@@ -5,10 +5,19 @@
 //! pre-refactor renderer at baseline `e598d178`; passing both renderers keeps the
 //! borrowed implementation byte-identical.
 
-use super::*;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::messages::BaseMessage;
+use crate::messages::ContentBlock;
+use crate::messages::MessageContent;
+use crate::messages::MessageId;
 use crate::messages::ToolCallRequest;
+use crate::session::transcript::MessageTranscript;
 use peri_acp_types::compact::LEGACY_CONTINUATION_HINT;
-use peri_acp_types::context_archive::build_catalog;
+
+use peri_acp_types::projection::MessageProjectionDirective;
+use peri_acp_types::projection::ProjectionAction;
+use peri_acp_types::projection::ProjectionActionEntry;
+use peri_acp_types::projection::ProjectionTarget;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -80,14 +89,14 @@ fn catalog(
         .iter()
         .map(|message| PersistedPayload::Message((*message).clone()))
         .collect::<Vec<_>>();
-    build_catalog(
+    peri_acp_types::context_archive::build_catalog(
         "session".into(),
         group.into(),
         anchor,
         &payloads,
         receipt.into(),
     )
-    .unwrap()
+    .expect("the build catalog fixture result is required for this assertion")
 }
 
 fn rendered(
@@ -95,8 +104,11 @@ fn rendered(
     actions: &[ProjectionActionEntry],
     caps: &ProviderCapabilities,
 ) -> String {
-    let projected = render_llm_view(transcript, actions, caps).expect("projection must render");
-    serde_json::to_string_pretty(&projected).unwrap()
+    let projected =
+        crate::agent::compact_v2::projection::render_llm_view(transcript, actions, caps)
+            .expect("projection must render");
+    serde_json::to_string_pretty(&projected)
+        .expect("to_string_pretty must accept this test fixture representation")
 }
 
 fn assert_golden(actual: &str, golden: &str) {
@@ -110,8 +122,10 @@ fn assert_golden(actual: &str, golden: &str) {
         actual,
         golden,
         "\n--- actual serialized projection ---\n{}\n--- golden ---\n{}\n--- end ---",
-        serde_json::to_string_pretty(&actual).unwrap(),
-        serde_json::to_string_pretty(&golden).unwrap()
+        serde_json::to_string_pretty(&actual)
+            .expect("to_string_pretty must accept this test fixture representation"),
+        serde_json::to_string_pretty(&golden)
+            .expect("to_string_pretty must accept this test fixture representation")
     );
 }
 
@@ -157,7 +171,7 @@ fn text_blocks_raw_and_reminders_keep_their_projection_bytes() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     assert!(transcript.mirror_committed_reminder(message_id(0x05), reminder));
 
     let actions = vec![
@@ -345,7 +359,9 @@ fn v3_preview_receipt_omission_and_references_keep_their_projection_bytes() {
         message_id: preview.id(),
         target: ProjectionTarget::Message,
         action: ProjectionAction::PreviewArchiveRead {
-            archive_ref: preview_catalog.reference().unwrap(),
+            archive_ref: preview_catalog
+                .reference()
+                .expect("the reference fixture result is required for this assertion"),
             keep_head: 3,
             keep_tail: 3,
         },
@@ -540,8 +556,11 @@ fn malformed_raw_projection_directives_are_rejected() {
     };
     transcript.set_flags_projection(id, directive(3, vec![action], None));
 
-    let error = render_persisted_llm_view(&transcript, &ProviderCapabilities::openai())
-        .expect_err("malformed raw tool_result must not be a safe projection target");
+    let error = crate::agent::compact_v2::projection::render_persisted_llm_view(
+        &transcript,
+        &ProviderCapabilities::openai(),
+    )
+    .expect_err("malformed raw tool_result must not be a safe projection target");
     assert!(
         format!("{error}").contains("invalid persisted context projection"),
         "unexpected error: {error}"

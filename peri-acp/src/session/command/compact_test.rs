@@ -20,21 +20,29 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use peri_acp_types::{
-    command::{FeedbackChannel, FeedbackLevel},
-    event::ExecutorEvent,
-    messages::{BaseMessage, ContentBlock, MessageId},
-    session_resources::{
-        FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources, SessionSnapshot,
-    },
-    store::{MessageFlags, PersistedPayload},
-    thread::{CancelPolicy, ThreadId},
-    workspace::SessionBinding,
-};
+use peri_acp_types::command::FeedbackChannel;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::ContentBlock;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionSnapshot;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::CancelPolicy;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::workspace::SessionBinding;
 
-use super::*;
+use crate::session::command::compact::CompactCommand;
+use crate::session::command::CommandContext;
 use crate::session::command::CommandResult;
 use crate::session::executor::PromptStopReason;
+use peri_acp_types::command::CommandHandler;
+use peri_acp_types::command::CommandOutcome;
 
 // ── Mock EventSink ────────────────────────────────────────────────────
 
@@ -269,7 +277,7 @@ impl BoundSession {
 // ── extract_file_info 测试 ───────────────────────────────────────────
 // 注意：[v2] extract_file_info / extract_skill_names 已迁移到 peri_agent::agent::compact_v2，
 // 通过 `use super::*` 间接可见。这里显式引用以保持独立可读。
-use peri_acp_types::compact::{extract_file_info, extract_skill_names};
+use peri_acp_types::compact;
 
 #[test]
 fn test_extract_file_info_single_file() {
@@ -279,7 +287,7 @@ fn test_extract_file_info_single_file() {
     )];
 
     // Act
-    let files = extract_file_info(&msgs);
+    let files = compact::extract_file_info(&msgs);
 
     // Assert: 提取到文件路径和行数（内容行数 = 总行数 - 1(路径行)）
     assert_eq!(files.len(), 1);
@@ -296,7 +304,7 @@ fn test_extract_file_info_multiple_files() {
     ];
 
     // Act
-    let files = extract_file_info(&msgs);
+    let files = compact::extract_file_info(&msgs);
 
     // Assert
     assert_eq!(files.len(), 2);
@@ -312,7 +320,7 @@ fn test_extract_file_info_empty_messages() {
     let msgs: Vec<BaseMessage> = vec![];
 
     // Act
-    let files = extract_file_info(&msgs);
+    let files = compact::extract_file_info(&msgs);
 
     // Assert
     assert!(files.is_empty());
@@ -328,7 +336,7 @@ fn test_extract_file_info_skips_non_file_messages() {
     ];
 
     // Act
-    let files = extract_file_info(&msgs);
+    let files = compact::extract_file_info(&msgs);
 
     // Assert: 全部跳过
     assert!(files.is_empty());
@@ -340,7 +348,7 @@ fn test_extract_file_info_file_with_no_content_lines() {
     let msgs = vec![BaseMessage::system("[最近读取的文件: /empty.rs\n")];
 
     // Act
-    let files = extract_file_info(&msgs);
+    let files = compact::extract_file_info(&msgs);
 
     // Assert: 路径行存在但无内容行（lines = 0）
     assert_eq!(files.len(), 1);
@@ -356,7 +364,7 @@ fn test_extract_skill_names_single_skill() {
     let msgs = vec![BaseMessage::system("[激活的 Skill 指令: tdd")];
 
     // Act
-    let skills = extract_skill_names(&msgs);
+    let skills = compact::extract_skill_names(&msgs);
 
     // Assert
     assert_eq!(skills.len(), 1);
@@ -372,7 +380,7 @@ fn test_extract_skill_names_multiple_skills() {
     ];
 
     // Act
-    let skills = extract_skill_names(&msgs);
+    let skills = compact::extract_skill_names(&msgs);
 
     // Assert
     assert_eq!(skills.len(), 2);
@@ -386,7 +394,7 @@ fn test_extract_skill_names_empty_messages() {
     let msgs: Vec<BaseMessage> = vec![];
 
     // Act
-    let skills = extract_skill_names(&msgs);
+    let skills = compact::extract_skill_names(&msgs);
 
     // Assert
     assert!(skills.is_empty());
@@ -401,7 +409,7 @@ fn test_extract_skill_names_skips_non_skill_messages() {
     ];
 
     // Act
-    let skills = extract_skill_names(&msgs);
+    let skills = compact::extract_skill_names(&msgs);
 
     // Assert: 全部跳过
     assert!(skills.is_empty());
@@ -415,7 +423,7 @@ fn test_extract_skill_names_extracts_only_first_line() {
     )];
 
     // Act
-    let skills = extract_skill_names(&msgs);
+    let skills = compact::extract_skill_names(&msgs);
 
     // Assert: 只提取第一行名称
     assert_eq!(skills.len(), 1);
@@ -566,7 +574,7 @@ impl peri_model::Model for MockSummaryModel {
         _request: peri_model::ModelRequest,
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelResponse> {
-        Ok(peri_model::ModelResponse::new(
+        Ok(peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text(self.summary.clone()),
             peri_model::StopReason::EndTurn,
             None,
@@ -690,7 +698,8 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
         matches!(result.messages[0], BaseMessage::Human { .. }),
         "首条必须为 Human"
     );
-    for (i, msg) in result.messages.iter().enumerate().skip(1) {
+    let remaining_msg = result.messages.iter().enumerate().skip(1);
+    for (i, msg) in remaining_msg {
         assert!(
             matches!(msg, BaseMessage::Human { .. }),
             "compact 输出索引 {} 必须为 Human（v2 re-inject 避免 hoist），实际: {:?}",
@@ -700,7 +709,8 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
     }
 
     // 不得出现孤立的 ToolUse（Ai 消息不应含 tool_calls）或 Tool 消息
-    for (i, msg) in result.messages.iter().enumerate() {
+    let enumerated_msg = result.messages.iter().enumerate();
+    for (i, msg) in enumerated_msg {
         match msg {
             BaseMessage::Ai { tool_calls, .. } => {
                 assert!(
@@ -742,7 +752,8 @@ async fn test_contract_summary_not_in_system_message() {
         result.messages[0].content().contains(unique_marker),
         "摘要必须出现在首条 Human"
     );
-    for (i, msg) in result.messages.iter().enumerate().skip(1) {
+    let remaining_msg = result.messages.iter().enumerate().skip(1);
+    for (i, msg) in remaining_msg {
         if let BaseMessage::System { content, .. } = msg {
             let text = content.text_content();
             assert!(

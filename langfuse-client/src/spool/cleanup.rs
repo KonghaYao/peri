@@ -2,7 +2,7 @@
 //! 句柄只持注册、不反向持 worker。删除协议：清理 owner 始终拥有同一个 [`ObjectClaim`]，delete 成功
 //! 才 `disarm_after_delete` 回收注册/slot/已写配额，失败把 claim 归回原 slot 重试；Drop 不做 IO、
 //! 不分配、不 spawn。只在同步临界区持锁、绝不跨 await，唯一阻塞操作是 `spawn_blocking` 的 delete；
-//! 清理路径从 `Drop` 进入，故取锁容忍毒化（`into_inner`），回收不能被另一次 panic 二次带崩。
+//! 清理路径从 `Drop` 进入，使用不带 poison 状态的锁，回收不会因已展开的 panic 再次 panic。
 //!
 //! dead_code 归因（无消费者，保留契约语义）：`CleanupSlot::seq` 是 §3.2 的「关联序号」（只写不读）、
 //! `SlotState::Disarmed::handed_off` 区分移交来源（写入不读，计数另由 `disarmed_after_handoff` 记录）、
@@ -10,8 +10,11 @@
 //! `CleanupRegistration::disarm_after_handoff` 已接线：生产移交分支在
 //! `batcher/recovery.rs::release_hand_off` 调用，不再是死代码。细节与判断见实施报告 §7。
 
+use parking_lot::{Mutex, MutexGuard};
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Weak};
 
 use tokio::sync::Notify;
 
@@ -23,6 +26,14 @@ use super::{SpoolError, SpoolResult};
 /// 已分配清理槽的注册凭证；每个对象、临时文件与恢复产物各占一槽。
 pub struct CleanupRegistration {
     pub(crate) slot: Arc<CleanupSlot>,
+}
+
+impl Debug for CleanupRegistration {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CleanupRegistration")
+            .finish_non_exhaustive()
+    }
 }
 
 /// 固定容量槽表、[`tokio::sync::Notify`] 与预算身份；由唯一 worker 独占持有。
@@ -83,8 +94,8 @@ impl SlotState {
 }
 
 /// blocking job 借用 claim 的保险：即使 `ObjectClaim::delete` panic 也把 claim 归回槽。
-struct BorrowGuard<'a> {
-    slot: &'a CleanupSlot,
+struct BorrowGuard<'slot> {
+    slot: &'slot CleanupSlot,
     id: ObjectId,
     claims: Vec<Box<dyn ObjectClaim>>,
 }
@@ -386,11 +397,9 @@ impl Drop for CleanupRegistration {
     }
 }
 
-/// 容忍毒化的取锁：Drop/清理路径不得因另一次 panic 二次 panic。
+/// 清理期间不因 poison 状态再次 panic；对象归还由 BorrowGuard 保证。
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock()
 }
 
 #[cfg(test)]

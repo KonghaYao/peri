@@ -1,4 +1,10 @@
-use super::*;
+use crate::terminal::BashTool;
+use peri_agent::agent::async_tasks::FOREGROUND_MAX_TIMEOUT_MS;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ToolExecutionStatus;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 #[tokio::test]
 async fn test_bash_nonzero_exit_code() {
@@ -94,7 +100,7 @@ fn test_truncate_output_line_count_accurate() {
     let lines: Vec<String> = (0..3000).map(|i| format!("line {}", i)).collect();
     let input = lines.join("\n");
     assert_eq!(input.split('\n').count(), 3000);
-    let result = truncate_output(&input);
+    let result = crate::terminal::truncate_output(&input);
     assert!(
         result.contains("3000 total lines"),
         "应显示正确的总行数: {result}"
@@ -110,14 +116,14 @@ fn test_truncate_output_line_count_accurate() {
 
 #[test]
 fn test_truncate_output_no_truncation_when_small() {
-    let result = truncate_output("hello\nworld");
+    let result = crate::terminal::truncate_output("hello\nworld");
     assert_eq!(result, "hello\nworld");
 }
 
 #[test]
 fn test_truncate_output_char_limit() {
     let long_line = "x".repeat(200_000);
-    let result = truncate_output(&long_line);
+    let result = crate::terminal::truncate_output(&long_line);
     assert!(result.contains("byte limit"), "应截断超长输出: {result}");
 }
 
@@ -127,7 +133,7 @@ fn test_truncate_output_preserves_tail() {
     let mut lines: Vec<String> = (0..2999).map(|i| format!("line {}", i)).collect();
     lines.push("CRITICAL ERROR: test failed".to_string());
     let input = lines.join("\n");
-    let result = truncate_output(&input);
+    let result = crate::terminal::truncate_output(&input);
     // 尾部关键行应保留
     assert!(
         result.contains("CRITICAL ERROR"),
@@ -289,16 +295,16 @@ async fn test_foreground_timeout_zero_promotes_at_foreground_maximum() {
 #[test]
 fn test_foreground_timeout_note_explains_bounded_sync_requests() {
     assert!(
-        foreground_timeout_note(None).is_empty(),
+        crate::terminal::foreground_timeout_note(None).is_empty(),
         "未改写时不应附加说明"
     );
-    let zero = foreground_timeout_note(Some(0));
+    let zero = crate::terminal::foreground_timeout_note(Some(0));
     assert!(zero.contains("cannot disable the timeout"), "{zero}");
     assert!(
         zero.contains(&FOREGROUND_MAX_TIMEOUT_MS.to_string()),
         "{zero}"
     );
-    let oversized = foreground_timeout_note(Some(600_000));
+    let oversized = crate::terminal::foreground_timeout_note(Some(600_000));
     assert!(oversized.contains("600000"), "{oversized}");
     assert!(oversized.contains("run_in_background"), "{oversized}");
 }
@@ -400,7 +406,7 @@ fn test_bash_schema_no_legacy_params() {
 fn test_truncate_output_persists_full_content_on_lines_truncation() {
     let lines: Vec<String> = (0..3000).map(|i| format!("line {}", i)).collect();
     let input = lines.join("\n");
-    let result = truncate_output(&input);
+    let result = crate::terminal::truncate_output(&input);
     // 落盘提示必须用**模型面名字**引导读取（当前 direct 工具使用原名）：逐字断言注册表的
     // 冻结字面量，不用查表派生期望值（同源派生会让「查询改坏」自洽通过）。
     assert!(
@@ -416,7 +422,7 @@ fn test_truncate_output_persists_full_content_on_lines_truncation() {
 #[test]
 fn test_truncate_output_persists_full_content_on_byte_truncation() {
     let long_line = "x".repeat(200_000);
-    let result = truncate_output(&long_line);
+    let result = crate::terminal::truncate_output(&long_line);
     assert!(
         result.contains("use `Read` to view complete content"),
         "字节截断也应持久化并引导读取: {result}"

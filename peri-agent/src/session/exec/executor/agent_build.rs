@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
-use peri_acp_types::{
-    event::{AgentEventHandler, BackgroundTaskResult, ExecutorEvent},
-    frozen::ThreadPersistence,
-    tasks::BgTaskKind,
-};
+use peri_acp_types::event::AgentEventHandler;
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::frozen::ThreadPersistence;
+use peri_acp_types::tasks::BgTaskKind;
 
 use crate::agent::react::AgentInput;
-use crate::session::exec::executor_helpers::{
-    build_and_execute_agent_v2, ExecOutcome, ForwarderLauncherFn, StageBuildFn, V2ExecuteRequest,
-};
+
+use crate::session::exec::executor_helpers::ExecOutcome;
+use crate::session::exec::executor_helpers::ForwarderLauncherFn;
+use crate::session::exec::executor_helpers::StageBuildFn;
+use crate::session::exec::executor_helpers::V2ExecuteRequest;
 use crate::session::exec::stage_builder::CachedLlmInstances;
 
-use super::{FrozenSessionData, SessionContext, TurnConfig};
+use crate::session::exec::executor::context::FrozenSessionData;
+use crate::session::exec::executor::context::SessionContext;
+use crate::session::exec::executor::TurnConfig;
 
 /// Agent 执行后的最终输出（state + 停止原因）。
 ///
@@ -70,6 +74,8 @@ pub(super) async fn build_and_execute_agent(
                         // 防御性回退：无冻结数据时 beta flag 投影为空（一切按 false，
                         // 不意外开启能力）
                         beta_flags: peri_acp_types::beta_flags::BetaFlags::default(),
+                        builtin_assembly_mode:
+                            peri_acp_types::builtin_mcp::BuiltinAssemblyMode::SingleExit,
                         // 无冻结执行环境：unavailable（不探测本地值冒充，H3）
                         runtime_env: None,
                     },
@@ -183,7 +189,7 @@ pub(super) async fn build_and_execute_agent(
     // 观测旁路；biased select 顺序不变量单点保持在 ACP spawn_eventbus_forwarder）
 
     // v2 单一路径。
-    build_and_execute_agent_v2(V2ExecuteRequest {
+    crate::session::exec::executor_helpers::build_and_execute_agent_v2(V2ExecuteRequest {
         session_id: ctx.session_id.clone(),
         user_input_mailbox: ctx.user_input_mailbox.clone(),
         async_result_mailbox: Some(async_result_mailbox),

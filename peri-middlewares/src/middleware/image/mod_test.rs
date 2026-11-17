@@ -1,13 +1,17 @@
 use std::sync::Arc;
 
-use peri_agent::{
-    agent::stages::{
-        middleware_runner::run_before_agent, receive::run_receive, ReceiveInput, StageContext,
-    },
-    messages::{BaseMessage, ContentBlock, MessageContent},
-    middleware::MiddlewareChain,
-    session::{FrozenContext, MessageSource, QueuedMessage, Session},
-};
+use peri_agent::agent::stages::middleware_runner;
+use peri_agent::agent::stages::receive;
+use peri_agent::agent::stages::ReceiveInput;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::messages::BaseMessage;
+use peri_agent::messages::ContentBlock;
+use peri_agent::messages::MessageContent;
+use peri_agent::middleware::MiddlewareChain;
+use peri_agent::session::FrozenContext;
+use peri_agent::session::MessageSource;
+use peri_agent::session::QueuedMessage;
+use peri_agent::session::Session;
 
 use super::test_support::ImageFixture;
 use super::ImageMiddleware;
@@ -18,17 +22,16 @@ use crate::at_mention::tests::work_fixture;
 /// 历史缺口：图片准备仅挂在一次性的 before_agent，第二批输入只留下 @image 文本。
 #[tokio::test]
 async fn test_image_later_input_reaches_model_after_micro_compact() {
-    use peri_agent::{
-        agent::{
-            compact_v2::CompactConfig,
-            react::{ReactLLM, Reasoning, StreamingContext},
-            stages::{run_react_loop, LoopResult},
-            token::ContextBudget,
-        },
-        messages::ToolCallRequest,
-        session::MessageQueue,
-        tools::BaseTool,
-    };
+    use peri_agent::agent::compact_v2::CompactConfig;
+    use peri_agent::agent::react::ReactLLM;
+    use peri_agent::agent::react::Reasoning;
+    use peri_agent::agent::react::StreamingContext;
+    use peri_agent::agent::stages;
+    use peri_agent::agent::stages::LoopResult;
+    use peri_agent::agent::token::ContextBudget;
+    use peri_agent::messages::ToolCallRequest;
+    use peri_agent::session::MessageQueue;
+    use peri_agent::tools::BaseTool;
     use std::sync::Mutex;
     #[derive(Clone)]
     struct CapturingLlm {
@@ -162,7 +165,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
             ));
         }
     }
-    let result = run_react_loop(ctx.clone(), 3).await;
+    let result = stages::run_react_loop(ctx.clone(), 3).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "循环应正常完成：{result:?}"
@@ -177,7 +180,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     .with_tools(Arc::clone(&ctx.runtime.tools))
     .build();
     next_context.compact = ctx.compact.clone();
-    let result = run_react_loop(next_context.clone(), 3).await;
+    let result = stages::run_react_loop(next_context.clone(), 3).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "后续执行应完成：{result:?}"
@@ -245,7 +248,9 @@ async fn image_replacement_reaches_transcript_with_the_original_message_id() {
     chain.add(Box::new(fixture.middleware()));
     ctx.runtime.middleware_chain = Arc::new(chain);
 
-    run_before_agent(&ctx, &[original.id()]).await.unwrap();
+    middleware_runner::run_before_agent(&ctx, &[original.id()])
+        .await
+        .unwrap();
 
     {
         let transcript = ctx.session.transcript.read();
@@ -306,12 +311,12 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
     let fixture = ImageFixture::new(dir.path()).await;
     chain.add(Box::new(fixture.middleware()));
     ctx.runtime.middleware_chain = Arc::new(chain);
-    let received = run_receive(ReceiveInput {
+    let received = receive::run_receive(ReceiveInput {
         context: ctx.clone(),
     })
     .await
     .unwrap();
-    run_before_agent(&ctx, &received.input_message_ids)
+    middleware_runner::run_before_agent(&ctx, &received.input_message_ids)
         .await
         .unwrap();
     {
@@ -382,7 +387,9 @@ async fn test_image_explicit_empty_batch_does_not_fall_back_to_history() {
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(ImageMiddleware::new()));
     ctx.runtime.middleware_chain = Arc::new(chain);
-    run_before_agent(&ctx, &[]).await.unwrap();
+    middleware_runner::run_before_agent(&ctx, &[])
+        .await
+        .unwrap();
     assert_eq!(
         serde_json::to_value(
             ctx.session

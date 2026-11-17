@@ -1,5 +1,13 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CurrentTurn;
+use super::SessionPhase;
 
+use super::TuiRenderUnit;
+
+use super::serial;
+
+#[must_use]
 fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
     BridgeState {
         child_runs: Default::default(),
@@ -35,7 +43,7 @@ fn test_dispatch_subagent_streaming_updates_current_turn_group() {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = make_state(SessionPhase::Idle, 0);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "agent-1".into(),
@@ -44,7 +52,7 @@ fn test_dispatch_subagent_streaming_updates_current_turn_group() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "child text".into(),
@@ -75,7 +83,7 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = make_state(SessionPhase::PromptRunning, 0);
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "agent-1".into(),
@@ -84,7 +92,7 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "child text".into(),
@@ -108,7 +116,7 @@ fn test_subagent_stopped_freezes_child_trailing_bubble() {
     );
     assert_eq!(b.duration_ms, None, "流式期间无冻结值");
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "agent-1".into(),
@@ -144,7 +152,7 @@ fn test_flush_retains_unpaired_completed_subagent_until_running_group_finishes()
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = make_state(SessionPhase::PromptRunning, 0);
     for (agent_id, text) in [("completed", "done"), ("running", "still running")] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::SubagentStarted {
                 agent_id: agent_id.into(),
@@ -153,7 +161,7 @@ fn test_flush_retains_unpaired_completed_subagent_until_running_group_finishes()
                 parent_tool_call_id: None,
             },
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                 text: text.into(),
@@ -162,7 +170,7 @@ fn test_flush_retains_unpaired_completed_subagent_until_running_group_finishes()
             }),
         );
         if agent_id == "completed" {
-            dispatch_and_notify(
+            super::dispatch_and_notify(
                 &mut state,
                 &AcpEventData::SubagentStopped {
                     agent_id: agent_id.into(),
@@ -172,7 +180,7 @@ fn test_flush_retains_unpaired_completed_subagent_until_running_group_finishes()
             );
         }
     }
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(state.current_turn.has_running_subagent());
     assert_eq!(
         state.current_turn.subagents.len(),
@@ -186,7 +194,7 @@ fn test_flush_retains_unpaired_completed_subagent_until_running_group_finishes()
         "committed 渲染在 current_turn 之前，提前归档会打乱分组顺序"
     );
     let archived_len = state.committed.len();
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(state.committed.len(), archived_len, "重复 flush 不重复归档");
     // 移除 index 0 后，剩余容器与待配对表都必须指向新的 index 0。
     state
@@ -214,7 +222,7 @@ fn test_flush_retains_unpaired_completed_subagent_until_running_group_finishes()
         matches!(unit, TuiRenderUnit::TuiAssistantBubble(b) if b.text.ends_with(" continued"))
     }));
     state.current_turn.stop_subagent("running", false, "");
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(state.current_turn.is_empty());
     assert_eq!(
         state
@@ -235,7 +243,7 @@ fn test_flush_resets_after_completed_subagent_is_archived() {
     state
         .current_turn
         .append_text("before child", Some("root-before"));
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "done-agent".into(),
@@ -244,7 +252,7 @@ fn test_flush_resets_after_completed_subagent_is_archived() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "done-agent".into(),
@@ -255,7 +263,7 @@ fn test_flush_resets_after_completed_subagent_is_archived() {
     state
         .current_turn
         .append_text("after child", Some("root-after"));
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(state.current_turn.is_empty());
     assert_eq!(state.committed.len(), 3);
     assert!(
@@ -279,7 +287,7 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
     let mut state = make_state(SessionPhase::Idle, 0);
 
     // 启动同步 sub-agent
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "sync-1".into(),
@@ -289,7 +297,7 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
         },
     );
     // 工具开始
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             agent_id: Some("sync-1".into()),
@@ -302,7 +310,7 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
         }),
     );
     // 工具结束
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
             agent_id: Some("sync-1".into()),
@@ -371,8 +379,8 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
     };
 
     // 第一个 Agent 调用：卡片先到（流式提前 ToolStarted），子分组紧随其后。
-    dispatch_and_notify(&mut state, &agent_tool("agent-call-1", "start coder"));
-    dispatch_and_notify(
+    super::dispatch_and_notify(&mut state, &agent_tool("agent-call-1", "start coder"));
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "child-1".into(),
@@ -381,10 +389,10 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(&mut state, &child_tool("child-1", "child-tool-1", "Read"));
+    super::dispatch_and_notify(&mut state, &child_tool("child-1", "child-tool-1", "Read"));
 
     // 第二个 Agent 调用的子 Agent 先启动（SubagentStarted 抢在父卡片之前到达）。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "child-2".into(),
@@ -393,9 +401,9 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(&mut state, &child_tool("child-2", "child-tool-2", "Grep"));
+    super::dispatch_and_notify(&mut state, &child_tool("child-2", "child-tool-2", "Grep"));
     // 迟到的第二个 Agent 卡片
-    dispatch_and_notify(&mut state, &agent_tool("agent-call-2", "start reviewer"));
+    super::dispatch_and_notify(&mut state, &agent_tool("agent-call-2", "start reviewer"));
 
     let vms: Vec<_> = state.current_turn.view_models().iter().cloned().collect();
     let layout: Vec<String> = vms
@@ -446,7 +454,7 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
         ("agent-call-1", "start coder"),
         ("agent-call-2", "start reviewer"),
     ] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
                 agent_id: None,
@@ -465,7 +473,7 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
         ("child-2", "reviewer", "agent-call-2"),
         ("child-1", "coder", "agent-call-1"),
     ] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::SubagentStarted {
                 agent_id: agent_id.into(),
@@ -474,7 +482,7 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
                 parent_tool_call_id: Some(parent.into()),
             },
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
                 agent_id: Some(agent_id.into()),
@@ -528,11 +536,11 @@ fn completed_subagent_is_consumed_only_at_archive_boundary() {
     assert!(turn.take_completed_subagents().is_empty());
 }
 
-/// [回归测试 R05] 运行中的 A 分组之后的已完成 B 分组不得被单独抽到 committed。
+/// [回归测试 R05/M2] 后台 A 分组仍在运行时，已完成 B 分组随整轮一起归档，
+/// 展示顺序不变；不能只抽 B 或把整轮留在 current_turn。
 ///
-/// committed 整段渲染在 current_turn 之前；若把 B 分组（位于 A 分组之后）独立
-/// 归档，B 会跨越仍在运行的 A 分组移到它前面，用户看到的时间线变成
-/// `A 调用卡 → B 分组 → A 分组 → B 调用卡`。
+/// committed 整段渲染在 current_turn 之前；归档时必须保持 segment 顺序，
+/// 否则用户看到的时间线会变成 `A 调用卡 → B 分组 → A 分组 → B 调用卡`。
 #[test]
 #[serial]
 fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
@@ -546,7 +554,7 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
         ("agent-call-a", "agent-a", false),
         ("agent-call-b", "agent-b", true),
     ] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
                 agent_id: None,
@@ -558,7 +566,7 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
                 origin_readable: None,
             }),
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
                 agent_id: None,
@@ -567,7 +575,7 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
                 is_error: false,
             }),
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::SubagentStarted {
                 agent_id: agent_id.into(),
@@ -577,7 +585,7 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
             },
         );
         if stop {
-            dispatch_and_notify(
+            super::dispatch_and_notify(
                 &mut state,
                 &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
                     text: "done".into(),
@@ -585,7 +593,7 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
                     agent_id: Some(agent_id.into()),
                 }),
             );
-            dispatch_and_notify(
+            super::dispatch_and_notify(
                 &mut state,
                 &AcpEventData::SubagentStopped {
                     agent_id: agent_id.into(),
@@ -596,16 +604,15 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
         }
     }
 
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(
-        state.current_turn.has_running_subagent(),
-        "A 分组仍在运行，turn 不得整体 reset"
+        state.current_turn.is_empty(),
+        "只有后台 A 仍在运行，普通 TurnDone 必须整段归档并 reset（M2）"
     );
 
     let layout: Vec<String> = state
         .committed
         .iter()
-        .chain(state.current_turn.view_models().iter())
         .map(|vm| match vm {
             TuiRenderUnit::TuiToolCard(card) => format!("card:{}", card.tool_id),
             TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
@@ -620,12 +627,13 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
             "card:agent-call-b",
             "group:agent-b",
         ],
-        "运行中分组之后的已完成分组不得越过它被提前归档"
-    );
-    assert!(
-        !state.committed.iter().any(
-            |vm| matches!(vm, TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "agent-b")
-        ),
-        "B 分组必须留在容器里等待 A 分组结束"
+        "整段归档后展示顺序不变：B 分组仍必须位于运行中的 A 分组之后"
     );
 }
+
+#[path = "subagent_routing_test/background_routing.rs"]
+mod background_routing;
+
+use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
+
+use super::dispatch_and_notify;

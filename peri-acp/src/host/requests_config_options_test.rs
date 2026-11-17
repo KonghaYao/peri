@@ -1,5 +1,8 @@
-use super::super::*;
-use crate::host::requests::config_options::{handle_set_config_option, handle_update_config};
+use super::super::{
+    json, serial, Arc, HashMap, LlmProvider, MockTransport, PeriConfig, PermissionMode,
+    SessionState, Value,
+};
+use crate::host::requests::config_options;
 use crate::session::agent_pool::{AgentPool, CachedLlmInstances};
 
 #[derive(Clone, Copy)]
@@ -9,12 +12,14 @@ enum PersistenceFailure {
 }
 
 fn live_config() -> PeriConfig {
-    let mut config = make_peri_config_with_provider(make_provider_config(
-        "configured",
-        "openai",
-        "valid-key",
-        "old-model",
-    ));
+    let mut config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "configured",
+            "openai",
+            "valid-key",
+            "old-model",
+        ),
+    );
     config.config.providers[0].models.opus = "new-model".into();
     config
 }
@@ -70,12 +75,17 @@ async fn assert_persistence_failure_is_atomic(
     let temporary = tempfile::tempdir().unwrap();
     let config = live_config();
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config.clone(), provider.clone(), &temporary).await;
+    let cfg = crate::host::requests::tests::make_server_config(
+        config.clone(),
+        provider.clone(),
+        &temporary,
+    )
+    .await;
     let revision = cfg.config_source.snapshot().unwrap().revision();
     let mut sessions = seeded_sessions(&provider);
     let cached = sessions["session"]
         .agent_pool
-        .get_cached_llm()
+        .cached_llm()
         .unwrap()
         .auxiliary_model
         .clone();
@@ -92,7 +102,7 @@ async fn assert_persistence_failure_is_atomic(
     let error = if update {
         let mut candidate = config.clone();
         candidate.config.providers[0].models.sonnet = "updated-model".into();
-        handle_update_config(
+        config_options::handle_update_config(
             &json!({"sessionId":"session", "config":candidate}),
             &cfg,
             &mut sessions,
@@ -102,7 +112,7 @@ async fn assert_persistence_failure_is_atomic(
         .unwrap_err()
     } else {
         let value = if config_id == "model" { "opus" } else { "high" };
-        handle_set_config_option(
+        config_options::handle_set_config_option(
             &json!({"sessionId":"session", "configId":config_id, "value":value}),
             &cfg,
             &mut sessions,
@@ -122,7 +132,7 @@ async fn assert_persistence_failure_is_atomic(
     assert_eq!(pool.fingerprint(), "seed-fingerprint");
     assert!(Arc::ptr_eq(
         &cached,
-        &pool.get_cached_llm().unwrap().auxiliary_model
+        &pool.cached_llm().unwrap().auxiliary_model
     ));
     assert!(Arc::ptr_eq(&subagent, &pool.subagent_llm_cache["seed"]));
     assert!(mock.notifications().is_empty());
@@ -184,11 +194,16 @@ async fn successful_options_persist_before_publishing_and_invalidate_cache() {
         let temporary = tempfile::tempdir().unwrap();
         let config = live_config();
         let provider = LlmProvider::from_config(&config).unwrap();
-        let cfg = make_server_config(config.clone(), provider.clone(), &temporary).await;
+        let cfg = crate::host::requests::tests::make_server_config(
+            config.clone(),
+            provider.clone(),
+            &temporary,
+        )
+        .await;
         let mut sessions = seeded_sessions(&provider);
         let mock = Arc::new(MockTransport::default());
         let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
-        handle_set_config_option(
+        config_options::handle_set_config_option(
             &json!({"sessionId":"session", "configId":config_id, "value":value}),
             &cfg,
             &mut sessions,
@@ -203,7 +218,7 @@ async fn successful_options_persist_before_publishing_and_invalidate_cache() {
             crate::session::agent_pool::fingerprint(&cfg.provider.read()),
             crate::session::agent_pool::fingerprint(&resolved)
         );
-        assert!(sessions["session"].agent_pool.get_cached_llm().is_none());
+        assert!(sessions["session"].agent_pool.cached_llm().is_none());
         assert!(sessions["session"].agent_pool.subagent_llm_cache.is_empty());
         assert!(!mock.notifications().is_empty());
         match config_id {
@@ -221,7 +236,12 @@ async fn missing_snapshot_rejects_persistence_but_mode_stays_runtime_only() {
     let temporary = tempfile::tempdir().unwrap();
     let config = live_config();
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config.clone(), provider.clone(), &temporary).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(
+        config.clone(),
+        provider.clone(),
+        &temporary,
+    )
+    .await;
     let path = cfg.config_source.global_path().to_owned();
     std::fs::write(&path, "{broken}").unwrap();
     cfg.config_source = Arc::new(crate::provider::ConfigSource::load_at_lenient(
@@ -233,7 +253,7 @@ async fn missing_snapshot_rejects_persistence_but_mode_stays_runtime_only() {
     let mock = Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
     for config_id in ["model", "thinking_effort", "context_1m"] {
-        let error = handle_set_config_option(
+        let error = config_options::handle_set_config_option(
             &json!({"sessionId":"session", "configId":config_id, "value":"opus"}),
             &cfg,
             &mut sessions,
@@ -243,9 +263,14 @@ async fn missing_snapshot_rejects_persistence_but_mode_stays_runtime_only() {
         .unwrap_err();
         assert_eq!(error.code, -32603);
     }
-    let error = handle_update_config(&json!({"config":config}), &cfg, &mut sessions, &transport)
-        .await
-        .unwrap_err();
+    let error = config_options::handle_update_config(
+        &json!({"config":config}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.code, -32603);
     assert_eq!(*cfg.peri_config.read(), config);
     assert!(mock.notifications().is_empty());
@@ -253,7 +278,7 @@ async fn missing_snapshot_rejects_persistence_but_mode_stays_runtime_only() {
         sessions["session"].agent_pool.fingerprint(),
         "seed-fingerprint"
     );
-    handle_set_config_option(
+    config_options::handle_set_config_option(
         &json!({"sessionId":"session", "configId":"mode", "value":"auto"}),
         &cfg,
         &mut sessions,
@@ -289,7 +314,12 @@ async fn update_config_publishes_accepted_settings_and_preserves_owned_fields() 
     let source = crate::provider::ConfigSource::load_at(&workspace, global).unwrap();
     let initial = source.loaded_merged();
     let provider = LlmProvider::from_config(&initial).unwrap();
-    let mut cfg = make_server_config(initial.clone(), provider.clone(), &temporary).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(
+        initial.clone(),
+        provider.clone(),
+        &temporary,
+    )
+    .await;
     cfg.config_source = Arc::new(source);
     let mut candidate = initial;
     candidate.schema = Some("request-schema".into());
@@ -306,7 +336,7 @@ async fn update_config_publishes_accepted_settings_and_preserves_owned_fields() 
     let mock = Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
 
-    handle_update_config(
+    config_options::handle_update_config(
         &json!({"sessionId":"session", "config":candidate}),
         &cfg,
         &mut sessions,
@@ -341,12 +371,14 @@ async fn update_config_rejects_credential_stripped_accepted_snapshot() {
     let workspace_path = cwd.join(".peri/settings.json");
     std::fs::write(&workspace_path, r#"{"config":{"language":"zh-CN"}}"#).unwrap();
     let global_path = temporary.path().join("global.json");
-    let mut config = make_peri_config_with_provider(make_provider_config(
-        "openai",
-        "openai",
-        "global-secret",
-        "session-model",
-    ));
+    let mut config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "openai",
+            "openai",
+            "global-secret",
+            "session-model",
+        ),
+    );
     config.config.providers[0].base_url = "https://old.example/v1".into();
     crate::provider::save_to(&config, &global_path).unwrap();
     let global_before = std::fs::read(&global_path).unwrap();
@@ -356,7 +388,12 @@ async fn update_config_rejects_credential_stripped_accepted_snapshot() {
     let loaded = source.loaded_merged();
     assert_eq!(loaded.config.providers[0].api_key, "global-secret");
     let provider = LlmProvider::from_config(&loaded).unwrap();
-    let mut cfg = make_server_config(loaded.clone(), provider.clone(), &temporary).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(
+        loaded.clone(),
+        provider.clone(),
+        &temporary,
+    )
+    .await;
     cfg.config_source = source;
     *cfg.peri_config.write() = loaded.clone();
     *cfg.provider.write() = provider.clone();
@@ -369,7 +406,7 @@ async fn update_config_rejects_credential_stripped_accepted_snapshot() {
     // accepted snapshot 不再有可用 provider。
     let mut candidate = loaded.clone();
     candidate.config.providers[0].base_url = "https://changed.example/v1".into();
-    let error = handle_update_config(
+    let error = config_options::handle_update_config(
         &json!({"config": candidate}),
         &cfg,
         &mut sessions,
@@ -421,12 +458,14 @@ async fn update_config_persists_workspace_relative_diff_and_uses_accepted_provid
     let workspace_path = cwd.join(".peri/settings.json");
     std::fs::write(&workspace_path, r#"{"config":{"language":"zh-CN"}}"#).unwrap();
     let global_path = temporary.path().join("global.json");
-    let mut config = make_peri_config_with_provider(make_provider_config(
-        "openai",
-        "openai",
-        "global-secret",
-        "old-model",
-    ));
+    let mut config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "openai",
+            "openai",
+            "global-secret",
+            "old-model",
+        ),
+    );
     config.config.providers[0].base_url = "https://old.example/v1".into();
     // 工作区文档缺省 active_alias 时按 opus 生效。
     config.config.providers[0].models.opus = "old-model".into();
@@ -437,7 +476,12 @@ async fn update_config_persists_workspace_relative_diff_and_uses_accepted_provid
     let loaded = source.loaded_merged();
     assert_eq!(loaded.config.providers[0].models.opus, "old-model");
     let provider = LlmProvider::from_config(&loaded).unwrap();
-    let mut cfg = make_server_config(loaded.clone(), provider.clone(), &temporary).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(
+        loaded.clone(),
+        provider.clone(),
+        &temporary,
+    )
+    .await;
     cfg.config_source = source;
     *cfg.peri_config.write() = loaded.clone();
     *cfg.provider.write() = provider;
@@ -447,7 +491,7 @@ async fn update_config_persists_workspace_relative_diff_and_uses_accepted_provid
 
     let mut candidate = loaded.clone();
     candidate.config.providers[0].models.opus = "updated-model".into();
-    handle_update_config(
+    config_options::handle_update_config(
         &json!({"sessionId":"session", "config": candidate}),
         &cfg,
         &mut sessions,
@@ -483,12 +527,17 @@ async fn invalid_model_candidate_is_rejected_before_persistence() {
     let temporary = tempfile::tempdir().unwrap();
     let config = live_config();
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config.clone(), provider.clone(), &temporary).await;
+    let cfg = crate::host::requests::tests::make_server_config(
+        config.clone(),
+        provider.clone(),
+        &temporary,
+    )
+    .await;
     let mut sessions = seeded_sessions(&provider);
     let mock = Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
     let revision = cfg.config_source.snapshot().unwrap().revision();
-    let error = handle_set_config_option(
+    let error = config_options::handle_set_config_option(
         &json!({"sessionId":"session", "configId":"model", "value":"unknown-tier"}),
         &cfg,
         &mut sessions,

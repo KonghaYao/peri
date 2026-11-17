@@ -1,10 +1,8 @@
 # OpenUI 代码索引（@peri-code/sdk）
 
 状态：现行实现。OpenUI 以 `@peri-code/sdk` 的源码 subpath 发布
-（`npm-packages/@peri-sdk/src/openui`），不单独构建；由 `npm-packages/peri-cf` 以
-`file:../@peri-sdk` 消费。组件库、Renderer 与服务端提示词从 CF 前端抽取而来；CF 只保留聊天适配层。
-使用说明见 [SDK README](../../npm-packages/@peri-sdk/README.md#openui)，
-消费侧见 [peri-cf](peri-cf.md)。
+（`npm-packages/@peri-sdk/src/openui`），不单独构建；组件库、Renderer 与服务端提示词
+由 SDK 直接维护。使用说明见 [SDK README](../../npm-packages/@peri-sdk/README.md#openui)。
 
 ## 架构速览
 
@@ -48,7 +46,7 @@ index.ts ──> splitOpenUI / theme / OpenUIActionEvent（轻量）
 
 所有 OpenUI subpath 直接发布 TS/TSX 源码，不进入 `dist` 打包；消费端需要能编译源码的打包器
 （Vite/Bun），Node 原生 ESM 直接 import 不在支持范围内。
-依赖方向：CF → `@peri-code/sdk/openui*`；OpenUI 源码不得 import `peri-cf`。Renderer 依赖
+依赖方向：聊天渲染方 → `@peri-code/sdk/openui*`；OpenUI 源码不得反向 import 宿主应用。Renderer 依赖
 `@openuidev/react-lang` 与 `react`（peer）；prompt 只依赖 `@openuidev/lang-core` 与 `spec.json`。
 `OpenUIProgram` 的文本回退通过 `renderText?: (text: string) => ReactNode` 注入，缺省纯文本；
 聊天侧传 `StreamdownText`。
@@ -62,13 +60,12 @@ index.ts ──> splitOpenUI / theme / OpenUIActionEvent（轻量）
 | 主题安装与 token | `test/openui/theme.test.ts` | `.light`/`.dark` 优先、CSS 变量回退、canvas 使用 host token |
 | Renderer 行为 | `test/openui/renderer.dom.test.tsx` | 校验失败回退、orphaned、图表告警、表单 action、禁用态、XSS |
 | Canvas/容器组件 | `test/openui/diff-view.dom.test.tsx`、`test/openui/containers.dom.test.tsx` | DiffStats 布局与格式化；容器 action 与图表数据 |
-| DOM 引导 | `test/openui/dom.ts` | happy-dom 全局与 `ResizeObserver` 等；与 CF 测试各自独立 |
+| DOM 引导 | `test/openui/dom.ts` | happy-dom 全局与 `ResizeObserver` 等；测试内独立引导 |
 
 ## 跨模块契约
 
-- 生成产物是跨进程契约：CF 的 `openui:check` 调用 SDK 生成器；篡改 `spec.json` 必须导致失败。
+- 生成产物是跨进程契约：`bun run openui:check` 调用 SDK 生成器；篡改 `spec.json` 必须导致失败。
 - 服务端只读 `spec.json`，不得 import `src/openui/renderer.tsx` 或 React。
-- 浏览器构建通过 CF `vite.config.ts` 的 `resolve.dedupe` 共用一份 React；Bun 测试通过 CF
-  `bunfig.toml` 的 test preload（`frontend/test/react-dedupe.ts`）做同一去重。
+- 浏览器构建需保证 React 单实例；SDK 不内置打包配置。
 - 验证命令（在 `npm-packages/@peri-sdk`）：`bun install`、`bun run openui:check`、
   `bun test test/openui`、`bun run typecheck`。

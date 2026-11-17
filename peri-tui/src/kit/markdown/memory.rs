@@ -44,6 +44,7 @@ pub(super) fn cache_retained_bytes(cache: &MarkdownRenderCache) -> usize {
     bytes
 }
 
+// The owned container reference preserves allocation capacity for retained-memory accounting.
 fn vec_storage_bytes<Value>(values: &Vec<Value>) -> usize {
     values.capacity().saturating_mul(size_of::<Value>())
 }
@@ -111,7 +112,52 @@ impl RetainedHeap for MarkdownSegment {
             Self::Text(lines) => lines.heap_bytes(),
             Self::Table(table) => table.heap_bytes(),
             Self::Image(image) => image.heap_bytes(),
+            Self::GenUi(segment) => segment
+                .source
+                .capacity()
+                .saturating_add(size_of::<peri_genui::ParseResult>() + 2 * size_of::<usize>())
+                .saturating_add(segment.parsed.retained_bytes())
+                .saturating_add(
+                    segment.buttons.capacity() * size_of::<crate::kit::genui::GenUiButton>(),
+                )
+                .saturating_add(
+                    segment
+                        .buttons
+                        .iter()
+                        .map(|button| {
+                            button.label.capacity()
+                                + match &button.action {
+                                    Ok(action) => action.retained_bytes(),
+                                    Err(error) => error.capacity(),
+                                }
+                        })
+                        .sum::<usize>(),
+                )
+                .saturating_add(segment.errors.heap_bytes())
+                .saturating_add(segment.root.as_ref().map_or(0, json_heap_bytes)),
         }
+    }
+}
+
+fn json_heap_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => text.capacity(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .fold(vec_storage_bytes(values), |bytes, value| {
+                bytes.saturating_add(json_heap_bytes(value))
+            }),
+        serde_json::Value::Object(values) => values.iter().fold(
+            values
+                .len()
+                .saturating_mul(size_of::<(String, serde_json::Value)>() + 3 * size_of::<usize>()),
+            |bytes, (key, value)| {
+                bytes
+                    .saturating_add(key.capacity())
+                    .saturating_add(json_heap_bytes(value))
+            },
+        ),
+        _ => 0,
     }
 }
 

@@ -2,8 +2,6 @@
 
 use serde_json::json;
 
-use super::parse_candidates_response;
-use crate::kit::atoms::{REWIND_PREVIEW, init_atoms};
 use serial_test::serial;
 
 #[test]
@@ -15,7 +13,8 @@ fn test_parse_candidates_response_extracts_messages() {
         ]
     });
 
-    let candidates = parse_candidates_response(&resp).unwrap();
+    let candidates = super::parse_candidates_response(&resp)
+        .expect("parse candidates response extracts messages: fixture text must be valid input");
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].id, "m1");
     assert_eq!(candidates[0].preview, "第一轮问题");
@@ -25,20 +24,21 @@ fn test_parse_candidates_response_extracts_messages() {
 #[test]
 fn test_parse_candidates_response_empty_ok() {
     let resp = json!({ "messages": [] });
-    let candidates = parse_candidates_response(&resp).unwrap();
+    let candidates = super::parse_candidates_response(&resp)
+        .expect("parse candidates response empty ok: fixture text must be valid input");
     assert!(candidates.is_empty());
 }
 
 #[test]
 fn test_parse_candidates_response_malformed_returns_err() {
     let resp = json!({ "unexpected": 1 });
-    assert!(parse_candidates_response(&resp).is_err());
+    assert!(super::parse_candidates_response(&resp).is_err());
 }
 
 #[test]
 #[serial]
 fn test_apply_candidates_writes_preview_atom() {
-    init_atoms();
+    crate::kit::atoms::init_atoms();
     let candidates = vec![crate::kit::rewind_candidates::RewindCandidate {
         id: "m1".into(),
         preview: "问题".into(),
@@ -53,3 +53,5 @@ fn test_apply_candidates_writes_preview_atom() {
     assert_eq!(preview.messages[0].preview, "问题");
     assert!(preview.files.is_empty(), "候选查询不携带文件信息");
 }
+
+use crate::kit::atoms::REWIND_PREVIEW;

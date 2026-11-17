@@ -2,17 +2,21 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
-use super::*;
+use crate::langfuse::bridge::LangfuseBridge;
 use crate::langfuse::config::LangfuseConfig;
 use crate::langfuse::session::LangfuseSession;
 use crate::langfuse::session_like::LangfuseSessionLike;
+use crate::langfuse::tracer::LangfuseTracer;
+use parking_lot::Mutex;
 use peri_acp_types::identity::AgentId;
 use peri_acp_types::session::TurnTelemetryOutcome;
+use peri_agent::agent::events_v2::ObserveEvent;
 use peri_agent::agent::LangfuseBridgeLike;
 use peri_agent::messages::BaseMessage;
 use peri_agent::session::turn::TurnId;
 use peri_agent::tools::ToolDefinition;
 use peri_config::observability::LangfuseCompression;
+use std::sync::Arc;
 
 // 冻结后的 input 只随来源交给部署，正文不再进 generation body（契约 §3.3），因此正文断言改为
 // 在真实链路（真实 Batcher/Session + 本地捕获端点）上读取已上线的 OTLP 字节。
@@ -55,7 +59,8 @@ async fn observe_start_reuses_snapshot_and_fallback_keeps_messages_and_tools() {
     // 冻结后到发布前，遥测必须持有原文 Arc（跨事件保留）；此处无 await，worker 尚未收敛。
     assert_eq!(Arc::strong_count(&messages), 3);
     let end = tracer.lock().on_turn_end(TurnTelemetryOutcome::Completed);
-    end.await.unwrap();
+    end.await
+        .expect("the end fixture result is required for this assertion");
     // 发布后原文 Arc 必须释放，且 generation 仍拿到完整的 fallback messages/tools 字节。
     assert_eq!(Arc::strong_count(&messages), 2);
     assert_eq!(
@@ -116,7 +121,8 @@ async fn observe_raw_request_supersedes_snapshot_for_completed_generation() {
         request_id: None,
     });
     let end = tracer.lock().on_turn_end(TurnTelemetryOutcome::Completed);
-    end.await.unwrap();
+    end.await
+        .expect("the end fixture result is required for this assertion");
     // 请求体取代 fallback 后，本轮收敛完成即不得继续保留 fallback 原文 Arc。
     assert_eq!(Arc::strong_count(&messages), 2);
     assert_eq!(

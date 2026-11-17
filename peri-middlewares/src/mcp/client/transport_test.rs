@@ -1,4 +1,3 @@
-use super::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
@@ -35,7 +34,7 @@ async fn auto_falls_back_to_legacy() {
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(initialized["method"], "notifications/initialized");
     });
-    let service = serve_client_auto(
+    let service = super::serve_client_auto(
         client,
         &crate::mcp::apps::McpCapabilityProfile::disabled(),
         std::time::Duration::from_secs(2),
@@ -90,7 +89,7 @@ async fn observe_first_request(
         request
     });
 
-    let _service = serve_client_auto(
+    let _service = super::serve_client_auto(
         client_io,
         capability_profile,
         std::time::Duration::from_secs(2),

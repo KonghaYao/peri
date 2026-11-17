@@ -48,6 +48,7 @@ pub fn parse_extra_tool_call(
 ///
 /// 当 tool_name 为 [`EXECUTE_EXTRA_TOOL_NAME`] 时，从 `input[EXTRA_TOOL_NAME_FIELD]` 提取目标工具名，
 /// 用于 HITL 权限判断。否则直接返回原始工具名。
+#[must_use]
 pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -> String {
     if tool_name == EXECUTE_EXTRA_TOOL_NAME {
         input
@@ -63,6 +64,7 @@ pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -
 /// 返回工具名按字典序排序后的逗号分隔字符串（含空格）。
 ///
 /// 输入必须来自当前 session 的实际 direct tool 集合。
+#[must_use]
 pub fn direct_tools_sorted_csv<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
     let mut names: Vec<&str> = names.into_iter().collect();
     names.sort_unstable();
@@ -71,6 +73,7 @@ pub fn direct_tools_sorted_csv<'a>(names: impl IntoIterator<Item = &'a str>) -> 
 }
 
 /// 将当前 session 的 direct tool 集合格式化为稳定的能力说明。
+#[must_use]
 pub fn direct_tools_description<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
     let names = direct_tools_sorted_csv(names);
     if names.is_empty() {

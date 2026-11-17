@@ -8,9 +8,10 @@ use agent_client_protocol::schema::v1::{SetSessionConfigOptionResponse, SetSessi
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::super::notify::{extract_session_id, send_config_option_update};
-use super::super::{apply_profile_effort, parse_permission_mode, AcpServerConfig, SessionState};
-use crate::dispatch::config_update::make_config_options;
+use super::super::notify;
+use super::super::AcpServerConfig;
+use super::super::SessionState;
+use crate::dispatch::config_update;
 use crate::provider::LlmProvider;
 use crate::transport::types::AcpError;
 
@@ -32,12 +33,12 @@ pub(crate) async fn handle_set_mode(
         .get("modeId")
         .and_then(|v| v.as_str())
         .unwrap_or("default");
-    let session_id = extract_session_id(params, "");
-    let mode = parse_permission_mode(mode_id);
+    let session_id = notify::extract_session_id(params, "");
+    let mode = super::super::parse_permission_mode(mode_id);
     cfg.permission_mode.store(mode);
     info!(mode_id = %mode_id, "Permission mode changed");
     let resp = SetSessionModeResponse::new();
-    send_config_option_update(transport.as_ref(), session_id, cfg).await;
+    notify::send_config_option_update(transport.as_ref(), session_id, cfg).await;
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
@@ -59,11 +60,11 @@ pub(crate) async fn handle_set_config_option(
         .get("configId")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let session_id = extract_session_id(params, "");
+    let session_id = notify::extract_session_id(params, "");
     let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
     match config_id {
         "mode" => {
-            let mode = parse_permission_mode(value);
+            let mode = super::super::parse_permission_mode(value);
             cfg.permission_mode.store(mode);
             info!(mode = %value, "Permission mode changed via configOption");
         }
@@ -71,7 +72,7 @@ pub(crate) async fn handle_set_config_option(
             let candidate = parking_lot::RwLock::new(cfg.peri_config.read().clone());
             match config_id {
                 "model" => candidate.write().config.active_alias = value.to_owned(),
-                "thinking_effort" => apply_profile_effort(&candidate, value),
+                "thinking_effort" => super::super::apply_profile_effort(&candidate, value),
                 "context_1m" => {
                     if matches!(&*cfg.provider.read(), LlmProvider::Responses { .. }) {
                         return Err(AcpError::new(
@@ -119,10 +120,10 @@ pub(crate) async fn handle_set_config_option(
     let config_options = {
         let c = cfg.peri_config.read();
         let p = cfg.provider.read();
-        make_config_options(&c, &p, cfg.permission_mode.load())
+        config_update::make_config_options(&c, &p, cfg.permission_mode.load())
     };
     let resp = SetSessionConfigOptionResponse::new(config_options);
-    send_config_option_update(transport.as_ref(), session_id, cfg).await;
+    notify::send_config_option_update(transport.as_ref(), session_id, cfg).await;
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 
@@ -133,7 +134,7 @@ pub(crate) async fn handle_update_config(
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     let revision = expected_revision(cfg)?;
-    let session_id = extract_session_id(params, "");
+    let session_id = notify::extract_session_id(params, "");
     let new_cfg: crate::provider::PeriConfig =
         serde_json::from_value(params.get("config").cloned().unwrap_or_default())
             .map_err(|_| AcpError::new(-32602, "Invalid config"))?;
@@ -230,15 +231,15 @@ pub(crate) async fn handle_update_config(
         }
     }
     for (id, environment, _, _) in &accepted_refreshed {
-        send_config_option_update(transport.as_ref(), id, &environment.cfg).await;
+        notify::send_config_option_update(transport.as_ref(), id, &environment.cfg).await;
     }
 
     let config_options = {
         let c = cfg.peri_config.read();
         let p = cfg.provider.read();
-        make_config_options(&c, &p, cfg.permission_mode.load())
+        config_update::make_config_options(&c, &p, cfg.permission_mode.load())
     };
-    send_config_option_update(transport.as_ref(), session_id, cfg).await;
+    notify::send_config_option_update(transport.as_ref(), session_id, cfg).await;
     serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))
         .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }

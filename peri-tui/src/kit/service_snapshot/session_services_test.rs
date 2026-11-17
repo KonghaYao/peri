@@ -1,13 +1,16 @@
-use super::*;
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::mpsc_transport_pair,
-    types::{AcpError, IncomingMessage},
-};
+use super::AcpTuiClient;
+use super::CronJobSummary;
+use super::McpInitPhase;
+use super::SessionServices;
+use super::json;
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
 
 #[tokio::test]
 async fn successful_projection_then_partial_failure_preserves_last_good_and_reports_errors() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     let server_task = tokio::spawn(async move {
         for round in 0..2 {
@@ -33,12 +36,16 @@ async fn successful_projection_then_partial_failure_preserves_last_good_and_repo
                     (1, "cron/list") => Err(AcpError::new(-32601, "unsupported cron")),
                     other => panic!("unexpected projection: {other:?}"),
                 };
-                server.send_response(id, response).await.unwrap();
+                server.send_response(id, response).await.expect("successful projection then partial failure preserves last good and reports errors: fixture task and request must complete successfully");
             }
         }
     });
     let mut services = SessionServices::default();
-    assert!(query(&client, "session-a", &mut services).await.is_none());
+    assert!(
+        super::query(&client, "session-a", &mut services)
+            .await
+            .is_none()
+    );
     assert_eq!(services.hooks[0].event, "pretooluse");
     assert_eq!(services.mcp.connected, 1);
     assert_eq!(services.mcp_servers[0].version.as_deref(), Some("1.2.3"));
@@ -95,18 +102,18 @@ async fn successful_projection_then_partial_failure_preserves_last_good_and_repo
     assert_eq!(services.mcp_servers[1].resources_count, 0);
     assert!(services.mcp_servers[1].subscriptions.is_none());
     assert_eq!(services.cron_jobs[0].id, "job-a");
-    let error = query(&client, "session-a", &mut services).await.unwrap();
+    let error = super::query(&client, "session-a", &mut services).await.expect("successful projection then partial failure preserves last good and reports errors: fixture task and request must complete successfully");
     assert!(!error.is_empty());
     assert_eq!(services.hooks[0].plugin_name, "first");
     assert_eq!(services.cron_jobs[0].id, "job-a");
     assert!(services.mcp_servers.is_empty());
     assert_eq!(services.mcp.init_phase, McpInitPhase::Ready);
-    server_task.await.unwrap();
+    server_task.await.expect("successful projection then partial failure preserves last good and reports errors: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
 async fn disconnect_keeps_same_owner_data_but_marks_mcp_failed() {
-    let (transport, _server) = mpsc_transport_pair();
+    let (transport, _server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.close();
     let mut services = SessionServices::default();
@@ -114,7 +121,11 @@ async fn disconnect_keeps_same_owner_data_but_marks_mcp_failed() {
         id: "retained".into(),
         ..Default::default()
     });
-    assert!(query(&client, "session-a", &mut services).await.is_some());
+    assert!(
+        super::query(&client, "session-a", &mut services)
+            .await
+            .is_some()
+    );
     assert_eq!(services.cron_jobs[0].id, "retained");
     assert_eq!(services.mcp.init_phase, McpInitPhase::Failed);
 }
@@ -122,26 +133,26 @@ async fn disconnect_keeps_same_owner_data_but_marks_mcp_failed() {
 #[test]
 fn last_good_projection_is_scoped_to_session_generation_not_only_session_id() {
     let mut refresh = super::super::SlowSnapshotRefresh::default();
-    refresh.reset_services(&Some(("session-a".into(), 1)));
+    refresh.reset_services(Some(("session-a".into(), 1)).as_ref());
     refresh.services.cron_jobs.push(CronJobSummary {
         id: "last-good".into(),
         ..Default::default()
     });
-    refresh.reset_services(&Some(("session-a".into(), 1)));
+    refresh.reset_services(Some(("session-a".into(), 1)).as_ref());
     assert_eq!(refresh.services.cron_jobs.len(), 1);
-    refresh.reset_services(&Some(("session-a".into(), 2)));
+    refresh.reset_services(Some(("session-a".into(), 2)).as_ref());
     assert!(refresh.services.cron_jobs.is_empty());
     refresh.services.cron_jobs.push(CronJobSummary::default());
-    refresh.reset_services(&Some(("session-b".into(), 2)));
+    refresh.reset_services(Some(("session-b".into(), 2)).as_ref());
     assert!(refresh.services.cron_jobs.is_empty());
     refresh.services.cron_jobs.push(CronJobSummary::default());
-    refresh.reset_services(&None);
+    refresh.reset_services(None);
     assert!(refresh.services.cron_jobs.is_empty());
 }
 
 #[tokio::test]
 async fn plugin_projection_keeps_writable_scope_and_read_only_entries_distinct() {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     let server_task = tokio::spawn(async move {
         for _ in 0..3 {
@@ -170,23 +181,29 @@ async fn plugin_projection_keeps_writable_scope_and_read_only_entries_distinct()
                 "cron/list" => json!({"jobs":[]}),
                 other => panic!("unexpected service request: {other}"),
             };
-            server.send_response(id, Ok(response)).await.unwrap();
+            server.send_response(id, Ok(response)).await.expect("plugin projection keeps writable scope and read only entries distinct: fixture task and request must complete successfully");
         }
     });
     let mut services = SessionServices::default();
-    assert!(query(&client, "session-a", &mut services).await.is_none());
-    for (entry, scope) in
-        services
-            .plugins
-            .iter()
-            .zip([Some("user"), Some("project"), Some("local"), None])
+    assert!(
+        super::query(&client, "session-a", &mut services)
+            .await
+            .is_none()
+    );
     {
-        assert_eq!(entry.install_scope.as_deref(), scope);
-        assert_eq!(entry.toggle_supported, Some(scope.is_some()));
-        assert_eq!(entry.management_error.is_some(), scope.is_none());
+        let iteration_items =
+            services
+                .plugins
+                .iter()
+                .zip([Some("user"), Some("project"), Some("local"), None]);
+        for (entry, scope) in iteration_items {
+            assert_eq!(entry.install_scope.as_deref(), scope);
+            assert_eq!(entry.toggle_supported, Some(scope.is_some()));
+            assert_eq!(entry.management_error.is_some(), scope.is_none());
+        }
     }
     assert_eq!(services.plugins.len(), 4);
-    server_task.await.unwrap();
+    server_task.await.expect("plugin projection keeps writable scope and read only entries distinct: fixture task and request must complete successfully");
 }
 
 #[test]
@@ -196,7 +213,7 @@ fn test_mcp_management_projection_needs_connection_and_server_capabilities() {
         {"name":"workspace", "transport":"stdio", "connectionStatus":"connected", "oauthStatus":"none", "toolsCount":0, "control":{"restart":false,"stop":false,"unavailableReason":"builtin"}},
         {"name":"legacy", "transport":"http", "connectionStatus":"connected", "oauthStatus":"none", "toolsCount":0}
     ]});
-    let (_, servers) = decode_mcp(value.clone(), true).unwrap();
+    let (_, servers) = super::decode_mcp(value.clone(), true).expect("mcp management projection needs connection and server capabilities: the decode_mcp fixture operation uses valid inputs");
     assert!(servers[0].control.restart && servers[0].control.stop);
     assert!(!servers[1].control.restart && !servers[1].control.stop);
     assert_eq!(
@@ -204,7 +221,7 @@ fn test_mcp_management_projection_needs_connection_and_server_capabilities() {
         Some("builtin")
     );
     assert!(!servers[2].control.restart && !servers[2].control.stop);
-    let (_, servers) = decode_mcp(value, false).unwrap();
+    let (_, servers) = super::decode_mcp(value, false).expect("mcp management projection needs connection and server capabilities: the decode_mcp fixture operation uses valid inputs");
     assert!(
         servers
             .iter()

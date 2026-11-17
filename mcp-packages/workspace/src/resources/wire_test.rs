@@ -8,18 +8,24 @@
 use std::time::Duration;
 
 use base64::Engine as _;
-use peri_acp_types::workspace_resources::{
-    digest_bytes, ResourceScope, SkillsListResponse, META_KEY_DIGEST, META_KEY_SCOPE,
-    SKILL_ENTRY_FILE,
-};
-use rmcp::{
-    model::{
-        CustomRequest, ErrorCode, PaginatedRequestParams, ReadResourceRequestParams,
-        ReadResourceResult, ResourceContents, ServerResult,
-    },
-    service::{Peer, QuitReason, RunningService},
-    ClientLifecycleMode, RoleClient,
-};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::SkillsListResponse;
+use peri_acp_types::workspace_resources::META_KEY_DIGEST;
+use peri_acp_types::workspace_resources::META_KEY_SCOPE;
+use peri_acp_types::workspace_resources::SKILL_ENTRY_FILE;
+use rmcp::model::CustomRequest;
+use rmcp::model::ErrorCode;
+use rmcp::model::PaginatedRequestParams;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResult;
+use rmcp::model::ResourceContents;
+use rmcp::model::ServerResult;
+use rmcp::service::Peer;
+use rmcp::service::QuitReason;
+use rmcp::service::RunningService;
+use rmcp::ClientLifecycleMode;
+use rmcp::RoleClient;
 
 use crate::resources::{
     ResourceBudget, ResourceRoot, WorkspaceResourceProvider, WorkspaceResourcesInput,
@@ -142,10 +148,12 @@ async fn skills_get(peer: &Peer<RoleClient>, uri: &str) -> Result<ServerResult, 
         .map_err(|error| error.to_string())
 }
 
-fn custom_value(result: ServerResult) -> serde_json::Value {
+/// rmcp 3.9.0 把 `skills/list` 升为一等请求，结果按类型化变体返回。
+fn typed_skills_value(result: ServerResult) -> serde_json::Value {
     match result {
-        ServerResult::CustomResult(custom) => custom.0,
-        other => panic!("期望 CustomResult，实际：{other:?}"),
+        ServerResult::ListSkillsResult(list) => serde_json::to_value(list).expect("序列化"),
+        ServerResult::GetSkillResult(get) => serde_json::to_value(get).expect("序列化"),
+        other => panic!("期望类型化 skills 结果，实际：{other:?}"),
     }
 }
 
@@ -376,7 +384,7 @@ async fn wire_meta_sections_list_and_read_verbatim() {
             );
             assert_eq!(
                 meta.get(META_KEY_DIGEST).and_then(|value| value.as_str()),
-                Some(digest_bytes(verbatim.as_bytes()).as_str())
+                Some(workspace_resources::digest_bytes(verbatim.as_bytes()).as_str())
             );
         }
         other => panic!("段落覆盖必须是文本内容：{other:?}"),
@@ -454,7 +462,7 @@ async fn wire_skills_list_and_get_semantics() {
     let pair = connect(server).await;
 
     // list：唯一命中 project 的 alpha（user 的 shadow 不公开）。
-    let value = custom_value(skills_list(&pair.peer(), None).await);
+    let value = typed_skills_value(skills_list(&pair.peer(), None).await);
     let response: SkillsListResponse = serde_json::from_value(value).expect("skills/list 形状");
     assert_eq!(response.skills.len(), 1, "shadow 项不出现在列表");
     let entry = &response.skills[0];
@@ -475,7 +483,7 @@ async fn wire_skills_list_and_get_semantics() {
     }
 
     // get 局部列表外项（shadow 的 URI 未被 list 枚举，但可按 URI 读取当前快照）。
-    let value = custom_value(
+    let value = typed_skills_value(
         skills_get(&pair.peer(), "skill://user/alpha/SKILL.md")
             .await
             .expect("shadow get 必须成功"),

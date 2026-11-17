@@ -1,8 +1,18 @@
 //! Manual compact must preserve the SQLite commit outcome when either select drops its future.
-use super::*;
-use crate::session::exec::compact_pipeline::execute_compact;
-use crate::session::test_resources::git_repository;
+
+use crate::session::exec::executor_helpers::tests::MockEventSink;
+use crate::session::exec::executor_helpers::InterceptOutcome;
+
 use crate::thread::{ThreadId, ThreadMeta};
+use async_trait::async_trait;
+use peri_acp_types::command::command_handler::CommandHandler;
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::CommandOutcome;
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::command::ResolvedCommand;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot,
@@ -16,6 +26,8 @@ use peri_acp_types::workspace::{
 };
 use peri_resources::sessions::SessionResourcesImpl;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 #[derive(Clone, Copy)]
 enum CommitMode {
@@ -294,7 +306,7 @@ impl peri_model::Model for SummaryModel {
         _: peri_model::ModelRequest,
         _: AgentCancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelResponse> {
-        peri_model::ModelResponse::new(
+        peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text("<summary>manual committed summary</summary>"),
             peri_model::StopReason::EndTurn,
             None,
@@ -311,7 +323,7 @@ struct PipelineHandler {
 impl CommandHandler for PipelineHandler {
     async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
         let cancel = ctx.cancel_token.clone();
-        let result = execute_compact(ctx).await;
+        let result = crate::session::exec::compact_pipeline::execute_compact(ctx).await;
         if !matches!(self.pause, HandlerPause::None) {
             self.store.fail_reload.store(
                 matches!(self.pause, HandlerPause::FailReload),
@@ -337,13 +349,13 @@ struct Case {
     done_reasons: Vec<String>,
 }
 async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Case {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = git_repository();
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let repo = crate::session::test_resources::git_repository();
     let cancel = AgentCancellationToken::new();
     let inner: Arc<dyn SessionResources> = Arc::new(
         SessionResourcesImpl::open(dir.path().join("manual.db"))
             .await
-            .unwrap(),
+            .expect("the temporary session store fixture must open successfully"),
     );
     let store = Arc::new(ControlledStore {
         inner: Arc::clone(&inner),
@@ -353,7 +365,10 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         calls: AtomicUsize::new(0),
     });
     // 真门面建会话：绑定 + frozen + 执行代际一次落盘，写入门禁才有 owner。
-    let workspace = inner.resolve_workspace(repo.path()).await.unwrap();
+    let workspace = inner
+        .resolve_workspace(repo.path())
+        .await
+        .expect("the resolve workspace fixture result is required for this assertion");
     let thread_id = uuid::Uuid::now_v7().to_string();
     let session = NewSession {
         thread_id: thread_id.clone(),
@@ -375,7 +390,10 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         },
         frozen: FrozenSnapshotBytes::new("{\"version\":1,\"manual\":true}"),
     };
-    inner.create_session(&session).await.unwrap();
+    inner
+        .create_session(&session)
+        .await
+        .expect("the create session fixture result is required for this assertion");
     let history = vec![
         BaseMessage::human("old manual question"),
         BaseMessage::ai("old manual answer"),
@@ -405,9 +423,12 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
                 summary: None,
                 metadata: serde_json::json!({}),
             })
-            .unwrap(),
+            .expect("the construct fixture result is required for this assertion"),
     });
-    inner.append_history(&thread_id, &payloads).await.unwrap();
+    inner
+        .append_history(&thread_id, &payloads)
+        .await
+        .expect("the append history fixture result is required for this assertion");
     if pre_cancel {
         cancel.cancel();
     }
@@ -415,20 +436,21 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         pause,
         store: store.clone(),
     });
-    let lookup: super::super::CommandLookupFn = Arc::new(move |_| {
-        let mut entry = test_route_entry();
-        entry.handler = handler.clone();
-        Some(ResolvedCommand {
-            entry: Arc::new(entry),
-            args: String::new(),
-        })
-    });
+    let lookup: crate::session::exec::executor_helpers::intercept::CommandLookupFn =
+        Arc::new(move |_| {
+            let mut entry = crate::session::exec::executor_helpers::tests::test_route_entry();
+            entry.handler = handler.clone();
+            Some(ResolvedCommand {
+                entry: Arc::new(entry),
+                args: String::new(),
+            })
+        });
     let content = MessageContent::text("/compact");
     let sink = Arc::new(MockEventSink::new());
     let event_sink: Arc<dyn EventSink> = sink.clone();
-    let (bg_tx, task_manager) = make_bg_infra();
+    let (bg_tx, task_manager) = crate::session::exec::executor_helpers::tests::make_bg_infra();
     let model: Option<Arc<dyn peri_model::Model>> = Some(Arc::new(SummaryModel));
-    let mut req = make_intercept_request(
+    let mut req = crate::session::exec::executor_helpers::tests::make_intercept_request(
         &content,
         &history,
         "manual",
@@ -439,20 +461,27 @@ async fn run_case(mode: CommitMode, pause: HandlerPause, pre_cancel: bool) -> Ca
         lookup,
     );
     req.history_payloads = std::borrow::Cow::Owned(payloads);
-    req.cwd = workspace.cwd.to_str().unwrap();
+    req.cwd = workspace
+        .cwd
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     req.session_resources = Some(store.clone());
     req.thread_id = Some(thread_id.clone());
     req.auxiliary_model = &model;
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        intercept_immediate_command(req),
+        crate::session::exec::executor_helpers::intercept_immediate_command(req),
     )
     .await
     .expect("manual cancellation must terminate");
     let InterceptOutcome::Handled(result) = outcome else {
         panic!("manual command must be handled");
     };
-    let done_reasons = sink.push_done_stop_reasons.lock().unwrap().clone();
+    let done_reasons = sink
+        .push_done_stop_reasons
+        .lock()
+        .expect("sink push done stop reasons mutex must remain unpoisoned throughout the test")
+        .clone();
     Case {
         _dir: dir,
         _repo: repo,
@@ -475,7 +504,7 @@ async fn stored_snapshot(case: &Case) -> SessionSnapshot {
         .inner
         .load_session_snapshot(&case.thread_id)
         .await
-        .unwrap()
+        .expect("the load session snapshot fixture result is required for this assertion")
 }
 
 /// 磁盘上的**有效**视图（未排除 own 条目）：与 `stored_snapshot` 同一真实门面，
@@ -485,7 +514,7 @@ async fn active_snapshot(case: &Case) -> ActiveSessionSnapshot {
         .inner
         .load_active_snapshot(&case.thread_id)
         .await
-        .unwrap()
+        .expect("the load active snapshot fixture result is required for this assertion")
 }
 
 async fn assert_durable_summary(case: &Case) {

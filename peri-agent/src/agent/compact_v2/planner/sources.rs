@@ -1,5 +1,5 @@
 //! Pin the exact source projection/content facts used by a plan, without rejecting tail appends.
-use super::super::projection::{MicroCompactPlan, ProjectionAction};
+use crate::agent::compact_v2::projection::{MicroCompactPlan, ProjectionAction};
 use crate::error::AgentResult;
 use crate::session::transcript::MessageTranscript;
 use std::collections::HashSet;
@@ -24,7 +24,7 @@ pub(super) fn capture(
     let mut pending = source_ids.iter().copied().collect::<Vec<_>>();
     while let Some(id) = pending.pop() {
         if let Some(directive) = transcript.projection_ref(id) {
-            for dependency in directive
+            let dependency_items = directive
                 .archive_catalog
                 .iter()
                 .flat_map(|catalog| catalog.dependencies.iter().copied())
@@ -47,8 +47,8 @@ pub(super) fn capture(
                             } => Some(anchor_message_id),
                             _ => None,
                         }),
-                )
-            {
+                );
+            for dependency in dependency_items {
                 if source_ids.insert(dependency) {
                     pending.push(dependency);
                 }
@@ -60,7 +60,12 @@ pub(super) fn capture(
         .iter()
         .filter(|entry| source_ids.contains(&entry.id()))
         .filter_map(|entry| entry.as_message())
-        .map(|message| Ok((message.id(), super::super::exposure::fingerprint(message)?)))
+        .map(|message| {
+            Ok((
+                message.id(),
+                crate::agent::compact_v2::exposure::fingerprint(message)?,
+            ))
+        })
         .collect::<AgentResult<_>>()?;
     plan.source_flags = transcript
         .entries()

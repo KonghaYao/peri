@@ -1,7 +1,7 @@
-use ratatui_kit::{
-    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
-    prelude::EventResult,
-};
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEvent;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::prelude::EventResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListNavAction {
@@ -27,6 +27,7 @@ pub fn classify_list_nav(key: &KeyEvent) -> Option<ListNavAction> {
     }
 }
 
+#[must_use]
 pub fn clamp_selection(selection: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0
@@ -35,6 +36,7 @@ pub fn clamp_selection(selection: usize, item_count: usize) -> usize {
     }
 }
 
+#[must_use]
 pub fn next_selection(selection: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0
@@ -43,10 +45,12 @@ pub fn next_selection(selection: usize, item_count: usize) -> usize {
     }
 }
 
+#[must_use]
 pub fn previous_selection(selection: usize) -> usize {
     selection.saturating_sub(1)
 }
 
+#[must_use]
 pub fn cycle_next(selection: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0
@@ -55,6 +59,7 @@ pub fn cycle_next(selection: usize, item_count: usize) -> usize {
     }
 }
 
+#[must_use]
 pub fn cycle_previous(selection: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0
@@ -70,6 +75,7 @@ pub fn cycle_previous(selection: usize, item_count: usize) -> usize {
 /// 超过时把视口下沿推到 `selected - visible_items / 3`，但不超过 `max_scroll`。
 ///
 /// 当 `item_count <= visible_items` 时返回 0（列表全可见，无需滚动）。
+#[must_use]
 pub fn scroll_start_for_selected(
     selected: usize,
     item_count: usize,

@@ -1,4 +1,5 @@
-use super::*;
+use crate::langfuse::tracer::stages::MqDrainedStats;
+use crate::langfuse::tracer::stages::StageSpans;
 use peri_agent::agent::events::{Stage, StageStatus};
 
 #[test]
@@ -40,23 +41,46 @@ fn test_on_mq_drained_writes_to_receive() {
     let mut s = StageSpans::new();
     let (_h, _replaced) =
         s.on_stage_start("main", Stage::Receive, "turn_1", "trace_1", "agent_obs");
-    s.on_mq_drained("main", 2, 1, 0);
-    assert_eq!(s.mq_counts("main"), Some((2, 1, 0)));
+    s.on_mq_drained(
+        "main",
+        MqDrainedStats {
+            prompt: 2,
+            defer: 1,
+            info: 0,
+            oldest_enqueued_at: Some("2026-07-14T10:00:00.000000Z".to_string()),
+        },
+    );
+    let stats = s.mq_stats("main").expect("Receive 阶段应记录排空统计");
+    assert_eq!((stats.prompt, stats.defer, stats.info), (2, 1, 0));
+    assert_eq!(
+        stats.oldest_enqueued_at.as_deref(),
+        Some("2026-07-14T10:00:00.000000Z")
+    );
 }
 
 #[test]
 fn test_on_mq_drained_outside_receive_no_op() {
     let mut s = StageSpans::new();
     let (_h, _replaced) = s.on_stage_start("main", Stage::Reason, "turn_1", "trace_1", "agent_obs");
-    s.on_mq_drained("main", 2, 1, 0);
-    assert_eq!(s.mq_counts("main"), None);
+    s.on_mq_drained(
+        "main",
+        MqDrainedStats {
+            prompt: 2,
+            defer: 1,
+            info: 0,
+            oldest_enqueued_at: None,
+        },
+    );
+    assert!(s.mq_stats("main").is_none());
 }
 
 #[test]
 fn test_on_workflow_start_creates_child_span() {
     let mut s = StageSpans::new();
     let (_h, _replaced) = s.on_stage_start("main", Stage::Act, "turn_1", "trace_1", "agent_obs");
-    let w = s.on_workflow_start("wf_1", "plan summary").unwrap();
+    let w = s
+        .on_workflow_start("wf_1", "plan summary")
+        .expect("the on workflow start fixture result is required for this assertion");
     assert!(w.span_id.starts_with("span_"));
 }
 
@@ -86,14 +110,18 @@ fn workflow_duplicate_start_keeps_original_identity_time_plan_and_parent() {
     stages.on_stage_start("main", Stage::Act, "trace", "turn", "parent");
     let first = stages
         .on_workflow_start("wf", "original plan")
-        .unwrap()
+        .expect("the on workflow start fixture result is required for this assertion")
         .clone();
-    let second = stages.on_workflow_start("wf", "replacement plan").unwrap();
+    let second = stages
+        .on_workflow_start("wf", "replacement plan")
+        .expect("the on workflow start fixture result is required for this assertion");
     assert_eq!(second.span_id, first.span_id);
     assert_eq!(second.start_time, first.start_time);
     assert_eq!(second.plan, "original plan");
     assert_eq!(second.parent_observation_id, "parent");
-    let ended = stages.on_workflow_end("wf", 2, 3).unwrap();
+    let ended = stages
+        .on_workflow_end("wf", 2, 3)
+        .expect("the on workflow end fixture result is required for this assertion");
     assert_eq!(ended.start.span_id, first.span_id);
     assert!(stages.on_workflow_end("wf", 4, 5).is_none());
 }

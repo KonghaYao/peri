@@ -1,4 +1,16 @@
-use super::*;
+use super::AgentRunParams;
+use super::AgentRunResult;
+use super::Arc;
+use super::CancelGateModel;
+use super::ChainSlot;
+use super::CompletedWorkflowModel;
+use super::FakeGoalController;
+use super::McpClientPool;
+use super::Model;
+use super::PermissionMode;
+use super::SharedPermissionMode;
+use super::WorkflowExecutionFixture;
+use peri_acp_types::workflow::AgentExecutor as _;
 
 // ── 契约用例 ─────────────────────────────────────────────────────────────────
 
@@ -24,7 +36,7 @@ use super::*;
 /// 槽位总数随之 18 → 17。
 #[test]
 fn blueprint_sequence_is_canonical() {
-    let slots = production_blueprint();
+    let slots = super::production_blueprint();
     let names: Vec<&str> = slots.iter().map(|s| slot_name(s)).collect();
     assert_eq!(
         names,
@@ -85,9 +97,9 @@ fn slot_name(slot: &ChainSlot) -> &'static str {
 /// 默认配置（全条件关闭）下的完整链序列，与迁移前 builder 完全一致。
 #[test]
 fn default_config_produces_canonical_chain() {
-    let ctx = base_context();
+    let ctx = super::base_context();
     assert_eq!(
-        assemble_names(&ctx),
+        super::assemble_names(&ctx),
         vec![
             "DefaultSystemPromptMiddleware",
             "LangMiddleware",
@@ -111,9 +123,9 @@ fn default_config_produces_canonical_chain() {
 /// 单独关闭 `ArtifactMiddleware` 后仅移除该实例的工具，不影响 ToolSearch 元工具。
 #[test]
 fn builtin_artifact_instance_can_be_closed_independently() {
-    let mut enabled = base_context();
-    enabled.mcp_pool = Some(pool_with_builtin_instances());
-    let enabled_tools = assemble_tool_names(&enabled);
+    let mut enabled = super::base_context();
+    enabled.mcp_pool = Some(super::pool_with_builtin_instances());
+    let enabled_tools = super::assemble_tool_names(&enabled);
     for expected in [
         "artifact",
         "WebSearch",
@@ -126,12 +138,12 @@ fn builtin_artifact_instance_can_be_closed_independently() {
         );
     }
 
-    let mut disabled = base_context();
-    disabled.mcp_pool = Some(pool_with_builtin_instances());
+    let mut disabled = super::base_context();
+    disabled.mcp_pool = Some(super::pool_with_builtin_instances());
     disabled
         .meta_harness_disabled
-        .insert("ArtifactMiddleware".to_string());
-    let disabled_tools = assemble_tool_names(&disabled);
+        .insert("artifact".to_string());
+    let disabled_tools = super::assemble_tool_names(&disabled);
     assert!(!disabled_tools.iter().any(|name| name == "artifact"));
     assert!(
         disabled_tools.iter().any(|name| name == "WebSearch"),
@@ -151,9 +163,9 @@ fn permission_mode_keeps_chain_shape() {
         PermissionMode::AutoMode,
         PermissionMode::Bypass,
     ] {
-        let mut ctx = base_context();
+        let mut ctx = super::base_context();
         ctx.permission_mode = SharedPermissionMode::new(mode);
-        let names = assemble_names(&ctx);
+        let names = super::assemble_names(&ctx);
         // 位置随 Web / Artifact 两槽位删除各前移 1（A7/A14 期望值同步），
         // 随 v4-part-3 C-04 的 Cron 槽位删除再前移 1，
         // 随 v4-part-4 W3-C1 的 Filesystem / Terminal 两槽位删除再各前移 1，
@@ -182,9 +194,13 @@ fn permission_mode_keeps_chain_shape() {
 /// Hook 组非空 → 每组展开一个 HookMiddleware，插在 Todo 之后、HITL 之前。
 #[test]
 fn hook_groups_expand_hook_middleware() {
-    let mut ctx = base_context();
-    ctx.hook_groups = vec![vec![make_hook()], vec![make_hook(), make_hook()], vec![]];
-    let names = assemble_names(&ctx);
+    let mut ctx = super::base_context();
+    ctx.hook_groups = vec![
+        vec![super::make_hook()],
+        vec![super::make_hook(), super::make_hook()],
+        vec![],
+    ];
+    let names = super::assemble_names(&ctx);
     // 空组不展开；非空组各展开一个实例
     assert_eq!(
         names
@@ -209,9 +225,9 @@ fn hook_groups_expand_hook_middleware() {
 #[test]
 fn conditional_registration_matrix() {
     // 单独开启
-    let mut with_mcp = base_context();
+    let mut with_mcp = super::base_context();
     with_mcp.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
-    let names_mcp = assemble_names(&with_mcp);
+    let names_mcp = super::assemble_names(&with_mcp);
     let pos_mcp = names_mcp.iter().position(|n| n == "McpMiddleware").unwrap();
     let pos_sub = names_mcp
         .iter()
@@ -223,9 +239,9 @@ fn conditional_registration_matrix() {
         "MCP 位置错误: {names_mcp:?}"
     );
 
-    let mut with_goal = base_context();
+    let mut with_goal = super::base_context();
     with_goal.goal_controller = Some(Arc::new(FakeGoalController));
-    let names_goal = assemble_names(&with_goal);
+    let names_goal = super::assemble_names(&with_goal);
     assert_eq!(
         names_goal.last().map(String::as_str),
         Some("GoalMiddleware")
@@ -235,12 +251,12 @@ fn conditional_registration_matrix() {
 /// 全开组合：完整序列精确断言（Hook 2 组 + MCP + Goal；Workflow 槽位已随 P5 删除）。
 #[test]
 fn full_config_chain_order() {
-    let mut ctx = base_context();
-    ctx.hook_groups = vec![vec![make_hook()], vec![make_hook()]];
+    let mut ctx = super::base_context();
+    ctx.hook_groups = vec![vec![super::make_hook()], vec![super::make_hook()]];
     ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
     ctx.goal_controller = Some(Arc::new(FakeGoalController));
 
-    let names = assemble_names(&ctx);
+    let names = super::assemble_names(&ctx);
     assert_eq!(
         names,
         vec![
@@ -280,7 +296,7 @@ async fn workflow_agent_definition_requires_the_resource_face() {
     )
     .unwrap();
 
-    let error = default_workflow_middleware_factory()
+    let error = crate::assembly::default_workflow_middleware_factory()
         .resolve_agent_definition("explorer", temp.path().to_str().unwrap())
         .await
         .unwrap_err();
@@ -289,13 +305,13 @@ async fn workflow_agent_definition_requires_the_resource_face() {
         "无资源面必须报「面不可用」而不是读盘：{error}"
     );
 
-    let error = default_workflow_middleware_factory()
+    let error = crate::assembly::default_workflow_middleware_factory()
         .resolve_agent_definition("plan", temp.path().to_str().unwrap())
         .await
         .unwrap_err();
     assert!(error.contains("unavailable"), "{error}");
 
-    let error = default_workflow_middleware_factory()
+    let error = crate::assembly::default_workflow_middleware_factory()
         .resolve_agent_definition("does-not-exist", temp.path().to_str().unwrap())
         .await
         .unwrap_err();
@@ -312,7 +328,7 @@ async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
         entered: Arc::new(std::sync::Mutex::new(Some(entered_tx))),
     });
     let cancel = tokio_util::sync::CancellationToken::new();
-    let mut ctx = workflow_context_with_disabled(&[]);
+    let mut ctx = super::workflow_context_with_disabled(&[]);
     fixture.bind(&mut ctx);
     ctx.cancel = Some(cancel.clone());
     ctx.model_factory = Arc::new(move |_model, _max_tokens, _observer| {
@@ -351,7 +367,7 @@ async fn test_workflow_executor_cancel_during_model_stream_is_interrupted() {
     let result = task.await.expect("workflow executor task 不得 panic");
 
     match result {
-        AgentRunResult::Dead { reason, detail } => {
+        AgentRunResult::Dead { reason, detail, .. } => {
             assert_eq!(reason.as_deref(), Some("interrupted"));
             assert!(
                 detail
@@ -370,7 +386,7 @@ async fn test_workflow_executor_forwarder_join_error_is_dead_and_failed_telemetr
     let model: Arc<dyn Model> = Arc::new(CompletedWorkflowModel);
     let telemetry = Arc::new(std::sync::Mutex::new(Vec::new()));
     let telemetry_for_hook = Arc::clone(&telemetry);
-    let mut ctx = workflow_context_with_disabled(&[]);
+    let mut ctx = super::workflow_context_with_disabled(&[]);
     fixture.bind(&mut ctx);
     ctx.model_factory = Arc::new(move |_model, _max_tokens, _observer| {
         peri_agent::agent::workflow::WorkflowModel {
@@ -428,7 +444,7 @@ async fn workflow_face_rejects_remote_agent_ids_without_an_approval_seam() {
     // F2（安全）：workflow 面没有批准 broker ⇒ 远端 id 必须显式拒绝；本地 id 的
     // 行为不受影响（本用例只锁拒绝分支，本地分支由上面的资源面用例覆盖）。
     let temp = tempfile::tempdir().unwrap();
-    let error = default_workflow_middleware_factory()
+    let error = crate::assembly::default_workflow_middleware_factory()
         .resolve_agent_definition("mcp__external__reviewer", temp.path().to_str().unwrap())
         .await
         .unwrap_err();

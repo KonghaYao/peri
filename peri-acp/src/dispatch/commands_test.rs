@@ -9,8 +9,8 @@ use peri_acp_types::command::{CommandContext, CommandResult, PromptStopReason};
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::PeriCaps;
 
-use super::commands::{build_available_commands_update, register_ui_entries, ui_route_entries};
-use crate::session::command::register_builtins;
+use super::commands;
+use crate::session::command;
 
 // ─── 辅助 ───────────────────────────────────────────────────────────────────
 
@@ -31,7 +31,7 @@ impl CommandHandler for FakeHandler {
 /// 内置注册表（register_builtins：core:compact / core:clear / core:rewind / core:loop，全部 kind=Command、core 域）。
 fn builtin_registry() -> CommandRegistry {
     let reg = CommandRegistry::new();
-    register_builtins(&reg);
+    command::register_builtins(&reg);
     reg
 }
 
@@ -96,7 +96,7 @@ fn plugin_entry(fullname: &str, plugin: &str) -> Arc<RouteEntry> {
 fn test_update_no_caps_projects_registry_entries_only() {
     let reg = builtin_registry();
     let caps = PeriCaps::default();
-    let update = build_available_commands_update(&reg.snapshot(), &caps);
+    let update = commands::build_available_commands_update(&reg.snapshot(), &caps);
     let value = serde_json::to_value(&update).unwrap();
     let commands = value["availableCommands"].as_array().unwrap();
 
@@ -180,8 +180,8 @@ fn test_update_all_enabled_includes_default_ui_details() {
 
     // 模拟调用点（P1-1 拆分后形态）：ui 注册为独立步骤（on_change 挂载前
     // 一次性），投影直接取注册表 snapshot（Phase 6 A4）。
-    register_ui_entries(&caps, &reg);
-    let update = build_available_commands_update(&reg.snapshot(), &caps);
+    commands::register_ui_entries(&caps, &reg);
+    let update = commands::build_available_commands_update(&reg.snapshot(), &caps);
     let value = serde_json::to_value(&update).unwrap();
     let commands = value["availableCommands"].as_array().unwrap();
     let names: Vec<&str> = commands
@@ -236,7 +236,7 @@ fn test_register_ui_entries_idempotent() {
     let reg = builtin_registry();
     let caps = PeriCaps::all_enabled();
 
-    register_ui_entries(&caps, &reg);
+    commands::register_ui_entries(&caps, &reg);
     let names: Vec<String> = reg.snapshot().iter().map(|e| e.fullname.clone()).collect();
     assert!(
         names.iter().any(|n| n == "ui:help"),
@@ -249,7 +249,7 @@ fn test_register_ui_entries_idempotent() {
     let n1 = names.len();
 
     // 重放（session/load 路径）：已注册条目全部跳过，注册表不变
-    register_ui_entries(&caps, &reg);
+    commands::register_ui_entries(&caps, &reg);
     let n2 = reg.snapshot().len();
     assert_eq!(n1, n2, "重放注册不得改变注册表内容");
 }
@@ -272,7 +272,7 @@ fn test_update_meta_injects_aliases_category_args() {
         },
     });
     let caps = PeriCaps::default();
-    let update = build_available_commands_update(&[entry], &caps);
+    let update = commands::build_available_commands_update(&[entry], &caps);
     let value = serde_json::to_value(&update).unwrap();
     let cmd = &value["availableCommands"][0];
     assert_eq!(cmd["name"], "demo");
@@ -296,7 +296,7 @@ fn test_update_projects_snapshot_entries_with_kinds() {
         plugin_entry("plugin:ecc:deploy", "ecc"),
     ];
     let caps = PeriCaps::all_enabled();
-    let update = build_available_commands_update(&entries, &caps);
+    let update = commands::build_available_commands_update(&entries, &caps);
     let value = serde_json::to_value(&update).unwrap();
     let commands = value["availableCommands"].as_array().unwrap();
 
@@ -375,7 +375,7 @@ fn test_update_skill_names_gated_by_caps() {
         skill_names: false,
         ..PeriCaps::all_enabled()
     };
-    let update = build_available_commands_update(&entries, &caps);
+    let update = commands::build_available_commands_update(&entries, &caps);
     let value = serde_json::to_value(&update).unwrap();
     assert!(
         value["_meta"].get("skillNames").is_none(),
@@ -403,7 +403,7 @@ fn test_update_local_skill_same_name_as_builtin_only_builtin_exists() {
     assert!(err.is_err(), "同名注册应被注册表冲突拒绝（键唯一性）");
 
     let caps = PeriCaps::all_enabled();
-    let update = build_available_commands_update(&reg.snapshot(), &caps);
+    let update = commands::build_available_commands_update(&reg.snapshot(), &caps);
     let value = serde_json::to_value(&update).unwrap();
     let commands = value["availableCommands"].as_array().unwrap();
     assert_eq!(
@@ -431,7 +431,7 @@ fn test_update_local_skill_same_name_as_builtin_only_builtin_exists() {
 #[test]
 fn test_ui_route_entries_from_caps_details() {
     let caps = PeriCaps::all_enabled();
-    let entries = ui_route_entries(&caps);
+    let entries = commands::ui_route_entries(&caps);
     assert_eq!(
         entries.len(),
         11,

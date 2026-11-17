@@ -1,6 +1,7 @@
-use super::*;
+use super::{Arc, ClientStatus, ConfigSource, McpClientPool, McpInitStatus, SystemMcpManifest};
 use crate::mcp::builtin::context::BuiltinInstanceContext;
 use peri_acp_types::ports::McpPoolPort;
+use std::fmt::Debug;
 
 const SCRIPT: &str = r#"
 const fs = require('node:fs');
@@ -73,8 +74,7 @@ async fn remote_workspace_resource_discovery_failure_blocks_initial_connection()
     )
     .await;
     assert!(matches!(
-        pool.get_client("workspace")
-            .map(|handle| handle.status.clone()),
+        pool.client("workspace").map(|handle| handle.status.clone()),
         Some(ClientStatus::Failed(_))
     ));
     assert!(!pool
@@ -109,7 +109,7 @@ impl tracing::Subscriber for WarnCaptureSubscriber {
     fn event(&self, event: &tracing::Event<'_>) {
         struct Fields(String);
         impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
                 if !self.0.is_empty() {
                     self.0.push(' ');
                 }
@@ -160,7 +160,7 @@ fn stdio_spawn_failure_is_recorded_and_logged() {
                 )
                 .await;
                 assert!(matches!(
-                    pool.get_client("broken")
+                    pool.client("broken")
                         .map(|client| client.status.clone()),
                     Some(ClientStatus::Failed(reason)) if reason.contains("stdio 启动失败")
                 ));
@@ -205,8 +205,7 @@ async fn worktree_static_server_uses_target_directory_on_initialize_and_reconnec
         )
         .await;
         assert!(matches!(
-            pool.get_client("fixture")
-                .map(|client| client.status.clone()),
+            pool.client("fixture").map(|client| client.status.clone()),
             Some(ClientStatus::Connected)
         ));
         pool.reconnect("fixture", None).await.unwrap();
@@ -377,7 +376,7 @@ async fn tools_list_error_never_becomes_connected_with_empty_tools() {
     .await;
 
     let client = pool
-        .get_client("broken-discovery")
+        .client("broken-discovery")
         .expect("失败必须留下可核对的状态，而不是注册成 Connected");
     match &client.status {
         ClientStatus::Failed(reason) => assert!(
@@ -520,9 +519,7 @@ async fn empty_tools_list_is_success_not_failure() {
     )
     .await;
 
-    let client = pool
-        .get_client("empty-discovery")
-        .expect("空数组是成功结果");
+    let client = pool.client("empty-discovery").expect("空数组是成功结果");
     assert!(
         matches!(client.status, ClientStatus::Connected),
         "空数组不得判为失败，实际: {:?}",
@@ -619,7 +616,7 @@ async fn system_discovery_is_live_while_ordinary_server_uses_cache() {
         )
         .await;
         for name in ["system-srv", "ordinary-srv"] {
-            let client = pool.get_client(name).unwrap_or_else(|| {
+            let client = pool.client(name).unwrap_or_else(|| {
                 panic!("第 {round} 轮 {name} 必须完成发现");
             });
             assert!(
@@ -737,7 +734,7 @@ async fn reconnect_replaces_discovery_evidence_with_current_generation() {
     )
     .await;
 
-    let first = pool.get_client("reconnect-srv").expect("首轮必须完成发现");
+    let first = pool.client("reconnect-srv").expect("首轮必须完成发现");
     let first_evidence = pool
         .discovery_evidence("reconnect-srv")
         .expect("首轮成功必须提交本代证据");
@@ -753,7 +750,7 @@ async fn reconnect_replaces_discovery_evidence_with_current_generation() {
         "重连时 tools/list 失败必须返回错误，实际: {reconnect:?}"
     );
     let current = pool
-        .get_client("reconnect-srv")
+        .client("reconnect-srv")
         .expect("失败的重连必须留下可核对状态，而不是空句柄");
     assert!(
         matches!(current.status, ClientStatus::Failed(_)),
@@ -880,15 +877,13 @@ async fn system_requirement_is_discovered_before_gated_ordinary_server() {
         "普通 MCP 未完成时整池不得发布 ready"
     );
     assert!(
-        pool.get_client("gated-ordinary").is_none(),
+        pool.client("gated-ordinary").is_none(),
         "普通 server 尚未放行，不应已经写入句柄（说明它排在 System 之前）"
     );
 
     std::fs::write(&release, "").unwrap();
     init.await.unwrap();
-    let ordinary = pool
-        .get_client("gated-ordinary")
-        .expect("放行后必须写入句柄");
+    let ordinary = pool.client("gated-ordinary").expect("放行后必须写入句柄");
     assert!(
         matches!(ordinary.status, ClientStatus::Connected),
         "放行后普通 server 必须完成连接，实际: {:?}",

@@ -5,7 +5,10 @@
 //! 从 `peri-middlewares` 的 host wire 证据下沉（2026-09-30）：同一断言主体（工具语义 +
 //! 共享投影）不依赖 host 装配，本包直接经 handler 的工具表验证。
 
-use super::*;
+use crate::workspace::WorkspaceMcpServer;
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::ErrorCode;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{json, Value};
 
@@ -39,7 +42,7 @@ async fn unknown_tool_is_invalid_params() {
     let dir = tempfile::tempdir().expect("临时目录夹具必须可创建");
     let server = server_in(&dir);
 
-    let error = invoke_tool_call(
+    let error = peri_mcp_common::invoke_tool_call(
         server.tools(),
         &server.cwd,
         &request("NoSuchTool", json!({})),
@@ -61,7 +64,7 @@ async fn read_pdf_pages_is_reported_as_tool_error() {
     let dir = tempfile::tempdir().unwrap();
     let server = server_in(&dir);
     let result = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &request("Read", json!({"file_path": "missing.pdf", "pages": "1-5"})),
@@ -81,7 +84,7 @@ async fn tool_failures_preserve_diagnostic_error_result() {
     let server = server_in(&dir);
 
     let missing = complete(
-        invoke_tool_call(server.tools(), &server.cwd, &request("Read", json!({})))
+        peri_mcp_common::invoke_tool_call(server.tools(), &server.cwd, &request("Read", json!({})))
             .await
             .expect("工具级失败仍走协议成功（is_error 承载语义）"),
     );
@@ -98,7 +101,7 @@ async fn tool_failures_preserve_diagnostic_error_result() {
 
     const LEAK_PATH: &str = "/tmp/secret-marker/private.txt";
     let leaky = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &request("Read", json!({ "file_path": LEAK_PATH })),
@@ -119,7 +122,7 @@ async fn tool_failures_preserve_diagnostic_error_result() {
     );
 
     let bash = complete(
-        invoke_tool_call(server.tools(), &server.cwd, &request("Bash", json!({})))
+        peri_mcp_common::invoke_tool_call(server.tools(), &server.cwd, &request("Bash", json!({})))
             .await
             .expect("工具级失败仍走协议成功"),
     );
@@ -143,7 +146,7 @@ async fn read_png_returns_mcp_image_content() {
     let server = server_in(&dir);
 
     let result = complete(
-        invoke_tool_call(
+        peri_mcp_common::invoke_tool_call(
             server.tools(),
             &server.cwd,
             &request("Read", json!({"file_path": "pixel.png"})),

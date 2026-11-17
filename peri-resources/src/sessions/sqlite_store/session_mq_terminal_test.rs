@@ -3,7 +3,11 @@
 //! 夹具与输入构造复用父模块 `session_mq_test`；这里只覆盖 `active` 守卫、不同结果 ID
 //! 与跨 thread 冲突这些与本机单事务形状直接相关的路径。
 
-use super::*;
+use super::{
+    terminal_facts, terminal_input, Fixture, MessageId, MqEnqueueDisposition, MqFilter,
+    PersistedPayload, SessionResourceErrorKind,
+};
+use crate::sessions::data::SessionDataPort;
 
 /// 先 Done + 结果 A，再 Error + 结果 B（不同 ID）：终态与结果都保留先提交的那一份。
 #[tokio::test]
@@ -48,7 +52,11 @@ async fn finalize_does_not_overwrite_terminal_with_a_different_result_id() {
         ("done".to_owned(), Some("idle".to_owned())),
         "后到的结算不得改写终态或工作意图"
     );
-    assert_eq!(mq_count(&fixture, &target).await, 1, "不得写第二条结果");
+    assert_eq!(
+        super::mq_count(&fixture, &target).await,
+        1,
+        "不得写第二条结果"
+    );
 
     let rows = fixture
         .data
@@ -92,7 +100,7 @@ async fn finalize_replaying_the_same_result_id_is_a_noop() {
         terminal_facts(&fixture, &child).await,
         ("done".to_owned(), Some("idle".to_owned()))
     );
-    assert_eq!(mq_count(&fixture, &target).await, 1);
+    assert_eq!(super::mq_count(&fixture, &target).await, 1);
 }
 
 /// 结果投递回 child 自己（恢复期自投递）不是新的接收方，不得提升工作意图。
@@ -120,12 +128,64 @@ async fn finalize_target_equals_child_does_not_promote_receiver() {
         .await
         .unwrap();
     assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
-    assert_eq!(mq_count(&fixture, &child).await, 1);
+    assert_eq!(super::mq_count(&fixture, &child).await, 1);
     assert_eq!(
         terminal_facts(&fixture, &child).await,
         ("done".to_owned(), Some("idle".to_owned())),
         "终态 work_state 不得被接收方提升改写"
     );
+}
+
+/// 目标已终态：结果行就绪、child 仍 `active` 也不得把 target 从终态 + `idle` 提升为
+/// `working`。结果本身仍按 MQ 规则接纳，改变的只有接收方工作意图。
+#[tokio::test]
+async fn finalize_does_not_promote_a_terminal_receiver() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    for terminal in [
+        AgentStatus::Error,
+        AgentStatus::Done,
+        AgentStatus::Cancelled,
+    ] {
+        let fixture = Fixture::new().await;
+        let child = fixture.thread("child").await;
+        let target = fixture.thread("parent").await;
+        // 终态 target 的 `work_state` 是派生值；旧路径可能停在 `idle`。
+        sqlx::query("UPDATE threads SET agent_status = ?1, work_state = 'idle' WHERE id = ?2")
+            .bind(terminal.as_str())
+            .bind(target.as_str())
+            .execute(&fixture.store.database.pool)
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .data
+            .finalize_child_terminal(
+                &child,
+                AgentStatus::Done,
+                WorkState::Idle,
+                &target,
+                terminal_input(MessageId::new(), "result to terminal parent"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
+        assert_eq!(
+            terminal_facts(&fixture, &target).await,
+            (terminal.as_str().to_owned(), Some("idle".to_owned())),
+            "{terminal:?}: 终态 target 的 agent_status 与 work_state 都不得改变"
+        );
+        assert_eq!(
+            terminal_facts(&fixture, &child).await,
+            ("done".to_owned(), Some("idle".to_owned())),
+            "{terminal:?}: child 仍按本次结算写入终态"
+        );
+        assert_eq!(
+            super::mq_count(&fixture, &target).await,
+            1,
+            "结果仍要落在目标 MQ"
+        );
+    }
 }
 
 /// 结果 ID 已在别的 thread 的 MQ：整次结算冲突回滚，终态不得越过守卫提交。
@@ -145,7 +205,7 @@ async fn finalize_conflicts_when_the_result_id_is_pending_in_another_thread() {
     let id = MessageId::new();
     fixture
         .data
-        .mq_enqueue(&foreign, input(id, "already pending elsewhere"))
+        .mq_enqueue(&foreign, super::input(id, "already pending elsewhere"))
         .await
         .unwrap();
 
@@ -169,8 +229,8 @@ async fn finalize_conflicts_when_the_result_id_is_pending_in_another_thread() {
         ("active".to_owned(), Some("working".to_owned())),
         "冲突不得留下终态或工作意图"
     );
-    assert_eq!(mq_count(&fixture, &target).await, 0);
-    assert_eq!(mq_count(&fixture, &foreign).await, 1);
+    assert_eq!(super::mq_count(&fixture, &target).await, 0);
+    assert_eq!(super::mq_count(&fixture, &foreign).await, 1);
 }
 
 /// 终态 + 残留 `working`：迟到结算只收敛工作意图，不覆盖终态、不新增结果行。
@@ -214,8 +274,12 @@ async fn late_finalize_converges_terminal_child_residual_working() {
             ),
             "{stored:?}: 终态保持不变，工作意图收敛到派生值"
         );
-        assert_eq!(mq_count(&fixture, &target).await, 0, "不得新增结果行");
-        assert_eq!(history_len(&fixture, &target).await, 0, "不得写历史");
+        assert_eq!(
+            super::mq_count(&fixture, &target).await,
+            0,
+            "不得新增结果行"
+        );
+        assert_eq!(super::history_len(&fixture, &target).await, 0, "不得写历史");
     }
 }
 

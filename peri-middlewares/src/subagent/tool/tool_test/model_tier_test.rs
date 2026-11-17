@@ -1,9 +1,17 @@
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::EchoLLM;
+use super::HostFixture;
+use super::RwLock;
+use super::SessionFixture;
+use super::SubAgentTool;
+use super::ThreadMeta;
 
 /// Agent 工具 schema 应声明 `model` 参数（string，可选），并列出全部可用档位
 #[test]
 fn test_agent_parameters_declares_model_tier() {
-    let t = make_subagent_tool(vec![]);
+    let t = super::make_subagent_tool(vec![]);
     let params = t.parameters();
     assert!(
         params["properties"]["model"]["type"] == "string",
@@ -61,18 +69,19 @@ fn write_test_agent_with_model(dir: &tempfile::TempDir, model: &str) {
 /// model 参数覆盖 frontmatter：定义声明 sonnet，调用传 haiku → llm_factory 收到 "haiku"
 #[tokio::test]
 async fn test_agent_model_override_replaces_frontmatter() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
     let t = host.bind(t);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -95,18 +104,19 @@ async fn test_agent_model_override_replaces_frontmatter() {
 /// model: "inherit" → 继承父模型（llm_factory 收到 None），覆盖 frontmatter
 #[tokio::test]
 async fn test_agent_model_inherit_uses_parent_model() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
     let t = host.bind(t);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -125,11 +135,11 @@ async fn test_agent_model_inherit_uses_parent_model() {
 /// 省略 model（或传空串 / 纯空白占位符）→ 保持 agent 定义 frontmatter model
 #[tokio::test]
 async fn test_agent_model_omitted_keeps_frontmatter() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
@@ -145,8 +155,8 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
             input["model"] = serde_json::Value::String(m.to_string());
         }
         let invocation = host.fresh_tool_call_id("omitted");
-        let result = t
-            .invoke(input, host.context_with(&[], invocation))
+        let result = host
+            .invoke_and_wait(&t, input, host.context_with(&[], invocation))
             .await
             .unwrap();
         assert!(result.contains("echo"), "应正常执行: {}", result);
@@ -168,19 +178,20 @@ async fn test_agent_model_omitted_keeps_frontmatter() {
 async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     for fm in ["inherit", ""] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         write_test_agent_with_model(&dir, fm);
         let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
         let t = host.bind(
-            with_agent_face(
+            super::with_agent_face(
                 make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
                 dir.path(),
             )
             .await,
         );
         let invocation = host.fresh_tool_call_id("inherit");
-        let result = t
-            .invoke(
+        let result = host
+            .invoke_and_wait(
+                &t,
                 serde_json::json!({
                     "subagent_type": "test-agent",
                     "prompt": "hello",
@@ -203,11 +214,11 @@ async fn test_agent_model_omitted_inherit_or_empty_frontmatter() {
 /// 档位大小写不敏感："HAIKU" → "haiku"；"InHerit" → 父模型（None）
 #[tokio::test]
 async fn test_agent_model_case_insensitive() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
@@ -215,8 +226,9 @@ async fn test_agent_model_case_insensitive() {
     let t = host.bind(t);
     for model in ["HAIKU", "InHerit"] {
         let invocation = host.fresh_tool_call_id("case");
-        let result = t
-            .invoke(
+        let result = host
+            .invoke_and_wait(
+                &t,
                 serde_json::json!({
                     "subagent_type": "test-agent",
                     "prompt": "hello",
@@ -248,8 +260,9 @@ async fn test_agent_model_unknown_ignored_on_fork() {
         make_recording_subagent_tool(vec![], Arc::clone(&aliases))
             .with_parent_messages(parent_messages),
     );
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do the thing",
@@ -267,18 +280,19 @@ async fn test_agent_model_unknown_ignored_on_fork() {
 /// 未知档位拒绝（不静默回退父模型），且不调用 llm_factory
 #[tokio::test]
 async fn test_agent_model_unknown_rejected() {
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
     let t = host.bind(t);
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -316,8 +330,9 @@ async fn test_agent_model_ignored_on_fork() {
         make_recording_subagent_tool(vec![], Arc::clone(&aliases))
             .with_parent_messages(parent_messages),
     );
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do the thing",
@@ -337,7 +352,7 @@ async fn test_agent_model_ignored_on_fork() {
 /// 未知档位 "turbo" 同样被宽容忽略，不做校验
 #[tokio::test]
 async fn test_resume_thread_id_ignores_model_field() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
@@ -352,7 +367,7 @@ async fn test_resume_thread_id_ignores_model_field() {
         Some(parent_id.clone()),
     );
     let id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(
+    super::preset_resumable_thread(
         &store,
         &id,
         "test-agent",
@@ -362,7 +377,7 @@ async fn test_resume_thread_id_ignores_model_field() {
     .await;
 
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
-    let mut t = with_agent_face(
+    let mut t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases))
             .with_session_resources(store.facade())
             .with_parent_thread_id(parent_id.clone())
@@ -379,8 +394,9 @@ async fn test_resume_thread_id_ignores_model_field() {
     let tool_call = durable_face.fresh_tool_call_id("resume-model");
     ctx.invocation_id = Some(tool_call.clone().into());
     ctx.tool_call_id = Some(tool_call.into());
-    let result = t
-        .invoke(
+    let result = durable_face
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "resume_thread_id": id.clone(),
                 "model": "turbo",
@@ -406,19 +422,20 @@ async fn test_resume_thread_id_ignores_model_field() {
 /// [回归测试] 首次覆盖不持久化；resume 使用当前定义并忽略本次 model。
 #[tokio::test]
 async fn test_resume_rebuilds_current_definition_after_initial_override() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "opus");
     let aliases = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-resume-model-contract").await;
     let tool = host.bind(
-        with_agent_face(
+        super::with_agent_face(
             make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
             dir.path(),
         )
         .await,
     );
-    let first = tool
-        .invoke(
+    let first = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "subagent_type": "test-agent", "prompt": "首次", "model": "haiku",
             }),
@@ -434,9 +451,10 @@ async fn test_resume_rebuilds_current_definition_after_initial_override() {
         .unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     // 重接资源面，模拟续聊时已刷新到当前磁盘定义的目录。
-    let tool = with_agent_face(tool, dir.path()).await;
-    let resumed = tool
-        .invoke(
+    let tool = super::with_agent_face(tool, dir.path()).await;
+    let resumed = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "resume_thread_id": id, "prompt": "继续", "model": "opus",
             }),
@@ -457,8 +475,8 @@ async fn test_agent_model_override_applies_to_background() {
     use peri_agent::agent::events::ExecutorEvent;
     use tokio::sync::mpsc;
 
-    let dir = tempdir().unwrap();
-    write_test_agent(&dir);
+    let dir = tempfile::tempdir().unwrap();
+    super::write_test_agent(&dir);
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
     let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
@@ -467,7 +485,7 @@ async fn test_agent_model_override_applies_to_background() {
         .with_task_manager(Arc::clone(&registry))
         .with_bg_event_sender(bg_tx);
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier").await;
-    let t = host.bind(with_agent_face(t, dir.path()).await);
+    let t = host.bind(super::with_agent_face(t, dir.path()).await);
 
     let invoke_msg = t
         .invoke(
@@ -515,20 +533,21 @@ async fn test_agent_model_override_applies_to_background() {
 /// 宽容解码不能将字符串布尔值当成分支开关，也不能把非字符串 model 当覆盖值。
 #[tokio::test]
 async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "sonnet");
     let aliases = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier-optional").await;
     let mut tool = host.bind(
-        with_agent_face(
+        super::with_agent_face(
             make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
             dir.path(),
         )
         .await,
     );
     tool.parent_cwd = dir.path().to_str().unwrap().to_string();
-    let result = tool
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "prompt": "  preserve spaces  ",
                 "subagent_type": "test-agent",
@@ -566,19 +585,20 @@ async fn test_agent_invoke_wrong_optional_types_keep_definition_and_parent_cwd()
 /// 不阻断会话其余能力）。
 #[tokio::test]
 async fn test_agent_frontmatter_unknown_tier_is_rejected_on_pointed_launch() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "turbo");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier-invalid").await;
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
     let t = host.bind(t);
 
-    let error = t
-        .invoke(
+    let error = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",
@@ -603,19 +623,20 @@ async fn test_agent_frontmatter_unknown_tier_is_rejected_on_pointed_launch() {
 /// [M2] frontmatter 档位大小写归一后仍可点名启动（`SONNET` → sonnet）。
 #[tokio::test]
 async fn test_agent_frontmatter_tier_case_normalized_on_launch() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_test_agent_with_model(&dir, "SONNET");
     let aliases: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
     let host = HostFixture::open_in(dir.path(), "fixture-model-tier-case").await;
-    let t = with_agent_face(
+    let t = super::with_agent_face(
         make_recording_subagent_tool(vec![], Arc::clone(&aliases)),
         dir.path(),
     )
     .await;
     let t = host.bind(t);
 
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "subagent_type": "test-agent",
                 "prompt": "hello",

@@ -4,13 +4,17 @@
 //! [`declared_current_shape_matches_a_fresh_database`] 断言，DDL 改动而声明未跟上会失败。
 #![cfg(not(target_os = "emscripten"))]
 
-use super::*;
+use super::{
+    ActualColumn, DroppedTable, InputTable, TableShape, CURRENT_COLUMNS_SQL, DROPPED_COLUMNS_SQL,
+    DROPPED_TABLES, INPUT_COLUMNS_SQL, INPUT_TABLES, THREADS_COLUMNS,
+};
+
 use crate::sessions::canonical;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 
 fn current_table(name: &str) -> Option<&'static TableShape> {
-    current_tables()
+    super::current_tables()
         .into_iter()
         .find(|table| table.name == name)
 }
@@ -49,10 +53,10 @@ async fn execute(connection: &mut SqliteConnection, statement: &str) {
 
 async fn fresh_database() -> (tempfile::TempDir, SqliteConnection) {
     let (directory, mut connection) = empty_database().await;
-    for statement in canonical::CREATE_TABLES
+    let schema_statements = canonical::CREATE_TABLES
         .iter()
-        .chain(canonical::CREATE_INDEXES)
-    {
+        .chain(canonical::CREATE_INDEXES);
+    for statement in schema_statements {
         execute(&mut connection, statement).await;
     }
     (directory, connection)
@@ -62,15 +66,15 @@ async fn fresh_database() -> (tempfile::TempDir, SqliteConnection) {
 #[tokio::test]
 async fn declared_current_shape_matches_a_fresh_database() {
     let (_directory, mut connection) = fresh_database().await;
-    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
         .await
         .unwrap();
-    check_current_shape(&tables).unwrap();
+    super::check_current_shape(&tables).unwrap();
     // 声明的表集合就是读回的表集合：多读到的表说明声明漏覆盖。
     for name in tables.keys() {
         assert!(current_table(name).is_some(), "undeclared table {name}");
     }
-    assert_eq!(tables.len(), current_tables().len());
+    assert_eq!(tables.len(), super::current_tables().len());
 }
 
 /// 可选表（凭证、关闭意图）缺表不是漂移，而必需表缺表必须失败——两条容忍线的分界。
@@ -80,15 +84,15 @@ async fn optional_tables_may_be_absent_but_mandatory_tables_may_not() {
     for table in ["mcp_oauth_credentials", "session_close_intents"] {
         execute(&mut connection, &format!("DROP TABLE {table}")).await;
     }
-    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
         .await
         .unwrap();
-    check_current_shape(&tables).unwrap();
+    super::check_current_shape(&tables).unwrap();
     execute(&mut connection, "DROP TABLE machines").await;
-    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
         .await
         .unwrap();
-    let error = check_current_shape(&tables).unwrap_err();
+    let error = super::check_current_shape(&tables).unwrap_err();
     assert!(error.contains("machines"), "{error}");
 }
 
@@ -115,10 +119,10 @@ async fn thread_mq_is_a_mandatory_current_table_with_exactly_the_pending_columns
     assert_eq!(declared.primary_key, &["thread_id", "id"]);
 
     execute(&mut connection, "DROP TABLE thread_mq").await;
-    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
         .await
         .unwrap();
-    let error = check_current_shape(&tables).unwrap_err();
+    let error = super::check_current_shape(&tables).unwrap_err();
     assert!(error.contains("thread_mq"), "{error}");
 }
 
@@ -132,10 +136,10 @@ async fn a_foreign_optional_table_is_still_refused() {
         "CREATE TABLE mcp_oauth_credentials (server_key TEXT PRIMARY KEY, blob TEXT NOT NULL)",
     )
     .await;
-    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
         .await
         .unwrap();
-    let error = check_current_shape(&tables).unwrap_err();
+    let error = super::check_current_shape(&tables).unwrap_err();
     assert!(error.contains("mcp_oauth_credentials"), "{error}");
 }
 
@@ -151,7 +155,7 @@ fn nullable_workspace_id_is_refused_by_the_strict_declaration() {
             ActualColumn::new(*name, not_null, i64::from(table.primary_key.contains(name)))
         })
         .collect();
-    let error = check_strict(table, &actual).unwrap_err();
+    let error = super::check_strict(table, &actual).unwrap_err();
     assert!(error.contains("workspace_id"), "{error}");
 }
 
@@ -160,7 +164,7 @@ fn nullable_workspace_id_is_refused_by_the_strict_declaration() {
 fn missing_table_is_refused() {
     let actual = vec![ActualColumn::new("id", false, 1)];
     let table = current_table("machines").unwrap();
-    assert!(check_strict(table, &actual).is_err());
+    assert!(super::check_strict(table, &actual).is_err());
 }
 
 /// 压缩前形状的列序列缺失即失败：`workspace_id` / `archived` 与两列工作快照都是当前形状
@@ -179,7 +183,7 @@ fn current_only_columns_are_not_expected_in_the_input_shape() {
         })
         .map(|name| ActualColumn::new(name, false, 0))
         .collect();
-    check_input(table, &actual).unwrap();
+    super::check_input(table, &actual).unwrap();
 }
 
 /// 退役缓存列仍在输入上界里（`removal_plan` 负责显式删除，判定不因它们存在而拒绝）。
@@ -196,10 +200,10 @@ fn retired_thread_columns_stay_inside_the_input_upper_bound() {
 async fn published_ten_input_shape_is_accepted() {
     let (_directory, mut connection) = empty_database().await;
     execute(&mut connection, PUBLISHED_TEN_DDL).await;
-    let tables = read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
         .await
         .unwrap();
-    check_input_shape(&tables).unwrap();
+    super::check_input_shape(&tables).unwrap();
 }
 
 /// 混合形状（登记语义的 `workspaces` 里混进了当前形状的 `machine_id`）必须被拒绝：
@@ -215,10 +219,10 @@ async fn mixed_input_shape_is_refused() {
         ),
     )
     .await;
-    let tables = read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
         .await
         .unwrap();
-    let error = check_input_shape(&tables).unwrap_err();
+    let error = super::check_input_shape(&tables).unwrap_err();
     assert!(error.contains("machine_id"), "{error}");
 }
 
@@ -243,16 +247,16 @@ async fn declared_dropped_shapes_match_the_legacy_ddl() {
     .await;
     execute(&mut connection, V14_INHERITED_INDEX_DDL).await;
     // 与生产同一份读法：输入面 + 删除面（退役表不在输入读取面里）。
-    let mut tables = read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
+    let mut tables = super::read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
         .await
         .unwrap();
-    for (table, columns) in read_local_columns(&mut connection, DROPPED_COLUMNS_SQL)
+    let local_columns = super::read_local_columns(&mut connection, DROPPED_COLUMNS_SQL)
         .await
-        .unwrap()
-    {
+        .unwrap();
+    for (table, columns) in local_columns {
         tables.entry(table).or_insert(columns);
     }
-    let plan = dropped_plan(&tables).unwrap();
+    let plan = super::dropped_plan(&tables).unwrap();
     for table in DROPPED_TABLES {
         assert!(plan.contains(&table.drop_sql), "{}", table.shape.name);
     }
@@ -264,10 +268,10 @@ async fn declared_dropped_shapes_match_the_legacy_ddl() {
 #[tokio::test]
 async fn missing_legacy_tables_skip_only_the_optional_drop() {
     let (_directory, mut connection) = empty_database().await;
-    let tables = read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
         .await
         .unwrap();
-    let plan = dropped_plan(&tables).unwrap();
+    let plan = super::dropped_plan(&tables).unwrap();
     assert_eq!(plan, vec!["DROP TABLE IF EXISTS session_environments"]);
 }
 
@@ -281,10 +285,10 @@ async fn foreign_table_with_a_legacy_name_is_refused() {
         principal_id TEXT PRIMARY KEY, credentials_blob TEXT NOT NULL, updated_at TEXT NOT NULL)",
     )
     .await;
-    let tables = read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
+    let tables = super::read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
         .await
         .unwrap();
-    let error = dropped_plan(&tables).unwrap_err();
+    let error = super::dropped_plan(&tables).unwrap_err();
     assert!(error.contains("mcp_oauth_credentials"), "{error}");
     // 判定的是删除动作：库里的别的同名表既不删也不放行。
     assert!(dropped_table("mcp_oauth_credentials").is_some());

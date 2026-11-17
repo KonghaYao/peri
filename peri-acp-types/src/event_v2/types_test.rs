@@ -1,6 +1,10 @@
 //! 事件身份与序列化契约。
 
-use super::*;
+use crate::event_v2::types::Event;
+use crate::event_v2::types::ObserveEvent;
+use crate::event_v2::types::RenderEvent;
+use crate::event_v2::types::StateEvent;
+use crate::event_v2::types::TurnErrorReason;
 
 use crate::identity::AgentId;
 use crate::messages::MessageId;

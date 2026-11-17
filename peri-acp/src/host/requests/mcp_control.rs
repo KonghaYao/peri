@@ -1,14 +1,15 @@
 //! Session-scoped ACP admission and wire projection for MCP runtime control.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use peri_acp_types::mcp_control::{McpControlError, McpControlRequest};
 use serde_json::{json, Value};
 
-use crate::{
-    host::{connection::ConnectionFacts, workspace::SessionEnvironment, SessionState},
-    transport::types::AcpError,
-};
+use crate::host::connection::ConnectionFacts;
+use crate::host::workspace::SessionEnvironment;
+use crate::host::SessionState;
+use crate::transport::types::AcpError;
 
 pub(crate) fn error(code: i64, kind: &str, message: impl Into<String>) -> AcpError {
     AcpError::new(code, message).with_data(json!({"kind": kind}))

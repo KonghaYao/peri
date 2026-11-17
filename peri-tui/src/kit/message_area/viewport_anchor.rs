@@ -67,7 +67,6 @@
 
 use crate::kit::tui_render_unit::{FoldKey, TuiAssistantBubble, TuiRenderUnit};
 
-use super::entry_nav::fold_key_of;
 use super::selection::SlotIndex;
 use crate::kit::history_window::WindowUnitToken;
 use std::hash::{Hash, Hasher};
@@ -89,7 +88,12 @@ impl UnitIdentity {
     /// 该身份是否就是这个单元。`kind` 先比、内容 hash 后算——种类不符时不做文本 hash。
     fn is(&self, vm: &TuiRenderUnit) -> bool {
         match self {
-            Self::Fold(key) => fold_key_of(vm).map(|(key, _)| key).as_ref() == Some(key),
+            Self::Fold(key) => {
+                super::entry_nav::fold_key_of(vm)
+                    .map(|(key, _)| key)
+                    .as_ref()
+                    == Some(key)
+            }
             Self::Content { kind, hash } => {
                 content_kind(vm) == *kind && content_identity_hash(vm) == *hash
             }
@@ -129,18 +133,21 @@ impl ViewportAnchor {
     pub(super) fn relocate(&self, index: &SlotIndex) -> Option<usize> {
         let items = index.canonical_items()?;
         let mut hit: Option<usize> = None;
-        for (slot, vm) in items.iter().enumerate() {
-            if !self.identity.is(vm) {
-                continue;
+        {
+            let iteration_items = items.iter().enumerate();
+            for (slot, vm) in iteration_items {
+                if !self.identity.is(vm) {
+                    continue;
+                }
+                if hit.is_some() {
+                    tracing::trace!(
+                        target: "msg_scroll_diag",
+                        "prepend anchor: identity is ambiguous in the new window → no compensation",
+                    );
+                    return None;
+                }
+                hit = Some(slot);
             }
-            if hit.is_some() {
-                tracing::trace!(
-                    target: "msg_scroll_diag",
-                    "prepend anchor: identity is ambiguous in the new window → no compensation",
-                );
-                return None;
-            }
-            hit = Some(slot);
         }
         let Some(slot) = hit else {
             tracing::trace!(
@@ -170,6 +177,7 @@ impl ViewportAnchor {
         }
     }
 
+    #[must_use]
     pub(super) fn offset_within_unit(&self) -> usize {
         self.offset_within_unit
     }
@@ -197,7 +205,7 @@ impl PrependRelocation {
 }
 
 fn identity_of(vm: &TuiRenderUnit) -> UnitIdentity {
-    match fold_key_of(vm) {
+    match super::entry_nav::fold_key_of(vm) {
         Some((key, _)) => UnitIdentity::Fold(key),
         None => UnitIdentity::Content {
             kind: content_kind(vm),
@@ -234,6 +242,7 @@ fn content_identity_hash(vm: &TuiRenderUnit) -> u64 {
 
 /// 单元种类判别位——内容身份的一部分：不同种类的单元即使内容 hash 相同也不互相认领
 /// （例如所有 `TuiDivider` 的 `content_hash` 都是 0）。
+#[must_use]
 fn content_kind(vm: &TuiRenderUnit) -> u8 {
     match vm {
         TuiRenderUnit::TuiUserBubble(_) => 1,
@@ -252,6 +261,7 @@ fn content_kind(vm: &TuiRenderUnit) -> u8 {
 #[cfg(test)]
 #[path = "viewport_anchor_e2e_test.rs"]
 mod e2e_tests;
+
 #[cfg(test)]
 #[path = "viewport_anchor_test.rs"]
 mod tests;

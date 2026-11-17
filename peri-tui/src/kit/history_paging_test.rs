@@ -5,7 +5,22 @@
 //! 阅读锚点（A20）不在这里测——它要真实视觉索引 `SlotIndex` 与真实发布路径，用例在
 //! `kit::message_area::viewport_anchor`（单元）与 `...::viewport_anchor::e2e_tests`（端到端）。
 
-use super::*;
+use super::HistorySpans;
+use super::HistoryWindow;
+use super::PAGE_LIMIT;
+use super::PageEntry;
+use super::WINDOW_DEFAULT_BYTE_BUDGET;
+use super::WINDOW_PAGE_LIMIT;
+use super::WindowDirection;
+use super::WindowGeneration;
+use super::WindowOpenRequest;
+use super::WindowPageCursor;
+use super::WindowPageRequest;
+use super::WindowRequest;
+use super::WindowRequestAnchor;
+use super::WindowSeekRequest;
+use super::atoms;
+
 use crate::kit::history_page_consumer::HistoryPageRequest;
 use crate::kit::history_window::{
     HistoryEntryView, HistorySource, HistoryWindowConfig, PersistentEntryKey, SegmentDraft,
@@ -19,6 +34,7 @@ fn user_unit(text: &str) -> TuiRenderUnit {
     TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(text.to_string()))
 }
 
+#[must_use]
 fn entry(entry_id: &str, position: u64, text: &str) -> PageEntry {
     PageEntry {
         entry_id: entry_id.to_string(),
@@ -55,7 +71,7 @@ fn test_decode_page_response_keeps_sub_item_kind() {
             },
         ],
     });
-    let decoded = decode_page_response(&raw).expect("page");
+    let decoded = super::decode_page_response(&raw).expect("page");
     assert_eq!(decoded.session_id, "s1");
     assert_eq!(decoded.snapshot_token, "tok");
     assert_eq!(decoded.next_cursor.as_deref(), Some("c2"));
@@ -69,11 +85,11 @@ fn test_decode_page_response_keeps_sub_item_kind() {
 
 #[test]
 fn test_decode_page_response_rejects_unknown_shape() {
-    assert!(decode_page_response(&json!({ "sessionId": "s1" })).is_none());
-    let (token, cursor) = decode_session_cursor(&json!({ "sessionId": "s1" }));
+    assert!(super::decode_page_response(&json!({ "sessionId": "s1" })).is_none());
+    let (token, cursor) = super::decode_session_cursor(&json!({ "sessionId": "s1" }));
     assert_eq!(token, None);
     assert_eq!(cursor, None);
-    let (token, cursor) = decode_session_cursor(&json!({
+    let (token, cursor) = super::decode_session_cursor(&json!({
         "snapshotToken": "tok",
         "nextCursor": null,
     }));
@@ -88,7 +104,7 @@ fn test_merge_page_orders_by_position_and_dedupes() {
     spans.record(100, "s1:own".to_string(), 0, 1);
 
     // 乱序页：20 在 10 之前给出，仍必须按 position 落到 100 之前。
-    let outcome = merge_page(
+    let outcome = super::merge_page(
         &mut window,
         &mut spans,
         &[entry("s1:b", 20, "b"), entry("s1:a", 10, "a")],
@@ -99,7 +115,7 @@ fn test_merge_page_orders_by_position_and_dedupes() {
     assert_eq!(window_texts(&window), vec!["a", "b", "own-100"]);
 
     // 重试同一页：全部判重，窗口不变。
-    let outcome = merge_page(
+    let outcome = super::merge_page(
         &mut window,
         &mut spans,
         &[entry("s1:b", 20, "b"), entry("s1:a", 10, "a")],
@@ -117,12 +133,12 @@ fn test_merge_page_inserts_into_middle_interval() {
     spans.record(10, "s1:a".to_string(), 0, 1);
     spans.record(30, "s1:c".to_string(), 1, 1);
 
-    let outcome = merge_page(&mut window, &mut spans, &[entry("s1:b", 20, "b")]);
+    let outcome = super::merge_page(&mut window, &mut spans, &[entry("s1:b", 20, "b")]);
     assert_eq!(outcome.inserted_entries, 1);
     assert_eq!(outcome.inserted_slot_range, Some((1, 2)));
     assert_eq!(window_texts(&window), vec!["a", "b", "c"]);
     // 后移后的区间槽位仍然正确：再插一条更早的条目落在最前。
-    merge_page(&mut window, &mut spans, &[entry("s1:z", 5, "z")]);
+    super::merge_page(&mut window, &mut spans, &[entry("s1:z", 5, "z")]);
     assert_eq!(window_texts(&window), vec!["z", "a", "b", "c"]);
 }
 
@@ -152,18 +168,18 @@ pub(crate) fn drain_pages_channel() {
 #[serial]
 fn test_request_older_page_if_due_merges_concurrent_triggers() {
     crate::kit::atoms::init_atoms();
-    reset_browsing_state();
+    super::reset_browsing_state();
     drain_pages_channel();
 
     // 未建立浏览身份：不请求。
-    assert!(!request_older_page_if_due(true));
-    note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
+    assert!(!super::request_older_page_if_due(true));
+    super::note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
     // 远离向前边界：不请求。
-    assert!(!request_older_page_if_due(false));
+    assert!(!super::request_older_page_if_due(false));
     // 贴边：派发一次，并把请求认领为在途。
-    assert!(request_older_page_if_due(true));
+    assert!(super::request_older_page_if_due(true));
     // 相同 cursor + limit 的并发触发被合并（不重复派发）。
-    assert!(!request_older_page_if_due(true));
+    assert!(!super::request_older_page_if_due(true));
     let rx = pages_channel();
     let request = rx.lock().try_recv().expect("one dispatched request");
     assert_eq!(request.session_id, "s1");
@@ -177,10 +193,10 @@ fn test_request_older_page_if_due_merges_concurrent_triggers() {
 #[serial]
 fn test_settle_request_drops_response_for_stale_identity() {
     crate::kit::atoms::init_atoms();
-    reset_browsing_state();
-    note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
+    super::reset_browsing_state();
+    super::note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
     drain_pages_channel();
-    assert!(request_older_page_if_due(true));
+    assert!(super::request_older_page_if_due(true));
     let in_flight = atoms::HISTORY_PAGING
         .state()
         .read()
@@ -189,17 +205,17 @@ fn test_settle_request_drops_response_for_stale_identity() {
         .expect("claimed");
 
     // 切会话后旧响应必须被丢弃。
-    reset_browsing_state();
+    super::reset_browsing_state();
     assert_eq!(
-        settle_request(&in_flight, Ok(Some("c2".to_string()))),
+        super::settle_request(&in_flight, Ok(Some("c2".to_string()))),
         None,
         "身份不匹配的响应不得推进游标"
     );
 
     // 同一次浏览内：成功推进游标。
-    note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
+    super::note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
     drain_pages_channel();
-    assert!(request_older_page_if_due(true));
+    assert!(super::request_older_page_if_due(true));
     let in_flight = atoms::HISTORY_PAGING
         .state()
         .read()
@@ -207,7 +223,7 @@ fn test_settle_request_drops_response_for_stale_identity() {
         .clone()
         .expect("claimed");
     assert_eq!(
-        settle_request(&in_flight, Ok(Some("c2".to_string()))),
+        super::settle_request(&in_flight, Ok(Some("c2".to_string()))),
         Some(Some("c2".to_string()))
     );
     assert_eq!(
@@ -218,14 +234,20 @@ fn test_settle_request_drops_response_for_stale_identity() {
     // 失败：保留原游标并记录原因（可重试），不推进。
     // 退避窗口由 `last_request_at` 控制，这里显式清掉——不靠 sleep 让用例变脆。
     atoms::HISTORY_PAGING.state().write().last_request_at = None;
-    assert!(request_older_page_if_due(true), "失败后允许重试同一页");
+    assert!(
+        super::request_older_page_if_due(true),
+        "失败后允许重试同一页"
+    );
     let in_flight = atoms::HISTORY_PAGING
         .state()
         .read()
         .in_flight
         .clone()
         .expect("retry claimed");
-    assert_eq!(settle_request(&in_flight, Err("boom".to_string())), None);
+    assert_eq!(
+        super::settle_request(&in_flight, Err("boom".to_string())),
+        None
+    );
     let state = atoms::HISTORY_PAGING.state().read().clone();
     assert_eq!(state.next_cursor.as_deref(), Some("c2"));
     assert_eq!(state.last_error.as_deref(), Some("boom"));
@@ -236,21 +258,21 @@ fn test_settle_request_drops_response_for_stale_identity() {
 #[serial]
 fn test_invalidate_browsing_stops_paging_for_session() {
     crate::kit::atoms::init_atoms();
-    reset_browsing_state();
-    note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
+    super::reset_browsing_state();
+    super::note_initial_cursor("s1", Some("tok".to_string()), Some("c1".to_string()));
     drain_pages_channel();
 
     // 别的会话的失效通知不影响当前浏览。
-    invalidate_browsing("s2", "range expired");
+    super::invalidate_browsing("s2", "range expired");
     assert!(atoms::HISTORY_PAGING.state().read().next_cursor.is_some());
 
-    invalidate_browsing("s1", "range expired");
+    super::invalidate_browsing("s1", "range expired");
     let state = atoms::HISTORY_PAGING.state().read().clone();
     assert!(state.next_cursor.is_none());
     assert!(state.snapshot_token.is_none());
     assert_eq!(state.last_error.as_deref(), Some("range expired"));
     // 失效后不再派发（需要下一次初始 load 重建浏览身份）。
-    assert!(!request_older_page_if_due(true));
+    assert!(!super::request_older_page_if_due(true));
 }
 
 // ---------------------------------------------------------------------------
@@ -264,15 +286,15 @@ fn test_window_mode_does_not_claim_legacy_page_channel() {
     crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
     crate::kit::history_page_consumer::reset_window_paging_state();
-    reset_browsing_state();
-    note_initial_cursor("s1", Some("token".into()), Some("legacy-cursor".into()));
-    assert!(!request_older_page_if_due(true));
+    super::reset_browsing_state();
+    super::note_initial_cursor("s1", Some("token".into()), Some("legacy-cursor".into()));
+    assert!(!super::request_older_page_if_due(true));
     let legacy = atoms::HISTORY_PAGING.state().read().clone();
     assert!(
         legacy.in_flight.is_none(),
         "window mode must not claim legacy page"
     );
-    reset_browsing_state();
+    super::reset_browsing_state();
     crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
     crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
 }
@@ -357,7 +379,7 @@ fn test_decode_window_page_response_matches_s4_wire() {
         ],
         "rewindInvalidation": { "status": "active", "reopenRequired": false }
     });
-    let decoded = decode_window_page_response(&raw).expect("window response");
+    let decoded = super::decode_window_page_response(&raw).expect("window response");
     assert_eq!(decoded.session_id, "s1");
     assert_eq!(decoded.identity.session_generation, "gen-7");
     assert_eq!(decoded.identity.structure_version, 12);
@@ -424,7 +446,7 @@ fn test_decode_window_page_response_matches_s4_wire() {
         "readTicket": "ticket-1",
         "items": []
     });
-    let decoded = decode_window_page_response(&no_descriptors).expect("empty response");
+    let decoded = super::decode_window_page_response(&no_descriptors).expect("empty response");
     assert!(decoded.body_descriptors.is_empty());
     assert_eq!(decoded.descriptor_only_items, 0);
     assert!(decoded.items.is_empty());
@@ -440,7 +462,7 @@ fn test_decode_window_page_response_matches_s4_wire() {
         ]
     });
     assert!(
-        decode_window_page_response(&invalid).is_none(),
+        super::decode_window_page_response(&invalid).is_none(),
         "own entries without position are malformed and drop the whole page"
     );
 }
@@ -479,7 +501,7 @@ fn test_decode_inherited_snapshot_and_source() {
             }]
         }]
     });
-    let decoded = decode_window_page_response(&raw).expect("inherited response");
+    let decoded = super::decode_window_page_response(&raw).expect("inherited response");
     let inherited = decoded.inherited.as_ref().expect("inherited meta");
     assert_eq!(inherited.snapshot_id, "snap-frozen");
     assert_eq!(
@@ -519,7 +541,7 @@ fn test_window_body_descriptors_use_snake_case_and_reject_duplicates() {
             "readTicket": "ticket-1"
         }
     ]);
-    let decoded = decode_window_page_response(&snake).expect("snake_case descriptors");
+    let decoded = super::decode_window_page_response(&snake).expect("snake_case descriptors");
     assert_eq!(decoded.descriptor_only_items, 1);
     assert_eq!(decoded.items[0].entry_id, "s1:orphan");
 
@@ -539,7 +561,7 @@ fn test_window_body_descriptors_use_snake_case_and_reject_duplicates() {
         }
     ]);
     assert!(
-        decode_window_page_response(&duplicate).is_none(),
+        super::decode_window_page_response(&duplicate).is_none(),
         "duplicate descriptors are ambiguous, not silently deduplicated"
     );
 }
@@ -620,7 +642,7 @@ fn test_window_source_wire_matches_s4_serde() {
             { "entryId": "s1:inherited", "source": inherited_wire, "subItems": [] }
         ]
     });
-    let decoded = decode_window_page_response(&raw).expect("response");
+    let decoded = super::decode_window_page_response(&raw).expect("response");
     assert_eq!(decoded.items[0].source, HistorySource::Own);
     assert_eq!(decoded.items[1].source, HistorySource::inherited("snap-1"));
 
@@ -679,13 +701,13 @@ fn test_window_request_validation_rejects_bad_shapes() {
 
 #[test]
 fn test_viewport_at_backward_boundary_uses_bottom_margin_and_content_fit() {
-    assert!(!viewport_at_backward_boundary(false, 0, 100, 10));
-    assert!(viewport_at_backward_boundary(false, 88, 100, 10));
-    assert!(viewport_at_backward_boundary(false, 90, 100, 10));
-    assert!(viewport_at_backward_boundary(true, 0, 100, 10));
-    assert!(viewport_at_backward_boundary(false, 0, 5, 10));
-    assert!(!viewport_at_backward_boundary(false, 0, 0, 10));
-    assert!(!viewport_at_backward_boundary(false, 0, 100, 0));
+    assert!(!super::viewport_at_backward_boundary(false, 0, 100, 10));
+    assert!(super::viewport_at_backward_boundary(false, 88, 100, 10));
+    assert!(super::viewport_at_backward_boundary(false, 90, 100, 10));
+    assert!(super::viewport_at_backward_boundary(true, 0, 100, 10));
+    assert!(super::viewport_at_backward_boundary(false, 0, 5, 10));
+    assert!(!super::viewport_at_backward_boundary(false, 0, 0, 10));
+    assert!(!super::viewport_at_backward_boundary(false, 0, 100, 0));
 }
 
 #[test]
@@ -700,7 +722,7 @@ fn test_window_generation_rejects_stale_snapshot_or_generation() {
         "afterCursor": null,
         "items": [],
     });
-    let response = decode_window_page_response(&raw).expect("response");
+    let response = super::decode_window_page_response(&raw).expect("response");
     let current = WindowGeneration {
         session_id: "s1".into(),
         session_generation: "gen-7".into(),

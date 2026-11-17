@@ -1,16 +1,13 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
-use rmcp::{
-    model::{ReadResourceResult, Tool},
-    service::RoleClient,
-};
+use rmcp::model::ReadResourceResult;
+use rmcp::model::Tool;
+use rmcp::service::RoleClient;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -321,10 +318,13 @@ fn persistent_cache_origin_is_partitioned_by_workspace_identity() {
         McpClientPool::new_pending(),
         McpClientPool::new_pending(),
     ];
-    for (pool, workspace) in pools.iter().zip([workspace_a, workspace_a, workspace_b]) {
-        pool.bind_workspace_scope(workspace).unwrap();
-        pool.bind_cache_policy(McpCachePolicy::Enabled).unwrap();
-        assert!(pool.persistent_cache_allowed("server"));
+    {
+        let paired_pools = pools.iter().zip([workspace_a, workspace_a, workspace_b]);
+        for (pool, workspace) in paired_pools {
+            pool.bind_workspace_scope(workspace).unwrap();
+            pool.bind_cache_policy(McpCachePolicy::Enabled).unwrap();
+            assert!(pool.persistent_cache_allowed("server"));
+        }
     }
     assert_eq!(
         pools[0].cache_origin("server"),

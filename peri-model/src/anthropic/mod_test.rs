@@ -3,13 +3,23 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use url::Url;
 
-use crate::{
-    prompt_cache::{combine_system_prompt_with_dynamic, SYSTEM_PROMPT_DYNAMIC_BOUNDARY},
-    ContentBlock, ImageSource, JsonObject, MediaType, ModelMessage, ModelRequest,
-    ModelRuntimeConfig, RetryConfig, ToolCall, ToolDefinition, ToolResult,
-};
+use crate::prompt_cache;
+use crate::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use crate::ContentBlock;
+use crate::ImageSource;
+use crate::JsonObject;
+use crate::MediaType;
+use crate::ModelMessage;
+use crate::ModelRequest;
+use crate::ModelRuntimeConfig;
+use crate::RetryConfig;
+use crate::ToolCall;
+use crate::ToolDefinition;
+use crate::ToolResult;
 
-use super::{request::body_for_test, AnthropicConfig, AnthropicModel};
+use super::request as request_functions;
+use super::AnthropicConfig;
+use super::AnthropicModel;
 use crate::Model;
 
 fn config() -> AnthropicConfig {
@@ -33,7 +43,7 @@ fn switching_from_responses_does_not_misuse_anthropic_signatures() {
             JsonObject::from_value(json!({"path":"a"})).unwrap(),
         )],
     )]);
-    let body = body_for_test(&config(), &request);
+    let body = request_functions::body_for_test(&config(), &request);
     // A converted foreign turn must be exactly the same wire as ordinary typed
     // text/calls and must not carry any foreign reasoning state or invent a
     // provider signature.
@@ -44,7 +54,7 @@ fn switching_from_responses_does_not_misuse_anthropic_signatures() {
             ContentBlock::text("visible"),
         ];
     }
-    assert_eq!(body, body_for_test(&config(), &ordinary));
+    assert_eq!(body, request_functions::body_for_test(&config(), &ordinary));
     let encoded = body.to_string();
     assert!(!encoded.contains("foreign-opaque"));
     assert!(!encoded.contains("provider_state"));
@@ -63,7 +73,8 @@ fn old_history_without_thinking_is_not_filled_with_fake_blocks() {
     ])
     .with_max_tokens(2_048);
 
-    let body = body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
+    let body =
+        request_functions::body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
     assert_eq!(
         body["messages"][1]["content"],
         json!([{ "type": "text", "text": "old answer" }])
@@ -96,7 +107,7 @@ fn unsigned_reasoning_is_replayed_as_text() {
         ModelMessage::user_text("next question"),
     ]);
 
-    let body = body_for_test(&config(), &request);
+    let body = request_functions::body_for_test(&config(), &request);
     assert_eq!(
         body["messages"][1]["content"],
         json!([
@@ -132,7 +143,7 @@ fn deepseek_compatible_history_fills_missing_thinking_blocks() {
     ])
     .with_max_tokens(64_000);
 
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &deepseek_config().with_extended_thinking(10_000, "max"),
         &request,
     );
@@ -177,7 +188,7 @@ fn deepseek_compatible_replays_unsigned_reasoning_as_thinking() {
     ])
     .with_max_tokens(64_000);
 
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &deepseek_config().with_extended_thinking(10_000, "max"),
         &request,
     );
@@ -202,7 +213,8 @@ fn deepseek_endpoint_keeps_verbatim_replay_for_claude_alias() {
     ])
     .with_max_tokens(64_000);
 
-    let body = body_for_test(&config.with_extended_thinking(10_000, "max"), &request);
+    let body =
+        request_functions::body_for_test(&config.with_extended_thinking(10_000, "max"), &request);
     // 端点身份优先：alias 模型仍按兼容端点补块并启用 thinking。
     assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
     assert_eq!(
@@ -226,7 +238,7 @@ fn official_anthropic_endpoint_requires_signed_replay_even_with_non_claude_model
     ])
     .with_max_tokens(2_048);
 
-    let body = body_for_test(&config, &request);
+    let body = request_functions::body_for_test(&config, &request);
     assert_eq!(
         body["messages"][1]["content"],
         json!([{ "type": "text", "text": "old answer" }])
@@ -245,7 +257,7 @@ fn unknown_proxy_model_alias_defaults_to_signed_replay() {
     ])
     .with_max_tokens(2_048);
 
-    let body = body_for_test(&config, &request);
+    let body = request_functions::body_for_test(&config, &request);
     assert_eq!(
         body["messages"][1]["content"],
         json!([{ "type": "text", "text": "old answer" }])
@@ -264,7 +276,7 @@ fn deepseek_model_on_compatible_proxy_keeps_verbatim_replay() {
     ])
     .with_max_tokens(2_048);
 
-    let body = body_for_test(&config, &request);
+    let body = request_functions::body_for_test(&config, &request);
     assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
     assert_eq!(
         body["thinking"],
@@ -282,7 +294,7 @@ fn adaptive_thinking_keeps_old_history_without_thinking_blocks() {
         ModelMessage::user_text("new question"),
     ]);
 
-    let body = body_for_test(&config, &request);
+    let body = request_functions::body_for_test(&config, &request);
     assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(body["output_config"], json!({ "effort": "high" }));
     assert_eq!(
@@ -314,7 +326,8 @@ fn manual_thinking_follows_tool_loop_turn_start_across_tool_results() {
     ])
     .with_max_tokens(2_048);
 
-    let body = body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
+    let body =
+        request_functions::body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
     // 一个 tool-use 循环是一个 assistant turn：turn 起点带签名 thinking，
     // 收尾的 text-only assistant 消息不能触发省略。
     assert_eq!(
@@ -349,7 +362,8 @@ fn manual_thinking_ignores_signed_thinking_from_previous_turns() {
     ])
     .with_max_tokens(2_048);
 
-    let body = body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
+    let body =
+        request_functions::body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
     // 上一个 turn 的签名 thinking 不能冒充当前 turn 的起点。
     assert!(body.get("thinking").is_none());
     assert!(body.get("output_config").is_none());
@@ -399,7 +413,7 @@ fn request() -> ModelRequest {
 
 #[test]
 fn request_contract_preserves_system_cache_thinking_and_tool_result_order() {
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &config().with_extended_thinking(1_024, "high"),
         &request().with_max_tokens(2_048),
     );
@@ -435,7 +449,7 @@ fn sonnet_5_5_uses_adaptive_thinking_and_preserves_effort() {
     for effort in ["low", "medium", "high", "xhigh", "max"] {
         let mut config = config().with_extended_thinking(10_000, effort);
         config.model = "claude-sonnet-5-5".into();
-        let body = body_for_test(&config, &ModelRequest::default());
+        let body = request_functions::body_for_test(&config, &ModelRequest::default());
         assert_eq!(body["max_tokens"], 32_000);
         assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
         assert_eq!(body["output_config"], json!({ "effort": effort }));
@@ -449,7 +463,7 @@ fn adaptive_thinking_ignores_manual_budget_and_small_config_output_limits() {
             .with_extended_thinking(0, "high")
             .with_max_tokens(max_tokens);
         config.model = "claude-sonnet-5-5".into();
-        let body = body_for_test(&config, &ModelRequest::default());
+        let body = request_functions::body_for_test(&config, &ModelRequest::default());
         assert_eq!(body["max_tokens"], max_tokens);
         assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
         assert_eq!(body["output_config"], json!({ "effort": "high" }));
@@ -463,7 +477,7 @@ fn adaptive_thinking_preserves_small_request_output_overrides() {
         .with_max_tokens(64_000);
     config.model = "claude-sonnet-5-5".into();
     for max_tokens in [1, 123, 1_024, 1_536, 2_047, 2_048] {
-        let body = body_for_test(
+        let body = request_functions::body_for_test(
             &config,
             &ModelRequest::default().with_max_tokens(max_tokens),
         );
@@ -488,7 +502,7 @@ fn legacy_model_preserves_manual_budget_clamp_and_minimum() {
             .with_extended_thinking(budget, "xhigh")
             .with_max_tokens(max_tokens);
         config.model = "claude-sonnet-4-6".into();
-        let body = body_for_test(&config, &ModelRequest::default());
+        let body = request_functions::body_for_test(&config, &ModelRequest::default());
         assert_eq!(body["max_tokens"], max_tokens);
         if let Some(budget) = expected_budget {
             assert_eq!(
@@ -514,7 +528,7 @@ fn unknown_models_and_aliases_keep_manual_thinking() {
     ] {
         let mut config = config().with_extended_thinking(10_000, "high");
         config.model = model.into();
-        let body = body_for_test(&config, &ModelRequest::default());
+        let body = request_functions::body_for_test(&config, &ModelRequest::default());
         assert_eq!(body["model"], model);
         assert_eq!(
             body["thinking"],
@@ -529,7 +543,7 @@ fn thinking_stays_disabled_without_explicit_enablement() {
     for model in ["claude-sonnet-5-5", "claude-sonnet-4-6", "custom-alias"] {
         let mut config = config();
         config.model = model.into();
-        let body = body_for_test(&config, &ModelRequest::default());
+        let body = request_functions::body_for_test(&config, &ModelRequest::default());
         assert_eq!(body["max_tokens"], 32_000);
         assert!(body.get("thinking").is_none());
         assert!(body.get("output_config").is_none());
@@ -539,7 +553,7 @@ fn thinking_stays_disabled_without_explicit_enablement() {
 /// 请求级 max_tokens 小于最小思考预算时，不能发送非法的 thinking 配置。
 #[test]
 fn request_budget_below_thinking_minimum_disables_thinking() {
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &config().with_extended_thinking(10_000, "max"),
         &request().with_max_tokens(1_024),
     );
@@ -551,7 +565,7 @@ fn request_budget_below_thinking_minimum_disables_thinking() {
 /// thinking 预算要为正文预留空间；请求上限不足时按可用额度收缩。
 #[test]
 fn request_budget_shrinks_thinking_budget_to_reserve_response() {
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &config().with_extended_thinking(10_000, "max"),
         &request().with_max_tokens(2_048),
     );
@@ -564,7 +578,7 @@ fn request_budget_shrinks_thinking_budget_to_reserve_response() {
 /// 最小思考预算加正文预留放不下时，不发送 thinking。
 #[test]
 fn request_budget_below_thinking_plus_reserve_disables_thinking() {
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &config().with_extended_thinking(10_000, "max"),
         &request().with_max_tokens(1_536),
     );
@@ -604,7 +618,7 @@ fn test_cache_breakpoint_advances_to_latest_tool_result_round() {
             "second tool output",
         )),
     ]);
-    let body = body_for_test(&config(), &history);
+    let body = request_functions::body_for_test(&config(), &history);
     let latest_results = body["messages"][2]["content"]
         .as_array()
         .expect("最后一条 user message 必须包含 tool results");
@@ -633,8 +647,8 @@ fn test_cache_breakpoint_advances_to_latest_tool_result_round() {
 fn test_cache_breakpoint_preserves_prefix_when_tool_round_is_appended() {
     let before = tool_history_request(3, false);
     let after = tool_history_request(4, false);
-    let before_body = body_for_test(&config(), &before);
-    let after_body = body_for_test(&config(), &after);
+    let before_body = request_functions::body_for_test(&config(), &before);
+    let after_body = request_functions::body_for_test(&config(), &after);
 
     assert_eq!(
         serde_json::to_vec(&before_body["system"]).expect("system serializes"),
@@ -677,7 +691,7 @@ fn test_cache_breakpoint_preserves_prefix_when_tool_round_is_appended() {
 /// second-last breakpoint；否则第一次请求只能命中更旧的文本历史。
 #[test]
 fn test_cache_breakpoint_keeps_latest_tool_result_before_new_human_prompt() {
-    let body = body_for_test(&config(), &tool_history_request(3, true));
+    let body = request_functions::body_for_test(&config(), &tool_history_request(3, true));
     let messages = body["messages"].as_array().expect("messages array");
     let previous_tool_result = &messages[messages.len() - 2]["content"][0];
     let latest_human = &messages[messages.len() - 1]["content"][0];
@@ -754,7 +768,7 @@ fn cache_breakpoint_count(value: &Value) -> usize {
 
 #[test]
 fn request_contract_without_cache_uses_plain_top_level_system() {
-    let body = body_for_test(&config().without_cache(), &request());
+    let body = request_functions::body_for_test(&config().without_cache(), &request());
     assert!(body["system"].is_string());
     assert!(!body["system"]
         .as_str()
@@ -793,7 +807,7 @@ fn system_cache_boundary_four_state_matrix_and_fallback_are_explicit() {
         ),
     ];
     for (system_text, expected) in cases {
-        let body = body_for_test(
+        let body = request_functions::body_for_test(
             &config(),
             &ModelRequest::new(vec![
                 ModelMessage::system_text(system_text),
@@ -806,7 +820,7 @@ fn system_cache_boundary_four_state_matrix_and_fallback_are_explicit() {
             .contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
     }
 
-    let empty = body_for_test(
+    let empty = request_functions::body_for_test(
         &config(),
         &ModelRequest::new(vec![
             ModelMessage::system_text(""),
@@ -821,7 +835,7 @@ fn repeated_system_cache_boundary_fails_closed_without_wire_leak() {
     let system = format!(
         "STATIC{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}DYNAMIC{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}TAIL"
     );
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &config(),
         &ModelRequest::new(vec![
             ModelMessage::system_text(system),
@@ -841,8 +855,9 @@ fn repeated_system_cache_boundary_fails_closed_without_wire_leak() {
 #[test]
 fn duplicate_boundary_plus_dynamic_contribution_remains_uncached_and_byte_preserving() {
     let base = format!("A{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}B{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}C");
-    let combined = combine_system_prompt_with_dynamic(Some(&base), "REQUEST").unwrap();
-    let body = body_for_test(
+    let combined =
+        prompt_cache::combine_system_prompt_with_dynamic(Some(&base), "REQUEST").unwrap();
+    let body = request_functions::body_for_test(
         &config(),
         &ModelRequest::new(vec![
             ModelMessage::system_text(combined),
@@ -860,7 +875,7 @@ fn duplicate_boundary_plus_dynamic_contribution_remains_uncached_and_byte_preser
 #[test]
 fn system_cache_prefix_is_stable_and_dynamic_order_is_preserved() {
     let body = |dynamic: &str| {
-        body_for_test(
+        request_functions::body_for_test(
             &config(),
             &ModelRequest::new(vec![
                 ModelMessage::system_text(format!(
@@ -905,7 +920,7 @@ fn output_token_limit_matches_the_resolved_wire_budget() {
             .with_extended_thinking(1_024, "high"),
     );
     assert_eq!(model.output_token_limit(), Some(4_096));
-    let body = body_for_test(
+    let body = request_functions::body_for_test(
         &model.config,
         &ModelRequest::new(vec![ModelMessage::user_text("summarize")]),
     );
@@ -943,7 +958,7 @@ fn tool_images_stay_native_inside_tool_result() {
         }),
     ]);
 
-    let body = body_for_test(&config(), &request);
+    let body = request_functions::body_for_test(&config(), &request);
     let blocks = body["messages"][1]["content"]
         .as_array()
         .expect("content array");

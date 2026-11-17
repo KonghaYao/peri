@@ -1,7 +1,5 @@
 use super::scroll::GesturePending;
-use crate::kit::atoms::{
-    FOCUSED_ENTRY, FOLD_OVERRIDES, FocusedEntry, SELECTED_SUBAGENT_ID, ViewModelsSnapshot,
-};
+
 use crate::kit::tui_render_unit::{
     FoldKey, FoldState, InteractionKind, TuiAskUserBlock, TuiRenderUnit,
 };
@@ -254,13 +252,16 @@ pub(crate) fn submit_interaction_option_with(
 /// `json!("")`）。question IDs 来自 durable block，不读取 active interaction。
 pub(crate) fn build_inline_answers(question_ids: &[String], label: &str) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    for (i, id) in question_ids.iter().enumerate() {
-        let val = if i == 0 && !label.is_empty() {
-            serde_json::json!(label)
-        } else {
-            serde_json::json!("")
-        };
-        map.insert(id.clone(), val);
+    {
+        let iteration_items = question_ids.iter().enumerate();
+        for (i, id) in iteration_items {
+            let val = if i == 0 && !label.is_empty() {
+                serde_json::json!(label)
+            } else {
+                serde_json::json!("")
+            };
+            map.insert(id.clone(), val);
+        }
     }
     serde_json::Value::Object(map)
 }
@@ -301,7 +302,7 @@ pub(super) fn apply_fold_toggle(
     };
     // 持久覆盖表：快照重建（push_view_models）后由折叠 pass 恢复，
     // 手动选择跨流式/跨 turn 保持（spec §7）。
-    FOLD_OVERRIDES.state().write().insert(fold_key, next);
+    crate::kit::fold_overrides::insert(fold_key, next);
     // 应用到当帧快照（COW set + 重算 hash）
     let mut updated = snapshot.items[idx].clone();
     apply_fold_override(&mut updated, next);
@@ -313,3 +314,11 @@ pub(super) fn apply_fold_toggle(
     snapshot.generation = snapshot.generation.wrapping_add(1);
     EventResult::Consumed
 }
+
+use crate::kit::atoms::FOCUSED_ENTRY;
+
+use crate::kit::atoms::FocusedEntry;
+
+use crate::kit::atoms::SELECTED_SUBAGENT_ID;
+
+use crate::kit::atoms::ViewModelsSnapshot;

@@ -3,7 +3,15 @@
 //! 从 `history_page_wire_test.rs` 按职责拆出（STD-SIZE-001：单文件 ≤1000 行），语义未改动：
 //! 用例体、断言与 helper 逐字节搬移。夹具与跨文件共享 helper 在父模块里，经 `use super::*` 取用。
 
-use super::*;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
+
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// A21：翻页与正在执行的 turn 并行——分页不取执行生命周期锁，也不回答 -32010。
 #[tokio::test]
@@ -19,7 +27,12 @@ async fn a_page_request_is_answered_while_the_session_holds_the_execution_lock()
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, sessions, task) =
-        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
     let sid = fixture.sid.clone();
     // 执行中的 turn：该会话的 prompt 锁被持有。
     let prompt_lock = Arc::new(tokio::sync::Mutex::new(()));
@@ -76,14 +89,16 @@ async fn pagination_fields_from_an_unnegotiated_connection_are_rejected() {
         .to_owned();
 
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, sessions, task) = spawn_loop(
-        Arc::clone(&cfg),
-        fixture.sessions,
-        Some(PeriCaps::default()),
-    )
-    .await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(PeriCaps::default()),
+        )
+        .await;
     let sid = fixture.sid.clone();
-    let before = session_facts(&sessions, &sid).await;
+    let before =
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await;
     let stored_before = cfg
         .session_resources
         .load_session_history(&sid)
@@ -98,18 +113,20 @@ async fn pagination_fields_from_an_unnegotiated_connection_are_rejected() {
         )
         .await
         .expect_err("未协商能力时携带 cursor 必须拒绝");
-    assert_page_rejection(
+    crate::host::requests::tests::history_page_wire_tests::assert_page_rejection(
         &error,
         -32601,
         "pagination_not_negotiated",
         "未协商分页的连接带 cursor",
     );
     assert!(
-        s9c_drain_notifications(&client).await.is_empty(),
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+            .await
+            .is_empty(),
         "拒绝不得发出任何回放通知（否则客户端会把拒绝当成一次 load）"
     );
     assert_eq!(
-        session_facts(&sessions, &sid).await,
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await,
         before,
         "拒绝不得触发一次初始 load：热态四元事实不变"
     );
@@ -159,8 +176,14 @@ async fn a_rejected_page_request_never_runs_an_initial_load() {
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, sessions, task) =
-        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
-    let before = session_facts(&sessions, &sid).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
+    let before =
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await;
     let stored_before = cfg
         .session_resources
         .load_session_history(&sid)
@@ -226,13 +249,18 @@ async fn a_rejected_page_request_never_runs_an_initial_load() {
             .await
             .err()
             .unwrap_or_else(|| panic!("{label}：必须被拒绝，实际返回了成功响应"));
-        assert_page_rejection(&error, code, reason, label);
+        crate::host::requests::tests::history_page_wire_tests::assert_page_rejection(
+            &error, code, reason, label,
+        );
         assert!(
-            s9c_drain_notifications(&client).await.is_empty(),
+            crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+                .await
+                .is_empty(),
             "{label}：拒绝不得发出任何回放通知（否则客户端会把拒绝当成一次 load）"
         );
         assert_eq!(
-            session_facts(&sessions, &sid).await,
+            crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid)
+                .await,
             before,
             "{label}：拒绝不得触发一次初始 load，也不得改动热态"
         );
@@ -285,8 +313,14 @@ async fn a_page_request_without_a_session_id_is_rejected_without_an_initial_load
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, sessions, task) =
-        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
-    let before = session_facts(&sessions, &sid).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
+    let before =
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await;
     let stored_before = cfg
         .session_resources
         .load_session_history(&sid)
@@ -305,11 +339,13 @@ async fn a_page_request_without_a_session_id_is_rejected_without_an_initial_load
         "缺 sessionId 的拒绝不带 data（没有 data.reason 可分类）：{error}"
     );
     assert!(
-        s9c_drain_notifications(&client).await.is_empty(),
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+            .await
+            .is_empty(),
         "拒绝不得发出任何回放通知（否则客户端会把拒绝当成一次 load）"
     );
     assert_eq!(
-        session_facts(&sessions, &sid).await,
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await,
         before,
         "拒绝不得触发一次初始 load：热态四元事实不变"
     );
@@ -360,7 +396,12 @@ async fn a_page_request_for_a_session_outside_the_live_set_is_rejected_without_c
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, sessions, task) =
-        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
 
     // 先决条件：会话还在热态集合里时该游标确实能出页（拒绝不能来自「游标本就无效」）。
     let page = client
@@ -382,7 +423,7 @@ async fn a_page_request_for_a_session_outside_the_live_set_is_rejected_without_c
         "夹具必须先有这条热态会话"
     );
     let hot_before = sessions.lock().await.len();
-    s9c_drain_notifications(&client).await;
+    crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client).await;
     let stored_before = cfg
         .session_resources
         .load_session_history(&sid)
@@ -404,7 +445,9 @@ async fn a_page_request_for_a_session_outside_the_live_set_is_rejected_without_c
         "会话不在热态集合的拒绝不带 data（没有 data.reason 可分类）：{error}"
     );
     assert!(
-        s9c_drain_notifications(&client).await.is_empty(),
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+            .await
+            .is_empty(),
         "拒绝不得发出任何回放通知（否则客户端会把拒绝当成一次 load）"
     );
     let states = sessions.lock().await;
@@ -450,7 +493,12 @@ async fn a_page_request_for_a_closing_session_is_rejected_without_a_replay() {
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, sessions, task) =
-        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
 
     // 先决条件：关闭之前该游标确实能出页（拒绝不能来自「游标本就无效」）。
     let page = client
@@ -474,8 +522,9 @@ async fn a_page_request_for_a_closing_session_is_rejected_without_a_replay() {
             .expect("夹具会话必须仍在热态集合里")
             .closing = true;
     }
-    s9c_drain_notifications(&client).await;
-    let before = session_facts(&sessions, &sid).await;
+    crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client).await;
+    let before =
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await;
     let stored_before = cfg
         .session_resources
         .load_session_history(&sid)
@@ -497,11 +546,13 @@ async fn a_page_request_for_a_closing_session_is_rejected_without_a_replay() {
         "关闭中的会话拒绝不带 data（没有 data.reason 可分类）：{error}"
     );
     assert!(
-        s9c_drain_notifications(&client).await.is_empty(),
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+            .await
+            .is_empty(),
         "拒绝不得发出任何回放通知（否则客户端会把拒绝当成一次 load）"
     );
     assert_eq!(
-        session_facts(&sessions, &sid).await,
+        crate::host::requests::tests::history_page_wire_tests::session_facts(&sessions, &sid).await,
         before,
         "拒绝不得触发一次初始 load：热态四元事实不变"
     );
@@ -532,7 +583,12 @@ async fn a_paginated_initial_load_for_a_handed_off_session_is_rejected_without_r
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, sessions, task) =
-        spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions,
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
     {
         let mut states = sessions.lock().await;
         let state = states.get_mut(&sid).expect("夹具会话必须仍在热态集合里");
@@ -555,7 +611,9 @@ async fn a_paginated_initial_load_for_a_handed_off_session_is_rejected_without_r
         "HandedOff 的拒绝不带 data（没有 data.reason 可分类）：{error}"
     );
     assert!(
-        s9c_drain_notifications(&client).await.is_empty(),
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+            .await
+            .is_empty(),
         "拒绝不得发出任何历史回放通知（空历史回放正是 A09 缺陷）"
     );
     let states = sessions.lock().await;

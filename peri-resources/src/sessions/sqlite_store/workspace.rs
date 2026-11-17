@@ -1,15 +1,25 @@
 //! Registry and session binding transactions; SQL-scoped lightweight history pages.
 
-use super::{
-    database::SqliteSessionDatabase,
-    discovery::{self, Discovery, Observation},
-};
-use crate::sessions::failure::not_found;
+use super::database::SqliteSessionDatabase;
+use super::discovery;
+use super::discovery::Discovery;
+use super::discovery::Observation;
+
 use anyhow::{Context, Result};
-use peri_acp_types::{
-    thread::{ThreadId, ThreadListEntry, ThreadMeta},
-    workspace::*,
-};
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadListEntry;
+use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::workspace::ProjectId;
+use peri_acp_types::workspace::ResolvedWorkspace;
+use peri_acp_types::workspace::ScopedThreadEntry;
+use peri_acp_types::workspace::ScopedThreadPage;
+use peri_acp_types::workspace::ScopedThreadQuery;
+use peri_acp_types::workspace::SessionBinding;
+use peri_acp_types::workspace::ThreadListCursor;
+use peri_acp_types::workspace::ThreadScope;
+use peri_acp_types::workspace::WorkspaceError;
+use peri_acp_types::workspace::WorkspaceId;
+use peri_acp_types::workspace::SESSION_BINDING_VERSION;
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 use std::path::{Component, Path, PathBuf};
 
@@ -296,7 +306,7 @@ impl SqliteSessionDatabase {
                 .fetch_optional(&mut *tx)
                 .await?;
         let Some((parent, owner)) = row else {
-            return Err(not_found().into());
+            return Err(crate::sessions::failure::not_found().into());
         };
         if parent.is_some() {
             // 子会话继承父会话的归属，不按自身保存的 cwd 另建归属。
@@ -388,7 +398,8 @@ impl SqliteSessionDatabase {
                 .await?;
         let (machine, path) = row.ok_or(WorkspaceError::InvalidBinding)?;
         if Path::new(&path) != workspace.root
-            || binding_cwd(&workspace.root, &workspace.relative_cwd) != workspace.cwd
+            || peri_acp_types::workspace::binding_cwd(&workspace.root, &workspace.relative_cwd)
+                != workspace.cwd
         {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
         }
@@ -609,7 +620,7 @@ impl SqliteSessionDatabase {
         let workspace = ResolvedWorkspace {
             project_id: binding.project_id,
             workspace_id: binding.workspace_id,
-            cwd: binding_cwd(&root, &binding.cwd_relative_to_workspace),
+            cwd: peri_acp_types::workspace::binding_cwd(&root, &binding.cwd_relative_to_workspace),
             root,
             relative_cwd: binding.cwd_relative_to_workspace.clone(),
             discovery_snapshot: discovery,
@@ -717,7 +728,10 @@ impl SqliteSessionDatabase {
                     row.try_get(7)?,
                 ))?;
                 let root = PathBuf::from(row.try_get::<String, _>(8)?);
-                let cwd = binding_cwd(&root, &binding.cwd_relative_to_workspace);
+                let cwd = peri_acp_types::workspace::binding_cwd(
+                    &root,
+                    &binding.cwd_relative_to_workspace,
+                );
                 (Some(binding), Some(root), cwd)
             } else {
                 (None, None, PathBuf::from(row.try_get::<String, _>(9)?))

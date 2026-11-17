@@ -6,9 +6,9 @@
 
 use langfuse_client::{IngestionEvent, InputSource, TelemetryEvent};
 
-use super::super::drop_telemetry::{LangfuseDropReason, LangfuseEventKind};
+use crate::langfuse::drop_telemetry::{LangfuseDropReason, LangfuseEventKind};
 
-use super::super::session_like::LangfuseSessionLike;
+use crate::langfuse::session_like::LangfuseSessionLike;
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 

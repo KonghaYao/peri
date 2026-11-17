@@ -1,32 +1,33 @@
 //! 真实 HTTP/SSE → provider → bridge → Agent 循环的流中断恢复契约。
 
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
-use peri_agent::{
-    agent::{
-        events_v2::{EventBus, RenderEvent},
-        model_bridge::AgentModelBridge,
-        react::AgentOutput,
-        stages::{run_react_loop, LoopResult, StageContext},
-    },
-    error::{AgentError, AgentResult},
-    messages::BaseMessage,
-    middleware::{capabilities::AfterAgentState, Middleware, MiddlewareChain},
-    session::{FrozenContext, MessageSource, QueuedMessage, Session},
-};
+use peri_agent::agent::events_v2::EventBus;
+use peri_agent::agent::events_v2::RenderEvent;
+use peri_agent::agent::model_bridge::AgentModelBridge;
+use peri_agent::agent::react::AgentOutput;
+
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::error::AgentError;
+use peri_agent::error::AgentResult;
+use peri_agent::messages::BaseMessage;
+use peri_agent::middleware::capabilities::AfterAgentState;
+use peri_agent::middleware::Middleware;
+use peri_agent::middleware::MiddlewareChain;
+use peri_agent::session::FrozenContext;
+use peri_agent::session::MessageSource;
+use peri_agent::session::QueuedMessage;
+use peri_agent::session::Session;
 use peri_model::{OpenAiConfig, OpenAiModel};
 use serde_json::Value;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    time::timeout,
-};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 
 const PARTIAL: &str =
     "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
@@ -54,13 +55,17 @@ async fn read_request(socket: &mut TcpStream) -> Value {
     let mut bytes = Vec::new();
     loop {
         let mut chunk = [0_u8; 4096];
-        let read = socket.read(&mut chunk).await.unwrap();
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .expect("the local HTTP fixture connection must yield its request bytes");
         assert_ne!(read, 0, "请求体必须完整送达");
         bytes.extend_from_slice(&chunk[..read]);
         let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
             continue;
         };
-        let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        let headers = std::str::from_utf8(&bytes[..header_end])
+            .expect("the fixture text must be valid UTF-8");
         let length: usize = headers
             .lines()
             .filter_map(|line| line.split_once(':'))
@@ -69,10 +74,11 @@ async fn read_request(socket: &mut TcpStream) -> Value {
             .1
             .trim()
             .parse()
-            .unwrap();
+            .expect("the parse fixture result is required for this assertion");
         let start = header_end + 4;
         if bytes.len() >= start + length {
-            return serde_json::from_slice(&bytes[start..start + length]).unwrap();
+            return serde_json::from_slice(&bytes[start..start + length])
+                .expect("from_slice must accept this test fixture representation");
         }
     }
 }
@@ -94,8 +100,15 @@ async fn run_script_with_observer(
     observer: Option<Arc<dyn peri_model::RetryObserver>>,
     truncated_transport: bool,
 ) -> Evidence {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the bind fixture result is required for this assertion");
+    let endpoint = format!(
+        "http://{}/v1/",
+        listener
+            .local_addr()
+            .expect("the local addr fixture result is required for this assertion")
+    );
     let mut runtime = peri_model::ModelRuntimeConfig::default().with_retry(
         peri_model::RetryConfig::default()
             .with_max_attempts(2)
@@ -106,12 +119,23 @@ async fn run_script_with_observer(
         runtime = runtime.with_retry_observer(observer);
     }
     let model = OpenAiModel::new(
-        OpenAiConfig::new(endpoint.parse().unwrap(), "fixture-key", "fixture-model")
-            .with_runtime(runtime),
+        OpenAiConfig::new(
+            endpoint
+                .parse()
+                .expect("the parse fixture result is required for this assertion"),
+            "fixture-key",
+            "fixture-model",
+        )
+        .with_runtime(runtime),
     );
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("the temporary test directory must be available");
     let session = Session::new(
-        Arc::from(directory.path().to_str().unwrap()),
+        Arc::from(
+            directory
+                .path()
+                .to_str()
+                .expect("the fixture text must be valid UTF-8"),
+        ),
         FrozenContext::builder().build(),
         None,
     );
@@ -135,7 +159,10 @@ async fn run_script_with_observer(
     let serve = async move {
         let mut requests = Vec::new();
         for body in responses {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("the accept fixture result is required for this assertion");
             requests.push(read_request(&mut socket).await);
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -144,14 +171,20 @@ async fn run_script_with_observer(
             socket
                 .write_all(&[header.as_bytes(), &body].concat())
                 .await
-                .unwrap();
-            socket.shutdown().await.unwrap();
+                .expect("the write all fixture result is required for this assertion");
+            socket
+                .shutdown()
+                .await
+                .expect("the shutdown fixture result is required for this assertion");
         }
         requests
     };
     // 同一作用域驱动客户端和服务端，超时会同时释放两端，不留下后台任务。
-    let (result, requests) = timeout(Duration::from_secs(5), async {
-        tokio::join!(run_react_loop(ctx.clone(), 4), serve)
+    let (result, requests) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            peri_agent::agent::stages::run_react_loop(ctx.clone(), 4),
+            serve
+        )
     })
     .await
     .expect("必须在有界时间内完成续跑及 HTTP fixture");
@@ -190,7 +223,9 @@ async fn test_stream_interruption_resumes_over_http() {
             evidence.result
         );
         assert_eq!(evidence.requests.len(), 2, "续跑必须发起第二次请求");
-        let messages = evidence.requests[1]["messages"].as_array().unwrap();
+        let messages = evidence.requests[1]["messages"]
+            .as_array()
+            .expect("the as array fixture result is required for this assertion");
         assert!(
             messages.iter().any(|message| {
                 message["role"] == "assistant" && message["content"] == "partial"
@@ -251,7 +286,9 @@ async fn test_stream_interruption_blank_finish_reason_resumes_over_http() {
         evidence.result
     );
     assert_eq!(evidence.requests.len(), 2, "空白结束原因必须触发续跑");
-    let messages = evidence.requests[1]["messages"].as_array().unwrap();
+    let messages = evidence.requests[1]["messages"]
+        .as_array()
+        .expect("the as array fixture result is required for this assertion");
     assert!(
         messages
             .iter()

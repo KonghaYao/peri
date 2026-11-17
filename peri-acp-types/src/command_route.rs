@@ -70,6 +70,7 @@ impl CommandSource {
     /// 名视作与 plugin 命名空间等同的领域，命令全名 = `{server}:{skill}`，
     /// server 名即词法首段域（注册表 provenance 域校验据此把关，设计 §58
     /// namespace 首段不可伪造）。
+    #[must_use]
     pub fn domain(&self) -> &str {
         match self {
             CommandSource::Core => "core",
@@ -169,7 +170,7 @@ impl RouteEntry {
     }
 }
 
-/// TUI 上送注册的 ui 域命令明细（设计 §88：`ui_commands: bool →
+/// TUI 上送注册的 ui 域命令明细（设计 §88：`ui_commands: bool` →
 /// `Vec<UiCommandSpec>` 的明细载体；wire：`peri.uiCommands` 数组元素）。
 ///
 /// 已由 [`crate::peri_caps::PeriCaps`] 承载（门控反转：TUI 声明明细 → ACP

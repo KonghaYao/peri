@@ -275,7 +275,7 @@ peri 侧现状：资源读取已由 `McpResourceTool`（`mcp_read_resource`，`p
 配套关系的几条细则：
 
 - **可发现性**：写工具的 `description` 显式声明其对应的资源 URI。读 URI ↔ 写工具的对应关系是**约定而非机制**——server 负责文档化，client 按约定引导 agent。
-- **命名区分（peri 内部）**：`peri-resources`（内部数据访问层，**可读写**：config / sessions / workflow）≠ MCP resources（协议，**只读**）。两者是「内部访问通道」与「对外只读视图」的关系，同名不同义；文档与代码注释须明确所指。
+- **命名区分（peri 内部）**：`peri-resources`（内部数据访问层，**可读写**：config / sessions）≠ MCP resources（协议，**只读**）。两者是「内部访问通道」与「对外只读视图」的关系，同名不同义；文档与代码注释须明确所指。
 - **边界映射**：peri 内部数据若对外暴露，映射为「只读资源 + 写工具」两半；内部写路径需预留事件出口，才能在订阅存在时触发 updated 通知。
 - **不引入自定义写方法**：`resources/write` 一类扩展方法破坏互操作（其他 client 不认），不进入对外契约；仅可在内部实现中预留。
 
@@ -399,6 +399,17 @@ flowchart LR
 | `notifications/elicitation/complete` | — | 有 | **移除**（elicitation 引导式提问，由 MRTR 取代） | 请求 / 响应之外的带外交互完成 |
 
 > 表中 SEP = Spec Extension Proposal（规范扩展提案）编号；WG = Working Group（工作组）。
+
+**宿主展示策略（Peri）**：自定义通知（未知 method）经 `ClientHandler` 汇入部署级缓冲，
+在 `before_model` 与连接状态变化同点位投递为 `Diagnostic` / `custom_notification` 的
+canonical `Info` 提醒，受众仅 `Tui` / `Diagnostics`（不进模型上下文、不唤醒）；同类按
+`(server, method)` 合并，单条 payload 截断 2 KiB，缓冲上限 32 条。ACP 会话级连接的通知
+不进入部署级提醒缓冲，仅记 `tracing::debug!`（生产路径 `serve_client_auto` 不装配 tap）；
+`acp_owners` 作为防御层跳过。
+`subscriptions/listen` 流不承载自定义 / 日志通知（rmcp `SubscriptionSink` 拒绝）。
+`notifications/message` 仅在请求 `_meta` 携带 `io.modelcontextprotocol/logLevel` 时处理，
+否则 debug 后忽略；Peri 不主动声明该键，且当前门控按 server 粘性保存（不随请求结束
+清除、重连不清理），因此生产路径实际恒被忽略。
 
 ### 5.5 实现要点与协议版本注意
 

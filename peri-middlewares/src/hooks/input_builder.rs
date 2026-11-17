@@ -7,7 +7,7 @@
 //! PostToolBatch / Stop / StopFailure / SessionEnd / Notification 等
 //! "无专用构造函数"的场景。
 //!
-//! [TRAP] 所有字面量构造必须通过这里，禁止在新代码里再次复制
+//! `[TRAP]` 所有字面量构造必须通过这里，禁止在新代码里再次复制
 //! `session_id: ..., transcript_path: ..., cwd: ..., permission_mode: Some(...)`
 //! 模板——历史 bug 多源于此（漏字段 / 字段错位）。
 
@@ -16,6 +16,7 @@ use peri_agent::agent::react::AgentOutput;
 use crate::hooks::types::{HookEvent, HookInput};
 
 /// 构造 PostToolBatch 的 `HookInput`，从 state 视角聚合 prompt + message_count。
+#[must_use]
 pub fn post_tool_batch(
     session_id: &str,
     transcript_path: &str,
@@ -85,6 +86,7 @@ pub fn stop(
 }
 
 /// 构造 StopFailure hook 的 `HookInput`，`tool_output` 携带 `{:?}` 错误描述。
+#[must_use]
 pub fn stop_failure(
     session_id: &str,
     transcript_path: &str,
@@ -116,6 +118,7 @@ pub fn stop_failure(
 }
 
 /// 构造 standalone 路径 SessionEnd 的 `HookInput`。
+#[must_use]
 pub fn session_end_standalone(
     session_id: &str,
     transcript_path: &str,
@@ -146,6 +149,7 @@ pub fn session_end_standalone(
 }
 
 /// 构造 standalone 路径 Notification 的 `HookInput`。
+#[must_use]
 pub fn notification_standalone(
     session_id: &str,
     transcript_path: &str,
@@ -177,6 +181,7 @@ pub fn notification_standalone(
 // === P1-5 新增 standalone 构造函数 ===
 
 /// 构造 standalone 路径 Setup 的 `HookInput`，session 初始化时触发。
+#[must_use]
 pub fn setup_standalone(
     session_id: &str,
     transcript_path: &str,
@@ -207,6 +212,7 @@ pub fn setup_standalone(
 
 /// 构造 standalone 路径 InstructionsLoaded 的 `HookInput`，
 /// 每次 user prompt 时规则/skill 已加载。
+#[must_use]
 pub fn instructions_loaded_standalone(
     session_id: &str,
     transcript_path: &str,
@@ -236,6 +242,7 @@ pub fn instructions_loaded_standalone(
 }
 
 /// 构造 standalone 路径 ConfigChange 的 `HookInput`。
+#[must_use]
 pub fn config_change_standalone(
     session_id: &str,
     transcript_path: &str,
@@ -266,6 +273,7 @@ pub fn config_change_standalone(
 }
 
 /// 构造 standalone 路径 WorktreeCreate 的 `HookInput`。
+#[must_use]
 pub fn worktree_create_standalone(
     session_id: &str,
     transcript_path: &str,
@@ -296,6 +304,7 @@ pub fn worktree_create_standalone(
 }
 
 /// 构造 standalone 路径 WorktreeRemove 的 `HookInput`。
+#[must_use]
 pub fn worktree_remove_standalone(
     session_id: &str,
     transcript_path: &str,
@@ -327,6 +336,7 @@ pub fn worktree_remove_standalone(
 
 /// 构造 standalone 路径 CwdChanged 的 `HookInput`。
 /// old_cwd 记录变更前的工作目录。
+#[must_use]
 pub fn cwd_changed_standalone(
     session_id: &str,
     transcript_path: &str,

@@ -6,7 +6,20 @@
 //! （`spawn_builtin_transport_with_handler`）与**生产** client 握手段，验证
 //! `workspace://git/ref` 的对外契约与回传闭环。
 
-use super::*;
+use super::Arc;
+use super::Duration;
+use super::McpCapabilityProfile;
+use super::McpServiceWrapper;
+use super::Peer;
+use super::RoleClient;
+use super::SpikeSubscriptionServer;
+use super::SubscriptionFilter;
+use super::SubscriptionProbe;
+use super::CLOSE_TIMEOUT;
+use super::HANDSHAKE_TIMEOUT;
+use super::OBSERVE_TIMEOUT;
+use super::SPIKE_URI;
+use super::UNSAMPLED_RESOURCE_TEXT;
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::session::{
     MessageKind, MessageQueue, MessageSource, QueuedPayload, SessionInbox,
@@ -19,12 +32,13 @@ use rmcp::model::{
     CallToolRequestParams, ErrorCode, GetMeta, ReadResourceRequestParams, ServerNotification,
 };
 use rmcp::service::ServiceError;
-use std::{path::Path, process::Command as StdCommand};
+use std::path::Path;
+use std::process::Command as StdCommand;
 
 use crate::mcp::builtin::context::BuiltinInstanceContext;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
-};
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinInstanceSupervisor;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
 use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool};
 
 // ─── T4–T6：workspace 真实 handler 的线路证据 ────────────────────────────────
@@ -67,15 +81,16 @@ impl WorkspaceLink {
 
 /// 连接一个 workspace 实例（节流窗口归零：线路用例需要在一次会话内观察两次采样）。
 async fn connect_workspace(cwd: &str) -> WorkspaceLink {
-    let transport = spawn_builtin_transport_with_handler(
+    let transport = runtime::spawn_builtin_transport_with_handler(
         "workspace",
         WorkspaceMcpServer::new(cwd, None).with_git_throttle(Duration::ZERO),
     );
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("builtin 握手不得超时（同进程链路）")
-        .expect("builtin 握手不得失败");
+    let service =
+        super::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
     WorkspaceLink {
         service,
         supervisor,
@@ -170,7 +185,7 @@ async fn wait_for_body(
     label: &str,
     pred: impl Fn(&str) -> bool,
 ) {
-    let observed = timeout(OBSERVE_TIMEOUT, async {
+    let observed = tokio::time::timeout(OBSERVE_TIMEOUT, async {
         loop {
             if pred(&read_body(peer, uri).await) {
                 return;
@@ -285,7 +300,7 @@ async fn t5_commit_after_tool_call_pushes_update_and_read_returns_notice() {
     )
     .await;
 
-    let notification = timeout(OBSERVE_TIMEOUT, subscription.next())
+    let notification = tokio::time::timeout(OBSERVE_TIMEOUT, subscription.next())
         .await
         .expect("git ref 变化必须在期限内推送")
         .expect("订阅流不得出错")
@@ -389,7 +404,7 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
     )
     .await;
 
-    let drained = timeout(OBSERVE_TIMEOUT, async {
+    let drained = tokio::time::timeout(OBSERVE_TIMEOUT, async {
         loop {
             let messages = queue.drain_all_sync();
             if !messages.is_empty() {
@@ -436,7 +451,7 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
 
     // 关闭面隔离：关闭集命中的实例不建立订阅（`subscription_allowed` 的唯一判定）。
     let closed = crate::assembly::builtin_closed_instances(&std::collections::HashSet::from([
-        "WorkspaceMiddleware".to_string(),
+        "workspace".to_string(),
     ]));
     assert_eq!(
         closed,
@@ -517,17 +532,18 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
     pool.register_inbox("session-1", inbox.handle());
 
     let probe = Arc::new(SubscriptionProbe::default());
-    let transport = spawn_builtin_transport_with_handler(
+    let transport = runtime::spawn_builtin_transport_with_handler(
         "workspace",
         SpikeSubscriptionServer {
             probe: Arc::clone(&probe),
         },
     );
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("builtin 握手不得超时")
-        .expect("builtin 握手不得失败");
+    let service =
+        super::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时")
+            .expect("builtin 握手不得失败");
     let peer = service.peer().clone();
     pool.clients.write().insert(
         "workspace".to_string(),
@@ -552,13 +568,13 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
     pool.spawn_subscription_loop("workspace", subscription)
         .await;
 
-    wait_until("探针进入 listen 回调", || probe.listen_entered()).await;
+    super::wait_until("探针进入 listen 回调", || probe.listen_entered()).await;
     let sink = probe.sink().expect("listen 回调必须登记 sink");
     sink.notify_resource_updated(SPIKE_URI)
         .await
         .expect("filter 内推送必须被接受");
 
-    let drained = timeout(OBSERVE_TIMEOUT, async {
+    let drained = tokio::time::timeout(OBSERVE_TIMEOUT, async {
         loop {
             let messages = queue.drain_all_sync();
             if !messages.is_empty() {
@@ -583,6 +599,31 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
     };
     assert_eq!(reminder.kind, "subscription_resource_updated");
     assert_eq!(reminder.source.0, "mcp");
+    assert_eq!(
+        reminder.category,
+        ReminderCategory::ExternalEvent,
+        "通用订阅提醒类别不得漂移"
+    );
+    assert_eq!(reminder.severity, ReminderSeverity::Info);
+    assert_eq!(reminder.delivery, ReminderDelivery::Required);
+    assert!(reminder.audiences.contains(ReminderAudience::Model));
+    assert!(reminder.audiences.contains(ReminderAudience::Tui));
+    assert!(reminder.audiences.contains(ReminderAudience::Automation));
+    assert_eq!(
+        reminder.summary.as_deref(),
+        Some("MCP 订阅资源已更新"),
+        "summary 逐字不回归"
+    );
+    assert_eq!(reminder.metadata["server"], "workspace");
+    assert_eq!(reminder.metadata["uri"], SPIKE_URI);
+    assert!(
+        reminder.metadata["subscription_id"].is_string(),
+        "subscription_id 必须随通知透传: {:?}",
+        reminder.metadata
+    );
+    assert!(reminder.body.contains("server=workspace"));
+    assert!(reminder.body.contains(SPIKE_URI));
+    assert!(reminder.body.contains("subscription_id="));
     assert!(
         message.kind.wakes_up(),
         "通用订阅提醒必须可唤醒会话（与 git_watch 的 Info 区分）"

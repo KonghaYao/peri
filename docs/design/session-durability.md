@@ -11,7 +11,7 @@
 1. Peri 启动、会话列表、历史分页和只读查询不启动恢复执行。只有进入某个会话，才判断其根 thread 范围内的恢复需求。
 2. 以已有 `thread_id`、`parent_thread_id` 和持久工作意图选择恢复对象。根 thread 只确定范围，不是所有结果的统一收件人。
 3. 主会话及其范围内需要继续工作的 async Agent 使用原 thread 恢复历史、MQ 和配置，再注入恢复提醒并继续执行。
-4. sync Agent 不自动续跑；按中断语义结束遗留执行，保留显式 resume 能力。已经实际转为后台继续执行的委派按 async 处理；仅停驻资源等待显式 resume 的 child 不自动复活。
+4. sync Agent 不自动续跑；按中断语义结束遗留执行，保留显式 resume 能力。已经实际转为后台继续执行的委派按 async 处理；仅停驻资源等待显式 resume 的 child 不自动复活。v5 起 `Agent` 工具只产生 async 委派（同步执行实现保留但不可唤醒），恢复对象因此以 async child 为主；历史遗留的 sync 委派仍按本条处理。
 5. TaskManager、运行锁、取消令牌、订阅和当前执行身份在本进程重新建立。稳定恢复身份是 thread，不要求复原旧内存 `task_id`、request ID 或回调闭包。
 6. 读取已提交事实后开始新的运行，不重放旧工具调用、发送命令或停机期间的外围事件。
 7. MQ 只保存待发送消息；历史消息仍归 `messages`。不新增异步任务绑定表或逐条结果处理标记。
@@ -176,7 +176,7 @@ pub trait SessionRecovery: Send + Sync {
 
 进入完成后，Host 把报告投影为 `RecoveryView`（`peri_acp_types::recovery`）并附加到 `session/load|resume` 响应的 `_meta.peri.recovery`；仅在本次实际恢复或失败时附加。`Failed` 且 `executionBlocked` 的失败在会话 runtime 上留下内存执行阻断，`session/prompt` 统一返回 `-32017` + `data.reason = "recovery_execution_blocked"`；`Unavailable` / `Superseded` 保持可重试，不阻断显式继续。阻断状态不持久化，每次新的 load/resume 重新判定。
 
-冷 child 的 `assemble_for_recovery` 只建立运行实例；调用它的 server loop 必须在响应前补齐 TaskManager 绑定与在线 endpoint。`discard` 只丢弃 `Prepared` 启动资格，MQ 中的提醒保留，下一次进入采纳同一条提醒而不是重复注入。
+冷 child 的 `assemble_for_recovery` 只建立运行实例：调用方必须先校验 `completion_target` 在根树内，装配后复核仍失败或接纳最终跳过时按本次发布的 generation 回收实例与 manager 登记，避免缓存泄漏。调用它的 server loop 必须在响应前补齐 TaskManager 绑定与在线 endpoint。`discard` 只丢弃 `Prepared` 启动资格，MQ 中的提醒保留，下一次进入采纳同一条提醒而不是重复注入。
 
 `enter`、普通执行准入、Stop、关闭和显式 resume 共用同一运行协调。恢复提醒与任务完成仍调用既有设计中的 `ThreadMq` 接口；状态变化由生命周期行为提交到 `SessionResources`，业务方不通过裸 setter 或 SQL 分别修改 MQ、历史与工作意图。
 
@@ -213,6 +213,8 @@ child 的终态、`work_state` 收尾、结果接纳到目标 MQ，以及适用�
 同一 child 的终态只写一次：重复结算（含 panic 兜底）不得改写已写下的终态，也不得因正文不同产生身份冲突。同一 child 的多次恢复使用各自恢复提醒的稳定 ID 作为结果身份；只有同一次恢复的重复结算才幂等，后续恢复的结果不得被上一条历史身份跳过。
 
 sync 委派实际转为后台继续执行时，worker 持有 `working` 写入并向调用方确认；写入失败取消子执行并返回错误，成功确认前不能返回 Pending。调用方在 `working` 已提交后消失时，调用方消失后仍存活的认领 worker 负责把 `agent_status` 与 `work_state` 一起恢复到认领前的值，不留「终态 + working」。终态写入只归 handoff worker。执行体与 worker 用进程内 `TerminalOwnership` CAS 决定唯一写入者；worker 先建立父 `AsyncResultMailbox` 的 Queued 责任，再用 `finalize_child_terminal` 一次提交 child 终态、`work_state` 与父 MQ 结果。没有可用 terminal route 时不 detach，按同步路径执行并用 `settle_terminal_without_result` 收尾；worker 准入被拒时同样回退同步，由 wrapper/执行体按同一 CAS 唯一写终态，不产生父回执。映射为：正常结束 `Done + Idle`；明确取消 `Cancelled + Stopped`；其他中断、失败、交接未完成或 close 失败 `Error + Idle`。finalize 失败时结果未确认，child 仍按 `working` 交给下一次进入，并用同一消息身份重试（若提交实际已落地，重试为幂等 no-op），不伪报完成。
+
+workflow agent 的 hidden child 没有父 MQ 结果，但在 `execute` 的每个退出路径尝试复用 `settle_terminal_without_result` 写同一组终态映射；显式完成路径 close 未结清时降级为 `Error + Idle`，future 被 workflow kill 或会话关闭 drop 时由结算守卫先取消并结清会话作用域，再按取消语义写 `Cancelled + Stopped`（close 失败只记录 warn）。结算成功后不再留给父会话恢复；写入失败时 child 仍可能为 `working`，继续按本节前面的终态门与恢复复核处理，并由 error 日志暴露。
 
 恢复 child 的 continuation 在 turn 真正获得准入后登记到 live 且未 closing 的实际接收会话。`TaskManager::register_live_agent` 同时建立任务投影、原 child thread 的可撤销消息入口和取消令牌；`TaskRecord.child_thread_id` 填写原 thread。`active_agents` 沿已保存的 `cancel_policy` 保留 Cascade／Independent 行为。接收会话未 live 时跳过登记，其之后进入时补做 adoption，不冷装配祖先链；child 终态结算或启动早失败时关闭 inbox 并收尾任务。
 

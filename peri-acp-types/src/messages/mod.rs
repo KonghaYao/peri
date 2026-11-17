@@ -3,8 +3,9 @@
 //! 纯数据 + 序列化类型，供 ThreadStore 契约（`crate::store`）与各层引用。
 //! peri-agent::messages 保留 re-export 兼容路径。
 
+pub mod base_message;
 pub mod content;
-pub mod message;
+pub use base_message as message;
 
 pub use content::{
     strip_system_reminders, ContentBlock, DocumentSource, ImageSource, MessageContent,

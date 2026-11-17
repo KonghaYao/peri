@@ -1,6 +1,28 @@
 //! `SessionDataPort` 的 SQLite 接线；数据面主体文件只保留类型、模块装配与测试挂载。
 
-use super::*;
+use super::{
+    async_trait, compaction, context, session_rows, ActiveSessionSnapshot, AgentStatus, Arc,
+    BindingState, ChildResumeRecord, ChildSnapshot, CloseSettlement, CompactionChange,
+    ForkSnapshot, FrozenSnapshotBytes, FrozenState, HashMap, HistoryCursor, HistoryForwardCursor,
+    HistoryPage, HistoryPageBounds, HistorySegment, MessageFlags, MessageId, MqCancelOutcome,
+    MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome, MqReceiveSelection, NewSession,
+    NewSessionDraft, Ordering, PersistedPayload, PersistenceRecovery, ResolvedWorkspace,
+    RewindBoundary, RewindCandidate, RewindOutcome, ScopedThreadPage, ScopedThreadQuery,
+    SessionBinding, SessionDataPort, SessionMetaPatch, SessionResourceResult, SessionSnapshot,
+    SqliteSessionData, TerminalSettlementOutcome, ThreadId, ThreadMeta, TrustedSystemReminder,
+    WorkState,
+};
+use crate::sessions::sqlite_store::session_data::binding_row_state_on;
+use crate::sessions::sqlite_store::session_data::frozen_bytes_on;
+use crate::sessions::sqlite_store::session_data::frozen_state_on;
+use crate::sessions::sqlite_store::session_data::machine_id_on;
+use crate::sessions::sqlite_store::session_data::projection_json;
+use crate::sessions::sqlite_store::session_data::recovery_scope_statement_with;
+use crate::sessions::sqlite_store::session_data::strict_thread_root_on;
+use crate::sessions::sqlite_store::session_data::thread_root_on;
+use crate::sessions::sqlite_store::session_data::BindingRowState;
+use crate::sessions::sqlite_store::session_data::ThreadRootFailure;
+
 use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 
 #[async_trait]
@@ -59,66 +81,11 @@ impl SessionDataPort for SqliteSessionData {
         self.catalog_rename_machine(machine_id, name).await
     }
     async fn save_new_session(&self, input: &NewSession) -> SessionResourceResult<()> {
-        self.writable()?;
-        let snapshot_at = input
-            .meta
-            .snapshot_at_message_id
-            .map(|id| id.as_uuid().to_string());
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        let resolved = SqliteSessionDatabase::validate_binding_relation_on(&mut tx, &input.binding)
-            .await
-            .map_err(super::super::failure::binding_relation_failure)?;
-        let mut row = new_session_row(
-            input,
-            snapshot_at.as_deref(),
-            Some(input.frozen.as_str()),
-            0,
-        );
-        row.cwd = super::super::discovery::path_text(&resolved.cwd).map_err(write_failure)?;
-        insert_thread_row(&mut tx, &row)
-            .await
-            .map_err(write_failure)?;
-        insert_binding_row(&mut tx, &input.thread_id, &input.binding)
-            .await
-            .map_err(write_failure)?;
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(input.thread_id.clone())))?;
-        Ok(())
+        self.save_new_session_transaction(input).await
     }
 
     async fn save_new_session_draft(&self, draft: &NewSessionDraft) -> SessionResourceResult<()> {
-        self.writable()?;
-        let snapshot_at = draft
-            .meta
-            .snapshot_at_message_id
-            .map(|id| id.as_uuid().to_string());
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        let resolved = SqliteSessionDatabase::validate_binding_relation_on(&mut tx, &draft.binding)
-            .await
-            .map_err(super::super::failure::binding_relation_failure)?;
-        let mut row = new_session_draft_row(draft, snapshot_at.as_deref(), 0);
-        row.cwd = super::super::discovery::path_text(&resolved.cwd).map_err(write_failure)?;
-        insert_thread_row(&mut tx, &row)
-            .await
-            .map_err(write_failure)?;
-        insert_binding_row(&mut tx, &draft.thread_id, &draft.binding)
-            .await
-            .map_err(write_failure)?;
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(draft.thread_id.clone())))?;
-        Ok(())
+        self.save_new_session_draft_transaction(draft).await
     }
 
     async fn commit_frozen(
@@ -126,32 +93,7 @@ impl SessionDataPort for SqliteSessionData {
         id: &ThreadId,
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
-        self.writable()?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        let updated = sqlx::query(
-            "UPDATE threads SET frozen_context = ?1 WHERE id = ?2 AND frozen_context IS NULL
-             AND EXISTS (SELECT 1 FROM session_bindings WHERE thread_id = ?2)",
-        )
-        .bind(frozen.as_str())
-        .bind(id.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| map_sqlx(&error))?;
-        if updated.rows_affected() != 1 {
-            return Err(SessionResourceError::conflict(
-                "session is not a bound draft with an uncommitted frozen snapshot",
-            ));
-        }
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
-        Ok(())
+        self.commit_frozen_transaction(id, frozen).await
     }
 
     async fn revoke_unpublished_session(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -169,104 +111,8 @@ impl SessionDataPort for SqliteSessionData {
         workspace: &ResolvedWorkspace,
         frozen: &FrozenSnapshotBytes,
     ) -> SessionResourceResult<()> {
-        self.writable()?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
+        self.adopt_legacy_session_transaction(id, saved_cwd, workspace, frozen)
             .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        let row: Option<(String, Option<String>, String)> =
-            sqlx::query_as("SELECT cwd, parent_thread_id, workspace_id FROM threads WHERE id = ?1")
-                .bind(id.as_str())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        let Some((cwd, parent, owner_workspace_id)) = row else {
-            return Err(not_found());
-        };
-        // 保存的绝对 cwd 是接纳依据；调用方不能借接纳顺手改绑。
-        if cwd != saved_cwd || owner_workspace_id != workspace.workspace_id.to_string() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
-            ));
-        }
-        let binding = SessionBinding::from_workspace(workspace);
-        // 子会话不另立归属：绑定身份逐字继承父会话（`save_child` 的同一不变量，
-        // 父子 cwd 一致也在调用方成立）。接纳因此只在父会话的绑定行已经成立、
-        // 且与本绑定一致时放行——父会话还没被本机核实过时如实拒绝，不代父接纳。
-        if let Some(parent) = parent.as_deref() {
-            let parent_id = ThreadId::from(parent.to_owned());
-            match binding_row_state_on(&mut tx, &parent_id).await? {
-                BindingRowState::Bound(parent_binding) if parent_binding == binding => {}
-                _ => {
-                    return Err(SessionResourceError::new(
-                        SessionResourceErrorKind::Workspace(
-                            WorkspaceError::ExecutionBindingMismatch,
-                        ),
-                    ));
-                }
-            }
-        }
-        // 展示投影（无观测快照，项目 id 由会话 id 派生）不是可接纳的执行证据：接受它
-        // 只会在下一句的项目关系比对里失败，并把「没有绑定」误报成「绑定数据不支持」。
-        if workspace.discovery_snapshot.is_none() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Workspace(WorkspaceError::UnverifiedLegacyOwner),
-            ));
-        }
-        // 接纳不制造项目：workspace 归属行由 resolve_workspace 建立，项目必须已登记。
-        workspace_store::require_project_exists(&mut tx, binding.project_id)
-            .await
-            .map_err(write_failure)?;
-        // The workspace owner was established by resolve_workspace.
-        // Adoption may attach its immutable evidence, but must not fabricate a
-        // workspace owner or change the session's logical workspace.
-        let owner_exists: Option<(String,)> =
-            sqlx::query_as("SELECT id FROM workspaces WHERE id = ?1 AND project_id = ?2")
-                .bind(binding.workspace_id.to_string())
-                .bind(binding.project_id.to_string())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        if owner_exists.is_none() {
-            return Err(SessionResourceError::new(
-                SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding),
-            ));
-        }
-        match binding_row_state_on(&mut tx, id).await? {
-            BindingRowState::Bound(existing) => {
-                // 竞争：已有绑定不覆盖、不修复，必须就是本 workspace。
-                if existing != binding {
-                    return Err(SessionResourceError::new(
-                        SessionResourceErrorKind::Workspace(
-                            WorkspaceError::ExecutionBindingMismatch,
-                        ),
-                    ));
-                }
-            }
-            BindingRowState::Absent => {
-                // 缺绑定就是接纳的全部前提：frozen 列已有字节（迁移前已认领、绑定
-                // 记录缺失的历史会话）同样是 legacy 现场，字节本身是唯一事实源——
-                // COALESCE 只补空列，已有字节不因候选而改变（write-once）。
-                sqlx::query(
-                    "UPDATE threads SET frozen_context = COALESCE(frozen_context, ?1) WHERE id = ?2",
-                )
-                .bind(frozen.as_str())
-                .bind(id.as_str())
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-                insert_binding_row(&mut tx, id, &binding)
-                    .await
-                    .map_err(write_failure)?;
-            }
-        }
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
-        Ok(())
     }
 
     async fn load_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
@@ -278,34 +124,37 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let meta = context::load_meta_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let parent = meta.parent_thread_id.clone();
         let binding = match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(binding) => BindingState::Bound(binding),
             BindingRowState::Absent if parent.is_some() => BindingState::ExternalOrUnregistered,
             BindingRowState::Absent => BindingState::Missing,
         };
-        let frozen = match frozen_bytes_on(&mut tx, id).await.map_err(read_failure)? {
+        let frozen = match frozen_bytes_on(&mut tx, id)
+            .await
+            .map_err(super::read_failure)?
+        {
             Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
             None => FrozenState::LegacyAbsent,
         };
         let payloads = context::load_payloads_on(&mut tx, id)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let flags = compaction::load_flags_on(&mut tx, id)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let inherited = context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         // 只读事务：没有写入效果可以证明，提交失败仍按原因分类，不判 `Unknown`。
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         Ok(SessionSnapshot {
             meta,
             binding,
@@ -328,33 +177,36 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let meta = context::load_meta_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let parent = meta.parent_thread_id.clone();
         let binding = match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(binding) => BindingState::Bound(binding),
             BindingRowState::Absent if parent.is_some() => BindingState::ExternalOrUnregistered,
             BindingRowState::Absent => BindingState::Missing,
         };
-        let frozen = match frozen_bytes_on(&mut tx, id).await.map_err(read_failure)? {
+        let frozen = match frozen_bytes_on(&mut tx, id)
+            .await
+            .map_err(super::read_failure)?
+        {
             Some(bytes) => FrozenState::Present(FrozenSnapshotBytes::new(bytes)),
             None => FrozenState::LegacyAbsent,
         };
         let payloads = context::load_active_payloads_on(&mut tx, id)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let flags = compaction::load_active_flags_on(&mut tx, id)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let inherited = context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
-            .map_err(read_failure)?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+            .map_err(super::read_failure)?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         Ok(ActiveSessionSnapshot {
             meta,
             binding,
@@ -372,7 +224,7 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         frozen_state_on(&mut connection, id).await
     }
     fn supports_history_window(&self) -> bool {
@@ -389,13 +241,13 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let meta = context::load_meta_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
-            .map_err(read_failure)?;
+            .map_err(super::read_failure)?;
         let state = match binding_row_state_on(&mut tx, id).await? {
             BindingRowState::Bound(binding) => BindingState::Bound(binding),
             BindingRowState::Absent if meta.parent_thread_id.is_some() => {
@@ -403,7 +255,7 @@ impl SessionDataPort for SqliteSessionData {
             }
             BindingRowState::Absent => BindingState::Missing,
         };
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         Ok(state)
     }
 
@@ -416,14 +268,14 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         let payloads = context::load_context_payloads_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
-            .map_err(read_failure)?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+            .map_err(super::read_failure)?;
+        tx.commit().await.map_err(|error| super::map_sqlx(&error))?;
         Ok(payloads)
     }
 
@@ -575,11 +427,14 @@ impl SessionDataPort for SqliteSessionData {
     ) -> SessionResourceResult<HashMap<MessageId, MessageFlags>> {
         compaction::load_flags_for_ids(&self.database, id, ids)
             .await
-            .map_err(read_failure)
+            .map_err(super::read_failure)
     }
 
     async fn load_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
-        self.database.load_meta(id).await.map_err(read_failure)
+        self.database
+            .load_meta(id)
+            .await
+            .map_err(super::read_failure)
     }
 
     async fn session_exists(&self, id: &ThreadId) -> SessionResourceResult<bool> {
@@ -587,7 +442,7 @@ impl SessionDataPort for SqliteSessionData {
             .bind(id.as_str())
             .fetch_optional(&self.database.pool)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         Ok(row.is_some())
     }
 
@@ -595,7 +450,7 @@ impl SessionDataPort for SqliteSessionData {
         self.database
             .load_session_binding_impl(id)
             .await
-            .map_err(read_failure)
+            .map_err(super::read_failure)
     }
 
     async fn binding_discovery_snapshot(
@@ -607,7 +462,7 @@ impl SessionDataPort for SqliteSessionData {
                 .bind(id.as_str())
                 .fetch_optional(&self.database.pool)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         Ok(row.and_then(|(snapshot,)| snapshot))
     }
 
@@ -617,7 +472,7 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         Ok(thread_root_on(&mut connection, id)
             .await
             .unwrap_or_else(|_| id.clone()))
@@ -632,13 +487,15 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         // 根必须严格解析：缺失或成环时范围不可解释，退回自身会把未知当已知。
         let root = match strict_thread_root_on(&mut connection, id).await {
             Ok(root) => root,
-            Err(ThreadRootFailure::Missing) => return Err(corrupt("thread ancestry is missing")),
-            Err(ThreadRootFailure::Cyclic) => return Err(corrupt("cyclic thread ancestry")),
-            Err(ThreadRootFailure::Store(error)) => return Err(read_failure(error)),
+            Err(ThreadRootFailure::Missing) => {
+                return Err(super::corrupt("thread ancestry is missing"))
+            }
+            Err(ThreadRootFailure::Cyclic) => return Err(super::corrupt("cyclic thread ancestry")),
+            Err(ThreadRootFailure::Store(error)) => return Err(super::read_failure(error)),
         };
         let (projection, filter) = self.database.recovery_scope_sql_parts();
         let rows: Vec<(String, Option<String>, Option<i64>, String)> = sqlx::query_as(
@@ -647,12 +504,12 @@ impl SessionDataPort for SqliteSessionData {
         .bind(root.as_str())
         .fetch_all(&mut *connection)
         .await
-        .map_err(|error| map_sqlx(&error))?;
+        .map_err(|error| super::map_sqlx(&error))?;
         let mut candidates = Vec::with_capacity(rows.len());
         for (thread_id, parent_thread_id, usage, state) in rows {
             let state = state
                 .parse::<peri_acp_types::thread::WorkState>()
-                .map_err(|_| corrupt("stored work state is not a known value"))?;
+                .map_err(|_| super::corrupt("stored work state is not a known value"))?;
             // SQL 已按 working 过滤；这里只防御未来投影漂移，不静默改成候选。
             if state != peri_acp_types::thread::WorkState::Working {
                 continue;
@@ -661,7 +518,7 @@ impl SessionDataPort for SqliteSessionData {
                 None => None,
                 Some(usage) => Some(
                     u64::try_from(usage)
-                        .map_err(|_| corrupt("stored context usage is negative"))?,
+                        .map_err(|_| super::corrupt("stored context usage is negative"))?,
                 ),
             };
             candidates.push(peri_acp_types::recovery::RecoveryCandidate {
@@ -690,7 +547,7 @@ impl SessionDataPort for SqliteSessionData {
         self.database
             .list_scoped_threads_impl(query)
             .await
-            .map_err(write_failure)
+            .map_err(super::write_failure)
     }
 
     async fn list_archived_sessions(
@@ -700,7 +557,7 @@ impl SessionDataPort for SqliteSessionData {
         self.database
             .list_scoped_threads_by_archive_impl(query, true)
             .await
-            .map_err(read_failure)
+            .map_err(super::read_failure)
     }
 
     async fn set_session_archived(
@@ -715,14 +572,14 @@ impl SessionDataPort for SqliteSessionData {
         self.database
             .list_child_threads(parent)
             .await
-            .map_err(read_failure)
+            .map_err(super::read_failure)
     }
 
     async fn list_session_tree(&self, root: &ThreadId) -> SessionResourceResult<Vec<ThreadMeta>> {
         self.database
             .list_session_threads(root)
             .await
-            .map_err(read_failure)
+            .map_err(super::read_failure)
     }
 
     async fn append_history(
@@ -752,151 +609,11 @@ impl SessionDataPort for SqliteSessionData {
     }
 
     async fn save_fork(&self, fork: &ForkSnapshot) -> SessionResourceResult<()> {
-        self.writable()?;
-        if fork.target.thread_id == fork.source_id {
-            return Err(invalid_input("fork target must differ from its source"));
-        }
-        let snapshot_at = fork
-            .target
-            .meta
-            .snapshot_at_message_id
-            .map(|id| id.as_uuid().to_string());
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, &fork.source_id).await?;
-        if !thread_exists_on(&mut tx, &fork.source_id)
-            .await
-            .map_err(read_failure)?
-        {
-            return Err(not_found());
-        }
-        insert_thread_row(
-            &mut tx,
-            &new_session_row(
-                &fork.target,
-                snapshot_at.as_deref(),
-                Some(fork.target.frozen.as_str()),
-                fork.payloads.len() as i64,
-            ),
-        )
-        .await
-        .map_err(write_failure)?;
-        insert_binding_row(&mut tx, &fork.target.thread_id, &fork.target.binding)
-            .await
-            .map_err(write_failure)?;
-        let payload_ids = insert_history_rows(&mut tx, &fork.target.thread_id, &fork.payloads)
-            .await
-            .map_err(write_failure)?;
-        for (message_id, flags) in &fork.flags {
-            if !payload_ids.contains(message_id) {
-                return Err(invalid_input("fork flags reference an unknown message id"));
-            }
-            let updated = sqlx::query(
-                "UPDATE messages SET truncated = ?1, excluded = ?2, projection = ?3
-                 WHERE message_id = ?4 AND thread_id = ?5",
-            )
-            .bind(flags.truncated)
-            .bind(flags.excluded)
-            .bind(projection_json(flags)?)
-            .bind(message_id.as_uuid().to_string())
-            .bind(fork.target.thread_id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-            if updated.rows_affected() != 1 {
-                return Err(corrupt("fork projection did not apply to exactly one row"));
-            }
-        }
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(fork.target.thread_id.clone())))?;
-        Ok(())
+        self.save_fork_transaction(fork).await
     }
 
     async fn save_child(&self, child: &ChildSnapshot) -> SessionResourceResult<()> {
-        self.writable()?;
-        // 防御校验复用门面同一条规则：落库写的是 `target.meta` 里的父关系，声明与它不一致
-        // 时必须在这里就停下，不能靠「父链核对」兜底——那条链查的是声明里的 parent。
-        ensure_child_relation(child)?;
-        let snapshot_at = child
-            .target
-            .meta
-            .snapshot_at_message_id
-            .map(|id| id.as_uuid().to_string());
-        let inherited = child
-            .inherited
-            .to_json_with_spans()
-            .map_err(|_| corrupt("inherited context is not serializable"))?;
-        // 发布前校验引用边界，损坏的继承区不能落库。
-        InheritedContext::from_json(&inherited.json)
-            .map_err(|_| corrupt("inherited context has invalid message references"))?;
-        let mut tx = self
-            .database
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, &child.parent_id).await?;
-        if !thread_exists_on(&mut tx, &child.parent_id)
-            .await
-            .map_err(read_failure)?
-        {
-            return Err(not_found());
-        }
-        // 父子关系与根归属必须与库内事实一致：child 的 root 必须真是 parent 链的根。
-        let parent_root = thread_root_on(&mut tx, &child.parent_id)
-            .await
-            .map_err(read_failure)?;
-        if parent_root != child.root_id {
-            return Err(invalid_input("child root does not match its parent chain"));
-        }
-        // frozen 必须逐字节来自 root 的已保存快照：不重新扫描目录，也不重新冻结。
-        let root_frozen = frozen_bytes_on(&mut tx, &child.root_id)
-            .await
-            .map_err(read_failure)?;
-        if root_frozen.as_deref() != Some(child.target.frozen.as_str()) {
-            return Err(invalid_input(
-                "child frozen snapshot must be the root's saved snapshot",
-            ));
-        }
-        // 子会话继承父会话的执行绑定身份，不另立 workspace 归属。
-        match binding_row_state_on(&mut tx, &child.parent_id).await? {
-            BindingRowState::Bound(parent_binding) if parent_binding != child.target.binding => {
-                return Err(SessionResourceError::new(
-                    SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
-                ));
-            }
-            _ => {}
-        }
-        insert_thread_row(
-            &mut tx,
-            &new_session_row(
-                &child.target,
-                snapshot_at.as_deref(),
-                Some(child.target.frozen.as_str()),
-                0,
-            ),
-        )
-        .await
-        .map_err(write_failure)?;
-        insert_binding_row(&mut tx, &child.target.thread_id, &child.target.binding)
-            .await
-            .map_err(write_failure)?;
-        sqlx::query("UPDATE threads SET inherited_context = ?1 WHERE id = ?2")
-            .bind(&inherited.json)
-            .bind(child.target.thread_id.as_str())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        // `inherited_context` 字节是唯一事实源：v15 起不再派生索引（可从本列重建）。
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(child.target.thread_id.clone())))?;
-        Ok(())
+        self.save_child_transaction(child).await
     }
 
     async fn load_child_resume_record(
@@ -908,13 +625,13 @@ impl SessionDataPort for SqliteSessionData {
                 .bind(child.as_str())
                 .fetch_optional(&self.database.pool)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         let Some((status,)) = row else {
-            return Err(not_found());
+            return Err(super::not_found());
         };
         let status: AgentStatus = status
             .parse()
-            .map_err(|_| corrupt("stored agent status is not readable"))?;
+            .map_err(|_| super::corrupt("stored agent status is not readable"))?;
         Ok(ChildResumeRecord {
             // 认领事实就是「该会话正在运行」：active 之外的状态都可被认领。
             claimed: status.is_active(),
@@ -934,7 +651,7 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|e| map_sqlx(&e))?;
+            .map_err(|e| super::map_sqlx(&e))?;
         self.require_session(&mut tx, child).await?;
         let updated =
             sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
@@ -943,13 +660,52 @@ impl SessionDataPort for SqliteSessionData {
                 .bind(child.as_str())
                 .execute(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         if updated.rows_affected() != 1 {
-            return Err(not_found());
+            return Err(super::not_found());
         }
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(child.clone())))?;
+            .map_err(|_| super::commit_failure(Some(child.clone())))?;
+        Ok(())
+    }
+
+    async fn settle_child_resume(
+        &self,
+        child: &ThreadId,
+        previous: &ChildResumeRecord,
+        work_state: Option<WorkState>,
+        terminal: Option<AgentStatus>,
+    ) -> SessionResourceResult<()> {
+        self.writable()?;
+        let now = peri_time::now_utc_rfc3339();
+        let status = terminal.unwrap_or(previous.status);
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| super::map_sqlx(&e))?;
+        self.require_session(&mut tx, child).await?;
+        // 两列必须在同一条语句里落地：分开提交会留下「状态已回滚、工作意图未回滚」
+        // 的中间态，之后的补偿会因状态不再属于本次认领而失去重试责任。
+        let updated = sqlx::query(
+            "UPDATE threads SET agent_status = ?1, updated_at = ?2,
+             work_state = COALESCE(?3, work_state) WHERE id = ?4",
+        )
+        .bind(status.as_str())
+        .bind(&now)
+        .bind(work_state.map(|state| state.as_str()))
+        .bind(child.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| super::map_sqlx(&error))?;
+        if updated.rows_affected() != 1 {
+            return Err(super::not_found());
+        }
+        tx.commit()
+            .await
+            .map_err(|_| super::commit_failure(Some(child.clone())))?;
         Ok(())
     }
 
@@ -964,14 +720,14 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|e| map_sqlx(&e))?;
+            .map_err(|e| super::map_sqlx(&e))?;
         self.require_session(&mut tx, id).await?;
         compaction::commit_compaction_lifecycle_on(&mut tx, id, change)
             .await
-            .map_err(write_failure)?;
+            .map_err(super::write_failure)?;
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 
@@ -989,7 +745,7 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         for (message_id, flags) in updates {
             let updated = sqlx::query(
@@ -1003,10 +759,10 @@ impl SessionDataPort for SqliteSessionData {
             .bind(id.as_str())
             .execute(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
             if updated.rows_affected() != 1 {
                 // 不属于本会话或不存在：既不静默跳过，也不把别会话的行改掉。
-                return Err(invalid_input(
+                return Err(super::invalid_input(
                     "projection target is not a history entry of this session",
                 ));
             }
@@ -1016,10 +772,10 @@ impl SessionDataPort for SqliteSessionData {
             .bind(id.as_str())
             .execute(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 
@@ -1053,7 +809,7 @@ impl SessionDataPort for SqliteSessionData {
         // 单列写入与迁移桥共用同一份 SQL：不碰 `updated_at`，不改运行态。
         session_rows::write_work_state(&self.database.pool, id, state)
             .await
-            .map_err(write_failure)
+            .map_err(super::write_failure)
     }
 
     async fn settle_work_state_after_turn(&self, id: &ThreadId) -> SessionResourceResult<bool> {
@@ -1067,7 +823,7 @@ impl SessionDataPort for SqliteSessionData {
     ) -> SessionResourceResult<()> {
         session_rows::write_context_usage(&self.database.pool, id, tokens)
             .await
-            .map_err(write_failure)
+            .map_err(super::write_failure)
     }
 
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -1155,7 +911,7 @@ impl SessionDataPort for SqliteSessionData {
             .pool
             .acquire()
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         Ok(
             super::mq::message_fact(&mut connection, &id.as_uuid().to_string())
                 .await?

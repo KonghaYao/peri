@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    AgentStatus, FaultPlan, Fixture, MessageId, MessagePolicy, MqEnqueueDisposition,
+    PersistedPayload, SessionResourceErrorKind, ThreadId, WorkState,
+};
+use crate::sessions::data::SessionDataPort;
 
 // ─── 入队与结算的批内原子性 ────────────────────────────────────────────────────
 
@@ -14,8 +18,8 @@ async fn reset_child_active(fixture: &Fixture, child: &ThreadId) {
 /// 插入与提升同批：只让提升语句失败时，插入也必须一起回滚，不能留下 `idle + pending`。
 #[tokio::test]
 async fn remote_enqueue_inserted_promotes_in_the_same_batch() {
-    let fixture = fixture().await;
-    let thread = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let thread = super::thread("mq-thread");
     fixture
         .data
         .set_work_state(&thread, WorkState::Idle)
@@ -32,7 +36,7 @@ async fn remote_enqueue_inserted_promotes_in_the_same_batch() {
 
     let error = fixture
         .data
-        .mq_enqueue(&thread, input(MessageId::new(), "wake"))
+        .mq_enqueue(&thread, super::input(MessageId::new(), "wake"))
         .await
         .unwrap_err();
     // 触发器中止的 SDK 分类随驱动而定：这里只要求「确定未生效」，语义由回滚断言覆盖。
@@ -45,18 +49,18 @@ async fn remote_enqueue_inserted_promotes_in_the_same_batch() {
         "{error:?}"
     );
     assert_eq!(
-        mq_rows(&fixture, &thread).await,
+        super::mq_rows(&fixture, &thread).await,
         0,
         "插入必须随提升失败一起回滚"
     );
-    assert_eq!(work_state(&fixture, &thread).await, WorkState::Idle);
+    assert_eq!(super::work_state(&fixture, &thread).await, WorkState::Idle);
 }
 
 /// 整批在发出前丢失：不返回已接纳，也不留下任何行。
 #[tokio::test]
 async fn remote_enqueue_dropped_batch_is_not_accepted() {
-    let fixture = fixture().await;
-    let thread = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let thread = super::thread("mq-thread");
     fixture
         .data
         .set_work_state(&thread, WorkState::Idle)
@@ -72,7 +76,7 @@ async fn remote_enqueue_dropped_batch_is_not_accepted() {
 
     let error = fixture
         .data
-        .mq_enqueue(&thread, input(MessageId::new(), "wake"))
+        .mq_enqueue(&thread, super::input(MessageId::new(), "wake"))
         .await
         .unwrap_err();
     assert!(
@@ -82,16 +86,16 @@ async fn remote_enqueue_dropped_batch_is_not_accepted() {
         ),
         "{error:?}"
     );
-    assert_eq!(mq_rows(&fixture, &thread).await, 0);
-    assert_eq!(work_state(&fixture, &thread).await, WorkState::Idle);
+    assert_eq!(super::mq_rows(&fixture, &thread).await, 0);
+    assert_eq!(super::work_state(&fixture, &thread).await, WorkState::Idle);
 }
 
 /// Existing 路径的提升失败必须 fail-closed：返回可重试错误，调用方用同一 ID 重试后变
 /// `working`，不把「已接纳、意图未落地」伪装成成功。
 #[tokio::test]
 async fn remote_enqueue_existing_promotion_failure_returns_error_then_retry_promotes() {
-    let fixture = fixture().await;
-    let thread = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let thread = super::thread("mq-thread");
     let id = MessageId::new();
     fixture
         .data
@@ -100,7 +104,7 @@ async fn remote_enqueue_existing_promotion_failure_returns_error_then_retry_prom
         .unwrap();
     fixture
         .data
-        .mq_enqueue(&thread, input(id, "wake"))
+        .mq_enqueue(&thread, super::input(id, "wake"))
         .await
         .unwrap();
     fixture
@@ -118,7 +122,7 @@ async fn remote_enqueue_existing_promotion_failure_returns_error_then_retry_prom
 
     let error = fixture
         .data
-        .mq_enqueue(&thread, input(id, "wake"))
+        .mq_enqueue(&thread, super::input(id, "wake"))
         .await
         .unwrap_err();
     assert!(
@@ -128,24 +132,31 @@ async fn remote_enqueue_existing_promotion_failure_returns_error_then_retry_prom
         ),
         "提升失败必须是可重试错误，而不是接纳成功: {error:?}"
     );
-    assert_eq!(mq_rows(&fixture, &thread).await, 1, "同 ID 不产生第二行");
-    assert_eq!(work_state(&fixture, &thread).await, WorkState::Idle);
+    assert_eq!(
+        super::mq_rows(&fixture, &thread).await,
+        1,
+        "同 ID 不产生第二行"
+    );
+    assert_eq!(super::work_state(&fixture, &thread).await, WorkState::Idle);
 
     let retry = fixture
         .data
-        .mq_enqueue(&thread, input(id, "wake"))
+        .mq_enqueue(&thread, super::input(id, "wake"))
         .await
         .unwrap();
     assert_eq!(retry.disposition, MqEnqueueDisposition::Existing);
-    assert_eq!(work_state(&fixture, &thread).await, WorkState::Working);
+    assert_eq!(
+        super::work_state(&fixture, &thread).await,
+        WorkState::Working
+    );
 }
 
 /// 结算批在发出前丢失：终态、意图与结果都不落库。
 #[tokio::test]
 async fn remote_finalize_is_single_batch_before_send() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
-    let target = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
+    let target = super::thread("mq-thread");
     fixture
         .data
         .set_work_state(&child, WorkState::Working)
@@ -166,7 +177,7 @@ async fn remote_finalize_is_single_batch_before_send() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(MessageId::new(), "child done"),
+            super::terminal_input(MessageId::new(), "child done"),
         )
         .await
         .unwrap_err();
@@ -178,18 +189,18 @@ async fn remote_finalize_is_single_batch_before_send() {
         "{error:?}"
     );
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("active".to_owned(), "working".to_owned())
     );
-    assert_eq!(mq_rows(&fixture, &target).await, 0);
+    assert_eq!(super::mq_rows(&fixture, &target).await, 0);
 }
 
 /// 结果插入失败时终态与工作意图必须一起回滚：不能留下「终态已写、结果未入队」。
 #[tokio::test]
 async fn remote_finalize_rolls_back_when_the_result_insert_fails() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
-    let target = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
+    let target = super::thread("mq-thread");
     let id = MessageId::new();
     fixture
         .data
@@ -214,25 +225,25 @@ async fn remote_finalize_rolls_back_when_the_result_insert_fails() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(id, "child done"),
+            super::terminal_input(id, "child done"),
         )
         .await
         .unwrap_err();
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("active".to_owned(), "working".to_owned()),
         "终态与工作意图不得越过失败的批次"
     );
-    assert_eq!(mq_rows(&fixture, &target).await, 0);
-    assert_eq!(history_rows(&fixture, &target).await, 0);
+    assert_eq!(super::mq_rows(&fixture, &target).await, 0);
+    assert_eq!(super::history_rows(&fixture, &target).await, 0);
 }
 
 /// 批次已提交但响应丢失：返回未决；同一 ID 重试读到已落地事实，不重复写结果。
 #[tokio::test]
 async fn remote_finalize_unknown_reply_is_retryable() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
-    let target = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
+    let target = super::thread("mq-thread");
     let id = MessageId::new();
     fixture
         .data
@@ -254,7 +265,7 @@ async fn remote_finalize_unknown_reply_is_retryable() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(id, "child done"),
+            super::terminal_input(id, "child done"),
         )
         .await
         .unwrap_err();
@@ -273,14 +284,18 @@ async fn remote_finalize_unknown_reply_is_retryable() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(id, "child done"),
+            super::terminal_input(id, "child done"),
         )
         .await
         .unwrap();
     assert_eq!(retry.disposition, MqEnqueueDisposition::Existing);
-    assert_eq!(mq_rows(&fixture, &target).await, 1, "不得重复接纳结果");
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::mq_rows(&fixture, &target).await,
+        1,
+        "不得重复接纳结果"
+    );
+    assert_eq!(
+        super::terminal_facts(&fixture, &child).await,
         ("done".to_owned(), "idle".to_owned())
     );
 }
@@ -288,9 +303,9 @@ async fn remote_finalize_unknown_reply_is_retryable() {
 /// 结算维护接收方工作意图：EnsureProcessing 提升、passive 不提升、stopped 不解除。
 #[tokio::test]
 async fn remote_finalize_maintains_receiver_work_intent() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
-    let target = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
+    let target = super::thread("mq-thread");
 
     fixture
         .data
@@ -299,11 +314,14 @@ async fn remote_finalize_maintains_receiver_work_intent() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(MessageId::new(), "ensure"),
+            super::terminal_input(MessageId::new(), "ensure"),
         )
         .await
         .unwrap();
-    assert_eq!(work_state(&fixture, &target).await, WorkState::Working);
+    assert_eq!(
+        super::work_state(&fixture, &target).await,
+        WorkState::Working
+    );
 
     fixture
         .data
@@ -311,14 +329,14 @@ async fn remote_finalize_maintains_receiver_work_intent() {
         .await
         .unwrap();
     reset_child_active(&fixture, &child).await;
-    let mut passive = terminal_input(MessageId::new(), "passive");
+    let mut passive = super::terminal_input(MessageId::new(), "passive");
     passive.policy = MessagePolicy::passive();
     fixture
         .data
         .finalize_child_terminal(&child, AgentStatus::Done, WorkState::Idle, &target, passive)
         .await
         .unwrap();
-    assert_eq!(work_state(&fixture, &target).await, WorkState::Idle);
+    assert_eq!(super::work_state(&fixture, &target).await, WorkState::Idle);
 
     fixture
         .data
@@ -333,20 +351,73 @@ async fn remote_finalize_maintains_receiver_work_intent() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(MessageId::new(), "stopped stays"),
+            super::terminal_input(MessageId::new(), "stopped stays"),
         )
         .await
         .unwrap();
-    assert_eq!(work_state(&fixture, &target).await, WorkState::Stopped);
+    assert_eq!(
+        super::work_state(&fixture, &target).await,
+        WorkState::Stopped
+    );
+}
+
+/// 目标已终态：结果行就绪、child 仍 `active` 也不得把 target 从终态 + `idle` 提升为
+/// `working`。结果本身仍按 MQ 规则接纳，改变的只有接收方工作意图。
+#[tokio::test]
+async fn remote_finalize_does_not_promote_a_terminal_receiver() {
+    for terminal in [
+        AgentStatus::Error,
+        AgentStatus::Done,
+        AgentStatus::Cancelled,
+    ] {
+        let fixture = super::fixture().await;
+        let child = super::thread("other-thread");
+        let target = super::thread("mq-thread");
+        // 终态 target 的 `work_state` 是派生值；旧路径可能停在 `idle`。
+        sqlx::query("UPDATE threads SET agent_status = ?1, work_state = 'idle' WHERE id = ?2")
+            .bind(terminal.as_str())
+            .bind(target.as_str())
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+
+        let outcome = fixture
+            .data
+            .finalize_child_terminal(
+                &child,
+                AgentStatus::Done,
+                WorkState::Idle,
+                &target,
+                super::terminal_input(MessageId::new(), "result to terminal parent"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
+        assert_eq!(
+            super::terminal_facts(&fixture, &target).await,
+            (terminal.as_str().to_owned(), "idle".to_owned()),
+            "{terminal:?}: 终态 target 的 agent_status 与 work_state 都不得改变"
+        );
+        assert_eq!(
+            super::terminal_facts(&fixture, &child).await,
+            ("done".to_owned(), "idle".to_owned()),
+            "{terminal:?}: child 仍按本次结算写入终态"
+        );
+        assert_eq!(
+            super::mq_rows(&fixture, &target).await,
+            1,
+            "结果仍要落在目标 MQ"
+        );
+    }
 }
 
 /// 终态只写一次：同一 child 先 Done 再 Error（不同结果 ID）。后到的结算既不能覆盖终态，
 /// 也不能再投递一条结果；结果未落地时按批后读取归类为冲突。
 #[tokio::test]
 async fn remote_finalize_later_terminal_does_not_overwrite_the_first() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
-    let target = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
+    let target = super::thread("mq-thread");
     fixture
         .data
         .finalize_child_terminal(
@@ -354,7 +425,7 @@ async fn remote_finalize_later_terminal_does_not_overwrite_the_first() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(MessageId::new(), "child done"),
+            super::terminal_input(MessageId::new(), "child done"),
         )
         .await
         .unwrap();
@@ -371,7 +442,7 @@ async fn remote_finalize_later_terminal_does_not_overwrite_the_first() {
             AgentStatus::Error,
             WorkState::Working,
             &target,
-            terminal_input(MessageId::new(), "child failed"),
+            super::terminal_input(MessageId::new(), "child failed"),
         )
         .await
         .unwrap_err();
@@ -380,13 +451,17 @@ async fn remote_finalize_later_terminal_does_not_overwrite_the_first() {
         "先提交的终态已生效且新结果未落地: {error:?}"
     );
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("done".to_owned(), "idle".to_owned()),
         "后到的 Error 不得覆盖已提交的 Done"
     );
-    assert_eq!(mq_rows(&fixture, &target).await, 1, "父 MQ 只能有一条结果");
     assert_eq!(
-        work_state(&fixture, &target).await,
+        super::mq_rows(&fixture, &target).await,
+        1,
+        "父 MQ 只能有一条结果"
+    );
+    assert_eq!(
+        super::work_state(&fixture, &target).await,
         WorkState::Idle,
         "后到的结算不得提升接收方意图"
     );
@@ -396,9 +471,9 @@ async fn remote_finalize_later_terminal_does_not_overwrite_the_first() {
 /// 批后按读取归类为 `Existing`；终态与结果行都只保留先提交的那一份。
 #[tokio::test]
 async fn remote_finalize_does_not_overwrite_a_settlement_committed_after_the_read() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
-    let target = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
+    let target = super::thread("mq-thread");
     let id = MessageId::new();
     fixture
         .data
@@ -407,7 +482,7 @@ async fn remote_finalize_does_not_overwrite_a_settlement_committed_after_the_rea
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(id, "child done"),
+            super::terminal_input(id, "child done"),
         )
         .await
         .unwrap();
@@ -431,25 +506,29 @@ async fn remote_finalize_does_not_overwrite_a_settlement_committed_after_the_rea
             AgentStatus::Error,
             WorkState::Working,
             &target,
-            terminal_input(id, "child done"),
+            super::terminal_input(id, "child done"),
         )
         .await
         .unwrap();
     assert_eq!(replay.disposition, MqEnqueueDisposition::Existing);
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("done".to_owned(), "idle".to_owned()),
         "批间提交的终态不得被后到批次覆盖"
     );
-    assert_eq!(mq_rows(&fixture, &target).await, 1, "不得重复接纳结果");
-    assert_eq!(work_state(&fixture, &target).await, WorkState::Idle);
+    assert_eq!(
+        super::mq_rows(&fixture, &target).await,
+        1,
+        "不得重复接纳结果"
+    );
+    assert_eq!(super::work_state(&fixture, &target).await, WorkState::Idle);
 }
 
 /// 结果投递回 child 自己（恢复期）不构成新的接收方，不得把刚写的终态重新提升为 `working`。
 #[tokio::test]
 async fn remote_finalize_target_equals_child_keeps_work_state() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
     fixture
         .data
         .set_work_state(&child, WorkState::Working)
@@ -463,14 +542,14 @@ async fn remote_finalize_target_equals_child_keeps_work_state() {
             AgentStatus::Done,
             WorkState::Idle,
             &child,
-            terminal_input(MessageId::new(), "self delivery"),
+            super::terminal_input(MessageId::new(), "self delivery"),
         )
         .await
         .unwrap();
     assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
-    assert_eq!(mq_rows(&fixture, &child).await, 1);
+    assert_eq!(super::mq_rows(&fixture, &child).await, 1);
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("done".to_owned(), "idle".to_owned())
     );
 }
@@ -478,9 +557,9 @@ async fn remote_finalize_target_equals_child_keeps_work_state() {
 /// 同 ID 结果已落地：重复结算（甚至状态与正文不同）必须成功 no-op，不改写任何事实。
 #[tokio::test]
 async fn remote_finalize_is_idempotent_once_landed() {
-    let fixture = fixture().await;
-    let child = thread("other-thread");
-    let target = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
+    let target = super::thread("mq-thread");
     let id = MessageId::new();
     fixture
         .data
@@ -489,7 +568,7 @@ async fn remote_finalize_is_idempotent_once_landed() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(id, "result A"),
+            super::terminal_input(id, "result A"),
         )
         .await
         .unwrap();
@@ -506,27 +585,27 @@ async fn remote_finalize_is_idempotent_once_landed() {
             AgentStatus::Error,
             WorkState::Working,
             &target,
-            terminal_input(id, "panic B"),
+            super::terminal_input(id, "panic B"),
         )
         .await
         .unwrap();
     assert_eq!(replay.disposition, MqEnqueueDisposition::Existing);
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("done".to_owned(), "idle".to_owned()),
         "已落地结算的重复调用不得改写终态或工作意图"
     );
-    assert_eq!(work_state(&fixture, &target).await, WorkState::Idle);
-    assert_eq!(mq_rows(&fixture, &target).await, 1);
+    assert_eq!(super::work_state(&fixture, &target).await, WorkState::Idle);
+    assert_eq!(super::mq_rows(&fixture, &target).await, 1);
 }
 
 /// 结果 ID 已属于别的 thread：冲突在批内被守卫拦下，终态与工作意图都不得提交。
 #[tokio::test]
 async fn remote_finalize_conflict_does_not_write_terminal_state() {
-    let fixture = fixture().await;
-    let child = thread("child-thread");
-    let target = thread("mq-thread");
-    let foreign = thread("other-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("child-thread");
+    let target = super::thread("mq-thread");
+    let foreign = super::thread("other-thread");
     sqlx::query(
         "INSERT INTO threads (id, cwd, created_at, updated_at, workspace_id)
          VALUES ('child-thread', '/tmp', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'ws')",
@@ -544,7 +623,10 @@ async fn remote_finalize_conflict_does_not_write_terminal_state() {
         .data
         .append_history(
             &foreign,
-            &[PersistedPayload::Message(human(id, "already elsewhere"))],
+            &[PersistedPayload::Message(super::human(
+                id,
+                "already elsewhere",
+            ))],
         )
         .await
         .unwrap();
@@ -556,7 +638,7 @@ async fn remote_finalize_conflict_does_not_write_terminal_state() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(id, "child done"),
+            super::terminal_input(id, "child done"),
         )
         .await
         .unwrap_err();
@@ -565,19 +647,19 @@ async fn remote_finalize_conflict_does_not_write_terminal_state() {
         "{error:?}"
     );
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("active".to_owned(), "working".to_owned())
     );
-    assert_eq!(mq_rows(&fixture, &target).await, 0);
+    assert_eq!(super::mq_rows(&fixture, &target).await, 0);
 }
 
 /// 批前读取与提交之间的冲突由批内守卫拦下：终态不得越过守卫提交。
 #[tokio::test]
 async fn remote_finalize_guards_a_conflict_that_appears_after_the_read() {
-    let fixture = fixture().await;
-    let child = thread("child-thread");
-    let target = thread("mq-thread");
-    let foreign = thread("other-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("child-thread");
+    let target = super::thread("mq-thread");
+    let foreign = super::thread("other-thread");
     sqlx::query(
         "INSERT INTO threads (id, cwd, created_at, updated_at, workspace_id)
          VALUES ('child-thread', '/tmp', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'ws')",
@@ -605,7 +687,7 @@ async fn remote_finalize_guards_a_conflict_that_appears_after_the_read() {
             AgentStatus::Done,
             WorkState::Idle,
             &target,
-            terminal_input(id, "child done"),
+            super::terminal_input(id, "child done"),
         )
         .await
         .unwrap_err();
@@ -614,10 +696,10 @@ async fn remote_finalize_guards_a_conflict_that_appears_after_the_read() {
         "{error:?}"
     );
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("active".to_owned(), "working".to_owned())
     );
-    assert_eq!(mq_rows(&fixture, &target).await, 0);
+    assert_eq!(super::mq_rows(&fixture, &target).await, 0);
 }
 
 /// 无结果终态：单批条件更新同时写终态与工作意图。
@@ -625,8 +707,8 @@ async fn remote_finalize_guards_a_conflict_that_appears_after_the_read() {
 async fn remote_settle_terminal_without_result_commits_status_and_work_state() {
     use peri_acp_types::session_resources::TerminalSettlementOutcome;
 
-    let fixture = fixture().await;
-    let child = thread("other-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
     fixture
         .data
         .set_work_state(&child, WorkState::Working)
@@ -640,7 +722,7 @@ async fn remote_settle_terminal_without_result_commits_status_and_work_state() {
         .unwrap();
     assert_eq!(outcome, TerminalSettlementOutcome::Settled);
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("done".to_owned(), "idle".to_owned())
     );
 }
@@ -650,8 +732,8 @@ async fn remote_settle_terminal_without_result_commits_status_and_work_state() {
 async fn remote_settle_terminal_without_result_duplicate_is_noop() {
     use peri_acp_types::session_resources::TerminalSettlementOutcome;
 
-    let fixture = fixture().await;
-    let child = thread("other-thread");
+    let fixture = super::fixture().await;
+    let child = super::thread("other-thread");
     fixture
         .data
         .settle_terminal_without_result(&child, AgentStatus::Done, WorkState::Idle)
@@ -667,7 +749,7 @@ async fn remote_settle_terminal_without_result_duplicate_is_noop() {
         TerminalSettlementOutcome::AlreadyTerminal(AgentStatus::Done)
     );
     assert_eq!(
-        terminal_facts(&fixture, &child).await,
+        super::terminal_facts(&fixture, &child).await,
         ("done".to_owned(), "idle".to_owned())
     );
 }
@@ -675,8 +757,8 @@ async fn remote_settle_terminal_without_result_duplicate_is_noop() {
 /// 批内会话守卫拒绝不存在的 child，并按 NotFound 分类。
 #[tokio::test]
 async fn remote_settle_terminal_without_result_rejects_missing_child() {
-    let fixture = fixture().await;
-    let child = thread("missing-child");
+    let fixture = super::fixture().await;
+    let child = super::thread("missing-child");
     let error = fixture
         .data
         .settle_terminal_without_result(&child, AgentStatus::Done, WorkState::Idle)
@@ -715,11 +797,11 @@ fn reminder(body: &str) -> peri_acp_types::system_reminder::TrustedSystemReminde
 async fn remote_retained_mq_settlement_commits_together() {
     use peri_acp_types::session::RetainedReminder;
 
-    let fixture = fixture().await;
-    let thread = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let thread = super::thread("mq-thread");
     let entry = fixture
         .data
-        .mq_enqueue(&thread, input(MessageId::new(), "retained"))
+        .mq_enqueue(&thread, super::input(MessageId::new(), "retained"))
         .await
         .unwrap();
 
@@ -736,19 +818,19 @@ async fn remote_retained_mq_settlement_commits_together() {
         .await
         .unwrap();
 
-    assert_eq!(history_rows(&fixture, &thread).await, 1);
-    assert_eq!(mq_rows(&fixture, &thread).await, 0);
+    assert_eq!(super::history_rows(&fixture, &thread).await, 1);
+    assert_eq!(super::mq_rows(&fixture, &thread).await, 0);
 }
 
 #[tokio::test]
 async fn remote_retained_mq_dropped_batch_changes_nothing() {
     use peri_acp_types::session::RetainedReminder;
 
-    let fixture = fixture().await;
-    let thread = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let thread = super::thread("mq-thread");
     let entry = fixture
         .data
-        .mq_enqueue(&thread, input(MessageId::new(), "retained"))
+        .mq_enqueue(&thread, super::input(MessageId::new(), "retained"))
         .await
         .unwrap();
     fixture
@@ -779,21 +861,21 @@ async fn remote_retained_mq_dropped_batch_changes_nothing() {
         "{error:?}"
     );
     assert_eq!(
-        history_rows(&fixture, &thread).await,
+        super::history_rows(&fixture, &thread).await,
         0,
         "未提交的批次不能写入提醒"
     );
-    assert_eq!(mq_rows(&fixture, &thread).await, 1, "待发行仍在");
+    assert_eq!(super::mq_rows(&fixture, &thread).await, 1, "待发行仍在");
 }
 
 #[tokio::test]
 async fn remote_retained_delete_failure_rolls_back_reminder_and_retry_is_idempotent() {
     use peri_acp_types::session::RetainedReminder;
-    let fixture = fixture().await;
-    let thread = thread("mq-thread");
+    let fixture = super::fixture().await;
+    let thread = super::thread("mq-thread");
     let entry = fixture
         .data
-        .mq_enqueue(&thread, input(MessageId::new(), "retained"))
+        .mq_enqueue(&thread, super::input(MessageId::new(), "retained"))
         .await
         .unwrap();
     let notices = [RetainedReminder {
@@ -813,11 +895,11 @@ async fn remote_retained_delete_failure_rolls_back_reminder_and_retry_is_idempot
         .await
         .is_err());
     assert_eq!(
-        history_rows(&fixture, &thread).await,
+        super::history_rows(&fixture, &thread).await,
         0,
         "提醒必须随删除失败回滚"
     );
-    assert_eq!(mq_rows(&fixture, &thread).await, 1);
+    assert_eq!(super::mq_rows(&fixture, &thread).await, 1);
     sqlx::query("DROP TRIGGER fail_retained_delete")
         .execute(&fixture.pool)
         .await
@@ -829,6 +911,6 @@ async fn remote_retained_delete_failure_rolls_back_reminder_and_retry_is_idempot
             .await
             .unwrap();
     }
-    assert_eq!(history_rows(&fixture, &thread).await, 1);
-    assert_eq!(mq_rows(&fixture, &thread).await, 0);
+    assert_eq!(super::history_rows(&fixture, &thread).await, 1);
+    assert_eq!(super::mq_rows(&fixture, &thread).await, 0);
 }

@@ -63,16 +63,25 @@ pub(super) struct CohortEntry {
 }
 
 impl CohortEntry {
+    #[must_use]
     fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(CohortState::Pending)),
         }
     }
 
+    #[must_use]
     fn is_cancelled(&self) -> bool {
-        matches!(&*self.state.lock().unwrap(), CohortState::Cancelled)
+        matches!(
+            &*self
+                .state
+                .lock()
+                .expect("the lifecycle state mutex must not be poisoned"),
+            CohortState::Cancelled
+        )
     }
 
+    #[must_use]
     fn ticket(
         &self,
         mode: CohortMode,
@@ -89,7 +98,7 @@ impl CohortEntry {
 
     /// 该 cohort 是否接受这条稳定身份（落定前/落定后都并入同一条车道）。
     fn accepts(&self, identity: &SessionIdentity) -> bool {
-        match &*self.state.lock().unwrap() {
+        match &*self.state.lock().expect("state mutex must not be poisoned") {
             CohortState::Adopted(adopted) => adopted == identity,
             // 键就是操作身份：同一操作的落定结果必然属于这个 cohort。
             CohortState::Pending => true,
@@ -108,12 +117,19 @@ pub(super) struct CohortTicket {
 }
 
 impl CohortTicket {
+    #[must_use]
     pub(super) fn is_cancelled(&self) -> bool {
-        matches!(&*self.state.lock().unwrap(), CohortState::Cancelled)
+        matches!(
+            &*self
+                .state
+                .lock()
+                .expect("the lifecycle state mutex must not be poisoned"),
+            CohortState::Cancelled
+        )
     }
 
     pub(super) fn adopted(&self) -> Option<SessionIdentity> {
-        match &*self.state.lock().unwrap() {
+        match &*self.state.lock().expect("state mutex must not be poisoned") {
             CohortState::Adopted(identity) => Some(identity.clone()),
             _ => None,
         }
@@ -121,7 +137,7 @@ impl CohortTicket {
 
     /// 永久取消本 cohort：身份一旦失效，后续成员不得重新初始化。
     pub(super) fn cancel(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if !matches!(&*state, CohortState::Cancelled) {
             *state = CohortState::Cancelled;
         }

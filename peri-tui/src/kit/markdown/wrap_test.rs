@@ -1,4 +1,3 @@
-use super::convert::wrap_styled_line;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 
@@ -10,7 +9,7 @@ fn line_text(line: &ratatui::text::Line<'static>) -> String {
 #[test]
 fn test_wrap_styled_line_ascii() {
     let line = ratatui::text::Line::from("word ".repeat(40).trim().to_string());
-    let rows = wrap_styled_line(&line, 30);
+    let rows = super::convert::wrap_styled_line(&line, 30);
     assert!(rows.len() > 1, "应折为多行");
     for r in &rows {
         assert!(r.width() <= 30, "行宽 {} 超限: {}", r.width(), line_text(r));
@@ -27,7 +26,7 @@ fn test_wrap_styled_line_ascii() {
 #[test]
 fn test_wrap_styled_line_cjk() {
     let line = ratatui::text::Line::from("测试文本".repeat(20)); // 每个字符宽 2
-    let rows = wrap_styled_line(&line, 22); // 奇数宽度边界
+    let rows = super::convert::wrap_styled_line(&line, 22); // 奇数宽度边界
     assert!(rows.len() > 1);
     for r in &rows {
         assert!(r.width() <= 22, "行宽 {} 超限", r.width());
@@ -50,7 +49,7 @@ fn test_wrap_styled_line_keeps_styles() {
             ratatui::style::Style::default().add_modifier(Modifier::BOLD),
         ),
     ]);
-    let rows = wrap_styled_line(&line, 30);
+    let rows = super::convert::wrap_styled_line(&line, 30);
     assert!(rows.len() > 1);
     let has_bold = rows.iter().any(|r| {
         r.spans
@@ -71,8 +70,8 @@ fn test_wrap_styled_line_keeps_styles() {
 #[test]
 fn test_wrap_styled_line_zero_width_and_short() {
     let short = ratatui::text::Line::from("abc");
-    assert_eq!(wrap_styled_line(&short, 10).len(), 1);
-    let rows = wrap_styled_line(&short, 0);
+    assert_eq!(super::convert::wrap_styled_line(&short, 10).len(), 1);
+    let rows = super::convert::wrap_styled_line(&short, 0);
     assert_eq!(rows.len(), 1);
     assert_eq!(line_text(&rows[0]), "abc");
 }
@@ -81,7 +80,7 @@ fn test_wrap_styled_line_zero_width_and_short() {
 #[test]
 fn test_wrap_styled_line_single_wide_grapheme() {
     let line = ratatui::text::Line::from("汉");
-    let rows = wrap_styled_line(&line, 1);
+    let rows = super::convert::wrap_styled_line(&line, 1);
     assert_eq!(rows.len(), 1, "超宽 grapheme 独占一行");
     assert_eq!(line_text(&rows[0]), "汉");
 }

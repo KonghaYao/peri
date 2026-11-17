@@ -7,12 +7,10 @@ use peri_acp::transport::types::AcpError;
 use serde_json::json;
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms::{
-    ACTIVE_EXECUTION_CWD, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, THREAD_BROWSER_ARCHIVED,
-    THREAD_BROWSER_SCOPE, THREAD_LIST_PAGE_COUNT,
-};
 
-use super::commit::{ProjectionIdentity, ProjectionUpdate, SnapshotPatch, commit_projection};
+use super::commit::ProjectionIdentity;
+use super::commit::ProjectionUpdate;
+use super::commit::SnapshotPatch;
 
 pub(crate) async fn refresh_mcp_projection(
     client: &AcpTuiClient,
@@ -43,10 +41,22 @@ pub(crate) async fn refresh_mcp_projection(
     .await
     .map_err(|_| AcpError::new(-32603, "MCP projection refresh timed out"))??;
     let (mcp, servers) = super::session_services::decode_mcp(value, client.supports_mcp_control())?;
-    Ok(commit_projection(
+    Ok(super::commit::commit_projection(
         Some(client),
         &expected,
         &[SnapshotPatch::Mcp(mcp)],
         ProjectionUpdate::Mcp(servers),
     ))
 }
+
+use crate::kit::atoms::ACTIVE_EXECUTION_CWD;
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::THREAD_BROWSER_ARCHIVED;
+
+use crate::kit::atoms::THREAD_BROWSER_SCOPE;
+
+use crate::kit::atoms::THREAD_LIST_PAGE_COUNT;

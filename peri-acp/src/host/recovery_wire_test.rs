@@ -4,7 +4,14 @@
 //! 走真实 `ServerLoop`：模式分流、生命周期锁与响应装配都是分发层的职责，只测
 //! `HostSessionRecovery` 会漏掉「恢复是否在响应之后放行」这一层。
 
-use super::*;
+use crate::host::requests::tests::recovery_tests::RecoveryHarness;
+use crate::transport::types::IncomingMessage;
+use crate::transport::types::RequestId;
+
+use peri_acp_types::thread::WorkState;
+use serde_json::json;
+use serde_json::Value;
+use std::sync::Arc;
 
 /// 真实 server loop；transport 的收件箱由用例提前填充。
 pub(super) async fn run_server_loop(harness: &RecoveryHarness) {
@@ -94,7 +101,7 @@ async fn load_response_precedes_the_recovery_turn() {
             .any(|(id, result)| *id == RequestId::Number(2) && result.is_ok()),
         "load 必须成功返回：{responses:?}"
     );
-    wait_for("恢复 turn 调用模型", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("恢复 turn 调用模型", || async {
         harness._mock.matched()
     })
     .await;
@@ -222,7 +229,7 @@ async fn blocked_session_prompt_returns_recovery_execution_blocked() {
     );
     run_server_loop(&harness).await;
 
-    wait_for("阻断的 prompt 返回错误", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("阻断的 prompt 返回错误", || async {
         harness.recorded.error_for(RequestId::Number(3)).is_some()
     })
     .await;
@@ -256,6 +263,27 @@ async fn idle_load_has_no_recovery_meta() {
     assert!(
         response["_meta"].get("peri.recovery").is_none(),
         "idle load 不应有恢复字段：{response}"
+    );
+}
+
+/// [回归测试] root-only working partition 不需要 child completion target，不得读取整树。
+#[tokio::test]
+async fn recovery_wire_root_only_load_skips_session_tree_query() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.set_working(&root).await;
+    crate::host::recovery::HostSessionRecovery::install_tree_query_probe(&root);
+    push_request(&harness, 2, "session/load", json!({"sessionId": root}));
+    run_server_loop(&harness).await;
+    let response = response_for(&harness, 2, "root-only load");
+    assert_eq!(
+        response["_meta"]["peri.recovery"]["recovered"],
+        json!([root])
+    );
+    assert_eq!(
+        crate::host::recovery::HostSessionRecovery::take_tree_query_count(&harness.thread_id,),
+        0,
+        "没有 working child 时不得调用 list_session_tree"
     );
 }
 

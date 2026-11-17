@@ -1,4 +1,4 @@
-use super::*;
+use super::{FoldState, TuiSkillPresentation, TuiToolCard, TuiToolPresentation};
 
 /// [回归测试] 无分配格式化哈希须与原公式一致，含 Unicode、presentation、fold 及秒级时长。
 #[test]
@@ -44,7 +44,10 @@ fn test_tool_hash_writer_preserves_format_hash_contract() {
             card.recompute_hash();
             assert_eq!(
                 card.content_hash,
-                tui_hash_combine(tui_hash_str(&old_input), card.diff_code())
+                super::super::hash::tui_hash_combine(
+                    super::super::hash::tui_hash_str(&old_input),
+                    card.diff_code()
+                )
             );
         }
     }

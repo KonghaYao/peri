@@ -1,17 +1,18 @@
 use std::time::Duration;
 
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, ClientRequest, CustomRequest, MetaObject,
-        RequestMetaObject, ServerResult,
-    },
-    ServiceExt,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::MetaObject;
+use rmcp::model::RequestMetaObject;
+use rmcp::model::ServerResult;
+use rmcp::ServiceExt;
 
-use crate::{
-    filesystem::transaction::{gate_next_commit, CommitGate},
-    WorkspaceMcpServer, TASK_OWNER_META_KEY,
-};
+use crate::filesystem::transaction;
+use crate::filesystem::transaction::CommitGate;
+use crate::WorkspaceMcpServer;
+use crate::TASK_OWNER_META_KEY;
 
 fn owner_meta(owner: &str) -> serde_json::Value {
     serde_json::json!({(TASK_OWNER_META_KEY): owner})
@@ -94,7 +95,7 @@ async fn rewind_wire_restores_write_pre_image_and_keeps_generic_edit() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("target.txt");
     tokio::fs::write(&file, "user original").await.unwrap();
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client_io, server_io) = tokio::io::duplex(8192);
     let server_task = tokio::spawn(async move {
         server
@@ -201,7 +202,7 @@ async fn rewind_edit_snapshot_excludes_write_that_lands_after_commit() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("target.txt");
     tokio::fs::write(&file, "user=old\nalpha").await.unwrap();
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client_io, server_io) = tokio::io::duplex(8192);
     let server_task = tokio::spawn(async move {
         server
@@ -216,7 +217,7 @@ async fn rewind_edit_snapshot_excludes_write_that_lands_after_commit() {
 
     // 让 Edit 在持锁提交后暂停；此时另一个写入者落盘，正好模拟旧实现的锁外 post 读窗口。
     let gate = std::sync::Arc::new(CommitGate::new());
-    gate_next_commit(&file.canonicalize().unwrap(), gate.clone());
+    transaction::gate_next_commit(&file.canonicalize().unwrap(), gate.clone());
     let peer = client.peer().clone();
     let edit_path = file.clone();
     let edit = tokio::spawn(async move {

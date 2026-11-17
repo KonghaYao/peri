@@ -8,23 +8,27 @@ use std::sync::{Arc, Mutex};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction},
-        style::{Modifier, Style, Stylize},
-        text::{Line, Span},
-        widgets::{Block, Borders, Paragraph},
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Block;
+use ratatui_kit::ratatui::widgets::Borders;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 use crate::i18n;
-use crate::kit::atoms::SLASH_SELECTED_INDEX;
-use crate::kit::inline_nav::{
-    InlineNavAction, clamp_selection, classify_inline_nav, next_selection, previous_selection,
-};
-use crate::kit::panel_mouse::{AreaTracker, ListLayout, hit_item};
+
+use crate::kit::inline_nav::InlineNavAction;
+use crate::kit::panel_mouse::AreaTracker;
+use crate::kit::panel_mouse::ListLayout;
 use crate::kit::slash_projection::ArgsSchema;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
@@ -40,6 +44,7 @@ pub enum SlashActionKind {
 /// Slash 条目按 kind 的静态语义色（S16：三层 slash 用颜色区分，不用方括号标签）。
 /// McpSkill 用 `semantic.model_info`（spec 允许「主题中专门 token」，
 /// `semantic.status.info` 不存在——不加 peri-theme 新字段，零范围蔓延）。
+#[must_use]
 pub(crate) fn slash_kind_color(
     kind: &SlashActionKind,
     semantic: &peri_theme::semantic::SemanticTokens,
@@ -74,6 +79,7 @@ pub struct SlashCompletionItem {
 impl SlashCompletionItem {
     /// 预计算双索引匹配串：label_lowercase + fullname_lowercase 合并。
     /// fullname 为空（过渡期合成条目）时退化为 label 小写。
+    #[must_use]
     pub fn make_search_lowercase(label_lowercase: &str, fullname: &str) -> String {
         if fullname.is_empty() {
             label_lowercase.to_string()
@@ -92,7 +98,7 @@ pub struct SlashCompletionProps {
     /// 无候选（列表空 / prefix 无匹配）时 Confirm 的落点：关闭弹窗后把 Enter
     /// 交回**提交通道**（输入区 `submit_text` 落点）。
     ///
-    /// [Why] 本组件在同一输入层、同优先级下晚于输入区注册；输入区的 Enter 提交
+    /// \[Why\] 本组件在同一输入层、同优先级下晚于输入区注册；输入区的 Enter 提交
     /// 分支带 `!slash_active` 守卫（peri-tui/src/kit/input_area.rs），事件只会被
     /// 本组件消费一次——无候选时若只 `on_cancel`，用户按下的 Enter 与输入框内容
     /// 会被静默吞掉（`/plugin` 打不开面板）。因此由弹窗自己回调提交，而不依赖
@@ -137,7 +143,9 @@ pub(crate) fn confirm_outcome(selection: usize, item_count: usize) -> ConfirmOut
     if item_count == 0 {
         ConfirmOutcome::Submit
     } else {
-        ConfirmOutcome::Select(clamp_selection(selection, item_count))
+        ConfirmOutcome::Select(crate::kit::inline_nav::clamp_selection(
+            selection, item_count,
+        ))
     }
 }
 
@@ -165,7 +173,7 @@ pub fn SlashCompletion(
 
     // 可见窗口（渲染时 skip(scroll_start).take(visible_rows)）——选中项保持在
     // 可视区域上 1/3 处；鼠标命中反推需要与渲染使用同一 scroll_start。
-    let sel_idx = clamp_selection(*selection.read(), item_count);
+    let sel_idx = crate::kit::inline_nav::clamp_selection(*selection.read(), item_count);
     let popup_h = THEME_ATOM.state().read().component.popup.inline_height;
     let visible_rows = popup_h.saturating_sub(2) as usize; // 减去上下边框
     let scroll_start = if item_count <= visible_rows {
@@ -183,7 +191,7 @@ pub fn SlashCompletion(
             // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
             if let Event::Mouse(mouse) = event {
                 if let Some(area) = area
-                    && let Some(idx) = hit_item(
+                    && let Some(idx) = crate::kit::panel_mouse::hit_item(
                         &mouse,
                         area,
                         ListLayout {
@@ -222,15 +230,15 @@ pub fn SlashCompletion(
             if key.kind != KeyEventKind::Press {
                 return EventResult::Ignored;
             }
-            match classify_inline_nav(&key) {
+            match crate::kit::inline_nav::classify_inline_nav(&key) {
                 Some(InlineNavAction::MoveUp) => {
                     let mut s = selection.write();
-                    *s = previous_selection(*s);
+                    *s = crate::kit::inline_nav::previous_selection(*s);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::MoveDown) => {
                     let mut s = selection.write();
-                    *s = next_selection(*s, item_count);
+                    *s = crate::kit::inline_nav::next_selection(*s, item_count);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::Confirm) => {
@@ -368,6 +376,8 @@ pub fn SlashCompletion(
         }
     )
 }
+
+use crate::kit::atoms::SLASH_SELECTED_INDEX;
 
 #[cfg(test)]
 mod tests {

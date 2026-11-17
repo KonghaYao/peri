@@ -4,19 +4,18 @@
 //! - 下载中：逐文件显示状态（Pending → Downloading → Done/Failed）
 //! - 完成后本组件处理 Esc；下载中交给 root 关闭展示，后台任务继续
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
-    prelude::*,
-    ratatui::{
-        style::Style,
-        text::{Line, Span},
-        widgets::Paragraph,
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
 use crate::i18n;
-use crate::kit::atoms::{DOWNLOAD_PROGRESS, FileDownloadStatus, LANG_VERSION};
-use crate::kit::popup_overlay::close_popup;
+
 use peri_theme::atoms::THEME_ATOM;
 
 /// 弹窗最大行数（标题 + 条目）
@@ -35,7 +34,7 @@ pub(crate) fn handle_download_progress_event(event: Event) -> EventResult {
             let dl = DOWNLOAD_PROGRESS.state();
             let current = dl.read().clone();
             if current.finished {
-                close_popup();
+                crate::kit::popup_overlay::close_popup();
                 return EventResult::Consumed;
             }
             EventResult::Ignored
@@ -178,3 +177,9 @@ pub fn DownloadProgressPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         }
     )
 }
+
+use crate::kit::atoms::DOWNLOAD_PROGRESS;
+
+use crate::kit::atoms::FileDownloadStatus;
+
+use crate::kit::atoms::LANG_VERSION;

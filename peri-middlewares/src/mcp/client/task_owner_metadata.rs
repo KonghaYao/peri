@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use peri_acp_types::builtin_mcp::find;
+use peri_acp_types::builtin_mcp;
 use peri_acp_types::tasks::TaskManager;
 use rmcp::model::RequestMetaObject;
 
@@ -16,9 +16,49 @@ pub(crate) fn source_uses_task_owner(source: Option<&crate::mcp::config::ConfigS
     match source {
         Some(crate::mcp::config::ConfigSource::WorkspaceRemote) => true,
         Some(crate::mcp::config::ConfigSource::Builtin { instance }) => {
-            find(instance).is_some_and(|declared| declared.task_owner_scoped)
+            if builtin_mcp::is_v5_server_name(instance) {
+                // 单出口聚合多种能力；服务端级判定用于订阅 / 恢复等 workspace 语义，
+                // 工具调用改用 [`tool_uses_task_owner`] 逐能力判定。
+                true
+            } else {
+                builtin_mcp::find(instance).is_some_and(|declared| declared.task_owner_scoped)
+            }
         }
         Some(_) | None => false,
+    }
+}
+
+/// v5 单出口工具所属能力；迁移期与外部 server 返回 `None`。
+pub(crate) fn tool_capability(
+    source: Option<&crate::mcp::config::ConfigSource>,
+    tool_name: &str,
+) -> Option<&'static peri_acp_types::builtin_mcp::v5::BuiltinCapability> {
+    match source {
+        Some(crate::mcp::config::ConfigSource::Builtin { instance })
+            if builtin_mcp::is_v5_server_name(instance) =>
+        {
+            builtin_mcp::capability_of_original_tool(tool_name).map(|(capability, _)| capability)
+        }
+        _ => None,
+    }
+}
+
+/// 单次工具调用是否需要注入 `_meta["peri/taskOwner"]`。
+///
+/// v5 单出口按工具所属能力的 `host_injection.task_owner_scoped` 判定；
+/// 迁移期六实例与远端 Workspace 沿用来源级判定。
+pub(crate) fn tool_uses_task_owner(
+    source: Option<&crate::mcp::config::ConfigSource>,
+    tool_name: &str,
+) -> bool {
+    match source {
+        Some(crate::mcp::config::ConfigSource::Builtin { instance })
+            if builtin_mcp::is_v5_server_name(instance) =>
+        {
+            builtin_mcp::capability_of_original_tool(tool_name)
+                .is_some_and(|(capability, _)| capability.host_injection.task_owner_scoped)
+        }
+        _ => source_uses_task_owner(source),
     }
 }
 
@@ -59,10 +99,13 @@ impl McpClientPool {
         server: &str,
         session_id: &str,
     ) -> Option<RequestMetaObject> {
+        let resolved = self
+            .capability_server_name(server)
+            .unwrap_or_else(|| server.to_string());
         let source = self
             .clients
             .read()
-            .get(server)
+            .get(&resolved)
             .and_then(|client| client.source.clone());
         task_owner_meta(source.as_ref(), session_id)
     }

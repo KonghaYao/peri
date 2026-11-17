@@ -17,7 +17,7 @@ use turso_serverless::Value;
 
 use peri_acp_types::thread::ThreadId;
 
-use super::sql::{text_at, StatementSpec};
+use super::sql::StatementSpec;
 
 /// 远端 op_ledger 表：每个 operation 一行，`operation_id` 是主键（唯一键空间）。
 pub(super) const OP_LEDGER_TABLE: &str = "peri_op_ledger";
@@ -213,11 +213,14 @@ pub(super) enum LedgerRow {
 
 /// 解码 `state, receipt, digest` 三列；形状不符一律 `Malformed`，不推断。
 pub(super) fn decode_row(values: &[Value]) -> LedgerRow {
-    let Some(state) = text_at(values, 0) else {
+    let Some(state) = super::sql::text_at(values, 0) else {
         return LedgerRow::Malformed;
     };
     match state {
-        STATE_APPLIED => match (text_at(values, 1), text_at(values, 2)) {
+        STATE_APPLIED => match (
+            super::sql::text_at(values, 1),
+            super::sql::text_at(values, 2),
+        ) {
             (Some(receipt), Some(digest)) => LedgerRow::Applied {
                 receipt: Receipt(receipt.to_owned()),
                 digest: digest.to_owned(),

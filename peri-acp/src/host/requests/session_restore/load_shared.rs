@@ -22,14 +22,18 @@ use peri_acp_types::recovery::{
 };
 use peri_acp_types::thread::ThreadId;
 
+use crate::dispatch;
 use crate::host::connection::ConnectionFacts;
 use crate::host::history_service::{self, HistoryInitialContext};
 use crate::host::history_v2_adapter::HistoryV2BackendAdapter;
 use crate::host::history_v2_load::LoadInitial;
 use crate::host::{AcpServerConfig, ContextOwnership, SharedSessions};
-use crate::{dispatch, transport::types::AcpError};
+use crate::transport::types::AcpError;
 
-use super::*;
+use super::{
+    LoadGeneration, LoadSessionResponse, PreparedSession, ResumeSessionResponse, SessionState,
+    TuiReplaySender,
+};
 
 /// initial 沿用独立的可取消恢复期限（设计 §12.4）：分页 10 秒总期限会误杀合法冷启动。
 const LOAD_INITIAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -45,8 +49,11 @@ pub(crate) async fn handle_load_shared(
 ) -> Result<Value, AcpError> {
     let generation = crate::host::history_page::initial_load_generation(params)?
         .unwrap_or_else(LoadGeneration::generate);
-    let prepared = match prepare_shared(params, cfg, sessions).await {
-        Ok(prepared) => prepared.prepared,
+    let PreparedShared {
+        prepared,
+        publication,
+    } = match prepare_shared(params, cfg, sessions).await {
+        Ok(prepared) => prepared,
         Err(error) => {
             if let Some(kind) = view_only_kind(&error) {
                 return serve_view_only_load(
@@ -65,52 +72,69 @@ pub(crate) async fn handle_load_shared(
             return Err(error);
         }
     };
-    // 窗口连接的首屏不是 load 响应里的回放：声明 `peri.historyWindowV1` 后，
-    // `session/load` 只装配会话，历史由随后的 `history.open` 提供。判据取本连接
-    // 的协商事实，不能用 `history_pagination` 代替——两者独立。
-    // History V2 initial 同样自行交付首屏，不再执行 V1 回放；所有权检查仍保留。
-    let skip_replay = connection.history_window_v1 || history.is_some();
-    let environment = replay_after_load(
-        cfg,
-        sessions,
-        &prepared.id,
-        transport,
-        &connection,
-        &generation,
-        skip_replay,
-    )
-    .await?;
-    let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    // 进入会话的占用初值：已保存快照 + 当前有效 window。读取失败不阻断 load，
-    // 缺失字段由客户端按未知展示（设计 §2.2）。
-    let context_usage = saved_context_usage(cfg, sessions, &prepared.id).await;
-    let mut response = finish_load_response(
-        cfg,
-        transport,
-        &prepared.id,
-        prepared.identity,
-        &connection,
-        &generation,
-        context_usage,
-    )
-    .await?;
-    // 非 V2 连接成功接管会话：撤销上一条连接留下的实时投递绑定，事件回到 V1 wire
-    // 形状。失败路径（装配/回放拒绝）不破坏既有交付。
-    if history.is_none() {
-        crate::host::live_delivery::detach_session(sessions, &prepared.id).await;
-    }
-    if let Some(initial) = history {
-        attach_history_initial(
+    let outcome: Result<Value, AcpError> = async {
+        // 窗口连接的首屏不是 load 响应里的回放：声明 `peri.historyWindowV1` 后，
+        // `session/load` 只装配会话，历史由随后的 `history.open` 提供。判据取本连接
+        // 的协商事实，不能用 `history_pagination` 代替——两者独立。
+        // History V2 initial 同样自行交付首屏，不再执行 V1 回放；所有权检查仍保留。
+        let skip_replay = connection.history_window_v1 || history.is_some();
+        let environment = replay_after_load(
             cfg,
             sessions,
             &prepared.id,
+            transport,
             &connection,
-            initial,
-            &mut response,
+            &generation,
+            skip_replay,
         )
         .await?;
+        let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+        // 进入会话的占用初值：已保存快照 + 当前有效 window。读取失败不阻断 load，
+        // 缺失字段由客户端按未知展示（设计 §2.2）。
+        let context_usage = saved_context_usage(local, sessions, &prepared.id).await;
+        let mut response = finish_load_response(
+            local,
+            transport,
+            &prepared.id,
+            prepared.identity,
+            &connection,
+            &generation,
+            context_usage,
+        )
+        .await?;
+        if let Some(initial) = history {
+            attach_history_initial(
+                local,
+                sessions,
+                &prepared.id,
+                &connection,
+                initial,
+                &mut response,
+            )
+            .await?;
+        } else {
+            // 非 V2 连接成功接管会话：撤销上一条连接留下的实时投递绑定，事件回到 V1
+            // wire 形状。失败路径（装配/回放拒绝）不破坏既有交付。
+            crate::host::live_delivery::detach_session(sessions, &prepared.id).await;
+            if connection.history_pagination {
+                crate::host::history_page::attach_initial_cursor(
+                    cfg,
+                    sessions,
+                    &prepared.id,
+                    &mut response,
+                )
+                .await?;
+            }
+        }
+        Ok(response)
     }
-    Ok(response)
+    .await;
+    match outcome {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            Err(rollback_after_restore_error(cfg, sessions, publication.as_ref(), error).await)
+        }
+    }
 }
 
 /// 在 standard `session/load` 响应上挂载 `_meta["peri.history"]`。
@@ -251,9 +275,53 @@ async fn saved_context_usage(
     }))
 }
 
-/// 共享的“确保会话已 live”阶段：load/resume/fork 复用，不包含回放或具体响应语义。
+/// 仅测试：在 cold publication 发布后、handler 后处理前注入一次状态变更。
+#[cfg(test)]
+pub(crate) mod publication_test_hook {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    use crate::host::{SessionState, SharedSessions};
+
+    type Hook = Box<dyn FnOnce(&mut SessionState) + Send>;
+    static HOOKS: LazyLock<Mutex<HashMap<String, Hook>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install(session_id: &str, hook: impl FnOnce(&mut SessionState) + Send + 'static) {
+        HOOKS
+            .lock()
+            .unwrap()
+            .insert(session_id.to_owned(), Box::new(hook));
+    }
+
+    pub(super) async fn apply(session_id: &str, sessions: &SharedSessions) {
+        let hook = HOOKS.lock().unwrap().remove(session_id);
+        if let Some(hook) = hook {
+            let mut states = sessions.lock().await;
+            if let Some(state) = states.get_mut(session_id) {
+                hook(state);
+            }
+        }
+    }
+}
+
+/// 冷恢复发布的唯一身份；只有同一 generation 仍占据 map 时才有清理权。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RestorePublication {
+    pub(crate) session_id: String,
+    pub(crate) session_generation: u64,
+}
+
+impl RestorePublication {
+    fn matches(&self, state: &SessionState) -> bool {
+        state.session_id == self.session_id && state.session_generation == self.session_generation
+    }
+}
+
+/// 共享准备结果：live 复用没有 publication，cold 发布携带精确 generation。
 pub(super) struct PreparedShared {
     pub(super) prepared: PreparedSession,
+    pub(super) publication: Option<RestorePublication>,
 }
 
 pub(super) async fn prepare_shared(
@@ -263,19 +331,27 @@ pub(super) async fn prepare_shared(
 ) -> Result<PreparedShared, AcpError> {
     let already_loaded = {
         let states = sessions.lock().await;
-        super::reject_incomplete_local_close(params, &states)?;
+        crate::host::requests::session_lifecycle::restore::session_restore_dispatch::reject_incomplete_local_close(params, &states)?;
         params
             .get("sessionId")
             .and_then(Value::as_str)
             .and_then(|id| states.get(id))
             .is_some()
     };
-    let prepared = if already_loaded {
-        prepare_live_shared(params, cfg, sessions).await?
+    let (prepared, publication) = if already_loaded {
+        (prepare_live_shared(params, cfg, sessions).await?, None)
     } else {
-        prepare_cold_shared(params, cfg, sessions).await?
+        let (prepared, publication) = prepare_cold_shared(params, cfg, sessions).await?;
+        (prepared, Some(publication))
     };
-    Ok(PreparedShared { prepared })
+    #[cfg(test)]
+    if publication.is_some() {
+        publication_test_hook::apply(&prepared.id, sessions).await;
+    }
+    Ok(PreparedShared {
+        prepared,
+        publication,
+    })
 }
 
 /// 冷恢复：复用 `prepare_existing` 完成装配，但只在**局部 scratch map** 上操作；
@@ -284,13 +360,17 @@ async fn prepare_cold_shared(
     params: &Value,
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
-) -> Result<PreparedSession, AcpError> {
+) -> Result<(PreparedSession, RestorePublication), AcpError> {
     let mut scratch = HashMap::new();
     let prepared = super::prepare_existing(params, cfg, &mut scratch).await?;
     let PreparedSession { id, identity } = prepared;
     let state = scratch
         .remove(&id)
         .ok_or_else(|| AcpError::new(-32603, "cold restore produced no session state"))?;
+    let publication = RestorePublication {
+        session_id: id.clone(),
+        session_generation: state.session_generation,
+    };
     let conflict = {
         let mut states = sessions.lock().await;
         if states.contains_key(&id) {
@@ -310,7 +390,7 @@ async fn prepare_cold_shared(
         ));
     }
 
-    Ok(PreparedSession { id, identity })
+    Ok((PreparedSession { id, identity }, publication))
 }
 
 /// 已 live：preflight 在锁外完成，payload 回填与 generation 刷新各自短锁。
@@ -319,7 +399,7 @@ async fn prepare_live_shared(
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
 ) -> Result<PreparedSession, AcpError> {
-    super::reject_closing_session(params, cfg).await?;
+    crate::host::requests::session_lifecycle::restore::session_restore_dispatch::reject_closing_session(params, cfg).await?;
     let id = params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -354,7 +434,8 @@ async fn prepare_live_shared(
         .drain_persistence(&id)
         .await
         .map_err(crate::host::workspace::resource_error)?;
-    let effective_servers = super::super::session_mcp_servers(params)?;
+    let effective_servers =
+        crate::host::requests::session_lifecycle::session_mcp_setup::session_mcp_servers(params)?;
     let legacy_adoption =
         super::legacy_session::prepare_for_restore(cfg, &id, None, effective_servers).await?;
     let mut environment_slot = legacy_adoption
@@ -369,8 +450,8 @@ async fn prepare_live_shared(
             params.get("cwd").and_then(Value::as_str),
         )
         .await?;
-        let persisted = super::load_frozen_bytes(cfg, &id).await?;
-        super::decode_frozen_snapshot(&persisted).map_err(workspace_error)?;
+        let persisted = crate::host::requests::session_lifecycle::restore::session_restore_dispatch::load_frozen_bytes(cfg, &id).await?;
+        crate::session::frozen_snapshot::decode_frozen_snapshot(&persisted).map_err(crate::host::workspace::workspace_error)?;
         let identity = super::response_identity(cfg, &id).await?;
 
         let live = {
@@ -456,7 +537,7 @@ async fn prepare_live_shared(
     match outcome {
         Ok(prepared) => Ok(prepared),
         Err(error) => {
-            Err(super::shutdown_bootstrapped_environment(environment_slot.take(), error).await)
+            Err(crate::host::requests::session_lifecycle::restore::session_restore_dispatch::shutdown_bootstrapped_environment(environment_slot.take(), error).await)
         }
     }
 }
@@ -574,6 +655,117 @@ async fn replay_after_load(
     Ok(environment)
 }
 
+/// 回滚已经发布到共享 map 的 cold restore。
+///
+/// 清理期间 state 保持 `closing` 并继续持有 environment；只有 manager 与 environment
+/// 都确认排空后，才按 publication generation 删除。旧 generation 永不删除新 state。
+pub(crate) async fn rollback_restore_publication(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    publication: &RestorePublication,
+) -> Result<(), AcpError> {
+    rollback_publication(cfg, sessions, publication, false).await
+}
+
+/// 回收已经发布、但尚无 turn 接管的 cold restore（恢复准备失败/跳过的路径）。
+///
+/// `closing` 只在该代次仍无 `cancel_token` 时设置：判定与 turn 准入共用
+/// `SharedSessions` 锁（prompt 在锁内发布令牌并检查 `closing`），因此要么 turn
+/// 先取得会话、回滚放弃删除，要么回滚先置 `closing`、新 turn 被拒绝。不能把
+/// 已开始的 turn 连同环境一起拆掉。
+pub(crate) async fn rollback_unused_restore_publication(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    publication: &RestorePublication,
+) -> Result<(), AcpError> {
+    rollback_publication(cfg, sessions, publication, true).await
+}
+
+async fn rollback_publication(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    publication: &RestorePublication,
+    require_idle: bool,
+) -> Result<(), AcpError> {
+    let environment = {
+        let mut states = sessions.lock().await;
+        let Some(state) = states.get_mut(&publication.session_id) else {
+            return Ok(());
+        };
+        if !publication.matches(state) {
+            return Ok(());
+        }
+        // 本代次已有 turn 持有会话：会话归执行方，回滚必须放弃。
+        if require_idle && state.cancel_token.is_some() {
+            return Ok(());
+        }
+        state.closing = true;
+        state.environment.clone()
+    };
+    let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    let manager_error = local
+        .session_manager
+        .close_session(&publication.session_id)
+        .await
+        .err()
+        .map(|error| error.to_string());
+    let environment_drained = match environment.as_ref() {
+        Some(environment) => environment.shutdown().await,
+        None => true,
+    };
+    if manager_error.is_none() && environment_drained {
+        let mut states = sessions.lock().await;
+        if states
+            .get(&publication.session_id)
+            .is_some_and(|state| publication.matches(state))
+        {
+            states.remove(&publication.session_id);
+        }
+        return Ok(());
+    }
+    let manager_detail = manager_error.as_deref().unwrap_or("complete");
+    tracing::error!(
+        session_id = %publication.session_id,
+        session_generation = publication.session_generation,
+        manager = manager_detail,
+        environment_drained,
+        "cold restore cleanup remains pending"
+    );
+    Err(AcpError::new(
+        -32010,
+        format!(
+            "Session {} cleanup incomplete: manager={manager_detail}, environment_drained={environment_drained}",
+            publication.session_id
+        ),
+    )
+    .with_data(serde_json::json!({
+        "reason": "session_cleanup_incomplete",
+        "sessionId": publication.session_id,
+    })))
+}
+
+pub(super) async fn rollback_after_restore_error(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    publication: Option<&RestorePublication>,
+    error: AcpError,
+) -> AcpError {
+    let Some(publication) = publication else {
+        return error;
+    };
+    match rollback_restore_publication(cfg, sessions, publication).await {
+        Ok(()) => error,
+        Err(cleanup) => {
+            let mut combined = AcpError::new(
+                cleanup.code,
+                format!("{}; {}", error.message, cleanup.message),
+            );
+            combined.data = cleanup.data;
+            combined
+        }
+    }
+}
+
 /// 清理未发布的恢复装配：环境与 session_manager 登记都不能泄漏。
 pub(crate) async fn cleanup_unpublished_restore(
     cfg: &AcpServerConfig,
@@ -608,7 +800,15 @@ async fn ensure_view_only_state(
     sessions: &SharedSessions,
     kind: &'static str,
     error: &AcpError,
-) -> Result<(String, ThreadId, RecoveryFailureView), AcpError> {
+) -> Result<
+    (
+        String,
+        ThreadId,
+        RecoveryFailureView,
+        Option<RestorePublication>,
+    ),
+    AcpError,
+> {
     let session_id = params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -620,24 +820,28 @@ async fn ensure_view_only_state(
         // 连元数据都读不到：保持原始装配错误，不伪装成可浏览历史。
         Err(_) => return Err(error.clone()),
     };
-    {
+    let publication = {
         let mut states = sessions.lock().await;
         if let Some(state) = states.get(&session_id) {
             // 已有 live 会话不降级；已发布的视图态可重复加载（历史/占用重放）。
             if !state.is_view_only() {
                 return Err(error.clone());
             }
+            None
         } else {
-            states.insert(
+            let state = crate::host::SessionState::view_only(
                 session_id.clone(),
-                crate::host::SessionState::view_only(
-                    session_id.clone(),
-                    thread.as_str().to_owned(),
-                    meta.cwd.clone(),
-                ),
+                thread.as_str().to_owned(),
+                meta.cwd.clone(),
             );
+            let publication = RestorePublication {
+                session_id: session_id.clone(),
+                session_generation: state.session_generation,
+            };
+            states.insert(session_id.clone(), state);
+            Some(publication)
         }
-    }
+    };
     cfg.session_manager.ensure_session(&session_id, &meta.cwd);
     let kind = if kind == "read_only" {
         RecoveryErrorKind::ReadOnly
@@ -653,7 +857,7 @@ async fn ensure_view_only_state(
     if let Some(runtime) = cfg.session_manager.get_session(&session_id) {
         runtime.set_recovery_execution_block(failure.clone());
     }
-    Ok((session_id, thread, failure))
+    Ok((session_id, thread, failure, publication))
 }
 
 fn view_only_recovery_view(
@@ -687,52 +891,68 @@ async fn serve_view_only_load(
     kind: &'static str,
     error: &AcpError,
 ) -> Result<Value, AcpError> {
-    let (session_id, thread, failure) =
+    let (session_id, thread, failure, publication) =
         ensure_view_only_state(params, cfg, sessions, kind, error).await?;
-    // 与正常 load 同一条回放路径：窗口连接跳过首屏回放，其余连接读存储回放。
-    if let Err(replay_error) = replay_after_load(
-        cfg,
-        sessions,
-        &session_id,
-        transport,
-        connection,
-        generation,
-        connection.history_window_v1 || history.is_some(),
-    )
-    .await
-    {
-        cleanup_unpublished_restore(cfg, &session_id, None).await;
-        sessions.lock().await.remove(&session_id);
-        return Err(replay_error);
-    }
-    let identity = response_identity(cfg, &session_id).await.ok().flatten();
-    let context_usage = saved_context_usage(cfg, sessions, &session_id).await;
-    let mut response = finish_load_response(
-        cfg,
-        transport,
-        &session_id,
-        identity,
-        connection,
-        generation,
-        context_usage,
-    )
-    .await?;
-    response["_meta"]["peri.recovery"] = view_only_recovery_view(&thread, failure)?;
-    if let Some(initial) = history {
-        // 历史可读与执行可用是独立事实：只读进入也遵守已协商的 initial 契约。
-        attach_history_initial(
+    let outcome: Result<Value, AcpError> = async {
+        // 与正常 load 同一条回放路径：窗口连接跳过首屏回放，其余连接读存储回放。
+        replay_after_load(
             cfg,
             sessions,
             &session_id,
+            transport,
             connection,
-            initial,
-            &mut response,
+            generation,
+            connection.history_window_v1 || history.is_some(),
         )
         .await?;
-    } else {
-        crate::host::live_delivery::detach_session(sessions, &session_id).await;
+        let identity = super::response_identity(cfg, &session_id)
+            .await
+            .ok()
+            .flatten();
+        let context_usage = saved_context_usage(cfg, sessions, &session_id).await;
+        let mut response = finish_load_response(
+            cfg,
+            transport,
+            &session_id,
+            identity,
+            connection,
+            generation,
+            context_usage,
+        )
+        .await?;
+        response["_meta"]["peri.recovery"] = view_only_recovery_view(&thread, failure)?;
+        if let Some(initial) = history {
+            // 历史可读与执行可用是独立事实：只读进入也遵守已协商的 initial 契约。
+            attach_history_initial(
+                cfg,
+                sessions,
+                &session_id,
+                connection,
+                initial,
+                &mut response,
+            )
+            .await?;
+        } else {
+            crate::host::live_delivery::detach_session(sessions, &session_id).await;
+            if connection.history_pagination {
+                crate::host::history_page::attach_initial_cursor(
+                    cfg,
+                    sessions,
+                    &session_id,
+                    &mut response,
+                )
+                .await?;
+            }
+        }
+        Ok(response)
     }
-    Ok(response)
+    .await;
+    match outcome {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            Err(rollback_after_restore_error(cfg, sessions, publication.as_ref(), error).await)
+        }
+    }
 }
 
 /// 只读/不可执行 store 的 resume：不取执行环境，只回身份、占用与阻断结果。
@@ -744,11 +964,11 @@ async fn serve_view_only_resume(
     kind: &'static str,
     error: &AcpError,
 ) -> Result<Value, AcpError> {
-    let (session_id, thread, failure) =
+    let (session_id, thread, failure, _publication) =
         ensure_view_only_state(params, cfg, sessions, kind, error).await?;
     let context_usage = saved_context_usage(cfg, sessions, &session_id).await;
     let caps = cfg.session_manager.ensure_session_caps(&session_id);
-    send_available_commands_update(
+    crate::host::notify::send_available_commands_update(
         transport,
         &session_id,
         &caps,
@@ -756,9 +976,12 @@ async fn serve_view_only_resume(
         cfg.stdio_command_filter,
     )
     .await;
-    prewarm_session_mcp_discovery(cfg, &session_id);
-    let identity = response_identity(cfg, &session_id).await.ok().flatten();
-    let mut response = identity_response(
+    crate::host::requests::session_lifecycle::prewarm_session_mcp_discovery(cfg, &session_id);
+    let identity = super::response_identity(cfg, &session_id)
+        .await
+        .ok()
+        .flatten();
+    let mut response = super::identity_response(
         serde_json::to_value(ResumeSessionResponse::new())
             .map_err(|error| AcpError::new(-32603, error.to_string()))?,
         identity,
@@ -780,17 +1003,21 @@ async fn finish_load_response(
     context_usage: Option<Value>,
 ) -> Result<Value, AcpError> {
     let session_caps = cfg.session_manager.ensure_session_caps(session_id);
-    send_config_option_update(transport.as_ref(), session_id, cfg).await;
-    let modes = build_mode_state(&cfg.permission_mode);
+    crate::host::notify::send_config_option_update(transport.as_ref(), session_id, cfg).await;
+    let modes = crate::session::state_builders::build_mode_state(&cfg.permission_mode);
     let config_options = {
         let c = cfg.peri_config.read();
         let p = cfg.provider.read();
-        make_config_options(&c, &p, cfg.permission_mode.load())
+        crate::host::requests::session_lifecycle::config_update::make_config_options(
+            &c,
+            &p,
+            cfg.permission_mode.load(),
+        )
     };
     let resp = LoadSessionResponse::new()
         .modes(modes)
         .config_options(config_options);
-    send_available_commands_update(
+    crate::host::notify::send_available_commands_update(
         transport,
         session_id,
         &session_caps,
@@ -798,8 +1025,8 @@ async fn finish_load_response(
         cfg.stdio_command_filter,
     )
     .await;
-    prewarm_session_mcp_discovery(cfg, session_id);
-    let mut response = identity_response(
+    crate::host::requests::session_lifecycle::prewarm_session_mcp_discovery(cfg, session_id);
+    let mut response = super::identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
     )?;
@@ -819,8 +1046,11 @@ pub(crate) async fn handle_resume_shared(
     sessions: &SharedSessions,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
-    let prepared = match prepare_shared(params, cfg, sessions).await {
-        Ok(prepared) => prepared.prepared,
+    let PreparedShared {
+        prepared,
+        publication,
+    } = match prepare_shared(params, cfg, sessions).await {
+        Ok(prepared) => prepared,
         Err(error) => {
             if let Some(kind) = view_only_kind(&error) {
                 return serve_view_only_resume(params, cfg, sessions, transport, kind, &error)
@@ -829,34 +1059,45 @@ pub(crate) async fn handle_resume_shared(
             return Err(error);
         }
     };
-    let environment = {
-        let states = sessions.lock().await;
-        states
-            .get(&prepared.id)
-            .ok_or_else(|| AcpError::new(-32602, "session not found"))?
-            .environment
-            .clone()
-    };
-    let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    // 与 load 同一展示契约：进入会话先给出已保存占用（设计 §2.2）。
-    let context_usage = saved_context_usage(cfg, sessions, &prepared.id).await;
-    let caps = cfg.session_manager.ensure_session_caps(&prepared.id);
-    send_available_commands_update(
-        transport,
-        &prepared.id,
-        &caps,
-        cfg.session_manager.command_registry_for(&prepared.id),
-        cfg.stdio_command_filter,
-    )
-    .await;
-    prewarm_session_mcp_discovery(cfg, &prepared.id);
-    let resp = ResumeSessionResponse::new();
-    let mut response = identity_response(
-        serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
-        prepared.identity,
-    )?;
-    if let Some(usage) = context_usage {
-        response["_meta"]["peri.contextUsage"] = usage;
+    let outcome: Result<Value, AcpError> = async {
+        let environment = {
+            let states = sessions.lock().await;
+            states
+                .get(&prepared.id)
+                .ok_or_else(|| AcpError::new(-32602, "session not found"))?
+                .environment
+                .clone()
+        };
+        let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+        let context_usage = saved_context_usage(local, sessions, &prepared.id).await;
+        let caps = local.session_manager.ensure_session_caps(&prepared.id);
+        crate::host::notify::send_available_commands_update(
+            transport,
+            &prepared.id,
+            &caps,
+            local.session_manager.command_registry_for(&prepared.id),
+            local.stdio_command_filter,
+        )
+        .await;
+        crate::host::requests::session_lifecycle::prewarm_session_mcp_discovery(
+            local,
+            &prepared.id,
+        );
+        let resp = ResumeSessionResponse::new();
+        let mut response = super::identity_response(
+            serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
+            prepared.identity,
+        )?;
+        if let Some(usage) = context_usage {
+            response["_meta"]["peri.contextUsage"] = usage;
+        }
+        Ok(response)
     }
-    Ok(response)
+    .await;
+    match outcome {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            Err(rollback_after_restore_error(cfg, sessions, publication.as_ref(), error).await)
+        }
+    }
 }

@@ -1,28 +1,39 @@
-use super::*;
+use super::FOLD_OVERRIDES;
+use super::FoldKey;
+use super::FoldState;
+use super::TuiCollapsedGroup;
+use super::TuiRenderUnit;
+use super::TuiSystemReminder;
+use super::TuiToolCard;
+use super::TuiToolPresentation;
+use super::TuiUserBubble;
+use super::serial;
+use crate::kit::message_area::entry_nav;
+use ratatui_kit::prelude::*;
 
 // ── Slice 2：entry 焦点导航纯函数 ─────────────────────────────────────────
 
 #[test]
 fn test_move_entry_focus_from_none_alt_up_targets_last_entry() {
     // Alt+Up 从无焦点 → 最新 entry（末项）
-    assert_eq!(move_entry_focus(5, None, -1), Some(4));
-    assert_eq!(move_entry_focus(1, None, -1), Some(0));
-    assert_eq!(move_entry_focus(0, None, -1), None);
+    assert_eq!(entry_nav::move_entry_focus(5, None, -1), Some(4));
+    assert_eq!(entry_nav::move_entry_focus(1, None, -1), Some(0));
+    assert_eq!(entry_nav::move_entry_focus(0, None, -1), None);
 }
 
 #[test]
 fn test_move_entry_focus_from_none_alt_down_targets_first_entry() {
-    assert_eq!(move_entry_focus(5, None, 1), Some(0));
-    assert_eq!(move_entry_focus(0, None, 1), None);
+    assert_eq!(entry_nav::move_entry_focus(5, None, 1), Some(0));
+    assert_eq!(entry_nav::move_entry_focus(0, None, 1), None);
 }
 
 #[test]
 fn test_move_entry_focus_clamps_at_bounds_no_wrap() {
     // 有焦点：上下移动并钳制在 [0, len-1]，不循环
-    assert_eq!(move_entry_focus(5, Some(3), -1), Some(2));
-    assert_eq!(move_entry_focus(5, Some(0), -1), Some(0));
-    assert_eq!(move_entry_focus(5, Some(4), 1), Some(4));
-    assert_eq!(move_entry_focus(5, Some(2), 1), Some(3));
+    assert_eq!(entry_nav::move_entry_focus(5, Some(3), -1), Some(2));
+    assert_eq!(entry_nav::move_entry_focus(5, Some(0), -1), Some(0));
+    assert_eq!(entry_nav::move_entry_focus(5, Some(4), 1), Some(4));
+    assert_eq!(entry_nav::move_entry_focus(5, Some(2), 1), Some(3));
 }
 
 #[test]
@@ -49,7 +60,7 @@ fn test_fold_key_of_maps_vm_identities() {
         }
         .into(),
     );
-    let (k, f) = fold_key_of(&vm).expect("应可折叠");
+    let (k, f) = entry_nav::fold_key_of(&vm).expect("应可折叠");
     assert_eq!(k, FoldKey::Reasoning("msg_9".into()));
     assert_eq!(f, FoldState::Preview);
 
@@ -73,7 +84,7 @@ fn test_fold_key_of_maps_vm_identities() {
         }
         .into(),
     );
-    assert!(fold_key_of(&vm_noid).is_none());
+    assert!(entry_nav::fold_key_of(&vm_noid).is_none());
 
     // tool / subagent 按 tool_id / agent_id 键控
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
@@ -93,20 +104,20 @@ fn test_fold_key_of_maps_vm_identities() {
         content_hash: 0,
     });
     assert_eq!(
-        fold_key_of(&tool),
+        entry_nav::fold_key_of(&tool),
         Some((FoldKey::Tool("tool-1".into()), FoldState::Collapsed))
     );
 
     let reminder = TuiSystemReminder::legacy("maintenance notice".into());
     let reminder_id = reminder.reminder_id;
     assert_eq!(
-        fold_key_of(&TuiRenderUnit::TuiSystemReminder(reminder)),
+        entry_nav::fold_key_of(&TuiRenderUnit::TuiSystemReminder(reminder)),
         Some((FoldKey::SystemReminder(reminder_id), FoldState::Collapsed))
     );
 
     // user bubble 无折叠能力
     let user = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
-    assert!(fold_key_of(&user).is_none());
+    assert!(entry_nav::fold_key_of(&user).is_none());
 
     // §6.7 subagent：fold_key_of 返回 SubAgent key——Enter 分派据此刻断打开
     // 详情 pane（折叠切换仍走同一 key 的覆盖表；分派改判在 mod.rs Enter 分支）。
@@ -125,7 +136,7 @@ fn test_fold_key_of_maps_vm_identities() {
         content_hash: 0,
     });
     assert_eq!(
-        fold_key_of(&sub),
+        entry_nav::fold_key_of(&sub),
         Some((
             FoldKey::SubAgent("instance-agent-7".into()),
             FoldState::Collapsed
@@ -155,7 +166,7 @@ fn test_apply_fold_override_sets_fold_user_modified_and_recomputes_hash() {
         content_hash: 0,
     });
     let before = tool.content_hash();
-    apply_fold_override(&mut tool, FoldState::Expanded);
+    entry_nav::apply_fold_override(&mut tool, FoldState::Expanded);
     match &tool {
         TuiRenderUnit::TuiToolCard(t) => {
             assert_eq!(t.fold, FoldState::Expanded);
@@ -170,7 +181,7 @@ fn test_apply_fold_override_sets_fold_user_modified_and_recomputes_hash() {
 
     // 无折叠能力（user bubble）→ no-op 不 panic
     let mut user = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
-    apply_fold_override(&mut user, FoldState::Expanded);
+    entry_nav::apply_fold_override(&mut user, FoldState::Expanded);
 }
 
 #[test]
@@ -209,7 +220,7 @@ fn test_collapsed_group_toggle_persists_override() {
     };
 
     assert_eq!(
-        apply_fold_toggle(&mut snapshot, 0, false),
+        entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
         EventResult::Consumed
     );
     assert!(matches!(
@@ -273,7 +284,7 @@ fn test_tool_expand_claims_deferred_history_result_refetch() {
         items: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(card)]),
         generation: 1,
     };
-    let claimed = apply_fold_toggle(&mut snapshot, 0, false);
+    let claimed = entry_nav::apply_fold_toggle(&mut snapshot, 0, false);
     assert_eq!(claimed, EventResult::Consumed);
     assert!(
         crate::kit::atoms::NOTIFICATION.state().read().is_some(),

@@ -1,7 +1,8 @@
 //! 会话初始状态与命令注册装配；不发布或拥有 session 注册表。
 
 use std::collections::HashMap;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::McpSkillRegistry;

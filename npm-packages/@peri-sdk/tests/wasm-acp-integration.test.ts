@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { createServer, connect } from "node:net";
+import { createServer } from "node:net";
 import { once } from "node:events";
 import {
   ChatManager,
@@ -14,6 +14,7 @@ import {
 import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
 import { OwnershipProbe } from "./ownership-probe";
+import { lookupEnv } from "../../../scripts/lib/local-store.mjs";
 
 async function unusedPort(): Promise<number> {
   const listener = createServer();
@@ -23,21 +24,6 @@ async function unusedPort(): Promise<number> {
   if (!address || typeof address === "string") throw new Error("no TCP port");
   await new Promise<void>((done) => listener.close(done));
   return address.port;
-}
-
-async function waitForSqld(port: number, child: Bun.Subprocess): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (child.exitCode !== null) throw new Error(`sqld exited (${child.exitCode})`);
-    try {
-      const socket = connect(port, "127.0.0.1");
-      await once(socket, "connect");
-      socket.destroy();
-      return;
-    } catch {
-      await Bun.sleep(50);
-    }
-  }
-  throw new Error("sqld did not listen within five seconds");
 }
 
 async function settled(model: () => number, expected: number, budgetMs = 20_000): Promise<void> {
@@ -66,16 +52,8 @@ function otlpBody(bytes: Uint8Array): unknown {
  */
 async function fixture() {
   const root = await mkdtemp(resolve(tmpdir(), "peri-sdk-wasm-chat-"));
-  const sqlPort = await unusedPort();
-  // 本地走 SDK 的 mise 工具；CI 用 PERI_TEST_SQLD_BIN 指向预下载的 Linux sqld。
-  const sqldCommand = process.env.PERI_TEST_SQLD_BIN
-    ? [process.env.PERI_TEST_SQLD_BIN]
-    : ["mise", "exec", "--", "sqld"];
-  const sqld = Bun.spawn([
-    ...sqldCommand, "--no-welcome", "--http-listen-addr",
-    `127.0.0.1:${sqlPort}`, "--db-path", resolve(root, "sessions"),
-  ], { cwd: resolve(import.meta.dir, ".."), stdin: "ignore", stdout: "ignore", stderr: "pipe" });
-  const sqldLog = new Response(sqld.stderr).text();
+  // 真实后端：默认起本地平台版 peri-loom；CI 或排障时用 PERI_TEST_STORAGE_* 直连外部端点。
+  const loom = await lookupEnv({ port: await unusedPort() });
   const prompts: string[] = [];
   const telemetry: unknown[] = [];
   const langfuse = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -96,12 +74,10 @@ async function fixture() {
       { headers: { "content-type": "text/event-stream" } },
     );
   } });
-  try { await waitForSqld(sqlPort, sqld); }
-  catch (error) { model.stop(true); langfuse.stop(true); await rm(root, { recursive: true, force: true }); throw error; }
   // ACP cwd 必须与 Chat path 一致；macOS 的 /var 是指向 /private/var 的符号链接。
   const workspace = await realpath(root);
   const moduleUrl = resolve(import.meta.dir, "../dist/wasm/peri-wasm.js");
-  const databaseUrl = `http://127.0.0.1:${sqlPort}`;
+  const databaseUrl = loom.url;
   const settings = {
     config: {
       active_alias: "sonnet",
@@ -109,10 +85,10 @@ async function fixture() {
       profiles: { sonnet: { provider: "fixture", model: "fixture-model" } },
     },
   };
-  const storage = new TursoStorage({ url: databaseUrl, authToken: "local-dev" });
+  const storage = new TursoStorage({ url: databaseUrl, authToken: loom.token });
   // Manager 的部署边界：Store 与机器身份；per-chat 只提供 cwd/settings。
   const store = {
-    storage: { url: databaseUrl, authToken: "local-dev" },
+    storage: { url: databaseUrl, authToken: loom.token },
     machineId: "00000000-0000-4000-8000-000000000003",
   };
   const workspaceRef = { id: `ws:${workspace}`, hostPath: workspace, runtimePath: workspace };
@@ -140,10 +116,11 @@ async function fixture() {
   const dispose = async (primaryError?: unknown, cleanupErrors: unknown[] = []) => {
     model.stop(true);
     langfuse.stop(true);
-    sqld.kill("SIGTERM");
-    await sqld.exited;
-    const serverLog = await sqldLog;
-    if (primaryError && serverLog) console.error(serverLog);
+    if (primaryError) {
+      const serverLog = await loom.logs();
+      if (serverLog) console.error(serverLog);
+    }
+    await loom.stop();
     await rm(root, { recursive: true, force: true });
     if (cleanupErrors.length) throw new AggregateError(primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors,
       "WASM integration domain or startup cleanup failed", { cause: primaryError });

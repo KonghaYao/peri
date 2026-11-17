@@ -1,20 +1,21 @@
 // ─── SEP-2640 规范路径：skills/list ───────────────────────────────────────
 
-use super::super::client::cache_scope_allows_persistence;
+use super::super::client;
 use super::super::client::ConnectionResourceCache;
 use peri_acp_types::skills::{SkillMetadata, SkillResource};
-use rmcp::{
-    model::{
-        CacheScope, ClientRequest, CustomRequest, ReadResourceRequestParams, ResourceContents,
-        ServerResult,
-    },
-    Peer, RoleClient,
-};
+use rmcp::model::CacheScope;
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ResourceContents;
+use rmcp::model::ServerResult;
+use rmcp::Peer;
+use rmcp::RoleClient;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::legacy_scan::uri_eq_ignore_scheme_case;
-use super::verify::{build_metadata, disambiguate_names, frontmatter_maps_equal, verify_digest};
+use super::legacy_scan;
+use super::verify;
 use super::{MAX_LIST_PAGES, RESOURCE_READ_TIMEOUT, SKILLS_LIST_TIMEOUT};
 
 /// `skills/list` 响应（分页；`nextCursor` 缺省兼容未分页 server）。
@@ -55,8 +56,8 @@ struct SkillResourceDto {
 /// 是该技能当前条目快照。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillGetResponse {
-    skill: SkillListEntryDto,
+pub(super) struct SkillGetResponse {
+    pub(super) skill: SkillListEntryDto,
 }
 
 /// 解析后的技能条目（frontmatter 原样保留——逐字段全量比对用；name/
@@ -219,7 +220,7 @@ async fn collect_via_skills_list_inner(
                 if !cache.is_current() {
                     return Err("skills/list connection changed".to_string());
                 }
-                if cache_scope_allows_persistence(page.cache_scope)
+                if client::cache_scope_allows_persistence(page.cache_scope)
                     || (page.cache_scope.is_none() && page.ttl_ms.is_some())
                 {
                     if let Some(ticket) = ticket {
@@ -288,6 +289,53 @@ async fn fetch_skill_list_page_checked(
     fetch_skill_list_page_inner(peer, server, params).await
 }
 
+/// 把 skills 调用的 `ServerResult` 归一化成可解析的 JSON 载荷。
+///
+/// `ServerResult` 是 untagged 联合，变体按 payload 形状判别而非按方法名：3.9.0 起
+/// 只有完整条目（`resources` 含 `size`）命中 `ListSkillsResult` / `GetSkillResult`，
+/// mcp-use 这类省略字段的响应仍落到 `CustomResult`，两条路径必须都能解析。类型化
+/// 结果的动态技能 `resources` 序列化为字符串 `"dynamic"`，这里降级为缺省
+/// `resources`（无 digest → 保守激活），避免整页因单条动态技能解析失败。其余变体
+/// 不承载 skills 载荷，返回 `None` 让调用方报告非预期响应，避免把畸形结果归一化成
+/// 空技能目录。
+pub(super) fn skill_result_payload(result: &ServerResult) -> Option<serde_json::Value> {
+    match result {
+        ServerResult::CustomResult(custom) => Some(custom.0.clone()),
+        ServerResult::ListSkillsResult(list) => {
+            let mut payload = serde_json::to_value(list).ok()?;
+            if let Some(entries) = payload
+                .get_mut("skills")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for entry in entries {
+                    omit_dynamic_resources(entry);
+                }
+            }
+            Some(payload)
+        }
+        ServerResult::GetSkillResult(get) => {
+            let mut payload = serde_json::to_value(get).ok()?;
+            if let Some(entry) = payload.get_mut("skill") {
+                omit_dynamic_resources(entry);
+            }
+            Some(payload)
+        }
+        _ => None,
+    }
+}
+
+/// `SkillResources::Dynamic` 的 wire 形状是字符串 `"dynamic"`，而领域 DTO 用
+/// `resources` 缺省表达同一语义。类型化结果在 rmcp 反序列化时已校验该标记，
+/// 这里只做形状降级，不放宽 DTO 接受任意字符串。
+fn omit_dynamic_resources(entry: &mut serde_json::Value) {
+    if entry.get("resources").and_then(serde_json::Value::as_str) != Some("dynamic") {
+        return;
+    }
+    if let Some(object) = entry.as_object_mut() {
+        object.remove("resources");
+    }
+}
+
 /// 单页读取（供 checked 与 best-effort 两条路径共用）。
 async fn fetch_skill_list_page_inner(
     peer: &Peer<RoleClient>,
@@ -297,14 +345,16 @@ async fn fetch_skill_list_page_inner(
     let request = ClientRequest::CustomRequest(CustomRequest::new("skills/list", params));
     let response = peri_time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
     match response {
-        Ok(Ok(ServerResult::CustomResult(custom))) => custom.result_as().map_err(|err| {
-            tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
-            format!("skills/list 响应解析失败: {err}")
-        }),
-        Ok(Ok(_)) => {
-            tracing::warn!(server, "MCP skill 发现：skills/list 返回非预期响应类型");
-            Err("skills/list 返回非预期响应类型".to_string())
-        }
+        Ok(Ok(result)) => match skill_result_payload(&result) {
+            Some(payload) => serde_json::from_value(payload).map_err(|err| {
+                tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 响应解析失败");
+                format!("skills/list 响应解析失败: {err}")
+            }),
+            None => {
+                tracing::warn!(server, "MCP skill 发现：skills/list 返回非预期响应类型");
+                Err("skills/list 返回非预期响应类型".to_string())
+            }
+        },
         Ok(Err(err)) => {
             tracing::warn!(server, error = %err, "MCP skill 发现：skills/list 调用失败");
             Err(format!("skills/list 调用失败: {err}"))
@@ -350,7 +400,7 @@ pub(crate) async fn recover_entry_via_skills_get(
     uri: &str,
 ) -> Option<SkillMetadata> {
     let refreshed = fetch_skill_entry(peer, uri).await?;
-    if !uri_eq_ignore_scheme_case(&refreshed.uri, uri) {
+    if !legacy_scan::uri_eq_ignore_scheme_case(&refreshed.uri, uri) {
         tracing::warn!(
             server,
             %uri,
@@ -396,7 +446,7 @@ pub(crate) async fn refresh_entry_and_content(
     let Some(expected) = meta
         .resources
         .iter()
-        .find(|resource| uri_eq_ignore_scheme_case(&resource.uri, request_uri))
+        .find(|resource| legacy_scan::uri_eq_ignore_scheme_case(&resource.uri, request_uri))
     else {
         tracing::warn!(
             server,
@@ -407,7 +457,7 @@ pub(crate) async fn refresh_entry_and_content(
     };
     let (text, mime) = match read_skill_resource_text(peer, server, request_uri).await {
         SkillResourceRead::Text(text, mime) => {
-            if !verify_digest(&text, &expected.digest) {
+            if !verify::verify_digest(&text, &expected.digest) {
                 tracing::warn!(
                     server,
                     %request_uri,
@@ -435,7 +485,7 @@ pub(crate) async fn refresh_entry_and_content(
         }
     };
     // SKILL.md 自身：内容即身份载体，frontmatter 必须与刷新条目全量一致。
-    if uri_eq_ignore_scheme_case(request_uri, entry_uri) {
+    if legacy_scan::uri_eq_ignore_scheme_case(request_uri, entry_uri) {
         let Some(expected_fm) = meta.frontmatter.as_ref() else {
             tracing::warn!(server, %request_uri, "MCP skill 恢复失败：刷新条目缺 frontmatter 快照");
             return None;
@@ -444,7 +494,7 @@ pub(crate) async fn refresh_entry_and_content(
             tracing::warn!(server, %request_uri, "MCP skill 恢复失败：正文 frontmatter 解析失败");
             return None;
         };
-        if !frontmatter_maps_equal(&actual_fm, expected_fm) {
+        if !verify::frontmatter_maps_equal(&actual_fm, expected_fm) {
             tracing::warn!(
                 server,
                 %request_uri,
@@ -521,17 +571,19 @@ async fn fetch_skill_entry(peer: &Peer<RoleClient>, uri: &str) -> Option<SkillLi
     let request = ClientRequest::CustomRequest(CustomRequest::new("skills/get", Some(params)));
     let response = peri_time::timeout(SKILLS_LIST_TIMEOUT, peer.send_request(request)).await;
     let parsed: SkillGetResponse = match response {
-        Ok(Ok(ServerResult::CustomResult(custom))) => match custom.result_as() {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                tracing::warn!(%uri, error = %err, "MCP skill skills/get 响应解析失败");
+        Ok(Ok(result)) => match skill_result_payload(&result) {
+            Some(payload) => match serde_json::from_value(payload) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    tracing::warn!(%uri, error = %err, "MCP skill skills/get 响应解析失败");
+                    return None;
+                }
+            },
+            None => {
+                tracing::warn!(%uri, "MCP skill skills/get 返回非预期响应类型");
                 return None;
             }
         },
-        Ok(Ok(_)) => {
-            tracing::warn!(%uri, "MCP skill skills/get 返回非预期响应类型");
-            return None;
-        }
         Ok(Err(err)) => {
             tracing::warn!(%uri, error = %err, "MCP skill skills/get 调用失败");
             return None;
@@ -593,7 +645,7 @@ pub(crate) fn entry_to_metadata(server: &str, entry: &SkillListEntry) -> Option<
     }
     let name = entry.frontmatter.get("name")?.as_str()?;
     let description = entry.frontmatter.get("description")?.as_str()?;
-    build_metadata(
+    verify::build_metadata(
         server,
         &entry.uri,
         name,
@@ -618,5 +670,5 @@ pub(crate) fn entries_to_metadata(
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     let all_rejected = total > 0 && out.is_empty();
-    (all_rejected, disambiguate_names(server, out))
+    (all_rejected, verify::disambiguate_names(server, out))
 }

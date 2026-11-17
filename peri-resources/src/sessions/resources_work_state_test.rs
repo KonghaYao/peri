@@ -3,7 +3,11 @@
 //! 两列都是「最后提交的快照」：只写自己，不碰 `updated_at`——否则每一轮 turn 都会
 //! 改写会话排序时间。断言以读回的可观察事实为准。
 
-use super::*;
+use super::Fixture;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::WorkState;
+
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session::{MessageKind, MessagePolicy, MessageSource, MqInput};
 use peri_acp_types::store::PersistedPayload;

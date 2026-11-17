@@ -1,10 +1,23 @@
 //! Real RCRA success/barrier evidence, using a durable session and an executable recovery tool.
-use super::*;
-use crate::session::{test_resources::TestSession, FrozenContext, Session};
+use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::react::ReactLLM;
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::SharedToolMap;
+
+use crate::messages::BaseMessage;
+use crate::session::test_resources::TestSession;
+use crate::session::FrozenContext;
+
+use crate::session::Session;
 use crate::tools::{
     BaseTool, ContextRetention, ToolContext, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput,
 };
+
 use peri_acp_types::context_archive::ContextArchiveReadPort;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 struct ReadFixture;
 #[async_trait::async_trait]
@@ -72,8 +85,10 @@ impl BaseTool for RecoveryFixture {
         ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let reader = crate::context_archive::ContextArchiveReader::new(
-            ctx.session_resources.unwrap(),
-            ctx.session_id.unwrap(),
+            ctx.session_resources
+                .expect("the session resources fixture result is required for this assertion"),
+            ctx.session_id
+                .expect("the session id fixture result is required for this assertion"),
         );
         Ok(serde_json::to_string(
             &reader.read(serde_json::from_value(input)?).await?,
@@ -179,7 +194,7 @@ async fn fixture(
 #[tokio::test]
 async fn successful_response_barrier_allows_only_previously_exposed_results() {
     let (bound, context, requests) = fixture(false).await;
-    let outcome = run_react_loop(context.clone(), 5).await;
+    let outcome = crate::agent::stages::run_react_loop(context.clone(), 5).await;
     assert!(matches!(outcome, LoopResult::Completed), "{outcome:?}");
     {
         let requests = requests.lock();
@@ -194,7 +209,7 @@ async fn successful_response_barrier_allows_only_previously_exposed_results() {
         let newest = requests[3]
             .iter()
             .find(|m| matches!(m, BaseMessage::Tool {tool_call_id,..} if tool_call_id == "read-2"))
-            .unwrap();
+            .expect("the find fixture result is required for this assertion");
         assert_eq!(
             newest.content(),
             format!(
@@ -211,7 +226,7 @@ async fn successful_response_barrier_allows_only_previously_exposed_results() {
         .resources()
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot
         .flags
         .values()
@@ -231,7 +246,7 @@ async fn successful_response_barrier_allows_only_previously_exposed_results() {
 #[tokio::test]
 async fn failed_model_response_does_not_confirm_captured_result() {
     let (_bound, context, requests) = fixture(true).await;
-    let _ = run_react_loop(context.clone(), 5).await;
+    let _ = crate::agent::stages::run_react_loop(context.clone(), 5).await;
     assert_eq!(requests.lock().len(), 2);
     let transcript = context.session.transcript.read();
     let exposed = context
@@ -239,13 +254,13 @@ async fn failed_model_response_does_not_confirm_captured_result() {
         .exposure
         .lock()
         .exposed_ids(&transcript)
-        .unwrap();
+        .expect("the exposed ids fixture result is required for this assertion");
     let result = transcript
         .entries()
         .iter()
         .filter_map(|e| e.as_message())
         .find(|m| matches!(m, BaseMessage::Tool { .. }))
-        .unwrap();
+        .expect("the find fixture result is required for this assertion");
     assert!(
         !exposed.contains(&result.id()),
         "failed response cannot authorize compaction"

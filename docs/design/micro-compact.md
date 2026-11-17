@@ -175,6 +175,8 @@ SQLite 与远端 Turso adapter 使用同一有界读取规则。未实现这些�
 
 Full 从与 Reason 相同的已提交模型视图生成摘要；摘要生成与取消/失败预算遵守 [ARC-COMPACT-001](../standards/architecture-contracts.md)。未消费后台结果依旧受 [异步任务设计](session-async-tasks.md) 保护，摘要模型不承担消费确认。
 
+Full 提交两段 Human 消息。第一段是软记忆：LLM 按提取提示词生成、带 `CONTINUATION_HINT` 的摘要。第二段是硬记忆：摘要完成后由 Harness 从会话 `TaskManager` 与 `GoalController` 读取活跃 shell / background agent / workflow / MCP（含 monitor）任务和 Active goal，使用运行时真实 id，并为每类附查看、恢复或取消 helper。硬记忆不进入摘要请求，不消耗摘要模型输出；再次 Full 时旧硬记忆按普通历史归档，但会从新摘要请求中排除，由本次快照重新生成。终态任务与终态 goal 不列入；快照为空时不追加第二段，保持旧单摘要输出。旧版本只识别第一段的续接标记，第二段按普通 Human 历史兼容；手动 `/compact` 与自动路径都读取会话任务注册表和 goal，来源缺失时降级为空快照。
+
 Full 清除被取代的渲染动作，同时保留旧锚点的目录及组链接。原锚点即使变成 excluded，授权的点查仍可访问。目录根按来源合并范围，随新摘要与 excluded transitions 同事务提交，不复制所有旧成员 ID。renderer 从摘要元数据确定性渲染入口，摘要正文无需复述任何引用。
 
 子会话继承的是冻结 payload/flags，不能修改 ancestor。独立 fork 经 `SessionResources::load_fork_snapshot` 合并冻结 inherited 与 own 历史；父 Full 后只剩根入口时，按冻结 roots 的授权范围与尾界分块补齐目录成员，并验证目录身份及内容摘要。补齐正文标记 `recovery_only` 并保持 excluded：授权成员可能只含一个结果，或包含多工具 AI 批次的一部分结果，因此这些副本仅供归档回查，不作为可执行历史参与 fork 协议闭合检查；普通历史的闭合检查保持不变。删除摘要的 rewind 与再次 Full、refork 均不能激活这些副本。来源缺失、内容变化或依赖超出冻结授权时拒绝复制，不纳入父会话后来追加的内容。随后重映射消息、目录成员/锚点、依赖、来源与根边界，按目标载荷重新计算内容摘要。canonical 工具参数中已经存在的旧字面引用不被伪改；未经授权的旧源引用明确拒绝，目标目录提供新的可发现入口。
@@ -195,6 +197,7 @@ rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代�
 | 收据/归档入口位置、预算合并、Full 后 root、冷恢复与 provider 切换 | `compact_v2/projection_position_test.rs`、`compact_v2/projection_borrowed_test.rs` |
 | 批次提交、失败与冷恢复视图 | `compact_v2/micro_test.rs`、`session/transcript_persistence_test.rs` |
 | 两次 Micro + 两次 Full、无 ID 摘要、实际新进程读取 | `compact_v2/archive_lifecycle_test.rs` |
+| 软/硬记忆两段、运行时 id、空快照、任务上限与终态过滤 | `compact_v2/hard_memory_test.rs`、`compact_v2/hard_memory_compact_test.rs` |
 | 原文分页、继承权限、摘要冲突、媒体、fork/rewind | `peri-agent/src/context_archive_test.rs`、`peri-acp-types/src/store/history_archive_test.rs` |
 | 子会话 Full 后独立 fork 的冻结归档授权 | `peri-acp/src/dispatch/session_fork_archive_test.rs` |
 | 远端有界读取与真实 MCP 调用 | `peri-resources/src/sessions/remote/session_archive_test.rs`、`peri-middlewares/src/mcp/context_archive_test.rs` |

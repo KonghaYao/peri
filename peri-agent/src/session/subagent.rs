@@ -2,13 +2,13 @@
 //!
 //! L3 归位：subagent 创建逻辑（建 thread / 建 session / 运行 + 收尾）自
 //! `peri-middlewares/src/subagent/`（spawner / execute_fork / execute_bg /
-//! build_agent 四条路径 + ACP `/bg` 命令）收敛至 [`spawn_subagent`]。
+//! build_agent 四条路径 + ACP `/bg` 命令）收敛至 [`spawn_subagent`](crate::session::subagent::SessionFactory::spawn_subagent)。
 //! Middleware 只声明工具与发起意图（组装 [`SubagentSpawnConfig`]），
 //! 不持有创建实现。
 //!
 //! 依赖方向：Agent 层不反向依赖 middlewares。子链装配经
 //! [`SubagentChainAssembler`] trait 依赖反转（中间件层提供实现，
-//! 链序 AgentsMd→Skills→[SkillPreload]→Todo→[ToolSearch] 由实现方保持，ARC-MIDDLEWARE-001）；
+//! 链序 AgentsMd→Skills→\[SkillPreload\]→Todo→\[ToolSearch\] 由实现方保持，ARC-MIDDLEWARE-001）；
 //! 生命周期 hook 触发经 [`SubagentLifecycleStart`]/[`SubagentLifecycleStop`]
 //! 闭包注入（middlewares 构造闭包，内部触发其 RegisteredHook）。
 //!
@@ -21,7 +21,8 @@
 
 mod background;
 mod child_runner;
-mod close;
+mod subagent_close_state;
+use subagent_close_state as close;
 mod directives;
 mod factory;
 mod lifecycle;
@@ -41,9 +42,7 @@ pub use crate::agent::async_tasks::handoff::{
 pub use directives::{build_bg_fork_directive, build_fork_directive, build_prediction_directive};
 pub use factory::SessionFactory;
 pub(crate) use lifecycle::flush_session_history;
-pub(crate) use lifecycle::{
-    on_subagent_stop_handler, BgCleanupGuard, BgStopEmitV2, DeregisterGuard,
-};
+pub(crate) use lifecycle::on_subagent_stop_handler;
 pub use types::{
     ChildHandoffFailure, ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome,
     ForkDirectiveKind, SubagentCancelPolicy, SubagentChainAssembler, SubagentChainContext,
@@ -57,25 +56,8 @@ pub use v2_bridge::{
 };
 pub(crate) use v2_bridge::{
     build_subagent_start_v2, build_subagent_stop_v2_with_failure, emit_subagent_start_v2,
-    emit_subagent_stop_v2_with_failure, SubagentStopV2Input,
+    emit_subagent_stop_v2_with_failure,
 };
-
-#[cfg(test)]
-use crate::agent::async_tasks::{
-    BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
-};
-#[cfg(test)]
-use crate::messages::BaseMessage;
-#[cfg(test)]
-use crate::middleware::chain::MiddlewareChain;
-#[cfg(test)]
-use crate::session::{FrozenContext, Session};
-#[cfg(test)]
-use crate::thread::ThreadMeta;
-#[cfg(test)]
-use peri_acp_types::identity::AgentId;
-#[cfg(test)]
-use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 #[path = "subagent_test.rs"]

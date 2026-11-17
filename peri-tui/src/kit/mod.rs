@@ -1,6 +1,6 @@
 //! ratatui-kit 集成模块。
 //!
-//! 该模块包含所有 ratatui-kit #[component] 组件。
+//! 该模块包含所有 ratatui-kit `#[component]` 组件。
 //! Phase 1-3：面板、弹窗、布局组件（编译桩）。
 //! Phase 4：事件系统统一——atoms/acp_bridge/event_handlers/mention/slash。
 //! Phase 5：Widget 桥接组件——message_area/input_area。
@@ -23,11 +23,14 @@ pub(crate) mod clipboard;
 pub(crate) mod config_service;
 pub(crate) mod context_usage;
 pub mod diff_parser;
+pub(crate) mod display_retention;
 pub mod entry;
 pub(crate) mod entry_render_cache;
 pub mod event_handlers;
 pub mod exit_hint;
 pub mod focus_router;
+pub(crate) mod fold_overrides;
+pub mod genui;
 pub mod history_detail_binding;
 pub mod history_page_consumer;
 pub mod history_paging;

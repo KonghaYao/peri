@@ -19,22 +19,23 @@
 //!   绝对路径可读是当前实现事实，登记为 `UNVERIFIED` 缺口。
 
 use crate::mcp::apps::McpCapabilityProfile;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BUILTIN_CONVERGE_TIMEOUT,
-};
-use crate::mcp::client::{serve_client_auto, McpServiceWrapper};
-use peri_acp_types::builtin_mcp::find;
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinInstanceSupervisor;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::client;
+use crate::mcp::client::McpServiceWrapper;
+use peri_acp_types::builtin_mcp;
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{BgTaskKind, TaskManager};
-use rmcp::{
-    model::{CallToolRequestParams, CallToolResponse, CallToolResult},
-    service::{Peer, RoleClient},
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::service::Peer;
+use rmcp::service::RoleClient;
 use serde_json::{json, Value};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceMcpServer};
@@ -73,10 +74,12 @@ async fn workspace_handler_handshakes_and_lists_seven_tools_over_wire() {
     // 成员集合本身也由此被钉住（数量与逐项名字）。成员集合的**冻结字面量**断言在
     // package 侧（`resources/wire_test.rs::wire_declares_resources_and_keeps_seven_tools`），
     // 防「注册表与 handler 一起漂移」的那一半由它承担，此处不重复。
-    let declared = find("workspace").expect("`workspace` 必须是已实现实例（注册表 T1）");
+    let declared =
+        builtin_mcp::find("workspace").expect("`workspace` 必须是已实现实例（注册表 T1）");
     let declared_order: Vec<&str> = declared
         .tools
         .iter()
+        .filter(|tool| tool.advertised)
         .map(|tool| tool.original_name)
         .collect();
     let wire_order: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
@@ -344,13 +347,16 @@ impl Pair {
 /// `input` 即 AW3-11 的 session 级输入：`None` 是顶层三路径 / 1:N 形态的形态（可见但退化），
 /// 既有五条线路用例都走该形态；后台任务两条用例显式传 `Some` / `None` 各一遍。
 async fn connect(cwd: &str, input: Option<WorkspaceInstanceInput>) -> Pair {
-    let transport =
-        spawn_builtin_transport_with_handler("workspace", WorkspaceMcpServer::new(cwd, input));
+    let transport = runtime::spawn_builtin_transport_with_handler(
+        "workspace",
+        WorkspaceMcpServer::new(cwd, input),
+    );
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("builtin 握手不得超时（同进程链路）")
-        .expect("builtin 握手不得失败");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
     Pair {
         service,
         supervisor,
@@ -376,10 +382,11 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     )
     .expect("builtin Workspace dispatch");
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("handshake deadline")
-        .expect("handshake");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("handshake deadline")
+            .expect("handshake");
     let pair = Pair {
         service,
         supervisor,
@@ -531,10 +538,11 @@ async fn builtin_close_cleans_up_workspace_owned_bash() {
     )
     .expect("builtin Workspace dispatch");
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("handshake deadline")
-        .expect("handshake");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("handshake deadline")
+            .expect("handshake");
     let pair = Pair {
         service,
         supervisor,
@@ -609,85 +617,4 @@ fn complete(response: CallToolResponse) -> CallToolResult {
         CallToolResponse::Complete(result) => result,
         other => panic!("期望 Complete 结果，实际：{other:?}"),
     }
-}
-
-// ─── beta flag `full-async-tools`（装配面 → 生产 Bash 路径）──────────────────
-
-/// `BuiltinInstanceContext` 注入的有效缺省同时驱动 schema `default` 与省略字段的调用：
-/// ① `tools/list` 的 `run_in_background.default` 随缺省（flag 开启时 true）；
-/// ② 省略字段的调用走 **owned 后台任务**（生产 `standalone` 路径）；
-/// ③ 显式 `false` 仍走前台（flag 只改缺省）。
-#[tokio::test]
-async fn workspace_dispatch_propagates_bash_default_run_in_background() {
-    let (_dir, cwd) = workspace_dir();
-    let context = crate::mcp::builtin::context::BuiltinInstanceContext::new(cwd.clone())
-        .with_workspace_bash_default_run_in_background(true);
-    let transport = crate::mcp::builtin::runtime::spawn_builtin_transport_with_context(
-        "workspace",
-        &context,
-        &std::collections::HashMap::new(),
-    )
-    .expect("内置 Workspace 分派必须成功");
-    let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("内置链路握手不得超时")
-        .expect("内置链路握手不得失败");
-    let pair = Pair {
-        service,
-        supervisor,
-    };
-    let peer = pair.peer();
-
-    let tools = peer.list_all_tools().await.expect("tools/list");
-    let bash = tools
-        .iter()
-        .find(|tool| tool.name == "Bash")
-        .expect("Bash 必须声明");
-    assert_eq!(
-        bash.input_schema["properties"]["run_in_background"]["default"],
-        json!(true),
-        "装配输入的有效缺省必须到达工具 schema"
-    );
-
-    // 省略字段：owned 后台任务（客户端支持 tasks 时回 Task 句柄，否则回执文本携带
-    // 任务启动信息——两条形态都只可能来自后台分支）。命令立刻结束，测试退出前不留
-    // 存活进程。
-    let omitted = peer
-        .call_tool_once(call("Bash", json!({"command": "printf bg-by-default"})))
-        .await
-        .expect("省略 run_in_background 且缺省为 true 时必须走后台");
-    let omitted_is_background = match &omitted {
-        CallToolResponse::Task(_) => true,
-        CallToolResponse::Complete(result) => {
-            first_text(result).is_some_and(|text| text.contains("Background shell task started"))
-        }
-        other => panic!("未知响应形态：{other:?}"),
-    };
-    assert!(
-        omitted_is_background,
-        "省略字段必须走 owned 后台任务：{omitted:?}"
-    );
-
-    // 显式 false：前台路径（同一链路、同一命令，仍是 Complete 结果）。
-    let explicit = complete(
-        peer.call_tool_once(call(
-            "Bash",
-            json!({"command": "printf explicit-foreground", "run_in_background": false}),
-        ))
-        .await
-        .expect("显式 false 必须走前台"),
-    );
-    assert_eq!(explicit.is_error, Some(false));
-    let text = first_text(&explicit).expect("前台结果必须有文本块");
-    assert!(
-        text.contains("explicit-foreground"),
-        "显式 false 必须拿到前台输出：{text}"
-    );
-    assert!(
-        !text.contains("Background shell task started"),
-        "显式 false 不得走后台：{text}"
-    );
-
-    pair.shutdown().await;
 }

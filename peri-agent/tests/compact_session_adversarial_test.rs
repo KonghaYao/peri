@@ -1,34 +1,41 @@
 //! Compact 会话边界对抗测试：公开 API、临时 SQLite、确定性模型。
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use peri_acp_types::{
-    command::{CommandContext, DependencyBag, FeedbackLevel},
-    event::{EventSink, ExecutorEvent},
-    session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources},
-    store::PersistedPayload,
-    thread::CancelPolicy,
-    workspace::SessionBinding,
-};
-use peri_agent::{
-    agent::{
-        compact_v2::CompactConfig,
-        react::{ReactLLM, Reasoning, StreamingContext},
-        stages::{run_react_loop, LoopResult, StageContext},
-        token::ContextBudget,
-    },
-    error::{AgentError, AgentResult},
-    messages::BaseMessage,
-    session::{
-        exec::compact_pipeline::execute_compact, FrozenContext, MessageQueue, MessageSource,
-        MessageTranscript, QueuedMessage, Session,
-    },
-    tools::BaseTool,
-};
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::DependencyBag;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::CancelPolicy;
+use peri_acp_types::workspace::SessionBinding;
+use peri_agent::agent::compact_v2::CompactConfig;
+use peri_agent::agent::react::ReactLLM;
+use peri_agent::agent::react::Reasoning;
+use peri_agent::agent::react::StreamingContext;
+
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::agent::token::ContextBudget;
+use peri_agent::error::AgentError;
+use peri_agent::error::AgentResult;
+use peri_agent::messages::BaseMessage;
+
+use peri_agent::session::FrozenContext;
+use peri_agent::session::MessageQueue;
+use peri_agent::session::MessageSource;
+use peri_agent::session::MessageTranscript;
+use peri_agent::session::QueuedMessage;
+use peri_agent::session::Session;
+use peri_agent::tools::BaseTool;
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     StopReason, TokenUsage,
@@ -45,14 +52,18 @@ struct BoundSession {
 
 impl BoundSession {
     async fn open() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir().expect("the temporary test directory must be available");
         let db_path = directory.path().join("compact-audit.db");
         let resources: Arc<dyn SessionResources> = Arc::new(
             peri_resources::sessions::SessionResourcesImpl::open(&db_path)
                 .await
-                .unwrap(),
+                .expect("the open fixture result is required for this assertion"),
         );
-        let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+        let workspace = resources
+            .resolve_workspace(directory.path())
+            .await
+            .expect("the resolve workspace fixture result is required for this assertion");
         let thread_id = uuid::Uuid::now_v7().to_string();
         let cwd = workspace.cwd.to_string_lossy().into_owned();
         resources
@@ -71,7 +82,7 @@ impl BoundSession {
                 frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
             })
             .await
-            .unwrap();
+            .expect("the create session fixture result is required for this assertion");
         Self {
             resources,
             thread_id,
@@ -152,7 +163,7 @@ impl Model for SummaryModel {
     async fn complete(&self, _: ModelRequest, _: CancellationToken) -> ModelResult<ModelResponse> {
         self.order.lock().push("summary");
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        ModelResponse::new(
+        ModelResponse::try_new(
             ModelMessage::assistant_text(if call < self.failures {
                 "<analysis>no summary</analysis>"
             } else {
@@ -214,7 +225,7 @@ async fn test_compact_session_next_prompt_restores_pressure_before_reason() {
         ))
         .await;
     assert!(matches!(
-        run_react_loop(first.clone(), 4).await,
+        peri_agent::agent::stages::run_react_loop(first.clone(), 4).await,
         LoopResult::Completed
     ));
     assert_eq!(
@@ -233,7 +244,7 @@ async fn test_compact_session_next_prompt_restores_pressure_before_reason() {
             BaseMessage::human("y".repeat(60_000)),
         ))
         .await;
-    let result = run_react_loop(second, 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(second, 4).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "下一 prompt 必须先压缩；实际 {result:?}，顺序 {:?}，摘要调用 {}",
@@ -254,15 +265,15 @@ async fn test_compact_session_cold_snapshot_compacts_before_first_reason() {
         .resources
         .append_history(&bound.thread_id, &payloads)
         .await
-        .unwrap();
+        .expect("the append history fixture result is required for this assertion");
     let reader =
         peri_resources::sessions::SessionResourcesImpl::open_existing_read_only(&bound.db_path)
             .await
-            .unwrap();
+            .expect("the open existing read only fixture result is required for this assertion");
     let snapshot = reader
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(snapshot.payloads.len(), 1);
     let session = bound.session(snapshot.payloads);
     let (model, summary) = make_models(false);
@@ -274,7 +285,7 @@ async fn test_compact_session_cold_snapshot_compacts_before_first_reason() {
             BaseMessage::human("continue"),
         ))
         .await;
-    let result = run_react_loop(context, 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(context, 4).await;
     assert!(
         matches!(result, LoopResult::Completed),
         "冷读历史必须先压缩；实际 {result:?}，顺序 {:?}，摘要调用 {}",
@@ -316,7 +327,7 @@ async fn test_compact_session_small_prompts_do_not_call_summary() {
                 BaseMessage::human(text),
             ))
             .await;
-        let result = run_react_loop(context, 4).await;
+        let result = peri_agent::agent::stages::run_react_loop(context, 4).await;
         assert!(matches!(result, LoopResult::Completed), "{result:?}");
     }
     assert_eq!(*model.order.lock(), ["reason", "reason"]);
@@ -341,19 +352,22 @@ async fn test_compact_session_cold_compacted_history_keeps_exclusions() {
     command.auxiliary_model = Some(summary);
     command.session_resources = Some(bound.resources.clone());
     command.thread_id = Some(bound.thread_id.clone());
-    let compacted = execute_compact(command).await;
+    let compacted = peri_agent::session::exec::compact_pipeline::execute_compact(command).await;
     assert!(matches!(
-        compacted.feedback.unwrap().level,
+        compacted
+            .feedback
+            .expect("the feedback fixture result is required for this assertion")
+            .level,
         FeedbackLevel::Info
     ));
     let reader =
         peri_resources::sessions::SessionResourcesImpl::open_existing_read_only(&bound.db_path)
             .await
-            .unwrap();
+            .expect("the open existing read only fixture result is required for this assertion");
     let snapshot = reader
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(snapshot.flags[&original.id()].excluded);
     assert!(snapshot
         .payloads
@@ -370,7 +384,7 @@ async fn test_compact_session_cold_compacted_history_keeps_exclusions() {
             BaseMessage::human("continue"),
         ))
         .await;
-    let result = run_react_loop(context, 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(context, 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(summary.calls.load(Ordering::SeqCst), 0);
     assert!(model.requests.lock()[0]
@@ -416,7 +430,7 @@ async fn test_compact_session_before_model_growth_is_checked_once_before_request
             BaseMessage::human("small task"),
         ))
         .await;
-    let result = run_react_loop(context, 4).await;
+    let result = peri_agent::agent::stages::run_react_loop(context, 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(*model.order.lock(), ["summary", "reason"]);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -521,8 +535,10 @@ impl BaseTool for ArchiveReadTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         use peri_acp_types::context_archive::ContextArchiveReadPort;
         let reader = peri_agent::context_archive::ContextArchiveReader::new(
-            ctx.session_resources.unwrap(),
-            ctx.session_id.unwrap(),
+            ctx.session_resources
+                .expect("the session resources fixture result is required for this assertion"),
+            ctx.session_id
+                .expect("the session id fixture result is required for this assertion"),
         );
         Ok(serde_json::to_string(
             &reader.read(serde_json::from_value(input)?).await?,
@@ -573,7 +589,7 @@ async fn test_compact_session_micro_shrink_does_not_hide_new_before_model_growth
         .resources
         .append_history(&bound.thread_id, &payloads)
         .await
-        .unwrap();
+        .expect("the append history fixture result is required for this assertion");
     let session = bound.session(payloads);
     let model = Arc::new(MicroGrowthModel(AtomicUsize::new(0)));
     let (_, summary) = make_models(false);
@@ -611,7 +627,7 @@ async fn test_compact_session_micro_shrink_does_not_hide_new_before_model_growth
             BaseMessage::human("continue"),
         ))
         .await;
-    let result = run_react_loop(context.clone(), 5).await;
+    let result = peri_agent::agent::stages::run_react_loop(context.clone(), 5).await;
     assert!(
         std::iter::from_fn(|| events.try_observe()).any(|event| matches!(
             event,
@@ -687,7 +703,7 @@ async fn test_compact_session_zero_usage_keeps_growth_and_valid_usage_settles_it
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     session
         .transcript()
         .write()
@@ -698,7 +714,7 @@ async fn test_compact_session_zero_usage_keeps_growth_and_valid_usage_settles_it
             has_tool_calls: false,
         })
         .await
-        .unwrap();
+        .expect("the run compact fixture result is required for this assertion");
         assert_eq!(
             context
                 .compact
@@ -713,14 +729,14 @@ async fn test_compact_session_zero_usage_keeps_growth_and_valid_usage_settles_it
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     for _ in 0..3 {
         compact::run_compact(CompactInput {
             context: context.clone(),
             has_tool_calls: false,
         })
         .await
-        .unwrap();
+        .expect("the run compact fixture result is required for this assertion");
         assert_eq!(
             context
                 .compact
@@ -735,7 +751,7 @@ async fn test_compact_session_zero_usage_keeps_growth_and_valid_usage_settles_it
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     assert_eq!(
         context
             .compact
@@ -753,7 +769,7 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
     use peri_agent::agent::stages::{compact, reason, CompactInput, ReasonInput};
     let bound = BoundSession::open().await;
     let session = bound.session(Vec::new());
-    for message in [
+    let message_items = [
         BaseMessage::human("old"),
         BaseMessage::ai_with_tool_calls(
             "",
@@ -765,7 +781,8 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
         ),
         BaseMessage::tool_result("old", "x".repeat(160_000)),
         BaseMessage::human("current"),
-    ] {
+    ];
+    for message in message_items {
         session.transcript().write().append(message);
     }
     let context = StageContext::builder(
@@ -794,7 +811,7 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
         has_tool_calls: false,
     })
     .await
-    .unwrap();
+    .expect("the run reason fixture result is required for this assertion");
     peri_agent::agent::stages::act::run_act(peri_agent::agent::stages::ActInput {
         context: context.clone(),
         reasoning: reasoned.reasoning,
@@ -803,14 +820,14 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
         exposure: reasoned.exposure,
     })
     .await
-    .unwrap();
+    .expect("the run act fixture result is required for this assertion");
     assert!(
         compact::run_compact(CompactInput {
             context: context.clone(),
             has_tool_calls: false,
         })
         .await
-        .unwrap()
+        .expect("the clone fixture result is required for this assertion")
         .compacted
     );
     let committed_pressure = context
@@ -818,7 +835,7 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
         .token_tracker
         .read()
         .estimated_context_tokens()
-        .unwrap();
+        .expect("the estimated context tokens fixture result is required for this assertion");
     assert!(committed_pressure >= 90_000, "真实新增结果仍计正增长");
     for _ in 0..3 {
         assert!(
@@ -827,7 +844,7 @@ async fn test_compact_session_repeated_micro_view_does_not_add_pressure() {
                 has_tool_calls: false,
             })
             .await
-            .unwrap()
+            .expect("the clone fixture result is required for this assertion")
             .compacted
         );
     }

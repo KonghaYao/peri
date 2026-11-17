@@ -1,6 +1,7 @@
 //! Owner-qualified interaction responses, bridge publication, and owned settlement.
 
-use peri_acp::transport::{AcpTransport, types::AcpError};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
 use serde_json::Value;
 use tracing::warn;
 
@@ -8,10 +9,7 @@ use super::super::interaction_lifecycle::{
     ClaimCause, ClaimedInteraction, InteractionExpiryReason, InteractionOwner,
     InteractionUiOutcome, ReverseInteractionKind,
 };
-use super::super::interaction_response::{
-    elicitation_cancel_response, permission_cancelled_response,
-};
-use super::super::interaction_settlement::expiry_for_cause;
+
 use super::{AcpNotification, AcpTuiClient, ClientProjectionMode};
 
 impl AcpTuiClient {
@@ -56,6 +54,7 @@ impl AcpTuiClient {
         false
     }
 
+    /// Claim an unpublishable interaction and settle its wire request once; stale owners do nothing.
     pub async fn reject_interaction(&self, owner: &InteractionOwner) {
         let _operation = self.lifecycle.operation_gate().lock().await;
         if let Some(claimed) = self.lifecycle.claim(owner, ClaimCause::BridgeReject) {
@@ -64,7 +63,11 @@ impl AcpTuiClient {
     }
 
     fn emit_terminal(&self, owner: InteractionOwner, outcome: InteractionUiOutcome) {
-        let weak = self.notification_weak.lock().unwrap().clone();
+        let weak = self
+            .notification_weak
+            .lock()
+            .expect("notification_weak mutex must not be poisoned")
+            .clone();
         if let Some(weak) = weak
             && let Some(tx) = weak.upgrade()
         {
@@ -81,8 +84,12 @@ impl AcpTuiClient {
         while let Some(lease) = batch.next_claim() {
             let claim = lease.claim();
             let response = match claim.owner.kind {
-                ReverseInteractionKind::Permission => permission_cancelled_response(),
-                ReverseInteractionKind::Elicitation => elicitation_cancel_response(),
+                ReverseInteractionKind::Permission => {
+                    super::super::interaction_response::permission_cancelled_response()
+                }
+                ReverseInteractionKind::Elicitation => {
+                    super::super::interaction_response::elicitation_cancel_response()
+                }
             };
             let outcome = match self
                 .transport
@@ -90,7 +97,7 @@ impl AcpTuiClient {
                 .await
             {
                 Ok(()) => InteractionUiOutcome::Expired {
-                    reason: expiry_for_cause(claim.cause),
+                    reason: super::super::interaction_settlement::expiry_for_cause(claim.cause),
                 },
                 Err(error) => {
                     warn!(error = %error, "failed to settle owned interaction");

@@ -1,7 +1,7 @@
 //! Session route transitions and operation-identity bookkeeping.
 
 use super::leases::TransitionLease;
-use super::reverse::drain_pending;
+
 use super::{
     AdmissionRoute, ClaimCause, ClaimedInteraction, InteractionLifecycle,
     InteractionLifecycleState, SessionOperationId, SessionRoute, TransitionKind,
@@ -23,6 +23,7 @@ impl SessionOperationId {
 }
 
 impl SessionRoute {
+    #[must_use]
     fn generation(&self) -> u64 {
         match self {
             Self::Bootstrapping { generation }
@@ -34,15 +35,24 @@ impl SessionRoute {
 }
 
 impl InteractionLifecycle {
+    #[must_use]
     pub fn has_session(&self) -> bool {
         matches!(
-            self.state.lock().unwrap().route,
+            self.state
+                .lock()
+                .expect("the lifecycle state mutex must not be poisoned")
+                .route,
             SessionRoute::Stable { .. }
         )
     }
 
     pub fn current_session_id(&self) -> Option<String> {
-        match &self.state.lock().unwrap().route {
+        match &self
+            .state
+            .lock()
+            .expect("state mutex must not be poisoned")
+            .route
+        {
             SessionRoute::Stable { session_id, .. } => Some(session_id.clone()),
             SessionRoute::Transitioning { target, .. } => target.clone(),
             SessionRoute::Bootstrapping { .. } | SessionRoute::NoSession { .. } => None,
@@ -50,7 +60,12 @@ impl InteractionLifecycle {
     }
 
     pub fn stable_identity(&self) -> Option<(String, u64)> {
-        match &self.state.lock().unwrap().route {
+        match &self
+            .state
+            .lock()
+            .expect("state mutex must not be poisoned")
+            .route
+        {
             SessionRoute::Stable {
                 session_id,
                 generation,
@@ -64,7 +79,12 @@ impl InteractionLifecycle {
     pub(crate) fn stable_identity_with_operation(
         &self,
     ) -> Option<(String, u64, Option<SessionOperationId>)> {
-        match &self.state.lock().unwrap().route {
+        match &self
+            .state
+            .lock()
+            .expect("state mutex must not be poisoned")
+            .route
+        {
             SessionRoute::Stable {
                 session_id,
                 generation,
@@ -80,7 +100,7 @@ impl InteractionLifecycle {
     /// `NoSession` 没有在途操作时按需分配一个建立身份并记住它：后续输入与
     /// 失败后的重试继续使用同一身份，车道不会因为「还没有操作」而分裂。
     pub(crate) fn admission_route(&self) -> AdmissionRoute {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         match state.route.clone() {
             SessionRoute::Stable {
                 session_id,
@@ -119,7 +139,7 @@ impl InteractionLifecycle {
 
     /// 新的一次用户决定：分配新身份并记为当前待定身份。
     pub(crate) fn allocate_operation(&self) -> SessionOperationId {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         let operation = SessionOperationId::next(&mut state);
         state.current_operation = Some(operation);
         operation
@@ -141,7 +161,7 @@ impl InteractionLifecycle {
         target: Option<String>,
         operation: TransitionOperation,
     ) -> Result<TransitionStart, &'static str> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         let generation = state
             .route
             .generation()
@@ -184,7 +204,8 @@ impl InteractionLifecycle {
         state.new_buffer.clear();
         state.new_flush_pending = false;
         state.warned_buffer_full = false;
-        let claims = drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true);
+        let claims =
+            super::reverse::drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true);
         Ok(TransitionStart {
             generation,
             from,
@@ -192,6 +213,7 @@ impl InteractionLifecycle {
         })
     }
 
+    #[must_use]
     pub fn arm_transition(&self, generation: u64) -> TransitionLease {
         TransitionLease {
             lifecycle: self.clone(),
@@ -206,7 +228,7 @@ impl InteractionLifecycle {
     /// 内到达的通知必须继续入队，否则会先于缓存帧投递并破坏 wire FIFO；缓存由
     /// [`Self::take_buffered_batch`] 在初始化结束后原子排空。
     pub fn commit_stable(&self, generation: u64, session_id: String) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if state.route.generation() != generation {
             return;
         }
@@ -229,7 +251,7 @@ impl InteractionLifecycle {
     }
 
     pub fn fail_transition(&self, generation: u64) -> Vec<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         if state.route.generation() != generation {
             return Vec::new();
         }
@@ -238,7 +260,7 @@ impl InteractionLifecycle {
         state.new_buffer.clear();
         state.new_flush_pending = false;
         state.warned_buffer_full = false;
-        drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
+        super::reverse::drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
     }
 
     /// initial 失败但旧窗口仍有效：回收本次切换的排队认领，并把路由交还旧会话。
@@ -271,19 +293,20 @@ impl InteractionLifecycle {
         state.new_buffer.clear();
         state.new_flush_pending = false;
         state.warned_buffer_full = false;
-        drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
+        super::reverse::drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
     }
 
     pub fn mark_deleted(&self, session_id: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         state.deleted_session_ids.insert(session_id.to_string());
     }
 
+    #[must_use]
     pub fn is_current_session(&self, session_id: &str) -> bool {
         if session_id.is_empty() {
             return true;
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("state mutex must not be poisoned");
         if state.deleted_session_ids.contains(session_id) {
             return false;
         }
@@ -303,7 +326,7 @@ impl InteractionLifecycle {
 
     #[cfg(test)]
     pub(crate) fn force_stable(&self, session_id: &str, accepting_reverse: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("state mutex must not be poisoned");
         state.route = SessionRoute::Stable {
             session_id: session_id.to_string(),
             generation: 1,

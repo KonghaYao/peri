@@ -1,10 +1,16 @@
 //! Frozen MetaHarness state and prompt behavior tests.
 
-use super::*;
-
 // ─── MetaHarness 冻结状态（设计 §2.3）───────────────────────────────────────
 
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use crate::provider::ProfileConfig;
+use crate::provider::Profiles;
+use crate::session::SessionManager;
+use peri_middlewares::prelude::PermissionMode;
+use peri_middlewares::prelude::SharedPermissionMode;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn mh_cfg(entries: &[(&str, bool)]) -> HashMap<String, bool> {
     entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
@@ -72,17 +78,36 @@ fn build_meta_harness_state_section_false_does_not_override() {
 #[test]
 fn build_meta_harness_state_middleware_false_enters_disabled() {
     let state = super::super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", false)])),
+        Some(&mh_cfg(&[("PermissionMiddleware", false)])),
         HashMap::new(),
     );
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
+    assert!(state
+        .disabled_middlewares
+        .contains("PermissionMiddleware"));
     assert!(state.section_overrides.is_empty());
+}
+
+#[test]
+fn build_meta_harness_state_capability_name_enters_disabled() {
+    let state = super::super::frozen::build_meta_harness_state(
+        Some(&mh_cfg(&[("web", false)])),
+        HashMap::new(),
+    );
+    assert!(
+        state.disabled_middlewares.contains("web"),
+        "v5 能力名必须进入关闭集，运行时再映射到同一能力"
+    );
+    let restored = super::super::frozen::build_meta_harness_state(
+        Some(&mh_cfg(&[("web", true)])),
+        HashMap::new(),
+    );
+    assert!(restored.disabled_middlewares.is_empty());
 }
 
 #[test]
 fn build_meta_harness_state_middleware_true_not_disabled() {
     let state = super::super::frozen::build_meta_harness_state(
-        Some(&mh_cfg(&[("WebMiddleware", true)])),
+        Some(&mh_cfg(&[("PermissionMiddleware", true)])),
         HashMap::new(),
     );
     assert!(
@@ -100,8 +125,8 @@ fn build_meta_harness_state_mixed_entries() {
         Some(&mh_cfg(&[
             ("01_intro", true),
             ("05_using_tools", false),
-            ("WebMiddleware", false),
-            ("WorkspaceMiddleware", true),
+            ("web", false),
+            ("workspace", true),
         ])),
         docs,
     );
@@ -109,8 +134,8 @@ fn build_meta_harness_state_mixed_entries() {
     assert!(state.section_overrides.contains_key("01_intro"));
     assert!(!state.section_overrides.contains_key("05_using_tools"));
     assert_eq!(state.disabled_middlewares.len(), 1);
-    assert!(state.disabled_middlewares.contains("WebMiddleware"));
-    assert!(!state.disabled_middlewares.contains("WorkspaceMiddleware"));
+    assert!(state.disabled_middlewares.contains("web"));
+    assert!(!state.disabled_middlewares.contains("workspace"));
 }
 
 /// 集成：build_frozen_data 应用段落覆盖 + middleware 关闭集合到冻结载体；
@@ -128,7 +153,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
             .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.providers = vec![crate::session::tests::make_provider_config("a", "gpt-4o")];
     peri_config.config.profiles = Profiles {
         sonnet: ProfileConfig {
             provider: "a".to_string(),
@@ -139,7 +164,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
     peri_config.config.meta_harness = Some(mh_cfg(&[
         ("01_intro", true),
         ("05_using_tools", true),
-        ("WebMiddleware", false),
+        ("web", false),
     ]));
     let provider = LlmProvider::from_config(&peri_config).unwrap();
     let config = Arc::new(peri_config);
@@ -187,7 +212,7 @@ async fn test_build_frozen_data_applies_meta_harness_state() {
         Some("CUSTOM-TOOLS-BODY")
     );
     assert!(
-        state.disabled_middlewares.contains("WebMiddleware"),
+        state.disabled_middlewares.contains("web"),
         "冻结状态包含关闭集合"
     );
     // 主 prompt 应用覆盖（SubAgent / fork / workflow agent 直接复用主
@@ -221,7 +246,7 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
             .unwrap();
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
-    peri_config.config.providers = vec![make_provider_config("a", "gpt-4o")];
+    peri_config.config.providers = vec![crate::session::tests::make_provider_config("a", "gpt-4o")];
     peri_config.config.profiles = Profiles {
         sonnet: ProfileConfig {
             provider: "a".to_string(),

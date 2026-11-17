@@ -21,7 +21,7 @@
 
 注册采用独立名称，不覆盖已有静态、插件、ACP 或临时条目。新注册名称采用 `[A-Za-z0-9_-]+`，拒绝 builtin 保留名与规范化/ASCII case-fold 后会碰撞的名字。restart/stop 精确匹配目录中的 opaque 稳定名称，允许既有插件名称中的冒号。注册使用专用严格 stdio/HTTP DTO（显式 `type`），校验 command/url 排他、非空 executable、HTTP(S) URL、字段类型；转换到内部配置时来源由宿主赋值，不接纳 builtin、WorkspaceRemote、ACP 来源身份及 system MCP 提权字段。
 
-本版重启/关闭仅针对可管理的普通 stdio/HTTP MCP。builtin、WorkspaceRemote、system MCP 和 MCP-over-ACP 明确返回 unsupported，避免切断核心工具与任务环境；后续扩展须单独修订契约。
+本版重启/关闭仅针对可管理的普通 stdio/HTTP MCP。builtin、WorkspaceRemote、system MCP 和 MCP-over-ACP 明确返回 unsupported，避免切断核心工具与任务环境；后续扩展须单独修订契约。v5 单出口不改变该边界：builtin `peri` 仍是不可 restart/stop 的系统 MCP；能力开关不属于 ACP 运行控制，不能经 `peri/mcp/control` 打开或关闭能力。
 
 ## 3. ACP wire
 

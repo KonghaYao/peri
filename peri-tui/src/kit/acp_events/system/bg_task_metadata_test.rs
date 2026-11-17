@@ -1,5 +1,14 @@
-use super::*;
-use crate::kit::atoms::{BgDisplayEntry, BgLiveDetail, BgTaskIdentity};
+use super::BG_DISPLAY;
+use super::BG_LIVE_DETAIL;
+use super::BG_TASK_IDENTITY;
+use super::BG_TASK_REVISION;
+use super::BG_TASKS;
+use super::BgTaskEntry;
+use super::BgTaskSnapshotSource;
+use super::METADATA_TEXT_BYTES;
+use super::RECENT_METADATA_BYTES;
+use super::RECENT_METADATA_ENTRIES;
+
 use std::collections::HashMap;
 
 struct Restore {
@@ -42,6 +51,7 @@ fn task(id: String, status: &str, summary: &str) -> BgTaskEntry {
         pid: None,
         revision: None,
         status: Some(status.into()),
+        child_thread_id: None,
     }
 }
 
@@ -82,8 +92,8 @@ fn terminal_event_burst_bounds_display_identity_and_vector_capacity() {
     let summary = "display description".repeat(2048);
     for index in 0..1000 {
         let entry = task(format!("burst-{index}"), "running", &summary);
-        handle_bg_task_started(&mut state, &entry);
-        handle_bg_task_completed(
+        super::handle_bg_task_started(&mut state, &entry);
+        super::handle_bg_task_completed(
             &state,
             &entry.task_id,
             Some(entry.kind.as_str()),
@@ -96,7 +106,7 @@ fn terminal_event_burst_bounds_display_identity_and_vector_capacity() {
     assert!(BG_TASKS.state().read().is_empty());
     assert_recent_bounds(0);
     assert!(!BG_TASK_IDENTITY.state().read().contains_key("burst-0"));
-    handle_bg_task_completed(&state, "burst-0", None, true, 1, Some(summary), None);
+    super::handle_bg_task_completed(&state, "burst-0", None, true, 1, Some(summary), None);
     assert!(!BG_TASK_IDENTITY.state().read().contains_key("burst-0"));
     assert!(!BG_LIVE_DETAIL.state().read().contains_key("burst-0"));
 }
@@ -115,7 +125,7 @@ fn large_snapshot_bounds_only_terminal_metadata_and_preserves_pending_tasks() {
         "pending_delivery",
         "awaiting delivery",
     ));
-    assert!(apply_bg_task_snapshot(
+    assert!(super::apply_bg_task_snapshot(
         &tasks,
         Some(10),
         BgTaskSnapshotSource::Live
@@ -137,7 +147,7 @@ fn large_snapshot_bounds_only_terminal_metadata_and_preserves_pending_tasks() {
     assert!(projected.len() <= 601 + RECENT_METADATA_ENTRIES);
     drop(projected);
     assert_recent_bounds(601);
-    assert!(!apply_bg_task_snapshot(
+    assert!(!super::apply_bg_task_snapshot(
         &[],
         Some(9),
         BgTaskSnapshotSource::Live
@@ -151,7 +161,7 @@ fn large_snapshot_bounds_only_terminal_metadata_and_preserves_pending_tasks() {
             .count(),
         600
     );
-    assert!(apply_bg_task_snapshot(
+    assert!(super::apply_bg_task_snapshot(
         &[],
         Some(11),
         BgTaskSnapshotSource::Live
@@ -175,7 +185,7 @@ fn large_snapshot_bounds_only_terminal_metadata_and_preserves_pending_tasks() {
 fn historical_nonterminal_snapshot_is_bounded_and_preserves_live_display() {
     let _restore = Restore::empty();
     let live = task("live-shell".into(), "running", "independent shell");
-    assert!(apply_bg_task_snapshot(
+    assert!(super::apply_bg_task_snapshot(
         &[live],
         Some(1),
         BgTaskSnapshotSource::Live,
@@ -184,7 +194,7 @@ fn historical_nonterminal_snapshot_is_bounded_and_preserves_live_display() {
         .state()
         .write()
         .get_mut("live-shell")
-        .unwrap()
+        .expect("historical nonterminal snapshot is bounded and preserves live display: fixture must contain the requested entry")
         .output_preview = Some("current output".into());
     let historical: Vec<_> = (0..1000)
         .map(|index| {
@@ -195,7 +205,7 @@ fn historical_nonterminal_snapshot_is_bounded_and_preserves_live_display() {
             )
         })
         .collect();
-    assert!(apply_bg_task_snapshot(
+    assert!(super::apply_bg_task_snapshot(
         &historical,
         Some(2),
         BgTaskSnapshotSource::Historical,
@@ -236,3 +246,9 @@ fn historical_nonterminal_snapshot_is_bounded_and_preserves_live_display() {
     assert!(BG_TASK_IDENTITY.state().read().contains_key("live-shell"));
     assert_recent_bounds(1);
 }
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::BgLiveDetail;
+
+use crate::kit::atoms::BgTaskIdentity;

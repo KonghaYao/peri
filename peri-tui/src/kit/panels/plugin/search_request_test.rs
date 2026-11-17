@@ -1,17 +1,18 @@
 //! Request/notification/bridge/render regression for plugin search completion.
 
-use super::{current_scope, discover::DiscoverState, render, search_request};
+use super::discover::DiscoverState;
+use super::render;
+use super::search_request;
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms::{ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER};
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::mpsc_transport_pair,
-    types::{AcpError, IncomingMessage},
-};
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
 use ratatui_kit::ratatui::style::{Color, Style};
 use serde_json::json;
 use serial_test::serial;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -69,7 +70,7 @@ fn discover_text(state: &DiscoverState) -> String {
 async fn completed_search_view(fail: bool) -> String {
     crate::kit::atoms::init_atoms();
     *ACTIVE_SESSION_ID.state().write() = "plugin-search-session".into();
-    let (client_transport, server) = mpsc_transport_pair();
+    let (client_transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, notification_rx) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("plugin-search-session", true);
     client.spawn_pump(notification_tx);
@@ -88,11 +89,14 @@ async fn completed_search_view(fail: bool) -> String {
         observed_tx,
     );
     let status = Arc::new(parking_lot::Mutex::new(DiscoverState::default()));
-    status.lock().reset_session(current_scope());
+    status.lock().reset_session(super::current_scope());
     status.lock().editor.insert_str("compiler");
     // 提交时固定查询文本，与面板处理提交的方式一致。
     let query = status.lock().editor.text.clone();
-    let ticket = status.lock().begin_search(current_scope()).unwrap();
+    let ticket = status
+        .lock()
+        .begin_search(super::current_scope())
+        .expect("completed search view: the fixture mutex must remain unpoisoned");
     let status_for_request = Arc::downgrade(&status);
     let client = Arc::new(client);
     let request = search_request::launch_search(
@@ -110,7 +114,7 @@ async fn completed_search_view(fail: bool) -> String {
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .expect("search request must reach transport")
-        .unwrap();
+        .expect("completed search view: fixture task and request must complete successfully");
     let IncomingMessage::Request { id, method, params } = incoming else {
         panic!("expected plugin search request, got {incoming:?}");
     };
@@ -127,7 +131,7 @@ async fn completed_search_view(fail: bool) -> String {
         server
             .send_response(id, Err(AcpError::new(-32603, "catalog unavailable")))
             .await
-            .unwrap();
+            .expect("completed search view: fixture task and request must complete successfully");
     } else {
         // The host pushes this notification before its response; observe the
         // actual bridge completion separately from the request future.
@@ -145,7 +149,7 @@ async fn completed_search_view(fail: bool) -> String {
                 }),
             )
             .await
-            .unwrap();
+            .expect("completed search view: fixture task and request must complete successfully");
         server
             .send_response(
                 id,
@@ -155,7 +159,7 @@ async fn completed_search_view(fail: bool) -> String {
                 }]})),
             )
             .await
-            .unwrap();
+            .expect("completed search view: fixture task and request must complete successfully");
         assert!(
             tokio::time::timeout(Duration::from_secs(2), observed_rx.recv())
                 .await
@@ -166,7 +170,7 @@ async fn completed_search_view(fail: bool) -> String {
     tokio::time::timeout(Duration::from_secs(2), request)
         .await
         .expect("search response settles its request task")
-        .unwrap();
+        .expect("completed search view: fixture task and request must complete successfully");
     if !fail {
         // A delayed, same-query legacy notification has no request identity.
         // Even after bridge dispatch it must not replace the owned response.
@@ -184,12 +188,16 @@ async fn completed_search_view(fail: bool) -> String {
                 }),
             )
             .await
-            .unwrap();
+            .expect("completed search view: fixture task and request must complete successfully");
         assert!(
             tokio::time::timeout(Duration::from_secs(2), observed_rx.recv())
                 .await
-                .unwrap()
-                .unwrap()
+                .expect(
+                    "completed search view: the fixture channel must exchange its expected message"
+                )
+                .expect(
+                    "completed search view: the fixture channel must exchange its expected message"
+                )
         );
         assert!(!discover_text(&status.lock()).contains("late-unowned-result"));
     }
@@ -200,16 +208,20 @@ async fn completed_search_view(fail: bool) -> String {
         server
             .send_response(id, Ok(response("retry-result")))
             .await
-            .unwrap();
+            .expect("completed search view: fixture task and request must complete successfully");
         tokio::time::timeout(Duration::from_secs(2), retry)
             .await
-            .unwrap()
-            .unwrap();
+            .expect("completed search view: fixture task and request must complete successfully")
+            .expect("completed search view: fixture task and request must complete successfully");
         assert!(discover_text(&status.lock()).contains("retry-result"));
     }
     shutdown.cancel();
-    notifier.await.unwrap();
-    bridge.await.unwrap();
+    notifier
+        .await
+        .expect("completed search view: fixture task and request must complete successfully");
+    bridge
+        .await
+        .expect("completed search view: fixture task and request must complete successfully");
     text
 }
 
@@ -257,7 +269,7 @@ fn item(name: &str) -> super::PluginSearchResultItem {
 
 fn search_owner() -> Arc<parking_lot::Mutex<DiscoverState>> {
     let mut state = DiscoverState::default();
-    state.reset_session(current_scope());
+    state.reset_session(super::current_scope());
     state.editor.insert_str("compiler");
     Arc::new(parking_lot::Mutex::new(state))
 }
@@ -267,7 +279,10 @@ fn launch_owned(
     client: &Arc<AcpTuiClient>,
 ) -> tokio::task::JoinHandle<()> {
     let query = owner.lock().editor.text.clone();
-    let ticket = owner.lock().begin_search(current_scope()).unwrap();
+    let ticket = owner
+        .lock()
+        .begin_search(super::current_scope())
+        .expect("launch owned: the fixture mutex must remain unpoisoned");
     let weak = Arc::downgrade(owner);
     search_request::launch_search(
         ticket,
@@ -287,8 +302,8 @@ async fn receive_search(
 ) -> peri_acp::transport::types::RequestId {
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("receive search: fixture task and request must complete successfully")
+        .expect("receive search: fixture task and request must complete successfully");
     let IncomingMessage::Request { id, method, params } = incoming else {
         panic!("expected search request");
     };
@@ -306,7 +321,7 @@ fn response(name: &str) -> serde_json::Value {
 async fn plugin_search_same_query_late_response_cannot_replace_newer_result() {
     let _atoms = SearchAtomsGuard::capture();
     *ACTIVE_SESSION_ID.state().write() = "same-query".into();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("same-query", true);
     let client = Arc::new(client);
@@ -318,19 +333,19 @@ async fn plugin_search_same_query_late_response_cannot_replace_newer_result() {
     server
         .send_response(second_id, Ok(response("new-result")))
         .await
-        .unwrap();
+        .expect("plugin search same query late response cannot replace newer result: fixture task and request must complete successfully");
     tokio::time::timeout(Duration::from_secs(2), second)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("plugin search same query late response cannot replace newer result: fixture task and request must complete successfully")
+        .expect("plugin search same query late response cannot replace newer result: fixture task and request must complete successfully");
     // The transport may reject a response whose superseded request was cancelled.
     let _ = server
         .send_response(first_id, Ok(response("old-result")))
         .await;
     tokio::time::timeout(Duration::from_secs(2), first)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("plugin search same query late response cannot replace newer result: fixture task and request must complete successfully")
+        .expect("plugin search same query late response cannot replace newer result: fixture task and request must complete successfully");
     let text = discover_text(&owner.lock());
     assert!(text.contains("new-result"));
     assert!(!text.contains("old-result"));
@@ -342,7 +357,7 @@ async fn plugin_search_session_switch_and_close_invalidate_pending_response() {
     let _atoms = SearchAtomsGuard::capture();
     for reason in ["switch", "reset", "close"] {
         *ACTIVE_SESSION_ID.state().write() = "before".into();
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _, _) = AcpTuiClient::new(transport);
         client.force_stable_for_test("before", true);
         let owner = search_owner();
@@ -352,18 +367,18 @@ async fn plugin_search_session_switch_and_close_invalidate_pending_response() {
             "close" => owner.lock().close(),
             "reset" => {
                 *BRIDGE_RESET_COUNTER.state().write() += 1;
-                owner.lock().reset_session(current_scope());
+                owner.lock().reset_session(super::current_scope());
             }
             _ => {
                 *ACTIVE_SESSION_ID.state().write() = "after".into();
-                owner.lock().reset_session(current_scope());
+                owner.lock().reset_session(super::current_scope());
             }
         }
         let _ = server.send_response(id, Ok(response("stale-result"))).await;
         tokio::time::timeout(Duration::from_secs(2), request)
             .await
-            .unwrap()
-            .unwrap();
+            .expect("plugin search session switch and close invalidate pending response: fixture task and request must complete successfully")
+            .expect("plugin search session switch and close invalidate pending response: fixture task and request must complete successfully");
         assert!(!discover_text(&owner.lock()).contains("stale-result"));
         assert_eq!(owner.lock().editor.all_text(), "");
         assert_eq!(owner.lock().status, super::SearchState::Idle);
@@ -375,7 +390,7 @@ async fn plugin_search_session_switch_and_close_invalidate_pending_response() {
 async fn plugin_search_dropped_owner_cancels_task_without_resurrecting_state() {
     let _atoms = SearchAtomsGuard::capture();
     *ACTIVE_SESSION_ID.state().write() = "dropped".into();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("dropped", true);
     let owner = search_owner();
@@ -386,7 +401,7 @@ async fn plugin_search_dropped_owner_cancels_task_without_resurrecting_state() {
     tokio::time::timeout(Duration::from_secs(2), request)
         .await
         .expect("owner removal cancels the pending request")
-        .unwrap();
+        .expect("plugin search dropped owner cancels task without resurrecting state: fixture task and request must complete successfully");
     assert!(weak.upgrade().is_none());
 }
 
@@ -399,12 +414,12 @@ async fn plugin_search_busy_projection_retries_once_accepted_or_exits_on_cancel(
     // refusal at the callback seam while keeping the actual RPC and render.
     for cancel in [false, true] {
         *ACTIVE_SESSION_ID.state().write() = "busy-projection".into();
-        let (transport, server) = mpsc_transport_pair();
+        let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _, _) = AcpTuiClient::new(transport);
         client.force_stable_for_test("busy-projection", true);
         let owner = search_owner();
         let query = owner.lock().editor.text.clone();
-        let ticket = owner.lock().begin_search(current_scope()).unwrap();
+        let ticket = owner.lock().begin_search(super::current_scope()).expect("plugin search busy projection retries once accepted or exits on cancel: the fixture mutex must remain unpoisoned");
         let weak = Arc::downgrade(&owner);
         let accepted = Arc::new(AtomicBool::new(false));
         let accepted_for_callback = accepted.clone();
@@ -431,11 +446,11 @@ async fn plugin_search_busy_projection_retries_once_accepted_or_exits_on_cancel(
         server
             .send_response(id, Ok(response("delivered-after-render")))
             .await
-            .unwrap();
+            .expect("plugin search busy projection retries once accepted or exits on cancel: fixture task and request must complete successfully");
         tokio::time::timeout(Duration::from_secs(2), refused_rx.recv())
             .await
             .expect("completion must encounter the simulated render borrow")
-            .unwrap();
+            .expect("plugin search busy projection retries once accepted or exits on cancel: fixture task and request must complete successfully");
         assert!(
             discover_text(&owner.lock()).contains(&crate::i18n::tr("panel-plugin-search-loading"))
         );
@@ -447,7 +462,7 @@ async fn plugin_search_busy_projection_retries_once_accepted_or_exits_on_cancel(
         tokio::time::timeout(Duration::from_secs(2), request)
             .await
             .expect("delivery must finish after acceptance or cancellation")
-            .unwrap();
+            .expect("plugin search busy projection retries once accepted or exits on cancel: fixture task and request must complete successfully");
         assert_eq!(projections.load(Ordering::SeqCst), usize::from(!cancel));
         let text = discover_text(&owner.lock());
         assert_eq!(text.contains("delivered-after-render"), !cancel);
@@ -460,7 +475,7 @@ async fn plugin_search_busy_projection_retries_once_accepted_or_exits_on_cancel(
 async fn plugin_search_empty_response_does_not_fall_back_to_local_catalog() {
     let _atoms = SearchAtomsGuard::capture();
     *ACTIVE_SESSION_ID.state().write() = "empty".into();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("empty", true);
     let owner = search_owner();
@@ -470,11 +485,11 @@ async fn plugin_search_empty_response_does_not_fall_back_to_local_catalog() {
     server
         .send_response(id, Ok(json!({"results":[]})))
         .await
-        .unwrap();
+        .expect("plugin search empty response does not fall back to local catalog: fixture task and request must complete successfully");
     tokio::time::timeout(Duration::from_secs(2), request)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("plugin search empty response does not fall back to local catalog: fixture task and request must complete successfully")
+        .expect("plugin search empty response does not fall back to local catalog: fixture task and request must complete successfully");
     assert!(
         owner
             .lock()
@@ -491,7 +506,7 @@ async fn plugin_search_empty_response_does_not_fall_back_to_local_catalog() {
 async fn plugin_search_invalid_response_leaves_loading_with_editable_input() {
     let _atoms = SearchAtomsGuard::capture();
     *ACTIVE_SESSION_ID.state().write() = "invalid".into();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client.force_stable_for_test("invalid", true);
     let client = Arc::new(client);
@@ -499,11 +514,11 @@ async fn plugin_search_invalid_response_leaves_loading_with_editable_input() {
     for value in [json!({}), json!({"results":[{"name":"incomplete"}]})] {
         let request = launch_owned(&owner, &client);
         let id = receive_search(&server).await;
-        server.send_response(id, Ok(value)).await.unwrap();
+        server.send_response(id, Ok(value)).await.expect("plugin search invalid response leaves loading with editable input: fixture task and request must complete successfully");
         tokio::time::timeout(Duration::from_secs(2), request)
             .await
-            .unwrap()
-            .unwrap();
+            .expect("plugin search invalid response leaves loading with editable input: fixture task and request must complete successfully")
+            .expect("plugin search invalid response leaves loading with editable input: fixture task and request must complete successfully");
         let text = discover_text(&owner.lock());
         assert!(text.contains(&crate::i18n::tr("panel-plugin-search-invalid-response")));
         assert!(text.contains("> compiler"));
@@ -521,7 +536,7 @@ fn plugin_search_keyboard_and_mouse_reach_the_same_submission_action() {
     };
     use ratatui_kit::ratatui::layout::Rect;
     let mut state = DiscoverState::default();
-    state.reset_session(current_scope());
+    state.reset_session(super::current_scope());
     let area = Some(Rect::new(0, 0, 80, 20));
     let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
     for c in "compiler".chars() {
@@ -568,7 +583,7 @@ fn plugin_search_remote_selection_uses_the_displayed_identity_for_detail_and_ins
     for mouse in [false, true] {
         let owner = search_owner();
         let mut state = owner.lock();
-        let ticket = state.begin_search(current_scope()).unwrap();
+        let ticket = state.begin_search(super::current_scope()).expect("plugin search remote selection uses the displayed identity for detail and install: the begin_search fixture operation uses valid inputs");
         state.complete(&ticket, Ok(vec![item("remote-selection")]));
         state.focused = false;
         let event = if mouse {
@@ -583,7 +598,7 @@ fn plugin_search_remote_selection_uses_the_displayed_identity_for_detail_and_ins
         };
         let action = decide(&event, Some(Rect::new(0, 0, 80, 20)), &state, &local);
         assert_eq!(apply(&mut state, action, &local), SearchEffect::Consumed);
-        assert_eq!(state.detail.as_ref().unwrap().name, "remote-selection");
+        assert_eq!(state.detail.as_ref().expect("plugin search remote selection uses the displayed identity for detail and install: the fixture must retain its expected variant").name, "remote-selection");
         assert_eq!(
             apply(&mut state, SearchAction::DetailAction(1), &local),
             SearchEffect::Install {
@@ -594,3 +609,7 @@ fn plugin_search_remote_selection_uses_the_displayed_identity_for_detail_and_ins
         assert!(state.detail.is_none());
     }
 }
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;

@@ -61,19 +61,22 @@ pub fn release_window_plans(
     let mut ranges = state.window.take_display_ranges(&keys);
     ranges.sort_unstable();
     let mut removed_units = 0usize;
-    for (start, len) in ranges.iter().rev() {
-        let tail = state.committed.split_off(start.saturating_add(*len));
-        let removed = state.committed.split_off(*start);
-        removed_units = removed_units.saturating_add(removed.len());
-        for unit in &removed {
-            if let crate::kit::tui_render_unit::TuiRenderUnit::TuiToolCard(card) = unit {
-                crate::kit::acp_events::history_window::forget_released_tool(
-                    &state.active_session_id,
-                    &card.tool_id,
-                );
+    {
+        let iteration_items = ranges.iter().rev();
+        for (start, len) in iteration_items {
+            let tail = state.committed.split_off(start.saturating_add(*len));
+            let removed = state.committed.split_off(*start);
+            removed_units = removed_units.saturating_add(removed.len());
+            for unit in &removed {
+                if let crate::kit::tui_render_unit::TuiRenderUnit::TuiToolCard(card) = unit {
+                    crate::kit::acp_events::history_window::forget_released_tool(
+                        &state.active_session_id,
+                        &card.tool_id,
+                    );
+                }
             }
+            state.committed.append(tail);
         }
-        state.committed.append(tail);
     }
     state.folded_history.invalidate();
     crate::kit::acp_events::render::invalidate_structural_caches();
@@ -151,10 +154,12 @@ impl HistoryWindow {
         }
     }
 
+    #[must_use]
     pub fn pending_release_bytes(&self) -> usize {
         self.budget.pending_release_bytes
     }
 
+    #[must_use]
     pub fn pending_release_epoch(&self) -> u64 {
         self.pending_release_epoch
     }

@@ -5,6 +5,7 @@
 //! 宿主不假设跨 run 唯一。
 
 use std::collections::HashMap;
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -15,9 +16,9 @@ use tracing::warn;
 
 use crate::protocol::{AgentRunParams, AgentRunResult};
 
-use super::close_gate::CloseGate;
-use super::event_log::BoundedEventLog;
-use super::WorkflowResourceUpdate;
+use crate::runtime::close_gate::CloseGate;
+use crate::runtime::event_log::BoundedEventLog;
+use crate::runtime::WorkflowResourceUpdate;
 
 /// 终态任务在快照表中的保留窗口（与 progress store 的 run 保留窗口同量级）。
 const TASK_RETENTION_MS: i64 = 300_000;
@@ -52,6 +53,7 @@ pub enum WorkflowTaskState {
 }
 
 impl WorkflowTaskState {
+    #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
@@ -142,6 +144,7 @@ pub enum WorkflowTaskEventKind {
 
 impl WorkflowTaskEventKind {
     /// 稳定事件名（`eventId` 与 serde 序列化共用的唯一字面量；不得用 `Debug`）。
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Published => "published",
@@ -222,6 +225,7 @@ pub struct WorkflowTaskTable {
 }
 
 impl WorkflowTaskTable {
+    #[must_use]
     pub fn new(updates: broadcast::Sender<WorkflowResourceUpdate>, gate: Arc<CloseGate>) -> Self {
         Self {
             inner: Mutex::new(TableInner {
@@ -253,6 +257,7 @@ impl WorkflowTaskTable {
     const EVENT_LOG_CAPACITY: usize = 512;
 
     /// 任务事件日志（`workflow://tasks` 的事实源）。
+    #[must_use]
     pub fn events(&self) -> &Arc<BoundedEventLog<WorkflowTaskEvent>> {
         &self.events
     }
@@ -266,6 +271,7 @@ impl WorkflowTaskTable {
     /// 关闭门票据覆盖「关闭检查 + 状态提交」整个临界区：关闭返回后到达的发布被拒绝
     /// （不登记、不产生事件），在途发布要么整体在关闭前提交、要么被拒绝
     /// （对抗审查 F6）。
+    #[must_use]
     pub fn publish(&self, task_id: String, params: AgentRunParams) -> PublishOutcome {
         let Some(_ticket) = self.gate.admit() else {
             return PublishOutcome::Closed;
@@ -396,6 +402,7 @@ impl WorkflowTaskTable {
     /// 非终态 `state` 直接拒绝（[`SettleOutcome::InvalidState`]），不修改记录——
     /// 不依赖 `debug_assert!` 维持运行时不变量。准入条件由 `admission` 显式声明；
     /// 重复回填携带不同结果时保留首次结果并记录告警（design §5.1）。
+    #[must_use]
     pub fn settle(
         &self,
         run_id: &str,
@@ -439,7 +446,22 @@ impl WorkflowTaskTable {
         {
             return SettleOutcome::NotAdmitted(entry.record.clone());
         }
+        // Fence before the terminal sink can deliver the result to the engine: a
+        // generic dead result may trigger an immediate retry. Only an admitted,
+        // first terminal result can install the fence; rejected reports cannot.
+        let scope_failure = result
+            .as_ref()
+            .and_then(AgentRunResult::unsettled_scope_error)
+            .map(str::to_owned);
+        if let Some(detail) = &scope_failure {
+            inner
+                .run_kills
+                .insert(run_id.to_string(), Some(detail.clone()));
+        }
         let record = self.write_terminal_locked(&mut inner, &key, state, result, reason, now_ms());
+        if let Some(detail) = scope_failure {
+            self.cancel_matching_locked(&mut inner, |record| record.run_id == run_id, Some(detail));
+        }
         match record {
             Some(record) => SettleOutcome::Settled(record),
             None => SettleOutcome::NotFound,
@@ -580,6 +602,7 @@ impl WorkflowTaskTable {
     }
 
     /// 某 run 下的全部任务（发布顺序）。
+    #[must_use]
     pub fn for_run(&self, run_id: &str) -> Vec<WorkflowTaskRecord> {
         let inner = self.inner.lock();
         inner
@@ -594,6 +617,7 @@ impl WorkflowTaskTable {
     ///
     /// 只返回计数：准入判定不需要任务正文。计数与 [`Self::publish`] 分属不同临界区，
     /// 结果仅作为发布前的准入提示；幂等与 kill 栅栏仍由发布路径在自身临界区裁决。
+    #[must_use]
     pub fn active_count_for_run(&self, run_id: &str) -> usize {
         let inner = self.inner.lock();
         Self::count_states_locked(&inner, run_id, |state| !state.is_terminal())
@@ -604,6 +628,7 @@ impl WorkflowTaskTable {
     ///
     /// 与 [`Self::mark_executing`] 分属不同临界区：返回值用于容量门限，唯一 claim
     /// 仍由 `mark_executing` 的临界区裁决（计数不构成准入保证）。
+    #[must_use]
     pub fn executing_count_for_run(&self, run_id: &str) -> usize {
         let inner = self.inner.lock();
         Self::count_states_locked(&inner, run_id, |state| {
@@ -631,6 +656,7 @@ impl WorkflowTaskTable {
     }
 
     /// 某 run 下指定 agent 的任务（单 agent kill 路径）。
+    #[must_use]
     pub fn for_agent(&self, run_id: &str, agent_id: u64) -> Vec<WorkflowTaskRecord> {
         self.for_run(run_id)
             .into_iter()
@@ -639,6 +665,7 @@ impl WorkflowTaskTable {
     }
 
     /// session 级快照（发布顺序；读取前先按保留窗口淘汰过期终态任务）。
+    #[must_use]
     pub fn snapshot(&self) -> Vec<WorkflowTaskRecord> {
         let mut inner = self.inner.lock();
         Self::trim_locked(&mut inner, now_ms());
@@ -650,6 +677,7 @@ impl WorkflowTaskTable {
     }
 
     /// 全部未终态任务（消费者基线扫描）。
+    #[must_use]
     pub fn active(&self) -> Vec<WorkflowTaskRecord> {
         self.baseline(None).active_tasks
     }
@@ -663,6 +691,7 @@ impl WorkflowTaskTable {
     /// 可见。事件日志保留窗口淘汰发布事件后，基线仍能完整找回活跃任务——
     /// 只读事件页会把「长期 published、发布事件已被淘汰」的任务永久漏掉
     /// （对抗审查 F3）。`run_id` 为 `None` 时是 session 级全量扫描。
+    #[must_use]
     pub fn baseline(&self, run_id: Option<&str>) -> TaskBaseline {
         let mut inner = self.inner.lock();
         Self::trim_locked(&mut inner, now_ms());
@@ -774,3 +803,11 @@ pub(crate) fn now_ms() -> i64 {
 #[cfg(test)]
 #[path = "tasks_test.rs"]
 mod tests;
+
+impl Debug for WorkflowTaskTable {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowTaskTable")
+            .finish_non_exhaustive()
+    }
+}

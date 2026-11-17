@@ -1,4 +1,10 @@
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::HostFixture;
+use super::RwLock;
+use super::SubAgentTool;
+use super::SubagentLlmSource;
 use serial_test::serial;
 
 /// 验证语义优先级（define.rs:399-403 的逻辑：background 优先 → 走 invoke_background_fork）。
@@ -29,10 +35,10 @@ async fn test_integration_fork_plus_background_priority() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             // 找到最后一条 Human 消息（fork directive 在 prompt queue 里）
@@ -43,7 +49,7 @@ async fn test_integration_fork_plus_background_priority() {
             {
                 *self.captured.lock().unwrap() = last_human.content();
             }
-            text_events("bg-fork done")
+            test_support::text_events("bg-fork done")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(PromptCaptureLLM);
@@ -190,7 +196,7 @@ async fn test_named_sync_does_not_inherit_parent_messages() {
         }),
         dir.path().to_string_lossy().into_owned(),
     );
-    let tool = host.bind(with_agent_face(tool, dir.path()).await);
+    let tool = host.bind(super::with_agent_face(tool, dir.path()).await);
 
     // 父侧 ToolContext 携带大父历史；命名子 agent 只应看到自己的 prompt。
     let parent_history = vec![
@@ -199,8 +205,9 @@ async fn test_named_sync_does_not_inherit_parent_messages() {
         BaseMessage::human("PARENT-HISTORY-MARKER-Q2"),
     ];
     super::super::invocation::reset_current_messages_calls();
-    let result = tool
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({
                 "subagent_type": "named-sync",
                 "prompt": "named child task",
@@ -264,7 +271,7 @@ async fn test_named_background_does_not_inherit_parent_messages() {
         }),
         dir.path().to_string_lossy().into_owned(),
     );
-    let tool = host.bind(with_agent_face(tool, dir.path()).await);
+    let tool = host.bind(super::with_agent_face(tool, dir.path()).await);
 
     let parent_history = vec![
         BaseMessage::human("PARENT-HISTORY-MARKER-BG-Q1"),

@@ -59,28 +59,31 @@ pub(crate) fn write_quoted(text: &str, out: &mut dyn Write) -> Result<(), Langfu
 /// 按 serde_json 口径转义一段字节（不含引号）；连续的非转义字节合并成一次写出。
 pub(crate) fn escape_into(bytes: &[u8], out: &mut dyn Write) -> std::io::Result<()> {
     let mut plain = 0usize;
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        let mut unicode = [b'\\', b'u', b'0', b'0', 0u8, 0u8];
-        let escape: &[u8] = match byte {
-            b'"' => &b"\\\""[..],
-            b'\\' => &b"\\\\"[..],
-            0x08 => &b"\\b"[..],
-            0x09 => &b"\\t"[..],
-            0x0a => &b"\\n"[..],
-            0x0c => &b"\\f"[..],
-            0x0d => &b"\\r"[..],
-            control if control < 0x20 => {
-                unicode[4] = HEX[(control >> 4) as usize];
-                unicode[5] = HEX[(control & 0x0f) as usize];
-                &unicode[..]
+    {
+        let indexed_bytes = bytes.iter().copied().enumerate();
+        for (index, byte) in indexed_bytes {
+            let mut unicode = [b'\\', b'u', b'0', b'0', 0u8, 0u8];
+            let escape: &[u8] = match byte {
+                b'"' => &b"\\\""[..],
+                b'\\' => &b"\\\\"[..],
+                0x08 => &b"\\b"[..],
+                0x09 => &b"\\t"[..],
+                0x0a => &b"\\n"[..],
+                0x0c => &b"\\f"[..],
+                0x0d => &b"\\r"[..],
+                control if control < 0x20 => {
+                    unicode[4] = HEX[(control >> 4) as usize];
+                    unicode[5] = HEX[(control & 0x0f) as usize];
+                    &unicode[..]
+                }
+                _ => continue,
+            };
+            if plain < index {
+                out.write_all(&bytes[plain..index])?;
             }
-            _ => continue,
-        };
-        if plain < index {
-            out.write_all(&bytes[plain..index])?;
+            out.write_all(escape)?;
+            plain = index + 1;
         }
-        out.write_all(escape)?;
-        plain = index + 1;
     }
     if plain < bytes.len() {
         out.write_all(&bytes[plain..])?;
@@ -89,12 +92,12 @@ pub(crate) fn escape_into(bytes: &[u8], out: &mut dyn Write) -> std::io::Result<
 }
 
 /// 边序列化边转义的适配器：serde_json 的紧凑输出直接进 sink，不为大对象物化整串。
-pub(crate) struct EscapeWriter<'a> {
-    out: &'a mut dyn Write,
+pub(crate) struct EscapeWriter<'output> {
+    out: &'output mut dyn Write,
 }
 
-impl<'a> EscapeWriter<'a> {
-    pub(crate) fn new(out: &'a mut dyn Write) -> Self {
+impl<'output> EscapeWriter<'output> {
+    pub(crate) fn new(out: &'output mut dyn Write) -> Self {
         Self { out }
     }
 }

@@ -1,6 +1,10 @@
 //! Session execution evidence checks shared by local and remote data homes.
 
-use super::*;
+use super::{
+    BindingRecheck, BindingState, Path, ResolvedWorkspace, SessionBinding, SessionDataHome,
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResourcesImpl,
+    ThreadId, WorkspaceError,
+};
 
 impl SessionResourcesImpl {
     pub(super) async fn load_workspace_for_session(
@@ -123,7 +127,7 @@ impl SessionResourcesImpl {
             .local()
             .validate_binding_value(binding, full)
             .await
-            .map_err(execution_failure)
+            .map_err(super::execution_failure)
     }
 
     /// 按 id 取数据面绑定字节后复核（只回答「绑定向哪里」的调用方用这个）。
@@ -163,7 +167,7 @@ impl SessionResourcesImpl {
             .local()
             .legacy_confirmed(id)
             .await
-            .map_err(execution_failure)?
+            .map_err(super::execution_failure)?
         {
             return Err(Self::unverified_legacy_owner());
         }
@@ -190,7 +194,7 @@ impl SessionResourcesImpl {
             Err(error) => match error.downcast_ref::<WorkspaceError>() {
                 // 观测不到这个目录：不是「绑定向哪里」的问题，按历史归属不可核实回答。
                 Some(WorkspaceError::Unavailable) => return Err(Self::unverified_legacy_owner()),
-                _ => return Err(execution_failure(error)),
+                _ => return Err(super::execution_failure(error)),
             },
         };
         let owner = self
@@ -198,12 +202,12 @@ impl SessionResourcesImpl {
             .data()
             .workspace_id_of(id)
             .await?
-            .ok_or_else(not_found)?;
+            .ok_or_else(super::not_found)?;
         if owner != resolved.workspace_id {
             local
                 .relink_unbound_ownership(id, &resolved)
                 .await
-                .map_err(execution_failure)?;
+                .map_err(super::execution_failure)?;
         }
         Ok(resolved)
     }
@@ -238,7 +242,7 @@ impl SessionResourcesImpl {
             .local()
             .legacy_confirmed(id)
             .await
-            .map_err(execution_failure)?
+            .map_err(super::execution_failure)?
         {
             return Ok(BindingState::LegacyConfirmed);
         }

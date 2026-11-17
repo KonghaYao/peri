@@ -1,12 +1,10 @@
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{TuiDivider, TuiNoteLevel, TuiSystemNote, TuiTodoSummary};
-use crate::truncate::truncate_by_width;
+
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-
-use super::helpers::{process_cont_prefix, process_first_prefix, sym};
 
 /// §6.6 System event：普通事件单行注记；warning/error 用符号 + accent。
 ///
@@ -31,15 +29,19 @@ pub(super) fn render_system_note_lines(
                     let style = Style::default()
                         .fg(sem.status.error)
                         .add_modifier(Modifier::BOLD);
-                    let mut spans = process_first_prefix(grid, sym().error, style);
+                    let mut spans = super::helpers::process_first_prefix(
+                        grid,
+                        super::helpers::sym().error,
+                        style,
+                    );
                     if grid.is_narrow() {
                         // Narrow 回退形态把符号位降级为 bullet（§11）；错误行保留
                         // `×`——错误信号优先于窄屏降级。
-                        spans[1] = Span::styled(sym().error, style);
+                        spans[1] = Span::styled(super::helpers::sym().error, style);
                     }
                     spans
                 } else {
-                    process_cont_prefix(grid, sem.text.dim)
+                    super::helpers::process_cont_prefix(grid, sem.text.dim)
                 };
                 spans.push(Span::styled(
                     text,
@@ -71,20 +73,23 @@ pub(super) fn render_system_note_lines(
             // [用户定案 2026-10-14] 注记不画 `── label ──` 横线——走普通过程行：
             // 左缘标记列 `│` + 正文（与 reasoning 摘要同形），不填充行尾。
             let label = clean.first().cloned().unwrap_or_default();
-            let mut spans =
-                process_first_prefix(grid, "\u{2502}", Style::default().fg(sem.text.dim));
+            let mut spans = super::helpers::process_first_prefix(
+                grid,
+                "\u{2502}",
+                Style::default().fg(sem.text.dim),
+            );
             spans.push(Span::styled(
-                truncate_by_width(&label, grid.process_content_width()),
+                crate::truncate::truncate_by_width(&label, grid.process_content_width()),
                 Style::default().fg(sem.text.dim),
             ));
             vec![Line::from(spans)]
         }
         TuiNoteLevel::Warning => {
-            let (symbol, color) = (sym().warning, sem.status.warning);
+            let (symbol, color) = (super::helpers::sym().warning, sem.status.warning);
             render_note_lines(grid, symbol, color, &clean)
         }
         TuiNoteLevel::Error => {
-            let (symbol, color) = (sym().error, sem.status.error);
+            let (symbol, color) = (super::helpers::sym().error, sem.status.error);
             render_note_lines(grid, symbol, color, &clean)
         }
     }
@@ -98,29 +103,32 @@ fn render_note_lines(
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let mut lines = Vec::new();
-    for (i, text) in clean.iter().enumerate() {
-        if text.is_empty() {
-            continue;
+    {
+        let iteration_items = clean.iter().enumerate();
+        for (i, text) in iteration_items {
+            if text.is_empty() {
+                continue;
+            }
+            let mut spans = if i == 0 {
+                super::helpers::process_first_prefix(
+                    grid,
+                    symbol,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                super::helpers::process_cont_prefix(grid, sem.text.dim)
+            };
+            let fg = if i == 0 { color } else { sem.text.muted };
+            spans.push(Span::styled(
+                crate::truncate::truncate_by_width(text, grid.process_content_width()),
+                Style::default().fg(fg),
+            ));
+            lines.push(Line::from(spans));
         }
-        let mut spans = if i == 0 {
-            process_first_prefix(
-                grid,
-                symbol,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            process_cont_prefix(grid, sem.text.dim)
-        };
-        let fg = if i == 0 { color } else { sem.text.muted };
-        spans.push(Span::styled(
-            truncate_by_width(text, grid.process_content_width()),
-            Style::default().fg(fg),
-        ));
-        lines.push(Line::from(spans));
     }
     if lines.is_empty() {
         // 空 note 兜底：至少渲染一条符号行
-        lines.push(Line::from(process_first_prefix(
+        lines.push(Line::from(super::helpers::process_first_prefix(
             grid,
             symbol,
             Style::default().fg(color),
@@ -138,7 +146,7 @@ fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
         "" => "\u{2500}\u{2500}".to_string(),
         l => format!("\u{2500}\u{2500} {l}"),
     };
-    let inner = truncate_by_width(&inner, content);
+    let inner = crate::truncate::truncate_by_width(&inner, content);
     let fill = content.saturating_sub(inner.width());
     Line::from(vec![
         Span::raw(" "),
@@ -166,9 +174,10 @@ pub(super) fn render_todo_summary_lines(
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
-    let mut spans = process_first_prefix(grid, "\u{25fc}", Style::default().fg(sem.accent));
+    let mut spans =
+        super::helpers::process_first_prefix(grid, "\u{25fc}", Style::default().fg(sem.accent));
     spans.push(Span::styled(
-        truncate_by_width(&data.text, grid.process_content_width()),
+        crate::truncate::truncate_by_width(&data.text, grid.process_content_width()),
         Style::default().fg(sem.text.muted),
     ));
     vec![Line::from(spans)]

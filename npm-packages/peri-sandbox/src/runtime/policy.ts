@@ -55,10 +55,11 @@ function overlapsManagedRoot(candidate: string, root: string): boolean {
 export function policyFor(options: {
   sandboxesRoot: string;
   sandboxId: string;
+  workspacePath: string;
+  homePath: string;
   profile: SandboxProfile;
   periPath: string;
 }): { json: string; hash: string } {
-  const base = sandboxPath(options.sandboxesRoot, options.sandboxId);
   const root = existsSync(options.sandboxesRoot) ? realpathSync(options.sandboxesRoot) : resolve(options.sandboxesRoot);
   const reads: string[] = [];
   for (const path of [...options.profile.runtimeReadPaths, srtRuntime().packageRoot, options.periPath]) {
@@ -76,13 +77,13 @@ export function policyFor(options: {
       allowRead: [
         ...reads,
         ...['/dev/null', '/dev/zero', '/dev/urandom', '/dev/random'].filter((path) => existsSync(path)),
-        join(base, 'workspace'),
-        join(base, 'home'),
+        options.workspacePath,
+        options.homePath,
         process.platform === 'darwin' ? macTmpPath(options.sandboxId) : '/tmp',
       ],
       allowWrite: [
-        join(base, 'workspace'),
-        join(base, 'home'),
+        options.workspacePath,
+        options.homePath,
         process.platform === 'darwin' ? macTmpPath(options.sandboxId) : '/tmp/claude',
       ],
       denyWrite: [],

@@ -1,6 +1,7 @@
-use super::fold::{EntryStatus, FoldState, entry_status_code, fold_state_code};
-use super::hash::{tui_hash_combine, tui_hash_roll, tui_hash_str};
-use super::reminder::{ReminderInfo, detect_reminder};
+use super::fold::EntryStatus;
+use super::fold::FoldState;
+
+use super::reminder::ReminderInfo;
 
 /// 用户消息携带的附件展示记录——只保留渲染所需字段。
 ///
@@ -70,6 +71,7 @@ pub struct TuiUserBubble {
 impl TuiUserBubble {
     /// 构造函数——自动从文本中检测 `<system-reminder>` 标签并提取
     /// [`ReminderInfo`]；`source` 填充占位 `None`（协议无来源标记）。
+    #[must_use]
     pub fn new(text: String) -> Self {
         Self::with_attachments(text, Vec::new())
     }
@@ -78,14 +80,14 @@ impl TuiUserBubble {
     /// `entry_render_cache::ensure`）——否则「同文本、不同附件」不会触发重渲染。
     /// 无附件时哈希与 [`Self::new`] 逐位一致（不改变既有缓存行为）。
     pub fn with_attachments(text: String, attachments: Vec<UserAttachment>) -> Self {
-        let mut content_hash = tui_hash_str(&text);
+        let mut content_hash = super::hash::tui_hash_str(&text);
         for attachment in &attachments {
-            content_hash = tui_hash_combine(content_hash, attachment.bytes as u64);
+            content_hash = super::hash::tui_hash_combine(content_hash, attachment.bytes as u64);
         }
         if !attachments.is_empty() {
-            content_hash = tui_hash_combine(content_hash, attachments.len() as u64);
+            content_hash = super::hash::tui_hash_combine(content_hash, attachments.len() as u64);
         }
-        let reminder = detect_reminder(&text);
+        let reminder = super::reminder::detect_reminder(&text);
         TuiUserBubble {
             text,
             attachments,
@@ -124,7 +126,7 @@ pub struct TuiAssistantBubble {
     /// Optional reasoning / thinking block (Anthropic extended thinking etc.).
     pub reasoning: Option<TuiReasoningBlock>,
     /// 身份字段——ACP `messageId`，折叠覆盖键 `FoldKey::Reasoning(message_id)` 用。
-    /// [G1] 不进 content_hash（同一消息内容变化不应因 id 失效），进 partial_eq。
+    /// \[G1\] 不进 content_hash（同一消息内容变化不应因 id 失效），进 partial_eq。
     pub message_id: Option<String>,
     /// 本 bubble 文本流式开始的时刻（§6.2 `12.4s`）——仅 trailing 流式段有值；
     /// 折叠 pass 在 phase 离开 PromptRunning 时冻结为 `duration_ms`（镜像
@@ -177,7 +179,7 @@ impl TuiAssistantBubble {
     /// 无到有）——hash 必须区分，否则按 hash 分片的渲染缓存持续供应运行中
     /// （无 meta）的旧帧（回归：冻结翻转后 duration meta 缺失/闪烁）。
     ///
-    /// 文本部分使用滚动哈希（[`tui_hash_roll`]）——流式追加时可由增量维护的
+    /// 文本部分使用滚动哈希（[`tui_hash_roll`](crate::kit::tui_render_unit::tui_hash_roll)）——流式追加时可由增量维护的
     /// 滚动值直接组合，避免每 token 对全量文本 format! + 哈希。
     /// `message_id` 是身份字段，不参与 hash。
     pub fn compute_hash(
@@ -187,9 +189,9 @@ impl TuiAssistantBubble {
         frozen: bool,
     ) -> u64 {
         Self::compute_hash_from_rolls(
-            tui_hash_roll(text),
+            super::hash::tui_hash_roll(text),
             reasoning
-                .map(|block| tui_hash_roll(&block.text))
+                .map(|block| super::hash::tui_hash_roll(&block.text))
                 .unwrap_or(0),
             reasoning,
             duration_secs,
@@ -206,17 +208,17 @@ impl TuiAssistantBubble {
     ) -> u64 {
         let mut h = text_hash;
         if let Some(r) = reasoning {
-            h = tui_hash_combine(h, reasoning_hash);
-            h = tui_hash_combine(h, fold_state_code(r.fold));
-            h = tui_hash_combine(h, entry_status_code(r.status));
-            h = tui_hash_combine(h, u64::from(r.is_running));
-            h = tui_hash_combine(h, r.duration_code());
+            h = super::hash::tui_hash_combine(h, reasoning_hash);
+            h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(r.fold));
+            h = super::hash::tui_hash_combine(h, super::fold::entry_status_code(r.status));
+            h = super::hash::tui_hash_combine(h, u64::from(r.is_running));
+            h = super::hash::tui_hash_combine(h, r.duration_code());
         }
-        h = tui_hash_combine(h, duration_secs);
-        tui_hash_combine(h, u64::from(frozen))
+        h = super::hash::tui_hash_combine(h, duration_secs);
+        super::hash::tui_hash_combine(h, u64::from(frozen))
     }
 
-    /// [G1] 正文时长对 hash 的确定性贡献：Running 按已耗时秒数（随时间变化，
+    /// \[G1\] 正文时长对 hash 的确定性贡献：Running 按已耗时秒数（随时间变化，
     /// 触发按秒重建），Completed 按冻结秒数（稳定）。与 `TuiReasoningBlock::duration_code`
     /// 同语义。
     pub fn duration_secs(&self) -> u64 {
@@ -246,12 +248,12 @@ impl TuiAssistantBubble {
     /// （下一帧自愈，但点击丢失）。身份校验只关心文本与折叠/状态；
     /// `message_id` 身份字段同样排除（与 compute_hash 口径一致）。
     pub fn stable_identity_hash(text: &str, reasoning: Option<&TuiReasoningBlock>) -> u64 {
-        let mut h = tui_hash_roll(text);
+        let mut h = super::hash::tui_hash_roll(text);
         if let Some(r) = reasoning {
-            h = tui_hash_combine(h, tui_hash_roll(&r.text));
-            h = tui_hash_combine(h, fold_state_code(r.fold));
-            h = tui_hash_combine(h, entry_status_code(r.status));
-            h = tui_hash_combine(h, u64::from(r.is_running));
+            h = super::hash::tui_hash_combine(h, super::hash::tui_hash_roll(&r.text));
+            h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(r.fold));
+            h = super::hash::tui_hash_combine(h, super::fold::entry_status_code(r.status));
+            h = super::hash::tui_hash_combine(h, u64::from(r.is_running));
             // 不含 duration_code——时变，不属于身份。
         }
         h
@@ -261,6 +263,7 @@ impl TuiAssistantBubble {
     /// 形态判定：zone 归属（`transcript::start_zone`/`end_zone`）与渲染前缀
     /// （`render.rs` 正文行）共用，单一权威。空 text（纯 reasoning / 工具轮）
     /// 恒为 true——渲染上无正文可缩进，zone 由 reasoning 分支决定。
+    #[must_use]
     pub fn is_brief(&self) -> bool {
         self.text.chars().count() < BRIEF_REPLY_MAX_CHARS
     }
@@ -302,11 +305,12 @@ pub struct TuiReasoningBlock {
 
 impl TuiReasoningBlock {
     /// 折叠二元访问器——渲染层沿用现有语义：`Collapsed → true`。
+    #[must_use]
     pub fn collapsed(&self) -> bool {
         self.fold == FoldState::Collapsed
     }
 
-    /// [G1] 推理时长对 hash 的确定性贡献：Running 按已耗时秒数（随时间变化，
+    /// \[G1\] 推理时长对 hash 的确定性贡献：Running 按已耗时秒数（随时间变化，
     /// 触发按秒重建刷新时长文本），Completed 按冻结秒数（稳定）。
     /// Completed 且 `duration_ms` 为 None（历史恢复路径，时长不可得）→ 特殊码
     /// `u64::MAX`，与 `Some(0)` 区分——渲染层省略时长（`思考了 · N 行`），

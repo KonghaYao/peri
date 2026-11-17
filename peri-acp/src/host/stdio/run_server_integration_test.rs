@@ -25,9 +25,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use crate::host::{self, AcpServerConfig};
 use crate::provider::{LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
-use crate::transport::{stdio::StdioTransport, AcpTransport};
-
-use super::assemble_stdio_config;
+use crate::transport::stdio::StdioTransport;
+use crate::transport::AcpTransport;
 
 struct StdioStartupGuard;
 
@@ -60,7 +59,7 @@ async fn test_stdio_assembly_uses_input_cwd_workspace() {
     let _guard = StdioStartupGuard;
     crate::provider::set_global_config_path(Some(global_path));
 
-    let assembled = assemble_stdio_config(
+    let assembled = super::assemble_stdio_config(
         crate::host::stdio::StdioInput {
             cwd: input_workspace.to_string_lossy().into_owned(),
             settings_stdin: false,

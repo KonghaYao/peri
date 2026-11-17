@@ -3,9 +3,6 @@
 //! 组件仍各自注册 `use_event_handler`，但所有跨层优先级判断必须先经过这里。
 //! 目标优先级：Popup > InlineCompletion > Panel > Input > Message。
 
-use crate::kit::atoms::{
-    ACTIVE_PANEL, AT_MENTION_ACTIVE, POPUP_KIND, PopupKind, SLASH_HINT_ACTIVE,
-};
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// 跨平台快捷键绑定——同时匹配 macOS Option 合成字符和标准 Ctrl+字母路径。
@@ -121,6 +118,7 @@ pub fn active_layer() -> FocusLayer {
 /// `SessionColumn`/`PanelOverlay` 内的面板 handler 先于 `PopupOverlay` 内的弹窗
 /// handler 注册，于是先注册的面板把键消费掉，弹窗收不到任何输入。
 /// 背景 handler（面板、搜索框等）必须先经此判定让路。
+#[must_use]
 pub fn popup_owns_foreground() -> bool {
     matches!(active_layer(), FocusLayer::Popup(_))
 }
@@ -155,6 +153,7 @@ pub fn classify_global_shortcut(key: &KeyEvent) -> Option<GlobalShortcut> {
     None
 }
 
+#[must_use]
 pub fn message_accepts_key(key: &KeyEvent) -> bool {
     matches!(
         key.code,
@@ -208,3 +207,13 @@ pub fn input_accepts_key(key: &KeyEvent) -> bool {
 #[cfg(test)]
 #[path = "focus_router_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::AT_MENTION_ACTIVE;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PopupKind;
+
+use crate::kit::atoms::SLASH_HINT_ACTIVE;

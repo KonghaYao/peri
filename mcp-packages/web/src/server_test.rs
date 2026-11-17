@@ -13,25 +13,33 @@
 //!   有证据（见 `web_handler_tools_call_reaches_real_http_stub_over_wire`）；
 //!   但**真实 Tavily 服务端**（DNS / TLS / 线上协议兼容性）仍记 **UNVERIFIED**。
 
-use std::{sync::Arc, sync::Mutex, time::Duration};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use peri_acp_types::builtin_mcp::find;
+use peri_acp_types::builtin_mcp;
 use peri_agent::tools::{BaseTool, ToolContext};
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode,
-        ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    },
-    service::{Peer, QuitReason, RunningService},
-    ClientLifecycleMode, RoleClient, ServerHandler, ServiceError,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::model::ErrorCode;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResult;
+use rmcp::model::ResourceContents;
+use rmcp::service::Peer;
+use rmcp::service::QuitReason;
+use rmcp::service::RunningService;
+use rmcp::ClientLifecycleMode;
+use rmcp::RoleClient;
+use rmcp::ServerHandler;
+use rmcp::ServiceError;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::WebMcpServer;
-use crate::{web_fetch::WebFetchTool, web_search::WebSearchTool};
-use peri_mcp_common::{invoke_tool_call, rmcp_tool_from_base};
+use crate::server::WebMcpServer;
+use crate::web_fetch::WebFetchTool;
+use crate::web_search::WebSearchTool;
 
 /// duplex 双向缓冲：单帧 JSON-RPC 行是几百字节级，8 KiB 与既有夹具一致。
 const DUPLEX_BUF: usize = 8 * 1024;
@@ -217,7 +225,7 @@ fn web_server_info_declares_tools_and_resources_capability_and_instance_name() {
 #[test]
 fn web_list_tools_matches_registry_declared_tool_set() {
     let server = WebMcpServer::new();
-    let declared = find("web").expect("web 是已实现实例");
+    let declared = builtin_mcp::find("web").expect("web 是已实现实例");
     let mut expected: Vec<&str> = declared
         .tools
         .iter()
@@ -237,7 +245,7 @@ fn web_list_tools_matches_registry_declared_tool_set() {
 #[test]
 fn web_tool_schemas_map_to_non_empty_objects() {
     for tool in WebMcpServer::new().tools() {
-        let mapped = rmcp_tool_from_base(tool.as_ref());
+        let mapped = peri_mcp_common::rmcp_tool_from_base(tool.as_ref());
         assert_eq!(mapped.name.as_ref(), tool.name(), "名字必须逐字映射");
         assert_eq!(
             mapped.description.as_deref(),
@@ -268,7 +276,7 @@ fn web_tool_schemas_map_to_non_empty_objects() {
 #[tokio::test]
 async fn web_call_tool_unknown_name_is_invalid_params() {
     let server = WebMcpServer::new();
-    let error = invoke_tool_call(server.tools(), "", &call("Nope", json!({})))
+    let error = peri_mcp_common::invoke_tool_call(server.tools(), "", &call("Nope", json!({})))
         .await
         .expect_err("未知工具名必须是协议错误（invalid_params）");
     assert_eq!(error.code.0, ErrorCode::INVALID_PARAMS.0);
@@ -284,7 +292,7 @@ async fn web_call_tool_success_maps_to_text_content() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let server = WebMcpServer::with_tools(vec![StubTool::succeeding("StubSearch", &calls)]);
 
-    let response = invoke_tool_call(
+    let response = peri_mcp_common::invoke_tool_call(
         server.tools(),
         "",
         &call("StubSearch", json!({"query": "rust"})),
@@ -307,7 +315,7 @@ async fn web_call_tool_empty_arguments_are_passed_as_empty_object() {
     let server = WebMcpServer::with_tools(vec![StubTool::succeeding("StubSearch", &calls)]);
 
     let request = CallToolRequestParams::new("StubSearch");
-    invoke_tool_call(server.tools(), "", &request)
+    peri_mcp_common::invoke_tool_call(server.tools(), "", &request)
         .await
         .expect("缺省参数不是协议错误");
 
@@ -321,9 +329,10 @@ async fn web_call_tool_error_maps_to_error_result_with_detail() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let server = WebMcpServer::with_tools(vec![StubTool::failing("StubFailing", &calls)]);
 
-    let response = invoke_tool_call(server.tools(), "", &call("StubFailing", json!({})))
-        .await
-        .expect("工具级失败必须是 Ok(Complete(error 结果))，不是 Err(internal_error)");
+    let response =
+        peri_mcp_common::invoke_tool_call(server.tools(), "", &call("StubFailing", json!({})))
+            .await
+            .expect("工具级失败必须是 Ok(Complete(error 结果))，不是 Err(internal_error)");
 
     let result = complete(response);
     assert_eq!(
@@ -353,7 +362,7 @@ async fn web_handler_tools_list_and_unknown_tool_round_trip_over_wire() {
         .expect("tools/list 必须成功（覆写 discover 会让它在会话层被拒）");
     let mut actual: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
     actual.sort_unstable();
-    let mut expected: Vec<&str> = find("web")
+    let mut expected: Vec<&str> = builtin_mcp::find("web")
         .expect("web 是已实现实例")
         .tools
         .iter()

@@ -23,7 +23,8 @@ use std::time::Duration;
 
 use peri_acp_types::plugin::McpServerConfig;
 use peri_agent::error::{AgentError, AgentResult};
-use peri_agent::middleware::{capabilities as hook_state, r#trait::Middleware};
+use peri_agent::middleware::capabilities as hook_state;
+use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::session::tool_catalog::{StartupRequiredTool, StartupToolUpdate};
 use peri_agent::tools::BaseTool;
 use rmcp::model::Tool;
@@ -32,10 +33,13 @@ use rmcp::transport::async_rw::AsyncRwTransport;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 
 use super::apps::McpCapabilityProfile;
-use super::client::{
-    serve_client_auto, ClientStatus, DiscoveryEvidence, McpClientHandle, McpClientPool,
-    OAuthStatus, SystemMcpManifest,
-};
+use super::client;
+use super::client::ClientStatus;
+use super::client::DiscoveryEvidence;
+use super::client::McpClientHandle;
+use super::client::McpClientPool;
+use super::client::OAuthStatus;
+use super::client::SystemMcpManifest;
 use super::McpMiddleware;
 
 /// server 名刻意含 `:`（与仓库内 `plugin:p1:srv1` 形态一致）：namespace
@@ -184,7 +188,7 @@ impl SeamFixture {
     async fn connect(&mut self, name: &str, tools: Vec<Tool>) -> (Arc<McpClientHandle>, u64) {
         let (client, server) = tokio::io::duplex(4096);
         self.peers.push(spawn_fake_peer(server));
-        let service = serve_client_auto(
+        let service = client::serve_client_auto(
             seam_transport(client),
             &McpCapabilityProfile::default(),
             Duration::from_secs(5),

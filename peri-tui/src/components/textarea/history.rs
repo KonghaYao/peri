@@ -104,6 +104,7 @@ impl History {
         self.redo_stack.clear();
     }
 
+    #[must_use]
     pub fn snapshot(state: &TextAreaState) -> Snapshot {
         Snapshot {
             text: state.text.clone(),

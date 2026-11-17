@@ -3,6 +3,7 @@ mod assembly;
 pub mod betas;
 pub mod io;
 pub mod mcp;
+pub mod mcp_capabilities;
 pub mod observability;
 pub mod provider;
 pub mod resources;

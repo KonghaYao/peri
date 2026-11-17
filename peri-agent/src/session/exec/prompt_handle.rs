@@ -14,6 +14,7 @@
 //! 销毁六阶段方法为 no-op（句柄生命周期 = 本轮执行，无 owned tasks 需要
 //! 编排）；cancel 走 `SessionState.cancel_token`（执行体消费），不经本句柄。
 
+use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -45,6 +46,8 @@ pub struct PromptHandle<Ctx, Turn> {
 
 impl<Ctx, Turn> PromptHandle<Ctx, Turn> {
     /// 构造本轮执行句柄。
+    /// The runner is invoked at most once: a second `SessionHandle::run` call returns an error because the turn input has already been consumed.
+    #[must_use]
     pub fn new(
         ctx: Ctx,
         turn: Turn,
@@ -113,5 +116,13 @@ impl<Ctx: Send + Sync + 'static, Turn: Send + Sync + 'static> SessionHandle
 
     fn drain(&self) -> Vec<UnstampedEvent> {
         Vec::new()
+    }
+}
+
+impl<Ctx, Turn> Debug for PromptHandle<Ctx, Turn> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PromptHandle")
+            .finish_non_exhaustive()
     }
 }

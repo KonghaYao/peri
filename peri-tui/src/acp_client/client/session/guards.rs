@@ -4,7 +4,7 @@ use tokio::sync::watch;
 
 use crate::acp_client::client::{AcpTuiClient, ClientProjectionMode};
 
-pub(super) struct StartupRestoreGuard<'a>(pub(super) &'a watch::Sender<bool>);
+pub(super) struct StartupRestoreGuard<'transition>(pub(super) &'transition watch::Sender<bool>);
 
 impl Drop for StartupRestoreGuard<'_> {
     fn drop(&mut self) {
@@ -33,8 +33,8 @@ impl Drop for PreparingSessionGuard {
 
 /// A dropped transition must also retire the UI target used for load replay.
 /// This guard drops while the operation gate is still held.
-pub(super) struct SessionProjectionGuard<'a> {
-    pub(super) client: &'a AcpTuiClient,
+pub(super) struct SessionProjectionGuard<'transition> {
+    pub(super) client: &'transition AcpTuiClient,
     pub(super) committed: bool,
     /// initial 失败但旧窗口仍有效：保留 load 起点已投影的会话边界。
     pub(super) retain_projection: bool,

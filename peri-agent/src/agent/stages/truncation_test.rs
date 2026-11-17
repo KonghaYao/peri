@@ -1,16 +1,29 @@
 //! 输出截断必须继续或明确停止，不能提交为成功。
 
-use super::*;
+use crate::agent::react::ReactLLM;
 use crate::agent::react::{AgentOutput, Reasoning, StreamingContext, ToolCall};
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
 use crate::error::AgentResult;
-use crate::middleware::{capabilities::AfterAgentState, Middleware};
-use crate::session::{queue::MessageSource, store::FrozenContext, Session};
+use crate::messages::BaseMessage;
+use crate::middleware::capabilities::AfterAgentState;
+use crate::middleware::chain::MiddlewareChain;
+use crate::middleware::Middleware;
+use crate::session::queue::MessageSource;
+use crate::session::store::FrozenContext;
+use crate::session::QueuedMessage;
+use crate::session::Session;
+use crate::tools::BaseTool;
+use parking_lot::RwLock;
 use peri_model::{
     ContentBlock as ModelContentBlock, ModelCapabilities, ModelMessage, ModelRequest,
     ModelResponse, ModelStream, ModelStreamEvent,
 };
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 struct ScriptedModel {
     responses: parking_lot::Mutex<VecDeque<Reasoning>>,
@@ -59,7 +72,10 @@ impl ReactLLM for ScriptedModel {
             requests.len()
         };
         if self.cancel_on_call == Some(call) {
-            streaming.unwrap().cancel.cancel();
+            streaming
+                .expect("the streaming fixture result is required for this assertion")
+                .cancel
+                .cancel();
         }
         Ok(self.responses.lock().pop_front().expect("不得额外请求模型"))
     }
@@ -137,11 +153,17 @@ fn make_interrupted(text: &str, max_attempts: u32) -> Reasoning {
 #[tokio::test]
 async fn test_terminal_provider_failure_preserves_partial_without_continuation() {
     let mut partial = make_interrupted("partial before quota failure", 10);
-    partial.stream_interruption.as_mut().unwrap().error =
-        peri_model::ModelError::protocol(peri_model::ProtocolErrorKind::ProviderTerminal);
-    let source = partial.source_message.clone().unwrap();
+    partial
+        .stream_interruption
+        .as_mut()
+        .expect("the as mut fixture result is required for this assertion")
+        .error = peri_model::ModelError::protocol(peri_model::ProtocolErrorKind::ProviderTerminal);
+    let source = partial
+        .source_message
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let (ctx, model, completions) = make_context(vec![partial], None);
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     assert!(
         matches!(result, LoopResult::Error(crate::error::AgentError::ModelError(ref error))
         if error.is_terminal_provider_failure()),
@@ -167,10 +189,13 @@ async fn test_terminal_provider_failure_preserves_partial_without_continuation()
 #[tokio::test]
 async fn test_stream_interruption_continues_from_saved_message() {
     let partial = make_interrupted("部分正文", 2);
-    let source = partial.source_message.clone().unwrap();
+    let source = partial
+        .source_message
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     let (ctx, model, completions) =
         make_context(vec![partial, Reasoning::with_answer("", "done")], None);
-    let result = run_react_loop(ctx, 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx, 10).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     let requests = model.requests.lock();
     assert_eq!(requests.len(), 2);
@@ -198,7 +223,7 @@ async fn test_stream_interruption_exhausts_event_budget() {
             vec![make_interrupted("partial", budget); budget as usize],
             None,
         );
-        let result = run_react_loop(ctx.clone(), 10).await;
+        let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
         match result {
             LoopResult::Error(crate::error::AgentError::StreamRecoveryExhausted {
                 attempts,
@@ -243,7 +268,7 @@ async fn test_stream_recovery_exhaustion_preempts_truncation_record() {
     let mut response = make_interrupted("partial", 1);
     response.stop_reason = peri_model::StopReason::MaxTokens;
     let (ctx, model, completions) = make_context(vec![response], None);
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     assert!(
         matches!(
             result,
@@ -272,13 +297,13 @@ async fn test_stream_recovery_exhaustion_preempts_truncation_record() {
 async fn test_stream_interruption_respects_cancel_and_iteration_limit() {
     let (ctx, _, completions) = make_context(vec![make_interrupted("partial", 4)], Some(1));
     assert!(matches!(
-        run_react_loop(ctx, 10).await,
+        crate::agent::stages::run_react_loop(ctx, 10).await,
         LoopResult::Interrupted
     ));
     assert_eq!(completions.load(Ordering::SeqCst), 0);
     let (ctx, model, completions) = make_context(vec![make_interrupted("partial", 4)], None);
     assert!(matches!(
-        run_react_loop(ctx, 1).await,
+        crate::agent::stages::run_react_loop(ctx, 1).await,
         LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(1))
     ));
     assert_eq!(model.requests.lock().len(), 1);
@@ -292,7 +317,9 @@ fn test_stream_interruption_reminder_contract() {
     use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
     let (ctx, _, _) = make_context(vec![], None);
     ctx.session.queue.drain_all_sync();
-    futures::executor::block_on(enqueue_stream_interruption_continuation(&ctx));
+    futures::executor::block_on(
+        crate::agent::stages::enqueue_stream_interruption_continuation(&ctx),
+    );
     let execution = ctx.session.turn.execution_binding();
     assert!(ctx.session.queue.has_required_for_run_sync(&execution));
     assert!(!ctx.session.queue.has_ensure_processing_sync());
@@ -327,7 +354,7 @@ async fn test_stream_interruption_tool_progress_does_not_reset_budget() {
         None,
     );
     assert!(matches!(
-        run_react_loop(ctx, 10).await,
+        crate::agent::stages::run_react_loop(ctx, 10).await,
         LoopResult::Error(crate::error::AgentError::StreamRecoveryExhausted { attempts: 2, .. })
     ));
     assert_eq!(model.requests.lock().len(), 3);
@@ -378,7 +405,7 @@ impl peri_model::Model for InterruptedThenDone {
                 }),
             ]
         } else {
-            let response = ModelResponse::new(
+            let response = ModelResponse::try_new(
                 ModelMessage::assistant_text("done"),
                 peri_model::StopReason::EndTurn,
                 None,
@@ -468,7 +495,7 @@ fn assistant_texts(request: &ModelRequest) -> Vec<String> {
 #[tokio::test]
 async fn test_stream_interruption_without_text_keeps_history_clean() {
     let harness = make_bridge_harness();
-    let result = run_react_loop(harness.ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(harness.ctx.clone(), 10).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     let requests = harness.model.requests.lock();
     assert_eq!(requests.len(), 2, "无正文中断仍必须有界续跑");
@@ -518,7 +545,7 @@ async fn model_partial_turn_continues_without_completing_or_repeating_output() {
     let (ctx, model, completions) =
         make_context(vec![partial, Reasoning::with_answer("", "done")], None);
     assert!(matches!(
-        run_react_loop(ctx, 10).await,
+        crate::agent::stages::run_react_loop(ctx, 10).await,
         LoopResult::Completed
     ));
     let requests = model.requests.lock();
@@ -539,7 +566,7 @@ async fn repeated_model_partial_turns_stop_at_the_continuation_budget() {
     partial.stop_reason = peri_model::StopReason::Continue;
     let (ctx, model, completions) = make_context(vec![partial; 3], None);
     assert!(matches!(
-        run_react_loop(ctx, 10).await,
+        crate::agent::stages::run_react_loop(ctx, 10).await,
         LoopResult::Error(crate::error::AgentError::OutputTruncated { attempts: 3 })
     ));
     assert_eq!(model.requests.lock().len(), 3);
@@ -600,7 +627,7 @@ async fn test_truncation_continues_without_premature_completion() {
         truncated.source_message = Some(source.clone());
         let (ctx, model, completions) =
             make_context(vec![truncated, Reasoning::with_answer("", "done")], None);
-        let result = run_react_loop(ctx.clone(), 10).await;
+        let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
         assert!(matches!(result, LoopResult::Completed), "{result:?}");
         let requests = model.requests.lock();
         assert_eq!(requests.len(), 2, "截断响应不能当作成功结束");
@@ -609,8 +636,10 @@ async fn test_truncation_continues_without_premature_completion() {
             .find(|m| m.id() == source.id())
             .expect("续跑保留原始消息身份");
         assert_eq!(
-            serde_json::to_value(saved).unwrap(),
-            serde_json::to_value(&source).unwrap(),
+            serde_json::to_value(saved)
+                .expect("to_value must accept this test fixture representation"),
+            serde_json::to_value(&source)
+                .expect("to_value must accept this test fixture representation"),
             "正文、思考和签名块必须完整保留"
         );
         assert!(requests[1]
@@ -637,7 +666,7 @@ async fn test_truncation_repeated_responses_stop_with_bounded_attempts() {
     let capture = LogCapture::default();
     let _subscriber = tracing::subscriber::set_default(capture.subscriber());
     let (ctx, model, completions) = make_context(vec![make_truncated("partial"); 3], None);
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     assert_eq!(model.requests.lock().len(), 3);
     assert!(
         matches!(
@@ -696,7 +725,7 @@ async fn test_truncation_complete_tool_call_continues_and_resets_budget() {
         ],
         None,
     );
-    let result = run_react_loop(ctx.clone(), 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx.clone(), 10).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(model.requests.lock().len(), 6);
     assert_eq!(completions.load(Ordering::SeqCst), 1);
@@ -721,7 +750,7 @@ async fn test_truncation_complete_tool_call_continues_and_resets_budget() {
 #[tokio::test]
 async fn test_truncation_continuation_respects_cancel() {
     let (ctx, model, completions) = make_context(vec![make_truncated("partial"); 2], Some(2));
-    let result = run_react_loop(ctx, 10).await;
+    let result = crate::agent::stages::run_react_loop(ctx, 10).await;
     assert!(matches!(result, LoopResult::Interrupted), "{result:?}");
     assert_eq!(model.requests.lock().len(), 2);
     assert_eq!(completions.load(Ordering::SeqCst), 0);
@@ -730,7 +759,7 @@ async fn test_truncation_continuation_respects_cancel() {
 #[tokio::test]
 async fn test_truncation_continuation_respects_iteration_limit() {
     let (ctx, model, completions) = make_context(vec![make_truncated("partial")], None);
-    let result = run_react_loop(ctx, 1).await;
+    let result = crate::agent::stages::run_react_loop(ctx, 1).await;
     assert!(
         matches!(
             result,

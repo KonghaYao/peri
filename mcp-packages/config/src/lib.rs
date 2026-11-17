@@ -1,11 +1,10 @@
 mod client;
 mod server;
 
-use std::{
-    io,
-    path::{Path, PathBuf},
-    sync::OnceLock,
-};
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub use client::ConfigurationClient;
 pub use server::ConfigurationMcpServer;
@@ -42,7 +41,7 @@ pub fn write_text_atomic(path: &Path, content: &str) -> io::Result<()> {
 
 pub fn write_text_if_unchanged(
     path: &Path,
-    expected: &Option<String>,
+    expected: Option<&str>,
     content: &str,
 ) -> io::Result<bool> {
     client()?.write_text_if_unchanged(path, expected, content)
@@ -60,6 +59,7 @@ pub fn canonicalize(path: &Path) -> io::Result<Option<PathBuf>> {
     client()?.canonicalize(path)
 }
 
+#[must_use]
 pub fn global_config_path() -> PathBuf {
     client()
         .and_then(ConfigurationClient::paths)

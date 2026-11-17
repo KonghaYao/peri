@@ -3,22 +3,28 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use peri_acp_types::{
-    event::{
-        EventMessage, EventPublisher, EventSink, EventSinkError, EventSubscriber, ExecutorEvent,
-        SubscriptionError,
-    },
-    identity::{EventDeliveryClass, SessionSeq},
-    messages::{MessageContent, MessageId},
-    runtime::UnstampedEvent,
-    session::{EnqueueUserInputRequest, MessageQueue, SessionInbox, TurnTelemetryOutcome},
-};
+use peri_acp_types::event::EventMessage;
+use peri_acp_types::event::EventPublisher;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::EventSinkError;
+use peri_acp_types::event::EventSubscriber;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::SubscriptionError;
+use peri_acp_types::identity::EventDeliveryClass;
+use peri_acp_types::identity::SessionSeq;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::runtime::UnstampedEvent;
+use peri_acp_types::session::EnqueueUserInputRequest;
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::SessionInbox;
+use peri_acp_types::session::TurnTelemetryOutcome;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::user_input_mailbox::UserInputMailbox;
 
-use super::super::{collect_result, spawn_event_pump, CollectRequest, SpawnPumpRequest};
-use super::publish_forwarded_event;
+use crate::session::exec::executor_helpers::collect::CollectRequest;
+use crate::session::exec::executor_helpers::event_pump::SpawnPumpRequest;
 
 struct RecordingPublisher {
     next: Mutex<Option<SessionSeq>>,
@@ -78,7 +84,7 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
     let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let request = EnqueueUserInputRequest {
         session_id: "session".into(),
         generation: mailbox.generation().into(),
@@ -87,10 +93,15 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
         content: MessageContent::text("问题"),
         original_draft: "问题".into(),
     };
-    mailbox.enqueue_sync(&request).unwrap();
+    mailbox
+        .enqueue_sync(&request)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     let messages = inbox.queue_for_test().drain_all_sync();
-    let id = messages[0].message().unwrap().id();
+    let id = messages[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
     (mailbox, request.input_id)
@@ -109,7 +120,7 @@ fn forwarder_binds_the_published_sequence_to_the_delivery_journal() {
     let (mailbox, input_id) = mailbox_with_delivery();
     let publisher = RecordingPublisher::new();
 
-    let published = publish_forwarded_event(
+    let published = crate::session::exec::executor_helpers::v2_execute::publish_forwarded_event(
         &publisher,
         "session",
         &source(),
@@ -132,7 +143,7 @@ fn forwarder_does_not_bind_when_publish_returns_no_sequence() {
     let (mailbox, input_id) = mailbox_with_delivery();
     let publisher = RecordingPublisher::unavailable();
 
-    let published = publish_forwarded_event(
+    let published = crate::session::exec::executor_helpers::v2_execute::publish_forwarded_event(
         &publisher,
         "session",
         &source(),
@@ -149,7 +160,7 @@ fn forwarder_does_not_touch_mailbox_for_non_delivery_events() {
     let (mailbox, _input_id) = mailbox_with_delivery();
     let publisher = RecordingPublisher::new();
 
-    publish_forwarded_event(
+    crate::session::exec::executor_helpers::v2_execute::publish_forwarded_event(
         &publisher,
         "session",
         &source(),
@@ -268,7 +279,7 @@ impl EventPublisher for NoopPublisher {
     }
 }
 
-fn draining_forwarder() -> super::ForwarderLauncherFn {
+fn draining_forwarder() -> crate::session::exec::executor_helpers::v2_execute::ForwarderLauncherFn {
     Arc::new(
         |mut handles: peri_acp_types::event_v2::EventHandles,
          _agent_id: String,
@@ -285,80 +296,86 @@ async fn main_executor_hook_stop_finishes_done_without_panic() {
 
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls_for_build = calls.clone();
-    let stage_build: super::StageBuildFn = Arc::new(move |sbr: super::StageBuildRequest| {
-        use crate::agent::stages::StageContext;
-        use crate::middleware::chain::MiddlewareChain;
-        use peri_acp_types::event_v2::EventBus;
+    let stage_build: crate::session::exec::executor_helpers::v2_execute::StageBuildFn = Arc::new(
+        move |sbr: crate::session::exec::executor_helpers::v2_execute::StageBuildRequest| {
+            use crate::agent::stages::StageContext;
+            use crate::middleware::chain::MiddlewareChain;
+            use peri_acp_types::event_v2::EventBus;
 
-        let session = crate::session::Session::new(
-            Arc::from("/tmp"),
-            sbr.frozen_session.v2_frozen().clone(),
-            None,
-        );
-        let turn = session.start_turn();
-        let mut chain = MiddlewareChain::new();
-        chain.add(Box::new(StopAfterToolBatch));
-        let mut tools = std::collections::BTreeMap::new();
-        tools.insert(
-            "StopProbeTool".to_string(),
-            Arc::new(StopProbeTool) as Arc<dyn crate::tools::BaseTool>,
-        );
-        let tools: crate::agent::stages::SharedToolMap = Arc::new(parking_lot::RwLock::new(tools));
-        let (bus, handles) = EventBus::new(Default::default());
-        let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-            .with_llm(Arc::new(OneToolLlm {
-                calls: calls_for_build.clone(),
-            }))
-            .with_tools(tools)
-            .with_middleware_chain(Arc::new(chain))
-            .with_event_bus(Arc::new(bus))
-            .build();
-        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
-        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Ok((
-            crate::session::exec::stage_builder::V2AgentOutput {
-                context,
-                session,
-                event_handles: handles,
-                todo_rx,
-                bg_event_rx,
-            },
-            None,
-        ))
-    });
+            let session = crate::session::Session::new(
+                Arc::from("/tmp"),
+                sbr.frozen_session.v2_frozen().clone(),
+                None,
+            );
+            let turn = session.start_turn();
+            let mut chain = MiddlewareChain::new();
+            chain.add(Box::new(StopAfterToolBatch));
+            let mut tools = std::collections::BTreeMap::new();
+            tools.insert(
+                "StopProbeTool".to_string(),
+                Arc::new(StopProbeTool) as Arc<dyn crate::tools::BaseTool>,
+            );
+            let tools: crate::agent::stages::SharedToolMap =
+                Arc::new(parking_lot::RwLock::new(tools));
+            let (bus, handles) = EventBus::new(Default::default());
+            let context =
+                StageContext::builder(turn, session.transcript(), session.queue().clone())
+                    .with_llm(Arc::new(OneToolLlm {
+                        calls: calls_for_build.clone(),
+                    }))
+                    .with_tools(tools)
+                    .with_middleware_chain(Arc::new(chain))
+                    .with_event_bus(Arc::new(bus))
+                    .build();
+            let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+            let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+            Ok((
+                crate::session::exec::stage_builder::V2AgentOutput {
+                    context,
+                    session,
+                    event_handles: handles,
+                    todo_rx,
+                    bg_event_rx,
+                },
+                None,
+            ))
+        },
+    );
 
-    let outcome = super::build_and_execute_agent_v2(super::V2ExecuteRequest {
-        session_id: "main-hook-stop".into(),
-        user_input_mailbox: None,
-        async_result_mailbox: None,
-        cwd: "/tmp".into(),
-        cancel: CancellationToken::new(),
-        session_resources: None,
-        thread_id: None,
-        agent_input: crate::agent::react::AgentInput::text("run probe"),
-        history_payloads: vec![],
-        cached_llm: None,
-        task_manager: None,
-        continuation: false,
-        frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
-            crate::session::FrozenContext::builder().build(),
-            None,
-        ),
-        event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
-        agent_overrides: None,
-        preload_skills: vec![],
-        child_handler_factory: None,
-        auxiliary_model: None,
-        thread_persistence: Default::default(),
-        goal_controller: None,
-        on_bg_complete: None,
-        publisher: Arc::new(NoopPublisher),
-        stage_build,
-        store_llm: Arc::new(|_| {}),
-        cancel_cascade: Arc::new(|_| {}),
-        forwarder_launcher: draining_forwarder(),
-        continuation_notify: None,
-    })
+    let outcome = crate::session::exec::executor_helpers::v2_execute::build_and_execute_agent_v2(
+        crate::session::exec::executor_helpers::v2_execute::V2ExecuteRequest {
+            session_id: "main-hook-stop".into(),
+            user_input_mailbox: None,
+            async_result_mailbox: None,
+            cwd: "/tmp".into(),
+            cancel: CancellationToken::new(),
+            session_resources: None,
+            thread_id: None,
+            agent_input: crate::agent::react::AgentInput::text("run probe"),
+            history_payloads: vec![],
+            cached_llm: None,
+            task_manager: None,
+            continuation: false,
+            frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
+                crate::session::FrozenContext::builder().build(),
+                None,
+            ),
+            event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
+            agent_overrides: None,
+            preload_skills: vec![],
+            child_handler_factory: None,
+            auxiliary_model: None,
+            thread_persistence: Default::default(),
+            goal_controller: None,
+            on_bg_complete: None,
+            publisher: Arc::new(NoopPublisher),
+            stage_build,
+            store_llm: Arc::new(|_| {}),
+            cancel_cascade: Arc::new(|_| {}),
+            forwarder_launcher: draining_forwarder(),
+            continuation_notify: None,
+        },
+    )
     .await;
 
     assert!(outcome.ok, "主会话 HookStop 必须正常结束");
@@ -383,81 +400,86 @@ async fn main_executor_fails_when_initial_prompt_cannot_be_admitted() {
     let mailbox = UserInputMailbox::new("main-enqueue-failed".into(), inbox, Arc::new(|_| {}));
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let ticket = mailbox.active_run_ticket().expect("attempt attached");
 
     let queue_for_build = queue.clone();
-    let stage_build: super::StageBuildFn = Arc::new(move |sbr: super::StageBuildRequest| {
-        use crate::agent::stages::StageContext;
-        use crate::middleware::chain::MiddlewareChain;
-        use peri_acp_types::event_v2::EventBus;
+    let stage_build: crate::session::exec::executor_helpers::v2_execute::StageBuildFn = Arc::new(
+        move |sbr: crate::session::exec::executor_helpers::v2_execute::StageBuildRequest| {
+            use crate::agent::stages::StageContext;
+            use crate::middleware::chain::MiddlewareChain;
+            use peri_acp_types::event_v2::EventBus;
 
-        let session = crate::session::Session::new_with_cancel_and_queue(
-            Arc::from("/tmp"),
-            sbr.frozen_session.v2_frozen().clone(),
-            None,
-            Arc::new(CancellationToken::new()),
-            queue_for_build.clone(),
-        );
-        let turn = session.start_turn();
-        let chain = MiddlewareChain::new();
-        let tools: crate::agent::stages::SharedToolMap =
-            Arc::new(parking_lot::RwLock::new(Default::default()));
-        let (bus, handles) = EventBus::new(Default::default());
-        let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-            .with_llm(Arc::new(OneToolLlm {
-                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            }))
-            .with_tools(tools)
-            .with_middleware_chain(Arc::new(chain))
-            .with_event_bus(Arc::new(bus))
-            .build();
-        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
-        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Ok((
-            crate::session::exec::stage_builder::V2AgentOutput {
-                context,
-                session,
-                event_handles: handles,
-                todo_rx,
-                bg_event_rx,
-            },
-            None,
-        ))
-    });
+            let session = crate::session::Session::new_with_cancel_and_queue(
+                Arc::from("/tmp"),
+                sbr.frozen_session.v2_frozen().clone(),
+                None,
+                Arc::new(CancellationToken::new()),
+                queue_for_build.clone(),
+            );
+            let turn = session.start_turn();
+            let chain = MiddlewareChain::new();
+            let tools: crate::agent::stages::SharedToolMap =
+                Arc::new(parking_lot::RwLock::new(Default::default()));
+            let (bus, handles) = EventBus::new(Default::default());
+            let context =
+                StageContext::builder(turn, session.transcript(), session.queue().clone())
+                    .with_llm(Arc::new(OneToolLlm {
+                        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    }))
+                    .with_tools(tools)
+                    .with_middleware_chain(Arc::new(chain))
+                    .with_event_bus(Arc::new(bus))
+                    .build();
+            let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+            let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+            Ok((
+                crate::session::exec::stage_builder::V2AgentOutput {
+                    context,
+                    session,
+                    event_handles: handles,
+                    todo_rx,
+                    bg_event_rx,
+                },
+                None,
+            ))
+        },
+    );
 
-    let outcome = super::build_and_execute_agent_v2(super::V2ExecuteRequest {
-        session_id: "main-enqueue-failed".into(),
-        user_input_mailbox: Some(mailbox.clone()),
-        async_result_mailbox: None,
-        cwd: "/tmp".into(),
-        cancel: CancellationToken::new(),
-        session_resources: None,
-        thread_id: None,
-        agent_input: crate::agent::react::AgentInput::text("must not run"),
-        history_payloads: vec![],
-        cached_llm: None,
-        task_manager: None,
-        continuation: false,
-        frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
-            crate::session::FrozenContext::builder().build(),
-            None,
-        ),
-        event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
-        agent_overrides: None,
-        preload_skills: vec![],
-        child_handler_factory: None,
-        auxiliary_model: None,
-        thread_persistence: Default::default(),
-        goal_controller: None,
-        on_bg_complete: None,
-        publisher: Arc::new(NoopPublisher),
-        stage_build,
-        store_llm: Arc::new(|_| {}),
-        cancel_cascade: Arc::new(|_| {}),
-        forwarder_launcher: draining_forwarder(),
-        continuation_notify: None,
-    })
+    let outcome = crate::session::exec::executor_helpers::v2_execute::build_and_execute_agent_v2(
+        crate::session::exec::executor_helpers::v2_execute::V2ExecuteRequest {
+            session_id: "main-enqueue-failed".into(),
+            user_input_mailbox: Some(mailbox.clone()),
+            async_result_mailbox: None,
+            cwd: "/tmp".into(),
+            cancel: CancellationToken::new(),
+            session_resources: None,
+            thread_id: None,
+            agent_input: crate::agent::react::AgentInput::text("must not run"),
+            history_payloads: vec![],
+            cached_llm: None,
+            task_manager: None,
+            continuation: false,
+            frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
+                crate::session::FrozenContext::builder().build(),
+                None,
+            ),
+            event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
+            agent_overrides: None,
+            preload_skills: vec![],
+            child_handler_factory: None,
+            auxiliary_model: None,
+            thread_persistence: Default::default(),
+            goal_controller: None,
+            on_bg_complete: None,
+            publisher: Arc::new(NoopPublisher),
+            stage_build,
+            store_llm: Arc::new(|_| {}),
+            cancel_cascade: Arc::new(|_| {}),
+            forwarder_launcher: draining_forwarder(),
+            continuation_notify: None,
+        },
+    )
     .await;
 
     assert!(!outcome.ok, "初始指令未接纳时不得报告成功");
@@ -530,79 +552,84 @@ impl EventSink for NoopSink {
 async fn prompt_result_reports_real_context_usage_after_one_turn() {
     use peri_acp_types::command::PromptStopReason;
 
-    let stage_build: super::StageBuildFn = Arc::new(|sbr: super::StageBuildRequest| {
-        use crate::agent::stages::StageContext;
-        use crate::middleware::chain::MiddlewareChain;
-        use peri_acp_types::event_v2::EventBus;
+    let stage_build: crate::session::exec::executor_helpers::v2_execute::StageBuildFn = Arc::new(
+        |sbr: crate::session::exec::executor_helpers::v2_execute::StageBuildRequest| {
+            use crate::agent::stages::StageContext;
+            use crate::middleware::chain::MiddlewareChain;
+            use peri_acp_types::event_v2::EventBus;
 
-        let session = crate::session::Session::new(
-            Arc::from("/tmp"),
-            sbr.frozen_session.v2_frozen().clone(),
-            None,
-        );
-        let turn = session.start_turn();
-        let tools: crate::agent::stages::SharedToolMap =
-            Arc::new(parking_lot::RwLock::new(Default::default()));
-        let (bus, handles) = EventBus::new(Default::default());
-        let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
-            .with_llm(Arc::new(UsageLlm))
-            .with_tools(tools)
-            .with_middleware_chain(Arc::new(MiddlewareChain::new()))
-            .with_event_bus(Arc::new(bus))
-            .build();
-        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
-        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        Ok((
-            crate::session::exec::stage_builder::V2AgentOutput {
-                context,
-                session,
-                event_handles: handles,
-                todo_rx,
-                bg_event_rx,
-            },
-            None,
-        ))
-    });
+            let session = crate::session::Session::new(
+                Arc::from("/tmp"),
+                sbr.frozen_session.v2_frozen().clone(),
+                None,
+            );
+            let turn = session.start_turn();
+            let tools: crate::agent::stages::SharedToolMap =
+                Arc::new(parking_lot::RwLock::new(Default::default()));
+            let (bus, handles) = EventBus::new(Default::default());
+            let context =
+                StageContext::builder(turn, session.transcript(), session.queue().clone())
+                    .with_llm(Arc::new(UsageLlm))
+                    .with_tools(tools)
+                    .with_middleware_chain(Arc::new(MiddlewareChain::new()))
+                    .with_event_bus(Arc::new(bus))
+                    .build();
+            let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+            let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+            Ok((
+                crate::session::exec::stage_builder::V2AgentOutput {
+                    context,
+                    session,
+                    event_handles: handles,
+                    todo_rx,
+                    bg_event_rx,
+                },
+                None,
+            ))
+        },
+    );
 
-    let outcome = super::build_and_execute_agent_v2(super::V2ExecuteRequest {
-        session_id: "main-context-usage".into(),
-        user_input_mailbox: None,
-        async_result_mailbox: None,
-        cwd: "/tmp".into(),
-        cancel: CancellationToken::new(),
-        session_resources: None,
-        thread_id: None,
-        agent_input: crate::agent::react::AgentInput::text("measure usage"),
-        history_payloads: vec![],
-        cached_llm: None,
-        task_manager: None,
-        continuation: false,
-        frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
-            crate::session::FrozenContext::builder().build(),
-            None,
-        ),
-        event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
-        agent_overrides: None,
-        preload_skills: vec![],
-        child_handler_factory: None,
-        auxiliary_model: None,
-        thread_persistence: Default::default(),
-        goal_controller: None,
-        on_bg_complete: None,
-        publisher: Arc::new(NoopPublisher),
-        stage_build,
-        store_llm: Arc::new(|_| {}),
-        cancel_cascade: Arc::new(|_| {}),
-        forwarder_launcher: draining_forwarder(),
-        continuation_notify: None,
-    })
+    let outcome = crate::session::exec::executor_helpers::v2_execute::build_and_execute_agent_v2(
+        crate::session::exec::executor_helpers::v2_execute::V2ExecuteRequest {
+            session_id: "main-context-usage".into(),
+            user_input_mailbox: None,
+            async_result_mailbox: None,
+            cwd: "/tmp".into(),
+            cancel: CancellationToken::new(),
+            session_resources: None,
+            thread_id: None,
+            agent_input: crate::agent::react::AgentInput::text("measure usage"),
+            history_payloads: vec![],
+            cached_llm: None,
+            task_manager: None,
+            continuation: false,
+            frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
+                crate::session::FrozenContext::builder().build(),
+                None,
+            ),
+            event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
+            agent_overrides: None,
+            preload_skills: vec![],
+            child_handler_factory: None,
+            auxiliary_model: None,
+            thread_persistence: Default::default(),
+            goal_controller: None,
+            on_bg_complete: None,
+            publisher: Arc::new(NoopPublisher),
+            stage_build,
+            store_llm: Arc::new(|_| {}),
+            cancel_cascade: Arc::new(|_| {}),
+            forwarder_launcher: draining_forwarder(),
+            continuation_notify: None,
+        },
+    )
     .await;
     assert!(outcome.ok, "一轮正常执行必须成功");
 
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_tx = Arc::new(Mutex::new(Some(event_tx)));
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let pump_handle = spawn_event_pump(SpawnPumpRequest {
+    let pump_handle = crate::session::exec::executor_helpers::spawn_event_pump(SpawnPumpRequest {
         subscription: Box::new(IdleSubscriber),
         event_rx,
         stop_reason_rx: stop_rx,
@@ -618,7 +645,7 @@ async fn prompt_result_reports_real_context_usage_after_one_turn() {
         .send((PromptStopReason::EndTurn, TurnTelemetryOutcome::Completed))
         .expect("stop reason receiver must be alive");
 
-    let result = collect_result(CollectRequest {
+    let result = crate::session::exec::executor_helpers::collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle,
         session_id: "main-context-usage",

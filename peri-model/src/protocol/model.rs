@@ -1,9 +1,10 @@
-use std::{
-    collections::BTreeMap,
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Poll;
 
 use crate::{ModelError, ModelResult, PreparedModelRequest, ProtocolErrorKind};
 use async_trait::async_trait;
@@ -66,12 +67,23 @@ fn complete_tool_calls(tool_calls: BTreeMap<usize, PendingToolCall>) -> ModelRes
 }
 
 /// 可消费的模型输出流，并持有其内部取消作用域。
+#[must_use = "model streams must be consumed or aborted to observe completion"]
 pub struct ModelStream {
     events: Pin<Box<dyn Stream<Item = ModelResult<ModelStreamEvent>> + Send>>,
     child_token: CancellationToken,
     child_cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
     cancellation_reported: bool,
     completed: bool,
+}
+
+impl Debug for ModelStream {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModelStream")
+            .field("cancellation_reported", &self.cancellation_reported)
+            .field("completed", &self.completed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ModelStream {

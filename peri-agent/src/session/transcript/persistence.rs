@@ -13,7 +13,7 @@ use anyhow::anyhow;
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::PersistedPayload;
 
-use super::PersistOp;
+use crate::session::transcript::PersistOp;
 use crate::thread::ThreadId;
 
 /// 一次持久化操作的预算预留（条数 + 估算字节）。
@@ -65,6 +65,7 @@ pub struct PersistenceBudget {
 }
 
 impl PersistenceBudget {
+    #[must_use]
     pub fn new(max_items: usize, max_bytes: usize) -> Arc<Self> {
         Arc::new(Self {
             max_items,
@@ -133,11 +134,13 @@ impl PersistenceBudget {
         self.failure.lock().ok().and_then(|slot| slot.clone())
     }
 
+    #[must_use]
     pub fn is_failed(&self) -> bool {
         self.failure().is_some()
     }
 
     /// 当前未归还的积压（条数, 字节）——测试用可观察量。
+    #[must_use]
     pub fn outstanding(&self) -> (usize, usize) {
         (
             self.items.load(Ordering::Acquire),

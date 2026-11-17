@@ -1,4 +1,17 @@
-use super::*;
+use crate::host::connection::ConnectionContext;
+use crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::AssembledHostFixture;
+use crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::W2_EVERY_SECOND_CRON;
+use crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::W2_TICK_INTERVAL;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use crate::host::mcp_v4_wave2::WAVE2_INSTANCES;
+use crate::host::PromptLocks;
+use crate::host::SharedSessions;
+
+use peri_middlewares::mcp::ClientStatus;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── 用例 9：reconnect 单 tick 驱动（§8 第 7 行 / H05 / V 子计划 `[W2 tick]`）──────
 
@@ -52,12 +65,12 @@ async fn reconnect_has_single_tick_driver() {
         .lock()
         .register(W2_EVERY_SECOND_CRON, TICK_PROBE_PROMPT)
         .expect("1s 粒度 cron 表达式必须被接受（计数观测的前提）");
-    let cron_tools = wave2_tools("cron").to_vec();
+    let cron_tools = crate::host::mcp_v4_wave2::wave2_tools("cron").to_vec();
     let mut triggers = scheduler.lock().subscribe();
     let force_window = std::time::Duration::from_millis(FORCE_WINDOW_MS);
 
     // ── ① gen1：驱动存在（逐轮计数）──────────────────────────────────────────
-    let gen1_rounds = force_due_rounds(
+    let gen1_rounds = crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::force_due_rounds(
         "gen1",
         &scheduler,
         &mut triggers,
@@ -71,7 +84,7 @@ async fn reconnect_has_single_tick_driver() {
     // 旧代句柄由本用例一直持有 ⇒ `Arc::ptr_eq` 为假不是地址复用的巧合。
     let generation1 = fixture
         .pool
-        .get_client("cron")
+        .client("cron")
         .unwrap_or_else(|| panic!("cron 必须已连接"));
     let outcome = fixture.pool.reconnect("cron", None).await;
     assert!(
@@ -80,14 +93,14 @@ async fn reconnect_has_single_tick_driver() {
     );
     let generation2 = fixture
         .pool
-        .get_client("cron")
+        .client("cron")
         .unwrap_or_else(|| panic!("reconnect 后 cron 必须仍有句柄"));
     assert!(
         !Arc::ptr_eq(&generation1, &generation2),
         "reconnect 必须产出新代对象（同一代复用会让旧 tick 与旧链路继续存活）"
     );
-    assert_instance_ready(&fixture.pool, "cron", &cron_tools);
-    let gen2_rounds = force_due_rounds(
+    crate::host::mcp_v4_wave2::assert_instance_ready(&fixture.pool, "cron", &cron_tools);
+    let gen2_rounds = crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::force_due_rounds(
         "gen2（reconnect 后）",
         &scheduler,
         &mut triggers,
@@ -105,7 +118,13 @@ async fn reconnect_has_single_tick_driver() {
     // ── ③ 旧代驱动的收敛面（可证伪）：关闭后 >2× interval 零触发 ─────────────
     fixture.pool.remove_server("cron").await;
     let closed_window = W2_TICK_INTERVAL * CLOSED_MULTIPLE + std::time::Duration::from_millis(500);
-    let closed = force_due_and_collect(&scheduler, &mut triggers, &task_id, closed_window).await;
+    let closed = crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::force_due_and_collect(
+        &scheduler,
+        &mut triggers,
+        &task_id,
+        closed_window,
+    )
+    .await;
     assert!(
         closed.is_empty(),
         "实例关闭后 {closed_window:?}（>2× interval）内不得有任何触发：到期任务若有驱动在跑，
@@ -161,7 +180,7 @@ async fn lifecycle_state_matrix() {
         session_tasks: _session_tasks,
     } = fixture;
 
-    let transport = idle_transport();
+    let transport = crate::host::mcp_v4_wave2::idle_transport();
     let mut sessions = HashMap::new();
     let created = crate::host::requests::handle_request(
         "session/new",
@@ -177,10 +196,11 @@ async fn lifecycle_state_matrix() {
         "session/new 必须回 sessionId: {created}"
     );
 
-    for (index, (instance, expected)) in WAVE2_INSTANCES.iter().enumerate() {
+    let enumerated_expected = WAVE2_INSTANCES.iter().enumerate();
+    for (index, (instance, expected)) in enumerated_expected {
         // ── 列 1：reconnect（新代对象；组合根状态与其他实例不变）──────────────
         let before = pool
-            .get_client(instance)
+            .client(instance)
             .unwrap_or_else(|| panic!("{instance} 必须已连接"));
         let outcome = pool.reconnect(instance, None).await;
         assert!(
@@ -188,13 +208,13 @@ async fn lifecycle_state_matrix() {
             "{instance} reconnect 必须成功: {outcome:?}"
         );
         let after = pool
-            .get_client(instance)
+            .client(instance)
             .unwrap_or_else(|| panic!("{instance} reconnect 后必须仍有句柄"));
         assert!(
             !Arc::ptr_eq(&before, &after),
             "{instance} reconnect 必须换新代对象（旧对象仍被本用例持有 ⇒ 不是地址复用）"
         );
-        assert_instance_ready(&pool, instance, expected);
+        crate::host::mcp_v4_wave2::assert_instance_ready(&pool, instance, expected);
         assert_eq!(
             scheduler.lock().list_tasks().len(),
             1,
@@ -209,11 +229,11 @@ async fn lifecycle_state_matrix() {
         // ── 列 2：close（收敛所属任务；组合根状态保留）─────────────────────────
         pool.remove_server(instance).await;
         assert!(
-            pool.get_client(instance).is_none(),
+            pool.client(instance).is_none(),
             "{instance} close 后不得留下句柄"
         );
         assert!(
-            pool.get_tools(instance).is_empty(),
+            pool.tools_for_server(instance).is_empty(),
             "{instance} close 后不得留下工具面"
         );
         assert!(
@@ -232,7 +252,7 @@ async fn lifecycle_state_matrix() {
             .iter()
             .skip(index + 1)
             .filter(|(other, _)| {
-                pool.get_client(other)
+                pool.client(other)
                     .map(|handle| matches!(handle.status, ClientStatus::Connected))
                     .unwrap_or(false)
             })
@@ -254,7 +274,7 @@ async fn lifecycle_state_matrix() {
                 scheduler.lock().force_next_fire_to_past(&task_id),
                 "反控前置：任务必须仍在组合根任务表内"
             );
-            let observed = count_triggers_in_window(&mut triggers, CONVERGE_WINDOW).await;
+            let observed = crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::count_triggers_in_window(&mut triggers, CONVERGE_WINDOW).await;
             assert!(
                 observed.is_empty(),
                 "cron close 必须收敛代监督者：到期任务在 {CONVERGE_WINDOW:?}（>2× interval）内不得触发: {observed:?}"

@@ -1,6 +1,9 @@
 //! 异常诊断不得抹去已经打开的 AGENT observation 的关闭义务。
 
-use super::*;
+use crate::langfuse::tracer::registry::types::IncompleteReason;
+use crate::langfuse::tracer::registry::types::SubagentStartOutcome;
+use crate::langfuse::tracer::registry::types::SubagentStatus;
+use crate::langfuse::tracer::registry::SubagentRegistry;
 
 fn make_active_registry() -> (SubagentRegistry, String) {
     let mut registry = SubagentRegistry::new();
@@ -72,7 +75,7 @@ fn test_duplicate_stop_after_closed_does_not_reopen_observation() {
         .is_none());
     let closed = registry
         .on_subagent_stop("main", "child", "done", false)
-        .unwrap();
+        .expect("the on subagent stop fixture result is required for this assertion");
     assert_eq!(closed.observation_id, observation_id);
     assert_eq!(closed.incomplete_reason, None);
     assert!(registry

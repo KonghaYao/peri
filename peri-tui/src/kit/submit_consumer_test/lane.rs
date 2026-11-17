@@ -1,7 +1,6 @@
 //! 提交车道原语与 load commit 窗口回归。
 
-use super::super::*;
-use super::support::*;
+use super::super::{Cohorts, LaneKey, SubmitLanes, mpsc};
 
 use peri_acp::transport::AcpTransport;
 use serde_json::json;
@@ -78,7 +77,7 @@ async fn test_submit_lanes_run_sessions_independently() {
         .expect("sender stays alive");
     assert_eq!(first, "b");
 
-    release_tx.send(()).unwrap();
+    release_tx.send(()).expect("submit lanes run sessions independently: fixture channel must deliver its expected message");
     let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .expect("a 释放后应继续执行")
@@ -90,7 +89,7 @@ async fn test_submit_lanes_run_sessions_independently() {
 /// 必须与既有队列共用同一条车道，不能预测 generation+1 另起 Session 车道。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_load_commit_window_stable_input_keeps_existing_lane() {
-    let (client, server) = make_client_without_pump();
+    let (client, server) = super::support::make_client_without_pump();
     client.force_stable_for_test("session-a", false);
     let reservation = Arc::new(client.reserve_session_load());
 
@@ -102,17 +101,17 @@ async fn test_load_commit_window_stable_input_keeps_existing_lane() {
             .load_reserved_session(held.as_ref(), "session-b", ".", None)
             .await
     });
-    let (close_id, close_params) = expect_request(&server, "session/close").await;
+    let (close_id, close_params) = super::support::expect_request(&server, "session/close").await;
     assert_eq!(close_params["sessionId"], "session-a");
-    server.send_response(close_id, Ok(json!({}))).await.unwrap();
-    let (load_id, load_params) = expect_request(&server, "session/load").await;
+    server.send_response(close_id, Ok(json!({}))).await.expect("load commit window stable input keeps existing lane: fixture task and request must complete successfully");
+    let (load_id, load_params) = super::support::expect_request(&server, "session/load").await;
     assert_eq!(load_params["sessionId"], "session-b");
     server
         .send_response(load_id, Ok(json!({"sessionId": "session-b"})))
         .await
-        .unwrap();
-    load.await.unwrap().unwrap();
-    wait_for_session(&client, "session-b").await;
+        .expect("load commit window stable input keeps existing lane: fixture task and request must complete successfully");
+    load.await.expect("load commit window stable input keeps existing lane: fixture task and request must complete successfully").expect("load commit window stable input keeps existing lane: fixture task and request must complete successfully");
+    super::support::wait_for_session(&client, "session-b").await;
     assert_eq!(client.pending_session_load_count(), 1, "预约必须仍被持有");
 
     // 窗口内入队：route 已是 Stable(B, g)，预约尚未释放。
@@ -147,7 +146,9 @@ async fn test_load_commit_window_stable_input_keeps_existing_lane() {
 
     let early = tokio::time::timeout(Duration::from_millis(200), done_rx.recv()).await;
     assert!(early.is_err(), "同车道后续输入不得越过前序: {early:?}");
-    release_tx.send(()).unwrap();
+    release_tx.send(()).expect("load commit window stable input keeps existing lane: fixture channel must deliver its expected message");
     assert_eq!(done_rx.recv().await, Some("first"));
     assert_eq!(done_rx.recv().await, Some("second"));
 }
+
+use crate::kit::submit_admission::register_admission;

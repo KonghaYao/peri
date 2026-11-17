@@ -35,6 +35,30 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
+同一 ACP 连接默认表示客户端的会话切换关系，并且至多绑定一个 setup 会话。连接已有当前
+会话时，`session/new|fork` 与指向不同 ID 的 `session/load|resume` 返回 `-32010`、
+`data.reason="session_switch_requires_close"`；客户端必须先成功 `session/close` 或
+`session/delete` 当前 ID。同 ID load/resume 保持允许并复用现有环境。并发 setup 在首个请求
+Preparing 时返回 `-32010`、`data.reason="session_setup_in_progress"`。正常绑定只在 setup 成功
+响应发送后提交，且只在匹配当前 ID 的 close/delete 成功响应发送后释放。唯一错误响应例外是
+`-32010` + `data.reason="session_cleanup_incomplete"` + `sessionId`：响应发送成功后，连接绑定到该
+cleanup owner，其他 ID setup 继续返回 `session_switch_requires_close`；客户端须成功
+`session/close(owner)` 才释放。错误响应发送失败不绑定，仍由 transport terminal shutdown 收口。
+带 cursor/history 的 `session/load`、`session/history/body` 与 child history 是
+只读浏览，不建立或切换连接绑定；恢复协调内部装配 child 也不经过该 wire gate。
+
+Cold load 与 fork 临时装配 source 时，Host 以 `(sessionId, sessionGeneration)` 记录本请求实际
+发布的环境。load 的 replay、响应装配或 initial cursor 失败，以及 fork 的成功/失败收尾，只能
+清理该 generation；已存在 source 或后来替换的新 generation 不受影响。清理先把匹配 state 标为
+closing 并保留 manager/environment owner，二者都确认排空后才删除；未确认时返回 `-32010`、
+`data.reason="session_cleanup_incomplete"` 与可操作的 `sessionId`，该会话拒绝再次 load，客户端可
+用 `session/close` 重试收口。响应写失败仍按 transport terminal 与 host shutdown 契约统一排空，
+不由自定义 transport 测试定义第二套资源清理语义。
+
+客户端必须在切换前调用 Peri 的 `session/close`（或 `session/delete`）并等待成功响应。未按此
+约定关闭时 setup 会被拒绝，因此不会创建新的会话环境；Peri 不自动关闭、LRU 淘汰或池化旧
+会话，未按约定使用导致的旧会话资源驻留或泄露不由 Peri 承担。
+
 会话级 `mcpServers` 条目可通过 `_meta["peri.subscriptions"]` 声明 `subscriptions/listen`，
 形状与 `.mcp.json` 的 `subscriptions` 相同；HTTP 与 stdio 生效，非法值返回 `-32602`，
 `type: "acp"` 暂不支持。
@@ -262,6 +286,68 @@ UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式�
 
 类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见
 [会话身份与工作区设计](session-id-environment.md)。
+
+#### 2.1.3 History V2 `peri.history`（beta，默认关闭）
+
+History V2 是连接级统一历史协议：首屏由 `session/load` 的 initial 交付，后续
+open/page/seek/body/close 走独立只读方法 `_peri/history`。它与 2.1.2 的
+`peri.historyWindowV1` 是两套独立协议，**同一连接不得混用**；TUI 的 `history-v2`
+beta 默认关闭，未开启时继续走 V1（见 [beta flags](beta-flags.md)）。
+
+**协商与失败关闭。** 客户端在 `initialize` 的
+`clientCapabilities._meta["peri.history"]` 声明 `{ "versions": [2],
+"requestedProfile": "windowed" }`；服务端只在后端兑现能力
+（`SessionResources::supports_history_v2()`）时回显
+`agentCapabilities._meta["peri.history"] = { "version": 2,
+"selectedProfile": "windowed", "limits": { ... } }`。未声明不产生 V2；
+声明了旧 `peri.historyPagination` / `peri.historyWindowV1` 又声明 V2、版本/模式不支持、
+或后端未实现时，`initialize` 显式失败（`unsupported_version` / `invalid_request`），
+不得静默回退为标准全量回放。remote/emscripten 未覆写端口，因此永远不能协商成可用。
+
+**initial。** 协商成功后，`session/load` 的 `_meta["peri.history"]` 可携带
+`{ "action": "initial", "requestKey": "...", "limit": 50, "targetBytes": 524288 }`。
+服务端在标准 load 响应上挂载同一 `_meta` 的 initial 结果：`deliveryId`、
+`liveBoundary { streamId, afterSeq }`、`executionReady`、`runtimeGeneration` 与 `page`
+（首屏页形状同 `_peri/history` 的页）。initial 成功前不撤销旧窗口；失败返回带
+effect 与 recovery 的领域错误，旧窗口仍可读。V2 initial 不混入 V1 的
+`periReplay` / `periLoadGeneration` 字段。
+
+**`_peri/history` 请求。** 根对象以 `action` 判别（`open` / `page` / `seek` / `body` /
+`close`），所有变体拒绝未知字段；未协商 V2 时返回 `-32601`
+（`protocol_not_negotiated`）。`requestKey` 是连接级严格递增操作号，由客户端分配；
+相同键 + 相同参数重放缓存结果，参数不同返回 `request_conflict`。
+
+- `open`：`anchor` 为 `{ "kind": "latest" }` 或
+  `{ "kind": "entry", "entryId", "source" }`，返回 `windowId`、`snapshotToken`、
+  `readTicket`、`committedTail`、`beforeCursor`/`afterCursor` 与页。
+- `page`：`windowId`、`snapshotToken`、`readTicket` 与恰好一个
+  `beforeCursor`/`afterCursor`；游标是 MAC 保护的 opaque 字符串，跨窗口或篡改返回
+  `cross_window_cursor` / `invalid_cursor`。
+- `seek`：按稳定 `entryId` 重新定位；锚点被 rewind/删除或越出冻结范围返回
+  `anchor_unavailable`，不得降级到 latest。
+- `body`：按 `bodyRef` 与 `offset`/`maxBytes` 分块读取，`representation` 为
+  `display-text` / `display-binary` / `display-json`；响应 `data` 是 base64，带
+  `nextOffset`/`complete`/`totalBytes`。页面内联的 opaque 条目只给 descriptor，
+  不随页返回正文。
+- `close`：按窗口身份拆除；close 不读后端，配额饱和时仍应快速返回。
+
+**实时投递。** initial 的 `liveBoundary` 固定首屏覆盖范围；服务端在 transcript 类
+`session/update` 的顶层 `_meta["peri.delivery"]` 写入
+`{ streamId, deliveryId, eventSeq }`。客户端只接纳 `afterSeq + 1` 起的连续事件；
+缺口进入 detached 并显示 gap 提示，不伪装连续。`session/load` 成功前到达的更新按
+会话有界暂存，发布后按 seq 重放。`_peri/history/changed` 目前只在协商中公布名称，
+服务端未发送（已知缺口），窗口失效依赖请求错误与重新 `open`。
+
+**错误。** 领域失败统一 JSON-RPC `-32000`，`data` 为 `HistoryErrorData`
+（`reason`、`recovery`、`effect`）。常见 reason：`invalid_cursor`、
+`cross_window_cursor`、`snapshot_invalidated`、`window_expired`、`window_closed`、
+`ticket_invalid`、`permission_denied`、`not_found`、`index_not_ready`、
+`capacity_exceeded`、`budget_exceeded`、`operation_in_progress`、`delivery_expired`、
+`busy`。`operation_in_progress` 保留客户端在途认领，不重复分配 requestKey。
+
+类型契约见 [peri-acp-types 代码索引](../code-index/peri-acp-types.md) 的 `history_v2`
+小节，服务端实现见 [peri-acp 代码索引](../code-index/peri-acp.md) 与
+[peri-resources 代码索引](../code-index/peri-resources.md) 的 History V2 行。
 
 存储 v2 与后台任务的版本化扩展另外注册 `peri/machines/list`、`peri/workspaces/list`、
 `peri/session/archive`、`session/metadata`、`peri/session_history` 与 `session/bg-tasks`；

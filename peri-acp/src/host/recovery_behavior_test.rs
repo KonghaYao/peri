@@ -2,8 +2,17 @@
 //!
 //! 与 `recovery_test.rs` 同夹具；本文件只放不需要 `ServerLoop` 的协调器用例。
 
-use super::*;
-use crate::host::{dispatch_prompt_turn, PromptOrigin};
+use crate::host;
+use crate::host::requests::tests::recovery_tests::RecoveryHarness;
+use crate::host::PromptOrigin;
+use peri_acp_types::recovery::RecoverySkipReason;
+use peri_acp_types::recovery::SessionRecovery;
+
+use peri_acp_types::thread::WorkState;
+use serde_json::json;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 /// 1. 根 `working`：进入后只注入一条提醒，启动后恰好跑一个 turn 并被 Receive 移交。
 #[tokio::test]
@@ -32,14 +41,19 @@ async fn working_root_injects_one_reminder_and_launch_runs_one_turn() {
     let rows = harness.recovery_rows(&thread_id).await;
     assert_eq!(rows.len(), 1, "只允许一条恢复提醒");
     assert_eq!(rows[0].kind, peri_acp_types::session::MessageKind::Defer);
-    assert_eq!(reminder_source(&rows[0]), "session_recovery");
-    assert!(
-        reminder_body(&rows[0]).contains("会话从中断后的已提交历史继续"),
-        "正文必须说明从已提交历史继续：{}",
-        reminder_body(&rows[0])
+    assert_eq!(
+        crate::host::requests::tests::recovery_tests::reminder_source(&rows[0]),
+        "session_recovery"
     );
     assert!(
-        reminder_body(&rows[0]).contains("外围任务归属与存活状态：未知"),
+        crate::host::requests::tests::recovery_tests::reminder_body(&rows[0])
+            .contains("会话从中断后的已提交历史继续"),
+        "正文必须说明从已提交历史继续：{}",
+        crate::host::requests::tests::recovery_tests::reminder_body(&rows[0])
+    );
+    assert!(
+        crate::host::requests::tests::recovery_tests::reminder_body(&rows[0])
+            .contains("外围任务归属与存活状态：未知"),
         "阶段 3 不得把外围任务写成已知状态"
     );
     assert!(
@@ -49,7 +63,7 @@ async fn working_root_injects_one_reminder_and_launch_runs_one_turn() {
     assert!(!harness._mock.matched(), "启动前不得调用模型");
 
     recovery.launch(&report).await;
-    wait_for("恢复 turn 调用模型", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("恢复 turn 调用模型", || async {
         harness._mock.matched()
     })
     .await;
@@ -57,7 +71,7 @@ async fn working_root_injects_one_reminder_and_launch_runs_one_turn() {
     assert!(harness.activation_allowed(&thread_id));
     assert!(harness.listener_started(&thread_id));
     // Receive 移交后提醒离开 MQ（进入历史），不再重复消费。
-    wait_for("提醒被 Receive 移交", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("提醒被 Receive 移交", || async {
         harness.recovery_rows(&thread_id).await.is_empty()
     })
     .await;
@@ -120,9 +134,10 @@ async fn discard_keeps_reminder_and_next_enter_adopts_without_duplicate() {
     );
 
     recovery.launch(&second).await;
-    wait_for("采纳后的恢复 turn 调用模型", || async {
-        harness._mock.matched()
-    })
+    crate::host::requests::tests::recovery_tests::wait_for(
+        "采纳后的恢复 turn 调用模型",
+        || async { harness._mock.matched() },
+    )
     .await;
     harness._mock.assert_async().await;
 }
@@ -169,7 +184,8 @@ async fn closed_scheduler_channel_rolls_back_admission() {
     let (dead_tx, dead_rx) = mpsc::unbounded_channel();
     drop(dead_rx);
     let dead_tx = Arc::new(dead_tx);
-    let recovery = recovery_for(&harness.cfg, &harness.sessions, &dead_tx);
+    let recovery =
+        crate::host::requests::tests::recovery_for(&harness.cfg, &harness.sessions, &dead_tx);
 
     let report = recovery.enter(&thread_id).await.unwrap();
     assert_eq!(report.recovered, vec![thread_id.clone()]);
@@ -231,7 +247,7 @@ async fn early_failed_recovery_launch_retries_only_on_the_next_entry() {
             .take()
     };
     recovery.launch(&report).await;
-    wait_for("恢复启动失败被记录", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("恢复启动失败被记录", || async {
         harness
             .cfg
             .session_manager
@@ -262,9 +278,10 @@ async fn early_failed_recovery_launch_retries_only_on_the_next_entry() {
     );
 
     recovery.launch(&second).await;
-    wait_for("重试的恢复 turn 调用模型", || async {
-        harness._mock.matched()
-    })
+    crate::host::requests::tests::recovery_tests::wait_for(
+        "重试的恢复 turn 调用模型",
+        || async { harness._mock.matched() },
+    )
     .await;
     harness._mock.assert_async().await;
 }
@@ -283,7 +300,7 @@ async fn normal_user_prompt_early_failure_does_not_set_recovery_flag() {
             .frozen = None;
     }
 
-    let error = dispatch_prompt_turn(
+    let error = host::dispatch_prompt_turn(
         json!({
             "sessionId": thread_id,
             "prompt": [{"type": "text", "text": "hello"}],
@@ -464,10 +481,14 @@ async fn nested_working_chain_keeps_each_reminder_in_its_own_queue() {
         );
     }
     // 提醒的任务列表只写本 thread 的直接 working child。
-    let body = reminder_body(&harness.recovery_rows(&root).await[0]);
+    let body = crate::host::requests::tests::recovery_tests::reminder_body(
+        &harness.recovery_rows(&root).await[0],
+    );
     assert!(body.contains("child-b"), "正文: {body}");
     assert!(!body.contains("child-c"), "只写直接子候选，正文: {body}");
-    let child_b = reminder_body(&harness.recovery_rows("child-b").await[0]);
+    let child_b = crate::host::requests::tests::recovery_tests::reminder_body(
+        &harness.recovery_rows("child-b").await[0],
+    );
     assert!(child_b.contains("child-c"), "正文: {child_b}");
 }
 
@@ -594,9 +615,10 @@ async fn three_way_enter_shares_one_gate_and_injects_once() {
     let first = spawn_enter(Arc::clone(&recovery), thread_id.clone());
     gate.wait_arrived(1).await;
     let second = spawn_enter(Arc::clone(&recovery), thread_id.clone());
-    wait_for("第二个进入持有同一把根锁", || async {
-        recovery.in_flight_gate_count(&root) >= 3
-    })
+    crate::host::requests::tests::recovery_tests::wait_for(
+        "第二个进入持有同一把根锁",
+        || async { recovery.in_flight_gate_count(&root) >= 3 },
+    )
     .await;
 
     gate.release(1);
@@ -611,9 +633,10 @@ async fn three_way_enter_shares_one_gate_and_injects_once() {
     );
 
     let third = spawn_enter(Arc::clone(&recovery), thread_id.clone());
-    wait_for("第三个进入排在同一把门后", || async {
-        recovery.in_flight_gate_count(&root) >= 3
-    })
+    crate::host::requests::tests::recovery_tests::wait_for(
+        "第三个进入排在同一把门后",
+        || async { recovery.in_flight_gate_count(&root) >= 3 },
+    )
     .await;
     gate.release(2);
 
@@ -671,9 +694,10 @@ async fn discard_does_not_remove_a_newer_generation_admission() {
 
     harness.spawn_continuation_scheduler();
     recovery.launch(&second.report).await;
-    wait_for("新代次的准入仍可启动", || async {
-        harness._mock.matched()
-    })
+    crate::host::requests::tests::recovery_tests::wait_for(
+        "新代次的准入仍可启动",
+        || async { harness._mock.matched() },
+    )
     .await;
     harness._mock.assert_async().await;
 }

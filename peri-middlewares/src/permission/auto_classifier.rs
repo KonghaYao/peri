@@ -1,9 +1,12 @@
-use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
-    hash::{Hash, Hasher},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -58,8 +61,18 @@ pub struct LlmAutoClassifier {
     cache_ttl: Duration,
 }
 
+impl Debug for LlmAutoClassifier {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LlmAutoClassifier")
+            .field("cache_ttl", &self.cache_ttl)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LlmAutoClassifier {
     /// 创建新的 LLM 分类器
+    #[must_use]
     pub fn new(model: Arc<AsyncMutex<Box<dyn peri_model::Model>>>) -> Self {
         Self {
             model,
@@ -69,6 +82,7 @@ impl LlmAutoClassifier {
     }
 
     /// 使用自定义缓存 TTL 创建分类器
+    #[must_use]
     pub fn with_cache_ttl(
         model: Arc<AsyncMutex<Box<dyn peri_model::Model>>>,
         cache_ttl: Duration,

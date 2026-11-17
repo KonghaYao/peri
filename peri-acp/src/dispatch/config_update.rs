@@ -8,7 +8,7 @@ use agent_client_protocol::schema::v1::{ConfigOptionUpdate, SessionConfigOption}
 use peri_acp_types::permission::PermissionMode;
 
 use crate::provider::{LlmProvider, PeriConfig};
-use crate::session::state_builders::build_config_options;
+use crate::session::state_builders;
 
 /// Build config options list from current config state.
 pub fn make_config_options(
@@ -16,7 +16,7 @@ pub fn make_config_options(
     provider: &LlmProvider,
     permission_mode: PermissionMode,
 ) -> Vec<SessionConfigOption> {
-    build_config_options(peri_config, provider, permission_mode)
+    state_builders::build_config_options(peri_config, provider, permission_mode)
 }
 
 /// Build a [`ConfigOptionUpdate`] from current config state.

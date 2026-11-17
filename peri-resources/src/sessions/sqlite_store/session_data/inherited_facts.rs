@@ -15,7 +15,8 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::thread::ThreadId;
 
 use super::blob_reader::{BlobReadError, BlobReader};
-use super::inherited_blob::{read_payload_id, Cursor, PayloadDecoding};
+use super::inherited_blob::Cursor;
+use super::inherited_blob::PayloadDecoding;
 
 /// 一条 payload 在列内的转义原文区间（不含两端引号）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,7 +163,10 @@ pub(super) fn scan_summary(reader: &BlobReader) -> Result<InheritedSummary, Blob
         Ok(())
     })?;
     let first_id = match first {
-        Some(span) => Some(read_payload_id(reader, span)?.ok_or(BlobReadError::Unsupported)?),
+        Some(span) => Some(
+            super::inherited_blob::read_payload_id(reader, span)?
+                .ok_or(BlobReadError::Unsupported)?,
+        ),
         None => None,
     };
     // 单条 payload 的 first 与 last 必须是同一个身份；避免重复读取造成的口径漂移。
@@ -170,7 +174,10 @@ pub(super) fn scan_summary(reader: &BlobReader) -> Result<InheritedSummary, Blob
         first_id
     } else {
         match last {
-            Some(span) => Some(read_payload_id(reader, span)?.ok_or(BlobReadError::Unsupported)?),
+            Some(span) => Some(
+                super::inherited_blob::read_payload_id(reader, span)?
+                    .ok_or(BlobReadError::Unsupported)?,
+            ),
             None => None,
         }
     };
@@ -193,7 +200,7 @@ pub(super) fn scan_layout(reader: &BlobReader) -> Result<InheritedLayout, BlobRe
     let mut payloads = Vec::with_capacity(spans.len());
     let mut positions = HashMap::with_capacity(spans.len());
     for span in spans {
-        let Some(id) = read_payload_id(reader, span)? else {
+        let Some(id) = super::inherited_blob::read_payload_id(reader, span)? else {
             return Err(BlobReadError::Unsupported);
         };
         // 与线性 `position()` 一致：重复身份保留首次出现的下标。

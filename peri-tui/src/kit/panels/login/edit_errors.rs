@@ -83,6 +83,7 @@ pub(super) fn profile_provider_missing(alias: &'static str) -> LoginError {
 }
 
 /// Login 的四个默认模型字段与档位 alias 一一对应。
+#[must_use]
 fn default_model_field(alias: &str) -> LoginField {
     match alias {
         "fable" => LoginField::FableModel,

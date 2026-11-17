@@ -1,13 +1,15 @@
-use super::*;
-use peri_acp_types::{
-    event::ChildEventStream,
-    identity::AttemptId,
-    session::{ExecutionBinding, TurnId},
-};
+use crate::event::AcpEvent;
+use peri_acp_types::event::ChildEventStream;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::identity::AttemptId;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::ExecutionBinding;
+use peri_acp_types::session::TurnId;
 
 #[tokio::test]
 async fn child_origin_crosses_standard_and_legacy_wire_without_relabeling() {
-    let (transport, sink) = compact_test_sink();
+    let (transport, sink) = crate::session::event_sink::tests::compact_test_sink();
     let execution = ExecutionBinding {
         turn_id: TurnId::new(),
         attempt_id: AttemptId::new(),
@@ -38,7 +40,8 @@ async fn child_origin_crosses_standard_and_legacy_wire_without_relabeling() {
     }
     let notifications = transport.notifications.lock().unwrap();
     assert_eq!(notifications.len(), 3);
-    for (index, (_, payload)) in notifications.iter().enumerate() {
+    let enumerated_payload = notifications.iter().enumerate();
+    for (index, (_, payload)) in enumerated_payload {
         let wire: peri_acp_types::event::ChildEventOrigin =
             serde_json::from_value(payload["_meta"]["peri"]["childRun"].clone()).unwrap();
         assert_eq!(&wire, events[index].child_origin().unwrap());

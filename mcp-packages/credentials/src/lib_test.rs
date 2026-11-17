@@ -1,4 +1,5 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::oauth_credentials::{
@@ -48,7 +49,7 @@ fn credentials(client_id: &str) -> StoredCredentials {
 
 #[tokio::test]
 async fn mcp_round_trip_and_blocking_cleanup_need_no_tool_pool() {
-    let client = OAuthCredentialClient::new(Arc::new(MemoryCredentials::default())).unwrap();
+    let client = OAuthCredentialClient::try_new(Arc::new(MemoryCredentials::default())).unwrap();
     assert!(client.load_server("first").await.unwrap().is_none());
     client
         .save_server("first", credentials("first-client"))
@@ -82,7 +83,7 @@ async fn invalid_identity_and_payload_errors_preserve_classification_and_diagnos
         .lock()
         .await
         .insert("corrupt".into(), "{\"secret-marker\":true}".into());
-    let client = OAuthCredentialClient::new(provider).unwrap();
+    let client = OAuthCredentialClient::try_new(provider).unwrap();
     let error = client.load_server("corrupt").await.err().unwrap();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error
@@ -119,7 +120,7 @@ impl OAuthCredentialPort for ReadOnlyCredentials {
 
 #[tokio::test]
 async fn read_only_failure_is_explicit_without_fallback() {
-    let client = OAuthCredentialClient::new(Arc::new(ReadOnlyCredentials)).unwrap();
+    let client = OAuthCredentialClient::try_new(Arc::new(ReadOnlyCredentials)).unwrap();
     let error = client
         .save_server("server", credentials("fixture-client"))
         .await
@@ -142,7 +143,7 @@ async fn credentials_reuse_configured_database_and_survive_resource_restart() {
         .await
         .unwrap()
         .workspace_id;
-    let client = OAuthCredentialClient::new(
+    let client = OAuthCredentialClient::try_new(
         sessions
             .oauth_credentials_for_workspace(workspace_id)
             .unwrap(),
@@ -174,7 +175,7 @@ async fn credentials_reuse_configured_database_and_survive_resource_restart() {
         .await
         .unwrap();
     let (sessions, shutdown) = resources.into_parts();
-    let client = OAuthCredentialClient::new(
+    let client = OAuthCredentialClient::try_new(
         sessions
             .oauth_credentials_for_workspace(workspace_id)
             .unwrap(),

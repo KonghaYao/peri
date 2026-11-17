@@ -10,25 +10,37 @@
 //! `Vec<PanelKind>` 不会同时含两个同组面板。
 
 use peri_theme::atoms::THEME_ATOM;
-use ratatui::{style::Style, symbols::scrollbar::Set};
-use ratatui_kit::{
-    components::scroll_view::{ScrollbarStyle, ScrollbarVisibility, Scrollbars},
-    crossterm::event::KeyCode,
-    prelude::*,
-    ratatui::layout::Constraint,
-};
+use ratatui::style::Style;
+use ratatui::symbols::scrollbar::Set;
+use ratatui_kit::components::scroll_view::ScrollbarStyle;
+use ratatui_kit::components::scroll_view::ScrollbarVisibility;
+use ratatui_kit::components::scroll_view::Scrollbars;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
-use crate::kit::panels::{
-    agent::AgentPanel, ask_user::AskUserPanel, config::ConfigPanel, cron::CronPanel,
-    goal::GoalPanel, history_detail::HistoryDetailPanel, hooks::HooksPanel, login::LoginPanel,
-    mcp::McpPanel, memory::MemoryPanel, model::ModelPanel, plugin::PluginPanel,
-    shell_detail::ShellDetailPanel, status::StatusPanel, subagent_detail::SubAgentDetailPanel,
-    tasks::TasksPanel, theme::ThemePanel, thread_browser::ThreadBrowserPanel,
-    workflow::WorkflowPanel,
-};
+
+use crate::kit::panels::agent::AgentPanel;
+use crate::kit::panels::ask_user::AskUserPanel;
+use crate::kit::panels::config::ConfigPanel;
+use crate::kit::panels::cron::CronPanel;
+use crate::kit::panels::goal::GoalPanel;
+use crate::kit::panels::history_detail::HistoryDetailPanel;
+use crate::kit::panels::hooks::HooksPanel;
+use crate::kit::panels::login::LoginPanel;
+use crate::kit::panels::mcp::McpPanel;
+use crate::kit::panels::memory::MemoryPanel;
+use crate::kit::panels::model::ModelPanel;
+use crate::kit::panels::plugin::PluginPanel;
+use crate::kit::panels::shell_detail::ShellDetailPanel;
+use crate::kit::panels::status::StatusPanel;
+use crate::kit::panels::subagent_detail::SubAgentDetailPanel;
+use crate::kit::panels::tasks::TasksPanel;
+use crate::kit::panels::theme::ThemePanel;
+use crate::kit::panels::thread_browser::ThreadBrowserPanel;
+use crate::kit::panels::workflow::WorkflowPanel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelScope {
@@ -661,3 +673,7 @@ pub fn clean_scrollbars() -> Scrollbars<'static> {
 #[cfg(test)]
 #[path = "panel_registry_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::OPEN_PANELS;

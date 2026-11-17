@@ -1,13 +1,15 @@
 use crate::middleware::capabilities as hook_state;
 use async_trait::async_trait;
 
-use crate::{
-    agent::react::{AgentOutput, ToolCall, ToolResult},
-    error::{AgentError, AgentResult},
-    middleware::r#trait::Middleware,
-};
+use crate::agent::react::AgentOutput;
+use crate::agent::react::ToolCall;
+use crate::agent::react::ToolResult;
+use crate::error::AgentError;
+use crate::error::AgentResult;
+use crate::middleware::r#trait::Middleware;
 
 /// 日志中间件 - 记录 Agent 执行过程
+#[derive(Debug)]
 pub struct LoggingMiddleware {
     name: String,
     /// 是否打印工具调用详情
@@ -15,6 +17,7 @@ pub struct LoggingMiddleware {
 }
 
 impl LoggingMiddleware {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             name: "logging".to_string(),
@@ -22,6 +25,7 @@ impl LoggingMiddleware {
         }
     }
 
+    #[must_use]
     pub fn verbose(mut self) -> Self {
         self.verbose = true;
         self
@@ -120,11 +124,13 @@ impl Middleware for LoggingMiddleware {
 }
 
 /// 步骤计数中间件 - 追踪执行指标
+#[derive(Debug)]
 pub struct MetricsMiddleware {
     name: String,
 }
 
 impl MetricsMiddleware {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             name: "metrics".to_string(),

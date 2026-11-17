@@ -13,10 +13,14 @@ use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use tokio_util::sync::CancellationToken;
 
-use super::*;
 use crate::agent::async_tasks::TaskManager;
 use crate::agent::events::BackgroundTaskResult;
 use crate::session::subagent::factory::ResumeClaim;
+use crate::session::subagent::run_sync::SyncCompletion;
+use crate::session::subagent::terminal_settlement::TerminalMqRoute;
+use crate::session::subagent::types::ChildHandoffReason;
+use crate::session::subagent::types::ChildHandoffReceipt;
+use crate::session::subagent::types::ChildRunOutcome;
 use crate::session::subagent::SubagentHost;
 use crate::session::test_resources::TestSession;
 use crate::session::{FrozenContext, Session};
@@ -40,7 +44,7 @@ impl Fixture {
         let child = session.create_child(&parent).await;
         let parent_queue = MessageQueue::bind(Arc::clone(&resources), parent.clone());
         let manager = Arc::new(TaskManager::new());
-        let task_id = new_sync_task_id();
+        let task_id = crate::session::subagent::run_sync::new_sync_task_id();
         let route = TerminalMqRoute {
             store: Arc::clone(&resources),
             target: parent.clone(),
@@ -99,12 +103,16 @@ async fn wait_for_terminal(
 ) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let queued = fixture.parent_queue.snapshot().await.unwrap();
+            let queued = fixture
+                .parent_queue
+                .snapshot()
+                .await
+                .expect("the snapshot fixture result is required for this assertion");
             let meta = fixture
                 .resources
                 .load_session_meta(&fixture.child)
                 .await
-                .unwrap();
+                .expect("the load session meta fixture result is required for this assertion");
             // 终态与 MQ 先于 registry 交付可见；同时等到回调，避免测试断言踩交付竞态。
             if queued.len() == 1 && meta.agent_status.is_terminal() && delivered.lock().is_some() {
                 break;
@@ -125,7 +133,7 @@ async fn sqlite_sync_handoff_finalizes_child_and_parent_mq_end_to_end() {
     let observed = Arc::clone(&delivered);
     let receipt = receipt(&session, &fixture.child);
 
-    let completion = run_sync_with_registered_handoff(
+    let completion = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
         Arc::clone(&session),
         fixture.child.as_str().to_owned(),
         "fixture".into(),
@@ -145,7 +153,7 @@ async fn sqlite_sync_handoff_finalizes_child_and_parent_mq_end_to_end() {
         },
     )
     .await
-    .unwrap();
+    .expect("the run sync with registered handoff fixture result is required for this assertion");
     assert!(matches!(completion, SyncCompletion::Pending(_)));
     wait_for_terminal(&fixture, &delivered).await;
 
@@ -153,11 +161,16 @@ async fn sqlite_sync_handoff_finalizes_child_and_parent_mq_end_to_end() {
         .resources
         .load_session_meta(&fixture.child)
         .await
-        .unwrap();
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Done);
     assert_eq!(meta.work_state, WorkState::Idle);
     assert_eq!(
-        fixture.parent_queue.snapshot().await.unwrap().len(),
+        fixture
+            .parent_queue
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
         1,
         "父 MQ 必须恰好收到一条结果"
     );
@@ -165,7 +178,7 @@ async fn sqlite_sync_handoff_finalizes_child_and_parent_mq_end_to_end() {
         .resources
         .load_session_meta(&fixture.parent)
         .await
-        .unwrap();
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(
         parent.work_state,
         WorkState::Working,
@@ -178,9 +191,14 @@ async fn sqlite_sync_handoff_finalizes_child_and_parent_mq_end_to_end() {
         .route
         .settle(fixture.child.as_str(), AgentStatus::Done, &result)
         .await
-        .unwrap();
+        .expect("the settle fixture result is required for this assertion");
     assert_eq!(
-        fixture.parent_queue.snapshot().await.unwrap().len(),
+        fixture
+            .parent_queue
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
         1,
         "重放不得产生第二条父 MQ 结果"
     );
@@ -188,7 +206,7 @@ async fn sqlite_sync_handoff_finalizes_child_and_parent_mq_end_to_end() {
         .resources
         .load_session_meta(&fixture.child)
         .await
-        .unwrap();
+        .expect("the load session meta fixture result is required for this assertion");
     assert_eq!(meta.agent_status, AgentStatus::Done);
 }
 
@@ -207,7 +225,7 @@ async fn sqlite_resumed_handoff_finalizes_under_active_guard() {
             },
         )
         .await
-        .unwrap();
+        .expect("the update session meta fixture result is required for this assertion");
     let (_, claim) = ResumeClaim::acquire(
         Arc::clone(&fixture.resources),
         fixture.child.as_str().to_owned(),
@@ -215,13 +233,13 @@ async fn sqlite_resumed_handoff_finalizes_under_active_guard() {
         None,
     )
     .await
-    .unwrap();
+    .expect("the acquire fixture result is required for this assertion");
     assert_eq!(
         fixture
             .resources
             .load_session_meta(&fixture.child)
             .await
-            .unwrap()
+            .expect("the load session meta fixture result is required for this assertion")
             .agent_status,
         AgentStatus::Active,
         "认领后、finalize 前必须保持 active"
@@ -231,7 +249,7 @@ async fn sqlite_resumed_handoff_finalizes_under_active_guard() {
     let delivered = Arc::new(parking_lot::Mutex::new(None));
     let observed = Arc::clone(&delivered);
     let receipt = receipt(&session, &fixture.child);
-    let completion = run_sync_with_registered_handoff(
+    let completion = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
         Arc::clone(&session),
         fixture.child.as_str().to_owned(),
         "fixture".into(),
@@ -248,12 +266,14 @@ async fn sqlite_resumed_handoff_finalizes_under_active_guard() {
                 .send(receipt.clone())
                 .expect("receipt receiver alive");
             // 与生产交接一致：终态归 handoff worker，认领只解除自身的结算责任。
-            claim.release_without_terminal().await.unwrap();
+            claim.release_without_terminal().await.expect(
+                "the release without terminal fixture result is required for this assertion",
+            );
             Ok(ChildRunOutcome::HandedOff { receipt })
         },
     )
     .await
-    .unwrap();
+    .expect("the run sync with registered handoff fixture result is required for this assertion");
     assert!(matches!(completion, SyncCompletion::Pending(_)));
     wait_for_terminal(&fixture, &delivered).await;
 
@@ -261,10 +281,18 @@ async fn sqlite_resumed_handoff_finalizes_under_active_guard() {
         .resources
         .load_session_meta(&fixture.child)
         .await
-        .unwrap();
+        .expect("the load session meta fixture result is required for this assertion");
     // HandedOff 是「委派未完成」：按 A3 映射 Error + Idle，而不是伪造 Done。
     assert_eq!(meta.agent_status, AgentStatus::Error);
     assert_eq!(meta.work_state, WorkState::Idle);
-    assert_eq!(fixture.parent_queue.snapshot().await.unwrap().len(), 1);
+    assert_eq!(
+        fixture
+            .parent_queue
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
+        1
+    );
     assert!(delivered.lock().is_some(), "worker 必须完成父结果交付");
 }

@@ -1,7 +1,7 @@
 //! Text editing decisions for the active custom answer.
 
 use super::form::FormState;
-use peri_acp_types::event_data::AskUser;
+
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 impl FormState {
@@ -124,3 +124,5 @@ impl FormState {
         }
     }
 }
+
+use peri_acp_types::event_data::AskUser;

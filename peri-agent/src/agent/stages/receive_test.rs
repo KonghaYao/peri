@@ -1,11 +1,15 @@
 //! 从 receive.rs 分离的测试模块
-use super::*;
 use crate::agent::events_v2::EventHandles;
+
+use crate::agent::events_v2::StateEvent;
+use crate::agent::stages::receive::ReceiveInput;
 use crate::agent::stages::StageContext;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::queue::MessageSource;
 use crate::session::store::FrozenContext;
+use crate::session::MessageKind;
 use crate::session::{QueuedMessage, Session};
+use peri_acp_types::event::ExecutorEvent;
 use std::sync::Arc;
 
 #[test]
@@ -27,7 +31,7 @@ fn canonical_reminder_has_no_synthetic_event_but_plain_defer_keeps_legacy_event(
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let canonical =
         QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder);
     let plain = QueuedMessage::defer(
@@ -35,8 +39,14 @@ fn canonical_reminder_has_no_synthetic_event_but_plain_defer_keeps_legacy_event(
         BaseMessage::human("legacy"),
     );
 
-    assert_eq!(synthetic_defer_text(&canonical), None);
-    assert_eq!(synthetic_defer_text(&plain).as_deref(), Some("legacy"));
+    assert_eq!(
+        crate::agent::stages::receive::synthetic_defer_text(&canonical),
+        None
+    );
+    assert_eq!(
+        crate::agent::stages::receive::synthetic_defer_text(&plain).as_deref(),
+        Some("legacy")
+    );
 }
 
 fn make_context() -> StageContext {
@@ -50,10 +60,11 @@ fn make_context() -> StageContext {
 /// monitor ALERT 被覆盖后不保留 mailbox 回执；同 ID 重投仍由 MQ 历史拒绝。
 #[tokio::test]
 async fn monitor_alert_consumption_does_not_retain_covered_receipt() {
-    use peri_acp_types::monitor::{monitor_alert_delivery_id, monitor_alert_reminder};
+    use peri_acp_types::monitor;
     let mut context = make_context();
-    let id = monitor_alert_delivery_id("monitor-webots", 1);
-    let alert = monitor_alert_reminder("monitor-webots", Some("webots"), 1, Some(1)).unwrap();
+    let id = monitor::monitor_alert_delivery_id("monitor-webots", 1);
+    let alert = monitor::monitor_alert_reminder("monitor-webots", Some("webots"), 1, Some(1))
+        .expect("the monitor alert reminder fixture result is required for this assertion");
     assert_eq!(alert.as_reminder().kind, "alert_matched");
     context
         .session
@@ -65,19 +76,24 @@ async fn monitor_alert_consumption_does_not_retain_covered_receipt() {
             id,
         ))
         .await
-        .unwrap();
-    let output = run_receive(ReceiveInput {
+        .expect("the enqueue fixture result is required for this assertion");
+    let output = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.consumed_count, 1);
     let mailbox = &context.session.async_result_mailbox;
     assert_eq!(mailbox.pending_count(), 1);
     let receipt = mailbox
         .capture_request("attempt", "request", &[id])
-        .unwrap();
-    assert_eq!(mailbox.cover_after_commit(&receipt, None).unwrap(), 1);
+        .expect("the capture request fixture result is required for this assertion");
+    assert_eq!(
+        mailbox
+            .cover_after_commit(&receipt, None)
+            .expect("the cover after commit fixture result is required for this assertion"),
+        1
+    );
     assert_eq!(mailbox.pending_count(), 0);
     assert!(
         mailbox.covered_is_empty(),
@@ -97,17 +113,17 @@ async fn monitor_alert_consumption_does_not_retain_covered_receipt() {
             id,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert_eq!(
         replay.disposition,
         peri_acp_types::session::MqEnqueueDisposition::AlreadyHandedOff
     );
     assert_eq!(
-        run_receive(ReceiveInput {
+        crate::agent::stages::receive::run_receive(ReceiveInput {
             context: context.clone()
         })
         .await
-        .unwrap()
+        .expect("the clone fixture result is required for this assertion")
         .consumed_count,
         0
     );
@@ -166,14 +182,14 @@ async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
             BaseMessage::human(body),
         ));
     }
-    let output = run_receive_with_budget(
+    let output = crate::agent::stages::receive::run_receive_with_budget(
         ReceiveInput {
             context: context.clone(),
         },
         watermark,
     )
     .await
-    .unwrap();
+    .expect("the run receive with budget fixture result is required for this assertion");
     assert_eq!(output.budget_deferred_count, 2);
     assert_eq!(output.consumed_count, 4);
     assert_eq!(output.wake_up_count, 2);
@@ -188,7 +204,11 @@ async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
     assert_eq!(
         pending
             .iter()
-            .map(|message| message.message().unwrap().content().to_string())
+            .map(|message| message
+                .message()
+                .expect("the fixture entry must contain a message payload")
+                .content()
+                .to_string())
             .collect::<Vec<_>>(),
         ["first fresh result", "second fresh result"]
     );
@@ -206,7 +226,7 @@ async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
     let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let enqueue = |text: &str| EnqueueUserInputRequest {
         session_id: "session".into(),
         generation: mailbox.generation().into(),
@@ -218,10 +238,15 @@ async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
 
     for _ in 0..128 {
         let request = enqueue("填充");
-        mailbox.enqueue_sync(&request).unwrap();
+        mailbox
+            .enqueue_sync(&request)
+            .expect("the enqueue sync fixture result is required for this assertion");
         mailbox.enter_idle_sync();
         let messages = inbox.queue_for_test().drain_all_sync();
-        let id = messages[0].message().unwrap().id();
+        let id = messages[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id();
         mailbox.mark_claimed_sync(&[id]);
         mailbox.mark_delivered_sync(&[id]);
     }
@@ -241,11 +266,15 @@ async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
     for item in mailbox.pending_delivery_notifications() {
         mailbox.ack_delivery_notification(&item.input_id);
     }
-    mailbox.enqueue_sync(&rejected).unwrap();
+    mailbox
+        .enqueue_sync(&rejected)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     let mut context = context;
     context.session.user_input_mailbox = Some(mailbox.clone());
-    run_receive(ReceiveInput { context }).await.unwrap();
+    crate::agent::stages::receive::run_receive(ReceiveInput { context })
+        .await
+        .expect("the run receive fixture result is required for this assertion");
     assert!(mailbox.snapshot_sync().items.is_empty());
     assert_eq!(mailbox.pending_delivery_notifications().len(), 1);
 }
@@ -263,7 +292,7 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
     let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
     let current = mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let a = EnqueueUserInputRequest {
         session_id: "session".into(),
         generation: mailbox.generation().into(),
@@ -279,8 +308,12 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
         original_draft: "B".into(),
         ..a.clone()
     };
-    mailbox.enqueue_sync(&a).unwrap();
-    mailbox.enqueue_sync(&b).unwrap();
+    mailbox
+        .enqueue_sync(&a)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    mailbox
+        .enqueue_sync(&b)
+        .expect("the enqueue sync fixture result is required for this assertion");
     for (command_id, input) in [("dispatch-b", &b), ("dispatch-a", &a)] {
         mailbox
             .dispatch(&DispatchUserInputsRequest {
@@ -290,19 +323,21 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
                 input_ids: vec![input.input_id.clone()],
             })
             .await
-            .unwrap();
+            .expect("the dispatch fixture result is required for this assertion");
     }
     mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);
-    let ticket = mailbox.reserve_run().unwrap();
+    let ticket = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
     mailbox.attach_attempt_sync(&ticket, CancellationToken::new());
     context.session.user_input_mailbox = Some(mailbox.clone());
     let (bus, mut handles) = EventBus::new(Default::default());
     context.runtime.event_bus = Arc::new(bus);
-    run_receive(ReceiveInput {
+    crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     context
         .runtime
         .event_bus
@@ -318,7 +353,9 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
             generation,
             content,
             ..
-        } = handles.render_rx.recv().await.unwrap()
+        } = handles.render_rx.recv().await.expect(
+            "handles render rx producer must deliver the expected test event before closing",
+        )
         else {
             panic!("真实用户气泡必须先于 assistant token");
         };
@@ -332,7 +369,9 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
     }
     assert!(
         matches!(
-            handles.render_rx.recv().await.unwrap(),
+            handles.render_rx.recv().await.expect(
+                "handles render rx producer must deliver the expected test event before closing"
+            ),
             RenderEvent::TextChunk { .. }
         ),
         "assistant 输出在全部用户接收事件之后"
@@ -374,7 +413,7 @@ async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
     let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let request = EnqueueUserInputRequest {
         session_id: "session".into(),
         generation: mailbox.generation().into(),
@@ -383,7 +422,9 @@ async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
         content: MessageContent::text("问题"),
         original_draft: "问题".into(),
     };
-    mailbox.enqueue_sync(&request).unwrap();
+    mailbox
+        .enqueue_sync(&request)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     context.session.user_input_mailbox = Some(mailbox.clone());
 
@@ -403,7 +444,7 @@ async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
             chunk: "occupied".into(),
         });
 
-    let receive = run_receive(ReceiveInput {
+    let receive = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     });
     tokio::pin!(receive);
@@ -415,14 +456,21 @@ async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
     );
     assert!(
         matches!(
-            handles.render_rx.recv().await.unwrap(),
+            handles.render_rx.recv().await.expect(
+                "handles render rx producer must deliver the expected test event before closing"
+            ),
             RenderEvent::TextChunk { .. }
         ),
         "先释放占位事件"
     );
-    receive.await.unwrap();
+    receive
+        .await
+        .expect("the receive fixture result is required for this assertion");
 
-    let RenderEvent::UserInputDelivered { input_id, .. } = handles.render_rx.recv().await.unwrap()
+    let RenderEvent::UserInputDelivered { input_id, .. } =
+        handles.render_rx.recv().await.expect(
+            "handles render rx producer must deliver the expected test event before closing",
+        )
     else {
         panic!("交付事件必须进入同一条 render FIFO");
     };
@@ -442,7 +490,9 @@ async fn test_receive_empty_queue() {
     let input = ReceiveInput {
         context: ctx.clone(),
     };
-    let output = run_receive(input).await.unwrap();
+    let output = crate::agent::stages::receive::run_receive(input)
+        .await
+        .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.consumed_count, 0);
     assert!(ctx.session.transcript.read().is_empty());
 }
@@ -458,7 +508,9 @@ async fn test_receive_consumes_prompt() {
     let input = ReceiveInput {
         context: ctx.clone(),
     };
-    let output = run_receive(input).await.unwrap();
+    let output = crate::agent::stages::receive::run_receive(input)
+        .await
+        .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.consumed_count, 1);
     assert_eq!(ctx.session.transcript.read().len(), 1);
 }
@@ -474,7 +526,9 @@ async fn test_receive_consumes_info_wrapped_in_reminder() {
     let input = ReceiveInput {
         context: ctx.clone(),
     };
-    let output = run_receive(input).await.unwrap();
+    let output = crate::agent::stages::receive::run_receive(input)
+        .await
+        .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.consumed_count, 1);
     assert_eq!(output.wake_up_count, 0);
 
@@ -500,7 +554,9 @@ async fn test_receive_consumes_defer() {
     let input = ReceiveInput {
         context: ctx.clone(),
     };
-    let output = run_receive(input).await.unwrap();
+    let output = crate::agent::stages::receive::run_receive(input)
+        .await
+        .expect("the run receive fixture result is required for this assertion");
     // 消费全部（Prompt + Defer）
     assert_eq!(output.consumed_count, 2);
     assert_eq!(output.wake_up_count, 2);
@@ -528,7 +584,9 @@ async fn test_receive_consumes_prompt_defer_and_info_together() {
     let input = ReceiveInput {
         context: ctx.clone(),
     };
-    let output = run_receive(input).await.unwrap();
+    let output = crate::agent::stages::receive::run_receive(input)
+        .await
+        .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.consumed_count, 3);
     assert!(ctx.session.queue.is_empty_sync());
 }
@@ -540,7 +598,9 @@ async fn test_receive_exit_on_empty_queue() {
     let input = ReceiveInput {
         context: ctx.clone(),
     };
-    let output = run_receive(input).await.unwrap();
+    let output = crate::agent::stages::receive::run_receive(input)
+        .await
+        .expect("the run receive fixture result is required for this assertion");
     assert_eq!(output.consumed_count, 0);
 }
 
@@ -565,14 +625,14 @@ async fn hook_stop_intent_requests_stop_without_waking_the_run() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let context = make_context();
     context.session.queue.push_sync(
         QueuedMessage::system_reminder(MessageKind::Info, MessageSource::HookStopIntent, reminder)
             .with_policy(crate::session::MessagePolicy::passive()),
     );
 
-    let output = run_receive(ReceiveInput {
+    let output = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
@@ -613,11 +673,11 @@ async fn stop_intent_bound_to_current_execution_stops() {
     let execution = context.session.turn.execution_binding();
     context.session.queue.push_sync(bound_stop(execution));
 
-    let output = run_receive(ReceiveInput {
+    let output = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
 
     assert!(output.stop_requested);
     assert_eq!(output.consumed_count, 1);
@@ -636,11 +696,11 @@ async fn stop_intent_from_previous_execution_is_suppressed() {
     assert_ne!(context.session.turn.execution_binding(), previous);
     context.session.queue.push_sync(bound_stop(previous));
 
-    let output = run_receive(ReceiveInput {
+    let output = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
 
     assert!(!output.stop_requested, "旧 Stop 不得终止新执行");
     assert_eq!(output.consumed_count, 1);
@@ -683,7 +743,7 @@ async fn receive_protocol_event_waits_when_state_channel_is_full() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     context
         .session
         .queue
@@ -692,7 +752,7 @@ async fn receive_protocol_event_waits_when_state_channel_is_full() {
             MessageSource::SystemInjected,
             reminder,
         ));
-    let receive = run_receive(ReceiveInput {
+    let receive = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: context.clone(),
     });
     tokio::pin!(receive);
@@ -703,11 +763,15 @@ async fn receive_protocol_event_waits_when_state_channel_is_full() {
         .await
     );
     assert!(!context.runtime.event_bus.health().dirty);
-    handles.state_rx.recv().await.unwrap();
+    handles
+        .state_rx
+        .recv()
+        .await
+        .expect("handles state rx producer must deliver the expected test event before closing");
     tokio::time::timeout(std::time::Duration::from_secs(1), receive)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion")
+        .expect("receive protocol event waits when state channel is full: the completed fixture operation must provide its result payload");
     assert_eq!(drain_system_reminder_events(&mut handles), 1);
     assert!(!context.runtime.event_bus.health().dirty);
 }

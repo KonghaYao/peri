@@ -1,7 +1,7 @@
 //! 从 act.rs 分离的测试模块
-use super::*;
 use crate::agent::events_v2::{EventBus, EventHandles, RenderEvent};
 use crate::agent::react::{AgentOutput, Reasoning, ToolCall};
+use crate::agent::stages::ActInput;
 use crate::agent::stages::{MiddlewareChain, StageContext};
 use crate::error::{AgentError, AgentResult};
 use crate::middleware::capabilities as hook_state;
@@ -63,7 +63,9 @@ async fn test_act_no_tool_calls_writes_answer() {
         catalog: ctx.runtime.tool_catalog.snapshot(),
         receipt: None,
     };
-    let output = run_act(input).await.unwrap();
+    let output = crate::agent::stages::act::run_act(input)
+        .await
+        .expect("the run act fixture result is required for this assertion");
     assert!(!output.has_tool_calls);
     assert_eq!(output.final_answer.as_deref(), Some("final answer"));
 
@@ -91,7 +93,9 @@ async fn test_act_with_tool_calls_dispatches() {
         catalog: ctx.runtime.tool_catalog.snapshot(),
         receipt: None,
     };
-    let output = run_act(input).await.unwrap();
+    let output = crate::agent::stages::act::run_act(input)
+        .await
+        .expect("the run act fixture result is required for this assertion");
     assert!(output.has_tool_calls, "有 tool_calls 时应标记");
     assert!(output.final_answer.is_none());
 
@@ -124,7 +128,7 @@ async fn test_act_after_agent_failure_emits_turn_completed() {
         .build();
 
     let reasoning = Reasoning::with_answer("thinking", "final answer");
-    let result = run_act(ActInput {
+    let result = crate::agent::stages::act::run_act(ActInput {
         exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
@@ -159,7 +163,7 @@ async fn test_act_tool_path_cancel_emits_turn_completed() {
 
     let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
-    let result = run_act(ActInput {
+    let result = crate::agent::stages::act::run_act(ActInput {
         exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
@@ -195,7 +199,7 @@ async fn turn_completed_waits_for_capacity_in_production_emitter() {
             turn_id: ctx.turn_id(),
             agent_id: ctx.session.agent_id,
         });
-    let send = emit_turn_completed(&ctx);
+    let send = crate::agent::stages::act::emit_turn_completed(&ctx);
     tokio::pin!(send);
     assert!(
         std::future::poll_fn(|cx| {
@@ -204,10 +208,14 @@ async fn turn_completed_waits_for_capacity_in_production_emitter() {
         .await
     );
     assert!(!ctx.runtime.event_bus.health().dirty);
-    handles.render_rx.recv().await.unwrap();
+    handles
+        .render_rx
+        .recv()
+        .await
+        .expect("handles render rx producer must deliver the expected test event before closing");
     tokio::time::timeout(std::time::Duration::from_secs(1), send)
         .await
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion");
     assert!(matches!(
         handles.try_render(),
         Some(RenderEvent::TurnCompleted { .. })
@@ -242,13 +250,13 @@ fn terminal_result(
             summary: None,
             metadata: serde_json::json!({ "task_id": "shell-act" }),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     mailbox
         .accept(id, &reminder, MessageSource::ShellComplete)
-        .unwrap();
+        .expect("the accept fixture result is required for this assertion");
     mailbox
         .mark_canonical_ready(id, &reminder, MessageSource::ShellComplete, None)
-        .unwrap();
+        .expect("the mark canonical ready fixture result is required for this assertion");
     let receipt = mailbox
         .capture_request("attempt-act", "request-act", &[id])
         .expect("request must capture the ready result");
@@ -261,7 +269,7 @@ async fn async_result_act_commit_covers_requested_result() {
     let ctx = make_context();
     let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
     let reasoning = Reasoning::with_answer("thinking", "final answer");
-    run_act(ActInput {
+    crate::agent::stages::act::run_act(ActInput {
         exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
@@ -269,7 +277,7 @@ async fn async_result_act_commit_covers_requested_result() {
         receipt: Some(receipt),
     })
     .await
-    .unwrap();
+    .expect("the run act fixture result is required for this assertion");
 
     assert_eq!(
         ctx.session.async_result_mailbox.pending_count(),
@@ -291,7 +299,7 @@ async fn async_result_act_empty_response_keeps_responsibility() {
     let ctx = make_context();
     let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
     let reasoning = Reasoning::with_answer("thinking", "");
-    run_act(ActInput {
+    crate::agent::stages::act::run_act(ActInput {
         exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
@@ -299,7 +307,7 @@ async fn async_result_act_empty_response_keeps_responsibility() {
         receipt: Some(receipt),
     })
     .await
-    .unwrap();
+    .expect("the run act fixture result is required for this assertion");
 
     assert_eq!(
         ctx.session.async_result_mailbox.pending_count(),
@@ -314,7 +322,11 @@ async fn async_result_act_empty_response_keeps_responsibility() {
         crate::session::async_result_mailbox::AsyncResultState::Blocked
     );
     assert_eq!(
-        snapshot.items[0].diagnostic.as_ref().unwrap().stage,
+        snapshot.items[0]
+            .diagnostic
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .stage,
         "act",
         "诊断必须指出失败阶段"
     );
@@ -329,7 +341,7 @@ async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failur
     let (_id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
     let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
-    run_act(ActInput {
+    crate::agent::stages::act::run_act(ActInput {
         exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
@@ -337,7 +349,7 @@ async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failur
         receipt: Some(receipt),
     })
     .await
-    .unwrap();
+    .expect("the run act fixture result is required for this assertion");
 
     assert_eq!(
         ctx.session.async_result_mailbox.pending_count(),
@@ -360,7 +372,7 @@ async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failur
     ctx.session.turn.cancel_token.cancel();
     let tool_call = ToolCall::new("call_2", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
-    let outcome = run_act(ActInput {
+    let outcome = crate::agent::stages::act::run_act(ActInput {
         exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
@@ -404,7 +416,7 @@ async fn async_result_act_barrier_failure_keeps_blocked() {
         MessageTranscript::new().with_persistence(store, "thread-barrier".to_string());
 
     let reasoning = Reasoning::with_answer("thinking", "final answer");
-    let outcome = run_act(ActInput {
+    let outcome = crate::agent::stages::act::run_act(ActInput {
         exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
@@ -444,7 +456,7 @@ fn closure_requires_terminal_evidence_and_no_live_task() {
     let call = ToolCall::new("bash-call", "Bash", serde_json::json!({}));
     let mut result = ToolResult::success("bash-call", "Bash", "Completed successfully");
     assert!(
-        closed_calls(&[(call.clone(), result.clone())]).is_empty(),
+        crate::agent::stages::act::closed_calls(&[(call.clone(), result.clone())]).is_empty(),
         "text and retention cannot prove completion"
     );
     for status in [
@@ -460,11 +472,28 @@ fn closure_requires_terminal_evidence_and_no_live_task() {
             output_ref: None,
             output_truncated: false,
         });
-        assert!(closed_calls(&[(call.clone(), result.clone())]).is_empty());
+        assert!(
+            crate::agent::stages::act::closed_calls(&[(call.clone(), result.clone())]).is_empty()
+        );
     }
-    result.execution.as_mut().unwrap().status = ToolExecutionStatus::Completed;
-    result.execution.as_mut().unwrap().task_id = Some("live-task".into());
-    assert!(closed_calls(&[(call.clone(), result.clone())]).is_empty());
-    result.execution.as_mut().unwrap().task_id = None;
-    assert_eq!(closed_calls(&[(call, result)]), vec!["bash-call"]);
+    result
+        .execution
+        .as_mut()
+        .expect("the as mut fixture result is required for this assertion")
+        .status = ToolExecutionStatus::Completed;
+    result
+        .execution
+        .as_mut()
+        .expect("the as mut fixture result is required for this assertion")
+        .task_id = Some("live-task".into());
+    assert!(crate::agent::stages::act::closed_calls(&[(call.clone(), result.clone())]).is_empty());
+    result
+        .execution
+        .as_mut()
+        .expect("the as mut fixture result is required for this assertion")
+        .task_id = None;
+    assert_eq!(
+        crate::agent::stages::act::closed_calls(&[(call, result)]),
+        vec!["bash-call"]
+    );
 }

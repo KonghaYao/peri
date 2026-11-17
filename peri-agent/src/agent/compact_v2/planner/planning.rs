@@ -1,20 +1,26 @@
 //! Bounded, monotone planning against the already committed model view.
 use std::collections::{HashMap, HashSet};
 
-use super::super::projection::{
-    render_micro_plan, render_persisted_llm_view, MicroCompactPlan, ProjectionAction,
-    ProjectionActionEntry, ProjectionTarget, ProviderCapabilities, ProviderProtocol,
-    PROJECTION_POLICY_VERSION,
-};
-use super::{
-    index::{Exchange, HistoryIndex},
-    CompactConfig, ContextPressure, MicroPlanningFacts, PlanningDiagnostics,
-};
+use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::compact_v2::planner::index::Exchange;
+use crate::agent::compact_v2::planner::index::HistoryIndex;
+use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::MicroPlanningFacts;
+use crate::agent::compact_v2::planner::PlanningDiagnostics;
+
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::ProviderProtocol;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageContent, MessageId};
 use crate::session::transcript::MessageTranscript;
 use crate::tools::ContextRetention;
-use peri_acp_types::context_archive::{build_catalog, ArchiveRoot};
+
+use peri_acp_types::context_archive::ArchiveRoot;
 
 // Bounds per-message directive growth and whole-batch protocol work, including
 // inline batches whose many exchanges share only two canonical message IDs.
@@ -167,7 +173,8 @@ pub fn plan_micro_with_facts(
     #[cfg(test)]
     super::PLAN_MICRO_CALLS.with(|calls| calls.set(calls.get() + 1));
     let index = HistoryIndex::collect(transcript)?;
-    let current = render_persisted_llm_view(transcript, caps)?;
+    let current =
+        crate::agent::compact_v2::projection::render_persisted_llm_view(transcript, caps)?;
     let current_by_id: HashMap<_, _> = current
         .iter()
         .map(|message| (message.id(), message))
@@ -177,7 +184,7 @@ pub fn plan_micro_with_facts(
         .map(|message| (message.id(), tokens(message)))
         .collect();
     let (strong_calls, strong_messages) = strong_projections(transcript);
-    let result_costs = super::costs::result_costs(&current);
+    let result_costs = crate::agent::compact_v2::planner::costs::result_costs(&current);
     let input_costs: HashMap<_, _> = current
         .iter()
         .flat_map(|message| message.tool_calls())
@@ -245,10 +252,12 @@ pub fn plan_micro_with_facts(
         ..Default::default()
     };
     let mut eligible = HashSet::new();
-    let mut preview_catalogs = super::catalogs::PreviewCatalogs::default();
+    let mut preview_catalogs =
+        crate::agent::compact_v2::planner::catalogs::PreviewCatalogs::default();
     let mut preview_counts: HashMap<MessageId, usize> = HashMap::new();
     let mut projected_savings = HashMap::new();
-    for (ei, exchange) in index.exchanges.iter().enumerate() {
+    let paired_items = index.exchanges.iter().enumerate();
+    for (ei, exchange) in paired_items {
         let step = &index.steps[exchange.step];
         let Some(result) = &exchange.result else {
             diagnostics.protect(
@@ -478,7 +487,8 @@ pub fn plan_micro_with_facts(
     let mut archived_member_ids = HashSet::new();
     // Only signed reasoning binds the whole batch. Other exchanges can retire
     // independently while their same-message siblings and assistant prose survive.
-    for (si, step) in index.steps.iter().enumerate() {
+    let paired_items_2 = index.steps.iter().enumerate();
+    for (si, step) in paired_items_2 {
         if plan.estimated_after_tokens <= desired {
             break;
         }
@@ -592,7 +602,7 @@ pub fn plan_micro_with_facts(
             .iter()
             .map(|entry| (*entry).clone().into_payload())
             .collect::<Vec<_>>();
-        let catalog = match build_catalog(
+        let catalog = match peri_acp_types::context_archive::build_catalog(
             scope.thread_id.clone(),
             group_id.clone(),
             anchor,
@@ -683,7 +693,8 @@ pub fn plan_micro_with_facts(
         .iter()
         .filter_map(|exchange| exchange.result.as_ref().map(|result| result.entry.id()))
         .collect::<HashSet<_>>();
-    for (position, entry) in transcript.entries().iter().enumerate() {
+    let paired_items_3 = transcript.entries().iter().enumerate();
+    for (position, entry) in paired_items_3 {
         if transcript.is_excluded(entry.id()) {
             continue;
         }
@@ -760,7 +771,7 @@ pub fn plan_micro_with_facts(
         .len();
     plan.no_op_candidates = diagnostics.zero_gain_count;
     plan.receipt_budget_tokens = receipt_budget;
-    if let Err(error) = super::super::micro::validate_plan_metadata(transcript, &plan) {
+    if let Err(error) = crate::agent::compact_v2::micro::validate_plan_metadata(transcript, &plan) {
         if !matches!(
             error,
             peri_acp_types::context_archive::ArchiveError::Unsupported
@@ -783,7 +794,8 @@ pub fn plan_micro_with_facts(
     if !plan.actions.is_empty() {
         // One final complete rendering validates protocol shape and charges actual
         // receipts/roots. No candidate causes another transcript-wide clone/scan.
-        let candidate = render_micro_plan(transcript, &plan, caps)?;
+        let candidate =
+            crate::agent::compact_v2::projection::render_micro_plan(transcript, &plan, caps)?;
         let after = crate::agent::token::estimate_request_tokens(&candidate, &[])
             .saturating_add(facts.fixed_view_tokens);
         if after >= before {
@@ -807,7 +819,7 @@ pub fn plan_micro_with_facts(
     plan.estimated_tokens_saved = before.saturating_sub(plan.estimated_after_tokens);
     diagnostics.target_shortfall_tokens = plan.estimated_after_tokens.saturating_sub(desired);
     plan.diagnostics = diagnostics;
-    super::sources::capture(transcript, &mut plan)?;
+    crate::agent::compact_v2::planner::sources::capture(transcript, &mut plan)?;
     Ok(plan)
 }
 

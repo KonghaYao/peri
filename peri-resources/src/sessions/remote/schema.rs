@@ -37,8 +37,7 @@ use std::fmt;
 use peri_acp_types::session_resources::SessionResourceResult;
 use turso_serverless::Value;
 
-use super::mutation::incomplete_reply;
-use super::sql::{int_at, text_at, StatementSpec};
+use super::sql::StatementSpec;
 use crate::sessions::schema_shape::{self, ActualColumn};
 
 /// 本构建写入并接受的远端 schema 版本：**与本机 `CURRENT_SCHEMA_VERSION` 同一个常量**。
@@ -320,14 +319,15 @@ pub(super) fn current_indexes_missing(rows: &[Vec<Value>]) -> Result<bool, Strin
             .and_then(|on| on.split('(').next())
             .expect("canonical CREATE INDEX must name a table");
         let expected_sql = create.replacen("IF NOT EXISTS ", "", 1);
-        let row = rows
-            .iter()
-            .find(|row| text_at(row, 0).is_some_and(|actual| actual.eq_ignore_ascii_case(name)));
+        let row = rows.iter().find(|row| {
+            super::sql::text_at(row, 0).is_some_and(|actual| actual.eq_ignore_ascii_case(name))
+        });
         match row {
             None => missing = true,
             Some(row)
-                if text_at(row, 1).is_some_and(|actual| actual.eq_ignore_ascii_case(table))
-                    && text_at(row, 2).is_some_and(|actual| {
+                if super::sql::text_at(row, 1)
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(table))
+                    && super::sql::text_at(row, 2).is_some_and(|actual| {
                         same_index_sql(actual, &expected_sql) || same_index_sql(actual, create)
                     }) => {}
             Some(_) => return Err(format!("index {name} definition drifted")),
@@ -453,14 +453,20 @@ pub(super) fn shape_probe(snapshot: &StoreSnapshot) -> Option<ShapeProbe> {
 pub(super) fn decode_column_map(
     rows: &[Vec<Value>],
 ) -> SessionResourceResult<HashMap<String, Vec<ActualColumn>>> {
-    let malformed = || incomplete_reply("session shape probe returned a row it cannot explain");
+    let malformed = || {
+        super::mutation::incomplete_reply("session shape probe returned a row it cannot explain")
+    };
     let mut decoded = Vec::with_capacity(rows.len());
     for row in rows {
         decoded.push((
-            text_at(row, 0).ok_or_else(malformed)?.to_owned(),
-            text_at(row, 1).ok_or_else(malformed)?.to_owned(),
-            int_at(row, 2).ok_or_else(malformed)? != 0,
-            int_at(row, 3).ok_or_else(malformed)?,
+            super::sql::text_at(row, 0)
+                .ok_or_else(malformed)?
+                .to_owned(),
+            super::sql::text_at(row, 1)
+                .ok_or_else(malformed)?
+                .to_owned(),
+            super::sql::int_at(row, 2).ok_or_else(malformed)? != 0,
+            super::sql::int_at(row, 3).ok_or_else(malformed)?,
         ));
     }
     Ok(schema_shape::group_columns(decoded))
@@ -495,9 +501,9 @@ pub(super) fn initialization_plan(store_id: &StoreId, now: &str) -> Vec<Statemen
 
 /// 解码元数据行（`schema_version, store_id, contract`）；形状不符即 `None`。
 pub(super) fn decode_identity(values: &[Value]) -> Option<StoreSnapshot> {
-    let schema_version = int_at(values, 0)?;
-    let store_id = text_at(values, 1)?;
-    let contract = text_at(values, 2)?;
+    let schema_version = super::sql::int_at(values, 0)?;
+    let store_id = super::sql::text_at(values, 1)?;
+    let contract = super::sql::text_at(values, 2)?;
     Some(StoreSnapshot {
         store_id: StoreId(store_id.to_owned()),
         schema_version,

@@ -12,6 +12,7 @@
 
 /// 子 Agent 事件 handler 工厂类型（事实源 peri-acp-types::frozen）
 pub use peri_acp_types::frozen::ChildHandlerFactory;
+use std::fmt::{self, Debug, Formatter};
 
 /// Register/Deregister 回调与冻结数据（事实源 peri-acp-types::frozen）
 pub use peri_acp_types::frozen::{
@@ -81,6 +82,7 @@ pub enum ChainSlot {
 ///
 /// 迁移自 `peri-acp/src/agent/builder.rs` 的 `MiddlewareChain` 构造顺序，
 /// 是行为契约，不得按名称/便利性/局部需求重排。
+#[must_use]
 pub fn production_blueprint() -> Vec<ChainSlot> {
     vec![
         // 第一组：上下文注入器
@@ -182,6 +184,7 @@ pub fn build_middleware_chain<A: MiddlewareChainAssembler>(
 ///   链上实例会重复提供工具面并写 notifier 副作用 |
 /// | `ToolSearch` | 面向模型 deferred 工具检索，idle 不产生模型可见目录 |
 /// | `Goal` | goal steering 依附模型循环，idle 没有循环 |
+#[must_use]
 pub fn invocation_rule_blueprint() -> Vec<ChainSlot> {
     production_blueprint()
         .into_iter()
@@ -200,11 +203,13 @@ pub struct InvocationRuleChain(Arc<MiddlewareChain>);
 impl InvocationRuleChain {
     /// 由**派生蓝本装配产物**构造（生产入口经 [`build_invocation_rule_chain`]；
     /// 测试可用它包住手写链以覆盖规则路径）。
+    #[must_use]
     pub fn from_derived_blueprint(chain: MiddlewareChain) -> Self {
         Self(Arc::new(chain))
     }
 
     /// 规则链的共享句柄（`InvocationContext` 执行期借用；不得用于 turn 链装配）。
+    #[must_use]
     pub fn shared(&self) -> Arc<MiddlewareChain> {
         Arc::clone(&self.0)
     }
@@ -245,14 +250,15 @@ use peri_acp_types::cron::CronSchedulerPort;
 use peri_acp_types::event::AgentEventHandler;
 use peri_acp_types::goal::GoalController;
 use peri_acp_types::hooks::RegisteredHook;
+use peri_acp_types::identity::AgentId;
 use peri_acp_types::interaction::UserInteractionBroker;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::plugin::LoadedPlugin;
 use peri_acp_types::ports::{McpPoolPort, ToolSearchPort};
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::skills::SkillRoot;
 use peri_acp_types::tools::TodoItem;
-use peri_acp_types::{identity::AgentId, permission::SharedPermissionMode};
 
 use crate::agent::async_tasks::TaskManager;
 use crate::agent::LangfuseBridgeLike;
@@ -271,12 +277,8 @@ pub type SystemPromptBuilder = Arc<dyn Fn(Option<&AgentOverrides>, &str) -> Stri
 ///
 /// 实现方为 `peri-middlewares::subagent::SubAgentMiddleware`（middlewares →
 /// Agent 声明边）；stage 装配（Agent 层）只经本端口调用，不触碰具体实现。
-pub trait SubAgentMiddlewarePort: Send + Sync {
-    /// 还原具体实现（装配方 downcast 用）。
-    ///
-    /// 安全契约：实现必须返回 `self`（同一对象、同一地址）；返回内字段或其他
-    /// 对象的 `Any` 会破坏 `downcast_arc` 的安全前提。
-    fn as_any(&self) -> &dyn Any;
+/// `Any` supertrait 让装配方按对象自身类型安全还原，实现方不提供 `as_any`。
+pub trait SubAgentMiddlewarePort: Any + Send + Sync {
     /// 注入父 agent 事件侧 AgentId（主 v2 session 创建后调用）。
     fn set_parent_agent_id(&self, id: AgentId);
     /// 注入父 v2 session（L3，主 session 创建后调用）。
@@ -284,38 +286,19 @@ pub trait SubAgentMiddlewarePort: Send + Sync {
 }
 
 impl dyn SubAgentMiddlewarePort {
-    /// 将 `Arc<dyn SubAgentMiddlewarePort>` 还原为具体实现 `Arc<T>`。
+    /// 将 `Arc<dyn SubAgentMiddlewarePort>` 还原为具体实现 `Arc<T>`
+    /// （类型不符返回原 `Arc`）。
     ///
-    /// # Safety
-    ///
-    /// 所有 `SubAgentMiddlewarePort` 实现必须让 [`Self::as_any`] 返回 `self`；
-    /// 返回内字段或其他对象的 `Any` 会以错误布局重建 `Arc<T>`（UB）。本函数的
-    /// 数据指针校验只能拦截常见包装器。
-    ///
-    /// ```compile_fail,E0133
-    /// use std::sync::Arc;
-    /// use peri_agent::session::factory::SubAgentMiddlewarePort;
-    /// fn safe_call<T: SubAgentMiddlewarePort + 'static>(
-    ///     port: Arc<dyn SubAgentMiddlewarePort>,
-    /// ) {
-    ///     let _ = port.downcast_arc::<T>();
-    /// }
-    /// ```
-    pub unsafe fn downcast_arc<T: SubAgentMiddlewarePort + 'static>(
+    /// 还原依据是对象自身 vtable 的真实 `TypeId`；包装实现只会还原为包装类型
+    /// 自身，不会把外层分配按内字段类型重建。
+    pub fn downcast_arc<T: SubAgentMiddlewarePort + 'static>(
         self: Arc<Self>,
     ) -> Result<Arc<T>, Arc<Self>> {
-        let ptr = Arc::into_raw(self);
-        // 必须经 `as_any()` 取 TypeId，不能对 trait object 直接取（会得到自身）。
-        // SAFETY: 由调用方保证 as_any 契约。
-        let any = unsafe { (*ptr).as_any() };
-        if std::ptr::addr_eq(any as *const dyn Any, ptr as *const ())
-            && any.type_id() == std::any::TypeId::of::<T>()
-        {
-            // SAFETY: 地址与 TypeId 均匹配 ⇒ 分配就是 T（调用方契约）。
-            unsafe { Ok(Arc::from_raw(ptr as *const T)) }
-        } else {
-            // SAFETY: 指针来自上面的 Arc::into_raw，未发生 cast。
-            unsafe { Err(Arc::from_raw(ptr)) }
+        // 用 clone 探测类型；失败时返回原 Arc，保持既有 Err 语义。
+        let probe = Arc::clone(&self) as Arc<dyn Any + Send + Sync>;
+        match probe.downcast::<T>() {
+            Ok(concrete) => Ok(concrete),
+            Err(_) => Err(self),
         }
     }
 }
@@ -327,7 +310,8 @@ impl dyn SubAgentMiddlewarePort {
 /// 仅含中间件构造所需的依赖；middlewares 具体类型经
 /// `peri-acp-types` 端口（`McpPoolPort` / `ToolSearchPort` /
 /// `WorkflowMiddlewarePort` / `CronSchedulerPort`）接入，
-/// 装配实现方（`ProductionChainAssembler`）内部 downcast 还原。
+/// 装配实现方（`ProductionChainAssembler`）经 `Any` supertrait 的真实
+/// `TypeId` 安全还原具体类型。
 #[allow(clippy::type_complexity)]
 pub struct AssemblyContext {
     // ── 会话级 ──
@@ -428,12 +412,6 @@ pub struct AssemblyContext {
     /// `FrozenSessionData::meta_harness().disabled_middlewares`，
     /// 禁止从每 turn 当前配置重建——ARC-FROZEN-001）。
     pub meta_harness_disabled: HashSet<String>,
-    // ── beta flag 投影（设计 §消费契约）──
-    /// `Agent` 工具 `run_in_background` 的有效缺省（源自会话冻结的 beta flag 投影，
-    /// 禁止回退每 turn 当前配置）：middleware 装配参数，`false` 与 flag 引入前一致。
-    ///
-    /// 装配面只传值，不在执行路径解析 flag 语义。
-    pub agent_default_run_in_background: bool,
     // ── 基础系统提示词段持有者（波 4 演进 2）──
     /// agent overrides（DefaultSystemPromptMiddleware 的 persona 段内容源；
     /// 与 render_system_prompt 闭包收到的是同一份值，保证链收集与渲染一致）
@@ -448,4 +426,82 @@ pub struct ChainAssembly {
     pub chain: MiddlewareChain,
     /// SubAgent 中间件端口（链中已有一份 clone；供上层注入主 agent 身份）
     pub subagent_mw: Option<Arc<dyn SubAgentMiddlewarePort>>,
+}
+
+impl Debug for InvocationRuleChain {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvocationRuleChain")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for AssemblyContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AssemblyContext")
+            .field("cwd", &self.cwd)
+            .field("model_name", &self.model_name)
+            .field("provider_name", &self.provider_name)
+            .field("auxiliary_model_present", &self.auxiliary_model.is_some())
+            .field("preload_skills_len", &self.preload_skills.len())
+            .field("plugin_skill_roots_len", &self.plugin_skill_roots.len())
+            .field("plugin_loaded_len", &self.plugin_loaded.len())
+            .field("hook_groups_len", &self.hook_groups.len())
+            .field(
+                "session_start_source_present",
+                &self.session_start_source.is_some(),
+            )
+            .field(
+                "mcp_skill_registry_present",
+                &self.mcp_skill_registry.is_some(),
+            )
+            .field("command_registry_present", &self.command_registry.is_some())
+            .field("cron_scheduler_present", &self.cron_scheduler.is_some())
+            .field("mcp_pool_present", &self.mcp_pool.is_some())
+            .field("session_id", &self.session_id)
+            .field("on_bg_complete_present", &self.on_bg_complete.is_some())
+            .field("langfuse_bridge_present", &self.langfuse_bridge.is_some())
+            .field(
+                "session_resources_present",
+                &self.session_resources.is_some(),
+            )
+            .field("parent_thread_id_present", &self.parent_thread_id.is_some())
+            .field("register_runtime_present", &self.register_runtime.is_some())
+            .field(
+                "deregister_runtime_present",
+                &self.deregister_runtime.is_some(),
+            )
+            .field(
+                "child_handler_factory_present",
+                &self.child_handler_factory.is_some(),
+            )
+            .field("frozen_claude_md_present", &self.frozen_claude_md.is_some())
+            .field(
+                "frozen_claude_local_md_present",
+                &self.frozen_claude_local_md.is_some(),
+            )
+            .field(
+                "frozen_skill_summary_present",
+                &self.frozen_skill_summary.is_some(),
+            )
+            .field("system_prompt_for_sub", &self.system_prompt_for_sub)
+            .field("goal_controller_present", &self.goal_controller.is_some())
+            .field(
+                "meta_harness_disabled_len",
+                &self.meta_harness_disabled.len(),
+            )
+            .field("agent_overrides_present", &self.agent_overrides.is_some())
+            .field("language_present", &self.language.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for ChainAssembly {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChainAssembly")
+            .field("subagent_mw_present", &self.subagent_mw.is_some())
+            .finish_non_exhaustive()
+    }
 }

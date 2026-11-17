@@ -94,34 +94,4 @@ pub use tool_search::{
 pub use tools::{ArcToolWrapper, AskUserTool, BoxToolWrapper};
 
 /// Prelude - 常用类型一次性导入
-pub mod prelude {
-    // 重导出 peri-agent 核心类型
-    pub use peri_agent::prelude::*;
-
-    pub use crate::{
-        agents_md::AgentsMdMiddleware,
-        ask_user::{
-            ask_user_tool_definition, parse_ask_user, InteractionContext, QuestionItem,
-            QuestionOption,
-        },
-        attribution::GitAttributionMiddleware,
-        hitl::HumanInTheLoopMiddleware,
-        hooks::{HookMiddleware, RegisteredHook},
-        middleware::TodoMiddleware,
-        permission::{
-            default_requires_approval, AutoClassifier, BatchItem, Classification, HitlDecision,
-            LlmAutoClassifier, PermissionMiddleware, PermissionMode, SharedPermissionMode,
-        },
-        plugin::{
-            AvailablePlugin, ClaudeSettings, CommandEntry, CommandProvider, CommandSource,
-            InstallScope, InstalledPlugin, InstalledPlugins, KnownMarketplace, LoadedPlugin,
-            LoaderError, MarketplaceEntry, MarketplaceError, MarketplaceManager,
-            MarketplaceManifest, MarketplacePlugin, MarketplaceRefreshEvent, MarketplaceSource,
-            PluginAgent, PluginAuthor, PluginCommand, PluginCommandProvider, PluginConfigError,
-            PluginManifest, PluginMiddleware, PluginOption,
-        },
-        skills::{SkillMetadata, SkillsMiddleware},
-        subagent::{SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool},
-        tools::{ArcToolWrapper, AskUserTool, BoxToolWrapper, TodoItem, TodoStatus, TodoWriteTool},
-    };
-}
+pub mod prelude;

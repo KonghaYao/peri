@@ -3,20 +3,31 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use peri_acp_types::{
-    event::{AgentEventHandler, ExecutorEvent, FnEventHandler},
-    workflow::{AgentRunParams, ProgressEvent},
-};
+use peri_acp_types::event::AgentEventHandler;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::FnEventHandler;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::ProgressEvent;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, warn};
 
-use super::WorkflowLangfuseEventHandler;
+use crate::agent::workflow::agent::WorkflowLangfuseEventHandler;
 
 #[derive(Clone, Default)]
 pub(super) struct RunStats {
     pub output_tokens: u64,
+    /// `output_tokens` only becomes a measurement after the provider reports usage;
+    /// a reported zero must stay distinguishable from "not reported".
+    pub usage_reported: bool,
     pub last_model: Option<String>,
     pub tool_count: u64,
+}
+
+impl RunStats {
+    /// `None` means no usage was reported; a reported zero stays `Some(0)`.
+    pub fn reported_output_tokens(&self) -> Option<u64> {
+        self.usage_reported.then_some(self.output_tokens)
+    }
 }
 
 pub(super) struct WorkflowObservation {
@@ -28,6 +39,7 @@ pub(super) struct WorkflowObservation {
 }
 
 impl WorkflowObservation {
+    #[must_use]
     pub fn new(
         params: &AgentRunParams,
         progress_tx: Option<UnboundedSender<ProgressEvent>>,
@@ -42,11 +54,13 @@ impl WorkflowObservation {
         })
     }
 
+    #[must_use]
     pub fn handler(self: &Arc<Self>) -> Arc<dyn AgentEventHandler> {
         let observation = self.clone();
         Arc::new(FnEventHandler(move |event| observation.on_event(event)))
     }
 
+    #[must_use]
     pub fn snapshot(&self) -> RunStats {
         self.stats.lock().clone()
     }
@@ -105,6 +119,7 @@ impl WorkflowObservation {
                     let mut stats = self.stats.lock();
                     if let Some(usage) = usage {
                         stats.output_tokens += usage.output_tokens as u64;
+                        stats.usage_reported = true;
                     }
                     stats.last_model = Some(model.clone());
                 }

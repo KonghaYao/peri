@@ -1,22 +1,27 @@
 use std::sync::Arc;
 
 use peri_agent::tools::{BaseTool, ToolContext};
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, ServerCapabilities, ServerConfig, Tool,
-    },
-    ErrorData as McpError,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::model::ContentBlock;
+use rmcp::model::Implementation;
+use rmcp::model::ListToolsResult;
+use rmcp::model::ServerCapabilities;
+use rmcp::model::ServerConfig;
+use rmcp::model::Tool;
+use rmcp::ErrorData as McpError;
 use serde_json::Value;
 
 /// `ServerConfig` with only tool capability enabled and the caller's package version.
+#[must_use]
 pub fn server_info(name: &'static str, version: &'static str) -> ServerConfig {
     ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
         .with_server_info(Implementation::new(name, version))
 }
 
 /// Convert the canonical `BaseTool` definition into an rmcp tool schema.
+#[must_use]
 pub fn rmcp_tool_from_base(tool: &dyn BaseTool) -> Tool {
     let definition = tool.definition();
     let schema = definition
@@ -28,6 +33,7 @@ pub fn rmcp_tool_from_base(tool: &dyn BaseTool) -> Tool {
 }
 
 /// Build a tools/list response while preserving the declared tool order.
+#[must_use]
 pub fn list_tools_of(tools: &[Arc<dyn BaseTool>]) -> ListToolsResult {
     ListToolsResult::with_all_items(
         tools

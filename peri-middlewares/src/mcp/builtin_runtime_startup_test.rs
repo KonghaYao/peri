@@ -1,4 +1,32 @@
-use super::*;
+use super::declared_direct_effective_names;
+use super::invocation_fixture;
+use super::json;
+use super::Arc;
+use super::BuiltinInstanceContext;
+use super::BuiltinMcpInstance;
+use super::BuiltinServerExit;
+use super::ClientStatus;
+use super::ConfigSource;
+use super::CronInstanceInput;
+use super::CronScheduler;
+use super::Duration;
+use super::HashSet;
+use super::McpClientHandle;
+use super::McpClientPool;
+use super::McpConnectionKey;
+use super::McpInitStatus;
+use super::McpMiddleware;
+use super::Middleware;
+use super::StartupFixture;
+use super::StartupProbe;
+use super::StartupRequiredTool;
+use super::TickCloseOutcome;
+use super::BUILTIN_CONVERGE_TIMEOUT;
+use super::BUILTIN_MCP_INSTANCES;
+use super::BUILTIN_TICK_INTERVAL;
+use super::CLOSE_TIMEOUT;
+use super::HANDSHAKE_TIMEOUT;
+use peri_agent::tools::BaseTool as _;
 
 // A. 真实启动路径（生产 loader + 生产 transport + 生产 handler）
 // ══════════════════════════════════════════════════════════════════════════════════
@@ -19,9 +47,9 @@ async fn production_startup_path_connects_both_builtin_instances() {
         BUILTIN_MCP_INSTANCES.len(),
         "每个 builtin 实例必须登记一条 server task（关闭时有归属）"
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let handle = pool
-            .get_client(instance.name)
+            .client(instance.name)
             .unwrap_or_else(|| panic!("{} 必须完成连接", instance.name));
         assert!(
             matches!(handle.status, ClientStatus::Connected),
@@ -40,27 +68,29 @@ async fn production_startup_path_connects_both_builtin_instances() {
             instance.name
         );
 
+        let served: Vec<&str> = handle.tools.iter().map(|tool| tool.name.as_ref()).collect();
         let declared: Vec<&str> = instance
             .tools
             .iter()
+            .filter(|tool| tool.advertised)
             .map(|tool| tool.original_name)
             .collect();
-        let served: Vec<&str> = handle.tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert_eq!(
             served, declared,
             "{} 的 live tools/list 必须按声明顺序返回注册表工具",
             instance.name
         );
-        let bridges: Vec<_> = build_typed_tool_bridges(&pool)
+        let bridges: Vec<_> = crate::mcp::tool_bridge::build_typed_tool_bridges(&pool)
             .into_iter()
             .filter(|tool| tool.builtin_mcp_instance() == Some(instance.name))
             .collect();
-        assert_eq!(bridges.len(), instance.tools.len());
+        // host-only 且不在 wire 目录中的工具没有 bridge（如 shell_task_list）。
+        assert_eq!(bridges.len(), served.len());
         for bridge in bridges {
             let declaration = instance
                 .tools
                 .iter()
-                .find(|tool| tool.effective_name == bridge.name())
+                .find(|tool| tool.legacy_name == bridge.name())
                 .unwrap();
             assert_eq!(
                 bridge.visible_to_model(),
@@ -89,7 +119,7 @@ async fn production_startup_path_connects_both_builtin_instances() {
         );
         assert_eq!(
             config.system_mcp_tools.as_deref(),
-            Some(declared_direct_original_names(instance).as_slice()),
+            Some(super::declared_direct_original_names(instance).as_slice()),
             "{} 的 system_mcp_tools 必须等于声明 direct 集合（A5/A17）",
             instance.name
         );
@@ -152,10 +182,11 @@ async fn pool_spawn_point_drives_cron_tick_and_stops_on_generation_close() {
         .expect("cron 必须已接线（dispatch 覆盖四个已实现实例）");
     let (io, supervisor) = transport.into_parts();
     // client 半边走生产握手（同进程链路），保证本代真的进入服务而不是空转。
-    let mut service = serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
-        .await
-        .expect("builtin 握手不得超时（同进程链路）")
-        .expect("builtin 握手不得失败");
+    let mut service =
+        crate::mcp::client::serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+            .await
+            .expect("builtin 握手不得超时（同进程链路）")
+            .expect("builtin 握手不得失败");
 
     // ① 正控：pool 挂上的 tick 把到期任务带过来（handler 内没有 tick，触发只能来自 pool）。
     let fired = tokio::time::timeout(Duration::from_secs(5), triggers.recv())
@@ -206,7 +237,7 @@ async fn builtin_instances_report_builtin_transport_type() {
     let fixture = StartupFixture::start().await;
     let infos = fixture.pool.all_server_infos();
 
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let info = infos
             .iter()
             .find(|info| info.name == instance.name)
@@ -246,7 +277,7 @@ async fn startup_gate_stages_declared_direct_tools_and_required_set() {
                     (
                         instance.name.to_string(),
                         tool.original_name.to_string(),
-                        tool.effective_name.to_string(),
+                        tool.legacy_name.to_string(),
                     )
                 })
         })
@@ -270,8 +301,8 @@ async fn startup_gate_stages_declared_direct_tools_and_required_set() {
         "候选的必需工具身份必须逐项等于注册表声明（原始名与 effective name 双层）"
     );
     assert_eq!(
-        direct_names_of(update.tools.iter().map(|tool| tool.as_ref())),
-        all_direct_effective_names(),
+        super::direct_names_of(update.tools.iter().map(|tool| tool.as_ref())),
+        super::all_direct_effective_names(),
         "候选内 direct 集合必须等于注册表声明的 direct 工具集合"
     );
 
@@ -307,16 +338,13 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         .collect();
 
     let cases: Vec<Vec<String>> = vec![
-        vec!["WebMiddleware".to_string()],
-        vec!["ArtifactMiddleware".to_string()],
-        vec![
-            "WebMiddleware".to_string(),
-            "ArtifactMiddleware".to_string(),
-        ],
+        vec!["web".to_string()],
+        vec!["artifact".to_string()],
+        vec!["web".to_string(), "artifact".to_string()],
     ];
     for disabled_list in cases {
         let disabled: HashSet<String> = disabled_list.iter().cloned().collect();
-        let closed = closed_instances(&disabled);
+        let closed = super::closed_instances(&disabled);
         assert!(
             !closed.is_empty(),
             "合法策略键必须映射到至少一个关闭实例: {disabled_list:?}"
@@ -329,10 +357,10 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         // 面①/③的 direct 面 = 未关闭实例**声明为 direct** 的工具（cron 声明
         // `direct: false`，因此不在其中——`direct_names_of` 与 `open_builtin_bridges`
         // 都只保留 direct）。
-        let expected_open_direct: Vec<String> = sorted(
+        let expected_open_direct: Vec<String> = super::sorted(
             open_instances
                 .iter()
-                .flat_map(|instance| declared_direct_effective_names(instance))
+                .flat_map(|instance| super::declared_direct_effective_names(instance))
                 .collect(),
         );
         // 面①的 required 只由「有必需工具的实例」产出（`required` 来自
@@ -341,7 +369,7 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         // `system_mcp_tools` 是空集，因此不出现在 required 里。
         let mut expected_servers: Vec<String> = open_instances
             .iter()
-            .filter(|instance| !declared_direct_effective_names(instance).is_empty())
+            .filter(|instance| !super::declared_direct_effective_names(instance).is_empty())
             .map(|instance| instance.name.to_string())
             .collect();
         expected_servers.sort();
@@ -368,16 +396,16 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
             "[{disabled_list:?}] 面① required 只允许未关闭且有必需工具的实例"
         );
         assert_eq!(
-            direct_names_of(update.tools.iter().map(|tool| tool.as_ref())),
+            super::direct_names_of(update.tools.iter().map(|tool| tool.as_ref())),
             expected_open_direct,
             "[{disabled_list:?}] 面① direct 集合必须随关闭集收缩"
         );
 
         // 面②：deferred 目录（链工具集合）。
-        let mut collected = tool_names(&middleware.collect_tools(&cwd));
+        let mut collected = super::tool_names(&middleware.collect_tools(&cwd));
         collected.retain(|name| !name.starts_with("mcp_read_resource") && name != "DiscoverMCP");
-        for instance in BUILTIN_MCP_INSTANCES {
-            for tool in declared_effective_names(instance) {
+        for instance in BUILTIN_MCP_INSTANCES.iter() {
+            for tool in super::declared_effective_names(instance) {
                 assert_eq!(
                     collected.contains(&tool.to_string()),
                     !closed.contains(instance.name),
@@ -393,32 +421,35 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         }
 
         // 面③：`open_builtin_bridges`（parent_tools 与 workflow builtin_tools 的共同 helper）。
-        let parent_face = tool_names(&open_builtin_bridges(&pool, &disabled));
+        let parent_face = super::tool_names(&super::open_builtin_bridges(&pool, &disabled));
         assert_eq!(
-            sorted(parent_face.clone()),
+            super::sorted(parent_face.clone()),
             expected_open_direct,
             "[{disabled_list:?}] 面③ parent_tools 提供面必须与 direct 集合一致"
         );
 
         // 面④：生产 workflow 工厂。
-        let workflow = default_workflow_middleware_factory_with_pool(Some(Arc::clone(&pool)))
-            .build_tools(&cwd, &disabled, None, None);
-        let workflow_names = tool_names(&workflow);
+        let workflow =
+            super::default_workflow_middleware_factory_with_pool(Some(Arc::clone(&pool)))
+                .build_tools(&cwd, &disabled, None, None);
+        let workflow_names = super::tool_names(&workflow);
         for name in &expected_open_direct {
             assert!(
                 workflow_names.contains(name),
                 "[{disabled_list:?}] 面④ workflow agent 工具列表必须含 {name}: {workflow_names:?}"
             );
         }
-        for instance in BUILTIN_MCP_INSTANCES
-            .iter()
-            .filter(|i| closed.contains(i.name))
         {
-            for tool in declared_effective_names(instance) {
-                assert!(
+            let closed_builtin_instances = BUILTIN_MCP_INSTANCES
+                .iter()
+                .filter(|i| closed.contains(i.name));
+            for instance in closed_builtin_instances {
+                for tool in super::declared_effective_names(instance) {
+                    assert!(
                     !workflow_names.contains(&tool.to_string()),
                     "[{disabled_list:?}] 面④ 关闭实例的 {tool} 不得出现在 workflow: {workflow_names:?}"
                 );
+                }
             }
         }
         for bare in &bare_names {
@@ -432,12 +463,13 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
     // `McpMiddleware=false`：链槽位键不是 builtin 策略键。
     let chain_off: HashSet<String> = ["McpMiddleware".to_string()].into_iter().collect();
     assert!(
-        closed_instances(&chain_off).is_empty(),
+        super::closed_instances(&chain_off).is_empty(),
         "McpMiddleware 是链槽位键，不是 builtin 实例策略键（两表语义不重叠，A7）"
     );
-    let workflow_off = default_workflow_middleware_factory_with_pool(Some(Arc::clone(&pool)))
-        .build_tools(&cwd, &chain_off, None, None);
-    let workflow_off_names = tool_names(&workflow_off);
+    let workflow_off =
+        super::default_workflow_middleware_factory_with_pool(Some(Arc::clone(&pool)))
+            .build_tools(&cwd, &chain_off, None, None);
+    let workflow_off_names = super::tool_names(&workflow_off);
     assert!(
         !workflow_off_names
             .iter()
@@ -471,8 +503,8 @@ async fn builtin_instances_are_distinct_and_reconnect_touches_one_generation() {
     let fixture = StartupFixture::start().await;
     let pool = Arc::clone(&fixture.pool);
 
-    let web_before = pool.get_client("web").expect("web 必须已连接");
-    let artifact_before = pool.get_client("artifact").expect("artifact 必须已连接");
+    let web_before = pool.client("web").expect("web 必须已连接");
+    let artifact_before = pool.client("artifact").expect("artifact 必须已连接");
     assert!(
         !Arc::ptr_eq(&web_before, &artifact_before),
         "两个实例的 Arc<McpClientHandle> 不得是同一份"
@@ -505,8 +537,8 @@ async fn builtin_instances_are_distinct_and_reconnect_touches_one_generation() {
         .await
         .expect("builtin 实例必须能重连");
 
-    let web_after = pool.get_client("web").expect("重连后必须留下新句柄");
-    let artifact_after = pool.get_client("artifact").expect("artifact 必须仍在");
+    let web_after = pool.client("web").expect("重连后必须留下新句柄");
+    let artifact_after = pool.client("artifact").expect("artifact 必须仍在");
     assert!(
         !Arc::ptr_eq(&web_before, &web_after),
         "重连必须换新句柄（旧代证据不得继续有效）"
@@ -551,8 +583,8 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
     let fixture = StartupFixture::start().await;
     let pool = Arc::clone(&fixture.pool);
     let cwd = fixture.project.to_string_lossy().into_owned();
-    let disabled: HashSet<String> = ["WebMiddleware".to_string()].into_iter().collect();
-    let closed = closed_instances(&disabled);
+    let disabled: HashSet<String> = ["web".to_string()].into_iter().collect();
+    let closed = super::closed_instances(&disabled);
     assert_eq!(
         closed,
         std::collections::BTreeSet::from(["web".to_string()])
@@ -560,9 +592,10 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
 
     // 能力面：目录与 parent_tools 提供面都只剩 artifact。
     let middleware = McpMiddleware::new(Arc::clone(&pool)).with_builtin_closures(closed.clone());
-    let collected = tool_names(&middleware.collect_tools(&cwd));
-    let web_tools = declared_effective_names(find("web").expect("web 已实现"));
-    let artifact_tools = declared_effective_names(find("artifact").expect("artifact 已实现"));
+    let collected = super::tool_names(&middleware.collect_tools(&cwd));
+    let web_tools = super::declared_effective_names(super::find("web").expect("web 已实现"));
+    let artifact_tools =
+        super::declared_effective_names(super::find("artifact").expect("artifact 已实现"));
     for tool in &web_tools {
         assert!(
             !collected.contains(&tool.to_string()),
@@ -585,8 +618,8 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
     // 为 `None` 只是「可见但退化」（AW3-11），不改变工具面——所以期望集合是「未关闭实例
     // 声明的全部 direct」，由注册表派生（与 `closure_matrix_four_faces_on_real_builtin_pool`
     // 面③同口径），不在此处第二份硬编码实例名。
-    let bridges = open_builtin_bridges(&pool, &disabled);
-    let bridge_names = tool_names(&bridges);
+    let bridges = super::open_builtin_bridges(&pool, &disabled);
+    let bridge_names = super::tool_names(&bridges);
     // 关闭集**只**作用于被点名实例：web 的工具一个不留（对**实际**产出断言，不只看期望）。
     for tool in &web_tools {
         assert!(
@@ -594,7 +627,7 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
             "关闭 WebMiddleware 后 web 的 direct 不得进入提供面: {tool} 在 {bridge_names:?}"
         );
     }
-    let expected_open_direct = sorted(
+    let expected_open_direct = super::sorted(
         BUILTIN_MCP_INSTANCES
             .iter()
             .filter(|instance| !closed.contains(instance.name))
@@ -602,7 +635,7 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
             .collect(),
     );
     assert_eq!(
-        sorted(bridge_names),
+        super::sorted(bridge_names),
         expected_open_direct,
         "关闭 web 后 direct 提供面必须恰为未关闭实例的全部 direct（artifact + workspace）"
     );

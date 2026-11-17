@@ -1,21 +1,23 @@
 //! 真实 notifier → bridge 边界：交付气泡与 assistant 输出共享同一个 FIFO。
 
 use peri_acp::event::AcpEvent;
-use peri_acp::transport::mpsc::mpsc_transport_pair;
-use peri_acp_types::{
-    messages::MessageContent,
-    session::{UserInput, UserInputQueueSnapshot, UserInputQueueTerminalItem, UserInputState},
-};
+
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::session::UserInput;
+use peri_acp_types::session::UserInputQueueSnapshot;
+use peri_acp_types::session::UserInputQueueTerminalItem;
+use peri_acp_types::session::UserInputState;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::acp_client::{AcpNotification, AcpTuiClient};
-use crate::kit::atoms::{self, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, VIEW_MODELS};
+
 use crate::kit::steer_queue::SteerItemState;
 use crate::kit::steer_state::{STEERS, SteerCommand, SteerCommandKind, SteerState};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
+#[must_use]
 fn snapshot() -> UserInputQueueSnapshot {
     UserInputQueueSnapshot {
         session_id: "s".into(),
@@ -76,7 +78,7 @@ async fn send_delivered(tx: &mpsc::Sender<AcpNotification>, input_id: &str, text
         },
     })
     .await
-    .unwrap();
+    .expect("send delivered: fixture task and request must complete successfully");
 }
 
 async fn send_text(tx: &mpsc::Sender<AcpNotification>, text: &str) {
@@ -92,7 +94,7 @@ async fn send_text(tx: &mpsc::Sender<AcpNotification>, text: &str) {
         }),
     })
     .await
-    .unwrap();
+    .expect("send text: fixture task and request must complete successfully");
 }
 
 fn spawn_wiring() -> (
@@ -103,7 +105,7 @@ fn spawn_wiring() -> (
     tokio::task::JoinHandle<()>,
     AcpTuiClient,
 ) {
-    let (client_transport, _server) = mpsc_transport_pair();
+    let (client_transport, _server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s", false);
     let (notif_tx, notif_rx) =
@@ -173,8 +175,8 @@ async fn delivered_bubbles_precede_assistant_at_real_bridge_boundary() {
 
     shutdown.cancel();
     drop(notif_tx);
-    notifier.await.unwrap();
-    bridge.await.unwrap();
+    notifier.await.expect("delivered bubbles precede assistant at real bridge boundary: fixture task and request must complete successfully");
+    bridge.await.expect("delivered bubbles precede assistant at real bridge boundary: fixture task and request must complete successfully");
 }
 
 /// assistant 已输出后，仅凭终态快照不得补一个位于回答之后的用户气泡。
@@ -206,7 +208,7 @@ async fn terminal_snapshot_after_assistant_output_never_appends_a_bubble() {
             },
         })
         .await
-        .unwrap();
+        .expect("terminal snapshot after assistant output never appends a bubble: fixture task and request must complete successfully");
     expect_observed(&mut observed).await;
 
     let after: Vec<TuiRenderUnit> = VIEW_MODELS.state().read().items.iter().cloned().collect();
@@ -219,8 +221,8 @@ async fn terminal_snapshot_after_assistant_output_never_appends_a_bubble() {
 
     shutdown.cancel();
     drop(notif_tx);
-    notifier.await.unwrap();
-    bridge.await.unwrap();
+    notifier.await.expect("terminal snapshot after assistant output never appends a bubble: fixture task and request must complete successfully");
+    bridge.await.expect("terminal snapshot after assistant output never appends a bubble: fixture task and request must complete successfully");
 }
 
 /// 致命执行失败（交付日志溢出等）必须结束提交反馈并留下可见错误。
@@ -254,7 +256,7 @@ async fn agent_execution_failure_clears_submitting_and_shows_error() {
             },
         })
         .await
-        .unwrap();
+        .expect("agent execution failure clears submitting and shows error: fixture task and request must complete successfully");
     expect_observed(&mut observed).await;
     assert!(
         !STEERS.state().read().direct_submitting("s", epoch),
@@ -284,6 +286,14 @@ async fn agent_execution_failure_clears_submitting_and_shows_error() {
 
     shutdown.cancel();
     drop(notif_tx);
-    notifier.await.unwrap();
-    bridge.await.unwrap();
+    notifier.await.expect("agent execution failure clears submitting and shows error: fixture task and request must complete successfully");
+    bridge.await.expect("agent execution failure clears submitting and shows error: fixture task and request must complete successfully");
 }
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::VIEW_MODELS;
+
+use crate::kit::atoms;

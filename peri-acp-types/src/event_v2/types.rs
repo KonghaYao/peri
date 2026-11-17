@@ -1,9 +1,10 @@
 //! 三层事件载荷与身份提取；枚举本身不持有发送端或执行状态。
 
-use crate::{
-    error::SafeSubagentFailure, event::ExecutorEvent, identity::AgentId, messages::BaseMessage,
-    session::TurnId,
-};
+use crate::error::SafeSubagentFailure;
+use crate::event::ExecutorEvent;
+use crate::identity::AgentId;
+use crate::messages::BaseMessage;
+use crate::session::TurnId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -476,6 +477,11 @@ pub enum ObserveEvent {
         prompt: usize,
         defer: usize,
         info: usize,
+        /// 本批消费消息中最小的 `enqueued_at`（RFC3339）；无可用值时保持 None。
+        ///
+        /// 排队等待由消费侧用 Receive 起点减去该时间得到，不在事件里预计算。
+        #[serde(default)]
+        oldest_enqueued_at: Option<String>,
     },
 }
 

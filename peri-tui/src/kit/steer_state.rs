@@ -79,6 +79,7 @@ pub(crate) struct FatalSubmissionReport {
 impl FatalSubmissionReport {
     /// 测试断言用：报告是否未结算任何输入。
     #[cfg(test)]
+    #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.not_sent.is_empty() && self.uncertain.is_empty()
     }
@@ -622,65 +623,71 @@ impl SteerState {
                 },
             })
             .collect();
-        for command in session
-            .pending
-            .iter()
-            .filter(|command| command.epoch == session.epoch)
         {
-            match &command.kind {
-                SteerCommandKind::Enqueue(input) => {
-                    if let Some(row) = rows.iter_mut().find(|row| row.id == input.input_id) {
-                        row.state = SteerItemState::Submitting;
-                    } else if !session.delivered.contains(&input.input_id)
-                        && !session.direct_submissions.contains(&input.input_id)
-                    {
-                        rows.push(SteerQueueItem {
-                            id: input.input_id.clone(),
-                            text: input.original_draft.clone(),
-                            state: SteerItemState::Submitting,
-                        });
-                    }
-                }
-                SteerCommandKind::Dispatch(ids) => {
-                    for row in &mut rows {
-                        if ids.contains(&row.id) {
-                            row.state = SteerItemState::Publishing;
+            let iteration_items = session
+                .pending
+                .iter()
+                .filter(|command| command.epoch == session.epoch);
+            for command in iteration_items {
+                match &command.kind {
+                    SteerCommandKind::Enqueue(input) => {
+                        if let Some(row) = rows.iter_mut().find(|row| row.id == input.input_id) {
+                            row.state = SteerItemState::Submitting;
+                        } else if !session.delivered.contains(&input.input_id)
+                            && !session.direct_submissions.contains(&input.input_id)
+                        {
+                            rows.push(SteerQueueItem {
+                                id: input.input_id.clone(),
+                                text: input.original_draft.clone(),
+                                state: SteerItemState::Submitting,
+                            });
                         }
                     }
-                }
-                SteerCommandKind::TakeBack { id, .. } => {
-                    if let Some(row) = rows.iter_mut().find(|row| row.id == *id) {
-                        row.state = SteerItemState::Withdrawing;
+                    SteerCommandKind::Dispatch(ids) => {
+                        for row in &mut rows {
+                            if ids.contains(&row.id) {
+                                row.state = SteerItemState::Publishing;
+                            }
+                        }
                     }
+                    SteerCommandKind::TakeBack { id, .. } => {
+                        if let Some(row) = rows.iter_mut().find(|row| row.id == *id) {
+                            row.state = SteerItemState::Withdrawing;
+                        }
+                    }
+                    SteerCommandKind::Refresh => {}
                 }
-                SteerCommandKind::Refresh => {}
             }
         }
-        for unsettled in session
-            .unsettled
-            .iter()
-            .filter(|entry| entry.epoch == session.epoch)
-            .filter(|entry| !session.delivered.contains(&entry.input.input_id))
         {
-            if rows.iter().any(|row| row.id == unsettled.input.input_id) {
-                continue;
+            let iteration_items = session
+                .unsettled
+                .iter()
+                .filter(|entry| entry.epoch == session.epoch)
+                .filter(|entry| !session.delivered.contains(&entry.input.input_id));
+            for unsettled in iteration_items {
+                if rows.iter().any(|row| row.id == unsettled.input.input_id) {
+                    continue;
+                }
+                rows.push(SteerQueueItem {
+                    id: unsettled.input.input_id.clone(),
+                    text: unsettled.input.original_draft.clone(),
+                    state: SteerItemState::Uncertain,
+                });
             }
-            rows.push(SteerQueueItem {
-                id: unsettled.input.input_id.clone(),
-                text: unsettled.input.original_draft.clone(),
-                state: SteerItemState::Uncertain,
-            });
         }
-        for recovered in session
-            .recovered
-            .iter()
-            .filter(|recovered| recovered.epoch == session.epoch)
         {
-            rows.push(SteerQueueItem {
-                id: recovered.input.input_id.clone(),
-                text: recovered.input.original_draft.clone(),
-                state: SteerItemState::Withdrawing,
-            });
+            let iteration_items = session
+                .recovered
+                .iter()
+                .filter(|recovered| recovered.epoch == session.epoch);
+            for recovered in iteration_items {
+                rows.push(SteerQueueItem {
+                    id: recovered.input.input_id.clone(),
+                    text: recovered.input.original_draft.clone(),
+                    state: SteerItemState::Withdrawing,
+                });
+            }
         }
         rows
     }
@@ -729,6 +736,7 @@ impl SteerState {
     }
 }
 
+#[must_use]
 pub(crate) fn is_enabled() -> bool {
     STEERS.state().read().enabled
 }

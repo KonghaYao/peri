@@ -1,16 +1,20 @@
 //! 循环/转发终态到 workflow 结果与遥测的投影；不管理任务或事件通道。
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
-use peri_acp_types::{
-    command::PromptStopReason,
-    session::{ExecutionFailure, TurnTelemetryOutcome},
-    workflow::{AgentRunParams, AgentRunResult, Usage},
-};
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::session::ExecutionFailure;
+use peri_acp_types::session::TurnTelemetryOutcome;
+use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::AgentRunResult;
+use peri_acp_types::workflow::Usage;
 use tracing::{debug, warn};
 
-use super::observation::{RunStats, WorkflowObservation};
-use crate::{agent::stages::LoopResult, session::Session};
+use crate::agent::stages::LoopResult;
+use crate::agent::workflow::agent::observation::{RunStats, WorkflowObservation};
+use crate::session::Session;
 
 pub(super) struct ProjectedResult {
     pub result: AgentRunResult,
@@ -18,9 +22,26 @@ pub(super) struct ProjectedResult {
 }
 
 impl ProjectedResult {
+    /// Preserve execution telemetry without losing the independent run-fence signal.
+    pub(super) fn after_scope_close(mut self, closed: bool) -> Self {
+        self.result = self.result.after_scope_close(closed);
+        if !closed && self.failure.is_none() {
+            self.failure = Some(ExecutionFailure::internal(
+                "Workflow agent scope did not close; outstanding resources are unconfirmed",
+            ));
+        }
+        self
+    }
+
+    #[must_use]
     pub fn telemetry_outcome(&self) -> TurnTelemetryOutcome {
         match &self.result {
-            AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
+            // scope 未结清时终态已按失败收口，中断不能再投影为取消。
+            AgentRunResult::Dead {
+                reason,
+                scope_close_incomplete,
+                ..
+            } if !*scope_close_incomplete && reason.as_deref() == Some("interrupted") => {
                 TurnTelemetryOutcome::Stopped {
                     reason: PromptStopReason::Cancelled,
                 }
@@ -32,6 +53,38 @@ impl ProjectedResult {
             },
             _ => TurnTelemetryOutcome::Completed,
         }
+    }
+}
+
+/// 本次 run 结果对应的 child 终态。
+///
+/// 与 sync/background child 的生命周期约定一致（`docs/design/session-durability.md`
+/// §5.3）：正常完成写 `Done`，用户取消写 `Cancelled`，其余中断与失败写 `Error`；
+/// `work_state` 由 [`peri_acp_types::thread::WorkState::after_agent_terminal`] 派生。
+pub(super) fn terminal_status(result: &AgentRunResult) -> AgentStatus {
+    match result {
+        AgentRunResult::Ok { .. } | AgentRunResult::Skipped => AgentStatus::Done,
+        AgentRunResult::Dead { reason, .. } if reason.as_deref() == Some("interrupted") => {
+            AgentStatus::Cancelled
+        }
+        AgentRunResult::Dead { .. } => AgentStatus::Error,
+    }
+}
+
+/// 作用域未结清时，任何结果都按失败收口为 `Error`。
+///
+/// sync child 在 close 失败时不写终态；workflow child 必须结算（否则残留
+/// `active + working` 会被父会话反复恢复），因此按 `session-durability` §5.3
+/// 的 close 失败映射写 `Error + Idle`：保留「资源未完全释放」的事实，同时不再
+/// 成为续跑候选。
+pub(super) fn terminal_status_after_close(
+    result: &AgentRunResult,
+    scope_closed: bool,
+) -> AgentStatus {
+    if scope_closed {
+        terminal_status(result)
+    } else {
+        AgentStatus::Error
     }
 }
 
@@ -48,13 +101,18 @@ pub(super) fn project_run_result(
     if let Err(failure) = forwarder_result {
         warn!(message = %failure.public_message, "Workflow agent: event forwarder failed");
         return ProjectedResult {
-            result: workflow_forwarder_dead_result(),
+            result: dead_result(
+                "event-forwarder-failed",
+                Some("Workflow agent event forwarding failed".into()),
+                started_at,
+                Some(observation.snapshot()),
+            ),
             failure: Some(failure),
         };
     }
     match loop_result {
         LoopResult::Completed | LoopResult::HookStopped { .. } => {
-            let output = crate::session::subagent::extract_last_ai_text(session);
+            let output = super::report::extract_output(session);
             ProjectedResult {
                 result: completed_result(
                     output,
@@ -69,23 +127,27 @@ pub(super) fn project_run_result(
         LoopResult::Interrupted => {
             debug!("Workflow agent: execution interrupted");
             ProjectedResult {
-                result: AgentRunResult::Dead {
-                    reason: Some("interrupted".into()),
-                    detail: Some("Workflow agent execution was interrupted".into()),
-                },
+                result: dead_result(
+                    "interrupted",
+                    Some("Workflow agent execution was interrupted".into()),
+                    started_at,
+                    Some(observation.snapshot()),
+                ),
                 failure: None,
             }
         }
         LoopResult::SettlementDue { .. } => {
             debug!("Workflow agent: settlement window expired");
             ProjectedResult {
-                result: AgentRunResult::Dead {
-                    reason: Some("settlement-due".into()),
-                    detail: Some(
+                result: dead_result(
+                    "settlement-due",
+                    Some(
                         "Workflow agent stopped admitting new iterations at its settlement deadline"
                             .into(),
                     ),
-                },
+                    started_at,
+                    Some(observation.snapshot()),
+                ),
                 failure: None,
             }
         }
@@ -93,12 +155,31 @@ pub(super) fn project_run_result(
             debug!(error = %error, "Workflow agent: execution failed");
             ProjectedResult {
                 failure: Some(ExecutionFailure::from_agent_error(&error)),
-                result: AgentRunResult::Dead {
-                    reason: Some("runagent-threw".into()),
-                    detail: Some(error.to_string()),
-                },
+                result: dead_result(
+                    "runagent-threw",
+                    Some(error.to_string()),
+                    started_at,
+                    Some(observation.snapshot()),
+                ),
             }
         }
+    }
+}
+
+/// Dead attempts must carry measured duration when the host observed execution;
+/// `None` stays an explicit "not measured" rather than silently missing metrics.
+fn dead_result(
+    reason: &str,
+    detail: Option<String>,
+    started_at: Instant,
+    stats: Option<RunStats>,
+) -> AgentRunResult {
+    AgentRunResult::Dead {
+        scope_close_incomplete: false,
+        reason: Some(reason.into()),
+        detail,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+        token_count: stats.and_then(|stats| stats.reported_output_tokens()),
     }
 }
 
@@ -114,16 +195,13 @@ fn completed_result(
     if tokens == 0 && !output.is_empty() {
         tokens = (output.len() as u64 / 4).max(1);
     }
-    let model = reported_model(stats.last_model, effective_model);
     if let Some(schema) = &params.schema {
         if let Err(error) = validate_json_schema(&output, schema) {
             debug!(error = %error, "Workflow agent: schema validation failed");
-            return AgentRunResult::Dead {
-                reason: Some("no-structured-output".into()),
-                detail: Some(error),
-            };
+            return dead_result("no-structured-output", Some(error), started_at, Some(stats));
         }
     }
+    let model = reported_model(stats.last_model, effective_model);
     AgentRunResult::Ok {
         output: serde_json::Value::String(output),
         usage: Usage {
@@ -137,10 +215,14 @@ fn completed_result(
     }
 }
 
+#[cfg(test)]
 pub(super) fn workflow_forwarder_dead_result() -> AgentRunResult {
     AgentRunResult::Dead {
+        scope_close_incomplete: false,
         reason: Some("event-forwarder-failed".into()),
         detail: Some("Workflow agent event forwarding failed".into()),
+        duration_ms: None,
+        token_count: None,
     }
 }
 
@@ -300,7 +382,8 @@ fn validate_schema_value(
             let raw_items = raw.and_then(|raw| {
                 serde_json::from_str::<Vec<Box<serde_json::value::RawValue>>>(raw.get()).ok()
             });
-            for (index, item) in items.iter().enumerate() {
+            let paired_items = items.iter().enumerate();
+            for (index, item) in paired_items {
                 let item_path = field_path
                     .map(|parent| format!("{parent}[{index}]"))
                     .unwrap_or_else(|| format!("[{index}]"));

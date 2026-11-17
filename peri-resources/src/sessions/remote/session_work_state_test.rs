@@ -6,7 +6,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use peri_acp_types::thread::{ThreadId, WorkState};
+use peri_acp_types::session_resources::SessionResourceErrorKind;
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
@@ -15,9 +16,10 @@ use super::mutation::{RemoteStore, StoreAccess};
 use super::schema::{self, StoreId};
 use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
-use crate::sessions::data::SessionDataPort;
+use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 
 const SESSION: &str = "work-state-session";
+const CHILD: &str = "work-state-child";
 
 struct Fixture {
     _directory: tempfile::TempDir,
@@ -212,5 +214,161 @@ async fn previous_generation_store_reads_idle_and_unknown_usage_without_writing(
         fixture.transport.writes.load(Ordering::SeqCst),
         0,
         "被拒绝的写入同样不产生批次"
+    );
+}
+
+// ─── 认领收尾：状态与工作意图同批 ──────────────────────────────────────────────
+
+/// 子会话行：认领中（`active` + `working`），供收尾批次改写。
+async fn seed_claimed_child(fixture: &Fixture) {
+    sqlx::query(
+        "INSERT INTO threads
+            (id, cwd, created_at, updated_at, workspace_id, agent_status, work_state)
+         VALUES (?1, '/tmp', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'ws', 'active', 'working')",
+    )
+    .bind(CHILD)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+}
+
+/// 直接读列值：断言的是落库事实，不是解码端的回填。
+async fn child_facts(fixture: &Fixture) -> (String, String) {
+    sqlx::query_as("SELECT agent_status, work_state FROM threads WHERE id = ?1")
+        .bind(CHILD)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+}
+
+fn previous() -> ChildResumeRecord {
+    ChildResumeRecord {
+        status: AgentStatus::Cancelled,
+        claimed: false,
+    }
+}
+
+/// 成功路径：终态与工作意图在同一次提交里写入。
+#[tokio::test]
+async fn settle_child_resume_writes_terminal_status_and_work_state_together() {
+    let fixture = current_fixture(StoreAccess::ReadWrite).await;
+    seed_claimed_child(&fixture).await;
+    let child: ThreadId = CHILD.to_owned();
+
+    fixture
+        .data
+        .settle_child_resume(
+            &child,
+            &previous(),
+            Some(WorkState::Stopped),
+            Some(AgentStatus::Done),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        child_facts(&fixture).await,
+        ("done".to_owned(), "stopped".to_owned())
+    );
+    assert_eq!(
+        fixture.data.load_child_resume_record(&child).await.unwrap(),
+        ChildResumeRecord {
+            status: AgentStatus::Done,
+            claimed: false,
+        }
+    );
+}
+
+/// 工作意图语句失败时终态也必须一起回滚：不能留下状态已改、意图未改的部分写入。
+#[tokio::test]
+async fn settle_child_resume_rolls_back_status_when_work_state_statement_fails() {
+    let fixture = current_fixture(StoreAccess::ReadWrite).await;
+    seed_claimed_child(&fixture).await;
+    sqlx::raw_sql(
+        "CREATE TRIGGER reject_work_state_settle BEFORE UPDATE OF work_state ON threads
+         WHEN NEW.work_state = 'stopped'
+         BEGIN SELECT RAISE(ABORT, 'injected work_state failure'); END",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let error = fixture
+        .data
+        .settle_child_resume(
+            &CHILD.to_owned(),
+            &previous(),
+            Some(WorkState::Stopped),
+            Some(AgentStatus::Done),
+        )
+        .await
+        .unwrap_err();
+    // 触发器中止的 SDK 分类随驱动而定：这里只要求「确定未生效」，回滚由列值断言覆盖。
+    assert!(
+        matches!(
+            error.kind(),
+            SessionResourceErrorKind::Unavailable { .. }
+                | SessionResourceErrorKind::InvalidInput { .. }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        child_facts(&fixture).await,
+        ("active".to_owned(), "working".to_owned()),
+        "工作意图语句失败不得让状态列单独提交"
+    );
+}
+
+/// `work_state = None` 时不发出该列写入：任何改写工作意图的语句都会撞触发器。
+#[tokio::test]
+async fn settle_child_resume_without_work_state_leaves_the_column_untouched() {
+    let fixture = current_fixture(StoreAccess::ReadWrite).await;
+    seed_claimed_child(&fixture).await;
+    sqlx::raw_sql(
+        "CREATE TRIGGER reject_work_state_write BEFORE UPDATE OF work_state ON threads
+         BEGIN SELECT RAISE(ABORT, 'unexpected work_state write'); END",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    fixture
+        .data
+        .settle_child_resume(
+            &CHILD.to_owned(),
+            &previous(),
+            None,
+            Some(AgentStatus::Done),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        child_facts(&fixture).await,
+        ("done".to_owned(), "working".to_owned()),
+        "未给出工作意图时该列必须保持原值"
+    );
+}
+
+/// `terminal = None` 时恢复认领前状态与工作意图。
+#[tokio::test]
+async fn settle_child_resume_without_terminal_restores_previous_status_and_work_state() {
+    let fixture = current_fixture(StoreAccess::ReadWrite).await;
+    seed_claimed_child(&fixture).await;
+    let child: ThreadId = CHILD.to_owned();
+
+    fixture
+        .data
+        .settle_child_resume(&child, &previous(), Some(WorkState::Stopped), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        child_facts(&fixture).await,
+        ("cancelled".to_owned(), "stopped".to_owned())
+    );
+    assert_eq!(
+        fixture.data.load_child_resume_record(&child).await.unwrap(),
+        previous()
     );
 }

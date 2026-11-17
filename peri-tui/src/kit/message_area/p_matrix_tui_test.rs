@@ -14,18 +14,15 @@
 use super::grid::GridSpec;
 use super::transcript::Transcript;
 use super::vm_cache::VmCacheSlot;
-use crate::kit::acp_events::{
-    BridgeState, acp_events_test::make_fold_test_state, dispatch_for_bridge, push_view_models,
-};
+use crate::kit::acp_events::BridgeState;
 use crate::kit::acp_types::AcpEventData;
-use crate::kit::atoms::{
-    self, FOLD_OVERRIDES, HISTORY_WINDOW_CAPABLE, HISTORY_WINDOW_PAGING, HISTORY_WINDOW_V1,
-};
+use crate::kit::atoms;
+
 use crate::kit::entry_render_cache::{EntryRenderContext, EntrySurface};
-use crate::kit::history_page_consumer::{
-    self, WindowConsumerRequest, WindowPagePlacement, WindowRequestContext, claim_window_request,
-    settle_window_response,
-};
+use crate::kit::history_page_consumer;
+use crate::kit::history_page_consumer::WindowConsumerRequest;
+use crate::kit::history_page_consumer::WindowPagePlacement;
+use crate::kit::history_page_consumer::WindowRequestContext;
 use crate::kit::history_paging::{
     WindowPageCursor, WindowPageItem, WindowPageResponse, WindowSubItem,
 };
@@ -60,10 +57,12 @@ impl Drop for AtomsGuard {
     }
 }
 
+#[must_use]
 fn identity() -> WindowIdentity {
     WindowIdentity::new(SESSION, "gen-1", 7, SNAPSHOT)
 }
 
+#[must_use]
 fn limits(body_bytes: usize, reserved_bytes: usize, page_target: usize) -> WindowLimits {
     WindowLimits {
         body_bytes,
@@ -81,7 +80,7 @@ fn setup_window(window_limits: WindowLimits) -> (BridgeState, AtomsGuard) {
     history_page_consumer::reset_window_paging_state();
     *atoms::ACTIVE_SESSION_ID.state().write() = SESSION.to_string();
 
-    let mut state = make_fold_test_state();
+    let mut state = crate::kit::acp_events::acp_events_test::make_fold_test_state();
     state.active_session_id = SESSION.to_string();
     state.window = HistoryWindow::new(HistoryWindowConfig {
         history_window_v1: true,
@@ -158,7 +157,7 @@ fn dispatch_page(
     context: &WindowRequestContext,
     page: WindowPageResponse,
 ) {
-    dispatch_for_bridge(
+    crate::kit::acp_events::dispatch_for_bridge(
         state,
         &AcpEventData::HistoryWindowPageLoaded {
             context: Box::new(context.clone()),
@@ -225,6 +224,7 @@ impl RenderProbe {
     }
 }
 
+#[must_use]
 fn fmib(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
@@ -351,7 +351,7 @@ fn p03_hundred_bidirectional_pages_stay_within_budgets() {
         // 接纳已发生、发布尚未结算：这是本轮的在途/待合并峰值。
         let page_reserved = state.window.budget().page_reserved_bytes;
         let pending_merge = state.window.pending_merge_bytes();
-        push_view_models(&mut state);
+        crate::kit::acp_events::push_view_models(&mut state);
         let after_publication_reserved = state.window.budget().page_reserved_bytes;
         assert_eq!(
             after_publication_reserved, 0,
@@ -394,12 +394,15 @@ fn p03_hundred_bidirectional_pages_stay_within_budgets() {
     }
 
     println!("== P03 采样（每 10 页；峰值另列） ==");
-    for row in rows.iter().filter(|row| row.0 % 10 == 0) {
-        println!(
-            "  page={:03} resident={}B committed_body={}B render_cache={}B \
+    {
+        let iteration_items = rows.iter().filter(|row| row.0 % 10 == 0);
+        for row in iteration_items {
+            println!(
+                "  page={:03} resident={}B committed_body={}B render_cache={}B \
              page_reserved={}B pending_merge={}B segments={} gaps={}",
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7
-        );
+                row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7
+            );
+        }
     }
     let stats = state.window.stats();
     let diagnostics = state.window.diagnostics();
@@ -508,7 +511,7 @@ fn p04_slow_consumer_does_not_accumulate_unapplied_pages() {
             cursor: WindowPageCursor::Before(format!("cursor-{index:04}")),
             limit: 50,
         };
-        match claim_window_request(&request) {
+        match crate::kit::history_page_consumer::claim_window_request(&request) {
             history_page_consumer::WindowClaim::Granted(in_flight) => {
                 granted += 1;
                 // “存储返回”：构建一页 1 MiB 正文，但先不消费。
@@ -528,7 +531,7 @@ fn p04_slow_consumer_does_not_accumulate_unapplied_pages() {
                             .unwrap_or(0)
                     })
                     .sum::<usize>();
-                match settle_window_response(&in_flight, &page) {
+                match crate::kit::history_page_consumer::settle_window_response(&in_flight, &page) {
                     history_page_consumer::WindowSettlement::Accepted(_) => {
                         held = Some((context, page, page_bytes));
                         max_unapplied_pages = max_unapplied_pages.max(1);
@@ -574,7 +577,7 @@ fn p04_slow_consumer_does_not_accumulate_unapplied_pages() {
             dispatch_page(&mut state, &context, page);
             max_window_pending_merge =
                 max_window_pending_merge.max(state.window.budget().pending_merge_bytes);
-            push_view_models(&mut state);
+            crate::kit::acp_events::push_view_models(&mut state);
             applied += 1;
             assert_eq!(
                 state.window.budget().page_reserved_bytes,
@@ -594,7 +597,7 @@ fn p04_slow_consumer_does_not_accumulate_unapplied_pages() {
     // 收尾：应用最后一个待合并页（若有）。
     if let Some((context, page, page_bytes)) = held.take() {
         dispatch_page(&mut state, &context, page);
-        push_view_models(&mut state);
+        crate::kit::acp_events::push_view_models(&mut state);
         applied += 1;
         max_unapplied_bytes = max_unapplied_bytes.max(page_bytes);
     }
@@ -632,3 +635,11 @@ fn p04_slow_consumer_does_not_accumulate_unapplied_pages() {
     assert_budget("max_window_resident", max_window_resident, 4 * 1024 * 1024);
     print_process("process(end)");
 }
+
+use crate::kit::atoms::FOLD_OVERRIDES;
+
+use crate::kit::atoms::HISTORY_WINDOW_CAPABLE;
+
+use crate::kit::atoms::HISTORY_WINDOW_PAGING;
+
+use crate::kit::atoms::HISTORY_WINDOW_V1;

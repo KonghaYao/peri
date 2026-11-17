@@ -1,17 +1,19 @@
-use std::{
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{RequestPermissionOutcome, RequestPermissionResponse};
 use agent_client_protocol_schema::v1::{CreateElicitationResponse, ElicitationAction};
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair};
+use peri_acp::transport::AcpTransport;
 use serde_json::{Value, json};
 use serial_test::serial;
 use tokio::sync::mpsc::error::TryRecvError;
 
-use super::pump::plan_reverse_request;
-use super::*;
+use super::AcpNotification;
+use super::AcpTuiClient;
+use super::InteractionLifecycle;
+use super::InteractionUiOutcome;
+
 use crate::acp_client::interaction_lifecycle::{
     ClaimCause, RegisterDecision, ReverseInteractionKind, TransitionKind,
 };
@@ -56,7 +58,7 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
     let old_active_panel = *atoms::ACTIVE_PANEL.state().read();
     let old_confirm = atoms::CONFIRM_PAYLOAD.state().read().clone();
     let old_todos = atoms::TODO_ITEMS.state().read().clone();
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) =
         AcpTuiClient::new_interactive(client_transport);
     client.lifecycle.force_stable("s1", true);
@@ -79,13 +81,13 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
         request_server
             .send_request("session/request_permission", json!({"sessionId":"s1"}))
             .await
-            .unwrap()
+            .expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully")
     });
     let AcpNotification::RequestPermission {
         owner: publish_first,
         request_id_json,
         ..
-    } = notification_rx.recv().await.unwrap()
+    } = notification_rx.recv().await.expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully")
     else {
         panic!()
     };
@@ -105,7 +107,7 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
             active_session_id: "s1".into(),
         })
         .await
-        .unwrap();
+        .expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(
         crate::kit::atoms::HITL_PENDING
@@ -120,7 +122,7 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
     let start = client
         .lifecycle
         .begin_transition(TransitionKind::Load, Some("s2".into()))
-        .unwrap();
+        .expect("bridge publish and transition are one operation gate order: the begin_transition fixture operation uses valid inputs");
     let transition = client.lifecycle.arm_transition(start.generation);
     crate::kit::session_boundary::project_session_boundary(Some("s2"));
     client.settle_claims_owned(start.claims).await;
@@ -129,10 +131,10 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
     drop(operation);
     assert_cancel_response(
         "session/request_permission",
-        publish_first_response.await.unwrap(),
+        publish_first_response.await.expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully"),
     );
     assert!(matches!(
-        notification_rx.recv().await.unwrap(),
+        notification_rx.recv().await.expect("bridge publish and transition are one operation gate order: the fixture channel must exchange its expected message"),
         AcpNotification::InteractionTerminal { owner, .. } if owner == publish_first
     ));
     assert!(crate::kit::atoms::HITL_PENDING.state().read().is_none());
@@ -147,13 +149,13 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
         request_server
             .send_request("session/request_permission", json!({"sessionId":"s1"}))
             .await
-            .unwrap()
+            .expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully")
     });
     let AcpNotification::RequestPermission {
         owner: transition_first,
         request_id_json,
         ..
-    } = notification_rx.recv().await.unwrap()
+    } = notification_rx.recv().await.expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully")
     else {
         panic!()
     };
@@ -161,13 +163,13 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
     let start = client
         .lifecycle
         .begin_transition(TransitionKind::New, None)
-        .unwrap();
+        .expect("bridge publish and transition are one operation gate order: the begin_transition fixture operation uses valid inputs");
     let transition = client.lifecycle.arm_transition(start.generation);
     crate::kit::session_boundary::project_session_boundary(None);
     client.settle_claims_owned(start.claims).await;
     assert_cancel_response(
         "session/request_permission",
-        transition_first_response.await.unwrap(),
+        transition_first_response.await.expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully"),
     );
     bridge_tx
         .send(AcpEventWithEpoch {
@@ -185,7 +187,7 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
             active_session_id: "s1".into(),
         })
         .await
-        .unwrap();
+        .expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully");
     client.lifecycle.fail_transition(start.generation);
     transition.disarm();
     drop(operation);
@@ -194,7 +196,7 @@ async fn test_bridge_publish_and_transition_are_one_operation_gate_order() {
 
     shutdown.cancel();
     drop(bridge_tx);
-    bridge.await.unwrap();
+    bridge.await.expect("bridge publish and transition are one operation gate order: fixture task and request must complete successfully");
     *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = old_active;
     *crate::kit::atoms::HITL_PENDING.state().write() = old_pending;
     *crate::kit::atoms::POPUP_KIND.state().write() = old_popup;
@@ -218,7 +220,7 @@ fn test_permission_reverse_session_id_matrix_fail_closed() {
         json!({"session_id": "s1"}),
         json!({"sessionId": "s1", "session_id": "s1"}),
     ] {
-        assert_forward(plan_reverse_request(
+        assert_forward(super::pump::plan_reverse_request(
             "session/request_permission",
             RequestId::Number(1),
             params,
@@ -231,7 +233,7 @@ fn test_permission_reverse_session_id_matrix_fail_closed() {
         json!({"sessionId": ""}),
         json!({"sessionId": "s1", "session_id": "s2"}),
     ] {
-        assert_settle(plan_reverse_request(
+        assert_settle(super::pump::plan_reverse_request(
             "session/request_permission",
             RequestId::Number(2),
             params,
@@ -243,7 +245,7 @@ fn test_permission_reverse_session_id_matrix_fail_closed() {
 #[test]
 fn test_elicitation_reverse_session_id_requires_canonical_camel_case() {
     let lifecycle = lifecycle(Some("s1"), true);
-    assert_forward(plan_reverse_request(
+    assert_forward(super::pump::plan_reverse_request(
         "elicitation/create",
         RequestId::Number(1),
         json!({"sessionId": "s1"}),
@@ -254,7 +256,7 @@ fn test_elicitation_reverse_session_id_requires_canonical_camel_case() {
         json!({"sessionId": ""}),
         json!({"session_id": "s1"}),
     ] {
-        assert_settle(plan_reverse_request(
+        assert_settle(super::pump::plan_reverse_request(
             "elicitation/create",
             RequestId::Number(2),
             params,
@@ -266,25 +268,25 @@ fn test_elicitation_reverse_session_id_requires_canonical_camel_case() {
 #[test]
 fn test_reverse_plan_requires_open_prompt_and_exact_current_session() {
     for method in ["session/request_permission", "elicitation/create"] {
-        assert_settle(plan_reverse_request(
+        assert_settle(super::pump::plan_reverse_request(
             method,
             RequestId::Number(1),
             json!({"sessionId": "s1"}),
             &lifecycle(None, false),
         ));
-        assert_settle(plan_reverse_request(
+        assert_settle(super::pump::plan_reverse_request(
             method,
             RequestId::Number(1),
             json!({"sessionId": "s2"}),
             &lifecycle(Some("s1"), true),
         ));
-        assert_settle(plan_reverse_request(
+        assert_settle(super::pump::plan_reverse_request(
             method,
             RequestId::Number(1),
             json!({"sessionId": "s1"}),
             &lifecycle(Some("s1"), false),
         ));
-        assert_forward(plan_reverse_request(
+        assert_forward(super::pump::plan_reverse_request(
             method,
             RequestId::Number(1),
             json!({"sessionId": "s1"}),
@@ -295,14 +297,14 @@ fn test_reverse_plan_requires_open_prompt_and_exact_current_session() {
 
 #[test]
 fn test_reverse_plan_preserves_number_and_string_request_ids() {
-    let settle = plan_reverse_request(
+    let settle = super::pump::plan_reverse_request(
         "session/request_permission",
         RequestId::Number(7),
         json!({"sessionId": "s1"}),
         &lifecycle(None, false),
     );
     let lifecycle = lifecycle(Some("s1"), true);
-    let forward = plan_reverse_request(
+    let forward = super::pump::plan_reverse_request(
         "elicitation/create",
         RequestId::String("7".into()),
         json!({"sessionId": "s1"}),
@@ -317,14 +319,14 @@ fn test_reverse_plan_preserves_number_and_string_request_ids() {
     };
     let claimed = lifecycle
         .claim(&forward.owner, ClaimCause::UserResponse)
-        .unwrap();
+        .expect("reverse plan preserves number and string request ids: the claim fixture operation uses valid inputs");
     assert_eq!(claimed.request_id, RequestId::String("7".into()));
 }
 
 #[test]
 fn test_unknown_reverse_method_is_not_claimed() {
     assert!(
-        plan_reverse_request(
+        super::pump::plan_reverse_request(
             "custom/request",
             RequestId::Number(1),
             json!({"sessionId": "s1"}),
@@ -347,13 +349,15 @@ async fn reverse_response(
 
 fn assert_cancel_response(method: &str, response: Value) {
     if method == "session/request_permission" {
-        let parsed: RequestPermissionResponse = serde_json::from_value(response).unwrap();
+        let parsed: RequestPermissionResponse = serde_json::from_value(response)
+            .expect("assert cancel response: fixture JSON must match the expected schema");
         assert!(matches!(
             parsed.outcome,
             RequestPermissionOutcome::Cancelled
         ));
     } else {
-        let parsed: CreateElicitationResponse = serde_json::from_value(response).unwrap();
+        let parsed: CreateElicitationResponse = serde_json::from_value(response)
+            .expect("assert cancel response: fixture JSON must match the expected schema");
         assert!(matches!(parsed.action, ElicitationAction::Cancel));
     }
 }
@@ -362,7 +366,11 @@ async fn receive_lifecycle_request(
     server: &peri_acp::transport::mpsc::MpscServerTransport,
     expected_method: &str,
 ) -> (RequestId, Value) {
-    let IncomingMessage::Request { id, method, params } = server.recv().await.unwrap() else {
+    let IncomingMessage::Request { id, method, params } = server
+        .recv()
+        .await
+        .expect("receive lifecycle request: fixture task and request must complete successfully")
+    else {
         panic!("expected lifecycle request")
     };
     assert_eq!(method, expected_method);
@@ -378,7 +386,7 @@ async fn test_initial_ensure_and_submit_ensure_share_one_lifecycle_request_both_
     let old_reset = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     let old_fold_overrides = crate::kit::atoms::FOLD_OVERRIDES.state().read().clone();
     for startup_first in [true, false] {
-        let (client_transport, server_transport) = mpsc_transport_pair();
+        let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _notification_tx, _notification_rx) =
             AcpTuiClient::new_interactive(client_transport);
 
@@ -399,9 +407,9 @@ async fn test_initial_ensure_and_submit_ensure_share_one_lifecycle_request_both_
         server_transport
             .send_response(new_id, Ok(json!({"sessionId": "shared"})))
             .await
-            .unwrap();
-        assert_eq!(first_ensure.await.unwrap().unwrap(), "shared");
-        assert_eq!(second_ensure.await.unwrap().unwrap(), "shared");
+            .expect("initial ensure and submit ensure share one lifecycle request both orders: fixture task and request must complete successfully");
+        assert_eq!(first_ensure.await.expect("initial ensure and submit ensure share one lifecycle request both orders: the fixture operation must finish without an inner failure").expect("initial ensure and submit ensure share one lifecycle request both orders: the fixture operation must finish without an inner failure"), "shared");
+        assert_eq!(second_ensure.await.expect("initial ensure and submit ensure share one lifecycle request both orders: the fixture operation must finish without an inner failure").expect("initial ensure and submit ensure share one lifecycle request both orders: the fixture operation must finish without an inner failure"), "shared");
         assert_eq!(client.current_session_id().as_deref(), Some("shared"));
         assert_eq!(
             crate::kit::atoms::ACTIVE_SESSION_ID.state().read().as_str(),
@@ -421,7 +429,7 @@ async fn test_initial_ensure_and_submit_ensure_share_one_lifecycle_request_both_
                 .await
         });
         let IncomingMessage::Request { id, method, params } =
-            server_transport.recv().await.unwrap()
+            server_transport.recv().await.expect("initial ensure and submit ensure share one lifecycle request both orders: fixture task and request must complete successfully")
         else {
             panic!("expected prompt request")
         };
@@ -430,8 +438,8 @@ async fn test_initial_ensure_and_submit_ensure_share_one_lifecycle_request_both_
         server_transport
             .send_response(id, Ok(json!({})))
             .await
-            .unwrap();
-        prompt.await.unwrap().unwrap();
+            .expect("initial ensure and submit ensure share one lifecycle request both orders: fixture task and request must complete successfully");
+        prompt.await.expect("initial ensure and submit ensure share one lifecycle request both orders: fixture task and request must complete successfully").expect("initial ensure and submit ensure share one lifecycle request both orders: fixture task and request must complete successfully");
     }
     *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = old_active;
     *crate::kit::atoms::VIEW_MODELS.state().write() = old_view;
@@ -448,7 +456,7 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
     let old_reset = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     let old_fold_overrides = crate::kit::atoms::FOLD_OVERRIDES.state().read().clone();
     for submit_first in [true, false] {
-        let (client_transport, server_transport) = mpsc_transport_pair();
+        let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
         let (client, _notification_tx, _notification_rx) =
             AcpTuiClient::new_interactive(client_transport);
         client.reserve_startup_restore().await;
@@ -461,7 +469,7 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
                 let _ = first_started_tx.send(());
                 submit_client.ensure_session("/tmp", None).await
             });
-            first_started_rx.await.unwrap();
+            first_started_rx.await.expect("startup restore reservation wins submit ensure both orders: fixture task and request must complete successfully");
             let load = tokio::spawn(async move {
                 load_client
                     .load_startup_session("restored", "/tmp", None)
@@ -475,7 +483,7 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
                     .load_startup_session("restored", "/tmp", None)
                     .await
             });
-            first_started_rx.await.unwrap();
+            first_started_rx.await.expect("startup restore reservation wins submit ensure both orders: fixture task and request must complete successfully");
             let submit =
                 tokio::spawn(async move { submit_client.ensure_session("/tmp", None).await });
             (submit, load)
@@ -485,9 +493,9 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
         server_transport
             .send_response(load_id, Ok(json!({})))
             .await
-            .unwrap();
-        assert_eq!(load.await.unwrap().unwrap(), "restored");
-        assert_eq!(submit.await.unwrap().unwrap(), "restored");
+            .expect("startup restore reservation wins submit ensure both orders: fixture task and request must complete successfully");
+        assert_eq!(load.await.expect("startup restore reservation wins submit ensure both orders: the fixture operation must finish without an inner failure").expect("startup restore reservation wins submit ensure both orders: the fixture operation must finish without an inner failure"), "restored");
+        assert_eq!(submit.await.expect("startup restore reservation wins submit ensure both orders: the fixture operation must finish without an inner failure").expect("startup restore reservation wins submit ensure both orders: the fixture operation must finish without an inner failure"), "restored");
         assert_eq!(client.current_session_id().as_deref(), Some("restored"));
         assert_eq!(
             crate::kit::atoms::ACTIVE_SESSION_ID.state().read().as_str(),
@@ -509,8 +517,8 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
         server_transport
             .send_response(prompt_id, Ok(json!({})))
             .await
-            .unwrap();
-        prompt.await.unwrap().unwrap();
+            .expect("startup restore reservation wins submit ensure both orders: fixture task and request must complete successfully");
+        prompt.await.expect("startup restore reservation wins submit ensure both orders: fixture task and request must complete successfully").expect("startup restore reservation wins submit ensure both orders: fixture task and request must complete successfully");
     }
     *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = old_active;
     *crate::kit::atoms::VIEW_MODELS.state().write() = old_view;
@@ -526,7 +534,7 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
 #[serial]
 async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
     // Arrange
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     let create_client = client.clone();
     let create = tokio::spawn(async move { create_client.ensure_session("/tmp", None).await });
@@ -534,8 +542,8 @@ async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
     server_transport
         .send_response(new_id, Ok(json!({"sessionId": "old"})))
         .await
-        .unwrap();
-    assert_eq!(create.await.unwrap().unwrap(), "old");
+        .expect("ordinary load reservation blocks prompt until target commits: fixture task and request must complete successfully");
+    assert_eq!(create.await.expect("ordinary load reservation blocks prompt until target commits: the fixture operation must finish without an inner failure").expect("ordinary load reservation blocks prompt until target commits: the fixture operation must finish without an inner failure"), "old");
     let reservation = client.reserve_session_load();
     let submit_client = client.clone();
     let submit = tokio::spawn(async move {
@@ -563,14 +571,14 @@ async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
     server_transport
         .send_response(close_id, Ok(json!({})))
         .await
-        .unwrap();
+        .expect("ordinary load reservation blocks prompt until target commits: fixture task and request must complete successfully");
     let (load_id, load_params) = receive_lifecycle_request(&server_transport, "session/load").await;
     assert_eq!(load_params["sessionId"], "target");
     server_transport
         .send_response(load_id, Ok(json!({})))
         .await
-        .unwrap();
-    assert_eq!(load.await.unwrap().unwrap(), "target");
+        .expect("ordinary load reservation blocks prompt until target commits: fixture task and request must complete successfully");
+    assert_eq!(load.await.expect("ordinary load reservation blocks prompt until target commits: the fixture operation must finish without an inner failure").expect("ordinary load reservation blocks prompt until target commits: the fixture operation must finish without an inner failure"), "target");
     // Act
     let (prompt_id, prompt_params) =
         receive_lifecycle_request(&server_transport, "session/prompt").await;
@@ -579,13 +587,14 @@ async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
     server_transport
         .send_response(prompt_id, Ok(json!({})))
         .await
-        .unwrap();
-    submit.await.unwrap().unwrap();
+        .expect("ordinary load reservation blocks prompt until target commits: fixture task and request must complete successfully");
+    submit.await.expect("ordinary load reservation blocks prompt until target commits: fixture task and request must complete successfully").expect("ordinary load reservation blocks prompt until target commits: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
+#[serial]
 async fn test_multiple_load_reservations_release_only_after_last_guard() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     let create_client = client.clone();
     let create = tokio::spawn(async move { create_client.ensure_session("/tmp", None).await });
@@ -593,8 +602,8 @@ async fn test_multiple_load_reservations_release_only_after_last_guard() {
     server_transport
         .send_response(new_id, Ok(json!({"sessionId": "old"})))
         .await
-        .unwrap();
-    create.await.unwrap().unwrap();
+        .expect("multiple load reservations release only after last guard: fixture task and request must complete successfully");
+    create.await.expect("multiple load reservations release only after last guard: fixture task and request must complete successfully").expect("multiple load reservations release only after last guard: fixture task and request must complete successfully");
 
     let first = client.reserve_session_load();
     let second = client.reserve_session_load();
@@ -621,13 +630,14 @@ async fn test_multiple_load_reservations_release_only_after_last_guard() {
     server_transport
         .send_response(prompt_id, Ok(json!({})))
         .await
-        .unwrap();
-    prompt.await.unwrap().unwrap();
+        .expect("multiple load reservations release only after last guard: fixture task and request must complete successfully");
+    prompt.await.expect("multiple load reservations release only after last guard: fixture task and request must complete successfully").expect("multiple load reservations release only after last guard: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
+#[serial]
 async fn test_failed_load_dispatch_releases_reservation() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     let create_client = client.clone();
     let create = tokio::spawn(async move { create_client.ensure_session("/tmp", None).await });
@@ -635,8 +645,8 @@ async fn test_failed_load_dispatch_releases_reservation() {
     server_transport
         .send_response(new_id, Ok(json!({"sessionId": "old"})))
         .await
-        .unwrap();
-    create.await.unwrap().unwrap();
+        .expect("failed load dispatch releases reservation: fixture task and request must complete successfully");
+    create.await.expect("failed load dispatch releases reservation: fixture task and request must complete successfully").expect("failed load dispatch releases reservation: fixture task and request must complete successfully");
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
         crate::kit::thread_load_consumer::ThreadLoadRequest,
@@ -661,103 +671,12 @@ async fn test_failed_load_dispatch_releases_reservation() {
     server_transport
         .send_response(prompt_id, Ok(json!({})))
         .await
-        .unwrap();
-    prompt.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn test_pump_cancels_no_active_reverse_requests() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
-    client.spawn_pump(notification_tx);
-    let server = Arc::new(server_transport);
-    for method in ["session/request_permission", "elicitation/create"] {
-        assert_cancel_response(
-            method,
-            reverse_response(server.clone(), method, json!({"sessionId": "s1"})).await,
-        );
-        assert!(matches!(
-            notification_rx.try_recv(),
-            Err(TryRecvError::Empty)
-        ));
-    }
-}
-
-#[tokio::test]
-async fn test_pump_cancels_snake_only_elicitation_without_ui_event() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
-    client.lifecycle.force_stable("s1", true);
-    client.spawn_pump(notification_tx);
-    let response = reverse_response(
-        Arc::new(server_transport),
-        "elicitation/create",
-        json!({"session_id": "s1"}),
-    )
-    .await;
-    assert_cancel_response("elicitation/create", response);
-    assert!(matches!(
-        notification_rx.try_recv(),
-        Err(TryRecvError::Empty)
-    ));
-}
-
-#[tokio::test]
-async fn test_pump_forwards_registered_owner_and_response_claims_once() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
-    client.lifecycle.force_stable("s1", true);
-    client.spawn_pump(notification_tx);
-    let server = Arc::new(server_transport);
-    let task_server = server.clone();
-    let request = tokio::spawn(async move {
-        task_server
-            .send_request(
-                "session/request_permission",
-                json!({"sessionId": "s1", "marker": "permission"}),
-            )
-            .await
-            .unwrap()
-    });
-    let AcpNotification::RequestPermission { owner, params, .. } =
-        notification_rx.recv().await.unwrap()
-    else {
-        panic!()
-    };
-    assert_eq!(params["marker"], "permission");
-    assert!(
-        client
-            .respond_interaction(&owner, json!({"done": true}), "done".into())
-            .await
-            .unwrap()
-    );
-    assert!(
-        !client
-            .respond_interaction(&owner, json!({"done": false}), "late".into())
-            .await
-            .unwrap()
-    );
-    assert_eq!(request.await.unwrap(), json!({"done": true}));
-}
-
-#[tokio::test]
-async fn test_pump_cancels_exact_request_when_notification_receiver_is_dropped() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notification_tx, notification_rx) = AcpTuiClient::new(client_transport);
-    client.lifecycle.force_stable("s1", true);
-    drop(notification_rx);
-    client.spawn_pump(notification_tx);
-    let response = reverse_response(
-        Arc::new(server_transport),
-        "session/request_permission",
-        json!({"sessionId": "s1"}),
-    )
-    .await;
-    assert_cancel_response("session/request_permission", response);
+        .expect("failed load dispatch releases reservation: fixture task and request must complete successfully");
+    prompt.await.expect("failed load dispatch releases reservation: fixture task and request must complete successfully").expect("failed load dispatch releases reservation: fixture task and request must complete successfully");
 }
 
 async fn cancel_drains_kind_before_notification(method: &'static str) {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s1", true);
     client.spawn_pump(notification_tx);
@@ -767,18 +686,20 @@ async fn cancel_drains_kind_before_notification(method: &'static str) {
         request_server
             .send_request(method, json!({"sessionId":"s1"}))
             .await
-            .unwrap()
+            .expect("cancel drains kind before notification: fixture task and request must complete successfully")
     });
-    let notification = notification_rx.recv().await.unwrap();
+    let notification = notification_rx.recv().await.expect("cancel drains kind before notification: fixture task and request must complete successfully");
     assert!(matches!(
         notification,
         AcpNotification::RequestPermission { .. } | AcpNotification::Elicitation { .. }
     ));
     let cancel_client = client.clone();
-    let cancel = tokio::spawn(async move { cancel_client.cancel().await.unwrap() });
-    let response = request.await.unwrap();
+    let cancel = tokio::spawn(async move {
+        cancel_client.cancel().await.expect("cancel drains kind before notification: fixture task and request must complete successfully")
+    });
+    let response = request.await.expect("cancel drains kind before notification: fixture task and request must complete successfully");
     assert_cancel_response(method, response);
-    let message = server.recv().await.unwrap();
+    let message = server.recv().await.expect("cancel drains kind before notification: fixture task and request must complete successfully");
     let IncomingMessage::Notification {
         method: notification_method,
         ..
@@ -787,83 +708,7 @@ async fn cancel_drains_kind_before_notification(method: &'static str) {
         panic!()
     };
     assert_eq!(notification_method, "session/cancel");
-    cancel.await.unwrap();
-}
-
-#[tokio::test]
-async fn test_cancel_drains_permission_before_turn_terminal() {
-    cancel_drains_kind_before_notification("session/request_permission").await;
-}
-
-#[tokio::test]
-async fn test_cancel_drains_elicitation_before_turn_terminal() {
-    cancel_drains_kind_before_notification("elicitation/create").await;
-}
-
-#[tokio::test]
-async fn test_new_immediate_post_response_notification_buffered_until_commit() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
-    client.spawn_pump(notification_tx);
-    let (commit_hook_tx, mut commit_hook_rx) = tokio::sync::mpsc::unbounded_channel();
-    client.install_transition_commit_hook(commit_hook_tx);
-    let server = Arc::new(server_transport);
-    let server_task = server.clone();
-    let serve = tokio::spawn(async move {
-        let IncomingMessage::Request { id, method, .. } = server_task.recv().await.unwrap() else {
-            panic!()
-        };
-        assert_eq!(method, "session/new");
-        server_task
-            .send_notification("session/update", json!({"sessionId":"old","update":{}}))
-            .await
-            .unwrap();
-        server_task
-            .send_response(id, Ok(json!({"sessionId":"new"})))
-            .await
-            .unwrap();
-    });
-    let new_client = client.clone();
-    let new_session = tokio::spawn(async move { new_client.new_session("/tmp", None).await });
-    let release_commit = commit_hook_rx.recv().await.unwrap();
-    serve.await.unwrap();
-
-    // The lifecycle response has arrived, but commit is causally paused. FIFO on
-    // the real MPSC transport makes the reverse request below an acknowledgement
-    // that the preceding ordinary notification was routed while Transitioning.
-    server
-        .send_notification(
-            "session/update",
-            json!({"sessionId":"new","update":{"marker":"new"}}),
-        )
-        .await
-        .unwrap();
-    let reverse_server = server.clone();
-    let reverse = tokio::spawn(async move {
-        reverse_server
-            .send_request("session/request_permission", json!({"sessionId":"new"}))
-            .await
-            .unwrap()
-    });
-    assert_cancel_response("session/request_permission", reverse.await.unwrap());
-    assert!(matches!(
-        notification_rx.try_recv(),
-        Err(TryRecvError::Empty)
-    ));
-
-    release_commit.send(()).unwrap();
-    assert_eq!(new_session.await.unwrap().unwrap(), "new");
-    let AcpNotification::SessionUpdate { session_id, params } =
-        notification_rx.recv().await.unwrap()
-    else {
-        panic!()
-    };
-    assert_eq!(session_id, "new");
-    assert_eq!(params["update"]["marker"], "new");
-    assert!(matches!(
-        notification_rx.try_recv(),
-        Err(TryRecvError::Empty)
-    ));
+    cancel.await.expect("cancel drains kind before notification: fixture task and request must complete successfully");
 }
 
 fn command_update(names: &[&str]) -> Value {
@@ -893,7 +738,12 @@ async fn next_command_names(
         .as_array()
         .expect("available commands")
         .iter()
-        .map(|command| command["name"].as_str().unwrap().to_owned())
+        .map(|command| {
+            command["name"]
+                .as_str()
+                .expect("next command names: fixture must have the expected variant")
+                .to_owned()
+        })
         .collect()
 }
 
@@ -901,8 +751,9 @@ async fn next_command_names(
 /// 必须继续排队。旧实现立即 Forward 新帧，再 flush 旧帧，导致启动后 `/` 列表
 /// 被不含 skill 的旧快照覆盖。
 #[tokio::test]
+#[serial]
 async fn test_new_session_flushes_notifications_in_wire_order_across_initialization() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.user_input_queue.store(true, Ordering::Release);
     client.spawn_pump(notification_tx);
@@ -910,7 +761,7 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
 
     let creator = client.clone();
     let new_session = tokio::spawn(async move { creator.new_session("/tmp", None).await });
-    let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
+    let IncomingMessage::Request { id, method, .. } = server.recv().await.expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully") else {
         panic!()
     };
     assert_eq!(method, "session/new");
@@ -919,13 +770,13 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
     server
         .send_notification("session/update", command_update(&["help"]))
         .await
-        .unwrap();
+        .expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully");
     // 未路由的通知作为屏障：它被直接投递，收到即证明前一条 update 已经过
     // route_ordinary，避免测试在竞态下空转通过。
     server
         .send_notification("test/unbuffered-barrier", json!({}))
         .await
-        .unwrap();
+        .expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully");
     assert!(matches!(
         notification_rx.recv().await,
         Some(AcpNotification::Other { .. })
@@ -933,13 +784,13 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
     server
         .send_response(id, Ok(json!({"sessionId": "new"})))
         .await
-        .unwrap();
+        .expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully");
 
     let IncomingMessage::Request {
         id: snapshot_id,
         method,
         ..
-    } = server.recv().await.unwrap()
+    } = server.recv().await.expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully")
     else {
         panic!()
     };
@@ -949,11 +800,11 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
     server
         .send_notification("session/update", command_update(&["help", "fix-bug"]))
         .await
-        .unwrap();
+        .expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully");
     server
         .send_notification("test/unbuffered-barrier", json!({}))
         .await
-        .unwrap();
+        .expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully");
     assert!(matches!(
         notification_rx.recv().await,
         Some(AcpNotification::Other { .. })
@@ -964,9 +815,9 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
             Ok(json!({"sessionId":"new","generation":"g","revision":1,"items":[]})),
         )
         .await
-        .unwrap();
+        .expect("new session flushes notifications in wire order across initialization: fixture task and request must complete successfully");
 
-    assert_eq!(new_session.await.unwrap().unwrap(), "new");
+    assert_eq!(new_session.await.expect("new session flushes notifications in wire order across initialization: the fixture operation must finish without an inner failure").expect("new session flushes notifications in wire order across initialization: the fixture operation must finish without an inner failure"), "new");
     assert_eq!(
         next_command_names(&mut notification_rx).await,
         vec!["help".to_owned()],
@@ -984,60 +835,8 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
     client.close();
 }
 
-/// 服务端通过 `$/cancel_request` 撤销挂起 elicitation（提问超时）：
-/// 客户端按 wire id 认领，结算为 `Expired(ServerCancelled)`，供 bridge 关闭
-/// 问答面板并恢复普通输入。
-#[tokio::test]
-async fn test_server_cancel_request_expires_pending_elicitation() {
-    use crate::acp_client::InteractionExpiryReason;
-    use tokio_util::sync::CancellationToken;
-
-    let (client_transport, server_transport) = mpsc_transport_pair();
-    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
-    client.lifecycle.force_stable("s1", true);
-    client.spawn_pump(notification_tx);
-    let server = Arc::new(server_transport);
-
-    let cancellation = CancellationToken::new();
-    let request_server = server.clone();
-    let request_cancellation = cancellation.clone();
-    let request = tokio::spawn(async move {
-        request_server
-            .send_cancellable_request(
-                "elicitation/create",
-                json!({"sessionId":"s1"}),
-                request_cancellation,
-            )
-            .await
-    });
-
-    let AcpNotification::Elicitation { owner, .. } = notification_rx.recv().await.unwrap() else {
-        panic!("expected elicitation request");
-    };
-    cancellation.cancel();
-
-    let error = request
-        .await
-        .unwrap()
-        .expect_err("cancelled request must fail");
-    assert_eq!(error.code, -32800);
-
-    let notification = notification_rx.recv().await.unwrap();
-    let AcpNotification::InteractionTerminal {
-        owner: ended,
-        outcome,
-    } = notification
-    else {
-        panic!("expected interaction terminal");
-    };
-    assert_eq!(ended, owner);
-    assert_eq!(
-        outcome,
-        InteractionUiOutcome::Expired {
-            reason: InteractionExpiryReason::ServerCancelled,
-        }
-    );
-}
-
 #[path = "client_reverse_abort_test.rs"]
 mod abort_tests;
+
+#[path = "client_reverse_test/pump_settlement.rs"]
+mod pump_settlement;

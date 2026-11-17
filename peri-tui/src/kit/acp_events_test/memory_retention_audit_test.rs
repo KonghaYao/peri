@@ -1,10 +1,20 @@
 //! Regression evidence through the real bridge; synthetic provider events, not RSS.
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::FoldKey;
+use super::FoldState;
+use super::TuiReasoningChunk;
+use super::TuiRenderUnit;
+use super::TuiTextChunk;
+use super::TuiToolStarted;
+use super::json;
+use super::serial;
+
 use crate::kit::history_window::{HistoryWindow, HistoryWindowConfig, WindowIdentity};
 use std::sync::Arc;
 
 fn start(state: &mut BridgeState, id: &str) {
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         state,
         &AcpEventData::SubagentStarted {
             agent_id: id.into(),
@@ -15,7 +25,7 @@ fn start(state: &mut BridgeState, id: &str) {
     );
 }
 fn stop(state: &mut BridgeState, id: &str) {
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         state,
         &AcpEventData::SubagentStopped {
             agent_id: id.into(),
@@ -25,7 +35,7 @@ fn stop(state: &mut BridgeState, id: &str) {
     );
 }
 fn text(state: &mut BridgeState, id: &str, message: &str, payload: String) {
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: payload,
@@ -36,14 +46,19 @@ fn text(state: &mut BridgeState, id: &str, message: &str, payload: String) {
 }
 fn evidence(name: &str, value: serde_json::Value) {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/memory-regression");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(name), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    std::fs::create_dir_all(&dir)
+        .expect("evidence: isolated fixture workspace must remain accessible");
+    std::fs::write(
+        dir.join(name),
+        serde_json::to_vec_pretty(&value).expect("evidence: fixture must serialize to JSON"),
+    )
+    .expect("evidence: fixture must serialize to JSON");
 }
 
 #[test]
 #[serial]
 fn memory_retention_regression_duplicate_stop_keeps_frozen_body() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     start(&mut state, "once");
     text(&mut state, "once", "message", "final child body".into());
     stop(&mut state, "once");
@@ -66,7 +81,7 @@ fn memory_retention_regression_duplicate_stop_keeps_frozen_body() {
 #[test]
 #[serial]
 fn memory_retention_regression_long_parent_releases_actual_child_allocations() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let mut first_body = None;
     let mut first_fold = None;
     let mut samples = Vec::new();
@@ -121,7 +136,7 @@ fn memory_retention_regression_long_parent_releases_actual_child_allocations() {
         !FOLD_OVERRIDES
             .state()
             .read()
-            .contains_key(&first_fold.unwrap()),
+            .contains_key(&first_fold.expect("memory retention regression long parent releases actual child allocations: the fixture establishes first_fold before this assertion")),
         "expired preview must release its fold directory key"
     );
     assert!(state.memory_snapshot().unique_reserved_bytes < 8 * 1024 * 1024);
@@ -135,7 +150,7 @@ fn memory_retention_regression_long_parent_releases_actual_child_allocations() {
 #[test]
 #[serial]
 fn memory_retention_regression_committed_preview_directory_is_bounded() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.active_session_id = "memory-regression-window".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state.window.begin_window(WindowIdentity::new(
@@ -147,7 +162,7 @@ fn memory_retention_regression_committed_preview_directory_is_bounded() {
     for index in 0..1000 {
         let id = format!("window-child-{index}");
         start(&mut state, &id);
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ReasoningChunk(TuiReasoningChunk {
                 text: "思考".repeat(32768),
@@ -156,7 +171,7 @@ fn memory_retention_regression_committed_preview_directory_is_bounded() {
             }),
         );
         stop(&mut state, &id);
-        dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+        super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     }
     let groups = state
         .committed
@@ -181,14 +196,14 @@ fn memory_retention_regression_committed_preview_directory_is_bounded() {
 #[test]
 #[serial]
 fn memory_retention_regression_unknown_child_never_enters_root() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     text(
         &mut state,
         "evicted-child",
         "old-message",
         "late child text".into(),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(TuiReasoningChunk {
             text: "late reasoning".into(),
@@ -196,7 +211,7 @@ fn memory_retention_regression_unknown_child_never_enters_root() {
             agent_id: Some("evicted-child".into()),
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
             tool_id: "old-tool".into(),
@@ -217,7 +232,7 @@ fn memory_retention_regression_unknown_child_never_enters_root() {
 #[test]
 #[serial]
 fn memory_retention_regression_many_small_message_ids_are_bounded() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     start(&mut state, "many-members");
     for index in 0..5000 {
         text(
@@ -244,12 +259,12 @@ fn memory_retention_regression_many_small_message_ids_are_bounded() {
 #[test]
 #[serial]
 fn memory_retention_regression_cancelled_todo_inputs_are_bounded() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let input = json!({"todos":[{"content":"todo ".repeat(512),"status":"pending","activeForm":"working"}]});
     for index in 0..1000 {
         let id = format!("todo-child-{index}");
         start(&mut state, &id);
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ToolStarted(TuiToolStarted {
                 tool_id: format!("todo-{index}"),
@@ -274,3 +289,5 @@ fn memory_retention_regression_cancelled_todo_inputs_are_bounded() {
     );
     crate::kit::acp_events::push_view_models_for_reset();
 }
+
+use crate::kit::atoms::FOLD_OVERRIDES;

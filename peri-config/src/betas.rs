@@ -7,7 +7,8 @@
 //! - 投影：由**合并后 settings** 派生；未覆盖与未知 id 一律 false。
 //!
 //! 类型 [`BetaFlags`] 定义在契约 crate（`peri-acp-types`）：它同时是会话冻结载体
-//! （`FrozenContext`）的成员，消费方（Bash / Agent 装配面）不重新解析 flag 语义。
+//! （`FrozenContext`）的成员，消费方不重新解析 flag 语义。当前 ACP 注册表为空，
+//! 仅 TUI 本地键 `history-window-v1` 被 [`is_known`] 接受。
 
 use crate::app::PeriConfig;
 
@@ -24,6 +25,7 @@ pub const HISTORY_WINDOW_V1: &str = "history-window-v1";
 pub const HISTORY_V2: &str = "history-v2";
 
 /// beta 键是否被接受：ACP 注册表 + 本 crate 的 TUI 本地 beta。
+#[must_use]
 pub fn is_known(id: &str) -> bool {
     id == HISTORY_WINDOW_V1 || id == HISTORY_V2 || peri_acp_types::beta_flags::find(id).is_some()
 }
@@ -55,6 +57,7 @@ pub(crate) fn resolve(global: &PeriConfig, merged: &PeriConfig) -> BetaFlags {
 /// [`BetaFlagOrigin::Global`] 标注——它只出现在无来源层对照的遗留/测试构造路径，
 /// 不影响有效值与消费语义。生产新建会话走 [`crate::settings::ConfigSource::beta_flags`]
 /// （由快照投影，来源层可判）。
+#[must_use]
 pub fn from_merged(merged: &PeriConfig) -> BetaFlags {
     resolve(merged, merged)
 }

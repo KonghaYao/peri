@@ -88,7 +88,7 @@ pub(crate) fn completed_event(text: impl Into<String>) -> ModelResult<ModelStrea
 }
 
 pub(crate) fn response_with_text(text: impl Into<String>) -> ModelResponse {
-    ModelResponse::new(
+    ModelResponse::try_new(
         peri_model::ModelMessage::assistant_text(text),
         StopReason::EndTurn,
         None,

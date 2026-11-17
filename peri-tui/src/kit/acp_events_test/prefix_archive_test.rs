@@ -1,6 +1,9 @@
 //! F06-b：运行中 SubAgent 不再让整个 turn 常驻；稳定前缀在 flush 边界归档。
 
-use super::*;
+use super::AcpEventData;
+use super::SessionPhase;
+use super::json;
+use super::serial;
 
 fn todo_start() -> AcpEventData {
     AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
@@ -28,10 +31,10 @@ fn todo_end() -> AcpEventData {
 #[test]
 #[serial]
 fn flush_archives_stable_prefix_while_subagent_runs() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.phase = SessionPhase::PromptRunning;
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "before child".into(),
@@ -39,12 +42,12 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(&mut state, &todo_start());
-    dispatch_and_notify(&mut state, &todo_end());
+    super::dispatch_and_notify(&mut state, &todo_start());
+    super::dispatch_and_notify(&mut state, &todo_end());
     assert!(state.last_successful_todos.is_some());
     let baseline = state.todo_baseline_sequence;
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "child".into(),
@@ -53,7 +56,7 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
             parent_tool_call_id: None,
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
 
     assert!(state.current_turn.has_running_subagent());
     assert_eq!(
@@ -73,11 +76,11 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
     );
 
     // 重复 flush 不重复归档。
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(state.committed.len(), 2);
 
     // 已归档 TodoWrite 的迟到结束事件：不 panic、不推进基线、不重建卡片。
-    dispatch_and_notify(&mut state, &todo_end());
+    super::dispatch_and_notify(&mut state, &todo_end());
     assert_eq!(
         state.todo_baseline_sequence, baseline,
         "迟到事件不得推进 Todo 基线"
@@ -86,7 +89,7 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
     assert!(state.current_turn.tool_cards.is_empty());
 
     // 运行中子 Agent 的路由窗口仍然有效。
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: " still here".into(),
@@ -100,7 +103,7 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
         " still here"
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "child".into(),
@@ -108,7 +111,7 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
             is_error: false,
         },
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert!(state.current_turn.is_empty());
     assert_eq!(state.committed.len(), 3, "停止后的分组完成归档");
 }

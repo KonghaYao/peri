@@ -2,7 +2,10 @@ use std::path::Path;
 
 use peri_config::{ConfigurationInputs, ConfigurationScope, ConfigurationSnapshot};
 
-use super::*;
+use super::HashMap;
+use super::McpCachePolicy;
+use super::McpConfigError;
+use super::MCP_CACHE_ENV;
 
 fn snapshot_for(
     cwd: &Path,
@@ -11,7 +14,7 @@ fn snapshot_for(
     project: &str,
     environment: HashMap<String, String>,
 ) -> ConfigurationSnapshot {
-    let scope = ConfigurationScope::new(cwd.to_path_buf(), global_path.to_path_buf()).unwrap();
+    let scope = ConfigurationScope::try_new(cwd.to_path_buf(), global_path.to_path_buf()).unwrap();
     ConfigurationSnapshot::resolve(
         scope,
         ConfigurationInputs {
@@ -22,6 +25,41 @@ fn snapshot_for(
         },
     )
     .unwrap()
+}
+
+#[test]
+fn frozen_assembly_mode_overrides_current_snapshot_mode() {
+    use peri_acp_types::builtin_mcp::BuiltinAssemblyMode;
+
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_home = temp.path().join("claude");
+    let global_path = temp.path().join("settings.json");
+    for (current, frozen, expected, absent) in [
+        ("v5", BuiltinAssemblyMode::LegacyInstances, "cron", "peri"),
+        ("legacy", BuiltinAssemblyMode::SingleExit, "peri", "cron"),
+    ] {
+        let snapshot = snapshot_for(
+            &cwd,
+            &global_path,
+            "{}",
+            "{}",
+            HashMap::from([("PERI_MCP_BUILTIN".to_owned(), current.to_owned())]),
+        );
+        let (config, _) = super::load_merged_config_from_snapshot_with_policy(
+            &cwd,
+            &claude_home,
+            &snapshot,
+            true,
+            false,
+            false,
+            Some(frozen),
+        )
+        .unwrap();
+        assert!(config.mcp_servers.contains_key(expected));
+        assert!(!config.mcp_servers.contains_key(absent));
+    }
 }
 
 fn install_enabled_plugin(claude_home: &Path) {
@@ -86,7 +124,7 @@ fn deployment_can_skip_plugin_discovery_and_builtin_overlay() {
         "{}",
         HashMap::new(),
     );
-    let (config, plugin_sources) = load_merged_config_from_snapshot_with_capabilities(
+    let (config, plugin_sources) = super::load_merged_config_from_snapshot_with_capabilities(
         &cwd,
         &claude_home,
         &snapshot,
@@ -114,7 +152,7 @@ fn failed_session_plugin_preparation_skips_valid_plugin_mcp_servers() {
         HashMap::new(),
     );
     let pool = crate::mcp::McpClientPool::new_pending();
-    let (enabled, _) = load_merged_config_from_snapshot_with_capabilities(
+    let (enabled, _) = super::load_merged_config_from_snapshot_with_capabilities(
         &cwd,
         &claude_home,
         &snapshot,
@@ -129,7 +167,7 @@ fn failed_session_plugin_preparation_skips_valid_plugin_mcp_servers() {
         .any(|name| name.starts_with("plugin:")));
 
     pool.set_plugin_source_failed(true).unwrap();
-    let (degraded, sources) = load_merged_config_from_snapshot_with_capabilities(
+    let (degraded, sources) = super::load_merged_config_from_snapshot_with_capabilities(
         &cwd,
         &claude_home,
         &snapshot,
@@ -161,7 +199,7 @@ fn snapshot_loader_accepts_the_same_directory_with_canonical_or_alternate_spelli
     );
     std::fs::write(&global_path, "invalid replacement settings").unwrap();
     for spelling in [cwd.canonicalize().unwrap(), cwd.join("nested/..")] {
-        let (config, _) = load_merged_config_from_snapshot_with_capabilities(
+        let (config, _) = super::load_merged_config_from_snapshot_with_capabilities(
             &spelling,
             &temp.path().join("claude"),
             &snapshot,
@@ -178,7 +216,7 @@ fn snapshot_loader_accepts_the_same_directory_with_canonical_or_alternate_spelli
     let other_cwd = temp.path().join("other");
     std::fs::create_dir_all(&other_cwd).unwrap();
     assert!(matches!(
-        load_merged_config_from_snapshot_with_capabilities(
+        super::load_merged_config_from_snapshot_with_capabilities(
             &other_cwd,
             &temp.path().join("claude"),
             &snapshot,
@@ -197,7 +235,7 @@ fn snapshot_loader_rejects_a_mismatched_workspace_before_loading_plugins() {
     let other_cwd = temp.path().join("other");
     let global_path = temp.path().join("settings.json");
     let snapshot = snapshot_for(&cwd, &global_path, "{}", "{}", HashMap::new());
-    let error = load_merged_config_from_snapshot(
+    let error = super::load_merged_config_from_snapshot(
         &other_cwd,
         &temp.path().join("missing-plugins"),
         &snapshot,
@@ -273,7 +311,7 @@ fn snapshot_loader_process_probe() {
     std::fs::write(&project_path, "invalid-project-after-snapshot").unwrap();
 
     let (config, plugin_sources) =
-        load_merged_config_from_snapshot(&cwd, &claude_home, &snapshot).unwrap();
+        super::load_merged_config_from_snapshot(&cwd, &claude_home, &snapshot).unwrap();
     assert_eq!(config.mcp_cache, Some(false));
     assert_eq!(
         McpCachePolicy::from_setting(config.mcp_cache),
@@ -299,7 +337,7 @@ fn snapshot_loader_process_probe() {
     );
     assert!(!config.mcp_servers.contains_key("workspace"));
 
-    let bare = load_bare_config_from_snapshot(&snapshot).unwrap();
+    let bare = super::load_bare_config_from_snapshot(&snapshot).unwrap();
     assert_eq!(bare.mcp_cache, Some(false));
     assert!(bare.mcp_servers.is_empty());
 
@@ -313,9 +351,18 @@ fn snapshot_loader_process_probe() {
             ("PERI_MCP_BUILTIN".to_string(), "on".to_string()),
         ]),
     );
-    let enabled_bare = load_bare_config_from_snapshot(&enabled_snapshot).unwrap();
-    assert!(enabled_bare.mcp_servers.contains_key("workspace"));
+    let enabled_bare = super::load_bare_config_from_snapshot(&enabled_snapshot).unwrap();
+    assert!(enabled_bare.mcp_servers.contains_key("peri"));
     assert_eq!(enabled_bare.mcp_servers.len(), 1);
+    assert_eq!(
+        enabled_bare.mcp_servers["peri"]
+            .env
+            .as_ref()
+            .and_then(|env| env.get("PERI_MCP_V5_CAPABILITIES"))
+            .map(String::as_str),
+        Some("workspace"),
+        "bare 只启用 workspace 能力"
+    );
 }
 
 /// M6：插件来源闭合位在 MCP 合并路径上的真实回归。
@@ -338,7 +385,7 @@ fn closed_plugin_face_skips_plugin_mcp_merging() {
         HashMap::new(),
     );
 
-    let (open, open_sources) = load_merged_config_from_snapshot_with_capabilities(
+    let (open, open_sources) = super::load_merged_config_from_snapshot_with_capabilities(
         &cwd,
         &claude_home,
         &snapshot,
@@ -350,7 +397,7 @@ fn closed_plugin_face_skips_plugin_mcp_merging() {
     assert!(open.mcp_servers.contains_key("plugin:sample:unique"));
     assert!(open_sources.contains_key("plugin:sample:unique"));
 
-    let (closed, closed_sources) = load_merged_config_from_snapshot_with_capabilities(
+    let (closed, closed_sources) = super::load_merged_config_from_snapshot_with_capabilities(
         &cwd,
         &claude_home,
         &snapshot,
@@ -374,7 +421,7 @@ fn closed_plugin_face_skips_plugin_mcp_merging() {
     // 非法插件 MCP 声明不得阻止其他来源启动；关闭位下连目录也不读取。
     let poisoned = temp.path().join("poisoned-claude");
     poison_plugin_mcp_config(&poisoned);
-    let (degraded, sources) = load_merged_config_from_snapshot_with_capabilities(
+    let (degraded, sources) = super::load_merged_config_from_snapshot_with_capabilities(
         &cwd, &poisoned, &snapshot, false, true, false,
     )
     .unwrap();
@@ -384,7 +431,7 @@ fn closed_plugin_face_skips_plugin_mcp_merging() {
         .keys()
         .any(|name| name.starts_with("plugin:")));
     assert!(sources.is_empty());
-    assert!(load_merged_config_from_snapshot_with_capabilities(
+    assert!(super::load_merged_config_from_snapshot_with_capabilities(
         &cwd, &poisoned, &snapshot, false, true, true,
     )
     .is_ok());

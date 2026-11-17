@@ -1,13 +1,12 @@
-use super::*;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    task::JoinSet,
-};
+use super::{ClientStatus, McpClientPool, McpInitStatus, Path};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tokio::task::JoinSet;
 
 async fn read_mcp_request(socket: &mut TcpStream) -> Option<serde_json::Value> {
     let mut request = Vec::new();
@@ -210,7 +209,7 @@ async fn initialize_pool(url: String) -> Arc<McpClientPool> {
 }
 
 fn assert_connected_with_fixture_tool(pool: &McpClientPool) {
-    let handle = pool.get_client("server").unwrap();
+    let handle = pool.client("server").unwrap();
     assert!(matches!(&handle.status, ClientStatus::Connected));
     assert_eq!(
         handle

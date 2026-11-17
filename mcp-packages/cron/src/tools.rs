@@ -1,3 +1,5 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,7 +20,16 @@ pub struct CronRegisterTool {
     scheduler: Arc<Mutex<CronScheduler>>,
 }
 
+impl Debug for CronRegisterTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CronRegisterTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl CronRegisterTool {
+    #[must_use]
     pub fn new(scheduler: Arc<Mutex<CronScheduler>>) -> Self {
         Self { scheduler }
     }
@@ -71,7 +82,7 @@ impl BaseTool for CronRegisterTool {
 
         match scheduler.register(expression, prompt) {
             Ok(id) => {
-                let next = scheduler.get_task(&id).and_then(|task| task.next_fire);
+                let next = scheduler.task(&id).and_then(|task| task.next_fire);
                 Ok(format!(
                     "已注册定时任务 {}（{}），下次触发: {} | prompt: {}",
                     id,
@@ -89,7 +100,16 @@ pub struct CronListTool {
     scheduler: Arc<Mutex<CronScheduler>>,
 }
 
+impl Debug for CronListTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CronListTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl CronListTool {
+    #[must_use]
     pub fn new(scheduler: Arc<Mutex<CronScheduler>>) -> Self {
         Self { scheduler }
     }
@@ -144,7 +164,16 @@ pub struct CronRemoveTool {
     scheduler: Arc<Mutex<CronScheduler>>,
 }
 
+impl Debug for CronRemoveTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CronRemoveTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl CronRemoveTool {
+    #[must_use]
     pub fn new(scheduler: Arc<Mutex<CronScheduler>>) -> Self {
         Self { scheduler }
     }
@@ -197,7 +226,16 @@ pub struct CronToggleTool {
     scheduler: Arc<Mutex<CronScheduler>>,
 }
 
+impl Debug for CronToggleTool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CronToggleTool")
+            .finish_non_exhaustive()
+    }
+}
+
 impl CronToggleTool {
+    #[must_use]
     pub fn new(scheduler: Arc<Mutex<CronScheduler>>) -> Self {
         Self { scheduler }
     }

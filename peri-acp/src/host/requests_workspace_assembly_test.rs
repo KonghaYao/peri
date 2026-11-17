@@ -1,4 +1,13 @@
-use super::*;
+use crate::host::requests::tests::workspace_cases::RetryShutdownPool;
+use crate::host::requests::tests::MockTransport;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// 测试夹具：把一次未完成排空的装配保留在会话表里，供关闭重试。
 ///
@@ -47,10 +56,11 @@ fn retain_failed_assembly(
 #[tokio::test]
 async fn worktree_failed_assembly_retains_resources_until_cleanup_retry() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, &tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, &tmp).await;
     let cwd = tmp.path().canonicalize().unwrap();
     cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
         startup_cwd: cwd.to_str().unwrap().to_owned(),
@@ -59,7 +69,8 @@ async fn worktree_failed_assembly_retains_resources_until_cleanup_retry() {
         mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         capabilities: Default::default(),
     });
-    let id = create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
+    let id =
+        crate::host::requests::tests::create_bound_fixture(&cfg, cwd.to_str().unwrap(), None).await;
     let mut environment =
         crate::host::workspace::SessionEnvironment::assemble(&cfg, cwd.to_str().unwrap(), &id)
             .await
@@ -85,19 +96,23 @@ async fn worktree_failed_assembly_retains_resources_until_cleanup_retry() {
         &environment,
     ));
     let close = json!({"sessionId": id});
-    assert!(
-        handle_request("session/close", &close, &cfg, &mut sessions, &transport)
-            .await
-            .is_err()
-    );
+    assert!(crate::host::requests::handle_request(
+        "session/close",
+        &close,
+        &cfg,
+        &mut sessions,
+        &transport
+    )
+    .await
+    .is_err());
     assert!(sessions.contains_key(&id));
     assert!(Arc::ptr_eq(
         sessions[&id].environment.as_ref().unwrap(),
         &environment,
     ));
-    append_human_message(&cfg, &id, "retained runtime handle").await;
+    crate::host::requests::tests::append_human_message(&cfg, &id, "retained runtime handle").await;
     // A closing owner cannot mutate session configuration or restart execution.
-    assert!(handle_request(
+    assert!(crate::host::requests::handle_request(
         "session/set_mode",
         &json!({"sessionId": id, "modeId": "ask"}),
         &cfg,
@@ -107,7 +122,7 @@ async fn worktree_failed_assembly_retains_resources_until_cleanup_retry() {
     .await
     .is_err());
     pool.settled.store(true, Ordering::Release);
-    handle_request("session/close", &close, &cfg, &mut sessions, &transport)
+    crate::host::requests::handle_request("session/close", &close, &cfg, &mut sessions, &transport)
         .await
         .unwrap();
     assert!(!sessions.contains_key(&id));

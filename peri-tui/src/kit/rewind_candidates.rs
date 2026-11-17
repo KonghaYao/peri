@@ -8,8 +8,6 @@ use fluent_bundle::FluentValue;
 use serde_json::Value;
 
 use crate::i18n;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, RENDER_HEARTBEAT, REWIND_PREVIEW, REWIND_QUERY_ERROR};
-use peri_acp_types::event_data::{RewindMessage, RewindPreview};
 
 /// 单个回退候选。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,3 +121,15 @@ pub fn spawn_candidates_query() {
 #[cfg(test)]
 #[path = "rewind_candidates_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;
+
+use crate::kit::atoms::REWIND_PREVIEW;
+
+use crate::kit::atoms::REWIND_QUERY_ERROR;
+
+use peri_acp_types::event_data::RewindMessage;
+
+use peri_acp_types::event_data::RewindPreview;

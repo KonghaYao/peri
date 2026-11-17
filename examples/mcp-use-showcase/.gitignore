@@ -1,0 +1,3 @@
+node_modules
+.mcp-use
+mcp-env.d.ts

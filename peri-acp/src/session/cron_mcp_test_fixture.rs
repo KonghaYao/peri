@@ -50,9 +50,6 @@ pub(super) async fn connect(
 
 #[async_trait::async_trait]
 impl McpPoolPort for CronWirePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({})
     }

@@ -2,7 +2,19 @@ use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
 use serde_json::json;
 
-use super::*;
+use crate::host::executor_flow_tests::execution_fixture;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::CapturePromptModel;
+use crate::host::executor_flow_tests::HomeGuard;
+use crate::session::executor::FrozenSessionData;
+use crate::session::executor::SessionContext;
+use peri_acp_types::messages::BaseMessage;
+#[cfg(not(windows))]
+use peri_model::Model;
+use serial_test::serial;
+use std::sync::Arc;
+use std::sync::Mutex;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 /// 夹具 deferred 工具：只用于让首个 Reason 的动态贡献包含 "## Deferred Tools"。
 ///
@@ -39,13 +51,15 @@ impl BaseTool for FixtureDeferredTool {
 #[tokio::test]
 async fn test_production_first_reason_sees_after_before_agent_dynamic_contributions() {
     use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
-    use peri_agent::agent::stages::{run_react_loop, LoopResult};
+    use peri_agent::agent::stages;
+    use peri_agent::agent::stages::LoopResult;
 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let model = Arc::new(CapturePromptModel {
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
-    let mut ctx = make_session_context("dynamic-first-reason").await;
+    let mut ctx =
+        crate::host::executor_flow_tests::make_session_context("dynamic-first-reason").await;
     // Q01 将 AgentResult 移出模型可见目录后，夹具必须自带一个 deferred 工具，
     // 否则 "## Deferred Tools" 段因目录为空而缺席，本用例就失去断言对象。
     ctx.shared_tools.write().insert(
@@ -53,11 +67,17 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
         Arc::new(FixtureDeferredTool),
     );
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
-    let frozen = frozen_with_dynamic_prompt_policy("DYNAMIC_BASE_SENTINEL", &[]);
+    let frozen = crate::host::executor_flow_tests::frozen_with_dynamic_prompt_policy(
+        "DYNAMIC_BASE_SENTINEL",
+        &[],
+    );
     let mut context = frozen.v2_frozen().clone();
     context.environment_prompt = Some(Arc::from("Working directory: /main-frozen-env"));
     let frozen = FrozenSessionData::from_frozen_parts(context, None);
-    let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None)).unwrap();
+    let (out, _) = crate::host::executor_flow_tests::make_stage_build(&ctx)(
+        crate::host::executor_flow_tests::make_stage_request(frozen, None),
+    )
+    .unwrap();
     let parent = Arc::clone(&out.session);
     out.context
         .session
@@ -71,7 +91,7 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
 
     let loop_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        run_react_loop(out.context, 1),
+        stages::run_react_loop(out.context, 1),
     )
     .await
     .expect("真实 loop 不得挂起");
@@ -79,7 +99,7 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
     assert!(matches!(loop_result, LoopResult::Completed));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    let system = system_text(&requests[0]);
+    let system = crate::host::executor_flow_tests::system_text(&requests[0]);
     assert!(system.ends_with(
         "<env>\nWorking directory: /main-frozen-env\nSession ID: dynamic-first-reason\n</env>"
     ));
@@ -144,7 +164,7 @@ impl peri_model::Model for FixedAnswerModel {
         _: peri_model::ModelRequest,
         cancellation: AgentCancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelStream> {
-        let response = peri_model::ModelResponse::new(
+        let response = peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text("done"),
             peri_model::StopReason::EndTurn,
             None,
@@ -217,14 +237,19 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
         SessionFactory, SubagentCancelPolicy, SubagentRunMode, SubagentSpawnConfig,
     };
 
-    let mut ctx = make_session_context("frozen-production-parent").await;
+    let mut ctx =
+        crate::host::executor_flow_tests::make_session_context("frozen-production-parent").await;
     ctx.language = Some("en-US".into());
-    let sentinel = make_sentinel_frozen();
+    let sentinel = crate::host::executor_flow_tests::make_sentinel_frozen();
     let workspace = tempfile::tempdir().unwrap();
     let _resources = bind_child_fixture_resources(&mut ctx, workspace.path(), &sentinel).await;
     let invocation_id = uuid::Uuid::now_v7().to_string();
-    let stage_build = make_stage_build(&ctx);
-    let (out, _) = stage_build(make_stage_request(sentinel.clone(), None)).unwrap();
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
+    let (out, _) = stage_build(crate::host::executor_flow_tests::make_stage_request(
+        sentinel.clone(),
+        None,
+    ))
+    .unwrap();
     let parent_frozen = &out.session.store().frozen;
     assert_eq!(&*parent_frozen.system_prompt, sentinel.system_prompt());
     assert_eq!(&*parent_frozen.claude_md, "FROZEN_CLAUDE_SENTINEL");
@@ -337,15 +362,16 @@ async fn test_production_stage_uses_frozen_language_and_keeps_override_out_of_ba
     let model = Arc::new(CapturePromptModel {
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
-    let mut ctx = make_session_context("frozen-language-override").await;
+    let mut ctx =
+        crate::host::executor_flow_tests::make_session_context("frozen-language-override").await;
     ctx.language = Some("en-US".into());
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
-    let sentinel = make_sentinel_frozen();
+    let sentinel = crate::host::executor_flow_tests::make_sentinel_frozen();
     let mut frozen = sentinel.v2_frozen().clone();
     frozen.environment_prompt = Some(Arc::from("Today's date: 1999-12-31"));
     let sentinel = FrozenSessionData::from_frozen_parts(frozen, None);
-    let stage_build = make_stage_build(&ctx);
-    let (out, _) = stage_build(make_stage_request(
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
+    let (out, _) = stage_build(crate::host::executor_flow_tests::make_stage_request(
         sentinel.clone(),
         Some(AgentOverrides {
             persona: Some("OVERRIDE_PERSONA_MARKER".into()),
@@ -407,7 +433,8 @@ async fn test_production_stage_uses_frozen_language_and_keeps_override_out_of_ba
 #[serial]
 async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files_appear() {
     use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
-    use peri_agent::agent::stages::{run_react_loop, LoopResult};
+    use peri_agent::agent::stages;
+    use peri_agent::agent::stages::LoopResult;
     use peri_agent::session::FrozenContext;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -433,12 +460,15 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     let model = Arc::new(CapturePromptModel {
         requests: Arc::clone(&requests),
     }) as Arc<dyn Model>;
-    let mut ctx = make_session_context("late-frozen-files").await;
+    let mut ctx = crate::host::executor_flow_tests::make_session_context("late-frozen-files").await;
     let _resources = bind_child_fixture_resources(&mut ctx, &cwd, &frozen).await;
     let invocation_id = uuid::Uuid::now_v7().to_string();
     ctx.primary_llm_factory = Some(Arc::new(move || Arc::clone(&model)));
-    let stage_build = make_stage_build(&ctx);
-    let (out, _) = stage_build(make_stage_request(frozen, None)).unwrap();
+    let stage_build = crate::host::executor_flow_tests::make_stage_build(&ctx);
+    let (out, _) = stage_build(crate::host::executor_flow_tests::make_stage_request(
+        frozen, None,
+    ))
+    .unwrap();
     let parent = Arc::clone(&out.session);
     let chain = Arc::clone(&out.context.runtime.middleware_chain);
     out.context
@@ -453,7 +483,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
 
     let loop_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        run_react_loop(out.context, 1),
+        stages::run_react_loop(out.context, 1),
     )
     .await
     .expect("真实 loop 不得挂起");

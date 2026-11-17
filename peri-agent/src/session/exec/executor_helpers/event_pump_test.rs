@@ -5,19 +5,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    command::PromptStopReason,
-    event::{
-        EventMessage, EventSink, EventSinkError, EventSubscriber, ExecutorEvent, SubscriptionError,
-    },
-    identity::{EventDeliveryClass, EventEnvelope, SessionEpoch, SessionSeq},
-    messages::{BaseMessage, MessageContent, MessageId},
-    session::{EnqueueUserInputRequest, MessageQueue, SessionInbox, TurnTelemetryOutcome},
-};
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::event::EventMessage;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::EventSinkError;
+use peri_acp_types::event::EventSubscriber;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::event::SubscriptionError;
+use peri_acp_types::identity::EventDeliveryClass;
+use peri_acp_types::identity::EventEnvelope;
+use peri_acp_types::identity::SessionEpoch;
+use peri_acp_types::identity::SessionSeq;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::EnqueueUserInputRequest;
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::SessionInbox;
+use peri_acp_types::session::TurnTelemetryOutcome;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
-use super::{spawn_event_pump, SpawnPumpRequest};
+use crate::session::exec::executor_helpers::event_pump::SpawnPumpRequest;
 use crate::session::user_input_mailbox::UserInputMailbox;
 
 struct PendingSubscriber;
@@ -126,16 +135,23 @@ fn mailbox_with_two_deliveries() -> Arc<UserInputMailbox> {
     let mailbox = UserInputMailbox::new("s".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let b = input(&mailbox, "00000000-0000-0000-0000-00000000000b", "B");
     let a = input(&mailbox, "00000000-0000-0000-0000-00000000000a", "A");
-    mailbox.enqueue_sync(&b).unwrap();
-    mailbox.enqueue_sync(&a).unwrap();
+    mailbox
+        .enqueue_sync(&b)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    mailbox
+        .enqueue_sync(&a)
+        .expect("the enqueue sync fixture result is required for this assertion");
     for _ in [&b, &a] {
         mailbox.enter_idle_sync();
         let messages = inbox.queue_for_test().drain_all_sync();
         assert_eq!(messages.len(), 1);
-        let id = messages[0].message().unwrap().id();
+        let id = messages[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id();
         mailbox.mark_claimed_sync(&[id]);
         assert_eq!(mailbox.mark_delivered_sync(&[id]).len(), 1);
     }
@@ -155,14 +171,14 @@ type PumpHarness = (
     mpsc::UnboundedSender<ExecutorEvent>,
     oneshot::Sender<(PromptStopReason, TurnTelemetryOutcome)>,
     Arc<RecordingSink>,
-    super::PumpHandle,
+    crate::session::exec::executor_helpers::event_pump::PumpHandle,
 );
 
 fn start_pump(mailbox: Arc<UserInputMailbox>) -> PumpHarness {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = oneshot::channel();
     let sink = Arc::new(RecordingSink::default());
-    let handle = spawn_event_pump(SpawnPumpRequest {
+    let handle = crate::session::exec::executor_helpers::spawn_event_pump(SpawnPumpRequest {
         subscription: Box::new(PendingSubscriber),
         event_rx,
         stop_reason_rx: stop_rx,
@@ -180,12 +196,12 @@ fn start_pump(mailbox: Arc<UserInputMailbox>) -> PumpHarness {
 async fn finish(
     event_tx: mpsc::UnboundedSender<ExecutorEvent>,
     stop_tx: oneshot::Sender<(PromptStopReason, TurnTelemetryOutcome)>,
-    handle: super::PumpHandle,
+    handle: crate::session::exec::executor_helpers::event_pump::PumpHandle,
 ) {
     drop(event_tx);
     stop_tx
         .send((PromptStopReason::EndTurn, TurnTelemetryOutcome::Completed))
-        .unwrap();
+        .expect("stop tx send test receiver must remain available for this delivery");
     peri_time::timeout(Duration::from_secs(2), handle.pump_done_rx)
         .await
         .expect("pump must finish")
@@ -215,7 +231,7 @@ async fn delivery_journal_is_emitted_before_assistant_output_in_delivery_order()
                 source_agent_id: None,
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     drop(message_tx);
     finish(event_tx, stop_tx, handle).await;
     assert_eq!(
@@ -240,7 +256,7 @@ async fn live_delivery_arriving_after_journal_is_not_emitted_twice() {
             input_id: "00000000-0000-0000-0000-00000000000a".into(),
             content: MessageContent::text("A"),
         })
-        .unwrap();
+        .expect("event tx send test receiver must remain available for this delivery");
     finish(event_tx, stop_tx, handle).await;
     assert_eq!(
         sink.records(),
@@ -273,7 +289,7 @@ fn start_pump_with_sink(
 ) -> (
     mpsc::UnboundedSender<ExecutorEvent>,
     oneshot::Sender<(PromptStopReason, TurnTelemetryOutcome)>,
-    super::PumpHandle,
+    crate::session::exec::executor_helpers::event_pump::PumpHandle,
 ) {
     start_pump_with_subscription(mailbox, Box::new(PendingSubscriber), sink)
 }
@@ -285,11 +301,11 @@ fn start_pump_with_subscription(
 ) -> (
     mpsc::UnboundedSender<ExecutorEvent>,
     oneshot::Sender<(PromptStopReason, TurnTelemetryOutcome)>,
-    super::PumpHandle,
+    crate::session::exec::executor_helpers::event_pump::PumpHandle,
 ) {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = oneshot::channel();
-    let handle = spawn_event_pump(SpawnPumpRequest {
+    let handle = crate::session::exec::executor_helpers::spawn_event_pump(SpawnPumpRequest {
         subscription,
         event_rx,
         stop_reason_rx: stop_rx,
@@ -328,7 +344,7 @@ async fn delivery_recorded_after_older_event_is_not_emitted_before_it() {
                 source_agent_id: None,
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     message_tx
         .send(sequenced_message(
             delivery_seq,
@@ -338,7 +354,7 @@ async fn delivery_recorded_after_older_event_is_not_emitted_before_it() {
                 content: MessageContent::text("并发"),
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     drop(message_tx);
     finish(event_tx, stop_tx, handle).await;
 
@@ -378,7 +394,7 @@ async fn bound_delivery_missed_by_lagged_subscription_is_replayed_before_next_ev
                 source_agent_id: None,
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     drop(message_tx);
     finish(event_tx, stop_tx, handle).await;
 
@@ -415,7 +431,7 @@ async fn unbound_delivery_is_flushed_at_tail_not_before_older_event() {
                 source_agent_id: None,
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     drop(message_tx);
     finish(event_tx, stop_tx, handle).await;
 
@@ -453,7 +469,7 @@ async fn duplicate_delivery_event_and_journal_entry_emit_once() {
                 content: MessageContent::text("并发"),
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     message_tx
         .send(sequenced_message(
             delivery_seq.next(),
@@ -463,7 +479,7 @@ async fn duplicate_delivery_event_and_journal_entry_emit_once() {
                 source_agent_id: None,
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     drop(message_tx);
     finish(event_tx, stop_tx, handle).await;
 
@@ -498,7 +514,7 @@ async fn background_tail_event_precedes_later_delivery_bubble() {
             SessionSeq::initial(),
             ExecutorEvent::MessageAdded(BaseMessage::human("后台回调")),
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     message_tx
         .send(sequenced_message(
             delivery_seq,
@@ -508,7 +524,7 @@ async fn background_tail_event_precedes_later_delivery_bubble() {
                 content: MessageContent::text("并发"),
             },
         ))
-        .unwrap();
+        .expect("message tx send test receiver must remain available for this delivery");
     drop(message_tx);
     finish(event_tx, stop_tx, handle).await;
 
@@ -532,12 +548,17 @@ fn mailbox_with_claimed_input() -> (Arc<UserInputMailbox>, MessageId) {
     let mailbox = UserInputMailbox::new("s".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     let request = input(&mailbox, "00000000-0000-0000-0000-00000000000c", "并发");
-    mailbox.enqueue_sync(&request).unwrap();
+    mailbox
+        .enqueue_sync(&request)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     let messages = inbox.queue_for_test().drain_all_sync();
-    let id = messages[0].message().unwrap().id();
+    let id = messages[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[id]);
     (mailbox, id)
 }
@@ -605,7 +626,7 @@ async fn concurrent_delivery_during_assistant_send_is_ordered_after_it_and_not_l
             chunk: "answer1".into(),
             source_agent_id: None,
         })
-        .unwrap();
+        .expect("event tx send test receiver must remain available for this delivery");
     // 事件已过第二次日志快照并进入 sink；此时 mark_delivered 是 mid-turn 并发交付。
     peri_time::timeout(Duration::from_secs(2), sink.entered.notified())
         .await
@@ -619,7 +640,7 @@ async fn concurrent_delivery_during_assistant_send_is_ordered_after_it_and_not_l
             chunk: "answer2".into(),
             source_agent_id: None,
         })
-        .unwrap();
+        .expect("event tx send test receiver must remain available for this delivery");
     finish(event_tx, stop_tx, handle).await;
 
     assert_eq!(
@@ -699,7 +720,7 @@ async fn failed_delivery_send_keeps_journal_until_retry_succeeds() {
             chunk: "dropped".into(),
             source_agent_id: None,
         })
-        .unwrap();
+        .expect("event tx send test receiver must remain available for this delivery");
     peri_time::timeout(Duration::from_secs(2), sink.failed.notified())
         .await
         .expect("sink must report failure");
@@ -719,7 +740,7 @@ async fn failed_delivery_send_keeps_journal_until_retry_succeeds() {
             chunk: "retry".into(),
             source_agent_id: None,
         })
-        .unwrap();
+        .expect("event tx send test receiver must remain available for this delivery");
     finish(event_tx, stop_tx, handle).await;
 
     assert_eq!(
@@ -793,7 +814,7 @@ async fn assistant_text_send_failure_is_retried_without_loss_or_duplicate() {
             chunk: "answer".into(),
             source_agent_id: None,
         })
-        .unwrap();
+        .expect("event tx send test receiver must remain available for this delivery");
     finish(event_tx, stop_tx, handle).await;
 
     assert_eq!(

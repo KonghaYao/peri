@@ -47,7 +47,7 @@ mod tests {
     #[test]
     fn test_permission_selected_response_matches_sdk_schema() {
         let response: RequestPermissionResponse =
-            serde_json::from_value(permission_selected_allow_once_response()).unwrap();
+            serde_json::from_value(permission_selected_allow_once_response()).expect("permission selected response matches sdk schema: fixture JSON must match the expected schema");
         let RequestPermissionOutcome::Selected(selected) = response.outcome else {
             panic!("permission response 应为 Selected")
         };
@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn test_permission_cancelled_response_matches_sdk_schema() {
         let response: RequestPermissionResponse =
-            serde_json::from_value(permission_cancelled_response()).unwrap();
+            serde_json::from_value(permission_cancelled_response()).expect("permission cancelled response matches sdk schema: fixture JSON must match the expected schema");
         assert!(matches!(
             response.outcome,
             RequestPermissionOutcome::Cancelled
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn test_elicitation_cancel_response_matches_sdk_schema() {
         let response: CreateElicitationResponse =
-            serde_json::from_value(elicitation_cancel_response()).unwrap();
+            serde_json::from_value(elicitation_cancel_response()).expect("elicitation cancel response matches sdk schema: fixture JSON must match the expected schema");
         assert!(matches!(response.action, ElicitationAction::Cancel));
     }
 
@@ -87,7 +87,7 @@ mod tests {
             }),
             "非交互声明必须落在 wire 字面键值上"
         );
-        let response: CreateElicitationResponse = serde_json::from_value(value.clone()).unwrap();
+        let response: CreateElicitationResponse = serde_json::from_value(value.clone()).expect("elicitation unanswered response declares cause: fixture JSON must match the expected schema");
         assert!(matches!(response.action, ElicitationAction::Cancel));
         assert_eq!(
             UnansweredCause::from_meta(response.meta.as_ref()),

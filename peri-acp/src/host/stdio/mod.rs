@@ -11,7 +11,9 @@
 //! 系统通道（会话资源门面）由部署单元（cli）打开后经 `session_resources` 注入，
 //! ACP 层不直接依赖 Resources（§0 依赖方向）。
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_acp_types::permission::SharedPermissionMode;
@@ -220,11 +222,11 @@ async fn assemble_stdio_config(
             cwd: cwd.clone(),
             bare: false,
             drive_cron_tick: false,
+            builtin_assembly_mode: None,
             // stdio 顶层装配不构造 builtin 上下文（`session_resources = false`）：
             // session 级输入（AW3-11）由每 session 的 `SessionEnvironment::assemble`
             // 产生，此处恒为 `None`。
             workspace_input: None,
-            workspace_bash_default_run_in_background: false,
             // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，恒为
             // `None`（资源面未接线），不改变任何既有行为。
             workspace_resources: None,
@@ -270,8 +272,6 @@ mod panic_hook_tests {
 
     use serial_test::serial;
 
-    use super::install_panic_hook;
-
     #[derive(Clone, Default)]
     struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 
@@ -308,14 +308,18 @@ mod panic_hook_tests {
     #[serial]
     fn panic_hook_records_panic_through_tracing() {
         let buffer = LogBuffer::default();
-        let _subscriber = tracing::subscriber::set_default(buffer.subscriber());
         let previous = std::panic::take_hook();
-        install_panic_hook();
+        super::install_panic_hook();
 
-        let result = std::panic::catch_unwind(|| panic!("acp panic hook probe"));
+        let probe_buffer = buffer.clone();
+        let result = std::thread::spawn(move || {
+            let _subscriber = tracing::subscriber::set_default(probe_buffer.subscriber());
+            panic!("acp panic hook probe");
+        })
+        .join();
         std::panic::set_hook(previous);
 
-        assert!(result.is_err(), "catch_unwind 必须捕获 panic");
+        assert!(result.is_err(), "the probe thread must report its panic");
         let logged = buffer.text();
         assert!(
             logged.contains("thread panicked at"),

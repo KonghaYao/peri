@@ -3,6 +3,8 @@
 //! ACP 协议面只持 `peri_acp_types` 端口接口；具体实现（包装 middlewares
 //! 业务函数）归实现方本模块。宿主装配点构造本模块实现后 upcast 注入。
 
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,12 +12,10 @@ use peri_acp_types::event_data::PluginSnapshotEntry;
 use peri_acp_types::hooks::SettingsHooksPort;
 use peri_acp_types::plugin::{InstallScope, InstalledPlugin, PluginManagerPort};
 
-use crate::plugin::{
-    cleanup_orphaned_plugins, install_plugin, load_enabled_plugins, load_installed_plugins,
-    load_known_marketplaces, parse_marketplace_input, remove_from_enabled_plugins,
-    save_known_marketplaces, uninstall_plugin, update_enabled_plugins, update_plugin,
-    KnownMarketplace, MarketplaceManager, MarketplaceSource,
-};
+use crate::plugin;
+use crate::plugin::KnownMarketplace;
+use crate::plugin::MarketplaceManager;
+use crate::plugin::MarketplaceSource;
 
 /// 插件管理端口实现：包装 `install_plugin` / `uninstall_plugin` /
 /// `update_enabled_plugins` / `remove_from_enabled_plugins` /
@@ -34,7 +34,7 @@ impl PluginManagerPort for PluginManager {
         claude_dir: &Path,
         project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
-        install_plugin(name, marketplace, scope, cache_dir, claude_dir, project_dir)
+        plugin::install_plugin(name, marketplace, scope, cache_dir, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
     }
@@ -46,7 +46,7 @@ impl PluginManagerPort for PluginManager {
         claude_dir: &Path,
         project_dir: Option<&Path>,
     ) -> Result<(), String> {
-        uninstall_plugin(plugin_id, scope, claude_dir, project_dir)
+        plugin::uninstall_plugin(plugin_id, scope, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
     }
@@ -56,9 +56,10 @@ impl PluginManagerPort for PluginManager {
         claude_dir: &Path,
         plugin: &peri_acp_types::plugin::LoadedPlugin,
     ) -> Result<Option<InstallScope>, String> {
-        let installed =
-            load_installed_plugins(Some(&claude_dir.join("plugins/installed_plugins.json")))
-                .map_err(|error| error.to_string())?;
+        let installed = plugin::load_installed_plugins(Some(
+            &claude_dir.join("plugins/installed_plugins.json"),
+        ))
+        .map_err(|error| error.to_string())?;
         let mut records = installed.plugins.iter().filter(|record| {
             record.id == format!("{}@{}", plugin.name, plugin.marketplace)
                 && record.install_path == plugin.install_path
@@ -89,9 +90,10 @@ impl PluginManagerPort for PluginManager {
         project_dir: Option<&Path>,
         enable: bool,
     ) -> Result<(), String> {
-        let installed =
-            load_installed_plugins(Some(&claude_dir.join("plugins/installed_plugins.json")))
-                .map_err(|error| error.to_string())?;
+        let installed = plugin::load_installed_plugins(Some(
+            &claude_dir.join("plugins/installed_plugins.json"),
+        ))
+        .map_err(|error| error.to_string())?;
         let writable = installed
             .plugins
             .iter()
@@ -113,9 +115,9 @@ impl PluginManagerPort for PluginManager {
             return Err("plugin has no writable installation record in the requested scope".into());
         }
         if enable {
-            update_enabled_plugins(plugin_id, scope, claude_dir, project_dir)
+            plugin::update_enabled_plugins(plugin_id, scope, claude_dir, project_dir)
         } else {
-            remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)
+            plugin::remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)
         }
         .map_err(|e| e.to_string())
     }
@@ -132,13 +134,13 @@ impl PluginManagerPort for PluginManager {
         claude_dir: &Path,
         project_dir: Option<&Path>,
     ) -> Result<InstalledPlugin, String> {
-        update_plugin(plugin_id, scope, cache_dir, claude_dir, project_dir)
+        plugin::update_plugin(plugin_id, scope, cache_dir, claude_dir, project_dir)
             .await
             .map_err(|e| e.to_string())
     }
 
     async fn refresh_marketplace(&self, name: &str) -> Result<usize, String> {
-        let kms = load_known_marketplaces(None)
+        let kms = plugin::load_known_marketplaces(None)
             .map_err(|e| format!("Failed to load marketplaces: {e}"))?;
         let km = kms
             .iter()
@@ -194,7 +196,7 @@ impl PluginManagerPort for PluginManager {
     }
 
     async fn cleanup(&self, claude_dir: &Path) -> Result<usize, String> {
-        cleanup_orphaned_plugins(claude_dir)
+        plugin::cleanup_orphaned_plugins(claude_dir)
             .await
             .map_err(|e| e.to_string())
     }
@@ -203,10 +205,10 @@ impl PluginManagerPort for PluginManager {
         // 与迁移前 TUI `cli_plugin::run_marketplace_add` 逻辑一致：
         // 解析 → 去重（install_location 非空视为真重复）→ clone/fetch →
         // 记录 known_marketplaces。
-        let marketplace_source = parse_marketplace_input(source)?;
+        let marketplace_source = plugin::parse_marketplace_input(source)?;
         let name = MarketplaceManager::extract_name(&marketplace_source);
 
-        let mut marketplaces = load_known_marketplaces(None).map_err(|e| e.to_string())?;
+        let mut marketplaces = plugin::load_known_marketplaces(None).map_err(|e| e.to_string())?;
         if let Some(existing) = marketplaces
             .iter()
             .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
@@ -232,14 +234,14 @@ impl PluginManagerPort for PluginManager {
             auto_update: false,
             last_updated: now,
         });
-        save_known_marketplaces(&marketplaces, None).map_err(|e| e.to_string())?;
+        plugin::save_known_marketplaces(&marketplaces, None).map_err(|e| e.to_string())?;
         Ok(actual_name)
     }
 
     async fn marketplace_remove(&self, name: &str) -> Result<(), String> {
         // 与迁移前 TUI `cli_plugin::run_marketplace_remove` 逻辑一致：
         // 过滤 known_marketplaces + 清除磁盘缓存目录。
-        let marketplaces = load_known_marketplaces(None).map_err(|e| e.to_string())?;
+        let marketplaces = plugin::load_known_marketplaces(None).map_err(|e| e.to_string())?;
         let original_len = marketplaces.len();
 
         let removed_location = marketplaces
@@ -262,7 +264,7 @@ impl PluginManagerPort for PluginManager {
             return Err(format!("未找到名为 \"{name}\" 的 marketplace"));
         }
 
-        save_known_marketplaces(&filtered, None).map_err(|e| e.to_string())?;
+        plugin::save_known_marketplaces(&filtered, None).map_err(|e| e.to_string())?;
         if let Some(loc) = removed_location {
             let install_path = std::path::Path::new(&loc);
             let cache_dir = self.cache_dir();
@@ -283,7 +285,7 @@ impl PluginManagerPort for PluginManager {
 
     async fn marketplace_update(&self, name: &str) -> Result<String, String> {
         // 与迁移前 TUI `cli_plugin::run_marketplace_update` 逻辑一致。
-        let marketplaces = load_known_marketplaces(None).map_err(|e| e.to_string())?;
+        let marketplaces = plugin::load_known_marketplaces(None).map_err(|e| e.to_string())?;
         let entry_index = marketplaces
             .iter()
             .position(|mkt| MarketplaceManager::extract_name(&mkt.source) == name)
@@ -300,7 +302,7 @@ impl PluginManagerPort for PluginManager {
         updated[entry_index].install_location = install_location;
         updated[entry_index].last_updated = now;
 
-        save_known_marketplaces(&updated, None).map_err(|e| e.to_string())?;
+        plugin::save_known_marketplaces(&updated, None).map_err(|e| e.to_string())?;
         Ok(manifest.name)
     }
 
@@ -308,10 +310,10 @@ impl PluginManagerPort for PluginManager {
         // 面板数据快照：派生逻辑与迁移前 TUI 面板
         // `load_marketplace_data` + `load_discover_plugins_from_disk` 一致
         // （known marketplaces × 缓存 manifest × installed 记录）。
-        let known = load_known_marketplaces(None).unwrap_or_default();
+        let known = plugin::load_known_marketplaces(None).unwrap_or_default();
         let cache_dir = crate::plugin::marketplaces_cache_dir();
         let _ = std::fs::create_dir_all(&cache_dir);
-        let installed = load_installed_plugins(None).unwrap_or_default();
+        let installed = plugin::load_installed_plugins(None).unwrap_or_default();
 
         let marketplaces: Vec<serde_json::Value> = known
             .iter()
@@ -493,7 +495,7 @@ impl PluginManagerPort for PluginManager {
         claude_dir: &Path,
         cwd: Option<&Path>,
     ) -> Result<Vec<peri_acp_types::plugin::CommandEntry>, String> {
-        load_enabled_plugins(claude_dir, cwd)
+        plugin::load_enabled_plugins(claude_dir, cwd)
             .map(|plugins| plugins.into_iter().flat_map(|p| p.commands).collect())
             .map_err(|error| error.to_string())
     }
@@ -543,7 +545,16 @@ pub struct AgentCatalogProvider {
     registry: parking_lot::RwLock<Option<Arc<crate::mcp::McpAgentRegistry>>>,
 }
 
+impl Debug for AgentCatalogProvider {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentCatalogProvider")
+            .finish_non_exhaustive()
+    }
+}
+
 impl AgentCatalogProvider {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -555,10 +566,6 @@ impl AgentCatalogProvider {
 }
 
 impl peri_acp_types::ports::AgentCatalogPort for AgentCatalogProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn catalog(&self, include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
         self.registry
             .read()
@@ -610,18 +617,18 @@ pub fn bind_agent_catalog_from_pool(
     session_id: &str,
     disabled_middlewares: &std::collections::HashSet<String>,
 ) -> Result<(), AgentCatalogBindingError> {
-    // SAFETY: 生产池是本 crate 的 McpClientPool（as_any 返回 self）；
-    // downcast 内的数据指针校验会拒绝返回内字段 Any 的实现。
-    let pool =
-        unsafe { Arc::clone(pool).downcast_arc::<crate::mcp::McpClientPool>() }.map_err(|_| {
+    // 对象自身 vtable 的 TypeId 决定还原；包装器不会被误认成 McpClientPool。
+    let pool = Arc::clone(pool)
+        .downcast_arc::<crate::mcp::McpClientPool>()
+        .map_err(|_| {
             tracing::debug!(
                 session_id,
                 "冻结目录定点绑定失败：pool 不是本 crate 的 McpClientPool 实现"
             );
             AgentCatalogBindingError::McpPoolMismatch
         })?;
-    // SAFETY: 生产目录端口是 AgentCatalogProvider（as_any 返回 self）。
-    let port = unsafe { Arc::clone(agent_catalog).downcast_arc::<AgentCatalogProvider>() }
+    let port = Arc::clone(agent_catalog)
+        .downcast_arc::<AgentCatalogProvider>()
         .map_err(|_| {
             tracing::debug!(
                 session_id,
@@ -639,15 +646,11 @@ pub fn bind_agent_catalog_from_pool(
 
 #[cfg(test)]
 /// 测试用空候选目录端口（无 registry 绑定 ⇒ 空目录，不触碰文件系统）。
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct NoopAgentCatalog;
 
 #[cfg(test)]
 impl peri_acp_types::ports::AgentCatalogPort for NoopAgentCatalog {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn catalog(&self, _include_builtin: bool) -> Vec<peri_acp_types::agents::AgentCatalogEntry> {
         Vec::new()
     }

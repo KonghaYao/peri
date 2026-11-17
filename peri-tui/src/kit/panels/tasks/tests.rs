@@ -8,8 +8,31 @@
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc::Receiver;
 
-use super::*;
-use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+use super::BG_TASKS;
+use super::BgTaskEntry;
+use super::CRON_JOBS;
+use super::CancelGates;
+use super::CancelTarget;
+use super::CronJobSummary;
+use super::Duration;
+use super::Event;
+use super::KeyCode;
+use super::MouseButton;
+use super::MouseEventKind;
+use super::NOTIFICATION;
+use super::Notification;
+use super::OperationTicket;
+use super::PanelKind;
+use super::Rect;
+use super::SegmentCounts;
+use super::TaskSegment;
+use super::TasksRow;
+use super::TasksViewport;
+use super::TuiRenderUnit;
+use super::TuiSubAgentGroup;
+use super::VIEW_MODELS;
+use ratatui_kit::prelude::*;
+
 use ratatui_kit::crossterm::event::{KeyEvent, KeyModifiers, MouseEvent};
 use ratatui_kit::ratatui::buffer::Buffer;
 use serial_test::serial;
@@ -308,6 +331,7 @@ fn mount_and_act<T: 'static>(
 
 impl MountedPanel {
     /// 当帧绘制区域（首帧 `AreaTracker` 未测量时退化为测试区域）。
+    #[must_use]
     fn area(&self) -> Rect {
         self.area.unwrap_or(TEST_AREA)
     }
@@ -332,7 +356,7 @@ impl MountedPanel {
                 area: Some(self.area()),
                 selected: self.selected,
                 cancel_gates: self.cancel_gates,
-                cancel_scope: current_scope(),
+                cancel_scope: super::current_scope(),
                 viewport,
                 bg_tasks,
             },
@@ -346,7 +370,7 @@ fn frame_state(selected: usize, area: Rect) -> (TasksViewport, Vec<BgTaskEntry>)
     let counts = SegmentCounts {
         background: bg_tasks.len(),
         cron: CRON_JOBS.state().read().len(),
-        subagent: collect_subagents(&VIEW_MODELS.state().read()).len(),
+        subagent: super::collect_subagents(&VIEW_MODELS.state().read()).len(),
     };
     let viewport =
         TasksViewport::for_content_rows(content_rows(Some(area), area.height), counts, selected);
@@ -364,9 +388,11 @@ fn bg_task(id: &str) -> BgTaskEntry {
         pid: Some(42),
         revision: None,
         status: None,
+        child_thread_id: None,
     }
 }
 
+#[must_use]
 fn cron_job(id: &str) -> CronJobSummary {
     CronJobSummary {
         id: id.to_string(),
@@ -425,6 +451,7 @@ fn buffer_row(buf: &Buffer, y: u16) -> String {
 }
 
 /// 夹具（8 后台 + 3 Cron + 2 SubAgent）下标 → 预期行身份。
+#[must_use]
 fn expected_identity(index: usize) -> String {
     match index {
         0..8 => format!("bg{index}"),
@@ -455,7 +482,7 @@ fn background_task_rows_render_explicit_status_labels() {
     for (status, key) in cases {
         let mut task = bg_task("bg-status");
         task.status = status.map(str::to_string);
-        let rendered: String = background_task_line(&task, false, &theme)
+        let rendered: String = super::background_task_line(&task, false, &theme)
             .spans
             .iter()
             .map(|span| span.content.as_ref())
@@ -499,31 +526,37 @@ fn drawn_rows_and_hit_testing_agree_across_segments() {
 
         // 先点所有非任务行：不选中、不关面板、不发请求
         let mut idle = Vec::new();
-        for (row, kind) in rows.iter().enumerate() {
-            if matches!(kind, TasksRow::Item(_)) {
-                continue;
+        {
+            let iteration_items = rows.iter().enumerate();
+            for (row, kind) in iteration_items {
+                if matches!(kind, TasksRow::Item(_)) {
+                    continue;
+                }
+                let before = *panel.selected.read();
+                let result = panel.event_with(
+                    left_down(row as u16 + 1, 5),
+                    viewport.clone(),
+                    bg_tasks.clone(),
+                );
+                idle.push((row, before, *panel.selected.read(), result));
             }
-            let before = *panel.selected.read();
-            let result = panel.event_with(
-                left_down(row as u16 + 1, 5),
-                viewport.clone(),
-                bg_tasks.clone(),
-            );
-            idle.push((row, before, *panel.selected.read(), result));
         }
 
         // 再逐个点任务行：命中的下标必须等于行表里该行的身份
         let mut hits = Vec::new();
-        for (row, kind) in rows.iter().enumerate() {
-            let TasksRow::Item(expected) = *kind else {
-                continue;
-            };
-            let result = panel.event_with(
-                left_down(row as u16 + 1, 5),
-                viewport.clone(),
-                bg_tasks.clone(),
-            );
-            hits.push((row, expected, *panel.selected.read(), result));
+        {
+            let iteration_items = rows.iter().enumerate();
+            for (row, kind) in iteration_items {
+                let TasksRow::Item(expected) = *kind else {
+                    continue;
+                };
+                let result = panel.event_with(
+                    left_down(row as u16 + 1, 5),
+                    viewport.clone(),
+                    bg_tasks.clone(),
+                );
+                hits.push((row, expected, *panel.selected.read(), result));
+            }
         }
         Some((rows, idle, hits))
     });
@@ -902,3 +935,10 @@ fn click_outside_rows_consumes_without_action() {
     assert!(CancelGuard::requests().is_empty());
     assert!(PanelStackGuard::panel_is_open(), "非任务行不得关闭面板");
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::OPEN_PANELS;
+
+use super::{BRIDGE_RESET_COUNTER, complete_cancel, current_scope, dispatch_cancel};
+use crate::kit::panels::shared::list::content_rows;

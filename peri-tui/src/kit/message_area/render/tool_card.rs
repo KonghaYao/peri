@@ -4,18 +4,15 @@ use crate::kit::tui_render_unit::{
     FoldState, TuiDiffBlock, TuiHunkLineKind, TuiTodoChangeKind, TuiTodoPresentation, TuiToolCard,
     TuiToolPresentation,
 };
-use crate::truncate::truncate_by_width;
-use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{
-    compact_output_lines, diff_change_summary, fit_summary_to_content, format_completed_duration,
-    format_running_duration, place_meta, process_cont_prefix, process_first_prefix,
-    status_symbol_and_color, sym,
-};
+use super::helpers::diff_change_summary;
+use super::helpers::format_completed_duration;
+use super::helpers::format_running_duration;
 
 /// 工具输出展开的最大行数（与历史 expanded 行为一致）。
 const TOOL_OUTPUT_MAX_LINES: usize = 4;
@@ -122,20 +119,25 @@ fn render_tool_plan(
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
     let (status_symbol, symbol_color) =
-        status_symbol_and_color(data.is_running, data.is_error, &sem);
+        super::helpers::status_symbol_and_color(data.is_running, data.is_error, &sem);
     let symbol = if !data.is_running && !data.is_error && data.fold == FoldState::Expanded {
-        sym().expanded.to_string()
+        super::helpers::sym().expanded.to_string()
     } else {
         status_symbol
     };
-    let mut spans = process_first_prefix(grid, &symbol, Style::default().fg(symbol_color));
+    let mut spans =
+        super::helpers::process_first_prefix(grid, &symbol, Style::default().fg(symbol_color));
     if data.is_error {
         // 错误符号恒在前缀的倒数第二位（末位是 gap）——窄屏首行前缀把符号位
         // 退化为 bullet，错误态换回显式错误符号（§15 error 永不隐藏）。
         let symbol_span = spans.len().saturating_sub(2);
-        spans[symbol_span] = Span::styled(sym().error, Style::default().fg(symbol_color));
+        spans[symbol_span] = Span::styled(
+            super::helpers::sym().error,
+            Style::default().fg(symbol_color),
+        );
     }
-    let label = truncate_by_width(&plan.label, grid.process_content_width().max(1));
+    let label =
+        crate::truncate::truncate_by_width(&plan.label, grid.process_content_width().max(1));
     let label_width = label.width();
     spans.push(Span::styled(
         label,
@@ -156,7 +158,7 @@ fn render_tool_plan(
         .process_content_width()
         .saturating_sub(used_width + fixed_width)
         .max(1);
-    let summary = truncate_by_width(&plan.summary, budget);
+    let summary = crate::truncate::truncate_by_width(&plan.summary, budget);
     if !summary.is_empty() {
         spans.push(Span::styled(
             format!(" {summary}"),
@@ -184,12 +186,11 @@ fn render_tool_plan(
     };
     // 正文裁剪先于 gutter 放置（helpers `fit_summary_to_content` 的调用约定）：
     // 裁剪会改变行宽，`used` 必须在裁剪后重算，duration 才落在带右缘。
-    fit_summary_to_content(&mut spans, grid);
+    super::helpers::fit_summary_to_content(&mut spans, grid);
     let used: usize = spans.iter().map(|span| span.content.width()).sum();
-    if let Some(meta) = duration_text
-        .as_deref()
-        .and_then(|duration| place_meta(grid, used, duration, Style::default().fg(sem.text.dim)))
-    {
+    if let Some(meta) = duration_text.as_deref().and_then(|duration| {
+        super::helpers::place_meta(grid, used, duration, Style::default().fg(sem.text.dim))
+    }) {
         spans.extend(meta);
     }
 
@@ -198,7 +199,7 @@ fn render_tool_plan(
         if data.fold != FoldState::Collapsed {
             let width = grid.process_content_width();
             for text in super::error::preview_lines(&data.output_summary, width, 2) {
-                let mut spans = process_cont_prefix(grid, sem.accents.tool);
+                let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.tool);
                 spans.push(Span::styled(text, Style::default().fg(sem.status.error)));
                 lines.push(Line::from(spans));
             }
@@ -207,7 +208,7 @@ fn render_tool_plan(
     }
     if data.fold != FoldState::Collapsed {
         for detail in plan.details {
-            let mut spans = process_cont_prefix(grid, sem.accents.tool);
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.tool);
             spans.extend(detail.spans);
             lines.push(Line::from(spans));
         }
@@ -244,7 +245,7 @@ fn project_todo_tool(
         .changes
         .iter()
         .map(|change| {
-            let symbols = sym();
+            let symbols = super::helpers::sym();
             let (icon, color) = match change.kind {
                 TuiTodoChangeKind::Completed => (symbols.success, sem.status.success),
                 TuiTodoChangeKind::Added => ("+", sem.status.success),
@@ -255,7 +256,7 @@ fn project_todo_tool(
             };
             if detail_width <= TODO_DETAIL_PREFIX_WIDTH {
                 return Line::from(Span::styled(
-                    truncate_by_width(icon, detail_width),
+                    crate::truncate::truncate_by_width(icon, detail_width),
                     Style::default().fg(color),
                 ));
             }
@@ -263,14 +264,14 @@ fn project_todo_tool(
             Line::from(vec![
                 Span::styled(format!("{icon} "), Style::default().fg(color)),
                 Span::styled(
-                    truncate_by_width(&change.content, content_width),
+                    crate::truncate::truncate_by_width(&change.content, content_width),
                     Style::default().fg(sem.text.muted),
                 ),
             ])
         })
         .collect();
     let error_details = vec![Line::from(Span::styled(
-        truncate_by_width(&data.output_summary, detail_width),
+        crate::truncate::truncate_by_width(&data.output_summary, detail_width),
         Style::default().fg(sem.text.muted),
     ))];
     ToolRenderPlan {
@@ -290,14 +291,15 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
     let content = grid.process_content_width();
     // builtin 一等工具的模型面名字是 effective name（`mcp__workspace__Bash`）：
     // 按名判定先经 IF-D15 归一 helper 换回原始工具名，未命中回落原样。
-    let name = original_tool_name_of_effective(&data.tool_name).unwrap_or(data.tool_name.as_str());
+    let name = peri_acp_types::builtin_mcp::original_tool_name_of_effective(&data.tool_name)
+        .unwrap_or(data.tool_name.as_str());
     let bash = name == "Bash";
     let mut completed_details = Vec::new();
     if bash {
         completed_details.push(Line::from(Span::styled(
             format!(
                 "$ {}",
-                truncate_by_width(&data.input_summary, content.saturating_sub(2))
+                crate::truncate::truncate_by_width(&data.input_summary, content.saturating_sub(2))
             ),
             Style::default().fg(sem.syntax.command),
         )));
@@ -310,7 +312,7 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
         TOOL_OUTPUT_MAX_LINES
     };
     let output_details = |output: &str, color| {
-        compact_output_lines(output, max_lines, content)
+        super::helpers::compact_output_lines(output, max_lines, content)
             .into_iter()
             .map(|line| Line::from(Span::styled(line, Style::default().fg(color))))
             .collect::<Vec<_>>()
@@ -326,7 +328,7 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
         error_details.push(Line::from(Span::styled(
             format!(
                 "$ {}",
-                truncate_by_width(&data.input_summary, content.saturating_sub(2))
+                crate::truncate::truncate_by_width(&data.input_summary, content.saturating_sub(2))
             ),
             Style::default().fg(sem.syntax.command),
         )));
@@ -388,7 +390,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
     let mut spans = Vec::new();
     if !diff.path.is_empty() {
         spans.push(Span::styled(
-            truncate_by_width(
+            crate::truncate::truncate_by_width(
                 &diff.path,
                 content.saturating_sub(count_text.width().min(content)),
             ),
@@ -400,7 +402,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
             spans.push(Span::styled(" ", Style::default()));
         }
         spans.push(Span::styled(
-            truncate_by_width(&count_text, content),
+            crate::truncate::truncate_by_width(&count_text, content),
             Style::default().fg(sem.text.dim),
         ));
     }
@@ -413,7 +415,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
     // hunk 头（dim）。
     let mut hunk_header = Vec::new();
     hunk_header.push(Span::styled(
-        truncate_by_width(
+        crate::truncate::truncate_by_width(
             &format!("@@ {} {} @@", hunk.old_range, hunk.new_range),
             content,
         ),
@@ -447,7 +449,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
         // 代码不软换行——超宽硬截断（§6.5「窄屏先隐行号再裁切代码」）。
         let used = spans.iter().map(|s| s.content.width()).sum::<usize>();
         let budget = content.saturating_sub(used).max(1);
-        let body = truncate_by_width(&l.text, budget);
+        let body = crate::truncate::truncate_by_width(&l.text, budget);
         spans.push(Span::styled(
             body,
             Style::default().fg(sem.text.primary).bg(diff_bg),
@@ -478,7 +480,8 @@ pub(super) fn completed_header_suffix(data: &TuiToolCard) -> String {
     if data.output_summary.is_empty() {
         return String::new();
     }
-    let name = original_tool_name_of_effective(&data.tool_name).unwrap_or(data.tool_name.as_str());
+    let name = peri_acp_types::builtin_mcp::original_tool_name_of_effective(&data.tool_name)
+        .unwrap_or(data.tool_name.as_str());
     match name {
         "Read" => {
             let total_lines = data

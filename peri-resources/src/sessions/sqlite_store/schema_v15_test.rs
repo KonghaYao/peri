@@ -4,7 +4,8 @@
 //! 身份、v14 → v15 删列删表并保留行、重复 locator 合并保留最早一行、旧完整快照被投影、
 //! 损坏快照拒绝整库升级、缺失证据保持 NULL。全部使用临时文件，不触碰真实数据库。
 
-use super::*;
+use super::SqliteThreadStore;
+
 use crate::sessions::canonical;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
@@ -123,7 +124,11 @@ async fn columns(connection: &mut SqliteConnection, table: &str) -> Vec<String> 
 async fn fresh_database_has_no_retired_columns_or_tables() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let mut connection = connect(&path).await;
     for (table, column) in [
         ("projects", "object_identity"),
@@ -152,7 +157,11 @@ async fn fresh_database_has_no_retired_columns_or_tables() {
 async fn projects_unique_locator() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let mut connection = connect(&path).await;
     sqlx::query("INSERT INTO projects (id, locator) VALUES ('p1', '/work')")
         .execute(&mut connection)
@@ -171,7 +180,11 @@ async fn projects_unique_locator() {
 #[tokio::test]
 async fn v14_to_v15_drops_columns_and_tables_and_keeps_rows() {
     let (_directory, path) = v14_fixture().await;
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let mut connection = connect(&path).await;
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut connection)
@@ -244,7 +257,11 @@ async fn v14_to_v15_drops_columns_and_tables_and_keeps_rows() {
 #[tokio::test]
 async fn legacy_snapshots_are_projected_and_missing_evidence_stays_null() {
     let (_directory, path) = v14_fixture().await;
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let mut connection = connect(&path).await;
     let (snapshot,): (String,) = sqlx::query_as(
         "SELECT discovery_snapshot FROM session_bindings WHERE thread_id = 'session'",
@@ -281,7 +298,7 @@ async fn corrupted_snapshot_refuses_the_upgrade() {
             .unwrap();
         connection.close().await.unwrap();
     }
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    let error = SqliteThreadStore::try_new(&path).await.err().unwrap();
     assert!(
         error.to_string().contains("creation snapshot"),
         "错误必须指出无法投影创建证据: {error}"
@@ -303,7 +320,11 @@ async fn corrupted_snapshot_refuses_the_upgrade() {
 #[tokio::test]
 async fn legacy_identity_json_stays_readable() {
     let (_directory, path) = v14_fixture().await;
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let mut connection = connect(&path).await;
     // 归属行的 discovery 仍是完整 v14 形态；按当前结构反序列化必须成功且 root 正确。
     let (discovery,): (String,) =
@@ -339,7 +360,7 @@ async fn foreign_shaped_inherited_tables_refuse_the_upgrade() {
         .unwrap();
         connection.close().await.unwrap();
     }
-    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    let error = SqliteThreadStore::try_new(&path).await.err().unwrap();
     let message = error.to_string();
     assert!(
         message.contains("refuses to drop a foreign inherited table"),
@@ -404,7 +425,11 @@ async fn missing_inherited_tables_upgrade_cleanly() {
         .unwrap();
         connection.close().await.unwrap();
     }
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let mut connection = connect(&path).await;
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut connection)
@@ -422,7 +447,11 @@ async fn missing_inherited_tables_upgrade_cleanly() {
 #[tokio::test]
 async fn correctly_shaped_inherited_tables_are_dropped() {
     let (_directory, path) = v14_fixture().await;
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let mut connection = connect(&path).await;
     let tables: Vec<(String,)> = sqlx::query_as(
         "SELECT name FROM sqlite_schema WHERE type = 'table'

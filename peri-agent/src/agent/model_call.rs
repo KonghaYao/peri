@@ -46,14 +46,14 @@ pub fn tool_model_call_context(purpose: &str) -> Option<ModelCallContext> {
 
 /// One auxiliary operation may make several logical requests (for example summary continuation).
 /// Its counter is operation-local; shared provider instances never hold mutable call identity.
-pub(crate) struct ScopedModel<'a> {
-    inner: &'a dyn Model,
+pub(crate) struct ScopedModel<'model> {
+    inner: &'model dyn Model,
     context: Option<ModelCallContext>,
     next_call: AtomicU64,
 }
 
-impl<'a> ScopedModel<'a> {
-    pub(crate) fn new(inner: &'a dyn Model, context: Option<ModelCallContext>) -> Self {
+impl<'model> ScopedModel<'model> {
+    pub(crate) fn new(inner: &'model dyn Model, context: Option<ModelCallContext>) -> Self {
         Self {
             inner,
             context,

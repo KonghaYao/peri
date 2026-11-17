@@ -1,12 +1,15 @@
-use super::*;
-use langfuse_client::{types::TraceBody, IngestionEvent, LangfuseError};
+use crate::host::AcpServerConfig;
+use langfuse_client::types::TraceBody;
+use langfuse_client::IngestionEvent;
+use langfuse_client::LangfuseError;
 use peri_config::observability::LangfuseCompression;
 use peri_controller::langfuse::{LangfuseConfig, LangfuseSession, LangfuseSessionLike};
+use serde_json::json;
 use std::future::Future;
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 fn event(id: &str) -> IngestionEvent {
     IngestionEvent::TraceCreate {
@@ -42,7 +45,7 @@ async fn owned_config(
     )
     .await
     .unwrap();
-    let mut cfg = test_config(tmp).await;
+    let mut cfg = crate::host::stdio::run_server_integration_tests::test_config(tmp).await;
     cfg.langfuse_session = Some(Arc::clone(&session));
     cfg.langfuse_shutdown_owner = Some(owner);
     (cfg, session)
@@ -77,7 +80,8 @@ async fn test_owned_host_shutdown_includes_final_producer_event_and_joins() {
             },
         )
         .unwrap();
-    let (transport, input, _output) = duplex_transport();
+    let (transport, input, _output) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
     started_rx.await.unwrap();
     drop(input);
@@ -114,9 +118,6 @@ struct RecoverablePool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for RecoverablePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
         if self.complete.load(Ordering::SeqCst) {
             peri_acp_types::ports::McpPoolShutdownReport::Complete {
@@ -155,7 +156,8 @@ async fn test_owned_host_incomplete_keeps_telemetry_open_and_retries_same_resour
         complete: AtomicBool::new(false),
     });
     cfg.mcp_pool = Some(pool.clone());
-    let (transport, input, _output) = duplex_transport();
+    let (transport, input, _output) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
     drop(input);
     assert_eq!(
@@ -188,7 +190,8 @@ async fn test_borrowed_host_eof_keeps_external_langfuse_session_open() {
         .await;
     let (mut cfg, session) = owned_config(&tmp, &http.url()).await;
     let process_owner = cfg.langfuse_shutdown_owner.take().unwrap();
-    let (transport, input, _output) = duplex_transport();
+    let (transport, input, _output) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
     drop(input);
     assert_eq!(
@@ -216,7 +219,8 @@ async fn test_owned_host_http_failure_keeps_joined_terminal_report() {
         .await;
     let (cfg, session) = owned_config(&tmp, &http.url()).await;
     session.try_add(event("failed")).unwrap();
-    let (transport, input, _output) = duplex_transport();
+    let (transport, input, _output) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
     drop(input);
     let report = host.shutdown().await;
@@ -257,7 +261,8 @@ async fn test_owned_host_shutdown_retains_http_failure_observed_by_turn_flush() 
         .await
         .unwrap();
     let clean_turn_flush = session.flush().await;
-    let (transport, input, _output) = duplex_transport();
+    let (transport, input, _output) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let mut host = crate::host::spawn_acp_server(Arc::new(transport), cfg);
     drop(input);
     let report = host.shutdown().await;

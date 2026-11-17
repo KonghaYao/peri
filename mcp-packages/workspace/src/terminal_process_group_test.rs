@@ -1,7 +1,12 @@
 //! Bash 完成路径的执行证据契约：状态与退出码必须描述**整个进程组**，
 //! 不能拿前台 shell 的退出码冒充仍在运行的后台子进程，也不能用命令文本
 //! （`&&` / `2>&1`）代替进程组的真实观测来降级状态。
-use super::*;
+use crate::terminal::BashTool;
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_agent::tools::BaseTool;
+use peri_agent::tools::ToolExecutionStatus;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// 有界后台子进程：等待 release 文件，最多自旋 600 次（≈6s）后自行退出。
 /// 断言失败时也不会留下无人回收的进程（测试中途 panic 也受此上界保护）。
@@ -13,7 +18,7 @@ async fn test_logical_and_operator_reports_completed_status() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
     let tool = BashTool::new(fixture.path().to_str().unwrap());
-    let output = timeout(
+    let output = peri_time::timeout(
         Duration::from_secs(10),
         tool.invoke_output(
             serde_json::json!({"command": "echo alpha && echo beta"}),
@@ -40,7 +45,7 @@ async fn test_stdout_redirect_operator_reports_completed_status() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
     let tool = BashTool::new(fixture.path().to_str().unwrap());
-    let output = timeout(
+    let output = peri_time::timeout(
         Duration::from_secs(10),
         tool.invoke_output(
             serde_json::json!({"command": "echo alpha 2>&1"}),
@@ -67,7 +72,7 @@ async fn test_untracked_leftover_child_reports_unknown_without_exit_code() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
     let fixture = tempfile::tempdir().unwrap();
     let tool = BashTool::new(fixture.path().to_str().unwrap());
-    let output = timeout(
+    let output = peri_time::timeout(
         Duration::from_secs(10),
         tool.invoke_output(
             serde_json::json!({"command": format!("{LEFTOVER_CHILD} exit 7"), "timeout": 5000}),
@@ -96,7 +101,7 @@ async fn test_untracked_leftover_child_reports_unknown_without_exit_code() {
     assert_eq!(evidence.task_id, None);
     // 子进程确实活着：放行后必须自行结束并留下标记，证明 Unknown 不是误报。
     std::fs::write(fixture.path().join("release"), "go").unwrap();
-    timeout(Duration::from_secs(5), async {
+    peri_time::timeout(Duration::from_secs(5), async {
         while !fixture.path().join("survived").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -119,7 +124,7 @@ async fn test_tracked_leftover_child_reports_running_without_exit_code() {
         .with_on_bg_complete(Arc::new(move |result, _| {
             tx.send(result.clone()).map_err(|error| error.to_string())
         }));
-    let output = timeout(
+    let output = peri_time::timeout(
         Duration::from_secs(10),
         tool.invoke_output(
             serde_json::json!({"command": format!("{LEFTOVER_CHILD} exit 7"), "timeout": 5000}),
@@ -147,7 +152,7 @@ async fn test_tracked_leftover_child_reports_running_without_exit_code() {
         "整组仍在运行时不得声明退出码（离线分析按非终态校验）"
     );
     std::fs::write(fixture.path().join("release"), "go").unwrap();
-    let result = timeout(Duration::from_secs(5), rx.recv())
+    let result = peri_time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("后台任务结束应通知")
         .unwrap();
@@ -156,14 +161,16 @@ async fn test_tracked_leftover_child_reports_running_without_exit_code() {
         peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
-    for path in [
-        files.stdout_path.as_ref(),
-        files.stderr_path.as_ref(),
-        evidence.output_ref.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
     {
-        let _ = std::fs::remove_file(path);
+        let captured_output_paths = [
+            files.stdout_path.as_ref(),
+            files.stderr_path.as_ref(),
+            evidence.output_ref.as_ref(),
+        ]
+        .into_iter()
+        .flatten();
+        for path in captured_output_paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }

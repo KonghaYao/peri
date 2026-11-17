@@ -1,4 +1,5 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
@@ -38,7 +39,7 @@ pub enum ApprovalMode {
 /// # endpoint 与互斥门的归属
 ///
 /// 本 broker 只是 **session 交互的一轮 endpoint**：`run_prompt` 每轮新建，
-/// 因此它**不拥有**互斥门——[`Self::interaction_gate`] 是从 session 运行时
+/// 因此它**不拥有**互斥门——`Self::interaction_gate` 是从 session 运行时
 /// （`SessionState.interaction_gate`）借来的共享句柄，同一 session 的跨轮
 /// broker（prompt 轮 / scheduled 轮）共用同一把门，Approval/Questions 串行
 /// 语义因此跨轮成立。ACP transport 是可替换 endpoint；不要把某一轮的 broker
@@ -58,6 +59,7 @@ impl AcpTransportBroker {
     ///
     /// `interaction_gate` 必须来自 session 运行时（`SessionState.interaction_gate`）；
     /// 门由 session 持有，跨轮共享。
+    #[must_use]
     pub fn new(
         transport: Arc<dyn RequestTransport>,
         session_id: SessionId,
@@ -430,7 +432,8 @@ fn inject_option_descriptions(params: &mut serde_json::Value, requests: &[Questi
             continue;
         };
         if let Some(arr) = container.get_mut(key).and_then(|v| v.as_array_mut()) {
-            for (opt_json, opt_data) in arr.iter_mut().zip(q.options.iter()) {
+            let paired_opt_data = arr.iter_mut().zip(q.options.iter());
+            for (opt_json, opt_data) in paired_opt_data {
                 if let Some(desc) = &opt_data.description {
                     opt_json["description"] = serde_json::Value::String(desc.clone());
                 }

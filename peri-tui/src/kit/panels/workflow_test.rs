@@ -7,8 +7,30 @@
 
 use std::cell::{Cell, RefCell};
 
-use super::*;
-use crate::kit::atoms::{ACTIVE_PANEL, OPEN_PANELS};
+use super::ACTIVE_SESSION_ID;
+use super::AGENT_NAME_COL_WIDTH;
+use super::AGENT_ROW_LEADING_COLS;
+use super::AgentTableColumns;
+use super::BRIDGE_RESET_COUNTER;
+use super::CompletionGate;
+use super::Duration;
+use super::Event;
+use super::KILL_NO_SESSION_KEY;
+use super::KeyCode;
+use super::MODEL_COL_WIDTH;
+use super::NOTIFICATION;
+use super::Notification;
+use super::PanelKind;
+use super::RUN_NOT_SYNCED_KEY;
+use super::SELECTED_WORKFLOW_RUN_ID;
+use super::TOKENS_COL_WIDTH;
+use super::TuiRunProgress;
+use super::UnicodeWidthStr;
+use super::WORKFLOW_SNAPSHOT;
+use super::WorkflowEventCtx;
+use super::i18n;
+use ratatui_kit::prelude::*;
+
 use crate::kit::workflow_snapshot::WorkflowSnapshot;
 use ratatui_kit::crossterm::event::{KeyEvent, KeyModifiers};
 use ratatui_kit::ratatui::buffer::Buffer;
@@ -211,7 +233,7 @@ impl MountedPanel {
             .as_ref()
             .map(|snapshot| snapshot.runs.iter().map(|run| run.run_id.clone()).collect())
             .unwrap_or_default();
-        handle_workflow_event(
+        super::handle_workflow_event(
             event,
             &WorkflowEventCtx {
                 run_ids: &run_ids,
@@ -233,6 +255,7 @@ impl MountedPanel {
 // ── 夹具与构造 ─────────────────────────────────────────────────────────
 
 /// 一条 run 的最小快照条目；phase 标题用于断言「面板选中的是哪条 run」。
+#[must_use]
 fn run(id: &str) -> TuiRunProgress {
     TuiRunProgress {
         run_id: id.to_string(),
@@ -588,10 +611,10 @@ fn kill_target_gone_from_snapshot_notifies_and_sends_nothing() {
 #[test]
 fn test_selected_run_index_selects_matching_run() {
     let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-    assert_eq!(selected_run_index(&ids, Some("b")), 1);
-    assert_eq!(selected_run_index(&ids, Some("a")), 0);
-    assert_eq!(selected_run_index(&ids, Some("gone")), 0);
-    assert_eq!(selected_run_index(&ids, None), 0);
+    assert_eq!(super::selected_run_index(&ids, Some("b")), 1);
+    assert_eq!(super::selected_run_index(&ids, Some("a")), 0);
+    assert_eq!(super::selected_run_index(&ids, Some("gone")), 0);
+    assert_eq!(super::selected_run_index(&ids, None), 0);
 }
 
 /// [回归测试] 快照收缩 / 重排后选中落点由身份推导：不越界，也不漂移到同下标的另一条 run。
@@ -603,18 +626,18 @@ fn test_selected_run_index_selects_matching_run() {
 #[test]
 fn test_selected_run_index_after_snapshot_shrinks() {
     let ids = vec!["only".to_string()];
-    assert_eq!(selected_run_index(&ids, Some("gone")), 0);
+    assert_eq!(super::selected_run_index(&ids, Some("gone")), 0);
 
     let reordered = vec!["b".to_string(), "a".to_string()];
-    assert_eq!(selected_run_index(&reordered, Some("a")), 1);
+    assert_eq!(super::selected_run_index(&reordered, Some("a")), 1);
 
-    assert_eq!(selected_run_index(&[], Some("a")), 0);
+    assert_eq!(super::selected_run_index(&[], Some("a")), 0);
 }
 
 #[test]
 fn test_agent_table_header_columns_align_with_rows() {
     let columns = AgentTableColumns::for_width(51);
-    let header = agent_table_header("Model", &columns);
+    let header = super::agent_table_header("Model", &columns);
     assert_eq!(
         UnicodeWidthStr::width(header.as_str()),
         columns.row_width(),
@@ -696,20 +719,42 @@ fn test_agent_table_columns_adapt_to_available_width() {
 /// 截断（CJK 每字符 2 列），超宽时以 '…'（1 列）收尾。
 #[test]
 fn test_truncate_to_width_unicode_safe() {
-    assert_eq!(truncate_to_width("short", 12), "short");
-    assert_eq!(truncate_to_width("claude-sonnet-4-5", 12), "claude-sonn…");
-    assert_eq!(truncate_to_width("中文模型名", 6), "中文…");
-    assert_eq!(truncate_to_width("ab", 1), "…");
+    assert_eq!(
+        super::agent_table_columns::truncate_to_width("short", 12),
+        "short"
+    );
+    assert_eq!(
+        super::agent_table_columns::truncate_to_width("claude-sonnet-4-5", 12),
+        "claude-sonn…"
+    );
+    assert_eq!(
+        super::agent_table_columns::truncate_to_width("中文模型名", 6),
+        "中文…"
+    );
+    assert_eq!(super::agent_table_columns::truncate_to_width("ab", 1), "…");
 }
 
 /// [单测] Model 列单元格：缺失显示 '-'，未超宽补齐到列宽，超宽截断。
 #[test]
 fn test_model_cell_missing_padding_and_truncate() {
-    assert_eq!(model_cell(None, 12), format!("-{}", " ".repeat(11)));
-    assert_eq!(model_cell(Some("claude-haiku"), 12), "claude-haiku");
     assert_eq!(
-        model_cell(Some("haiku"), 12),
+        super::agent_table_columns::model_cell(None, 12),
+        format!("-{}", " ".repeat(11))
+    );
+    assert_eq!(
+        super::agent_table_columns::model_cell(Some("claude-haiku"), 12),
+        "claude-haiku"
+    );
+    assert_eq!(
+        super::agent_table_columns::model_cell(Some("haiku"), 12),
         format!("haiku{}", " ".repeat(7))
     );
-    assert_eq!(model_cell(Some("claude-sonnet-4-5"), 12), "claude-sonn…");
+    assert_eq!(
+        super::agent_table_columns::model_cell(Some("claude-sonnet-4-5"), 12),
+        "claude-sonn…"
+    );
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::OPEN_PANELS;

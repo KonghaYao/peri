@@ -1,11 +1,10 @@
 //! Setup wizard provider 列表渲染回归：模型别名截断必须落在字符边界上。
 
-use super::*;
 use crate::app::setup_wizard::SetupWizardState;
 use ratatui_kit::ratatui::style::Color;
 
 fn render_alias_rows(state: &SetupWizardState) -> Vec<String> {
-    let (_, lines) = render_form_step(
+    let (_, lines) = super::render_form_step(
         state,
         Color::DarkGray,
         Color::Cyan,

@@ -3,12 +3,14 @@
 use std::sync::Arc;
 
 use super::continuation;
-use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
+use crate::dispatch::prompt;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::thread::{ThreadId, WorkState};
 use serde_json::Value;
 
-use super::{extract_session_id, AcpServerConfig, PromptLocks, SharedSessions};
+use super::AcpServerConfig;
+use super::PromptLocks;
+use super::SharedSessions;
 use crate::transport::types::AcpError;
 
 #[derive(Clone, Copy)]
@@ -73,7 +75,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // 恢复启动门发出的 continuation：只有它的早失败反馈给协调器。用户 prompt 或
     // 普通续跑失败不改变恢复准入。
     let recovery_origin = matches!(origin, PromptOrigin::Continuation { recovery: true, .. });
-    let prompt_session_id = extract_session_id(&params, "").to_string();
+    let prompt_session_id = super::extract_session_id(&params, "").to_string();
     let environment = sessions
         .lock()
         .await
@@ -149,7 +151,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // bgResults（该 RPC 仅 stdio 会话使用，allow_await_wake=false 永不挂起）。
     if !is_continuation && cfg.session_manager.is_idle_suspended(&prompt_session_id) {
         super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
-        let (_, content, _attachments) = extract_and_validate_run_prompt_params(&params)?;
+        let (_, content, _attachments) = prompt::extract_and_validate_run_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
             if let Err(error) = inbox
                 .handle()
@@ -991,34 +993,5 @@ pub(super) async fn settle_work_state_with_retry(
 }
 
 #[cfg(test)]
-pub(crate) mod admission_gate {
-    use std::collections::HashMap;
-    use std::sync::{Arc, LazyLock, Mutex};
-    use tokio::sync::Notify;
-
-    #[derive(Default)]
-    pub(crate) struct Gate {
-        pub(crate) entered: Notify,
-        pub(crate) release: Notify,
-    }
-
-    static GATES: LazyLock<Mutex<HashMap<String, Arc<Gate>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
-
-    pub(crate) fn install(session_id: &str) -> Arc<Gate> {
-        let gate = Arc::new(Gate::default());
-        GATES
-            .lock()
-            .unwrap()
-            .insert(session_id.into(), gate.clone());
-        gate
-    }
-
-    pub(in crate::host) async fn wait(session_id: &str) {
-        let gate = GATES.lock().unwrap().remove(session_id);
-        if let Some(gate) = gate {
-            gate.entered.notify_one();
-            gate.release.notified().await;
-        }
-    }
-}
+#[path = "prompt_dispatch_admission_gate_test.rs"]
+pub(crate) mod admission_gate;

@@ -12,19 +12,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use peri_acp_types::plugin::ConfigSource;
 use peri_acp_types::ports::McpPoolPort;
-use peri_acp_types::workflow::{AgentRunParams, AgentRunResult, Usage};
+use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult, Usage};
 use peri_mcp_workflow::{WorkflowInstanceInput, WorkflowMcpServer, WorkflowRuntime};
-use peri_resources::workflow::runner::AgentExecutor;
 use serde_json::{json, Value};
 
 use crate::mcp::apps::McpCapabilityProfile;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_handler, BuiltinInstanceSupervisor, BuiltinServerExit,
-    BUILTIN_CONVERGE_TIMEOUT,
-};
-use crate::mcp::client::{
-    serve_client_auto, ClientStatus, McpClientHandle, McpClientPool, McpServiceWrapper,
-};
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinInstanceSupervisor;
+use crate::mcp::builtin::runtime::BuiltinServerExit;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::client;
+use crate::mcp::client::ClientStatus;
+use crate::mcp::client::McpClientHandle;
+use crate::mcp::client::McpClientPool;
+use crate::mcp::client::McpServiceWrapper;
 use crate::mcp::McpTaskOwner;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -91,12 +92,13 @@ async fn connect_workflow() -> WorkflowLink {
         None,
     ));
     let server = WorkflowMcpServer::new(WorkflowInstanceInput::new(Arc::clone(&runtime)));
-    let transport = spawn_builtin_transport_with_handler("workflow", server);
+    let transport = runtime::spawn_builtin_transport_with_handler("workflow", server);
     let (io, supervisor) = transport.into_parts();
-    let service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("workflow 握手不得超时")
-        .expect("workflow 握手不得失败");
+    let service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("workflow 握手不得超时")
+            .expect("workflow 握手不得失败");
     WorkflowLink {
         service,
         supervisor,
@@ -272,7 +274,8 @@ async fn subscribe_instance_resource_receives_tasks_updates() {
     // 逐次发布直到通知送达（首条丢失时消费方本应补读，设计 §4.3）。
     let mut received = None;
     for attempt in 0..20u64 {
-        link.runtime
+        let _ = link
+            .runtime
             .tasks()
             .publish(format!("task-{attempt}"), task_params("run-1", attempt));
         match tokio::time::timeout(Duration::from_millis(100), subscription.next()).await {
@@ -415,13 +418,14 @@ async fn workspace_live_tasks_reads_owner_scoped_shell_state() {
     }
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy().into_owned(), false);
-    let transport = spawn_builtin_transport_with_handler("workspace", server.clone());
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy().into_owned());
+    let transport = runtime::spawn_builtin_transport_with_handler("workspace", server.clone());
     let (io, supervisor) = transport.into_parts();
-    let mut service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
-        .await
-        .expect("workspace 握手不得超时")
-        .expect("workspace 握手不得失败");
+    let mut service =
+        client::serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("workspace 握手不得超时")
+            .expect("workspace 握手不得失败");
     let peer = service.peer().clone();
 
     let (mut owner, spawner) = McpTaskOwner::new();

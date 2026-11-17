@@ -39,7 +39,7 @@
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
 //! - `plugin` — 插件契约（PluginManifest/LoadedPlugin/PluginLoadResult/PluginManagerPort）
-//! - `builtin_mcp` — builtin MCP 注册表纯数据（实例 / 原始工具名 / effective name / direct / 声明模板）
+//! - `builtin_mcp` — builtin MCP 注册表纯数据（实例 / 原始工具名 / effective name / direct / 声明模板；`v5` 子模块为单出口能力声明与迁移映射，默认路径未切换）
 //! - `ports` — 装配注入端口（McpPoolPort/ToolSearchPort/AgentCatalogPort）
 
 pub mod acp_mcp;
@@ -57,13 +57,17 @@ pub mod cron;
 pub mod error;
 pub mod event;
 pub mod event_data;
+mod event_origin;
 pub mod event_v2;
 pub mod frozen;
 pub mod goal;
 pub mod history_common;
 pub mod history_page;
+mod history_page_visibility;
 pub mod history_v2;
 pub mod history_window;
+#[path = "history_window/request.rs"]
+mod history_window_request;
 pub mod hooks;
 pub mod identity;
 pub mod interaction;
@@ -71,7 +75,8 @@ pub mod mcp;
 pub mod mcp_apps;
 pub mod mcp_apps_facade;
 pub mod mcp_control;
-pub mod mcp_skills;
+pub mod mcp_skill_registry;
+pub use mcp_skill_registry as mcp_skills;
 pub mod messages;
 pub mod meta_harness;
 pub mod model;
@@ -79,6 +84,8 @@ pub mod monitor;
 pub mod oauth_credentials;
 pub mod peri_caps;
 pub use peri_caps::PeriCaps;
+#[path = "context_archive/archive_chunk_batch.rs"]
+mod archive_chunk_batch;
 pub mod context_archive;
 pub mod permission;
 pub mod plugin;
@@ -91,7 +98,10 @@ pub mod sentinel;
 pub mod session;
 pub mod session_authorization;
 pub mod session_resources;
-pub mod session_store;
+pub mod session_store_deployment;
+pub use session_store_deployment as session_store;
+#[path = "store/history_projection.rs"]
+mod history_projection;
 pub mod skills;
 pub mod store;
 pub mod summary;

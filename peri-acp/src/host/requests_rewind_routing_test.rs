@@ -1,7 +1,44 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use async_trait::async_trait;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::BindingRecheck;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::ChildResumeClaim;
+use peri_acp_types::session_resources::ChildSnapshot;
+use peri_acp_types::session_resources::CloseSettlement;
+use peri_acp_types::session_resources::ForkSnapshot;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::FrozenState;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionDraft;
+use peri_acp_types::session_resources::PersistenceRecovery;
+use peri_acp_types::session_resources::RewindBoundary;
 use peri_acp_types::session_resources::RewindCandidate;
+use peri_acp_types::session_resources::RewindOutcome;
+use peri_acp_types::session_resources::SessionAvailability;
+use peri_acp_types::session_resources::SessionInitialization;
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionSnapshot;
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+
+use peri_acp_types::system_reminder::TrustedSystemReminder;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::workspace::ResolvedWorkspace;
+use peri_acp_types::workspace::ScopedThreadPage;
+use peri_acp_types::workspace::ScopedThreadQuery;
+#[cfg(test)]
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // ── 读取路径探针：候选查询不得再走全量历史 ────────────────────────────────────
 
@@ -83,18 +120,24 @@ forward_session_resources_except_candidate_reads! {
 #[tokio::test]
 async fn test_rewind_candidates_routes_to_dispatch() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -103,7 +146,7 @@ async fn test_rewind_candidates_routes_to_dispatch() {
         },
     );
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/rewind-candidates",
         &json!({ "sessionId": sid }),
         &cfg,
@@ -123,18 +166,24 @@ async fn test_rewind_candidates_routes_to_dispatch() {
 #[tokio::test]
 async fn test_rewind_preview_routes_to_dispatch() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -147,7 +196,7 @@ async fn test_rewind_preview_routes_to_dispatch() {
         .as_uuid()
         .to_string();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target_id }),
         &cfg,
@@ -167,18 +216,24 @@ async fn test_rewind_preview_routes_to_dispatch() {
 #[tokio::test]
 async fn test_rewind_preview_missing_target_returns_not_found() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -187,7 +242,7 @@ async fn test_rewind_preview_missing_target_returns_not_found() {
         },
     );
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": "00000000-0000-0000-0000-000000000000" }),
         &cfg,
@@ -209,18 +264,24 @@ async fn test_rewind_preview_missing_target_returns_not_found() {
 #[tokio::test]
 async fn test_rewind_routes_to_dispatch() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -232,7 +293,7 @@ async fn test_rewind_routes_to_dispatch() {
         .id()
         .as_uuid()
         .to_string();
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({ "sessionId": sid, "target_message_id": target_id }),
         &cfg,
@@ -243,7 +304,7 @@ async fn test_rewind_routes_to_dispatch() {
     .unwrap();
     let preview_fingerprint = preview["preview_fingerprint"].as_str().unwrap();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": sid,
@@ -277,18 +338,25 @@ async fn test_rewind_routes_to_dispatch() {
 #[tokio::test]
 async fn test_rewind_candidates_never_reads_full_history() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -303,7 +371,7 @@ async fn test_rewind_candidates_never_reads_full_history() {
     });
     cfg.controller = Arc::new(peri_controller::Controller::new(spy.clone()));
 
-    let value = handle_request(
+    let value = crate::host::requests::handle_request(
         "session/rewind-candidates",
         &json!({ "sessionId": sid }),
         &cfg,
@@ -325,18 +393,24 @@ async fn test_rewind_candidates_never_reads_full_history() {
 #[tokio::test]
 async fn test_rewind_candidates_skips_trailing_reminders_and_truncates_preview() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
     cfg.session_manager.caps_registry().insert(
         sid.clone(),
         PeriCaps {
@@ -365,7 +439,7 @@ async fn test_rewind_candidates_skips_trailing_reminders_and_truncates_preview()
         .await
         .unwrap();
 
-    let value = handle_request(
+    let value = crate::host::requests::handle_request(
         "session/rewind-candidates",
         &json!({ "sessionId": sid }),
         &cfg,

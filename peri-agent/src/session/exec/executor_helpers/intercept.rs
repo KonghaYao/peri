@@ -1,19 +1,26 @@
+use peri_acp_types::thread::ThreadId;
 use std::borrow::Cow;
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use peri_acp_types::{
-    command::{
-        CommandContext, CommandFeedback, CommandOutcome, CommandResult, FeedbackChannel,
-        FeedbackLevel, PromptStopReason, ResolvedCommand,
-    },
-    compact::CompactConfig,
-    event::{EventSink, ExecutorEvent},
-    messages::{BaseMessage, MessageContent},
-    session::{ExecutionFailure, PromptResult},
-    session_resources::SessionResources,
-    store::PersistedPayload,
-    tasks::TaskManager,
-};
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::CommandFeedback;
+use peri_acp_types::command::CommandOutcome;
+use peri_acp_types::command::CommandResult;
+use peri_acp_types::command::FeedbackChannel;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::command::ResolvedCommand;
+use peri_acp_types::compact::CompactConfig;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::session::ExecutionFailure;
+use peri_acp_types::session::PromptResult;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::tasks::TaskManager;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::transcript::{CompactionCommitState, MessageTranscript};
@@ -34,19 +41,19 @@ pub type CommandLookupFn = Arc<dyn Fn(&str) -> Option<ResolvedCommand> + Send + 
 /// `load_compact_config` 语义预填（env overrides 每轮重新应用）；
 /// 命令注册表查找经 [`InterceptRequest::command_lookup`] 注入（ACP 协议面
 /// 会话级注册表语义，`resolve` 严格精确）。
-pub struct InterceptRequest<'a> {
+pub struct InterceptRequest<'request> {
     // ── 消息上下文 ──
-    pub content: &'a MessageContent,
+    pub content: &'request MessageContent,
     /// Canonical effective history (reminders included). The `BaseMessage`
     /// projection is derived only after a command has been resolved, so ordinary
     /// prompts pay no full-history copy for command recognition.
     ///
     /// 生产调用点传 `Cow::Borrowed`（零拷贝）；测试夹具可传 `Cow::Owned`。
-    pub history_payloads: Cow<'a, [peri_acp_types::store::PersistedPayload]>,
+    pub history_payloads: Cow<'request, [peri_acp_types::store::PersistedPayload]>,
     // ── 会话上下文 ──
-    pub cwd: &'a str,
-    pub session_id: &'a str,
-    pub cancel: &'a CancellationToken,
+    pub cwd: &'request str,
+    pub session_id: &'request str,
+    pub cancel: &'request CancellationToken,
     pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
     // ── 冻结数据投影（原 FrozenSessionData；ACP 调用点投影字符串）──
@@ -55,10 +62,12 @@ pub struct InterceptRequest<'a> {
     pub frozen_skill_summary: Option<String>,
     pub frozen_system_prompt: Option<String>,
     // ── 运行时服务 ──
-    pub event_sink: &'a Arc<dyn EventSink>,
-    pub auxiliary_model: &'a Option<Arc<dyn peri_model::Model>>,
+    pub event_sink: &'request Arc<dyn EventSink>,
+    pub auxiliary_model: &'request Option<Arc<dyn peri_model::Model>>,
     // ── 异步服务 ──
-    pub task_manager: &'a Arc<dyn TaskManager>,
+    pub task_manager: &'request Arc<dyn TaskManager>,
+    /// 会话级 goal 控制面（手动 `/compact` 硬记忆的运行时来源）。
+    pub goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
     /// 会话级后台结果处理责任；`/compact` 必须据此保护未覆盖的终态通知。
     pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
@@ -133,7 +142,7 @@ pub enum InterceptOutcome {
 /// `Inject`（不 push_done）；`Delegate` 本 Phase 无实现（恒 `Done`），
 /// `unreachable!`（Phase 6 ui 域上送注册后接入）。
 ///
-/// [TRAP] Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。
+/// \[TRAP\] Immediate 命令路径绕过 agent event pump，必须手动调用 `sink.push_done()`。
 /// 否则 TUI 界面永久卡在 loading 状态（issue_2026-05-29-immediate-command-missing-push-done）。
 pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> InterceptOutcome {
     let text = req.content.text_content();
@@ -230,6 +239,12 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             mailbox,
         );
     }
+    if let Some(goal) = req.goal_controller.clone() {
+        deps.insert(
+            std::any::TypeId::of::<Arc<dyn peri_acp_types::goal::GoalController>>(),
+            Arc::new(goal),
+        );
+    }
     let mut ctx = CommandContext::new(
         req.session_id.to_string(),
         history.clone(),
@@ -324,7 +339,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             req.event_sink
                 .push_done(
                     req.session_id,
-                    super::done_stop_reason(result.stop_reason),
+                    crate::session::exec::executor_helpers::done_stop_reason(result.stop_reason),
                     None,
                 )
                 .await;
@@ -365,7 +380,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
 
 async fn restore_committed_context(
     store: Option<&Arc<dyn SessionResources>>,
-    thread_id: Option<&String>,
+    thread_id: Option<&ThreadId>,
 ) -> anyhow::Result<(Vec<PersistedPayload>, Vec<BaseMessage>)> {
     let (store, thread_id) = store
         .zip(thread_id)
@@ -402,7 +417,54 @@ async fn restore_committed_context(
             .collect(),
     );
     let messages =
-        crate::session::exec::compact_pipeline::assemble_compact_messages(&transcript, &None)
+        crate::session::exec::compact_pipeline::assemble_compact_messages(&transcript, None)
             .messages;
     Ok((transcript.active_payloads(), messages))
+}
+
+impl<'request> Debug for InterceptRequest<'request> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InterceptRequest")
+            .field("cwd", &self.cwd)
+            .field("session_id", &self.session_id)
+            .field(
+                "session_resources_present",
+                &self.session_resources.is_some(),
+            )
+            .field("thread_id_present", &self.thread_id.is_some())
+            .field("frozen_claude_md_present", &self.frozen_claude_md.is_some())
+            .field(
+                "frozen_claude_local_md_present",
+                &self.frozen_claude_local_md.is_some(),
+            )
+            .field(
+                "frozen_skill_summary_present",
+                &self.frozen_skill_summary.is_some(),
+            )
+            .field(
+                "frozen_system_prompt_present",
+                &self.frozen_system_prompt.is_some(),
+            )
+            .field("mcp_pool_present", &self.mcp_pool.is_some())
+            .field(
+                "async_result_mailbox_present",
+                &self.async_result_mailbox.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for InterceptOutcome {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        let variant = match self {
+            Self::Handled(..) => "Handled",
+            Self::Inject(..) => "Inject",
+            Self::PassThrough => "PassThrough",
+        };
+        formatter
+            .debug_tuple("InterceptOutcome")
+            .field(&variant)
+            .finish()
+    }
 }

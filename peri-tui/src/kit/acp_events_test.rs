@@ -1,6 +1,15 @@
 //! Tests for acp_events
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CacheUsageSample;
+use super::CurrentTurn;
+use super::SessionPhase;
+use super::SubmitRequest;
+use super::TuiAssistantBubble;
+use super::TuiNoteLevel;
+use super::TuiRenderUnit;
+
 use crate::kit::acp_types::{
     AcpEventWithEpoch, FeedbackChannel, FeedbackLevel, TuiCommandFeedback,
 };
@@ -8,12 +17,11 @@ use crate::kit::message_area::TodoStatus;
 use crate::kit::tui_render_unit::{
     InteractionKind, TuiAskUserBlock, TuiTodoChangeKind, TuiToolPresentation,
 };
-use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption};
+
 use serde_json::json;
 use serial_test::serial;
 use tokio::sync::mpsc;
 
-use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk, TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningBlock};
 
 // 本文件经 acp_events/mod.rs 的 `#[path = "../acp_events_test.rs"]` 挂载；此路径
@@ -27,6 +35,8 @@ mod bg_task_live_test;
 mod command_feedback_test;
 #[path = "acp_events_test/diff_grouping_test.rs"]
 mod diff_grouping_test;
+#[path = "acp_events_test/display_retention_test.rs"]
+mod display_retention_test;
 #[path = "acp_events_test/fold_test.rs"]
 mod fold_test;
 #[path = "acp_events_test/group_incremental_test.rs"]
@@ -149,13 +159,13 @@ pub(crate) fn make_fold_test_state() -> BridgeState {
 #[serial]
 fn test_old_agent_done_and_interrupted_do_not_settle_new_execution() {
     let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "answer".into(),
@@ -163,19 +173,19 @@ fn test_old_agent_done_and_interrupted_do_not_settle_new_execution() {
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("B".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::AgentDone {
             request_id: Some("A".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TurnInterrupted {
             reason: "cancelled".into(),
@@ -186,7 +196,7 @@ fn test_old_agent_done_and_interrupted_do_not_settle_new_execution() {
     assert_eq!(state.current_request_id.as_deref(), Some("B"));
     assert!(!state.current_turn.is_empty());
     assert!(state.committed.is_empty());
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::AgentDone {
             request_id: Some("B".into()),
@@ -201,19 +211,19 @@ fn test_old_agent_done_and_interrupted_do_not_settle_new_execution() {
 #[serial]
 fn test_late_prompt_failure_preserves_new_execution_loading() {
     let mut state = make_fold_test_state();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("A".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("B".into()),
         },
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptFailed {
             request_id: "A".into(),
@@ -222,7 +232,7 @@ fn test_late_prompt_failure_preserves_new_execution_loading() {
     assert_eq!(state.phase, SessionPhase::PromptRunning);
     assert_eq!(state.current_request_id.as_deref(), Some("B"));
     assert!(ACP_STATE.state().read().is_loading);
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptFailed {
             request_id: "B".into(),
@@ -240,14 +250,14 @@ fn test_external_execution_terminal_preserves_pending_input_rollback_owner() {
     let previous_restore = restore.lock().take();
     for cancelled in [false, true] {
         let mut state = make_fold_test_state();
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::LocalUserBubble {
                 text: "pending B".into(),
                 attachments: Vec::new(),
             },
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ExecutionStarted {
                 request_id: "approval".into(),
@@ -257,7 +267,7 @@ fn test_external_execution_terminal_preserves_pending_input_rollback_owner() {
             state
                 .last_submitted_text
                 .as_ref()
-                .unwrap()
+                .expect("external execution terminal preserves pending input rollback owner: the fixture must retain its expected variant")
                 .request_id
                 .is_none()
         );
@@ -271,23 +281,23 @@ fn test_external_execution_terminal_preserves_pending_input_rollback_owner() {
                 request_id: Some("approval".into()),
             }
         };
-        dispatch_and_notify(&mut state, &approval_terminal);
+        super::dispatch_and_notify(&mut state, &approval_terminal);
         assert!(restore.lock().is_none());
         assert!(
             state
                 .last_submitted_text
                 .as_ref()
-                .unwrap()
+                .expect("external execution terminal preserves pending input rollback owner: the fixture must retain its expected variant")
                 .request_id
                 .is_none()
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::PromptSubmitted {
                 request_id: Some("B".into()),
             },
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ExecutionStarted {
                 request_id: "A".into(),
@@ -303,25 +313,25 @@ fn test_external_execution_terminal_preserves_pending_input_rollback_owner() {
                 request_id: Some("A".into()),
             }
         };
-        dispatch_and_notify(&mut state, &terminal);
+        super::dispatch_and_notify(&mut state, &terminal);
         assert!(restore.lock().is_none());
         assert_eq!(
             state
                 .last_submitted_text
                 .as_ref()
-                .unwrap()
+                .expect("external execution terminal preserves pending input rollback owner: the fixture must retain its expected variant")
                 .request_id
                 .as_deref(),
             Some("B")
         );
         assert_eq!(state.committed.len(), 1);
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::ExecutionStarted {
                 request_id: "B".into(),
             },
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::TurnInterrupted {
                 reason: "cancelled".into(),
@@ -355,7 +365,7 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
         ("task-done", "agent-done"),
         ("task-running", "agent-running"),
     ] {
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::BgTaskStarted(BgTaskEntry {
                 task_id: task_id.into(),
@@ -365,9 +375,10 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
                 pid: None,
                 revision: None,
                 status: None,
+                child_thread_id: None,
             }),
         );
-        dispatch_and_notify(
+        super::dispatch_and_notify(
             &mut state,
             &AcpEventData::SubagentStarted {
                 agent_id: agent_id.into(),
@@ -378,7 +389,7 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
         );
     }
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "agent-done".into(),
@@ -402,7 +413,7 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
     BG_DISPLAY.state().write().clear();
     BG_TASK_IDENTITY.state().write().clear();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(BgTaskEntry {
             task_id: "task-running".into(),
@@ -412,9 +423,10 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
             pid: None,
             revision: None,
             status: None,
+            child_thread_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
             agent_id: "agent-running".into(),
@@ -424,7 +436,7 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
         },
     );
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStopped {
             agent_id: "stale-agent".into(),
@@ -444,7 +456,7 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
 fn test_llm_retrying_injects_warning_system_note() {
     let mut state = make_fold_test_state();
 
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LlmRetrying {
             attempt: 1,
@@ -479,7 +491,7 @@ fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
         cached_tokens: 50,
         request_id: None,
     });
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::PromptSubmitted {
             request_id: Some("new-prompt".into()),
@@ -496,7 +508,7 @@ fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
     state.current_turn.append_reasoning("analysis", Some("r1"));
     state.current_turn.append_text("final text", Some("m1"));
     let generation_before = state.generation;
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::AgentExecutionFailed {
             message: "forwarder failed".into(),
@@ -515,3 +527,40 @@ fn test_prompt_and_agent_failure_clear_pending_cache_usage() {
         "failure snapshot must be frozen"
     );
 }
+
+use peri_acp_types::event_data::AskUser;
+
+use peri_acp_types::event_data::HitlPending;
+
+use peri_acp_types::event_data::Question;
+
+use peri_acp_types::event_data::QuestionOption;
+
+use crate::kit::stream_data::TuiReasoningChunk;
+
+use crate::kit::stream_data::TuiTextChunk;
+
+use crate::kit::stream_data::TuiToolEnded;
+
+use crate::kit::stream_data::TuiToolStarted;
+
+use super::PublicationIntent;
+use super::StreamingMode;
+use super::SubmittedInputRollback;
+use super::TuiUserBubble;
+use super::bridge_state::has_md_block_boundary_since;
+use super::compact;
+use super::current_streaming_mode;
+use super::dispatch_and_notify;
+use super::dispatch_for_bridge;
+use super::dispatch_trusted_structured_for_bridge;
+use super::drain_input_buffer;
+use super::handle_plan_update;
+use super::history_page;
+use super::push_view_models;
+use super::push_view_models_for_reset;
+use super::turn;
+use crate::kit::atoms::{
+    ACP_STATE, BG_AGENT_IDS, BG_DISPLAY, BG_TASK_IDENTITY, BG_TASKS, BgTaskEntry, FOLD_OVERRIDES,
+    PERI_CONFIG_HANDLE, SUBMIT_TX, VIEW_MODELS, ViewModelsSnapshot,
+};

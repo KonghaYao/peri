@@ -3,17 +3,15 @@ use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{
     FoldState, TuiCollapsedGroup, TuiRenderUnit, TuiSubAgentGroup, TuiToolCard,
 };
-use crate::truncate::truncate_by_width;
+
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::helpers::{
-    fit_summary_to_content, format_completed_duration, format_running_duration, place_meta,
-    process_cont_prefix, process_first_prefix, status_symbol_and_color, sym,
-};
+use super::helpers::format_completed_duration;
+use super::helpers::format_running_duration;
 
 /// running 子 agent 最多展示的最近工具调用行数（§6.7 工具行展示）。
 pub(super) const SUBAGENT_TOOL_LINES: usize = 3;
@@ -64,15 +62,16 @@ pub(super) fn render_subagent_group_lines(
 
 fn subagent_entry_line(data: &TuiSubAgentGroup, grid: &GridSpec) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
-    let (symbol, color) = status_symbol_and_color(data.is_running, data.is_error, &sem);
-    let mut spans = process_first_prefix(grid, &symbol, Style::default().fg(color));
+    let (symbol, color) =
+        super::helpers::status_symbol_and_color(data.is_running, data.is_error, &sem);
+    let mut spans = super::helpers::process_first_prefix(grid, &symbol, Style::default().fg(color));
     let name = if data.agent_name.trim().is_empty() {
         &data.agent_id
     } else {
         &data.agent_name
     };
     spans.push(Span::styled(
-        truncate_by_width(name, grid.process_content_width().max(1)),
+        crate::truncate::truncate_by_width(name, grid.process_content_width().max(1)),
         Style::default()
             .fg(sem.text.primary)
             .add_modifier(Modifier::BOLD),
@@ -89,13 +88,14 @@ fn subagent_entry_line(data: &TuiSubAgentGroup, grid: &GridSpec) -> Line<'static
 fn subagent_tool_line(card: &TuiToolCard, grid: &GridSpec) -> Line<'static> {
     let sem = THEME_ATOM.state().read().semantic;
     let content = grid.process_content_width();
-    let mut spans = process_cont_prefix(grid, sem.text.dim);
+    let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
     // Narrow 断点：符号位省略（设计文档 §6 断点表——极端窄屏接受状态字符
     // 丢失，错误信号由错误词与原因行兜底；§11 与主时间线 accent 退化同哲学）。
     if !grid.is_narrow() || card.is_error {
         // 符号复用状态三元组（running braille 帧 / ✓ / ×）；颜色就地决定：
         // running/success 低显著 text.dim（P2），error 升级 status.error（P3）。
-        let (symbol, _) = status_symbol_and_color(card.is_running, card.is_error, &sem);
+        let (symbol, _) =
+            super::helpers::status_symbol_and_color(card.is_running, card.is_error, &sem);
         let symbol_color = if card.is_error {
             sem.status.error
         } else {
@@ -132,7 +132,7 @@ fn subagent_tool_line(card: &TuiToolCard, grid: &GridSpec) -> Line<'static> {
         .saturating_sub(name.width() + error_word.width() + dur_w + 6)
         .max(1);
     if !card.input_summary.is_empty() {
-        let summary = truncate_by_width(&card.input_summary, budget);
+        let summary = crate::truncate::truncate_by_width(&card.input_summary, budget);
         if !summary.is_empty() {
             spans.push(Span::styled(
                 format!("  {summary}"),
@@ -151,11 +151,11 @@ fn subagent_tool_line(card: &TuiToolCard, grid: &GridSpec) -> Line<'static> {
     }
     // 正文裁剪先于 gutter 放置（helpers `fit_summary_to_content` 的调用约定）：
     // duration 是右缘元数据，不做正文裁剪的目标；`used` 在裁剪后重算。
-    fit_summary_to_content(&mut spans, grid);
+    super::helpers::fit_summary_to_content(&mut spans, grid);
     let used: usize = spans.iter().map(|s| s.content.width()).sum();
     if let Some(meta) = duration_text
         .as_deref()
-        .and_then(|d| place_meta(grid, used, d, Style::default().fg(sem.text.dim)))
+        .and_then(|d| super::helpers::place_meta(grid, used, d, Style::default().fg(sem.text.dim)))
     {
         spans.extend(meta);
     }
@@ -171,10 +171,10 @@ fn subagent_error_reason_lines(grid: &GridSpec, reason: &str) -> Vec<Line<'stati
         .into_iter()
         .enumerate()
         .map(|(index, text)| {
-            let mut spans = process_cont_prefix(grid, sem.text.dim);
+            let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
                 if index == 0 {
-                    format!("{} ", sym().error)
+                    format!("{} ", super::helpers::sym().error)
                 } else {
                     "  ".to_owned()
                 },
@@ -222,11 +222,12 @@ pub(super) fn render_collapsed_group_lines(
     let sem = THEME_ATOM.state().read().semantic;
     let expanded = data.fold == FoldState::Expanded;
     let symbol = if expanded {
-        sym().expanded
+        super::helpers::sym().expanded
     } else {
-        sym().collapsed
+        super::helpers::sym().collapsed
     };
-    let mut spans = process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
+    let mut spans =
+        super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     // 先截 title 使 (title + failed 后缀) 总宽 ≤ 过程区预算——失败数不可被截断吞掉
     // （§15「error 永不隐藏」），title 截断在前。
     let suffix = if data.failed_count > 0 {
@@ -242,7 +243,7 @@ pub(super) fn render_collapsed_group_lines(
     };
     let content_width = grid.process_content_width();
     let keep = content_width.saturating_sub(suffix.width()).max(1);
-    let title_trunc = truncate_by_width(&data.title, keep);
+    let title_trunc = crate::truncate::truncate_by_width(&data.title, keep);
     spans.push(Span::styled(
         title_trunc,
         Style::default().fg(sem.text.muted),

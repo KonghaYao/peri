@@ -3,13 +3,17 @@
 use std::path::{Path, PathBuf};
 
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
+use tracing_subscriber::fmt;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Registry;
 
 /// TracingGuard 在 Drop 时保证日志被 flush。
 ///
 /// 当前版本 `tracing` 0.1.x 的 `set_global_default` 不返回 guard，
 /// 因此 TracingGuard 作为生命周期标记存在，真正的 flush 由
 /// `RollingFileAppender` 的 Drop（程序退出时 OS 回收文件句柄）保证。
+#[derive(Debug)]
 pub struct TracingGuard;
 
 impl Drop for TracingGuard {
@@ -49,6 +53,12 @@ fn resolve_log_target(log_file: Option<&str>, service_name: &str) -> (PathBuf, S
 /// 初始化 tracing，输出到日志文件（TUI 模式下避免干扰界面）。
 ///
 /// 日志使用 `tracing-appender` 按天轮转，保留最近 5 个轮转文件。
+///
+/// # Panics
+///
+/// Panics if the log directory or rolling file cannot be created, or if a global
+/// tracing subscriber has already been installed.
+#[must_use]
 pub fn init_tracing(service_name: &str) -> TracingGuard {
     let is_json = std::env::var("RUST_LOG_FORMAT").as_deref() == Ok("json");
     let log_file = std::env::var("RUST_LOG_FILE").ok();

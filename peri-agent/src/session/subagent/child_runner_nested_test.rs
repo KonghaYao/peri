@@ -1,10 +1,29 @@
-use super::*;
+use crate::agent::async_tasks::TaskManager;
+use crate::agent::react::ReactLLM;
+use crate::agent::react::Reasoning;
+use crate::agent::react::StreamingContext;
+use crate::agent::stages::ReceiveInput;
+use crate::middleware::chain::MiddlewareChain;
+use crate::session::queue::MessageSource;
+use crate::session::queue::QueuedMessage;
+use crate::session::subagent::ChildRunOutcome;
+use crate::session::subagent::SubagentHost;
+use crate::session::FrozenContext;
+use crate::session::Session;
+use crate::tools::BaseTool;
+
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::BgTaskRegistration;
+use peri_acp_types::tasks::TaskManager as TaskManagerPort;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test(start_paused = true)]
 async fn old_bound_control_message_is_suppressed_on_new_run() {
     let manager = Arc::new(TaskManager::new());
-    let child = make_child(manager.clone(), true);
-    let built = nested_context(
+    let child = crate::session::subagent::child_runner::tests::make_child(manager.clone(), true);
+    let built = crate::session::subagent::child_runner::tests::nested_context(
         &child,
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
@@ -31,11 +50,11 @@ async fn old_bound_control_message_is_suppressed_on_new_run() {
         )
         .with_policy(peri_acp_types::session::MessagePolicy::continue_current_run(old_execution)),
     );
-    let received = run_receive(ReceiveInput {
+    let received = crate::agent::stages::receive::run_receive(ReceiveInput {
         context: built.context,
     })
     .await
-    .unwrap();
+    .expect("the run receive fixture result is required for this assertion");
     assert_eq!(received.consumed_count, 1);
     assert_eq!(received.wake_up_count, 0, "旧执行绑定必须被抑制");
 }
@@ -64,7 +83,8 @@ async fn execution_error_with_handoff_write_failure_keeps_both_causes() {
         FrozenContext::builder().build(),
         Some(child_id.clone()),
     );
-    let (owner, store) = bind_owner_store(&child, &manager);
+    let (owner, store) =
+        crate::session::subagent::child_runner::tests::bind_owner_store(&child, &manager);
     child.set_subagent_host(SubagentHost {
         task_manager: Some(manager.clone()),
         child_owner: Some(owner),
@@ -80,12 +100,12 @@ async fn execution_error_with_handoff_write_failure_keeps_both_causes() {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
-    let built = build_v2_subagent_context(
+    let built = crate::session::subagent::build_v2_subagent_context(
         Some(child.clone()),
         Box::new(FailingLlm),
         Arc::new(MiddlewareChain::new()),
@@ -98,13 +118,15 @@ async fn execution_error_with_handoff_write_failure_keeps_both_causes() {
         None,
         None,
         None,
-        Some(agent_id_from_child_thread(&child_id)),
+        Some(crate::session::subagent::agent_id_from_child_thread(
+            &child_id,
+        )),
     );
-    let permit = permit_for(&child, &built.context);
+    let permit = crate::session::subagent::child_runner::tests::permit_for(&child, &built.context);
     store.restrict_to_history_read_only();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
-        run_child_until_terminal(built.context, 10, &child),
+        crate::session::subagent::child_runner::run_child_until_terminal(built.context, 10, &child),
     )
     .await
     .expect("model failure must not wait for D");
@@ -144,7 +166,8 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
         FrozenContext::builder().build(),
         Some(child_id.clone()),
     );
-    let (owner, _store) = bind_owner_store(&child, &manager);
+    let (owner, _store) =
+        crate::session::subagent::child_runner::tests::bind_owner_store(&child, &manager);
     child.set_subagent_host(SubagentHost {
         task_manager: Some(manager.clone()),
         child_owner: Some(owner),
@@ -160,16 +183,22 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
-    let built = fixed_context(&child, "child answer");
-    let permit = permit_for(&child, &built.context);
+    let built =
+        crate::session::subagent::child_runner::tests::fixed_context(&child, "child answer");
+    let permit = crate::session::subagent::child_runner::tests::permit_for(&child, &built.context);
     let run_child = child.clone();
     let mut runner = tokio::spawn(async move {
-        let outcome = run_child_until_terminal(built.context, 10, &run_child).await;
+        let outcome = crate::session::subagent::child_runner::run_child_until_terminal(
+            built.context,
+            10,
+            &run_child,
+        )
+        .await;
         if let Some(permit) = permit {
             permit.finish(Ok(()));
         }
@@ -186,7 +215,10 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
     }
     // No process exists in this fixture; the delayed obligation is the message.
     manager.confirm_external_execution_stopped(&ticket);
-    assert!(manager.complete(&ticket, nested_result()));
+    assert!(manager.complete(
+        &ticket,
+        crate::session::subagent::child_runner::tests::nested_result()
+    ));
     let (entered, release) = child.queue().gate_next_receive();
     let delivery_id = peri_acp_types::messages::MessageId::new();
     let reminder = crate::session::producer_reminders::trusted_reminder(
@@ -215,7 +247,7 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut runner)
         .await
         .expect("runner must finish after commit")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
     let ChildRunOutcome::HandedOff { receipt } = outcome else {
         panic!("committed-but-unreasoned result must hand off: {outcome:?}");
     };
@@ -232,8 +264,12 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
 #[tokio::test(start_paused = true)]
 async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
     let c_manager = Arc::new(TaskManager::new());
-    let c = make_child(c_manager.clone(), true);
-    let c_id = c.store().thread_id.clone().unwrap();
+    let c = crate::session::subagent::child_runner::tests::make_child(c_manager.clone(), true);
+    let c_id = c
+        .store()
+        .thread_id
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     TaskManagerPort::register(
         c_manager.as_ref(),
         BgTaskRegistration {
@@ -244,12 +280,12 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .expect("the register fixture result is required for this assertion");
     c.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("C task"),
     ));
-    let c_built = fixed_context(&c, "C waiting");
+    let c_built = crate::session::subagent::child_runner::tests::fixed_context(&c, "C waiting");
     let c_terminal_route = c
         .subagent_host()
         .and_then(|host| host.child_owner.clone())
@@ -262,7 +298,7 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
             },
         );
     let b_manager = Arc::new(TaskManager::new());
-    let b = make_child(b_manager.clone(), false);
+    let b = crate::session::subagent::child_runner::tests::make_child(b_manager.clone(), false);
     let inbox = crate::session::async_router::AsyncRouter::for_queue(b.queue());
     let c_run_id = c_id.clone();
     let c_completion = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
@@ -299,7 +335,7 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
         },
     )
     .await
-    .unwrap();
+    .expect("the run sync with registered handoff fixture result is required for this assertion");
     let crate::session::subagent::run_sync::SyncCompletion::Pending(pending) = c_completion else {
         panic!("C must hand off its permanent shell");
     };
@@ -316,29 +352,40 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("B waits for C"),
     ));
-    let b_built = fixed_context(&b, "B summarized C");
-    let b_outcome = run_child_until_terminal(b_built.context, 10, &b).await;
+    let b_built =
+        crate::session::subagent::child_runner::tests::fixed_context(&b, "B summarized C");
+    let b_outcome =
+        crate::session::subagent::child_runner::run_child_until_terminal(b_built.context, 10, &b)
+            .await;
     assert!(
         matches!(b_outcome, ChildRunOutcome::Settled),
         "{b_outcome:?}"
     );
     let b_text = crate::session::subagent::util::extract_last_ai_text(&b);
     assert!(b_text.contains("B summarized C"));
-    assert!(transcript_contains(&b, &c_id), "直接父 B 必须收到 C 的身份");
+    assert!(
+        crate::session::subagent::child_runner::tests::transcript_contains(&b, &c_id),
+        "直接父 B 必须收到 C 的身份"
+    );
 
-    let a = make_child(Arc::new(TaskManager::new()), false);
+    let a = crate::session::subagent::child_runner::tests::make_child(
+        Arc::new(TaskManager::new()),
+        false,
+    );
     a.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("B summarized C"),
     ));
-    let a_built = fixed_context(&a, "A done");
-    let a_outcome = run_child_until_terminal(a_built.context, 10, &a).await;
+    let a_built = crate::session::subagent::child_runner::tests::fixed_context(&a, "A done");
+    let a_outcome =
+        crate::session::subagent::child_runner::run_child_until_terminal(a_built.context, 10, &a)
+            .await;
     assert!(
         matches!(a_outcome, ChildRunOutcome::Settled),
         "{a_outcome:?}"
     );
     assert!(
-        !transcript_contains(&a, &c_id),
+        !crate::session::subagent::child_runner::tests::transcript_contains(&a, &c_id),
         "A 不得越过 B 接收 C 的身份"
     );
     assert_eq!(c_manager.active_count(), 1, "C 的 Shell 保持真实状态");

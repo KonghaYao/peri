@@ -3,22 +3,16 @@
 //! 由 `system` 挂载；`system::handle_bg_task_*` / `system::apply_bg_task_snapshot` /
 //! `system::request_bg_task_snapshot` 路径经 `pub use` 保持不变。
 
-use super::*;
+use super::BridgeState;
+
 use crate::i18n;
 use crate::kit::acp_events::SessionPhase;
 use crate::kit::acp_types::{BgTaskEntry, BgTaskSnapshotSource};
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY,
-    BG_TASK_REVISION, BG_TASKS, BgLiveStatus, NOTIFICATION, PROGRAM_STATUS,
-};
-use crate::kit::bg_task_identity::{
-    METADATA_TEXT_BYTES, RECENT_METADATA_BYTES, RECENT_METADATA_ENTRIES, bounded_label,
-    protected_task_ids, prune_metadata, upsert_identity_from_started,
-};
-use crate::kit::bg_task_live::{
-    mark_task_cancelled, mark_task_completed, seed_live_from_running_snapshot,
-    seed_live_from_started, seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
-};
+
+use crate::kit::bg_task_identity::METADATA_TEXT_BYTES;
+use crate::kit::bg_task_identity::RECENT_METADATA_BYTES;
+use crate::kit::bg_task_identity::RECENT_METADATA_ENTRIES;
+
 use crate::kit::bg_task_status::BgTaskStatus;
 use crate::kit::program_status::{self, ProgramStatus};
 use fluent_bundle::FluentValue;
@@ -48,7 +42,12 @@ pub(crate) fn apply_bg_task_snapshot(
     if live_source {
         for task in &tasks {
             if BgTaskStatus::classify(task.status.as_deref()).is_active() {
-                seed_live_from_running_snapshot(&task.task_id, &task.kind, &task.summary, task.pid);
+                crate::kit::bg_task_live::seed_live_from_running_snapshot(
+                    &task.task_id,
+                    &task.kind,
+                    &task.summary,
+                    task.pid,
+                );
             }
         }
     }
@@ -86,14 +85,24 @@ pub(crate) fn apply_bg_task_snapshot(
         .collect();
     if live_source {
         BG_DISPLAY.state().write().clone_from(&entries);
+        for task in &tasks {
+            if BgTaskStatus::classify(task.status.as_deref()).is_active()
+                && is_agent_task(task)
+                && let Some(child_thread_id) = task.child_thread_id.as_deref()
+            {
+                bind_task_row_to_child(&task.task_id, child_thread_id);
+            }
+        }
     }
     for t in &tasks {
-        upsert_identity_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
+        crate::kit::bg_task_identity::upsert_identity_from_started(
+            &t.task_id, &t.kind, &t.summary, t.pid,
+        );
         let status = BgTaskStatus::classify(t.status.as_deref());
         if status.is_terminal() {
             // 历史回放不得覆盖当前 live 明细；缺失时才补只读终态事实。
             if live_source || !has_live_detail(&t.task_id) {
-                seed_live_from_terminal_snapshot(
+                crate::kit::bg_task_live::seed_live_from_terminal_snapshot(
                     &t.task_id,
                     &t.kind,
                     &t.summary,
@@ -103,28 +112,41 @@ pub(crate) fn apply_bg_task_snapshot(
             }
         } else if live_source {
             if !status.is_active() {
-                seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
+                crate::kit::bg_task_live::seed_unobserved_snapshot(
+                    &t.task_id, &t.kind, &t.summary, t.pid,
+                );
             }
         } else if !has_live_detail(&t.task_id) {
-            seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
+            crate::kit::bg_task_live::seed_unobserved_snapshot(
+                &t.task_id, &t.kind, &t.summary, t.pid,
+            );
         }
     }
     if live_source {
-        crate::kit::bg_task_live::reconcile_snapshot_tasks(&protected_task_ids());
+        crate::kit::bg_task_live::reconcile_snapshot_tasks(
+            &crate::kit::bg_task_identity::protected_task_ids(),
+        );
     }
-    prune_metadata();
+    crate::kit::bg_task_identity::prune_metadata();
     true
 }
 
 fn project_task(task: &BgTaskEntry) -> BgTaskEntry {
     BgTaskEntry {
         task_id: task.task_id.clone(),
-        kind: bounded_label(&task.kind),
-        summary: bounded_label(&task.summary),
-        started_at: bounded_label(&task.started_at),
+        kind: crate::kit::bg_task_identity::bounded_label(&task.kind),
+        summary: crate::kit::bg_task_identity::bounded_label(&task.summary),
+        started_at: crate::kit::bg_task_identity::bounded_label(&task.started_at),
         pid: task.pid,
         revision: task.revision,
-        status: task.status.as_deref().map(bounded_label),
+        status: task
+            .status
+            .as_deref()
+            .map(crate::kit::bg_task_identity::bounded_label),
+        child_thread_id: task
+            .child_thread_id
+            .as_deref()
+            .map(crate::kit::bg_task_identity::bounded_label),
     }
 }
 
@@ -136,28 +158,31 @@ fn bounded_snapshot_tasks(
 ) -> Vec<&BgTaskEntry> {
     let (mut count, mut bytes) = (0usize, 0usize);
     let mut selected = Vec::new();
-    for task in tasks.iter().rev() {
-        if source == BgTaskSnapshotSource::Historical
-            || BgTaskStatus::classify(task.status.as_deref()).is_terminal()
-        {
-            let size = std::mem::size_of::<BgTaskEntry>()
-                + task.task_id.len()
-                + task.kind.len().min(METADATA_TEXT_BYTES)
-                + task.summary.len().min(METADATA_TEXT_BYTES)
-                + task.started_at.len().min(METADATA_TEXT_BYTES)
-                + task
-                    .status
-                    .as_ref()
-                    .map_or(0, |status| status.len().min(METADATA_TEXT_BYTES));
-            if count >= RECENT_METADATA_ENTRIES
-                || bytes.saturating_add(size) > RECENT_METADATA_BYTES
+    {
+        let iteration_items = tasks.iter().rev();
+        for task in iteration_items {
+            if source == BgTaskSnapshotSource::Historical
+                || BgTaskStatus::classify(task.status.as_deref()).is_terminal()
             {
-                continue;
+                let size = std::mem::size_of::<BgTaskEntry>()
+                    + task.task_id.len()
+                    + task.kind.len().min(METADATA_TEXT_BYTES)
+                    + task.summary.len().min(METADATA_TEXT_BYTES)
+                    + task.started_at.len().min(METADATA_TEXT_BYTES)
+                    + task
+                        .status
+                        .as_ref()
+                        .map_or(0, |status| status.len().min(METADATA_TEXT_BYTES));
+                if count >= RECENT_METADATA_ENTRIES
+                    || bytes.saturating_add(size) > RECENT_METADATA_BYTES
+                {
+                    continue;
+                }
+                count += 1;
+                bytes += size;
             }
-            count += 1;
-            bytes += size;
+            selected.push(task);
         }
-        selected.push(task);
     }
     selected.reverse();
     selected
@@ -170,6 +195,7 @@ fn has_live_detail(task_id: &str) -> bool {
 /// wire 上 `BgTaskKind::Agent` 的 serde snake_case 值。
 const AGENT_KIND: &str = "agent";
 
+#[must_use]
 fn is_agent_task(task: &BgTaskEntry) -> bool {
     task.kind == AGENT_KIND
 }
@@ -178,6 +204,7 @@ fn is_agent_task(task: &BgTaskEntry) -> bool {
 /// 证据（`BG_LIVE_DETAIL` 为 Running）：历史快照会把非终态任务 seed 为
 /// Unobserved，不能据此让程序状态停在 working。shell 是用户显式放到后台的命令，
 /// workflow/mcp 的生命周期由各自调度承担，都不代表主程序还在推进任务。
+#[must_use]
 pub(crate) fn has_active_async_agent() -> bool {
     let tasks = BG_TASKS.state();
     let tasks = tasks.read();
@@ -219,7 +246,7 @@ fn settle_async_agent_status(state: &BridgeState, success: bool) {
 }
 
 fn bg_task_description(summary: &str, status: Option<&str>) -> String {
-    let summary = bounded_label(summary);
+    let summary = crate::kit::bg_task_identity::bounded_label(summary);
     match BgTaskStatus::classify(status) {
         BgTaskStatus::Lost => format!("{summary} · {}", i18n::tr("bg-task-status-lost")),
         BgTaskStatus::Reconciling => {
@@ -294,6 +321,18 @@ fn accept_bg_task_delta(revision: Option<u64>) -> bool {
     true
 }
 
+/// 任务行与 `SubagentStarted` 共享 child thread 身份：按身份绑定，不按到达顺序。
+///
+/// 任务行先到时也先建立 link/identity，后到的 `SubagentStarted` 可精确认领；
+/// child 先到时把占位 live owner 的正文与终态移交到任务行。
+fn bind_task_row_to_child(task_id: &str, child_thread_id: &str) {
+    let agent_name =
+        crate::kit::bg_task_live::pending_live_owner_name(child_thread_id).unwrap_or_default();
+    if crate::kit::bg_task_identity::link_row_to_agent(task_id, child_thread_id, &agent_name) {
+        crate::kit::bg_task_live::attach_pending_live_detail(task_id, child_thread_id);
+    }
+}
+
 pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEntry) {
     if !accept_bg_task_delta(entry.revision) {
         return;
@@ -315,12 +354,22 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
             tasks.push(project_task(entry));
         }
     }
-    upsert_identity_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
-    seed_live_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
+    crate::kit::bg_task_identity::upsert_identity_from_started(
+        &entry.task_id,
+        &entry.kind,
+        &entry.summary,
+        entry.pid,
+    );
+    crate::kit::bg_task_live::seed_live_from_started(
+        &entry.task_id,
+        &entry.kind,
+        &entry.summary,
+        entry.pid,
+    );
     let display_entry = crate::kit::atoms::BgDisplayEntry {
         id: entry.task_id.clone(),
         linked_agent_id: None,
-        agent_type: bounded_label(&entry.kind),
+        agent_type: crate::kit::bg_task_identity::bounded_label(&entry.kind),
         desc: bg_task_description(&entry.summary, entry.status.as_deref()),
         is_active: true,
         is_error: false,
@@ -332,7 +381,7 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     let display = BG_DISPLAY.state();
     let mut display = display.write();
     if let Some(existing) = display.iter_mut().find(|e| e.id == entry.task_id) {
-        existing.agent_type = bounded_label(&entry.kind);
+        existing.agent_type = crate::kit::bg_task_identity::bounded_label(&entry.kind);
         existing.desc = bg_task_description(&entry.summary, entry.status.as_deref());
         existing.is_active = true;
         existing.completed_at = None;
@@ -340,7 +389,12 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
         display.push(display_entry);
     }
     drop(display);
-    prune_metadata();
+    if is_agent_task(entry)
+        && let Some(child_thread_id) = entry.child_thread_id.as_deref()
+    {
+        bind_task_row_to_child(&entry.task_id, child_thread_id);
+    }
+    crate::kit::bg_task_identity::prune_metadata();
 }
 
 pub(crate) fn handle_bg_task_completed(
@@ -357,7 +411,7 @@ pub(crate) fn handle_bg_task_completed(
     }
     let was_agent = task_is_agent(task_id);
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
-    mark_task_completed(task_id, success, duration_ms, output_preview);
+    crate::kit::bg_task_live::mark_task_completed(task_id, success, duration_ms, output_preview);
     // 标记后台显示条目为完成（保留 3s 后自动清除）
     let now = peri_time::monotonic_now();
     if let Some(entry) = BG_DISPLAY
@@ -370,7 +424,7 @@ pub(crate) fn handle_bg_task_completed(
         entry.is_error = !success;
         entry.completed_at = Some(now);
     }
-    prune_metadata();
+    crate::kit::bg_task_identity::prune_metadata();
     let msg = if success {
         i18n::tr_args(
             "app-note-bg-task-completed",
@@ -411,7 +465,7 @@ pub(crate) fn handle_bg_task_cancelled(
     }
     let was_agent = task_is_agent(task_id);
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
-    mark_task_cancelled(task_id, reason);
+    crate::kit::bg_task_live::mark_task_cancelled(task_id, reason);
     // 标记后台显示条目为失败（3s 倒计时）
     let now = peri_time::monotonic_now();
     if let Some(entry) = BG_DISPLAY
@@ -424,7 +478,7 @@ pub(crate) fn handle_bg_task_cancelled(
         entry.is_error = true;
         entry.completed_at = Some(now);
     }
-    prune_metadata();
+    crate::kit::bg_task_identity::prune_metadata();
     if was_agent {
         settle_async_agent_status(state, false);
     }
@@ -437,7 +491,7 @@ pub(crate) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Opti
     let tasks = BG_TASKS.state();
     let mut tasks = tasks.write();
     if let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) {
-        task.status = Some(bounded_label(status));
+        task.status = Some(crate::kit::bg_task_identity::bounded_label(status));
         let description = bg_task_description(&task.summary, task.status.as_deref());
         if let Some(entry) = BG_DISPLAY
             .state()
@@ -456,3 +510,23 @@ pub(crate) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Opti
 #[cfg(test)]
 #[path = "bg_task_metadata_test.rs"]
 mod metadata_tests;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_IDENTITY;
+
+use crate::kit::atoms::BG_TASK_REVISION;
+
+use crate::kit::atoms::BG_TASKS;
+
+use crate::kit::atoms::BgLiveStatus;
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::PROGRAM_STATUS;

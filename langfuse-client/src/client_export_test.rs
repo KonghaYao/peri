@@ -17,22 +17,39 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use serde_json::{json, Value};
 
-use super::*;
-use crate::{
-    client::LangfuseClient,
-    config::TelemetryConfig,
-    encoding::ExportContext,
-    memory::MemoryBudget,
-    payload::{ExportPayload, PayloadBody},
-    snapshot::TelemetryEvent,
-    spool::cleanup::CleanupRegistry,
-    spool::{
-        CleanupRegistration, ObjectClaim, ObjectId, ObjectKind, ObjectMeta, PageCursor,
-        QuotaReservation, RouteFingerprint, SpoolError, SpoolObject, SpoolPage, SpoolReader,
-        SpoolResult, SpoolState, SpoolStore, SpoolUsage, TemporaryObject,
-    },
-    types::IngestionEvent,
-};
+use super::BudgetedWriter;
+use super::Compression;
+use super::CountingWriter;
+use super::Duration;
+use super::ExportConfig;
+use super::LangfuseError;
+use super::Serialize;
+use crate::client::LangfuseClient;
+use crate::config::TelemetryConfig;
+use crate::encoding::ExportContext;
+use crate::memory::MemoryBudget;
+use crate::payload::ExportPayload;
+use crate::payload::PayloadBody;
+use crate::snapshot::TelemetryEvent;
+use crate::spool::cleanup::CleanupRegistry;
+use crate::spool::CleanupRegistration;
+use crate::spool::ObjectClaim;
+use crate::spool::ObjectId;
+use crate::spool::ObjectKind;
+use crate::spool::ObjectMeta;
+use crate::spool::PageCursor;
+use crate::spool::QuotaReservation;
+use crate::spool::RouteFingerprint;
+use crate::spool::SpoolError;
+use crate::spool::SpoolObject;
+use crate::spool::SpoolPage;
+use crate::spool::SpoolReader;
+use crate::spool::SpoolResult;
+use crate::spool::SpoolState;
+use crate::spool::SpoolStore;
+use crate::spool::SpoolUsage;
+use crate::spool::TemporaryObject;
+use crate::types::IngestionEvent;
 
 const TRACE_ID: &str = "11111111111111111111111111111111";
 
@@ -89,7 +106,7 @@ fn invalid_export_configurations_are_rejected() {
 // ─── 受预算约束的 writer ────────────────────────────────────────────
 
 fn budget(limit: usize) -> Arc<MemoryBudget> {
-    MemoryBudget::new(limit).expect("budget")
+    MemoryBudget::try_new(limit).expect("budget")
 }
 
 /// `ExportPayload` 刻意不实现 `Debug`（正文不得因断言外泄），因此不能用 `unwrap_err`。
@@ -156,7 +173,7 @@ fn writer(
     };
     let registry = CleanupRegistry::new(cleanup_store, Arc::clone(budget), 8);
     let registration = registry.try_register().expect("cleanup slot");
-    BudgetedWriter::new(
+    BudgetedWriter::try_new(
         telemetry_config,
         Arc::clone(budget),
         store,
@@ -224,7 +241,7 @@ fn request_clones_share_the_once_serialized_body() {
     let events = events();
     let telemetry = telemetry(events, &budget);
     let telemetry_config = TelemetryConfig::default();
-    let payload = encode(
+    let payload = super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, 1 << 20),
         &config,
@@ -263,7 +280,7 @@ impl Serialize for InvalidPayload {
 
 #[test]
 fn serialization_error_does_not_expose_payload() {
-    let error = preflight(&InvalidPayload, 32).unwrap_err();
+    let error = super::preflight(&InvalidPayload, 32).unwrap_err();
     assert!(error.to_string().contains("preflight serialization failed"));
     assert!(!error.to_string().contains("secret-payload"));
     // 编码侧：越限与未就绪来源的错误文本都不得携带正文。
@@ -279,7 +296,7 @@ fn serialization_error_does_not_expose_payload() {
         ..Default::default()
     };
     let telemetry_config = TelemetryConfig::default();
-    let error = error_of(encode(
+    let error = error_of(super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, 1),
         &config,
@@ -303,9 +320,9 @@ fn counting_writer_is_exact_bounded_and_overflow_safe() {
     assert!(writer.write_all(b"6").is_err());
     assert_eq!(writer.count, 5);
     assert!(writer.exceeded);
-    assert!(preflight(&"123", 5).is_ok());
+    assert!(super::preflight(&"123", 5).is_ok());
     assert!(matches!(
-        preflight(&"1234", 5),
+        super::preflight(&"1234", 5),
         Err(LangfuseError::PayloadTooLarge { limit_bytes: 5 })
     ));
     let mut writer = CountingWriter {
@@ -324,9 +341,9 @@ fn counting_writer_is_exact_bounded_and_overflow_safe() {
 fn preflight_counts_json_escaping_and_total_array_envelope() {
     let payload = vec!["\"\\\n", "文本"];
     let expected = serde_json::to_vec(&payload).unwrap().len();
-    preflight(&payload, expected).unwrap();
+    super::preflight(&payload, expected).unwrap();
     assert!(
-        matches!(preflight(&payload, expected - 1), Err(LangfuseError::PayloadTooLarge { limit_bytes }) if limit_bytes == expected - 1)
+        matches!(super::preflight(&payload, expected - 1), Err(LangfuseError::PayloadTooLarge { limit_bytes }) if limit_bytes == expected - 1)
     );
 }
 
@@ -342,7 +359,7 @@ fn gzip_and_none_share_otlp_semantics() {
         compression: Compression::None,
         ..Default::default()
     };
-    let none = encode(
+    let none = super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, 1 << 20),
         &none_config,
@@ -363,7 +380,7 @@ fn gzip_and_none_share_otlp_semantics() {
         compression: Compression::Gzip,
         ..Default::default()
     };
-    let gzip = encode(
+    let gzip = super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, 1 << 20),
         &gzip_config,
@@ -412,7 +429,7 @@ fn raw_and_wire_limits_are_independent() {
         compression: Compression::Gzip,
         ..Default::default()
     };
-    let error = error_of(encode(
+    let error = error_of(super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, raw_only.max_wire_bytes),
         &raw_only,
@@ -424,7 +441,7 @@ fn raw_and_wire_limits_are_independent() {
 
     // 只超线包上限：解压后上限远大于正文，线包上限取实测压缩结果的一半。
     let compressed = payload_bytes(
-        &encode(
+        &super::encode(
             &telemetry,
             writer(&telemetry_config, &budget, None, 1 << 20),
             &ExportConfig {
@@ -445,7 +462,7 @@ fn raw_and_wire_limits_are_independent() {
         compression: Compression::Gzip,
         ..Default::default()
     };
-    let error = error_of(encode(
+    let error = error_of(super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, wire_only.max_wire_bytes),
         &wire_only,
@@ -462,7 +479,7 @@ fn raw_and_wire_limits_are_independent() {
         compression: Compression::None,
         ..Default::default()
     };
-    let error = error_of(encode(
+    let error = error_of(super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, none_wire.max_wire_bytes),
         &none_wire,
@@ -497,7 +514,7 @@ fn otlp_expansion_reports_a_splittable_limit_error() {
         ..Default::default()
     };
     let telemetry_config = TelemetryConfig::default();
-    let error = error_of(encode(
+    let error = error_of(super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, limit),
         &config,
@@ -535,7 +552,7 @@ fn export_event_count_excludes_records_without_spans() {
         &budget,
     );
     for compression in [Compression::None, Compression::Gzip] {
-        let payload = encode(
+        let payload = super::encode(
             &telemetry,
             writer(&TelemetryConfig::default(), &budget, None, 1 << 20),
             &ExportConfig {
@@ -579,13 +596,13 @@ fn spooled_export_body_matches_memory_body() {
             compression,
             ..Default::default()
         };
-        let in_memory = encode(
+        let in_memory = super::encode(
             &telemetry,
             writer(&telemetry_config, &budget, None, 1 << 20),
             &config,
         )
         .expect("memory encode");
-        let spooled = encode(
+        let spooled = super::encode(
             &telemetry,
             writer(
                 &telemetry_config,
@@ -723,7 +740,7 @@ async fn encoded_request_exactly_at_limit_is_accepted() {
         compression: Compression::None,
         ..Default::default()
     };
-    let payload = encode(
+    let payload = super::encode(
         &telemetry,
         writer(&telemetry_config, &budget, None, 1 << 20),
         &config,
@@ -754,235 +771,4 @@ async fn encoded_request_exactly_at_limit_is_accepted() {
     mock.assert_async().await;
 }
 
-// ─── 最小暂存端口（测试局部 fixture） ──────────────────────────────
-
-/// 进程内暂存端口：`create` 写入内存缓冲，`publish` 后可按 id 领取。
-struct MemStore {
-    threshold: usize,
-    next: AtomicU64,
-    self_ref: std::sync::OnceLock<std::sync::Weak<MemStore>>,
-    objects: Mutex<HashMap<ObjectId, Bytes>>,
-    in_flight: Mutex<HashMap<ObjectId, Arc<Mutex<Vec<u8>>>>>,
-}
-
-impl crate::spool::sealed::Sealed for MemStore {}
-
-impl MemStore {
-    fn new(threshold: usize) -> Arc<Self> {
-        let store = Arc::new(Self {
-            threshold,
-            next: AtomicU64::new(1),
-            self_ref: std::sync::OnceLock::new(),
-            objects: Mutex::new(HashMap::new()),
-            in_flight: Mutex::new(HashMap::new()),
-        });
-        let _ = store.self_ref.set(Arc::downgrade(&store));
-        store
-    }
-
-    fn handle(&self) -> Arc<dyn SpoolStore> {
-        let store = self
-            .self_ref
-            .get()
-            .expect("self handle")
-            .upgrade()
-            .expect("store alive");
-        let handle: Arc<dyn SpoolStore> = store;
-        handle
-    }
-
-    fn allocate(&self) -> ObjectId {
-        let counter = self.next.fetch_add(1, Ordering::Relaxed);
-        let mut raw = [0u8; 16];
-        raw[..8].copy_from_slice(&counter.to_be_bytes());
-        ObjectId::from_bytes(raw)
-    }
-
-    fn bytes(&self, id: ObjectId) -> SpoolResult<Bytes> {
-        self.objects
-            .lock()
-            .expect("objects")
-            .get(&id)
-            .cloned()
-            .ok_or(SpoolError::NotFound)
-    }
-
-    fn meta(&self, id: ObjectId) -> ObjectMeta {
-        let len = self
-            .objects
-            .lock()
-            .expect("objects")
-            .get(&id)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or_default();
-        ObjectMeta {
-            version: 1,
-            id,
-            kind: ObjectKind::Export,
-            route: RouteFingerprint::from_bytes([9; 32]),
-            event_count: 0,
-            encoding: crate::config::Compression::None,
-            raw_len: len,
-            stored_len: len,
-            sha256: [0; 32],
-            accepted_at_ms: 0,
-            expires_at_ms: 60_000,
-            attempts: 0,
-            next_attempt_at_ms: None,
-            state: SpoolState::Ready,
-        }
-    }
-}
-
-impl SpoolStore for MemStore {
-    fn reserve(&self, bytes: u64) -> SpoolResult<Box<dyn QuotaReservation>> {
-        struct Reserved(u64);
-        impl QuotaReservation for Reserved {
-            fn bytes(&self) -> u64 {
-                self.0
-            }
-        }
-        Ok(Box::new(Reserved(bytes)))
-    }
-
-    fn create(
-        &self,
-        quota: Box<dyn QuotaReservation>,
-        _kind: ObjectKind,
-        cleanup: CleanupRegistration,
-    ) -> SpoolResult<Box<dyn TemporaryObject>> {
-        let id = self.allocate();
-        cleanup.slot.bind(id, quota.bytes())?;
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        self.in_flight
-            .lock()
-            .expect("in flight")
-            .insert(id, Arc::clone(&buffer));
-        Ok(Box::new(MemObject {
-            id,
-            handle: self.handle(),
-            threshold: self.threshold,
-            buffer,
-            cleanup: Some(cleanup),
-        }))
-    }
-
-    fn inspect(&self, id: ObjectId) -> SpoolResult<ObjectMeta> {
-        self.bytes(id).map(|_| self.meta(id))
-    }
-
-    fn open(&self, id: ObjectId) -> SpoolResult<SpoolReader> {
-        Ok(Box::new(std::io::Cursor::new(self.bytes(id)?)))
-    }
-
-    fn list(&self, _after: Option<PageCursor>, _limit: usize) -> SpoolResult<SpoolPage> {
-        Err(SpoolError::Unavailable)
-    }
-
-    fn claim(&self, id: ObjectId) -> SpoolResult<Option<Box<dyn ObjectClaim>>> {
-        let mut held = self.in_flight.lock().expect("in flight");
-        if let Some(buffer) = held.remove(&id) {
-            let bytes = Bytes::from(buffer.lock().expect("buffer").clone());
-            return Ok(Some(Box::new(MemClaim {
-                meta: self.meta(id),
-                bytes,
-            })));
-        }
-        Ok(Some(Box::new(MemClaim {
-            meta: self.meta(id),
-            bytes: self.bytes(id)?,
-        })))
-    }
-
-    fn delete(&self, id: ObjectId) -> SpoolResult<()> {
-        self.objects
-            .lock()
-            .expect("objects")
-            .remove(&id)
-            .map(|_| ())
-            .ok_or(SpoolError::NotFound)
-    }
-
-    fn usage(&self) -> SpoolResult<SpoolUsage> {
-        let objects = self.objects.lock().expect("objects");
-        let stored_bytes = objects.values().map(|bytes| bytes.len() as u64).sum();
-        Ok(SpoolUsage {
-            reserved_bytes: stored_bytes,
-            stored_bytes,
-            objects: objects.len() as u64,
-        })
-    }
-}
-
-struct MemObject {
-    id: ObjectId,
-    handle: Arc<dyn SpoolStore>,
-    threshold: usize,
-    buffer: Arc<Mutex<Vec<u8>>>,
-    cleanup: Option<CleanupRegistration>,
-}
-
-impl Write for MemObject {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len()
-            > self
-                .threshold
-                .saturating_sub(self.buffer.lock().expect("buffer").len())
-        {
-            return Err(std::io::Error::other("fake spool quota exceeded"));
-        }
-        self.buffer.lock().expect("buffer").extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl TemporaryObject for MemObject {
-    fn id(&self) -> ObjectId {
-        self.id
-    }
-
-    fn written_len(&self) -> u64 {
-        self.buffer.lock().expect("buffer").len() as u64
-    }
-
-    fn publish(mut self: Box<Self>, meta: ObjectMeta) -> SpoolResult<SpoolObject> {
-        let bytes = Bytes::from(std::mem::take(&mut *self.buffer.lock().expect("buffer")));
-        let claim: Box<dyn ObjectClaim> = Box::new(MemClaim {
-            meta: meta.clone(),
-            bytes,
-        });
-        let cleanup = self.cleanup.take().ok_or(SpoolError::Unavailable)?;
-        SpoolObject::from_claim(self.handle.clone(), claim, cleanup)
-    }
-
-    fn abort(self: Box<Self>) -> SpoolResult<()> {
-        Ok(())
-    }
-}
-
-struct MemClaim {
-    meta: ObjectMeta,
-    bytes: Bytes,
-}
-
-impl ObjectClaim for MemClaim {
-    fn meta(&self) -> &ObjectMeta {
-        &self.meta
-    }
-
-    fn open(&self) -> SpoolResult<SpoolReader> {
-        Ok(Box::new(std::io::Cursor::new(self.bytes.clone())))
-    }
-
-    fn checkpoint(&mut self, _meta: ObjectMeta) -> SpoolResult<()> {
-        Ok(())
-    }
-
-    fn delete(&mut self) -> SpoolResult<()> {
-        Ok(())
-    }
-}
+include!("client_export_test/memory_spool_fixture.rs");

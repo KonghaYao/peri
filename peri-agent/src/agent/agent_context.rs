@@ -12,15 +12,16 @@ use crate::middleware::state::MiddlewareState;
 use crate::session::MessageQueue;
 
 /// MiddlewareState 的 StageContext 薄封装
-pub struct AgentContext<'a> {
+#[derive(Debug)]
+pub struct AgentContext<'context> {
     /// 委托给 StageContext（实时状态）
-    ctx: &'a StageContext,
+    ctx: &'context StageContext,
 
     /// 从 transcript.visible_messages() 克隆的消息缓存
     messages_cache: Vec<BaseMessage>,
 
     /// 本次 Receive 的输入身份，只供本批输入准备链读取。
-    input_message_ids: Option<&'a [MessageId]>,
+    input_message_ids: Option<&'context [MessageId]>,
 
     /// 标记已有消息是否被替换（用于输入准备 runner reconcile）
     messages_modified: bool,
@@ -36,11 +37,12 @@ pub struct AgentContext<'a> {
     recall_buffer: Vec<String>,
 }
 
-impl<'a> AgentContext<'a> {
+impl<'context> AgentContext<'context> {
     /// 从 StageContext 构造 AgentContext
     ///
     /// - 一次性克隆 transcript 的 visible_messages 到 messages_cache
-    pub fn from_stage(ctx: &'a StageContext) -> Self {
+    #[must_use]
+    pub fn from_stage(ctx: &'context StageContext) -> Self {
         let messages_cache = ctx
             .session
             .transcript
@@ -60,17 +62,22 @@ impl<'a> AgentContext<'a> {
     }
 
     /// 为本次输入准备绑定精确批次，Some(empty) 表示不处理历史用户消息。
-    pub(crate) fn with_input_message_ids(mut self, input_message_ids: &'a [MessageId]) -> Self {
+    pub(crate) fn with_input_message_ids(
+        mut self,
+        input_message_ids: &'context [MessageId],
+    ) -> Self {
         self.input_message_ids = Some(input_message_ids);
         self
     }
 
     /// 获取消息缓存快照（供 runner reconcile 到 transcript 使用）
+    #[must_use]
     pub fn messages_cache(&self) -> &[BaseMessage] {
         &self.messages_cache
     }
 
     /// 已有消息是否被替换（供输入准备 runner 决定是否需要 reconcile）
+    #[must_use]
     pub fn messages_modified(&self) -> bool {
         self.messages_modified
     }

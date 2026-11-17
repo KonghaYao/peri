@@ -6,6 +6,7 @@ use super::{CurrentTurn, PendingSubagentGroup, TurnSegment};
 /// 配对判定分三层：身份优先（`parent_tool_call_id` == 卡片 `tool_id`，两个方向
 /// 共用）、无身份时前向扫描（`start_subagent` 认领最早未 claim 卡片）、以及
 /// 分组先到时的待配对表（`start_tool` 认领，仅身份匹配或无身份分组）。
+#[must_use]
 pub(super) fn is_agent_launcher_tool(tool_name: &str) -> bool {
     tool_name == "Agent"
 }
@@ -205,19 +206,21 @@ impl CurrentTurn {
         completed
     }
 
+    #[must_use]
     pub fn has_running_subagent(&self) -> bool {
         self.subagents.iter().any(|subagent| subagent.is_running)
     }
 
     /// 仅同步 subagent 需要在 turn 边界后继续接收事件；后台组由全局 live
     /// 明细维护，跨 turn 时必须冻结，不能保留活动容器。
+    #[must_use]
     pub fn has_running_sync_subagent(&self) -> bool {
         self.subagents
             .iter()
             .any(|subagent| subagent.is_running && !subagent.is_background)
     }
 
-    /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。
+    /// \[诊断\] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。
     pub fn subagent_ids(&self) -> Vec<&str> {
         self.subagents.iter().map(|s| s.agent_id.as_str()).collect()
     }

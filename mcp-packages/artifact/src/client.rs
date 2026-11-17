@@ -1,3 +1,5 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use thiserror::Error;
 
 const DEFAULT_URL: &str = "https://cloud-artifacts.claude-code-best.win";
@@ -41,6 +43,15 @@ pub struct ArtifactClient {
     token: String,
 }
 
+impl Debug for ArtifactClient {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactClient")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
 /// 服务端响应（兼容 Deno Deploy 抹平 HTTP 状态码的情况，错误字段在 body 中）
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ArtifactResponse {
@@ -56,11 +67,13 @@ pub struct ArtifactResponse {
 }
 
 impl ArtifactClient {
+    #[must_use]
     pub fn new(base_url: String, token: String) -> Self {
         Self { base_url, token }
     }
 
     /// 只解释传给本 MCP 实例的环境，不读取宿主进程环境。
+    #[must_use]
     pub fn from_instance_env(env: &std::collections::HashMap<String, String>) -> Self {
         let url = env
             .get("PERI_ARTIFACTS_URL")
@@ -73,6 +86,7 @@ impl ArtifactClient {
         Self::new(url, token)
     }
 
+    #[must_use]
     pub fn upload_url(&self) -> String {
         format!("{}/upload", self.base_url.trim_end_matches('/'))
     }
@@ -154,6 +168,7 @@ impl ArtifactClient {
     /// `␛]8;;URL␛\URL␛]8;;␛\` 这样的乱码。
     /// OSC 8 应该在 UI 渲染层（如 `LinkSpan` / Markdown link 渲染器）处理，
     /// tool_result 只返回纯 URL 文本。
+    #[must_use]
     pub fn format_output(resp: &ArtifactResponse) -> String {
         let mut output = format!("Artifact uploaded: {}\n", resp.url);
         if let Some(ref expires) = resp.expires_at {

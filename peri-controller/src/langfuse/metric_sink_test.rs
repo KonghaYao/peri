@@ -60,10 +60,30 @@ fn error_metric_is_reported_as_langfuse_event() {
         );
     };
     assert_eq!(body.name.as_deref(), Some("tool.error"));
-    assert_eq!(body.input.as_ref().unwrap()["error"], "exit 1");
-    assert_eq!(body.metadata.as_ref().unwrap()["event_type"], "metric");
-    assert_eq!(body.metadata.as_ref().unwrap()["sid"], "sid-1");
-    assert_eq!(body.metadata.as_ref().unwrap()["rid"], "rid-1");
+    assert_eq!(
+        body.input
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["error"],
+        "exit 1"
+    );
+    assert_eq!(
+        body.metadata
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["event_type"],
+        "metric"
+    );
+    assert_eq!(
+        body.metadata
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["sid"],
+        "sid-1"
+    );
+    assert_eq!(
+        body.metadata
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["rid"],
+        "rid-1"
+    );
     assert_eq!(body.level, Some(ObservationLevel::Error));
     assert!(body.parent_observation_id.is_none());
     assert_eq!(body.start_time.as_deref(), Some("2026-09-30T10:00:00.000Z"));
@@ -83,7 +103,8 @@ fn metric_event_wire_type_is_event_create() {
     ));
 
     let events = session.events_snapshot();
-    let wire = serde_json::to_value(&events[0]).unwrap();
+    let wire = serde_json::to_value(&events[0])
+        .expect("to_value must accept this test fixture representation");
     assert_eq!(wire["type"], "event-create");
     assert!(wire["body"]["traceId"]
         .as_str()
@@ -102,7 +123,11 @@ fn non_error_metric_keeps_default_level() {
         panic!("metrics must be reported as EventCreate");
     };
     assert_eq!(body.level, Some(ObservationLevel::Default));
-    assert!(body.metadata.as_ref().unwrap()["sid"].is_null());
+    assert!(body
+        .metadata
+        .as_ref()
+        .expect("the as ref fixture result is required for this assertion")["sid"]
+        .is_null());
 }
 
 fn event_trace_id(event: &IngestionEvent) -> String {
@@ -312,7 +337,7 @@ fn rejected_metric_is_recorded_in_drop_registry() {
         drop_registry: LangfuseDropRegistry::default(),
         turn_traces: crate::langfuse::TurnTraceRegistry::default(),
         last_trace_id: LazyLock::new(|| parking_lot::Mutex::new(None)),
-        budget: MemoryBudget::new(1024 * 1024).expect("固定的非零测试预算必须被接受"),
+        budget: MemoryBudget::try_new(1024 * 1024).expect("固定的非零测试预算必须被接受"),
     });
     let sink = LangfuseMetricsSink::new(Arc::clone(&session) as Arc<dyn LangfuseSessionLike>);
 

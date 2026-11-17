@@ -1,4 +1,11 @@
-use super::*;
+use super::AgentCancellationToken;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::HostFixture;
+use super::RwLock;
+use super::SubAgentTool;
+use super::SubagentLlmSource;
 use serial_test::serial;
 
 // ─── SubAgent v2 集成测试（4 场景）──────────────────────────────────────
@@ -59,8 +66,9 @@ async fn test_integration_fork_parent_messages_passthrough() {
 
     // Act: fork 模式触发端到端路径
     super::super::invocation::reset_current_messages_calls();
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "continue from parent context"
@@ -167,14 +175,14 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            text_events("ctx-preferred")
+            test_support::text_events("ctx-preferred")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(CaptureContentLLM);
@@ -196,8 +204,9 @@ async fn test_fork_prefers_tool_context_messages_over_parent_snapshot() {
         .with_parent_messages(Arc::clone(&parent_messages)),
     );
 
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "review current turn"
@@ -247,14 +256,14 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            text_events("fallback-used")
+            test_support::text_events("fallback-used")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(FallbackCaptureLLM);
@@ -276,8 +285,9 @@ async fn test_fork_falls_back_to_parent_messages_when_tool_context_empty() {
         .with_parent_messages(Arc::clone(&parent_messages)),
     );
 
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "review fallback"
@@ -329,14 +339,14 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.captured.lock().unwrap() = messages.iter().map(|m| m.content()).collect();
-            text_events("tool-call-dropped")
+            test_support::text_events("tool-call-dropped")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(DropToolCallCaptureLLM);
@@ -355,8 +365,9 @@ async fn test_fork_drops_trailing_tool_call_message_from_tool_context() {
         "/tmp".to_string(),
     ));
 
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "review without dangling tool call"
@@ -417,13 +428,13 @@ async fn test_integration_background_independent_survives_parent_cancel() {
             _request: peri_model::ModelRequest,
             _cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let receiver = self.release.lock().unwrap().take();
             if let Some(receiver) = receiver {
                 let _ = receiver.await;
             }
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            text_events("bg done independent")
+            test_support::text_events("bg done independent")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(CountingLLM);
@@ -474,7 +485,7 @@ async fn test_integration_background_independent_survives_parent_cancel() {
         .with_bg_event_sender(bg_tx),
     );
 
-    // Act 1: 启动 background fork
+    // Act 1: 启动 background fork（门控未放行，必须用普通 invoke 拿启动回执）
     let invoke_result = t
         .invoke(
             serde_json::json!({
@@ -577,110 +588,6 @@ async fn test_integration_background_independent_survives_parent_cancel() {
     );
 }
 
-/// 场景 3（Sync Cascade cancel）—— 补充断言。
-///
-/// 已有测试 `test_cancel_token_interrupts_subagent`（:655）验证了"父 cancel 在 SubAgent 执行前触发"
-/// 的场景，但它的断言仅检查返回值 `contains("interrupted")`。这里补充验证：
-/// - cancel 在执行前触发 → run_react_loop 返回 LoopResult::Interrupted
-/// - 返回的 "interrupted" 字符串（通过 execute_fork.rs:236 / define.rs:584 的 output_summary）
-/// - 不会调用任何工具/LLM 多次（避免 cancel 后的 zombie 执行）
-///
-/// 原测试 :655 已覆盖核心断言，本测试作为补充，验证 cancel 的"前置触发"边界条件
-/// 与"返回值规范化"约定。
-#[tokio::test]
-async fn test_integration_sync_cascade_cancel_returns_interrupted_marker() {
-    let dir = tempdir().unwrap();
-    let host = HostFixture::open_in(dir.path(), "fixture-iv2-cascade").await;
-    let agents_dir = dir.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(
-        agents_dir.join("cancellable.md"),
-        "---\nname: cancellable\ndescription: Can be cancelled\n---\n\nYou are cancellable.\n",
-    )
-    .unwrap();
-
-    // LLM 永远尝试调用不存在的工具，模拟"无限循环"——但 cancel 在执行前触发
-    let llm_call_count: Arc<std::sync::atomic::AtomicUsize> =
-        Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let llm_call_count_clone = Arc::clone(&llm_call_count);
-
-    #[derive(Clone)]
-    struct LoopingLLM {
-        count: Arc<std::sync::atomic::AtomicUsize>,
-    }
-    impl LoopingLLM {
-        async fn respond(
-            &self,
-            request: peri_model::ModelRequest,
-            cancellation: tokio_util::sync::CancellationToken,
-        ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
-            let _ = &cancellation;
-            let _messages = base_messages(&request);
-            let defined = defined_tools(&request);
-            let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
-
-            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            tool_events_from_react(vec![peri_agent::agent::react::ToolCall::new(
-                "id1",
-                "nonexistent",
-                serde_json::json!({}),
-            )])
-        }
-    }
-    crate::subagent::test_support::fixture_model_impl!(LoopingLLM);
-
-    let cancel = AgentCancellationToken::new();
-    // 关键：在 SubAgent 执行**之前** cancel（模拟父 Agent 收到 Ctrl+C 后才 spawn SubAgent）
-    cancel.cancel();
-    host.cancel_parent();
-
-    let t = host.bind(
-        SubAgentTool::new(
-            Arc::new(vec![]),
-            None,
-            Arc::new(move |_: Option<&str>| {
-                crate::subagent::test_support::fixture_source(
-                    std::sync::Arc::new(LoopingLLM {
-                        count: Arc::clone(&llm_call_count_clone),
-                    }),
-                    "fixture-scripted",
-                )
-            }),
-            dir.path().to_str().unwrap().to_string(),
-        )
-        .with_cancel(cancel),
-    );
-    let t = with_agent_face(t, dir.path()).await;
-
-    let result = t
-        .invoke(
-            serde_json::json!({
-                "subagent_type": "cancellable",
-                "prompt": "run",
-                "cwd": dir.path().to_str().unwrap()
-            }),
-            host.context(&[]),
-        )
-        .await
-        .unwrap();
-
-    // Assert 1: 返回值包含 interrupted 标记（Cascade cancel 传播成功）
-    assert!(
-        result.contains("interrupted"),
-        "Cascade cancel should produce 'interrupted' marker, got: {}",
-        result
-    );
-
-    // Assert 2: cancel 在 loop 入口前阻断 LLM。
-    let final_count = llm_call_count.load(std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        final_count, 0,
-        "pre-cancelled Cascade child must not call the LLM (got {} calls)",
-        final_count
-    );
-}
-
 /// P0-2：background non-fork 必须通过实际 `invoke_background` 路径，由 loop 在
 /// Receive 后唯一执行 before_agent。测试使用 registry 和 bg event sender，不轮询或 sleep。
 #[tokio::test]
@@ -689,7 +596,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents_dir = dir.path().join(".claude").join("agents");
     let skills_dir = dir.path().join(".claude").join("skills").join("p0-2-skill");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -721,10 +628,10 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -738,7 +645,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
                 .iter()
                 .filter(|message| message.content().contains("P0-2 BACKGROUND SKILL MARKER"))
                 .count();
-            text_events("p0-2 background done")
+            test_support::text_events("p0-2 background done")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(BackgroundSkillLLM);
@@ -772,7 +679,7 @@ async fn test_p0_2_background_defined_skill_preload_once_after_parent_cancel() {
         .with_task_manager(registry)
         .with_bg_event_sender(bg_tx),
     );
-    let tool = host.bind(with_agent_face(tool, dir.path()).await);
+    let tool = host.bind(super::with_agent_face(tool, dir.path()).await);
     let tool = super::with_skill_registry(
         tool,
         "workspace",

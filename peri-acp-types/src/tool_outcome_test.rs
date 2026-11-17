@@ -1,7 +1,9 @@
 //! raw 工具结果保真契约测试（设计 §7.1：content/structuredContent/isError/_meta
 //! 与未知扩展字段无损保留）。
 
-use super::*;
+use crate::tool_outcome::JsonRpcError;
+use crate::tool_outcome::RawToolResult;
+use crate::tool_outcome::RemoteToolError;
 use serde_json::json;
 
 #[test]

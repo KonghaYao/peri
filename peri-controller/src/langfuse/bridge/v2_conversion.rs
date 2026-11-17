@@ -1,6 +1,6 @@
 //! v2 render/observe 事件到观测事件的纯转换，保持来源 agent 身份。
 
-use super::UnifiedLangfuseEvent;
+use crate::langfuse::bridge::unified_event::UnifiedLangfuseEvent;
 use peri_agent::agent::events::CompactTrigger;
 use peri_agent::agent::events_v2::{ObserveEvent, RenderEvent};
 use peri_agent::messages::BaseMessage;
@@ -180,15 +180,20 @@ impl UnifiedLangfuseEvent {
                 prompt,
                 defer,
                 info,
+                oldest_enqueued_at,
                 ..
             } => Some(UnifiedLangfuseEvent::MessageQueueDrained {
                 agent_id: agent_id.to_string(),
                 prompt,
                 defer,
                 info,
+                oldest_enqueued_at,
             }),
-            ObserveEvent::AiReasoningChunk { text, .. } => {
-                Some(UnifiedLangfuseEvent::AiReasoningChunk { text })
+            ObserveEvent::AiReasoningChunk { agent_id, text, .. } => {
+                Some(UnifiedLangfuseEvent::AiReasoningChunk {
+                    agent_id: agent_id.to_string(),
+                    text,
+                })
             }
             ObserveEvent::TurnError { reason, .. } => {
                 Some(UnifiedLangfuseEvent::TurnError { reason })

@@ -44,6 +44,7 @@ impl TodoSnapshot {
         Some(Self { items })
     }
 
+    #[must_use]
     pub(crate) fn items(&self) -> &[TuiTodoItem] {
         &self.items
     }
@@ -145,6 +146,7 @@ fn diff_todos(previous: &[TuiTodoItem], current: &[TuiTodoItem]) -> Vec<TuiTodoC
     changes
 }
 
+#[must_use]
 fn change(kind: TuiTodoChangeKind, item: &TuiTodoItem) -> TuiTodoChange {
     TuiTodoChange {
         kind,

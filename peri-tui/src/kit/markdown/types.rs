@@ -11,6 +11,29 @@ pub enum MarkdownSegment {
     /// 图片（类型化语义——P2 消息流内联像素的升级接口，§6.1 Q2）。
     /// P0 渲染为文本降级行（§8.1 R4 三式），像素渲染由 T7 overlay 承接。
     Image(ImageSegment),
+    /// 保留结构和动作，宽度与主题变化时由消息渲染器重新布局。
+    GenUi(GenUiSegment),
+}
+
+#[derive(Debug, Clone)]
+pub struct GenUiSegment {
+    pub source: String,
+    pub parsed: std::sync::Arc<peri_genui::ParseResult>,
+    pub partial: bool,
+    pub buttons: Vec<crate::kit::genui::GenUiButton>,
+    pub(crate) root: Option<serde_json::Value>,
+    pub(crate) errors: Vec<String>,
+}
+
+impl PartialEq for GenUiSegment {
+    fn eq(&self, other: &Self) -> bool {
+        // 解析是同一静态库上的纯函数，源文相同即可比较共享的非 PartialEq 结果。
+        self.source == other.source
+            && self.partial == other.partial
+            && self.buttons == other.buttons
+            && self.root == other.root
+            && self.errors == other.errors
+    }
 }
 
 /// 一张图片的渲染期语义与 P0 文本降级行。

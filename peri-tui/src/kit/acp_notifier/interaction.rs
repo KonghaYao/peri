@@ -2,7 +2,7 @@
 
 use crate::kit::acp_notifier::BridgeSink;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, PendingInteraction};
-use peri_acp_types::event_data::{AskUser, HitlPending, Question, QuestionOption};
+
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -211,3 +211,11 @@ fn extract_options_from_oneof(prop: &Value, key: &str, nested: bool) -> Vec<Ques
         })
         .collect()
 }
+
+use peri_acp_types::event_data::AskUser;
+
+use peri_acp_types::event_data::HitlPending;
+
+use peri_acp_types::event_data::Question;
+
+use peri_acp_types::event_data::QuestionOption;

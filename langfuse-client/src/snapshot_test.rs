@@ -14,9 +14,12 @@ use serde_json::json;
 use crate::error::LangfuseError;
 use crate::memory::MemoryBudget;
 use crate::payload::{BudgetedBytes, InputSnapshot};
-use crate::snapshot::{
-    snapshot_value, InputSource, SnapshotCell, SnapshotState, SnapshotTicket, TelemetryEvent,
-};
+use crate::snapshot;
+use crate::snapshot::InputSource;
+use crate::snapshot::SnapshotCell;
+use crate::snapshot::SnapshotState;
+use crate::snapshot::SnapshotTicket;
+use crate::snapshot::TelemetryEvent;
 use crate::spool::cleanup::CleanupRegistry;
 use crate::spool::{
     CleanupRegistration, ObjectClaim, ObjectId, ObjectKind, ObjectMeta, PageCursor,
@@ -26,7 +29,7 @@ use crate::spool::{
 use crate::types::{EventBody, IngestionEvent};
 
 fn budget(limit: usize) -> Arc<MemoryBudget> {
-    MemoryBudget::new(limit).expect("budget")
+    MemoryBudget::try_new(limit).expect("budget")
 }
 
 fn event(input: Option<serde_json::Value>, output: Option<serde_json::Value>) -> IngestionEvent {
@@ -53,7 +56,7 @@ fn event(input: Option<serde_json::Value>, output: Option<serde_json::Value>) ->
 
 fn inline(budget: &Arc<MemoryBudget>, body: &'static [u8]) -> InputSnapshot {
     let permit = budget.try_reserve(body.len()).expect("permit");
-    InputSnapshot::Inline(BudgetedBytes::new(Bytes::from_static(body), permit).expect("bytes"))
+    InputSnapshot::Inline(BudgetedBytes::try_new(Bytes::from_static(body), permit).expect("bytes"))
 }
 
 /// 准入拒绝：`TelemetryEvent` 不实现 `Debug`，不能用 `expect_err`。
@@ -202,7 +205,7 @@ fn spooled(store: &Arc<FakeStore>, id: ObjectId, budget: &Arc<MemoryBudget>) -> 
 #[test]
 fn snapshot_value_borrows_arc_and_writes_compact_json() {
     let value = Arc::new(json!({"key": "value", "list": [1, 2, 3]}));
-    let source = snapshot_value(&value);
+    let source = snapshot::snapshot_value(&value);
     assert_eq!(Arc::strong_count(&value), 2, "只克隆 Arc，不重建 JSON 树");
 
     let mut first = Vec::new();
@@ -213,7 +216,7 @@ fn snapshot_value_borrows_arc_and_writes_compact_json() {
     assert_eq!(first, second, "允许被多次调用");
 
     let big = Arc::new(json!({ "blob": "x".repeat(4096) }));
-    let source = snapshot_value(&big);
+    let source = snapshot::snapshot_value(&big);
     assert!(source.retained_bytes().expect("accounting") >= 4096);
 }
 

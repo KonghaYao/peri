@@ -26,8 +26,11 @@ pub use peri_acp_types::session::{
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::thread::CancelPolicy as Policy;
+    use peri_acp_types::session::cancel_all_agents;
+    use peri_acp_types::session::cancel_cascade_agents;
+    use peri_acp_types::session::cancel_cascade_agents_collecting;
+    use peri_acp_types::session::AgentRuntime;
 
     fn make_runtime(policy: Policy) -> AgentRuntime {
         AgentRuntime::new("thread-1".to_string(), policy)

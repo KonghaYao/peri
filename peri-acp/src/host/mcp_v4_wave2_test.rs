@@ -44,48 +44,42 @@
 
 use crate::transport::AcpTransport;
 use async_trait::async_trait;
-use peri_acp_types::{
-    interaction::UserInteractionBroker,
-    session::{ExecutionFailureKind, MessageSource},
-};
 use peri_agent::tools::BaseTool;
-use peri_model::Model;
+
 use serde_json::json;
 
-use std::{
-    collections::HashMap,
-    ffi::OsString,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::ffi::OsString;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use peri_acp_types::{
-    builtin_mcp::find as find_builtin_instance,
-    messages::BaseMessage,
-    permission::{PermissionMode, SharedPermissionMode},
-    ports::McpPoolPort,
-};
-use peri_middlewares::{
-    assembly::{
-        BuiltinContextError, BuiltinInstanceContext, CronInstanceInput, WorkflowInstanceInput,
-    },
-    mcp::{ClientStatus, McpClientPool, McpInitStatus, McpTaskOwner},
-    tool_search::{core_tools, SEARCH_EXTRA_TOOLS_NAME},
-};
-use serial_test::serial;
+use peri_acp_types::builtin_mcp;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::ports::McpPoolPort;
+use peri_middlewares::assembly::BuiltinInstanceContext;
+use peri_middlewares::assembly::CronInstanceInput;
+use peri_middlewares::assembly::WorkflowInstanceInput;
+use peri_middlewares::mcp::ClientStatus;
+use peri_middlewares::mcp::McpClientPool;
+use peri_middlewares::mcp::McpInitStatus;
+use peri_middlewares::mcp::McpTaskOwner;
+use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
 
-use super::{
-    assemble::HostAssemblyInput,
-    connection::ConnectionContext,
-    executor_flow_tests::{MockEventSink, SessionTaskBindings},
-    mcp_v4_wire_fixture::{run_wire_prompt, ScriptedToolCall, WireScriptedModel},
-    AcpServerConfig, PromptLocks, SharedSessions,
-};
-use crate::{
-    provider::{ConfigSource, LlmProvider, PeriConfig, ProviderConfig, ProviderModels},
-    session::executor::{PromptResult, SessionContext},
-    transport::stdio::StdioTransport,
-};
+use super::assemble::HostAssemblyInput;
+use super::executor_flow_tests::MockEventSink;
+use super::executor_flow_tests::SessionTaskBindings;
+use super::mcp_v4_wire_fixture;
+use super::mcp_v4_wire_fixture::ScriptedToolCall;
+use super::mcp_v4_wire_fixture::WireScriptedModel;
+use super::AcpServerConfig;
+use crate::provider::ConfigSource;
+use crate::provider::LlmProvider;
+use crate::provider::PeriConfig;
+use crate::provider::ProviderConfig;
+use crate::provider::ProviderModels;
+use crate::session::executor::PromptResult;
+use crate::session::executor::SessionContext;
+use crate::transport::stdio::StdioTransport;
 
 // ── 夹具 1：HOME 重定向（进程级 env ⇒ 必须 `#[serial]`）────────────────────────
 
@@ -120,8 +114,38 @@ impl Drop for HomeRedirect {
 struct FixtureDirs {
     tmp: tempfile::TempDir,
     _home_guard: HomeRedirect,
+    _builtin_guard: BuiltinInjectionLegacy,
     workspace: PathBuf,
     claude_home: PathBuf,
+}
+
+/// v4 wave2 suite 固定走六实例回滚路径；默认装配已经是 v5 单出口。
+struct BuiltinInjectionLegacy {
+    previous: Option<OsString>,
+    applied: bool,
+}
+
+impl BuiltinInjectionLegacy {
+    fn set() -> Self {
+        let previous = std::env::var_os("PERI_MCP_BUILTIN");
+        let applied = previous.is_none();
+        if applied {
+            std::env::set_var("PERI_MCP_BUILTIN", "legacy");
+        }
+        Self { previous, applied }
+    }
+}
+
+impl Drop for BuiltinInjectionLegacy {
+    fn drop(&mut self) {
+        if !self.applied {
+            return;
+        }
+        match self.previous.take() {
+            Some(value) => std::env::set_var("PERI_MCP_BUILTIN", value),
+            None => std::env::remove_var("PERI_MCP_BUILTIN"),
+        }
+    }
 }
 
 impl FixtureDirs {
@@ -134,9 +158,11 @@ impl FixtureDirs {
             std::fs::create_dir_all(dir).expect("创建临时目录");
         }
         let guard = HomeRedirect::set(&home);
+        let builtin_guard = BuiltinInjectionLegacy::set();
         Self {
             tmp,
             _home_guard: guard,
+            _builtin_guard: builtin_guard,
             workspace,
             claude_home,
         }
@@ -251,7 +277,7 @@ impl BuiltinHostFixture {
     fn assert_instance_connected(&self, instance: &str) {
         let handle = self
             .pool
-            .get_client(instance)
+            .client(instance)
             .unwrap_or_else(|| panic!("{instance} 必须完成连接"));
         assert!(
             matches!(handle.status, ClientStatus::Connected),
@@ -342,6 +368,7 @@ async fn assemble_host_with_workspace_input(
             cwd: dirs.workspace_str(),
             bare: false,
             drive_cron_tick,
+            builtin_assembly_mode: None,
             // session 级 `workspace` 输入（AW3-11）由调用方给定：默认 `None` ⇒
             // 可见但退化，本文件断言面（cron）不含它。
             workspace_input,
@@ -353,7 +380,6 @@ async fn assemble_host_with_workspace_input(
             // typed `InstanceInputMissing`，system 闸门把首个 prompt 打成 fatal。
             workflow_input: Some(WorkflowInstanceInput::slot()),
             // Bash 的 beta flag 缺省同为会话级投影：本夹具无 flag 覆盖。
-            workspace_bash_default_run_in_background: false,
             // 无会话上下文（测试夹具）：A24 关闭集为空集。
             builtin_closed: Default::default(),
             // 宿主技能面关闭位与关闭集同源：本夹具无会话上下文，恒为假。
@@ -429,7 +455,7 @@ async fn probe_tool_faces(label: &str, ctx: SessionContext, query: &str) -> Tool
         SEARCH_EXTRA_TOOLS_NAME,
         serde_json::json!({ "query": query, "max_results": 50 }),
     )]));
-    let result = run_wire_prompt(ctx, &sink, &model).await;
+    let result = mcp_v4_wire_fixture::run_wire_prompt(ctx, &sink, &model).await;
     assert!(
         result.ok,
         "{label}：探针 prompt 必须正常结束: stop={:?}",
@@ -471,43 +497,44 @@ fn searched_tool_names(result: &PromptResult) -> Vec<String> {
 
 /// 注册表声明的原始工具名（`tools/list` 的唯一事实源）。
 fn declared_tool_names(instance: &str) -> Vec<&'static str> {
-    find_builtin_instance(instance)
+    builtin_mcp::find(instance)
         .unwrap_or_else(|| panic!("{instance} 必须在 builtin 注册表内"))
         .tools
         .iter()
+        .filter(|tool| tool.advertised)
         .map(|tool| tool.original_name)
         .collect()
 }
 
 /// 注册表声明的 effective name（模型可见名）。
 fn declared_effective_names(instance: &str) -> Vec<&'static str> {
-    find_builtin_instance(instance)
+    builtin_mcp::find(instance)
         .unwrap_or_else(|| panic!("{instance} 必须在 builtin 注册表内"))
         .tools
         .iter()
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .collect()
 }
 
 /// 注册表声明的、模型可见的 effective name；host-only 工具不进入模型面。
 fn declared_model_visible_effective_names(instance: &str) -> Vec<&'static str> {
-    find_builtin_instance(instance)
+    builtin_mcp::find(instance)
         .unwrap_or_else(|| panic!("{instance} 必须在 builtin 注册表内"))
         .tools
         .iter()
         .filter(|tool| tool.model_visible)
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .collect()
 }
 
 /// 注册表声明为 `direct: true` 的 effective name。
 fn declared_direct_effective_names(instance: &str) -> Vec<&'static str> {
-    find_builtin_instance(instance)
+    builtin_mcp::find(instance)
         .unwrap_or_else(|| panic!("{instance} 必须在 builtin 注册表内"))
         .tools
         .iter()
         .filter(|tool| tool.direct)
-        .map(|tool| tool.effective_name)
+        .map(|tool| tool.legacy_name)
         .collect()
 }
 
@@ -532,7 +559,7 @@ fn panel_row(pool: &McpClientPool, instance: &str) -> peri_middlewares::mcp::Ser
 /// 面板行同时取证（`transport_type == "builtin"` 的运行时身份 + `status_label`）。
 fn assert_instance_ready(pool: &McpClientPool, instance: &str, expected_tools: &[&str]) {
     let handle = pool
-        .get_client(instance)
+        .client(instance)
         .unwrap_or_else(|| panic!("{instance} 必须完成连接（未发布 ready）"));
     assert!(
         matches!(handle.status, ClientStatus::Connected),
@@ -588,7 +615,7 @@ fn assert_instance_ready(pool: &McpClientPool, instance: &str, expected_tools: &
 /// 逐实例的「**未**发布 ready」取证 + typed 失败原因（失败不得伪装成任何 ready 证据）。
 fn assert_no_ready_evidence(pool: &McpClientPool, instance: &str, expect_reason: &str) {
     let handle = pool
-        .get_client(instance)
+        .client(instance)
         .unwrap_or_else(|| panic!("{instance} 必须留下失败收口句柄（不得静默消失）"));
     let reason = match &handle.status {
         ClientStatus::Failed(reason) => reason.clone(),
@@ -701,8 +728,6 @@ fn wave2_tools(instance: &str) -> &'static [&'static str] {
         .unwrap_or_else(|| panic!("{instance} 必须在 WAVE2_INSTANCES 内"))
         .1
 }
-
-use self::mcp_v4_wave2_cron_support_test::*;
 
 #[path = "mcp_v4_wave2_capability_test.rs"]
 mod mcp_v4_wave2_capability_test;

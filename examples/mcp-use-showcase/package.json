@@ -1,0 +1,28 @@
+{
+  "name": "mcp-use-showcase",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bunx mcp-use dev -p 31337 --no-open",
+    "typecheck": "bunx mcp-use typecheck",
+    "client": "bun run scripts/client.ts",
+    "subscribe": "bun run scripts/subscribe.ts",
+    "gateway": "bun run scripts/gateway.ts",
+    "openapi": "bunx mcp-use dev --entry src/openapi.ts -p 31338 --no-open"
+  },
+  "dependencies": {
+    "@mcp-use/client": "^2.4.5",
+    "@modelcontextprotocol/client": "^2.3.1",
+    "mcp-use": "^2.12.4",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^5.9.0"
+  }
+}

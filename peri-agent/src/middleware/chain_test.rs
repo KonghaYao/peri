@@ -1,5 +1,10 @@
-use super::*;
+use crate::agent::react::ToolCall;
+use crate::agent::react::ToolResult;
 use crate::agent::state::AgentState;
+use crate::error::AgentError;
+use crate::error::AgentResult;
+use crate::middleware::capabilities as hook_state;
+use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::r#trait::Middleware;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
@@ -28,7 +33,7 @@ impl Middleware for OrderRecorder {
     async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         self.log
             .lock()
-            .unwrap()
+            .expect("self log mutex must remain unpoisoned throughout the test")
             .push(format!("{}.before_agent", self.name));
         Ok(())
     }
@@ -40,7 +45,7 @@ impl Middleware for OrderRecorder {
     ) -> AgentResult<ToolCall> {
         self.log
             .lock()
-            .unwrap()
+            .expect("self log mutex must remain unpoisoned throughout the test")
             .push(format!("{}.before_tool", self.name));
         Ok(tool_call.clone())
     }
@@ -53,7 +58,7 @@ impl Middleware for OrderRecorder {
     ) -> AgentResult<()> {
         self.log
             .lock()
-            .unwrap()
+            .expect("self log mutex must remain unpoisoned throughout the test")
             .push(format!("{}.after_tool", self.name));
         Ok(())
     }
@@ -99,7 +104,10 @@ struct ToolHookRecorder {
 
 impl ToolHookRecorder {
     fn record(&self) -> AgentResult<()> {
-        self.log.lock().unwrap().push(self.name);
+        self.log
+            .lock()
+            .expect("self log mutex must remain unpoisoned throughout the test")
+            .push(self.name);
         match self.failure {
             None => Ok(()),
             Some(ToolHookFailure::Interrupted) => Err(AgentError::Interrupted),
@@ -170,7 +178,11 @@ async fn before_tool_failure_short_circuits_without_reclassifying_error() {
         let call = ToolCall::new("id", "tool", serde_json::json!({}));
         let error = chain.run_before_tool(&mut state, call).await.unwrap_err();
         assert_tool_hook_error(error, failure);
-        assert_eq!(*log.lock().unwrap(), ["First", "Failing"]);
+        assert_eq!(
+            *log.lock()
+                .expect("log lock mutex must remain unpoisoned throughout the test"),
+            ["First", "Failing"]
+        );
     }
 }
 
@@ -195,7 +207,11 @@ async fn after_tool_failure_short_circuits_without_reclassifying_error() {
             .await
             .unwrap_err();
         assert_tool_hook_error(error, failure);
-        assert_eq!(*log.lock().unwrap(), ["First", "Failing"]);
+        assert_eq!(
+            *log.lock()
+                .expect("log lock mutex must remain unpoisoned throughout the test"),
+            ["First", "Failing"]
+        );
     }
 }
 
@@ -221,9 +237,15 @@ async fn test_multiple_middlewares_sequential_order() {
     chain.add(Box::new(OrderRecorder::new("C", Arc::clone(&log))));
 
     let mut state = AgentState::new("/tmp");
-    chain.run_before_agent(&mut state).await.unwrap();
+    chain
+        .run_before_agent(&mut state)
+        .await
+        .expect("the run before agent fixture result is required for this assertion");
 
-    let calls = log.lock().unwrap().clone();
+    let calls = log
+        .lock()
+        .expect("log lock mutex must remain unpoisoned throughout the test")
+        .clone();
     assert_eq!(
         calls,
         vec!["A.before_agent", "B.before_agent", "C.before_agent"]
@@ -243,7 +265,10 @@ async fn test_error_short_circuits_chain() {
 
     assert!(result.is_err(), "应该返回错误");
     // B.before_agent 不应被执行
-    let calls = log.lock().unwrap().clone();
+    let calls = log
+        .lock()
+        .expect("log lock mutex must remain unpoisoned throughout the test")
+        .clone();
     assert_eq!(calls, vec!["A.before_agent"]);
 }
 
@@ -256,7 +281,10 @@ async fn test_before_tool_modification_propagates() {
 
     let mut state = AgentState::new("/tmp");
     let original = ToolCall::new("id1", "my_tool", serde_json::json!({}));
-    let result = chain.run_before_tool(&mut state, original).await.unwrap();
+    let result = chain
+        .run_before_tool(&mut state, original)
+        .await
+        .expect("the run before tool fixture result is required for this assertion");
 
     assert_eq!(result.name, "my_tool_modified");
 }
@@ -273,7 +301,10 @@ async fn test_before_tool_chained_modifications() {
 
     let mut state = AgentState::new("/tmp");
     let original = ToolCall::new("id1", "tool", serde_json::json!({}));
-    let result = chain.run_before_tool(&mut state, original).await.unwrap();
+    let result = chain
+        .run_before_tool(&mut state, original)
+        .await
+        .expect("the run before tool fixture result is required for this assertion");
 
     assert_eq!(result.name, "tool_a_b");
 }
@@ -282,13 +313,16 @@ async fn test_before_tool_chained_modifications() {
 async fn test_empty_chain_runs_ok() {
     let chain = MiddlewareChain::new();
     let mut state = AgentState::new("/tmp");
-    chain.run_before_agent(&mut state).await.unwrap();
+    chain
+        .run_before_agent(&mut state)
+        .await
+        .expect("the run before agent fixture result is required for this assertion");
 
     let original = ToolCall::new("id", "tool", serde_json::json!({}));
     let result = chain
         .run_before_tool(&mut state, original.clone())
         .await
-        .unwrap();
+        .expect("the run before tool fixture result is required for this assertion");
     assert_eq!(result.name, original.name);
 }
 
@@ -314,9 +348,12 @@ async fn test_after_tool_sequential_order() {
     chain
         .run_after_tool(&mut state, &call, &result)
         .await
-        .unwrap();
+        .expect("the run after tool fixture result is required for this assertion");
 
-    let calls = log.lock().unwrap().clone();
+    let calls = log
+        .lock()
+        .expect("log lock mutex must remain unpoisoned throughout the test")
+        .clone();
     assert_eq!(calls, vec!["A.after_tool", "B.after_tool"]);
 }
 
@@ -386,12 +423,24 @@ async fn test_before_tools_batch_mixed_approval() {
     assert_eq!(results.len(), 3);
     // 第一个：通过，名称被 SuffixA 修改为 tool1_a
     assert!(results[0].is_ok());
-    assert_eq!(results[0].as_ref().unwrap().name, "tool1_a");
+    assert_eq!(
+        results[0]
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .name,
+        "tool1_a"
+    );
     // 第二个：被 RejectSecond 拒绝
     assert!(matches!(&results[1], Err(AgentError::ToolRejected { tool, .. }) if tool == "tool2_a"));
     // 第三个：通过
     assert!(results[2].is_ok());
-    assert_eq!(results[2].as_ref().unwrap().name, "tool3_a");
+    assert_eq!(
+        results[2]
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .name,
+        "tool3_a"
+    );
 }
 
 /// 批量工具调用：所有中间件使用默认逐条实现，结果应与逐个调用一致
@@ -427,8 +476,20 @@ async fn test_before_tools_batch_equivalent_to_individual() {
         .run_before_tools_batch(&mut state, calls.clone())
         .await;
     assert_eq!(batch_results.len(), 2);
-    assert_eq!(batch_results[0].as_ref().unwrap().name, "t1_x");
-    assert_eq!(batch_results[1].as_ref().unwrap().name, "t2_x");
+    assert_eq!(
+        batch_results[0]
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .name,
+        "t1_x"
+    );
+    assert_eq!(
+        batch_results[1]
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .name,
+        "t2_x"
+    );
 }
 
 #[tokio::test]
@@ -526,7 +587,10 @@ async fn test_before_tools_batch_long_result_preserves_rejection_and_stops_chain
             _state: &mut dyn hook_state::BeforeToolState,
             call: &ToolCall,
         ) -> AgentResult<ToolCall> {
-            self.0.lock().unwrap().push(call.id.clone());
+            self.0
+                .lock()
+                .expect("self lock mutex must remain unpoisoned throughout the test")
+                .push(call.id.clone());
             Ok(call.clone())
         }
     }
@@ -555,5 +619,8 @@ async fn test_before_tools_batch_long_result_preserves_rejection_and_stops_chain
             if middleware == "ExtraResult"
                 && reason == "before_tools_batch returned 2 results for 1 calls"
     ));
-    assert!(later_calls.lock().unwrap().is_empty());
+    assert!(later_calls
+        .lock()
+        .expect("later calls lock mutex must remain unpoisoned throughout the test")
+        .is_empty());
 }

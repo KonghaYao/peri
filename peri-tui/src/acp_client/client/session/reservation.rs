@@ -18,7 +18,11 @@ impl AcpTuiClient {
     /// 操作身份在预约锁内分配：准入快照按同一把锁读取，因此不会看到「身份已
     /// 存在但预约尚未登记」的中间态。
     pub(crate) fn reserve_session_load(&self) -> SessionLoadReservation {
-        let mut reservations = self.session_load_reservations.reservations.lock().unwrap();
+        let mut reservations = self
+            .session_load_reservations
+            .reservations
+            .lock()
+            .expect("session_load_reservations.reservations mutex must not be poisoned");
         let operation = self.lifecycle.allocate_operation();
         reservations.reserve(operation);
         // 预约本身就是一次用户会话决定：与计数同锁递增，排队输入的准入快照
@@ -36,7 +40,7 @@ impl AcpTuiClient {
         self.session_load_reservations
             .reservations
             .lock()
-            .unwrap()
+            .expect("session_load_reservations .reservations mutex must not be poisoned")
             .pending()
     }
 
@@ -50,7 +54,7 @@ impl AcpTuiClient {
                 .session_load_reservations
                 .reservations
                 .lock()
-                .unwrap()
+                .expect("self .session_load_reservations .reservations mutex must not be poisoned")
                 .pending()
                 == 0
             {
@@ -71,7 +75,10 @@ impl AcpTuiClient {
         loop {
             let opened = {
                 let _operation = self.lifecycle.operation_gate().lock().await;
-                let reservations = self.session_load_reservations.reservations.lock().unwrap();
+                let reservations =
+                    self.session_load_reservations.reservations.lock().expect(
+                        "session_load_reservations.reservations mutex must not be poisoned",
+                    );
                 let _ = *epoch_rx.borrow_and_update();
                 if reservations.pending() > 0 {
                     None
@@ -121,7 +128,11 @@ impl AcpTuiClient {
         target: Option<String>,
         operation: TransitionOperation,
     ) -> Result<TransitionStart, &'static str> {
-        let mut reservations = self.session_load_reservations.reservations.lock().unwrap();
+        let mut reservations = self
+            .session_load_reservations
+            .reservations
+            .lock()
+            .expect("session_load_reservations.reservations mutex must not be poisoned");
         let operation = match reservation {
             Some(reservation) => {
                 let operation = reservation.operation();

@@ -1,12 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use peri_theme::semantic::SemanticTokens;
-use ratatui_kit::ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
-};
+use ratatui_kit::ratatui::buffer::Buffer;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::widgets::Block;
+use ratatui_kit::ratatui::widgets::Borders;
+use ratatui_kit::ratatui::widgets::Clear;
+use ratatui_kit::ratatui::widgets::Paragraph;
+use ratatui_kit::ratatui::widgets::Widget;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -243,26 +246,34 @@ impl QueueView {
         }
         let (send_width, edit_width) = self.action_widths();
         let actions_width = send_width.saturating_add(edit_width).saturating_add(1);
-        for (row, item) in self.items.iter().skip(offset).take(visible).enumerate() {
-            let y = area.y.saturating_add(1).saturating_add(row as u16);
-            let row_area = Rect::new(area.x, y, area.width, 1);
-            frame.rows.push((item.id.clone(), row_area));
-            // 结果未知的输入不提供发送/取回控件：换身份重发或取回都会破坏
-            // “可能已发出”的身份约束。
-            if item.state == SteerItemState::Uncertain {
-                continue;
-            }
-            if area.width >= actions_width {
-                frame.controls.push(Control {
-                    area: Rect::new(area.right().saturating_sub(actions_width), y, send_width, 1),
-                    selection: Selection::Dispatch(item.id.clone()),
-                    enabled: item.state == SteerItemState::Queued,
-                });
-                frame.controls.push(Control {
-                    area: Rect::new(area.right().saturating_sub(edit_width), y, edit_width, 1),
-                    selection: Selection::TakeBack(item.id.clone()),
-                    enabled: item.state.can_take_back(),
-                });
+        {
+            let iteration_items = self.items.iter().skip(offset).take(visible).enumerate();
+            for (row, item) in iteration_items {
+                let y = area.y.saturating_add(1).saturating_add(row as u16);
+                let row_area = Rect::new(area.x, y, area.width, 1);
+                frame.rows.push((item.id.clone(), row_area));
+                // 结果未知的输入不提供发送/取回控件：换身份重发或取回都会破坏
+                // “可能已发出”的身份约束。
+                if item.state == SteerItemState::Uncertain {
+                    continue;
+                }
+                if area.width >= actions_width {
+                    frame.controls.push(Control {
+                        area: Rect::new(
+                            area.right().saturating_sub(actions_width),
+                            y,
+                            send_width,
+                            1,
+                        ),
+                        selection: Selection::Dispatch(item.id.clone()),
+                        enabled: item.state == SteerItemState::Queued,
+                    });
+                    frame.controls.push(Control {
+                        area: Rect::new(area.right().saturating_sub(edit_width), y, edit_width, 1),
+                        selection: Selection::TakeBack(item.id.clone()),
+                        enabled: item.state.can_take_back(),
+                    });
+                }
             }
         }
         frame

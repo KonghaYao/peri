@@ -1,12 +1,27 @@
 //! New-session and load transitions under the operation gate.
 
-use peri_acp::transport::{AcpTransport, types::AcpError};
-use serde_json::json;
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
+use serde_json::{Value, json};
 
 use crate::acp_client::client::{AcpTuiClient, ClientProjectionMode, SessionLoadReservation};
 use crate::acp_client::interaction_lifecycle::{TransitionKind, TransitionOperation};
 
 use super::guards::{PreparingSessionGuard, SessionProjectionGuard};
+
+/// 冷 load 清理未完成时服务端已把连接绑定到该 owner，客户端必须显式 close。
+fn cleanup_incomplete_owner(error: &AcpError) -> Option<&str> {
+    if error.code != -32010 {
+        return None;
+    }
+    let data: &Value = error.data.as_ref()?;
+    if data.get("reason").and_then(Value::as_str) != Some("session_cleanup_incomplete") {
+        return None;
+    }
+    data.get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+}
 
 /// initial 失败时收敛投影。
 ///
@@ -87,7 +102,10 @@ impl AcpTuiClient {
         operation: TransitionOperation,
     ) -> Result<String, AcpError> {
         let _preparing = PreparingSessionGuard::enter();
-        *self.restore_error.lock().unwrap() = None;
+        *self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned") = None;
         self.clear_startup_restore_target();
         if self.history_v2_active() {
             // 切换会话前 best-effort 关闭旧窗口；关闭确认属于服务端，本地只复位状态。
@@ -122,7 +140,10 @@ impl AcpTuiClient {
                 // 旧会话清理失败不写入粘滞 `restore_error`：那会让后续每次
                 // 建立/发送都被同一条陈旧错误拦截且无从清除。改记待关闭身份，
                 // 下一次建立会话先重放同一关闭。
-                *self.restore_error.lock().unwrap() = None;
+                *self
+                    .restore_error
+                    .lock()
+                    .expect("restore_error mutex must not be poisoned") = None;
                 self.remember_close_failure(old_sid, None, &error);
                 tracing::warn!(
                     session_id = %old_sid,
@@ -179,7 +200,10 @@ impl AcpTuiClient {
             );
         }
         self.project_execution_cwd(Some(effective_cwd));
-        *self.restore_error.lock().unwrap() = None;
+        *self
+            .restore_error
+            .lock()
+            .expect("restore_error mutex must not be poisoned") = None;
         projection.committed = true;
         transition.disarm();
         self.flush_buffered();
@@ -297,10 +321,11 @@ impl AcpTuiClient {
             }
         }
         self.settle_claims_owned(start.claims).await;
+        // cleanup-incomplete owner 即使与本次目标同 ID 也必须先关闭：服务端仍把
+        // 连接绑在 closing 会话上，直接重载只会再次收到 session_switch_requires_close。
         let close_target = self
             .pending_close_target()
-            .or(start.from)
-            .filter(|candidate| *candidate != session_id);
+            .or_else(|| start.from.filter(|candidate| *candidate != session_id));
         if let Some(ref old_sid) = close_target {
             if let Err(error) = self.close_previous_session(old_sid).await {
                 self.lifecycle.fail_transition(start.generation);
@@ -311,7 +336,10 @@ impl AcpTuiClient {
                 // 与 `new_session_under_gate` 同一口径：清理旧会话失败不是
                 // 恢复失败，不写入粘滞 `restore_error`（含本函数入口的占位）。
                 // 额外记住本次要加载的目标，避免用户的历史意图被换成空会话。
-                *self.restore_error.lock().unwrap() = None;
+                *self
+                    .restore_error
+                    .lock()
+                    .expect("restore_error mutex must not be poisoned") = None;
                 self.remember_close_failure(old_sid, Some(session_id.to_owned()), &error);
                 tracing::warn!(
                     session_id = %old_sid,
@@ -375,6 +403,11 @@ impl AcpTuiClient {
         let loaded = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
+                // cleanup-incomplete 已把连接绑定到该会话；下一次建立/切换先关闭它，
+                // 否则服务端会以 session_switch_requires_close 永久拒绝。
+                if let Some(owner) = cleanup_incomplete_owner(&error) {
+                    self.remember_close_failure(owner, None, &error);
+                }
                 *self.restore_error.lock().unwrap() = Some(error.to_string());
                 self.fail_initial_transition(start.generation, session_id, retain_previous);
                 transition.disarm();
@@ -517,7 +550,10 @@ impl AcpTuiClient {
             .to_owned();
         self.project_execution_cwd(execution_ready.then_some(execution_cwd));
         {
-            let mut target = self.startup_restore_target.lock().unwrap();
+            let mut target = self
+                .startup_restore_target
+                .lock()
+                .expect("startup_restore_target mutex must not be poisoned");
             if target.as_deref() == Some(session_id) {
                 *target = None;
             }
@@ -539,7 +575,10 @@ impl AcpTuiClient {
             let claims = self.lifecycle.fail_transition(generation);
             self.settle_claims_owned(claims).await;
             self.project_execution_cwd(None);
-            *self.restore_error.lock().unwrap() = Some(error.to_string());
+            *self
+                .restore_error
+                .lock()
+                .expect("restore_error mutex must not be poisoned") = Some(error.to_string());
             if self.projection_mode == ClientProjectionMode::Interactive {
                 crate::kit::session_boundary::project_session_boundary(None);
             }

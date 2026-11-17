@@ -9,8 +9,10 @@
 //! 两者产出的 `VIEW_MODELS` 必须**逐条结构相等**：`TuiRenderUnit` 派生
 //! `PartialEq`，比较全部字段，陈旧但 hash 相同的字段也会被抓到。
 
-use super::*;
-use crate::kit::stream_data::{TuiTextChunk, TuiToolEnded, TuiToolStarted};
+use super::AcpEventData;
+use super::BridgeState;
+use super::TuiRenderUnit;
+use super::serial;
 
 fn tool_started(id: &str, name: &str) -> AcpEventData {
     AcpEventData::ToolStarted(TuiToolStarted {
@@ -87,28 +89,31 @@ fn normalize_assembly_clock(unit: &TuiRenderUnit) -> TuiRenderUnit {
 /// → 断言逐条相等。清缓存后重新发布会把缓存以**参照结果**填回，故下一个事件仍在
 /// 复用路径上（参照结果与热路径等价，正是本测试要证的命题）。
 fn assert_incremental_equivalent(state: &mut BridgeState, events: &[AcpEventData]) {
-    for (idx, ev) in events.iter().enumerate() {
-        dispatch_and_notify(state, ev);
-        let incremental: Vec<TuiRenderUnit> = VIEW_MODELS
-            .state()
-            .read()
-            .items
-            .iter()
-            .map(normalize_assembly_clock)
-            .collect();
-        crate::kit::acp_events::render::reset_tool_group_cache();
-        crate::kit::acp_events::render::push_view_models(state);
-        let reference: Vec<TuiRenderUnit> = VIEW_MODELS
-            .state()
-            .read()
-            .items
-            .iter()
-            .map(normalize_assembly_clock)
-            .collect();
-        assert_eq!(
-            incremental, reference,
-            "事件 #{idx}（{ev:?}）的增量快照与全量重建不一致"
-        );
+    {
+        let iteration_items = events.iter().enumerate();
+        for (idx, ev) in iteration_items {
+            super::dispatch_and_notify(state, ev);
+            let incremental: Vec<TuiRenderUnit> = VIEW_MODELS
+                .state()
+                .read()
+                .items
+                .iter()
+                .map(normalize_assembly_clock)
+                .collect();
+            crate::kit::acp_events::render::reset_tool_group_cache();
+            crate::kit::acp_events::render::push_view_models(state);
+            let reference: Vec<TuiRenderUnit> = VIEW_MODELS
+                .state()
+                .read()
+                .items
+                .iter()
+                .map(normalize_assembly_clock)
+                .collect();
+            assert_eq!(
+                incremental, reference,
+                "事件 #{idx}（{ev:?}）的增量快照与全量重建不一致"
+            );
+        }
     }
 }
 
@@ -117,7 +122,7 @@ fn assert_incremental_equivalent(state: &mut BridgeState, events: &[AcpEventData
 #[test]
 #[serial]
 fn test_incremental_group_tool_lifecycle() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let mut events = vec![AcpEventData::PromptSubmitted {
         request_id: Some("r1".into()),
     }];
@@ -146,7 +151,7 @@ fn test_incremental_group_tool_lifecycle() {
 #[test]
 #[serial]
 fn test_incremental_group_error_lookahead() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let mut events = vec![AcpEventData::PromptSubmitted {
         request_id: Some("r1".into()),
     }];
@@ -173,7 +178,7 @@ fn test_incremental_group_aux_inputs() {
     use crate::kit::atoms::{FOCUSED_ENTRY, FocusedEntry};
     use crate::kit::tui_render_unit::{FoldKey, FoldState};
 
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     *FOCUSED_ENTRY.state().write() = None;
     let mut events = vec![AcpEventData::PromptSubmitted {
         request_id: Some("r1".into()),
@@ -228,7 +233,7 @@ fn test_incremental_group_aux_inputs() {
 #[test]
 #[serial]
 fn test_incremental_group_shrinking_segment() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let mut events = Vec::new();
     for round in 0..3 {
         events.push(AcpEventData::PromptSubmitted {
@@ -242,3 +247,11 @@ fn test_incremental_group_shrinking_segment() {
     }
     assert_incremental_equivalent(&mut state, &events);
 }
+
+use crate::kit::stream_data::TuiTextChunk;
+
+use crate::kit::stream_data::TuiToolEnded;
+
+use crate::kit::stream_data::TuiToolStarted;
+
+use crate::kit::atoms::{FOLD_OVERRIDES, VIEW_MODELS};

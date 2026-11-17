@@ -12,7 +12,7 @@ use agent_client_protocol::schema::v1::{
 use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::PeriCaps;
 
-use super::tool_projection::{project_tool_completion, project_tool_start};
+use super::tool_projection;
 // 保留既有 public 路径，投影规则由共享 module 持有。
 pub use super::tool_projection::tool_result_content;
 
@@ -29,6 +29,7 @@ pub struct MappedEvent {
 
 impl MappedEvent {
     /// Category ①: full SessionUpdate.
+    #[must_use]
     pub fn standard(updates: Vec<SessionUpdate>) -> Self {
         Self {
             updates,
@@ -37,6 +38,7 @@ impl MappedEvent {
     }
 
     /// Category ① with source_agent_id extracted from the event.
+    #[must_use]
     pub fn standard_with_src(updates: Vec<SessionUpdate>, source_agent_id: Option<String>) -> Self {
         Self {
             updates,
@@ -97,7 +99,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             origin_readable,
             ..
         } => {
-            let mut tool_call = project_tool_start(tool_call_id, name, input);
+            let mut tool_call = tool_projection::project_tool_start(tool_call_id, name, input);
             // 真实所属 assistant 消息经 ACP `_meta` 扩展透传；标准 `ToolCall`
             // 没有消息归属字段，且 `message_id` 仍是 turn 派生的 v1 兼容值。
             // `originReadable` 区分「已持久化可回读」与「确认没有可回读 origin」
@@ -142,7 +144,7 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
                 Ok(v) => Some(v),
                 Err(_) => Some(serde_json::Value::String(output.clone())),
             };
-            let mut update = project_tool_completion(
+            let mut update = tool_projection::project_tool_completion(
                 tool_call_id,
                 output,
                 *is_error,

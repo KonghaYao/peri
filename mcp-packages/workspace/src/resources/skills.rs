@@ -16,16 +16,18 @@
 
 use std::path::{Path, PathBuf};
 
-use peri_acp_types::workspace_resources::{
-    digest_bytes, is_valid_uri_segment, skill_uri, ResourceScope, SkillEntry, SkillGetResponse,
-    SkillResourceRef, SkillsListResponse, SKILL_ENTRY_FILE,
-};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::SkillEntry;
+use peri_acp_types::workspace_resources::SkillGetResponse;
+use peri_acp_types::workspace_resources::SkillResourceRef;
+use peri_acp_types::workspace_resources::SKILL_ENTRY_FILE;
 use serde_json::{Map, Value};
 
-use super::path::{canonical_root, is_text_bytes, safe_read_file};
-use super::scan::{enumerate_skill_files, find_skill_dirs, relative_path_string};
+use super::path;
+use super::scan;
 use super::{ResourceBudget, ResourceError, WorkspaceResourcesInput};
-use peri_mcp_common::agent_definition::frontmatter::{frontmatter_json, frontmatter_summary};
+use peri_mcp_common::agent_definition::frontmatter;
 
 /// 技能条目的存储位置。
 #[derive(Debug)]
@@ -60,7 +62,7 @@ pub(crate) struct SkillRecord {
 impl SkillRecord {
     /// 技能入口 URI。
     pub fn uri(&self) -> Option<String> {
-        skill_uri(
+        workspace_resources::skill_uri(
             self.scope,
             self.plugin_name.as_deref(),
             &self.name,
@@ -76,7 +78,7 @@ impl SkillRecord {
             .iter()
             .map(|file| {
                 Some(SkillResourceRef {
-                    uri: skill_uri(
+                    uri: workspace_resources::skill_uri(
                         self.scope,
                         self.plugin_name.as_deref(),
                         &self.name,
@@ -107,7 +109,7 @@ impl SkillRecord {
         let bytes = match &self.store {
             SkillStore::Disk { root, dir_relative } => {
                 let full_relative = format!("{dir_relative}/{relative_path}");
-                safe_read_file(root, &full_relative, max_bytes)?
+                path::safe_read_file(root, &full_relative, max_bytes)?
             }
             SkillStore::Builtin { index } => {
                 if relative_path != SKILL_ENTRY_FILE {
@@ -132,7 +134,7 @@ pub(crate) fn scan_root(
     budget: &ResourceBudget,
 ) -> Vec<SkillRecord> {
     let mut records = Vec::new();
-    for dir in find_skill_dirs(root_canonical, budget.max_depth, budget.max_dirs_per_root) {
+    for dir in scan::find_skill_dirs(root_canonical, budget.max_depth, budget.max_dirs_per_root) {
         let Some(record) = build_record(root_canonical, &dir, scope, plugin_name, budget) else {
             continue;
         };
@@ -149,31 +151,31 @@ fn build_record(
     plugin_name: Option<&str>,
     budget: &ResourceBudget,
 ) -> Option<SkillRecord> {
-    let dir_relative = relative_path_string(root_canonical, dir)?;
+    let dir_relative = scan::relative_path_string(root_canonical, dir)?;
     let skill_md_relative = format!("{dir_relative}/{SKILL_ENTRY_FILE}");
     // SKILL.md 是技能身份的来源：symlink / 超预算 / 非文本 / frontmatter 不合法
     // 都使该技能不公开（跳过）。
     let skill_bytes =
-        safe_read_file(root_canonical, &skill_md_relative, budget.max_file_bytes).ok()?;
-    if !is_text_bytes(&skill_bytes) {
+        path::safe_read_file(root_canonical, &skill_md_relative, budget.max_file_bytes).ok()?;
+    if !path::is_text_bytes(&skill_bytes) {
         tracing::warn!(skill_dir = %dir_relative, "技能 SKILL.md 非 UTF-8 文本，跳过");
         return None;
     }
-    let skill_digest = digest_bytes(&skill_bytes);
+    let skill_digest = workspace_resources::digest_bytes(&skill_bytes);
     let skill_size = skill_bytes.len() as u64;
     let skill_text = String::from_utf8(skill_bytes).ok()?;
-    let frontmatter = match frontmatter_json(&skill_text) {
+    let frontmatter = match frontmatter::frontmatter_json(&skill_text) {
         Some(frontmatter) => frontmatter,
         None => {
             tracing::warn!(skill_dir = %dir_relative, "技能 SKILL.md frontmatter 解析失败，跳过");
             return None;
         }
     };
-    let Some((name, description)) = frontmatter_summary(&frontmatter) else {
+    let Some((name, description)) = frontmatter::frontmatter_summary(&frontmatter) else {
         tracing::warn!(skill_dir = %dir_relative, "技能 frontmatter 缺 name/description，跳过");
         return None;
     };
-    if !is_valid_uri_segment(&name) {
+    if !workspace_resources::is_valid_uri_segment(&name) {
         // X3：非法历史名称处置 = 不公开（登记）；wire 不改写名称本身。
         tracing::warn!(skill_dir = %dir_relative, "技能名不符合 URI 段约束，不公开");
         return None;
@@ -195,7 +197,7 @@ fn build_record(
         size: skill_size,
         text: true,
     }];
-    for relative_path in enumerate_skill_files(dir, budget.max_files_per_skill) {
+    for relative_path in scan::enumerate_skill_files(dir, budget.max_files_per_skill) {
         if relative_path == SKILL_ENTRY_FILE {
             continue;
         }
@@ -228,7 +230,7 @@ fn read_manifest_file(
     budget: &ResourceBudget,
 ) -> Option<SkillFileRecord> {
     let full_relative = format!("{dir_relative}/{relative_path}");
-    let bytes = match safe_read_file(root_canonical, &full_relative, budget.max_file_bytes) {
+    let bytes = match path::safe_read_file(root_canonical, &full_relative, budget.max_file_bytes) {
         Ok(bytes) => bytes,
         Err(ResourceError::Budget) => {
             tracing::warn!(file = %relative_path, "技能附件超过大小预算，未列入 manifest");
@@ -241,9 +243,9 @@ fn read_manifest_file(
     };
     Some(SkillFileRecord {
         relative_path: relative_path.to_string(),
-        digest: digest_bytes(&bytes),
+        digest: workspace_resources::digest_bytes(&bytes),
         size: bytes.len() as u64,
-        text: is_text_bytes(&bytes),
+        text: path::is_text_bytes(&bytes),
     })
 }
 
@@ -260,7 +262,7 @@ pub(crate) fn scan_catalog(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for root in &input.skill_roots {
-        let Some(canonical) = canonical_root(&root.path) else {
+        let Some(canonical) = path::canonical_root(&root.path) else {
             continue;
         };
         for record in scan_root(&canonical, root.scope, root.plugin_name.as_deref(), budget) {
@@ -296,6 +298,19 @@ pub(crate) fn scan_catalog(
     catalog
 }
 
+/// `skills/list` 的扫描入口：首期不分页（非空 cursor 按非法参数拒绝），
+/// 返回一次扫描的完整记录批供类型化结果直接消费。
+pub(crate) fn scan_catalog_for_list(
+    input: &WorkspaceResourcesInput,
+    budget: &ResourceBudget,
+    cursor: Option<String>,
+) -> Result<Vec<SkillRecord>, ResourceError> {
+    if cursor.is_some() {
+        return Err(ResourceError::InvalidUri);
+    }
+    Ok(scan_catalog(input, budget))
+}
+
 /// 按 URI 定位技能：在 scope（+plugin）匹配的输入根中扫描，取首个 `name` 匹配项
 /// （同一根内先到先得；不做跨根去重——shadow 项可读，见模块头）。
 pub(crate) fn locate(
@@ -320,7 +335,7 @@ pub(crate) fn locate(
         if root.scope != scope || root.plugin_name.as_deref() != plugin_name {
             continue;
         }
-        let Some(canonical) = canonical_root(&root.path) else {
+        let Some(canonical) = path::canonical_root(&root.path) else {
             continue;
         };
         matched_scope_root = true;
@@ -338,28 +353,6 @@ pub(crate) fn locate(
         // 但内部保留区分（InvalidUri 表示 URI 指向不存在的来源面）。
         Err(ResourceError::InvalidUri)
     }
-}
-
-/// `skills/list` 入口（首期不分页：非空 cursor 按非法参数拒绝）。
-pub(crate) fn skills_list_response(
-    input: &WorkspaceResourcesInput,
-    budget: &ResourceBudget,
-    cursor: Option<String>,
-) -> Result<SkillsListResponse, ResourceError> {
-    if cursor.is_some() {
-        return Err(ResourceError::InvalidUri);
-    }
-    let catalog = scan_catalog(input, budget);
-    let skills = catalog
-        .iter()
-        .filter_map(SkillRecord::entry)
-        .collect::<Vec<_>>();
-    Ok(SkillsListResponse {
-        skills,
-        next_cursor: None,
-        ttl_ms: None,
-        cache_scope: None,
-    })
 }
 
 /// `skills/get` 入口：按 URI 返回当前条目快照（不依赖 list 的枚举批）。

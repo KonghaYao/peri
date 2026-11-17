@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 use crate::app::App;
 use crate::app::agent::LlmProvider;
-use peri_acp::transport::mpsc::mpsc_transport_pair;
+
 use peri_acp_types::permission::PermissionMode;
 
 /// TUI 启动选项——CLI 解析后由调用方填好传入。
@@ -42,7 +42,7 @@ pub async fn build_app_and_acp(
     _panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<(App, Option<(AcpTuiClient, mpsc::Receiver<AcpNotification>)>)> {
     let model_transport_route = peri_acp::provider::transport_route::from_environment()?;
-    let mut app = App::new(opts.session_store.clone()).await?;
+    let mut app = App::try_new(opts.session_store.clone()).await?;
 
     // (I17-D) panic_notify_rx 已退役——ServiceRegistry.panic_notify_rx 字段删除，
     // 该参数仅保留签名以维持调用方兼容；实际 panic 通知走 tracing log。
@@ -193,11 +193,10 @@ async fn attach_acp_with_transport_route(
                     // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
                     // cron_state，tick 由 host 侧 scheduler 驱动执行）。
                     drive_cron_tick: true,
+                    builtin_assembly_mode: None,
                     // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每
                     // session 的会话环境装配产生（AW3-11）。
                     workspace_input: None,
-                    // 顶层三路径（无会话上下文）不消费 flag：Bash 缺省恒为前台。
-                    workspace_bash_default_run_in_background: false,
                     // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，
                     // 保持未接线（`resources/list` 只有 git ref）。
                     workspace_resources: None,
@@ -220,7 +219,8 @@ async fn attach_acp_with_transport_route(
             // (I17-D) app.services.acp_session_manager 字段已退役——
             // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。
 
-            let (client_transport, server_transport) = mpsc_transport_pair();
+            let (client_transport, server_transport) =
+                peri_acp::transport::mpsc::mpsc_transport_pair();
             let (acp_client, notification_tx, notification_rx) =
                 AcpTuiClient::new_interactive(client_transport);
             let server_transport = Arc::new(server_transport);

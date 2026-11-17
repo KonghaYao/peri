@@ -1,7 +1,7 @@
-use super::{
-    append_common_obs_attrs, build_span, build_status, span_head, CommonAttrs, EventView,
-    LangfuseError, OtlpSink,
-};
+use super::CommonAttrs;
+use super::EventView;
+use super::LangfuseError;
+use super::OtlpSink;
 use crate::stable_json::StableMap;
 use crate::types::GenerationBody;
 
@@ -15,7 +15,7 @@ pub(super) fn generation_create(
     view: &EventView<'_>,
     sink: &mut OtlpSink<'_>,
 ) -> Result<(), LangfuseError> {
-    let span = build_span(
+    let span = super::build_span(
         body.trace_id.as_deref(),
         body.id.as_deref(),
         body.parent_observation_id.as_deref(),
@@ -24,11 +24,11 @@ pub(super) fn generation_create(
         timestamp,
     )?;
     sink.begin_span(
-        &span_head(&span),
+        &super::span_head(&span),
         body.name.as_deref().unwrap_or("generation"),
     )?;
     sink.attr_str("langfuse.observation.type", "generation")?;
-    append_common_obs_attrs(
+    super::append_common_obs_attrs(
         sink,
         view,
         CommonAttrs {
@@ -75,7 +75,7 @@ pub(super) fn generation_create(
     if let Some(session_id) = body.session_id.as_deref() {
         sink.attr_str("langfuse.session.id", session_id)?;
     }
-    sink.end_span(build_status(
+    sink.end_span(super::build_status(
         body.level.as_ref(),
         body.status_message.as_deref(),
     ))

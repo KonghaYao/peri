@@ -10,10 +10,14 @@ use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::messages::BaseMessage;
 
 use super::clear::ClearCommand;
-use super::{
-    register_builtins, AgentPassthrough, CommandContext, CommandHandler, CommandOutcome,
-    CommandRegistry, CommandResult, FeedbackChannel, FeedbackLevel,
-};
+use super::AgentPassthrough;
+use super::CommandContext;
+use super::CommandHandler;
+use super::CommandOutcome;
+use super::CommandRegistry;
+use super::CommandResult;
+use super::FeedbackChannel;
+use super::FeedbackLevel;
 use crate::session::executor::PromptStopReason;
 
 /// 执行并解包：clear 恒 Done，其他变体 panic（与旧 AgentCommand 转发
@@ -124,7 +128,7 @@ async fn test_agent_passthrough_injects_original_text() {
 #[test]
 fn test_register_builtins_resolves_builtin_commands() {
     let reg = CommandRegistry::new();
-    register_builtins(&reg);
+    super::register_builtins(&reg);
 
     // 裸名（第一等级域条目登记裸名，alias_index）
     let resolved = reg.resolve("/compact").expect("裸名 compact 应命中");
@@ -308,7 +312,7 @@ async fn test_clear_command_does_not_call_push_done_itself() {
 #[test]
 fn test_loop_resolve_hits_registry_entry() {
     let reg = CommandRegistry::new();
-    register_builtins(&reg);
+    super::register_builtins(&reg);
 
     let resolved = reg.resolve("/loop").expect("/loop 应命中 core:loop");
     assert_eq!(resolved.entry.fullname, "core:loop");
@@ -326,7 +330,7 @@ fn test_loop_resolve_hits_registry_entry() {
 async fn test_loop_injects_prompt_and_rejects_empty_args() {
     let sink = Arc::new(MockEventSink::new());
     let reg = CommandRegistry::new();
-    register_builtins(&reg);
+    super::register_builtins(&reg);
 
     let mut ctx = make_command_context(sink.clone());
     ctx.args = "检查状态".to_string();

@@ -1,5 +1,14 @@
-use super::*;
-use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+use super::Arc;
+use super::EntryInvalidation;
+use super::EntryRenderCache;
+use super::EntryRenderContext;
+use super::EntrySurface;
+use super::GridSpec;
+use super::Line;
+use super::MarkdownLineCache;
+use super::TuiRenderUnit;
+use super::ZoneTransition;
+
 use crate::kit::message_area::grid::TextLineSource;
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAssistantBubble, TuiNoteLevel, TuiReasoningBlock, TuiSystemNote,
@@ -37,6 +46,133 @@ fn context(surface: EntrySurface) -> EntryRenderContext {
 
 #[test]
 #[serial_test::serial]
+fn genui_parse_payload_is_counted_once_per_shared_arc() {
+    let library = crate::kit::genui::library::library().unwrap();
+    let source = format!(
+        "$count = 1\nroot = Stack([Text(\"{}\"), Button(\"add\", @Set($count, $count + 1))])",
+        "数据".repeat(2048)
+    );
+    let parsed = Arc::new(peri_genui::parse(&source, library));
+    let parsed_bytes = parsed.retained_bytes();
+    let action = crate::kit::genui::GenUiAction::Set("$count".into(), peri_genui::Expr::Null);
+    let make = || crate::kit::genui::GenUiButtonInfo {
+        line_start: 0,
+        line_end: 1,
+        x_start: 0,
+        x_end: 1,
+        block: None,
+        parsed: Some(Arc::clone(&parsed)),
+        partial: false,
+        action: action.clone(),
+        label: "add".into(),
+    };
+    let single = EntryRenderCache {
+        genui_buttons: vec![make()],
+        ..Default::default()
+    };
+    let double = EntryRenderCache {
+        genui_buttons: vec![make(), make()],
+        ..Default::default()
+    };
+
+    let sample = make();
+    let per_button = std::mem::size_of::<crate::kit::genui::GenUiButtonInfo>()
+        + sample.label.capacity()
+        + sample.action.retained_bytes();
+    let single_bytes = single.retained_bytes();
+    assert!(single_bytes >= parsed_bytes);
+    assert_eq!(
+        double.retained_bytes() - single_bytes,
+        per_button,
+        "the second button shares the same ParseResult Arc"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn genui_buttons_rebuild_for_width_theme_and_transition_changes() {
+    let original = Arc::clone(&peri_theme::atoms::THEME_ATOM.state().read());
+    let mut cache = EntryRenderCache::default();
+    let text = format!(
+        "before\n\n```gen-ui\nroot = Stack([Card([Text(\"{}\"), Button(\"继续\", @ToAssistant(\"next\"))], \"标题\")])\n```\n\nafter",
+        "宽度变化的内容 ".repeat(20)
+    );
+    let TuiRenderUnit::TuiAssistantBubble(mut bubble) = bubble(&text) else {
+        unreachable!()
+    };
+    Arc::make_mut(&mut bubble).started_at = Some(peri_time::monotonic_now());
+    let vm = TuiRenderUnit::TuiAssistantBubble(bubble);
+    let mut previous_row = None;
+    let mut previous_style = None;
+    for (width, theme) in [
+        (80, peri_theme::builtin::dark_theme()),
+        (40, peri_theme::builtin::dark_theme()),
+        (40, peri_theme::builtin::light_theme()),
+    ] {
+        let theme = Arc::new(theme);
+        peri_theme::atoms::init_theme_atoms(Arc::clone(&theme));
+        let context = EntryRenderContext {
+            theme,
+            ..context(EntrySurface::Message)
+        };
+        let grid = GridSpec::grid_for(width);
+        let invalidation = cache.ensure(
+            &vm,
+            &grid,
+            context,
+            0,
+            ZoneTransition::ExitProcess(TextLineSource::Assistant),
+        );
+        assert!(matches!(
+            invalidation,
+            EntryInvalidation::Content | EntryInvalidation::Layout
+        ));
+        let [button] = cache.genui_buttons() else {
+            panic!("应暴露一个按钮命中区");
+        };
+        assert_eq!(button.line_end, button.line_start + 1);
+        assert!(
+            cache
+                .line(button.line_start)
+                .unwrap()
+                .to_string()
+                .contains(" 继续 ")
+        );
+        assert!(
+            cache
+                .markdown_lines()
+                .genui_ranges
+                .iter()
+                .any(|range| range.contains(&button.line_start))
+        );
+        if width == 80 {
+            previous_row = Some(button.line_start);
+        } else {
+            assert!(button.line_start > previous_row.unwrap());
+        }
+        let style = cache
+            .line(button.line_start)
+            .unwrap()
+            .spans
+            .iter()
+            .find(|span| span.content.contains(" 继续 "))
+            .unwrap()
+            .style;
+        if let Some(previous_style) = previous_style {
+            assert_ne!(style, previous_style);
+        }
+        if width == 40 {
+            previous_style = Some(style);
+        }
+    }
+    cache.evict();
+    assert!(cache.genui_buttons().is_empty());
+    assert!(cache.markdown_lines().genui_ranges.is_empty());
+    peri_theme::atoms::init_theme_atoms(original);
+}
+
+#[test]
+#[serial_test::serial]
 fn unchanged_entry_has_no_parse_or_wrap_work() {
     let mut cache = EntryRenderCache::default();
     let vm = bubble("# cached body");
@@ -47,14 +183,17 @@ fn unchanged_entry_has_no_parse_or_wrap_work() {
         EntryInvalidation::Content
     );
     let lines = Arc::clone(cache.lines());
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     assert_eq!(
         cache.ensure(&vm, &grid, context, 100, ZoneTransition::None),
         EntryInvalidation::None
     );
     assert!(Arc::ptr_eq(&lines, cache.lines()));
-    assert_eq!(perf_counters().full_parses, 0);
-    assert_eq!(perf_counters().wrap_recalculated_lines, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 0);
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().wrap_recalculated_lines,
+        0
+    );
 }
 
 #[test]
@@ -229,14 +368,17 @@ fn reasoning_animation_only_refreshes_header_without_markdown_or_wrap() {
     let grid = GridSpec::with_content(60);
     cache.ensure(&vm, &grid, context.clone(), 0, ZoneTransition::None);
     let body = cache.lines()[1..].to_vec();
-    reset_perf_counters();
+    crate::kit::acp_bridge::reset_perf_counters();
     assert_eq!(
         cache.ensure(&vm, &grid, context, 10, ZoneTransition::None),
         EntryInvalidation::Animation
     );
     assert_eq!(&cache.lines()[1..], body.as_slice());
-    assert_eq!(perf_counters().full_parses, 0);
-    assert_eq!(perf_counters().wrap_recalculated_lines, 0);
+    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 0);
+    assert_eq!(
+        crate::kit::acp_bridge::perf_counters().wrap_recalculated_lines,
+        0
+    );
 }
 
 #[test]
@@ -260,7 +402,10 @@ fn stable_chunks_use_visible_line_access_and_resize_reuses_parsed_blocks() {
     );
     let parsed = cache.markdown.stable_parsed_blocks();
     assert!(parsed > 0);
-    let start = cache.markdown_lines.stable_start.unwrap();
+    let start = cache
+        .markdown_lines
+        .stable_start
+        .expect("preparing stable markdown records its overlay start");
     assert_eq!(
         cache.line(start),
         cache.markdown_lines.stable[0].lines.first()
@@ -309,6 +454,6 @@ fn test_stable_markdown_wrap_uses_requested_viewport_width() {
     let mut cache = MarkdownLineCache::default();
     cache.retain_and_wrap(80, vec![(1, lines.clone())]);
     cache.stable_start = Some(0);
-    let expected = build_wrap_map(&lines, 25);
+    let expected = super::build_wrap_map(&lines, 25);
     assert_eq!(cache.build_slot_wrap_map(&[Line::default()], 25), expected);
 }

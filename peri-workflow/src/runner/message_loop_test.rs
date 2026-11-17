@@ -1,8 +1,24 @@
-use super::*;
 use crate::journal::RunState;
+use crate::journal::WorkflowJournalStore;
+use crate::progress::WorkflowProgressStore;
 use crate::progress::{RunProgress, RunStatus};
+use crate::protocol::WorkflowLimits;
+use crate::rpc::IncomingMessage;
+use crate::rpc::RpcChannel;
+use crate::runner::limits::RunLimitState;
+use crate::runner::message_loop::MessageLoop;
+use crate::runner::AgentTaskPublish;
+use crate::runner::AgentTaskSink;
+use crate::runner::WorkflowInput;
+use crate::runner::WorkflowResult;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::ProgressEvent;
+use peri_js_runtime::JsExecutionHost;
 use serde_json::json;
+
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 /// 记录发布调用的测试 sink：返回固定结果（不触达任务表）。
 ///
@@ -28,10 +44,17 @@ async fn run_messages(
     method: &str,
     params: serde_json::Value,
     limits: WorkflowLimits,
+    breach: Option<&str>,
 ) -> (WorkflowResult, RunState, RunProgress) {
-    let tmp = tempfile::tempdir().unwrap();
-    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
-    journal.init_run("run-1", "return null").unwrap();
+    let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
+    let journal = Arc::new(WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    ));
+    journal
+        .init_run("run-1", "return null")
+        .expect("the init run fixture result is required for this assertion");
     let progress = Arc::new(WorkflowProgressStore::new());
     progress.apply_event(&ProgressEvent::RunStarted {
         run_id: "run-1".into(),
@@ -53,7 +76,7 @@ async fn run_messages(
             params: Some(params),
         })
         .await
-        .unwrap();
+        .expect("msg tx send test receiver must remain available for this delivery");
     msg_tx
         .send(IncomingMessage::Request {
             id: None,
@@ -61,13 +84,17 @@ async fn run_messages(
             params: Some(json!({"runId": "run-1", "status": "completed"})),
         })
         .await
-        .unwrap();
+        .expect("msg tx send test receiver must remain available for this delivery");
     drop(msg_tx);
     let (done_tx, mut done_rx) = watch::channel(None);
+    let limit_state = Arc::new(RunLimitState::new(limits.max_tool_calls));
+    if let Some(breach) = breach {
+        limit_state.set_breach(breach.to_string());
+    }
     let message_loop = MessageLoop {
-        run_scope: Arc::new(super::super::scope::RunScope::new()),
+        run_scope: Arc::new(crate::runner::scope::RunScope::new()),
         agent_task_sink: Some(sink),
-        limit_state: Arc::new(RunLimitState::new(limits.max_tool_calls)),
+        limit_state,
         channel: Arc::new(RpcChannel::new(host.channel())),
         journal_store: Arc::clone(&journal),
         progress_store: Arc::clone(&progress),
@@ -88,6 +115,7 @@ async fn run_messages(
         run_started: std::time::Instant::now(),
         msg_rx,
         done_tx,
+        attempts: crate::journal::AttemptTracker::default(),
     };
     message_loop.run().await;
     host.kill().await.expect("应回收本地管道进程");
@@ -96,8 +124,12 @@ async fn run_messages(
         .expect("消息循环必须发布终态");
     (
         result,
-        journal.read_state("run-1").unwrap(),
-        progress.get_run("run-1").unwrap(),
+        journal
+            .read_state("run-1")
+            .expect("the read state fixture result is required for this assertion"),
+        progress
+            .run_snapshot("run-1")
+            .expect("the run snapshot fixture result is required for this assertion"),
     )
 }
 
@@ -114,6 +146,7 @@ async fn test_invalid_agent_task_continues_to_workflow_done() {
         // 跨 run 的发布：runId 与当前 run 不匹配，必须在准入前被拒绝。
         json!({"runId": "other-run", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         WorkflowLimits::default(),
+        None,
     )
     .await;
     assert_eq!(calls.load(Ordering::SeqCst), 0, "跨 run 发布不得进入准入");
@@ -138,6 +171,7 @@ async fn test_agent_limit_stops_before_queued_workflow_done() {
         "agent/task",
         json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         limits,
+        None,
     )
     .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1, "准入被调用一次并拒绝");
@@ -148,5 +182,35 @@ async fn test_agent_limit_stops_before_queued_workflow_done() {
     );
     assert_eq!(state.status, "failed");
     assert_eq!(state.error, result.error);
+    assert!(matches!(progress.status, RunStatus::Failed));
+}
+
+/// maxElapsedMs 超时是后到的失败：终态必须保留先前记录的首个 breach 诊断。
+#[tokio::test]
+async fn test_elapsed_timeout_keeps_the_first_breach() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let sink = RecordingSink {
+        calls: Arc::clone(&calls),
+        outcome: AgentTaskPublish::Accepted,
+    };
+    let limits = WorkflowLimits {
+        max_elapsed_ms: Some(0),
+        ..WorkflowLimits::default()
+    };
+    let (result, state, progress) = run_messages(
+        Arc::new(sink),
+        "agent/task",
+        json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
+        limits,
+        Some("workflow exceeded maxToolCalls (5)"),
+    )
+    .await;
+    assert_eq!(
+        result.error.as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+        "超时不得覆写首个 breach"
+    );
+    assert_eq!(state.error, result.error);
+    assert_eq!(result.status, "failed");
     assert!(matches!(progress.status, RunStatus::Failed));
 }

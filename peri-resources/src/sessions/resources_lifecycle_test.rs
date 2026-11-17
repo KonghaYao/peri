@@ -1,4 +1,7 @@
-use super::*;
+use super::{Fixture, FrozenSnapshotBytes, SessionResourceError, SessionResourceErrorKind};
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::SessionResources;
+use std::time::Duration;
 
 /// close/delete 成功路径必须回收 mutation gate 的 pending 条目与屏障。
 #[tokio::test]
@@ -121,14 +124,14 @@ async fn test_delete_cascades_canonical_data_and_allows_identity_reuse() {
         .await
         .unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::NotFound
     ));
     assert!(fixture
         .facade
         .append_history(
             &"s-del-root".to_owned(),
-            &[payload("deleted session write")]
+            &[super::payload("deleted session write")]
         )
         .await
         .is_err());
@@ -139,7 +142,7 @@ async fn test_delete_cascades_canonical_data_and_allows_identity_reuse() {
         .facade
         .append_history(
             &"s-del-root".to_owned(),
-            &[payload("recreated session write")],
+            &[super::payload("recreated session write")],
         )
         .await
         .unwrap();
@@ -157,7 +160,7 @@ async fn test_unbound_frozen_session_backfills_binding_and_keeps_the_canonical_b
     fixture.create(&id).await;
     fixture
         .facade
-        .append_history(&id, &[payload("preserved unbound history")])
+        .append_history(&id, &[super::payload("preserved unbound history")])
         .await
         .unwrap();
     let before = fixture.facade.load_session_snapshot(&id).await.unwrap();
@@ -215,7 +218,7 @@ async fn test_close_stops_new_writes_and_reports_unknown_persistence() {
     fixture.shutdown().await.unwrap();
     assert!(fixture
         .facade
-        .append_history(&id, &[payload("late")])
+        .append_history(&id, &[super::payload("late")])
         .await
         .is_err());
     fixture.shutdown().await.unwrap();
@@ -292,7 +295,7 @@ async fn test_recovery_after_failed_shutdown_allows_shutdown_to_finish() {
         .unwrap();
     assert!(fixture
         .facade
-        .append_history(&id, &[payload("closed to new writes")])
+        .append_history(&id, &[super::payload("closed to new writes")])
         .await
         .is_err());
     fixture.shutdown().await.unwrap();

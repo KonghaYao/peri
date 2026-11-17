@@ -1,6 +1,9 @@
 //! 解析 Git 的 NUL 字段协议，提交消息与路径不参与记录边界识别。
 
-use crate::commit::{parse_co_authors, CommitType, FileChange, ParsedCommit};
+use crate::commit;
+use crate::commit::CommitType;
+use crate::commit::FileChange;
+use crate::commit::ParsedCommit;
 
 pub(super) fn parse_log_output(mut raw: &[u8]) -> Result<Vec<ParsedCommit>, String> {
     let mut commits = Vec::new();
@@ -25,7 +28,7 @@ pub(super) fn parse_log_output(mut raw: &[u8]) -> Result<Vec<ParsedCommit>, Stri
             author_email,
             commit_type: CommitType::from_subject(&subject),
             subject,
-            co_authors: parse_co_authors(&body),
+            co_authors: commit::parse_co_authors(&body),
             files,
         });
     }

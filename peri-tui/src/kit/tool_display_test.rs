@@ -1,46 +1,50 @@
 //! Tests for tool_display
-#[cfg(test)]
-use super::*;
 
 #[test]
 fn test_bash_maps_to_shell() {
-    assert_eq!(format_tool_name("Bash"), "Shell");
+    assert_eq!(super::format_tool_name("Bash"), "Shell");
 }
 
 #[test]
 fn test_folder_operations_maps_to_folder() {
-    assert_eq!(format_tool_name("folder_operations"), "Folder");
+    assert_eq!(super::format_tool_name("folder_operations"), "Folder");
 }
 
 #[test]
 fn test_unknown_passthrough() {
     // 大部分工具名保留原样（不再映射为别名）
-    assert_eq!(format_tool_name("WebSearch"), "WebSearch");
-    assert_eq!(format_tool_name("WebFetch"), "WebFetch");
-    assert_eq!(format_tool_name("TodoWrite"), "TodoWrite");
-    assert_eq!(format_tool_name("AskUserQuestion"), "AskUserQuestion");
-    assert_eq!(format_tool_name("AgentResult"), "AgentResult");
-    assert_eq!(format_tool_name("artifact"), "artifact");
-    assert_eq!(format_tool_name("CustomTool"), "CustomTool");
+    assert_eq!(super::format_tool_name("WebSearch"), "WebSearch");
+    assert_eq!(super::format_tool_name("WebFetch"), "WebFetch");
+    assert_eq!(super::format_tool_name("TodoWrite"), "TodoWrite");
+    assert_eq!(
+        super::format_tool_name("AskUserQuestion"),
+        "AskUserQuestion"
+    );
+    assert_eq!(super::format_tool_name("AgentResult"), "AgentResult");
+    assert_eq!(super::format_tool_name("artifact"), "artifact");
+    assert_eq!(super::format_tool_name("CustomTool"), "CustomTool");
 }
 
 #[test]
 fn test_format_tool_args_bash_extracts_command() {
     let args = serde_json::json!({"command": "cargo build -p peri-tui"});
-    assert_eq!(format_tool_args("Bash", &args), "cargo build -p peri-tui");
+    assert_eq!(
+        super::format_tool_args("Bash", &args),
+        "cargo build -p peri-tui"
+    );
 }
 
 #[test]
 fn test_format_tool_args_read_extracts_file_path() {
     let args = serde_json::json!({"file_path": "src/main.rs"});
-    assert_eq!(format_tool_args("Read", &args), "src/main.rs");
+    assert_eq!(super::format_tool_args("Read", &args), "src/main.rs");
 }
 
 #[test]
 fn test_format_tool_args_glob_truncates_pattern() {
     let long = "a".repeat(250);
     let args = serde_json::json!({"pattern": &long});
-    let result = format_tool_args("Glob", &args);
+    let result = super::format_tool_args("Glob", &args);
     assert!(result.len() <= 203, "应为 200 字符 + '...'");
     assert!(result.ends_with("..."));
 }
@@ -49,20 +53,23 @@ fn test_format_tool_args_glob_truncates_pattern() {
 fn test_format_tool_args_websearch_truncates_query() {
     let long = "q".repeat(80);
     let args = serde_json::json!({"query": &long});
-    let result = format_tool_args("WebSearch", &args);
+    let result = super::format_tool_args("WebSearch", &args);
     assert!(result.len() <= 63);
 }
 
 #[test]
 fn test_format_tool_args_unknown_returns_empty() {
     let args = serde_json::json!({"x": "y"});
-    assert_eq!(format_tool_args("UnknownTool", &args), "");
+    assert_eq!(super::format_tool_args("UnknownTool", &args), "");
 }
 
 #[test]
 fn test_format_tool_args_folder_operations() {
     let args = serde_json::json!({"operation": "list", "folder_path": "/tmp"});
-    assert_eq!(format_tool_args("folder_operations", &args), "list /tmp");
+    assert_eq!(
+        super::format_tool_args("folder_operations", &args),
+        "list /tmp"
+    );
 }
 
 #[test]
@@ -70,7 +77,7 @@ fn test_format_websearch_query_truncated() {
     // WebSearch query 超过 60 字符时应截断
     let long = "q".repeat(80);
     let args = serde_json::json!({"query": &long});
-    let result = format_tool_args("WebSearch", &args);
+    let result = super::format_tool_args("WebSearch", &args);
     assert!(result.len() <= 63, "应为 60 字符 + '...'");
     assert!(result.ends_with("..."));
 }
@@ -82,7 +89,7 @@ fn test_format_webfetch_url_not_truncated() {
         "https://example.com/very/long/path/that/exceeds/sixty/characters/total/here.txt";
     assert!(long_url.chars().count() > 60, "测试用 url 长度应 > 60");
     let args = serde_json::json!({"url": &long_url});
-    let result = format_tool_args("WebFetch", &args);
+    let result = super::format_tool_args("WebFetch", &args);
     assert_eq!(result, long_url, "WebFetch url 不应被截断");
 }
 
@@ -94,18 +101,18 @@ fn tui_web_tools_still_summarize_after_migration() {
     // 归一走 IF-D15 的 original_tool_name_of_effective，本模块不得硬编码名字字面量。
     let long_query = "q".repeat(80);
     let args = serde_json::json!({ "query": long_query });
-    let effective = format_tool_args("mcp__web__WebSearch", &args);
-    assert_eq!(effective, format_tool_args("WebSearch", &args));
+    let effective = super::format_tool_args("mcp__web__WebSearch", &args);
+    assert_eq!(effective, super::format_tool_args("WebSearch", &args));
     assert!(effective.len() <= 63, "仍按 60 字符截断: {effective:?}");
 
     let url = "https://example.com/very/long/path/that/exceeds/sixty/characters/total/here.txt";
     let args = serde_json::json!({ "url": url });
-    assert_eq!(format_tool_args("mcp__web__WebFetch", &args), url);
+    assert_eq!(super::format_tool_args("mcp__web__WebFetch", &args), url);
 
     // artifact 走 file_path 专用分支（未命中会返回空串，对比 test_format_tool_args_unknown_returns_empty）
     let args = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
     assert_eq!(
-        format_tool_args("mcp__artifact__artifact", &args),
+        super::format_tool_args("mcp__artifact__artifact", &args),
         "peri-tui/src/lib.rs"
     );
 }
@@ -114,10 +121,13 @@ fn tui_web_tools_still_summarize_after_migration() {
 fn tui_unknown_mcp_names_fall_back_to_generic() {
     // 反证：未知 / 外部 `mcp__*` 两次都不命中 ⇒ 与迁移前逐位一致（无摘要）。
     let args = serde_json::json!({ "file_path": "peri-tui/src/lib.rs" });
-    assert_eq!(format_tool_args("mcp__foo__bar", &args), "");
+    assert_eq!(super::format_tool_args("mcp__foo__bar", &args), "");
     // 归一表是冻结字面量的精确匹配：不做前缀、大小写或 sanitize 反拆
-    assert_eq!(format_tool_args("mcp__web__WebSearchExtra", &args), "");
-    assert_eq!(format_tool_args("mcp__web__websearch", &args), "");
+    assert_eq!(
+        super::format_tool_args("mcp__web__WebSearchExtra", &args),
+        ""
+    );
+    assert_eq!(super::format_tool_args("mcp__web__websearch", &args), "");
 }
 
 // ── wave 3（workspace）注册表新增：display 名必须复用**既有**分支 ──────────────
@@ -127,37 +137,37 @@ fn tui_unknown_mcp_names_fall_back_to_generic() {
 #[test]
 fn workspace_effective_names_map_to_short_names() {
     // 判别点：归一入口失效 ⇒ 下面两条退化为 effective name 原样（断言变红）。
-    assert_eq!(format_tool_name("mcp__workspace__Bash"), "Shell");
+    assert_eq!(super::format_tool_name("mcp__workspace__Bash"), "Shell");
     assert_eq!(
-        format_tool_name("mcp__workspace__folder_operations"),
+        super::format_tool_name("mcp__workspace__folder_operations"),
         "Folder"
     );
     // 等价值：effective name 与裸名同结果（不新增 effective name 专用分支）。
     assert_eq!(
-        format_tool_name("mcp__workspace__Bash"),
-        format_tool_name("Bash")
+        super::format_tool_name("mcp__workspace__Bash"),
+        super::format_tool_name("Bash")
     );
     assert_eq!(
-        format_tool_name("mcp__workspace__folder_operations"),
-        format_tool_name("folder_operations")
+        super::format_tool_name("mcp__workspace__folder_operations"),
+        super::format_tool_name("folder_operations")
     );
     // 归一后仍无显示名分支的名字：必须回落**原样**（不是空串、也不是别名）。
     assert_eq!(
-        format_tool_name("mcp__workspace__Read"),
+        super::format_tool_name("mcp__workspace__Read"),
         "mcp__workspace__Read"
     );
     assert_eq!(
-        format_tool_name("mcp__workspace__Edit"),
+        super::format_tool_name("mcp__workspace__Edit"),
         "mcp__workspace__Edit"
     );
     // 未命中归一表：未知 / 外部 `mcp__*`、前缀相似、大小写不匹配一律原样。
-    assert_eq!(format_tool_name("mcp__foo__Bar"), "mcp__foo__Bar");
+    assert_eq!(super::format_tool_name("mcp__foo__Bar"), "mcp__foo__Bar");
     assert_eq!(
-        format_tool_name("mcp__workspace__BashExtra"),
+        super::format_tool_name("mcp__workspace__BashExtra"),
         "mcp__workspace__BashExtra"
     );
     assert_eq!(
-        format_tool_name("mcp__workspace__bash"),
+        super::format_tool_name("mcp__workspace__bash"),
         "mcp__workspace__bash"
     );
 }

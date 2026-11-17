@@ -1,20 +1,37 @@
-use super::*;
-use crate::mcp::{
-    config::ConfigSource, resource_tool::McpResourceTool, tool_bridge::McpToolBridge,
-    McpClientHandle, OAuthStatus,
-};
+use super::Arc;
+use super::ClientStatus;
+use super::CustomRequest;
+use super::Duration;
+use super::McpClientPool;
+use super::Peer;
+use super::RoleClient;
+use super::StoreOutputRequest;
+use super::StoredOutput;
+use super::MAX_BYTES;
+use super::MAX_LINES;
+use super::STORE_OUTPUT_METHOD;
+use crate::mcp::config::ConfigSource;
+use crate::mcp::resource_tool::McpResourceTool;
+use crate::mcp::tool_bridge::McpToolBridge;
+use crate::mcp::McpClientHandle;
+use crate::mcp::OAuthStatus;
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::tasks::{TaskManager as TaskManagerPort, TaskShutdownReport};
 use peri_agent::tools::{BaseTool, ToolContext};
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomResult,
-        ReadResourceRequestParams, ReadResourceResponse, Tool,
-    },
-    service::{RequestContext, RoleServer, RunningService},
-    ServerHandler, ServiceExt,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CallToolResult;
+use rmcp::model::ContentBlock;
+use rmcp::model::CustomResult;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResponse;
+use rmcp::model::Tool;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::service::RunningService;
+use rmcp::ServerHandler;
+use rmcp::ServiceExt;
 use tokio::sync::Notify;
 
 #[path = "current_invocation_fixture_test.rs"]
@@ -122,7 +139,7 @@ async fn lost_mcp_task_receipt_keeps_session_shutdown_incomplete() {
     let manager: Arc<dyn TaskManagerPort> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("receipt-session", &manager);
-    let bridge = McpToolBridge::new("remote", &test_tool(), pool.get_client("remote").unwrap())
+    let bridge = McpToolBridge::new("remote", &test_tool(), pool.client("remote").unwrap())
         .with_output_store(&pool, Some("receipt-session"));
     let call = tokio::spawn(async move {
         bridge
@@ -174,7 +191,7 @@ impl ServerHandler for Source {
 }
 
 pub(crate) struct Wire {
-    pub(crate) client: RunningService<RoleClient, rmcp::model::InitializeRequestParams>,
+    pub(crate) client: RunningService<RoleClient, crate::mcp::client::PeriClientHandler>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -192,8 +209,11 @@ impl Wire {
         });
         let client = tokio::time::timeout(
             Duration::from_secs(2),
-            crate::mcp::client::mcpp_client_info_for_profile(
-                &crate::mcp::apps::McpCapabilityProfile::disabled(),
+            crate::mcp::client::PeriClientHandler::new(
+                crate::mcp::client::mcpp_client_info_for_profile(
+                    &crate::mcp::apps::McpCapabilityProfile::disabled(),
+                ),
+                None,
             )
             .serve(client_io),
         )
@@ -250,7 +270,7 @@ async fn missing_or_unknown_child_binding_fails_before_send_without_root_fallbac
     let root: Arc<dyn TaskManagerPort> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("root-session", &root);
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
     for context in [
         ToolContext::new(&[], "."),
@@ -299,7 +319,7 @@ async fn child_scope_metadata_ignores_owner_parameters_and_captured_root() {
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("root-session", &root);
     pool.bind_session_task_manager("child-thread", &child);
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
     bridge.invoke(input, fixture.context(0, ".")).await.unwrap();
     {
@@ -333,7 +353,7 @@ async fn child_mcp_bridge_uses_child_binding_for_real_call() {
     let manager: Arc<dyn TaskManagerPort> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("child-thread", &manager);
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
     let context = fixture.context(0, ".");
     assert_eq!(context.session_id.as_deref(), Some("child-thread"));
@@ -366,7 +386,7 @@ async fn child_mcp_task_receipt_registers_under_child_owner() {
         "child-thread",
         SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
     );
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
     let context = fixture.context(0, ".");
     let output = bridge.invoke(serde_json::json!({}), context).await.unwrap();
@@ -426,7 +446,7 @@ async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override
         child_queue,
         child.clone(),
     );
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
     let output = bridge.invoke(input, fixture.context(0, ".")).await.unwrap();
     assert!(output.contains("Background task started:"), "{output}");
@@ -454,7 +474,7 @@ async fn test_closed_monitor_owner_returns_honest_task_receipt_error() {
         "session",
         SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
     );
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("session"));
     let error = bridge
         .invoke(serde_json::json!({}), fixture.context(0, "."))
@@ -534,7 +554,7 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
         delivered: parking_lot::Mutex::new(Vec::new()),
         accepted: Notify::new(),
     });
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
     let context = fixture
         .context(0, ".")
@@ -640,23 +660,26 @@ async fn host_bridge_success_error_and_resource_use_workspace_wire_readback() {
     pool.bind_session_task_manager("session", &manager);
     workspace.install(&pool, "workspace", true);
     source.install(&pool, "source", false);
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, Some("session"));
-    for (index, error) in [false, true].into_iter().enumerate() {
-        let input = if error {
-            serde_json::json!({"error": true})
-        } else {
-            serde_json::json!({})
-        };
-        let result = bridge
-            .invoke(input, fixture.context(index, host.path().to_str().unwrap()))
-            .await;
-        // 线路 error 结果是正常返回值（文本投影带失败上下文），两侧都落同一条落存提示。
-        let output = result.unwrap_or_else(|error| error.to_string());
-        let saved_path =
-            assert_remote_readback(workspace.client.peer(), &output, &large_output()).await;
-        assert!(!std::path::Path::new(&reference(&output, "path=")).starts_with(host.path()));
-        std::fs::remove_file(saved_path).unwrap();
+    {
+        let indexed_storage_modes = [false, true].into_iter().enumerate();
+        for (index, error) in indexed_storage_modes {
+            let input = if error {
+                serde_json::json!({"error": true})
+            } else {
+                serde_json::json!({})
+            };
+            let result = bridge
+                .invoke(input, fixture.context(index, host.path().to_str().unwrap()))
+                .await;
+            // 线路 error 结果是正常返回值（文本投影带失败上下文），两侧都落同一条落存提示。
+            let output = result.unwrap_or_else(|error| error.to_string());
+            let saved_path =
+                assert_remote_readback(workspace.client.peer(), &output, &large_output()).await;
+            assert!(!std::path::Path::new(&reference(&output, "path=")).starts_with(host.path()));
+            std::fs::remove_file(saved_path).unwrap();
+        }
     }
     let resource = McpResourceTool::new(pool.clone(), Arc::new(McpSkillRegistry::new()))
         .with_session_id("session");
@@ -710,19 +733,22 @@ async fn missing_workspace_does_not_claim_saved_output() {
     let manager: Arc<dyn TaskManagerPort> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("session", &manager);
-    let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
+    let bridge = McpToolBridge::new("source", &test_tool(), pool.client("source").unwrap())
         .with_output_store(&pool, None);
-    for (index, error) in [false, true].into_iter().enumerate() {
-        let input = if error {
-            serde_json::json!({"error": true})
-        } else {
-            serde_json::json!({})
-        };
-        let result = bridge.invoke(input, fixture.context(index, ".")).await;
-        // 线路 error 结果是正常返回值（文本投影带失败上下文）。
-        let output = result.unwrap_or_else(|error| error.to_string());
-        assert!(output.contains("Full output NOT saved"));
-        assert!(!output.contains("resource_uri="));
+    {
+        let indexed_storage_modes = [false, true].into_iter().enumerate();
+        for (index, error) in indexed_storage_modes {
+            let input = if error {
+                serde_json::json!({"error": true})
+            } else {
+                serde_json::json!({})
+            };
+            let result = bridge.invoke(input, fixture.context(index, ".")).await;
+            // 线路 error 结果是正常返回值（文本投影带失败上下文）。
+            let output = result.unwrap_or_else(|error| error.to_string());
+            assert!(output.contains("Full output NOT saved"));
+            assert!(!output.contains("resource_uri="));
+        }
     }
     let resource = McpResourceTool::new(pool.clone(), Arc::new(McpSkillRegistry::new()));
     let output = resource
@@ -824,7 +850,7 @@ async fn store_rejects_closed_replaced_regenerated_and_reowned_workspace_results
         tokio::time::timeout(Duration::from_secs(1), fixture.entered.notified())
             .await
             .unwrap();
-        let current = fixture.pool.get_client("workspace").unwrap();
+        let current = fixture.pool.client("workspace").unwrap();
         match change {
             "close" => fixture.pool.begin_shutdown(),
             "replace" => {
@@ -886,7 +912,8 @@ async fn output_timeout_and_drop_notify_server_cancellation() {
 async fn invalid_receipt_and_foreign_owner_are_not_saved_success() {
     let fixture = DelayedFixture::new(true).await;
     fixture.release.notify_one();
-    let output = format_output(Some(&fixture.pool), Some("session"), large_output(), false).await;
+    let output =
+        super::format_output(Some(&fixture.pool), Some("session"), large_output(), false).await;
     assert!(output.contains("Full output NOT saved: invalid output store response"));
     fixture
         .pool
@@ -906,80 +933,11 @@ async fn rpc_failure_never_claims_saved_output() {
     let wire = Wire::connect(Source).await;
     let pool = Arc::new(McpClientPool::new_empty());
     wire.install(&pool, "workspace", true);
-    let output = format_output(Some(&pool), Some("session"), large_output(), false).await;
+    let output = super::format_output(Some(&pool), Some("session"), large_output(), false).await;
     assert!(output.contains("Full output NOT saved: output store RPC failed"));
     assert!(!output.contains("resource_uri="));
     pool.clients.write().clear();
     wire.close().await;
 }
 
-// ── M7：模型面 UTF-8 字节预算 ────────────────────────────────────────────────
-
-/// 单行巨量输出：行数预算挡不住，必须由字节预算兜住，且提示计入预算。
-#[tokio::test]
-async fn single_line_output_is_bounded_by_the_byte_budget() {
-    let raw = "λ".repeat(MAX_BYTES);
-    assert_eq!(raw.lines().count(), 1, "前置：单行输入不触发行预算");
-    let output = format_output(None, None, raw, false).await;
-    assert!(
-        output.len() <= MAX_BYTES,
-        "模型面文本必须落在字节预算内: {} > {}",
-        output.len(),
-        MAX_BYTES
-    );
-    assert!(output.contains("[MCP output truncated:"));
-    assert!(output.contains("bytes"), "提示必须说明触发原因: {output}");
-    // 单行输入被字节预算截断后仍是完整 UTF-8（按字符边界截断，不产生半个字符）：
-    // 截断点必须落在 2 字节的 λ 边界上，正文长度是偶数。
-    let notice_at = output.find("[MCP output truncated:").unwrap();
-    let body = &output[..notice_at];
-    assert_eq!(
-        body.len() % 2,
-        0,
-        "截断必须落在 UTF-8 字符边界: {}",
-        body.len()
-    );
-    assert!(!output.contains('\u{FFFD}'));
-}
-
-/// 行数与字节同时超限时，提示必须把两个原因都说清。
-#[tokio::test]
-async fn byte_and_line_budgets_report_both_reasons() {
-    let raw: String = (0..3000)
-        .map(|line| format!("line-{line}-{}", "x".repeat(200)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let total_lines = raw.lines().count();
-    let total_bytes = raw.len();
-    assert!(
-        total_lines > MAX_LINES && total_bytes > MAX_BYTES,
-        "前置：两层预算都超限"
-    );
-    let output = format_output(None, None, raw, false).await;
-    assert!(output.len() <= MAX_BYTES, "len={}", output.len());
-    assert!(
-        output.contains(&format!("{total_lines} total lines, {total_bytes} bytes")),
-        "两个触发原因都必须出现: {}",
-        &output[output.len().saturating_sub(240)..]
-    );
-}
-
-/// 预算内输出逐字返回：不做任何落存、不追加提示（既有语义不变）。
-#[tokio::test]
-async fn output_within_budget_is_returned_verbatim() {
-    let raw = "short λ output\nsecond line\n".to_string();
-    let output = format_output(None, None, raw.clone(), false).await;
-    assert_eq!(output, raw);
-}
-
-/// 落存不可用时必须明说，且不得给出任何可回查地址。
-#[tokio::test]
-async fn byte_truncation_without_store_never_claims_a_path() {
-    let raw = "y".repeat(MAX_BYTES + 1);
-    let output = format_output(None, None, raw, true).await;
-    assert!(output.contains("[MCP error output truncated:"));
-    assert!(output.contains("Full output NOT saved: workspace output store not configured"));
-    assert!(!output.contains("resource_uri="));
-    assert!(!output.contains("path="));
-    assert!(output.len() <= MAX_BYTES);
-}
+include!("output_store_test/output_budgets.rs");

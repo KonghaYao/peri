@@ -14,10 +14,13 @@
 //! `WorkflowAgentDefinition` 的运行时裁剪；「有效工具集为空」在 subagent 与
 //! workflow 两条派发路径上都不报错（现状），所以预检只能由派发方在 brief 里完成。
 
-use super::*;
+use crate::resources::builtin::BUILTIN_AGENTS;
+use crate::resources::builtin::BUILTIN_SKILLS;
 
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
-use peri_acp_types::workspace_resources::{agent_uri, ResourceScope, AGENT_ENTRY_FILE};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::AGENT_ENTRY_FILE;
 use peri_mcp_web::BUILTIN_AGENTS as WEB_BUILTIN_AGENTS;
 use serde_json::Value;
 
@@ -444,8 +447,8 @@ fn dispatch_guidance_wires_real_tools_and_agent_resources() {
     );
 
     // 正向：指导文本给出的 agent 定义读取路径必须是生产 `agent_uri` 的真实输出。
-    let plan_uri =
-        agent_uri(ResourceScope::Builtin, None, "plan").expect("builtin plan 必须可寻址");
+    let plan_uri = workspace_resources::agent_uri(ResourceScope::Builtin, None, "plan")
+        .expect("builtin plan 必须可寻址");
     assert_eq!(plan_uri, format!("agent://builtin/plan/{AGENT_ENTRY_FILE}"));
     assert!(
         body.contains(&plan_uri),
@@ -453,7 +456,7 @@ fn dispatch_guidance_wires_real_tools_and_agent_resources() {
     );
     for target in builtin_targets() {
         assert!(
-            agent_uri(ResourceScope::Builtin, None, &target.id).is_some(),
+            workspace_resources::agent_uri(ResourceScope::Builtin, None, &target.id).is_some(),
             "builtin 目标 {} 必须可经 agent:// 寻址",
             target.id
         );

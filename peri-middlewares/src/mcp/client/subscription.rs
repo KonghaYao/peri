@@ -1,4 +1,5 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY};
 use peri_acp_types::plugin::McpSubscriptionsConfig;
@@ -8,10 +9,12 @@ use peri_acp_types::system_reminder::{
     ReminderSource as CanonicalReminderSource, SystemReminder, TrustedSystemReminder,
     TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
 };
-use rmcp::{
-    model::{GetMeta, NotificationMetaObject, ServerNotification, SubscriptionFilter},
-    service::{Subscription, SubscriptionEnd},
-};
+use rmcp::model::GetMeta;
+use rmcp::model::NotificationMetaObject;
+use rmcp::model::ServerNotification;
+use rmcp::model::SubscriptionFilter;
+use rmcp::service::Subscription;
+use rmcp::service::SubscriptionEnd;
 use serde_json::json;
 
 use super::{McpClientPool, McpServiceWrapper, SUBSCRIPTION_LISTEN_TIMEOUT};
@@ -19,504 +22,99 @@ use super::{McpClientPool, McpServiceWrapper, SUBSCRIPTION_LISTEN_TIMEOUT};
 #[path = "subscription_tasks.rs"]
 mod tasks;
 
-impl McpClientPool {
-    // ── subscriptions/listen（2026-07-28 协议）──────────────────────────────
-
-    /// 广播一条订阅通知到所有已注册的会话 inbox。
-    ///
-    /// 通知以 canonical ExternalEvent reminder 注入；Defer 唤醒 idle executor，
-    /// Info 留待下一次主动执行消费。
-    async fn broadcast_subscription_notification(
-        &self,
-        server: &str,
-        uri: &str,
-        subscription_id: &str,
-        kind: MessageKind,
-    ) {
-        let handles: Vec<InboxHandle> = self.session_bindings.read().inboxes();
-        if handles.is_empty() {
-            tracing::debug!(server = %server, uri = %uri, "订阅通知到达但无注册会话 inbox");
-            return;
-        }
-        let body = format!(
-            "MCP 资源已更新：server={server}, uri={uri}, subscription_id={subscription_id}。请查看并处理。"
-        );
-        let reminder = TrustedSystemReminderFactory::for_producer()
-            .construct(SystemReminder {
-                version: SYSTEM_REMINDER_VERSION,
-                category: ReminderCategory::ExternalEvent,
-                source: CanonicalReminderSource("mcp".into()),
-                kind: "subscription_resource_updated".into(),
-                severity: ReminderSeverity::Info,
-                delivery: ReminderDelivery::Required,
-                audiences: ReminderAudiences(vec![
-                    ReminderAudience::Model,
-                    ReminderAudience::Tui,
-                    ReminderAudience::Automation,
-                ]),
-                body,
-                summary: Some("MCP 订阅资源已更新".into()),
-                metadata: json!({
-                    "server": server,
-                    "uri": uri,
-                    "subscription_id": subscription_id,
-                }),
-            })
-            .expect("MCP subscription reminder mapping must be valid");
-        for handle in handles {
-            if let Err(error) = handle
-                .push_system_reminder(kind, MessageSource::McpNotification, reminder.clone())
-                .await
-            {
-                tracing::warn!(%error, "MCP subscription reminder enqueue failed");
-            }
-        }
-        tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "订阅通知已广播到会话 inbox");
-    }
-
-    /// 订阅流异常中断后的最大重试次数（每次中断独立计算，收到通知即重置）。
-    const SUBSCRIPTION_RETRY_LIMIT: usize = 3;
-    /// 订阅流异常中断后的退避基准秒数（指数递增：1s/2s/4s）。
-    const SUBSCRIPTION_RETRY_BASE_DELAY_SECS: u64 = 1;
-
-    /// git ref 资源通知的 `resources/read` 上界。
-    ///
-    /// 通知只说明「资源已更新」，正文要回读；上界保证「读了但读不回来」不会挂住消费
-    /// 循环——超时按失败走通用提醒回退（事件不丢）。
-    const GIT_REF_READ_TIMEOUT: Duration = Duration::from_secs(2);
-
-    /// 通知分派（Git Watch 下沉的宿主消费入口）。
-    ///
-    /// - 命中内置 `workspace` 的 git ref 资源 ⇒ 回读资源正文，组装**宿主内置**的
-    ///   canonical `git_watch` 提醒（D-5：元数据不从 server 取），`Info` 不唤醒；
-    /// - 回读失败 / 超时 ⇒ 回退既有通用订阅提醒（事件不丢，只是语义降级）；
-    /// - 其余资源 ⇒ 既有路径逐位不变。
-    async fn dispatch_resource_updated(
-        &self,
-        server: &str,
-        uri: &str,
-        subscription_id: &str,
-        declared_kind: Option<McpNotificationMessageKind>,
-    ) {
-        if !is_git_watch_resource(server, uri) {
-            self.broadcast_subscription_notification(
-                server,
-                uri,
-                subscription_id,
-                declared_kind.map(Into::into).unwrap_or(MessageKind::Defer),
-            )
-            .await;
-            return;
-        }
-        match self.read_git_ref_body(server, uri).await {
-            Some(body) => {
-                self.broadcast_git_watch_notification(server, uri, &body, declared_kind)
-                    .await
-            }
-            None => {
-                tracing::warn!(
-                    server = %server,
-                    uri = %uri,
-                    "git ref 资源回读失败/超时，回退通用订阅提醒"
-                );
-                self.broadcast_subscription_notification(
-                    server,
-                    uri,
-                    subscription_id,
-                    declared_kind.map(Into::into).unwrap_or(MessageKind::Defer),
-                )
-                .await;
-            }
-        }
-    }
-
-    /// 回读 git ref 资源正文：`resources/read`（带超时）→ 首个文本内容。
-    async fn read_git_ref_body(&self, server: &str, uri: &str) -> Option<String> {
-        let peer = self
-            .get_client(server)
-            .and_then(|handle| handle.peer.clone())?;
-        match peri_time::timeout(
-            Self::GIT_REF_READ_TIMEOUT,
-            self.read_resource_cached(server, uri, &peer),
-        )
-        .await
-        {
-            Ok(Ok((result, _ticket))) => first_text_body(&result),
-            Ok(Err(error)) => {
-                tracing::warn!(server = %server, uri = %uri, error = %error, "git ref 资源读取失败");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(server = %server, uri = %uri, "git ref 资源读取超时");
-                None
-            }
-        }
-    }
-
-    /// 把宿主内置的 `git_watch` 提醒推到所有注册会话 inbox（`Info`，不唤醒）。
-    async fn broadcast_git_watch_notification(
-        &self,
-        server: &str,
-        uri: &str,
-        body: &str,
-        declared_kind: Option<McpNotificationMessageKind>,
-    ) {
-        let handles: Vec<InboxHandle> = self.session_bindings.read().inboxes();
-        if handles.is_empty() {
-            tracing::debug!(server = %server, uri = %uri, "git ref 变化到达但无注册会话 inbox");
-            return;
-        }
-        let (default_kind, reminder) = git_watch_reminder_from_resource(uri, body);
-        let kind = declared_kind.map(Into::into).unwrap_or(default_kind);
-        for handle in handles {
-            if let Err(error) = handle
-                .push_system_reminder(kind, MessageSource::McpNotification, reminder.clone())
-                .await
-            {
-                tracing::warn!(%error, "MCP subscription reminder enqueue failed");
-            }
-        }
-        tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "git ref 变化已注入会话");
-    }
-
-    /// 启动订阅消费循环：读取 `subscriptions/listen` 流上的通知并广播。
-    ///
-    /// 循环持有 `Subscription`（drop 即取消订阅）；transport 关闭或流结束
-    /// 时自然退出。tool/prompt list_changed 由 rmcp peer 内部自动失效缓存。
-    ///
-    /// 流异常中断（`SubscriptionEnd::Lagged` / `Abrupt` / 瞬时错误）时按
-    /// 指数退避（1s/2s/4s）重新 `Peer::listen` 恢复，最多重试
-    /// [`Self::SUBSCRIPTION_RETRY_LIMIT`] 次；期间收到正常通知会重置计数。
-    /// 连接关闭、配置移除或重试耗尽后退出循环并告警。
-    pub(crate) async fn spawn_subscription_loop(
-        self: &Arc<Self>,
-        server: &str,
-        mut subscription: Subscription,
-    ) {
-        let _admission = self.lifecycle_registration.lock();
-        if !self.is_open() {
-            return;
-        }
-        let pool = Arc::clone(self);
-        let task_server = server.to_string();
-        let key = crate::mcp::McpTaskKey::Subscription(server.to_string());
-        let _ = self.task_spawner.spawn(key, async move {
-            // 剩余重试次数：收到通知即重置，保证每段中断序列都有独立恢复机会
-            let mut retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
-            loop {
-                match subscription.next().await {
-                    Ok(Some(notification @ ServerNotification::ResourceUpdatedNotification(_))) => {
-                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
-                        let ServerNotification::ResourceUpdatedNotification(ref notif) =
-                            notification
-                        else {
-                            unreachable!()
-                        };
-                        let sid = notification
-                            .get_meta()
-                            .subscription_id()
-                            .map(|id| id.to_string())
-                            .unwrap_or_default();
-                        pool.invalidate_resource_cache(&task_server, Some(&notif.params.uri))
-                            .await;
-                        let declared_kind =
-                            notification_message_kind(&task_server, Some(notification.get_meta()));
-                        pool.dispatch_resource_updated(
-                            &task_server,
-                            &notif.params.uri,
-                            &sid,
-                            declared_kind,
-                        )
-                        .await;
-                    }
-                    Ok(Some(ServerNotification::ResourceListChangedNotification(_))) => {
-                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
-                        pool.invalidate_resource_cache(&task_server, None).await;
-                    }
-                    Ok(Some(ServerNotification::ToolListChangedNotification(_))) => {
-                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
-                        // rmcp peer 已失效其连接内工具缓存；同步失效跨进程磁盘
-                        // tools/list 缓存，使下次回源刷新 bridge 使用的 schema。
-                        pool.invalidate_tools_cache(&task_server).await;
-                    }
-                    Ok(Some(ServerNotification::PromptListChangedNotification(_))) => {
-                        // rmcp peer 已失效其连接内 prompt 缓存；本客户端未持久化
-                        // prompts，无需磁盘失效。
-                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
-                    }
-                    Ok(Some(_)) => {
-                        // 其余通知（Cancelled/Progress/Logging/Task/Custom 等）无需处理
-                        retries_left = Self::SUBSCRIPTION_RETRY_LIMIT;
-                    }
-                    Ok(None) => {
-                        // 仅对异常结束（Lagged/Abrupt）重试；Graceful/Cancelled
-                        // 为正常终止，不恢复
-                        let retriable = matches!(
-                            subscription.end(),
-                            Some(SubscriptionEnd::Lagged { .. }) | Some(SubscriptionEnd::Abrupt)
-                        );
-                        if !retriable || retries_left == 0 {
-                            tracing::info!(
-                                server = %task_server,
-                                end = ?subscription.end(),
-                                "订阅流结束，停止消费"
-                            );
-                            break;
-                        }
-                        // Subscription 为独占对象：重新 listen 前必须 drop 旧
-                        // 句柄（drop 自动发送 cancelled 并注销）
-                        drop(subscription);
-                        match pool
-                            .relisten_subscription(&task_server, &mut retries_left)
-                            .await
-                        {
-                            Some(new_subscription) => subscription = new_subscription,
-                            None => break,
-                        }
-                    }
-                    Err(e) => {
-                        if retries_left == 0 {
-                            tracing::warn!(
-                                server = %task_server,
-                                error = %e,
-                                "订阅流错误，重试耗尽，停止消费"
-                            );
-                            break;
-                        }
-                        drop(subscription);
-                        match pool
-                            .relisten_subscription(&task_server, &mut retries_left)
-                            .await
-                        {
-                            Some(new_subscription) => subscription = new_subscription,
-                            None => break,
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    /// 订阅流异常中断后的恢复：退避等待后按 server 当前配置重新建立
-    /// `subscriptions/listen` 长流。
-    ///
-    /// 消耗一次重试机会。连接已关闭（services 表无该 server）、订阅配置
-    /// 已移除或重新 listen 失败时返回 None 退出循环。
-    async fn relisten_subscription(
-        self: &Arc<Self>,
-        server: &str,
-        retries_left: &mut usize,
-    ) -> Option<Subscription> {
-        *retries_left -= 1;
-        let attempt = Self::SUBSCRIPTION_RETRY_LIMIT - *retries_left;
-        let delay_secs = Self::SUBSCRIPTION_RETRY_BASE_DELAY_SECS << (attempt - 1);
-        tracing::warn!(
-            server = %server,
-            attempt = %attempt,
-            delay_secs = %delay_secs,
-            "订阅流异常中断，退避后重新 listen"
-        );
-        peri_time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-        // 连接可能已被移除/重连：取 services 表中的当前 peer
-        let peer = {
-            let services = self.services.lock();
-            services.get(server).map(|s| s.peer().clone())
-        };
-        let Some(peer) = peer else {
-            tracing::info!(server = %server, "连接已关闭，订阅循环退出");
-            return None;
-        };
-        // 配置可能已被移除：按当前配置重建过滤器
-        let filter = self
-            .configs
-            .read()
-            .get(server)
-            .and_then(|c| c.subscriptions.as_ref())
-            .filter(|s| !s.is_empty())
-            .map(build_subscription_filter);
-        let Some(filter) = filter else {
-            tracing::info!(server = %server, "订阅配置已移除，订阅循环退出");
-            return None;
-        };
-        match peri_time::timeout(SUBSCRIPTION_LISTEN_TIMEOUT, peer.listen(filter)).await {
-            Ok(Ok(new_subscription)) => {
-                tracing::info!(server = %server, "订阅流重新建立");
-                Some(new_subscription)
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    server = %server,
-                    error = %e,
-                    "重新 listen 失败，订阅循环退出"
-                );
-                None
-            }
-            Err(_) => {
-                tracing::warn!(
-                    server = %server,
-                    timeout_secs = SUBSCRIPTION_LISTEN_TIMEOUT.as_secs(),
-                    "重新 listen 超时，订阅循环退出"
-                );
-                None
-            }
-        }
-    }
-}
-
-/// Server-selected queue scheduling for a single resource notification.
-/// Unknown values do not change the existing per-resource default.
-fn notification_message_kind(
-    server: &str,
-    meta: Option<&NotificationMetaObject>,
-) -> Option<McpNotificationMessageKind> {
-    let value = meta?.get(MCP_MESSAGE_KIND_META_KEY)?;
-    let parsed = value.as_str().and_then(McpNotificationMessageKind::parse);
-    if parsed.is_none() {
-        tracing::warn!(server = %server, value = ?value, "invalid MCP notification message kind");
-    }
-    parsed
-}
-
-/// 由 `McpSubscriptionsConfig` 构建 `subscriptions/listen` 过滤器。
-pub(crate) fn build_subscription_filter(sub: &McpSubscriptionsConfig) -> SubscriptionFilter {
-    let mut b = SubscriptionFilter::builder();
-    if !sub.resources.is_empty() {
-        b = b.resource_subscriptions(sub.resources.iter().cloned());
-    }
-    if sub.tools_list_changed {
-        b = b.tools_list_changed();
-    }
-    if sub.prompts_list_changed {
-        b = b.prompts_list_changed();
-    }
-    if sub.resources_list_changed {
-        b = b.resources_list_changed();
-    }
-    b.build()
-}
-
-/// 该通知是否属于**宿主内置**的 git ref 资源（D-5 的绑定面）。
-///
-/// 判定不写第二份实例名字面量：以「实例有默认订阅且默认订阅覆盖该 URI」为准
-/// （默认订阅的唯一声明在 `mcp::builtin::workspace_subscription`）。
-#[cfg(not(target_os = "emscripten"))]
-pub(crate) fn is_git_watch_resource(server: &str, uri: &str) -> bool {
-    uri == peri_mcp_workspace::GIT_REF_RESOURCE_URI
-        && crate::mcp::builtin::default_subscriptions_for(server)
-            .is_some_and(|sub| sub.resources.iter().any(|resource| resource == uri))
-}
-
-#[cfg(target_os = "emscripten")]
-pub(crate) fn is_git_watch_resource(_server: &str, _uri: &str) -> bool {
-    false
-}
-
-/// 读回正文的信任边界（§6 风险 6：读回的 payload 不可信，限长、不进控制状态）。
-const GIT_REF_BODY_MAX_BYTES: usize = 8 * 1024;
-
-/// 资源正文 → canonical `git_watch` 提醒（**纯函数**，便于单测）。
-///
-/// 元数据逐字段 = 旧 `GitWatchMiddleware` 的契约（计划 §1 逐字保持项）：category /
-/// source / kind / severity / delivery / audiences / summary / metadata 全部写死，
-/// `body` = 资源正文逐字（仅超长时按 UTF-8 边界截断）。
-///
-/// 返回 `MessageKind::Info`（**不唤醒**）：git ref 变化是诊断信息，不是需要 agent 立即
-/// 响应的外部事件（旧实现的 `MessageKind::Info` 语义逐字保持）。
-pub(crate) fn git_watch_reminder_from_resource(
-    uri: &str,
-    body: &str,
-) -> (MessageKind, TrustedSystemReminder) {
-    #[cfg(not(target_os = "emscripten"))]
-    debug_assert_eq!(
-        uri,
-        peri_mcp_workspace::GIT_REF_RESOURCE_URI,
-        "git_watch 映射只对 git ref 资源生效"
-    );
-    #[cfg(target_os = "emscripten")]
-    let _ = uri;
-    let reminder = TrustedSystemReminderFactory::for_producer()
-        .construct(SystemReminder {
-            version: SYSTEM_REMINDER_VERSION,
-            category: ReminderCategory::Diagnostic,
-            source: CanonicalReminderSource("git_watch".into()),
-            kind: "repository_ref_changed".into(),
-            severity: ReminderSeverity::Info,
-            delivery: ReminderDelivery::Configurable,
-            audiences: ReminderAudiences(vec![
-                ReminderAudience::Model,
-                ReminderAudience::Tui,
-                ReminderAudience::Diagnostics,
-            ]),
-            body: truncate_body(body),
-            summary: Some("Git branch 或 HEAD 已变化".into()),
-            metadata: json!({}),
-        })
-        .expect("git watch reminder mapping must be valid");
-    (MessageKind::Info, reminder)
-}
-
-/// 超长正文按 UTF-8 边界截断（截断处追加标记，避免把截断伪装成完整正文）。
-fn truncate_body(body: &str) -> String {
-    if body.len() <= GIT_REF_BODY_MAX_BYTES {
-        return body.to_string();
-    }
-    let mut end = GIT_REF_BODY_MAX_BYTES;
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…（资源正文超长，已截断）", &body[..end])
-}
-
-/// `resources/read` 结果里的首个文本内容（Blob / 空内容返回 `None`）。
-fn first_text_body(result: &rmcp::model::ReadResourceResult) -> Option<String> {
-    result.contents.iter().find_map(|content| match content {
-        rmcp::model::ResourceContents::TextResourceContents { text, .. } => Some(text.clone()),
-        rmcp::model::ResourceContents::BlobResourceContents { .. } => None,
-        // `ResourceContents` 是 non_exhaustive（未来新增形态安全退化，不 panic）。
-        _ => None,
-    })
-}
-
-/// 连接成功后建立 `subscriptions/listen` 长流并启动消费循环（2026-07-28 协议）。
-///
-/// 失败仅告警——server 可能不支持，连接本身仍可用。initialize / reconnect 共用。
-pub(crate) async fn setup_subscription(
-    pool: &Arc<McpClientPool>,
-    rs: &McpServiceWrapper,
-    name: &str,
-    sub: &McpSubscriptionsConfig,
-) {
-    match peri_time::timeout(
-        SUBSCRIPTION_LISTEN_TIMEOUT,
-        rs.peer().listen(build_subscription_filter(sub)),
-    )
-    .await
-    {
-        Ok(Ok(subscription)) => {
-            pool.spawn_subscription_loop(name, subscription).await;
-            tracing::info!(
-                server = %name,
-                resources = ?sub.resources,
-                "subscriptions/listen 已建立"
-            );
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(
-                server = %name,
-                error = %e,
-                "subscriptions/listen 建立失败（server 可能不支持）"
-            );
-        }
-        Err(_) => {
-            tracing::warn!(
-                server = %name,
-                timeout_secs = SUBSCRIPTION_LISTEN_TIMEOUT.as_secs(),
-                "subscriptions/listen 建立超时（连接仍可用）"
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 #[path = "subscription_test.rs"]
 mod tests;
+
+#[path = "subscription/subscription_events.rs"]
+mod subscription_events;
+#[cfg(test)]
+pub(crate) use subscription_events::build_subscription_filter;
+#[cfg(test)]
+pub(crate) use subscription_events::git_watch_reminder_from_resource;
+#[cfg(not(target_os = "emscripten"))]
+#[cfg(test)]
+pub(crate) use subscription_events::is_git_watch_resource;
+#[cfg(target_os = "emscripten")]
+#[cfg(test)]
+pub(crate) use subscription_events::is_git_watch_resource;
+#[cfg(test)]
+use subscription_events::notification_message_kind;
+pub(crate) use subscription_events::setup_subscription;
+
+impl McpClientPool {
+    /// 关闭 builtin 能力时不建立订阅；外部 server 的订阅不受影响。
+    pub(crate) fn subscription_allowed(&self, server: &str) -> bool {
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        let configs = self.configs.read();
+        let Some(config) = configs.get(server) else {
+            return true;
+        };
+        if super::super::builtin::is_closed_source(server, config.source.as_ref(), &closed) {
+            return false;
+        }
+        if !matches!(config.source.as_ref(), Some(peri_acp_types::plugin::ConfigSource::Builtin { instance }) if peri_acp_types::builtin_mcp::is_v5_server_name(instance))
+        {
+            return true;
+        }
+        config.subscriptions.as_ref().is_none_or(|subscriptions| {
+            !super::super::builtin::visible_subscription_resources(
+                server,
+                &subscriptions.resources,
+                &closed,
+            )
+            .is_empty()
+        })
+    }
+
+    pub(crate) fn subscription_allowed_for_uri(&self, server: &str, uri: &str) -> bool {
+        if !self.subscription_allowed(server) {
+            return false;
+        }
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        let is_builtin_v5 = self.configs.read().get(server).is_some_and(|config| {
+            matches!(config.source.as_ref(), Some(peri_acp_types::plugin::ConfigSource::Builtin { instance }) if peri_acp_types::builtin_mcp::is_v5_server_name(instance))
+        });
+        !is_builtin_v5 || !super::super::builtin::is_resource_closed(uri, &closed)
+    }
+
+    pub(crate) fn filter_subscriptions(
+        &self,
+        server: &str,
+        subscriptions: &McpSubscriptionsConfig,
+    ) -> Option<McpSubscriptionsConfig> {
+        let closed = self
+            .builtin_instance_context()
+            .map(|context| context.closed.clone())
+            .unwrap_or_default();
+        let is_builtin_v5 = self.configs.read().get(server).is_some_and(|config| {
+            matches!(config.source.as_ref(), Some(peri_acp_types::plugin::ConfigSource::Builtin { instance }) if peri_acp_types::builtin_mcp::is_v5_server_name(instance))
+        });
+        let resources = if is_builtin_v5 {
+            super::super::builtin::visible_subscription_resources(
+                server,
+                &subscriptions.resources,
+                &closed,
+            )
+        } else {
+            subscriptions.resources.clone()
+        };
+        (!resources.is_empty()
+            || (!is_builtin_v5
+                && (subscriptions.tools_list_changed
+                    || subscriptions.prompts_list_changed
+                    || subscriptions.resources_list_changed)))
+            .then_some(McpSubscriptionsConfig {
+                resources,
+                tools_list_changed: subscriptions.tools_list_changed,
+                prompts_list_changed: subscriptions.prompts_list_changed,
+                resources_list_changed: subscriptions.resources_list_changed,
+            })
+    }
+}

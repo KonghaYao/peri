@@ -7,22 +7,22 @@
 //! mount probe.
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{LOGIN_PANEL_REQUEST, LoginPanelRequest, PERI_CONFIG_HANDLE};
-use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::panel_mouse::hit_item;
+
 use crate::kit::panels::shared::list::ListViewport;
-use ratatui_kit::{
-    crossterm::event::{
-        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    },
-    prelude::*,
-    ratatui::layout::Rect,
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEvent;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
-use super::edit::{edit_field, effective_provider_id, set_context_window, switch_active_alias};
-use super::editor_view::{PaneHit, kv_row_hits};
-use super::panel_render::provider_button_label;
+use super::edit::switch_active_alias;
+use super::editor_view::PaneHit;
+
 use super::{FIELD_CONTEXT_WINDOW, FIELD_COUNT, PROFILE_KEYS};
 
 /// 右栏内容区几何：标题 1 行 + 空行 1 行 + 主区 + 底部提示 1 行。
@@ -87,7 +87,8 @@ fn hit_provider_button(mouse: &MouseEvent, area: Rect) -> bool {
     if mouse.row != row {
         return false;
     }
-    let width = UnicodeWidthStr::width(provider_button_label().as_str()) as u16;
+    let width =
+        UnicodeWidthStr::width(super::panel_render::provider_button_label().as_str()) as u16;
     mouse.column >= area.x && mouse.column < area.x.saturating_add(width)
 }
 
@@ -176,22 +177,26 @@ pub(super) fn handle_model_event_with(
             }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 let offset = ctx.right_scroll.read().offset().y;
-                if let Some(PaneHit::Field(field)) =
-                    hit_right_pane(&kv_row_hits(FIELD_COUNT), &mouse, area, offset)
-                {
+                if let Some(PaneHit::Field(field)) = hit_right_pane(
+                    &super::editor_view::kv_row_hits(FIELD_COUNT),
+                    &mouse,
+                    area,
+                    offset,
+                ) {
                     *ctx.right_cursor.write() = field;
                     *ctx.right_focus.write() = true;
                     if field == FIELD_CONTEXT_WINDOW {
                         begin_window_edit(ctx, &ctx.selected_alias.read().clone());
                     } else {
-                        edit_field(ctx.selected_alias.read().clone(), field, true);
+                        super::edit::edit_field(ctx.selected_alias.read().clone(), field, true);
                     }
                     *ctx.render_version.write() += 1;
                     return EventResult::Consumed;
                 }
             }
             if mouse.column < left_column_end(area)
-                && let Some(idx) = hit_item(&mouse, area, ctx.viewport.hit_layout())
+                && let Some(idx) =
+                    crate::kit::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
             {
                 *ctx.selected_alias.write() = PROFILE_KEYS[idx].to_owned();
                 switch_alias(idx);
@@ -231,14 +236,14 @@ pub(super) fn handle_model_event_with(
         KeyCode::Up => {
             if *ctx.right_focus.read() {
                 let mut c = ctx.right_cursor.write();
-                *c = previous_selection(*c);
+                *c = crate::kit::list_nav::previous_selection(*c);
             } else {
                 // 从面板选中档位出发上移（与渲染高亮一致）
                 let idx = PROFILE_KEYS
                     .iter()
                     .position(|k| *k == current_alias)
                     .unwrap_or(1);
-                let next = previous_selection(idx);
+                let next = crate::kit::list_nav::previous_selection(idx);
                 *ctx.selected_alias.write() = PROFILE_KEYS[next].to_owned();
                 switch_alias(next);
                 *ctx.render_version.write() += 1;
@@ -247,14 +252,14 @@ pub(super) fn handle_model_event_with(
         KeyCode::Down => {
             if *ctx.right_focus.read() {
                 let mut c = ctx.right_cursor.write();
-                *c = next_selection(*c, FIELD_COUNT);
+                *c = crate::kit::list_nav::next_selection(*c, FIELD_COUNT);
             } else {
                 // 从面板选中档位出发下移（与渲染高亮一致）
                 let idx = PROFILE_KEYS
                     .iter()
                     .position(|k| *k == current_alias)
                     .unwrap_or(1);
-                let next = next_selection(idx, PROFILE_KEYS.len());
+                let next = crate::kit::list_nav::next_selection(idx, PROFILE_KEYS.len());
                 *ctx.selected_alias.write() = PROFILE_KEYS[next].to_owned();
                 switch_alias(next);
                 *ctx.render_version.write() += 1;
@@ -270,7 +275,7 @@ pub(super) fn handle_model_event_with(
                 if *ctx.right_cursor.read() == FIELD_CONTEXT_WINDOW {
                     begin_window_edit(ctx, &current_alias);
                 } else {
-                    edit_field(current_alias.clone(), *ctx.right_cursor.read(), true);
+                    super::edit::edit_field(current_alias.clone(), *ctx.right_cursor.read(), true);
                 }
                 *ctx.render_version.write() += 1;
             } else {
@@ -283,7 +288,7 @@ pub(super) fn handle_model_event_with(
                 if *ctx.right_cursor.read() == FIELD_CONTEXT_WINDOW {
                     begin_window_edit(ctx, &current_alias);
                 } else {
-                    edit_field(current_alias.clone(), *ctx.right_cursor.read(), false);
+                    super::edit::edit_field(current_alias.clone(), *ctx.right_cursor.read(), false);
                 }
                 *ctx.render_version.write() += 1;
             } else {
@@ -316,7 +321,7 @@ fn begin_window_edit(ctx: &ModelEventCtx, alias: &str) {
 fn open_provider_management(alias: &str) {
     let provider_id = PERI_CONFIG_HANDLE.get().and_then(|handle| {
         let cfg = handle.read();
-        effective_provider_id(&cfg, alias)
+        super::edit::effective_provider_id(&cfg, alias)
     });
     *LOGIN_PANEL_REQUEST.state().write() = Some(LoginPanelRequest { provider_id });
     crate::kit::panel_registry::open_panel(PanelKind::Login);
@@ -366,3 +371,11 @@ pub(super) struct ModelEventCtx {
     pub(super) right_scroll: State<ScrollViewState>,
     pub(super) viewport: ListViewport,
 }
+
+use super::edit::set_context_window;
+
+use crate::kit::atoms::LOGIN_PANEL_REQUEST;
+
+use crate::kit::atoms::LoginPanelRequest;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;

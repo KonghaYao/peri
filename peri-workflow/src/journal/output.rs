@@ -1,5 +1,5 @@
 //! JSON output extraction commits a reference only after its backing file is written.
-use super::WorkflowJournalStore;
+use crate::journal::WorkflowJournalStore;
 use std::collections::HashSet;
 use tracing::warn;
 
@@ -37,6 +37,7 @@ fn sanitize_label(json_path: &str) -> String {
 ///
 /// 返回值同时用作占位符 `${label}` 与文件名 `outputs/<label>.txt`，因此「引用可
 /// 解析」由构造保证，读侧不需要猜或兜底。
+#[must_use]
 pub fn output_label(json_path: &str, used: &mut HashSet<String>) -> String {
     let base = sanitize_label(json_path);
     if used.insert(base.clone()) {
@@ -54,6 +55,7 @@ pub fn output_label(json_path: &str, used: &mut HashSet<String>) -> String {
 
 /// 递归遍历 JSON Value，将长度超过 threshold 的字符串写入 outputs/ 目录，
 /// 仅写入成功后替换为 "${label}" 占位符；失败保留原文。返回成功提取的标签列表。
+#[must_use]
 pub fn extract_long_texts(
     value: &mut serde_json::Value,
     run_id: &str,
@@ -86,14 +88,12 @@ fn extract_long_texts_inner(
 ) {
     match value {
         serde_json::Value::Object(map) => {
-            let keys: Vec<String> = map.keys().cloned().collect();
-            for key in keys {
+            for (key, child) in map.iter_mut() {
                 let child_hint = if key_hint.is_empty() {
                     key.clone()
                 } else {
                     format!("{}.{}", key_hint, key)
                 };
-                let child = map.get_mut(&key).unwrap();
                 if let serde_json::Value::String(s) = child {
                     if s.len() > threshold {
                         // 占位符与文件名取同一 label（去重后），两者不可能再漂移。
@@ -119,7 +119,8 @@ fn extract_long_texts_inner(
             }
         }
         serde_json::Value::Array(arr) => {
-            for (i, item) in arr.iter_mut().enumerate() {
+            let paired_items = arr.iter_mut().enumerate();
+            for (i, item) in paired_items {
                 let child_hint = if key_hint.is_empty() {
                     format!("[{}]", i)
                 } else {

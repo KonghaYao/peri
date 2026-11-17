@@ -63,7 +63,7 @@
 
 ## P1 补充场景
 
-1. **P1-04 Beta 开关只对新会话生效**（[issue](../../../spec/issues/2026-10-08-beta-flags-implementation.md)）
-   1. 在 Config 面板开启 full-async-tools，保存后保留当前会话并新建会话。
-   2. 分别在两个会话调用未显式指定后台模式的 Bash 与 Agent。
-   3. 核对旧会话仍用原行为、重启后设置保留。新会话中：Bash 未显式指定时走后台、显式 false 仍前台；Agent 省略与显式 false 都后台（MCP Agent 仍同步激活）。
+1. **P1-04 Agent 默认后台、beta 区块已移除**（[设计](../../../docs/design/beta-flags.md)）
+   1. 打开 Config 面板：注册表为空，不再渲染 beta 开关区块。
+   2. 调用省略 `run_in_background` 的 `Agent` 与显式 `run_in_background: false` 的 `Agent`：两者都立即返回后台回执，不阻塞等待结果。
+   3. 调用省略 `run_in_background` 的 `Bash`：仍前台执行；只有显式 `true` 才转后台。

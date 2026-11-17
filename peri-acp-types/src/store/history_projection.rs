@@ -6,7 +6,7 @@ use crate::messages::MessageId;
 use crate::projection::ProjectionAction;
 use crate::store::MessageFlags;
 
-use super::RewindFlagEntry;
+use crate::store::history::RewindFlagEntry;
 
 /// Compute flag replacements for a retained canonical prefix, without reading its bodies.
 /// Missing anchors, members, or replacement evidence revoke the whole archive group.

@@ -1,6 +1,37 @@
 //! Builtin handler factory and source propagation contracts.
 
-use super::*;
+use super::json;
+use super::mpsc;
+use super::Arc;
+use super::BackgroundTaskResult;
+use super::BgTaskKind;
+use super::BuiltinInjectionPolicy;
+use super::BuiltinInstanceContext;
+use super::BuiltinServerHandler;
+use super::ClientStatus;
+use super::ConcreteTaskManager;
+use super::ConfigSource;
+use super::CronInstanceInput;
+use super::CronScheduler;
+use super::CrossFixture;
+use super::DiscoverMCPTool;
+use super::HashMap;
+use super::McpClientHandle;
+use super::McpClientPool;
+use super::McpServerConfig;
+use super::OAuthStatus;
+use super::Pair;
+use super::TaskManager;
+use super::ToolContext;
+use super::TransportConfig;
+use super::TransportKind;
+use super::Value;
+use super::WorkspaceInstanceInput;
+use super::BUILTIN_MCP_INSTANCES;
+use super::BUILTIN_RESERVED_INSTANCE_NAMES;
+use super::WAVE2_INSTANCES;
+use peri_agent::tools::BaseTool as _;
+use rmcp::ServerHandler as _;
 
 /// `workspace` 的 session 级输入夹具（AW3-11）：**真实** per-session `TaskManager` +
 /// session 级回调（本文件不断言回调触发，只断言「分派不因输入有无而改变」）。
@@ -18,14 +49,14 @@ fn dispatch_factory_covers_implemented_instances_only() {
     let ctx = BuiltinInstanceContext::new(".");
     assert!(
         matches!(
-            builtin_server_handler("web", &ctx),
+            crate::mcp::builtin::dispatch::builtin_server_handler("web", &ctx),
             Some(BuiltinServerHandler::Web(_))
         ),
         "web 必须有 handler"
     );
     assert!(
         matches!(
-            builtin_server_handler("artifact", &ctx),
+            crate::mcp::builtin::dispatch::builtin_server_handler("artifact", &ctx),
             Some(BuiltinServerHandler::Artifact(_))
         ),
         "artifact 必须有 handler"
@@ -40,7 +71,7 @@ fn dispatch_factory_covers_implemented_instances_only() {
     );
     assert!(
         matches!(
-            builtin_server_handler("workspace", &ctx),
+            crate::mcp::builtin::dispatch::builtin_server_handler("workspace", &ctx),
             Some(BuiltinServerHandler::Workspace(_))
         ),
         "workspace 缺 session 级输入仍必须有 handler（可见但退化，不是 HandlerNotWired）"
@@ -70,7 +101,7 @@ fn dispatch_factory_covers_implemented_instances_only() {
     let none_with_minimal_ctx: Vec<&str> = BUILTIN_MCP_INSTANCES
         .iter()
         .map(|instance| instance.name)
-        .filter(|name| builtin_server_handler(name, &ctx).is_none())
+        .filter(|name| crate::mcp::builtin::dispatch::builtin_server_handler(name, &ctx).is_none())
         .collect();
     assert_eq!(
         none_with_minimal_ctx,
@@ -82,15 +113,15 @@ fn dispatch_factory_covers_implemented_instances_only() {
     // 表外的名字（外部 MCP / 拼错的实例名）：非保留性先落成前置断言，再验同样的 None。
     let unknown = "not-a-builtin";
     assert!(
-        !is_reserved_instance_name(unknown),
+        !super::is_reserved_instance_name(unknown),
         "前置：{unknown} 必须在保留名表之外"
     );
     assert!(
-        find(unknown).is_none(),
+        peri_acp_types::builtin_mcp::find(unknown).is_none(),
         "前置：{unknown} 必须在已实现实例表之外"
     );
     assert!(
-        builtin_server_handler(unknown, &ctx).is_none(),
+        crate::mcp::builtin::dispatch::builtin_server_handler(unknown, &ctx).is_none(),
         "{unknown}: 表外名字不得产出 handler（不静默回退）"
     );
 }
@@ -115,14 +146,14 @@ fn dispatch_covers_cron_variant() {
     // web / artifact：原有断言保留（各自的变体，不因新增两条 arm 而改派）。
     assert!(
         matches!(
-            builtin_server_handler("web", &ctx),
+            crate::mcp::builtin::dispatch::builtin_server_handler("web", &ctx),
             Some(BuiltinServerHandler::Web(_))
         ),
         "web 必须仍得自己的变体"
     );
     assert!(
         matches!(
-            builtin_server_handler("artifact", &ctx),
+            crate::mcp::builtin::dispatch::builtin_server_handler("artifact", &ctx),
             Some(BuiltinServerHandler::Artifact(_))
         ),
         "artifact 必须仍得自己的变体"
@@ -131,7 +162,8 @@ fn dispatch_covers_cron_variant() {
     // cron：自己的变体。`CronMcpServer` **没有** `#[cfg(test)]` 取值访问器
     // （本任务的文件 owner 清单不含 `cron.rs`，不为断言放宽生产可见性），因此这里以
     // 变体身份为准；「三个工具持同一份 scheduler」由 `mcp::builtin::cron` 的用例覆盖。
-    let cron_handler = builtin_server_handler("cron", &ctx).expect("cron 必须有 handler");
+    let cron_handler = crate::mcp::builtin::dispatch::builtin_server_handler("cron", &ctx)
+        .expect("cron 必须有 handler");
     assert!(
         matches!(cron_handler, BuiltinServerHandler::Cron(_)),
         "cron 必须得 cron 变体（不得回退到别的实例）"
@@ -140,7 +172,7 @@ fn dispatch_covers_cron_variant() {
     // `workspace`（AW3-11）：**可见但退化**——即使上下文**不带** session 级输入，工厂也必须
     // 返回 `Workspace` 变体（`None` 在分支上不是 `HandlerNotWired`）。
     assert!(
-        is_reserved_instance_name("workspace"),
+        super::is_reserved_instance_name("workspace"),
         "前置：workspace 必须在保留名表内"
     );
     assert!(
@@ -153,8 +185,9 @@ fn dispatch_covers_cron_variant() {
         ctx.workspace.is_none(),
         "前置：本上下文**不带** workspace 输入（正是「可见但退化」要覆盖的形态）"
     );
-    let workspace_handler = builtin_server_handler("workspace", &ctx)
-        .expect("workspace 缺 session 级输入仍必须装配（可见但退化，不是 HandlerNotWired）");
+    let workspace_handler =
+        crate::mcp::builtin::dispatch::builtin_server_handler("workspace", &ctx)
+            .expect("workspace 缺 session 级输入仍必须装配（可见但退化，不是 HandlerNotWired）");
     assert!(
         matches!(workspace_handler, BuiltinServerHandler::Workspace(_)),
         "workspace 必须得 workspace 变体（不得回退到别的实例）"
@@ -164,7 +197,7 @@ fn dispatch_covers_cron_variant() {
     let with_input = BuiltinInstanceContext::new(".").with_workspace(workspace_input());
     assert!(
         matches!(
-            builtin_server_handler("workspace", &with_input),
+            crate::mcp::builtin::dispatch::builtin_server_handler("workspace", &with_input),
             Some(BuiltinServerHandler::Workspace(_))
         ),
         "带齐 workspace 输入时同样得 workspace 变体"
@@ -173,11 +206,11 @@ fn dispatch_covers_cron_variant() {
     // 表外名字：与上下文是否带输入无关，恒 `None`。
     let unknown = "not-a-builtin";
     assert!(
-        !is_reserved_instance_name(unknown),
+        !super::is_reserved_instance_name(unknown),
         "前置：{unknown} 必须在保留名表之外"
     );
     assert!(
-        builtin_server_handler(unknown, &ctx).is_none(),
+        crate::mcp::builtin::dispatch::builtin_server_handler(unknown, &ctx).is_none(),
         "{unknown}: 表外名字不得产出 handler"
     );
 }
@@ -194,13 +227,14 @@ fn all_registered_instances_have_handler() {
 
     let mut dispatched: Vec<&'static str> = Vec::new();
     let mut server_names: Vec<String> = Vec::new();
-    for instance in BUILTIN_MCP_INSTANCES {
-        let handler = builtin_server_handler(instance.name, ctx).unwrap_or_else(|| {
-            panic!(
-                "{}: 已实现实例必须有 handler（上下文已给齐 cron 输入）",
-                instance.name
-            )
-        });
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
+        let handler = crate::mcp::builtin::dispatch::builtin_server_handler(instance.name, ctx)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: 已实现实例必须有 handler（上下文已给齐 cron 输入）",
+                    instance.name
+                )
+            });
         let variant = match &handler {
             BuiltinServerHandler::Web(_) => "web",
             BuiltinServerHandler::Artifact(_) => "artifact",
@@ -251,11 +285,12 @@ fn all_registered_instances_have_handler() {
     // 未知实例名 ②：表外名字（注册表与保留名表都查不到）。
     let outside = "nope";
     assert!(
-        !is_reserved_instance_name(outside) && find(outside).is_none(),
+        !super::is_reserved_instance_name(outside)
+            && peri_acp_types::builtin_mcp::find(outside).is_none(),
         "前置：{outside} 必须在两张表之外"
     );
     assert!(
-        builtin_server_handler(outside, ctx).is_none(),
+        crate::mcp::builtin::dispatch::builtin_server_handler(outside, ctx).is_none(),
         "{outside}: 表外名字不得产出 handler"
     );
 
@@ -284,7 +319,7 @@ async fn builtin_source_propagates() {
 
     // ① overlay：空用户配置 ⇒ 每个已实现实例一条完整 builtin 条目，身份写进 `source`。
     let mut servers: HashMap<String, McpServerConfig> = HashMap::new();
-    apply_builtin_overlay(&mut servers, &BuiltinInjectionPolicy::all())
+    super::apply_builtin_overlay(&mut servers, &BuiltinInjectionPolicy::legacy_instances())
         .expect("空用户配置必须被 overlay 接受");
     let mut configs: Vec<(&str, McpServerConfig)> = Vec::new();
     for instance in WAVE2_INSTANCES {
@@ -321,7 +356,7 @@ async fn builtin_source_propagates() {
             TransportKind::Builtin,
             "{instance}: 三分类必须是 builtin"
         );
-        require_known_builtin_instance(instance).expect("实例必须能在注册表解析");
+        super::require_known_builtin_instance(instance).expect("实例必须能在注册表解析");
         configs.push((instance, config));
     }
 
@@ -358,7 +393,7 @@ async fn builtin_source_propagates() {
     // 握手），再按生产提交形状登记句柄。
     let mut pairs: Vec<(&str, Pair)> = Vec::new();
     for (instance, config) in &configs {
-        let pair = connect_via_dispatch(instance, &fixture.ctx).await;
+        let pair = super::connect_via_dispatch(instance, &fixture.ctx).await;
         let tools = pair
             .peer()
             .list_all_tools()

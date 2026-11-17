@@ -2,7 +2,12 @@ use std::collections::HashMap;
 
 use peri_acp_types::meta_harness::{BUILTIN_INSTANCE_POLICY_KEYS, MIDDLEWARE_NAMES};
 
-use super::*;
+use super::AppConfig;
+use super::ProfileConfig;
+use super::Profiles;
+use super::ProviderAuthConfig;
+use super::ProviderConfig;
+use super::ProviderModels;
 
 #[test]
 fn removed_skills_dir_keys_are_only_opaque_unknown_fields() {
@@ -26,16 +31,44 @@ fn removed_skills_dir_keys_are_only_opaque_unknown_fields() {
     }
 }
 
-/// 「已知 MetaHarness 键全集」= 链槽位名 ∪ builtin 实例策略键（v4-part-2 A7 的两表并集）。
+/// 「已知 MetaHarness 键全集」= 链槽位名 ∪ builtin 旧策略键（兼容 adapter）∪ v5 能力名。
 ///
-/// 测试用它构造「全关」输入：并集本身就承担「两表都被消费」的断言——若实现只读
-/// 其中一张表，全关输入不再成立（保险丝判定面缺项）。
+/// 测试用它构造「全关」输入：三张表都进入关闭集，保险丝判定面缺项即失败。
 fn all_known_middleware_keys() -> Vec<&'static str> {
     MIDDLEWARE_NAMES
         .iter()
         .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
         .copied()
+        .chain(
+            peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+                .iter()
+                .map(|capability| capability.name),
+        )
         .collect()
+}
+
+#[test]
+fn all_disabled_detects_canonical_and_legacy_capability_switches() {
+    let middleware = MIDDLEWARE_NAMES
+        .iter()
+        .map(|name| ((*name).to_owned(), false));
+    for switches in [
+        peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .map(|capability| capability.name)
+            .collect::<Vec<_>>(),
+        peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .map(|capability| capability.legacy_policy_key)
+            .collect::<Vec<_>>(),
+    ] {
+        let mut map: HashMap<String, bool> = middleware.clone().collect();
+        map.extend(switches.into_iter().map(|name| (name.to_owned(), false)));
+        assert!(super::all_middleware_disabled(&map));
+        map.insert("web".to_owned(), true);
+        map.insert("WebMiddleware".to_owned(), true);
+        assert!(!super::all_middleware_disabled(&map));
+    }
 }
 
 fn make_global() -> AppConfig {
@@ -298,17 +331,17 @@ fn provider_models_fable_tier_and_fallback() {
         fable: String::new(),
     };
     // fable 档位为空 → 回退 opus
-    assert_eq!(m.get_model("fable"), Some("claude-opus-4-6"));
-    assert_eq!(m.get_model("FABLE"), Some("claude-opus-4-6"));
+    assert_eq!(m.model("fable"), Some("claude-opus-4-6"));
+    assert_eq!(m.model("FABLE"), Some("claude-opus-4-6"));
     let m2 = ProviderModels {
         fable: "claude-fable-1-0".into(),
         ..m
     };
-    assert_eq!(m2.get_model("fable"), Some("claude-fable-1-0"));
-    assert_eq!(m2.get_model("opus"), Some("claude-opus-4-6"));
-    assert_eq!(m2.get_model("sonnet"), Some("claude-sonnet-4-6"));
-    assert_eq!(m2.get_model("haiku"), Some("claude-haiku-4-5"));
-    assert_eq!(m2.get_model("turbo"), None);
+    assert_eq!(m2.model("fable"), Some("claude-fable-1-0"));
+    assert_eq!(m2.model("opus"), Some("claude-opus-4-6"));
+    assert_eq!(m2.model("sonnet"), Some("claude-sonnet-4-6"));
+    assert_eq!(m2.model("haiku"), Some("claude-haiku-4-5"));
+    assert_eq!(m2.model("turbo"), None);
 }
 
 #[test]
@@ -409,16 +442,16 @@ fn meta_harness_deserializes_bool_entries() {
         "meta_harness": {
             "01_intro": true,
             "05_using_tools": false,
-            "WebMiddleware": false,
-            "WorkspaceMiddleware": true
+            "web": false,
+            "workspace": true
         }
     }"#;
     let cfg: AppConfig = serde_json::from_str(json).unwrap();
     let map = cfg.meta_harness.unwrap();
     assert_eq!(map.get("01_intro"), Some(&true));
     assert_eq!(map.get("05_using_tools"), Some(&false));
-    assert_eq!(map.get("WebMiddleware"), Some(&false));
-    assert_eq!(map.get("WorkspaceMiddleware"), Some(&true));
+    assert_eq!(map.get("web"), Some(&false));
+    assert_eq!(map.get("workspace"), Some(&true));
 }
 
 #[test]
@@ -426,7 +459,7 @@ fn meta_harness_roundtrip_preserves_values() {
     let cfg = AppConfig {
         meta_harness: Some(mh(&[
             ("01_intro", true),
-            ("WebMiddleware", false),
+            ("web", false),
             ("10_hitl", false),
         ])),
         ..Default::default()
@@ -439,13 +472,13 @@ fn meta_harness_roundtrip_preserves_values() {
 #[test]
 fn meta_harness_merges_per_key() {
     let mut global = AppConfig {
-        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        meta_harness: Some(mh(&[("01_intro", true), ("web", false)])),
         ..make_global()
     };
     let workspace = AppConfig {
         meta_harness: Some(mh(&[
-            ("01_intro", false),            // 同 key：workspace 覆盖 global
-            ("WorkspaceMiddleware", false), // 新 key：保留并追加
+            ("01_intro", false),  // 同 key：workspace 覆盖 global
+            ("workspace", false), // 新 key：保留并追加
         ])),
         ..Default::default()
     };
@@ -456,46 +489,36 @@ fn meta_harness_merges_per_key() {
         Some(&false),
         "workspace 同 key 覆盖 global"
     );
-    assert_eq!(map.get("WorkspaceMiddleware"), Some(&false));
-    assert_eq!(
-        map.get("WebMiddleware"),
-        Some(&false),
-        "global 其余 key 保留"
-    );
+    assert_eq!(map.get("workspace"), Some(&false));
+    assert_eq!(map.get("web"), Some(&false), "global 其余 key 保留");
 }
 
 #[test]
 fn meta_harness_false_overrides_true() {
     let mut global = AppConfig {
-        meta_harness: Some(mh(&[("WebMiddleware", true)])),
+        meta_harness: Some(mh(&[("web", true)])),
         ..make_global()
     };
     let workspace = AppConfig {
-        meta_harness: Some(mh(&[("WebMiddleware", false)])),
+        meta_harness: Some(mh(&[("web", false)])),
         ..Default::default()
     };
     global.merge_overrides(workspace);
-    assert_eq!(
-        global.meta_harness.unwrap().get("WebMiddleware"),
-        Some(&false)
-    );
+    assert_eq!(global.meta_harness.unwrap().get("web"), Some(&false));
 }
 
 #[test]
 fn meta_harness_true_restores_middleware() {
     let mut global = AppConfig {
-        meta_harness: Some(mh(&[("WebMiddleware", false)])),
+        meta_harness: Some(mh(&[("web", false)])),
         ..make_global()
     };
     let workspace = AppConfig {
-        meta_harness: Some(mh(&[("WebMiddleware", true)])),
+        meta_harness: Some(mh(&[("web", true)])),
         ..Default::default()
     };
     global.merge_overrides(workspace);
-    assert_eq!(
-        global.meta_harness.unwrap().get("WebMiddleware"),
-        Some(&true)
-    );
+    assert_eq!(global.meta_harness.unwrap().get("web"), Some(&true));
 }
 
 #[test]
@@ -509,11 +532,11 @@ fn section_false_is_valid() {
 
 #[test]
 fn middleware_true_is_valid() {
-    // middleware 名 + true = 显式恢复装配，合法保留
-    let json = r#"{"meta_harness":{"WebMiddleware":true}}"#;
+    // 能力名 + true = 显式恢复装配，合法保留
+    let json = r#"{"meta_harness":{"web":true}}"#;
     let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
     cfg.validate_meta_harness();
-    assert_eq!(cfg.meta_harness.unwrap().get("WebMiddleware"), Some(&true));
+    assert_eq!(cfg.meta_harness.unwrap().get("web"), Some(&true));
 }
 
 #[test]
@@ -524,6 +547,26 @@ fn unknown_key_warns_and_is_ignored() {
     let map = cfg.meta_harness.unwrap();
     assert!(!map.contains_key("NotAMiddleware"), "未知 key 被移除");
     assert_eq!(map.get("01_intro"), Some(&true), "已知 key 保留");
+}
+
+#[test]
+fn legacy_and_v5_capability_keys_are_both_valid_meta_harness_keys() {
+    // 旧键保留为确定性映射 adapter（#409 §8.6），v5 能力名是开关身份。
+    let json = r#"{"meta_harness":{"web":false,"WorkspaceMiddleware":false,"WorkflowMiddleware":true,"unknown":false}}"#;
+    let mut cfg: AppConfig = serde_json::from_str(json).unwrap();
+    cfg.validate_meta_harness();
+    let map = cfg.meta_harness.unwrap();
+    assert_eq!(map.get("web"), Some(&false), "v5 能力名必须保留");
+    assert_eq!(
+        map.get("WorkspaceMiddleware"),
+        Some(&false),
+        "旧键必须映射到 workspace，不能 silent no-op"
+    );
+    assert_eq!(map.get("WorkflowMiddleware"), Some(&true));
+    assert!(!map.contains_key("unknown"));
+
+    let mapped = peri_acp_types::builtin_mcp::capability_of_switch("WorkspaceMiddleware").unwrap();
+    assert_eq!(mapped.name, "workspace");
 }
 
 #[test]
@@ -546,7 +589,7 @@ fn env_still_replaces_whole_map() {
     // 对照：meta_harness 逐 key 合并是专属特例，env 仍整体覆盖
     let mut global = AppConfig {
         env: Some(HashMap::from([("FOO".to_string(), "bar".to_string())])),
-        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        meta_harness: Some(mh(&[("01_intro", true), ("web", false)])),
         ..make_global()
     };
     let workspace = AppConfig {
@@ -561,7 +604,7 @@ fn env_still_replaces_whole_map() {
     let mh_map = global.meta_harness.unwrap();
     assert_eq!(mh_map.get("01_intro"), Some(&false));
     assert_eq!(
-        mh_map.get("WebMiddleware"),
+        mh_map.get("web"),
         Some(&false),
         "meta_harness 逐 key 合并，global key 保留"
     );
@@ -581,7 +624,7 @@ fn meta_harness_project_none_preserves_global() {
 #[test]
 fn meta_harness_project_empty_does_not_delete_global_keys() {
     let mut global = AppConfig {
-        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        meta_harness: Some(mh(&[("01_intro", true), ("web", false)])),
         ..make_global()
     };
     // workspace 显式空 map：不提供删除语义，global key 全部保留
@@ -592,7 +635,7 @@ fn meta_harness_project_empty_does_not_delete_global_keys() {
     global.merge_overrides(workspace);
     let map = global.meta_harness.unwrap();
     assert_eq!(map.get("01_intro"), Some(&true));
-    assert_eq!(map.get("WebMiddleware"), Some(&false));
+    assert_eq!(map.get("web"), Some(&false));
 }
 
 #[test]
@@ -628,12 +671,12 @@ fn all_middleware_false_is_kept_but_warns() {
 fn partial_middleware_false_does_not_trigger_fuse() {
     // 只关一个 middleware（文档示例场景）不触发保险丝
     let mut cfg = AppConfig {
-        meta_harness: Some(mh(&[("WebMiddleware", false)])),
+        meta_harness: Some(mh(&[("web", false)])),
         ..Default::default()
     };
     cfg.validate_meta_harness();
     let map = cfg.meta_harness.unwrap();
-    assert_eq!(map.get("WebMiddleware"), Some(&false));
+    assert_eq!(map.get("web"), Some(&false));
     assert_eq!(map.len(), 1);
 }
 
@@ -652,15 +695,12 @@ fn all_middleware_false_plus_section_keys_still_triggers_fuse() {
     assert_eq!(map.get("01_intro"), Some(&true));
 }
 
-/// v4-part-2 A7：builtin 实例策略键仍是**已知键**（不得被当未知键 warn + 丢弃）。
-///
-/// 若 `validate_meta_harness` 的 known 集合漏掉 `BUILTIN_INSTANCE_POLICY_KEYS`，
-/// `"WebMiddleware": false` 会静默消失 ⇒ 关闭语义降级为「键有效但无效果」。
+/// v5 能力名是 builtin 关闭的已知键；旧 `*Middleware` key 已退役。
 #[test]
-fn builtin_instance_policy_keys_are_known_keys() {
-    let entries: Vec<(&str, bool)> = BUILTIN_INSTANCE_POLICY_KEYS
+fn capability_names_are_known_meta_harness_keys() {
+    let entries: Vec<(&str, bool)> = peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
         .iter()
-        .map(|k| (*k, false))
+        .map(|capability| (capability.name, false))
         .collect();
     let mut cfg = AppConfig {
         meta_harness: Some(mh(&entries)),
@@ -670,15 +710,21 @@ fn builtin_instance_policy_keys_are_known_keys() {
     let map = cfg.meta_harness.unwrap();
     assert_eq!(
         map.len(),
-        BUILTIN_INSTANCE_POLICY_KEYS.len(),
-        "策略键全部保留"
+        peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.len(),
+        "能力名全部保留"
     );
-    for key in BUILTIN_INSTANCE_POLICY_KEYS {
-        assert_eq!(map.get(*key), Some(&false), "{key} 是已知键，必须保留");
-    }
-    // 两表分离（A7）：策略键不再属于链槽位名表，但仍是合法配置键。
-    for key in BUILTIN_INSTANCE_POLICY_KEYS {
-        assert!(!MIDDLEWARE_NAMES.contains(key), "{key} 不应在链槽位名表内");
+    for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        assert_eq!(
+            map.get(capability.name),
+            Some(&false),
+            "{} 是已知键，必须保留",
+            capability.name
+        );
+        assert!(
+            !MIDDLEWARE_NAMES.contains(&capability.name),
+            "{} 不应在链槽位名表内",
+            capability.name
+        );
     }
 }
 
@@ -692,7 +738,7 @@ fn retired_meta_harness_keys_are_ignored() {
                 ("FilesystemMiddleware", enabled),
                 ("TerminalMiddleware", enabled),
                 ("GitWatchMiddleware", enabled),
-                ("WorkspaceMiddleware", false),
+                ("WorkspaceMiddleware", enabled),
                 ("01_intro", true),
             ])),
             ..Default::default()
@@ -700,7 +746,8 @@ fn retired_meta_harness_keys_are_ignored() {
         cfg.validate_meta_harness();
         assert_eq!(
             cfg.meta_harness.unwrap(),
-            mh(&[("WorkspaceMiddleware", false), ("01_intro", true)])
+            mh(&[("01_intro", true), ("WorkspaceMiddleware", enabled)]),
+            "未知旧键整体丢弃；builtin 旧键保留为能力映射 adapter"
         );
     }
 }
@@ -850,7 +897,7 @@ fn extract_overrides_roundtrip_profiles() {
 #[test]
 fn extract_overrides_roundtrip_meta_harness_and_extra() {
     let global = AppConfig {
-        meta_harness: Some(mh(&[("01_intro", true), ("WebMiddleware", false)])),
+        meta_harness: Some(mh(&[("01_intro", true), ("web", false)])),
         extra: {
             let mut m = serde_json::Map::new();
             m.insert("legacy_a".into(), serde_json::json!(1));
@@ -860,7 +907,7 @@ fn extract_overrides_roundtrip_meta_harness_and_extra() {
     };
     let ws = AppConfig {
         // 01_intro 与全局同值（true）、WorkspaceMiddleware 为工作区新增
-        meta_harness: Some(mh(&[("01_intro", true), ("WorkspaceMiddleware", false)])),
+        meta_harness: Some(mh(&[("01_intro", true), ("workspace", false)])),
         ..Default::default()
     };
     assert_roundtrip(&global, &ws);
@@ -871,8 +918,8 @@ fn extract_overrides_roundtrip_meta_harness_and_extra() {
     let extracted = merged.extract_overrides(&global);
     let mh = extracted.meta_harness.as_ref().unwrap();
     assert!(!mh.contains_key("01_intro"), "与全局同值 key 应剔除");
-    assert!(mh.contains_key("WorkspaceMiddleware"));
-    assert!(!mh.contains_key("WebMiddleware"), "全局 key 不收录");
+    assert!(mh.contains_key("workspace"));
+    assert!(!mh.contains_key("web"), "全局 key 不收录");
     assert_eq!(mh.len(), 1);
     assert_roundtrip(
         &global,
@@ -910,7 +957,10 @@ fn removed_compact_keys_are_reported_once_and_only_when_present() {
     let legacy = serde_json::json!({
         "config": { "compact": { "ptl_max_retries": 5, "summary_max_tokens": 8000 } }
     });
-    assert_eq!(legacy_compact_keys_in(&legacy), vec!["ptl_max_retries"]);
+    assert_eq!(
+        super::legacy_compact_keys_in(&legacy),
+        vec!["ptl_max_retries"]
+    );
 
     for silent in [
         serde_json::json!({ "config": { "compact": { "summary_max_tokens": 8000 } } }),
@@ -919,7 +969,7 @@ fn removed_compact_keys_are_reported_once_and_only_when_present() {
         serde_json::json!({ "config": { "compact": 7 } }),
     ] {
         assert!(
-            legacy_compact_keys_in(&silent).is_empty(),
+            super::legacy_compact_keys_in(&silent).is_empty(),
             "无旧键的文档不得产生迁移诊断：{silent}"
         );
     }

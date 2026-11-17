@@ -5,44 +5,58 @@
 //! 驱动生产 spawn 内调用的同一对落地函数 `apply_archive_outcome` / `apply_delete_outcome`：
 //! 身份捕获与复验语义与生产路径同源；RPC 往返与 spawn 调度本身只能由人工 / 端到端验证覆盖。
 
-use super::*;
+use super::ACTIVE_SESSION_ID;
+use super::BRIDGE_RESET_COUNTER;
+use super::Duration;
+use super::NOTIFICATION;
+use super::Notification;
+use super::Style;
+use super::THREAD_BROWSER_ARCHIVED;
+use super::THREAD_BROWSER_SCOPE;
+use super::THREAD_LIST;
+use super::THREAD_LIST_ERROR;
+use super::ThreadBrowserScope;
+use super::ThreadListViewKey;
+use super::ThreadSummary;
+use super::i18n;
+use ratatui_kit::prelude::*;
 use serial_test::serial;
 
 #[test]
 fn directory_suffix_keeps_workspace_name_and_unicode_width() {
-    assert_eq!(path_tail("/long/仓库/feature", 12), "…库/feature");
-    assert_eq!(path_tail("/a", 10), "/a");
-    assert_eq!(path_tail("/a", 0), "");
+    assert_eq!(super::path_tail("/long/仓库/feature", 12), "…库/feature");
+    assert_eq!(super::path_tail("/a", 10), "/a");
+    assert_eq!(super::path_tail("/a", 0), "");
 }
 
 #[test]
 fn truncation_boundaries_are_display_width_safe() {
-    assert_eq!(truncate_text("abcdef", 0), "");
-    assert_eq!(truncate_text("abcdef", 1), "…");
-    assert_eq!(truncate_text("abcdef", 2), "a…");
-    assert_eq!(truncate_text("abcdef", 3), "ab…");
-    assert_eq!(truncate_text("仓库名称", 1), "…");
-    assert_eq!(truncate_text("仓库名称", 2), "…");
-    assert_eq!(truncate_text("仓库名称", 3), "仓…");
-    assert_eq!(truncate_text("仓库名称", 4), "仓…");
-    assert_eq!(truncate_text("仓库名称", 5), "仓库…");
-    assert_eq!(truncate_text("仓库名称", 8), "仓库名称");
-    assert_eq!(truncate_text("", 1), "");
-    assert_eq!(truncate_text("a", 1), "a");
-    assert_eq!(truncate_text("a", 2), "a");
-    assert_eq!(truncate_text("界", 2), "界");
-    assert_eq!(truncate_text("界面", 3), "界…");
-    assert_eq!(truncate_text("abcdef", 4), "abc…");
-    assert_eq!(truncate_text("abcdef", 5), "abcd…");
-    assert_eq!(truncate_text("abcdef", 6), "abcdef");
-    assert_eq!(truncate_text("中文", 4), "中文");
-    assert_eq!(truncate_text("中文测试", 6), "中文…");
-    assert_eq!(truncate_text("中文测试", 7), "中文测…");
-    assert_eq!(truncate_text("中文测试", 8), "中文测试");
-    assert_eq!(truncate_text("中文测试", 9), "中文测试");
-    assert_eq!(truncate_text("x", 0), "");
-    assert_eq!(truncate_text("x", 2), "x");
-    assert_eq!(truncate_text("xy", 2), "xy");
+    assert_eq!(super::truncate_text("abcdef", 0), "");
+    assert_eq!(super::truncate_text("abcdef", 1), "…");
+    assert_eq!(super::truncate_text("abcdef", 2), "a…");
+    assert_eq!(super::truncate_text("abcdef", 3), "ab…");
+    assert_eq!(super::truncate_text("仓库名称", 1), "…");
+    assert_eq!(super::truncate_text("仓库名称", 2), "…");
+    assert_eq!(super::truncate_text("仓库名称", 3), "仓…");
+    assert_eq!(super::truncate_text("仓库名称", 4), "仓…");
+    assert_eq!(super::truncate_text("仓库名称", 5), "仓库…");
+    assert_eq!(super::truncate_text("仓库名称", 8), "仓库名称");
+    assert_eq!(super::truncate_text("", 1), "");
+    assert_eq!(super::truncate_text("a", 1), "a");
+    assert_eq!(super::truncate_text("a", 2), "a");
+    assert_eq!(super::truncate_text("界", 2), "界");
+    assert_eq!(super::truncate_text("界面", 3), "界…");
+    assert_eq!(super::truncate_text("abcdef", 4), "abc…");
+    assert_eq!(super::truncate_text("abcdef", 5), "abcd…");
+    assert_eq!(super::truncate_text("abcdef", 6), "abcdef");
+    assert_eq!(super::truncate_text("中文", 4), "中文");
+    assert_eq!(super::truncate_text("中文测试", 6), "中文…");
+    assert_eq!(super::truncate_text("中文测试", 7), "中文测…");
+    assert_eq!(super::truncate_text("中文测试", 8), "中文测试");
+    assert_eq!(super::truncate_text("中文测试", 9), "中文测试");
+    assert_eq!(super::truncate_text("x", 0), "");
+    assert_eq!(super::truncate_text("x", 2), "x");
+    assert_eq!(super::truncate_text("xy", 2), "xy");
 }
 
 #[test]
@@ -50,12 +64,140 @@ fn selection_visibility_clamps_to_resized_viewport() {
     let mut state = ratatui_kit::components::scroll_view::ScrollViewState::with_offset(
         ratatui_kit::ratatui::layout::Position::new(0, 10),
     );
-    keep_selection_visible(&mut state, 3, 20, 5);
+    selection::keep_selection_visible(&mut state, 3, 20, 5);
     assert_eq!(state.offset().y, 3);
-    keep_selection_visible(&mut state, 19, 20, 5);
+    selection::keep_selection_visible(&mut state, 19, 20, 5);
     assert_eq!(state.offset().y, 15);
-    keep_selection_visible(&mut state, 0, 0, 5);
+    selection::keep_selection_visible(&mut state, 0, 0, 5);
     assert_eq!(state.offset().y, 15);
+}
+
+// ── 选中身份跨列表重排的稳定性（U02）──────────────────────────────────
+//
+// 后台快照每 2 秒重排一次列表：刚聊过的会话 `updated_at` 更新，会顶到首行。
+// 选中项因此必须跟着 thread 身份走；按下标跟随会让 Enter 加载另一条会话。
+
+/// 重排后身份仍在列表里：行下标跟着身份走，而不是停在原行号。
+#[test]
+fn selection_follows_identity_across_reorder() {
+    let reordered = vec![thread("b"), thread("a")];
+    assert_eq!(super::resolve_selection(Some("a"), &reordered, 0), 1);
+    assert_eq!(
+        super::adopt_selection(Some("a"), &reordered, 1).as_deref(),
+        Some("a")
+    );
+}
+
+/// 列表暂时为空（刷新失败 / 首次加载）：不得丢掉身份，否则下一帧首行冒充用户选择。
+#[test]
+fn empty_list_keeps_selected_identity() {
+    let empty: Vec<ThreadSummary> = Vec::new();
+    assert_eq!(super::resolve_selection(Some("a"), &empty, 0), 0);
+    assert_eq!(
+        super::adopt_selection(Some("a"), &empty, 0).as_deref(),
+        Some("a"),
+        "空列表帧必须保留原选中身份"
+    );
+    // 空帧之后列表重新带回原顺序，身份仍是被选中的那一条。
+    let restored = vec![thread("a"), thread("b")];
+    assert_eq!(super::resolve_selection(Some("a"), &restored, 0), 0);
+}
+
+/// 刷新重排把选中行挪出视口：视口必须跟过去，否则高亮不可见但 Enter 仍能加载。
+#[test]
+fn reorder_keeps_selected_row_inside_viewport() {
+    let viewport = 5;
+    let original: Vec<ThreadSummary> = (0..20).map(|index| thread(&format!("t{index}"))).collect();
+    let mut state = ScrollViewState::default();
+    let mut cursor = selection::sync_refreshed_selection(
+        &mut state,
+        Some("t0"),
+        &original,
+        0,
+        viewport,
+        viewport,
+    );
+    assert_eq!(cursor, 0);
+    assert_eq!(state.offset().y, 0, "首帧无需滚动");
+
+    // 后台刷新：t0 被其它会话的 updated_at 顶到末行。
+    let mut reordered = original;
+    let entry = reordered.remove(0);
+    reordered.push(entry);
+    cursor = selection::sync_refreshed_selection(
+        &mut state,
+        Some("t0"),
+        &reordered,
+        cursor,
+        viewport,
+        viewport,
+    );
+
+    assert_eq!(cursor, 19, "光标跟随身份换到新行");
+    assert_eq!(state.offset().y, 15, "视口滚到选中行可见");
+    assert!(
+        (state.offset().y as usize..state.offset().y as usize + viewport).contains(&cursor),
+        "选中行必须落在视口内"
+    );
+
+    // 手动滚动没有换行 / 视口变化，刷新帧不得把视口拉回。
+    state.set_offset(ratatui_kit::ratatui::layout::Position::new(0, 0));
+    let cursor = selection::sync_refreshed_selection(
+        &mut state,
+        Some("t0"),
+        &reordered,
+        cursor,
+        viewport,
+        viewport,
+    );
+    assert_eq!(state.offset().y, 0, "手动滚动不被刷新覆盖");
+    assert_eq!(cursor, 19, "选中的身份不变");
+}
+
+/// 身份确实离开当前视图（归档 / 删除 / 换 scope）才回落到光标行。
+#[test]
+fn vanished_identity_adopts_cursor_row() {
+    let refreshed = vec![thread("b"), thread("c")];
+    assert_eq!(super::resolve_selection(Some("a"), &refreshed, 1), 1);
+    assert_eq!(
+        super::adopt_selection(Some("a"), &refreshed, 1).as_deref(),
+        Some("c"),
+        "身份消失时回落到光标行"
+    );
+}
+
+/// 空刷新帧保留的身份不在列表里：`a` 与 Enter 共用成员校验，不能归档不可见会话。
+#[test]
+fn archive_requires_visible_list_member() {
+    let empty: Vec<ThreadSummary> = Vec::new();
+    assert_eq!(
+        selection::visible_target(Some("a"), &empty),
+        None,
+        "空列表没有归档目标"
+    );
+
+    let refreshed = vec![thread("b"), thread("c")];
+    assert_eq!(
+        selection::visible_target(Some("a"), &refreshed),
+        None,
+        "身份已离开当前列表，按 a 必须是 no-op"
+    );
+    assert_eq!(
+        selection::visible_target(Some("b"), &refreshed).as_deref(),
+        Some("b")
+    );
+    assert_eq!(selection::visible_target(None, &refreshed), None);
+}
+
+/// 没有身份（首次打开面板）时按光标行回填。
+#[test]
+fn missing_identity_seeds_from_cursor_row() {
+    let threads = vec![thread("a"), thread("b")];
+    assert_eq!(
+        super::adopt_selection(None, &threads, 1).as_deref(),
+        Some("b")
+    );
+    assert_eq!(super::adopt_selection(None, &[], 0), None);
 }
 
 // ── 会话动作回写的视图身份（归档 `a` / 删除 `d`+Enter）──────────────────
@@ -116,6 +258,7 @@ impl Drop for PanelStateGuard {
     }
 }
 
+#[must_use]
 fn thread(id: &str) -> ThreadSummary {
     ThreadSummary {
         id: id.to_owned(),
@@ -156,7 +299,7 @@ fn archive_response_from_another_session_does_not_touch_list() {
     *THREAD_LIST.state().write() = vec![thread("other")];
     THREAD_LIST_ERROR.set(Some("new session error".to_owned()));
 
-    apply_archive_outcome(&view, "t1", Ok(()));
+    super::apply_archive_outcome(&view, "t1", Ok(()));
 
     assert_eq!(
         thread_ids(),
@@ -178,14 +321,14 @@ fn archive_response_after_scope_switch_does_not_touch_list() {
     let view = ThreadListViewKey::current();
     THREAD_BROWSER_SCOPE.set(ThreadBrowserScope::Workspace);
 
-    apply_archive_outcome(&view, "t1", Err("boom".to_owned()));
+    super::apply_archive_outcome(&view, "t1", Err("boom".to_owned()));
     assert_eq!(
         list_error().as_deref(),
         Some("baseline error"),
         "切 scope 后旧失败不得写错误"
     );
 
-    apply_archive_outcome(&view, "t1", Ok(()));
+    super::apply_archive_outcome(&view, "t1", Ok(()));
     assert_eq!(
         thread_ids(),
         vec!["t1", "t2"],
@@ -202,7 +345,7 @@ fn archive_response_after_archived_view_switch_does_not_touch_list() {
     THREAD_BROWSER_ARCHIVED.set(true);
     *THREAD_LIST.state().write() = vec![thread("archived-only")];
 
-    apply_archive_outcome(&view, "t1", Ok(()));
+    super::apply_archive_outcome(&view, "t1", Ok(()));
 
     assert_eq!(thread_ids(), vec!["archived-only"]);
     assert_eq!(list_error().as_deref(), Some("baseline error"));
@@ -215,7 +358,7 @@ fn archive_response_removes_entry_when_view_identity_matches() {
     let _guard = PanelStateGuard::install();
     let view = ThreadListViewKey::current();
 
-    apply_archive_outcome(&view, "t1", Ok(()));
+    super::apply_archive_outcome(&view, "t1", Ok(()));
 
     assert_eq!(thread_ids(), vec!["t2"], "归档成功后该条离开当前列表");
     assert_eq!(list_error().as_deref(), None, "成功后清掉旧错误");
@@ -228,7 +371,7 @@ fn delete_failure_is_visible_to_the_user() {
     let _guard = PanelStateGuard::install();
     let view = ThreadListViewKey::current();
 
-    apply_delete_outcome(&view, "t1", Err("rpc unavailable".to_owned()));
+    super::apply_delete_outcome(&view, "t1", Err("rpc unavailable".to_owned()));
 
     assert_eq!(
         notified_message(),
@@ -248,7 +391,7 @@ fn delete_success_leaves_list_to_the_next_refresh() {
     let _guard = PanelStateGuard::install();
     let view = ThreadListViewKey::current();
 
-    apply_delete_outcome(&view, "t1", Ok(()));
+    super::apply_delete_outcome(&view, "t1", Ok(()));
 
     assert_eq!(thread_ids(), vec!["t1", "t2"]);
     assert_eq!(notified_message(), None);
@@ -262,7 +405,7 @@ fn delete_response_after_session_switch_is_discarded() {
     let view = ThreadListViewKey::current();
     ACTIVE_SESSION_ID.set("session-b".to_owned());
 
-    apply_delete_outcome(&view, "t1", Err("rpc unavailable".to_owned()));
+    super::apply_delete_outcome(&view, "t1", Err("rpc unavailable".to_owned()));
 
     assert_eq!(notified_message(), None, "旧列表的失败不得提示给新会话");
 }
@@ -296,26 +439,26 @@ fn relative_time_buckets_by_elapsed_minutes() {
     crate::i18n::init(Some("en"));
     let now: chrono::DateTime<chrono::Utc> = peri_time::now_wall().into();
 
-    assert_eq!(format_relative_time(now), "just now");
+    assert_eq!(super::format_relative_time(now), "just now");
     assert_eq!(
-        format_relative_time(now - chrono::Duration::minutes(5)),
+        super::format_relative_time(now - chrono::Duration::minutes(5)),
         "5 minutes ago"
     );
     assert_eq!(
-        format_relative_time(now - chrono::Duration::minutes(1)),
+        super::format_relative_time(now - chrono::Duration::minutes(1)),
         "1 minute ago",
         "单数不加 s"
     );
     assert_eq!(
-        format_relative_time(now - chrono::Duration::hours(2)),
+        super::format_relative_time(now - chrono::Duration::hours(2)),
         "2 hours ago"
     );
     assert_eq!(
-        format_relative_time(now - chrono::Duration::hours(23)),
+        super::format_relative_time(now - chrono::Duration::hours(23)),
         "23 hours ago"
     );
     assert_eq!(
-        format_relative_time(now - chrono::Duration::days(14)),
+        super::format_relative_time(now - chrono::Duration::days(14)),
         "14 days ago",
         "超过一天不再细分小时"
     );
@@ -327,7 +470,7 @@ fn relative_time_buckets_by_elapsed_minutes() {
         message_count: 0,
         updated_at: None,
     };
-    assert_eq!(relative_time_label(&missing), i18n::tr("common-na"));
+    assert_eq!(super::relative_time_label(&missing), i18n::tr("common-na"));
 }
 
 /// 时间列补白按终端显示宽度：中文时间文本用 `{:<width$}` 会少补空格。
@@ -335,29 +478,45 @@ fn relative_time_buckets_by_elapsed_minutes() {
 fn time_column_pads_by_display_width_not_char_count() {
     use unicode_width::UnicodeWidthStr;
 
-    assert_eq!(pad_display_width("abc", 6), "abc   ");
-    assert_eq!(pad_display_width("刚刚", 6), "刚刚  ", "中文 2 字符占 4 列");
-    assert_eq!(pad_display_width("12 天前", 6), "12 天前", "已达标不裁剪");
-    assert_eq!(pad_display_width("abcdefgh", 6), "abcdefgh", "超宽不截断");
-
-    assert_eq!(time_column_width(&[]), 6, "空列表取下界");
-    assert_eq!(time_column_width(&["刚刚".to_owned()]), 6, "低于下界取下界");
+    assert_eq!(super::pad_display_width("abc", 6), "abc   ");
     assert_eq!(
-        time_column_width(&["刚刚".to_owned(), "12 天前".to_owned()]),
+        super::pad_display_width("刚刚", 6),
+        "刚刚  ",
+        "中文 2 字符占 4 列"
+    );
+    assert_eq!(
+        super::pad_display_width("12 天前", 6),
+        "12 天前",
+        "已达标不裁剪"
+    );
+    assert_eq!(
+        super::pad_display_width("abcdefgh", 6),
+        "abcdefgh",
+        "超宽不截断"
+    );
+
+    assert_eq!(super::time_column_width(&[]), 6, "空列表取下界");
+    assert_eq!(
+        super::time_column_width(&["刚刚".to_owned()]),
+        6,
+        "低于下界取下界"
+    );
+    assert_eq!(
+        super::time_column_width(&["刚刚".to_owned(), "12 天前".to_owned()]),
         7,
         "取最宽条目"
     );
     // 列宽必须容纳本帧最宽标签，否则该行补白失败、标题比同帧其它行右移。
     assert_eq!(
-        time_column_width(&["1000 days ago".to_owned()]),
+        super::time_column_width(&["1000 days ago".to_owned()]),
         13,
         "超宽时间文本撑开列宽而不是被列宽截断"
     );
     let wide = ["2 hours ago", "1000 days ago"].map(str::to_owned);
-    let column = time_column_width(&wide);
+    let column = super::time_column_width(&wide);
     assert_eq!(
         wide.iter()
-            .map(|label| pad_display_width(label, column).width())
+            .map(|label| super::pad_display_width(label, column).width())
             .collect::<Vec<_>>(),
         vec![column, column],
         "同帧所有行补白到同一列宽"
@@ -370,14 +529,16 @@ fn chip_span_marks_selection_with_background() {
     let active = Style::new().bg(ratatui_kit::ratatui::style::Color::Red);
     let idle = Style::new();
 
-    let selected = chip_span("项目".to_owned(), true, active, idle);
+    let selected = super::chip_span("项目".to_owned(), true, active, idle);
     assert_eq!(selected.content.as_ref(), " 项目 ");
     assert_eq!(
         selected.style.bg,
         Some(ratatui_kit::ratatui::style::Color::Red)
     );
 
-    let unselected = chip_span("全部".to_owned(), false, active, idle);
+    let unselected = super::chip_span("全部".to_owned(), false, active, idle);
     assert_eq!(unselected.content.as_ref(), " 全部 ");
     assert_eq!(unselected.style.bg, None);
 }
+
+use super::selection;

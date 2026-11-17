@@ -3,23 +3,24 @@
 //! 底层适配器实现 MiddlewareState，hook 只能看到对应的窄接口。
 //! 消息替换仅在 before_agent / before_input 提供，其余阶段不能修改输入缓存。
 
-use super::state::MiddlewareState;
-use crate::{
-    agent::stages::SharedToolMap,
-    error::AgentResult,
-    messages::{BaseMessage, MessageId},
-    session::{
-        queue::ProducerQueue, tool_catalog::StartupToolUpdate, MessageKind, MessagePolicy,
-        MessageSource, QueuedMessage,
-    },
-};
+use crate::agent::stages::SharedToolMap;
+use crate::error::AgentResult;
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
+use crate::middleware::state::MiddlewareState;
+use crate::session::queue::ProducerQueue;
+use crate::session::tool_catalog::StartupToolUpdate;
+use crate::session::MessageKind;
+use crate::session::MessagePolicy;
+use crate::session::MessageSource;
+use crate::session::QueuedMessage;
 
 /// 只读消息与 turn 元数据，不暴露队列或工具目录。
 ///
 /// ```compile_fail,E0599
 /// use peri_agent::middleware::capabilities::StateView;
 /// fn cannot_mutate_catalog(state: &dyn StateView) {
-///     state.local_tools().unwrap().write().clear();
+///     state.local_tools().expect("the example requires a local tool catalog").write().clear();
 /// }
 /// ```
 /// ```compile_fail,E0599
@@ -49,7 +50,9 @@ pub trait StateView: Send + Sync {
     ) -> Option<peri_acp_types::interaction::InteractionAttribution> {
         None
     }
+    #[must_use]
     fn cwd(&self) -> &str;
+    #[must_use]
     fn messages(&self) -> &[BaseMessage];
     /// 当前 turn 的 ReAct step；`None` = 本次执行没有活跃 turn。
     ///
@@ -89,6 +92,7 @@ pub trait MessageReplace: Send + Sync {
 /// ```
 pub trait QueueState: Send + Sync {
     /// 会话级 mailbox 的生产者面（与 Receive 消费的是同一实例）。
+    #[must_use]
     fn v2_producer(&self) -> ProducerQueue<'_>;
     fn enqueue_v2_message(&self, msg: QueuedMessage);
 }
@@ -258,6 +262,7 @@ pub trait AfterAgentState: StateView + QueueState + BackgroundActivity + HookOut
 
 /// 只读后台活动判断，复用 Receive 等待的 session task 事实，不暴露管理器写权限。
 pub trait BackgroundActivity: Send + Sync {
+    #[must_use]
     fn has_active_background_tasks(&self) -> bool;
 }
 

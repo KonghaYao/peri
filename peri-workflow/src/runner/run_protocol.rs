@@ -3,13 +3,13 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::artifact::{WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION};
-use super::WorkflowInput;
 use crate::error::WorkflowError;
 use crate::protocol::{
     AgentRunParams, AgentRunResult, AgentTaskParams, JournalEntry, WorkflowDoneParams,
     WorkflowStartParams,
 };
+use crate::runner::artifact::{WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION};
+use crate::runner::WorkflowInput;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,7 +113,8 @@ pub(super) fn workflow_start_params(
 pub(super) fn reusable_journal_prefix(mut entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
     entries.sort_by_key(|entry| entry.seq);
     let mut prefix = Vec::new();
-    for (expected_seq, entry) in entries.into_iter().enumerate() {
+    let paired_items = entries.into_iter().enumerate();
+    for (expected_seq, entry) in paired_items {
         let expected_seq = u64::try_from(expected_seq).expect("journal prefix index fits in u64");
         if entry.seq != expected_seq || !matches!(entry.result, AgentRunResult::Ok { .. }) {
             break;

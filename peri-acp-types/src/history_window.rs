@@ -70,6 +70,7 @@ impl HistorySource {
         Self::Own
     }
 
+    #[must_use]
     pub fn inherited(frozen_snapshot_id: impl Into<String>) -> Self {
         Self::Inherited {
             frozen_snapshot_id: frozen_snapshot_id.into(),
@@ -77,6 +78,7 @@ impl HistorySource {
         }
     }
 
+    #[must_use]
     pub fn inherited_with_ancestor(
         frozen_snapshot_id: impl Into<String>,
         ancestor_thread_id: Option<ThreadId>,
@@ -87,6 +89,7 @@ impl HistorySource {
         }
     }
 
+    #[must_use]
     pub fn is_own(&self) -> bool {
         matches!(self, Self::Own)
     }
@@ -120,10 +123,12 @@ pub enum HistoryWindowDirection {
 }
 
 impl HistoryWindowDirection {
+    #[must_use]
     pub fn reads_before(self) -> bool {
         matches!(self, Self::Around | Self::Before)
     }
 
+    #[must_use]
     pub fn reads_after(self) -> bool {
         matches!(self, Self::Around | Self::After)
     }
@@ -197,6 +202,7 @@ pub struct HistoryEntryId {
 }
 
 impl HistoryEntryId {
+    #[must_use]
     pub fn new(thread_id: &ThreadId, message_id: MessageId) -> Self {
         Self {
             thread_id: thread_id.clone(),
@@ -241,9 +247,7 @@ impl HistoryEntryId {
     }
 }
 
-mod request;
-
-pub use request::{
+pub use crate::history_window_request::{
     HistoryWindowOpenPlan, HistoryWindowOpenRequest, HistoryWindowPageRequest,
     HistoryWindowRequest, HistoryWindowSeekAnchor, HistoryWindowSeekRequest,
 };
@@ -273,6 +277,7 @@ struct WireCommittedTail {
 const WIRE_COMMITTED_TAIL_VERSION: u8 = 1;
 
 impl HistoryCommittedTail {
+    #[must_use]
     pub fn new(thread_id: &ThreadId, entry_id: MessageId, position: u64) -> Self {
         Self {
             thread_id: thread_id.clone(),
@@ -356,6 +361,7 @@ pub enum HistoryInheritedWindow {
 }
 
 impl HistoryInheritedWindow {
+    #[must_use]
     pub fn is_present(&self) -> bool {
         matches!(self, Self::Present(_))
     }
@@ -561,10 +567,12 @@ impl HistoryWindowCursor {
 pub struct HistoryReadTicket(String);
 
 impl HistoryReadTicket {
+    #[must_use]
     pub fn new(opaque: impl Into<String>) -> Self {
         Self(opaque.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -653,7 +661,13 @@ pub struct HistoryBodyDescriptor {
 }
 
 impl HistoryBodyDescriptor {
-    pub fn new(
+    /// Binds a nonempty oversize body to the ticket used for bounded chunk reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryWindowError::InvalidRequest`] when the byte length is zero
+    /// or the chunk size exceeds the supported bounds.
+    pub fn try_new(
         total_bytes: u64,
         chunk_size: u32,
         snapshot_token: impl Into<String>,
@@ -742,7 +756,13 @@ pub struct HistoryCommitMetadata {
 }
 
 impl HistoryCommitMetadata {
-    pub fn new(
+    /// Records the identities and structure version of a confirmed full commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryWindowError::ReadFailed`] when the checkpoint or committed
+    /// tail identity is empty.
+    pub fn try_new(
         checkpoint_id: impl Into<String>,
         summary_entry_id: Option<String>,
         committed_tail: impl Into<String>,
@@ -774,6 +794,7 @@ pub enum HistoryRewindStatus {
     ReopenRequired,
 }
 
+/// Whether a history window remains active or must be reopened after invalidation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryRewindInvalidation {
     pub status: HistoryRewindStatus,
@@ -781,6 +802,7 @@ pub struct HistoryRewindInvalidation {
 }
 
 impl HistoryRewindInvalidation {
+    #[must_use]
     pub fn active() -> Self {
         Self {
             status: HistoryRewindStatus::Active,
@@ -788,6 +810,7 @@ impl HistoryRewindInvalidation {
         }
     }
 
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.status == HistoryRewindStatus::Active && !self.reopen_required
     }
@@ -860,18 +883,21 @@ pub enum HistoryWindowError {
 }
 
 impl HistoryWindowError {
+    #[must_use]
     pub fn invalid_request(detail: impl Into<String>) -> Self {
         Self::InvalidRequest {
             detail: detail.into(),
         }
     }
 
+    #[must_use]
     pub fn window_invalidated(detail: impl Into<String>) -> Self {
         Self::WindowInvalidated {
             detail: detail.into(),
         }
     }
 
+    #[must_use]
     pub fn anchor_unavailable(detail: impl Into<String>) -> Self {
         Self::AnchorUnavailable {
             detail: detail.into(),

@@ -3,10 +3,24 @@
 //! 与 `commit_test` 共用隔离子进程夹具：`PERI_CONFIG_HANDLE` 是进程级
 //! OnceLock，每个场景必须在独立子进程中运行。
 
-use super::*;
+use super::AuthController;
+use super::Fixture;
+use super::KeyCode;
+use super::KeyEvent;
+use super::KeyModifiers;
+use super::LoginEditContext;
+use super::LoginEditState;
+use super::LoginErrorKind;
+use super::LoginField;
+use super::LoginPanelMode;
+use super::NOTIFICATION;
+use super::Profiles;
+use super::ProviderKind;
+use super::ProviderModels;
+
 use crate::chatgpt_auth::AccountStatus;
 use crate::kit::panels::login::auth::AuthViewState;
-use crate::kit::panels::login::edit_handler::auth_scope;
+
 use crate::kit::panels::login::edit_state::{AuthChoice, LoginError};
 
 fn plan_store() -> std::path::PathBuf {
@@ -14,7 +28,14 @@ fn plan_store() -> std::path::PathBuf {
 }
 
 fn isolated(name: &str, scenario: impl std::future::Future<Output = ()>) {
-    super::run_isolated(name, module_path!().split_once("::").unwrap().1, scenario);
+    super::run_isolated(
+        name,
+        module_path!()
+            .split_once("::")
+            .expect("isolated: the fixture text must contain its expected delimiter")
+            .1,
+        scenario,
+    );
 }
 
 /// 新建 Responses + ChatGPT plan，四档默认模型已填，身份暂空。
@@ -56,7 +77,7 @@ fn press_save(
     edit_cursor: &mut usize,
     auth: &mut AuthController,
 ) {
-    handle_login_edit_keys(
+    super::super::super::edit_handler::handle_login_edit_keys(
         LoginEditContext {
             mode,
             edit_state,
@@ -83,7 +104,7 @@ fn login_commit_signed_in_empty_identity_saves_once_with_four_models() {
                 crate::i18n::tr("login-auth-identity-required"),
             ));
             let mut auth = AuthController::new();
-            let scope = auth_scope(&state);
+            let scope = crate::kit::panels::login::edit_handler::auth_scope(&state);
             assert!(auth.sync_scope(scope));
             // 已过期的 access token 也不得阻断保存：刷新由首次使用负责。
             auth.set_view_for_test(AuthViewState::SignedIn(signed_in_status(
@@ -124,7 +145,7 @@ fn login_commit_signed_in_empty_identity_saves_once_with_four_models() {
                 .providers
                 .iter()
                 .find(|provider| provider.id == "new-plan")
-                .unwrap();
+                .expect("login commit signed in empty identity saves once with four models: fixture must contain the searched item");
             let Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
                 store,
                 account,
@@ -145,7 +166,7 @@ fn login_commit_signed_in_empty_identity_saves_once_with_four_models() {
             for alias in Profiles::ALL {
                 assert_eq!(
                     saved.config.profiles.get(alias),
-                    initial_config().config.profiles.get(alias),
+                    super::initial_config().config.profiles.get(alias),
                     "{alias} must stay unchanged: Login only writes provider defaults"
                 );
             }
@@ -162,7 +183,7 @@ fn login_commit_checking_save_waits_without_red_then_adopts_on_status() {
             let fixture = Fixture::new(false);
             let state = new_plan_state(&fixture);
             let mut auth = AuthController::new();
-            let scope = auth_scope(&state);
+            let scope = crate::kit::panels::login::edit_handler::auth_scope(&state);
             assert!(auth.sync_scope(scope));
             auth.set_view_for_test(AuthViewState::Checking);
 
@@ -222,9 +243,9 @@ fn login_commit_mismatch_blocks_then_explicit_adoption_saves() {
             let fixture = Fixture::new(false);
             let cfg = fixture.config.read().clone();
             let state =
-                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).unwrap();
+                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).expect("login commit mismatch blocks then explicit adoption saves: the edit_provider fixture operation uses valid inputs");
             let mut auth = AuthController::new();
-            let scope = auth_scope(&state);
+            let scope = crate::kit::panels::login::edit_handler::auth_scope(&state);
             assert!(auth.sync_scope(scope));
             auth.set_view_for_test(AuthViewState::SignedIn(signed_in_status(
                 "verified-subject",
@@ -245,8 +266,8 @@ fn login_commit_mismatch_blocks_then_explicit_adoption_saves() {
             );
 
             assert_eq!(mode, LoginPanelMode::Edit, "不同身份必须阻断保存");
-            let blocked = edit_state.as_ref().unwrap();
-            let error = blocked.inline_error.as_ref().unwrap();
+            let blocked = edit_state.as_ref().expect("login commit mismatch blocks then explicit adoption saves: fixture must have the expected variant");
+            let error = blocked.inline_error.as_ref().expect("login commit mismatch blocks then explicit adoption saves: fixture must have the expected variant");
             assert_eq!(error.kind, LoginErrorKind::AuthReference);
             assert_eq!(
                 error.message,
@@ -260,7 +281,7 @@ fn login_commit_mismatch_blocks_then_explicit_adoption_saves() {
             );
 
             // 显式采用：动作行 Enter。
-            handle_login_edit_keys(
+            super::super::super::edit_handler::handle_login_edit_keys(
                 LoginEditContext {
                     mode: &mut mode,
                     edit_state: &mut edit_state,
@@ -272,7 +293,7 @@ fn login_commit_mismatch_blocks_then_explicit_adoption_saves() {
                 None,
                 &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             );
-            let adopted = edit_state.as_ref().unwrap();
+            let adopted = edit_state.as_ref().expect("login commit mismatch blocks then explicit adoption saves: fixture must have the expected variant");
             assert_eq!(adopted.plan.subject, "verified-subject");
             assert_eq!(adopted.plan.client_id, "verified-client");
             assert!(adopted.inline_error.is_none());
@@ -297,7 +318,7 @@ fn login_commit_mismatch_blocks_then_explicit_adoption_saves() {
                 .providers
                 .iter()
                 .find(|provider| provider.id == "plan")
-                .unwrap();
+                .expect("login commit mismatch blocks then explicit adoption saves: fixture must contain the searched item");
             let Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
                 subject,
                 client_id,
@@ -311,7 +332,7 @@ fn login_commit_mismatch_blocks_then_explicit_adoption_saves() {
             for alias in Profiles::ALL {
                 assert_eq!(
                     saved.config.profiles.get(alias),
-                    initial_config().config.profiles.get(alias),
+                    super::initial_config().config.profiles.get(alias),
                     "{alias} must stay unchanged"
                 );
             }
@@ -328,8 +349,8 @@ fn login_commit_ctrl_r_syncs_auth_scope_and_requests_status() {
             let fixture = Fixture::new(false);
             let cfg = fixture.config.read().clone();
             let state =
-                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).unwrap();
-            let expected_scope = auth_scope(&state);
+                LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).expect("login commit ctrl r syncs auth scope and requests status: the edit_provider fixture operation uses valid inputs");
+            let expected_scope = crate::kit::panels::login::edit_handler::auth_scope(&state);
             let mut auth = AuthController::new();
             // 旧目标的“已登录”不得在重载后继续显示或参与采用。
             assert!(
@@ -351,7 +372,7 @@ fn login_commit_ctrl_r_syncs_auth_scope_and_requests_status() {
             let mut edit_state = Some(state);
             let mut focus = LoginField::ProviderId;
             let mut cursor = 0usize;
-            let intent = handle_login_edit_keys(
+            let intent = super::super::super::edit_handler::handle_login_edit_keys(
                 LoginEditContext {
                     mode: &mut mode,
                     edit_state: &mut edit_state,
@@ -399,7 +420,7 @@ fn login_commit_new_plan_provider_seeds_models_before_saving() {
             assert_eq!(state.models.opus, "plan-opus", "预填后再次触发不覆盖");
 
             let mut auth = AuthController::new();
-            let scope = auth_scope(&state);
+            let scope = crate::kit::panels::login::edit_handler::auth_scope(&state);
             assert!(auth.sync_scope(scope));
             auth.set_view_for_test(AuthViewState::SignedIn(signed_in_status(
                 "verified-subject",
@@ -427,7 +448,7 @@ fn login_commit_new_plan_provider_seeds_models_before_saving() {
                 .providers
                 .iter()
                 .find(|provider| provider.id == "seeded-plan")
-                .unwrap();
+                .expect("login commit new plan provider seeds models before saving: fixture must contain the searched item");
             assert_eq!(provider.models.fable, "plan-fable");
             assert_eq!(provider.models.opus, "plan-opus");
             assert_eq!(provider.models.sonnet, "plan-sonnet");
@@ -435,7 +456,7 @@ fn login_commit_new_plan_provider_seeds_models_before_saving() {
             for alias in Profiles::ALL {
                 assert_eq!(
                     saved.config.profiles.get(alias),
-                    initial_config().config.profiles.get(alias),
+                    super::initial_config().config.profiles.get(alias),
                     "{alias} must stay unchanged: auto-fill only touches Login draft"
                 );
             }

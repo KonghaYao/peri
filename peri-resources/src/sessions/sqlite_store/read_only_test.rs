@@ -1,10 +1,14 @@
-use super::*;
+use super::{
+    AgentStatus, AssertSqlSafe, ReadOnlyStoreErrorKind, ReadOnlyThreadStoreError,
+    SqliteConnectOptions, SqliteThreadStore, ThreadMeta, ThreadStore, REQUIRED_MESSAGE_COLUMNS,
+    REQUIRED_THREAD_COLUMNS,
+};
+
 use sqlx::Connection;
 use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tempfile::tempdir;
 
 #[derive(Debug, PartialEq, Eq)]
 struct DatabaseSnapshot {
@@ -146,7 +150,7 @@ fn readonly_load_error_kind(error: &anyhow::Error) -> ReadOnlyStoreErrorKind {
 
 #[tokio::test]
 async fn test_readonly_open_missing_database_creates_nothing() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().join("missing-parent");
     let db_path = parent.join("threads.db");
     let kind = readonly_error_kind(&db_path).await;
@@ -156,7 +160,7 @@ async fn test_readonly_open_missing_database_creates_nothing() {
 
 #[tokio::test]
 async fn test_readonly_open_directory_and_non_sqlite_are_typed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let directory_kind = readonly_error_kind(dir.path()).await;
     assert_eq!(directory_kind, ReadOnlyStoreErrorKind::DatabaseUnreadable);
     let file = dir.path().join("not-sqlite.db");
@@ -167,7 +171,7 @@ async fn test_readonly_open_directory_and_non_sqlite_are_typed() {
 
 #[tokio::test]
 async fn test_readonly_open_rejects_missing_table_and_required_column_without_migration() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let missing_table = dir.path().join("missing-table.db");
     let mut connection = sqlx::SqliteConnection::connect_with(
         &SqliteConnectOptions::new()
@@ -221,7 +225,7 @@ async fn test_readonly_open_rejects_every_required_column_without_mutation() {
         ("messages", REQUIRED_MESSAGE_COLUMNS),
     ] {
         for column in columns {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
             let db_path = dir.path().join(format!("missing-{table}-{column}.db"));
             create_schema_without(&db_path, table, column).await;
             let before = directory_snapshot(dir.path());
@@ -237,10 +241,13 @@ async fn test_readonly_open_rejects_every_required_column_without_mutation() {
 
 #[tokio::test]
 async fn test_readonly_store_loads_exact_meta_and_distinguishes_missing_session() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    let mut expected = ThreadMeta::new_at(absolute_test_path("workspace"), peri_time::now_wall());
+    let writer = SqliteThreadStore::try_new(&db_path).await.unwrap();
+    let mut expected = ThreadMeta::new_at(
+        super::absolute_test_path("workspace"),
+        peri_time::now_wall(),
+    );
     expected.title = Some("title".into());
     expected.agent_status = AgentStatus::Done;
     let id = writer.create_thread(expected.clone()).await.unwrap();
@@ -272,12 +279,15 @@ async fn test_readonly_store_loads_exact_meta_and_distinguishes_missing_session(
 /// 紧接的只读打开不依赖 busy 重试；只 `Drop` 不提供这一保证。
 #[tokio::test]
 async fn concurrent_close_settles_before_read_only_reopen() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
     let (bridge, facade) = crate::sessions::open_store_and_facade_for_tests(&db_path)
         .await
         .unwrap();
-    let expected = ThreadMeta::new_at(absolute_test_path("workspace"), peri_time::now_wall());
+    let expected = ThreadMeta::new_at(
+        super::absolute_test_path("workspace"),
+        peri_time::now_wall(),
+    );
     let id = bridge.create_thread(expected).await.unwrap();
     let bridge = Arc::new(bridge);
     let (first, second) = tokio::join!(
@@ -303,10 +313,10 @@ async fn concurrent_close_settles_before_read_only_reopen() {
 
 #[test]
 fn test_meta_decoder_rejects_negative_derived_content_size() {
-    let error = meta_from_row(
+    let error = super::meta_from_row(
         "550e8400-e29b-41d4-a716-446655440000".into(),
         None,
-        absolute_test_path("tmp"),
+        super::absolute_test_path("tmp"),
         "2026-09-04T00:00:00Z".into(),
         "2026-09-04T00:00:00Z".into(),
         0,
@@ -340,12 +350,12 @@ async fn test_readonly_store_rejects_corrupt_enum_time_type_and_negative_counts_
         ("message_count", "-1"),
         ("message_count", "'secret-invalid-type'"),
     ] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("threads.db");
-        let writer = SqliteThreadStore::new(&db_path).await.unwrap();
+        let writer = SqliteThreadStore::try_new(&db_path).await.unwrap();
         let id = writer
             .create_thread(ThreadMeta::new_at(
-                absolute_test_path("tmp"),
+                super::absolute_test_path("tmp"),
                 peri_time::now_wall(),
             ))
             .await
@@ -384,10 +394,10 @@ async fn test_readonly_store_rejects_corrupt_enum_time_type_and_negative_counts_
 
 #[tokio::test]
 async fn test_readonly_backed_trait_rejects_mutation_and_preserves_row() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
-    let expected = ThreadMeta::new_at(absolute_test_path("before"), peri_time::now_wall());
+    let writer = SqliteThreadStore::try_new(&db_path).await.unwrap();
+    let expected = ThreadMeta::new_at(super::absolute_test_path("before"), peri_time::now_wall());
     let id = writer.create_thread(expected.clone()).await.unwrap();
     writer.database.pool.close().await;
     let database_before = database_snapshot(&db_path).await;
@@ -417,12 +427,12 @@ async fn test_readonly_backed_trait_rejects_mutation_and_preserves_row() {
 
 #[tokio::test]
 async fn test_readonly_store_observes_wal_commit_but_not_uncommitted_update() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
+    let writer = SqliteThreadStore::try_new(&db_path).await.unwrap();
     let id = writer
         .create_thread(ThreadMeta::new_at(
-            absolute_test_path("baseline"),
+            super::absolute_test_path("baseline"),
             peri_time::now_wall(),
         ))
         .await
@@ -441,7 +451,7 @@ async fn test_readonly_store_observes_wal_commit_but_not_uncommitted_update() {
     assert_eq!(sidecars_after_open, sidecars_before_open);
     assert_eq!(
         reader.load_meta(&id).await.unwrap().cwd,
-        absolute_test_path("baseline")
+        super::absolute_test_path("baseline")
     );
     let sidecars_after_load = directory_snapshot(dir.path());
     assert_eq!(sidecars_after_load, sidecars_before_open);
@@ -518,7 +528,7 @@ fn test_shape_probe_failure_classification_never_fakes_schema_verdict() {
             message: "shape probe failed",
         }));
         assert_eq!(
-            classify_shape_probe_failure(&error).kind(),
+            super::classify_shape_probe_failure(&error).kind(),
             ReadOnlyStoreErrorKind::SchemaIncompatible,
             "SQLite primary result code {code} 是确定性 schema/镜像判定"
         );
@@ -539,14 +549,14 @@ fn test_shape_probe_failure_classification_never_fakes_schema_verdict() {
             message: "shape probe failed",
         }));
         assert_eq!(
-            classify_shape_probe_failure(&error).kind(),
+            super::classify_shape_probe_failure(&error).kind(),
             ReadOnlyStoreErrorKind::DatabaseUnreadable,
             "code {code:?} 不得伪装成 schema 判定"
         );
     }
     for error in [sqlx::Error::PoolTimedOut, sqlx::Error::RowNotFound] {
         assert_eq!(
-            classify_shape_probe_failure(&error).kind(),
+            super::classify_shape_probe_failure(&error).kind(),
             ReadOnlyStoreErrorKind::DatabaseUnreadable
         );
     }
@@ -554,9 +564,9 @@ fn test_shape_probe_failure_classification_never_fakes_schema_verdict() {
 
 #[tokio::test]
 async fn test_readonly_open_lock_contention_is_bounded() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("threads.db");
-    let writer = SqliteThreadStore::new(&db_path).await.unwrap();
+    let writer = SqliteThreadStore::try_new(&db_path).await.unwrap();
     drop(writer);
     let mut lock =
         sqlx::SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&db_path))

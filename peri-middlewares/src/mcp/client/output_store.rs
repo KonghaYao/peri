@@ -1,10 +1,15 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use peri_acp_types::workspace_output::{StoreOutputRequest, StoredOutput, STORE_OUTPUT_METHOD};
-use rmcp::{
-    model::{CancelledNotificationParam, ClientRequest, CustomRequest, RequestId, ServerResult},
-    service::{Peer, PeerRequestOptions, RoleClient},
-};
+use rmcp::model::CancelledNotificationParam;
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::RequestId;
+use rmcp::model::ServerResult;
+use rmcp::service::Peer;
+use rmcp::service::PeerRequestOptions;
+use rmcp::service::RoleClient;
 
 use super::{ClientStatus, McpClientPool};
 
@@ -44,10 +49,8 @@ impl Drop for PendingOutput {
 fn workspace_available(pool: &McpClientPool) -> bool {
     pool.is_open()
         && !pool.builtin_instance_context().is_some_and(|context| {
-            let source = pool
-                .get_client("workspace")
-                .and_then(|handle| handle.source.clone());
-            crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+            let source = pool.capability_source("workspace");
+            crate::mcp::builtin::is_capability_closed("workspace", source.as_ref(), &context.closed)
         })
 }
 
@@ -71,7 +74,7 @@ impl McpClientPool {
             return Err("workspace output store unavailable or disabled");
         }
         let handle = self
-            .get_client_visible_to("workspace", session_id)
+            .capability_client_visible_to("workspace", session_id)
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .filter(|handle| crate::mcp::builtin::is_workspace_source(handle.source.as_ref()))
             .ok_or("workspace output store unavailable")?;
@@ -105,7 +108,7 @@ impl McpClientPool {
         if !workspace_available(self)
             || self.acp_owners.read().get("workspace").cloned() != owner
             || !self
-                .get_client_visible_to("workspace", session_id)
+                .capability_client_visible_to("workspace", session_id)
                 .is_some_and(|current| {
                     Arc::ptr_eq(&current, &handle)
                         && matches!(current.status, ClientStatus::Connected)

@@ -317,7 +317,7 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 
 ## 7. 关闭与扩展
 
-- 元关闭：MetaHarness `MonitorMiddleware: false`、配置项
+- 元关闭：MetaHarness `"monitor": false`、配置项
   `{"monitor": {"disabled": true}}`，或 `PERI_MCP_BUILTIN=off`。关闭后实例不装配，
   已存在的内存任务随实例消失。
 - 附随 skill 走 workspace 静态资产（`mcp-packages/workspace/src/resources/builtin/skills/monitor/`），

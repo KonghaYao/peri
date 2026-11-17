@@ -71,6 +71,7 @@ fn is_ai_email(email: &str) -> bool {
 ///   the commit is attributed ONLY to those AI co-authors (human author excluded).
 /// - Otherwise, author and all co-authors each get full credit as usual.
 /// - Input follows git log newest-first order; the first name seen for an email wins.
+#[must_use]
 pub fn aggregate(commits: &[ParsedCommit]) -> Vec<PersonStats> {
     let mut map: HashMap<String, PersonStats> = HashMap::new();
 

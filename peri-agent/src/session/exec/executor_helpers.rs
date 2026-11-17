@@ -1,4 +1,4 @@
-//! [`run_session_loop`] 的 helper 子流程（L5：自 `peri-acp/src/host/exec/executor_helpers.rs`
+//! [`run_session_loop`](crate::session::exec::executor::run_session_loop) 的 helper 子流程（L5：自 `peri-acp/src/host/exec/executor_helpers.rs`
 //! 物理迁入，ACP 侧保留 re-export 桥）。
 //!
 //! 本文件承载以下四个被 orchestrator 串起来的子流程：
@@ -13,8 +13,8 @@
 //! # 依赖反转（§0）
 //!
 //! 本模块只依赖 peri-acp-types / peri-model / crate 内部：
-//! - 事件发射经 [`EventPublisher`] 端口（ACP/Controller 适配层实现），
-//!   事件消费经 [`EventSubscriber`] 端口（包装 Controller 订阅）
+//! - 事件发射经 [`EventPublisher`](peri_acp_types::event::EventPublisher) 端口（ACP/Controller 适配层实现），
+//!   事件消费经 [`EventSubscriber`](peri_acp_types::event::EventSubscriber) 端口（包装 Controller 订阅）
 //! - 命令拦截经注入的 `command_lookup` 闭包（ACP 协议面注册表）+ 注入的
 //!   `compact_config_loader` 闭包（`load_compact_config` 语义留在 ACP）
 //! - stage 装配经注入的 `StageBuildFn`（ACP 侧从 `SessionContext` 投影
@@ -36,12 +36,14 @@
 
 use peri_acp_types::command::PromptStopReason;
 use peri_acp_types::session::ExecutionFailure;
+use std::fmt::{self, Debug, Formatter};
 
 use crate::agent::state::AgentState;
 
 mod collect;
 mod event_pump;
 mod intercept;
+mod loop_terminal;
 mod v2_execute;
 
 pub use collect::{close_channel, collect_result, wait_for_pump, CollectRequest};
@@ -55,49 +57,11 @@ pub use v2_execute::{
     V2ExecuteRequest,
 };
 
-// 普通执行与 Immediate 命令共用 done 协议投影，避免响应已取消而通知仍正常完成。
-fn done_stop_reason(reason: PromptStopReason) -> &'static str {
-    match reason {
-        PromptStopReason::EndTurn => "end_turn",
-        PromptStopReason::Cancelled => "cancelled",
-        PromptStopReason::MaxTurnRequests => "max_turn_requests",
-        PromptStopReason::MaxTokens => "max_tokens",
-    }
-}
+use exec_outcome::done_stop_reason;
 
-// ── 共享类型（L5：自 ACP executor.rs 迁入）──────────────────────────────────
+pub use exec_outcome::ExecOutcome;
 
-/// Agent 执行后的最终输出（state + 停止原因）。
-pub struct ExecOutcome {
-    pub execution_binding: Option<peri_acp_types::session::ExecutionBinding>,
-    pub ok: bool,
-    pub stop_reason: PromptStopReason,
-    /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = 真正
-    /// fatal 的 `LoopResult::Error`，见
-    /// spec/history/2026-08.md 2026-08-18 条目 Commit 1）。
-    pub failure: Option<ExecutionFailure>,
-    /// A Full Compact committed during this turn and replaced prior visible history.
-    pub history_replaced_by_compaction: bool,
-    /// Canonical transcript snapshot captured after the persistence barrier.
-    /// 只含**有效**（未排除）条目：Full Compact 提交释放的 own 原文不在其中，
-    /// 完整历史（含归档原文）只能从存储读取。
-    pub persisted_payloads: Vec<peri_acp_types::store::PersistedPayload>,
-    /// Durable state could not be rolled back or verified; host must invalidate the session.
-    pub persistence_inconsistent: bool,
-    pub agent_state: AgentState,
-}
-
-/// turn 退出时仍未结算的后台任务数（§7.3 有界等待摘要）。
-///
-/// 与 `idle_should_wait` 的 busy 判据同源（`active_count`）：任务终态结算后
-/// 即不再计入；`0` 表示无未结算任务，ACP 响应不附加 pending 标记。
-pub(crate) fn pending_task_count(
-    manager: Option<&std::sync::Arc<dyn peri_acp_types::tasks::TaskManager>>,
-) -> u32 {
-    manager
-        .map(|manager| manager.active_count() as u32)
-        .unwrap_or(0)
-}
+pub(crate) use exec_outcome::pending_task_count;
 
 #[cfg(test)]
 #[path = "executor_helpers/event_pump_test.rs"]
@@ -110,3 +74,6 @@ mod collect_tests;
 #[cfg(test)]
 #[path = "executor_helpers_test.rs"]
 mod tests;
+
+#[path = "executor_helpers/exec_outcome.rs"]
+mod exec_outcome;

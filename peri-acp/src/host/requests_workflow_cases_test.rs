@@ -1,5 +1,15 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
 use peri_acp_types::ports::{McpPoolPort, McpPoolShutdownReport};
+use peri_acp_types::tasks::BgTaskKind;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[path = "requests_task_cancel_test.rs"]
 mod task_cancel_tests;
@@ -7,18 +17,21 @@ mod task_cancel_tests;
 #[tokio::test]
 async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = make_server_config(config.clone(), provider, &tmp).await;
+    let cfg =
+        crate::host::requests::tests::make_server_config(config.clone(), provider, &tmp).await;
     let mock = Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd":tmp.path()}),
         &cfg,
@@ -81,7 +94,7 @@ async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
     // 自证清空，生产由工具层调用点在执行真停止后确认）。
     manager.cancel("wf-revision-1").unwrap();
     manager.confirm_external_execution_stopped(&ticket);
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": sid}),
         &cfg,
@@ -91,7 +104,7 @@ async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
     .await
     .unwrap();
 
-    let second_cfg = make_server_config(
+    let second_cfg = crate::host::requests::tests::make_server_config(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &tmp,
@@ -100,7 +113,7 @@ async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
     let load_mock = Arc::new(MockTransport::default());
     let load_transport: Arc<dyn crate::transport::AcpTransport> = load_mock.clone();
     let mut loaded_sessions = HashMap::new();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":sid,"cwd":tmp.path()}),
         &second_cfg,
@@ -139,17 +152,19 @@ async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
 #[tokio::test]
 async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd":tmp.path()}),
         &cfg,
@@ -176,7 +191,7 @@ async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
         .unwrap();
     assert_eq!(registry.active_count(), 1);
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/cancel-bg-task",
         &json!({ "sessionId": sid, "taskId": "wf-run-1" }),
         &cfg,
@@ -202,18 +217,20 @@ async fn test_cancel_bg_task_workflow_invokes_kill_closure() {
 #[tokio::test]
 async fn test_cancel_bg_task_session_not_found_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/cancel-bg-task",
         &json!({ "sessionId": "no-such-session", "taskId": "wf-run-1" }),
         &cfg,
@@ -236,14 +253,16 @@ async fn test_cancel_bg_task_session_not_found_returns_error() {
 #[tokio::test]
 async fn test_cancel_bg_task_task_not_found_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let sid = "cancel-bg-session".to_string();
@@ -252,7 +271,7 @@ async fn test_cancel_bg_task_task_not_found_returns_error() {
         .await
         .unwrap();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/cancel-bg-task",
         &json!({ "sessionId": sid, "taskId": "no-such-task" }),
         &cfg,
@@ -305,10 +324,6 @@ impl FakeWorkflowPool {
 
 #[async_trait::async_trait]
 impl McpPoolPort for FakeWorkflowPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn shutdown(&self) -> McpPoolShutdownReport {
         McpPoolShutdownReport::Complete {
             settled_services: 0,
@@ -359,19 +374,23 @@ async fn workflow_pool_fixture(
     runs_reply: Result<&str, &str>,
 ) -> WorkflowPoolFixture {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let pool = Arc::new(FakeWorkflowPool::new(tool_reply, runs_reply));
     cfg.mcp_pool = Some(Arc::clone(&pool) as Arc<dyn McpPoolPort>);
     let mut sessions = HashMap::new();
     let cwd = tmp.path().to_str().unwrap();
-    let sid = register_session_with_history(&mut sessions, cwd, &cfg).await;
+    let sid =
+        crate::host::requests::tests::register_session_with_history(&mut sessions, cwd, &cfg).await;
     WorkflowPoolFixture {
         cfg,
         sessions,
@@ -393,7 +412,7 @@ async fn test_kill_run_maps_pool_reply_to_killed() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     // 命中：killed:true，且调用参数只有 runId
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "workflow/kill_run",
         &json!({ "sessionId": fixture.sid, "runId": "run-b" }),
         &fixture.cfg,
@@ -417,7 +436,7 @@ async fn test_kill_run_maps_pool_reply_to_killed() {
     fixture
         .pool
         .set_tool_reply(Ok("Workflow run 'run-a' not found."));
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "workflow/kill_run",
         &json!({ "sessionId": fixture.sid, "runId": "run-a" }),
         &fixture.cfg,
@@ -432,7 +451,7 @@ async fn test_kill_run_maps_pool_reply_to_killed() {
     fixture
         .pool
         .set_tool_reply(Err("workflow instance is not connected"));
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/kill_run",
         &json!({ "sessionId": fixture.sid, "runId": "run-a" }),
         &fixture.cfg,
@@ -448,7 +467,7 @@ async fn test_kill_run_maps_pool_reply_to_killed() {
     );
 
     // 缺失 sessionId → -32602
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/kill_run",
         &json!({ "runId": "run-a" }),
         &fixture.cfg,
@@ -464,7 +483,7 @@ async fn test_kill_run_maps_pool_reply_to_killed() {
     );
 
     // session 不存在 → 明确错误（修复前静默返回 killed:false）
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/kill_run",
         &json!({ "sessionId": "no-such-session", "runId": "run-a" }),
         &fixture.cfg,
@@ -487,20 +506,26 @@ async fn test_kill_run_maps_pool_reply_to_killed() {
 #[tokio::test]
 async fn test_kill_run_without_pool_reports_session_not_found() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
 
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/kill_run",
         &json!({ "sessionId": sid, "runId": "run-a" }),
         &cfg,
@@ -529,7 +554,7 @@ async fn test_list_runs_reads_pool_resource() {
     let mut sessions = fixture.sessions;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "workflow/list_runs",
         &json!({ "sessionId": fixture.sid }),
         &fixture.cfg,
@@ -554,7 +579,7 @@ async fn test_list_runs_reads_pool_resource() {
 
     // 资源读取失败 → -32603，文本透传
     *fixture.pool.runs_reply.lock().unwrap() = Err("workflow instance not connected".to_string());
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/list_runs",
         &json!({ "sessionId": fixture.sid }),
         &fixture.cfg,
@@ -571,7 +596,7 @@ async fn test_list_runs_reads_pool_resource() {
 
     // 正文不是 JSON（资源不是 run 索引）→ 如实报错，不伪造空列表
     *fixture.pool.runs_reply.lock().unwrap() = Ok("not json".to_string());
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/list_runs",
         &json!({ "sessionId": fixture.sid }),
         &fixture.cfg,
@@ -591,20 +616,26 @@ async fn test_list_runs_reads_pool_resource() {
 #[tokio::test]
 async fn test_list_runs_without_pool_is_empty() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let sid =
-        register_session_with_history(&mut sessions, tmp.path().to_str().unwrap(), &cfg).await;
+    let sid = crate::host::requests::tests::register_session_with_history(
+        &mut sessions,
+        tmp.path().to_str().unwrap(),
+        &cfg,
+    )
+    .await;
 
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "workflow/list_runs",
         &json!({ "sessionId": sid }),
         &cfg,
@@ -616,7 +647,7 @@ async fn test_list_runs_without_pool_is_empty() {
     assert_eq!(resp["runs"], json!([]));
 
     // 缺失 sessionId 仍为协议错误（-32602）
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/list_runs",
         &json!({}),
         &cfg,
@@ -644,7 +675,7 @@ async fn test_kill_agent_maps_pool_reply_to_killed() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
     // 命中：killed:true，参数带 runId + agentId
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "workflow/kill_agent",
         &json!({ "sessionId": fixture.sid, "runId": "run-x", "agentId": 3 }),
         &fixture.cfg,
@@ -668,7 +699,7 @@ async fn test_kill_agent_maps_pool_reply_to_killed() {
     fixture
         .pool
         .set_tool_reply(Ok("No active agent 3 in workflow run 'run-x'."));
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "workflow/kill_agent",
         &json!({ "sessionId": fixture.sid, "runId": "run-x", "agentId": 3 }),
         &fixture.cfg,
@@ -680,7 +711,7 @@ async fn test_kill_agent_maps_pool_reply_to_killed() {
     assert_eq!(resp["killed"], false);
 
     // 缺失 agentId → -32602，且不触达池
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/kill_agent",
         &json!({ "sessionId": fixture.sid, "runId": "run-x" }),
         &fixture.cfg,
@@ -701,7 +732,7 @@ async fn test_kill_agent_maps_pool_reply_to_killed() {
     );
 
     // 缺失 sessionId → -32602
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/kill_agent",
         &json!({ "runId": "run-x", "agentId": 1 }),
         &fixture.cfg,
@@ -717,7 +748,7 @@ async fn test_kill_agent_maps_pool_reply_to_killed() {
     );
 
     // session 不存在 → 明确错误（修复前静默返回 killed:false）
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/kill_agent",
         &json!({ "sessionId": "no-such-session", "runId": "run-x", "agentId": 1 }),
         &fixture.cfg,
@@ -750,7 +781,7 @@ async fn test_resume_calls_workflow_tool_with_resume_from() {
     // 正常恢复：ACP 只传 resumeFromRunId（内核完成 state/journal 读取与启动），
     // 新 run id 从内核启动消息读取。
     let old_run = "0198f0aa-0000-7000-8000-000000000000";
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "workflow/resume",
         &json!({ "sessionId": fixture.sid, "runId": old_run }),
         &fixture.cfg,
@@ -778,7 +809,7 @@ async fn test_resume_calls_workflow_tool_with_resume_from() {
     fixture
         .pool
         .set_tool_reply(Err("Failed to read workflow state: missing state.json"));
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/resume",
         &json!({ "sessionId": fixture.sid, "runId": old_run }),
         &fixture.cfg,
@@ -795,7 +826,7 @@ async fn test_resume_calls_workflow_tool_with_resume_from() {
 
     // 启动消息缺 run id 行 → 如实报错，不伪造 runId
     fixture.pool.set_tool_reply(Ok("Workflow started (no id)"));
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/resume",
         &json!({ "sessionId": fixture.sid, "runId": old_run }),
         &fixture.cfg,
@@ -811,7 +842,7 @@ async fn test_resume_calls_workflow_tool_with_resume_from() {
     );
 
     // 缺失 sessionId → -32602
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/resume",
         &json!({ "runId": "no-such-run" }),
         &fixture.cfg,
@@ -827,7 +858,7 @@ async fn test_resume_calls_workflow_tool_with_resume_from() {
     );
 
     // session 不存在 → 明确错误（修复前可能误用第一个 session 的 middleware）
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "workflow/resume",
         &json!({ "sessionId": "no-such-session", "runId": "no-such-run" }),
         &fixture.cfg,

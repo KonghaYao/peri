@@ -30,11 +30,16 @@ use std::time::{Duration, Instant};
 
 use langfuse_client::client::ExportConfig;
 use langfuse_client::config::{BatcherConfig, TelemetryConfig};
+use langfuse_client::spool;
 use langfuse_client::spool::native::NativeSpool;
-use langfuse_client::spool::{
-    route_fingerprint, ObjectId, ObjectKind, ObjectMeta, RouteFingerprint, SpoolError, SpoolState,
-    SpoolStore, SpoolUsage,
-};
+use langfuse_client::spool::ObjectId;
+use langfuse_client::spool::ObjectKind;
+use langfuse_client::spool::ObjectMeta;
+use langfuse_client::spool::RouteFingerprint;
+use langfuse_client::spool::SpoolError;
+use langfuse_client::spool::SpoolState;
+use langfuse_client::spool::SpoolStore;
+use langfuse_client::spool::SpoolUsage;
 use langfuse_client::types::{GenerationBody, TraceBody};
 use langfuse_client::{Batcher, IngestionEvent, LangfuseClient, ShutdownReport};
 use sha2::{Digest, Sha256};
@@ -287,7 +292,7 @@ fn client(url: &str) -> LangfuseClient {
 }
 
 fn route(url: &str) -> RouteFingerprint {
-    route_fingerprint(url, PK, SK).expect("route fingerprint")
+    spool::route_fingerprint(url, PK, SK).expect("route fingerprint")
 }
 
 fn spool_at(root: &Path, url: &str) -> Arc<dyn SpoolStore> {
@@ -423,13 +428,16 @@ async fn wait_for_object(
         if let Some(meta) = entries.iter().flatten().find(|meta| ready(meta)) {
             return meta.clone();
         }
-        for meta in entries.iter().flatten() {
-            let line = format!(
-                "{:?}/attempts={}/events={}/due={:?}",
-                meta.state, meta.attempts, meta.event_count, meta.next_attempt_at_ms
-            );
-            if history.last() != Some(&line) {
-                history.push(line);
+        {
+            let iterated_entries = entries.iter().flatten();
+            for meta in iterated_entries {
+                let line = format!(
+                    "{:?}/attempts={}/events={}/due={:?}",
+                    meta.state, meta.attempts, meta.event_count, meta.next_attempt_at_ms
+                );
+                if history.last() != Some(&line) {
+                    history.push(line);
+                }
             }
         }
         assert!(
@@ -569,17 +577,22 @@ impl Drop for ChildProcess {
 }
 
 /// 子进程描述：角色（publish/probe_claim）、真实临时 root、父进程服务端 URL 与放行/标记文件。
-struct ChildSpec<'a> {
-    root: &'a Path,
-    url: &'a str,
-    mode: &'a str,
+struct ChildSpec<'scenario> {
+    root: &'scenario Path,
+    url: &'scenario str,
+    mode: &'scenario str,
     ttl: Duration,
     release: PathBuf,
     marker: Option<PathBuf>,
 }
 
-impl<'a> ChildSpec<'a> {
-    fn publish(root: &'a Path, url: &'a str, ttl: Duration, release: PathBuf) -> Self {
+impl<'scenario> ChildSpec<'scenario> {
+    fn publish(
+        root: &'scenario Path,
+        url: &'scenario str,
+        ttl: Duration,
+        release: PathBuf,
+    ) -> Self {
         Self {
             root,
             url,
@@ -590,7 +603,7 @@ impl<'a> ChildSpec<'a> {
         }
     }
 
-    fn probe_claim(root: &'a Path, url: &'a str, marker: PathBuf) -> Self {
+    fn probe_claim(root: &'scenario Path, url: &'scenario str, marker: PathBuf) -> Self {
         Self {
             root,
             url,

@@ -29,6 +29,21 @@ use crate::session::transcript::MessageTranscript;
 /// bounded external MCP call deadline).
 pub(crate) const HANDOFF_MAX_WAIT: Duration = Duration::from_secs(120);
 
+/// Effective bounded-wait window.
+///
+/// Production always uses [`HANDOFF_MAX_WAIT`]. The `test-support` feature adds
+/// an environment override so an end-to-end test can exercise the bound without
+/// waiting two minutes; the feature is never enabled by a production build.
+pub(crate) fn handoff_max_wait() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Ok(raw) = std::env::var("PERI_TEST_HANDOFF_MAX_WAIT_MS") {
+        if let Ok(ms) = raw.parse::<u64>() {
+            return Duration::from_millis(ms);
+        }
+    }
+    HANDOFF_MAX_WAIT
+}
+
 /// Canonical reminder kind for the bounded-wait handoff.
 const HANDOFF_REMINDER_KIND: &str = "pending_handoff";
 
@@ -55,17 +70,19 @@ impl ChildSettlementWindow {
         *self
             .deadline
             .lock()
-            .get_or_insert_with(|| Instant::now() + HANDOFF_MAX_WAIT)
+            .get_or_insert_with(|| Instant::now() + handoff_max_wait())
     }
 
     pub fn deadline(&self) -> Option<Instant> {
         *self.deadline.lock()
     }
 
+    #[must_use]
     pub fn is_started(&self) -> bool {
         self.deadline.lock().is_some()
     }
 
+    #[must_use]
     pub fn expired(&self) -> bool {
         self.deadline()
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -414,22 +431,12 @@ fn normalized_pending_tasks(tasks: &[PendingHandoffTask]) -> Vec<PendingHandoffT
     normalized.sort_by(|a, b| {
         a.task_id
             .cmp(&b.task_id)
-            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+            .then_with(|| a.kind.rank().cmp(&b.kind.rank()))
             .then_with(|| a.owner_session_id.cmp(&b.owner_session_id))
             .then_with(|| a.owner_identity.cmp(&b.owner_identity))
     });
     normalized.dedup();
     normalized
-}
-
-/// Total order over task kinds for normalization (declaration order of the contract enum).
-fn kind_rank(kind: BgTaskKind) -> u8 {
-    match kind {
-        BgTaskKind::Shell => 0,
-        BgTaskKind::Agent => 1,
-        BgTaskKind::Workflow => 2,
-        BgTaskKind::Mcp => 3,
-    }
 }
 
 /// Canonical bytes of the reminder for identity derivation.

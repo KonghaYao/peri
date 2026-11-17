@@ -5,8 +5,11 @@
 //! cell，kitty.rs:180-184）；第二帧同 `&Protocol` 0 处、占位符 U+10EEEE 仍在
 //! （AtomicBool 跨帧持久化，S2 §4）。
 
-#[cfg(test)]
-use super::*;
+use super::AsyncImage;
+use super::GraphicsProtocol;
+use super::Resize;
+use super::TerminalCaps;
+
 use image::{DynamicImage, ImageBuffer, Rgba};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -19,6 +22,7 @@ fn solid_image(w: u32, h: u32) -> DynamicImage {
 }
 
 /// 仅覆盖 graphics 字段的能力集合（其余默认全能力）。
+#[must_use]
 fn caps(graphics: GraphicsProtocol) -> TerminalCaps {
     TerminalCaps {
         graphics,
@@ -51,13 +55,13 @@ fn wait_for_resize(async_img: &mut AsyncImage) -> bool {
 
 #[test]
 fn supported_gates_on_capability_bit() {
-    assert!(supported(&caps(GraphicsProtocol::Kitty)));
+    assert!(super::supported(&caps(GraphicsProtocol::Kitty)));
     assert!(
-        !supported(&caps(GraphicsProtocol::ITerm2)),
+        !super::supported(&caps(GraphicsProtocol::ITerm2)),
         "ITerm2 检测但 disabled：未验证不启用"
     );
     assert!(
-        !supported(&TerminalCaps::default()),
+        !super::supported(&TerminalCaps::default()),
         "None 安全默认：未探测/未知环境无像素渲染"
     );
 }
@@ -67,16 +71,16 @@ fn picker_for_maps_caps_to_protocol_type() {
     use ratatui_image::picker::ProtocolType;
 
     assert_eq!(
-        picker_for(&caps(GraphicsProtocol::Kitty)).protocol_type(),
+        super::picker_for(&caps(GraphicsProtocol::Kitty)).protocol_type(),
         ProtocolType::Kitty
     );
     // ITerm2 / None 不强制 Kitty（halfblocks 安全态，像素渲染由 supported 门控）。
     assert_ne!(
-        picker_for(&caps(GraphicsProtocol::ITerm2)).protocol_type(),
+        super::picker_for(&caps(GraphicsProtocol::ITerm2)).protocol_type(),
         ProtocolType::Kitty
     );
     assert_ne!(
-        picker_for(&TerminalCaps::default()).protocol_type(),
+        super::picker_for(&TerminalCaps::default()).protocol_type(),
         ProtocolType::Kitty
     );
 }
@@ -85,8 +89,8 @@ fn picker_for_maps_caps_to_protocol_type() {
 
 #[test]
 fn static_protocol_transmit_once_across_frames() {
-    let picker = picker_for(&caps(GraphicsProtocol::Kitty));
-    let proto = static_protocol(
+    let picker = super::picker_for(&caps(GraphicsProtocol::Kitty));
+    let proto = super::static_protocol(
         &picker,
         solid_image(64, 64),
         Size::new(8, 8),
@@ -94,17 +98,17 @@ fn static_protocol_transmit_once_across_frames() {
     )
     .expect("static protocol 构造失败");
 
-    let mut term = Terminal::new(TestBackend::new(20, 12)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(20, 12)).expect("static protocol transmit once across frames: fixture parameters must construct a valid value");
     let area = Rect::new(0, 0, 8, 8);
 
     // 首帧：transmit 恰好 1 次（整张图一个 transmit，写在 y==0 首行 cell）。
     term.draw(|f| f.render_widget(ratatui_image::Image::new(&proto), area))
-        .unwrap();
+        .expect("static protocol transmit once across frames: fixture parameters must construct a valid value");
     assert_eq!(count_transmit(term.backend().buffer()), 1);
 
     // 第二帧（同一 &Protocol，未重建）：transmit 不再出现，只有占位符。
     term.draw(|f| f.render_widget(ratatui_image::Image::new(&proto), area))
-        .unwrap();
+        .expect("static protocol transmit once across frames: fixture parameters must construct a valid value");
     assert_eq!(
         count_transmit(term.backend().buffer()),
         0,
@@ -124,7 +128,7 @@ fn static_protocol_transmit_once_across_frames() {
 
 #[test]
 fn async_image_resizes_off_thread_and_renders() {
-    let picker = picker_for(&caps(GraphicsProtocol::Kitty));
+    let picker = super::picker_for(&caps(GraphicsProtocol::Kitty));
     let mut async_img = AsyncImage::new(&picker, solid_image(64, 64));
     let mut buf = Buffer::empty(Rect::new(0, 0, 20, 12));
     let area = Rect::new(0, 0, 8, 8);
@@ -176,7 +180,7 @@ fn async_image_resizes_off_thread_and_renders() {
 
 #[test]
 fn async_image_poll_completed_reports_update() {
-    let picker = picker_for(&caps(GraphicsProtocol::Kitty));
+    let picker = super::picker_for(&caps(GraphicsProtocol::Kitty));
     let mut async_img = AsyncImage::new(&picker, solid_image(32, 32));
     let mut buf = Buffer::empty(Rect::new(0, 0, 20, 12));
     let area = Rect::new(0, 0, 8, 8);

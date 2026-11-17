@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, Line, Node, NodeKind, SlotIndex, SlotLines, WrappedLineInfo};
 
 fn slot(text: &str, height: usize) -> (Arc<SlotLines>, Vec<WrappedLineInfo>) {
     (
@@ -24,30 +24,31 @@ fn persistent_update_keeps_old_layout_and_untouched_branch() {
     let old = index.clone();
     let (lines, map) = slot("changed 中文🙂", 7);
     index.set_slot(1023, lines, &map, true);
-    let NodeKind::Branch(old_left, _) = &old.root.as_ref().unwrap().kind else {
+    let NodeKind::Branch(old_left, _) = &old.root.as_ref().expect("persistent update keeps old layout and untouched branch: fixture must have the expected variant").kind else {
         panic!()
     };
-    let NodeKind::Branch(new_left, _) = &index.root.as_ref().unwrap().kind else {
+    let NodeKind::Branch(new_left, _) = &index.root.as_ref().expect("persistent update keeps old layout and untouched branch: fixture must have the expected variant").kind else {
         panic!()
     };
     assert!(Arc::ptr_eq(
-        old_left.as_ref().unwrap(),
-        new_left.as_ref().unwrap()
+        old_left.as_ref().expect("persistent update keeps old layout and untouched branch: the fixture must retain its expected variant"),
+        new_left.as_ref().expect("persistent update keeps old layout and untouched branch: the fixture must retain its expected variant")
     ));
     assert_eq!(old.total_visual(), 1024);
     assert_eq!(index.total_visual(), 1030);
-    assert_eq!(old.line(1023, 0).unwrap().to_string(), "row-1023");
-    assert_eq!(index.visual_lookup(1029).unwrap().slot_index, 1023);
+    assert_eq!(old.line(1023, 0).expect("persistent update keeps old layout and untouched branch: the fixture collection must contain the expected entry").to_string(), "row-1023");
+    assert_eq!(index.visual_lookup(1029).expect("persistent update keeps old layout and untouched branch: the visual_lookup fixture operation uses valid inputs").slot_index, 1023);
     assert_eq!(index.slot_visual_start(1023), Some(1023));
-    assert_eq!(changed_nodes(&old.root, &index.root), 11);
+    assert_eq!(changed_nodes(old.root.as_ref(), index.root.as_ref()), 11);
 }
 
-fn changed_nodes(old: &Option<Arc<Node>>, new: &Option<Arc<Node>>) -> usize {
+fn changed_nodes(old: Option<&Arc<Node>>, new: Option<&Arc<Node>>) -> usize {
     match (old, new) {
         (Some(old), Some(new)) if Arc::ptr_eq(old, new) => 0,
         (Some(old), Some(new)) => match (&old.kind, &new.kind) {
             (NodeKind::Branch(old_left, old_right), NodeKind::Branch(new_left, new_right)) => {
-                1 + changed_nodes(old_left, new_left) + changed_nodes(old_right, new_right)
+                1 + changed_nodes(old_left.as_ref(), new_left.as_ref())
+                    + changed_nodes(old_right.as_ref(), new_right.as_ref())
             }
             _ => 1,
         },
@@ -66,7 +67,7 @@ fn old_layout_does_not_keep_evictable_lines_alive() {
     drop(lines);
     assert!(weak.upgrade().is_none());
     assert_eq!(old.total_visual(), 3);
-    assert_eq!(old.logical_lookup(0).unwrap().global_visual_end, 3);
+    assert_eq!(old.logical_lookup(0).expect("old layout does not keep evictable lines alive: the logical_lookup fixture operation uses valid inputs").global_visual_end, 3);
 }
 
 #[test]
@@ -78,8 +79,8 @@ fn append_truncate_and_empty_slots_preserve_coordinates() {
     index.set_slot(2, Arc::new(SlotLines::default()), &[], true);
     let (lines, map) = slot("last", 5);
     index.set_slot(3, lines, &map, true);
-    assert_eq!(index.visual_lookup(0).unwrap().slot_index, 1);
-    assert_eq!(index.visual_lookup(2).unwrap().slot_index, 3);
+    assert_eq!(index.visual_lookup(0).expect("append truncate and empty slots preserve coordinates: the visual_lookup fixture operation uses valid inputs").slot_index, 1);
+    assert_eq!(index.visual_lookup(2).expect("append truncate and empty slots preserve coordinates: the visual_lookup fixture operation uses valid inputs").slot_index, 3);
     let old = index.clone();
     index.truncate(2);
     assert_eq!(index.total_visual(), 2);

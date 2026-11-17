@@ -48,8 +48,12 @@ fn minimal_input() -> WorkflowInput {
 
 #[tokio::test]
 async fn closed_runtime_rejects_new_runs_on_both_entry_points() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
 
     runtime.mark_closed();
     assert!(runtime.is_closed());
@@ -75,8 +79,12 @@ async fn closed_runtime_rejects_new_runs_on_both_entry_points() {
 
 #[tokio::test]
 async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
 
     // 路径分隔符 / 非 UUID：同一权威校验（is_safe_run_id）。
     for candidate in ["../../etc", "not-a-uuid", "a/b"] {
@@ -93,8 +101,14 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
     // 合法 UUID 但 state.json 属于另一个 run：拒绝（目录被替换 / 损坏）。
     let requested = uuid::Uuid::now_v7().to_string();
     let other = uuid::Uuid::now_v7().to_string();
-    let journal = WorkflowJournalStore::new(dir.path().to_str().unwrap());
-    journal.init_run(&requested, "return 1").unwrap();
+    let journal = WorkflowJournalStore::new(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    journal
+        .init_run(&requested, "return 1")
+        .expect("the init run fixture result is required for this assertion");
     journal
         .write_state(
             &requested,
@@ -106,6 +120,7 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
                 acceptance_status: Default::default(),
                 post_processing_status: Default::default(),
                 delivery_status: Default::default(),
+                outcome: Default::default(),
                 write_intent: None,
                 limits: Default::default(),
                 budget_total: None,
@@ -119,7 +134,7 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
                 error: None,
             },
         )
-        .unwrap();
+        .expect("the write state fixture result is required for this assertion");
     let error = runtime
         .resume(&requested)
         .await
@@ -132,8 +147,12 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
 
 #[test]
 fn consumer_token_is_bound_once_and_verified() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     assert!(!runtime.consumer_bound(), "未绑定时回填一律拒绝");
     assert!(!runtime.verify_consumer_token(""), "空令牌不构成绑定");
 
@@ -146,8 +165,12 @@ fn consumer_token_is_bound_once_and_verified() {
 
 #[test]
 fn kill_run_only_reports_running_runs_as_killed() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let run_id = uuid::Uuid::now_v7().to_string();
 
     // 未登记的 run：不算命中。
@@ -171,8 +194,12 @@ fn kill_run_only_reports_running_runs_as_killed() {
 
 #[test]
 fn kill_run_fences_run_tasks_before_registry_kill() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let run_id = uuid::Uuid::now_v7().to_string();
     let _ = runtime.registry().reserve(crate::registry::WorkflowRun {
         run_id: run_id.clone(),
@@ -183,7 +210,7 @@ fn kill_run_fences_run_tasks_before_registry_kill() {
         child_handle: None,
         kill_tx: None,
     });
-    runtime.tasks().publish(
+    let _ = runtime.tasks().publish(
         "t-1".into(),
         crate::protocol::AgentRunParams {
             run_id: run_id.clone(),
@@ -232,8 +259,12 @@ fn kill_run_fences_run_tasks_before_registry_kill() {
 
 #[test]
 fn event_watermark_tracks_the_run_event_log() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let mut updates: broadcast::Receiver<WorkflowResourceUpdate> = runtime.subscribe();
 
     assert_eq!(runtime.event_watermark("run-1"), 0, "无事件时水位为 0");
@@ -269,19 +300,23 @@ fn event_watermark_tracks_the_run_event_log() {
 /// run-2 的 `CAPACITY + 1` 条事件占 2..=CAPACITY+2，水位期望 `CAPACITY + 2`。
 #[test]
 fn event_watermark_does_not_regress_when_events_are_evicted() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
 
     assert_eq!(
         runtime.run_events().append(run_event("run-1")),
         1,
         "全局 sequence 从 1 起分配"
     );
-    let last_sequence = (0..=super::RUN_EVENT_LOG_CAPACITY)
+    let last_sequence = (0..=crate::runtime::RUN_EVENT_LOG_CAPACITY)
         .fold(0, |_, _| runtime.run_events().append(run_event("run-2")));
     assert_eq!(
         last_sequence,
-        (super::RUN_EVENT_LOG_CAPACITY + 2) as u64,
+        (crate::runtime::RUN_EVENT_LOG_CAPACITY + 2) as u64,
         "run-1 已消耗首个 sequence；run-2 的末条事件为 CAPACITY + 2"
     );
 
@@ -292,7 +327,7 @@ fn event_watermark_does_not_regress_when_events_are_evicted() {
     );
     assert_eq!(
         runtime.event_watermark("run-2"),
-        (super::RUN_EVENT_LOG_CAPACITY + 2) as u64
+        (crate::runtime::RUN_EVENT_LOG_CAPACITY + 2) as u64
     );
     // 防假阳性：淘汰必须真的发生（保留窗口容量即 CAPACITY），否则本用例会退化为
     // 「未触发淘汰路径仍通过」。
@@ -314,8 +349,12 @@ fn event_watermark_does_not_regress_when_events_are_evicted() {
 /// 而不是只在启动 fast-path 补发一次。
 #[test]
 fn runs_index_is_notified_on_index_affecting_commits() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     let mut updates = runtime.subscribe();
 
     runtime
@@ -354,8 +393,12 @@ fn runs_index_is_notified_on_index_affecting_commits() {
 /// F6 回归：关闭位必须封住任务发布（关闭顺序第 ① 步：停止接受新 run 与新任务发布）。
 #[test]
 fn closed_runtime_refuses_task_publication() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = make_runtime(dir.path().to_str().unwrap());
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
     runtime.mark_closed();
 
     let _ = runtime
@@ -406,4 +449,77 @@ fn drain_updates(
         seen.push(update);
     }
     seen
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn unsettled_child_scope_fences_real_engine_retries_and_forces_failed_completion() {
+    if std::env::var_os("PERI_WORKFLOW_ARTIFACT_DIR").is_none() {
+        eprintln!("Set PERI_WORKFLOW_ARTIFACT_DIR to exercise the real engine scope fence");
+        return;
+    }
+    use crate::runtime::tasks::{ClaimOutcome, WorkflowTaskState};
+    use peri_acp_types::workflow::{DeliveryStatus, WorkflowRunStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut completions) = broadcast::channel(8);
+    let runtime = Arc::new(WorkflowRuntime::new(
+        Arc::new(NullExecutor),
+        dir.path().to_str().unwrap(),
+        tx,
+        None,
+    ));
+    let mut updates = runtime.subscribe();
+    let mut input = minimal_input();
+    // Even a script that swallows aborts must not acquire another assignment or
+    // turn a host scope failure back into a successful completion.
+    input.script = "export const meta = { name: 'scope-fence', description: 'scope-close retry regression' }; try { await agent('first'); } catch (_) {} try { await agent('must not execute'); } catch (_) {} return { status: 'completed' };".into();
+    let launching = Arc::clone(&runtime);
+    let launch = tokio::spawn(async move { launching.start_prepared_run(input).await });
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(task) = runtime.tasks().active().first().cloned() {
+                break task;
+            }
+            let _ = updates.recv().await;
+        }
+    })
+    .await
+    .expect("the real engine must publish its first assignment");
+    assert!(matches!(
+        runtime.tasks().mark_executing(
+            &first.run_id,
+            &first.task_id,
+            tokio_util::sync::CancellationToken::new()
+        ),
+        ClaimOutcome::Claimed(_)
+    ));
+    let detail = "Scope close incomplete: background writer has not settled";
+    let _ = runtime.settle_agent_task(
+        &first.run_id,
+        &first.task_id,
+        WorkflowTaskState::Failed,
+        Some(AgentRunResult::Dead {
+            scope_close_incomplete: false,
+            reason: Some("scope-close-incomplete".into()),
+            detail: Some(detail.into()),
+            duration_ms: None,
+            token_count: None,
+        }),
+        Some(detail.into()),
+    );
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(10), completions.recv())
+        .await
+        .expect("a fenced run must terminate")
+        .unwrap();
+    assert_eq!(completion.status, WorkflowRunStatus::Failed);
+    assert_eq!(completion.delivery_status, DeliveryStatus::Blocked);
+    assert_eq!(completion.error.as_deref(), Some(detail));
+    assert!(completion.to_notification().contains(detail));
+    let records = runtime.tasks().snapshot();
+    assert!(records
+        .iter()
+        .filter(|task| task.task_id != first.task_id)
+        .all(|task| task.state == WorkflowTaskState::Cancelled));
+    assert!(runtime.tasks().active().is_empty());
+    let _ = launch.await.unwrap();
 }

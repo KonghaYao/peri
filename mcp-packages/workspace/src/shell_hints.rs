@@ -2,7 +2,7 @@
 //! 从 PATH 扫描条目名做模糊匹配给出 did-you-mean 候选；
 //! 无合适候选时不硬凑候选，给出环境类兜底诊断。
 
-use crate::fuzzy::fuzzy_filter_min;
+use crate::fuzzy;
 use std::ffi::OsString;
 
 /// fuzzy 相似度下限：低于此分视为"无关候选"。
@@ -44,7 +44,7 @@ fn build_hint(name: &str, candidates: &[String]) -> String {
     // 首字符约束剔除跨长字符串的稀疏子序列噪声（carg→lli-child-target）——
     // 拼错命令名时首字符几乎不会错，此约束不会误杀真实拼错（dockr→docker）。
     let first_char = name.chars().next();
-    let matched: Vec<String> = fuzzy_filter_min(candidates, name, MIN_FUZZY_SCORE)
+    let matched: Vec<String> = fuzzy::fuzzy_filter_min(candidates, name, MIN_FUZZY_SCORE)
         .into_iter()
         .filter(|c| first_char.is_none_or(|fc| c.starts_with(fc)))
         .take(3)

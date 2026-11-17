@@ -8,11 +8,6 @@ pub(super) struct InvocationArgs {
     pub(super) prompt: Option<String>,
     pub(super) subagent_type: Option<String>,
     pub(super) model: Option<String>,
-    /// **显式**意图（`None` = 调用未给出该字段）：缺省由装配期注入的有效缺省补齐。
-    ///
-    /// 显式与缺省必须分开承载：只有显式 `true` 会与「后台能力未装配」的场景
-    /// （MCP Agent / resume）冲突，缺省不得把它们推进报错路径。
-    pub(super) run_in_background: Option<bool>,
     pub(super) cwd: Option<String>,
     pub(super) is_fork: bool,
 }
@@ -106,7 +101,6 @@ impl InvocationArgs {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
-        let run_in_background = input.get("run_in_background").and_then(|v| v.as_bool());
         let cwd = input
             .get("cwd")
             .and_then(|v| v.as_str())
@@ -120,7 +114,6 @@ impl InvocationArgs {
             prompt,
             subagent_type,
             model,
-            run_in_background,
             cwd,
             is_fork,
         })

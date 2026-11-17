@@ -1,4 +1,19 @@
-use super::*;
+use crate::session::user_input_mailbox::window::DELIVERY_JOURNAL_CAPACITY;
+use crate::session::user_input_mailbox::window::TERMINAL_CAPACITY;
+use crate::session::user_input_mailbox::UserInputMailbox;
+use crate::session::user_input_mailbox::UserInputQueueError;
+use parking_lot::Mutex;
+use peri_acp_types::event_v2::StateEvent;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::EnqueueUserInputRequest;
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::SessionInbox;
+use peri_acp_types::session::TakeBackUserInputRequest;
+use peri_acp_types::session::UserInputState;
+use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
 
 fn withdraw(mailbox: &UserInputMailbox, input: &EnqueueUserInputRequest) {
     mailbox
@@ -8,13 +23,15 @@ fn withdraw(mailbox: &UserInputMailbox, input: &EnqueueUserInputRequest) {
             command_id: uuid::Uuid::now_v7().to_string(),
             input_id: input.input_id.clone(),
         })
-        .unwrap();
+        .expect("the take back sync fixture result is required for this assertion");
 }
 
 fn fill_withdrawn(mailbox: &UserInputMailbox) {
     for _ in 0..TERMINAL_CAPACITY {
-        let input = make_input(mailbox, "撤回填充");
-        mailbox.enqueue_sync(&input).unwrap();
+        let input = crate::session::user_input_mailbox::tests::make_input(mailbox, "撤回填充");
+        mailbox
+            .enqueue_sync(&input)
+            .expect("the enqueue sync fixture result is required for this assertion");
         withdraw(mailbox, &input);
     }
 }
@@ -22,16 +39,24 @@ fn fill_withdrawn(mailbox: &UserInputMailbox) {
 #[test]
 fn overflow_preserves_delivered_and_withdrawn_identity() {
     for terminal in [UserInputState::Delivered, UserInputState::Withdrawn] {
-        let (mailbox, inbox) = make_mailbox();
+        let (mailbox, inbox) = crate::session::user_input_mailbox::tests::make_mailbox();
         mailbox
             .attach_external_attempt_sync(CancellationToken::new(), false)
-            .unwrap();
-        let mut input = make_input(&mailbox, "只执行一次");
-        mailbox.enqueue_sync(&input).unwrap();
+            .expect(
+                "the attach external attempt sync fixture result is required for this assertion",
+            );
+        let mut input =
+            crate::session::user_input_mailbox::tests::make_input(&mailbox, "只执行一次");
+        mailbox
+            .enqueue_sync(&input)
+            .expect("the enqueue sync fixture result is required for this assertion");
         if terminal == UserInputState::Delivered {
             mailbox.enter_idle_sync();
             let messages = inbox.queue_for_test().drain_all_sync();
-            let id = messages[0].message().unwrap().id();
+            let id = messages[0]
+                .message()
+                .expect("the fixture entry must contain a message payload")
+                .id();
             mailbox.mark_claimed_sync(&[id]);
             mailbox.mark_delivered_sync(&[id]);
         } else {
@@ -44,7 +69,9 @@ fn overflow_preserves_delivered_and_withdrawn_identity() {
             .iter()
             .any(|item| item.input_id == input.input_id));
         input.command_id = uuid::Uuid::now_v7().to_string();
-        let receipt = mailbox.enqueue_sync(&input).unwrap();
+        let receipt = mailbox
+            .enqueue_sync(&input)
+            .expect("the enqueue sync fixture result is required for this assertion");
         assert_eq!(receipt.results[0].state, terminal);
         assert!(receipt.snapshot.items.is_empty());
         mailbox.enter_idle_sync();
@@ -74,14 +101,20 @@ fn old_enqueue_new_delivery_survives_overflow_and_lost_event() {
     );
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
-    let input = make_input(&mailbox, "最早入队，最后交付");
-    mailbox.enqueue_sync(&input).unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let input =
+        crate::session::user_input_mailbox::tests::make_input(&mailbox, "最早入队，最后交付");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
     fill_withdrawn(&mailbox);
     snapshots.lock().clear();
     mailbox.enter_idle_sync();
     let messages = inbox.queue_for_test().drain_all_sync();
-    let id = messages[0].message().unwrap().id();
+    let id = messages[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
     assert!(snapshots.lock().iter().any(|snapshot| snapshot
@@ -93,30 +126,49 @@ fn old_enqueue_new_delivery_survives_overflow_and_lost_event() {
     let snapshot = mailbox.snapshot_sync();
     assert_eq!(snapshot.terminal_items.len(), TERMINAL_CAPACITY);
     assert_eq!(
-        snapshot.terminal_items.last().unwrap().input_id,
+        snapshot
+            .terminal_items
+            .last()
+            .expect("snapshot terminal items fixture must contain the expected element")
+            .input_id,
         input.input_id
     );
 }
 
 #[test]
 fn same_batch_delivery_uses_receive_order_not_enqueue_order() {
-    let (mailbox, _) = make_mailbox();
+    let (mailbox, _) = crate::session::user_input_mailbox::tests::make_mailbox();
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
-    let a = make_input(&mailbox, "A");
-    let b = make_input(&mailbox, "B");
-    mailbox.enqueue_sync(&a).unwrap();
-    mailbox.enqueue_sync(&b).unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let a = crate::session::user_input_mailbox::tests::make_input(&mailbox, "A");
+    let b = crate::session::user_input_mailbox::tests::make_input(&mailbox, "B");
     mailbox
-        .dispatch_sync(&make_dispatch(&mailbox, &[&b]))
-        .unwrap();
+        .enqueue_sync(&a)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox
-        .dispatch_sync(&make_dispatch(&mailbox, &[&a]))
-        .unwrap();
+        .enqueue_sync(&b)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    mailbox
+        .dispatch_sync(&crate::session::user_input_mailbox::tests::make_dispatch(
+            &mailbox,
+            &[&b],
+        ))
+        .expect("the dispatch sync fixture result is required for this assertion");
+    mailbox
+        .dispatch_sync(&crate::session::user_input_mailbox::tests::make_dispatch(
+            &mailbox,
+            &[&a],
+        ))
+        .expect("the dispatch sync fixture result is required for this assertion");
     let ids: Vec<_> = [&b, &a]
         .iter()
-        .map(|input| MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap()))
+        .map(|input| {
+            MessageId::from(
+                uuid::Uuid::parse_str(&input.input_id)
+                    .expect("the parse str fixture result is required for this assertion"),
+            )
+        })
         .collect();
     mailbox.mark_claimed_sync(&ids);
     assert_eq!(
@@ -159,21 +211,29 @@ fn same_batch_delivery_uses_receive_order_not_enqueue_order() {
 
 #[test]
 fn delivery_journal_admission_rejects_before_claim_and_recovers_after_ack() {
-    let (mailbox, inbox) = make_mailbox();
+    let (mailbox, inbox) = crate::session::user_input_mailbox::tests::make_mailbox();
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
     for index in 0..DELIVERY_JOURNAL_CAPACITY {
-        let input = make_input(&mailbox, &format!("交付 {index}"));
-        mailbox.enqueue_sync(&input).unwrap();
+        let input = crate::session::user_input_mailbox::tests::make_input(
+            &mailbox,
+            &format!("交付 {index}"),
+        );
+        mailbox
+            .enqueue_sync(&input)
+            .expect("the enqueue sync fixture result is required for this assertion");
         mailbox.enter_idle_sync();
         let messages = inbox.queue_for_test().drain_all_sync();
-        let id = messages[0].message().unwrap().id();
+        let id = messages[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id();
         mailbox.mark_claimed_sync(&[id]);
         assert_eq!(mailbox.mark_delivered_sync(&[id]).len(), 1);
     }
     // 日志已满：新输入在 enqueue 准入处被拒绝，尚未进入 MQ/Claimed。
-    let rejected = make_input(&mailbox, "准入拒绝输入");
+    let rejected = crate::session::user_input_mailbox::tests::make_input(&mailbox, "准入拒绝输入");
     assert_eq!(
         mailbox.enqueue_sync(&rejected).unwrap_err(),
         UserInputQueueError::Capacity,
@@ -198,10 +258,15 @@ fn delivery_journal_admission_rejects_before_claim_and_recovers_after_ack() {
     for item in pending {
         mailbox.ack_delivery_notification(&item.input_id);
     }
-    mailbox.enqueue_sync(&rejected).unwrap();
+    mailbox
+        .enqueue_sync(&rejected)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     let messages = inbox.queue_for_test().drain_all_sync();
-    let rejected_id = messages[0].message().unwrap().id();
+    let rejected_id = messages[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[rejected_id]);
     assert_eq!(
         mailbox.mark_delivered_sync(&[rejected_id]),
@@ -232,7 +297,9 @@ fn unpublished_terminal_cannot_be_evicted() {
                     .any(|item| item.state == UserInputState::Delivered)
                     && !callback_blocked.swap(true, Ordering::SeqCst)
                 {
-                    entered_tx.send(()).unwrap();
+                    entered_tx.send(()).expect(
+                        "entered tx send test receiver must remain available for this delivery",
+                    );
                     callback_release.wait();
                 }
                 captured.lock().push(snapshot);
@@ -241,18 +308,23 @@ fn unpublished_terminal_cannot_be_evicted() {
     );
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), false)
-        .unwrap();
-    let input = make_input(&mailbox, "等待首次发布");
-    mailbox.enqueue_sync(&input).unwrap();
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let input = crate::session::user_input_mailbox::tests::make_input(&mailbox, "等待首次发布");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.enter_idle_sync();
     let messages = inbox.queue_for_test().drain_all_sync();
-    let id = messages[0].message().unwrap().id();
+    let id = messages[0]
+        .message()
+        .expect("the fixture entry must contain a message payload")
+        .id();
     mailbox.mark_claimed_sync(&[id]);
     let delivering = mailbox.clone();
     let thread = std::thread::spawn(move || delivering.mark_delivered_sync(&[id]));
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(2))
-        .unwrap();
+        .expect("the recv timeout fixture result is required for this assertion");
     // 第一次发布仍阻塞。后续快照必须先携带该终态，才允许它被淘汰。
     fill_withdrawn(&mailbox);
     let observed = snapshots.lock().iter().any(|snapshot| {
@@ -262,10 +334,91 @@ fn unpublished_terminal_cannot_be_evicted() {
             .any(|item| item.input_id == input.input_id)
     });
     release.wait();
-    thread.join().unwrap();
+    thread
+        .join()
+        .expect("thread join test worker must complete without panicking");
     assert!(observed, "并发终结不能在首次快照发布之前挤掉旧终态");
     assert_eq!(
         mailbox.snapshot_sync().terminal_items.len(),
         TERMINAL_CAPACITY
+    );
+}
+
+#[test]
+fn withdrawn_identity_survives_record_pruned_before_settle() {
+    let (mailbox, _) = crate::session::user_input_mailbox::tests::make_mailbox();
+    let mut input = crate::session::user_input_mailbox::tests::make_input(&mailbox, "撤回竞态");
+    mailbox.enqueue_sync(&input).unwrap();
+    let mut state = mailbox.state.lock();
+    let fingerprint = state
+        .records
+        .iter()
+        .find(|record| record.input_id == input.input_id)
+        .expect("待发记录必须存在")
+        .fingerprint;
+    // 模拟 take_back 等待 MQ 取消期间，refresh_from_store 先清掉了 Queued 记录。
+    state.records.clear();
+    super::super::window::retain_terminal(
+        &mut state,
+        &input.input_id,
+        Some((fingerprint, UserInputState::Withdrawn)),
+    );
+    let input_uuid = uuid::Uuid::parse_str(&input.input_id).unwrap();
+    assert_eq!(
+        state
+            .terminal_identities
+            .get(&input_uuid)
+            .map(|identity| identity.state),
+        Some(UserInputState::Withdrawn),
+        "记录缺失时仍须用取消条目身份写入 Withdrawn"
+    );
+    drop(state);
+
+    input.command_id = uuid::Uuid::now_v7().to_string();
+    let receipt = mailbox.enqueue_sync(&input).unwrap();
+    assert_eq!(receipt.results[0].state, UserInputState::Withdrawn);
+    assert!(
+        receipt.snapshot.items.is_empty(),
+        "已撤回的 ID 不能重新进入待发投影"
+    );
+}
+
+#[tokio::test]
+async fn enqueue_racing_with_withdrawal_does_not_resurrect_input() {
+    let (mailbox, inbox) = crate::session::user_input_mailbox::tests::make_mailbox();
+    let input = crate::session::user_input_mailbox::tests::make_input(&mailbox, "撤回竞态");
+    let (entered, release) = inbox.queue_for_test().gate_next_enqueue();
+    let enqueue_mailbox = mailbox.clone();
+    let enqueue_input = input.clone();
+    let task = tokio::spawn(async move { enqueue_mailbox.enqueue(&enqueue_input).await });
+    entered.await.expect("enqueue reaches the MQ gate");
+    // 模拟 take_back 在 enqueue 等待 MQ 期间完成：Queued 记录被清理，终态身份已写入。
+    let fingerprint = super::super::state::fingerprint_for(
+        &input.input_id,
+        &input.content,
+        &input.original_draft,
+    );
+    super::super::window::retain_terminal(
+        &mut mailbox.state.lock(),
+        &input.input_id,
+        Some((fingerprint, UserInputState::Withdrawn)),
+    );
+    release.send(()).expect("release the enqueue gate");
+
+    let receipt = task
+        .await
+        .expect("enqueue task joins")
+        .expect("enqueue reports the terminal identity");
+    assert_eq!(receipt.results[0].state, UserInputState::Withdrawn);
+    assert!(receipt.snapshot.items.is_empty());
+    assert!(mailbox
+        .state
+        .lock()
+        .records
+        .iter()
+        .all(|record| record.input_id != input.input_id));
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "the MQ row inserted by the racing enqueue must be cancelled"
     );
 }

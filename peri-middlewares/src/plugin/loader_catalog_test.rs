@@ -1,8 +1,19 @@
-use super::*;
+use super::InstallScope;
+use super::InstalledPlugin;
+use super::InstalledPlugins;
+use super::LoaderError;
+use super::Path;
+use super::PathBuf;
+use super::PluginCommandEntry;
+use super::PluginManifest;
+use super::PluginOrigin;
 
 #[test]
 fn test_load_no_plugins_aggregated() {
-    let result = load_enabled_plugins_aggregated(Path::new("/nonexistent/path"), None);
+    let result = crate::plugin::loader::load_enabled_plugins_aggregated(
+        Path::new("/nonexistent/path"),
+        None,
+    );
     assert!(result.plugins.is_empty());
     assert!(result.all_skill_roots.is_empty());
     assert!(result.all_mcp_servers.is_empty());
@@ -13,7 +24,7 @@ fn test_load_no_plugins_aggregated() {
 
 #[test]
 fn test_load_enabled_plugins_aggregated() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -59,7 +70,7 @@ fn test_load_enabled_plugins_aggregated() {
     )
     .unwrap();
 
-    let result = load_enabled_plugins_aggregated(dir.path(), None);
+    let result = crate::plugin::loader::load_enabled_plugins_aggregated(dir.path(), None);
     assert_eq!(result.plugins.len(), 1);
     assert_eq!(result.plugins[0].name, "my-plugin");
     assert!(result.plugins[0].hooks_config.is_some());
@@ -90,7 +101,7 @@ fn test_load_enabled_plugins_aggregated() {
 
 #[test]
 fn test_load_plugin_skill_dirs_aggregated() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("skill-plugin");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::create_dir_all(plugin_dir.join("skills").join("my-skill")).unwrap();
@@ -129,7 +140,7 @@ fn test_load_plugin_skill_dirs_aggregated() {
     let settings = r#"{"enabledPlugins":["skill-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let result = load_enabled_plugins_aggregated(dir.path(), None);
+    let result = crate::plugin::loader::load_enabled_plugins_aggregated(dir.path(), None);
     assert_eq!(result.all_skill_roots.len(), 1);
     assert!(result.all_skill_roots[0].path.ends_with("my-skill"));
 }
@@ -137,7 +148,7 @@ fn test_load_plugin_skill_dirs_aggregated() {
 #[test]
 fn test_extract_commands_string_directory() {
     // 测试 "commands": ["./commands/"] 字符串目录路径格式
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let cmd_dir = dir.path().join("commands");
     std::fs::create_dir_all(&cmd_dir).unwrap();
     std::fs::write(
@@ -150,10 +161,10 @@ fn test_extract_commands_string_directory() {
     // 直接构造 PluginCommandEntry::Path 来测试目录扫描
     let direct_manifest = PluginManifest {
         commands: Some(vec![PluginCommandEntry::Path("commands".into())]),
-        ..make_manifest_with_commands(vec![])
+        ..super::make_manifest_with_commands(vec![])
     };
 
-    let entries = extract_commands(&direct_manifest, dir.path(), "ecc");
+    let entries = crate::plugin::loader::extract_commands(&direct_manifest, dir.path(), "ecc");
     assert_eq!(entries.len(), 2);
     let mut names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
     names.sort();
@@ -169,24 +180,24 @@ fn test_extract_commands_string_directory() {
 fn test_extract_commands_string_directory_nonexistent() {
     let manifest = PluginManifest {
         commands: Some(vec![PluginCommandEntry::Path("nonexistent_dir".into())]),
-        ..make_manifest_with_commands(vec![])
+        ..super::make_manifest_with_commands(vec![])
     };
-    let entries = extract_commands(&manifest, Path::new("/tmp"), "p");
+    let entries = crate::plugin::loader::extract_commands(&manifest, Path::new("/tmp"), "p");
     assert!(entries.is_empty());
 }
 
 #[test]
 fn test_extract_commands_string_single_file() {
     // 字符串也可以是指向单个 .md 文件的路径
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("standalone.md"), "---\n---\nContent").unwrap();
 
     let manifest = PluginManifest {
         commands: Some(vec![PluginCommandEntry::Path("standalone.md".into())]),
-        ..make_manifest_with_commands(vec![])
+        ..super::make_manifest_with_commands(vec![])
     };
 
-    let entries = extract_commands(&manifest, dir.path(), "p");
+    let entries = crate::plugin::loader::extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "plugin:p:standalone");
 }
@@ -196,7 +207,7 @@ fn test_extract_commands_string_single_file() {
 #[test]
 fn test_load_enabled_plugins_with_project_settings() {
     // 场景：项目 settings 有 ["a"]，用户 settings 有 ["b"]，只启用 "a"（项目替换用户）
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_a_dir = dir.path().join("plugin-a");
     let plugin_b_dir = dir.path().join("plugin-b");
     std::fs::create_dir_all(plugin_a_dir.join(".claude-plugin")).unwrap();
@@ -262,7 +273,7 @@ fn test_load_enabled_plugins_with_project_settings() {
     )
     .unwrap();
 
-    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    let loaded = crate::plugin::loader::load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
     assert_eq!(loaded.len(), 1, "项目级替换用户级，只应启用 plugin-a");
     assert_eq!(loaded[0].name, "plugin-a");
 }
@@ -270,7 +281,7 @@ fn test_load_enabled_plugins_with_project_settings() {
 #[test]
 fn test_load_enabled_plugins_project_fallback_to_user() {
     // 场景：项目 settings 存在但无 enabledPlugins 字段，回退用户级
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -315,7 +326,7 @@ fn test_load_enabled_plugins_project_fallback_to_user() {
     )
     .unwrap();
 
-    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    let loaded = crate::plugin::loader::load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
     assert_eq!(loaded.len(), 1, "项目级无 enabledPlugins 应回退用户级");
     assert_eq!(loaded[0].name, "my-plugin");
 }
@@ -323,7 +334,7 @@ fn test_load_enabled_plugins_project_fallback_to_user() {
 #[test]
 fn test_load_enabled_plugins_project_empty_enabled() {
     // 场景：项目 settings enabledPlugins 为空数组，回退用户级
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -368,7 +379,7 @@ fn test_load_enabled_plugins_project_empty_enabled() {
     )
     .unwrap();
 
-    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    let loaded = crate::plugin::loader::load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
     assert_eq!(
         loaded.len(),
         1,
@@ -380,7 +391,7 @@ fn test_load_enabled_plugins_project_empty_enabled() {
 #[test]
 fn test_load_enabled_plugins_missing_project() {
     // 场景：cwd=None，仅读用户级 settings（向后兼容）
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let plugin_dir = dir.path().join("my-plugin");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -416,7 +427,7 @@ fn test_load_enabled_plugins_missing_project() {
     )
     .unwrap();
 
-    let loaded = load_enabled_plugins(&claude_dir, None).unwrap();
+    let loaded = crate::plugin::loader::load_enabled_plugins(&claude_dir, None).unwrap();
     assert_eq!(loaded.len(), 1, "cwd=None 时行为不变，仅读用户 settings");
     assert_eq!(loaded[0].name, "my-plugin");
 }
@@ -485,7 +496,7 @@ fn assert_mcp_config_invalid(error: LoaderError, expected_path: &Path, rule: &st
 #[test]
 fn test_system_mcp_plugin_strict_sources_reject_invalid() {
     // 文件引用（wrapped）：非法内容 → McpConfigInvalid，且不部分接纳合法兄弟条目。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(
         &claude_home,
@@ -500,8 +511,8 @@ fn test_system_mcp_plugin_strict_sources_reject_invalid() {
         r#"{"mcpServers":{"legal":{"command":"npx"},"bad":{"system_mcp_tools":["t"]}}}"#,
     )
     .unwrap();
-    let error =
-        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法 wrapped 配置必须失败");
+    let error = crate::plugin::loader::load_enabled_plugins_for_mcp(&claude_home, None)
+        .expect_err("非法 wrapped 配置必须失败");
     assert_mcp_config_invalid(error, &wrapped, SYSTEM_TOOLS_RULE);
 
     // 文件引用（flat）：同样失败。
@@ -510,12 +521,12 @@ fn test_system_mcp_plugin_strict_sources_reject_invalid() {
         r#"{"legal":{"command":"npx"},"bad":{"system_mcp":false,"system_mcp_tools":[]}}"#,
     )
     .unwrap();
-    let error =
-        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法 flat 配置必须失败");
+    let error = crate::plugin::loader::load_enabled_plugins_for_mcp(&claude_home, None)
+        .expect_err("非法 flat 配置必须失败");
     assert_mcp_config_invalid(error, &wrapped, SYSTEM_TOOLS_RULE);
 
     // 根 .mcp.json 回退：manifest 未声明 mcpServers 时读取，非法同样失败。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(&claude_home, "fallback", None);
     let root_mcp = plugin_dir.join(".mcp.json");
@@ -524,24 +535,28 @@ fn test_system_mcp_plugin_strict_sources_reject_invalid() {
         r#"{"mcpServers":{"bad":{"system_mcp_tools":["t"]}}}"#,
     )
     .unwrap();
-    let error =
-        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法根 .mcp.json 必须失败");
+    let error = crate::plugin::loader::load_enabled_plugins_for_mcp(&claude_home, None)
+        .expect_err("非法根 .mcp.json 必须失败");
     assert_mcp_config_invalid(error, &root_mcp, SYSTEM_TOOLS_RULE);
 
     // 内联 manifest：清单解析本身失败（内联 DTO 走契约层 Deserialize），
     // 错误仍保留路径与固定规则正文，而不是被当作未安装跳过。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(
         &claude_home,
         "inline",
         Some(r#"{"bad":{"system_mcp_tools":["t"]}}"#),
     );
-    let error =
-        load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法内联 MCP 配置必须失败");
+    let error = crate::plugin::loader::load_enabled_plugins_for_mcp(&claude_home, None)
+        .expect_err("非法内联 MCP 配置必须失败");
     let text = error.to_string();
     assert!(
-        text.contains(&plugin_manifest_path(&plugin_dir).display().to_string()),
+        text.contains(
+            &crate::plugin::loader::plugin_manifest_path(&plugin_dir)
+                .display()
+                .to_string()
+        ),
         "错误必须带清单路径: {text}"
     );
     assert!(
@@ -553,10 +568,10 @@ fn test_system_mcp_plugin_strict_sources_reject_invalid() {
 #[test]
 fn test_system_mcp_plugin_invalid_manifest_has_no_fallback() {
     // 已存在但非法的清单：不得 synthetic overwrite、不得从根配置兜底、文件字节不变。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(&claude_home, "broken-manifest", None);
-    let manifest_path = plugin_manifest_path(&plugin_dir);
+    let manifest_path = crate::plugin::loader::plugin_manifest_path(&plugin_dir);
     let broken = r#"{"name":"broken-manifest","version":"1.0.0","mcpServers":{"bad":{"system_mcp_tools":["t"]}}}"#;
     std::fs::write(&manifest_path, broken).unwrap();
     // 根配置里放一个合法 server：非法清单不允许借它兜底「修复」。
@@ -566,7 +581,8 @@ fn test_system_mcp_plugin_invalid_manifest_has_no_fallback() {
     )
     .unwrap();
 
-    let error = load_enabled_plugins_for_mcp(&claude_home, None).expect_err("非法现存清单必须失败");
+    let error = crate::plugin::loader::load_enabled_plugins_for_mcp(&claude_home, None)
+        .expect_err("非法现存清单必须失败");
     assert!(
         error.to_string().contains(SYSTEM_TOOLS_RULE),
         "必须保留清单解析的明确错误: {error}"
@@ -581,7 +597,7 @@ fn test_system_mcp_plugin_invalid_manifest_has_no_fallback() {
 #[test]
 fn test_system_mcp_plugin_empty_manifest_map_has_no_fallback() {
     // manifest 显式声明空 map：属于「已声明」，不得从根 .mcp.json 加载额外服务器。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(&claude_home, "empty-map", Some("{}"));
     std::fs::write(
@@ -590,7 +606,7 @@ fn test_system_mcp_plugin_empty_manifest_map_has_no_fallback() {
     )
     .unwrap();
 
-    let plugins = load_enabled_plugins_for_mcp(&claude_home, None).unwrap();
+    let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(&claude_home, None).unwrap();
     assert_eq!(plugins.len(), 1);
     assert!(
         plugins[0].mcp_servers.is_empty(),
@@ -599,7 +615,7 @@ fn test_system_mcp_plugin_empty_manifest_map_has_no_fallback() {
     );
 
     // 未声明（manifest 无 mcpServers 字段）才允许根回退。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(&claude_home, "no-decl", None);
     std::fs::write(
@@ -607,7 +623,7 @@ fn test_system_mcp_plugin_empty_manifest_map_has_no_fallback() {
         r#"{"mcpServers":{"root-srv":{"command":"npx"}}}"#,
     )
     .unwrap();
-    let plugins = load_enabled_plugins_for_mcp(&claude_home, None).unwrap();
+    let plugins = crate::plugin::loader::load_enabled_plugins_for_mcp(&claude_home, None).unwrap();
     assert!(plugins[0].mcp_servers.contains_key("root-srv"));
 }
 
@@ -615,7 +631,7 @@ fn test_system_mcp_plugin_empty_manifest_map_has_no_fallback() {
 fn test_system_mcp_plugin_lenient_aggregate_keeps_other_capabilities() {
     // 宽容聚合路径（展示/面板）保持产品行为：坏 MCP 声明不阻止该插件的
     // hooks 装配，但错误必须被记录而不是静默丢弃。
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(
         &claude_home,
@@ -637,7 +653,7 @@ fn test_system_mcp_plugin_lenient_aggregate_keeps_other_capabilities() {
     )
     .unwrap();
 
-    let aggregated = load_enabled_plugins_aggregated(&claude_home, None);
+    let aggregated = crate::plugin::loader::load_enabled_plugins_aggregated(&claude_home, None);
     assert_eq!(aggregated.plugins.len(), 1, "坏 MCP 配置不得让插件整体消失");
     assert!(
         aggregated.all_mcp_servers.is_empty(),
@@ -671,14 +687,14 @@ fn snapshot_paths(root: &Path) -> Vec<PathBuf> {
 /// 只读准备发现：清单缺失必须失败并定位插件，不得生成合成清单（无写副作用）。
 #[test]
 fn test_readonly_discovery_missing_manifest_fails_without_repair() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(&claude_home, "ghost", None);
     let manifest_path = plugin_dir.join(".claude-plugin").join("plugin.json");
     std::fs::remove_file(&manifest_path).unwrap();
 
     let before = snapshot_paths(&plugin_dir);
-    let error = load_enabled_plugins_aggregated_readonly(&claude_home, None)
+    let error = crate::plugin::loader::load_enabled_plugins_aggregated_readonly(&claude_home, None)
         .expect_err("readonly discovery must not silently skip a plugin with a missing manifest");
     let message = error.to_string();
     assert!(
@@ -699,12 +715,12 @@ fn test_readonly_discovery_missing_manifest_fails_without_repair() {
 /// 同一布局下宽容聚合保持既有产品行为（跳过该插件、返回空结果），与只读路径明确分离。
 #[test]
 fn test_lenient_aggregate_still_skips_missing_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(&claude_home, "ghost", None);
     std::fs::remove_file(plugin_dir.join(".claude-plugin").join("plugin.json")).unwrap();
 
-    let aggregated = load_enabled_plugins_aggregated(&claude_home, None);
+    let aggregated = crate::plugin::loader::load_enabled_plugins_aggregated(&claude_home, None);
     assert!(
         aggregated.plugins.is_empty(),
         "宽容聚合仍跳过缺失清单的插件，不因准备路径严格化而改变"
@@ -714,7 +730,7 @@ fn test_lenient_aggregate_still_skips_missing_manifest() {
 /// 非法清单在只读路径上以可定位错误失败，不被当作用户未安装而跳过。
 #[test]
 fn test_readonly_discovery_invalid_manifest_fails() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     let plugin_dir = install_plugin(&claude_home, "broken", None);
     std::fs::write(
@@ -723,7 +739,7 @@ fn test_readonly_discovery_invalid_manifest_fails() {
     )
     .unwrap();
 
-    let error = load_enabled_plugins_aggregated_readonly(&claude_home, None)
+    let error = crate::plugin::loader::load_enabled_plugins_aggregated_readonly(&claude_home, None)
         .expect_err("readonly discovery must fail on an invalid manifest");
     let message = error.to_string();
     assert!(
@@ -735,13 +751,16 @@ fn test_readonly_discovery_invalid_manifest_fails() {
 /// 有效插件：只读聚合成功、无写副作用，且同输入重复调用结果一致。
 #[test]
 fn test_readonly_discovery_is_side_effect_free_and_repeatable() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_home = dir.path().join(".claude-test");
     install_plugin(&claude_home, "ok", None);
 
     let before = snapshot_paths(&claude_home);
-    let first = load_enabled_plugins_aggregated_readonly(&claude_home, None).unwrap();
-    let second = load_enabled_plugins_aggregated_readonly(&claude_home, None).unwrap();
+    let first = crate::plugin::loader::load_enabled_plugins_aggregated_readonly(&claude_home, None)
+        .unwrap();
+    let second =
+        crate::plugin::loader::load_enabled_plugins_aggregated_readonly(&claude_home, None)
+            .unwrap();
 
     assert_eq!(first.plugins.len(), 1);
     assert_eq!(first.plugins[0].name, second.plugins[0].name);

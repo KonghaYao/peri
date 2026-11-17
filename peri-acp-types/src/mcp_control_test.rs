@@ -1,4 +1,4 @@
-use super::*;
+use crate::mcp_control::McpControlRequest;
 #[test]
 fn control_dto_is_strict_and_roundtrips() {
     let request = serde_json::json!({"sessionId":"s1","serverName":"docs","action":"register","config":{"type":"http","url":"https://example.com/mcp"}});
@@ -13,6 +13,23 @@ fn control_dto_is_strict_and_roundtrips() {
     assert!(
         serde_json::from_value::<McpControlRequest>(serde_json::to_value(parsed).unwrap()).is_ok()
     );
+}
+
+#[test]
+fn reserved_builtin_server_names_cannot_be_registered() {
+    for server_name in ["peri", "web", "Web", "workspace"] {
+        let request: McpControlRequest = serde_json::from_value(serde_json::json!({
+            "sessionId":"s1",
+            "serverName": server_name,
+            "action": "register",
+            "config": {"type":"http","url":"https://example.com/mcp"},
+        }))
+        .unwrap();
+        assert!(
+            request.validate().is_err(),
+            "{server_name} 是 builtin 保留名，不得经 ACP 注册"
+        );
+    }
 }
 
 #[test]

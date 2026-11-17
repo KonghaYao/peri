@@ -1,6 +1,7 @@
-use super::*;
+use super::{json, Arc, BaseMessage, GoalTool};
 use async_trait::async_trait;
 use peri_agent::goal::{GoalController, GoalStatus, GoalViewSnapshot};
+use peri_agent::tools::BaseTool as _;
 use peri_agent::tools::ToolContext;
 use peri_model::{
     Model, ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelResult,
@@ -270,7 +271,7 @@ impl Model for MockModel {
         if self.should_error {
             return Err(ModelError::protocol(ProtocolErrorKind::Provider));
         }
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text(self.response_text.clone()),
             self.stop_reason.clone(),
             None,
@@ -455,7 +456,7 @@ impl Model for BudgetCheckingModel {
             request.max_tokens.is_none(),
             "goal 验证请求必须继承 auxiliary model 的输出预算"
         );
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text(r#"{"achieved": true, "evidence": "ok"}"#),
             StopReason::EndTurn,
             None,
@@ -665,7 +666,7 @@ impl Model for GatedModel {
     ) -> ModelResult<ModelResponse> {
         self.entered.notify_one();
         self.release.notified().await;
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text(
                 r#"{"achieved": true, "evidence": "验证通过"}"#.to_string(),
             ),

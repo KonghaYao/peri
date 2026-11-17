@@ -1,4 +1,4 @@
-use super::*;
+use super::{async_trait, Arc, GoalMiddleware, Ordering};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
 };
@@ -62,10 +62,10 @@ fn make_complete_snapshot() -> GoalViewSnapshot {
 #[tokio::test]
 async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
     use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as _};
-    use peri_agent::agent::{
-        agent_context::AgentContext, async_tasks::TaskManager, events::BackgroundTaskResult,
-        stages::StageContext,
-    };
+    use peri_agent::agent::agent_context::AgentContext;
+    use peri_agent::agent::async_tasks::TaskManager;
+    use peri_agent::agent::events::BackgroundTaskResult;
+    use peri_agent::agent::stages::StageContext;
     use peri_agent::session::{FrozenContext, Session};
     for kind in [BgTaskKind::Agent, BgTaskKind::Workflow, BgTaskKind::Shell] {
         for success in [true, false] {

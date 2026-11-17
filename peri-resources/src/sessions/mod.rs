@@ -9,13 +9,17 @@ mod archive;
 mod archive_fork;
 mod binding_evidence;
 mod canonical;
-mod data;
+mod session_data_port;
+use session_data_port as data;
 #[cfg(not(target_os = "emscripten"))]
 mod discovery;
 mod failure;
 #[cfg(not(target_os = "emscripten"))]
-mod filesystem;
-mod local_port;
+mod filesystem_thread_store;
+#[cfg(not(target_os = "emscripten"))]
+use filesystem_thread_store as filesystem;
+mod local_execution_port;
+use local_execution_port as local_port;
 mod machine;
 #[cfg(not(target_os = "emscripten"))]
 pub use machine::adopt_file_identity;
@@ -53,11 +57,13 @@ pub(crate) fn remote_engine_turso() -> remote::RemoteEngine {
 pub(crate) fn credential_from_value(
     value: String,
 ) -> Result<remote::SessionStoreCredential, remote::CredentialError> {
-    remote::SessionStoreCredential::new(value)
+    remote::SessionStoreCredential::try_new(value)
 }
 
 #[cfg(not(target_os = "emscripten"))]
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+#[cfg(not(target_os = "emscripten"))]
+use std::sync::Arc;
 
 /// 只解析默认数据库位置；不创建目录、数据库或连接。
 #[cfg(not(target_os = "emscripten"))]

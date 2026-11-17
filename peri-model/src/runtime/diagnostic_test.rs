@@ -1,14 +1,20 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::{stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use super::{read_http_error, response_to_sse_stream, SseDecoders};
-use crate::{
-    runtime::retry::{retrying_stream, StreamAttempt},
-    transport::{HttpBody, HttpResponse},
-    ModelError, ModelStream, ModelStreamEvent, ProtocolErrorKind, RetryConfig, TransportErrorKind,
-};
+use super::SseDecoders;
+use crate::runtime::retry;
+use crate::runtime::retry::StreamAttempt;
+use crate::transport::HttpBody;
+use crate::transport::HttpResponse;
+use crate::ModelError;
+use crate::ModelStream;
+use crate::ModelStreamEvent;
+use crate::ProtocolErrorKind;
+use crate::RetryConfig;
+use crate::TransportErrorKind;
 
 fn decoders() -> SseDecoders {
     (Arc::new(|_, _| Ok(Vec::new())), Arc::new(|| Ok(Vec::new())))
@@ -23,7 +29,7 @@ async fn http_error(status: u16, chunks: Vec<crate::ModelResult<Vec<u8>>>) -> Mo
         cancellation.clone(),
     );
     let (decoder, completion) = decoders();
-    response_to_sse_stream(
+    super::response_to_sse_stream(
         response,
         cancellation,
         "provider secret".into(),
@@ -31,8 +37,7 @@ async fn http_error(status: u16, chunks: Vec<crate::ModelResult<Vec<u8>>>) -> Mo
         completion,
     )
     .await
-    .err()
-    .expect("HTTP error")
+    .expect_err("HTTP error")
 }
 
 #[tokio::test]
@@ -76,7 +81,7 @@ async fn http_error_body_limit_stops_reading_without_waiting_for_eof() {
     let (decoder, completion) = decoders();
     let error = tokio::time::timeout(
         Duration::from_secs(1),
-        response_to_sse_stream(
+        super::response_to_sse_stream(
             response,
             cancellation,
             "provider".into(),
@@ -86,8 +91,7 @@ async fn http_error_body_limit_stops_reading_without_waiting_for_eof() {
     )
     .await
     .expect("body must be bounded")
-    .err()
-    .expect("HTTP error");
+    .expect_err("HTTP error");
     assert_eq!(
         error.diagnostic().body().unwrap().len(),
         super::super::error::MAX_DIAGNOSTIC_BYTES
@@ -113,7 +117,7 @@ async fn http_error_body_has_total_timeout_for_pending_and_empty_chunks() {
         let response = HttpResponse::new(503, None, body, cancellation.clone());
         let error = peri_time::timeout(
             Duration::from_secs(1),
-            read_http_error(
+            super::read_http_error(
                 response,
                 cancellation,
                 "provider".into(),
@@ -137,7 +141,7 @@ async fn cancellation_interrupts_http_error_body_collection() {
     let (decoder, completion) = decoders();
     let task_cancellation = cancellation.clone();
     let task = tokio::spawn(async move {
-        response_to_sse_stream(
+        super::response_to_sse_stream(
             response,
             task_cancellation,
             "provider".into(),
@@ -173,7 +177,7 @@ async fn retry_exhaustion_and_observer_preserve_actual_error_details() {
     let observer = Arc::new(move |observation: crate::RetryObservation| {
         observed.lock().unwrap().push(observation);
     });
-    let mut events = retrying_stream(
+    let mut events = retry::retrying_stream(
         RetryConfig::default()
             .with_max_attempts(2)
             .with_base_delay(Duration::ZERO)
@@ -217,7 +221,7 @@ async fn visible_delta_interruption_preserves_transport_and_protocol_diagnostics
                 ])))
             })
         });
-        let mut events = retrying_stream(
+        let mut events = retry::retrying_stream(
             RetryConfig::default(),
             CancellationToken::new(),
             None,

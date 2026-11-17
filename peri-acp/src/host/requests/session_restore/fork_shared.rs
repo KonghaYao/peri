@@ -7,17 +7,19 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::super::{
-    fork_source_error, prewarm_session_mcp_discovery, session_mcp_servers, ForkSessionResponse,
-    SessionId,
-};
+use super::super::ForkSessionResponse;
+use super::super::SessionId;
 // 本地 workflow 运行时不在 emscripten 构建面内（wasm 产物不打包 workflow），
 // 对应名称在该目标不存在；调用处已有同条件 cfg。
-#[cfg(not(target_os = "emscripten"))]
-use super::super::{attach_session_workflow, create_session_workflow_chain, workflow_face_closed};
-use super::*;
-use crate::host::notify::send_available_commands_update;
+// 本文件其余会话类型与端口仍在所有目标可用。
+use crate::dispatch;
+
+use crate::host::notify;
+use crate::host::prepared::PreparedSessionInputs;
+
 use crate::host::workspace::SessionEnvironment;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
 use crate::host::SharedSessions;
 use crate::transport::types::AcpError;
 
@@ -32,50 +34,73 @@ pub(crate) async fn handle_fork_shared(
         .and_then(|v| v.as_str())
         .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
         .to_owned();
-    // 与 load/resume 共用：短锁判断 + 锁外 preflight/DB + 短锁复核发布。
-    super::load_shared::prepare_shared(params, cfg, sessions).await?;
-    let workspace = crate::host::workspace::reassert_expected(
-        cfg,
-        &source_id,
-        params.get("cwd").and_then(Value::as_str),
-    )
-    .await?;
-    let (execution_active, frozen_missing) = {
-        let states = sessions.lock().await;
-        let source = states
-            .get(&source_id)
-            .ok_or_else(|| AcpError::new(-32602, "Load the source session before forking"))?;
-        (source.cancel_token.is_some(), source.frozen.is_none())
+    // 与 load/resume 共用准备；只有本请求 cold 发布 source 时才取得清理权。
+    let super::load_shared::PreparedShared {
+        publication: source_publication,
+        ..
+    } = super::load_shared::prepare_shared(params, cfg, sessions).await?;
+    let source_setup: Result<_, AcpError> = async {
+        let workspace = crate::host::workspace::reassert_expected(
+            cfg,
+            &source_id,
+            params.get("cwd").and_then(Value::as_str),
+        )
+        .await?;
+        let (execution_active, frozen_missing) = {
+            let states = sessions.lock().await;
+            let source = states
+                .get(&source_id)
+                .ok_or_else(|| AcpError::new(-32602, "Load the source session before forking"))?;
+            (source.cancel_token.is_some(), source.frozen.is_none())
+        };
+        if execution_active
+            || cfg
+                .session_manager
+                .get_session(&source_id)
+                .is_some_and(|s| !s.active_agents.is_empty() || !s.task_manager.is_execution_idle())
+        {
+            return Err(AcpError::new(
+                -32010,
+                "Cannot fork while source execution is active",
+            ));
+        }
+        if frozen_missing {
+            return Err(AcpError::new(-32603, "Source frozen snapshot is missing"));
+        }
+        let cwd_owned = workspace
+            .cwd
+            .to_str()
+            .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
+            .to_owned();
+        let fork_source = dispatch::load_fork_source(&cfg.session_resources, &source_id)
+            .await
+            .map_err(crate::host::requests::session_lifecycle::session_lifecycle_dispatch::fork_source_error)?;
+        let mut prepared =
+            PreparedSessionInputs::prepare_fork(cfg, &cwd_owned, fork_source.frozen.as_str())?;
+        prepared.session_mcp_servers = crate::host::requests::session_lifecycle::session_mcp_setup::session_mcp_servers(params)?;
+        let frozen_data = prepared
+            .frozen
+            .clone()
+            .ok_or_else(|| AcpError::new(-32603, "Fork frozen snapshot is missing"))?;
+        Ok((workspace, cwd_owned, fork_source, prepared, frozen_data))
+    }
+    .await;
+    let (workspace, cwd_owned, fork_source, prepared, frozen_data) = match source_setup {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Err(super::load_shared::rollback_after_restore_error(
+                cfg,
+                sessions,
+                source_publication.as_ref(),
+                error,
+            )
+            .await)
+        }
     };
-    if execution_active
-        || cfg
-            .session_manager
-            .get_session(&source_id)
-            .is_some_and(|s| !s.active_agents.is_empty() || !s.task_manager.is_execution_idle())
-    {
-        return Err(AcpError::new(
-            -32010,
-            "Cannot fork while source execution is active",
-        ));
+    if let Some(publication) = source_publication.as_ref() {
+        super::load_shared::rollback_restore_publication(cfg, sessions, publication).await?;
     }
-    if frozen_missing {
-        return Err(AcpError::new(-32603, "Source frozen snapshot is missing"));
-    }
-    let cwd_owned = workspace
-        .cwd
-        .to_str()
-        .ok_or_else(|| AcpError::new(-32602, "Execution directory is not UTF-8"))?
-        .to_owned();
     let cwd = cwd_owned.as_str();
-    let fork_source = dispatch::load_fork_source(&cfg.session_resources, &source_id)
-        .await
-        .map_err(fork_source_error)?;
-    let mut prepared = PreparedSessionInputs::prepare_fork(cfg, cwd, fork_source.frozen.as_str())?;
-    prepared.session_mcp_servers = session_mcp_servers(params)?;
-    let frozen_data = prepared
-        .frozen
-        .clone()
-        .ok_or_else(|| AcpError::new(-32603, "Fork frozen snapshot is missing"))?;
     let (new_thread_id, published_payloads) = dispatch::fork_bound_session(
         &cfg.session_resources,
         &fork_source,
@@ -83,9 +108,11 @@ pub(crate) async fn handle_fork_shared(
         peri_time::now_utc_rfc3339(),
     )
     .await
-    .map_err(fork_source_error)?;
+    .map_err(
+        crate::host::requests::session_lifecycle::session_lifecycle_dispatch::fork_source_error,
+    )?;
 
-    let identity = match response_identity(cfg, &new_thread_id).await {
+    let identity = match crate::host::requests::session_lifecycle::restore::session_restore_dispatch::response_identity(cfg, &new_thread_id).await {
         Ok(identity) => identity,
         Err(error) => {
             cfg.session_resources
@@ -116,10 +143,10 @@ pub(crate) async fn handle_fork_shared(
     let caps = cfg.session_manager.ensure_session_caps(&new_session_id);
 
     #[cfg(not(target_os = "emscripten"))]
-    let workflow_chain = if workflow_face_closed(&frozen_data) {
+    let workflow_chain = if super::super::workflow_face_closed(&frozen_data) {
         None
     } else {
-        Some(create_session_workflow_chain(
+        Some(super::super::create_session_workflow_chain(
             cfg,
             cwd,
             &new_session_id,
@@ -133,7 +160,8 @@ pub(crate) async fn handle_fork_shared(
         if let Some(environment) = &environment {
             environment.activate();
         }
-        if let Err(error) = attach_session_workflow(environment.as_ref(), chain).await {
+        if let Err(error) = super::super::attach_session_workflow(environment.as_ref(), chain).await
+        {
             if let Some(environment) = &environment {
                 if !environment.shutdown().await {
                     return Err(AcpError::new(
@@ -167,7 +195,7 @@ pub(crate) async fn handle_fork_shared(
         event_health: Default::default(),
         cancel_token: None,
         interaction_gate: crate::host::workspace_interaction::session_interaction_gate(
-            &environment,
+            environment.as_deref(),
         ),
         host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         continuation_armed: false,
@@ -212,7 +240,7 @@ pub(crate) async fn handle_fork_shared(
         environment.activate();
     }
     tracing::info!(source = %source_id, new = %new_session_id, "Session forked");
-    send_available_commands_update(
+    notify::send_available_commands_update(
         transport,
         &new_session_id,
         &caps,
@@ -220,9 +248,9 @@ pub(crate) async fn handle_fork_shared(
         cfg.stdio_command_filter,
     )
     .await;
-    prewarm_session_mcp_discovery(cfg, &new_session_id);
+    super::super::prewarm_session_mcp_discovery(cfg, &new_session_id);
     let resp = ForkSessionResponse::new(SessionId::new(new_session_id.clone()));
-    identity_response(
+    crate::host::requests::session_lifecycle::restore::session_restore_dispatch::identity_response(
         serde_json::to_value(resp).map_err(crate::host::workspace::workspace_error)?,
         identity,
     )

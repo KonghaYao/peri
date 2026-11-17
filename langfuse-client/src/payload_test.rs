@@ -12,14 +12,14 @@ use crate::memory::MemoryBudget;
 use crate::payload::{BudgetedBytes, ExportPayload, PayloadBody};
 
 fn budget(limit: usize) -> Arc<MemoryBudget> {
-    MemoryBudget::new(limit).expect("budget")
+    MemoryBudget::try_new(limit).expect("budget")
 }
 
 #[test]
 fn new_rejects_permit_smaller_than_body() {
     let budget = budget(1024);
     let permit = budget.try_reserve(3).expect("permit");
-    let error = match BudgetedBytes::new(Bytes::from_static(b"abcd"), permit) {
+    let error = match BudgetedBytes::try_new(Bytes::from_static(b"abcd"), permit) {
         Ok(_) => panic!("permit must cover the body"),
         Err(error) => error,
     };
@@ -30,7 +30,7 @@ fn new_rejects_permit_smaller_than_body() {
 fn shared_body_keeps_permit_until_last_reference() {
     let budget = budget(1024);
     let permit = budget.try_reserve(16).expect("permit");
-    let shared = BudgetedBytes::new(Bytes::from_static(b"0123456789abcd"), permit)
+    let shared = BudgetedBytes::try_new(Bytes::from_static(b"0123456789abcd"), permit)
         .expect("bounded body")
         .into_shared();
     assert_eq!(shared.len(), 14);
@@ -49,7 +49,7 @@ fn shared_body_keeps_permit_until_last_reference() {
 fn payload_exposes_body_source_and_budget_identity() {
     let budget = budget(4096);
     let permit = budget.try_reserve(64).expect("permit");
-    let body = BudgetedBytes::new(Bytes::from_static(b"{\"batch\":[]}"), permit).expect("body");
+    let body = BudgetedBytes::try_new(Bytes::from_static(b"{\"batch\":[]}"), permit).expect("body");
     let payload = ExportPayload {
         body: PayloadBody::Memory(body),
         encoding: Compression::Gzip,

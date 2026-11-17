@@ -1,10 +1,17 @@
-use super::*;
+use super::Arc;
+use super::RespondRule;
+use super::RoleClient;
+use super::ServerDiscoveryState;
+use super::WarnCaptureSubscriber;
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 #[tokio::test]
 async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
     let (client_io, server_io) = tokio::io::duplex(8192);
     let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    tokio::spawn(private_zero_ttl_skill_server(
+    tokio::spawn(super::private_zero_ttl_skill_server(
         server_io,
         Arc::clone(&request_count),
     ));
@@ -19,13 +26,13 @@ async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
     let first_cache =
         crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
     let (first_scoped, origin) = super::cache_fixture::scoped_cache(
-        make_spec_handle(&running),
+        super::make_spec_handle(&running),
         first_cache.clone(),
         workspace,
         Some(version),
     );
-    let resources = vec![resource("skill://srv/cached/SKILL.md")];
-    let (_, first_entries) = collect_skill_entries(
+    let resources = vec![super::resource("skill://srv/cached/SKILL.md")];
+    let (_, first_entries) = crate::mcp::skill_discovery::legacy_scan::collect_skill_entries(
         running.peer().clone(),
         "srv",
         resources.clone(),
@@ -46,13 +53,13 @@ async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
     let second_cache =
         crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
     let (second_scoped, second_origin) = super::cache_fixture::scoped_cache(
-        make_spec_handle(&running),
+        super::make_spec_handle(&running),
         second_cache.clone(),
         workspace,
         Some(version),
     );
     assert_eq!(origin, second_origin);
-    let (_, second_entries) = collect_skill_entries(
+    let (_, second_entries) = crate::mcp::skill_discovery::legacy_scan::collect_skill_entries(
         running.peer().clone(),
         "srv",
         resources,
@@ -76,16 +83,16 @@ async fn legacy_private_zero_ttl_cache_survives_cache_recreation() {
     let third_cache =
         crate::mcp::resource_cache::McpResourceCache::at(cache_dir.path().to_path_buf());
     let (third_scoped, third_origin) = super::cache_fixture::scoped_cache(
-        make_spec_handle(&running),
+        super::make_spec_handle(&running),
         third_cache,
         workspace,
         Some("sha256:changed-cache-version"),
     );
     assert_eq!(origin, third_origin);
-    let (_, third_entries) = collect_skill_entries(
+    let (_, third_entries) = crate::mcp::skill_discovery::legacy_scan::collect_skill_entries(
         running.peer().clone(),
         "srv",
-        vec![resource("skill://srv/cached/SKILL.md")],
+        vec![super::resource("skill://srv/cached/SKILL.md")],
         AgentCancellationToken::new(),
         Some((third_scoped, third_origin)),
     )
@@ -105,7 +112,7 @@ async fn collect_skill_entries_sorts_by_name_despite_completion_order() {
     // 确定性为 [zebra, alpha]（与 name 排序相反）；若 collect 不排序，
     // entries 将保持完成序。
     let completion_log: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    tokio::spawn(raw_skill_server(
+    tokio::spawn(super::raw_skill_server(
         server_io,
         vec![RespondRule {
             segment: "alpha",
@@ -124,11 +131,14 @@ async fn collect_skill_entries_sorts_by_name_despite_completion_order() {
     let peer = running.peer().clone();
 
     let resources = vec![
-        resource("skill://srv/zebra/SKILL.md"),
-        resource("skill://srv/alpha/SKILL.md"),
+        super::resource("skill://srv/zebra/SKILL.md"),
+        super::resource("skill://srv/alpha/SKILL.md"),
     ];
     let cancel = AgentCancellationToken::new();
-    let (_, entries) = collect_skill_entries(peer, "srv", resources, cancel, None).await;
+    let (_, entries) = crate::mcp::skill_discovery::legacy_scan::collect_skill_entries(
+        peer, "srv", resources, cancel, None,
+    )
+    .await;
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     // frontmatter name = uri 最终段（zebra/alpha）→ 注册名
@@ -167,7 +177,7 @@ fn run_discovery_all_reads_fail_emits_warn() {
                 let token: HandleToken = Arc::new(3u32);
                 let (client_io, server_io) = tokio::io::duplex(8192);
                 // 空段规则匹配所有 uri → 全部返回 JSON-RPC error（read 失败）
-                tokio::spawn(raw_skill_server(
+                tokio::spawn(super::raw_skill_server(
                     server_io,
                     vec![RespondRule {
                         segment: "",
@@ -182,16 +192,23 @@ fn run_discovery_all_reads_fail_emits_warn() {
                     client_io,
                     None::<rmcp::model::ServerPeerInfo>,
                 );
-                let handle = make_discovery_handle(
+                let handle = super::make_discovery_handle(
                     &running,
                     vec![
-                        resource("skill://srv/a/SKILL.md"),
-                        resource("skill://srv/b/SKILL.md"),
+                        super::resource("skill://srv/a/SKILL.md"),
+                        super::resource("skill://srv/b/SKILL.md"),
                     ],
                 );
                 reg.mark_discovery_started("srv", token.clone());
                 let cancel = AgentCancellationToken::new();
-                run_discovery(reg.clone(), None, handle, token.clone(), cancel).await;
+                crate::mcp::skill_discovery::run_discovery(
+                    reg.clone(),
+                    None,
+                    handle,
+                    token.clone(),
+                    cancel,
+                )
+                .await;
                 assert!(
                     matches!(
                         reg.discovery_state("srv"),
@@ -217,7 +234,7 @@ async fn run_discovery_cancel_after_first_response_clears_started() {
     let token: HandleToken = Arc::new(4u32);
     let (client_io, server_io) = tokio::io::duplex(8192);
     let first_done = Arc::new(tokio::sync::Notify::new());
-    tokio::spawn(raw_skill_server(
+    tokio::spawn(super::raw_skill_server(
         server_io,
         vec![RespondRule {
             segment: "alpha",
@@ -232,16 +249,16 @@ async fn run_discovery_cancel_after_first_response_clears_started() {
         client_io,
         None::<rmcp::model::ServerPeerInfo>,
     );
-    let handle = make_discovery_handle(
+    let handle = super::make_discovery_handle(
         &running,
         vec![
-            resource("skill://srv/zebra/SKILL.md"),
-            resource("skill://srv/alpha/SKILL.md"),
+            super::resource("skill://srv/zebra/SKILL.md"),
+            super::resource("skill://srv/alpha/SKILL.md"),
         ],
     );
     reg.mark_discovery_started("srv", token.clone());
     let cancel = AgentCancellationToken::new();
-    let discovery = tokio::spawn(run_discovery(
+    let discovery = tokio::spawn(crate::mcp::skill_discovery::run_discovery(
         reg.clone(),
         None,
         handle,
@@ -279,7 +296,7 @@ fn run_discovery_cancel_before_warn_does_not_emit_warn() {
                 let token: HandleToken = Arc::new(5u32);
                 let (client_io, server_io) = tokio::io::duplex(8192);
                 let first_done = Arc::new(tokio::sync::Notify::new());
-                tokio::spawn(raw_skill_server(
+                tokio::spawn(super::raw_skill_server(
                     server_io,
                     vec![
                         // zebra：立即返回 error（entries 保持空）
@@ -303,16 +320,16 @@ fn run_discovery_cancel_before_warn_does_not_emit_warn() {
                     client_io,
                     None::<rmcp::model::ServerPeerInfo>,
                 );
-                let handle = make_discovery_handle(
+                let handle = super::make_discovery_handle(
                     &running,
                     vec![
-                        resource("skill://srv/zebra/SKILL.md"),
-                        resource("skill://srv/alpha/SKILL.md"),
+                        super::resource("skill://srv/zebra/SKILL.md"),
+                        super::resource("skill://srv/alpha/SKILL.md"),
                     ],
                 );
                 reg.mark_discovery_started("srv", token.clone());
                 let cancel = AgentCancellationToken::new();
-                let discovery = tokio::spawn(run_discovery(
+                let discovery = tokio::spawn(crate::mcp::skill_discovery::run_discovery(
                     reg.clone(),
                     None,
                     handle,

@@ -1,4 +1,7 @@
-use super::*;
+use super::AVAILABLE_SLASH_COMMANDS;
+use super::AcpEventData;
+use super::{BridgeSink, handle_session_update};
+
 use crate::kit::acp_types::CacheUsageSample;
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::ArgKind;
@@ -243,7 +246,7 @@ async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_r
         })
     };
     assert!(
-        handle_session_update(
+        super::handle_session_update(
             payload(
                 json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 70}),
                 json!({"peri": {"sourceAgentId": "child"}})
@@ -254,7 +257,7 @@ async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_r
         .await
         .is_none()
     );
-    let zero = handle_session_update(
+    let zero = super::handle_session_update(
         payload(
             json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 0}),
             json!({}),
@@ -285,7 +288,7 @@ async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_r
         "inconsistent root usage must remain unavailable"
     );
     assert!(
-        handle_session_update(
+        super::handle_session_update(
             payload(json!({"inputTokens": 100, "outputTokens": 1}), json!({})),
             &direct_sink(&dummy_tx),
             "test"

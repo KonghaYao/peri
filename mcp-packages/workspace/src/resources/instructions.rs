@@ -19,10 +19,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use peri_acp_types::workspace_resources::{
-    digest_bytes, InstructionDocument, INSTRUCTION_LOCAL_URI, INSTRUCTION_MAIN_URI, MIME_JSON,
-    MIME_MARKDOWN, MIME_TEXT,
-};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::InstructionDocument;
+use peri_acp_types::workspace_resources::INSTRUCTION_LOCAL_URI;
+use peri_acp_types::workspace_resources::INSTRUCTION_MAIN_URI;
+use peri_acp_types::workspace_resources::MIME_JSON;
+use peri_acp_types::workspace_resources::MIME_MARKDOWN;
+use peri_acp_types::workspace_resources::MIME_TEXT;
 use serde::Serialize;
 
 use super::{ResourceBudget, ResourceError};
@@ -141,8 +144,8 @@ fn is_excluded(path: &Path, excludes: &[String]) -> bool {
 
 /// `@import` 展开的可变状态：已登记依赖、防环 visited、累计读取预算
 /// （根正文 + 整棵展开树共享，M9）。
-struct ImportState<'a> {
-    imports: &'a mut Vec<ImportRecord>,
+struct ImportState<'imports> {
+    imports: &'imports mut Vec<ImportRecord>,
     visited: HashSet<PathBuf>,
     remaining_bytes: u64,
 }
@@ -190,7 +193,7 @@ fn scan_main(
                     raw
                 };
                 let text = bound_final_text(text, budget);
-                let digest = digest_bytes(text.as_bytes());
+                let digest = workspace_resources::digest_bytes(text.as_bytes());
                 return (
                     Some(InstructionDoc {
                         text,
@@ -239,7 +242,7 @@ fn scan_local(
         return None;
     }
     let text = bound_final_text(text, budget);
-    let digest = digest_bytes(text.as_bytes());
+    let digest = workspace_resources::digest_bytes(text.as_bytes());
     Some(InstructionDoc {
         text,
         digest,
@@ -437,7 +440,7 @@ fn resolve_imports(
             .unwrap_or_else(|| import_path.to_string());
         state.imports.push(ImportRecord {
             relative: relative_label,
-            digest: digest_bytes(imported.as_bytes()),
+            digest: workspace_resources::digest_bytes(imported.as_bytes()),
         });
 
         let import_dir = resolved.parent().unwrap_or(base_dir);
@@ -491,7 +494,7 @@ pub(crate) fn read(
         InstructionDocument::Index => {
             let text =
                 serde_json::to_string_pretty(&bundle.index).map_err(|_| ResourceError::Io)?;
-            let digest = digest_bytes(text.as_bytes());
+            let digest = workspace_resources::digest_bytes(text.as_bytes());
             Ok(InstructionRead {
                 mime: MIME_JSON,
                 text,

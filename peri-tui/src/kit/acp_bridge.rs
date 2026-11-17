@@ -5,9 +5,11 @@
 //! Phase 2 完整实现——main_loop fan-out 后独立消费。
 
 use crate::acp_client::AcpTuiClient;
-use crate::kit::acp_events::{
-    self, BridgeState, PublicationIntent, SessionPhase, StreamingMode, current_streaming_mode,
-};
+use crate::kit::acp_events;
+use crate::kit::acp_events::BridgeState;
+use crate::kit::acp_events::PublicationIntent;
+use crate::kit::acp_events::SessionPhase;
+use crate::kit::acp_events::StreamingMode;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, CurrentTurn};
 use crate::kit::atoms;
 use tokio::sync::mpsc;
@@ -182,6 +184,7 @@ pub(crate) struct DeterministicClock {
 
 #[cfg(test)]
 impl DeterministicClock {
+    #[must_use]
     pub(crate) fn now_ms(self) -> u64 {
         self.now_ms
     }
@@ -299,7 +302,7 @@ impl PublicationScheduler {
         state: &mut BridgeState,
         now: peri_time::Instant,
     ) {
-        let mode = current_streaming_mode();
+        let mode = crate::kit::acp_events::current_streaming_mode();
         if self.pending_mode.is_some_and(|scheduled| scheduled != mode) {
             self.pending_deadline = None;
             self.pending_mode = None;
@@ -374,9 +377,9 @@ impl PublicationScheduler {
         if self
             .pending_mode
             .take()
-            .is_some_and(|mode| mode != current_streaming_mode())
+            .is_some_and(|mode| mode != crate::kit::acp_events::current_streaming_mode())
         {
-            self.last_streaming_mode = Some(current_streaming_mode());
+            self.last_streaming_mode = Some(crate::kit::acp_events::current_streaming_mode());
             return false;
         }
         // 历史回放与明确 projection 读取都不能吞掉待发布事实。
@@ -588,10 +591,10 @@ fn spawn_acp_bridge_inner(
                     }
                     if state.current_turn.has_running_bash_tool() {
                         state.current_turn.invalidate_cache();
-                        use crate::kit::acp_events::current_streaming_mode;
+
                         use crate::kit::acp_events::StreamingMode;
                         let mode_is_none =
-                            matches!(current_streaming_mode(), StreamingMode::None);
+                            matches!(crate::kit::acp_events::current_streaming_mode(), StreamingMode::None);
                         if !mode_is_none {
                             scheduler.accept(PublicationIntent::Immediate, &mut state);
                         }

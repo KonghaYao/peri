@@ -1,6 +1,7 @@
 //! F2a：History V2 实时投递的 sink 行为（暂停缓冲、恢复续号、非 transcript 透传）。
 
 use super::*;
+use crate::host::live_delivery::LiveDelivery;
 
 /// 暂停期（load 装配中）的 transcript 更新只进缓冲；恢复后 load 响应已发，
 /// 补发事件从 afterSeq + 1 开始；之后恢复直发。

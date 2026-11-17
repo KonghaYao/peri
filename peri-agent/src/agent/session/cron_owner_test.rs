@@ -2,9 +2,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::*;
 use crate::agent::session::inbox::SessionInbox;
 use crate::session::{MessageQueue, MessageSource};
+use peri_acp_types::session::CronOwner;
 use tokio::sync::mpsc;
 
 #[tokio::test]
@@ -20,7 +20,8 @@ async fn test_cron_owner_forwards_trigger_to_inbox() {
     owner.start(rx, inbox_handle, shutdown.clone());
 
     // Send a trigger prompt
-    tx.send("check deploy status".to_string()).unwrap();
+    tx.send("check deploy status".to_string())
+        .expect("tx send test receiver must remain available for this delivery");
 
     // Give the task time to process
     tokio::time::sleep(Duration::from_millis(50)).await;

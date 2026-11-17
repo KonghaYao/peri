@@ -16,7 +16,15 @@
 //! 磁盘哨兵：SKILL.md 的 description 是唯一会进摘要的字段，因此「摘要不含
 //! 哨兵 description / 完全为空」直接证明宿主没有读盘。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 项目级技能名（`{cwd}/.claude/skills/<name>/SKILL.md`）。
 const PROJECT_SKILL: &str = "e2e-project-skill";
@@ -96,10 +104,11 @@ impl SkillFixture {
 
 /// 生产装配的宿主配置：bare（只建 workspace 池）+ 指定启动目录。
 async fn skill_server_config(tmp: &tempfile::TempDir, startup_cwd: String) -> AcpServerConfig {
-    let config =
-        make_peri_config_with_provider(make_provider_config("test", "openai", "key", "model"));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let mut cfg = make_server_config(config, provider, tmp).await;
+    let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     cfg.config_source = Arc::new(
         crate::provider::ConfigSource::load_at(
             std::path::Path::new(&startup_cwd),
@@ -125,13 +134,16 @@ fn workspace_resource_uris(sessions: &HashMap<String, SessionState>, id: &str) -
     let Some(pool) = environment.cfg.mcp_pool.as_ref() else {
         return vec!["无 MCP 池".to_owned()];
     };
-    let Some(pool) = pool
-        .as_any()
+    let Some(pool) = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()
     else {
         return vec!["池不是生产 McpClientPool".to_owned()];
     };
-    pool.get_resources("workspace")
+    let mut resources = pool.resources_for_server("peri");
+    if resources.is_empty() {
+        resources = pool.resources_for_server("workspace");
+    }
+    resources
         .iter()
         .map(|resource| resource.uri.clone())
         .collect()
@@ -170,7 +182,7 @@ async fn removed_skills_dir_settings_do_not_change_resource_discovery() {
         let cfg = skill_server_config(&fixture._tmp, fixture.startup.clone()).await;
         let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
         let mut sessions = HashMap::new();
-        let created = handle_request(
+        let created = crate::host::requests::handle_request(
             "session/new",
             &json!({"cwd": fixture.target}),
             &cfg,
@@ -217,7 +229,7 @@ async fn new_session_frozen_summary_comes_from_workspace_origin() {
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": fixture.target.clone()}),
         &cfg,
@@ -254,7 +266,7 @@ async fn new_session_frozen_summary_comes_from_workspace_origin() {
         "同一技能不得重复出现在摘要（不双源）：summary={summary:?}"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -273,7 +285,7 @@ async fn disable_bundled_skills_true_hides_builtin_catalog() {
     let cfg_enabled = skill_server_config(&enabled._tmp, enabled.startup.clone()).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions_enabled = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": enabled.target.clone()}),
         &cfg_enabled,
@@ -299,7 +311,7 @@ async fn disable_bundled_skills_true_hides_builtin_catalog() {
     let disabled = SkillFixture::new(r#""01_intro":true"#, true);
     let cfg = skill_server_config(&disabled._tmp, disabled.startup.clone()).await;
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": disabled.target.clone()}),
         &cfg,
@@ -321,7 +333,7 @@ async fn disable_bundled_skills_true_hides_builtin_catalog() {
         "关的是 builtin 面，项目级来源照常：summary={summary:?}"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -338,12 +350,12 @@ async fn disable_bundled_skills_true_hides_builtin_catalog() {
 async fn closed_workspace_instance_makes_skills_unavailable_without_disk_fallback() {
     // 同 `new_session_frozen_summary_comes_from_workspace_origin` 的夹具，
     // 只差关闭位 `meta_harness.WorkspaceMiddleware=false`。
-    let fixture = SkillFixture::new(r#""01_intro":true,"WorkspaceMiddleware":false"#, false);
+    let fixture = SkillFixture::new(r#""01_intro":true,"workspace":false"#, false);
     let cfg = skill_server_config(&fixture._tmp, fixture.startup.clone()).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
 
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": fixture.target.clone()}),
         &cfg,
@@ -370,7 +382,7 @@ async fn closed_workspace_instance_makes_skills_unavailable_without_disk_fallbac
         "磁盘哨兵不得出现在冻结 system prompt（零 FS 兜底）"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,
@@ -419,7 +431,7 @@ async fn skills_middleware_disabled_hides_all_system_skill_commands() {
     let enabled = SkillFixture::new(r#""01_intro":true"#, false);
     let cfg_enabled = skill_server_config(&enabled._tmp, enabled.startup.clone()).await;
     let mut sessions_enabled = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": enabled.target.clone()}),
         &cfg_enabled,
@@ -434,7 +446,12 @@ async fn skills_middleware_disabled_hides_all_system_skill_commands() {
             .environment
             .as_ref()
             .expect("会话环境（生产装配路径）");
-        super::session_lifecycle::after_new_response(&environment.cfg, &transport, &id).await;
+        crate::host::requests::session_lifecycle::after_new_response(
+            &environment.cfg,
+            &transport,
+            &id,
+        )
+        .await;
     }
     let registry_enabled = cfg_enabled
         .session_manager
@@ -474,7 +491,7 @@ async fn skills_middleware_disabled_hides_all_system_skill_commands() {
     let closed = SkillFixture::new(r#""01_intro":true,"SkillsMiddleware":false"#, false);
     let cfg = skill_server_config(&closed._tmp, closed.startup.clone()).await;
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": closed.target.clone()}),
         &cfg,
@@ -489,7 +506,12 @@ async fn skills_middleware_disabled_hides_all_system_skill_commands() {
             .environment
             .as_ref()
             .expect("会话环境（生产装配路径）");
-        super::session_lifecycle::after_new_response(&environment.cfg, &transport, &id).await;
+        crate::host::requests::session_lifecycle::after_new_response(
+            &environment.cfg,
+            &transport,
+            &id,
+        )
+        .await;
     }
     let registry = cfg
         .session_manager
@@ -501,7 +523,9 @@ async fn skills_middleware_disabled_hides_all_system_skill_commands() {
         .mcp_skill_registry_for(&id)
         .expect("会话技能注册表");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    while skill_registry.skills_of("workspace").is_empty() {
+    while skill_registry.skills_of("peri").is_empty()
+        && skill_registry.skills_of("workspace").is_empty()
+    {
         assert!(std::time::Instant::now() < deadline, "系统 skill 发现超时");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -553,7 +577,7 @@ async fn closed_workspace_instance_makes_instructions_unavailable_without_disk_f
     let open = SkillFixture::new(r#""01_intro":true"#, false);
     let open_cfg = skill_server_config(&open._tmp, open.startup.clone()).await;
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": open.target.clone()}),
         &open_cfg,
@@ -576,7 +600,7 @@ async fn closed_workspace_instance_makes_instructions_unavailable_without_disk_f
             .contains(&"peri-instruction://workspace/main".to_string()),
         "指令资源必须经 workspace 实例暴露"
     );
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &open_cfg,
@@ -587,10 +611,10 @@ async fn closed_workspace_instance_makes_instructions_unavailable_without_disk_f
     .unwrap();
 
     // ── 关闭实例（同一夹具，只差关闭位） ──
-    let closed = SkillFixture::new(r#""01_intro":true,"WorkspaceMiddleware":false"#, false);
+    let closed = SkillFixture::new(r#""01_intro":true,"workspace":false"#, false);
     let closed_cfg = skill_server_config(&closed._tmp, closed.startup.clone()).await;
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": closed.target.clone()}),
         &closed_cfg,
@@ -621,7 +645,7 @@ async fn closed_workspace_instance_makes_instructions_unavailable_without_disk_f
         "关闭会话的冻结 prompt 同样不得携带旧指令正文"
     );
     // 不误伤其他面：关闭位只摘指令/技能面，会话自身仍可创建并关闭。
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &closed_cfg,
@@ -654,10 +678,13 @@ fn workspace_resource_description(
 ) -> Option<String> {
     let environment = sessions[id].environment.as_ref()?;
     let pool = environment.cfg.mcp_pool.as_ref()?;
-    let pool = pool
-        .as_any()
+    let pool = (pool.as_ref() as &dyn std::any::Any)
         .downcast_ref::<peri_middlewares::mcp::McpClientPool>()?;
-    pool.get_resources("workspace")
+    let mut resources = pool.resources_for_server("peri");
+    if resources.is_empty() {
+        resources = pool.resources_for_server("workspace");
+    }
+    resources
         .iter()
         .find(|resource| resource.uri == uri)
         .and_then(|resource| resource.description.clone())
@@ -705,7 +732,7 @@ async fn bare_agents_root_is_wired_and_loses_same_id_to_the_claude_root() {
     let cfg = skill_server_config(&fixture._tmp, fixture.startup.clone()).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let mut sessions = HashMap::new();
-    let created = handle_request(
+    let created = crate::host::requests::handle_request(
         "session/new",
         &json!({"cwd": fixture.target.clone()}),
         &cfg,
@@ -738,7 +765,7 @@ async fn bare_agents_root_is_wired_and_loses_same_id_to_the_claude_root() {
         "胜出者是先到的 `.claude/agents` 版（description = frontmatter 逐字投影）"
     );
 
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId": id}),
         &cfg,

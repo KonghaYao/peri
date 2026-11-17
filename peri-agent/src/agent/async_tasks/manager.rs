@@ -1,19 +1,22 @@
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use peri_acp_types::tasks::{
     BgRegistryEvent, BgShellHandle, BgTaskKind, BgTaskRegistration, ExternalTaskRegistration,
-    TaskChange, TaskRegistrationTicket, TaskSnapshot,
+    TaskCancelChannel, TaskChange, TaskRegistrationTicket, TaskSnapshot,
 };
 use sha2::{Digest, Sha256};
 
 use crate::agent::events::BackgroundTaskResult;
 
-use super::registry::{
+use crate::agent::async_tasks::agent_inbox::QueuedSubagentMessage;
+use crate::agent::async_tasks::agent_inbox::SubagentMessageError;
+use crate::agent::async_tasks::registry::{
     BackgroundRegistryError, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,
     BgCancelHandle, BgTaskInfo,
 };
-use super::shell::finalize_bg_shell;
-use super::{QueuedSubagentMessage, ShellExecutor, SubagentMessageError};
+
+use crate::agent::async_tasks::shell_executor::ShellExecutor;
 
 // ── TaskManager（per-session 聚合）────────────────────────────────────────────
 
@@ -102,8 +105,6 @@ impl Drop for ExternalCompletionClaim<'_> {
         self.registry.reset_completion_claim(self.ticket);
     }
 }
-
-use super::delivery::terminal_delivery_id as external_delivery_id;
 
 #[cfg(test)]
 #[path = "external_settlement_test.rs"]
@@ -238,9 +239,13 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         self.active_count()
     }
 
+    fn active_count_including_children(&self) -> usize {
+        self.active_count_including_children()
+    }
+
     fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String> {
-        let cancel_handle = match request.kind {
-            BgTaskKind::Shell => match request.kill {
+        let cancel_handle = match request.kind.cancel_channel() {
+            TaskCancelChannel::Process => match request.kill {
                 Some(kill) => BgCancelHandle::Kill(Some(kill)),
                 None => request
                     .pid
@@ -257,19 +262,14 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                             .to_string()
                     })?,
             },
-            BgTaskKind::Workflow => BgCancelHandle::Kill(request.kill),
-            BgTaskKind::Agent => BgCancelHandle::Kill(request.kill),
-            BgTaskKind::Mcp => return Err("MCP tasks must use register_external".into()),
+            TaskCancelChannel::Closure => BgCancelHandle::Kill(request.kill),
+            TaskCancelChannel::External => {
+                return Err("MCP tasks must use register_external".into())
+            }
         };
         let task = BackgroundTask {
             id: request.task_id,
-            agent_name: match request.kind {
-                BgTaskKind::Shell => "bg-shell",
-                BgTaskKind::Agent => "agent",
-                BgTaskKind::Workflow => "workflow",
-                BgTaskKind::Mcp => "mcp",
-            }
-            .to_string(),
+            agent_name: request.kind.task_agent_name().to_string(),
             prompt_summary: request.summary,
             status: BackgroundTaskStatus::Running,
             started_at: peri_time::monotonic_now(),
@@ -295,7 +295,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         &self,
         request: peri_acp_types::tasks::LiveAgentRegistration,
     ) -> Result<TaskRegistrationTicket, String> {
-        let inbox = super::agent_inbox::BackgroundAgentInbox::new(
+        let inbox = crate::agent::async_tasks::agent_inbox::BackgroundAgentInbox::new(
             request.child_thread_id,
             request.queue,
             request.cancel.clone(),
@@ -398,7 +398,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
 
     fn finalize_bg_shell(
         &self,
-        on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
+        on_bg_complete: Option<&peri_acp_types::tasks::OnBgCompleteFn>,
         ticket: TaskRegistrationTicket,
         prompt_summary: String,
         success: bool,
@@ -407,7 +407,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         timed_out: bool,
         shell_output: Option<peri_acp_types::event::ShellOutput>,
     ) {
-        finalize_bg_shell(
+        crate::agent::async_tasks::shell::finalize_bg_shell(
             &self.registry,
             on_bg_complete,
             ticket,
@@ -438,6 +438,7 @@ impl TaskManager {
         None
     }
 
+    #[must_use]
     pub fn child_owners(&self) -> Vec<Arc<crate::session::subagent::ParkedChildOwner>> {
         self.child_owners.read().values().cloned().collect()
     }
@@ -448,14 +449,17 @@ impl TaskManager {
     }
 
     /// 父结果是否已由 registry 的单一 retry worker 接管。
+    #[must_use]
     pub fn has_pending_delivery(&self, task_id: &str) -> bool {
         self.registry.has_pending_delivery(task_id)
     }
 
+    #[must_use]
     pub fn has_pending_deliveries(&self) -> bool {
         self.registry.has_pending_deliveries()
     }
 
+    #[must_use]
     pub fn has_unsettled_tasks(&self) -> bool {
         self.active_count() > 0 || !self.registry.external_settled()
     }
@@ -478,6 +482,7 @@ impl TaskManager {
         self.registry.scope.close();
     }
 
+    #[must_use]
     pub fn session_close_settled(&self) -> bool {
         self.registry.scope.is_closed()
             && self.registry.scope.is_idle()
@@ -494,15 +499,20 @@ impl TaskManager {
     pub fn mark_external_running(&self, task_id: &str) -> bool {
         self.registry.mark_external_status(task_id, "running")
     }
+    #[must_use]
     pub fn snapshot(&self) -> TaskSnapshot {
         self.registry.snapshot()
     }
 
     /// Unsettled tasks used by the bounded-wait handoff record.
-    pub fn pending_handoff_tasks(&self) -> Vec<super::handoff::PendingHandoffTask> {
+    #[must_use]
+    pub fn pending_handoff_tasks(
+        &self,
+    ) -> Vec<crate::agent::async_tasks::handoff::PendingHandoffTask> {
         self.registry.pending_handoff_tasks()
     }
 
+    #[must_use]
     pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
         self.registry.subscribe_events()
     }
@@ -632,7 +642,10 @@ impl TaskManager {
         };
         result.task_id = task_id.to_owned();
         // Stable delivery ID: retries of the give-up converge on one reminder.
-        let delivery_id = external_delivery_id(task_id, "abandoned-unresolved");
+        let delivery_id = crate::agent::async_tasks::delivery::terminal_delivery_id(
+            task_id,
+            "abandoned-unresolved",
+        );
         notify(&result, delivery_id).await?;
         if self.registry.complete(ticket, result) {
             Ok(true)
@@ -687,7 +700,10 @@ impl TaskManager {
             ticket,
         };
         result.task_id = task_id.to_owned();
-        let delivery_id = external_delivery_id(task_id, terminal_transition_id);
+        let delivery_id = crate::agent::async_tasks::delivery::terminal_delivery_id(
+            task_id,
+            terminal_transition_id,
+        );
         notify(&result, delivery_id).await?;
         if self.registry.complete(ticket, result) {
             Ok(true)
@@ -707,6 +723,7 @@ impl TaskManager {
             self.registry.cancel(task_id)
         }
     }
+    #[must_use]
     pub fn new() -> Self {
         Self {
             registry: Arc::new(BackgroundTaskRegistry::new()),
@@ -716,6 +733,7 @@ impl TaskManager {
         }
     }
 
+    #[must_use]
     pub fn with_shell_executor(executor: Arc<dyn ShellExecutor>) -> Self {
         Self {
             shell_executor: Some(executor),
@@ -730,6 +748,7 @@ impl TaskManager {
     /// 冒充会话级管理器——既不建游离作用域，也不静默接收任务；与真正拿不到
     /// 会话级管理器的后果（后台 hook 不进入会话作用域）相比，显式不执行是
     /// fail-closed 的诚实结果。
+    #[must_use]
     pub fn without_session_scope() -> Self {
         let manager = Self::new();
         manager.registry.scope.close();
@@ -737,6 +756,7 @@ impl TaskManager {
     }
 
     /// 访问底层 registry（workflow 适配 / ACP 侧 Snapshot 等场景）
+    #[must_use]
     pub fn registry(&self) -> &Arc<BackgroundTaskRegistry> {
         &self.registry
     }
@@ -757,10 +777,26 @@ impl TaskManager {
 
     // ── registry 委托（Middleware 经 TaskManager 发起，不直接持有 registry）──
 
+    #[must_use]
     pub fn active_count(&self) -> usize {
         self.registry.active_count()
     }
 
+    /// 当前活跃任务数，含 child-owned 子会话的递归汇总。
+    ///
+    /// 子会话任务由各自的 owner 管理器持有；父会话不汇总会把「子 shell 仍在跑」
+    /// 投影成已完成。树形登记（每个 owner 只挂在直接父会话）保证不重复计数。
+    #[must_use]
+    pub fn active_count_including_children(&self) -> usize {
+        self.active_count()
+            + self
+                .child_owners()
+                .into_iter()
+                .map(|owner| owner.manager.active_count_including_children())
+                .sum::<usize>()
+    }
+
+    #[must_use]
     pub fn count_by_kind(&self, kind: BgTaskKind) -> usize {
         self.registry.count_by_kind(kind)
     }
@@ -824,10 +860,12 @@ impl TaskManager {
         self.registry.cancel(task_id)
     }
 
+    #[must_use]
     pub fn list_tasks(&self) -> Vec<(String, BackgroundTaskStatus, String)> {
         self.registry.list_tasks()
     }
 
+    #[must_use]
     pub fn list_tasks_full(&self) -> Vec<BgTaskInfo> {
         self.registry.list_tasks_full()
     }
@@ -874,5 +912,14 @@ impl TaskManager {
             timeout_ms,
             on_bg_complete,
         )
+    }
+}
+
+impl Debug for TaskManager {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaskManager")
+            .field("shell_executor_present", &self.shell_executor.is_some())
+            .finish_non_exhaustive()
     }
 }

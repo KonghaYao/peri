@@ -17,10 +17,11 @@ use peri_acp_types::interaction::UserInteractionBroker;
 use peri_acp_types::session_resources::SessionResources;
 use peri_agent::agent::async_tasks::TaskManager;
 use peri_agent::agent::AgentCancellationToken;
-use peri_agent::session::factory::{
-    build_invocation_rule_chain, AssemblyContext, ChainAssembly, InvocationRuleChain,
-    MiddlewareChainAssembler,
-};
+use peri_agent::session::factory;
+use peri_agent::session::factory::AssemblyContext;
+use peri_agent::session::factory::ChainAssembly;
+use peri_agent::session::factory::InvocationRuleChain;
+use peri_agent::session::factory::MiddlewareChainAssembler;
 use peri_agent::session::subagent::SubagentLlmSource;
 
 use super::workspace::SessionEnvironment;
@@ -30,10 +31,9 @@ use crate::provider::{LlmProvider, PeriConfig};
 /// session-owned 交互门：环境自带（router 借用的同一 `Arc`）；无环境（无工作区
 /// 的测试会话）时按既有语义新建一把——那时没有执行路径，门只提供形状。
 pub(crate) fn session_interaction_gate(
-    environment: &Option<Arc<SessionEnvironment>>,
+    environment: Option<&SessionEnvironment>,
 ) -> Arc<tokio::sync::Mutex<()>> {
     environment
-        .as_ref()
         .map(|env| env.interaction_gate())
         .unwrap_or_default()
 }
@@ -65,7 +65,6 @@ pub(crate) fn build_idle_invocation_rules<A>(
     broker: Arc<dyn UserInteractionBroker>,
     cancel: AgentCancellationToken,
     disabled_middlewares: &HashSet<String>,
-    agent_default_run_in_background: bool,
     session_resources: &Arc<dyn SessionResources>,
     session_task_manager: &Arc<dyn peri_acp_types::tasks::TaskManager>,
 ) -> Result<InvocationRuleChain, peri_agent::session::factory::AssemblyError>
@@ -183,10 +182,9 @@ where
         todo_tx,
         goal_controller: None,
         meta_harness_disabled: disabled_middlewares.clone(),
-        agent_default_run_in_background,
         agent_overrides: None,
         language: None,
     };
 
-    build_invocation_rule_chain(assembler, &ctx)
+    factory::build_invocation_rule_chain(assembler, &ctx)
 }

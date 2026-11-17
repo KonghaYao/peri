@@ -35,6 +35,7 @@ pub struct McpSubscriptionsSummary {
 
 impl McpSubscriptionsSummary {
     /// 无资源订阅且全部列表变化标志关闭 = 空订阅（详情显示空节）。
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.resources.is_empty()
             && !self.tools_list_changed

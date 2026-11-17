@@ -1,5 +1,11 @@
-use super::*;
+use crate::host::apps_facade::SessionAppsFacade;
+use crate::host::connection::ConnectionContext;
+use crate::host::mcp_apps::InvokeSessionGate;
 use peri_acp_types::interaction::AttachmentId;
+use peri_acp_types::mcp_apps::McpAppInvokeRequest;
+use peri_acp_types::mcp_apps::McpAppsErrorKind;
+use peri_acp_types::mcp_apps::MCP_APPS_ENVELOPE_VERSION;
+use peri_acp_types::mcp_apps::MCP_APPS_PROTOCOL_VERSION;
 use peri_acp_types::mcp_apps::{
     McpAppInvokeOutcome, McpAppsRelayError, McpAppsRelayPort, RawResource,
 };
@@ -8,6 +14,8 @@ use peri_acp_types::mcp_apps_facade::{
     CloseVerdict, ResourceList, ResourceListRequest, ResourceReadRequest, TargetIdentity,
 };
 use serde_json::json;
+use serde_json::Value;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 struct StubRelay {
@@ -137,8 +145,13 @@ fn invoke_params() -> Value {
 
 #[test]
 fn version_validation_is_fail_closed() {
-    assert!(validate_versions(MCP_APPS_ENVELOPE_VERSION, MCP_APPS_PROTOCOL_VERSION).is_ok());
-    let error = validate_versions("2", MCP_APPS_PROTOCOL_VERSION).unwrap_err();
+    assert!(crate::host::mcp_apps::validate_versions(
+        MCP_APPS_ENVELOPE_VERSION,
+        MCP_APPS_PROTOCOL_VERSION
+    )
+    .is_ok());
+    let error =
+        crate::host::mcp_apps::validate_versions("2", MCP_APPS_PROTOCOL_VERSION).unwrap_err();
     assert_eq!(error.data.unwrap()["kind"], "unsupported_envelope_version");
 }
 
@@ -259,7 +272,7 @@ async fn invoke_disabled_capability_fails_closed() {
     let mut connection = ConnectionContext::new(false);
     connection.commit_initialize(peri_acp_types::PeriCaps::default());
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
-    let error = handle_invoke(
+    let error = crate::host::mcp_apps::handle_invoke(
         &invoke_params(),
         &connection,
         Some(&relay),
@@ -279,7 +292,7 @@ async fn invoke_unknown_session_fails_closed() {
     let connection = enabled_connection();
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let test_facade = TestFacade::new(Arc::clone(&relay), &[connection.id()]);
-    let error = handle_invoke(
+    let error = crate::host::mcp_apps::handle_invoke(
         &invoke_params(),
         &connection,
         Some(&relay),
@@ -311,7 +324,7 @@ async fn invoke_is_admitted_without_session_busy_refusal() {
     let connection = enabled_connection();
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let test_facade = TestFacade::new(Arc::clone(&relay), &[connection.id()]);
-    let admitted = handle_invoke(
+    let admitted = crate::host::mcp_apps::handle_invoke(
         &invoke_params(),
         &connection,
         Some(&relay),
@@ -326,7 +339,7 @@ async fn invoke_is_admitted_without_session_busy_refusal() {
     assert_eq!(admitted.value["toolCallId"], "tool-new-1");
 
     // 第二次 invoke：准入面无状态可选，拒绝只能来自 relay 自己的错误面。
-    let error = handle_invoke(
+    let error = crate::host::mcp_apps::handle_invoke(
         &invoke_params(),
         &connection,
         Some(&relay),
@@ -351,7 +364,7 @@ async fn invoke_while_session_is_closing_is_policy_denied() {
     let connection = enabled_connection();
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let test_facade = TestFacade::new(Arc::clone(&relay), &[connection.id()]);
-    let error = handle_invoke(
+    let error = crate::host::mcp_apps::handle_invoke(
         &invoke_params(),
         &connection,
         Some(&relay),
@@ -373,7 +386,7 @@ async fn invoke_relay_policy_denial_does_not_project_success() {
         invoke: std::sync::Mutex::new(Some(Err(McpAppsErrorKind::PolicyDenied))),
     });
     let test_facade = TestFacade::new(Arc::clone(&relay), &[connection.id()]);
-    let error = handle_invoke(
+    let error = crate::host::mcp_apps::handle_invoke(
         &invoke_params(),
         &connection,
         Some(&relay),
@@ -393,7 +406,7 @@ async fn invoke_success_returns_tool_call_id_without_synthetic_model_cards() {
     let connection = enabled_connection();
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let test_facade = TestFacade::new(Arc::clone(&relay), &[connection.id()]);
-    let result = handle_invoke(
+    let result = crate::host::mcp_apps::handle_invoke(
         &invoke_params(),
         &connection,
         Some(&relay),
@@ -422,7 +435,7 @@ async fn invoke_unknown_method_through_request_router_is_unsupported() {
     // 旧 relay 面自 S6 起也不再参与 `handle_request` 的任何分支（别名走 facade）。
     let relay: Arc<dyn McpAppsRelayPort> = Arc::new(StubRelay::invoke_ok());
     let test_facade = TestFacade::new(relay, &[connection.id()]);
-    let error = handle_request(
+    let error = crate::host::mcp_apps::handle_request(
         "peri/mcp/invoke",
         &invoke_params(),
         &mut connection,
@@ -452,9 +465,10 @@ async fn legacy_aliases_and_new_methods_share_the_same_facade_requirement() {
         "peri/mcp/resource",
     ] {
         let mut connection = enabled_connection();
-        let error = handle_request(method, &json!({}), &mut connection, None)
-            .await
-            .unwrap_err();
+        let error =
+            crate::host::mcp_apps::handle_request(method, &json!({}), &mut connection, None)
+                .await
+                .unwrap_err();
         assert_eq!(
             error.data.unwrap()["kind"],
             "capability_disabled",
@@ -468,8 +482,13 @@ async fn legacy_aliases_and_new_methods_share_the_same_facade_requirement() {
 async fn capability_disabled_connection_is_refused_for_new_methods() {
     let mut connection = ConnectionContext::new(false);
     connection.commit_initialize(peri_acp_types::PeriCaps::default());
-    let error = handle_request("peri/mcp/apps/list", &json!({}), &mut connection, None)
-        .await
-        .unwrap_err();
+    let error = crate::host::mcp_apps::handle_request(
+        "peri/mcp/apps/list",
+        &json!({}),
+        &mut connection,
+        None,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.data.unwrap()["kind"], "capability_disabled");
 }

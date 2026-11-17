@@ -55,10 +55,15 @@ pub struct JemallocBreakdown {
     pub retained: usize,
 }
 
-/// Set allocator environment variables before initialization.
+/// Set allocator environment variables before ordinary runtime startup.
+///
+/// # Safety
+///
+/// If `MALLOC_CONF` is absent, call before starting threads that may read the process environment.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn init_alloc_conf() {
+pub unsafe fn init_alloc_conf() {
     if std::env::var("MALLOC_CONF").is_err() {
+        // SAFETY: The caller guarantees environment mutation precedes concurrent environment readers.
         unsafe {
             std::env::set_var(
                 "MALLOC_CONF",
@@ -68,8 +73,13 @@ pub fn init_alloc_conf() {
     }
 }
 
+/// Platform allocator setup has no work on system-allocator targets.
+///
+/// # Safety
+///
+/// Keep the startup-only calling convention so the same caller is valid on jemalloc targets.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub fn init_alloc_conf() {}
+pub unsafe fn init_alloc_conf() {}
 
 /// Force jemalloc to aggressively reclaim freed memory.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -80,7 +90,8 @@ pub fn alloc_collect() {
     if let Ok(n) = tikv_jemalloc_ctl::arenas::narenas::read() {
         for i in 0..n {
             let key = format!("arena.{}.purge\0", i);
-            // Safety: key is null-terminated, jemalloc handles arena.purge
+            // SAFETY: The key is a live NUL-terminated arena purge command; null value buffers request an action only.
+            // jemalloc exposes arena purging only through its C mallctl interface.
             unsafe {
                 tikv_jemalloc_sys::mallctl(
                     key.as_ptr() as *const _,
@@ -169,6 +180,7 @@ pub fn os_rss_mb() -> Option<u64> {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[must_use]
 fn bytes_to_mib(bytes: u64) -> u64 {
     bytes / 1024 / 1024
 }

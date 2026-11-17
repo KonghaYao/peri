@@ -1,22 +1,18 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use ratatui::style::Style;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui_kit_markdown::{MarkdownTheme, ParsedBlock};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::kit::image_safety::{UrlKind, classify_url, sanitize_for_terminal};
+use crate::kit::image_safety::UrlKind;
 
-use super::code_block::code_block_lines;
-use super::heading::heading_line;
-use super::list::{LIST_ITEM_GAP_MAX_DEPTH, list_item_gap, list_item_line};
+use super::list::LIST_ITEM_GAP_MAX_DEPTH;
 use super::scan::ImageInfo;
-use super::span_style::apply_span_styles;
-use super::table::compute_table_col_widths;
+
 use super::types::{ImageSegment, MarkdownSegment, TableData};
 
 // ── 图片 token 侧表查表（T3）────────────────────────────────────────
@@ -181,214 +177,255 @@ pub(crate) fn convert_to_segments_with_state(
     image_infos: &[ImageInfo],
     lookup: &HashMap<&str, usize>,
 ) -> Vec<MarkdownSegment> {
-    for (i, block) in blocks.iter().enumerate() {
-        if i < state.processed_block_count {
-            continue;
-        }
-
-        // 跳过 parser 生成的空 Paragraph（列表前后的哨兵）
-        if matches!(block, ParsedBlock::Paragraph(lines) if lines.is_empty()) {
-            state.prev_was_list_item = false;
-            state.processed_block_count = i + 1;
-            state.block_line_ends.push(state.current_text.len());
-            continue;
-        }
-
-        let list_depth = match block {
-            ParsedBlock::ListItem(item) => Some(item.depth),
-            _ => None,
-        };
-        let is_list_item = list_depth.is_some();
-
-        // 连续列表项是否保持紧凑（不插空行）：上一块也是列表项，且间距策略判定
-        // 该深度不插空行（见 [`list_item_gap`]）。顶层列表项默认插空行。
-        let tight_list_items = state.prev_was_list_item
-            && list_depth.is_some_and(|depth| !list_item_gap(LIST_ITEM_GAP_MAX_DEPTH, depth));
-
-        // 分隔：非首块 + 非紧凑列表项序列 → 确保恰好一行空行
-        if !(state.current_text.is_empty()
-            || state
-                .current_text
-                .last()
-                .is_some_and(|l| l.spans.is_empty())
-            || tight_list_items)
-        {
-            state.current_text.push(Line::default());
-        }
-
-        match block {
-            ParsedBlock::Heading(level, line) => {
-                // [P0-1 修复] 标题内图片 token 在 span 层替换为降级文案（与
-                // 表格单元格同一策略：不拆段、保持标题结构/样式完整）——
-                // 否则 NUL 包裹 token 宽度为 0，标题渲染为空行（内容丢失）。
-                let line = replace_line_tokens(
-                    &heading_line(level, line, theme),
-                    lookup,
-                    image_infos,
-                    theme,
-                    base_style,
-                );
-                state
-                    .current_text
-                    .extend(wrap_styled_line(&line, max_width));
+    {
+        let iteration_items = blocks.iter().enumerate();
+        for (i, block) in iteration_items {
+            if i < state.processed_block_count {
+                continue;
             }
-            ParsedBlock::Paragraph(para_lines) => {
-                // 检测「可能是表头行」的 Paragraph：首行以 | 开头，
-                // 流式期间分隔符未到达时被误判为 Paragraph，后续 block 类型会翻转为 Table。
-                if !state.has_potential_table_header
-                    && para_lines
-                        .first()
-                        .and_then(|l| l.spans.first())
-                        .is_some_and(|s| s.content.starts_with('|'))
-                {
-                    state.has_potential_table_header = true;
+
+            // 跳过 parser 生成的空 Paragraph（列表前后的哨兵）
+            if matches!(block, ParsedBlock::Paragraph(lines) if lines.is_empty()) {
+                state.prev_was_list_item = false;
+                state.processed_block_count = i + 1;
+                state.block_line_ends.push(state.current_text.len());
+                continue;
+            }
+
+            let list_depth = match block {
+                ParsedBlock::ListItem(item) => Some(item.depth),
+                _ => None,
+            };
+            let is_list_item = list_depth.is_some();
+
+            // 连续列表项是否保持紧凑（不插空行）：上一块也是列表项，且间距策略判定
+            // 该深度不插空行（见 [`list_item_gap`]）。顶层列表项默认插空行。
+            let tight_list_items = state.prev_was_list_item
+                && list_depth.is_some_and(|depth| {
+                    !super::list::list_item_gap(LIST_ITEM_GAP_MAX_DEPTH, depth)
+                });
+
+            // 分隔：非首块 + 非紧凑列表项序列 → 确保恰好一行空行
+            if !(state.current_text.is_empty()
+                || state
+                    .current_text
+                    .last()
+                    .is_some_and(|l| l.spans.is_empty())
+                || tight_list_items)
+            {
+                state.current_text.push(Line::default());
+            }
+
+            match block {
+                ParsedBlock::Heading(level, line) => {
+                    // [P0-1 修复] 标题内图片 token 在 span 层替换为降级文案（与
+                    // 表格单元格同一策略：不拆段、保持标题结构/样式完整）——
+                    // 否则 NUL 包裹 token 宽度为 0，标题渲染为空行（内容丢失）。
+                    let line = replace_line_tokens(
+                        &super::heading::heading_line(level, line, theme),
+                        lookup,
+                        image_infos,
+                        theme,
+                        base_style,
+                    );
+                    state
+                        .current_text
+                        .extend(wrap_styled_line(&line, max_width));
                 }
-                // [T3 图片拆段] 占位 token 替换为 Image 段（spec §3.4）。
-                // standalone：段落剔除全部命中 token 后仅剩空白 → 段级间距；
-                // 否则行内混排，拆段 flush 出独立 Text 段 + Image 段。
-                let standalone = para_lines.iter().all(|l| line_is_only_images(l, lookup));
-                // [P1-1 修复] 同段多图合并：standalone 段内连续图片合并为
-                // **一个** Image 段（lines 多行、段内无空行），与跨段
-                // （`\n\n` 分隔的独立段落）区分——render 层 gap 规则据此
-                // 对跨段独立图片加空行（§3.5「独占段前后有空行」）。
-                let mut pending_image: Option<usize> = None;
-                for line in para_lines {
-                    let parts = split_line_by_tokens(line, lookup);
-                    if parts.is_empty() {
-                        // 快速路径：无图片（常见路径，与 T2 前行为一致）
-                        state.current_text.extend(wrap_styled_line(
-                            &style_line(line, theme, base_style),
-                            max_width,
-                        ));
-                        continue;
+                ParsedBlock::Paragraph(para_lines) => {
+                    // 检测「可能是表头行」的 Paragraph：首行以 | 开头，
+                    // 流式期间分隔符未到达时被误判为 Paragraph，后续 block 类型会翻转为 Table。
+                    if !state.has_potential_table_header
+                        && para_lines
+                            .first()
+                            .and_then(|l| l.spans.first())
+                            .is_some_and(|s| s.content.starts_with('|'))
+                    {
+                        state.has_potential_table_header = true;
                     }
-                    for part in parts {
-                        match part {
-                            LinePart::Text(frag) => {
-                                // 独占段内仅空白的片段（如 `![a](u) ![b](v)` 图间空格）
-                                // 不累积：保持连续独占 Image 段，避免 render 层间隙误判
-                                // （§3.5：独占段连续无间隙、仅首段前加）。
-                                if standalone
-                                    && frag
-                                        .spans
-                                        .iter()
-                                        .all(|s| s.content.as_ref().trim().is_empty())
-                                {
-                                    continue;
-                                }
-                                // 行内混排：后续图片不与该段前图合并。
-                                pending_image = None;
-                                state.current_text.extend(wrap_styled_line(
-                                    &style_line(&frag, theme, base_style),
-                                    max_width,
-                                ));
-                            }
-                            LinePart::Image { idx } => {
-                                // 锚点处 flush 已累积文本为独立 Text 段
-                                // （拆段不破坏块间距：段落间距空行仍在 current_text
-                                // 缓冲层，segment 间间隙由 render.rs §3.5 规则接管）。
-                                trim_trailing_blanks(&mut state.current_text);
-                                if !state.current_text.is_empty() {
-                                    state.segments.push(MarkdownSegment::Text(std::mem::take(
-                                        &mut state.current_text,
-                                    )));
-                                    pending_image = None;
-                                }
-                                let info = &image_infos[idx];
-                                let seg = build_image_segment(
-                                    info, standalone, theme, base_style, max_width,
-                                );
-                                if standalone {
-                                    if let Some(img_idx) = pending_image
-                                        && let MarkdownSegment::Image(prev) =
-                                            &mut state.segments[img_idx]
+                    // [T3 图片拆段] 占位 token 替换为 Image 段（spec §3.4）。
+                    // standalone：段落剔除全部命中 token 后仅剩空白 → 段级间距；
+                    // 否则行内混排，拆段 flush 出独立 Text 段 + Image 段。
+                    let standalone = para_lines.iter().all(|l| line_is_only_images(l, lookup));
+                    // [P1-1 修复] 同段多图合并：standalone 段内连续图片合并为
+                    // **一个** Image 段（lines 多行、段内无空行），与跨段
+                    // （`\n\n` 分隔的独立段落）区分——render 层 gap 规则据此
+                    // 对跨段独立图片加空行（§3.5「独占段前后有空行」）。
+                    let mut pending_image: Option<usize> = None;
+                    for line in para_lines {
+                        let parts = split_line_by_tokens(line, lookup);
+                        if parts.is_empty() {
+                            // 快速路径：无图片（常见路径，与 T2 前行为一致）
+                            state.current_text.extend(wrap_styled_line(
+                                &style_line(line, theme, base_style),
+                                max_width,
+                            ));
+                            continue;
+                        }
+                        for part in parts {
+                            match part {
+                                LinePart::Text(frag) => {
+                                    // 独占段内仅空白的片段（如 `![a](u) ![b](v)` 图间空格）
+                                    // 不累积：保持连续独占 Image 段，避免 render 层间隙误判
+                                    // （§3.5：独占段连续无间隙、仅首段前加）。
+                                    if standalone
+                                        && frag
+                                            .spans
+                                            .iter()
+                                            .all(|s| s.content.as_ref().trim().is_empty())
                                     {
-                                        // 同段多图：降级行追加到已合并段
-                                        // （段内连续，无空行）。
-                                        prev.lines.extend(seg.lines);
+                                        continue;
+                                    }
+                                    // 行内混排：后续图片不与该段前图合并。
+                                    pending_image = None;
+                                    state.current_text.extend(wrap_styled_line(
+                                        &style_line(&frag, theme, base_style),
+                                        max_width,
+                                    ));
+                                }
+                                LinePart::Image { idx } => {
+                                    // 锚点处 flush 已累积文本为独立 Text 段
+                                    // （拆段不破坏块间距：段落间距空行仍在 current_text
+                                    // 缓冲层，segment 间间隙由 render.rs §3.5 规则接管）。
+                                    trim_trailing_blanks(&mut state.current_text);
+                                    if !state.current_text.is_empty() {
+                                        state.segments.push(MarkdownSegment::Text(std::mem::take(
+                                            &mut state.current_text,
+                                        )));
+                                        pending_image = None;
+                                    }
+                                    let info = &image_infos[idx];
+                                    let seg = build_image_segment(
+                                        info, standalone, theme, base_style, max_width,
+                                    );
+                                    if standalone {
+                                        if let Some(img_idx) = pending_image
+                                            && let MarkdownSegment::Image(prev) =
+                                                &mut state.segments[img_idx]
+                                        {
+                                            // 同段多图：降级行追加到已合并段
+                                            // （段内连续，无空行）。
+                                            prev.lines.extend(seg.lines);
+                                        } else {
+                                            state.segments.push(MarkdownSegment::Image(seg));
+                                            pending_image = Some(state.segments.len() - 1);
+                                        }
                                     } else {
                                         state.segments.push(MarkdownSegment::Image(seg));
-                                        pending_image = Some(state.segments.len() - 1);
                                     }
-                                } else {
-                                    state.segments.push(MarkdownSegment::Image(seg));
                                 }
                             }
                         }
                     }
                 }
-            }
-            ParsedBlock::CodeBlock(lang, code_lines) => {
-                for line in code_block_lines(lang, code_lines, theme) {
-                    for mut visual_line in wrap_styled_line(&line, max_width) {
-                        // code block 的背景必须覆盖整个 content 区，而不只是已有字符。
-                        // 折行后逐视觉行补齐，保证超长代码的每一行也铺满右侧。
-                        let width = visual_line.width();
-                        if width < max_width
-                            && let Some(background) =
-                                visual_line.spans.first().and_then(|span| span.style.bg)
-                        {
-                            visual_line.spans.push(Span::styled(
-                                " ".repeat(max_width - width),
-                                Style::default().bg(background),
-                            ));
+                ParsedBlock::CodeBlock(lang, code_lines) => {
+                    if lang == "gen-ui" || lang == "gen-ui-partial" {
+                        trim_trailing_blanks(&mut state.current_text);
+                        if !state.current_text.is_empty() {
+                            state.segments.push(MarkdownSegment::Text(std::mem::take(
+                                &mut state.current_text,
+                            )));
                         }
-                        state.current_text.push(visual_line);
+                        let source = code_lines
+                            .join("\n")
+                            .replace(super::parser::GENUI_BACKTICKS, "```");
+                        match crate::kit::genui::library::library() {
+                            Ok(library) => state.segments.push(MarkdownSegment::GenUi(
+                                super::types::GenUiSegment::parse(
+                                    source,
+                                    lang == "gen-ui-partial",
+                                    library,
+                                ),
+                            )),
+                            Err(error) => {
+                                let theme_state = peri_theme::atoms::THEME_ATOM.state();
+                                let muted = theme_state.read().semantic.text.muted;
+                                state.current_text.push(Line::from(Span::styled(
+                                    format!("gen-ui: {error}"),
+                                    base_style.fg(muted),
+                                )));
+                            }
+                        }
+                        // 旧测试缓存不能续跑已移出的结构段，沿用动态块的失效条件。
+                        state.has_table_in_processed_blocks = true;
+                    } else {
+                        for line in super::code_block::code_block_lines(lang, code_lines, theme) {
+                            for mut visual_line in wrap_styled_line(&line, max_width) {
+                                // code block 的背景必须覆盖整个 content 区，而不只是已有字符。
+                                // 折行后逐视觉行补齐，保证超长代码的每一行也铺满右侧。
+                                let width = visual_line.width();
+                                if width < max_width
+                                    && let Some(background) =
+                                        visual_line.spans.first().and_then(|span| span.style.bg)
+                                {
+                                    visual_line.spans.push(Span::styled(
+                                        " ".repeat(max_width - width),
+                                        Style::default().bg(background),
+                                    ));
+                                }
+                                state.current_text.push(visual_line);
+                            }
+                        }
                     }
                 }
-            }
-            ParsedBlock::ListItem(item) => {
-                // [P0-1 修复] 列表项内图片 token 在 span 层替换为降级文案
-                // （同 Heading 分支；列表标记 `• ` 保留，图片可见）。
-                let line = replace_line_tokens(
-                    &list_item_line(item, theme, base_style),
-                    lookup,
-                    image_infos,
-                    theme,
-                    base_style,
-                );
-                state
-                    .current_text
-                    .extend(wrap_styled_line(&line, max_width));
-            }
-            ParsedBlock::Rule => {
-                let rule_char = "─".repeat(max_width.min(80));
-                let rule_span = Span::styled(rule_char, theme.rule_style);
-                state.current_text.push(Line::from(rule_span));
-            }
-            ParsedBlock::Table(headers, rows, alignments) => {
-                // 表格前：冲刷已有文本为独立段
-                trim_trailing_blanks(&mut state.current_text);
-                if !state.current_text.is_empty() {
-                    state.segments.push(MarkdownSegment::Text(std::mem::take(
-                        &mut state.current_text,
-                    )));
+                ParsedBlock::ListItem(item) => {
+                    // [P0-1 修复] 列表项内图片 token 在 span 层替换为降级文案
+                    // （同 Heading 分支；列表标记 `• ` 保留，图片可见）。
+                    let line = replace_line_tokens(
+                        &super::list::list_item_line(item, theme, base_style),
+                        lookup,
+                        image_infos,
+                        theme,
+                        base_style,
+                    );
+                    state
+                        .current_text
+                        .extend(wrap_styled_line(&line, max_width));
                 }
-                // [T3 表格单元格] P0 不拆段：单元格内 token 在 span 样式层替换为
-                // 降级文案 span（spec §3.6 验收：单元格显示降级文案、结构完整）。
-                // 替换必须在列宽计算之前（宽度按降级文案计）。
-                let headers = replace_cell_tokens(headers, lookup, image_infos, theme, base_style);
-                let rows = rows
-                    .iter()
-                    .map(|row| replace_cell_tokens(row, lookup, image_infos, theme, base_style))
-                    .collect::<Vec<_>>();
-                let col_widths =
-                    compute_table_col_widths(&headers, &rows, alignments.len(), max_width);
-                state.segments.push(MarkdownSegment::Table(TableData {
-                    headers,
-                    rows,
-                    alignments: alignments.clone(),
-                    col_widths,
-                }));
-                // Table 是动态块：后续追加行会改变同一 block 的内容。
-                // 标记以便缓存层知道不能续跑此状态。
-                state.has_table_in_processed_blocks = true;
+                ParsedBlock::Rule => {
+                    let rule_char = "─".repeat(max_width.min(80));
+                    let rule_span = Span::styled(rule_char, theme.rule_style);
+                    state.current_text.push(Line::from(rule_span));
+                }
+                ParsedBlock::Table(headers, rows, alignments) => {
+                    // 表格前：冲刷已有文本为独立段
+                    trim_trailing_blanks(&mut state.current_text);
+                    if !state.current_text.is_empty() {
+                        state.segments.push(MarkdownSegment::Text(std::mem::take(
+                            &mut state.current_text,
+                        )));
+                    }
+                    // [T3 表格单元格] P0 不拆段：单元格内 token 在 span 样式层替换为
+                    // 降级文案 span（spec §3.6 验收：单元格显示降级文案、结构完整）。
+                    // 替换必须在列宽计算之前（宽度按降级文案计）。
+                    let headers =
+                        replace_cell_tokens(headers, lookup, image_infos, theme, base_style);
+                    let rows = rows
+                        .iter()
+                        .map(|row| replace_cell_tokens(row, lookup, image_infos, theme, base_style))
+                        .collect::<Vec<_>>();
+                    let col_widths = super::table::compute_table_col_widths(
+                        &headers,
+                        &rows,
+                        alignments.len(),
+                        max_width,
+                    );
+                    state.segments.push(MarkdownSegment::Table(TableData {
+                        headers,
+                        rows,
+                        alignments: alignments.clone(),
+                        col_widths,
+                    }));
+                    // Table 是动态块：后续追加行会改变同一 block 的内容。
+                    // 标记以便缓存层知道不能续跑此状态。
+                    state.has_table_in_processed_blocks = true;
+                }
             }
-        }
 
-        state.prev_was_list_item = is_list_item;
-        state.processed_block_count = i + 1;
-        state.block_line_ends.push(state.current_text.len());
+            state.prev_was_list_item = is_list_item;
+            state.processed_block_count = i + 1;
+            state.block_line_ends.push(state.current_text.len());
+        }
     }
 
     // 末尾 flush：segments 用 mem::take 移出（零拷贝）——续跑路径下 segments
@@ -414,7 +451,11 @@ fn trim_trailing_blanks(text: &mut Vec<Line<'static>>) {
 
 /// 通用段落行渲染。`base_style` 作为普通文本的兜底前景色。
 fn style_line(line: &Line<'static>, theme: &MarkdownTheme, base_style: Style) -> Line<'static> {
-    Line::from(apply_span_styles(&line.spans, theme, Some(base_style)))
+    Line::from(super::span_style::apply_span_styles(
+        &line.spans,
+        theme,
+        Some(base_style),
+    ))
 }
 
 /// 按 display width 将带样式行折为多行（保留 span 样式）。
@@ -575,12 +616,12 @@ fn image_degraded_spans(
     theme: &MarkdownTheme,
     base_style: Style,
 ) -> Vec<Span<'static>> {
-    let sanitized_alt = sanitize_for_terminal(&info.alt);
+    let sanitized_alt = crate::kit::image_safety::sanitize_for_terminal(&info.alt);
     let alt = truncate_chars(&sanitized_alt, 64);
-    let sanitized_url = sanitize_for_terminal(&info.url);
+    let sanitized_url = crate::kit::image_safety::sanitize_for_terminal(&info.url);
     let url = truncate_chars(&sanitized_url, 200);
     // scheme 分类用原始 url（截断可能破坏 scheme 前缀）
-    let is_remote = classify_url(&info.url) == UrlKind::RemoteHttp;
+    let is_remote = crate::kit::image_safety::classify_url(&info.url) == UrlKind::RemoteHttp;
     let label: String = if is_remote {
         if alt.is_empty() {
             "[Remote image] ".to_string()
@@ -609,11 +650,24 @@ fn build_image_segment(
     let spans = image_degraded_spans(info, theme, base_style);
     let lines = wrap_styled_line(&Line::from(spans), max_width);
     ImageSegment {
-        alt: truncate_chars(&sanitize_for_terminal(&info.alt), 64).into_owned(),
-        url: truncate_chars(&sanitize_for_terminal(&info.url), 200).into_owned(),
-        title: (!info.title.is_empty())
-            .then(|| truncate_chars(&sanitize_for_terminal(&info.title), 200).into_owned()),
-        is_remote: classify_url(&info.url) == UrlKind::RemoteHttp,
+        alt: truncate_chars(
+            &crate::kit::image_safety::sanitize_for_terminal(&info.alt),
+            64,
+        )
+        .into_owned(),
+        url: truncate_chars(
+            &crate::kit::image_safety::sanitize_for_terminal(&info.url),
+            200,
+        )
+        .into_owned(),
+        title: (!info.title.is_empty()).then(|| {
+            truncate_chars(
+                &crate::kit::image_safety::sanitize_for_terminal(&info.title),
+                200,
+            )
+            .into_owned()
+        }),
+        is_remote: crate::kit::image_safety::classify_url(&info.url) == UrlKind::RemoteHttp,
         standalone,
         byte_start: info.byte_start,
         byte_end: info.byte_end,

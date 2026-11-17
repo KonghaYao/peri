@@ -7,9 +7,11 @@ use peri_acp_types::history_v2::{
 };
 use peri_acp_types::history_window::HistoryBodyChunk;
 
-use super::*;
+use super::{DETAIL_WINDOW_MAX_BYTES, DetailError, HistoryDetailWindow};
+
 use crate::kit::history_window::{DetailDescriptor, HistorySource, HistoryV2BodyBinding};
 
+#[must_use]
 fn descriptor(total: u64) -> DetailDescriptor {
     DetailDescriptor::new(
         HistorySource::Own,
@@ -21,6 +23,7 @@ fn descriptor(total: u64) -> DetailDescriptor {
     )
 }
 
+#[must_use]
 fn chunk(offset: u64, bytes: &[u8], complete: bool, next: Option<u64>) -> HistoryBodyChunk {
     HistoryBodyChunk {
         entry_id: "s1:m1".into(),
@@ -221,9 +224,9 @@ fn open_close_detail_uses_window_descriptor_and_keeps_slot_state() {
     let descriptor = descriptor(1024);
     let key = descriptor.key.clone();
     window.register_detail_descriptor(descriptor);
-    open_history_detail(&window, &key).expect("open detail");
+    super::open_history_detail(&window, &key).expect("open detail");
     assert!(crate::kit::atoms::HISTORY_DETAIL.state().read().is_some());
-    close_history_detail();
+    super::close_history_detail();
     assert!(crate::kit::atoms::HISTORY_DETAIL.state().read().is_none());
 }
 
@@ -237,7 +240,7 @@ fn session_boundary_clears_detail_and_focus() {
     let descriptor = descriptor(1024);
     let key = descriptor.key.clone();
     window.register_detail_descriptor(descriptor);
-    open_history_detail(&window, &key).expect("open detail");
+    super::open_history_detail(&window, &key).expect("open detail");
     crate::kit::atoms::FOCUSED_ENTRY
         .set(Some(crate::kit::atoms::FocusedEntry { slot: 3, key: None }));
     let old_active = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
@@ -293,13 +296,13 @@ fn event_layer_opens_detail_from_placeholder_and_clears_on_close() {
         content_hash: hash,
         descriptor: descriptor.clone(),
     }]);
-    assert!(open_detail_from_slot(0));
+    assert!(super::open_detail_from_slot(0));
     assert!(HISTORY_DETAIL.state().read().is_some());
     assert_eq!(
         *ACTIVE_PANEL.state().read(),
         Some(crate::app::panel_types::PanelKind::HistoryDetail)
     );
-    close_history_detail();
+    super::close_history_detail();
     crate::kit::panel_registry::close_active_panel();
     assert!(HISTORY_DETAIL.state().read().is_none());
     HISTORY_DETAIL_TARGETS.set(Vec::new());
@@ -321,7 +324,7 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
     crate::kit::atoms::HISTORY_DETAIL
         .set(Some(HistoryDetailWindow::open(descriptor).expect("open")));
 
-    let first = scroll_detail_request(1).expect("first scroll must request a chunk");
+    let first = super::scroll_detail_request(1).expect("first scroll must request a chunk");
     assert_eq!(
         first.offset, 1024,
         "scroll_to registers the uncovered offset"
@@ -344,9 +347,9 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
         .expect("detail")
         .apply_chunk(chunk(1024, &vec![b'a'; 1024], false, Some(2048)), 1024)
         .expect("apply first request");
-    let second = scroll_detail_request(1).expect("second scroll must request a chunk");
+    let second = super::scroll_detail_request(1).expect("second scroll must request a chunk");
     assert_eq!(second.offset, 2048);
-    close_history_detail();
+    super::close_history_detail();
 }
 
 #[test]
@@ -415,7 +418,8 @@ fn detail_panel_lines_show_loading_error_and_inherited_notice() {
     let theme = peri_theme::atoms::THEME_ATOM.state().read().clone();
     let mut window = HistoryDetailWindow::open(descriptor(4)).expect("open");
     window.fail("ticket expired");
-    let lines = build_history_detail_lines(Some(&window), Some("inherited unsupported"), &theme);
+    let lines =
+        super::build_history_detail_lines(Some(&window), Some("inherited unsupported"), &theme);
     let rendered = lines
         .iter()
         .map(|line| {
@@ -430,7 +434,7 @@ fn detail_panel_lines_show_loading_error_and_inherited_notice() {
     assert!(rendered.contains("ticket expired"));
     assert!(rendered.contains("s1:m1"));
 
-    let lines = build_history_detail_lines(None, None, &theme);
+    let lines = super::build_history_detail_lines(None, None, &theme);
     assert!(!lines.is_empty());
 }
 
@@ -442,7 +446,7 @@ fn detail_scroll_event_path_requests_next_chunk_without_main_viewport_change() {
         HistoryDetailWindow::open(descriptor(1024)).expect("open"),
     ));
     let before = crate::kit::atoms::WINDOW_VIEWPORT.state().read().clone();
-    scroll_detail(1);
+    super::scroll_detail(1);
     let detail = crate::kit::atoms::HISTORY_DETAIL
         .state()
         .read()
@@ -457,7 +461,7 @@ fn detail_scroll_event_path_requests_next_chunk_without_main_viewport_change() {
         crate::kit::atoms::WINDOW_VIEWPORT.state().read().clone(),
         before
     );
-    close_history_detail();
+    super::close_history_detail();
 }
 
 #[test]
@@ -578,7 +582,7 @@ fn detail_incomplete_tail_at_eof_is_still_corruption() {
 fn detail_true_corruption_still_reports_utf8() {
     let mut window = HistoryDetailWindow::open(descriptor(9)).expect("open");
     let mut bytes = b"abcde".to_vec();
-    bytes.push(0xFF);
+    bytes.push(0xff);
     bytes.extend_from_slice(b"xyz");
     window
         .apply_chunk(chunk(0, &bytes, true, None), 256 * 1024)
@@ -598,7 +602,7 @@ fn detail_export_reports_prefix_gap_instead_of_copying_empty() {
     assert_eq!(window.loaded_text(), Err(DetailError::ExportGap));
 
     crate::kit::atoms::HISTORY_DETAIL.set(Some(window));
-    export_detail_to_clipboard();
+    super::export_detail_to_clipboard();
     let detail = crate::kit::atoms::HISTORY_DETAIL
         .state()
         .read()
@@ -612,7 +616,7 @@ fn detail_export_reports_prefix_gap_instead_of_copying_empty() {
         "export must explain the prefix gap: {:?}",
         detail.last_error
     );
-    close_history_detail();
+    super::close_history_detail();
 }
 
 #[test]

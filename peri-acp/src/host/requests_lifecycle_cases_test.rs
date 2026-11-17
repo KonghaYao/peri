@@ -1,4 +1,9 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 删除后：响应为空对象、线程从 store 移除（load_meta 报错）、活跃会话从
 /// sessions 表清理。
@@ -6,26 +11,29 @@ use super::*;
 #[tokio::test]
 async fn test_delete_removes_thread_and_active_session() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp.path().to_str().unwrap();
 
     // 真实创建线程（id 即 session id）
-    let thread_id = create_bound_fixture(&cfg, cwd, None).await;
+    let thread_id = crate::host::requests::tests::create_bound_fixture(&cfg, cwd, None).await;
     let sid = thread_id.clone();
 
     // 活跃会话登记（与 session/new 后的内存态一致）
-    register_session_with_workflow(&mut sessions, &sid, cwd, &cfg).await;
+    crate::host::requests::tests::register_session_with_workflow(&mut sessions, &sid, cwd, &cfg)
+        .await;
 
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "session/delete",
         &json!({ "sessionId": sid }),
         &cfg,
@@ -72,18 +80,20 @@ async fn test_delete_removes_thread_and_active_session() {
 #[tokio::test]
 async fn test_delete_unknown_session_is_idempotent() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "session/delete",
         &json!({ "sessionId": "never-existed" }),
         &cfg,
@@ -99,18 +109,20 @@ async fn test_delete_unknown_session_is_idempotent() {
 #[tokio::test]
 async fn test_delete_missing_session_id_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "session/delete",
         &json!({}),
         &cfg,
@@ -133,22 +145,24 @@ async fn test_delete_missing_session_id_returns_error() {
 #[tokio::test]
 async fn test_rename_persists_title_and_pushes_session_info_update() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let mock = std::sync::Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
     let cwd = tmp.path().to_str().unwrap();
 
     // 真实创建线程（id 即 session id），与 session/new 后的持久层状态一致
-    let sid = create_bound_fixture(&cfg, cwd, None).await;
-    handle_request(
+    let sid = crate::host::requests::tests::create_bound_fixture(&cfg, cwd, None).await;
+    crate::host::requests::handle_request(
         "session/load",
         &json!({ "sessionId": sid }),
         &cfg,
@@ -159,7 +173,7 @@ async fn test_rename_persists_title_and_pushes_session_info_update() {
     .unwrap();
     let new_title = "重构 ACP 协议".to_string();
 
-    let resp = handle_request(
+    let resp = crate::host::requests::handle_request(
         "session/rename",
         &json!({ "sessionId": sid, "title": new_title }),
         &cfg,
@@ -197,18 +211,20 @@ async fn test_rename_persists_title_and_pushes_session_info_update() {
 #[tokio::test]
 async fn test_rename_missing_session_id_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "session/rename",
         &json!({ "title": "无 sessionId" }),
         &cfg,
@@ -229,18 +245,20 @@ async fn test_rename_missing_session_id_returns_error() {
 #[tokio::test]
 async fn test_rename_missing_title_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
 
-    let err = handle_request(
+    let err = crate::host::requests::handle_request(
         "session/rename",
         &json!({ "sessionId": "some-session" }),
         &cfg,

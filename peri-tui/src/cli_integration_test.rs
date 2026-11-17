@@ -57,7 +57,7 @@ struct TestCli {
 fn test_print_with_prompt() {
     let cli = TestCli::try_parse_from(["peri", "-p", "hello world"]);
     assert!(cli.is_ok());
-    let cli = cli.unwrap();
+    let cli = cli.expect("print with prompt: the unwrap fixture operation uses valid inputs");
     assert_eq!(cli.print, Some(Some("hello world".to_string())));
 }
 
@@ -65,7 +65,7 @@ fn test_print_with_prompt() {
 fn test_print_without_prompt() {
     let cli = TestCli::try_parse_from(["peri", "-p"]);
     assert!(cli.is_ok());
-    let cli = cli.unwrap();
+    let cli = cli.expect("print without prompt: the unwrap fixture operation uses valid inputs");
     assert_eq!(cli.print, Some(None));
 }
 
@@ -89,7 +89,7 @@ fn test_permission_mode_aliases() {
 fn test_allowed_tools() {
     let cli = TestCli::try_parse_from(["peri", "--allowedTools", "Bash", "--allowedTools", "Edit"]);
     assert!(cli.is_ok());
-    let cli = cli.unwrap();
+    let cli = cli.expect("allowed tools: the unwrap fixture operation uses valid inputs");
     assert_eq!(
         cli.allowed_tools,
         Some(vec!["Bash".to_string(), "Edit".to_string()])
@@ -100,7 +100,7 @@ fn test_allowed_tools() {
 fn test_resume_with_value() {
     let cli = TestCli::try_parse_from(["peri", "-r", "abc-123"]);
     assert!(cli.is_ok());
-    let cli = cli.unwrap();
+    let cli = cli.expect("resume with value: the unwrap fixture operation uses valid inputs");
     assert_eq!(cli.resume, Some(Some("abc-123".to_string())));
 }
 
@@ -108,7 +108,7 @@ fn test_resume_with_value() {
 fn test_resume_without_value() {
     let cli = TestCli::try_parse_from(["peri", "-r"]);
     assert!(cli.is_ok());
-    let cli = cli.unwrap();
+    let cli = cli.expect("resume without value: the unwrap fixture operation uses valid inputs");
     assert_eq!(cli.resume, Some(None));
 }
 
@@ -123,7 +123,7 @@ fn test_meta_session_nested_grammar() {
         "550e8400-e29b-41d4-a716-446655440000",
         "--json",
     ])
-    .unwrap();
+    .expect("meta session nested grammar: the fixture command-line arguments must parse");
     assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
     let Some(Commands::Meta {
         action: MetaAction::Session { session_id, json },
@@ -165,8 +165,8 @@ fn test_print_conflicts_with_meta() {
         "session",
         "550e8400-e29b-41d4-a716-446655440000",
     ])
-    .unwrap();
-    assert!(validate_cli(&cli).is_err());
+    .expect("print conflicts with meta: the fixture command-line arguments must parse");
+    assert!(super::validate_cli(&cli).is_err());
 }
 
 #[test]
@@ -195,9 +195,9 @@ fn test_meta_rejects_every_unrelated_top_level_option() {
         let mut args = vec!["peri"];
         args.extend_from_slice(unrelated);
         args.extend_from_slice(&["meta", "session", "550e8400-e29b-41d4-a716-446655440000"]);
-        let cli = Cli::try_parse_from(args).unwrap();
+        let cli = Cli::try_parse_from(args).expect("meta rejects every unrelated top level option: the fixture command-line arguments must parse");
         assert!(
-            validate_cli(&cli).is_err(),
+            super::validate_cli(&cli).is_err(),
             "Meta accepted unrelated option: {unrelated:?}"
         );
     }
@@ -240,7 +240,7 @@ fn test_argv_meta_detection_respects_top_level_subcommand_position() {
         let mut args = vec![OsString::from("peri")];
         args.extend(ordinary.iter().map(OsString::from));
         assert!(
-            !argv_requests_meta(&args),
+            !super::argv_requests_meta(&args),
             "ordinary argv was classified as Meta: {ordinary:?}"
         );
     }
@@ -306,7 +306,7 @@ fn test_argv_meta_detection_respects_top_level_subcommand_position() {
         let mut args = vec![OsString::from("peri")];
         args.extend(meta.iter().map(OsString::from));
         assert!(
-            argv_requests_meta(&args),
+            super::argv_requests_meta(&args),
             "Meta argv was not classified as Meta: {meta:?}"
         );
     }
@@ -317,14 +317,14 @@ fn test_argv_meta_detection_respects_top_level_subcommand_position() {
         OsString::from("--model"),
         OsString::from("meta"),
     ];
-    assert!(!argv_requests_meta(&other_command));
+    assert!(!super::argv_requests_meta(&other_command));
 }
 
 #[test]
 fn test_combined_model_effort() {
     let cli = TestCli::try_parse_from(["peri", "--model", "sonnet", "--effort", "high"]);
     assert!(cli.is_ok());
-    let cli = cli.unwrap();
+    let cli = cli.expect("combined model effort: the unwrap fixture operation uses valid inputs");
     assert_eq!(cli.model, Some("sonnet".to_string()));
     assert_eq!(cli.effort, Some("high".to_string()));
 }
@@ -333,47 +333,57 @@ fn test_combined_model_effort() {
 fn test_disallowed_tools_alias() {
     let cli = TestCli::try_parse_from(["peri", "--disallowed-tools", "WebFetch"]);
     assert!(cli.is_ok());
-    let cli = cli.unwrap();
+    let cli = cli.expect("disallowed tools alias: the unwrap fixture operation uses valid inputs");
     assert_eq!(cli.disallowed_tools, Some(vec!["WebFetch".to_string()]));
 }
 
-use super::*;
+use super::Cli;
+use super::Commands;
+use super::MetaAction;
+use super::OsString;
 
 // ─── 全局配置/数据库路径参数（Slice C1）─────────────────────────────────────
 
 #[test]
 fn test_config_file_flag_parses() {
-    let cli = TestCli::try_parse_from(["peri", "--config-file", "/tmp/cfg.json"]).unwrap();
+    let cli = TestCli::try_parse_from(["peri", "--config-file", "/tmp/cfg.json"])
+        .expect("config file flag parses: the fixture command-line arguments must parse");
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
 }
 
 #[test]
 fn test_config_file_alias_parses() {
-    let cli = TestCli::try_parse_from(["peri", "--configFile", "/tmp/cfg.json"]).unwrap();
+    let cli = TestCli::try_parse_from(["peri", "--configFile", "/tmp/cfg.json"])
+        .expect("config file alias parses: the fixture command-line arguments must parse");
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
 }
 
 #[test]
 fn test_config_file_equals_form_parses() {
-    let cli = TestCli::try_parse_from(["peri", "--config-file=/tmp/cfg.json"]).unwrap();
+    let cli = TestCli::try_parse_from(["peri", "--config-file=/tmp/cfg.json"])
+        .expect("config file equals form parses: the fixture command-line arguments must parse");
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
 }
 
 #[test]
 fn test_config_file_camel_equals_form_parses() {
-    let cli = TestCli::try_parse_from(["peri", "--configFile=/tmp/cfg.json"]).unwrap();
+    let cli = TestCli::try_parse_from(["peri", "--configFile=/tmp/cfg.json"]).expect(
+        "config file camel equals form parses: the fixture command-line arguments must parse",
+    );
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
 }
 
 #[test]
 fn test_db_path_flag_parses() {
-    let cli = TestCli::try_parse_from(["peri", "--db-path", "/tmp/threads.db"]).unwrap();
+    let cli = TestCli::try_parse_from(["peri", "--db-path", "/tmp/threads.db"])
+        .expect("db path flag parses: the fixture command-line arguments must parse");
     assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
 }
 
 #[test]
 fn test_db_path_alias_parses() {
-    let cli = TestCli::try_parse_from(["peri", "--dbPath", "/tmp/threads.db"]).unwrap();
+    let cli = TestCli::try_parse_from(["peri", "--dbPath", "/tmp/threads.db"])
+        .expect("db path alias parses: the fixture command-line arguments must parse");
     assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
 }
 
@@ -396,7 +406,7 @@ fn test_config_file_and_db_path_combined() {
         "--db-path",
         "/tmp/threads.db",
     ])
-    .unwrap();
+    .expect("config file and db path combined: the fixture command-line arguments must parse");
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
     assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
 }
@@ -410,7 +420,7 @@ fn test_real_cli_parses_config_and_db_flags() {
         "--db-path",
         "/tmp/threads.db",
     ])
-    .unwrap();
+    .expect("real cli parses config and db flags: the fixture command-line arguments must parse");
     assert_eq!(cli.config_file, Some(PathBuf::from("/tmp/cfg.json")));
     assert_eq!(cli.db_path, Some(PathBuf::from("/tmp/threads.db")));
 }
@@ -426,7 +436,7 @@ fn test_session_store_flags_parse() {
         "--session-store-engine",
         "turso",
     ])
-    .unwrap();
+    .expect("session store flags parse: the fixture command-line arguments must parse");
     assert_eq!(cli.session_store.as_deref(), Some("env:TURSO_URL"));
     assert_eq!(cli.session_store_token_env.as_deref(), Some("TURSO_TOEKN"));
     assert_eq!(cli.session_store_engine.as_deref(), Some("turso"));
@@ -443,7 +453,7 @@ fn test_session_store_camel_aliases_parse() {
         "--sessionStoreEngine",
         "libsql",
     ])
-    .unwrap();
+    .expect("session store camel aliases parse: the fixture command-line arguments must parse");
     assert_eq!(cli.session_store.as_deref(), Some("/tmp/threads.db"));
     assert_eq!(
         cli.session_store_token_env.as_deref(),
@@ -468,7 +478,7 @@ fn test_real_cli_parses_session_store_flags() {
         "--session-store-token-env=TURSO_TOEKN",
         "--session-store-engine=turso",
     ])
-    .unwrap();
+    .expect("real cli parses session store flags: the fixture command-line arguments must parse");
     assert_eq!(cli.session_store.as_deref(), Some("env:TURSO_URL"));
     assert_eq!(cli.session_store_token_env.as_deref(), Some("TURSO_TOEKN"));
     assert_eq!(cli.session_store_engine.as_deref(), Some("turso"));
@@ -487,7 +497,7 @@ fn test_removed_approve_flags_are_rejected() {
 
 #[test]
 fn test_real_cli_accepts_explicit_default_permission_mode() {
-    let cli = Cli::try_parse_from(["peri", "--permission-mode", "default"]).unwrap();
+    let cli = Cli::try_parse_from(["peri", "--permission-mode", "default"]).expect("real cli accepts explicit default permission mode: the fixture command-line arguments must parse");
     assert_eq!(cli.permission_mode.as_deref(), Some("default"));
 }
 
@@ -495,9 +505,9 @@ fn test_real_cli_accepts_explicit_default_permission_mode() {
 
 #[test]
 fn resume_without_value_is_rejected_by_validation() {
-    let cli = Cli::try_parse_from(["peri", "-r"]).unwrap();
+    let cli = Cli::try_parse_from(["peri", "-r"]).expect("resume without value is rejected by validation: the fixture command-line arguments must parse");
     assert_eq!(cli.resume, Some(None), "解析仍接受可选值，校验负责拒绝");
-    let error = validate_cli(&cli).expect_err("无值 -r 必须被拒绝");
+    let error = super::validate_cli(&cli).expect_err("无值 -r 必须被拒绝");
     assert!(error.contains("--resume"), "{error}");
     assert!(error.contains("session ID"), "{error}");
 }
@@ -506,8 +516,10 @@ fn resume_without_value_is_rejected_by_validation() {
 fn resume_with_empty_value_is_rejected() {
     let cases: &[&[&str]] = &[&["peri", "-r", ""], &["peri", "--resume="]];
     for args in cases {
-        let cli = Cli::try_parse_from(*args).unwrap();
-        let error = validate_cli(&cli).expect_err("空会话 ID 必须被拒绝");
+        let cli = Cli::try_parse_from(*args).expect(
+            "resume with empty value is rejected: the fixture command-line arguments must parse",
+        );
+        let error = super::validate_cli(&cli).expect_err("空会话 ID 必须被拒绝");
         assert!(error.contains("--resume"), "{error}");
         assert!(error.contains("non-empty"), "{error}");
     }
@@ -515,22 +527,27 @@ fn resume_with_empty_value_is_rejected() {
 
 #[test]
 fn print_rejects_resume_before_startup() {
-    let cli = Cli::try_parse_from(["peri", "-p", "-r", "session-a"]).unwrap();
-    let error = validate_cli(&cli).expect_err("print 模式不得静默忽略 -r");
+    let cli = Cli::try_parse_from(["peri", "-p", "-r", "session-a"]).expect(
+        "print rejects resume before startup: the fixture command-line arguments must parse",
+    );
+    let error = super::validate_cli(&cli).expect_err("print 模式不得静默忽略 -r");
     assert!(error.contains("print"), "{error}");
     assert!(error.contains("--resume"), "{error}");
 }
 
 #[test]
 fn continue_with_resume_is_rejected() {
-    let cli = Cli::try_parse_from(["peri", "-c", "-r", "session-a"]).unwrap();
-    let error = validate_cli(&cli).expect_err("-c 与 -r 必须冲突");
+    let cli = Cli::try_parse_from(["peri", "-c", "-r", "session-a"])
+        .expect("continue with resume is rejected: the fixture command-line arguments must parse");
+    let error = super::validate_cli(&cli).expect_err("-c 与 -r 必须冲突");
     assert!(error.contains("--continue"), "{error}");
     assert!(error.contains("--resume"), "{error}");
 }
 
 #[test]
 fn valid_resume_still_passes_validation() {
-    let cli = Cli::try_parse_from(["peri", "-r", "session-a"]).unwrap();
-    assert!(validate_cli(&cli).is_ok());
+    let cli = Cli::try_parse_from(["peri", "-r", "session-a"]).expect(
+        "valid resume still passes validation: the fixture command-line arguments must parse",
+    );
+    assert!(super::validate_cli(&cli).is_ok());
 }

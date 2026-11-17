@@ -25,7 +25,7 @@ pub enum ControllerError {
     InjectFailed(String, #[source] peri_runtime::RuntimeError),
 }
 
-/// 事件订阅错误（[`Subscription::recv`] 流语义）。
+/// 事件订阅错误（[`Subscription::recv`](crate::controller::Subscription::recv) 流语义）。
 ///
 /// §9 事件契约 Broadcast 交付类：慢消费者 lagging；`Lagged` 为可恢复错误
 /// （可继续 recv），`Closed` 为终态（事件流终止）。

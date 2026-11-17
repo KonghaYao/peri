@@ -1,18 +1,34 @@
-use super::*;
+use super::invocation_fixture;
+use super::json;
+use super::AgentCancellationToken;
+use super::AgentError;
+use super::Arc;
+use super::BaseTool;
+use super::Duration;
+use super::EffectiveToolError;
+use super::EffectiveToolErrorCode;
+use super::GatedTool;
+use super::McpClientPool;
+use super::McpMiddleware;
+use super::Middleware;
+use super::Ordering;
+use super::StartupProbe;
+use super::SystemMcpManifest;
+use super::TappedLink;
 
 /// 外层取消必须返回 interrupted、不重放调用，并保持同一 pool 可继续服务。
 /// 本用例的 FixtureBuiltinHandler 故意不消费取消，释放 GatedTool 后核对可继续服务；
 /// 生产 handler 的通知传播与 shell 清理由 workspace_recovery_test 单独覆盖。
 #[tokio::test]
 async fn builtin_handler_in_flight_cancel_has_no_replay_and_keeps_pool_serving() {
-    let web = find("web").expect("web 已实现");
+    let web = super::find("web").expect("web 已实现");
     let declaration = &web.tools[0];
     let gated = Arc::new(GatedTool::new(declaration.original_name));
     let gated_tool: Arc<dyn BaseTool> = Arc::clone(&gated) as Arc<dyn BaseTool>;
     let link = TappedLink::connect(web, "runtime-fixture-web", vec![gated_tool]).await;
-    let bridge = link.bridge(declaration.effective_name);
+    let bridge = link.bridge(declaration.legacy_name);
     let invocation_fixture = invocation_fixture::InvocationFixture::new(
-        declaration.effective_name,
+        declaration.legacy_name,
         &[
             json!({ "payload": "in-flight" }),
             json!({ "payload": "after-cancel" }),
@@ -129,9 +145,9 @@ async fn builtin_instance_cancellation_maps_to_interrupted() {
     /// 用例前提量：远大于本用例的实测时长，使「耗时远小于它」即排除 timeout 路径。
     const STARTUP_TIMEOUT_MS: u64 = 60_000;
 
-    let web = find("web").expect("web 已实现");
+    let web = super::find("web").expect("web 已实现");
     let pool = Arc::new(McpClientPool::new_pending());
-    let mut config = builtin_entry(web);
+    let mut config = super::builtin_entry(web);
     config.system_mcp_timeout = Some(STARTUP_TIMEOUT_MS);
     pool.configs.write().insert(web.name.to_string(), config);
     // 清单已发布（requirements 才非空）但**不提交任何连接 / discovery evidence**：

@@ -1,6 +1,6 @@
 //! Remote machine and workspace catalog operations.
 
-use super::session_data::{invalid_input, not_found, unsupported_behavior, RemoteSessionData};
+use super::session_data::RemoteSessionData;
 use super::sql::StatementSpec;
 use peri_acp_types::session_resources::SessionResourceResult;
 use turso_serverless::Value;
@@ -12,7 +12,7 @@ impl RemoteSessionData {
         path: &str,
     ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
         if self.legacy_shape {
-            return Err(unsupported_behavior(
+            return Err(super::session_data::unsupported_behavior(
                 "workspace ownership requires the current schema generation",
             ));
         }
@@ -40,7 +40,7 @@ impl RemoteSessionData {
         &self,
     ) -> SessionResourceResult<Vec<peri_acp_types::workspace::MachineInfo>> {
         if self.legacy_shape {
-            return Err(unsupported_behavior(
+            return Err(super::session_data::unsupported_behavior(
                 "machine catalog requires the current schema generation",
             ));
         }
@@ -83,7 +83,7 @@ impl RemoteSessionData {
         machine_id: &str,
     ) -> SessionResourceResult<Vec<peri_acp_types::workspace::WorkspaceInfo>> {
         if self.legacy_shape {
-            return Err(unsupported_behavior(
+            return Err(super::session_data::unsupported_behavior(
                 "workspace catalog requires the current schema generation",
             ));
         }
@@ -127,13 +127,13 @@ impl RemoteSessionData {
         name: &str,
     ) -> SessionResourceResult<()> {
         if self.legacy_shape {
-            return Err(unsupported_behavior(
+            return Err(super::session_data::unsupported_behavior(
                 "machine rename requires the current schema generation",
             ));
         }
         let name = name.trim();
         if name.is_empty() || name.len() > 200 {
-            return Err(invalid_input(
+            return Err(super::session_data::invalid_input(
                 "machine name must contain 1 to 200 characters",
             ));
         }
@@ -153,7 +153,7 @@ impl RemoteSessionData {
             .await?;
         match counts.first() {
             None | Some(1) => Ok(()),
-            Some(0) => Err(not_found()),
+            Some(0) => Err(super::session_data::not_found()),
             _ => Err(super::session_codec::corrupt(
                 "machine rename affected multiple rows",
             )),

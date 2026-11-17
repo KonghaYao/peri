@@ -1,0 +1,73 @@
+# Fixture: 正常的 CI 执行范围，用于 ci_test_inventory 的正向与 CLI 测试。
+jobs:
+    build:
+        steps:
+            - name: Run workspace tests
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'not (package(=peri-acp) | package(=peri-agent) | package(=peri-tui)
+                  | package(=peri-middlewares) | package(=peri-mcp-common))'
+
+            - name: Run ACP tests
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-acp)'
+
+            - name: Run Agent tests
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & not (binary(=compact_pressure_adversarial_test)
+                  | binary(=compact_session_adversarial_test)
+                  | binary(=compact_session_manual_adversarial_test)
+                  | binary(=compact_authority_projection_test))'
+
+            - name: Run Compact pressure suite
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & binary(=compact_pressure_adversarial_test)'
+
+            - name: Run Compact session suite
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & binary(=compact_session_adversarial_test)'
+
+            - name: Run Compact session manual suite
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & binary(=compact_session_manual_adversarial_test)'
+
+            - name: Run Compact authority suite
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-agent) & binary(=compact_authority_projection_test)'
+
+            - name: Run TUI tests
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-tui)'
+
+            - name: Run middleware tests
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-middlewares)'
+
+            - name: Run MCP capability tests
+              shell: bash
+              run: >-
+                  cargo nextest run --locked --workspace --no-tests=fail
+                  -E 'package(=peri-mcp-common)'
+
+            - name: Run doctests
+              shell: bash
+              run: >-
+                  cargo test --doc --locked --workspace
+                  --exclude peri-acp --exclude peri-tui

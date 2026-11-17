@@ -93,7 +93,7 @@ pub struct PeriCaps {
     /// `peri.uiCommands`：TUI 上送的 ui 域命令明细（空 = 不广播 ui 条目）。
     /// 门控语义反转：TUI 声明明细 → ACP 注册为 `ui:*` 条目，而非 ACP 附加
     /// 硬编码列表；旧客户端 bool `true` 由 [`PeriCaps::from_client_meta`]
-    /// 退化为 [`default_ui_commands`] 明细（注册冲突按注册表裁决，见该函数
+    /// 退化为 `default_ui_commands` 明细（注册冲突按注册表裁决，见该函数
     /// 注释）。
     #[serde(default)]
     pub ui_commands: Vec<UiCommandSpec>,
@@ -131,7 +131,7 @@ impl PeriCaps {
 
     /// `peri.uiCommands` 兼容两态解析：
     /// - 数组 → `Vec<UiCommandSpec>`（serde 解析失败按空处理 + warn）；
-    /// - 旧客户端 bool `true` → 退化为 [`default_ui_commands`] 明细（明细与旧
+    /// - 旧客户端 bool `true` → 退化为 `default_ui_commands` 明细（明细与旧
     ///   ACP 硬编码列表一致；注册时同名冲突按注册表裁决，见该函数注释）；
     /// - 未声明 / `false` / 其他类型 → 空（外部客户端默认不接收界面性命令）。
     fn meta_ui_commands(meta: &serde_json::Map<String, Value>) -> Vec<UiCommandSpec> {

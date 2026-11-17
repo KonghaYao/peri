@@ -38,7 +38,7 @@ impl PrivateDirCache {
         let mut dir = self
             .dir
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .map_err(|_| io::Error::other("private output directory cache was poisoned"))?;
         if let Some(dir) = dir.as_ref() {
             return Ok(dir.path.clone());
         }

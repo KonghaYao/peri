@@ -18,13 +18,8 @@ pub(super) fn reset_scope(gates: &mut ActionGates, scope: OperationScope) {
     gates.retain(|_, gate| !gate.reset_scope(scope.clone()));
 }
 
-use crate::{
-    acp_client::AcpTuiClient,
-    i18n,
-    kit::atoms::{
-        ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, CRON_ACTION_ERROR, CRON_JOBS,
-    },
-};
+use crate::acp_client::AcpTuiClient;
+use crate::i18n;
 
 pub(super) fn dispatch(
     method: &'static str,
@@ -176,3 +171,13 @@ fn fail(message: String) {
 #[cfg(test)]
 #[path = "actions_test.rs"]
 mod tests;
+
+use crate::kit::atoms::ACP_CLIENT_HANDLE;
+
+use crate::kit::atoms::ACTIVE_SESSION_ID;
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::CRON_ACTION_ERROR;
+
+use crate::kit::atoms::CRON_JOBS;

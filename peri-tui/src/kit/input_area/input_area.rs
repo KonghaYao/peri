@@ -1,0 +1,953 @@
+//! 输入区域 #[component] 组件。
+//!
+//! S8：完整输入体验——
+//! - **多行 buffer**：Shift/Alt+Enter 换行；渲染按行拆分；高度动态扩展（3~40% 屏幕）
+//! - **history**：Up/Down 浏览 `INPUT_HISTORY` atom；Esc 或回到栈底恢复编辑态
+//! - **@mention**：输入 @ 触发 AT_MENTION_ACTIVE；popup 显示在输入框上方
+//! - **slash**：行首 / 触发 SLASH_HINT_ACTIVE；popup 显示在输入框上方
+//! - **提交**：Enter 提交，submit_consumer 消费 + push_history
+
+//
+// element! 宏展开为 `XxxProps { ... ..Default::default() }`，全字段已指定时
+// clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
+#![allow(clippy::needless_update)]
+
+use super::{attachment, hooks, paste, popup, render, submit};
+
+use attachment::AttachmentEdge;
+use hooks::{AreaTracker, CjkGhostFix};
+
+use render::QUEUE_VISIBLE_MAX;
+
+use crate::components::textarea::TextAreaState;
+
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::KeyModifiers;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
+use std::sync::{Arc, Mutex};
+
+use crate::i18n;
+
+use crate::kit::mention_popup::MentionPopup;
+use crate::kit::message_area::grid::GridSpec;
+use crate::kit::mouse_router;
+use crate::kit::slash_completion::{SlashCompletion, SlashCompletionItem};
+use fluent_bundle::FluentValue;
+use peri_theme::atoms::THEME_ATOM;
+
+/// [S2 单一事实源] 输入内容变化 → 焦点回到输入态：同步清除消息区 entry
+/// 导航焦点（消息区仲裁与渲染同读 FOCUSED_ENTRY，无需 effect 收敛）。
+///
+/// [Why] 鼠标点击 chat entry 展开后 entry 导航焦点激活（FOCUSED_ENTRY =
+/// Some），此时直接键入，Enter 仍被消息区消费为折叠切换/option 提交，输入框
+/// 无法提交。鼠标点击输入框已在 Down handler 清除（见下方鼠标分支）；本函数
+/// 覆盖键盘路径——所有修改 buffer 内容的按键/粘贴在写 state 前调用。
+pub(super) fn exit_entry_focus_on_edit() {
+    if FOCUSED_ENTRY.state().read().is_some() {
+        *FOCUSED_ENTRY.state().write() = None;
+    }
+}
+
+#[derive(Default, Props)]
+pub struct InputAreaProps {
+    pub loading: bool,
+    pub hidden: bool,
+    /// §11 高度降级：composer 编辑行数上限（`None` = 默认 10）。
+    /// h<8 时由 `layout_plan` 传 `Some(2)`，钳制 TextArea 行数。
+    pub max_lines: Option<u16>,
+    /// §11 高度降级：session title（composer 上边栏）是否可见。
+    /// h<12 时由 `layout_plan` 传 false 隐藏。
+    pub session_title_visible: bool,
+    /// [Fix §11] 输入区高度预算上限（SessionColumn = term_h - status - 3）：
+    /// queued 队列/弹出层超过预算时优先截断队列，保证 transcript ≥3 行。
+    /// `None` = 不限制（默认）。
+    pub max_total_height: Option<u16>,
+    /// §3.1/§10 水平网格（SessionColumn 传入）——composer prompt 前缀按
+    /// gap 对齐 transcript content 起点；标题/footer 行按断点降级。
+    pub grid: GridSpec,
+}
+
+#[component]
+pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // 单一编辑状态——闭包编辑 + 渲染读取共享同一实例
+    let state = hooks.use_state(TextAreaState::default);
+    let paste_gate = hooks.use_state(paste::PasteGate::default);
+    let paste_gate = paste_gate.read().clone();
+    let steer_height = hooks.use_state(|| 0u16);
+    let steers = hooks.use_atom(&crate::kit::steer_state::STEERS);
+    let steer_session = hooks.use_atom(&crate::kit::atoms::ACTIVE_SESSION_ID);
+    // 终端窗口焦点：FocusGained/FocusLost 事件驱动，切换 tmux 窗格/终端标签时隐藏光标
+    let term_focused = hooks.use_state(|| true);
+    // i18n 语言切换订阅
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
+    // ACP 下发的 slash 投影变化必须直接唤醒输入框重渲染。否则异步 MCP
+    // discovery 虽已刷新缓存，输入区仍会停留在旧帧，直到打开任意面板触发重绘。
+    let slash_commands = hooks.use_atom(&AVAILABLE_SLASH_COMMANDS);
+    let _slash_command_count = slash_commands.read().len();
+    let _ = slash_commands;
+
+    // [§3.1] 居中带由 SessionColumn 的 `CenterBand` 包装在 draw 期收窄；
+    // AreaTracker 因此记录 band，composer_area 是光标与点击列的坐标基准。
+
+    // 追踪 composer 区域 + overlay 高度，用于鼠标点击→光标定位
+    // area_tracker: 值拷贝模式（仿 MsgAreaTracker），避免每帧 Arc 重建导致 handler 读到 None
+    let composer_area;
+    {
+        let tracker = hooks.use_hook(|| AreaTracker { rect: None });
+        composer_area = tracker.rect; // 每帧取副本，区块结束即释放 &mut hooks 借用
+    }
+    let overlay_height = Arc::new(parking_lot::Mutex::new(0u16));
+
+    // CJK 光标残影修复：post_component_draw 时标记续接 cell AlwaysUpdate
+    hooks.use_hook(|| CjkGhostFix);
+
+    // 终端焦点切换（tmux 窗格 / 终端标签切换）：FocusGained/FocusLost 更新 term_focused
+    {
+        let tf = term_focused;
+        hooks.use_event_handler(
+            ratatui_kit::prelude::EventScope::Global,
+            ratatui_kit::prelude::EventPriority::Normal,
+            move |event| match event {
+                Event::FocusGained => {
+                    *tf.write() = true;
+                    EventResult::Consumed
+                }
+                Event::FocusLost => {
+                    *tf.write() = false;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
+        );
+    }
+
+    // [Slice 3a] §3.1/§10 对齐：光标上下视觉移动的宽度 = 区域宽 - 正文起点
+    // （prompt 前缀 + 右预留），随 grid gap 变化。
+    let grid_for_visual = props.grid;
+    hooks.use_event_handler(
+        EventScope::Current,
+        EventPriority::Normal,
+        move |event| match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if !crate::kit::focus_router::input_accepts_key(&key) {
+                    return EventResult::Ignored;
+                }
+                let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                let is_alt = key.modifiers.contains(KeyModifiers::ALT);
+
+                if matches!(key.code, KeyCode::Esc) {
+                    INPUT_AREA_ESC_PREFIX.set(is_alt);
+                } else {
+                    INPUT_AREA_ESC_PREFIX.set(false);
+                }
+
+                // 当前是否激活了 @mention / slash（激活时方向键给 popup 用）
+                let mention_active = *AT_MENTION_ACTIVE.state().read();
+                let slash_active = *SLASH_HINT_ACTIVE.state().read();
+
+                let result = match key.code {
+                    // ── 提交 ──（仅在不激活 popup 时按 Enter 提交；补全弹窗
+                    // 无候选时的 Enter 由 SlashCompletion 的 on_submit 回调走
+                    // 同一 commit_input 落点，不被静默吞掉）
+                    KeyCode::Enter if !is_shift && !is_alt && !mention_active && !slash_active => {
+                        submit::commit_input(state);
+                        EventResult::Consumed
+                    }
+
+                    // Shift/Alt+Enter：换行（多行 buffer）
+                    KeyCode::Enter if (is_shift || is_alt) && !mention_active && !slash_active => {
+                        exit_entry_focus_on_edit();
+                        state.write().insert_char('\n');
+                        EventResult::Consumed
+                    }
+
+                    // ── 编辑快捷键 ──
+                    KeyCode::Char('w') if is_ctrl => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        state.write().delete_word_backward();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('u') if is_ctrl => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        state.write().clear();
+                        popup::reset_mention_popup();
+                        popup::reset_slash_popup();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('a') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_line_home();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('e') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_line_end();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('b') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_left();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('f') if is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_right();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('h') if is_ctrl && !mention_active && !slash_active => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        s.backspace();
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('d') if is_ctrl && !mention_active && !slash_active => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        s.delete_forward();
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('z')
+                        if is_ctrl && !is_alt && !mention_active && !slash_active =>
+                    {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        s.undo();
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('r')
+                        if is_ctrl && !is_alt && !mention_active && !slash_active =>
+                    {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        s.redo();
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('y')
+                        if is_ctrl && !is_alt && !mention_active && !slash_active =>
+                    {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        s.paste_yank();
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('b')
+                        if is_alt && !is_ctrl && !mention_active && !slash_active =>
+                    {
+                        state.write().cursor_word_left();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Char('f')
+                        if is_alt && !is_ctrl && !mention_active && !slash_active =>
+                    {
+                        state.write().cursor_word_right();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Backspace if !mention_active && !slash_active => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        // 文本为空：Backspace 移除整张附件（一次一张），不逐字符删。
+                        if !is_alt
+                            && attachment::remove_pending_attachment(&s, AttachmentEdge::Last)
+                        {
+                            popup::update_popup_prefix(&s);
+                            return EventResult::Consumed;
+                        }
+                        if is_alt {
+                            s.delete_word_backward();
+                        } else {
+                            s.backspace();
+                        }
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Backspace => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        if !is_alt
+                            && attachment::remove_pending_attachment(&s, AttachmentEdge::Last)
+                        {
+                            popup::update_popup_prefix(&s);
+                            return EventResult::Consumed;
+                        }
+                        if is_alt {
+                            s.delete_word_backward();
+                        } else {
+                            s.backspace();
+                        }
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Delete if !mention_active && !slash_active => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        // 与 Backspace 对称：文本为空时 Delete 从头部移除一张附件。
+                        if !is_alt
+                            && attachment::remove_pending_attachment(&s, AttachmentEdge::First)
+                        {
+                            popup::update_popup_prefix(&s);
+                            return EventResult::Consumed;
+                        }
+                        if is_alt {
+                            s.delete_word_forward();
+                        } else {
+                            s.delete_forward();
+                        }
+                        popup::update_popup_prefix(&s);
+                        EventResult::Consumed
+                    }
+                    KeyCode::Left if is_alt && !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_word_left();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Right if is_alt && !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_word_right();
+                        EventResult::Consumed
+                    }
+
+                    KeyCode::Left if !mention_active && !slash_active => {
+                        state.write().cursor_left();
+                        EventResult::Consumed
+                    }
+                    KeyCode::Right if !mention_active && !slash_active => {
+                        state.write().cursor_right();
+                        EventResult::Consumed
+                    }
+
+                    // ── history 导航（仅在不激活 popup 且无 Ctrl 修饰时）──
+                    // I18-B：必须排除 Ctrl+Up/Down/Home/End——这些键留给 message_area 滚动。
+                    // 事件现在分别由 InputArea / MessageArea 用 `use_event_handler` 注册，
+                    // 因此这里显式避开 Ctrl+ 组合，避免与消息区滚动键冲突。
+                    KeyCode::Up if !is_ctrl && !mention_active && !slash_active => {
+                        tracing::info!(?key, "input area consumed up");
+                        let tw = composer_area
+                            .map(|a| {
+                                a.width
+                                    .saturating_sub(render::prompt_and_border_width(
+                                        grid_for_visual,
+                                    ))
+                                    .max(1) as usize
+                            })
+                            .unwrap_or(80);
+                        let moved = state.write().cursor_visual_up(tw);
+                        if !moved {
+                            let current = state.read().all_text();
+                            if let Some(historical) =
+                                crate::kit::input_history::history_up(Some(&current))
+                            {
+                                exit_entry_focus_on_edit();
+                                state.write().replace_all_no_undo(historical);
+                            }
+                        }
+                        EventResult::Consumed
+                    }
+                    KeyCode::Down if !is_ctrl && !mention_active && !slash_active => {
+                        tracing::info!(?key, "input area consumed down");
+                        let tw = composer_area
+                            .map(|a| {
+                                a.width
+                                    .saturating_sub(render::prompt_and_border_width(
+                                        grid_for_visual,
+                                    ))
+                                    .max(1) as usize
+                            })
+                            .unwrap_or(80);
+                        let moved = state.write().cursor_visual_down(tw);
+                        if !moved
+                            && let Some(historical) = crate::kit::input_history::history_down()
+                        {
+                            exit_entry_focus_on_edit();
+                            state.write().replace_all_no_undo(historical);
+                        }
+                        EventResult::Consumed
+                    }
+                    KeyCode::Home if !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_home();
+                        EventResult::Consumed
+                    }
+                    KeyCode::End if !is_ctrl && !mention_active && !slash_active => {
+                        state.write().cursor_end();
+                        EventResult::Consumed
+                    }
+                    // I19-D：Esc 不再清空草稿——用户多行输入时误按 Esc 会丢失全部内容。
+                    // 双击 Esc 由 event_handlers.rs 上层处理（触发 RewindPopup），
+                    // 用户想清空输入框用 Ctrl+U。popup 激活时 Esc 由 event_handlers 关 popup。
+                    KeyCode::Esc if !mention_active && !slash_active => EventResult::Ignored,
+
+                    // ── 字符输入 ──
+                    KeyCode::Char(ch) if !is_ctrl && !is_alt => {
+                        submit::exit_history_mode_if_active();
+                        exit_entry_focus_on_edit();
+                        let mut s = state.write();
+                        s.insert_char(ch);
+                        popup::update_popup_prefix(&s);
+                        *PREDICTION.state().write() = PredictionState::default();
+                        EventResult::Consumed
+                    }
+
+                    // ── Ctrl+V 粘贴剪贴板（M6）──
+                    // 上传式：图片以 base64 附件进 PENDING_ATTACHMENTS，不落盘、
+                    // 不插入 `@image <path>` 文本。阻塞 I/O 在 paste 模块的独立线程内。
+                    // 粘贴不应触发 slash/mention 弹窗（与 Event::Paste 分支一致）。
+                    KeyCode::Char('v')
+                        if is_ctrl && !is_alt && !is_shift && !mention_active && !slash_active =>
+                    {
+                        paste::handle_clipboard_paste(state, &paste_gate)
+                    }
+
+                    // ── 预测文本接受（Tab）──
+                    KeyCode::Tab => {
+                        let pred = PREDICTION.state();
+                        if !pred.read().text.is_empty() {
+                            exit_entry_focus_on_edit();
+                            let text = pred.read().text.clone();
+                            *pred.write() = PredictionState::default();
+                            submit::exit_history_mode_if_active();
+                            state.write().replace_all_no_undo(text);
+                            popup::reset_mention_popup();
+                            popup::reset_slash_popup();
+                            return EventResult::Consumed;
+                        }
+                        EventResult::Ignored
+                    }
+
+                    _ => EventResult::Ignored,
+                };
+
+                if !is_alt {
+                    INPUT_AREA_ESC_PREFIX.set(false);
+                }
+                result
+            }
+            Event::Paste(paste_text) => paste::handle_bracketed_paste(state, &paste_text),
+            _ => EventResult::Ignored,
+        },
+    );
+    // ── 鼠标点击光标定位（Global scope，确保点击事件能到达）──
+    {
+        let state_cl = state;
+        let overlay_height_cl = overlay_height.clone();
+        // [Slice 3a] §3.1/§10 对齐：正文起点 = prompt 前缀宽度（outer1+accent1+gap），
+        // 随 grid gap 变化（gap=1 → 3，gap=2 → 4）。
+        let grid_cl = props.grid;
+        hooks.use_event_handler(
+            ratatui_kit::prelude::EventScope::Global,
+            ratatui_kit::prelude::EventPriority::High,
+            move |event| {
+                if let Event::Mouse(mouse) = event {
+                    // 弹窗或面板激活时不处理鼠标——放行给前景 handler（如模型快速切换弹窗
+                    // 锚定在状态栏上方、覆盖输入区时，点击弹窗行必须由弹窗消费）。
+                    if mouse_router::is_occluded() {
+                        return EventResult::Ignored;
+                    }
+                    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                        return EventResult::Ignored;
+                    }
+                    if let Some(outer) = composer_area {
+                        let ov_h = *overlay_height_cl.lock();
+                        let composer_top = outer.y.saturating_add(ov_h).saturating_add(1);
+                        let text_x = outer.x.saturating_add(2 + grid_cl.gap);
+                        // [FIX] 必须加上界：composer 下方是状态栏/通知行，行号同样 >= composer_top。
+                        // 长文本（wrap > 10 行，editor_rows clamp 到 10）时 composer_height 不再
+                        // 随文本增长，click_visual_row 可能落入 total_visual_rows 范围 → 误把
+                        // 状态栏点击当作 composer 点击消费，status_bar 模型切换弹窗收不到事件。
+                        if mouse.row >= composer_top
+                            && mouse.row < outer.y.saturating_add(outer.height)
+                            && mouse.column >= text_x
+                        {
+                            // [S2 单一事实源] 点击输入框 = 焦点回到输入态：事件
+                            // 边界同步清除消息区 entry 导航焦点（消息区仲裁与
+                            // 渲染同读 FOCUSED_ENTRY，无需 effect 收敛）——
+                            // 否则点击展开后 Enter 仍被消息区消费为折叠切换，
+                            // 输入框无法提交。
+                            // [已知限制] Down handler 闭包不可注入测试（ratatui-kit
+                            // dispatch pub(crate)）；本行迁移正确性由全库 grep 旧
+                            // atom 名零残留 + focus_router_test 的
+                            // focused=false → Enter 放行语义覆盖（S3 review M1）。
+                            *FOCUSED_ENTRY.state().write() = None;
+                            let click_visual_row = mouse.row.saturating_sub(composer_top) as usize;
+                            let click_display_col = mouse.column.saturating_sub(text_x) as usize;
+                            let s = state_cl.read();
+                            if !s.text.is_empty() {
+                                let tw = outer
+                                    .width
+                                    .saturating_sub(render::prompt_and_border_width(grid_cl))
+                                    .max(1) as usize;
+                                let wr =
+                                    crate::components::textarea::wrap_text(&s.text, s.cursor, tw);
+                                if click_visual_row < wr.total_visual_rows {
+                                    let vl = &wr.visual_lines[click_visual_row];
+                                    let mut col = 0usize;
+                                    let mut target_char = vl.char_range.0;
+                                    for (i, ch) in vl.text.char_indices() {
+                                        let cw =
+                                            unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                                        if col + cw > click_display_col {
+                                            break;
+                                        }
+                                        col += cw;
+                                        target_char = vl.char_range.0
+                                            + vl.text[..i + ch.len_utf8()].chars().count();
+                                    }
+                                    drop(s);
+                                    state_cl.write().desired_col = None;
+                                    state_cl.write().cursor = target_char;
+                                    // 点击在 composer 内，消费事件，阻止 message_area 误处理
+                                    return EventResult::Consumed;
+                                }
+                            }
+                            drop(s);
+                        }
+                    }
+                }
+                // 点击不在 composer 内，不消费
+                EventResult::Ignored
+            },
+        );
+    }
+    let editor = state.read().clone();
+    let hidden = props.hidden;
+    let text = editor.text.clone();
+    let cursor = editor.cursor;
+    // [T7 §7.3] 输入区快照（cursor 触发源）：render body 每帧 write_no_update
+    // 写 INPUT_SNAPSHOT（同 keepgoing_rect 模式——TUI-RENDER-001 派生缓存，
+    // 不唤醒订阅者；overlay 组件经渲染循环每帧读取最新值）。
+    *crate::kit::atoms::INPUT_SNAPSHOT.state().write_no_update() =
+        crate::kit::atoms::InputSnapshot {
+            text: text.clone(),
+            cursor_char: cursor,
+        };
+    let loading = props.loading;
+    // 光标显示逻辑：loading 态始终显示；无面板/弹窗激活时显示；否则隐藏
+    // use_atom 确保面板/弹窗变化时触发重渲染；*解引用取最新值
+    let _panel_guard = hooks.use_atom(&ACTIVE_PANEL);
+    let _popup_guard = hooks.use_atom(&POPUP_KIND);
+    let active_panel = *ACTIVE_PANEL.state().read();
+    let popup_kind = *POPUP_KIND.state().read();
+    let show_cursor = *term_focused.read() && active_panel.is_none() && popup_kind.is_none();
+
+    // 取消回滚文本恢复：use_effect 在 render 后运行，避免 render body 中写状态。
+    // TurnInterrupted 递增 RENDER_HEARTBEAT → AppShell 重渲染 → InputArea 级联重渲染 → effect 执行。
+    {
+        let _hb = hooks.use_atom(&crate::kit::atoms::RENDER_HEARTBEAT);
+        let hb_val = *_hb.read();
+        let state_for_effect = state;
+        hooks.use_effect(
+            move || {
+                if let Some(text) = crate::kit::atoms::INPUT_RESTORE_TEXT
+                    .get()
+                    .and_then(|mu| mu.try_lock())
+                    .and_then(|mut g| g.take())
+                {
+                    state_for_effect.write().replace_all_no_undo(text);
+                }
+            },
+            hb_val,
+        );
+    }
+
+    // 选区范围（从 TextAreaState 传递到渲染器）
+    let selection_range = editor.selection_range();
+    // 占位符文本：优先使用 prediction（Tab 补全），其次使用 editor 设定的占位符
+    let pred_text = hooks.use_atom(&PREDICTION).read().text.clone();
+    let placeholder_str: Option<&str> = if !pred_text.is_empty() {
+        Some(pred_text.as_str())
+    } else if !editor.placeholder.is_empty() {
+        Some(editor.placeholder.as_str())
+    } else {
+        None
+    };
+
+    // 当前激活状态（驱动 popup 渲染）
+    let mention_active = *AT_MENTION_ACTIVE.state().read();
+    let slash_active = *SLASH_HINT_ACTIVE.state().read();
+    // 只在 popup 激活时才读/克隆 prefix 和 items，避免每帧不必要的 atom 读 + 堆分配
+    let mention_prefix = if mention_active {
+        MENTION_PREFIX.state().read().clone()
+    } else {
+        String::new()
+    };
+    let slash_prefix = if slash_active {
+        SLASH_PREFIX.state().read().clone()
+    } else {
+        String::new()
+    };
+
+    // 计算 editor 视口高度（用于渲染窗口裁剪）
+    // [Slice 3a] §3.1/§10 对齐：prompt 前缀宽度随 grid gap 变化
+    // （outer1 + accent1 + gap），正文起点与 transcript content 起点一致。
+    let text_width = composer_area
+        .map(|a| {
+            a.width
+                .saturating_sub(render::prompt_and_border_width(props.grid))
+                .max(1) as usize
+        })
+        .unwrap_or(80);
+    let wrap = crate::components::textarea::wrap_text(&text, cursor, text_width);
+    // [Slice 1c] §11 高度降级：h<8 时钳制编辑行数上限（max_lines），
+    // 默认上限 10 保持不变。
+    let max_editor_rows = props.max_lines.unwrap_or(10);
+    let editor_rows = (wrap.total_visual_rows as u16).clamp(1, max_editor_rows);
+
+    // 多行渲染——按 \n 拆分，每行作为独立 Line，光标高亮放在对应行
+    // viewport_height 传入实际显示行数，render 内部只渲染该窗口大小的行
+    let lines = render::render_multiline_with_cursor_for_themed(
+        &text,
+        cursor,
+        selection_range,
+        placeholder_str,
+        text_width,
+        editor_rows as usize,
+        loading,
+        show_cursor,
+    );
+
+    // 计算 composer 本体高度；popup 额外占位，避免被输入区自身裁切。
+    let composer_height = editor_rows + 2;
+
+    // 只在 slash 激活时克隆整个 item 列表——非激活态跳过 50+ item × 3 String 的堆分配
+    let slash_items = if slash_active {
+        popup::get_cached_slash_items()
+    } else {
+        Vec::new()
+    };
+    let mention_select_state = state;
+    let slash_select_state = state;
+    // 无候选 Confirm（popup 吞 Enter 修复）的提交落点状态句柄
+    let slash_submit_state = state;
+
+    let slash_popup_height = if slash_active {
+        render::popup_height(slash_items.len())
+    } else {
+        0
+    };
+    // 只在 mention 激活时读 FILE_LIST + 过滤——非激活态跳过 200+ 文件名的 atom 读和分配
+    let mention_items = if mention_active {
+        popup::filter_files_for_mention(&mention_prefix)
+    } else {
+        Vec::new()
+    };
+    let mention_popup_height = if mention_active {
+        render::popup_height(mention_items.len())
+    } else {
+        0
+    };
+    let ov_height = slash_popup_height.max(mention_popup_height);
+    *overlay_height.lock() = slash_popup_height.max(mention_popup_height);
+
+    // §10 queued（Slice 3 D4 反转）：loading 期间提交的 prompt 只入队
+    // INPUT_BUFFER，渲染在 composer 上方（最多 5 条 + `· · ·`），不提前进
+    // transcript；TurnDone/取消复位时 drain（本地气泡恰出现一次）。
+    // [Fix §11] 输入区高度预算（`max_total_height` = term_h - status - 3）
+    // 不足时**队列最先让位**——保证 transcript ≥3 行（40×8 + 排队场景不再
+    // 把 transcript 挤到 2 行）；剩余排队项在 drain 时仍会发送，只是不可见。
+    let input_buffer_handle = hooks.use_atom(&INPUT_BUFFER);
+    // 队列行只展示文本；附件随排队项保留并在 drain 时随请求一起提交。
+    let queue_items: Vec<String> = input_buffer_handle
+        .read()
+        .iter()
+        .take(QUEUE_VISIBLE_MAX)
+        .map(|input| input.text.clone())
+        .collect();
+    let queue_has_more = input_buffer_handle.read().len() > QUEUE_VISIBLE_MAX;
+    let queue_lines = render::build_queue_lines(&queue_items, queue_has_more, text_width);
+    let legacy_queue_height = if hidden || queue_lines.is_empty() {
+        0
+    } else {
+        let n = queue_lines.len() as u16;
+        match props.max_total_height {
+            // 预算先保 composer + 弹出层，余量给队列；预算低于两者时队列隐藏。
+            Some(budget) => n.min(budget.saturating_sub(composer_height + ov_height)),
+            None => n,
+        }
+    };
+    let steer_enabled = steers.read().enabled;
+    let steer_session_id = steer_session.read().clone();
+    let direct_submitting = steers.read().direct_submitting(
+        &steer_session_id,
+        crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
+    );
+    let steer_items = steers.read().rows(&steer_session_id);
+    let steer_budget = props
+        .max_total_height
+        .map(|budget| budget.saturating_sub(composer_height + ov_height));
+    let queue_height = if steer_enabled {
+        if hidden || steer_items.is_empty() {
+            0
+        } else {
+            (*steer_height.read()).min(steer_budget.unwrap_or(u16::MAX))
+        }
+    } else {
+        legacy_queue_height
+    };
+    *overlay_height.lock() = ov_height.saturating_add(queue_height);
+    let restore_epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
+    let restore_pending = steers.read().pending_recovery_ids(&steer_session_id);
+    let draft_empty = text.is_empty() && PENDING_ATTACHMENTS.state().read().is_empty();
+    let restore_deps = (
+        steer_session_id.clone(),
+        restore_epoch,
+        restore_pending,
+        draft_empty,
+    );
+    hooks.use_effect(
+        move || {
+            let mut editor = state.write();
+            if crate::kit::atoms::ACTIVE_SESSION_ID.state().read().as_str() != steer_session_id
+                || crate::kit::atoms::BRIDGE_RESET_COUNTER.get() != restore_epoch
+            {
+                return;
+            }
+            let draft_is_empty =
+                editor.text.is_empty() && PENDING_ATTACHMENTS.state().read().is_empty();
+            let recovered = crate::kit::steer_state::STEERS.state().write().recover(
+                &steer_session_id,
+                restore_epoch,
+                draft_is_empty,
+            );
+            if let Some(input) = recovered {
+                editor.replace_all_no_undo(input.original_draft);
+                drop(editor);
+                PENDING_ATTACHMENTS.set(crate::kit::steer_state::attachments_from_content(
+                    &input.content,
+                ));
+                crate::kit::input_history::reset_history_cursor();
+                popup::reset_mention_popup();
+                popup::reset_slash_popup();
+            }
+        },
+        restore_deps,
+    );
+
+    let total_height = if hidden {
+        0
+    } else {
+        composer_height + ov_height + queue_height
+    };
+
+    let composer_lines = render::build_composer_lines(lines, loading, props.grid);
+
+    // §10 composer 标题/footer（Slice 3a）：
+    // - title_top 右侧 session title；
+    // - title_bottom 左侧附件标签（`[图片] 图片 1` / `@ N 个文件`，
+    //   见 render::build_attachments_label），右侧资源线（CPU% · MEM · ctx，
+    //   原状态栏 Row1 第 4/5/7 项迁移）。
+    // 窄屏逐级隐藏：h<12（session_title_visible=false）隐藏 title_top 整行；
+    // h<8（max_lines=Some(2)）再隐藏 title_bottom。
+    let ctx_usage = hooks.use_atom(&CONTEXT_USAGE);
+    let attachments_handle = hooks.use_atom(&PENDING_ATTACHMENTS);
+    let attachments_label = render::build_attachments_label(&attachments_handle.read());
+    // 右侧资源线：CPU%（>50 显示）→ MEM（恒显）→ ctx，保持原状态栏顺序；
+    // 全部 muted，不启用资源阈值色（与 composer footer 其余文本同色系）。
+    let sem = THEME_ATOM.state().read().semantic;
+    let footer_right: Option<Line<'static>> = {
+        let snap = hooks.use_atom(&SERVICE_SNAPSHOT).read().clone();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if snap.cpu_percent > 50.0 {
+            spans.push(Span::styled(
+                format!("CPU {:.0}%", snap.cpu_percent),
+                Style::default().fg(sem.text.muted),
+            ));
+        }
+        if !spans.is_empty() {
+            spans.push(render::footer_separator(sem.text.muted));
+        }
+        spans.push(Span::styled(
+            format!("MEM {}MB", snap.memory_mb),
+            Style::default().fg(sem.text.muted),
+        ));
+        if let Some(usage) = ctx_usage.read().as_ref() {
+            spans.push(render::footer_separator(sem.text.muted));
+            // 未知显式展示为未知：进入会话时保存值为 NULL 不能落成 0%。
+            let c = match usage.percent() {
+                Some(pct) => i18n::tr_args(
+                    "composer-context-usage",
+                    &[("pct".to_string(), FluentValue::from(pct.round() as u64))],
+                ),
+                None => i18n::tr("composer-context-usage-unknown"),
+            };
+            spans.push(Span::styled(
+                format!(" {c} "),
+                Style::default().fg(sem.text.muted),
+            ));
+        }
+        (!spans.is_empty()).then(|| Line::from(spans))
+    };
+    // 当前会话标题：service_snapshot 周期性派生；空标题或 §11 高度降级
+    // （h<12，session_title_visible=false）时上边栏不渲染标签。
+    let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();
+    let submitting_title = crate::truncate::truncate_by_width(
+        &i18n::tr("composer-submitting"),
+        usize::from(
+            composer_area
+                .map(|area| area.width)
+                .unwrap_or(80)
+                .saturating_sub(3),
+        ),
+    );
+    let shown_session_title = if direct_submitting {
+        submitting_title.as_str()
+    } else if props.session_title_visible {
+        session_title.as_str()
+    } else {
+        ""
+    };
+
+    // 保持 Text 的主题与透明背景；边线重绘由 CjkGhostFix 处理。
+    let composer_paragraph = Paragraph::new(composer_lines).block(render::build_composer_block(
+        loading,
+        shown_session_title,
+        attachments_label.as_deref(),
+        footer_right,
+        props.session_title_visible || direct_submitting,
+        props.max_lines.is_none(),
+        composer_area.map(|a| a.width).unwrap_or(80),
+    ));
+
+    element!(
+        View(
+            flex_direction: Direction::Vertical,
+            width: Constraint::Fill(1),
+            height: Constraint::Length(total_height),
+        ) {
+            { if !hidden && slash_active {
+                element!(SlashCompletion(
+                    prefix: slash_prefix.clone(),
+                    items: slash_items.clone(),
+                    on_select: Arc::new(Mutex::new(Handler::from(move |item: SlashCompletionItem| {
+                        // Phase 4 步骤 4：选中行为收敛——统一先 resolve_ui_command
+                        // （ui 域本地拦截：裸名 / ui: 前缀 / aliases 归一化）。
+                        // 命中 → 清空输入框并打开面板 / 激活 setup；未命中 →
+                        // apply_slash_selection 落输入框（display 即 lexical）。
+                        let mut editor = slash_select_state.write();
+                        popup::handle_slash_selection(&mut editor, &item);
+                        popup::reset_slash_popup();
+                    }))),
+                    on_cancel: Arc::new(Mutex::new(Handler::from(|_: ()| {
+                        popup::reset_slash_popup();
+                    }))),
+                    on_submit: Arc::new(Mutex::new(Handler::from(move |_: ()| {
+                        // 无候选（列表空/无匹配）按 Enter：弹窗已关，输入按普通
+                        // 提交通道处理——`/plugin` 等由 submit 解析器本地开面板。
+                        submit::commit_input(slash_submit_state);
+                    }))),
+                )).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            } }
+            { if !hidden && mention_active {
+                element!(MentionPopup(
+                    prefix: mention_prefix.clone(),
+                    items: mention_items.clone(),
+                    on_select: Arc::new(Mutex::new(Handler::from(move |replacement: String| {
+                        let mut editor = mention_select_state.write();
+                        popup::replace_last_mention(&mut editor, &replacement);
+                        popup::reset_mention_popup();
+                    }))),
+                    on_cancel: Arc::new(Mutex::new(Handler::from(|_: ()| {
+                        popup::reset_mention_popup();
+                    }))),
+                )).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            } }
+            { if !hidden && steer_enabled {
+                element!(crate::kit::steer_queue::SteerQueue(
+                    items: steer_items,
+                    max_rows: 5usize,
+                    max_height: steer_budget,
+                    on_height_change: Arc::new(Mutex::new(Handler::from(move |height: u16| {
+                        if *steer_height.read() != height { *steer_height.write() = height; }
+                    }))),
+                    on_action: Arc::new(Mutex::new(Handler::from(move |action: crate::kit::steer_queue::SteerQueueAction| {
+                        let draft_is_empty = state.read().text.is_empty()
+                            && PENDING_ATTACHMENTS.state().read().is_empty();
+                        crate::kit::steer_state::act(action, draft_is_empty);
+                    }))),
+                )).into_any()
+            } else if !hidden && !queue_lines.is_empty() {
+                // §10 queued 队列（Slice 3b）：composer 边框上方的排队提示行，
+                // 不进 transcript/不参与滚动模型；drain 后本列表随 buffer 清空。
+                element!(
+                    View(
+                        flex_direction: Direction::Vertical,
+                        width: Constraint::Fill(1),
+                        height: Constraint::Length(queue_height),
+                    ) {
+                        Text(text: Paragraph::new(queue_lines))
+                    }
+                ).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            } }
+            { if !hidden {
+                element!(
+                    View(
+                        flex_direction: Direction::Vertical,
+                        width: Constraint::Fill(1),
+                        height: Constraint::Length(composer_height),
+                    ) {
+                        Text(text: composer_paragraph)
+                    }
+                ).into_any()
+            } else {
+                element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
+            } }
+        }
+    )
+}
+
+use crate::kit::atoms::PredictionState;
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::AT_MENTION_ACTIVE;
+
+use crate::kit::atoms::AVAILABLE_SLASH_COMMANDS;
+
+use crate::kit::atoms::CONTEXT_USAGE;
+
+use crate::kit::atoms::CURRENT_SESSION_TITLE;
+
+use crate::kit::atoms::FOCUSED_ENTRY;
+
+use crate::kit::atoms::INPUT_AREA_ESC_PREFIX;
+
+use crate::kit::atoms::INPUT_BUFFER;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::MENTION_PREFIX;
+
+use crate::kit::atoms::PENDING_ATTACHMENTS;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PREDICTION;
+
+use crate::kit::atoms::SERVICE_SNAPSHOT;
+
+use crate::kit::atoms::SLASH_HINT_ACTIVE;
+
+use crate::kit::atoms::SLASH_PREFIX;

@@ -1,18 +1,31 @@
 /**
  * Chat 控制面的公开符号（主入口与 portable 共用）。
  *
- * 只包含 Chat 句柄、动作、事实/视图契约与错误；已删除的旧业务门面
- * 不再从任何发布入口导出。
+ * 刻意保留 `ChatManager`、`ChatService` 与 `createChatSession` 作为公共装配与控制 API；
+ * 旧的单体 `Agent` 门面与进程内 host 装配已删除，不再从任何发布入口导出。
  */
 
 export { ChatManager } from "../chat/manager";
 export { ChatService } from "../chat/service";
+export { createChatSession } from "../chat/session-factory";
+export type { CreateChatSessionInput } from "../chat/session-factory";
+export { ChatActivityTracker } from "../chat/activity";
+export type {
+    ChatActivitySnapshot,
+    ChatActivitySource,
+    ChatActivitySourceSnapshot,
+    ChatActivityTrackerOptions,
+} from "../chat/activity";
 export {
     CHAT_SEND_TEXT_MAX_LENGTH,
     ChatUserAction,
     parseChatUserAction,
 } from "../chat/action";
-export { clearSessionOwnership } from "../chat/ownership";
+export {
+    clearSessionOwnership,
+    readSessionOwnership,
+} from "../chat/ownership";
+export type { SessionOwnershipRecord } from "../chat/ownership";
 export * from "../chat/errors";
 export { SessionQueueStaleError } from "../agent/session-queue";
 export { WorkspaceMismatchError } from "../workspace/errors";
@@ -92,6 +105,13 @@ export type { PublicError, PublicErrorCode } from "../state/doc-model";
 
 export { ChatView } from "../view/chat-view";
 export { ChatReplica } from "../view/chat-replica";
+export { ChatFactReplica } from "../view/chat-fact-replica";
+export {
+    ChatState, ChatStateInputError,
+} from "../view/chat-state";
+export type {
+    ChatStateInputErrorReason, ChatStateMessage, ChatStateSnapshot, ChatStateSnapshotInput,
+} from "../view/chat-state";
 /**
  * 宿主侧的 View 共享表：按 Chat id 复用同一个 `ChatView`。
  *
@@ -100,6 +120,11 @@ export { ChatReplica } from "../view/chat-replica";
 export { ChatViewRegistry } from "../view/view-registry";
 export type { ChatViewOptions, ChatViewSync } from "../view/chat-view";
 export type { ChatReplicaConnection, ChatReplicaStatus } from "../view/chat-replica";
+export type {
+    ChatFactReplicaOptions,
+    ChatFactReplicaStatus,
+    ChatFactSnapshot,
+} from "../view/chat-fact-replica";
 export type { ChatYjsChannel } from "../view/channel";
 export { readSessionView } from "../view/session-view";
 export type {

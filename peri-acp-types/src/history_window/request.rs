@@ -7,7 +7,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::{
+use crate::history_window::{
     HistoryWindowAnchor, HistoryWindowDirection, HistoryWindowError,
     HISTORY_WINDOW_DEFAULT_BYTE_BUDGET, HISTORY_WINDOW_DEFAULT_LIMIT,
     HISTORY_WINDOW_MAX_BYTE_BUDGET, HISTORY_WINDOW_MAX_LIMIT,
@@ -18,7 +18,7 @@ use super::{
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HistoryWindowSeekAnchor {
     pub entry_id: String,
-    pub source: super::HistorySource,
+    pub source: crate::history_window::HistorySource,
 }
 
 /// `session/load` 内 `history` 的判别联合。

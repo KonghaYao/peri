@@ -9,12 +9,14 @@
 //! INPUT_SNAPSHOT / FOCUSED_ENTRY / VIEW_MODELS / POPUP_KIND / ACTIVE_PANEL）在测试间污染，
 //! 统一 `reset_atoms()` + `serial_test::serial`（仿 mouse_router_test 模式）。
 
-#[cfg(test)]
-use super::*;
-use crate::kit::atoms::{
-    ACTIVE_PANEL, FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE,
-    INPUT_SNAPSHOT, POPUP_KIND, PopupKind, ViewModelsSnapshot,
-};
+use super::Arc;
+use super::AsyncImage;
+use super::FocusedEntry;
+use super::ImagePreviewState;
+use super::InputSnapshot;
+use super::Path;
+use super::decode_image;
+
 use crate::kit::message_area::ImageHoverState;
 use crate::kit::terminal_caps::GraphicsProtocol;
 use crate::kit::tui_render_unit::TuiRenderUnit;
@@ -96,7 +98,10 @@ fn cursor_image_path_finds_image_line() {
         text: "hello\n@image /tmp/a.png\nworld".to_string(),
         cursor_char: 20, // 第二行内
     };
-    assert_eq!(cursor_image_path(&snap), Some("/tmp/a.png".to_string()));
+    assert_eq!(
+        super::cursor_image_path(&snap),
+        Some("/tmp/a.png".to_string())
+    );
 }
 
 #[test]
@@ -110,13 +115,13 @@ fn cursor_image_path_locates_line_by_char_index() {
         text,
         cursor_char: c2 + 1,
     };
-    assert_eq!(cursor_image_path(&snap), Some("/b.png".to_string()));
+    assert_eq!(super::cursor_image_path(&snap), Some("/b.png".to_string()));
     // 光标在第 2 行（非 @image）→ None。
     let snap2 = InputSnapshot {
         text: "@image /a.png\n世界\n@image /b.png".to_string(),
         cursor_char: line0_len + 1 + 1,
     };
-    assert_eq!(cursor_image_path(&snap2), None);
+    assert_eq!(super::cursor_image_path(&snap2), None);
 }
 
 #[test]
@@ -138,7 +143,7 @@ fn cursor_image_path_non_image_lines_return_none() {
         },
     ];
     for c in cases {
-        assert_eq!(cursor_image_path(&c), None, "text={:?}", c.text);
+        assert_eq!(super::cursor_image_path(&c), None, "text={:?}", c.text);
     }
 }
 
@@ -148,7 +153,10 @@ fn cursor_image_path_trims_whitespace() {
         text: "  @image   /tmp/a.png  ".to_string(),
         cursor_char: 5,
     };
-    assert_eq!(cursor_image_path(&snap), Some("/tmp/a.png".to_string()));
+    assert_eq!(
+        super::cursor_image_path(&snap),
+        Some("/tmp/a.png".to_string())
+    );
 }
 
 // ── focus 触发源 ────────────────────────────────────────────────────────
@@ -171,7 +179,7 @@ fn focus_image_path_uses_first_image_line() {
     view_models_with("text\n@image /tmp/b.png\n@image /tmp/c.png");
     let focused = FocusedEntry { slot: 0, key: None };
     assert_eq!(
-        focus_image_path(&focused),
+        super::focus_image_path(&focused),
         Some("/tmp/b.png".to_string()),
         "取 slot 第一个 @image 行"
     );
@@ -183,7 +191,10 @@ fn focus_image_path_slot_guards() {
     reset_atoms();
     view_models_with("@image /tmp/b.png");
     // 越界 slot → None。
-    assert_eq!(focus_image_path(&FocusedEntry { slot: 9, key: None }), None);
+    assert_eq!(
+        super::focus_image_path(&FocusedEntry { slot: 9, key: None }),
+        None
+    );
     // 非 user bubble slot（再造一个 divider）→ None。
     let vm = TuiRenderUnit::TuiDivider(crate::kit::tui_render_unit::TuiDivider {
         label: None,
@@ -193,7 +204,10 @@ fn focus_image_path_slot_guards() {
         items: im::Vector::from_iter([vm]),
         generation: 1,
     };
-    assert_eq!(focus_image_path(&FocusedEntry { slot: 0, key: None }), None);
+    assert_eq!(
+        super::focus_image_path(&FocusedEntry { slot: 0, key: None }),
+        None
+    );
 }
 
 // ── 三态仲裁 ────────────────────────────────────────────────────────────
@@ -207,7 +221,10 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
         text: "@image /cur.png".to_string(),
         cursor_char: 0,
     };
-    assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
+    assert_eq!(
+        super::resolve_preview_target(),
+        Some("/cur.png".to_string())
+    );
 
     // hover 与 cursor 同时命中 → hover 优先。
     *IMAGE_PREVIEW_HOVER.state().write() = Some(ImageHoverState {
@@ -218,21 +235,30 @@ fn resolve_preview_target_priority_hover_cursor_focus() {
         path: "/hov.png".to_string(),
         size_text: "45 B".to_string(),
     });
-    assert_eq!(resolve_preview_target(), Some("/hov.png".to_string()));
+    assert_eq!(
+        super::resolve_preview_target(),
+        Some("/hov.png".to_string())
+    );
 
     // hover 清空、cursor 命中、focus 命中 → cursor 优先于 focus。
     *IMAGE_PREVIEW_HOVER.state().write() = None;
     view_models_with("@image /focus.png");
     *FOCUSED_ENTRY.state().write() = Some(FocusedEntry { slot: 0, key: None });
-    assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
+    assert_eq!(
+        super::resolve_preview_target(),
+        Some("/cur.png".to_string())
+    );
 
     // cursor 清空 → focus。
     *INPUT_SNAPSHOT.state().write() = InputSnapshot::default();
-    assert_eq!(resolve_preview_target(), Some("/focus.png".to_string()));
+    assert_eq!(
+        super::resolve_preview_target(),
+        Some("/focus.png".to_string())
+    );
 
     // 全部清空 → None（Idle）。
     *FOCUSED_ENTRY.state().write() = None;
-    assert_eq!(resolve_preview_target(), None);
+    assert_eq!(super::resolve_preview_target(), None);
 }
 
 #[test]
@@ -249,7 +275,7 @@ fn resolve_preview_target_ignores_unconfirmed_hover() {
     });
 
     assert_eq!(
-        resolve_preview_target(),
+        super::resolve_preview_target(),
         None,
         "即时行高亮不应在稳定悬停确认前触发 overlay"
     );
@@ -263,26 +289,33 @@ fn resolve_preview_target_occluded_returns_none() {
         text: "@image /cur.png".to_string(),
         cursor_char: 0,
     };
-    assert_eq!(resolve_preview_target(), Some("/cur.png".to_string()));
+    assert_eq!(
+        super::resolve_preview_target(),
+        Some("/cur.png".to_string())
+    );
     *POPUP_KIND.state().write() = Some(PopupKind::Confirm);
-    assert_eq!(resolve_preview_target(), None, "弹窗遮挡 → 隐藏（§7.5）");
+    assert_eq!(
+        super::resolve_preview_target(),
+        None,
+        "弹窗遮挡 → 隐藏（§7.5）"
+    );
 }
 
 // ── 几何（§7.4）─────────────────────────────────────────────────────────
 
 #[test]
 fn preview_geometry_centered_60x40() {
-    let r = preview_geometry(100, 50).expect("正常终端应有几何");
+    let r = super::preview_geometry(100, 50).expect("正常终端应有几何");
     assert_eq!((r.width, r.height), (60, 20), "60% 宽 × 40% 高");
     assert_eq!((r.x, r.y), (20, 15), "居中");
 }
 
 #[test]
 fn preview_geometry_saturates_small_terminals() {
-    assert!(preview_geometry(3, 3).is_none(), "w<2 → 不渲染");
-    assert!(preview_geometry(1, 100).is_none(), "h<2 → 不渲染");
+    assert!(super::preview_geometry(3, 3).is_none(), "w<2 → 不渲染");
+    assert!(super::preview_geometry(1, 100).is_none(), "h<2 → 不渲染");
     // 大终端不溢出（u16 乘法走 u32）。
-    let r = preview_geometry(u16::MAX, u16::MAX).expect("大终端有几何");
+    let r = super::preview_geometry(u16::MAX, u16::MAX).expect("大终端有几何");
     assert!(r.width > 0 && r.height > 0);
 }
 
@@ -293,9 +326,11 @@ fn preview_geometry_saturates_small_terminals() {
 fn request_preview_managed_reaches_ready() {
     reset_atoms();
     crate::i18n::init(Some("en"));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect(
+        "request preview managed reaches ready: isolated fixture workspace must remain accessible",
+    );
     let file = managed_fixture(dir.path(), "a.png");
-    request_preview_with(Some(file.to_str().unwrap()), Some(dir.path()), decode_image);
+    super::request_preview_with(Some(file.to_str().expect("request preview managed reaches ready: fixture paths and protocol text must be valid UTF-8")), Some(dir.path()), decode_image);
     assert!(
         wait_state(|s| matches!(s, ImagePreviewState::Ready { .. })),
         "Managed fixture PNG 应解码到 Ready"
@@ -322,14 +357,14 @@ fn request_preview_managed_reaches_ready() {
 fn request_preview_manual_degrades_without_decode() {
     reset_atoms();
     crate::i18n::init(Some("en"));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("request preview manual degrades without decode: isolated fixture workspace must remain accessible");
     let root = dir.path().join("managed");
-    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&root).expect("request preview manual degrades without decode: isolated fixture workspace must remain accessible");
     // 手工路径：受管理根之外（同 tempdir 但不在 managed 子目录内）。
     let file = managed_fixture(dir.path(), "manual.png");
     let called = std::sync::Arc::new(AtomicBool::new(false));
     let called2 = std::sync::Arc::clone(&called);
-    request_preview_with(Some(file.to_str().unwrap()), Some(&root), move |_| {
+    super::request_preview_with(Some(file.to_str().expect("request preview manual degrades without decode: fixture paths and protocol text must be valid UTF-8")), Some(&root), move |_| {
         called2.store(true, Ordering::SeqCst);
         Err("unreachable")
     });
@@ -351,13 +386,13 @@ fn request_preview_manual_degrades_without_decode() {
 #[serial]
 fn request_preview_validation_failure_errors() {
     reset_atoms();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("request preview validation failure errors: isolated fixture workspace must remain accessible");
     let root = dir.path().join("managed");
-    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&root).expect("request preview validation failure errors: isolated fixture workspace must remain accessible");
     // .png 扩展名但内容为文本 → T5 MimeMismatch → Error。
     let bad = root.join("fake.png");
-    std::fs::write(&bad, "not an image").unwrap();
-    request_preview_with(Some(bad.to_str().unwrap()), Some(&root), |_| {
+    std::fs::write(&bad, "not an image").expect("request preview validation failure errors: isolated fixture workspace must remain accessible");
+    super::request_preview_with(Some(bad.to_str().expect("request preview validation failure errors: fixture paths and protocol text must be valid UTF-8")), Some(&root), |_| {
         Err("unreachable")
     });
     assert!(
@@ -370,7 +405,7 @@ fn request_preview_validation_failure_errors() {
 #[serial]
 fn request_preview_invalid_path_errors() {
     reset_atoms();
-    request_preview_with(Some("/nonexistent/nope.png"), None, |_| Err("unreachable"));
+    super::request_preview_with(Some("/nonexistent/nope.png"), None, |_| Err("unreachable"));
     assert!(
         wait_state(|s| matches!(s, ImagePreviewState::Error { .. })),
         "无法 canonicalize → Error"
@@ -386,7 +421,7 @@ fn request_preview_none_clears_to_idle() {
         path: "/tmp/a.png".into(),
         reason: "test".into(),
     };
-    request_preview(None);
+    super::request_preview(None);
     assert!(
         matches!(
             IMAGE_PREVIEW_STATE.state().read().clone(),
@@ -402,27 +437,43 @@ fn request_preview_none_clears_to_idle() {
 #[serial]
 fn stale_decode_result_is_dropped() {
     reset_atoms();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect(
+        "stale decode result is dropped: isolated fixture workspace must remain accessible",
+    );
     let root = dir.path().join("managed");
-    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&root).expect(
+        "stale decode result is dropped: isolated fixture workspace must remain accessible",
+    );
     let file_a = managed_fixture(&root, "a.png");
     let file_b = managed_fixture(&root, "b.png");
 
     let (tx_release, rx_release) = mpsc::channel::<()>();
-    request_preview_with(Some(file_a.to_str().unwrap()), Some(&root), move |_| {
-        let _ = rx_release.recv(); // 阻塞直至主线程放行
-        Ok(solid_image(2, 2))
-    });
-    request_preview_with(Some(file_b.to_str().unwrap()), Some(&root), |_| {
-        Ok(solid_image(4, 4))
-    });
+    super::request_preview_with(
+        Some(file_a.to_str().expect(
+            "stale decode result is dropped: fixture paths and protocol text must be valid UTF-8",
+        )),
+        Some(&root),
+        move |_| {
+            let _ = rx_release.recv(); // 阻塞直至主线程放行
+            Ok(solid_image(2, 2))
+        },
+    );
+    super::request_preview_with(
+        Some(file_b.to_str().expect(
+            "stale decode result is dropped: fixture paths and protocol text must be valid UTF-8",
+        )),
+        Some(&root),
+        |_| Ok(solid_image(4, 4)),
+    );
     assert!(
         wait_state(
             |s| matches!(s, ImagePreviewState::Ready { path, .. } if path.ends_with("b.png"))
         ),
         "B 应先完成并写入 Ready"
     );
-    tx_release.send(()).unwrap(); // 放行 A 的陈旧解码
+    tx_release.send(()).expect(
+        "stale decode result is dropped: fixture channel must deliver its expected message",
+    ); // 放行 A 的陈旧解码
     // 等待 A 线程完成（其写回前请求 id 已不匹配 → 丢弃）。
     std::thread::sleep(Duration::from_millis(150));
     let state = IMAGE_PREVIEW_STATE.state().read().clone();
@@ -437,6 +488,7 @@ fn stale_decode_result_is_dropped() {
 // ── 渲染（TestBackend，§7.6 渲染测试组）───────────────────────────────
 
 /// 仅覆盖 graphics 字段的能力集合（其余默认全能力）。
+#[must_use]
 fn caps(graphics: GraphicsProtocol) -> crate::kit::terminal_caps::TerminalCaps {
     crate::kit::terminal_caps::TerminalCaps {
         graphics,
@@ -461,11 +513,13 @@ fn ready_state(path: PathBuf) -> ImagePreviewState {
 #[test]
 fn draw_preview_overlay_ready_transmits() {
     crate::i18n::init(Some("en"));
-    let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(40, 20)).expect(
+        "draw preview overlay ready transmits: fixture parameters must construct a valid value",
+    );
     let rect = Rect::new(10, 4, 24, 12);
     let state = ready_state(PathBuf::from("/tmp/a.png"));
     let mut async_img = AsyncImage::new(
-        &picker_for(&caps(GraphicsProtocol::Kitty)),
+        &crate::kit::image_preview::picker_for(&caps(GraphicsProtocol::Kitty)),
         solid_image(64, 64),
     );
     let caps = caps(GraphicsProtocol::Kitty);
@@ -478,7 +532,7 @@ fn draw_preview_overlay_ready_transmits() {
         "后台 resize 应在超时内完成"
     );
     term.draw(|f| {
-        draw_preview_overlay(
+        super::draw_preview_overlay(
             f.buffer_mut(),
             rect,
             &state,
@@ -487,7 +541,7 @@ fn draw_preview_overlay_ready_transmits() {
             &caps,
         )
     })
-    .unwrap();
+    .expect("draw preview overlay ready transmits: the draw fixture operation uses valid inputs");
     let buf = term.backend().buffer();
     // 首帧 transmit 恰好 1 处（y==0 首行 cell——overlay 内首行即 rect.y）。
     assert_eq!(count_transmit(buf), 1, "Ready + Kitty 应输出像素 transmit");
@@ -501,15 +555,19 @@ fn draw_preview_overlay_ready_transmits() {
 #[test]
 fn draw_preview_overlay_degraded_no_escape() {
     crate::i18n::init(Some("en"));
-    let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(40, 20)).expect(
+        "draw preview overlay degraded no escape: fixture parameters must construct a valid value",
+    );
     let rect = Rect::new(10, 4, 24, 12);
     let state = ImagePreviewState::Degraded {
         path: "/tmp/a.png".into(),
         reason: crate::i18n::tr("image-preview-degraded"),
     };
     let caps = caps(GraphicsProtocol::Kitty);
-    term.draw(|f| draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
-        .unwrap();
+    term.draw(|f| super::draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
+        .expect(
+            "draw preview overlay degraded no escape: the draw fixture operation uses valid inputs",
+        );
     let buf = term.backend().buffer();
     assert_eq!(count_transmit(buf), 0, "Degraded 无像素 escape");
     // meta 行提示文本渲染在边框内首行（按列遍历该行 cell 收集符号）。
@@ -526,11 +584,12 @@ fn draw_preview_overlay_degraded_no_escape() {
 #[test]
 fn draw_preview_overlay_idle_empty() {
     crate::i18n::init(Some("en"));
-    let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(40, 20))
+        .expect("draw preview overlay idle empty: fixture parameters must construct a valid value");
     let rect = Rect::new(10, 4, 24, 12);
     let caps = caps(GraphicsProtocol::Kitty);
     term.draw(|f| {
-        draw_preview_overlay(
+        super::draw_preview_overlay(
             f.buffer_mut(),
             rect,
             &ImagePreviewState::Idle,
@@ -539,7 +598,7 @@ fn draw_preview_overlay_idle_empty() {
             &caps,
         )
     })
-    .unwrap();
+    .expect("draw preview overlay idle empty: the draw fixture operation uses valid inputs");
     assert_eq!(count_transmit(term.backend().buffer()), 0, "Idle 无输出");
     assert!(
         !term
@@ -555,16 +614,16 @@ fn draw_preview_overlay_idle_empty() {
 #[test]
 fn draw_preview_overlay_pixel_disabled_meta_only() {
     crate::i18n::init(Some("en"));
-    let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(40, 20)).expect("draw preview overlay pixel disabled meta only: fixture parameters must construct a valid value");
     let rect = Rect::new(10, 4, 24, 12);
     let state = ready_state(PathBuf::from("/tmp/a.png"));
     let mut async_img = AsyncImage::new(
-        &picker_for(&caps(GraphicsProtocol::Kitty)),
+        &crate::kit::image_preview::picker_for(&caps(GraphicsProtocol::Kitty)),
         solid_image(64, 64),
     );
     let caps = caps(GraphicsProtocol::Kitty);
     term.draw(|f| {
-        draw_preview_overlay(
+        super::draw_preview_overlay(
             f.buffer_mut(),
             rect,
             &state,
@@ -573,7 +632,7 @@ fn draw_preview_overlay_pixel_disabled_meta_only() {
             &caps,
         )
     })
-    .unwrap();
+    .expect("draw preview overlay pixel disabled meta only: the draw fixture operation uses valid inputs");
     assert_eq!(
         count_transmit(term.backend().buffer()),
         0,
@@ -584,12 +643,12 @@ fn draw_preview_overlay_pixel_disabled_meta_only() {
 #[test]
 fn draw_preview_overlay_unsupported_protocol_degrades() {
     crate::i18n::init(Some("en"));
-    let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(40, 20)).expect("draw preview overlay unsupported protocol degrades: fixture parameters must construct a valid value");
     let rect = Rect::new(10, 4, 24, 12);
     let state = ready_state(PathBuf::from("/tmp/a.png"));
     let caps = caps(GraphicsProtocol::ITerm2); // 检测但 disabled（§6.3）
-    term.draw(|f| draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
-        .unwrap();
+    term.draw(|f| super::draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
+        .expect("draw preview overlay unsupported protocol degrades: the draw fixture operation uses valid inputs");
     assert_eq!(
         count_transmit(term.backend().buffer()),
         0,
@@ -603,12 +662,12 @@ fn draw_preview_overlay_unsupported_protocol_degrades() {
 fn draw_preview_overlay_no_protocol_shows_hint() {
     crate::i18n::init(Some("en"));
     for protocol in [GraphicsProtocol::None, GraphicsProtocol::ITerm2] {
-        let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(40, 20)).expect("draw preview overlay no protocol shows hint: fixture parameters must construct a valid value");
         let rect = Rect::new(10, 4, 24, 12);
         let state = ready_state(PathBuf::from("/tmp/a.png"));
         let caps = caps(protocol);
-        term.draw(|f| draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
-            .unwrap();
+        term.draw(|f| super::draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
+            .expect("draw preview overlay no protocol shows hint: the draw fixture operation uses valid inputs");
         assert_eq!(
             count_transmit(term.backend().buffer()),
             0,
@@ -631,7 +690,7 @@ fn draw_preview_overlay_no_protocol_shows_hint() {
 #[test]
 fn preview_meta_text_ready_format() {
     crate::i18n::init(Some("en"));
-    let text = preview_meta_text(&ready_state(PathBuf::from("/tmp/a.png")));
+    let text = super::preview_meta_text(&ready_state(PathBuf::from("/tmp/a.png")));
     assert!(
         text.starts_with("[Image: a.png · 1×1"),
         "meta 行含文件名 + WxH，实际: {text}"
@@ -652,20 +711,20 @@ fn preview_meta_text_ready_format() {
 /// 非 Idle 才返回 clear 区域；终端过小（无几何）恒不渲染。
 #[test]
 fn idle_does_not_clear_overlay_area() {
-    let rect = preview_geometry(100, 40).expect("大终端有几何");
+    let rect = super::preview_geometry(100, 40).expect("大终端有几何");
     assert_eq!(
-        overlay_clear_rect(Some(rect), &ImagePreviewState::Idle),
+        super::overlay_clear_rect(Some(rect), &ImagePreviewState::Idle),
         None,
         "Idle 必须走 0×0 clear:false 空覆盖（F1）"
     );
     let state = ready_state(PathBuf::from("/tmp/a.png"));
     assert_eq!(
-        overlay_clear_rect(Some(rect), &state),
+        super::overlay_clear_rect(Some(rect), &state),
         Some(rect),
         "Ready 才返回全尺寸 clear 覆盖"
     );
     assert_eq!(
-        overlay_clear_rect(None, &state),
+        super::overlay_clear_rect(None, &state),
         None,
         "终端过小无几何 → 恒空覆盖"
     );
@@ -678,26 +737,26 @@ fn idle_does_not_clear_overlay_area() {
 #[serial]
 fn decode_uses_validated_buffer_not_reopened_path() {
     reset_atoms();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("decode uses validated buffer not reopened path: isolated fixture workspace must remain accessible");
     let root = dir.path().join("managed");
-    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&root).expect("decode uses validated buffer not reopened path: isolated fixture workspace must remain accessible");
     let file = managed_fixture(&root, "a.png");
-    let original = std::fs::read(&file).unwrap();
+    let original = std::fs::read(&file).expect("decode uses validated buffer not reopened path: isolated fixture workspace must remain accessible");
     let (tx_started, rx_started) = mpsc::channel::<()>();
     let (tx_release, rx_release) = mpsc::channel::<()>();
-    request_preview_with(Some(file.to_str().unwrap()), Some(&root), move |buf| {
-        tx_started.send(()).unwrap();
-        rx_release.recv().unwrap(); // 等主线程替换磁盘文件
+    super::request_preview_with(Some(file.to_str().expect("decode uses validated buffer not reopened path: fixture paths and protocol text must be valid UTF-8")), Some(&root), move |buf| {
+        tx_started.send(()).expect("decode uses validated buffer not reopened path: fixture channel must deliver its expected message");
+        rx_release.recv().expect("decode uses validated buffer not reopened path: fixture channel must deliver its expected message"); // 等主线程替换磁盘文件
         assert_eq!(
             buf, original,
             "decode 必须使用 validate 时读入的缓冲（F2 TOCTOU）"
         );
         Ok(solid_image(1, 1))
     });
-    rx_started.recv().unwrap();
+    rx_started.recv().expect("decode uses validated buffer not reopened path: fixture channel must deliver its expected message");
     // 校验已完成、decode 闭包已持有缓冲：把磁盘文件替换为 1MB 内容。
-    std::fs::write(&file, vec![0u8; 1024 * 1024]).unwrap();
-    tx_release.send(()).unwrap();
+    std::fs::write(&file, vec![0u8; 1024 * 1024]).expect("decode uses validated buffer not reopened path: isolated fixture workspace must remain accessible");
+    tx_release.send(()).expect("decode uses validated buffer not reopened path: fixture channel must deliver its expected message");
     assert!(
         wait_state(|s| matches!(s, ImagePreviewState::Ready { .. })),
         "decode 从缓冲解码应达 Ready（未按路径重开被替换文件）"
@@ -709,15 +768,15 @@ fn decode_uses_validated_buffer_not_reopened_path() {
 #[test]
 fn preview_meta_line_sanitizes_control_chars() {
     crate::i18n::init(Some("en"));
-    let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    let mut term = Terminal::new(TestBackend::new(40, 20)).expect("preview meta line sanitizes control chars: fixture parameters must construct a valid value");
     let rect = Rect::new(10, 4, 24, 12);
     let caps = caps(GraphicsProtocol::Kitty);
     let state = ImagePreviewState::Loading {
         path: "/tmp/a\x1b[31m.png".into(),
         grade: crate::kit::image_safety::PathGrade::Managed,
     };
-    term.draw(|f| draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
-        .unwrap();
+    term.draw(|f| super::draw_preview_overlay(f.buffer_mut(), rect, &state, true, None, &caps))
+        .expect("preview meta line sanitizes control chars: the draw fixture operation uses valid inputs");
     let buf = term.backend().buffer();
     let row_text: String = (rect.x..rect.x + rect.width)
         .map(|x| buf[(x, rect.y + 1)].symbol().to_string())
@@ -727,3 +786,21 @@ fn preview_meta_line_sanitizes_control_chars() {
         "meta 行不得含 ESC 序列（F3），实际: {row_text:?}"
     );
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::FOCUSED_ENTRY;
+
+use crate::kit::atoms::IMAGE_HOVER;
+
+use crate::kit::atoms::IMAGE_PREVIEW_HOVER;
+
+use crate::kit::atoms::IMAGE_PREVIEW_STATE;
+
+use crate::kit::atoms::INPUT_SNAPSHOT;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PopupKind;
+
+use crate::kit::atoms::ViewModelsSnapshot;

@@ -1,4 +1,6 @@
-use super::*;
+use crate::provider::LlmProvider;
+use crate::session::agent_pool::AgentPool;
+use std::sync::Arc;
 fn make_openai_provider(model: &str) -> LlmProvider {
     LlmProvider::OpenAi {
         api_key: "test-key".to_string(),
@@ -28,7 +30,7 @@ fn make_anthropic_provider(model: &str) -> LlmProvider {
 #[test]
 fn test_agent_pool_new_is_empty() {
     let pool = AgentPool::new();
-    assert!(pool.get_cached_llm().is_none());
+    assert!(pool.cached_llm().is_none());
     assert!(pool.fingerprint().is_empty());
 }
 
@@ -44,7 +46,7 @@ fn test_invalidate_clears_cache() {
     let mut pool = AgentPool::new();
     pool.fingerprint = "OpenAI:gpt-4o".to_string();
     pool.invalidate();
-    assert!(pool.get_cached_llm().is_none());
+    assert!(pool.cached_llm().is_none());
     assert!(pool.fingerprint().is_empty());
 }
 
@@ -61,19 +63,22 @@ fn test_has_valid_cache_fingerprint_mismatch() {
 #[test]
 fn test_fingerprint_openai() {
     let provider = make_openai_provider("gpt-4o-mini");
-    let fp = fingerprint(&provider);
+    let fp = crate::session::agent_pool::fingerprint(&provider);
     assert_eq!(fp.len(), 64);
-    assert_eq!(fp, fingerprint(&provider.clone()));
+    assert_eq!(
+        fp,
+        crate::session::agent_pool::fingerprint(&provider.clone())
+    );
 }
 
 #[test]
 fn test_fingerprint_anthropic() {
     let provider = make_anthropic_provider("claude-sonnet-4-20250514");
-    let fp = fingerprint(&provider);
+    let fp = crate::session::agent_pool::fingerprint(&provider);
     assert_eq!(fp.len(), 64);
     assert_ne!(
         fp,
-        fingerprint(&make_openai_provider(provider.model_name()))
+        crate::session::agent_pool::fingerprint(&make_openai_provider(provider.model_name()))
     );
 }
 
@@ -100,7 +105,7 @@ fn test_invalidate_clears_subagent_cache() {
     pool.invalidate();
     // invalidate 应同时清空 subagent_llm_cache
     assert!(pool.subagent_llm_cache.is_empty());
-    assert!(pool.get_cached_llm().is_none());
+    assert!(pool.cached_llm().is_none());
     assert!(pool.fingerprint().is_empty());
 }
 
@@ -187,9 +192,9 @@ fn test_fingerprint_includes_effort() {
         retry_observer: None,
     };
 
-    let fp_none = fingerprint(&provider_no_effort);
-    let fp_low = fingerprint(&provider_low);
-    let fp_high = fingerprint(&provider_high);
+    let fp_none = crate::session::agent_pool::fingerprint(&provider_no_effort);
+    let fp_low = crate::session::agent_pool::fingerprint(&provider_low);
+    let fp_high = crate::session::agent_pool::fingerprint(&provider_high);
 
     // 不同 effort 产生不同 fingerprint
     assert_ne!(fp_low, fp_high);
@@ -211,7 +216,10 @@ fn test_fingerprint_same_effort_stable() {
         retry_observer: None,
     };
     let b = a.clone();
-    assert_eq!(fingerprint(&a), fingerprint(&b));
+    assert_eq!(
+        crate::session::agent_pool::fingerprint(&a),
+        crate::session::agent_pool::fingerprint(&b)
+    );
 }
 
 /// 无 effort 等同于不启用 extended thinking
@@ -237,7 +245,10 @@ fn test_fingerprint_no_effort_distinct() {
         context_window: 200_000,
         retry_observer: None,
     };
-    assert_ne!(fingerprint(&none), fingerprint(&low));
+    assert_ne!(
+        crate::session::agent_pool::fingerprint(&none),
+        crate::session::agent_pool::fingerprint(&low)
+    );
 }
 
 /// 跨 turn 新鲜度回归测试：转发器挂 AgentPool（session 级），
@@ -356,7 +367,7 @@ fn mock_model(name: &str) -> impl peri_model::Model {
             _request: ModelRequest,
             _cancellation: CancellationToken,
         ) -> ModelResult<ModelResponse> {
-            Ok(ModelResponse::new(
+            Ok(ModelResponse::try_new(
                 ModelMessage::assistant_text("mock response"),
                 StopReason::EndTurn,
                 None,
@@ -394,8 +405,8 @@ fn test_provider_connection_update_does_not_reuse_stale_cache() {
     }
     for replacement in [changed_key, changed_url, changed_options] {
         let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
-        let old_fp = fingerprint(&original);
-        let new_fp = fingerprint(&replacement);
+        let old_fp = crate::session::agent_pool::fingerprint(&original);
+        let new_fp = crate::session::agent_pool::fingerprint(&replacement);
         let old = AgentPool::get_or_create_subagent_llm(&pool, &old_fp, || {
             // 模拟创建期间更新配置清缓存，然后旧工厂才返回并回填。
             pool.lock().invalidate();

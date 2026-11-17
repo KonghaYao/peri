@@ -7,6 +7,7 @@ use crate::session::Session;
 // ─── 工具函数（自 tool/mod.rs / mod.rs 迁移） ──────────────────────────────
 
 /// 从 session transcript 提取最后一条非空 AI 消息文本（P1-11: 各执行路径共用）。
+#[must_use]
 pub fn extract_last_ai_text(session: &Arc<Session>) -> String {
     let transcript = session.transcript();
     let tx = transcript.read();
@@ -33,6 +34,7 @@ pub fn extract_last_ai_text(session: &Arc<Session>) -> String {
 ///
 /// 遍历 `visible_messages()` 中所有 `BaseMessage::Tool` 条目——每条对应一次
 /// 工具执行（含成功和失败）。
+#[must_use]
 pub fn count_tool_calls_from_session(session: &Arc<Session>) -> usize {
     let transcript = session.transcript();
     let tx = transcript.read();
@@ -44,7 +46,10 @@ pub fn count_tool_calls_from_session(session: &Arc<Session>) -> usize {
 
 /// Parent-visible notice for a bounded handoff: identity, retained obligations and
 /// the explicit resume path. Never claims the pending work completed.
-pub fn format_handoff_notice(receipt: &super::types::ChildHandoffReceipt) -> String {
+#[must_use]
+pub fn format_handoff_notice(
+    receipt: &crate::session::subagent::types::ChildHandoffReceipt,
+) -> String {
     let tasks = if receipt.tasks.is_empty() {
         "none (retained queue messages are recorded in the handoff reminder)".to_string()
     } else {
@@ -72,6 +77,7 @@ pub fn format_handoff_notice(receipt: &super::types::ChildHandoffReceipt) -> Str
 }
 
 /// Format sub-agent execution result as a summary string returned to the parent agent.
+#[must_use]
 pub fn format_subagent_result(output: &AgentOutput) -> String {
     if output.tool_calls.is_empty() {
         return output.text.clone();

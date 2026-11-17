@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
-use tempfile::tempdir;
+use tempfile;
 
-use super::*;
+use super::HooksConfig;
+use super::Path;
+use super::PluginManifest;
+use super::RegisteredHook;
 use crate::hooks::types::HookEvent;
 use crate::hooks::types::HookType;
 
@@ -26,7 +29,7 @@ fn make_manifest_with_hooks(hooks: Option<HooksConfig>) -> PluginManifest {
 
 #[test]
 fn test_file_priority_over_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let hooks_dir = dir.path().join("hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
 
@@ -46,14 +49,14 @@ fn test_file_priority_over_manifest() {
     manifest_hooks.insert(crate::hooks::types::HookEvent::PostToolUse, vec![]);
     let manifest = make_manifest_with_hooks(Some(manifest_hooks));
 
-    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    let result = super::extract_hooks(&manifest, dir.path()).unwrap();
     assert!(result.contains_key(&crate::hooks::types::HookEvent::PreToolUse));
     assert!(!result.contains_key(&crate::hooks::types::HookEvent::PostToolUse));
 }
 
 #[test]
 fn test_wrapped_hooks_file_priority_over_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let hooks_dir = dir.path().join("hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
     std::fs::write(
@@ -70,7 +73,7 @@ fn test_wrapped_hooks_file_priority_over_manifest() {
     .unwrap();
     let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
 
-    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    let result = super::extract_hooks(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(matches!(
         &result[&HookEvent::UserPromptSubmit][0].hooks[0],
@@ -80,18 +83,20 @@ fn test_wrapped_hooks_file_priority_over_manifest() {
 
 #[test]
 fn test_empty_wrapped_hooks_override_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let hooks_dir = dir.path().join("hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
     std::fs::write(hooks_dir.join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
     let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
 
-    assert!(extract_hooks(&manifest, dir.path()).unwrap().is_empty());
+    assert!(super::extract_hooks(&manifest, dir.path())
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn test_invalid_wrapped_hooks_fall_back_to_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let hooks_dir = dir.path().join("hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
     let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
@@ -104,50 +109,50 @@ fn test_invalid_wrapped_hooks_fall_back_to_manifest() {
         r#"{"hooks": {"Stop": [{"hooks": [{"type": "command"}]}]}}"#,
     ] {
         std::fs::write(hooks_dir.join("hooks.json"), content).unwrap();
-        let result = extract_hooks(&manifest, dir.path()).unwrap();
+        let result = super::extract_hooks(&manifest, dir.path()).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&HookEvent::Stop));
         assert!(result[&HookEvent::Stop].is_empty());
-        assert!(extract_hooks(&make_manifest_with_hooks(None), dir.path()).is_none());
+        assert!(super::extract_hooks(&make_manifest_with_hooks(None), dir.path()).is_none());
     }
 }
 
 #[test]
 fn test_fallback_to_manifest_hooks() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // No hooks/hooks.json file
 
     let mut manifest_hooks: HooksConfig = HashMap::new();
     manifest_hooks.insert(crate::hooks::types::HookEvent::SessionStart, vec![]);
     let manifest = make_manifest_with_hooks(Some(manifest_hooks));
 
-    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    let result = super::extract_hooks(&manifest, dir.path()).unwrap();
     assert!(result.contains_key(&crate::hooks::types::HookEvent::SessionStart));
 }
 
 #[test]
 fn test_both_missing_returns_none() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let manifest = make_manifest_with_hooks(None);
 
-    let result = extract_hooks(&manifest, dir.path());
+    let result = super::extract_hooks(&manifest, dir.path());
     assert!(result.is_none());
 }
 
 #[test]
 fn test_unreadable_hooks_file_falls_back_to_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("hooks/hooks.json")).unwrap();
     let manifest = make_manifest_with_hooks(Some(HashMap::from([(HookEvent::Stop, vec![])])));
 
-    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    let result = super::extract_hooks(&manifest, dir.path()).unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains_key(&HookEvent::Stop));
 }
 
 #[test]
 fn test_invalid_json_falls_back_to_manifest() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let hooks_dir = dir.path().join("hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
 
@@ -159,26 +164,26 @@ fn test_invalid_json_falls_back_to_manifest() {
     let manifest = make_manifest_with_hooks(Some(manifest_hooks));
 
     // Should fall back to manifest hooks
-    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    let result = super::extract_hooks(&manifest, dir.path()).unwrap();
     assert!(result.contains_key(&crate::hooks::types::HookEvent::Stop));
 }
 
 #[test]
 fn test_empty_hooks_returns_empty_hashmap() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let hooks_dir = dir.path().join("hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
 
     std::fs::write(hooks_dir.join("hooks.json"), "{}").unwrap();
 
     let manifest = make_manifest_with_hooks(None);
-    let result = extract_hooks(&manifest, dir.path()).unwrap();
+    let result = super::extract_hooks(&manifest, dir.path()).unwrap();
     assert!(result.is_empty());
 }
 
 #[test]
 fn test_load_settings_local_hooks_basic() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -206,7 +211,7 @@ fn test_load_settings_local_hooks_basic() {
     )
     .unwrap();
 
-    let hooks = load_settings_local_hooks(dir.path().to_str().unwrap());
+    let hooks = super::load_settings_local_hooks(dir.path().to_str().unwrap());
     assert_eq!(hooks.len(), 2);
 
     // Verify plugin source
@@ -230,24 +235,24 @@ fn test_load_settings_local_hooks_basic() {
 
 #[test]
 fn test_load_settings_local_hooks_no_file() {
-    let hooks = load_settings_local_hooks("/nonexistent/path");
+    let hooks = super::load_settings_local_hooks("/nonexistent/path");
     assert!(hooks.is_empty());
 }
 
 #[test]
 fn test_load_settings_local_hooks_no_hooks_field() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(claude_dir.join("settings.local.json"), "{}").unwrap();
 
-    let hooks = load_settings_local_hooks(dir.path().to_str().unwrap());
+    let hooks = super::load_settings_local_hooks(dir.path().to_str().unwrap());
     assert!(hooks.is_empty());
 }
 
 #[test]
 fn test_load_settings_local_hooks_with_matcher() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -269,14 +274,14 @@ fn test_load_settings_local_hooks_with_matcher() {
     )
     .unwrap();
 
-    let hooks = load_settings_local_hooks(dir.path().to_str().unwrap());
+    let hooks = super::load_settings_local_hooks(dir.path().to_str().unwrap());
     assert_eq!(hooks.len(), 1);
     assert_eq!(hooks[0].matcher.as_deref(), Some(".env|.env.local"));
 }
 
 #[test]
 fn test_load_local_hooks_known_events() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(
@@ -287,7 +292,7 @@ fn test_load_local_hooks_known_events() {
         }}"#,
     )
     .unwrap();
-    let hooks = load_settings_local_hooks(dir.path().to_str().unwrap());
+    let hooks = super::load_settings_local_hooks(dir.path().to_str().unwrap());
     assert!(
         !hooks.is_empty(),
         "Should load hooks from project settings.local.json"
@@ -306,14 +311,14 @@ fn test_load_local_hooks_known_events() {
 // ===== load_settings_project_hooks 测试 =====
 
 fn load_project_hooks(cwd: &str) -> Vec<RegisteredHook> {
-    let home = tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
     write_hooks_settings(home.path());
-    load_settings_project_hooks_under(cwd, Some(home.path()))
+    super::load_settings_project_hooks_under(cwd, Some(home.path()))
 }
 
 #[test]
 fn test_load_settings_project_hooks_basic() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -371,7 +376,7 @@ fn test_load_settings_project_hooks_no_file() {
 
 #[test]
 fn test_load_settings_project_hooks_no_hooks_field() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
@@ -382,18 +387,18 @@ fn test_load_settings_project_hooks_no_hooks_field() {
 
 #[test]
 fn test_settings_hooks_read_failure_returns_empty() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(claude_dir.join("settings.json")).unwrap();
     std::fs::create_dir_all(claude_dir.join("settings.local.json")).unwrap();
 
     assert!(load_project_hooks(dir.path().to_str().unwrap()).is_empty());
-    assert!(load_settings_local_hooks(dir.path().to_str().unwrap()).is_empty());
+    assert!(super::load_settings_local_hooks(dir.path().to_str().unwrap()).is_empty());
 }
 
 #[test]
 fn test_load_settings_project_hooks_with_matcher() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -487,7 +492,7 @@ fn write_hooks_settings(dir: &Path) {
 /// known-folder 而不读环境变量，该平台只能跳过）。
 #[test]
 fn test_project_hooks_skipped_when_cwd_is_home() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     write_hooks_settings(&home);
     let project_dir = tmp.path().join("proj");
@@ -498,11 +503,11 @@ fn test_project_hooks_skipped_when_cwd_is_home() {
     assert_eq!(peri_config::io::home_dir().as_deref(), Some(home.as_path()));
     // 同一文件：项目级为空，用户级仍加载（hooks 只保留一份）
     assert!(
-        load_settings_project_hooks(home.to_str().unwrap()).is_empty(),
+        super::load_settings_project_hooks(home.to_str().unwrap()).is_empty(),
         "用户主目录下不得把用户级 hooks 再注册为项目级"
     );
     assert_eq!(load_project_hooks(home.to_str().unwrap()).len(), 1);
-    let global_hooks = load_global_settings_hooks();
+    let global_hooks = super::load_global_settings_hooks();
     assert_eq!(global_hooks.len(), 1, "用户级 hooks 应照常加载");
     assert_eq!(global_hooks[0].plugin_name, "settings.json");
     assert_eq!(global_hooks[0].plugin_id, "settings.global");
@@ -511,7 +516,7 @@ fn test_project_hooks_skipped_when_cwd_is_home() {
 
     // 子目录是真正的项目级，不受影响
     assert_eq!(
-        load_settings_project_hooks(project_dir.to_str().unwrap()).len(),
+        super::load_settings_project_hooks(project_dir.to_str().unwrap()).len(),
         1,
         "普通项目目录仍按项目级加载"
     );
@@ -521,14 +526,14 @@ fn test_project_hooks_skipped_when_cwd_is_home() {
 #[cfg(unix)]
 #[test]
 fn test_project_hooks_skipped_when_home_reached_via_symlink() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     write_hooks_settings(&home);
     let link = tmp.path().join("home-link");
     std::os::unix::fs::symlink(&home, &link).unwrap();
 
     assert!(
-        load_settings_project_hooks_under(link.to_str().unwrap(), Some(&home)).is_empty(),
+        super::load_settings_project_hooks_under(link.to_str().unwrap(), Some(&home)).is_empty(),
         "符号链接指向用户级文件时不得重复注册"
     );
 }
@@ -536,22 +541,28 @@ fn test_project_hooks_skipped_when_home_reached_via_symlink() {
 /// [回归] 同文件判定逐条核对（显式主目录，不依赖进程主目录，各平台都跑）。
 #[test]
 fn test_is_user_settings_path_under_explicit_home() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     write_hooks_settings(&home);
     let project_dir = tmp.path().join("proj");
     write_hooks_settings(&project_dir);
 
     assert!(
-        is_user_settings_path_under(&home.join(".claude").join("settings.json"), &home),
+        super::is_user_settings_path_under(&home.join(".claude").join("settings.json"), &home),
         "主目录下的 settings.json 就是用户级文件"
     );
     assert!(
-        !is_user_settings_path_under(&project_dir.join(".claude").join("settings.json"), &home),
+        !super::is_user_settings_path_under(
+            &project_dir.join(".claude").join("settings.json"),
+            &home
+        ),
         "普通项目目录的 settings.json 不是用户级文件"
     );
     assert!(
-        !is_user_settings_path_under(&home.join(".claude").join("settings.local.json"), &home),
+        !super::is_user_settings_path_under(
+            &home.join(".claude").join("settings.local.json"),
+            &home
+        ),
         "同目录的 settings.local.json 不是用户级 settings.json"
     );
 }
@@ -560,14 +571,14 @@ fn test_is_user_settings_path_under_explicit_home() {
 #[cfg(unix)]
 #[test]
 fn test_is_user_settings_path_under_symlinked_home() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     write_hooks_settings(&home);
     let link = tmp.path().join("home-link");
     std::os::unix::fs::symlink(&home, &link).unwrap();
 
     assert!(
-        is_user_settings_path_under(&link.join(".claude").join("settings.json"), &home),
+        super::is_user_settings_path_under(&link.join(".claude").join("settings.json"), &home),
         "符号链接指向用户级文件时应判为同一文件"
     );
 }
@@ -575,7 +586,7 @@ fn test_is_user_settings_path_under_symlinked_home() {
 #[cfg(unix)]
 #[test]
 fn test_project_settings_file_alias_is_user_source() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     write_hooks_settings(&home);
     let project = tmp.path().join("project");
@@ -585,19 +596,21 @@ fn test_project_settings_file_alias_is_user_source() {
         project.join(".claude/settings.json"),
     )
     .unwrap();
-    assert!(load_settings_project_hooks_under(project.to_str().unwrap(), Some(&home)).is_empty());
+    assert!(
+        super::load_settings_project_hooks_under(project.to_str().unwrap(), Some(&home)).is_empty()
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn test_symlink_with_same_lexical_prefix_is_distinct_source() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let other = tmp.path().join("other");
     write_hooks_settings(&home);
     write_hooks_settings(&other);
     std::os::unix::fs::symlink(&other, home.join("alias")).unwrap();
-    assert!(!is_user_settings_path_under(
+    assert!(!super::is_user_settings_path_under(
         &home.join("alias/.claude/settings.json"),
         &home,
     ));
@@ -607,7 +620,7 @@ fn test_symlink_with_same_lexical_prefix_is_distinct_source() {
 #[cfg(unix)]
 #[test]
 fn test_project_hooks_skipped_when_user_source_identity_fails() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let claude_dir = home.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
@@ -615,22 +628,23 @@ fn test_project_hooks_skipped_when_user_source_identity_fails() {
     std::os::unix::fs::symlink(&user_path, &user_path).unwrap();
     let project_dir = tmp.path().join("project");
     write_hooks_settings(&project_dir);
-    assert!(is_user_settings_path_under(
+    assert!(super::is_user_settings_path_under(
         &project_dir.join(".claude/settings.json"),
         &home,
     ));
     assert!(
-        load_settings_project_hooks_under(project_dir.to_str().unwrap(), Some(&home)).is_empty()
+        super::load_settings_project_hooks_under(project_dir.to_str().unwrap(), Some(&home))
+            .is_empty()
     );
 }
 
 #[test]
 fn test_project_hooks_without_home_load_project_source() {
-    let project = tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
     write_hooks_settings(project.path());
 
     assert_eq!(
-        load_settings_project_hooks_under(project.path().to_str().unwrap(), None).len(),
+        super::load_settings_project_hooks_under(project.path().to_str().unwrap(), None).len(),
         1
     );
 }
@@ -640,7 +654,7 @@ fn test_project_hooks_without_home_load_project_source() {
 #[test]
 fn test_tolerant_mixed_valid_and_invalid_events() {
     // 场景：部分事件有效、部分无效，有效的事件应保留
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -678,7 +692,7 @@ fn test_tolerant_mixed_valid_and_invalid_events() {
 #[test]
 fn test_tolerant_unknown_event_skipped() {
     // 场景：hooks 中所有 key 都是未知事件，应返回空
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -713,7 +727,7 @@ fn test_tolerant_unknown_event_skipped() {
 #[test]
 fn test_tolerant_non_array_rules_skipped() {
     // 场景：事件 key 已知，但值不是数组（如字符串），应跳过该事件
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -744,7 +758,7 @@ fn test_tolerant_non_array_rules_skipped() {
 #[test]
 fn test_tolerant_all_invalid_returns_empty() {
     // 场景：所有事件的 rules 格式都错误，应返回空列表（不 panic）
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 
@@ -768,7 +782,7 @@ fn test_tolerant_all_invalid_returns_empty() {
 #[test]
 fn test_tolerant_hooks_not_object_returns_empty() {
     // 场景：hooks 字段不是 object（如数组），应返回空
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
 

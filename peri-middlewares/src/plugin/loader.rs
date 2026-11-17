@@ -1,11 +1,16 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+#[cfg(test)]
+pub(crate) use crate::plugin::config::{extract_agents_paths, extract_skills_paths};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use gray_matter::{engine::YAML, Matter};
+use gray_matter::engine::YAML;
+use gray_matter::Matter;
 use peri_acp_types::command::command_route::{
     CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource as RouteCommandSource,
     RouteEntry,
@@ -16,20 +21,17 @@ use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use crate::{
-    hooks::types::RegisteredHook,
-    mcp::McpServerConfig,
-    plugin::{
-        config::{
-            load_claude_settings, load_installed_plugins, load_plugin_manifest,
-            marketplaces_cache_dir, ClaudeSettings,
-        },
-        installer::generate_synthetic_manifest,
-        marketplace::read_manifest_from_path,
-        types::{InstalledPlugins, McpServerEntry, PluginCommandEntry, PluginManifest},
-    },
-    skills::{SkillRoot, SkillSource},
-};
+use crate::hooks::types::RegisteredHook;
+use crate::mcp::McpServerConfig;
+use crate::plugin::config;
+use crate::plugin::config::ClaudeSettings;
+use crate::plugin::installer;
+use crate::plugin::marketplace;
+use crate::plugin::types::InstalledPlugins;
+use crate::plugin::types::McpServerEntry;
+use crate::plugin::types::PluginCommandEntry;
+use crate::plugin::types::PluginManifest;
+use crate::skills::SkillRoot;
 
 // 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::plugin`）。
 // `CommandSource` / `CommandEntry` / `LoadedPlugin` / `PluginLoadResult` 自本文件
@@ -81,7 +83,7 @@ pub fn parse_command_md(path: &Path) -> Option<(CommandFrontmatter, String)> {
 }
 
 pub fn load_manifest(plugin_dir: &Path) -> Result<PluginManifest, LoaderError> {
-    load_plugin_manifest(plugin_dir)
+    config::load_plugin_manifest(plugin_dir)
         .map_err(|e| LoaderError::ManifestLoadFailed(format!("{}: {e}", plugin_dir.display())))
 }
 
@@ -96,7 +98,7 @@ fn try_generate_synthetic_manifest_fallback(
         return false;
     }
 
-    let cache_dir = marketplaces_cache_dir().join(marketplace);
+    let cache_dir = config::marketplaces_cache_dir().join(marketplace);
     let manifest_path = cache_dir.join("marketplace.json");
     let subdir_path = cache_dir.join(".claude-plugin").join("marketplace.json");
 
@@ -108,7 +110,7 @@ fn try_generate_synthetic_manifest_fallback(
         return false;
     };
 
-    let marketplace_manifest = match read_manifest_from_path(&manifest_file) {
+    let marketplace_manifest = match marketplace::read_manifest_from_path(&manifest_file) {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -128,7 +130,7 @@ fn try_generate_synthetic_manifest_fallback(
         return false;
     }
 
-    match generate_synthetic_manifest(install_path, marketplace_plugin) {
+    match installer::generate_synthetic_manifest(install_path, marketplace_plugin) {
         Ok(()) => {
             debug!(
                 plugin = %plugin_name,
@@ -265,6 +267,14 @@ pub struct PluginCommandHandler {
     pub source: CommandSource,
 }
 
+impl Debug for PluginCommandHandler {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PluginCommandHandler")
+            .finish_non_exhaustive()
+    }
+}
+
 #[async_trait]
 impl CommandHandler for PluginCommandHandler {
     async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
@@ -285,6 +295,7 @@ impl CommandHandler for PluginCommandHandler {
 /// 相对）；handler = [`PluginCommandHandler`] 占位。含 `plugin:` 前缀但缺
 /// 末段 cmd（词法异常，如 `plugin:x`）→ 跳过并告警；非 plugin 域 name
 /// （如 `foo:bar`）不属本函数职责，静默跳过（register 词法校验兜底）。
+#[must_use]
 pub fn plugin_route_entries(entries: &[CommandEntry]) -> Vec<RouteEntry> {
     entries
         .iter()
@@ -316,97 +327,6 @@ pub fn plugin_route_entries(entries: &[CommandEntry]) -> Vec<RouteEntry> {
             })
         })
         .collect()
-}
-
-/// Extract skill roots from plugin manifest.
-///
-/// Manifest `skills` entries are treated as paths relative to the plugin root
-/// (matching Claude Code convention: `skills: ["./skills/"]` or `skills: ["skills/tdd"]`).
-/// Each entry becomes a `SkillRoot` (`source=Plugin`, `plugin_name=plugin_name`),
-/// regardless of whether it directly contains `SKILL.md` or is a container——
-/// 两条形态都交给 provider 的扫描语义处理（W4b：宿主侧扫描已删除，
-/// 目录叶子语义见 `mcp-packages/workspace/src/resources/skills.rs`）。
-///
-/// Falls back to `base_dir/skills/` as a single root when no manifest skills are declared.
-pub(crate) fn extract_skills_paths(
-    manifest: &PluginManifest,
-    base_dir: &Path,
-    plugin_name: &str,
-) -> Vec<SkillRoot> {
-    let mut result = Vec::new();
-
-    // 1. manifest 显式声明（每条 entry 是相对于插件根目录的路径）
-    if let Some(skills) = &manifest.skills {
-        if !skills.is_empty() {
-            for entry in skills {
-                let skill_path = base_dir.join(entry);
-                if !skill_path.is_dir() {
-                    debug!(path = %skill_path.display(), "插件 skill 路径不存在，跳过");
-                    continue;
-                }
-                result.push(SkillRoot {
-                    path: skill_path,
-                    source: SkillSource::Plugin,
-                    plugin_name: Some(plugin_name.to_string()),
-                });
-            }
-            return result;
-        }
-    }
-
-    // 2. fallback：base_dir/skills/ 作为一个 root（由 provider 递归扫描）
-    let skills_dir = base_dir.join("skills");
-    if skills_dir.is_dir() {
-        result.push(SkillRoot {
-            path: skills_dir,
-            source: SkillSource::Plugin,
-            plugin_name: Some(plugin_name.to_string()),
-        });
-    }
-
-    result
-}
-
-/// Extract agent directories from plugin manifest.
-///
-/// When the manifest declares `agents`, uses those paths directly.
-/// Falls back to scanning default directories (`agents/` and `.agents/`)
-/// when no agents are declared — matching Claude Code's behavior where
-/// agents placed in these directories are auto-discovered.
-pub(crate) fn extract_agents_paths(manifest: &PluginManifest, base_dir: &Path) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-
-    // 1. manifest 显式声明
-    if let Some(agents) = &manifest.agents {
-        if !agents.is_empty() {
-            for agent in agents {
-                let agent_path = base_dir.join(&agent.path);
-                if agent_path.exists() {
-                    result.push(agent_path);
-                } else {
-                    debug!(path = %agent_path.display(), "插件 agent 路径不存在，跳过");
-                }
-            }
-            return result;
-        }
-    }
-
-    // 2. fallback：扫描默认 agent 目录（agents/ 和 .agents/）
-    for dir_name in &["agents", ".agents"] {
-        let agents_dir = base_dir.join(dir_name);
-        if agents_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&agents_dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_dir() {
-                        result.push(p);
-                    }
-                }
-            }
-        }
-    }
-
-    result
 }
 
 /// 插件清单文件路径（`.claude-plugin/plugin.json`）。
@@ -689,8 +609,9 @@ fn load_plugins_with_policies(
         };
 
         let commands = extract_commands(&manifest, &plugin.install_path, &plugin.name);
-        let skills_roots = extract_skills_paths(&manifest, &plugin.install_path, &plugin.name);
-        let agents_dirs = extract_agents_paths(&manifest, &plugin.install_path);
+        let skills_roots =
+            config::extract_skills_paths(&manifest, &plugin.install_path, &plugin.name);
+        let agents_dirs = config::extract_agents_paths(&manifest, &plugin.install_path);
         let mcp_servers = match extract_mcp_servers(&manifest, &plugin.install_path) {
             Ok(servers) => servers,
             Err(error) => match mcp_policy {
@@ -768,14 +689,18 @@ fn select_enabled_plugins(
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let settings_path = claude_dir.join("settings.json");
 
-    let installed = load_installed_plugins(Some(&plugins_path))?;
-    let user_settings = load_claude_settings(Some(&settings_path))?;
+    let installed = config::load_installed_plugins(Some(&plugins_path))?;
+    let user_settings = config::load_claude_settings(Some(&settings_path))?;
 
     let project_settings = cwd
-        .map(|directory| load_claude_settings(Some(&directory.join(".claude/settings.json"))))
+        .map(|directory| {
+            config::load_claude_settings(Some(&directory.join(".claude/settings.json")))
+        })
         .transpose()?;
     let local_settings = cwd
-        .map(|directory| load_claude_settings(Some(&directory.join(".claude/settings.local.json"))))
+        .map(|directory| {
+            config::load_claude_settings(Some(&directory.join(".claude/settings.local.json")))
+        })
         .transpose()?;
     let inherited = ClaudeSettings {
         enabled_plugins: merge_enabled_plugins(&user_settings, project_settings.as_ref())
@@ -833,7 +758,16 @@ pub struct PluginCommandProvider {
     entries: Vec<CommandEntry>,
 }
 
+impl Debug for PluginCommandProvider {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PluginCommandProvider")
+            .finish_non_exhaustive()
+    }
+}
+
 impl PluginCommandProvider {
+    #[must_use]
     pub fn new(plugins: &[LoadedPlugin]) -> Self {
         let entries: Vec<CommandEntry> = plugins.iter().flat_map(|p| p.commands.clone()).collect();
         Self { entries }
@@ -846,6 +780,7 @@ impl CommandProvider for PluginCommandProvider {
     }
 }
 
+#[must_use]
 pub fn merge_plugin_mcp_servers(plugins: &[LoadedPlugin]) -> HashMap<String, McpServerConfig> {
     let mut result = HashMap::new();
     for plugin in plugins {
@@ -866,6 +801,7 @@ pub fn merge_plugin_mcp_servers(plugins: &[LoadedPlugin]) -> HashMap<String, Mcp
 ///
 /// `cwd`：项目工作目录，用于发现项目级 `.claude/settings.json` 的 `enabledPlugins`。
 /// 传 `None` 时仅读取用户级 `~/.claude/settings.json`。
+#[must_use]
 pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) -> PluginLoadResult {
     let plugins = match load_enabled_plugins(claude_dir, cwd) {
         Ok(p) => p,
@@ -929,10 +865,7 @@ fn aggregate_plugin_data(plugins: Vec<LoadedPlugin>) -> PluginLoadResult {
                         hooks.push(RegisteredHook {
                             hook: hook_def.clone(),
                             event: event.clone(),
-                            matcher: rule
-                                .matcher
-                                .clone()
-                                .or_else(|| hook_def.get_matcher().cloned()),
+                            matcher: rule.matcher.clone().or_else(|| hook_def.matcher().cloned()),
                             plugin_name: plugin.name.clone(),
                             plugin_id: plugin.name.clone(),
                             plugin_source: Some(plugin.scope.clone()),

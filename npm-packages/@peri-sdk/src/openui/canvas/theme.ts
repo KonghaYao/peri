@@ -7,7 +7,7 @@ export {
 } from "./tokens";
 
 export const canvasTypography = {
-  // 标题字号对齐 peri-cf 的 chat-markdown.css；正文保持 14/20 以提高信息密度。
+  // 标题字号对齐聊天 Markdown 渲染；正文保持 14/20 以提高信息密度。
   h1: { fontSize: "21px", lineHeight: "30px", fontWeight: 590 },
   h2: { fontSize: "19px", lineHeight: "28px", fontWeight: 590 },
   h3: { fontSize: "18px", lineHeight: "26px", fontWeight: 590 },

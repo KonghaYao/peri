@@ -59,7 +59,11 @@ pub(super) fn resolve_event(event: &mut TelemetryEvent) -> Resolved {
             continue;
         };
         let taken = {
-            let mut state = ticket.cell.state.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = ticket
+                .cell
+                .state
+                .lock()
+                .expect("snapshot preparation state must remain consistent after a panic");
             match &*state {
                 SnapshotState::Preparing => return Resolved::Waiting,
                 _ => std::mem::replace(&mut *state, SnapshotState::Taken),
@@ -94,7 +98,7 @@ pub(super) fn freeze_snapshot(
     };
     let mut prefix = Vec::new();
     if !write_prefix(source, &mut prefix, prefix_limit)? {
-        return Ok(InputSnapshot::Inline(BudgetedBytes::new(
+        return Ok(InputSnapshot::Inline(BudgetedBytes::try_new(
             bytes::Bytes::from(prefix),
             allowance,
         )?));
@@ -157,15 +161,15 @@ fn resume_in_memory(
         return Err(LangfuseError::PayloadTooLarge { limit_bytes: limit });
     }
     outcome?;
-    Ok(InputSnapshot::Inline(BudgetedBytes::new(
+    Ok(InputSnapshot::Inline(BudgetedBytes::try_new(
         bytes::Bytes::from(buffer),
         permit,
     )?))
 }
 
 /// 阈值内只累加的内存 sink；达到阈值即要求调用方转盘（不保留超出阈值的字节）。
-struct PrefixSink<'a> {
-    buffer: &'a mut Vec<u8>,
+struct PrefixSink<'buffer> {
+    buffer: &'buffer mut Vec<u8>,
     limit: usize,
     overflowed: bool,
 }
@@ -188,8 +192,8 @@ impl Write for PrefixSink<'_> {
 }
 
 /// 内存回退用的续写 sink：丢弃已在前缀中的前 `skip` 字节，其余按上界累加。
-struct ResumeSink<'a> {
-    buffer: &'a mut Vec<u8>,
+struct ResumeSink<'buffer> {
+    buffer: &'buffer mut Vec<u8>,
     skip: usize,
     limit: usize,
     overflowed: bool,
@@ -291,8 +295,8 @@ fn payload_too_large(limit_bytes: usize) -> SpoolFailure {
 }
 
 /// 落盘 sink：写对象的同时计数与摘要，并区分「超逻辑上界」与「磁盘写失败」。
-struct ObjectSink<'a> {
-    object: &'a mut dyn TemporaryObject,
+struct ObjectSink<'buffer> {
+    object: &'buffer mut dyn TemporaryObject,
     hasher: Sha256,
     written: u64,
     limit: u64,

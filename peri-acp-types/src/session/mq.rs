@@ -135,6 +135,7 @@ pub struct MqWatermark {
 }
 
 impl MqWatermark {
+    #[must_use]
     pub fn new(enqueued_at: impl Into<String>, id: MessageId) -> Self {
         Self {
             enqueued_at: enqueued_at.into(),
@@ -196,7 +197,7 @@ pub enum MqEnqueueDisposition {
     AlreadyHandedOff,
 }
 
-/// 入队结果。只有 [`Inserted`](MqEnqueueDisposition::Inserted)/[`Existing`] 的
+/// 入队结果。只有 [`Inserted`](MqEnqueueDisposition::Inserted)/[`Existing`](MqEnqueueDisposition::Existing) 的
 /// `entry.enqueued_at` 是持久事实；`AlreadyHandedOff` 的 entry 是请求内容的投影
 /// （历史表不保存入队时间，MQ 行也已不存在）。
 #[derive(Debug, Clone)]
@@ -464,6 +465,10 @@ pub trait ThreadMqStore: Send + Sync {
     #[cfg(feature = "test-support")]
     fn install_receive_gate(&self, _gate: ReceiveGate) {}
 
+    /// 仅测试：暂停下一次 enqueue 提交，供“撤回与入队交错”竞态测试使用。
+    #[cfg(feature = "test-support")]
+    fn install_enqueue_gate(&self, _gate: ReceiveGate) {}
+
     /// 仅测试：让下一次 MQ 查询在读取前暂停；默认实现忽略门控。
     #[cfg(feature = "test-support")]
     fn install_query_gate(&self, _gate: ReceiveGate) {}
@@ -476,6 +481,7 @@ pub struct SessionResourcesMqStore {
 }
 
 impl SessionResourcesMqStore {
+    #[must_use]
     pub fn new(resources: Arc<dyn SessionResources>) -> Self {
         Self { resources }
     }

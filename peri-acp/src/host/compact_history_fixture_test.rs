@@ -1,24 +1,86 @@
 //! Ordinary Compact history and cancellation regressions through the production host.
 
-use super::*;
-use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
-use peri_acp_types::{
-    messages::{BaseMessage, MessageId},
-    session::{
-        MessageKind, MessagePolicy, MessageSource, MqCancelOutcome, MqEnqueueOutcome, MqEntry,
-        MqFilter, MqInput, MqReceiveOutcome, MqReceiveSelection,
-    },
-    session_resources::{
-        ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
-        NewSessionMeta, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability,
-        SessionHistoryWindowBounds, SessionMetaPatch, SessionResourceResult, SessionResources,
-        SessionSnapshot,
-    },
-    store::{CompactionChange, MessageFlags, PersistedPayload},
-    thread::{ThreadId, ThreadMeta},
-    workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding},
-};
+use crate::host::executor_flow_tests::execution_fixture;
+#[cfg(not(windows))]
+use crate::host::executor_flow_tests::CapturePromptModel;
+use crate::host::executor_flow_tests::HomeGuard;
+use crate::host::executor_flow_tests::MockEventSink;
+use crate::host::prompt;
+use crate::host::SessionState;
+use crate::host::SharedSessions;
+use crate::session::agent_pool::AgentPool;
+use crate::session::executor::SessionContext;
+use crate::session::executor::TurnInput;
+use async_trait::async_trait;
+#[cfg(not(windows))]
+use futures::stream;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::MessageKind;
+use peri_acp_types::session::MessagePolicy;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::MqCancelOutcome;
+use peri_acp_types::session::MqEnqueueOutcome;
+use peri_acp_types::session::MqEntry;
+use peri_acp_types::session::MqFilter;
+use peri_acp_types::session::MqInput;
+use peri_acp_types::session::MqReceiveOutcome;
+use peri_acp_types::session::MqReceiveSelection;
+use peri_acp_types::session_resources::ChildResumeClaim;
+use peri_acp_types::session_resources::ChildSnapshot;
+use peri_acp_types::session_resources::ForkSnapshot;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::NewSession;
+use peri_acp_types::session_resources::NewSessionMeta;
+use peri_acp_types::session_resources::PersistenceRecovery;
+use peri_acp_types::session_resources::RewindBoundary;
+use peri_acp_types::session_resources::RewindOutcome;
+use peri_acp_types::session_resources::SessionAvailability;
+use peri_acp_types::session_resources::SessionHistoryWindowBounds;
+use peri_acp_types::session_resources::SessionMetaPatch;
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::session_resources::SessionSnapshot;
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::workspace::ResolvedWorkspace;
+use peri_acp_types::workspace::ScopedThreadPage;
+use peri_acp_types::workspace::ScopedThreadQuery;
+use peri_acp_types::workspace::SessionBinding;
+use peri_agent::session::exec::executor_helpers::StageBuildFn;
+#[cfg(not(windows))]
+use peri_model::Model;
+#[cfg(not(windows))]
+use peri_model::ModelCapabilities;
+#[cfg(not(windows))]
+use peri_model::ModelMessage;
+#[cfg(not(windows))]
+use peri_model::ModelRequest;
+#[cfg(not(windows))]
+use peri_model::ModelResponse;
+#[cfg(not(windows))]
+use peri_model::ModelResult;
+#[cfg(not(windows))]
+use peri_model::ModelStream;
+#[cfg(not(windows))]
+use peri_model::ModelStreamEvent;
+#[cfg(not(windows))]
+use peri_model::StopReason;
+#[cfg(not(windows))]
+use peri_model::TokenUsage;
+use serial_test::serial;
 use std::collections::HashMap;
+#[cfg(not(windows))]
+use std::sync::atomic::AtomicUsize;
+#[cfg(not(windows))]
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 #[path = "compact_command_test.rs"]
 mod compact_command_tests;
@@ -45,7 +107,7 @@ impl Model for SummaryModel {
         _request: ModelRequest,
         cancellation: AgentCancellationToken,
     ) -> ModelResult<ModelStream> {
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text(SUMMARY),
             StopReason::EndTurn,
             None,
@@ -417,7 +479,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         continuation_mq_steering_pending: false,
         recovery_settlement_pending: false,
         view_only: false,
-        frozen: Some(make_sentinel_frozen()),
+        frozen: Some(crate::host::executor_flow_tests::make_sentinel_frozen()),
         recall_items: vec![],
         agent_pool: AgentPool::new(),
         title: None,
@@ -454,7 +516,7 @@ async fn make_compact_context(
     let thread_id = meta.id.clone();
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     let cwd = workspace.cwd.to_str().unwrap();
-    let frozen = make_sentinel_frozen();
+    let frozen = crate::host::executor_flow_tests::make_sentinel_frozen();
     store
         .create_session(&NewSession {
             thread_id: thread_id.clone(),
@@ -474,7 +536,7 @@ async fn make_compact_context(
         })
         .await
         .unwrap();
-    let mut ctx = make_session_context(&thread_id).await;
+    let mut ctx = crate::host::executor_flow_tests::make_session_context(&thread_id).await;
     ctx.cwd = cwd.into();
     ctx.thread_id = Some(thread_id.clone());
     ctx.session_resources = Some(store.clone());
@@ -505,7 +567,7 @@ async fn make_compact_turn(
     sessions: &SharedSessions,
     trigger_full: bool,
 ) -> TurnInput {
-    let stage = make_stage_build(ctx);
+    let stage = crate::host::executor_flow_tests::make_stage_build(ctx);
     let stage_build: StageBuildFn = Arc::new(move |request| {
         let (mut output, cache) = stage(request)?;
         if trigger_full {
@@ -527,7 +589,7 @@ async fn make_compact_turn(
     });
     let sessions = sessions.lock().await;
     let state = sessions.get(&ctx.session_id).unwrap();
-    let mut turn = make_turn_input(
+    let mut turn = crate::host::executor_flow_tests::make_turn_input(
         Arc::new(MockEventSink::new()),
         MessageContent::text("continue ordinary session"),
         false,
@@ -549,7 +611,8 @@ async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &Share
     ctx.primary_llm_factory = Some(Arc::new(move || model.clone()));
     ctx.cancel = AgentCancellationToken::new();
     let turn = make_compact_turn(&ctx, sessions, false).await;
-    let result = run_session_loop(ctx, turn).await;
+    let result =
+        crate::host::executor_flow_tests::execution_fixture::run_session_loop(ctx, turn).await;
     assert!(result.ok, "恢复后的下一轮应成功: {:?}", result.failure);
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1, "下一轮必须真正到达模型");
@@ -587,7 +650,7 @@ async fn ordinary_append_after_full_does_not_read_window_bounds() {
     let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
     let resources: Arc<dyn SessionResources> = store.clone();
 
-    finish_prompt_turn(
+    prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,
@@ -603,7 +666,7 @@ async fn ordinary_append_after_full_does_not_read_window_bounds() {
     );
 
     for _ in 0..2 {
-        finish_prompt_turn(
+        prompt::finish_prompt_turn(
             &sessions,
             &ctx.session_id,
             false,
@@ -634,7 +697,7 @@ async fn concurrent_rewind_discards_compact_bounds_metadata() {
     let task_sessions = sessions.clone();
     let task_id = ctx.session_id.clone();
     let task = tokio::spawn(async move {
-        finish_prompt_turn(
+        prompt::finish_prompt_turn(
             &task_sessions,
             &task_id,
             false,
@@ -678,7 +741,7 @@ async fn cancelled_turn_persists_stopped_work_state() {
     let mut result = synthetic_result(false);
     result.ok = false;
     result.stop_reason = peri_acp_types::command::PromptStopReason::Cancelled;
-    finish_prompt_turn(&sessions, &ctx.session_id, false, result, Some(resources))
+    prompt::finish_prompt_turn(&sessions, &ctx.session_id, false, result, Some(resources))
         .await
         .expect("cancelled turn");
 
@@ -702,7 +765,7 @@ async fn completed_turn_persists_idle_and_context_usage() {
 
     let mut result = synthetic_result(false);
     result.context_usage_tokens = Some(4321);
-    finish_prompt_turn(&sessions, &ctx.session_id, false, result, Some(resources))
+    prompt::finish_prompt_turn(&sessions, &ctx.session_id, false, result, Some(resources))
         .await
         .expect("completed turn");
 
@@ -748,7 +811,7 @@ async fn completed_turn_keeps_working_while_processing_work_is_pending() {
         .await
         .unwrap();
 
-    finish_prompt_turn(
+    prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,
@@ -783,7 +846,7 @@ async fn completed_turn_does_not_lift_a_stopped_intent() {
         .await
         .unwrap();
 
-    finish_prompt_turn(
+    prompt::finish_prompt_turn(
         &sessions,
         &ctx.session_id,
         false,

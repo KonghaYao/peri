@@ -98,14 +98,17 @@ impl HistoryDetailWindow {
             .map(|chunk| Arc::clone(&chunk.bytes))
     }
 
+    #[must_use]
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
 
+    #[must_use]
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }
 
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         self.complete
     }
@@ -504,6 +507,7 @@ pub async fn fetch_detail_chunk(
     window.apply_chunk(chunk, max_bytes)
 }
 
+#[must_use]
 fn distance_to(anchor: u64, start: u64, end: u64) -> u64 {
     if anchor < start {
         start.saturating_sub(anchor)
@@ -749,10 +753,9 @@ pub(crate) fn build_history_detail_lines(
     inherited_notice: Option<&str>,
     theme: &peri_theme::theme::ThemeDefinition,
 ) -> Vec<ratatui_kit::ratatui::text::Line<'static>> {
-    use ratatui_kit::ratatui::{
-        style::Style,
-        text::{Line, Span},
-    };
+    use ratatui_kit::ratatui::style::Style;
+    use ratatui_kit::ratatui::text::Line;
+    use ratatui_kit::ratatui::text::Span;
     let mut lines = Vec::new();
     if let Some(notice) = inherited_notice {
         lines.push(Line::from(Span::styled(

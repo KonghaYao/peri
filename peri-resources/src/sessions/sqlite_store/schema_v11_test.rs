@@ -1,10 +1,12 @@
-use super::*;
+use super::{SqliteConnectOptions, SqliteThreadStore, CURRENT_SCHEMA_VERSION};
+use peri_acp_types::store::ThreadStore;
+
 use crate::sessions::canonical::{CREATE_INDEXES, V10_CREATE_TABLES};
 use crate::sessions::schema_cleanup::{
     LEGACY_BOUND_EXECUTION_SQL, LEGACY_EXECUTION_SQL, LEGACY_GOALS_SQL,
 };
 use peri_acp_types::messages::BaseMessage;
-use peri_acp_types::store::{serialize_persisted_payload, PersistedPayload};
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::workspace::WorkspaceError;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 
@@ -53,7 +55,7 @@ async fn old_database() -> (tempfile::TempDir, SqliteConnection) {
         let message = BaseMessage::human(id);
         sqlx::query("INSERT INTO messages (message_id, thread_id, role, content, truncated, excluded) VALUES (?1, ?2, 'user', ?3, 1, 1)")
             .bind(message.id().as_uuid().to_string()).bind(id)
-            .bind(serialize_persisted_payload(&PersistedPayload::Message(message)).unwrap())
+            .bind(peri_acp_types::store::serialize_persisted_payload(&PersistedPayload::Message(message)).unwrap())
             .execute(&mut connection).await.unwrap();
     }
     (directory, connection)
@@ -101,7 +103,7 @@ async fn old_versions_upgrade_preserving_goal_extensions_and_history_rowids() {
         .await
         .unwrap();
         connection.close().await.unwrap();
-        let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+        let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
             .await
             .unwrap();
         let mut connection = store.database.pool.acquire().await.unwrap();
@@ -151,7 +153,7 @@ async fn schema_v11_rebuild_replaces_the_index_set_on_threads() {
         vec!["idx_threads_parent_thread_id".to_owned()]
     );
     connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let mut connection = store.database.pool.acquire().await.unwrap();
@@ -214,7 +216,7 @@ async fn unknown_thread_columns_refuse_the_upgrade() {
         .unwrap();
         let before = history(&mut connection).await;
         connection.close().await.unwrap();
-        let error = match SqliteThreadStore::new(directory.path().join("threads.db")).await {
+        let error = match SqliteThreadStore::try_new(directory.path().join("threads.db")).await {
             Ok(_) => panic!("unknown columns on a rebuilt table must refuse the upgrade"),
             Err(error) => error,
         };
@@ -260,7 +262,7 @@ async fn environment_backfill_failure_rolls_back_schema_and_version() {
     connection.close().await.unwrap();
 
     let path = directory.path().join("threads.db");
-    assert!(SqliteThreadStore::new(&path).await.is_err());
+    assert!(SqliteThreadStore::try_new(&path).await.is_err());
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new()
             .filename(&path)
@@ -294,7 +296,7 @@ async fn schema_v11_upgrade_removes_only_retired_state_and_keeps_config_and_hist
     let before = history(&mut connection).await;
     let path = directory.path().join("threads.db");
     connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let mut connection = store.database.pool.acquire().await.unwrap();
     let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
         .fetch_one(&mut *connection)
@@ -321,7 +323,7 @@ async fn schema_v11_upgrade_removes_only_retired_state_and_keeps_config_and_hist
     assert_eq!(meta.config.as_deref(), Some(r#"{"model":"keep"}"#));
     meta.config = Some(r#"{"model":"changed"}"#.into());
     store.update_meta(&"older".into(), meta).await.unwrap();
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     assert_eq!(
         reopened
             .load_meta(&"older".into())
@@ -346,7 +348,7 @@ async fn schema_v11_reading_context_preserves_timestamp_and_recent_order() {
     let (directory, connection) = old_database().await;
     let path = directory.path().join("threads.db");
     connection.close().await.unwrap();
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let before = store.load_meta(&"older".into()).await.unwrap().updated_at;
     let order = store
         .list_thread_entries("/tmp")
@@ -412,7 +414,7 @@ async fn schema_v11_readonly_old_and_new_databases_never_migrate_or_write_on_rea
     assert_eq!(history(&mut connection).await, before);
     drop(connection);
     drop(reader);
-    let writer = SqliteThreadStore::new(&path).await.unwrap();
+    let writer = SqliteThreadStore::try_new(&path).await.unwrap();
     // `Drop` 不等待连接回收；只读重开前显式收尾，避免与 WAL checkpoint 竞争。
     writer.close().await;
     let reader = SqliteThreadStore::open_existing_read_only(&path)
@@ -458,7 +460,7 @@ async fn schema_v11_unknown_retired_state_and_external_dependencies_refuse_witho
                 .await
                 .unwrap();
         connection.close().await.unwrap();
-        let error = match SqliteThreadStore::new(directory.path().join("threads.db")).await {
+        let error = match SqliteThreadStore::try_new(directory.path().join("threads.db")).await {
             Ok(_) => panic!("unexpected upgrade: {setup}"),
             Err(error) => error,
         };
@@ -534,7 +536,7 @@ async fn schema_v11_failed_column_drop_rolls_back_the_prior_execution_drop() {
         .unwrap();
     sqlx::raw_sql("PRAGMA user_version = 10; INSERT INTO threads (id, cwd, created_at, updated_at) VALUES ('session', '/tmp', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'); INSERT INTO thread_goals VALUES ('session', 'goal', 'keep on failure', 'active', NULL, 0, 0, 1, 1)").execute(&mut connection).await.unwrap();
     connection.close().await.unwrap();
-    assert!(SqliteThreadStore::new(&path).await.is_err());
+    assert!(SqliteThreadStore::try_new(&path).await.is_err());
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new().filename(&path).read_only(true),
     )
@@ -593,7 +595,7 @@ async fn schema_v11_cleans_prior_development_eleven_and_reopens_without_runtime_
         connection.close().await.unwrap();
         let path = directory.path().join("threads.db");
         for _ in 0..2 {
-            let store = SqliteThreadStore::new(&path).await.unwrap();
+            let store = SqliteThreadStore::try_new(&path).await.unwrap();
             let mut connection = store.database.pool.acquire().await.unwrap();
             assert_eq!(history(&mut connection).await, before);
             let after: (String, String, String) = sqlx::query_as(
@@ -636,7 +638,7 @@ async fn schema_v11_same_version_unknown_execution_table_is_preserved() {
     .unwrap();
     connection.close().await.unwrap();
     let path = directory.path().join("threads.db");
-    assert!(SqliteThreadStore::new(&path).await.is_err());
+    assert!(SqliteThreadStore::try_new(&path).await.is_err());
     let mut connection = SqliteConnection::connect_with(
         &SqliteConnectOptions::new().filename(&path).read_only(true),
     )

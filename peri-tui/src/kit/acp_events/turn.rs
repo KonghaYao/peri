@@ -2,9 +2,10 @@
 //! TurnCommitted, PromptStarted/Submitted, SessionReplayStarted/Done,
 //! LocalUserBubble, BgCallbackBubble, CommittedAssistantText.
 
-use super::*;
+use super::{BridgeState, SessionPhase, SubmittedInputRollback};
+
 use crate::kit::acp_types::CurrentTurn;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, PROGRAM_STATUS, RENDER_HEARTBEAT};
+
 use crate::kit::program_status::{self, ProgramStatus};
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit};
 
@@ -32,7 +33,8 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // buffered_text 已由 LocalUserBubble 事件提前入队 committed，
     // TurnDone 不再代为搬运。
     let _ = state.pending_cache_usage.take();
-    state.flush_current_turn();
+    // 普通 TurnDone 是 turn 边界：后台 child 不阻塞父消息归档（M2）。
+    state.flush_current_turn_at_boundary();
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
@@ -81,21 +83,21 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     super::render::drain_input_buffer();
 }
 
-pub(super) fn handle_agent_done(state: &mut BridgeState, request_id: &Option<String>) {
-    if request_id != &state.current_request_id {
+pub(super) fn handle_agent_done(state: &mut BridgeState, request_id: Option<&str>) {
+    if request_id != state.current_request_id.as_deref() {
         return;
     }
     state.current_request_id = None;
     let rollback = state.last_submitted_text.take();
     handle_turn_done(state);
-    state.last_submitted_text = rollback.filter(|input| input.request_id != *request_id);
+    state.last_submitted_text = rollback.filter(|input| input.request_id.as_deref() != request_id);
 }
 
 pub(super) fn handle_cache_usage_updated(
     state: &mut BridgeState,
-    sample: &Option<crate::kit::acp_types::CacheUsageSample>,
+    sample: Option<&crate::kit::acp_types::CacheUsageSample>,
 ) {
-    state.pending_cache_usage = sample.clone();
+    state.pending_cache_usage = sample.cloned();
     if let Some(sample) = sample {
         let show_warning = PERI_CONFIG_HANDLE
             .get()
@@ -139,7 +141,7 @@ fn inject_cache_coverage_warning_if_needed(
 pub(super) fn handle_turn_interrupted(
     state: &mut BridgeState,
     _reason: &str,
-    request_id: &Option<String>,
+    request_id: Option<&str>,
 ) {
     // Issue 2026-08-05（返工）：stale 判定 = request_id 配对（主导排序）
     // OR 代际判定（排队分支兜底），两条互补：
@@ -153,13 +155,12 @@ pub(super) fn handle_turn_interrupted(
     //   current_request_id 停留在 A，id 配对判不出 stale，代际判定兜底。
     //
     // 正常取消（无新提交）两条都不命中 → 非 stale → 走零产出回滚。
-    let id_mismatch = request_id
-        .as_ref()
-        .is_some_and(|rid| state.current_request_id.as_ref() != Some(rid));
+    let id_mismatch =
+        request_id.is_some_and(|rid| state.current_request_id.as_deref() != Some(rid));
     let rollback_mismatch = state
         .last_submitted_text
         .as_ref()
-        .is_some_and(|input| request_id.is_some() && input.request_id != *request_id);
+        .is_some_and(|input| request_id.is_some() && input.request_id.as_deref() != request_id);
     let is_stale =
         id_mismatch || rollback_mismatch || state.turn_generation > state.last_prompt_generation;
     if id_mismatch {
@@ -221,7 +222,11 @@ pub(super) fn handle_turn_interrupted(
     // [Slice 3] loading 提交只入队不发气泡，不设置 last_submitted_text——
     // 回滚不会误恢复排队中的输入）。
     if state.current_turn.is_empty() && state.last_submitted_text.is_some() {
-        let restore_text = state.last_submitted_text.take().unwrap().text;
+        let restore_text = state
+            .last_submitted_text
+            .take()
+            .expect("the rollback owner was matched before taking its submitted text")
+            .text;
         // 移除 committed 中最后一条用户气泡
         if let Some(last) = state.committed.last()
             && matches!(last, TuiRenderUnit::TuiUserBubble(_))
@@ -308,16 +313,16 @@ pub(super) fn handle_prompt_started(state: &mut BridgeState) {
     super::render::push_acp_state(state);
 }
 
-pub(super) fn handle_prompt_submitted(state: &mut BridgeState, request_id: &Option<String>) {
+pub(super) fn handle_prompt_submitted(state: &mut BridgeState, request_id: Option<&str>) {
     if let Some(input) = state.last_submitted_text.as_mut()
         && input.request_id.is_none()
     {
-        input.request_id = request_id.clone();
+        input.request_id = request_id.map(str::to_owned);
     }
     handle_execution_started(state, request_id);
 }
 
-pub(super) fn handle_execution_started(state: &mut BridgeState, request_id: &Option<String>) {
+pub(super) fn handle_execution_started(state: &mut BridgeState, request_id: Option<&str>) {
     state.phase = SessionPhase::PromptRunning;
     program_status::publish(ProgramStatus::Working);
     state.variant = 1;
@@ -327,7 +332,7 @@ pub(super) fn handle_execution_started(state: &mut BridgeState, request_id: &Opt
     state.last_prompt_generation = state.turn_generation;
     // Issue 2026-08-05 返工：记录当前 turn 的 request_id——stale TurnInterrupted
     // 的 request_id 配对判定基准（主导排序场景，见 handle_turn_interrupted 注释）。
-    state.current_request_id = request_id.clone();
+    state.current_request_id = request_id.map(str::to_owned);
     state.pending_cache_usage = None;
     super::render::push_acp_state(state);
 }
@@ -455,7 +460,7 @@ pub(super) fn handle_bg_callback_bubble(state: &mut BridgeState) {
 pub(super) fn handle_committed_assistant_text(
     state: &mut BridgeState,
     text: &str,
-    reasoning: &Option<String>,
+    reasoning: Option<&str>,
 ) {
     let vm = committed_assistant_unit(text, reasoning);
     state.committed.push_back(vm);
@@ -467,7 +472,7 @@ pub(super) fn handle_committed_assistant_text(
 ///
 /// 历史页与回放共用同一份构造：两者的入口差别只在「怎么进窗口」（回放 push_back、
 /// 历史页按区间插入，见 `acp_events::history_page`）。
-pub(super) fn committed_assistant_unit(text: &str, reasoning: &Option<String>) -> TuiRenderUnit {
+pub(super) fn committed_assistant_unit(text: &str, reasoning: Option<&str>) -> TuiRenderUnit {
     committed_assistant_unit_with_message_id(text, reasoning, None)
 }
 
@@ -476,13 +481,13 @@ pub(super) fn committed_assistant_unit(text: &str, reasoning: &Option<String>) -
 /// 历史页从 `entryId` 解析出裸消息 uuid，才能与 live `messageId` 做稳定去重。
 pub(super) fn committed_assistant_unit_with_message_id(
     text: &str,
-    reasoning: &Option<String>,
+    reasoning: Option<&str>,
     message_id: Option<String>,
 ) -> TuiRenderUnit {
     // 完整消息（非流式）→ reasoning 视为已完成：按 §7 表折叠为单行。
     // [G1] hash 统一走 TuiAssistantBubble::compute_hash（含 fold/status）。
-    let reason_block = reasoning.as_ref().map(|r| TuiReasoningBlock {
-        text: r.clone(),
+    let reason_block = reasoning.map(|r| TuiReasoningBlock {
+        text: r.to_owned(),
         fold: crate::kit::tui_render_unit::fold_for_status(
             crate::kit::tui_render_unit::FoldTarget::Reasoning,
             crate::kit::tui_render_unit::EntryStatus::Completed,
@@ -508,3 +513,9 @@ pub(super) fn committed_assistant_unit_with_message_id(
     bubble.recompute_hash();
     TuiRenderUnit::TuiAssistantBubble(bubble.into())
 }
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+use crate::kit::atoms::PROGRAM_STATUS;
+
+use crate::kit::atoms::RENDER_HEARTBEAT;

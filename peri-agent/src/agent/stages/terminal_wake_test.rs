@@ -1,12 +1,15 @@
-use super::*;
 use crate::agent::async_tasks::{
     BackgroundTask, BackgroundTaskStatus, BgCancelHandle, BgTaskKind, TaskManager,
 };
 use crate::agent::events::BackgroundTaskResult;
 use crate::agent::react::{ReactLLM, Reasoning, StreamingContext};
+
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
 use crate::messages::BaseMessage;
 use crate::session::queue::MessageSource;
 use crate::session::FrozenContext;
+
 use std::sync::atomic::{AtomicBool as TestAtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
@@ -54,7 +57,9 @@ fn make_task(id: &str) -> BackgroundTask {
 #[tokio::test]
 async fn test_idle_loop_exits_when_registry_completes_without_queue_message() {
     let manager = Arc::new(TaskManager::new());
-    let registration = manager.register_with_kind(make_task("bg-1")).unwrap();
+    let registration = manager
+        .register_with_kind(make_task("bg-1"))
+        .expect("the register with kind fixture result is required for this assertion");
     let session = crate::session::Session::new(
         Arc::from("/tmp/terminal-wake-test"),
         FrozenContext::builder().build(),
@@ -71,7 +76,7 @@ async fn test_idle_loop_exits_when_registry_completes_without_queue_message() {
         .with_idle_registry(manager.registry().subscribe_activity())
         .with_idle_suspended_flag(Arc::clone(&suspended))
         .build();
-    let task = tokio::spawn(run_react_loop(context, 0));
+    let task = tokio::spawn(crate::agent::stages::run_react_loop(context, 0));
 
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !suspended.load(AtomicOrdering::Acquire) {
@@ -108,7 +113,9 @@ async fn test_idle_loop_exits_when_registry_completes_without_queue_message() {
 #[tokio::test]
 async fn test_idle_loop_cancel_returns_interrupted_and_clears_suspended() {
     let manager = Arc::new(TaskManager::new());
-    manager.register_with_kind(make_task("bg-cancel")).unwrap();
+    manager
+        .register_with_kind(make_task("bg-cancel"))
+        .expect("the register with kind fixture result is required for this assertion");
     let session = crate::session::Session::new(
         Arc::from("/tmp/terminal-wake-cancel-test"),
         FrozenContext::builder().build(),
@@ -126,7 +133,7 @@ async fn test_idle_loop_cancel_returns_interrupted_and_clears_suspended() {
         .with_idle_suspended_flag(Arc::clone(&suspended))
         .build();
     let cancel = context.session.turn.cancel_token.clone();
-    let task = tokio::spawn(run_react_loop(context, 0));
+    let task = tokio::spawn(crate::agent::stages::run_react_loop(context, 0));
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !suspended.load(AtomicOrdering::Acquire) {
             tokio::task::yield_now().await;
@@ -142,13 +149,17 @@ async fn test_idle_loop_cancel_returns_interrupted_and_clears_suspended() {
         .expect("loop task must not panic");
     assert!(matches!(result, LoopResult::Interrupted));
     assert!(!suspended.load(AtomicOrdering::Acquire));
-    manager.cancel("bg-cancel").unwrap();
+    manager
+        .cancel("bg-cancel")
+        .expect("the cancel fixture result is required for this assertion");
 }
 
 #[tokio::test]
 async fn test_idle_loop_consumes_queued_completion_before_terminal_registry_check() {
     let manager = Arc::new(TaskManager::new());
-    let registration = manager.register_with_kind(make_task("bg-queued")).unwrap();
+    let registration = manager
+        .register_with_kind(make_task("bg-queued"))
+        .expect("the register with kind fixture result is required for this assertion");
     let session = crate::session::Session::new(
         Arc::from("/tmp/terminal-wake-queued-test"),
         FrozenContext::builder().build(),
@@ -187,7 +198,7 @@ async fn test_idle_loop_consumes_queued_completion_before_terminal_registry_chec
         .build();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        run_react_loop(context, 1),
+        crate::agent::stages::run_react_loop(context, 1),
     )
     .await
     .expect("queued completion must not leave the loop waiting");

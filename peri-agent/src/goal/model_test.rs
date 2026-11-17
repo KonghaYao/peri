@@ -1,4 +1,5 @@
-use super::*;
+use peri_acp_types::goal::GoalStatus;
+use peri_acp_types::goal::ThreadGoal;
 
 #[test]
 fn test_thread_goal_new_生成有效_goal_id() {
@@ -19,15 +20,17 @@ fn test_thread_goal_serde_roundtrip() {
         Some(100_000),
         peri_time::now_wall(),
     );
-    let json = serde_json::to_string(&goal).unwrap();
-    let deserialized: ThreadGoal = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&goal)
+        .expect("to_string must accept this test fixture representation");
+    let deserialized: ThreadGoal =
+        serde_json::from_str(&json).expect("from_str must accept this test fixture representation");
     assert_eq!(deserialized.objective, goal.objective);
     assert_eq!(deserialized.token_budget, goal.token_budget);
 }
 
 #[test]
 fn test_status_transitions() {
-    use GoalStatus::*;
+    use GoalStatus::{Active, Blocked, Complete};
     // Active → Complete / Blocked
     assert!(Active.can_transition_to(&Complete));
     assert!(Active.can_transition_to(&Blocked));
@@ -41,7 +44,7 @@ fn test_status_transitions() {
 
 #[test]
 fn test_is_terminal() {
-    use GoalStatus::*;
+    use GoalStatus::{Active, Blocked, Complete};
     assert!(!Active.is_terminal());
     assert!(Complete.is_terminal());
     assert!(Blocked.is_terminal());

@@ -3,8 +3,14 @@
 //! 覆盖：定义与静态表一致（id / frontmatter / digest）、资源列表的 URI 与
 //! `_meta` 投影、read 的逐字正文与范围判定（非本实例 URI 不误读）。
 
-use super::*;
-use peri_acp_types::workspace_resources::{digest_bytes, META_KEY_DIGEST, META_KEY_SCOPE};
+use crate::agents::AgentResourceError;
+use crate::agents::BUILTIN_AGENTS;
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::META_KEY_DIGEST;
+use peri_acp_types::workspace_resources::META_KEY_FRONTMATTER;
+use peri_acp_types::workspace_resources::META_KEY_SCOPE;
+use peri_acp_types::workspace_resources::MIME_MARKDOWN;
+use rmcp::model::ResourceContents;
 
 const WEB_RESEARCHER_URI: &str = "agent://builtin/web-researcher/agent.md";
 
@@ -14,7 +20,9 @@ fn web_researcher_is_the_only_shipped_agent_and_matches_its_frontmatter() {
     let agent = &BUILTIN_AGENTS[0];
     assert_eq!(agent.id, "web-researcher");
 
-    let frontmatter = frontmatter_json(agent.content).expect("frontmatter 必须可解析");
+    let frontmatter =
+        peri_mcp_common::agent_definition::frontmatter::frontmatter_json(agent.content)
+            .expect("frontmatter 必须可解析");
     assert_eq!(
         frontmatter.get("name").and_then(|v| v.as_str()),
         Some(agent.id)
@@ -34,7 +42,7 @@ fn web_researcher_is_the_only_shipped_agent_and_matches_its_frontmatter() {
 
 #[test]
 fn list_projects_the_builtin_uri_and_metadata() {
-    let resources = list_resources();
+    let resources = crate::agents::list_resources();
     assert_eq!(resources.len(), 1);
     let resource = &resources[0];
     assert_eq!(resource.uri, WEB_RESEARCHER_URI);
@@ -57,7 +65,7 @@ fn list_projects_the_builtin_uri_and_metadata() {
     );
     assert_eq!(
         meta.0.get(META_KEY_DIGEST).and_then(|v| v.as_str()),
-        Some(digest_bytes(BUILTIN_AGENTS[0].content.as_bytes()).as_str())
+        Some(workspace_resources::digest_bytes(BUILTIN_AGENTS[0].content.as_bytes()).as_str())
     );
     let frontmatter = meta
         .0
@@ -72,7 +80,7 @@ fn list_projects_the_builtin_uri_and_metadata() {
 
 #[test]
 fn read_returns_the_definition_verbatim_with_metadata() {
-    let contents = read(WEB_RESEARCHER_URI).expect("本实例定义可读");
+    let contents = crate::agents::read(WEB_RESEARCHER_URI).expect("本实例定义可读");
     match contents {
         ResourceContents::TextResourceContents {
             text,
@@ -89,7 +97,7 @@ fn read_returns_the_definition_verbatim_with_metadata() {
             );
             assert_eq!(
                 meta.0.get(META_KEY_DIGEST).and_then(|v| v.as_str()),
-                Some(digest_bytes(text.as_bytes()).as_str())
+                Some(workspace_resources::digest_bytes(text.as_bytes()).as_str())
             );
         }
         other => panic!("agent 定义必须是文本内容：{other:?}"),
@@ -99,11 +107,11 @@ fn read_returns_the_definition_verbatim_with_metadata() {
 #[test]
 fn read_rejects_non_agent_and_foreign_uris_without_leaking_the_definition() {
     assert_eq!(
-        read("https://example.test/x").unwrap_err(),
+        crate::agents::read("https://example.test/x").unwrap_err(),
         AgentResourceError::InvalidUri
     );
     assert_eq!(
-        read("agent://builtin/not-shipped/agent.md").unwrap_err(),
+        crate::agents::read("agent://builtin/not-shipped/agent.md").unwrap_err(),
         AgentResourceError::NotFound
     );
     // 其他 scope 形状合法，但不归本实例提供。
@@ -113,7 +121,7 @@ fn read_rejects_non_agent_and_foreign_uris_without_leaking_the_definition() {
         "agent://user/web-researcher/agent.md",
     ] {
         assert_eq!(
-            read(uri).unwrap_err(),
+            crate::agents::read(uri).unwrap_err(),
             AgentResourceError::NotFound,
             "{uri}"
         );

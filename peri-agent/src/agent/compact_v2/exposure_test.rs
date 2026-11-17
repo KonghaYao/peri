@@ -1,5 +1,10 @@
-use super::*;
+use crate::agent::compact_v2::exposure::ExposureLedger;
+use crate::agent::compact_v2::exposure::RequestExposure;
+use crate::agent::compact_v2::exposure::MAX_EXPOSED_MESSAGES;
+use crate::messages::BaseMessage;
 use crate::messages::MessageContent;
+use crate::messages::MessageId;
+use crate::session::MessageTranscript;
 
 #[test]
 fn test_exposure_requires_success_confirmation_and_exact_source() {
@@ -7,21 +12,31 @@ fn test_exposure_requires_success_confirmation_and_exact_source() {
     let original = BaseMessage::tool_result("read", "canonical result");
     let id = original.id();
     transcript.append(original.clone());
-    let receipt = RequestExposure::capture(std::slice::from_ref(&original), &transcript).unwrap();
+    let receipt = RequestExposure::capture(std::slice::from_ref(&original), &transcript)
+        .expect("the capture fixture result is required for this assertion");
     let mut ledger = ExposureLedger::default();
     assert!(
-        ledger.exposed_ids(&transcript).unwrap().is_empty(),
+        ledger
+            .exposed_ids(&transcript)
+            .expect("the exposed ids fixture result is required for this assertion")
+            .is_empty(),
         "请求捕获不等于成功消费"
     );
     ledger.confirm(&receipt);
-    assert!(ledger.exposed_ids(&transcript).unwrap().contains(&id));
+    assert!(ledger
+        .exposed_ids(&transcript)
+        .expect("the exposed ids fixture result is required for this assertion")
+        .contains(&id));
     let mut changed = original;
     if let BaseMessage::Tool { content, .. } = &mut changed {
         *content = MessageContent::text("different result");
     }
     transcript.replace_by_id(changed);
     assert!(
-        ledger.exposed_ids(&transcript).unwrap().is_empty(),
+        ledger
+            .exposed_ids(&transcript)
+            .expect("the exposed ids fixture result is required for this assertion")
+            .is_empty(),
         "同ID内容变化必须重新暴露"
     );
 }
@@ -35,12 +50,15 @@ fn test_preview_and_virtual_receipt_do_not_expose_canonical_result() {
     if let BaseMessage::Tool { content, .. } = &mut preview {
         *content = MessageContent::text("incomplete preview");
     }
-    let receipt =
-        RequestExposure::capture(&[preview, BaseMessage::human("receipt")], &transcript).unwrap();
+    let receipt = RequestExposure::capture(&[preview, BaseMessage::human("receipt")], &transcript)
+        .expect("the capture fixture result is required for this assertion");
     let mut ledger = ExposureLedger::default();
     ledger.confirm(&receipt);
     assert!(
-        ledger.exposed_ids(&transcript).unwrap().is_empty(),
+        ledger
+            .exposed_ids(&transcript)
+            .expect("the exposed ids fixture result is required for this assertion")
+            .is_empty(),
         "占位符不能证明原文被消费"
     );
 }
@@ -109,7 +127,8 @@ fn test_cold_terminal_evidence_requires_success_and_synchronous_typed_status() {
         transcript.append(message.clone());
         messages.push(message);
     }
-    let receipt = RequestExposure::capture(&messages, &transcript).unwrap();
+    let receipt = RequestExposure::capture(&messages, &transcript)
+        .expect("the capture fixture result is required for this assertion");
     let mut ledger = ExposureLedger::default();
     assert!(
         ledger.closed_calls().is_empty(),
@@ -138,7 +157,8 @@ fn test_cold_completion_reads_canonical_evidence_instead_of_request_metadata() {
             output_truncated: false,
         });
     }
-    let receipt = RequestExposure::capture(&[request], &transcript).unwrap();
+    let receipt = RequestExposure::capture(&[request], &transcript)
+        .expect("the capture fixture result is required for this assertion");
     let mut ledger = ExposureLedger::default();
     ledger.confirm(&receipt);
     assert!(

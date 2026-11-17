@@ -1,13 +1,12 @@
-use super::event_builder::{
-    new_uuid, now_rfc3339, try_add_or_warn_via_session, try_add_prepared_or_warn_via_session,
-    VERSION,
-};
-use super::generation::PendingTerminalState;
-use super::input_snapshot::{llm_input_source, mark_rejected_input, GenerationInput};
-use super::registry::{GateEvent, Ownership};
-use super::usage;
-use super::LangfuseTracer;
-use langfuse_client::snapshot::{snapshot_value, SnapshotSource};
+use crate::langfuse::tracer::event_builder::VERSION;
+use crate::langfuse::tracer::generation::PendingTerminalState;
+
+use crate::langfuse::tracer::input_snapshot::GenerationInput;
+use crate::langfuse::tracer::registry::{GateEvent, Ownership};
+use crate::langfuse::tracer::usage;
+use crate::langfuse::tracer::LangfuseTracer;
+
+use langfuse_client::snapshot::SnapshotSource;
 use langfuse_client::types::{EventBody, ObservationLevel};
 use langfuse_client::{GenerationBody, IngestionEvent};
 use peri_agent::messages::BaseMessage;
@@ -59,7 +58,7 @@ impl LangfuseTracer {
         tools: &[ToolDefinition],
     ) -> bool {
         // 快照计费先于归属判定与注册闸门：闸门只保存已冻结来源。
-        let input = self.freeze_input(llm_input_source(
+        let input = self.freeze_input(crate::langfuse::tracer::input_snapshot::llm_input_source(
             &Arc::new(messages.to_vec()),
             &Arc::new(tools.to_vec()),
         ));
@@ -76,7 +75,10 @@ impl LangfuseTracer {
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }
-        let input = self.freeze_input(llm_input_source(&messages, &Arc::new(tools.to_vec())));
+        let input = self.freeze_input(crate::langfuse::tracer::input_snapshot::llm_input_source(
+            &messages,
+            &Arc::new(tools.to_vec()),
+        ));
         self.on_llm_start_snapshot_inner(agent_id, step, input);
     }
 
@@ -132,7 +134,7 @@ impl LangfuseTracer {
         if !tracked && self.subagent.ownership(agent_id) != Ownership::Unknown {
             return; // 保留既有静默 no-op
         }
-        let input = self.freeze_input(snapshot_value(&body));
+        let input = self.freeze_input(langfuse_client::snapshot::snapshot_value(&body));
         if tracked {
             self.generation
                 .on_llm_request_payload(agent_id, step, input);
@@ -169,7 +171,11 @@ impl LangfuseTracer {
                 step,
                 "on_llm_end: 缺少 LlmCallStart，创建 synthetic generation"
             );
-            let input = self.freeze_input(llm_input_source(&Arc::default(), &Arc::default()));
+            let input =
+                self.freeze_input(crate::langfuse::tracer::input_snapshot::llm_input_source(
+                    &Arc::default(),
+                    &Arc::default(),
+                ));
             self.generation.on_llm_start(agent_id, step, input);
         }
 
@@ -203,7 +209,7 @@ impl LangfuseTracer {
             .on_llm_end(agent_id, step)
             .expect("generation existence checked before removal");
 
-        let end_time = now_rfc3339();
+        let end_time = crate::langfuse::tracer::event_builder::now_rfc3339();
         let usage_details: Option<std::collections::HashMap<String, i32>> =
             usage.map(usage::build_usage_details);
         let usage_map: Option<std::collections::HashMap<String, serde_json::Value>> =
@@ -238,7 +244,7 @@ impl LangfuseTracer {
         let mut meta = gen_end.retry_metadata.unwrap_or(serde_json::json!({}));
         if gen_end.input.is_rejected() {
             // 冻结被拒：明确标记，不把旧 fallback 当作实际请求上报（契约 §3.6）
-            mark_rejected_input(&mut meta);
+            crate::langfuse::tracer::input_snapshot::mark_rejected_input(&mut meta);
         }
         if start_missing {
             if let Some(obj) = meta.as_object_mut() {
@@ -283,6 +289,26 @@ impl LangfuseTracer {
                 obj.insert("request_id".to_string(), serde_json::json!(req_id));
             }
         }
+        // completion_start_time 只由首个 reasoning 分片证明；可见文本没有独立观测事件，
+        // 不能借用该边界推算，故显式写 null（不可测量），避免被读成 0。
+        let first_reasoning_ms = gen_end
+            .completion_start_time
+            .as_deref()
+            .and_then(|at| elapsed_ms(&gen_end.start_time, at));
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert(
+                "completion_start_source".to_string(),
+                serde_json::json!(if first_reasoning_ms.is_some() {
+                    "reasoning_chunk"
+                } else {
+                    "unavailable"
+                }),
+            );
+            if let Some(ms) = first_reasoning_ms {
+                obj.insert("first_reasoning_ms".to_string(), serde_json::json!(ms));
+            }
+            obj.insert("first_visible_text_ms".to_string(), serde_json::Value::Null);
+        }
 
         let (level, status_message, generation_output) = if output.starts_with("ERROR: ") {
             (
@@ -311,7 +337,7 @@ impl LangfuseTracer {
             parent_observation_id: Some(parent_id),
             version: Some(VERSION.to_string()),
             environment: None,
-            completion_start_time: None,
+            completion_start_time: gen_end.completion_start_time,
             model: Some(model.to_string()),
             model_parameters: None,
             usage_details,
@@ -323,7 +349,7 @@ impl LangfuseTracer {
         };
 
         let event = IngestionEvent::GenerationCreate {
-            id: new_uuid(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
             timestamp: end_time,
             body: gen_body,
             metadata: None,
@@ -331,15 +357,17 @@ impl LangfuseTracer {
         // 冻结被拒（`Rejected`）时事件不带来源，是直接事件：同一准入实现的直接入口才是它的
         // 交付路径（`try_add_prepared` 只承载携带来源的事件）；拒收事实已由 metadata 标记。
         match gen_end.input.into_source() {
-            Some(input) => try_add_prepared_or_warn_via_session(
-                &*self.session,
-                event,
-                Some(input),
-                None,
-                &self.trace_id,
-                "LLM GenerationCreate",
-            ),
-            None => try_add_or_warn_via_session(
+            Some(input) => {
+                crate::langfuse::tracer::event_builder::try_add_prepared_or_warn_via_session(
+                    &*self.session,
+                    event,
+                    Some(input),
+                    None,
+                    &self.trace_id,
+                    "LLM GenerationCreate",
+                )
+            }
+            None => crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
                 &*self.session,
                 event,
                 &self.trace_id,
@@ -390,10 +418,10 @@ impl LangfuseTracer {
         }
 
         let event_body = EventBody {
-            id: Some(new_uuid()),
+            id: Some(crate::langfuse::tracer::event_builder::new_uuid()),
             trace_id: Some(self.trace_id.clone()),
             name: Some("cache-hit-rate-low".to_string()),
-            start_time: Some(now_rfc3339()),
+            start_time: Some(crate::langfuse::tracer::event_builder::now_rfc3339()),
             input: Some(serde_json::json!({
                 "step": step,
                 "input_tokens": usage.input_tokens,
@@ -412,12 +440,12 @@ impl LangfuseTracer {
             parent_observation_id: Some(self.agent_observation_id.clone()),
         };
         let event = IngestionEvent::EventCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
+            timestamp: crate::langfuse::tracer::event_builder::now_rfc3339(),
             body: event_body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
             &*self.session,
             event,
             &self.trace_id,
@@ -438,4 +466,11 @@ fn parse_output(output: &str) -> serde_json::Value {
     }
     // fallback: 将纯文本包装为 {text: ...}
     serde_json::json!({"text": output})
+}
+
+/// 两 RFC3339 时间差（毫秒，负差按 0）；任一不可解析时返回 None。
+pub(super) fn elapsed_ms(start: &str, end: &str) -> Option<u64> {
+    let start = chrono::DateTime::parse_from_rfc3339(start).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(end).ok()?;
+    Some(end.signed_duration_since(start).num_milliseconds().max(0) as u64)
 }

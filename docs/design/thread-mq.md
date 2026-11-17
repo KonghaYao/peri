@@ -262,7 +262,7 @@ pub enum MqInput {
 
 本地子 Agent（含 sync 转后台）的终态变更、工作意图收尾与目标 MQ 接纳由同一业务操作表达。具备批/事务能力的后端必须在同一事务或托管批内提交：
 
-- 本机 SQLite：`BEGIN IMMEDIATE` 完成终态、`work_state`、结果插入与接收方意图提升；结果插入和终态更新都要求 child 仍为 `active`，终态因此只写一次。
+- 本机 SQLite：`BEGIN IMMEDIATE` 完成终态、`work_state`、结果插入与接收方意图提升；结果插入和终态更新都要求 child 仍为 `active`，终态因此只写一次；接收方提升还要求 target 仍为 `active`，已终态的接收方不会被改回 `working`。
 - 远端存储：`finalize_child_terminal` 与 `settle_terminal_without_result` 各为一次 `commit_effects` 托管批；`Inserted` 的接纳与工作意图提升同批，`Existing` 在 `same_payload` 确认后单独提升，失败返回可重试错误。
 
 关闭结算 `settle_retained_mq` 在本机 SQLite 使用单事务，远端使用单个托管批，写提醒与删除 MQ 水位共同提交、共同回滚。未实现原子行为的 adapter 返回 `Unsupported`，默认实现不写部分事实。后端矩阵以 `session-durability.md` §5.3 为权威。

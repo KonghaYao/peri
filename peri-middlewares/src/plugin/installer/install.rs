@@ -1,13 +1,10 @@
 use std::path::Path;
 
-use super::{
-    copy_dir_recursive, generate_synthetic_manifest, get_marketplace_manifest, match_project_path,
-    update_enabled_plugins, InstallerError,
-};
-use crate::plugin::{
-    config::{load_installed_plugins, load_plugin_manifest, save_installed_plugins},
-    types::{InstallScope, InstalledPlugin, PluginOrigin},
-};
+use super::InstallerError;
+use crate::plugin::config;
+use crate::plugin::types::InstallScope;
+use crate::plugin::types::InstalledPlugin;
+use crate::plugin::types::PluginOrigin;
 
 /// 外部字符串只能作为缓存目录中的单个正常分量，拒绝 `.`、`..`、分隔符与绝对路径。
 fn validate_cache_path_segment(field: &str, value: &str) -> Result<(), InstallerError> {
@@ -92,9 +89,9 @@ pub async fn install_plugin(
         project_dir
     };
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
-    let mut installed = load_installed_plugins(Some(&plugins_path))?;
+    let mut installed = config::load_installed_plugins(Some(&plugins_path))?;
 
-    let manifest = get_marketplace_manifest(marketplace, marketplace_cache_dir)?;
+    let manifest = super::get_marketplace_manifest(marketplace, marketplace_cache_dir)?;
 
     let marketplace_plugin = manifest
         .plugins
@@ -126,7 +123,9 @@ pub async fn install_plugin(
                                 "--depth",
                                 "1",
                                 &url,
-                                cache_dir.to_str().unwrap(),
+                                cache_dir.to_str().expect(
+                                    "plugin cache path must be valid UTF-8 before spawning git",
+                                ),
                             ]);
                             #[cfg(all(unix, not(target_os = "emscripten")))]
                             let output = peri_process::run_output_blocking(command);
@@ -172,7 +171,7 @@ pub async fn install_plugin(
     }
     let manifest_path = source_dir.join(".claude-plugin").join("plugin.json");
     let has_native_manifest = if manifest_path.exists() {
-        load_plugin_manifest(&source_dir)?;
+        config::load_plugin_manifest(&source_dir)?;
         true
     } else {
         false
@@ -200,7 +199,7 @@ pub async fn install_plugin(
             }
             std::fs::create_dir_all(&target_dir)?;
             ensure_within_cache_root(&cache_root, &target_dir)?;
-            copy_dir_recursive(&source_dir, &target_dir).map_err(|e| {
+            super::copy_dir_recursive(&source_dir, &target_dir).map_err(|e| {
                 InstallerError::CopyFailed {
                     src: source_dir.clone(),
                     dst: target_dir.clone(),
@@ -209,7 +208,7 @@ pub async fn install_plugin(
             })?;
 
             if !has_native_manifest {
-                generate_synthetic_manifest(&target_dir, &marketplace_plugin)?;
+                super::generate_synthetic_manifest(&target_dir, &marketplace_plugin)?;
             }
 
             Ok(())
@@ -232,12 +231,14 @@ pub async fn install_plugin(
     };
 
     installed.plugins.retain(|p| {
-        !(p.id == plugin_id && p.scope == scope && match_project_path(&p.project_path, project_dir))
+        !(p.id == plugin_id
+            && p.scope == scope
+            && super::match_project_path((p.project_path).as_deref(), project_dir))
     });
     installed.plugins.push(installed_plugin.clone());
-    save_installed_plugins(&installed, Some(&plugins_path))?;
+    config::save_installed_plugins(&installed, Some(&plugins_path))?;
 
-    update_enabled_plugins(&plugin_id, scope, claude_dir, project_dir)?;
+    super::update_enabled_plugins(&plugin_id, scope, claude_dir, project_dir)?;
 
     Ok(installed_plugin)
 }
@@ -260,10 +261,10 @@ pub async fn update_plugin(
     validate_cache_path_segment("marketplace", marketplace)?;
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
-    let installed = load_installed_plugins(Some(&plugins_path))?;
+    let installed = config::load_installed_plugins(Some(&plugins_path))?;
     let current = super::installation_for_mutation(&installed, plugin_id, scope, project_dir)?;
 
-    let manifest = get_marketplace_manifest(marketplace, marketplace_cache_dir)?;
+    let manifest = super::get_marketplace_manifest(marketplace, marketplace_cache_dir)?;
     let latest = manifest
         .plugins
         .iter()

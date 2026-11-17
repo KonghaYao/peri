@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::BackgroundTaskRegistry;
+use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 use peri_acp_types::tasks::{BgShellHandle, ExternalExecutionGuard, OnBgCompleteFn};
 
 /// Execution-environment port; Agent holds session admission across synchronous startup.

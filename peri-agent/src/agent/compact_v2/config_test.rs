@@ -1,7 +1,7 @@
 use std::env;
 use std::sync::Mutex;
 
-use super::*;
+use peri_acp_types::compact::CompactConfig;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -36,8 +36,8 @@ fn test_default_values() {
 fn test_micro_min_gain_divisor_default_override_and_zero_rejection() {
     assert_eq!(CompactConfig::default().micro_min_gain_divisor, 10);
 
-    let overridden: CompactConfig =
-        serde_json::from_str(r#"{"micro_min_gain_divisor":20}"#).unwrap();
+    let overridden: CompactConfig = serde_json::from_str(r#"{"micro_min_gain_divisor":20}"#)
+        .expect("from_str must accept this test fixture representation");
     assert_eq!(overridden.micro_min_gain_divisor, 20);
 
     assert!(
@@ -59,26 +59,28 @@ fn test_max_resident_history_bytes_default_deserialize_and_override() {
         134_217_728
     );
 
-    let config: CompactConfig = serde_json::from_str(r#"{"auto_compact_threshold":0.9}"#).unwrap();
+    let config: CompactConfig = serde_json::from_str(r#"{"auto_compact_threshold":0.9}"#)
+        .expect("from_str must accept this test fixture representation");
     assert_eq!(
         config.max_resident_history_bytes, 134_217_728,
         "缺省 JSON 字段使用 128 MiB 默认值"
     );
 
-    let config: CompactConfig =
-        serde_json::from_str(r#"{"max_resident_history_bytes":4096}"#).unwrap();
+    let config: CompactConfig = serde_json::from_str(r#"{"max_resident_history_bytes":4096}"#)
+        .expect("from_str must accept this test fixture representation");
     assert_eq!(config.max_resident_history_bytes, 4096);
 
-    let config: CompactConfig =
-        serde_json::from_str(r#"{"max_resident_history_bytes":0}"#).unwrap();
+    let config: CompactConfig = serde_json::from_str(r#"{"max_resident_history_bytes":0}"#)
+        .expect("from_str must accept this test fixture representation");
     assert_eq!(config.max_resident_history_bytes, 0, "0 表示关闭驻留门控");
 
     let serialized = serde_json::to_string(&CompactConfig {
         max_resident_history_bytes: 8192,
         ..Default::default()
     })
-    .unwrap();
-    let back: CompactConfig = serde_json::from_str(&serialized).unwrap();
+    .expect("to_string must accept this test fixture representation");
+    let back: CompactConfig = serde_json::from_str(&serialized)
+        .expect("from_str must accept this test fixture representation");
     assert_eq!(back.max_resident_history_bytes, 8192);
 }
 
@@ -94,8 +96,10 @@ fn test_serde_roundtrip() {
         summary_max_requests: 5,
         ..Default::default()
     };
-    let json = serde_json::to_string(&config).unwrap();
-    let deserialized: CompactConfig = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&config)
+        .expect("to_string must accept this test fixture representation");
+    let deserialized: CompactConfig =
+        serde_json::from_str(&json).expect("from_str must accept this test fixture representation");
     assert!((deserialized.auto_compact_threshold - 0.90).abs() < 0.001);
     assert_eq!(deserialized.micro_compact_stale_steps, 10);
     assert_eq!(deserialized.micro_field_threshold_chars, 900);
@@ -126,7 +130,8 @@ fn test_micro_field_limits_reject_zero_threshold_and_non_shrinking_values() {
 #[test]
 fn test_serde_partial_deserialize() {
     let json = r#"{"auto_compact_threshold": 0.90}"#;
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!((config.auto_compact_threshold - 0.90).abs() < 0.001);
     assert!(config.auto_compact_enabled);
     assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
@@ -136,14 +141,17 @@ fn test_serde_partial_deserialize() {
 #[test]
 fn test_serde_empty_object() {
     let json = "{}";
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!(config.auto_compact_enabled);
     assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
 }
 
 #[test]
 fn test_apply_env_overrides_on_custom_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK
+        .lock()
+        .expect("ENV LOCK lock mutex must remain unpoisoned throughout the test");
     env::remove_var("DISABLE_COMPACT");
     env::remove_var("DISABLE_AUTO_COMPACT");
     env::set_var("COMPACT_THRESHOLD", "0.80");
@@ -158,8 +166,8 @@ fn test_apply_env_overrides_on_custom_config() {
 
 #[test]
 fn test_excluded_tools_are_explicit_additional_protection() {
-    let config: CompactConfig =
-        serde_json::from_str(r#"{"micro_excluded_tools":["CustomTool"]}"#).unwrap();
+    let config: CompactConfig = serde_json::from_str(r#"{"micro_excluded_tools":["CustomTool"]}"#)
+        .expect("from_str must accept this test fixture representation");
     assert_eq!(config.micro_excluded_tools, vec!["CustomTool"]);
     assert!(CompactConfig::default().micro_excluded_tools.is_empty());
 }
@@ -168,12 +176,14 @@ fn test_excluded_tools_are_explicit_additional_protection() {
 fn test_auto_compact_threshold_clamps_out_of_range() {
     // 超出 1.0 → clamp 到 1.0
     let json = r#"{"auto_compact_threshold": 1.5}"#;
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!((config.auto_compact_threshold - 1.0).abs() < 0.001);
 
     // 负数 → clamp 到 0.0
     let json = r#"{"auto_compact_threshold": -0.5}"#;
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!((config.auto_compact_threshold - 0.0).abs() < 0.001);
 }
 
@@ -181,19 +191,23 @@ fn test_auto_compact_threshold_clamps_out_of_range() {
 fn test_auto_compact_threshold_normal_values_unchanged() {
     // 合法范围内的值保持不变
     let json = r#"{"auto_compact_threshold": 0.80}"#;
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!((config.auto_compact_threshold - 0.80).abs() < 0.001);
 
     let json = r#"{"auto_compact_threshold": 0.95}"#;
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
 
     let json = r#"{"auto_compact_threshold": 0.0}"#;
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!((config.auto_compact_threshold - 0.0).abs() < 0.001);
 
     let json = r#"{"auto_compact_threshold": 1.0}"#;
-    let config: CompactConfig = serde_json::from_str(json).unwrap();
+    let config: CompactConfig =
+        serde_json::from_str(json).expect("from_str must accept this test fixture representation");
     assert!((config.auto_compact_threshold - 1.0).abs() < 0.001);
 }
 

@@ -1,4 +1,10 @@
-use super::*;
+use crate::workspace::SessionBinding;
+use crate::workspace::ThreadScope;
+use crate::workspace::WorkspaceError;
+use crate::workspace::SESSION_BINDING_VERSION;
+use crate::workspace::{ProjectId, WorkspaceId};
+use std::path::Path;
+use std::path::PathBuf;
 
 #[test]
 fn test_workspace_binding_and_scope_wire_roundtrip_preserves_identity() {
@@ -78,18 +84,18 @@ fn test_workspace_missing_or_malformed_identity_cannot_deserialize() {
 #[test]
 fn test_binding_cwd_keeps_workspace_root_without_trailing_separator() {
     let root = Path::new("/a/workspace");
-    assert_eq!(binding_cwd(root, Path::new("")), root);
+    assert_eq!(crate::workspace::binding_cwd(root, Path::new("")), root);
     assert_eq!(
-        binding_cwd(root, Path::new("")),
+        crate::workspace::binding_cwd(root, Path::new("")),
         PathBuf::from("/a/workspace")
     );
     assert_eq!(
-        binding_cwd(root, Path::new("sub/dir")),
+        crate::workspace::binding_cwd(root, Path::new("sub/dir")),
         PathBuf::from("/a/workspace/sub/dir")
     );
     // 根自身带分隔符时按调用方给出的文本返回，不再叠一层。
     assert_eq!(
-        binding_cwd(Path::new("/a/workspace/"), Path::new("")),
+        crate::workspace::binding_cwd(Path::new("/a/workspace/"), Path::new("")),
         PathBuf::from("/a/workspace/")
     );
 }
@@ -97,28 +103,28 @@ fn test_binding_cwd_keeps_workspace_root_without_trailing_separator() {
 #[test]
 fn test_same_execution_directory_normalizes_text_not_meaning() {
     // 同一目录的等价文本写法。
-    assert!(same_execution_directory(
+    assert!(crate::workspace::same_execution_directory(
         Path::new("/a/workspace"),
         Path::new("/a/workspace/")
     ));
-    assert!(same_execution_directory(
+    assert!(crate::workspace::same_execution_directory(
         Path::new("/a/workspace"),
         Path::new("/a//workspace")
     ));
-    assert!(same_execution_directory(
+    assert!(crate::workspace::same_execution_directory(
         Path::new("/a/workspace"),
         Path::new("/a/./workspace")
     ));
     // 不同目录仍不等；`..` 不折叠（不做 canonicalize）。
-    assert!(!same_execution_directory(
+    assert!(!crate::workspace::same_execution_directory(
         Path::new("/a/workspace"),
         Path::new("/a/workspace/sub")
     ));
-    assert!(!same_execution_directory(
+    assert!(!crate::workspace::same_execution_directory(
         Path::new("/a/workspace"),
         Path::new("/a/workspace/../other")
     ));
-    assert!(!same_execution_directory(
+    assert!(!crate::workspace::same_execution_directory(
         Path::new("/a/workspace"),
         Path::new("/a/other")
     ));

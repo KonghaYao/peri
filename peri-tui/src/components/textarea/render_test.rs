@@ -1,4 +1,3 @@
-use super::{render_multiline_with_cursor, wrap_text};
 use ratatui::style::{Color, Style};
 
 fn cursor_style() -> Style {
@@ -40,7 +39,7 @@ fn test_viewport_50_lines_cursor_at_25_returns_10_lines() {
     let cursor = line_starts[25] + 2;
     let viewport_height = 10;
 
-    let result = render_multiline_with_cursor(
+    let result = super::render_multiline_with_cursor(
         &text,
         cursor,
         cursor_style(),
@@ -94,7 +93,7 @@ fn test_viewport_cursor_at_last_line() {
     let cursor = line_starts[49] + 2;
     let viewport_height = 10;
 
-    let result = render_multiline_with_cursor(
+    let result = super::render_multiline_with_cursor(
         &text,
         cursor,
         cursor_style(),
@@ -131,7 +130,7 @@ fn test_viewport_cursor_at_first_line() {
     let cursor = line_starts[0] + 2;
     let viewport_height = 10;
 
-    let result = render_multiline_with_cursor(
+    let result = super::render_multiline_with_cursor(
         &text,
         cursor,
         cursor_style(),
@@ -166,7 +165,7 @@ fn test_viewport_small_text_returns_all_lines() {
     let cursor = 8; // line1 的 'n' 位置: "line0\n"=6 chars, "li"=2 chars → 6+2=8
     let viewport_height = 10;
 
-    let result = render_multiline_with_cursor(
+    let result = super::render_multiline_with_cursor(
         text,
         cursor,
         cursor_style(),
@@ -197,7 +196,7 @@ fn test_viewport_cursor_centered_in_window() {
     let cursor = line_starts[15] + 2;
     let viewport_height = 10;
 
-    let result = render_multiline_with_cursor(
+    let result = super::render_multiline_with_cursor(
         &text,
         cursor,
         cursor_style(),
@@ -237,7 +236,7 @@ fn test_viewport_smooth_scroll_on_cursor_move() {
         let from = target[0];
         let to = target[1];
 
-        let result_from = render_multiline_with_cursor(
+        let result_from = super::render_multiline_with_cursor(
             &text,
             line_starts[from] + 2,
             cursor_style(),
@@ -251,7 +250,7 @@ fn test_viewport_smooth_scroll_on_cursor_move() {
             false,
             true,
         );
-        let result_to = render_multiline_with_cursor(
+        let result_to = super::render_multiline_with_cursor(
             &text,
             line_starts[to] + 2,
             cursor_style(),
@@ -277,8 +276,14 @@ fn test_viewport_smooth_scroll_on_cursor_move() {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        let line_num_from: usize = first_text_from.trim_start_matches("line").parse().unwrap();
-        let line_num_to: usize = first_text_to.trim_start_matches("line").parse().unwrap();
+        let line_num_from: usize = first_text_from
+            .trim_start_matches("line")
+            .parse()
+            .expect("viewport smooth scroll on cursor move: fixture text must be valid input");
+        let line_num_to: usize = first_text_to
+            .trim_start_matches("line")
+            .parse()
+            .expect("viewport smooth scroll on cursor move: fixture text must be valid input");
 
         let diff = (line_num_from as isize - line_num_to as isize).unsigned_abs();
         assert!(
@@ -293,7 +298,7 @@ fn test_viewport_smooth_scroll_on_cursor_move() {
 /// ASCII 文本 6 字符，max_width=3，应折成 2 行 "abc" / "def"
 #[test]
 fn test_wrap_text_ascii_splits_at_width() {
-    let result = wrap_text("abcdef", 4, 3); // cursor at 'e' (index 4)
+    let result = super::wrap_text("abcdef", 4, 3); // cursor at 'e' (index 4)
     assert_eq!(result.total_visual_rows, 2);
     assert_eq!(result.visual_lines[0].text, "abc");
     assert_eq!(result.visual_lines[1].text, "def");
@@ -304,7 +309,7 @@ fn test_wrap_text_ascii_splits_at_width() {
 /// CJK 文本 "你好世界" (4 chars, 8 cols)，max_width=4，应折成 "你好"/"世界"
 #[test]
 fn test_wrap_text_cjk_splits_at_half() {
-    let result = wrap_text("你好世界", 2, 4); // cursor at '世' (index 2)
+    let result = super::wrap_text("你好世界", 2, 4); // cursor at '世' (index 2)
     assert_eq!(result.total_visual_rows, 2);
     assert_eq!(result.visual_lines[0].text, "你好");
     assert_eq!(result.visual_lines[1].text, "世界");
@@ -315,7 +320,7 @@ fn test_wrap_text_cjk_splits_at_half() {
 /// 短文本不折行
 #[test]
 fn test_wrap_text_short_no_wrap() {
-    let result = wrap_text("abc", 1, 10);
+    let result = super::wrap_text("abc", 1, 10);
     assert_eq!(result.total_visual_rows, 1);
     assert_eq!(result.visual_lines[0].text, "abc");
     assert_eq!(result.cursor_visual_row, 0);
@@ -325,7 +330,7 @@ fn test_wrap_text_short_no_wrap() {
 /// max_width=1 时只折行不截断（CJK char 宽 2 也容纳）
 #[test]
 fn test_wrap_text_min_width_does_not_truncate() {
-    let result = wrap_text("你", 1, 1);
+    let result = super::wrap_text("你", 1, 1);
     assert_eq!(result.total_visual_rows, 1);
     assert_eq!(result.visual_lines[0].text, "你");
 }
@@ -333,7 +338,7 @@ fn test_wrap_text_min_width_does_not_truncate() {
 /// 空文本返回 1 个空视觉行
 #[test]
 fn test_wrap_text_empty_returns_one_empty_line() {
-    let result = wrap_text("", 0, 10);
+    let result = super::wrap_text("", 0, 10);
     assert_eq!(result.total_visual_rows, 1);
     assert_eq!(result.visual_lines[0].text, "");
     assert_eq!(result.cursor_visual_row, 0);
@@ -344,7 +349,7 @@ fn test_wrap_text_empty_returns_one_empty_line() {
 #[test]
 fn test_wrap_text_multi_logical_with_wrap() {
     let text = "abc\ndefgh";
-    let result = wrap_text(text, 5, 3);
+    let result = super::wrap_text(text, 5, 3);
     assert_eq!(result.total_visual_rows, 3);
     assert_eq!(result.visual_lines[0].text, "abc");
     assert_eq!(result.visual_lines[1].text, "def");
@@ -356,7 +361,7 @@ fn test_wrap_text_multi_logical_with_wrap() {
 /// 光标在文本末尾
 #[test]
 fn test_wrap_text_cursor_at_text_end() {
-    let result = wrap_text("你好", 2, 4);
+    let result = super::wrap_text("你好", 2, 4);
     assert_eq!(result.cursor_visual_row, 0);
     assert_eq!(result.cursor_visual_col, 4);
 }
@@ -365,7 +370,7 @@ fn test_wrap_text_cursor_at_text_end() {
 #[test]
 fn test_wrap_text_empty_lines_preserved() {
     let text = "a\n\nb";
-    let result = wrap_text(text, 2, 10); // cursor = 2 (在空行)
+    let result = super::wrap_text(text, 2, 10); // cursor = 2 (在空行)
     assert_eq!(result.total_visual_rows, 3);
     assert_eq!(result.visual_lines[1].text, "");
     assert_eq!(result.cursor_visual_row, 1); // 光标在空行

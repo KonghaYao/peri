@@ -5,19 +5,16 @@
 //! severity=Info / delivery=Configurable / audiences=[Model,Tui,Diagnostics] /
 //! summary / metadata={} / **Info 不唤醒**；正文 = 资源正文（超长按 UTF-8 边界截断）。
 
-use super::{
-    git_watch_reminder_from_resource, is_git_watch_resource, notification_message_kind,
-    McpClientPool,
-};
+use super::McpClientPool;
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY};
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::ports::McpPoolPort;
 use peri_acp_types::session::{
-    MessageKind, MessageQueue, MessageSource, QueuedMessage, SessionInbox,
+    MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload, SessionInbox,
 };
 use peri_acp_types::system_reminder::{
-    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity, SYSTEM_REMINDER_VERSION,
 };
 use rmcp::model::NotificationMetaObject;
 use std::sync::Arc;
@@ -32,7 +29,7 @@ async fn server_notification_kind_controls_resource_update_wake() {
     for (wire, expected) in [("info", MessageKind::Info), ("defer", MessageKind::Defer)] {
         let mut meta = NotificationMetaObject::new();
         meta.insert(MCP_MESSAGE_KIND_META_KEY.into(), wire.into());
-        let declared = notification_message_kind("server", Some(&meta)).unwrap();
+        let declared = super::notification_message_kind("server", Some(&meta)).unwrap();
         assert_eq!(MessageKind::from(declared), expected);
         pool.dispatch_resource_updated("server", "resource://x", "subscription", Some(declared))
             .await;
@@ -40,12 +37,55 @@ async fn server_notification_kind_controls_resource_update_wake() {
             inbox.queue_for_test().has_wake_up_sync(),
             expected == MessageKind::Defer
         );
-        assert_eq!(inbox.queue_for_test().drain_all_sync()[0].kind, expected);
+        let drained = inbox.queue_for_test().drain_all_sync();
+        assert_eq!(drained.len(), 1, "一次资源更新恰注入一条提醒");
+        let message = &drained[0];
+        assert_eq!(message.kind, expected);
+        assert_eq!(message.source, MessageSource::McpNotification);
+        let reminder = match &message.payload {
+            QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+            other => panic!("期望 canonical reminder，实际 {other:?}"),
+        };
+        assert_eq!(reminder.version, SYSTEM_REMINDER_VERSION);
+        assert_eq!(
+            reminder.category,
+            ReminderCategory::ExternalEvent,
+            "非 git 资源更新必须走通用 ExternalEvent 提醒"
+        );
+        assert_eq!(reminder.source.0, "mcp");
+        assert_eq!(reminder.kind, "subscription_resource_updated");
+        assert_eq!(reminder.severity, ReminderSeverity::Info);
+        assert_eq!(reminder.delivery, ReminderDelivery::Required);
+        assert_eq!(reminder.audiences.0.len(), 3, "受众不得漂移");
+        assert!(reminder.audiences.contains(ReminderAudience::Model));
+        assert!(reminder.audiences.contains(ReminderAudience::Tui));
+        assert!(reminder.audiences.contains(ReminderAudience::Automation));
+        assert_eq!(
+            reminder.summary.as_deref(),
+            Some("MCP 订阅资源已更新"),
+            "summary 逐字不回归"
+        );
+        assert_eq!(
+            reminder.metadata,
+            serde_json::json!({
+                "server": "server",
+                "uri": "resource://x",
+                "subscription_id": "subscription",
+            })
+        );
+        assert_eq!(
+            reminder.body,
+            "MCP 资源已更新：server=server, uri=resource://x, subscription_id=subscription。请查看并处理。",
+            "正文逐字不回归"
+        );
     }
-    assert_eq!(notification_message_kind("server", None), None);
+    assert_eq!(super::notification_message_kind("server", None), None);
     let mut invalid = NotificationMetaObject::new();
     invalid.insert(MCP_MESSAGE_KIND_META_KEY.into(), "prompt".into());
-    assert_eq!(notification_message_kind("server", Some(&invalid)), None);
+    assert_eq!(
+        super::notification_message_kind("server", Some(&invalid)),
+        None
+    );
     pool.dispatch_resource_updated("server", "resource://x", "subscription", None)
         .await;
     assert_eq!(
@@ -59,7 +99,7 @@ async fn server_notification_kind_controls_resource_update_wake() {
 fn reminder_matches_old_contract_field_by_field() {
     let body =
         "[Git watch] Repository ref changed since the last sample:\n- HEAD: aaaaaaa → bbbbbbb";
-    let (kind, reminder) = git_watch_reminder_from_resource(GIT_URI, body);
+    let (kind, reminder) = super::git_watch_reminder_from_resource(GIT_URI, body);
 
     assert_eq!(kind, MessageKind::Info, "旧契约：Info（不唤醒）");
     assert!(!kind.wakes_up(), "Info 不得唤醒会话");
@@ -86,7 +126,7 @@ fn reminder_matches_old_contract_field_by_field() {
 fn oversized_body_is_truncated_at_char_boundary() {
     // 8 KiB 上限：超出部分丢弃并留下截断标记（信任边界，§6 风险 6）。
     let body = "头".repeat(4 * 1024); // 12 KiB 的多字节正文
-    let (_, reminder) = git_watch_reminder_from_resource(GIT_URI, &body);
+    let (_, reminder) = super::git_watch_reminder_from_resource(GIT_URI, &body);
     let reminder = reminder.as_reminder();
 
     assert!(
@@ -105,26 +145,26 @@ fn oversized_body_is_truncated_at_char_boundary() {
 
     // 未超长时逐字保留（不做任何加工）。
     let short = "[Git watch] Repository ref snapshot:\n- Branch: main\n- HEAD: ccccccc";
-    let (_, reminder) = git_watch_reminder_from_resource(GIT_URI, short);
+    let (_, reminder) = super::git_watch_reminder_from_resource(GIT_URI, short);
     assert_eq!(reminder.as_reminder().body, short);
 }
 
 #[test]
 fn git_watch_binding_is_workspace_instance_and_git_ref_uri_only() {
     assert!(
-        is_git_watch_resource("workspace", GIT_URI),
+        super::is_git_watch_resource("workspace", GIT_URI),
         "内置 workspace 的 git ref 资源走宿主内置映射"
     );
     assert!(
-        !is_git_watch_resource("workspace", "workspace://other"),
+        !super::is_git_watch_resource("workspace", "workspace://other"),
         "同实例的其它 URI 不映射"
     );
     assert!(
-        !is_git_watch_resource("web", GIT_URI),
+        !super::is_git_watch_resource("web", GIT_URI),
         "其它 builtin 实例不映射"
     );
     assert!(
-        !is_git_watch_resource("external-server", GIT_URI),
+        !super::is_git_watch_resource("external-server", GIT_URI),
         "外部 server 不映射（只绑定内置实例）"
     );
 }

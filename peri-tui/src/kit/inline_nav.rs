@@ -1,7 +1,6 @@
-use ratatui_kit::{
-    crossterm::event::{KeyCode, KeyEvent},
-    prelude::EventResult,
-};
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEvent;
+use ratatui_kit::prelude::EventResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineNavAction {
@@ -21,6 +20,7 @@ pub fn classify_inline_nav(key: &KeyEvent) -> Option<InlineNavAction> {
     }
 }
 
+#[must_use]
 pub fn clamp_selection(selection: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0
@@ -29,6 +29,7 @@ pub fn clamp_selection(selection: usize, item_count: usize) -> usize {
     }
 }
 
+#[must_use]
 pub fn next_selection(selection: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0
@@ -37,6 +38,7 @@ pub fn next_selection(selection: usize, item_count: usize) -> usize {
     }
 }
 
+#[must_use]
 pub fn previous_selection(selection: usize) -> usize {
     selection.saturating_sub(1)
 }

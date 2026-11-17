@@ -1,6 +1,13 @@
 //! 会话级外部系统指令的最终请求与 provider wire 回归。
 
-use super::*;
+use crate::agent::model_bridge::tests::CaptureSystemModel;
+use crate::agent::model_bridge::AgentModelBridge;
+use crate::agent::react::ReactLLM as _;
+use crate::messages::BaseMessage;
+use peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use peri_model::Model as _;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 #[test]
 fn test_external_instructions_are_included_in_pressure_estimate() {
@@ -40,35 +47,70 @@ async fn test_external_instructions_model_request_and_provider_wire() {
         bridge
             .generate_reasoning(&[BaseMessage::human("go")], &[], None)
             .await
-            .unwrap();
-        let request = requests.lock().unwrap().pop().unwrap();
-        let system = request.messages[0].text_content().unwrap();
+            .expect("the generate reasoning fixture result is required for this assertion");
+        let request = requests
+            .lock()
+            .expect("requests lock mutex must remain unpoisoned throughout the test")
+            .pop()
+            .expect("requests lock fixture must contain the expected element");
+        let system = request.messages[0]
+            .text_content()
+            .expect("the text content fixture result is required for this assertion");
         assert!(system.ends_with("<env>\nWorking directory: /frozen\nToday's date: 2026-10-21\nSession ID: current-session\n</env>"));
         assert_eq!(system.matches("<env>").count(), 1);
-        assert!(system.find("CONTRIBUTION").unwrap() < system.find("<env>").unwrap());
+        assert!(
+            system
+                .find("CONTRIBUTION")
+                .expect("the find fixture result is required for this assertion")
+                < system
+                    .find("<env>")
+                    .expect("the find fixture result is required for this assertion")
+        );
         assert_eq!(system.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(), 1);
         assert_eq!(system.matches(external).count(), 1);
         assert!(
-            system.find(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).unwrap() < system.find(external).unwrap()
+            system
+                .find(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+                .expect("the find fixture result is required for this assertion")
+                < system
+                    .find(external)
+                    .expect("the find fixture result is required for this assertion")
         );
-        assert!(system.find(external).unwrap() < system.find("CONTRIBUTION").unwrap());
+        assert!(
+            system
+                .find(external)
+                .expect("the find fixture result is required for this assertion")
+                < system
+                    .find("CONTRIBUTION")
+                    .expect("the find fixture result is required for this assertion")
+        );
         if internal.contains("UNCACHED_INTERNAL") {
-            assert!(system.find("UNCACHED_INTERNAL").unwrap() < system.find(external).unwrap());
+            assert!(
+                system
+                    .find("UNCACHED_INTERNAL")
+                    .expect("the find fixture result is required for this assertion")
+                    < system
+                        .find(external)
+                        .expect("the find fixture result is required for this assertion")
+            );
         }
         let anthropic = peri_model::anthropic::AnthropicModel::new(
             peri_model::anthropic::AnthropicConfig::new(
-                url::Url::parse("https://example.invalid").unwrap(),
+                url::Url::parse("https://example.invalid")
+                    .expect("the parse fixture result is required for this assertion"),
                 "test",
                 "claude-test",
             ),
         );
         let anth_body = anthropic
             .prepare_request(&request)
-            .unwrap()
+            .expect("the prepare request fixture result is required for this assertion")
             .body()
             .as_value()
             .clone();
-        let blocks = anth_body["system"].as_array().unwrap();
+        let blocks = anth_body["system"]
+            .as_array()
+            .expect("the as array fixture result is required for this assertion");
         assert_eq!(
             blocks
                 .iter()
@@ -76,14 +118,22 @@ async fn test_external_instructions_model_request_and_provider_wire() {
                 .count(),
             usize::from(!internal.is_empty())
         );
-        let dynamic_text = blocks.last().unwrap()["text"].as_str().unwrap();
+        let dynamic_text = blocks
+            .last()
+            .expect("blocks last fixture must contain the expected element")["text"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion");
         assert!(dynamic_text.ends_with("</env>"));
         assert!(dynamic_text.contains("Session ID: current-session"));
         assert_eq!(dynamic_text.matches(external).count(), 1);
         if internal.contains("UNCACHED_INTERNAL") {
             assert!(
-                dynamic_text.find("UNCACHED_INTERNAL").unwrap()
-                    < dynamic_text.find(external).unwrap()
+                dynamic_text
+                    .find("UNCACHED_INTERNAL")
+                    .expect("the find fixture result is required for this assertion")
+                    < dynamic_text
+                        .find(external)
+                        .expect("the find fixture result is required for this assertion")
             );
         }
         assert!(dynamic_text.contains(&format!(
@@ -91,23 +141,32 @@ async fn test_external_instructions_model_request_and_provider_wire() {
         )));
         let openai = peri_model::openai_compatible::OpenAiModel::new(
             peri_model::openai_compatible::OpenAiConfig::new(
-                url::Url::parse("https://example.invalid").unwrap(),
+                url::Url::parse("https://example.invalid")
+                    .expect("the parse fixture result is required for this assertion"),
                 "test",
                 "gpt-test",
             ),
         );
         let openai_body = openai
             .prepare_request(&request)
-            .unwrap()
+            .expect("the prepare request fixture result is required for this assertion")
             .body()
             .as_value()
             .clone();
-        let wire = openai_body["messages"][0]["content"].as_str().unwrap();
+        let wire = openai_body["messages"][0]["content"]
+            .as_str()
+            .expect("the as str fixture result is required for this assertion");
         assert!(wire.ends_with("</env>"));
         assert!(wire.contains("Session ID: current-session"));
         assert_eq!(wire.matches(external).count(), 1);
         if internal.contains("UNCACHED_INTERNAL") {
-            assert!(wire.find("UNCACHED_INTERNAL").unwrap() < wire.find(external).unwrap());
+            assert!(
+                wire.find("UNCACHED_INTERNAL")
+                    .expect("the find fixture result is required for this assertion")
+                    < wire
+                        .find(external)
+                        .expect("the find fixture result is required for this assertion")
+            );
         }
         assert!(!wire.contains(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
     }
@@ -132,7 +191,10 @@ async fn test_v1_embedded_external_instructions_fail_before_provider_when_unsafe
             .generate_reasoning(&[BaseMessage::human("go")], &[], None)
             .await
             .is_err());
-        assert!(requests.lock().unwrap().is_empty());
+        assert!(requests
+            .lock()
+            .expect("requests lock mutex must remain unpoisoned throughout the test")
+            .is_empty());
     }
 }
 
@@ -148,9 +210,12 @@ async fn test_v1_embedded_external_instructions_main_prompt_keeps_original_bytes
     bridge
         .generate_reasoning(&[BaseMessage::human("go")], &[], None)
         .await
-        .unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
     assert_eq!(
-        requests.lock().unwrap()[0].messages[0]
+        requests
+            .lock()
+            .expect("requests lock mutex must remain unpoisoned throughout the test")[0]
+            .messages[0]
             .text_content()
             .as_deref(),
         Some(prompt)
@@ -168,9 +233,15 @@ async fn test_external_instructions_create_boundary_without_internal_or_contribu
     bridge
         .generate_reasoning(&[BaseMessage::human("go")], &[], None)
         .await
-        .unwrap();
-    let request = requests.lock().unwrap().pop().unwrap();
-    let system = request.messages[0].text_content().unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
+    let request = requests
+        .lock()
+        .expect("requests lock mutex must remain unpoisoned throughout the test")
+        .pop()
+        .expect("requests lock fixture must contain the expected element");
+    let system = request.messages[0]
+        .text_content()
+        .expect("the text content fixture result is required for this assertion");
     assert_eq!(system.matches(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).count(), 1);
     assert!(system.starts_with(SYSTEM_PROMPT_DYNAMIC_BOUNDARY));
     assert!(system.contains("<agent_instructions>\n  literal  \n</agent_instructions>"));
@@ -190,18 +261,38 @@ fn test_environment_keeps_shared_prefix_and_uses_request_session_id() {
     };
     let first = bridge("session-a", "Working directory: /a")
         .build_request(&[], &[])
-        .unwrap();
+        .expect("the build request fixture result is required for this assertion");
     let second = bridge("session-b", "Working directory: /b")
         .build_request(&[], &[])
-        .unwrap();
-    let first_text = first.messages[0].text_content().unwrap();
-    let second_text = second.messages[0].text_content().unwrap();
+        .expect("the build request fixture result is required for this assertion");
+    let first_text = first.messages[0]
+        .text_content()
+        .expect("the text content fixture result is required for this assertion");
+    let second_text = second.messages[0]
+        .text_content()
+        .expect("the text content fixture result is required for this assertion");
     assert_eq!(
-        first_text.split_once("<env>").unwrap().0,
-        second_text.split_once("<env>").unwrap().0
+        first_text
+            .split_once("<env>")
+            .expect("the split once fixture result is required for this assertion")
+            .0,
+        second_text
+            .split_once("<env>")
+            .expect("the split once fixture result is required for this assertion")
+            .0
     );
-    assert!(first_text.contains(&format!("Session ID: {}", first.session_id.unwrap())));
-    assert!(second_text.contains(&format!("Session ID: {}", second.session_id.unwrap())));
+    assert!(first_text.contains(&format!(
+        "Session ID: {}",
+        first
+            .session_id
+            .expect("the session id fixture result is required for this assertion")
+    )));
+    assert!(second_text.contains(&format!(
+        "Session ID: {}",
+        second
+            .session_id
+            .expect("the session id fixture result is required for this assertion")
+    )));
 }
 
 #[test]
@@ -228,7 +319,7 @@ fn test_environment_rejects_missing_session_id_and_reserved_boundary() {
     assert!(bridge()
         .with_session_id("valid-session")
         .build_request(&[], &[])
-        .unwrap()
+        .expect("the build request fixture result is required for this assertion")
         .messages
         .is_empty());
 }

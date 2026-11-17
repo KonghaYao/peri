@@ -1,6 +1,9 @@
 //! Tests for mid_toolsearch
 
-use super::*;
+use super::{
+    Arc, BTreeMap, BaseTool, ExecuteExtraTool, RwLock, SearchExtraTools, ToolSearchIndex,
+    ToolSearchMiddleware,
+};
 use async_trait::async_trait;
 use peri_agent::middleware::r#trait::Middleware;
 

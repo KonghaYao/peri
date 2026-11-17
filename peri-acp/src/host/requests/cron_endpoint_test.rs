@@ -1,11 +1,16 @@
-use super::*;
+use crate::host::requests::tests::HomeDirGuard;
+use crate::host::requests::tests::MockTransport;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::test]
 #[serial]
 async fn cron_endpoint_does_not_fall_back_to_local_scheduler_when_mcp_is_closed() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
-    let cfg = deployment(&tmp, false).await;
+    let cfg = crate::host::requests::tests::cron_tests::deployment(&tmp, false).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp
         .path()
@@ -14,9 +19,15 @@ async fn cron_endpoint_does_not_fall_back_to_local_scheduler_when_mcp_is_closed(
         .to_string_lossy()
         .into_owned();
     let mut sessions = HashMap::new();
-    let id = new_session(&cfg, &mut sessions, &transport, &cwd).await;
+    let id = crate::host::requests::tests::cron_tests::new_session(
+        &cfg,
+        &mut sessions,
+        &transport,
+        &cwd,
+    )
+    .await;
     let environment = sessions[&id].environment.clone().unwrap();
-    cron_tool(
+    crate::host::requests::tests::cron_tests::cron_tool(
         &environment,
         &id,
         &cwd,
@@ -26,9 +37,9 @@ async fn cron_endpoint_does_not_fall_back_to_local_scheduler_when_mcp_is_closed(
         }),
     )
     .await;
-    let local = scheduler(&environment);
+    let local = crate::host::requests::tests::cron_tests::scheduler(&environment);
     let job_id = local.lock().list_tasks()[0].id.clone();
-    let before = handle_request(
+    let before = crate::host::requests::handle_request(
         "cron/list",
         &json!({"sessionId":id}),
         &cfg,
@@ -41,7 +52,7 @@ async fn cron_endpoint_does_not_fall_back_to_local_scheduler_when_mcp_is_closed(
     environment.cfg.mcp_pool.as_ref().unwrap().shutdown().await;
     for method in ["cron/list", "cron/toggle", "cron/remove"] {
         assert!(
-            handle_request(
+            crate::host::requests::handle_request(
                 method,
                 &json!({"sessionId":id,"id":job_id}),
                 &cfg,
@@ -62,7 +73,7 @@ async fn cron_endpoint_does_not_fall_back_to_local_scheduler_when_mcp_is_closed(
 async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     let tmp = tempfile::tempdir().unwrap();
     let _home = HomeDirGuard::set(tmp.path());
-    let cfg = deployment(&tmp, false).await;
+    let cfg = crate::host::requests::tests::cron_tests::deployment(&tmp, false).await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp
         .path()
@@ -71,10 +82,22 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
         .to_string_lossy()
         .into_owned();
     let mut sessions = HashMap::new();
-    let first = new_session(&cfg, &mut sessions, &transport, &cwd).await;
-    let second = new_session(&cfg, &mut sessions, &transport, &cwd).await;
+    let first = crate::host::requests::tests::cron_tests::new_session(
+        &cfg,
+        &mut sessions,
+        &transport,
+        &cwd,
+    )
+    .await;
+    let second = crate::host::requests::tests::cron_tests::new_session(
+        &cfg,
+        &mut sessions,
+        &transport,
+        &cwd,
+    )
+    .await;
     for id in [&first, &second] {
-        cron_tool(
+        crate::host::requests::tests::cron_tests::cron_tool(
             sessions[id].environment.as_ref().unwrap(),
             id,
             &cwd,
@@ -83,13 +106,17 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
         )
         .await;
     }
-    let first_scheduler = scheduler(sessions[&first].environment.as_ref().unwrap());
-    let second_scheduler = scheduler(sessions[&second].environment.as_ref().unwrap());
+    let first_scheduler = crate::host::requests::tests::cron_tests::scheduler(
+        sessions[&first].environment.as_ref().unwrap(),
+    );
+    let second_scheduler = crate::host::requests::tests::cron_tests::scheduler(
+        sessions[&second].environment.as_ref().unwrap(),
+    );
     let job = first_scheduler
         .lock()
         .register("*/5 * * * *", "first session")
         .unwrap();
-    let list = handle_request(
+    let list = crate::host::requests::handle_request(
         "cron/list",
         &json!({"sessionId":first}),
         &cfg,
@@ -100,7 +127,7 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     .unwrap();
     assert_eq!(list["jobs"][0]["id"], job);
     assert_eq!(list["jobs"][0]["prompt"], "first session");
-    let other = handle_request(
+    let other = crate::host::requests::handle_request(
         "cron/list",
         &json!({"sessionId":second}),
         &cfg,
@@ -111,7 +138,7 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     .unwrap();
     assert_eq!(other["jobs"], json!([]));
     for method in ["cron/toggle", "cron/remove"] {
-        let error = handle_request(
+        let error = crate::host::requests::handle_request(
             method,
             &json!({"sessionId":second,"id":job}),
             &cfg,
@@ -128,7 +155,7 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     }
     assert!(first_scheduler.lock().list_tasks()[0].enabled);
     assert!(second_scheduler.lock().list_tasks().is_empty());
-    let toggled = handle_request(
+    let toggled = crate::host::requests::handle_request(
         "cron/toggle",
         &json!({"sessionId":first,"id":job}),
         &cfg,
@@ -139,7 +166,7 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     .unwrap();
     assert_eq!(toggled, json!({"id":job,"success":true}));
     assert!(!first_scheduler.lock().list_tasks()[0].enabled);
-    handle_request(
+    crate::host::requests::handle_request(
         "cron/remove",
         &json!({"sessionId":first,"id":job}),
         &cfg,
@@ -150,7 +177,7 @@ async fn cron_endpoint_uses_session_scheduler_and_rejects_cross_session_jobs() {
     .unwrap();
     assert!(first_scheduler.lock().list_tasks().is_empty());
     for id in [first, second] {
-        handle_request(
+        crate::host::requests::handle_request(
             "session/close",
             &json!({"sessionId":id}),
             &cfg,
@@ -171,7 +198,12 @@ async fn cron_endpoint_rejects_absent_closed_and_unsupported_environments() {
         cron: false,
         ..Default::default()
     };
-    let cfg = deployment_with_capabilities(&tmp, false, capabilities).await;
+    let cfg = crate::host::requests::tests::cron_tests::deployment_with_capabilities(
+        &tmp,
+        false,
+        capabilities,
+    )
+    .await;
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
     let cwd = tmp
         .path()
@@ -182,17 +214,29 @@ async fn cron_endpoint_rejects_absent_closed_and_unsupported_environments() {
     let mut sessions = HashMap::new();
     for params in [json!({}), json!({"sessionId":"unknown"})] {
         assert_eq!(
-            handle_request("cron/list", &params, &cfg, &mut sessions, &transport)
-                .await
-                .unwrap_err()
-                .code,
+            crate::host::requests::handle_request(
+                "cron/list",
+                &params,
+                &cfg,
+                &mut sessions,
+                &transport
+            )
+            .await
+            .unwrap_err()
+            .code,
             -32602
         );
     }
-    let id = new_session(&cfg, &mut sessions, &transport, &cwd).await;
+    let id = crate::host::requests::tests::cron_tests::new_session(
+        &cfg,
+        &mut sessions,
+        &transport,
+        &cwd,
+    )
+    .await;
     for method in ["cron/list", "cron/toggle", "cron/remove"] {
         assert_eq!(
-            handle_request(
+            crate::host::requests::handle_request(
                 method,
                 &json!({"sessionId":id,"id":"job"}),
                 &cfg,
@@ -206,7 +250,7 @@ async fn cron_endpoint_rejects_absent_closed_and_unsupported_environments() {
         );
     }
     sessions.get_mut(&id).unwrap().closing = true;
-    assert!(handle_request(
+    assert!(crate::host::requests::handle_request(
         "cron/list",
         &json!({"sessionId":id}),
         &cfg,
@@ -219,7 +263,7 @@ async fn cron_endpoint_rejects_absent_closed_and_unsupported_environments() {
     .contains("closing"));
     sessions.get_mut(&id).unwrap().closing = false;
     let environment = sessions.get_mut(&id).unwrap().environment.take();
-    assert!(handle_request(
+    assert!(crate::host::requests::handle_request(
         "cron/list",
         &json!({"sessionId":id}),
         &cfg,
@@ -236,7 +280,7 @@ async fn cron_endpoint_rejects_absent_closed_and_unsupported_environments() {
         .join("wrong-scope")
         .to_string_lossy()
         .into_owned();
-    assert!(handle_request(
+    assert!(crate::host::requests::handle_request(
         "cron/list",
         &json!({"sessionId":id}),
         &cfg,
@@ -246,7 +290,7 @@ async fn cron_endpoint_rejects_absent_closed_and_unsupported_environments() {
     .await
     .is_err());
     sessions.get_mut(&id).unwrap().cwd = cwd;
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &cfg,

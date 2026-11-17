@@ -8,7 +8,7 @@
 //!   Runtime，不直接调用 Agent 层执行本体
 //! - [`UnstampedEvent`]：Agent 层业务事件的身份最小投影（携带 turn_id +
 //!   agent_id + message_id + delivery_class）；session_id / session_seq 由
-//!   [`Runtime::stamp`] 按 session 维度补打（`docs/top-level.md` §9 事件契约）
+//!   `peri_runtime::Runtime::stamp` 按 session 维度补打（`docs/top-level.md` §9 事件契约）
 //!
 //! 依赖方向：契约层无依赖（仅 serde/async-trait/tokio），各层引用本签名。
 
@@ -39,6 +39,7 @@ pub struct UnstampedEvent {
 
 impl UnstampedEvent {
     /// 构造未补打事件。
+    #[must_use]
     pub fn new(
         turn_id: impl Into<String>,
         agent_id: impl Into<String>,

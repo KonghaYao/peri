@@ -344,10 +344,10 @@ pub(crate) async fn run_before_bound_tools_batch(
 }
 
 /// 调用期只读视图：会话快照 + turn 事实（可缺），外加队列与 hook 输出端口。
-struct InvocationState<'a> {
-    context: &'a InvocationContext,
+struct InvocationState<'invocation> {
+    context: &'invocation InvocationContext,
     /// `None` = 无活跃 turn（idle 执行）：规则显式看到缺 turn，不伪造 step。
-    turn: Option<&'a ModelTurnFacts>,
+    turn: Option<&'invocation ModelTurnFacts>,
 }
 
 impl hook_state::StateView for InvocationState<'_> {
@@ -418,9 +418,10 @@ impl hook_state::HookOutputState for InvocationState<'_> {
 }
 
 /// 工具审批状态：调用期只读视图 + 已绑定目标身份。
-struct BoundApprovalState<'a> {
-    view: InvocationState<'a>,
-    targets: &'a std::collections::HashMap<String, std::sync::Arc<dyn crate::tools::BaseTool>>,
+struct BoundApprovalState<'invocation> {
+    view: InvocationState<'invocation>,
+    targets:
+        &'invocation std::collections::HashMap<String, std::sync::Arc<dyn crate::tools::BaseTool>>,
 }
 
 impl hook_state::StateView for BoundApprovalState<'_> {

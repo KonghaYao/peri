@@ -1,16 +1,12 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 
-use super::{
-    atomic_write_settings, get_marketplace_manifest, install::declared_version, match_project_path,
-    remove_from_enabled_plugins, sanitize_plugin_id, InstallerError, PluginUpdateInfo,
-};
-use crate::plugin::{
-    config::{load_installed_plugins, save_installed_plugins},
-    types::InstalledPlugins,
-};
+use super::install;
+use super::InstallerError;
+use super::PluginUpdateInfo;
+use crate::plugin::config;
+use crate::plugin::types::InstalledPlugins;
 
 pub async fn uninstall_plugin(
     plugin_id: &str,
@@ -25,7 +21,7 @@ pub async fn uninstall_plugin(
         project_dir
     };
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
-    let mut installed = load_installed_plugins(Some(&plugins_path))?;
+    let mut installed = config::load_installed_plugins(Some(&plugins_path))?;
 
     let entry = super::installation_for_mutation(&installed, plugin_id, scope, project_dir)?;
 
@@ -36,20 +32,23 @@ pub async fn uninstall_plugin(
     let is_last_scope = !installed.plugins.iter().any(|p| {
         p.id == plugin_id
             && (p.scope != scope
-                || (p.scope == scope && !match_project_path(&p.project_path, project_dir)))
+                || (p.scope == scope
+                    && !super::match_project_path((p.project_path).as_deref(), project_dir)))
     });
 
     installed.plugins.retain(|p| {
-        !(p.id == plugin_id && p.scope == scope && match_project_path(&p.project_path, project_dir))
+        !(p.id == plugin_id
+            && p.scope == scope
+            && super::match_project_path((p.project_path).as_deref(), project_dir))
     });
-    save_installed_plugins(&installed, Some(&plugins_path))?;
+    config::save_installed_plugins(&installed, Some(&plugins_path))?;
 
-    remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)?;
+    super::remove_from_enabled_plugins(plugin_id, &scope, claude_dir, project_dir)?;
 
     if is_last_scope {
         // 仅 Peri 安装的插件才执行文件清理；外部插件跳过
         if !is_external {
-            let sanitized_id = sanitize_plugin_id(plugin_id);
+            let sanitized_id = super::sanitize_plugin_id(plugin_id);
             let data_dir = claude_dir.join("plugins").join("data").join(&sanitized_id);
             if data_dir.exists() {
                 tokio::fs::remove_dir_all(&data_dir).await.ok();
@@ -100,7 +99,7 @@ fn remove_plugin_options(plugin_id: &str, claude_dir: &Path) -> Result<(), Insta
             configs.remove(plugin_id);
         }
 
-        atomic_write_settings(&settings_path, &value)?;
+        super::atomic_write_settings(&settings_path, &value)?;
     }
 
     Ok(())
@@ -118,7 +117,9 @@ pub async fn check_updates(
         let (name, marketplace) = plugin.id.split_once('@').unwrap_or((&plugin.id, ""));
 
         if !manifest_cache.contains_key(marketplace) {
-            if let Ok(manifest) = get_marketplace_manifest(marketplace, marketplace_cache_dir) {
+            if let Ok(manifest) =
+                super::get_marketplace_manifest(marketplace, marketplace_cache_dir)
+            {
                 manifest_cache.insert(marketplace.to_string(), manifest);
             } else {
                 continue;
@@ -128,7 +129,7 @@ pub async fn check_updates(
         let manifest = &manifest_cache[marketplace];
         if let Some(latest) = manifest.plugins.iter().find(|p| p.name == name) {
             // 未声明版本的条目无法与已安装时间戳比较，不报告更新。
-            let Some(latest_version) = declared_version(latest) else {
+            let Some(latest_version) = install::declared_version(latest) else {
                 continue;
             };
 
@@ -154,7 +155,7 @@ pub async fn cleanup_orphaned_plugins(claude_dir: &Path) -> Result<usize, Instal
         return Ok(0);
     }
 
-    let installed = load_installed_plugins(Some(
+    let installed = config::load_installed_plugins(Some(
         &claude_dir.join("plugins").join("installed_plugins.json"),
     ))?;
     let installed_paths: std::collections::HashSet<PathBuf> = installed

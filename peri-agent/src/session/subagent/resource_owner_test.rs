@@ -1,6 +1,12 @@
-use super::*;
+use crate::agent::async_tasks::TaskManager;
+use crate::session::subagent::resource_owner::ParkedChildOwner;
+
+use crate::session::MessageQueue;
+use peri_acp_types::session::ExecutionBinding;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
+use peri_acp_types::tasks::TaskManager as _;
+use std::sync::Arc;
 
 fn owner(parent: &str, child: &str) -> Arc<ParkedChildOwner> {
     ParkedChildOwner::new(
@@ -25,39 +31,51 @@ async fn test_owner_retains_resources_without_computation() {
     let root = Arc::new(TaskManager::new());
     let child = owner("root", "child");
     let weak = Arc::downgrade(&child);
-    root.register_child_owner(child.clone()).unwrap();
-    let permit = child.acquire(execution()).unwrap();
+    root.register_child_owner(child.clone())
+        .expect("the register child owner fixture result is required for this assertion");
+    let permit = child
+        .acquire(execution())
+        .expect("the acquire fixture result is required for this assertion");
     assert!(child.check_resume().unwrap_err().contains("active"));
     permit.finish(Ok(()));
     drop(child);
-    let retained = root.child_owner("child").unwrap();
+    let retained = root
+        .child_owner("child")
+        .expect("the child owner fixture result is required for this assertion");
     assert!(weak.upgrade().is_some(), "资源不能随计算释放");
     assert!(
         root.child_owner("unrelated").is_none(),
         "不能越过可信子树寻址"
     );
-    retained.check_resume().unwrap();
-    retained.close().await.unwrap();
+    retained
+        .check_resume()
+        .expect("the check resume fixture result is required for this assertion");
+    retained
+        .close()
+        .await
+        .expect("the close fixture result is required for this assertion");
     assert!(retained
         .acquire(execution())
-        .err()
-        .unwrap()
+        .expect_err(
+            "test_owner_retains_resources_without_computation must reject the invalid fixture"
+        )
         .contains("closing"));
 }
 
 #[tokio::test]
 async fn test_abandoned_execution_blocks_resume_without_cancelling_resources() {
     let child = owner("root", "child");
-    let permit = child.acquire(execution()).unwrap();
+    let permit = child
+        .acquire(execution())
+        .expect("the acquire fixture result is required for this assertion");
     drop(permit);
     assert!(child
         .failure()
-        .unwrap()
+        .expect("the failure fixture result is required for this assertion")
         .contains("without terminal settlement"));
     assert!(child
         .acquire(execution())
-        .err()
-        .unwrap()
+        .expect_err("test_abandoned_execution_blocks_resume_without_cancelling_resources must reject the invalid fixture")
         .contains("unconfirmed"));
     assert!(
         !child.manager.session_close_settled(),
@@ -70,9 +88,18 @@ async fn test_nested_owner_lookup_and_closing_host_rejection() {
     let root = Arc::new(TaskManager::new());
     let child = owner("root", "child");
     let nested = owner("child", "nested");
-    child.manager.register_child_owner(nested.clone()).unwrap();
-    root.register_child_owner(child).unwrap();
-    assert!(Arc::ptr_eq(&root.child_owner("nested").unwrap(), &nested));
+    child
+        .manager
+        .register_child_owner(nested.clone())
+        .expect("the register child owner fixture result is required for this assertion");
+    root.register_child_owner(child)
+        .expect("the register child owner fixture result is required for this assertion");
+    assert!(Arc::ptr_eq(
+        &root
+            .child_owner("nested")
+            .expect("the child owner fixture result is required for this assertion"),
+        &nested
+    ));
     root.begin_session_close();
     assert!(root
         .register_child_owner(owner("root", "new"))
@@ -106,25 +133,25 @@ async fn test_handoff_commit_reuses_frozen_execution_snapshot() {
     .build();
     let permit = owner
         .acquire(context.session.turn.execution_binding())
-        .unwrap();
-    let first = super::super::commit_child_handoff(
+        .expect("the acquire fixture result is required for this assertion");
+    let first = crate::agent::async_tasks::handoff::commit_child_handoff(
         &context.session,
         &owner,
-        super::super::ChildHandoffReason::SettlementDeadline,
+        crate::session::subagent::types::ChildHandoffReason::SettlementDeadline,
         vec![],
         vec![],
     )
     .await
-    .unwrap();
-    let second = super::super::commit_child_handoff(
+    .expect("the commit child handoff fixture result is required for this assertion");
+    let second = crate::agent::async_tasks::handoff::commit_child_handoff(
         &context.session,
         &owner,
-        super::super::ChildHandoffReason::SettlementDeadline,
+        crate::session::subagent::types::ChildHandoffReason::SettlementDeadline,
         vec![],
         vec![],
     )
     .await
-    .unwrap();
+    .expect("the commit child handoff fixture result is required for this assertion");
     assert_eq!(first.canonical_message_id, second.canonical_message_id);
     assert_eq!(resources.payloads().len(), 1, "重复提交不得产生第二条交接");
     permit.finish(Ok(()));
@@ -166,7 +193,7 @@ async fn test_close_settles_terminal_and_records_retained_input() {
             ),
         )
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     child
         .queue
         .enqueue(crate::session::QueuedMessage::prompt(
@@ -174,13 +201,23 @@ async fn test_close_settles_terminal_and_records_retained_input() {
             crate::messages::BaseMessage::human("追加输入"),
         ))
         .await
-        .unwrap();
-    child.close().await.unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
+    child
+        .close()
+        .await
+        .expect("the close fixture result is required for this assertion");
     assert!(
-        !child.queue.has_required().await.unwrap(),
+        !child
+            .queue
+            .has_required()
+            .await
+            .expect("the has required fixture result is required for this assertion"),
         "已结算输入不得残留 Required"
     );
-    let payloads = resources.load_session_history(&child_id).await.unwrap();
+    let payloads = resources
+        .load_session_history(&child_id)
+        .await
+        .expect("the load session history fixture result is required for this assertion");
     assert_eq!(payloads.len(), 2, "终态按原 ID 落库，未处理输入单独记录");
     assert!(payloads.iter().any(|payload| {
         matches!(payload, PersistedPayload::SystemReminder { reminder, .. }
@@ -229,7 +266,10 @@ async fn test_close_rolls_back_retained_settlement_on_sqlite() {
         crate::messages::BaseMessage::human("追加输入"),
     );
     // 汇总提醒的稳定 ID 与顺序无关：未处理输入永远排在终态提醒之后。
-    let unprocessed_id = close_settlement_delivery_id(&child_id, std::slice::from_ref(&pending));
+    let unprocessed_id = crate::session::subagent::resource_owner::close_settlement_delivery_id(
+        &child_id,
+        std::slice::from_ref(&pending),
+    );
     queue.push_async(pending).await;
 
     resources
@@ -243,8 +283,11 @@ async fn test_close_rolls_back_retained_settlement_on_sqlite() {
             )],
         )
         .await
-        .unwrap();
-    let before = resources.load_session_history(&child_id).await.unwrap();
+        .expect("the append history fixture result is required for this assertion");
+    let before = resources
+        .load_session_history(&child_id)
+        .await
+        .expect("the load session history fixture result is required for this assertion");
 
     let owner = ParkedChildOwner::new(
         child_id.clone(),
@@ -263,7 +306,10 @@ async fn test_close_rolls_back_retained_settlement_on_sqlite() {
         "结算失败必须如实上报: {error}"
     );
 
-    let after = resources.load_session_history(&child_id).await.unwrap();
+    let after = resources
+        .load_session_history(&child_id)
+        .await
+        .expect("the load session history fixture result is required for this assertion");
     assert_eq!(after.len(), before.len(), "失败的结算不得留下已写提醒");
     assert!(
         !after
@@ -272,7 +318,11 @@ async fn test_close_rolls_back_retained_settlement_on_sqlite() {
         "终态提醒必须随事务回滚"
     );
     assert_eq!(
-        queue.snapshot().await.unwrap().len(),
+        queue
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
         2,
         "MQ 行必须原样保留"
     );
@@ -321,8 +371,11 @@ async fn test_root_queries_cancels_and_closes_nested_owner_tree() {
         Some(crate::session::test_resources::mock::MockSessionResources::new()),
         None,
     );
-    b_manager.register_child_owner(c.clone()).unwrap();
-    root.register_child_owner(b.clone()).unwrap();
+    b_manager
+        .register_child_owner(c.clone())
+        .expect("the register child owner fixture result is required for this assertion");
+    root.register_child_owner(b.clone())
+        .expect("the register child owner fixture result is required for this assertion");
     let ticket = c_manager
         .register(peri_acp_types::tasks::BgTaskRegistration {
             task_id: "c-shell".into(),
@@ -331,16 +384,26 @@ async fn test_root_queries_cancels_and_closes_nested_owner_tree() {
             pid: None,
             kill: Some(Box::new(|| {})),
         })
-        .unwrap();
-    assert!(Arc::ptr_eq(&root.child_owner("c").unwrap(), &c));
-    let c_from_root = root.child_task_manager("c").unwrap();
+        .expect("the register fixture result is required for this assertion");
+    assert!(Arc::ptr_eq(
+        &root
+            .child_owner("c")
+            .expect("the child owner fixture result is required for this assertion"),
+        &c
+    ));
+    let c_from_root = root
+        .child_task_manager("c")
+        .expect("the child task manager fixture result is required for this assertion");
     assert_eq!(c_from_root.active_count(), 1);
-    c_from_root.cancel_async("c-shell").await.unwrap();
+    c_from_root
+        .cancel_async("c-shell")
+        .await
+        .expect("the cancel async fixture result is required for this assertion");
     assert_eq!(c_manager.active_count(), 0);
     // 模拟执行环境确认 kill 已生效；真实 ShellExecutor 由完成回调确认。
     c_manager.registry().confirm_external_stopped(&ticket);
     c_manager.finalize_bg_shell(
-        &None,
+        None,
         ticket,
         "nested shell".into(),
         false,
@@ -349,7 +412,9 @@ async fn test_root_queries_cancels_and_closes_nested_owner_tree() {
         false,
         None,
     );
-    root.close_child_resources().await.unwrap();
+    root.close_child_resources()
+        .await
+        .expect("the close child resources fixture result is required for this assertion");
     assert!(root.child_owner("b").is_none());
     assert!(root.child_owner("c").is_none());
 }
@@ -360,34 +425,39 @@ use crate::session::{FrozenContext, MessageTranscript, Session};
 #[tokio::test]
 async fn test_unconfirmed_failure_and_pending_receipt_count_as_obligations() {
     let child = owner("root", "child");
-    let permit = child.acquire(execution()).unwrap();
+    let permit = child
+        .acquire(execution())
+        .expect("the acquire fixture result is required for this assertion");
     permit.finish(Err("handoff persistence failed".into()));
     assert!(child.has_unsettled_obligations_sync());
     assert!(child.check_resume().is_err());
     assert!(child
         .acquire(execution())
-        .err()
-        .unwrap()
+        .expect_err("test_unconfirmed_failure_and_pending_receipt_count_as_obligations must reject the invalid fixture")
         .contains("unconfirmed"));
 
     let child = owner("root", "child");
     let binding = execution();
-    let permit = child.acquire(binding.clone()).unwrap();
-    let receipt = super::super::ChildHandoffReceipt {
+    let permit = child
+        .acquire(binding.clone())
+        .expect("the acquire fixture result is required for this assertion");
+    let receipt = crate::session::subagent::types::ChildHandoffReceipt {
         child_thread_id: "child".into(),
         execution: binding,
         owner_session_id: "child".into(),
-        reason: super::super::ChildHandoffReason::SettlementDeadline,
+        reason: crate::session::subagent::types::ChildHandoffReason::SettlementDeadline,
         tasks: Vec::new(),
         message_ids: Vec::new(),
         message_sequences: Vec::new(),
         unprocessed_tool_calls: Vec::new(),
         canonical_message_id: peri_acp_types::messages::MessageId::new(),
     };
-    child.freeze_receipt(receipt).unwrap();
+    child
+        .freeze_receipt(receipt)
+        .expect("the freeze receipt fixture result is required for this assertion");
     permit.finish(Ok(()));
     assert!(child.has_unsettled_obligations_sync());
-    let error = child.acquire(execution()).err().unwrap();
+    let error = child.acquire(execution()).expect_err("test_unconfirmed_failure_and_pending_receipt_count_as_obligations must reject the invalid fixture");
     assert!(
         error.contains("unconfirmed") || error.contains("pending"),
         "{error}"
@@ -416,7 +486,9 @@ async fn test_close_with_unconfirmed_history_flush_keeps_owner() {
         None,
     );
     owner.set_writer(session.transcript().read().persist_tx_handle());
-    parent.register_child_owner(owner.clone()).unwrap();
+    parent
+        .register_child_owner(owner.clone())
+        .expect("the register child owner fixture result is required for this assertion");
     store.restrict_to_history_read_only();
     session
         .transcript()
@@ -437,10 +509,15 @@ async fn test_close_with_unconfirmed_history_flush_keeps_owner() {
 #[tokio::test]
 async fn test_close_rejects_active_execution_until_it_ends() {
     let child = owner("root", "child");
-    let permit = child.acquire(execution()).unwrap();
+    let permit = child
+        .acquire(execution())
+        .expect("the acquire fixture result is required for this assertion");
     assert!(child.close().await.unwrap_err().contains("active"));
     permit.finish(Ok(()));
-    child.close().await.unwrap();
+    child
+        .close()
+        .await
+        .expect("the close fixture result is required for this assertion");
 }
 
 #[test]
@@ -484,39 +561,43 @@ fn test_missing_handoff_capability_is_not_classified_as_persistence_failure() {
 #[tokio::test]
 async fn test_prepare_resume_preserves_exclusion_and_pending_handoff() {
     let child = owner("root", "child");
-    let preparation = child.prepare_resume().unwrap();
-    assert!(child.prepare_resume().err().unwrap().contains("preparing"));
+    let preparation = child
+        .prepare_resume()
+        .expect("the prepare resume fixture result is required for this assertion");
+    assert!(child.prepare_resume().expect_err("test_prepare_resume_preserves_exclusion_and_pending_handoff must reject the invalid fixture").contains("preparing"));
     assert!(child
         .acquire(execution())
-        .err()
-        .unwrap()
+        .expect_err("test_prepare_resume_preserves_exclusion_and_pending_handoff must reject the invalid fixture")
         .contains("preparing"));
     drop(preparation);
     let binding = execution();
-    let permit = child.acquire(binding.clone()).unwrap();
-    assert!(child.prepare_resume().err().unwrap().contains("active"));
+    let permit = child
+        .acquire(binding.clone())
+        .expect("the acquire fixture result is required for this assertion");
+    assert!(child.prepare_resume().expect_err("test_prepare_resume_preserves_exclusion_and_pending_handoff must reject the invalid fixture").contains("active"));
     child
-        .freeze_receipt(super::super::ChildHandoffReceipt {
+        .freeze_receipt(crate::session::subagent::types::ChildHandoffReceipt {
             child_thread_id: "child".into(),
             execution: binding,
             owner_session_id: "child".into(),
-            reason: super::super::ChildHandoffReason::ExecutionFailed,
+            reason: crate::session::subagent::types::ChildHandoffReason::ExecutionFailed,
             tasks: Vec::new(),
             message_ids: Vec::new(),
             message_sequences: Vec::new(),
             unprocessed_tool_calls: Vec::new(),
             canonical_message_id: peri_acp_types::messages::MessageId::new(),
         })
-        .unwrap();
+        .expect("the freeze receipt fixture result is required for this assertion");
     permit.finish(Ok(()));
     assert!(child
         .prepare_resume()
-        .err()
-        .unwrap()
+        .expect_err("test_prepare_resume_preserves_exclusion_and_pending_handoff must reject the invalid fixture")
         .contains("handoff is unconfirmed"));
     assert!(child.pending_receipt().is_some());
-    child.begin_close().unwrap();
-    assert!(child.prepare_resume().err().unwrap().contains("closing"));
+    child
+        .begin_close()
+        .expect("the begin close fixture result is required for this assertion");
+    assert!(child.prepare_resume().expect_err("test_prepare_resume_preserves_exclusion_and_pending_handoff must reject the invalid fixture").contains("closing"));
 }
 
 /// [回归测试] 并发准备必须只有一个持有 permit，不能先检查后加锁。
@@ -543,11 +624,17 @@ async fn test_concurrent_prepare_resume_allows_only_one_permit() {
     finish.wait();
     let granted = workers
         .into_iter()
-        .map(|worker| worker.join().unwrap())
+        .map(|worker| {
+            worker
+                .join()
+                .expect("worker join test worker must complete without panicking")
+        })
         .filter(|granted| *granted)
         .count();
     assert_eq!(granted, 1);
-    child.prepare_resume().unwrap();
+    child
+        .prepare_resume()
+        .expect("the prepare resume fixture result is required for this assertion");
 }
 
 // ─── 关闭结算入队闸门 ────────────────────────────────────────────────────────
@@ -576,14 +663,16 @@ async fn late_enqueue_during_close_settlement_is_rejected_without_orphan_rows() 
             crate::messages::BaseMessage::human("关闭前输入"),
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
 
     let (entered, release) = child.gate_next_close_settlement();
     let closing = {
         let child = child.clone();
         tokio::spawn(async move { child.close().await })
     };
-    entered.await.unwrap();
+    entered
+        .await
+        .expect("the entered fixture result is required for this assertion");
     assert!(
         child.queue.is_admission_closed(),
         "结算读取前必须已关闭入队闸门"
@@ -602,18 +691,23 @@ async fn late_enqueue_during_close_settlement_is_rejected_without_orphan_rows() 
         "迟到入队必须被明确拒绝: {error}"
     );
 
-    release.send(()).unwrap();
-    closing.await.unwrap().unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
+    closing.await.expect("the closing fixture result is required for this assertion").expect("late enqueue during close settlement is rejected without orphan rows: the completed fixture operation must provide its result payload");
     assert!(
         child
             .queue
             .query(Default::default())
             .await
-            .unwrap()
+            .expect("the default fixture result is required for this assertion")
             .is_empty(),
         "结算后不得留下无人消费的 MQ 行"
     );
-    let history = resources.load_session_history(&child_id).await.unwrap();
+    let history = resources
+        .load_session_history(&child_id)
+        .await
+        .expect("the load session history fixture result is required for this assertion");
     assert!(
         history.iter().any(|payload| matches!(
             payload,
@@ -641,7 +735,10 @@ async fn closed_owner_queue_rejects_after_close_and_a_new_binding_reopens() {
         Some(resources.clone()),
         None,
     );
-    child.close().await.unwrap();
+    child
+        .close()
+        .await
+        .expect("the close fixture result is required for this assertion");
 
     assert!(child.queue.is_admission_closed());
     let error = child
@@ -662,7 +759,7 @@ async fn closed_owner_queue_rejects_after_close_and_a_new_binding_reopens() {
             crate::messages::BaseMessage::human("resume 输入"),
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
 }
 
@@ -701,20 +798,22 @@ async fn concurrent_close_and_enqueue_leave_no_unconsumed_rows() {
         tokio::spawn(async move { child.close().await })
     };
     while let Some(result) = workers.join_next().await {
-        if let Err(error) = result.unwrap() {
+        if let Err(error) =
+            result.expect("the result fixture result is required for this assertion")
+        {
             assert!(
                 error.downcast_ref::<QueueClosed>().is_some(),
                 "只有关闸拒绝可以出现在 close 期间: {error}"
             );
         }
     }
-    closing.await.unwrap().unwrap();
+    closing.await.expect("the closing fixture result is required for this assertion").expect("concurrent close and enqueue leave no unconsumed rows: the completed fixture operation must provide its result payload");
     assert!(
         child
             .queue
             .query(Default::default())
             .await
-            .unwrap()
+            .expect("the default fixture result is required for this assertion")
             .is_empty(),
         "并发 close/enqueue 后不得留下无人消费的 MQ 行"
     );
@@ -738,7 +837,8 @@ async fn close_child_resources_settles_dormant_passive_rows() {
         Some(resources.clone()),
         None,
     );
-    root.register_child_owner(child.clone()).unwrap();
+    root.register_child_owner(child.clone())
+        .expect("the register child owner fixture result is required for this assertion");
 
     let reminder = crate::session::producer_reminders::trusted_reminder(
         ReminderCategory::Diagnostic,
@@ -758,13 +858,19 @@ async fn close_child_resources_settles_dormant_passive_rows() {
             reminder,
         ))
         .await
-        .unwrap();
+        .expect("the enqueue fixture result is required for this assertion");
     assert!(
-        !child.queue.has_required().await.unwrap(),
+        !child
+            .queue
+            .has_required()
+            .await
+            .expect("the has required fixture result is required for this assertion"),
         "passive Info 不是 Required，不得阻塞关闭"
     );
 
-    root.close_child_resources().await.unwrap();
+    root.close_child_resources()
+        .await
+        .expect("the close child resources fixture result is required for this assertion");
 
     assert!(root.child_owner(&child_id).is_none(), "owner 必须释放");
     assert!(
@@ -772,11 +878,14 @@ async fn close_child_resources_settles_dormant_passive_rows() {
             .queue
             .query(Default::default())
             .await
-            .unwrap()
+            .expect("the default fixture result is required for this assertion")
             .is_empty(),
         "dormant child 的 passive 行不得残留"
     );
-    let history = resources.load_session_history(&child_id).await.unwrap();
+    let history = resources
+        .load_session_history(&child_id)
+        .await
+        .expect("the load session history fixture result is required for this assertion");
     assert!(
         history.iter().any(|payload| matches!(
             payload,

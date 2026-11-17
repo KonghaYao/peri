@@ -270,16 +270,19 @@ impl ContentBlock {
         }
     }
 
+    #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 
+    #[must_use]
     pub fn image_url(url: impl Into<String>) -> Self {
         Self::Image {
             source: ImageSource::Url { url: url.into() },
         }
     }
 
+    #[must_use]
     pub fn image_base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
         Self::Image {
             source: ImageSource::Base64 {
@@ -289,6 +292,7 @@ impl ContentBlock {
         }
     }
 
+    #[must_use]
     pub fn tool_use(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -301,6 +305,7 @@ impl ContentBlock {
         }
     }
 
+    #[must_use]
     pub fn tool_result(
         tool_use_id: impl Into<String>,
         content: Vec<ContentBlock>,
@@ -314,6 +319,7 @@ impl ContentBlock {
         }
     }
 
+    #[must_use]
     pub fn reasoning(text: impl Into<String>) -> Self {
         Self::Reasoning {
             text: text.into(),
@@ -321,6 +327,7 @@ impl ContentBlock {
         }
     }
 
+    #[must_use]
     pub fn reasoning_with_signature(text: impl Into<String>, signature: impl Into<String>) -> Self {
         Self::Reasoning {
             text: text.into(),
@@ -385,16 +392,19 @@ impl MessageContent {
     }
 
     /// 从字符串构建
+    #[must_use]
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text(s.into())
     }
 
     /// 从 ContentBlock 列表构建
+    #[must_use]
     pub fn blocks(blocks: Vec<ContentBlock>) -> Self {
         Self::Blocks(blocks)
     }
 
     /// 从 provider 原生 JSON 列表构建
+    #[must_use]
     pub fn raw(values: Vec<serde_json::Value>) -> Self {
         Self::Raw(values)
     }

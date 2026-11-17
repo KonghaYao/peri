@@ -12,21 +12,25 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    command::{
-        command_handler::CommandHandler, command_route::RouteEntry, CommandContext,
-        CommandFeedback, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,
-        PromptStopReason, ResolvedCommand,
-    },
-    compact::CompactConfig,
-    event::{EventSink, ExecutorEvent},
-    messages::{BaseMessage, MessageContent},
-};
+use peri_acp_types::command::command_handler::CommandHandler;
+use peri_acp_types::command::command_route::RouteEntry;
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::CommandFeedback;
+use peri_acp_types::command::CommandOutcome;
+use peri_acp_types::command::CommandResult;
+use peri_acp_types::command::FeedbackChannel;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::command::ResolvedCommand;
+use peri_acp_types::compact::CompactConfig;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::{
-    emit_command_feedback, intercept_immediate_command, InterceptOutcome, InterceptRequest,
-};
+use crate::session::exec::executor_helpers::InterceptOutcome;
+use crate::session::exec::executor_helpers::InterceptRequest;
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -49,7 +53,10 @@ impl MockEventSink {
     }
 
     fn push_done_count(&self) -> usize {
-        *self.push_done_count.lock().unwrap()
+        *self
+            .push_done_count
+            .lock()
+            .expect("self push done count mutex must remain unpoisoned throughout the test")
     }
 }
 
@@ -62,19 +69,25 @@ impl EventSink for MockEventSink {
         _context_window: u32,
     ) -> Result<(), peri_acp_types::event::EventSinkError> {
         let json = serde_json::to_string(event).unwrap_or_default();
-        self.pushed_events.lock().unwrap().push(json);
+        self.pushed_events
+            .lock()
+            .expect("self pushed events mutex must remain unpoisoned throughout the test")
+            .push(json);
         Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
-        *self.push_done_count.lock().unwrap() += 1;
+        *self
+            .push_done_count
+            .lock()
+            .expect("self push done count mutex must remain unpoisoned throughout the test") += 1;
         self.push_done_request_ids
             .lock()
-            .unwrap()
+            .expect("self push done request ids mutex must remain unpoisoned throughout the test")
             .push(request_id.map(String::from));
         self.push_done_stop_reasons
             .lock()
-            .unwrap()
+            .expect("self push done stop reasons mutex must remain unpoisoned throughout the test")
             .push(stop_reason.to_string());
     }
 }
@@ -94,13 +107,14 @@ fn make_intercept_request<'a>(
     event_sink: &'a Arc<dyn EventSink>,
     _bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     task_manager: &'a Arc<dyn peri_acp_types::tasks::TaskManager>,
-    command_lookup: super::super::CommandLookupFn,
+    command_lookup: crate::session::exec::executor_helpers::intercept::CommandLookupFn,
 ) -> InterceptRequest<'a> {
     let compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync> =
         Arc::new(CompactConfig::default);
     InterceptRequest {
         mcp_pool: None,
         async_result_mailbox: None,
+        goal_controller: None,
         content,
         history_payloads: std::borrow::Cow::Owned(
             history
@@ -165,29 +179,30 @@ async fn test_intercept_args_parse_failure_returns_error_feedback() {
             description: None,
         }],
     };
-    let lookup: super::super::CommandLookupFn = Arc::new(move |text: &str| {
-        if text == "rewind" {
-            Some(ResolvedCommand {
-                entry: Arc::new(RouteEntry {
-                    fullname: "core:rewind".to_string(),
-                    aliases: vec![],
-                    description: "rewind for args-parse test".to_string(),
-                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
-                    category: None,
-                    args_schema: Some(schema.clone()),
-                    handler: Arc::new(SentryHandler),
-                    provenance: peri_acp_types::command::command_route::CommandProvenance {
-                        source: peri_acp_types::command::command_route::CommandSource::Core,
-                        lifecycle:
-                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
-                    },
-                }),
-                args: String::new(),
-            })
-        } else {
-            None
-        }
-    });
+    let lookup: crate::session::exec::executor_helpers::intercept::CommandLookupFn =
+        Arc::new(move |text: &str| {
+            if text == "rewind" {
+                Some(ResolvedCommand {
+                    entry: Arc::new(RouteEntry {
+                        fullname: "core:rewind".to_string(),
+                        aliases: vec![],
+                        description: "rewind for args-parse test".to_string(),
+                        kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                        category: None,
+                        args_schema: Some(schema.clone()),
+                        handler: Arc::new(SentryHandler),
+                        provenance: peri_acp_types::command::command_route::CommandProvenance {
+                            source: peri_acp_types::command::command_route::CommandSource::Core,
+                            lifecycle:
+                                peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                        },
+                    }),
+                    args: String::new(),
+                })
+            } else {
+                None
+            }
+        });
 
     let content = MessageContent::text("/rewind");
     let history: Vec<BaseMessage> = vec![BaseMessage::human("hello")];
@@ -207,7 +222,7 @@ async fn test_intercept_args_parse_failure_returns_error_feedback() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：Handled + feedback(Error, 参数解析失败) + history 原样 + push_done
     let InterceptOutcome::Handled(prompt_result) = result else {
@@ -221,11 +236,16 @@ async fn test_intercept_args_parse_failure_returns_error_feedback() {
         "解析失败应返回原样 history"
     );
     // feedback 经 emit_command_feedback 发射为 CommandFeedback 事件
-    let events = mock_sink.pushed_events.lock().unwrap();
+    let events = mock_sink
+        .pushed_events
+        .lock()
+        .expect("mock sink pushed events mutex must remain unpoisoned throughout the test");
     let fb_event = events.iter().find(|json| json.contains("command_feedback"));
     assert!(fb_event.is_some(), "解析失败应发射 CommandFeedback 事件");
     assert!(
-        fb_event.unwrap().contains("rewind 参数解析失败"),
+        fb_event
+            .expect("the fb event fixture result is required for this assertion")
+            .contains("rewind 参数解析失败"),
         "错误消息应含 'rewind 参数解析失败'，实际: {events:?}"
     );
     drop(events);
@@ -285,30 +305,31 @@ async fn test_intercept_args_parse_ok_passes_into_handler() {
             description: None,
         }],
     };
-    let lookup: super::super::CommandLookupFn = Arc::new(move |text: &str| {
-        if text.starts_with("rewind") {
-            Some(ResolvedCommand {
-                entry: Arc::new(RouteEntry {
-                    fullname: "core:rewind".to_string(),
-                    aliases: vec![],
-                    description: "rewind for args-parse test".to_string(),
-                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
-                    category: None,
-                    args_schema: Some(schema.clone()),
-                    handler: Arc::new(OkHandler),
-                    provenance: peri_acp_types::command::command_route::CommandProvenance {
-                        source: peri_acp_types::command::command_route::CommandSource::Core,
-                        lifecycle:
-                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
-                    },
-                }),
-                // resolve 词法切分（不变式 3）：命令名后的参数原样
-                args: "abc123 --no-revert-files".to_string(),
-            })
-        } else {
-            None
-        }
-    });
+    let lookup: crate::session::exec::executor_helpers::intercept::CommandLookupFn =
+        Arc::new(move |text: &str| {
+            if text.starts_with("rewind") {
+                Some(ResolvedCommand {
+                    entry: Arc::new(RouteEntry {
+                        fullname: "core:rewind".to_string(),
+                        aliases: vec![],
+                        description: "rewind for args-parse test".to_string(),
+                        kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                        category: None,
+                        args_schema: Some(schema.clone()),
+                        handler: Arc::new(OkHandler),
+                        provenance: peri_acp_types::command::command_route::CommandProvenance {
+                            source: peri_acp_types::command::command_route::CommandSource::Core,
+                            lifecycle:
+                                peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                        },
+                    }),
+                    // resolve 词法切分（不变式 3）：命令名后的参数原样
+                    args: "abc123 --no-revert-files".to_string(),
+                })
+            } else {
+                None
+            }
+        });
 
     let content = MessageContent::text("/rewind abc123 --no-revert-files");
     let history: Vec<BaseMessage> = vec![];
@@ -328,7 +349,7 @@ async fn test_intercept_args_parse_ok_passes_into_handler() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：Handled + handler 已执行（OkHandler 内断言 ctx.args）
     let InterceptOutcome::Handled(prompt_result) = result else {
@@ -363,12 +384,19 @@ async fn test_emit_command_feedback_session_appends_system_message() {
     let mut result = result_with_feedback(FeedbackChannel::Session);
 
     // Act
-    emit_command_feedback(&sink, "test-session", &mut result).await;
+    crate::session::exec::executor_helpers::emit_command_feedback(
+        &sink,
+        "test-session",
+        &mut result,
+    )
+    .await;
 
     // Assert：尾部为系统消息（内容同 feedback.message）
     let messages = &result.messages;
     assert_eq!(messages.len(), 2, "Session 通道应追加一条系统消息");
-    let last = messages.last().unwrap();
+    let last = messages
+        .last()
+        .expect("messages last fixture must contain the expected element");
     assert!(
         matches!(last, BaseMessage::System { .. }),
         "尾元素应为系统消息"
@@ -377,7 +405,11 @@ async fn test_emit_command_feedback_session_appends_system_message() {
     // feedback 已被 take（发射唯一归属本 helper），事件发射一次
     assert!(result.feedback.is_none(), "feedback 应被 take 出");
     assert_eq!(
-        mock_sink.pushed_events.lock().unwrap().len(),
+        mock_sink
+            .pushed_events
+            .lock()
+            .expect("mock sink pushed events mutex must remain unpoisoned throughout the test")
+            .len(),
         1,
         "Session 通道也应发射 CommandFeedback 事件"
     );
@@ -392,13 +424,22 @@ async fn test_emit_command_feedback_ui_only_keeps_messages() {
     let mut result = result_with_feedback(FeedbackChannel::UiOnly);
 
     // Act
-    emit_command_feedback(&sink, "test-session", &mut result).await;
+    crate::session::exec::executor_helpers::emit_command_feedback(
+        &sink,
+        "test-session",
+        &mut result,
+    )
+    .await;
 
     // Assert：messages 不变（UiOnly 不进会话，设计 §79）
     assert_eq!(result.messages.len(), 1, "UiOnly 不应追加消息");
     assert!(result.feedback.is_none(), "feedback 应被 take 出");
     assert_eq!(
-        mock_sink.pushed_events.lock().unwrap().len(),
+        mock_sink
+            .pushed_events
+            .lock()
+            .expect("mock sink pushed events mutex must remain unpoisoned throughout the test")
+            .len(),
         1,
         "UiOnly 仍应发射 CommandFeedback 事件"
     );

@@ -1,9 +1,13 @@
 //! Shared, bounded SQL for canonical archive access. No schema or execution state.
-use peri_acp_types::{
-    context_archive::*,
-    messages::MessageId,
-    session_resources::{SessionResourceError, SessionResourceErrorKind, SessionResourceResult},
-};
+use peri_acp_types::context_archive::ArchiveChunkQuery;
+use peri_acp_types::context_archive::ArchiveMetadataItem;
+use peri_acp_types::context_archive::ArchiveMetadataPage;
+use peri_acp_types::context_archive::ArchiveMetadataQuery;
+use peri_acp_types::context_archive::ARCHIVE_MAX_METADATA_BYTES;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::SessionResourceError;
+use peri_acp_types::session_resources::SessionResourceErrorKind;
+use peri_acp_types::session_resources::SessionResourceResult;
 
 pub(crate) const TAIL_SQL: &str = "SELECT message_id FROM messages WHERE thread_id = ?1 AND (?2 IS NULL OR message_id = ?2) ORDER BY rowid DESC LIMIT 1";
 pub(crate) const METADATA_SQL: &str = "SELECT message_id,

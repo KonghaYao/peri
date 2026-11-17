@@ -317,7 +317,7 @@ fn project_sub_item(
             (Some(text), _) => {
                 entries[entry_index].push(super::turn::committed_assistant_unit_with_message_id(
                     text,
-                    &None,
+                    None,
                     message_id.map(str::to_owned),
                 ));
             }
@@ -328,10 +328,9 @@ fn project_sub_item(
         },
         HistorySubItem::Reasoning(item) => match (&item.text, &item.body) {
             (Some(text), _) => {
-                let reasoning = Some(text.clone());
                 entries[entry_index].push(super::turn::committed_assistant_unit_with_message_id(
                     "",
-                    &reasoning,
+                    Some(text.as_str()),
                     message_id.map(str::to_owned),
                 ));
             }

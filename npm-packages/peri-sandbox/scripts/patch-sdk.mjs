@@ -51,7 +51,7 @@ for (const pkg of ['client', 'server']) {
         'if (provided === "complete") return result;',
         'if (provided === "complete" || provided === "task" && method === "tools/call") return result;',
       );
-    // The inner Peri MCP server (rmcp 3.5.1) omits `resultType` on custom
+    // The inner Peri MCP server omits `resultType` on custom
     // methods such as `skills/list`. A 2026 client must accept what the server
     // sent and let the outer encode seam stamp `resultType`; rejecting here
     // would turn a transparent bridge into a filter.

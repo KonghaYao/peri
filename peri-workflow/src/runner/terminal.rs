@@ -4,10 +4,11 @@ use peri_js_runtime::JsExecutionHost;
 use tokio::sync::watch;
 use tracing::warn;
 
-use super::{WorkflowInput, WorkflowResult};
 use crate::error::WorkflowError;
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
+use crate::runner::WorkflowInput;
+use crate::runner::WorkflowResult;
 
 fn public_workflow_error(error: &str) -> String {
     peri_acp_types::session::bounded_error_message(error, 2_000)
@@ -32,6 +33,7 @@ fn persist_failed_state(
         acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
         post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
         delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+        outcome: peri_acp_types::workflow::WorkflowOutcome::Failed,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         budget_total: input.budget_total,
@@ -53,7 +55,7 @@ pub(super) fn project_postcondition(
     execution_status: &str,
     acceptance_status: peri_acp_types::workflow::AcceptanceStatus,
     write_intent: Option<&peri_acp_types::workflow::WorkflowWriteIntent>,
-    verification: Option<&Result<(), String>>,
+    verification: Option<&Result<(), crate::journal::PostconditionFailure>>,
 ) -> (
     peri_acp_types::workflow::PostProcessingStatus,
     peri_acp_types::workflow::DeliveryStatus,
@@ -63,6 +65,8 @@ pub(super) fn project_postcondition(
     };
 
     let post_processing = match (write_intent, verification) {
+        // 未声明写范围时观察到变化：无法归因给本 run，只能是 blocked，不升级为 failed。
+        (_, Some(Err(failure))) if !failure.is_violation() => PostProcessingStatus::Blocked,
         (_, Some(Err(_))) => PostProcessingStatus::Failed,
         (Some(WorkflowWriteIntent::ReadOnly), Some(Ok(()))) => PostProcessingStatus::NotRequired,
         (Some(WorkflowWriteIntent::Write { .. }), Some(Ok(()))) => PostProcessingStatus::Passed,
@@ -108,6 +112,18 @@ pub(super) fn send_failure(
     }));
 }
 
+/// failed 终态必须带有可读错误：引擎 `workflow/done` 偶尔只给 status。
+pub(super) fn ensure_failure_error(result: &mut WorkflowResult) {
+    if result.status == "failed"
+        && result
+            .error
+            .as_deref()
+            .is_none_or(|error| error.trim().is_empty())
+    {
+        result.error = Some("workflow failed without error details".to_string());
+    }
+}
+
 pub(super) fn finalize_workflow(
     mut final_result: WorkflowResult,
     input: &WorkflowInput,
@@ -130,14 +146,33 @@ pub(super) fn finalize_workflow(
         input.write_intent.as_ref(),
         postcondition.as_ref(),
     );
-    if let Some(Err(error)) = postcondition {
-        let error = format!("Git postcondition failed: {error}");
+    if let Some(Err(failure)) = postcondition {
+        let error = format!(
+            "Git postcondition {}: {failure}",
+            if failure.is_violation() {
+                "failed"
+            } else {
+                "blocked"
+            }
+        );
         final_result.error = Some(match final_result.error.take() {
             Some(existing) => format!("{existing}; {error}"),
             None => error,
         });
     }
+    ensure_failure_error(&mut final_result);
     final_result.error = final_result.error.as_deref().map(public_workflow_error);
+
+    let execution_status = match final_result.status.as_str() {
+        "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
+        "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
+        _ => peri_acp_types::workflow::ExecutionStatus::Failed,
+    };
+    let outcome = peri_acp_types::workflow::WorkflowOutcome::project(
+        execution_status,
+        acceptance_status,
+        final_result.delivery_status,
+    );
 
     // Write state.json
     let stderr_tail = public_stderr_summary(host.stderr_tail());
@@ -145,14 +180,11 @@ pub(super) fn finalize_workflow(
         run_id: final_result.run_id.clone(),
         workflow_name: input.workflow_name.clone(),
         status: final_result.status.clone(),
-        execution_status: match final_result.status.as_str() {
-            "completed" => peri_acp_types::workflow::ExecutionStatus::Completed,
-            "killed" => peri_acp_types::workflow::ExecutionStatus::Killed,
-            _ => peri_acp_types::workflow::ExecutionStatus::Failed,
-        },
-        acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
+        execution_status,
+        acceptance_status,
         post_processing_status: final_result.post_processing_status,
         delivery_status: final_result.delivery_status,
+        outcome,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         budget_total: input.budget_total,
@@ -210,11 +242,11 @@ pub(super) fn finalize_workflow(
 /// Cancellation has one projection for both startup and an active message loop.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn send_killed(
-    done: &tokio::sync::watch::Sender<Option<super::WorkflowResult>>,
+    done: &tokio::sync::watch::Sender<Option<crate::runner::WorkflowResult>>,
     journal: &crate::journal::WorkflowJournalStore,
     progress: &crate::progress::WorkflowProgressStore,
     run_id: &str,
-    input: &super::WorkflowInput,
+    input: &crate::runner::WorkflowInput,
     started_at: &str,
     stderr_tail: Option<String>,
 ) {
@@ -227,6 +259,7 @@ pub(super) fn send_killed(
         acceptance_status: peri_acp_types::workflow::AcceptanceStatus::Unknown,
         post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
         delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
+        outcome: peri_acp_types::workflow::WorkflowOutcome::Killed,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         budget_total: input.budget_total,
@@ -249,7 +282,7 @@ pub(super) fn send_killed(
         peri_acp_types::workflow::PostProcessingStatus::Blocked,
         peri_acp_types::workflow::DeliveryStatus::Blocked,
     );
-    let _ = done.send(Some(super::WorkflowResult {
+    let _ = done.send(Some(crate::runner::WorkflowResult {
         run_id: run_id.into(),
         status: "killed".into(),
         return_value: None,

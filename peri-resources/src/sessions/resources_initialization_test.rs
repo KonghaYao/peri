@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    Fixture, FrozenSnapshotBytes, FrozenState, ResolvedWorkspace, SessionResourceErrorKind,
+};
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::workspace::WorkspaceError;
 
 /// [回归测试] 诊断快照变化不破坏创建准入；真正的归属差异仍然失败。
 #[tokio::test]
@@ -151,7 +156,7 @@ async fn test_commit_frozen_is_write_once_and_blocks_abandon() {
     let other = FrozenSnapshotBytes::new(r#"{"v":1,"id":"second-write"}"#);
     let error = initialization.commit_frozen(&other).await.unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
     assert_eq!(
@@ -162,7 +167,7 @@ async fn test_commit_frozen_is_write_once_and_blocks_abandon() {
     // 已提交的草稿不是「未发布创建」：撤销必须拒绝，且一条行都不删。
     let error = initialization.clone().abandon().await.unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
     assert_eq!(fixture.count_threads(&id).await, 1);
@@ -231,7 +236,7 @@ async fn test_crash_after_commit_preserves_snapshot_and_refuses_draft_cleanup() 
         .await
         .unwrap_err();
     assert!(matches!(
-        error_kind(&error),
+        super::error_kind(&error),
         SessionResourceErrorKind::Conflict { .. }
     ));
     assert_eq!(fixture.count_threads(&id).await, 1);
@@ -266,7 +271,7 @@ async fn test_discard_refuses_a_session_without_binding() {
         .unwrap_err();
     assert!(
         matches!(
-            error_kind(&error),
+            super::error_kind(&error),
             SessionResourceErrorKind::Conflict { .. }
         ),
         "unexpected refusal: {error:?}"

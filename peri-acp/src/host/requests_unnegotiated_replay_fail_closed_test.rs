@@ -1,4 +1,10 @@
-use super::*;
+use crate::dispatch::session_replay::REPLAY_SEGMENT_BYTE_BUDGET;
+use crate::dispatch::session_replay::REPLAY_SEGMENT_ROWS;
+use crate::host::requests::tests::unnegotiated_replay_tests::ReplayFixture;
+use crate::host::requests::tests::unnegotiated_replay_tests::SpyMode;
+use peri_acp_types::messages::BaseMessage;
+
+use peri_acp_types::PeriCaps;
 
 /// 有界证据：段读取被多次调用，**没有任何一次返回全量**，且未协商路径不调用全量读取。
 #[tokio::test]
@@ -124,13 +130,20 @@ async fn streamed_canonical_replay_falls_back_to_the_full_read_when_the_segment_
         ])
         .await;
     let canonical = fixture.canonical().await;
-    fixture.archive(&payload_ids(&canonical)[..2]).await;
+    fixture
+        .archive(
+            &crate::host::requests::tests::unnegotiated_replay_tests::payload_ids(&canonical)[..2],
+        )
+        .await;
     fixture.set_caps(PeriCaps::default());
     fixture.reset_reads();
 
     fixture.load_unnegotiated().await.unwrap();
 
-    let expected: Vec<String> = canonical.iter().map(payload_text).collect();
+    let expected: Vec<String> = canonical
+        .iter()
+        .map(crate::host::requests::tests::unnegotiated_replay_tests::payload_text)
+        .collect();
     assert_eq!(fixture.texts(), expected, "回退同样交付完整 canonical 历史");
     let calls = fixture.spy.segment_calls();
     assert_eq!(calls.len(), 1, "回退只发生在首段之前");

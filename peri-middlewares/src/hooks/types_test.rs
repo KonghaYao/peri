@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    HookDecision, HookEvent, HookInput, HookSpecificOutput, HookType, HooksConfig,
+    PermissionDecision, SyncHookResponse,
+};
 
 #[test]
 fn test_hooktype_deser_command() {
@@ -44,7 +47,7 @@ fn test_hooktype_deser_agent() {
 fn test_hooktype_deser_with_condition() {
     let json = r#"{"type": "command", "command": "echo check", "if": "Bash(git commit)"}"#;
     let hook: HookType = serde_json::from_str(json).unwrap();
-    assert_eq!(hook.get_condition(), Some(&"Bash(git commit)".to_string()));
+    assert_eq!(hook.condition(), Some(&"Bash(git commit)".to_string()));
 }
 
 #[test]
@@ -141,7 +144,7 @@ fn test_hooktype_getter_methods() {
         r#"{"type": "command", "command": "echo", "once": true, "matcher": "Bash"}"#,
     )
     .unwrap();
-    assert_eq!(hook.get_matcher(), Some(&"Bash".to_string()));
+    assert_eq!(hook.matcher(), Some(&"Bash".to_string()));
     assert!(hook.is_once());
     assert!(!hook.is_async());
 }

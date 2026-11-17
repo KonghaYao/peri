@@ -1,8 +1,64 @@
 //! 门面契约的不变量测试：三个独立事实、效果确定性、定向更新语义。
 
-use super::*;
+#[cfg(test)]
+use crate::history_page::HistoryForwardCursor;
+#[cfg(test)]
+use crate::messages::MessageId;
+use crate::session_resources::child_resume_claim::ChildResumeClaim;
+use crate::session_resources::history::RewindBoundary;
+use crate::session_resources::history::RewindOutcome;
+use crate::session_resources::history_window::HistoryWindowPagePlan;
+use crate::session_resources::history_window::HistoryWindowReadIntent;
+use crate::session_resources::history_window::HistoryWindowTailExpectation;
+use crate::session_resources::metadata::AccessMode;
+use crate::session_resources::metadata::BindingRecheck;
+use crate::session_resources::metadata::BindingState;
+use crate::session_resources::metadata::ChildSnapshot;
+use crate::session_resources::metadata::DataCapabilities;
+use crate::session_resources::metadata::ExecutionAvailability;
+use crate::session_resources::metadata::ForkSnapshot;
+use crate::session_resources::metadata::FrozenSnapshotBytes;
+use crate::session_resources::metadata::MutationOutcome;
+use crate::session_resources::metadata::NewSession;
+use crate::session_resources::metadata::NewSessionDraft;
+use crate::session_resources::metadata::PersistenceRecovery;
+use crate::session_resources::metadata::SessionAvailability;
+use crate::session_resources::metadata::SessionMetaPatch;
+use crate::session_resources::metadata::SessionSnapshot;
+use crate::session_resources::session_initialization::SessionInitialization;
+use crate::session_resources::session_resource_error::CloseSettlement;
+use crate::session_resources::session_resource_error::SessionResourceError;
+use crate::session_resources::session_resource_error::SessionResourceErrorKind;
+use crate::session_resources::session_resource_error::SessionResourceResult;
+use crate::session_resources::session_resources::SessionResources;
+#[cfg(test)]
+use crate::store::CompactionChange;
+#[cfg(test)]
+use crate::store::MessageFlags;
+#[cfg(test)]
+use crate::store::PersistedPayload;
+#[cfg(test)]
+use crate::system_reminder::TrustedSystemReminder;
+#[cfg(test)]
+use crate::thread::AgentStatus;
+#[cfg(test)]
+use crate::thread::ThreadMeta;
+#[cfg(test)]
+use crate::thread::WorkState;
 use crate::thread::{CancelPolicy, ThreadId};
+#[cfg(test)]
+use crate::workspace::ResolvedWorkspace;
+#[cfg(test)]
+use crate::workspace::ScopedThreadPage;
+#[cfg(test)]
+use crate::workspace::ScopedThreadQuery;
 use crate::workspace::WorkspaceError;
+#[cfg(test)]
+use async_trait::async_trait;
+#[cfg(test)]
+use std::path::Path;
+#[cfg(test)]
+use std::sync::Arc;
 
 fn thread_id() -> ThreadId {
     ThreadId::from("0197f3f0-0000-7000-8000-000000000001".to_string())

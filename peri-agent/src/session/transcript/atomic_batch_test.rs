@@ -1,12 +1,15 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use futures::poll;
 use parking_lot::RwLock;
 
-use super::*;
+use crate::messages::BaseMessage;
 use crate::messages::{ContentBlock, MessageContent, ToolCallRequest};
 use crate::session::test_resources::mock::{MockSessionResources, ResumeLoadGate};
 use crate::session::test_resources::TestSession;
+use crate::session::transcript::MessageTranscript;
+use peri_acp_types::store::PersistedPayload;
 
 fn exchange(image_count: usize, data_chars: usize) -> Vec<BaseMessage> {
     let calls: Vec<_> = (0..image_count)
@@ -34,11 +37,15 @@ fn gated_transcript() -> (
     let store = MockSessionResources::new();
     let (entered, enter) = tokio::sync::oneshot::channel();
     let (release, wait) = tokio::sync::oneshot::channel();
-    *store.append_gate.lock().unwrap() = Some(ResumeLoadGate {
-        entered,
-        release: wait,
-        dropped: Arc::new(AtomicBool::new(false)),
-    });
+    *store
+        .append_gate
+        .lock()
+        .expect("store append gate mutex must remain unpoisoned throughout the test") =
+        Some(ResumeLoadGate {
+            entered,
+            release: wait,
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
     let transcript = Arc::new(RwLock::new(
         MessageTranscript::new().with_persistence(store.clone(), "atomic-exchange".to_owned()),
     ));
@@ -46,8 +53,13 @@ fn gated_transcript() -> (
 }
 
 async fn flush(transcript: &Arc<RwLock<MessageTranscript>>) {
-    let writer = transcript.read().persist_tx_handle().unwrap();
-    MessageTranscript::flush_via_tx(&writer).await.unwrap();
+    let writer = transcript
+        .read()
+        .persist_tx_handle()
+        .expect("the persist tx handle fixture result is required for this assertion");
+    MessageTranscript::flush_via_tx(&writer)
+        .await
+        .expect("the flush via tx fixture result is required for this assertion");
 }
 
 /// [回归测试] 同批两个或九个图片结果超过普通积压预算，仍须整批落库且可冷加载。
@@ -63,12 +75,12 @@ async fn test_atomic_exchange_large_images_are_durable_and_complete() {
         let ids: Vec<_> = messages.iter().map(BaseMessage::id).collect();
         MessageTranscript::commit_tool_exchange(&transcript, messages)
             .await
-            .unwrap();
+            .expect("the commit tool exchange fixture result is required for this assertion");
         let loaded = session
             .resources()
             .load_session_snapshot(&session.thread_id)
             .await
-            .unwrap();
+            .expect("the load session snapshot fixture result is required for this assertion");
         assert_eq!(
             loaded
                 .payloads
@@ -78,8 +90,12 @@ async fn test_atomic_exchange_large_images_are_durable_and_complete() {
             ids
         );
         assert_eq!(transcript.read().len(), count + 1);
-        for payload in loaded.payloads.iter().skip(1) {
-            let MessageContent::Blocks(blocks) = payload.as_message().unwrap().message_content()
+        let payload_items = loaded.payloads.iter().skip(1);
+        for payload in payload_items {
+            let MessageContent::Blocks(blocks) = payload
+                .as_message()
+                .expect("the as message fixture result is required for this assertion")
+                .message_content()
             else {
                 panic!("图片结果必须保留多模态内容");
             };
@@ -95,7 +111,7 @@ async fn test_atomic_exchange_large_images_are_durable_and_complete() {
             transcript
                 .read()
                 .persistence_budget()
-                .unwrap()
+                .expect("the persistence budget fixture result is required for this assertion")
                 .outstanding(),
             (0, 0)
         );
@@ -108,11 +124,11 @@ async fn test_atomic_exchange_drains_existing_byte_backlog_first() {
     let store = MockSessionResources::new();
     let prefix = BaseMessage::human("older pending message");
     let prefix_id = prefix.id();
-    let bytes = super::super::persistence::Reservation::for_payload(&PersistedPayload::Message(
-        prefix.clone(),
-    ))
+    let bytes = crate::session::transcript::persistence::Reservation::for_payload(
+        &PersistedPayload::Message(prefix.clone()),
+    )
     .bytes;
-    let budget = super::super::persistence::PersistenceBudget::new(1, bytes);
+    let budget = crate::session::transcript::persistence::PersistenceBudget::new(1, bytes);
     let mut current = MessageTranscript::new().with_persistence_budget(
         store.clone(),
         "ordered-exchange".to_owned(),
@@ -123,7 +139,7 @@ async fn test_atomic_exchange_drains_existing_byte_backlog_first() {
     let transcript = Arc::new(RwLock::new(current));
     MessageTranscript::commit_tool_exchange(&transcript, exchange(2, bytes))
         .await
-        .unwrap();
+        .expect("the commit tool exchange fixture result is required for this assertion");
     assert_eq!(store.append_calls(), 2, "旧积压与不可分交换各提交一次");
     assert_eq!(store.payloads()[0].id(), prefix_id);
     assert_eq!(store.payloads().len(), 4);
@@ -139,14 +155,20 @@ async fn test_atomic_exchange_waits_for_store_and_limits_concurrent_batches() {
         exchange(2, 8),
     ));
     assert!(poll!(commit.as_mut()).is_pending());
-    entered.await.unwrap();
+    entered
+        .await
+        .expect("the entered fixture result is required for this assertion");
     assert!(transcript.read().is_empty(), "确认前不能发布部分 canonical");
     let error = MessageTranscript::commit_tool_exchange(&transcript, exchange(1, 8))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("already pending"));
-    release.send(()).unwrap();
-    commit.await.unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
+    commit
+        .await
+        .expect("the commit fixture result is required for this assertion");
     assert_eq!(store.append_calls(), 1);
     assert_eq!(store.payloads().len(), 3);
     assert_eq!(transcript.read().len(), 3);
@@ -161,9 +183,13 @@ async fn test_atomic_exchange_caller_drop_keeps_owned_write_and_requires_reload(
         exchange(2, 8),
     ));
     assert!(poll!(commit.as_mut()).is_pending());
-    entered.await.unwrap();
+    entered
+        .await
+        .expect("the entered fixture result is required for this assertion");
     drop(commit);
-    release.send(()).unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
     flush(&transcript).await;
     assert_eq!(
         store.payloads().len(),
@@ -189,9 +215,13 @@ async fn test_atomic_exchange_drop_during_prior_flush_preserves_fifo_completion(
         exchange(2, 8),
     ));
     assert!(poll!(commit.as_mut()).is_pending());
-    entered.await.unwrap();
+    entered
+        .await
+        .expect("the entered fixture result is required for this assertion");
     drop(commit);
-    release.send(()).unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
     flush(&transcript).await;
     assert_eq!(store.payloads().len(), 4);
     assert_eq!(store.payloads()[0].id(), prefix_id);
@@ -208,8 +238,12 @@ async fn test_atomic_exchange_drop_after_ack_keeps_unconfirmed_view_invalid() {
         exchange(2, 8),
     ));
     assert!(poll!(commit.as_mut()).is_pending());
-    entered.await.unwrap();
-    release.send(()).unwrap();
+    entered
+        .await
+        .expect("the entered fixture result is required for this assertion");
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
     flush(&transcript).await;
     drop(commit);
     assert_eq!(store.payloads().len(), 3);
@@ -225,11 +259,18 @@ async fn test_atomic_exchange_shutdown_waits_behind_the_owned_transaction() {
         exchange(2, 8),
     ));
     assert!(poll!(commit.as_mut()).is_pending());
-    entered.await.unwrap();
-    let writer = transcript.read().persist_tx_handle().unwrap();
+    entered
+        .await
+        .expect("the entered fixture result is required for this assertion");
+    let writer = transcript
+        .read()
+        .persist_tx_handle()
+        .expect("the persist tx handle fixture result is required for this assertion");
     transcript.read().shutdown_persistence();
     drop(commit);
-    release.send(()).unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
     writer.closed().await;
     assert_eq!(store.payloads().len(), 3);
     assert!(transcript.read().compaction_commit_state().is_uncertain());
@@ -243,11 +284,15 @@ async fn test_atomic_exchange_revision_change_rejects_hot_publication() {
         exchange(2, 8),
     ));
     assert!(poll!(commit.as_mut()).is_pending());
-    entered.await.unwrap();
+    entered
+        .await
+        .expect("the entered fixture result is required for this assertion");
     let later = BaseMessage::human("concurrent append");
     let later_id = later.id();
     transcript.write().append(later);
-    release.send(()).unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
     let error = commit.await.unwrap_err();
     assert!(error.to_string().contains("changed during exchange commit"));
     flush(&transcript).await;
@@ -280,7 +325,7 @@ async fn test_atomic_exchange_store_failure_preserves_canonical_and_surfaces_err
         .resources()
         .load_session_snapshot(&session.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(loaded.payloads.is_empty());
 }
 
@@ -309,7 +354,7 @@ async fn test_atomic_exchange_preserves_a_previous_full_compact_receipt() {
     let transcript = Arc::new(RwLock::new(current));
     MessageTranscript::commit_tool_exchange(&transcript, exchange(1, 8))
         .await
-        .unwrap();
+        .expect("the commit tool exchange fixture result is required for this assertion");
     assert_eq!(store.payloads().len(), 2);
     assert!(transcript.read().compaction_commit_state().has_committed());
     assert!(!transcript.read().compaction_commit_state().is_uncertain());

@@ -2,11 +2,12 @@
 
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::ComponentDrawer;
-use ratatui_kit::ratatui::{
-    layout::Rect,
-    style::{Modifier, Style},
-    widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState},
-};
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::widgets::Scrollbar;
+use ratatui_kit::ratatui::widgets::ScrollbarOrientation;
+use ratatui_kit::ratatui::widgets::ScrollbarState;
 
 pub(crate) fn draw_scrollbar(
     drawer: &mut ComponentDrawer,

@@ -2,15 +2,12 @@
 #![cfg(unix)]
 
 use serde_json::{Value, json};
-use std::{
-    path::Path,
-    process::Stdio,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
@@ -21,31 +18,39 @@ async fn read_request(socket: &mut TcpStream) -> Value {
     let mut bytes = Vec::new();
     let (body_start, body_len) = loop {
         let mut chunk = [0; 4096];
-        let count = socket.read(&mut chunk).await.unwrap();
+        let count = socket
+            .read(&mut chunk)
+            .await
+            .expect("read request: fixture task and request must complete successfully");
         assert_ne!(count, 0, "provider 请求不应提前结束");
         bytes.extend_from_slice(&chunk[..count]);
         if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-            let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+            let headers = std::str::from_utf8(&bytes[..end])
+                .expect("read request: fixture paths and protocol text must be valid UTF-8");
             assert!(headers.starts_with("POST /v1/messages "));
             let length = headers
                 .lines()
                 .filter_map(|line| line.split_once(':'))
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .unwrap()
+                .expect("read request: fixture must contain the searched item")
                 .1
                 .trim()
                 .parse::<usize>()
-                .unwrap();
+                .expect("read request: fixture must contain the searched item");
             break (end + 4, length);
         }
     };
     while bytes.len() < body_start + body_len {
         let mut chunk = [0; 4096];
-        let count = socket.read(&mut chunk).await.unwrap();
+        let count = socket
+            .read(&mut chunk)
+            .await
+            .expect("read request: fixture task and request must complete successfully");
         assert_ne!(count, 0, "provider 请求 body 不应被截断");
         bytes.extend_from_slice(&chunk[..count]);
     }
-    serde_json::from_slice(&bytes[body_start..body_start + body_len]).unwrap()
+    serde_json::from_slice(&bytes[body_start..body_start + body_len])
+        .expect("read request: fixture JSON must match the expected schema")
 }
 
 async fn respond(socket: &mut TcpStream, tool: Option<(&str, &str, Value)>, text: &str) {
@@ -85,15 +90,20 @@ async fn respond(socket: &mut TcpStream, tool: Option<(&str, &str, Value)>, text
     socket
         .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
         .await
-        .unwrap();
-    socket.shutdown().await.unwrap();
+        .expect("respond: fixture task and request must complete successfully");
+    socket
+        .shutdown()
+        .await
+        .expect("respond: fixture task and request must complete successfully");
 }
 
 fn install_integrations(root: &Path) {
     let claude = root.join(".claude");
     let plugin = claude.join("plugins/cache/fixture/blocked/1.0.0");
-    std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
-    std::fs::create_dir_all(root.join(".peri")).unwrap();
+    std::fs::create_dir_all(plugin.join(".claude-plugin"))
+        .expect("install integrations: isolated fixture workspace must remain accessible");
+    std::fs::create_dir_all(root.join(".peri"))
+        .expect("install integrations: isolated fixture workspace must remain accessible");
     // 非法插件 MCP 必须根本不加载，否则普通初始化会 fail closed。
     std::fs::write(
         plugin.join(".claude-plugin/plugin.json"),
@@ -102,22 +112,22 @@ fn install_integrations(root: &Path) {
         })
         .to_string(),
     )
-    .unwrap();
+    .expect("install integrations: isolated fixture workspace must remain accessible");
     std::fs::write(claude.join("plugins/installed_plugins.json"), json!({
         "version":2, "plugins":[{"id":"blocked@fixture", "name":"blocked", "version":"1.0.0", "marketplace":"fixture", "install_path":plugin, "scope":"User", "origin":"PeriInstalled"}]
-    }).to_string()).unwrap();
+    }).to_string()).expect("install integrations: isolated fixture workspace must remain accessible");
     let hooks = json!({"SessionStart":[{"hooks":[{"type":"command", "command":"touch unexpected-hook"}]}], "PreToolUse":[{"matcher":"*", "hooks":[{"type":"command", "command":"touch unexpected-hook"}]}]});
     std::fs::write(
         claude.join("settings.json"),
         json!({"enabledPlugins":["blocked@fixture"], "hooks":hooks}).to_string(),
     )
-    .unwrap();
+    .expect("install integrations: isolated fixture workspace must remain accessible");
     std::fs::write(
         root.join(".mcp.json"),
         json!({"mcpServers":{"external":{"command":"sh", "args":["-c", "touch unexpected-mcp"]}}})
             .to_string(),
     )
-    .unwrap();
+    .expect("install integrations: isolated fixture workspace must remain accessible");
     std::fs::write(
         root.join(".peri/settings.json"),
         json!({
@@ -125,22 +135,33 @@ fn install_integrations(root: &Path) {
         })
         .to_string(),
     )
-    .unwrap();
+    .expect("install integrations: isolated fixture workspace must remain accessible");
 }
 
 async fn run_bare(builtins_disabled: bool) {
-    let fixture = tempfile::tempdir().unwrap();
-    let root = fixture.path().canonicalize().unwrap();
+    let fixture =
+        tempfile::tempdir().expect("run bare: isolated fixture workspace must remain accessible");
+    let root = fixture
+        .path()
+        .canonicalize()
+        .expect("run bare: isolated fixture workspace must remain accessible");
     install_integrations(&root);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("run bare: fixture task and request must complete successfully");
+    let address = listener
+        .local_addr()
+        .expect("run bare: the fixture listener must expose its bound local address");
     let settings = root.join("settings.json");
-    std::fs::write(&settings, json!({"config":{"providers":[{"id":"fixture", "type":"anthropic", "apiKey":"test-only", "baseUrl":format!("http://{address}"), "models":{"opus":"fixture-model"}}]}}).to_string()).unwrap();
+    std::fs::write(&settings, json!({"config":{"providers":[{"id":"fixture", "type":"anthropic", "apiKey":"test-only", "baseUrl":format!("http://{address}"), "models":{"opus":"fixture-model"}}]}}).to_string()).expect("run bare: isolated fixture workspace must remain accessible");
     let calls = Arc::new(AtomicUsize::new(0));
     let served = Arc::clone(&calls);
     let provider = tokio::spawn(async move {
         loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("run bare: fixture task and request must complete successfully");
             let request = read_request(&mut socket).await;
             if request.to_string().contains("<prediction_directive>")
                 || request["tools"].as_array().is_none_or(Vec::is_empty)
@@ -148,7 +169,9 @@ async fn run_bare(builtins_disabled: bool) {
                 respond(&mut socket, None, "").await;
                 continue;
             }
-            let tools = request["tools"].as_array().unwrap();
+            let tools = request["tools"]
+                .as_array()
+                .expect("run bare: fixture must have the expected variant");
             let workspace_names = [
                 "Read",
                 "Write",
@@ -191,7 +214,7 @@ async fn run_bare(builtins_disabled: bool) {
             let result = |id: &str| {
                 request["messages"]
                     .as_array()
-                    .unwrap()
+                    .expect("run bare: fixture must have the expected variant")
                     .iter()
                     .filter_map(|message| message["content"].as_array())
                     .flatten()
@@ -260,7 +283,10 @@ async fn run_bare(builtins_disabled: bool) {
     }
     let result = tokio::time::timeout(
         Duration::from_secs(25),
-        command.spawn().unwrap().wait_with_output(),
+        command
+            .spawn()
+            .expect("run bare: isolated fixture workspace must remain accessible")
+            .wait_with_output(),
     )
     .await;
     provider.abort();
@@ -271,7 +297,9 @@ async fn run_bare(builtins_disabled: bool) {
             .is_err_and(|error| error.is_panic()),
         "provider 验证失败: {provider_result:?}"
     );
-    let output = result.expect("bare CLI 必须自行退出").unwrap();
+    let output = result
+        .expect("bare CLI 必须自行退出")
+        .expect("run bare: the fixture operation must finish without an inner failure");
     assert!(
         output.status.success(),
         "{}",
@@ -283,7 +311,9 @@ async fn run_bare(builtins_disabled: bool) {
     );
     if !builtins_disabled {
         assert_eq!(
-            std::fs::read_to_string(root.join("roundtrip.txt")).unwrap(),
+            std::fs::read_to_string(root.join("roundtrip.txt")).expect(
+                "run bare: the fixture storage and layout must support the requested operation"
+            ),
             MARKER
         );
     }
@@ -297,9 +327,14 @@ async fn run_bare(builtins_disabled: bool) {
         .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_slice(line).unwrap())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .expect("run bare: fixture JSON must match the expected schema")
+        })
         .collect();
-    let final_event = events.last().unwrap();
+    let final_event = events
+        .last()
+        .expect("run bare: fixture collection must contain the expected item");
     assert_eq!(final_event["type"], "result");
     assert_eq!(final_event["status"], "completed");
     assert_eq!(final_event["is_error"], false);

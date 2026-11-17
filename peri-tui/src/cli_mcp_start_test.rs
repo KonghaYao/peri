@@ -1,31 +1,30 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use peri_acp_types::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES;
+use peri_middlewares::mcp::standalone::Target;
 
-use super::{Args, run};
+use super::{Args, display_path, resolve_options, run};
 
-#[test]
-fn instance_is_required() {
-    let error = run(&[]).unwrap_err().to_string();
-    assert!(error.contains("<INSTANCE>"), "{error}");
+fn parse(args: &[&str]) -> Args {
+    let mut argv = vec!["peri mcp-start"];
+    argv.extend_from_slice(args);
+    Args::try_parse_from(argv).unwrap()
+}
+
+fn write_mcp_file(dir: &Path, contents: &str) {
+    fs::write(dir.join(".mcp.json"), contents).unwrap();
+}
+
+fn workspace_arg(dir: &Path) -> &str {
+    dir.to_str().unwrap()
 }
 
 #[test]
-fn unknown_instance_is_rejected() {
-    let error = run(&[OsString::from("sandbox"), OsString::from("--stdio")])
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("unknown builtin MCP instance: sandbox"));
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
-        assert!(error.contains(name), "error should list {name}: {error}");
-    }
-}
-
-#[test]
-fn transport_is_required_and_exclusive() {
-    let missing = Args::try_parse_from(["peri mcp-start", "workspace"])
+fn instance_is_optional_but_transport_is_required() {
+    let missing = Args::try_parse_from(["peri mcp-start"])
         .unwrap_err()
         .to_string();
     assert!(missing.contains("--stdio"), "{missing}");
@@ -37,9 +36,20 @@ fn transport_is_required_and_exclusive() {
 }
 
 #[test]
+fn unknown_instance_is_rejected() {
+    let error = run(&[OsString::from("sandbox"), OsString::from("--stdio")])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown builtin MCP instance: sandbox"));
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES.iter() {
+        assert!(error.contains(name), "error should list {name}: {error}");
+    }
+}
+
+#[test]
 fn http_defaults_to_loopback_8765() {
-    let args = Args::try_parse_from(["peri mcp-start", "web", "--http"]).unwrap();
-    assert_eq!(args.instance, "web");
+    let args = parse(&["web", "--http"]);
+    assert_eq!(args.instance.as_deref(), Some("web"));
     assert!(args.http);
     assert!(!args.stdio);
     assert_eq!(args.host, "127.0.0.1");
@@ -49,8 +59,7 @@ fn http_defaults_to_loopback_8765() {
 
 #[test]
 fn http_accepts_host_port_and_workspace() {
-    let args = Args::try_parse_from([
-        "peri mcp-start",
+    let args = parse(&[
         "artifact",
         "--http",
         "--host",
@@ -59,8 +68,7 @@ fn http_accepts_host_port_and_workspace() {
         "9000",
         "--workspace",
         "/tmp/project",
-    ])
-    .unwrap();
+    ]);
     assert_eq!(args.host, "0.0.0.0");
     assert_eq!(args.port, 9000);
     assert_eq!(args.workspace, Some(PathBuf::from("/tmp/project")));
@@ -68,16 +76,14 @@ fn http_accepts_host_port_and_workspace() {
 
 #[test]
 fn allowed_host_parses_repeatedly() {
-    let args = Args::try_parse_from([
-        "peri mcp-start",
+    let args = parse(&[
         "workspace",
         "--http",
         "--allowed-host",
         "sandbox.local",
         "--allowed-host",
         "sandbox.local:8765",
-    ])
-    .unwrap();
+    ]);
     assert_eq!(args.allowed_host, ["sandbox.local", "sandbox.local:8765"]);
 }
 
@@ -96,10 +102,338 @@ fn allowed_host_requires_http() {
 
 #[test]
 fn every_reserved_instance_parses() {
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
-        let args = Args::try_parse_from(["peri mcp-start", name, "--stdio"])
-            .unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert_eq!(args.instance, *name);
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES.iter() {
+        let args = parse(&[*name, "--stdio"]);
+        assert_eq!(args.instance.as_deref(), Some(*name));
         assert!(args.stdio);
     }
+}
+
+#[test]
+fn capability_flag_is_repeatable_and_comma_separated() {
+    let args = parse(&[
+        "--capability",
+        "web,cron",
+        "--capability",
+        "artifact",
+        "--stdio",
+    ]);
+    assert_eq!(args.capability, ["web,cron", "artifact"]);
+    assert_eq!(args.instance, None);
+}
+
+#[test]
+fn help_documents_capability_selection() {
+    let help = Args::try_parse_from(["peri mcp-start", "--help"])
+        .unwrap_err()
+        .to_string();
+    assert!(help.contains("--capability"), "{help}");
+    assert!(help.contains("all/none"), "{help}");
+    assert!(help.contains("x-peri.capabilities"), "{help}");
+    assert!(help.contains("Legacy compatibility"), "{help}");
+}
+
+#[test]
+fn instance_and_capability_are_mutually_exclusive() {
+    let error = resolve_options(parse(&["web", "--capability", "cron", "--stdio"]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("either a legacy instance argument or --capability"),
+        "{error}"
+    );
+}
+
+#[test]
+fn peri_positional_selects_the_single_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "peri",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target;
+    assert_eq!(capabilities.len(), 6, "{capabilities:?}");
+}
+
+#[test]
+fn peri_positional_accepts_capability_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "peri",
+        "--capability",
+        "web,cron",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["web".to_owned(), "cron".to_owned()])
+    );
+}
+
+#[test]
+fn legacy_instance_maps_to_the_single_exit_without_reading_mcp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mcp_file(dir.path(), "{not json");
+    let options = resolve_options(parse(&[
+        "web",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    assert_eq!(options.target, Target::Capabilities(vec!["web".to_owned()]));
+}
+
+#[test]
+fn every_legacy_instance_maps_to_its_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        let options = resolve_options(parse(&[
+            capability.legacy_instance,
+            "--stdio",
+            "--workspace",
+            workspace_arg(dir.path()),
+        ]))
+        .unwrap();
+        assert_eq!(
+            options.target,
+            Target::Capabilities(vec![capability.name.to_owned()]),
+            "{} must map to its capability",
+            capability.legacy_instance
+        );
+    }
+}
+
+#[test]
+fn capability_mode_reads_extension_from_mcp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mcp_file(
+        dir.path(),
+        r#"{"mcpServers":{"peri":{"x-peri":{"capabilities":["cron"]}}}}"#,
+    );
+    let options = resolve_options(parse(&[
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["cron".to_owned()])
+    );
+}
+
+#[test]
+fn cli_capability_overrides_mcp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mcp_file(
+        dir.path(),
+        r#"{"mcpServers":{"peri":{"x-peri":{"capabilities":["web"]}}}}"#,
+    );
+    let options = resolve_options(parse(&[
+        "--capability",
+        "cron",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["cron".to_owned()])
+    );
+}
+
+#[test]
+fn legacy_six_entries_map_to_caps_in_mcp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mcp_file(
+        dir.path(),
+        r#"{"mcpServers":{
+            "workspace":{"disabled":true},
+            "web":{"disabled":true},
+            "artifact":{"disabled":true},
+            "cron":{"disabled":true},
+            "monitor":{},
+            "workflow":{"disabled":true}
+        }}"#,
+    );
+    let options = resolve_options(parse(&[
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    assert_eq!(
+        options.target,
+        Target::Capabilities(vec!["monitor".to_owned()])
+    );
+}
+
+#[test]
+fn no_selection_defaults_to_all_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target;
+    for name in [
+        "workspace",
+        "web",
+        "artifact",
+        "cron",
+        "monitor",
+        "workflow",
+    ] {
+        assert!(
+            capabilities.iter().any(|capability| capability == name),
+            "missing {name}: {capabilities:?}"
+        );
+    }
+    assert_eq!(capabilities.len(), 6);
+}
+
+#[test]
+fn unknown_capability_is_a_load_error() {
+    let error = run(&[
+        OsString::from("--capability"),
+        OsString::from("sandbox"),
+        OsString::from("--stdio"),
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("unknown builtin MCP capability: `sandbox`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn duplicate_capability_is_a_load_error() {
+    let error = run(&[
+        OsString::from("--capability"),
+        OsString::from("web,web"),
+        OsString::from("--stdio"),
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("duplicate capability `web`"), "{error}");
+}
+
+#[test]
+fn all_is_parsed_as_every_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = resolve_options(parse(&[
+        "--capability",
+        "all",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target;
+    assert_eq!(capabilities.len(), 6);
+}
+
+#[test]
+fn none_is_an_empty_selection_error() {
+    let error = run(&[
+        OsString::from("--capability"),
+        OsString::from("none"),
+        OsString::from("--stdio"),
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("is empty"), "{error}");
+    assert!(error.contains("command line"), "{error}");
+}
+
+#[test]
+fn invalid_mcp_file_is_reported_with_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mcp_file(dir.path(), "{not json");
+    let error = resolve_options(parse(&[
+        "--capability",
+        "web",
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("invalid JSON in MCP config"), "{error}");
+    // The workspace is canonicalized, so compare against the canonical file and
+    // require the friendly rendering that hides the Windows `\\?\` prefix.
+    let expected = fs::canonicalize(dir.path().join(".mcp.json")).unwrap();
+    assert!(error.contains(&display_path(&expected)), "{error}");
+    assert!(error.contains(".mcp.json"), "{error}");
+    assert!(!error.contains(r"\\?\"), "{error}");
+}
+
+#[test]
+fn display_path_strips_windows_verbatim_prefix() {
+    assert_eq!(
+        display_path(Path::new(r"\\?\C:\workspace\.mcp.json")),
+        r"C:\workspace\.mcp.json"
+    );
+    assert_eq!(
+        display_path(Path::new(r"\\?\UNC\server\share\.mcp.json")),
+        r"\\server\share\.mcp.json"
+    );
+    assert_eq!(
+        display_path(Path::new(r"C:\workspace\.mcp.json")),
+        r"C:\workspace\.mcp.json"
+    );
+}
+
+#[test]
+fn misplaced_capabilities_and_legacy_overrides_are_typed_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mcp_file(dir.path(), r#"{"capabilities":["web"]}"#);
+    let error = resolve_options(parse(&[
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("not a Peri capability selector"),
+        "{message}"
+    );
+
+    write_mcp_file(dir.path(), r#"{"mcpServers":{"web":{"command":"npx"}}}"#);
+    let error = resolve_options(parse(&[
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("must not declare command/url"),
+        "{message}"
+    );
+
+    // 旧 MetaHarness 能力键保留为确定性映射 adapter（#409 §8.6）：standalone
+    // 仍把它当能力开关，不能 silent no-op。
+    write_mcp_file(dir.path(), r#"{"meta_harness":{"WebMiddleware":false}}"#);
+    let options = resolve_options(parse(&[
+        "--stdio",
+        "--workspace",
+        workspace_arg(dir.path()),
+    ]))
+    .unwrap();
+    let Target::Capabilities(capabilities) = options.target;
+    assert_eq!(capabilities.len(), 5, "{capabilities:?}");
+    assert!(!capabilities.iter().any(|name| name == "web"));
 }

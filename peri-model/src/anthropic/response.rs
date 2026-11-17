@@ -31,7 +31,7 @@ fn decode_completed_response_inner(
     let usage = value.get("usage").map(decode_usage).transpose()?;
     let request_id =
         request_id.or_else(|| value.get("id").and_then(Value::as_str).map(str::to_owned));
-    ModelResponse::new(
+    ModelResponse::try_new(
         ModelMessage::assistant(content, tool_calls),
         stop_reason,
         usage,

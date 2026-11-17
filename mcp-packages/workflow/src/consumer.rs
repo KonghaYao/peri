@@ -1,38 +1,45 @@
 //! Host consumer commands use tools/call and the same authenticated MCP boundary as backfill.
-use super::*;
+use super::json;
+use super::AgentRunResult;
+use super::DispatchOutcome;
+use super::RequestMetaObject;
+use super::Tool;
+use super::Value;
+use super::WorkflowMcpServer;
+use super::WorkflowTaskState;
 
 pub(super) fn tools() -> Vec<Tool> {
     vec![
         Tool::new(
             "WorkflowAgentClaim",
             "Host-only: atomically claim one agent task; retry with the same claimId.",
-            schema_of(json!({
+            super::schema_of(json!({
                 "type":"object", "properties":{"runId":{"type":"string"},"taskId":{"type":"string"},"claimId":{"type":"string"}},"required":["runId","taskId","claimId"]
             })),
         ),
         Tool::new(
             "WorkflowConsumerReady",
             "Host-only: declare consumer readiness after reading a subscribed baseline.",
-            schema_of(json!({
+            super::schema_of(json!({
                 "type":"object", "properties":{"ready":{"type":"boolean"}},"required":["ready"]
             })),
         ),
         Tool::new(
             "WorkflowCompletionAck",
             "Host-only: confirm accepted terminal delivery.",
-            schema_of(json!({
+            super::schema_of(json!({
                 "type":"object", "properties":{"runId":{"type":"string"}},"required":["runId"]
             })),
         ),
         Tool::new(
             "WorkflowClose",
             "Host-only: close admissions and drain instance-owned executions.",
-            schema_of(json!({"type":"object","properties":{}})),
+            super::schema_of(json!({"type":"object","properties":{}})),
         ),
         Tool::new(
             "WorkflowTaskObserved",
             "Host-only: confirm a run is registered in the consumer task projection.",
-            schema_of(
+            super::schema_of(
                 json!({"type":"object","properties":{"runId":{"type":"string"}},"required":["runId"]}),
             ),
         ),
@@ -59,18 +66,24 @@ impl WorkflowMcpServer {
                 if !ready {
                     // Subscription loss cancels local executors before withdrawing
                     // readiness. Settle their abandoned claims through the owner.
-                    for task in runtime.tasks().active() {
-                        if task.state == WorkflowTaskState::Executing {
-                            runtime.settle_agent_task(
-                                &task.run_id,
-                                &task.task_id,
-                                WorkflowTaskState::Cancelled,
-                                Some(AgentRunResult::Dead {
-                                    reason: Some("consumer disconnected".into()),
-                                    detail: None,
-                                }),
-                                Some("consumer disconnected".into()),
-                            );
+                    {
+                        let iterated_runtime = runtime.tasks().active();
+                        for task in iterated_runtime {
+                            if task.state == WorkflowTaskState::Executing {
+                                runtime.settle_agent_task(
+                                    &task.run_id,
+                                    &task.task_id,
+                                    WorkflowTaskState::Cancelled,
+                                    Some(AgentRunResult::Dead {
+                                        scope_close_incomplete: false,
+                                        reason: Some("consumer disconnected".into()),
+                                        detail: None,
+                                        duration_ms: None,
+                                        token_count: None,
+                                    }),
+                                    Some("consumer disconnected".into()),
+                                );
+                            }
                         }
                     }
                 }
@@ -90,7 +103,7 @@ impl WorkflowMcpServer {
                 }
             }
             "WorkflowTaskObserved" => {
-                let run_id = match required_str(arguments, "runId") {
+                let run_id = match super::required_str(arguments, "runId") {
                     Ok(id) => id,
                     Err(error) => return DispatchOutcome::Protocol(error),
                 };
@@ -107,7 +120,7 @@ impl WorkflowMcpServer {
                 DispatchOutcome::tool_ok("{}".into())
             }
             "WorkflowCompletionAck" => {
-                let run_id = match required_str(arguments, "runId") {
+                let run_id = match super::required_str(arguments, "runId") {
                     Ok(id) => id,
                     Err(error) => return DispatchOutcome::Protocol(error),
                 };
@@ -115,22 +128,22 @@ impl WorkflowMcpServer {
                 DispatchOutcome::tool_ok("{}".into())
             }
             "WorkflowAgentClaim" => {
-                let run_id = match required_str(arguments, "runId") {
+                let run_id = match super::required_str(arguments, "runId") {
                     Ok(id) => id,
                     Err(error) => return DispatchOutcome::Protocol(error),
                 };
-                let task_id = match required_str(arguments, "taskId") {
+                let task_id = match super::required_str(arguments, "taskId") {
                     Ok(id) => id,
                     Err(error) => return DispatchOutcome::Protocol(error),
                 };
-                let claim_id = match required_str(arguments, "claimId") {
+                let claim_id = match super::required_str(arguments, "claimId") {
                     Ok(id) if !id.is_empty() => id,
                     _ => return DispatchOutcome::invalid_params("claimId must be nonempty"),
                 };
                 if runtime.is_closed() {
                     return DispatchOutcome::tool_err("workflow instance is closed");
                 }
-                encode_json(
+                super::encode_json(
                     &runtime.tasks().claim_for_consumer(
                         run_id,
                         task_id,

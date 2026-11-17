@@ -3,7 +3,6 @@
 
 use std::sync::Mutex;
 
-use super::submission_result;
 use crate::error::LangfuseError;
 
 #[derive(Default)]
@@ -32,7 +31,7 @@ pub(in crate::batcher) struct ShutdownSnapshot {
 
 impl ShutdownSnapshot {
     pub(in crate::batcher) fn result(self) -> Result<(), LangfuseError> {
-        submission_result(self.failures)
+        super::submission_result(self.failures)
     }
 }
 
@@ -70,6 +69,6 @@ impl FailureLedger {
             // Never clear failures produced after this snapshot's watermark.
             watermarks.confirmed = watermarks.confirmed.max(snapshot.through);
         }
-        submission_result(snapshot.failures)
+        super::submission_result(snapshot.failures)
     }
 }

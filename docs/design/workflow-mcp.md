@@ -4,6 +4,8 @@
 **范围**：`peri-workflow` 子系统从 middleware 槽位迁移为 builtin MCP 实例；Node 引擎保留为实例执行后端；agent 回调改为「任务资源发布 + 工具回填」的标准信道语义。
 **代码事实源**：`peri-middlewares/src/mcp/builtin/`、`peri-acp-types/src/builtin_mcp.rs`、`peri-workflow/`、`npm-packages/@peri-workflow/`、`peri-acp/src/host/{workflow_agent,requests/workflow}.rs`。
 
+**v5 关系（尚未实现）**：workflow 仍是 `mcp-packages/workflow` 的能力实现；v5 中经单出口 `peri` 暴露，deferred 模型名由 `mcp__workflow__*` 改为 `mcp__peri__*`，关闭粒度由实例改为 capability。本文的工具、资源、订阅、任务信道与取消/幂等语义不变；v4 独立实例形态仅在迁移期兼容。目标见 [MCP v5 单出口目标设计](mcp-v5-single-exit.md)。
+
 ## 1. 背景与取代关系
 
 Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请求接入，工具、资源、订阅与关闭都不走标准 MCP 面，双方以「server 向 client 发请求」表达执行依赖。本设计以 builtin MCP 实例承载编排能力，并把 agent 回调改为「任务资源发布 + 工具回填」的标准信道；旧槽位、端口与旧 middleware 目录已由该形态取代。
@@ -12,16 +14,16 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 2.1 目标
 
-1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。
+1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。该形态是 v4 兼容期路径；v5 目标为单出口内的 `workflow` capability。
 2. agent 回调改为 **MCPP Channel 语义**：agent 任务作为 outbound 资源（event-log）发布，宿主消费者发现并执行，经 inbound 工具回填结果。不新增私有 JSON-RPC method 或 vendor capability。
-3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口与旧 middleware 目录已删除；`peri-resources/src/workflow.rs` 门面仍保留（残留目标，见 §7）。
-4. 用户可见配置语义保持兼容：MetaHarness 关闭键 `"WorkflowMiddleware"` 沿用（从中间件表迁到 builtin 实例关闭表）；ACP 方法名（`workflow/*`）与 TUI 交互不变。
+3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口、旧 middleware 目录与 Resources 门面均已删除；workflow 接入归 builtin MCP 实例。
+4. 能力开关使用 v5 能力名 `"workflow": false`；旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter（M4 删除）。ACP 方法名（`workflow/*`）与 TUI 交互不变，能力开关以单出口配置为准。
 
 ### 2.2 非目标
 
 1. 不让 Node 引擎进程直接实现标准 MCP server（外部 stdio 直连）——内置实例已覆盖目标；引擎独立分发留待将来在同一语义上升级。
 2. 不迁移 journal 落盘位置（`.claude/workflow-runs/` 保持现状）；归属另行裁决。
-3. 不改 ACP 方法名、TUI 面板与 `BgTaskKind::Workflow`；不改 `peri-acp-types/src/workflow.rs` 契约类型。
+3. 不改 ACP 方法名、TUI 面板、`BgTaskKind` 变体与 wire 值；不改 `peri-acp-types/src/workflow.rs` 契约类型。
 4. 不做跨进程任务恢复与旧执行恢复：任务表为运行期状态，恢复语义仍由 journal + `resume` 承担（遵循「不恢复旧 Agent 执行」）。
 5. 不做 workflow 的跨实例/远程分发。
 
@@ -75,7 +77,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 `peri-acp-types/src/builtin_mcp.rs` 声明：
 
 - `WORKFLOW_TOOLS`：`Workflow` / `WorkflowStatus` / `WorkflowKill`（模型面，`direct: false`），以及 `WorkflowAgentResult` / `WorkflowAgentClaim` / `WorkflowConsumerReady` / `WorkflowCompletionAck` / `WorkflowClose` / `WorkflowTaskObserved`（host-only，`model_visible: false`）。
-- `BUILTIN_MCP_INSTANCES` 条目：`name = "workflow"`、`policy_key = "WorkflowMiddleware"`（沿用旧槽位键，用户配置兼容）。
+- `BUILTIN_MCP_INSTANCES` 派生视图：`name = "workflow"`、`legacy_instance = "workflow"`（由能力表派生，只服务迁移期 adapter）。
 - `BUILTIN_RESERVED_INSTANCE_NAMES` 包含 `"workflow"`。
 - `BuiltinMcpTool::model_visible` 区分模型可见面与 host-only 工具；其余实例默认 `true`。
 
@@ -122,7 +124,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 4.4 关闭
 
-- 关闭键 `"WorkflowMiddleware"` 在 `BUILTIN_INSTANCE_POLICY_KEYS` 中声明；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。
+- 关闭键为 v5 能力名 `"workflow"`；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时消失；旧键保留为确定性映射 adapter（M4 删除）。
 - `MIDDLEWARE_NAMES` 不含该键，`MIDDLEWARE_TOOL_NAMES` 不含 `"Workflow"`；两表零交集由装配测试断言。
 - 工具归一/过滤面（`tool_catalog`、`permission`）按实例身份自动生效（`mcp__workflow__*`）。
 - 子 Agent 按实例身份整体排除 `workflow`（`CHILD_ABSENT_BUILTIN_INSTANCES`），不另立逐工具名单。
@@ -187,7 +189,6 @@ published ──► executing ──► completed | failed | cancelled
 ## 7. 待裁决记录
 
 - journal 落盘归属（工作区工具环境 vs Session Store）：保持现状（`.claude/workflow-runs/`），独立裁决；原裁决 issue 已归档，可经 Git 历史检索。
-- `peri-resources/src/workflow.rs` 门面删除：未落地残留目标；`peri-resources` 仍依赖 workflow，删除需独立裁决。
 - Node 引擎独立分发为外部 MCP server：本设计在同语义上保留升级路径（`agent/task`/`agent/result` ↔ 标准资源/工具），不在本范围实施。
 
 ## 8. MCP 数据边界契约

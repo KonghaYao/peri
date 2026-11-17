@@ -10,17 +10,17 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 
 ## 架构速览
 
-- 定位：与 provider 无关的协议 DTO + 流式优先模型接口（lib.rs）；只产消标准 `peri-model` 协议，不引用 Agent 事件/类型（anthropic/mod.rs）
-- 数据流：`ModelRequest → build_request（provider 适配）→ HttpTransport/SSE → provider decoder（ModelStreamEvent 流）→ ModelStream → 上层消费（peri-agent/src/agent/model_bridge.rs）`
+- 定位：与 provider 无关的协议 DTO + 流式优先模型接口（lib.rs）；只产消标准 `peri-model` 协议，不引用 Agent 事件/类型（anthropic/anthropic_model.rs）
+- 数据流：`ModelRequest → build_request（provider 适配）→ HttpTransport/SSE → provider decoder（ModelStreamEvent 流）→ ModelStream → 上层消费（peri-agent/src/agent/agent_model_bridge.rs）`
 - 模型接口：`protocol/model.rs` 的 `Model` trait——`stream()`是唯一调用路径；`complete()`仅聚合 stream 事件，无独立非流式路径
-- 稳定不变量：`ModelStream` 持有 parent 的 child token，`abort()` 只取消本流、不反向取消父 token（model.rs）；正常 provider decoder 应以单个 `Completed(ModelResponse)` 收尾；retry driver 将可见输出后的失败转为 `Interrupted`，`complete()` 遇该终态返回底层错误，不聚合半成品（model.rs）；无终态 EOF 报错（model.rs）；`ModelResponse::new` 强制 assistant message（types.rs）；事实源关系：协议类型在 `protocol/`，adapter 配置在各自目录，`lib.rs` 统一 re-export；装配面（provider 工厂）在 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`，OpenAi / Anthropic 构造）
+- 稳定不变量：`ModelStream` 持有 parent 的 child token，`abort()` 只取消本流、不反向取消父 token（model.rs）；正常 provider decoder 应以单个 `Completed(ModelResponse)` 收尾；retry driver 将可见输出后的失败转为 `Interrupted`，`complete()` 遇该终态返回底层错误，不聚合半成品（model.rs）；无终态 EOF 报错（model.rs）；`ModelResponse::try_new` 强制 assistant message（types.rs）；事实源关系：协议类型在 `protocol/`，adapter 配置在各自目录，`lib.rs` 统一 re-export；装配面（provider 工厂）在 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`，OpenAi / Anthropic 构造）
 
 ## 速查表
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 加新 provider/模型适配 | 模板 `src/openai_compatible/`；trait 事实源 `src/protocol/model.rs`（`Model`）；装配面 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`） | `impl Model for OpenAiModel`（openai_compatible/mod.rs）；`stream::decoders()`返回 `SseDecoderFactory` | 实现 `capabilities`/`prepare_request`/`stream` 三方法；stream 走 `runtime_http_sse_stream`（runtime/stream.rs）串 transport+retry；`prepare_request` 默认实现明确拒绝（model.rs）；`build_request` 须产出有界观测的 `PreparedModelRequest`（observe，request.rs） |
-| 改流式事件 | `src/protocol/model.rs` `ModelStreamEvent`（TextDelta/ReasoningDelta/ToolCallDelta/Usage/Completed/Interrupted）+ `src/runtime/stream.rs`；消费方 `peri-agent/src/agent/model_bridge.rs`（generate_from_request） | 各 adapter `decode_event`（anthropic/stream.rs、openai_compatible/stream.rs）；`Model::complete` 聚合（model.rs） | 成功以 Completed 收尾；可见增量后失败以 Interrupted 终态交付 error/attempts/max_attempts，不携带 usage、不重放请求；complete 返回底层错误（model.rs），agent 保存部分正文并有界 Defer 续跑；耗尽经 ExecutionFailure → ACP data.diagnostic 投影。无终态 EOF 仍报错（model.rs）；新增变体须同步 complete 聚合 + model_bridge 消费 + ACP 映射（ARC-EVENT-001） |
+| 加新 provider/模型适配 | 模板 `src/openai_compatible/`；trait 事实源 `src/protocol/model.rs`（`Model`）；装配面 `peri-acp/src/provider/mod.rs`（`LlmProvider::into_model`） | `impl Model for OpenAiModel`（openai_compatible/open_ai_model.rs）；`stream::decoders()`返回 `SseDecoderFactory` | 实现 `capabilities`/`prepare_request`/`stream` 三方法；stream 走 `runtime_http_sse_stream`（runtime/stream.rs）串 transport+retry；`prepare_request` 默认实现明确拒绝（model.rs）；`build_request` 须产出有界观测的 `PreparedModelRequest`（observe，request.rs） |
+| 改流式事件 | `src/protocol/model.rs` `ModelStreamEvent`（TextDelta/ReasoningDelta/ToolCallDelta/Usage/Completed/Interrupted）+ `src/runtime/stream.rs`；消费方 `peri-agent/src/agent/agent_model_bridge.rs`（generate_from_request） | 各 adapter `decode_event`（anthropic/stream.rs、openai_compatible/stream.rs）；`Model::complete` 聚合（model.rs） | 成功以 Completed 收尾；可见增量后失败以 Interrupted 终态交付 error/attempts/max_attempts，不携带 usage、不重放请求；complete 返回底层错误（model.rs），agent 保存部分正文并有界 Defer 续跑；耗尽经 ExecutionFailure → ACP data.diagnostic 投影。无终态 EOF 仍报错（model.rs）；新增变体须同步 complete 聚合 + model_bridge 消费 + ACP 映射（ARC-EVENT-001） |
 | 改 TokenUsage/StopReason 语义 | 事实源 `src/protocol/types.rs`：`TokenUsage`（cache_creation/cache_read 可选，`new`）、`StopReason`（tagged，`Other{value}` 兜底） | 构造点：anthropic/stream.rs `current_usage`/`completed_response`；openai_compatible/response.rs 解码 | Anthropic start/delta/stop 的 input/cache 按字段最新值更新（缺失保留、显式零覆盖），完整 input 含缓存；usage 溢出（完整 input 超 u32）→ provider error 且不发 Completed（anthropic/mod_test.rs）；StopReason 语义消费方在 model_bridge（映射 agent 层 stop reason） |
 | 改消息内容模型 | 事实源 `src/protocol/types.rs`：`ContentBlock`（Text/Image/Document/Reasoning/ToolUse/ToolResult/RedactedReasoning）、`ModelMessage`（role-tagged）、`ToolCall`、`ToolResult` | 两端映射：`content_to_anthropic`（anthropic/request.rs）、`block_to_openai_part`（openai_compatible/request.rs）；`ContentBlock::text_content`（types.rs） | 新增 block 变体必须同时改两端映射 + `text_content`（否则判空/文本提取漏分支）；Anthropic tool_use 只序列化一次（mod_test.rs）；序列化顺序须确定（ARC-SERIAL-001） |
 | 改传输层（HTTP/SSE） | `src/transport/http.rs`（`HttpTransport`、`ReqwestTransport`）、`src/transport/sse.rs`（`SseEvent`、`SseParser`） | 组装点 `runtime_http_sse_stream`（runtime/stream.rs）→ `retrying_http_sse_stream`→ `response_to_sse_stream` | transport 是 crate-private seam（transport/mod.rs）；各 adapter 共享同步 `SseDecoderFactory`，每次 retry 新建 decoder 状态；SSE DONE 调用 completion decoder，OpenAI 还须有效 finish_reason，流内 error 不得忽略；parser 与 decoder 按顺序交付完整增量和后续错误，Completed 后不消费尾帧；EOF 不等于成功；公共 API 不暴露 client/headers/原始请求 |
@@ -28,7 +28,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 | 改观测/长度边界 | `src/runtime/request.rs`：`PreparedModelRequest`、`observe`、`ObservedProviderBody`、`ModelRuntimeConfig` | 配置显式构造，不读环境变量；`AnthropicConfig::new`/`OpenAiConfig::new` | 键、路径、URL/query、data URI 和 config Debug 保留原始内容，不做内容脱敏；观测级别和长度约束独立，契约 ARC-SECRET-001 |
 | 改错误类型/分类 | `src/runtime/error.rs`：`ModelError`、`ProtocolErrorKind` | `ModelError::protocol`、`http_status`、`with_message`、`with_body`、`with_causes` | 实际错误正文和原因链与分类共存；cancelled 与 interrupted 语义区分，协议形状与长度校验不做敏感内容判断 |
 | 改模型诊断 / 重试耗尽事实 | `src/runtime/error.rs` + `src/runtime/retry.rs` | `ModelErrorDiagnostic`；`ModelError::diagnostic`；`RetryObservation::diagnostic`；`retry_exhausted_with_context` | 保留 category/status/provider/request-id/transport/protocol/retry 事实及 message/body/causes；重试与中断转换不得丢弃原始原因，字段内容不脱敏；无信息时为 None，枚举使用 snake_case |
-| 录制／回放传输 | `src/protocol/call_context.rs`、`src/runtime/route.rs`、`src/transport/route.rs` | `ModelRequest.call_context`、`ModelRuntimeConfig::with_transport_route` | 请求构建完成后才改物理 URL；保留逻辑 provider 身份。调用上下文不序列化到模型请求；每次实际发送分配 attempt。缺少上下文时失败，不回落直连。 |
+| 录制／回放传输 | `src/protocol/call_context.rs`、`src/runtime/route/model_transport_route.rs`、`src/transport/route.rs` | `ModelRequest.call_context`、`ModelRuntimeConfig::with_transport_route` | 请求构建完成后才改物理 URL；保留逻辑 provider 身份。调用上下文不序列化到模型请求；每次实际发送分配 attempt。缺少上下文时失败，不回落直连。 |
 
 ### Responses 新增入口
 
@@ -46,7 +46,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 
 ### protocol/（协议 DTO + 模型接口事实源）
 
-`protocol/prepared.rs::PreparedModelCall` 是 RCRA 持久请求屏障使用的 opaque full-wire 请求：`Model::prepare_stream` 冻结 provider body、endpoint/model 与 credential 配置关联，`checkpoint()` 保留完整消息、system 和工具 schema，`start()` 消费同一冻结请求后才允许 HTTP effect。公开 `new` 构造器供受信跨 crate provider 实现同一精确请求契约，准备阶段无执行副作用；不允许自动降级。所有内置 adapter 共享此契约；不支持的 Model 默认拒绝。此类型不是经过脱敏/截断的 `PreparedModelRequest` observation，checkpoint 不含认证 headers/API keys。对应验证：`prepared_stream_test`（发送 body 等于完整 checkpoint；取消零发送）及 `PreparedModelCall::new` doc test（取消时不调用发送闭包）。
+`protocol/prepared/prepared_model_call.rs::PreparedModelCall` 是 RCRA 持久请求屏障使用的 opaque full-wire 请求：`Model::prepare_stream` 冻结 provider body、endpoint/model 与 credential 配置关联，`checkpoint()` 保留完整消息、system 和工具 schema，`start()` 消费同一冻结请求后才允许 HTTP effect。公开 `new` 构造器供受信跨 crate provider 实现同一精确请求契约，准备阶段无执行副作用；不允许自动降级。所有内置 adapter 共享此契约；不支持的 Model 默认拒绝。此类型不是经过脱敏/截断的 `PreparedModelRequest` observation，checkpoint 不含认证 headers/API keys。对应验证：`prepared_stream_test`（发送 body 等于完整 checkpoint；取消零发送）及 `PreparedModelCall::new` doc test（取消时不调用发送闭包）。
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 配置/模型/流入口 | anthropic/mod.rs | `AnthropicConfig`（Debug 保留配置原文；`with_extended_thinking` 显式启用 thinking、传递 effort）；`AnthropicModel`；`impl Model`（stream → runtime_http_sse_stream） |
+| 配置/模型/流入口 | anthropic/anthropic_model.rs | `AnthropicConfig`（Debug 保留配置原文；`with_extended_thinking` 显式启用 thinking、传递 effort）；`AnthropicModel`；`impl Model`（stream → runtime_http_sse_stream） |
 | 请求构建 | anthropic/request.rs | `build_request`；`messages_endpoint`（拒绝 userinfo/非 http(s)，保留 base path）；`messages_to_anthropic` |
 | thinking 模式/预算 | anthropic/request.rs；回归 anthropic/mod_test.rs | `build_request` 是模型模式选择的唯一权威：启用时仅精确 `claude-sonnet-5-5` 发送 `adaptive`，无 `budget_tokens`、不受手动预算门限影响；其余模型/未知 alias 保留 `enabled` 预算收缩与省略。effort 原样写入 `output_config`；输出上限仍由 request override 优先。回归覆盖默认上限、各 effort、小配置/请求上限、旧模型、alias 与未启用；定向命令：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-model -p peri-acp --lib -- anthropic` |
 | 历史 thinking 回放 | anthropic/request.rs；回归 anthropic/mod_test.rs、peri-agent/tests/micro_compact_wire_test.rs | 回放策略按端点/模型分流：官方 Anthropic（`api.anthropic.com`）及未知代理/模型默认只把带非空 signature 的 `Reasoning` 回放为 `thinking`，缺失/空签名及其他 provider 的 reasoning 摘要降级为 `text`，不伪造空签名块；DeepSeek 端点（`*.deepseek.com`）或其他端点上的 `deepseek-*` 模型不校验签名，`Reasoning` 原样回放为 `thinking`（含已有签名），并为缺 thinking 块的历史 assistant 消息前置空 thinking 占位。手动 `enabled` 在签名策略下要求最后一个 assistant turn 以带签名 thinking 开头；tool-use 循环算同一 turn，判定跨 tool_result 回溯到 turn 起点，无法满足时不发送 thinking（官方建议）；DeepSeek 策略不应用该门控。`adaptive` 无此要求；Micro Compact 后的最终 wire 同样遵循各自回放策略。 |
@@ -70,7 +70,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 配置/模型/流入口 | openai_compatible/mod.rs | `OpenAiConfig`；`OpenAiModel`；`impl Model` |
+| 配置/模型/流入口 | openai_compatible/open_ai_model.rs | `OpenAiConfig`；`OpenAiModel`；`impl Model` |
 | 请求构建 | openai_compatible/request.rs | `BuiltOpenAiRequest`；`extract_system_message`；`messages_to_json`；工具图片在连续 tool 结果批次后投影为带调用身份的 user 附件，图片不进入 tool 角色；回归 `request_image_test.rs` |
 | 流解码 | openai_compatible/stream.rs | `decoders`；`decode_event`；`complete_stream` |
 

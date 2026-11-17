@@ -5,7 +5,8 @@
 //! 不含 Rust `String`/`Vec` 的分配；进程峰值未接入 allocator 账单，报告里标 n/a。
 
 use super::history::{HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL};
-use super::*;
+use super::{Arc, SqliteSessionData};
+
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::sqlite_store::SqliteThreadStore;
 use peri_acp_types::history_window::{HistoryReadTicket, HistorySource, HistoryWindowError};
@@ -14,10 +15,11 @@ use peri_acp_types::projection::MessageProjectionDirective;
 use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResourceErrorKind,
 };
-use peri_acp_types::store::{
-    serialize_persisted_payload, CompactionChange, InheritedContext, MessageFlags,
-    PersistedPayload, ThreadStore,
-};
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
@@ -36,6 +38,8 @@ extern "C" {
 fn sqlite_peak_reset() -> i64 {
     // SAFETY: SQLite 的全局分配计数；测试串行执行（--test-threads=1）。
     let before = unsafe { sqlite3_memory_used() };
+    // SAFETY: SQLite exposes this process-wide counter only through its C API;
+    // resetting the counter does not access a connection or borrow its storage.
     unsafe {
         sqlite3_memory_highwater(1);
     }
@@ -50,7 +54,7 @@ fn sqlite_peak_extra(before: i64) -> i64 {
 
 async fn database() -> (SqliteThreadStore, SqliteSessionData, TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let store = SqliteThreadStore::new(directory.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(directory.path().join("threads.db"))
         .await
         .unwrap();
     let data = SqliteSessionData::new(Arc::clone(&store.database));
@@ -152,7 +156,7 @@ async fn incremental_large_body_chunks_stay_bounded_and_exact() {
     let body = "A".repeat(LARGE_BYTES);
     let large = PersistedPayload::Message(BaseMessage::human(body));
     let tail = PersistedPayload::Message(BaseMessage::human("tail"));
-    let expected = serialize_persisted_payload(&large).unwrap();
+    let expected = peri_acp_types::store::serialize_persisted_payload(&large).unwrap();
     assert!(expected.len() > LARGE_BYTES);
 
     let (_store, data, _directory, id) =
@@ -304,7 +308,7 @@ async fn incremental_large_body_chunks_stay_bounded_and_exact() {
 async fn inherited_chunks_reassemble_escapes_and_multibyte_bodies() {
     let content = "quote:\" slash:\\ newline:\n tab:\t ctrl:\u{1} 中文 emoji:😀 tail";
     let payload = PersistedPayload::Message(BaseMessage::human(content));
-    let expected = serialize_persisted_payload(&payload).unwrap();
+    let expected = peri_acp_types::store::serialize_persisted_payload(&payload).unwrap();
     let (_store, data, _directory, id) =
         session_with_inherited(std::slice::from_ref(&payload), "parent").await;
     let bounds = data.history_window_bounds(&id).await.unwrap();
@@ -384,7 +388,7 @@ async fn inherited_chunks_reassemble_escapes_and_multibyte_bodies() {
 #[tokio::test]
 async fn non_canonical_inherited_envelope_falls_back_to_sql() {
     let payload = PersistedPayload::Message(BaseMessage::human("fallback body"));
-    let expected = serialize_persisted_payload(&payload).unwrap();
+    let expected = peri_acp_types::store::serialize_persisted_payload(&payload).unwrap();
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let id = "fallback-session".to_owned();
@@ -887,7 +891,7 @@ async fn non_canonical_envelope_with_undecodable_payload_fails_closed() {
 #[tokio::test]
 async fn jsonb_inherited_context_falls_back_to_sql() {
     let payload = PersistedPayload::Message(BaseMessage::human("jsonb body"));
-    let expected = serialize_persisted_payload(&payload).unwrap();
+    let expected = peri_acp_types::store::serialize_persisted_payload(&payload).unwrap();
     let (store, data, directory) = database().await;
     let workspace = workspace(&store, directory.path()).await;
     let id = "inherited-jsonb".to_owned();

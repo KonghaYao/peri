@@ -27,7 +27,7 @@ pub struct ProviderModels {
 }
 
 impl ProviderModels {
-    pub fn get_model(&self, alias: &str) -> Option<&str> {
+    pub fn model(&self, alias: &str) -> Option<&str> {
         match alias.to_lowercase().as_str() {
             "opus" => Some(&self.opus),
             "sonnet" => Some(&self.sonnet),
@@ -54,7 +54,7 @@ fn default_profile_max_tokens() -> u32 {
     32000
 }
 
-fn is_default_effort(value: &String) -> bool {
+fn is_default_effort(value: &str) -> bool {
     *value == default_profile_effort()
 }
 
@@ -107,6 +107,7 @@ impl Default for ProfileConfig {
 }
 
 impl ProfileConfig {
+    #[must_use]
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -161,6 +162,7 @@ pub struct BetasConfig {
 }
 
 impl BetasConfig {
+    #[must_use]
     pub fn is_default(&self) -> bool {
         self.overrides.is_empty()
     }
@@ -191,6 +193,7 @@ impl BetasConfig {
 /// 原始配置文档里仍存在的已删除 compact 键（判定与诊断分离，判定可测）。
 ///
 /// 在**解析类型之前**调用：类型化模型已不认识这些键，只靠反序列化无法发现它们。
+#[must_use]
 pub fn legacy_compact_keys_in(document: &serde_json::Value) -> Vec<&'static str> {
     let Some(compact) = document.pointer("/config/compact") else {
         return Vec::new();
@@ -323,6 +326,7 @@ impl AppConfig {
             && provider.auth == base.auth
     }
 
+    #[must_use]
     pub fn extract_overrides(&self, global: &AppConfig) -> AppConfig {
         let mut overrides = AppConfig::default();
         if self.providers != global.providers {
@@ -426,28 +430,52 @@ impl AppConfig {
             .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
             .copied()
             .chain(std::iter::once(BUILT_IN_SUBAGENTS_KEY))
+            // v5 能力名是 builtin 能力的开关身份；旧 `*Middleware` 键保留为
+            // 确定性映射的兼容 adapter（#409 §8.6），M4 清理时删除。
+            .chain(
+                peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+                    .iter()
+                    .map(|capability| capability.name),
+            )
             .collect();
         map.retain(|key, _| {
             if known.contains(key.as_str()) {
+                if peri_acp_types::builtin_mcp::capability_of_legacy_policy_key(key).is_ok() {
+                    tracing::warn!(
+                        key = %key,
+                        "meta_harness: legacy builtin policy key mapped to its capability; \
+                         use the capability name (retired at M4)"
+                    );
+                }
                 true
             } else {
                 tracing::warn!(key = %key, "meta_harness: unknown key ignored");
                 false
             }
         });
-        let all_disabled = MIDDLEWARE_NAMES
-            .iter()
-            .chain(BUILTIN_INSTANCE_POLICY_KEYS.iter())
-            .all(|name| map.get(*name).copied() == Some(false));
-        if all_disabled {
+        if all_middleware_disabled(map) {
             tracing::warn!(
-                middleware_count = MIDDLEWARE_NAMES.len() + BUILTIN_INSTANCE_POLICY_KEYS.len(),
+                middleware_count = MIDDLEWARE_NAMES.len()
+                    + peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES.len(),
                 "meta_harness: ALL middleware disabled — every tool/hook/section holder \
                  will be unavailable; if this was not intentional, remove the meta_harness \
                  keys from settings.json"
             );
         }
     }
+}
+
+fn all_middleware_disabled(map: &HashMap<String, bool>) -> bool {
+    MIDDLEWARE_NAMES
+        .iter()
+        .all(|name| map.get(*name).copied() == Some(false))
+        && peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
+            .iter()
+            .all(|capability| {
+                [capability.name, capability.legacy_policy_key]
+                    .iter()
+                    .any(|key| map.get(*key).copied() == Some(false))
+            })
 }
 
 impl Default for AppConfig {
@@ -508,6 +536,7 @@ pub enum ProviderAuthConfig {
 }
 
 impl ProviderConfig {
+    #[must_use]
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
     }

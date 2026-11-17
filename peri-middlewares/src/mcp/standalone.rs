@@ -1,9 +1,11 @@
-//! In-process serving for builtin MCP instances (`peri mcp-start`).
+//! In-process serving for the v5 builtin single exit (`peri mcp-start`).
 //!
-//! `peri mcp-start <instance> --stdio|--http` serves the named builtin instance
-//! from this binary; no sibling worker executable is involved. HTTP mode is MCP
-//! Streamable HTTP at `/mcp` and is unauthenticated: bind a non-loopback host only
-//! on an isolated network.
+//! `peri mcp-start peri --stdio|--http` serves the single exit through the
+//! capability router; the selection is resolved by `peri-tui` before this module
+//! runs. Legacy `mcp-start <instance>` is a CLI adapter that maps the instance to
+//! its capability in `peri-tui`, so this module has no per-instance serving path.
+//! HTTP mode is MCP Streamable HTTP at `/mcp` and is unauthenticated: bind a
+//! non-loopback host only on an isolated network.
 //!
 //! `workflow` is served slot-only: without an ACP host nothing binds a
 //! `WorkflowRuntime`, so tool calls that need the runtime return the existing typed
@@ -13,10 +15,20 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 #[cfg(not(target_os = "emscripten"))]
-use peri_mcp_common::standalone::{serve_http, serve_stdio};
+use peri_mcp_common::standalone;
 
 #[cfg(not(target_os = "emscripten"))]
-use super::builtin::standalone::StandaloneFactory;
+use super::builtin::router::RouterTemplate;
+
+#[cfg(not(target_os = "emscripten"))]
+pub use super::builtin::router::{CapabilityReadiness, CapabilityStatus, RouterReadiness};
+
+/// What the standalone process serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// v5 single exit with the resolved capability set.
+    Capabilities(Vec<String>),
+}
 
 /// Transport selected on the command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,35 +42,59 @@ pub enum Transport {
     },
 }
 
-/// Inputs for one standalone builtin instance.
+/// Inputs for one standalone process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    pub instance: String,
+    pub target: Target,
     pub transport: Transport,
     /// Working directory for the served instance. Not an OS sandbox.
     pub workspace: PathBuf,
 }
 
-/// Serve `options.instance` until the transport closes.
+/// Serve `options.target` until the transport closes.
 #[cfg(not(target_os = "emscripten"))]
 pub async fn run(options: Options) -> Result<()> {
-    let factory = StandaloneFactory::new(&options.instance, options.workspace)?;
-    let workspace = factory.workspace_handle();
-    let served = match options.transport {
-        Transport::Stdio => serve_stdio(factory.create()?).await,
+    let Target::Capabilities(capabilities) = options.target;
+    run_router(capabilities, options.transport, options.workspace).await
+}
+
+#[cfg(not(target_os = "emscripten"))]
+async fn run_router(
+    capabilities: Vec<String>,
+    transport: Transport,
+    workspace: PathBuf,
+) -> Result<()> {
+    let template = RouterTemplate::new(&capabilities, workspace)?;
+    let workspace_handle = template.workspace_handle();
+    let served = match transport {
+        Transport::Stdio => {
+            let router = template.create()?;
+            standalone::serve_stdio(router).await
+        }
         Transport::Http {
             host,
             port,
             allowed_hosts,
-        } => serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
+        } => {
+            standalone::serve_http(
+                move || template.create().map_err(std::io::Error::other),
+                &host,
+                port,
+                &allowed_hosts,
+            )
+            .await
+        }
     };
-    let cleanup = match workspace {
+    // 只有装配了 workspace 能力才存在 shell 任务；关闭 workspace 不是清理失败。
+    let cleanup = match workspace_handle {
         Some(server) => server.shutdown_shell_tasks().await,
         None => None,
     };
     served?;
-    if cleanup != Some(peri_acp_types::tasks::TaskShutdownReport::Complete) {
-        anyhow::bail!("Workspace shell task cleanup incomplete");
+    if let Some(report) = cleanup {
+        if report != peri_acp_types::tasks::TaskShutdownReport::Complete {
+            anyhow::bail!("Workspace shell task cleanup incomplete");
+        }
     }
     Ok(())
 }

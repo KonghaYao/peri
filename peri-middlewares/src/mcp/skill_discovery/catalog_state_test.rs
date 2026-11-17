@@ -1,5 +1,13 @@
-use super::*;
+use super::Arc;
+use super::RoleClient;
+use super::ServerDiscoveryState;
+use super::SkillMetadata;
+use super::SkillOrigin;
+use super::SkillSource;
 use crate::skills::tools::{DiscoverSkillsTool, SkillTool};
+use peri_acp_types::mcp_skills::HandleToken;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_agent::agent::AgentCancellationToken;
 use peri_agent::tools::{BaseTool, ToolContext};
 
 async fn list_response_server(io: tokio::io::DuplexStream, response: serde_json::Value) {
@@ -32,10 +40,10 @@ async fn discover_response(response: serde_json::Value) -> Arc<McpSkillRegistry>
     let registry = Arc::new(McpSkillRegistry::new());
     let token: HandleToken = Arc::new(1u32);
     registry.mark_discovery_started("srv", token.clone());
-    run_discovery(
+    crate::mcp::skill_discovery::run_discovery(
         registry.clone(),
         None,
-        make_spec_handle(&running),
+        super::make_spec_handle(&running),
         token,
         AgentCancellationToken::new(),
     )
@@ -190,14 +198,14 @@ async fn missing_peer_is_failed_for_spec_and_legacy_empty_candidates() {
             client_io,
             None::<rmcp::model::ServerPeerInfo>,
         );
-        let mut handle = make_spec_handle(&running);
+        let mut handle = super::make_spec_handle(&running);
         let fields = Arc::get_mut(&mut handle).unwrap();
         fields.peer = None;
         fields.skills_capable = skills_capable;
         let registry = Arc::new(McpSkillRegistry::new());
         let token: HandleToken = Arc::new(1u32);
         registry.mark_discovery_started("srv", token.clone());
-        run_discovery(
+        crate::mcp::skill_discovery::run_discovery(
             registry.clone(),
             None,
             handle,
@@ -238,10 +246,10 @@ async fn legacy_empty_candidates_cancelled_during_probe_do_not_publish_empty() {
     let registry = Arc::new(McpSkillRegistry::new());
     let token: HandleToken = Arc::new(1u32);
     registry.mark_discovery_started("srv", token.clone());
-    run_discovery(
+    crate::mcp::skill_discovery::run_discovery(
         registry.clone(),
         None,
-        make_discovery_handle(&running, vec![]),
+        super::make_discovery_handle(&running, vec![]),
         token,
         cancel,
     )
@@ -264,7 +272,7 @@ async fn skills_list_timeout_is_failed_not_ready_empty() {
         let registry = Arc::new(McpSkillRegistry::new());
         let token: HandleToken = Arc::new(1u32);
         registry.mark_discovery_started("srv", token.clone());
-        let handle = make_spec_handle(&running);
+        let handle = super::make_spec_handle(&running);
         let cache = cached.then(|| {
             let pool = Arc::new(crate::mcp::client::McpClientPool::new_empty());
             pool.advance_handle_generation(&handle);
@@ -273,7 +281,7 @@ async fn skills_list_timeout_is_failed_not_ready_empty() {
                 .insert("srv".to_string(), handle.clone());
             pool.resource_cache_for_handle(&handle).unwrap()
         });
-        run_discovery_with_cache(
+        crate::mcp::skill_discovery::run_discovery_with_cache(
             registry.clone(),
             None,
             handle,
@@ -347,10 +355,10 @@ async fn cancelled_skills_list_does_not_publish_ready_empty() {
     )
     .await;
     assert!(result.is_err());
-    run_discovery(
+    crate::mcp::skill_discovery::run_discovery(
         registry.clone(),
         None,
-        make_spec_handle(&running),
+        super::make_spec_handle(&running),
         token,
         cancel,
     )

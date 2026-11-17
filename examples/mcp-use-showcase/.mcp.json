@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "mcp-use-showcase": {
+      "type": "http",
+      "url": "http://127.0.0.1:31337/mcp",
+      "subscriptions": {
+        "resources": ["demo://state"],
+        "resourcesListChanged": true,
+        "toolsListChanged": true
+      }
+    }
+  }
+}

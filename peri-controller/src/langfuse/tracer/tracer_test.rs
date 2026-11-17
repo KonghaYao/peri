@@ -6,8 +6,12 @@
 //! 注意：`on_turn_end()` 内部调用 `tokio::spawn`，因此需要 `#[tokio::test]`
 //! 提供异步运行时。
 
-use super::input_snapshot::GenerationInput;
-use super::*;
+use crate::langfuse::langfuse_session_like::LangfuseSessionLike as _;
+
+use crate::langfuse::tracer::input_snapshot::GenerationInput;
+use crate::langfuse::tracer::LangfuseTracer;
+use langfuse_client::types::ObservationLevel;
+use langfuse_client::IngestionEvent;
 use langfuse_client::ObservationType;
 use peri_acp_types::command::PromptStopReason;
 use peri_acp_types::session::{ExecutionFailure, TurnTelemetryOutcome};
@@ -249,6 +253,7 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
     // 追踪器只搬运不透明来源；这里直接登记一个"已 start 但归属不可解析"的 generation。
     t.generation
         .on_llm_start("unregistered-child", 0, GenerationInput::Rejected);
+    t.on_ai_reasoning_chunk("unregistered-child", "think");
 
     t.on_llm_end(
         "unregistered-child",
@@ -305,6 +310,14 @@ async fn test_unresolved_llm_parent_is_preserved_until_turn_end_fallback() {
             .and_then(|metadata| metadata.get("incomplete")),
         Some(&serde_json::json!(false))
     );
+    assert!(
+        generation.completion_start_time.is_some(),
+        "兜底路径不得丢失首个 reasoning 建立起的 completion 起点"
+    );
+    let meta = generation.metadata.as_ref().expect("应携带 metadata");
+    assert_eq!(meta["completion_start_source"], "reasoning_chunk");
+    assert!(meta["first_reasoning_ms"].as_u64().is_some());
+    assert_eq!(meta["first_visible_text_ms"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -400,389 +413,7 @@ async fn test_unsampled_failure_emits_parent_before_error_and_preserves_message(
         );
     }
 }
-
-// ── TextChunk 无副作用回归测试 ─────────────────────────────────────────────
-
-/// [回归] TextChunk 曾无条件累积到 `LangfuseTracer::final_answer`（无读取者、
-/// 无上限、无清理）。文本增量不得进入 Langfuse 事件模型。
-#[test]
-fn test_text_chunks_produce_no_langfuse_events() {
-    use crate::langfuse::bridge::UnifiedLangfuseEvent;
-    use peri_agent::agent::events::ExecutorEvent;
-    use peri_agent::agent::events_v2::RenderEvent;
-
-    for chunk in ["Hello ", "World"] {
-        assert!(
-            UnifiedLangfuseEvent::from_executor_event(ExecutorEvent::TextChunk {
-                message_id: peri_acp_types::messages::MessageId::new(),
-                chunk: chunk.to_string(),
-                source_agent_id: None,
-            })
-            .is_none(),
-            "v1 TextChunk 不应产生 Langfuse 事件"
-        );
-        assert!(
-            UnifiedLangfuseEvent::from_render_event(RenderEvent::TextChunk {
-                turn_id: peri_acp_types::session::TurnId::new(),
-                agent_id: peri_acp_types::identity::AgentId::new(),
-                message_id: peri_acp_types::messages::MessageId::new(),
-                chunk: chunk.to_string(),
-            })
-            .is_none(),
-            "v2 TextChunk 不应产生 Langfuse 事件"
-        );
-    }
-}
-
-/// 文本增量不进入 tracer 后，完整文本仍由 `on_llm_end` 的 Generation output 承载。
-#[tokio::test]
-async fn test_generation_output_remains_complete_after_text_chunks() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_llm_start("main", 0, &[], &[]);
-    t.on_llm_end("main", 0, "gpt-4", "openai", "Hello World", None, None);
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    let generation_output = events.iter().find_map(|e| {
-        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
-            body.output.clone()
-        } else {
-            None
-        }
-    });
-    assert_eq!(
-        generation_output,
-        Some(serde_json::json!({"text": "Hello World"})),
-        "文本增量不进入 tracer 后，Generation output 仍须是完整文本"
-    );
-}
-
-// ── LLM Generation 事件测试 ─────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_llm_generation_emits_events() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_llm_start("main", 0, &[], &[]);
-    t.on_llm_end("main", 0, "gpt-4", "openai", "response", None, None);
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    let gen_count = events
-        .iter()
-        .filter(|e| matches!(e, langfuse_client::IngestionEvent::GenerationCreate { .. }))
-        .count();
-    assert!(gen_count > 0, "应有至少一个 GenerationCreate 事件");
-
-    // 回归防护：input 不再进 body（由部署侧冻结来源承载，见 `input_snapshot_test` 的逐字节
-    // 用例），因此这里的假会话（无冻结能力）必须留下稳定拒收标记，不得静默丢掉 generation input
-    // （历史上曾因重构误写成硬编码 None，导致所有 generation 的 input 丢失，见 commit 0c0a3313）。
-    let rejected = events.iter().any(|e| {
-        matches!(e, langfuse_client::IngestionEvent::GenerationCreate { body, .. }
-            if body.metadata.as_ref().and_then(|meta| meta.get("input_snapshot_rejected"))
-                == Some(&serde_json::json!(true)))
-    });
-    assert!(rejected, "冻结被拒必须显式标记 input_snapshot_rejected");
-}
-
-#[tokio::test]
-async fn test_llm_error_preserves_status_message() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_llm_start("main", 0, &[], &[]);
-    t.on_llm_end(
-        "main",
-        0,
-        "gpt-4",
-        "openai",
-        "ERROR: sentinel-secret",
-        None,
-        None,
-    );
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    let gen = events.iter().find_map(|e| {
-        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
-            Some(body)
-        } else {
-            None
-        }
-    });
-    let gen = gen.expect("应有 GenerationCreate 事件");
-    assert_eq!(
-        gen.level,
-        Some(langfuse_client::types::ObservationLevel::Error),
-        "LLM 失败时 generation 应标记 Error 级"
-    );
-    assert_eq!(
-        gen.status_message.as_deref(),
-        Some("ERROR: sentinel-secret"),
-        "generation statusMessage 应保留实际错误"
-    );
-    assert!(format!("{gen:?}").contains("sentinel-secret"));
-}
-
-#[tokio::test]
-async fn test_turn_error_reason_is_safe_in_error_span() {
-    let (mut t, session) = make_tracer(0.0);
-    t.on_turn_start("turn_1");
-    t.on_turn_error(peri_agent::agent::events_v2::TurnErrorReason::LlmFailure);
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Failed {
-        failure: Box::new(peri_acp_types::session::ExecutionFailure {
-            kind: peri_acp_types::session::ExecutionFailureKind::Llm,
-            public_message: "LLM failure".to_string(),
-            error_category: None,
-            causes: Vec::new(),
-            http_status: None,
-            diagnostic: None,
-        }),
-    });
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    let error_span = events
-        .iter()
-        .find_map(|e| {
-            if let langfuse_client::IngestionEvent::EventCreate { body, .. } = e {
-                (body.name.as_deref() == Some("ErrorTurn")).then_some(body)
-            } else {
-                None
-            }
-        })
-        .expect("应有 ErrorTurn event");
-    assert_eq!(
-        error_span
-            .output
-            .as_ref()
-            .and_then(|output| output.get("error_class")),
-        Some(&serde_json::json!("llm_failure"))
-    );
-    assert_eq!(
-        error_span
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("error_schema_version")),
-        Some(&serde_json::json!(3))
-    );
-    assert!(!format!("{error_span:?}").contains("sentinel-secret"));
-}
-
-#[tokio::test]
-async fn test_llm_retry_accumulates_metadata() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_llm_start("main", 0, &[], &[]);
-    t.on_llm_retrying("main", 0, 1, 3, 500, "timeout");
-    t.on_llm_retrying("main", 0, 2, 3, 1000, "timeout");
-    t.on_llm_end("main", 0, "gpt-4", "openai", "response", None, None);
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    // 验证 GenerationCreate 包含重试 metadata（字段名为 retry_count）
-    let has_retry_meta = events.iter().any(|e| {
-        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
-            body.metadata
-                .as_ref()
-                .map(|m| m.get("retry_count").is_some())
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    });
-    assert!(
-        has_retry_meta,
-        "GenerationCreate 应包含重试 metadata (retry_count)"
-    );
-}
-
-// ── Middleware 事件测试 ─────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_middleware_start_and_end() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_middleware_start(
-        "auth",
-        peri_agent::agent::events::MiddlewareHook::BeforeAgent,
-    );
-    let mw_handle = t.middleware.on_start(
-        "auth",
-        peri_agent::agent::events::MiddlewareHook::BeforeAgent,
-    );
-    // 微小延迟确保 duration > 0（MiddlewareSpan 条件上报）
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    t.on_middleware_end(&mw_handle, StageStatus::Done, None);
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    let has_mw_span = events.iter().any(|e| {
-        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
-            body.name.as_deref() == Some("mw-auth")
-        } else {
-            false
-        }
-    });
-    assert!(has_mw_span, "应有 mw-auth SpanCreate 事件");
-}
-
-// ── Compact 事件测试 ────────────────────────────────────────────────────────
-
-/// Micro compact 应记录为独立类型 `micro-compact`（name 区分），
-/// 且 input/output 结构完整（执行前状态 / 执行结果含 token 指标）。
-#[tokio::test]
-async fn test_compact_lifecycle() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_compact_start(
-        peri_agent::agent::events::CompactStrategy::Micro,
-        peri_agent::agent::events::CompactTrigger::Auto,
-    );
-    // 微小延迟确保 duration > 0（Compact 条件上报）
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    t.on_compact_end(crate::langfuse::tracer::compact::CompactEndInfo {
-        summary: "summary text".to_string(),
-        files_count: 3,
-        skills_count: 2,
-        micro_cleared: 5,
-        is_error: false,
-        error_message: String::new(),
-        estimated_tokens_saved: 12000,
-        estimated_tokens_before: 45000,
-        estimated_tokens_after: 33000,
-        cache_hit_rate_before: 0.8,
-        full_escalation_reason: None,
-        outcome: Some("done".to_string()),
-    });
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    let compact = events.iter().find_map(|e| {
-        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
-            if body.name.as_deref() == Some("micro-compact") {
-                Some(body)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    });
-    let body = compact.expect("Micro 策略应有 micro-compact SpanCreate 事件");
-
-    // input = 执行前状态
-    let input = body.input.as_ref().expect("compact 应有 input");
-    assert_eq!(input["strategy"], "Micro");
-    assert_eq!(input["estimated_tokens_before"], 45000);
-    assert_eq!(input["cache_hit_rate_before"], 0.8);
-
-    // output = 执行结果（含 token 指标）
-    let output = body.output.as_ref().expect("compact 应有 output");
-    assert_eq!(output["summary"], "summary text");
-    assert_eq!(output["files_count"], 3);
-    assert_eq!(output["skills_count"], 2);
-    assert_eq!(output["micro_cleared"], 5);
-    assert_eq!(output["estimated_tokens_saved"], 12000);
-    assert_eq!(output["estimated_tokens_after"], 33000);
-    assert_eq!(output["outcome"], "done");
-
-    // v2 条件上报：compact 改为延迟创建，不再发 SpanUpdate
-    let has_compact_update = events.iter().any(|e| {
-        if let langfuse_client::IngestionEvent::SpanUpdate { body, .. } = e {
-            body.name.as_deref() == Some("micro-compact") || body.name.as_deref() == Some("compact")
-        } else {
-            false
-        }
-    });
-    assert!(!has_compact_update, "v2 条件上报不应发 compact SpanUpdate");
-}
-
-/// Full 策略应记录为 `compact`（非 micro-compact）。
-#[tokio::test]
-async fn test_full_compact_span_name() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_compact_start(
-        peri_agent::agent::events::CompactStrategy::Full,
-        peri_agent::agent::events::CompactTrigger::Auto,
-    );
-    // 微小延迟确保 duration > 0（Compact 条件上报）
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    t.on_compact_end(crate::langfuse::tracer::compact::CompactEndInfo {
-        summary: "summary text".to_string(),
-        files_count: 0,
-        skills_count: 0,
-        micro_cleared: 0,
-        is_error: false,
-        error_message: String::new(),
-        estimated_tokens_saved: 0,
-        estimated_tokens_before: 0,
-        estimated_tokens_after: 0,
-        cache_hit_rate_before: 0.0,
-        full_escalation_reason: None,
-        outcome: None,
-    });
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    let has_full = events.iter().any(|e| {
-        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
-            body.name.as_deref() == Some("compact")
-        } else {
-            false
-        }
-    });
-    assert!(has_full, "Full 策略应有 compact SpanCreate 事件");
-
-    let has_micro = events.iter().any(|e| {
-        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
-            body.name.as_deref() == Some("micro-compact")
-        } else {
-            false
-        }
-    });
-    assert!(!has_micro, "Full 策略不应有 micro-compact 事件");
-}
-
-// ── Workflow 事件测试 ───────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_workflow_span_carries_plan_input() {
-    let (mut t, session) = make_tracer(1.0);
-    t.on_turn_start("turn_1");
-    t.on_stage_start(Stage::Act, "turn_1");
-    t.on_workflow_start("wf-1", "my test plan");
-    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
-    tokio::task::yield_now().await;
-    let events = session.events_snapshot();
-
-    // 回归防护：workflow span 必须携带 plan input
-    // （历史上曾因重构把 {"plan": plan} 误改为硬编码 None）
-    let wf_input = events.iter().find_map(|e| {
-        if let langfuse_client::IngestionEvent::SpanCreate { body, .. } = e {
-            if body.name.as_deref() == Some("workflow-wf-1") {
-                body.input.as_ref()
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    });
-    assert_eq!(
-        wf_input,
-        Some(&serde_json::json!({"plan": "my test plan"})),
-        "workflow span 应携带 plan input"
-    );
-}
+include!("span_payload_test.rs");
 
 /// 回归测试：当 `stages.active_handle()` 返回 None 但 subagent 已注册时，
 /// `on_tool_start` 的 parent_id 应 fallback 到该 subagent 的 AGENT obs id，
@@ -828,7 +459,13 @@ fn test_receive_stage_span_includes_mq_counts_in_input() {
     t.on_stage_start(Stage::Receive, "turn_mq");
 
     // 2. 模拟 MQ 排空：1 条 prompt + 2 条 defer + 0 条 info = 共 3 条
-    t.on_mq_drained("main", 1, 2, 0);
+    t.on_mq_drained(
+        "main",
+        1,
+        2,
+        0,
+        Some("2020-01-01T00:00:00.000000Z".to_string()),
+    );
 
     // 3. 确保 stage 持续 ≥ 2ms，避免 duration_ms==0 导致 span 被条件跳过
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -879,6 +516,57 @@ fn test_receive_stage_span_includes_mq_counts_in_input() {
     assert_eq!(mq["defer"], serde_json::json!(2), "defer 计数应为 2");
     assert_eq!(mq["info"], serde_json::json!(0), "info 计数应为 0");
     assert_eq!(mq["total"], serde_json::json!(3), "total 应为 1+2+0 = 3");
+
+    // 排队等待以 Receive 起点减去最早入队时间；两端都在 span 上，可复算。
+    let enqueued = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00.000000Z")
+        .expect("fixture 时间应可解析");
+    let started = chrono::DateTime::parse_from_rfc3339(
+        span.start_time.as_deref().expect("span start_time 应存在"),
+    )
+    .expect("span start_time 应可解析");
+    let expected_ms = started
+        .signed_duration_since(enqueued)
+        .num_milliseconds()
+        .max(0) as u64;
+    assert_eq!(
+        input["queue_wait_ms"],
+        serde_json::json!(expected_ms),
+        "queue_wait_ms 应等于 Receive 起点与最早入队时间的差"
+    );
+}
+
+/// 没有可用入队时间时，queue_wait_ms 必须是 null（保持未知），不能补零。
+#[test]
+fn test_receive_stage_queue_wait_is_null_without_enqueued_at() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_mq_null");
+    t.on_stage_start(Stage::Receive, "turn_mq_null");
+    t.on_mq_drained("main", 1, 0, 0, None);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let handle = t
+        .stages
+        .active_handle("main")
+        .expect("Receive stage 应为 active")
+        .clone();
+    t.on_stage_end("main", &handle, StageStatus::Done);
+
+    let events = session.events_snapshot();
+    let span = events
+        .iter()
+        .find_map(|e| {
+            if let IngestionEvent::SpanCreate { body, .. } = e {
+                (body.name.as_deref() == Some("stage-receive")).then_some(body)
+            } else {
+                None
+            }
+        })
+        .expect("应有 stage-receive SpanCreate");
+    let input = span.input.as_ref().expect("Receive span input 应存在");
+    assert_eq!(
+        input.get("queue_wait_ms"),
+        Some(&serde_json::Value::Null),
+        "无入队时间时 queue_wait_ms 应为 null"
+    );
 }
 
 /// 非 Receive 阶段的 span input 应保持 None，不应误填充。
@@ -968,6 +656,14 @@ async fn test_tool_observation_carries_input_and_output() {
         obs.output,
         Some(serde_json::json!("file content: hello")),
         "TOOL observation 应携带工具执行结果"
+    );
+    assert_eq!(
+        obs.metadata
+            .as_ref()
+            .and_then(|meta| meta.get("tool_call_id"))
+            .and_then(|id| id.as_str()),
+        Some("tc_read"),
+        "TOOL observation metadata 应携带 tool_call_id，用于与 Generation tool_calls 对齐"
     );
 }
 

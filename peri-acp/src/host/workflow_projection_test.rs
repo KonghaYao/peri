@@ -1,10 +1,18 @@
-use super::*;
-use peri_acp_types::{
-    ports::McpPoolShutdownReport,
-    tasks::{BgTaskKind, BgTaskRegistration},
-    workflow::{AgentExecutor, AgentRunParams, AgentRunResult, WorkflowRunStatus},
-};
+use crate::host::workflow_projection::Client;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::ports::McpPoolShutdownReport;
+use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::BgTaskRegistration;
+use peri_acp_types::tasks::TaskManager;
+use peri_acp_types::workflow::AgentExecutor;
+use peri_acp_types::workflow::AgentRunParams;
+use peri_acp_types::workflow::AgentRunResult;
+use peri_acp_types::workflow::WorkflowRunStatus;
+use peri_acp_types::workflow::WorkflowTaskResult;
+use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 struct Executor;
 #[async_trait::async_trait]
@@ -21,9 +29,6 @@ struct WirePool {
 }
 #[async_trait::async_trait]
 impl McpPoolPort for WirePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn snapshot(&self) -> serde_json::Value {
         json!({})
     }
@@ -198,11 +203,13 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
         acceptance_status: Default::default(),
         post_processing_status: Default::default(),
         delivery_status: Default::default(),
+        outcome: Default::default(),
         state_artifact_exists: false,
         duration_ms: 10,
         agent_count: 0,
         tool_calls_count: 0,
         error: Some("failed".into()),
+        result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
     };

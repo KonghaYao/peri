@@ -1,8 +1,13 @@
 //! oversize 记忆溢出后的 body 行为：身份集合不再是权威，必须按稳定 `entryId`
 //! 回存储重取校验；已暴露 descriptor 仍可读，未暴露条目继续拒绝。
 
-use super::*;
-
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::PersistedPayload;
+use serde_json::json;
+use serial_test::serial;
+use std::sync::Arc;
 #[tokio::test]
 #[serial]
 async fn overflowed_memory_revalidates_by_stable_entry_identity() {
@@ -22,9 +27,17 @@ async fn overflowed_memory_revalidates_by_stable_entry_identity() {
     let normal_id = fixture.own_ids().await[0];
 
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),

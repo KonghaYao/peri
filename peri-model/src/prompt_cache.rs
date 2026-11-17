@@ -7,6 +7,7 @@
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
 /// Removes every reserved cache-boundary token without changing surrounding bytes.
+#[must_use]
 pub fn strip_system_prompt_dynamic_boundaries(text: &str) -> String {
     text.replace(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "")
 }

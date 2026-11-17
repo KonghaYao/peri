@@ -3,13 +3,18 @@
 //! 只验证 committed / current_turn / folded_history 的条目与字节可区分；
 //! 不改变任何释放/折叠语义。
 
-use super::*;
+use super::SessionPhase;
+use super::TuiAssistantBubble;
+use super::TuiRenderUnit;
+use super::TuiTextChunk;
+use super::TuiUserBubble;
+use super::serial;
 
 use std::sync::Arc;
 
 #[test]
 fn bridge_snapshot_separates_committed_current_and_folded_bytes() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
 
     let committed_text = "committed-body-".repeat(16);
     state
@@ -78,7 +83,7 @@ fn bridge_snapshot_separates_committed_current_and_folded_bytes() {
 /// 槽位地址不能充当分配身份（每次 clone 的枚举槽位不同）。
 #[test]
 fn bridge_snapshot_dedups_shared_assistant_arc_across_layers() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let text = "shared-arc-body-".repeat(64);
     state
         .committed
@@ -110,7 +115,7 @@ fn bridge_snapshot_dedups_shared_assistant_arc_across_layers() {
 /// [M07 回归] 同一 Arc 同时出现在 current_turn 与 committed 时，unique 只计一次。
 #[test]
 fn bridge_snapshot_dedups_shared_arc_between_current_and_committed() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     // PromptRunning 下 fold 不改写 bubble，folded_history 与 committed 共享同一 Arc。
     state.phase = SessionPhase::PromptRunning;
     let text = "shared-arc-cross-layer-".repeat(32);
@@ -137,7 +142,7 @@ fn bridge_snapshot_dedups_shared_arc_between_current_and_committed() {
 /// [M07 回归] 按值 clone 的 TuiToolCard 是独立分配，必须计两次。
 #[test]
 fn bridge_snapshot_counts_independently_cloned_tool_cards_twice() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let input = "input-summary-".repeat(64);
     let output = "output-summary-".repeat(64);
     let card = crate::kit::tui_render_unit::TuiToolCard {
@@ -172,7 +177,7 @@ fn bridge_snapshot_counts_independently_cloned_tool_cards_twice() {
 /// body 归零但 String capacity 仍可区分。
 #[test]
 fn bridge_snapshot_separates_raw_input_and_capacity_after_clear() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let raw = "x".repeat(64 * 1024);
     state
         .current_turn
@@ -257,7 +262,7 @@ fn bridge_snapshot_reports_bg_live_stream_and_nested_separately() {
             agent_id: Some("probe-agent".into()),
         },
     );
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     let before = state.memory_snapshot();
     assert_eq!(before.bg_live_entries, 1);
     assert!(before.bg_live_stream_bytes > 0);

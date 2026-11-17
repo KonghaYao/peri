@@ -1,15 +1,24 @@
-use super::*;
+use super::AcpEventData;
+use super::CancellationToken;
+use super::ReplayAtomsGuard;
+use super::acp_events;
+use super::atoms;
+use super::mpsc;
+use super::serial;
+
 use crate::acp_client::AcpTuiClient;
+
 use crate::kit::acp_notifier::spawn_kit_notifier;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use peri_acp::event::AcpEvent;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::IncomingMessage;
 use serde_json::json;
 use std::time::Duration;
 
 async fn cancel_streaming_output(chunk_kinds: &[&str]) {
     let _restore = ReplayAtomsGuard::new();
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notifications, notification_rx) = AcpTuiClient::new(transport);
     client.force_stable_for_test("s1", false);
     client.spawn_pump(notifications);
@@ -20,7 +29,7 @@ async fn cancel_streaming_output(chunk_kinds: &[&str]) {
         crate::kit::acp_notifier::BridgeSink::direct(bridge_tx),
         shutdown.clone(),
     );
-    let mut state = scheduler_state();
+    let mut state = super::scheduler_state();
 
     server
         .send_notification(
@@ -30,11 +39,11 @@ async fn cancel_streaming_output(chunk_kinds: &[&str]) {
             }}),
         )
         .await
-        .unwrap();
+        .expect("cancel streaming output: fixture task and request must complete successfully");
     let started = tokio::time::timeout(Duration::from_secs(2), bridge_rx.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("cancel streaming output: fixture task and request must complete successfully")
+        .expect("cancel streaming output: fixture task and request must complete successfully");
     acp_events::dispatch_for_bridge(&mut state, &started.event);
     assert_eq!(state.current_request_id.as_deref(), Some("streaming-1"));
     assert!(atoms::ACP_STATE.state().read().is_loading);
@@ -49,16 +58,19 @@ async fn cancel_streaming_output(chunk_kinds: &[&str]) {
                 }}),
             )
             .await
-            .unwrap();
+            .expect("cancel streaming output: fixture task and request must complete successfully");
         let chunk = tokio::time::timeout(Duration::from_secs(2), bridge_rx.recv())
             .await
-            .unwrap()
-            .unwrap();
+            .expect("cancel streaming output: fixture task and request must complete successfully")
+            .expect("cancel streaming output: fixture task and request must complete successfully");
         acp_events::dispatch_for_bridge(&mut state, &chunk.event);
     }
     assert!(!state.current_turn.is_empty());
 
-    client.cancel().await.unwrap();
+    client
+        .cancel()
+        .await
+        .expect("cancel streaming output: fixture task and request must complete successfully");
     assert!(
         matches!(server.recv().await, Some(IncomingMessage::Notification {
         method, params,
@@ -74,14 +86,18 @@ async fn cancel_streaming_output(chunk_kinds: &[&str]) {
             json!({"sessionId":"s1", "requestId":"streaming-1", "stopReason":"cancelled"}),
         )
         .await
-        .unwrap();
+        .expect("cancel streaming output: fixture task and request must complete successfully");
     let terminal = tokio::time::timeout(Duration::from_millis(200), bridge_rx.recv()).await;
     shutdown.cancel();
-    notifier.await.unwrap();
+    notifier
+        .await
+        .expect("cancel streaming output: fixture task and request must complete successfully");
     client.close();
     let terminal = terminal
         .expect("cancelled streaming request must forward its terminal notification")
-        .unwrap();
+        .expect(
+            "cancel streaming output: the fixture operation must finish without an inner failure",
+        );
     assert!(
         matches!(&terminal.event, AcpEventData::TurnInterrupted { request_id, .. }
         if request_id.as_deref() == Some("streaming-1"))

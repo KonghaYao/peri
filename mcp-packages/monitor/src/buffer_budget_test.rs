@@ -1,5 +1,10 @@
-use super::*;
+use crate::buffer::CapturedEvent;
+use crate::buffer::EventBuffer;
 use crate::buffer::{MAX_READ_BYTES, MAX_TASK_BYTES, MIN_TASK_BYTES};
+use crate::buffer_budget::BufferBudget;
+use crate::buffer_budget::INSTANCE_EVENT_BYTES;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 fn captured(text: String) -> CapturedEvent {
     CapturedEvent {

@@ -12,6 +12,7 @@ use crate::command::{CommandContext, CommandResult};
 
 /// 执行结果三态（设计 §71：Done=完成并反馈，Inject=透传指令进 agent 管线，
 /// Delegate=转发其他执行者：ui 域回 TUI / 未来 MCP 直连）。
+#[must_use]
 pub enum CommandOutcome {
     /// 命令已完成，携带执行结果（消息历史 + 停止原因 + 可选反馈）。
     Done(CommandResult),

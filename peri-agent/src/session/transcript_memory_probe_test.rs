@@ -4,7 +4,9 @@
 //! 模型。断言全部是对象级证据：条目/引用消失、容量下降、被排除正文不在热态；
 //! 不用 RSS 单独证明释放，也不承诺固定降幅。
 
-use super::*;
+use crate::session::transcript::MessageTranscript;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
 
 use peri_acp_types::store::CompactionChange;
 
@@ -17,7 +19,7 @@ async fn full_commit_releases_archived_own_bodies_and_container_capacity() {
     // 冻结继承区：Full 不得改动其条目与字节。
     let inherited: Vec<_> = (0..3)
         .map(|index| {
-            PersistedPayload::Message(make_human(&format!(
+            PersistedPayload::Message(crate::session::transcript::tests::make_human(&format!(
                 "inherited-{index}-{}",
                 "i".repeat(256)
             )))
@@ -31,10 +33,15 @@ async fn full_commit_releases_archived_own_bodies_and_container_capacity() {
     let mut archived_ids = Vec::new();
     for index in 0..48 {
         let body = format!("ARCHIVED-{index:02}-{}", "x".repeat(1024));
-        archived_ids.push(transcript.append(make_human(&body)));
+        archived_ids.push(transcript.append(crate::session::transcript::tests::make_human(&body)));
     }
-    let retained_id = transcript.append(make_ai("RETAINED-OWN-BODY"));
-    transcript.flush_persistence().await.unwrap();
+    let retained_id = transcript.append(crate::session::transcript::tests::make_ai(
+        "RETAINED-OWN-BODY",
+    ));
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     let t0 = transcript.memory_snapshot();
     assert!(t0.own_bytes.body >= 48 * 1024, "夹具必须包含真实正文");
@@ -53,7 +60,8 @@ async fn full_commit_releases_archived_own_bodies_and_container_capacity() {
             )
         })
         .collect();
-    let summary = make_ai(&format!("FULL-SUMMARY-{}", "s".repeat(128)));
+    let summary =
+        crate::session::transcript::tests::make_ai(&format!("FULL-SUMMARY-{}", "s".repeat(128)));
     let summary_id = summary.id();
     transcript
         .commit_compaction_lifecycle(CompactionChange {
@@ -61,7 +69,7 @@ async fn full_commit_releases_archived_own_bodies_and_container_capacity() {
             appended_messages: vec![summary],
         })
         .await
-        .unwrap();
+        .expect("the commit compaction lifecycle fixture result is required for this assertion");
 
     let t1 = transcript.memory_snapshot();
     println!("T0=[{t0:?}]\nT1=[{t1:?}]");
@@ -135,7 +143,7 @@ async fn full_commit_releases_archived_own_bodies_and_container_capacity() {
         .resources()
         .load_session_snapshot(&session.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert!(
         stored.payloads.iter().any(|payload| payload
             .as_message()

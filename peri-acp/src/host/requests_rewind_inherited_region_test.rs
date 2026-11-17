@@ -1,4 +1,18 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session_resources::ChildSnapshot;
+
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+
+use peri_acp_types::thread::ThreadId;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── 继承区在请求级 rewind 里的口径 ─────────────────────────────────────────────
 
@@ -34,7 +48,11 @@ async fn register_child_with_inherited_history(
     // parent：child 的 frozen 必须逐字节等于 root 已保存快照，因此复用同一份编码结果。
     let parent = "rewind-inherited-parent".to_string();
     cfg.session_resources
-        .create_session(&bound_input(&parent, &workspace, encoded.clone()))
+        .create_session(&crate::host::requests::tests::bound_input(
+            &parent,
+            &workspace,
+            encoded.clone(),
+        ))
         .await
         .unwrap();
     let inherited_payloads = vec![
@@ -48,7 +66,7 @@ async fn register_child_with_inherited_history(
 
     // child：继承 parent 到快照点为止的上下文，自有历史另算。
     let sid = "rewind-inherited-child".to_string();
-    let mut target = bound_input(&sid, &workspace, encoded);
+    let mut target = crate::host::requests::tests::bound_input(&sid, &workspace, encoded);
     target.meta.parent_thread_id = Some(parent.clone());
     target.meta.snapshot_at_message_id = Some(inherited_payloads[1].id());
     cfg.session_resources
@@ -146,28 +164,32 @@ async fn test_rewind_with_an_inherited_region_only_clears_own_archived_prefix() 
     use peri_acp_types::messages::BaseMessage;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let mock = Arc::new(MockTransport::default());
     let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
     let fixture =
         register_child_with_inherited_history(&mut sessions, &cfg, tmp.path().to_str().unwrap())
             .await;
-    enable_rewind_and_event_caps(&cfg, &fixture.sid);
-    let before_history = history_ids(&sessions, &fixture.sid);
-    let before_payloads = payload_ids(&sessions, &fixture.sid);
+    crate::host::requests::tests::rewind_cases::enable_rewind_and_event_caps(&cfg, &fixture.sid);
+    let before_history =
+        crate::host::requests::tests::rewind_cases::history_ids(&sessions, &fixture.sid);
+    let before_payloads =
+        crate::host::requests::tests::rewind_cases::payload_ids(&sessions, &fixture.sid);
 
     // 继承条目不是本会话的回退目标：存储按 id 在**本会话的行集合**里找边界，放行会留下
     // 「内存已截断、存储没动」的分叉，因此执行必须先拒绝，且热态一行不动。
     let inherited_target = fixture.inherited[0].as_uuid().to_string();
-    let inherited_preview = handle_request(
+    let inherited_preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({
             "sessionId": fixture.sid,
@@ -179,7 +201,7 @@ async fn test_rewind_with_an_inherited_region_only_clears_own_archived_prefix() 
     )
     .await
     .unwrap();
-    let error = handle_request(
+    let error = crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": fixture.sid,
@@ -193,10 +215,16 @@ async fn test_rewind_with_an_inherited_region_only_clears_own_archived_prefix() 
     .await
     .unwrap_err();
     assert_eq!(error.code, -32602, "继承条目不得当作回退目标: {error:?}");
-    assert_eq!(history_ids(&sessions, &fixture.sid), before_history);
-    assert_eq!(payload_ids(&sessions, &fixture.sid), before_payloads);
+    assert_eq!(
+        crate::host::requests::tests::rewind_cases::history_ids(&sessions, &fixture.sid),
+        before_history
+    );
+    assert_eq!(
+        crate::host::requests::tests::rewind_cases::payload_ids(&sessions, &fixture.sid),
+        before_payloads
+    );
 
-    let preview = handle_request(
+    let preview = crate::host::requests::handle_request(
         "session/rewind-preview",
         &json!({
             "sessionId": fixture.sid,
@@ -210,7 +238,7 @@ async fn test_rewind_with_an_inherited_region_only_clears_own_archived_prefix() 
     .unwrap();
     let fingerprint = preview["preview_fingerprint"].as_str().unwrap().to_string();
 
-    let response = handle_request(
+    let response = crate::host::requests::handle_request(
         "session/rewind",
         &json!({
             "sessionId": fixture.sid,
@@ -227,7 +255,7 @@ async fn test_rewind_with_an_inherited_region_only_clears_own_archived_prefix() 
     // 有效视图：继承区 + 存活摘要。被摘要覆盖的原文不得复活（它们仍在归档区），目标被移除。
     let expected = vec![fixture.inherited[0], fixture.inherited[1], fixture.own[2]];
     assert_eq!(
-        payload_ids(&sessions, &fixture.sid),
+        crate::host::requests::tests::rewind_cases::payload_ids(&sessions, &fixture.sid),
         expected,
         "热态必须是「继承区 + 存活摘要」"
     );
@@ -244,7 +272,8 @@ async fn test_rewind_with_an_inherited_region_only_clears_own_archived_prefix() 
             .collect::<Vec<_>>(),
         "wire 与热态同源"
     );
-    let events = agent_events(&mock, "rewind_completed");
+    let events =
+        crate::host::requests::tests::rewind_cases::agent_events(&mock, "rewind_completed");
     assert_eq!(events.len(), 1);
     let event_messages: Vec<BaseMessage> =
         serde_json::from_str(events[0]["messages_json"].as_str().unwrap()).unwrap();

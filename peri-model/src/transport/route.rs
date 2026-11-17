@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -32,11 +33,11 @@ struct RoutedTransport {
 }
 
 #[derive(Serialize)]
-struct WireContext<'a> {
+struct WireContext<'call> {
     v: u8,
-    run: &'a str,
+    run: &'call str,
     #[serde(flatten)]
-    call: &'a ModelCallContext,
+    call: &'call ModelCallContext,
     attempt: u32,
 }
 

@@ -1,12 +1,29 @@
 //! Tests for tui_render_unit
 
-use super::*;
+use super::EntryStatus;
+use super::FoldKey;
+use super::FoldState;
+use super::FoldTarget;
+use super::InteractionKind;
+use super::TuiAskUserBlock;
+use super::TuiAssistantBubble;
+use super::TuiCollapsedGroup;
+use super::TuiDivider;
+use super::TuiNoteLevel;
+use super::TuiReasoningBlock;
+use super::TuiRenderUnit;
+use super::TuiSubAgentGroup;
+use super::TuiSystemNote;
+use super::TuiToolCard;
+use super::TuiToolPresentation;
+use super::TuiUserBubble;
+use super::UserAttachment;
 
 // ── tui_hash_str ─────────────────────────────────────────────────────
 
 #[test]
 fn test_tui_hash_str_different_input_different_output() {
-    assert_ne!(tui_hash_str("hello"), tui_hash_str("world"));
+    assert_ne!(super::tui_hash_str("hello"), super::tui_hash_str("world"));
 }
 
 // ── 附件展示记录（粘贴图片）─────────────────────────────────────────────
@@ -220,7 +237,11 @@ fn test_recompute_hash_after_fold_change() {
         TuiAssistantBubble::compute_hash(&bubble.text, bubble.reasoning.as_ref(), 0, true);
     let initial_hash = bubble.content_hash;
     // 修改 fold 状态
-    bubble.reasoning.as_mut().unwrap().fold = FoldState::Collapsed;
+    bubble
+        .reasoning
+        .as_mut()
+        .expect("recompute hash after fold change: fixture must have the expected variant")
+        .fold = FoldState::Collapsed;
     // 不调用 recompute_hash → content_hash 仍是旧值（错误状态）
     assert_eq!(bubble.content_hash, initial_hash);
     // 调用 recompute_hash → content_hash 更新
@@ -260,42 +281,42 @@ fn test_fold_for_status_matches_spec_table() {
     use FoldState::*;
     use FoldTarget::*;
     // user / assistant 永远展开
-    assert_eq!(fold_for_status(User, Running), Expanded);
-    assert_eq!(fold_for_status(User, Completed), Expanded);
-    assert_eq!(fold_for_status(Assistant, Running), Expanded);
-    assert_eq!(fold_for_status(Assistant, Completed), Expanded);
-    assert_eq!(fold_for_status(Assistant, Error), Expanded);
+    assert_eq!(super::fold_for_status(User, Running), Expanded);
+    assert_eq!(super::fold_for_status(User, Completed), Expanded);
+    assert_eq!(super::fold_for_status(Assistant, Running), Expanded);
+    assert_eq!(super::fold_for_status(Assistant, Completed), Expanded);
+    assert_eq!(super::fold_for_status(Assistant, Error), Expanded);
     // reasoning：Running → Preview / Completed → Collapsed / Error → Preview
-    assert_eq!(fold_for_status(Reasoning, Running), Preview);
-    assert_eq!(fold_for_status(Reasoning, Completed), Collapsed);
-    assert_eq!(fold_for_status(Reasoning, Error), Preview);
+    assert_eq!(super::fold_for_status(Reasoning, Running), Preview);
+    assert_eq!(super::fold_for_status(Reasoning, Completed), Collapsed);
+    assert_eq!(super::fold_for_status(Reasoning, Error), Preview);
     // tool：流式 Preview，成功或失败完成后均收束为 Collapsed
-    assert_eq!(fold_for_status(Tool, Running), Preview);
-    assert_eq!(fold_for_status(Tool, Completed), Collapsed);
-    assert_eq!(fold_for_status(Tool, Error), Collapsed);
+    assert_eq!(super::fold_for_status(Tool, Running), Preview);
+    assert_eq!(super::fold_for_status(Tool, Completed), Collapsed);
+    assert_eq!(super::fold_for_status(Tool, Error), Collapsed);
     // subagent：Collapsed + live summary → Collapsed → Expanded summary
-    assert_eq!(fold_for_status(SubAgent, Running), Collapsed);
-    assert_eq!(fold_for_status(SubAgent, Completed), Collapsed);
-    assert_eq!(fold_for_status(SubAgent, Error), Expanded);
+    assert_eq!(super::fold_for_status(SubAgent, Running), Collapsed);
+    assert_eq!(super::fold_for_status(SubAgent, Completed), Collapsed);
+    assert_eq!(super::fold_for_status(SubAgent, Error), Expanded);
     // system：Collapsed → Collapsed → Expanded summary
-    assert_eq!(fold_for_status(System, Running), Collapsed);
-    assert_eq!(fold_for_status(System, Completed), Collapsed);
-    assert_eq!(fold_for_status(System, Error), Expanded);
+    assert_eq!(super::fold_for_status(System, Running), Collapsed);
+    assert_eq!(super::fold_for_status(System, Completed), Collapsed);
+    assert_eq!(super::fold_for_status(System, Error), Expanded);
     // interaction：Expanded → Expanded（答毕完整展示，用户需求）→ Expanded
-    assert_eq!(fold_for_status(Interaction, Running), Expanded);
-    assert_eq!(fold_for_status(Interaction, Completed), Expanded);
-    assert_eq!(fold_for_status(Interaction, Error), Expanded);
+    assert_eq!(super::fold_for_status(Interaction, Running), Expanded);
+    assert_eq!(super::fold_for_status(Interaction, Completed), Expanded);
+    assert_eq!(super::fold_for_status(Interaction, Error), Expanded);
 }
 
 #[test]
 fn test_fold_and_status_codes_deterministic_and_distinct() {
     // [G1] hash 代码必须确定性且互不相同——状态混淆会破坏缓存重建。
-    assert_eq!(fold_state_code(FoldState::Collapsed), 1);
-    assert_eq!(fold_state_code(FoldState::Preview), 2);
-    assert_eq!(fold_state_code(FoldState::Expanded), 3);
-    assert_eq!(entry_status_code(EntryStatus::Running), 1);
-    assert_eq!(entry_status_code(EntryStatus::Completed), 2);
-    assert_eq!(entry_status_code(EntryStatus::Error), 3);
+    assert_eq!(super::fold_state_code(FoldState::Collapsed), 1);
+    assert_eq!(super::fold_state_code(FoldState::Preview), 2);
+    assert_eq!(super::fold_state_code(FoldState::Expanded), 3);
+    assert_eq!(super::entry_status_code(EntryStatus::Running), 1);
+    assert_eq!(super::entry_status_code(EntryStatus::Completed), 2);
+    assert_eq!(super::entry_status_code(EntryStatus::Error), 3);
 }
 
 #[test]
@@ -531,7 +552,7 @@ fn test_tool_card_hash_includes_diff() {
 fn test_tui_render_unit_subagent_group_construction() {
     let inner = TuiRenderUnit::TuiDivider(TuiDivider {
         label: Some("inner".into()),
-        content_hash: tui_hash_str("inner"),
+        content_hash: super::tui_hash_str("inner"),
     });
     let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
         preview_omitted: false,
@@ -875,3 +896,7 @@ fn test_fold_key_interaction_roundtrip() {
 
 #[path = "tui_render_unit_reminder_test.rs"]
 mod reminder_tests;
+
+use super::ReminderInfo;
+use super::ReminderType;
+use super::i18n;

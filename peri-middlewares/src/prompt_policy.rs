@@ -1,6 +1,6 @@
 //! 段落能力策略（H2 单一权威）。
 //!
-//! 由**实际装配事实**（[`SectionCapabilities`]）派生系统提示词段落集合：
+//! 由**实际装配事实**（[`peri_agent::middleware::prompt_sections::SectionCapabilities`]）派生系统提示词段落集合：
 //! 主链、子链、workflow 链与冻结渲染共用本策略，ACP 不维护第二份按执行类型
 //! 硬编码的排除表。
 //!
@@ -17,7 +17,8 @@
 
 use std::collections::HashSet;
 
-use peri_acp_types::{agents::AgentOverrides, meta_harness::MetaHarnessState};
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::meta_harness::MetaHarnessState;
 use peri_agent::middleware::prompt_sections::{PromptSection, SectionCapabilities};
 
 use crate::default_system_prompt::{DefaultSystemPromptMiddleware, LangMiddleware};
@@ -27,6 +28,7 @@ use crate::skills::SkillsMiddleware;
 use crate::subagent::SubAgentMiddleware;
 
 /// 按能力事实收集段落（纯函数，渲染面与对拍测试共用）。
+#[must_use]
 pub fn collect_prompt_sections(
     state: &MetaHarnessState,
     overrides: Option<&AgentOverrides>,
@@ -62,6 +64,7 @@ pub fn collect_prompt_sections(
 /// 主链 `PermissionMiddleware` 恒以 `with_shared_mode` 构造（broker 必填）
 /// ⇒ 审批有效；`HumanInTheLoopMiddleware` 装配即持有提问通道。
 /// 与真实链的对拍见 `assembly_test_sections.rs`。
+#[must_use]
 pub fn main_chain_capabilities(disabled: &HashSet<String>) -> SectionCapabilities {
     SectionCapabilities {
         base_prompt: !disabled.contains("DefaultSystemPromptMiddleware"),
@@ -79,6 +82,7 @@ pub fn main_chain_capabilities(disabled: &HashSet<String>) -> SectionCapabilitie
 /// （`base_prompt` / `language` 仍按冻结 disabled 决策表达继承面），gated 段只
 /// 保留子链真实具备的 13_skills。与真实子链的对拍见
 /// `subagent/tool/tool_test/sections_parity_test.rs`。
+#[must_use]
 pub fn subagent_chain_capabilities(disabled: &HashSet<String>) -> SectionCapabilities {
     SectionCapabilities {
         // 基础段（01-06 / 07_runtime / persona）与语言段：继承会话冻结决策——
@@ -100,6 +104,7 @@ pub fn subagent_chain_capabilities(disabled: &HashSet<String>) -> SectionCapabil
 /// `PermissionMiddleware::disabled()`——存在不等于需要审批说明。workflow 链不
 /// 装配 SubAgentMiddleware。与真实 workflow 链的对拍见
 /// `assembly_test_workflow.rs`。
+#[must_use]
 pub fn workflow_chain_capabilities(
     disabled: &HashSet<String>,
     broker_present: bool,

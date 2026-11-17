@@ -1,4 +1,8 @@
-use super::*;
+use super::Arc;
+use super::BuiltinContextError;
+use super::BuiltinInstanceContext;
+use super::BuiltinSpawnError;
+use super::McpClientPool;
 
 // ─── A33：builtin 实例上下文的一次性注入 / 晚注入 / 缺失 ───────────────────────
 
@@ -112,9 +116,10 @@ async fn meta_harness_reads_only_identity_verified_builtin_workspace() {
         .is_empty());
 
     // 外部 server 占用 "workspace" 名字（source = None）且已连接：X7 拒绝。
-    pool.clients
-        .write()
-        .insert("workspace".to_string(), connected_test_handle("workspace"));
+    pool.clients.write().insert(
+        "workspace".to_string(),
+        super::connected_test_handle("workspace"),
+    );
     assert!(
         pool.read_builtin_workspace_meta(&enabled)
             .await
@@ -125,7 +130,7 @@ async fn meta_harness_reads_only_identity_verified_builtin_workspace() {
 
     // 身份正确（ConfigSource::Builtin）但实例在关闭集内：X8 直接空批。
     let pool = McpClientPool::new_pending();
-    let mut handle = connected_test_handle("workspace");
+    let mut handle = super::connected_test_handle("workspace");
     Arc::get_mut(&mut handle).unwrap().source = Some(crate::mcp::config::ConfigSource::Builtin {
         instance: "workspace".to_string(),
     });

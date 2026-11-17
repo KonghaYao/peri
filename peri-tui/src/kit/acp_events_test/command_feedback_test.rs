@@ -1,4 +1,13 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CurrentTurn;
+use super::FeedbackChannel;
+use super::FeedbackLevel;
+use super::SessionPhase;
+use super::TuiCommandFeedback;
+use super::TuiNoteLevel;
+use super::TuiRenderUnit;
+use super::serial;
 
 /// Phase 4 步骤 8：CommandFeedback 消费——inject_system_note 后 current_turn
 /// 含 SystemNote，level 映射 Info→Info / Warning→Warning / Error→Error
@@ -35,7 +44,7 @@ fn test_command_feedback_injects_system_note() {
     };
 
     // Info（UiOnly 通道）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CommandFeedback(TuiCommandFeedback {
             level: FeedbackLevel::Info,
@@ -44,7 +53,7 @@ fn test_command_feedback_injects_system_note() {
         }),
     );
     // Warning（UiOnly 通道）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CommandFeedback(TuiCommandFeedback {
             level: FeedbackLevel::Warning,
@@ -53,7 +62,7 @@ fn test_command_feedback_injects_system_note() {
         }),
     );
     // Error（Session 通道——v1 同样走 inject_system_note，不进 ACP 消息）
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::CommandFeedback(TuiCommandFeedback {
             level: FeedbackLevel::Error,
@@ -80,3 +89,5 @@ fn test_command_feedback_injects_system_note() {
         "三条 CommandFeedback 应按时序注入 current_turn 内部 SystemNote"
     );
 }
+
+use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};

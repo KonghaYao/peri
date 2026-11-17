@@ -1,10 +1,10 @@
-use super::*;
-use crate::kit::atoms::{self, CONFIRM_PAYLOAD};
-use peri_acp::transport::{
-    AcpTransport,
-    mpsc::{MpscServerTransport, mpsc_transport_pair},
-    types::{AcpError, IncomingMessage, RequestId},
-};
+use super::AcpTuiClient;
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::mpsc::MpscServerTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp::transport::types::IncomingMessage;
+use peri_acp::transport::types::RequestId;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -90,7 +90,7 @@ impl Drop for UiAtomsGuard {
 }
 
 fn interactive_client() -> (AcpTuiClient, MpscServerTransport) {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new_interactive(transport);
     client
         .session_workspace
@@ -115,7 +115,7 @@ async fn next_request(server: &MpscServerTransport) -> (RequestId, String, Value
     let msg = tokio::time::timeout(Duration::from_secs(5), server.recv())
         .await
         .expect("expected a client request")
-        .unwrap();
+        .expect("next request: fixture task and request must complete successfully");
     let IncomingMessage::Request { id, method, params } = msg else {
         panic!("expected request")
     };
@@ -159,10 +159,13 @@ async fn reach_load(server: &MpscServerTransport, response: Result<Value, AcpErr
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("reach load: fixture task and request must complete successfully");
     let (id, method, params) = next_request(server).await;
     assert_eq!(method, "session/load");
-    server.send_response(id, response).await.unwrap();
+    server
+        .send_response(id, response)
+        .await
+        .expect("reach load: fixture task and request must complete successfully");
     params
 }
 
@@ -181,7 +184,7 @@ async fn load_by_id_has_no_recovery_popup_or_reset_request() {
     .expect("session load must complete without a recovery decision");
     assert_eq!(params["sessionId"], TARGET);
     assert_eq!(params["cwd"], EFFECTIVE_CWD);
-    assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(load.expect("load by id has no recovery popup or reset request: the fixture establishes load before this assertion"), TARGET);
     assert_eq!(
         client.current_execution_cwd().as_deref(),
         Some(EFFECTIVE_CWD)
@@ -209,7 +212,7 @@ async fn load_ignores_legacy_execution_admission_metadata() {
     })
     .await
     .expect("legacy metadata must not affect session loading");
-    assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(load.expect("load ignores legacy execution admission metadata: the fixture establishes load before this assertion"), TARGET);
     assert_eq!(params["cwd"], EFFECTIVE_CWD);
     assert!(client.check_restore_error().is_ok());
     assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
@@ -232,8 +235,8 @@ async fn close_incomplete_is_replayed_before_establishing_next_session() {
     server
         .send_response(id, Ok(json!({ "sessionId": "first" })))
         .await
-        .unwrap();
-    assert_eq!(first.await.unwrap().unwrap(), "first");
+        .expect("close incomplete is replayed before establishing next session: fixture task and request must complete successfully");
+    assert_eq!(first.await.expect("close incomplete is replayed before establishing next session: the fixture operation must finish without an inner failure").expect("close incomplete is replayed before establishing next session: the fixture operation must finish without an inner failure"), "first");
 
     let reopener = client.clone();
     let second = tokio::spawn(async move { reopener.new_session("/w", None).await });
@@ -243,24 +246,102 @@ async fn close_incomplete_is_replayed_before_establishing_next_session() {
     server
         .send_response(id, Err(AcpError::new(-32010, "Session close incomplete")))
         .await
-        .unwrap();
+        .expect("close incomplete is replayed before establishing next session: fixture task and request must complete successfully");
     let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/close");
     assert_eq!(
         params["sessionId"], "first",
         "incomplete 必须重放同一关闭请求"
     );
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("close incomplete is replayed before establishing next session: fixture task and request must complete successfully");
     let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/new");
     assert_eq!(params["cwd"], "/w");
     server
         .send_response(id, Ok(json!({ "sessionId": "second" })))
         .await
-        .unwrap();
-    assert_eq!(second.await.unwrap().unwrap(), "second");
+        .expect("close incomplete is replayed before establishing next session: fixture task and request must complete successfully");
+    assert_eq!(second.await.expect("close incomplete is replayed before establishing next session: the fixture operation must finish without an inner failure").expect("close incomplete is replayed before establishing next session: the fixture operation must finish without an inner failure"), "second");
     assert!(client.check_restore_error().is_ok());
     assert_eq!(client.current_session_id().as_deref(), Some("second"));
+}
+
+/// 冷 load 清理未完成：服务端把连接绑定到 owner；客户端必须记住它，下一次切换先
+/// close(owner)，否则会被 `session_switch_requires_close` 永久拒绝。
+#[tokio::test]
+#[serial_test::serial]
+async fn cleanup_incomplete_load_remembers_owner_for_next_switch() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let cleanup = AcpError::new(-32010, "Session cleanup incomplete").with_data(json!({
+        "reason": "session_cleanup_incomplete",
+        "sessionId": TARGET,
+    }));
+    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            client.load_session(TARGET, "/startup", None),
+            reach_load(&server, Err(cleanup))
+        )
+    })
+    .await
+    .expect("cleanup-incomplete load must return");
+    assert_eq!(load.expect_err("cleanup incomplete load remembers owner for next switch: the invalid fixture must be rejected").code, -32010);
+
+    let switcher = client.clone();
+    let next = tokio::spawn(async move { switcher.new_session("/w", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/close");
+    assert_eq!(params["sessionId"], TARGET, "必须先关闭 cleanup owner");
+    server.send_response(id, Ok(json!({}))).await.expect("cleanup incomplete load remembers owner for next switch: fixture task and request must complete successfully");
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "after-cleanup" })))
+        .await
+        .expect("cleanup incomplete load remembers owner for next switch: fixture task and request must complete successfully");
+    assert_eq!(next.await.expect("cleanup incomplete load remembers owner for next switch: the fixture operation must finish without an inner failure").expect("cleanup incomplete load remembers owner for next switch: the fixture operation must finish without an inner failure"), "after-cleanup");
+    assert!(client.check_restore_error().is_ok());
+}
+
+/// 同一 ID 重试也必须先关闭 cleanup owner，再重新 cold load；否则服务端仍绑定
+/// 在 closing 会话上，重载会再次被 `session_switch_requires_close` 拒绝。
+#[tokio::test]
+#[serial_test::serial]
+async fn cleanup_incomplete_same_id_retry_closes_owner_first() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    let cleanup = AcpError::new(-32010, "Session cleanup incomplete").with_data(json!({
+        "reason": "session_cleanup_incomplete",
+        "sessionId": TARGET,
+    }));
+    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            client.load_session(TARGET, "/startup", None),
+            reach_load(&server, Err(cleanup))
+        )
+    })
+    .await
+    .expect("cleanup-incomplete load must return");
+    assert_eq!(load.expect_err("cleanup incomplete same id retry closes owner first: the invalid fixture must be rejected").code, -32010);
+
+    let retry = client.clone();
+    let next = tokio::spawn(async move { retry.load_session(TARGET, "/startup", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "peri/session_context");
+    assert_eq!(params["sessionId"], TARGET);
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .expect("cleanup incomplete same id retry closes owner first: fixture task and request must complete successfully");
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/close");
+    assert_eq!(params["sessionId"], TARGET, "同 ID 重试也必须先关闭 owner");
+    server.send_response(id, Ok(json!({}))).await.expect("cleanup incomplete same id retry closes owner first: fixture task and request must complete successfully");
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    assert_eq!(params["sessionId"], TARGET);
+    server.send_response(id, Ok(json!({}))).await.expect("cleanup incomplete same id retry closes owner first: fixture task and request must complete successfully");
+    assert_eq!(next.await.expect("cleanup incomplete same id retry closes owner first: the fixture operation must finish without an inner failure").expect("cleanup incomplete same id retry closes owner first: the fixture operation must finish without an inner failure"), TARGET);
 }
 
 /// 关闭旧会话持续 incomplete：失败后必须保留旧身份，下一次建立会话先重放同一
@@ -278,15 +359,15 @@ async fn incomplete_close_failure_keeps_old_session_pending() {
     server
         .send_response(id, Ok(json!({ "sessionId": "first" })))
         .await
-        .unwrap();
-    assert_eq!(first.await.unwrap().unwrap(), "first");
+        .expect("incomplete close failure keeps old session pending: fixture task and request must complete successfully");
+    assert_eq!(first.await.expect("incomplete close failure keeps old session pending: the fixture operation must finish without an inner failure").expect("incomplete close failure keeps old session pending: the fixture operation must finish without an inner failure"), "first");
 
     let reopener = client.clone();
     let mut attempt = tokio::spawn(async move { reopener.new_session("/w", None).await });
     let mut replays = 0usize;
     let error = loop {
         tokio::select! {
-            result = &mut attempt => break result.unwrap().unwrap_err(),
+            result = &mut attempt => break result.expect("incomplete close failure keeps old session pending: the fixture establishes result before this assertion").expect_err("incomplete close failure keeps old session pending: the invalid fixture must be rejected"),
             message = server.recv() => {
                 let Some(IncomingMessage::Request { id, method, params }) = message else {
                     panic!("关闭预算内客户端只应重放 session/close");
@@ -297,7 +378,7 @@ async fn incomplete_close_failure_keeps_old_session_pending() {
                 server
                     .send_response(id, Err(AcpError::new(-32010, "Session close incomplete")))
                     .await
-                    .unwrap();
+                    .expect("incomplete close failure keeps old session pending: the fixture operation must finish without an inner failure");
             }
         }
     };
@@ -320,15 +401,15 @@ async fn incomplete_close_failure_keeps_old_session_pending() {
         "重试必须先完成同一个关闭，而不是绕过它新建会话"
     );
     assert_eq!(params["sessionId"], "first");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("incomplete close failure keeps old session pending: fixture task and request must complete successfully");
     let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/new");
     assert_eq!(params["cwd"], "/w");
     server
         .send_response(id, Ok(json!({ "sessionId": "second" })))
         .await
-        .unwrap();
-    assert_eq!(retry.await.unwrap().unwrap(), "second");
+        .expect("incomplete close failure keeps old session pending: fixture task and request must complete successfully");
+    assert_eq!(retry.await.expect("incomplete close failure keeps old session pending: the fixture operation must finish without an inner failure").expect("incomplete close failure keeps old session pending: the fixture operation must finish without an inner failure"), "second");
     assert!(client.check_restore_error().is_ok());
 }
 
@@ -346,8 +427,8 @@ async fn incomplete_close_keeps_pending_load_target() {
     server
         .send_response(id, Ok(json!({ "sessionId": "first" })))
         .await
-        .unwrap();
-    assert_eq!(first.await.unwrap().unwrap(), "first");
+        .expect("incomplete close keeps pending load target: fixture task and request must complete successfully");
+    assert_eq!(first.await.expect("incomplete close keeps pending load target: the fixture operation must finish without an inner failure").expect("incomplete close keeps pending load target: the fixture operation must finish without an inner failure"), "first");
 
     let switcher = client.clone();
     let mut attempt = tokio::spawn(async move { switcher.load_session(TARGET, "/w", None).await });
@@ -357,11 +438,11 @@ async fn incomplete_close_keeps_pending_load_target() {
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("incomplete close keeps pending load target: fixture task and request must complete successfully");
 
     let error = loop {
         tokio::select! {
-            result = &mut attempt => break result.unwrap().unwrap_err(),
+            result = &mut attempt => break result.expect("incomplete close keeps pending load target: the fixture establishes result before this assertion").expect_err("incomplete close keeps pending load target: the invalid fixture must be rejected"),
             message = server.recv() => {
                 let Some(IncomingMessage::Request { id, method, params }) = message else {
                     panic!("关闭预算内客户端只应重放 session/close");
@@ -371,7 +452,7 @@ async fn incomplete_close_keeps_pending_load_target() {
                 server
                     .send_response(id, Err(AcpError::new(-32010, "Session close incomplete")))
                     .await
-                    .unwrap();
+                    .expect("incomplete close keeps pending load target: the fixture operation must finish without an inner failure");
             }
         }
     };
@@ -387,19 +468,19 @@ async fn incomplete_close_keeps_pending_load_target() {
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("incomplete close keeps pending load target: fixture task and request must complete successfully");
     let (id, method, params) = next_request_or_task(&server, &mut resumed).await;
     assert_eq!(method, "session/close", "重试必须先完成同一个关闭");
     assert_eq!(params["sessionId"], "first");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("incomplete close keeps pending load target: fixture task and request must complete successfully");
     let (id, method, params) = next_request_or_task(&server, &mut resumed).await;
     assert_eq!(
         method, "session/load",
         "必须完成被打断的加载，而不是新建空会话"
     );
     assert_eq!(params["sessionId"], TARGET);
-    server.send_response(id, Ok(json!({}))).await.unwrap();
-    assert_eq!(resumed.await.unwrap().unwrap(), TARGET);
+    server.send_response(id, Ok(json!({}))).await.expect("incomplete close keeps pending load target: fixture task and request must complete successfully");
+    assert_eq!(resumed.await.expect("incomplete close keeps pending load target: the fixture operation must finish without an inner failure").expect("incomplete close keeps pending load target: the fixture operation must finish without an inner failure"), TARGET);
     assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
     assert!(client.check_restore_error().is_ok());
 }
@@ -437,7 +518,7 @@ async fn failed_recovery_meta_keeps_session_and_sets_notification() {
     })
     .await
     .expect("load 必须在部分成功契约下完成");
-    assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(load.expect("failed recovery meta keeps session and sets notification: the fixture establishes load before this assertion"), TARGET);
     assert_eq!(
         atoms::ACTIVE_SESSION_ID.state().read().as_str(),
         TARGET,
@@ -493,11 +574,13 @@ async fn partial_recovery_meta_sets_notification() {
     })
     .await
     .expect("partial load 必须成功");
-    assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(load.expect("partial recovery meta sets notification: the fixture establishes load before this assertion"), TARGET);
     assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
     let notification_state = atoms::NOTIFICATION.state();
     let notice = notification_state.read();
-    let notice = notice.as_ref().unwrap();
+    let notice = notice
+        .as_ref()
+        .expect("partial recovery meta sets notification: fixture must have the expected variant");
     assert!(notice.message.contains('1'), "{}", notice.message);
     assert!(client.check_restore_error().is_ok());
 }
@@ -520,7 +603,12 @@ async fn malformed_recovery_meta_is_ignored() {
     })
     .await
     .expect("损坏的恢复字段不得阻断 load");
-    assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(
+        load.expect(
+            "malformed recovery meta is ignored: the fixture establishes load before this assertion"
+        ),
+        TARGET
+    );
     assert!(client.check_restore_error().is_ok());
     assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
     assert!(atoms::NOTIFICATION.state().read().is_none());
@@ -543,14 +631,14 @@ async fn startup_load_failure_is_retried_by_next_ensure() {
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("startup load failure is retried by next ensure: fixture task and request must complete successfully");
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
     server
         .send_response(id, Err(AcpError::new(-32603, "load failed")))
         .await
-        .unwrap();
-    assert_eq!(load.await.unwrap().unwrap_err().code, -32603);
+        .expect("startup load failure is retried by next ensure: fixture task and request must complete successfully");
+    assert_eq!(load.await.expect("startup load failure is retried by next ensure: the fixture operation must finish without an inner failure").expect_err("startup load failure is retried by next ensure: the invalid fixture must be rejected").code, -32603);
     assert_eq!(
         client.startup_retry_target().as_deref(),
         Some(TARGET),
@@ -565,12 +653,12 @@ async fn startup_load_failure_is_retried_by_next_ensure() {
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("startup load failure is retried by next ensure: fixture task and request must complete successfully");
     let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/load", "重试不得变成 session/new");
     assert_eq!(params["sessionId"], TARGET);
-    server.send_response(id, Ok(json!({}))).await.unwrap();
-    assert_eq!(retry.await.unwrap().unwrap(), TARGET);
+    server.send_response(id, Ok(json!({}))).await.expect("startup load failure is retried by next ensure: fixture task and request must complete successfully");
+    assert_eq!(retry.await.expect("startup load failure is retried by next ensure: the fixture operation must finish without an inner failure").expect("startup load failure is retried by next ensure: the fixture operation must finish without an inner failure"), TARGET);
     assert_eq!(client.startup_retry_target(), None);
     assert!(client.check_restore_error().is_ok());
     assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
@@ -591,14 +679,14 @@ async fn startup_load_failure_retry_does_not_create_a_new_session() {
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("startup load failure retry does not create a new session: fixture task and request must complete successfully");
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
     server
         .send_response(id, Err(AcpError::new(-32603, "load failed")))
         .await
-        .unwrap();
-    assert_eq!(load.await.unwrap().unwrap_err().code, -32603);
+        .expect("startup load failure retry does not create a new session: fixture task and request must complete successfully");
+    assert_eq!(load.await.expect("startup load failure retry does not create a new session: the fixture operation must finish without an inner failure").expect_err("startup load failure retry does not create a new session: the invalid fixture must be rejected").code, -32603);
 
     let retry_client = client.clone();
     let retry = tokio::spawn(async move { retry_client.ensure_session("/startup", None).await });
@@ -607,14 +695,14 @@ async fn startup_load_failure_retry_does_not_create_a_new_session() {
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("startup load failure retry does not create a new session: fixture task and request must complete successfully");
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
     server
         .send_response(id, Err(AcpError::new(-32603, "still failing")))
         .await
-        .unwrap();
-    assert_eq!(retry.await.unwrap().unwrap_err().code, -32603);
+        .expect("startup load failure retry does not create a new session: fixture task and request must complete successfully");
+    assert_eq!(retry.await.expect("startup load failure retry does not create a new session: the fixture operation must finish without an inner failure").expect_err("startup load failure retry does not create a new session: the invalid fixture must be rejected").code, -32603);
     assert_eq!(client.startup_retry_target().as_deref(), Some(TARGET));
     assert_no_request(&server, Duration::from_millis(100)).await;
 }
@@ -634,14 +722,14 @@ async fn clear_after_startup_failure_creates_new_session() {
     server
         .send_response(id, Ok(context(EFFECTIVE_CWD)))
         .await
-        .unwrap();
+        .expect("clear after startup failure creates new session: fixture task and request must complete successfully");
     let (id, method, _) = next_request(&server).await;
     assert_eq!(method, "session/load");
     server
         .send_response(id, Err(AcpError::new(-32603, "load failed")))
         .await
-        .unwrap();
-    assert_eq!(load.await.unwrap().unwrap_err().code, -32603);
+        .expect("clear after startup failure creates new session: fixture task and request must complete successfully");
+    assert_eq!(load.await.expect("clear after startup failure creates new session: the fixture operation must finish without an inner failure").expect_err("clear after startup failure creates new session: the invalid fixture must be rejected").code, -32603);
 
     let clearer = client.clone();
     let clear = tokio::spawn(async move { clearer.new_session("/w", None).await });
@@ -651,11 +739,11 @@ async fn clear_after_startup_failure_creates_new_session() {
     server
         .send_response(id, Ok(json!({ "sessionId": "fresh" })))
         .await
-        .unwrap();
-    assert_eq!(clear.await.unwrap().unwrap(), "fresh");
+        .expect("clear after startup failure creates new session: fixture task and request must complete successfully");
+    assert_eq!(clear.await.expect("clear after startup failure creates new session: the fixture operation must finish without an inner failure").expect("clear after startup failure creates new session: the fixture operation must finish without an inner failure"), "fresh");
     assert_eq!(client.startup_retry_target(), None);
     assert!(client.check_restore_error().is_ok());
-    let ensured = client.ensure_session("/w", None).await.unwrap();
+    let ensured = client.ensure_session("/w", None).await.expect("clear after startup failure creates new session: fixture task and request must complete successfully");
     assert_eq!(ensured, "fresh");
 }
 
@@ -701,3 +789,6 @@ async fn failed_history_preflight_keeps_current_session_usable() {
     assert_no_request(&server, Duration::from_millis(100)).await;
     client.close();
 }
+use crate::kit::atoms::CONFIRM_PAYLOAD;
+
+use crate::kit::atoms;

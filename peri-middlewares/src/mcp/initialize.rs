@@ -1,22 +1,30 @@
-use std::{path::Path, sync::Arc};
+use std::path::Path;
+use std::sync::Arc;
 
-use rmcp::{
-    model::Tool,
-    service::{Peer, RoleClient, ServiceError},
-};
+use rmcp::model::Tool;
+use rmcp::service::Peer;
+use rmcp::service::RoleClient;
+use rmcp::service::ServiceError;
 
-use super::{
-    auth_store::static_credential_key,
-    builtin::runtime::BUILTIN_CONVERGE_TIMEOUT,
-    client::{
-        build_http_transport, serve_client_auto, setup_subscription, ClientStatus,
-        DiscoveryEvidence, McpClientHandle, McpClientPool, McpInitStatus, OAuthStatus,
-        SystemMcpManifest, HTTP_CONNECT_TIMEOUT, SHUTDOWN_TIMEOUT, STDIO_CONNECT_TIMEOUT,
-    },
-    config::{ConfigSource, McpServerConfig, OAuthConfig},
-    oauth_flow::OAuthFlowEvent,
-    transport::{TransportConfig, TransportKind},
-};
+use super::auth_store;
+use super::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use super::client;
+use super::client::ClientStatus;
+use super::client::DiscoveryEvidence;
+use super::client::McpClientHandle;
+use super::client::McpClientPool;
+use super::client::McpInitStatus;
+use super::client::OAuthStatus;
+use super::client::SystemMcpManifest;
+use super::client::HTTP_CONNECT_TIMEOUT;
+use super::client::SHUTDOWN_TIMEOUT;
+use super::client::STDIO_CONNECT_TIMEOUT;
+use super::config::ConfigSource;
+use super::config::McpServerConfig;
+use super::config::OAuthConfig;
+use super::oauth_flow::OAuthFlowEvent;
+use super::transport::TransportConfig;
+use super::transport::TransportKind;
 
 #[cfg(test)]
 #[path = "initialize_test.rs"]
@@ -95,7 +103,7 @@ pub(super) fn commit_discovery_failure(
     server_name: &str,
     initialize_ok: bool,
 ) {
-    let Some(handle) = pool.get_client(server_name) else {
+    let Some(handle) = pool.client(server_name) else {
         pool.clear_discovery_evidence(server_name);
         return;
     };
@@ -257,8 +265,13 @@ impl McpClientPool {
     ) {
         pool.seal_builtin_context();
         let loaded = match pool.configuration_snapshot.get() {
-            Some(snapshot) => super::config::load_bare_config_from_snapshot(snapshot),
-            None => super::config::load_bare_config(),
+            Some(snapshot) => super::config::load_bare_config_from_snapshot_with_mode(
+                snapshot,
+                pool.frozen_builtin_mode.get().copied(),
+            ),
+            None => {
+                super::config::load_bare_config_with_mode(pool.frozen_builtin_mode.get().copied())
+            }
         };
         let mut config = match loaded {
             Ok(config) => config,
@@ -303,7 +316,7 @@ impl McpClientPool {
         // 配置加载失败必须是可见的 Failed：不发布 Ready、不标记 initialized、
         // 不注册任何 server（因而也不会开始 transport）。B 在 1R 消费该失败。
         let loaded = match pool.configuration_snapshot.get() {
-            Some(snapshot) => super::config::load_merged_config_from_snapshot_with_capabilities(
+            Some(snapshot) => super::config::load_merged_config_from_snapshot_with_policy(
                 cwd,
                 claude_home,
                 snapshot,
@@ -311,14 +324,16 @@ impl McpClientPool {
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_sources_available(),
                 pool.plugin_face_closed(),
+                pool.frozen_builtin_mode.get().copied(),
             ),
-            None => super::config::load_merged_config_full_with_capabilities(
+            None => super::config::load_merged_config_full_with_policy(
                 cwd,
                 claude_home,
                 pool.builtin_available
                     .load(std::sync::atomic::Ordering::Acquire),
                 pool.plugin_sources_available(),
                 pool.plugin_face_closed(),
+                pool.frozen_builtin_mode.get().copied(),
             ),
         };
         let (mut config, plugin_sources) = match loaded {
@@ -452,346 +467,383 @@ impl McpClientPool {
             .filter(|(_, server)| server.system_mcp == Some(true))
             .count();
         let mut connected = 0usize;
-        for (index, (name, server_config)) in ordered.into_iter().enumerate() {
-            // System MCP 是本轮启动的阻塞条件，普通 MCP 不是：System 批次处理
-            // 完即向等待方收口。后续普通 transport 即使每个都等满超时，也只
-            // 影响它们自己的工具可用时间，不再拖住会话创建。
-            if index == system_total {
-                pool.mark_system_settled();
-            }
-            let slot = pool.server_slot(name);
-            let Ok(_operation) = slot.operation.clone().try_lock_owned() else {
-                continue;
-            };
-            if slot.stopped.load(std::sync::atomic::Ordering::Acquire)
-                || pool
-                    .get_client(name)
-                    .is_some_and(|h| h.status == ClientStatus::Connected)
-            {
-                continue;
-            }
+        {
+            let indexed_ordered = ordered.into_iter().enumerate();
+            for (index, (name, server_config)) in indexed_ordered {
+                // System MCP 是本轮启动的阻塞条件，普通 MCP 不是：System 批次处理
+                // 完即向等待方收口。后续普通 transport 即使每个都等满超时，也只
+                // 影响它们自己的工具可用时间，不再拖住会话创建。
+                if index == system_total {
+                    pool.mark_system_settled();
+                }
+                let slot = pool.server_slot(name);
+                let Ok(_operation) = slot.operation.clone().try_lock_owned() else {
+                    continue;
+                };
+                if slot.stopped.load(std::sync::atomic::Ordering::Acquire)
+                    || pool
+                        .client(name)
+                        .is_some_and(|h| h.status == ClientStatus::Connected)
+                {
+                    continue;
+                }
 
-            // 跳过已禁用的服务器，注册为 Disabled 状态
-            if server_config.disabled.unwrap_or(false) {
-                tracing::info!(server = %name, "MCP 服务器已禁用，跳过连接");
-                pool.clients.write().insert(
-                    name.clone(),
-                    Arc::new(McpClientHandle {
-                        call_gate: Default::default(),
-                        name: name.clone(),
-                        version: None,
-                        connected_at: None,
-                        protocol_version: None,
-                        cache_version: None,
-                        peer: None,
-                        tools: vec![],
-                        resources: vec![],
-                        status: ClientStatus::Disabled,
-                        oauth_status: OAuthStatus::default(),
-                        source: server_config.source.clone(),
-                        url: server_config.url.clone(),
-                        skills_capable: false,
-                    }),
-                );
-                continue;
-            }
-            if matches!(server_config.source, Some(ConfigSource::Builtin { .. }))
-                && !pool
-                    .builtin_available
-                    .load(std::sync::atomic::Ordering::Acquire)
-            {
-                Self::insert_failed(
-                    &pool,
-                    name,
-                    "builtin handler is unavailable in this deployment".into(),
-                );
-                commit_discovery_failure(&pool, name, false);
-                continue;
-            }
-            // 本次发现尝试开始：旧代证据立即作废，等待方按「仍在进行」重新判定，
-            // 不会把上一次尝试的成功当成这一次的证据。
-            pool.clear_discovery_evidence(name);
-            let transport_config = match TransportConfig::try_from(server_config) {
-                Ok(tc) => tc,
-                Err(e) => {
-                    tracing::warn!(server = %name, error = %e, "传输层构建失败");
-                    Self::insert_failed(&pool, name, format!("传输层构建失败: {e}"));
+                // 跳过已禁用的服务器，注册为 Disabled 状态
+                if server_config.disabled.unwrap_or(false) {
+                    tracing::info!(server = %name, "MCP 服务器已禁用，跳过连接");
+                    pool.clients.write().insert(
+                        name.clone(),
+                        Arc::new(McpClientHandle {
+                            call_gate: Default::default(),
+                            name: name.clone(),
+                            version: None,
+                            connected_at: None,
+                            protocol_version: None,
+                            cache_version: None,
+                            peer: None,
+                            tools: vec![],
+                            resources: vec![],
+                            status: ClientStatus::Disabled,
+                            oauth_status: OAuthStatus::default(),
+                            source: server_config.source.clone(),
+                            url: server_config.url.clone(),
+                            skills_capable: false,
+                        }),
+                    );
+                    continue;
+                }
+                if matches!(server_config.source, Some(ConfigSource::Builtin { .. }))
+                    && !pool
+                        .builtin_available
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    Self::insert_failed(
+                        &pool,
+                        name,
+                        "builtin handler is unavailable in this deployment".into(),
+                    );
                     commit_discovery_failure(&pool, name, false);
                     continue;
                 }
-            };
-            // 三分类（IF-D1）：超时与日志字段来自同一结果；`is_http` 仅用于
-            // 「是否 AuthRequired」判定（HTTP 专属，builtin 无 URL / 无凭据恒 false）。
-            let kind = transport_config.kind();
-            let timeout = connect_timeout(kind);
-            let is_http = matches!(kind, TransportKind::Http);
-            // lifecycle 统一自动协商；subscriptions 只负责连接后订阅。
-            let subscriptions = server_config
-                .subscriptions
-                .as_ref()
-                .filter(|s| !s.is_empty());
+                // 本次发现尝试开始：旧代证据立即作废，等待方按「仍在进行」重新判定，
+                // 不会把上一次尝试的成功当成这一次的证据。
+                pool.clear_discovery_evidence(name);
+                let transport_config = match TransportConfig::try_from(server_config) {
+                    Ok(tc) => tc,
+                    Err(e) => {
+                        tracing::warn!(server = %name, error = %e, "传输层构建失败");
+                        Self::insert_failed(&pool, name, format!("传输层构建失败: {e}"));
+                        commit_discovery_failure(&pool, name, false);
+                        continue;
+                    }
+                };
+                // 三分类（IF-D1）：超时与日志字段来自同一结果；`is_http` 仅用于
+                // 「是否 AuthRequired」判定（HTTP 专属，builtin 无 URL / 无凭据恒 false）。
+                let kind = transport_config.kind();
+                let timeout = connect_timeout(kind);
+                let is_http = matches!(kind, TransportKind::Http);
+                // lifecycle 统一自动协商；subscriptions 只负责连接后订阅。
+                // v5：订阅按会话关闭集过滤（workspace 关闭时不再订阅 git ref）。
+                let subscriptions = server_config
+                    .subscriptions
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|subscriptions| pool.filter_subscriptions(name, subscriptions));
 
-            let connect_result = match transport_config {
-                // builtin 分支：同进程链路（duplex + 真实 `rmcp::serve_server`）。它与 stdio
-                // 分支走**同一条**处理链（同参的 `serve_client_auto` → 发现 → 句柄 → 提交），
-                // 不为 builtin 另起一套 spawn / readiness / 面板语义。
-                TransportConfig::Builtin { ref instance } => {
-                    // 实例解析与上下文读取都在 pool 方法内统一收口：未注册 / 上下文缺失 /
-                    // 输入缺失 / handler 未接线各得 typed 原因 + 失败证据 + continue。
-                    let transport = match pool.spawn_builtin_transport_with_environment(
-                        instance,
-                        server_config.env.as_ref().unwrap_or(&Default::default()),
-                    ) {
-                        Ok(transport) => transport,
-                        Err(error) => {
-                            let reason = format!("builtin 启动失败: {error}");
-                            tracing::warn!(server = %name, error = %reason, "MCP builtin 启动失败");
-                            Self::insert_failed(&pool, name, reason);
-                            commit_discovery_failure(&pool, name, false);
-                            continue;
-                        }
-                    };
-                    let (io, supervisor) = transport.into_parts();
-                    // task 归属：server 半边是同进程 task，必须与 `services` 同期登记，
-                    // 否则重连 / 关闭会留下 orphan（IF-D12）。同名旧代监督者先按冻结顺序
-                    // 有界收敛（先停 tick 再收敛 server task）。
-                    if let Some(previous) = pool.register_builtin_task(name.clone(), supervisor) {
-                        let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
-                    }
-                    let connected = serve_client_auto(io, &pool.capability_profile, timeout).await;
-                    // 握手失败 / 超时：本实例的 server task 当场收口（不含糊到 pool 关闭）；
-                    // 成功则由重连 / 关闭 / 移除时的有界关闭负责。
-                    if !matches!(connected, Ok(Ok(_))) {
-                        pool.close_builtin_task(name).await;
-                    }
-                    connected
-                }
-                #[allow(unused_variables)]
-                TransportConfig::Stdio {
-                    ref command,
-                    ref args,
-                    ref env,
-                } => match pool
-                    .stdio_available
-                    .load(std::sync::atomic::Ordering::Acquire)
-                {
-                    false => {
-                        Self::insert_failed(&pool, name, crate::platform::STDIO_UNAVAILABLE.into());
-                        commit_discovery_failure(&pool, name, false);
-                        continue;
-                    }
-                    #[cfg(target_os = "emscripten")]
-                    true => {
-                        Self::insert_failed(&pool, name, crate::platform::STDIO_UNAVAILABLE.into());
-                        commit_discovery_failure(&pool, name, false);
-                        continue;
-                    }
-                    #[cfg(not(target_os = "emscripten"))]
-                    true => match pool.spawn_stdio_transport(name, command, args, env, cwd) {
-                        Ok(transport) => {
-                            serve_client_auto(transport, &pool.capability_profile, timeout).await
-                        }
-                        Err(e) => {
-                            let err_str = e.to_string();
-                            tracing::warn!(server = %name, error = %err_str, "MCP stdio 启动失败");
-                            Self::insert_failed(&pool, name, format!("stdio 启动失败: {err_str}"));
-                            commit_discovery_failure(&pool, name, false);
-                            continue;
-                        }
-                    },
-                },
-                TransportConfig::StreamableHttp {
-                    ref url,
-                    ref headers,
-                    ref oauth,
-                } => {
-                    let token_store = pool.oauth_credentials().ok();
-                    if oauth.is_some() && token_store.is_none() {
-                        Self::insert_failed(
-                            &pool,
-                            name,
-                            "OAuth credentials were not injected".into(),
-                        );
-                        commit_discovery_failure(&pool, name, false);
-                        continue;
-                    }
-                    let oauth_cfg = if let Some(config) = oauth.as_ref() {
-                        Some(config.clone())
-                    } else if let Some(token_store) = token_store.as_ref() {
-                        let default_oauth = OAuthConfig::default();
-                        let key = static_credential_key(name, url, &default_oauth);
-                        match token_store.load_server(&key).await {
-                            Ok(Some(_)) => Some(default_oauth),
-                            Ok(None) => None,
+                let connect_result = match transport_config {
+                    // builtin 分支：同进程链路（duplex + 真实 `rmcp::serve_server`）。它与 stdio
+                    // 分支走**同一条**处理链（同参的 `serve_client_auto_for_server` → 发现 → 句柄 → 提交），
+                    // 不为 builtin 另起一套 spawn / readiness / 面板语义。
+                    TransportConfig::Builtin { ref instance } => {
+                        // 实例解析与上下文读取都在 pool 方法内统一收口：未注册 / 上下文缺失 /
+                        // 输入缺失 / handler 未接线各得 typed 原因 + 失败证据 + continue。
+                        let transport = match pool.spawn_builtin_transport_with_environment(
+                            instance,
+                            server_config.env.as_ref().unwrap_or(&Default::default()),
+                        ) {
+                            Ok(transport) => transport,
                             Err(error) => {
-                                Self::insert_failed(&pool, name, error.to_string());
+                                let reason = format!("builtin 启动失败: {error}");
+                                tracing::warn!(server = %name, error = %reason, "MCP builtin 启动失败");
+                                Self::insert_failed(&pool, name, reason);
                                 commit_discovery_failure(&pool, name, false);
                                 continue;
                             }
+                        };
+                        let (io, supervisor) = transport.into_parts();
+                        // task 归属：server 半边是同进程 task，必须与 `services` 同期登记，
+                        // 否则重连 / 关闭会留下 orphan（IF-D12）。同名旧代监督者先按冻结顺序
+                        // 有界收敛（先停 tick 再收敛 server task）。
+                        if let Some(previous) = pool.register_builtin_task(name.clone(), supervisor)
+                        {
+                            let _ = previous.close(BUILTIN_CONVERGE_TIMEOUT).await;
                         }
-                    } else {
-                        None
-                    };
-                    if oauth_cfg.is_some() {
-                        if pool.oauth_event_callback().is_some() {
-                            // host pool：不主动触发授权（避免启动即弹 popup
-                            // 打扰），统一标记 NeedsAuthorization，由用户经
-                            // MCP 面板显式发起（mcp/oauth_start RPC →
-                            // spawn_oauth_flow → popup）。
-                            Self::insert_needs_auth(&pool, name, "OAuth 授权待完成".to_string());
+                        let connected =
+                            client::serve_client_auto_for_server(io, &pool, name, timeout).await;
+                        // 握手失败 / 超时：本实例的 server task 当场收口（不含糊到 pool 关闭）；
+                        // 成功则由重连 / 关闭 / 移除时的有界关闭负责。
+                        if !matches!(connected, Ok(Ok(_))) {
+                            pool.close_builtin_task(name).await;
+                        }
+                        connected
+                    }
+                    #[allow(unused_variables)]
+                    TransportConfig::Stdio {
+                        ref command,
+                        ref args,
+                        ref env,
+                    } => match pool
+                        .stdio_available
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        false => {
+                            Self::insert_failed(
+                                &pool,
+                                name,
+                                crate::platform::STDIO_UNAVAILABLE.into(),
+                            );
+                            commit_discovery_failure(&pool, name, false);
                             continue;
                         }
-                        // TUI 面板池：无 UI 交互通道，走快速路径——尝试恢复
-                        // 存储凭证直接连接（不弹窗）；凭据缺失/失效时保持
-                        // NeedsAuthorization，由 host pool 授权后共享凭据服务
-                        // 恢复。异步执行不阻塞初始化。
-                        pool.spawn_oauth_flow(name);
-                        continue;
-                    } else {
-                        serve_client_auto(
-                            build_http_transport(url, headers),
-                            &pool.capability_profile,
-                            timeout,
-                        )
-                        .await
-                    }
-                }
-            };
-
-            match connect_result {
-                Ok(Ok(rs)) => {
-                    let rs = pool.track_server_service(name, rs);
-                    // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
-                    // 失败仅告警——server 可能不支持，连接本身仍可用。
-                    // A24 关闭门：关闭集命中的 builtin 实例不建立订阅（订阅是能力的外部
-                    // 副作用；`WorkspaceMiddleware: false` ⇒ 零 git 调用）。
-                    if let Some(sub) = subscriptions {
-                        if pool.subscription_allowed(name) {
-                            setup_subscription(&pool, &rs, name, sub).await;
-                        } else {
-                            tracing::info!(
-                                server = %name,
-                                "builtin 实例在关闭集内，跳过 subscriptions/listen"
+                        #[cfg(target_os = "emscripten")]
+                        true => {
+                            Self::insert_failed(
+                                &pool,
+                                name,
+                                crate::platform::STDIO_UNAVAILABLE.into(),
                             );
+                            commit_discovery_failure(&pool, name, false);
+                            continue;
+                        }
+                        #[cfg(not(target_os = "emscripten"))]
+                        true => match pool.spawn_stdio_transport(name, command, args, env, cwd) {
+                            Ok(transport) => {
+                                client::serve_client_auto_for_server(
+                                    transport, &pool, name, timeout,
+                                )
+                                .await
+                            }
+                            Err(e) => {
+                                let err_str = e.to_string();
+                                tracing::warn!(server = %name, error = %err_str, "MCP stdio 启动失败");
+                                Self::insert_failed(
+                                    &pool,
+                                    name,
+                                    format!("stdio 启动失败: {err_str}"),
+                                );
+                                commit_discovery_failure(&pool, name, false);
+                                continue;
+                            }
+                        },
+                    },
+                    TransportConfig::StreamableHttp {
+                        ref url,
+                        ref headers,
+                        ref oauth,
+                    } => {
+                        let token_store = pool.oauth_credentials().ok();
+                        if oauth.is_some() && token_store.is_none() {
+                            Self::insert_failed(
+                                &pool,
+                                name,
+                                "OAuth credentials were not injected".into(),
+                            );
+                            commit_discovery_failure(&pool, name, false);
+                            continue;
+                        }
+                        let oauth_cfg = if let Some(config) = oauth.as_ref() {
+                            Some(config.clone())
+                        } else if let Some(token_store) = token_store.as_ref() {
+                            let default_oauth = OAuthConfig::default();
+                            let key = auth_store::static_credential_key(name, url, &default_oauth);
+                            match token_store.load_server(&key).await {
+                                Ok(Some(_)) => Some(default_oauth),
+                                Ok(None) => None,
+                                Err(error) => {
+                                    Self::insert_failed(&pool, name, error.to_string());
+                                    commit_discovery_failure(&pool, name, false);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if oauth_cfg.is_some() {
+                            if pool.oauth_event_callback().is_some() {
+                                // host pool：不主动触发授权（避免启动即弹 popup
+                                // 打扰），统一标记 NeedsAuthorization，由用户经
+                                // MCP 面板显式发起（mcp/oauth_start RPC →
+                                // spawn_oauth_flow → popup）。
+                                Self::insert_needs_auth(
+                                    &pool,
+                                    name,
+                                    "OAuth 授权待完成".to_string(),
+                                );
+                                continue;
+                            }
+                            // TUI 面板池：无 UI 交互通道，走快速路径——尝试恢复
+                            // 存储凭证直接连接（不弹窗）；凭据缺失/失效时保持
+                            // NeedsAuthorization，由 host pool 授权后共享凭据服务
+                            // 恢复。异步执行不阻塞初始化。
+                            pool.spawn_oauth_flow(name);
+                            continue;
+                        } else {
+                            client::serve_client_auto_for_server(
+                                client::build_http_transport(url, headers),
+                                &pool,
+                                name,
+                                timeout,
+                            )
+                            .await
                         }
                     }
-                    let peer = rs.peer().clone();
-                    pool.configure_peer_cache(&peer).await;
-                    let cache_version = pool.install_peer_cache_version(name, &peer);
-                    let startup =
-                        match pool.capture_startup_cache_connection(name, &peer, server_config) {
-                            Ok(startup) => startup,
+                };
+
+                match connect_result {
+                    Ok(Ok(rs)) => {
+                        let rs = pool.track_server_service(name, rs);
+                        // 订阅配置存在：建立 subscriptions/listen 长流（2026-07-28）。
+                        // 失败仅告警——server 可能不支持，连接本身仍可用。
+                        // A24 关闭门：关闭集命中的 builtin 实例不建立订阅（订阅是能力的外部
+                        // 副作用；`WorkspaceMiddleware: false` ⇒ 零 git 调用）。
+                        if let Some(sub) = subscriptions {
+                            if pool.subscription_allowed(name) {
+                                client::setup_subscription(&pool, &rs, name, &sub).await;
+                            } else {
+                                tracing::info!(
+                                    server = %name,
+                                    "builtin 实例在关闭集内，跳过 subscriptions/listen"
+                                );
+                            }
+                        }
+                        let peer = rs.peer().clone();
+                        pool.configure_peer_cache(&peer).await;
+                        let cache_version = pool.install_peer_cache_version(name, &peer);
+                        let startup =
+                            match pool.capture_startup_cache_connection(name, &peer, server_config)
+                            {
+                                Ok(startup) => startup,
+                                Err(error) => {
+                                    let mut service = rs;
+                                    let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                    fail_tool_discovery(&pool, name, &error.to_string());
+                                    continue;
+                                }
+                            };
+                        // 严格发现（契约 2 / 主 plan IF-M3）：`tools/list` 的 `Err` 既不是
+                        // 「服务器没有工具」，也不是 ready 证据。只有真实成功的 round-trip
+                        // 才允许提交 `Connected`；失败必须显式失败并释放已建立的 service，
+                        // 否则 `Connected + tools=[]` 会被下游误判为 discovery 完成。
+                        let tools =
+                            match list_discovered_tools(&pool, name, &peer, server_config).await {
+                                Ok(tools) => tools,
+                                Err(error) => {
+                                    let mut service = rs;
+                                    let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                    fail_tool_discovery(&pool, name, &error.to_string());
+                                    continue;
+                                }
+                            };
+                        let resources = match pool
+                            .list_all_resources_cached_for_startup(name, &peer, server_config)
+                            .await
+                        {
+                            Ok(resources) => resources,
                             Err(error) => {
-                                let mut service = rs;
-                                let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-                                fail_tool_discovery(&pool, name, &error.to_string());
-                                continue;
+                                if matches!(
+                                    server_config.source,
+                                    Some(ConfigSource::WorkspaceRemote)
+                                ) {
+                                    let mut service = rs;
+                                    let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                    fail_workspace_resource_discovery(
+                                        &pool,
+                                        name,
+                                        &error.to_string(),
+                                    );
+                                    continue;
+                                }
+                                downgrade_resource_listing(name, &error.to_string());
+                                Vec::new()
                             }
                         };
-                    // 严格发现（契约 2 / 主 plan IF-M3）：`tools/list` 的 `Err` 既不是
-                    // 「服务器没有工具」，也不是 ready 证据。只有真实成功的 round-trip
-                    // 才允许提交 `Connected`；失败必须显式失败并释放已建立的 service，
-                    // 否则 `Connected + tools=[]` 会被下游误判为 discovery 完成。
-                    let tools = match list_discovered_tools(&pool, name, &peer, server_config).await
-                    {
-                        Ok(tools) => tools,
-                        Err(error) => {
+                        tracing::info!(server = %name, tools = tools.len(), resources = resources.len(), "MCP 连接成功");
+                        let peer = rs.peer().clone();
+                        let oauth_status = OAuthStatus::default();
+                        let skills_capable = super::client::peer_declares_skills(&peer);
+                        let handle = Arc::new(McpClientHandle {
+                            call_gate: Default::default(),
+                            name: name.clone(),
+                            version: peer.peer_info().and_then(|info| {
+                                info.server_info.as_ref().map(|si| si.version.clone())
+                            }),
+                            cache_version: cache_version.clone(),
+                            connected_at: Some(peri_time::now_utc_rfc3339()),
+                            protocol_version: peer
+                                .peer_info()
+                                .map(|info| info.protocol_version.as_str().to_string()),
+                            peer: Some(peer),
+                            tools,
+                            resources,
+                            status: ClientStatus::Connected,
+                            oauth_status,
+                            source: server_config.source.clone(),
+                            url: server_config.url.clone(),
+                            skills_capable,
+                        });
+                        let committed = Arc::clone(&handle);
+                        if pool.require_cache_connection_current(&startup).is_err() {
                             let mut service = rs;
                             let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-                            fail_tool_discovery(&pool, name, &error.to_string());
                             continue;
                         }
-                    };
-                    let resources = match pool
-                        .list_all_resources_cached_for_startup(name, &peer, server_config)
-                        .await
-                    {
-                        Ok(resources) => resources,
-                        Err(error) => {
-                            if matches!(server_config.source, Some(ConfigSource::WorkspaceRemote)) {
-                                let mut service = rs;
-                                let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-                                fail_workspace_resource_discovery(&pool, name, &error.to_string());
-                                continue;
-                            }
-                            downgrade_resource_listing(name, &error.to_string());
-                            Vec::new()
+                        if let Err(mut service) =
+                            pool.try_commit_connection(name.clone(), handle, rs)
+                        {
+                            let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                            // 提交被拒（pool 关闭）：不留任何可被读成成功的证据。
+                            pool.clear_discovery_evidence(name);
+                            break;
                         }
-                    };
-                    tracing::info!(server = %name, tools = tools.len(), resources = resources.len(), "MCP 连接成功");
-                    let peer = rs.peer().clone();
-                    let oauth_status = OAuthStatus::default();
-                    let skills_capable = super::client::peer_declares_skills(&peer);
-                    let handle = Arc::new(McpClientHandle {
-                        call_gate: Default::default(),
-                        name: name.clone(),
-                        version: peer.peer_info().and_then(|info| {
-                            info.server_info.as_ref().map(|si| si.version.clone())
-                        }),
-                        cache_version: cache_version.clone(),
-                        connected_at: Some(peri_time::now_utc_rfc3339()),
-                        protocol_version: peer
-                            .peer_info()
-                            .map(|info| info.protocol_version.as_str().to_string()),
-                        peer: Some(peer),
-                        tools,
-                        resources,
-                        status: ClientStatus::Connected,
-                        oauth_status,
-                        source: server_config.source.clone(),
-                        url: server_config.url.clone(),
-                        skills_capable,
-                    });
-                    let committed = Arc::clone(&handle);
-                    if pool.require_cache_connection_current(&startup).is_err() {
-                        let mut service = rs;
-                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-                        continue;
+                        // 唯一能提交「本代完整发现证据」的位置：transport + initialize +
+                        // 能力协商 + 真实成功的 live `tools/list` 全部完成，且句柄已登记代际。
+                        commit_discovery_success(&pool, name, &committed);
+                        connected += 1;
+                        let _ = status_tx.send(McpInitStatus::Initializing {
+                            connected,
+                            total: connectable,
+                        });
+                        *pool.init_status.write() = McpInitStatus::Initializing {
+                            connected,
+                            total: connectable,
+                        };
                     }
-                    if let Err(mut service) = pool.try_commit_connection(name.clone(), handle, rs) {
-                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-                        // 提交被拒（pool 关闭）：不留任何可被读成成功的证据。
-                        pool.clear_discovery_evidence(name);
-                        break;
+                    Ok(Err(e)) => {
+                        let err_str = e.to_string();
+                        tracing::warn!(server = %name, error = %err_str, "MCP 连接失败");
+                        if Self::is_auth_required_error(&err_str, is_http) {
+                            // 服务器要求授权（如 sentry 401）：标记待授权，不主动
+                            // 触发——用户经 MCP 面板显式发起授权（mcp/oauth_start）。
+                            Self::insert_needs_auth(&pool, name, err_str);
+                        } else {
+                            Self::insert_failed(&pool, name, err_str);
+                        }
+                        // initialize 未完成：证据必须明确记为「本代 initialize 失败」，
+                        // 不能靠「没有证据」让等待方一直等到 deadline。
+                        commit_discovery_failure(&pool, name, false);
                     }
-                    // 唯一能提交「本代完整发现证据」的位置：transport + initialize +
-                    // 能力协商 + 真实成功的 live `tools/list` 全部完成，且句柄已登记代际。
-                    commit_discovery_success(&pool, name, &committed);
-                    connected += 1;
-                    let _ = status_tx.send(McpInitStatus::Initializing {
-                        connected,
-                        total: connectable,
-                    });
-                    *pool.init_status.write() = McpInitStatus::Initializing {
-                        connected,
-                        total: connectable,
-                    };
-                }
-                Ok(Err(e)) => {
-                    let err_str = e.to_string();
-                    tracing::warn!(server = %name, error = %err_str, "MCP 连接失败");
-                    if Self::is_auth_required_error(&err_str, is_http) {
-                        // 服务器要求授权（如 sentry 401）：标记待授权，不主动
-                        // 触发——用户经 MCP 面板显式发起授权（mcp/oauth_start）。
-                        Self::insert_needs_auth(&pool, name, err_str);
-                    } else {
-                        Self::insert_failed(&pool, name, err_str);
+                    Err(_) => {
+                        // 超时是面板上可见、日志里必须可查的失败：首次启动需装依赖的
+                        // stdio 服务器会在连接超时内完不成握手。
+                        tracing::warn!(
+                            server = %name,
+                            transport = transport_label(kind),
+                            timeout_secs = timeout.as_secs(),
+                            "MCP 连接超时"
+                        );
+                        Self::insert_failed(&pool, name, "连接超时".to_string());
+                        commit_discovery_failure(&pool, name, false);
                     }
-                    // initialize 未完成：证据必须明确记为「本代 initialize 失败」，
-                    // 不能靠「没有证据」让等待方一直等到 deadline。
-                    commit_discovery_failure(&pool, name, false);
-                }
-                Err(_) => {
-                    // 超时是面板上可见、日志里必须可查的失败：首次启动需装依赖的
-                    // stdio 服务器会在连接超时内完不成握手。
-                    tracing::warn!(
-                        server = %name,
-                        transport = transport_label(kind),
-                        timeout_secs = timeout.as_secs(),
-                        "MCP 连接超时"
-                    );
-                    Self::insert_failed(&pool, name, "连接超时".to_string());
-                    commit_discovery_failure(&pool, name, false);
                 }
             }
         }

@@ -1,4 +1,15 @@
-use super::*;
+use crate::buffer::MAX_READ_BYTES;
+use crate::buffer_budget::BufferBudget;
+use crate::state::MonitorError;
+use crate::state::MonitorState;
+use crate::state::MonitorStatus;
+use crate::state::StartRequest;
+use crate::state::DEFAULT_DEADLINE_MS;
+use crate::state::MAX_RETAINED_TASKS;
+use crate::state::TERMINAL_RETENTION;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 #[tokio::test]
 async fn maintenance_is_cancelled_and_cannot_extend_instance_lifetime() {
@@ -203,10 +214,13 @@ async fn concurrent_start_admission_cannot_exceed_the_task_limit() {
     }
     assert_eq!(admitted.len(), 1);
     assert_eq!(state.tasks.lock().len(), MAX_RETAINED_TASKS);
-    for id in admitted.into_iter().chain(std::iter::once(started.task_id)) {
-        state
-            .stop(&id, None, None)
-            .await
-            .expect("stop actual producers");
+    {
+        let cleanup_task_ids = admitted.into_iter().chain(std::iter::once(started.task_id));
+        for id in cleanup_task_ids {
+            state
+                .stop(&id, None, None)
+                .await
+                .expect("stop actual producers");
+        }
     }
 }

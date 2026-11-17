@@ -3,7 +3,16 @@
 //! 从 `history_page_wire_test.rs` 按职责拆出（STD-SIZE-001：单文件 ≤1000 行），语义未改动：
 //! 用例体、断言与 helper 逐字节搬移。夹具与跨文件共享 helper 在父模块里，经 `use super::*` 取用。
 
-use super::*;
+use super::spawn_loop;
+
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
+
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::sync::Arc;
 
 // ── 独立复核（S9-recheck：未协商连接的完整回放与私有语义边界）──────────────────
 
@@ -16,7 +25,11 @@ fn s9_recheck_all_keys(value: &Value, out: &mut Vec<String>) {
                 s9_recheck_all_keys(inner, out);
             }
         }
-        Value::Array(items) => items.iter().for_each(|item| s9_recheck_all_keys(item, out)),
+        Value::Array(items) => {
+            for item in items {
+                s9_recheck_all_keys(item, out);
+            }
+        }
         _ => {}
     }
 }
@@ -45,12 +58,13 @@ async fn s9_recheck_unnegotiated_load(
         .len();
 
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(
-        Arc::clone(&cfg),
-        Arc::clone(&fixture.sessions),
-        Some(PeriCaps::default()),
-    )
-    .await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            Arc::clone(&fixture.sessions),
+            Some(PeriCaps::default()),
+        )
+        .await;
     let sid = fixture.sid.clone();
 
     let for_load = Arc::clone(&client);
@@ -150,7 +164,11 @@ async fn s9_recheck_session_caps_do_not_leak_peri_private_fields_to_an_unnegotia
     let fixture = PageFixture::new(&tmp).await;
     fixture.archive(1).await;
 
-    let (_texts, keys, _reply) = s9_recheck_unnegotiated_load(&fixture, pagination_caps()).await;
+    let (_texts, keys, _reply) = s9_recheck_unnegotiated_load(
+        &fixture,
+        crate::host::requests::tests::history_page_wire_tests::pagination_caps(),
+    )
+    .await;
 
     let leaked: Vec<String> = [
         "nextCursor",
@@ -189,12 +207,13 @@ async fn s9_recheck_negotiated_load(
         .insert(fixture.sid.clone(), session_registry_caps);
 
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(
-        Arc::clone(&cfg),
-        Arc::clone(&fixture.sessions),
-        Some(connection_caps),
-    )
-    .await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            Arc::clone(&fixture.sessions),
+            Some(connection_caps),
+        )
+        .await;
     let sid = fixture.sid.clone();
 
     let for_load = Arc::clone(&client);
@@ -246,8 +265,12 @@ async fn s9_recheck_a_negotiated_connection_still_receives_the_replay_marks() {
     let fixture = PageFixture::new(&tmp).await;
     fixture.archive(1).await;
 
-    let (generations, keys, reply) =
-        s9_recheck_negotiated_load(&fixture, PeriCaps::default(), pagination_caps()).await;
+    let (generations, keys, reply) = s9_recheck_negotiated_load(
+        &fixture,
+        PeriCaps::default(),
+        crate::host::requests::tests::history_page_wire_tests::pagination_caps(),
+    )
+    .await;
 
     assert!(
         keys.iter().any(|key| key == "periReplay"),
@@ -309,7 +332,9 @@ async fn s9c_wire_facts(
     client: &crate::transport::mpsc::MpscClientTransport,
     reply: &Value,
 ) -> (Vec<String>, Vec<String>, Vec<Value>) {
-    let notifications = s9c_drain_notifications(client).await;
+    let notifications =
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(client)
+            .await;
     assert!(
         !notifications.is_empty(),
         "load 必须发出通知（否则本用例是空转）"
@@ -378,16 +403,20 @@ async fn s9c_verification_an_initialize_without_peri_extensions_yields_no_privat
     );
 
     // 这条会话此前被 peri 连接注册过：注册表里存着旧客户端的全能力值。
-    fixture
-        .cfg
-        .session_manager
-        .caps_registry()
-        .insert(fixture.sid.clone(), pagination_caps());
+    fixture.cfg.session_manager.caps_registry().insert(
+        fixture.sid.clone(),
+        crate::host::requests::tests::history_page_wire_tests::pagination_caps(),
+    );
 
     let cfg = Arc::clone(&fixture.cfg);
     // 连接侧**不预置**任何协商值：门必须由下面这条真实 `initialize` 请求建立。
     let (client, _sessions, task) =
-        spawn_loop(Arc::clone(&cfg), Arc::clone(&fixture.sessions), None).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            Arc::clone(&fixture.sessions),
+            None,
+        )
+        .await;
 
     client
         .send_request("initialize", s9c_standard_initialize_params())
@@ -429,7 +458,12 @@ async fn s9c_verification_an_initialize_with_peri_extensions_keeps_every_replay_
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, _sessions, task) =
-        spawn_loop(Arc::clone(&cfg), Arc::clone(&fixture.sessions), None).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            Arc::clone(&fixture.sessions),
+            None,
+        )
+        .await;
 
     client
         .send_request("initialize", s9c_peri_initialize_params())
@@ -503,7 +537,12 @@ async fn s9c_verification_a_never_initialized_in_process_connection_keeps_the_re
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, _sessions, task) =
-        spawn_loop(Arc::clone(&cfg), Arc::clone(&fixture.sessions), None).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            Arc::clone(&fixture.sessions),
+            None,
+        )
+        .await;
 
     let reply = client
         .send_request("session/load", json!({ "sessionId": fixture.sid }))

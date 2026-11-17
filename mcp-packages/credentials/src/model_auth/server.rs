@@ -1,23 +1,30 @@
 use std::sync::Arc;
 
-use rmcp::{
-    model::{CustomRequest, CustomResult, Implementation, ServerCapabilities, ServerConfig},
-    service::{RequestContext, RoleServer},
-    ErrorData, ServerHandler,
-};
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::model::Implementation;
+use rmcp::model::ServerCapabilities;
+use rmcp::model::ServerConfig;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::ErrorData;
+use rmcp::ServerHandler;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    callback::LoginAttempt,
-    oauth::OAuth,
-    store::{Lease, Store},
-    types::{
-        AuthError, AuthResult, CredentialReply, ExpectedIdentity, LogoutOutcome, Request, Response,
-        StoredAccount,
-    },
-    METHOD,
-};
+use super::callback::LoginAttempt;
+use super::oauth::OAuth;
+use super::store::Lease;
+use super::store::Store;
+use super::types::AuthError;
+use super::types::AuthResult;
+use super::types::CredentialReply;
+use super::types::ExpectedIdentity;
+use super::types::LogoutOutcome;
+use super::types::Request;
+use super::types::Response;
+use super::types::StoredAccount;
+use super::METHOD;
 
 pub(super) struct AuthServer {
     pub store: Store,

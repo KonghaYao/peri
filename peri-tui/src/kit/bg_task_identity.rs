@@ -1,8 +1,5 @@
 //! Background task `task_id` ↔ `agent_id` 双键解析。
 
-use crate::kit::atoms::{
-    BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS, BgDisplayEntry, BgLiveStatus,
-};
 use crate::kit::bg_task_status::BgTaskStatus;
 use std::collections::HashSet;
 
@@ -25,8 +22,23 @@ pub(crate) fn bounded_label(value: &str) -> String {
     result
 }
 
+#[must_use]
 pub fn is_unbound_agent_row(entry: &BgDisplayEntry) -> bool {
     entry.agent_type == "agent" && entry.linked_agent_id.is_none()
+}
+
+/// 以 child thread 身份找任务行。该身份由注册时的 live inbox 提供，
+/// 与 `SubagentStarted.instance_id` 是同一个 UUID。
+pub(crate) fn task_id_for_child_thread(child_thread_id: &str) -> Option<String> {
+    BG_TASKS
+        .state()
+        .read()
+        .iter()
+        .rev()
+        .find(|task| {
+            task.kind == "agent" && task.child_thread_id.as_deref() == Some(child_thread_id)
+        })
+        .map(|task| task.task_id.clone())
 }
 
 pub fn bind_linked_agent_on_subagent_started(
@@ -34,6 +46,12 @@ pub fn bind_linked_agent_on_subagent_started(
     agent_name: &str,
     instance_id: Option<&str>,
 ) -> Option<String> {
+    // 任务行与 child 共享 child_thread_id：精确身份优先，不依赖跨通道到达顺序。
+    if let Some(task_id) = task_id_for_child_thread(agent_id)
+        && link_row_to_agent(&task_id, agent_id, agent_name)
+    {
+        return Some(task_id);
+    }
     // A missing old Stop can leave its detail Running. Only the same display
     // occurrence proves a duplicate; a new run must claim its new unbound row.
     let same_run_tasks: HashSet<_> = BG_LIVE_DETAIL
@@ -79,6 +97,11 @@ pub fn resolve_subagent_id_for_display(entry: &BgDisplayEntry) -> Option<String>
 }
 
 pub fn task_id_for_agent_id(agent_id: &str) -> Option<String> {
+    // 当前 occurrence 的占位 owner 优先于旧保留行/旧 identity：resume 复用
+    // agent_id 时，旧任务的终态明细不能抢走新一轮的流式事件。
+    if let Some(task_id) = crate::kit::bg_task_live::pending_live_owner_for_agent(agent_id) {
+        return Some(task_id);
+    }
     let display_store = BG_DISPLAY.state();
     {
         let display = display_store.read();
@@ -100,11 +123,42 @@ pub fn task_id_for_agent_id(agent_id: &str) -> Option<String> {
             }
         }
     }
+    // 反向乱序：任务行尚未出现时，占位 owner 以 agent_id 为键承接迟到预览。
+    if BG_LIVE_DETAIL.state().read().contains_key(agent_id) {
+        return Some(agent_id.to_string());
+    }
     let display = display_store.read();
     display
         .iter()
         .find(|e| e.id == agent_id)
         .map(|e| e.id.clone())
+}
+
+/// 把已存在但未绑定 agent 的任务行认领给迟到的 `SubagentStarted` 对应 child。
+///
+/// 返回是否真的建立了绑定（任务行存在、active 且仍是未绑定 agent 行）。
+pub(crate) fn link_row_to_agent(task_id: &str, agent_id: &str, agent_name: &str) -> bool {
+    let display_store = BG_DISPLAY.state();
+    {
+        let mut display = display_store.write();
+        let Some(entry) = display.iter_mut().find(|entry| {
+            entry.id == task_id
+                && entry.is_active
+                && (is_unbound_agent_row(entry)
+                    || entry.linked_agent_id.as_deref() == Some(agent_id))
+        }) else {
+            return false;
+        };
+        entry.linked_agent_id = Some(agent_id.to_string());
+    }
+    let identity_store = BG_TASK_IDENTITY.state();
+    let mut identities = identity_store.write();
+    let identity = identities.entry(task_id.to_owned()).or_default();
+    identity.agent_id = Some(agent_id.to_string());
+    if !agent_name.is_empty() {
+        identity.agent_name = Some(bounded_label(agent_name));
+    }
+    true
 }
 
 pub fn with_bg_display_for_agent<F>(agent_id: &str, f: F)
@@ -187,18 +241,21 @@ pub(crate) fn prune_metadata() {
         let mut display = display.write();
         let (mut count, mut bytes) = (0usize, 0usize);
         let mut keep = vec![true; display.len()];
-        for (index, row) in display.iter().enumerate().rev() {
-            if row.is_active || protected.contains(&row.id) {
-                continue;
-            }
-            let size = display_reserved(row);
-            if count >= RECENT_METADATA_ENTRIES
-                || bytes.saturating_add(size) > RECENT_METADATA_BYTES
-            {
-                keep[index] = false;
-            } else {
-                count += 1;
-                bytes += size;
+        {
+            let iteration_items = display.iter().enumerate().rev();
+            for (index, row) in iteration_items {
+                if row.is_active || protected.contains(&row.id) {
+                    continue;
+                }
+                let size = display_reserved(row);
+                if count >= RECENT_METADATA_ENTRIES
+                    || bytes.saturating_add(size) > RECENT_METADATA_BYTES
+                {
+                    keep[index] = false;
+                } else {
+                    count += 1;
+                    bytes += size;
+                }
             }
         }
         let mut index = 0;
@@ -248,3 +305,15 @@ pub(crate) fn prune_metadata() {
 #[cfg(test)]
 #[path = "bg_task_identity_test.rs"]
 mod tests;
+
+use crate::kit::atoms::BG_DISPLAY;
+
+use crate::kit::atoms::BG_LIVE_DETAIL;
+
+use crate::kit::atoms::BG_TASK_IDENTITY;
+
+use crate::kit::atoms::BG_TASKS;
+
+use crate::kit::atoms::BgDisplayEntry;
+
+use crate::kit::atoms::BgLiveStatus;

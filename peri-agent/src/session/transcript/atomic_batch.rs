@@ -1,11 +1,16 @@
 //! A settled tool exchange is one owned, FIFO writer transaction, published after ACK.
 
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use parking_lot::RwLock;
 
-use super::{history, BaseMessage, MessageTranscript, PersistOp, PersistedPayload};
+use crate::messages::BaseMessage;
+use crate::session::transcript::MessageTranscript;
+use crate::session::transcript::PersistOp;
+use peri_acp_types::store::history;
+use peri_acp_types::store::PersistedPayload;
 
 /// Owned transaction passed only by the transcript's checked admission path.
 #[derive(Debug)]

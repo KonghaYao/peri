@@ -1,11 +1,11 @@
-use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::fmt::{self, Debug, Formatter};
+use std::sync::Arc;
 
-use crate::{
-    agent::react::ToolCall,
-    error::{AgentError, AgentResult},
-    tools::BaseTool,
-};
+use crate::agent::react::ToolCall;
+use crate::error::AgentError;
+use crate::error::AgentResult;
+use crate::tools::BaseTool;
 
 /// 已在单个 dispatch batch 的不可变工具表中解析完成的调用事实。
 ///
@@ -20,6 +20,7 @@ pub struct CanonicalToolInvocation {
 }
 
 impl CanonicalToolInvocation {
+    #[must_use]
     pub fn with_policy_input(&self, input: serde_json::Value) -> Self {
         let mut invocation = self.clone();
         invocation.policy_call.input = input;
@@ -91,7 +92,7 @@ fn ensure_model_visible(target: &dyn BaseTool) -> AgentResult<()> {
 }
 
 /// 默认解析器：精确 key、canonical 名称、大小写折叠 key 和 alias 必须唯一。
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct DirectToolInvocationResolver;
 
 impl DirectToolInvocationResolver {
@@ -185,6 +186,7 @@ fn apply_param_alias(
 /// schema 约束，避免把字段名相似但语义不同的 API 强行兼容。
 ///
 /// 按实际绑定目标的名字和 builtin 声明匹配，不根据外部工具的名字推断身份。
+#[must_use]
 pub fn normalize_params(
     input: serde_json::Value,
     target: Option<&dyn BaseTool>,
@@ -210,7 +212,8 @@ pub fn normalize_params(
 
     apply_param_alias(&mut obj, declared_params, "path", "file_path");
     let effective_name = target.name();
-    let original_name = original_tool_name_of_effective(effective_name);
+    let original_name =
+        peri_acp_types::builtin_mcp::original_tool_name_of_effective(effective_name);
     for (tool_name, alias, canonical) in TOOL_PARAM_ALIASES {
         if effective_name.eq_ignore_ascii_case(tool_name)
             || original_name.is_some_and(|original| original.eq_ignore_ascii_case(tool_name))
@@ -224,3 +227,12 @@ pub fn normalize_params(
 #[cfg(test)]
 #[path = "invocation_test.rs"]
 mod tests;
+
+impl Debug for CanonicalToolInvocation {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CanonicalToolInvocation")
+            .field("wrapper_name_present", &self.wrapper_name.is_some())
+            .finish_non_exhaustive()
+    }
+}

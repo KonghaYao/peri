@@ -1,6 +1,29 @@
 //! RCRA 阶段共享依赖与构造，执行循环只消费此边界。
 
-use super::*;
+use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::events_v2::EventBus;
+use crate::agent::react::ReactLLM;
+use crate::agent::stages::async_context::AsyncContext;
+use crate::agent::stages::compact_progress;
+use crate::agent::stages::model_view::ModelViewScope;
+use crate::agent::stages::null_llm::NullReactLLM;
+use crate::agent::stages::SharedToolMap;
+use crate::agent::token::ContextBudget;
+use crate::messages::BaseMessage;
+use crate::middleware::chain::MiddlewareChain;
+use crate::session::tool_catalog::SessionToolCatalog;
+use crate::session::turn::TurnContext;
+use crate::session::MessageQueue;
+use crate::session::MessageTranscript;
+use crate::tools::DirectToolInvocationResolver;
+use crate::tools::ToolInvocationResolver;
+use parking_lot::RwLock;
+use peri_acp_types::identity::AgentId;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::fmt::{self, Debug, Formatter};
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 
 // ─── 阶段间共享上下文子结构 ─────────────────────────────────────────────────
 
@@ -63,7 +86,7 @@ pub struct CompactContext {
 /// 所有阶段通过此结构体访问 Session 实体，不直接持有 Session。
 ///
 /// **P2 扩展**：加入 LLM / 工具 / 中间件链 / EventBus / Compact 等运行时依赖，
-/// 让 stages 可以自驱完整 ReAct 循环，由 [`run_react_loop`] 入口统一驱动。
+/// 让 stages 可以自驱完整 ReAct 循环，由 [`run_react_loop`](crate::agent::stages::run_react_loop) 入口统一驱动。
 #[derive(Clone)]
 pub struct StageContext {
     pub session: SessionHandle,
@@ -72,9 +95,11 @@ pub struct StageContext {
     pub async_ctx: AsyncContext,
     /// 当前 session 的 Goal 只读/控制投影源。
     pub goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
+    /// 会话级后台任务注册表（Compact 硬记忆的运行时 id 事实源）。
+    pub task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
     /// Recall 累加器（跨 middleware hook 共享）。
     ///
-    /// 每次 middleware hook 都会构造临时 [`AgentContext`]，
+    /// 每次 middleware hook 都会构造临时 [`AgentContext`](crate::agent::agent_context::AgentContext)，
     /// 调用结束后由 middleware_runner 把 AgentContext 内部
     /// recall_buffer drain 到本缓冲区，循环结束后由 executor 统一取出。
     pub recall_buffer: Arc<RwLock<Vec<String>>>,
@@ -120,6 +145,7 @@ impl StageContext {
     ///
     /// **注意**：此构造函数仅用于单元测试。生产代码请用 `StageContextBuilder`。
     #[cfg(test)]
+    #[must_use]
     pub fn new(
         turn: TurnContext,
         transcript: Arc<RwLock<MessageTranscript>>,
@@ -184,12 +210,14 @@ impl StageContext {
                 hook_stop_requested: None,
             },
             goal_controller: None,
+            task_manager: None,
             recall_buffer: rbuf,
             model_view: Arc::new(ModelViewScope::default()),
         }
     }
 
     /// 创建 builder（生产代码推荐路径）
+    #[must_use]
     pub fn builder(
         turn: TurnContext,
         transcript: Arc<RwLock<MessageTranscript>>,
@@ -245,20 +273,24 @@ impl StageContext {
                 hook_stop_requested: None,
             },
             goal_controller: None,
+            task_manager: None,
         }
     }
 
     /// 便捷访问：当前 turn_id
+    #[must_use]
     pub fn turn_id(&self) -> crate::session::turn::TurnId {
         self.session.turn.turn_id()
     }
 
     /// 便捷访问：当前 cwd
+    #[must_use]
     pub fn cwd(&self) -> &str {
         &self.session.turn.cwd
     }
 
     /// 取出可见消息快照（已过滤 excluded 标记）
+    #[must_use]
     pub fn visible_messages(&self) -> Vec<BaseMessage> {
         self.session
             .transcript
@@ -282,4 +314,61 @@ pub struct StageContextBuilder {
     pub(super) compact: CompactContext,
     pub(super) async_ctx: AsyncContext,
     pub(super) goal_controller: Option<Arc<dyn peri_acp_types::goal::GoalController>>,
+    pub(super) task_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+}
+
+impl Debug for SessionHandle {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionHandle")
+            .field(
+                "user_input_mailbox_present",
+                &self.user_input_mailbox.is_some(),
+            )
+            .field("model_parent_present", &self.model_parent.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for RuntimeServices {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeServices")
+            .field("shared_tools_present", &self.shared_tools.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for CompactContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompactContext")
+            .field("context_budget_present", &self.context_budget.is_some())
+            .field("compact_config_present", &self.compact_config.is_some())
+            .field("compact_llm_present", &self.compact_llm.is_some())
+            .field("compact_pre_hook_present", &self.compact_pre_hook.is_some())
+            .field(
+                "compact_post_hook_present",
+                &self.compact_post_hook.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for StageContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StageContext")
+            .field("goal_controller_present", &self.goal_controller.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Debug for StageContextBuilder {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StageContextBuilder")
+            .field("goal_controller_present", &self.goal_controller.is_some())
+            .finish_non_exhaustive()
+    }
 }

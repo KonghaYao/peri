@@ -1,6 +1,14 @@
 //! 手动 compact 的持久化行为与输入一致性校验。
 
-use super::*;
+use crate::session::command::compact::tests::BoundSession;
+use crate::session::command::compact::tests::MockEventSink;
+use crate::session::command::compact::tests::MockSummaryModel;
+use crate::session::command::compact::CompactCommand;
+use crate::session::executor::PromptStopReason;
+use peri_acp_types::command::FeedbackChannel;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::messages::BaseMessage;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_compact_pipeline_uses_bound_sqlite_lifecycle() {
@@ -13,7 +21,7 @@ async fn test_compact_pipeline_uses_bound_sqlite_lifecycle() {
     session.append(&history).await;
 
     let sink = Arc::new(MockEventSink::new());
-    let ctx = make_ctx_with_model_and_thread(
+    let ctx = crate::session::command::compact::tests::make_ctx_with_model_and_thread(
         sink,
         history.clone(),
         session.cwd.clone(),
@@ -24,7 +32,8 @@ async fn test_compact_pipeline_uses_bound_sqlite_lifecycle() {
         Some(session.thread_id.clone()),
     );
 
-    let result = execute_compact(&CompactCommand, ctx).await;
+    let result =
+        crate::session::command::compact::tests::execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert!(
@@ -56,7 +65,7 @@ async fn test_compact_pipeline_does_not_append_preexisting_history_to_bound_thre
     ];
     session.append(&history).await;
 
-    let ctx = make_ctx_with_model_and_thread(
+    let ctx = crate::session::command::compact::tests::make_ctx_with_model_and_thread(
         Arc::new(MockEventSink::new()),
         history.clone(),
         session.cwd.clone(),
@@ -67,7 +76,8 @@ async fn test_compact_pipeline_does_not_append_preexisting_history_to_bound_thre
         Some(session.thread_id.clone()),
     );
 
-    let result = execute_compact(&CompactCommand, ctx).await;
+    let result =
+        crate::session::command::compact::tests::execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     let stored_history = session.stored_messages().await;
@@ -106,9 +116,9 @@ async fn test_compact_pipeline_reuses_canonical_history_for_second_bound_sqlite_
     session.append(&history).await;
 
     let first_sink = Arc::new(MockEventSink::new());
-    let first = execute_compact(
+    let first = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             first_sink.clone(),
             history,
             session.cwd.clone(),
@@ -129,9 +139,9 @@ async fn test_compact_pipeline_reuses_canonical_history_for_second_bound_sqlite_
     );
 
     let second_sink = Arc::new(MockEventSink::new());
-    let second = execute_compact(
+    let second = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             second_sink.clone(),
             session.stored_messages().await,
             session.cwd.clone(),
@@ -186,9 +196,9 @@ async fn test_compact_pipeline_accepts_effective_only_history_for_second_lifecyc
     ];
     session.append(&history).await;
 
-    let first = execute_compact(
+    let first = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             history.clone(),
             session.cwd.clone(),
@@ -219,9 +229,9 @@ async fn test_compact_pipeline_accepts_effective_only_history_for_second_lifecyc
         "被压缩的原文必须不在有效集合里"
     );
 
-    let second = execute_compact(
+    let second = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             effective,
             session.cwd.clone(),
@@ -270,9 +280,9 @@ async fn test_compact_pipeline_history_read_only_lifecycle_failure_preserves_dur
         .collect::<Vec<_>>();
     let read_only = session.open_read_only().await;
 
-    let result = execute_compact(
+    let result = crate::session::command::compact::tests::execute_compact(
         &CompactCommand,
-        make_ctx_with_model_and_thread(
+        crate::session::command::compact::tests::make_ctx_with_model_and_thread(
             Arc::new(MockEventSink::new()),
             history.clone(),
             session.cwd.clone(),
@@ -332,7 +342,7 @@ async fn test_compact_pipeline_rejects_incoming_history_that_differs_from_bound_
     session.append(&stored_history).await;
 
     let sink = Arc::new(MockEventSink::new());
-    let ctx = make_ctx_with_model_and_thread(
+    let ctx = crate::session::command::compact::tests::make_ctx_with_model_and_thread(
         sink.clone(),
         incoming_history.clone(),
         session.cwd.clone(),
@@ -343,7 +353,8 @@ async fn test_compact_pipeline_rejects_incoming_history_that_differs_from_bound_
         Some(session.thread_id.clone()),
     );
 
-    let result = execute_compact(&CompactCommand, ctx).await;
+    let result =
+        crate::session::command::compact::tests::execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(
@@ -398,7 +409,7 @@ async fn test_compact_pipeline_without_thread_binding_returns_error_without_muta
         BaseMessage::ai("unbound assistant response"),
     ];
     let sink = Arc::new(MockEventSink::new());
-    let ctx = make_ctx_with_model_and_thread(
+    let ctx = crate::session::command::compact::tests::make_ctx_with_model_and_thread(
         sink.clone(),
         history.clone(),
         "/tmp".to_string(),
@@ -409,7 +420,8 @@ async fn test_compact_pipeline_without_thread_binding_returns_error_without_muta
         None,
     );
 
-    let result = execute_compact(&CompactCommand, ctx).await;
+    let result =
+        crate::session::command::compact::tests::execute_compact(&CompactCommand, ctx).await;
 
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
     assert_eq!(

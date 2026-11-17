@@ -5,7 +5,7 @@ use super::grid::{GridSpec, TextLineSource, ZoneTransition};
 use super::selection::{SlotIndex, SlotLines};
 use super::viewport_anchor::{PrependRelocation, ViewportAnchor};
 use super::vm_cache::VmCacheSlot;
-use crate::kit::atoms::{TranscriptPublication, ViewModelsSnapshot};
+
 use crate::kit::entry_render_cache::{EntryInvalidation, EntryRenderContext};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
@@ -54,6 +54,7 @@ fn end_zone(vm: &TuiRenderUnit) -> EntryZone {
 
 /// entry 是否产出渲染行——0 行 entry（空 bubble / 空 user prompt）不参与相邻判定（§7）。
 /// 判定条件与 `render::vm_to_lines_cached_with_layout` 的 0 行早返回同源，两处须同步。
+#[must_use]
 fn produces_lines(vm: &TuiRenderUnit) -> bool {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
@@ -69,6 +70,7 @@ fn produces_lines(vm: &TuiRenderUnit) -> bool {
 /// 台阶线色来源：按 entry 类型映射文本区左侧线条色——user 气泡用
 /// `text.secondary`、assistant 正文用 `accent`、Divider 用 `text.secondary`（与
 /// `── label ──` 同色）；主题值在渲染层解析（`render/helpers.rs::text_line_color`）。
+#[must_use]
 fn text_line_source(vm: &TuiRenderUnit) -> TextLineSource {
     match vm {
         TuiRenderUnit::TuiUserBubble(_) => TextLineSource::User,
@@ -130,6 +132,7 @@ pub(super) struct Transcript {
     retained_bytes: usize,
     clock: u64,
     frame: Option<u64>,
+    genui_revision: u64,
     /// [REQ-C01-3 / A20] 最近一次发布的重定位结果（仅当该次发布与一次更早历史并入配对）。
     /// 渲染 body 取走（一次性）后交给 `run_auto_follow` 的并入分支消费；
     /// 语义与身份口径见 [`super::viewport_anchor`]。
@@ -141,6 +144,8 @@ pub(super) struct Transcript {
     pub(super) scanned_slots: usize,
     pub(super) updated_slots: usize,
     pub(super) evictions: usize,
+    #[cfg(test)]
+    pub(super) genui_budget_checks: usize,
     pub(super) invalidation: &'static str,
 }
 
@@ -163,6 +168,10 @@ impl Transcript {
         self.scanned_slots = 0;
         self.updated_slots = 0;
         self.evictions = 0;
+        #[cfg(test)]
+        {
+            self.genui_budget_checks = 0;
+        }
         let structural_epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get();
         let structural_changed = structural_epoch != self.structural_epoch_seen;
         if structural_changed {
@@ -277,6 +286,34 @@ impl Transcript {
                     self.enforce_budget(caches, &pinned);
                 }
             }
+        }
+        let genui_revision = crate::kit::genui::view_state::revision();
+        if self.genui_revision != genui_revision {
+            for slot in 0..caches.len() {
+                if caches[slot].entry.genui_state_changed() {
+                    let transition = zone_transition(&snapshot.items, slot);
+                    self.ensure_slot(
+                        slot,
+                        &snapshot.items[slot],
+                        caches,
+                        grid,
+                        width,
+                        &context,
+                        frame,
+                        transition,
+                    );
+                    let visible = self.index.visible_slots(
+                        scroll_y.min(self.index.total_visual().saturating_sub(height)),
+                        height,
+                    );
+                    self.enforce_budget(caches, &visible);
+                    #[cfg(test)]
+                    {
+                        self.genui_budget_checks += 1;
+                    }
+                }
+            }
+            self.genui_revision = genui_revision;
         }
         // ── [REQ-C01-3 / A20] 发布**后**的重定位：同一身份在新索引里重查视觉起点 ──
         // 只在「本次发布」与「一次更早历史并入」配对时产出：`HISTORY_PREPEND_EPOCH`
@@ -403,12 +440,16 @@ impl Transcript {
         cache.copy_button = cache.entry.copy_button().cloned();
         cache.interaction = cache.entry.interaction().cloned();
         cache.image_lines = cache.entry.image_lines().to_vec();
-        let lines = Arc::new(match cache.entry.markdown_lines().stable_overlay() {
-            Some((start, stable)) => {
-                SlotLines::composite(Arc::clone(cache.entry.lines()), start, stable)
-            }
-            None => SlotLines::single(Arc::clone(cache.entry.lines())),
-        });
+        cache.genui_buttons = cache.entry.genui_buttons().to_vec();
+        let lines = Arc::new(
+            (match cache.entry.markdown_lines().stable_overlay() {
+                Some((start, stable)) => {
+                    SlotLines::composite(Arc::clone(cache.entry.lines()), start, stable)
+                }
+                None => SlotLines::single(Arc::clone(cache.entry.lines())),
+            })
+            .with_genui_ranges(&cache.entry.markdown_lines().genui_ranges),
+        );
         if !layout_changed {
             Arc::make_mut(&mut self.index).replace_lines(slot, Arc::clone(&lines));
         } else {
@@ -436,6 +477,7 @@ impl Transcript {
         }
     }
 
+    #[must_use]
     pub(super) fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
@@ -474,7 +516,8 @@ impl Transcript {
             }
             caches[slot].evict();
             self.retained_bytes = self.retained_bytes.saturating_sub(self.bytes[slot]);
-            self.bytes[slot] = 0;
+            self.bytes[slot] = caches[slot].retained_bytes();
+            self.retained_bytes = self.retained_bytes.saturating_add(self.bytes[slot]);
             self.evictions += 1;
         }
         self.recency.extend(visible);
@@ -500,7 +543,10 @@ impl Transcript {
         height: usize,
     ) -> Arc<SlotIndex> {
         let viewport = self.index.visible_slots(scroll_y, height);
-        let context = self.context.clone().unwrap();
+        let context = self
+            .context
+            .clone()
+            .expect("transcript preparation installs context before warming visible slots");
         for slot in viewport.clone() {
             if caches[slot].lines.is_none() {
                 let transition = zone_transition(&snapshot.items, slot);
@@ -508,10 +554,14 @@ impl Transcript {
                     slot,
                     &snapshot.items[slot],
                     caches,
-                    self.grid.unwrap(),
+                    self.grid.expect(
+                        "transcript preparation installs its grid before warming visible slots",
+                    ),
                     self.width,
                     &context,
-                    self.frame.unwrap(),
+                    self.frame.expect(
+                        "transcript preparation starts a frame before warming visible slots",
+                    ),
                     transition,
                 );
             }
@@ -523,5 +573,13 @@ impl Transcript {
 }
 
 #[cfg(test)]
+#[path = "genui_test.rs"]
+mod genui_tests;
+
+#[cfg(test)]
 #[path = "transcript_test.rs"]
 mod tests;
+
+use crate::kit::atoms::TranscriptPublication;
+
+use crate::kit::atoms::ViewModelsSnapshot;

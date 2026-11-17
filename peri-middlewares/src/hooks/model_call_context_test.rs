@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Arc, HashMap, HookAction, HookDispatcher, HookEvent, HookInput, OnceTracker, ReactLLM,
+    RegisteredHook, RwLock,
+};
 use peri_agent::agent::react::{Reasoning, StreamingContext};
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::BaseTool;
@@ -117,32 +120,35 @@ async fn concurrent_tool_hooks_keep_execution_group_and_config_slot_identity() {
     let mut contexts = seen.lock().clone();
     contexts.sort_by(|left, right| left.call.cmp(&right.call));
     assert_eq!(contexts.len(), 8);
-    for (context, (execution, call)) in contexts.iter().zip([
-        (
-            "shared-exec",
-            "hook:group:0:PreToolUse:reason:7:shared-tool:1",
-        ),
-        (
-            "shared-exec",
-            "hook:group:0:PreToolUse:reason:7:shared-tool:2",
-        ),
-        (
-            "shared-exec",
-            "hook:group:1:PreToolUse:reason:7:shared-tool:1",
-        ),
-        (
-            "shared-exec",
-            "hook:group:1:PreToolUse:reason:7:shared-tool:2",
-        ),
-        ("exec-a", "hook:local:PreToolUse:reason:7:tool-a:1"),
-        ("exec-a", "hook:local:PreToolUse:reason:7:tool-a:2"),
-        ("exec-b", "hook:local:PreToolUse:reason:7:tool-b:1"),
-        ("exec-b", "hook:local:PreToolUse:reason:7:tool-b:2"),
-    ]) {
-        assert_eq!(context.owner, "owner");
-        assert_eq!(context.execution, execution);
-        assert_eq!(context.call, call);
-        assert_eq!(context.purpose, "hook");
-        assert_eq!(context.parent, None);
+    {
+        let paired_contexts = contexts.iter().zip([
+            (
+                "shared-exec",
+                "hook:group:0:PreToolUse:reason:7:shared-tool:1",
+            ),
+            (
+                "shared-exec",
+                "hook:group:0:PreToolUse:reason:7:shared-tool:2",
+            ),
+            (
+                "shared-exec",
+                "hook:group:1:PreToolUse:reason:7:shared-tool:1",
+            ),
+            (
+                "shared-exec",
+                "hook:group:1:PreToolUse:reason:7:shared-tool:2",
+            ),
+            ("exec-a", "hook:local:PreToolUse:reason:7:tool-a:1"),
+            ("exec-a", "hook:local:PreToolUse:reason:7:tool-a:2"),
+            ("exec-b", "hook:local:PreToolUse:reason:7:tool-b:1"),
+            ("exec-b", "hook:local:PreToolUse:reason:7:tool-b:2"),
+        ]);
+        for (context, (execution, call)) in paired_contexts {
+            assert_eq!(context.owner, "owner");
+            assert_eq!(context.execution, execution);
+            assert_eq!(context.call, call);
+            assert_eq!(context.purpose, "hook");
+            assert_eq!(context.parent, None);
+        }
     }
 }

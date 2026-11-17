@@ -41,6 +41,7 @@ impl std::ops::AddAssign for BodyReserved {
     }
 }
 
+// The owned container reference preserves allocation capacity for retained-memory accounting.
 pub fn string_body_reserved(value: &String) -> BodyReserved {
     BodyReserved {
         body: value.len(),
@@ -48,8 +49,10 @@ pub fn string_body_reserved(value: &String) -> BodyReserved {
     }
 }
 
-pub fn option_string_body_reserved(value: &Option<String>) -> BodyReserved {
-    value.as_ref().map(string_body_reserved).unwrap_or_default()
+#[must_use]
+// The owned container reference preserves allocation capacity for retained-memory accounting.
+pub fn option_string_body_reserved(value: Option<&String>) -> BodyReserved {
+    value.map(string_body_reserved).unwrap_or_default()
 }
 
 /// 结构化 JSON 的逻辑字节（不分配序列化临时体）。
@@ -114,7 +117,7 @@ pub fn presentation_bytes(presentation: &TuiToolPresentation) -> BodyReserved {
                     * std::mem::size_of::<crate::kit::tui_render_unit::TuiTodoChange>();
             for item in &todo.current_items {
                 bytes += string_body_reserved(&item.content);
-                bytes += option_string_body_reserved(&item.active_form);
+                bytes += option_string_body_reserved(item.active_form.as_ref());
             }
             for change in &todo.changes {
                 bytes += string_body_reserved(&change.content);
@@ -132,6 +135,14 @@ pub struct SeenAllocations {
 impl SeenAllocations {
     pub fn account_arc<T>(&mut self, arc: &Arc<T>, bytes: usize) -> usize {
         self.account_ptr(Arc::as_ptr(arc) as usize, bytes)
+    }
+
+    pub fn account_arc_with<T>(&mut self, arc: &Arc<T>, bytes: impl FnOnce() -> usize) -> usize {
+        let ptr = Arc::as_ptr(arc) as usize;
+        if self.seen.contains_key(&ptr) {
+            return 0;
+        }
+        self.account_ptr(ptr, bytes())
     }
 
     pub fn account_ptr(&mut self, ptr: usize, bytes: usize) -> usize {
@@ -152,11 +163,13 @@ impl SeenAllocations {
         self.seen.values().copied().sum()
     }
 
+    #[must_use]
     pub fn allocations(&self) -> usize {
         self.seen.len()
     }
 }
 
+#[must_use]
 pub fn retained_str_bytes(value: &str) -> usize {
     value.len()
 }
@@ -311,6 +324,16 @@ pub fn retained_ask_user_bytes(block: &TuiAskUserBlock) -> usize {
         + block.options.iter().map(String::capacity).sum::<usize>()
         + block.result.as_ref().map_or(0, String::capacity)
         + block.request_id.as_ref().map_or(0, String::capacity)
+        + retained_vec_bytes(&block.question_ids)
+        + block
+            .question_ids
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>()
+        + block
+            .owner
+            .as_ref()
+            .map_or(0, |owner| owner.session_id.capacity())
 }
 
 pub fn retained_collapsed_group_bytes(

@@ -36,7 +36,7 @@ Workspace 由可移植值对象 `WorkspaceRef` 表达：`runtimePath` 是 Agent/
 - `send` 同步返回 `SendReceipt`：`inputId` 与 `accepted` 表示入队被接受，`then`/投递等待表示 Peri 已交付输入；两者不能混为一谈。
 - `cancel` 的 `requested` 只表示取消通知已写出，不是停止证明。停止必须由 ACP 关闭/结算证据确认。
 - 动作失败携带 `disposition`：`rejected` 明确未生效；`unknown` 可能已写出/执行且不得自动重试；`not_sent` 只由调用端在提交前产生。
-- CF HTTP 层只做边界校验、目标绑定核对与错误映射，不重写领域规则。
+- 宿主 HTTP 层只做边界校验、目标绑定核对与错误映射，不重写领域规则。
 
 ## 4. 绑定、SessionOwnership 与关闭
 
@@ -52,7 +52,7 @@ Workspace 由可移植值对象 `WorkspaceRef` 表达：`runtimePath` 是 Agent/
 - 关闭是有界所有权事务：`session/close` 在预算内重放。超时返回 `ChatCloseIncompleteError` 并保留 ownership、索引与资源；不产生 `closed` 事实，可重试。
 - `shutdown` 先封闭新准入，再分别结算在途绑定/关闭，最后释放 WASM 运行后端；失败聚合上报，可重试。
 
-`ChatManager` 接收调用方注入的存储端口，并在内部为每个实例构造 `SessionOwnership` 协调器。它解决同一个 Session 被多个 Chat 句柄或服务实例同时绑定的问题：重复执行会造成消息双写与工具重复调用。绑定前向共享存储写入以 Session ID 为唯一 key 的记录（Manager 实例 owner），加载路径读到其他 owner 时冲突并在 CF 映射为 409；不覆盖已有记录。ownership 只在清理确认后释放；关闭超时或失败时保留，避免其他实例接管半关闭会话。unstorage memory driver 仅单进程有效；跨实例需要共享 storage，并由路由层保证同一 Session 的单实例绑定与崩溃清理。加载路径已有控制者时冲突映射 409 `binding_conflict`；加载路径（`change_session`）的 KV 读/写失败映射 500 `claim_failed`；新会话路径（`create_new_session`）claim 阶段失败（本地/KV 冲突或 KV 读/写失败）映射 500 `session_creation_failed`（stage `claim`，带 `createdSessionId`）。没有通用 503 ownership 错误码。release 故障保留记录供重试。
+`ChatManager` 接收调用方注入的存储端口，并在内部为每个实例构造 `SessionOwnership` 协调器。它解决同一个 Session 被多个 Chat 句柄或服务实例同时绑定的问题：重复执行会造成消息双写与工具重复调用。绑定前向共享存储写入以 Session ID 为唯一 key 的记录（Manager 实例 owner），加载路径读到其他 owner 时冲突并在宿主路由层映射为 409；不覆盖已有记录。ownership 只在清理确认后释放；关闭超时或失败时保留，避免其他实例接管半关闭会话。unstorage memory driver 仅单进程有效；跨实例需要共享 storage，并由路由层保证同一 Session 的单实例绑定与崩溃清理。加载路径已有控制者时冲突映射 409 `binding_conflict`；加载路径（`change_session`）的 KV 读/写失败映射 500 `claim_failed`；新会话路径（`create_new_session`）claim 阶段失败（本地/KV 冲突或 KV 读/写失败）映射 500 `session_creation_failed`（stage `claim`，带 `createdSessionId`）。没有通用 503 ownership 错误码。release 故障保留记录供重试。
 
 ## 5. 事实与同步
 

@@ -92,11 +92,13 @@ impl HistoryWindowPagePlan {
     ///
     /// before 半段优先包含锚点；只有 `before_limit == 0`（`direction = after` 或
     /// `seek` 只请求更晚方向）时才由 after 半段包含。两者互斥，保证锚点恰好出现一次。
+    #[must_use]
     pub fn after_includes_anchor(&self) -> bool {
         self.include_anchor && self.before_limit == 0
     }
 
     /// 首次 open：没有快照尾界，adapter 读取当前 durable tail。
+    #[must_use]
     pub fn open(
         source: HistorySource,
         anchor: Option<MessageId>,
@@ -187,6 +189,7 @@ impl HistoryWindowEntry {
         }
     }
 
+    #[must_use]
     pub fn position(&self) -> u64 {
         match self {
             Self::Loaded(item) => item.position,

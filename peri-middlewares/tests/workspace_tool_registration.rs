@@ -9,7 +9,7 @@
 //!
 //! 两侧都从公开面取证，缺任意一侧断言都退化为空转：
 //!
-//! - 注册表侧（`peri-acp-types`）：`workspace` 实例的工具表非空；
+//! - 注册表侧（`peri-acp-types`）：`workspace` 实例的公开工具表非空；
 //! - 实现侧（`peri_mcp_workspace` 的公开 `filesystem` / `terminal` 模块）：逐项构造，断言
 //!   `BaseTool::name()` / `is_direct()` / `prompt_declaration()` 与注册表声明**逐字相等**。
 //!
@@ -22,14 +22,15 @@
 //!   `tool_search/declaration.rs`）。任一侧被改写都会让模型面指引漂移，而 `tools/list`
 //!   不承载该文本（声明段另有来源），只有本断言能发现。
 
-use peri_acp_types::builtin_mcp::find as find_builtin_instance;
+use peri_acp_types::builtin_mcp;
 use peri_agent::tools::BaseTool;
-use peri_mcp_workspace::{
-    filesystem::{
-        EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
-    },
-    terminal::BashTool,
-};
+use peri_mcp_workspace::filesystem::EditFileTool;
+use peri_mcp_workspace::filesystem::FolderOperationsTool;
+use peri_mcp_workspace::filesystem::GlobFilesTool;
+use peri_mcp_workspace::filesystem::GrepTool;
+use peri_mcp_workspace::filesystem::ReadFileTool;
+use peri_mcp_workspace::filesystem::WriteFileTool;
+use peri_mcp_workspace::terminal::BashTool;
 
 /// 按注册表**原始工具名**从公开路径构造实现。
 ///
@@ -58,14 +59,13 @@ fn build_tool(original_name: &str) -> Box<dyn BaseTool> {
 /// 遍历顺序取自注册表本身（不做第二份名单）：注册表是「有哪些工具」的唯一权威。
 #[test]
 fn workspace_registry_and_tool_implementations_agree() {
-    let workspace =
-        find_builtin_instance("workspace").expect("workspace 必须是已实现的 builtin 实例");
+    let workspace = builtin_mcp::find("workspace").expect("workspace 必须是已实现的 builtin 实例");
     assert!(
-        !workspace.tools.is_empty(),
-        "workspace 实例的工具表不得为空（空表会让下面的循环退化为空转）"
+        workspace.tools.iter().any(|tool| tool.advertised),
+        "workspace 实例的公开工具表不得为空（空表会让下面的循环退化为空转）"
     );
 
-    for declared in workspace.tools {
+    for declared in workspace.tools.iter().filter(|tool| tool.advertised) {
         let tool = build_tool(declared.original_name);
 
         assert_eq!(

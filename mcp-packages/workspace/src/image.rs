@@ -9,12 +9,13 @@ pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct ReadImageRequest {
     pub path: String,
     pub max_size: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ImageData {
     pub data: String,
     pub media_type: String,

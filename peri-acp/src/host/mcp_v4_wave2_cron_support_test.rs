@@ -1,21 +1,30 @@
 //! Shared cron test fixtures and observations for wave 2 test modules.
 
-use super::*;
-use peri_acp_types::{
-    cron::CronSchedulerPort,
-    event::ExecutorEvent,
-    interaction::{
-        ApprovalDecision, InteractionContext, InteractionResponse, TrustedInteractionOwner,
-        UserInteractionBroker,
-    },
-    ports::McpTaskOwnerPort,
-};
+use crate::host::executor_flow_tests::MockEventSink;
+use crate::host::executor_flow_tests::SessionTaskBindings;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use crate::host::AcpServerConfig;
+use crate::session::executor::SessionContext;
+use crate::transport::AcpTransport;
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::interaction::ApprovalDecision;
+use peri_acp_types::interaction::InteractionContext;
+use peri_acp_types::interaction::InteractionResponse;
+use peri_acp_types::interaction::TrustedInteractionOwner;
+use peri_acp_types::interaction::UserInteractionBroker;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::ports::McpTaskOwnerPort;
+
 use peri_mcp_cron::{CronScheduler, CronSchedulerPortHandle, CronTrigger};
+use peri_middlewares::mcp::ClientStatus;
+use peri_middlewares::mcp::McpClientPool;
 use peri_model::{
     Model, ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelResult, ModelStream,
     ModelStreamEvent, StopReason,
 };
 use serde_json::json;
+use std::sync::Arc;
 
 pub(super) async fn collect_triggers(
     triggers: &mut tokio::sync::mpsc::UnboundedReceiver<peri_mcp_cron::CronTrigger>,
@@ -152,18 +161,16 @@ pub(super) struct AssembledHostFixture {
 
 impl AssembledHostFixture {
     pub(super) async fn start(dirs: FixtureDirs, drive_cron_tick: bool) -> Self {
-        let mut cfg = assemble_host_with_tick(&dirs, drive_cron_tick).await;
+        let mut cfg =
+            crate::host::mcp_v4_wave2::assemble_host_with_tick(&dirs, drive_cron_tick).await;
         // 装配产出的唯一 MCP task owner：夹具必须持有到用例结束（task 归属在它手上）。
         let owner = cfg
             .mcp_task_owner
             .take()
             .expect("装配必须留下 MCP task owner");
-        // SAFETY: 装配注入本 crate 的 McpClientPool（as_any 返回 self）。
-        let pool = unsafe {
-            Arc::clone(&cfg.mcp_pool.clone().expect("装配必须构造 MCP pool"))
-                .downcast_arc::<McpClientPool>()
-        }
-        .unwrap_or_else(|_| panic!("装配的 MCP pool 必须是 McpClientPool"));
+        let pool = Arc::clone(&cfg.mcp_pool.clone().expect("装配必须构造 MCP pool"))
+            .downcast_arc::<McpClientPool>()
+            .unwrap_or_else(|_| panic!("装配的 MCP pool 必须是 McpClientPool"));
         // assemble.rs already owns and starts Initialize. Starting a second
         // run_initialize on this pool races the per-server operation gates and
         // lets each initializer count only its own subset of the connections.
@@ -230,9 +237,9 @@ impl AssembledHostFixture {
     }
 
     pub(super) fn assert_all_ready(&self) {
-        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
-            let expected = declared_tool_names(instance.name);
-            assert_instance_ready(&self.pool, instance.name, &expected);
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
+            let expected = crate::host::mcp_v4_wave2::declared_tool_names(instance.name);
+            crate::host::mcp_v4_wave2::assert_instance_ready(&self.pool, instance.name, &expected);
         }
     }
 
@@ -461,7 +468,7 @@ impl Model for TurnRecordingModel {
         let mut events = vec![ModelStreamEvent::TextDelta {
             text: end.to_string(),
         }];
-        let response = ModelResponse::new(
+        let response = ModelResponse::try_new(
             ModelMessage::assistant_text(end.to_string()),
             StopReason::EndTurn,
             None,

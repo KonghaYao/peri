@@ -78,9 +78,9 @@
 //!   会把它的 `rowid` 复用给新插入的行，这类新行 `rowid <= tail` 因而会被本次遍历读到，而被
 //!   删行的内容静默消失（实测见 `.recon/S9-boundedness.md` 第 3.4 节第 6 点与第 6 节 R1）。
 
-#[path = "history_page_visibility.rs"]
-mod visibility;
-pub use visibility::{history_body_displayable_to_client, HistoryEntryRole};
+pub use crate::history_page_visibility::{
+    history_body_displayable_to_client, HistoryEntryRole,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -88,7 +88,8 @@ use crate::messages::MessageId;
 use crate::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
-use crate::store::{deserialize_persisted_payload, PersistedPayload};
+use crate::store;
+use crate::store::PersistedPayload;
 use crate::thread::ThreadId;
 
 /// 浏览范围身份：同一次向上翻页期间，只要范围起点没被删掉就保持不变。
@@ -169,6 +170,7 @@ struct WireHistoryCursor {
 const WIRE_HISTORY_CURSOR_VERSION: u8 = 1;
 
 impl HistoryCursor {
+    #[must_use]
     pub fn new(thread_id: ThreadId, anchor: MessageId, range_token: impl Into<RangeToken>) -> Self {
         Self {
             thread_id,
@@ -251,6 +253,7 @@ struct WireHistoryCursorEnvelope {
 const WIRE_HISTORY_CURSOR_ENVELOPE_VERSION: u8 = 1;
 
 impl HistoryCursorEnvelope {
+    #[must_use]
     pub fn new(
         structure_version: u64,
         snapshot_token: impl Into<RangeToken>,
@@ -349,6 +352,7 @@ struct WireHistoryForwardCursor {
 const WIRE_HISTORY_FORWARD_CURSOR_VERSION: u8 = 1;
 
 impl HistoryForwardCursor {
+    #[must_use]
     pub fn new(after: impl Into<StorageOrderKey>, tail: impl Into<StorageOrderKey>) -> Self {
         Self {
             after: after.into(),
@@ -441,8 +445,12 @@ impl HistoryPageBounds {
     ///
     /// `range_token` **直接取原文本**，不重新序列化：分页读取是拿同一列的文本与游标比较的，
     /// 两边各转换一次就可能把一次正常翻页变成 `Expired`。id 不是 uuid 即损坏（与
-    /// [`HistoryPageRow::new`] 同规），不降级成空范围。
-    pub fn new(range_head: Option<&str>) -> SessionResourceResult<Self> {
+    /// [`HistoryPageRow::try_new`] 同规），不降级成空范围。
+    ///
+    /// # Errors
+    ///
+    /// Returns a corruption error when a present persisted id is not a UUID.
+    pub fn try_new(range_head: Option<&str>) -> SessionResourceResult<Self> {
         match range_head {
             Some(range_head) => Ok(Self {
                 range_head: Some(
@@ -489,6 +497,7 @@ pub struct HistoryPage {
 
 impl HistoryPage {
     /// 页内条目编码字节之和（单条 oversize 时可能超过预算，这是唯一的例外）。
+    #[must_use]
     pub fn total_bytes(&self) -> usize {
         self.items.iter().map(|item| item.encoded_bytes).sum()
     }
@@ -525,7 +534,11 @@ pub struct HistoryPageRow {
 
 impl HistoryPageRow {
     /// 从持久化行的 id 文本（uuid）与信封原文构造候选行；id 不可解释即损坏。
-    pub fn new(message_id: &str, content: String) -> SessionResourceResult<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a corruption error when the persisted id is not a UUID.
+    pub fn try_new(message_id: &str, content: String) -> SessionResourceResult<Self> {
         Ok(Self {
             message_id: message_id_of(message_id)?,
             content,
@@ -551,10 +564,18 @@ pub struct HistoryPageCandidate {
 impl HistoryPageCandidate {
     /// 从持久化行的 id 文本、存储序键与字节长度构造候选行。
     ///
-    /// id 不是 uuid 即损坏（与 [`HistoryPageRow::new`] 同规）；负的行号或长度不可能出现
+    /// id 不是 uuid 即损坏（与 [`HistoryPageRow::try_new`] 同规）；负的行号或长度不可能出现
     /// （`rowid` 与长度都非负），出现即损坏，不取绝对值兜底。
-    pub fn new(message_id: &str, position: i64, encoded_bytes: i64) -> SessionResourceResult<Self> {
-        Self::new_with_role(
+    ///
+    /// # Errors
+    ///
+    /// Returns a corruption error for an invalid UUID, negative position, or negative length.
+    pub fn try_new(
+        message_id: &str,
+        position: i64,
+        encoded_bytes: i64,
+    ) -> SessionResourceResult<Self> {
+        Self::try_new_with_role(
             message_id,
             position,
             encoded_bytes,
@@ -563,7 +584,7 @@ impl HistoryPageCandidate {
     }
 
     /// 带存储 role 的候选行；窗口读取用它避免为可见性判定解码正文。
-    pub fn new_with_role(
+    pub fn try_new_with_role(
         message_id: &str,
         position: i64,
         encoded_bytes: i64,
@@ -627,6 +648,7 @@ impl HistoryPagePlan {
     ///
     /// `candidates` 必须按存储序降序给入，最多 `limit + 1` 行（多出的那一条只用于
     /// 「更早方向还有没有内容」）。
+    #[must_use]
     pub fn plan(
         thread_id: &ThreadId,
         range_token: &str,
@@ -648,6 +670,7 @@ impl HistoryPagePlan {
     ///
     /// `candidates` 必须按存储序**升序**给入（离锚点最近的一行在前），最多 `limit + 1`
     /// 行；多出的那一条只用于判断「更晚方向还有没有内容」。页内顺序仍是历史正序。
+    #[must_use]
     pub fn plan_after(
         thread_id: &ThreadId,
         range_token: &str,
@@ -702,6 +725,7 @@ impl HistoryPagePlan {
     }
 
     /// 本页推进的行（按候选给入顺序），含不可展示行。
+    #[must_use]
     pub fn entries(&self) -> &[HistoryPageCandidate] {
         &self.entries
     }
@@ -712,11 +736,13 @@ impl HistoryPagePlan {
     }
 
     /// 对应方向是否还有内容。
+    #[must_use]
     pub fn has_more(&self) -> bool {
         self.has_more
     }
 
     /// 本页使用的字节预算（窗口据此区分 descriptor 条目）。
+    #[must_use]
     pub fn byte_budget(&self) -> usize {
         self.byte_budget
     }
@@ -775,7 +801,8 @@ impl HistoryPagePlan {
             ));
         }
         let mut items = Vec::new();
-        for (row, planned) in rows.iter().zip(loaded.iter()) {
+        let paired_planned = rows.iter().zip(loaded.iter());
+        for (row, planned) in paired_planned {
             if row.message_id != planned.message_id {
                 return Err(corrupt(
                     "history page bodies are not the planned page entries",
@@ -911,7 +938,8 @@ impl HistorySegmentPlan {
             ));
         }
         let mut payloads = inherited;
-        for (row, planned) in rows.iter().zip(self.entries.iter()) {
+        let paired_planned = rows.iter().zip(self.entries.iter());
+        for (row, planned) in paired_planned {
             if row.message_id != planned.message_id {
                 return Err(corrupt(
                     "history segment bodies are not the planned segment entries",
@@ -945,7 +973,7 @@ pub fn message_id_of(message_id: &str) -> SessionResourceResult<MessageId> {
 
 /// 行内 id 与载荷 id 必须一致：不一致是数据故障，不把两套身份混起来（与整段历史读取同规）。
 fn decode_row(row: &HistoryPageRow) -> SessionResourceResult<PersistedPayload> {
-    let payload = deserialize_persisted_payload(&row.content)
+    let payload = store::deserialize_persisted_payload(&row.content)
         .map_err(|_| corrupt("history entry is not decodable"))?;
     if payload.id() != row.message_id {
         return Err(corrupt("persisted payload message id mismatch"));

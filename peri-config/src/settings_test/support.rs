@@ -15,7 +15,7 @@ pub(super) fn revision(source: &ConfigSource) -> crate::ConfigurationRevision {
         .map(|snapshot| snapshot.revision())
         .unwrap_or_else(|| {
             crate::ConfigurationSnapshot::resolve(
-                crate::ConfigurationScope::new(
+                crate::ConfigurationScope::try_new(
                     std::env::temp_dir(),
                     source.global_path().to_owned(),
                 )

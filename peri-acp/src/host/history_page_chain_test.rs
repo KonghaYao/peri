@@ -3,7 +3,15 @@
 //! 从 `history_page_wire_test.rs` 按职责拆出（STD-SIZE-001：单文件 ≤1000 行），语义未改动：
 //! 用例体、断言与 helper 逐字节搬移。夹具与跨文件共享 helper 在父模块里，经 `use super::*` 取用。
 
-use super::*;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
+use peri_acp_types::messages::BaseMessage;
+
+use peri_acp_types::store::PersistedPayload;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::sync::Arc;
 
 /// A08：同一 cursor、同一生效 `limit` 重试 3 次给出等价页；换 `limit` 只改页长与边界，
 /// 逻辑遍历顺序不变。
@@ -22,7 +30,12 @@ async fn the_same_cursor_replays_equivalent_pages_and_limit_only_changes_page_bo
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, _sessions, task) =
-        spawn_loop(cfg, fixture.sessions.clone(), Some(pagination_caps())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions.clone(),
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
     let sid = fixture.sid.clone();
     let cursor = Value::String(cursor);
 
@@ -60,10 +73,16 @@ async fn the_same_cursor_replays_equivalent_pages_and_limit_only_changes_page_bo
     }
 
     // 换 limit：页长与页边界随之改变，但逻辑遍历顺序不变。
-    let shorter = walk_pages(&client, &sid, &cursor, 2).await;
-    let longer = walk_pages(&client, &sid, &cursor, 3).await;
-    assert_page_chain(&shorter);
-    assert_page_chain(&longer);
+    let shorter = crate::host::requests::tests::history_page_wire_tests::walk_pages(
+        &client, &sid, &cursor, 2,
+    )
+    .await;
+    let longer = crate::host::requests::tests::history_page_wire_tests::walk_pages(
+        &client, &sid, &cursor, 3,
+    )
+    .await;
+    crate::host::requests::tests::history_page_wire_tests::assert_page_chain(&shorter);
+    crate::host::requests::tests::history_page_wire_tests::assert_page_chain(&longer);
     assert_eq!(shorter[0].len(), 2, "limit=2 的首页两条");
     assert_eq!(longer[0].len(), 3, "limit 改变页长");
 
@@ -84,12 +103,12 @@ async fn the_same_cursor_replays_equivalent_pages_and_limit_only_changes_page_bo
         "limit 不改变覆盖范围"
     );
     assert_eq!(
-        logical_sequence(&shorter),
-        logical_sequence(&longer),
+        crate::host::requests::tests::history_page_wire_tests::logical_sequence(&shorter),
+        crate::host::requests::tests::history_page_wire_tests::logical_sequence(&longer),
         "limit 只改页边界：合并后的逻辑顺序不变"
     );
     assert_eq!(
-        logical_sequence(&shorter).len(),
+        crate::host::requests::tests::history_page_wire_tests::logical_sequence(&shorter).len(),
         4,
         "归档区的全部更早条目都要被翻出来"
     );
@@ -112,7 +131,12 @@ async fn a_cursor_survives_appends_and_another_full_without_moving_its_page_memb
 
     let cfg = Arc::clone(&fixture.cfg);
     let (client, _sessions, task) =
-        spawn_loop(cfg, fixture.sessions.clone(), Some(pagination_caps())).await;
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions.clone(),
+            Some(crate::host::requests::tests::history_page_wire_tests::pagination_caps()),
+        )
+        .await;
     let sid = fixture.sid.clone();
     let cursor = Value::String(cursor);
 
@@ -196,9 +220,9 @@ async fn legacy_pages_keep_complete_cross_page_tool_output_with_window_beta_off(
         let count = fixture.own_ids().await.len();
         fixture.archive(count).await;
         let initial = fixture.initial_cursor().await;
-        let caps = pagination_caps();
+        let caps = crate::host::requests::tests::history_page_wire_tests::pagination_caps();
         assert!(!caps.history_window_v1);
-        let (client, _, task) = spawn_loop(
+        let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
             Arc::clone(&fixture.cfg),
             Arc::clone(&fixture.sessions),
             Some(caps),

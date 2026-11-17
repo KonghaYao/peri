@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use crate::skills::{SkillRoot, SkillSource};
+use tracing::debug;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -111,6 +114,7 @@ pub enum PluginConfigError {
 /// （SHGetKnownFolderPath），完全忽略 HOME/USERPROFILE 环境变量，而跨平台工具
 /// 惯例、git-bash 与 CI/测试注入都依赖 HOME 生效；各拼一份会在 Windows 上取到
 /// 不同目录（插件入口按 HOME、其余入口按 profile）。
+#[must_use]
 pub fn user_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -122,36 +126,43 @@ pub fn user_home() -> PathBuf {
 /// 返回 `~/.claude/` 根目录，不存在时返回 fallback（当前目录）。
 ///
 /// 主目录解析见 [`user_home`]。
+#[must_use]
 pub fn claude_home() -> PathBuf {
     user_home().join(".claude")
 }
 
 /// 返回 `~/.claude/plugins/` 目录
+#[must_use]
 pub fn plugins_dir() -> PathBuf {
     claude_home().join("plugins")
 }
 
 /// 返回 `~/.claude/plugins/known_marketplaces.json` 路径
+#[must_use]
 pub fn known_marketplaces_path() -> PathBuf {
     plugins_dir().join("known_marketplaces.json")
 }
 
 /// 返回 `~/.claude/plugins/installed_plugins.json` 路径
+#[must_use]
 pub fn installed_plugins_path() -> PathBuf {
     plugins_dir().join("installed_plugins.json")
 }
 
 /// 返回 `~/.claude/plugins/marketplaces/` 缓存目录
+#[must_use]
 pub fn marketplaces_cache_dir() -> PathBuf {
     plugins_dir().join("marketplaces")
 }
 
 /// 返回 `~/.claude/plugins/cache/` 插件版本缓存目录
+#[must_use]
 pub fn plugin_cache_dir() -> PathBuf {
     plugins_dir().join("cache")
 }
 
 /// 返回 `~/.claude/settings.json` 路径
+#[must_use]
 pub fn claude_settings_path() -> PathBuf {
     claude_home().join("settings.json")
 }
@@ -518,3 +529,94 @@ pub fn load_plugin_manifest(plugin_dir: &Path) -> Result<PluginManifest, PluginC
 #[cfg(test)]
 #[path = "config_test.rs"]
 mod tests;
+
+/// Extract skill roots from plugin manifest.
+///
+/// Manifest `skills` entries are treated as paths relative to the plugin root
+/// (matching Claude Code convention: `skills: ["./skills/"]` or `skills: ["skills/tdd"]`).
+/// Each entry becomes a `SkillRoot` (`source=Plugin`, `plugin_name=plugin_name`),
+/// regardless of whether it directly contains `SKILL.md` or is a container——
+/// 两条形态都交给 provider 的扫描语义处理（W4b：宿主侧扫描已删除，
+/// 目录叶子语义见 `mcp-packages/workspace/src/resources/skills.rs`）。
+///
+/// Falls back to `base_dir/skills/` as a single root when no manifest skills are declared.
+pub(crate) fn extract_skills_paths(
+    manifest: &PluginManifest,
+    base_dir: &Path,
+    plugin_name: &str,
+) -> Vec<SkillRoot> {
+    let mut result = Vec::new();
+
+    // 1. manifest 显式声明（每条 entry 是相对于插件根目录的路径）
+    if let Some(skills) = &manifest.skills {
+        if !skills.is_empty() {
+            for entry in skills {
+                let skill_path = base_dir.join(entry);
+                if !skill_path.is_dir() {
+                    debug!(path = %skill_path.display(), "插件 skill 路径不存在，跳过");
+                    continue;
+                }
+                result.push(SkillRoot {
+                    path: skill_path,
+                    source: SkillSource::Plugin,
+                    plugin_name: Some(plugin_name.to_string()),
+                });
+            }
+            return result;
+        }
+    }
+
+    // 2. fallback：base_dir/skills/ 作为一个 root（由 provider 递归扫描）
+    let skills_dir = base_dir.join("skills");
+    if skills_dir.is_dir() {
+        result.push(SkillRoot {
+            path: skills_dir,
+            source: SkillSource::Plugin,
+            plugin_name: Some(plugin_name.to_string()),
+        });
+    }
+
+    result
+}
+
+/// Extract agent directories from plugin manifest.
+///
+/// When the manifest declares `agents`, uses those paths directly.
+/// Falls back to scanning default directories (`agents/` and `.agents/`)
+/// when no agents are declared — matching Claude Code's behavior where
+/// agents placed in these directories are auto-discovered.
+pub(crate) fn extract_agents_paths(manifest: &PluginManifest, base_dir: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+
+    // 1. manifest 显式声明
+    if let Some(agents) = &manifest.agents {
+        if !agents.is_empty() {
+            for agent in agents {
+                let agent_path = base_dir.join(&agent.path);
+                if agent_path.exists() {
+                    result.push(agent_path);
+                } else {
+                    debug!(path = %agent_path.display(), "插件 agent 路径不存在，跳过");
+                }
+            }
+            return result;
+        }
+    }
+
+    // 2. fallback：扫描默认 agent 目录（agents/ 和 .agents/）
+    for dir_name in &["agents", ".agents"] {
+        let agents_dir = base_dir.join(dir_name);
+        if agents_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        result.push(p);
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}

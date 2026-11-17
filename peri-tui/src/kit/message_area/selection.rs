@@ -5,7 +5,6 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kit::atoms::{COPY_CHAR_COUNT, COPY_MESSAGE_UNTIL};
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::text_selection::{self, SelectionAnchor, TextSelection};
 use ratatui_kit::ratatui::style::Style;
@@ -36,18 +35,21 @@ pub(crate) fn build_wrap_map(lines: &[Line<'static>], width: u16) -> (usize, Vec
     );
     let mut wrap_map = Vec::with_capacity(lines.len());
     let mut visual_row = 0usize;
-    for (idx, line) in lines.iter().enumerate() {
-        let rows = Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
-            .wrap(Wrap { trim: false })
-            .line_count(width);
-        let rows = rows.max(1);
-        wrap_map.push(WrappedLineInfo {
-            logical_idx: idx,
-            visual_start: visual_row,
-            visual_end: visual_row + rows,
-            slot_index: 0,
-        });
-        visual_row += rows;
+    {
+        let iteration_items = lines.iter().enumerate();
+        for (idx, line) in iteration_items {
+            let rows = Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
+                .wrap(Wrap { trim: false })
+                .line_count(width);
+            let rows = rows.max(1);
+            wrap_map.push(WrappedLineInfo {
+                logical_idx: idx,
+                visual_start: visual_row,
+                visual_end: visual_row + rows,
+                slot_index: 0,
+            });
+            visual_row += rows;
+        }
     }
     (visual_row, wrap_map)
 }
@@ -63,6 +65,7 @@ struct SlotLinePart {
 pub(super) struct SlotLines {
     parts: Vec<SlotLinePart>,
     prefix: Vec<usize>,
+    genui_ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl SlotLines {
@@ -117,16 +120,31 @@ impl SlotLines {
                     .saturating_add(part.end.saturating_sub(part.start)),
             );
         }
-        Self { parts, prefix }
+        Self {
+            parts,
+            prefix,
+            genui_ranges: Vec::new(),
+        }
     }
 
+    #[must_use]
     pub(super) fn len(&self) -> usize {
         self.prefix.last().copied().unwrap_or(0)
+    }
+
+    pub(super) fn with_genui_ranges(mut self, ranges: &[std::ops::Range<usize>]) -> Self {
+        self.genui_ranges = ranges.to_vec();
+        self
+    }
+
+    pub(super) fn is_genui_line(&self, logical: usize) -> bool {
+        super::render::is_genui_line(&self.genui_ranges, logical)
     }
 
     pub(super) fn retained_metadata_bytes(&self) -> usize {
         self.parts.capacity() * std::mem::size_of::<SlotLinePart>()
             + self.prefix.capacity() * std::mem::size_of::<usize>()
+            + self.genui_ranges.capacity() * std::mem::size_of::<std::ops::Range<usize>>()
     }
 
     pub(super) fn get(&self, logical: usize) -> Option<&Line<'static>> {
@@ -250,7 +268,7 @@ pub(super) fn visual_to_logical(visual_row: usize, wrap_map: &[WrappedLineInfo])
 ///
 /// 返回值长度 = 视觉行数 + 1，元素依次是 row 0 起始 byte、row 1 起始 byte、...
 /// 末行结束 byte（= `plain.len()`）。
-fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
+pub(super) fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
     use ratatui_kit::ratatui::buffer::Buffer;
     use ratatui_kit::ratatui::layout::Rect;
     use ratatui_kit::ratatui::widgets::Widget;
@@ -391,13 +409,16 @@ pub(super) fn resolve_selection_anchor(
 ) -> Option<usize> {
     let items = index.canonical_items()?;
     let mut hit: Option<usize> = None;
-    for (slot, vm) in items.iter().enumerate() {
-        let token = super::window_identity_token(vm);
-        if token.kind == anchor.unit_kind && token.hash == anchor.unit_hash {
-            if hit.is_some() {
-                return None;
+    {
+        let iteration_items = items.iter().enumerate();
+        for (slot, vm) in iteration_items {
+            let token = super::window_identity_token(vm);
+            if token.kind == anchor.unit_kind && token.hash == anchor.unit_hash {
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(slot);
             }
-            hit = Some(slot);
         }
     }
     let (start, end) = index.slot_visual_range(hit?)?;
@@ -645,7 +666,11 @@ pub(super) fn extract_visual_range_index(
         {
             materialized = Some((lookup.slot_index, index.materialize(lookup.slot_index)?));
         }
-        let line = materialized.as_ref()?.1.line(local_idx)?;
+        let slot_lines = &materialized.as_ref()?.1;
+        let line = slot_lines.line(local_idx)?;
+        if slot_lines.is_genui_line(local_idx) {
+            continue;
+        }
         let plain = text_selection::line_to_plain_text(line);
         // 台阶行（§6 ` ╰─╮` / ` ╭─╯`）是纯结构 chrome——整行跳过，既不进入
         // 复制文本也不为其保留空行。
@@ -698,17 +723,22 @@ pub(super) fn extract_visual_range_index(
             if b0 >= b1 {
                 continue;
             }
-            parts.push(map_slice_to_semantic(&plain, b0, b1, &semantic));
+            parts.push(map_slice_to_semantic(&plain, b0, b1, semantic.as_ref()));
         } else if li == first {
             // 首行：从 sr_off 行内的列 sc 到逻辑行末尾
             let s_row_byte = row_starts[sr_off];
             let b0 = row_start_byte(&plain, s_row_byte, sc);
-            parts.push(map_slice_to_semantic(&plain, b0, plain.len(), &semantic));
+            parts.push(map_slice_to_semantic(
+                &plain,
+                b0,
+                plain.len(),
+                semantic.as_ref(),
+            ));
         } else if li == last {
             // 末行：从逻辑行开头到 er_off 行内的列 ec
             let e_row_byte = row_starts[er_off];
             let b1 = row_end_byte(&plain, e_row_byte, ec);
-            parts.push(map_slice_to_semantic(&plain, 0, b1, &semantic));
+            parts.push(map_slice_to_semantic(&plain, 0, b1, semantic.as_ref()));
         } else {
             // 中间行（完整选择）：直接用语义全文
             match &semantic {
@@ -771,7 +801,7 @@ fn map_slice_to_semantic(
     plain: &str,
     b0: usize,
     b1: usize,
-    semantic: &Option<(String, usize)>,
+    semantic: Option<&(String, usize)>,
 ) -> String {
     let Some((sem, p)) = semantic else {
         return plain[b0..b1].to_string();
@@ -802,3 +832,7 @@ mod grapheme_tests;
 #[cfg(test)]
 #[path = "selection_anchor_test.rs"]
 mod anchor_tests;
+
+use crate::kit::atoms::COPY_CHAR_COUNT;
+
+use crate::kit::atoms::COPY_MESSAGE_UNTIL;

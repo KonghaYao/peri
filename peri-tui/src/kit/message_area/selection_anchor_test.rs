@@ -1,8 +1,18 @@
 //! [F5] 历史前插后按稳定身份重定位选区起点。
 
-use super::*;
+use super::AnchorResolution;
+use super::Arc;
+use super::GridSpec;
+use super::Line;
+use super::SelectionAnchor;
+use super::SlotIndex;
+use super::SlotLines;
+use super::TextSelection;
+use super::WrappedLineInfo;
+
 use ratatui_kit::ratatui::text::Span;
 
+#[must_use]
 fn make_line(s: &str) -> Line<'static> {
     Line::from(vec![Span::raw(s.to_string())])
 }
@@ -38,19 +48,22 @@ fn anchored_index(
     let grid = GridSpec::grid_for(80);
     let mut index = SlotIndex::default();
     index.set_source(im::Vector::from(items), grid, anchor_test_context(), 0);
-    for (slot, slot_lines) in lines.into_iter().enumerate() {
-        let map = vec![WrappedLineInfo {
-            logical_idx: 0,
-            visual_start: 0,
-            visual_end: 1,
-            slot_index: slot,
-        }];
-        index.set_slot(
-            slot,
-            Arc::new(SlotLines::single(Arc::new(slot_lines))),
-            &map,
-            true,
-        );
+    {
+        let iteration_items = lines.into_iter().enumerate();
+        for (slot, slot_lines) in iteration_items {
+            let map = vec![WrappedLineInfo {
+                logical_idx: 0,
+                visual_start: 0,
+                visual_end: 1,
+                slot_index: slot,
+            }];
+            index.set_slot(
+                slot,
+                Arc::new(SlotLines::single(Arc::new(slot_lines))),
+                &map,
+                true,
+            );
+        }
     }
     index
 }
@@ -62,7 +75,7 @@ fn test_selection_anchor_relocates_after_history_prepend() {
         vec![anchor_test_bubble("history"), anchor_test_bubble("old")],
         vec![vec![make_line("HIST")], vec![make_line("ABCDEF")]],
     );
-    let anchor = capture_selection_anchor(&before, (1, 1)).expect("有 canonical items");
+    let anchor = super::capture_selection_anchor(&before, (1, 1)).expect("有 canonical items");
     let mut selection = TextSelection::new();
     selection.start_drag_anchored(1, 1, Some(anchor));
     selection.update_drag(1, 5);
@@ -80,16 +93,16 @@ fn test_selection_anchor_relocates_after_history_prepend() {
     let after = anchored_index(items, lines);
 
     assert!(matches!(
-        relocate_selection_start(&after, &mut selection),
+        super::relocate_selection_start(&after, &mut selection),
         AnchorResolution::Resolved
     ));
     assert_eq!(selection.start, Some((11, 1)), "原单元下移 10 行");
     // Up 按当前滚动偏移重算终点：用户指针未动，同一屏幕位置对应新的
     // 视觉行（原内容下移 10 行）。
     selection.update_drag(11, 5);
-    let ((sr, sc), (er, ec)) = resolved_bounds(&after, &selection).unwrap();
+    let ((sr, sc), (er, ec)) = super::resolved_bounds(&after, &selection).expect("selection anchor relocates after history prepend: the resolved_bounds fixture operation uses valid inputs");
     assert_eq!(
-        extract_visual_range_index(&after, (sr, sc), (er, ec), 80, None, None).as_deref(),
+        super::extract_visual_range_index(&after, (sr, sc), (er, ec), 80, None, None).as_deref(),
         Some("BCDE"),
         "同一屏幕位置释放仍复制原文字，而不是前插的历史内容"
     );
@@ -103,7 +116,7 @@ fn test_selection_anchor_missing_or_ambiguous_cancels() {
             vec![anchor_test_bubble("history"), anchor_test_bubble("old")],
             vec![vec![make_line("HIST")], vec![make_line("ABCDEF")]],
         );
-        capture_selection_anchor(&index, (1, 1)).expect("anchor")
+        super::capture_selection_anchor(&index, (1, 1)).expect("anchor")
     };
 
     // 身份不存在（单元被淘汰/替换）→ 明确取消。
@@ -111,11 +124,11 @@ fn test_selection_anchor_missing_or_ambiguous_cancels() {
         vec![anchor_test_bubble("history")],
         vec![vec![make_line("HIST")]],
     );
-    assert_eq!(resolve_selection_anchor(&missing, &anchor), None);
+    assert_eq!(super::resolve_selection_anchor(&missing, &anchor), None);
     let mut selection = TextSelection::new();
     selection.start_drag_anchored(1, 1, Some(anchor.clone()));
     assert!(matches!(
-        relocate_selection_start(&missing, &mut selection),
+        super::relocate_selection_start(&missing, &mut selection),
         AnchorResolution::Lost
     ));
 
@@ -132,7 +145,7 @@ fn test_selection_anchor_missing_or_ambiguous_cancels() {
             vec![make_line("ABCDEF")],
         ],
     );
-    assert_eq!(resolve_selection_anchor(&ambiguous, &anchor), None);
+    assert_eq!(super::resolve_selection_anchor(&ambiguous, &anchor), None);
 }
 
 #[test]
@@ -157,7 +170,7 @@ fn test_selection_anchor_rejects_row_offset_beyond_unit() {
         vec![vec![make_line("HIST")]],
     );
     assert_eq!(
-        resolve_selection_anchor(&index, &anchor),
+        super::resolve_selection_anchor(&index, &anchor),
         None,
         "单元变矮后偏移越界 → 取消"
     );

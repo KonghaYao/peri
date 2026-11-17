@@ -21,24 +21,25 @@
 
 #![allow(clippy::needless_update)]
 
-use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind, MouseButton, MouseEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction, Rect},
-        style::Style,
-        text::{Line, Span},
-        widgets::{Block, Borders, Paragraph},
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Block;
+use ratatui_kit::ratatui::widgets::Borders;
+use ratatui_kit::ratatui::widgets::Paragraph;
 
-use crate::kit::atoms::{
-    LANG_VERSION, MODEL_SWITCH_ANCHOR, PERI_CONFIG_HANDLE, POPUP_KIND, PopupKind,
-};
-use crate::kit::list_nav::{ListNavAction, classify_list_nav, next_selection, previous_selection};
+use crate::kit::list_nav::ListNavAction;
 use crate::kit::mouse_router;
-use crate::kit::panels::model::{PROFILE_KEYS, switch_active_alias};
-use crate::kit::popup_overlay::close_popup;
+use crate::kit::panels::model::PROFILE_KEYS;
+
 use peri_theme::atoms::THEME_ATOM;
 use unicode_width::UnicodeWidthStr;
 
@@ -58,7 +59,7 @@ fn switch_session_alias(index: usize) {
             }
         });
     } else {
-        switch_active_alias(index);
+        crate::kit::panels::model::switch_active_alias(index);
     }
 }
 
@@ -95,10 +96,7 @@ fn quick_switch_rows(cfg: &crate::config::PeriConfig) -> Vec<QuickSwitchRow> {
             });
             let model = profile
                 .and_then(|pf| pf.model.clone().filter(|m| !m.is_empty()))
-                .or_else(|| {
-                    prov.and_then(|p| p.models.get_model(key))
-                        .map(str::to_string)
-                })
+                .or_else(|| prov.and_then(|p| p.models.model(key)).map(str::to_string))
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| key.to_string());
             QuickSwitchRow {
@@ -180,6 +178,7 @@ fn row_index_at(row: u16, col: u16, area: &Rect) -> Option<usize> {
 ///
 /// 与 `row_index_at` 的区别：内容行判定对 top/bottom border 返回 None，
 /// 而 border 属于弹窗视觉范围——点击 border 不关闭弹窗，仅矩形外触发 dismiss。
+#[must_use]
 fn click_inside_popup(row: u16, col: u16, area: &Rect) -> bool {
     row >= area.y
         && row < area.y.saturating_add(area.height)
@@ -240,24 +239,24 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         if let Event::Key(key) = event
             && key.kind == KeyEventKind::Press
         {
-            match classify_list_nav(&key) {
+            match crate::kit::list_nav::classify_list_nav(&key) {
                 Some(ListNavAction::MoveUp) => {
                     let mut s = sel.write();
-                    *s = previous_selection(*s);
+                    *s = crate::kit::list_nav::previous_selection(*s);
                     return EventResult::Consumed;
                 }
                 Some(ListNavAction::MoveDown) => {
                     let mut s = sel.write();
-                    *s = next_selection(*s, PROFILE_KEYS.len());
+                    *s = crate::kit::list_nav::next_selection(*s, PROFILE_KEYS.len());
                     return EventResult::Consumed;
                 }
                 Some(ListNavAction::Confirm) => {
                     switch_session_alias(*sel.read());
-                    close_popup();
+                    crate::kit::popup_overlay::close_popup();
                     return EventResult::Consumed;
                 }
                 Some(ListNavAction::Cancel) => {
-                    close_popup();
+                    crate::kit::popup_overlay::close_popup();
                     return EventResult::Consumed;
                 }
                 // Tab 切换视图在本弹窗无意义——不消费（留给外层）
@@ -297,14 +296,14 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(idx) = row_index_at(mouse.row, mouse.column, &area) {
                         switch_session_alias(idx);
-                        close_popup();
+                        crate::kit::popup_overlay::close_popup();
                         return EventResult::Consumed;
                     }
                     // 点击弹窗矩形（含边框）之外 → 关闭弹窗（dismiss-on-outside-click）。
                     // 矩形内非内容行（边框/padding）点击不关闭也不切换，Consumed 防止
                     // 事件穿透到背景组件。
                     if !click_inside_popup(mouse.row, mouse.column, &area) {
-                        close_popup();
+                        crate::kit::popup_overlay::close_popup();
                     }
                     return EventResult::Consumed;
                 }
@@ -321,40 +320,43 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
     let cur_sel = *sel.read();
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        let is_sel = i == cur_sel;
-        let is_active = row.alias == active_alias;
-        let prefix = if is_sel {
-            "❯"
-        } else if is_active {
-            "●"
-        } else {
-            "○"
-        };
-        // 只显示 `alias model` 两段（用户要求精简）
-        let alias_span = format!(" {} {}", prefix, row.alias);
-        let model_text = truncate_str(&row.model, 36);
-        if is_sel {
-            lines.push(Line::from(vec![
-                Span::styled(alias_span, Style::new().fg(semantic.accent).bold()),
-                Span::styled(
-                    format!(" {model_text}"),
-                    Style::new().fg(semantic.accent).bold(),
-                ),
-            ]));
-        } else {
-            let alias_style = if is_active {
-                Style::new().fg(semantic.status.success).bold()
+    {
+        let iteration_items = rows.iter().enumerate();
+        for (i, row) in iteration_items {
+            let is_sel = i == cur_sel;
+            let is_active = row.alias == active_alias;
+            let prefix = if is_sel {
+                "❯"
+            } else if is_active {
+                "●"
             } else {
-                Style::new().fg(semantic.text.primary)
+                "○"
             };
-            lines.push(Line::from(vec![
-                Span::styled(alias_span, alias_style),
-                Span::styled(
-                    format!(" {model_text}"),
-                    Style::new().fg(semantic.text.muted),
-                ),
-            ]));
+            // 只显示 `alias model` 两段（用户要求精简）
+            let alias_span = format!(" {} {}", prefix, row.alias);
+            let model_text = truncate_str(&row.model, 36);
+            if is_sel {
+                lines.push(Line::from(vec![
+                    Span::styled(alias_span, Style::new().fg(semantic.accent).bold()),
+                    Span::styled(
+                        format!(" {model_text}"),
+                        Style::new().fg(semantic.accent).bold(),
+                    ),
+                ]));
+            } else {
+                let alias_style = if is_active {
+                    Style::new().fg(semantic.status.success).bold()
+                } else {
+                    Style::new().fg(semantic.text.primary)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(alias_span, alias_style),
+                    Span::styled(
+                        format!(" {model_text}"),
+                        Style::new().fg(semantic.text.muted),
+                    ),
+                ]));
+            }
         }
     }
 
@@ -398,3 +400,13 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 #[cfg(test)]
 #[path = "model_quick_switch_test.rs"]
 mod tests;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::MODEL_SWITCH_ANCHOR;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+use crate::kit::atoms::POPUP_KIND;
+
+use crate::kit::atoms::PopupKind;

@@ -71,16 +71,16 @@ fn read_ticket_debug_never_prints_the_opaque_value() {
 #[test]
 fn descriptor_requires_a_positive_length_and_bounded_chunk() {
     let ticket = HistoryReadTicket::new("ticket");
-    assert!(HistoryBodyDescriptor::new(0, 1024, "snap", ticket.clone()).is_err());
-    assert!(HistoryBodyDescriptor::new(10, 0, "snap", ticket.clone()).is_err());
-    assert!(HistoryBodyDescriptor::new(
+    assert!(HistoryBodyDescriptor::try_new(0, 1024, "snap", ticket.clone()).is_err());
+    assert!(HistoryBodyDescriptor::try_new(10, 0, "snap", ticket.clone()).is_err());
+    assert!(HistoryBodyDescriptor::try_new(
         10,
         HISTORY_WINDOW_MAX_CHUNK_SIZE + 1,
         "snap",
         ticket.clone()
     )
     .is_err());
-    assert!(HistoryBodyDescriptor::new(10, 1024, "snap", ticket).is_ok());
+    assert!(HistoryBodyDescriptor::try_new(10, 1024, "snap", ticket).is_ok());
 }
 
 #[test]

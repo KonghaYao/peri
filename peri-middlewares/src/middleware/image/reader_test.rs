@@ -1,12 +1,13 @@
-use super::*;
+use crate::mcp::ClientStatus;
 use crate::middleware::image::test_support::ImageFixture;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn image_missing_workspace_never_reads_an_existing_host_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("local.png");
     image::RgbImage::new(1, 1).save(&path).unwrap();
-    let error = read_image(None, Some("image-session"), path.to_str().unwrap(), 1024)
+    let error = super::read_image(None, Some("image-session"), path.to_str().unwrap(), 1024)
         .await
         .err()
         .unwrap();
@@ -20,7 +21,7 @@ async fn image_workspace_cwd_is_the_only_relative_path_base() {
         .save(dir.path().join("input.png"))
         .unwrap();
     let fixture = ImageFixture::new(dir.path()).await;
-    let result = read_image(
+    let result = super::read_image(
         Some(&fixture.pool),
         Some("image-session"),
         "input.png",
@@ -45,7 +46,7 @@ async fn image_workspace_owned_by_another_session_is_unavailable() {
         .acp_owners
         .write()
         .insert("workspace".to_owned(), "other-session".to_owned());
-    let result = read_image(
+    let result = super::read_image(
         Some(&fixture.pool),
         Some("image-session"),
         "input.png",
@@ -63,14 +64,14 @@ async fn image_workspace_owned_by_another_session_is_unavailable() {
 async fn image_same_named_nonbuiltin_server_cannot_supply_attachments() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = ImageFixture::new(dir.path()).await;
-    let mut client = (*fixture.pool.get_client("workspace").unwrap()).clone();
+    let mut client = (*fixture.pool.client("workspace").unwrap()).clone();
     client.source = None;
     fixture
         .pool
         .clients
         .write()
         .insert("workspace".to_owned(), Arc::new(client));
-    let result = read_image(
+    let result = super::read_image(
         Some(&fixture.pool),
         Some("image-session"),
         "input.png",
@@ -88,7 +89,7 @@ async fn image_same_named_nonbuiltin_server_cannot_supply_attachments() {
 async fn image_construct_time_workspace_disable_overrides_open_pool() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = ImageFixture::new(dir.path()).await;
-    let disabled = std::collections::HashSet::from(["WorkspaceMiddleware".to_owned()]);
+    let disabled = std::collections::HashSet::from(["workspace".to_owned()]);
     let middleware = crate::middleware::image::ImageMiddleware::new().with_mcp_pool(
         fixture.pool.clone(),
         "image-session".to_owned(),
@@ -109,7 +110,7 @@ async fn image_pool_workspace_disable_is_also_enforced() {
         .pool
         .set_builtin_instance_context(Arc::new(context))
         .unwrap();
-    let result = read_image(
+    let result = super::read_image(
         Some(&fixture.pool),
         Some("image-session"),
         "input.png",
@@ -127,14 +128,14 @@ async fn image_pool_workspace_disable_is_also_enforced() {
 async fn image_disconnected_workspace_does_not_fall_back_to_host() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = ImageFixture::new(dir.path()).await;
-    let mut client = (*fixture.pool.get_client("workspace").unwrap()).clone();
+    let mut client = (*fixture.pool.client("workspace").unwrap()).clone();
     client.status = ClientStatus::Disabled;
     fixture
         .pool
         .clients
         .write()
         .insert("workspace".to_owned(), Arc::new(client));
-    let result = read_image(
+    let result = super::read_image(
         Some(&fixture.pool),
         Some("image-session"),
         "input.png",

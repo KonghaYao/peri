@@ -8,9 +8,9 @@ use std::borrow::Cow;
 use crate::messages::{BaseMessage, MessageContent, MessageId};
 
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::system_reminder::{
-    encode_system_reminder, reminder_egress_allowed, ReminderAudience, TrustedSystemReminder,
-};
+
+use peri_acp_types::system_reminder::ReminderAudience;
+use peri_acp_types::system_reminder::TrustedSystemReminder;
 
 // ─── TranscriptEntry ──────────────────────────────────────────────────────────
 
@@ -25,6 +25,7 @@ pub enum TranscriptEntry {
 }
 
 impl TranscriptEntry {
+    #[must_use]
     pub fn id(&self) -> MessageId {
         match self {
             Self::Message(message) => message.id(),
@@ -39,6 +40,7 @@ impl TranscriptEntry {
         }
     }
 
+    #[must_use]
     pub fn message(&self) -> &BaseMessage {
         self.as_message()
             .expect("canonical reminder has no stored BaseMessage")
@@ -46,20 +48,25 @@ impl TranscriptEntry {
 
     /// 该条目是否应向目标受众投递。
     ///
-    /// 普通消息恒可见；canonical reminder 一律经 [`reminder_egress_allowed`] 的单一
+    /// 普通消息恒可见；canonical reminder 一律经 [`reminder_egress_allowed`](peri_acp_types::system_reminder::reminder_egress_allowed) 的单一
     /// 投递规则判定（`Required` 只在声明受众内不可被屏蔽，`DiagnosticOnly`
     /// 默认只进 Diagnostics）。持久化保留 canonical reminder，过滤只发生在出口。
+    #[must_use]
     pub fn visible_to(&self, audience: ReminderAudience) -> bool {
         match self {
             Self::Message(_) => true,
             Self::Reminder { reminder, .. } => {
-                reminder_egress_allowed(reminder.as_reminder(), audience)
+                peri_acp_types::system_reminder::reminder_egress_allowed(
+                    reminder.as_reminder(),
+                    audience,
+                )
             }
         }
     }
 
     /// Canonical model projection shared by normal Reason and compact rendering.
     /// 转为 canonical 持久化载荷（与 `active_payloads` 同一映射，不另立格式）。
+    #[must_use]
     pub fn into_payload(self) -> PersistedPayload {
         match self {
             Self::Message(message) => PersistedPayload::Message(message),
@@ -94,7 +101,9 @@ impl TranscriptEntry {
             }
             Self::Reminder { id, reminder } => Ok(Cow::Owned(BaseMessage::Human {
                 id: *id,
-                content: MessageContent::text(encode_system_reminder(reminder)?),
+                content: MessageContent::text(
+                    peri_acp_types::system_reminder::encode_system_reminder(reminder)?,
+                ),
             })),
         }
     }

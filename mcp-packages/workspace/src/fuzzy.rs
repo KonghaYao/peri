@@ -1,7 +1,8 @@
 //! 候选模糊排序：供工具在失败点生成 did-you-mean 恢复建议
 //! （Bash 命令候选、文件路径候选）。排序用 Skim 子序列匹配。
 
-use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 
 /// 返回所有可匹配的候选（score 降序）。无匹配返回空。
 pub(crate) fn fuzzy_filter(candidates: &[String], query: &str) -> Vec<String> {

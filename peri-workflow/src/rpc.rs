@@ -3,10 +3,12 @@
 //! 通用 NDJSON、pending request 与 process I/O 由 `peri-js-runtime` 承担；本模块仅
 //! 保留 Workflow 特有的 active agent ownership/kill 语义。
 
+use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -41,6 +43,7 @@ pub struct RpcChannel {
 }
 
 impl RpcChannel {
+    #[must_use]
     pub fn new(transport: Arc<peri_js_runtime::RpcChannel>) -> Self {
         Self {
             transport,
@@ -101,6 +104,7 @@ impl RpcChannel {
         .then_some((cancel_rx, token))
     }
 
+    #[must_use]
     pub fn deregister_agent(&self, run_id: &str, agent_id: u64, token: u64) -> bool {
         let key = (run_id.to_string(), agent_id);
         let owned = self
@@ -113,6 +117,7 @@ impl RpcChannel {
         owned
     }
 
+    #[must_use]
     pub async fn kill_agent(&self, run_id: &str, agent_id: u64) -> bool {
         if let Some((_, agent)) = self.pending_agents.remove(&(run_id.to_string(), agent_id)) {
             if let Some(rpc_id) = agent.rpc_id {
@@ -131,3 +136,9 @@ impl RpcChannel {
 #[cfg(test)]
 #[path = "rpc_test.rs"]
 mod tests;
+
+impl Debug for RpcChannel {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("RpcChannel").finish_non_exhaustive()
+    }
+}

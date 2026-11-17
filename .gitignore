@@ -163,6 +163,8 @@ claude-blog
 claude-blog-cn
 
 *.py
+!scripts/ci_test_inventory.py
+!scripts/test-ci-test-inventory.py
 !scripts/test-i386.py
 !scripts/test-loongarch64.py
 !scripts/test-install-beta.py
@@ -229,6 +231,8 @@ settings.json
 !.claude/skills/langfuse/
 !.claude/skills/langfuse/scripts/
 !.claude/skills/langfuse/scripts/**
+!.claude/skills/dogfood-user-persona/**
+!.claude/skills/dogfood-user-persona/
 !.claude/agents/
 !.claude/agents/coder.md
 .qoder/**/*

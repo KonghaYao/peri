@@ -3,12 +3,11 @@
 //! 流程：catalog → before_model → 最终压力检查 → snapshot → LlmCallStart →
 //!       LLM.generate_reasoning（与 cancel 竞争）→ LlmCallEnd → after_model
 
-use super::middleware_runner::{
-    run_after_model, run_before_model, run_before_reason_catalog, run_on_error,
-};
-use super::{ReasonInput, ReasonOutput};
 use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
 use crate::agent::react::{Reasoning, StreamingContext};
+
+use crate::agent::stages::ReasonInput;
+use crate::agent::stages::ReasonOutput;
 use crate::error::{AgentError, AgentResult};
 
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
@@ -24,7 +23,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let _view_release = ctx.model_view.release_guard();
 
     // 固定准备阶段之前的视图；Full reset/Micro 缩减本身不应触发第二次评估。
-    super::compact::context_pressure::refresh(ctx)?;
+    crate::agent::stages::compact::context_pressure::refresh(ctx)?;
 
     // hooks 前的 canonical 修订：准备阶段新增历史是驻留预算补检的独立证据，
     // 不要求投影 token 增长（例如低 token 但大正文）。
@@ -39,10 +38,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         }
     };
     *ctx.runtime.tools.write() = refreshed.tool_map();
-    run_before_reason_catalog(ctx).await?;
+    crate::agent::stages::middleware_runner::run_before_reason_catalog(ctx).await?;
 
     // before_model middleware（goal_middleware / compact_middleware 等在此注入）
-    run_before_model(ctx).await?;
+    crate::agent::stages::middleware_runner::run_before_model(ctx).await?;
     let catalog = {
         let working = ctx.runtime.tools.read();
         ctx.runtime
@@ -53,11 +52,11 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
 
     // Validate restored recovery dependencies against the final permission-filtered catalog,
     // even below the Micro trigger. Never replay canonical bodies to bypass a removed tool.
-    super::archive_capability::validate(ctx, &catalog).await?;
+    crate::agent::stages::archive_capability::validate(ctx, &catalog).await?;
 
     // before_model 和动态工具发布在常规 Compact 之后。只有准备阶段确实新增
     // 压力且达到 Full 阈值时补检一次；不重复运行模型/compact hooks。
-    let prepared_input_grew = super::compact::context_pressure::refresh(ctx)?;
+    let prepared_input_grew = crate::agent::stages::compact::context_pressure::refresh(ctx)?;
     let canonical_changed =
         ctx.session.transcript.read().view_revision() != canonical_revision_before_hooks;
     let resident_exceeded = ctx
@@ -74,8 +73,12 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                 .iter()
                 .map(|item| item.delivery_id)
                 .collect();
-            super::compact::resident_gate(ctx, config.max_resident_history_bytes, &protected_ids)
-                .is_exceeded()
+            crate::agent::stages::compact::resident_gate(
+                ctx,
+                config.max_resident_history_bytes,
+                &protected_ids,
+            )
+            .is_exceeded()
         });
     let needs_compact = (prepared_input_grew
         && ctx
@@ -97,7 +100,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             }))
         || (canonical_changed && resident_exceeded);
     if needs_compact {
-        super::compact::run_compact_core(super::CompactInput {
+        crate::agent::stages::compact::run_compact_core(crate::agent::stages::CompactInput {
             context: ctx.clone(),
             has_tool_calls: input.has_tool_calls,
         })
@@ -207,7 +210,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     let (new_visible_work, last_entry) = {
         let transcript = ctx.session.transcript.read();
         (
-            super::compact_progress::CompactBudgetRecovery::has_new_work_after(
+            crate::agent::stages::compact_progress::CompactBudgetRecovery::has_new_work_after(
                 watermark,
                 &transcript,
                 true,
@@ -273,7 +276,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                         message: e.to_string(),
                     });
                     // 通过 middleware chain 触发 on_error
-                    let _ = run_on_error(ctx, &e).await;
+                    let _ = crate::agent::stages::middleware_runner::run_on_error(ctx, &e).await;
                     return Err(e);
                 }
             }
@@ -379,7 +382,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     }
 
     // after_model middleware（hook_middleware / git_attribution 等在此）
-    run_after_model(ctx, &reasoning).await?;
+    crate::agent::stages::middleware_runner::run_after_model(ctx, &reasoning).await?;
 
     Ok(ReasonOutput {
         reasoning,

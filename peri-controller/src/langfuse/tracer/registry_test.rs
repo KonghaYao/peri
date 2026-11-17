@@ -74,7 +74,7 @@ async fn test_tool_batch_reparents_to_stage_act() {
     // ① Reason 阶段:LLM 决定调用工具
     let reason = t
         .on_stage_start_gated("main", Stage::Reason, "turn_act_reparent")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_llm_start("main", 0, &[], &[]);
     t.on_llm_end("main", 0, "m", "p", "plan", None, None);
     // ② ToolStart 先到:batch 创建,parent 冻结为 stage-reason
@@ -85,7 +85,7 @@ async fn test_tool_batch_reparents_to_stage_act() {
     // ④ Act 开始:batch parent 应重挂到 stage-act
     let act = t
         .on_stage_start_gated("main", Stage::Act, "turn_act_reparent")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     // ⑤ 工具结束 + Act 结束 → flush batch(此时 parent 已是 stage-act)
     t.on_tool_end("main", "call_1", "file list", false);
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -159,7 +159,7 @@ async fn test_replaced_stage_emits_span_no_orphan_batch() {
     // 主 agent Act stage + Agent 工具 → subagent join
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_replaced_stage")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start(
         "main",
         "call_agent",
@@ -167,12 +167,15 @@ async fn test_replaced_stage_emits_span_no_orphan_batch() {
         &serde_json::json!({"prompt": "review"}),
     );
     t.on_subagent_start("main", "child_1", "coder", false);
-    let child_obs_id = t.subagent.observation_id_of("child_1").unwrap();
+    let child_obs_id = t
+        .subagent
+        .observation_id_of("child_1")
+        .expect("the observation id of fixture result is required for this assertion");
 
     // child Reason stage：工具开始，batch parent 冻结为 reason span
     let child_reason = t
         .on_stage_start_gated("child_1", Stage::Reason, "turn_replaced_stage")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     let reason_span_id = child_reason.span_id.clone();
     // 确保 stage duration > 0(v2 条件上报:0ms stage span 不上报)
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -188,7 +191,7 @@ async fn test_replaced_stage_emits_span_no_orphan_batch() {
     // 修复前:reason span 永不发送，batch 的 parent 悬空。
     let child_act = t
         .on_stage_start_gated("child_1", Stage::Act, "turn_replaced_stage")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
 
     // 工具结束 + Act 正常结束(span 正常上报)
     t.on_tool_end("child_1", "call_bash", "file list", false);
@@ -295,7 +298,7 @@ async fn test_subagent_flushes_tool_batch_per_act_stage() {
 
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_subagent_batch_per_act")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start(
         "main",
         "call_agent",
@@ -308,7 +311,7 @@ async fn test_subagent_flushes_tool_batch_per_act_stage() {
     for step in 1..=2 {
         let reason = t
             .on_stage_start_gated("child_1", Stage::Reason, "turn_subagent_batch_per_act")
-            .unwrap();
+            .expect("the on stage start gated fixture result is required for this assertion");
         std::thread::sleep(std::time::Duration::from_millis(2));
         t.on_tool_start(
             "child_1",
@@ -320,7 +323,7 @@ async fn test_subagent_flushes_tool_batch_per_act_stage() {
 
         let act = t
             .on_stage_start_gated("child_1", Stage::Act, "turn_subagent_batch_per_act")
-            .unwrap();
+            .expect("the on stage start gated fixture result is required for this assertion");
         act_ids.push(act.span_id.clone());
         t.on_tool_end(
             "child_1",
@@ -376,7 +379,7 @@ async fn test_turn_end_closes_stale_stage_no_orphan_batch() {
     // 主 agent Act stage + Agent 工具 → subagent join
     let main_act = t
         .on_stage_start_gated("main", Stage::Act, "turn_stale_stage")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     t.on_tool_start(
         "main",
         "call_agent",
@@ -387,7 +390,7 @@ async fn test_turn_end_closes_stale_stage_no_orphan_batch() {
 
     // subagent:reason stage → 工具 start(batch 创建) → act stage 重挂 batch
     t.on_stage_start_gated("child_1", Stage::Reason, "turn_stale_stage")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_tool_start(
         "child_1",
@@ -397,7 +400,7 @@ async fn test_turn_end_closes_stale_stage_no_orphan_batch() {
     );
     let child_act = t
         .on_stage_start_gated("child_1", Stage::Act, "turn_stale_stage")
-        .unwrap();
+        .expect("the on stage start gated fixture result is required for this assertion");
     std::thread::sleep(std::time::Duration::from_millis(2));
     t.on_tool_end("child_1", "call_bash", "files", false);
     // ⚠️ 故意不调用 on_stage_end(child_act) —— 模拟最后一个 stage 的

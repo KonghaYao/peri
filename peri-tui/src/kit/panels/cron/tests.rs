@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{CRON_ACTION_ERROR, CRON_JOBS, CronJobSummary, PANEL_SCROLL_OWNER};
-use crate::kit::panels::shared::list::{ListViewport, content_rows};
+
+use crate::kit::panels::shared::list::ListViewport;
 use ratatui_kit::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -30,10 +30,12 @@ const TEST_AREA: Rect = Rect {
 /// 捕获到的动作序列（本地决策；不触发真实 RPC）。
 type Captured = Rc<RefCell<Vec<(&'static str, String)>>>;
 
+#[must_use]
 fn captured() -> Captured {
     Rc::new(RefCell::new(Vec::new()))
 }
 
+#[must_use]
 fn job(index: usize) -> CronJobSummary {
     CronJobSummary {
         id: format!("job{index}"),
@@ -183,7 +185,7 @@ fn reset_effect_cancels_pending_ticket_on_next_frame() {
                 .set(crate::kit::atoms::BRIDGE_RESET_COUNTER.get() + 1);
         }
         2 => {
-            assert!(ticket.as_ref().unwrap().is_cancelled());
+            assert!(ticket.as_ref().expect("reset effect cancels pending ticket on next frame: the fixture must retain its expected variant").is_cancelled());
             assert!(panel.action_gates.read().is_empty());
         }
         _ => {}
@@ -200,7 +202,7 @@ impl MountedPanel {
     fn event_in(&self, event: Event, area: Rect, captured: &Captured) -> EventResult {
         let jobs = CRON_JOBS.state().read().clone();
         let viewport = ListViewport::for_content_rows(
-            content_rows(Some(area), area.height),
+            crate::kit::panels::shared::list::content_rows(Some(area), area.height),
             super::list_metrics(jobs.is_empty()),
             jobs.len(),
             *self.selected.read(),
@@ -512,3 +514,11 @@ fn click_while_confirming_does_not_toggle() {
         "待删目标仍固定时确认提示必须可见：{text}"
     );
 }
+
+use crate::kit::atoms::CRON_ACTION_ERROR;
+
+use crate::kit::atoms::CRON_JOBS;
+
+use crate::kit::atoms::CronJobSummary;
+
+use crate::kit::atoms::PANEL_SCROLL_OWNER;

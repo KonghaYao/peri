@@ -20,21 +20,25 @@ pub(crate) struct OperationTicket<S = OperationScope> {
 
 impl<S> OperationTicket<S> {
     /// 发起请求时固定的作用域：请求参数、日志与响应返回后的复检都用它。
+    #[must_use]
     pub(crate) fn scope(&self) -> &S {
         &self.scope
     }
 
     /// 请求代次。门自己比对代次；面板用它识别「已脱离等待但仍需送达的终态」。
+    #[must_use]
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
     /// 取消令牌：异步侧 `select!` 用。取消只结束本地等待。
+    #[must_use]
     pub(crate) fn token(&self) -> &CancellationToken {
         &self.cancelled
     }
 
     /// 本地等待是否已取消（视图不再观察本次请求）。
+    #[must_use]
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.is_cancelled()
     }
@@ -88,6 +92,7 @@ impl<S: Clone + Eq> CompletionGate<S> {
     ///
     /// 令牌被 `cancel_wait` 取消但票仍在途时仍算当前：注销取消只停止远端等待，
     /// 本地清理结果仍属于本次操作。
+    #[must_use]
     pub(crate) fn is_current(&self, ticket: &OperationTicket<S>) -> bool {
         ticket.scope == self.scope
             && self.pending.as_ref().map(|pending| pending.generation) == Some(ticket.generation)
@@ -126,16 +131,19 @@ impl<S: Clone + Eq> CompletionGate<S> {
     }
 
     /// 是否有在途请求。`Idle` / `Running` 由它推导，不另存副本。
+    #[must_use]
     pub(crate) fn is_pending(&self) -> bool {
         self.pending.is_some()
     }
 
     /// 当前作用域：日志与调用方自身的比较用。
+    #[must_use]
     pub(crate) fn scope(&self) -> &S {
         &self.scope
     }
 
     /// 当前作用域是否等于给定作用域。
+    #[must_use]
     pub(crate) fn scope_matches(&self, scope: &S) -> bool {
         self.scope == *scope
     }

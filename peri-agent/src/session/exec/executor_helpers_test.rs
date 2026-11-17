@@ -12,21 +12,25 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    command::{
-        command_handler::CommandHandler, command_route::RouteEntry, CommandContext,
-        CommandFeedback, CommandOutcome, CommandResult, FeedbackChannel, FeedbackLevel,
-        PromptStopReason, ResolvedCommand,
-    },
-    compact::CompactConfig,
-    event::{EventSink, ExecutorEvent},
-    messages::{BaseMessage, MessageContent},
-};
+use peri_acp_types::command::command_handler::CommandHandler;
+use peri_acp_types::command::command_route::RouteEntry;
+use peri_acp_types::command::CommandContext;
+use peri_acp_types::command::CommandFeedback;
+use peri_acp_types::command::CommandOutcome;
+use peri_acp_types::command::CommandResult;
+use peri_acp_types::command::FeedbackChannel;
+use peri_acp_types::command::FeedbackLevel;
+use peri_acp_types::command::PromptStopReason;
+use peri_acp_types::command::ResolvedCommand;
+use peri_acp_types::compact::CompactConfig;
+use peri_acp_types::event::EventSink;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageContent;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::{
-    emit_command_feedback, intercept_immediate_command, InterceptOutcome, InterceptRequest,
-};
+use crate::session::exec::executor_helpers::intercept::InterceptOutcome;
+use crate::session::exec::executor_helpers::intercept::InterceptRequest;
 
 // ── Mock EventSink ─────────────────────────────────────────────────────────
 
@@ -49,7 +53,10 @@ impl MockEventSink {
     }
 
     fn push_done_count(&self) -> usize {
-        *self.push_done_count.lock().unwrap()
+        *self
+            .push_done_count
+            .lock()
+            .expect("self push done count mutex must remain unpoisoned throughout the test")
     }
 }
 
@@ -62,19 +69,25 @@ impl EventSink for MockEventSink {
         _context_window: u32,
     ) -> Result<(), peri_acp_types::event::EventSinkError> {
         let json = serde_json::to_string(event).unwrap_or_default();
-        self.pushed_events.lock().unwrap().push(json);
+        self.pushed_events
+            .lock()
+            .expect("self pushed events mutex must remain unpoisoned throughout the test")
+            .push(json);
         Ok(())
     }
 
     async fn push_done(&self, _session_id: &str, stop_reason: &str, request_id: Option<&str>) {
-        *self.push_done_count.lock().unwrap() += 1;
+        *self
+            .push_done_count
+            .lock()
+            .expect("self push done count mutex must remain unpoisoned throughout the test") += 1;
         self.push_done_request_ids
             .lock()
-            .unwrap()
+            .expect("self push done request ids mutex must remain unpoisoned throughout the test")
             .push(request_id.map(String::from));
         self.push_done_stop_reasons
             .lock()
-            .unwrap()
+            .expect("self push done stop reasons mutex must remain unpoisoned throughout the test")
             .push(stop_reason.to_string());
     }
 }
@@ -131,13 +144,14 @@ fn make_intercept_request<'a>(
     event_sink: &'a Arc<dyn EventSink>,
     _bg_event_tx: &'a tokio::sync::mpsc::UnboundedSender<ExecutorEvent>,
     task_manager: &'a Arc<dyn peri_acp_types::tasks::TaskManager>,
-    command_lookup: super::CommandLookupFn,
+    command_lookup: crate::session::exec::executor_helpers::intercept::CommandLookupFn,
 ) -> InterceptRequest<'a> {
     let compact_config_loader: Arc<dyn Fn() -> CompactConfig + Send + Sync> =
         Arc::new(CompactConfig::default);
     InterceptRequest {
         mcp_pool: None,
         async_result_mailbox: None,
+        goal_controller: None,
         content,
         history_payloads: std::borrow::Cow::Owned(
             history
@@ -175,13 +189,13 @@ fn make_bg_infra() -> (
 }
 
 /// 默认 command_lookup mock：未注册（None），等价 ACP 注册表未命中。
-fn no_match_lookup() -> super::CommandLookupFn {
+fn no_match_lookup() -> crate::session::exec::executor_helpers::intercept::CommandLookupFn {
     Arc::new(|_text: &str| None)
 }
 
 /// 命中 Fake CommandHandler 的 command_lookup mock（/compact 路径；
 /// P1-6：返回 `ResolvedCommand`，args 词法切分由注册表 resolve 完成）。
-fn immediate_lookup() -> super::CommandLookupFn {
+fn immediate_lookup() -> crate::session::exec::executor_helpers::intercept::CommandLookupFn {
     Arc::new(|text: &str| {
         if text == "compact" {
             Some(ResolvedCommand {
@@ -196,7 +210,7 @@ fn immediate_lookup() -> super::CommandLookupFn {
 
 /// 命中返回 Inject 的 handler 的 command_lookup mock（Phase 5 Step 6 语义：
 /// 回传 `Inject(text)`，executor.rs 调用点转 AgentInput::blocks 进 agent 管线）。
-fn inject_lookup() -> super::CommandLookupFn {
+fn inject_lookup() -> crate::session::exec::executor_helpers::intercept::CommandLookupFn {
     struct InjectHandler;
     #[async_trait]
     impl CommandHandler for InjectHandler {
@@ -252,7 +266,7 @@ async fn test_intercept_unknown_command_returns_none() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：未知命令不拦截，PassThrough 继续走 agent 管线
     assert!(
@@ -282,7 +296,7 @@ async fn test_intercept_plain_text_returns_none() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：普通文本不拦截
     assert!(
@@ -312,7 +326,7 @@ async fn test_intercept_slash_only_returns_none() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：单个 `/` 应 PassThrough（不空命中命令）
     assert!(
@@ -344,7 +358,7 @@ async fn test_intercept_etc_hosts_falls_through() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：绝对路径未命中注册表 → PassThrough，且不产生任何事件
     assert!(
@@ -352,7 +366,11 @@ async fn test_intercept_etc_hosts_falls_through() {
         "/etc/hosts 应 PassThrough 走 agent 管线"
     );
     assert!(
-        mock_sink.pushed_events.lock().unwrap().is_empty(),
+        mock_sink
+            .pushed_events
+            .lock()
+            .expect("mock sink pushed events mutex must remain unpoisoned throughout the test")
+            .is_empty(),
         "fall through 路径不得产生错误事件"
     );
     assert_eq!(
@@ -386,7 +404,7 @@ async fn test_intercept_mcp_legacy_form_falls_through() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：mcp__ 遗留形态不拦截、不报错 → PassThrough
     assert!(
@@ -394,7 +412,11 @@ async fn test_intercept_mcp_legacy_form_falls_through() {
         "mcp__ 遗留形态应 PassThrough 走 agent 管线"
     );
     assert!(
-        mock_sink.pushed_events.lock().unwrap().is_empty(),
+        mock_sink
+            .pushed_events
+            .lock()
+            .expect("mock sink pushed events mutex must remain unpoisoned throughout the test")
+            .is_empty(),
         "fall through 路径不得产生错误事件"
     );
     assert_eq!(
@@ -409,7 +431,7 @@ async fn test_intercept_mcp_legacy_form_falls_through() {
 /// 命中 Fake ClearHandler 的 command_lookup mock（core:clear 注册形态：
 /// 别名 cls/reset，args_schema = ArgsSchema::default() 零校验；语义与真实
 /// ClearCommand 对齐——messages 清空 + feedback(Info, "对话已清空", UiOnly)）。
-fn clear_lookup() -> super::CommandLookupFn {
+fn clear_lookup() -> crate::session::exec::executor_helpers::intercept::CommandLookupFn {
     struct FakeClearHandler;
     #[async_trait]
     impl CommandHandler for FakeClearHandler {
@@ -457,10 +479,13 @@ fn assert_clear_handled(result: InterceptOutcome, mock_sink: &MockEventSink) {
         prompt_result.messages.is_empty(),
         "clear 应清空消息历史（真实 ClearCommand messages: Vec::new() 语义）"
     );
-    let events = mock_sink.pushed_events.lock().unwrap();
+    let events = mock_sink
+        .pushed_events
+        .lock()
+        .expect("mock sink pushed events mutex must remain unpoisoned throughout the test");
     let fb_event = events.iter().find(|json| json.contains("command_feedback"));
     assert!(fb_event.is_some(), "clear 应发射 CommandFeedback 事件");
-    let fb_json = fb_event.unwrap();
+    let fb_json = fb_event.expect("the fb event fixture result is required for this assertion");
     assert!(
         fb_json.contains("对话已清空") && fb_json.contains("uiOnly"),
         "反馈应为 feedback(Info, 对话已清空, UiOnly)，实际: {fb_json}"
@@ -497,7 +522,7 @@ async fn test_intercept_clear_hits_registry_and_handles() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：注册表命中 → 确定性清空
     assert_clear_handled(result, &mock_sink);
@@ -525,7 +550,7 @@ async fn test_intercept_clear_alias_cls_hits_registry_and_handles() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：别名命中 → 确定性清空
     assert_clear_handled(result, &mock_sink);
@@ -553,7 +578,7 @@ async fn test_intercept_clear_alias_reset_hits_registry_and_handles() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：别名命中 → 确定性清空
     assert_clear_handled(result, &mock_sink);
@@ -584,7 +609,7 @@ async fn test_intercept_compact_command_calls_push_done() {
     );
 
     // Act
-    intercept_immediate_command(req).await;
+    crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：必须调用 push_done 一次
     assert_eq!(
@@ -616,7 +641,7 @@ async fn test_intercept_no_match_does_not_call_push_done() {
     );
 
     // Act
-    intercept_immediate_command(req).await;
+    crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：未拦截时 push_done 为 0（由后续 pump 负责）
     assert_eq!(
@@ -656,7 +681,7 @@ async fn test_intercept_with_cancelled_token_still_returns_some() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：无论 select 走哪个分支，结果都应 Handled（命令已拦截或被取消）
     assert!(
@@ -693,7 +718,7 @@ async fn test_intercept_immediate_returns_empty_recall_items() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：recall_items 必须为空
     let InterceptOutcome::Handled(prompt_result) = result else {
@@ -728,7 +753,7 @@ async fn test_intercept_immediate_ok_always_true() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert
     let InterceptOutcome::Handled(prompt_result) = result else {
@@ -762,7 +787,7 @@ async fn test_intercept_inject_outcome_returns_inject() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：Inject 原样回传（注入文本进 agent 管线），不 push_done
     assert!(
@@ -793,30 +818,31 @@ async fn test_intercept_skill_passthrough_injects_original_text() {
             CommandOutcome::Inject(ctx.raw_text)
         }
     }
-    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
-        // 镜像注册表 resolve 语义：整段文本进入，名字 + args 词法切分完成。
-        if text == "diagnose 帮我调试一下" {
-            Some(ResolvedCommand {
-                entry: Arc::new(RouteEntry {
-                    fullname: "core:diagnose".to_string(),
-                    aliases: vec![],
-                    description: "test skill".to_string(),
-                    kind: peri_acp_types::command::command_route::CommandEntryKind::Skill,
-                    category: None,
-                    args_schema: None,
-                    handler: Arc::new(PassthroughHandler),
-                    provenance: peri_acp_types::command::command_route::CommandProvenance {
-                        source: peri_acp_types::command::command_route::CommandSource::Core,
-                        lifecycle:
-                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
-                    },
-                }),
-                args: "帮我调试一下".to_string(),
-            })
-        } else {
-            None
-        }
-    });
+    let lookup: crate::session::exec::executor_helpers::intercept::CommandLookupFn =
+        Arc::new(|text: &str| {
+            // 镜像注册表 resolve 语义：整段文本进入，名字 + args 词法切分完成。
+            if text == "diagnose 帮我调试一下" {
+                Some(ResolvedCommand {
+                    entry: Arc::new(RouteEntry {
+                        fullname: "core:diagnose".to_string(),
+                        aliases: vec![],
+                        description: "test skill".to_string(),
+                        kind: peri_acp_types::command::command_route::CommandEntryKind::Skill,
+                        category: None,
+                        args_schema: None,
+                        handler: Arc::new(PassthroughHandler),
+                        provenance: peri_acp_types::command::command_route::CommandProvenance {
+                            source: peri_acp_types::command::command_route::CommandSource::Core,
+                            lifecycle:
+                                peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                        },
+                    }),
+                    args: "帮我调试一下".to_string(),
+                })
+            } else {
+                None
+            }
+        });
 
     let content = MessageContent::text("/diagnose 帮我调试一下");
     let history: Vec<BaseMessage> = vec![];
@@ -836,7 +862,7 @@ async fn test_intercept_skill_passthrough_injects_original_text() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：skill 命中 → Inject 回传原文（含 `/skill-name` token），不 push_done
     assert!(
@@ -864,29 +890,30 @@ async fn test_intercept_cancel_outcome_returns_handled_cancelled() {
             unreachable!("pending 永不返回");
         }
     }
-    let lookup: super::CommandLookupFn = Arc::new(|text: &str| {
-        if text == "pending" {
-            Some(ResolvedCommand {
-                entry: Arc::new(RouteEntry {
-                    fullname: "core:pending".to_string(),
-                    aliases: vec![],
-                    description: "pending handler".to_string(),
-                    kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
-                    category: None,
-                    args_schema: None,
-                    handler: Arc::new(PendingHandler),
-                    provenance: peri_acp_types::command::command_route::CommandProvenance {
-                        source: peri_acp_types::command::command_route::CommandSource::Core,
-                        lifecycle:
-                            peri_acp_types::command::command_route::CommandLifecycle::Connected,
-                    },
-                }),
-                args: String::new(),
-            })
-        } else {
-            None
-        }
-    });
+    let lookup: crate::session::exec::executor_helpers::intercept::CommandLookupFn =
+        Arc::new(|text: &str| {
+            if text == "pending" {
+                Some(ResolvedCommand {
+                    entry: Arc::new(RouteEntry {
+                        fullname: "core:pending".to_string(),
+                        aliases: vec![],
+                        description: "pending handler".to_string(),
+                        kind: peri_acp_types::command::command_route::CommandEntryKind::Command,
+                        category: None,
+                        args_schema: None,
+                        handler: Arc::new(PendingHandler),
+                        provenance: peri_acp_types::command::command_route::CommandProvenance {
+                            source: peri_acp_types::command::command_route::CommandSource::Core,
+                            lifecycle:
+                                peri_acp_types::command::command_route::CommandLifecycle::Connected,
+                        },
+                    }),
+                    args: String::new(),
+                })
+            } else {
+                None
+            }
+        });
 
     let content = MessageContent::text("/pending");
     let history: Vec<BaseMessage> = vec![BaseMessage::human("hello")];
@@ -907,7 +934,7 @@ async fn test_intercept_cancel_outcome_returns_handled_cancelled() {
     );
 
     // Act
-    let result = intercept_immediate_command(req).await;
+    let result = crate::session::exec::executor_helpers::intercept_immediate_command(req).await;
 
     // Assert：cancel 分支 → Handled(Cancelled) + history 原样 + push_done
     let InterceptOutcome::Handled(prompt_result) = result else {
@@ -933,46 +960,4 @@ mod terminal_mapping_tests;
 
 #[path = "executor_helpers/compact_cancel_test.rs"]
 mod compact_cancel_tests;
-
-// [回归测试] §7.3 摘要计数与 loop 的 busy 判据同源：无任务/无 manager 记 0，
-// 未结算任务按 active_count 计入（终态结算后不再计入）。
-#[test]
-fn test_pending_task_count_reflects_unsettled_tasks() {
-    use crate::session::exec::executor_helpers::pending_task_count;
-    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
-    let none: Option<Arc<dyn TaskManagerPort>> = None;
-    assert_eq!(pending_task_count(none.as_ref()), 0);
-    let manager: Arc<dyn TaskManagerPort> = Arc::new(crate::agent::async_tasks::TaskManager::new());
-    assert_eq!(pending_task_count(Some(&manager)), 0);
-    let ticket = manager
-        .register(BgTaskRegistration {
-            task_id: "bg-pending".into(),
-            kind: BgTaskKind::Shell,
-            summary: "sleep 300".into(),
-            pid: None,
-            kill: Some(Box::new(|| {})),
-        })
-        .unwrap();
-    assert_eq!(pending_task_count(Some(&manager)), 1);
-    manager.complete(
-        &ticket,
-        peri_acp_types::event::BackgroundTaskResult {
-            task_id: "bg-pending".into(),
-            agent_name: "bg-shell".into(),
-            prompt_summary: "sleep 300".into(),
-            success: true,
-            output: "done".into(),
-            tool_calls_count: 0,
-            duration_ms: 1,
-            timed_out: false,
-            child_thread_id: None,
-            subagent_failure: None,
-            shell_output: None,
-        },
-    );
-    assert_eq!(
-        pending_task_count(Some(&manager)),
-        0,
-        "结算后不得再计入 pending"
-    );
-}
+include!("executor_pending_tasks_test.rs");

@@ -1,8 +1,10 @@
 //! ACP request wrappers for capabilities, prompts, configuration, and cancellation.
 
 use agent_client_protocol::schema::v1::PromptResponse;
-use peri_acp::transport::{AcpTransport, types::AcpError};
-use peri_acp_types::{PeriCaps, command::command_route::UiCommandSpec};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
+use peri_acp_types::PeriCaps;
+use peri_acp_types::command::command_route::UiCommandSpec;
 use serde_json::{Value, json};
 
 use super::AcpTuiClient;
@@ -406,6 +408,12 @@ impl AcpTuiClient {
         Ok(())
     }
 
+    /// Settle owned interactions and send cancellation for the current session and managed run.
+    ///
+    /// Successful delivery does not mean execution has stopped; completion arrives through notifications.
+    ///
+    /// # Errors
+    /// Returns an error when no session is active or the notification cannot be sent.
     pub async fn cancel(&self) -> Result<(), AcpError> {
         let _operation = self.lifecycle.operation_gate().lock().await;
         let session_id = self

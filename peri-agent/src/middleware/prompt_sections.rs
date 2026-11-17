@@ -1,7 +1,7 @@
 //! 段落持有者接口（波 4 演进基础设施，设计 §3.1.1 拆分持有契约 2/3/4）。
 //!
-//! Middleware 经 [`Middleware::prompt_sections`]（`trait.rs`）声明其持有的
-//! 系统提示词段落（内容载体），装配期经 [`MiddlewareChain::collect_prompt_sections`]
+//! Middleware 经 [`Middleware::prompt_sections`](crate::middleware::Middleware::prompt_sections)（`trait.rs`）声明其持有的
+//! 系统提示词段落（内容载体），装配期经 [`MiddlewareChain::collect_prompt_sections`](crate::middleware::MiddlewareChain::collect_prompt_sections)
 //! （`chain.rs`）收集，渲染面（`peri-acp` 的 `PromptTemplate`）按"位置属性 +
 //! 段内序号"排序装配（**不依赖 middleware 链序**，契约 2）。
 //!
@@ -20,6 +20,7 @@
 //! = 跳过渲染不 fail；渲染面物化时过滤空内容段落（见 `PromptTemplate::new`）。
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Debug, Formatter};
 
 use peri_acp_types::meta_harness::SECTION_HOLDER_MIDDLEWARE;
 
@@ -50,6 +51,7 @@ pub enum PromptSectionContent {
 
 impl PromptSectionContent {
     /// 渲染用文本视图
+    #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
             Self::Builtin(s) => s,
@@ -74,6 +76,7 @@ pub struct PromptSection {
 
 impl PromptSection {
     /// 构造静态段落声明（`include_str!` 内容零拷贝）。
+    #[must_use]
     pub fn builtin(
         id: &'static str,
         zone: PromptSectionZone,
@@ -89,6 +92,7 @@ impl PromptSection {
     }
 
     /// 构造动态段落声明（middleware 按装配事实生成内容）。
+    #[must_use]
     pub fn dynamic(id: &'static str, zone: PromptSectionZone, order: u16, content: String) -> Self {
         Self {
             id,
@@ -110,6 +114,7 @@ impl PromptSection {
 /// 锁定）。
 ///
 /// 纯函数（输入名集合而非链实例），便于测试与装配面复用。
+#[must_use]
 pub fn project_enabled_sections(chain_middleware_names: &HashSet<&str>) -> HashSet<&'static str> {
     SECTION_HOLDER_MIDDLEWARE
         .iter()
@@ -133,7 +138,7 @@ pub enum SectionLayoutError {
 }
 
 impl std::fmt::Display for SectionLayoutError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateId { id } => {
                 write!(
@@ -209,6 +214,7 @@ pub struct SectionCapabilities {
 
 impl SectionCapabilities {
     /// 从实际装配的段落声明派生能力事实（链收集结果即装配事实）。
+    #[must_use]
     pub fn from_sections(sections: &[PromptSection]) -> Self {
         let has = |id: &str| sections.iter().any(|section| section.id == id);
         Self {

@@ -5,7 +5,7 @@
 //! `build_stage_context` / `V2AgentOutput` / `CachedLlmInstances` /
 //! `StageBuildInput`）。本模块不再持有装配实现，只做两件事：
 //!
-//! 1. 从投影型 [`SessionContext`]（`peri-agent::session::exec::executor`）投影
+//! 1. 从投影型 [`peri_agent::session::exec::executor::SessionContext`]（`peri-agent::session::exec::executor`）投影
 //!    构造 [`StageBuildInput`]（会话数据逐字段对应；注入面按原 ACP 语义构造）；
 //! 2. 经注入参数接入装配器（`MiddlewareChainAssembler`，宿主传
 //!    `ProductionChainAssembler`）与 compact hook 闭包，调用 peri_agent 正式
@@ -20,7 +20,7 @@
 //!   host/prompt.rs `build_compact_hooks` 构造，本模块不再承载）；
 //! - `langfuse_bridge_factory`：由宿主 turn 级 Langfuse hooks 捕获后传入；
 //! - `shared_queue` / `idle_inbox` / `launch_cron_bridge`：经
-//!   [`SessionAccessPort`] 定位（原 `SessionManager` 路径；None = print mode /
+//!   [`peri_acp_types::session::SessionAccessPort`] 定位（原 `SessionManager` 路径；None = print mode /
 //!   无 session，走 turn 级 CronOwner 路径）。
 //!
 //! 依赖方向（§0）：本模块只依赖 peri-acp-types / peri-agent（执行面）/
@@ -29,21 +29,21 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::{
-    agents::AgentOverrides,
-    command_registry::CommandRegistry,
-    event::AgentEventHandler,
-    frozen::{ChildHandlerFactory, ThreadPersistence},
-    goal::GoalController,
-    mcp_skills::McpSkillRegistry,
-    session::SessionInbox,
-};
-use peri_agent::agent::{async_tasks::TaskManager, LangfuseBridgeLike};
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::command_registry::CommandRegistry;
+use peri_acp_types::event::AgentEventHandler;
+use peri_acp_types::frozen::ChildHandlerFactory;
+use peri_acp_types::frozen::ThreadPersistence;
+use peri_acp_types::goal::GoalController;
+use peri_acp_types::mcp_skills::McpSkillRegistry;
+use peri_acp_types::session::SessionInbox;
+use peri_agent::agent::async_tasks::TaskManager;
+use peri_agent::agent::LangfuseBridgeLike;
 use peri_agent::session::exec::executor::FrozenSessionData;
-use peri_agent::session::exec::stage_builder::{
-    build_stage_context as build_stage_context_agent, CachedLlmInstances, StageBuildInput,
-    V2AgentOutput,
-};
+use peri_agent::session::exec::stage_builder;
+use peri_agent::session::exec::stage_builder::CachedLlmInstances;
+use peri_agent::session::exec::stage_builder::StageBuildInput;
+use peri_agent::session::exec::stage_builder::V2AgentOutput;
 // 装配器与注入闭包类型事实源在 peri-agent（middlewares 侧仅 re-export，
 // 本模块直接引事实源，不触碰 middlewares）
 use peri_agent::session::factory::{
@@ -53,12 +53,9 @@ use peri_agent::session::factory::{
 // 渲染面收集（middlewares 段声明）位于 ACP 宿主装配面 session/mod.rs
 // （§0 边 2 豁免），本模块只消费收集结果，不触碰 middlewares
 use crate::prompt::{PromptEnv, PromptTemplate};
-use crate::session::{
-    build_collected_sections, build_collected_sections_with_capabilities,
-    subagent_chain_capabilities,
-};
+use crate::session;
 
-/// 从投影型 [`SessionContext`] 构造 [`StageBuildInput`] 并调用 peri_agent 正式
+/// 从投影型 [`peri_agent::session::exec::executor::SessionContext`] 构造 [`StageBuildInput`] 并调用 peri_agent 正式
 /// `build_stage_context`（stage 装配本体，`peri-agent/src/session/exec/stage_builder.rs`）。
 ///
 /// 签名保持 ACP 装配面形态（18 参数）：前 17 个与正式签名一一对应
@@ -178,7 +175,8 @@ pub(crate) fn build_stage_context(
             // 波 4 演进（C2/C3）：收集结果 = 能力事实（冻结 disabled
             // 集合 + 主链装配条件）驱动的段落集合——与链收集同一事实源，
             // 禁止双轨。
-            let collected = build_collected_sections(&meta_harness, ov, language.as_deref());
+            let collected =
+                session::build_collected_sections(&meta_harness, ov, language.as_deref());
             let template = PromptTemplate::new(&meta_harness, &collected);
             let env = PromptEnv::frozen(cwd, &frozen_date, frozen_runtime_env.as_ref());
             template.render(&env, agent_catalog.as_ref())
@@ -197,13 +195,13 @@ pub(crate) fn build_stage_context(
         // （定义型 / fork）不得收到 10_hitl / 12_ask_user / 11_subagent 声明；
         // 基础段与语言段继承会话冻结决策，13_skills 按子链 SkillsMiddleware。
         let capabilities_for_sub =
-            subagent_chain_capabilities(&meta_harness_for_sub.disabled_middlewares);
+            session::subagent_chain_capabilities(&meta_harness_for_sub.disabled_middlewares);
         // 冻结运行环境（H3）：子 Agent 重渲染同样只消费快照。
         let frozen_runtime_env_for_sub = frozen.runtime_env.clone();
         Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
             // C2：收集结果在调用期按 overrides 计算（persona 段内容依赖
             // overrides；与主重渲染同一事实源）。
-            let collected = build_collected_sections_with_capabilities(
+            let collected = session::build_collected_sections_with_capabilities(
                 &meta_harness_for_sub,
                 overrides,
                 frozen_language_for_sub.as_deref(),
@@ -287,16 +285,10 @@ pub(crate) fn build_stage_context(
         // MetaHarness：装配期关闭集合与段落覆盖均从同一 frozen snapshot
         // 派生，禁止回退当轮 SessionContext/config（设计 §2.5）。
         meta_harness_disabled: frozen.meta_harness.disabled_middlewares.clone(),
-        // beta flag 投影（设计 §消费契约）：`Agent` 工具缺省后台的语义值来自**会话
-        // 冻结**的 flag 值（随会话创建定格，不重读当轮配置）；flag id 的解析只在
-        // 本装配层发生，middleware/工具不解析 flag 语义。
-        agent_default_run_in_background: frozen
-            .beta_flags
-            .is_enabled(peri_acp_types::beta_flags::FULL_ASYNC_TOOLS),
     };
 
     // 调用 peri_agent 正式 stage 装配本体（透传 V2AgentOutput）
-    build_stage_context_agent(
+    stage_builder::build_stage_context(
         &input,
         assembler,
         cached_llm,

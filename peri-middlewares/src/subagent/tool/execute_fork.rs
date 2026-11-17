@@ -10,13 +10,15 @@
 use std::sync::Arc;
 
 use peri_agent::messages::BaseMessage;
-use peri_agent::session::subagent::{
-    extract_last_ai_text, format_subagent_result, ForkDirectiveKind, SubagentCancelPolicy,
-    SubagentRunMode,
-};
+use peri_agent::session::subagent;
+use peri_agent::session::subagent::ForkDirectiveKind;
+use peri_agent::session::subagent::SubagentCancelPolicy;
+use peri_agent::session::subagent::SubagentRunMode;
 use peri_agent::tools::BaseTool;
 
 impl super::SubAgentTool {
+    /// v5 起 `Agent` 工具恒后台，本同步 fork 实现保留但不再被产品路径调用。
+    #[allow(dead_code)] // 同步路径按 v5 裁决保留实现（不可唤醒），不删除
     pub(crate) async fn invoke_fork(
         &self,
         prompt: &str,
@@ -71,7 +73,7 @@ impl super::SubAgentTool {
         }
 
         // 结果格式：会话资源门面存在时带 child_thread_id 前缀（与迁移前一致）
-        let text = extract_last_ai_text(&spawned.session);
+        let text = subagent::extract_last_ai_text(&spawned.session);
         let output = peri_agent::agent::react::AgentOutput {
             text,
             steps: 0,
@@ -79,7 +81,7 @@ impl super::SubAgentTool {
             stop_reason: None,
             block_continue: None,
         };
-        let result_text = format_subagent_result(&output);
+        let result_text = subagent::format_subagent_result(&output);
         if host.session_resources.is_some() {
             Ok(format!(
                 "child_thread_id: {}\n{}",

@@ -1,4 +1,16 @@
-use super::*;
+use crate::host::mcp_v4_wave2::BuiltinHostFixture;
+use crate::host::mcp_v4_wave2::BuiltinInjectionOff;
+use crate::host::mcp_v4_wave2::FixtureDeferredTool;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use crate::host::mcp_v4_wave2::WAVE2_INSTANCES;
+
+use peri_middlewares::assembly::BuiltinInstanceContext;
+use peri_middlewares::assembly::CronInstanceInput;
+use peri_middlewares::assembly::WorkflowInstanceInput;
+use peri_middlewares::tool_search::core_tools;
+use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
+use serial_test::serial;
+use std::sync::Arc;
 
 // ── 用例 6：`PERI_MCP_BUILTIN=off` 零注入（§8 第 10 / 15 行 / A2 / A11 / R28）────
 
@@ -61,23 +73,26 @@ async fn off_has_zero_builtin_injection() {
                 .collect::<Vec<_>>()
         );
         assert!(
-            fixture.pool.get_all_clients().is_empty(),
+            fixture.pool.clients().is_empty(),
             "off 时不得有任何 Connected client（`get_all_clients` 只回 Connected 句柄）"
         );
         // ② handler 层：四个实例都不出现。
         for (instance, _) in WAVE2_INSTANCES {
             assert!(
-                fixture.pool.get_client(instance).is_none(),
+                fixture.pool.client(instance).is_none(),
                 "off 时 `{instance}` 实例不得被注册（零注入）"
             );
             assert!(
-                fixture.pool.get_tools(instance).is_empty(),
+                fixture.pool.tools_for_server(instance).is_empty(),
                 "off 时 `{instance}` 不得有工具面"
             );
         }
         // ③ tick 层：已到期任务在 2.4s（>2× 1s interval）内不得被触发。
-        let observed =
-            collect_triggers(&mut triggers, std::time::Duration::from_millis(2_400)).await;
+        let observed = crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::collect_triggers(
+            &mut triggers,
+            std::time::Duration::from_millis(2_400),
+        )
+        .await;
         assert!(
             observed.is_empty(),
             "off 时不得有任何 tick 驱动者（已到期任务在 2.4s 内零触发）: {observed:?}"
@@ -88,10 +103,14 @@ async fn off_has_zero_builtin_injection() {
             "FixtureDeferredTool".to_string(),
             Arc::new(FixtureDeferredTool),
         );
-        let faces =
-            probe_tool_faces("off（零注入）", ctx, "web fetch artifact cron fixtureprobe").await;
+        let faces = crate::host::mcp_v4_wave2::probe_tool_faces(
+            "off（零注入）",
+            ctx,
+            "web fetch artifact cron fixtureprobe",
+        )
+        .await;
         for (instance, _) in WAVE2_INSTANCES {
-            for name in declared_effective_names(instance) {
+            for name in crate::host::mcp_v4_wave2::declared_effective_names(instance) {
                 assert!(
                     !faces.direct.iter().any(|tool| tool == name),
                     "off 时 `{name}` 不得进入首个 LLM 请求的直连参数: {:?}",
@@ -103,7 +122,7 @@ async fn off_has_zero_builtin_injection() {
                     faces.searched
                 );
             }
-            for bare in declared_tool_names(instance) {
+            for bare in crate::host::mcp_v4_wave2::declared_tool_names(instance) {
                 assert!(
                     !faces.direct.iter().any(|tool| tool == bare)
                         && !faces.searched.iter().any(|tool| tool == bare),
@@ -163,13 +182,15 @@ async fn off_has_zero_builtin_injection() {
     );
     let fixture = BuiltinHostFixture::start_with_context(
         dirs,
-        BuiltinInstanceContext::new(cwd.clone()).with_cron(CronInstanceInput {
-            scheduler: Arc::clone(&scheduler),
-            tick_enabled: true,
-        }),
+        BuiltinInstanceContext::new(cwd.clone())
+            .with_cron(CronInstanceInput {
+                scheduler: Arc::clone(&scheduler),
+                tick_enabled: true,
+            })
+            .with_workflow(WorkflowInstanceInput::slot()),
     )
     .await;
-    assert_instance_ready(
+    crate::host::mcp_v4_wave2::assert_instance_ready(
         &fixture.pool,
         "cron",
         &[
@@ -180,7 +201,11 @@ async fn off_has_zero_builtin_injection() {
             "cron_acknowledge",
         ],
     );
-    let observed = collect_triggers(&mut triggers, std::time::Duration::from_secs(3)).await;
+    let observed = crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::collect_triggers(
+        &mut triggers,
+        std::time::Duration::from_secs(3),
+    )
+    .await;
     assert!(
         !observed.is_empty(),
         "ON 控制：`cron` 实例的 tick 必须驱动 scheduler（否则 A 段的「零触发」不可证伪）"
@@ -216,10 +241,10 @@ async fn wave1_compatibility_with_wave2() {
     let dirs = FixtureDirs::new();
     let fixture = BuiltinHostFixture::start(dirs, false).await;
     for (instance, expected) in WAVE2_INSTANCES {
-        assert_instance_ready(&fixture.pool, instance, expected);
+        crate::host::mcp_v4_wave2::assert_instance_ready(&fixture.pool, instance, expected);
     }
 
-    let faces = probe_tool_faces(
+    let faces = crate::host::mcp_v4_wave2::probe_tool_faces(
         "wave 1 兼容（四实例共存）",
         fixture.session_context("mcp-v4-wave2-wave1-compat").await,
         "web fetch artifact",
@@ -233,7 +258,9 @@ async fn wave1_compatibility_with_wave2() {
     //    既有实例挤出去。（wave 1 三名仍在表内由 `peri-acp-types` 注册表用例锁定。）
     let mut expected_builtin_direct: Vec<String> = WAVE2_INSTANCES
         .iter()
-        .flat_map(|(instance, _)| declared_direct_effective_names(instance))
+        .flat_map(|(instance, _)| {
+            crate::host::mcp_v4_wave2::declared_direct_effective_names(instance)
+        })
         .map(str::to_string)
         .collect();
     expected_builtin_direct.sort();
@@ -255,9 +282,11 @@ async fn wave1_compatibility_with_wave2() {
 
     // ③ 当前模型可见名只出现于应有的面，不生成历史前缀执行别名。
     for (instance, _) in WAVE2_INSTANCES {
-        for current_name in declared_effective_names(instance) {
+        for current_name in crate::host::mcp_v4_wave2::declared_effective_names(instance) {
             assert!(
-                if declared_direct_effective_names(instance).contains(&current_name) {
+                if crate::host::mcp_v4_wave2::declared_direct_effective_names(instance)
+                    .contains(&current_name)
+                {
                     faces.direct.iter().any(|tool| tool == current_name)
                 } else {
                     !faces.direct.iter().any(|tool| tool == current_name)

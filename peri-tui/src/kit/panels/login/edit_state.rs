@@ -8,10 +8,7 @@
 use crate::config::ConfigurationRevision;
 use crate::i18n;
 
-use super::edit_errors::{
-    profile_model_missing, profile_provider_missing, profile_resolver_error,
-    profile_window_missing, provider_error, remap_hidden_field,
-};
+use super::edit_errors::remap_hidden_field;
 
 pub(super) use super::edit_types::{LoginError, LoginErrorKind, LoginField};
 pub(super) use super::plan::PlanDraft;
@@ -40,6 +37,7 @@ impl ProviderKind {
         }
     }
 
+    #[must_use]
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
@@ -48,6 +46,7 @@ impl ProviderKind {
         }
     }
 
+    #[must_use]
     pub(super) fn label_key(self) -> &'static str {
         match self {
             Self::Anthropic => "setup-provider-anthropic",
@@ -56,6 +55,7 @@ impl ProviderKind {
         }
     }
 
+    #[must_use]
     pub(super) fn next(self) -> Self {
         match self {
             Self::Anthropic => Self::OpenAi,
@@ -64,6 +64,7 @@ impl ProviderKind {
         }
     }
 
+    #[must_use]
     pub(super) fn previous(self) -> Self {
         match self {
             Self::Anthropic => Self::OpenAiResponses,
@@ -82,6 +83,7 @@ pub(super) enum AuthChoice {
 }
 
 impl AuthChoice {
+    #[must_use]
     pub(super) fn toggle(self) -> Self {
         match self {
             Self::ApiKey => Self::ChatGptPlan,
@@ -139,6 +141,7 @@ fn effective_owner<'a>(cfg: &'a PeriConfig, profile: &ProfileConfig) -> Option<&
 }
 
 impl LoginEditState {
+    #[must_use]
     pub(super) fn is_new(&self) -> bool {
         self.original_provider_id.is_empty()
     }
@@ -212,11 +215,13 @@ impl LoginEditState {
         })
     }
 
+    #[must_use]
     pub(super) fn is_responses(&self) -> bool {
         self.kind == Some(ProviderKind::OpenAiResponses)
     }
 
     /// Responses plan mode: API key fields are hidden and plan auth serialized.
+    #[must_use]
     pub(super) fn is_plan_mode(&self) -> bool {
         self.is_responses() && self.auth_choice == AuthChoice::ChatGptPlan
     }
@@ -348,6 +353,7 @@ impl LoginEditState {
         };
     }
 
+    #[must_use]
     pub(super) fn field_text(&self, field: LoginField) -> String {
         match field {
             LoginField::ProviderId => self.provider_id.clone(),
@@ -593,7 +599,7 @@ impl LoginEditState {
         if self.is_responses() {
             let provider = &candidate.config.providers[provider_index];
             if let Err(error) = peri_config::provider::validate_responses_provider(provider) {
-                return Err(provider_error(error));
+                return Err(super::edit_errors::provider_error(error));
             }
             // 新建 provider 不改任何档位，不因未绑定/缺 contextWindow 阻断保存。
             // 已有 provider 只阻断“本次新弄坏”的绑定：baseline 原本就不解析且
@@ -607,7 +613,7 @@ impl LoginEditState {
                         Ok(Some(_)) => {}
                         Ok(None) => {
                             if baseline_ok {
-                                return Err(profile_provider_missing(alias));
+                                return Err(super::edit_errors::profile_provider_missing(alias));
                             }
                             unresolved.push(alias);
                         }
@@ -636,12 +642,12 @@ fn resolver_error_for_candidate(
     match error {
         ProviderError::MissingModelCapacity => {
             if alias_has_model(candidate, alias) {
-                profile_window_missing(alias)
+                super::edit_errors::profile_window_missing(alias)
             } else {
-                profile_model_missing(alias)
+                super::edit_errors::profile_model_missing(alias)
             }
         }
-        other => profile_resolver_error(alias, other),
+        other => super::edit_errors::profile_resolver_error(alias, other),
     }
 }
 
@@ -657,7 +663,7 @@ fn alias_has_model(cfg: &PeriConfig, alias: &str) -> bool {
         return true;
     }
     effective_owner(cfg, profile)
-        .and_then(|provider| provider.models.get_model(alias))
+        .and_then(|provider| provider.models.model(alias))
         .is_some_and(|model| !model.trim().is_empty())
 }
 
@@ -692,6 +698,7 @@ fn best_model_mapping<'a>(
         )
 }
 
+#[must_use]
 fn models_are_empty(models: &ProviderModels) -> bool {
     models.fable.trim().is_empty()
         && models.opus.trim().is_empty()

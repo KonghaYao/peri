@@ -1,9 +1,20 @@
 //! S7.4 / A26：inherited 冻结前缀的 bounds、page/seek、分块与父变更隔离。
 
-use super::*;
-
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::AcpTransport;
 use peri_acp_types::history_window::HistoryEntryId;
-use peri_acp_types::store::{serialize_persisted_payload, InheritedContext};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::store;
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(super) async fn set_inherited(
     tmp: &tempfile::TempDir,
@@ -55,9 +66,17 @@ async fn inherited_open_page_seek_and_chunks_use_the_frozen_snapshot() {
     ];
     set_inherited(&tmp, &sid, &inherited, "parent-session").await;
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
-    let own = open(
+    let own = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -72,7 +91,7 @@ async fn inherited_open_page_seek_and_chunks_use_the_frozen_snapshot() {
     let anchor_entry = HistoryEntryId::new(&sid, inherited[1].id()).encode();
     let source = inherited_source(&snapshot_id, "parent-session");
 
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -108,7 +127,7 @@ async fn inherited_open_page_seek_and_chunks_use_the_frozen_snapshot() {
     assert_eq!(opened["committedTail"], Value::Null);
     assert!(opened["beforeCursor"].is_null());
     assert!(opened["afterCursor"].is_string());
-    let later = page(
+    let later = crate::host::requests::tests::history_page_wire_tests::window_tests::page(
         &client,
         &sid,
         &opened["snapshotToken"],
@@ -229,7 +248,7 @@ async fn inherited_open_page_seek_and_chunks_use_the_frozen_snapshot() {
     assert_eq!(text_after, "ancestor two");
 
     // inherited 超大条目 descriptor + 有界分块（UTF-8 跨块）。
-    let oversized = open(
+    let oversized = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -271,7 +290,7 @@ async fn inherited_open_page_seek_and_chunks_use_the_frozen_snapshot() {
     }
     assert_eq!(
         collected,
-        serialize_persisted_payload(&inherited[1])
+        store::serialize_persisted_payload(&inherited[1])
             .unwrap()
             .into_bytes()
     );
@@ -310,9 +329,17 @@ async fn inherited_absence_and_ancestor_mismatch_are_explicit() {
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
-    let own = open(
+    let own = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -324,7 +351,7 @@ async fn inherited_absence_and_ancestor_mismatch_are_explicit() {
 
     let source = inherited_source("inherited:missing", "no-such-ancestor");
     let anchor = HistoryEntryId::new(&sid, MessageId::new()).encode();
-    let error = open(
+    let error = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -349,8 +376,16 @@ async fn inherited_ancestor_mismatch_is_rejected() {
     let inherited = vec![PersistedPayload::Message(BaseMessage::human("ancestor"))];
     set_inherited(&tmp, &sid, &inherited, "parent-session").await;
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
-    let own = open(
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
+    let own = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -360,7 +395,7 @@ async fn inherited_ancestor_mismatch_is_rejected() {
     let snapshot_id = own["inherited"]["snapshotId"].as_str().unwrap();
     let anchor = HistoryEntryId::new(&sid, inherited[0].id()).encode();
     let wrong_ancestor = inherited_source(snapshot_id, "wrong-parent");
-    let error = open(
+    let error = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -396,13 +431,21 @@ async fn rewind_invalidates_old_inherited_ticket_but_frozen_prefix_remains_reada
         sid.clone(),
         PeriCaps {
             rewind: true,
-            ..window_caps()
+            ..crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps()
         },
     );
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -415,7 +458,7 @@ async fn rewind_invalidates_old_inherited_ticket_but_frozen_prefix_remains_reada
         .to_owned();
     let source = inherited_source(&snapshot_id, "parent-session");
     let anchor = HistoryEntryId::new(&sid, inherited[0].id()).encode();
-    let inherited_open = open(
+    let inherited_open = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -448,7 +491,7 @@ async fn rewind_invalidates_old_inherited_ticket_but_frozen_prefix_remains_reada
         )
         .await
         .expect("rewind");
-    s9c_drain_notifications(&client).await;
+    crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client).await;
 
     let stale = client
         .send_request(
@@ -469,7 +512,7 @@ async fn rewind_invalidates_old_inherited_ticket_but_frozen_prefix_remains_reada
         .unwrap_err();
     assert!(stale.code == -32012 || stale.code == -32014);
 
-    let reopened = open(
+    let reopened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -497,8 +540,16 @@ async fn close_invalidates_old_inherited_ticket() {
     ))];
     set_inherited(&tmp, &sid, &inherited, "parent-session").await;
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
-    let opened = open(
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -511,7 +562,7 @@ async fn close_invalidates_old_inherited_ticket() {
         .to_owned();
     let source = inherited_source(&snapshot_id, "parent-session");
     let anchor = HistoryEntryId::new(&sid, inherited[0].id()).encode();
-    let inherited_open = open(
+    let inherited_open = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({
@@ -528,7 +579,7 @@ async fn close_invalidates_old_inherited_ticket() {
         .send_request("session/close", json!({ "sessionId": sid }))
         .await
         .expect("close");
-    s9c_drain_notifications(&client).await;
+    crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client).await;
     let stale = client
         .send_request(
             "session/load",

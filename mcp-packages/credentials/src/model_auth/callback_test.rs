@@ -1,4 +1,11 @@
-use super::*;
+use crate::model_auth::callback::LoginAttempt;
+use crate::model_auth::oauth::OAuth;
+use crate::model_auth::types::AuthError;
+use crate::model_auth::types::StoredAccount;
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use url::Url;
 
 #[test]
 fn callback_rejects_wrong_state_path_duplicates_and_client_switch() {
@@ -11,7 +18,11 @@ fn callback_rejects_wrong_state_path_duplicates_and_client_switch() {
     ] {
         assert!(
             matches!(
-                validate_callback(&Url::parse(url).unwrap(), "state", Some("issued")),
+                crate::model_auth::callback::validate_callback(
+                    &Url::parse(url).unwrap(),
+                    "state",
+                    Some("issued")
+                ),
                 Err(AuthError::InvalidCallback)
             ),
             "{url}"
@@ -23,11 +34,11 @@ fn callback_rejects_wrong_state_path_duplicates_and_client_switch() {
 fn initial_callback_requires_issued_client_and_returning_callback_can_omit_it() {
     let url = Url::parse("http://127.0.0.1:7000/auth/callback?state=state&code=code").unwrap();
     assert!(matches!(
-        validate_callback(&url, "state", None),
+        crate::model_auth::callback::validate_callback(&url, "state", None),
         Err(AuthError::InvalidCallback)
     ));
     assert_eq!(
-        validate_callback(&url, "state", Some("issued"))
+        crate::model_auth::callback::validate_callback(&url, "state", Some("issued"))
             .unwrap()
             .client_id,
         "issued"
@@ -37,7 +48,7 @@ fn initial_callback_requires_issued_client_and_returning_callback_can_omit_it() 
         .query_pairs_mut()
         .append_pair("client_id", "dynamic_agent_client");
     assert!(matches!(
-        validate_callback(&initial, "state", None),
+        crate::model_auth::callback::validate_callback(&initial, "state", None),
         Err(AuthError::InvalidCallback)
     ));
 }
@@ -47,11 +58,11 @@ fn denial_only_applies_after_state_validation() {
     let url =
         Url::parse("http://127.0.0.1:7000/auth/callback?state=state&error=access_denied").unwrap();
     assert!(matches!(
-        validate_callback(&url, "state", None),
+        crate::model_auth::callback::validate_callback(&url, "state", None),
         Err(AuthError::AccessDenied)
     ));
     assert!(matches!(
-        validate_callback(&url, "wrong", None),
+        crate::model_auth::callback::validate_callback(&url, "wrong", None),
         Err(AuthError::InvalidCallback)
     ));
 }

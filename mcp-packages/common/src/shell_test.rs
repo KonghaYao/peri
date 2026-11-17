@@ -1,5 +1,6 @@
-use super::*;
-use peri_agent::agent::async_tasks::*;
+use peri_agent::agent::async_tasks::{
+    BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle, BgTaskKind,
+};
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -19,7 +20,8 @@ async fn test_cancel_kills_process_group() {
     let marker_path = marker.to_string_lossy().to_string();
 
     // spawn 带子进程的命令（sh → sleep），bash 为进程组组长；不设 kill_on_drop
-    let mut cmd = shell_command(&format!("sh -c 'sleep 2; touch {}'", marker_path), &[]);
+    let mut cmd =
+        crate::shell::shell_command(&format!("sh -c 'sleep 2; touch {}'", marker_path), &[]);
     cmd.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(unix)]
@@ -36,7 +38,7 @@ async fn test_cancel_kills_process_group() {
         chrono_started_at: chrono::Utc::now(),
         kind: BgTaskKind::Shell,
         cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || {
-            kill_process_group(pid, "KILL")
+            crate::shell::kill_process_group(pid, "KILL")
         }))),
         cancel_token: None,
         pid: Some(pid),
@@ -65,7 +67,7 @@ async fn test_cancel_kills_process_group() {
 
 #[test]
 fn test_shell_command_unix_bash_c() {
-    let cmd = shell_command("echo", &["hello"]);
+    let cmd = crate::shell::shell_command("echo", &["hello"]);
     let formatted = format!("{cmd:?}");
     #[cfg(unix)]
     {
@@ -97,7 +99,7 @@ fn test_shell_command_unix_bash_c() {
 
 #[test]
 fn test_shell_command_no_args() {
-    let cmd = shell_command("ls", &[]);
+    let cmd = crate::shell::shell_command("ls", &[]);
     let formatted = format!("{cmd:?}");
     #[cfg(unix)]
     {
@@ -125,7 +127,7 @@ fn test_shell_command_no_args() {
 
 #[test]
 fn test_shell_command_multi_args() {
-    let cmd = shell_command("npx", &["-y", "@anthropic/mcp-server"]);
+    let cmd = crate::shell::shell_command("npx", &["-y", "@anthropic/mcp-server"]);
     let formatted = format!("{cmd:?}");
     #[cfg(unix)]
     {
@@ -164,7 +166,7 @@ fn test_shell_command_multi_args() {
 /// 测试期望 1s 超时返回 Err，实际返回 Ok("ping -n 60 127.0.0.1\r\n")。
 #[test]
 fn test_shell_command_windows_command_not_string_literal() {
-    let cmd = shell_command("ping -n 60 127.0.0.1", &[]);
+    let cmd = crate::shell::shell_command("ping -n 60 127.0.0.1", &[]);
     let formatted = format!("{cmd:?}");
     #[cfg(windows)]
     {
@@ -185,7 +187,7 @@ fn test_shell_command_windows_command_not_string_literal() {
 /// 被 PowerShell 解析为代码（与 commit b689cc39 的安全意图一致）。
 #[test]
 fn test_shell_command_windows_args_still_escaped() {
-    let cmd = shell_command("echo", &["$HOME", "a;b"]);
+    let cmd = crate::shell::shell_command("echo", &["$HOME", "a;b"]);
     let formatted = format!("{cmd:?}");
     #[cfg(windows)]
     {
@@ -210,7 +212,7 @@ fn test_shell_command_windows_args_still_escaped() {
 #[test]
 fn test_persist_writes_file_and_returns_hint() {
     let content = "line1\nline2\nline3";
-    let hint = persist_truncated_output(content);
+    let hint = crate::shell::persist_truncated_output(content);
     // 提示应包含文件名
     assert!(
         hint.contains("peri-tool-output-"),
@@ -241,7 +243,7 @@ fn test_persist_writes_file_and_returns_hint() {
 fn test_persist_output_uses_private_directory_and_owner_only_file() {
     use std::os::unix::fs::PermissionsExt;
 
-    let hint = persist_truncated_output("secret\npayload");
+    let hint = crate::shell::persist_truncated_output("secret\npayload");
     let path = hint
         .split("saved to ")
         .nth(1)
@@ -271,7 +273,7 @@ fn test_persist_output_uses_private_directory_and_owner_only_file() {
 
 #[test]
 fn test_persist_empty_string() {
-    let hint = persist_truncated_output("");
+    let hint = crate::shell::persist_truncated_output("");
     // 空内容也应生成包含路径的提示，且同样用模型面名字引导读取（逐字断言冻结字面量）
     assert!(
         hint.contains("use `Read` to view complete content"),

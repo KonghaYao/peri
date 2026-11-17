@@ -14,11 +14,13 @@ use peri_acp_types::store::PersistedPayload;
 // ─── Receive 阶段类型 ────────────────────────────────────────────────────────
 
 /// Receive 阶段输入
+#[derive(Debug)]
 pub struct ReceiveInput {
     pub context: StageContext,
 }
 
 /// Receive 阶段输出
+#[derive(Debug)]
 pub struct ReceiveOutput {
     /// 本轮消费的消息数量（含不唤醒循环的 Info）
     pub consumed_count: usize,
@@ -186,6 +188,28 @@ pub(super) async fn run_receive_with_budget(
         process_entry(&input.context, entry, item.status).await;
     }
 
+    // 排队等待只取真正从 MQ 拿到的行（Missing/Conflict 未移交，不参与）。
+    // 解析失败的时间丢弃而非按字符串猜序；保留原始值交给消费侧换算，事件不预计算。
+    let oldest_enqueued_at = outcome
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                MqReceiveStatus::Committed
+                    | MqReceiveStatus::AlreadyPresent
+                    | MqReceiveStatus::Suppressed
+            )
+        })
+        .filter_map(|item| item.entry.as_ref())
+        .filter_map(|entry| {
+            chrono::DateTime::parse_from_rfc3339(&entry.enqueued_at)
+                .ok()
+                .map(|at| (at.with_timezone(&chrono::Utc), entry.enqueued_at.clone()))
+        })
+        .min_by_key(|(at, _)| *at)
+        .map(|(_, raw)| raw);
+
     if consumed_count > 0 || budget_deferred_count > 0 {
         input
             .context
@@ -197,6 +221,7 @@ pub(super) async fn run_receive_with_budget(
                 prompt: prompt_count,
                 defer: defer_count,
                 info: info_count,
+                oldest_enqueued_at,
             });
     }
 
@@ -269,13 +294,7 @@ async fn process_entry(
     status: MqReceiveStatus,
 ) {
     let message = QueuedMessage::from_mq_entry(entry.clone());
-    let terminal_result = matches!(
-        entry.source,
-        MessageSource::ShellComplete
-            | MessageSource::SubAgentComplete
-            | MessageSource::WorkflowComplete
-            | MessageSource::McpNotification
-    );
+    let terminal_result = entry.source.is_background_completion();
     let delivery_id = message.delivery_id;
     let payload_id = payload_id(&entry.payload);
 

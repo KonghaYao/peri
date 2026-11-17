@@ -1,6 +1,6 @@
 //! Responses provider state persistence at the Agent/model boundary.
 
-use super::{convert_model_message, AgentModelBridge};
+use crate::agent::model_bridge::AgentModelBridge;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use peri_model::{JsonObject, ModelMessage, ToolCall};
 use serde_json::json;
@@ -10,7 +10,8 @@ fn responses_replay_survives_canonical_json_restart_and_model_roundtrip() {
     let call = ToolCall::new(
         "call_1",
         "Read",
-        JsonObject::from_value(json!({"path":"a.rs"})).unwrap(),
+        JsonObject::from_value(json!({"path":"a.rs"}))
+            .expect("from_value must accept this test fixture representation"),
     );
     let original = ModelMessage::assistant(
         vec![
@@ -34,15 +35,19 @@ fn responses_replay_survives_canonical_json_restart_and_model_roundtrip() {
         ],
         vec![call],
     );
-    let canonical = convert_model_message(&original).unwrap();
-    let saved = serde_json::to_vec(&canonical).unwrap();
+    let canonical = crate::agent::model_bridge::convert_model_message(&original)
+        .expect("the convert model message fixture result is required for this assertion");
+    let saved = serde_json::to_vec(&canonical)
+        .expect("to_vec must accept this test fixture representation");
     drop(canonical);
-    let restored: BaseMessage = serde_json::from_slice(&saved).unwrap();
+    let restored: BaseMessage = serde_json::from_slice(&saved)
+        .expect("from_slice must accept this test fixture representation");
     assert_eq!(restored.content(), "Reading now");
     assert_eq!(restored.tool_calls().len(), 1);
     assert_eq!(restored.tool_calls()[0].id, "call_1");
     assert_eq!(
-        AgentModelBridge::convert_message(&restored).unwrap(),
+        AgentModelBridge::convert_message(&restored)
+            .expect("the convert message fixture result is required for this assertion"),
         original
     );
 }

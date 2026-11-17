@@ -12,19 +12,15 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use crate::{
-    provider::PeriConfig,
-    session::{
-        command::{
-            execute_rewind, extract_file_changes, CommandContext, DurableRewindCommit,
-            RewindDurability,
-        },
-        event_sink::EventSink,
-        executor::PromptStopReason,
-    },
-    transport::types::AcpError,
-};
-use peri_agent::session::exec::executor_helpers::emit_command_feedback;
+use crate::provider::PeriConfig;
+use crate::session::command;
+use crate::session::command::CommandContext;
+use crate::session::command::DurableRewindCommit;
+use crate::session::command::RewindDurability;
+use crate::session::event_sink::EventSink;
+use crate::session::executor::PromptStopReason;
+use crate::transport::types::AcpError;
+use peri_agent::session::exec::executor_helpers;
 use peri_controller::Controller;
 
 /// 解析 `session/rewind` 系请求的公共参数（RPC 专用，wire 形态不变）。
@@ -104,13 +100,13 @@ struct SafeFileChange {
 }
 
 #[derive(serde::Serialize)]
-struct PreviewFingerprint<'a> {
+struct PreviewFingerprint<'preview> {
     schema: u8,
-    session_id: &'a str,
-    target_message_id: &'a str,
+    session_id: &'preview str,
+    target_message_id: &'preview str,
     revert_files: bool,
-    removed_messages: &'a [peri_acp_types::messages::BaseMessage],
-    file_changes: &'a [SafeFileChange],
+    removed_messages: &'preview [peri_acp_types::messages::BaseMessage],
+    file_changes: &'preview [SafeFileChange],
 }
 
 fn preview_material(
@@ -122,7 +118,7 @@ fn preview_material(
 ) -> Result<(Vec<SafeFileChange>, String), AcpError> {
     let cwd = normalized_absolute(Path::new(cwd))
         .ok_or_else(|| AcpError::new(-32602, "rewind preview requires an absolute session cwd"))?;
-    let all_changes = extract_file_changes(removed_messages);
+    let all_changes = command::extract_file_changes(removed_messages);
     if all_changes.len() > MAX_FILE_CHANGES {
         return Err(AcpError::new(
             -32602,
@@ -130,7 +126,8 @@ fn preview_material(
         ));
     }
     let mut changes = Vec::with_capacity(all_changes.len());
-    for change in all_changes.iter().rev() {
+    let reversed_change = all_changes.iter().rev();
+    for change in reversed_change {
         let (raw_path, kind) = match change {
             crate::session::command::FileChange::Write { path, .. } => (path, "write"),
             crate::session::command::FileChange::Edit { path, .. } => (path, "edit"),
@@ -320,7 +317,8 @@ pub async fn rewind_execute(
     ctx.frozen_system_prompt = frozen_system_prompt;
 
     // Phase 5 Step 5：共享执行体（slash 与 RPC 双入口复用）。
-    let execution = execute_rewind(ctx, args.target_message_id, args.revert_files, commit).await;
+    let execution =
+        command::execute_rewind(ctx, args.target_message_id, args.revert_files, commit).await;
     let durability = execution.durability;
     let mut result = execution.result;
     let rewind_error = result
@@ -331,7 +329,7 @@ pub async fn rewind_execute(
 
     // 编排层反馈接线（plan Step 1 第三处接线点）：handler.execute 之后、
     // push_done 之前发射 CommandFeedback（channel=Session 额外追加系统消息）。
-    emit_command_feedback(event_sink, &session_id, &mut result).await;
+    executor_helpers::emit_command_feedback(event_sink, &session_id, &mut result).await;
 
     // 与 execute-command dispatch 一致：Immediate 命令绕过 agent event pump，
     // 必须手动 signal completion（TRAP: issue_2026-06-29-immediate-command-missing-push-done）。

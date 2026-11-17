@@ -4,7 +4,11 @@
 //! - 默认值（new_at/default_for_db_at/反序列化缺字段）
 //! - 强类型枚举 CancelPolicy / AgentStatus 的 FromStr/Display/as_str
 //! - 非法字符串不静默 fallback 的硬约束
-use super::*;
+use crate::thread::types::AgentStatus;
+use crate::thread::types::CancelPolicy;
+use crate::thread::types::ThreadMeta;
+use crate::thread::types::ThreadMetaParseError;
+use crate::thread::types::WorkState;
 
 #[test]
 fn metadata_preserves_config_and_discards_retired_cache_fields_from_old_json() {

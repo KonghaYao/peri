@@ -1,6 +1,7 @@
 //! Tests
 
-use super::*;
+use super::TodoItem;
+use super::TodoStatus;
 
 #[test]
 fn test_render_todo_lines_icons_and_crossed() {
@@ -18,7 +19,7 @@ fn test_render_todo_lines_icons_and_crossed() {
             content: "部署".into(),
         },
     ];
-    let lines = render_todo_lines(&items);
+    let lines = super::render_todo_lines(&items);
     assert_eq!(lines.len(), 4);
 
     let in_progress_icon = lines[0].spans[0].content.as_ref();
@@ -49,7 +50,7 @@ fn test_render_todo_lines_icons_and_crossed() {
 
 #[test]
 fn test_render_todo_lines_empty() {
-    let lines = render_todo_lines(&[]);
+    let lines = super::render_todo_lines(&[]);
     assert_eq!(lines.len(), 1);
     for line in &lines {
         assert!(
@@ -95,7 +96,7 @@ fn test_footer_loading_steady_state_has_no_control_state_transition() {
 #[test]
 fn test_render_idle_spinner_line_static_fixed_frame() {
     let verb = "格物致知";
-    let line = render_idle_spinner_line(ratatui::style::Color::DarkGray, verb);
+    let line = super::render_idle_spinner_line(ratatui::style::Color::DarkGray, verb);
     let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     let frame0 = crate::components::spinner::animation::tick_to_frame(0);
     assert!(
@@ -103,7 +104,7 @@ fn test_render_idle_spinner_line_static_fixed_frame() {
         "idle 应渲染静止图标（固定第一帧），实际: {rendered}"
     );
     // 静止语义：连续两次渲染内容一致（不随壁钟推进换帧）
-    let again = render_idle_spinner_line(ratatui::style::Color::DarkGray, verb);
+    let again = super::render_idle_spinner_line(ratatui::style::Color::DarkGray, verb);
     let rendered2: String = again.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(rendered, rendered2, "idle 行不应随时间变化");
     // 附带默认 verb 文字（历史会话恢复后不再只有孤零零的图标）

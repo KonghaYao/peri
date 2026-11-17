@@ -1,8 +1,13 @@
 //! `beta_flags` 模块测试：注册表约束与投影语义。
 
-use super::*;
+use crate::beta_flags::BetaFlagOrigin;
+use crate::beta_flags::BetaFlagValue;
+use crate::beta_flags::BetaFlags;
+use crate::beta_flags::BETA_FLAGS;
 
 /// id 必须唯一且为 kebab-case（发布后不得改名，settings 键身份）。
+///
+/// 当前注册表为空：用例保持对新增条目的约束，空清单本身不报错。
 #[test]
 fn test_registry_ids_are_unique_kebab_case() {
     let mut seen = std::collections::HashSet::new();
@@ -33,23 +38,22 @@ fn test_registry_ids_are_unique_kebab_case() {
     }
 }
 
-/// 清单顺序稳定：首个条目是 `full-async-tools`（设计 §首个 flag）。
+/// `full-async-tools` 已转正并删除：注册表不再声明该 id，未知 id 按未覆盖处理。
 #[test]
-fn test_registry_declares_full_async_tools_first() {
-    assert_eq!(
-        BETA_FLAGS.first().map(|flag| flag.id),
-        Some(FULL_ASYNC_TOOLS)
+fn test_removed_full_async_tools_is_not_registered() {
+    assert!(
+        BETA_FLAGS.is_empty(),
+        "当前不应再声明 ACP beta flag：{BETA_FLAGS:?}"
     );
+    assert!(crate::beta_flags::find("full-async-tools").is_none());
 }
 
-/// 查找命中/未命中。
+/// 查找未命中。
 #[test]
-fn test_find_hit_and_miss() {
-    let found = find(FULL_ASYNC_TOOLS).expect("注册表条目必须可查");
-    assert_eq!(found.id, FULL_ASYNC_TOOLS);
-    assert_eq!(found.description, BETA_FLAGS[0].description);
-    assert!(find("not-a-flag").is_none());
-    assert!(find("").is_none());
+fn test_find_miss() {
+    assert!(crate::beta_flags::find("full-async-tools").is_none());
+    assert!(crate::beta_flags::find("not-a-flag").is_none());
+    assert!(crate::beta_flags::find("").is_none());
 }
 
 /// 未覆盖与未知 id 一律 false（快照缺失/配置面不可用不得意外开启能力）。
@@ -57,22 +61,19 @@ fn test_find_hit_and_miss() {
 fn test_uncovered_and_unknown_ids_default_false() {
     let empty = BetaFlags::default();
     assert!(empty.is_empty());
-    assert!(!empty.is_enabled(FULL_ASYNC_TOOLS));
-    assert!(empty.value(FULL_ASYNC_TOOLS).is_none());
+    assert!(!empty.is_enabled("test-flag"));
+    assert!(empty.value("test-flag").is_none());
 
     let flags = BetaFlags::from_values([(
-        FULL_ASYNC_TOOLS.to_string(),
+        "test-flag".to_string(),
         BetaFlagValue {
             enabled: false,
             origin: BetaFlagOrigin::Workspace,
         },
     )]);
+    assert!(!flags.is_enabled("test-flag"), "显式 false 有效值为 false");
     assert!(
-        !flags.is_enabled(FULL_ASYNC_TOOLS),
-        "显式 false 有效值为 false"
-    );
-    assert!(
-        flags.value(FULL_ASYNC_TOOLS).is_some(),
+        flags.value("test-flag").is_some(),
         "显式 false 与未覆盖必须可区分（面板显示语义）"
     );
     assert!(!flags.is_enabled("unknown-flag"));
@@ -91,7 +92,7 @@ fn test_enabled_entries_report_origin() {
             },
         ),
         (
-            FULL_ASYNC_TOOLS.to_string(),
+            "aa-first".to_string(),
             BetaFlagValue {
                 enabled: true,
                 origin: BetaFlagOrigin::Global,
@@ -102,9 +103,9 @@ fn test_enabled_entries_report_origin() {
     assert_eq!(
         enabled,
         vec![
-            (FULL_ASYNC_TOOLS, BetaFlagOrigin::Global),
+            ("aa-first", BetaFlagOrigin::Global),
             ("zz-last", BetaFlagOrigin::Workspace)
         ]
     );
-    assert!(flags.is_enabled(FULL_ASYNC_TOOLS));
+    assert!(flags.is_enabled("aa-first"));
 }

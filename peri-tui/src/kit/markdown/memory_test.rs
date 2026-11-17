@@ -2,16 +2,42 @@ use std::mem::size_of;
 
 use ratatui::text::{Line, Span};
 
-use super::*;
+use super::Arc;
+use super::Color;
+use super::Cow;
+use super::MarkdownRenderCache;
+use super::MarkdownSegment;
+use super::Palette;
+use super::ParsedBlock;
+use super::TableData;
 
 fn cache_for_source(source: &str) -> MarkdownRenderCache {
-    let (segments, blocks) = parse_markdown_piece(source, 80, Palette::default(), Color::Reset);
+    let (segments, blocks) =
+        super::parse_markdown_piece(source, 80, Palette::default(), Color::Reset);
     MarkdownRenderCache {
         chunk_source: source.to_owned(),
         stable_chunk_blocks: vec![blocks],
         stable_chunks: vec![Arc::new(segments)],
         ..Default::default()
     }
+}
+
+#[test]
+fn genui_source_and_internal_parse_tree_are_charged() {
+    let source = format!(
+        "```gen-ui\nroot = Stack([Text(\"{}\")])\n```",
+        "数据".repeat(256)
+    );
+    let cache = cache_for_source(&source);
+    let segment = cache.stable_chunks[0]
+        .iter()
+        .find_map(|segment| match segment {
+            MarkdownSegment::GenUi(segment) => Some(segment),
+            _ => None,
+        })
+        .unwrap();
+    assert!(segment.parsed.retained_bytes() > segment.source.len());
+    assert!(cache.retained_bytes() > segment.source.capacity() + segment.parsed.retained_bytes());
 }
 
 #[test]

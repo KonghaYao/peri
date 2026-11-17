@@ -9,8 +9,14 @@ use peri_model::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::compact_v2::full::SUMMARY_FINAL_PROMPT;
+use crate::agent::compact_v2::full::SUMMARY_RECOVERY_PROMPT;
+use crate::agent::compact_v2::projection::MessageProjectionDirective;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
+use crate::agent::compact_v2::CompactOutcome;
+
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::transcript::MessageTranscript;
 use crate::thread::ThreadMeta;
@@ -64,23 +70,34 @@ async fn full_compact_preserves_replay_in_sqlite_but_starts_summary_without_it()
     let original_id = original.id();
     transcript.append(original.clone());
     transcript.append(BaseMessage::tool_result("responses-read", "file contents"));
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    full_compact_inner(
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
-    transcript.flush_persistence().await.unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
 
     {
-        let requests = model.requests.lock().unwrap();
-        let request = requests.first().unwrap();
+        let requests = model
+            .requests
+            .lock()
+            .expect("model requests mutex must remain unpoisoned throughout the test");
+        let request = requests
+            .first()
+            .expect("requests first fixture must contain the expected element");
         assert_eq!(request.messages.iter().filter(|message| {
             matches!(message, ModelMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, peri_model::ContentBlock::ProviderState { .. })))
         }).count(), 1);
@@ -93,30 +110,36 @@ async fn full_compact_preserves_replay_in_sqlite_but_starts_summary_without_it()
         .iter()
         .any(|message| message.content().contains("captured")));
 
-    let saved = store.load_session_snapshot(&thread_id).await.unwrap();
+    let saved = store
+        .load_session_snapshot(&thread_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion");
     let payload = saved
         .payloads
         .iter()
         .find(|payload| payload.id() == original_id)
-        .unwrap();
+        .expect("the find fixture result is required for this assertion");
     // JSON decode simulates a new process rather than preserving any adapter cache.
     let restored = peri_acp_types::store::deserialize_persisted_payload(
-        &peri_acp_types::store::serialize_persisted_payload(payload).unwrap(),
+        &peri_acp_types::store::serialize_persisted_payload(payload).expect(
+            "the serialize persisted payload fixture result is required for this assertion",
+        ),
     )
-    .unwrap();
+    .expect("the deserialize persisted payload fixture result is required for this assertion");
     assert!(matches!(restored, PersistedPayload::Message(ref message)
-        if serde_json::to_value(message).unwrap() == serde_json::to_value(&original).unwrap()));
+        if serde_json::to_value(message).expect("to_value must accept this test fixture representation") == serde_json::to_value(&original).expect("to_value must accept this test fixture representation")));
 }
 
 #[tokio::test]
 async fn full_compact_refuses_to_split_inherited_provider_replay_from_own_result() {
     let mut transcript = MessageTranscript::new().with_ancestor(vec![replay_call()]);
     transcript.append(BaseMessage::tool_result("responses-read", "own result"));
-    let before = serde_json::to_value(transcript.visible_messages()).unwrap();
+    let before = serde_json::to_value(transcript.visible_messages())
+        .expect("to_value must accept this test fixture representation");
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    let error = full_compact_inner(
+    let error = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
@@ -127,9 +150,14 @@ async fn full_compact_refuses_to_split_inherited_provider_replay_from_own_result
     assert!(error
         .to_string()
         .contains("cannot split a provider replay unit"));
-    assert!(model.requests.lock().unwrap().is_empty());
+    assert!(model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test")
+        .is_empty());
     assert_eq!(
-        serde_json::to_value(transcript.visible_messages()).unwrap(),
+        serde_json::to_value(transcript.visible_messages())
+            .expect("the visible messages fixture result is required for this assertion"),
         before
     );
 }
@@ -157,8 +185,11 @@ impl Model for CapturingFullModel {
         request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
-        self.requests.lock().unwrap().push(request);
-        Ok(ModelResponse::new(
+        self.requests
+            .lock()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
+            .push(request);
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>captured</summary>"),
             StopReason::EndTurn,
             None,
@@ -192,7 +223,7 @@ impl Model for FullLifecycleModel {
         _request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text("<summary>FULL_SUMMARY_MARKER</summary>"),
             StopReason::EndTurn,
             None,
@@ -206,12 +237,12 @@ impl Model for FullLifecycleModel {
 // 审计中确认的失败反例，修复后作为默认执行的回归测试。
 // 对应 spec/history/2026-09.md 2026-09-10 条目。
 async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
     let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
         .await
-        .unwrap();
+        .expect("the create thread fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     for turn in 0..4 {
         let call_id = format!("audit-bash-{turn}");
@@ -226,14 +257,16 @@ async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
         ));
         transcript.append(BaseMessage::tool_result(&call_id, "x".repeat(40_000)));
     }
-    let result = full_compact_inner(
+    let result = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
-        dir.path().to_str().unwrap(),
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
     )
     .await
-    .unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
     assert_eq!(
         result.outcome,
         crate::agent::compact_v2::CompactOutcome::FullApplied
@@ -245,15 +278,19 @@ async fn make_audit_full_history() -> (tempfile::TempDir, MessageTranscript) {
 /// [回归测试] Full 成功排除的历史不得再次成为 Micro 候选；使用默认 stale=3。
 #[tokio::test]
 async fn test_audit_full_excluded_history_must_not_be_micro_candidate() {
-    use crate::agent::compact_v2::{planner::plan_micro, projection};
+    use crate::agent::compact_v2::planner;
+    use crate::agent::compact_v2::projection;
     let (_dir, transcript) = make_audit_full_history().await;
-    let plan = plan_micro(&transcript, &CompactConfig::default(), true);
-    let before = transcript.visible_model_messages().unwrap();
-    let after =
-        projection::render_llm_view(&transcript, &plan.actions, &Default::default()).unwrap();
+    let plan = planner::plan_micro(&transcript, &CompactConfig::default(), true);
+    let before = transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion");
+    let after = projection::render_llm_view(&transcript, &plan.actions, &Default::default())
+        .expect("the render llm view fixture result is required for this assertion");
     assert_eq!(
-        serde_json::to_value(before).unwrap(),
-        serde_json::to_value(after).unwrap()
+        serde_json::to_value(before)
+            .expect("to_value must accept this test fixture representation"),
+        serde_json::to_value(after).expect("to_value must accept this test fixture representation")
     );
     assert!(
         plan.actions.is_empty(),
@@ -266,7 +303,8 @@ async fn test_audit_full_excluded_history_must_not_be_micro_candidate() {
 /// [回归测试] 96% 的新压力样本不能用 excluded 历史的虚假收益满足回收目标。
 #[tokio::test]
 async fn test_audit_excluded_savings_must_not_suppress_full() {
-    use crate::agent::compact_v2::{planner::ContextPressure, CompactOutcome};
+    use crate::agent::compact_v2::planner::ContextPressure;
+    use crate::agent::compact_v2::CompactOutcome;
     let (dir, mut transcript) = make_audit_full_history().await;
     let pressure = ContextPressure {
         estimated_tokens: 96_000,
@@ -284,7 +322,9 @@ async fn test_audit_excluded_savings_must_not_suppress_full() {
         &pressure,
         false,
         &mut failures,
-        dir.path().to_str().unwrap(),
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
         None,
     )
     .await;
@@ -317,7 +357,7 @@ async fn full_compact_model_input_comes_from_canonical_transcript() {
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    let result = full_compact_inner(
+    let result = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
@@ -329,9 +369,13 @@ async fn full_compact_model_input_comes_from_canonical_transcript() {
         "无 persistence 的测试 transcript 应在 model capture 后拒绝 lifecycle commit"
     );
 
-    let requests = model.requests.lock().unwrap();
+    let requests = model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test");
     let request = requests.first().expect("Full model 应收到一次请求");
-    let body = serde_json::to_string(request).unwrap();
+    let body = serde_json::to_string(request)
+        .expect("to_string must accept this test fixture representation");
     assert!(
         body.contains(original),
         "Full 输入必须读取 canonical transcript"
@@ -353,7 +397,7 @@ async fn test_full_compact_summarizes_and_excludes_canonical_report() {
     let thread_id = store
         .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
         .await
-        .unwrap();
+        .expect("the create thread fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(make_human("question"));
     let reminder_id = transcript.append_system_reminder(
@@ -370,26 +414,29 @@ async fn test_full_compact_summarizes_and_excludes_canonical_report() {
                 summary: None,
                 metadata: serde_json::json!({}),
             })
-            .unwrap(),
+            .expect("the construct fixture result is required for this assertion"),
     );
     transcript.append(make_ai("answer"));
 
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    full_compact_inner(
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
 
-    let requests = model.requests.lock().unwrap();
+    let requests = model
+        .requests
+        .lock()
+        .expect("model requests mutex must remain unpoisoned throughout the test");
     assert!(
         serde_json::to_string(&requests[0])
-            .unwrap()
+            .expect("to_string must accept this test fixture representation")
             .contains("REPORT_TAIL_FACT"),
         "Full 摘要请求必须包含超过旧 2000 字符预览的报告结论"
     );
@@ -399,7 +446,7 @@ async fn test_full_compact_summarizes_and_excludes_canonical_report() {
     );
     assert!(!transcript
         .visible_model_messages()
-        .unwrap()
+        .expect("the visible model messages fixture result is required for this assertion")
         .iter()
         .any(|message| message.id() == reminder_id));
 }
@@ -410,17 +457,17 @@ async fn full_excludes_loaded_root_history() {
     let thread_id = store
         .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
         .await
-        .unwrap();
+        .expect("the create thread fixture result is required for this assertion");
     let question = make_human("previous turn question");
     let answer = make_ai("previous turn answer");
     store
         .append_message(&thread_id, question.clone())
         .await
-        .unwrap();
+        .expect("the append message fixture result is required for this assertion");
     store
         .append_message(&thread_id, answer.clone())
         .await
-        .unwrap();
+        .expect("the append message fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new()
         .with_own_payloads(vec![
             peri_acp_types::store::PersistedPayload::Message(question.clone()),
@@ -428,21 +475,23 @@ async fn full_excludes_loaded_root_history() {
         ])
         .with_persistence(store, thread_id);
 
-    let result = full_compact_inner(
+    let result = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
 
     assert_eq!(result.affected_count, 2);
     assert!(
         transcript.get(question.id()).is_none() && transcript.get(answer.id()).is_none(),
         "Full 提交后已加载的旧历史必须从热态释放"
     );
-    let provider_messages = transcript.visible_model_messages().unwrap();
+    let provider_messages = transcript
+        .visible_model_messages()
+        .expect("the visible model messages fixture result is required for this assertion");
     assert_eq!(
         provider_messages.len(),
         1,
@@ -462,28 +511,28 @@ async fn full_affected_count_tracks_only_false_to_true_transitions() {
     let thread_id = store
         .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
         .await
-        .unwrap();
+        .expect("the create thread fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(BaseMessage::system("system"));
     transcript.append(make_human("question"));
     transcript.append(make_ai("answer"));
 
-    let first = full_compact_inner(
+    let first = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
-    let second = full_compact_inner(
+    .expect("the full compact inner fixture result is required for this assertion");
+    let second = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
         "/tmp",
     )
     .await
-    .unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
 
     assert_eq!(first.affected_count, 2);
     assert_eq!(second.affected_count, 1, "第二轮只应排除首轮 summary");
@@ -492,12 +541,19 @@ async fn full_affected_count_tracks_only_false_to_true_transitions() {
 /// [回归测试] 历史 Read/Skill 路径只属于工具环境；Full 不能从计算实例同名路径回读。
 #[tokio::test]
 async fn full_compact_uses_historical_tool_results_without_local_file_re_read() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
     let file_path = dir.path().join("remote.txt");
     let skill_path = dir.path().join("skills/demo/SKILL.md");
-    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
-    std::fs::write(&file_path, "LOCAL_FILE_MARKER").unwrap();
-    std::fs::write(&skill_path, "LOCAL_SKILL_MARKER").unwrap();
+    std::fs::create_dir_all(
+        skill_path
+            .parent()
+            .expect("the parent fixture result is required for this assertion"),
+    )
+    .expect("the create dir all fixture result is required for this assertion");
+    std::fs::write(&file_path, "LOCAL_FILE_MARKER")
+        .expect("the test fixture file must be writable");
+    std::fs::write(&skill_path, "LOCAL_SKILL_MARKER")
+        .expect("the test fixture file must be writable");
     let store = MockSessionResources::new();
     let thread_id = store
         .create_thread(ThreadMeta::new_at(
@@ -505,7 +561,7 @@ async fn full_compact_uses_historical_tool_results_without_local_file_re_read() 
             peri_time::now_wall(),
         ))
         .await
-        .unwrap();
+        .expect("the create thread fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new().with_persistence(store, thread_id);
     transcript.append(make_human("read the remote workspace"));
     let read = transcript.append(make_ai_with_read_tool(&file_path.to_string_lossy()));
@@ -528,15 +584,21 @@ async fn full_compact_uses_historical_tool_results_without_local_file_re_read() 
     let model = CapturingFullModel {
         requests: std::sync::Mutex::new(Vec::new()),
     };
-    full_compact_inner(
+    let _ = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&model),
         &CompactConfig::default(),
         &dir.path().to_string_lossy(),
     )
     .await
-    .unwrap();
-    let model_input = serde_json::to_string(&model.requests.lock().unwrap()[0]).unwrap();
+    .expect("the full compact inner fixture result is required for this assertion");
+    let model_input = serde_json::to_string(
+        &model
+            .requests
+            .lock()
+            .expect("model requests mutex must remain unpoisoned throughout the test")[0],
+    )
+    .expect("to_string must accept this test fixture representation");
     assert!(model_input.contains("REMOTE_FILE_MARKER"));
     assert!(model_input.contains("REMOTE_SKILL_MARKER"));
     assert!(!model_input.contains("LOCAL_FILE_MARKER"));
@@ -555,7 +617,8 @@ async fn test_full_compact_no_llm_returns_error() {
     t.append(make_ai("assistant response"));
 
     let config = CompactConfig::default();
-    let result = full_compact_inner(&mut t, None, &config, "/tmp").await;
+    let result =
+        crate::agent::compact_v2::full::full_compact_inner(&mut t, None, &config, "/tmp").await;
     assert!(result.is_err(), "无 LLM 应返回错误");
 }
 
@@ -588,7 +651,7 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
         .await
         .expect("Full compact 前应完成持久化");
 
-    let result = full_compact_inner(
+    let result = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
@@ -712,37 +775,45 @@ async fn test_full_compact_sqlite_persists_lifecycle_and_preserves_ancestor_and_
 
 #[tokio::test]
 async fn test_full_rejects_retained_catalog_growth_before_any_durable_or_hot_change() {
-    use peri_acp_types::context_archive::{
-        build_catalog, validate_projection_metadata, ARCHIVE_MAX_METADATA_BYTES,
-    };
+    use peri_acp_types::context_archive;
+    use peri_acp_types::context_archive::ARCHIVE_MAX_METADATA_BYTES;
     let bound = crate::session::test_resources::TestSession::open().await;
     let mut transcript =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let message = make_human("canonical history remains available");
     let id = message.id();
-    let catalog = build_catalog(
+    let catalog = context_archive::build_catalog(
         bound.thread_id.clone(),
         "full-near-budget".into(),
         id,
         &[PersistedPayload::Message(message.clone())],
         String::new(),
     )
-    .unwrap();
+    .expect("the build catalog fixture result is required for this assertion");
     let mut directive = MessageProjectionDirective {
         policy_version: PROJECTION_POLICY_VERSION,
         archive_catalog: Some(catalog),
         ..Default::default()
     };
-    let size = serde_json::to_vec(&directive).unwrap().len();
-    directive.archive_catalog.as_mut().unwrap().receipt =
-        "x".repeat(ARCHIVE_MAX_METADATA_BYTES - size);
-    validate_projection_metadata(&directive).unwrap();
+    let size = serde_json::to_vec(&directive)
+        .expect("to_vec must accept this test fixture representation")
+        .len();
+    directive
+        .archive_catalog
+        .as_mut()
+        .expect("the as mut fixture result is required for this assertion")
+        .receipt = "x".repeat(ARCHIVE_MAX_METADATA_BYTES - size);
+    context_archive::validate_projection_metadata(&directive)
+        .expect("the validate projection metadata fixture result is required for this assertion");
     transcript.append(message);
     transcript.set_flags_projection(id, directive);
-    transcript.flush_persistence().await.unwrap();
+    transcript
+        .flush_persistence()
+        .await
+        .expect("the flush persistence fixture result is required for this assertion");
     let revision = transcript.view_revision();
     let flags = transcript.flags(id);
-    let error = full_compact_inner(
+    let error = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
@@ -761,7 +832,7 @@ async fn test_full_rejects_retained_catalog_growth_before_any_durable_or_hot_cha
         .resources()
         .load_session_snapshot(&bound.thread_id)
         .await
-        .unwrap();
+        .expect("the load session snapshot fixture result is required for this assertion");
     assert_eq!(
         stored.payloads.len(),
         1,
@@ -816,7 +887,7 @@ async fn test_full_compact_history_read_only_backend_leaves_memory_and_store_unc
         .await
         .expect("加载初始 history 失败");
 
-    let error = full_compact_inner(
+    let error = crate::agent::compact_v2::full::full_compact_inner(
         &mut transcript,
         Some(&FullLifecycleModel),
         &CompactConfig::default(),
@@ -874,78 +945,7 @@ async fn test_full_compact_empty_transcript_skips() {
     let config = CompactConfig::default();
     let affected = crate::agent::compact_v2::micro::micro_compact(&mut t, &config)
         .await
-        .unwrap();
+        .expect("the micro compact fixture result is required for this assertion");
     assert_eq!(affected, 0);
 }
-
-#[test]
-fn summary_instruction_lists_recovery_resources_before_current_state() {
-    let prompt = summary_instruction(1024);
-
-    assert!(prompt.contains("Target at most 1024 output tokens"));
-    assert!(prompt.contains("2. **Recovery resources**"));
-    assert!(prompt.contains("3. **Current state and next action**"));
-    let recovery = prompt.find("Recovery resources").unwrap();
-    let current = prompt.find("Current state and next action").unwrap();
-    assert!(
-        recovery < current,
-        "Recovery resources 必须是优先级 2，位于当前状态之前"
-    );
-    assert!(prompt.contains("SkillTool(\"<exact canonical name>\")"));
-    assert!(prompt.contains("body archived by this compaction"));
-    assert!(prompt.contains("when retention is not explicitly shown"));
-    assert!(prompt.contains("preloaded; do not reload"));
-    assert!(prompt.contains("work which depends on their results waits"));
-    assert!(prompt.contains("Contract: X. Recent actual: Y (deviation)."));
-    assert!(prompt.contains("Recovery targets the contract"));
-    assert!(prompt.contains("report it as unrecoverable"));
-    // 重复 compact：恢复项是 Earlier summaries 合并规则的显式例外。
-    assert!(prompt.contains("except Recovery resources"));
-    assert!(prompt.contains("list every skill still active on every compaction"));
-    assert!(prompt.contains("carry forward recovery items the previous summary left unfinished"));
-    assert!(prompt.contains("never merge or omit a recovery item"));
-    assert!(prompt.contains("record the user's latest choice"));
-    assert!(prompt.contains("completing one work item does not end a session-wide mode"));
-    assert!(prompt.contains("Distinguish skill activation from body visibility"));
-    assert!(prompt.contains("Preserve an explicit user exit or override"));
-}
-
-#[test]
-fn recovery_prompts_name_recovery_resources() {
-    for prompt in [SUMMARY_RECOVERY_PROMPT, SUMMARY_FINAL_PROMPT] {
-        assert!(prompt.contains("recovery resources"));
-        assert!(prompt.contains("skills whose bodies were archived"));
-        assert!(prompt.contains("contract-vs-actual deviation"));
-        assert!(prompt.contains("Do not call tools"));
-    }
-    assert!(SUMMARY_RECOVERY_PROMPT.contains("cut off"));
-    assert!(SUMMARY_RECOVERY_PROMPT.contains("Continue exactly from the end"));
-}
-
-#[test]
-fn continuation_hint_is_single_line_and_gates_the_first_action() {
-    let hint = crate::agent::compact_v2::CONTINUATION_HINT;
-
-    assert!(!hint.contains('\n'), "续接标记必须保持单行");
-    for fragment in [
-        "The summary below",
-        "before any other tool call",
-        "SkillTool",
-        "If a reload fails",
-        "DiscoverSkillsTool",
-        "cannot be recovered",
-        "authoritative",
-        "user instruction takes precedence",
-    ] {
-        assert!(hint.contains(fragment), "续接标记缺少 {fragment}: {hint}");
-    }
-
-    let message =
-        build_summary_message("<summary>body</summary>", crate::messages::MessageId::new());
-    let content = message.content();
-    assert_eq!(content.lines().next(), Some(hint), "首行必须是续接标记");
-    assert!(
-        content.starts_with(&format!("{hint}\n\n<summary>body</summary>")),
-        "摘要正文必须位于续接标记之后"
-    );
-}
+include!("full_prompt_contract_test.rs");

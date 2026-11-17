@@ -2,14 +2,16 @@
 //!
 //! 与 `recovery_child_test.rs` 同夹具；本文件只覆盖父级登记与收件人/策略。
 
-use super::recovery_child::{parent_notices, settled_meta};
-use super::*;
-use crate::host::recovery::{
-    deliver_child_turn, finish_recovered_child_without_result, register_recovered_child_for_turn,
-    ChildTurnOutcome,
-};
+use super::recovery_child;
+use crate::host::recovery;
+use crate::host::recovery::ChildTurnOutcome;
+use crate::host::requests::tests::recovery_tests::RecoveryHarness;
+
+use peri_acp_types::recovery::SessionRecovery;
+
 use peri_acp_types::tasks::BgRegistryEvent;
 use peri_acp_types::thread::{CancelPolicy, ThreadId, WorkState};
+use std::time::Duration;
 
 /// 父发布广播接收者；`child_task_events` 只读取 child 自己的 Started/Completed。
 /// 父会话的 `session/bg-tasks` 投影。
@@ -62,15 +64,17 @@ async fn recovered_child_registers_in_live_parent_and_finishes_after_settlement(
     let report = recovery.enter(&root).await.unwrap();
     assert_eq!(report.recovered, vec!["child-b".to_owned()]);
     recovery.launch(&report).await;
-    wait_for("父 MQ 收到恢复结果", || async {
-        !parent_notices(&harness, &root).await.is_empty()
+    crate::host::requests::tests::recovery_tests::wait_for("父 MQ 收到恢复结果", || async {
+        !recovery_child::parent_notices(&harness, &root)
+            .await
+            .is_empty()
     })
     .await;
     harness._mock.assert_async().await;
 
     // 结果通知先于父任务结算提交；以任务投影离开 running 作为收尾完成的可观察点，
     // 否则会在 continuation 尚未执行完结算时读取事件。
-    wait_for("父任务收尾为完成", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("父任务收尾为完成", || async {
         parent_manager
             .snapshot()
             .tasks
@@ -127,13 +131,13 @@ async fn repeated_recovery_registration_is_deduplicated() {
     let mut events = parent_manager.subscribe_events();
 
     assert!(
-        register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
+        recovery::register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
             .await
             .unwrap(),
         "首次准入必须登记"
     );
     assert!(
-        !register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
+        !recovery::register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
             .await
             .unwrap(),
         "同一投递不得重复登记"
@@ -172,7 +176,7 @@ async fn repeated_recovery_registration_is_deduplicated() {
         .expect("child session is published")
         .take_recovery_parent()
         .expect("recovery delivery must be retained");
-    finish_recovered_child_without_result(&harness.cfg, &delivery);
+    recovery::finish_recovered_child_without_result(&harness.cfg, &delivery);
     assert_eq!(parent_manager.active_count(), 0);
     assert!(
         !harness
@@ -200,8 +204,10 @@ async fn parent_not_live_skips_registration_without_ghost_task() {
     let report = recovery.enter(&root).await.unwrap();
     assert_eq!(report.recovered, vec!["child-c".to_owned()]);
     recovery.launch(&report).await;
-    wait_for("直接父 B 收到结果", || async {
-        !parent_notices(&harness, "child-b").await.is_empty()
+    crate::host::requests::tests::recovery_tests::wait_for("直接父 B 收到结果", || async {
+        !recovery_child::parent_notices(&harness, "child-b")
+            .await
+            .is_empty()
     })
     .await;
     harness._mock.assert_async().await;
@@ -287,7 +293,7 @@ async fn parent_entry_adopts_an_already_running_recovered_child() {
         .expect("child session is published")
         .take_recovery_parent()
         .expect("adopted delivery must be retained");
-    deliver_child_turn(
+    recovery::deliver_child_turn(
         &harness.cfg,
         &harness.sessions,
         "child-c",
@@ -338,11 +344,13 @@ async fn parent_stop_cancels_cascade_recovered_child_and_persists_stopped() {
         .get_session("child-b")
         .expect("child session is published")
         .record_recovery_parent(ThreadId::from(root.clone()), None);
-    assert!(
-        register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
-            .await
-            .unwrap()
-    );
+    assert!(recovery::register_recovered_child_for_turn(
+        &harness.cfg,
+        &harness.sessions,
+        "child-b"
+    )
+    .await
+    .unwrap());
 
     let outcome = {
         let mut states = harness.sessions.lock().await;
@@ -364,7 +372,9 @@ async fn parent_stop_cancels_cascade_recovered_child_and_persists_stopped() {
     )
     .await;
     assert_eq!(
-        settled_meta(&harness, "child-b").await.work_state,
+        recovery_child::settled_meta(&harness, "child-b")
+            .await
+            .work_state,
         WorkState::Stopped,
         "Stop 必须把 cascade 恢复 child 落为 stopped"
     );
@@ -376,7 +386,7 @@ async fn parent_stop_cancels_cascade_recovered_child_and_persists_stopped() {
         .expect("child session is published")
         .take_recovery_parent()
         .expect("recovery delivery must be retained");
-    finish_recovered_child_without_result(&harness.cfg, &delivery);
+    recovery::finish_recovered_child_without_result(&harness.cfg, &delivery);
 }
 
 /// 父 close：既有 cancel_all 取消恢复 child；结算后 close 能完成。
@@ -401,11 +411,13 @@ async fn parent_close_cancels_recovered_child_registration() {
         .get_session("child-b")
         .expect("child session is published")
         .record_recovery_parent(ThreadId::from(root.clone()), None);
-    assert!(
-        register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
-            .await
-            .unwrap()
-    );
+    assert!(recovery::register_recovered_child_for_turn(
+        &harness.cfg,
+        &harness.sessions,
+        "child-b"
+    )
+    .await
+    .unwrap());
     let parent_manager = harness
         .cfg
         .session_manager
@@ -429,7 +441,7 @@ async fn parent_close_cancels_recovered_child_registration() {
         .expect("child session is published")
         .take_recovery_parent()
         .expect("recovery delivery must be retained");
-    finish_recovered_child_without_result(&harness.cfg, &delivery);
+    recovery::finish_recovered_child_without_result(&harness.cfg, &delivery);
     assert!(
         harness
             .cfg
@@ -474,7 +486,7 @@ async fn live_idle_parent_is_woken_by_the_recovered_result() {
         .expect("child session is published")
         .take_recovery_parent()
         .expect("recovery delivery must be retained");
-    deliver_child_turn(
+    recovery::deliver_child_turn(
         &harness.cfg,
         &harness.sessions,
         "child-b",
@@ -498,7 +510,9 @@ async fn live_idle_parent_is_woken_by_the_recovered_result() {
         "唤醒来自父 MQ 的 ensure_processing 结果行"
     );
     assert_eq!(
-        settled_meta(&harness, &root).await.work_state,
+        recovery_child::settled_meta(&harness, &root)
+            .await
+            .work_state,
         WorkState::Working
     );
 }
@@ -538,13 +552,13 @@ async fn recovery_result_targets_saved_resumer_without_reparenting() {
         .expect("recovery delivery must be retained");
     assert_eq!(delivery.parent, ThreadId::from("child-b"));
     assert_eq!(
-        settled_meta(&harness, "child-c")
+        recovery_child::settled_meta(&harness, "child-c")
             .await
             .parent_thread_id
             .as_deref(),
         Some(root.as_str())
     );
-    deliver_child_turn(
+    recovery::deliver_child_turn(
         &harness.cfg,
         &harness.sessions,
         "child-c",
@@ -554,8 +568,15 @@ async fn recovery_result_targets_saved_resumer_without_reparenting() {
         },
     )
     .await;
-    assert_eq!(parent_notices(&harness, "child-b").await.len(), 1);
-    assert!(parent_notices(&harness, &root).await.is_empty());
+    assert_eq!(
+        recovery_child::parent_notices(&harness, "child-b")
+            .await
+            .len(),
+        1
+    );
+    assert!(recovery_child::parent_notices(&harness, &root)
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -591,11 +612,13 @@ async fn independent_recovered_child_keeps_inbox_and_survives_parent_stop() {
         .get_session("child-b")
         .unwrap()
         .record_recovery_parent(root.clone(), None);
-    assert!(
-        register_recovered_child_for_turn(&harness.cfg, &harness.sessions, "child-b")
-            .await
-            .unwrap()
-    );
+    assert!(recovery::register_recovered_child_for_turn(
+        &harness.cfg,
+        &harness.sessions,
+        "child-b"
+    )
+    .await
+    .unwrap());
     let parent = harness.cfg.session_manager.get_session(&root).unwrap();
     let manager = parent.task_manager.clone();
     assert_eq!(
@@ -639,7 +662,9 @@ async fn independent_recovered_child_keeps_inbox_and_survives_parent_stop() {
     assert!(!token.is_cancelled());
     assert!(!outcome.stop_targets.contains(&"child-b".to_owned()));
     assert_eq!(
-        settled_meta(&harness, "child-b").await.work_state,
+        recovery_child::settled_meta(&harness, "child-b")
+            .await
+            .work_state,
         WorkState::Working
     );
     let delivery = harness
@@ -649,7 +674,7 @@ async fn independent_recovered_child_keeps_inbox_and_survives_parent_stop() {
         .unwrap()
         .take_recovery_parent()
         .unwrap();
-    finish_recovered_child_without_result(&harness.cfg, &delivery);
+    recovery::finish_recovered_child_without_result(&harness.cfg, &delivery);
     assert!(concrete
         .send_subagent_message("child-b", Some("after closure"))
         .await
@@ -682,7 +707,9 @@ async fn missing_completion_target_does_not_guess_the_historical_parent() {
         .iter()
         .any(|failure| failure.detail.contains("completion target")));
     assert_eq!(
-        settled_meta(&harness, "child-b").await.work_state,
+        recovery_child::settled_meta(&harness, "child-b")
+            .await
+            .work_state,
         WorkState::Working
     );
 }

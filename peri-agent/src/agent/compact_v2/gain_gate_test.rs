@@ -3,16 +3,19 @@
 //! 决策函数是唯一权威：`M = ceil(C/10)`，G 使用最终完整渲染后的净减少量。
 //! 端到端用例复用真实 planner 与提交路径，验证未达门槛时零写入。
 
-use super::decision::{decide_auto_compact, min_micro_gain_tokens, GainDecision};
-use super::planner::{
+use crate::agent::compact_v2::config::CompactConfig;
+
+use crate::agent::compact_v2::decision::GainDecision;
+use crate::agent::compact_v2::planner::{
     ArchivePlanningScope, ContextPressure, FullEscalationReason, MicroPlanningFacts,
 };
-use super::{run_compact_with_facts, CompactConfig, CompactOutcome, ProviderCapabilities};
+use crate::agent::compact_v2::projection::ProviderCapabilities;
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent, MessageId, ToolCallRequest};
 use crate::session::async_result_mailbox::ProtectedResults;
 use crate::session::test_resources::TestSession;
 use crate::session::transcript::MessageTranscript;
+use peri_acp_types::compact::CompactOutcome;
 
 fn pressure(estimated_tokens: u64, context_window: u32) -> ContextPressure {
     ContextPressure {
@@ -36,7 +39,8 @@ fn exposed_facts(transcript: &MessageTranscript, session_id: &str) -> MicroPlann
             }),
         ..Default::default()
     };
-    for entry in transcript.entries().iter().skip(transcript.ancestor_len()) {
+    let entry_items = transcript.entries().iter().skip(transcript.ancestor_len());
+    for entry in entry_items {
         facts.exposed_message_ids.insert(entry.id());
         if let Some(message) = entry.as_message() {
             for call in message.tool_calls() {
@@ -74,10 +78,10 @@ async fn compact_once(
     session_id: &str,
     config: &CompactConfig,
     pressure: &ContextPressure,
-) -> super::CompactResult {
+) -> crate::agent::compact_v2::CompactResult {
     let facts = exposed_facts(transcript, session_id);
     let mut failures = 0u32;
-    run_compact_with_facts(
+    crate::agent::compact_v2::run_compact_with_facts(
         transcript,
         None,
         config,
@@ -105,15 +109,27 @@ fn has_persisted_projection(transcript: &MessageTranscript) -> bool {
 #[test]
 fn minimum_gain_is_one_tenth_of_the_full_window_rounded_up() {
     let config = CompactConfig::default();
-    assert_eq!(min_micro_gain_tokens(0, &config), 0);
-    assert_eq!(min_micro_gain_tokens(1, &config), 1);
-    assert_eq!(min_micro_gain_tokens(200_000, &config), 20_000);
     assert_eq!(
-        min_micro_gain_tokens(200_001, &config),
+        crate::agent::compact_v2::decision::min_micro_gain_tokens(0, &config),
+        0
+    );
+    assert_eq!(
+        crate::agent::compact_v2::decision::min_micro_gain_tokens(1, &config),
+        1
+    );
+    assert_eq!(
+        crate::agent::compact_v2::decision::min_micro_gain_tokens(200_000, &config),
+        20_000
+    );
+    assert_eq!(
+        crate::agent::compact_v2::decision::min_micro_gain_tokens(200_001, &config),
         20_001,
         "不得向下取整丢掉 1 token"
     );
-    assert_eq!(min_micro_gain_tokens(199_999, &config), 20_000);
+    assert_eq!(
+        crate::agent::compact_v2::decision::min_micro_gain_tokens(199_999, &config),
+        20_000
+    );
 }
 
 #[test]
@@ -121,8 +137,10 @@ fn micro_zone_defers_one_token_below_the_minimum_gain() {
     let config = CompactConfig::default();
     let pressure = pressure(160_000, 200_000);
 
-    let below = decide_auto_compact(&pressure, &config, 19_999, true);
-    let at = decide_auto_compact(&pressure, &config, 20_000, true);
+    let below =
+        crate::agent::compact_v2::decision::decide_auto_compact(&pressure, &config, 19_999, true);
+    let at =
+        crate::agent::compact_v2::decision::decide_auto_compact(&pressure, &config, 20_000, true);
 
     match below {
         GainDecision::Deferred(deferral) => {
@@ -140,7 +158,7 @@ fn micro_zone_defers_one_token_below_the_minimum_gain() {
 
 #[test]
 fn micro_zone_without_candidates_defers_instead_of_failing() {
-    let decision = decide_auto_compact(
+    let decision = crate::agent::compact_v2::decision::decide_auto_compact(
         &pressure(160_000, 200_000),
         &CompactConfig::default(),
         0,
@@ -162,11 +180,11 @@ fn full_condition_requires_the_larger_of_minimum_gain_and_reclaim() {
     let below = pressure(190_000, 200_000);
     assert_eq!(below.target_reclaim_tokens(), 4_000);
     assert_eq!(
-        decide_auto_compact(&below, &config, 19_000, true),
+        crate::agent::compact_v2::decision::decide_auto_compact(&below, &config, 19_000, true),
         GainDecision::Full(FullEscalationReason::InsufficientReclaim)
     );
     assert_eq!(
-        decide_auto_compact(&below, &config, 20_000, true),
+        crate::agent::compact_v2::decision::decide_auto_compact(&below, &config, 20_000, true),
         GainDecision::Micro
     );
 
@@ -174,12 +192,12 @@ fn full_condition_requires_the_larger_of_minimum_gain_and_reclaim() {
     let high = pressure(210_000, 200_000);
     assert_eq!(high.target_reclaim_tokens(), 23_000);
     assert_eq!(
-        decide_auto_compact(&high, &config, 20_000, true),
+        crate::agent::compact_v2::decision::decide_auto_compact(&high, &config, 20_000, true),
         GainDecision::Full(FullEscalationReason::InsufficientReclaim),
         "不能只因达到 10% 就选择 Micro"
     );
     assert_eq!(
-        decide_auto_compact(&high, &config, 23_000, true),
+        crate::agent::compact_v2::decision::decide_auto_compact(&high, &config, 23_000, true),
         GainDecision::Micro
     );
 }
@@ -187,7 +205,7 @@ fn full_condition_requires_the_larger_of_minimum_gain_and_reclaim() {
 #[test]
 fn full_condition_without_candidates_keeps_the_existing_full_semantics() {
     assert_eq!(
-        decide_auto_compact(
+        crate::agent::compact_v2::decision::decide_auto_compact(
             &pressure(196_000, 200_000),
             &CompactConfig::default(),
             0,
@@ -203,7 +221,12 @@ fn zero_context_window_never_uses_a_zero_threshold_auto_micro() {
         micro_compact_threshold: 0.0,
         ..Default::default()
     };
-    let decision = decide_auto_compact(&pressure(0, 0), &config, u64::MAX, true);
+    let decision = crate::agent::compact_v2::decision::decide_auto_compact(
+        &pressure(0, 0),
+        &config,
+        u64::MAX,
+        true,
+    );
     match decision {
         GainDecision::Deferred(deferral) => assert_eq!(
             deferral.reason,
@@ -216,7 +239,7 @@ fn zero_context_window_never_uses_a_zero_threshold_auto_micro() {
 #[test]
 fn below_the_micro_threshold_skips() {
     assert_eq!(
-        decide_auto_compact(
+        crate::agent::compact_v2::decision::decide_auto_compact(
             &pressure(100_000, 200_000),
             &CompactConfig::default(),
             50_000,
@@ -400,8 +423,10 @@ fn deferred_end_event_keeps_a_serializable_contract() {
             min_gain_tokens: 20_000,
         }),
     };
-    let json = serde_json::to_string(&event).unwrap();
-    let back: crate::agent::events_v2::ObserveEvent = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string(&event)
+        .expect("to_string must accept this test fixture representation");
+    let back: crate::agent::events_v2::ObserveEvent =
+        serde_json::from_str(&json).expect("from_str must accept this test fixture representation");
     match back {
         crate::agent::events_v2::ObserveEvent::CompactEnded {
             outcome,
@@ -463,7 +488,7 @@ fn builtin_bash_is_preview_only_and_keeps_its_arguments() {
     };
     facts.exposed_message_ids.extend([call.id(), result.id()]);
     facts.closed_call_ids.insert("call-bash".into());
-    let plan = super::planner::plan_micro_with_facts(
+    let plan = crate::agent::compact_v2::planner::plan_micro_with_facts(
         &transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -473,21 +498,24 @@ fn builtin_bash_is_preview_only_and_keeps_its_arguments() {
         &facts,
         &ProviderCapabilities::openai(),
     )
-    .unwrap();
+    .expect("the plan micro with facts fixture result is required for this assertion");
     assert!(
         !plan.actions.iter().any(|entry| matches!(
             entry.action,
-            super::ProjectionAction::OmitToolExchange { .. }
+            crate::agent::compact_v2::projection::ProjectionAction::OmitToolExchange { .. }
         )),
         "Bash 不得进入整组省略白名单"
     );
     assert!(plan.actions.iter().any(|entry| matches!(
         entry.action,
-        super::ProjectionAction::CompactToolResult { .. }
+        crate::agent::compact_v2::projection::ProjectionAction::CompactToolResult { .. }
     )));
-    let rendered =
-        super::projection::render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai())
-            .expect("preview must render");
+    let rendered = crate::agent::compact_v2::projection::render_micro_plan(
+        &transcript,
+        &plan,
+        &ProviderCapabilities::openai(),
+    )
+    .expect("preview must render");
     let call_message = rendered
         .iter()
         .find(|message| message.id() == call.id())

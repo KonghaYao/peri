@@ -1,8 +1,7 @@
 use super::*;
-use crate::acp_client::AdmissionGuard;
 use peri_acp::transport::{
     AcpTransport,
-    mpsc::{MpscServerTransport, mpsc_transport_pair},
+    mpsc::MpscServerTransport,
     types::{IncomingMessage, RequestId},
 };
 use serde_json::Value;
@@ -22,7 +21,7 @@ fn context(cwd: &str) -> Value {
 }
 
 fn client() -> (AcpTuiClient, MpscServerTransport) {
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new(transport);
     client
         .session_workspace
@@ -39,11 +38,11 @@ async fn legacy_history_context_without_binding_can_restore_saved_directory() {
     let (id, _) = request(&server, "peri/session_context").await;
     let mut legacy = context("/saved/project");
     legacy["binding"] = Value::Null;
-    server.send_response(id, Ok(legacy)).await.unwrap();
+    server.send_response(id, Ok(legacy)).await.expect("legacy history context without binding can restore saved directory: fixture task and request must complete successfully");
     let (id, params) = request(&server, "session/load").await;
     assert_eq!(params["cwd"], "/saved/project");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
-    assert_eq!(load.await.unwrap().unwrap(), "legacy");
+    server.send_response(id, Ok(json!({}))).await.expect("legacy history context without binding can restore saved directory: fixture task and request must complete successfully");
+    assert_eq!(load.await.expect("legacy history context without binding can restore saved directory: the fixture operation must finish without an inner failure").expect("legacy history context without binding can restore saved directory: the fixture operation must finish without an inner failure"), "legacy");
     assert_eq!(
         client.current_execution_cwd().as_deref(),
         Some("/saved/project")
@@ -52,10 +51,9 @@ async fn legacy_history_context_without_binding_can_restore_saved_directory() {
 
 #[tokio::test]
 async fn legacy_history_preview_does_not_switch_or_prepare_execution() {
-    use peri_acp_types::{
-        messages::BaseMessage,
-        store::{PersistedPayload, serialize_persisted_payload},
-    };
+    use peri_acp_types::messages::BaseMessage;
+    use peri_acp_types::store::PersistedPayload;
+    use peri_acp_types::store::serialize_persisted_payload;
     let (client, server) = client();
     client.lifecycle.force_stable("active", false);
     client.project_execution_cwd(Some("/active".into()));
@@ -66,12 +64,12 @@ async fn legacy_history_preview_does_not_switch_or_prepare_execution() {
     let message = serialize_persisted_payload(&PersistedPayload::Message(BaseMessage::human(
         "saved message",
     )))
-    .unwrap();
-    server.send_response(id, Ok(json!({"sessionId":"legacy","binding":null,"payloads":[serde_json::from_str::<Value>(&message).unwrap()]}))).await.unwrap();
+    .expect("legacy history preview does not switch or prepare execution: the serialize_persisted_payload fixture operation uses valid inputs");
+    server.send_response(id, Ok(json!({"sessionId":"legacy","binding":null,"payloads":[serde_json::from_str::<Value>(&message).expect("legacy history preview does not switch or prepare execution: fixture JSON must match the expected schema")]}))).await.expect("legacy history preview does not switch or prepare execution: fixture JSON must match the expected schema");
     assert_eq!(
-        read.await.unwrap().unwrap()[0]
+        read.await.expect("legacy history preview does not switch or prepare execution: the fixture operation must finish without an inner failure").expect("legacy history preview does not switch or prepare execution: the fixture operation must finish without an inner failure")[0]
             .as_message()
-            .unwrap()
+            .expect("legacy history preview does not switch or prepare execution: the fixture operation must finish without an inner failure")
             .content(),
         "saved message"
     );
@@ -83,8 +81,8 @@ async fn legacy_history_preview_does_not_switch_or_prepare_execution() {
 async fn request(server: &MpscServerTransport, expected: &str) -> (RequestId, Value) {
     let msg = tokio::time::timeout(Duration::from_secs(5), server.recv())
         .await
-        .unwrap()
-        .unwrap();
+        .expect("request: fixture task and request must complete successfully")
+        .expect("request: fixture task and request must complete successfully");
     let IncomingMessage::Request { id, method, params } = msg else {
         panic!("expected request")
     };
@@ -106,74 +104,24 @@ async fn resume_uses_saved_execution_directory_and_commits_it_after_load() {
     server
         .send_response(id, Ok(context("/worktrees/feature/src")))
         .await
-        .unwrap();
+        .expect("resume uses saved execution directory and commits it after load: fixture task and request must complete successfully");
     let (id, params) = request(&server, "session/close").await;
     assert_eq!(params["sessionId"], "old");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("resume uses saved execution directory and commits it after load: fixture task and request must complete successfully");
     let (id, params) = request(&server, "session/load").await;
     assert_eq!(params["cwd"], "/worktrees/feature/src");
     assert_eq!(client.current_execution_cwd(), None);
-    server.send_response(id, Ok(json!({}))).await.unwrap();
-    assert_eq!(load.await.unwrap().unwrap(), "target");
+    server.send_response(id, Ok(json!({}))).await.expect("resume uses saved execution directory and commits it after load: fixture task and request must complete successfully");
+    assert_eq!(load.await.expect("resume uses saved execution directory and commits it after load: the fixture operation must finish without an inner failure").expect("resume uses saved execution directory and commits it after load: the fixture operation must finish without an inner failure"), "target");
     assert_eq!(
         client.current_execution_cwd().as_deref(),
         Some("/worktrees/feature/src")
     );
 }
 
-#[tokio::test]
-async fn unavailable_binding_preserves_old_session_and_cancels_waiting_cohort() {
-    let (client, server) = client();
-    client.lifecycle.force_stable("old", false);
-    client.project_execution_cwd(Some("/main".into()));
-    let reservation = client.reserve_session_load();
-    let snapshot = client.session_admission_snapshot();
-    let admission = AdmissionGuard::new(snapshot.switch_seq, false)
-        .with_operation(snapshot.unclaimed_load.unwrap());
-    let loader = client.clone();
-    let load = tokio::spawn(async move {
-        loader
-            .load_reserved_session(&reservation, "target", "/main", None)
-            .await
-    });
-    let (id, _) = request(&server, "peri/session_context").await;
-    server
-        .send_response(id, Err(AcpError::new(-32001, "workspace unavailable")))
-        .await
-        .unwrap();
-    assert!(
-        load.await
-            .unwrap()
-            .unwrap_err()
-            .to_string()
-            .contains("workspace unavailable")
-    );
-    assert_eq!(client.current_session_id().as_deref(), Some("old"));
-    assert_eq!(client.current_execution_cwd().as_deref(), Some("/main"));
-    let mut admitted = Some(("unexpected".to_owned(), 0));
-    client
-        .resolve_session_admission("/main", admission, |identity| admitted = identity.cloned())
-        .await
-        .unwrap();
-    assert!(admitted.is_none(), "等待目标切换的输入不能改投旧会话");
-    assert_eq!(client.ensure_session("/main", None).await.unwrap(), "old");
-    let sender = client.clone();
-    let prompt = tokio::spawn(async move {
-        sender
-            .prompt(
-                &peri_acp_types::messages::MessageContent::text("new input"),
-                None,
-            )
-            .await
-    });
-    let (id, params) = request(&server, "session/prompt").await;
-    assert_eq!(params["sessionId"], "old", "用户之后的新输入仍可继续原会话");
-    server
-        .send_response(id, Ok(json!({"stopReason": "end_turn"})))
-        .await
-        .unwrap();
-    prompt.await.unwrap().unwrap();
-}
+// 旧语义（失败的目标预检让 `ensure_session` 永久失败）与 39ed 修正冲突：
+// 39ed 明确要求目标预检失败不污染当前会话；同场景回归见
+// `acp_client::client::recovery_test::failed_history_preflight_keeps_current_session_usable`。
 
 #[tokio::test]
 async fn failed_startup_load_leaves_no_session_and_does_not_create_a_new_one() {
@@ -186,7 +134,7 @@ async fn failed_startup_load_leaves_no_session_and_does_not_create_a_new_one() {
     server
         .send_response(id, Ok(context("/worktrees/feature/src")))
         .await
-        .unwrap();
+        .expect("failed startup load leaves no session and does not create a new one: fixture task and request must complete successfully");
     let (id, _) = request(&server, "session/load").await;
     server
         .send_response(
@@ -194,11 +142,11 @@ async fn failed_startup_load_leaves_no_session_and_does_not_create_a_new_one() {
             Err(AcpError::new(-32001, "session owned by another host")),
         )
         .await
-        .unwrap();
+        .expect("failed startup load leaves no session and does not create a new one: fixture task and request must complete successfully");
     assert!(
         load.await
-            .unwrap()
-            .unwrap_err()
+            .expect("failed startup load leaves no session and does not create a new one: the fixture operation must finish without an inner failure")
+            .expect_err("failed startup load leaves no session and does not create a new one: the invalid fixture must be rejected")
             .to_string()
             .contains("another host")
     );
@@ -211,7 +159,7 @@ async fn failed_startup_load_leaves_no_session_and_does_not_create_a_new_one() {
     server
         .send_response(id, Ok(context("/worktrees/feature/src")))
         .await
-        .unwrap();
+        .expect("failed startup load leaves no session and does not create a new one: fixture task and request must complete successfully");
     let (id, _) = request(&server, "session/load").await;
     server
         .send_response(
@@ -219,12 +167,12 @@ async fn failed_startup_load_leaves_no_session_and_does_not_create_a_new_one() {
             Err(AcpError::new(-32001, "session owned by another host")),
         )
         .await
-        .unwrap();
+        .expect("failed startup load leaves no session and does not create a new one: fixture task and request must complete successfully");
     assert!(
         retry
             .await
-            .unwrap()
-            .unwrap_err()
+            .expect("failed startup load leaves no session and does not create a new one: the fixture operation must finish without an inner failure")
+            .expect_err("failed startup load leaves no session and does not create a new one: the invalid fixture must be rejected")
             .to_string()
             .contains("another host")
     );
@@ -241,7 +189,7 @@ async fn continue_queries_exact_workspace_directory_and_distinguishes_no_candida
     server
         .send_response(id, Ok(context("/worktrees/feature/src")))
         .await
-        .unwrap();
+        .expect("continue queries exact workspace directory and distinguishes no candidate: fixture task and request must complete successfully");
     let (id, params) = request(&server, "session/list").await;
     let query = &params["_meta"]["peri.sessionWorkspaceV1"];
     assert_eq!(
@@ -251,11 +199,12 @@ async fn continue_queries_exact_workspace_directory_and_distinguishes_no_candida
         }})
     );
     assert_eq!(query["limit"], 1);
-    server.send_response(id, Ok(json!({"sessions":[],"_meta":{"peri.sessionWorkspaceV1":{"threads":[],"nextCursor":null}}}))).await.unwrap();
-    assert_eq!(lookup.await.unwrap().unwrap(), None);
+    server.send_response(id, Ok(json!({"sessions":[],"_meta":{"peri.sessionWorkspaceV1":{"threads":[],"nextCursor":null}}}))).await.expect("continue queries exact workspace directory and distinguishes no candidate: fixture task and request must complete successfully");
+    assert_eq!(lookup.await.expect("continue queries exact workspace directory and distinguishes no candidate: the fixture operation must finish without an inner failure").expect("continue queries exact workspace directory and distinguishes no candidate: the fixture operation must finish without an inner failure"), None);
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn continue_query_failure_blocks_ensure_until_explicit_new_session() {
     let (client, server) = client();
     client.reserve_startup_restore().await;
@@ -266,14 +215,14 @@ async fn continue_query_failure_blocks_ensure_until_explicit_new_session() {
     server
         .send_response(id, Err(AcpError::new(-32001, "discovery failed")))
         .await
-        .unwrap();
-    let error = lookup.await.unwrap().unwrap_err();
+        .expect("continue query failure blocks ensure until explicit new session: fixture task and request must complete successfully");
+    let error = lookup.await.expect("continue query failure blocks ensure until explicit new session: fixture task and request must complete successfully").expect_err("continue query failure blocks ensure until explicit new session: the invalid fixture must be rejected");
     client.fail_startup_restore(&error).await;
     assert!(
         client
             .ensure_session("/main", None)
             .await
-            .unwrap_err()
+            .expect_err("continue query failure blocks ensure until explicit new session: the invalid fixture must be rejected")
             .to_string()
             .contains("discovery failed")
     );
@@ -281,13 +230,13 @@ async fn continue_query_failure_blocks_ensure_until_explicit_new_session() {
     let create = tokio::spawn(async move { creator.new_session("/main", None).await });
     let (id, params) = request(&server, "session/new").await;
     assert_eq!(params["cwd"], "/main");
-    server.send_response(id, Ok(json!({"sessionId":"fresh","_meta":{"peri.sessionWorkspaceV1":{"workspace":{"cwd":"/canonical/main"}}}}))).await.unwrap();
-    assert_eq!(create.await.unwrap().unwrap(), "fresh");
+    server.send_response(id, Ok(json!({"sessionId":"fresh","_meta":{"peri.sessionWorkspaceV1":{"workspace":{"cwd":"/canonical/main"}}}}))).await.expect("continue query failure blocks ensure until explicit new session: fixture task and request must complete successfully");
+    assert_eq!(create.await.expect("continue query failure blocks ensure until explicit new session: the fixture operation must finish without an inner failure").expect("continue query failure blocks ensure until explicit new session: the fixture operation must finish without an inner failure"), "fresh");
     assert_eq!(
         client.current_execution_cwd().as_deref(),
         Some("/canonical/main")
     );
-    assert_eq!(client.ensure_session("/main", None).await.unwrap(), "fresh");
+    assert_eq!(client.ensure_session("/main", None).await.expect("continue query failure blocks ensure until explicit new session: the fixture operation must finish without an inner failure"), "fresh");
 }
 
 #[tokio::test]
@@ -297,12 +246,12 @@ async fn unsupported_context_version_cannot_be_used_for_execution() {
     let (id, _) = request(&server, "peri/session_context").await;
     let mut response = context("/worktrees/feature/src");
     response["version"] = json!(2);
-    server.send_response(id, Ok(response)).await.unwrap();
+    server.send_response(id, Ok(response)).await.expect("unsupported context version cannot be used for execution: fixture task and request must complete successfully");
     assert!(
         lookup
             .await
-            .unwrap()
-            .unwrap_err()
+            .expect("unsupported context version cannot be used for execution: the fixture operation must finish without an inner failure")
+            .expect_err("unsupported context version cannot be used for execution: the invalid fixture must be rejected")
             .to_string()
             .contains("unsupported session context version")
     );
@@ -320,21 +269,21 @@ async fn failed_input_initialization_closes_loaded_session_and_blocks_prompt() {
     server
         .send_response(id, Ok(context("/worktrees/feature/src")))
         .await
-        .unwrap();
+        .expect("failed input initialization closes loaded session and blocks prompt: fixture task and request must complete successfully");
     let (id, _) = request(&server, "session/load").await;
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("failed input initialization closes loaded session and blocks prompt: fixture task and request must complete successfully");
     let (id, _) = request(&server, "session/input/snapshot").await;
     server
         .send_response(id, Err(AcpError::new(-32603, "snapshot unavailable")))
         .await
-        .unwrap();
+        .expect("failed input initialization closes loaded session and blocks prompt: fixture task and request must complete successfully");
     let (id, params) = request(&server, "session/close").await;
     assert_eq!(params["sessionId"], "target");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("failed input initialization closes loaded session and blocks prompt: fixture task and request must complete successfully");
     assert!(
         load.await
-            .unwrap()
-            .unwrap_err()
+            .expect("failed input initialization closes loaded session and blocks prompt: the fixture operation must finish without an inner failure")
+            .expect_err("failed input initialization closes loaded session and blocks prompt: the invalid fixture must be rejected")
             .to_string()
             .contains("snapshot unavailable")
     );
@@ -344,7 +293,7 @@ async fn failed_input_initialization_closes_loaded_session_and_blocks_prompt() {
         client
             .ensure_session("/main", None)
             .await
-            .unwrap_err()
+            .expect_err("failed input initialization closes loaded session and blocks prompt: the invalid fixture must be rejected")
             .to_string()
             .contains("snapshot unavailable")
     );
@@ -361,8 +310,8 @@ async fn permission_changes_address_active_session_not_startup_shared_mode() {
         params,
         json!({"sessionId":"worktree-session","modeId":"accept_edit"})
     );
-    server.send_response(id, Ok(json!({}))).await.unwrap();
-    change.await.unwrap().unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("permission changes address active session not startup shared mode: fixture task and request must complete successfully");
+    change.await.expect("permission changes address active session not startup shared mode: fixture task and request must complete successfully").expect("permission changes address active session not startup shared mode: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
@@ -377,8 +326,8 @@ async fn complete_host_configuration_never_targets_active_workspace() {
     let (id, params) = request(&server, "session/update_config").await;
     assert!(params.get("sessionId").is_none());
     assert!(params.get("config").is_some());
-    server.send_response(id, Ok(json!({}))).await.unwrap();
-    update.await.unwrap().unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("complete host configuration never targets active workspace: fixture task and request must complete successfully");
+    update.await.expect("complete host configuration never targets active workspace: fixture task and request must complete successfully").expect("complete host configuration never targets active workspace: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
@@ -392,8 +341,8 @@ async fn model_changes_use_host_supported_session_config_rpc() {
         params,
         json!({"sessionId":"feature-session", "configId":"model", "value":"strong"})
     );
-    server.send_response(id, Ok(json!({}))).await.unwrap();
-    task.await.unwrap().unwrap();
+    server.send_response(id, Ok(json!({}))).await.expect("model changes use host supported session config rpc: fixture task and request must complete successfully");
+    task.await.expect("model changes use host supported session config rpc: fixture task and request must complete successfully").expect("model changes use host supported session config rpc: fixture task and request must complete successfully");
 }
 
 #[tokio::test]
@@ -408,8 +357,8 @@ async fn permission_labels_translate_to_acp_mode_identifiers() {
             params,
             json!({"sessionId":"feature-session", "modeId":wire})
         );
-        server.send_response(id, Ok(json!({}))).await.unwrap();
-        task.await.unwrap().unwrap();
+        server.send_response(id, Ok(json!({}))).await.expect("permission labels translate to acp mode identifiers: fixture task and request must complete successfully");
+        task.await.expect("permission labels translate to acp mode identifiers: fixture task and request must complete successfully").expect("permission labels translate to acp mode identifiers: fixture task and request must complete successfully");
     }
 }
 
@@ -417,7 +366,7 @@ async fn permission_labels_translate_to_acp_mode_identifiers() {
 #[serial_test::serial]
 async fn cancelled_load_clears_the_target_published_for_replay() {
     use crate::kit::atoms::{ACTIVE_EXECUTION_CWD, ACTIVE_SESSION_ID};
-    let (transport, server) = mpsc_transport_pair();
+    let (transport, server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _, _) = AcpTuiClient::new_interactive(transport);
     client
         .session_workspace
@@ -429,11 +378,11 @@ async fn cancelled_load_clears_the_target_published_for_replay() {
     server
         .send_response(id, Ok(context("/worktrees/feature/src")))
         .await
-        .unwrap();
+        .expect("cancelled load clears the target published for replay: fixture task and request must complete successfully");
     let (_id, _) = request(&server, "session/load").await;
     assert_eq!(&*ACTIVE_SESSION_ID.state().read(), "target");
     load.abort();
-    assert!(load.await.unwrap_err().is_cancelled());
+    assert!(load.await.expect_err("cancelled load clears the target published for replay: the invalid fixture must be rejected").is_cancelled());
     assert!(ACTIVE_SESSION_ID.state().read().is_empty());
     assert!(ACTIVE_EXECUTION_CWD.state().read().is_none());
     assert!(!client.has_session());

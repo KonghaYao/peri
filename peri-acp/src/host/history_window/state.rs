@@ -1,6 +1,9 @@
 //! 窗口读取的短锁状态检查与稳定 entryId 解析。
 
-use super::*;
+use crate::host::SessionState;
+use crate::transport::types::AcpError;
+use peri_acp_types::history_window::HistoryEntryId;
+use peri_acp_types::history_window::HistoryWindowError;
 
 /// 短锁内允许读取窗口的会话状态。
 ///
@@ -11,14 +14,24 @@ pub(super) fn readable_state<'a>(
     sessions: &'a std::collections::HashMap<String, SessionState>,
     session_id: &str,
 ) -> Result<&'a SessionState, AcpError> {
-    let state = sessions
-        .get(session_id)
-        .ok_or_else(|| window_error(HistoryWindowError::SessionNotFound))?;
+    let state = sessions.get(session_id).ok_or_else(|| {
+        crate::host::history_window::history_window_coordinator::window_error(
+            HistoryWindowError::SessionNotFound,
+        )
+    })?;
     if state.closing {
-        return Err(window_error(HistoryWindowError::SessionClosing));
+        return Err(
+            crate::host::history_window::history_window_coordinator::window_error(
+                HistoryWindowError::SessionClosing,
+            ),
+        );
     }
     if state.history_window.rewind_in_progress {
-        return Err(window_error(HistoryWindowError::MutationInProgress));
+        return Err(
+            crate::host::history_window::history_window_coordinator::window_error(
+                HistoryWindowError::MutationInProgress,
+            ),
+        );
     }
     Ok(state)
 }
@@ -29,14 +42,24 @@ pub(super) fn readable_state_mut<'a>(
     sessions: &'a mut std::collections::HashMap<String, SessionState>,
     session_id: &str,
 ) -> Result<&'a mut SessionState, AcpError> {
-    let state = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| window_error(HistoryWindowError::SessionNotFound))?;
+    let state = sessions.get_mut(session_id).ok_or_else(|| {
+        crate::host::history_window::history_window_coordinator::window_error(
+            HistoryWindowError::SessionNotFound,
+        )
+    })?;
     if state.closing {
-        return Err(window_error(HistoryWindowError::SessionClosing));
+        return Err(
+            crate::host::history_window::history_window_coordinator::window_error(
+                HistoryWindowError::SessionClosing,
+            ),
+        );
     }
     if state.history_window.rewind_in_progress {
-        return Err(window_error(HistoryWindowError::MutationInProgress));
+        return Err(
+            crate::host::history_window::history_window_coordinator::window_error(
+                HistoryWindowError::MutationInProgress,
+            ),
+        );
     }
     Ok(state)
 }
@@ -46,5 +69,6 @@ pub(super) fn parse_anchor(
     entry_id: &str,
     session_id: &str,
 ) -> Result<peri_acp_types::messages::MessageId, AcpError> {
-    HistoryEntryId::parse_for_session(entry_id, &session_id.to_owned()).map_err(window_error)
+    HistoryEntryId::parse_for_session(entry_id, &session_id.to_owned())
+        .map_err(crate::host::history_window::history_window_coordinator::window_error)
 }

@@ -8,10 +8,14 @@
 //!
 //! 夹具风格沿用 `requests_history_lifecycle_test.rs` / `requests_rewind_cases_test.rs`。
 
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
 use async_trait::async_trait;
 use peri_acp_types::history_page::{HistoryForwardCursor, HistorySegment};
-use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId, ToolCallRequest};
+use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot,
     CloseSettlement, ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft,
@@ -19,15 +23,19 @@ use peri_acp_types::session_resources::{
     SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
     SessionResources, SessionSnapshot,
 };
+
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 use peri_acp_types::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery};
 use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::dispatch::session_replay::{REPLAY_SEGMENT_BYTE_BUDGET, REPLAY_SEGMENT_ROWS};
 use crate::host::connection::ConnectionFacts;
 
 // ── 记录调用的门面替身 ────────────────────────────────────────────────────────
@@ -249,12 +257,14 @@ impl ReplayFixture {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = std::fs::canonicalize(tmp.path()).unwrap().join("saved");
         std::fs::create_dir(&cwd).unwrap();
-        let config = make_peri_config_with_provider(make_provider_config(
-            "local",
-            "openai",
-            "fixture-key",
-            "fixture-model",
-        ));
+        let config = crate::host::requests::tests::make_peri_config_with_provider(
+            crate::host::requests::tests::make_provider_config(
+                "local",
+                "openai",
+                "fixture-key",
+                "fixture-model",
+            ),
+        );
         let provider = LlmProvider::from_config(&config).unwrap();
         let (_bridge, facade) = peri_resources::sessions::open_store_and_facade_for_tests(
             tmp.path().join("threads.db"),
@@ -263,7 +273,9 @@ impl ReplayFixture {
         .unwrap();
         let spy = Arc::new(ReplaySpy::new(Arc::new(facade), mode));
         let resources: Arc<dyn SessionResources> = spy.clone();
-        let cfg = build_server_config(config, provider, &tmp, resources).await;
+        let cfg =
+            crate::host::requests::tests::build_server_config(config, provider, &tmp, resources)
+                .await;
         Self {
             cfg,
             spy,
@@ -291,7 +303,9 @@ impl ReplayFixture {
         let encoded = crate::session::frozen_snapshot::encode_frozen_snapshot(&frozen).unwrap();
         self.cfg
             .session_resources
-            .create_session(&bound_input(sid, &workspace, encoded))
+            .create_session(&crate::host::requests::tests::bound_input(
+                sid, &workspace, encoded,
+            ))
             .await
             .unwrap();
         self.id = sid.to_owned();
@@ -465,7 +479,11 @@ fn collect_keys(value: &Value, out: &mut Vec<String>) {
                 collect_keys(inner, out);
             }
         }
-        Value::Array(items) => items.iter().for_each(|item| collect_keys(item, out)),
+        Value::Array(items) => {
+            for item in items {
+                collect_keys(item, out);
+            }
+        }
         _ => {}
     }
 }

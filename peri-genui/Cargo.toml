@@ -1,0 +1,14 @@
+[package]
+name = "peri-genui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Framework-agnostic OpenUI Lang core for Peri"
+license = "MIT"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+icu_collator.workspace = true

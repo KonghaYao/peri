@@ -119,6 +119,7 @@ pub fn scan_images(sanitized: &str) -> Vec<ImageInfo> {
 /// 非结构语法（无 markdown 标记字符，不破坏 `|` 行首表头检测）、可映射回
 /// 原始字节区间（side table 按序号查表）。NUL 优于 PUA：显示宽度为 0
 /// （漏替换也不撑宽表格/行），且用户输入/输入法路径几乎不可能产生。
+#[must_use]
 fn image_token(n: usize) -> String {
     format!("\u{0}IMG{n}\u{0}")
 }
@@ -142,8 +143,11 @@ pub fn replace_images(text: &str, infos: &[ImageInfo]) -> (String, Vec<ImageInfo
         with_tokens.push(updated);
     }
     let mut replaced = text.to_string();
-    for info in with_tokens.iter().rev() {
-        replaced.replace_range(info.byte_start..info.byte_end, &info.token);
+    {
+        let iteration_items = with_tokens.iter().rev();
+        for info in iteration_items {
+            replaced.replace_range(info.byte_start..info.byte_end, &info.token);
+        }
     }
     (replaced, with_tokens)
 }

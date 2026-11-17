@@ -9,10 +9,10 @@
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-};
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio::process::Command;
 
 const SCRIPT_URL_SH: &str =
     "https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.sh";
@@ -28,6 +28,7 @@ const SCRIPT_URL_PS1_PROXIED: &str =
     "https://github-proxy-5ad00a.netlify.app/konghayao/peri/raw/main/scripts/install.ps1";
 
 /// Install-script URL for the current platform.
+#[must_use]
 fn script_url(use_proxy: bool, windows: bool) -> &'static str {
     match (windows, use_proxy) {
         (false, false) => SCRIPT_URL_SH,
@@ -50,6 +51,7 @@ struct InstallerEnv {
 /// The proxied API URL belongs to a third-party mirror, so the user's
 /// `GITHUB_TOKEN` must not reach it; direct installs keep the token for
 /// GitHub API rate-limit bypass.
+#[must_use]
 fn installer_env(use_proxy: bool) -> InstallerEnv {
     if use_proxy {
         InstallerEnv {

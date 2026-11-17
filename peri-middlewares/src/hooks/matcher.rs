@@ -1,4 +1,4 @@
-use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
+use peri_acp_types::builtin_mcp;
 use regex::Regex;
 
 /// 匹配型归一（IF-D6 ⑥ / A4）：`matcher` 与 `tool_name` 两侧都按
@@ -13,8 +13,8 @@ fn any_candidate_match(
     tool_name: &str,
     matches: impl Fn(&str, &str) -> bool,
 ) -> bool {
-    let matcher_original = original_tool_name_of_effective(matcher);
-    let tool_original = original_tool_name_of_effective(tool_name);
+    let matcher_original = builtin_mcp::original_tool_name_of_effective(matcher);
+    let tool_original = builtin_mcp::original_tool_name_of_effective(tool_name);
     matches(matcher, tool_name)
         || tool_original.is_some_and(|original| matches(matcher, original))
         || matcher_original.is_some_and(|original| matches(original, tool_name))
@@ -35,6 +35,7 @@ fn any_candidate_match(
 ///
 /// builtin 一等工具的 effective name（`mcp__<实例>__<原始名>`）与裸名 `WebFetch`
 /// 两种写法都命中（IF-D6 ⑥ 匹配型归一，见 [`any_candidate_match`]）。
+#[must_use]
 pub fn matches_matcher(matcher: &str, tool_name: &str) -> bool {
     if matcher == "*" || matcher.is_empty() {
         return true;
@@ -65,6 +66,7 @@ fn matches_matcher_name(matcher: &str, tool_name: &str) -> bool {
 ///
 /// 工具名比较同样走 IF-D6 ⑥ 匹配型归一：条件侧写裸名 `WebFetch(...)` 与写
 /// effective name（`mcp__<实例>__<原始名>(...)`）都命中（见 [`any_candidate_match`]）。
+#[must_use]
 pub fn matches_if_condition(
     condition: &str,
     tool_name: &str,
@@ -131,7 +133,7 @@ mod parity_tests {
                     .iter()
                     .find(|tool| tool.original_name == original_name)
             })
-            .map(|tool| tool.effective_name)
+            .map(|tool| tool.legacy_name)
             .expect("builtin 声明表应声明该 (实例, 原始工具名)")
     }
 
@@ -185,7 +187,7 @@ mod parity_tests {
     fn hooks_matcher_unknown_names_behave_exactly_as_before() {
         // 未命中归一表 ⇒ 候选名只有原样，等价于单次比较
         assert_eq!(
-            original_tool_name_of_effective("mcp__filesystem__read_file"),
+            builtin_mcp::original_tool_name_of_effective("mcp__filesystem__read_file"),
             None
         );
         assert!(matches_matcher(
@@ -206,7 +208,7 @@ mod parity_tests {
         // 大小写敏感保持：与 effective name 仅差大小写的名字不是同一个名字
         let effective = effective_name("web", "WebFetch");
         assert_eq!(
-            original_tool_name_of_effective(&effective.to_lowercase()),
+            builtin_mcp::original_tool_name_of_effective(&effective.to_lowercase()),
             None
         );
         assert!(!matches_matcher(&effective.to_lowercase(), effective));

@@ -1,6 +1,7 @@
 //! Compact event handlers — CompactStarted, CompactCompleted.
 
-use super::*;
+use super::{BridgeState, SessionPhase};
+
 use crate::i18n;
 use crate::kit::tui_render_unit::TuiNoteLevel;
 use fluent_bundle::FluentValue;

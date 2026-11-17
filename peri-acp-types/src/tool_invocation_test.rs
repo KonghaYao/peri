@@ -1,6 +1,8 @@
 //! canonical 执行身份与来源契约测试（身份分离：invocation vs 模型 tool-call ID）。
 
-use super::*;
+use crate::tool_invocation::EffectiveToolCall;
+use crate::tool_invocation::InvocationId;
+use crate::tool_invocation::InvocationOrigin;
 
 // -- 执行身份 / 来源 ----------------------------------------------------------
 

@@ -1,13 +1,17 @@
 //! 迟到 open 与 gap seek 的窗口页回归（自 `history_window_page_test` 拆分）。
 
-use super::*;
+use super::AcpEventData;
+use super::WindowIdentity;
+use super::WindowPagePlacement;
+use super::WindowRequestContext;
+use super::serial;
 
 #[test]
 #[serial]
 fn late_open_replaces_only_replay_prefix_and_keeps_appended_turn() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
+    let (mut state, _guard) = super::state_with_window();
     crate::kit::history_paging::reset_browsing_state();
     // 旧回放：一个已登记区间的展示单元。
     state
@@ -26,7 +30,7 @@ fn late_open_replaces_only_replay_prefix_and_keeps_appended_turn() {
         .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
             "new question".to_string(),
         )));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
     assert!(state.generation > requested_display);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
@@ -41,16 +45,19 @@ fn late_open_replaces_only_replay_prefix_and_keeps_appended_turn() {
         display_generation: requested_display,
         gap: None,
     };
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::HistoryWindowPageLoaded {
             context: Box::new(context),
-            response: Box::new(response(identity, vec![text_item("m1", 10, "page")])),
+            response: Box::new(super::response(
+                identity,
+                vec![super::text_item("m1", 10, "page")],
+            )),
         },
     );
 
     assert_eq!(
-        committed_texts(&state),
+        super::committed_texts(&state),
         vec!["page", "new question"],
         "旧回放被原位替换，open 在途期间追加的消息保留且不重复"
     );
@@ -63,7 +70,7 @@ fn late_open_replaces_only_replay_prefix_and_keeps_appended_turn() {
 fn late_open_without_known_replay_boundary_keeps_display_intact() {
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
+    let (mut state, _guard) = super::state_with_window();
     crate::kit::history_paging::reset_browsing_state();
     state
         .committed
@@ -76,7 +83,7 @@ fn late_open_without_known_replay_boundary_keeps_display_intact() {
         .push_back(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
             "new answer".to_string(),
         )));
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     let identity = WindowIdentity::new("s1", "gen-2", 8, "snap-2");
     let context = WindowRequestContext {
@@ -90,16 +97,19 @@ fn late_open_without_known_replay_boundary_keeps_display_intact() {
         display_generation: requested_display,
         gap: None,
     };
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::HistoryWindowPageLoaded {
             context: Box::new(context),
-            response: Box::new(response(identity, vec![text_item("m1", 10, "page")])),
+            response: Box::new(super::response(
+                identity,
+                vec![super::text_item("m1", 10, "page")],
+            )),
         },
     );
 
     assert_eq!(
-        committed_texts(&state),
+        super::committed_texts(&state),
         vec!["legacy replay", "new answer"],
         "无法确认旧回放边界时不得整体清空，也不得把旧页重复铺上去"
     );
@@ -120,7 +130,7 @@ fn gap_seek_response_fills_the_gap_in_place_without_reordering() {
     };
     use crate::kit::tui_render_unit::{TuiRenderUnit, TuiUserBubble};
 
-    let (mut state, _guard) = state_with_window();
+    let (mut state, _guard) = super::state_with_window();
     let identity = state.window.identity().cloned().expect("identity");
     let source = crate::kit::history_window::HistorySource::Own;
     let entry_a = HistoryEntryView::new(
@@ -229,16 +239,19 @@ fn gap_seek_response_fills_the_gap_in_place_without_reordering() {
         "test fixture must keep two distinct resident segments"
     );
 
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::HistoryWindowPageLoaded {
             context: Box::new(context),
-            response: Box::new(response(identity, vec![text_item("b", 20, "b")])),
+            response: Box::new(super::response(
+                identity,
+                vec![super::text_item("b", 20, "b")],
+            )),
         },
     );
 
     assert_eq!(
-        committed_texts(&state),
+        super::committed_texts(&state),
         vec!["a", "b", "live answer"],
         "gap response must be inserted where the gap was, before live tail content"
     );

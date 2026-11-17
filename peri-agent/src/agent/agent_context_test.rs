@@ -1,7 +1,9 @@
 //! 从 agent_context.rs 分离的测试模块
-use super::*;
+use crate::agent::agent_context::AgentContext;
 use crate::agent::stages::StageContext;
+use crate::messages::BaseMessage;
 use crate::messages::MessageContent;
+use crate::middleware::state::MiddlewareState;
 use crate::session::store::FrozenContext;
 use crate::session::Session;
 use std::sync::Arc;
@@ -137,7 +139,7 @@ fn replacement_preserves_visible_message_order_and_defers_transcript_write() {
             .transcript
             .read()
             .get(second.id())
-            .unwrap()
+            .expect("the id fixture result is required for this assertion")
             .message()
             .content(),
         "second"

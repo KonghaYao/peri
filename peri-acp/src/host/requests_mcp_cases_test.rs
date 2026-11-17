@@ -1,4 +1,15 @@
-use super::*;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
+use async_trait::async_trait;
+#[cfg(test)]
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// session/new 首发无 mcp 条目；MCP 发现完成后经「发现管线直接写入命令
 /// 注册表（A3 `mark_source_completed`）→ **注册表 on_change（投影重建唯一
@@ -10,19 +21,21 @@ use super::*;
 #[tokio::test]
 async fn test_available_commands_update_mcp_callback_resend() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/new",
         &json!({ "cwd": tmp.path().to_str().unwrap() }),
         &cfg,
@@ -32,7 +45,7 @@ async fn test_available_commands_update_mcp_callback_resend() {
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap().to_string();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
+    crate::host::requests::session_lifecycle::after_new_response(&cfg, &transport_dyn, &sid).await;
 
     // 命令面投影的观测口径：**只数** `session/update` 里的 available_commands_update。
     // 同一会话另有 `peri/unstable_event` 通道（如会话任务投影的 bg-task-snapshot），
@@ -176,14 +189,17 @@ async fn test_available_commands_update_mcp_callback_resend() {
 #[tokio::test]
 async fn test_session_load_prewarms_mcp_discovery_smoke() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps::default());
     let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending());
     // 夹具补生产步骤：生产装配给每个池 spawn `run_initialize`
@@ -194,12 +210,17 @@ async fn test_session_load_prewarms_mcp_discovery_smoke() {
     // 池本身仍无任何已连接 server（本用例的 prewarm 空跑面不变）。
     pool.mark_initialized();
     cfg.mcp_pool = Some(pool);
-    create_bound_fixture(&cfg, tmp.path().to_str().unwrap(), Some("s1")).await;
+    crate::host::requests::tests::create_bound_fixture(
+        &cfg,
+        tmp.path().to_str().unwrap(),
+        Some("s1"),
+    )
+    .await;
     let mut sessions = HashMap::new();
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/load",
         &json!({ "sessionId": "s1", "cwd": tmp.path().to_str().unwrap() }),
         &cfg,
@@ -233,14 +254,16 @@ async fn test_session_load_prewarms_mcp_discovery_smoke() {
 #[tokio::test]
 async fn test_available_commands_update_ui_entries_from_caps_details() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let cfg = make_server_config(peri_config, provider, &tmp).await;
+    let cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     // 协商 caps：仅上送两条自定义 ui 明细（大写 name 验证小写归一 + alias 透传）
     cfg.session_manager.set_pending_caps(PeriCaps {
         ui_commands: vec![
@@ -262,7 +285,7 @@ async fn test_available_commands_update_ui_entries_from_caps_details() {
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
-    let result = handle_request(
+    let result = crate::host::requests::handle_request(
         "session/new",
         &json!({ "cwd": tmp.path().to_str().unwrap() }),
         &cfg,
@@ -272,7 +295,7 @@ async fn test_available_commands_update_ui_entries_from_caps_details() {
     .await
     .unwrap();
     let sid = result["sessionId"].as_str().unwrap();
-    super::session_lifecycle::after_new_response(&cfg, &transport_dyn, sid).await;
+    crate::host::requests::session_lifecycle::after_new_response(&cfg, &transport_dyn, sid).await;
 
     let notifications = transport.notifications();
     assert_eq!(notifications.len(), 1, "首发仅一条 session/update 通知");
@@ -330,14 +353,16 @@ async fn test_available_commands_update_ui_entries_from_caps_details() {
 #[tokio::test]
 async fn test_available_commands_update_callbacks_do_not_hold_strong_refs() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-openai-test",
-        "gpt-4o",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-openai-test",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let _cfg = make_server_config(peri_config, provider, &tmp).await;
+    let _cfg = crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     let transport: Arc<MockTransport> = Arc::new(MockTransport::default());
     let transport_dyn: Arc<dyn crate::transport::AcpTransport> = transport.clone();
 
@@ -365,14 +390,17 @@ async fn test_available_commands_update_callbacks_do_not_hold_strong_refs() {
 #[tokio::test]
 async fn test_mcp_list_requires_negotiated_oauth_capability() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-test-placeholder",
+            "gpt-test",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps::default());
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
@@ -394,14 +422,17 @@ async fn test_mcp_list_requires_negotiated_oauth_capability() {
 #[tokio::test]
 async fn test_legacy_agent_event_mcp_list_returns_snapshot() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-test-placeholder",
+            "gpt-test",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         agent_event: true,
         ..PeriCaps::default()
@@ -423,14 +454,17 @@ async fn test_legacy_agent_event_mcp_list_returns_snapshot() {
 #[tokio::test]
 async fn test_mcp_list_returns_bounded_safe_empty_snapshot_when_negotiated() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-test-placeholder",
+            "gpt-test",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         oauth: true,
         ..PeriCaps::default()
@@ -458,10 +492,6 @@ struct CatalogPool {
 
 #[async_trait]
 impl peri_acp_types::ports::McpPoolPort for CatalogPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
         peri_acp_types::ports::McpPoolShutdownReport::Complete {
             settled_services: 0,
@@ -486,14 +516,17 @@ async fn test_mcp_list_projects_connection_meta() {
         McpToolInfo,
     };
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-test-placeholder",
+            "gpt-test",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         oauth: true,
         ..PeriCaps::default()
@@ -618,14 +651,17 @@ async fn test_mcp_list_projects_connection_meta() {
 #[tokio::test]
 async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-test-placeholder",
+            "gpt-test",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         oauth: true,
         ..PeriCaps::default()
@@ -650,14 +686,17 @@ async fn test_legacy_agent_event_oauth_start_without_flow_id_generates_one() {
     // caps: agent_event=true 且 oauth=false（legacy TUI 契约）——无 flow_id 时
     // 必须由 host 自动生成并受理；TUI 的 [ 授权 ] 按钮依赖这条兜底路径。
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-test-placeholder",
+            "gpt-test",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         agent_event: true,
         ..PeriCaps::default()
@@ -690,14 +729,17 @@ async fn test_legacy_agent_event_oauth_start_without_flow_id_generates_one() {
 #[tokio::test]
 async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let peri_config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "sk-test-placeholder",
-        "gpt-test",
-    ));
+    let peri_config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "sk-test-placeholder",
+            "gpt-test",
+        ),
+    );
     let provider = LlmProvider::from_config(&peri_config).unwrap();
-    let mut cfg = make_server_config(peri_config, provider, &tmp).await;
+    let mut cfg =
+        crate::host::requests::tests::make_server_config(peri_config, provider, &tmp).await;
     cfg.session_manager.set_pending_caps(PeriCaps {
         oauth: true,
         ..PeriCaps::default()
@@ -736,9 +778,13 @@ async fn handle_mcp_projection(
     connection.commit_initialize(cfg.session_manager.effective_host_caps());
     let connection = connection.facts();
     match method {
-        "mcp/list" => super::mcp_oauth::handle_list(params, cfg, &connection, true),
-        "mcp/oauth_start" => super::mcp_oauth::handle_oauth_start(params, cfg, &connection),
-        "mcp/oauth_callback" => super::mcp_oauth::handle_oauth_callback(params, cfg, &connection),
+        "mcp/list" => crate::host::requests::mcp_oauth::handle_list(params, cfg, &connection, true),
+        "mcp/oauth_start" => {
+            crate::host::requests::mcp_oauth::handle_oauth_start(params, cfg, &connection)
+        }
+        "mcp/oauth_callback" => {
+            crate::host::requests::mcp_oauth::handle_oauth_callback(params, cfg, &connection)
+        }
         _ => unreachable!(),
     }
 }

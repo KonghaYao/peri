@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use serde_json::{json, Value};
 
-use super::ingestion_events_to_otel;
-use crate::{error::LangfuseError, types::IngestionEvent};
+use crate::error::LangfuseError;
+use crate::types::IngestionEvent;
 
 fn event(kind: &str, body: Value) -> IngestionEvent {
     serde_json::from_value(json!({
@@ -16,7 +16,7 @@ fn event(kind: &str, body: Value) -> IngestionEvent {
 }
 
 fn wire(events: &[IngestionEvent]) -> Value {
-    let request = ingestion_events_to_otel(events).unwrap();
+    let request = super::ingestion_events_to_otel(events).unwrap();
     serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap()
 }
 
@@ -42,7 +42,7 @@ fn attr<'a>(span: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 fn failure(events: &[IngestionEvent]) -> String {
-    match ingestion_events_to_otel(events) {
+    match super::ingestion_events_to_otel(events) {
         Err(LangfuseError::IngestionApi(message)) => message,
         result => panic!("expected a safe conversion error, got {result:?}"),
     }
@@ -521,9 +521,13 @@ fn trace_attributes_remain_distinct_and_metadata_has_filterable_fields() {
         ("langfuse.trace.metadata.category", "test"),
     ];
     assert_eq!(attrs(span).len(), expected.len());
-    for ((actual_key, actual_value), (key, value)) in attrs(span).iter().zip(expected) {
-        assert_eq!(*actual_key, key);
-        assert_eq!(**actual_value, json!({"stringValue": value}));
+    {
+        let attributes = attrs(span);
+        let paired_attributes = attributes.iter().zip(expected);
+        for ((actual_key, actual_value), (key, value)) in paired_attributes {
+            assert_eq!(*actual_key, key);
+            assert_eq!(**actual_value, json!({"stringValue": value}));
+        }
     }
 }
 

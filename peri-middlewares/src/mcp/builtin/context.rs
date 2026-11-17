@@ -16,11 +16,16 @@
 //! - cron scheduler 由**组合根**构造并以 `Arc` 注入同一份（A1）：本类型不新建
 //!   第二份 scheduler（`Arc::ptr_eq` 可观察）。
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::collections::BTreeSet;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+#[cfg(not(target_os = "emscripten"))]
+use std::sync::Arc;
 
 #[cfg(not(target_os = "emscripten"))]
 use parking_lot::Mutex;
-use peri_acp_types::builtin_mcp::find;
+#[cfg(not(target_os = "emscripten"))]
+use peri_acp_types::builtin_mcp;
 use thiserror::Error;
 
 #[cfg(not(target_os = "emscripten"))]
@@ -57,7 +62,18 @@ pub struct CronInstanceInput {
     pub tick_enabled: bool,
 }
 
+#[cfg(not(target_os = "emscripten"))]
+impl Debug for CronInstanceInput {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CronInstanceInput")
+            .field("tick_enabled", &self.tick_enabled)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(target_os = "emscripten")]
+#[derive(Debug)]
 pub struct CronInstanceInput;
 
 /// 宿主装配构造并注入 pool 的 builtin 实例上下文（IF-P3-04）。
@@ -92,13 +108,7 @@ pub struct BuiltinInstanceContext {
     /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace_resources: Option<WorkspaceResourcesInput>,
-    /// `workspace` 实例 Bash 的**有效 `run_in_background` 缺省**（beta flag 投影）。
-    ///
-    /// 装配期一次注入：会话装配从**会话冻结**的 flag 值派生，dispatch 只读不改、
-    /// 不读配置、不派生根（AW3-11 模式）。`false` = 既有行为（未显式传参走前台）。
-    #[cfg(not(target_os = "emscripten"))]
-    pub workspace_bash_default_run_in_background: bool,
-    /// A24 关闭集：`policy_key ∈ disabled_middlewares` 的实例名（唯一实现
+    /// A24 关闭集：能力开关（v5 能力名或迁移期旧键）命中的实例名（唯一实现
     /// `mcp::builtin::closed_instances`，宿主经 `peri_middlewares::assembly` 的薄委托派生）。
     ///
     /// 语义是**非物理**关闭（只关本 turn 的工具投影与同步目标），因此本类型只承载它、
@@ -115,8 +125,19 @@ pub struct BuiltinInstanceContext {
     pub skills_face_closed: bool,
 }
 
+impl Debug for BuiltinInstanceContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("BuiltinInstanceContext");
+        debug.field("cwd", &self.cwd);
+        debug
+            .field("skills_face_closed", &self.skills_face_closed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl BuiltinInstanceContext {
     /// 最小构造：给定 cwd，无实例输入、关闭集为空、技能面关闭位为假。
+    #[must_use]
     pub fn new(cwd: impl Into<String>) -> Self {
         Self {
             cwd: cwd.into(),
@@ -127,8 +148,6 @@ impl BuiltinInstanceContext {
             workspace: None,
             #[cfg(not(target_os = "emscripten"))]
             workspace_resources: None,
-            #[cfg(not(target_os = "emscripten"))]
-            workspace_bash_default_run_in_background: false,
             closed: BTreeSet::new(),
             skills_face_closed: false,
         }
@@ -136,6 +155,7 @@ impl BuiltinInstanceContext {
 
     /// 提供 `cron` 实例输入。
     #[cfg(not(target_os = "emscripten"))]
+    #[must_use]
     pub fn with_cron(mut self, input: CronInstanceInput) -> Self {
         self.cron = Some(input);
         self
@@ -143,6 +163,7 @@ impl BuiltinInstanceContext {
 
     /// 提供 `workflow` 实例输入（会话装配注入的运行时槽位；见 [`Self::workflow`]）。
     #[cfg(not(target_os = "emscripten"))]
+    #[must_use]
     pub fn with_workflow(mut self, input: WorkflowInstanceInput) -> Self {
         self.workflow = Some(input);
         self
@@ -150,6 +171,7 @@ impl BuiltinInstanceContext {
 
     /// 仅供旧装配测试；生产 Workspace 不使用此输入。
     #[cfg(not(target_os = "emscripten"))]
+    #[must_use]
     pub fn with_workspace(mut self, input: WorkspaceInstanceInput) -> Self {
         self.workspace = Some(input);
         self
@@ -161,27 +183,22 @@ impl BuiltinInstanceContext {
     /// 只表达「装配期已产出该输入」，不改变 `instance_input_ready`——资源面缺失是
     /// 「未支持」而不是「实例不可装配」（`workspace` 落 `Some(_) => true` 分支）。
     #[cfg(not(target_os = "emscripten"))]
+    #[must_use]
     pub fn with_workspace_resources(mut self, input: WorkspaceResourcesInput) -> Self {
         self.workspace_resources = Some(input);
         self
     }
 
     /// 设置 A24 关闭集（`closed_instances(...)` 的产物，原样承载）。
+    #[must_use]
     pub fn with_closed(mut self, closed: BTreeSet<String>) -> Self {
         self.closed = closed;
         self
     }
 
-    /// 提供 `workspace` 实例 Bash 的有效 `run_in_background` 缺省（装配期 flag 投影，
-    /// 见 [`Self::workspace_bash_default_run_in_background`]；不在此处推导）。
-    #[cfg(not(target_os = "emscripten"))]
-    pub fn with_workspace_bash_default_run_in_background(mut self, default: bool) -> Self {
-        self.workspace_bash_default_run_in_background = default;
-        self
-    }
-
     /// 设置宿主技能面关闭位（宿主装配从**同一份** `disabled_middlewares` 派生，
     /// 见 [`Self::skills_face_closed`]；不在此处推导，避免第二份判定）。
+    #[must_use]
     pub fn with_skills_face_closed(mut self, closed: bool) -> Self {
         self.skills_face_closed = closed;
         self
@@ -210,7 +227,7 @@ impl BuiltinInstanceContext {
         if !crate::platform::builtin_instance_supported(instance) {
             return false;
         }
-        match find(instance).map(|registered| registered.name) {
+        match builtin_mcp::find(instance).map(|registered| registered.name) {
             Some("cron") => self.cron.is_some(),
             Some("workflow") => self.workflow.is_some(),
             Some(_) => true,

@@ -3,7 +3,7 @@
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::RewindCandidate;
 
-use super::{rewind_candidate_response, rewind_candidates, REWIND_CANDIDATE_LIMIT};
+use super::REWIND_CANDIDATE_LIMIT;
 
 #[test]
 fn test_candidates_extracts_only_user_messages() {
@@ -13,7 +13,7 @@ fn test_candidates_extracts_only_user_messages() {
         BaseMessage::human("第二轮用户问题"),
     ];
 
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let messages = result["messages"].as_array().unwrap();
 
     assert_eq!(messages.len(), 2, "只提取 user 消息");
@@ -33,7 +33,7 @@ fn test_candidates_excludes_system_reminder_injection() {
         BaseMessage::human("<system-reminder>后台任务完成通知</system-reminder>"),
     ];
 
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let messages = result["messages"].as_array().unwrap();
 
     assert_eq!(messages.len(), 1, "纯系统注入消息不进入候选");
@@ -49,7 +49,7 @@ fn test_candidates_preserves_user_message_with_trailing_reminder() {
         "请用 Write 工具创建文件\n<system-reminder>Bypass 模式：工具调用自动批准</system-reminder>",
     )];
 
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let messages = result["messages"].as_array().unwrap();
 
     assert_eq!(
@@ -75,14 +75,14 @@ fn test_candidates_drops_pure_reminder_after_strip() {
         " \n<system-reminder>后台任务完成通知</system-reminder>\n",
     )];
 
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let messages = result["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 0, "剥离后为空的注入消息不进候选");
 }
 
 #[test]
 fn test_candidates_empty_history_returns_empty_list() {
-    let result = rewind_candidates(&[]).unwrap();
+    let result = super::rewind_candidates(&[]).unwrap();
     assert_eq!(result["messages"].as_array().unwrap().len(), 0);
 }
 
@@ -91,7 +91,7 @@ fn test_candidates_preview_truncated_to_200_chars() {
     let long = "x".repeat(500);
     let history = vec![BaseMessage::human(long.as_str())];
 
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let preview = result["messages"][0]["preview"].as_str().unwrap();
     assert_eq!(preview.chars().count(), 200);
 }
@@ -104,7 +104,7 @@ fn test_candidates_newest_first() {
         BaseMessage::ai("第一轮回答"),
         BaseMessage::human("第二轮问题"),
     ];
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let messages = result["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0]["preview"], "第二轮问题", "最新在前");
@@ -117,7 +117,7 @@ fn test_candidates_are_bounded_to_latest_64_user_messages() {
         .map(|index| BaseMessage::human(format!("message-{index}")))
         .collect::<Vec<_>>();
 
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let messages = result["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 64);
     assert_eq!(messages[0]["preview"], "message-99");
@@ -134,7 +134,7 @@ fn test_trailing_pure_reminders_do_not_consume_the_limit() {
         BaseMessage::human(format!("<system-reminder>notice-{index}</system-reminder>"))
     }));
 
-    let result = rewind_candidates(&history).unwrap();
+    let result = super::rewind_candidates(&history).unwrap();
     let messages = result["messages"].as_array().unwrap();
     assert_eq!(messages.len(), REWIND_CANDIDATE_LIMIT);
     assert_eq!(messages[0]["preview"], "valid-69");
@@ -168,7 +168,7 @@ fn test_candidate_response_is_bounded_and_cleans_previews() {
         },
     );
 
-    let value = rewind_candidate_response(&candidates);
+    let value = super::rewind_candidate_response(&candidates);
     let messages = value["messages"].as_array().unwrap();
     assert_eq!(messages.len(), REWIND_CANDIDATE_LIMIT, "防御性上限仍生效");
 

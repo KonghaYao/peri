@@ -1,38 +1,48 @@
 //! 公共执行编排辅助与 forwarder 收尾契约。
 
-use super::{
-    await_workflow_forwarder, requested_model,
-    result::{reported_model, workflow_forwarder_dead_result},
-    select_workflow_system_prompt, tool_name_in, workflow_model_bridge,
-};
 use crate::agent::workflow::WorkflowAgentDefinition;
 
 #[test]
 fn agent_type_tool_matching_is_case_insensitive() {
-    assert!(tool_name_in(&["Read".into(), "Grep".into()], "read"));
-    assert!(tool_name_in(&["*".into()], "Write"));
-    assert!(!tool_name_in(&["Read".into()], "Write"));
+    assert!(crate::agent::workflow::agent::tool_name_in(
+        &["Read".into(), "Grep".into()],
+        "read"
+    ));
+    assert!(crate::agent::workflow::agent::tool_name_in(
+        &["*".into()],
+        "Write"
+    ));
+    assert!(!crate::agent::workflow::agent::tool_name_in(
+        &["Read".into()],
+        "Write"
+    ));
 }
 
 /// [回归测试] MCP 迁移后，旧 agent.md / allowedTools 的允许和禁止列表
 /// 必须仍匹配同一能力；否则允许列表丢工具、禁止列表放行写入和 shell。
 #[test]
 fn workflow_tool_policy_matches_builtin_names_in_both_directions() {
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         for tool in instance.tools {
             assert!(
-                tool_name_in(&[tool.original_name.into()], tool.effective_name),
+                crate::agent::workflow::agent::tool_name_in(
+                    &[tool.original_name.into()],
+                    tool.legacy_name
+                ),
                 "旧声明必须覆盖 MCP 工具：{}",
-                tool.effective_name
+                tool.legacy_name
             );
             assert!(
-                tool_name_in(&[tool.effective_name.into()], tool.original_name),
+                crate::agent::workflow::agent::tool_name_in(
+                    &[tool.legacy_name.into()],
+                    tool.original_name
+                ),
                 "MCP 声明必须覆盖原始工具：{}",
                 tool.original_name
             );
-            assert!(tool_name_in(
+            assert!(crate::agent::workflow::agent::tool_name_in(
                 &[tool.original_name.to_lowercase()],
-                tool.effective_name
+                tool.legacy_name
             ));
         }
     }
@@ -41,18 +51,30 @@ fn workflow_tool_policy_matches_builtin_names_in_both_directions() {
 /// 外部服务同名工具不是 builtin 能力，禁止通过拆前缀扩大授权。
 #[test]
 fn workflow_tool_policy_preserves_external_names_and_wildcard_rules() {
-    assert!(!tool_name_in(&["Bash".into()], "mcp__external__Bash"));
-    assert!(!tool_name_in(&["Read".into()], "mcp__workspace__Write"));
-    assert!(tool_name_in(&["*".into()], "mcp__workspace__Write"));
-    assert!(!tool_name_in(
+    assert!(!crate::agent::workflow::agent::tool_name_in(
+        &["Bash".into()],
+        "mcp__external__Bash"
+    ));
+    assert!(!crate::agent::workflow::agent::tool_name_in(
+        &["Read".into()],
+        "mcp__workspace__Write"
+    ));
+    assert!(crate::agent::workflow::agent::tool_name_in(
+        &["*".into()],
+        "mcp__workspace__Write"
+    ));
+    assert!(!crate::agent::workflow::agent::tool_name_in(
         &["*".into(), "Read".into()],
         "mcp__workspace__Write"
     ));
-    assert!(tool_name_in(
+    assert!(crate::agent::workflow::agent::tool_name_in(
         &["mcp__external__Bash".into()],
         "MCP__EXTERNAL__BASH"
     ));
-    assert!(!tool_name_in(&[], "mcp__workspace__Read"));
+    assert!(!crate::agent::workflow::agent::tool_name_in(
+        &[],
+        "mcp__workspace__Read"
+    ));
 }
 
 #[test]
@@ -63,7 +85,7 @@ fn requested_model_prefers_workflow_value() {
     };
 
     assert_eq!(
-        requested_model(Some("sonnet"), Some(&definition)),
+        crate::agent::workflow::agent::requested_model(Some("sonnet"), Some(&definition)),
         Some("sonnet")
     );
 }
@@ -75,13 +97,16 @@ fn requested_model_inherit_overrides_agent_definition() {
         ..Default::default()
     };
 
-    assert_eq!(requested_model(Some("inherit"), Some(&definition)), None);
+    assert_eq!(
+        crate::agent::workflow::agent::requested_model(Some("inherit"), Some(&definition)),
+        None
+    );
 }
 
 #[test]
 fn requested_model_trims_concrete_model_name() {
     assert_eq!(
-        requested_model(Some("  claude-sonnet-4-5  "), None),
+        crate::agent::workflow::agent::requested_model(Some("  claude-sonnet-4-5  "), None),
         Some("claude-sonnet-4-5")
     );
 }
@@ -93,17 +118,23 @@ fn requested_model_uses_agent_definition_when_omitted() {
         ..Default::default()
     };
 
-    assert_eq!(requested_model(None, Some(&definition)), Some("haiku"));
+    assert_eq!(
+        crate::agent::workflow::agent::requested_model(None, Some(&definition)),
+        Some("haiku")
+    );
 }
 
 #[test]
 fn result_model_falls_back_to_effective_model() {
     assert_eq!(
-        reported_model(None, "claude-haiku-4-5"),
+        crate::agent::workflow::agent::result::reported_model(None, "claude-haiku-4-5"),
         Some("claude-haiku-4-5".into())
     );
     assert_eq!(
-        reported_model(Some("provider-reported".into()), "claude-haiku-4-5"),
+        crate::agent::workflow::agent::result::reported_model(
+            Some("provider-reported".into()),
+            "claude-haiku-4-5"
+        ),
         Some("provider-reported".into())
     );
 }
@@ -119,7 +150,7 @@ async fn workflow_drops_last_event_bus_owner_before_awaiting_forwarder() {
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        await_workflow_forwarder(bus.into(), handle),
+        crate::agent::workflow::agent::await_workflow_forwarder(bus.into(), handle),
     )
     .await
     .expect("dropping the separately-held EventBus must close all channels")
@@ -132,7 +163,7 @@ async fn workflow_forwarder_join_error_maps_to_dead_failure() {
         crate::agent::events_v2::EventBus::new(crate::agent::events_v2::EventBusConfig::default());
     let handle = tokio::spawn(std::future::pending());
     handle.abort();
-    let failure = await_workflow_forwarder(bus.into(), handle)
+    let failure = crate::agent::workflow::agent::await_workflow_forwarder(bus.into(), handle)
         .await
         .expect_err("aborted forwarder must fail the workflow run");
     assert_eq!(
@@ -140,7 +171,7 @@ async fn workflow_forwarder_join_error_maps_to_dead_failure() {
         peri_acp_types::session::ExecutionFailureKind::Internal
     );
     assert!(matches!(
-        workflow_forwarder_dead_result(),
+        crate::agent::workflow::agent::result::workflow_forwarder_dead_result(),
         peri_acp_types::workflow::AgentRunResult::Dead { reason: Some(reason), .. }
             if reason == "event-forwarder-failed"
     ));
@@ -162,7 +193,10 @@ impl crate::middleware::r#trait::Middleware for LateContributionMiddleware {
     }
 
     fn prompt_contribution(&self) -> Option<String> {
-        self.contribution.lock().unwrap().clone()
+        self.contribution
+            .lock()
+            .expect("self contribution mutex must remain unpoisoned throughout the test")
+            .clone()
     }
 }
 
@@ -185,8 +219,11 @@ impl peri_model::Model for WorkflowCaptureModel {
         request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> peri_model::ModelResult<peri_model::ModelStream> {
-        self.requests.lock().unwrap().push(request);
-        let response = peri_model::ModelResponse::new(
+        self.requests
+            .lock()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
+            .push(request);
+        let response = peri_model::ModelResponse::try_new(
             peri_model::ModelMessage::assistant_text("done"),
             peri_model::StopReason::EndTurn,
             None,
@@ -203,7 +240,7 @@ impl WorkflowCaptureModel {
     fn last_system(&self) -> String {
         self.requests
             .lock()
-            .unwrap()
+            .expect("self requests mutex must remain unpoisoned throughout the test")
             .last()
             .map(|request| {
                 request
@@ -241,7 +278,7 @@ async fn workflow_bridge_reads_contributions_at_request_time() {
     let model = std::sync::Arc::new(WorkflowCaptureModel {
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let bridge = workflow_model_bridge(
+    let bridge = crate::agent::workflow::agent::workflow_model_bridge(
         std::sync::Arc::clone(&model) as std::sync::Arc<dyn peri_model::Model>,
         "BASE_SYSTEM".to_string(),
         None,
@@ -255,15 +292,18 @@ async fn workflow_bridge_reads_contributions_at_request_time() {
     bridge
         .generate_reasoning(&[crate::messages::BaseMessage::human("hi")], &[], None)
         .await
-        .unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
     assert_eq!(model.last_system(), "BASE_SYSTEM");
 
     // 2) before_agent 填贡献后：同一个 bridge 的下一个请求带当前贡献。
-    *contribution.lock().unwrap() = Some("LATE_SKILLS_SUMMARY".to_string());
+    *contribution
+        .lock()
+        .expect("contribution lock mutex must remain unpoisoned throughout the test") =
+        Some("LATE_SKILLS_SUMMARY".to_string());
     bridge
         .generate_reasoning(&[crate::messages::BaseMessage::human("again")], &[], None)
         .await
-        .unwrap();
+        .expect("the generate reasoning fixture result is required for this assertion");
     let system = model.last_system();
     // 统一权威组合：静态 base + reserved boundary + 动态贡献（M1）。
     assert_eq!(
@@ -305,7 +345,7 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
         (None, None, "FALLBACK_INTERNAL"),
     ];
     for (definition, frozen_default, expected_internal) in cases {
-        let internal = select_workflow_system_prompt(
+        let internal = crate::agent::workflow::agent::select_workflow_system_prompt(
             definition.as_ref(),
             frozen_default,
             &builder,
@@ -319,7 +359,7 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
         let model = std::sync::Arc::new(WorkflowCaptureModel {
             requests: std::sync::Mutex::new(Vec::new()),
         });
-        let bridge = workflow_model_bridge(
+        let bridge = crate::agent::workflow::agent::workflow_model_bridge(
             std::sync::Arc::clone(&model) as std::sync::Arc<dyn peri_model::Model>,
             internal,
             Some(std::sync::Arc::from("WORKFLOW_EXTERNAL")),
@@ -331,7 +371,7 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
         bridge
             .generate_reasoning(&[crate::messages::BaseMessage::human("go")], &[], None)
             .await
-            .unwrap();
+            .expect("the generate reasoning fixture result is required for this assertion");
         let system = model.last_system();
         assert_eq!(system.matches("WORKFLOW_EXTERNAL").count(), 1);
         assert!(system.ends_with(
@@ -341,8 +381,10 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
         assert!(
             system
                 .find(peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
-                .unwrap()
-                < system.find("WORKFLOW_EXTERNAL").unwrap()
+                .expect("the find fixture result is required for this assertion")
+                < system
+                    .find("WORKFLOW_EXTERNAL")
+                    .expect("the find fixture result is required for this assertion")
         );
     }
 }
@@ -417,7 +459,11 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
             agent_id: Option<peri_acp_types::identity::AgentId>,
         ) -> crate::session::subagent::V2SubagentContext {
             if let Some(session) = session.as_ref() {
-                *self.session.lock().unwrap() = Some(Arc::clone(session));
+                *self
+                    .session
+                    .lock()
+                    .expect("self session mutex must remain unpoisoned throughout the test") =
+                    Some(Arc::clone(session));
             }
             crate::session::subagent::DefaultSubagentV2ContextBuilder.build(
                 session,
@@ -518,7 +564,7 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
         .await;
 
     match result {
-        AgentRunResult::Dead { reason, detail } => {
+        AgentRunResult::Dead { reason, detail, .. } => {
             assert_eq!(reason.as_deref(), Some("initial-prompt-enqueue-failed"));
             let detail = detail.unwrap_or_default();
             assert!(
@@ -539,11 +585,26 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
     let session = captured
         .session
         .lock()
-        .unwrap()
+        .expect("captured session mutex must remain unpoisoned throughout the test")
         .clone()
         .expect("execute 必须已构建 v2 会话");
     assert!(
         session.config().cancel_token.is_cancelled(),
         "失败分支必须关闭会话作用域"
+    );
+    let child = resources
+        .threads()
+        .into_iter()
+        .find(|meta| meta.parent_thread_id.as_deref() == Some("workflow-parent") && meta.hidden)
+        .expect("入队失败时 child 已落库");
+    assert_eq!(
+        child.agent_status,
+        peri_acp_types::thread::AgentStatus::Error,
+        "入队失败必须写失败终态"
+    );
+    assert_eq!(
+        child.work_state,
+        peri_acp_types::thread::WorkState::Idle,
+        "入队失败后不得留下续跑意图"
     );
 }

@@ -1,8 +1,7 @@
-use std::{
-    io,
-    sync::{Arc, Barrier},
-    thread,
-};
+use std::io;
+use std::sync::Arc;
+use std::sync::Barrier;
+use std::thread;
 
 use crate::ConfigurationClient;
 
@@ -15,13 +14,13 @@ fn compare_and_write_distinguishes_missing_from_empty_files() {
     let client = ConfigurationClient::local().unwrap();
 
     assert!(client
-        .write_text_if_unchanged(&missing, &None, "created")
+        .write_text_if_unchanged(&missing, None, "created")
         .unwrap());
     assert!(client
-        .write_text_if_unchanged(&empty, &Some(String::new()), "filled")
+        .write_text_if_unchanged(&empty, Some(""), "filled")
         .unwrap());
     assert!(!client
-        .write_text_if_unchanged(&empty, &None, "must not replace")
+        .write_text_if_unchanged(&empty, None, "must not replace")
         .unwrap());
     assert_eq!(client.read_text(&missing).unwrap(), "created");
     assert_eq!(client.read_text(&empty).unwrap(), "filled");
@@ -35,7 +34,7 @@ fn compare_and_write_conflict_preserves_the_current_content() {
     let client = ConfigurationClient::local().unwrap();
 
     assert!(!client
-        .write_text_if_unchanged(&path, &Some("stale".into()), "replacement")
+        .write_text_if_unchanged(&path, Some("stale"), "replacement")
         .unwrap());
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -55,7 +54,7 @@ fn concurrent_compare_and_write_has_a_single_winner() {
         let barrier = barrier.clone();
         thread::spawn(move || {
             barrier.wait();
-            client.write_text_if_unchanged(&path, &Some("initial".into()), content)
+            client.write_text_if_unchanged(&path, Some("initial"), content)
         })
     });
     barrier.wait();
@@ -102,7 +101,7 @@ fn compare_and_write_io_errors_do_not_disclose_file_content() {
     assert!(!error.to_string().contains("secret"));
 
     let error = client
-        .write_text_if_unchanged(&unreadable, &None, "replacement")
+        .write_text_if_unchanged(&unreadable, None, "replacement")
         .unwrap_err();
     assert!(!error.to_string().contains("secret"));
 }

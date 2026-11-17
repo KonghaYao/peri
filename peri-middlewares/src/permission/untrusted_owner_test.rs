@@ -5,12 +5,17 @@
 //! 单条审批（`before_tool` → `broker_approve`）与批量审批
 //!（`before_tools_batch` → `batch_broker_approve`）。
 
+use peri_agent::middleware::Middleware as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use peri_agent::agent::state::AgentState;
 
-use super::*;
+use super::{
+    async_trait, default_requires_approval, AgentError, AgentResult, ApprovalDecision,
+    InteractionContext, InteractionResponse, PermissionMiddleware, ToolCall,
+    TrustedInteractionOwner, UserInteractionBroker,
+};
 
 /// 记录交互次数、被调用即失败的 broker：无归属的路径**不得**产生任何 broker 交互。
 struct PanickingBroker {

@@ -3,8 +3,11 @@ use crate::kit::tui_render_unit::{TuiRenderUnit, TuiToolCard};
 use unicode_width::UnicodeWidthStr;
 
 use super::group::SUBAGENT_TOOL_LINES;
-use super::helpers::is_step_line;
-use super::tool_card::projected_tool_header_text;
+
+pub(crate) fn is_genui_line(ranges: &[std::ops::Range<usize>], logical: usize) -> bool {
+    // 按同帧布局跳过整个结构段，不能从框线字形猜测来源或重新解析消息。
+    ranges.iter().any(|range| range.contains(&logical))
+}
 
 /// §9 语义复制（D3）：按 VM 变体从渲染行提取「语义文本」——复制内容而非
 /// 屏幕像素。供 `extract_visual_range`（selection.rs）在复制时调用（事件时点，
@@ -36,7 +39,7 @@ pub(crate) fn semantic_line_text(
     line: &ratatui_kit::ratatui::text::Line<'static>,
     grid: &GridSpec,
 ) -> Option<String> {
-    if is_step_line(line) {
+    if super::helpers::is_step_line(line) {
         return Some(String::new());
     }
     let plain = crate::kit::text_selection::line_to_plain_text(line);
@@ -138,7 +141,7 @@ fn strip_code_block_visual_padding(
 /// §9 tool header 行语义与视觉 header 共用 `ToolRenderPlan` 投影；仅去除状态符号、
 /// duration 和视觉截断。
 fn tool_header_semantic(data: &TuiToolCard, grid: &GridSpec) -> String {
-    projected_tool_header_text(data, grid)
+    super::tool_card::projected_tool_header_text(data, grid)
 }
 
 /// 子 Agent 失败原因行（§6.7）的「符号/对齐」标记：首行 `× `（错误符号 + 空格）、

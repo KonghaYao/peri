@@ -1,11 +1,15 @@
+use crate::agent::react::AgentOutput;
+use crate::agent::react::Reasoning;
+use crate::agent::react::ToolCall;
+use crate::agent::react::ToolResult;
+use crate::error::AgentError;
+use crate::error::AgentResult;
 use crate::middleware::capabilities as hook_state;
-use crate::{
-    agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
-    error::{AgentError, AgentResult},
-    middleware::{prompt_sections::PromptSection, r#trait::Middleware},
-    tools::BaseTool,
-};
+use crate::middleware::prompt_sections::PromptSection;
+use crate::middleware::r#trait::Middleware;
+use crate::tools::BaseTool;
 use peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+use std::fmt::{self, Debug, Formatter};
 
 /// 动态 prompt 贡献的准入错误（M1）：带来源 middleware 名，调用方可定位。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -18,6 +22,7 @@ pub enum PromptContributionError {
 
 impl PromptContributionError {
     /// 贡献来源 middleware 名（结构化诊断字段）。
+    #[must_use]
     pub fn middleware(&self) -> &str {
         match self {
             Self::ReservedBoundaryToken { middleware } => middleware,
@@ -34,6 +39,7 @@ pub struct MiddlewareChain {
 }
 
 impl MiddlewareChain {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             middlewares: Vec::new(),
@@ -46,20 +52,24 @@ impl MiddlewareChain {
     }
 
     /// 中间件数量
+    #[must_use]
     pub fn len(&self) -> usize {
         self.middlewares.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.middlewares.is_empty()
     }
 
     /// 获取所有中间件名称
+    #[must_use]
     pub fn names(&self) -> Vec<&str> {
         self.middlewares.iter().map(|m| m.name()).collect()
     }
 
     /// 收集所有中间件提供的工具（按注册顺序，后注册的同名工具覆盖先注册的）
+    #[must_use]
     pub fn collect_tools(&self, cwd: &str) -> Vec<Box<dyn BaseTool>> {
         self.middlewares
             .iter()
@@ -77,6 +87,7 @@ impl MiddlewareChain {
     ///
     /// 契约 3（gate 原子迁移）：收集到的段落即持有者已装配（gate 开启）；
     /// 契约 4（运行时缺失防御）：middleware 未提供段落（默认空）不 fail。
+    #[must_use]
     pub fn collect_prompt_sections(&self) -> Vec<PromptSection> {
         self.middlewares
             .iter()
@@ -185,7 +196,8 @@ impl MiddlewareChain {
                     actual = batch_results.len(),
                     "middleware returned an invalid batch result count"
                 );
-                for result in results.iter_mut().filter(|result| result.is_ok()) {
+                let result_items = results.iter_mut().filter(|result| result.is_ok());
+                for result in result_items {
                     *result = Err(AgentError::MiddlewareError {
                         middleware: middleware.name().to_string(),
                         reason: reason.clone(),
@@ -495,3 +507,12 @@ mod prompt_tests;
 #[cfg(test)]
 #[path = "chain_reminder_test.rs"]
 mod reminder_tests;
+
+impl Debug for MiddlewareChain {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MiddlewareChain")
+            .field("middlewares_len", &self.middlewares.len())
+            .finish_non_exhaustive()
+    }
+}

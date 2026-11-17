@@ -5,7 +5,29 @@
 //! （`RelayFixture::app_callback`），断言落在 `SessionInvocationOutcome` 与其
 //! `error_kind()` 投影上。
 
-use super::*;
+use super::AppAttachRequest;
+use super::AppQualification;
+use super::Arc;
+use super::AtomicUsize;
+use super::AttachmentBinding;
+use super::AttachmentId;
+use super::ClientViewId;
+use super::ConnectionEpoch;
+use super::McpAppRecord;
+use super::McpAppRecordSpec;
+use super::McpAppsErrorKind;
+use super::Mutex;
+use super::Ordering;
+use super::RequestNamespaceId;
+use super::RequestSeq;
+use super::CONNECTION;
+use super::SERVER;
+use super::SESSION;
+use peri_acp_types::mcp_apps::McpAppsRelayPort as _;
+use peri_acp_types::mcp_apps_facade::McpAppsFeatures;
+use peri_acp_types::mcp_apps_facade::McpAppsLimits;
+use peri_acp_types::mcp_apps_facade::ResourceListRequest;
+use peri_acp_types::mcp_apps_facade::ResourceReadRequest;
 use peri_acp_types::mcp_apps_facade::{AppExecutionState, AttachmentDetachReason, CloseVerdict};
 
 /// 关闭连接 = retire endpoint + 附件 **detach**（D6）：不撤销 record、不取消执行。
@@ -13,7 +35,7 @@ use peri_acp_types::mcp_apps_facade::{AppExecutionState, AttachmentDetachReason,
 async fn closed_connection_detaches_without_revoking_record_or_cancelling_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
     let epoch = ConnectionEpoch::initial();
 
     fixture.relay.close_connection(CONNECTION);
@@ -69,7 +91,7 @@ async fn closed_connection_detaches_without_revoking_record_or_cancelling_execut
 async fn attach_returns_snapshot_without_calling_business_tool() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
 
     let record = fixture.issue_unattached_record();
     fixture
@@ -180,7 +202,7 @@ async fn attach_returns_snapshot_without_calling_business_tool() {
 async fn reattach_bumps_epoch_and_old_epoch_requests_are_rejected() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
     let old_epoch = ConnectionEpoch::initial();
 
     fixture
@@ -249,7 +271,7 @@ async fn reattach_bumps_epoch_and_old_epoch_requests_are_rejected() {
 async fn detach_is_idempotent_and_reattach_recovers_the_view() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
 
     fixture
         .relay
@@ -304,7 +326,7 @@ async fn detach_is_idempotent_and_reattach_recovers_the_view() {
 async fn close_app_revokes_interaction_without_cancelling_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
 
     let outcome = fixture.relay.close_app(SESSION, &fixture.record_id);
     assert_eq!(outcome.verdict, CloseVerdict::Closed);
@@ -344,7 +366,7 @@ async fn close_app_revokes_interaction_without_cancelling_execution() {
 async fn list_apps_projects_descriptor_facts() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
 
     let descriptors = fixture
         .relay
@@ -386,7 +408,7 @@ async fn list_apps_projects_descriptor_facts() {
     let handle = fixture
         .relay
         .pool
-        .get_client(SERVER)
+        .client(SERVER)
         .expect("fixture server installed");
     fixture.relay.pool.advance_handle_generation(&handle);
     let observed = fixture.relay.pool.handle_generation(&handle);
@@ -410,7 +432,7 @@ async fn list_apps_projects_descriptor_facts() {
 async fn resources_read_and_list_use_the_bound_server_only() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
     let epoch = ConnectionEpoch::initial();
 
     let contents = fixture
@@ -488,7 +510,7 @@ async fn resources_read_and_list_use_the_bound_server_only() {
 async fn source_target_comes_from_the_retained_outcome_record_only() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
 
     let error = fixture
         .relay
@@ -537,7 +559,7 @@ async fn source_target_comes_from_the_retained_outcome_record_only() {
 async fn attach_rejects_records_from_another_incarnation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
     let other_session = "relay-session-other";
     let other_incarnation = fixture.service.runtime_epoch() + 1;
     fixture
@@ -599,7 +621,7 @@ async fn attach_rejects_records_from_another_incarnation() {
 async fn new_view_first_attach_after_all_views_detached_is_reported_as_reattached() {
     let calls = Arc::new(AtomicUsize::new(0));
     let inputs = Arc::new(Mutex::new(Vec::new()));
-    let fixture = relay_with_service(calls, inputs).await;
+    let fixture = super::relay_with_service(calls, inputs).await;
 
     fixture
         .relay

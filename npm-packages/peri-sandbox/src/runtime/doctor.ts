@@ -224,7 +224,14 @@ async function probeProfile(
     makeDirectories(options.sandboxesRoot, id);
     writeFileSync(
       policyPath,
-      policyFor({ sandboxesRoot: options.sandboxesRoot, sandboxId: id, profile, periPath: options.periPath }).json,
+      policyFor({
+        sandboxesRoot: options.sandboxesRoot,
+        sandboxId: id,
+        workspacePath: workspace,
+        homePath: home,
+        profile,
+        periPath: options.periPath,
+      }).json,
       { mode: 0o600 },
     );
     writeFileSync(secretPath, 'control-secret', { mode: 0o600 });

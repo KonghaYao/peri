@@ -1,11 +1,16 @@
-use super::*;
 use crate::agent::react::{AgentOutput, ReactLLM, Reasoning};
-use crate::agent::stages::{run_react_loop, ExecutionEntryOrigin, InvocationContext, LoopResult};
+
+use crate::agent::stages::ExecutionEntryOrigin;
+use crate::agent::stages::InvocationContext;
+use crate::agent::stages::LoopResult;
+use crate::agent::stages::StageContext;
 use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, MessageContent};
+use crate::middleware::capabilities as hook_state;
 use crate::middleware::{Middleware, MiddlewareChain};
 use crate::session::queue::{MessageSource, QueuedMessage};
 use crate::session::store::FrozenContext;
+use crate::session::tool_catalog::StartupToolUpdate;
 use crate::session::Session;
 use std::sync::Arc;
 use std::time::Duration;
@@ -211,7 +216,7 @@ async fn cancel_pending_hook(hook: PendingHook) {
     let cancel = context.session.turn.cancel_token.clone();
     let catalog = context.runtime.tool_catalog.clone();
     let before = catalog.snapshot();
-    let mut execution = Box::pin(run_react_loop(context, 10));
+    let mut execution = Box::pin(crate::agent::stages::run_react_loop(context, 10));
     tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
             _ = entered.notified() => {},
@@ -250,7 +255,7 @@ async fn cancel_pending_hook(hook: PendingHook) {
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("next prompt")),
     ));
-    let result = run_react_loop(next, 10).await;
+    let result = crate::agent::stages::run_react_loop(next, 10).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
 }
 
@@ -324,11 +329,13 @@ async fn cancel_pending_batch_approval_preserves_result_count() {
         None,
     );
     let no_bound_targets = std::collections::HashMap::new();
-    let mut approval = Box::pin(run_before_bound_tools_batch(
-        &invocation,
-        &calls,
-        &no_bound_targets,
-    ));
+    let mut approval = Box::pin(
+        crate::agent::stages::middleware_runner::run_before_bound_tools_batch(
+            &invocation,
+            &calls,
+            &no_bound_targets,
+        ),
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
             _ = entered.notified() => {},
@@ -336,11 +343,11 @@ async fn cancel_pending_batch_approval_preserves_result_count() {
         }
     })
     .await
-    .unwrap();
+    .expect("the timeout fixture result is required for this assertion");
     context.session.turn.cancel_token.cancel();
     let results = tokio::time::timeout(Duration::from_millis(200), approval)
         .await
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion");
     assert_eq!(results.len(), calls.len());
     assert!(results
         .iter()
@@ -366,7 +373,8 @@ async fn cancel_pending_first_turn_reminder() {
         entered: entered.clone(),
     }));
     context.runtime.middleware_chain = Arc::new(chain);
-    let mut reminder = Box::pin(run_first_turn_reminders(&context));
+    let mut reminder =
+        Box::pin(crate::agent::stages::middleware_runner::run_first_turn_reminders(&context));
     tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
             _ = entered.notified() => {},
@@ -374,11 +382,11 @@ async fn cancel_pending_first_turn_reminder() {
         }
     })
     .await
-    .unwrap();
+    .expect("the timeout fixture result is required for this assertion");
     context.session.turn.cancel_token.cancel();
     let result = tokio::time::timeout(Duration::from_millis(200), reminder)
         .await
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion");
     assert!(matches!(result, Err(AgentError::Interrupted)));
 }
 
@@ -434,7 +442,7 @@ async fn cancel_pending_tool_postprocessing(hook: PendingHook) {
         .runtime
         .tool_catalog
         .pin_working_tools(&context.runtime.tools.read())
-        .unwrap();
+        .expect("the pin working tools fixture result is required for this assertion");
     let reasoning = Reasoning::with_tools(
         "",
         vec![crate::agent::react::ToolCall::new(
@@ -456,11 +464,11 @@ async fn cancel_pending_tool_postprocessing(hook: PendingHook) {
         }
     })
     .await
-    .unwrap();
+    .expect("the timeout fixture result is required for this assertion");
     context.session.turn.cancel_token.cancel();
     let result = tokio::time::timeout(Duration::from_millis(200), dispatch)
         .await
-        .unwrap();
+        .expect("the timeout fixture result is required for this assertion");
     assert!(matches!(result, Err(AgentError::Interrupted)));
     assert!(
         session
@@ -500,7 +508,7 @@ async fn cancelled_startup_does_not_poll_or_commit_candidate() {
     );
     let before = context.runtime.tool_catalog.snapshot();
     context.session.turn.cancel_token.cancel();
-    let result = run_before_react_start(&context).await;
+    let result = crate::agent::stages::middleware_runner::run_before_react_start(&context).await;
     assert!(matches!(result, Err(AgentError::Interrupted)));
     assert!(Arc::ptr_eq(
         &before,

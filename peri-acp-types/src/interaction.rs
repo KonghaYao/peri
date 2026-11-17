@@ -8,10 +8,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    identity::AttemptId,
-    session::{ExecutionBinding, TurnId},
-};
+use crate::identity::AttemptId;
+use crate::session::ExecutionBinding;
+use crate::session::TurnId;
 
 // ─── ApprovalItem ──────────────────────────────────────────────────────────────
 
@@ -272,10 +271,12 @@ impl UnansweredCause {
 pub struct AttachmentId(String);
 
 impl AttachmentId {
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -327,21 +328,25 @@ pub struct ConnectionEpoch(u64);
 
 impl ConnectionEpoch {
     /// 首次连接的纪元（1；0 保留给「未知/未分配」）。
+    #[must_use]
     pub const fn initial() -> Self {
         Self(1)
     }
 
     /// 从已知值构造（0 = 未知纪元的显式表达，不表示「首次连接」）。
+    #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
     /// 递增到下个纪元（重连时调用）。只增不减，旧纪元不得复用。
+    #[must_use]
     pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
     /// 底层值。
+    #[must_use]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -411,8 +416,9 @@ pub enum InteractionAttribution {
 impl InteractionAttribution {
     /// 从真实 turn 事实铸造模型归属事实。
     ///
-    /// `binding` 必须来自 [`crate::session::TurnContext::execution_binding`] 或其
+    /// `binding` 必须来自 `peri_agent::session::TurnContext::execution_binding` 或其
     /// 等价投影（`InvocationContext`），不得手工拼装。
+    #[must_use]
     pub fn model_turn(session_id: impl Into<String>, binding: ExecutionBinding) -> Self {
         Self::ModelTurn {
             session_id: session_id.into(),
@@ -421,6 +427,7 @@ impl InteractionAttribution {
     }
 
     /// 从 Attachment 事实铸造 App 归属事实。
+    #[must_use]
     pub fn app_attachment(
         app_id: impl Into<String>,
         attachment_id: impl Into<AttachmentId>,
@@ -434,6 +441,7 @@ impl InteractionAttribution {
     }
 
     /// 从 Host 入口事实铸造程序化归属事实。
+    #[must_use]
     pub fn host_request(namespace: impl Into<String>, seq: u64) -> Self {
         Self::HostRequest {
             namespace: namespace.into(),
@@ -585,8 +593,9 @@ pub enum TrustedInteractionOwner {
 impl TrustedInteractionOwner {
     /// 从真实 turn 事实铸造模型归属。
     ///
-    /// `binding` 必须来自 [`crate::session::TurnContext::execution_binding`]
+    /// `binding` 必须来自 `peri_agent::session::TurnContext::execution_binding`
     /// 或其投影（`InvocationContext`），不得手工拼装。
+    #[must_use]
     pub fn model(session_id: impl Into<String>, binding: ExecutionBinding) -> Self {
         Self::Model {
             session_id: session_id.into(),
@@ -596,6 +605,7 @@ impl TrustedInteractionOwner {
     }
 
     /// 从 Attachment 事实铸造 App 归属。
+    #[must_use]
     pub fn app(
         app_id: impl Into<String>,
         attachment_id: impl Into<AttachmentId>,
@@ -609,6 +619,7 @@ impl TrustedInteractionOwner {
     }
 
     /// 从 Host 入口事实铸造程序化归属。
+    #[must_use]
     pub fn host(namespace: impl Into<String>, seq: u64) -> Self {
         Self::Host {
             namespace: namespace.into(),

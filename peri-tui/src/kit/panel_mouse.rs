@@ -25,6 +25,7 @@ pub struct AreaTracker {
 }
 
 impl AreaTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self { rect: None }
     }
@@ -73,6 +74,7 @@ pub fn left_down(mouse: &MouseEvent) -> Option<(u16, u16)> {
 }
 
 /// 判断鼠标列是否落在最右滚动条列（ScrollView 渲染滚动条时该列不可点）。
+#[must_use]
 pub fn is_scrollbar_column(mouse: &MouseEvent, area: Rect) -> bool {
     mouse.column == area.x.saturating_add(area.width).saturating_sub(1)
 }
@@ -127,6 +129,7 @@ mod tests {
     use super::*;
     use ratatui_kit::crossterm::event::MouseEvent;
 
+    #[must_use]
     fn area() -> Rect {
         Rect::new(10, 20, 60, 14)
     }

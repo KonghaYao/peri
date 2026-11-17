@@ -1,5 +1,21 @@
-use super::*;
+use crate::interaction::UnansweredCause;
+use crate::mcp_apps::InvocationTarget;
+use crate::mcp_apps::JsonRpcRequest;
+use crate::mcp_apps::JsonRpcResponse;
+use crate::mcp_apps::McpAppInvokeRequest;
+use crate::mcp_apps::McpAppInvokeResponse;
+use crate::mcp_apps::McpAppRequest;
+use crate::mcp_apps::NotExecutedCause;
+use crate::mcp_apps::RawResource;
+use crate::mcp_apps::SessionInvocationOutcome;
+use crate::mcp_apps::SessionInvocationOutcomeRecord;
+use crate::mcp_apps::SkippedPostHook;
+use crate::mcp_apps::MCP_APPS_ENVELOPE_VERSION;
+use crate::mcp_apps::MCP_APPS_HTML_MIME;
+use crate::mcp_apps::MCP_APPS_PROTOCOL_VERSION;
+use crate::tool_outcome::RawToolResult as RawCallToolResult;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 #[test]
 fn inbound_invoke_envelope_rejects_mcp_protocol_version() {

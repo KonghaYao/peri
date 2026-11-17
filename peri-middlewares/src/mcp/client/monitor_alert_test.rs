@@ -2,13 +2,14 @@
 
 use std::time::{Duration, Instant};
 
-use peri_acp_types::monitor::{
-    monitor_alert_delivery_id, monitor_alert_reminder, MONITOR_META_KEY,
-};
+use peri_acp_types::monitor;
+use peri_acp_types::monitor::MONITOR_META_KEY;
 use rmcp::model::{JsonObject, MetaObject};
 use serde_json::json;
 
-use super::*;
+use super::MonitorAlertAction;
+use super::MonitorAlertState;
+use super::MONITOR_ALERT_MERGE_WINDOW;
 
 fn meta_with(value: serde_json::Value) -> MetaObject {
     let mut fields = JsonObject::new();
@@ -32,7 +33,7 @@ fn observe(
     now: Instant,
     has_inbox: bool,
 ) -> Result<MonitorAlertAction, &'static str> {
-    let meta = parse_monitor_meta(meta)?;
+    let meta = super::parse_monitor_meta(meta)?;
     Ok(state.decide(meta.alert_matched, now, has_inbox))
 }
 
@@ -156,7 +157,7 @@ fn missing_or_malformed_meta_is_an_error_and_does_not_advance() {
 
 #[test]
 fn valid_meta_parses_camel_case_fields() {
-    let parsed = parse_monitor_meta(Some(&valid_meta())).expect("valid meta");
+    let parsed = super::parse_monitor_meta(Some(&valid_meta())).expect("valid meta");
     assert_eq!(parsed.alert_matched, 3);
     assert_eq!(parsed.last_alert_seq, Some(42));
     assert_eq!(parsed.label.as_deref(), Some("build"));
@@ -164,23 +165,23 @@ fn valid_meta_parses_camel_case_fields() {
 
 #[test]
 fn same_id_and_hits_produce_verbatim_identical_reminders() {
-    let first = monitor_alert_reminder("monitor-1", Some("build"), 7, Some(99))
+    let first = monitor::monitor_alert_reminder("monitor-1", Some("build"), 7, Some(99))
         .expect("reminder")
         .as_reminder()
         .body
         .clone();
-    let second = monitor_alert_reminder("monitor-1", Some("build"), 7, Some(99))
+    let second = monitor::monitor_alert_reminder("monitor-1", Some("build"), 7, Some(99))
         .expect("reminder")
         .as_reminder()
         .body
         .clone();
     assert_eq!(first, second);
     assert_eq!(
-        monitor_alert_delivery_id("monitor-1", 7),
-        monitor_alert_delivery_id("monitor-1", 7)
+        monitor::monitor_alert_delivery_id("monitor-1", 7),
+        monitor::monitor_alert_delivery_id("monitor-1", 7)
     );
     assert_ne!(
-        monitor_alert_delivery_id("monitor-1", 7),
-        monitor_alert_delivery_id("monitor-1", 8)
+        monitor::monitor_alert_delivery_id("monitor-1", 7),
+        monitor::monitor_alert_delivery_id("monitor-1", 8)
     );
 }

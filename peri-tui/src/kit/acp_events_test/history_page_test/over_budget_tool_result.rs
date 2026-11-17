@@ -1,6 +1,17 @@
 //! 超预算工具结果的延迟补读与展开认领（自 `history_page_test` 拆分）。
 
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+
+use super::HistoryPageResponse;
+use super::TuiRenderUnit;
+
+use super::history_page;
+use super::history_paging;
+use super::json;
+
+use super::serial;
+
 use crate::kit::acp_events::history_page::{
     DEFERRED_TOOL_RESULT_TEXT, UNAVAILABLE_TOOL_RESULT_TEXT,
 };
@@ -21,6 +32,7 @@ fn source(tool_id: &str, token: &str, cursor: &str) -> history_page::ToolResultS
     }
 }
 
+#[must_use]
 fn origin(cursor: &str, limit: usize) -> HistoryPageOrigin {
     HistoryPageOrigin {
         session_id: "s1".into(),
@@ -38,7 +50,7 @@ fn dispatch_refetch(
     tool_id: &str,
     error: Option<String>,
 ) {
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(response),
@@ -73,13 +85,13 @@ async fn test_live_tool_card_with_persistent_position_defers_result_with_source(
         HistoryWindow, HistoryWindowConfig, PersistentEntryKey, WindowIdentity,
     };
 
-    let mut state = browsing_state("tok");
+    let mut state = super::browsing_state("tok");
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
     history_page::clear_pending_tool_ends_for_tests();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "live answer".into(),
@@ -87,7 +99,7 @@ async fn test_live_tool_card_with_persistent_position_defers_result_with_source(
             agent_id: None,
         }),
     );
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
             tool_id: "t-live".into(),
@@ -99,7 +111,7 @@ async fn test_live_tool_card_with_persistent_position_defers_result_with_source(
             origin_readable: None,
         }),
     );
-    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     // 页回执给同一持久条目的位置；live 卡随条目进入可补读区间。
     let key = PersistentEntryKey::own("s1:m-live");
     assert!(state.window.promote_live_seal_position(&key, 10));
@@ -107,16 +119,16 @@ async fn test_live_tool_card_with_persistent_position_defers_result_with_source(
 
     let tail_text = "TAIL-LIVE-END";
     let output = format!("{}{tail_text}", "x".repeat(9 * 1024 * 1024));
-    dispatch_landing_page_with_origin(
+    super::dispatch_landing_page_with_origin(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             Some("cursor-2"),
             vec![(
                 "s1:result",
                 20,
-                vec![sub(0, tool_end("t-live", &output, false))],
+                vec![super::sub(0, super::tool_end("t-live", &output, false))],
             )],
         ),
         Some(origin("cursor-result", 50)),
@@ -143,38 +155,44 @@ async fn test_live_tool_card_with_persistent_position_defers_result_with_source(
 #[serial]
 async fn test_history_page_over_budget_result_defers_then_refetches_by_origin_cursor() {
     use crate::acp_client::AcpTuiClient;
-    use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
+    use peri_acp::transport::AcpTransport;
+    use peri_acp::transport::mpsc::mpsc_transport_pair;
+    use peri_acp::transport::types::IncomingMessage;
     use std::time::Duration;
 
-    let mut state = browsing_state("tok");
-    seed_first_screen_own_entry(&mut state, "s1:own-latest", 100);
+    let mut state = super::browsing_state("tok");
+    super::seed_first_screen_own_entry(&mut state, "s1:own-latest", 100);
     history_page::clear_pending_tool_ends_for_tests();
 
     let tail = "TAIL-9MIB-END";
     let output = format!("{}{tail}", "x".repeat(9 * 1024 * 1024));
     let output_len = output.len();
     // 结果页的请求定位随事件传递：补读必须回到这个 cursor，而不是响应 nextCursor。
-    dispatch_landing_page_with_origin(
+    super::dispatch_landing_page_with_origin(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             Some("cursor-2"),
             vec![(
                 "s1:result",
                 20,
-                vec![sub(0, tool_end("t-big", &output, false))],
+                vec![super::sub(0, super::tool_end("t-big", &output, false))],
             )],
         ),
         Some(origin("cursor-result", 50)),
     );
-    dispatch_landing_page(
+    super::dispatch_landing_page(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
-            vec![("s1:call", 10, vec![sub(0, tool_start("t-big", "Bash"))])],
+            vec![(
+                "s1:call",
+                10,
+                vec![super::sub(0, super::tool_start("t-big", "Bash"))],
+            )],
         ),
     );
 
@@ -280,32 +298,36 @@ async fn test_history_page_over_budget_result_defers_then_refetches_by_origin_cu
 #[test]
 #[serial]
 fn test_history_page_over_budget_error_result_keeps_error_placeholder() {
-    let mut state = browsing_state("tok");
-    seed_first_screen_own_entry(&mut state, "s1:own-latest", 100);
+    let mut state = super::browsing_state("tok");
+    super::seed_first_screen_own_entry(&mut state, "s1:own-latest", 100);
     history_page::clear_pending_tool_ends_for_tests();
 
     let output = format!("{}{tail}", "x".repeat(9 * 1024 * 1024), tail = "FAILED");
-    dispatch_landing_page_with_origin(
+    super::dispatch_landing_page_with_origin(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             Some("cursor-2"),
             vec![(
                 "s1:result",
                 20,
-                vec![sub(0, tool_end("t-big", &output, true))],
+                vec![super::sub(0, super::tool_end("t-big", &output, true))],
             )],
         ),
         Some(origin("cursor-result", 50)),
     );
-    dispatch_landing_page(
+    super::dispatch_landing_page(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
-            vec![("s1:call", 10, vec![sub(0, tool_start("t-big", "Bash"))])],
+            vec![(
+                "s1:call",
+                10,
+                vec![super::sub(0, super::tool_start("t-big", "Bash"))],
+            )],
         ),
     );
 
@@ -322,15 +344,19 @@ fn test_history_page_over_budget_error_result_keeps_error_placeholder() {
 #[test]
 #[serial]
 fn test_history_page_over_budget_no_source_error_result_keeps_error_placeholder() {
-    let mut state = browsing_state("tok");
+    let mut state = super::browsing_state("tok");
     history_page::clear_pending_tool_ends_for_tests();
-    dispatch_landing_page(
+    super::dispatch_landing_page(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
-            vec![("s1:call", 10, vec![sub(0, tool_start("t-big", "Bash"))])],
+            vec![(
+                "s1:call",
+                10,
+                vec![super::sub(0, super::tool_start("t-big", "Bash"))],
+            )],
         ),
     );
     history_page::insert_pending_tool_end_for_tests(
@@ -354,20 +380,20 @@ fn test_history_page_over_budget_no_source_error_result_keeps_error_placeholder(
 #[test]
 #[serial]
 fn test_interleaved_refetch_results_do_not_steal_force_complete() {
-    let mut state = browsing_state("tok");
+    let mut state = super::browsing_state("tok");
     history_page::clear_pending_tool_ends_for_tests();
-    dispatch_landing_page(
+    super::dispatch_landing_page(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
             vec![(
                 "s1:calls",
                 10,
                 vec![
-                    sub(0, tool_start("tA", "Bash")),
-                    sub(1, tool_start("tB", "Bash")),
+                    super::sub(0, super::tool_start("tA", "Bash")),
+                    super::sub(1, super::tool_start("tB", "Bash")),
                 ],
             )],
         ),
@@ -389,22 +415,22 @@ fn test_interleaved_refetch_results_do_not_steal_force_complete() {
     let tail_b = "B-END";
     let output_a = format!("{}{tail_a}", "a".repeat(9 * 1024 * 1024));
     let output_b = format!("{}{tail_b}", "b".repeat(9 * 1024 * 1024));
-    let response_a = page(
+    let response_a = super::page(
         "tok",
         None,
         vec![(
             "s1:result-tA",
             21,
-            vec![sub(0, tool_end("tA", &output_a, false))],
+            vec![super::sub(0, super::tool_end("tA", &output_a, false))],
         )],
     );
-    let response_b = page(
+    let response_b = super::page(
         "tok",
         None,
         vec![(
             "s1:result-tB",
             22,
-            vec![sub(0, tool_end("tB", &output_b, false))],
+            vec![super::sub(0, super::tool_end("tB", &output_b, false))],
         )],
     );
 
@@ -433,20 +459,20 @@ fn test_interleaved_refetch_results_do_not_steal_force_complete() {
 #[test]
 #[serial]
 fn test_refetch_force_marker_is_scoped_to_its_tool() {
-    let mut state = browsing_state("tok");
+    let mut state = super::browsing_state("tok");
     history_page::clear_pending_tool_ends_for_tests();
-    dispatch_landing_page(
+    super::dispatch_landing_page(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
             vec![(
                 "s1:calls",
                 10,
                 vec![
-                    sub(0, tool_start("tA", "Bash")),
-                    sub(1, tool_start("tB", "Bash")),
+                    super::sub(0, super::tool_start("tA", "Bash")),
+                    super::sub(1, super::tool_start("tB", "Bash")),
                 ],
             )],
         ),
@@ -461,13 +487,13 @@ fn test_refetch_force_marker_is_scoped_to_its_tool() {
     let output_a = format!("{}A-END", "a".repeat(9 * 1024 * 1024));
     dispatch_refetch(
         &mut state,
-        page(
+        super::page(
             "tok",
             None,
             vec![(
                 "s1:result-tA",
                 21,
-                vec![sub(0, tool_end("tA", &output_a, false))],
+                vec![super::sub(0, super::tool_end("tA", &output_a, false))],
             )],
         ),
         3,
@@ -478,16 +504,16 @@ fn test_refetch_force_marker_is_scoped_to_its_tool() {
     assert_eq!(summary_a.len(), output_a.len(), "tA 必须补读完整");
 
     let output_b = format!("{}B-END", "b".repeat(9 * 1024 * 1024));
-    dispatch_landing_page(
+    super::dispatch_landing_page(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
             vec![(
                 "s1:result-tB",
                 22,
-                vec![sub(0, tool_end("tB", &output_b, false))],
+                vec![super::sub(0, super::tool_end("tB", &output_b, false))],
             )],
         ),
     );
@@ -504,35 +530,35 @@ fn test_refetch_force_marker_is_scoped_to_its_tool() {
 #[test]
 #[serial]
 fn test_page_origin_follows_its_response_event() {
-    let mut state = browsing_state("tok");
+    let mut state = super::browsing_state("tok");
     history_page::clear_pending_tool_ends_for_tests();
 
     let output_a = format!("{}A-END", "a".repeat(9 * 1024 * 1024));
     let output_b = format!("{}B-END", "b".repeat(9 * 1024 * 1024));
-    dispatch_landing_page_with_origin(
+    super::dispatch_landing_page_with_origin(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
             vec![(
                 "s1:result-tA",
                 21,
-                vec![sub(0, tool_end("tA", &output_a, false))],
+                vec![super::sub(0, super::tool_end("tA", &output_a, false))],
             )],
         ),
         Some(origin("cursor-A", 50)),
     );
-    dispatch_landing_page_with_origin(
+    super::dispatch_landing_page_with_origin(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
             vec![(
                 "s1:result-tB",
                 22,
-                vec![sub(0, tool_end("tB", &output_b, false))],
+                vec![super::sub(0, super::tool_end("tB", &output_b, false))],
             )],
         ),
         Some(origin("cursor-B", 60)),
@@ -557,7 +583,7 @@ fn test_page_origin_follows_its_response_event() {
 fn test_refetch_response_releases_in_flight_when_page_dropped() {
     use crate::kit::acp_events::history_window;
 
-    let mut state = browsing_state("tok-current");
+    let mut state = super::browsing_state("tok-current");
     history_page::clear_pending_tool_ends_for_tests();
     history_window::insert_deferred_tool_result_for_tests(
         "t-big",
@@ -573,16 +599,16 @@ fn test_refetch_response_releases_in_flight_when_page_dropped() {
     );
 
     // 快照已经变化：整页丢弃，但请求必须结束。
-    let stale = page(
+    let stale = super::page(
         "tok-stale",
         None,
         vec![(
             "s1:result-t-big",
             20,
-            vec![sub(0, tool_end("t-big", "late", false))],
+            vec![super::sub(0, super::tool_end("t-big", "late", false))],
         )],
     );
-    dispatch_for_bridge(
+    super::dispatch_for_bridge(
         &mut state,
         &AcpEventData::HistoryPageLoaded {
             response: Box::new(stale),
@@ -616,7 +642,7 @@ async fn test_refetch_times_out_with_explicit_error() {
     use peri_acp::transport::mpsc::mpsc_transport_pair;
     use std::time::{Duration, Instant};
 
-    let _state = browsing_state("tok");
+    let _state = super::browsing_state("tok");
     let deferred_source = source("t-big", "tok", "cursor-result");
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, _tx, _rx) = AcpTuiClient::new(client_transport);
@@ -665,15 +691,19 @@ async fn test_refetch_timeout_releases_in_flight_and_allows_retry() {
     use peri_acp::transport::mpsc::mpsc_transport_pair;
     use std::time::Duration;
 
-    let mut state = browsing_state("tok");
+    let mut state = super::browsing_state("tok");
     history_page::clear_pending_tool_ends_for_tests();
-    dispatch_landing_page(
+    super::dispatch_landing_page(
         &mut state,
         "tok",
-        page(
+        super::page(
             "tok",
             None,
-            vec![("s1:call", 10, vec![sub(0, tool_start("t-big", "Bash"))])],
+            vec![(
+                "s1:call",
+                10,
+                vec![super::sub(0, super::tool_start("t-big", "Bash"))],
+            )],
         ),
     );
     history_window::insert_deferred_tool_result_for_tests(
@@ -721,13 +751,13 @@ async fn test_refetch_timeout_releases_in_flight_and_allows_retry() {
     let output = format!("{}{tail}", "r".repeat(9 * 1024 * 1024));
     dispatch_refetch(
         &mut state,
-        page(
+        super::page(
             "tok",
             None,
             vec![(
                 "s1:result-t-big",
                 20,
-                vec![sub(0, tool_end("t-big", &output, false))],
+                vec![super::sub(0, super::tool_end("t-big", &output, false))],
             )],
         ),
         22,

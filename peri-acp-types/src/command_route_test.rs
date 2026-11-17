@@ -8,8 +8,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use super::*;
+use crate::command::command_args::ArgsSchema;
+use crate::command::command_handler::CommandHandler;
 use crate::command::command_handler::CommandOutcome;
+use crate::command::command_name::CommandLevel;
+use crate::command::command_route::CommandEntryKind;
+use crate::command::command_route::CommandLifecycle;
+use crate::command::command_route::CommandProvenance;
+use crate::command::command_route::CommandSource;
+use crate::command::command_route::RouteEntry;
+use crate::command::command_route::UiCommandSpec;
 use crate::command::CommandContext;
 
 // ─── 测试 fixture ──────────────────────────────────────────────────────────
@@ -186,8 +194,10 @@ fn command_lifecycle_four_states_distinct() {
         CommandLifecycle::Discovered,
         CommandLifecycle::Disconnecting,
     ];
-    for (i, a) in states.iter().enumerate() {
-        for (j, b) in states.iter().enumerate() {
+    let enumerated_a = states.iter().enumerate();
+    for (i, a) in enumerated_a {
+        let enumerated_b = states.iter().enumerate();
+        for (j, b) in enumerated_b {
             assert_eq!(a == b, i == j, "四态两两互异");
         }
     }

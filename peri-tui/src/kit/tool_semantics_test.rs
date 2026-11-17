@@ -1,17 +1,17 @@
-use super::{TodoSnapshot, presentation_for};
+use super::TodoSnapshot;
 use crate::kit::tui_render_unit::{TuiTodoChangeKind, TuiTodoStatus, TuiToolPresentation};
 use serde_json::json;
 
 #[test]
 fn skill_presentation_uses_skill_and_legacy_skill_name() {
     assert_eq!(
-        presentation_for("Skill", &json!({"skill": "using-superpowers"}), None),
+        super::presentation_for("Skill", &json!({"skill": "using-superpowers"}), None),
         TuiToolPresentation::Skill(crate::kit::tui_render_unit::TuiSkillPresentation {
             name: "using-superpowers".into(),
         }),
     );
     assert_eq!(
-        presentation_for("SkillTool", &json!({"skill_name": "legacy-skill"}), None),
+        super::presentation_for("SkillTool", &json!({"skill_name": "legacy-skill"}), None),
         TuiToolPresentation::Skill(crate::kit::tui_render_unit::TuiSkillPresentation {
             name: "legacy-skill".into(),
         }),
@@ -21,7 +21,7 @@ fn skill_presentation_uses_skill_and_legacy_skill_name() {
 #[test]
 fn malformed_todo_input_falls_back_to_generic_card() {
     assert_eq!(
-        presentation_for("TodoWrite", &json!({"todos": "not-an-array"}), None),
+        super::presentation_for("TodoWrite", &json!({"todos": "not-an-array"}), None),
         TuiToolPresentation::Generic,
     );
 }
@@ -29,7 +29,7 @@ fn malformed_todo_input_falls_back_to_generic_card() {
 #[test]
 fn skill_without_a_parseable_name_stays_safe_and_semantic() {
     assert_eq!(
-        presentation_for("Skill", &json!({"skill": 42}), None),
+        super::presentation_for("Skill", &json!({"skill": 42}), None),
         TuiToolPresentation::Skill(crate::kit::tui_render_unit::TuiSkillPresentation {
             name: "unknown".into(),
         }),
@@ -38,7 +38,7 @@ fn skill_without_a_parseable_name_stays_safe_and_semantic() {
 
 #[test]
 fn initial_todo_snapshot_reports_progress_and_added_items() {
-    let presentation = presentation_for(
+    let presentation = super::presentation_for(
         "TodoWrite",
         &json!({
             "todos": [
@@ -80,7 +80,7 @@ fn todo_diff_tracks_status_active_form_and_removed_items() {
     }))
     .expect("previous todo snapshot should parse");
 
-    let presentation = presentation_for(
+    let presentation = super::presentation_for(
         "TodoWrite",
         &json!({
             "todos": [
@@ -119,7 +119,7 @@ fn todo_diff_marks_completed_task_returning_to_work_as_reopened() {
     }))
     .expect("previous todo snapshot should parse");
 
-    let presentation = presentation_for(
+    let presentation = super::presentation_for(
         "TodoWrite",
         &json!({
             "todos": [{"content": "回归任务", "status": "in_progress"}]
@@ -140,7 +140,7 @@ fn identical_todo_snapshot_has_no_changes() {
     });
     let previous = TodoSnapshot::parse(&input).expect("snapshot should parse");
 
-    let presentation = presentation_for("TodoWrite", &input, Some(&previous));
+    let presentation = super::presentation_for("TodoWrite", &input, Some(&previous));
     let TuiToolPresentation::Todo(todo) = presentation else {
         panic!("expected Todo presentation");
     };

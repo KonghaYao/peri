@@ -1,13 +1,22 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use rmcp::{
-    model::{CustomRequest, CustomResult, ReadResourceRequestParams, ReadResourceResponse},
-    service::{RequestContext, RoleServer},
-    ServerHandler,
-};
+use rmcp::model::CustomRequest;
+use rmcp::model::CustomResult;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResponse;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::ServerHandler;
 use tokio::sync::Notify;
 
-use super::super::{output_store::tests::Wire, AcpConnectionDeclaration, McpClientPool};
+use super::super::output_store::tests::Wire;
+use super::super::AcpConnectionDeclaration;
+use super::super::McpClientPool;
+
+/// 与 `read_resource` 返回的正文一致：rmcp 3.9.0 校验 manifest 必须包含自身
+/// `SKILL.md`，activation 也按该内容校验 digest。
+const OLD_SKILL_MD: &str = "---\nname: old\ndescription: old generation\n---\n\nold";
 
 struct DelayedProvider {
     entered: Arc<Notify>,
@@ -22,6 +31,21 @@ impl DelayedProvider {
 }
 
 impl ServerHandler for DelayedProvider {
+    /// rmcp 3.9.0 按 server 声明的 skills 扩展门控 `skills/list` / `skills/get`，
+    /// 未声明时请求在进入 handler 前就回 `-32601`。
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        let mut capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_resources()
+            .build();
+        let mut extensions = rmcp::model::ExtensionCapabilities::new();
+        extensions.insert(
+            peri_acp_types::skills::SKILLS_EXTENSION_ID.to_string(),
+            rmcp::model::JsonObject::new(),
+        );
+        capabilities.extensions = Some(extensions);
+        rmcp::model::ServerConfig::new(capabilities)
+    }
+
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -30,7 +54,7 @@ impl ServerHandler for DelayedProvider {
         self.respond().await;
         Ok(ReadResourceResponse::Complete(
             serde_json::from_value(serde_json::json!({
-                    "contents": [{"uri": request.uri, "text": "---\nname: old\ndescription: old generation\n---\n\nold"}],
+                    "contents": [{"uri": request.uri, "text": OLD_SKILL_MD}],
                 "ttlMs": 60000, "cacheScope": "public"
             }))
             .unwrap(),
@@ -47,6 +71,26 @@ impl ServerHandler for DelayedProvider {
             "skills": [{"uri": "skill://old/SKILL.md", "frontmatter": {"name": "old", "description": "old generation"}}],
             "ttlMs": 60000, "cacheScope": "public"
         })))
+    }
+
+    /// rmcp 3.9.0 起 `skills/list` 是类型化请求，mock 必须同样可阻塞应答。
+    async fn list_skills(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListSkillsResult, rmcp::ErrorData> {
+        self.respond().await;
+        let skill = rmcp::model::Skill::new(
+            "skill://old/SKILL.md",
+            rmcp::model::SkillFrontmatter::new("old", "old generation"),
+            rmcp::model::SkillResources::Files(vec![rmcp::model::SkillResource::from_bytes(
+                "skill://old/SKILL.md",
+                OLD_SKILL_MD.as_bytes(),
+            )]),
+        );
+        Ok(rmcp::model::ListSkillsResult::with_all_items(vec![skill])
+            .with_ttl_ms(60000)
+            .with_cache_scope(rmcp::model::CacheScope::Public))
     }
 }
 
@@ -171,7 +215,7 @@ async fn scoped_skill_and_legacy_cache_rejects_old_tickets_and_keeps_same_genera
     .await;
     let pool = Arc::new(McpClientPool::new_empty());
     install_acp(&wire, &pool, "first");
-    let handle = pool.get_client("server").unwrap();
+    let handle = pool.client("server").unwrap();
     let (cache, origin) = pool.resource_cache_for_handle(&handle).unwrap();
     for method in ["skills/list", "skills/legacy-read"] {
         let ticket = cache.ticket(&origin, method, "null").await.unwrap();
@@ -212,6 +256,31 @@ async fn scoped_skill_and_legacy_cache_rejects_old_tickets_and_keeps_same_genera
     wire.close().await;
 }
 
+/// [回归测试] 延迟 provider 的 `skills/list` 必须返回含自身 `SKILL.md` 的
+/// 完整 manifest，否则 rmcp 3.9.0 在进入 fencing 逻辑前就拒绝整页。
+#[tokio::test]
+async fn delayed_provider_lists_a_valid_typed_skill_manifest() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let wire = Wire::connect(DelayedProvider {
+        entered: entered.clone(),
+        release: release.clone(),
+    })
+    .await;
+    let peer = wire.client.peer().clone();
+    let request = tokio::spawn(async move { peer.list_skills(None).await });
+    entered.notified().await;
+    release.notify_one();
+    let result = request.await.unwrap().expect("typed skills/list");
+    let skill = result.skills.first().expect("一条技能");
+    skill.validate().expect("manifest 必须包含 SKILL.md");
+    let rmcp::model::SkillResources::Files(files) = &skill.resources else {
+        panic!("静态技能必须是完整 manifest");
+    };
+    assert!(files.iter().any(|file| file.uri == "skill://old/SKILL.md"));
+    wire.close().await;
+}
+
 #[tokio::test]
 async fn delayed_skill_and_legacy_discovery_cannot_publish_or_cache_a_retired_connection() {
     for skills_capable in [true, false] {
@@ -230,7 +299,7 @@ async fn delayed_skill_and_legacy_discovery_cannot_publish_or_cache_a_retired_co
             handle.skills_capable = skills_capable;
             handle.resources = vec![rmcp::model::Resource::new("skill://old/SKILL.md", "old")];
         }
-        let handle = pool.get_client("server").unwrap();
+        let handle = pool.client("server").unwrap();
         pool.advance_handle_generation(&handle);
         let cache = pool.resource_cache_for_handle(&handle).unwrap();
         let old_origin = cache.1.clone();

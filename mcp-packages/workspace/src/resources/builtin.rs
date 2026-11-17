@@ -13,15 +13,16 @@
 //!   不在本表；宿主把宿主绑定的任何 builtin 实例都视为本地来源，两者在目录面
 //!   同形（`AgentSource::Local` + scope = builtin）。
 
-use peri_acp_types::workspace_resources::{
-    digest_bytes, is_valid_uri_segment, ResourceScope, SKILL_ENTRY_FILE,
-};
-use peri_mcp_common::agent_definition::frontmatter::{frontmatter_json, frontmatter_summary};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::SKILL_ENTRY_FILE;
+use peri_mcp_common::agent_definition::frontmatter;
 
 use super::skills::{SkillFileRecord, SkillRecord, SkillStore};
 use super::ResourceBudget;
 
 /// 单个 builtin 技能的编译期嵌入数据。
+#[derive(Debug)]
 pub struct BuiltinSkill {
     /// 注册表名（与 frontmatter `name` 一致；有测试锁定）。
     pub name: &'static str,
@@ -59,6 +60,10 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         name: "monitor",
         content: include_str!("builtin/skills/monitor/SKILL.md"),
     },
+    BuiltinSkill {
+        name: "interview",
+        content: include_str!("builtin/skills/interview/SKILL.md"),
+    },
 ];
 
 /// builtin 技能的原始字节（`SkillRecord::read_file` 的静态读取路径）。
@@ -72,6 +77,7 @@ pub(crate) fn builtin_skill_bytes(index: usize) -> Option<&'static [u8]> {
 /// `peri-middlewares/src/subagent/built-in/*.md` 迁入）。
 ///
 /// `id` = 文件 stem（宿主 `subagent_type` 参数值），定义文件与之一致。
+#[derive(Debug)]
 pub struct BuiltinAgent {
     /// Agent 标识（`agent://builtin/{id}/agent.md` 的 `{id}` 段）。
     pub id: &'static str,
@@ -113,51 +119,54 @@ pub(crate) fn builtin_agent_bytes(index: usize) -> Option<&'static [u8]> {
 /// 构造 builtin 技能条目（frontmatter 解析失败 / 名称非法 / 超预算的条目跳过并记日志）。
 pub(crate) fn builtin_skill_records(budget: &ResourceBudget) -> Vec<SkillRecord> {
     let mut records = Vec::new();
-    for (index, skill) in BUILTIN_SKILLS.iter().enumerate() {
-        let bytes = skill.content.as_bytes();
-        if bytes.len() as u64 > budget.max_file_bytes {
-            tracing::warn!(skill = skill.name, "builtin 技能超过大小预算，跳过");
-            continue;
+    {
+        let indexed_entries = BUILTIN_SKILLS.iter().enumerate();
+        for (index, skill) in indexed_entries {
+            let bytes = skill.content.as_bytes();
+            if bytes.len() as u64 > budget.max_file_bytes {
+                tracing::warn!(skill = skill.name, "builtin 技能超过大小预算，跳过");
+                continue;
+            }
+            let Some(frontmatter) = frontmatter::frontmatter_json(skill.content) else {
+                tracing::warn!(
+                    skill = skill.name,
+                    "builtin 技能 frontmatter 解析失败，跳过"
+                );
+                continue;
+            };
+            let Some((name, description)) = frontmatter::frontmatter_summary(&frontmatter) else {
+                tracing::warn!(skill = skill.name, "builtin 技能缺 name/description，跳过");
+                continue;
+            };
+            if name != skill.name {
+                tracing::warn!(
+                    registry_name = skill.name,
+                    frontmatter_name = %name,
+                    "builtin 注册表名与 frontmatter name 不一致"
+                );
+            }
+            if !workspace_resources::is_valid_uri_segment(&name) {
+                tracing::warn!(
+                    skill = skill.name,
+                    "builtin 技能名不符合 URI 段约束，不公开"
+                );
+                continue;
+            }
+            records.push(SkillRecord {
+                scope: ResourceScope::Builtin,
+                plugin_name: None,
+                name,
+                description,
+                store: SkillStore::Builtin { index },
+                frontmatter,
+                files: vec![SkillFileRecord {
+                    relative_path: SKILL_ENTRY_FILE.to_string(),
+                    digest: workspace_resources::digest_bytes(bytes),
+                    size: bytes.len() as u64,
+                    text: true,
+                }],
+            });
         }
-        let Some(frontmatter) = frontmatter_json(skill.content) else {
-            tracing::warn!(
-                skill = skill.name,
-                "builtin 技能 frontmatter 解析失败，跳过"
-            );
-            continue;
-        };
-        let Some((name, description)) = frontmatter_summary(&frontmatter) else {
-            tracing::warn!(skill = skill.name, "builtin 技能缺 name/description，跳过");
-            continue;
-        };
-        if name != skill.name {
-            tracing::warn!(
-                registry_name = skill.name,
-                frontmatter_name = %name,
-                "builtin 注册表名与 frontmatter name 不一致"
-            );
-        }
-        if !is_valid_uri_segment(&name) {
-            tracing::warn!(
-                skill = skill.name,
-                "builtin 技能名不符合 URI 段约束，不公开"
-            );
-            continue;
-        }
-        records.push(SkillRecord {
-            scope: ResourceScope::Builtin,
-            plugin_name: None,
-            name,
-            description,
-            store: SkillStore::Builtin { index },
-            frontmatter,
-            files: vec![SkillFileRecord {
-                relative_path: SKILL_ENTRY_FILE.to_string(),
-                digest: digest_bytes(bytes),
-                size: bytes.len() as u64,
-                text: true,
-            }],
-        });
     }
     records
 }

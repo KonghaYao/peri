@@ -1,5 +1,5 @@
-use super::*;
-use peri_acp::transport::mpsc::mpsc_transport_pair;
+use super::AcpTuiClient;
+use super::App;
 
 #[tokio::test]
 async fn attach_acp_rejects_second_attachment_before_spawning_host() {
@@ -8,9 +8,9 @@ async fn attach_acp_rejects_second_attachment_before_spawning_host() {
     const TEST_NAME: &str =
         "launch::tests::attach_acp_rejects_second_attachment_before_spawning_host";
     if std::env::var_os(CHILD_ENV).is_none() {
-        // App::new reads config and environment before the duplicate guard.
+        // App::try_new reads config and environment before the duplicate guard.
         // Isolate those process-wide inputs, not just its SQLite database.
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut command = std::process::Command::new(std::env::current_exe().expect("attach acp rejects second attachment before spawning host: isolated fixture workspace must remain accessible"));
         command
             .args(["--exact", TEST_NAME, "--nocapture"])
             .env_clear()
@@ -38,15 +38,15 @@ async fn attach_acp_rejects_second_attachment_before_spawning_host() {
     crate::config::set_global_config_path(Some(temp.path().join("settings.json")));
     let db_path = temp.path().join("threads.db");
     let mut app =
-        App::new(peri_acp_types::session_store::SessionStoreDeployment::local_path(db_path))
+        App::try_new(peri_acp_types::session_store::SessionStoreDeployment::local_path(db_path))
             .await
             .expect("app");
-    let (client_transport, _server_transport) = mpsc_transport_pair();
+    let (client_transport, _server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) =
         AcpTuiClient::new_interactive(client_transport);
     app.acp_client = Some(client);
 
-    let error = match attach_acp(&mut app).await {
+    let error = match super::attach_acp(&mut app).await {
         Ok(_) => panic!("duplicate attach unexpectedly succeeded"),
         Err(error) => error,
     };

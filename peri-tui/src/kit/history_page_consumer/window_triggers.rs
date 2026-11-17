@@ -6,12 +6,21 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use super::*;
+use super::WINDOW_DEFAULT_BYTE_BUDGET;
+use super::WINDOW_PAGE_LIMIT;
+use super::WindowClaim;
+use super::WindowConsumerRequest;
+use super::WindowDirection;
+use super::WindowPageCursor;
+use super::WindowPagingStatus;
+use super::atoms;
+use super::history_paging;
+
 use crate::kit::history_paging::WindowGapRequest;
 use crate::kit::history_window::GapSeekDirection;
 
 pub fn request_window_older_page_if_due() -> bool {
-    if !window_path_enabled() {
+    if !super::window_path_enabled() {
         return false;
     }
     let cursor = {
@@ -36,18 +45,22 @@ pub fn request_window_older_page_if_due() -> bool {
         cursor
     };
     let Some(request) =
-        build_window_page_request(WindowPageCursor::Before(cursor), WINDOW_PAGE_LIMIT)
+        super::build_window_page_request(WindowPageCursor::Before(cursor), WINDOW_PAGE_LIMIT)
     else {
         return false;
     };
     let request_id = request.request_id().to_string();
-    match claim_window_request(&request) {
+    match super::claim_window_request(&request) {
         WindowClaim::Granted(_) => {
             let sent = atoms::HISTORY_WINDOW_TX
                 .get()
                 .is_some_and(|tx| tx.send(request).is_ok());
             if !sent {
-                fail_window_request(&request_id, "history window channel is unavailable", false);
+                super::fail_window_request(
+                    &request_id,
+                    "history window channel is unavailable",
+                    false,
+                );
             }
             sent
         }
@@ -64,7 +77,7 @@ pub fn request_window_older_page_if_due() -> bool {
 }
 
 pub fn request_window_newer_page_if_due() -> bool {
-    if !window_path_enabled() {
+    if !super::window_path_enabled() {
         return false;
     }
     let cursor = {
@@ -89,18 +102,22 @@ pub fn request_window_newer_page_if_due() -> bool {
         cursor
     };
     let Some(request) =
-        build_window_page_request(WindowPageCursor::After(cursor), WINDOW_PAGE_LIMIT)
+        super::build_window_page_request(WindowPageCursor::After(cursor), WINDOW_PAGE_LIMIT)
     else {
         return false;
     };
     let request_id = request.request_id().to_string();
-    match claim_window_request(&request) {
+    match super::claim_window_request(&request) {
         WindowClaim::Granted(_) => {
             let sent = atoms::HISTORY_WINDOW_TX
                 .get()
                 .is_some_and(|tx| tx.send(request).is_ok());
             if !sent {
-                fail_window_request(&request_id, "history window channel is unavailable", false);
+                super::fail_window_request(
+                    &request_id,
+                    "history window channel is unavailable",
+                    false,
+                );
             }
             sent
         }
@@ -121,9 +138,9 @@ pub fn build_window_gap_request(
 ) -> Option<WindowConsumerRequest> {
     match history_paging::window_gap_recovery(window)? {
         WindowGapRequest::Page { gap_id, cursor } => {
-            build_window_page_request_for_gap(Some(gap_id), cursor, WINDOW_PAGE_LIMIT)
+            super::build_window_page_request_for_gap(Some(gap_id), cursor, WINDOW_PAGE_LIMIT)
         }
-        WindowGapRequest::Seek { gap_id, anchor } => build_window_seek_request_for_gap(
+        WindowGapRequest::Seek { gap_id, anchor } => super::build_window_seek_request_for_gap(
             Some(gap_id),
             anchor,
             WINDOW_PAGE_LIMIT,
@@ -138,7 +155,7 @@ pub fn build_window_gap_request(
 /// （更晚）消费 `Page(After)`；`None`（方向未知）接受任一候选。seek 目标同时
 /// 覆盖两侧。发送成功后只移除被消费的候选，另一方向留待反向滚动。
 pub fn request_window_gap_if_due(direction: Option<GapSeekDirection>) -> bool {
-    if !window_path_enabled() {
+    if !super::window_path_enabled() {
         return false;
     }
     let gap = {
@@ -154,10 +171,12 @@ pub fn request_window_gap_if_due(direction: Option<GapSeekDirection>) -> bool {
         gap
     };
     let request = match &gap {
-        WindowGapRequest::Page { gap_id, cursor } => {
-            build_window_page_request_for_gap(Some(*gap_id), cursor.clone(), WINDOW_PAGE_LIMIT)
-        }
-        WindowGapRequest::Seek { gap_id, anchor } => build_window_seek_request_for_gap(
+        WindowGapRequest::Page { gap_id, cursor } => super::build_window_page_request_for_gap(
+            Some(*gap_id),
+            cursor.clone(),
+            WINDOW_PAGE_LIMIT,
+        ),
+        WindowGapRequest::Seek { gap_id, anchor } => super::build_window_seek_request_for_gap(
             Some(*gap_id),
             anchor.clone(),
             WINDOW_PAGE_LIMIT,
@@ -168,7 +187,7 @@ pub fn request_window_gap_if_due(direction: Option<GapSeekDirection>) -> bool {
         return false;
     };
     let request_id = request.request_id().to_string();
-    match claim_window_request(&request) {
+    match super::claim_window_request(&request) {
         WindowClaim::Granted(_) => {
             let sent = atoms::HISTORY_WINDOW_TX
                 .get()
@@ -177,7 +196,11 @@ pub fn request_window_gap_if_due(direction: Option<GapSeekDirection>) -> bool {
                 let handle = atoms::WINDOW_GAP_REQUEST.state();
                 handle.write().retain(|candidate| candidate != &gap);
             } else {
-                fail_window_request(&request_id, "history window gap channel unavailable", false);
+                super::fail_window_request(
+                    &request_id,
+                    "history window gap channel unavailable",
+                    false,
+                );
             }
             sent
         }
@@ -195,7 +218,7 @@ pub fn enqueue_window_gap_request(window: &crate::kit::history_window::HistoryWi
 }
 
 pub fn retry_window_open_if_due(now: Instant) -> Option<WindowConsumerRequest> {
-    if !window_path_enabled() {
+    if !super::window_path_enabled() {
         return None;
     }
     let handle = atoms::HISTORY_WINDOW_PAGING.state();
@@ -213,7 +236,7 @@ pub fn retry_window_open_if_due(now: Instant) -> Option<WindowConsumerRequest> {
     if now < retry_at {
         return None;
     }
-    let request_id = next_request_id(&mut state);
+    let request_id = super::next_request_id(&mut state);
     Some(WindowConsumerRequest::Open {
         request_id,
         session_id: state.session_id.clone(),
@@ -228,13 +251,13 @@ pub fn request_window_retry_if_due() -> bool {
         return false;
     };
     let request_id = request.request_id().to_string();
-    match claim_window_request(&request) {
+    match super::claim_window_request(&request) {
         WindowClaim::Granted(_) => {
             let sent = atoms::HISTORY_WINDOW_TX
                 .get()
                 .is_some_and(|tx| tx.send(request).is_ok());
             if !sent {
-                fail_window_request(
+                super::fail_window_request(
                     &request_id,
                     "history window retry channel unavailable",
                     false,

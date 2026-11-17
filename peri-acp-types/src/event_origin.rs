@@ -1,11 +1,11 @@
 //! Runtime-only provenance for a child execution's display events.
 
-use crate::{event::ExecutorEvent, session::ExecutionBinding};
+use crate::event::ExecutorEvent;
+use crate::session::ExecutionBinding;
 use serde::{Deserialize, Serialize};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 static NEXT_CHILD_RUN_ORDER: AtomicU64 = AtomicU64::new(1);
 

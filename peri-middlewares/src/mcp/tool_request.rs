@@ -1,13 +1,16 @@
 //! Own one MCP request until completion. Dropping an invocation sends cancellation
 //! instead of silently leaving server-side work running.
-use rmcp::{
-    model::{
-        CallToolRequest, CallToolRequestParams, CallToolResponse, CancelledNotificationParam,
-        ClientRequest, RequestId, ServerResult,
-    },
-    service::{Peer, PeerRequestOptions, RoleClient},
-    ServiceError,
-};
+use rmcp::model::CallToolRequest;
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CancelledNotificationParam;
+use rmcp::model::ClientRequest;
+use rmcp::model::RequestId;
+use rmcp::model::ServerResult;
+use rmcp::service::Peer;
+use rmcp::service::PeerRequestOptions;
+use rmcp::service::RoleClient;
+use rmcp::ServiceError;
 use std::time::Duration;
 
 const CANCEL_SEND_TIMEOUT: Duration = Duration::from_secs(1);

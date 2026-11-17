@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 pub const STOP_BLOCK_LIMIT: u32 = 8;
 
 /// Stop Block 的处理结果。
+#[derive(Debug)]
 pub enum GuardDecision {
     /// 不 Block，重置计数器，agent 正常结束。
     Pass,
@@ -25,11 +26,13 @@ pub enum GuardDecision {
 /// Stop Block 计数器状态机。
 ///
 /// 由 `HookMiddleware` 通过 `Arc` 共享。
+#[derive(Debug)]
 pub struct StopBlockGuard {
     count: Mutex<u32>,
 }
 
 impl StopBlockGuard {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             count: Mutex::new(0),
@@ -37,6 +40,7 @@ impl StopBlockGuard {
     }
 
     /// 收到 `HookAction::Block` 时调用，返回后续处理决策。
+    #[must_use]
     pub fn on_block(&self, reason: &str) -> GuardDecision {
         let mut count = self.count.lock();
         *count += 1;
@@ -68,6 +72,7 @@ impl StopBlockGuard {
     }
 
     /// 当前连续 Block 次数（仅用于测试与诊断）。
+    #[must_use]
     pub fn current_count(&self) -> u32 {
         *self.count.lock()
     }
@@ -86,6 +91,7 @@ mod tests;
 /// 构造 Stop hook block 的反馈正文。
 ///
 /// canonical envelope 由 middleware producer 构造；本状态机仅负责正文，不接触 state。
+#[must_use]
 pub fn format_stop_block_feedback_no_wrapper(reason: &str, count: u32) -> String {
     format!(
         "<stop_hook_feedback>\nThe Stop hook blocked because: {}\nPlease address this feedback and continue your work.\n(Block {}/8)\n</stop_hook_feedback>",
@@ -94,6 +100,7 @@ pub fn format_stop_block_feedback_no_wrapper(reason: &str, count: u32) -> String
 }
 
 /// 构造 PostToolBatch hook block 的反馈正文（工具结果已提交，反馈用于修正）。
+#[must_use]
 pub fn format_post_tool_batch_feedback_no_wrapper(reason: &str, count: u32) -> String {
     format!(
         "<post_tool_batch_hook_feedback>\nThe PostToolBatch hook blocked because: {}\nThe tool results above are already committed; address this feedback before continuing.\n(Block {}/8)\n</post_tool_batch_hook_feedback>",
@@ -102,6 +109,7 @@ pub fn format_post_tool_batch_feedback_no_wrapper(reason: &str, count: u32) -> S
 }
 
 /// 构造 PostToolBatch `continue:false` 的停止意图正文（客户端可诊断，不进模型）。
+#[must_use]
 pub fn format_post_tool_batch_stop_intent(stop_reason: Option<&str>) -> String {
     match stop_reason {
         Some(reason) => format!(

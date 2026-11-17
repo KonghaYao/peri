@@ -1,5 +1,9 @@
 //! In-process standalone handler construction for `peri mcp-start`.
 //!
+//! Migration-period instance construction: the CLI accepts one legacy instance
+//! name, and the v5 single-exit router reuses this factory per capability. The
+//! valid set comes from the capability registry.
+//!
 //! Construction goes through [`super::dispatch::builtin_server_handler_with_env`], so
 //! the standalone entry serves exactly the handlers the ACP host assembles. The
 //! `workspace` arm is the exception: one server is built up front and cloned per
@@ -26,7 +30,8 @@ use peri_mcp_workspace::{
 };
 
 use super::context::{BuiltinInstanceContext, CronInstanceInput};
-use super::dispatch::{builtin_server_handler_with_env, BuiltinServerHandler};
+use super::dispatch;
+use super::dispatch::BuiltinServerHandler;
 
 /// Reusable per-session handler factory for one builtin instance.
 pub(crate) struct StandaloneFactory {
@@ -40,7 +45,7 @@ pub(crate) struct StandaloneFactory {
 }
 
 impl StandaloneFactory {
-    pub(crate) fn new(instance: &str, workspace: PathBuf) -> Result<Self> {
+    pub(crate) fn try_new(instance: &str, workspace: PathBuf) -> Result<Self> {
         if !BUILTIN_RESERVED_INSTANCE_NAMES.contains(&instance) {
             bail!(
                 "unknown builtin MCP instance: {instance} (expected one of: {})",
@@ -65,7 +70,7 @@ impl StandaloneFactory {
             }
             "workspace" => {
                 workspace_server = Some(
-                    WorkspaceMcpServer::standalone(cwd, false)
+                    WorkspaceMcpServer::standalone(cwd)
                         .with_resources(default_workspace_resources(&workspace)),
                 );
             }
@@ -96,12 +101,13 @@ impl StandaloneFactory {
         if let Some(monitor) = &self.monitor {
             return Ok(BuiltinServerHandler::Monitor(monitor.clone()));
         }
-        builtin_server_handler_with_env(&self.instance, &self.context, &self.env).ok_or_else(|| {
-            io::Error::other(format!(
-                "builtin MCP handler is not wired: {}",
-                self.instance
-            ))
-        })
+        dispatch::builtin_server_handler_with_env(&self.instance, &self.context, &self.env)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "builtin MCP handler is not wired: {}",
+                    self.instance
+                ))
+            })
     }
 
     /// Shared handle for post-serve cleanup; workspace clones share the task registry.

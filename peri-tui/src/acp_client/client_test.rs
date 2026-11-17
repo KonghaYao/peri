@@ -1,12 +1,14 @@
-use super::*;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};
+use super::{AcpEvent, AcpNotification, AcpTuiClient, mpsc};
+
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::IncomingMessage;
 use serde_json::json;
 
 /// Issue 2026-08-05 返工链路测试：pump 解析 `peri/agent_event_done` 的
 /// requestId → `AgentDone.request_id`（服务器回带 → TUI stale 配对）。
 #[tokio::test]
 async fn test_pump_parses_agent_event_done_request_id() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(notification_tx);
@@ -21,9 +23,9 @@ async fn test_pump_parses_agent_event_done_request_id() {
             }),
         )
         .await
-        .unwrap();
+        .expect("pump parses agent event done request id: fixture task and request must complete successfully");
 
-    match notification_rx.recv().await.unwrap() {
+    match notification_rx.recv().await.expect("pump parses agent event done request id: fixture task and request must complete successfully") {
         AcpNotification::AgentDone {
             session_id,
             stop_reason,
@@ -41,7 +43,7 @@ async fn test_pump_parses_agent_event_done_request_id() {
 /// Immediate 命令 / stdio 等路径）。
 #[tokio::test]
 async fn test_pump_agent_event_done_without_request_id() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(notification_tx);
@@ -52,9 +54,9 @@ async fn test_pump_agent_event_done_without_request_id() {
             json!({ "sessionId": "s1", "stopReason": "end_turn" }),
         )
         .await
-        .unwrap();
+        .expect("pump agent event done without request id: fixture task and request must complete successfully");
 
-    match notification_rx.recv().await.unwrap() {
+    match notification_rx.recv().await.expect("pump agent event done without request id: fixture task and request must complete successfully") {
         AcpNotification::AgentDone {
             session_id,
             stop_reason,
@@ -74,7 +76,7 @@ async fn test_pump_agent_event_done_without_request_id() {
 /// 黑名单中的会话事件必须被 drop——None 放行语义只服务于首次连接初始化。
 #[tokio::test]
 async fn test_pump_drops_events_from_deleted_session_when_current_none() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
 
@@ -85,17 +87,17 @@ async fn test_pump_drops_events_from_deleted_session_when_current_none() {
     server_transport
         .send_notification(
             "peri/agent_event",
-            json!({ "sessionId": "deleted-sess", "event_json": serde_json::to_string(&AcpEvent::StateSnapshot { messages_json: "[]".to_string() }).unwrap() }),
+            json!({ "sessionId": "deleted-sess", "event_json": serde_json::to_string(&AcpEvent::StateSnapshot { messages_json: "[]".to_string() }).expect("pump drops events from deleted session when current none: fixture data must serialize to JSON") }),
         )
         .await
-        .unwrap();
+        .expect("pump drops events from deleted session when current none: fixture must serialize to JSON");
     server_transport
         .send_notification(
             "peri/agent_event_done",
             json!({ "sessionId": "deleted-sess", "stopReason": "cancelled" }),
         )
         .await
-        .unwrap();
+        .expect("pump drops events from deleted session when current none: fixture task and request must complete successfully");
 
     // 无事件应到达 UI
     match tokio::time::timeout(
@@ -113,7 +115,7 @@ async fn test_pump_drops_events_from_deleted_session_when_current_none() {
 /// 黑名单不误伤：current=None 时未删除会话的初始化通知仍正常放行。
 #[tokio::test]
 async fn test_pump_still_forwards_init_notifications_when_current_none() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s-init", false);
     client.spawn_pump(notification_tx);
@@ -124,9 +126,9 @@ async fn test_pump_still_forwards_init_notifications_when_current_none() {
             json!({ "sessionId": "s-init", "commands": [] }),
         )
         .await
-        .unwrap();
+        .expect("pump still forwards init notifications when current none: fixture task and request must complete successfully");
 
-    match notification_rx.recv().await.unwrap() {
+    match notification_rx.recv().await.expect("pump still forwards init notifications when current none: fixture task and request must complete successfully") {
         AcpNotification::SessionUpdate { session_id, .. } => {
             assert_eq!(session_id, "s-init");
         }
@@ -138,7 +140,7 @@ async fn test_pump_still_forwards_init_notifications_when_current_none() {
 /// 该会话后续事件被过滤。
 #[tokio::test]
 async fn test_delete_session_clears_current_and_blacklists() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
 
@@ -149,7 +151,7 @@ async fn test_delete_session_clears_current_and_blacklists() {
     let server_transport = std::sync::Arc::new(server_transport);
     let server_tx_for_task = server_transport.clone();
     let server = tokio::spawn(async move {
-        let msg = server_tx_for_task.recv().await.unwrap();
+        let msg = server_tx_for_task.recv().await.expect("delete session clears current and blacklists: fixture task and request must complete successfully");
         let IncomingMessage::Request { id, method, params } = msg else {
             panic!("expected request, got {msg:?}");
         };
@@ -161,14 +163,14 @@ async fn test_delete_session_clears_current_and_blacklists() {
         server_tx_for_task
             .send_response(id, Ok(serde_json::json!({})))
             .await
-            .unwrap();
+            .expect("delete session clears current and blacklists: fixture task and request must complete successfully");
     });
 
     client
         .delete_session("sess-1")
         .await
         .expect("delete 应成功");
-    server.await.unwrap();
+    server.await.expect("delete session clears current and blacklists: fixture task and request must complete successfully");
 
     assert!(
         client.current_session_id().is_none(),
@@ -186,7 +188,7 @@ async fn test_delete_session_clears_current_and_blacklists() {
             json!({ "sessionId": "sess-1", "stopReason": "cancelled" }),
         )
         .await
-        .unwrap();
+        .expect("delete session clears current and blacklists: fixture task and request must complete successfully");
     match tokio::time::timeout(
         std::time::Duration::from_millis(200),
         notification_rx.recv(),
@@ -202,12 +204,12 @@ async fn test_delete_session_clears_current_and_blacklists() {
 /// [回归测试] prompt 的成功 RPC 响应仍须保留业务终态，不能丢弃 max_tokens。
 #[tokio::test]
 async fn test_prompt_with_response_preserves_stop_reason() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
-        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.expect("prompt with response preserves stop reason: fixture task and request must complete successfully")
         else {
             panic!("应收到 prompt 请求");
         };
@@ -215,7 +217,7 @@ async fn test_prompt_with_response_preserves_stop_reason() {
         server_transport
             .send_response(id, Ok(json!({"stopReason": "max_tokens"})))
             .await
-            .unwrap();
+            .expect("prompt with response preserves stop reason: fixture task and request must complete successfully");
     });
     let response = client
         .prompt_with_response(
@@ -223,25 +225,25 @@ async fn test_prompt_with_response_preserves_stop_reason() {
             None,
         )
         .await
-        .unwrap();
+        .expect("prompt with response preserves stop reason: fixture task and request must complete successfully");
     assert_eq!(
         response.stop_reason,
         agent_client_protocol::schema::v1::StopReason::MaxTokens
     );
-    server.await.unwrap();
+    server.await.expect("prompt with response preserves stop reason: fixture task and request must complete successfully");
     client.close();
 }
 
 #[tokio::test]
 async fn test_prompt_with_response_rejects_missing_stop_reason_and_releases_lease() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(notification_tx);
     let server = tokio::spawn(async move {
         for response in [json!({}), json!({"stopReason": "end_turn"})] {
             let IncomingMessage::Request { id, method, .. } =
-                server_transport.recv().await.unwrap()
+                server_transport.recv().await.expect("prompt with response rejects missing stop reason and releases lease: fixture task and request must complete successfully")
             else {
                 panic!("应收到 prompt 请求");
             };
@@ -249,25 +251,25 @@ async fn test_prompt_with_response_rejects_missing_stop_reason_and_releases_leas
             server_transport
                 .send_response(id, Ok(response))
                 .await
-                .unwrap();
+                .expect("prompt with response rejects missing stop reason and releases lease: fixture task and request must complete successfully");
         }
     });
     let content = peri_acp_types::messages::MessageContent::text("hello");
     let error = client
         .prompt_with_response(&content, None)
         .await
-        .unwrap_err();
+        .expect_err("prompt with response rejects missing stop reason and releases lease: the invalid fixture must be rejected");
     assert!(
         error
             .to_string()
             .contains("invalid session/prompt response")
     );
-    let response = client.prompt_with_response(&content, None).await.unwrap();
+    let response = client.prompt_with_response(&content, None).await.expect("prompt with response rejects missing stop reason and releases lease: fixture task and request must complete successfully");
     assert_eq!(
         response.stop_reason,
         agent_client_protocol::schema::v1::StopReason::EndTurn
     );
-    server.await.unwrap();
+    server.await.expect("prompt with response rejects missing stop reason and releases lease: fixture task and request must complete successfully");
     client.close();
 }
 
@@ -279,7 +281,7 @@ async fn test_prompt_with_response_rejects_missing_stop_reason_and_releases_leas
 async fn test_prompt_carries_image_blocks_on_the_wire() {
     use peri_acp_types::messages::{ContentBlock, MessageContent};
 
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
     client.lifecycle.force_stable("s1", false);
     client.spawn_pump(notification_tx);
@@ -293,7 +295,7 @@ async fn test_prompt_carries_image_blocks_on_the_wire() {
     let server = tokio::spawn(async move {
         let IncomingMessage::Request {
             id, method, params, ..
-        } = server_transport.recv().await.unwrap()
+        } = server_transport.recv().await.expect("prompt carries image blocks on the wire: fixture task and request must complete successfully")
         else {
             panic!("应收到 prompt 请求");
         };
@@ -305,7 +307,9 @@ async fn test_prompt_carries_image_blocks_on_the_wire() {
             wire.is_array(),
             "blocks 形态必须是数组（不得降级为字符串）: {wire}"
         );
-        let decoded: MessageContent = serde_json::from_value(wire.clone()).unwrap();
+        let decoded: MessageContent = serde_json::from_value(wire.clone()).expect(
+            "prompt carries image blocks on the wire: fixture JSON must match the expected schema",
+        );
         assert_eq!(decoded, expected, "图片块必须逐字保留");
         assert!(
             matches!(
@@ -317,11 +321,11 @@ async fn test_prompt_carries_image_blocks_on_the_wire() {
         server_transport
             .send_response(id, Ok(json!({"stopReason": "end_turn"})))
             .await
-            .unwrap();
+            .expect("prompt carries image blocks on the wire: fixture task and request must complete successfully");
     });
 
-    client.prompt(&content, None).await.unwrap();
-    server.await.unwrap();
+    client.prompt(&content, None).await.expect("prompt carries image blocks on the wire: fixture task and request must complete successfully");
+    server.await.expect("prompt carries image blocks on the wire: fixture task and request must complete successfully");
     client.close();
 }
 
@@ -329,7 +333,7 @@ async fn test_prompt_carries_image_blocks_on_the_wire() {
 /// 在持有 operation gate 时无限等待。
 #[tokio::test]
 async fn notification_queue_overflow_closes_transport() {
-    let (transport, _server) = mpsc_transport_pair();
+    let (transport, _server) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (tx, _rx) = mpsc::channel(1);
     assert!(super::pump::deliver_or_close(
         &transport,

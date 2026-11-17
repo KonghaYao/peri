@@ -1,11 +1,20 @@
-use super::*;
+use super::Path;
+use crate::sessions::SqliteThreadStore;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::ThreadStore;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::workspace::ProjectId;
+use peri_acp_types::workspace::ResolvedWorkspace;
+use peri_acp_types::workspace::ScopedThreadQuery;
+use peri_acp_types::workspace::ThreadScope;
+use peri_acp_types::workspace::WorkspaceError;
 
 #[tokio::test]
 async fn test_worktree_main_linked_subdirectory_and_clone_identity() {
-    let repository = repository();
+    let repository = super::repository();
     let linked = tempfile::tempdir().unwrap();
     let linked_path = linked.path().join("linked tree");
-    git(
+    super::git(
         repository.path(),
         &[
             "worktree",
@@ -15,7 +24,7 @@ async fn test_worktree_main_linked_subdirectory_and_clone_identity() {
             linked_path.to_str().unwrap(),
         ],
     );
-    let (store, _db) = store().await;
+    let (store, _db) = super::store().await;
     let root = store.resolve_workspace(repository.path()).await.unwrap();
     let linked = store.resolve_workspace(&linked_path).await.unwrap();
     assert_eq!(root.project_id, linked.project_id);
@@ -28,7 +37,7 @@ async fn test_worktree_main_linked_subdirectory_and_clone_identity() {
     assert_eq!(nested.workspace_id, linked.workspace_id);
     assert_eq!(nested.relative_cwd, Path::new("nested space"));
     let clone = tempfile::tempdir().unwrap();
-    git(
+    super::git(
         clone.path(),
         &[
             "clone",
@@ -47,10 +56,10 @@ async fn test_worktree_main_linked_subdirectory_and_clone_identity() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_rejected() {
-    let repo = repository();
+    let repo = super::repository();
     let aliases = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(repo.path(), aliases.path().join("alias")).unwrap();
-    let (store, _db) = store().await;
+    let (store, _db) = super::store().await;
     let original = store.resolve_workspace(repo.path()).await.unwrap();
     let alias = store
         .resolve_workspace(&aliases.path().join("alias"))
@@ -58,7 +67,7 @@ async fn test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_r
         .unwrap();
     assert_eq!(original, alias);
     std::fs::create_dir(repo.path().join("sub")).unwrap();
-    let (id, _) = bound(&store, &repo.path().join("sub")).await;
+    let (id, _) = super::bound(&store, &repo.path().join("sub")).await;
     let binding = store.load_session_binding(&id).await.unwrap().unwrap();
     // cwd 被 symlink 指向别处：canonical 与保存路径不一致，无法证明仍是同一位置。
     std::fs::remove_dir(repo.path().join("sub")).unwrap();
@@ -80,8 +89,8 @@ async fn test_worktree_cwd_replaced_by_file_is_unavailable() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
     std::fs::create_dir(&root).unwrap();
-    let (store, _db) = store().await;
-    let (id, _) = bound(&store, &root).await;
+    let (store, _db) = super::store().await;
+    let (id, _) = super::bound(&store, &root).await;
     // 同路径换成普通文件：不是目录，按不可用失败。
     std::fs::remove_dir(&root).unwrap();
     std::fs::write(&root, b"not a directory").unwrap();
@@ -107,8 +116,8 @@ async fn test_worktree_ancestor_symlink_swap_is_rejected() {
     let outside = tokio::fs::canonicalize(outside.path()).await.unwrap();
     std::fs::create_dir_all(outside.join("sub")).unwrap();
 
-    let (store, _db) = store().await;
-    let (id, _) = bound(&store, &sub).await;
+    let (store, _db) = super::store().await;
+    let (id, _) = super::bound(&store, &sub).await;
     let binding = store.load_session_binding(&id).await.unwrap().unwrap();
 
     // 祖先 parent 改名，原位换成指向外部的 symlink；外部同样存在 sub。
@@ -132,7 +141,7 @@ async fn bound_with_history(
     store: &SqliteThreadStore,
     cwd: &Path,
 ) -> (ThreadId, ResolvedWorkspace) {
-    let (id, workspace) = bound(store, cwd).await;
+    let (id, workspace) = super::bound(store, cwd).await;
     store
         .append_message(&id, BaseMessage::human("bound history"))
         .await
@@ -169,7 +178,7 @@ async fn test_worktree_replaced_directory_keeps_workspace_and_binding() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
     std::fs::create_dir(&root).unwrap();
-    let (store, _db) = store().await;
+    let (store, _db) = super::store().await;
     let (old_thread, registered) = bound_with_history(&store, &root).await;
 
     // 同一路径上换成一个新的文件对象：对象身份变化不再阻断恢复。
@@ -191,7 +200,7 @@ async fn test_worktree_replaced_directory_keeps_workspace_and_binding() {
     assert_eq!(binding.project_id, registered.project_id);
 
     // 同一路径上的新对象复用同一条归属行与同一个项目（locator-only）。
-    let (replacement_thread, replacement) = bound(&store, &root).await;
+    let (replacement_thread, replacement) = super::bound(&store, &root).await;
     assert_eq!(replacement.workspace_id, registered.workspace_id);
     assert_eq!(replacement.project_id, registered.project_id);
     // v15 起发现快照只记路径布局，不再持久化文件对象身份：同一路径的替换产生**相同**的
@@ -219,7 +228,7 @@ async fn test_worktree_moved_directory_registers_new_path_keeps_old_history() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
     std::fs::create_dir(&root).unwrap();
-    let (store, _db) = store().await;
+    let (store, _db) = super::store().await;
     let (old_thread, registered) = bound_with_history(&store, &root).await;
 
     let moved = directory.path().join("moved");
@@ -237,7 +246,7 @@ async fn test_worktree_moved_directory_registers_new_path_keeps_old_history() {
     assert_only_history(&store, registered.project_id, &old_thread).await;
 
     // 新路径可建会话，且不把旧登记改写到新位置。
-    let (relocated_thread, relocated) = bound(&store, &moved).await;
+    let (relocated_thread, relocated) = super::bound(&store, &moved).await;
     assert_ne!(relocated.workspace_id, registered.workspace_id);
     assert_ne!(relocated.project_id, registered.project_id);
     assert_eq!(
@@ -258,10 +267,10 @@ async fn test_worktree_moved_directory_registers_new_path_keeps_old_history() {
 /// `git worktree move` 改变的是工作区位置，common directory 与项目证据未变。
 #[tokio::test]
 async fn test_worktree_moved_linked_worktree_reuses_project_registers_new_workspace() {
-    let repository = repository();
+    let repository = super::repository();
     let linked = tempfile::tempdir().unwrap();
     let original = linked.path().join("linked tree");
-    git(
+    super::git(
         repository.path(),
         &[
             "worktree",
@@ -271,11 +280,11 @@ async fn test_worktree_moved_linked_worktree_reuses_project_registers_new_worksp
             original.to_str().unwrap(),
         ],
     );
-    let (store, _db) = store().await;
+    let (store, _db) = super::store().await;
     let (old_thread, registered) = bound_with_history(&store, &original).await;
 
     let moved = linked.path().join("moved tree");
-    git(
+    super::git(
         repository.path(),
         &[
             "worktree",
@@ -294,7 +303,7 @@ async fn test_worktree_moved_linked_worktree_reuses_project_registers_new_worksp
         Some(WorkspaceError::Unavailable)
     ));
 
-    let (relocated_thread, relocated) = bound(&store, &moved).await;
+    let (relocated_thread, relocated) = super::bound(&store, &moved).await;
     assert_ne!(relocated.workspace_id, registered.workspace_id);
     assert_eq!(relocated.project_id, registered.project_id);
     assert_eq!(
@@ -312,8 +321,8 @@ async fn test_worktree_registration_reuses_exact_object_and_keeps_rows_unique() 
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
     std::fs::create_dir(&root).unwrap();
-    let (store, _db) = store().await;
-    let (_, registered) = bound(&store, &root).await;
+    let (store, _db) = super::store().await;
+    let (_, registered) = super::bound(&store, &root).await;
     let resolved = store.resolve_workspace(&root).await.unwrap();
     assert_eq!(resolved, registered);
     let duplicate = sqlx::query(
@@ -333,12 +342,12 @@ async fn test_worktree_registration_reuses_exact_object_and_keeps_rows_unique() 
 /// 项目与快照都不参与执行准入：原路径的 cwd 仍在，已有会话继续执行，也不被静默改绑。
 #[tokio::test]
 async fn test_worktree_new_nested_repository_keeps_original_binding() {
-    let repo = repository();
+    let repo = super::repository();
     let nested = repo.path().join("sub");
     std::fs::create_dir(&nested).unwrap();
-    let (store, _db) = store().await;
-    let (id, registered) = bound(&store, &nested).await;
-    git(&nested, &["init", "-q"]);
+    let (store, _db) = super::store().await;
+    let (id, registered) = super::bound(&store, &nested).await;
+    super::git(&nested, &["init", "-q"]);
     let resolved = store.validate_session_binding(&id).await.unwrap();
     assert_eq!(resolved.workspace_id, registered.workspace_id);
     assert_eq!(resolved.project_id, registered.project_id);
@@ -353,12 +362,12 @@ async fn test_worktree_directory_gaining_repository_keeps_registration() {
     let root = directory.path().join("project");
     let nested = root.join("sub");
     std::fs::create_dir_all(&nested).unwrap();
-    let (store, _db) = store().await;
-    let (root_id, registered) = bound(&store, &root).await;
-    let (nested_id, nested_workspace) = bound(&store, &nested).await;
+    let (store, _db) = super::store().await;
+    let (root_id, registered) = super::bound(&store, &root).await;
+    let (nested_id, nested_workspace) = super::bound(&store, &nested).await;
     assert_ne!(nested_workspace.workspace_id, registered.workspace_id);
 
-    git(&root, &["init", "-q"]);
+    super::git(&root, &["init", "-q"]);
 
     // The registered directory object keeps its identity instead of failing closed.
     let rediscovered = store.resolve_workspace(&root).await.unwrap();
@@ -376,7 +385,7 @@ async fn test_worktree_directory_gaining_repository_keeps_registration() {
     let existing = store.validate_session_binding(&root_id).await.unwrap();
     assert_eq!(existing.workspace_id, registered.workspace_id);
     assert_eq!(existing.project_id, registered.project_id);
-    let (fresh, fresh_workspace) = bound(&store, &root).await;
+    let (fresh, fresh_workspace) = super::bound(&store, &root).await;
     assert_ne!(fresh, root_id);
     assert_eq!(fresh_workspace.workspace_id, registered.workspace_id);
     assert_eq!(
@@ -395,11 +404,11 @@ async fn test_worktree_directory_gaining_repository_keeps_registration() {
 /// [回归测试] 已登记仓库移除 `.git`：根目录对象仍然相同，注册继续可用。
 #[tokio::test]
 async fn test_worktree_repository_losing_git_keeps_registration() {
-    let repo = repository();
+    let repo = super::repository();
     let nested = repo.path().join("sub");
     std::fs::create_dir(&nested).unwrap();
-    let (store, _db) = store().await;
-    let (id, registered) = bound(&store, repo.path()).await;
+    let (store, _db) = super::store().await;
+    let (id, registered) = super::bound(&store, repo.path()).await;
     assert_eq!(
         store.resolve_workspace(&nested).await.unwrap().workspace_id,
         registered.workspace_id
@@ -417,7 +426,7 @@ async fn test_worktree_repository_losing_git_keeps_registration() {
     let existing = store.validate_session_binding(&id).await.unwrap();
     assert_eq!(existing.workspace_id, registered.workspace_id);
     assert_eq!(existing.project_id, registered.project_id);
-    let _ = bound(&store, repo.path()).await;
+    let _ = super::bound(&store, repo.path()).await;
     // Without a repository each directory is again its own workspace; the
     // subdirectory no longer belongs to the registered root workspace.
     let separate = store.resolve_workspace(&nested).await.unwrap();
@@ -427,10 +436,13 @@ async fn test_worktree_repository_losing_git_keeps_registration() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_worktree_concurrent_registration_reuses_winner() {
-    let repo = repository();
+    let repo = super::repository();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("concurrent.db");
-    let (left, right) = tokio::join!(SqliteThreadStore::new(&path), SqliteThreadStore::new(&path));
+    let (left, right) = tokio::join!(
+        SqliteThreadStore::try_new(&path),
+        SqliteThreadStore::try_new(&path)
+    );
     let left = left.unwrap();
     let right = right.unwrap();
     let (left_workspace, right_workspace) = tokio::join!(
@@ -449,12 +461,12 @@ async fn test_worktree_concurrent_registration_reuses_winner() {
 
 #[tokio::test]
 async fn test_worktree_scoped_pages_and_exact_directory_are_lightweight() {
-    let repo = repository();
+    let repo = super::repository();
     let sub = repo.path().join("sub");
     std::fs::create_dir(&sub).unwrap();
-    let (store, _db) = store().await;
-    let (root_id, root) = bound(&store, repo.path()).await;
-    let (sub_id, sub) = bound(&store, &sub).await;
+    let (store, _db) = super::store().await;
+    let (root_id, root) = super::bound(&store, repo.path()).await;
+    let (sub_id, sub) = super::bound(&store, &sub).await;
     store
         .append_message(&root_id, BaseMessage::human("root history"))
         .await

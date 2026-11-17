@@ -2,7 +2,7 @@
 
 use tokio::io::AsyncWriteExt;
 
-use super::{assemble_stdio_config, read_bootstrap_settings, StdioInput};
+use super::StdioInput;
 
 struct ConfigPathGuard;
 
@@ -26,7 +26,7 @@ async fn settings_bootstrap_is_separate_from_following_acp_frames() {
         .await
         .unwrap();
 
-    let injected = read_bootstrap_settings(&mut reader).await.unwrap();
+    let injected = super::read_bootstrap_settings(&mut reader).await.unwrap();
     assert_eq!(injected, std::str::from_utf8(settings).unwrap());
     let mut acp_line = String::new();
     let mut buffered = tokio::io::BufReader::new(reader);
@@ -43,7 +43,7 @@ async fn settings_bootstrap_rejects_oversized_frame_before_reading_body() {
         .write_all(&(super::MAX_BOOTSTRAP_SETTINGS_BYTES as u32 + 1).to_be_bytes())
         .await
         .unwrap();
-    assert!(read_bootstrap_settings(&mut reader).await.is_err());
+    assert!(super::read_bootstrap_settings(&mut reader).await.is_err());
 }
 
 #[tokio::test]
@@ -53,7 +53,7 @@ async fn injected_settings_assemble_without_settings_file() {
     let _guard = ConfigPathGuard;
     crate::provider::set_global_config_path(Some(tmp.path().join("missing-settings.json")));
     let settings = r#"{"config":{"active_alias":"sonnet","providers":[{"id":"injected","type":"openai","apiKey":"test"}],"profiles":{"sonnet":{"provider":"injected","model":"injected-model"}}}}"#;
-    let assembled = assemble_stdio_config(
+    let assembled = super::assemble_stdio_config(
         StdioInput {
             cwd: tmp.path().to_string_lossy().into_owned(),
             settings_stdin: true,

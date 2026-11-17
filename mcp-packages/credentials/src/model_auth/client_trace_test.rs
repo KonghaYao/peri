@@ -1,15 +1,33 @@
 //! Exercise the real credentials MCP transport with DEBUG/TRACE enabled. No
 //! production credentials or external network are used by this regression.
-use std::{fmt, sync::atomic::AtomicU64};
+use crate::model_auth::server::Capability;
+use crate::model_auth::METHOD;
+use peri_model::RequestAuth;
+use rmcp::model::{ClientRequest, CustomRequest};
+use rmcp::service::PeerRequestOptions;
+use rmcp::ServiceExt;
+use std::fmt;
+use std::sync::atomic::AtomicU64;
 
-use tracing::{
-    field::{Field, Visit},
-    level_filters::LevelFilter,
-    span::{Attributes, Id, Record},
-    Event, Metadata, Subscriber,
-};
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing::level_filters::LevelFilter;
+use tracing::span::Attributes;
+use tracing::span::Id;
+use tracing::span::Record;
+use tracing::Event;
+use tracing::Metadata;
+use tracing::Subscriber;
 
-use super::*;
+use crate::model_auth::client::tests::MockIssuer;
+use crate::model_auth::client::tests::Mode;
+use serde_json::json;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 struct Capture {
@@ -18,7 +36,7 @@ struct Capture {
     next_span: Arc<AtomicU64>,
 }
 
-struct Fields<'a>(&'a mut String);
+struct Fields<'output>(&'output mut String);
 
 impl Visit for Fields<'_> {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
@@ -71,7 +89,7 @@ fn check_mcp_logs(level: LevelFilter) {
             let mock = MockIssuer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let manager = mock.manager(dir.path(), "trace-fixture");
-            seed(&manager, 5000).await;
+            crate::model_auth::client::tests::seed(&manager, 5000).await;
             let credential = manager.credential(CancellationToken::new()).await.unwrap();
             assert_eq!(credential.bearer(), "synthetic-access-initial");
 
@@ -185,7 +203,7 @@ fn detached_refresh_errors_and_worker_panics_are_visible_without_tokens() {
             let mock = MockIssuer::start().await;
             let dir = tempfile::tempdir().unwrap();
             let manager = mock.manager(dir.path(), "detached-fixture");
-            seed(&manager, 0).await;
+            crate::model_auth::client::tests::seed(&manager, 0).await;
             *mock.state.mode.lock().unwrap() = Mode::Pending;
             let cancellation = CancellationToken::new();
             let work = manager.credential(cancellation.clone());
@@ -200,9 +218,12 @@ fn detached_refresh_errors_and_worker_panics_are_visible_without_tokens() {
             assert!(result.unwrap_err().is_cancelled());
             *mock.state.mode.lock().unwrap() = Mode::MissingScope;
             mock.state.release_refresh.notify_one();
-            let account = tokio::time::timeout(Duration::from_secs(5), stored(&manager))
-                .await
-                .unwrap();
+            let account = tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::model_auth::client::tests::stored(&manager),
+            )
+            .await
+            .unwrap();
             assert!(account.tokens.is_none() && account.binding.is_none());
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
@@ -231,7 +252,7 @@ fn detached_refresh_errors_and_worker_panics_are_visible_without_tokens() {
                 );
                 1000
             });
-            seed(&crashing, 0).await;
+            crate::model_auth::client::tests::seed(&crashing, 0).await;
             let error = tokio::time::timeout(
                 Duration::from_secs(5),
                 crashing.credential(CancellationToken::new()),

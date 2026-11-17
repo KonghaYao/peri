@@ -8,11 +8,14 @@
 //!   `terminal_*_test.rs` / 旧 `git_watch/mod_test.rs` 同写法）后断言首采样基线与
 //!   commit 后第二次采样的 notice 文案。
 
-use std::{process::Command as StdCommand, time::Duration};
+use std::process::Command as StdCommand;
+use std::time::Duration;
 
-use tempfile::tempdir;
-
-use super::*;
+use crate::git_watch::GitSnapshot;
+use crate::git_watch::GitWatchState;
+use crate::git_watch::SampleOutcome;
+use crate::git_watch::GIT_SAMPLE_TIMEOUT;
+use crate::git_watch::UNSAMPLED_RESOURCE_TEXT;
 
 fn init_git_repo(path: &std::path::Path) {
     StdCommand::new("git")
@@ -54,7 +57,7 @@ fn snapshot(branch: &str, head: &str) -> GitSnapshot {
 
 #[test]
 fn parse_sample_stdout_three_states() {
-    match parse_sample_stdout("true\nabc123def456789\nmain\n") {
+    match crate::git_watch::parse_sample_stdout("true\nabc123def456789\nmain\n") {
         SampleOutcome::Repository(snapshot) => {
             assert_eq!(snapshot.branch, "main");
             assert_eq!(snapshot.head, "abc123def456789");
@@ -62,13 +65,16 @@ fn parse_sample_stdout_three_states() {
         other => panic!("expected Repository, got {other:?}"),
     }
     assert_eq!(
-        parse_sample_stdout("false\n"),
+        crate::git_watch::parse_sample_stdout("false\n"),
         SampleOutcome::NotRepository,
         "非仓库态必须与失败区分"
     );
-    assert_eq!(parse_sample_stdout(""), SampleOutcome::Failed);
     assert_eq!(
-        parse_sample_stdout("true\nabc123\n"),
+        crate::git_watch::parse_sample_stdout(""),
+        SampleOutcome::Failed
+    );
+    assert_eq!(
+        crate::git_watch::parse_sample_stdout("true\nabc123\n"),
         SampleOutcome::Failed,
         "缺 branch 行即失败"
     );
@@ -77,16 +83,24 @@ fn parse_sample_stdout_three_states() {
 #[test]
 fn notice_text_lists_only_changed_fields_with_short_hash() {
     let a = snapshot("main", &"a".repeat(40));
-    assert!(notice_text(None, &a).is_none(), "首采样没有基线 ⇒ 不通知");
-    assert!(notice_text(Some(&a), &a).is_none(), "无变化 ⇒ 不通知");
+    assert!(
+        crate::git_watch::notice_text(None, &a).is_none(),
+        "首采样没有基线 ⇒ 不通知"
+    );
+    assert!(
+        crate::git_watch::notice_text(Some(&a), &a).is_none(),
+        "无变化 ⇒ 不通知"
+    );
 
     let branch_changed = snapshot("dev", &a.head);
-    let msg = notice_text(Some(&a), &branch_changed).expect("branch 变化必须产出 notice");
+    let msg = crate::git_watch::notice_text(Some(&a), &branch_changed)
+        .expect("branch 变化必须产出 notice");
     assert!(msg.contains("- Branch: main → dev"));
     assert!(!msg.contains("HEAD:"), "未变化项不出现：{msg}");
 
     let head_changed = snapshot("dev", &"b".repeat(40));
-    let msg = notice_text(Some(&branch_changed), &head_changed).expect("HEAD 变化必须产出 notice");
+    let msg = crate::git_watch::notice_text(Some(&branch_changed), &head_changed)
+        .expect("HEAD 变化必须产出 notice");
     assert!(
         msg.contains("- HEAD: aaaaaaa → bbbbbbb"),
         "短 hash 取 7 位：{msg}"
@@ -105,7 +119,7 @@ fn snapshot_text_and_unsampled_body() {
         "未采样时的资源正文是固定文本"
     );
 
-    let text = snapshot_text(&snapshot("main", &"c".repeat(40)));
+    let text = crate::git_watch::snapshot_text(&snapshot("main", &"c".repeat(40)));
     assert!(text.contains("[Git watch] Repository ref snapshot:"));
     assert!(text.contains("- Branch: main"));
     assert!(text.contains("- HEAD: ccccccc"));
@@ -200,13 +214,13 @@ async fn change_updates_resource_body_with_notice() {
 #[tokio::test]
 async fn real_repo_baseline_then_commit_notice() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     init_git_repo(dir.path());
     let cwd = dir.path().to_string_lossy().into_owned();
 
     let state = GitWatchState::with_timing(Duration::ZERO, GIT_SAMPLE_TIMEOUT);
     assert!(state.begin_sample());
-    let first = run_git_sample(&cwd).await;
+    let first = crate::git_watch::run_git_sample(&cwd).await;
     match &first {
         SampleOutcome::Repository(snapshot) => assert_eq!(snapshot.branch, "main"),
         other => panic!("首采样必须命中仓库，实际 {other:?}"),
@@ -224,7 +238,7 @@ async fn real_repo_baseline_then_commit_notice() {
         .expect("git commit");
 
     assert!(state.begin_sample());
-    let second = run_git_sample(&cwd).await;
+    let second = crate::git_watch::run_git_sample(&cwd).await;
     let notice = state
         .finish_sample(second)
         .expect("commit 后第二次采样必须产出 notice");
@@ -236,14 +250,14 @@ async fn real_repo_baseline_then_commit_notice() {
 #[tokio::test]
 async fn real_non_repo_sample_is_failed() {
     let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_string_lossy().into_owned();
     // 普通目录下 `git rev-parse` 以非零退出（fatal: not a git repository），旧实现的
     // 映射是 `Failed`（不是 `NotRepository`）——本用例锁这条既有事实。
     // `NotRepository`（`--is-inside-work-tree` 印出 `false` 且退出码 0）在旧实现里只由
     // 解析层可达，由 T1 的 `parse_sample_stdout` 与 T2 的状态机短路锁定。
     assert_eq!(
-        run_git_sample(&cwd).await,
+        crate::git_watch::run_git_sample(&cwd).await,
         SampleOutcome::Failed,
         "非仓库目录必须按失败收口（不推进节流、不通知）"
     );

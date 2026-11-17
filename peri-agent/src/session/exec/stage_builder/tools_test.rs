@@ -1,5 +1,8 @@
-use super::*;
+use crate::tools::BaseTool;
 use async_trait::async_trait;
+use parking_lot::RwLock;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// 测试桩工具（仅 `name` 有效）。
 struct NamedTool(&'static str);
@@ -45,10 +48,10 @@ fn migrated_naked_names_are_no_longer_excluded() {
         Arc::new(RwLock::new(BTreeMap::new()));
     {
         let mut map = base.write();
-        for original in BUILTIN_MCP_INSTANCES
+        let original_items = BUILTIN_MCP_INSTANCES
             .iter()
-            .flat_map(|instance| instance.tools.iter().map(|tool| tool.original_name))
-        {
+            .flat_map(|instance| instance.tools.iter().map(|tool| tool.original_name));
+        for original in original_items {
             map.insert(original.to_string(), Arc::new(NamedTool(original)));
         }
         map.insert(
@@ -78,7 +81,7 @@ fn migrated_naked_names_are_no_longer_excluded() {
     );
 
     // 当前链无任何 middleware 工具：已迁移裸名全部保留，反例名被剔除。
-    let view = build_session_tool_view(&base, vec![]);
+    let view = crate::session::exec::stage_builder::tools::build_session_tool_view(&base, vec![]);
     let view_map = view.read();
     for original in &declared {
         assert!(
@@ -96,10 +99,13 @@ fn migrated_naked_names_are_no_longer_excluded() {
 fn session_view_keeps_first_injected_name_case_insensitively() {
     let first: Arc<dyn BaseTool> = Arc::new(NamedTool("Read"));
     let base = RwLock::new(BTreeMap::from([("Read".into(), first.clone())]));
-    let view = build_session_tool_view(&base, vec![Box::new(NamedTool("read"))]);
+    let view = crate::session::exec::stage_builder::tools::build_session_tool_view(
+        &base,
+        vec![Box::new(NamedTool("read"))],
+    );
     assert_eq!(view.read().len(), 1);
     assert!(Arc::ptr_eq(&view.read()["Read"], &first));
-    let view = build_session_tool_view(
+    let view = crate::session::exec::stage_builder::tools::build_session_tool_view(
         &RwLock::new(BTreeMap::new()),
         vec![Box::new(NamedTool("lookup")), Box::new(NamedTool("LOOKUP"))],
     );
@@ -148,7 +154,7 @@ impl crate::middleware::Middleware for InitialCatalogProbe {
     ) -> crate::error::AgentResult<()> {
         *self.0.write() = state
             .local_tools()
-            .unwrap()
+            .expect("the local tools fixture result is required for this assertion")
             .read()
             .keys()
             .cloned()
@@ -159,22 +165,19 @@ impl crate::middleware::Middleware for InitialCatalogProbe {
 
 #[tokio::test]
 async fn main_initial_before_agent_observes_filtered_mcp_catalog() {
-    use crate::{
-        agent::stages::{middleware_runner, StageContext},
-        middleware::MiddlewareChain,
-        session::{FrozenContext, Session},
-    };
+    use crate::agent::stages::middleware_runner;
+    use crate::agent::stages::StageContext;
+    use crate::middleware::MiddlewareChain;
+    use crate::session::FrozenContext;
+    use crate::session::Session;
 
     for (policy, expected) in [
-        (
-            "WorkspaceMiddleware",
-            vec!["Read", "RemoteRead", "WebSearch"],
-        ),
+        ("workspace", vec!["Read", "RemoteRead", "WebSearch"]),
         ("McpMiddleware", vec!["Read"]),
     ] {
         let core: Arc<dyn BaseTool> = Arc::new(SourceTool("Read", None, None));
         let shared = RwLock::new(BTreeMap::from([("Read".into(), core)]));
-        let view = build_session_tool_view(
+        let view = crate::session::exec::stage_builder::tools::build_session_tool_view(
             &shared,
             vec![
                 Box::new(SourceTool("Write", Some("workspace"), Some("workspace"))),
@@ -186,8 +189,12 @@ async fn main_initial_before_agent_observes_filtered_mcp_catalog() {
             view.read().contains_key("Write"),
             "name-only view is not the MCP policy boundary"
         );
-        let catalog =
-            register_tool_catalog(&view, [policy.into()].into_iter().collect(), None).unwrap();
+        let catalog = crate::session::exec::stage_builder::tools::register_tool_catalog(
+            &view,
+            [policy.into()].into_iter().collect(),
+            None,
+        )
+        .expect("the register tool catalog fixture result is required for this assertion");
         let observed = Arc::new(RwLock::new(Vec::new()));
         let mut chain = MiddlewareChain::new();
         chain.add(Box::new(InitialCatalogProbe(observed.clone())));
@@ -203,7 +210,7 @@ async fn main_initial_before_agent_observes_filtered_mcp_catalog() {
         .build();
         middleware_runner::run_before_agent(&ctx, &[])
             .await
-            .unwrap();
+            .expect("the run before agent fixture result is required for this assertion");
         assert_eq!(*observed.read(), expected, "first hook: {policy}");
         assert_eq!(
             catalog.snapshot().tools.keys().cloned().collect::<Vec<_>>(),

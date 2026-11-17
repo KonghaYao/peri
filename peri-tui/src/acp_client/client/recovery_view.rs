@@ -3,7 +3,6 @@
 //! 客户端不复制服务端的执行阻断状态；这里只把 `_meta.peri.recovery` 投影成通知。
 //! 真正的执行拒绝以服务端 `-32017` 为准。
 
-use peri_acp_types::event_data::SystemNotification;
 use peri_acp_types::recovery::{RecoveryView, RecoveryViewStatus};
 use serde_json::Value;
 
@@ -88,3 +87,6 @@ pub(super) fn present(session_id: &str, view: &RecoveryView) {
 #[cfg(test)]
 #[path = "recovery_view_test.rs"]
 mod tests;
+
+use peri_acp_types::event_data::SystemNotification;
+

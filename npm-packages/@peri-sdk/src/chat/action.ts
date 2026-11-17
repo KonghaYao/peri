@@ -145,7 +145,7 @@ export function parseChatUserAction(raw: unknown): ChatUserAction {
             });
         case "send": {
             const text = requireNonEmptyString(payload.text, requestId, "payload.text");
-            // 与 CF canonical 的 `content.trim().length > 0` 对齐；只校验，不改写文本。
+            // 与 canonical 的 `content.trim().length > 0` 对齐；只校验，不改写文本。
             if (text.trim().length === 0) validationError(requestId, "payload.text must not be blank");
             if (text.length > CHAT_SEND_TEXT_MAX_LENGTH) {
                 validationError(requestId, `payload.text must not exceed ${CHAT_SEND_TEXT_MAX_LENGTH} characters`);

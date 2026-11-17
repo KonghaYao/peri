@@ -1,12 +1,18 @@
 //! Permission drift must stop a restored projection before any model request.
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::SessionFixture;
+use super::SubAgentTool;
+use super::ThreadMeta;
 use peri_acp_types::context_archive::{ArchiveReadRequest, ContextArchiveReadPort};
-use peri_agent::agent::compact_v2::{
-    micro::apply_micro_plan,
-    planner::{plan_micro_with_facts, ArchivePlanningScope, ContextPressure, MicroPlanningFacts},
-    projection::ProviderCapabilities,
-    CompactConfig,
-};
+use peri_agent::agent::compact_v2::micro;
+use peri_agent::agent::compact_v2::planner;
+use peri_agent::agent::compact_v2::planner::ArchivePlanningScope;
+use peri_agent::agent::compact_v2::planner::ContextPressure;
+use peri_agent::agent::compact_v2::planner::MicroPlanningFacts;
+use peri_agent::agent::compact_v2::projection::ProviderCapabilities;
+use peri_agent::agent::compact_v2::CompactConfig;
 use peri_agent::session::MessageTranscript;
 use peri_agent::tools::ContextRetention;
 
@@ -45,20 +51,20 @@ impl ArchiveResumeModel {
         request: peri_model::ModelRequest,
         _: tokio_util::sync::CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support::*;
-        let tools = defined_tools(&request);
+        use crate::subagent::test_support;
+        let tools = test_support::defined_tools(&request);
         assert!(
             tools.iter().any(|t| t.name() == "ReadContextArchive"),
             "恢复后的最终请求必须包含回查工具"
         );
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        text_events("archive-resume-complete")
+        test_support::text_events("archive-resume-complete")
     }
 }
 crate::subagent::test_support::fixture_model_impl!(ArchiveResumeModel);
 
 async fn permission_drift(retention: ContextRetention) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let agents = dir.path().join(".claude/agents");
     std::fs::create_dir_all(&agents).unwrap();
     let definition = agents.join("archived-child.md");
@@ -77,9 +83,10 @@ async fn permission_drift(retention: ContextRetention) {
         peri_agent::session::FrozenContext::builder().build(),
         Some(parent_id.clone()),
     );
-    install_parent_host(&store, &parent);
+    let capture = super::install_parent_host(&store, &parent);
     let child = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &child, "archived-child", Some(&parent_id), vec![]).await;
+    super::preset_resumable_thread(&store, &child, "archived-child", Some(&parent_id), vec![])
+        .await;
     let mut transcript = MessageTranscript::new().with_persistence(store.facade(), child.clone());
     transcript.append(BaseMessage::human("保留审计原文"));
     for i in 0..6 {
@@ -113,7 +120,7 @@ async fn permission_drift(retention: ContextRetention) {
                 .extend(message.tool_calls().iter().map(|call| call.id.clone()));
         }
     }
-    let plan = plan_micro_with_facts(
+    let plan = planner::plan_micro_with_facts(
         &transcript,
         &CompactConfig {
             micro_compact_stale_steps: 0,
@@ -133,12 +140,17 @@ async fn permission_drift(retention: ContextRetention) {
     .unwrap();
     assert!(!plan.catalogs.is_empty(), "测试必须实际提交归档投影");
     let reference = plan.catalogs[0].member_ref(0).unwrap();
-    assert!(apply_micro_plan(&mut transcript, &plan).await.unwrap() > 0);
+    assert!(
+        micro::apply_micro_plan(&mut transcript, &plan)
+            .await
+            .unwrap()
+            > 0
+    );
     transcript.shutdown_persistence();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = calls.clone();
     let tool = SubAgentTool::new(
-        Arc::new(vec![make_tool("Read"), Arc::new(RecoveryTool)]),
+        Arc::new(vec![super::make_tool("Read"), Arc::new(RecoveryTool)]),
         None,
         Arc::new(move |_| {
             crate::subagent::test_support::fixture_source(
@@ -152,19 +164,29 @@ async fn permission_drift(retention: ContextRetention) {
     .with_parent_thread_id(parent_id)
     .with_parent_session(parent);
     write_definition(false);
-    let tool = with_agent_face(tool, dir.path()).await;
-    let failure = tool
+    let tool = super::with_agent_face(tool, dir.path()).await;
+    let receipt = tool
         .invoke(
             serde_json::json!({"resume_thread_id":child,"cwd":cwd}),
-            preset_child_ctx(&child, "."),
+            super::preset_child_ctx(&child, "."),
         )
         .await
-        .unwrap_err();
+        .expect("v5 resume 恒后台：权限漂移在子执行中失败");
+    assert!(receipt.contains("Background task"), "{receipt}");
+    let failure = capture.wait().await;
+    assert!(!failure.success, "权限漂移必须落为失败终态");
+    let safe_failure = failure
+        .subagent_failure
+        .as_ref()
+        .expect("typed child failure must survive background settlement");
+    let failure_text = format!(
+        "{} {}",
+        safe_failure.message(),
+        safe_failure.causes().join(" ")
+    );
     assert!(
-        failure
-            .to_string()
-            .contains("context_archive_capability_required"),
-        "权限漂移必须明确报错: {failure}"
+        failure_text.contains("context_archive_capability_required"),
+        "权限漂移必须明确报错: {failure_text}"
     );
     assert_eq!(
         calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -172,11 +194,12 @@ async fn permission_drift(retention: ContextRetention) {
         "不可发出缺少回查能力的模型请求"
     );
     write_definition(true);
-    let tool = with_agent_face(tool, dir.path()).await;
-    let success = tool
-        .invoke(
+    let tool = super::with_agent_face(tool, dir.path()).await;
+    let success = capture
+        .invoke_and_wait(
+            &tool,
             serde_json::json!({"resume_thread_id":child,"cwd":cwd}),
-            preset_child_ctx(&child, "."),
+            super::preset_child_ctx(&child, "."),
         )
         .await
         .unwrap();

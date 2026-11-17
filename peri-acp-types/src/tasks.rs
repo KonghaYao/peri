@@ -4,12 +4,14 @@
 //! `TaskManager` / `BackgroundTaskRegistry` 等运行时实现留在 peri-agent
 //! （per-session 聚合，生命周期/取消/事件跟随 session，§2 async tasks manager）。
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::{future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 
 use crate::event::BackgroundTaskResult;
+use crate::session::MessageSource;
 
 /// Runtime evidence owned by a task producer, never reconstructed from a task ID.
 /// Implementations live with the task registry; adapters only retain the ticket.
@@ -30,6 +32,7 @@ pub trait TaskRegistrationReceipt: Send + Sync {
 pub struct TaskRegistrationTicket(Arc<dyn TaskRegistrationReceipt>);
 
 impl TaskRegistrationTicket {
+    #[must_use]
     pub fn from_receipt(receipt: Arc<dyn TaskRegistrationReceipt>) -> Self {
         Self(receipt)
     }
@@ -72,6 +75,78 @@ pub enum BgTaskKind {
     Mcp,
 }
 
+/// 取消通道的契约分类；执行侧按通道分发，不再按 kind 重排分支。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCancelChannel {
+    /// 进程句柄：pid 交给执行环境换取取消回调。
+    Process,
+    /// 生产方提供的 kill 闭包。
+    Closure,
+    /// 外部 owner 承担的异步取消。
+    External,
+}
+
+impl BgTaskKind {
+    /// 稳定标签（并发上限错误、诊断与持久化投影使用）。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Agent => "agent",
+            Self::Workflow => "workflow",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    /// 注册簿记中的历史展示名；`Shell` 保持 legacy `bg-shell`，不改既存投影。
+    pub const fn task_agent_name(self) -> &'static str {
+        match self {
+            Self::Shell => "bg-shell",
+            Self::Agent => "agent",
+            Self::Workflow => "workflow",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    /// 提醒来源标签；完成通知与失败降级共用同一映射。
+    pub const fn reminder_source(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Agent => "subagent",
+            Self::Workflow => "workflow",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    /// 完成消息来源；与 [`MessageSource::is_background_completion`] 的集合一致。
+    pub const fn completion_source(self) -> MessageSource {
+        match self {
+            Self::Shell => MessageSource::ShellComplete,
+            Self::Agent => MessageSource::SubAgentComplete,
+            Self::Workflow => MessageSource::WorkflowComplete,
+            Self::Mcp => MessageSource::McpNotification,
+        }
+    }
+
+    /// 归一化排序值（契约声明顺序）；canonical handoff 身份依赖该顺序。
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Shell => 0,
+            Self::Agent => 1,
+            Self::Workflow => 2,
+            Self::Mcp => 3,
+        }
+    }
+
+    /// 取消通道分类。
+    pub const fn cancel_channel(self) -> TaskCancelChannel {
+        match self {
+            Self::Shell => TaskCancelChannel::Process,
+            Self::Agent | Self::Workflow => TaskCancelChannel::Closure,
+            Self::Mcp => TaskCancelChannel::External,
+        }
+    }
+}
+
 /// 后台任务注册表事件（registry → executor 事件推送通道）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -84,6 +159,10 @@ pub enum BgRegistryEvent {
         kind: BgTaskKind,
         summary: String,
         started_at: String,
+        /// 后台 Agent 任务的 child thread 身份（= TUI `SubagentStarted.instance_id`）。
+        /// 与 `task_id` 是独立身份；消费端据此精确配对任务行与 child，不依赖到达顺序。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_thread_id: Option<String>,
     },
     Completed {
         task_id: String,
@@ -111,6 +190,7 @@ pub struct TaskChange {
     pub event: BgRegistryEvent,
 }
 
+/// A read-only task projection; task and child-thread identities remain independent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
     pub task_id: String,
@@ -134,12 +214,14 @@ pub struct TaskRecord {
     pub child_thread_id: Option<String>,
 }
 
+/// A task projection at one revision, paired with the incremental change stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSnapshot {
     pub revision: u64,
     pub tasks: Vec<TaskRecord>,
 }
 
+/// Asynchronous cancellation supplied by the owner of an external task.
 pub type ExternalCancelFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 /// Terminal delivery hook. Delivery is durable and confirmed before the task
@@ -209,7 +291,8 @@ pub struct BgTaskRegistration {
     pub summary: String,
     /// OS 进程 PID（bg shell 有效；None = 无进程句柄）。
     pub pid: Option<u32>,
-    /// kill 闭包（Workflow 类任务的取消转发；None = kill 通道不可用）。
+    /// kill 闭包（`TaskCancelChannel::Closure` 类任务的取消转发；None = kill
+    /// 通道不可用，任务保留到自然完成）。
     pub kill: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
@@ -234,6 +317,7 @@ pub enum TaskShutdownReport {
     Incomplete,
 }
 
+/// A session-owned task that can move between executor threads.
 pub type OwnedTaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 /// Keeps external execution in the session scope until its caller proves cleanup.
@@ -377,6 +461,14 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// 当前活跃任务数（/bg 并发限制预检）。
     fn active_count(&self) -> usize;
 
+    /// 当前活跃任务数，含 child-owned 子会话（递归）。
+    ///
+    /// 默认只看本管理器；聚合实现覆盖它以汇总子会话，避免父 turn 把
+    /// 「子会话仍有未结算任务」误判为已结算。
+    fn active_count_including_children(&self) -> usize {
+        self.active_count()
+    }
+
     /// 按类型注册任务（Shell / Workflow 有 kind 独立并发上限；Agent 类不限额；
     /// middleware 发起面调用，错误语义经 String 表达——并发上限 / 注册失败）。
     fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String>;
@@ -466,7 +558,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     #[allow(clippy::too_many_arguments)] // 收尾参数集为跨层固定契约，不分组
     fn finalize_bg_shell(
         &self,
-        on_bg_complete: &Option<OnBgCompleteFn>,
+        on_bg_complete: Option<&OnBgCompleteFn>,
         ticket: TaskRegistrationTicket,
         prompt_summary: String,
         success: bool,
@@ -542,7 +634,7 @@ impl TaskManager for NoopTaskManager {
 
     fn finalize_bg_shell(
         &self,
-        _on_bg_complete: &Option<OnBgCompleteFn>,
+        _on_bg_complete: Option<&OnBgCompleteFn>,
         _ticket: TaskRegistrationTicket,
         _prompt_summary: String,
         _success: bool,
@@ -555,37 +647,5 @@ impl TaskManager for NoopTaskManager {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::TaskRecord;
-
-    /// `child_thread_id` 是可选增量字段：旧 JSON（无该键）继续可反序列化，
-    /// `None` 时不序列化该键，`Some` 时 roundtrip 保真。
-    #[test]
-    fn task_record_child_thread_id_is_backward_compatible() {
-        let legacy = serde_json::json!({
-            "task_id": "bg-01a1407d-c445-7ac3-a7ab-db7f4535cb10",
-            "kind": "agent",
-            "summary": "identity",
-            "started_at": "2026-10-16T00:00:00Z",
-            "status": "running",
-            "duration_ms": 0,
-            "output_preview": null,
-        });
-        let record: TaskRecord = serde_json::from_value(legacy).unwrap();
-        assert!(record.child_thread_id.is_none());
-        assert!(serde_json::to_value(&record)
-            .unwrap()
-            .get("child_thread_id")
-            .is_none());
-
-        let mut record = record;
-        record.child_thread_id = Some("01a1407d-c445-7ac3-a7ab-db6d6e66266c".into());
-        let value = serde_json::to_value(&record).unwrap();
-        assert_eq!(
-            value["child_thread_id"],
-            "01a1407d-c445-7ac3-a7ab-db6d6e66266c"
-        );
-        let back: TaskRecord = serde_json::from_value(value).unwrap();
-        assert_eq!(back.child_thread_id, record.child_thread_id);
-    }
-}
+#[path = "tasks_test.rs"]
+mod tests;

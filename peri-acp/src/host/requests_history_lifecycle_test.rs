@@ -1,7 +1,24 @@
-use super::*;
+use crate::host::requests::handle_request;
+use crate::host::requests::tests::MockTransport;
+use crate::host::AcpServerConfig;
+use crate::host::SessionState;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::FrozenState;
+
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::store::{CompactionChange, MessageFlags};
 use peri_acp_types::PeriCaps;
+use peri_resources::sessions::SqliteThreadStore;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 async fn binding_state(cfg: &AcpServerConfig, id: &str) -> BindingState {
     cfg.session_resources
@@ -33,13 +50,15 @@ impl Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = std::fs::canonicalize(tmp.path()).unwrap().join("saved");
         std::fs::create_dir(&cwd).unwrap();
-        let config = make_peri_config_with_provider(make_provider_config(
-            "local",
-            "openai",
-            "fixture-key",
-            "fixture-model",
-        ));
-        let (cfg, bridge) = make_server_config_with_bridge(
+        let config = crate::host::requests::tests::make_peri_config_with_provider(
+            crate::host::requests::tests::make_provider_config(
+                "local",
+                "openai",
+                "fixture-key",
+                "fixture-model",
+            ),
+        );
+        let (cfg, bridge) = crate::host::requests::tests::make_server_config_with_bridge(
             config.clone(),
             LlmProvider::from_config(&config).unwrap(),
             &tmp,
@@ -47,7 +66,7 @@ impl Fixture {
         .await;
         let mut sessions = HashMap::new();
         let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-        let created = handle_request(
+        let created = crate::host::requests::handle_request(
             "session/new",
             &json!({"cwd":cwd}),
             &cfg,
@@ -73,7 +92,7 @@ impl Fixture {
     }
 
     async fn request(&mut self, method: &str, params: &Value) -> Result<Value, AcpError> {
-        handle_request(
+        crate::host::requests::handle_request(
             method,
             params,
             &self.cfg,
@@ -264,14 +283,14 @@ async fn another_host_handle_can_restore_without_peri_execution_exclusion() {
     let mut fixture = Fixture::new().await;
     let id = fixture.id.clone();
     let configuration = fixture.cfg.peri_config.read().clone();
-    let other = make_server_config(
+    let other = crate::host::requests::tests::make_server_config(
         configuration.clone(),
         LlmProvider::from_config(&configuration).unwrap(),
         &fixture.tmp,
     )
     .await;
     let mut other_sessions = HashMap::new();
-    handle_request(
+    crate::host::requests::handle_request(
         "session/load",
         &json!({"sessionId":id}),
         &other,
@@ -286,7 +305,7 @@ async fn another_host_handle_can_restore_without_peri_execution_exclusion() {
         "preserved session history"
     );
     assert!(fixture.sessions.contains_key(&id));
-    handle_request(
+    crate::host::requests::handle_request(
         "session/close",
         &json!({"sessionId":id}),
         &other,
@@ -404,7 +423,7 @@ async fn read_only_store_closes_views_without_mutating_history() {
         .await
         .unwrap(),
     );
-    let readonly = build_server_config(
+    let readonly = crate::host::requests::tests::build_server_config(
         config.clone(),
         LlmProvider::from_config(&config).unwrap(),
         &fixture.tmp,
@@ -412,7 +431,7 @@ async fn read_only_store_closes_views_without_mutating_history() {
     )
     .await;
     let mut sessions = HashMap::new();
-    let history = handle_request(
+    let history = crate::host::requests::handle_request(
         "peri/session_history",
         &json!({"sessionId":id}),
         &readonly,
@@ -422,8 +441,13 @@ async fn read_only_store_closes_views_without_mutating_history() {
     .await
     .unwrap();
     assert_eq!(history["payloads"].as_array().unwrap().len(), 1);
-    for method in ["session/load", "session/resume", "session/delete"] {
-        assert!(handle_request(
+    for method in [
+        "session/load",
+        "session/resume",
+        "session/close",
+        "session/delete",
+    ] {
+        assert!(crate::host::requests::handle_request(
             method,
             &json!({"sessionId":id}),
             &readonly,

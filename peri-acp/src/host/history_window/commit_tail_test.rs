@@ -19,7 +19,9 @@ use crate::transport::types::AcpError;
 use super::oversize::{
     OversizeMemory, OVERSIZE_DESCRIPTOR_BYTE_BUDGET, OVERSIZE_DESCRIPTOR_MEMORY_MAX_ENTRIES,
 };
-use super::{finalize, HistoryWindowCoordinator, WindowConnection, WindowNotificationSink};
+use super::HistoryWindowCoordinator;
+use super::WindowConnection;
+use super::WindowNotificationSink;
 
 fn tail(position: u64) -> HistoryCommittedTail {
     HistoryCommittedTail::new(
@@ -203,9 +205,16 @@ async fn failed_finalize_does_not_pollute_oversize_memory() {
     let entry = MessageId::new();
 
     // generation 不匹配：二次校验失败，descriptor 不得进入票据记忆。
-    let error = finalize(&sessions, "session-1", 8, 3, &issued, &[(entry, 1)])
-        .await
-        .unwrap_err();
+    let error = crate::host::history_window::history_window_coordinator::finalize(
+        &sessions,
+        "session-1",
+        8,
+        3,
+        &issued,
+        &[(entry, 1)],
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error.code, -32012);
     assert!(
         !issued.remembers_oversize(entry),
@@ -213,8 +222,15 @@ async fn failed_finalize_does_not_pollute_oversize_memory() {
     );
 
     // 校验通过后才登记。
-    finalize(&sessions, "session-1", 7, 3, &issued, &[(entry, 1)])
-        .await
-        .expect("matching generation/structure must pass");
+    crate::host::history_window::history_window_coordinator::finalize(
+        &sessions,
+        "session-1",
+        7,
+        3,
+        &issued,
+        &[(entry, 1)],
+    )
+    .await
+    .expect("matching generation/structure must pass");
     assert!(issued.remembers_oversize(entry));
 }

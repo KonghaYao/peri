@@ -7,11 +7,14 @@
 //! 真实进程边界（`peri acp` 子进程）由 `peri-tui/tests/session_recovery_process.rs`
 //! 覆盖；本文件证明的是同一库文件上存储与恢复语义的正确性。
 
-use super::*;
+use crate::host::requests::tests::recovery_tests::RecoveryHarness;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::recovery::SessionRecovery;
 use peri_acp_types::recovery::{RecoverySkip, RecoverySkipReason};
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+
 use sqlx::Connection as _;
+use std::time::Duration;
 
 /// 1. 已提交的 `working` + 已提交的 MQ 行 → 新进程进入时恰好一条提醒、恰好一个 turn。
 ///
@@ -66,7 +69,7 @@ async fn committed_working_and_queue_recover_once_in_a_new_host() {
     );
 
     recovery.launch(&report).await;
-    wait_for("恢复 turn 调用模型", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("恢复 turn 调用模型", || async {
         host._mock.matched()
     })
     .await;
@@ -120,19 +123,22 @@ async fn recovery_reminder_survives_an_earlier_failed_attempt() {
 
     recovery.launch(&report).await;
 
-    wait_for("恢复 turn 调用模型且提醒被移交", || async {
-        let model_turn = host
-            .recorded
-            .notifications()
-            .iter()
-            .any(|(method, params)| {
-                method == "session/update"
-                    && params["update"]["sessionUpdate"] == "agent_message_chunk"
-            });
-        model_turn && host.recovery_rows(&thread_id).await.is_empty()
-    })
+    crate::host::requests::tests::recovery_tests::wait_for(
+        "恢复 turn 调用模型且提醒被移交",
+        || async {
+            let model_turn = host
+                .recorded
+                .notifications()
+                .iter()
+                .any(|(method, params)| {
+                    method == "session/update"
+                        && params["update"]["sessionUpdate"] == "agent_message_chunk"
+                });
+            model_turn && host.recovery_rows(&thread_id).await.is_empty()
+        },
+    )
     .await;
-    wait_for("用户待发输入被交付", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("用户待发输入被交付", || async {
         host.recorded
             .notifications()
             .iter()
@@ -238,12 +244,12 @@ async fn reentry_in_a_third_host_does_not_repeat_the_recovered_turn() {
     let report = recovery.enter(&thread_id).await.unwrap();
     assert_eq!(report.recovered, vec![thread_id.clone()]);
     recovery.launch(&report).await;
-    wait_for("恢复 turn 调用模型", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("恢复 turn 调用模型", || async {
         first._mock.matched()
     })
     .await;
     first._mock.assert_async().await;
-    wait_for("提醒被 Receive 移交", || async {
+    crate::host::requests::tests::recovery_tests::wait_for("提醒被 Receive 移交", || async {
         first.recovery_rows(&thread_id).await.is_empty()
     })
     .await;

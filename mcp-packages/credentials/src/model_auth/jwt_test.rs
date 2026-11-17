@@ -1,7 +1,11 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde_json::json;
 
-use super::*;
+use crate::model_auth::jwt::Claims;
+use crate::model_auth::jwt::Jwks;
+use crate::model_auth::types::AuthError;
+use crate::model_auth::types::AuthResult;
 
 // Synthetic fixture private key, generated exclusively for offline tests.
 fn signed(claims: serde_json::Value) -> String {
@@ -27,7 +31,7 @@ fn claims() -> serde_json::Value {
 
 fn check(value: serde_json::Value) -> AuthResult<Claims> {
     let jwks = serde_json::from_str(include_str!("fixtures/test-only-jwks.json")).unwrap();
-    verify(
+    crate::model_auth::jwt::verify(
         &signed(value),
         &jwks,
         "https://auth.openai.com",
@@ -83,7 +87,7 @@ fn altered_signature_unsigned_token_and_duplicate_key_are_rejected() {
     let (input, _) = token.rsplit_once('.').unwrap();
     let corrupt = format!("{input}.{}", URL_SAFE_NO_PAD.encode(vec![0; 256]));
     assert!(matches!(
-        verify(
+        crate::model_auth::jwt::verify(
             &corrupt,
             &jwks,
             "https://auth.openai.com",
@@ -99,7 +103,7 @@ fn altered_signature_unsigned_token_and_duplicate_key_are_rejected() {
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims()).unwrap())
     );
     assert!(matches!(
-        verify(
+        crate::model_auth::jwt::verify(
             &unsigned,
             &jwks,
             "https://auth.openai.com",
@@ -116,7 +120,7 @@ fn altered_signature_unsigned_token_and_duplicate_key_are_rejected() {
             .remove(0),
     );
     assert!(matches!(
-        verify(
+        crate::model_auth::jwt::verify(
             &token,
             &jwks,
             "https://auth.openai.com",

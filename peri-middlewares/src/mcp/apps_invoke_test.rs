@@ -1,4 +1,4 @@
-use super::*;
+use super::{CancellationToken, McpAppsErrorKind, PoolMcpAppsRelay};
 use crate::mcp::client::{ClientStatus, McpClientHandle, McpClientPool};
 /// Host 归属值：生产上由 `SessionAppsFacade` 的 Host 操作域 + 请求账本给出
 /// （序号权威在调用方）；本文件只驱动 relay 面，故显式给出一对固定值。

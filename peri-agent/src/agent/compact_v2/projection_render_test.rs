@@ -1,8 +1,10 @@
-use super::projection::{
-    estimate_projection_chars, render_llm_view, MicroCompactPlan, ProjectionAction,
-    ProjectionActionEntry, ProjectionTarget, ProviderCapabilities, ProviderProtocol,
-    PROJECTION_POLICY_VERSION,
-};
+use crate::agent::compact_v2::projection::MicroCompactPlan;
+use crate::agent::compact_v2::projection::ProjectionAction;
+use crate::agent::compact_v2::projection::ProjectionActionEntry;
+use crate::agent::compact_v2::projection::ProjectionTarget;
+use crate::agent::compact_v2::projection::ProviderCapabilities;
+use crate::agent::compact_v2::projection::ProviderProtocol;
+use crate::agent::compact_v2::projection::PROJECTION_POLICY_VERSION;
 use crate::messages::{BaseMessage, ContentBlock, MessageContent};
 use crate::session::transcript::MessageTranscript;
 fn transcript_with_tool_exchange(
@@ -51,10 +53,13 @@ fn provider_replay_unit_survives_render_and_provider_switch_unchanged() {
         ProviderCapabilities::anthropic(),
         ProviderCapabilities::default(),
     ] {
-        let view = render_llm_view(&transcript, &[], &caps).unwrap();
+        let view = crate::agent::compact_v2::projection::render_llm_view(&transcript, &[], &caps)
+            .expect("the render llm view fixture result is required for this assertion");
         assert_eq!(
-            serde_json::to_value(&view).unwrap(),
-            serde_json::to_value(transcript.visible_messages()).unwrap()
+            serde_json::to_value(&view)
+                .expect("to_value must accept this test fixture representation"),
+            serde_json::to_value(transcript.visible_messages())
+                .expect("the visible messages fixture result is required for this assertion")
         );
         assert_eq!(view[0].content(), "visible assistant text");
         assert_eq!(view[0].tool_calls().len(), 1);
@@ -66,7 +71,7 @@ fn provider_replay_unit_survives_render_and_provider_switch_unchanged() {
 fn provider_replay_rejects_assistant_text_and_result_projection() {
     let transcript = replay_transcript();
     let visible = transcript.visible_messages();
-    for action in [
+    let action_items = [
         ProjectionActionEntry {
             message_id: visible[0].id(),
             target: ProjectionTarget::ContentBlock { index: 0 },
@@ -81,9 +86,14 @@ fn provider_replay_rejects_assistant_text_and_result_projection() {
                 preserve_recovery_handle: false,
             },
         },
-    ] {
-        let error =
-            render_llm_view(&transcript, &[action], &ProviderCapabilities::openai()).unwrap_err();
+    ];
+    for action in action_items {
+        let error = crate::agent::compact_v2::projection::render_llm_view(
+            &transcript,
+            &[action],
+            &ProviderCapabilities::openai(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("provider replay"), "{error}");
     }
 }
@@ -130,7 +140,7 @@ fn canonical_reminder_renders_once_with_and_without_directives() {
             summary: None,
             metadata: serde_json::json!({}),
         })
-        .unwrap();
+        .expect("the construct fixture result is required for this assertion");
     let mut transcript = MessageTranscript::new();
     let reminder_id = transcript.append_system_reminder(reminder);
     let normal_id = transcript.append(BaseMessage::human("normal"));
@@ -146,8 +156,12 @@ fn canonical_reminder_renders_once_with_and_without_directives() {
             ..Default::default()
         },
     ] {
-        let projected =
-            render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default()).unwrap();
+        let projected = crate::agent::compact_v2::projection::render_llm_view(
+            &transcript,
+            &plan.actions,
+            &ProviderCapabilities::default(),
+        )
+        .expect("the render llm view fixture result is required for this assertion");
         let reminders: Vec<_> = projected
             .iter()
             .filter(|message| message.id() == reminder_id)
@@ -186,7 +200,8 @@ fn test_blocks_image_projection_removes_base64() {
 
     let caps = ProviderCapabilities::default();
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
 
     // 投影后不应含 Base64 payload
     let blocks = projected[0].content_blocks();
@@ -231,7 +246,8 @@ fn test_blocks_document_projection_removes_base64() {
 
     let caps = ProviderCapabilities::default();
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
 
     let blocks = projected[0].content_blocks();
     let has_doc_base64 = blocks.iter().any(|b| {
@@ -284,8 +300,12 @@ fn legacy_tool_input_projection_preserves_selected_long_fields_and_tool_use() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     let BaseMessage::Ai {
         content,
         tool_calls,
@@ -345,9 +365,12 @@ fn test_tool_input_projection_short_or_invalid_selected_fields_are_noops() {
             ..Default::default()
         };
 
-        let projected =
-            render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-                .expect("render_llm_view 应成功");
+        let projected = crate::agent::compact_v2::projection::render_llm_view(
+            &transcript,
+            &plan.actions,
+            &ProviderCapabilities::default(),
+        )
+        .expect("render_llm_view 应成功");
         let BaseMessage::Ai { tool_calls, .. } = &projected[0] else {
             panic!("第一条消息应为 Ai 消息");
         };
@@ -386,8 +409,12 @@ fn regression_glob_short_pattern_projection_contains_no_compact_note() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     let BaseMessage::Ai { tool_calls, .. } = &projected[0] else {
         panic!("第一条消息应为 Ai 消息");
     };
@@ -433,8 +460,12 @@ fn test_short_tool_result_compact_action_is_direct_render_noop() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     assert_eq!(
         projected[1].content(),
         result_text,
@@ -482,8 +513,12 @@ fn test_tool_result_projection_preserves_block_boundaries() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
     };
@@ -491,7 +526,8 @@ fn test_tool_result_projection_preserves_block_boundaries() {
         panic!("block boundaries must survive")
     };
     assert_eq!(blocks.len(), 2);
-    for (block, character) in blocks.iter().zip(['A', 'B']) {
+    let paired_items = blocks.iter().zip(['A', 'B']);
+    for (block, character) in paired_items {
         let ContentBlock::Text { text } = block else {
             panic!("expected text")
         };
@@ -500,7 +536,8 @@ fn test_tool_result_projection_preserves_block_boundaries() {
         assert!(text.contains("2550 字符已省略"));
     }
 
-    let (before, after) = estimate_projection_chars(&transcript, &[action]);
+    let (before, after) =
+        crate::agent::compact_v2::projection::estimate_projection_chars(&transcript, &[action]);
     assert_eq!(before, 6000);
     assert_eq!(after, content.text_content().chars().count() as u64);
     assert!(before > after, "多 Text block 的整体估算应体现节省");
@@ -543,8 +580,12 @@ fn test_tool_result_projection_keeps_multi_block_content_at_or_below_total_limit
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
     };
@@ -589,15 +630,20 @@ fn test_tool_result_projection_uses_action_policy_below_planner_threshold() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
     };
     assert!(matches!(content, MessageContent::Blocks(_)));
     assert!(content.text_content().contains("字符已省略"));
 
-    let (before, after) = estimate_projection_chars(&transcript, &[action]);
+    let (before, after) =
+        crate::agent::compact_v2::projection::estimate_projection_chars(&transcript, &[action]);
     assert_eq!(before, 450);
     assert_eq!(after, content.text_content().chars().count() as u64);
     assert!(
@@ -635,8 +681,12 @@ fn test_tool_result_projection_uses_exact_head_tail_format() {
         ..Default::default()
     };
 
-    let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
-        .expect("render_llm_view 应成功");
+    let projected = crate::agent::compact_v2::projection::render_llm_view(
+        &transcript,
+        &plan.actions,
+        &ProviderCapabilities::default(),
+    )
+    .expect("render_llm_view 应成功");
     assert_eq!(projected[1].content(), "abc\n... [496 字符已省略] ...\nyz");
 }
 
@@ -672,7 +722,8 @@ fn test_tool_result_projection_keeps_head_tail() {
 
     let caps = ProviderCapabilities::default();
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
 
     // ToolResult 内容应被截断
     if let BaseMessage::Tool { content, .. } = &projected[1] {
@@ -717,7 +768,8 @@ fn test_error_tool_result_is_unchanged() {
 
     let caps = ProviderCapabilities::default();
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
 
     // 错误 ToolResult 应保持不变
     if let BaseMessage::Tool {
@@ -760,7 +812,8 @@ fn test_cjk_projection_uses_character_boundary() {
 
     let caps = ProviderCapabilities::default();
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
 
     if let BaseMessage::Tool { content, .. } = &projected[1] {
         let text = content.text_content();
@@ -803,7 +856,8 @@ fn test_signed_reasoning_not_partially_truncated() {
         signed_reasoning_must_be_whole: true,
     };
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
 
     // 签名不应被局部截断
     let blocks = projected[0].content_blocks();
@@ -833,7 +887,8 @@ fn test_render_llm_view_no_actions_passthrough() {
     let caps = ProviderCapabilities::default();
 
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
     assert_eq!(projected.len(), 2, "无 action 时应保留全部可见消息");
 }
 
@@ -870,7 +925,8 @@ fn test_human_and_system_are_unchanged() {
 
     let caps = ProviderCapabilities::default();
     let projected =
-        render_llm_view(&transcript, &plan.actions, &caps).expect("render_llm_view 应成功");
+        crate::agent::compact_v2::projection::render_llm_view(&transcript, &plan.actions, &caps)
+            .expect("render_llm_view 应成功");
 
     // Human/System 永不变
     assert_eq!(projected[0].content(), "hello");

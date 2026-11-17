@@ -11,8 +11,6 @@ use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 
-use crate::kit::atoms::LOADING_EPOCH;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TodoStatus {
     InProgress,
@@ -248,3 +246,5 @@ pub(super) fn build_footer_lines(
 #[cfg(test)]
 #[path = "footer_test.rs"]
 mod tests;
+
+use crate::kit::atoms::LOADING_EPOCH;

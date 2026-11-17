@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,10 +9,10 @@ use langfuse_client::{
     TelemetryEvent,
 };
 
-use super::*;
 use crate::langfuse::drop_telemetry::{
     LangfuseDropReason, LangfuseDropRegistry, LangfuseEventKind,
 };
+use crate::langfuse::session_like::LangfuseSessionLike;
 
 struct FailingSession {
     drops: LangfuseDropRegistry,
@@ -28,7 +29,7 @@ enum FailureMode {
 
 /// 真实预算身份：入队失败用例不绕过预算校验，只是各入口统一返回同一失败分类。
 fn failing_budget() -> Arc<MemoryBudget> {
-    MemoryBudget::new(1024 * 1024).expect("固定的非零测试预算必须被接受")
+    MemoryBudget::try_new(1024 * 1024).expect("固定的非零测试预算必须被接受")
 }
 
 impl FailureMode {
@@ -98,7 +99,12 @@ fn test_try_add_failure_records_safe_trace_drop_snapshot() {
         metadata: None,
     };
 
-    try_add_or_warn_via_session(&session, event, "trace-id", "must not be logged");
+    crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
+        &session,
+        event,
+        "trace-id",
+        "must not be logged",
+    );
 
     let snapshot = session
         .drop_registry()
@@ -149,9 +155,10 @@ impl tracing::Subscriber for EventRecorder {
 struct CollectedFields(String);
 
 impl tracing::field::Visit for CollectedFields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
         use std::fmt::Write;
-        write!(&mut self.0, "{}={:?};", field.name(), value).unwrap();
+        write!(&mut self.0, "{}={:?};", field.name(), value)
+            .expect("the value fixture result is required for this assertion");
     }
 }
 
@@ -183,10 +190,18 @@ fn congestion_records_every_drop_without_per_event_logs() {
         let recorder = EventRecorder::default();
         tracing::subscriber::with_default(recorder.clone(), || {
             for _ in 0..128 {
-                try_add_or_warn_via_session(&session, trace_event(), "trace-id", "private-context");
+                crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
+                    &session,
+                    trace_event(),
+                    "trace-id",
+                    "private-context",
+                );
             }
         });
-        let snapshot = session.drop_registry().snapshot("trace-id").unwrap();
+        let snapshot = session
+            .drop_registry()
+            .snapshot("trace-id")
+            .expect("the snapshot fixture result is required for this assertion");
         assert_eq!(snapshot.total, 128);
         assert_eq!(snapshot.by_reason.get(&reason), Some(&128));
         assert_eq!(
@@ -207,7 +222,12 @@ fn unknown_admission_error_is_diagnosed_without_error_or_event_payload() {
     };
     let recorder = EventRecorder::default();
     tracing::subscriber::with_default(recorder.clone(), || {
-        try_add_or_warn_via_session(&session, trace_event(), "trace-id", "private-context");
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
+            &session,
+            trace_event(),
+            "trace-id",
+            "private-context",
+        );
     });
     let events = recorder.events.lock();
     assert_eq!(events.len(), 1);

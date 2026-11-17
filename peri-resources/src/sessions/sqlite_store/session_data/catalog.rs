@@ -1,6 +1,6 @@
 //! Local Machine and Workspace catalog and Session archive operations.
 
-use super::*;
+use super::{SessionResourceResult, SqliteSessionData, ThreadId};
 
 impl SqliteSessionData {
     pub(super) async fn catalog_machines(
@@ -11,15 +11,15 @@ impl SqliteSessionData {
             sqlx::query_as("SELECT id, name, identity_kind FROM machines ORDER BY name, id")
                 .fetch_all(&self.database.pool)
                 .await
-                .map_err(|error| read_failure(error.into()))?;
+                .map_err(|error| super::read_failure(error.into()))?;
         let current = crate::sessions::machine::current()
-            .map_err(|_| unavailable("machine identity is not initialized"))?;
+            .map_err(|_| super::unavailable("machine identity is not initialized"))?;
         rows.into_iter()
             .map(|(id, name, kind)| {
                 let identity_kind = match kind.as_str() {
                     "known" => MachineIdentityKind::Known,
                     "legacy_unknown" => MachineIdentityKind::LegacyUnknown,
-                    _ => return Err(corrupt("stored machine identity kind is invalid")),
+                    _ => return Err(super::corrupt("stored machine identity kind is invalid")),
                 };
                 Ok(MachineInfo {
                     is_current: id == current,
@@ -41,19 +41,19 @@ impl SqliteSessionData {
         .bind(machine_id)
         .fetch_all(&self.database.pool)
         .await
-        .map_err(|error| read_failure(error.into()))?;
+        .map_err(|error| super::read_failure(error.into()))?;
         rows.into_iter()
             .map(|(id, path, source)| {
                 let path_source = match source.as_str() {
                     "discovered" => WorkspacePathSource::Discovered,
                     "derived_legacy" => WorkspacePathSource::DerivedLegacy,
                     "unverified" => WorkspacePathSource::Unverified,
-                    _ => return Err(corrupt("stored workspace path source is invalid")),
+                    _ => return Err(super::corrupt("stored workspace path source is invalid")),
                 };
                 Ok(WorkspaceInfo {
                     id: id
                         .parse()
-                        .map_err(|_| corrupt("stored workspace id is invalid"))?,
+                        .map_err(|_| super::corrupt("stored workspace id is invalid"))?,
                     machine_id: machine_id.to_owned(),
                     path: path.into(),
                     path_source,
@@ -69,7 +69,7 @@ impl SqliteSessionData {
         self.writable()?;
         let name = name.trim();
         if name.is_empty() || name.len() > 200 {
-            return Err(invalid_input(
+            return Err(super::invalid_input(
                 "machine name must contain 1 to 200 characters",
             ));
         }
@@ -78,9 +78,9 @@ impl SqliteSessionData {
             .bind(machine_id)
             .execute(&self.database.pool)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         if result.rows_affected() == 0 {
-            return Err(not_found());
+            return Err(super::not_found());
         }
         Ok(())
     }
@@ -95,18 +95,22 @@ impl SqliteSessionData {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         self.require_session(&mut tx, id).await?;
         let row: Option<(Option<String>, Option<String>)> =
             sqlx::query_as("SELECT parent_thread_id, frozen_context FROM threads WHERE id = ?1")
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         match row {
-            None => return Err(not_found()),
-            Some((Some(_), _)) => return Err(invalid_input("child sessions cannot be archived")),
-            Some((None, None)) => return Err(invalid_input("draft sessions cannot be archived")),
+            None => return Err(super::not_found()),
+            Some((Some(_), _)) => {
+                return Err(super::invalid_input("child sessions cannot be archived"))
+            }
+            Some((None, None)) => {
+                return Err(super::invalid_input("draft sessions cannot be archived"))
+            }
             Some((None, Some(_))) => {}
         }
         sqlx::query("UPDATE threads SET archived = ?1 WHERE id = ?2")
@@ -114,10 +118,10 @@ impl SqliteSessionData {
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(|error| map_sqlx(&error))?;
+            .map_err(|error| super::map_sqlx(&error))?;
         tx.commit()
             .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
+            .map_err(|_| super::commit_failure(Some(id.clone())))?;
         Ok(())
     }
 }

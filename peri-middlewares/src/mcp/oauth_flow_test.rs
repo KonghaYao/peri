@@ -1,6 +1,9 @@
 //! Tests for oauth_flow
 
-use super::*;
+use super::{
+    oneshot, Arc, OAuthCallbackResult, OAuthFailureKind, OAuthFlowError, OAuthFlowEvent,
+    OAuthFlowManager,
+};
 
 use peri_acp_types::oauth_credentials::{OAuthCredentialPort, OAuthCredentialResult};
 
@@ -38,7 +41,7 @@ impl OAuthCredentialPort for MemoryOAuthCredentialPort {
 }
 
 fn memory_client() -> crate::mcp::auth_store::OAuthCredentialClient {
-    crate::mcp::auth_store::OAuthCredentialClient::new(std::sync::Arc::new(
+    crate::mcp::auth_store::OAuthCredentialClient::try_new(std::sync::Arc::new(
         MemoryOAuthCredentialPort::default(),
     ))
     .unwrap()

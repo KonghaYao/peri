@@ -5,7 +5,13 @@
 //! 不另造坐标换算。身份重定位的判据只有一条：**同一个可见单元在屏幕上的行号不变**，
 //! 屏幕行 = `slot_visual_start(单元) − 视口偏移`。
 
-use super::*;
+use super::FoldKey;
+use super::PrependRelocation;
+use super::SlotIndex;
+use super::TuiRenderUnit;
+use super::UnitIdentity;
+use super::ViewportAnchor;
+
 use crate::kit::entry_render_cache::{EntryRenderContext, EntrySurface};
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::message_area::selection::{SlotLines, WrappedLineInfo};
@@ -32,21 +38,24 @@ fn index(items: Vec<TuiRenderUnit>, heights: &[usize]) -> SlotIndex {
     let grid = GridSpec::grid_for(80);
     let mut index = SlotIndex::default();
     index.set_source(im::Vector::from(items), grid, context(), 0);
-    for (slot, height) in heights.iter().copied().enumerate() {
-        let map = vec![WrappedLineInfo {
-            logical_idx: 0,
-            visual_start: 0,
-            visual_end: height,
-            slot_index: slot,
-        }];
-        index.set_slot(
-            slot,
-            Arc::new(SlotLines::single(Arc::new(vec![Line::from(format!(
-                "slot-{slot}"
-            ))]))),
-            &map,
-            true,
-        );
+    {
+        let iteration_items = heights.iter().copied().enumerate();
+        for (slot, height) in iteration_items {
+            let map = vec![WrappedLineInfo {
+                logical_idx: 0,
+                visual_start: 0,
+                visual_end: height,
+                slot_index: slot,
+            }];
+            index.set_slot(
+                slot,
+                Arc::new(SlotLines::single(Arc::new(vec![Line::from(format!(
+                    "slot-{slot}"
+                ))]))),
+                &map,
+                true,
+            );
+        }
     }
     index
 }
@@ -180,7 +189,7 @@ fn relocate_refuses_when_the_anchored_unit_was_absorbed_into_a_group() {
     );
     let anchor = ViewportAnchor::capture(&before, 3).expect("锚点落在 t2 内");
     assert_eq!(
-        identity_of(&before.canonical_items().unwrap()[1]),
+        super::identity_of(&before.canonical_items().expect("relocate refuses when the anchored unit was absorbed into a group: the canonical_items fixture operation uses valid inputs")[1]),
         UnitIdentity::Fold(FoldKey::Tool("t2".into())),
         "工具卡身份 = 既有折叠键"
     );

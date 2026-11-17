@@ -50,7 +50,7 @@ pub enum FoldKey {
     SystemReminder(u64),
 }
 
-/// [G2] spec §7 折叠表——每个 entry 类型 × 状态的默认折叠目标。
+/// \[G2\] spec §7 折叠表——每个 entry 类型 × 状态的默认折叠目标。
 ///
 /// 唯一折叠策略单点：`push_view_models` 的折叠 pass（以及未来所有消费者）
 /// 只能从这里取值，禁止在别处内联折叠决策。
@@ -83,6 +83,7 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
 }
 
 /// `FoldState` 的确定性 hash 代码——纳入 content_hash 公式（G1）。
+#[must_use]
 pub fn fold_state_code(f: FoldState) -> u64 {
     match f {
         FoldState::Collapsed => 1,
@@ -92,6 +93,7 @@ pub fn fold_state_code(f: FoldState) -> u64 {
 }
 
 /// `EntryStatus` 的确定性 hash 代码——纳入 content_hash 公式（G1）。
+#[must_use]
 pub fn entry_status_code(s: EntryStatus) -> u64 {
     match s {
         EntryStatus::Running => 1,

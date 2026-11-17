@@ -1,4 +1,12 @@
-use super::*;
+use super::Admission;
+use super::Arc;
+use super::BackpressurePolicy;
+use super::BatcherCommand;
+use super::LangfuseError;
+use super::MemoryBudget;
+use super::QueuedEvent;
+use super::SnapshotSource;
+use super::TelemetryEvent;
 use crate::types::TraceBody;
 use crate::IngestionEvent;
 use std::time::Duration;
@@ -18,7 +26,7 @@ fn event(id: &str) -> IngestionEvent {
 
 /// 测试预算：只用于通过准入的预算身份校验，不参与容量断言。
 fn budget() -> Arc<MemoryBudget> {
-    MemoryBudget::new(usize::MAX).unwrap()
+    MemoryBudget::try_new(usize::MAX).unwrap()
 }
 
 fn telemetry(id: &str, budget: &Arc<MemoryBudget>) -> TelemetryEvent {
@@ -37,7 +45,7 @@ async fn poll_pending<T>(future: std::pin::Pin<&mut impl std::future::Future<Out
 #[tokio::test]
 async fn test_close_drains_committed_work_without_waiting_for_reserved_permit() {
     let budget = budget();
-    let bytes = queued_bytes(&telemetry("committed", &budget), usize::MAX).unwrap();
+    let bytes = super::queued_bytes(&telemetry("committed", &budget), usize::MAX).unwrap();
     let (admission, mut receiver, _) = Admission::for_test(2, 256, bytes);
     admission
         .send(telemetry("committed", &budget))

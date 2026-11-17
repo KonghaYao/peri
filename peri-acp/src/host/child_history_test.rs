@@ -1,9 +1,21 @@
 //! Child timeline reads must not create executable ACP sessions.
 
-use super::*;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::transport::types::AcpError;
+use crate::transport::AcpTransport;
 use peri_acp_types::history_window::HistoryEntryId;
+use peri_acp_types::messages::BaseMessage;
+
 use peri_acp_types::session_resources::{ChildSnapshot, RewindBoundary};
-use peri_acp_types::store::{serialize_persisted_payload, InheritedContext};
+use peri_acp_types::store;
+use peri_acp_types::store::InheritedContext;
+use peri_acp_types::store::PersistedPayload;
+
+use peri_acp_types::PeriCaps;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::sync::Arc;
 
 fn child_caps() -> PeriCaps {
     PeriCaps {
@@ -30,9 +42,11 @@ async fn create_child_of(
         .resolve_workspace(tmp.path())
         .await
         .unwrap();
-    let child = new_session_id();
-    let frozen = frozen_snapshot_bytes(&fixture.cfg, parent).await.unwrap();
-    let mut target = bound_input(&child, &workspace, frozen);
+    let child = crate::host::requests::tests::new_session_id();
+    let frozen = crate::host::requests::tests::frozen_snapshot_bytes(&fixture.cfg, parent)
+        .await
+        .unwrap();
+    let mut target = crate::host::requests::tests::bound_input(&child, &workspace, frozen);
     target.meta.parent_thread_id = Some(parent.to_owned());
     target.meta.hidden = true;
     fixture
@@ -92,12 +106,13 @@ async fn child_history_pages_without_session_state_or_execution_setup() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let child = create_child(&fixture, &tmp, &fixture.sid).await;
-    let (client, sessions, task) = spawn_loop(
-        Arc::clone(&fixture.cfg),
-        Arc::clone(&fixture.sessions),
-        Some(child_caps()),
-    )
-    .await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&fixture.cfg),
+            Arc::clone(&fixture.sessions),
+            Some(child_caps()),
+        )
+        .await;
     let opened = child_request(
         &client,
         &fixture.sid,
@@ -110,7 +125,12 @@ async fn child_history_pages_without_session_state_or_execution_setup() {
     assert_eq!(opened["parentSessionId"], fixture.sid);
     assert_eq!(opened["scope"], "child");
     assert_eq!(opened["items"].as_array().unwrap().len(), 2);
-    append_human_message(&fixture.cfg, &child, "appended after snapshot").await;
+    crate::host::requests::tests::append_human_message(
+        &fixture.cfg,
+        &child,
+        "appended after snapshot",
+    )
+    .await;
     let page = child_page(&client, &fixture.sid, &child, &opened)
         .await
         .unwrap();
@@ -123,7 +143,9 @@ async fn child_history_pages_without_session_state_or_execution_setup() {
     assert!(!states.contains_key(&child));
     drop(states);
     assert!(
-        s9c_drain_notifications(&client).await.is_empty(),
+        crate::host::requests::tests::history_page_wire_tests::s9c_drain_notifications(&client)
+            .await
+            .is_empty(),
         "browsing must not replay or execute"
     );
     task.abort();
@@ -136,8 +158,13 @@ async fn child_history_authorizes_direct_parent_and_replaces_one_scope() {
     let fixture = PageFixture::new(&tmp).await;
     let child = create_child(&fixture, &tmp, &fixture.sid).await;
     let other = create_child(&fixture, &tmp, &fixture.sid).await;
-    let unrelated = create_bound_fixture(&fixture.cfg, tmp.path().to_str().unwrap(), None).await;
-    let (client, _, task) = spawn_loop(
+    let unrelated = crate::host::requests::tests::create_bound_fixture(
+        &fixture.cfg,
+        tmp.path().to_str().unwrap(),
+        None,
+    )
+    .await;
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
         Some(child_caps()),
@@ -172,12 +199,13 @@ async fn child_history_rewind_delete_and_parent_generation_invalidate() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let child = create_child(&fixture, &tmp, &fixture.sid).await;
-    let (client, sessions, task) = spawn_loop(
-        Arc::clone(&fixture.cfg),
-        Arc::clone(&fixture.sessions),
-        Some(child_caps()),
-    )
-    .await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&fixture.cfg),
+            Arc::clone(&fixture.sessions),
+            Some(child_caps()),
+        )
+        .await;
     let open = json!({"kind":"open","direction":"before","limit":2});
     let opened = child_request(&client, &fixture.sid, &child, open.clone())
         .await
@@ -244,14 +272,20 @@ async fn child_history_descendants_require_bounded_canonical_ancestry() {
     let fixture = PageFixture::new(&tmp).await;
     let child = create_child(&fixture, &tmp, &fixture.sid).await;
     let descendant = create_child_of(&fixture, &tmp, &child, &fixture.sid).await;
-    let foreign = create_bound_fixture(&fixture.cfg, tmp.path().to_str().unwrap(), None).await;
-    let foreign_child = create_child(&fixture, &tmp, &foreign).await;
-    let (client, sessions, task) = spawn_loop(
-        Arc::clone(&fixture.cfg),
-        Arc::clone(&fixture.sessions),
-        Some(child_caps()),
+    let foreign = crate::host::requests::tests::create_bound_fixture(
+        &fixture.cfg,
+        tmp.path().to_str().unwrap(),
+        None,
     )
     .await;
+    let foreign_child = create_child(&fixture, &tmp, &foreign).await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&fixture.cfg),
+            Arc::clone(&fixture.sessions),
+            Some(child_caps()),
+        )
+        .await;
     let open = json!({"kind":"open","direction":"before","limit":2});
     let opened = child_request(&client, &fixture.sid, &descendant, open.clone())
         .await
@@ -313,7 +347,7 @@ async fn child_history_filters_descriptors_and_rechecks_body_audience() {
         .append_history(&child, &[hidden])
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
         Some(child_caps()),
@@ -383,7 +417,7 @@ async fn child_history_filters_descriptors_and_rechecks_body_audience() {
         content: "now private".into(),
     });
     sqlx::query("UPDATE messages SET content = ?1 WHERE message_id = ?2")
-        .bind(serialize_persisted_payload(&replacement).unwrap())
+        .bind(store::serialize_persisted_payload(&replacement).unwrap())
         .bind(visible_id.as_uuid().to_string())
         .execute(&pool)
         .await
@@ -402,7 +436,7 @@ async fn child_history_requires_capability_and_rejects_setup_fields() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let child = create_child(&fixture, &tmp, &fixture.sid).await;
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
         None,
@@ -417,7 +451,7 @@ async fn child_history_requires_capability_and_rejects_setup_fields() {
     .await
     .is_err());
     task.abort();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
         Some(child_caps()),
@@ -454,7 +488,7 @@ async fn child_history_projects_text_reasoning_and_tools_without_provider_state(
         .append_history(&child, &[payload])
         .await
         .unwrap();
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
         Some(child_caps()),
@@ -491,12 +525,13 @@ async fn child_history_new_child_live_state_and_structure_changes_invalidate_sco
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let child = create_child(&fixture, &tmp, &fixture.sid).await;
-    let (client, sessions, task) = spawn_loop(
-        Arc::clone(&fixture.cfg),
-        Arc::clone(&fixture.sessions),
-        Some(child_caps()),
-    )
-    .await;
+    let (client, sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&fixture.cfg),
+            Arc::clone(&fixture.sessions),
+            Some(child_caps()),
+        )
+        .await;
     let open = json!({"kind":"open","direction":"before","limit":2});
     let opened = child_request(&client, &fixture.sid, &child, open.clone())
         .await
@@ -537,7 +572,7 @@ async fn child_history_corrupt_large_reminder_is_rejected_before_descriptor_and_
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
     let child = create_child(&fixture, &tmp, &fixture.sid).await;
-    let (client, _, task) = spawn_loop(
+    let (client, _, task) = crate::host::requests::tests::history_page_wire_tests::spawn_loop(
         Arc::clone(&fixture.cfg),
         Arc::clone(&fixture.sessions),
         Some(child_caps()),

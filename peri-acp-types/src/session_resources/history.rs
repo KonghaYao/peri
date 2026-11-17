@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 
 use super::{BindingState, FrozenState};
-use crate::messages::{strip_system_reminders, BaseMessage, MessageId};
+use crate::messages;
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
 use crate::store::{InheritedContext, MessageFlags, PersistedPayload};
 use crate::thread::ThreadMeta;
 
@@ -84,7 +86,7 @@ pub fn rewind_candidate_text(message: &BaseMessage) -> Option<String> {
         return None;
     }
     let text = message.content();
-    if strip_system_reminders(&text).trim().is_empty() {
+    if messages::strip_system_reminders(&text).trim().is_empty() {
         return None;
     }
     Some(text)

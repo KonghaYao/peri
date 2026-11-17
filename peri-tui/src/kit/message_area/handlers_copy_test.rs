@@ -1,6 +1,10 @@
-use super::*;
+use super::CopyButtonHit;
+use super::TuiAssistantBubble;
+use super::TuiRenderUnit;
+use super::ViewModelsSnapshot;
 use crate::kit::tui_render_unit::{TuiNoteLevel, TuiSystemNote};
 
+#[must_use]
 fn snapshot(text: &str, content_hash: u64) -> ViewModelsSnapshot {
     ViewModelsSnapshot {
         generation: 1,
@@ -13,6 +17,7 @@ fn snapshot(text: &str, content_hash: u64) -> ViewModelsSnapshot {
     }
 }
 
+#[must_use]
 fn hit() -> CopyButtonHit {
     CopyButtonHit {
         row: 3,
@@ -28,14 +33,14 @@ fn hit() -> CopyButtonHit {
 fn error_click_copies_source_including_hidden_lines_and_whitespace() {
     let text = "  HTTP 400\n".to_owned() + &"完整响应 ".repeat(200) + "\nlast hidden line  ";
     assert_eq!(
-        copy_text_for_hit(&snapshot(&text, 17), &hit()).as_deref(),
+        super::copy_text_for_hit(&snapshot(&text, 17), &hit()).as_deref(),
         Some(text.as_str())
     );
 }
 
 #[test]
 fn stale_error_icon_cannot_copy_another_message_after_rewind() {
-    assert!(copy_text_for_hit(&snapshot("replacement error", 18), &hit()).is_none());
+    assert!(super::copy_text_for_hit(&snapshot("replacement error", 18), &hit()).is_none());
 }
 
 #[test]
@@ -44,7 +49,7 @@ fn removed_error_icon_is_safe_after_reset() {
         generation: 2,
         items: im::Vector::new(),
     };
-    assert!(copy_text_for_hit(&empty, &hit()).is_none());
+    assert!(super::copy_text_for_hit(&empty, &hit()).is_none());
 }
 
 #[test]
@@ -69,7 +74,7 @@ fn markdown_copy_keeps_stable_identity_instead_of_duration_hash() {
     let mut button = hit();
     button.vm_hash = identity;
     assert_eq!(
-        copy_text_for_hit(&source, &button).as_deref(),
+        super::copy_text_for_hit(&source, &button).as_deref(),
         Some(text.as_str())
     );
 }

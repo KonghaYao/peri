@@ -1,5 +1,9 @@
-use super::*;
-use crate::store::{deserialize_persisted_payload, serialize_persisted_payload};
+use crate::messages::BaseMessage;
+use crate::messages::MessageId;
+use crate::store;
+use crate::store::PersistedPayload;
+use crate::system_reminder::SystemReminder;
+use crate::system_reminder::TrustedSystemReminderFactory;
 use crate::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SYSTEM_REMINDER_VERSION,
@@ -44,23 +48,28 @@ fn history_body_visibility_matches_regular_payload_projection() {
         }
     }
     for payload in payloads {
-        let encoded = serialize_persisted_payload(&payload).unwrap();
+        let encoded = store::serialize_persisted_payload(&payload).unwrap();
         assert_eq!(
-            history_body_displayable_to_client(encoded.as_bytes()).unwrap(),
+            crate::history_page_visibility::history_body_displayable_to_client(encoded.as_bytes())
+                .unwrap(),
             payload.displayable_to_client()
         );
         if let PersistedPayload::Message(message) = payload {
             let legacy = serde_json::to_vec(&message).unwrap();
             assert_eq!(
-                history_body_displayable_to_client(legacy.as_slice()).unwrap(),
+                crate::history_page_visibility::history_body_displayable_to_client(
+                    legacy.as_slice()
+                )
+                .unwrap(),
                 !message.is_system()
             );
         }
         assert_eq!(
-            deserialize_persisted_payload(&encoded)
+            store::deserialize_persisted_payload(&encoded)
                 .unwrap()
                 .displayable_to_client(),
-            history_body_displayable_to_client(encoded.as_bytes()).unwrap()
+            crate::history_page_visibility::history_body_displayable_to_client(encoded.as_bytes())
+                .unwrap()
         );
     }
 }
@@ -72,10 +81,15 @@ fn history_body_visibility_rejects_unknown_envelopes_and_truncated_json() {
         r#"{"version":1,"type":"unknown"}"#,
         "{}",
     ] {
-        assert!(!history_body_displayable_to_client(encoded.as_bytes()).unwrap());
+        assert!(
+            !crate::history_page_visibility::history_body_displayable_to_client(encoded.as_bytes())
+                .unwrap()
+        );
     }
-    assert!(history_body_displayable_to_client(
-        br#"{"role":"user","content":"unfinished"#.as_slice()
-    )
-    .is_err());
+    assert!(
+        crate::history_page_visibility::history_body_displayable_to_client(
+            br#"{"role":"user","content":"unfinished"#.as_slice()
+        )
+        .is_err()
+    );
 }

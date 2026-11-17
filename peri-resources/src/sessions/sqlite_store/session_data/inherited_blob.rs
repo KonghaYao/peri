@@ -24,16 +24,13 @@ use peri_acp_types::history_window::HistoryWindowError;
 use peri_acp_types::messages::MessageId;
 use std::sync::Arc;
 
-use super::blob_reader::{
-    is_transient_blob_error, is_unsupported_blob_error, open_blob, BlobReadError, BlobReader,
-};
+use super::blob_reader::BlobReadError;
+use super::blob_reader::BlobReader;
 use super::history::HISTORY_WINDOW_INHERITED_HEADER_SQL;
-use super::history_window::inherited_snapshot_of;
-use super::inherited_facts::{
-    scan_layout, scan_summary, CachedInheritedFacts, InheritedCacheLookup, InheritedLayout,
-    PayloadSpan,
+use super::inherited_facts::{CachedInheritedFacts, InheritedCacheLookup, InheritedLayout, PayloadSpan};
+use super::{
+    SessionResourceError, SessionResourceResult, SqliteConnection, SqliteSessionData, ThreadId,
 };
-use super::*;
 
 /// 扫描/解码窗口。读放大只受 blob 窗口余量约束，与正文总大小无关。
 const SCAN_WINDOW: usize = 16 * 1024;
@@ -378,7 +375,7 @@ pub(super) fn next_unit(raw: &[u8], pos: &mut usize) -> Result<Option<DecodedUni
             "inherited payload has an invalid unicode escape",
         ));
     };
-    if (0xD800..=0xDBFF).contains(&first) {
+    if (0xd800..=0xdbff).contains(&first) {
         let Some(&next_escape) = raw.get(*pos + 6) else {
             return Ok(None);
         };
@@ -398,12 +395,12 @@ pub(super) fn next_unit(raw: &[u8], pos: &mut usize) -> Result<Option<DecodedUni
                 "inherited payload has an invalid unicode escape",
             ));
         };
-        if !(0xDC00..=0xDFFF).contains(&second) {
+        if !(0xdc00..=0xdfff).contains(&second) {
             return Err(BlobReadError::Corrupt(
                 "inherited payload has an unpaired surrogate",
             ));
         }
-        let scalar = 0x10000 + (((first as u32 - 0xD800) << 10) | (second as u32 - 0xDC00));
+        let scalar = 0x10000 + (((first as u32 - 0xd800) << 10) | (second as u32 - 0xdc00));
         let mut bytes = [0u8; 4];
         let len = encode_utf8(scalar, &mut bytes).ok_or(BlobReadError::Corrupt(
             "inherited payload has invalid unicode",
@@ -414,7 +411,7 @@ pub(super) fn next_unit(raw: &[u8], pos: &mut usize) -> Result<Option<DecodedUni
             decoded_len: len,
         }));
     }
-    if (0xDC00..=0xDFFF).contains(&first) {
+    if (0xdc00..=0xdfff).contains(&first) {
         return Err(BlobReadError::Corrupt(
             "inherited payload has an unpaired surrogate",
         ));
@@ -450,16 +447,16 @@ fn encode_utf8(scalar: u32, out: &mut [u8; 4]) -> Option<usize> {
 }
 
 /// 顺序扫描列内容的小游标；每次只保留一个窗口。
-pub(super) struct Cursor<'a> {
-    reader: &'a BlobReader,
+pub(super) struct Cursor<'reader> {
+    reader: &'reader BlobReader,
     window: Vec<u8>,
     window_start: u64,
     pos: usize,
     pushback: Option<u8>,
 }
 
-impl<'a> Cursor<'a> {
-    pub(super) fn new(reader: &'a BlobReader) -> Self {
+impl<'reader> Cursor<'reader> {
+    pub(super) fn new(reader: &'reader BlobReader) -> Self {
         Self {
             reader,
             window: Vec::new(),
@@ -628,18 +625,18 @@ pub(super) use super::inherited_read::{
 
 impl SqliteSessionData {
     fn inherited_cache_lookup(&self, id: &ThreadId, total: u64) -> InheritedCacheLookup {
-        let mut cache = match self.inherited_facts.lock() {
-            Ok(cache) => cache,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut cache = self
+            .inherited_facts
+            .lock()
+            .expect("inherited facts cache must remain consistent after each mutation");
         cache.lookup(id, total)
     }
 
     fn store_inherited_facts(&self, id: &ThreadId, entry: CachedInheritedFacts) {
-        let mut cache = match self.inherited_facts.lock() {
-            Ok(cache) => cache,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut cache = self
+            .inherited_facts
+            .lock()
+            .expect("inherited facts cache must remain consistent after each mutation");
         cache.store(id, entry);
     }
 
@@ -655,9 +652,9 @@ impl SqliteSessionData {
                 .bind(id.as_str())
                 .fetch_optional(&mut *connection)
                 .await
-                .map_err(|error| map_sqlx(&error))?;
+                .map_err(|error| super::map_sqlx(&error))?;
         let Some((rowid, parent, value_type)) = row else {
-            return Err(not_found());
+            return Err(super::not_found());
         };
         // NULL 列没有可读取的值；空 TEXT/BLOB 由 blob 句柄报告 0 字节。
         if value_type == "null" {
@@ -681,7 +678,7 @@ impl SqliteSessionData {
                 detail: format!("sqlite handle is unavailable: {error}"),
             })
         })?;
-        let result = match open_blob(&mut locked, table, column, rowid) {
+        let result = match super::blob_reader::open_blob(&mut locked, table, column, rowid) {
             Ok(reader) => read(&reader),
             Err(error) => Err(error),
         };
@@ -742,7 +739,10 @@ impl SqliteSessionData {
         };
         let total = match Self::inherited_blob_total(connection, rowid).await? {
             Ok(total) => total,
-            Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
+            Err(error)
+                if super::blob_reader::is_unsupported_blob_error(&error)
+                    || super::blob_reader::is_transient_blob_error(&error) =>
+            {
                 return Ok(InheritedSummaryRead::Unsupported);
             }
             Err(error) => return Err(map_inherited_blob_error(error)),
@@ -754,12 +754,16 @@ impl SqliteSessionData {
             InheritedCacheLookup::Unsupported => return Ok(InheritedSummaryRead::Unsupported),
             InheritedCacheLookup::Summary(summary) => {
                 return Ok(InheritedSummaryRead::Facts {
-                    snapshot: inherited_snapshot_of(id, parent, &summary),
+                    snapshot: super::history_window::inherited_snapshot_of(id, parent, &summary),
                 });
             }
             InheritedCacheLookup::Layout(layout) => {
                 return Ok(InheritedSummaryRead::Facts {
-                    snapshot: inherited_snapshot_of(id, parent, &layout.summary()),
+                    snapshot: super::history_window::inherited_snapshot_of(
+                        id,
+                        parent,
+                        &layout.summary(),
+                    ),
                 });
             }
             InheritedCacheLookup::Miss => {}
@@ -783,7 +787,7 @@ impl SqliteSessionData {
                 }
                 InheritedCacheLookup::Miss => {}
             }
-            match scan_summary(reader) {
+            match super::inherited_facts::scan_summary(reader) {
                 Ok(summary) => {
                     let summary = Arc::new(summary);
                     self.store_inherited_facts(
@@ -807,13 +811,16 @@ impl SqliteSessionData {
             Ok(SummaryProbe::Absent) => Ok(InheritedSummaryRead::Facts { snapshot: None }),
             Ok(SummaryProbe::Cached(summary)) | Ok(SummaryProbe::Parsed(summary)) => {
                 Ok(InheritedSummaryRead::Facts {
-                    snapshot: inherited_snapshot_of(id, parent, &summary),
+                    snapshot: super::history_window::inherited_snapshot_of(id, parent, &summary),
                 })
             }
             Ok(SummaryProbe::Unsupported) => Ok(InheritedSummaryRead::Unsupported),
             // 打开失败（类型不是 TEXT/BLOB、行在定位后消失）或扫描期间 blob 失效：
             // 交给 SQL 语义解释。瞬态错误不写缓存，避免一次竞争永久停用增量路径。
-            Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
+            Err(error)
+                if super::blob_reader::is_unsupported_blob_error(&error)
+                    || super::blob_reader::is_transient_blob_error(&error) =>
+            {
                 Ok(InheritedSummaryRead::Unsupported)
             }
             Err(error) => Err(map_inherited_blob_error(error)),
@@ -838,7 +845,10 @@ impl SqliteSessionData {
         };
         let total = match Self::inherited_blob_total(connection, rowid).await? {
             Ok(total) => total,
-            Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
+            Err(error)
+                if super::blob_reader::is_unsupported_blob_error(&error)
+                    || super::blob_reader::is_transient_blob_error(&error) =>
+            {
                 return Ok(InheritedFactsRead::Unsupported);
             }
             Err(error) => return Err(map_inherited_blob_error(error)),
@@ -853,7 +863,11 @@ impl SqliteSessionData {
             InheritedCacheLookup::Unsupported => return Ok(InheritedFactsRead::Unsupported),
             InheritedCacheLookup::Layout(layout) => {
                 return Ok(InheritedFactsRead::Facts {
-                    snapshot: inherited_snapshot_of(id, parent, &layout.summary()),
+                    snapshot: super::history_window::inherited_snapshot_of(
+                        id,
+                        parent,
+                        &layout.summary(),
+                    ),
                     layout: Some(layout),
                 });
             }
@@ -877,7 +891,7 @@ impl SqliteSessionData {
                 // summary 不含数组顺序，必须走索引或重新扫描成完整布局。
                 InheritedCacheLookup::Summary(_) | InheritedCacheLookup::Miss => {}
             }
-            match scan_layout(reader) {
+            match super::inherited_facts::scan_layout(reader) {
                 Ok(layout) => {
                     let layout = Arc::new(layout);
                     self.store_inherited_facts(
@@ -904,12 +918,19 @@ impl SqliteSessionData {
             }),
             Ok(LayoutProbe::Cached(layout)) | Ok(LayoutProbe::Parsed(layout)) => {
                 Ok(InheritedFactsRead::Facts {
-                    snapshot: inherited_snapshot_of(id, parent, &layout.summary()),
+                    snapshot: super::history_window::inherited_snapshot_of(
+                        id,
+                        parent,
+                        &layout.summary(),
+                    ),
                     layout: Some(layout),
                 })
             }
             Ok(LayoutProbe::Unsupported) => Ok(InheritedFactsRead::Unsupported),
-            Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
+            Err(error)
+                if super::blob_reader::is_unsupported_blob_error(&error)
+                    || super::blob_reader::is_transient_blob_error(&error) =>
+            {
                 Ok(InheritedFactsRead::Unsupported)
             }
             Err(error) => Err(map_inherited_blob_error(error)),

@@ -1,4 +1,6 @@
-use super::*;
+use super::cache_policy;
+use super::McpConfigError;
+use super::McpConfigFile;
 
 #[test]
 fn cache_setting_rejects_null_and_non_boolean_values() {
@@ -80,7 +82,7 @@ fn cache_only_files_are_merged_without_changing_builtin_overlay() {
                 serde_json::json!({"mcpCache": project}).to_string(),
             )
             .unwrap();
-            let (config, _) = load_merged_config_full_with_paths(
+            let (config, _) = super::load_merged_config_full_with_paths(
                 directory.path(),
                 &claude_home,
                 &global_path,
@@ -88,8 +90,8 @@ fn cache_only_files_are_merged_without_changing_builtin_overlay() {
             )
             .unwrap();
             assert_eq!(config.mcp_cache, Some(global && project));
-            assert!(config.mcp_servers.contains_key("workspace"));
-            assert!(config.mcp_servers.contains_key("web"));
+            assert!(config.mcp_servers.contains_key("peri"));
+            assert!(!config.mcp_servers.contains_key("workspace"));
         }
     }
 }
@@ -99,15 +101,21 @@ fn global_cache_setting_uses_nested_precedence_and_validates_shadowed_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings.json");
     std::fs::write(&path, r#"{"mcpCache":false,"config":{"mcpCache":true}}"#).unwrap();
-    assert_eq!(load_global_config(&path).unwrap().mcp_cache, Some(true));
+    assert_eq!(
+        super::load_global_config(&path).unwrap().mcp_cache,
+        Some(true)
+    );
     std::fs::write(&path, r#"{"mcpCache":false,"config":{"mcpServers":{}}}"#).unwrap();
-    assert_eq!(load_global_config(&path).unwrap().mcp_cache, Some(false));
+    assert_eq!(
+        super::load_global_config(&path).unwrap().mcp_cache,
+        Some(false)
+    );
     for content in [
         r#"{"mcpCache":null,"config":{"mcpCache":false}}"#,
         r#"{"mcpCache":true,"config":{"mcpCache":"false"}}"#,
     ] {
         std::fs::write(&path, content).unwrap();
-        assert!(load_global_config(&path).is_err());
+        assert!(super::load_global_config(&path).is_err());
     }
 }
 
@@ -120,13 +128,15 @@ fn updating_server_disabled_preserves_cache_policy_and_rejects_invalid_policy() 
         r#"{"mcpCache":false,"mcpServers":{"external":{"command":"echo"}}}"#,
     )
     .unwrap();
-    set_server_disabled_with_paths(directory.path(), &path, "external", true).unwrap();
-    let config = load_global_config(&path).unwrap();
+    super::set_server_disabled_with_paths(directory.path(), &path, "external", true).unwrap();
+    let config = super::load_global_config(&path).unwrap();
     assert_eq!(config.mcp_cache, Some(false));
     assert_eq!(config.mcp_servers["external"].disabled, Some(true));
     let invalid = r#"{"mcpCache":null,"mcpServers":{"external":{"command":"echo"}}}"#;
     std::fs::write(&path, invalid).unwrap();
-    assert!(set_server_disabled_with_paths(directory.path(), &path, "external", true).is_err());
+    assert!(
+        super::set_server_disabled_with_paths(directory.path(), &path, "external", true).is_err()
+    );
     assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
 }
 
@@ -171,8 +181,8 @@ fn cache_environment_process_probe() {
     std::fs::write(directory.path().join(".mcp.json"), r#"{"mcpCache":true}"#).unwrap();
     peri_config::io::set_global_config_path(Some(path));
     let environment = std::env::var("PERI_MCP_CACHE").unwrap();
-    let config = load_merged_config_full(directory.path(), &directory.path().join("claude"));
-    let bare = load_bare_config();
+    let config = super::load_merged_config_full(directory.path(), &directory.path().join("claude"));
+    let bare = super::load_bare_config();
     if environment == "invalid" {
         assert!(matches!(
             config,

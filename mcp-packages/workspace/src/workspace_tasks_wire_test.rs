@@ -1,15 +1,18 @@
 use std::time::Duration;
 
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResponse, CancelTaskParams, ClientCapabilities,
-        ClientConfig, GetTaskParams, ProtocolVersion, ServerNotification, SubscriptionFilter,
-        TaskStatus,
-    },
-    ClientLifecycleMode,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResponse;
+use rmcp::model::CancelTaskParams;
+use rmcp::model::ClientCapabilities;
+use rmcp::model::ClientConfig;
+use rmcp::model::GetTaskParams;
+use rmcp::model::ProtocolVersion;
+use rmcp::model::ServerNotification;
+use rmcp::model::SubscriptionFilter;
+use rmcp::model::TaskStatus;
+use rmcp::ClientLifecycleMode;
 
-use super::WorkspaceMcpServer;
+use crate::workspace::WorkspaceMcpServer;
 use crate::TASK_OWNER_META_KEY;
 
 fn owner_meta(owner: &str) -> rmcp::model::RequestMetaObject {
@@ -55,7 +58,7 @@ async fn connect(
 async fn generic_client_without_peri_metadata_calls_write_and_bash() {
     let dir = tempfile::tempdir().expect("workspace");
     let target = dir.path().join("plain.txt");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(server.clone(), ClientCapabilities::default()).await;
 
     let write = CallToolRequestParams::new("Write").with_arguments(
@@ -115,7 +118,7 @@ async fn generic_client_without_peri_metadata_calls_write_and_bash() {
 #[tokio::test]
 async fn task_owner_isolation_hides_and_protects_other_sessions_tasks() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -201,7 +204,7 @@ async fn task_owner_isolation_hides_and_protects_other_sessions_tasks() {
 #[tokio::test]
 async fn task_completion_is_delivered_to_its_subscription() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -252,7 +255,7 @@ async fn task_completion_is_delivered_to_its_subscription() {
 #[tokio::test]
 async fn task_cancellation_is_delivered_to_its_subscription() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -318,7 +321,7 @@ async fn task_cancellation_is_delivered_to_its_subscription() {
 #[tokio::test]
 async fn task_result_remains_queryable_across_connections() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (first, first_server) = connect(server.clone(), capabilities.clone()).await;
     let request = CallToolRequestParams::new("Bash").with_arguments(
@@ -377,7 +380,7 @@ async fn task_result_remains_queryable_across_connections() {
 #[tokio::test]
 async fn task_query_requires_client_capability() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(server.clone(), ClientCapabilities::default()).await;
     let error = client
         .peer()
@@ -396,7 +399,7 @@ async fn task_query_requires_client_capability() {
 #[tokio::test]
 async fn task_cancel_wire_stops_the_owned_shell() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (client, server_task) = connect(server.clone(), capabilities).await;
     let request = CallToolRequestParams::new("Bash").with_arguments(
@@ -447,7 +450,7 @@ async fn task_cancel_wire_stops_the_owned_shell() {
 #[tokio::test]
 async fn foreground_timeout_promotion_returns_queryable_task() {
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (client, server_task) = connect(server.clone(), capabilities).await;
     let request = CallToolRequestParams::new("Bash").with_arguments(
@@ -495,81 +498,6 @@ async fn foreground_timeout_promotion_returns_queryable_task() {
     );
 }
 
-// ── beta flag `full-async-tools`（生产路径：`standalone` 注入有效缺省）──────
-
-/// 生产路径（`standalone`）：schema `default` 与 `call_tool` 判定同源——
-/// 省略 `run_in_background` 的调用走 owned 后台任务，显式 `false` 仍走前台。
-#[tokio::test]
-async fn standalone_default_run_in_background_drives_schema_and_call_path() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), true);
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-
-    let tools = client.peer().list_tools(None).await.expect("tools/list");
-    let bash = tools
-        .tools
-        .iter()
-        .find(|tool| tool.name.as_ref() == "Bash")
-        .expect("Bash 必须声明");
-    assert_eq!(
-        bash.input_schema["properties"]["run_in_background"]["default"],
-        serde_json::json!(true),
-        "生产路径 schema default 必须跟随装配期有效缺省"
-    );
-
-    // 省略字段：owned 后台任务（client 支持 tasks ⇒ 返回 Task 句柄）。
-    let request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "sleep 30"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    let CallToolResponse::Task(created) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("省略字段且缺省为 true 时必须走后台")
-    else {
-        panic!("缺省后台必须返回 task handle")
-    };
-    assert!(created.task.task_id.starts_with("shell-"));
-
-    // 显式 false：仍走前台（返回 Complete 而非 Task）。
-    let request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "printf explicit-foreground", "run_in_background": false})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    let CallToolResponse::Complete(result) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("显式 false 必须走前台")
-    else {
-        panic!("显式 false 不得返回 task handle")
-    };
-    assert_eq!(result.is_error, Some(false));
-    let text = result
-        .content
-        .iter()
-        .filter_map(|block| block.as_text().map(|text| text.text.clone()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("explicit-foreground"), "{text}");
-
-    drop(client);
-    server_task.await.expect("server closed");
-    assert_eq!(
-        server.shutdown_shell_tasks().await,
-        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
-    );
-}
-
 /// [回归测试] 后台 shell 被并发上限拒绝时，wire 上的错误必须保留上限事实，而不是
 /// 折叠成不透明的 `shell task launch failed`；命令文本不进入错误文本，上限不变。
 #[tokio::test]
@@ -577,7 +505,7 @@ async fn concurrent_limit_rejection_keeps_limit_facts_on_the_wire() {
     use peri_agent::agent::async_tasks::BackgroundTaskRegistry;
 
     let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let capabilities = ClientCapabilities::builder().enable_tasks().build();
     let (client, server_task) = connect(server.clone(), capabilities).await;
     let mut task_ids = Vec::new();
@@ -646,7 +574,7 @@ async fn concurrent_limit_rejection_keeps_limit_facts_on_the_wire() {
 async fn background_integral_float_timeout_is_normalized_on_the_wire() {
     let dir = tempfile::tempdir().expect("workspace");
     let finished = dir.path().join("finished");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -707,7 +635,7 @@ async fn background_integral_float_timeout_is_normalized_on_the_wire() {
 async fn background_invalid_timeout_is_rejected_before_spawn() {
     let dir = tempfile::tempdir().expect("workspace");
     let sentinel = dir.path().join("spawned");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy());
     let (client, server_task) = connect(
         server.clone(),
         ClientCapabilities::builder().enable_tasks().build(),
@@ -758,241 +686,4 @@ async fn background_invalid_timeout_is_rejected_before_spawn() {
     );
 }
 
-// ── 阶段 4：按直接 owner 查询存活任务（host-only `shell_task_list`）────────────
-
-fn scope_meta(owner: &str, thread_owner: &str) -> rmcp::model::RequestMetaObject {
-    let mut fields = serde_json::Map::new();
-    fields.insert(TASK_OWNER_META_KEY.into(), owner.into());
-    fields.insert(crate::THREAD_OWNER_META_KEY.into(), thread_owner.into());
-    rmcp::model::RequestMetaObject(rmcp::model::MetaObject(fields))
-}
-
-/// 调用 host-only 查询面并解析 JSON 文本；调用本身不得是工具错误。
-async fn shell_task_list(
-    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
-    owner: Option<&str>,
-) -> serde_json::Value {
-    let mut arguments = serde_json::Map::new();
-    if let Some(owner) = owner {
-        arguments.insert("owner".into(), owner.into());
-    }
-    let request = CallToolRequestParams::new("shell_task_list").with_arguments(arguments);
-    let CallToolResponse::Complete(result) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("shell_task_list 必须可调用")
-    else {
-        panic!("查询必须返回 complete 结果")
-    };
-    assert_ne!(result.is_error, Some(true), "查询失败不得伪装成空列表");
-    let text = result
-        .content
-        .iter()
-        .filter_map(|block| block.as_text().map(|text| text.text.clone()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    serde_json::from_str(&text)
-        .unwrap_or_else(|error| panic!("查询结果必须是 JSON: {error}: {text}"))
-}
-
-/// 按 owner 过滤只返回该 owner 的存活任务；`threadOwner` 来自 `peri/threadOwner`。
-#[tokio::test]
-async fn shell_task_list_filters_live_tasks_by_direct_owner() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-
-    // 查询面不进模型工具清单：七工具面保持不变。
-    let tools = client.peer().list_all_tools().await.expect("tools/list");
-    assert_eq!(tools.len(), 7, "host-only 查询不得进入模型工具面");
-
-    let mut first = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "sleep 30", "run_in_background": true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    first.meta = Some(scope_meta("session-a", "thread-a"));
-    let CallToolResponse::Task(first_task) = client
-        .peer()
-        .call_tool_once(first)
-        .await
-        .expect("owner A task")
-    else {
-        panic!("task handle")
-    };
-
-    let mut second = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "sleep 30", "run_in_background": true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    second.meta = Some(scope_meta("session-b", "thread-b"));
-    let CallToolResponse::Task(second_task) = client
-        .peer()
-        .call_tool_once(second)
-        .await
-        .expect("owner B task")
-    else {
-        panic!("task handle")
-    };
-
-    let listed = shell_task_list(&client, Some("session-a")).await;
-    assert_eq!(listed["unknown"], serde_json::json!(false));
-    let tasks = listed["tasks"].as_array().expect("tasks array");
-    assert_eq!(tasks.len(), 1, "只返回该 owner 的存活任务: {listed}");
-    assert_eq!(tasks[0]["taskId"], first_task.task.task_id);
-    assert_eq!(tasks[0]["owner"], "session-a");
-    assert_eq!(tasks[0]["threadOwner"], "thread-a");
-    assert_eq!(tasks[0]["state"], "working");
-    assert!(tasks[0]["startedAt"]
-        .as_str()
-        .is_some_and(|v| !v.is_empty()));
-
-    let listed = shell_task_list(&client, Some("session-b")).await;
-    let tasks = listed["tasks"].as_array().expect("tasks array");
-    assert_eq!(tasks.len(), 1, "owner B 只看得到自己的任务: {listed}");
-    assert_eq!(tasks[0]["taskId"], second_task.task.task_id);
-
-    let listed = shell_task_list(&client, Some("session-c")).await;
-    assert_eq!(
-        listed["unknown"],
-        serde_json::json!(false),
-        "已确认没有任务必须是 known-empty，而不是 unknown"
-    );
-    assert_eq!(listed["tasks"], serde_json::json!([]));
-
-    for (owner, task) in [("session-a", &first_task), ("session-b", &second_task)] {
-        let mut cancel = CancelTaskParams::new(&task.task.task_id);
-        cancel.meta = Some(owner_meta(owner));
-        client
-            .peer()
-            .cancel_task(cancel)
-            .await
-            .expect("cancel owned task");
-    }
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let a = shell_task_list(&client, Some("session-a")).await;
-            let b = shell_task_list(&client, Some("session-b")).await;
-            if a["tasks"] == serde_json::json!([]) && b["tasks"] == serde_json::json!([]) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("terminal tasks leave the live list");
-
-    drop(client);
-    server_task.await.expect("join server");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), server.shutdown_shell_tasks())
-            .await
-            .expect("process cleanup deadline"),
-        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
-    );
-}
-
-/// 没有 Shell 任务状态的实例：unknown + detail，且 `tasks` 为空；不是 MCP 错误。
-#[tokio::test]
-async fn shell_task_list_without_task_state_reports_unknown() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::new(dir.path().to_string_lossy(), None);
-    let (client, server_task) = connect(server, ClientCapabilities::default()).await;
-
-    let listed = shell_task_list(&client, None).await;
-    assert_eq!(listed["unknown"], serde_json::json!(true));
-    assert_eq!(listed["tasks"], serde_json::json!([]));
-    assert!(
-        listed["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("not enabled")),
-        "未知必须携带可定位的原因: {listed}"
-    );
-
-    drop(client);
-    server_task.await.expect("join server");
-}
-
-/// 恢复协调器以 thread id 查询（设计 §6）；session id 与 thread id 都是直接 owner，
-/// 等值匹配即可看到该任务，不相干 owner 仍是 known-empty。
-#[tokio::test]
-async fn shell_task_list_matches_session_and_thread_owner() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-
-    let mut request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "sleep 30", "run_in_background": true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    request.meta = Some(scope_meta("session-a", "thread-a"));
-    let CallToolResponse::Task(task) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("owned task")
-    else {
-        panic!("task handle")
-    };
-
-    for owner in ["session-a", "thread-a"] {
-        let listed = shell_task_list(&client, Some(owner)).await;
-        assert_eq!(listed["unknown"], serde_json::json!(false));
-        let tasks = listed["tasks"].as_array().expect("tasks array");
-        assert_eq!(
-            tasks.len(),
-            1,
-            "{owner} 必须看到直接归属的存活任务: {listed}"
-        );
-        assert_eq!(tasks[0]["taskId"], task.task.task_id);
-    }
-
-    let listed = shell_task_list(&client, Some("thread-other")).await;
-    assert_eq!(listed["unknown"], serde_json::json!(false));
-    assert_eq!(listed["tasks"], serde_json::json!([]));
-
-    let mut cancel = CancelTaskParams::new(&task.task.task_id);
-    cancel.meta = Some(owner_meta("session-a"));
-    client
-        .peer()
-        .cancel_task(cancel)
-        .await
-        .expect("cancel owned task");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let by_thread = shell_task_list(&client, Some("thread-a")).await;
-            let by_session = shell_task_list(&client, Some("session-a")).await;
-            if by_thread["tasks"] == serde_json::json!([])
-                && by_session["tasks"] == serde_json::json!([])
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("terminal tasks leave the live list");
-
-    drop(client);
-    server_task.await.expect("join server");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), server.shutdown_shell_tasks())
-            .await
-            .expect("process cleanup deadline"),
-        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
-    );
-}
+include!("workspace_tasks_wire_test/task_owner_listing.rs");

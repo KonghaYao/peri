@@ -1,6 +1,12 @@
 //! Edit 行语法的纯布局回归：列对齐、宽度上限、长值与光标窗口、窄屏降级。
 
-use super::*;
+use super::EditViewMetrics;
+use super::FIELD_LABEL_KEYS;
+use super::INDENT;
+use super::MAX_LABEL_COL;
+use super::StatusEntry;
+use super::StatusTone;
+
 use crate::kit::panels::login::render::LoginRenderColors;
 use ratatui_kit::ratatui::text::Line;
 use serial_test::serial;
@@ -75,8 +81,14 @@ fn field_values_start_in_the_same_column() {
             ("类型", "[OpenAI Responses]"),
             ("认证方式", "[ChatGPT plan]"),
         ] {
-            let lines =
-                text_field_lines(&metrics, label, value, value.chars().count(), false, &color);
+            let lines = super::text_field_lines(
+                &metrics,
+                label,
+                value,
+                value.chars().count(),
+                false,
+                &color,
+            );
             assert_eq!(lines.len(), 1);
             let prefix_width: usize = lines[0].spans[..4]
                 .iter()
@@ -99,15 +111,19 @@ fn every_line_fits_the_content_width() {
             let metrics = EditViewMetrics::for_width(width);
             let budget = metrics.content_width;
             let mut lines = Vec::new();
-            lines.push(title_line(&metrics, "编辑 Provider：very-long-id", &color));
-            lines.push(section_line(&metrics, "基本信息", None, &color));
-            lines.push(section_line(
+            lines.push(super::title_line(
+                &metrics,
+                "编辑 Provider：very-long-id",
+                &color,
+            ));
+            lines.push(super::section_line(&metrics, "基本信息", None, &color));
+            lines.push(super::section_line(
                 &metrics,
                 "高级",
                 Some("只读".to_string()),
                 &color,
             ));
-            lines.extend(text_field_lines(
+            lines.extend(super::text_field_lines(
                 &metrics,
                 "名称",
                 &"p".repeat(300),
@@ -115,7 +131,7 @@ fn every_line_fits_the_content_width() {
                 false,
                 &color,
             ));
-            lines.extend(choice_field_lines(
+            lines.extend(super::choice_field_lines(
                 &metrics,
                 "类型",
                 "[OpenAI Responses]".to_string(),
@@ -123,19 +139,19 @@ fn every_line_fits_the_content_width() {
                 false,
                 &color,
             ));
-            lines.extend(readonly_kv_lines(
+            lines.extend(super::readonly_kv_lines(
                 &metrics,
                 "基础 URL",
                 peri_config::provider::DEFAULT_RESPONSES_URL,
                 Some("官方 endpoint，已锁定"),
                 &color,
             ));
-            lines.push(continuation_line(
+            lines.push(super::continuation_line(
                 &metrics,
                 "已保存的类型，按 Enter 更改",
                 &color,
             ));
-            lines.extend(status_lines(
+            lines.extend(super::status_lines(
                 &metrics,
                 "登录状态",
                 &[StatusEntry::new(
@@ -144,7 +160,7 @@ fn every_line_fits_the_content_width() {
                 )],
                 &color,
             ));
-            let (actions_line, _) = action_row(
+            let (actions_line, _) = super::action_row(
                 &metrics,
                 &[
                     "登录 ChatGPT".to_string(),
@@ -157,27 +173,30 @@ fn every_line_fits_the_content_width() {
                 &color,
             );
             lines.push(actions_line);
-            lines.push(button_line(&metrics, "确认", true, &color));
-            lines.extend(warning_lines(
+            lines.push(super::button_line(&metrics, "确认", true, &color));
+            lines.extend(super::warning_lines(
                 &metrics,
                 "ChatGPT 凭据已保存，但 Provider 配置尚未保存",
                 &color,
             ));
-            lines.extend(error_lines(
+            lines.extend(super::error_lines(
                 &metrics,
                 "Provider 校验失败：一个很长的错误说明",
                 &color,
             ));
-            for (index, line) in lines.iter().enumerate() {
-                assert!(
-                    line_width(line) <= budget,
-                    "width={width} row={index} 超宽: {} > {budget}\n{:?}",
-                    line_width(line),
-                    line.spans
-                        .iter()
-                        .map(|span| span.content.as_ref())
-                        .collect::<String>()
-                );
+            {
+                let iteration_items = lines.iter().enumerate();
+                for (index, line) in iteration_items {
+                    assert!(
+                        line_width(line) <= budget,
+                        "width={width} row={index} 超宽: {} > {budget}\n{:?}",
+                        line_width(line),
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    );
+                }
             }
         }
     });
@@ -190,7 +209,7 @@ fn long_readonly_path_is_middle_truncated() {
         let color = colors();
         let metrics = EditViewMetrics::for_width(80);
         let path = format!("/Users/example/{}/credentials/chatgpt", "a".repeat(260));
-        let lines = readonly_kv_lines(&metrics, "凭据目录", &path, None, &color);
+        let lines = super::readonly_kv_lines(&metrics, "凭据目录", &path, None, &color);
         assert_eq!(lines.len(), 1);
         let text: String = lines[0]
             .spans
@@ -210,27 +229,30 @@ fn cursor_window_keeps_the_cursor_inside_for_ascii_and_cjk() {
     let color = colors();
     let budget = 20;
     for value in ["p".repeat(300), "长".repeat(150)] {
-        for cursor in [0, 1, 150, value.chars().count()] {
-            let window = cursor_window(&value, cursor, budget);
-            assert!(window.start <= window.cursor, "start 必须不晚于光标");
-            assert!(
-                window.cursor < window.end
-                    || (window.cursor == value.chars().count()
-                        && window.end == value.chars().count()),
-                "cursor={cursor} window={window:?}"
-            );
-            let spans = value_spans(&value, cursor, budget, true, &color);
-            let width: usize = spans.iter().map(|span| span.content.width()).sum();
-            assert!(width <= budget, "窗口宽度 {width} 超过 {budget}");
-            let visible: String = spans.iter().map(|span| span.content.as_ref()).collect();
-            assert!(
-                visible.contains('‹') || window.start == 0,
-                "左侧被裁时必须显示 ‹: {visible}"
-            );
-            assert!(
-                visible.contains('›') || window.end == value.chars().count(),
-                "右侧被裁时必须显示 ›: {visible}"
-            );
+        {
+            let iteration_items = [0, 1, 150, value.chars().count()];
+            for cursor in iteration_items {
+                let window = super::cursor_window(&value, cursor, budget);
+                assert!(window.start <= window.cursor, "start 必须不晚于光标");
+                assert!(
+                    window.cursor < window.end
+                        || (window.cursor == value.chars().count()
+                            && window.end == value.chars().count()),
+                    "cursor={cursor} window={window:?}"
+                );
+                let spans = super::value_spans(&value, cursor, budget, true, &color);
+                let width: usize = spans.iter().map(|span| span.content.width()).sum();
+                assert!(width <= budget, "窗口宽度 {width} 超过 {budget}");
+                let visible: String = spans.iter().map(|span| span.content.as_ref()).collect();
+                assert!(
+                    visible.contains('‹') || window.start == 0,
+                    "左侧被裁时必须显示 ‹: {visible}"
+                );
+                assert!(
+                    visible.contains('›') || window.end == value.chars().count(),
+                    "右侧被裁时必须显示 ›: {visible}"
+                );
+            }
         }
     }
 }
@@ -241,7 +263,7 @@ fn empty_editable_value_has_placeholder_and_no_dangling_colon() {
     with_lang("zh-CN", || {
         let color = colors();
         let metrics = EditViewMetrics::for_width(100);
-        let lines = text_field_lines(&metrics, "Fable 模型", "", 0, false, &color);
+        let lines = super::text_field_lines(&metrics, "Fable 模型", "", 0, false, &color);
         let text: String = lines[0]
             .spans
             .iter()
@@ -259,7 +281,7 @@ fn narrow_layout_stacks_label_and_value() {
         let color = colors();
         let metrics = EditViewMetrics::for_width(30);
         assert!(metrics.narrow(), "30 列必须降级");
-        let lines = text_field_lines(&metrics, "名称", "gpt", 0, true, &color);
+        let lines = super::text_field_lines(&metrics, "名称", "gpt", 0, true, &color);
         assert_eq!(lines.len(), 2, "窄屏字段占两行");
         for line in &lines {
             assert!(line_width(line) <= metrics.content_width);
@@ -289,7 +311,7 @@ fn long_email_status_is_limited_to_two_lines() {
             StatusTone::Success,
             2,
         )];
-        let lines = status_lines(&metrics, "登录状态", &entries, &color);
+        let lines = super::status_lines(&metrics, "登录状态", &entries, &color);
         assert_eq!(lines.len(), 2, "状态点只出现一次，长 email 最多 2 行");
         let text: String = lines
             .iter()
@@ -308,7 +330,7 @@ fn cjk_values_never_split_a_wide_character() {
         let color = colors();
         let metrics = EditViewMetrics::for_width(80);
         let value = "中文".repeat(40);
-        let lines = text_field_lines(&metrics, "名称", &value, 0, false, &color);
+        let lines = super::text_field_lines(&metrics, "名称", &value, 0, false, &color);
         assert!(line_width(&lines[0]) <= metrics.content_width);
         let text: String = lines[0]
             .spans

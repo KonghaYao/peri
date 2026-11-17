@@ -1,7 +1,7 @@
-use super::event_builder::{new_uuid, try_add_or_warn_via_session, VERSION};
-use super::registry::{GateEvent, Ownership};
-use super::tool_batch;
-use super::LangfuseTracer;
+use crate::langfuse::tracer::event_builder::VERSION;
+use crate::langfuse::tracer::registry::{GateEvent, Ownership};
+use crate::langfuse::tracer::tool_batch;
+use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::ObservationLevel;
 use langfuse_client::{IngestionEvent, ObservationBody, ObservationType, SpanBody};
 
@@ -177,12 +177,12 @@ impl LangfuseTracer {
                 ..Default::default()
             };
             let batch_event = IngestionEvent::SpanCreate {
-                id: new_uuid(),
+                id: crate::langfuse::tracer::event_builder::new_uuid(),
                 timestamp: batch.batch_end_time.clone(),
                 body: batch_body,
                 metadata: None,
             };
-            try_add_or_warn_via_session(
+            crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
                 &*self.session,
                 batch_event,
                 &self.trace_id,
@@ -219,15 +219,18 @@ impl LangfuseTracer {
                     level,
                     version: Some(VERSION.to_string()),
                     session_id: Some(self.session_id.clone()),
+                    metadata: Some(serde_json::json!({
+                        "tool_call_id": tool.tool_call_id,
+                    })),
                     ..Default::default()
                 };
                 let tool_event = IngestionEvent::ObservationCreate {
-                    id: new_uuid(),
+                    id: crate::langfuse::tracer::event_builder::new_uuid(),
                     timestamp: tool.end_time,
                     body: obs_body,
                     metadata: None,
                 };
-                try_add_or_warn_via_session(
+                crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
                     &*self.session,
                     tool_event,
                     &self.trace_id,

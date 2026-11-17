@@ -1,7 +1,17 @@
-use super::*;
+use super::ACP_STATE;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::AcpNotification;
+use super::CancellationToken;
+use super::INPUT_BUFFER;
+use super::NOTIFICATION;
+use super::RENDER_HEARTBEAT;
+use super::mpsc;
+use super::{BridgeSink, spawn_kit_notifier, spawn_kit_notifier_with_client};
+
 use crate::acp_client::AcpTuiClient;
-use crate::kit::atoms::BufferedInput;
-use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair};
+
+use peri_acp::transport::AcpTransport;
 use serde_json::json;
 use serial_test::serial;
 fn spawn_test_notifier() -> (
@@ -19,7 +29,7 @@ fn spawn_test_notifier() -> (
 
 #[tokio::test]
 async fn bridge_delivery_failure_claims_and_settles_registered_interaction() {
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, notification_rx) = AcpTuiClient::new(client_transport);
     client.force_stable_for_test("s1", true);
     client.spawn_pump(notification_tx);
@@ -45,7 +55,7 @@ async fn bridge_delivery_failure_claims_and_settles_registered_interaction() {
     .expect("bridge rejection must not leave reverse request hanging")
     .expect("bridge rejection must settle the reverse request");
     let response: agent_client_protocol::schema::v1::RequestPermissionResponse =
-        serde_json::from_value(response).unwrap();
+        serde_json::from_value(response).expect("bridge delivery failure claims and settles registered interaction: fixture JSON must match the expected schema");
     assert!(matches!(
         response.outcome,
         agent_client_protocol::schema::v1::RequestPermissionOutcome::Cancelled
@@ -64,7 +74,7 @@ async fn test_agent_done_forwards_turn_done_to_bridges() {
             request_id: None,
         })
         .await
-        .unwrap();
+        .expect("agent done forwards turn done to bridges: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx.recv().await.expect("bridge 应收到 TurnDone");
     assert!(matches!(bridge_event.event, AcpEventData::TurnDone));
@@ -85,7 +95,7 @@ async fn test_agent_done_cancelled_forwards_request_id_to_turn_interrupted() {
             request_id: Some("rid-1".into()),
         })
         .await
-        .unwrap();
+        .expect("agent done cancelled forwards request id to turn interrupted: fixture task and request must complete successfully");
 
     let bridge_event = bridge_rx
         .recv()
@@ -180,7 +190,7 @@ async fn test_real_wiring_transport_death_resets_loading() {
     let hb_before = *RENDER_HEARTBEAT.state().read();
 
     // 生产 wiring：client + pump + notifier（bridge 用 dummy rx 即可）
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, notification_rx) = AcpTuiClient::new(client_transport);
     client.spawn_pump(notification_tx);
     let (bridge_tx, _bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
@@ -260,3 +270,5 @@ async fn unreachable_failure_event_converges_via_notification_close() {
     );
     shutdown.cancel();
 }
+
+use crate::kit::atoms::BufferedInput;

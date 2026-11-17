@@ -1,4 +1,6 @@
-use super::*;
+use super::Color;
+use super::MarkdownSegment;
+use super::Palette;
 
 const TEST_BASE_FG: Color = Color::White;
 
@@ -6,7 +8,7 @@ const TEST_BASE_FG: Color = Color::White;
 fn assert_table_contains(md: &str, width: usize, headers: &[&str], rows: &[&[&str]], label: &str) {
     use ratatui_kit::components::TableTheme;
 
-    let segments = parse_markdown(md, width, Palette::default(), TEST_BASE_FG);
+    let segments = super::parse_markdown(md, width, Palette::default(), TEST_BASE_FG);
     let table_data = segments
         .iter()
         .find_map(|s| match s {
@@ -31,7 +33,7 @@ fn assert_table_contains(md: &str, width: usize, headers: &[&str], rows: &[&[&st
     );
 
     let theme = TableTheme::from_palette(&Palette::default());
-    let lines = table_data_to_lines(table_data, &theme, width);
+    let lines = super::table_data_to_lines(table_data, &theme, width);
 
     let all_text: String = lines
         .iter()
@@ -46,12 +48,15 @@ fn assert_table_contains(md: &str, width: usize, headers: &[&str], rows: &[&[&st
         );
     }
     // 验证每个数据单元格
-    for (ri, row) in rows.iter().enumerate() {
-        for cell in *row {
-            assert!(
-                all_text.contains(cell),
-                "[{label}] 应包含数据行{ri}单元格 '{cell}'，实际文本:\n{all_text}"
-            );
+    {
+        let iteration_items = rows.iter().enumerate();
+        for (ri, row) in iteration_items {
+            for cell in *row {
+                assert!(
+                    all_text.contains(cell),
+                    "[{label}] 应包含数据行{ri}单元格 '{cell}'，实际文本:\n{all_text}"
+                );
+            }
         }
     }
     // 验证至少渲染了足够行数（顶边框 + 表头行 + 分隔行 + N行数据 + 底边框）
@@ -175,3 +180,5 @@ fn test_table_8_typical_agent_output() {
         "8-agent-output",
     );
 }
+
+use ratatui_kit::components::ComponentTheme as _;

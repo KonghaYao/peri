@@ -1,15 +1,20 @@
-use super::*;
+use crate::provider::transport_route::PROXY_ENV;
+use crate::provider::transport_route::RUN_ENV;
 
 #[test]
 fn absent_route_preserves_normal_deployment() {
-    assert_eq!(parse(None, None).unwrap(), None);
+    assert_eq!(
+        crate::provider::transport_route::parse(None, None).unwrap(),
+        None
+    );
 }
 
 #[test]
 fn explicit_route_captures_origin_and_run() {
-    let route = parse(Some("http://127.0.0.1:9010"), Some("case-one"))
-        .unwrap()
-        .unwrap();
+    let route =
+        crate::provider::transport_route::parse(Some("http://127.0.0.1:9010"), Some("case-one"))
+            .unwrap()
+            .unwrap();
     assert_eq!(route.proxy_url().as_str(), "http://127.0.0.1:9010/");
     assert_eq!(route.run(), "case-one");
 }
@@ -27,7 +32,9 @@ fn provider(kind: &str, endpoint: &str) -> super::super::LlmProvider {
 
 #[test]
 fn route_preserves_provider_checkpoint_and_effective_profile() {
-    let route = parse(Some("http://127.0.0.1:9010"), Some("case-one")).unwrap();
+    let route =
+        crate::provider::transport_route::parse(Some("http://127.0.0.1:9010"), Some("case-one"))
+            .unwrap();
     for (kind, endpoint) in [
         ("anthropic", "https://anthropic.fixture.invalid"),
         ("openai", "https://openai.fixture.invalid/v1"),
@@ -84,7 +91,8 @@ async fn routed_provider_sends_original_body_and_auth_only_to_proxy() {
         .expect(1)
         .create_async()
         .await;
-    let route = parse(Some(&proxy.url()), Some("wire-case")).unwrap();
+    let route =
+        crate::provider::transport_route::parse(Some(&proxy.url()), Some("wire-case")).unwrap();
     let model = provider("openai_responses", &endpoint).into_model_with_transport_route(route);
     let mut request =
         peri_model::ModelRequest::new(vec![peri_model::ModelMessage::user_text("hello")]);
@@ -110,7 +118,9 @@ fn incomplete_route_never_falls_back_to_direct() {
         (Some("http://127.0.0.1:9010"), None),
         (None, Some("case-one")),
     ] {
-        let error = parse(proxy, run).unwrap_err().to_string();
+        let error = crate::provider::transport_route::parse(proxy, run)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(PROXY_ENV));
         assert!(error.contains(RUN_ENV));
         assert!(error.contains("must be set together"));
@@ -128,13 +138,17 @@ fn invalid_route_fails_with_configuration_diagnostic() {
         "http://localhost?token=synthetic",
         "http://localhost/#fragment",
     ] {
-        let error = format!("{:#}", parse(Some(proxy), Some("case-one")).unwrap_err());
+        let error = format!(
+            "{:#}",
+            crate::provider::transport_route::parse(Some(proxy), Some("case-one")).unwrap_err()
+        );
         assert!(error.contains(PROXY_ENV), "{proxy}: {error}");
     }
     for run in ["".to_owned(), "   ".to_owned(), "x".repeat(257)] {
         let error = format!(
             "{:#}",
-            parse(Some("http://localhost:9010"), Some(&run)).unwrap_err()
+            crate::provider::transport_route::parse(Some("http://localhost:9010"), Some(&run))
+                .unwrap_err()
         );
         assert!(error.contains(RUN_ENV));
         assert!(error.contains("nonempty run"));

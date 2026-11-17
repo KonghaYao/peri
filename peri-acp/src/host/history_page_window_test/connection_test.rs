@@ -1,6 +1,19 @@
 //! V1 连接绑定、提交通知与 body 快照边界（从父测试模块拆出）。
 
-use super::*;
+use crate::host::requests::tests::history_page_wire_tests::PageFixture;
+use crate::host::requests::tests::MockTransport;
+use crate::provider::LlmProvider;
+use crate::transport::types::AcpError;
+use crate::transport::AcpTransport;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::store::CompactionChange;
+use peri_acp_types::store::MessageFlags;
+use peri_acp_types::store::PersistedPayload;
+use serde_json::json;
+use serde_json::Value;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 记录型 transport：只收集 host 通知。
 struct RecordingTransport {
@@ -71,7 +84,7 @@ async fn history_commit_notification_is_gated_by_an_open_window_and_idempotent()
     crate::host::history_window::handle(
         &fixture.cfg,
         &fixture.sessions,
-        &window_caps(),
+        &crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
         &sid,
         request,
         &connection,
@@ -148,8 +161,16 @@ async fn open_after_durable_full_reads_checkpoint_from_storage() {
 
     let expected = peri_acp_types::history_window::HistoryEntryId::new(&sid, summary_id).encode();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
-    let opened = open(
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -172,20 +193,26 @@ async fn tickets_and_commit_notifications_are_bound_to_the_opening_connection() 
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client_a, _sessions_a, task_a) = spawn_loop(
-        Arc::clone(&cfg),
-        fixture.sessions.clone(),
-        Some(window_caps()),
-    )
-    .await;
-    let (client_b, _sessions_b, task_b) = spawn_loop(
-        Arc::clone(&cfg),
-        fixture.sessions.clone(),
-        Some(window_caps()),
-    )
-    .await;
+    let (client_a, _sessions_a, task_a) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions.clone(),
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
+    let (client_b, _sessions_b, task_b) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            fixture.sessions.clone(),
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
-    let opened = open(
+    let opened = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client_a,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -193,7 +220,7 @@ async fn tickets_and_commit_notifications_are_bound_to_the_opening_connection() 
     .await
     .expect("connection A opens the window");
 
-    let foreign = page(
+    let foreign = crate::host::requests::tests::history_page_wire_tests::window_tests::page(
         &client_b,
         &sid,
         &opened["snapshotToken"],
@@ -253,9 +280,17 @@ async fn body_rejects_non_oversize_and_post_snapshot_entries() {
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
-    let normal = open(
+    let normal = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
@@ -279,7 +314,7 @@ async fn body_rejects_non_oversize_and_post_snapshot_entries() {
         .unwrap_err();
     assert_eq!(rejected.code, -32016);
 
-    let oversized = open(
+    let oversized = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1, "byteBudget": 1 }),
@@ -362,10 +397,18 @@ async fn failed_open_keeps_the_old_ticket_usable() {
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
 
     // 旧窗口使用小预算，拿到一个 descriptor 以便同时验证 body。
-    let old = open(
+    let old = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1, "byteBudget": 1 }),
@@ -375,7 +418,7 @@ async fn failed_open_keeps_the_old_ticket_usable() {
     let old_entry = old["items"][0]["entryId"].as_str().unwrap().to_owned();
 
     // 失败的 open：非法预算在准备/发布前被拒绝。
-    let failed = open(
+    let failed = crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "byteBudget": 0 }),
@@ -385,7 +428,7 @@ async fn failed_open_keeps_the_old_ticket_usable() {
     assert_eq!(failed.code, -32602);
 
     // 旧 ticket/snapshot 仍然完全可用：page、seek、body。
-    let old_page = page(
+    let old_page = crate::host::requests::tests::history_page_wire_tests::window_tests::page(
         &client,
         &sid,
         &old["snapshotToken"],
@@ -434,14 +477,14 @@ async fn failed_open_keeps_the_old_ticket_usable() {
     assert!(!old_body["bytes"].as_array().unwrap().is_empty());
 
     // 成功的 open 才替换旧 ticket。
-    open(
+    crate::host::requests::tests::history_page_wire_tests::window_tests::open(
         &client,
         &sid,
         json!({ "kind": "open", "direction": "before", "limit": 1 }),
     )
     .await
     .expect("successful open");
-    let stale = page(
+    let stale = crate::host::requests::tests::history_page_wire_tests::window_tests::page(
         &client,
         &sid,
         &old["snapshotToken"],
@@ -463,7 +506,15 @@ async fn resume_wire_uses_the_shared_preparation_path() {
     let fixture = PageFixture::new(&tmp).await;
     let sid = fixture.sid.clone();
     let cfg = Arc::clone(&fixture.cfg);
-    let (client, _sessions, task) = spawn_loop(cfg, fixture.sessions, Some(window_caps())).await;
+    let (client, _sessions, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            cfg,
+            fixture.sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
     client
         .send_request("session/resume", json!({ "sessionId": sid }))
         .await
@@ -475,27 +526,151 @@ async fn resume_wire_uses_the_shared_preparation_path() {
 #[serial]
 async fn fork_wire_uses_the_shared_preparation_path() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let config = make_peri_config_with_provider(make_provider_config(
-        "a",
-        "openai",
-        "unused-test-key",
-        "gpt-4o",
-    ));
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "unused-test-key",
+            "gpt-4o",
+        ),
+    );
     let provider = LlmProvider::from_config(&config).unwrap();
-    let cfg = Arc::new(make_server_config(config, provider, &tmp).await);
+    let cfg =
+        Arc::new(crate::host::requests::tests::make_server_config(config, provider, &tmp).await);
     let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let (client, _sessions, task) =
-        spawn_loop(Arc::clone(&cfg), sessions, Some(window_caps())).await;
+    let (client, observed, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            sessions,
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
     let created = client
         .send_request("session/new", json!({ "cwd": tmp.path() }))
         .await
         .expect("create a fork source with frozen data");
     let source = created["sessionId"].as_str().expect("source id").to_owned();
+    client
+        .send_request("session/close", json!({ "sessionId": source }))
+        .await
+        .expect("close the current source before switching to the fork");
     let forked = client
         .send_request("session/fork", json!({ "sessionId": source }))
         .await
         .expect("fork through the shared path");
     let target = forked["sessionId"].as_str().expect("fork target id");
     assert_ne!(target, source);
+    assert!(
+        !observed.lock().await.contains_key(&source),
+        "fork cold source 必须在 target 成功前完成清理"
+    );
+    assert!(
+        cfg.session_manager.get_session(&source).is_none(),
+        "fork cold source manager 不得残留"
+    );
+    task.abort();
+}
+
+/// [回归测试] fork 前置失败也必须清理本请求 cold 发布的 source。
+#[tokio::test]
+#[serial]
+async fn fork_cold_source_failure_does_not_leave_source_environment() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "unused-test-key",
+            "gpt-4o",
+        ),
+    );
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg =
+        Arc::new(crate::host::requests::tests::make_server_config(config, provider, &tmp).await);
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (client, observed, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            Arc::clone(&sessions),
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
+    let created = client
+        .send_request("session/new", json!({ "cwd": tmp.path() }))
+        .await
+        .unwrap();
+    let source = created["sessionId"].as_str().unwrap().to_owned();
+    client
+        .send_request("session/close", json!({ "sessionId": source }))
+        .await
+        .unwrap();
+    let transport: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
+    let error = crate::host::requests::session_lifecycle::handle_fork_shared(
+        &json!({ "sessionId": source, "mcpServers": "invalid" }),
+        &cfg,
+        &sessions,
+        &transport,
+    )
+    .await
+    .expect_err("invalid fork declaration 必须失败");
+    assert_eq!(error.code, -32602, "{error:?}");
+    assert!(!observed.lock().await.contains_key(&source));
+    assert!(cfg.session_manager.get_session(&source).is_none());
+    task.abort();
+}
+
+/// [回归测试] preexisting source 不属于 fork 请求，不得被 source cleanup 关闭。
+#[tokio::test]
+#[serial]
+async fn fork_preexisting_source_remains_live() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = crate::host::requests::tests::make_peri_config_with_provider(
+        crate::host::requests::tests::make_provider_config(
+            "a",
+            "openai",
+            "unused-test-key",
+            "gpt-4o",
+        ),
+    );
+    let provider = LlmProvider::from_config(&config).unwrap();
+    let cfg =
+        Arc::new(crate::host::requests::tests::make_server_config(config, provider, &tmp).await);
+    let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let (client, observed, task) =
+        crate::host::requests::tests::history_page_wire_tests::spawn_loop(
+            Arc::clone(&cfg),
+            Arc::clone(&sessions),
+            Some(
+                crate::host::requests::tests::history_page_wire_tests::window_tests::window_caps(),
+            ),
+        )
+        .await;
+    let created = client
+        .send_request("session/new", json!({ "cwd": tmp.path() }))
+        .await
+        .unwrap();
+    let source = created["sessionId"].as_str().unwrap().to_owned();
+    let transport: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
+    let forked = crate::host::requests::session_lifecycle::handle_fork_shared(
+        &json!({ "sessionId": source }),
+        &cfg,
+        &sessions,
+        &transport,
+    )
+    .await
+    .expect("preexisting source fork 必须成功");
+    assert!(forked["sessionId"].is_string());
+    assert!(
+        observed.lock().await.contains_key(&source),
+        "preexisting source state 必须保留"
+    );
+    assert!(
+        cfg.session_manager.get_session(&source).is_some(),
+        "preexisting source manager 必须保留"
+    );
     task.abort();
 }

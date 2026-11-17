@@ -22,14 +22,14 @@ use super::runtime_binding::{self, RecoveryTaskTerminal};
 use crate::session::RecoveryDelivery;
 
 /// 本次恢复 turn 的结束事实（来自 continuation dispatch 的结果）。
-pub(crate) enum ChildTurnOutcome<'a> {
+pub(crate) enum ChildTurnOutcome<'outcome> {
     /// turn 已结束；`stop_reason` 是 ACP 停止原因的 snake_case 字面量。
     Finished {
-        stop_reason: &'a str,
+        stop_reason: &'outcome str,
     },
     Failed {
         code: i64,
-        message: &'a str,
+        message: &'outcome str,
     },
 }
 

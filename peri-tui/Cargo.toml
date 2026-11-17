@@ -13,6 +13,9 @@ path = "src/lib.rs"
 name = "peri"
 path = "src/main.rs"
 
+[features]
+test-support = ["peri-acp/test-support"]
+
 [dev-dependencies]
 ratatui-kit = { version = "0.12.0", features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
@@ -21,6 +24,7 @@ serial_test.workspace = true
 tracing-subscriber.workspace = true
 [dependencies]
 peri-time.workspace = true
+peri-genui = { path = "../peri-genui" }
 serde.workspace = true
 # 3.0 批 3（tui-deps）依赖收紧豁免清单（见 scripts/import-exemptions.conf）：
 # - peri-middlewares：插件子系统直读（cli_plugin.rs 命令面与 host_ports hook
@@ -30,6 +34,8 @@ serde.workspace = true
 # - peri-resources：Resources::open() 门面（app/mod.rs / main.rs / cli_print.rs
 #   初始化 thread store）+ thread/mod.rs 的 SqliteThreadStore re-export；
 #   M-TUI / L5 收紧后移除
+# - peri-workflow：cli_workflow.rs 启动层直连 workflow CLI（配置/会话初始化前，
+#   不经 ACP、不读会话数据）；单文件豁免见 scripts/import-exemptions.conf
 peri-middlewares = { path = "../peri-middlewares" }
 peri-resources = { path = "../peri-resources" }
 # ratatui-widgets（reflow.rs WordWrapper）由 ratatui 0.30 传递引入；
@@ -102,3 +108,5 @@ tikv-jemalloc-sys.workspace = true
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
+# 启动层能力（非 UI 数据流）：`peri workflow` 子命令在配置/会话初始化前直连 CLI。
+peri-workflow = { path = "../peri-workflow" }

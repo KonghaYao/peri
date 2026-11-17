@@ -6,7 +6,19 @@
 //! 为 `Some` 时 dispatch 调 `with_resources`、为 `None` 时保持「资源面未接线」，两条语义
 //! 各有具名用例（`w4a_*`），且都走 `connect_via_dispatch` 的**生产工厂路径**。
 
-use super::*;
+use super::json;
+use super::BuiltinInstanceContext;
+use super::BuiltinServerHandler;
+use super::ClientRequest;
+use super::CrossFixture;
+use super::CustomRequest;
+use super::ErrorCode;
+use super::ResourceRoot;
+use super::ResourceScope;
+use super::ServerResult;
+use super::ServiceError;
+use super::WorkspaceMcpServer;
+use super::WorkspaceResourcesInput;
 use rmcp::model::{ReadResourceRequestParams, ResourceContents};
 
 /// W4a 覆盖面用的段落 ID（∈ 契约 `SECTION_IDS`）与其正文哨兵。
@@ -60,7 +72,7 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
                 .with_disable_bundled(true),
         ),
     );
-    let pair = connect_handler("workspace", handler).await;
+    let pair = super::connect_handler("workspace", handler).await;
     let peer = pair.peer();
 
     // resources/list：既有 git ref 与夹具技能同批出现。
@@ -95,7 +107,7 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
         templates.resource_templates
     );
 
-    // skills/list：custom 面的默认语义是 -32601 ⇒ 正常响应即证明转发；条目形状按契约锁定。
+    // skills/list：rmcp 3.9.0 起是类型化请求，默认实现是 -32601 ⇒ 正常响应即证明转发。
     let result = peer
         .send_request(ClientRequest::CustomRequest(CustomRequest::new(
             "skills/list",
@@ -104,8 +116,8 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
         .await
         .expect("skills/list 必须经 dispatch 成功");
     let value = match result {
-        ServerResult::CustomResult(custom) => custom.0,
-        other => panic!("期望 CustomResult，实际：{other:?}"),
+        ServerResult::ListSkillsResult(list) => serde_json::to_value(list).expect("序列化"),
+        other => panic!("期望 ListSkillsResult，实际：{other:?}"),
     };
     assert_eq!(
         value["skills"][0]["uri"].as_str(),
@@ -135,7 +147,7 @@ async fn w1_workspace_resource_surface_forwards_through_dispatch() {
     pair.shutdown().await;
 
     // web 实例：声明并转发自己的资源面（builtin Agent 定义）；skills/* 仍诚实拒绝。
-    let web = connect_via_dispatch("web", &fixture.ctx).await;
+    let web = super::connect_via_dispatch("web", &fixture.ctx).await;
     let web_peer = web.peer();
     let info = web_peer
         .peer_info()
@@ -208,7 +220,7 @@ async fn w4a_workspace_resources_from_context_make_meta_surface_visible() {
     let cwd = w4a_meta_cwd(&dir);
     let ctx = BuiltinInstanceContext::new(cwd)
         .with_workspace_resources(WorkspaceResourcesInput::new().with_disable_bundled(true));
-    let pair = connect_via_dispatch("workspace", &ctx).await;
+    let pair = super::connect_via_dispatch("workspace", &ctx).await;
     let peer = pair.peer();
 
     let resources = peer
@@ -256,7 +268,7 @@ async fn w4a_workspace_without_resources_input_keeps_provider_unwired() {
     let cwd = w4a_meta_cwd(&dir);
     // 文档在盘且可读，但上下文不装载资源输入 ⇒ 资源面未接线。
     let ctx = BuiltinInstanceContext::new(cwd);
-    let pair = connect_via_dispatch("workspace", &ctx).await;
+    let pair = super::connect_via_dispatch("workspace", &ctx).await;
     let peer = pair.peer();
 
     let resources = peer

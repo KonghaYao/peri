@@ -13,10 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use peri_acp_types::history_v2::{
-    DecimalU64, HISTORY_V2_VERSION, HistoryDirection, HistoryEntryAnchor, HistoryLimits,
+    DecimalU64, HistoryDirection, HistoryEntryAnchor, HistoryLimits,
     HistoryWindowPage,
 };
-use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::acp_client::AcpTuiClient;
@@ -24,12 +23,20 @@ use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms;
 
 use super::error::HistoryV2WireFailure;
-use super::outbound::{self, OutboundCommand, Submit, WindowEnqueue};
+use super::outbound::{self, OutboundCommand, WindowEnqueue};
 use super::paging::{HistoryV2PagingStatus, HistoryV2SeekSettlement};
 use super::request::{
     HistoryV2PageRequest, HistoryV2RequestIdentity, HistoryV2SeekRequest, parse_page_result,
 };
 use super::{HistoryV2State, initial};
+
+mod request;
+pub use request::HistoryV2ConsumerRequest;
+
+mod support;
+pub(crate) use support::{
+    HistoryV2WindowIdentity, reset_consumer_state, submit_body,
+};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -74,116 +81,6 @@ impl HistoryV2RequestIdentity<'_> {
     }
 }
 
-/// 消费者队列里的请求；`Open` 只用于失败恢复后的重建与 V2 新会话首窗。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HistoryV2ConsumerRequest {
-    Open {
-        session_id: String,
-        request_key: DecimalU64,
-        anchor: Option<HistoryEntryAnchor>,
-    },
-    Page(HistoryV2PageRequest),
-    Seek(HistoryV2SeekRequest),
-    /// 窗口拆除（best-effort）：只发送关闭事实，不修改本地状态。
-    Close {
-        session_id: String,
-        request_key: DecimalU64,
-        window_id: String,
-        snapshot_token: String,
-        read_ticket: String,
-    },
-}
-
-impl HistoryV2ConsumerRequest {
-    pub(crate) fn session_id(&self) -> &str {
-        match self {
-            Self::Open { session_id, .. } => session_id,
-            Self::Close { session_id, .. } => session_id,
-            Self::Page(request) => &request.context.session_id,
-            Self::Seek(request) => &request.context.session_id,
-        }
-    }
-
-    pub(crate) fn request_key(&self) -> DecimalU64 {
-        match self {
-            Self::Open { request_key, .. } => *request_key,
-            Self::Close { request_key, .. } => *request_key,
-            Self::Page(request) => request.context.request_key,
-            Self::Seek(request) => request.context.request_key,
-        }
-    }
-
-    /// 失败结算身份：session + window（open/close 为 None）+ requestKey。
-    fn identity(&self) -> HistoryV2RequestIdentity<'_> {
-        match self {
-            Self::Open { .. } | Self::Close { .. } => HistoryV2RequestIdentity {
-                session_id: self.session_id(),
-                window_id: None,
-                request_key: self.request_key(),
-            },
-            Self::Page(request) => request.context.identity(),
-            Self::Seek(request) => request.context.identity(),
-        }
-    }
-
-    /// `_peri/history` 的完整 params。open 不带 window/ticket，其余带。
-    pub fn params(&self, limits: &HistoryLimits) -> Value {
-        match self {
-            Self::Open {
-                session_id,
-                request_key,
-                anchor,
-            } => {
-                let anchor = match anchor {
-                    None => json!({"kind": "latest"}),
-                    Some(anchor) => json!({
-                        "kind": "entry",
-                        "entryId": anchor.entry_id,
-                        "source": source_value(&anchor.source),
-                    }),
-                };
-                json!({
-                    "version": HISTORY_V2_VERSION,
-                    "action": "open",
-                    "sessionId": session_id,
-                    "requestKey": request_key,
-                    "anchor": anchor,
-                    "before": limits.default_items,
-                    "after": 0,
-                    "targetBytes": limits.target_page_bytes,
-                })
-            }
-            Self::Close {
-                session_id,
-                request_key,
-                window_id,
-                snapshot_token,
-                read_ticket,
-            } => json!({
-                "version": HISTORY_V2_VERSION,
-                "action": "close",
-                "sessionId": session_id,
-                "requestKey": request_key,
-                "windowId": window_id,
-                "snapshotToken": snapshot_token,
-                "readTicket": read_ticket,
-            }),
-            Self::Page(request) => request.params(),
-            Self::Seek(request) => request.params(),
-        }
-    }
-}
-
-fn source_value(source: &peri_acp_types::history_v2::HistorySource) -> Value {
-    match source {
-        peri_acp_types::history_v2::HistorySource::Own => json!({"kind": "own"}),
-        peri_acp_types::history_v2::HistorySource::Inherited(origin) => json!({
-            "kind": "inherited",
-            "snapshotId": origin.snapshot_id,
-            "ancestorSessionId": origin.ancestor_session_id,
-        }),
-    }
-}
 
 /// 本地 beta 与连接协商同时为真；V1 窗口路径据此让位。
 pub(crate) fn v2_path_active() -> bool {
@@ -205,69 +102,6 @@ pub(crate) fn reset_request_key_for_test() {
     atoms::HISTORY_V2_NEXT_KEY.store(0, Ordering::Relaxed);
 }
 
-/// 一个已交付窗口的关闭身份。关闭只依赖服务端事实，不读回当前状态，避免在持有
-/// 状态锁时再次进入入队临界区。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HistoryV2WindowIdentity {
-    pub session_id: String,
-    pub window_id: String,
-    pub snapshot_token: String,
-    pub read_ticket: String,
-}
-
-impl HistoryV2WindowIdentity {
-    pub(crate) fn from_state(state: &HistoryV2State) -> Option<Self> {
-        state.window.as_ref().map(Self::from_window)
-    }
-
-    fn from_window(window: &super::HistoryV2Window) -> Self {
-        Self {
-            session_id: window.session_id.clone(),
-            window_id: window.window_id.clone(),
-            snapshot_token: window.snapshot_token.clone(),
-            read_ticket: window.read_ticket.clone(),
-        }
-    }
-}
-
-/// H5c：详情面板的正文请求。详情是窗口内容的派生阅读器：按 §11.4 使用独立的
-/// 详情预算和随机 offset 语义，不写窗口页/正文账目，也不参与窗口代次结算；
-/// 响应由 `HistoryV2BodyBinding` 的 window/snapshot/bodyRef 校验。requestKey 与
-/// 页/seek/open/initial 共用同一分配器，并且与入队在同一临界区内完成。
-pub(crate) fn submit_body(
-    binding: &crate::kit::history_detail_binding::HistoryV2BodyBinding,
-    offset: u64,
-    max_bytes: u32,
-) -> Result<Submit<super::request::HistoryV2BodyRequest>, outbound::SubmitError> {
-    outbound::submit_body(|request_key| super::request::HistoryV2BodyRequest {
-        context: super::request::HistoryV2RequestContext {
-            request_key,
-            session_id: binding.session_id.clone(),
-            window_id: binding.window_id.clone(),
-            snapshot_token: binding.snapshot_token.clone(),
-            read_ticket: binding.read_ticket.clone(),
-            view_epoch: 0,
-        },
-        body_key: String::new(),
-        body_ref: binding.body_ref.clone(),
-        offset: DecimalU64::new(offset),
-        max_bytes,
-    })
-}
-
-/// 桥接 reset 只清理视图投影；在途认领由生命周期同步动作（new/load/delete）
-/// 清理，避免桥接任务的异步观察晚于新会话的 Open 入队。
-pub(crate) fn reset_view_projection() {
-    atoms::HISTORY_V2_PREFIX_LEN.set(0);
-    atoms::HISTORY_V2_VIEW_EPOCH.set(0);
-}
-
-/// 会话边界复位：作废在途 open 并重置视图投影。
-pub(crate) fn reset_consumer_state() {
-    *open_claim_slot() = None;
-    CONSUMER_EPOCH.fetch_add(1, Ordering::Relaxed);
-    reset_view_projection();
-}
 
 fn open_claim_slot() -> std::sync::MutexGuard<'static, Option<OpenClaim>> {
     OPEN_IN_FLIGHT

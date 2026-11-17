@@ -1,0 +1,860 @@
+//! MessageArea：直接读取 VIEW_MODELS，通过 vm_to_lines 将 TuiRenderUnit
+//! 转换为 Vec<Line>，按视口裁剪后渲染。
+//!
+//! - 滚动：由自持 ScrollPos（usize 偏移）处理键盘/鼠标事件（offset 管理）
+//! - 渲染：视口裁剪——只 clone + highlight + 渲染视口内 ~60 行，避免 O(N×W) per render
+//! - 智能跟随：use_effect 检测 VIEW_MODELS 变化
+//! - 不再使用 RENDER_CACHE / render_bridge / ScrollView / wrap_map（已替换为 wrap_map_cache）
+
+#![allow(clippy::needless_update)]
+
+use super::footer;
+use super::handlers;
+use super::hits;
+use super::no_color;
+use super::props;
+use super::render;
+use super::scroll;
+use super::selection;
+use super::transcript;
+use super::vm_cache;
+
+use std::sync::Arc;
+
+use crate::kit::text_selection::TextSelection;
+
+use crate::kit::welcome::Welcome;
+use peri_theme::atoms::{PALETTE_ATOM, THEME_ATOM};
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::layout::Position;
+use ratatui_kit::ratatui::style::Modifier;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::text::Text as RatText;
+use ratatui_kit::ratatui::widgets::Block;
+use ratatui_kit::ratatui::widgets::Padding;
+use ratatui_kit::ratatui::widgets::Paragraph;
+use ratatui_kit::ratatui::widgets::Wrap;
+
+#[cfg(test)]
+pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
+    let _ = selection::build_wrap_map(lines, width);
+}
+
+use self::hits::CopyButtonHit;
+
+use self::hits::ImageLineHit;
+use self::hits::InteractionOptionHit;
+
+use self::vm_cache::VmCacheSlot;
+use self::vm_cache::total_visual_rows;
+
+use props::MessageAreaProps;
+use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
+
+use scroll::{DragThrottle, ScrollbarDragState};
+use selection::WrappedLineInfo;
+
+// ── 组件 ──────────────────────────────────────────────────────────────────
+
+#[component]
+pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let frame_t0 = peri_time::monotonic_now();
+    tracing::trace!(target: "frozen_diag", "MessageArea: update/body called");
+    let view_models = hooks.use_atom(&VIEW_MODELS);
+    let acp_state = hooks.use_atom(&crate::kit::atoms::ACP_STATE);
+    let todo_atom = hooks.use_atom(&crate::kit::atoms::TODO_ITEMS);
+    hooks.use_atom(&LANG_VERSION);
+    // 订阅 PALETTE_ATOM / THEME_ATOM：主题切换时触发 MessageArea 重渲染，
+    // palette_key 同时包含 Markdown palette 与 code block 的 surface.sunken，
+    // 确保所有 Markdown 色值随主题更新。
+    let _palette = hooks.use_atom(&PALETTE_ATOM);
+    let theme = hooks.use_atom(&peri_theme::atoms::THEME_ATOM);
+    // 订阅 TERMINAL_CAPS：NO_COLOR 时对可见行做颜色剥离（§12，G3 视口级 pass）。
+    // 启动时探测一次后不再变化；订阅仅为语义完整（切换不重渲染也无副作用）。
+    let caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);
+    let strip_color = !caps.read().color;
+    // 订阅 IMAGE_HOVER：Moved handler 写入时触发消息区重渲染（hover 行
+    // 绝对路径显示/清除）。读取仍在渲染 body 视口循环（读副本，G3 视口级）。
+    hooks.use_atom(&IMAGE_HOVER);
+
+    let (snapshot, publication) = self::vm_cache::read_render_snapshot();
+    let todo_items = todo_atom.read().clone();
+    let is_loading = acp_state.read().is_loading;
+
+    // [Slice 3] Transcript 统一水平网格（§3.1）——content 列宽来自 SessionColumn。
+    let grid = props.grid;
+
+    // [§3.1] 滚动条是窗口级 chrome——锚在窗口最右列，不随居中带内移。
+    // MessageArea 由 `CenterBand` 在 draw 期收窄，本 hook 的
+    // `pre_component_draw` 看到的是 band；render body 每帧写入终端宽度与网格，
+    // 由 `ScrollbarHook` 还原外框，渲染与命中测试共用该矩形。
+    let (term_w, _) = hooks.use_terminal_size();
+    let scrollbar_fields = hooks.use_state(ScrollbarFields::default);
+    let scrollbar_area = {
+        let sb = hooks.use_hook(move || ScrollbarHook {
+            fields: scrollbar_fields,
+            outer: None,
+            term_width: 0,
+            grid,
+        });
+        sb.set_layout(term_w, grid);
+        sb.outer // 上一帧的外框（本帧渲染用 hook 内同一字段）
+    };
+
+    let vm_generation = snapshot.generation;
+
+    // ── 按 VM 分片的渲染缓存 ──────────────────────────────────────────────────
+    // vm_caches 与 snapshot.items 长度对齐，每个 slot 缓存一个 VM 的 lines + wrap_map。
+    // [TRAP] write_no_update 必须用——ratatui-kit ReactiveMutRef::Drop 无条件 wake()，
+    // render body 内 write 会自激回路 100% CPU。
+    let vm_caches: State<Vec<VmCacheSlot>> = hooks.use_state(Vec::new);
+    let transcript = hooks.use_state(transcript::Transcript::default);
+
+    // ── Footer 行预计算：必须在 empty 分支之前调用，确保所有 hook 顺序一致 ──
+    // keepgoing 防抖：KEEPGOING_BLOCKED_UNTIL 内的时间未过期 → 按钮禁用样式渲染
+    let keepgoing_blocked = crate::kit::atoms::KEEPGOING_BLOCKED_UNTIL
+        .state()
+        .read()
+        .is_some_and(|until| peri_time::monotonic_now() < until);
+    // 消息区位置追踪 + 视宽：build_footer_lines 需要 vis_width 判断按钮是否
+    // 超宽换行（m4：换行后点击区域与实际渲染位置错位，超宽时跳过按钮渲染）。
+    let area_hook = hooks.use_hook(MsgAreaTracker::new);
+    let area_rect = area_hook.rect;
+    let vis_width = area_rect
+        .map(|r| r.width.saturating_sub(1))
+        .unwrap_or(grid.line_width())
+        .max(1);
+    let (footer_lines, keepgoing_layout, footer_has_content) = footer::build_footer_lines(
+        &mut hooks,
+        is_loading,
+        &todo_items,
+        keepgoing_blocked,
+        vis_width,
+    );
+    // keepgoing 按钮屏幕点击区域 (y, x_start, width)，每帧更新，点击 handler 实时读取
+    // （handler 闭包捕获的是 State 句柄而非帧快照，滚动后坐标仍正确）
+    let keepgoing_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
+    // md 复制按钮屏幕点击区域（每帧更新，点击 handler 实时读取——同上）
+    let copy_buttons = hooks.use_state(Arc::<Vec<CopyButtonHit>>::default);
+    // [T4 §4] @image 行屏幕点击/hover 热区（每帧由渲染 body 更新，点击与
+    // Moved handler 实时读取——同 CopyButtonHit 模式）。
+    let image_rects = hooks.use_state(Arc::<Vec<ImageLineHit>>::default);
+    let genui_rects = hooks.use_state(Arc::<Vec<super::genui_action::GenUiButtonHit>>::default);
+    // hover 高亮即时更新；预览需在同一目标稳定停留后才写入独立 atom。
+    // gate 用 Arc<Mutex<_>> 跨异步计时任务保活，组件卸载后旧任务也只会自行失效。
+    let image_preview_hover_gate = hooks.use_state(|| {
+        Arc::new(parking_lot::Mutex::new(
+            handlers::ImagePreviewHoverGate::default(),
+        ))
+    });
+
+    let empty = snapshot.items.is_empty() && !is_loading && todo_items.is_empty();
+    // [Why has_content 而非 !footer_lines.is_empty()] footer 常驻渲染后恒非空
+    // （idle 态含静止 spinner 占位行），空态若据此判定会让 Welcome 页面被
+    // footer 占位行污染；仅当有实质内容（summary/todo）时才在 Welcome 下展示。
+    let brewed_lines = if empty && footer_has_content {
+        Some(footer_lines.clone())
+    } else {
+        None
+    };
+
+    let scroll_state = hooks.use_state(scroll::ScrollPos::default);
+    let prev_items_len = hooks.use_state(|| 0usize);
+    let _prev_is_loading = hooks.use_state(|| false);
+    let _todo_hash = footer::hash_todo_items(&todo_items);
+
+    // ── 文本选区 + 左键手势状态机 ──
+    let text_sel = hooks.use_state(TextSelection::default);
+    // 手势中间状态（Pending）：Down 冻结 screen/visual/entry_hit；Drag 超
+    // 容差升级后置 None，Armed 由 text_sel.dragging 表达。
+    let gesture = hooks.use_state(|| Option::<scroll::GesturePending>::None);
+    let drag_throttle = hooks.use_state(DragThrottle::default);
+
+    // 滚动条 thumb 拖拽状态（点击/拖拽事件处理器读写）
+    let scrollbar_drag = hooks.use_state(ScrollbarDragState::default);
+    // [Slice 2] §8.1 `↓ New output` 指示器屏幕点击区域 (y, x_start, x_end)，
+    // 每帧由渲染 body 更新（write_no_update），点击 handler 实时读取——与
+    // keepgoing / md 复制按钮同模式（事件在上帧渲染完成后分发）。
+    let new_output_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
+    // [Slice 4 §6.8] interaction option 点击热区（每帧由渲染 body 更新，
+    // 点击 handler 实时读取——同 CopyButtonHit 模式）。
+    let interaction_rects = hooks.use_state(Arc::<Vec<InteractionOptionHit>>::default);
+    // [Slice 4 §6.8] interaction option 键盘焦点（entry 焦点内部态，不新增
+    // FocusLayer——option 是 entry 焦点内部状态，仲裁仍走 message_nav_accepts）。
+    // 焦点移动到其他 entry 时重置为 0（下方 handler）。
+    let interaction_option = hooks.use_state(|| 0usize);
+    // [Slice 4 §6.8]「等待时锚定此 block」：pending interaction block 的 slot
+    // index（每帧派生：扫描快照，pending 完成 → 自然清除）。
+    let anchor_slot_state = hooks.use_state(|| Option::<usize>::None);
+
+    let vis_height = area_rect.map(|r| r.height).unwrap_or(60).max(1);
+
+    let anim_frame = peri_time::now_wall()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64 / 100)
+        .unwrap_or(0);
+    let items_len = snapshot.items.len();
+    let context = crate::kit::entry_render_cache::EntryRenderContext {
+        theme: Arc::clone(&theme.read()),
+        language: LANG_VERSION.get(),
+        surface: crate::kit::entry_render_cache::EntrySurface::Message,
+        occurrence: BRIDGE_RESET_COUNTER.get(),
+    };
+    self::vm_cache::trace_phase(
+        "preparation",
+        frame_t0,
+        Some("body-before-prepare-including-vm-read"),
+    );
+    // [REQ-C01-3 / A20] 历史翻页代数（`HISTORY_PREPEND_EPOCH`，桥接任务每并入一页 +1）
+    // 在 prepare **之前**读，且**必须晚于上面的 `read_render_snapshot()`**：桥接侧先推
+    // 代数再发布，所以「快照里看得到并入 = 代数也看得到」；反过来（代数读在前、快照读在
+    // 后）会漏配一整次并入——它是本处读序的唯一理由，见 `viewport_anchor` 模块文档 4.。
+    // epoch 只是「并合发生过」这个事实，不承载任何桥接槽位语义。
+    let prepend_epoch = HISTORY_PREPEND_EPOCH.get();
+    let prepare_wait = peri_time::monotonic_now();
+    let mut transcript_guard = transcript.write_no_update();
+    let mut caches_guard = vm_caches.write_no_update();
+    let prepare_acquired = peri_time::monotonic_now();
+    vm_cache::trace_elapsed(
+        "prepare-lock-wait",
+        prepare_acquired.duration_since(prepare_wait),
+        None,
+    );
+    let prepare_start = peri_time::monotonic_now();
+    let slot_index = transcript_guard.prepare(
+        &snapshot,
+        &publication,
+        &mut caches_guard,
+        grid,
+        vis_width,
+        context,
+        anim_frame,
+        BRIDGE_RESET_COUNTER.get(),
+        scroll_state.read().offset(),
+        vis_height as usize,
+        prepend_epoch,
+    );
+    let prepare_end = peri_time::monotonic_now();
+    *anchor_slot_state.write_no_update() = transcript_guard.anchor();
+    // [REQ-C01-3 / A20] 本次发布的重定位结果（一次性；`prepare` 内完成身份重定位，
+    // 见 `viewport_anchor`）。取走后交给并入分支消费。
+    let prepend_relocation = transcript_guard.take_prepend_relocation();
+    drop(caches_guard);
+    drop(transcript_guard);
+    let t_rebuild = peri_time::monotonic_now();
+    vm_cache::trace_elapsed(
+        "prepare",
+        prepare_end.duration_since(prepare_start),
+        Some("synchronous-transcript-derivation"),
+    );
+    let total_logical_lines = slot_index.total_logical();
+    let core_total_visual_rows = slot_index.total_visual();
+    let num_slots = slot_index.slot_count();
+
+    // [Slice 4 §6.8] anchor 的视觉行范围（core 行）：slot 起始偏移 + slot 内
+    // 视觉行数。供 auto_follow 的 anchor 分支对齐视口到 block 底部。
+    // 每帧由 anchor_slot 派生（resize 后按新快照/wrap_map 自动重算）。
+    // [Fix §15] O(1) 查表：旧实现每帧对 concat_wrap_map 全量 filter 求最大
+    // visual_end（O(total wrapped lines) 第二次全量遍历）——slot.visual_rows
+    // 即 wrap_map 末项 visual_end（rebuild 时同源写入），与旧语义完全一致。
+    let anchor_visual_range: Option<(usize, usize)> = anchor_slot_state
+        .read()
+        .and_then(|slot| slot_index.slot_visual_range(slot));
+    let t_concat = peri_time::monotonic_now();
+    self::vm_cache::trace_phase(
+        "concat",
+        t_rebuild,
+        Some(&format!(
+            "slots={num_slots}, logic_lines={total_logical_lines}, vis_rows={core_total_visual_rows}"
+        )),
+    );
+
+    // ── 总视觉行数 = core + footer ──
+    // [Why] 分片缓存命中后 core_total_visual_rows 已是 sum(slot.visual_rows)，无需 line_count。
+    // footer 通常几行，单独 build_wrap_map 成本可忽略。
+    let footer_visual_rows: usize = if !empty && !footer_lines.is_empty() {
+        let (_, footer_map) = selection::build_wrap_map(&footer_lines, vis_width);
+        footer_map.last().map(|e| e.visual_end).unwrap_or(0)
+    } else {
+        0
+    };
+    // [Padding] 追加 SCROLL_PADDING 行空白滚动空间，减少流式输出期间因新行到达
+    // 导致的视口抖动。这 2 行不计入实际渲染内容，仅影响 max_scroll / content_length；
+    // 吸底跟随恢复判定会扣除它们（scroll::should_follow_after_user_scroll）。
+    let total_visual_rows =
+        total_visual_rows(core_total_visual_rows, footer_visual_rows, is_loading);
+
+    handlers::register_keepgoing_click(&mut hooks, keepgoing_rect);
+
+    handlers::register_copy_click(&mut hooks, copy_buttons, view_models);
+
+    // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
+    // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
+    // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
+    // ── 吸底自动跟随 ──
+    let last_scrolled_at = hooks.use_state(|| 0usize);
+    // 粘性吸底开关：默认跟随；用户向上滚动即退出（浏览模式），滚回底部才恢复。
+    let follow_bottom = hooks.use_state(|| true);
+    handlers::register_new_output_indicator_click(
+        &mut hooks,
+        new_output_rect,
+        follow_bottom,
+        scroll_state,
+    );
+
+    handlers::register_interaction_option_click(&mut hooks, interaction_rects, view_models);
+
+    handlers::register_image_click(&mut hooks, image_rects, view_models);
+    super::genui_action::register_click(&mut hooks, genui_rects, view_models);
+
+    handlers::register_image_hover(&mut hooks, image_rects, image_preview_hover_gate);
+
+    // [S2 单一事实源] FOCUSED_ENTRY 订阅（hook 声明必须在 handler 之前，hook
+    // 顺序每次渲染一致）：仲裁/渲染/外部清除共读同一事实源，无收敛窗口期。
+    let focused_entry_atom = hooks.use_atom(&FOCUSED_ENTRY);
+    handlers::register_entry_click(
+        &mut hooks,
+        area_rect,
+        scrollbar_area,
+        gesture,
+        interaction_option,
+        text_sel,
+    );
+
+    // 闭包持 clone，原值继续在 render body 内用。
+    // [Why 位置] 必须声明在 follow_bottom 之后（闭包捕获），且所有 hook 每次渲染
+    // 以相同相对顺序调用——use_event_handler 只是占顺序槽，位置调整无状态错位。
+    handlers::register_scroll_events(
+        &mut hooks,
+        area_rect,
+        scrollbar_area,
+        vis_width,
+        scroll_state,
+        text_sel,
+        gesture,
+        drag_throttle,
+        scrollbar_fields,
+        scrollbar_drag,
+        follow_bottom,
+        view_models,
+        grid,
+        Arc::clone(&slot_index),
+    );
+
+    handlers::register_keyboard_nav(&mut hooks, interaction_option);
+
+    // [S2 单一事实源] 焦点同步已删除：外部清除（输入区点击 / session 复位）
+    // 在事件边界直接写 FOCUSED_ENTRY = None，仲裁与渲染同源读取——不再需要
+    // effect 收敛局部 entry_focus（旧双轨：仲裁读局部、清除只写共享 → 窗口期）。
+
+    let prev_total_visual_rows = hooks.use_state(|| 0usize);
+    // [Fix] resize 高度变化哨兵：vis_height 加入 effect 依赖，终端高度变化时触发
+    // auto_follow 的 resize 跟随逻辑（否则 resize 缩小视口后底部 footer/spinner 消失）。
+    let prev_vis_height = hooks.use_state(|| 0u16);
+    // [Fix] Submit 强制滚底 / History 切换强制滚底：订阅 atom 重新渲染
+    let _loading_epoch_atom = hooks.use_atom(&LOADING_EPOCH);
+    let _reset_counter_atom = hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    let loading_epoch = LOADING_EPOCH.get();
+    let prev_loading_epoch = hooks.use_state(|| loading_epoch);
+    let bridge_reset_counter = BRIDGE_RESET_COUNTER.get();
+    let prev_reset_counter = hooks.use_state(|| bridge_reset_counter);
+    // [F6] Pending（Down 已记录）或 Armed（已升级拖拽）期间暂停输出驱动的吸底。
+    // 每帧从 State 读最新值；effect 在内容增长导致 deps 变化时运行，闭包携带
+    // 的是当帧值（Down/Drag 事件后 dispatch 会强制重渲染）。
+    let selection_active = gesture.read().is_some() || text_sel.read().dragging;
+    hooks.use_effect(
+        {
+            move || {
+                scroll::run_auto_follow(&scroll::AutoFollowCtx {
+                    total_visual_rows,
+                    vis_height,
+                    scroll_state,
+                    prev_items_len,
+                    last_scrolled_at,
+                    items_len,
+                    is_loading,
+                    follow_bottom,
+                    prev_total_visual_rows,
+                    prev_vis_height,
+                    loading_epoch,
+                    prev_loading_epoch,
+                    bridge_reset_counter,
+                    prev_reset_counter,
+                    // [REQ-C01-3 / A20] 更早历史并入的重定位结果：`prepare` 内用
+                    // 「发布前锚点身份 + 发布后新索引」换算完成，effect 只消费
+                    // （一次性取值见上方 `take_prepend_relocation` 调用点）。
+                    prepend_relocation,
+                    // [Slice 4 §6.8] pending interaction block 锚定范围
+                    // （每帧派生值；effect 依赖不含它——block 完成时 generation
+                    // 变化触发 effect，用当帧最新值）。
+                    anchor_visual_range,
+                    // [F6] 文本拖选中：暂停输出增长驱动的吸底跟随。
+                    selection_active,
+                })
+            }
+        },
+        (
+            items_len,
+            vm_generation,
+            is_loading,
+            total_visual_rows,
+            vis_height,
+            loading_epoch,
+            bridge_reset_counter,
+        ),
+    );
+
+    if empty {
+        // 重置滚动条字段，避免 Welcome 页面残留旧会话的滚动条
+        *scrollbar_fields.write_no_update() = ScrollbarFields::default();
+        // 清空 md 复制按钮映射——Welcome 页面无消息，防止点击残留按钮复制已消失内容
+        *copy_buttons.write_no_update() = Arc::new(Vec::new());
+        // 清空 @image 行热区映射（同 copy_buttons——Welcome 页面无消息可点）
+        *image_rects.write_no_update() = Arc::new(Vec::new());
+        *genui_rects.write_no_update() = Arc::new(Vec::new());
+        if let Some(lines) = brewed_lines {
+            return element!(
+                View(
+                    flex_direction: Direction::Vertical,
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                ) {
+                    View(height: Constraint::Fill(1)) {
+                        Welcome(width: grid.content_width())
+                    }
+                    Text(text: Paragraph::new(RatText::from(lines)).wrap(Wrap { trim: false }))
+                }
+            )
+            .into_any();
+        }
+        return element!(
+            View(width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                Welcome(width: grid.content_width())
+            }
+        )
+        .into_any();
+    }
+
+    // ── 视口裁剪渲染（移除 ScrollView 的全量大 buffer）──
+    // [TRAP] 原 ScrollView + Paragraph-with-Wrap 组合是 100% CPU 的真凶：ScrollView 创建
+    // (width × total_visual_rows) 大 buffer，Paragraph 渲染所有 N 行到这个 buffer 是
+    // O(N×W) per render。Drag 60-120Hz × O(N×W) 直接拉满 CPU。
+    //
+    // 视口裁剪：只 clone + highlight + 渲染视口内 ~60 行（vis_height）。
+    //   1. 通过 wrap_map_cache 二分查找视口对应的逻辑行 [vp_start, vp_end]
+    //   2. vp_first_offset = scroll_y - wrap_map[vp_start].visual_start（首行视觉偏移）
+    //   3. viewport_lines = clone(core[vp_start..=vp_end]) + 必要时附加 footer_lines
+    //   4. Paragraph::scroll((vp_first_offset, 0)) 精确偏移首行
+    //
+    // highlight：视口内选区行用 sel_bg 背景。不再缓存 highlight 结果——视口裁剪后
+    // 只有 ~60 行，highlight 成本可忽略。Drag 期间频繁跨逻辑行变化也不会卡。
+    //
+    // [DEBUG] PERI_NO_HIGHLIGHT=1 紧急回退——完全不进入 highlight 路径。
+    let no_highlight = std::env::var("PERI_NO_HIGHLIGHT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    // clamp scroll_y 不超过 max_scroll（替代 ScrollView 渲染时的 clamp）
+    let max_scroll = total_visual_rows.saturating_sub(vis_height as usize);
+    let scroll_y_raw = scroll_state.read().offset();
+    let scroll_y = scroll_y_raw.min(max_scroll);
+
+    // [Fix] 每帧钳制 scroll_state.offset 到 [0, max_scroll]。
+    // apply_scroll 的 scroll_down() 无限递增 offset，没有上限感知——用户可以一直
+    // 往下滚直到 offset 远超 max_scroll。虽然 scroll_y = raw.min(max_scroll) 让
+    // 渲染正确，但 scroll_state 内部 offset 不被重置，往上滚时需要把多余 offset
+    // 消耗完（如 offset=100, max_scroll=40 → 需滚 60 次才恢复）。
+    // write_no_update 不触发 re-render，避免自激回路。
+    if scroll_y_raw > max_scroll {
+        scroll_state.write_no_update().set_offset(max_scroll);
+    }
+
+    // 更新 scrollbar fields——post_component_draw 时基于此渲染滚动条
+    //
+    // [Fix] ratatui Scrollbar 的 position 模型是 "item index"，max_position =
+    // content_length - 1。但我们的 scroll_y 是 scroll offset，max = content_length -
+    // vis_height。直接传 scroll_y 会导致 thumb 永远到不了底部（因为 scroll_y <
+    // content_length - 1）。需要把 [0, max_scroll] 线性映射到 [0, content_length-1]。
+    {
+        let mut g = scrollbar_fields.write_no_update();
+        g.content_length = total_visual_rows;
+        g.position = scroll_y
+            .saturating_mul(total_visual_rows.saturating_sub(1))
+            .checked_div(max_scroll)
+            .unwrap_or(0);
+        g.viewport_length = vis_height as usize;
+    }
+
+    // [REQ-C01-1] 历史翻页触发**不在这里**：render body 写 atom 被 TUI-RENDER-001
+    // 禁止，触发点放在滚动事件边界（`scroll/event.rs`）——滚轮在派发前已逐事件落地，
+    // 事件路径直接读当帧视口事实即可。
+
+    let new_output_active = scroll::new_output_indicator_active(
+        *follow_bottom.read(),
+        scroll_y,
+        vis_height as usize,
+        core_total_visual_rows + footer_visual_rows,
+    );
+    // 指示器独占视口最后一行，正文裁剪预算扣除该行。
+    let vp_height = (vis_height as usize).saturating_sub(usize::from(new_output_active));
+
+    // ── keepgoing 按钮屏幕位置（每帧更新）──
+    // 必须在 scroll_y 计算之后、handler 使用之前；write_no_update 避免自激重渲染。
+    {
+        let mut k_rect = keepgoing_rect.write_no_update();
+        *k_rect = self::hits::compute_keepgoing_rect(
+            empty,
+            area_rect,
+            keepgoing_layout,
+            core_total_visual_rows,
+            scroll_y,
+            vp_height as u16,
+        );
+    }
+
+    let warm_start = peri_time::monotonic_now();
+    let slot_index = transcript.write_no_update().warm_visible(
+        &snapshot,
+        &mut vm_caches.write_no_update(),
+        scroll_y,
+        vp_height,
+    );
+    self::vm_cache::trace_phase(
+        "viewport-warm",
+        warm_start,
+        Some("includes-local-cache-locks"),
+    );
+    *genui_rects.write_no_update() = Arc::new(area_rect.map_or_else(Vec::new, |area| {
+        super::genui_action::button_hits(
+            &vm_caches.read(),
+            &snapshot,
+            area,
+            vp_height as u16,
+            scroll_y,
+            &slot_index,
+        )
+    }));
+    drop(snapshot);
+    if vm_cache::render_timing_enabled() {
+        let transcript_guard = transcript.read();
+        tracing::info!(target: "perf.render", generation = vm_generation,
+            scanned = transcript_guard.scanned_slots, updated = transcript_guard.updated_slots,
+            evicted = transcript_guard.evictions, retained_bytes = transcript_guard.retained_bytes(),
+            invalidation = transcript_guard.invalidation, "transcript-work");
+    }
+
+    hits::update_copy_button_hits(
+        copy_buttons,
+        &vm_caches,
+        &view_models,
+        area_rect,
+        vp_height as u16,
+        scroll_y,
+        &slot_index,
+        grid,
+    );
+
+    hits::update_image_line_hits(
+        image_rects,
+        &vm_caches,
+        area_rect,
+        vp_height as u16,
+        scroll_y,
+        &slot_index,
+        grid,
+    );
+
+    let interaction_highlight: Option<(usize, usize)> = hits::update_interaction_hits(
+        interaction_rects,
+        &vm_caches,
+        area_rect,
+        vp_height as u16,
+        scroll_y,
+        &slot_index,
+        &focused_entry_atom,
+        &interaction_option,
+    );
+
+    // core_total_visual_rows 在前面拼接 wrap_map 时算出，直接复用。
+
+    // 选区范围（字符级）：(first_logical, last_logical, sr, sc, er, ec)
+    // 视口外选区不参与 highlight，selection state 保留供复制
+    // [Why] 字符级高亮——旧版只存 (first_logical, last_logical) 整逻辑行范围，
+    // 导致整行背景色覆盖；与字符级复制提取不一致。现在保留完整 (sr, sc, er, ec)，
+    // highlight_line_in_selection 用 wrap_byte_starts 算 byte 范围，拆分 spans。
+    // sr/er 为视觉行（usize，内容可超 65535 视觉行），sc/ec 为视觉列（u16）。
+    let sel_bounds: Option<(usize, usize, usize, u16, usize, u16)> = if !no_highlight {
+        let sel = text_sel.read();
+        // [F5] 起点优先按稳定身份解析（历史前插后视觉行号改变，内容身份不变）；
+        // 身份认不出时不显示过期高亮，下一次事件会明确取消选区。
+        if let Some(((sr, sc), (er, ec))) = selection::resolved_bounds(&slot_index, &sel) {
+            // Clamp sr/er 到 wrap_map 视觉范围内（footer 区域无 wrap_map）
+            let max_visual = slot_index.total_visual().saturating_sub(1);
+            let sr_c = sr.min(max_visual);
+            let er_c = er.min(max_visual);
+            match (
+                slot_index.visual_lookup(sr_c),
+                slot_index.visual_lookup(er_c),
+            ) {
+                (Some(f), Some(l)) => Some((
+                    f.global_logical.min(l.global_logical),
+                    f.global_logical.max(l.global_logical),
+                    sr_c,
+                    sc,
+                    er_c,
+                    ec,
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 视口对应的 core 逻辑行范围 + 首行视觉偏移
+    let (vp_core_start, vp_core_end, vp_first_offset): (usize, usize, usize) =
+        if scroll_y < core_total_visual_rows && total_logical_lines > 0 {
+            slot_index
+                .viewport_logical_range(scroll_y, vp_height)
+                .unwrap_or((0, 0, 0))
+        } else {
+            // 视口完全在 footer 内（footer 占据末尾几行）
+            (0, 0, 0)
+        };
+
+    // 视口是否包含 footer（视口末尾超出 core 总视觉行数）
+    let viewport_has_footer =
+        !empty && !footer_lines.is_empty() && scroll_y + vp_height > core_total_visual_rows;
+
+    // 构建 viewport_lines：clone + highlight 视口内的 core 行，必要时附加 footer
+    let sel_bg = THEME_ATOM.state().read().semantic.surface.selection;
+    // [F3] NO_COLOR 最终 pass 会剥离背景色；选区必须保留非颜色标记。
+    // 有颜色时用主题 selection 背景；无色时用 REVERSED（strip_line_colors
+    // 保留 modifier，仍可在最终 Buffer 上辨识）。
+    let selection_style = if strip_color {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().bg(sel_bg)
+    };
+    // [T4 §4] hover 状态读副本（每帧一次）：视口 post-pass 据此把命中的
+    // @image meta 行替换为绝对路径 + accent 高亮（G3 视口级，不写缓存）。
+    // 陈旧校验：hover 的 vm_hash 与当帧 slot 的 content_hash 不一致
+    // （Rewind/Reset 后索引错位 / 内容变更）→ 不应用（防御误高亮）。
+    let image_hover = {
+        let caches = vm_caches.read();
+        IMAGE_HOVER.state().read().as_ref().and_then(|h| {
+            caches
+                .get(h.slot_index)
+                .filter(|s| s.content_hash == h.vm_hash)
+                .map(|_| h.clone())
+        })
+    };
+    // [Slice 3] §9 focus 视觉（G3：只作用于视口行，不写缓存/业务状态）：
+    // focused entry 左缘 selection border（outer 列，空格 + selection 背景
+    // 反色——整格填充色块，视觉为连续竖线；NO_COLOR 时退化为 `|` 字符，
+    // §12 状态不依赖颜色）。
+    // [S2 单一事实源] 渲染读点——与仲裁同读 FOCUSED_ENTRY。
+    let focus_slot = focused_entry_atom.read().as_ref().map(|f| f.slot);
+    let focus_caps = crate::kit::atoms::TERMINAL_CAPS.state();
+    let focus_border_glyph = if focus_caps.read().color { " " } else { "|" };
+    let focus_border_style = Style::default().bg(sel_bg);
+    let core_len = total_logical_lines;
+    let mut viewport_lines: Vec<Line<'static>> = Vec::with_capacity(
+        (vp_core_end.saturating_sub(vp_core_start) + 1)
+            .min(vp_height + 2)
+            .saturating_add(footer_lines.len()),
+    );
+
+    let mut materialized: Option<(usize, Arc<selection::SlotLines>)> = None;
+    if scroll_y < core_total_visual_rows && vp_core_start <= vp_core_end && core_len > 0 {
+        let end = vp_core_end.min(core_len - 1);
+        for i in vp_core_start..=end {
+            let in_sel = sel_bounds.is_some_and(|(f, l, _, _, _, _)| i >= f && i <= l);
+            if let Some(lookup) = slot_index.logical_lookup(i) {
+                let entry = WrappedLineInfo {
+                    logical_idx: i,
+                    visual_start: lookup.global_visual_start,
+                    visual_end: lookup.global_visual_end,
+                    slot_index: lookup.slot_index,
+                };
+                let local_idx = lookup.local_logical;
+                if materialized
+                    .as_ref()
+                    .is_none_or(|(slot, _)| *slot != lookup.slot_index)
+                {
+                    materialized = Some((
+                        lookup.slot_index,
+                        slot_index
+                            .materialize(lookup.slot_index)
+                            .expect("logical lookup identifies a materializable transcript slot"),
+                    ));
+                }
+                let line = materialized
+                    .as_ref()
+                    .expect("the current slot was materialized before reading its lines")
+                    .1
+                    .line(local_idx)
+                    .expect("logical lookup returns a line within its materialized slot");
+                let mut out = if in_sel {
+                    let (_, _, sr, sc, er, ec) =
+                        sel_bounds.expect("in_sel is true only when selection bounds are present");
+                    selection::highlight_line_in_selection(
+                        line,
+                        &entry,
+                        sr,
+                        er,
+                        sc,
+                        ec,
+                        vis_width,
+                        selection_style,
+                    )
+                } else {
+                    line.clone()
+                };
+                // [T4 §4] @image hover 视觉 post-pass：命中行替换为绝对路径 +
+                // accent 高亮。按 (slot_index, logical_idx) 定位——滚动后 hover
+                // 高亮跟随行移动，不依赖鼠标位置。
+                if let Some(h) = image_hover.as_ref()
+                    && entry.slot_index == h.slot_index
+                    && local_idx == h.logical_idx
+                {
+                    let hover_sem = THEME_ATOM.state().read().semantic;
+                    out = render::render_image_hover_line(h, &grid, &hover_sem);
+                }
+                // [Slice 3] focus 视觉 post-pass——替换首列 outer 空 cell
+                // （渲染层约定：非空行首 span 恒为裸空格 outer cell）。
+                if focus_slot == Some(entry.slot_index)
+                    && let Some(first) = out.spans.first_mut()
+                    && first.content.as_ref() == " "
+                    && first.style == Style::default()
+                {
+                    *first = Span::styled(focus_border_glyph, focus_border_style);
+                }
+                // [Slice 4 §6.8] interaction「当前项」高亮：焦点 slot 的当前
+                // option 行（§9：selection bg + border + bold——border 是选项
+                // 静态 `[ ]` 外框，bg + bold 在此应用）。
+                if interaction_highlight == Some((entry.slot_index, local_idx))
+                    && !out.spans.is_empty()
+                {
+                    out.style = out.style.bg(sel_bg).add_modifier(Modifier::BOLD);
+                }
+                viewport_lines.push(out);
+            }
+        }
+    }
+
+    // 指示器是固定视口 chrome，不参与正文折行/scroll；绘制与点击共用末行。
+    let new_output_line = if new_output_active {
+        let arrow = if caps.read().unicode { "\u{2193}" } else { "v" };
+        let sem = THEME_ATOM.state().read().semantic;
+        let mut spans = vec![Span::raw(" ".repeat(grid.first_prefix_width()))];
+        spans.push(Span::styled(
+            format!("{arrow} {}", crate::i18n::tr("msg-new-output")),
+            Style::default()
+                .fg(sem.status.running)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let line = Line::from(spans);
+        Some(if strip_color {
+            self::no_color::strip_line_colors(&line)
+        } else {
+            line
+        })
+    } else {
+        None
+    };
+    *new_output_rect.write_no_update() = area_rect
+        .filter(|area| new_output_active && area.height > 0)
+        .map(|area| (area.bottom() - 1, area.x, area.right()));
+
+    if viewport_has_footer {
+        viewport_lines.extend(footer_lines.iter().cloned());
+    }
+    // [NO_COLOR 剥离 pass]（§12）：只作用于视口内可见行，不写缓存/业务状态（G3）。
+    // 剥离颜色但保留 modifier（bold/italic/dim）与符号、文本——状态不依赖颜色。
+    if strip_color {
+        for line in viewport_lines.iter_mut() {
+            *line = self::no_color::strip_line_colors(line);
+        }
+    }
+    // [PERI_RENDER_TIMING] 视口裁剪耗时
+    self::vm_cache::trace_phase(
+        "viewport",
+        t_concat,
+        Some(&format!("vp_lines={}", viewport_lines.len())),
+    );
+
+    // Paragraph::scroll 偏移：core 内的偏移 = vp_first_offset
+    // 视口完全在 footer 内时（scroll_y >= core_total_visual_rows），按 footer 内偏移
+    let scroll_offset_y: u16 = if scroll_y >= core_total_visual_rows && core_total_visual_rows > 0 {
+        (scroll_y - core_total_visual_rows) as u16
+    } else {
+        vp_first_offset.min(u16::MAX as usize) as u16
+    };
+
+    // [Why] View 必须保持 `Fill(1)`（占满居中带）——Paragraph 的 wrap 宽度靠右
+    // padding 1 列从 band 宽度推出 vis_width；若 View 改为 `Max(vis_width)`，右 padding
+    // 会把 wrap 宽度再压 1 列，与 `total_visual_rows` / wrap_map / `line_count(vis_width)`
+    // 的估算错位（多算一次折行）。
+    //
+    // 让 Paragraph 实际 wrap 宽度 = vis_width 的正确做法：给 Paragraph 套
+    // `Block::default().padding(Padding::new(0, 1, 0, 0))`（右 padding 1）。Block 占满
+    // View 的 area.width（= band 宽），内部 wrap 宽度 = band - 1 = vis_width，与
+    // `total_visual_rows` / `wrap_map_cache` / `line_count(vis_width)` 的估算一致；
+    // 带内最右 1 列为正文留白（滚动条另在窗口最右列，见 ScrollbarHook）。
+    self::vm_cache::trace_phase(
+        "message-body-total",
+        frame_t0,
+        Some(&format!(
+            "gen={vm_generation}, excludes-widget-draw-and-terminal-flush"
+        )),
+    );
+    render_viewport(viewport_lines, scroll_offset_y, new_output_line)
+}
+
+pub(super) fn render_viewport(
+    viewport_lines: Vec<Line<'static>>,
+    scroll_offset_y: u16,
+    new_output_line: Option<Line<'static>>,
+) -> AnyElement<'static> {
+    element!(
+        View(
+            flex_direction: Direction::Vertical,
+            width: Constraint::Fill(1),
+            height: Constraint::Fill(1),
+        ) {
+            View(height: Constraint::Fill(1)) {
+                Text(text: Paragraph::new(RatText::from(viewport_lines))
+                    .wrap(Wrap { trim: false })
+                    .block(Block::default().padding(Padding::new(0, 1, 0, 0))),
+                    scroll: Position::new(scroll_offset_y, 0))
+            }
+            { new_output_line.map(|line| element!(
+                View(height: Constraint::Length(1)) {
+                    Text(text: line)
+                }
+            )) }
+        }
+    )
+    .into_any()
+}
+
+use crate::kit::atoms::BRIDGE_RESET_COUNTER;
+
+use crate::kit::atoms::FOCUSED_ENTRY;
+
+use crate::kit::atoms::HISTORY_PREPEND_EPOCH;
+
+use crate::kit::atoms::IMAGE_HOVER;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::LOADING_EPOCH;
+
+use crate::kit::atoms::VIEW_MODELS;

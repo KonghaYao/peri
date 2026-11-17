@@ -38,13 +38,15 @@ use peri_acp_types::messages::{
 };
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::system_reminder::{reminder_egress_allowed, ReminderAudience, SystemReminder};
+use peri_acp_types::system_reminder;
+use peri_acp_types::system_reminder::ReminderAudience;
+use peri_acp_types::system_reminder::SystemReminder;
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::tools::{ToolOutcome, ToolOutput};
 use peri_acp_types::PeriCaps;
 use peri_controller::Controller;
 
-use crate::event::tool_projection::{project_tool_completion, project_tool_start};
+use crate::event::tool_projection;
 
 /// 一条持久化 payload 的一个展示子项。
 ///
@@ -85,19 +87,20 @@ pub fn entry_id(session_id: &str, message_id: MessageId) -> String {
 /// 而用空位置表冒充「协商过」——那会漏发位置戳，客户端按 `null` 处理会把自有条目排到
 /// 继承条目之间。
 #[derive(Clone, Copy, Debug)]
-pub struct ReplayMarks<'a> {
-    generation: &'a LoadGeneration,
-    session_id: &'a str,
+pub struct ReplayMarks<'replay> {
+    generation: &'replay LoadGeneration,
+    session_id: &'replay str,
     /// `None` = 未协商分页：不打条目身份 / 位置戳。
-    positions: Option<&'a HashMap<MessageId, u64>>,
+    positions: Option<&'replay HashMap<MessageId, u64>>,
 }
 
-impl<'a> ReplayMarks<'a> {
+impl<'replay> ReplayMarks<'replay> {
     /// 协商过分页的连接：位置表是存储给出的自有有效条目序键。
+    #[must_use]
     pub fn new(
-        generation: &'a LoadGeneration,
-        session_id: &'a str,
-        positions: &'a HashMap<MessageId, u64>,
+        generation: &'replay LoadGeneration,
+        session_id: &'replay str,
+        positions: &'replay HashMap<MessageId, u64>,
     ) -> Self {
         Self {
             generation,
@@ -107,7 +110,11 @@ impl<'a> ReplayMarks<'a> {
     }
 
     /// 未协商分页的连接：回放仍带本次 load 的代次，但不带任何条目身份 / 位置戳。
-    pub fn without_entry_marks(generation: &'a LoadGeneration, session_id: &'a str) -> Self {
+    #[must_use]
+    pub fn without_entry_marks(
+        generation: &'replay LoadGeneration,
+        session_id: &'replay str,
+    ) -> Self {
         Self {
             generation,
             session_id,
@@ -117,7 +124,7 @@ impl<'a> ReplayMarks<'a> {
 
     /// 一条 payload 的戳。继承区条目（本线程没有行）不在位置表里：它们拿得到身份，
     /// 拿不到位置——位置只在同一个存储序内可比。
-    fn entry(&self, message_id: MessageId) -> EntryMarks<'a> {
+    fn entry(&self, message_id: MessageId) -> EntryMarks<'replay> {
         EntryMarks {
             generation: self.generation,
             session_id: self.session_id,
@@ -135,22 +142,24 @@ impl<'a> ReplayMarks<'a> {
 /// 它是「本次 load 的代次」与「条目身份 / 存储序位置」的合体，因为三者必须**同进同出**：
 /// 客户端按代次把通知与那次响应配对，按身份去重、按位置把页并进稀疏首屏。
 #[derive(Clone, Copy, Debug)]
-pub struct EntryMarks<'a> {
-    generation: &'a LoadGeneration,
-    session_id: &'a str,
+pub struct EntryMarks<'replay> {
+    generation: &'replay LoadGeneration,
+    session_id: &'replay str,
     message_id: MessageId,
     position: Option<u64>,
     /// 本连接是否协商过分页：`false` 时 [`write_entry_marks`] 一个字段都不写。
     merge: bool,
 }
 
-impl<'a> EntryMarks<'a> {
+impl<'replay> EntryMarks<'replay> {
     /// 本次 load 的代次（REQ-H04）。
-    pub fn generation(&self) -> &'a LoadGeneration {
+    #[must_use]
+    pub fn generation(&self) -> &'replay LoadGeneration {
         self.generation
     }
 
     /// 本连接是否协商过分页（决定要不要打条目身份 / 位置戳）。
+    #[must_use]
     pub fn merge(&self) -> bool {
         self.merge
     }
@@ -216,13 +225,14 @@ pub fn project_payload_updates(
 /// 「属于哪一次 load」的通知与那次响应配对。按代次暂存/安装/丢弃（失败代次不得安装、
 /// 迟到通知不污染新快照、重试不重复）属于 TUI / SDK 切片，不在这里。
 ///
-/// 只在协商过回放标记的连接上出现（见 [`replay_chunk`]）：未协商的标准客户端收到的仍是
+/// 只在协商过回放标记的连接上出现（见 `replay_chunk`）：未协商的标准客户端收到的仍是
 /// 纯 ACP 完整回放，不引入 Peri 私有语义（REQ §5.3）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadGeneration(String);
 
 impl LoadGeneration {
     /// 采用客户端给的代次（重试可以显式复用同一代次，服务端不解释其内容）。
+    #[must_use]
     pub fn from_client(value: &str) -> Self {
         Self(value.to_owned())
     }
@@ -232,6 +242,7 @@ impl LoadGeneration {
         Self(uuid::Uuid::now_v7().to_string())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -242,7 +253,7 @@ impl LoadGeneration {
 /// 回放发送与历史页装配共用这一份判据；未声明客户端受众的 reminder（例如 Model-only
 /// recall）不得因为回放或翻页而出现在 wire 上。
 pub fn reminder_visible_to_client(reminder: &SystemReminder) -> bool {
-    reminder_egress_allowed(reminder, ReminderAudience::Tui)
+    system_reminder::reminder_egress_allowed(reminder, ReminderAudience::Tui)
 }
 
 pub async fn replay_persisted_session_history(
@@ -317,7 +328,7 @@ pub async fn replay_canonical_history_streamed(
     generation: &LoadGeneration,
 ) -> Result<(), ReplayError> {
     // 未协商分页：一个条目身份 / 位置戳都不打（`merge = false`，见 [`EntryMarks`]）。代次仍随
-    // `caps.replay` 出现——那是回放扩展的字段，门控见 [`replay_meta`]。
+    // `caps.replay` 出现——那是回放扩展的字段，门控见 `replay_meta`。
     let marks = ReplayMarks::without_entry_marks(generation, session_id);
     let thread_id = ThreadId::from(session_id.to_owned());
     let resources = controller.sessions();
@@ -503,7 +514,8 @@ pub fn project_message_updates(
                     )));
                     // 纯文本 AI 消息无 blocks，tool_calls 由下方单独处理
                     for tc in tool_calls {
-                        let tool_call = project_tool_start(&tc.id, &tc.name, &tc.arguments);
+                        let tool_call =
+                            tool_projection::project_tool_start(&tc.id, &tc.name, &tc.arguments);
                         updates.push(ProjectedUpdate::session(SessionUpdate::ToolCall(
                             replay_tool(tool_call, caps, marks),
                         )));
@@ -538,7 +550,7 @@ pub fn project_message_updates(
                     }
                     PeriContentBlock::ToolUse { id, name, input } => {
                         emitted_ids.insert(id.clone());
-                        let tc = project_tool_start(id, name, input);
+                        let tc = tool_projection::project_tool_start(id, name, input);
                         updates.push(ProjectedUpdate::session(SessionUpdate::ToolCall(
                             replay_tool(tc, caps, marks),
                         )));
@@ -551,7 +563,8 @@ pub fn project_message_updates(
             // 发射 tool_calls 中未被 ContentBlock::ToolUse 覆盖的条目
             for tc in tool_calls {
                 if !emitted_ids.contains(&tc.id) {
-                    let tool_call = project_tool_start(&tc.id, &tc.name, &tc.arguments);
+                    let tool_call =
+                        tool_projection::project_tool_start(&tc.id, &tc.name, &tc.arguments);
                     updates.push(ProjectedUpdate::session(SessionUpdate::ToolCall(
                         replay_tool(tool_call, caps, marks),
                     )));
@@ -572,7 +585,7 @@ pub fn project_message_updates(
                 outcome: ToolOutcome::Unreported,
             }
             .projected_text(None);
-            let mut update = project_tool_completion(
+            let mut update = tool_projection::project_tool_completion(
                 tool_call_id,
                 &result_text,
                 *is_error,
@@ -635,7 +648,7 @@ fn replay_chunk(
     chunk
 }
 
-/// 给 `ToolCall` 打上回放 meta 标记（`periReplay` + 代次 + 位置戳，见 [`replay_meta`]）。
+/// 给 `ToolCall` 打上回放 meta 标记（`periReplay` + 代次 + 位置戳，见 `replay_meta`）。
 fn replay_tool(mut tc: ToolCall, caps: &PeriCaps, marks: Option<&EntryMarks<'_>>) -> ToolCall {
     tc.meta = replay_meta(caps, marks);
     tc
@@ -679,7 +692,7 @@ fn extract_text(content: &PeriMessageContent) -> String {
 ///
 /// `marks` 是本条 payload 的身份与位置戳（[`EntryMarks`]）：两条通道打出的
 /// `periEntryId` / `periPosition` / `periLoadGeneration` 必须同源拼装
-/// （[`write_entry_marks`] / [`replay_meta`]），不允许各自发明字段名。
+/// （[`write_entry_marks`] / `replay_meta`），不允许各自发明字段名。
 #[async_trait::async_trait]
 pub trait ReplaySender: Send + Sync {
     async fn send(&self, notif: SessionNotification) -> Result<(), ReplayError>;

@@ -1,7 +1,22 @@
 //! 身份与作用域回归：复用真实挂载，接缝仅截取请求，避免全局 ACP OnceLock 干扰。
-use super::*;
-use operation::{OperationState, PluginOperation, tests::mount_panel};
+use super::ACTIVE_SESSION_ID;
+use super::BRIDGE_RESET_COUNTER;
+use super::MarketplaceIdentity;
+use super::MsEntry;
+use super::MsStatus;
+use super::OperationScope;
+use super::PLUGIN_LIST;
+use super::PluginSummary;
+use super::PluginViewTab;
+use super::data;
+use super::i18n;
+use super::operation;
+use super::panel_handler;
+use super::search_handler;
+use operation::OperationState;
+use operation::PluginOperation;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui_kit::prelude::*;
 use serial_test::serial;
 use std::cell::RefCell;
 
@@ -37,7 +52,11 @@ impl Guard {
     }
 
     fn requests() -> Vec<PluginOperation> {
-        REQUESTS.with(|slot| slot.borrow().clone().unwrap())
+        REQUESTS.with(|slot| {
+            slot.borrow()
+                .clone()
+                .expect("requests: the borrow fixture operation uses valid inputs")
+        })
     }
 }
 
@@ -64,6 +83,7 @@ fn plugin(name: &str, marketplace: &str, scope: &str) -> PluginSummary {
     }
 }
 
+#[must_use]
 fn marketplace(name: &str, source: &str) -> MsEntry {
     MsEntry {
         name: name.into(),
@@ -85,9 +105,9 @@ fn installed_detail_and_action_follow_identity_after_reorder() {
     for scope in ["user", "project", "local"] {
         let wanted = plugin("compiler", "tools", scope);
         *PLUGIN_LIST.state().write() = vec![wanted.clone(), plugin("other", "tools", scope)];
-        mount_panel(move |panel| {
+        operation::tests::mount_panel(move |panel| {
             panel.event(key(KeyCode::Enter));
-            let identity = panel.detail_plugin.read().clone().unwrap();
+            let identity = panel.detail_plugin.read().clone().expect("installed detail and action follow identity after reorder: isolated fixture workspace must remain accessible");
             *PLUGIN_LIST.state().write() = vec![
                 plugin("compiler", "other-market", scope),
                 plugin("compiler", "tools", "unknown"),
@@ -95,8 +115,8 @@ fn installed_detail_and_action_follow_identity_after_reorder() {
             ];
             assert_eq!(
                 identity
-                    .resolve(&PLUGIN_LIST.state().read(), &current_scope())
-                    .unwrap()
+                    .resolve(&PLUGIN_LIST.state().read(), &super::current_scope())
+                    .expect("installed detail and action follow identity after reorder: the fixture storage and layout must support the requested operation")
                     .install_scope
                     .as_deref(),
                 Some(scope)
@@ -104,7 +124,7 @@ fn installed_detail_and_action_follow_identity_after_reorder() {
             panel.event(key(KeyCode::Enter));
             assert_eq!(
                 Guard::requests().last(),
-                Some(&PluginOperation::installed("enable", &wanted).unwrap())
+                Some(&PluginOperation::installed("enable", &wanted).expect("installed detail and action follow identity after reorder: the installed fixture operation uses valid inputs"))
             );
         });
     }
@@ -116,7 +136,7 @@ fn installed_missing_identity_and_confirmation_never_target_replacement() {
     let _guard = Guard::new();
     for confirm in [false, true] {
         *PLUGIN_LIST.state().write() = vec![plugin("compiler", "tools", "project")];
-        mount_panel(move |panel| {
+        operation::tests::mount_panel(move |panel| {
             panel.event(key(KeyCode::Enter));
             if confirm {
                 panel.event(key(KeyCode::Down));
@@ -138,7 +158,7 @@ fn installed_missing_identity_and_confirmation_never_target_replacement() {
 fn marketplace_detail_and_confirmation_follow_source_not_position() {
     let _guard = Guard::new();
     for delete in [false, true] {
-        mount_panel(move |panel| {
+        operation::tests::mount_panel(move |panel| {
             let wanted = marketplace("tools", "github:org/tools");
             data::set_marketplaces_for_test(vec![
                 wanted.clone(),
@@ -157,7 +177,7 @@ fn marketplace_detail_and_confirmation_follow_source_not_position() {
             panel.event(key(KeyCode::Enter));
             if delete {
                 assert_eq!(
-                    panel.marketplace_confirmation.read().as_ref().unwrap().name,
+                    panel.marketplace_confirmation.read().as_ref().expect("marketplace detail and confirmation follow source not position: the fixture storage and layout must support the requested operation").name,
                     "tools"
                 );
                 panel.event(key(KeyCode::Enter));
@@ -177,7 +197,7 @@ fn marketplace_detail_and_confirmation_follow_source_not_position() {
 fn marketplace_missing_source_rejects_detail_and_confirmation() {
     let _guard = Guard::new();
     for confirm in [false, true] {
-        mount_panel(move |panel| {
+        operation::tests::mount_panel(move |panel| {
             data::set_marketplaces_for_test(vec![marketplace("tools", "github:org/tools")]);
             *panel.active_tab.write() = PluginViewTab::Marketplaces;
             *panel.selected.write() = 1;
@@ -201,8 +221,8 @@ fn marketplace_missing_source_rejects_detail_and_confirmation() {
 fn stale_session_or_reset_event_cannot_cancel_new_loading() {
     let _guard = Guard::new();
     for reset in [false, true] {
-        mount_panel(move |panel| {
-            let old_scope = current_scope();
+        operation::tests::mount_panel(move |panel| {
+            let old_scope = super::current_scope();
             if reset {
                 BRIDGE_RESET_COUNTER.set(BRIDGE_RESET_COUNTER.get() + 1);
             } else {
@@ -210,7 +230,7 @@ fn stale_session_or_reset_event_cannot_cancel_new_loading() {
             }
             let ticket = panel.operation.write().begin(
                 PluginOperation::marketplace_refresh("tools".into()),
-                current_scope(),
+                super::current_scope(),
             );
             let attempts = data::REFRESH_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
             for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Esc] {

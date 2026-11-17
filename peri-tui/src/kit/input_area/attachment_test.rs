@@ -1,5 +1,7 @@
-use super::*;
-use crate::kit::atoms::PendingAttachment;
+use super::AttachmentEdge;
+use super::PENDING_ATTACHMENTS;
+use super::TextAreaState;
+
 use serial_test::serial;
 
 fn push_png(base64: &str) {
@@ -23,7 +25,7 @@ fn backspace_removes_last_attachment_as_one_unit() {
     }
 
     assert!(
-        remove_pending_attachment(&TextAreaState::default(), AttachmentEdge::Last),
+        super::remove_pending_attachment(&TextAreaState::default(), AttachmentEdge::Last),
         "空文本 Backspace 应消费为整张移除"
     );
     assert_eq!(atom.read().len(), 1, "每次只移除一张");
@@ -44,7 +46,7 @@ fn delete_removes_first_attachment_when_text_empty() {
         pending.push(PendingAttachment::image("image/png", "BAUG"));
     }
 
-    assert!(remove_pending_attachment(
+    assert!(super::remove_pending_attachment(
         &TextAreaState::default(),
         AttachmentEdge::First
     ));
@@ -69,23 +71,23 @@ fn repeated_removal_drains_one_attachment_per_key() {
         push_png(base64);
     }
 
-    assert!(remove_pending_attachment(
+    assert!(super::remove_pending_attachment(
         &TextAreaState::default(),
         AttachmentEdge::Last
     ));
     assert_eq!(atom.read().len(), 2);
-    assert!(remove_pending_attachment(
+    assert!(super::remove_pending_attachment(
         &TextAreaState::default(),
         AttachmentEdge::Last
     ));
     assert_eq!(atom.read().len(), 1);
-    assert!(remove_pending_attachment(
+    assert!(super::remove_pending_attachment(
         &TextAreaState::default(),
         AttachmentEdge::Last
     ));
     assert!(atom.read().is_empty());
     assert!(
-        !remove_pending_attachment(&TextAreaState::default(), AttachmentEdge::Last),
+        !super::remove_pending_attachment(&TextAreaState::default(), AttachmentEdge::Last),
         "无附件时不再消费按键"
     );
 }
@@ -104,11 +106,20 @@ fn attachment_removal_requires_empty_text() {
     let mut editor = TextAreaState::default();
     editor.insert_str("看一下这张图");
 
-    assert!(!remove_pending_attachment(&editor, AttachmentEdge::Last));
-    assert!(!remove_pending_attachment(&editor, AttachmentEdge::First));
+    assert!(!super::remove_pending_attachment(
+        &editor,
+        AttachmentEdge::Last
+    ));
+    assert!(!super::remove_pending_attachment(
+        &editor,
+        AttachmentEdge::First
+    ));
     assert_eq!(atom.read().len(), 1, "有文本时附件不动");
     editor.clear();
-    assert!(remove_pending_attachment(&editor, AttachmentEdge::Last));
+    assert!(super::remove_pending_attachment(
+        &editor,
+        AttachmentEdge::Last
+    ));
     atom.write().clear();
 }
 
@@ -118,8 +129,10 @@ fn attachment_removal_requires_empty_text() {
 fn attachment_removal_noop_without_attachments() {
     crate::kit::atoms::init_atoms();
     PENDING_ATTACHMENTS.state().write().clear();
-    assert!(!remove_pending_attachment(
+    assert!(!super::remove_pending_attachment(
         &TextAreaState::default(),
         AttachmentEdge::Last
     ));
 }
+
+use crate::kit::atoms::PendingAttachment;

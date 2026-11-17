@@ -9,25 +9,24 @@
 //!   复制判定（映射在 `mcp/initialize.rs` 的 `connect_timeout` / `transport_label`）。
 //! - 每个实例一条**独立** duplex 与一个**独立** task（隔离契约：不得共用 transport）。
 
-use std::{
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    task::{Context, Poll},
-};
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 
-use rmcp::{
-    serve_server,
-    service::{QuitReason, ServerInitializeError},
-    ServerHandler,
-};
+use rmcp;
+use rmcp::service::QuitReason;
+use rmcp::service::ServerInitializeError;
+use rmcp::ServerHandler;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, DuplexStream, ReadBuf, ReadHalf, WriteHalf},
-    task::JoinHandle,
-};
+use tokio::io::AsyncRead;
+use tokio::io::DuplexStream;
+use tokio::io::ReadBuf;
+use tokio::io::ReadHalf;
+use tokio::io::WriteHalf;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::context::BuiltinInstanceContext;
@@ -83,6 +82,11 @@ pub(crate) enum BuiltinSpawnError {
     /// 当前注册表内实例均由 dispatch 显式接线；该分支保护未来新增实现避免静默回退。
     #[error("builtin 实例 handler 尚未接线: {instance}")]
     HandlerNotWired { instance: String },
+    /// v5 单出口 router 装配失败（全部能力不可用 / 能力依赖非法）。
+    ///
+    /// 错误文本只含能力名与固定规则文本，不含路径 / env / 凭据。
+    #[error("builtin 单出口装配失败: {reason}")]
+    RouterBuild { reason: String },
 }
 
 /// server task 的退出事实。
@@ -92,7 +96,7 @@ pub(crate) enum BuiltinSpawnError {
 pub(crate) enum BuiltinServerExit {
     /// 已完成握手并收敛（正常路径：client 关闭 → 输入流 EOF → `QuitReason::Closed`）。
     ///
-    /// rmcp 3.5.1 的 `server/discover` 是 bootstrap 探测：discover 后 server 仍等待
+    /// rmcp 的 `server/discover` 是 bootstrap 探测：discover 后 server 仍等待
     /// `initialize` 或首个非 discover 请求。Auto 生命周期只做 discover 就关闭时，
     /// server 以 `ConnectionClosed` 退出；此时客户端握手已完成，仍归入正常关闭。
     Quit(QuitReason),
@@ -392,7 +396,7 @@ impl BuiltinTransport {
 
 /// 记录 server 侧是否读到过入站字节。
 ///
-/// rmcp 3.5.1 把 `server/discover` 当作 bootstrap 探测，discover 后仍等待
+/// rmcp 把 `server/discover` 当作 bootstrap 探测，discover 后仍等待
 /// `initialize` 或首个非 discover 请求。Auto 握手只完成 discover 就关闭时，
 /// `serve_server` 以 `ConnectionClosed` 退出；但此时客户端已握手，不能报成
 /// `NotStarted`。用「是否读过入站字节」区分未握手的直接丢弃，避免匹配错误文本。
@@ -459,13 +463,13 @@ where
     let server_read = ObservedRead::new(server_read, Arc::clone(&saw_inbound));
     let task_instance = instance.to_string();
     let handle = tokio::spawn(async move {
-        match serve_server(handler, (server_read, server_write)).await {
+        match rmcp::serve_server(handler, (server_read, server_write)).await {
             // `waiting()` 消费 running service；输入流 EOF / 对端关闭即返回 QuitReason。
             Ok(running) => match running.waiting().await {
                 Ok(reason) => BuiltinServerExit::Quit(reason),
                 Err(error) => BuiltinServerExit::TaskFailed(error.to_string()),
             },
-            // 3.5.1 的 discover bootstrap 只应答探测、不进入服务循环；客户端在
+            // discover bootstrap 只应答探测、不进入服务循环；客户端在
             // discover 后关闭时，把已完成握手的链路归入正常关闭。
             Err(ServerInitializeError::ConnectionClosed(_))
                 if saw_inbound.load(Ordering::Relaxed) =>
@@ -516,6 +520,17 @@ pub(crate) fn spawn_builtin_transport_with_context(
             instance: instance.to_string(),
         }
     })?;
+    if peri_acp_types::builtin_mcp::is_v5_server_name(instance) {
+        let (router, workspace_tasks) =
+            super::router::build_host_router(ctx, env).map_err(|error| {
+                BuiltinSpawnError::RouterBuild {
+                    reason: error.to_string(),
+                }
+            })?;
+        let mut transport = spawn_builtin_transport_with_handler(instance, router);
+        transport.workspace_tasks = workspace_tasks;
+        return Ok(transport);
+    }
     if !ctx.instance_input_ready(instance) {
         return Err(BuiltinSpawnError::InstanceInputMissing {
             instance: instance.to_string(),

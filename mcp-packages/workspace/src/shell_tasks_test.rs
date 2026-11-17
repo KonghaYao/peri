@@ -1,10 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use peri_acp_types::tasks::TaskShutdownReport;
 use peri_agent::agent::async_tasks::{BackgroundTaskRegistry, TaskManager};
 use rmcp::model::{Task, TaskPayload, TaskStatus};
 
-use super::ShellTasks;
+use crate::shell_tasks::ShellTasks;
 
 struct FailedCreationExecutor {
     panics: bool,

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { SandboxError, type SandboxProfile, type SandboxSettings, type StartSandboxOptions } from './types.js';
 
@@ -60,7 +60,12 @@ export function parseSettings(value: unknown): SandboxSettings {
   }
 }
 
-/// Derive an id from `sessionKey` without keeping a registry.
+/**
+ * Derive an opaque runtime handle from a caller-chosen `sessionKey`.
+ *
+ * This names managed state/process/lock only. Adapters must not derive it from a workspace URI:
+ * that would turn a runtime resource handle into a second workspace identity.
+ */
 export function deriveSandboxId(sessionKey: string): string {
   if (sessionKey.trim().length === 0 || Buffer.byteLength(sessionKey) > 1024)
     throw new SandboxError('invalid_options', 'sessionKey must be a non-empty string below 1024 bytes.');
@@ -93,6 +98,32 @@ export function canonicalizePath(path: string): string {
     current = parent;
   }
   return join(realpathSync(current), ...suffix);
+}
+
+function withinOrEqual(candidate: string, root: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/**
+ * Resolve an explicit workspace root without joining it under `sandboxesRoot`.
+ *
+ * The host authorizes the real directory; this only enforces the invariants a
+ * sandbox needs: the leaf exists, is private (0700), and neither contains nor
+ * lives inside managed sandbox state (policy/token/lock/other workspaces).
+ */
+export function resolveExplicitWorkspace(workspacePath: string, sandboxesRoot: string): string {
+  if (workspacePath === '/' || !isAbsolute(workspacePath) || resolve(workspacePath) !== workspacePath)
+    throw new SandboxError('invalid_options', 'workspacePath must be a normalized absolute path.');
+  const entry = lstatSync(workspacePath, { throwIfNoEntry: false });
+  if (!entry || entry.isSymbolicLink() || !statSync(workspacePath).isDirectory())
+    throw new SandboxError('invalid_options', `workspacePath must be an existing real directory: ${workspacePath}`);
+  if (entry.mode & 0o077)
+    throw new SandboxError('invalid_options', `workspacePath must be private (0700): ${workspacePath}`);
+  const canonical = canonicalizePath(workspacePath);
+  if (withinOrEqual(canonical, sandboxesRoot) || withinOrEqual(sandboxesRoot, canonical))
+    throw new SandboxError('invalid_options', 'workspacePath must not overlap sandboxesRoot.');
+  return canonical;
 }
 
 export function assertSandboxId(id: string): string {
@@ -156,13 +187,18 @@ export function resolveProfile(
 /**
  * Normalize caller options against loaded settings.
  *
- * `sandboxId`/`sessionKey` are resolved here; the id stays stable for the
- * lifetime of the instance and for explicit restarts with the same options.
+ * `sandboxId`/`sessionKey` are resolved here; the id names managed state/process/lock for the
+ * instance and explicit restarts with the same options. It is a runtime resource handle, never a
+ * workspace identity or a lookup/authorization/restore key.
  */
 export function resolveOptions(options: StartSandboxOptions, settings: SandboxSettings): ResolvedSandboxOptions {
   const sandboxesRoot = canonicalizePath(options.sandboxesRoot ?? settings.sandboxesRoot);
   const sandboxId = resolveSandboxId(options);
   const sandboxRoot = join(sandboxesRoot, sandboxId);
+  const workspacePath =
+    options.workspacePath === undefined
+      ? join(sandboxRoot, 'workspace')
+      : resolveExplicitWorkspace(options.workspacePath, sandboxesRoot);
   const { profile, profileName } = resolveProfile(settings, options);
 
   if (options.token !== undefined && options.tokenFile !== undefined)
@@ -182,7 +218,7 @@ export function resolveOptions(options: StartSandboxOptions, settings: SandboxSe
     sandboxId,
     sandboxesRoot,
     sandboxRoot,
-    workspacePath: join(sandboxRoot, 'workspace'),
+    workspacePath,
     homePath: join(sandboxRoot, 'home'),
     profile,
     profileName,

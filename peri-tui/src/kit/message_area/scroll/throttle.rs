@@ -1,10 +1,9 @@
 use std::time::Instant;
 
-use crate::kit::atoms::TUI_CONFIG_HANDLE;
 use crate::kit::message_area::props::ScrollbarFields;
 use ratatui_kit::prelude::*;
 
-use super::{ScrollPos, update_follow_on_scroll};
+use super::ScrollPos;
 
 // ── 滚动速度控制 ──────────────────────────────────────────────────────────
 
@@ -21,6 +20,7 @@ pub(in crate::kit::message_area) const SCROLL_PADDING: usize = 2;
 const DEFAULT_SCROLL_FRAME_MS: u64 = 50;
 
 /// fps 值转换为毫秒间隔
+#[must_use]
 fn fps_to_ms(fps: u32) -> u64 {
     match fps {
         60 => 16,
@@ -74,6 +74,7 @@ impl Default for DragThrottle {
 
 /// 纯函数：offset 应用滚动量后的新位置（正=向下，负=向上；越界封顶/封底）。
 /// 调用方负责先做哨兵归一化（见 [`land_scroll_delta`]）。
+#[must_use]
 pub(super) fn apply_delta_to_offset(offset: usize, delta: i32, max_scroll: usize) -> usize {
     if delta > 0 {
         offset.saturating_add(delta as usize).min(max_scroll)
@@ -111,5 +112,7 @@ pub(super) fn apply_scroll(
     let final_offset = land_scroll_delta(state.offset(), delta, max_scroll);
     state.set_offset(final_offset);
     drop(state);
-    update_follow_on_scroll(follow_bottom, max_scroll, final_offset);
+    super::update_follow_on_scroll(follow_bottom, max_scroll, final_offset);
 }
+
+use crate::kit::atoms::TUI_CONFIG_HANDLE;

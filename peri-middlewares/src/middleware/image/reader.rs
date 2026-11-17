@@ -1,13 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use peri_mcp_workspace::image::{
     ImageReadError, ReadImageRequest, ReadImageResponse, MAX_IMAGE_BYTES, READ_IMAGE_METHOD,
 };
-use rmcp::{
-    model::{CancelledNotificationParam, ClientRequest, CustomRequest, RequestId, ServerResult},
-    service::{Peer, PeerRequestOptions, RoleClient},
-};
+use rmcp::model::CancelledNotificationParam;
+use rmcp::model::ClientRequest;
+use rmcp::model::CustomRequest;
+use rmcp::model::RequestId;
+use rmcp::model::ServerResult;
+use rmcp::service::Peer;
+use rmcp::service::PeerRequestOptions;
+use rmcp::service::RoleClient;
 
 use crate::mcp::{ClientStatus, McpClientPool};
 
@@ -56,7 +61,7 @@ pub(super) async fn read_image(
         return Err(unavailable());
     }
     let client = pool
-        .get_client_visible_to("workspace", Some(session_id))
+        .capability_client_visible_to("workspace", Some(session_id))
         .ok_or_else(unavailable)?;
     if !matches!(client.status, ClientStatus::Connected)
         || !crate::mcp::builtin::is_workspace_source(client.source.as_ref())
@@ -90,7 +95,7 @@ pub(super) async fn read_image(
     pending.id.take();
     if workspace_closed(pool)
         || !pool
-            .get_client_visible_to("workspace", Some(session_id))
+            .client_visible_to("workspace", Some(session_id))
             .is_some_and(|current| Arc::ptr_eq(&current, &client))
     {
         return Err(unavailable());
@@ -131,10 +136,8 @@ pub(super) async fn read_image(
 
 fn workspace_closed(pool: &McpClientPool) -> bool {
     pool.builtin_instance_context().is_some_and(|context| {
-        let source = pool
-            .get_client("workspace")
-            .and_then(|handle| handle.source.clone());
-        crate::mcp::builtin::is_closed_source("workspace", source.as_ref(), &context.closed)
+        let source = pool.capability_source("workspace");
+        crate::mcp::builtin::is_capability_closed("workspace", source.as_ref(), &context.closed)
     })
 }
 

@@ -1,4 +1,5 @@
-use super::*;
+use super::ClaudeAgentFrontmatter;
+use super::ToolsValue;
 
 #[test]
 fn test_parse_valid_agent_file() {
@@ -12,7 +13,7 @@ model: sonnet
 You are a code reviewer. Focus on quality and best practices.
 "#;
 
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(agent.frontmatter.name, "code-reviewer");
     assert_eq!(agent.frontmatter.description, "Reviews code for quality");
     assert_eq!(agent.tools(), vec!["Read", "Grep", "Glob"]);
@@ -37,7 +38,7 @@ background: true
 You are a researcher with restricted capabilities.
 "#;
 
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(agent.frontmatter.name, "safe-researcher");
     assert_eq!(agent.disallowed_tools(), vec!["Write", "Edit"]);
     assert_eq!(agent.frontmatter.max_turns, Some(10));
@@ -54,7 +55,7 @@ description: A minimal agent
 Basic system prompt.
 "#;
 
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(agent.frontmatter.name, "minimal-agent");
     assert!(agent.tools().is_empty());
     assert_eq!(agent.frontmatter.tools, ToolsValue::Empty);
@@ -65,7 +66,7 @@ Basic system prompt.
 fn test_parse_crlf_preserves_prompt() {
     let content = "---\r\nname: reviewer\r\ndescription: Review code\r\ntools: []\r\n---\r\n\r\nReview carefully.\r\nKeep findings concrete.\r\n";
 
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
 
     assert_eq!(agent.frontmatter.name, "reviewer");
     assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
@@ -85,7 +86,7 @@ fn test_tools_value_wildcards_remain_explicit() {
             "---\nname: reviewer\ndescription: Review code\ntools: {declaration}\n---\nprompt"
         );
 
-        let agent = parse_agent_file(&content).unwrap();
+        let agent = super::parse_agent_file(&content).unwrap();
 
         assert_eq!(agent.frontmatter.tools, ToolsValue::List(expected));
     }
@@ -119,18 +120,18 @@ fn test_frontmatter_json_projection_preserves_tools_semantics() {
 #[test]
 fn test_parse_errors_preserve_failure_categories() {
     assert_eq!(
-        parse_agent_file_inner("plain markdown").unwrap_err(),
+        super::parse_agent_file_inner("plain markdown").unwrap_err(),
         "文件不以 '---' 开头，缺少 YAML frontmatter"
     );
     assert_eq!(
-        parse_agent_file_inner("---\nname: reviewer\n").unwrap_err(),
+        super::parse_agent_file_inner("---\nname: reviewer\n").unwrap_err(),
         "未找到闭合的 '---' 分隔符"
     );
     for content in [
         "---\nname: reviewer\n---\nprompt",
         "---\nname: reviewer\ndescription: review\ntools: ['']\n---\nprompt",
     ] {
-        assert!(parse_agent_file_inner(content)
+        assert!(super::parse_agent_file_inner(content)
             .unwrap_err()
             .starts_with("YAML frontmatter 解析失败: "));
     }
@@ -139,7 +140,7 @@ fn test_parse_errors_preserve_failure_categories() {
 #[test]
 fn test_parse_no_frontmatter() {
     let content = "Just plain markdown without frontmatter.";
-    assert!(parse_agent_file(content).is_none());
+    assert!(super::parse_agent_file(content).is_none());
 }
 
 #[test]
@@ -153,7 +154,7 @@ tools: Read
 
 System prompt here.
 "#;
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(agent.frontmatter.name, "test-agent");
     assert_eq!(agent.frontmatter.description, "Use --- for separators");
 }
@@ -161,7 +162,7 @@ System prompt here.
 #[test]
 fn test_parse_malformed_yaml_returns_none() {
     let content = "---\ninvalid: [yaml: broken\n---\n\nprompt";
-    assert!(parse_agent_file(content).is_none());
+    assert!(super::parse_agent_file(content).is_none());
 }
 
 #[test]
@@ -172,7 +173,7 @@ description: test
 maxTurns: 0
 ---
 prompt"#;
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(agent.frontmatter.max_turns, Some(0));
     // 验证 tool.rs 中的 maxTurns:0 降级逻辑（这里只验证解析正确）
 }
@@ -185,7 +186,7 @@ description: test
 tools: Read, Write, Edit
 ---
 prompt"#;
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(agent.tools(), vec!["Read", "Write", "Edit"]);
 }
 
@@ -199,7 +200,7 @@ tools:
   - Glob
 ---
 prompt"#;
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(agent.tools(), vec!["Read", "Glob"]);
 }
 
@@ -216,7 +217,7 @@ tools: []
 ---
 prompt"#;
 
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
 
     assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
 }
@@ -230,7 +231,7 @@ tools: ""
 ---
 prompt"#;
 
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
 
     assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
 }
@@ -245,7 +246,7 @@ tools: null
 ---
 prompt"#;
 
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
 
     assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
 }
@@ -262,7 +263,7 @@ tools: {}
 ---
 prompt"#;
 
-    assert!(parse_agent_file(content).is_none());
+    assert!(super::parse_agent_file(content).is_none());
 }
 
 /// [回归测试] `tools` 数组不能静默丢弃非字符串元素。
@@ -275,7 +276,7 @@ tools: [Read, 42]
 ---
 prompt"#;
 
-    assert!(parse_agent_file(content).is_none());
+    assert!(super::parse_agent_file(content).is_none());
 }
 
 // ─── prompt_mode tests ───────────────────────────────────────────────────
@@ -288,7 +289,7 @@ name: basic
 description: test
 ---
 prompt"#;
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(
         agent.frontmatter.prompt_mode, None,
         "prompt_mode 缺失时应默认为 None（extend 行为）"
@@ -304,7 +305,7 @@ description: A full mode agent
 promptMode: full
 ---
 prompt"#;
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(
         agent.frontmatter.prompt_mode,
         Some("full".to_string()),
@@ -322,7 +323,7 @@ promptMode: some-weird-value
 ---
 prompt"#;
     // 解析不应 panic
-    let agent = parse_agent_file(content).unwrap();
+    let agent = super::parse_agent_file(content).unwrap();
     assert_eq!(
         agent.frontmatter.prompt_mode,
         Some("some-weird-value".to_string()),

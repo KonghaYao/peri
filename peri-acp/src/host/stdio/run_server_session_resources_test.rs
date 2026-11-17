@@ -1,4 +1,7 @@
-use super::*;
+use crate::host;
+use crate::transport::AcpTransport;
+use serde_json::json;
+use std::sync::Arc;
 
 // ── 批 3 Step 5 迁移：MCP 发现预热 ────────────────────────────────────────────
 //
@@ -11,9 +14,10 @@ use super::*;
 #[tokio::test]
 async fn test_fork_registers_session_and_copies_history() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config(&tmp).await;
+    let cfg = crate::host::stdio::run_server_integration_tests::test_config(&tmp).await;
     let session_resources = Arc::clone(&cfg.session_resources);
-    let (transport, mut input_write, mut output_read) = duplex_transport();
+    let (transport, mut input_write, mut output_read) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     // 前置：注册带非空 canonical history 的 source session。
@@ -21,7 +25,12 @@ async fn test_fork_registers_session_and_copies_history() {
     let source_message_id = source_message.id();
     let source_payload = peri_acp_types::store::PersistedPayload::Message(source_message.clone());
     let source_thread_id = "fork-source-session".to_string();
-    create_bound_thread_fixture(&cfg, &source_thread_id, tmp.path().to_str().unwrap()).await;
+    crate::host::stdio::run_server_integration_tests::create_bound_thread_fixture(
+        &cfg,
+        &source_thread_id,
+        tmp.path().to_str().unwrap(),
+    )
+    .await;
     cfg.session_manager.ensure_session(
         &source_thread_id,
         std::fs::canonicalize(tmp.path()).unwrap().to_str().unwrap(),
@@ -75,8 +84,12 @@ async fn test_fork_registers_session_and_copies_history() {
         sessions.clone(),
     ));
 
-    send_initialize(&mut input_write, &mut output_read).await;
-    let result = send_request_and_read_result(
+    crate::host::stdio::run_server_integration_tests::send_initialize(
+        &mut input_write,
+        &mut output_read,
+    )
+    .await;
+    let result = crate::host::stdio::run_server_integration_tests::send_request_and_read_result(
         &mut input_write,
         &mut output_read,
         2,
@@ -112,7 +125,8 @@ async fn test_fork_registers_session_and_copies_history() {
     assert_eq!(stored_fork.len(), 1);
     assert_eq!(stored_fork[0].id(), forked_message_id);
     drop(sessions);
-    await_server_exit(server_task, input_write).await;
+    crate::host::stdio::run_server_integration_tests::await_server_exit(server_task, input_write)
+        .await;
 }
 
 /// session/new 预热 MCP skill 发现 smoke：pool 已初始化但无已连接 server
@@ -121,8 +135,11 @@ async fn test_fork_registers_session_and_copies_history() {
 #[tokio::test]
 async fn test_new_prewarms_mcp_discovery_smoke() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let cfg = test_config_with_empty_mcp_pool(&tmp).await;
-    let (transport, mut input_write, mut output_read) = duplex_transport();
+    let cfg =
+        crate::host::stdio::run_server_integration_tests::test_config_with_empty_mcp_pool(&tmp)
+            .await;
+    let (transport, mut input_write, mut output_read) =
+        crate::host::stdio::run_server_integration_tests::duplex_transport();
     let transport: Arc<dyn AcpTransport> = Arc::new(transport);
     let sessions = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let server_task = tokio::spawn(host::run_acp_server_with_sessions(
@@ -131,8 +148,12 @@ async fn test_new_prewarms_mcp_discovery_smoke() {
         sessions.clone(),
     ));
 
-    send_initialize(&mut input_write, &mut output_read).await;
-    let result = send_request_and_read_result(
+    crate::host::stdio::run_server_integration_tests::send_initialize(
+        &mut input_write,
+        &mut output_read,
+    )
+    .await;
+    let result = crate::host::stdio::run_server_integration_tests::send_request_and_read_result(
         &mut input_write,
         &mut output_read,
         2,
@@ -146,5 +167,6 @@ async fn test_new_prewarms_mcp_discovery_smoke() {
     );
     // prewarm 空跑路径（已初始化空 pool）不 panic
 
-    await_server_exit(server_task, input_write).await;
+    crate::host::stdio::run_server_integration_tests::await_server_exit(server_task, input_write)
+        .await;
 }

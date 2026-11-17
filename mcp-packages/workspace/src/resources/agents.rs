@@ -25,15 +25,15 @@
 
 use std::path::{Path, PathBuf};
 
-use peri_acp_types::workspace_resources::{
-    agent_uri, digest_bytes, is_valid_uri_segment, ResourceScope, AGENT_ENTRY_FILE,
-    META_KEY_FRONTMATTER,
-};
+use peri_acp_types::workspace_resources;
+use peri_acp_types::workspace_resources::ResourceScope;
+use peri_acp_types::workspace_resources::AGENT_ENTRY_FILE;
+use peri_acp_types::workspace_resources::META_KEY_FRONTMATTER;
 
-use super::path::{canonical_root, is_text_bytes};
-use super::scan::is_regular_file;
+use super::path;
+use super::scan;
 use super::{ResourceBudget, ResourceError, WorkspaceResourcesInput};
-use peri_mcp_common::agent_definition::frontmatter::frontmatter_json;
+use peri_mcp_common::agent_definition::frontmatter;
 
 /// agent 定义的存储位置。
 #[derive(Debug, Clone)]
@@ -50,6 +50,7 @@ pub(crate) enum AgentStore {
 impl AgentStore {
     /// 定义文件相对根的路径（builtin 为文件名；仅测试断言使用）。
     #[cfg(test)]
+    #[must_use]
     pub fn relative_path(&self) -> &str {
         match self {
             Self::Disk { relative_path, .. } => relative_path,
@@ -74,10 +75,11 @@ pub(crate) struct AgentRecord {
 
 impl AgentRecord {
     pub fn uri(&self) -> Option<String> {
-        agent_uri(self.scope, self.plugin_name.as_deref(), &self.agent_id)
+        workspace_resources::agent_uri(self.scope, self.plugin_name.as_deref(), &self.agent_id)
     }
 
     /// `_meta` 投影（含 frontmatter JSON；无 frontmatter 时不写该键）。
+    #[must_use]
     pub fn meta(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut meta = serde_json::Map::new();
         if let Some(frontmatter) = &self.frontmatter {
@@ -92,7 +94,7 @@ impl AgentRecord {
 
 /// 从定义文本构造展示字段与 frontmatter 投影（`None` = 无合法 frontmatter）。
 fn frontmatter_parts(text: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
-    frontmatter_json(text)
+    frontmatter::frontmatter_json(text)
 }
 
 /// 扫描一个 agent 根（canonical）下的全部定义（顺序确定：按条目名排序）。
@@ -147,14 +149,14 @@ pub(crate) fn scan_root(
             (stem, name.to_string())
         } else if file_type.is_dir() {
             let agent_file = entry.path().join(AGENT_ENTRY_FILE);
-            if !is_regular_file(&agent_file) {
+            if !scan::is_regular_file(&agent_file) {
                 continue;
             }
             (name.to_string(), format!("{}/{AGENT_ENTRY_FILE}", name))
         } else {
             continue;
         };
-        if !is_valid_uri_segment(&agent_id) || !seen.insert(agent_id.clone()) {
+        if !workspace_resources::is_valid_uri_segment(&agent_id) || !seen.insert(agent_id.clone()) {
             tracing::debug!(agent = %agent_id, "agent 标识非法或重复，跳过");
             continue;
         }
@@ -178,7 +180,7 @@ pub(crate) fn scan_root(
                 relative_path,
             },
             frontmatter: frontmatter_parts(text),
-            digest: digest_bytes(&bytes),
+            digest: workspace_resources::digest_bytes(&bytes),
         });
     }
     records
@@ -189,37 +191,40 @@ pub(crate) fn scan_root(
 /// 预算超限 / 标识非法的条目跳过并记日志（与技能面 builtin 同口径）。
 pub(crate) fn builtin_records(budget: &ResourceBudget) -> Vec<AgentRecord> {
     let mut records = Vec::new();
-    for (index, agent) in super::builtin::BUILTIN_AGENTS.iter().enumerate() {
-        let bytes = agent.content.as_bytes();
-        if bytes.len() as u64 > budget.max_file_bytes {
-            tracing::warn!(agent = agent.id, "builtin agent 超过大小预算，跳过");
-            continue;
+    {
+        let indexed_builtin_agents = super::builtin::BUILTIN_AGENTS.iter().enumerate();
+        for (index, agent) in indexed_builtin_agents {
+            let bytes = agent.content.as_bytes();
+            if bytes.len() as u64 > budget.max_file_bytes {
+                tracing::warn!(agent = agent.id, "builtin agent 超过大小预算，跳过");
+                continue;
+            }
+            if !workspace_resources::is_valid_uri_segment(agent.id) {
+                tracing::warn!(
+                    agent = agent.id,
+                    "builtin agent 标识不符合 URI 段约束，不公开"
+                );
+                continue;
+            }
+            let (display_name, description) = display_fields(agent.id, agent.content);
+            records.push(AgentRecord {
+                scope: ResourceScope::Builtin,
+                plugin_name: None,
+                agent_id: agent.id.to_string(),
+                display_name,
+                description,
+                store: AgentStore::Builtin { index },
+                frontmatter: frontmatter_parts(agent.content),
+                digest: workspace_resources::digest_bytes(bytes),
+            });
         }
-        if !is_valid_uri_segment(agent.id) {
-            tracing::warn!(
-                agent = agent.id,
-                "builtin agent 标识不符合 URI 段约束，不公开"
-            );
-            continue;
-        }
-        let (display_name, description) = display_fields(agent.id, agent.content);
-        records.push(AgentRecord {
-            scope: ResourceScope::Builtin,
-            plugin_name: None,
-            agent_id: agent.id.to_string(),
-            display_name,
-            description,
-            store: AgentStore::Builtin { index },
-            frontmatter: frontmatter_parts(agent.content),
-            digest: digest_bytes(bytes),
-        });
     }
     records
 }
 
 /// 展示字段：frontmatter `name`（空/缺失回退标识）与 trim 后的 `description`。
 fn display_fields(agent_id: &str, text: &str) -> (String, String) {
-    let frontmatter = frontmatter_json(text).unwrap_or_default();
+    let frontmatter = frontmatter::frontmatter_json(text).unwrap_or_default();
     let display_name = frontmatter
         .get("name")
         .and_then(|value| value.as_str())
@@ -248,7 +253,7 @@ pub(crate) fn scan_catalog(
     let mut seen: std::collections::HashSet<(ResourceScope, Option<String>, String)> =
         std::collections::HashSet::new();
     for root in &input.agent_roots {
-        let Some(canonical) = canonical_root(&root.path) else {
+        let Some(canonical) = path::canonical_root(&root.path) else {
             continue;
         };
         for record in scan_root(&canonical, root.scope, root.plugin_name.as_deref(), budget) {
@@ -295,7 +300,7 @@ pub(crate) fn locate(
         if root.scope != scope || root.plugin_name.as_deref() != plugin_name {
             continue;
         }
-        let Some(canonical) = canonical_root(&root.path) else {
+        let Some(canonical) = path::canonical_root(&root.path) else {
             continue;
         };
         matched_scope_root = true;
@@ -328,7 +333,7 @@ pub(crate) fn read_record_definition(
         } => super::path::safe_read_file(root, relative_path, budget.max_file_bytes).ok()?,
         AgentStore::Builtin { index } => super::builtin::builtin_agent_bytes(*index)?.to_vec(),
     };
-    if bytes.len() as u64 > budget.max_file_bytes || !is_text_bytes(&bytes) {
+    if bytes.len() as u64 > budget.max_file_bytes || !path::is_text_bytes(&bytes) {
         return None;
     }
     Some(bytes)
@@ -342,7 +347,7 @@ pub(crate) fn read_definition(
 ) -> Option<Vec<u8>> {
     let bytes =
         super::path::safe_read_file(root_canonical, relative_path, budget.max_file_bytes).ok()?;
-    if !is_text_bytes(&bytes) {
+    if !path::is_text_bytes(&bytes) {
         return None;
     }
     Some(bytes)

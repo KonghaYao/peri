@@ -1,4 +1,5 @@
-use super::*;
+use super::ConfigSource;
+use super::McpConfigError;
 use crate::mcp::builtin::BuiltinInjectionPolicy;
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 
@@ -17,7 +18,7 @@ fn explicit_policy_gates_defaults_without_gating_configuration_io() {
         (BuiltinInjectionPolicy::all(), true),
         (BuiltinInjectionPolicy::none(), false),
     ] {
-        let (config, _) = load_merged_config_full_with_paths(
+        let (config, _) = super::load_merged_config_full_with_paths(
             directory.path(),
             &claude_home,
             &global_path,
@@ -28,8 +29,17 @@ fn explicit_policy_gates_defaults_without_gating_configuration_io() {
             config.mcp_servers["external"].source,
             Some(ConfigSource::Global(global_path.clone()))
         );
-        for instance in BUILTIN_MCP_INSTANCES {
-            assert_eq!(config.mcp_servers.contains_key(instance.name), enabled);
+        assert_eq!(
+            config.mcp_servers.contains_key("peri"),
+            enabled,
+            "v5 单出口注入必须由策略闸门控制"
+        );
+        for instance in BUILTIN_MCP_INSTANCES.iter() {
+            assert!(
+                !config.mcp_servers.contains_key(instance.name),
+                "v5 默认路径不得写回迁移期实例 {}",
+                instance.name
+            );
         }
     }
 }
@@ -54,14 +64,14 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
     )
     .unwrap();
 
-    let (config, _) = load_merged_config_full_with_paths(
+    let (config, _) = super::load_merged_config_full_with_paths(
         directory.path(),
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let entry = &config.mcp_servers[instance.name];
         assert_eq!(entry.disabled, Some(true));
         assert_eq!(entry.system_mcp, None);
@@ -73,15 +83,16 @@ fn builtin_closure_list_survives_configuration_reads_and_disabled_updates() {
         );
     }
 
-    set_server_disabled_with_paths(directory.path(), &global_path, "workspace", false).unwrap();
-    let (config, _) = load_merged_config_full_with_paths(
+    super::set_server_disabled_with_paths(directory.path(), &global_path, "workspace", false)
+        .unwrap();
+    let (config, _) = super::load_merged_config_full_with_paths(
         directory.path(),
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let entry = &config.mcp_servers[instance.name];
         assert_eq!(
             entry.disabled,
@@ -108,7 +119,7 @@ fn disabled_policy_does_not_bypass_builtin_admission() {
             serde_json::json!({"mcpServers": {"workspace": fragment}}).to_string(),
         )
         .unwrap();
-        let error = load_merged_config_full_with_paths(
+        let error = super::load_merged_config_full_with_paths(
             directory.path(),
             &claude_home,
             &global_path,

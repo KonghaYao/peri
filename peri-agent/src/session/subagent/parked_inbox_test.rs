@@ -1,14 +1,26 @@
-use super::*;
+use crate::agent::async_tasks::TaskManager;
+use crate::messages::BaseMessage;
 use crate::session::queue::{MessageSource, QueuedMessage};
+
+use crate::session::subagent::tests::EchoLLM;
+use crate::session::subagent::tests::EmptyChainAssembler;
+use crate::session::subagent::SessionFactory;
+use crate::session::subagent::SubagentCancelPolicy;
 use crate::session::subagent::SubagentHost;
+use crate::session::subagent::SubagentRunMode;
+use crate::session::subagent::SubagentSpawnConfig;
+use crate::session::test_resources::mock::MockSessionResources;
+use crate::session::FrozenContext;
 use crate::session::MessageQueue;
+use crate::session::Session;
+use crate::thread::ThreadId;
 use peri_acp_types::ports::{McpPoolPort, McpPoolShutdownReport};
 use peri_acp_types::session::MqFilter;
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::tasks::{
     BgTaskKind, BgTaskRegistration, OnBgCompleteFn, TaskManager as TaskManagerPort,
 };
-use std::any::Any;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 记录 bind/park 事件；park 后从注册集合移除，模拟真实 broadcast 收件人。
@@ -48,10 +60,6 @@ impl McpPoolPort for RecordingPool {
     fn park_agent_session(&self, session_id: &str) {
         self.events.lock().push(("park", session_id.to_owned()));
         self.registered.lock().remove(session_id);
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     async fn shutdown(&self) -> McpPoolShutdownReport {
@@ -168,7 +176,7 @@ async fn sync_terminal_parks_then_resume_consumes_parked_backlog() {
 
     let resumed = SessionFactory::resume_subagent(
         Some(&parent),
-        resume_config(Arc::clone(&store), child_id.clone()),
+        crate::session::subagent::tests::resume_config(Arc::clone(&store), child_id.clone()),
     )
     .await
     .expect("parked owner must resume");
@@ -182,14 +190,14 @@ async fn sync_terminal_parks_then_resume_consumes_parked_backlog() {
         store
             .mq_history_contains(&ThreadId::from(child_id.as_str()), backlog_id)
             .await
-            .unwrap(),
+            .expect("the as str fixture result is required for this assertion"),
         "Receive 将积压行写入历史"
     );
     assert!(
         store
             .mq_query(&ThreadId::from(child_id.as_str()), MqFilter::default())
             .await
-            .unwrap()
+            .expect("the default fixture result is required for this assertion")
             .is_empty(),
         "Receive 删除 MQ 行"
     );
@@ -230,7 +238,7 @@ async fn background_terminal_parks_inbox_and_keeps_owner() {
     tokio::time::timeout(Duration::from_secs(10), finished_rx)
         .await
         .expect("background child must finish")
-        .unwrap();
+        .expect("the expect fixture result is required for this assertion");
 
     assert!(!pool.is_registered(&child_id), "终态停驻后不再接收广播");
     assert_eq!(pool.count("bind", &child_id), 1);
@@ -271,10 +279,10 @@ async fn handed_off_resume_keeps_inbox_registered() {
             pid: None,
             kill: Some(Box::new(|| {})),
         })
-        .unwrap();
+        .expect("the register fixture result is required for this assertion");
     let resumed = SessionFactory::resume_subagent(
         Some(&parent),
-        resume_config(Arc::clone(&store), child_id.clone()),
+        crate::session::subagent::tests::resume_config(Arc::clone(&store), child_id.clone()),
     )
     .await
     .expect("handoff resume must return pending");

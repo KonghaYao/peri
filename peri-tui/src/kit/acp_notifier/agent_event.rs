@@ -2,7 +2,7 @@
 
 use crate::kit::acp_types::{AcpEventData, FeedbackChannel, FeedbackLevel, TuiCommandFeedback};
 use peri_acp::event::AcpEvent;
-use peri_acp_types::event_data::{OauthNeeded, SystemNotification};
+
 use tracing::debug;
 
 /// 将 `peri/agent_event` 通道的 `AcpEvent` DTO 转换为 kit 层的 `AcpEventData`。
@@ -213,6 +213,10 @@ pub(super) fn decode_agent_event(event: AcpEvent) -> Option<AcpEventData> {
         }
     }
 }
+
+use peri_acp_types::event_data::OauthNeeded;
+
+use peri_acp_types::event_data::SystemNotification;
 
 #[cfg(test)]
 mod tests {

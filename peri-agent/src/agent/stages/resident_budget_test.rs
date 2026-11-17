@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::compact_v2::planner::ResidentHistoryPressure;
 use crate::agent::model_bridge::AgentModelBridge;
-use crate::agent::stages::reason::run_reason;
+
 use crate::agent::stages::{compact, CompactInput, ReasonInput, StageContext};
 use crate::agent::token::ContextBudget;
 use crate::messages::{BaseMessage, MessageContent};
@@ -126,7 +126,7 @@ impl Model for RecordingModel {
                 None::<&str>,
             ));
         }
-        Ok(ModelResponse::new(
+        Ok(ModelResponse::try_new(
             ModelMessage::assistant_text(format!("<summary>{}</summary>", self.summary)),
             StopReason::EndTurn,
             None,
@@ -140,7 +140,10 @@ struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogBuffer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        self.0
+            .lock()
+            .expect("self lock mutex must remain unpoisoned throughout the test")
+            .extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -207,7 +210,9 @@ fn build_context(
     (session, context)
 }
 
-async fn run_stage(context: &StageContext) -> crate::error::AgentResult<super::CompactOutput> {
+async fn run_stage(
+    context: &StageContext,
+) -> crate::error::AgentResult<crate::agent::stages::CompactOutput> {
     compact::run_compact(CompactInput {
         context: context.clone(),
         has_tool_calls: false,
@@ -281,14 +286,16 @@ async fn resident_budget_forces_full_without_usage() {
     let model = RecordingModel::new(false);
     let (session, context) = build_context(&bound, transcript, resident_config(1), model.clone());
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(output.compacted, "无 usage、低 token 时驻留超限仍须 Full");
     assert_eq!(model.request_count(), 1);
     let view = session
         .transcript()
         .read()
         .visible_model_messages()
-        .unwrap();
+        .expect("the visible model messages fixture result is required for this assertion");
     assert!(
         view.iter()
             .any(|message| message.content().contains("stage resident full summary")),
@@ -330,7 +337,9 @@ async fn resident_budget_forces_full_with_consumed_pressure_sample() {
         .read()
         .is_pressure_sample_consumed(key));
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(output.compacted, "已消费样本不得阻断驻留 Full");
     assert_eq!(model.request_count(), 1);
 }
@@ -345,12 +354,16 @@ async fn resident_budget_boundary_is_strictly_greater() {
     let (_session, mut context) =
         build_context(&bound, transcript, resident_config(total), model.clone());
 
-    let at_limit = run_stage(&context).await.unwrap();
+    let at_limit = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(!at_limit.compacted, "恰好等于上限不得触发 Full");
     assert_eq!(model.request_count(), 0);
 
     context.compact.compact_config = Some(resident_config(total.saturating_sub(1)));
-    let over_limit = run_stage(&context).await.unwrap();
+    let over_limit = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(over_limit.compacted, "超过上限 1 字节必须触发 Full");
     assert_eq!(model.request_count(), 1);
 }
@@ -385,7 +398,9 @@ async fn resident_budget_shadow_reports_without_commit() {
     let (session, context) = build_context(&bound, transcript, config, model.clone());
     let (logs, _capture) = capture_logs();
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(!output.compacted, "shadow 不得提交 Full");
     assert_eq!(model.request_count(), 0);
     assert_eq!(
@@ -393,7 +408,13 @@ async fn resident_budget_shadow_reports_without_commit() {
         before.total_entries,
         "shadow 不得改动 transcript"
     );
-    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let text = String::from_utf8(
+        logs.0
+            .lock()
+            .expect("logs lock mutex must remain unpoisoned throughout the test")
+            .clone(),
+    )
+    .expect("the fixture text must be valid UTF-8");
     assert!(
         text.contains("Shadow mode: resident Full Compact planned"),
         "shadow 必须报告拟执行的 Full: {text}"
@@ -412,7 +433,9 @@ async fn resident_budget_auto_disabled_does_not_trigger_full() {
     };
     let (_session, context) = build_context(&bound, transcript, config, model.clone());
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(!output.compacted);
     assert_eq!(model.request_count(), 0);
 }
@@ -425,9 +448,17 @@ async fn resident_full_residual_is_recorded() {
     let (_session, context) = build_context(&bound, transcript, resident_config(1), model.clone());
     let (logs, _capture) = capture_logs();
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(output.compacted);
-    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    let text = String::from_utf8(
+        logs.0
+            .lock()
+            .expect("logs lock mutex must remain unpoisoned throughout the test")
+            .clone(),
+    )
+    .expect("the fixture text must be valid UTF-8");
     assert!(
         text.contains("resident_residual_total_reserved_bytes"),
         "Full 后必须记录残余字节: {text}"
@@ -442,11 +473,15 @@ async fn resident_full_is_not_repeated_without_new_work() {
     let model = RecordingModel::new(false);
     let (session, context) = build_context(&bound, transcript, resident_config(1), model.clone());
 
-    let first = run_stage(&context).await.unwrap();
+    let first = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(first.compacted, "首次驻留超限必须 Full");
     assert_eq!(model.request_count(), 1);
 
-    let second = run_stage(&context).await.unwrap();
+    let second = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(!second.compacted, "无新 Human/Tool 时不得重复驻留 Full");
     assert_eq!(model.request_count(), 1, "第二次运行不得再次调用摘要模型");
 
@@ -457,7 +492,9 @@ async fn resident_full_is_not_repeated_without_new_work() {
         transcript.append(make_ai_with_tool("", "Bash", "stage_resident_new_call"));
         transcript.append(make_tool_result("stage_resident_new_call", "new output"));
     }
-    let third = run_stage(&context).await.unwrap();
+    let third = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(third.compacted, "出现新 Human/Tool 后应可再次 Full");
     assert_eq!(model.request_count(), 2, "新工作单元允许第二次 Full");
 }
@@ -486,7 +523,9 @@ async fn resident_inherited_residual_does_not_repeat_full_for_small_new_work() {
         model.clone(),
     );
 
-    let first = run_stage(&context).await.unwrap();
+    let first = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(first.compacted, "首次超限必须执行一次 Full");
     assert_eq!(model.request_count(), 1);
 
@@ -496,7 +535,9 @@ async fn resident_inherited_residual_does_not_repeat_full_for_small_new_work() {
             let mut transcript = handle.write();
             append_small_tool_exchange(&mut transcript, round);
         }
-        let output = run_stage(&context).await.unwrap();
+        let output = run_stage(&context)
+            .await
+            .expect("the run stage fixture result is required for this assertion");
         assert!(
             !output.compacted,
             "第 {round} 轮：Full 后残余主导，小工具结果不得触发 Full"
@@ -522,7 +563,9 @@ async fn resident_full_resumes_after_own_region_exceeds_limit() {
         model.clone(),
     );
 
-    let first = run_stage(&context).await.unwrap();
+    let first = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(first.compacted, "首次超限必须执行一次 Full");
     assert_eq!(model.request_count(), 1);
 
@@ -542,7 +585,9 @@ async fn resident_full_resumes_after_own_region_exceeds_limit() {
         "自有区必须超过完整预算才允许恢复 Full"
     );
 
-    let second = run_stage(&context).await.unwrap();
+    let second = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(second.compacted, "自有区超过完整预算后应再次 Full");
     assert_eq!(model.request_count(), 2);
 }
@@ -573,7 +618,9 @@ async fn resident_irreducible_own_does_not_repeat_full_for_small_new_work() {
         model.clone(),
     );
 
-    let first = run_stage(&context).await.unwrap();
+    let first = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(first.compacted, "首次超限必须执行一次 Full");
     assert_eq!(model.request_count(), 1);
 
@@ -594,7 +641,9 @@ async fn resident_irreducible_own_does_not_repeat_full_for_small_new_work() {
             let mut transcript = handle.write();
             append_small_tool_exchange(&mut transcript, round);
         }
-        let output = run_stage(&context).await.unwrap();
+        let output = run_stage(&context)
+            .await
+            .expect("the run stage fixture result is required for this assertion");
         assert!(
             !output.compacted,
             "第 {round} 轮：不可回收 own 主导，小工具结果不得触发 Full"
@@ -622,7 +671,9 @@ async fn resident_irreducible_own_does_not_repeat_full_for_small_new_work() {
         "可回收 own 超过完整预算后才允许恢复 Full"
     );
 
-    let resumed = run_stage(&context).await.unwrap();
+    let resumed = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(resumed.compacted, "可回收 own 超过完整预算后应再次 Full");
     assert_eq!(model.request_count(), 2);
 }
@@ -652,7 +703,9 @@ async fn resident_below_inherited_limit_keeps_new_work_gate() {
     let (session, context) =
         build_context(&bound, transcript, resident_config(LIMIT), model.clone());
 
-    let first = run_stage(&context).await.unwrap();
+    let first = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(first.compacted, "首次超限必须 Full");
     assert_eq!(model.request_count(), 1);
     let after_full = ResidentHistoryPressure::from_transcript(LIMIT, &session.transcript().read());
@@ -676,7 +729,9 @@ async fn resident_below_inherited_limit_keeps_new_work_gate() {
         "自有区本身仍未超过完整预算"
     );
 
-    let second = run_stage(&context).await.unwrap();
+    let second = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(
         second.compacted,
         "继承区低于预算时，新工作触发的总量超限仍应 Full"
@@ -697,12 +752,16 @@ async fn resident_shadow_does_not_record_pressure_snapshot() {
     };
     let (_session, mut context) = build_context(&bound, transcript, config, model.clone());
 
-    let shadowed = run_stage(&context).await.unwrap();
+    let shadowed = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(!shadowed.compacted, "shadow 不得提交 Full");
     assert_eq!(model.request_count(), 0);
 
     context.compact.compact_config = Some(resident_config(RESIDUAL_LIMIT));
-    let applied = run_stage(&context).await.unwrap();
+    let applied = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(
         applied.compacted,
         "shadow 未记录 Full 后快照，下一次超限必须按首次门控执行 Full"
@@ -746,12 +805,18 @@ async fn resident_full_does_not_probe_archive_metadata() {
     let store = MockSessionResources::new();
     let (entered, _entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    release_tx.send(()).unwrap();
-    *store.archive_probe_gate.lock().unwrap() = Some(ResumeLoadGate {
-        entered,
-        release: release_rx,
-        dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    });
+    release_tx
+        .send(())
+        .expect("release tx send test receiver must remain available for this delivery");
+    *store
+        .archive_probe_gate
+        .lock()
+        .expect("store archive probe gate mutex must remain unpoisoned throughout the test") =
+        Some(ResumeLoadGate {
+            entered,
+            release: release_rx,
+            dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
     let mut transcript =
         MessageTranscript::new().with_persistence(store.clone(), "resident-archive-failure".into());
     append_resident_exchanges(&mut transcript);
@@ -765,146 +830,21 @@ async fn resident_full_does_not_probe_archive_metadata() {
         Arc::new(ArchiveReadTool) as Arc<dyn BaseTool>,
     );
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(output.compacted, "archive metadata 失败不得阻断驻留 Full");
     assert_eq!(model.request_count(), 1);
     assert!(
-        store.archive_probe_gate.lock().unwrap().is_some(),
+        store
+            .archive_probe_gate
+            .lock()
+            .expect("store archive probe gate mutex must remain unpoisoned throughout the test")
+            .is_some(),
         "驻留路径不得消费 archive metadata 探测"
     );
 }
-
-struct FinalAnswerLlm;
-
-#[async_trait]
-impl crate::agent::react::ReactLLM for FinalAnswerLlm {
-    async fn generate_reasoning(
-        &self,
-        _messages: &[BaseMessage],
-        _tools: &[&dyn BaseTool],
-        _streaming: Option<crate::agent::react::StreamingContext>,
-    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
-        Ok(crate::agent::react::Reasoning::with_answer(
-            "post-check reasoning",
-            "done",
-        ))
-    }
-
-    fn model_name(&self) -> String {
-        "resident-reason-fixture".into()
-    }
-}
-
-struct AppendHumanBeforeModel;
-
-#[async_trait]
-impl Middleware for AppendHumanBeforeModel {
-    fn name(&self) -> &str {
-        "AppendHumanBeforeModel"
-    }
-
-    async fn before_model(
-        &self,
-        state: &mut dyn hook_state::BeforeModelState,
-    ) -> crate::error::AgentResult<()> {
-        state.add_message(BaseMessage::human("hooks injected input"));
-        Ok(())
-    }
-}
-
-fn reason_context(
-    bound: &TestSession,
-    transcript: MessageTranscript,
-    limit: u64,
-    compact_model: Arc<RecordingModel>,
-    hook: bool,
-) -> StageContext {
-    let (_session, mut context) =
-        build_context(bound, transcript, resident_config(limit), compact_model);
-    context.runtime.llm = Arc::new(FinalAnswerLlm);
-    if hook {
-        let mut chain = crate::middleware::MiddlewareChain::new();
-        chain.add(Box::new(AppendHumanBeforeModel));
-        context.runtime.middleware_chain = Arc::new(chain);
-    }
-    context
-}
-
-/// hooks 后的 canonical 变化是独立的驻留补检证据：不要求投影 token 增长。
-#[tokio::test]
-async fn reason_rechecks_resident_after_hooks_canonical_change() {
-    let bound = TestSession::open().await;
-    let compact_model = RecordingModel::new(false);
-    let context = reason_context(
-        &bound,
-        build_transcript(&bound),
-        1,
-        compact_model.clone(),
-        true,
-    );
-
-    run_reason(ReasonInput {
-        context,
-        has_tool_calls: false,
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        compact_model.request_count(),
-        1,
-        "hooks 后新增 canonical 且驻留超限必须补检一次 Full"
-    );
-}
-
-#[tokio::test]
-async fn reason_skips_resident_recheck_without_canonical_change() {
-    let bound = TestSession::open().await;
-    let compact_model = RecordingModel::new(false);
-    let context = reason_context(
-        &bound,
-        build_transcript(&bound),
-        1,
-        compact_model.clone(),
-        false,
-    );
-
-    run_reason(ReasonInput {
-        context,
-        has_tool_calls: false,
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        compact_model.request_count(),
-        0,
-        "canonical 未变化时不得仅因驻留超限补检"
-    );
-}
-
-#[tokio::test]
-async fn reason_skips_resident_recheck_below_limit() {
-    let bound = TestSession::open().await;
-    let compact_model = RecordingModel::new(false);
-    let context = reason_context(
-        &bound,
-        build_transcript(&bound),
-        u64::MAX,
-        compact_model.clone(),
-        true,
-    );
-
-    run_reason(ReasonInput {
-        context,
-        has_tool_calls: false,
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        compact_model.request_count(),
-        0,
-        "hooks 改变 canonical 但未超限时不得补检 Full"
-    );
-}
+include!("reason_resident_recheck_test.rs");
 
 /// `context_budget` 缺失只关闭 token 压力，不得关闭与之独立的驻留字节门控。
 #[tokio::test]
@@ -916,7 +856,9 @@ async fn resident_budget_without_context_budget_still_full() {
         build_context(&bound, transcript, resident_config(1), model.clone());
     context.compact.context_budget = None;
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(
         output.compacted,
         "context_budget 缺失时驻留超限仍须执行 Full"
@@ -931,7 +873,9 @@ async fn resident_budget_without_context_budget_still_full() {
         build_context(&bound, transcript, resident_config(u64::MAX), model.clone());
     context.compact.context_budget = None;
 
-    let output = run_stage(&context).await.unwrap();
+    let output = run_stage(&context)
+        .await
+        .expect("the run stage fixture result is required for this assertion");
     assert!(
         !output.compacted,
         "context_budget 缺失且未超限时必须保持 Skip"

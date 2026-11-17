@@ -4,16 +4,17 @@
 //! 预算约束、以及 flush 前缀屏障只覆盖其捕获边界（含准备失败的前缀归属）。全部用例用本地
 //! fixture：无共享 test_helpers、不新增 mockall、不依赖 sleep 判断进度。
 
-use std::{
-    io::Read,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::io::Read;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
-use super::*;
+use super::{
+    Batcher, BatcherConfig, ExportConfig, IngestionEvent, LangfuseClient, LangfuseError,
+    MemoryBudget, TelemetryEvent,
+};
 use crate::config::TelemetryConfig;
 use crate::snapshot::SnapshotSource;
 use crate::types::TraceBody;
@@ -310,7 +311,7 @@ async fn oversized_span_rejects_only_itself() {
     // 编码维度是单条不可拆的硬约束：导出正文上限取“大事件正文 - 1”（同时仍覆盖其原文长度），
     // 因此超限事件必须在本地精确拒收，而不是发出后由服务端失败。
     let probe = event_with_payload("probe", 8 * 1024);
-    let budget = MemoryBudget::new(64 * 1024 * 1024).unwrap();
+    let budget = MemoryBudget::try_new(64 * 1024 * 1024).unwrap();
     let measured = crate::encoding::measure_otlp(
         &[TelemetryEvent::try_new(probe, None, None, &budget).unwrap()],
         usize::MAX,

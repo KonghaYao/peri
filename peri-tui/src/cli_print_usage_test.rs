@@ -1,4 +1,8 @@
-use super::*;
+use super::OutputFormat;
+use super::PrintOutput;
+use super::StopReason;
+use super::Value;
+use super::json;
 
 #[test]
 fn print_inline_settings_do_not_cross_contaminate_concurrent_loads() {
@@ -8,7 +12,7 @@ fn print_inline_settings_do_not_cross_contaminate_concurrent_loads() {
                 let inline = format!(
                     r#"{{"config":{{"active_alias":"{alias}","providers":[{{"id":"{provider_id}","type":"openai","apiKey":"test","models":{{"{alias}":"test-model"}}}}],"profiles":{{"{alias}":{{"provider":"{provider_id}","model":"test-model"}}}}}}}}"#
                 );
-                let source = load_print_config_source(Some(&inline)).unwrap();
+                let source = super::load_print_config_source(Some(&inline)).expect("print inline settings do not cross contaminate concurrent loads: the load_print_config_source fixture operation uses valid inputs");
                 let settings = source.loaded_merged();
                 assert_eq!(settings.config.active_alias, alias);
                 assert_eq!(settings.config.providers[0].id, provider_id);
@@ -22,8 +26,8 @@ fn print_inline_settings_do_not_cross_contaminate_concurrent_loads() {
 fn print_inline_settings_failures_do_not_create_config_file() {
     let before = std::env::temp_dir().join("peri-settings-override.json");
     let existed_before = before.exists();
-    assert!(load_print_config_source(Some("not JSON")).is_err());
-    let source = load_print_config_source(Some(r#"{"config":{"providers":[]}}"#)).unwrap();
+    assert!(super::load_print_config_source(Some("not JSON")).is_err());
+    let source = super::load_print_config_source(Some(r#"{"config":{"providers":[]}}"#)).expect("print inline settings failures do not create config file: the load_print_config_source fixture operation uses valid inputs");
     assert!(peri_tui::app::agent::LlmProvider::from_source(&source).is_none());
     assert_eq!(before.exists(), existed_before);
 }
@@ -42,15 +46,15 @@ fn test_print_usage_per_call_and_summary_do_not_overlap_cache() {
     let first: Value = serde_json::from_str(
         &output
             .handle_session_update(&usage_update(100, 7, 60, 10))
-            .unwrap(),
+            .expect("print usage per call and summary do not overlap cache: the handle_session_update fixture operation uses valid inputs"),
     )
-    .unwrap();
+    .expect("print usage per call and summary do not overlap cache: fixture JSON must match the expected schema");
     let second: Value = serde_json::from_str(
         &output
             .handle_session_update(&usage_update(250, 9, 80, 20))
-            .unwrap(),
+            .expect("print usage per call and summary do not overlap cache: the handle_session_update fixture operation uses valid inputs"),
     )
-    .unwrap();
+    .expect("print usage per call and summary do not overlap cache: fixture JSON must match the expected schema");
     assert_eq!(first["type"], "assistant");
     assert_ne!(
         first["message"]["id"], second["message"]["id"],
@@ -62,8 +66,8 @@ fn test_print_usage_per_call_and_summary_do_not_overlap_cache() {
     );
     assert_eq!(second["message"]["usage"]["input_tokens"], 150);
     assert_eq!(
-        output.result(StopReason::EndTurn, None),
-        json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "usage": {
+        output.result(StopReason::EndTurn, 0, None),
+        json!({"type": "result", "stop_reason": "end_turn", "status": "completed", "is_error": false, "pending_tasks": 0, "usage": {
         "input_tokens": 180, "cache_read_input_tokens": 140,
         "cache_creation_input_tokens": 30, "output_tokens": 16
     }, "total_cost_usd": null})
@@ -83,7 +87,7 @@ fn test_print_usage_missing_invalid_and_replay_are_not_counted() {
         assert!(output.handle_session_update(&update).is_none());
     }
     assert!(
-        output.result(StopReason::EndTurn, None)["usage"].is_null(),
+        output.result(StopReason::EndTurn, 0, None)["usage"].is_null(),
         "未知 usage 不能伪装成零"
     );
 }
@@ -93,12 +97,12 @@ fn test_print_usage_without_cache_fields_or_request_id() {
     let mut output = PrintOutput::new(OutputFormat::StreamJson);
     let event: Value = serde_json::from_str(&output.handle_session_update(&json!({
         "update": {"sessionUpdate": "usage_update", "_meta": {"inputTokens": 12, "outputTokens": 0}}
-    })).unwrap()).unwrap();
+    })).expect("print usage without cache fields or request id: the handle_session_update fixture operation uses valid inputs")).expect("print usage without cache fields or request id: fixture JSON must match the expected schema");
     assert_eq!(
         event["message"]["usage"],
         json!({"input_tokens": 12, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0})
     );
-    assert!(!event["message"]["id"].as_str().unwrap().is_empty());
+    assert!(!event["message"]["id"].as_str().expect("print usage without cache fields or request id: the fixture must retain its expected variant").is_empty());
 }
 
 #[test]

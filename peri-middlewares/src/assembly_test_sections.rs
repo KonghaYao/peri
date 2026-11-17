@@ -1,4 +1,21 @@
-use super::*;
+use super::async_trait;
+use super::AgentOverrides;
+use super::Arc;
+use super::AssemblyContext;
+use super::BTreeMap;
+use super::ChainSlot;
+use super::FakeBroker;
+use super::FakeEventHandler;
+use super::FakeLlm;
+use super::FakeModel;
+use super::GoalController;
+use super::GoalViewSnapshot;
+use super::PermissionMode;
+use super::ProductionChainAssembler;
+use super::RwLock;
+use super::SharedPermissionMode;
+use super::TaskManager;
+use super::ToolSearchIndex;
 
 // ─── 波 4 演进 C2/C3：段落持有者（基础段 + gated 段）────────────────────
 
@@ -13,7 +30,7 @@ use crate::subagent::SubAgentMiddleware;
 /// 逐项一致（C3：gated 段 10/11/13 持有者并入）。
 #[test]
 fn c2_chain_collection_matches_static_declaration() {
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     let overrides = AgentOverrides {
         persona: Some("chain persona".into()),
         tone: Some("chain tone".into()),
@@ -23,7 +40,8 @@ fn c2_chain_collection_matches_static_declaration() {
     ctx.agent_overrides = Some(overrides.clone());
     ctx.language = Some("zh-CN".to_string());
 
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
     let collected = out.chain.collect_prompt_sections();
 
     let expected = DefaultSystemPromptMiddleware::sections(Some(&overrides))
@@ -62,12 +80,13 @@ fn c2_chain_collection_matches_static_declaration() {
 /// 无持有者、收集结果无对应段落（基础段 + persona / language 全部消失）。
 #[test]
 fn c2_disable_holders_removes_sections_from_chain() {
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     ctx.meta_harness_disabled
         .insert("DefaultSystemPromptMiddleware".to_string());
     ctx.meta_harness_disabled
         .insert("LangMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
 
     let names: Vec<&str> = out.chain.names();
     assert!(
@@ -105,14 +124,17 @@ fn c2_disable_holders_removes_sections_from_chain() {
 #[test]
 fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
     // 基线：默认装配下四段全部收集
-    let baseline_ctx = base_context();
-    let baseline_ids: Vec<&str> = build_middleware_chain(&ProductionChainAssembler, &baseline_ctx)
-        .expect("assembly")
-        .chain
-        .collect_prompt_sections()
-        .iter()
-        .map(|s| s.id)
-        .collect();
+    let baseline_ctx = super::base_context();
+    let baseline_ids: Vec<&str> = peri_agent::session::factory::build_middleware_chain(
+        &ProductionChainAssembler,
+        &baseline_ctx,
+    )
+    .expect("assembly")
+    .chain
+    .collect_prompt_sections()
+    .iter()
+    .map(|s| s.id)
+    .collect();
     for id in ["10_hitl", "11_subagent", "12_ask_user", "13_skills"] {
         assert!(
             baseline_ids.contains(&id),
@@ -143,9 +165,11 @@ fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
         ),
     ];
     for (mw, section_id, gone_tools) in cases {
-        let mut ctx = base_context();
+        let mut ctx = super::base_context();
         ctx.meta_harness_disabled.insert(mw.to_string());
-        let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+        let out =
+            peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+                .expect("assembly");
         let collected_ids: Vec<&str> = out
             .chain
             .collect_prompt_sections()
@@ -175,14 +199,15 @@ fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
 /// 链上收集到的 gated 段落 ID 集合 == 映射表投影（持有者在链上 → 段落开启）。
 #[test]
 fn chain_collected_gated_sections_match_projection() {
-    use peri_agent::middleware::project_enabled_sections;
+    use peri_agent::middleware;
     use std::collections::HashSet;
 
     // 默认装配：持有者全部在链 → 投影包含全部三个 gated 段
-    let ctx = base_context();
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let ctx = super::base_context();
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
     let names: HashSet<&str> = out.chain.names().into_iter().collect();
-    let projected = project_enabled_sections(&names);
+    let projected = middleware::project_enabled_sections(&names);
     for id in ["10_hitl", "11_subagent", "13_skills"] {
         assert!(
             projected.contains(id),
@@ -190,12 +215,13 @@ fn chain_collected_gated_sections_match_projection() {
         );
     }
     // 关闭 SubAgentMiddleware → 投影与链收集同时失去 11_subagent
-    let mut ctx = base_context();
+    let mut ctx = super::base_context();
     ctx.meta_harness_disabled
         .insert("SubAgentMiddleware".to_string());
-    let out = build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
+    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("assembly");
     let names: HashSet<&str> = out.chain.names().into_iter().collect();
-    let projected = project_enabled_sections(&names);
+    let projected = middleware::project_enabled_sections(&names);
     assert!(
         !projected.contains("11_subagent"),
         "关闭 SubAgentMiddleware 后投影应关闭 11_subagent: {projected:?}"
@@ -247,17 +273,15 @@ impl GoalController for ReminderGoalController {
 async fn test_stage_completion_reminders_share_assembled_task_manager() {
     use peri_acp_types::session::SessionInbox;
     use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as _};
-    use peri_agent::{
-        agent::{react::AgentOutput, stages::middleware_runner},
-        session::{
-            exec::{
-                executor::FrozenSessionData,
-                stage_builder::{build_stage_context, StageBuildInput},
-            },
-            factory::{ChainAssembly, MiddlewareChainAssembler},
-            FrozenContext, MessageQueue,
-        },
-    };
+    use peri_agent::agent::react::AgentOutput;
+    use peri_agent::agent::stages::middleware_runner;
+    use peri_agent::session::exec::executor::FrozenSessionData;
+    use peri_agent::session::exec::stage_builder;
+    use peri_agent::session::exec::stage_builder::StageBuildInput;
+    use peri_agent::session::factory::ChainAssembly;
+    use peri_agent::session::factory::MiddlewareChainAssembler;
+    use peri_agent::session::FrozenContext;
+    use peri_agent::session::MessageQueue;
     struct CaptureAssembler(parking_lot::Mutex<Option<Arc<TaskManager>>>);
     impl MiddlewareChainAssembler for CaptureAssembler {
         type Context = AssemblyContext;
@@ -332,12 +356,11 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 compact_pre_hook: None,
                 compact_post_hook: None,
                 meta_harness_disabled: Default::default(),
-                agent_default_run_in_background: Default::default(),
             };
             let assembler = CaptureAssembler(parking_lot::Mutex::new(None));
             let manager = supplied.then(|| Arc::new(TaskManager::new()));
             let controller = Arc::new(ReminderGoalController(Default::default()));
-            let (built, _) = build_stage_context(
+            let (built, _) = stage_builder::build_stage_context(
                 &input,
                 &assembler,
                 None,

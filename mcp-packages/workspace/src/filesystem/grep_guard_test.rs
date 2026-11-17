@@ -1,4 +1,14 @@
-use super::*;
+use crate::filesystem::grep::GrepTool;
+use crate::filesystem::grep::MAX_LINE_BYTES;
+use crate::filesystem::grep::MAX_OUTPUT_BYTES;
+use crate::filesystem::grep::SEARCH_THREADS_MAX;
+use crate::filesystem::grep::SEARCH_TIMEOUT;
+use crate::filesystem::grep_args::OutputMode;
+use crate::filesystem::grep_args::ParsedArgs;
+use peri_agent::tools::BaseTool;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Duration;
 
 // ─── Grep 防护移植（glob.rs 蓝本：协作取消 / 线程 cap / 预算）───────────────
 
@@ -35,7 +45,7 @@ fn test_grep_cancelled_skips_walk() {
         max_depth: None,
     };
     let cancelled = Arc::new(AtomicBool::new(true));
-    let result = execute_search(
+    let result = crate::filesystem::grep::execute_search(
         &parsed,
         &[],
         dir.path().to_str().unwrap(),

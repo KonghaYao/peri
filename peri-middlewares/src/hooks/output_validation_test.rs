@@ -8,7 +8,9 @@ use peri_agent::error::AgentError;
 use peri_agent::middleware::chain::MiddlewareChain;
 use peri_agent::tools::{BaseTool, ToolContext};
 
-use super::*;
+use super::HookAction;
+use super::HookEvent;
+use super::PermissionDecision;
 use crate::hooks::middleware::HookMiddleware;
 use crate::hooks::types::{HookType, RegisteredHook};
 use crate::permission::{PermissionMode, SharedPermissionMode};
@@ -17,11 +19,11 @@ use crate::permission::{PermissionMode, SharedPermissionMode};
 fn mismatched_event_is_rejected_even_with_top_level_system_message() {
     let output = r#"{"systemMessage":"ignore deny","hook_specific_output":{"hookEventName":"SessionStart","initialUserMessage":"foreign"}}"#;
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, output),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, output),
         HookAction::Block { .. }
     ));
     assert!(matches!(
-        parse_http_hook_response(&HookEvent::PermissionRequest, output),
+        super::parse_http_hook_response(&HookEvent::PermissionRequest, output),
         HookAction::Block { .. }
     ));
 }
@@ -30,11 +32,11 @@ fn mismatched_event_is_rejected_even_with_top_level_system_message() {
 fn unsupported_permission_request_specific_output_is_rejected() {
     let output = r#"{"hook_specific_output":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#;
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PermissionRequest, output),
+        super::parse_command_hook_output(&HookEvent::PermissionRequest, output),
         HookAction::Block { .. }
     ));
     assert!(matches!(
-        parse_http_hook_response(&HookEvent::PermissionRequest, output),
+        super::parse_http_hook_response(&HookEvent::PermissionRequest, output),
         HookAction::Block { .. }
     ));
 }
@@ -46,7 +48,7 @@ fn unknown_fields_cannot_silently_discard_a_decision() {
         r#"{"hook_specific_output":{"hookEventName":"PreToolUse","decision":"deny"}}"#,
     ] {
         assert!(matches!(
-            parse_command_hook_output(&HookEvent::PreToolUse, output),
+            super::parse_command_hook_output(&HookEvent::PreToolUse, output),
             HookAction::Block { .. }
         ));
     }
@@ -56,7 +58,7 @@ fn unknown_fields_cannot_silently_discard_a_decision() {
 fn camel_case_hook_specific_output_carries_user_prompt_context() {
     let output =
         r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"ctx"}}"#;
-    match parse_command_hook_output(&HookEvent::UserPromptSubmit, output) {
+    match super::parse_command_hook_output(&HookEvent::UserPromptSubmit, output) {
         HookAction::AdditionalContext { context } => assert_eq!(context, "ctx"),
         other => panic!("expected AdditionalContext, got {other:?}"),
     }
@@ -66,7 +68,7 @@ fn camel_case_hook_specific_output_carries_user_prompt_context() {
 fn camel_case_hook_specific_output_keeps_pretooluse_deny() {
     let output =
         r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}"#;
-    match parse_command_hook_output(&HookEvent::PreToolUse, output) {
+    match super::parse_command_hook_output(&HookEvent::PreToolUse, output) {
         HookAction::PermissionOverride { decision, .. } => {
             assert_eq!(decision, PermissionDecision::Deny);
         }
@@ -78,7 +80,7 @@ fn camel_case_hook_specific_output_keeps_pretooluse_deny() {
 fn camel_case_alias_does_not_loosen_unknown_field_rejection() {
     let output = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"bogus":1}"#;
     assert!(matches!(
-        parse_command_hook_output(&HookEvent::PreToolUse, output),
+        super::parse_command_hook_output(&HookEvent::PreToolUse, output),
         HookAction::Block { .. }
     ));
 }

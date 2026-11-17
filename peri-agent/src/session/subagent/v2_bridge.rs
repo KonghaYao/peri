@@ -1,3 +1,4 @@
+use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -5,9 +6,11 @@ use peri_acp_types::identity::AgentId;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::events::AgentEventHandler;
-use crate::agent::events_v2::{
-    observe_event_to_executor, EventBus, EventBusConfig, EventHandles, ObserveEvent,
-};
+
+use crate::agent::events_v2::EventBus;
+use crate::agent::events_v2::EventBusConfig;
+use crate::agent::events_v2::EventHandles;
+use crate::agent::events_v2::ObserveEvent;
 use crate::agent::react::ReactLLM;
 use crate::agent::stages::{SharedToolMap, StageContext};
 use crate::agent::{CompactConfig, ContextBudget};
@@ -41,6 +44,7 @@ pub struct V2SubagentContext {
 ///
 /// 身份契约：`child_thread_id`、subagent session `AgentId`、`instance_id`、
 /// forwarder `source_agent_id`、事件 `agent_id` 收敛为同一 UUID。
+#[must_use]
 pub fn agent_id_from_child_thread(child_thread_id: &str) -> AgentId {
     AgentId::from_uuid(
         uuid::Uuid::parse_str(child_thread_id)
@@ -149,12 +153,12 @@ pub(crate) fn build_subagent_stop_v2_with_failure(
     }
 }
 
-pub(crate) struct SubagentStopV2Input<'a> {
+pub(crate) struct SubagentStopV2Input<'stop> {
     pub(crate) turn_id: TurnId,
     pub(crate) parent_agent_id: Option<AgentId>,
     pub(crate) child_agent_id: AgentId,
-    pub(crate) agent_name: &'a str,
-    pub(crate) result: &'a str,
+    pub(crate) agent_name: &'stop str,
+    pub(crate) result: &'stop str,
     pub(crate) is_error: bool,
     pub(crate) subagent_failure: Option<peri_acp_types::error::SafeSubagentFailure>,
 }
@@ -211,7 +215,7 @@ pub(super) fn forward_subagent_start_v1(
     let Some(h) = handler else { return };
     // SubagentStarted 无 source_agent_id 字段（TUI 按 instance_id 配对），
     // 无需 set_source_agent_id；instance_id 由 child_agent_id 身份透传（C1）。
-    if let Some(exec_ev) = observe_event_to_executor(ev) {
+    if let Some(exec_ev) = crate::agent::events_v2::observe_event_to_executor(ev) {
         h.on_event(exec_ev);
     }
 }
@@ -223,7 +227,7 @@ pub(super) fn forward_subagent_stop_v1(
     ev: ObserveEvent,
 ) {
     let Some(h) = handler else { return };
-    if let Some(exec_ev) = observe_event_to_executor(ev) {
+    if let Some(exec_ev) = crate::agent::events_v2::observe_event_to_executor(ev) {
         h.on_event(exec_ev);
     }
 }
@@ -235,6 +239,7 @@ pub(super) fn forward_subagent_stop_v1(
 /// parent_messages / system_prompt）；None 时内部自建（测试/工具直调路径兜底，
 /// 无持久化）。
 #[allow(clippy::too_many_arguments)]
+#[must_use]
 pub fn build_v2_subagent_context(
     session: Option<Arc<Session>>,
     llm: Box<dyn ReactLLM + Send + Sync>,
@@ -280,7 +285,8 @@ pub fn build_v2_subagent_context(
     // 先过滤再合并，关闭的旧 MCP 候选不得占用合法 core 工具的名字。
     let mut tools_map: std::collections::BTreeMap<String, Arc<dyn BaseTool>> =
         std::collections::BTreeMap::new();
-    for tool in tools.into_iter().filter(|tool| tool_filter(tool.as_ref())) {
+    let tool_items = tools.into_iter().filter(|tool| tool_filter(tool.as_ref()));
+    for tool in tool_items {
         tools_map.insert(tool.name().to_string(), tool);
     }
     for tool in chain.collect_tools(cwd) {
@@ -333,9 +339,10 @@ pub fn build_v2_subagent_context(
 
     if let Some(manager) = host.and_then(|host| host.task_manager.clone()) {
         let wait = crate::agent::async_tasks::handoff::BoundedWait::new(
-            crate::agent::async_tasks::handoff::HANDOFF_MAX_WAIT,
+            crate::agent::async_tasks::handoff::handoff_max_wait(),
         );
         builder = builder
+            .with_task_manager(manager.clone())
             .with_idle_waiting()
             .with_idle_registry(manager.registry().subscribe_activity())
             .with_idle_should_wait({
@@ -390,6 +397,7 @@ pub fn build_v2_subagent_context(
 #[allow(clippy::too_many_arguments)]
 pub trait SubagentV2ContextBuilder: Send + Sync {
     /// 构造 SubAgent v2 上下文（参数与 [`build_v2_subagent_context`] 一致）。
+    #[must_use]
     fn build(
         &self,
         session: Option<Arc<Session>>,
@@ -407,6 +415,7 @@ pub trait SubagentV2ContextBuilder: Send + Sync {
 }
 
 /// [`SubagentV2ContextBuilder`] 的默认实现：委托 [`build_v2_subagent_context`]。
+#[derive(Debug)]
 pub struct DefaultSubagentV2ContextBuilder;
 
 #[allow(clippy::too_many_arguments)]
@@ -440,5 +449,13 @@ impl SubagentV2ContextBuilder for DefaultSubagentV2ContextBuilder {
             compact_llm,
             agent_id,
         )
+    }
+}
+
+impl Debug for V2SubagentContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("V2SubagentContext")
+            .finish_non_exhaustive()
     }
 }

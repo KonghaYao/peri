@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
-use std::sync::OnceLock;
 #[cfg(not(target_os = "emscripten"))]
-use std::{fs, path::Path};
+use std::fs;
+#[cfg(not(target_os = "emscripten"))]
+use std::path::Path;
+use std::sync::OnceLock;
 use uuid::Uuid;
 
 static MACHINE_ID: OnceLock<String> = OnceLock::new();
@@ -50,6 +52,7 @@ pub(crate) async fn initialize() -> Result<&'static str> {
     current()
 }
 
+/// Returns the identity fixed for this process, or an error before initialization.
 pub fn current() -> Result<&'static str> {
     MACHINE_ID
         .get()

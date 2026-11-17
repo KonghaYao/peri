@@ -1,16 +1,27 @@
-use super::*;
+use super::AcpEventData;
+use super::BridgeState;
+use super::CurrentTurn;
+
+use super::PublicationIntent;
+use super::SessionPhase;
+use super::TodoStatus;
+use super::TuiRenderUnit;
+
+use super::TuiUserBubble;
+use super::json;
+use super::serial;
 
 #[test]
 #[serial]
 fn test_transcript_publication_preserves_stable_history_and_resets_hint() {
     crate::kit::atoms::init_atoms();
-    push_view_models_for_reset();
-    let mut state = make_fold_test_state();
+    super::push_view_models_for_reset();
+    let mut state = super::make_fold_test_state();
     state.phase = SessionPhase::PromptRunning;
     state.committed = (0..256)
         .map(|index| TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("history-{index}"))))
         .collect();
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "first 中文".into(),
@@ -19,7 +30,7 @@ fn test_transcript_publication_preserves_stable_history_and_resets_hint() {
         }),
     );
     let previous = VIEW_MODELS.state().read().generation;
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "🙂 tail".into(),
@@ -37,7 +48,7 @@ fn test_transcript_publication_preserves_stable_history_and_resets_hint() {
         publication.changed_from >= 255,
         "unchanged history should not be scanned by render"
     );
-    push_view_models_for_reset();
+    super::push_view_models_for_reset();
     assert_eq!(
         crate::kit::atoms::TRANSCRIPT_PUBLICATION.get().changed_from,
         0
@@ -48,11 +59,11 @@ fn test_transcript_publication_preserves_stable_history_and_resets_hint() {
 #[test]
 #[serial]
 fn test_replay_events_defer_publication_until_scheduler_boundary() {
-    let mut state = make_fold_test_state();
+    let mut state = super::make_fold_test_state();
     state.phase = SessionPhase::ReplayingHistory;
 
     for text in ["history one", "history two"] {
-        let intent = dispatch_for_bridge(
+        let intent = super::dispatch_for_bridge(
             &mut state,
             &AcpEventData::CommittedAssistantText {
                 text: text.into(),
@@ -65,7 +76,7 @@ fn test_replay_events_defer_publication_until_scheduler_boundary() {
     assert_eq!(state.committed.len(), 2);
     assert_eq!(state.generation, 0, "逐条 replay 不应完整发布 VIEW_MODELS");
 
-    let intent = dispatch_for_bridge(&mut state, &AcpEventData::SessionReplayDone);
+    let intent = super::dispatch_for_bridge(&mut state, &AcpEventData::SessionReplayDone);
     assert_eq!(intent, PublicationIntent::Published);
     assert_eq!(state.generation, 1, "completion 边界必须发布完整历史");
     assert_eq!(VIEW_MODELS.state().read().items.len(), 2);
@@ -112,7 +123,7 @@ fn test_push_view_models_uses_bridge_state() {
     };
 
     // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
-    push_view_models(&mut state);
+    super::push_view_models(&mut state);
 
     let snapshot = VIEW_MODELS.state().read().clone();
     assert!(
@@ -135,7 +146,7 @@ fn test_handle_plan_update_multiple_entries() {
         ]
     });
 
-    handle_plan_update(&plan_json);
+    super::handle_plan_update(&plan_json);
 
     let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
     assert_eq!(items.len(), 3, "应包含 3 个条目");
@@ -154,7 +165,7 @@ fn test_handle_plan_update_empty_entries() {
         "entries": []
     });
 
-    handle_plan_update(&plan_json);
+    super::handle_plan_update(&plan_json);
 
     let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
     assert!(items.is_empty(), "空 entries 应产出空列表");
@@ -171,7 +182,7 @@ fn test_handle_plan_update_missing_entries() {
     }];
 
     let plan_json = json!({});
-    handle_plan_update(&plan_json);
+    super::handle_plan_update(&plan_json);
 
     // Plan 缺少 entries 字段 → deserialize 失败 → 不覆盖 TODO_ITEMS
     let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
@@ -214,7 +225,7 @@ fn test_prediction_writes_prediction_atom() {
     };
 
     use peri_acp_types::event_data::{Prediction, PredictionAction};
-    dispatch_and_notify(
+    super::dispatch_and_notify(
         &mut state,
         &AcpEventData::Prediction(Prediction {
             text: "type this".into(),
@@ -241,3 +252,7 @@ fn test_prediction_writes_prediction_atom() {
 mod session_compact_events_test;
 #[path = "session_rewind_events_test.rs"]
 mod session_rewind_events_test;
+
+use crate::kit::atoms::{PREDICTION, PredictionState, VIEW_MODELS, ViewModelsSnapshot};
+
+use super::{FeedbackChannel, FeedbackLevel, TuiCommandFeedback, dispatch_and_notify};

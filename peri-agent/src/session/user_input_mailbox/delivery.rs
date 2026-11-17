@@ -2,16 +2,13 @@
 
 use std::collections::HashSet;
 
-use peri_acp_types::{
-    messages::{MessageContent, MessageId},
-    session::UserInputState,
-};
+use peri_acp_types::messages::MessageContent;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::UserInputState;
 
-use super::state::matches_id;
-use super::window::{
-    prune_terminal_records, retain_terminal, PendingDeliveryNotification, DELIVERY_JOURNAL_CAPACITY,
-};
-use super::UserInputMailbox;
+use crate::session::user_input_mailbox::window::PendingDeliveryNotification;
+use crate::session::user_input_mailbox::window::DELIVERY_JOURNAL_CAPACITY;
+use crate::session::user_input_mailbox::UserInputMailbox;
 
 impl UserInputMailbox {
     /// 返回本次首次接纳的注册输入 ID，调用方在本轮 render FIFO 发聊天事件。
@@ -55,7 +52,7 @@ impl UserInputMailbox {
             }
             let mut delivered = Vec::new();
             {
-                let super::MailboxState {
+                let crate::session::user_input_mailbox::MailboxState {
                     records,
                     delivered_notifications,
                     delivery_journal,
@@ -63,8 +60,9 @@ impl UserInputMailbox {
                 } = &mut *state;
                 // Receive 的 ids 是 MQ 实际消费顺序，不可按 enqueue 的 records 顺序补确认。
                 for (id, content) in inputs {
-                    let Some(record) = records.iter_mut().find(|record| matches_id(record, &[*id]))
-                    else {
+                    let Some(record) = records.iter_mut().find(|record| {
+                        crate::session::user_input_mailbox::state::matches_id(record, &[*id])
+                    }) else {
                         continue;
                     };
                     if matches!(
@@ -102,9 +100,9 @@ impl UserInputMailbox {
             }
             state.revision += 1;
             for id in &delivered {
-                retain_terminal(&mut state, id);
+                crate::session::user_input_mailbox::window::retain_terminal(&mut state, id, None);
             }
-            prune_terminal_records(&mut state);
+            crate::session::user_input_mailbox::window::prune_terminal_records(&mut state);
             delivered
         };
         let snapshot = self.snapshot().await;

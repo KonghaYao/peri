@@ -1,7 +1,7 @@
 //! HooksPanel 底部提示与真实动作的一致性回归。
 
-use crate::kit::atoms::{ACTIVE_PANEL, HOOK_LIST, HookSummary, OPEN_PANELS};
-use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
+use crate::kit::panels::shared::list::ListMetrics;
+use crate::kit::panels::shared::list::ListViewport;
 use ratatui_kit::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
 use ratatui_kit::ratatui::buffer::Buffer;
@@ -11,6 +11,7 @@ use serial_test::serial;
 /// 面板行度量：header 3 行 + 每项 3 行 + footer 2 行（与组件内常量同源）。
 const METRICS: ListMetrics = ListMetrics::new(3, 3, 2);
 
+#[must_use]
 fn hook(index: usize) -> HookSummary {
     HookSummary {
         event: format!("hooke{index:02}"),
@@ -128,7 +129,7 @@ impl MountedPanel {
     fn event(&self, event: Event, area: Rect, term_h: u16) -> EventResult {
         let item_count = HOOK_LIST.state().read().len();
         let viewport = ListViewport::for_content_rows(
-            content_rows(Some(area), term_h),
+            crate::kit::panels::shared::list::content_rows(Some(area), term_h),
             METRICS,
             item_count,
             *self.selected.read(),
@@ -229,3 +230,11 @@ fn test_hooks_nav_hint_describes_close_not_open() {
         );
     }
 }
+
+use crate::kit::atoms::ACTIVE_PANEL;
+
+use crate::kit::atoms::HOOK_LIST;
+
+use crate::kit::atoms::HookSummary;
+
+use crate::kit::atoms::OPEN_PANELS;

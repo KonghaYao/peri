@@ -1,4 +1,10 @@
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::HostFixture;
+use super::RwLock;
+use super::SubAgentTool;
+use super::SubagentLlmSource;
 
 // ─── Fork path tests ────────────────────────────────────────────────────
 
@@ -22,14 +28,14 @@ async fn test_fork_inherits_parent_messages() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             *self.msg_count.lock().unwrap() = messages.len();
-            text_events("fork-done")
+            test_support::text_events("fork-done")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(ForkTestLLM);
@@ -52,8 +58,9 @@ async fn test_fork_inherits_parent_messages() {
         .with_parent_messages(Arc::clone(&parent_messages)),
     );
 
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do the thing"
@@ -96,12 +103,12 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let defined = defined_tools(&request);
+            let defined = test_support::defined_tools(&request);
             let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
-            text_events("tools-check")
+            test_support::text_events("tools-check")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(ToolsCheckLLM);
@@ -111,9 +118,9 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
     // `builtin_mcp_instance`（P5 起 workflow 是 builtin 实例，模型面名字
     // `mcp__workflow__Workflow`）。
     let parent_tools: Vec<Arc<dyn BaseTool>> = vec![
-        make_tool("Read"),
-        make_tool("Agent"),
-        make_tool("AskUserQuestion"),
+        super::make_tool("Read"),
+        super::make_tool("Agent"),
+        super::make_tool("AskUserQuestion"),
         Arc::new(CapabilityTool {
             name: "mcp__workflow__Workflow",
             builtin_instance: Some("workflow"),
@@ -142,7 +149,8 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
         .with_parent_messages(parent_messages),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "check tools"
@@ -184,12 +192,13 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
 #[tokio::test]
 async fn test_fork_without_parent_messages_returns_error() {
     let host = HostFixture::open("fixture-fork-empty").await;
-    let t = host.bind(make_subagent_tool(vec![]));
+    let t = host.bind(super::make_subagent_tool(vec![]));
 
     // Fork 现在从 ToolContext 获取消息（而非 self.parent_messages），
     // 空消息也是合法输入。
-    let result = t
-        .invoke(
+    let result = host
+        .invoke_and_wait(
+            &t,
             serde_json::json!({
                 "fork": true,
                 "prompt": "do something"
@@ -231,7 +240,8 @@ async fn test_fork_system_prompt_consistent() {
         .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string())),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "check system"
@@ -281,7 +291,8 @@ async fn test_fork_identity_is_projected_not_parent_bytes() {
         .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string())),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "check projected prefix"
@@ -334,15 +345,15 @@ async fn test_fork_directive_includes_rules() {
             request: peri_model::ModelRequest,
             cancellation: tokio_util::sync::CancellationToken,
         ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-            use crate::subagent::test_support::*;
+            use crate::subagent::test_support;
             let _ = &cancellation;
-            let messages = base_messages(&request);
-            let defined = defined_tools(&request);
+            let messages = test_support::base_messages(&request);
+            let defined = test_support::defined_tools(&request);
             let _tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
             let last = messages.last().map(|m| m.content()).unwrap_or_default();
             *self.last.lock().unwrap() = last;
-            text_events("directive-check")
+            test_support::text_events("directive-check")
         }
     }
     crate::subagent::test_support::fixture_model_impl!(DirectiveCheckLLM);
@@ -365,7 +376,8 @@ async fn test_fork_directive_includes_rules() {
         .with_parent_messages(parent_messages),
     );
 
-    t.invoke(
+    host.invoke_and_wait(
+        &t,
         serde_json::json!({
             "fork": true,
             "prompt": "my directive task"
@@ -475,8 +487,8 @@ fn capability_tools() -> Vec<Arc<dyn BaseTool>> {
 /// 继承策略：Agent / AskUser / builtin workflow 与 cron 实例全部闭合；工作区工具保持。
 #[test]
 fn child_inheritance_filter_closes_extension_faces_and_keeps_workspace() {
-    use crate::subagent::fork::child_inheritance_filter;
-    let filter = child_inheritance_filter();
+    use crate::subagent::fork;
+    let filter = fork::child_inheritance_filter();
     let tools = capability_tools();
     let allowed: Vec<&str> = tools
         .iter()
@@ -494,11 +506,11 @@ fn child_inheritance_filter_closes_extension_faces_and_keeps_workspace() {
 /// `filter_tools` 结果一致闭合。
 #[test]
 fn definition_and_fork_share_one_inheritance_policy() {
-    use crate::subagent::fork::{canonical_tool_filter, filter_tools};
+    use crate::subagent::fork;
     use peri_mcp_core::agent_definition::ToolsValue;
     let tools = capability_tools();
     let star = ToolsValue::List(vec!["*".to_string()]);
-    let definition_filter = canonical_tool_filter(&star, &ToolsValue::Empty);
+    let definition_filter = fork::canonical_tool_filter(&star, &ToolsValue::Empty);
     let names: Vec<&str> = tools
         .iter()
         .filter(|tool| definition_filter(tool.as_ref()))
@@ -506,7 +518,7 @@ fn definition_and_fork_share_one_inheritance_policy() {
         .collect();
     assert_eq!(names, vec!["mcp__user__cron", "Read", "Bash"]);
 
-    let filtered = filter_tools(&tools, &star, &ToolsValue::Empty);
+    let filtered = fork::filter_tools(&tools, &star, &ToolsValue::Empty);
     let filtered_names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
     assert_eq!(
         filtered_names,
@@ -652,8 +664,8 @@ async fn test_fork_rejected_when_parent_context_above_limit() {
             input[key] = value.clone();
         }
 
-        let error = tool
-            .invoke(input, ctx)
+        let error = host
+            .invoke_and_wait(&tool, input, ctx)
             .await
             .expect_err(&format!("{label} fork 在使用率 80% 时应被拒绝"));
         let message = error.to_string();
@@ -696,8 +708,8 @@ async fn test_non_fork_invocation_ignores_fork_context_gate() {
 
     // 缺少 subagent_type 时走到定义解析前的参数错误——证明没有触发 fork 门，
     // 也证明门不误伤非 fork 路径（错误来自缺失参数而非上下文使用率）。
-    let error = tool
-        .invoke(serde_json::json!({ "prompt": "do the thing" }), ctx)
+    let error = host
+        .invoke_and_wait(&tool, serde_json::json!({ "prompt": "do the thing" }), ctx)
         .await
         .expect_err("缺少 subagent_type 应报参数错误");
     let message = error.to_string();

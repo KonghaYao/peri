@@ -689,7 +689,7 @@ fn reopen_keeps_streaming_content_not_in_the_new_page() {
         .committed
         .push_back(crate::kit::acp_events::turn::committed_assistant_unit(
             "streaming",
-            &None,
+            None,
         ));
 
     let mut reopened = page(

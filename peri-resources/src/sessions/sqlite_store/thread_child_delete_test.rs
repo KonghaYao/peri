@@ -19,13 +19,17 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{MessageKind, MessagePolicy, MessageSource, MqInput};
 use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
 use peri_acp_types::store::PersistedPayload;
+use peri_acp_types::store::ThreadStore;
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tempfile::TempDir;
 
 use super::session_rows::THREAD_CHILD_DELETES;
-use super::*;
+use super::{
+    Arc, AssertSqlSafe, BaseMessage, SqliteSessionData, SqliteSessionDatabase, SqliteThreadStore,
+};
+
 use crate::sessions::data::SessionDataPort;
 
 // ─── 夹具：同一份 schema，关掉外键强制的执行器 ────────────────────────────────
@@ -44,7 +48,11 @@ struct NoCascade {
 async fn without_cascade() -> NoCascade {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
-    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    SqliteThreadStore::try_new(&path)
+        .await
+        .unwrap()
+        .close()
+        .await;
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(

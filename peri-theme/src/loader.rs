@@ -10,7 +10,8 @@ use crate::theme::ThemeDefinition;
 
 mod decode;
 mod resolve;
-mod source;
+mod theme_sources;
+use theme_sources as source;
 
 /// 主题加载错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +43,7 @@ pub fn load_theme(name: &str) -> Result<Arc<ThemeDefinition>, ThemeLoadError> {
 }
 
 /// 列出内置主题和用户目录中的 JSON 文件名称，排序并去重；不预先解析文件。
+#[must_use]
 pub fn list_available_themes() -> Vec<String> {
     source::ThemeSources::from_environment().list()
 }

@@ -1,7 +1,7 @@
-use super::event_builder::{new_uuid, now_rfc3339, try_add_or_warn_via_session, VERSION};
-use super::registry::{self, GateEvent, Ownership};
-use super::stages::StageHandle;
-use super::LangfuseTracer;
+use crate::langfuse::tracer::event_builder::VERSION;
+use crate::langfuse::tracer::registry::{self, GateEvent, Ownership};
+use crate::langfuse::tracer::stages::StageHandle;
+use crate::langfuse::tracer::LangfuseTracer;
 use langfuse_client::types::ObservationLevel;
 use langfuse_client::{IngestionEvent, ObservationBody, ObservationType};
 use peri_agent::agent::events::{Stage, StageStatus};
@@ -262,6 +262,8 @@ impl LangfuseTracer {
             "is_synthetic": false,
             "was_sampled": true,
             "turn_id": self.trace_id.clone(),
+            // 子 Agent 的 thread 身份，用于跨 trace 关联该子会话产生的观测
+            "child_thread_id": closed.agent_id,
         });
         if let Some(reason) = &closed.incomplete_reason {
             metadata["incomplete_reason"] = serde_json::json!(format!("{:?}", reason));
@@ -288,12 +290,12 @@ impl LangfuseTracer {
             session_id: Some(self.session_id.clone()),
         };
         let event = IngestionEvent::ObservationCreate {
-            id: new_uuid(),
-            timestamp: now_rfc3339(),
+            id: crate::langfuse::tracer::event_builder::new_uuid(),
+            timestamp: crate::langfuse::tracer::event_builder::now_rfc3339(),
             body,
             metadata: None,
         };
-        try_add_or_warn_via_session(
+        crate::langfuse::tracer::event_builder::try_add_or_warn_via_session(
             &*self.session,
             event,
             &self.trace_id,

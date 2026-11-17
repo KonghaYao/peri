@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use peri_agent::middleware::r#trait::Middleware;
 
-use crate::mcp::builtin::closed_instances;
+use crate::mcp::builtin;
 use crate::mcp::{ClientStatus, McpClientHandle, McpClientPool, McpMiddleware, Tool};
 
 /// 构造一个「已连接」的假 MCP client（工具名按传入列表）。
@@ -118,8 +118,8 @@ fn pool_with_builtin_instances() -> Arc<McpClientPool> {
 fn collected_tool_names(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<String> {
     let disabled: std::collections::HashSet<String> =
         disabled.iter().map(|name| name.to_string()).collect();
-    let middleware =
-        McpMiddleware::new(Arc::clone(pool)).with_builtin_closures(closed_instances(&disabled));
+    let middleware = McpMiddleware::new(Arc::clone(pool))
+        .with_builtin_closures(builtin::closed_instances(&disabled));
     middleware
         .collect_tools("/tmp/contract-test")
         .into_iter()
@@ -134,8 +134,8 @@ fn collected_tool_names(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<Str
 fn builtin_tools_are_collected_with_declared_direct() {
     let pool = pool_with_builtin_instances();
     let disabled: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let middleware =
-        McpMiddleware::new(Arc::clone(&pool)).with_builtin_closures(closed_instances(&disabled));
+    let middleware = McpMiddleware::new(Arc::clone(&pool))
+        .with_builtin_closures(builtin::closed_instances(&disabled));
     let tools = middleware.collect_tools("/tmp/contract-test");
 
     let direct_of = |name: &str| -> Option<bool> {
@@ -144,18 +144,18 @@ fn builtin_tools_are_collected_with_declared_direct() {
             .find(|tool| tool.name() == name)
             .map(|tool| tool.is_direct())
     };
-    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+    for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.iter() {
         for declaration in instance.tools {
             assert_eq!(
-                direct_of(declaration.effective_name),
+                direct_of(declaration.legacy_name),
                 Some(declaration.direct),
                 "{} 的 direct 必须等于注册表声明（IF-D13）",
-                declaration.effective_name
+                declaration.legacy_name
             );
             assert_eq!(
                 tools
                     .iter()
-                    .find(|tool| tool.name() == declaration.effective_name)
+                    .find(|tool| tool.name() == declaration.legacy_name)
                     .unwrap()
                     .visible_to_model(),
                 declaration.model_visible,
@@ -174,7 +174,7 @@ fn builtin_tools_are_collected_with_declared_direct() {
 #[test]
 fn closed_builtin_instance_disappears_from_collected_tools() {
     // 关闭 web：两个 web 工具消失，artifact 与外部 server 保留。
-    let web_closed = collected_tool_names(&pool_with_builtin_instances(), &["WebMiddleware"]);
+    let web_closed = collected_tool_names(&pool_with_builtin_instances(), &["web"]);
     assert!(
         !web_closed
             .iter()
@@ -191,8 +191,7 @@ fn closed_builtin_instance_disappears_from_collected_tools() {
     );
 
     // 关闭 artifact：只有 artifact 消失。
-    let artifact_closed =
-        collected_tool_names(&pool_with_builtin_instances(), &["ArtifactMiddleware"]);
+    let artifact_closed = collected_tool_names(&pool_with_builtin_instances(), &["artifact"]);
     assert!(artifact_closed.iter().any(|name| name == "WebSearch"));
     assert!(
         !artifact_closed.iter().any(|name| name == "artifact"),
@@ -200,10 +199,7 @@ fn closed_builtin_instance_disappears_from_collected_tools() {
     );
 
     // 两者都关闭：builtin 工具一个不剩。
-    let both_closed = collected_tool_names(
-        &pool_with_builtin_instances(),
-        &["WebMiddleware", "ArtifactMiddleware"],
-    );
+    let both_closed = collected_tool_names(&pool_with_builtin_instances(), &["web", "artifact"]);
     assert!(
         !both_closed
             .iter()

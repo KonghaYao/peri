@@ -3,7 +3,8 @@
 //!
 //! 真实链路与覆盖口径见 `server_test.rs` 头注（注入生产 handler + rmcp 原生 client）。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use peri_acp_types::workflow::{AgentRunParams, AgentRunResult, Usage};
@@ -11,18 +12,23 @@ use peri_workflow::protocol::ProgressEvent;
 use peri_workflow::runner::AgentExecutor;
 use peri_workflow::runtime::WorkflowRuntime;
 use peri_workflow::runtime::WORKFLOW_CONSUMER_META_KEY;
-use rmcp::{
-    model::{
-        CallToolRequestParams, CallToolResult, ErrorCode, MetaObject, ReadResourceRequestParams,
-        ReadResourceResult, RequestMetaObject,
-    },
-    service::{Peer, QuitReason, RunningService},
-    ClientLifecycleMode, RoleClient, ServiceError,
-};
+use rmcp::model::CallToolRequestParams;
+use rmcp::model::CallToolResult;
+use rmcp::model::ErrorCode;
+use rmcp::model::MetaObject;
+use rmcp::model::ReadResourceRequestParams;
+use rmcp::model::ReadResourceResult;
+use rmcp::model::RequestMetaObject;
+use rmcp::service::Peer;
+use rmcp::service::QuitReason;
+use rmcp::service::RunningService;
+use rmcp::ClientLifecycleMode;
+use rmcp::RoleClient;
+use rmcp::ServiceError;
 use serde_json::Value;
 
-use super::WorkflowMcpServer;
 use crate::input::WorkflowInstanceInput;
+use crate::server::WorkflowMcpServer;
 
 const DUPLEX_BUF: usize = 8 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);

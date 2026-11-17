@@ -1,22 +1,23 @@
 //! 模型缓存、冻结 prompt 与生产链上下文投影。
-use super::{AcpAgentOutput, AgentComponents, CachedLlmInstances, StageBuildInput};
-use crate::{
-    agent::{
-        async_tasks::TaskManager, model_bridge::AgentModelBridge, react::ReactLLM,
-        token::ContextBudget,
-    },
-    session::{
-        exec::executor::FrozenSessionData,
-        factory::{AssemblyContext, ChainAssembly, MiddlewareChainAssembler, OnBgCompleteFn},
-    },
-};
-use peri_acp_types::{
-    agents::AgentOverrides,
-    event::AgentEventHandler,
-    frozen::{ChildHandlerFactory, ThreadPersistence},
-    goal::GoalController,
-    tools::TodoItem,
-};
+use crate::agent::async_tasks::TaskManager;
+use crate::agent::model_bridge::AgentModelBridge;
+use crate::agent::react::ReactLLM;
+use crate::agent::token::ContextBudget;
+use crate::session::exec::executor::FrozenSessionData;
+use crate::session::exec::stage_builder::AcpAgentOutput;
+use crate::session::exec::stage_builder::AgentComponents;
+use crate::session::exec::stage_builder::CachedLlmInstances;
+use crate::session::exec::stage_builder::StageBuildInput;
+use crate::session::factory::AssemblyContext;
+use crate::session::factory::ChainAssembly;
+use crate::session::factory::MiddlewareChainAssembler;
+use crate::session::factory::OnBgCompleteFn;
+use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::event::AgentEventHandler;
+use peri_acp_types::frozen::ChildHandlerFactory;
+use peri_acp_types::frozen::ThreadPersistence;
+use peri_acp_types::goal::GoalController;
+use peri_acp_types::tools::TodoItem;
 use std::sync::Arc;
 
 /// 构建可复用的 Agent（ACP 和 TUI 共用核心构建逻辑）
@@ -43,7 +44,10 @@ pub(crate) fn build_agent(
     task_manager: Arc<TaskManager>,
     on_bg_complete: Option<OnBgCompleteFn>,
     cached_llm: Option<&CachedLlmInstances>,
-) -> Result<(AcpAgentOutput, Option<CachedLlmInstances>), super::StageBuildError> {
+) -> Result<
+    (AcpAgentOutput, Option<CachedLlmInstances>),
+    crate::session::exec::stage_builder::StageBuildError,
+> {
     // FrozenContext 中的空字符串是“冻结缺席”，仍须投影为 Some("")，
     // 防止 AgentsMd/Skills middleware 在 before_agent 阶段重读晚到文件。
     let frozen = frozen_session.v2_frozen();
@@ -214,7 +218,7 @@ struct TurnAssembly {
     task_manager: Arc<TaskManager>,
     on_bg_complete: Option<OnBgCompleteFn>,
     todo_tx: tokio::sync::mpsc::Sender<Vec<TodoItem>>,
-    bg_event_tx: super::BgEventTx,
+    bg_event_tx: crate::session::exec::stage_builder::BgEventTx,
     frozen_claude_md: Option<String>,
     frozen_claude_local_md: Option<String>,
     frozen_skill_summary: Option<String>,
@@ -271,8 +275,6 @@ fn project_assembly(input: &StageBuildInput, turn: TurnAssembly) -> AssemblyCont
         // MetaHarness：装配期关闭集合（源自会话冻结状态投影，
         // 顶层链过滤——设计 §2.5；禁止从每 turn 当前配置重建）。
         meta_harness_disabled: input.meta_harness_disabled.clone(),
-        // beta flag 投影（会话冻结）：`Agent` 工具缺省后台的语义值，随链装配下传。
-        agent_default_run_in_background: input.agent_default_run_in_background,
         // 波 4 演进 2：基础段持有者（DefaultSystemPromptMiddleware 的
         // persona 内容源 = 与 render_system_prompt 同一份 agent_overrides；
         // LangMiddleware 的语言内容源 = 冻结语言，保证链收集与渲染一致）。

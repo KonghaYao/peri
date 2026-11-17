@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 use peri_acp_types::builtin_mcp::{BUILTIN_MCP_INSTANCES, BUILTIN_RESERVED_INSTANCE_NAMES};
 use peri_acp_types::plugin::ConfigSource;
 
-use crate::mcp::builtin::{apply_builtin_overlay, BuiltinInjectionPolicy};
-use crate::mcp::config::{
-    load_merged_config_full_with_paths, remove_server_from_config_with_paths,
-    set_server_disabled_with_paths, McpConfigError, McpConfigFile,
-};
+use crate::mcp::builtin;
+use crate::mcp::builtin::BuiltinInjectionPolicy;
+use crate::mcp::config;
+use crate::mcp::config::McpConfigError;
+use crate::mcp::config::McpConfigFile;
 
 /// 测试用显式全局路径（不存在 → 空全局配置）：不读真实 `~/.peri/settings.json`。
 fn missing_global_path(dir: &Path) -> PathBuf {
@@ -52,7 +52,7 @@ fn load(
     global_path: &Path,
     policy: &BuiltinInjectionPolicy,
 ) -> Result<McpConfigFile, McpConfigError> {
-    load_merged_config_full_with_paths(cwd, claude_home, global_path, policy)
+    config::load_merged_config_full_with_paths(cwd, claude_home, global_path, policy)
         .map(|(config, _)| config)
 }
 
@@ -88,7 +88,7 @@ fn builtin_default_layer_inserts_complete_entries() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
 
@@ -98,7 +98,7 @@ fn builtin_default_layer_inserts_complete_entries() {
         "零用户配置时应恰有两个 builtin 条目，实际 keys: {:?}",
         merged.mcp_servers.keys().collect::<Vec<_>>()
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let entry = merged
             .mcp_servers
             .get(instance.name)
@@ -169,7 +169,7 @@ fn empty_user_entry_still_becomes_system_direct_instance() {
     // `{"cron": {}}` 与 `{"web": {}}` 走同一条「规则 2：存在且无
     // command/url」分支，差别只在 direct 集合（cron 为空集，零工具提升）。夹具按名字
     // 逐一构造，因此每个实例都必须各自证明一次。
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let name = instance.name;
         let (_dir, cwd, claude_home, global_path) =
             project_with_servers(&format!(r#"{{"{name}":{{}}}}"#));
@@ -177,7 +177,7 @@ fn empty_user_entry_still_becomes_system_direct_instance() {
             &cwd,
             &claude_home,
             &global_path,
-            &BuiltinInjectionPolicy::all(),
+            &BuiltinInjectionPolicy::legacy_instances(),
         )
         .unwrap();
 
@@ -214,7 +214,8 @@ fn empty_user_entry_still_becomes_system_direct_instance() {
 fn workspace_default_subscription_is_injected_by_overlay() {
     let mut map: std::collections::HashMap<String, peri_acp_types::plugin::McpServerConfig> =
         std::collections::HashMap::new();
-    apply_builtin_overlay(&mut map, &BuiltinInjectionPolicy::all()).expect("空配置必须可注入");
+    builtin::apply_builtin_overlay(&mut map, &BuiltinInjectionPolicy::legacy_instances())
+        .expect("空配置必须可注入");
 
     let workspace = map.get("workspace").expect("workspace 条目必须存在");
     assert_eq!(
@@ -222,7 +223,7 @@ fn workspace_default_subscription_is_injected_by_overlay() {
         crate::mcp::builtin::default_subscriptions_for("workspace"),
         "workspace 必须带默认订阅（git ref 资源）"
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         if instance.name == "workspace" {
             continue;
         }
@@ -248,7 +249,7 @@ fn user_subscriptions_win_over_default_injection() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     let workspace = merged
@@ -271,7 +272,7 @@ fn user_subscriptions_win_over_default_injection() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     let workspace = merged
@@ -300,7 +301,7 @@ fn user_fields_are_respected_without_deep_merge() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     let web = merged.mcp_servers.get("web").expect("web 条目应保留");
@@ -314,6 +315,24 @@ fn user_fields_are_respected_without_deep_merge() {
 }
 
 #[test]
+fn v5_web_credentials_survive_legacy_instance_removal() {
+    let (_dir, cwd, claude_home, global_path) = project_with_servers(
+        r#"{"web":{"env":{"WEB_TOKEN":"legacy"}},"peri":{"env":{"OTHER_TOKEN":"current"}}}"#,
+    );
+    let merged = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::all(),
+    )
+    .unwrap();
+    let env = merged.mcp_servers["peri"].env.as_ref().expect("v5 env");
+    assert_eq!(env.get("WEB_TOKEN").map(String::as_str), Some("legacy"));
+    assert_eq!(env.get("OTHER_TOKEN").map(String::as_str), Some("current"));
+    assert!(!merged.mcp_servers.contains_key("web"));
+}
+
+#[test]
 fn system_mcp_timeout_without_system_mcp_is_rejected_before_overlay() {
     // 解析期契约（IF-M1）先于 overlay：不构成 system 依赖的 timeout 声明是非法配置，
     // 不得被 overlay「顺手补齐」掩盖成可用实例。
@@ -323,7 +342,7 @@ fn system_mcp_timeout_without_system_mcp_is_rejected_before_overlay() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .expect_err("timeout 缺少 system_mcp 必须在解析期被拒绝");
     assert!(
@@ -360,7 +379,7 @@ fn every_reserved_instance_is_implemented_and_injected_with_builtin_identity() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
 
@@ -370,7 +389,7 @@ fn every_reserved_instance_is_implemented_and_injected_with_builtin_identity() {
         "保留名逐项已实现 ⇒ 产物键集必须恰等于保留名表（不多不少）: {:?}",
         merged.mcp_servers.keys().collect::<Vec<_>>()
     );
-    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES.iter() {
         assert!(
             peri_acp_types::builtin_mcp::find(name).is_some(),
             "{name} 必须已在注册表内（wave 3 后不存在「预留但未实现」的名字）"
@@ -408,7 +427,7 @@ fn disabled_instance_keeps_builtin_transport_but_not_system_dependency() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     let web = merged.mcp_servers.get("web").expect("web 条目应保留");
@@ -441,7 +460,7 @@ fn disabled_with_system_mcp_is_rejected_at_load_time() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .expect_err("`disabled + system_mcp` 必须在加载期被拒绝，不得落到 readiness 的 fatal");
     // M7 后拒绝位置前移到**共享** `McpServerConfig::validate`（覆盖 builtin/普通/
@@ -512,7 +531,7 @@ fn reserved_instance_names_cannot_be_taken_over_by_command() {
             &cwd,
             &claude_home,
             &global_path,
-            &BuiltinInjectionPolicy::all(),
+            &BuiltinInjectionPolicy::legacy_instances(),
         )
         .expect_err("保留名被 command 接管必须加载期 typed error");
         assert_reserved_takeover(error, name);
@@ -527,7 +546,7 @@ fn remote_workspace_requires_global_or_host_selection_and_no_tool_manifest() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .expect_err("a project cannot select a trusted remote workspace");
     assert!(matches!(
@@ -546,7 +565,7 @@ fn remote_workspace_requires_global_or_host_selection_and_no_tool_manifest() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     let workspace = &merged.mcp_servers["workspace"];
@@ -578,7 +597,7 @@ fn reserved_instance_names_cannot_be_taken_over_by_url() {
             &cwd,
             &claude_home,
             &global_path,
-            &BuiltinInjectionPolicy::all(),
+            &BuiltinInjectionPolicy::legacy_instances(),
         )
         .expect_err("保留名被 url 接管必须加载期 typed error");
         // 不把 url 带进错误文本（认证信息可能出现在 query / userinfo 里）。
@@ -605,6 +624,21 @@ fn reserved_name_takeover_is_rejected_even_when_injection_is_off() {
 }
 
 #[test]
+fn v5_single_exit_name_cannot_be_taken_over() {
+    // `peri` 是 v5 单出口保留名；兼容期也不允许用户条目用 command/url 冒充。
+    let (_dir, cwd, claude_home, global_path) =
+        project_with_servers(r#"{"peri":{"command":"fake-command"}}"#);
+    let error = load(
+        &cwd,
+        &claude_home,
+        &global_path,
+        &BuiltinInjectionPolicy::legacy_instances(),
+    )
+    .expect_err("peri 不得被用户 command 接管");
+    assert_reserved_takeover(error, "peri");
+}
+
+#[test]
 fn non_reserved_instance_with_command_is_untouched() {
     // 非保留名照旧：overlay 不触碰（也不因它存在而失败）。
     let (_dir, cwd, claude_home, global_path) =
@@ -613,7 +647,7 @@ fn non_reserved_instance_with_command_is_untouched() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     let external = merged
@@ -638,7 +672,7 @@ fn builtin_only_entry_written(raw: &str) -> Option<String> {
         .get("mcpServers")
         .or_else(|| value.get("config")?.get("mcpServers"))?
         .as_object()?;
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let Some(entry) = servers.get(instance.name) else {
             continue;
         };
@@ -673,7 +707,7 @@ fn write_back_functions_never_persist_builtin_default_entries() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     assert!(merged.mcp_servers.contains_key("artifact"), "注入已发生");
@@ -684,7 +718,7 @@ fn write_back_functions_never_persist_builtin_default_entries() {
     );
 
     // 2. 两个写回函数只修改**已存在于磁盘文件中的条目**：用户条目正常写盘。
-    set_server_disabled_with_paths(&cwd, &global_path, "plain", true).unwrap();
+    config::set_server_disabled_with_paths(&cwd, &global_path, "plain", true).unwrap();
     let after_disable = std::fs::read_to_string(&project_path).unwrap();
     let written: serde_json::Value = serde_json::from_str(&after_disable).unwrap();
     assert_eq!(written["mcpServers"]["plain"]["disabled"], true);
@@ -693,7 +727,7 @@ fn write_back_functions_never_persist_builtin_default_entries() {
         "写回不得把 builtin 默认条目写盘: {after_disable}"
     );
 
-    remove_server_from_config_with_paths(&cwd, &global_path, "plain").unwrap();
+    config::remove_server_from_config_with_paths(&cwd, &global_path, "plain").unwrap();
     let after_remove = std::fs::read_to_string(&project_path).unwrap();
     assert!(
         builtin_only_entry_written(&after_remove).is_none(),
@@ -726,13 +760,13 @@ fn write_back_is_noop_for_instance_that_only_exists_in_memory() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     assert!(merged.mcp_servers.contains_key("web"));
 
-    set_server_disabled_with_paths(&cwd, &global_path, "web", true).unwrap();
-    remove_server_from_config_with_paths(&cwd, &global_path, "web").unwrap();
+    config::set_server_disabled_with_paths(&cwd, &global_path, "web", true).unwrap();
+    config::remove_server_from_config_with_paths(&cwd, &global_path, "web").unwrap();
     assert_eq!(
         std::fs::read_to_string(&project_path).unwrap(),
         before,
@@ -749,10 +783,10 @@ fn system_mcp_tools_equals_declared_direct_set_for_every_instance() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         let tools = merged.mcp_servers[instance.name]
             .system_mcp_tools
             .clone()
@@ -800,8 +834,12 @@ fn system_mcp_tools_equals_declared_direct_set_for_every_instance() {
                     "workspace 的 direct 集合必须覆盖其全部已声明工具（AW3-03：7 项）"
                 );
                 assert!(
-                    instance.tools.iter().all(|tool| tool.direct),
-                    "workspace 不得有 deferred 工具（AW3-03：7 项一律 direct）"
+                    instance
+                        .tools
+                        .iter()
+                        .filter(|tool| tool.advertised)
+                        .all(|tool| tool.direct),
+                    "workspace wire 目录不得有 deferred 工具（AW3-03：7 项一律 direct）"
                 );
             }
             other => panic!("新增实例 {other} 必须在本测试内显式登记 direct 语义"),
@@ -913,7 +951,7 @@ fn builtin_injection_does_not_change_existing_hash_dedup_result() {
         &cwd,
         &claude_home,
         &global_path,
-        &BuiltinInjectionPolicy::all(),
+        &BuiltinInjectionPolicy::legacy_instances(),
     )
     .unwrap();
     let not_injected = load(
@@ -942,7 +980,7 @@ fn builtin_injection_does_not_change_existing_hash_dedup_result() {
         non_builtin_keys(&not_injected),
         "builtin 注入不得改变既有 server 的去重结果"
     );
-    for instance in BUILTIN_MCP_INSTANCES {
+    for instance in BUILTIN_MCP_INSTANCES.iter() {
         assert!(
             injected.mcp_servers.contains_key(instance.name)
                 && !not_injected.mcp_servers.contains_key(instance.name),

@@ -1,8 +1,9 @@
 //! Hook 显式停止意图的执行绑定与跨 run 抑制。
 
-use super::*;
 use crate::agent::async_tasks::handoff::ChildSettlementWindow;
 use crate::agent::react::{ReactLLM, Reasoning, StreamingContext};
+use crate::agent::stages::context::StageContext;
+use crate::agent::stages::LoopResult;
 use crate::messages::BaseMessage;
 use crate::session::queue::{MessageSource, QueuedMessage};
 use crate::session::{FrozenContext, MessageKind, Session, TurnContext};
@@ -74,7 +75,9 @@ async fn stop_intent_for_current_execution_returns_hook_stopped() {
         .push_sync(stop_message(turn.execution_binding()));
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let result = run_react_loop(context_with_turn(&session, turn, calls.clone()), 10).await;
+    let result =
+        crate::agent::stages::run_react_loop(context_with_turn(&session, turn, calls.clone()), 10)
+            .await;
 
     assert!(matches!(
         result,
@@ -95,7 +98,7 @@ async fn stale_stop_intent_does_not_stop_new_execution() {
     ));
     let calls = Arc::new(AtomicUsize::new(0));
 
-    let result = run_react_loop(
+    let result = crate::agent::stages::run_react_loop(
         context_with_turn(&session, session.start_turn(), calls.clone()),
         10,
     )
@@ -125,7 +128,7 @@ async fn deadline_left_stop_intent_does_not_stop_resumed_execution() {
 
     let mut first = context_with_turn(&session, first_turn, calls.clone());
     first.async_ctx.child_settlement = Some(window);
-    let first_result = run_react_loop(first, 10).await;
+    let first_result = crate::agent::stages::run_react_loop(first, 10).await;
     assert!(matches!(first_result, LoopResult::SettlementDue { .. }));
     assert_eq!(
         session.queue().len_sync(),
@@ -138,7 +141,7 @@ async fn deadline_left_stop_intent_does_not_stop_resumed_execution() {
         MessageSource::UserInput,
         BaseMessage::human("resume after handoff"),
     ));
-    let resumed = run_react_loop(
+    let resumed = crate::agent::stages::run_react_loop(
         context_with_turn(&session, session.start_turn(), calls.clone()),
         10,
     )
@@ -151,7 +154,11 @@ async fn deadline_left_stop_intent_does_not_stop_resumed_execution() {
     session
         .queue()
         .push_sync(stop_message(stop_turn.execution_binding()));
-    let stopped = run_react_loop(context_with_turn(&session, stop_turn, calls.clone()), 10).await;
+    let stopped = crate::agent::stages::run_react_loop(
+        context_with_turn(&session, stop_turn, calls.clone()),
+        10,
+    )
+    .await;
     assert!(
         matches!(stopped, LoopResult::HookStopped { .. }),
         "同一执行内消费到的 Stop 仍必须生效"

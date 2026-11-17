@@ -8,7 +8,13 @@ use peri_acp_types::workspace_resources::{
     META_KEY_SCOPE, MIME_MARKDOWN,
 };
 
-use super::*;
+use crate::resources::ResourceBody;
+use crate::resources::ResourceBudget;
+use crate::resources::ResourceError;
+use crate::resources::ResourceRoot;
+use crate::resources::WorkspaceResourceProvider;
+use crate::resources::WorkspaceResourcesInput;
+use peri_acp_types::workspace_resources::INSTRUCTION_LOCAL_URI;
 
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().expect("临时目录夹具必须可创建")
@@ -188,16 +194,15 @@ fn scan_read_replacement_does_not_leak() {
         );
         // 整个技能仍在（入口未受影响），但其 manifest 已不含逃逸项。
         let entry = provider
-            .skills_get("skill://project/alpha/SKILL.md")
+            .get_skill("skill://project/alpha/SKILL.md")
             .expect("技能仍可读");
-        let uris: Vec<&str> = entry
-            .skill
-            .resources
-            .as_ref()
-            .expect("manifest")
-            .iter()
-            .map(|resource| resource.uri.as_str())
-            .collect();
+        let uris: Vec<&str> = match &entry.skill.resources {
+            rmcp::model::SkillResources::Files(files) => {
+                files.iter().map(|resource| resource.uri.as_str()).collect()
+            }
+            rmcp::model::SkillResources::Dynamic => panic!("静态技能必须是完整 manifest"),
+            other => panic!("静态技能必须是完整 manifest，实际：{other:?}"),
+        };
         assert!(!uris.contains(&"skill://project/alpha/sub/data.txt"));
     }
 }
@@ -248,7 +253,7 @@ fn empty_input_still_lists_builtin_skills_and_instruction_index() {
     );
     assert!(
         uris.iter().any(|uri| uri.starts_with("skill://builtin/")),
-        "builtin 默认启用（7 个内置技能）"
+        "builtin 默认启用（内置技能列表非空）"
     );
     assert!(
         !uris.contains(&INSTRUCTION_MAIN_URI),
@@ -336,11 +341,170 @@ fn skills_endpoints_delegate_to_catalog() {
             budget: ResourceBudget::default(),
         },
     );
-    let list = provider.skills_list(None).expect("skills/list");
+    let list = provider.list_skills(None).expect("skills/list");
     assert_eq!(list.skills.len(), 1);
+    let rmcp::model::SkillResources::Files(files) = &list.skills[0].resources else {
+        panic!("静态技能必须是完整 manifest");
+    };
+    assert!(
+        files.iter().all(|file| file.size > 0),
+        "类型化结果必须带 size"
+    );
     let get = provider
-        .skills_get("skill://project/alpha/SKILL.md")
+        .get_skill("skill://project/alpha/SKILL.md")
         .expect("skills/get");
     assert_eq!(get.skill.uri, "skill://project/alpha/SKILL.md");
-    assert!(provider.skills_list(Some("c1".into())).is_err());
+    assert!(provider.list_skills(Some("c1".into())).is_err());
+}
+
+/// [回归测试] `skills/list` 直接消费一次扫描的 manifest：扫描批取得后删除技能
+/// 目录，类型化转换仍成功（旧实现按 URI 回查 `locate` 会重扫并让整页失败）。
+#[test]
+fn list_skills_uses_single_scan_snapshot_and_survives_later_removal() {
+    let cwd = tempdir();
+    let skills = tempdir();
+    write_skill(skills.path(), "alpha", "alpha");
+    write_skill(skills.path(), "beta", "beta");
+    let input = WorkspaceResourcesInput {
+        instruction_excludes: Vec::new(),
+        skill_roots: vec![ResourceRoot::new(skills.path(), ResourceScope::Project)],
+        agent_roots: Vec::new(),
+        disable_bundled: true,
+        budget: ResourceBudget::default(),
+    };
+    let budget = input.budget;
+    let catalog = crate::resources::skills::scan_catalog(&input, &budget);
+    assert_eq!(catalog.len(), 2);
+
+    std::fs::remove_dir_all(skills.path().join("beta")).expect("删除 beta");
+    let typed = catalog
+        .iter()
+        .map(crate::resources::typed_skill_from_record)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("快照转换不再回查磁盘");
+    assert_eq!(typed.len(), 2);
+    let beta = typed
+        .iter()
+        .find(|skill| skill.uri == "skill://project/beta/SKILL.md")
+        .expect("beta 仍在扫描批内");
+    let rmcp::model::SkillResources::Files(files) = &beta.resources else {
+        panic!("静态技能必须是完整 manifest");
+    };
+    assert!(files
+        .iter()
+        .any(|file| file.uri == "skill://project/beta/SKILL.md"));
+    assert!(
+        files.iter().all(|file| file.size > 0),
+        "manifest 必须带 size"
+    );
+
+    // provider 的公开 list 每次重新扫描：删除后只剩 alpha。
+    let provider = WorkspaceResourceProvider::new(cwd.path(), input);
+    let list = provider.list_skills(None).expect("skills/list");
+    assert_eq!(list.skills.len(), 1);
+    assert_eq!(list.skills[0].uri, "skill://project/alpha/SKILL.md");
+}
+
+/// [回归测试] `skills/list` 任一记录无法类型化时整页报错：附件名含 URI 非法
+/// 字符（`#`）使 `skill_uri` 返回 `None`，该技能不得被静默丢弃。
+#[test]
+fn list_skills_fails_whole_page_when_a_record_cannot_be_typed() {
+    let cwd = tempdir();
+    let skills = tempdir();
+    write_skill(skills.path(), "alpha", "alpha");
+    write(&skills.path().join("alpha").join("bad#name.txt"), b"data\n");
+    let provider = WorkspaceResourceProvider::new(
+        cwd.path(),
+        WorkspaceResourcesInput {
+            instruction_excludes: Vec::new(),
+            skill_roots: vec![ResourceRoot::new(skills.path(), ResourceScope::Project)],
+            agent_roots: Vec::new(),
+            disable_bundled: true,
+            budget: ResourceBudget::default(),
+        },
+    );
+
+    let err = match provider.list_skills(None) {
+        Ok(result) => panic!("转换失败必须整页报错，实际返回 {} 项", result.skills.len()),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err,
+        ResourceError::InvalidUri,
+        "错误分类必须与旧实现一致（任一记录转换失败即整页失败）"
+    );
+}
+
+/// [回归测试] `skills/list` 必须透传 SKILL.md 的原始 frontmatter：摘要会 trim
+/// description，带前导空白的引号标量若用摘要值，会与 `skills/get` 及正文不一致，
+/// 激活侧 `frontmatter_maps_equal`（字符串仅 trim_end）将误拒。
+#[test]
+fn list_skill_preserves_raw_description_for_activation() {
+    let cwd = tempdir();
+    let skills = tempdir();
+    let content = "---\nname: spaced\ndescription: \"  leading spaces\"\n---\nbody\n";
+    write(
+        &skills.path().join("spaced").join("SKILL.md"),
+        content.as_bytes(),
+    );
+    let provider = WorkspaceResourceProvider::new(
+        cwd.path(),
+        WorkspaceResourcesInput {
+            instruction_excludes: Vec::new(),
+            skill_roots: vec![ResourceRoot::new(skills.path(), ResourceScope::Project)],
+            agent_roots: Vec::new(),
+            disable_bundled: true,
+            budget: ResourceBudget::default(),
+        },
+    );
+
+    let list = provider.list_skills(None).expect("skills/list");
+    let get = provider
+        .get_skill("skill://project/spaced/SKILL.md")
+        .expect("skills/get");
+    assert_eq!(
+        list.skills[0].frontmatter, get.skill.frontmatter,
+        "list 与 get 的 frontmatter 必须逐字一致"
+    );
+    assert_eq!(
+        list.skills[0].frontmatter.description, "  leading spaces",
+        "列表必须保留原始 description，而不是 trim 后的摘要"
+    );
+
+    // 激活以正文原始 frontmatter 为期望值；字符串比对只归一尾随空白。
+    let raw = peri_mcp_common::agent_definition::frontmatter::frontmatter_json(content)
+        .expect("夹具 frontmatter 可解析");
+    let raw_description = raw
+        .get("description")
+        .and_then(|value| value.as_str())
+        .expect("夹具 description");
+    assert_eq!(
+        list.skills[0].frontmatter.description.trim_end(),
+        raw_description.trim_end(),
+        "激活的 trim_end-only 比对必须通过"
+    );
+}
+
+#[test]
+fn declared_workspace_resource_templates_match_wire_values() {
+    let cwd = tempdir();
+    let provider = WorkspaceResourceProvider::new(cwd.path(), WorkspaceResourcesInput::new());
+    let mut wire: Vec<String> = provider
+        .list_resource_templates()
+        .into_iter()
+        .map(|template| template.uri_template)
+        .collect();
+    let mut declared: Vec<String> = peri_acp_types::builtin_mcp::capability("workspace")
+        .expect("workspace capability 必须已声明")
+        .resources
+        .resource_templates
+        .iter()
+        .map(|uri| (*uri).to_owned())
+        .collect();
+    wire.sort_unstable();
+    declared.sort_unstable();
+    assert_eq!(
+        declared, wire,
+        "v5 声明表的资源模板必须与 workspace wire 值逐字一致"
+    );
 }

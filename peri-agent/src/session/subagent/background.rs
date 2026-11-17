@@ -7,25 +7,25 @@ use peri_acp_types::identity::AgentId;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use super::lifecycle::drain_subagent_events;
-use super::terminal_settlement::{settle_terminal_without_result, TerminalMqRoute};
-use super::types::{
-    ChildRunOutcome, SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop,
-};
-use super::util::{count_tool_calls_from_session, extract_last_ai_text, format_handoff_notice};
-use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
-use super::{
-    build_subagent_start_v2, build_subagent_stop_v2_with_failure, emit_subagent_start_v2,
-    emit_subagent_stop_v2_with_failure, BgCleanupGuard, BgStopEmitV2, SubagentStopV2Input,
-};
 use crate::agent::async_tasks::{
     BackgroundAgentInbox, BackgroundAgentInboxGuard, BackgroundTask, BackgroundTaskStatus,
     BgCancelHandle, BgTaskKind, TaskManager,
 };
 use crate::agent::events::{AgentEventHandler, ExecutorEvent};
-use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
+
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
+
+use crate::session::subagent::lifecycle::BgCleanupGuard;
+use crate::session::subagent::lifecycle::BgStopEmitV2;
+
+use crate::session::subagent::terminal_settlement::TerminalMqRoute;
+use crate::session::subagent::types::{
+    ChildRunOutcome, SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop,
+};
+
+use crate::session::subagent::v2_bridge::SubagentStopV2Input;
+use crate::session::subagent::v2_bridge::V2SubagentContext;
 use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
@@ -107,7 +107,7 @@ pub(super) async fn spawn_background_subagent(
     parent_tool_call_id: Option<String>,
     cancel_token: CancellationToken,
     v2_ctx: V2SubagentContext,
-    resume_claim: Option<&mut super::factory::ResumeClaim>,
+    resume_claim: Option<&mut crate::session::subagent::factory::ResumeClaim>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let resuming = resume_claim.is_some();
     let task_manager =
@@ -295,7 +295,7 @@ pub(super) async fn spawn_background_subagent(
                 &cwd_for_task,
             );
         }
-        emit_subagent_start_v2(
+        crate::session::subagent::emit_subagent_start_v2(
             &event_bus_for_emit,
             execution_turn.turn_id(),
             parent_agent_id,
@@ -304,9 +304,9 @@ pub(super) async fn spawn_background_subagent(
             true,
             parent_tool_call_id.clone(),
         );
-        forward_subagent_start_v1(
+        crate::session::subagent::v2_bridge::forward_subagent_start_v1(
             bg_forwarder_handler.as_ref(),
-            build_subagent_start_v2(
+            crate::session::subagent::build_subagent_start_v2(
                 execution_turn.turn_id(),
                 parent_agent_id,
                 subagent_agent_id,
@@ -319,18 +319,25 @@ pub(super) async fn spawn_background_subagent(
         // 后转发到 bg_event_sender（BG pump 独立于主 pump，主 turn 结束后仍存活）。
         // SubagentStart/Stop 不在此转发（发射侧已同步协议化直发，防双发——
         // 见 `forward_subagent_start_v1` / `forward_subagent_stop_v1`）。
-        let forwarder_handle = spawn_subagent_event_forwarder_for_completion(
-            v2_ctx.event_handles,
-            bg_forwarder_handler,
-            langfuse_bridge.clone(),
-            child_thread_id_for_task.clone(),
-        );
+        let forwarder_handle =
+            crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion(
+                v2_ctx.event_handles,
+                bg_forwarder_handler,
+                langfuse_bridge.clone(),
+                child_thread_id_for_task.clone(),
+            );
 
-        let mut outcome =
-            super::child_runner::run_child_until_terminal(context, max_iterations, &session).await;
+        let mut outcome = crate::session::subagent::child_runner::run_child_until_terminal(
+            context,
+            max_iterations,
+            &session,
+        )
+        .await;
         // 已提交的交接不能替代后续 history flush 的确认。
         let mut history_flush_failed = false;
-        if let Err(error) = super::lifecycle::flush_session_history(&session).await {
+        if let Err(error) =
+            crate::session::subagent::lifecycle::flush_session_history(&session).await
+        {
             history_flush_failed = true;
             outcome = match outcome {
                 ChildRunOutcome::HandedOff { receipt } => ChildRunOutcome::Failed {
@@ -402,7 +409,9 @@ pub(super) async fn spawn_background_subagent(
                 permit.finish(Ok(()));
             }
         }
-        if let Err(error) = super::close::settle_explicit_close(&session, interrupted).await {
+        if let Err(error) =
+            crate::session::subagent::close::settle_explicit_close(&session, interrupted).await
+        {
             tracing::error!(thread_id = %child_thread_id_for_task, %error, "child close incomplete; delegation terminal withheld");
             cleanup_guard.deregister = None;
             cleanup_guard.disarm_stop();
@@ -418,10 +427,12 @@ pub(super) async fn spawn_background_subagent(
             ChildRunOutcome::Settled | ChildRunOutcome::Interrupted
         );
         let mut drain_failure: Option<String> = None;
+        // SubagentStop.result 是完整子 agent 输出，不做长度截断；显示层使用
+        // 各自的有界预览并在裁剪时标记省略。
         let (text, mut output_summary, mut status, success, failure) = match &outcome {
             ChildRunOutcome::Settled => {
-                let text = extract_last_ai_text(&session);
-                let summary = text.chars().take(500).collect::<String>();
+                let text = crate::session::subagent::util::extract_last_ai_text(&session);
+                let summary = text.clone();
                 (text, summary, AgentStatus::Done, true, None)
             }
             ChildRunOutcome::Interrupted => (
@@ -438,7 +449,7 @@ pub(super) async fn spawn_background_subagent(
                     receipt.clone(),
                 );
                 (
-                    extract_last_ai_text(&session),
+                    crate::session::subagent::util::extract_last_ai_text(&session),
                     "delegation incomplete: pending tasks handed off".to_string(),
                     AgentStatus::Error,
                     false,
@@ -454,9 +465,11 @@ pub(super) async fn spawn_background_subagent(
                 );
                 if let Some(receipt) = residual {
                     output.push_str("\n\n");
-                    output.push_str(&format_handoff_notice(receipt));
+                    output.push_str(&crate::session::subagent::util::format_handoff_notice(
+                        receipt,
+                    ));
                 }
-                let summary = output.chars().take(500).collect::<String>();
+                let summary = output.clone();
                 (output, summary, AgentStatus::Error, false, failure)
             }
             ChildRunOutcome::HandoffFailed { cause, failure } => {
@@ -467,7 +480,7 @@ pub(super) async fn spawn_background_subagent(
                 }
                 output.push_str(&format!(
                     "{}: {}",
-                    super::types::handoff_failure_label(failure),
+                    crate::session::subagent::types::handoff_failure_label(failure),
                     failure.error
                 ));
                 if let Some(flush) = &failure.flush_error {
@@ -475,24 +488,30 @@ pub(super) async fn spawn_background_subagent(
                 }
                 if let Some(receipt) = &failure.receipt {
                     output.push_str("\n\n");
-                    output.push_str(&format_handoff_notice(receipt));
+                    output.push_str(&crate::session::subagent::util::format_handoff_notice(
+                        receipt,
+                    ));
                 }
                 let safe = match cause {
                     Some(cause) => {
                         SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, cause)
                     }
                     None => {
-                        let error = super::types::handoff_failure_agent_error(failure);
+                        let error =
+                            crate::session::subagent::types::handoff_failure_agent_error(failure);
                         SubagentFailure::safe_failure_from_error(&child_thread_id_for_task, &error)
                     }
                 };
-                let summary = output.chars().take(500).collect::<String>();
+                let summary = output.clone();
                 (output, summary, AgentStatus::Error, false, safe)
             }
         };
         let output = match &outcome {
             ChildRunOutcome::HandedOff { receipt } => {
-                format!("{text}\n\n{}", format_handoff_notice(receipt))
+                format!(
+                    "{text}\n\n{}",
+                    crate::session::subagent::util::format_handoff_notice(receipt)
+                )
             }
             _ => text,
         };
@@ -502,7 +521,9 @@ pub(super) async fn spawn_background_subagent(
             prompt_summary: prompt_summary_for_task.clone(),
             success,
             output,
-            tool_calls_count: count_tool_calls_from_session(&session),
+            tool_calls_count: crate::session::subagent::util::count_tool_calls_from_session(
+                &session,
+            ),
             duration_ms: started_at.elapsed().as_millis() as u64,
             child_thread_id: Some(child_thread_id_for_task.clone()),
             timed_out: false,
@@ -510,7 +531,7 @@ pub(super) async fn spawn_background_subagent(
             shell_output: None,
         };
         let subagent_turn_id = execution_turn.turn_id();
-        emit_subagent_stop_v2_with_failure(
+        crate::session::subagent::emit_subagent_stop_v2_with_failure(
             &event_bus_for_emit,
             SubagentStopV2Input {
                 turn_id: subagent_turn_id,
@@ -524,8 +545,12 @@ pub(super) async fn spawn_background_subagent(
         );
         // The guard retains only a Weak producer and stays armed throughout
         // drain, so forced abort still pairs Started with exactly one Stopped.
-        if let Err(error) =
-            drain_subagent_events(event_bus_for_emit, forwarder_handle, langfuse_bridge).await
+        if let Err(error) = crate::session::subagent::lifecycle::drain_subagent_events(
+            event_bus_for_emit,
+            forwarder_handle,
+            langfuse_bridge,
+        )
+        .await
         {
             tracing::error!(thread_id = %child_thread_id_for_task, error = %error.user_facing_message(), causes = ?error.cause_chain(), "child event forwarding barrier incomplete");
             drain_failure = Some(error.to_string());
@@ -534,7 +559,7 @@ pub(super) async fn spawn_background_subagent(
                     SubagentFailure::new(&child_thread_id_for_task, &agent_name_for_task, error);
                 result.output =
                     format!("Background sub-agent failed: {}", failure.public_message());
-                output_summary = result.output.chars().take(500).collect();
+                output_summary = result.output.clone();
                 result.subagent_failure = failure.safe_failure();
                 result.success = false;
                 publish_completed = false;
@@ -545,7 +570,7 @@ pub(super) async fn spawn_background_subagent(
                     result.output,
                     error.user_facing_message()
                 );
-                output_summary = result.output.chars().take(500).collect();
+                output_summary = result.output.clone();
             }
         }
         if let Some(ref on_stop) = on_subagent_stop {
@@ -567,11 +592,11 @@ pub(super) async fn spawn_background_subagent(
         .await;
         if !terminal_persisted {
             publish_completed = false;
-            output_summary = result.output.chars().take(500).collect();
+            output_summary = result.output.clone();
         }
-        forward_subagent_stop_v1(
+        crate::session::subagent::v2_bridge::forward_subagent_stop_v1(
             bg_stop_handler.as_ref(),
-            build_subagent_stop_v2_with_failure(
+            crate::session::subagent::build_subagent_stop_v2_with_failure(
                 subagent_turn_id,
                 parent_agent_id,
                 subagent_agent_id,
@@ -629,7 +654,11 @@ pub(super) async fn spawn_background_subagent(
         }
         // 先注销再释放执行准入，避免 resume 重新注册后被本次停驻覆盖。
         if parked_inbox {
-            super::lifecycle::park_child_inbox(&session, &child_thread_id_for_task, &outcome);
+            crate::session::subagent::lifecycle::park_child_inbox(
+                &session,
+                &child_thread_id_for_task,
+                &outcome,
+            );
         }
         if let Some(permit) = permit {
             permit.finish(permit_result);
@@ -812,7 +841,12 @@ async fn persist_background_terminal(
         return false;
     };
     if let Err(error) =
-        settle_terminal_without_result(store, &ThreadId::from(thread_id), status).await
+        crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+            store,
+            &ThreadId::from(thread_id),
+            status,
+        )
+        .await
     {
         tracing::error!(%thread_id, %error, "subagent terminal status write failed");
         result.success = false;

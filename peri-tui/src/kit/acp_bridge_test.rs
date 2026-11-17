@@ -1,6 +1,22 @@
-use super::*;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+
+use super::BridgeState;
+use super::CancellationToken;
+use super::CurrentTurn;
+use super::DeterministicClock;
+use super::PUBLICATION_INTERVAL;
+use super::PublicationIntent;
+use super::PublicationObservation;
+use super::PublicationReason;
+use super::PublicationScheduler;
+use super::SessionPhase;
+use super::acp_events;
+use super::atoms;
+use super::mpsc;
+
 use crate::kit::acp_types::PendingInteraction;
-use peri_acp_types::event_data::{AskUser, HitlPending};
+
 use serial_test::serial;
 
 #[path = "acp_bridge_cancel_test.rs"]
@@ -73,12 +89,12 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
     use crate::kit::tui_render_unit::TuiRenderUnit;
     use agent_client_protocol_schema::v1::SessionNotification;
     use peri_acp::dispatch::{ReplayError, ReplaySender, replay_persisted_session_history};
-    use peri_acp_types::{
-        PeriCaps,
-        messages::{BaseMessage, ContentBlock, MessageContent},
-        store::ThreadStore,
-        thread::ThreadMeta,
-    };
+    use peri_acp_types::PeriCaps;
+    use peri_acp_types::messages::BaseMessage;
+    use peri_acp_types::messages::ContentBlock;
+    use peri_acp_types::messages::MessageContent;
+    use peri_acp_types::store::ThreadStore;
+    use peri_acp_types::thread::ThreadMeta;
     use peri_resources::sessions::SqliteThreadStore;
     struct WireSender(mpsc::Sender<AcpNotification>);
     #[async_trait::async_trait]
@@ -87,10 +103,11 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
             self.0
                 .send(AcpNotification::SessionUpdate {
                     session_id: notif.session_id.to_string(),
-                    params: serde_json::to_value(notif).unwrap(),
+                    params: serde_json::to_value(notif)
+                        .expect("send: fixture must serialize to JSON"),
                 })
                 .await
-                .unwrap();
+                .expect("send: fixture must serialize to JSON");
             Ok(())
         }
 
@@ -105,7 +122,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
             Ok(())
         }
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("replay persisted history publishes final assistant in order: isolated fixture workspace must remain accessible");
     let path = dir.path().join("history.db");
     let cases = [
         vec![],
@@ -153,18 +170,18 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
                     .map(|text| (matches!(message, BaseMessage::Human { .. }), text))
             })
             .collect();
-        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let store = SqliteThreadStore::try_new(&path).await.expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
         let id = store
             .create_thread(ThreadMeta::new_at(
-                dir.path().to_str().unwrap(),
+                dir.path().to_str().expect("replay persisted history publishes final assistant in order: fixture paths and protocol text must be valid UTF-8"),
                 peri_time::now_wall(),
             ))
             .await
-            .unwrap();
-        store.append_messages(&id, &messages).await.unwrap();
+            .expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
+        store.append_messages(&id, &messages).await.expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
         drop(store);
-        let reopened = SqliteThreadStore::new(&path).await.unwrap();
-        let payloads = reopened.load_context_payloads(&id).await.unwrap();
+        let reopened = SqliteThreadStore::try_new(&path).await.expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
+        let payloads = reopened.load_context_payloads(&id).await.expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
         assert_eq!(payloads.len(), messages.len(), "磁盘重载不得按角色截断");
         let (notif_tx, notif_rx) =
             mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
@@ -189,7 +206,7 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
             &peri_acp::dispatch::ReplayMarks::without_entry_marks(&generation, &id),
         )
         .await
-        .unwrap();
+        .expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
         let mut state = scheduler_state();
         state.phase = SessionPhase::Idle;
         state.active_session_id = id;
@@ -200,13 +217,13 @@ async fn test_replay_persisted_history_publishes_final_assistant_in_order() {
             let event = tokio::time::timeout(std::time::Duration::from_secs(5), bridge_rx.recv())
                 .await
                 .expect("回放通知应及时到达")
-                .unwrap();
+                .expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
             assert_eq!(event.active_session_id, state.active_session_id);
             let intent = acp_events::dispatch_for_bridge(&mut state, &event.event);
             scheduler.accept_at(intent, &mut state, now);
         }
         shutdown.cancel();
-        notifier.await.unwrap();
+        notifier.await.expect("replay persisted history publishes final assistant in order: fixture task and request must complete successfully");
         assert!(
             state.current_turn.is_empty(),
             "回放不应依赖 live turn 的 dirty 标记"
@@ -252,7 +269,7 @@ fn test_replay_receiver_close_publishes_committed_tail() {
     );
     scheduler.accept(intent, &mut state);
     let mut last_reset = BRIDGE_RESET_COUNTER.get();
-    flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
+    super::flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
     assert_eq!(VIEW_MODELS.state().read().items.len(), 1);
     assert!(scheduler.pending_deadline.is_none());
 }
@@ -349,7 +366,7 @@ fn test_production_scheduler_lifecycle_invalidation_matrix_is_stale_noop() {
         let mut scheduler = PublicationScheduler::default();
         let now = peri_time::Instant::now();
         scheduler.accept_at(PublicationIntent::Deferred, &mut state, now);
-        let stale_deadline = scheduler.pending_deadline.unwrap();
+        let stale_deadline = scheduler.pending_deadline.expect("production scheduler lifecycle invalidation matrix is stale noop: the fixture establishes scheduler.pending_deadline before this assertion");
 
         match lifecycle {
             "terminal" => scheduler.accept_at(PublicationIntent::Immediate, &mut state, now),
@@ -382,7 +399,7 @@ fn test_receiver_close_reset_wins_over_dirty_final_publication() {
         &mut state,
         peri_time::Instant::now(),
     );
-    flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
+    super::flush_on_receiver_close(&mut state, &mut scheduler, &mut last_reset);
 
     assert!(scheduler.pending_deadline.is_none());
     assert_eq!(state.active_session_id, "s2");
@@ -414,7 +431,7 @@ fn test_bridge_reset_rehydrates_pending_compact_note_for_same_session() {
     let mut state = scheduler_state();
     let mut last_reset = old_reset;
 
-    apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
+    super::apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
 
     assert!(matches!(
         state.current_turn.view_models().iter().next(),
@@ -455,7 +472,7 @@ fn test_bridge_reset_discards_pending_compact_note_on_session_switch() {
     let mut state = scheduler_state();
     let mut last_reset = old_reset;
 
-    apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
+    super::apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
 
     assert!(state.current_turn.view_models().is_empty());
     assert!(PENDING_COMPACT_NOTE.state().read().is_none());
@@ -491,7 +508,7 @@ fn test_compact_replay_events_keep_bridge_idle_after_reset() {
     *ACTIVE_SESSION_ID.state().write() = "s1".into();
     let mut state = scheduler_state();
     let mut last_reset = old_reset;
-    apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
+    super::apply_bridge_reset(&mut state, &mut last_reset, old_reset.wrapping_add(1));
 
     acp_events::dispatch_for_bridge(
         &mut state,
@@ -530,7 +547,7 @@ fn test_deterministic_clock_advances_without_sleep() {
 
 #[test]
 fn test_publication_observer_records_metadata_without_content() {
-    reset_perf_counters();
+    super::reset_perf_counters();
     let observations = [
         PublicationObservation {
             generation: 7,
@@ -549,9 +566,9 @@ fn test_publication_observer_records_metadata_without_content() {
         },
     ];
     for observation in observations {
-        observe_publication(observation);
+        super::observe_publication(observation);
     }
-    let counters = perf_counters();
+    let counters = super::perf_counters();
     assert_eq!(
         (
             observations,
@@ -587,11 +604,11 @@ fn ask_user() -> AcpEventData {
 #[test]
 fn test_interaction_gate_requires_nonempty_exact_active_session() {
     for event in [hitl(), ask_user()] {
-        assert!(accepts_event_session(&event, "s1", "s1", false));
-        assert!(!accepts_event_session(&event, "", "s1", false));
-        assert!(!accepts_event_session(&event, "s1", "", false));
-        assert!(!accepts_event_session(&event, "s1", "s2", false));
-        assert!(accepts_event_session(&event, "s1", "s1", true));
+        assert!(super::accepts_event_session(&event, "s1", "s1", false));
+        assert!(!super::accepts_event_session(&event, "", "s1", false));
+        assert!(!super::accepts_event_session(&event, "s1", "", false));
+        assert!(!super::accepts_event_session(&event, "s1", "s2", false));
+        assert!(super::accepts_event_session(&event, "s1", "s1", true));
     }
 }
 
@@ -603,19 +620,19 @@ fn test_ordinary_gate_preserves_nonreset_wildcards() {
             result: "done".into(),
         },
     };
-    assert!(accepts_event_session(&event, "", "s1", false));
-    assert!(accepts_event_session(&event, "s1", "", false));
-    assert!(accepts_event_session(&event, "s1", "s1", false));
-    assert!(!accepts_event_session(&event, "s1", "s2", false));
+    assert!(super::accepts_event_session(&event, "", "s1", false));
+    assert!(super::accepts_event_session(&event, "s1", "", false));
+    assert!(super::accepts_event_session(&event, "s1", "s1", false));
+    assert!(!super::accepts_event_session(&event, "s1", "s2", false));
 }
 
 #[test]
 fn test_ordinary_gate_preserves_just_reset_rules() {
     let event = AcpEventData::PromptStarted;
-    assert!(accepts_event_session(&event, "s1", "", true));
-    assert!(accepts_event_session(&event, "s1", "s1", true));
-    assert!(!accepts_event_session(&event, "", "s1", true));
-    assert!(!accepts_event_session(&event, "s1", "s2", true));
+    assert!(super::accepts_event_session(&event, "s1", "", true));
+    assert!(super::accepts_event_session(&event, "s1", "s1", true));
+    assert!(!super::accepts_event_session(&event, "", "s1", true));
+    assert!(!super::accepts_event_session(&event, "s1", "s2", true));
 }
 
 fn goal_snapshot(objective: &str, continuation_count: u64) -> AcpEventData {
@@ -646,7 +663,7 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
     let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    let handle = super::spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
 
     tx.send(AcpEventWithEpoch {
         child_origin: None,
@@ -655,7 +672,7 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("goal snapshot bridge accepts current session and drops stale session: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(
         GOAL_SNAPSHOT
@@ -673,15 +690,15 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
         active_session_id: "s0".into(),
     })
     .await
-    .unwrap();
+    .expect("goal snapshot bridge accepts current session and drops stale session: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(false));
-    let projected = GOAL_SNAPSHOT.state().read().clone().unwrap();
+    let projected = GOAL_SNAPSHOT.state().read().clone().expect("goal snapshot bridge accepts current session and drops stale session: isolated fixture workspace must remain accessible");
     assert_eq!(projected.objective.as_deref(), Some("current"));
     assert_eq!(projected.continuation_count, 2);
 
     shutdown.cancel();
     drop(tx);
-    handle.await.unwrap();
+    handle.await.expect("goal snapshot bridge accepts current session and drops stale session: fixture task and request must complete successfully");
     *ACTIVE_SESSION_ID.state().write() = old_active;
     BRIDGE_RESET_COUNTER.set(old_reset);
     *GOAL_SNAPSHOT.state().write() = old_goal;
@@ -700,7 +717,7 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
     let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    let handle = super::spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
     tx.send(AcpEventWithEpoch {
         child_origin: None,
         view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -710,7 +727,7 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
         active_session_id: "s2".into(),
     })
     .await
-    .unwrap();
+    .expect("late prompt failure from previous session does not reset loading: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     assert!(ACP_STATE.state().read().is_loading);
     tx.send(AcpEventWithEpoch {
@@ -722,12 +739,12 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("late prompt failure from previous session does not reset loading: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(false));
     assert!(ACP_STATE.state().read().is_loading);
     shutdown.cancel();
     drop(tx);
-    handle.await.unwrap();
+    handle.await.expect("late prompt failure from previous session does not reset loading: fixture task and request must complete successfully");
     *ACTIVE_SESSION_ID.state().write() = old_active;
     BRIDGE_RESET_COUNTER.set(old_reset);
 }
@@ -755,7 +772,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+    let handle = super::spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
     tx.send(AcpEventWithEpoch {
         child_origin: None,
         view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -763,7 +780,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         active_session_id: String::new(),
     })
     .await
-    .unwrap();
+    .expect("hitl bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     *HITL_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
@@ -783,14 +800,14 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("hitl bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
         HITL_PENDING
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("hitl bridge drops unowned events before all side effects: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"sentinel\""
     );
@@ -808,7 +825,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("hitl bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     *HITL_PENDING.state().write() = Some(PendingInteraction {
         owner: Default::default(),
@@ -827,14 +844,14 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         active_session_id: "stale".into(),
     })
     .await
-    .unwrap();
+    .expect("hitl bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(false));
     assert_eq!(
         HITL_PENDING
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("hitl bridge drops unowned events before all side effects: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"sentinel\""
     );
@@ -846,14 +863,14 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
         active_session_id: "s1".into(),
     })
     .await
-    .unwrap();
+    .expect("hitl bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     assert_eq!(observed_rx.recv().await, Some(true));
     assert_eq!(
         HITL_PENDING
             .state()
             .read()
             .as_ref()
-            .unwrap()
+            .expect("hitl bridge drops unowned events before all side effects: the fixture storage and layout must support the requested operation")
             .request_id_json,
         "\"h\""
     );
@@ -861,7 +878,7 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     assert!(VIEW_MODELS.state().read().items.iter().any(|vm| matches!(vm, crate::kit::tui_render_unit::TuiRenderUnit::TuiAskUserBlock(block) if block.request_id.as_deref() == Some("\"h\""))));
     shutdown.cancel();
     drop(tx);
-    handle.await.unwrap();
+    handle.await.expect("hitl bridge drops unowned events before all side effects: fixture task and request must complete successfully");
     *ACP_STATE.state().write() = old_acp_state;
     *ACTIVE_SESSION_ID.state().write() = old_active;
     BRIDGE_RESET_COUNTER.set(old_reset);
@@ -879,3 +896,9 @@ mod ask_user_tests;
 
 #[path = "acp_bridge_child_origin_test.rs"]
 mod child_origin_tests;
+
+use peri_acp_types::event_data::AskUser;
+
+use peri_acp_types::event_data::HitlPending;
+
+use super::{apply_bridge_reset, spawn_acp_bridge_observed};

@@ -237,6 +237,7 @@ impl BatcherConfig {
     }
 
     /// 从 ClientConfig 构造 Batcher 配置；遥测配置逐字段复制。
+    #[must_use]
     pub fn from_client(client: &ClientConfig) -> Self {
         Self {
             max_events: client.batch_max_events,

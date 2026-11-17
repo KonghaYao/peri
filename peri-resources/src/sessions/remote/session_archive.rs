@@ -1,13 +1,12 @@
-use super::{
-    mutation::sole_row,
-    session_data::{not_found, RemoteSessionData},
-    sql::{int_at, text_at, StatementSpec},
-};
+use super::session_data::RemoteSessionData;
+use super::sql::StatementSpec;
 use crate::sessions::archive as query;
-use peri_acp_types::{
-    context_archive::*, history_page::message_id_of, session_resources::SessionResourceResult,
-    thread::ThreadId,
+use peri_acp_types::context_archive::{
+    ArchiveChunk, ArchiveChunkBatch, ArchiveChunkQuery, ArchiveMetadataPage, ArchiveMetadataQuery,
+    ArchiveRoot, ARCHIVE_MAX_METADATA_BYTES,
 };
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::thread::ThreadId;
 use turso_serverless::Value;
 
 fn optional_id(id: Option<peri_acp_types::messages::MessageId>) -> Value {
@@ -32,10 +31,17 @@ impl RemoteSessionData {
                 ],
             )])
             .await?;
-        let tail_row =
-            sole_row(tail_rows.into_iter().next().ok_or_else(not_found)?)?.ok_or_else(not_found)?;
-        let tail = text_at(&tail_row, 0).ok_or_else(not_found)?.to_owned();
-        let tail_id = message_id_of(&tail)?;
+        let tail_row = super::mutation::sole_row(
+            tail_rows
+                .into_iter()
+                .next()
+                .ok_or_else(super::session_data::not_found)?,
+        )?
+        .ok_or_else(super::session_data::not_found)?;
+        let tail = super::sql::text_at(&tail_row, 0)
+            .ok_or_else(super::session_data::not_found)?
+            .to_owned();
+        let tail_id = peri_acp_types::history_page::message_id_of(&tail)?;
         let (bounds, rows) = store
             .read_pair(
                 StatementSpec::new(
@@ -63,24 +69,29 @@ impl RemoteSessionData {
                 ),
             )
             .await?;
-        let bound = sole_row(bounds)?.ok_or_else(not_found)?;
-        if int_at(&bound, 0) != Some(query::bound_identity_count(tail_id, plan)) {
-            return Err(not_found());
+        let bound =
+            super::mutation::sole_row(bounds)?.ok_or_else(super::session_data::not_found)?;
+        if super::sql::int_at(&bound, 0) != Some(query::bound_identity_count(tail_id, plan)) {
+            return Err(super::session_data::not_found());
         }
         let items = rows
             .iter()
             .map(|row| {
                 query::decode_metadata(
-                    text_at(row, 0).ok_or_else(not_found)?,
-                    text_at(row, 1).map(str::to_owned),
-                    int_at(row, 2).ok_or_else(not_found)?,
+                    super::sql::text_at(row, 0).ok_or_else(super::session_data::not_found)?,
+                    super::sql::text_at(row, 1).map(str::to_owned),
+                    super::sql::int_at(row, 2).ok_or_else(super::session_data::not_found)?,
                 )
             })
             .collect::<SessionResourceResult<Vec<_>>>()?;
         if plan.anchor.is_some() && items.is_empty() {
-            return Err(not_found());
+            return Err(super::session_data::not_found());
         }
-        Ok(query::page(message_id_of(&tail)?, items, plan.limit))
+        Ok(query::page(
+            peri_acp_types::history_page::message_id_of(&tail)?,
+            items,
+            plan.limit,
+        ))
     }
     pub(super) async fn read_archive_body_chunk(
         &self,
@@ -88,12 +99,12 @@ impl RemoteSessionData {
         plan: &ArchiveChunkQuery,
     ) -> SessionResourceResult<ArchiveChunk> {
         query::validate_chunk(plan)?;
-        let batch = ArchiveChunkBatch::new(vec![plan.clone()])
+        let batch = ArchiveChunkBatch::try_new(vec![plan.clone()])
             .map_err(|_| query::invalid("invalid archive chunk bounds"))?;
         self.read_archive_body_chunks(id, &batch)
             .await?
             .pop()
-            .ok_or_else(not_found)
+            .ok_or_else(super::session_data::not_found)
     }
 
     pub(super) async fn read_archive_body_chunks(
@@ -122,8 +133,10 @@ impl RemoteSessionData {
         rows.into_iter()
             .zip(batch.queries())
             .map(|(rows, plan)| {
-                let row = sole_row(rows)?.ok_or_else(not_found)?;
-                let total = int_at(&row, 1).ok_or_else(not_found)?;
+                let row =
+                    super::mutation::sole_row(rows)?.ok_or_else(super::session_data::not_found)?;
+                let total =
+                    super::sql::int_at(&row, 1).ok_or_else(super::session_data::not_found)?;
                 if total < 0 || plan.offset > total as u64 {
                     return Err(query::invalid("archive offset exceeds canonical body"));
                 }
@@ -158,9 +171,15 @@ impl RemoteSessionData {
                 ],
             )])
             .await?;
-        let row =
-            sole_row(rows.into_iter().next().ok_or_else(not_found)?)?.ok_or_else(not_found)?;
-        serde_json::from_str(text_at(&row, 0).ok_or_else(not_found)?)
-            .map_err(|_| query::invalid("invalid inherited archive grant"))
+        let row = super::mutation::sole_row(
+            rows.into_iter()
+                .next()
+                .ok_or_else(super::session_data::not_found)?,
+        )?
+        .ok_or_else(super::session_data::not_found)?;
+        serde_json::from_str(
+            super::sql::text_at(&row, 0).ok_or_else(super::session_data::not_found)?,
+        )
+        .map_err(|_| query::invalid("invalid inherited archive grant"))
     }
 }

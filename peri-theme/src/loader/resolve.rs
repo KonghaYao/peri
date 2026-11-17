@@ -26,7 +26,8 @@ pub(super) fn flatten_json_obj(
             }
         }
         serde_json::Value::Array(array) => {
-            for (index, value) in array.iter().enumerate() {
+            let indexed_array = array.iter().enumerate();
+            for (index, value) in indexed_array {
                 flatten_json_obj(&format!("{prefix}.{index}"), value, flat);
             }
         }

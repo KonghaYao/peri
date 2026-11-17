@@ -1,8 +1,14 @@
-use super::view::{QueueFrame, QueueView, Selection, ViewState, preview, validated_action};
+use super::view::QueueFrame;
+use super::view::QueueView;
+use super::view::Selection;
+use super::view::ViewState;
 use super::{SteerItemState, SteerQueueAction, SteerQueueItem};
-use crate::kit::terminal_caps::{TerminalCaps, symbols};
-use peri_theme::prelude::dark_theme;
-use ratatui_kit::ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
+use crate::kit::terminal_caps::TerminalCaps;
+
+use ratatui_kit::ratatui::buffer::Buffer;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::widgets::Widget;
 use std::sync::{Arc, Mutex};
 use unicode_width::UnicodeWidthStr;
 
@@ -21,9 +27,10 @@ fn make_view(items: Vec<SteerQueueItem>) -> QueueView {
         items,
         max_rows: 5,
         state: ViewState::default(),
-        symbols: symbols(&TerminalCaps::default()),
-        semantic: dark_theme().semantic,
-        separator_style: Style::default().fg(dark_theme().component.input.border),
+        symbols: crate::kit::terminal_caps::symbols(&TerminalCaps::default()),
+        semantic: peri_theme::prelude::dark_theme().semantic,
+        separator_style: Style::default()
+            .fg(peri_theme::prelude::dark_theme().component.input.border),
         title: "待发送 7".to_owned(),
         frame: Arc::new(Mutex::new(QueueFrame::default())),
     }
@@ -139,7 +146,7 @@ fn test_queue_render_clears_bottom_spacer() {
 
 #[test]
 fn test_queue_action_single_dispatch_only_selected_id() {
-    let action = validated_action(
+    let action = super::view::validated_action(
         &Selection::Dispatch("B".to_owned()),
         &["A".to_owned(), "B".to_owned()],
         &make_items(),
@@ -158,7 +165,7 @@ fn test_queue_action_all_keeps_completed_frame_selection() {
     // 新增条目不加入旧帧全发；已失效项跳过。
     let mut items = make_items();
     items[1].state = SteerItemState::Dispatching;
-    let action = validated_action(
+    let action = super::view::validated_action(
         &Selection::All,
         &["A".to_owned(), "B".to_owned(), "C".to_owned()],
         &items,
@@ -174,7 +181,8 @@ fn test_queue_action_all_keeps_completed_frame_selection() {
 
 #[test]
 fn test_queue_action_takeback_uses_queued_stable_id() {
-    let action = validated_action(&Selection::TakeBack("B".to_owned()), &[], &make_items());
+    let action =
+        super::view::validated_action(&Selection::TakeBack("B".to_owned()), &[], &make_items());
     assert_eq!(
         action,
         Some(SteerQueueAction::TakeBack { id: "B".to_owned() }),
@@ -190,12 +198,12 @@ fn test_queue_action_transitional_items_reject_commands() {
     items[2].state = SteerItemState::Withdrawing;
     for id in ["A", "B", "C"] {
         assert_eq!(
-            validated_action(&Selection::Dispatch(id.to_owned()), &[], &items),
+            super::view::validated_action(&Selection::Dispatch(id.to_owned()), &[], &items),
             None,
             "暂态不得重复发送 {id}"
         );
         assert_eq!(
-            validated_action(&Selection::TakeBack(id.to_owned()), &[], &items),
+            super::view::validated_action(&Selection::TakeBack(id.to_owned()), &[], &items),
             None,
             "暂态不得取回 {id}"
         );
@@ -207,10 +215,10 @@ fn published_unclaimed_row_enables_takeback_but_not_dispatch() {
     let mut items = make_items();
     items[1].state = SteerItemState::Dispatching;
     assert_eq!(
-        validated_action(&Selection::TakeBack("B".into()), &[], &items),
+        super::view::validated_action(&Selection::TakeBack("B".into()), &[], &items),
         Some(SteerQueueAction::TakeBack { id: "B".into() })
     );
-    assert!(validated_action(&Selection::Dispatch("B".into()), &[], &items).is_none());
+    assert!(super::view::validated_action(&Selection::Dispatch("B".into()), &[], &items).is_none());
     assert!(super::view::selections(&items, 5).contains(&Selection::TakeBack("B".into())));
     let frame = make_view(items).layout(Rect::new(0, 0, 50, 7));
     assert!(
@@ -237,7 +245,7 @@ fn queue_render_distinguishes_confirmed_draft_from_published_input() {
                 state,
             };
             let mut view = make_view(vec![item]);
-            view.symbols = symbols(&TerminalCaps {
+            view.symbols = crate::kit::terminal_caps::symbols(&TerminalCaps {
                 unicode,
                 ..Default::default()
             });
@@ -249,12 +257,12 @@ fn queue_render_distinguishes_confirmed_draft_from_published_input() {
                 .controls
                 .iter()
                 .find(|control| control.selection == Selection::Dispatch("confirmed-input".into()))
-                .unwrap();
+                .expect("queue render distinguishes confirmed draft from published input: fixture must contain the searched item");
             let takeback = frame
                 .controls
                 .iter()
                 .find(|control| control.selection == Selection::TakeBack("confirmed-input".into()))
-                .unwrap();
+                .expect("queue render distinguishes confirmed draft from published input: fixture must contain the searched item");
             assert_eq!(dispatch.enabled, dispatch_enabled, "{state:?}");
             assert_eq!(takeback.enabled, takeback_enabled, "{state:?}");
             assert_eq!(frame.dispatch_ids.is_empty(), !dispatch_enabled);
@@ -272,7 +280,12 @@ fn queue_render_distinguishes_confirmed_draft_from_published_input() {
                 view.symbols.take_back
             );
             assert_eq!(
-                validated_action(&dispatch.selection, &frame.dispatch_ids, &view.items).is_some(),
+                super::view::validated_action(
+                    &dispatch.selection,
+                    &frame.dispatch_ids,
+                    &view.items
+                )
+                .is_some(),
                 dispatch_enabled
             );
         }
@@ -283,7 +296,7 @@ fn queue_render_distinguishes_confirmed_draft_from_published_input() {
 fn claimed_row_has_no_takeback_control_or_keyboard_action() {
     let mut items = make_items();
     items[1].state = SteerItemState::Claimed;
-    assert!(validated_action(&Selection::TakeBack("B".into()), &[], &items).is_none());
+    assert!(super::view::validated_action(&Selection::TakeBack("B".into()), &[], &items).is_none());
     assert!(!super::view::selections(&items, 5).contains(&Selection::TakeBack("B".into())));
     let frame = make_view(items).layout(Rect::new(0, 0, 50, 7));
     assert!(
@@ -296,21 +309,25 @@ fn claimed_row_has_no_takeback_control_or_keyboard_action() {
 #[test]
 fn test_queue_preview_preserves_display_width_and_graphemes() {
     let text = "你好\n e\u{301} 继续完整正文";
-    let shortened = preview(text, 8);
+    let shortened = super::view::preview(text, 8);
     assert_eq!(shortened, "你好 e\u{301} …", "摘要需单行并保留组合字符");
     assert!(shortened.width() <= 8, "省略号也必须计入显示宽度");
-    assert_eq!(preview(text, 0), "", "零列不得溢出");
+    assert_eq!(super::view::preview(text, 0), "", "零列不得溢出");
 }
 
 #[test]
 fn test_queue_layout_narrow_controls_do_not_overlap() {
     let frame = make_view(make_items()).layout(Rect::new(0, 0, 4, 7));
-    for (index, control) in frame.controls.iter().enumerate() {
-        for other in frame.controls.iter().skip(index + 1) {
-            assert!(
-                control.area.intersection(other.area).is_empty(),
-                "窄区域动作不可重叠"
-            );
+    {
+        let iteration_items = frame.controls.iter().enumerate();
+        for (index, control) in iteration_items {
+            let remaining_controls = frame.controls.iter().skip(index + 1);
+            for other in remaining_controls {
+                assert!(
+                    control.area.intersection(other.area).is_empty(),
+                    "窄区域动作不可重叠"
+                );
+            }
         }
     }
 }

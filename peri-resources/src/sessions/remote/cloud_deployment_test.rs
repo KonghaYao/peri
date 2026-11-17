@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::cloud_tests::{check, failure, run_counts, unique_run_label, with_cleanup, CloudTarget};
+use super::cloud_tests::CloudTarget;
 use super::mutation::StoreAccess;
 
 pub(super) const HOME_ENV: &str = "PERI_CLOUD_FACADE_HOME";
@@ -30,13 +30,13 @@ const READ_ONLY_CHILD: &str = "sessions::remote::cloud_deployment_child_tests::c
 #[ignore = "显式 cloud 实验：需要已授权测试库的 .env，默认不跑"]
 async fn cloud_deployment_entry_point_full_lifecycle() {
     let target = CloudTarget::load();
-    let run = unique_run_label("peri-facade");
+    let run = super::cloud_tests::unique_run_label("peri-facade");
     let home = tempfile::tempdir().expect("temp home");
     let read_only_home = tempfile::tempdir().expect("temp home for the read-only phase");
     let workspace = synthetic_workspace();
     let collected: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-    let result = with_cleanup(&target, &run, || async {
+    let result = super::cloud_tests::with_cleanup(&target, &run, || async {
         let lines = lifecycle_flow(
             &target,
             &run,
@@ -53,8 +53,11 @@ async fn cloud_deployment_entry_point_full_lifecycle() {
     match result {
         Ok(()) => {
             let mut out = target.out();
-            for line in collected.lock().unwrap().iter() {
-                out.push(line.clone());
+            {
+                let collected = collected.lock().unwrap();
+                for line in collected.iter() {
+                    out.push(line.clone());
+                }
             }
             out.push("deployment_lifecycle=ok".to_owned());
             out.flush();
@@ -73,11 +76,11 @@ async fn lifecycle_flow(
     let mut lines = Vec::new();
     lines.extend(run_child(WRITE_CHILD, home, workspace, run, None)?);
     let written = counts_now(target, run).await?;
-    check(
+    super::cloud_tests::check(
         written.sessions == 3 && written.messages == 6,
         "write phase must save root, child and fork remotely",
     )?;
-    check(
+    super::cloud_tests::check(
         !local_sqlite_path(home).exists(),
         "Turso write opened a local SQLite file",
     )?;
@@ -94,11 +97,11 @@ async fn lifecycle_flow(
 
     lines.extend(run_child(RECOVER_CHILD, home, workspace, run, None)?);
     let recovered = counts_now(target, run).await?;
-    check(
+    super::cloud_tests::check(
         recovered.sessions == 1 && recovered.messages == 3,
         "cold recovery must leave the fork tree remotely",
     )?;
-    check(
+    super::cloud_tests::check(
         std::fs::read(&poisoned).map_err(|error| error.to_string())? == b"damaged local SQLite",
         "Turso cold recovery touched local SQLite",
     )?;
@@ -114,7 +117,7 @@ async fn lifecycle_flow(
         run,
         Some("fresh"),
     )?);
-    check(
+    super::cloud_tests::check(
         !local_sqlite_path(read_only_home).exists(),
         "fresh read-only Turso open created local SQLite",
     )?;
@@ -125,12 +128,12 @@ async fn lifecycle_flow(
         run,
         Some("registered"),
     )?);
-    check(
+    super::cloud_tests::check(
         std::fs::read(&poisoned).map_err(|error| error.to_string())? == b"damaged local SQLite",
         "read-only Turso open touched local SQLite",
     )?;
     let after = counts_now(target, run).await?;
-    check(
+    super::cloud_tests::check(
         after.sessions == recovered.sessions
             && after.messages == recovered.messages
             && after.ledger == recovered.ledger,
@@ -144,9 +147,12 @@ async fn counts_now(
     target: &CloudTarget,
     run: &str,
 ) -> Result<super::cloud_tests::RunCounts, String> {
-    let store = target.store(StoreAccess::ReadOnly).await.map_err(failure)?;
-    let counts = run_counts(&store, run).await?;
-    store.close().await.map_err(failure)?;
+    let store = target
+        .store(StoreAccess::ReadOnly)
+        .await
+        .map_err(super::cloud_tests::failure)?;
+    let counts = super::cloud_tests::run_counts(&store, run).await?;
+    store.close().await.map_err(super::cloud_tests::failure)?;
     Ok(counts)
 }
 

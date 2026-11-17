@@ -9,10 +9,10 @@
 //! - 相同输入的产出顺序确定（按文件名字节序排序，与 loader 的 `subdirs.sort()`
 //!   同口径）。
 
-use std::{
-    collections::HashSet,
-    path::{Component, Path, PathBuf},
-};
+use std::collections::HashSet;
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
 
 /// 永远不会包含 SKILL.md 的目录名（与 loader 同名单；跳过以加速扫描）。
 const SKIP_DIR_NAMES: &[&str] = &[

@@ -1,8 +1,24 @@
 //! `runtime/tasks.rs` 的行为测试：发布幂等、状态机、单次终态提交（CAS）、
 //! 取消句柄与任务事件（design §5.1 / §5.3）。
 
-use super::*;
+use crate::protocol::AgentRunParams;
+use crate::protocol::AgentRunResult;
 use crate::protocol::Usage;
+use crate::runtime::close_gate::CloseGate;
+use crate::runtime::tasks::ClaimOutcome;
+use crate::runtime::tasks::PublishOutcome;
+use crate::runtime::tasks::SettleAdmission;
+use crate::runtime::tasks::SettleOutcome;
+use crate::runtime::tasks::WorkflowTaskEventKind;
+use crate::runtime::tasks::WorkflowTaskState;
+use crate::runtime::tasks::WorkflowTaskTable;
+use crate::runtime::tasks::MAX_TASK_RECORDS;
+use crate::runtime::tasks::TASK_RETENTION_MS;
+use crate::runtime::WorkflowResourceUpdate;
+
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 fn make_params(run_id: &str, agent_id: u64) -> AgentRunParams {
     AgentRunParams {
@@ -82,7 +98,7 @@ fn same_task_id_in_different_runs_is_distinct() {
 #[test]
 fn lifecycle_transitions_and_single_terminal_settle() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 7));
+    let _ = table.publish("t-1".into(), make_params("run-1", 7));
 
     let token = CancellationToken::new();
     let executing = match table.mark_executing("run-1", "t-1", token) {
@@ -125,7 +141,7 @@ fn lifecycle_transitions_and_single_terminal_settle() {
 #[test]
 fn settle_rejects_non_terminal_state_without_mutating_record() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     let token = CancellationToken::new();
     assert!(matches!(
         table.mark_executing("run-1", "t-1", token.clone()),
@@ -150,7 +166,10 @@ fn settle_rejects_non_terminal_state_without_mutating_record() {
         other => panic!("非终态 state 必须被显式拒绝：{other:?}"),
     }
     assert_eq!(
-        table.get("run-1", "t-1").unwrap().state,
+        table
+            .get("run-1", "t-1")
+            .expect("the fixture must contain t-1")
+            .state,
         WorkflowTaskState::Executing,
         "拒绝提交后记录保持原状"
     );
@@ -161,7 +180,7 @@ fn settle_rejects_non_terminal_state_without_mutating_record() {
 fn settle_executing_only_rejects_unclaimed_task() {
     // 回填授权面：published（消费者尚未 claim）不得被直接结算为终态。
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
 
     match table.settle(
         "run-1",
@@ -177,7 +196,10 @@ fn settle_executing_only_rejects_unclaimed_task() {
         other => panic!("未 claim 的任务不得被回填结算：{other:?}"),
     }
     assert_eq!(
-        table.get("run-1", "t-1").unwrap().state,
+        table
+            .get("run-1", "t-1")
+            .expect("the fixture must contain t-1")
+            .state,
         WorkflowTaskState::Published,
         "拒绝提交后记录保持原状"
     );
@@ -186,7 +208,7 @@ fn settle_executing_only_rejects_unclaimed_task() {
 #[test]
 fn mark_executing_is_exclusive_claim() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     let first = CancellationToken::new();
     let second = CancellationToken::new();
     assert!(matches!(
@@ -229,7 +251,7 @@ fn settle_unknown_task_is_not_found() {
 #[test]
 fn cancel_triggers_registered_token_exactly_once() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     let token = CancellationToken::new();
     table.mark_executing("run-1", "t-1", token.clone());
     assert!(!token.is_cancelled());
@@ -254,11 +276,11 @@ fn cancel_triggers_registered_token_exactly_once() {
 fn settle_wins_over_later_cancel_first_terminal_state_kept() {
     // 「结果与 kill 同时到达」：以先进入终态者为准。
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     let token = CancellationToken::new();
     table.mark_executing("run-1", "t-1", token.clone());
 
-    table.settle(
+    let _ = table.settle(
         "run-1",
         "t-1",
         SettleAdmission::ExecutingOnly,
@@ -271,7 +293,10 @@ fn settle_wins_over_later_cancel_first_terminal_state_kept() {
         SettleOutcome::AlreadyTerminal(_)
     ));
     assert_eq!(
-        table.get("run-1", "t-1").unwrap().state,
+        table
+            .get("run-1", "t-1")
+            .expect("the fixture must contain t-1")
+            .state,
         WorkflowTaskState::Completed,
         "迟到 kill 不得覆盖已完成"
     );
@@ -281,15 +306,15 @@ fn settle_wins_over_later_cancel_first_terminal_state_kept() {
 #[test]
 fn cancel_run_only_touches_unsettled_tasks_of_that_run() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
-    table.publish("t-2".into(), make_params("run-1", 2));
-    table.publish("t-3".into(), make_params("run-2", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-2".into(), make_params("run-1", 2));
+    let _ = table.publish("t-3".into(), make_params("run-2", 1));
     let token = CancellationToken::new();
     assert!(matches!(
         table.mark_executing("run-1", "t-1", token),
         ClaimOutcome::Claimed(_)
     ));
-    table.settle(
+    let _ = table.settle(
         "run-1",
         "t-1",
         SettleAdmission::ExecutingOnly,
@@ -301,11 +326,17 @@ fn cancel_run_only_touches_unsettled_tasks_of_that_run() {
     let cancelled = table.cancel_run("run-1", Some("run killed".into()));
     assert_eq!(cancelled, vec!["t-2".to_string()], "只取消未终态任务");
     assert_eq!(
-        table.get("run-1", "t-1").unwrap().state,
+        table
+            .get("run-1", "t-1")
+            .expect("the fixture must contain t-1")
+            .state,
         WorkflowTaskState::Completed
     );
     assert_eq!(
-        table.get("run-2", "t-3").unwrap().state,
+        table
+            .get("run-2", "t-3")
+            .expect("the fixture must contain t-3")
+            .state,
         WorkflowTaskState::Published,
         "其他 run 的任务不受影响"
     );
@@ -315,7 +346,7 @@ fn cancel_run_only_touches_unsettled_tasks_of_that_run() {
 fn mark_executing_after_terminal_keeps_terminal_state() {
     // kill 先于消费：任务已 cancelled，mark_executing 不得把它改回 executing。
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     table.cancel("run-1", "t-1", Some("kill first".into()));
 
     let claim = table.mark_executing("run-1", "t-1", CancellationToken::new());
@@ -334,8 +365,8 @@ fn mark_executing_after_terminal_keeps_terminal_state() {
 #[test]
 fn active_excludes_terminal_tasks() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
-    table.publish("t-2".into(), make_params("run-1", 2));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-2".into(), make_params("run-1", 2));
     assert!(matches!(
         table.mark_executing("run-1", "t-1", CancellationToken::new()),
         ClaimOutcome::Claimed(_)
@@ -344,7 +375,7 @@ fn active_excludes_terminal_tasks() {
         table.mark_executing("run-1", "t-2", CancellationToken::new()),
         ClaimOutcome::Claimed(_)
     ));
-    table.settle(
+    let _ = table.settle(
         "run-1",
         "t-1",
         SettleAdmission::ExecutingOnly,
@@ -360,13 +391,13 @@ fn active_excludes_terminal_tasks() {
 #[test]
 fn events_carry_sequence_kind_and_stable_event_id() {
     let (table, mut rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 5));
+    let _ = table.publish("t-1".into(), make_params("run-1", 5));
     let token = CancellationToken::new();
     assert!(matches!(
         table.mark_executing("run-1", "t-1", token),
         ClaimOutcome::Claimed(_)
     ));
-    table.settle(
+    let _ = table.settle(
         "run-1",
         "t-1",
         SettleAdmission::ExecutingOnly,
@@ -407,7 +438,8 @@ fn events_carry_sequence_kind_and_stable_event_id() {
             )
         );
         assert_eq!(
-            serde_json::to_value(event.kind).unwrap(),
+            serde_json::to_value(event.kind)
+                .expect("to_value must accept this test fixture representation"),
             serde_json::Value::String(event.kind.as_str().to_string()),
             "eventId 与 wire 序列化共用同一份 kind 字面量"
         );
@@ -427,9 +459,9 @@ fn events_carry_sequence_kind_and_stable_event_id() {
 #[test]
 fn for_agent_filters_within_run() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
-    table.publish("t-2".into(), make_params("run-1", 2));
-    table.publish("t-3".into(), make_params("run-2", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-2".into(), make_params("run-1", 2));
+    let _ = table.publish("t-3".into(), make_params("run-2", 1));
 
     let records = table.for_agent("run-1", 2);
     assert_eq!(records.len(), 1);
@@ -441,10 +473,10 @@ fn for_agent_filters_within_run() {
 #[test]
 fn count_for_run_separates_active_states_and_runs() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
-    table.publish("t-2".into(), make_params("run-1", 2));
-    table.publish("t-3".into(), make_params("run-1", 3));
-    table.publish("t-4".into(), make_params("run-2", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-2".into(), make_params("run-1", 2));
+    let _ = table.publish("t-3".into(), make_params("run-1", 3));
+    let _ = table.publish("t-4".into(), make_params("run-2", 1));
     assert!(matches!(
         table.mark_executing("run-1", "t-2", CancellationToken::new()),
         ClaimOutcome::Claimed(_)
@@ -480,8 +512,8 @@ fn count_for_run_separates_active_states_and_runs() {
 #[test]
 fn counts_survive_retention_eviction_of_terminal_tasks() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
-    table.settle(
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.settle(
         "run-1",
         "t-1",
         SettleAdmission::AnyActive,
@@ -489,7 +521,7 @@ fn counts_survive_retention_eviction_of_terminal_tasks() {
         None,
         Some("killed".into()),
     );
-    table.publish("t-2".into(), make_params("run-1", 2));
+    let _ = table.publish("t-2".into(), make_params("run-1", 2));
     assert!(matches!(
         table.mark_executing("run-1", "t-2", CancellationToken::new()),
         ClaimOutcome::Claimed(_)
@@ -498,7 +530,7 @@ fn counts_survive_retention_eviction_of_terminal_tasks() {
     assert_eq!(table.executing_count_for_run("run-1"), 1);
 
     // 保留窗口之后：终态任务被淘汰，活跃任务永不淘汰（计数口径不变）。
-    table.trim_at(now_ms() + TASK_RETENTION_MS);
+    table.trim_at(crate::runtime::tasks::now_ms() + TASK_RETENTION_MS);
     assert_eq!(
         table.active_count_for_run("run-1"),
         1,
@@ -522,7 +554,7 @@ fn counts_survive_retention_eviction_of_terminal_tasks() {
         ),
         SettleOutcome::Settled(_)
     ));
-    table.trim_at(now_ms() + TASK_RETENTION_MS * 2);
+    table.trim_at(crate::runtime::tasks::now_ms() + TASK_RETENTION_MS * 2);
     assert_eq!(table.active_count_for_run("run-1"), 0);
     assert_eq!(table.executing_count_for_run("run-1"), 0);
 }
@@ -540,7 +572,7 @@ fn terminal_state_helpers() {
 fn cancel_run_fences_tasks_published_after_the_sweep() {
     // kill 是栅栏不是快照：sweep 之后（Node 迟到 / 并发）发布的任务直接落 cancelled。
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     let cancelled = table.cancel_run("run-1", Some("run killed".into()));
     assert_eq!(cancelled, vec!["t-1".to_string()]);
 
@@ -590,8 +622,8 @@ fn cancel_run_fences_tasks_published_after_the_sweep() {
 #[test]
 fn cancel_agent_fences_tasks_of_that_agent_only() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 7));
-    table.publish("t-2".into(), make_params("run-1", 8));
+    let _ = table.publish("t-1".into(), make_params("run-1", 7));
+    let _ = table.publish("t-2".into(), make_params("run-1", 8));
     let cancelled = table.cancel_agent("run-1", 7, Some("agent 7 killed".into()));
     assert_eq!(cancelled, vec!["t-1".to_string()]);
 
@@ -616,8 +648,8 @@ fn cancel_agent_fences_tasks_of_that_agent_only() {
 #[test]
 fn terminal_tasks_are_evicted_after_retention_window() {
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
-    table.settle(
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.settle(
         "run-1",
         "t-1",
         SettleAdmission::AnyActive,
@@ -625,10 +657,10 @@ fn terminal_tasks_are_evicted_after_retention_window() {
         None,
         Some("killed".into()),
     );
-    table.publish("t-2".into(), make_params("run-1", 2));
+    let _ = table.publish("t-2".into(), make_params("run-1", 2));
 
     // 保留窗口内：终态任务仍在快照表（资源可读）。
-    let now = now_ms();
+    let now = crate::runtime::tasks::now_ms();
     table.trim_at(now);
     assert_eq!(table.snapshot().len(), 2);
 
@@ -652,8 +684,8 @@ fn snapshot_table_has_a_hard_upper_bound() {
     let (table, _rx) = make_table();
     for index in 0..(MAX_TASK_RECORDS + 8) {
         let task_id = format!("t-{index}");
-        table.publish(task_id.clone(), make_params("run-1", index as u64));
-        table.settle(
+        let _ = table.publish(task_id.clone(), make_params("run-1", index as u64));
+        let _ = table.settle(
             "run-1",
             &task_id,
             SettleAdmission::AnyActive,
@@ -683,7 +715,7 @@ fn snapshot_table_has_a_hard_upper_bound() {
 fn conflicting_late_settle_keeps_first_result() {
     // 冲突回填：保留首次结果并返回既有终态（告警经 tracing，不在断言面）。
     let (table, _rx) = make_table();
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     assert!(matches!(
         table.mark_executing("run-1", "t-1", CancellationToken::new()),
         ClaimOutcome::Claimed(_)
@@ -705,8 +737,11 @@ fn conflicting_late_settle_keeps_first_result() {
         SettleAdmission::ExecutingOnly,
         WorkflowTaskState::Failed,
         Some(AgentRunResult::Dead {
+            scope_close_incomplete: false,
             reason: Some("conflict".into()),
             detail: None,
+            duration_ms: None,
+            token_count: None,
         }),
         Some("conflict".into()),
     ) {
@@ -740,7 +775,10 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
         {
             sink_limit.observe_tool_calls(&record.task_id, count);
         }
-        sink_deliveries.lock().unwrap().push(record.clone());
+        sink_deliveries
+            .lock()
+            .expect("sink deliveries lock mutex must remain unpoisoned throughout the test")
+            .push(record.clone());
     }));
 
     let result = AgentRunResult::Ok {
@@ -752,13 +790,13 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
         phase: None,
         duration_ms: None,
     };
-    table.publish("t-1".into(), make_params("run-1", 1));
+    let _ = table.publish("t-1".into(), make_params("run-1", 1));
     assert!(matches!(
         table.mark_executing("run-1", "t-1", CancellationToken::new()),
         ClaimOutcome::Claimed(_)
     ));
     for _ in 0..2 {
-        table.settle(
+        let _ = table.settle(
             "run-1",
             "t-1",
             SettleAdmission::ExecutingOnly,
@@ -768,7 +806,9 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
         );
     }
 
-    let delivered = delivered.lock().unwrap();
+    let delivered = delivered
+        .lock()
+        .expect("delivered lock mutex must remain unpoisoned throughout the test");
     assert_eq!(delivered.len(), 2, "重复回填必须再次投递终态结果");
     assert_eq!(delivered[0].task_id, delivered[1].task_id);
     assert_eq!(delivered[0].result, delivered[1].result, "重投同一份结果");
@@ -780,12 +820,12 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
     );
 
     // 另一任务继续累计并超限，证明首次的 3 确实计入、去重只按 task 生效。
-    table.publish("t-2".into(), make_params("run-1", 2));
+    let _ = table.publish("t-2".into(), make_params("run-1", 2));
     assert!(matches!(
         table.mark_executing("run-1", "t-2", CancellationToken::new()),
         ClaimOutcome::Claimed(_)
     ));
-    table.settle(
+    let _ = table.settle(
         "run-1",
         "t-2",
         SettleAdmission::ExecutingOnly,
@@ -798,4 +838,155 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
         Some("workflow exceeded maxToolCalls (5)"),
         "另一任务的 3 次调用应正常累计到 6"
     );
+}
+
+fn scope_close_failure() -> AgentRunResult {
+    AgentRunResult::Dead {
+        scope_close_incomplete: false,
+        reason: Some("event-forwarder-failed".into()),
+        detail: Some("Original failure with outstanding writers".into()),
+        duration_ms: None,
+        token_count: None,
+    }
+    .after_scope_close(false)
+}
+
+#[test]
+fn committed_scope_failure_fences_only_its_run_and_cancels_peers() {
+    let (table, _rx) = make_table();
+    for (task, agent) in [("failed", 1), ("queued", 2), ("running", 3)] {
+        let _ = table.publish(task.into(), make_params("run-1", agent));
+    }
+    let failed_token = CancellationToken::new();
+    let peer_token = CancellationToken::new();
+    assert!(matches!(
+        table.mark_executing("run-1", "failed", failed_token),
+        ClaimOutcome::Claimed(_)
+    ));
+    assert!(matches!(
+        table.mark_executing("run-1", "running", peer_token.clone()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let _ = table.publish("other".into(), make_params("run-2", 1));
+
+    let failure = scope_close_failure();
+    match table.settle(
+        "run-1",
+        "failed",
+        SettleAdmission::ExecutingOnly,
+        WorkflowTaskState::Failed,
+        Some(failure.clone()),
+        None,
+    ) {
+        SettleOutcome::Settled(record) => {
+            assert_eq!(record.state, WorkflowTaskState::Failed);
+            assert_eq!(record.result, Some(failure));
+        }
+        other => panic!("scope failure must commit: {other:?}"),
+    }
+    assert!(peer_token.is_cancelled(), "active same-run peer must stop");
+    for task in ["queued", "running"] {
+        assert_eq!(
+            table.get("run-1", task).unwrap().state,
+            WorkflowTaskState::Cancelled
+        );
+        assert!(matches!(
+            table.mark_executing("run-1", task, CancellationToken::new()),
+            ClaimOutcome::AlreadyTerminal(_)
+        ));
+        assert!(table
+            .claim_for_consumer("run-1", task, "peer-claim", None)
+            .is_none());
+    }
+
+    match table.publish("retry".into(), make_params("run-1", 4)) {
+        PublishOutcome::Published(record) => assert_eq!(record.state, WorkflowTaskState::Cancelled),
+        other => panic!("retry should have a terminal receipt: {other:?}"),
+    }
+    assert!(matches!(
+        table.mark_executing("run-1", "retry", CancellationToken::new()),
+        ClaimOutcome::AlreadyTerminal(_)
+    ));
+    assert!(table
+        .claim_for_consumer("run-1", "retry", "retry-claim", None)
+        .is_none());
+    assert!(table
+        .claim_for_consumer("run-2", "other", "other-claim", None)
+        .is_some());
+    let _ = table.publish("other-late".into(), make_params("run-2", 2));
+    assert!(matches!(
+        table.mark_executing("run-2", "other-late", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+}
+
+#[test]
+fn conflicting_late_scope_failure_does_not_fence_a_successful_run() {
+    let (table, _rx) = make_table();
+    let _ = table.publish("completed".into(), make_params("run-1", 1));
+    assert!(matches!(
+        table.mark_executing("run-1", "completed", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let success = ok_result();
+    assert!(matches!(
+        table.settle(
+            "run-1",
+            "completed",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Completed,
+            Some(success.clone()),
+            None
+        ),
+        SettleOutcome::Settled(_)
+    ));
+    for _ in 0..2 {
+        match table.settle(
+            "run-1",
+            "completed",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Failed,
+            Some(scope_close_failure()),
+            None,
+        ) {
+            SettleOutcome::AlreadyTerminal(record) => {
+                assert_eq!(record.state, WorkflowTaskState::Completed);
+                assert_eq!(record.result, Some(success.clone()));
+            }
+            other => panic!("first terminal result must win: {other:?}"),
+        }
+    }
+    let _ = table.publish("next".into(), make_params("run-1", 2));
+    assert!(table
+        .claim_for_consumer("run-1", "next", "next-claim", None)
+        .is_some());
+}
+
+#[test]
+fn nonadmitted_scope_failure_does_not_fence_pending_work() {
+    let (table, _rx) = make_table();
+    let _ = table.publish("unclaimed".into(), make_params("run-1", 1));
+    assert!(matches!(
+        table.settle(
+            "run-1",
+            "unclaimed",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Failed,
+            Some(scope_close_failure()),
+            None
+        ),
+        SettleOutcome::NotAdmitted(_)
+    ));
+    assert_eq!(
+        table.get("run-1", "unclaimed").unwrap().state,
+        WorkflowTaskState::Published
+    );
+    assert!(matches!(
+        table.mark_executing("run-1", "unclaimed", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let _ = table.publish("next".into(), make_params("run-1", 2));
+    assert!(table
+        .claim_for_consumer("run-1", "next", "next-claim", None)
+        .is_some());
 }

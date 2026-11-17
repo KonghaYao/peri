@@ -1,0 +1,57 @@
+{
+  "packages": [
+    {
+      "name": "peri-acp",
+      "targets": [
+        {"name": "peri_acp", "kind": ["lib"], "src_path": "peri-acp/src/lib.rs", "test": true},
+        {"name": "integration_test", "kind": ["test"], "src_path": "peri-acp/tests/integration_test.rs", "test": true},
+        {"name": "prompt_cache_boundary", "kind": ["test"], "src_path": "peri-acp/tests/prompt_cache_boundary.rs", "test": true}
+      ]
+    },
+    {
+      "name": "peri-agent",
+      "targets": [
+        {"name": "peri_agent", "kind": ["lib"], "src_path": "peri-agent/src/lib.rs", "test": true},
+        {"name": "compact_pressure_adversarial_test", "kind": ["test"], "src_path": "peri-agent/tests/compact_pressure_adversarial_test.rs", "test": true},
+        {"name": "compact_session_adversarial_test", "kind": ["test"], "src_path": "peri-agent/tests/compact_session_adversarial_test.rs", "test": true},
+        {"name": "compact_session_manual_adversarial_test", "kind": ["test"], "src_path": "peri-agent/tests/compact_session_manual_adversarial_test.rs", "test": true},
+        {"name": "compact_authority_projection_test", "kind": ["test"], "src_path": "peri-agent/tests/compact_authority_projection_test.rs", "test": true},
+        {"name": "middleware_tests", "kind": ["test"], "src_path": "peri-agent/tests/middleware_tests.rs", "test": true}
+      ]
+    },
+    {
+      "name": "peri-tui",
+      "targets": [
+        {"name": "peri_tui", "kind": ["lib"], "src_path": "peri-tui/src/lib.rs", "test": true},
+        {"name": "peri", "kind": ["bin"], "src_path": "peri-tui/src/main.rs", "test": true},
+        {"name": "meta_session_cli", "kind": ["test"], "src_path": "peri-tui/tests/meta_session_cli.rs", "test": true}
+      ]
+    },
+    {
+      "name": "peri-middlewares",
+      "targets": [
+        {"name": "peri_middlewares", "kind": ["lib"], "src_path": "peri-middlewares/src/lib.rs", "test": true},
+        {"name": "mcp_isolation_contract", "kind": ["test"], "src_path": "peri-middlewares/tests/mcp_isolation_contract.rs", "test": true}
+      ]
+    },
+    {
+      "name": "peri-mcp-common",
+      "targets": [
+        {"name": "peri_mcp_common", "kind": ["lib"], "src_path": "peri-mcp-common/src/lib.rs", "test": true}
+      ]
+    },
+    {
+      "name": "peri-model",
+      "targets": [
+        {"name": "peri_model", "kind": ["lib"], "src_path": "peri-model/src/lib.rs", "test": true},
+        {"name": "responses_wire_test", "kind": ["test"], "src_path": "peri-model/tests/responses_wire_test.rs", "test": true}
+      ]
+    },
+    {
+      "name": "peri-ignored",
+      "targets": [
+        {"name": "peri_ignored", "kind": ["lib"], "src_path": "peri-ignored/src/lib.rs", "test": false}
+      ]
+    }
+  ]
+}

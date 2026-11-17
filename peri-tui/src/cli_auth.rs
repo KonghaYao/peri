@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use peri_tui::chatgpt_auth::resolve_credential_store;
 
 #[derive(Subcommand)]
 pub(super) enum AuthCommand {
@@ -34,7 +33,7 @@ pub(super) struct ChatGptOptions {
 }
 
 fn credential_store(config_path: &std::path::Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
-    resolve_credential_store(config_path, explicit)
+    peri_tui::chatgpt_auth::resolve_credential_store(config_path, explicit)
 }
 
 pub(super) async fn run(action: AuthCommand, config_path: PathBuf) -> Result<()> {
@@ -54,7 +53,7 @@ pub(super) async fn run(action: AuthCommand, config_path: PathBuf) -> Result<()>
             | ChatGptAction::Logout(options) => options,
         };
         let store = credential_store(&config_path, options.store.clone())?;
-        let manager = ChatGptAuthManager::new(store.clone(), options.account.clone())?;
+        let manager = ChatGptAuthManager::try_new(store.clone(), options.account.clone())?;
         match action {
             ChatGptAction::Login(options) => {
                 let pending = manager.begin_login(CancellationToken::new()).await?;

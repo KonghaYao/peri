@@ -1,4 +1,24 @@
-use super::*;
+use crate::host::executor_flow_tests::MockEventSink;
+use crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::ApprovalTransport;
+use crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::AssembledHostFixture;
+use crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::ToolApprovalBroker;
+use crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::TurnRecordingModel;
+use crate::host::mcp_v4_wave2::FixtureDirs;
+use crate::host::mcp_v4_wire_fixture::ScriptedToolCall;
+use crate::host::mcp_v4_wire_fixture::WireScriptedModel;
+use crate::host::PromptLocks;
+use crate::host::SharedSessions;
+use crate::transport::AcpTransport;
+use peri_acp_types::interaction::UserInteractionBroker;
+use peri_acp_types::permission::PermissionMode;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::session::MessageSource;
+use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
+use peri_model::Model;
+use serde_json::json;
+use serial_test::serial;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── 用例 8：cron 端到端（§8 第 6 行 / H04 / V 子计划 `[W2 cron-e2e]`）──────────
 
@@ -81,13 +101,18 @@ async fn cron_register_tick_approval_continuation() {
     ]));
     register_ctx.broker = Arc::clone(&register_broker) as Arc<dyn UserInteractionBroker>;
     register_ctx.permission_mode = SharedPermissionMode::new(PermissionMode::Default);
-    let register_turn = run_wire_prompt(register_ctx, &register_sink, &register_model).await;
+    let register_turn = crate::host::mcp_v4_wire_fixture::run_wire_prompt(
+        register_ctx,
+        &register_sink,
+        &register_model,
+    )
+    .await;
     assert!(
         register_turn.ok,
         "注册 turn 必须正常收束: {:?}",
         register_turn.failure
     );
-    let register_name = declared_effective_names("cron")
+    let register_name = crate::host::mcp_v4_wave2::declared_effective_names("cron")
         .first()
         .copied()
         .expect("cron 必须声明工具");
@@ -109,7 +134,8 @@ async fn cron_register_tick_approval_continuation() {
         )],
         "工具级审批看到的必须是**模型面 effective name** + 逐字入参（A14：事件载荷不归一）"
     );
-    let tool_ends = tool_end_events(&register_sink);
+    let tool_ends =
+        crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::tool_end_events(&register_sink);
     let registered = tool_ends
         .iter()
         .find(|(name, _, _)| name == register_name)
@@ -202,7 +228,7 @@ async fn cron_register_tick_approval_continuation() {
     assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);
     assert!(
-        wait_until(
+        crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::wait_until(
             "rejected scheduled approval",
             std::time::Duration::from_secs(15),
             || transport.approvals() == 1
@@ -239,7 +265,7 @@ async fn cron_register_tick_approval_continuation() {
     assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);
     assert!(
-        wait_until(
+        crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::wait_until(
             "approved scheduled permission awaiting response",
             std::time::Duration::from_secs(15),
             || transport.approvals() == 2
@@ -272,7 +298,7 @@ async fn cron_register_tick_approval_continuation() {
     assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);
     assert!(
-        wait_until(
+        crate::host::mcp_v4_wave2::mcp_v4_wave2_cron_support_test::wait_until(
             "approved scheduled turn",
             std::time::Duration::from_secs(15),
             || turn_model.calls() > 0

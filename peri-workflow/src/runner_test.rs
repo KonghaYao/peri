@@ -6,19 +6,18 @@
 
 use serial_test::serial;
 
-use super::limits::RunLimitState;
-use super::run_protocol::{
-    parse_agent_task_params, parse_run_scoped, reusable_journal_prefix, validate_start_ack,
-    workflow_start_params, JournalTruncateParams,
-};
-use super::terminal::project_postcondition;
-use super::{
-    receive_workflow_result, AgentExecutor, WorkflowInput, WorkflowResult, WorkflowRunner,
-};
 use crate::journal::WorkflowJournalStore;
 use crate::progress::{RunStatus, WorkflowProgressStore};
 use crate::protocol::WorkflowDoneParams;
 use crate::protocol::{AgentRunParams, AgentRunResult, Usage, WorkflowLimits};
+use crate::runner::limits::RunLimitState;
+
+use crate::runner::run_protocol::JournalTruncateParams;
+
+use crate::runner::WorkflowInput;
+use crate::runner::WorkflowResult;
+use crate::runner::WorkflowRunner;
+use peri_acp_types::workflow::AgentExecutor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -41,9 +40,9 @@ fn resume_reuses_only_the_contiguous_success_prefix() {
             "result": {"kind": "ok", "output": "must-replay", "usage": {"outputTokens": 1}}
         }
     ]))
-    .unwrap();
+    .expect("from_value must accept this test fixture representation");
 
-    let prefix = reusable_journal_prefix(entries);
+    let prefix = crate::runner::run_protocol::reusable_journal_prefix(entries);
     assert_eq!(prefix.len(), 1);
     assert_eq!(prefix[0].key, "first");
 }
@@ -62,9 +61,9 @@ fn resume_skipped_entry_is_a_cache_boundary() {
             "result": {"kind": "ok", "output": "must-replay", "usage": {"outputTokens": 1}}
         }
     ]))
-    .unwrap();
+    .expect("from_value must accept this test fixture representation");
 
-    assert!(reusable_journal_prefix(entries).is_empty());
+    assert!(crate::runner::run_protocol::reusable_journal_prefix(entries).is_empty());
 }
 
 #[test]
@@ -76,9 +75,9 @@ fn resume_gap_is_not_treated_as_a_success_prefix() {
             "result": {"kind": "ok", "output": "must-replay", "usage": {"outputTokens": 1}}
         }
     ]))
-    .unwrap();
+    .expect("from_value must accept this test fixture representation");
 
-    assert!(reusable_journal_prefix(entries).is_empty());
+    assert!(crate::runner::run_protocol::reusable_journal_prefix(entries).is_empty());
 }
 
 struct CountingAgentExecutor {
@@ -90,23 +89,32 @@ impl AgentExecutor for CountingAgentExecutor {
     async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
         AgentRunResult::Dead {
+            scope_close_incomplete: false,
             reason: Some("test executor must not run".into()),
             detail: None,
+            duration_ms: None,
+            token_count: None,
         }
     }
 }
 
 #[tokio::test]
 async fn resume_sequence_gap_fails_before_any_agent_execution() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
     let journal = Arc::new(WorkflowJournalStore::new(cwd));
-    journal.init_run("source", "script").unwrap();
+    journal
+        .init_run("source", "script")
+        .expect("the init run fixture result is required for this assertion");
     std::fs::write(
         journal.run_dir("source").join("journal.jsonl"),
         "{\"key\":\"later\",\"seq\":1,\"result\":{\"kind\":\"ok\",\"output\":\"later\",\"usage\":{\"outputTokens\":1}}}\n",
     )
-    .unwrap();
+    .expect("the test fixture file must be writable");
 
     let calls = Arc::new(AtomicU64::new(0));
     let executor = Arc::new(CountingAgentExecutor {
@@ -274,13 +282,15 @@ fn completed_workflow_result() -> WorkflowResult {
 #[tokio::test]
 async fn workflow_result_receiver_reads_already_published_value() {
     let (done_tx, done_rx) = tokio::sync::watch::channel(None);
-    done_tx.send(Some(completed_workflow_result())).unwrap();
+    done_tx
+        .send(Some(completed_workflow_result()))
+        .expect("done tx send test receiver must remain available for this delivery");
     let mut late_rx = done_rx.clone();
     drop(done_tx);
 
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        receive_workflow_result(&mut late_rx),
+        crate::runner::receive_workflow_result(&mut late_rx),
     )
     .await
     .expect("已发布的 watch 终态必须立即可读")
@@ -296,7 +306,7 @@ async fn workflow_result_receiver_returns_none_when_closed_without_result() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        receive_workflow_result(&mut done_rx),
+        crate::runner::receive_workflow_result(&mut done_rx),
     )
     .await
     .expect("关闭且无终态的 watch 不得挂起");
@@ -314,7 +324,7 @@ fn postcondition_projection_never_escalates_to_deliverable() {
 
     let read_only = WorkflowWriteIntent::ReadOnly;
     assert_eq!(
-        project_postcondition(
+        crate::runner::terminal::project_postcondition(
             "completed",
             AcceptanceStatus::Unknown,
             Some(&read_only),
@@ -325,7 +335,7 @@ fn postcondition_projection_never_escalates_to_deliverable() {
     // acceptance 无生产写入方（内核不判验收）：Passed 也不把 delivery 抬到
     // deliverable——deliverable 属引擎之外的验收层（2026-10-11 用户裁决）。
     assert_eq!(
-        project_postcondition(
+        crate::runner::terminal::project_postcondition(
             "completed",
             AcceptanceStatus::Passed,
             Some(&read_only),
@@ -334,7 +344,7 @@ fn postcondition_projection_never_escalates_to_deliverable() {
         (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
     );
     assert_eq!(
-        project_postcondition(
+        crate::runner::terminal::project_postcondition(
             "completed",
             AcceptanceStatus::Failed,
             Some(&read_only),
@@ -358,21 +368,130 @@ fn postcondition_projection_fails_safe_without_evidence() {
         commit_required: None,
     };
     assert_eq!(
-        project_postcondition("completed", AcceptanceStatus::Unknown, Some(&write), None),
-        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
-    );
-    assert_eq!(
-        project_postcondition(
+        crate::runner::terminal::project_postcondition(
             "completed",
             AcceptanceStatus::Unknown,
             Some(&write),
-            Some(&Err("credential token=secret".into())),
+            None
+        ),
+        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+    assert_eq!(
+        crate::runner::terminal::project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            Some(&write),
+            Some(&Err(crate::journal::PostconditionFailure::Violation(
+                "credential token=secret".into(),
+            ),)),
         ),
         (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
     );
     assert_eq!(
-        project_postcondition("completed", AcceptanceStatus::Unknown, None, Some(&Ok(())),),
+        crate::runner::terminal::project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            None,
+            Some(&Ok(())),
+        ),
         (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+}
+
+#[test]
+fn postcondition_projection_separates_unattributed_changes_from_violations() {
+    use crate::journal::PostconditionFailure;
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
+    };
+
+    let read_only = WorkflowWriteIntent::ReadOnly;
+    let unattributed =
+        PostconditionFailure::Unattributed("git changes outside the run's write footprint".into());
+    assert_eq!(
+        crate::runner::terminal::project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            Some(&read_only),
+            Some(&Err(unattributed)),
+        ),
+        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+    let violation = PostconditionFailure::Violation("escaped allowlist".into());
+    assert_eq!(
+        crate::runner::terminal::project_postcondition(
+            "completed",
+            AcceptanceStatus::Unknown,
+            Some(&read_only),
+            Some(&Err(violation)),
+        ),
+        (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
+    );
+}
+
+#[test]
+fn outcome_separates_execution_from_delivery() {
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, ExecutionStatus, WorkflowOutcome,
+    };
+
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Completed,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Unknown,
+        ),
+        WorkflowOutcome::Completed
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Completed,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Blocked,
+        ),
+        WorkflowOutcome::Blocked
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Completed,
+            AcceptanceStatus::Failed,
+            DeliveryStatus::Unknown,
+        ),
+        WorkflowOutcome::Blocked
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Failed,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Blocked,
+        ),
+        WorkflowOutcome::Failed
+    );
+    assert_eq!(
+        WorkflowOutcome::project(
+            ExecutionStatus::Running,
+            AcceptanceStatus::Unknown,
+            DeliveryStatus::Unknown,
+        ),
+        WorkflowOutcome::Unknown
+    );
+}
+
+#[test]
+fn failed_terminal_without_error_gets_a_readable_fallback() {
+    let mut result = completed_workflow_result();
+    result.status = "failed".into();
+    result.error = None;
+    crate::runner::terminal::ensure_failure_error(&mut result);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("workflow failed without error details")
+    );
+    result.error = Some("   ".into());
+    crate::runner::terminal::ensure_failure_error(&mut result);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("workflow failed without error details")
     );
 }
 
@@ -390,7 +509,7 @@ fn test_workflow_start_params_preserve_budget_total() {
         git_baseline: None,
     };
 
-    let params = workflow_start_params("run-1", &input, None, "/tmp");
+    let params = crate::runner::run_protocol::workflow_start_params("run-1", &input, None, "/tmp");
 
     assert_eq!(params.budget_total, Some(9_007_199_254_740_991));
     assert_eq!(params.max_concurrency, 2);
@@ -399,7 +518,7 @@ fn test_workflow_start_params_preserve_budget_total() {
 
 #[test]
 fn test_agent_task_params_preserve_requested_model() {
-    let (task_id, params) = parse_agent_task_params(
+    let (task_id, params) = crate::runner::run_protocol::parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "run-1",
             "taskId": "t-1",
@@ -409,7 +528,7 @@ fn test_agent_task_params_preserve_requested_model() {
         })),
         "run-1",
     )
-    .unwrap();
+    .expect("the parse agent task params fixture result is required for this assertion");
 
     assert_eq!(task_id, "t-1");
     assert_eq!(params.model.as_deref(), Some("sonnet"));
@@ -417,7 +536,7 @@ fn test_agent_task_params_preserve_requested_model() {
 
 #[test]
 fn test_agent_task_params_reject_invalid_model_type() {
-    let result = parse_agent_task_params(
+    let result = crate::runner::run_protocol::parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "run-1",
             "taskId": "t-1",
@@ -433,12 +552,12 @@ fn test_agent_task_params_reject_invalid_model_type() {
 
 #[test]
 fn test_agent_task_params_reject_missing_params() {
-    assert!(parse_agent_task_params(None, "run-1").is_err());
+    assert!(crate::runner::run_protocol::parse_agent_task_params(None, "run-1").is_err());
 }
 
 #[test]
 fn test_agent_task_params_reject_empty_task_id() {
-    let result = parse_agent_task_params(
+    let result = crate::runner::run_protocol::parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "run-1",
             "taskId": "  ",
@@ -453,7 +572,7 @@ fn test_agent_task_params_reject_empty_task_id() {
 
 #[test]
 fn test_agent_task_params_reject_cross_run_identity() {
-    let result = parse_agent_task_params(
+    let result = crate::runner::run_protocol::parse_agent_task_params(
         Some(serde_json::json!({
             "runId": "other-run",
             "taskId": "t-1",
@@ -471,7 +590,7 @@ fn test_agent_task_params_reject_cross_run_identity() {
 
 #[test]
 fn test_run_scoped_done_rejects_cross_run_identity() {
-    let result = parse_run_scoped::<WorkflowDoneParams>(
+    let result = crate::runner::run_protocol::parse_run_scoped::<WorkflowDoneParams>(
         Some(serde_json::json!({
             "runId": "other-run",
             "status": "completed"
@@ -487,27 +606,30 @@ fn test_run_scoped_done_rejects_cross_run_identity() {
 
 #[test]
 fn test_run_scoped_journal_rejects_missing_run_identity() {
-    let result = parse_run_scoped::<JournalTruncateParams>(Some(serde_json::json!({})), "run-1");
+    let result = crate::runner::run_protocol::parse_run_scoped::<JournalTruncateParams>(
+        Some(serde_json::json!({})),
+        "run-1",
+    );
 
     assert_eq!(result.err(), Some("invalid run-scoped RPC parameters"));
 }
 
 #[test]
 fn test_start_ack_accepts_matching_protocol_and_build() {
-    validate_start_ack(serde_json::json!({
+    crate::runner::run_protocol::validate_start_ack(serde_json::json!({
         "ok": true,
-        "protocolVersion": super::artifact::WORKFLOW_PROTOCOL_VERSION,
-        "buildId": super::artifact::WORKFLOW_BUILD_ID
+        "protocolVersion": crate::runner::artifact::WORKFLOW_PROTOCOL_VERSION,
+        "buildId": crate::runner::artifact::WORKFLOW_BUILD_ID
     }))
-    .unwrap();
+    .expect("the validate start ack fixture result is required for this assertion");
 }
 
 #[test]
 fn test_start_ack_rejects_protocol_mismatch() {
-    let error = validate_start_ack(serde_json::json!({
+    let error = crate::runner::run_protocol::validate_start_ack(serde_json::json!({
         "ok": true,
-        "protocolVersion": super::artifact::WORKFLOW_PROTOCOL_VERSION + 1,
-        "buildId": super::artifact::WORKFLOW_BUILD_ID
+        "protocolVersion": crate::runner::artifact::WORKFLOW_PROTOCOL_VERSION + 1,
+        "buildId": crate::runner::artifact::WORKFLOW_BUILD_ID
     }))
     .unwrap_err();
 
@@ -523,8 +645,12 @@ async fn test_kill_marks_run_killed_in_progress_store() {
     if !require_explicit_engine() {
         return;
     }
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
 
     let executor = Arc::new(MockAgentExecutor {
         delay: std::time::Duration::from_secs(5),
@@ -574,7 +700,7 @@ return { output: result }
     let progress_wait = Arc::clone(&progress);
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let Some(run) = progress_wait.get_run(&run_id) {
+            if let Some(run) = progress_wait.run_snapshot(&run_id) {
                 if matches!(run.status, RunStatus::Running) {
                     break;
                 }
@@ -586,20 +712,25 @@ return { output: result }
     .expect("run 未在超时内进入 Running 状态");
 
     // 触发 kill（等效 workflow/kill_run RPC → WorkflowTaskRegistry::kill → kill_tx）
-    kill_tx.send(()).unwrap();
+    kill_tx
+        .send(())
+        .expect("kill tx send test receiver must remain available for this delivery");
 
     // 等待完成信号：kill 分支是 done_tx 的唯一出口，必达
     tokio::time::timeout(std::time::Duration::from_secs(30), done_rx.changed())
         .await
         .expect("kill 后未收到完成信号")
-        .unwrap();
-    let result = done_rx.borrow().clone().unwrap();
+        .expect("the expect fixture result is required for this assertion");
+    let result = done_rx
+        .borrow()
+        .clone()
+        .expect("the clone fixture result is required for this assertion");
     assert_eq!(result.status, "killed");
 
-    // 核心断言：kill 后 progress_store 显示 Killed（workflow/list_runs 与 get_run 同源，
+    // 核心断言：kill 后 progress_store 显示 Killed（workflow/list_runs 与 run_snapshot 同源，
     // 回归点：修复前此处永久 Running —— 幽灵 running 根因）
     let run = progress
-        .get_run(&run_id)
+        .run_snapshot(&run_id)
         .expect("run 应存在于 progress_store");
     assert!(
         matches!(run.status, RunStatus::Killed),
@@ -612,7 +743,7 @@ return { output: result }
     );
 
     // run() 应在 kill 分支后正常返回 Ok
-    run_handle.await.unwrap().unwrap();
+    run_handle.await.expect("the run handle fixture result is required for this assertion").expect("kill marks run killed in progress store: the completed fixture operation must provide its result payload");
 }
 
 /// [回归测试] Node 自然崩溃（非 kill）时 msg_loop failed 收尾必须收敛 progress_store
@@ -630,8 +761,12 @@ async fn test_natural_crash_marks_run_failed_in_progress_store() {
     if !require_explicit_engine() {
         return;
     }
-    let tmp = tempfile::TempDir::new().unwrap();
-    let cwd = tmp.path().to_str().unwrap();
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let cwd = tmp
+        .path()
+        .to_str()
+        .expect("the fixture text must be valid UTF-8");
 
     let executor = Arc::new(MockAgentExecutor {
         delay: std::time::Duration::ZERO,
@@ -685,7 +820,7 @@ throw new Error('intentional crash after agent')
     let progress_wait = Arc::clone(&progress);
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if progress_wait.get_run(&run_id).is_some() {
+            if progress_wait.run_snapshot(&run_id).is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -695,11 +830,11 @@ throw new Error('intentional crash after agent')
     .expect("run 未在超时内出现");
 
     // 不触发 kill：Node 自然崩溃 → run() 应正常返回
-    run_handle.await.unwrap().unwrap();
+    run_handle.await.expect("the run handle fixture result is required for this assertion").expect("natural crash marks run failed in progress store: the completed fixture operation must provide its result payload");
 
     // 核心断言：自然崩溃后 progress_store 显示 Failed（修复前此处永久 Running）
     let run = progress
-        .get_run(&run_id)
+        .run_snapshot(&run_id)
         .expect("run 应存在于 progress_store");
     assert!(
         matches!(run.status, RunStatus::Failed),
@@ -710,4 +845,26 @@ throw new Error('intentional crash after agent')
         run.completed_at.is_some(),
         "Failed 条目必须设置 completed_at，否则 cleanup_completed 永不清理"
     );
+}
+
+#[test]
+fn fatal_host_failure_uses_the_existing_first_failure_slot_per_run() {
+    let executor = Arc::new(MockAgentExecutor {
+        delay: std::time::Duration::ZERO,
+    }) as Arc<dyn AgentExecutor>;
+    let runner = WorkflowRunner::new(executor, ".", None);
+    let failed = Arc::new(RunLimitState::new(None));
+    let independent = Arc::new(RunLimitState::new(None));
+    runner
+        .run_limit_states
+        .insert("failed".into(), Arc::clone(&failed));
+    runner
+        .run_limit_states
+        .insert("independent".into(), Arc::clone(&independent));
+    runner.note_run_failure("failed", "scope not closed");
+    runner.note_run_failure("failed", "later failure");
+    assert_eq!(failed.breach().as_deref(), Some("scope not closed"));
+    assert_eq!(independent.breach(), None);
+    runner.note_run_failure("already retired", "late result");
+    assert_eq!(runner.run_limit_states.len(), 2);
 }

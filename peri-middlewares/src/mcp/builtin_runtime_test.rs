@@ -88,16 +88,22 @@ use tokio::sync::Notify;
 
 use crate::assembly::{default_workflow_middleware_factory_with_pool, open_builtin_bridges};
 use crate::mcp::builtin::context::CronInstanceInput;
-use crate::mcp::builtin::runtime::{
-    spawn_builtin_transport_with_tap, BuiltinServerExit, BuiltinServerTask, BuiltinWireLog,
-    TickCloseOutcome, BUILTIN_CONVERGE_TIMEOUT, BUILTIN_TICK_INTERVAL,
-};
+use crate::mcp::builtin::runtime;
+use crate::mcp::builtin::runtime::BuiltinServerExit;
+use crate::mcp::builtin::runtime::BuiltinServerTask;
+use crate::mcp::builtin::runtime::BuiltinWireLog;
+use crate::mcp::builtin::runtime::TickCloseOutcome;
+use crate::mcp::builtin::runtime::BUILTIN_CONVERGE_TIMEOUT;
+use crate::mcp::builtin::runtime::BUILTIN_TICK_INTERVAL;
 use crate::mcp::builtin::BUILTIN_INJECTION_ENV;
-use crate::mcp::client::{
-    serve_client_auto, McpConnectionKey, McpInitStatus, McpServiceWrapper, SystemMcpManifest,
-};
-use crate::mcp::initialize::list_discovered_tools;
-use crate::mcp::tool_bridge::{build_typed_tool_bridges, McpToolBridge};
+use crate::mcp::client;
+use crate::mcp::client::McpConnectionKey;
+use crate::mcp::client::McpInitStatus;
+use crate::mcp::client::McpServiceWrapper;
+use crate::mcp::client::SystemMcpManifest;
+use crate::mcp::initialize;
+use crate::mcp::tool_bridge;
+use crate::mcp::tool_bridge::McpToolBridge;
 use crate::permission::{default_requires_approval, PermissionMiddleware};
 use peri_mcp_cron::CronScheduler;
 
@@ -126,14 +132,9 @@ struct LoaderEnvGuard {
 }
 
 impl LoaderEnvGuard {
-    fn redirect(home: &Path) -> Self {
-        Self::redirect_with_builtin_env(home, None)
-    }
-
-    /// 同 [`Self::redirect`]，但 `PERI_MCP_BUILTIN` 取显式值（`None` = 移除该变量）。
+    /// 重定向 `HOME`，`PERI_MCP_BUILTIN` 取显式值（`None` = 移除该变量）。
     ///
-    /// 既有 `redirect` 逐位不变（委托到本函数、`builtin_env = None`）；WP-MW 的
-    /// `PERI_MCP_BUILTIN=off` 零注入用例需要这一份取值。
+    /// v5 默认路径用 `None`；回滚与零注入用例分别传 `"legacy"` / `"off"`。
     fn redirect_with_builtin_env(home: &Path, builtin_env: Option<&str>) -> Self {
         let lock = peri_mcp_common::process_env::lock().expect("进程环境锁");
         let home = home.to_string_lossy().into_owned();
@@ -188,7 +189,7 @@ fn declared_effective_names(instance: &BuiltinMcpInstance) -> Vec<String> {
         .tools
         .iter()
         .filter(|tool| tool.model_visible)
-        .map(|tool| tool.effective_name.to_string())
+        .map(|tool| tool.legacy_name.to_string())
         .collect()
 }
 
@@ -202,7 +203,7 @@ fn declared_direct_effective_names(instance: &BuiltinMcpInstance) -> Vec<String>
         .tools
         .iter()
         .filter(|tool| tool.direct)
-        .map(|tool| tool.effective_name.to_string())
+        .map(|tool| tool.legacy_name.to_string())
         .collect()
 }
 
@@ -211,7 +212,7 @@ fn all_direct_effective_names() -> Vec<String> {
     let mut names: Vec<String> = BUILTIN_MCP_INSTANCES
         .iter()
         .flat_map(|instance| instance.tools.iter().filter(|tool| tool.direct))
-        .map(|tool| tool.effective_name.to_string())
+        .map(|tool| tool.legacy_name.to_string())
         .collect();
     names.sort();
     names
@@ -612,7 +613,9 @@ impl StartupFixture {
         let project = fixture.path().join("project");
         std::fs::create_dir_all(&home).expect("home 可创建");
         std::fs::create_dir_all(&project).expect("project 可创建");
-        let env = LoaderEnvGuard::redirect(&home);
+        // v5 单出口默认路径由 `v5_single_exit_*` 用例覆盖；本夹具保留 v4 六实例
+        // 回滚路径，供逐实例隔离 / 关闭矩阵的既有断言继续有效。
+        let env = LoaderEnvGuard::redirect_with_builtin_env(&home, Some("legacy"));
         let cwd = project.to_string_lossy().to_string();
 
         let pool = Arc::new(McpClientPool::new_pending());
@@ -717,13 +720,13 @@ impl TappedLink {
         bind_fixture_session(&pool);
         let handler = FixtureBuiltinHandler::new(info_name, tools);
         let (transport, wire) =
-            spawn_builtin_transport_with_tap(instance.instance, handler.clone());
+            runtime::spawn_builtin_transport_with_tap(instance.instance, handler.clone());
         // 夹具自持 server task（不登记进 pool）：只取 io 与 server 半边，tick 归属
         // （生产恒 `None`）与本次夹具无关。
         let crate::mcp::builtin::runtime::BuiltinTransport {
             io, server_task, ..
         } = transport;
-        let service = serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
+        let service = client::serve_client_auto(io, &pool.capability_profile, HANDSHAKE_TIMEOUT)
             .await
             .expect("builtin 握手不得超时（同进程链路）")
             .expect("builtin 握手不得失败");
@@ -734,7 +737,7 @@ impl TappedLink {
             .write()
             .insert(instance.name.to_string(), config.clone());
         let peer = service.peer().clone();
-        let discovered = list_discovered_tools(&pool, instance.name, &peer, &config)
+        let discovered = initialize::list_discovered_tools(&pool, instance.name, &peer, &config)
             .await
             .expect("live tools/list 必须成功");
         let handle = Arc::new(McpClientHandle {
@@ -815,7 +818,7 @@ impl TappedLink {
 
     /// 本链路所在 pool 的类型化 bridge（生产构造：声明 direct 生效）。
     fn bridge(&self, effective_name: &str) -> McpToolBridge {
-        build_typed_tool_bridges(&self.pool)
+        tool_bridge::build_typed_tool_bridges(&self.pool)
             .into_iter()
             .find(|bridge| bridge.name() == effective_name)
             .unwrap_or_else(|| panic!("必须存在 {effective_name} 的 typed bridge"))
@@ -824,7 +827,7 @@ impl TappedLink {
     /// peer（用于「effective name 不是 wire 名」的反证）。
     fn peer(&self) -> rmcp::service::Peer<rmcp::service::RoleClient> {
         self.pool
-            .get_client(self.instance.name)
+            .client(self.instance.name)
             .and_then(|handle| handle.peer.clone())
             .expect("夹具链路必须有 peer")
     }

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const OAUTH_CREDENTIAL_METHOD: &str = "peri/oauth_credentials";
 
+/// Credential-store operations keyed by MCP server identity.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OAuthCredentialRequest {
@@ -20,6 +21,7 @@ pub enum OAuthCredentialRequest {
     List,
 }
 
+/// Credential-store outcomes; absent credentials remain distinct from storage failures.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum OAuthCredentialValue {
@@ -28,7 +30,8 @@ pub enum OAuthCredentialValue {
     Saved,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, thiserror::Error)]
+/// Stable credential-store failure categories carried across the service boundary.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthCredentialError {
     #[error("OAuth credential input is invalid")]
@@ -41,7 +44,9 @@ pub enum OAuthCredentialError {
     InvalidData,
 }
 
+/// A credential operation outcome preserving the typed storage failure.
 pub type OAuthCredentialResult<T> = Result<T, OAuthCredentialError>;
+/// The wire result for a credential-store operation.
 pub type OAuthCredentialResponse = OAuthCredentialResult<OAuthCredentialValue>;
 
 pub fn validate_server_key(server_key: &str) -> OAuthCredentialResult<()> {
@@ -61,6 +66,8 @@ pub fn validate_credentials(credentials: &str) -> OAuthCredentialResult<()> {
     }
 }
 
+/// Scoped access to serialized OAuth credentials and their server keys.
+/// Implementations report storage failures rather than replacing them with missing records.
 #[async_trait]
 pub trait OAuthCredentialPort: Send + Sync {
     async fn load(&self, server_key: &str) -> OAuthCredentialResult<Option<String>>;

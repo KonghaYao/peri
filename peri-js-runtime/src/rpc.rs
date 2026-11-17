@@ -1,3 +1,5 @@
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -19,6 +21,7 @@ pub struct JsonRpcError {
     pub data: Option<Value>,
 }
 
+#[derive(Debug)]
 pub enum ParsedMessage {
     Response {
         id: u64,
@@ -32,6 +35,7 @@ pub enum ParsedMessage {
     },
 }
 
+#[derive(Debug)]
 pub enum IncomingMessage {
     ProtocolError(String),
     ResourceLimit {
@@ -56,6 +60,16 @@ pub struct RpcChannel {
     pending_requests: Arc<DashMap<u64, oneshot::Sender<std::result::Result<Value, JsonRpcError>>>>,
     next_id: AtomicU64,
     max_frame_bytes: usize,
+}
+
+impl Debug for RpcChannel {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RpcChannel")
+            .field("next_id", &self.next_id)
+            .field("max_frame_bytes", &self.max_frame_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RpcChannel {

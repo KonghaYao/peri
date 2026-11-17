@@ -15,22 +15,23 @@
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
-use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT, VIEW_MODELS};
-use crate::kit::list_nav::{clamp_selection, next_selection, previous_selection};
-use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column, left_down};
+
+use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
-use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind},
-    prelude::*,
-    ratatui::{
-        layout::{Constraint, Rect},
-        style::{Style, Stylize},
-        text::{Line, Span},
-        widgets::{Paragraph, Wrap},
-    },
-};
+use ratatui_kit::crossterm::event::Event;
+use ratatui_kit::crossterm::event::KeyCode;
+use ratatui_kit::crossterm::event::KeyEventKind;
+use ratatui_kit::prelude::*;
+use ratatui_kit::ratatui::layout::Constraint;
+use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Style;
+use ratatui_kit::ratatui::style::Stylize;
+use ratatui_kit::ratatui::text::Line;
+use ratatui_kit::ratatui::text::Span;
+use ratatui_kit::ratatui::widgets::Paragraph;
+use ratatui_kit::ratatui::widgets::Wrap;
 
 /// 元信息行条数——cursor 索引空间的前半段（`0..META_ROWS`），其后紧接 SubAgent 行。
 /// `meta_rows` 数组字面量的长度由该常量约束，索引空间不会与渲染行数各算一份。
@@ -181,35 +182,38 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
     ];
 
-    for (i, (label, value)) in meta_rows.iter().enumerate() {
-        let is_selected = i == sel;
-        let cursor_mark = if is_selected { ">" } else { " " };
-        let label_style = if is_selected {
-            Style::new()
-                .fg(theme_def.read().component.panel.title)
-                .bold()
-        } else {
-            Style::new().fg(theme_def.read().semantic.text.muted)
-        };
-        let value_style = if is_selected {
-            Style::new()
-                .fg(theme_def.read().semantic.text.primary)
-                .bold()
-        } else {
-            Style::new().fg(theme_def.read().semantic.text.primary)
-        };
+    {
+        let iteration_items = meta_rows.iter().enumerate();
+        for (i, (label, value)) in iteration_items {
+            let is_selected = i == sel;
+            let cursor_mark = if is_selected { ">" } else { " " };
+            let label_style = if is_selected {
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
+            } else {
+                Style::new().fg(theme_def.read().semantic.text.muted)
+            };
+            let value_style = if is_selected {
+                Style::new()
+                    .fg(theme_def.read().semantic.text.primary)
+                    .bold()
+            } else {
+                Style::new().fg(theme_def.read().semantic.text.primary)
+            };
 
-        body.push_item(
-            i,
-            Line::from(vec![
-                Span::styled(
-                    format!(" {} ", cursor_mark),
-                    Style::new().fg(theme_def.read().component.panel.title),
-                ),
-                Span::styled(format!("{:<18}", format!("{}:", label)), label_style),
-                Span::styled(value.chars().take(60).collect::<String>(), value_style),
-            ]),
-        );
+            body.push_item(
+                i,
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", cursor_mark),
+                        Style::new().fg(theme_def.read().component.panel.title),
+                    ),
+                    Span::styled(format!("{:<18}", format!("{}:", label)), label_style),
+                    Span::styled(value.chars().take(60).collect::<String>(), value_style),
+                ]),
+            );
+        }
     }
 
     // SubAgent 列表标题
@@ -235,52 +239,55 @@ pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .italic(),
         )]));
     } else {
-        for (i, sa) in subagents.iter().enumerate() {
-            let is_selected = META_ROWS + i == sel;
-            let cursor_mark = if is_selected { ">" } else { " " };
-            let name_style = if is_selected {
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold()
-            } else {
-                Style::new().fg(theme_def.read().semantic.text.primary)
-            };
-            let status_marker = if sa.collapsed {
-                Span::styled(
-                    i18n::tr("agent-collapsed"),
-                    Style::new().fg(theme_def.read().semantic.text.muted),
-                )
-            } else {
-                Span::styled(
-                    i18n::tr("agent-expanded"),
-                    Style::new().fg(theme_def.read().semantic.status.success),
-                )
-            };
-            body.push_item(
-                META_ROWS + i,
-                Line::from(vec![
+        {
+            let iteration_items = subagents.iter().enumerate();
+            for (i, sa) in iteration_items {
+                let is_selected = META_ROWS + i == sel;
+                let cursor_mark = if is_selected { ">" } else { " " };
+                let name_style = if is_selected {
+                    Style::new()
+                        .fg(theme_def.read().component.panel.title)
+                        .bold()
+                } else {
+                    Style::new().fg(theme_def.read().semantic.text.primary)
+                };
+                let status_marker = if sa.collapsed {
                     Span::styled(
-                        format!(" {} ", cursor_mark),
-                        Style::new().fg(theme_def.read().component.panel.title),
-                    ),
-                    Span::styled(sa.agent_name.clone(), name_style),
-                    Span::styled(
-                        format!("  [{}]", sa.agent_id),
-                        Style::new().fg(theme_def.read().semantic.text.dim),
-                    ),
-                    status_marker,
-                    Span::styled(
-                        i18n::tr_args(
-                            "agent-message-count",
-                            &[(
-                                "count".to_string(),
-                                FluentValue::from(sa.view_models.len() as i64),
-                            )],
-                        ),
+                        i18n::tr("agent-collapsed"),
                         Style::new().fg(theme_def.read().semantic.text.muted),
-                    ),
-                ]),
-            );
+                    )
+                } else {
+                    Span::styled(
+                        i18n::tr("agent-expanded"),
+                        Style::new().fg(theme_def.read().semantic.status.success),
+                    )
+                };
+                body.push_item(
+                    META_ROWS + i,
+                    Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", cursor_mark),
+                            Style::new().fg(theme_def.read().component.panel.title),
+                        ),
+                        Span::styled(sa.agent_name.clone(), name_style),
+                        Span::styled(
+                            format!("  [{}]", sa.agent_id),
+                            Style::new().fg(theme_def.read().semantic.text.dim),
+                        ),
+                        status_marker,
+                        Span::styled(
+                            i18n::tr_args(
+                                "agent-message-count",
+                                &[(
+                                    "count".to_string(),
+                                    FluentValue::from(sa.view_models.len() as i64),
+                                )],
+                            ),
+                            Style::new().fg(theme_def.read().semantic.text.muted),
+                        ),
+                    ]),
+                );
+            }
         }
     }
 
@@ -342,6 +349,7 @@ struct PanelBody {
 }
 
 impl PanelBody {
+    #[must_use]
     fn new(width: u16) -> Self {
         Self {
             lines: Vec::new(),
@@ -370,6 +378,7 @@ impl PanelBody {
     }
 
     /// 内容区总行数（滚动缓冲高度）。
+    #[must_use]
     fn height(&self) -> u16 {
         self.row
     }
@@ -390,14 +399,16 @@ fn hit_item_at(content_row: u16, spans: &[ItemSpan]) -> Option<usize> {
 fn handle_agent_event(event: Event, ctx: &AgentEventCtx) -> EventResult {
     if let Event::Mouse(mouse) = &event {
         // 滚轮/拖拽让给面板滚轮仲裁（panel_scroll::register_panel_scroll）
-        let Some((row, _col)) = left_down(mouse) else {
+        let Some((row, _col)) = crate::kit::panel_mouse::left_down(mouse) else {
             return EventResult::Ignored;
         };
         let Some(area) = ctx.area else {
             return EventResult::Consumed;
         };
         // 顶部边框行与滚动条列不参与列表命中
-        if row < area.y.saturating_add(1) || is_scrollbar_column(mouse, area) {
+        if row < area.y.saturating_add(1)
+            || crate::kit::panel_mouse::is_scrollbar_column(mouse, area)
+        {
             return EventResult::Consumed;
         }
         let view_row = row.saturating_sub(area.y).saturating_sub(1);
@@ -422,11 +433,17 @@ fn handle_agent_event(event: Event, ctx: &AgentEventCtx) -> EventResult {
         KeyCode::Enter => close_panel(),
         KeyCode::Up => {
             let mut c = ctx.cursor.write();
-            *c = clamp_selection(previous_selection(*c), ctx.item_count);
+            *c = crate::kit::list_nav::clamp_selection(
+                crate::kit::list_nav::previous_selection(*c),
+                ctx.item_count,
+            );
         }
         KeyCode::Down => {
             let mut c = ctx.cursor.write();
-            *c = next_selection(clamp_selection(*c, ctx.item_count), ctx.item_count);
+            *c = crate::kit::list_nav::next_selection(
+                crate::kit::list_nav::clamp_selection(*c, ctx.item_count),
+                ctx.item_count,
+            );
         }
         _ => {}
     }
@@ -494,3 +511,11 @@ fn close_panel() {
 #[cfg(test)]
 #[path = "agent_test.rs"]
 mod tests;
+
+use crate::kit::atoms::LANG_VERSION;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+use crate::kit::atoms::SERVICE_SNAPSHOT;
+
+use crate::kit::atoms::VIEW_MODELS;

@@ -6,7 +6,7 @@ use crate::i18n::LcRegistry;
 /// 提示不得沿用 `common-nav-enter-close` 的 `Enter::open` 描述。
 #[test]
 fn test_plugin_detail_footer_describes_execute_not_open() {
-    let src = include_str!("../plugin.rs");
+    let src = include_str!("plugin_panel.rs");
     assert!(
         src.contains(r#"i18n::tr("panel-plugin-detail-hint")"#),
         "Plugin 详情页底部提示须使用详情专属 key"
@@ -48,7 +48,7 @@ fn test_plugin_detail_footer_describes_execute_not_open() {
 /// Installed / Discover 列表态底部提示：Enter 进详情，Esc 关闭面板。
 #[test]
 fn test_plugin_list_footer_describes_details_not_close() {
-    let src = include_str!("../plugin.rs");
+    let src = include_str!("plugin_panel.rs");
     assert!(
         src.contains(r#"i18n::tr("panel-plugin-list-hint")"#),
         "Plugin 列表态底部提示须使用列表专属 key"
@@ -91,13 +91,12 @@ fn test_plugin_list_footer_describes_details_not_close() {
 /// 二者都不适用 `panel-plugin-list-hint` 的「Enter: 查看详情」。
 #[test]
 fn test_plugin_list_footer_hint_selected_by_tab() {
-    let src = include_str!("../plugin.rs");
+    let src = include_str!("plugin_panel.rs");
     let footer = src
-        .split("// 列表态 Enter 语义按 tab 不同")
-        .nth(1)
-        .and_then(|rest| {
-            rest.split("lines.push(Line::from(vec![Span::styled(footer_text")
-                .next()
+        .split_once("// 列表态 Enter 语义按 tab 不同")
+        .and_then(|(_, rest)| {
+            rest.split_once("lines.push(Line::from(vec![Span::styled(footer_text")
+                .map(|(footer, _)| footer)
         })
         .expect("Plugin 列表态 footer 分支存在");
 

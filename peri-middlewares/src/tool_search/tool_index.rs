@@ -1,12 +1,11 @@
 //! TF-IDF 搜索索引 — 工具索引构建、混合搜索（TF-IDF + 关键词）、工具查找
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use peri_agent::tools::BaseTool;
@@ -211,8 +210,17 @@ pub struct ToolSearchIndex {
     cached_prompt_version: RwLock<Option<u64>>,
 }
 
+impl Debug for ToolSearchIndex {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolSearchIndex")
+            .finish_non_exhaustive()
+    }
+}
+
 impl ToolSearchIndex {
     /// 构造空索引
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
@@ -243,11 +251,12 @@ impl ToolSearchIndex {
     /// 混合搜索
     ///
     /// 查询语法：
-    /// - `select:mcp__cron__cron_list,mcp__cron__cron_remove` — 按精确名称查找，逗号分隔
+    /// - `select:mcp__peri__cron_list,mcp__peri__cron_remove` — 按精确名称查找，逗号分隔
     /// - `+slack message` — `+` 前缀词为必选，其余为可选关键词
     /// - `slack message` — 纯关键词搜索
     ///
     /// 评分：关键词分数 × 0.4 + TF-IDF 分数 × 0.6
+    #[must_use]
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
         // select: 前缀 — 按精确名称直接查找
         if let Some(names_str) = query.strip_prefix("select:") {
@@ -331,11 +340,12 @@ impl ToolSearchIndex {
     }
 
     /// 按名称查找工具
-    pub fn get_tool(&self, name: &str) -> Option<Arc<dyn BaseTool>> {
+    pub fn tool(&self, name: &str) -> Option<Arc<dyn BaseTool>> {
         self.tools.read().get(name).cloned()
     }
 
     /// 返回所有工具的 (name, description) 列表
+    #[must_use]
     pub fn list_names(&self) -> Vec<(String, String)> {
         self.tools
             .read()
@@ -350,6 +360,7 @@ impl ToolSearchIndex {
     /// 或（单条自身超预算时）只保留工具名与省略原因；绝不按字符串裁切，因此
     /// JSON schema（参数段）不会出现半截结构。省略数量与原因对模型可见，
     /// 被省略的工具仍可经 `SearchExtraTools` 关键词检索得到。
+    #[must_use]
     pub fn format_deferred_list(&self) -> String {
         let tools = self.tools.read();
         if tools.is_empty() {
@@ -405,6 +416,7 @@ impl ToolSearchIndex {
     }
 
     /// 返回索引中的工具总数
+    #[must_use]
     pub fn total_count(&self) -> usize {
         self.tools.read().len()
     }
@@ -432,6 +444,7 @@ impl ToolSearchIndex {
     }
 
     /// 返回当前内容版本号（每次 `build()` 递增）
+    #[must_use]
     pub fn content_version(&self) -> u64 {
         self.content_version.load(Ordering::SeqCst)
     }
@@ -452,11 +465,7 @@ impl Default for ToolSearchIndex {
 }
 
 // 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn ToolSearchPort>`）。
-impl peri_acp_types::ports::ToolSearchPort for ToolSearchIndex {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+impl peri_acp_types::ports::ToolSearchPort for ToolSearchIndex {}
 
 #[cfg(test)]
 #[path = "tool_index_test.rs"]

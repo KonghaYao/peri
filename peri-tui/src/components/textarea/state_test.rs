@@ -1,5 +1,5 @@
-use super::{CharCategory, classify_char, prev_word_boundary};
-use super::{TextAreaState, display_width_before, render_multiline_with_cursor};
+use super::CharCategory;
+use super::TextAreaState;
 use ratatui::style::{Color, Style};
 
 #[test]
@@ -107,7 +107,7 @@ fn ph_style() -> Style {
 
 #[test]
 fn test_render_multiline_empty_shows_cursor() {
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "",
         0,
         cursor_style(),
@@ -131,7 +131,7 @@ fn test_render_multiline_empty_shows_cursor() {
 #[test]
 fn test_render_multiline_empty_loading_shows_cursor() {
     // loading + empty + focused 应显示光标（show_cursor=true 优先于 loading）
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "",
         0,
         cursor_style(),
@@ -152,7 +152,7 @@ fn test_render_multiline_empty_loading_shows_cursor() {
 #[test]
 fn test_render_multiline_cjk_cursor_mid_line() {
     // "你好世界" (4 CJK chars, 8 display cols), cursor 在位置 2（"好"之后即"世"上）
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "你好世界",
         2,
         cursor_style(),
@@ -181,7 +181,7 @@ fn test_render_multiline_cjk_cursor_mid_line() {
 #[test]
 fn test_render_multiline_cjk_cursor_at_start() {
     // "你好", cursor 在位置 0（"你"上）
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "你好",
         0,
         cursor_style(),
@@ -208,7 +208,7 @@ fn test_render_multiline_cjk_cursor_at_start() {
 #[test]
 fn test_render_multiline_cjk_cursor_at_end() {
     // "你好", cursor 在位置 2（末尾）
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "你好",
         2,
         cursor_style(),
@@ -232,7 +232,7 @@ fn test_render_multiline_cjk_cursor_at_end() {
 #[test]
 fn test_render_multiline_cjk_cursor_second_line() {
     // "abc\n你好", cursor 在位置 5（第二行"好"上）
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "abc\n你好",
         5,
         cursor_style(),
@@ -261,16 +261,16 @@ fn test_render_multiline_cjk_cursor_second_line() {
 
 #[test]
 fn test_display_width_before_cjk() {
-    assert_eq!(display_width_before("abc", 2), 2);
-    assert_eq!(display_width_before("abc", 0), 0);
-    assert_eq!(display_width_before("你好世界", 2), 4); // 2 CJK chars = 4 cols
-    assert_eq!(display_width_before("你好世界", 1), 2);
-    assert_eq!(display_width_before("你好", 3), 4); // 超出 char 数返回全宽
+    assert_eq!(super::display_width_before("abc", 2), 2);
+    assert_eq!(super::display_width_before("abc", 0), 0);
+    assert_eq!(super::display_width_before("你好世界", 2), 4); // 2 CJK chars = 4 cols
+    assert_eq!(super::display_width_before("你好世界", 1), 2);
+    assert_eq!(super::display_width_before("你好", 3), 4); // 超出 char 数返回全宽
 }
 
 #[test]
 fn test_render_multiline_splits_newlines() {
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "a\nb\nc",
         0,
         cursor_style(),
@@ -294,9 +294,9 @@ fn test_word_boundary_punct_vs_alpha() {
     // "fn foo(a)": f(0) n(1) ' '(2) f(3) o(4) o(5) ( (6) a(7) ) (8)
     let s = "fn foo(a)";
     // 末尾 cursor=9: 跳过 ')'→Punct，然后跳过 'a'→Other，停在 '('之后 → 7
-    assert_eq!(prev_word_boundary(s, s.chars().count()), 7);
+    assert_eq!(super::prev_word_boundary(s, s.chars().count()), 7);
     // cursor=3 在空格之后：跳过空格→0
-    assert_eq!(prev_word_boundary(s, 3), 0);
+    assert_eq!(super::prev_word_boundary(s, 3), 0);
 }
 
 #[test]
@@ -305,16 +305,16 @@ fn test_word_boundary_cjk_punct() {
     let total = s.chars().count(); // 6
     // 末尾 cursor=6: 跳过 世界(Other)→pos=4；'。'为全角 Punct 被当"词"跳过→3
     // prev_word_boundary 在 step3 将 '。' 作为 Punct 词整体回退
-    assert_eq!(prev_word_boundary(s, total), 3);
+    assert_eq!(super::prev_word_boundary(s, total), 3);
 }
 
 #[test]
 fn test_classify_char_basics() {
-    assert!(matches!(classify_char(' '), CharCategory::Space));
-    assert!(matches!(classify_char('.'), CharCategory::Punct));
-    assert!(matches!(classify_char('a'), CharCategory::Other));
-    assert!(matches!(classify_char('你'), CharCategory::Other));
-    assert!(matches!(classify_char('。'), CharCategory::Punct)); // U+3002 全角句号
+    assert!(matches!(super::classify_char(' '), CharCategory::Space));
+    assert!(matches!(super::classify_char('.'), CharCategory::Punct));
+    assert!(matches!(super::classify_char('a'), CharCategory::Other));
+    assert!(matches!(super::classify_char('你'), CharCategory::Other));
+    assert!(matches!(super::classify_char('。'), CharCategory::Punct)); // U+3002 全角句号
 }
 
 // ── Step 3: 选区基础操作 ────────────────────────────────────
@@ -428,7 +428,13 @@ fn test_yank_after_delete_selection() {
     s.cursor = 6;
     s.delete_selection();
     assert!(s.yank.is_some());
-    assert_eq!(s.yank.as_ref().unwrap().text(), "hello ");
+    assert_eq!(
+        s.yank
+            .as_ref()
+            .expect("yank after delete selection: the fixture must retain its expected variant")
+            .text(),
+        "hello "
+    );
 }
 
 #[test]
@@ -478,7 +484,7 @@ fn test_delete_forward_at_line_end_merges_next() {
 
 #[test]
 fn test_render_selection_single_line() {
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "hello world",
         0,
         cursor_style(),
@@ -503,7 +509,7 @@ fn test_render_selection_single_line() {
 
 #[test]
 fn test_render_selection_none_renders_normally() {
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "hello",
         0,
         cursor_style(),
@@ -529,7 +535,7 @@ fn test_render_selection_none_renders_normally() {
 #[test]
 fn test_render_show_cursor_false_no_cursor_highlight() {
     // show_cursor=false：光标位置字符不应用 cursor_style，无行尾 styled space
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "hello",
         2,
         cursor_style(),
@@ -557,7 +563,7 @@ fn test_render_show_cursor_false_no_cursor_highlight() {
 #[test]
 fn test_render_show_cursor_false_empty_with_placeholder() {
     // show_cursor=false + 空文本 + placeholder：渲染占位文本，无光标 space
-    let lines = render_multiline_with_cursor(
+    let lines = super::render_multiline_with_cursor(
         "",
         0,
         cursor_style(),
@@ -655,7 +661,7 @@ fn test_cjk_delete_no_cursor_ghost() {
     let ds = Style::default().bg(Color::Black);
 
     // 模拟：输入 "你好世界"，cursor 在位置 1（'好' 上）
-    let _before = render_multiline_with_cursor(
+    let _before = super::render_multiline_with_cursor(
         "你好世界",
         1,
         cs,
@@ -671,8 +677,20 @@ fn test_cjk_delete_no_cursor_ghost() {
     );
 
     // 模拟：删除 '你' 后，text="好世界"，cursor 移到位置 0（'好' 上）
-    let after =
-        render_multiline_with_cursor("好世界", 0, cs, None, ss, None, ps, ds, 12, 3, false, true);
+    let after = super::render_multiline_with_cursor(
+        "好世界",
+        0,
+        cs,
+        None,
+        ss,
+        None,
+        ps,
+        ds,
+        12,
+        3,
+        false,
+        true,
+    );
 
     // 旧光标在 "好"（before 中 index 1）上，bg 应为 CURSOR_BG
     // 新光标在 "好"（after 中 index 0）上，bg 也应为 CURSOR_BG

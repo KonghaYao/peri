@@ -1,16 +1,17 @@
 # History V2 验收与发布说明
 
-> 状态：本地 SQLite + TUI 的唯一历史扩展验收记录。
+> 状态：本地 SQLite + TUI 的 History V2 beta 验收记录。
 >
 > 依据：仓库外设计稿《Peri ACP 统一历史加载协议详细设计》v2.0（2026-10-22）§2、§9、§12、§13、§15；
 > 本文只记录可复现证据与明确缺口，**不把未验证项写成通过**。验收编号沿用设计稿 A01–A44。
 
 ## 1. 范围
 
-1. 覆盖**本地 SQLite 后端 + TUI**：History V2 是唯一历史路径，`history-window-v1` 与旧私有
-   分页/窗口协议已删除；`history-v2` 仅作为无行为迁移键保留。
+1. 覆盖**本地 SQLite 后端 + TUI**：`history-v2` 是默认关闭的 beta，只有显式开启且服务端
+   回显后才在**该连接内**成为唯一历史路径；`history-window-v1` 与旧私有分页/窗口协议
+   **仍保留**，beta 关闭时 TUI 继续走 V1。本轮不删除 V1。
 2. 标准 ACP 兼容边界保留：未声明 `_meta["peri.history"]` 的客户端仍得到标准
-   `session/load` 完整回放；Peri TUI 不进入该回退。
+   `session/load` 完整回放；Peri TUI 在 V2 关闭时走 V1（V1 能力未协商时走标准回放）。
 3. 远端（remote）与多实例仍显式失败：`supports_history_v2()` 默认 false，协商阶段返回
    `unsupported_version`；本轮不验收跨实例失效、接管或远端 V2。
 4. 不包含：数据库表/列变更、旧协议重新启用、持久执行恢复、远端性能基准。
@@ -39,22 +40,22 @@
 | A11 | 已覆盖 | `server_loop_history_test::{server_loop_history_cancel_is_processed_while_body_blocked,server_loop_history_close_returns_before_blocked_page_result}`：真实 ServerLoop 中慢读不阻塞 cancel/close。执行锁并发场景仍未单测。 |
 | A12 | 未覆盖 | V2 initial 在真实执行进行中的准入等待/拒绝路径无回归；旧执行准入测试已随协议删除。 |
 | A13 | 已覆盖 | `paging_test::{late_response_from_old_request_does_not_touch_new_state,response_from_an_old_window_is_discarded_and_resets_in_flight}`、`consumer_test::{late_failure_from_previous_session_does_not_touch_new_window,late_open_failure_keeps_the_new_session_claim}`。 |
-| A14 | 已覆盖 | `paging_test::seek_preempts_page_and_old_page_cannot_clear_the_new_request`、`body_test::late_body_response_does_not_write_into_a_newer_request`、`history_v2_view_test::same_epoch_page_keeps_detail_but_seek_closes_it`。 |
+| A14 | 已覆盖 | `paging_test::seek_preempts_page_and_old_page_cannot_clear_the_new_request`、`history_v2_view_test::same_epoch_page_keeps_detail_but_seek_closes_it`。 |
 | A15 | 部分覆盖 | `paging_test::{anchor_becomes_unavailable_after_its_entry_is_evicted,coverage_gap_is_explicit_and_never_treated_as_continuous}`、`history_v2_view_test::{seek_keeps_live_tail_and_marks_it_as_live,seek_dedupes_live_message_already_in_the_new_page,reopen_keeps_streaming_content_not_in_the_new_page}`；终端 resize 下的视觉锚点未自动化。 |
 | A16 | 部分覆盖 | `history_v2_adapter_test::tool_call_and_result_share_invocation_key_across_entries`、`history_v2_view_test::{tool_call_and_result_merge_across_entries,tool_result_without_call_is_a_standalone_card,different_invocation_keys_do_not_merge}`；跨 source 同名 ID 未单测。 |
 | A17 | 已覆盖 | `history_v2_adapter_test::append_stays_outside_the_fixed_tail_and_tail_removal_invalidates`、`service_test::{backend_revision_change_invalidates_and_removes_window,backend_committed_tail_change_invalidates_and_removes_window}`。 |
 | A18 | 部分覆盖 | `service_test::{backend_revision_change_invalidates_and_removes_window,close_during_page_discards_stale_page}`；V2 下 rewind/删除后旧窗口失效的 Host 端到端未单测（`requests_rewind_*` 只覆盖 transcript 与执行视图）。 |
 | A19 | 范围外 | 适配器明确 `historyRevision` 是 own 存储序 tail position，不是持久结构版本；跨实例失效与第二进程改写不在本轮承诺内。 |
 | A20 | 部分覆盖 | fixed tail 与 tail 变化失效见 A17；V2 不消费 compact 提交通知，compact 后旧窗口按 revision/tail 复核失败并重开的 e2e 未建立。 |
-| A21 | 部分覆盖 | `history_v2_adapter_inherited_test::{open_latest_orders_inherited_before_own_and_keeps_own_tail,before_pages_cross_regions_without_duplicates,after_page_from_inherited_anchor_continues_into_own_without_skipping,seek_inherited_returns_anchor_once_with_stable_ordinals,inherited_oversized_visibility_uses_bounded_prefix,own_append_does_not_change_the_frozen_prefix_and_tail_delete_invalidates,oversized_inherited_without_index_maps_to_index_not_ready}`；父会话删除场景未单测。 |
-| A22 | 部分覆盖 | `history_v2_adapter_inherited_test::oversized_inherited_without_index_maps_to_index_not_ready`、`initial_test::initial_without_execution_ready_still_returns_page`、TUI `initial_test::execution_not_ready_keeps_history_readable_but_not_executable`；补充真实只读 SQLite 重开/分页/关闭后重进（`history_v2_load_test::session_load_v2_reopened_read_only_store_keeps_history_readable`），跨进程退出重启及目录删除（`session_load_v2_process_restart_preserves_history`），以及 TUI `history_v2_session_test::view_only_initial_keeps_history_readable_without_execution_cwd`。仍未覆盖真实终端中的完整操作链。 |
+| A21 | 部分覆盖 | `history_v2_adapter_inherited_test::{open_latest_orders_inherited_before_own_and_keeps_own_tail,before_pages_cross_regions_without_duplicates,after_page_from_inherited_anchor_continues_into_own_without_skipping,seek_inherited_returns_anchor_once_with_stable_ordinals,inherited_oversized_visibility_uses_bounded_prefix,own_append_does_not_change_the_frozen_prefix_and_tail_delete_invalidates,inherited_prefix_judgement_is_fail_closed_when_identity_is_unknown}`；父会话删除与“冻结索引缺失转 `index_not_ready`”场景未单测。 |
+| A22 | 部分覆盖 | `initial_test::initial_without_execution_ready_still_returns_page`、TUI `initial_test::execution_not_ready_keeps_history_readable_but_not_executable`；补充真实只读 SQLite 重开/分页/关闭后重进（`history_v2_load_test::session_load_v2_reopened_read_only_store_keeps_history_readable`），跨进程退出重启及目录删除（`session_load_v2_process_restart_preserves_history`），以及 TUI `history_v2_session_test::view_only_initial_keeps_history_readable_without_execution_cwd`。仍未覆盖真实终端中的完整操作链。 |
 | A23 | 已覆盖 | `service_test::{page_wrong_ticket_is_ticket_invalid,page_wrong_snapshot_token_is_snapshot_invalidated,page_session_mismatch_is_permission_denied}`、`history_service/cursor_test`（MAC/窗口/旧 cursor）、`body_test::body_ref_must_be_issued_by_the_window`。 |
 | A24 | 已覆盖 | `service_test::{close_then_page_is_window_closed_and_close_replays,close_during_page_discards_stale_page}`、`body_test::body_returns_chunk_and_close_rejects_later_body`、`history_v2_end_to_end_test` 的 close 阶段。 |
 | A25 | 已覆盖 | `service_test::{idle_window_expires_after_five_minutes,absolute_window_expiry_wins_over_recent_use,opening_placeholder_is_pruned_after_sixty_seconds,capacity_rejects_ninth_window_and_expiry_frees_a_slot}`。 |
-| A26 | 部分覆盖 | TUI 保留预算与失效：`paging_test::{retention_bounds_retained_items_and_keeps_reload_cursor,anchor_becomes_unavailable_after_its_entry_is_evicted}`、`body_test::body_budget_rejects_before_allocating_unbounded_state`；长时间滚动 RSS 与 pin 阻塞可见性未实测。 |
-| A27 | 已覆盖 | TUI `body_test::{body_chunks_concatenate_in_offset_order_and_stop_when_complete,late_body_response_does_not_write_into_a_newer_request}`、`history_detail_test::{detail_chunks_cross_utf8_boundary_without_garble,detail_incomplete_tail_at_eof_is_still_corruption}`、`history_v2_adapter_body_test::oversized_tool_call_and_result_bodies_render_semantic_text`。 |
+| A26 | 部分覆盖 | TUI 保留预算与失效：`paging_test::{retention_bounds_retained_items_and_keeps_reload_cursor,anchor_becomes_unavailable_after_its_entry_is_evicted}`；长时间滚动 RSS 与 pin 阻塞可见性未实测。 |
+| A27 | 已覆盖 | TUI `history_detail_test::{detail_chunks_cross_utf8_boundary_without_garble,detail_incomplete_tail_at_eof_is_still_corruption}`、`consumer_test::blocked_queue_keeps_body_and_load_in_enqueue_order`、`history_v2_adapter_body_test::oversized_tool_call_and_result_bodies_render_semantic_text`。 |
 | A28 | 已覆盖 | 标准连接：`history_v2_load_test::session_load_v2_legacy_response_is_unchanged_and_missing_meta_is_rejected` 证明未声明 `peri.history` 时仍走标准回放；`requests/session_caps.rs` 内联测试覆盖无声明不产生 V2 cap。 |
-| A29 | 已覆盖 | `requests/session_caps.rs::{legacy_only_history_declarations_do_not_select_or_echo_v2,mixed_legacy_and_v2_declarations_are_rejected}`、`peri_caps_test::{test_retired_history_capability_keys_are_not_parsed_or_echoed,test_history_window_v1_is_retired}`、`history_v2_load_test::session_load_v2_mixed_fields_and_unnegotiated_initial_are_rejected`、TUI `requests_caps_test::{test_history_v2_declaration_requires_explicit_server_selection,test_legacy_history_capabilities_never_satisfy_startup}`。 |
+| A29 | 已覆盖 | `requests/session_caps.rs::{legacy_only_history_declarations_do_not_select_or_echo_v2,mixed_legacy_and_v2_declarations_are_rejected}`、`peri_caps_test::{test_retired_history_capability_keys_are_not_parsed_or_echoed,test_history_window_v1_requires_explicit_negotiation}`、`history_v2_load_test::session_load_v2_mixed_fields_and_unnegotiated_initial_are_rejected`、TUI `requests_caps_test::{test_history_v2_declaration_requires_explicit_server_selection,test_history_window_capability_requires_explicit_server_true}`。 |
 | A30 | 部分覆盖 | 本地真实 SQLite 全链路：`history_v2_end_to_end_test`、`history_v2_adapter_test::local_sqlite_advertises_history_v2_and_unknown_sessions_fail_closed`；remote 未实现 V2（fail-closed），远端读取量与往返为范围外。 |
 | A31 | 已覆盖 | `requests_caps_test::test_history_v2_declaration_requires_explicit_server_selection`：服务端未选择 V2 时 TUI 启动失败；`session_caps::negotiate_history_v2` 不会把旧能力或缺失声明升级成 V2。 |
 | A32 | 部分覆盖 | `initial_test::initial_replays_same_bytes_and_rejects_conflicting_params` 覆盖同态重放与 `execution_ready`/`runtimeGeneration`；runtime 已关闭后的重试未单测。 |
@@ -105,7 +106,7 @@ crate 级计数不替代单项场景证明，未覆盖部分不记为通过。
 | FIX-03 | `peri-acp/src/host/history_v2_adapter/{projection,view}.rs` | `history_v2_adapter_visibility_test::{truncated_multibyte_prefix_keeps_reminder_visible,unknown_role_and_inherited_use_the_same_prefix_rules,undetermined_prefix_fails_the_page_and_retry_reads_the_entry,injected_prefix_read_failure_fails_page_then_retry_reads,explicitly_hidden_reminder_is_still_skipped}` | 覆盖 1024 字节前缀的结构化 JSON 判定、UTF-8 截断、无法判定/读取失败整页失败；未覆盖真实磁盘 I/O 抖动。 |
 | FIX-04 | `peri-acp/src/host/server_loop/history.rs`、`history_service/operations.rs`、`live_delivery.rs` | `server_loop_history_test::{server_loop_history_cancel_is_processed_while_body_blocked,server_loop_history_close_returns_before_blocked_page_result,server_loop_history_disconnect_drops_blocked_page_without_publishing,server_loop_history_disconnect_drops_blocked_body_without_publishing,server_loop_history_capacity_saturation_rejects_without_waiting}`、`live_delivery_test::{candidate_keeps_old_stream_identity_and_buffers_independently,commit_candidate_replaces_stream_and_flushes_candidate_buffer,close_discards_candidate_and_old_stream}` | 覆盖同步准入、在途配额 4、close 快速路径、取消/断连迟到结果不发布；真实 transport socket 断连未做端到端用例（本地 ServerLoop 断连治理见 T10），`session/load` 仍在循环内 `await`。 |
 | FIX-05 | `peri-acp/src/host/history_service/{initial,window}.rs`、`live_delivery.rs` | `history_service/initial_replacement_test::{initial_backend_failure_keeps_old_window_and_live_identity,initial_budget_failure_keeps_old_window_and_live_stream,cancelled_initial_keeps_old_window_and_live_stream,close_session_during_initial_prepare_does_not_revive_old_window,initial_success_switches_live_only_after_commit,initial_replacement_at_capacity_is_bounded_across_success_failure_and_replay}` | 覆盖准备失败/预算失败/取消/会话关闭时旧窗口与旧 streamId/afterSeq 保留，以及 max+1 替换边界；不覆盖跨连接与进程崩溃。 |
-| CLEAN-01 | `history_common`、`session_resources::history_window`、`history_detail_binding`、`history_page` 删除项 | `history_v2_load_test::{session_history_body_is_method_not_found,session_load_v2_mixed_fields_and_unnegotiated_initial_are_rejected,session_load_v2_legacy_response_is_unchanged_and_missing_meta_is_rejected}`、`session_io_test::removed_execution_protocols_are_unsupported`、`requests/session_caps.rs::{legacy_only_history_declarations_do_not_select_or_echo_v2,mixed_legacy_and_v2_declarations_are_rejected}`、`peri_caps_test::{test_retired_history_capability_keys_are_not_parsed_or_echoed,test_history_window_v1_is_retired}`、`client_test::test_pump_has_no_typed_path_for_legacy_history_committed` | 覆盖旧能力不回显、旧顶层字段拒绝、旧方法 method not found、TUI 无旧通知解析路径；以静态不存在与负向断言为主，不做运行时模糊测试。 |
+| CLEAN-01 | `history_common`、`session_resources::history_window`、`history_detail_binding`、`history_page` 删除项 | `history_v2_load_test::{session_history_body_is_method_not_found,session_load_v2_mixed_fields_and_unnegotiated_initial_are_rejected,session_load_v2_legacy_response_is_unchanged_and_missing_meta_is_rejected}`、`session_io_test::removed_execution_protocols_are_unsupported`、`requests/session_caps.rs::{legacy_only_history_declarations_do_not_select_or_echo_v2,mixed_legacy_and_v2_declarations_are_rejected}`、`peri_caps_test::{test_retired_history_capability_keys_are_not_parsed_or_echoed,test_history_window_v1_requires_explicit_negotiation}` | 覆盖旧能力不回显、旧顶层字段拒绝与旧方法 method not found；以静态不存在与负向断言为主，不做运行时模糊测试。 |
 
 ## 4. 本地验收矩阵（T01–T18）
 
@@ -134,9 +135,9 @@ crate 级计数不替代单项场景证明，未覆盖部分不记为通过。
 
 本轮完成的静态核对：
 
-1. 对已删除的旧能力键、旧通知/方法与旧分页字段做全仓检索（`docs` 与两个模块 `CLAUDE.md`）：剩余命中只出现在删除/拒绝/迁移说明。
+1. 对 V2 拒绝的旧能力混合声明、旧顶层字段与退役键做负向检索；V1 能力本身仍保留，相关命中属于共存路径而非删除残留。
 2. 本文引用的测试文件与用例名均以当前工作区 `rg -n 'fn [a-z_]+'` 核对存在。
-3. 本次文档修改未重跑 Cargo；测试结果以 §2.1 记录的交付前全量运行为准，下列命令保留为复核入口。
+3. 本次文档修改后已重跑 §2.1 的五个 crate 全量 lib 测试；下列命令保留为复核入口。
 
 ```bash
 ./scripts/cargo-rmcp-patched.sh check --locked \
@@ -193,5 +194,6 @@ crate 级计数不替代单项场景证明，未覆盖部分不记为通过。
 | 文档一致性 | 设计、索引、验收与 CLAUDE 路由同步 | 本轮更新 |
 | 远端/多实例 | 显式失败且不标为通过 | 范围外 |
 
-History V2 是本地 TUI 的唯一历史路径；发布判断仍须读取 §2 的未覆盖与部分覆盖项，不能把
-“旧协议已删除”表述为“完整设计已验收”。
+`history-v2` 是默认关闭的本地 beta；开启后 V2 是该连接内唯一历史路径，关闭时 V1 仍可用。
+发布判断仍须读取 §2 的未覆盖与部分覆盖项，不能把“beta 可用”表述为“完整设计已验收”，
+也不能表述为“V1 已删除”。

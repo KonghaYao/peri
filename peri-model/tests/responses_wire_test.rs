@@ -1,12 +1,9 @@
 //! Independent public-API checks using a real loopback HTTP server.
 
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use peri_model::{
@@ -16,12 +13,12 @@ use peri_model::{
     ToolDefinition, ToolResult,
 };
 use serde_json::{json, Value};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::Mutex,
-    time::timeout,
-};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 fn event(kind: &str, mut value: Value) -> String {
@@ -109,13 +106,16 @@ async fn read_request(socket: &mut TcpStream) -> Captured {
 async fn send_sse(socket: &mut TcpStream, body: &str) {
     socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
     // Deliberately split JSON and multibyte UTF-8 across HTTP body chunks.
-    for chunk in body.as_bytes().chunks(7) {
-        socket
-            .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
-            .await
-            .unwrap();
-        socket.write_all(chunk).await.unwrap();
-        socket.write_all(b"\r\n").await.unwrap();
+    {
+        let iterated_body = body.as_bytes().chunks(7);
+        for chunk in iterated_body {
+            socket
+                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(chunk).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+        }
     }
     socket.write_all(b"0\r\n\r\n").await.unwrap();
     socket.shutdown().await.unwrap();
@@ -142,16 +142,19 @@ async fn interleaved_calls_roundtrip_and_replay_once_over_chunked_http() {
         "response.created",
         json!({"response": {"id": "resp_fixture", "status": "in_progress", "output": []}}),
     );
-    for (index, item) in output.iter().enumerate().take(3) {
-        let mut added = item.clone();
-        if added["type"] == "function_call" {
-            added["arguments"] = json!("");
-            added["status"] = json!("in_progress");
+    {
+        let indexed_output = output.iter().enumerate().take(3);
+        for (index, item) in indexed_output {
+            let mut added = item.clone();
+            if added["type"] == "function_call" {
+                added["arguments"] = json!("");
+                added["status"] = json!("in_progress");
+            }
+            script += &event(
+                "response.output_item.added",
+                json!({"output_index": index, "item": added}),
+            );
         }
-        script += &event(
-            "response.output_item.added",
-            json!({"output_index": index, "item": added}),
-        );
     }
     for (index, id, delta) in [
         (1, "fc_item_a", "{\"value\":"),
@@ -216,7 +219,7 @@ async fn interleaved_calls_roundtrip_and_replay_once_over_chunked_http() {
         }
         requests
     };
-    let (_, requests) = timeout(Duration::from_secs(5), async {
+    let (_, requests) = time::timeout(Duration::from_secs(5), async {
         tokio::join!(client, server)
     })
     .await
@@ -288,7 +291,7 @@ async fn retry_sends_exact_frozen_checkpoint_and_no_auth_material() {
         }
         captured
     };
-    let (_, captured) = timeout(Duration::from_secs(5), async {
+    let (_, captured) = time::timeout(Duration::from_secs(5), async {
         tokio::join!(client, server)
     })
     .await
@@ -308,7 +311,7 @@ async fn same_origin_redirect_never_receives_bearer() {
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let model = ResponsesModel::new(config(&endpoint, 1));
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let result = timeout(Duration::from_secs(5), async {
+    let result = time::timeout(Duration::from_secs(5), async {
         let server = async {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -344,8 +347,7 @@ fn plan_profile_rejects_untrusted_endpoints_before_execution() {
             ResponsesModel::new(config(endpoint, 1).with_profile(ResponsesProfile::ChatGptPlan));
         let error = model
             .prepare_stream(ModelRequest::default())
-            .err()
-            .expect("unsafe plan endpoint accepted");
+            .expect_err("unsafe plan endpoint accepted");
         assert_eq!(
             error.protocol_error().unwrap().kind(),
             ProtocolErrorKind::InvalidEndpoint,
@@ -478,7 +480,9 @@ async fn endpoint_policy_runs_before_credential_even_with_platform_profile() {
         ProtocolErrorKind::InvalidEndpoint
     );
     assert_eq!(auth.credentials.load(Ordering::SeqCst), 0);
-    assert!(timeout(Duration::ZERO, listener.accept()).await.is_err());
+    assert!(time::timeout(Duration::ZERO, listener.accept())
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -524,26 +528,29 @@ async fn unauthorized_rotates_only_auth_and_retries_same_frozen_body() {
         }
         captured
     };
-    let (_, captured) = timeout(Duration::from_secs(5), async {
+    let (_, captured) = time::timeout(Duration::from_secs(5), async {
         tokio::join!(client, server)
     })
     .await
     .unwrap();
     assert_eq!(auth.credentials.load(Ordering::SeqCst), 2);
     assert_eq!(auth.refreshes.load(Ordering::SeqCst), 1);
-    for (index, request) in captured.iter().enumerate() {
-        assert_eq!(request.body, checkpoint["body"]);
-        assert!(request
-            .headers
-            .to_ascii_lowercase()
-            .contains(&format!("authorization: bearer fixture-token-{index}")));
+    {
+        let indexed_captured = captured.iter().enumerate();
+        for (index, request) in indexed_captured {
+            assert_eq!(request.body, checkpoint["body"]);
+            assert!(request
+                .headers
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer fixture-token-{index}")));
+        }
     }
     assert!(!checkpoint.to_string().contains("fixture-token"));
 }
 
 async fn assert_peer_disconnected(socket: &mut TcpStream) {
     let mut byte = [0_u8; 1];
-    let read = timeout(Duration::from_secs(2), socket.read(&mut byte))
+    let read = time::timeout(Duration::from_secs(2), socket.read(&mut byte))
         .await
         .expect("cancellation must abort the held HTTP request even without consumer polling");
     assert!(
@@ -569,7 +576,7 @@ async fn authenticated_abort_cancels_held_http_but_preserves_parent_and_sibling(
         )
         .await
         .unwrap();
-    let (mut socket, _) = timeout(Duration::from_secs(2), listener.accept())
+    let (mut socket, _) = time::timeout(Duration::from_secs(2), listener.accept())
         .await
         .unwrap()
         .unwrap();
@@ -597,7 +604,7 @@ async fn authenticated_drop_cancels_held_http_but_preserves_parent_and_sibling()
         )
         .await
         .unwrap();
-    let (mut socket, _) = timeout(Duration::from_secs(2), listener.accept())
+    let (mut socket, _) = time::timeout(Duration::from_secs(2), listener.accept())
         .await
         .unwrap()
         .unwrap();
@@ -622,7 +629,7 @@ async fn logout_cancels_unpolled_held_http_and_returns_cancelled() {
         )
         .await
         .unwrap();
-    let (mut socket, _) = timeout(Duration::from_secs(2), listener.accept())
+    let (mut socket, _) = time::timeout(Duration::from_secs(2), listener.accept())
         .await
         .unwrap()
         .unwrap();
@@ -631,7 +638,7 @@ async fn logout_cancels_unpolled_held_http_and_returns_cancelled() {
     // Keep the model stream alive and entirely unpolled until the HTTP peer
     // observes disconnect: take_until alone does not satisfy this lifecycle.
     assert_peer_disconnected(&mut socket).await;
-    let error = timeout(Duration::from_secs(2), stream.next())
+    let error = time::timeout(Duration::from_secs(2), stream.next())
         .await
         .unwrap()
         .expect("logout needs typed cancellation, not EOF")
@@ -655,13 +662,15 @@ async fn logged_out_auth_never_resolves_credentials_or_sends_http() {
         )]))
         .unwrap();
     let mut stream = prepared.start(parent.clone()).unwrap();
-    let error = timeout(Duration::from_secs(2), stream.next())
+    let error = time::timeout(Duration::from_secs(2), stream.next())
         .await
         .unwrap()
         .expect("logout needs typed cancellation")
         .unwrap_err();
     assert!(error.is_cancelled());
     assert_eq!(auth.credentials.load(Ordering::SeqCst), 0);
-    assert!(timeout(Duration::ZERO, listener.accept()).await.is_err());
+    assert!(time::timeout(Duration::ZERO, listener.accept())
+        .await
+        .is_err());
     assert!(!parent.is_cancelled());
 }

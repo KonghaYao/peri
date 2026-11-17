@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use langfuse_client::client::ExportConfig;
 use langfuse_client::config::{BatcherConfig, Compression, TelemetryConfig};
-use langfuse_client::snapshot::snapshot_value;
+
 use langfuse_client::{Batcher, LangfuseClient, LangfuseError};
 use peri_agent::messages::BaseMessage;
 use peri_agent::tools::ToolDefinition;
 
-use super::super::input_snapshot::{llm_input_source, GenerationInput};
-use super::*;
+use crate::langfuse::tracer::generation::GenerationTracker;
+
+use crate::langfuse::tracer::input_snapshot::GenerationInput;
 
 /// 与本用例无关的载荷占位；追踪器不解释来源内容，只负责移动与释放。
 fn opaque_input() -> GenerationInput {
@@ -47,7 +48,9 @@ fn test_on_llm_retrying_accumulates_attempts() {
     t.on_llm_retrying("main", 0, 2, 3, 2000, "timeout");
     let end = t.on_llm_end("main", 0).expect("should return Some");
     assert!(end.retry_metadata.is_some());
-    let meta = end.retry_metadata.unwrap();
+    let meta = end
+        .retry_metadata
+        .expect("the retry metadata fixture result is required for this assertion");
     assert_eq!(meta["retry_count"], 2);
     assert_eq!(meta["retries"][0]["delay_ms"], 1000);
     assert!(meta.get("error").is_none());
@@ -127,7 +130,9 @@ fn freeze(messages: &Arc<Vec<BaseMessage>>, tools: &Arc<Vec<ToolDefinition>>) ->
     Frozen {
         input: GenerationInput::Frozen(
             batcher
-                .try_freeze(llm_input_source(messages, tools))
+                .try_freeze(crate::langfuse::tracer::input_snapshot::llm_input_source(
+                    messages, tools,
+                ))
                 .expect("freeze"),
         ),
         batcher,
@@ -225,7 +230,7 @@ async fn raw_payload_source_is_held_by_reference_and_releases_the_fallback() {
     let payload = GenerationInput::Frozen(
         frozen
             .batcher
-            .try_freeze(snapshot_value(&raw))
+            .try_freeze(langfuse_client::snapshot::snapshot_value(&raw))
             .expect("freeze payload"),
     );
     assert_eq!(
@@ -256,15 +261,61 @@ async fn abandoned_generation_hands_out_source_and_retry_metadata_once() {
     let frozen = freeze(&messages, &tools);
     tracker.on_llm_start("child", 3, frozen.input);
     tracker.on_llm_retrying("child", 3, 1, 2, 20, "private provider body");
+    tracker.mark_completion_start("child", "2026-07-14T10:00:01Z".to_string());
     let abandoned = tracker.take_all_active();
     assert_eq!(abandoned.len(), 1);
+    assert_eq!(
+        abandoned[0].completion_start_time.as_deref(),
+        Some("2026-07-14T10:00:01Z"),
+        "放弃的 generation 仍应保留 completion 起点"
+    );
     assert!(
         matches!(&abandoned[0].input, GenerationInput::Frozen(_)),
         "放弃的 generation 必须交出已冻结来源"
     );
     assert_eq!(
-        abandoned[0].retry_metadata.as_ref().unwrap()["retry_count"],
+        abandoned[0]
+            .retry_metadata
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")["retry_count"],
         1
     );
     assert!(tracker.take_all_active().is_empty());
+}
+
+#[test]
+fn test_first_reasoning_marks_only_own_generation() {
+    let mut tracker = GenerationTracker::new();
+    tracker.on_llm_start("agent_a", 0, opaque_input());
+    tracker.on_llm_start("agent_b", 0, opaque_input());
+
+    tracker.mark_completion_start("agent_b", "2026-07-14T10:00:01Z".to_string());
+    tracker.mark_completion_start("agent_b", "2026-07-14T10:00:02Z".to_string());
+
+    let end_b = tracker.on_llm_end("agent_b", 0).expect("B 应存在");
+    assert_eq!(
+        end_b.completion_start_time.as_deref(),
+        Some("2026-07-14T10:00:01Z"),
+        "只记录首个 reasoning 分片时间"
+    );
+
+    let end_a = tracker.on_llm_end("agent_a", 0).expect("A 应存在");
+    assert!(
+        end_a.completion_start_time.is_none(),
+        "A 未产生 reasoning，不能复用 B 的时间"
+    );
+}
+
+#[test]
+fn test_reasoning_without_active_generation_is_ignored() {
+    let mut tracker = GenerationTracker::new();
+    tracker.mark_completion_start("agent_a", "2026-07-14T10:00:01Z".to_string());
+    assert!(
+        tracker.on_llm_end("agent_a", 0).is_none(),
+        "无活跃 generation 时不得创建状态"
+    );
+
+    tracker.on_llm_start("agent_a", 0, opaque_input());
+    let end = tracker.on_llm_end("agent_a", 0).expect("应存在");
+    assert!(end.completion_start_time.is_none());
 }

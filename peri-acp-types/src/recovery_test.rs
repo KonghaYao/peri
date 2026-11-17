@@ -1,6 +1,15 @@
 //! 恢复契约的类型与 serde 兼容：分类映射、报告容器与 MQ 来源字面量。
 
-use super::*;
+use crate::recovery::RecoveryError;
+use crate::recovery::RecoveryErrorKind;
+use crate::recovery::RecoveryFailure;
+use crate::recovery::RecoveryReport;
+use crate::recovery::RecoverySkip;
+use crate::recovery::RecoverySkipReason;
+use crate::recovery::RecoveryView;
+use crate::recovery::RecoveryViewStatus;
+use crate::session_resources::SessionResourceError;
+use crate::session_resources::SessionResourceErrorKind;
 
 fn resource(kind: SessionResourceErrorKind) -> SessionResourceError {
     SessionResourceError::new(kind)

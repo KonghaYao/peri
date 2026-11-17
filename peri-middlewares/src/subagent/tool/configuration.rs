@@ -1,16 +1,20 @@
 //! Public builders and parent-host fallback access for the single tool owner.
 use super::SubagentChainAssemblerImpl;
-use crate::{hooks::types::RegisteredHook, mcp::McpAgentRegistry};
+use crate::hooks::types::RegisteredHook;
+use crate::mcp::McpAgentRegistry;
 use parking_lot::RwLock;
 use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::identity::AgentId;
+use peri_agent::agent::events::AgentEventHandler;
+use peri_agent::messages::BaseMessage;
 use peri_agent::session::subagent::SubagentHost;
-use peri_agent::{agent::events::AgentEventHandler, messages::BaseMessage, tools::BaseTool};
+use peri_agent::tools::BaseTool;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 impl super::SubAgentTool {
     #[allow(clippy::type_complexity)]
+    #[must_use]
     pub fn new(
         parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
         event_handler: Option<Arc<dyn AgentEventHandler>>,
@@ -37,16 +41,7 @@ impl super::SubAgentTool {
             mcp_agent_registry: None,
             broker: None,
             chain_assembler: Arc::new(SubagentChainAssemblerImpl::new()),
-            default_run_in_background: false,
         }
-    }
-
-    /// 注入 `run_in_background` 的有效缺省（middleware 装配参数；会话内冻结）。
-    ///
-    /// 未注入 = `false`：与 flag 引入前逐位一致。
-    pub(crate) fn with_default_run_in_background(mut self, default: bool) -> Self {
-        self.default_run_in_background = default;
-        self
     }
 
     pub(crate) fn with_mcp_agents(
@@ -71,6 +66,7 @@ impl super::SubAgentTool {
     }
 
     #[allow(clippy::type_complexity)]
+    #[must_use]
     pub fn with_system_builder(
         mut self,
         builder: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
@@ -79,22 +75,26 @@ impl super::SubAgentTool {
         self
     }
 
+    #[must_use]
     pub fn with_cancel(mut self, cancel: AgentCancellationToken) -> Self {
         self.cancel = Some(cancel);
         self
     }
 
+    #[must_use]
     pub fn with_parent_messages(mut self, messages: Arc<RwLock<Vec<BaseMessage>>>) -> Self {
         self.parent_messages = Some(messages);
         self
     }
 
+    #[must_use]
     pub fn with_registered_hooks(mut self, hooks: Vec<RegisteredHook>) -> Self {
         self.registered_hooks = Arc::new(hooks);
         self
     }
 
     #[allow(clippy::type_complexity)]
+    #[must_use]
     pub fn with_child_handler_factory(
         mut self,
         factory: Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>,
@@ -117,6 +117,7 @@ impl super::SubAgentTool {
 
     // ── 运行时通道回退注入（测试/遗留路径；生产路径经 parent_session 的 host） ──
 
+    #[must_use]
     pub fn with_task_manager(
         mut self,
         task_manager: Arc<peri_agent::agent::async_tasks::TaskManager>,
@@ -125,6 +126,7 @@ impl super::SubAgentTool {
         self
     }
 
+    #[must_use]
     pub fn with_bg_event_sender(
         mut self,
         sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::ExecutorEvent>,
@@ -134,6 +136,7 @@ impl super::SubAgentTool {
     }
 
     /// 注入会话资源门面（唯一会话行为入口；旧 `with_thread_store` 已随迁移退出）。
+    #[must_use]
     pub fn with_session_resources(
         mut self,
         store: Arc<dyn peri_acp_types::session_resources::SessionResources>,
@@ -142,12 +145,14 @@ impl super::SubAgentTool {
         self
     }
 
+    #[must_use]
     pub fn with_parent_thread_id(mut self, id: String) -> Self {
         self.host.parent_thread_id = Some(id);
         self
     }
 
     #[allow(clippy::type_complexity)]
+    #[must_use]
     pub fn with_register_runtime(
         mut self,
         cb: Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>,
@@ -156,6 +161,7 @@ impl super::SubAgentTool {
         self
     }
 
+    #[must_use]
     pub fn with_deregister_runtime(mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
         self.host.deregister_runtime = Some(cb);
         self
@@ -163,6 +169,7 @@ impl super::SubAgentTool {
 
     /// 注入 main agent 捕获的 frozen CLAUDE.md/Skills 数据（测试/遗留回退；
     /// 生产路径 frozen 数据由 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent) 从 parent session copy）。
+    #[must_use]
     pub fn with_frozen_data(
         mut self,
         claude_md: Option<Arc<String>>,
@@ -176,6 +183,7 @@ impl super::SubAgentTool {
     }
 
     /// 设置 bg 完成时的同步回调（测试/遗留回退；生产路径经 parent_session 的 host）。
+    #[must_use]
     pub fn with_on_bg_complete(mut self, cb: peri_acp_types::tasks::OnBgCompleteFn) -> Self {
         self.host.on_bg_complete = Some(cb);
         self.host.completion_target = None;
@@ -183,6 +191,7 @@ impl super::SubAgentTool {
     }
 
     /// 设置 Langfuse 桥接器（测试/遗留回退；生产路径经 parent_session 的 host）。
+    #[must_use]
     pub fn with_langfuse_bridge(
         mut self,
         bridge: Arc<dyn peri_agent::agent::LangfuseBridgeLike>,

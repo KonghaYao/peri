@@ -8,14 +8,16 @@
 //! `prepare_seq` 并登记准备任务——空闲槽不足立即拒收，不留下半登记，也不以等待 permit 的任务
 //! 列表保存大对象。`event_seq`/`prepare_seq` 在同一个 admission 锁内各自单调递增。
 
-use std::{
-    collections::VecDeque,
-    sync::{atomic::AtomicBool, Arc, Mutex},
-};
+#[cfg(test)]
+use super::budget::queued_bytes;
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use tokio::sync::{watch, Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-use super::budget::queued_bytes;
+use super::budget;
 use super::{BatcherCommand, QueuedEvent};
 use crate::config::{BackpressurePolicy, BatcherConfig};
 use crate::memory::{MemoryBudget, MemoryPermit};
@@ -215,7 +217,7 @@ impl Admission {
         if policy != BackpressurePolicy::DropOldest && self.shared.slots.available_permits() == 0 {
             return Err(LangfuseError::QueueFull);
         }
-        let bytes = queued_bytes(&event, self.shared.max_event_bytes);
+        let bytes = budget::queued_bytes(&event, self.shared.max_event_bytes);
         let mut state = self.shared.state.lock().expect("batch admission poisoned");
         if !state.accepting {
             return Err(LangfuseError::ChannelClosed);
@@ -296,7 +298,7 @@ impl Admission {
         if self.shared.slots.is_closed() {
             return Err(LangfuseError::ChannelClosed);
         }
-        let bytes = queued_bytes(&event, self.shared.max_event_bytes)?;
+        let bytes = budget::queued_bytes(&event, self.shared.max_event_bytes)?;
         let permit = Arc::clone(&self.shared.slots)
             .acquire_owned()
             .await

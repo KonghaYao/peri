@@ -6,7 +6,8 @@ use std::sync::Arc;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 
 use super::workspace::SessionEnvironment;
-use crate::host::assemble::{assemble_server_config, HostAssemblyInput};
+use crate::host::assemble;
+use crate::host::assemble::HostAssemblyInput;
 use crate::provider::{ConfigSource, LlmProvider, PeriConfig, ProviderConfig, ProviderModels};
 
 // ── 夹具 ─────────────────────────────────────────────────────────────────────
@@ -43,7 +44,7 @@ async fn seam_fixture() -> SeamFixture {
         .expect("夹具配置源"),
     );
 
-    let cfg = assemble_server_config(HostAssemblyInput {
+    let cfg = assemble::assemble_server_config(HostAssemblyInput {
         provider,
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         config_source,
@@ -56,8 +57,8 @@ async fn seam_fixture() -> SeamFixture {
         // 本文件验证激活前的输入注入与关闭，初始化受 activation 闸门保护。
         bare: true,
         drive_cron_tick: false,
+        builtin_assembly_mode: None,
         workspace_input: None,
-        workspace_bash_default_run_in_background: false,
         // 本夹具直接构造顶层装配：资源面输入同样保持未接线（会话路径才装载）。
         workspace_resources: None,
         // 同理：workflow 运行时槽位是会话级装配输入，本夹具无会话上下文。
@@ -167,7 +168,7 @@ async fn workflow_consumer_waits_for_instance_registration_then_dispatches() {
         "runId": "delayed-run", "agentId": 1, "prompt": "dispatch"
     }))
     .unwrap();
-    runtime.tasks().publish("delayed-task".into(), params);
+    let _ = runtime.tasks().publish("delayed-task".into(), params);
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let page = pool
@@ -220,10 +221,6 @@ struct WorkflowSetupPool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for WorkflowSetupPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn has_instance(&self, _instance: &str) -> bool {
         self.present
     }
@@ -324,10 +321,6 @@ struct SkillCatalogOnlySystemPool {
 
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for SkillCatalogOnlySystemPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "initPhase": "initializing",

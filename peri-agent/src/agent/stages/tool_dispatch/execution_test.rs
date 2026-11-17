@@ -1,14 +1,33 @@
-use super::*;
+use crate::agent::react::ToolCall;
+use crate::agent::react::ToolResult;
+use crate::agent::stages::tool_dispatch::execution::ApprovalOutcome;
+use crate::agent::stages::tool_dispatch::execution::SettledInvocation;
 use crate::agent::stages::{
     ExecutionEntryOrigin, InvocationContext, SessionInvocationSource, StageContext,
 };
+use crate::error::AgentError;
+use crate::messages::BaseMessage;
+
 use crate::messages::MessageContent;
+
 use crate::session::queue::MessageQueue;
+
 use crate::session::transcript::MessageTranscript;
 use crate::session::turn::TurnContext;
+use crate::tools::BaseTool;
+use crate::tools::EffectiveToolError;
+use crate::tools::EffectiveToolErrorCode;
+use crate::tools::InvocationId;
 use crate::tools::InvocationOrigin;
+use crate::tools::ToolCallId;
+
+use crate::tools::ToolOutcome;
+use crate::tools::ToolOutput;
 use peri_acp_types::error::ToolRejectionCause;
 use peri_acp_types::interaction::UnansweredCause;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn completed_application_failure_retains_typed_error_without_unknown_classification() {
@@ -16,23 +35,33 @@ fn completed_application_failure_retains_typed_error_without_unknown_classificat
         EffectiveToolErrorCode::ApplicationFailed,
         "FileNotFound: missing-file.txt",
     );
-    let effective = effective_tool_error_from_boxed(Box::new(received));
+    let effective = crate::agent::stages::tool_dispatch::execution::effective_tool_error_from_boxed(
+        Box::new(received),
+    );
     assert_eq!(effective.code, EffectiveToolErrorCode::ApplicationFailed);
     assert_eq!(effective.message, "FileNotFound: missing-file.txt");
-    assert!(execution_for_effective_error(effective.code).is_none());
+    assert!(
+        crate::agent::stages::tool_dispatch::execution::execution_for_effective_error(
+            effective.code
+        )
+        .is_none()
+    );
 }
 
 #[test]
 fn unclassified_tool_errors_retain_failure_classification() {
     for message in ["FileNotFound", "-32603", "transport disconnected"] {
-        let effective = effective_tool_error_from_boxed(std::io::Error::other(message).into());
+        let effective =
+            crate::agent::stages::tool_dispatch::execution::effective_tool_error_from_boxed(
+                std::io::Error::other(message).into(),
+            );
         assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
     }
 }
 
 #[test]
 fn boxed_known_agent_rejections_preserve_failure_classification() {
-    for (error, expected) in [
+    let paired_items = [
         (
             AgentError::ToolNotFound("resume".into()),
             EffectiveToolErrorCode::UnknownTool,
@@ -46,8 +75,12 @@ fn boxed_known_agent_rejections_preserve_failure_classification() {
             },
             EffectiveToolErrorCode::UserRejected,
         ),
-    ] {
-        let effective = effective_tool_error_from_boxed(Box::new(error));
+    ];
+    for (error, expected) in paired_items {
+        let effective =
+            crate::agent::stages::tool_dispatch::execution::effective_tool_error_from_boxed(
+                Box::new(error),
+            );
         assert_eq!(effective.code, expected);
     }
 }
@@ -55,11 +88,13 @@ fn boxed_known_agent_rejections_preserve_failure_classification() {
 /// 用户**已作出**的拒绝决定 ⇒ `USER_REJECTED`（分类不变）。
 #[test]
 fn user_rejection_keeps_user_rejected_classification() {
-    let effective = effective_tool_error(AgentError::ToolRejected {
-        tool: "Write".into(),
-        reason: "用户拒绝".into(),
-        cause: ToolRejectionCause::UserRejected,
-    });
+    let effective = crate::agent::stages::tool_dispatch::execution::effective_tool_error(
+        AgentError::ToolRejected {
+            tool: "Write".into(),
+            reason: "用户拒绝".into(),
+            cause: ToolRejectionCause::UserRejected,
+        },
+    );
     assert_eq!(effective.code, EffectiveToolErrorCode::UserRejected);
     assert_eq!(
         effective.unanswered_cause(),
@@ -71,11 +106,13 @@ fn user_rejection_keeps_user_rejected_classification() {
 /// 无人可答 ⇒ `PERMISSION_DENIED` + typed 原因随错误过边界（裁决 R9）。
 #[test]
 fn approval_unavailable_is_permission_denied_with_typed_cause() {
-    let effective = effective_tool_error(AgentError::ToolRejected {
-        tool: "Write".into(),
-        reason: UnansweredCause::NoOnlineEndpoint.reason_text().to_string(),
-        cause: ToolRejectionCause::ApprovalUnavailable(UnansweredCause::NoOnlineEndpoint),
-    });
+    let effective = crate::agent::stages::tool_dispatch::execution::effective_tool_error(
+        AgentError::ToolRejected {
+            tool: "Write".into(),
+            reason: UnansweredCause::NoOnlineEndpoint.reason_text().to_string(),
+            cause: ToolRejectionCause::ApprovalUnavailable(UnansweredCause::NoOnlineEndpoint),
+        },
+    );
     assert_eq!(effective.code, EffectiveToolErrorCode::PermissionDenied);
     assert_ne!(effective.code, EffectiveToolErrorCode::UserRejected);
     assert_eq!(
@@ -88,11 +125,13 @@ fn approval_unavailable_is_permission_denied_with_typed_cause() {
 /// 本端策略拒绝（hook / 分类器 / 审批机制缺失）既不是用户拒绝，也不是无人可答。
 #[test]
 fn policy_denial_is_permission_denied_without_unanswered_cause() {
-    let effective = effective_tool_error(AgentError::ToolRejected {
-        tool: "Write".into(),
-        reason: "Hook blocked".into(),
-        cause: ToolRejectionCause::PolicyDenied,
-    });
+    let effective = crate::agent::stages::tool_dispatch::execution::effective_tool_error(
+        AgentError::ToolRejected {
+            tool: "Write".into(),
+            reason: "Hook blocked".into(),
+            cause: ToolRejectionCause::PolicyDenied,
+        },
+    );
     assert_eq!(effective.code, EffectiveToolErrorCode::PermissionDenied);
     assert_ne!(effective.code, EffectiveToolErrorCode::UserRejected);
     assert_eq!(effective.unanswered_cause(), None);
@@ -115,13 +154,18 @@ fn rejection_codes_have_a_single_authority() {
             EffectiveToolErrorCode::PermissionDenied,
         ),
     ] {
-        assert_eq!(rejection_error_code(cause), expected);
         assert_eq!(
-            effective_error_code(&AgentError::ToolRejected {
-                tool: "Write".into(),
-                reason: "x".into(),
-                cause,
-            }),
+            crate::agent::stages::tool_dispatch::execution::rejection_error_code(cause),
+            expected
+        );
+        assert_eq!(
+            crate::agent::stages::tool_dispatch::execution::effective_error_code(
+                &AgentError::ToolRejected {
+                    tool: "Write".into(),
+                    reason: "x".into(),
+                    cause,
+                }
+            ),
             expected
         );
     }
@@ -129,15 +173,18 @@ fn rejection_codes_have_a_single_authority() {
 
 #[test]
 fn boxed_interruption_retains_cancelled_classification() {
-    let effective = effective_tool_error_from_boxed(Box::new(AgentError::Interrupted));
+    let effective = crate::agent::stages::tool_dispatch::execution::effective_tool_error_from_boxed(
+        Box::new(AgentError::Interrupted),
+    );
     assert_eq!(effective.code, EffectiveToolErrorCode::Cancelled);
 }
 
 #[test]
 fn boxed_unclassified_agent_error_retains_tool_failed_classification() {
-    let effective = effective_tool_error_from_boxed(Box::new(AgentError::Other(anyhow::anyhow!(
-        "resume preparation rejected"
-    ))));
+    let effective =
+        crate::agent::stages::tool_dispatch::execution::effective_tool_error_from_boxed(Box::new(
+            AgentError::Other(anyhow::anyhow!("resume preparation rejected")),
+        ));
     assert_eq!(effective.code, EffectiveToolErrorCode::ToolFailed);
 }
 
@@ -237,9 +284,15 @@ async fn same_name_calls_have_distinct_invocations_and_original_model_ids() {
             context: crate::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             self.0.lock().push((
-                context.session_id.unwrap(),
-                context.invocation_id.unwrap(),
-                context.tool_call_id.unwrap(),
+                context
+                    .session_id
+                    .expect("the session id fixture result is required for this assertion"),
+                context
+                    .invocation_id
+                    .expect("the invocation id fixture result is required for this assertion"),
+                context
+                    .tool_call_id
+                    .expect("the tool call id fixture result is required for this assertion"),
             ));
             Ok("ok".into())
         }
@@ -264,7 +317,7 @@ async fn same_name_calls_have_distinct_invocations_and_original_model_ids() {
     let turn = invocation
         .require_turn("test identity")
         .expect("active turn");
-    let output = dispatch_concurrent(
+    let output = crate::agent::stages::tool_dispatch::execution::dispatch_concurrent(
         &invocation,
         Some(turn),
         &calls,
@@ -316,7 +369,11 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
     let mut target_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
     target_tools.insert(
         "call_1".to_string(),
-        Arc::clone(all_tools.get("Read").unwrap()),
+        Arc::clone(
+            all_tools
+                .get("Read")
+                .expect("the fixture must contain Read"),
+        ),
     );
     let raw_calls = HashMap::new();
     let catalog = ctx.runtime.tool_catalog.snapshot();
@@ -324,7 +381,7 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
     let turn = invocation
         .require_turn("test dispatch")
         .expect("active turn");
-    let results = dispatch_concurrent(
+    let results = crate::agent::stages::tool_dispatch::execution::dispatch_concurrent(
         &invocation,
         Some(turn),
         &ready_calls,
@@ -338,7 +395,13 @@ async fn test_dispatch_concurrent_single_tool_succeeds() {
     .await;
     assert_eq!(results.len(), 1);
     assert!(results[0].is_ok(), "工具应成功执行");
-    assert_eq!(results[0].as_ref().unwrap().text, "ok");
+    assert_eq!(
+        results[0]
+            .as_ref()
+            .expect("the as ref fixture result is required for this assertion")
+            .text,
+        "ok"
+    );
 }
 
 #[tokio::test]
@@ -361,7 +424,11 @@ async fn test_dispatch_concurrent_cancelled() {
     let mut target_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
     target_tools.insert(
         "call_1".to_string(),
-        Arc::clone(all_tools.get("Read").unwrap()),
+        Arc::clone(
+            all_tools
+                .get("Read")
+                .expect("the fixture must contain Read"),
+        ),
     );
     let raw_calls = HashMap::new();
     let catalog = ctx.runtime.tool_catalog.snapshot();
@@ -369,7 +436,7 @@ async fn test_dispatch_concurrent_cancelled() {
     let turn = invocation
         .require_turn("test dispatch")
         .expect("active turn");
-    let results = dispatch_concurrent(
+    let results = crate::agent::stages::tool_dispatch::execution::dispatch_concurrent(
         &invocation,
         Some(turn),
         &ready_calls,
@@ -409,7 +476,7 @@ async fn test_dispatch_concurrent_preserves_typed_subagent_failure() {
     let turn = invocation
         .require_turn("test dispatch")
         .expect("active turn");
-    let results = dispatch_concurrent(
+    let results = crate::agent::stages::tool_dispatch::execution::dispatch_concurrent(
         &invocation,
         Some(turn),
         &ready_calls,
@@ -466,14 +533,22 @@ async fn test_settle_results_mixed_ready_settled() {
     )];
     let all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
     let invocation = make_invocation(&ctx);
-    let outcome = settle_results(&invocation, approval, tool_results, false, &all_tools).await;
+    let outcome = crate::agent::stages::tool_dispatch::execution::settle_results(
+        &invocation,
+        approval,
+        tool_results,
+        false,
+        &all_tools,
+    )
+    .await;
     // ready + settled = 2 条
     assert_eq!(outcome.results.len(), 2, "应合并 ready 和 settled 结果");
     // settled 在前，ready 在后
     assert!(outcome.results[0].result.is_error, "rejected 应是错误");
     assert!(!outcome.results[1].result.is_error, "ready 工具应成功");
     assert_eq!(outcome.results[1].result.output, "Image read");
-    let message = settled_tool_message(&outcome.results[1]);
+    let message =
+        crate::agent::stages::tool_dispatch::execution::settled_tool_message(&outcome.results[1]);
     assert!(
         message
             .content_blocks()
@@ -516,7 +591,11 @@ fn test_post_process_result_truncates_by_tool_output_limit() {
     let mut result = ToolResult::error("call_1", "Limited", "x".repeat(200));
     let mut all_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
     all_tools.insert("call_1".to_string(), std::sync::Arc::new(LimitedTool));
-    post_process_result(&call, &mut result, &all_tools);
+    crate::agent::stages::tool_dispatch::execution::post_process_result(
+        &call,
+        &mut result,
+        &all_tools,
+    );
     assert_eq!(result.output.chars().count(), 60, "{}", result.output);
     assert!(
         result.output.ends_with("[Output truncated at 60 chars]"),
@@ -528,25 +607,38 @@ fn test_post_process_result_truncates_by_tool_output_limit() {
     // 未登记 output 上限的工具：输出保持不变
     let mut untouched = ToolResult::error("call_2", "Other", "kept as-is");
     let empty_tools: HashMap<String, std::sync::Arc<dyn BaseTool>> = HashMap::new();
-    post_process_result(&call, &mut untouched, &empty_tools);
+    crate::agent::stages::tool_dispatch::execution::post_process_result(
+        &call,
+        &mut untouched,
+        &empty_tools,
+    );
     assert_eq!(untouched.output, "kept as-is");
 }
 
 #[test]
 fn test_effective_cancel_and_timeout_errors_keep_typed_execution_facts() {
-    let cancelled = execution_for_effective_error(EffectiveToolErrorCode::Cancelled)
-        .expect("cancel must carry evidence");
+    let cancelled = crate::agent::stages::tool_dispatch::execution::execution_for_effective_error(
+        EffectiveToolErrorCode::Cancelled,
+    )
+    .expect("cancel must carry evidence");
     assert_eq!(
         cancelled.status,
         crate::tools::ToolExecutionStatus::Cancelled
     );
-    let timed_out = execution_for_effective_error(EffectiveToolErrorCode::Timeout)
-        .expect("timeout must carry evidence");
+    let timed_out = crate::agent::stages::tool_dispatch::execution::execution_for_effective_error(
+        EffectiveToolErrorCode::Timeout,
+    )
+    .expect("timeout must carry evidence");
     assert_eq!(
         timed_out.status,
         crate::tools::ToolExecutionStatus::TimedOut
     );
-    assert!(execution_for_effective_error(EffectiveToolErrorCode::ToolFailed).is_none());
+    assert!(
+        crate::agent::stages::tool_dispatch::execution::execution_for_effective_error(
+            EffectiveToolErrorCode::ToolFailed
+        )
+        .is_none()
+    );
 }
 
 /// idle 执行入口的输入（session 级事实 + typed 来源）：生产路径由
@@ -601,7 +693,7 @@ async fn idle_entry_returns_typed_not_available_without_turn() {
         "idle 入口仍持有真实会话身份（缺的是 turn 事实）"
     );
 
-    let error = match collect_tool_results(
+    let error = match crate::agent::stages::tool_dispatch::execution::collect_tool_results(
         &invocation,
         vec![ToolCall::new("call-1", "Probe", serde_json::json!({}))],
         &HashMap::new(),
@@ -674,7 +766,7 @@ async fn idle_app_invocation_runs_without_turn_facts_or_model_ownership() {
 
     let seen: Seen = Arc::default();
     let tool: Arc<dyn BaseTool> = Arc::new(AttributionProbe(seen.clone()));
-    let outcome = collect_tool_results(
+    let outcome = crate::agent::stages::tool_dispatch::execution::collect_tool_results(
         &invocation,
         vec![ToolCall::new("call-1", "Probe", serde_json::json!({}))],
         &HashMap::new(),
@@ -765,7 +857,7 @@ async fn dispatch_reuses_bound_history_snapshot_without_copy() {
     let turn = invocation
         .require_turn("snapshot test")
         .expect("active turn");
-    let output = dispatch_concurrent(
+    let output = crate::agent::stages::tool_dispatch::execution::dispatch_concurrent(
         &invocation,
         Some(turn),
         &calls,
@@ -795,7 +887,9 @@ async fn dispatch_reuses_bound_history_snapshot_without_copy() {
 #[test]
 fn input_summary_keeps_string_input_verbatim() {
     assert_eq!(
-        input_summary(&serde_json::json!("plain text")),
+        crate::agent::stages::tool_dispatch::execution::input_summary(&serde_json::json!(
+            "plain text"
+        )),
         "plain text",
         "字符串型入参取原值，不额外加 JSON 引号"
     );
@@ -804,7 +898,9 @@ fn input_summary_keeps_string_input_verbatim() {
 #[test]
 fn input_summary_serializes_object_input() {
     assert_eq!(
-        input_summary(&serde_json::json!({"command": "exit 1"})),
+        crate::agent::stages::tool_dispatch::execution::input_summary(
+            &serde_json::json!({"command": "exit 1"})
+        ),
         r#"{"command":"exit 1"}"#,
         "对象型入参必须序列化，不能退化为空串（生产上曾全部为空）"
     );
@@ -813,97 +909,9 @@ fn input_summary_serializes_object_input() {
 #[test]
 fn input_summary_truncates_overlong_input_to_200_chars() {
     let long = "界".repeat(250);
-    let summary = input_summary(&serde_json::json!(long));
+    let summary =
+        crate::agent::stages::tool_dispatch::execution::input_summary(&serde_json::json!(long));
     assert_eq!(summary.chars().count(), 200, "按字符截断，不切坏多字节字符");
     assert_eq!(summary, "界".repeat(200));
 }
-
-#[test]
-fn raw_image_content_is_projected_into_model_tool_message() {
-    let raw = peri_acp_types::tool_outcome::RawToolResult::new(serde_json::json!({
-        "content": [
-            {"type": "text", "text": "Image read"},
-            {"type": "image", "data": "AQID", "mimeType": "image/png"}
-        ]
-    }));
-    let output = ToolOutput::from_raw_result("Image read\n[image: image/png]", raw);
-    let media = model_media_blocks(&output.outcome);
-    assert_eq!(media.len(), 1, "必须恰好提升一个图片块");
-
-    let settled = SettledInvocation {
-        call: ToolCall::new("call-1", "Read", serde_json::json!({})),
-        result: ToolResult::success("call-1", "Read", "Image read\n[image: image/png]"),
-        outcome: output.outcome.clone(),
-    };
-    let message = settled_tool_message(&settled);
-    let blocks = message.content_blocks();
-    assert!(
-        blocks
-            .iter()
-            .any(|block| matches!(block, crate::messages::ContentBlock::Text { text } if text.contains("Image read"))),
-        "文本投影必须保留"
-    );
-    assert!(
-        blocks
-            .iter()
-            .any(|block| matches!(block, crate::messages::ContentBlock::Image { .. })),
-        "图片块必须进入模型工具消息"
-    );
-}
-
-#[test]
-fn unsupported_or_empty_tool_images_are_dropped_without_losing_text() {
-    for block in [
-        serde_json::json!({"type": "image", "data": "AQID", "mimeType": "image/svg+xml"}),
-        serde_json::json!({"type": "image", "data": "", "mimeType": "image/png"}),
-    ] {
-        let raw = peri_acp_types::tool_outcome::RawToolResult::new(serde_json::json!({
-            "content": [block]
-        }));
-        let outcome = ToolOutcome::from_raw(raw);
-        assert!(
-            model_media_blocks(&outcome).is_empty(),
-            "不支持的图片必须被丢弃"
-        );
-        let settled = SettledInvocation {
-            call: ToolCall::new("call-3", "Read", serde_json::json!({})),
-            result: ToolResult::success("call-3", "Read", "Image read"),
-            outcome,
-        };
-        let message = settled_tool_message(&settled);
-        assert!(
-            matches!(message.message_content(), MessageContent::Text(text) if text == "Image read"),
-            "丢弃图片后必须保留文本投影"
-        );
-    }
-}
-
-#[test]
-fn aggregate_image_payload_budget_is_shared_across_one_tool_message() {
-    let chunk = "A".repeat(8 * 1024 * 1024);
-    let raw = peri_acp_types::tool_outcome::RawToolResult::new(serde_json::json!({
-        "content": [
-            {"type": "image", "data": chunk.clone(), "mimeType": "image/png"},
-            {"type": "image", "data": chunk, "mimeType": "image/png"}
-        ]
-    }));
-    let outcome = ToolOutcome::from_raw(raw);
-    assert_eq!(
-        model_media_blocks(&outcome).len(),
-        1,
-        "第二张图不得让同一条工具消息的 base64 总量超过预算"
-    );
-}
-
-#[test]
-fn text_only_tool_results_keep_the_legacy_text_message_shape() {
-    let settled = SettledInvocation::unreported(
-        ToolCall::new("call-2", "Read", serde_json::json!({})),
-        ToolResult::success("call-2", "Read", "plain text"),
-    );
-    let message = settled_tool_message(&settled);
-    assert!(
-        matches!(message.message_content(), MessageContent::Text(text) if text == "plain text"),
-        "无图片时不得改变既有文本消息形状"
-    );
-}
+include!("execution_image_projection_test.rs");

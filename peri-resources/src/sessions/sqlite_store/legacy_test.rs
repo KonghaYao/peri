@@ -1,4 +1,6 @@
-use super::*;
+use super::{BaseMessage, PersistedPayload, SqliteConnectOptions, SqliteThreadStore, ThreadMeta};
+use peri_acp_types::store::ThreadStore;
+
 use peri_acp_types::workspace::{ScopedThreadQuery, ThreadScope};
 use sqlx::{Connection, SqliteConnection};
 
@@ -52,7 +54,7 @@ async fn legacy_database(path: &std::path::Path, cwd: &std::path::Path) -> Strin
     )
     .bind(message.id().as_uuid().to_string())
     .bind(&id)
-    .bind(serialize_persisted_payload(&PersistedPayload::Message(message)).unwrap())
+    .bind(super::serialize_persisted_payload(&PersistedPayload::Message(message)).unwrap())
     .execute(&mut connection)
     .await
     .unwrap();
@@ -69,7 +71,7 @@ async fn legacy_history_visible_after_upgrade_and_schema3_reopen() {
     let path = dir.path().join("threads.db");
     let id = legacy_database(&path, &cwd).await;
     for _ in 0..2 {
-        let store = SqliteThreadStore::new(&path).await.unwrap();
+        let store = SqliteThreadStore::try_new(&path).await.unwrap();
         let workspace = store.resolve_workspace(&cwd).await.unwrap();
         let owner: (String,) = sqlx::query_as("SELECT workspace_id FROM threads WHERE id = ?1")
             .bind(&id)
@@ -115,7 +117,7 @@ async fn legacy_history_in_missing_directory_remains_in_all_scope() {
     let missing = dir.path().join("removed-checkout");
     let path = dir.path().join("threads.db");
     let id = legacy_database(&path, &missing).await;
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let page = store
         .list_scoped_threads(&ScopedThreadQuery {
             scope: ThreadScope::All,
@@ -137,8 +139,8 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
     let path = dir.path().join("threads.db");
     let id = legacy_database(&path, &cwd).await;
-    let left = SqliteThreadStore::new(&path).await.unwrap();
-    let right = SqliteThreadStore::new(&path).await.unwrap();
+    let left = SqliteThreadStore::try_new(&path).await.unwrap();
+    let right = SqliteThreadStore::try_new(&path).await.unwrap();
     let workspace = left.resolve_workspace(&cwd).await.unwrap();
     let (left_adoption, right_adoption) = tokio::join!(
         left.adopt_legacy_thread(&id, cwd.to_str().unwrap(), &workspace, "first snapshot"),
@@ -180,7 +182,7 @@ async fn legacy_adoption_commits_snapshot_once_across_concurrent_restorers() {
     );
     left.close().await;
     right.close().await;
-    let reopened = SqliteThreadStore::new(&path).await.unwrap();
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
     assert_eq!(
         reopened.load_frozen_snapshot(&id).await.unwrap().unwrap(),
         winner
@@ -202,7 +204,7 @@ async fn legacy_adoption_failure_rolls_back_binding_and_snapshot() {
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
     let path = dir.path().join("threads.db");
     let id = legacy_database(&path, &cwd).await;
-    let store = SqliteThreadStore::new(&path).await.unwrap();
+    let store = SqliteThreadStore::try_new(&path).await.unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
     sqlx::raw_sql("CREATE TRIGGER reject_binding BEFORE INSERT ON session_bindings BEGIN SELECT RAISE(FAIL, 'injected binding failure'); END;")
         .execute(&store.database.pool).await.unwrap();
@@ -233,7 +235,7 @@ async fn legacy_adoption_rejects_changed_cwd_and_child_without_losing_history() 
     use peri_acp_types::workspace::WorkspaceError;
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(dir.path().join("threads.db"))
         .await
         .unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
@@ -312,7 +314,7 @@ async fn legacy_adoption_backfills_binding_and_keeps_the_native_frozen_snapshot(
     use peri_acp_types::workspace::WorkspaceError;
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(dir.path().join("threads.db"))
         .await
         .unwrap();
     let workspace = store.resolve_workspace(&cwd).await.unwrap();
@@ -340,7 +342,7 @@ async fn legacy_adoption_backfills_binding_and_keeps_the_native_frozen_snapshot(
         .unwrap();
     assert_eq!(deleted.rows_affected(), 1);
     store.close().await;
-    let store = SqliteThreadStore::new(dir.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(dir.path().join("threads.db"))
         .await
         .unwrap();
     // 已认领过、绑定记录丢失：接纳补上绑定，既有 frozen 字节是唯一事实源，候选不写入。
@@ -386,7 +388,7 @@ async fn legacy_history_scopes_keep_path_boundaries_and_mixed_pagination() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = std::fs::canonicalize(dir.path()).unwrap().join("project_%");
     std::fs::create_dir(&cwd).unwrap();
-    let store = SqliteThreadStore::new(dir.path().join("threads.db"))
+    let store = SqliteThreadStore::try_new(dir.path().join("threads.db"))
         .await
         .unwrap();
     let ws = store.resolve_workspace(&cwd).await.unwrap();

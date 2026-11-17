@@ -1,8 +1,11 @@
-use super::*;
 use crate::agent::async_tasks::TaskManager;
-use crate::session::{subagent::SubagentHost, FrozenContext};
+use crate::session::subagent::SubagentHost;
+use crate::session::FrozenContext;
+use crate::session::Session;
 use peri_acp_types::ports::{McpPoolPort, McpPoolShutdownReport};
+use peri_acp_types::tasks::TaskManager as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn child(manager: Arc<TaskManager>, pool: Option<Arc<dyn McpPoolPort>>) -> Arc<Session> {
     let session = Session::new(
@@ -22,9 +25,6 @@ struct UnavailablePool;
 
 #[async_trait::async_trait]
 impl McpPoolPort for UnavailablePool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn shutdown(&self) -> McpPoolShutdownReport {
         panic!("child close must not shutdown shared pool")
     }
@@ -41,9 +41,6 @@ struct GatedPool {
 
 #[async_trait::async_trait]
 impl McpPoolPort for GatedPool {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn shutdown(&self) -> McpPoolShutdownReport {
         panic!("child close must not shutdown shared pool")
     }
@@ -63,14 +60,20 @@ impl McpPoolPort for GatedPool {
 async fn natural_completion_does_not_close_child_scope() {
     let manager = Arc::new(TaskManager::new());
     let session = child(manager.clone(), Some(Arc::new(UnavailablePool)));
-    settle_explicit_close(&session, false).await.unwrap();
+    crate::session::subagent::close::settle_explicit_close(&session, false)
+        .await
+        .expect("the settle explicit close fixture result is required for this assertion");
     assert!(!session.config().cancel_token.is_cancelled());
-    assert!(!session.subagent_host().unwrap().close_state.is_closing());
+    assert!(!session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .is_closing());
     manager
         .spawn_owned(Box::pin(async {}))
-        .unwrap()
+        .expect("the spawn owned fixture result is required for this assertion")
         .await
-        .unwrap();
+        .expect("natural completion does not close child scope: the completed fixture operation must provide its result payload");
 }
 
 #[tokio::test]
@@ -80,9 +83,13 @@ async fn cancelled_token_is_not_resource_close_evidence() {
         Some(Arc::new(UnavailablePool)),
     );
     session.config().cancel_token.cancel();
-    let result = settle_explicit_close(&session, true).await;
+    let result = crate::session::subagent::close::settle_explicit_close(&session, true).await;
     assert!(result.unwrap_err().contains("Incomplete"));
-    assert!(session.subagent_host().unwrap().close_state.is_closing());
+    assert!(session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .is_closing());
 }
 
 #[tokio::test]
@@ -94,17 +101,23 @@ async fn explicit_close_waits_for_owned_work_without_cancelling_independent_dele
     let (release, wait) = tokio::sync::oneshot::channel();
     let owned = manager.spawn_owned(Box::pin(async move {
         tokio::select! { _ = observed.cancelled() => panic!("independent delegate implicitly cancelled"), _ = wait => {} }
-    })).unwrap();
-    let closing = tokio::spawn(close_subagent_session_scope(session.clone()));
+    })).expect("the spawn owned fixture result is required for this assertion");
+    let closing = tokio::spawn(
+        crate::session::subagent::close::close_subagent_session_scope(session.clone()),
+    );
     while !session.config().cancel_token.is_cancelled() {
         tokio::task::yield_now().await;
     }
     assert!(!closing.is_finished());
     assert!(!independent.is_cancelled());
     assert!(manager.spawn_owned(Box::pin(async {})).is_err());
-    release.send(()).unwrap();
-    owned.await.unwrap();
-    closing.await.unwrap().unwrap();
+    release
+        .send(())
+        .expect("release send test receiver must remain available for this delivery");
+    owned
+        .await
+        .expect("the owned fixture result is required for this assertion");
+    closing.await.expect("the closing fixture result is required for this assertion").expect("explicit close waits for owned work without cancelling independent delegate: the completed fixture operation must provide its result payload");
 }
 
 #[tokio::test]
@@ -115,55 +128,81 @@ async fn abandoned_close_waiter_does_not_lose_resource_barrier() {
         calls: AtomicUsize::new(0),
     });
     let session = child(Arc::new(TaskManager::new()), Some(pool.clone()));
-    let first = tokio::spawn(close_subagent_session_scope(session.clone()));
+    let first = tokio::spawn(
+        crate::session::subagent::close::close_subagent_session_scope(session.clone()),
+    );
     pool.entered.notified().await;
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
-    let second = tokio::spawn(close_subagent_session_scope(session));
+    let second =
+        tokio::spawn(crate::session::subagent::close::close_subagent_session_scope(session));
     tokio::task::yield_now().await;
     assert!(!second.is_finished());
     assert_eq!(pool.calls.load(Ordering::SeqCst), 1);
     pool.release.notify_one();
-    second.await.unwrap().unwrap();
+    second.await.expect("the second fixture result is required for this assertion").expect("abandoned close waiter does not lose resource barrier: the completed fixture operation must provide its result payload");
 }
 
 #[tokio::test(start_paused = true)]
 async fn close_waits_for_handoff_delivery_retry_and_preserves_failure_diagnostic() {
     let session = child(Arc::new(TaskManager::new()), None);
-    let state = session.subagent_host().unwrap().close_state.clone();
+    let state = session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .clone();
     let (retry_sender, retry_receiver) = tokio::sync::oneshot::channel();
     let worker_state = state.clone();
     let worker = state
         .spawn_sync_worker("child".into(), || {
             Ok(async move {
                 worker_state.record_sync_delivery_failure("child", "queue rejected result");
-                retry_receiver.await.unwrap();
+                retry_receiver
+                    .await
+                    .expect("the retry receiver fixture result is required for this assertion");
                 peri_time::sleep(std::time::Duration::from_secs(5)).await;
                 worker_state.settle_sync_delivery("child");
             })
         })
-        .unwrap();
-    let closing = tokio::spawn(close_subagent_session_scope(session.clone()));
-    let failure = closing.await.unwrap().unwrap_err();
+        .expect("the spawn sync worker fixture result is required for this assertion");
+    let closing = tokio::spawn(
+        crate::session::subagent::close::close_subagent_session_scope(session.clone()),
+    );
+    let failure = closing
+        .await
+        .expect("the closing fixture result is required for this assertion")
+        .unwrap_err();
     assert!(failure.contains("queue rejected result"));
     assert!(state.is_closing());
-    retry_sender.send(()).unwrap();
+    retry_sender
+        .send(())
+        .expect("retry sender send test receiver must remain available for this delivery");
     tokio::task::yield_now().await;
-    assert!(close_subagent_session_scope(session.clone())
-        .await
-        .unwrap_err()
-        .contains("queue rejected result"));
+    assert!(
+        crate::session::subagent::close::close_subagent_session_scope(session.clone())
+            .await
+            .unwrap_err()
+            .contains("queue rejected result")
+    );
     tokio::time::advance(std::time::Duration::from_secs(4)).await;
     assert!(!worker.is_finished());
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
-    worker.await.unwrap();
-    close_subagent_session_scope(session).await.unwrap();
+    worker
+        .await
+        .expect("the worker fixture result is required for this assertion");
+    crate::session::subagent::close::close_subagent_session_scope(session)
+        .await
+        .expect("the close subagent session scope fixture result is required for this assertion");
 }
 
 #[tokio::test]
 async fn worker_delivery_failure_is_not_reported_as_successful_close() {
     let session = child(Arc::new(TaskManager::new()), None);
-    let state = session.subagent_host().unwrap().close_state.clone();
+    let state = session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .clone();
     let worker_state = state.clone();
     state
         .spawn_sync_worker("child".into(), || {
@@ -171,17 +210,23 @@ async fn worker_delivery_failure_is_not_reported_as_successful_close() {
                 worker_state.record_sync_delivery_failure("child", "queue unavailable");
             })
         })
-        .unwrap()
+        .expect("the spawn sync worker fixture result is required for this assertion")
         .await
-        .unwrap();
-    let error = close_subagent_session_scope(session).await.unwrap_err();
+        .expect("worker delivery failure is not reported as successful close: the completed fixture operation must provide its result payload");
+    let error = crate::session::subagent::close::close_subagent_session_scope(session)
+        .await
+        .unwrap_err();
     assert!(error.contains("child: Incomplete: sync child delivery failed: queue unavailable"));
 }
 
 #[tokio::test]
 async fn worker_explicit_close_does_not_wait_for_itself_but_external_close_does() {
     let session = child(Arc::new(TaskManager::new()), None);
-    let state = session.subagent_host().unwrap().close_state.clone();
+    let state = session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .clone();
     let (entered_sender, entered_receiver) = tokio::sync::oneshot::channel();
     let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
     let worker_session = session.clone();
@@ -189,30 +234,49 @@ async fn worker_explicit_close_does_not_wait_for_itself_but_external_close_does(
     let worker = state
         .spawn_sync_worker("child".into(), || {
             Ok(async move {
-                settle_explicit_close(&worker_session, true).await.unwrap();
-                entered_sender.send(()).unwrap();
-                release_receiver.await.unwrap();
+                crate::session::subagent::close::settle_explicit_close(&worker_session, true)
+                    .await
+                    .expect(
+                        "the settle explicit close fixture result is required for this assertion",
+                    );
+                entered_sender.send(()).expect(
+                    "entered sender send test receiver must remain available for this delivery",
+                );
+                release_receiver
+                    .await
+                    .expect("the release receiver fixture result is required for this assertion");
                 worker_state.settle_sync_delivery("child");
             })
         })
-        .unwrap();
+        .expect("the spawn sync worker fixture result is required for this assertion");
     tokio::time::timeout(std::time::Duration::from_secs(2), entered_receiver)
         .await
         .expect("worker must not wait for itself")
-        .unwrap();
-    let closing = tokio::spawn(close_subagent_session_scope(session));
+        .expect("the expect fixture result is required for this assertion");
+    let closing =
+        tokio::spawn(crate::session::subagent::close::close_subagent_session_scope(session));
     tokio::task::yield_now().await;
     assert!(!closing.is_finished());
-    release_sender.send(()).unwrap();
-    worker.await.unwrap();
-    closing.await.unwrap().unwrap();
+    release_sender
+        .send(())
+        .expect("release sender send test receiver must remain available for this delivery");
+    worker
+        .await
+        .expect("the worker fixture result is required for this assertion");
+    closing.await.expect("the closing fixture result is required for this assertion").expect("worker explicit close does not wait for itself but external close does: the completed fixture operation must provide its result payload");
 }
 
 #[tokio::test]
 async fn close_rejects_late_worker_registration() {
     let session = child(Arc::new(TaskManager::new()), None);
-    let state = session.subagent_host().unwrap().close_state.clone();
-    close_subagent_session_scope(session).await.unwrap();
+    let state = session
+        .subagent_host()
+        .expect("the subagent host fixture result is required for this assertion")
+        .close_state
+        .clone();
+    crate::session::subagent::close::close_subagent_session_scope(session)
+        .await
+        .expect("the close subagent session scope fixture result is required for this assertion");
     let error = state
         .spawn_sync_worker("late".into(), || Ok(async {}))
         .unwrap_err();
@@ -221,21 +285,31 @@ async fn close_rejects_late_worker_registration() {
 
 #[test]
 fn close_failure_classification_allows_only_unconfirmed_settlement() {
-    assert!(close_failure_allows_terminal_finalization(
-        "Incomplete: child settlement is unconfirmed (x); resources closed"
-    ));
-    assert!(close_failure_allows_terminal_finalization(
-        "Incomplete: child handoff is unconfirmed"
-    ));
-    assert!(!close_failure_allows_terminal_finalization(
-        "Incomplete: child history persistence unconfirmed: append failed"
-    ));
-    assert!(!close_failure_allows_terminal_finalization(
-        "Incomplete: child MCP resource owner unavailable"
-    ));
-    assert!(!close_failure_allows_terminal_finalization(
-        "Incomplete: child resources remain unsettled"
-    ));
+    assert!(
+        crate::session::subagent::close::close_failure_allows_terminal_finalization(
+            "Incomplete: child settlement is unconfirmed (x); resources closed"
+        )
+    );
+    assert!(
+        crate::session::subagent::close::close_failure_allows_terminal_finalization(
+            "Incomplete: child handoff is unconfirmed"
+        )
+    );
+    assert!(
+        !crate::session::subagent::close::close_failure_allows_terminal_finalization(
+            "Incomplete: child history persistence unconfirmed: append failed"
+        )
+    );
+    assert!(
+        !crate::session::subagent::close::close_failure_allows_terminal_finalization(
+            "Incomplete: child MCP resource owner unavailable"
+        )
+    );
+    assert!(
+        !crate::session::subagent::close::close_failure_allows_terminal_finalization(
+            "Incomplete: child resources remain unsettled"
+        )
+    );
 }
 
 #[path = "close_admission_test.rs"]

@@ -11,17 +11,14 @@ use std::sync::Arc;
 use crate::cli_args::OutputFormat;
 use agent_client_protocol::schema::v1::StopReason;
 use anyhow::Result;
-use peri_acp::host::assemble::{HostAssemblyInput, assemble_server_config};
-use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_acp::host::assemble::HostAssemblyInput;
+
 use peri_acp_types::interaction::UnansweredCause;
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::session_store::SessionStoreDeployment;
-use peri_tui::acp_client::{
-    AcpDeployment, AcpNotification, AcpTuiClient,
-    interaction_response::{
-        elicitation_unanswered_response, permission_selected_allow_once_response,
-    },
-};
+use peri_tui::acp_client::AcpDeployment;
+use peri_tui::acp_client::AcpNotification;
+use peri_tui::acp_client::AcpTuiClient;
 use serde_json::{Value, json};
 
 fn load_print_config_source(
@@ -176,7 +173,7 @@ pub async fn run_print(
     let (session_resources, session_store_shutdown) = resources.into_parts();
 
     // ── ACP host 装配（与 TUI 同源，见 peri_acp::host::assemble）──
-    let mut host_config = assemble_server_config(HostAssemblyInput {
+    let mut host_config = peri_acp::host::assemble::assemble_server_config(HostAssemblyInput {
         provider: provider.clone(),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         config_source: config_source.clone(),
@@ -188,11 +185,10 @@ pub async fn run_print(
         bare,
         // print 无 tick 语义（迁移前 print 路径无每秒 tick，行为零变化）。
         drive_cron_tick: false,
+        builtin_assembly_mode: None,
         // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每 session 的
         // 会话环境装配产生（AW3-11）。
         workspace_input: None,
-        // 顶层三路径（无会话上下文）不消费 flag：Bash 缺省恒为前台。
-        workspace_bash_default_run_in_background: false,
         // 资源面输入同为会话级（见上）：顶层装配无会话消费者，保持未接线。
         workspace_resources: None,
         // 同理：workflow 运行时槽位是会话级装配输入（编排状态随会话存在），顶层恒为 `None`。
@@ -208,7 +204,7 @@ pub async fn run_print(
     })
     .await;
     host_config.model_transport_route = model_transport_route;
-    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (acp_client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     let server_transport = Arc::new(server_transport);
     let host = peri_acp::host::spawn_acp_server(server_transport, host_config);
@@ -218,6 +214,7 @@ pub async fn run_print(
     let mut deployment = AcpDeployment::new(acp_client.clone(), host);
     let mut output = PrintOutput::new(fmt);
     let mut stop_reason = None;
+    let mut pending_tasks: u32 = 0;
     let operation = async {
         // ── ephemeral session：new → prompt（流式收集事件）→ close ──
         let session_id = acp_client.new_session(&cwd, None).await?;
@@ -233,6 +230,15 @@ pub async fn run_print(
                     biased;
                     res = &mut prompt_fut => {
                         let response = res.map_err(|e| anyhow::anyhow!("session/prompt 失败: {e}"))?;
+                        // test-support 诊断：把 ACP 终态（含 `_meta`）留给端到端测试断言。
+                        // 生产构建不含本分支。
+                        #[cfg(feature = "test-support")]
+                        if std::env::var_os("PERI_TEST_PRINT_DIAG").is_some()
+                            && let Ok(value) = serde_json::to_value(&response)
+                        {
+                            eprintln!("PERI_TEST_PRINT_RESPONSE {value}");
+                        }
+                        pending_tasks = pending_tasks_from_meta(response.meta.as_ref());
                         stop_reason = Some(response.stop_reason);
                         break;
                     }
@@ -246,10 +252,17 @@ pub async fn run_print(
         }
 
         // 关闭 ephemeral session（释放 host 侧 history/frozen/agent_pool）
-        acp_client
+        let close_result = acp_client
             .send_raw_request("session/close", json!({ "sessionId": session_id }))
-            .await
-            .map_err(|_| anyhow::anyhow!("ACP session cleanup failed"))?;
+            .await;
+        #[cfg(feature = "test-support")]
+        if std::env::var_os("PERI_TEST_PRINT_DIAG").is_some() {
+            match &close_result {
+                Ok(_) => eprintln!("PERI_TEST_SESSION_CLOSE ok"),
+                Err(error) => eprintln!("PERI_TEST_SESSION_CLOSE error={error}"),
+            }
+        }
+        close_result.map_err(|_| anyhow::anyhow!("ACP session cleanup failed"))?;
         Ok(())
     };
     let cleanup_result = deployment.run(operation).await;
@@ -259,9 +272,9 @@ pub async fn run_print(
     if let Some(stop_reason) = stop_reason {
         // result 只在 deployment 已结束后发出；任务终态与清理失败分别表达。
         let cleanup_error = cleanup_result.as_ref().err().map(|_| "ACP cleanup failed");
-        output.output_final(stop_reason, cleanup_error);
+        output.output_final(stop_reason, pending_tasks, cleanup_error);
         cleanup_result?;
-        require_completed(stop_reason)
+        require_completed(stop_reason, pending_tasks)
     } else {
         cleanup_result?;
         anyhow::bail!("session/prompt ended without a terminal response")
@@ -288,7 +301,20 @@ fn unimplemented_print_flags(
     .collect()
 }
 
-fn require_completed(stop_reason: StopReason) -> Result<()> {
+/// 从 ACP 终态 `_meta.peri.pendingTasks` 读取未结算任务数（对象嵌套，
+/// 不是点号 key）；缺失或非法值按 0 处理，与 host 只在 pending>0 时写 meta 一致。
+fn pending_tasks_from_meta(meta: Option<&serde_json::Map<String, Value>>) -> u32 {
+    meta.and_then(|m| m.get("peri"))
+        .and_then(|peri| peri.get("pendingTasks"))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+fn require_completed(stop_reason: StopReason, pending_tasks: u32) -> Result<()> {
+    if pending_tasks > 0 {
+        anyhow::bail!("session/prompt incomplete: pendingTasks={pending_tasks}")
+    }
     if stop_reason == StopReason::EndTurn {
         Ok(())
     } else {
@@ -363,12 +389,14 @@ async fn auto_approve(
 }
 
 fn print_permission_response() -> Value {
-    permission_selected_allow_once_response()
+    peri_tui::acp_client::interaction_response::permission_selected_allow_once_response()
 }
 
 /// `-p` 无交互界面：声明「无人可作答」而非裸 cancel，工具据此如实转述。
 fn print_elicitation_response() -> Value {
-    elicitation_unanswered_response(UnansweredCause::NonInteractiveClient)
+    peri_tui::acp_client::interaction_response::elicitation_unanswered_response(
+        UnansweredCause::NonInteractiveClient,
+    )
 }
 
 /// 事件输出器：消费 ACP 协议化事件（session/update 通知），输出格式与
@@ -415,6 +443,7 @@ impl PrintUsage {
 }
 
 impl PrintOutput {
+    #[must_use]
     fn new(fmt: OutputFormat) -> Self {
         Self {
             fmt,
@@ -469,7 +498,7 @@ impl PrintOutput {
                             "type": "text",
                             "content": text
                         }))
-                        .unwrap(),
+                        .expect("serializing JSON Value containing only JSON data is infallible"),
                     ),
                     OutputFormat::Text | OutputFormat::Json => {
                         self.text_buffer.push_str(&text);
@@ -498,7 +527,7 @@ impl PrintOutput {
                             "name": name,
                             "input": input,
                         }))
-                        .unwrap(),
+                        .expect("serializing JSON Value containing only JSON data is infallible"),
                     )
                 } else {
                     None
@@ -531,7 +560,7 @@ impl PrintOutput {
                             "id": tool_call_id,
                             "output": output,
                         }))
-                        .unwrap(),
+                        .expect("serializing JSON Value containing only JSON data is infallible"),
                     )
                 } else {
                     None
@@ -541,24 +570,45 @@ impl PrintOutput {
         }
     }
 
-    fn output_final(&self, stop_reason: StopReason, cleanup_error: Option<&str>) {
+    fn output_final(
+        &self,
+        stop_reason: StopReason,
+        pending_tasks: u32,
+        cleanup_error: Option<&str>,
+    ) {
         match self.fmt {
             OutputFormat::Text => println!("{}", self.text_buffer),
             OutputFormat::Json => println!(
                 "{}",
-                serde_json::to_string_pretty(&self.result(stop_reason, cleanup_error)).unwrap()
+                serde_json::to_string_pretty(&self.result(
+                    stop_reason,
+                    pending_tasks,
+                    cleanup_error
+                ))
+                .expect("serializing the print result JSON Value is infallible")
             ),
-            OutputFormat::StreamJson => println!("{}", self.result(stop_reason, cleanup_error)),
+            OutputFormat::StreamJson => {
+                println!("{}", self.result(stop_reason, pending_tasks, cleanup_error))
+            }
         }
     }
 
-    fn result(&self, stop_reason: StopReason, cleanup_error: Option<&str>) -> Value {
-        let completed = stop_reason == StopReason::EndTurn;
+    fn result(
+        &self,
+        stop_reason: StopReason,
+        pending_tasks: u32,
+        cleanup_error: Option<&str>,
+    ) -> Value {
+        // `EndTurn` 只表示本轮 loop 退出；未结算后台任务与清理失败都意味着
+        // 调用方拿不到完整结果，不能投影为成功。
+        let completed =
+            stop_reason == StopReason::EndTurn && pending_tasks == 0 && cleanup_error.is_none();
         let mut result = json!({
             "type": "result",
             "stop_reason": stop_reason,
             "status": if completed { "completed" } else { "incomplete" },
-            "is_error": !completed || cleanup_error.is_some(),
+            "is_error": !completed,
+            "pending_tasks": pending_tasks,
         });
         match self.fmt {
             OutputFormat::StreamJson => {
@@ -602,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn test_print_drain_waits_for_sender_close_and_keeps_tail_events() {
         for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
-            let (transport, _server) = mpsc_transport_pair();
+            let (transport, _server) = peri_acp::transport::mpsc::mpsc_transport_pair();
             let (client, sender, mut receiver) = AcpTuiClient::new(transport);
             let mut output = PrintOutput::new(fmt);
             {
@@ -623,12 +673,12 @@ mod tests {
                             params: json!({"sessionId": "s1", "update": update}),
                         })
                         .await
-                        .unwrap();
+                        .expect("print drain waits for sender close and keeps tail events: fixture task and request must complete successfully");
                 }
                 drop(sender);
                 drain.await;
             }
-            let result = output.result(StopReason::EndTurn, None);
+            let result = output.result(StopReason::EndTurn, 0, None);
             if fmt == OutputFormat::Json {
                 assert_eq!(result["content"], "tail");
             } else {
@@ -650,30 +700,54 @@ mod tests {
         ] {
             for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
                 let output = PrintOutput::new(fmt);
-                let result = output.result(stop_reason, None);
+                let result = output.result(stop_reason, 0, None);
                 assert_eq!(result["stop_reason"], json!(stop_reason));
                 assert_eq!(result["status"], "incomplete");
                 assert_eq!(result["is_error"], true);
-                assert!(require_completed(stop_reason).is_err());
+                assert!(require_completed(stop_reason, 0).is_err());
             }
         }
     }
 
     #[test]
+    fn test_print_result_treats_pending_tasks_as_incomplete() {
+        for fmt in [OutputFormat::Json, OutputFormat::StreamJson] {
+            let output = PrintOutput::new(fmt);
+            let result = output.result(StopReason::EndTurn, 1, None);
+            assert_eq!(result["stop_reason"], "end_turn");
+            assert_eq!(result["status"], "incomplete");
+            assert_eq!(result["is_error"], true);
+            assert_eq!(result["pending_tasks"], 1);
+            assert!(require_completed(StopReason::EndTurn, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn test_pending_tasks_from_meta_reads_nested_object() {
+        let meta: serde_json::Map<String, Value> =
+            serde_json::from_value(json!({"peri": {"pendingTasks": 3}})).expect("pending tasks from meta reads nested object: fixture JSON must match the expected schema");
+        assert_eq!(pending_tasks_from_meta(Some(&meta)), 3);
+        let flat: serde_json::Map<String, Value> =
+            serde_json::from_value(json!({"peri.pendingTasks": 3})).expect("pending tasks from meta reads nested object: fixture JSON must match the expected schema");
+        assert_eq!(pending_tasks_from_meta(Some(&flat)), 0);
+        assert_eq!(pending_tasks_from_meta(None), 0);
+    }
+
+    #[test]
     fn test_print_result_distinguishes_completed_task_from_cleanup_failure() {
         let output = PrintOutput::new(OutputFormat::Json);
-        let result = output.result(StopReason::EndTurn, Some("ACP cleanup failed"));
+        let result = output.result(StopReason::EndTurn, 0, Some("ACP cleanup failed"));
         assert_eq!(result["stop_reason"], "end_turn");
-        assert_eq!(result["status"], "completed");
+        assert_eq!(result["status"], "incomplete");
         assert_eq!(result["is_error"], true);
         assert_eq!(result["cleanup_error"], "ACP cleanup failed");
-        assert!(require_completed(StopReason::EndTurn).is_ok());
+        assert!(require_completed(StopReason::EndTurn, 0).is_ok());
     }
 
     #[test]
     fn test_print_permission_response_is_selected_allow_once() {
         let response: RequestPermissionResponse =
-            serde_json::from_value(print_permission_response()).unwrap();
+            serde_json::from_value(print_permission_response()).expect("print permission response is selected allow once: fixture JSON must match the expected schema");
         let RequestPermissionOutcome::Selected(selected) = response.outcome else {
             panic!("print permission 应自动选择 allow_once")
         };
@@ -685,7 +759,7 @@ mod tests {
     #[test]
     fn test_print_elicitation_response_declares_non_interactive_client() {
         let response: CreateElicitationResponse =
-            serde_json::from_value(print_elicitation_response()).unwrap();
+            serde_json::from_value(print_elicitation_response()).expect("print elicitation response declares non interactive client: fixture JSON must match the expected schema");
         assert!(matches!(response.action, ElicitationAction::Cancel));
         assert_eq!(
             UnansweredCause::from_meta(response.meta.as_ref()),

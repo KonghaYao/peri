@@ -27,7 +27,7 @@ fn parse(proxy: Option<&str>, run: Option<&str>) -> Result<Option<ModelTransport
         (None, None) => Ok(None),
         (Some(proxy), Some(run)) => {
             let url = Url::parse(proxy).with_context(|| format!("Invalid {PROXY_ENV}"))?;
-            ModelTransportRoute::new(url, run)
+            ModelTransportRoute::try_new(url, run)
                 .map(Some)
                 .with_context(|| format!("Invalid {PROXY_ENV}/{RUN_ENV} configuration"))
         }

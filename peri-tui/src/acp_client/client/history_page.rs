@@ -12,7 +12,8 @@
 
 use serde_json::json;
 
-use peri_acp::transport::{AcpTransport, types::AcpError};
+use peri_acp::transport::AcpTransport;
+use peri_acp::transport::types::AcpError;
 
 use crate::kit::history_paging::{HistoryBodyRequest, WindowRequest};
 
@@ -99,7 +100,8 @@ mod tests {
         WindowRequestAnchor,
     };
     use crate::kit::history_window::HistorySource;
-    use peri_acp::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
+    use peri_acp::transport::mpsc::mpsc_transport_pair;
+    use peri_acp::transport::types::IncomingMessage;
     use serde_json::json;
 
     #[tokio::test]
@@ -173,7 +175,7 @@ mod tests {
             server_transport
                 .send_response(id, Ok(json!({ "entryId": "s1:m1", "offset": 0, "bytes": [], "nextOffset": null, "complete": true })))
                 .await
-                .unwrap();
+                .expect("load history body sends bounded range request: fixture task and request must complete successfully");
         });
         let response = client
             .load_history_body("s1", &request)
@@ -199,7 +201,9 @@ mod tests {
             client
                 .load_history_body("s1", &request)
                 .await
-                .unwrap_err()
+                .expect_err(
+                    "load history body rejects invalid bounds: the invalid fixture must be rejected"
+                )
                 .code,
             -32602
         );

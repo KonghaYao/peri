@@ -6,10 +6,12 @@ use crate::{
     ModelRequest, ToolCall, ToolDefinition, ToolResult,
 };
 
-use super::{
-    replay::state_block, request::build_request, response::project_items, ResponsesConfig,
-    ResponsesModel, ResponsesProfile,
-};
+use super::replay;
+use super::request;
+use super::response;
+use super::ResponsesConfig;
+use super::ResponsesModel;
+use super::ResponsesProfile;
 
 fn config(profile: ResponsesProfile) -> ResponsesConfig {
     ResponsesConfig::new(
@@ -44,7 +46,7 @@ fn chatgpt_profile_uses_namespaces_and_omits_unsupported_parameters() {
     request.temperature = Some(0.6);
     request.session_id = Some("session".into());
     let config = config(ResponsesProfile::ChatGptPlan).with_reasoning_effort("high");
-    let built = build_request(&config, &request).unwrap();
+    let built = request::build_request(&config, &request).unwrap();
     assert_eq!(
         built.endpoint.as_str(),
         "https://api.openai.com/v1/responses"
@@ -80,9 +82,9 @@ fn user_only_chatgpt_input_is_valid_and_platform_keeps_its_controls() {
         .with_tools(vec![tool()])
         .with_max_tokens(42);
     request.temperature = Some(0.5);
-    let plan = build_request(&config(ResponsesProfile::ChatGptPlan), &request).unwrap();
+    let plan = request::build_request(&config(ResponsesProfile::ChatGptPlan), &request).unwrap();
     assert_eq!(plan.body["input"].as_array().unwrap().len(), 1);
-    let platform = build_request(&config(ResponsesProfile::Platform), &request).unwrap();
+    let platform = request::build_request(&config(ResponsesProfile::Platform), &request).unwrap();
     assert_eq!(platform.body["max_output_tokens"], 42);
     assert_eq!(platform.body["temperature"], 0.5);
     assert_eq!(platform.body["tools"][0]["type"], "function");
@@ -91,14 +93,14 @@ fn user_only_chatgpt_input_is_valid_and_platform_keeps_its_controls() {
 
 #[test]
 fn current_max_reasoning_effort_is_supported_and_unknown_efforts_fail_locally() {
-    let body = build_request(
+    let body = request::build_request(
         &config(ResponsesProfile::Platform).with_reasoning_effort("max"),
         &ModelRequest::default(),
     )
     .unwrap()
     .body;
     assert_eq!(body["reasoning"]["effort"], "max");
-    assert!(build_request(
+    assert!(request::build_request(
         &config(ResponsesProfile::Platform).with_reasoning_effort("ultra"),
         &ModelRequest::default()
     )
@@ -118,7 +120,7 @@ fn chatgpt_credentials_are_restricted_to_the_exact_official_endpoint() {
         let config = ResponsesConfig::new(Url::parse(endpoint).unwrap(), "secret", "model")
             .with_profile(ResponsesProfile::ChatGptPlan);
         assert!(
-            build_request(&config, &ModelRequest::default()).is_err(),
+            request::build_request(&config, &ModelRequest::default()).is_err(),
             "{endpoint}"
         );
     }
@@ -129,7 +131,7 @@ fn chatgpt_credentials_are_restricted_to_the_exact_official_endpoint() {
     ] {
         let config = ResponsesConfig::new(Url::parse(endpoint).unwrap(), "secret", "model")
             .with_profile(ResponsesProfile::ChatGptPlan);
-        assert!(build_request(&config, &ModelRequest::default()).is_ok());
+        assert!(request::build_request(&config, &ModelRequest::default()).is_ok());
     }
 }
 
@@ -162,7 +164,7 @@ fn maps_images_documents_and_function_outputs_without_flattening() {
             is_error: true,
         }),
     ]);
-    let input = &build_request(&config(ResponsesProfile::Platform), &request)
+    let input = &request::build_request(&config(ResponsesProfile::Platform), &request)
         .unwrap()
         .body["input"];
     assert_eq!(
@@ -180,11 +182,11 @@ fn maps_images_documents_and_function_outputs_without_flattening() {
 }
 
 fn state_message(config: &ResponsesConfig, items: &[Value]) -> ModelMessage {
-    let binding = build_request(config, &ModelRequest::default())
+    let binding = request::build_request(config, &ModelRequest::default())
         .unwrap()
         .binding;
-    let (mut content, calls) = project_items(items, config.profile, None).unwrap();
-    content.push(state_block(&binding, items));
+    let (mut content, calls) = response::project_items(items, config.profile, None).unwrap();
+    content.push(replay::state_block(&binding, items));
     ModelMessage::assistant(content, calls)
 }
 
@@ -204,7 +206,7 @@ fn native_replay_preserves_order_ids_phase_encrypted_state_and_avoids_duplicates
         state_message(&config, &items),
         ModelMessage::tool_result(ToolResult::success("call_a", "read_file", "contents")),
     ]);
-    let built = build_request(&config, &request).unwrap();
+    let built = request::build_request(&config, &request).unwrap();
     assert_eq!(&built.body["input"].as_array().unwrap()[..3], &items);
     assert_eq!(built.body["input"].as_array().unwrap().len(), 4);
     assert_eq!(built.body["input"][3]["call_id"], "call_a");
@@ -224,7 +226,7 @@ fn replay_requires_matching_projection_and_does_not_cross_credential_domain() {
         "test-model",
     )
     .with_credential_ref("other-account");
-    let body = build_request(&foreign, &ModelRequest::new(vec![original.clone()]))
+    let body = request::build_request(&foreign, &ModelRequest::new(vec![original.clone()]))
         .unwrap()
         .body;
     assert!(!body.to_string().contains("opaque-ciphertext"));
@@ -234,7 +236,7 @@ fn replay_requires_matching_projection_and_does_not_cross_credential_domain() {
     if let ModelMessage::Assistant { content, .. } = &mut changed {
         content[0] = ContentBlock::text("different projection");
     }
-    assert!(build_request(&config, &ModelRequest::new(vec![changed])).is_err());
+    assert!(request::build_request(&config, &ModelRequest::new(vec![changed])).is_err());
 }
 
 #[test]
@@ -258,7 +260,7 @@ fn opaque_state_is_rejected_outside_assistant_and_tool_arguments_are_objects() {
             is_error: false,
         }),
     ] {
-        assert!(build_request(
+        assert!(request::build_request(
             &config(ResponsesProfile::Platform),
             &ModelRequest::new(vec![message])
         )
@@ -266,7 +268,7 @@ fn opaque_state_is_rejected_outside_assistant_and_tool_arguments_are_objects() {
     }
     let mut items = output_items();
     items[2]["arguments"] = json!("[]");
-    assert!(project_items(&items, ResponsesProfile::Platform, None).is_err());
+    assert!(response::project_items(&items, ResponsesProfile::Platform, None).is_err());
 }
 
 #[test]
@@ -277,7 +279,7 @@ fn normalized_calls_use_call_id_and_plan_namespace() {
         JsonObject::from_value(json!({"path":"a.txt"})).unwrap(),
     );
     let request = ModelRequest::new(vec![ModelMessage::assistant(Vec::new(), vec![call])]);
-    let body = build_request(&config(ResponsesProfile::ChatGptPlan), &request)
+    let body = request::build_request(&config(ResponsesProfile::ChatGptPlan), &request)
         .unwrap()
         .body;
     assert_eq!(body["input"][0]["namespace"], "peri");
@@ -305,7 +307,7 @@ fn cross_endpoint_model_and_profile_replay_keeps_only_the_typed_projection() {
         super::request_test::config(ResponsesProfile::ChatGptPlan),
     ];
     for alternate in alternatives {
-        let body = build_request(&alternate, &ModelRequest::new(vec![message.clone()]))
+        let body = request::build_request(&alternate, &ModelRequest::new(vec![message.clone()]))
             .unwrap()
             .body;
         assert!(!body.to_string().contains("opaque-ciphertext"));
@@ -324,13 +326,13 @@ fn invalid_or_duplicate_function_names_fail_before_transport() {
     ] {
         let mut tool = tool();
         tool.name = name;
-        assert!(build_request(
+        assert!(request::build_request(
             &config(ResponsesProfile::Platform),
             &ModelRequest::default().with_tools(vec![tool])
         )
         .is_err());
     }
-    assert!(build_request(
+    assert!(request::build_request(
         &config(ResponsesProfile::Platform),
         &ModelRequest::default().with_tools(vec![tool(), tool()])
     )
@@ -341,7 +343,7 @@ fn invalid_or_duplicate_function_names_fail_before_transport() {
 fn replay_rejects_duplicate_native_item_ids_and_call_ids() {
     let mut items = output_items();
     items.push(items[2].clone());
-    assert!(project_items(&items, ResponsesProfile::Platform, None).is_err());
+    assert!(response::project_items(&items, ResponsesProfile::Platform, None).is_err());
     items[3]["id"] = json!("fc_new");
-    assert!(project_items(&items, ResponsesProfile::Platform, None).is_err());
+    assert!(response::project_items(&items, ResponsesProfile::Platform, None).is_err());
 }

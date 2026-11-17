@@ -1,16 +1,18 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
-use rmcp::{
-    model::{InitializeResult, ListToolsResult, PaginatedRequestParams, Tool},
-    service::{RequestContext, RoleServer},
-    ServerHandler,
-};
+use rmcp::model::InitializeResult;
+use rmcp::model::ListToolsResult;
+use rmcp::model::PaginatedRequestParams;
+use rmcp::model::Tool;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
+use rmcp::ServerHandler;
 use tokio::sync::Notify;
 
-use super::super::{output_store::tests::Wire, McpClientPool};
+use super::super::output_store::tests::Wire;
+use super::super::McpClientPool;
 use crate::mcp::config::McpServerConfig;
 
 struct StartupProvider {

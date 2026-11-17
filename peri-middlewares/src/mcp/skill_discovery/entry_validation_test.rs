@@ -1,4 +1,4 @@
-use super::*;
+use super::SkillListEntryDto;
 
 /// [M8] 坏条目混合好条目：坏条目被**隔离**（不整批失败），好条目照常进入发现
 /// 结果，并报出被隔离计数。
@@ -32,7 +32,7 @@ fn collect_entries_isolates_bad_entries_and_keeps_good_ones() {
         ),
     ];
 
-    let (entries, rejected) = collect_entries("demo", dto_entries, "test");
+    let (entries, rejected) = super::collect_entries("demo", dto_entries, "test");
     assert_eq!(entries.len(), 2, "好条目必须保留");
     assert_eq!(rejected, 2, "坏条目被隔离并计数");
     assert_eq!(entries[0].uri, "skill://a/SKILL.md");

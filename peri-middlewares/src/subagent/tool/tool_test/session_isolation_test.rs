@@ -1,4 +1,11 @@
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::EchoLLM;
+use super::RwLock;
+use super::SessionFixture;
+use super::SubAgentTool;
+use super::ThreadMeta;
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::tasks::TaskManager as _;
 use peri_agent::agent::async_tasks::TaskManager;
@@ -19,20 +26,20 @@ impl ObservedToolsLlm {
         request: peri_model::ModelRequest,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        use crate::subagent::test_support::*;
+        use crate::subagent::test_support;
         let _ = &cancellation;
-        let defined = defined_tools(&request);
+        let defined = test_support::defined_tools(&request);
         let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         *self.0.write() = tools.iter().map(|tool| tool.name().to_owned()).collect();
-        text_events("nested-complete")
+        test_support::text_events("nested-complete")
     }
 }
 crate::subagent::test_support::fixture_model_impl!(ObservedToolsLlm);
 
 #[tokio::test]
 async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let root_id = store
@@ -108,7 +115,7 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     }
     let bound = super::super::session_binding::SessionBoundAssembler::new(&tool).bind_tools(
         &child.session,
-        vec![Arc::new(tool.clone()), make_tool("Probe")],
+        vec![Arc::new(tool.clone()), super::make_tool("Probe")],
         Arc::new(|tool| tool.name() != "Probe"),
     );
     let mut nested_ctx = ToolContext::new(&[], &cwd);
@@ -176,7 +183,7 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         mcp_pool: Some(pool.clone()),
         ..Default::default()
     });
-    let tool = make_subagent_tool(Vec::new()).with_parent_session(replacement_parent);
+    let tool = super::make_subagent_tool(Vec::new()).with_parent_session(replacement_parent);
     // resume 携带本次工具调用身份（父侧 provenance 来源）。
     let resume_invocation = "fixture-isolation-nested-resume";
 
@@ -296,7 +303,7 @@ async fn agent_binding_retains_task_directory_and_routes_only_to_child() {
 async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding() {
     use peri_acp_types::ports::McpPoolPort;
     use peri_acp_types::session::{MessageSource, SessionInbox};
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let root_id = store
@@ -328,7 +335,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         mcp_pool: Some(pool.clone()),
         ..Default::default()
     });
-    let tool = make_subagent_tool(Vec::new()).with_parent_session(parent);
+    let tool = super::make_subagent_tool(Vec::new()).with_parent_session(parent);
     let mut config = tool.resume_config_base(
         child_id.clone(),
         Some("complete naturally".into()),
@@ -477,7 +484,7 @@ async fn wait_for_background_idle(manager: &TaskManager) {
 #[tokio::test]
 async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delivery() {
     use peri_agent::agent::events::ExecutorEvent;
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let root_id = store
@@ -494,9 +501,10 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
         task_manager: Some(Arc::new(TaskManager::new())),
         ..Default::default()
     });
-    let root_tool = make_subagent_tool(Vec::new()).with_parent_session(root.clone());
+    let root_tool = super::make_subagent_tool(Vec::new()).with_parent_session(root.clone());
     let child = spawn_completed_child(&root_tool, &cwd, "child").await;
-    let child_tool = make_subagent_tool(Vec::new()).with_parent_session(child.session.clone());
+    let child_tool =
+        super::make_subagent_tool(Vec::new()).with_parent_session(child.session.clone());
     let grandchild = spawn_completed_child(&child_tool, &cwd, "grandchild").await;
     assert_eq!(
         store
@@ -570,7 +578,7 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
 #[tokio::test]
 async fn configured_background_callback_overrides_live_parent_and_retries_original_target() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let store = SessionFixture::open_in(dir.path()).await;
     let cwd = store.workspace_cwd();
     let root_id = store
@@ -588,7 +596,7 @@ async fn configured_background_callback_overrides_live_parent_and_retries_origin
         task_manager: Some(manager.clone()),
         ..Default::default()
     });
-    let tool = make_subagent_tool(Vec::new()).with_parent_session(parent.clone());
+    let tool = super::make_subagent_tool(Vec::new()).with_parent_session(parent.clone());
     let child = spawn_completed_child(&tool, &cwd, "child").await;
     let target = Session::new(
         Arc::from(cwd.as_str()),

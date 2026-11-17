@@ -1,4 +1,8 @@
-use super::*;
+use super::AcpEventData;
+use super::AcpEventWithEpoch;
+use super::SubmitRequest;
+use super::mpsc;
+use super::serial;
 
 /// C1 回归测试：drain_input_buffer 清空 INPUT_BUFFER 队列。
 ///
@@ -23,7 +27,7 @@ async fn test_drain_input_buffer_preserves_order() {
         buf.push_back(BufferedInput::text("third"));
     }
 
-    drain_input_buffer();
+    super::drain_input_buffer();
 
     // 验证 buffer 已被 drain 干净——这是 drain_input_buffer 的核心效应
     assert!(
@@ -43,7 +47,7 @@ async fn test_drain_input_buffer_empty_is_noop() {
     });
 
     INPUT_BUFFER.state().write().clear();
-    drain_input_buffer();
+    super::drain_input_buffer();
 
     assert!(
         INPUT_BUFFER.state().read().is_empty(),
@@ -63,7 +67,7 @@ fn test_drain_input_buffer_no_submit_tx_safe() {
         .state()
         .write()
         .push_back(BufferedInput::text("x"));
-    drain_input_buffer();
+    super::drain_input_buffer();
     // SUBMIT_TX 已被前面测试 set 过，所以 drain 成功 → buffer 被清空
     // 即使 SUBMIT_TX 未 set，drain 早退，buffer 仍有 "x"——两种情况都不算 panic
 }
@@ -81,7 +85,7 @@ fn test_drain_input_buffer_sends_local_user_bubble_once() {
     let (tx, rx) = mpsc::unbounded_channel::<AcpEventWithEpoch>();
     crate::kit::atoms::install_local_event_tx(tx);
     let local_rx = Some(rx);
-    let mut submit_rx = ensure_submit_tx_observable();
+    let mut submit_rx = super::ensure_submit_tx_observable();
 
     // 入队两条
     {
@@ -91,7 +95,7 @@ fn test_drain_input_buffer_sends_local_user_bubble_once() {
         buf.push_back(BufferedInput::text("second"));
     }
 
-    drain_input_buffer();
+    super::drain_input_buffer();
 
     assert!(
         INPUT_BUFFER.state().read().is_empty(),
@@ -155,7 +159,7 @@ fn test_bridge_reset_clears_input_buffer() {
     // 模拟 acp_bridge 的 counter 检测分支：
     // push_view_models_for_reset() 前同步清空 INPUT_BUFFER
     INPUT_BUFFER.state().write().clear();
-    push_view_models_for_reset();
+    super::push_view_models_for_reset();
 
     assert!(
         INPUT_BUFFER.state().read().is_empty(),
@@ -173,3 +177,7 @@ fn test_bridge_reset_clears_input_buffer() {
         "bridge reset 后 current_turn 应为空"
     );
 }
+
+use crate::kit::atoms::{
+    BufferedInput, INPUT_BUFFER, SUBMIT_TX, VIEW_MODELS,
+};

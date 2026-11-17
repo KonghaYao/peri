@@ -11,17 +11,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use peri_acp_types::{
-    plugin::McpServerConfig,
-    session_resources::{ActiveSessionSnapshot, BindingState, FrozenSnapshotBytes, FrozenState},
-    thread::{ThreadId, ThreadMeta},
-    workspace::{ResolvedWorkspace, WorkspaceError},
-};
+use peri_acp_types::plugin::McpServerConfig;
+use peri_acp_types::session_resources::ActiveSessionSnapshot;
+use peri_acp_types::session_resources::BindingState;
+use peri_acp_types::session_resources::FrozenSnapshotBytes;
+use peri_acp_types::session_resources::FrozenState;
+use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::ThreadMeta;
+use peri_acp_types::workspace::ResolvedWorkspace;
+use peri_acp_types::workspace::WorkspaceError;
 
-use super::{decode_frozen_snapshot, AcpError, AcpServerConfig};
+use super::AcpError;
+use super::AcpServerConfig;
 use crate::host::prepared::PreparedSessionInputs;
-use crate::host::requests::session_lifecycle::enabled_meta_sections;
-use crate::host::workspace::{resource_error, workspace_error, SessionEnvironment};
+use crate::host::requests::session_lifecycle;
+use crate::host::workspace;
+use crate::host::workspace::SessionEnvironment;
 
 /// legacy 首次接纳的定稿结果：已按接纳后（或 winner）的字节构建的准备输入。
 pub(super) struct LegacyAdoption {
@@ -41,7 +46,7 @@ pub(super) async fn resolve_saved_workspace(
             peri_acp_types::session_resources::BindingRecheck::Recorded,
         )
         .await
-        .map_err(resource_error)
+        .map_err(workspace::resource_error)
 }
 
 /// 读取接纳后的持久 frozen 字节（write-once 后唯一事实源）。
@@ -53,7 +58,7 @@ async fn persisted_frozen_bytes(
     let snapshot = resources
         .load_active_snapshot(&id.to_owned())
         .await
-        .map_err(resource_error)?;
+        .map_err(workspace::resource_error)?;
     match snapshot.frozen {
         FrozenState::Present(bytes) => Ok(bytes.into_string()),
         FrozenState::LegacyAbsent => Err(AcpError::new(
@@ -104,7 +109,7 @@ pub(super) async fn prepare_for_restore(
     let snapshot = resources
         .load_active_snapshot(&id)
         .await
-        .map_err(resource_error)?;
+        .map_err(workspace::resource_error)?;
     let meta = snapshot.meta.clone();
     if matches!(snapshot.binding, BindingState::Bound(_)) {
         return Ok(None);
@@ -129,7 +134,7 @@ pub(super) async fn prepare_for_restore(
         FrozenState::LegacyAbsent => resources
             .relink_unbound_session(&meta.id)
             .await
-            .map_err(resource_error)?,
+            .map_err(workspace::resource_error)?,
     };
     let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
     match snapshot.frozen {
@@ -137,11 +142,12 @@ pub(super) async fn prepare_for_restore(
         // 按 winner 字节重新定格输入（不重建、不覆盖）。未知版本的唯一错误权威是
         // 解码器（`FrozenSnapshotError::UnsupportedVersion`），存储层不表达它。
         FrozenState::Present(bytes) => {
-            decode_frozen_snapshot(bytes.as_str()).map_err(workspace_error)?;
+            crate::session::frozen_snapshot::decode_frozen_snapshot(bytes.as_str())
+                .map_err(workspace::workspace_error)?;
             resources
                 .adopt_legacy_session(&id, &meta.cwd, &workspace, &bytes)
                 .await
-                .map_err(resource_error)?;
+                .map_err(workspace::resource_error)?;
             let persisted = persisted_frozen_bytes(&resources, &id).await?;
             let mut prepared =
                 PreparedSessionInputs::prepare_restore(cfg, &workspace_cwd, &persisted)?;
@@ -185,8 +191,8 @@ pub(super) async fn prepare_for_restore(
             let outcome: Result<LegacyAdoption, AcpError> = async {
                 // 内容准入（与 session/new 的 P4 同源）：覆盖文档 / 技能目录 / 项目指令。
                 let enabled_sections = match environment.as_ref() {
-                    Some(env) => enabled_meta_sections(&env.cfg),
-                    None => enabled_meta_sections(cfg),
+                    Some(env) => session_lifecycle::enabled_meta_sections(&env.cfg),
+                    None => session_lifecycle::enabled_meta_sections(cfg),
                 };
                 let docs = match environment.as_ref() {
                     Some(env) if !enabled_sections.is_empty() => {
@@ -227,7 +233,7 @@ pub(super) async fn prepare_for_restore(
                 resources
                     .adopt_legacy_session(&id, saved_cwd, &workspace, &candidate_bytes)
                     .await
-                    .map_err(resource_error)?;
+                    .map_err(workspace::resource_error)?;
                 let persisted = persisted_frozen_bytes(&resources, &id).await?;
                 if persisted == candidate_bytes.as_str() {
                     let environment = environment.take();
@@ -281,9 +287,11 @@ async fn prepare_child_for_restore(
     let parent = resources
         .load_active_snapshot(&parent_thread_id)
         .await
-        .map_err(resource_error)?;
+        .map_err(workspace::resource_error)?;
     let BindingState::Bound(_) = &parent.binding else {
-        return Err(workspace_error(WorkspaceError::UnverifiedParentBinding));
+        return Err(workspace::workspace_error(
+            WorkspaceError::UnverifiedParentBinding,
+        ));
     };
     let workspace = resources
         .validate_bound_workspace(
@@ -291,7 +299,7 @@ async fn prepare_child_for_restore(
             peri_acp_types::session_resources::BindingRecheck::Recorded,
         )
         .await
-        .map_err(resource_error)?;
+        .map_err(workspace::resource_error)?;
     let parent_frozen = match parent.frozen {
         FrozenState::Present(bytes) => bytes,
         // 父会话有绑定却没有 frozen：没有可继承的冻结输入（绑定与 frozen 一起成立），
@@ -304,14 +312,15 @@ async fn prepare_child_for_restore(
         }
     };
     // 未知版本由解码器回答，存储层不表达它（与根会话同一错误权威）。
-    decode_frozen_snapshot(parent_frozen.as_str()).map_err(workspace_error)?;
+    crate::session::frozen_snapshot::decode_frozen_snapshot(parent_frozen.as_str())
+        .map_err(workspace::workspace_error)?;
     // 子会话自己的 frozen 若已存在就是它的事实源（write-once 只补空列）；缺失时按
     // 父的已持久字节补齐——`save_child` 的同一不变量：child frozen == root 已存字节。
     let id = ThreadId::from(meta.id.clone());
     resources
         .adopt_legacy_session(&id, &meta.cwd, &workspace, &parent_frozen)
         .await
-        .map_err(resource_error)?;
+        .map_err(workspace::resource_error)?;
     let persisted = persisted_frozen_bytes(&resources, &meta.id).await?;
     let workspace_cwd = workspace.cwd.to_string_lossy().into_owned();
     let mut prepared = PreparedSessionInputs::prepare_restore(cfg, &workspace_cwd, &persisted)?;

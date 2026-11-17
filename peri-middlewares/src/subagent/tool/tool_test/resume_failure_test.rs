@@ -1,6 +1,18 @@
-use super::*;
+use super::Arc;
+use super::BaseMessage;
+use super::BaseTool;
+use super::PersistedPayload;
+use super::ReactLLM;
+use super::Reasoning;
+use super::RwLock;
+use super::SessionFixture;
+use super::StreamingContext;
+use super::SubAgentTool;
+use super::ThreadMeta;
 use peri_agent::agent::react::ToolCall;
-use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
+use peri_agent::agent::stages;
+use peri_agent::agent::stages::LoopResult;
+use peri_agent::agent::stages::StageContext;
 use peri_agent::session::{
     FrozenContext, MessageSource, MessageTranscript, QueuedMessage, Session,
 };
@@ -91,7 +103,7 @@ impl ReactLLM for MissingThreadParent {
 /// 历史背景：直接运行 RCRA 不包含宿主的 post-run flush；读取历史须等待 writer barrier。
 #[tokio::test]
 async fn parent_completes_after_real_agent_resume_missing_thread() {
-    let directory = tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
     let fixture = SessionFixture::open_in(directory.path()).await;
     let cwd = fixture.workspace_cwd();
     let parent_id = fixture
@@ -132,7 +144,7 @@ async fn parent_completes_after_real_agent_resume_missing_thread() {
         .build();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        run_react_loop(context, 3),
+        stages::run_react_loop(context, 3),
     )
     .await
     .expect("parent must not stall on missing-thread failure");

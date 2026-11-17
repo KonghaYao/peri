@@ -51,6 +51,7 @@ pub struct LcRegistry {
 }
 
 impl LcRegistry {
+    #[must_use]
     pub fn new(lang: Option<&str>) -> Self {
         let mut bundles = HashMap::new();
         bundles.insert("en".to_string(), Self::create_bundle("en", EN_FTL));
@@ -140,6 +141,7 @@ impl LcRegistry {
         self.bundles.keys().map(|s| s.as_str()).collect()
     }
 
+    #[must_use]
     pub fn current_lang(&self) -> &str {
         self.current_lang.as_str()
     }
@@ -148,6 +150,19 @@ impl LcRegistry {
 impl Default for LcRegistry {
     fn default() -> Self {
         Self::new(None)
+    }
+}
+
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+
+impl Debug for LcRegistry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LcRegistry")
+            .field("current_lang", &self.current_lang)
+            .field("language_count", &self.bundles.len())
+            .finish_non_exhaustive()
     }
 }
 

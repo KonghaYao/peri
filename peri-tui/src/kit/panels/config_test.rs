@@ -1,22 +1,22 @@
 //! Tests for panels_config
 
-#[cfg(test)]
-use super::*;
+use super::PERMISSION_OPTS;
+use super::i18n;
 
 #[test]
 fn test_parse_permission_mode_roundtrip() {
     for opt in PERMISSION_OPTS {
-        let mode = parse_permission_mode(opt);
+        let mode = super::parse_permission_mode(opt);
         assert!(mode.is_some(), "{} 应解析成功", opt);
-        let label = permission_mode_label(mode.unwrap());
+        let label = super::permission_mode_label(mode.expect("parse permission mode roundtrip: the fixture value must satisfy its target representation"));
         assert_eq!(label, *opt, "label 与原始字符串应一致");
     }
 }
 
 #[test]
 fn test_parse_permission_mode_invalid() {
-    assert!(parse_permission_mode("invalid").is_none());
-    assert!(parse_permission_mode("").is_none());
+    assert!(super::parse_permission_mode("invalid").is_none());
+    assert!(super::parse_permission_mode("").is_none());
 }
 
 // ── 面板级用例：共享视口、命中/绘制同源、保存失败与句柄缺失 ──────────────────
@@ -25,8 +25,8 @@ fn test_parse_permission_mode_invalid() {
 // cron 面板测试）；保存入口经 `activate_row_with` 注入，单测绝不写真实配置文件。
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{NOTIFICATION, Notification, PANEL_SCROLL_OWNER, PERI_CONFIG_HANDLE};
-use crate::kit::panels::shared::list::{ListViewport, content_rows};
+
+use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
 use ratatui_kit::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
@@ -52,11 +52,6 @@ const SHORT_AREA: Rect = Rect {
     width: 60,
     height: 10,
 };
-
-/// beta 区块标题行在行模型中的下标：不可激活（点击只改选中项，不写配置）。
-fn beta_section_row() -> usize {
-    super::CONFIG_ROWS.len()
-}
 
 /// 行模型末行（beta flag 行）。
 fn last_row() -> usize {
@@ -196,7 +191,7 @@ impl MountedPanel {
     fn event(&self, event: Event, area: Rect) -> EventResult {
         let rows = super::config_rows();
         let viewport = ListViewport::for_content_rows(
-            content_rows(Some(area), area.height),
+            crate::kit::panels::shared::list::content_rows(Some(area), area.height),
             super::LIST_METRICS,
             rows.len(),
             *self.cursor.read(),
@@ -242,8 +237,8 @@ fn rendered_rows_follow_panel_height() {
 
     let tall = buffer_text(&mount_panel_frames(TEST_AREA, 2, |_, _| {}));
     assert!(
-        tall.contains(&i18n::tr("config-beta-section")),
-        "面板变高后必须渲染 beta 区块，而不是停在矮面板的 4 行：{tall}"
+        tall.contains(&i18n::tr("config-field-scroll-fps")),
+        "面板变高后必须渲染更多基础行，而不是停在矮面板的 4 行：{tall}"
     );
 }
 
@@ -254,7 +249,7 @@ fn rendered_rows_follow_panel_height() {
 #[serial]
 fn click_on_rendered_row_highlights_that_row() {
     let _atoms = PanelAtomsGuard::install();
-    let section = i18n::tr("config-beta-section");
+    let section = i18n::tr("config-field-scroll-fps");
 
     let buf = mount_panel_frames(TEST_AREA, 2, |_, _| {});
     let row = rendered_row_of(&buf, &section);
@@ -265,7 +260,7 @@ fn click_on_rendered_row_highlights_that_row() {
             assert_eq!(result, EventResult::Consumed);
             assert_eq!(
                 *panel.cursor.read(),
-                beta_section_row(),
+                super::ROW_SCROLL_FPS,
                 "点击必须选中被点的那一行"
             );
         }
@@ -283,7 +278,11 @@ fn click_on_rendered_row_highlights_that_row() {
 #[serial]
 fn short_panel_hit_matches_scrolled_window() {
     let _atoms = PanelAtomsGuard::install();
-    let section = i18n::tr("config-beta-section");
+    let (section, expected_row) = if peri_acp_types::beta_flags::BETA_FLAGS.is_empty() {
+        (i18n::tr("config-field-scroll-fps"), super::ROW_SCROLL_FPS)
+    } else {
+        (i18n::tr("config-beta-section"), super::CONFIG_ROWS.len())
+    };
     let last = last_row();
 
     let buf = mount_panel_frames(SHORT_AREA, 2, move |_, panel| {
@@ -291,7 +290,7 @@ fn short_panel_hit_matches_scrolled_window() {
     });
     assert!(
         buffer_text(&buf).contains(&section),
-        "选中末行时窗口必须滚到末尾 4 行（含 beta 区块）：\n{}",
+        "选中末行时窗口必须滚到末尾 4 行（含末行内容）：\n{}",
         buffer_text(&buf)
     );
     let row = rendered_row_of(&buf, &section);
@@ -307,7 +306,7 @@ fn short_panel_hit_matches_scrolled_window() {
             assert_eq!(result, EventResult::Consumed);
             assert_eq!(
                 *panel.cursor.read(),
-                beta_section_row(),
+                expected_row,
                 "点击窗口内的行必须选中同一行"
             );
         }
@@ -508,9 +507,7 @@ fn beta_flag_without_handle_reports_failure() {
     let handle = super::beta_tests::ensure_config_handle();
     let before = handle.read().clone();
 
-    super::toggle_beta_flag_with(None, peri_acp_types::beta_flags::FULL_ASYNC_TOOLS, |_| {
-        Ok(())
-    });
+    super::toggle_beta_flag_with(None, peri_config::betas::HISTORY_WINDOW_V1, |_| Ok(()));
 
     assert_eq!(*handle.read(), before, "句柄缺失不得改动 beta 覆盖");
     assert!(
@@ -544,12 +541,11 @@ fn hooks_stay_stable_across_frames() {
 /// 注册之前没有任何提前 `return`——hook 数量与顺序不可能随渲染路径变化。
 #[test]
 fn config_hooks_precede_event_registration_and_returns() {
-    let src = include_str!("config.rs");
-    let body = src
-        .split("#[path = \"config_test.rs\"]")
-        .next()
-        .expect("组件模块体");
-    let component = body.split("pub fn ConfigPanel").nth(1).expect("组件函数体");
+    let src = include_str!("config/config_panel.rs").replace("\r\n", "\n");
+    let component = src
+        .split_once("pub fn ConfigPanel")
+        .and_then(|(_, rest)| rest.split_once("\n}\n").map(|(body, _)| body))
+        .expect("组件函数体完整");
     let handler = component
         .find("hooks.use_event_handler_with_options")
         .expect("事件注册存在");
@@ -570,3 +566,11 @@ fn config_hooks_precede_event_registration_and_returns() {
         "事件注册之后不得再注册 hook"
     );
 }
+
+use crate::kit::atoms::NOTIFICATION;
+
+use crate::kit::atoms::Notification;
+
+use crate::kit::atoms::PANEL_SCROLL_OWNER;
+
+use crate::kit::atoms::PERI_CONFIG_HANDLE;

@@ -192,6 +192,25 @@ test('startSandbox returns a ready instance with a private workspace and no leak
   });
 });
 
+test('startSandbox uses an explicit workspace instead of deriving it under the sandbox root', async () => {
+  await withRoot(async (root) => {
+    const { deps, provider } = harness();
+    const workspace = join(root, 'project');
+    mkdirSync(workspace, { mode: 0o700 });
+    const instance = await startSandboxWith(startOptions(root, { workspacePath: workspace }), deps);
+    try {
+      assert.equal(instance.workspacePath, workspace);
+      assert.equal(existsSync(join(root, 'sandboxes', id, 'workspace')), false);
+      const policy = JSON.parse(readFileSync(provider.starts[0].policyPath, 'utf8'));
+      assert(policy.filesystem.allowRead.includes(workspace));
+      assert(policy.filesystem.allowWrite.includes(workspace));
+      assert.equal(policy.filesystem.allowRead.includes(join(root, 'sandboxes', id, 'workspace')), false);
+    } finally {
+      await instance.close();
+    }
+  });
+});
+
 test('the same sandbox id conflicts while running, and restarts keep the workspace', async () => {
   await withRoot(async (root) => {
     const { deps } = harness();

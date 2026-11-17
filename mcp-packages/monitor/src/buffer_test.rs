@@ -3,7 +3,12 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::io::BufReader;
 
-use super::*;
+use crate::buffer::CapturedEvent;
+use crate::buffer::EventBuffer;
+use crate::buffer::MAX_EVENT_BYTES;
+use crate::buffer::MAX_READ_BYTES;
+use crate::buffer::MAX_READ_EVENTS;
+use crate::buffer::MIN_TASK_BYTES;
 
 fn captured(text: &str) -> CapturedEvent {
     CapturedEvent {
@@ -176,8 +181,11 @@ fn read_cursor_matches_linear_oracle_across_wrapped_ring() {
     assert_read_matches_linear_oracle(&buffer, Some(u64::MAX));
 
     let near_max_sequences = [u64::MAX - 4, u64::MAX - 3, u64::MAX - 2, u64::MAX - 1];
-    for (event, seq) in buffer.events.iter_mut().zip(near_max_sequences) {
-        event.seq = seq;
+    {
+        let paired_events = buffer.events.iter_mut().zip(near_max_sequences);
+        for (event, seq) in paired_events {
+            event.seq = seq;
+        }
     }
     buffer.next_seq = u64::MAX;
 
@@ -221,7 +229,7 @@ fn event_text_is_capped_and_flagged_as_truncated() {
 #[tokio::test]
 async fn capture_lines_splits_lines_and_marks_partial_tail() {
     let buffer = Arc::new(Mutex::new(EventBuffer::new(10, MIN_TASK_BYTES)));
-    capture_lines(
+    crate::buffer::capture_lines(
         BufReader::new(&b"alpha\nbeta\npartial"[..]),
         "stdout",
         Arc::clone(&buffer),
@@ -244,7 +252,7 @@ async fn capture_lines_splits_lines_and_marks_partial_tail() {
 async fn capture_lines_bounds_a_line_without_newline() {
     let buffer = Arc::new(Mutex::new(EventBuffer::new(10, MIN_TASK_BYTES)));
     let long = vec![b'x'; MAX_EVENT_BYTES + 1024];
-    capture_lines(BufReader::new(&long[..]), "stderr", Arc::clone(&buffer)).await;
+    crate::buffer::capture_lines(BufReader::new(&long[..]), "stderr", Arc::clone(&buffer)).await;
     let page = buffer.lock().read(None, 10, MAX_READ_BYTES);
     assert_eq!(page.events.len(), 1);
     assert_eq!(page.events[0].text.len(), MAX_EVENT_BYTES);
@@ -255,7 +263,7 @@ async fn capture_lines_bounds_a_line_without_newline() {
 #[tokio::test]
 async fn capture_lines_strips_crlf() {
     let buffer = Arc::new(Mutex::new(EventBuffer::new(10, MIN_TASK_BYTES)));
-    capture_lines(
+    crate::buffer::capture_lines(
         BufReader::new(&b"windows\r\n"[..]),
         "stdout",
         Arc::clone(&buffer),
