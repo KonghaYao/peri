@@ -31,7 +31,6 @@ pub mod exit_hint;
 pub mod focus_router;
 pub(crate) mod fold_overrides;
 pub mod genui;
-pub mod history_detail_binding;
 pub mod history_page_consumer;
 pub mod history_paging;
 pub mod history_v2;
