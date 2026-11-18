@@ -4,14 +4,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use peri_acp_types::identity::AttemptId;
 use peri_acp_types::mcp_control::DynamicLoaderBinding;
+use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::plugin::InstallScope;
 use peri_acp_types::plugin::LoadedPlugin;
 use peri_acp_types::plugin::PluginOrigin;
 use peri_acp_types::plugin::PluginScope;
+use peri_acp_types::session::ExecutionBinding;
 use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::MqReceiveStatus;
 use peri_acp_types::session::PluginSelection;
+use peri_acp_types::session::QueuedMessage;
 use peri_acp_types::session::QueuedPayload;
+use peri_acp_types::session::TurnId;
 use peri_acp_types::system_reminder::ReminderAudience;
 use peri_acp_types::system_reminder::ReminderCategory;
 use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
@@ -281,5 +288,59 @@ fn test_guidance_enqueue_failure_is_returned() {
         error.to_string().contains("closed to new enqueues"),
         "必须保留队列关闭原因: {error}"
     );
-    assert!(queue.is_empty_sync(), "失败时不得写入部分指引");
+    assert!(error.enqueued.is_empty(), "本次失败没有已提交前缀");
+    assert!(queue.is_empty_sync(), "失败时不得留下部分指引");
+}
+
+/// guidance 中途失败后，失败 attempt 已提交的 SystemInjected 行必须能清理；
+/// 同一 MQ 中的用户输入行不受影响，用户取消契约也不因此放宽。
+#[test]
+fn test_failed_guidance_cleanup_removes_only_attempt_rows() {
+    let queue = MessageQueue::new();
+    let prompt = futures::executor::block_on(queue.enqueue_sent(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("run the selected plugin"),
+    )))
+    .expect("用户输入必须能进入 MQ")
+    .entry;
+    let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
+    let enqueued =
+        futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
+            .expect("开放队列接受指引");
+    assert!(enqueued.len() > 1, "指引必须分段以覆盖部分提交前缀");
+    let execution = ExecutionBinding {
+        turn_id: TurnId::new(),
+        attempt_id: AttemptId::new(),
+    };
+
+    let outcome = futures::executor::block_on(
+        queue.discard_system_injected_for_attempt(&enqueued, &execution),
+    )
+    .expect("失败 attempt 的 SystemInjected 行必须可清理");
+    assert_eq!(outcome.items.len(), enqueued.len());
+    assert!(
+        outcome
+            .items
+            .iter()
+            .all(|item| item.status == MqReceiveStatus::Suppressed),
+        "清理只删除 MQ 行，不写历史: {:?}",
+        outcome.items
+    );
+
+    let remaining = futures::executor::block_on(queue.snapshot()).expect("MQ snapshot");
+    assert_eq!(remaining.len(), 1, "只应保留用户输入行: {remaining:?}");
+    assert_eq!(remaining[0].id(), prompt.id);
+    assert_eq!(remaining[0].source, MessageSource::UserInput);
+
+    let rejection = futures::executor::block_on(
+        queue.discard_system_injected_for_attempt(std::slice::from_ref(&prompt), &execution),
+    );
+    assert!(rejection.is_err(), "内部清理不得删除用户输入行");
+    assert_eq!(
+        futures::executor::block_on(queue.snapshot())
+            .expect("MQ snapshot")
+            .len(),
+        1,
+        "拒绝清理后用户输入行必须仍在 MQ"
+    );
 }

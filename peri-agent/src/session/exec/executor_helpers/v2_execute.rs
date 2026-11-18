@@ -346,13 +346,34 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // system prompt，也不改写用户正文（Model-only canonical reminder）。
     // 逐段入队失败必须终止本轮：部分指引已落库时不能继续并报告成功。
     if !req.plugin_guidance.is_empty() {
-        if let Err(error) = crate::session::exec::executor::plugin_guidance::push_plugin_guidance(
+        if let Err(failure) = crate::session::exec::executor::plugin_guidance::push_plugin_guidance(
             &v2_out.context.session.queue,
             &req.plugin_guidance,
         )
         .await
         {
+            let crate::session::exec::executor::plugin_guidance::GuidanceEnqueueFailure {
+                error,
+                enqueued,
+            } = failure;
             error!(session_id = %req.session_id, %error, "plugin guidance enqueue failed");
+            // 逐段入队失败时，前面已提交的指引片段必须随本次 attempt 一起清理，
+            // 否则下一次 Receive 会把它当作完整指引消费。这里只允许删除
+            // SystemInjected 行，用户输入仍由取消/重投递契约管理。
+            let execution_binding = v2_out.context.session.turn.execution_binding();
+            if let Err(cleanup_error) = v2_out
+                .context
+                .session
+                .queue
+                .discard_system_injected_for_attempt(&enqueued, &execution_binding)
+                .await
+            {
+                error!(
+                    session_id = %req.session_id,
+                    error = %cleanup_error,
+                    "plugin guidance cleanup failed"
+                );
+            }
             let failure = ExecutionFailure::internal(format!(
                 "Plugin guidance could not be admitted to the thread MQ: {error}"
             ));
@@ -376,7 +397,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 );
             }
             return ExecOutcome {
-                execution_binding: Some(v2_out.context.session.turn.execution_binding()),
+                execution_binding: Some(execution_binding),
                 ok: false,
                 stop_reason: PromptStopReason::EndTurn,
                 failure: Some(failure),

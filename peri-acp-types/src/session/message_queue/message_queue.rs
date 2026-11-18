@@ -311,6 +311,43 @@ impl MessageQueue {
             .await?)
     }
 
+    /// 失败 attempt 的内部清理：只删除本 attempt 写入的 `SystemInjected` 行。
+    ///
+    /// 用户取消仍只走 [`Self::cancel_user_input`]（只接受 `UserInput`）；本入口只用于
+    /// 执行侧在 admission 失败后撤回尚未被 Receive 选中的指引，不写历史。
+    pub async fn discard_system_injected_for_attempt(
+        &self,
+        entries: &[MqEntry],
+        execution: &ExecutionBinding,
+    ) -> Result<MqReceiveOutcome> {
+        if entries.is_empty() {
+            return Ok(MqReceiveOutcome { items: Vec::new() });
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.source != MessageSource::SystemInjected)
+        {
+            anyhow::bail!("attempt cleanup only accepts system-injected MQ rows");
+        }
+        let selection = MqReceiveSelection {
+            items: entries
+                .iter()
+                .cloned()
+                .map(|entry| MqReceiveItem {
+                    entry,
+                    disposition: MqReceiveDisposition::Suppress,
+                })
+                .collect(),
+            purpose: MqReceivePurpose::NonModelSettlement,
+            execution: execution.clone(),
+        };
+        Ok(self
+            .inner
+            .store
+            .mq_receive(&self.inner.thread_id, selection)
+            .await?)
+    }
+
     /// 提交运行期发送选择：只接受仍在 MQ 的用户输入，不写历史（`§5.3`）。
     ///
     /// 只报告当下事实：被接纳的消息仍是待发事实（`Accepted`），直到 Receive 移交成功。

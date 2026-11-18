@@ -12,6 +12,8 @@ use peri_acp_types::plugin::LoadedPlugin;
 use peri_acp_types::session::MessageKind;
 use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::MqEnqueueDisposition;
+use peri_acp_types::session::MqEntry;
 use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::QueuedMessage;
 use peri_acp_types::system_reminder::ReminderAudience;
@@ -140,14 +142,37 @@ fn guidance_for_plugin(name: &str, loaders: &[&str]) -> String {
     )
 }
 
+/// 指引入队失败：携带已提交的前缀，调用方必须按 attempt 清理。
+///
+/// 逐段入队不是原子操作；丢弃 `enqueued` 会让失败 attempt 的片段留在 MQ，
+/// 被下一次 Receive 当成完整指引消费。
+#[derive(Debug)]
+pub(crate) struct GuidanceEnqueueFailure {
+    pub(crate) error: anyhow::Error,
+    pub(crate) enqueued: Vec<MqEntry>,
+}
+
+impl std::fmt::Display for GuidanceEnqueueFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GuidanceEnqueueFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
 /// 以 Model-only canonical reminder 投递指引；不修改 frozen system prompt。
 ///
-/// 逐段入队不是原子操作：任一段失败都把错误返回给调用方，不能把已写入的
-/// 前缀当作完整指引继续执行。
+/// 逐段入队不是原子操作：任一段失败都把错误与已提交前缀返回给调用方，
+/// 不能把已写入的片段当作完整指引继续执行。
 pub(crate) async fn push_plugin_guidance(
     queue: &MessageQueue,
     texts: &[String],
-) -> anyhow::Result<()> {
+) -> Result<Vec<MqEntry>, GuidanceEnqueueFailure> {
+    let mut enqueued = Vec::new();
     for text in texts {
         let mut remaining = text.as_str();
         while !remaining.is_empty() {
@@ -174,11 +199,18 @@ pub(crate) async fn push_plugin_guidance(
                 MessageSource::SystemInjected,
                 reminder,
             );
-            queue.enqueue(message).await?;
+            match queue.enqueue(message).await {
+                Ok(outcome) => {
+                    if outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff {
+                        enqueued.push(outcome.entry);
+                    }
+                }
+                Err(error) => return Err(GuidanceEnqueueFailure { error, enqueued }),
+            }
             remaining = &remaining[end..];
         }
     }
-    Ok(())
+    Ok(enqueued)
 }
 
 #[cfg(test)]
