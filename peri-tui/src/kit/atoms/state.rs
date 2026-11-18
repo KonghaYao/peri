@@ -11,6 +11,9 @@
 //! - REWIND_ACTION_TX: rewind popup → rewind_consumer
 //! - THREAD_LOAD_TX: thread browser → thread_load_consumer
 
+mod download_progress;
+pub use download_progress::*;
+
 use super::mcp;
 
 use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit};
@@ -964,43 +967,6 @@ pub struct Notification {
 pub static NOTIFICATION: AtomStatic<Option<Notification>> = AtomStatic::new(|| None);
 
 // ── Confirm Popup 相关 State ─────────────────────────────────────────────────
-
-// ── Download Progress Popup 相关 ────────────────────────────────────────────
-
-/// 下载进度中的单文件状态
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileDownloadStatus {
-    /// 等待下载
-    Pending,
-    /// 正在下载
-    Downloading,
-    /// 下载完成
-    Done,
-    /// 下载失败（包含错误信息）
-    Failed(String),
-}
-
-/// 下载进度条目
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DownloadItem {
-    pub filename: String,
-    pub status: FileDownloadStatus,
-}
-
-/// 下载进度弹窗的完整状态
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DownloadProgressPayload {
-    pub items: Vec<DownloadItem>,
-    /// 下载是否已完成（true 时 Esc 可关闭弹窗）
-    pub finished: bool,
-    /// 成功下载的文件数量
-    pub success_count: usize,
-    /// 失败的文件数量
-    pub fail_count: usize,
-}
-
-pub static DOWNLOAD_PROGRESS: AtomStatic<DownloadProgressPayload> =
-    AtomStatic::new(DownloadProgressPayload::default);
 
 pub fn init_atoms() {}
 
