@@ -173,6 +173,10 @@ pub fn server_config_hash(config: &McpServerConfig) -> u64 {
     if let Some(system_mcp_timeout) = &config.system_mcp_timeout {
         system_mcp_timeout.hash(&mut hasher);
     }
+    // 仅 true 参与哈希：eager（缺省）配置的哈希保持与旧版本一致。
+    if config.dynamic {
+        true.hash(&mut hasher);
+    }
     hasher.finish()
 }
 

@@ -231,6 +231,7 @@ fn builtin_entry(instance: &BuiltinMcpInstance) -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
+        dynamic: false,
         // 必须为 None：显式版本会跳过 Auto 的 `server/discover` 探测。
         subscriptions: None,
         system_mcp: Some(true),
