@@ -51,6 +51,34 @@ fn test_user_input_queue_cap_is_opt_in_and_echoed() {
         "内嵌客户端声明消费能力"
     );
 }
+
+/// 旧 Host 的 enqueue 拒绝未知字段：子能力必须独立协商并原样回显。
+#[test]
+fn test_user_input_queue_plugin_selections_is_separately_negotiated() {
+    let legacy = json!({"peri.userInputQueue": true});
+    let caps = PeriCaps::from_client_meta(legacy.as_object().unwrap());
+    assert!(
+        !caps.user_input_queue_plugin_selections,
+        "仅声明队列不能让客户端发送 pluginSelections"
+    );
+    assert_eq!(
+        caps.to_agent_meta()["peri.userInputQueue.pluginSelections"],
+        false,
+        "未声明时回显 false，客户端 fail-closed"
+    );
+
+    let enabled = json!({
+        "peri.userInputQueue": true,
+        "peri.userInputQueue.pluginSelections": true,
+    });
+    let caps = PeriCaps::from_client_meta(enabled.as_object().unwrap());
+    assert!(caps.user_input_queue_plugin_selections);
+    assert_eq!(
+        caps.to_agent_meta()["peri.userInputQueue.pluginSelections"],
+        true
+    );
+    assert!(PeriCaps::all_enabled().user_input_queue_plugin_selections);
+}
 use crate::command::command_route::UiCommandSpec;
 use serde_json::json;
 

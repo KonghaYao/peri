@@ -61,6 +61,12 @@ pub struct PeriCaps {
     /// 用户待发送队列与逐条发送控制，默认不协商。
     #[serde(default)]
     pub user_input_queue: bool,
+    /// 入队请求可携带 `pluginSelections`（`peri.userInputQueue.pluginSelections`）。
+    ///
+    /// 旧 Host 的 `EnqueueUserInputRequest` 拒绝未知字段，因此该能力必须独立协商：
+    /// 客户端只在服务端明确回显 true 时发送选择，否则保留草稿与选择并提示不可用。
+    #[serde(default)]
+    pub user_input_queue_plugin_selections: bool,
     /// Versioned project/workspace queries and immutable session execution context.
     #[serde(default)]
     pub session_workspace_v1: bool,
@@ -119,6 +125,10 @@ impl PeriCaps {
             rewind: meta_bool(meta, "peri.rewind"),
             system_reminder: meta_bool(meta, "peri.systemReminder"),
             user_input_queue: meta_bool(meta, "peri.userInputQueue"),
+            user_input_queue_plugin_selections: meta_bool(
+                meta,
+                "peri.userInputQueue.pluginSelections",
+            ),
             session_workspace_v1: meta_bool(meta, "peri.sessionWorkspaceV1"),
             history_pagination: meta_bool(meta, "peri.historyPagination"),
             history_window_v1: meta_bool(meta, "peri.historyWindowV1"),
@@ -188,6 +198,10 @@ impl PeriCaps {
             Value::Bool(self.user_input_queue),
         );
         m.insert(
+            "peri.userInputQueue.pluginSelections".into(),
+            Value::Bool(self.user_input_queue_plugin_selections),
+        );
+        m.insert(
             "peri.sessionWorkspaceV1".into(),
             Value::Bool(self.session_workspace_v1),
         );
@@ -230,6 +244,7 @@ impl PeriCaps {
             rewind: true,
             system_reminder: true,
             user_input_queue: true,
+            user_input_queue_plugin_selections: true,
             session_workspace_v1: true,
             history_pagination: true,
             history_window_v1: true,

@@ -485,7 +485,7 @@ fn toggle_pending_plugin(
     selected: usize,
     event_scope: &crate::application::operations::OperationScope,
 ) {
-    if !crate::kit::steer_state::is_enabled() {
+    if !crate::kit::steer_state::supports_plugin_selections() {
         notify(crate::i18n::tr("panel-plugin-selection-unavailable"));
         return;
     }

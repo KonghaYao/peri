@@ -17,7 +17,12 @@ fn plugin(name: &str, marketplace: &str) -> PluginSummary {
 #[serial_test::serial]
 fn test_toggle_pending_plugin_adds_then_removes_selected_plugin() {
     crate::kit::atoms::init_atoms();
-    crate::kit::steer_state::STEERS.state().write().enabled = true;
+    {
+        let steers_atom = crate::kit::steer_state::STEERS.state();
+        let mut steers = steers_atom.write();
+        steers.enabled = true;
+        steers.plugin_selections = true;
+    }
     PENDING_PLUGIN_SELECTIONS.set(Vec::new());
     PLUGIN_LIST.set(vec![plugin("alpha", ""), plugin("beta", "market")]);
     let scope = OperationScope::new("session", 0);

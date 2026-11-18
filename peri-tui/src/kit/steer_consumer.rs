@@ -326,6 +326,18 @@ async fn admit(
         // 已结算命令不得再发出，也不能当作成功。
         return Ok(AdmitOutcome::AlreadySettled);
     }
+    if let SteerCommandKind::Enqueue(input) = &command.kind
+        && !input.plugin_selections.is_empty()
+        && !client.supports_plugin_selections()
+    {
+        // 发送前拒绝而不是先发后失败：旧 Host 的 deny_unknown_fields 会拒绝整个
+        // 入队；reject 路径把完整原稿与选择恢复为草稿并给出提示。
+        return Err(AcpError::new(
+            -32602,
+            "server does not support plugin selections in queued input",
+        )
+        .into());
+    }
     let receipt = match &command.kind {
         SteerCommandKind::Refresh => return Ok(AdmitOutcome::Submitted),
         SteerCommandKind::Enqueue(input) => {

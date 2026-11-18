@@ -116,6 +116,9 @@ impl AcpTuiClient {
         caps.history_window_v1 =
             !history_v2_requested && crate::kit::atoms::HISTORY_WINDOW_V1.get();
         caps.ui_commands = specs.to_vec();
+        // 入队契约的独立子能力：旧 Host 不认识该 key 也不会回显，客户端据此保留
+        // 草稿与选择，不会先发送再被 deny_unknown_fields 拒绝。
+        caps.user_input_queue_plugin_selections = true;
         self.mcp_control
             .store(false, std::sync::atomic::Ordering::Release);
         let mut meta = caps.to_agent_meta();
@@ -157,6 +160,17 @@ impl AcpTuiClient {
             .unwrap_or(false);
         self.user_input_queue
             .store(supported, std::sync::atomic::Ordering::Release);
+        // 旧 Host 的 enqueue 拒绝未知字段：只有服务端明确回显子能力才允许发送
+        // pluginSelections；缺失/非布尔一律 fail-closed。
+        let plugin_selections_supported = supported
+            && result
+                .pointer("/agentCapabilities/_meta/peri.userInputQueue.pluginSelections")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        self.user_input_queue_plugin_selections.store(
+            plugin_selections_supported,
+            std::sync::atomic::Ordering::Release,
+        );
         // fail-closed：只有服务端在 initialize 响应中明确回显 true 才启用。
         // 客户端请求值不是服务端能力事实，缺失/非布尔一律按不支持处理。
         let history_window = result
@@ -202,7 +216,10 @@ impl AcpTuiClient {
             crate::kit::history_v2::reset_state();
         }
         if self.projection_mode == super::ClientProjectionMode::Interactive {
-            crate::kit::steer_state::STEERS.state().write().enabled = supported;
+            let steers_atom = crate::kit::steer_state::STEERS.state();
+            let mut steers = steers_atom.write();
+            steers.enabled = supported;
+            steers.plugin_selections = plugin_selections_supported;
         }
         Ok(())
     }

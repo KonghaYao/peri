@@ -209,6 +209,8 @@ struct RecoveredInput {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SteerState {
     pub(crate) enabled: bool,
+    /// 服务端确认入队请求可携带 `pluginSelections`；旧 Host 为 false。
+    pub(crate) plugin_selections: bool,
     sessions: HashMap<String, SessionSteers>,
 }
 
@@ -740,6 +742,14 @@ impl SteerState {
 #[must_use]
 pub(crate) fn is_enabled() -> bool {
     STEERS.state().read().enabled
+}
+
+/// 服务端是否确认 `EnqueueUserInputRequest.pluginSelections` 可用。
+#[must_use]
+pub(crate) fn supports_plugin_selections() -> bool {
+    let atom = STEERS.state();
+    let state = atom.read();
+    state.enabled && state.plugin_selections
 }
 
 pub(crate) fn session_boundary(session_id: &str, epoch: u64) {
