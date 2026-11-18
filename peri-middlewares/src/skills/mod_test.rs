@@ -431,18 +431,30 @@ fn resumes_released_skills_bytes_and_preserves_the_frozen_operation_ceiling() {
 fn resumes_crlf_frozen_skills_sections_produced_on_windows() {
     use peri_acp_types::skills::SkillToolAccess::{self, DiscoverOnly, Full};
 
+    // Windows checkouts may already deliver CRLF, so normalize before converting:
+    // converting an existing `\r\n` again would yield `\r\r\n` and break matching.
+    fn crlf(text: &str) -> String {
+        let converted = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        assert!(
+            !converted.contains("\r\r\n"),
+            "CRLF conversion double-encoded an existing carriage return"
+        );
+        converted
+    }
+
     // Windows checkouts/builds may store frozen sections with CRLF line endings;
     // recognition must not depend on the line endings of the producing platform.
-    let old = include_str!("fixtures/released_25c183e_section.txt").replace('\n', "\r\n");
-    let identity = format!("frozen persona\r\n\r\n{old}\r\n\r\nfrozen language");
+    let old = crlf(include_str!("fixtures/released_25c183e_section.txt"));
+    // Multibyte context makes byte offsets diverge from normalized indices.
+    let identity = format!("冻结人格\r\n\r\n{old}\r\n\r\n冻结语言");
     let (projected, access) =
         SkillsMiddleware::project_resumed_identity(&identity, None, None, Full, None).unwrap();
     assert_eq!(access, SkillToolAccess::None);
-    assert_eq!(projected, "frozen persona\r\n\r\nfrozen language");
+    assert_eq!(projected, "冻结人格\r\n\r\n冻结语言");
 
     let sections = SkillsMiddleware::sections_for_tools(DiscoverOnly);
-    let body = sections[0].content.as_str().replace('\n', "\r\n");
-    let discover = format!("frozen persona\r\n\r\n{body}\r\n\r\nfrozen language");
+    let body = crlf(sections[0].content.as_str());
+    let discover = format!("冻结人格\r\n\r\n{body}\r\n\r\n冻结语言");
     let (unchanged, access) =
         SkillsMiddleware::project_resumed_identity(&discover, Some(DiscoverOnly), None, Full, None)
             .unwrap();
