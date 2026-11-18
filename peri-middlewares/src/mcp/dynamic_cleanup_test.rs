@@ -511,16 +511,26 @@ async fn removal_waits_for_an_admitted_commit_and_cleans_its_publication() {
         tokio::task::yield_now().await;
     }
 
+    // 有界确认卸载任务已运行到共享准入边界：它随后只能阻塞在提交持有的准入锁上。
+    // 只靠「超时内未完成」不能证明卸载已被调度到准入点。
+    let admission_hits_before = pool.removal_admission_hits.load(Ordering::SeqCst);
     let remove_pool = pool.clone();
-    let (removed_tx, removed_rx) = tokio::sync::oneshot::channel();
     let remove = tokio::spawn(async move {
         remove_pool.remove_server("lazy").await;
-        let _ = removed_tx.send(());
     });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pool.removal_admission_hits.load(Ordering::SeqCst) == admission_hits_before {
+        assert!(
+            Instant::now() < deadline,
+            "卸载未在超时内到达准入边界（remove_server 未被调度到共享准入）"
+        );
+        tokio::task::yield_now().await;
+    }
     // 修复后移除只能阻塞在准入锁上；旧实现会在提交恢复前完成卸载。
-    let removed_before_commit = tokio::time::timeout(Duration::from_secs(2), removed_rx)
-        .await
-        .is_ok();
+    assert!(
+        !remove.is_finished(),
+        "移除不得先于已准入的提交完成（两者未共用准入锁）"
+    );
 
     let _ = release_tx.send(());
     publication_pause.await.unwrap();
@@ -528,10 +538,6 @@ async fn removal_waits_for_an_admitted_commit_and_cleans_its_publication() {
     remove.await.unwrap();
 
     assert!(committed, "已过准入的提交必须完成发布");
-    assert!(
-        !removed_before_commit,
-        "移除不得先于已准入的提交完成（两者未共用准入锁）"
-    );
     assert!(
         pool.client("lazy").is_none(),
         "已卸载 server 不得残留可调用句柄"

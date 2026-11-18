@@ -177,6 +177,8 @@ impl McpClientPool {
     pub async fn remove_server(self: &Arc<Self>, server_name: &str) {
         // 准入锁下完成「不可再提交」与条目取走：已通过准入的提交要么先于此完成、
         // 由这里收口，要么在此之后因 stopped/配置版本失效被拒绝。不可把 await 放进锁内。
+        #[cfg(test)]
+        self.removal_admission_hits.fetch_add(1, Ordering::SeqCst);
         let (cancelled_attempt, service) = {
             let _admission = self.lifecycle_registration.lock();
             self.server_slot(server_name)
