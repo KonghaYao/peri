@@ -485,15 +485,15 @@ fn toggle_pending_plugin(
     selected: usize,
     event_scope: &crate::application::operations::OperationScope,
 ) {
-    if !crate::kit::steer_state::supports_plugin_selections() {
-        notify(crate::i18n::tr("panel-plugin-selection-unavailable"));
-        return;
-    }
     let plugins = PLUGIN_LIST.state().read().clone();
     let Some(plugin) = plugins.get(selected) else {
+        if !crate::kit::steer_state::supports_plugin_selections() {
+            notify(crate::i18n::tr("panel-plugin-selection-unavailable"));
+        }
         return;
     };
     let plugin_id = super::InstalledIdentity::new(plugin, event_scope.clone()).plugin_id();
+    let supported = crate::kit::steer_state::supports_plugin_selections();
     let added = {
         let atom = crate::kit::atoms::PENDING_PLUGIN_SELECTIONS.state();
         let mut pending = atom.write();
@@ -501,8 +501,14 @@ fn toggle_pending_plugin(
             .iter()
             .position(|selection| selection.plugin_id == plugin_id)
         {
+            // 移除不受能力门限制：热降级后仍必须能清空已登记的选择，
+            // 否则提交会被 `commit_input` 永久阻断。
             pending.remove(index);
             false
+        } else if !supported {
+            drop(pending);
+            notify(crate::i18n::tr("panel-plugin-selection-unavailable"));
+            return;
         } else {
             pending.push(peri_acp_types::session::PluginSelection::new(
                 plugin_id.clone(),
