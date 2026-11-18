@@ -629,10 +629,11 @@ impl TaskManager {
             agent_name: "mcp".into(),
             prompt_summary: "unobservable task owner".into(),
             success: false,
-            output: "The task owner stayed unobservable for the whole bounded retry window and \
-                     the task was abandoned as unresolved. Its remote side effects are unknown; \
-                     check the owner directly before assuming it stopped."
-                .into(),
+            output: format!(
+                "The task owner became unreachable: {reason}. The task was abandoned as \
+                 unresolved. Its remote side effects are unknown; check the owner directly \
+                 before assuming it stopped."
+            ),
             tool_calls_count: 0,
             duration_ms: 0,
             timed_out: true,

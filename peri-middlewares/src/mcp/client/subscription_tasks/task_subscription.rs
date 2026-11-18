@@ -3,6 +3,7 @@ use super::{
     Instant, McpClientPool, MetaObject, MonitorAlertAction, MonitorAlertState, Peer, RoleClient,
     TaskManager, TaskPayload, TaskRegistrationTicket,
 };
+use crate::mcp::client::monitor_identity;
 
 /// One `tasks/get` observation: the protocol task plus its result metadata.
 ///
@@ -172,7 +173,34 @@ impl McpClientPool {
                     }
                     Err(error) => {
                         manager.mark_external_lost(&task_id);
-                        if lost_owner_retry_due(&mut lost_owner_attempts) {
+                        let transport_closed = peer.is_transport_closed();
+                        if monitor_identity::monitor_owner_lost(
+                            pool.is_monitor_server(&server),
+                            transport_closed,
+                            &error,
+                        ) {
+                            // The in-process monitor keeps tasks and transport in
+                            // one state: a closed transport or an unknown task
+                            // can never become observable again.
+                            let reason = if transport_closed {
+                                "monitor transport closed".to_owned()
+                            } else {
+                                format!("monitor task is unknown to its owner: {error}")
+                            };
+                            match manager.abandon_external(&ticket, &reason).await {
+                                Ok(true) => break,
+                                Ok(false) => {
+                                    tracing::warn!(server = %server, session_id = %session_id,
+                                        task_id = %raw_task_id, reason,
+                                        "MCP task abandon not yet committed");
+                                }
+                                Err(abandon_error) => {
+                                    tracing::warn!(server = %server, session_id = %session_id,
+                                        task_id = %raw_task_id, reason, %abandon_error,
+                                        "MCP task abandon pending reconciliation");
+                                }
+                            }
+                        } else if lost_owner_retry_due(&mut lost_owner_attempts) {
                             match manager
                                 .abandon_external(
                                     &ticket,
@@ -201,10 +229,16 @@ impl McpClientPool {
                 drop(pool);
                 peri_time::sleep(Duration::from_secs(2)).await;
                 if let Some(pool) = weak_pool.upgrade() {
+                    // Task servers are named by capability (`monitor`); the v5
+                    // single-exit connection is keyed by `peri`. Resolve the
+                    // actual connection so a reconnect swaps the peer.
+                    let connection = pool
+                        .capability_server_name(&server)
+                        .unwrap_or_else(|| server.clone());
                     if let Some(next) = pool
                         .clients
                         .read()
-                        .get(&server)
+                        .get(&connection)
                         .and_then(|client| client.peer.clone())
                     {
                         peer = next;

@@ -194,7 +194,10 @@ Keep the emitted records small; use `label` so `monitor_list` stays readable.
 - `monitor_stop` is idempotent. It reports `cleanup.processTerminated`
   separately from the `cancelled` status; a slow child may still be cleaning up.
 - Task state is in memory only. After a process restart or instance replacement,
-  old task ids are unknown; there is no recovery or replay.
+  old task ids are unknown; there is no recovery or replay. If the host process
+  survives but the monitor instance or its connection disappears, the initiating
+  session receives one `unresolved` terminal reminder and the task is settled;
+  if the host process exits, no reminder can be delivered.
 - Tasks belong to the initiating session. Another session cannot read or stop
   them.
 
