@@ -542,6 +542,25 @@ async fn test_concurrent_enqueue_with_different_plugin_selections_conflicts() {
     );
 }
 
+/// [回归] `AlreadyHandedOff` 的 entry 来自当前请求，选择比较必须回读邮箱在
+/// MQ await 期间写入的记录/终态身份指纹。
+#[test]
+fn test_already_handed_off_uses_stored_identity_fingerprint() {
+    assert!(
+        super::commands::ensure_stored_fingerprint(None, 7).is_ok(),
+        "没有权威身份时不能凭空判定冲突"
+    );
+    assert!(
+        super::commands::ensure_stored_fingerprint(Some(7), 7).is_ok(),
+        "相同指纹的并发重试保持幂等"
+    );
+    assert_eq!(
+        super::commands::ensure_stored_fingerprint(Some(8), 7).unwrap_err(),
+        UserInputQueueError::IdentityConflict,
+        "已有输入的选择/正文与请求不同时必须拒绝"
+    );
+}
+
 /// [回归] 取消提交后、take_back 恢复前若对账剪掉 Queued 记录，撤回回执仍须
 /// 从被删除的 MQ 行恢复插件选择，不能静默变成空选择。
 #[tokio::test]

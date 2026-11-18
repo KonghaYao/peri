@@ -44,6 +44,20 @@ pub(super) fn existing_selection_match(
     Ok(())
 }
 
+/// 用邮箱内已持久化的身份指纹复核等待期间出现的并发事实。
+///
+/// `AlreadyHandedOff` 的 `entry` 是本次请求的投影，无法据此比较选择；第一请求的
+/// 记录或终态身份可能在 MQ await 期间写入邮箱，指纹包含选择与正文，可作为权威来源。
+pub(super) fn ensure_stored_fingerprint(
+    stored: Option<u64>,
+    requested: u64,
+) -> Result<(), UserInputQueueError> {
+    if stored.is_some_and(|stored| stored != requested) {
+        return Err(UserInputQueueError::IdentityConflict);
+    }
+    Ok(())
+}
+
 /// 撤回回执的插件选择来源。
 ///
 /// 被删除的 MQ 行与名称同批写入，是并发对账下仍可读取的事实；运行期记录可能
@@ -189,6 +203,19 @@ impl UserInputMailbox {
                 &outcome.entry,
                 &request.plugin_selections,
             )?;
+            // AlreadyHandedOff 的 entry 是请求投影，选择比较必须回读邮箱权威身份。
+            let stored_fingerprint = state
+                .records
+                .iter()
+                .find(|record| record.input_id == request.input_id)
+                .map(|record| record.fingerprint)
+                .or_else(|| {
+                    state
+                        .terminal_identities
+                        .get(&input_uuid)
+                        .map(|identity| identity.fingerprint)
+                });
+            ensure_stored_fingerprint(stored_fingerprint, input_fingerprint)?;
             // 撤回与 enqueue 的 MQ await 可以交错：take_back 在等待期间清理了
             // Queued 记录并写入 `Withdrawn` 身份，而本调用仍持有已提交的 MQ 行。
             // 终态身份优先，既不复活待发记录，也要取消本次插入的行。
