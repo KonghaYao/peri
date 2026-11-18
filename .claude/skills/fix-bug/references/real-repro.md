@@ -5,7 +5,7 @@
 ## 1. 从 worktree 构建
 
 ```bash
-cd .worktrees/<slug>
+cd "$WT"   # 第 1 步选定的 worktree 绝对路径；已在其中时直接用当前目录
 ./scripts/cargo-rmcp-patched.sh build -p peri --locked
 ```
 
@@ -43,7 +43,7 @@ SGR 鼠标序列格式（坐标是 1-based）：
 1. 点击按钮视觉列 `C`，记录是否命中；再点 `C ± left_pad`，确认偏移方向与数值。
 2. 在可见文本列 `A..B` 拖动，读取剪贴板或应用反馈，核对复制内容是否与光标范围一致。
 3. 缩窄到 80 列重复一次，确认行为不变。
-4. 修复后重新构建并重启再复验：`./scripts/cargo-rmcp-patched.sh build -p peri --locked`，退出旧进程后按第 2 步重新启动 TUI。复用修复前的进程仍在运行旧二进制，结果无效。然后用同一组坐标重复测试，记录新的命中列与复制内容。
+4. 修复后重新构建并重启再复验：`./scripts/cargo-rmcp-patched.sh build -p peri --locked`，退出旧进程并执行 `tmux kill-session -t fixrepro`，再按第 2 步分别以宽终端和 80 列新建会话启动 TUI。复用修复前的进程或旧会话会保留旧二进制/旧尺寸，结果无效。然后用同一组坐标重复测试，记录新的命中列与复制内容。
 
 ## 5. 记录模板
 
