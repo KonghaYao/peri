@@ -44,6 +44,21 @@ pub(super) fn existing_selection_match(
     Ok(())
 }
 
+/// 撤回回执的插件选择来源。
+///
+/// 被删除的 MQ 行与名称同批写入，是并发对账下仍可读取的事实；运行期记录可能
+/// 已在取消提交后、取回恢复前被剪除。旧行没有选择时才回退记录缓存。
+pub(super) fn taken_back_selections(
+    entry: &MqEntry,
+    record_selections: Option<Vec<PluginSelection>>,
+) -> Vec<PluginSelection> {
+    if entry.plugin_selections.is_empty() {
+        record_selections.unwrap_or_default()
+    } else {
+        entry.plugin_selections.clone()
+    }
+}
+
 impl UserInputMailbox {
     pub async fn enqueue(
         &self,
@@ -481,14 +496,15 @@ impl UserInputMailbox {
             let mut taken_back = None;
             match cancel_outcome {
                 MqCancelOutcome::Cancelled(entry) => {
-                    // 撤回回执必须带上原输入的选择：选择随 input_id 走，
-                    // 只从 MQ 行重建会丢掉只在 Host 运行期记录里的字段。
-                    let selections = state
+                    // 撤回回执必须带上原输入的选择：选择随 input_id 走。
+                    // 对账可能在取消提交后、这里恢复前剪掉运行期记录，因此以
+                    // 被删除的 MQ 行为准；旧行无选择时才回退记录缓存。
+                    let record_selections = state
                         .records
                         .iter()
                         .find(|record| record.input_id == request.input_id)
-                        .map(|record| record.plugin_selections.clone())
-                        .unwrap_or_default();
+                        .map(|record| record.plugin_selections.clone());
+                    let selections = taken_back_selections(&entry, record_selections);
                     if let Some(record) = state
                         .records
                         .iter_mut()

@@ -542,6 +542,55 @@ async fn test_concurrent_enqueue_with_different_plugin_selections_conflicts() {
     );
 }
 
+/// [回归] 取消提交后、take_back 恢复前若对账剪掉 Queued 记录，撤回回执仍须
+/// 从被删除的 MQ 行恢复插件选择，不能静默变成空选择。
+#[tokio::test]
+async fn test_taken_back_selections_survive_pruned_record() {
+    let (mailbox, inbox) = make_mailbox();
+    let mut input = make_input(&mailbox, "撤回选择");
+    input.plugin_selections = vec![PluginSelection::new("alpha")];
+    mailbox
+        .enqueue_sync(&input)
+        .expect("enqueue must be admitted");
+    mailbox.state.lock().records.clear();
+
+    let id = MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap());
+    let MqCancelOutcome::Cancelled(entry) = inbox
+        .queue_for_test()
+        .cancel_user_input(&id)
+        .await
+        .expect("cancelled MQ row")
+    else {
+        panic!("queued input must be cancelled");
+    };
+    assert_eq!(
+        super::commands::taken_back_selections(&entry, None),
+        vec![PluginSelection::new("alpha")],
+        "记录被剪除时选择必须来自 cancelled MQ 行"
+    );
+
+    // 旧版本行可能没有持久化选择：此时保留运行期记录的回退语义。
+    let mut legacy = make_input(&mailbox, "旧行撤回");
+    legacy.plugin_selections = Vec::new();
+    mailbox
+        .enqueue_sync(&legacy)
+        .expect("legacy enqueue must be admitted");
+    let id = MessageId::from(uuid::Uuid::parse_str(&legacy.input_id).unwrap());
+    let MqCancelOutcome::Cancelled(entry) = inbox
+        .queue_for_test()
+        .cancel_user_input(&id)
+        .await
+        .expect("cancelled legacy MQ row")
+    else {
+        panic!("legacy queued input must be cancelled");
+    };
+    assert_eq!(
+        super::commands::taken_back_selections(&entry, Some(vec![PluginSelection::new("beta")]),),
+        vec![PluginSelection::new("beta")],
+        "MQ 行没有选择时回退运行期记录"
+    );
+}
+
 /// [回归] 对账查询进行期间入队：旧查询结果不得清理新记录，快照 revision 必须覆盖其内容。
 #[tokio::test]
 async fn refresh_keeps_records_enqueued_while_its_mq_query_is_in_flight() {
