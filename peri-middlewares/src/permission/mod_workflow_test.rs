@@ -324,35 +324,82 @@ async fn workflow_non_start_tools_do_not_enter_approval() {
     );
 }
 
-/// deferred 工具经 `ExecuteExtraTool` 的兼容路径同样按目标名判定。
+/// deferred 工具经 ToolInvoke（及旧名 alias）的兼容路径同样按目标名判定。
 #[tokio::test]
-async fn workflow_start_via_execute_extra_tool_requires_approval() {
+async fn workflow_start_via_tool_invoke_requires_approval() {
     let broker = RecordingBroker::new(false);
     let mw = mw_with_mode_and_broker(PermissionMode::Default, broker.clone(), None);
-    let mut state = super::approval_state();
     let target = workflow_model_name("Workflow");
-    let tc = ToolCall {
-        id: "workflow-extra".to_string(),
-        name: "ExecuteExtraTool".to_string(),
-        input: serde_json::json!({
-            "tool_name": target,
-            "params": {"script": "..."},
-        }),
-    };
 
-    let result = mw.before_tool(&mut state, &tc).await;
+    for (wrapper_name, input) in [
+        (
+            crate::tool_search::TOOL_INVOKE_NAME,
+            serde_json::json!({"name": target, "arguments": {"script": "..."}}),
+        ),
+        (
+            crate::tool_search::EXECUTE_EXTRA_TOOL_NAME,
+            serde_json::json!({"tool_name": target, "params": {"script": "..."}}),
+        ),
+    ] {
+        let mut state = super::approval_state();
+        let tc = ToolCall {
+            id: "workflow-extra".to_string(),
+            name: wrapper_name.to_string(),
+            input,
+        };
 
-    assert!(matches!(
-        result,
-        Err(AgentError::ToolRejected {
-            cause: ToolRejectionCause::UserRejected,
-            ..
-        })
-    ));
+        let result = mw.before_tool(&mut state, &tc).await;
+
+        assert!(matches!(
+            result,
+            Err(AgentError::ToolRejected {
+                cause: ToolRejectionCause::UserRejected,
+                ..
+            })
+        ));
+    }
+
     assert_eq!(
         broker.requested_tools(),
-        vec!["ExecuteExtraTool".to_string()],
+        vec![
+            crate::tool_search::TOOL_INVOKE_NAME.to_string(),
+            crate::tool_search::EXECUTE_EXTRA_TOOL_NAME.to_string(),
+        ],
         "包装调用应进入审批（目标名 {target} 驱动判定）"
+    );
+}
+
+/// 畸形代理调用（字段冲突/缺参）必须 fail-closed 进入审批，不能按目标名静默放行。
+#[tokio::test]
+async fn malformed_tool_invoke_requires_approval_fail_closed() {
+    let broker = RecordingBroker::new(false);
+    let mw = mw_with_mode_and_broker(PermissionMode::Default, broker.clone(), None);
+
+    for input in [
+        serde_json::json!({"name": "Read", "tool_name": "Write", "arguments": {}}),
+        serde_json::json!({"name": "Read"}),
+        serde_json::json!({"name": "", "arguments": {}}),
+    ] {
+        let mut state = super::approval_state();
+        let tc = ToolCall {
+            id: "malformed-proxy".to_string(),
+            name: crate::tool_search::TOOL_INVOKE_NAME.to_string(),
+            input,
+        };
+        let result = mw.before_tool(&mut state, &tc).await;
+        assert!(matches!(
+            result,
+            Err(AgentError::ToolRejected {
+                cause: ToolRejectionCause::UserRejected,
+                ..
+            })
+        ));
+    }
+
+    assert_eq!(
+        broker.requested_tools().len(),
+        3,
+        "畸形代理调用必须逐条进入审批"
     );
 }
 

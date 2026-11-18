@@ -352,7 +352,7 @@ fn test_capability_omitted_tools_with_disallowed_write_edit_is_writes() {
 /// omitted tools + 显式 disallow 全部已知核心写能力工具（含 Bash / folder_operations
 /// / cron_register）→ 仍标 writes。
 ///
-/// 继承面还包含无法静态证明只读的 `mcp__*` 工具与 `ExecuteExtraTool` deferred
+/// 继承面还包含无法静态证明只读的 `mcp__*` 工具与 `ToolInvoke` deferred
 /// 执行入口；用「已知核心工具都被 disallow」推断 readonly 会与解析后的工具集
 /// 漂移。只有显式白名单或 `tools: []` 能证明只读。
 #[test]
@@ -418,14 +418,15 @@ fn test_capability_whitelist_mcp_prefix_is_writes() {
     assert!(cap.can_mutate, "mcp__* 无法证明只读，应保守标 writes");
 }
 
-/// `ExecuteExtraTool` 可执行 deferred 的外部写工具，白名单含它不得标 readonly。
+/// `ExecuteExtraTool` / `ToolInvoke` 可执行 deferred 的外部写工具，白名单含它不得标 readonly。
 #[test]
 fn test_capability_whitelist_execute_extra_tool_is_writes() {
-    let cap = capability_from_yaml("name: a\ndescription: d\ntools: [Read, ExecuteExtraTool]\n");
-    assert!(
-        cap.can_mutate,
-        "ExecuteExtraTool 是 deferred 执行入口，无法证明只读"
-    );
+    for entry in ["ExecuteExtraTool", "ToolInvoke"] {
+        let cap = capability_from_yaml(&format!(
+            "name: a\ndescription: d\ntools: [Read, {entry}]\n"
+        ));
+        assert!(cap.can_mutate, "{entry} 是 deferred 执行入口，无法证明只读");
+    }
 }
 
 /// explorer 的只读白名单是工具级裁剪：解析结果非空，且与 capability 标签一致。

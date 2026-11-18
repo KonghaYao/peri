@@ -121,8 +121,8 @@ tools 原语在两个协议版本中基本兼容。2026-07-28 的新增与调整
 
 对 MCP 工具而言，核心问题不是协议本身，而是**如何进入 peri 的 tool search 体系**。peri 把工具面分成两面（由 `BaseTool::is_direct()` 决定，默认 `false`——安全默认值：新工具默认为 deferred）：
 
-- **direct（核心面）**：直接出现在 LLM API 的 tools 参数中，始终可见——core tools 与两个元工具（`SearchExtraTools` / `ExecuteExtraTool`）属于此面。
-- **deferred（延迟面）**：不直接可见。工具进入 `ToolSearchIndex` 索引，agent 先经 `SearchExtraTools` 发现、再经 `ExecuteExtraTool` 代理执行。
+- **direct（核心面）**：直接出现在 LLM API 的 tools 参数中，始终可见——core tools 与两个元工具（`ToolSearch` / `ToolInvoke`）属于此面。
+- **deferred（延迟面）**：不直接可见。工具进入 `ToolSearchIndex` 索引，agent 先经 `ToolSearch` 发现、再经 `ToolInvoke` 代理执行。
 
 **MCP 工具默认落在 deferred 面**，收益有二：
 
@@ -149,8 +149,8 @@ MCP 工具经 `McpToolBridge`（`peri-middlewares/src/mcp/tool_bridge.rs`）包�
 由 `peri-middlewares/src/tool_search/` 实现，`ToolSearchMiddleware` 编排：
 
 1. **入索引**：`before_agent` 把 deferred 工具构建进 `ToolSearchIndex`——TF-IDF 索引，name 权重 3.0 / description 权重 2.5，CJK 逐字分词、ASCII 按空格 / 下划线 / 连字符分词，余弦相似度排序；同时把「延迟工具列表」（名称 + 摘要）注入 system prompt，让 agent 知道存在哪些延迟工具。
-2. **发现**：agent 调 `SearchExtraTools`（direct 元工具，namespace `meta`）——查询形式 `select:<tool_name>`（按名精确取）或关键词搜索；返回命中工具及完整 JSON schema。
-3. **执行**：agent 调 `ExecuteExtraTool`（direct）传 `{tool_name, params}` 代理执行 → 路由到 `McpToolBridge.invoke` → MCP `tools/call` → server。
+2. **发现**：agent 调 `ToolSearch`（direct 元工具，namespace `meta`）——查询形式 `select:<tool_name>`（按名精确取）或关键词搜索；返回命中工具及完整 JSON schema。
+3. **执行**：agent 调 `ToolInvoke`（direct）传 `{name, arguments}` 代理执行 → 路由到 `McpToolBridge.invoke` → MCP `tools/call` → server。旧名 `ExecuteExtraTool` / `{tool_name, params}` 仅作为解析别名保留。
 
 ```mermaid
 flowchart LR
@@ -158,9 +158,9 @@ flowchart LR
     B -->|"is_direct() = false（默认）"| C["shared_tools<br/>deferred 面"]
     C -->|"before_agent 构建"| D["ToolSearchIndex<br/>TF-IDF 索引"]
     D -->|"延迟工具列表（名称+摘要）"| E["system prompt"]
-    F["agent（LLM）"] -->|"SearchExtraTools<br/>select: / 关键词查询"| D
+    F["agent（LLM）"] -->|"ToolSearch<br/>select: / 关键词查询"| D
     D -->|"命中工具的完整 schema"| F
-    F -->|"ExecuteExtraTool<br/>{tool_name, params}"| G["McpToolBridge.invoke"]
+    F -->|"ToolInvoke<br/>{name, arguments}"| G["McpToolBridge.invoke"]
     G -->|"tools/call"| A
 ```
 

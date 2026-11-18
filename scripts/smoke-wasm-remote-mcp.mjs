@@ -128,16 +128,16 @@ try {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     const tools = body.tools?.map((tool) => tool.function?.name) ?? [];
     if (modelRequests.length === 1) {
-      assert(tools.includes('SearchExtraTools') && tools.includes('ExecuteExtraTool'),
+      assert(tools.includes('ToolSearch') && tools.includes('ToolInvoke'),
         `MCP discovery meta tools missing from model request: ${JSON.stringify(tools)}`);
       modelEvent(response, { tool_calls: [{ index: 0, id: 'search-1', type: 'function',
-        function: { name: 'SearchExtraTools', arguments: JSON.stringify({ query: 'select:mcp__fixture__echo' }) } }] }, 'tool_calls');
+        function: { name: 'ToolSearch', arguments: JSON.stringify({ query: 'select:mcp__fixture__echo' }) } }] }, 'tool_calls');
     } else if (modelRequests.length === 2) {
       assert(JSON.stringify(body).includes('mcp__fixture__echo'),
         `deferred MCP tool was not discovered: ${JSON.stringify(body)}`);
       modelEvent(response, { tool_calls: [{ index: 0, id: 'call-1', type: 'function',
-        function: { name: 'ExecuteExtraTool', arguments: JSON.stringify({
-          tool_name: 'mcp__fixture__echo', params: { text: 'from-wasm' },
+        function: { name: 'ToolInvoke', arguments: JSON.stringify({
+          name: 'mcp__fixture__echo', arguments: { text: 'from-wasm' },
         }) } }] }, 'tool_calls');
     } else {
       assert(JSON.stringify(body).includes('MCP_ECHO:from-wasm'),

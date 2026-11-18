@@ -430,7 +430,7 @@ pub(crate) fn declared_names_cover(declared: &[String], name: &str) -> bool {
 ///
 /// - 显式工具名：`Bash`（echo > file / rm / git commit）、`Write`、`Edit`、
 ///   `folder_operations`（含 create/delete/move 操作）、`cron_register`
-///   （可定时触发任意 prompt，等价委派执行权）、`ExecuteExtraTool`
+///   （可定时触发任意 prompt，等价委派执行权）、`ToolInvoke`
 ///   （可执行 deferred 的外部写工具，无法静态证明只读）；
 /// - 前缀：`mcp__*`（外部能力，无法静态证明只读）。
 ///
@@ -447,7 +447,8 @@ pub(super) fn is_mutation_tool(name: &str) -> bool {
     matches!(
         lower.as_str(),
         "bash" | "write" | "edit" | "folder_operations" | "cron_register" | "executeextratool"
-    ) || lower.starts_with("mcp__")
+    ) || peri_acp_types::tool_proxy::is_invoke_proxy_name(name)
+        || lower.starts_with("mcp__")
 }
 
 /// 从 Agent frontmatter 推断运行时能力画像（D5：保守 readonly）。

@@ -10,7 +10,7 @@ argumentHint: "[task description or /ultracode]"
 
 # Ultracode: Multi-Agent Workflow Orchestration
 
-Use the **Workflow** tool through `SearchExtraTools` and `ExecuteExtraTool`.
+Use the **Workflow** tool through `ToolSearch` and `ToolInvoke`.
 Main owns the business task and its current contract; the run owns its stage graph.
 When multitask is active, a single-role task uses one fresh Agent and a task with
 ordered multi-agent stages uses one Workflow. Do not nest a coordinator agent or
@@ -88,12 +88,15 @@ work may continue. Do not restart the fenced run until its outstanding resources
 ## Discover and launch
 
 ```
-SearchExtraTools("workflow")
-ExecuteExtraTool("Workflow", {
-  "script": "...workflow script...",
-  "args": {},
-  "maxConcurrency": 3,
-  "writeIntent": { "kind": "read_only" }
+ToolSearch("workflow")
+ToolInvoke({
+  "name": "Workflow",
+  "arguments": {
+    "script": "...workflow script...",
+    "args": {},
+    "maxConcurrency": 3,
+    "writeIntent": { "kind": "read_only" }
+  }
 })
 ```
 

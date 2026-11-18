@@ -1,12 +1,13 @@
 use super::{
     async_trait, declaration, fmt, hook_state, AgentResult, Arc, BTreeMap, BaseTool, Debug,
     ExecuteExtraTool, Formatter, Middleware, RwLock, SearchExtraTools, StdRwLock, ToolSearchIndex,
+    TOOL_INVOKE_NAME, TOOL_SEARCH_NAME,
 };
 
 /// ToolSearch 中间件
 ///
 /// 职责：
-/// 1. 注册 SearchExtraTools 和 ExecuteExtraTool 两个元工具
+/// 1. 注册 ToolSearch 和 ToolInvoke 两个元工具
 /// 2. 在 before_agent 时注入延迟工具列表到 system prompt
 pub struct ToolSearchMiddleware {
     pub(super) tool_search_index: Arc<ToolSearchIndex>,
@@ -80,14 +81,11 @@ impl ToolSearchMiddleware {
                 .map(|(_, tool)| Arc::clone(tool))
                 .collect();
             request_index.build(deferred_arcs.clone());
-            if guard
-                .get(super::super::core_tools::SEARCH_EXTRA_TOOLS_NAME)
-                .is_some_and(|tool| {
-                    tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
-                })
-            {
+            if guard.get(TOOL_SEARCH_NAME).is_some_and(|tool| {
+                tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
+            }) {
                 guard.insert(
-                    super::super::core_tools::SEARCH_EXTRA_TOOLS_NAME.to_string(),
+                    TOOL_SEARCH_NAME.to_string(),
                     Arc::new(SearchExtraTools::with_direct_tools(
                         Arc::clone(&request_index),
                         direct_names.iter().map(String::as_str),
@@ -95,14 +93,11 @@ impl ToolSearchMiddleware {
                 );
             }
             let request_resolver = Arc::new(RwLock::new(guard.clone()));
-            if guard
-                .get(super::super::core_tools::EXECUTE_EXTRA_TOOL_NAME)
-                .is_some_and(|tool| {
-                    tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
-                })
-            {
+            if guard.get(TOOL_INVOKE_NAME).is_some_and(|tool| {
+                tool.mcp_server_name().is_none() && tool.namespace() == Some("meta")
+            }) {
                 guard.insert(
-                    super::super::core_tools::EXECUTE_EXTRA_TOOL_NAME.to_string(),
+                    TOOL_INVOKE_NAME.to_string(),
                     Arc::new(ExecuteExtraTool::with_direct_tools(
                         request_resolver,
                         direct_names.iter().map(String::as_str),

@@ -666,7 +666,7 @@ async fn system_mcp_ready_exposes_required_tools_on_first_model_request() {
     );
 
     assert!(
-        tools.iter().any(|name| name == "SearchExtraTools"),
+        tools.iter().any(|name| name == "ToolSearch"),
         "普通 MCP 工具通过 ToolSearch 发现"
     );
 }
@@ -705,7 +705,7 @@ async fn system_mcp_empty_required_tools_ready_without_injection() {
         "空数组不得注入任何 direct 工具: {tools:?}"
     );
     assert!(
-        tools.iter().any(|name| name == "SearchExtraTools"),
+        tools.iter().any(|name| name == "ToolSearch"),
         "未提升的工具通过 ToolSearch 发现"
     );
 }

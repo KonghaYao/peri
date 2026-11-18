@@ -6,6 +6,7 @@ use super::{
 };
 use peri_agent::middleware::Middleware as _;
 use peri_agent::session::subagent::SubagentChainAssembler as _;
+use peri_middlewares::tool_search::{TOOL_INVOKE_NAME, TOOL_SEARCH_NAME};
 
 pub(super) struct LookupTool;
 
@@ -57,8 +58,8 @@ impl LookupLLM {
         let tools: Vec<&dyn BaseTool> = defined.iter().map(|t| t as &dyn BaseTool).collect();
 
         assert!(!tools.iter().any(|tool| tool.name() == "mcp__late__lookup"));
-        assert!(tools.iter().any(|tool| tool.name() == "SearchExtraTools"));
-        assert!(tools.iter().any(|tool| tool.name() == "ExecuteExtraTool"));
+        assert!(tools.iter().any(|tool| tool.name() == TOOL_SEARCH_NAME));
+        assert!(tools.iter().any(|tool| tool.name() == TOOL_INVOKE_NAME));
         let step = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if step == 1 && !self.1 {
             assert!(!messages
@@ -71,7 +72,7 @@ impl LookupLLM {
         match step {
             0 => inline_fixture::tool_events_from_react(vec![ToolCall::new(
                 "search",
-                "SearchExtraTools",
+                TOOL_SEARCH_NAME,
                 serde_json::json!({"query": "select:mcp__late__lookup"}),
             )]),
             1 => {
@@ -82,8 +83,8 @@ impl LookupLLM {
                     .contains("mcp__late__lookup"));
                 inline_fixture::tool_events_from_react(vec![ToolCall::new(
                     "execute",
-                    "ExecuteExtraTool",
-                    serde_json::json!({"tool_name": "mcp__late__lookup", "params": {}}),
+                    TOOL_INVOKE_NAME,
+                    serde_json::json!({"name": "mcp__late__lookup", "arguments": {}}),
                 )])
             }
             _ => {
@@ -226,7 +227,7 @@ pub(super) fn explicit_zero_tools_does_not_gain_search_or_execution_tools() {
 pub(super) fn denied_mcp_tools_are_absent_from_the_child_search_and_execution_catalog() {
     let child = filtered_child(None, vec!["mcp__late__lookup".to_string()]);
     let snapshot = child.context.runtime.tool_catalog.snapshot();
-    assert!(snapshot.tools.contains_key("SearchExtraTools"));
-    assert!(snapshot.tools.contains_key("ExecuteExtraTool"));
+    assert!(snapshot.tools.contains_key(TOOL_SEARCH_NAME));
+    assert!(snapshot.tools.contains_key(TOOL_INVOKE_NAME));
     assert!(!snapshot.tools.contains_key("mcp__late__lookup"));
 }

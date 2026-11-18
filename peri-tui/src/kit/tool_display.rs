@@ -92,11 +92,11 @@ fn format_tool_args_by_name(tool_name: &str, args: &serde_json::Value) -> Option
                 .unwrap_or_default()
                 .to_string(),
         ),
-        "ExecuteExtraTool" | "SearchExtraTools" => {
-            let key = if tool_name == "ExecuteExtraTool" {
-                "tool_name"
-            } else {
-                "query"
+        "ExecuteExtraTool" | "ToolInvoke" | "SearchExtraTools" | "ToolSearch" => {
+            let key = match tool_name {
+                "ExecuteExtraTool" => "tool_name",
+                "ToolInvoke" => "name",
+                _ => "query",
             };
             Some(
                 args.get(key)

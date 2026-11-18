@@ -1,4 +1,4 @@
-//! SearchExtraTools 元工具 — 搜索并发现延迟加载的工具
+//! ToolSearch 元工具 — 搜索并发现延迟加载的工具
 
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -9,7 +9,7 @@ use peri_agent::tools::BaseTool;
 use serde_json::{json, Value};
 
 use super::core_tools::direct_tools_description;
-use super::core_tools::SEARCH_EXTRA_TOOLS_NAME;
+use super::core_tools::{SEARCH_EXTRA_TOOLS_NAME, TOOL_SEARCH_NAME};
 use super::tool_index::ToolSearchIndex;
 
 #[cfg(test)]

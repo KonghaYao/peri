@@ -13,7 +13,7 @@ userInvocable: true
 
 You have access to scheduled task tools (`mcp__cron__cron_register`, `mcp__cron__cron_list`, `mcp__cron__cron_remove`) for registering recurring automated tasks using standard 5-field cron expressions (`minute hour day_of_month month day_of_week`).
 
-These three tools are **deferred**: they are not in your direct tool list. Discover them with `SearchExtraTools` (e.g. search for `cron`), then invoke them by their full name with `ExecuteExtraTool`.
+These three tools are **deferred**: they are not in your direct tool list. Discover them with `ToolSearch` (e.g. search for `cron`), then invoke them by their full name with `ToolInvoke` (`{"name": "<tool>", "arguments": {...}}`).
 
 ## When to Use
 
@@ -31,7 +31,7 @@ Do NOT register a cron task just because the user mentions a time — only when 
 | `mcp__cron__cron_list()` | List all registered tasks with status, next fire time, and prompt. |
 | `mcp__cron__cron_remove(id)` | Remove a task by its ID (shown by `mcp__cron__cron_list`). |
 
-If `SearchExtraTools` returns no `mcp__cron__*` tool, the built-in `cron` instance is disabled for this session (MetaHarness `CronMiddleware: false`, the `{"cron": {"disabled": true}}` config entry, or `PERI_MCP_BUILTIN=off`); tell the user instead of trying to work around it.
+If `ToolSearch` returns no `mcp__cron__*` tool, the built-in `cron` instance is disabled for this session (MetaHarness `CronMiddleware: false`, the `{"cron": {"disabled": true}}` config entry, or `PERI_MCP_BUILTIN=off`); tell the user instead of trying to work around it.
 
 ## Cron Expression Format
 

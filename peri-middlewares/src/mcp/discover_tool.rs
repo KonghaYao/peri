@@ -3,7 +3,7 @@
 //! JSON-RPC 风格入参（`{method, params}`），错误契约 `{error:{code,message}}`
 //! （无 id）：未知 method `-32601`、参数错误 `-32602`、server 不存在/未连接
 //! `-32000`。**只读硬约束**：本文件不调用任何 MCP tools/call、read_resource、
-//! ExecuteExtraTool、build_tool_bridges——数据全部来自会话工具目录、pool
+//! ToolInvoke、build_tool_bridges——数据全部来自会话工具目录、pool
 //! 只读快照与 registry。
 
 use std::fmt;

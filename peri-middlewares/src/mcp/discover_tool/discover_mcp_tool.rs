@@ -11,7 +11,7 @@ pub(super) const DEFAULT_MAX_RESULTS: usize = 5;
 pub(super) const MAX_RESULTS_CAP: usize = 20;
 
 /// 只读查询 MCP 域：搜索 MCP server/tool/resource/skill、列出服务器清单、
-/// 查看服务器连接详情。不提供执行（工具走 ExecuteExtraTool、资源走
+/// 查看服务器连接详情。不提供执行（工具走 ToolInvoke、资源走
 /// mcp_read_resource、技能走 SkillTool）。
 pub struct DiscoverMCPTool {
     pub(super) pool: Arc<McpClientPool>,
@@ -475,7 +475,7 @@ impl BaseTool for DiscoverMCPTool {
          服务器连接状态/协议版本/capabilities/OAuth。会话目录的 search/list 工具条目\
          包含 execution_name、original_name、server、direct 和保留完整 JSON Schema 的 tool；\
          隐藏工具不会出现。direct 工具按 execution_name 直接调用，deferred 工具经\
-         ExecuteExtraTool 调用。未装配目录时返回原始诊断快照，不保证名称可执行。\
+         ToolInvoke 调用。未装配目录时返回原始诊断快照，不保证名称可执行。\
          本工具不执行调用；资源读取走 mcp_read_resource，技能加载走 SkillTool。"
     }
 

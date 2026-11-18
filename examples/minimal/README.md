@@ -50,7 +50,7 @@ forms map to the same capability.
 
 `cron` tools are always **deferred** (`mcp__cron__cron_register` /
 `mcp__cron__cron_list` / `mcp__cron__cron_remove`): the model reaches them
-through `SearchExtraTools` → `ExecuteExtraTool`, so closing that instance only shrinks the
+through `ToolSearch` → `ToolInvoke`, so closing that instance only shrinks the
 deferred catalog and its search results.
 
 | Field | Current value | Meaning |
@@ -75,7 +75,7 @@ deferred catalog and its search results.
 | `SubAgentMiddleware` | `true` | Enables the `Agent` tool, project subagent discovery, and the `11_subagent` prompt section. |
 | `McpMiddleware` | `true` | Enables MCP server connections, resources, and MCP-provided tools. Project MCP servers are configured in `.mcp.json`. |
 | `WorkflowMiddleware` | `false` | Disables workflow registration and workflow execution tools. |
-| `ToolSearch` | `true` | Enables `SearchExtraTools` and `ExecuteExtraTool`, allowing deferred tools such as MCP tools to be discovered and invoked on demand. |
+| `ToolSearch` | `true` | Enables `ToolSearch` and `ToolInvoke`, allowing deferred tools such as MCP tools to be discovered and invoked on demand. |
 | `ArtifactMiddleware` | `false` | Closes the built-in `artifact` instance's tool face (`mcp__artifact__artifact`, a direct tool). |
 | `GoalMiddleware` | `false` | Disables goal-management prompt content and tools. |
 

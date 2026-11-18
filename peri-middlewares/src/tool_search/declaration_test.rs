@@ -324,7 +324,7 @@ fn build_real_direct_tools() -> Vec<Arc<dyn BaseTool>> {
     // 2 skills：SkillTool/DiscoverSkillsTool（M8：调用时读 registry 当前投影）
     tools.push(Arc::new(SkillTool::new(None)));
     tools.push(Arc::new(DiscoverSkillsTool::new(None)));
-    // 3 meta：SearchExtraTools/ExecuteExtraTool（artifact 由 builtin 桥提供，见上）
+    // 3 meta：ToolSearch/ToolInvoke（artifact 由 builtin 桥提供，见上）
     let index = Arc::new(ToolSearchIndex::new());
     let shared: Arc<PLRwLock<BTreeMap<String, Arc<dyn BaseTool>>>> =
         Arc::new(PLRwLock::new(BTreeMap::new()));
@@ -356,8 +356,8 @@ fn declared(
 #[test]
 fn test_all_real_tool_declarations_render_without_placeholder_residue() {
     use crate::tool_search::core_tools::{
-        EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME, TOOL_AGENT, TOOL_ASK_USER,
-        TOOL_DISCOVER_SKILLS, TOOL_SKILL, TOOL_TODO,
+        TOOL_AGENT, TOOL_ASK_USER, TOOL_DISCOVER_SKILLS, TOOL_INVOKE_NAME, TOOL_SEARCH_NAME,
+        TOOL_SKILL, TOOL_TODO,
     };
     // 三个已迁移工具的模型面名字（迁移前是裸名 `WebFetch`/`WebSearch`/`artifact`）
     let web_fetch = declared("web", "WebFetch").legacy_name;
@@ -385,8 +385,8 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
         TOOL_TODO,
         TOOL_SKILL,
         TOOL_DISCOVER_SKILLS,
-        SEARCH_EXTRA_TOOLS_NAME,
-        EXECUTE_EXTRA_TOOL_NAME,
+        TOOL_SEARCH_NAME,
+        TOOL_INVOKE_NAME,
     ]);
     for name in &expected {
         let tool = tools

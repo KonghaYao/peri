@@ -172,7 +172,7 @@ pub struct AgentComponents {
     pub llm: Arc<dyn ReactLLM + Send + Sync>,
     /// 中间件链（v2 StageContext 直接复用）
     pub chain: Arc<MiddlewareChain>,
-    /// 共享工具注册表（deferred tools，供 ExecuteExtraTool 代理）
+    /// 共享工具注册表（deferred tools，供 ToolInvoke 代理）
     #[allow(clippy::type_complexity)]
     pub shared_tools: Option<Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>>>,
     /// 上下文预算（token 监控）

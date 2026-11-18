@@ -181,8 +181,8 @@ async fn test_fork_tool_surface_excludes_child_absent_capabilities() {
         *captured
     );
     assert!(
-        captured.contains(&"SearchExtraTools".to_string())
-            && captured.contains(&"ExecuteExtraTool".to_string()),
+        captured.contains(&"ToolSearch".to_string())
+            && captured.contains(&"ToolInvoke".to_string()),
         "Fork 应保留 deferred 元工具, got: {:?}",
         *captured
     );

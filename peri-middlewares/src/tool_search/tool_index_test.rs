@@ -430,7 +430,7 @@ fn deferred_list_stays_within_budget_and_reports_omissions() {
         &list[list.len().saturating_sub(220)..]
     );
     assert!(
-        list.contains("SearchExtraTools"),
+        list.contains("ToolSearch"),
         "被省略的工具必须给出替代发现路径"
     );
     // 每条进入列表的条目都是完整的（参数段结尾完整），不存在半截条目。

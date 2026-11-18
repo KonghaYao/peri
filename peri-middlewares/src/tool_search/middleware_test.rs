@@ -2,7 +2,7 @@
 
 use super::{
     Arc, BTreeMap, BaseTool, ExecuteExtraTool, RwLock, SearchExtraTools, ToolSearchIndex,
-    ToolSearchMiddleware,
+    ToolSearchMiddleware, TOOL_INVOKE_NAME, TOOL_SEARCH_NAME,
 };
 use async_trait::async_trait;
 use peri_agent::middleware::r#trait::Middleware;
@@ -156,8 +156,10 @@ fn test_collect_tools_returns_meta_tools() {
 
     assert_eq!(tools.len(), 2, "expected the two ToolSearch meta tools");
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-    assert!(names.contains(&"SearchExtraTools"));
-    assert!(names.contains(&"ExecuteExtraTool"));
+    assert!(names.contains(&TOOL_SEARCH_NAME));
+    assert!(names.contains(&TOOL_INVOKE_NAME));
+    assert!(!names.contains(&crate::tool_search::SEARCH_EXTRA_TOOLS_NAME));
+    assert!(!names.contains(&crate::tool_search::EXECUTE_EXTRA_TOOL_NAME));
 }
 
 #[tokio::test]
@@ -292,18 +294,23 @@ async fn external_mcp_meta_name_winners_survive_catalog_rebinds() {
     let index = Arc::new(ToolSearchIndex::new());
     let shared = Arc::new(RwLock::new(BTreeMap::new()));
     let middleware = ToolSearchMiddleware::new(index, shared);
-    let external = ["SearchExtraTools", "ExecuteExtraTool"]
-        .into_iter()
-        .map(|name| {
-            let tool: Arc<dyn BaseTool> = Arc::new(
-                MockTool::new(name, "external system tool")
-                    .with_direct()
-                    .with_mcp_source("system-server")
-                    .with_namespace("meta"),
-            );
-            (name.to_string(), tool)
-        })
-        .collect::<BTreeMap<_, _>>();
+    let external = [
+        TOOL_SEARCH_NAME,
+        TOOL_INVOKE_NAME,
+        crate::tool_search::SEARCH_EXTRA_TOOLS_NAME,
+        crate::tool_search::EXECUTE_EXTRA_TOOL_NAME,
+    ]
+    .into_iter()
+    .map(|name| {
+        let tool: Arc<dyn BaseTool> = Arc::new(
+            MockTool::new(name, "external system tool")
+                .with_direct()
+                .with_mcp_source("system-server")
+                .with_namespace("meta"),
+        );
+        (name.to_string(), tool)
+    })
+    .collect::<BTreeMap<_, _>>();
     let local: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(external.clone()));
 
     middleware
@@ -348,11 +355,11 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
         Arc::new(MockTool::new("Read", "Read a file").with_direct()) as Arc<dyn BaseTool>,
     );
     local.insert(
-        "SearchExtraTools".to_string(),
+        TOOL_SEARCH_NAME.to_string(),
         Arc::new(SearchExtraTools::new(Arc::clone(&index))) as Arc<dyn BaseTool>,
     );
     local.insert(
-        "ExecuteExtraTool".to_string(),
+        TOOL_INVOKE_NAME.to_string(),
         Arc::new(ExecuteExtraTool::new(Arc::clone(&shared))) as Arc<dyn BaseTool>,
     );
     let local_view: peri_agent::agent::stages::SharedToolMap = Arc::new(RwLock::new(local));
@@ -370,7 +377,7 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
     assert_eq!(results[0].name, "Workflow");
 
     let tools = local_view.read();
-    for meta_name in ["SearchExtraTools", "ExecuteExtraTool"] {
+    for meta_name in [TOOL_SEARCH_NAME, TOOL_INVOKE_NAME] {
         let description = tools.get(meta_name).unwrap().description();
         assert!(description.contains("Read"), "{meta_name}: {description}");
         assert!(
@@ -380,6 +387,16 @@ async fn test_before_agent_builds_index_from_local_tools_when_shared_empty() {
         assert!(
             !description.contains("always available"),
             "不得静态宣称 core tools always available：{meta_name}: {description}"
+        );
+    }
+
+    for legacy in [
+        crate::tool_search::SEARCH_EXTRA_TOOLS_NAME,
+        crate::tool_search::EXECUTE_EXTRA_TOOL_NAME,
+    ] {
+        assert!(
+            tools.get(legacy).is_none(),
+            "rebind 不得注册旧名键 {legacy}"
         );
     }
 
@@ -638,7 +655,7 @@ async fn app_only_tools_are_absent_from_index_lists_and_declarations() {
     }
 
     // 3) 元工具描述：direct 工具清单只含模型可见项。
-    let search_description = shared.read()["SearchExtraTools"].description().to_string();
+    let search_description = shared.read()[TOOL_SEARCH_NAME].description().to_string();
     assert!(
         search_description.contains("VisibleDirect"),
         "模型可见 direct 工具应出现在 SearchExtraTools 描述: {search_description}"

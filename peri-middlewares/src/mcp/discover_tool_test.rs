@@ -403,7 +403,7 @@ async fn search_hits_all_four_types_with_labels_and_schema() {
     assert_eq!(server["status"], "connected");
 
     // tool 结果带完整 input schema（rmcp camelCase 序列化 inputSchema；供
-    // ExecuteExtraTool 衔接）
+    // ToolInvoke 衔接）
     let tool_entry = arr.iter().find(|e| e["type"] == "tool").unwrap();
     assert_eq!(tool_entry["server"], "zz-server");
     assert_eq!(tool_entry["tool"]["name"], "zz_tool");

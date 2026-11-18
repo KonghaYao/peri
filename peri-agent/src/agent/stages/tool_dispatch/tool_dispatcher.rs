@@ -34,10 +34,10 @@ pub struct DispatchOutcome {
     pub results: Vec<(ToolCall, ToolResult)>,
 }
 
-/// ExecuteExtraTool 在 target 解析失败时尚未投影 canonical tool；与 policy/invoke 一致，
-/// 不产生 render 副作用（避免 UI 仅展示误导性的 wrapper 行）。
+/// ToolInvoke 在 target 解析失败时尚未投影 canonical tool；与 policy/invoke 一致，
+/// 不产生 render 副作用（避免 UI 仅展示误导性的 wrapper 行）。旧名 alias 同样排除。
 pub(super) fn should_emit_settled_tool_render(call: &ToolCall) -> bool {
-    call.name != "ExecuteExtraTool"
+    !peri_acp_types::tool_proxy::is_invoke_proxy_name(&call.name)
 }
 
 /// 为 middleware 前已结算的工具调用（解析失败、畸形 id 等）补全 render 事件。

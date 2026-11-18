@@ -309,10 +309,11 @@ fn summarize_input_by_name(
         }
         // ── file_path 不截断但精简 cwd 前缀 ──
         "artifact" => Some(shorten_path(&str_val("file_path"))),
-        // ── tool_name 截断 40 ──
+        // ── tool_name/name 截断 40 ──
         "ExecuteExtraTool" => Some(truncate_text(&str_val("tool_name"), 40)),
+        "ToolInvoke" => Some(truncate_text(&str_val("name"), 40)),
         // ── query 截断 40 ──
-        "SearchExtraTools" => Some(truncate_text(&str_val("query"), 40)),
+        "SearchExtraTools" | "ToolSearch" => Some(truncate_text(&str_val("query"), 40)),
         _ => None,
     }
 }

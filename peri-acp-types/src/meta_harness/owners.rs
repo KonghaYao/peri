@@ -90,7 +90,9 @@ declare_owners! {
     AskUser("HumanInTheLoopMiddleware", false, true) ["AskUserQuestion"] { ASK_USER("12_ask_user", Uncached, 5) },
     SubAgent("SubAgentMiddleware", false, false) ["Agent","AgentResult"] { SUBAGENT("11_subagent", Uncached, 4) },
     Mcp("McpMiddleware", true, true) ["DiscoverMCP","mcp_read_resource"] {},
-    ToolSearch("ToolSearch", true, false) ["ToolSearch","SearchExtraTools","ExecuteExtraTool"] {},
+    // ToolSearch 一词同时是 middleware 关闭键与搜索工具名（一个词两层身份）；
+    // `"ToolSearch": false` 同时下线 middleware 与其 meta 工具。
+    ToolSearch("ToolSearch", true, false) ["ToolSearch","ToolInvoke"] {},
     Goal("GoalMiddleware", false, false) ["goal"] {},
 }
 

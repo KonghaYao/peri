@@ -29,13 +29,14 @@ pub use auto_classifier::{AutoClassifier, Classification, LlmAutoClassifier};
 pub use peri_agent::hitl::{BatchItem, HitlDecision};
 pub use shared_mode::{PermissionMode, SharedPermissionMode};
 
-// ─── ExecuteExtraTool 权限透传 ─────────────────────────────────────────────
+// ─── ToolInvoke 权限透传 ───────────────────────────────────────────────────
 
 /// 获取有效的工具名称
 ///
-/// 当 tool_name 为 [`crate::tool_search::core_tools::EXECUTE_EXTRA_TOOL_NAME`] 时，
-/// 从 `input[EXTRA_TOOL_NAME_FIELD]` 提取目标工具名，用于 HITL 权限判断。
-/// 否则直接返回原始工具名。
+/// 当 tool_name 为调用代理（[`crate::tool_search::core_tools::TOOL_INVOKE_NAME`]，
+/// 或迁移期旧名 [`crate::tool_search::core_tools::EXECUTE_EXTRA_TOOL_NAME`]）时，
+/// 从统一解析器提取目标工具名，用于 HITL 权限判断。字段冲突或畸形时返回外层名，
+/// 由权限层 fail-closed 处理。否则直接返回原始工具名。
 pub use crate::tool_search::core_tools::resolve_effective_tool_name as effective_tool_name;
 
 #[cfg(test)]
