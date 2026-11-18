@@ -384,6 +384,51 @@ fn withdrawn_identity_survives_record_pruned_before_settle() {
 }
 
 #[tokio::test]
+async fn identity_conflict_after_insert_removes_the_queued_row() {
+    let (mailbox, inbox) = crate::session::user_input_mailbox::tests::make_mailbox();
+    let input = crate::session::user_input_mailbox::tests::make_input(&mailbox, "身份冲突竞态");
+    let (entered, release) = inbox.queue_for_test().gate_next_enqueue();
+    let enqueue_mailbox = mailbox.clone();
+    let enqueue_input = input.clone();
+    let task = tokio::spawn(async move { enqueue_mailbox.enqueue(&enqueue_input).await });
+    entered.await.expect("enqueue reaches the MQ gate");
+    // 等待期间写入同一 input_id 但指纹不同的终态身份：本调用已插入的行必须撤回，
+    // 不能让调用方收到 IdentityConflict 后该行仍可被 Receive 消费。
+    let conflicting_fingerprint = super::super::state::fingerprint_for(
+        &input.input_id,
+        &input.content,
+        &input.original_draft,
+        &input.plugin_selections,
+    )
+    .wrapping_add(1);
+    super::super::window::retain_terminal(
+        &mut mailbox.state.lock(),
+        &input.input_id,
+        Some((conflicting_fingerprint, UserInputState::Withdrawn)),
+    );
+    release.send(()).expect("release the enqueue gate");
+
+    let error = task
+        .await
+        .expect("enqueue task joins")
+        .expect_err("stored identity mismatch must reject the enqueue");
+    assert_eq!(error, UserInputQueueError::IdentityConflict);
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "the MQ row inserted by this call must be cancelled before returning"
+    );
+    assert!(
+        mailbox
+            .state
+            .lock()
+            .records
+            .iter()
+            .all(|record| record.input_id != input.input_id),
+        "身份冲突不得留下待发记录"
+    );
+}
+
+#[tokio::test]
 async fn enqueue_racing_with_withdrawal_does_not_resurrect_input() {
     let (mailbox, inbox) = crate::session::user_input_mailbox::tests::make_mailbox();
     let input = crate::session::user_input_mailbox::tests::make_input(&mailbox, "撤回竞态");
