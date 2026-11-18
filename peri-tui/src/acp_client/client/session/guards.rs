@@ -36,6 +36,8 @@ impl Drop for PreparingSessionGuard {
 pub(super) struct SessionProjectionGuard<'transition> {
     pub(super) client: &'transition AcpTuiClient,
     pub(super) committed: bool,
+    /// initial 失败但旧窗口仍有效：保留 load 起点已投影的会话边界。
+    pub(super) retain_projection: bool,
 }
 
 impl Drop for SessionProjectionGuard<'_> {
@@ -44,6 +46,9 @@ impl Drop for SessionProjectionGuard<'_> {
             return;
         }
         self.client.project_execution_cwd(None);
+        if self.retain_projection {
+            return;
+        }
         if self.client.projection_mode == ClientProjectionMode::Interactive
             && !crate::kit::atoms::ACTIVE_SESSION_ID
                 .state()

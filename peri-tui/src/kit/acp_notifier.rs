@@ -44,6 +44,10 @@ mod projection_tests;
 mod interaction_tests;
 
 #[cfg(test)]
+#[path = "acp_notifier_live_test.rs"]
+mod live_tests;
+
+#[cfg(test)]
 use crate::acp_client::AcpNotification;
 #[cfg(test)]
 use crate::kit::acp_types::AcpEventData;

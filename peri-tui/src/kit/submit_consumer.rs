@@ -28,7 +28,10 @@ use tracing::{error, info, warn};
 use crate::acp_client::{AcpTuiClient, AdmissionGuard};
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
-
+use crate::kit::atoms::{
+    ACP_STATE, EXIT_REQUESTED, LOADING_EPOCH, NOTIFICATION, RENDER_HEARTBEAT, REWIND_ACTION_TX,
+    local_event_tx,
+};
 use crate::kit::submit_request::{
     ExportMode, SessionControlRequest, SubmitRequest, ViewActionRequest,
 };
@@ -312,7 +315,7 @@ async fn handle_agent_text_submit(
     // 通过 LOCAL_EVENT_TX 发送 PromptSubmitted 事件到 acp_bridge，
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
     {
-        if let Some(tx) = LOCAL_EVENT_TX.get() {
+        if let Some(tx) = local_event_tx() {
             let _ = tx.send(AcpEventWithEpoch {
                 child_origin: None,
                 view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -494,7 +497,7 @@ async fn handle_keepgoing_submit(
 
     // 与 handle_agent_text_submit 相同的 loading 状态切换：PromptSubmitted 事件
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
-    if let Some(tx) = LOCAL_EVENT_TX.get() {
+    if let Some(tx) = local_event_tx() {
         let _ = tx.send(AcpEventWithEpoch {
             child_origin: None,
             view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -676,7 +679,7 @@ fn clear_loading_state() {
         let mut acp = ref_guard.write();
         acp.is_loading = false;
     }
-    if let Some(tx) = LOCAL_EVENT_TX.get() {
+    if let Some(tx) = local_event_tx() {
         let _ = tx.send(AcpEventWithEpoch {
             child_origin: None,
             view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -689,7 +692,7 @@ fn clear_loading_state() {
 }
 
 fn reset_failed_prompt(session_id: &str, request_id: &str) {
-    if let Some(tx) = LOCAL_EVENT_TX.get() {
+    if let Some(tx) = local_event_tx() {
         let _ = tx.send(AcpEventWithEpoch {
             child_origin: None,
             view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
@@ -831,17 +834,3 @@ mod admission_probe {
 #[cfg(test)]
 #[path = "submit_consumer_test.rs"]
 mod tests;
-
-use crate::kit::atoms::ACP_STATE;
-
-use crate::kit::atoms::EXIT_REQUESTED;
-
-use crate::kit::atoms::LOADING_EPOCH;
-
-use crate::kit::atoms::LOCAL_EVENT_TX;
-
-use crate::kit::atoms::NOTIFICATION;
-
-use crate::kit::atoms::RENDER_HEARTBEAT;
-
-use crate::kit::atoms::REWIND_ACTION_TX;

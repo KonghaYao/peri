@@ -218,3 +218,160 @@ fn test_scroll_away_from_top_does_not_dispatch() {
             .is_none()
     );
 }
+
+/// V2：同一滚动事件刚排队的 older-page 不得被 gap seek 取消；方向未知不 seek。
+#[test]
+#[serial]
+fn test_v2_scroll_does_not_cancel_in_flight_older_page() {
+    use peri_acp_types::history_v2::{
+        DecimalU64, HISTORY_V2_VERSION, HistoryBoundary, HistoryBoundaryPosition,
+        HistoryBoundarySide, HistoryDirection, HistoryLimits,
+    };
+    use serde_json::json;
+
+    use crate::kit::history_v2::paging::{HistoryV2Gap, HistoryV2InFlightKind};
+    use crate::kit::history_window::GapSeekDirection;
+
+    struct V2Guard;
+
+    impl Drop for V2Guard {
+        fn drop(&mut self) {
+            crate::kit::atoms::HISTORY_V2_CAPABLE.set(false);
+            crate::kit::atoms::HISTORY_V2_STATE
+                .set(crate::kit::history_v2::HistoryV2State::default());
+            *crate::kit::atoms::HISTORY_V2_TX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    crate::kit::atoms::init_atoms();
+    crate::kit::history_v2::consumer::reset_request_key_for_test();
+    let _guard = V2Guard;
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(true);
+
+    let limits = HistoryLimits::default();
+    let initial = json!({
+        "_meta": {"peri.history": {
+            "version": HISTORY_V2_VERSION,
+            "kind": "initial",
+            "requestKey": "1",
+            "executionReady": true,
+            "runtimeGeneration": "runtime-1",
+            "deliveryId": "delivery-1",
+            "liveBoundary": {"streamId": "live-1", "afterSeq": "0"},
+            "page": {
+                "version": HISTORY_V2_VERSION,
+                "kind": "window",
+                "sessionId": "s1",
+                "windowId": "w1",
+                "snapshotToken": "snapshot-1",
+                "historyRevision": "17",
+                "committedTail": "19",
+                "projectionVersion": 1,
+                "readTicket": "ticket-1",
+                "beforeCursor": "before-1",
+                "afterCursor": "after-1",
+                "items": [{
+                    "entryId": "s1:e5",
+                    "source": {"kind": "own"},
+                    "contentVersion": "1",
+                    "durability": {"state": "sealed", "origin": "live", "finalItemSeq": "3"},
+                    "order": {"region": "own", "ordinal": "5"},
+                    "subItems": [{
+                        "kind": "text",
+                        "subItemId": "s1:e5:0",
+                        "role": "assistant",
+                        "text": "anchor",
+                    }],
+                }],
+                "coverage": {
+                    "kind": "interval",
+                    "from": {"kind": "head"},
+                    "to": {"kind": "tail"},
+                },
+                "progress": {"reason": "complete", "scannedEntries": 1, "consumedEntries": 1},
+            },
+        }},
+    });
+    let mut state = crate::kit::history_v2::initial::admit_load_response(
+        &initial,
+        "s1",
+        DecimalU64::new(1),
+        &limits,
+    )
+    .expect("initial admitted");
+    state.window_mut().expect("window").gaps.push(HistoryV2Gap {
+        from: HistoryBoundary::Head,
+        to: HistoryBoundary::Position(HistoryBoundaryPosition {
+            region: "own".into(),
+            ordinal: DecimalU64::new(5),
+            side: HistoryBoundarySide::Before,
+        }),
+    });
+    let page = state
+        .window_mut()
+        .expect("window")
+        .request_page(
+            DecimalU64::new(2),
+            HistoryDirection::Before,
+            limits.default_items,
+            &limits,
+        )
+        .expect("older page request");
+    let request_key = page.context.request_key;
+    let epoch = state.window().expect("window").paging.view_epoch;
+    crate::kit::atoms::HISTORY_V2_STATE.set(state);
+    crate::kit::history_v2::consumer::seed_request_key(DecimalU64::new(2));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    *crate::kit::atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+
+    // 向上滚动：本事件已排队的 older-page 不得被 gap seek 取消。
+    assert!(!event::request_gap_page_after_scroll(Some(
+        GapSeekDirection::Before
+    )));
+    assert!(rx.try_recv().is_err(), "在途 page 存在时不得发 seek");
+    {
+        let published = crate::kit::atoms::HISTORY_V2_STATE.state();
+        let published = published.read();
+        let window = published.window().expect("window");
+        assert_eq!(window.paging.view_epoch, epoch, "不得推进导航代次");
+        let flight = window
+            .paging
+            .in_flight
+            .as_ref()
+            .expect("older-page 请求必须保留");
+        assert_eq!(flight.context.request_key, request_key);
+        assert!(matches!(
+            flight.kind,
+            HistoryV2InFlightKind::Page {
+                direction: HistoryDirection::Before,
+                ..
+            }
+        ));
+    }
+
+    // 方向未知（滚动条跳转）同样不主动 seek。
+    assert!(!event::request_gap_page_after_scroll(None));
+    assert!(rx.try_recv().is_err());
+
+    // 释放认领后，向上滚动才允许以缺口锚点 seek 恢复。
+    let handle = crate::kit::atoms::HISTORY_V2_STATE.state();
+    handle
+        .write()
+        .window_mut()
+        .expect("window")
+        .cancel_request(request_key);
+    assert!(event::request_gap_page_after_scroll(Some(
+        GapSeekDirection::Before
+    )));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(crate::kit::history_v2::outbound::OutboundCommand::Request(
+            crate::kit::history_v2::consumer::HistoryV2ConsumerRequest::Seek(_)
+        ))
+    ));
+}

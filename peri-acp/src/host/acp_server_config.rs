@@ -6,6 +6,8 @@ use super::connection;
 
 use super::lifecycle;
 
+use super::live_delivery;
+
 use super::oauth_delivery;
 
 use super::recovery;
@@ -100,6 +102,11 @@ pub(crate) struct SessionState {
     /// `peri.historyWindowV1` 的轻量运行期事实：ticket、committed tail、checkpoint、
     /// rewind 状态。**不保存历史正文**。
     pub(crate) history_window: HistoryWindowCoordinator,
+    /// 本会话当前绑定的实时投递注册表（V2 `session/load` 成功装配时写入）。
+    ///
+    /// 注册表归**连接**所有；这里只保存 `Arc` 供执行轮的事件 sink 选用。非 V2 会话为
+    /// `None`，事件保持既有 wire 形状。
+    pub(crate) live_delivery: Option<Arc<live_delivery::LiveDelivery>>,
     /// 仅内存诊断；dirty 表示事件视图需要重同步，局部补快照不清除此标记。
     pub(super) event_health: Arc<peri_acp_types::event_v2::BusHealth>,
     pub(crate) cancel_token: Option<CancellationToken>,
@@ -156,6 +163,7 @@ impl SessionState {
             structure_version: 0,
             session_generation: next_session_generation(),
             history_window: Default::default(),
+            live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
             interaction_gate: Arc::new(tokio::sync::Mutex::new(())),

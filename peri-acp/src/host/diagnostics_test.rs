@@ -195,3 +195,40 @@ async fn successful_session_update_is_unchanged_and_not_logged() {
     .await;
     assert!(buffer.text().is_empty(), "{}", buffer.text());
 }
+
+#[test]
+fn oversized_load_drops_recovery_meta_but_keeps_history() {
+    let mut result = Ok(json!({
+        "sessionId": "s1",
+        "_meta": {
+            "peri.history": {"kind": "initial"},
+            "peri.recovery": {"status": "partial"},
+        }
+    }));
+    let size = serde_json::to_vec(result.as_ref().unwrap()).unwrap().len() as u64;
+    assert!(
+        !crate::host::response_diagnostics::drop_recovery_meta_if_over_budget(&mut result, size, 0),
+        "等于上限不算超限，不能删除 recovery"
+    );
+    let response = result.as_ref().unwrap();
+    assert!(response["_meta"].get("peri.recovery").is_some());
+
+    assert!(
+        crate::host::response_diagnostics::drop_recovery_meta_if_over_budget(
+            &mut result,
+            size - 1,
+            0
+        ),
+        "包络/元数据超限时必须移除 recovery"
+    );
+    let response = result.as_ref().unwrap();
+    assert!(response["_meta"].get("peri.recovery").is_none());
+    assert!(response["_meta"].get("peri.history").is_some());
+    assert!(
+        !crate::host::response_diagnostics::drop_recovery_meta_if_over_budget(
+            &mut result,
+            size - 1,
+            0
+        )
+    );
+}

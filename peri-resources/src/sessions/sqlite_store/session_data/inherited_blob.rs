@@ -20,19 +20,16 @@
 //! 语义（不反序列化、不校验正文转义）。正文合法性由消费/解析路径负责；非 canonical 或
 //! 结构异常的信封回退 SQL，后者按原有语义反序列化首尾 payload。
 
-use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistoryWindowError};
+use peri_acp_types::history_window::HistoryWindowError;
 use peri_acp_types::messages::MessageId;
 use std::sync::Arc;
 
 use super::blob_reader::BlobReadError;
 use super::blob_reader::BlobReader;
 use super::history::HISTORY_WINDOW_INHERITED_HEADER_SQL;
-
-use super::inherited_facts::CachedInheritedFacts;
-use super::inherited_facts::InheritedCacheLookup;
-use super::inherited_facts::InheritedLayout;
-use super::inherited_facts::InheritedSummary;
-use super::inherited_facts::PayloadSpan;
+use super::inherited_facts::{
+    CachedInheritedFacts, InheritedCacheLookup, InheritedLayout, PayloadSpan,
+};
 use super::{
     SessionResourceError, SessionResourceResult, SqliteConnection, SqliteSessionData, ThreadId,
 };
@@ -624,58 +621,9 @@ impl<'reader> Cursor<'reader> {
     }
 }
 
-/// summary 读取结果：`Unsupported` 表示信封不是 canonical 形状，调用方回退 SQL。
-pub(super) enum InheritedSummaryRead {
-    Facts {
-        snapshot: Option<HistoryInheritedSnapshot>,
-    },
-    Unsupported,
-}
-
-/// 全量布局读取结果：`Unsupported` 表示信封不是 canonical 形状，调用方回退 SQL。
-pub(super) enum InheritedFactsRead {
-    Facts {
-        snapshot: Option<HistoryInheritedSnapshot>,
-        layout: Option<Arc<InheritedLayout>>,
-    },
-    Unsupported,
-}
-
-/// 定位与打开 blob 之间只做一次缓存判定/扫描，结果交给外层分类。
-enum SummaryProbe {
-    Absent,
-    Cached(Arc<InheritedSummary>),
-    Parsed(Arc<InheritedSummary>),
-    Unsupported,
-}
-
-enum LayoutProbe {
-    Absent,
-    Cached(Arc<InheritedLayout>),
-    Parsed(Arc<InheritedLayout>),
-    Unsupported,
-}
-
-pub(super) fn map_inherited_blob_error(error: BlobReadError) -> SessionResourceError {
-    match error {
-        BlobReadError::OffsetBeyondLength => {
-            HistoryWindowError::invalid_request("body chunk offset is beyond the entry length")
-                .into()
-        }
-        BlobReadError::Corrupt(detail) => super::corrupt(detail),
-        BlobReadError::Sqlite(code) => HistoryWindowError::ReadFailed {
-            detail: format!("sqlite blob read failed (code {code})"),
-        }
-        .into(),
-        BlobReadError::Transient(detail) => HistoryWindowError::ReadFailed {
-            detail: detail.to_owned(),
-        }
-        .into(),
-        BlobReadError::Unsupported => {
-            super::corrupt("inherited context is not incrementally readable")
-        }
-    }
-}
+pub(super) use super::inherited_read::{
+    map_inherited_blob_error, InheritedFactsRead, InheritedSummaryRead, LayoutProbe, SummaryProbe,
+};
 
 impl SqliteSessionData {
     fn inherited_cache_lookup(&self, id: &ThreadId, total: u64) -> InheritedCacheLookup {

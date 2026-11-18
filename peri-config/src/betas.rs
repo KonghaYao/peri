@@ -8,7 +8,7 @@
 //!
 //! 类型 [`BetaFlags`] 定义在契约 crate（`peri-acp-types`）：它同时是会话冻结载体
 //! （`FrozenContext`）的成员，消费方不重新解析 flag 语义。当前 ACP 注册表为空，
-//! 仅 TUI 本地键 `history-window-v1` 被 [`is_known`] 接受。
+//! [`is_known`] 接受 TUI 本地键 `history-window-v1` 与 `history-v2`。
 
 use crate::app::PeriConfig;
 
@@ -19,10 +19,15 @@ pub use peri_acp_types::beta_flags::{BetaFlagOrigin, BetaFlagValue, BetaFlags};
 /// 仍需服务端 `peri.historyWindowV1` 协商能力同时为真。键使用现有 kebab-case 风格。
 pub const HISTORY_WINDOW_V1: &str = "history-window-v1";
 
+/// TUI 本地 beta：History V2（统一 initial + `_peri/history`）。默认关闭；只有显式
+/// `true` 才在 initialize 中请求 `peri.history`。开启但未选中 V2 时启动显式失败
+/// （fail-closed），不会静默回退；因此该键只控制「是否尝试协商」，不是能力事实。
+pub const HISTORY_V2: &str = "history-v2";
+
 /// beta 键是否被接受：ACP 注册表 + 本 crate 的 TUI 本地 beta。
 #[must_use]
 pub fn is_known(id: &str) -> bool {
-    id == HISTORY_WINDOW_V1 || peri_acp_types::beta_flags::find(id).is_some()
+    id == HISTORY_WINDOW_V1 || id == HISTORY_V2 || peri_acp_types::beta_flags::find(id).is_some()
 }
 
 /// 由合并后 settings 派生有效值，并标注每个覆盖的**来源层**（诊断用）。

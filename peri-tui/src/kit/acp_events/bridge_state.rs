@@ -8,8 +8,8 @@
 // ── Re-exports for external consumers ──
 
 use super::{
-    agent, compact, fold, history_page, history_window, live_tool_links, render, streaming,
-    subagent, system, tool, turn,
+    agent, compact, fold, history_page, history_v2, history_window, live_tool_links, render,
+    streaming, subagent, system, tool, turn,
 };
 
 // 测试文件通过 super::* 获取这些类型——原在 acp_events.rs 中直接可用
@@ -633,6 +633,10 @@ pub(crate) fn dispatch_for_bridge(
         HistoryWindowDegraded { session_id, reason } => {
             history_window::handle_window_degraded(state, session_id, reason);
         }
+        HistoryV2ViewChanged {
+            state: v2,
+            view_generation,
+        } => history_v2::handle_view(state, v2.as_ref(), *view_generation),
         // 回放条目位置标记：只登记区间，不产生展示单元。
         ReplayEntryMarked { entry_id, position } => {
             crate::kit::history_paging::mark_own_entry(entry_id, *position)
@@ -705,6 +709,7 @@ pub(crate) fn dispatch_for_bridge(
             | ReplayToolEnded { .. }
             | HistoryPageLoaded { .. }
             | HistoryWindowPageLoaded { .. }
+            | HistoryV2ViewChanged { .. }
     ) {
         PublicationIntent::Deferred
     } else {

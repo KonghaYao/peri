@@ -1,9 +1,9 @@
-use super::{AcpError, AcpTuiClient, json};
-
-use peri_acp::transport::AcpTransport;
-use peri_acp::transport::mpsc::MpscServerTransport;
-use peri_acp::transport::types::IncomingMessage;
-use peri_acp::transport::types::RequestId;
+use super::*;
+use peri_acp::transport::{
+    AcpTransport,
+    mpsc::MpscServerTransport,
+    types::{IncomingMessage, RequestId},
+};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -119,55 +119,9 @@ async fn resume_uses_saved_execution_directory_and_commits_it_after_load() {
     );
 }
 
-#[tokio::test]
-async fn unavailable_binding_preserves_old_session_but_blocks_queued_prompt() {
-    let (client, server) = client();
-    client.lifecycle.force_stable("old", false);
-    client.project_execution_cwd(Some("/main".into()));
-    let loader = client.clone();
-    let load = tokio::spawn(async move { loader.load_session("target", "/main", None).await });
-    let (id, _) = request(&server, "peri/session_context").await;
-    server
-        .send_response(id, Err(AcpError::new(-32001, "workspace unavailable")))
-        .await
-        .expect("unavailable binding preserves old session but blocks queued prompt: fixture task and request must complete successfully");
-    assert!(
-        load.await
-            .expect("unavailable binding preserves old session but blocks queued prompt: the fixture operation must finish without an inner failure")
-            .expect_err("unavailable binding preserves old session but blocks queued prompt: the invalid fixture must be rejected")
-            .to_string()
-            .contains("workspace unavailable")
-    );
-    assert_eq!(client.current_session_id().as_deref(), Some("old"));
-    assert_eq!(client.current_execution_cwd().as_deref(), Some("/main"));
-    assert!(
-        client
-            .ensure_session("/main", None)
-            .await
-            .expect_err("unavailable binding preserves old session but blocks queued prompt: the invalid fixture must be rejected")
-            .to_string()
-            .contains("workspace unavailable")
-    );
-    let error = client
-        .prompt(
-            &peri_acp_types::messages::MessageContent::text("do work"),
-            None,
-        )
-        .await
-        .expect_err("unavailable binding preserves old session but blocks queued prompt: the invalid fixture must be rejected");
-    assert!(error.to_string().contains("workspace unavailable"));
-    let error = client
-        .dispatch_user_inputs(&peri_acp_types::session::DispatchUserInputsRequest {
-            session_id: "old".into(),
-            generation: "g".into(),
-            command_id: "dispatch".into(),
-            input_ids: vec!["input".into()],
-        })
-        .await
-        .expect_err("unavailable binding preserves old session but blocks queued prompt: the invalid fixture must be rejected");
-    assert_eq!(error.code, -32602);
-    assert!(error.to_string().contains("workspace unavailable"));
-}
+// 旧语义（失败的目标预检让 `ensure_session` 永久失败）与 39ed 修正冲突：
+// 39ed 明确要求目标预检失败不污染当前会话；同场景回归见
+// `acp_client::client::recovery_test::failed_history_preflight_keeps_current_session_usable`。
 
 #[tokio::test]
 async fn failed_startup_load_leaves_no_session_and_does_not_create_a_new_one() {

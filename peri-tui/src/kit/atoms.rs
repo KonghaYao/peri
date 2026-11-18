@@ -13,6 +13,9 @@
 
 mod mcp;
 
+mod confirm;
+pub use confirm::{CONFIRM_PAYLOAD, ConfirmAction, ConfirmPayload};
+
 mod state;
 pub use state::*;
 

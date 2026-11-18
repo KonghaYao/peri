@@ -54,11 +54,19 @@ mod execution;
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
 mod history_page;
+/// 连接级 History V2 协议服务（H2）：窗口、幂等、cursor、预算与后端 port。
+mod history_service;
+/// History V2 own 历史适配器（H3a1）：复用窗口读取端口，不开新表/列。
+mod history_v2_adapter;
+/// `session/load` 的 History V2 initial 准入（H4b）：生命周期装配前解析与拒绝。
+mod history_v2_load;
 /// `peri.historyWindowV1` 的 Host coordinator 与 open/page/seek 路由。
 mod history_window;
 /// session-owned 交互路由（按可信归属选审批 endpoint；投递失败原因的诚实产出点：
 /// `NoOnlineEndpoint` / `OwnerUnmatched` / `AttachmentDetached`，见 `interaction_router.rs`）。
 mod interaction_router;
+/// 连接级实时投递注册表（F2a）：暂停缓冲、序号与关闭语义。
+pub(crate) mod live_delivery;
 
 /// MCP Apps facade（七个 `peri/mcp/apps/*` 方法）与请求账本（设计 4a §1.3/§4.4）。
 mod apps_facade;

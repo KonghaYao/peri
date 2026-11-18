@@ -27,6 +27,14 @@ mod reverse_tests;
 mod child_origin_tests;
 
 #[cfg(test)]
+#[path = "client/history_v2_test.rs"]
+mod history_v2_tests;
+
+#[cfg(test)]
+#[path = "client/history_v2_session_test.rs"]
+mod history_v2_session_tests;
+
+#[cfg(test)]
 use peri_acp::event::AcpEvent;
 
 #[cfg(test)]

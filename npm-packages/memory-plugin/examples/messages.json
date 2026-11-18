@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "agentId": "peri-agent-example",
+  "sessionId": "session-example",
+  "records": [
+    {
+      "id": "turn-001",
+      "kind": "messages",
+      "timestamp": "2026-11-16T00:00:00Z",
+      "messages": [
+        { "role": "user", "content": "Memory MCP 提供记忆，消息由独立 CLI 导入。" },
+        { "role": "assistant", "content": "使用同一 JS 入口的 mcp 与 import 子命令。" }
+      ],
+      "tags": ["project:peri"]
+    },
+    {
+      "id": "compact-001",
+      "kind": "compact",
+      "timestamp": "2026-11-16T00:10:00Z",
+      "content": "已确认：采用现有 Hindsight 后端，不增加 MemoryMiddleware。",
+      "tags": ["project:peri"]
+    }
+  ]
+}

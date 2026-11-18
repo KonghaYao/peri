@@ -1,5 +1,6 @@
 //! Receive loop and request-class dispatch; long-running work stays host-owned.
 
+mod history;
 mod notification;
 
 use std::sync::Arc;

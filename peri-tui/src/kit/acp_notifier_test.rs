@@ -3,6 +3,7 @@ use super::AcpEventWithEpoch;
 use super::AcpNotification;
 use super::CancellationToken;
 use super::mpsc;
+use super::{BridgeSink, forward_notification, spawn_kit_notifier};
 
 use serde_json::json;
 #[tokio::test]
@@ -23,8 +24,8 @@ async fn test_history_committed_notification_forwards_typed_event() {
         "committedTail": tail,
         "hint": { "kind": "open", "anchor": { "kind": "latest" } }
     });
-    let owner = super::forward_notification(
-        &bridge_tx,
+    let owner = forward_notification(
+        &BridgeSink::direct(bridge_tx),
         AcpNotification::HistoryCommitted {
             session_id: "s1".into(),
             params: payload,
@@ -50,7 +51,7 @@ fn spawn_test_notifier() -> (
         mpsc::channel(crate::acp_client::client::NOTIFICATION_QUEUE_CAPACITY);
     let (bridge_tx, bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
     let shutdown = CancellationToken::new();
-    let _handle = super::spawn_kit_notifier(notif_rx, bridge_tx, shutdown.clone());
+    let _handle = spawn_kit_notifier(notif_rx, BridgeSink::direct(bridge_tx), shutdown.clone());
     (notif_tx, bridge_rx, shutdown)
 }
 

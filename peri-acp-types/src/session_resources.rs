@@ -21,8 +21,9 @@ pub mod history;
 
 pub mod history_window;
 pub use history_window::{
-    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
-    HistoryWindowTailExpectation, InheritedHistoryEntry, SessionHistoryWindowBounds,
+    HistoryEntryMetadata, HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
+    HistoryWindowRows, HistoryWindowTailExpectation, InheritedHistoryEntry,
+    SessionHistoryWindowBounds,
 };
 
 mod metadata;

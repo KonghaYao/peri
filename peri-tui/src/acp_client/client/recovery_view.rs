@@ -7,6 +7,7 @@ use peri_acp_types::recovery::{RecoveryView, RecoveryViewStatus};
 use serde_json::Value;
 
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
+use crate::kit::atoms::{BRIDGE_RESET_COUNTER, NOTIFICATION, Notification, local_event_tx};
 
 const RECOVERY_NOTICE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -70,7 +71,7 @@ pub(super) fn present(session_id: &str, view: &RecoveryView) {
         until: peri_time::monotonic_now() + RECOVERY_NOTICE_DURATION,
     }));
     // 启动早期 bridge 可能尚未接线：此时只保留 toast，不阻塞 load。
-    if let Some(tx) = LOCAL_EVENT_TX.get() {
+    if let Some(tx) = local_event_tx() {
         let _ = tx.send(AcpEventWithEpoch {
             child_origin: None,
             view_epoch: BRIDGE_RESET_COUNTER.get(),
@@ -88,11 +89,3 @@ pub(super) fn present(session_id: &str, view: &RecoveryView) {
 mod tests;
 
 use peri_acp_types::event_data::SystemNotification;
-
-use crate::kit::atoms::BRIDGE_RESET_COUNTER;
-
-use crate::kit::atoms::LOCAL_EVENT_TX;
-
-use crate::kit::atoms::NOTIFICATION;
-
-use crate::kit::atoms::Notification;
