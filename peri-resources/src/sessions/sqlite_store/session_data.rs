@@ -73,6 +73,8 @@ mod interrupted;
 mod lifecycle;
 #[path = "session_data/mq.rs"]
 mod mq;
+#[path = "session_data/mq_payload.rs"]
+mod mq_payload;
 #[path = "session_data/rewind_candidates.rs"]
 mod rewind_candidates;
 

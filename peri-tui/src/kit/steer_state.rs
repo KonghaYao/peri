@@ -125,6 +125,7 @@ fn newer_or_identical(previous: &UserInputQueueSnapshot, next: &UserInputQueueSn
                 && left.state == right.state
                 && left.content == right.content
                 && left.original_draft == right.original_draft
+                && left.plugin_selections == right.plugin_selections
         })
 }
 
@@ -208,6 +209,8 @@ struct RecoveredInput {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SteerState {
     pub(crate) enabled: bool,
+    /// 服务端确认入队请求可携带 `pluginSelections`；旧 Host 为 false。
+    pub(crate) plugin_selections: bool,
     sessions: HashMap<String, SessionSteers>,
 }
 
@@ -741,6 +744,14 @@ pub(crate) fn is_enabled() -> bool {
     STEERS.state().read().enabled
 }
 
+/// 服务端是否确认 `EnqueueUserInputRequest.pluginSelections` 可用。
+#[must_use]
+pub(crate) fn supports_plugin_selections() -> bool {
+    let atom = STEERS.state();
+    let state = atom.read();
+    state.enabled && state.plugin_selections
+}
+
 pub(crate) fn session_boundary(session_id: &str, epoch: u64) {
     STEERS.state().write().reset_session(session_id, epoch);
 }
@@ -767,6 +778,7 @@ pub(crate) fn establish_session_snapshot(snapshot: UserInputQueueSnapshot) {
 pub(crate) fn enqueue(
     original_draft: String,
     attachments: Vec<PendingAttachment>,
+    plugin_selections: Vec<peri_acp_types::session::PluginSelection>,
 ) -> Result<(), String> {
     let session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let epoch = atoms::BRIDGE_RESET_COUNTER.get();
@@ -774,6 +786,7 @@ pub(crate) fn enqueue(
         input_id: uuid::Uuid::now_v7().to_string(),
         content: content_with_attachments(&original_draft, &attachments),
         original_draft,
+        plugin_selections,
     };
     let command = SteerCommand {
         session_id,

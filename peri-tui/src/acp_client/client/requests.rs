@@ -116,6 +116,9 @@ impl AcpTuiClient {
         caps.history_window_v1 =
             !history_v2_requested && crate::kit::atoms::HISTORY_WINDOW_V1.get();
         caps.ui_commands = specs.to_vec();
+        // 入队契约的独立子能力：旧 Host 不认识该 key 也不会回显，客户端据此保留
+        // 草稿与选择，不会先发送再被 deny_unknown_fields 拒绝。
+        caps.user_input_queue_plugin_selections = true;
         self.mcp_control
             .store(false, std::sync::atomic::Ordering::Release);
         let mut meta = caps.to_agent_meta();
@@ -157,6 +160,17 @@ impl AcpTuiClient {
             .unwrap_or(false);
         self.user_input_queue
             .store(supported, std::sync::atomic::Ordering::Release);
+        // 旧 Host 的 enqueue 拒绝未知字段：只有服务端明确回显子能力才允许发送
+        // pluginSelections；缺失/非布尔一律 fail-closed。
+        let plugin_selections_supported = supported
+            && result
+                .pointer("/agentCapabilities/_meta/peri.userInputQueue.pluginSelections")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        self.user_input_queue_plugin_selections.store(
+            plugin_selections_supported,
+            std::sync::atomic::Ordering::Release,
+        );
         // fail-closed：只有服务端在 initialize 响应中明确回显 true 才启用。
         // 客户端请求值不是服务端能力事实，缺失/非布尔一律按不支持处理。
         let history_window = result
@@ -202,7 +216,10 @@ impl AcpTuiClient {
             crate::kit::history_v2::reset_state();
         }
         if self.projection_mode == super::ClientProjectionMode::Interactive {
-            crate::kit::steer_state::STEERS.state().write().enabled = supported;
+            let steers_atom = crate::kit::steer_state::STEERS.state();
+            let mut steers = steers_atom.write();
+            steers.enabled = supported;
+            steers.plugin_selections = plugin_selections_supported;
         }
         Ok(())
     }
@@ -223,7 +240,7 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
-        self.send_prompt(content, request_id, None)
+        self.send_prompt(content, request_id, None, &[])
             .await
             .map(|_| ())
     }
@@ -233,13 +250,16 @@ impl AcpTuiClient {
     /// 身份校验与 Stable 选择在同一 operation gate 内完成；切换会话后迟到的
     /// 排队提交返回 [`crate::acp_client::SESSION_BINDING_CHANGED_CODE`]，由
     /// 调用方显式取消并反馈，绝不改投新会话。
+    ///
+    /// `plugin_selections` 只含插件 ID；空集合不写 wire 字段，保持旧 Host 形态。
     pub(crate) async fn prompt_in_session(
         &self,
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
         expected: &(String, u64),
+        plugin_selections: &[peri_acp_types::session::PluginSelection],
     ) -> Result<(), AcpError> {
-        self.send_prompt(content, request_id, Some(expected))
+        self.send_prompt(content, request_id, Some(expected), plugin_selections)
             .await
             .map(|_| ())
     }
@@ -250,7 +270,7 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<PromptResponse, AcpError> {
-        let response = self.send_prompt(content, request_id, None).await?;
+        let response = self.send_prompt(content, request_id, None, &[]).await?;
         serde_json::from_value(response).map_err(|error| {
             AcpError::new(-32603, format!("invalid session/prompt response: {error}"))
         })
@@ -261,6 +281,7 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
         expected: Option<&(String, u64)>,
+        plugin_selections: &[peri_acp_types::session::PluginSelection],
     ) -> Result<Value, AcpError> {
         let (session_id, lease) = self
             .open_prompt_after_session_loads(request_id.clone(), expected)
@@ -271,6 +292,9 @@ impl AcpTuiClient {
         });
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
+        }
+        if !plugin_selections.is_empty() {
+            params["pluginSelections"] = json!(plugin_selections);
         }
         let session_id = params.get("sessionId").cloned();
         let request_id = params.get("requestId").cloned();

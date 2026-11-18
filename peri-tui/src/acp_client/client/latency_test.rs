@@ -35,6 +35,7 @@ fn enqueue() -> EnqueueUserInputRequest {
         input_id: "input".into(),
         content: MessageContent::text("synthetic input"),
         original_draft: "synthetic input".into(),
+        plugin_selections: Vec::new(),
     }
 }
 

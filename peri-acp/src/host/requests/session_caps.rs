@@ -91,6 +91,11 @@ fn apply_backend_caps(mut caps: PeriCaps, supports_history_window: bool) -> Peri
     if !supports_history_window {
         caps.history_window_v1 = false;
     }
+    // 子能力不能脱离队列能力单独成立：未协商队列时回显 false，
+    // 客户端据此不会发送旧 Host 不认识的 pluginSelections。
+    if !caps.user_input_queue {
+        caps.user_input_queue_plugin_selections = false;
+    }
     caps
 }
 
@@ -160,6 +165,31 @@ mod tests {
         serde_json::from_value::<HistoryErrorData>(data.clone())
             .expect("data 必须是合法的 HistoryErrorData")
             .reason
+    }
+
+    #[test]
+    fn plugin_selection_capability_cannot_outlive_queue_capability() {
+        let orphan = PeriCaps {
+            user_input_queue: false,
+            user_input_queue_plugin_selections: true,
+            ..PeriCaps::default()
+        };
+        let caps = effective_caps_for_backend(orphan, &Map::new(), true, true).unwrap();
+        assert!(
+            !caps.user_input_queue_plugin_selections,
+            "子能力必须依赖队列能力"
+        );
+
+        let paired = PeriCaps {
+            user_input_queue: true,
+            user_input_queue_plugin_selections: true,
+            ..PeriCaps::default()
+        };
+        let caps = effective_caps_for_backend(paired, &Map::new(), true, true).unwrap();
+        assert!(
+            caps.user_input_queue_plugin_selections,
+            "队列可用时原样回显"
+        );
     }
 
     #[test]

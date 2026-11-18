@@ -248,6 +248,11 @@ impl DynamicToolLoader {
         Ok(())
     }
 
+    /// 构造本 Loader 时绑定的插件来源；与名称摘要使用同一个身份快照。
+    fn plugin_source(&self) -> Option<&str> {
+        self.identity.plugin.as_deref()
+    }
+
     /// 连接提交后验证当前会话的下一轮目录（plan 7 / 7.1）。
     ///
     /// 只读：不发布候选、不改变当前 Act 的工具视图；端口在执行期由 canonical
@@ -354,7 +359,7 @@ impl BaseTool for DynamicToolLoader {
 pub(crate) fn dynamic_loader_tools(
     pool: &Arc<McpClientPool>,
     session: Option<&str>,
-) -> Vec<Arc<dyn BaseTool>> {
+) -> Vec<Arc<DynamicToolLoader>> {
     if !pool.is_open() {
         return Vec::new();
     }
@@ -370,7 +375,7 @@ pub(crate) fn dynamic_loader_tools(
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut seen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let mut loaders: Vec<Arc<dyn BaseTool>> = Vec::new();
+    let mut loaders: Vec<Arc<DynamicToolLoader>> = Vec::new();
     for (server_key, config) in candidates {
         if session.is_some_and(|session| !pool.is_visible_to_session(&server_key, session)) {
             continue;
@@ -401,6 +406,31 @@ pub(crate) fn dynamic_loader_tools(
         loaders.push(Arc::new(loader));
     }
     loaders
+}
+
+/// 当前池内可投影的 dynamic Loader 绑定（Host 生成插件指引的受控投影）。
+///
+/// 与 [`dynamic_loader_tools`] 走同一条可见性 / 关闭 / 去重 / 排序规则；
+/// 名称与插件归属必须取自同一个 `LoaderIdentity`，不能在两次读取之间
+/// 让共享 `plugin_sources` 的替换拆散它们。
+pub(crate) fn dynamic_loader_bindings(
+    pool: &Arc<McpClientPool>,
+    session: Option<&str>,
+) -> Vec<peri_acp_types::mcp_control::DynamicLoaderBinding> {
+    bindings_from(&dynamic_loader_tools(pool, session))
+}
+
+fn bindings_from(
+    loaders: &[Arc<DynamicToolLoader>],
+) -> Vec<peri_acp_types::mcp_control::DynamicLoaderBinding> {
+    loaders
+        .iter()
+        .map(|loader| peri_acp_types::mcp_control::DynamicLoaderBinding {
+            loader: loader.name.clone(),
+            server_key: loader.identity.server_key.clone(),
+            plugin_source: loader.plugin_source().map(str::to_owned),
+        })
+        .collect()
 }
 
 fn not_connected(server: &str) -> McpPoolError {

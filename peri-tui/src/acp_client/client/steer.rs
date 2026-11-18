@@ -22,6 +22,17 @@ impl AcpTuiClient {
         self.user_input_queue.load(Ordering::Acquire)
     }
 
+    /// Whether the server accepted `pluginSelections` inside enqueue requests.
+    ///
+    /// Older hosts reject the unknown field, so this is negotiated separately from
+    /// the queue capability and fails closed when the echo is missing.
+    pub(crate) fn supports_plugin_selections(&self) -> bool {
+        self.supports_user_input_queue()
+            && self
+                .user_input_queue_plugin_selections
+                .load(Ordering::Acquire)
+    }
+
     async fn input_request<P: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,

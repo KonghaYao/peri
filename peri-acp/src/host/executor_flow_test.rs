@@ -693,6 +693,7 @@ pub(super) fn make_turn_input(
     TurnInput {
         event_sink,
         content,
+        plugin_selections: vec![],
         continuation,
         frozen: None,
         history_payloads: history

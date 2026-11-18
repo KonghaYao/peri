@@ -5,6 +5,7 @@ use crate::session::user_input_mailbox::UserInputQueueError;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::TakeBackUserInputRequest;
 use peri_acp_types::session::UserInputState;
 use std::sync::Arc;
@@ -70,6 +71,111 @@ fn test_mailbox_takeback_restores_full_multimodal_input_and_blocks_dispatch() {
     assert!(
         inbox.queue_for_test().is_empty_sync(),
         "已取回内容不进入消费路径"
+    );
+}
+
+/// 两条排队输入各自携带插件选择：快照按 inputId 投影，撤回只带走被撤回项的选择。
+#[test]
+fn test_queued_inputs_keep_their_own_plugin_selection_through_withdraw() {
+    let (mailbox, _) = crate::session::user_input_mailbox::tests::make_mailbox();
+    mailbox
+        .attach_external_attempt_sync(CancellationToken::new(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let mut first = crate::session::user_input_mailbox::tests::make_input(&mailbox, "第一个任务");
+    first.plugin_selections = vec![PluginSelection::new("alpha")];
+    let mut second = crate::session::user_input_mailbox::tests::make_input(&mailbox, "第二个任务");
+    second.plugin_selections = vec![PluginSelection::new("beta@market")];
+    for input in [&first, &second] {
+        mailbox
+            .enqueue_sync(input)
+            .expect("the enqueue sync fixture result is required for this assertion");
+    }
+
+    let snapshot = mailbox.snapshot_sync();
+    let selection_of = |input_id: &str| {
+        snapshot
+            .items
+            .iter()
+            .find(|item| item.input_id == input_id)
+            .expect("the queued fixture must stay visible in the snapshot")
+            .plugin_selections
+            .clone()
+    };
+    assert_eq!(
+        selection_of(&first.input_id),
+        vec![PluginSelection::new("alpha")],
+        "后一条输入不得覆盖前一条的选择"
+    );
+    assert_eq!(
+        selection_of(&second.input_id),
+        vec![PluginSelection::new("beta@market")],
+        "同一队列两条输入各自保留选择"
+    );
+
+    let receipt = mailbox
+        .take_back_sync(&TakeBackUserInputRequest {
+            session_id: "session".into(),
+            generation: mailbox.generation().into(),
+            command_id: "takeback-selected".into(),
+            input_id: first.input_id.clone(),
+        })
+        .expect("the take back sync fixture result is required for this assertion");
+    assert_eq!(
+        receipt
+            .taken_back
+            .expect("the taken back fixture result is required for this assertion")
+            .plugin_selections,
+        vec![PluginSelection::new("alpha")],
+        "撤回回执必须带回该输入的选择，供编辑器恢复后重发"
+    );
+    assert_eq!(
+        mailbox
+            .snapshot_sync()
+            .items
+            .iter()
+            .find(|item| item.input_id == second.input_id)
+            .expect("the untouched queued fixture must stay visible in the snapshot")
+            .plugin_selections,
+        vec![PluginSelection::new("beta@market")],
+        "撤回前一条不得改动后一条的选择"
+    );
+}
+
+/// 已移交输入的插件选择按记录投影，供 Reason 准备阶段生成指引。
+#[test]
+fn test_handed_off_plugin_selections_follow_the_dispatched_inputs() {
+    let (mailbox, _) = crate::session::user_input_mailbox::tests::make_mailbox();
+    mailbox
+        .attach_external_attempt_sync(CancellationToken::new(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let mut first = crate::session::user_input_mailbox::tests::make_input(&mailbox, "第一个任务");
+    first.plugin_selections = vec![PluginSelection::new("alpha")];
+    let mut second = crate::session::user_input_mailbox::tests::make_input(&mailbox, "第二个任务");
+    second.plugin_selections = vec![PluginSelection::new("beta@market")];
+    for input in [&first, &second] {
+        mailbox
+            .enqueue_sync(input)
+            .expect("the enqueue sync fixture result is required for this assertion");
+    }
+    assert!(
+        mailbox.handed_off_plugin_selections().is_empty(),
+        "未移交的输入不能提前成为本轮指引来源"
+    );
+
+    mailbox
+        .dispatch_sync(&crate::session::user_input_mailbox::tests::make_dispatch(
+            &mailbox,
+            &[&first, &second],
+        ))
+        .expect("the dispatch sync fixture result is required for this assertion");
+
+    assert_eq!(
+        mailbox.handed_off_plugin_selections(),
+        vec![
+            PluginSelection::new("alpha"),
+            PluginSelection::new("beta@market")
+        ],
+        "本轮执行的选择必须来自已移交输入，而不是当前全局选择"
     );
 }
 

@@ -78,8 +78,68 @@ pub(super) fn build_attachments_label(attachments: &[PendingAttachment]) -> Opti
     Some(parts.join(" · "))
 }
 
+/// composer 底部左侧的插件选择标签。
+///
+/// 只展示插件 ID（`插件: a@mkt · b`）；提交后选择随该条输入冻结，标签不再代表
+/// “当前全局选择”。
+pub(super) fn build_plugin_label(
+    selections: &[peri_acp_types::session::PluginSelection],
+) -> Option<String> {
+    if selections.is_empty() {
+        return None;
+    }
+    let ids = selections
+        .iter()
+        .map(|selection| selection.plugin_id.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(i18n::tr_args(
+        "composer-plugin-selections",
+        &[("plugins".to_string(), FluentValue::from(ids))],
+    ))
+}
+
+/// composer 底部左侧标签：插件选择在前、附件在后。
+///
+/// `max_width` 是右侧资源线之外可用的列数。放不下时先截断插件 ID，
+/// 不能因为插件标签过长把附件提示裁掉。
+pub(super) fn build_composer_tags(
+    plugin_label: Option<String>,
+    attachments_label: Option<String>,
+    max_width: usize,
+) -> Option<String> {
+    let plugin_label = plugin_label.filter(|label| !label.is_empty());
+    let attachments_label = attachments_label.filter(|label| !label.is_empty());
+    match (plugin_label, attachments_label) {
+        (None, None) => None,
+        (Some(plugin), None) => Some(crate::truncate::truncate_by_width(&plugin, max_width)),
+        (None, Some(attachments)) => {
+            Some(crate::truncate::truncate_by_width(&attachments, max_width))
+        }
+        (Some(plugin), Some(attachments)) => {
+            let separator = " · ";
+            let full = format!("{plugin}{separator}{attachments}");
+            if full.width() <= max_width {
+                return Some(full);
+            }
+            // `truncate_by_width` 的省略号不占预算，先留 1 列避免覆盖右侧资源线。
+            let plugin_budget = max_width
+                .saturating_sub(attachments.width() + separator.width())
+                .saturating_sub(1);
+            if plugin_budget == 0 {
+                return Some(crate::truncate::truncate_by_width(&attachments, max_width));
+            }
+            Some(format!(
+                "{}{separator}{attachments}",
+                crate::truncate::truncate_by_width(&plugin, plugin_budget)
+            ))
+        }
+    }
+}
+
 /// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧附件标签
-/// （`[图片] 图片 1`，见 [`build_attachments_label`]）+ 右侧资源线
+/// （`[图片] 图片 1`，见 [`build_attachments_label`]；插件选择见
+/// [`build_plugin_label`]）+ 右侧资源线
 /// （`footer_right`：CPU% · MEM · ctx，原状态栏迁移）。
 /// 窄屏（§11）逐级隐藏：`show_top=false`（h<12）隐藏 title_top 整行；
 /// `show_bottom=false`（h<8）隐藏 title_bottom。
@@ -88,7 +148,7 @@ pub(super) fn build_attachments_label(attachments: &[PendingAttachment]) -> Opti
 pub(super) fn build_composer_block(
     loading: bool,
     session_title: &str,
-    attachments_label: Option<&str>,
+    composer_tags: Option<&str>,
     footer_right: Option<Line<'static>>,
     show_top: bool,
     show_bottom: bool,
@@ -112,12 +172,18 @@ pub(super) fn build_composer_block(
         }
     }
     if show_bottom {
-        // 左侧附件标签 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
-        if let Some(f) = attachments_label {
-            block = block.title_bottom(Line::from(Span::styled(
-                format!(" {f} "),
-                Style::default().fg(sem.text.muted),
-            )));
+        // 左侧插件/附件标签 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）。
+        // 右侧 title 不预留空间时会直接覆盖左侧单元格，窄屏必须按右侧宽度截断。
+        let right_width = footer_right.as_ref().map_or(0, |line| line.width());
+        let left_budget = usize::from(max_width).saturating_sub(right_width + 2);
+        if let Some(f) = composer_tags {
+            let fitted = crate::truncate::truncate_by_width(f, left_budget);
+            if !fitted.is_empty() {
+                block = block.title_bottom(Line::from(Span::styled(
+                    format!(" {fitted} "),
+                    Style::default().fg(sem.text.muted),
+                )));
+            }
         }
         if let Some(line) = footer_right {
             block = block.title_bottom(line.right_aligned());

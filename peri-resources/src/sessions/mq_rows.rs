@@ -114,8 +114,9 @@ pub(in crate::sessions) fn source_token(
 
 pub(in crate::sessions) fn payload_json(
     payload: &peri_acp_types::store::PersistedPayload,
+    plugin_selections: &[peri_acp_types::session::PluginSelection],
 ) -> SessionResourceResult<String> {
-    peri_acp_types::store::serialize_persisted_payload(payload)
+    peri_acp_types::store::serialize_persisted_payload_with_selections(payload, plugin_selections)
         .map_err(|_| super::failure::corrupt("MQ payload is not serializable"))
 }
 
@@ -170,8 +171,9 @@ pub(in crate::sessions) fn decode_entry(row: RawMqRow<'_>) -> SessionResourceRes
         .map_err(|_| super::failure::corrupt("MQ row has an unknown message source"))?;
     let policy = serde_json::from_str(row.policy_json)
         .map_err(|_| super::failure::corrupt("MQ row has an unreadable message policy"))?;
-    let payload = peri_acp_types::store::deserialize_persisted_payload(row.payload_json)
-        .map_err(|_| super::failure::corrupt("MQ row has an unreadable payload"))?;
+    let (payload, plugin_selections) =
+        peri_acp_types::store::deserialize_persisted_payload_with_selections(row.payload_json)
+            .map_err(|_| super::failure::corrupt("MQ row has an unreadable payload"))?;
     let id = row
         .id
         .parse::<uuid::Uuid>()
@@ -185,6 +187,7 @@ pub(in crate::sessions) fn decode_entry(row: RawMqRow<'_>) -> SessionResourceRes
         payload,
         policy,
         original_draft: row.original_draft.map(str::to_owned),
+        plugin_selections,
     })
 }
 

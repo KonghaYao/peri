@@ -73,6 +73,19 @@ impl MessagePolicy {
         }
     }
 
+    /// 绑定产生它的执行、但不要求新执行处理的非唤醒消息（如插件指引）。
+    ///
+    /// 同一执行按 `ProjectOnly` 正常提交；其他执行在 Receive 中按 `Suppressed` 删除，
+    /// 避免失败 attempt 的遗留行进入后续 transcript。
+    #[must_use]
+    pub fn execution_scoped(execution: ExecutionBinding) -> Self {
+        Self {
+            requirement: MessageRequirement::Optional,
+            activation: MessageActivation::ContinueCurrentRun(execution),
+            model_visible: true,
+        }
+    }
+
     /// 绑定当前执行的停止意图：同一执行仍经 Receive 唯一退出口生效；
     /// 其他执行中视为过期控制消息（`Suppressed`），不产生推理义务。
     pub fn stop_current_run(execution: ExecutionBinding) -> Self {

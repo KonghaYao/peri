@@ -117,6 +117,15 @@ pub async fn emit_command_feedback(
     }
 }
 
+/// 注入内容与可归属的插件来源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectPayload {
+    /// 注入进 agent 管线的原文。
+    pub text: String,
+    /// 插件域 slash 命令的插件名；其他注入来源为 `None`。
+    pub plugin: Option<String>,
+}
+
 /// 命令拦截结果三态（Phase 5 Step 6 定案，计划代码形态）：
 ///
 /// - [`InterceptOutcome::Handled`]：命令已完成（`Done` 映射——ok:true /
@@ -127,7 +136,7 @@ pub async fn emit_command_feedback(
 ///   fall through 进 agent 管线（不报错，设计 §78）
 pub enum InterceptOutcome {
     Handled(Box<PromptResult>),
-    Inject(String),
+    Inject(InjectPayload),
     PassThrough,
 }
 
@@ -157,6 +166,15 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
     // 命令文本，命令名 + 参数词法切分由注册表 resolve 统一完成，不变式 3）。
     let Some(resolved) = (req.command_lookup)(stripped) else {
         return InterceptOutcome::PassThrough;
+    };
+
+    // 插件域 slash 解析为同一种插件使用上下文：来源由路由表 provenance 声明，
+    // 不从命令文本反推；后续指引与显式选择共用同一生成过程。
+    let slash_plugin = match &resolved.entry.provenance.source {
+        peri_acp_types::command::command_route::CommandSource::Plugin { name } => {
+            Some(name.clone())
+        }
+        _ => None,
     };
 
     // 命令识别先于大历史投影构造：普通 prompt 在 resolve 失败时直接透传，
@@ -371,7 +389,10 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 failure,
             }))
         }
-        CommandOutcome::Inject(payload) => InterceptOutcome::Inject(payload),
+        CommandOutcome::Inject(payload) => InterceptOutcome::Inject(InjectPayload {
+            text: payload,
+            plugin: slash_plugin,
+        }),
         CommandOutcome::Delegate(_) => {
             unreachable!("Delegate 本 Phase 无实现（恒 Done）；Phase 6 ui 域上送注册后接入")
         }

@@ -182,6 +182,7 @@ async fn steer_managed_turn_schedules_continuation_without_second_dispatch() {
             input_id: RUNNING_ID.into(),
             content: MessageContent::text(RUNNING_TEXT),
             original_draft: RUNNING_TEXT.into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("在途输入应入队");
@@ -210,6 +211,7 @@ async fn steer_managed_turn_schedules_continuation_without_second_dispatch() {
             input_id: INPUT_ID.into(),
             content: MessageContent::text(STEER_TEXT),
             original_draft: STEER_TEXT.into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("暂存区入队应被接受");
@@ -382,6 +384,7 @@ async fn steer_dispatch_cancelled_turn_keeps_activation_and_consumes_input() {
             input_id: INPUT_ID.into(),
             content: MessageContent::text(STEER_TEXT),
             original_draft: STEER_TEXT.into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("暂存区入队应被接受");
@@ -504,6 +507,7 @@ async fn failed_attach_keeps_drop_fallback_and_allows_next_dispatch() {
             input_id: ATTACH_FAILED_RUNNING_ID.into(),
             content: MessageContent::text(RUNNING_TEXT),
             original_draft: RUNNING_TEXT.into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("运行中输入应入队");
@@ -570,6 +574,7 @@ async fn failed_attach_keeps_drop_fallback_and_allows_next_dispatch() {
             input_id: ATTACH_FAILED_STEER_ID.into(),
             content: MessageContent::text(STEER_TEXT),
             original_draft: STEER_TEXT.into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("失败后新输入应入队");
@@ -593,6 +598,7 @@ async fn failed_attach_keeps_drop_fallback_and_allows_next_dispatch() {
             input_id: ATTACH_FAILED_NEXT_ID.into(),
             content: MessageContent::text("失败后排队"),
             original_draft: "失败后排队".into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("后续普通输入应入队");

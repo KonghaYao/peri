@@ -3,6 +3,8 @@
 use crate::session::test_resources::mock::MockResumeClaim;
 use crate::session::test_resources::mock::MockSessionResources;
 use async_trait::async_trait;
+
+use super::mock_session_resources::MqEnqueueUncertainty;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{MqEnqueueOutcome, MqInput, ThreadMqStore as _};
@@ -358,8 +360,35 @@ impl SessionResources for MockSessionResources {
                     payload: input.payload,
                     policy: input.policy,
                     original_draft: input.original_draft,
+                    plugin_selections: input.plugin_selections,
                 },
             });
+        }
+        let fault = {
+            let mut fault = self.mq_enqueue_uncertainty.lock().expect(
+                "self mq enqueue uncertainty mutex must remain unpoisoned throughout the test",
+            );
+            match fault.as_mut() {
+                Some(pending) if pending.skip == 0 => fault.take(),
+                Some(pending) => {
+                    pending.skip -= 1;
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(fault) = fault {
+            return match fault.uncertainty {
+                MqEnqueueUncertainty::WithoutWrite => Err(
+                    SessionResourceError::persistence_uncertain(Some(thread_id.clone())),
+                ),
+                MqEnqueueUncertainty::AfterWrite => {
+                    self.mq.mq_enqueue(thread_id, input).await?;
+                    Err(SessionResourceError::persistence_uncertain(Some(
+                        thread_id.clone(),
+                    )))
+                }
+            };
         }
         self.mq.mq_enqueue(thread_id, input).await
     }

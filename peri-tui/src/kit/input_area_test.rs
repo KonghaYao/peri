@@ -849,6 +849,84 @@ fn test_composer_label_non_image_keeps_file_count() {
     assert_eq!(render::build_attachments_label(&[]), None);
 }
 
+/// 插件选择标签只列插件 ID，空选择不产生标签。
+#[test]
+#[serial]
+fn test_composer_plugin_label_lists_selected_ids() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    assert_eq!(
+        render::build_plugin_label(&[
+            peri_acp_types::session::PluginSelection::new("alpha"),
+            peri_acp_types::session::PluginSelection::new("beta@market"),
+        ])
+        .as_deref(),
+        Some("插件: alpha · beta@market")
+    );
+    assert_eq!(render::build_plugin_label(&[]), None);
+}
+
+/// 插件选择在附件之前，两者都存在时共用一个标签行。
+#[test]
+#[serial]
+fn test_composer_tags_put_plugin_selection_before_attachments() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    assert_eq!(
+        render::build_composer_tags(
+            render::build_plugin_label(&[peri_acp_types::session::PluginSelection::new("alpha")]),
+            render::build_attachments_label(&[png_attachment()]),
+            80,
+        )
+        .as_deref(),
+        Some("插件: alpha · [图片] 图片 1")
+    );
+    assert_eq!(render::build_composer_tags(None, None, 80), None);
+}
+
+/// 40 列 composer + 两个长插件 ID：插件标签截断，附件提示必须仍在行尾可见，
+/// 不能被插件 ID 挤出或被右侧资源线覆盖。
+#[test]
+#[serial]
+fn test_composer_tags_keep_attachment_visible_in_narrow_composer() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    let plugin = render::build_plugin_label(&[
+        peri_acp_types::session::PluginSelection::new("alpha-tools@market"),
+        peri_acp_types::session::PluginSelection::new("beta-tools@market"),
+    ]);
+    let attachment = render::build_attachments_label(&[png_attachment()]);
+    // 40 列 composer 减去右侧 " MEM 512MB "（11 列）与左右各 1 列 padding。
+    let tags = render::build_composer_tags(plugin, attachment, 27)
+        .expect("插件与附件同时存在时必须生成标签");
+    assert!(
+        tags.ends_with("[图片] 图片 1"),
+        "附件提示必须保留在行尾: {tags:?}"
+    );
+    assert!(tags.contains('…'), "插件 ID 放不下时应截断: {tags:?}");
+
+    let block = render::build_composer_block(
+        false,
+        "",
+        Some(&tags),
+        Some(Line::from(" MEM 512MB ")),
+        false,
+        true,
+        40,
+    );
+    let rows = render_block_text(&block, 40, 3);
+    assert!(
+        rows[2].replace(' ', "").contains("[图片]"),
+        "40 列下附件提示必须可见: {:?}",
+        rows[2]
+    );
+    assert!(
+        rows[2].contains("MEM 512MB"),
+        "右侧资源线必须保留: {:?}",
+        rows[2]
+    );
+}
+
 /// 标签 + 边框：composer 底栏确实显示图片标签（端到端，不只测生成函数）。
 #[test]
 #[serial]

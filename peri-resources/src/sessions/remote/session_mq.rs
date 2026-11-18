@@ -127,7 +127,8 @@ impl RemoteSessionData {
             ));
         }
         let message_id = label(input.id);
-        let payload = crate::sessions::mq_rows::payload_json(&input.payload)?;
+        let payload =
+            crate::sessions::mq_rows::payload_json(&input.payload, &input.plugin_selections)?;
         let policy = crate::sessions::mq_rows::policy_json(&input.policy);
         let ensures_processing = input.policy.ensures_processing();
         let kind = crate::sessions::mq_rows::kind_token(input.kind)?;
@@ -245,7 +246,8 @@ impl RemoteSessionData {
             ));
         }
         let message_id = label(input.id);
-        let payload = crate::sessions::mq_rows::payload_json(&input.payload)?;
+        let payload =
+            crate::sessions::mq_rows::payload_json(&input.payload, &input.plugin_selections)?;
         let policy = crate::sessions::mq_rows::policy_json(&input.policy);
         let kind = crate::sessions::mq_rows::kind_token(input.kind)?;
         let source = crate::sessions::mq_rows::source_token(&input.source)?;
@@ -723,6 +725,7 @@ impl RemoteSessionData {
                                         &content,
                                         &crate::sessions::mq_rows::payload_json(
                                             &item.entry.payload,
+                                            &item.entry.plugin_selections,
                                         )?,
                                     ) =>
                             {
@@ -880,6 +883,7 @@ fn settled_without_write(input: MqInput) -> MqEnqueueOutcome {
             payload: input.payload,
             policy: input.policy,
             original_draft: input.original_draft,
+            plugin_selections: input.plugin_selections,
         },
     }
 }

@@ -130,6 +130,7 @@ pub(super) const VISIBLE_ITEMS: usize = 5;
 pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
+    let highlighted_plugin = hooks.use_state(|| Option::<InstalledIdentity>::None);
     let active_tab = hooks.use_state(|| PluginViewTab::Installed);
     let detail_plugin = hooks.use_state(|| Option::<InstalledIdentity>::None);
     let action_index = hooks.use_state(|| 0usize);
@@ -236,6 +237,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 &panel_scope,
                 area,
                 selected,
+                highlighted_plugin,
                 active_tab,
                 discover,
                 action_index,
@@ -255,6 +257,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     operation::tests::visit_mounted_panel(operation::tests::MountedPanel {
         operation,
         selected,
+        highlighted_plugin,
         active_tab,
         discover,
         action_index,
@@ -271,6 +274,16 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sel = *selected.read();
     let current_tab = *active_tab.read();
     let detail_identity = detail_plugin.read().clone();
+    // 记录本帧高亮的插件身份：Space 事件按身份解析，列表在两帧之间重排时
+    // 不会把旧行号命中到替换项。
+    *highlighted_plugin.write_no_update() =
+        if current_tab == PluginViewTab::Installed && detail_identity.is_none() {
+            plugins
+                .get(sel)
+                .map(|plugin| InstalledIdentity::new(plugin, current_scope()))
+        } else {
+            None
+        };
     let ai = *action_index.read();
     let scroll_start =
         peri_tui_components::list_nav::scroll_start_for_selected(sel, count, VISIBLE_ITEMS);

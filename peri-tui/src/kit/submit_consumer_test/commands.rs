@@ -141,6 +141,7 @@ async fn test_empty_agent_text_skipped() {
         SubmitRequest::AgentText {
             text: "   \n\t ".to_string(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         },
         None,
     )
@@ -164,6 +165,7 @@ async fn test_creates_session_when_missing() {
             SubmitRequest::AgentText {
                 text: "hello".to_string(),
                 attachments: Vec::new(),
+                plugin_selections: Vec::new(),
             },
             None,
         ),

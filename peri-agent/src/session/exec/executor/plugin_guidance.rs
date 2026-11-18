@@ -1,0 +1,269 @@
+//! Host-side plugin usage guidance（plan 9.1 / 9.3）。
+//!
+//! 客户端只提交插件 ID；指引中的 Loader 名称来自当前会话的受控池投影与已加载
+//! 插件元数据。slash 插件命令与显式选择共用本模块的同一过程，命令处理器不连接
+//! MCP，也不自行拼装指引。
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use peri_acp_types::mcp_control::DynamicLoaderBinding;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::plugin::LoadedPlugin;
+use peri_acp_types::session::ExecutionBinding;
+use peri_acp_types::session::MessageKind;
+use peri_acp_types::session::MessagePolicy;
+use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::MqEnqueueDisposition;
+use peri_acp_types::session::MqEntry;
+use peri_acp_types::session::MqFilter;
+use peri_acp_types::session::PluginSelection;
+use peri_acp_types::session::QueueClosed;
+use peri_acp_types::session::QueuedMessage;
+use peri_acp_types::session_resources::MutationOutcome;
+use peri_acp_types::session_resources::SessionResourceError;
+use peri_acp_types::system_reminder::ReminderAudience;
+use peri_acp_types::system_reminder::ReminderAudiences;
+use peri_acp_types::system_reminder::ReminderCategory;
+use peri_acp_types::system_reminder::ReminderDelivery;
+use peri_acp_types::system_reminder::ReminderSeverity;
+use peri_acp_types::system_reminder::ReminderSource;
+use peri_acp_types::system_reminder::SystemReminder;
+use peri_acp_types::system_reminder::TrustedSystemReminderFactory;
+use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
+use peri_acp_types::system_reminder::SYSTEM_REMINDER_VERSION;
+
+use crate::tools::BaseTool;
+
+/// 合并本轮插件选择：显式选择在前，已移交队列输入居中，slash 来源在后。
+///
+/// 按 plugin ID 去重并保持首次出现顺序；同一插件不会重复生成指引。
+pub(crate) fn merge_plugin_selections(
+    explicit: Vec<PluginSelection>,
+    handed_off: Vec<PluginSelection>,
+    slash_plugin: Option<&str>,
+) -> Vec<PluginSelection> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for selection in explicit
+        .into_iter()
+        .chain(handed_off)
+        .chain(slash_plugin.map(PluginSelection::new))
+    {
+        if seen.insert(selection.plugin_id.clone()) {
+            merged.push(selection);
+        }
+    }
+    merged
+}
+
+/// 为每个已选且存在可见 Loader 的插件生成一段指引。
+///
+/// 未安装的选择与没有可见 Loader 的插件不产出文本：不能暗示不存在的业务能力。
+pub(crate) fn guidance_texts(
+    selections: &[PluginSelection],
+    plugins: &[LoadedPlugin],
+    loaders: &[DynamicLoaderBinding],
+) -> Vec<String> {
+    let mut emitted = HashSet::new();
+    let mut texts = Vec::new();
+    for selection in selections {
+        let mut matching: Vec<&LoadedPlugin> = plugins
+            .iter()
+            .filter(|plugin| plugin_matches(&selection.plugin_id, plugin))
+            .collect();
+        matching.sort_by(|left, right| left.name.cmp(&right.name));
+        for plugin in matching {
+            let source = plugin_source_id(plugin);
+            if !emitted.insert(source.clone()) {
+                continue;
+            }
+            let mut loader_names: Vec<&str> = loaders
+                .iter()
+                .filter(|binding| binding.plugin_source.as_deref() == Some(source.as_str()))
+                .map(|binding| binding.loader.as_str())
+                .collect();
+            loader_names.sort_unstable();
+            loader_names.dedup();
+            if loader_names.is_empty() {
+                tracing::debug!(
+                    plugin = %plugin.name,
+                    "selected plugin has no visible dynamic MCP loader; guidance omitted"
+                );
+                continue;
+            }
+            texts.push(guidance_for_plugin(&plugin.name, &loader_names));
+        }
+    }
+    texts
+}
+
+fn plugin_matches(selection: &str, plugin: &LoadedPlugin) -> bool {
+    selection == plugin_source_id(plugin)
+        || selection == plugin.name
+        || selection == plugin.scope.plugin_id
+}
+
+/// 只保留同时出现在有效 Reason 目录中的 Loader。
+///
+/// `catalog` 是 Reason 边界用于分发的候选工具集，`filter` 是会话工具策略；
+/// 名称与来源必须同时命中。被策略拒绝或目录不可用时不能提示模型调用。
+pub(crate) fn retain_effective_loaders(
+    bindings: Vec<DynamicLoaderBinding>,
+    catalog: &[Arc<dyn BaseTool>],
+    filter: &(dyn Fn(&dyn BaseTool) -> bool + Send + Sync),
+) -> Vec<DynamicLoaderBinding> {
+    bindings
+        .into_iter()
+        .filter(|binding| {
+            catalog.iter().any(|tool| {
+                filter(tool.as_ref())
+                    && tool.name() == binding.loader
+                    && tool.mcp_server_name() == Some(binding.server_key.as_str())
+            })
+        })
+        .collect()
+}
+
+/// 与 `collect_plugin_mcp_servers` 的来源标识同源（marketplace 为空仍保留分隔符）。
+fn plugin_source_id(plugin: &LoadedPlugin) -> String {
+    format!("{}@{}", plugin.name, plugin.marketplace)
+}
+
+fn guidance_for_plugin(name: &str, loaders: &[&str]) -> String {
+    let calls = match loaders {
+        [single] => format!("call ToolInvoke with name \"{single}\" and arguments {{}}"),
+        many => format!(
+            "call ToolInvoke with one of these names and arguments {{}}: {}",
+            many.iter()
+                .map(|loader| format!("\"{loader}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    format!(
+        "The selected plugin is {name}. To use its MCP capabilities, {calls}. \
+         After loading succeeds, use ToolSearch in a subsequent model step to find \
+         the tools needed for the task."
+    )
+}
+
+/// 指引入队失败：携带已确认前缀与结果未知的片段身份，调用方必须按 attempt 清理。
+///
+/// 逐段入队不是原子操作；丢弃 `cleanup` 会让失败 attempt 的片段留在 MQ，
+/// 被下一次 Receive 当成完整指引消费。失败片段可能已经提交，因此它的行也会在
+/// 可查回时进入 `cleanup`；`uncertain` 保留身份，供查询不可用时记录与诊断。
+#[derive(Debug)]
+pub(crate) struct GuidanceEnqueueFailure {
+    pub(crate) error: anyhow::Error,
+    /// 本次 attempt 必须删除的 SystemInjected 行：已确认前缀 + 失败片段中已查回的行。
+    pub(crate) cleanup: Vec<MqEntry>,
+    /// 写入结果未知的失败片段身份；不能只返回前缀。
+    pub(crate) uncertain: Option<MessageId>,
+}
+
+impl std::fmt::Display for GuidanceEnqueueFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for GuidanceEnqueueFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+/// 失败片段的写入结果是否可能已经生效。
+///
+/// 只有能证明「未写入」的错误才排除：准入关闭发生在存储调用之前，存储明确报告
+/// `NotApplied` 时也从未提交。其余错误（尤其 `PersistenceUncertain`）都必须按
+/// 可能已提交处理，否则该 attempt 的行会遗留到下一次 Receive。
+fn failed_chunk_may_be_persisted(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<QueueClosed>().is_some() {
+        return false;
+    }
+    error
+        .downcast_ref::<SessionResourceError>()
+        .is_none_or(|error| error.effect() != MutationOutcome::NotApplied)
+}
+
+/// 以 Model-only canonical reminder 投递指引；不修改 frozen system prompt。
+///
+/// 逐段入队不是原子操作：任一段失败都把错误、已提交前缀与失败片段身份返回给调用方。
+/// 失败片段的 id 在入队前固定，因此即使存储报告结果未知也能按身份清理。
+///
+/// 每行绑定产生它的执行且不唤醒新执行：同一执行正常消费，后续执行在 Receive 中按
+/// 过期行 Suppress，即使失败清理没查回该行也不会污染新 transcript。
+pub(crate) async fn push_plugin_guidance(
+    queue: &MessageQueue,
+    texts: &[String],
+    execution: &ExecutionBinding,
+) -> Result<Vec<MqEntry>, GuidanceEnqueueFailure> {
+    let mut enqueued = Vec::new();
+    for text in texts {
+        let mut remaining = text.as_str();
+        while !remaining.is_empty() {
+            let mut end = remaining.len().min(MAX_REMINDER_BODY_BYTES);
+            while !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            let reminder = TrustedSystemReminderFactory::for_producer()
+                .construct(SystemReminder {
+                    version: SYSTEM_REMINDER_VERSION,
+                    category: ReminderCategory::Guidance,
+                    source: ReminderSource("plugin_usage".into()),
+                    kind: "plugin_guidance".into(),
+                    severity: ReminderSeverity::Info,
+                    delivery: ReminderDelivery::Required,
+                    audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+                    body: remaining[..end].to_owned(),
+                    summary: None,
+                    metadata: serde_json::json!({}),
+                })
+                .expect("plugin guidance is bounded before reminder construction");
+            // 入队失败后返回值里不再有 MqEntry，必须在消费消息前固定投递身份。
+            let message_id = MessageId::new();
+            let message = QueuedMessage::system_reminder_with_delivery_id(
+                MessageKind::Info,
+                MessageSource::SystemInjected,
+                reminder,
+                message_id,
+            )
+            .with_policy(MessagePolicy::execution_scoped(execution.clone()));
+            match queue.enqueue(message).await {
+                Ok(outcome) => {
+                    if outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff {
+                        enqueued.push(outcome.entry);
+                    }
+                }
+                Err(error) => {
+                    let uncertain = failed_chunk_may_be_persisted(&error);
+                    if uncertain {
+                        // 失败片段可能已经提交：按固定 id 查回该行，纳入同一清理集合；
+                        // 查询本身失败时保留身份，由调用方记录并保守处理。
+                        if let Ok(rows) = queue.query(MqFilter::default()).await {
+                            if let Some(row) = rows.into_iter().find(|row| {
+                                row.id == message_id && row.source == MessageSource::SystemInjected
+                            }) {
+                                enqueued.push(row);
+                            }
+                        }
+                    }
+                    return Err(GuidanceEnqueueFailure {
+                        error,
+                        cleanup: enqueued,
+                        uncertain: uncertain.then_some(message_id),
+                    });
+                }
+            }
+            remaining = &remaining[end..];
+        }
+    }
+    Ok(enqueued)
+}
+
+#[cfg(test)]
+#[path = "plugin_guidance_test.rs"]
+mod tests;

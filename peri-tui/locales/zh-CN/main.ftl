@@ -895,6 +895,7 @@ composer-attachments = @ { $count } 个文件
 # 图片附件（§粘贴图片）：$name 为 `attachment-image-name`，多张带数量与前若干名称。
 composer-image-attachment = [图片] { $name }
 composer-image-attachments = [图片] ×{ $count } · { $names }
+composer-plugin-selections = 插件: { $plugins }
 composer-context-usage = { $pct }% ctx
 composer-context-usage-unknown = ctx 未知
 
@@ -941,6 +942,7 @@ paste-in-progress = 正在处理剪贴板粘贴，请稍候
 paste-image-failed = 无法粘贴图片：PNG 无效或超过 20 MiB
 paste-terminal-hint = 这里读不到本机剪贴板——请用终端原生粘贴（Cmd+V / Ctrl+Shift+V）
 submit-blocked = 当前请求运行中，稍后再执行该命令
+submit-plugin-selection-unavailable = 插件选择需要更新的 Agent；草稿与选择已保留
 export-success = 已导出消息文本：{ $path }
 export-fail = 导出消息文本失败：{ $error }
 cancel-request-sent = 已发送取消请求
@@ -1258,7 +1260,10 @@ panel-plugin-list-count = 发现 { $count } 个插件
 panel-plugin-discover-hint-keys = Enter: 查看详情  |  输入: 过滤  |  ←/→/Tab: 切换视图
 
 # ---- Plugin Panel Navigation ----
-panel-plugin-list-hint = ←/→/Tab: 切换视图  |  ↑/↓: 导航  |  Enter: 查看详情  |  Esc: 关闭
+panel-plugin-list-hint = ←/→/Tab: 切换视图  |  ↑/↓: 导航  |  Space: 用于下次任务  |  Enter: 查看详情  |  Esc: 关闭
+panel-plugin-selection-added = 已加入下次任务: { $name }
+panel-plugin-selection-removed = 已从下次任务移除: { $name }
+panel-plugin-selection-unavailable = 插件选择需要更新的 Agent
 
 # ---- Tasks Panel ----
 panel-tasks-total-label =   总计: 

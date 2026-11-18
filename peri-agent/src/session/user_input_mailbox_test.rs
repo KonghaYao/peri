@@ -12,6 +12,7 @@ use peri_acp_types::session::DispatchUserInputsRequest;
 use peri_acp_types::session::EnqueueUserInputRequest;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::session::MqCancelOutcome;
+use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::SessionInbox;
 use peri_acp_types::session::TakeBackUserInputRequest;
 use peri_acp_types::session::TurnId;
@@ -44,6 +45,7 @@ fn make_input(mailbox: &UserInputMailbox, text: &str) -> EnqueueUserInputRequest
         input_id: uuid::Uuid::now_v7().to_string(),
         content: MessageContent::text(text),
         original_draft: text.into(),
+        plugin_selections: Vec::new(),
     }
 }
 
@@ -491,6 +493,123 @@ fn test_mailbox_terminal_snapshot_is_bounded() {
         .all(|item| item.state == UserInputState::Delivered));
 }
 
+/// [回归] 同一 input_id 的并发 enqueue 都通过前置指纹检查时，MQ 的 Existing
+/// 只比较正文/原稿；选择不同必须按身份冲突拒绝，不能返回先到者的成功回执。
+#[tokio::test]
+async fn test_concurrent_enqueue_with_different_plugin_selections_conflicts() {
+    let (mailbox, inbox) = make_mailbox();
+    let mut first = make_input(&mailbox, "同一输入");
+    first.plugin_selections = vec![PluginSelection::new("alpha")];
+    mailbox
+        .enqueue_sync(&first)
+        .expect("first enqueue must be admitted");
+    let entry = inbox
+        .queue_for_test()
+        .query(peri_acp_types::session::MqFilter::default())
+        .await
+        .expect("MQ row query")
+        .into_iter()
+        .find(|entry| entry.id.as_uuid().to_string() == first.input_id)
+        .expect("first request row must exist");
+
+    assert_eq!(
+        super::commands::existing_selection_match(
+            peri_acp_types::session::MqEnqueueDisposition::Existing,
+            &entry,
+            &[PluginSelection::new("beta")],
+        )
+        .unwrap_err(),
+        UserInputQueueError::IdentityConflict,
+        "选择不同时不得把先到者的 MQ 行当作本次请求的成功回执"
+    );
+    assert!(
+        super::commands::existing_selection_match(
+            peri_acp_types::session::MqEnqueueDisposition::Existing,
+            &entry,
+            &[PluginSelection::new("alpha")],
+        )
+        .is_ok(),
+        "相同选择的重试必须保持幂等"
+    );
+    assert!(
+        super::commands::existing_selection_match(
+            peri_acp_types::session::MqEnqueueDisposition::Inserted,
+            &entry,
+            &[PluginSelection::new("beta")],
+        )
+        .is_ok(),
+        "新插入的行由本次请求定义，无需比较"
+    );
+}
+
+/// [回归] `AlreadyHandedOff` 的 entry 来自当前请求，选择比较必须回读邮箱在
+/// MQ await 期间写入的记录/终态身份指纹。
+#[test]
+fn test_already_handed_off_uses_stored_identity_fingerprint() {
+    assert!(
+        super::commands::ensure_stored_fingerprint(None, 7).is_ok(),
+        "没有权威身份时不能凭空判定冲突"
+    );
+    assert!(
+        super::commands::ensure_stored_fingerprint(Some(7), 7).is_ok(),
+        "相同指纹的并发重试保持幂等"
+    );
+    assert_eq!(
+        super::commands::ensure_stored_fingerprint(Some(8), 7).unwrap_err(),
+        UserInputQueueError::IdentityConflict,
+        "已有输入的选择/正文与请求不同时必须拒绝"
+    );
+}
+
+/// [回归] 取消提交后、take_back 恢复前若对账剪掉 Queued 记录，撤回回执仍须
+/// 从被删除的 MQ 行恢复插件选择，不能静默变成空选择。
+#[tokio::test]
+async fn test_taken_back_selections_survive_pruned_record() {
+    let (mailbox, inbox) = make_mailbox();
+    let mut input = make_input(&mailbox, "撤回选择");
+    input.plugin_selections = vec![PluginSelection::new("alpha")];
+    mailbox
+        .enqueue_sync(&input)
+        .expect("enqueue must be admitted");
+    mailbox.state.lock().records.clear();
+
+    let id = MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap());
+    let MqCancelOutcome::Cancelled(entry) = inbox
+        .queue_for_test()
+        .cancel_user_input(&id)
+        .await
+        .expect("cancelled MQ row")
+    else {
+        panic!("queued input must be cancelled");
+    };
+    assert_eq!(
+        super::commands::taken_back_selections(&entry, None),
+        vec![PluginSelection::new("alpha")],
+        "记录被剪除时选择必须来自 cancelled MQ 行"
+    );
+
+    // 旧版本行可能没有持久化选择：此时保留运行期记录的回退语义。
+    let mut legacy = make_input(&mailbox, "旧行撤回");
+    legacy.plugin_selections = Vec::new();
+    mailbox
+        .enqueue_sync(&legacy)
+        .expect("legacy enqueue must be admitted");
+    let id = MessageId::from(uuid::Uuid::parse_str(&legacy.input_id).unwrap());
+    let MqCancelOutcome::Cancelled(entry) = inbox
+        .queue_for_test()
+        .cancel_user_input(&id)
+        .await
+        .expect("cancelled legacy MQ row")
+    else {
+        panic!("legacy queued input must be cancelled");
+    };
+    assert_eq!(
+        super::commands::taken_back_selections(&entry, Some(vec![PluginSelection::new("beta")]),),
+        vec![PluginSelection::new("beta")],
+        "MQ 行没有选择时回退运行期记录"
+    );
+}
+
 /// [回归] 对账查询进行期间入队：旧查询结果不得清理新记录，快照 revision 必须覆盖其内容。
 #[tokio::test]
 async fn refresh_keeps_records_enqueued_while_its_mq_query_is_in_flight() {
@@ -718,6 +837,43 @@ async fn refresh_prunes_only_confirmed_mq_absence() {
             .iter()
             .all(|item| item.input_id != removed.input_id),
         "成功查询确认不存在的 Queued 才允许清理"
+    );
+}
+
+/// [回归] 实例重建后从 MQ 行恢复插件选择，快照标签不丢。
+#[tokio::test]
+async fn hydrate_restores_plugin_selections_from_store() {
+    let resources = MockSessionResources::new();
+    let (first, _queue) = make_mock_mailbox(Arc::clone(&resources));
+    first
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .expect("the attach external attempt fixture result is required for this assertion");
+    let mut input = make_input(&first, "选择插件");
+    input.plugin_selections = vec![
+        PluginSelection::new("alpha"),
+        PluginSelection::new("beta@market"),
+    ];
+    first
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+
+    // 新实例只从 MQ 查询恢复，不依赖上一实例的内存记录。
+    let (restarted, _queue) = make_mock_mailbox(resources);
+    restarted
+        .hydrate()
+        .await
+        .expect("the hydrate fixture result is required for this assertion");
+    let snapshot = restarted.snapshot().await;
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.input_id == input.input_id)
+        .expect("待发行必须在重建后恢复");
+    assert_eq!(
+        item.plugin_selections, input.plugin_selections,
+        "选择随 input_id 持久化，重启后仍要生成标签与指引"
     );
 }
 

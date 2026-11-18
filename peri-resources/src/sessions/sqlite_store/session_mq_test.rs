@@ -11,7 +11,7 @@ use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session::{
     MessageKind, MessagePolicy, MessageSource, MqCancelOutcome, MqEnqueueDisposition, MqFilter,
     MqInput, MqReceiveDisposition, MqReceiveItem, MqReceivePurpose, MqReceiveSelection,
-    MqReceiveStatus,
+    MqReceiveStatus, PluginSelection,
 };
 use peri_acp_types::session_resources::{
     RewindBoundary, SessionResourceErrorKind, TerminalSettlementOutcome,
@@ -71,6 +71,7 @@ fn input(id: MessageId, text: &str) -> MqInput {
         payload: PersistedPayload::Message(human(id, text)),
         policy: MessagePolicy::ensure_processing(),
         original_draft: Some(text.to_owned()),
+        plugin_selections: Vec::new(),
     }
 }
 
@@ -137,6 +138,7 @@ async fn enqueue_survives_reopen_with_every_fact() {
         payload: PersistedPayload::Message(human(id, "child done")),
         policy: MessagePolicy::passive(),
         original_draft: Some("draft text".to_owned()),
+        plugin_selections: Vec::new(),
     };
     let outcome = fixture
         .data
@@ -166,6 +168,35 @@ async fn enqueue_survives_reopen_with_every_fact() {
     assert_eq!(
         peri_acp_types::store::serialize_persisted_payload(&entry.payload).unwrap(),
         peri_acp_types::store::serialize_persisted_payload(&requested.payload).unwrap()
+    );
+    reopened.close().await;
+}
+
+/// 待发用户输入的插件选择随 payload JSON 落盘，重开后仍在（不新增表列）。
+#[tokio::test]
+async fn queued_user_input_keeps_plugin_selections_across_reopen() {
+    let fixture = Fixture::new().await;
+    let thread = fixture.thread("mq selections").await;
+    let mut requested = input(MessageId::new(), "选插件");
+    requested.plugin_selections = vec![
+        PluginSelection::new("alpha"),
+        PluginSelection::new("beta@market"),
+    ];
+    fixture
+        .data
+        .mq_enqueue(&thread, requested.clone())
+        .await
+        .unwrap();
+
+    let path = fixture.path();
+    fixture.store.close().await;
+    let reopened = SqliteThreadStore::try_new(&path).await.unwrap();
+    let data = SqliteSessionData::new(Arc::clone(&reopened.database));
+    let entries = data.mq_query(&thread, MqFilter::default()).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].plugin_selections, requested.plugin_selections,
+        "插件选择必须随行恢复，否则重启后标签与指引都会丢失"
     );
     reopened.close().await;
 }
@@ -380,6 +411,7 @@ async fn control_plane_queries_do_not_decode_mq_payloads() {
                     payload: PersistedPayload::Message(human(id, &body)),
                     policy: MessagePolicy::ensure_processing(),
                     original_draft: None,
+                    plugin_selections: Vec::new(),
                 },
             )
             .await
@@ -740,6 +772,7 @@ async fn receive_rolls_back_the_whole_batch_on_a_corrupt_row() {
         payload: good.entry.payload.clone(),
         policy: MessagePolicy::ensure_processing(),
         original_draft: None,
+        plugin_selections: Vec::new(),
     };
     let selection = MqReceiveSelection {
         items: vec![

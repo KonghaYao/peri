@@ -126,6 +126,7 @@ fn input(mailbox: &UserInputMailbox, input_id: &str, text: &str) -> EnqueueUserI
         input_id: input_id.into(),
         content: MessageContent::text(text),
         original_draft: text.into(),
+        plugin_selections: Vec::new(),
     }
 }
 

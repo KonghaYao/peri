@@ -43,6 +43,7 @@ fn terminal_input(id: MessageId, body: &str) -> MqInput {
         },
         policy: MessagePolicy::ensure_processing(),
         original_draft: None,
+        plugin_selections: Vec::new(),
     }
 }
 

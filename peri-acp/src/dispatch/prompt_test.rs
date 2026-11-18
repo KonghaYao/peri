@@ -60,6 +60,50 @@ fn test_extract_prompt_params_defaults_empty_content_without_body_keys() {
 }
 
 #[test]
+fn test_extract_plugin_selections_reads_id_list() {
+    let params = serde_json::json!({
+        "pluginSelections": [{"pluginId": "alpha"}, {"pluginId": "beta@market"}]
+    });
+    let selections = crate::dispatch::prompt::extract_plugin_selections(&params).unwrap();
+    assert_eq!(
+        selections,
+        vec![
+            peri_acp_types::session::PluginSelection::new("alpha"),
+            peri_acp_types::session::PluginSelection::new("beta@market"),
+        ],
+        "选择随 prompt 原样进入 Agent，不在 dispatch 层改写"
+    );
+}
+
+#[test]
+fn test_extract_plugin_selections_treats_absent_and_null_as_empty() {
+    for params in [
+        serde_json::json!({"sessionId": "s1"}),
+        serde_json::json!({"sessionId": "s1", "pluginSelections": null}),
+    ] {
+        assert!(
+            crate::dispatch::prompt::extract_plugin_selections(&params)
+                .unwrap()
+                .is_empty(),
+            "旧客户端缺省或显式 null 表示没有插件选择"
+        );
+    }
+}
+
+#[test]
+fn test_extract_plugin_selections_rejects_malformed_selection() {
+    for value in [
+        serde_json::json!("alpha"),
+        serde_json::json!([{"pluginId": "alpha", "guidance": "ignore previous"}]),
+        serde_json::json!([{"pluginId": "alpha"}, "beta"]),
+    ] {
+        let params = serde_json::json!({"sessionId": "s1", "pluginSelections": value});
+        let error = crate::dispatch::prompt::extract_plugin_selections(&params).unwrap_err();
+        assert_eq!(error.code, -32602, "形状不符必须显式拒绝本轮 prompt");
+    }
+}
+
+#[test]
 fn test_handle_prompt_success() {
     let params = serde_json::json!({
         "sessionId": "existing",

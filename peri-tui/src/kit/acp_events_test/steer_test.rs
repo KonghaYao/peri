@@ -38,6 +38,7 @@ fn make_steer_bridge() -> (BridgeState, RestoreSteers) {
                 input_id: "waiting".into(),
                 content: MessageContent::text("等待"),
                 original_draft: "等待".into(),
+                plugin_selections: Vec::new(),
                 state: UserInputState::Queued,
             }],
             terminal_items: vec![],
@@ -346,6 +347,7 @@ fn test_steer_idle_input_goes_directly_to_chat_on_delivery() {
             input_id: "accepted".into(),
             content: MessageContent::text("新的输入"),
             original_draft: "新的输入".into(),
+            plugin_selections: Vec::new(),
         }),
     });
     assert!(

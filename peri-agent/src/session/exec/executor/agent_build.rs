@@ -40,6 +40,7 @@ pub(super) async fn build_and_execute_agent(
     continuation: bool,
     stage_build: StageBuildFn,
     forwarder_launcher: ForwarderLauncherFn,
+    plugin_guidance: Vec<String>,
 ) -> ExecOutcome {
     let frozen_session = if let Some(f) = turn.frozen {
         // 使用 session 创建时冻结的完整数据，跳过重建。
@@ -219,6 +220,7 @@ pub(super) async fn build_and_execute_agent(
         cancel_cascade,
         forwarder_launcher,
         continuation_notify: ctx.continuation_notify.clone(),
+        plugin_guidance,
     })
     .await
 }

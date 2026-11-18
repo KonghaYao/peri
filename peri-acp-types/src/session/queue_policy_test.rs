@@ -64,6 +64,25 @@ fn stop_intent_is_bound_to_its_own_execution() {
     assert!(!stop.policy.notifies_execution());
 }
 
+/// 非唤醒的执行绑定通知：同一执行正常投影，其他执行被 Suppress。
+#[test]
+fn execution_scoped_notification_is_non_waking_and_suppressed_elsewhere() {
+    let origin = execution();
+    let policy = MessagePolicy::execution_scoped(origin.clone());
+    assert_eq!(
+        policy.disposition(&origin),
+        MessageDisposition::ProjectOnly,
+        "同一执行仍必须提交自己的通知"
+    );
+    assert_eq!(
+        policy.disposition(&execution()),
+        MessageDisposition::Suppressed,
+        "其他执行不得消费该通知"
+    );
+    assert!(!policy.notifies_execution(), "通知不得单独唤醒新执行");
+    assert!(!policy.ensures_processing());
+}
+
 /// 旧执行绑定的 guidance 在 Receive 中被显式标记为 `Suppress`：删行、不写历史。
 #[tokio::test]
 async fn expired_guidance_is_explicitly_suppressed() {

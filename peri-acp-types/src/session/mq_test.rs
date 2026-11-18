@@ -16,6 +16,7 @@ fn entry(enqueued_at: &str, id: MessageId) -> MqEntry {
         }),
         policy: MessagePolicy::ensure_processing(),
         original_draft: None,
+        plugin_selections: Vec::new(),
     }
 }
 

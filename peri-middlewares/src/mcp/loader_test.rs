@@ -270,6 +270,47 @@ async fn closing_the_source_disables_the_loader() {
     assert!(fixture.pool.client("lazy").is_none());
 }
 
+/// 名称与插件来源必须取自同一个 `LoaderIdentity`：共享 `plugin_sources`
+/// 在两次投影之间被整体替换时，绑定不能把旧名称配到新来源。
+#[test]
+fn loader_binding_reuses_the_identity_that_produced_the_name() {
+    let fixture = Fixture::new();
+    let mut plugin = secret_bearing_config();
+    plugin.source = Some(ConfigSource::Plugin);
+    let server = "plugin:pa:srvA";
+    fixture.pool.configs.write().insert(server.into(), plugin);
+    fixture
+        .pool
+        .plugin_sources
+        .write()
+        .insert(server.into(), "pa@alpha".into());
+
+    let loaders = super::dynamic_loader_tools(&fixture.pool, Some("session-1"));
+    assert_eq!(loaders.len(), 1, "fixture must project one loader");
+    let name = loaders[0].name().to_owned();
+
+    // 模拟 initialize 在名称读取与插件来源读取之间整体替换共享映射。
+    fixture
+        .pool
+        .plugin_sources
+        .write()
+        .insert(server.into(), "pb@beta".into());
+    assert_eq!(
+        fixture.pool.plugin_source_of(server).as_deref(),
+        Some("pb@beta"),
+        "第二次读取会看到替换后的来源"
+    );
+
+    let bindings = super::bindings_from(&loaders);
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].loader, name, "名称必须来自原身份");
+    assert_eq!(
+        bindings[0].plugin_source.as_deref(),
+        Some("pa@alpha"),
+        "插件来源必须与名称同源，不能重新读取共享映射"
+    );
+}
+
 /// 名称由规范键 + 来源摘要构成：稳定、合法、限长，且随作用域/插件身份变化。
 #[test]
 fn loader_names_are_stable_bounded_and_source_bound() {

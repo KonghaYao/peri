@@ -1,6 +1,44 @@
 use crate::host::prompt::prompt_turn::execution_failure_to_acp_error;
 use crate::host::prompt::prompt_turn::ACP_TURN_EXECUTION_FAILED_CODE;
 
+/// legacy `session/prompt` 与队列路径共用同一 fail-closed 语义：未协商
+/// `pluginSelections` 时非空选择必须在轮次开始前拒绝，缺省/null 仍为空。
+#[test]
+fn test_legacy_prompt_plugin_selections_require_negotiated_capability() {
+    use peri_acp_types::session::PluginSelection;
+    use peri_acp_types::PeriCaps;
+
+    let selections = vec![PluginSelection::new("alpha")];
+    let error = crate::host::prompt::prompt_turn::ensure_plugin_selections_negotiated(
+        &selections,
+        PeriCaps::default(),
+    )
+    .expect_err("未协商能力时必须拒绝非空选择");
+    assert_eq!(error.code, -32602, "{error:?}");
+
+    let negotiated = PeriCaps {
+        user_input_queue: true,
+        user_input_queue_plugin_selections: true,
+        ..PeriCaps::default()
+    };
+    assert!(
+        crate::host::prompt::prompt_turn::ensure_plugin_selections_negotiated(
+            &selections,
+            negotiated
+        )
+        .is_ok(),
+        "已协商能力时保留合法选择"
+    );
+    assert!(
+        crate::host::prompt::prompt_turn::ensure_plugin_selections_negotiated(
+            &[],
+            PeriCaps::default()
+        )
+        .is_ok(),
+        "空选择不需要能力协商"
+    );
+}
+
 /// stdio 部署过滤 rewind/clear：stdio（true）命中 rewind/clear 返回 true。
 #[test]
 fn test_stdio_filters_rewind_and_clear_only_when_stdio() {

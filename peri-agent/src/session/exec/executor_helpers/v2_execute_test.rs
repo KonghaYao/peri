@@ -92,6 +92,7 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
         input_id: uuid::Uuid::now_v7().to_string(),
         content: MessageContent::text("问题"),
         original_draft: "问题".into(),
+        plugin_selections: Vec::new(),
     };
     mailbox
         .enqueue_sync(&request)
@@ -374,6 +375,7 @@ async fn main_executor_hook_stop_finishes_done_without_panic() {
             cancel_cascade: Arc::new(|_| {}),
             forwarder_launcher: draining_forwarder(),
             continuation_notify: None,
+            plugin_guidance: Vec::new(),
         },
     )
     .await;
@@ -478,6 +480,7 @@ async fn main_executor_fails_when_initial_prompt_cannot_be_admitted() {
             cancel_cascade: Arc::new(|_| {}),
             forwarder_launcher: draining_forwarder(),
             continuation_notify: None,
+            plugin_guidance: Vec::new(),
         },
     )
     .await;
@@ -621,6 +624,7 @@ async fn prompt_result_reports_real_context_usage_after_one_turn() {
             cancel_cascade: Arc::new(|_| {}),
             forwarder_launcher: draining_forwarder(),
             continuation_notify: None,
+            plugin_guidance: Vec::new(),
         },
     )
     .await;

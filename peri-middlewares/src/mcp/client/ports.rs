@@ -27,6 +27,12 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     ) -> Option<Arc<dyn peri_acp_types::mcp_control::SessionMcpCatalogPort>> {
         Some(crate::mcp::control::catalog_source(self, session_id))
     }
+    fn dynamic_loader_bindings(
+        self: Arc<Self>,
+        session_id: &str,
+    ) -> Vec<peri_acp_types::mcp_control::DynamicLoaderBinding> {
+        crate::mcp::loader::dynamic_loader_bindings(&self, Some(session_id))
+    }
     fn cancel_oauth_flow(&self, flow_id: &str) -> Result<bool, String> {
         Ok(McpClientPool::cancel_oauth_flow(self, flow_id))
     }

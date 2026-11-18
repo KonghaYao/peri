@@ -806,6 +806,7 @@ async fn completed_turn_keeps_working_while_processing_work_is_pending() {
                 }),
                 policy: MessagePolicy::ensure_processing(),
                 original_draft: None,
+                plugin_selections: Vec::new(),
             },
         )
         .await

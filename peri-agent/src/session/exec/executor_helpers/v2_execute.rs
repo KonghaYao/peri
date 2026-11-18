@@ -157,6 +157,11 @@ pub struct V2ExecuteRequest {
     pub continuation_notify: Option<
         tokio::sync::mpsc::UnboundedSender<crate::session::exec::executor::ContinuationRequest>,
     >,
+    /// 本轮插件指引文本（Host 依据会话元数据生成；随当前请求投递）。
+    ///
+    /// 以 Model-only canonical reminder 入队，不修改 frozen system prompt；
+    /// 空表示本轮没有已选插件或没有可见 Loader。
+    pub plugin_guidance: Vec<String>,
 }
 
 /// 通过注入的 stage 装配面构造 StageContext，再由 [`run_react_loop`](crate::agent::stages::run_react_loop) 驱动循环
@@ -326,6 +331,85 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             }
             return ExecOutcome {
                 execution_binding: Some(v2_out.context.session.turn.execution_binding()),
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                failure: Some(failure),
+                history_replaced_by_compaction: false,
+                persisted_payloads: req.history_payloads,
+                persistence_inconsistent: false,
+                agent_state: AgentState::new(&req.cwd),
+            };
+        }
+    }
+
+    // 插件指引随当前请求投递：与用户 Prompt 同批进入 Receive，但不写入 frozen
+    // system prompt，也不改写用户正文（Model-only canonical reminder）。
+    // 逐段入队失败必须终止本轮：部分指引已落库时不能继续并报告成功。
+    if !req.plugin_guidance.is_empty() {
+        // 指引绑定本 attempt：行本身不唤醒新执行，后续执行会把遗留行按过期处理。
+        let execution_binding = v2_out.context.session.turn.execution_binding();
+        if let Err(failure) = crate::session::exec::executor::plugin_guidance::push_plugin_guidance(
+            &v2_out.context.session.queue,
+            &req.plugin_guidance,
+            &execution_binding,
+        )
+        .await
+        {
+            let crate::session::exec::executor::plugin_guidance::GuidanceEnqueueFailure {
+                error,
+                cleanup,
+                uncertain,
+            } = failure;
+            error!(session_id = %req.session_id, %error, "plugin guidance enqueue failed");
+            if let Some(uncertain_id) = uncertain {
+                // 写入结果未知：即使存储暂时查不到该行，也必须留下身份，便于诊断遗留指引。
+                warn!(
+                    session_id = %req.session_id,
+                    message_id = ?uncertain_id,
+                    "plugin guidance enqueue outcome is uncertain; attempting attempt-scoped cleanup"
+                );
+            }
+            // 逐段入队失败时，前面已提交的指引片段与结果未知但已查回的片段必须随本次
+            // attempt 一起清理，否则下一次 Receive 会把它当作完整指引消费。这里只允许
+            // 删除 SystemInjected 行，用户输入仍由取消/重投递契约管理。
+            if let Err(cleanup_error) = v2_out
+                .context
+                .session
+                .queue
+                .discard_system_injected_for_attempt(&cleanup, &execution_binding)
+                .await
+            {
+                error!(
+                    session_id = %req.session_id,
+                    error = %cleanup_error,
+                    ?uncertain,
+                    "plugin guidance cleanup failed"
+                );
+            }
+            let failure = ExecutionFailure::internal(format!(
+                "Plugin guidance could not be admitted to the thread MQ: {error}"
+            ));
+            let source = UnstampedEvent::new(
+                String::new(),
+                String::new(),
+                None,
+                EventDeliveryClass::Critical,
+            );
+            req.publisher.publish_event(
+                &req.session_id,
+                &source,
+                ExecutorEvent::AgentExecutionFailed {
+                    message: failure.public_message.clone(),
+                },
+            );
+            if let (Some(mailbox), Some(ticket)) = (&req.user_input_mailbox, &input_ticket) {
+                mailbox.record_attempt_outcome(
+                    ticket,
+                    crate::session::user_input_mailbox::UserInputAttemptOutcome::Failed,
+                );
+            }
+            return ExecOutcome {
+                execution_binding: Some(execution_binding),
                 ok: false,
                 stop_reason: PromptStopReason::EndTurn,
                 failure: Some(failure),
@@ -887,6 +971,7 @@ impl Debug for V2ExecuteRequest {
                 "continuation_notify_present",
                 &self.continuation_notify.is_some(),
             )
+            .field("plugin_guidance_len", &self.plugin_guidance.len())
             .finish_non_exhaustive()
     }
 }

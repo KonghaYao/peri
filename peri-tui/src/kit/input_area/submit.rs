@@ -26,12 +26,14 @@ pub(super) fn submit_text(submitted: String) {
         Some(SubmitRequest::AgentText {
             text: submitted.clone(),
             attachments: take_pending_attachments(),
+            plugin_selections: Vec::new(),
         })
     } else {
         crate::kit::submit_request::parse_submit_request(&submitted).map(|request| match request {
             SubmitRequest::AgentText { text, .. } => SubmitRequest::AgentText {
                 text,
                 attachments: take_pending_attachments(),
+                plugin_selections: Vec::new(),
             },
             other => other,
         })
@@ -39,14 +41,31 @@ pub(super) fn submit_text(submitted: String) {
     let Some(request) = request else {
         return;
     };
+    // AgentText 提交把待提交插件选择一并冻结；控制类请求保留选择给下一次任务。
+    let request = match request {
+        SubmitRequest::AgentText {
+            text, attachments, ..
+        } => SubmitRequest::AgentText {
+            text,
+            attachments,
+            plugin_selections: std::mem::take(
+                &mut *crate::kit::atoms::PENDING_PLUGIN_SELECTIONS.state().write(),
+            ),
+        },
+        other => other,
+    };
 
     if crate::kit::steer_state::is_enabled()
         && !is_remote_command(&submitted)
-        && let SubmitRequest::AgentText { text, attachments } = request
+        && let SubmitRequest::AgentText {
+            text,
+            attachments,
+            plugin_selections,
+        } = request
     {
         crate::kit::input_history::push_history(&submitted);
         crate::kit::input_history::reset_history_cursor();
-        if let Err(error) = crate::kit::steer_state::enqueue(text, attachments) {
+        if let Err(error) = crate::kit::steer_state::enqueue(text, attachments, plugin_selections) {
             tracing::warn!(error = %error, "user input queue submission rejected locally");
         }
         return;
@@ -71,9 +90,13 @@ pub(super) fn dispatch_submit_request<F>(
         SubmitRequest::SessionControl(SessionControlRequest::ToggleSetup) => {
             *WIZARD_ACTIVE.state().write() = true;
         }
-        SubmitRequest::AgentText { text, attachments } => {
+        SubmitRequest::AgentText {
+            text,
+            attachments,
+            plugin_selections,
+        } => {
             if crate::kit::steer_state::is_enabled() && !is_remote_command(&text) {
-                let _ = crate::kit::steer_state::enqueue(text, attachments);
+                let _ = crate::kit::steer_state::enqueue(text, attachments, plugin_selections);
                 return;
             }
             crate::kit::input_history::push_history(&text);
@@ -81,13 +104,14 @@ pub(super) fn dispatch_submit_request<F>(
             if is_loading {
                 // 旧服务端兼容队列：运行期间延后提交，出队时再加入聊天记录。
                 // 支持用户输入队列的服务端在上方分支处理普通输入。
-                // 附件随排队项一起存——只存文本会在 drain 时静默丢弃图片。
+                // 附件与插件选择随排队项一起存——只存文本会在 drain 时静默丢弃
+                // 图片或插件意图。
                 let input_buffer = INPUT_BUFFER.state();
                 let mut guard = input_buffer.write();
-                guard.push_back(crate::kit::atoms::BufferedInput::with_attachments(
-                    text,
-                    attachments,
-                ));
+                guard.push_back(
+                    crate::kit::atoms::BufferedInput::with_attachments(text, attachments)
+                        .with_plugin_selections(plugin_selections),
+                );
                 while guard.len() > 32 {
                     guard.pop_front();
                 }
@@ -96,7 +120,11 @@ pub(super) fn dispatch_submit_request<F>(
                 // 统一走 dispatch_and_notify → push_view_models 写入路径。
                 // 气泡带附件展示记录——发送后消息区仍能看到「这条消息带了图片」。
                 send_local_user_bubble(&text, &attachments);
-                send_request(SubmitRequest::AgentText { text, attachments });
+                send_request(SubmitRequest::AgentText {
+                    text,
+                    attachments,
+                    plugin_selections,
+                });
             }
         }
         request @ (SubmitRequest::SessionControl(_)
@@ -121,14 +149,8 @@ pub(super) fn dispatch_submit_request<F>(
 pub(super) fn commit_input(state: State<TextAreaState>) {
     super::exit_entry_focus_on_edit();
     let mut s = state.write();
-    if crate::kit::steer_state::is_enabled()
-        && crate::kit::atoms::ACP_STATE.state().read().is_loading
-        && is_remote_command(&s.text)
-    {
-        show_submit_blocked_notification(&crate::kit::submit_request::SubmitRequest::AgentText {
-            text: s.text.clone(),
-            attachments: Vec::new(),
-        });
+    if let Some(blocked) = commit_block_reason(&s.text) {
+        handle_commit_block(blocked, &s.text);
         return;
     }
     let submitted = s.take_text();
@@ -138,6 +160,75 @@ pub(super) fn commit_input(state: State<TextAreaState>) {
     super::popup::reset_mention_popup();
     super::popup::reset_slash_popup();
     *crate::kit::atoms::PREDICTION.state().write() = crate::kit::atoms::PredictionState::default();
+}
+
+/// `commit_input` 的提交前阻断分支；返回 `Some` 时草稿与选择必须原样保留。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommitBlock {
+    RemoteCommand,
+    PluginSelectionUnavailable,
+}
+
+/// 本次 Enter 是否作为 AgentText 下发（含图片-only 提交）。
+///
+/// 能力闸门只约束会携带选择发送的请求；本地命令（如 `/setup`）不经过
+/// 入队协议，不能被升级后残留的选择阻断。
+fn submits_agent_text(text: &str, has_attachments: bool) -> bool {
+    match crate::kit::submit_request::parse_submit_request(text) {
+        Some(SubmitRequest::AgentText { .. }) => true,
+        Some(_) => false,
+        None => crate::kit::steer_state::is_enabled() && has_attachments,
+    }
+}
+
+/// 旧 Host 的 EnqueueUserInputRequest 拒绝 pluginSelections：能力未协商时
+/// 必须在取走草稿前阻断，不能静默丢弃标签后照常提交。
+pub(super) fn commit_block_reason(text: &str) -> Option<CommitBlock> {
+    if crate::kit::steer_state::is_enabled()
+        && crate::kit::atoms::ACP_STATE.state().read().is_loading
+        && is_remote_command(text)
+    {
+        return Some(CommitBlock::RemoteCommand);
+    }
+    if submits_agent_text(
+        text,
+        !crate::kit::atoms::PENDING_ATTACHMENTS
+            .state()
+            .read()
+            .is_empty(),
+    ) && !crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+        .state()
+        .read()
+        .is_empty()
+        && !crate::kit::steer_state::supports_plugin_selections()
+    {
+        return Some(CommitBlock::PluginSelectionUnavailable);
+    }
+    None
+}
+
+pub(super) fn handle_commit_block(blocked: CommitBlock, text: &str) {
+    match blocked {
+        CommitBlock::RemoteCommand => {
+            show_submit_blocked_notification(
+                &crate::kit::submit_request::SubmitRequest::AgentText {
+                    text: text.to_owned(),
+                    attachments: Vec::new(),
+                    plugin_selections: Vec::new(),
+                },
+            );
+        }
+        CommitBlock::PluginSelectionUnavailable => notify_plugin_selection_unavailable(),
+    }
+}
+
+fn notify_plugin_selection_unavailable() {
+    *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
+        message: i18n::tr("submit-plugin-selection-unavailable"),
+        until: peri_time::monotonic_now() + std::time::Duration::from_secs(3),
+    });
+    crate::kit::atoms::RENDER_HEARTBEAT
+        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
 pub(super) fn show_submit_blocked_notification(request: &SubmitRequest) {

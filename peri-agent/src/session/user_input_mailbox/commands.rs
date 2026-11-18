@@ -7,7 +7,9 @@ use peri_acp_types::session::DispatchUserInputsRequest;
 use peri_acp_types::session::EnqueueUserInputRequest;
 use peri_acp_types::session::MqCancelOutcome;
 use peri_acp_types::session::MqEnqueueDisposition;
+use peri_acp_types::session::MqEntry;
 use peri_acp_types::session::MqSendStatus;
+use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::QueuedMessage;
 use peri_acp_types::session::TakeBackUserInputRequest;
 use peri_acp_types::session::UserInput;
@@ -26,6 +28,50 @@ pub(super) const PENDING_CAPACITY: usize = 32;
 /// 「已接纳 vs 已移交」歧义，必须远小于用户可感知的停顿。
 pub(super) const DISPATCH_HANDOFF_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(50);
+
+/// 并发 enqueue 的既有行裁决。
+///
+/// 前置指纹检查与 MQ 提交之间存在窗口；存储对 `Existing` 只比较正文/原稿，
+/// 选择不同的请求不能借用先到者的成功回执。
+pub(super) fn existing_selection_match(
+    disposition: MqEnqueueDisposition,
+    entry: &MqEntry,
+    requested: &[PluginSelection],
+) -> Result<(), UserInputQueueError> {
+    if disposition == MqEnqueueDisposition::Existing && entry.plugin_selections != requested {
+        return Err(UserInputQueueError::IdentityConflict);
+    }
+    Ok(())
+}
+
+/// 用邮箱内已持久化的身份指纹复核等待期间出现的并发事实。
+///
+/// `AlreadyHandedOff` 的 `entry` 是本次请求的投影，无法据此比较选择；第一请求的
+/// 记录或终态身份可能在 MQ await 期间写入邮箱，指纹包含选择与正文，可作为权威来源。
+pub(super) fn ensure_stored_fingerprint(
+    stored: Option<u64>,
+    requested: u64,
+) -> Result<(), UserInputQueueError> {
+    if stored.is_some_and(|stored| stored != requested) {
+        return Err(UserInputQueueError::IdentityConflict);
+    }
+    Ok(())
+}
+
+/// 撤回回执的插件选择来源。
+///
+/// 被删除的 MQ 行与名称同批写入，是并发对账下仍可读取的事实；运行期记录可能
+/// 已在取消提交后、取回恢复前被剪除。旧行没有选择时才回退记录缓存。
+pub(super) fn taken_back_selections(
+    entry: &MqEntry,
+    record_selections: Option<Vec<PluginSelection>>,
+) -> Vec<PluginSelection> {
+    if entry.plugin_selections.is_empty() {
+        record_selections.unwrap_or_default()
+    } else {
+        entry.plugin_selections.clone()
+    }
+}
 
 impl UserInputMailbox {
     pub async fn enqueue(
@@ -52,6 +98,7 @@ impl UserInputMailbox {
             &request.input_id,
             &request.content,
             &request.original_draft,
+            &request.plugin_selections,
         );
         let early = {
             let mut state = self.state.lock();
@@ -133,6 +180,7 @@ impl UserInputMailbox {
             },
         )
         .with_original_draft(request.original_draft.clone())
+        .with_plugin_selections(request.plugin_selections.clone())
         // 用户输入是必须处理的消息；「未 dispatch 不激活」由 MQ 的发送选择
         // （`send_inputs`）保证，而不是把策略降级为 passive。
         .with_policy(peri_acp_types::session::MessagePolicy::ensure_processing());
@@ -145,65 +193,99 @@ impl UserInputMailbox {
             }
         };
 
-        let (sent_ready, results, cancel_inserted) = {
+        let (sent_ready, results, cancel_inserted, conflict) = {
             let mut state = self.state.lock();
             state.admissions_in_flight = state.admissions_in_flight.saturating_sub(1);
-            // 撤回与 enqueue 的 MQ await 可以交错：take_back 在等待期间清理了
-            // Queued 记录并写入 `Withdrawn` 身份，而本调用仍持有已提交的 MQ 行。
-            // 终态身份优先，既不复活待发记录，也要取消本次插入的行。
-            let terminal = state
-                .terminal_identities
-                .get(&input_uuid)
-                .map(|identity| identity.state);
-            let mut cancel_inserted = false;
-            let sent_ready = match outcome.disposition {
-                MqEnqueueDisposition::Inserted | MqEnqueueDisposition::Existing => {
-                    if terminal.is_some() {
-                        cancel_inserted = true;
-                        Vec::new()
-                    } else {
-                        if !state
-                            .records
-                            .iter()
-                            .any(|record| record.input_id == request.input_id)
-                        {
-                            let seq = state.next_record_seq();
-                            state.records.push(
-                                crate::session::user_input_mailbox::InputRecord::new(
-                                    request.input_id.clone(),
-                                    input_fingerprint,
-                                    seq,
-                                    request.content.clone(),
-                                    request.original_draft.clone(),
-                                ),
-                            );
-                            state.revision += 1;
-                            if state.active.is_none() || state.paused {
-                                state.paused = false;
-                                crate::session::user_input_mailbox::state::promote_next(&mut state);
+            // 并发 enqueue 都可能通过前置指纹检查：MQ 的 Existing 只比较正文/原稿，
+            // 选择不同时存储行属于先到者，本次请求必须按身份冲突拒绝。
+            let conflict = existing_selection_match(
+                outcome.disposition,
+                &outcome.entry,
+                &request.plugin_selections,
+            )
+            .and_then(|()| {
+                // AlreadyHandedOff 的 entry 是请求投影，选择比较必须回读邮箱权威身份。
+                let stored_fingerprint = state
+                    .records
+                    .iter()
+                    .find(|record| record.input_id == request.input_id)
+                    .map(|record| record.fingerprint)
+                    .or_else(|| {
+                        state
+                            .terminal_identities
+                            .get(&input_uuid)
+                            .map(|identity| identity.fingerprint)
+                    });
+                ensure_stored_fingerprint(stored_fingerprint, input_fingerprint)
+            })
+            .err();
+            if let Some(error) = conflict {
+                // 身份冲突发生在 MQ 提交之后：本次 Inserted 的行必须撤回，否则调用方
+                // 收到失败后下一次 Receive 仍会消费它。Existing 行属于先到者，不能替
+                // 对方删除。
+                let cancel_inserted = outcome.disposition == MqEnqueueDisposition::Inserted;
+                (Vec::new(), Vec::new(), cancel_inserted, Some(error))
+            } else {
+                // 撤回与 enqueue 的 MQ await 可以交错：take_back 在等待期间清理了
+                // Queued 记录并写入 `Withdrawn` 身份，而本调用仍持有已提交的 MQ 行。
+                // 终态身份优先，既不复活待发记录，也要取消本次插入的行。
+                let terminal = state
+                    .terminal_identities
+                    .get(&input_uuid)
+                    .map(|identity| identity.state);
+                let mut cancel_inserted = false;
+                let sent_ready = match outcome.disposition {
+                    MqEnqueueDisposition::Inserted | MqEnqueueDisposition::Existing => {
+                        if terminal.is_some() {
+                            cancel_inserted = true;
+                            Vec::new()
+                        } else {
+                            if !state
+                                .records
+                                .iter()
+                                .any(|record| record.input_id == request.input_id)
+                            {
+                                let seq = state.next_record_seq();
+                                state.records.push(
+                                    crate::session::user_input_mailbox::InputRecord::new(
+                                        request.input_id.clone(),
+                                        input_fingerprint,
+                                        seq,
+                                        request.content.clone(),
+                                        request.original_draft.clone(),
+                                        request.plugin_selections.clone(),
+                                    ),
+                                );
+                                state.revision += 1;
+                                if state.active.is_none() || state.paused {
+                                    state.paused = false;
+                                    crate::session::user_input_mailbox::state::promote_next(
+                                        &mut state,
+                                    );
+                                }
+                            }
+                            if self.wake_suspended_locked(&mut state) {
+                                crate::session::user_input_mailbox::state::ready_ids(&state)
+                            } else {
+                                Vec::new()
                             }
                         }
-                        if self.wake_suspended_locked(&mut state) {
-                            crate::session::user_input_mailbox::state::ready_ids(&state)
-                        } else {
-                            Vec::new()
-                        }
                     }
-                }
-                _ => Vec::new(),
-            };
-            let results = crate::session::user_input_mailbox::state::results_for(
-                &state,
-                std::slice::from_ref(&request.input_id),
-            );
-            crate::session::user_input_mailbox::state::remember_command(
-                &mut state,
-                &request.command_id,
-                fingerprint,
-                results.clone(),
-                None,
-            );
-            (sent_ready, results, cancel_inserted)
+                    _ => Vec::new(),
+                };
+                let results = crate::session::user_input_mailbox::state::results_for(
+                    &state,
+                    std::slice::from_ref(&request.input_id),
+                );
+                crate::session::user_input_mailbox::state::remember_command(
+                    &mut state,
+                    &request.command_id,
+                    fingerprint,
+                    results.clone(),
+                    None,
+                );
+                (sent_ready, results, cancel_inserted, None)
+            }
         };
         if cancel_inserted {
             let id = MessageId::from(input_uuid);
@@ -220,6 +302,9 @@ impl UserInputMailbox {
                     return Err(UserInputQueueError::Store(error.to_string()));
                 }
             }
+        }
+        if let Some(error) = conflict {
+            return Err(error);
         }
         self.send_ready_ids(sent_ready, true).await;
         Ok(self.receipt(results, None).await)
@@ -454,6 +539,15 @@ impl UserInputMailbox {
             let mut taken_back = None;
             match cancel_outcome {
                 MqCancelOutcome::Cancelled(entry) => {
+                    // 撤回回执必须带上原输入的选择：选择随 input_id 走。
+                    // 对账可能在取消提交后、这里恢复前剪掉运行期记录，因此以
+                    // 被删除的 MQ 行为准；旧行无选择时才回退记录缓存。
+                    let record_selections = state
+                        .records
+                        .iter()
+                        .find(|record| record.input_id == request.input_id)
+                        .map(|record| record.plugin_selections.clone());
+                    let selections = taken_back_selections(&entry, record_selections);
                     if let Some(record) = state
                         .records
                         .iter_mut()
@@ -470,8 +564,9 @@ impl UserInputMailbox {
                         Some((input_fingerprint, UserInputState::Withdrawn)),
                     );
                     crate::session::user_input_mailbox::window::prune_terminal_records(&mut state);
-                    taken_back =
-                        crate::session::user_input_mailbox::state::user_input_from_entry(&entry);
+                    taken_back = crate::session::user_input_mailbox::state::user_input_from_entry(
+                        &entry, selections,
+                    );
                 }
                 MqCancelOutcome::AlreadyHandedOff => {
                     // 已移交历史：不能回删冒充取消；保留运行期记录等待 Receive

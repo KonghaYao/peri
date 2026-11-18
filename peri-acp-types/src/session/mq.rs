@@ -18,7 +18,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::messages::MessageId;
-use crate::session::{ExecutionBinding, MessageKind, MessagePolicy, MessageSource};
+use crate::session::{
+    ExecutionBinding, MessageKind, MessagePolicy, MessageSource, PluginSelection,
+};
 use crate::session_resources::{SessionResourceResult, SessionResources};
 use crate::store::PersistedPayload;
 use crate::system_reminder::TrustedSystemReminder;
@@ -37,6 +39,8 @@ pub struct MqInput {
     pub policy: MessagePolicy,
     /// 用户输入的原始编辑器文本；其他来源为 `None`。
     pub original_draft: Option<String>,
+    /// 与该 input_id 冻结的插件选择；写入 `payload_json`，重启后可恢复。
+    pub plugin_selections: Vec<PluginSelection>,
 }
 
 /// `thread_mq` 中一行的事实，不含任何运行期状态。
@@ -50,6 +54,8 @@ pub struct MqEntry {
     pub payload: PersistedPayload,
     pub policy: MessagePolicy,
     pub original_draft: Option<String>,
+    /// 用户输入随行持久化的插件选择；其他来源为空。
+    pub plugin_selections: Vec<PluginSelection>,
 }
 
 impl MqEntry {

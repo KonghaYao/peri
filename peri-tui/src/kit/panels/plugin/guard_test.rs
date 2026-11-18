@@ -255,6 +255,7 @@ fn stale_session_or_reset_event_cannot_cancel_new_loading() {
                     &old_scope,
                     None,
                     panel.selected,
+                    panel.highlighted_plugin,
                     panel.active_tab,
                     panel.discover,
                     panel.action_index,

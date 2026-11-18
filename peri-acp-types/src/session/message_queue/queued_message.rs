@@ -1,7 +1,7 @@
 //! Queued payload and source contracts.
 
 use super::super::mq::{MqEntry, MqInput};
-use super::super::MessagePolicy;
+use super::super::{MessagePolicy, PluginSelection};
 use crate::messages::{BaseMessage, MessageId};
 use crate::store::PersistedPayload;
 use crate::system_reminder::TrustedSystemReminder;
@@ -108,6 +108,8 @@ pub struct QueuedMessage {
     pub admission_sequence: Option<u64>,
     /// 用户输入的原始编辑器文本；其他来源为 `None`。
     pub original_draft: Option<String>,
+    /// 用户输入随行冻结的插件选择；其他来源为空。
+    pub plugin_selections: Vec<PluginSelection>,
     /// 存储生成的入队时间；只有从 MQ 读回的条目有值。
     pub enqueued_at: Option<String>,
 }
@@ -137,6 +139,7 @@ impl QueuedMessage {
             policy,
             admission_sequence: None,
             original_draft: None,
+            plugin_selections: Vec::new(),
             enqueued_at: None,
         }
     }
@@ -156,6 +159,12 @@ impl QueuedMessage {
     /// 附带用户输入的原始编辑器文本（只有待发送区的用户输入需要）。
     pub fn with_original_draft(mut self, draft: impl Into<String>) -> Self {
         self.original_draft = Some(draft.into());
+        self
+    }
+
+    /// 附带与本次用户输入冻结的插件选择。
+    pub fn with_plugin_selections(mut self, selections: Vec<PluginSelection>) -> Self {
+        self.plugin_selections = selections;
         self
     }
 
@@ -237,6 +246,7 @@ impl QueuedMessage {
             payload,
             policy: self.policy,
             original_draft: self.original_draft,
+            plugin_selections: self.plugin_selections,
         }
     }
 
@@ -250,6 +260,7 @@ impl QueuedMessage {
             payload,
             policy,
             original_draft,
+            plugin_selections,
         } = entry;
         let (payload, delivery_id) = match payload {
             PersistedPayload::Message(message) => (QueuedPayload::Message(message), None),
@@ -265,6 +276,7 @@ impl QueuedMessage {
             policy,
             admission_sequence: None,
             original_draft,
+            plugin_selections,
             enqueued_at: Some(enqueued_at),
         }
     }

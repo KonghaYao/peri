@@ -120,6 +120,9 @@ pub struct AcpTuiClient {
     /// 新的用户决定取代，只能取消，不得改投新会话。
     pub(super) session_switch_seq: Arc<std::sync::atomic::AtomicU64>,
     pub(super) user_input_queue: Arc<std::sync::atomic::AtomicBool>,
+    /// `peri.userInputQueue.pluginSelections` 的服务端回显：旧 Host 不认识
+    /// `pluginSelections` 字段，未确认前客户端不得发送选择。
+    pub(super) user_input_queue_plugin_selections: Arc<std::sync::atomic::AtomicBool>,
     pub(super) session_workspace: Arc<std::sync::atomic::AtomicBool>,
     pub(super) mcp_control: Arc<std::sync::atomic::AtomicBool>,
     /// History V2 连接事实：本地开关、服务端选择与协商预算都按连接持有。
@@ -296,6 +299,7 @@ impl AcpTuiClient {
             session_load_reservations: Arc::new(SessionLoadReservationState::new(load_epoch_tx)),
             session_switch_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            user_input_queue_plugin_selections: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             history_v2_enabled: Arc::new(Mutex::new(None)),
@@ -318,6 +322,15 @@ impl AcpTuiClient {
     #[cfg(test)]
     pub(crate) fn force_stable_for_test(&self, session_id: &str, accepting_reverse: bool) {
         self.lifecycle.force_stable(session_id, accepting_reverse);
+    }
+
+    /// 仅测试：直接设定 `pluginSelections` 入队能力，模拟 Host 升级/降级。
+    #[cfg(test)]
+    pub(crate) fn force_plugin_selections_for_test(&self, supported: bool) {
+        self.user_input_queue
+            .store(supported, std::sync::atomic::Ordering::Release);
+        self.user_input_queue_plugin_selections
+            .store(supported, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -350,6 +363,10 @@ impl Debug for AcpTuiClient {
             .debug_struct("AcpTuiClient")
             .field("projection_mode", &self.projection_mode)
             .field("user_input_queue", &self.user_input_queue)
+            .field(
+                "user_input_queue_plugin_selections",
+                &self.user_input_queue_plugin_selections,
+            )
             .field("session_workspace", &self.session_workspace)
             .finish_non_exhaustive()
     }

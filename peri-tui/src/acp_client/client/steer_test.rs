@@ -64,6 +64,105 @@ async fn test_user_input_old_server_keeps_legacy_path() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
+async fn test_plugin_selection_capability_requires_explicit_server_echo() {
+    for (agent_meta, expected) in [
+        (json!({"peri.userInputQueue": true}), false),
+        (
+            json!({
+                "peri.userInputQueue": true,
+                "peri.userInputQueue.pluginSelections": true,
+            }),
+            true,
+        ),
+    ] {
+        let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
+        let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
+        client.spawn_pump(notification_tx);
+        let server = tokio::spawn(async move {
+            let IncomingMessage::Request { id, method, params } =
+                server_transport.recv().await.expect(
+                    "plugin selection capability requires explicit server echo: fixture request",
+                )
+            else {
+                panic!("应收到 initialize");
+            };
+            assert_eq!(method, "initialize");
+            assert_eq!(
+                params["clientCapabilities"]["_meta"]["peri.userInputQueue.pluginSelections"],
+                json!(true),
+                "TUI 必须显式请求子能力，不能只凭队列能力发送 pluginSelections"
+            );
+            server_transport
+                .send_response(id, Ok(json!({"agentCapabilities": {"_meta": agent_meta}})))
+                .await
+                .expect(
+                    "plugin selection capability requires explicit server echo: fixture response",
+                );
+        });
+        client
+            .register_ui_commands(&[])
+            .await
+            .expect("plugin selection capability requires explicit server echo: initialize");
+        assert!(client.supports_user_input_queue());
+        assert_eq!(
+            client.supports_plugin_selections(),
+            expected,
+            "只有服务端明确回显子能力才允许发送 pluginSelections"
+        );
+        server
+            .await
+            .expect("plugin selection capability requires explicit server echo: fixture task");
+        client.close();
+    }
+}
+
+/// 直接 prompt 路径的 wire 形态：选择按 `{pluginId}` 数组发送，空集合不写字段。
+#[tokio::test]
+async fn test_prompt_in_session_writes_plugin_selections_wire_shape() {
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
+    client.force_stable_for_test("s", false);
+    client.spawn_pump(notification_tx);
+    let identity = client
+        .stable_session_identity()
+        .expect("prompt wire test requires a stable session");
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request { id, method, params } = server_transport
+            .recv()
+            .await
+            .expect("prompt in session writes plugin selections wire shape: fixture request")
+        else {
+            panic!("应收到 prompt");
+        };
+        assert_eq!(method, "session/prompt");
+        assert_eq!(
+            params["pluginSelections"],
+            json!([{"pluginId": "alpha"}, {"pluginId": "beta@market"}]),
+            "选择必须以 pluginId 数组进入 prompt wire"
+        );
+        server_transport
+            .send_response(id, Ok(json!({"stopReason": "end_turn"})))
+            .await
+            .expect("prompt in session writes plugin selections wire shape: fixture response");
+    });
+    client
+        .prompt_in_session(
+            &peri_acp_types::messages::MessageContent::text("hello"),
+            None,
+            &identity,
+            &[
+                peri_acp_types::session::PluginSelection::new("alpha"),
+                peri_acp_types::session::PluginSelection::new("beta@market"),
+            ],
+        )
+        .await
+        .expect("prompt with selections must be accepted");
+    server.await.expect("prompt wire fixture task");
+    client.close();
+}
+
+#[tokio::test]
 async fn test_user_input_enqueue_preserves_wire_identity_and_raw_draft() {
     let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
     let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
@@ -93,6 +192,7 @@ async fn test_user_input_enqueue_preserves_wire_identity_and_raw_draft() {
             input_id: "i".into(),
             content: peri_acp_types::messages::MessageContent::text("  中文\n@image /tmp/a.png\n"),
             original_draft: "  中文\n@image /tmp/a.png\n".into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("user input enqueue preserves wire identity and raw draft: fixture task and request must complete successfully");

@@ -29,6 +29,7 @@ use super::mq::MqReceiveStatus;
 use super::mq::MqWatermark;
 use super::mq::ThreadMqStore;
 use super::MessageSource;
+use super::PluginSelection;
 use crate::messages::MessageId;
 use crate::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
@@ -98,7 +99,7 @@ impl ThreadMqStore for InMemoryMqStore {
                 let _ = release.await;
             }
         }
-        let payload_json = payload_json(&input.payload)?;
+        let payload_json = payload_json(&input.payload, &input.plugin_selections)?;
         let mut state = self.state.lock();
         // 历史事实优先：已移交的 ID 不再回到 MQ。
         if let Some(history) = state.history.get(&input.id) {
@@ -118,6 +119,7 @@ impl ThreadMqStore for InMemoryMqStore {
                     payload: input.payload,
                     policy: input.policy,
                     original_draft: input.original_draft,
+                    plugin_selections: input.plugin_selections,
                 },
             });
         }
@@ -149,6 +151,7 @@ impl ThreadMqStore for InMemoryMqStore {
             payload: input.payload,
             policy: input.policy,
             original_draft: input.original_draft,
+            plugin_selections: input.plugin_selections,
         };
         state.rows.push(StoredRow {
             thread_id: thread_id.clone(),
@@ -408,8 +411,11 @@ fn filter_entries(entries: impl IntoIterator<Item = MqEntry>, filter: &MqFilter)
     selected
 }
 
-fn payload_json(payload: &PersistedPayload) -> SessionResourceResult<String> {
-    store::serialize_persisted_payload(payload).map_err(|_| {
+fn payload_json(
+    payload: &PersistedPayload,
+    plugin_selections: &[PluginSelection],
+) -> SessionResourceResult<String> {
+    store::serialize_persisted_payload_with_selections(payload, plugin_selections).map_err(|_| {
         SessionResourceError::new(SessionResourceErrorKind::Internal {
             detail: "MQ payload is not serializable".to_owned(),
         })

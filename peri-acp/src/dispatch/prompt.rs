@@ -107,6 +107,20 @@ pub fn extract_prompt_params(
     Ok((session_id, content, attachments))
 }
 
+/// 解析客户端提交的可选插件选择。
+///
+/// 只接受插件 ID 列表；形状不符时显式拒绝本轮 prompt，不能静默忽略选择后照常
+/// 执行（否则用户标签与真实执行语义不一致）。
+pub(crate) fn extract_plugin_selections(
+    params: &Value,
+) -> Result<Vec<peri_acp_types::session::PluginSelection>, AcpError> {
+    match params.get("pluginSelections") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| AcpError::new(-32602, format!("invalid pluginSelections: {error}"))),
+    }
+}
+
 /// `run_prompt` 专用：在 [`extract_prompt_params`] 之后校验 body 键语义（与迁移前
 /// `host/prompt.rs` 一致，并允许仅顶层 `attachments` 无 `message`/`prompt` 键）。
 pub(crate) fn validate_run_prompt_body(

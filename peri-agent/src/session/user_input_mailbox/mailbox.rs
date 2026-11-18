@@ -14,6 +14,7 @@ pub(super) use peri_acp_types::identity::AgentId;
 
 pub(super) use peri_acp_types::messages::MessageContent;
 
+pub(super) use peri_acp_types::session::PluginSelection;
 pub(super) use peri_acp_types::session::SessionInbox;
 
 pub(super) use peri_acp_types::session::TurnId;
@@ -78,6 +79,8 @@ pub(super) struct InputRecord {
     pub(super) fingerprint: u64,
     pub(super) content: MessageContent,
     pub(super) original_draft: String,
+    /// 与该 input_id 绑定的插件选择；快照与撤回回执都从这里投影。
+    pub(super) plugin_selections: Vec<PluginSelection>,
     pub(super) state: UserInputState,
     pub(super) handed_off: bool,
     /// 交付日志槽位在 enqueue 时预留；交付时转为日志条目，撤回时释放。

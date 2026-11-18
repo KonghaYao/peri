@@ -82,6 +82,7 @@ fn pending_recovery_predicate_matches_only_entry_defer() {
         },
         policy: MessagePolicy::ensure_processing(),
         original_draft: None,
+        plugin_selections: Vec::new(),
     };
     assert!(crate::host::recovery::reminder::is_pending_recovery(
         &entry(MessageKind::Defer, MessageSource::SessionRecovery)

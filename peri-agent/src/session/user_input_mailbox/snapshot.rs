@@ -72,6 +72,7 @@ impl UserInputMailbox {
                 input_id: record.input_id.clone(),
                 content: record.content.clone(),
                 original_draft: record.original_draft.clone(),
+                plugin_selections: record.plugin_selections.clone(),
                 state: record.state,
             })
             .collect();
@@ -149,10 +150,13 @@ fn merge_store_entries(
             continue;
         }
         let seq = state.next_record_seq();
+        // 选择随 payload JSON 持久化；重启后从这里恢复到运行期记录与快照标签。
+        let plugin_selections = entry.plugin_selections.clone();
         let fingerprint = crate::session::user_input_mailbox::state::fingerprint_for(
             &input_id,
             &content,
             &original_draft,
+            &plugin_selections,
         );
         state.records.push(InputRecord::new(
             input_id,
@@ -160,6 +164,7 @@ fn merge_store_entries(
             seq,
             content,
             original_draft,
+            plugin_selections,
         ));
         changed = true;
     }

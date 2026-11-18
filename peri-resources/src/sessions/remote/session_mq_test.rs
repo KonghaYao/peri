@@ -134,6 +134,7 @@ fn input(id: MessageId, text: &str) -> MqInput {
         payload: PersistedPayload::Message(human(id, text)),
         policy: MessagePolicy::ensure_processing(),
         original_draft: Some(text.to_owned()),
+        plugin_selections: Vec::new(),
     }
 }
 

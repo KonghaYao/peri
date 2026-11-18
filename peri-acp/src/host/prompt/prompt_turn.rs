@@ -219,6 +219,23 @@ pub(crate) async fn run_prompt(
     .map(|outcome| outcome.response)
 }
 
+/// legacy `session/prompt` 的插件选择准入。
+///
+/// 未协商 `peri.userInputQueue.pluginSelections` 的会话不得接受非空选择：
+/// 能力关闭时该路径必须不可达。缺省/null 解析为空选择，仍按原语义接受。
+pub(crate) fn ensure_plugin_selections_negotiated(
+    selections: &[peri_acp_types::session::PluginSelection],
+    caps: peri_acp_types::PeriCaps,
+) -> Result<(), AcpError> {
+    if !selections.is_empty() && !caps.user_input_queue_plugin_selections {
+        return Err(AcpError::new(
+            -32602,
+            "plugin selections were not negotiated for this session",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_prompt_attempt(
     params: Value,
@@ -256,6 +273,12 @@ pub(super) async fn run_prompt_attempt(
     let stdio_command_filter = deployment.stdio_command_filter;
     let (session_id, content, _attachments) =
         crate::dispatch::prompt::extract_and_validate_run_prompt_params(&params)?;
+    // 旧 prompt 路径的插件选择：只解析插件 ID 并随本轮携带；指引生成在 Reason
+    // 准备阶段消费这一事实，客户端不能提交可信指引或 Loader 绑定。
+    let plugin_selections = crate::dispatch::prompt::extract_plugin_selections(&params)?;
+    // 能力未协商时必须与队列路径同样 fail-closed：旧客户端不能绕过协商把选择
+    // 注入本轮。缺省/null 仍按空选择接受。
+    ensure_plugin_selections_negotiated(&plugin_selections, session_manager.get_caps(&session_id))?;
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
     // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
 
@@ -622,6 +645,7 @@ pub(super) async fn run_prompt_attempt(
     let turn = executor::TurnInput {
         event_sink,
         content,
+        plugin_selections,
         continuation,
         frozen: Some(frozen),
         history_payloads,

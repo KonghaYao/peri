@@ -1,11 +1,11 @@
 //! Session executor.
 
 use super::{
-    collect_result, exec_oneshot, input_recalls, intercept_immediate_command, spawn_event_pump,
-    AgentInput, Arc, AsyncRouter, BackgroundTaskResult, BgTaskKind, CollectRequest, ContentBlock,
-    ExecutionFailure, ExecutorEvent, FrozenSessionData, InterceptOutcome, InterceptRequest,
-    LangfuseTurnEndHook, MessageContent, PromptResult, PromptStopReason, SessionContext,
-    SpawnPumpRequest, TurnInput,
+    collect_result, exec_oneshot, input_recalls, intercept_immediate_command, plugin_guidance,
+    spawn_event_pump, AgentInput, Arc, AsyncRouter, BackgroundTaskResult, BgTaskKind,
+    CollectRequest, ContentBlock, ExecutionFailure, ExecutorEvent, FrozenSessionData,
+    InterceptOutcome, InterceptRequest, LangfuseTurnEndHook, MessageContent, PromptResult,
+    PromptStopReason, SessionContext, SpawnPumpRequest, TurnInput,
 };
 
 /// bg 完成 → ACP server continuation scheduler 的通知请求。
@@ -89,6 +89,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let TurnInput {
         event_sink,
         content,
+        plugin_selections,
         continuation,
         frozen,
         history_payloads,
@@ -271,7 +272,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     //   Inject(text) → AgentInput::blocks(text) 进 agent 管线（不 push_done，
     //                  pump 负责）；
     //   PassThrough  → 现状 AgentInput::blocks(content)。
-    let injected_content = match intercept_immediate_command(InterceptRequest {
+    let (injected_content, slash_plugin) = match intercept_immediate_command(InterceptRequest {
         content: &content,
         history_payloads: std::borrow::Cow::Borrowed(&history_payloads),
         cwd: &ctx.cwd,
@@ -304,8 +305,52 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     .await
     {
         InterceptOutcome::Handled(result) => return *result,
-        InterceptOutcome::Inject(text) => MessageContent::text(text),
-        InterceptOutcome::PassThrough => content,
+        InterceptOutcome::Inject(payload) => (MessageContent::text(payload.text), payload.plugin),
+        InterceptOutcome::PassThrough => (content, None),
+    };
+
+    // 插件指引在 Reason 准备阶段生成：显式选择、已移交队列输入与 slash 来源
+    // 共用同一过程；Loader 名称只来自会话元数据投影，客户端不提交。
+    let handed_off_selections = ctx
+        .user_input_mailbox
+        .as_ref()
+        .map(|mailbox| mailbox.handed_off_plugin_selections())
+        .unwrap_or_default();
+    let plugin_selections = plugin_guidance::merge_plugin_selections(
+        plugin_selections,
+        handed_off_selections,
+        slash_plugin.as_deref(),
+    );
+    let plugin_guidance_texts = if plugin_selections.is_empty() {
+        Vec::new()
+    } else {
+        let pool_bindings = ctx
+            .mcp_pool
+            .as_ref()
+            .map(|pool| Arc::clone(pool).dynamic_loader_bindings(&ctx.session_id))
+            .unwrap_or_default();
+        // 指引只能点名 Reason 真正会分发的 Loader：会话工具策略拒绝或目录
+        // 不可用的 Loader 不能提示模型调用。
+        let loader_bindings = match &ctx.session_mcp_catalog {
+            Some(catalog) => {
+                let disabled = frozen
+                    .as_ref()
+                    .map(|frozen| frozen.meta_harness().disabled_middlewares.clone())
+                    .unwrap_or_default();
+                let filter = crate::session::tool_catalog::ToolFilterPolicy::with_mcp_policy(
+                    disabled,
+                    Arc::new(|_| true),
+                );
+                let snapshot = catalog.snapshot();
+                plugin_guidance::retain_effective_loaders(
+                    pool_bindings,
+                    &snapshot.tools,
+                    filter.as_ref(),
+                )
+            }
+            None => Vec::new(),
+        };
+        plugin_guidance::guidance_texts(&plugin_selections, &ctx.plugin_loaded, &loader_bindings)
     };
 
     let trace_input = injected_content.text_content();
@@ -382,6 +427,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         continuation,
         stage_build,
         forwarder_launcher,
+        plugin_guidance_texts,
     )
     .await;
 
