@@ -116,7 +116,9 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 ### 2.6 Dynamic MCP 按需加载（外部 server）
 
-**现行（PR A/B）**：`dynamic: true` 的外部 server 只登记受控配置，首次显式 Loader 调用前不启动进程、不联网、不建立连接。每个配置投影为一条 deferred 宿主工具 `LoadMCP__<规范键>_<身份摘要>`；模型经 `ToolSearch` 发现、`ToolInvoke` 执行，工具名不含地址、headers、env 或凭证，调用不接受任何参数。
+**现行**：`dynamic: true` 的外部 server 只登记受控配置，首次显式 Loader 调用前不启动进程、不联网、不建立连接。每个配置投影为一条 deferred 宿主工具 `LoadMCP__<规范键>_<身份摘要>`；模型经 `ToolSearch` 发现、`ToolInvoke` 执行，工具名不含地址、headers、env 或凭证，调用不接受任何参数。
+
+用户入口：插件面板把已安装插件加入下一次任务的待提交上下文，composer 只显示插件 ID 标签；提交时选择与文本、附件同批经 `AgentText` / 输入队列随 `input_id` 冻结。客户端只提交插件 ID，不提交指引、URL、凭证或 Loader 绑定；Host 在 Reason 准备阶段按当前会话的插件元数据与 pool 投影生成 model-only 指引并给出 Loader 名称，slash 命令复用同一过程。选择只表达使用意图，不触发连接、不修改权限；选择未安装或没有可见 Loader 的插件不产出指引。
 
 1. 加载走与 initialize/reconnect 相同的连接、发现与提交路径：只有 transport、initialize 与真实成功的 live `tools/list` 全部完成，才允许提交 `Connected`。失败、需要 OAuth 或会话目录无法验证时报告错误，不伪造 ready，不重放业务操作。
 2. 每个 server slot 最多一个在建 attempt；并发调用共享同一结果。单个等待者退出不影响其他等待者；全部退出或显式 stop/unload/会话关闭时取消 attempt。
@@ -124,9 +126,9 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 4. 失败 attempt 在收口时关闭未提交的 service/process；重复 load/close 不累积连接、进程、任务或保留 owner。Loader 成功不产生额外授权：新工具在下一轮 Reason 进入目录后仍走既有审批与 runtime authorization。
 5. 子 Agent、fork 与 workflow 沿用各自冻结配置与目录过滤；继承配置不触发首次加载，已连接能力能否复用仍由既有会话准入决定。
 
-**验证入口**：`cargo test -p peri-middlewares --lib -- mcp::control::load_attempt_tests`、`mcp::control::dynamic_cleanup_tests` 与 `mcp::loader::tests` 覆盖并发单次加载、失败共享、停止/卸载竞争、保留计数、授权未就绪与下一轮目录。
+**验证入口**：`cargo test -p peri-middlewares --lib -- mcp::control::load_attempt_tests`、`mcp::control::dynamic_cleanup_tests` 与 `mcp::loader::tests` 覆盖并发单次加载、失败共享、停止/卸载竞争、保留计数、授权未就绪与下一轮目录；`cargo test -p peri-agent --lib -- session::exec::executor::plugin_guidance` 覆盖选择合并、指引文本与投递。用户闭环由 `peri-e2e` 的 P01 场景覆盖：选择插件后提交任务，模型只经 `ToolSearch` / `ToolInvoke` 调用 Loader，下一轮搜索到业务工具 schema 并执行真实本地 HTTP MCP，同会话复用连接，关闭后 socket 归零；录制基线为 Ubuntu 24.04，随 `.github/peri-e2e.rev` 在 CI 回放。
 
-**实现差距**：PR A/B 已覆盖名称、配置分流、单次 attempt、Loader/目录投影、下一轮刷新与 B6 的错误/授权/停止/清理面；插件选择入口与一条完整用户 E2E 由 PR C 完成。
+**实现差距**：PR A/B/C 已覆盖名称、配置分流、单次 attempt、Loader/目录投影、下一轮刷新、B6 的错误/授权/停止/清理面，以及插件选择入口、输入队列往返与用户 E2E；端到端证据为 `peri-e2e` commit `002afc0` 的 P01 场景（录制 run 44304311873，CI run 44305234011 的 Ubuntu 24.04 完整回放 62 passed）。
 
 ## 3. 配置权威
 

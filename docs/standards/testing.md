@@ -374,6 +374,11 @@ npm --prefix ../peri-e2e run e2e:replay:record         # 显式重录，仅本�
 在线模型。fixture 的 seed/configure 约束、每场景报告与终态断言以新仓 README 为准，报告落在新仓
 `results/replay-v2/`。
 
+插件动态 MCP 的用户闭环由 P01 覆盖：选择插件后提交任务，模型只经 `ToolSearch` / `ToolInvoke`
+调用 Loader，下一轮搜索到业务工具 schema 并执行真实本地 HTTP MCP，同会话复用连接，关闭会话后
+连接归零。场景目录、阻塞项与录制基线以 `peri-e2e` 的 `fixtures/replay-v2/README.md` 为准；
+完整回放由 `peri-e2e` CI 执行。
+
 world 映射的唯一事实源是 `peri-e2e/scripts/replay-world-sources.mjs`：`sys.block0.main`
 （`01_intro`–`06_tone_style` 组合）、`sys.skills`、`sys.compact.summary`、`sys.compact.user`
 与 `tools.Agent.*`。`sys.compact.user` 的 `{summary_target_tokens}` 按运行时目标值替换后冻结；
