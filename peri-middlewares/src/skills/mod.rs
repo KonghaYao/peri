@@ -10,7 +10,6 @@ use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::skills::SkillOrigin;
 use peri_agent::error::AgentResult;
 use peri_agent::middleware::prompt_sections::PromptSection;
-use peri_agent::middleware::prompt_sections::PromptSectionZone;
 use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::tools::BaseTool;
 

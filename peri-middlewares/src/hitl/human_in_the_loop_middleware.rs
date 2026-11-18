@@ -1,6 +1,6 @@
 use super::{
     fmt, Arc, AskUserTool, BaseTool, Debug, Formatter, Middleware, PromptSection,
-    PromptSectionZone, UserInteractionBroker,
+    UserInteractionBroker,
 };
 
 // ─── HumanInTheLoopMiddleware（提问通道）──────────────────────────────────────
@@ -32,19 +32,17 @@ impl HumanInTheLoopMiddleware {
     /// 段落声明（渲染面收集与链收集的单一事实源）。
     ///
     /// `12_ask_user` 段 = 提问纪律说明（`sections/12_ask_user.md`，
-    /// include_str 零拷贝，文件在 `peri-acp/prompts/sections/`，与
+    /// include_str 零拷贝，文件在 `peri-middlewares/prompts/sections/`，与
     /// `10_hitl` 同模式）。契约 3（gate 原子迁移）：本段 gate = 本
     /// middleware 是否在链上（收集即装配）——关闭即段落消失。
     #[must_use]
     pub fn sections() -> Vec<PromptSection> {
-        vec![PromptSection::builtin(
-            "12_ask_user",
-            PromptSectionZone::Uncached,
-            5, // 2026-08-15 拆分后编号事实：gated 12=5（11_subagent=4 之后，13_skills 顺延为 6）
-            include_str!(concat!(
+        vec![PromptSection::declared(
+            peri_acp_types::meta_harness::sections::ASK_USER,
+            peri_agent::middleware::PromptSectionContent::Builtin(include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../peri-acp/prompts/sections/12_ask_user.md"
-            )),
+                "/prompts/sections/12_ask_user.md"
+            ))),
         )]
     }
 }
@@ -59,7 +57,7 @@ impl HumanInTheLoopMiddleware {
 
 impl Middleware for HumanInTheLoopMiddleware {
     fn name(&self) -> &str {
-        "HumanInTheLoopMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::AskUser.name()
     }
 
     /// 声明持有的系统提示词段落（12_ask_user，装配期收集，契约 2）。

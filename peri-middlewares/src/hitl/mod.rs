@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use peri_agent::interaction::UserInteractionBroker;
 use peri_agent::middleware::prompt_sections::PromptSection;
-use peri_agent::middleware::prompt_sections::PromptSectionZone;
 use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::tools::BaseTool;
 
@@ -37,7 +36,6 @@ mod tests {
     use peri_agent::interaction::InteractionResponse;
     use peri_agent::interaction::TrustedInteractionOwner;
     use peri_agent::interaction::UserInteractionBroker;
-    use peri_agent::middleware::prompt_sections::PromptSectionZone;
 
     use super::*;
 
@@ -87,7 +85,10 @@ mod tests {
         assert_eq!(sections.len(), 1, "12_ask_user 段应唯一");
         let section = &sections[0];
         assert_eq!(section.id, "12_ask_user");
-        assert_eq!(section.zone, PromptSectionZone::Uncached);
+        assert_eq!(
+            section.zone,
+            peri_agent::middleware::PromptSectionZone::Uncached
+        );
         assert_eq!(section.order, 5);
     }
 }

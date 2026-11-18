@@ -18,7 +18,7 @@
 //! 退化为「使用发现阶段已校验的正文」（该路径的正文读取仍在发现期完成）。
 //!
 //! 批准面（X6 核实结论，2026-09-29 W2b）：**skill 级批准面当前不存在**——
-//! 既有批准只落在两处：(a) 工具粒度 `permission::sensitive_tool_entries()`
+//! 既有批准只落在两处：(a) 工具粒度 `permission::default_requires_approval`
 //! （含 `mcp__` 前缀「按绑定来源审批」；`SkillTool` 不在表内，
 //! 属免批准 direct 工具）；(b) agent 粒度 `McpAgentRegistry::approvals`
 //! （内容 + 有效能力绑定，变更重批）。因此 X6 的「本地受信来源免逐技能批准」

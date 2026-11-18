@@ -4,7 +4,6 @@ use super::AgentCancellationToken;
 use super::AgentCapability;
 use super::AgentEventHandler;
 use super::AgentModelSelection;
-use super::AgentOverrides;
 use super::AgentResult;
 use super::AgentResultTool;
 use super::Arc;
@@ -15,7 +14,6 @@ use super::ClaudeAgentFrontmatter;
 use super::InvalidModelTier;
 use super::Middleware;
 use super::PromptSection;
-use super::PromptSectionZone;
 use super::RwLock;
 use super::Session;
 use super::SubAgentTool;
@@ -156,7 +154,7 @@ impl SubAgentMiddlewareConfig {
 ///     SubagentLlmSource::model(model.clone(), "model-name")
 /// });
 /// // Optional: system prompt builder, making sub-agent's tone/proactiveness visible in Langfuse
-/// let system_builder = Arc::new(|overrides: Option<&AgentOverrides>, cwd: &str| {
+/// let system_builder = Arc::new(|overrides: Option<&AgentOverrides>, cwd: &str, _skill_access, _projection| {
 ///     build_system_prompt(overrides, cwd)
 /// });
 /// let middleware = SubAgentMiddleware::new(parent_tools, Some(event_handler), llm_factory)
@@ -177,8 +175,7 @@ pub struct SubAgentMiddleware {
         Arc<dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
-    pub(super) system_builder:
-        Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
+    pub(super) system_builder: Option<peri_agent::session::factory::SystemPromptBuilder>,
     /// Parent agent cancellation token (passed to child agent, supports user interruption)
     pub(super) cancel: Option<AgentCancellationToken>,
     /// Shared reference to parent agent message snapshot, written in before_agent, read by Fork child agent
@@ -279,7 +276,7 @@ impl SubAgentMiddleware {
     #[must_use]
     pub fn with_system_builder(
         mut self,
-        builder: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
+        builder: peri_agent::session::factory::SystemPromptBuilder,
     ) -> Self {
         self.system_builder = Some(builder);
         self
@@ -341,7 +338,7 @@ impl SubAgentMiddleware {
     }
 
     /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.5.1
-    /// 步骤 3——文件留在 `peri-acp/prompts/sections/` 由 middleware
+    /// 步骤 3——文件留在 `peri-middlewares/prompts/sections/` 由 middleware
     /// `include_str!`，内容不复制）。
     ///
     /// 11_subagent 段为 Builtin 文本，**含 `{{available_agents}}` 占位符**：
@@ -353,15 +350,14 @@ impl SubAgentMiddleware {
     /// SubAgentTool/AgentResultTool 同时消失（盲区闭合）。
     #[must_use]
     pub fn sections() -> Vec<PromptSection> {
-        vec![PromptSection::builtin(
-            "11_subagent",
-            PromptSectionZone::Uncached,
-            4, // C1 D2 编号事实：gated 11=4（10_hitl=3 之后）
-            include_str!(concat!(
+        vec![PromptSection::declared(
+            peri_acp_types::meta_harness::sections::SUBAGENT,
+            peri_agent::middleware::PromptSectionContent::Builtin(include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../peri-acp/prompts/sections/11_subagent.md"
-            )),
-        )]
+                "/prompts/sections/11_subagent.md"
+            ))),
+        )
+        .with_agent_catalog()]
     }
 
     /// Build SubAgentTool instance (clone Arc fields, do not transfer ownership)
@@ -507,7 +503,7 @@ impl peri_agent::session::factory::SubAgentMiddlewarePort for SubAgentMiddleware
 #[async_trait]
 impl Middleware for SubAgentMiddleware {
     fn name(&self) -> &str {
-        "SubAgentMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::SubAgent.name()
     }
 
     /// 声明持有的系统提示词段落（11_subagent，内容载体；装配期收集，契约 2）。

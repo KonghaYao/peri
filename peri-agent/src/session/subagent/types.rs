@@ -156,7 +156,7 @@ impl SubagentLlmSource {
         environment_prompt: Option<Arc<str>>,
         legacy_embedded_instructions: bool,
         provider: crate::agent::model_bridge::SystemContributionProvider,
-        normalize_persisted_identity: bool,
+        persisted_identity: Option<crate::messages::MessageId>,
     ) -> Box<dyn ReactLLM + Send + Sync> {
         let mut bridge = crate::agent::model_bridge::AgentModelBridge::new(self.model)
             .with_external_instructions(external_instructions)
@@ -167,11 +167,9 @@ impl SubagentLlmSource {
             bridge = bridge.with_session_id(session_id);
         }
         if !identity_system.trim().is_empty() {
-            bridge = bridge
-                .with_system(identity_system)
-                .with_absorbed_system_message(normalize_persisted_identity);
+            bridge = bridge.with_system(identity_system);
         }
-        Box::new(bridge)
+        Box::new(bridge.with_absorbed_system_message(persisted_identity))
     }
 }
 
@@ -239,6 +237,18 @@ pub struct SubagentChainContext {
 pub trait SubagentChainAssembler: Send + Sync {
     #[must_use]
     fn assemble(&self, ctx: &SubagentChainContext) -> MiddlewareChain;
+
+    /// Apply runtime restrictions to the historical identity without changing stored history.
+    fn project_resumed_identity(
+        &self,
+        identity: &str,
+        _cwd: &str,
+        _recorded: Option<peri_acp_types::skills::SkillToolAccess>,
+        _frozen: Option<&peri_acp_types::meta_harness::MetaHarnessState>,
+        tool_filter: crate::session::tool_catalog::ToolFilter,
+    ) -> Result<(String, crate::session::tool_catalog::ToolFilter), String> {
+        Ok((identity.to_owned(), tool_filter))
+    }
 
     #[must_use]
     fn bind_tools(

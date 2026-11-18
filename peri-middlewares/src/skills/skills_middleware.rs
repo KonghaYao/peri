@@ -1,7 +1,8 @@
 use super::{
     async_trait, hook_state, tools, AgentResult, Arc, BaseTool, McpSkillRegistry, Middleware,
-    PromptSection, PromptSectionZone, RwLock, SkillMetadata, SkillOrigin, SkillSource,
+    PromptSection, RwLock, SkillMetadata, SkillOrigin, SkillSource,
 };
+use peri_acp_types::skills::SkillToolAccess;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 
@@ -102,6 +103,8 @@ pub struct SkillsMiddleware {
     pub(super) frozen_summary: Option<String>,
     /// Cached prompt contribution (populated in before_agent, returned by prompt_contribution).
     pub(super) cached_contribution: Arc<RwLock<Option<String>>>,
+    prompt_access: RwLock<SkillToolAccess>,
+    register_tools: bool,
     /// MCP 远端技能注册表（None = 未装配技能面：投影为空，不回退任何本地来源）。
     pub(super) mcp_registry: Option<Arc<McpSkillRegistry>>,
 }
@@ -142,7 +145,7 @@ impl SkillsMiddleware {
     /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.1.1）。
     ///
     /// 13_skills 段 = 机制说明（`sections/13_skills.md`，include_str 零拷贝，
-    /// 文件留在 `peri-acp/prompts/sections/`）+ 动态 discovery 协议
+    /// 文件在本 crate 的 `prompts/sections/`）+ 动态 discovery 协议
     /// （[`format_discovery_protocol`]）。
     ///
     /// 契约 3（gate 原子迁移）：本段 gate = 本 middleware 是否在链上
@@ -150,18 +153,38 @@ impl SkillsMiddleware {
     /// SkillTool/DiscoverSkillsTool 同时消失（盲区闭合）。
     #[must_use]
     pub fn sections() -> Vec<PromptSection> {
+        Self::sections_for_tools(SkillToolAccess::Full)
+    }
+
+    pub fn sections_for_tools(access: SkillToolAccess) -> Vec<PromptSection> {
+        let partial = match access {
+            SkillToolAccess::None => return Vec::new(),
+            SkillToolAccess::LoadOnly => Some(
+                "# Skills\n\nUse `SkillTool(skill_name)` to load the full skill by name. Use the exact name from the session-start metadata, user instructions, or an earlier result. After compaction, use the exact names in Recovery resources to reload any archived active skill. If loading fails, keep skill-dependent work blocked unless the user permits a fallback.",
+            ),
+            SkillToolAccess::DiscoverOnly => Some(
+                "# Skills\n\nUse `DiscoverSkillsTool(query?)` to find current skills by name or description. The results are catalog metadata and do not include the skill body. Apply skill instructions that the harness has already loaded. If an active skill body is unavailable, keep dependent work blocked unless the user permits a fallback.",
+            ),
+            SkillToolAccess::Full => None,
+        };
+        if let Some(content) = partial {
+            return vec![PromptSection::declared(
+                peri_acp_types::meta_harness::sections::SKILLS,
+                peri_agent::middleware::PromptSectionContent::Builtin(content),
+            )
+            .without_override()];
+        }
+
         let mut content = String::with_capacity(1024);
         content.push_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/13_skills.md"
+            "/prompts/sections/13_skills.md"
         )));
         content.push_str("\n\n");
         content.push_str(&format_discovery_protocol());
-        vec![PromptSection::dynamic(
-            "13_skills",
-            PromptSectionZone::Uncached,
-            6, // C1 D2 编号事实（2026-08-15 顺延）：gated 13=6（12_ask_user=5 之后）
-            content,
+        vec![PromptSection::declared(
+            peri_acp_types::meta_harness::sections::SKILLS,
+            peri_agent::middleware::PromptSectionContent::Dynamic(content),
         )]
     }
 
@@ -170,7 +193,180 @@ impl SkillsMiddleware {
         Self {
             frozen_summary: None,
             cached_contribution: Arc::new(RwLock::new(None)),
+            prompt_access: RwLock::new(SkillToolAccess::Full),
+            register_tools: true,
             mcp_registry: None,
+        }
+    }
+
+    /// Project the child policy against the same tools the child chain contributes.
+    pub fn access_for_filter(filter: impl Fn(&dyn BaseTool) -> bool) -> SkillToolAccess {
+        let tools = Self::new().collect_tools("");
+        SkillToolAccess::from_tools(tools.iter().map(Box::as_ref).filter(|tool| filter(*tool)))
+    }
+
+    /// 冻结身份可能来自 Windows 检出/构建（CRLF）；匹配按 LF 归一化进行，
+    /// `offsets` 以归一化字节下标映射回原串字节下标。
+    fn line_ending_normalized(identity: &str) -> (String, Vec<usize>) {
+        let mut normalized = String::with_capacity(identity.len());
+        let mut offsets = Vec::with_capacity(identity.len() + 1);
+        let bytes = identity.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                offsets.push(index);
+                normalized.push('\n');
+                index += 2;
+            } else {
+                let ch = identity[index..]
+                    .chars()
+                    .next()
+                    .expect("offset follows a char boundary");
+                offsets.extend(std::iter::repeat_n(index, ch.len_utf8()));
+                normalized.push(ch);
+                index += ch.len_utf8();
+            }
+        }
+        offsets.push(identity.len());
+        (normalized, offsets)
+    }
+
+    pub(crate) fn project_resumed_identity(
+        identity: &str,
+        recorded: Option<SkillToolAccess>,
+        frozen: Option<&peri_acp_types::meta_harness::MetaHarnessState>,
+        requested: SkillToolAccess,
+        rendered_section: Option<&str>,
+    ) -> Result<(String, SkillToolAccess), String> {
+        use peri_acp_types::meta_harness::{sections, AssemblyPlan, ChainSlot, ExecutionProfile};
+        use sha2::{Digest, Sha256};
+        use SkillToolAccess::{DiscoverOnly, Full, LoadOnly};
+
+        // Rendered default owner section from release commit 25c183e.
+        const LEGACY_LEN: usize = 5124;
+        const LEGACY_DIGEST: [u8; 32] = [
+            0x2b, 0xd9, 0x12, 0xf1, 0xb0, 0x88, 0xd2, 0x43, 0x38, 0xb6, 0x4d, 0x0c, 0x66, 0x33,
+            0xc4, 0xc8, 0x7a, 0xe6, 0xb6, 0x77, 0x79, 0x7f, 0xf6, 0xd5, 0x10, 0x64, 0x73, 0x9c,
+            0x82, 0xd7, 0x57, 0xe7,
+        ];
+
+        if frozen.is_some_and(|state| {
+            !AssemblyPlan::new(&state.disabled_middlewares, ExecutionProfile::Child)
+                .declares_sections(ChainSlot::Skills)
+        }) {
+            return Ok((identity.to_owned(), SkillToolAccess::None));
+        }
+
+        let variants =
+            [Full, LoadOnly, DiscoverOnly].map(|access| (access, Self::sections_for_tools(access)));
+        let overridden = frozen.and_then(|state| state.section_overrides.get(sections::SKILLS.id));
+        let (normalized, offsets) = Self::line_ending_normalized(identity);
+        let is_section = |start: usize, end: usize| {
+            (start == 0 || normalized[..start].ends_with("\n\n"))
+                && (end == normalized.len() || normalized[end..].starts_with("\n\n"))
+        };
+        let bodies = variants
+            .iter()
+            .flat_map(|(access, sections)| {
+                sections
+                    .iter()
+                    .map(move |section| (*access, section.content.as_str()))
+            })
+            .chain(
+                rendered_section
+                    .or_else(|| overridden.map(AsRef::as_ref))
+                    .map(|body| (Full, body)),
+            )
+            .filter(|(_, body)| !body.is_empty())
+            // 段落正文同样按 LF 归一化（Windows 构建的 include_str! 产物为 CRLF）。
+            .map(|(access, body)| (access, body.replace("\r\n", "\n")))
+            .collect::<Vec<_>>();
+        let mut matches = bodies
+            .iter()
+            .flat_map(|(access, body)| {
+                normalized
+                    .match_indices(body.as_str())
+                    .filter_map(move |(start, _)| {
+                        let end = start + body.len();
+                        is_section(start, end).then_some((start, end, *access))
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (start, _) in normalized.match_indices("# Skills\n") {
+            let end = start + LEGACY_LEN;
+            if let Some(body) = normalized
+                .get(start..end)
+                .filter(|_| is_section(start, end))
+            {
+                if Sha256::digest(body.as_bytes())[..] == LEGACY_DIGEST {
+                    matches.push((start, end, SkillToolAccess::None));
+                }
+            }
+        }
+        matches.sort_unstable_by_key(|(start, end, _)| (*start, *end));
+        matches.dedup_by(|next, previous| {
+            if (next.0, next.1) != (previous.0, previous.1) {
+                return false;
+            }
+            previous.2 = previous.2.intersect(next.2);
+            true
+        });
+        let (start, end, allowed) = match matches.as_slice() {
+            [(start, end, allowed)] => (*start, *end, *allowed),
+            [] if !normalized.contains("# Skills")
+                && (recorded == Some(SkillToolAccess::None)
+                    || (recorded.is_none()
+                        && overridden.is_none_or(|body| !body.contains("{{")))) =>
+            {
+                return Ok((identity.to_owned(), SkillToolAccess::None));
+            }
+            _ => return Err("cannot identify the frozen Skills section for resume".into()),
+        };
+        // 归一化偏移回到原串，保留未命中部分的原始行尾。
+        let (start, end) = (offsets[start], offsets[end]);
+        let ceiling = recorded.unwrap_or(SkillToolAccess::None);
+        let access = requested.intersect(allowed).intersect(ceiling);
+        if recorded.is_none() || allowed == SkillToolAccess::None {
+            tracing::warn!(
+                "Legacy child identity has no recorded skills authorization; resuming without skill tools"
+            );
+        } else if access == allowed {
+            return Ok((identity.to_owned(), access));
+        }
+
+        let before = &identity[..start];
+        let after = &identity[end..];
+        let replacement = Self::sections_for_tools(access);
+        let projected = if let Some(section) = replacement.first() {
+            format!("{before}{}{after}", section.content.as_str())
+        } else if let Some(after) = after
+            .strip_prefix("\n\n")
+            .or_else(|| after.strip_prefix("\r\n\r\n"))
+        {
+            format!("{before}{after}")
+        } else {
+            before
+                .strip_suffix("\n\n")
+                .or_else(|| before.strip_suffix("\r\n\r\n"))
+                .unwrap_or(before)
+                .to_owned()
+        };
+        Ok((projected, access))
+    }
+
+    pub(crate) fn without_tool_registration(mut self) -> Self {
+        self.register_tools = false;
+        self
+    }
+
+    fn update_prompt_access(&self, state: &dyn hook_state::CatalogState) {
+        if let Some(tools) = state.local_tools() {
+            let tools = tools.read();
+            *self
+                .prompt_access
+                .write()
+                .expect("skill prompt access lock poisoned") =
+                SkillToolAccess::from_tools(tools.values().map(Arc::as_ref));
         }
     }
 
@@ -277,7 +473,7 @@ impl Default for SkillsMiddleware {
 #[async_trait]
 impl Middleware for SkillsMiddleware {
     fn name(&self) -> &str {
-        "SkillsMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Skills.name()
     }
 
     /// 声明持有的系统提示词段落（13_skills，内容载体；装配期收集，契约 2）。
@@ -286,11 +482,24 @@ impl Middleware for SkillsMiddleware {
     }
 
     fn prompt_contribution(&self) -> Option<String> {
-        let summary = self
-            .cached_contribution
+        let access = *self
+            .prompt_access
             .read()
-            .expect("frozen prompt contribution must not expose an interrupted cache update")
-            .clone();
+            .expect("skill prompt access lock poisoned");
+        if access == SkillToolAccess::None {
+            return None;
+        }
+        let summary = access
+            .can_load()
+            .then(|| {
+                self.cached_contribution
+                    .read()
+                    .expect(
+                        "frozen prompt contribution must not expose an interrupted cache update",
+                    )
+                    .clone()
+            })
+            .flatten();
         if self
             .mcp_registry
             .as_ref()
@@ -305,13 +514,25 @@ impl Middleware for SkillsMiddleware {
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {
+        if !self.register_tools {
+            return Vec::new();
+        }
         vec![
             Box::new(tools::SkillTool::new(self.mcp_registry.clone())),
             Box::new(tools::DiscoverSkillsTool::new(self.mcp_registry.clone())),
         ]
     }
 
-    async fn before_agent(&self, _state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
+    async fn before_reason_catalog(
+        &self,
+        state: &mut dyn hook_state::CatalogState,
+    ) -> AgentResult<()> {
+        self.update_prompt_access(state);
+        Ok(())
+    }
+
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
+        self.update_prompt_access(state);
         // 投递面（J1）：冻结摘要优先（会话内不变）；未冻结时只用系统来源的当前
         // 投影渲染——非 system 来源保持既有延迟发现语义，不自动改 prompt。
         //

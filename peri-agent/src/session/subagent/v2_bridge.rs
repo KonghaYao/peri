@@ -279,7 +279,11 @@ pub fn build_v2_subagent_context(
         .meta_harness
         .disabled_middlewares
         .clone();
-    let mcp_enabled = !disabled.contains("McpMiddleware");
+    let plan = peri_acp_types::meta_harness::AssemblyPlan::new(
+        &disabled,
+        peri_acp_types::meta_harness::ExecutionProfile::Child,
+    );
+    let mcp_enabled = plan.contains(peri_acp_types::meta_harness::ChainSlot::Mcp);
     let tool_filter = ToolFilterPolicy::with_mcp_policy(disabled, tool_filter);
 
     // 先过滤再合并，关闭的旧 MCP 候选不得占用合法 core 工具的名字。

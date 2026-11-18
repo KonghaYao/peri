@@ -1,116 +1,43 @@
-//! 系统提示词基础段持有者（波 4 演进 2，设计 §3.5 / §3.5.2）。
-//!
-//! 两个 middleware 持有系统提示词的基础段落（内容载体，设计 §3.5 语义边界
-//! ①——段落渲染仍走 `PromptTemplate` 段落装配渲染，middleware 仅作内容
-//! 载体，`prompt_contribution` 通道语义不变）：
-//!
-//! - [`DefaultSystemPromptMiddleware`]：01-06 基础段（Cached 1-6）+
-//!   07_runtime（Uncached 1，运行时规则）+ env（Environment 0）+ persona
-//!   动态段（Uncached 0，full/extend/无 overrides 三态）。关闭它 =
-//!   基础段 + Persona 全部消失（纯净模式清空 persona 覆盖）。
-//! - [`LangMiddleware`]：Language 段（id `language`，Uncached 7，内容 =
-//!   `settings.language` 映射的指令文本）。可关闭、可覆盖
-//!   （`.peri/meta/language.md`）。
-//!
-//! 段落文件留在 `peri-acp/prompts/sections/`（设计 §3.5.1 步骤 3：文件可
-//! 留在 sections/ 由 middleware `include_str!`，内容不复制）；本 crate 经
-//! workspace 相对路径 `../peri-acp/prompts/sections/` 引用。
-//!
-//! 契约 3（gate 原子迁移）：本批迁移即判定——基础段 gate = 本 middleware
-//! 是否在链上（收集即装配，`PromptTemplate` 侧收集段恒渲染）；渲染面构造
-//! 点（冻结渲染 / 重渲染闭包）经 `DefaultSystemPromptMiddleware::sections`
-//! 静态声明收集（冻结 disabled 集合驱动，链未装配也能得到一致段落——
-//! C1 遗留问题 1/2 落定，见决策记录 D3）。本模块的段声明函数是渲染面与
-//! 链收集的**单一事实源**，禁止双轨。
-//!
-//! 契约 4（运行时缺失防御）：middleware 在链上但内容为空（无 overrides /
-//! 无语言配置）= 段仍声明、内容为空串，由渲染面空内容过滤跳过渲染不
-//! fail——同时保证 `.peri/meta/persona.md` / `.peri/meta/language.md`
-//! 覆盖在无用户配置时仍可注入（覆盖先于空过滤生效）。
+//! Frozen engineering defaults, persona, environment and language declarations.
 
 use peri_acp_types::agents::AgentOverrides;
+use peri_acp_types::meta_harness::{sections, SectionSpec};
 use peri_agent::middleware::prompt_sections::PromptSection;
-use peri_agent::middleware::prompt_sections::PromptSectionZone;
 use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::middleware::PromptSectionContent;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 
-/// 基础段落声明（ID / 内容 / 位置属性）。
-///
-/// 01-06 为 Cached；07_runtime 为 Uncached；env 独立冻结并由请求层放在末尾。
-const BASE_SECTIONS: [(&str, &str, PromptSectionZone, u16); 8] = [
+const BASE_SECTIONS: &[(SectionSpec, &str)] = &[
     (
-        "01_intro",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/01_intro.md"
-        )),
-        PromptSectionZone::Cached,
-        1,
+        sections::INTRO,
+        include_str!("../../prompts/sections/01_intro.md"),
     ),
     (
-        "02_system",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/02_system.md"
-        )),
-        PromptSectionZone::Cached,
-        2,
+        sections::SYSTEM,
+        include_str!("../../prompts/sections/02_system.md"),
     ),
     (
-        "03_doing_tasks",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/03_doing_tasks.md"
-        )),
-        PromptSectionZone::Cached,
-        3,
+        sections::TASKS,
+        include_str!("../../prompts/sections/03_doing_tasks.md"),
     ),
     (
-        "04_actions",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/04_actions.md"
-        )),
-        PromptSectionZone::Cached,
-        4,
+        sections::ACTIONS,
+        include_str!("../../prompts/sections/04_actions.md"),
     ),
     (
-        "05_using_tools",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/05_using_tools.md"
-        )),
-        PromptSectionZone::Cached,
-        5,
+        sections::TOOLS,
+        include_str!("../../prompts/sections/05_using_tools.md"),
     ),
     (
-        "06_tone_style",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/06_tone_style.md"
-        )),
-        PromptSectionZone::Cached,
-        6,
+        sections::STYLE,
+        include_str!("../../prompts/sections/06_tone_style.md"),
     ),
     (
-        "07_runtime",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/07_runtime.md"
-        )),
-        PromptSectionZone::Uncached,
-        1,
+        sections::RUNTIME,
+        include_str!("../../prompts/sections/07_runtime.md"),
     ),
-    (
-        "env",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/env.md"
-        )),
-        PromptSectionZone::Environment,
-        0,
-    ),
+    (sections::ENV, include_str!("../../prompts/sections/env.md")),
 ];
 
 /// 系统提示词基础段持有者（设计 §3.1.1 归属全景 / §3.5 演进 2）。
@@ -146,14 +73,15 @@ impl DefaultSystemPromptMiddleware {
     #[must_use]
     pub fn sections(overrides: Option<&AgentOverrides>) -> Vec<PromptSection> {
         let mut sections = Vec::with_capacity(BASE_SECTIONS.len() + 1);
-        sections.push(PromptSection::dynamic(
-            "persona",
-            PromptSectionZone::Uncached,
-            0, // 现状顺序：boundary 后、07_runtime 之前
-            build_persona_content(overrides),
+        sections.push(PromptSection::declared(
+            sections::PERSONA,
+            PromptSectionContent::Dynamic(build_persona_content(overrides)),
         ));
-        for (id, content, zone, order) in BASE_SECTIONS {
-            sections.push(PromptSection::builtin(id, zone, order, content));
+        for &(spec, content) in BASE_SECTIONS {
+            sections.push(PromptSection::declared(
+                spec,
+                PromptSectionContent::Builtin(content),
+            ));
         }
         sections
     }
@@ -161,7 +89,7 @@ impl DefaultSystemPromptMiddleware {
 
 impl Middleware for DefaultSystemPromptMiddleware {
     fn name(&self) -> &str {
-        "DefaultSystemPromptMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::DefaultSystemPrompt.name()
     }
 
     /// 声明持有的系统提示词段落（内容载体；装配期收集，契约 2）。
@@ -194,18 +122,16 @@ impl LangMiddleware {
     /// 过滤跳过）——保证 `.peri/meta/language.md` 覆盖可注入。
     #[must_use]
     pub fn sections(language: Option<&str>) -> Vec<PromptSection> {
-        vec![PromptSection::dynamic(
-            "language",
-            PromptSectionZone::Uncached,
-            8, // gated 段（10/11/12/13/15 = 3-7，2026-08-15 拆分后）之后最后段
-            build_language_content(language),
+        vec![PromptSection::declared(
+            sections::LANGUAGE,
+            PromptSectionContent::Dynamic(build_language_content(language)),
         )]
     }
 }
 
 impl Middleware for LangMiddleware {
     fn name(&self) -> &str {
-        "LangMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Lang.name()
     }
 
     fn prompt_sections(&self) -> Vec<PromptSection> {

@@ -104,3 +104,59 @@ impl Default for SkillMetadata {
         }
     }
 }
+
+pub const SKILL_TOOL_NAME: &str = "SkillTool";
+pub const DISCOVER_SKILLS_TOOL_NAME: &str = "DiscoverSkillsTool";
+
+/// The skills operations actually available to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillToolAccess {
+    None,
+    LoadOnly,
+    DiscoverOnly,
+    Full,
+}
+
+impl SkillToolAccess {
+    pub fn from_tools<'a>(tools: impl IntoIterator<Item = &'a dyn crate::tools::BaseTool>) -> Self {
+        let mut load = false;
+        let mut discover = false;
+        for tool in tools {
+            if tool.is_direct()
+                && tool.visible_to_model()
+                && tool.mcp_server_name().is_none()
+                && tool.namespace() == Some("skills")
+            {
+                load |= tool.name() == SKILL_TOOL_NAME;
+                discover |= tool.name() == DISCOVER_SKILLS_TOOL_NAME;
+            }
+        }
+        match (load, discover) {
+            (false, false) => Self::None,
+            (true, false) => Self::LoadOnly,
+            (false, true) => Self::DiscoverOnly,
+            (true, true) => Self::Full,
+        }
+    }
+
+    pub fn intersect(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Full, access) | (access, Self::Full) => access,
+            (Self::LoadOnly, Self::LoadOnly) => Self::LoadOnly,
+            (Self::DiscoverOnly, Self::DiscoverOnly) => Self::DiscoverOnly,
+            _ => Self::None,
+        }
+    }
+
+    pub fn permits(self, tool: &dyn crate::tools::BaseTool) -> bool {
+        match Self::from_tools([tool]) {
+            Self::None => true,
+            operation => self.intersect(operation) == operation,
+        }
+    }
+
+    pub fn can_load(self) -> bool {
+        matches!(self, Self::LoadOnly | Self::Full)
+    }
+}

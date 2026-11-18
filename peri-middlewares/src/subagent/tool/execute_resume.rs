@@ -187,7 +187,7 @@ impl super::SubAgentTool {
         }
 
         // 2. 按 title 恢复工具集 / LLM / 迭代上限：
-        //    - "fork" → 父工具集 clone（无过滤）+
+        //    - "fork" → 父工具集 clone，沿用 fork spawn 的子链继承策略 +
         //      DEFAULT_SUBAGENT_MAX_ITERATIONS
         //    - 其他 → load_agent_def(title) 重新应用过滤（tools/disallowed，
         //      权限漂移防护）+ agent_def 声明的 max_turns
@@ -198,7 +198,7 @@ impl super::SubAgentTool {
             (
                 llm,
                 tools,
-                Arc::new(|_: &dyn BaseTool| true) as peri_agent::session::tool_catalog::ToolFilter,
+                crate::subagent::fork::child_inheritance_filter(),
                 crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
             )
         } else {

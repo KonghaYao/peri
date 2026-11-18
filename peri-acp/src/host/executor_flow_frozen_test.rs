@@ -211,14 +211,12 @@ async fn test_subagent_projection_drops_abilities_the_child_chain_lacks() {
     }
 
     // 子链投影（与 ACP `system_builder` 同一收集入口与能力事实）
-    let capabilities =
-        crate::session::subagent_chain_capabilities(&frozen.meta_harness().disabled_middlewares);
-    let collected = crate::session::build_collected_sections_with_capabilities(
-        frozen.meta_harness(),
-        None,
-        frozen.language(),
-        &capabilities,
+    let capabilities = peri_acp_types::meta_harness::AssemblyPlan::new(
+        &frozen.meta_harness().disabled_middlewares,
+        peri_acp_types::meta_harness::ExecutionProfile::Child,
     );
+    let collected =
+        crate::session::build_collected_sections_for_plan(None, frozen.language(), &capabilities);
     let projected = crate::prompt::PromptTemplate::new(frozen.meta_harness(), &collected).render(
         &crate::prompt::PromptEnv::frozen(cwd, frozen.date(), frozen.runtime_env()),
         &catalog,
@@ -304,7 +302,12 @@ async fn test_workflow_prompt_excludes_hitl_section() {
         capabilities,
         frozen.runtime_env().cloned(),
     );
-    let prompt = fallback("/tmp", Some("2026-01-01"), frozen.language());
+    let prompt = fallback(
+        "/tmp",
+        Some("2026-01-01"),
+        frozen.language(),
+        peri_acp_types::skills::SkillToolAccess::Full,
+    );
     assert!(
         !prompt.contains("Human-in-the-Loop (HITL)"),
         "workflow 链无审批 middleware：提示词不得包含 10_hitl"
@@ -318,7 +321,13 @@ async fn test_workflow_prompt_excludes_hitl_section() {
         capabilities,
         frozen.runtime_env().cloned(),
     );
-    let agent_prompt = builder(None, "/tmp", Some("2026-01-01"), frozen.language());
+    let agent_prompt = builder(
+        None,
+        "/tmp",
+        Some("2026-01-01"),
+        frozen.language(),
+        peri_acp_types::skills::SkillToolAccess::Full,
+    );
     assert!(
         !agent_prompt.contains("Human-in-the-Loop (HITL)"),
         "workflow agentType builder 同样不得包含 10_hitl"

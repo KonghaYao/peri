@@ -10,8 +10,8 @@ pub mod r#trait;
 pub use base::{LoggingMiddleware, MetricsMiddleware};
 pub use chain::{MiddlewareChain, PromptContributionError};
 pub use prompt_sections::{
-    project_enabled_sections, validate_section_layout, PromptSection, PromptSectionContent,
-    PromptSectionZone, SectionCapabilities, SectionLayoutError,
+    validate_section_layout, PromptSection, PromptSectionContent, PromptSectionZone,
+    SectionLayoutError,
 };
 pub use queue_enqueue::enqueue_v2_message;
 pub use r#trait::{Middleware, NoopMiddleware};

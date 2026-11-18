@@ -71,64 +71,6 @@ fn test_collect_prompt_sections_gathers_provided_sections() {
     assert_eq!(dyn_section.content.as_str(), "dyn", "动态内容透传");
 }
 
-/// 契约 3 投影：段落 gate = 持有 middleware 是否在链上（映射表驱动）。
-#[test]
-fn test_project_enabled_sections_from_chain_names() {
-    use std::collections::HashSet;
-
-    // 空集合 → 无段落开启
-    assert!(crate::middleware::project_enabled_sections(&HashSet::new()).is_empty());
-
-    let names: HashSet<&str> = [
-        "SubAgentMiddleware",
-        "SkillsMiddleware",
-        "UnrelatedMiddleware",
-    ]
-    .into_iter()
-    .collect();
-    let enabled = crate::middleware::project_enabled_sections(&names);
-    assert!(
-        enabled.contains("11_subagent"),
-        "SubAgentMiddleware 在链上 → 11_subagent 开启"
-    );
-    assert!(
-        enabled.contains("13_skills"),
-        "SkillsMiddleware 在链上 → 13_skills 开启"
-    );
-    assert!(
-        !enabled.contains("10_hitl"),
-        "PermissionMiddleware 不在链上 → 10_hitl 关闭（2026-08-15 拆分：10_hitl 持有者）"
-    );
-    assert!(
-        !enabled.contains("16_workflow"),
-        "16_workflow 已整段删除（C2，ultracode skill 覆盖），投影恒不含"
-    );
-
-    // 与链收集的一致性：链上持有者提供的段落 = 投影开启的段落
-    let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(SectionProvider::new(
-        "SkillsMiddleware",
-        vec![PromptSection::builtin(
-            "13_skills",
-            PromptSectionZone::Uncached,
-            5,
-            "skills",
-        )],
-    )));
-    let collected_ids: HashSet<&str> = chain
-        .collect_prompt_sections()
-        .iter()
-        .map(|s| s.id)
-        .collect();
-    let projected = crate::middleware::project_enabled_sections(
-        &chain.names().into_iter().collect::<HashSet<&str>>(),
-    );
-    assert_eq!(
-        collected_ids, projected,
-        "收集到的段落 = 映射表投影（同一判定，两条路径一致）"
-    );
-}
-
 /// 贡献中间件：按名返回固定 prompt_contribution。
 struct ContributionStub {
     name: &'static str,

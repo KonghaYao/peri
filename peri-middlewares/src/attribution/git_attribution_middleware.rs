@@ -84,7 +84,7 @@ impl GitAttributionMiddleware {
 #[async_trait]
 impl Middleware for GitAttributionMiddleware {
     fn name(&self) -> &str {
-        "GitAttributionMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::GitAttribution.name()
     }
 
     fn prompt_contribution(&self) -> Option<String> {

@@ -317,6 +317,7 @@ pub(super) async fn spawn_subagent_impl(
         frozen_skill_summary.as_deref(),
         frozen_date.as_deref(),
     );
+    let identity_message = system_prompt.as_deref().map(BaseMessage::system);
     let (session, mut v2_ctx) =
         crate::session::subagent::factory::context::build_subagent_session_v2(
             cwd.clone(),
@@ -343,9 +344,7 @@ pub(super) async fn spawn_subagent_impl(
             context_budget,
             compact_llm,
             Some(crate::session::subagent::v2_bridge::agent_id_from_child_thread(&child_thread_id)),
-            // 身份随 transcript 持久化（见 6b），故开启定向吸收：请求投影按内容相等
-            // 丢弃该条，身份在请求面只由 bridge base system 出现一次。
-            true,
+            identity_message.as_ref().map(BaseMessage::id),
         )
         .await?;
     v2_ctx.context.session.model_parent =
@@ -359,13 +358,22 @@ pub(super) async fn spawn_subagent_impl(
     // - transcript 起始处的 System 消息：负责**持久化**。执行恢复 metadata 通道
     //   已随 recovery 移除，transcript 是本分支上身份唯一的持久事实；恢复路径
     //   （见 `resume.rs`）不再注入身份，而是读回这条历史，避免重注入。
-    //   归一化吸收（上方 `normalize_persisted_identity`）保证请求面仍恰一次，
-    //   transcript 本体不被改写、历史保持可读。
+    //   请求投影按消息身份吸收该条，保证模型只收到一份会话身份。
     // - fork 路径：位于 parent_messages/ancestor 之后（身份在对话上下文之后）。
-    if let Some(identity) = system_prompt.as_deref() {
-        let transcript = session.transcript();
-        let mut guard = transcript.write();
-        guard.append(BaseMessage::system(identity));
+    if let Some(identity) = identity_message {
+        let access = peri_acp_types::skills::SkillToolAccess::from_tools(
+            v2_ctx
+                .context
+                .runtime
+                .tools
+                .read()
+                .values()
+                .map(Arc::as_ref),
+        );
+        session
+            .transcript()
+            .write()
+            .append(identity.with_child_skill_ceiling(access));
     }
 
     // 6c. push prompt 到 queue（fork 路径套 fork directive 模板）

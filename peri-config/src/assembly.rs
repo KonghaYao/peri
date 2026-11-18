@@ -185,10 +185,18 @@ pub(crate) fn resolve(
 ) -> Result<ResolvedConfiguration, ConfigurationError> {
     let global = parse_document(inputs.global.as_deref(), SourceIdentity::GlobalFile)?;
     let workspace = parse_document(inputs.workspace.as_deref(), SourceIdentity::WorkspaceFile)?;
-    let global_settings = parse_settings(&global, SourceIdentity::GlobalFile)?;
+    let global_settings = parse_settings(
+        &global,
+        inputs.global.as_deref(),
+        SourceIdentity::GlobalFile,
+    )?;
     let mut settings = global_settings.clone();
     if inputs.workspace.is_some() {
-        let overrides = parse_settings(&workspace, SourceIdentity::WorkspaceFile)?;
+        let overrides = parse_settings(
+            &workspace,
+            inputs.workspace.as_deref(),
+            SourceIdentity::WorkspaceFile,
+        )?;
         settings.config.merge_overrides(overrides.config);
     }
     let mcp = resolve_mcp(scope, inputs, &HashMap::new())?;
@@ -317,10 +325,11 @@ pub(crate) fn parse_document(
 
 fn parse_settings(
     document: &Value,
+    raw: Option<&str>,
     source_identity: SourceIdentity,
 ) -> Result<PeriConfig, ConfigurationError> {
     crate::app::warn_legacy_compact_keys(document);
-    let mut config: PeriConfig = serde_json::from_value(document.clone()).map_err(|error| {
+    let mut config: PeriConfig = serde_json::from_str(raw.unwrap_or("{}")).map_err(|error| {
         ConfigurationError::InvalidInput {
             cause: Box::new(error),
             source_identity,

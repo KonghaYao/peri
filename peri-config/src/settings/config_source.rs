@@ -389,7 +389,7 @@ pub(super) fn load_with_raw(path: &Path) -> Result<(PeriConfig, Option<String>)>
         return Err(SettingsError::InvalidJson);
     }
     crate::app::warn_legacy_compact_keys(&document);
-    let mut config: PeriConfig = serde_json::from_value(document).map_err(SettingsError::Json)?;
+    let mut config: PeriConfig = serde_json::from_str(&content).map_err(SettingsError::Json)?;
     config.config.validate_overrides();
     Ok((config, Some(content)))
 }

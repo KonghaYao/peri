@@ -194,27 +194,43 @@ pub(crate) fn build_stage_context(
         // 子链能力事实（H2）：子链不装配审批 / 提问 / 子代理持有者——子 Agent
         // （定义型 / fork）不得收到 10_hitl / 12_ask_user / 11_subagent 声明；
         // 基础段与语言段继承会话冻结决策，13_skills 按子链 SkillsMiddleware。
-        let capabilities_for_sub =
-            session::subagent_chain_capabilities(&meta_harness_for_sub.disabled_middlewares);
+        let capabilities_for_sub = peri_acp_types::meta_harness::AssemblyPlan::new(
+            &meta_harness_for_sub.disabled_middlewares,
+            peri_acp_types::meta_harness::ExecutionProfile::Child,
+        );
         // 冻结运行环境（H3）：子 Agent 重渲染同样只消费快照。
         let frozen_runtime_env_for_sub = frozen.runtime_env.clone();
-        Arc::new(move |overrides: Option<&AgentOverrides>, cwd_dir: &str| {
-            // C2：收集结果在调用期按 overrides 计算（persona 段内容依赖
-            // overrides；与主重渲染同一事实源）。
-            let collected = session::build_collected_sections_with_capabilities(
-                &meta_harness_for_sub,
-                overrides,
-                frozen_language_for_sub.as_deref(),
-                &capabilities_for_sub,
-            );
-            let t = PromptTemplate::new(&meta_harness_for_sub, &collected);
-            let env = PromptEnv::frozen(
-                cwd_dir,
-                &frozen_date_for_sub,
-                frozen_runtime_env_for_sub.as_ref(),
-            );
-            t.render(&env, agent_catalog_for_sub.as_ref())
-        })
+        Arc::new(
+            move |overrides: Option<&AgentOverrides>, cwd_dir: &str, skill_access, projection| {
+                // C2：收集结果在调用期按 overrides 计算（persona 段内容依赖
+                // overrides；与主重渲染同一事实源）。
+                let t = crate::session::derived_prompt_template(
+                    &meta_harness_for_sub,
+                    overrides,
+                    frozen_language_for_sub.as_deref(),
+                    &capabilities_for_sub,
+                    skill_access,
+                );
+                let env = PromptEnv::frozen(
+                    cwd_dir,
+                    &frozen_date_for_sub,
+                    frozen_runtime_env_for_sub.as_ref(),
+                );
+                use peri_agent::session::factory::ChildPromptProjection;
+                match projection {
+                    ChildPromptProjection::Identity => {
+                        t.render(&env, agent_catalog_for_sub.as_ref())
+                    }
+                    ChildPromptProjection::SkillsSection => t
+                        .render_owned_section(
+                            peri_acp_types::meta_harness::sections::SKILLS,
+                            &env,
+                            agent_catalog_for_sub.as_ref(),
+                        )
+                        .unwrap_or_default(),
+                }
+            },
+        )
     };
 
     // ── 注入面：compact plugin hook 回调（宿主 host/prompt.rs

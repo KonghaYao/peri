@@ -95,6 +95,13 @@ fn workflow_build_tools_filters_disabled() {
         }
     }
 
+    let mcp_disabled = ["McpMiddleware".to_owned()].into_iter().collect();
+    let mcp_closed = pool_factory.build_tools("/tmp/contract-test", &mcp_disabled, None, None);
+    assert!(mcp_closed
+        .iter()
+        .all(|tool| tool.mcp_server_name().is_none()));
+    assert!(mcp_closed.iter().any(|tool| tool.name() == "SkillTool"));
+
     // v4-part-4 W3-C1：workspace 实例关闭键（`WorkspaceMiddleware`）在面④同样生效——
     // 7 个 `*` 一个不剩。名字面从注册表派生。
     {
@@ -176,6 +183,15 @@ fn workflow_build_middlewares_filters_disabled() {
             "TodoMiddleware",
             "PermissionMiddleware",
         ]
+    );
+
+    let skills = all
+        .iter()
+        .find(|middleware| middleware.name() == "SkillsMiddleware")
+        .unwrap();
+    assert!(
+        skills.collect_tools("/tmp").is_empty(),
+        "workflow skills must come only from the filtered factory tool list"
     );
 
     // 逐个禁用：链上消失；剩余项相对顺序不变
@@ -280,9 +296,7 @@ async fn workflow_shell_tool_face_is_the_workspace_bridge() {
 /// 仅 (Some, Some) 才是有效审批（其余为 `disabled()`，不得声明 10_hitl）。
 #[test]
 fn workflow_capability_policy_matches_real_assembly() {
-    use crate::permission::PermissionMiddleware;
-    use crate::prompt_policy;
-    use peri_agent::middleware::prompt_sections::SectionCapabilities;
+    use peri_acp_types::meta_harness::{AssemblyPlan, ChainSlot, ExecutionProfile};
 
     let factory = crate::assembly::default_workflow_middleware_factory();
     for disabled in [
@@ -303,23 +317,25 @@ fn workflow_capability_policy_matches_real_assembly() {
                 chain.add(middleware);
             }
 
-            let facts = SectionCapabilities::from_sections(&chain.collect_prompt_sections());
-            let expected =
-                prompt_policy::workflow_chain_capabilities(&set, broker_present, mode_present);
-            let same_rule =
-                PermissionMiddleware::workflow_approval_active(broker_present, mode_present);
-            assert_eq!(
-                facts.approval, expected.approval,
-                "disabled={disabled:?} broker={broker_present} mode={mode_present}"
+            let plan = AssemblyPlan::new(
+                &set,
+                ExecutionProfile::Workflow {
+                    broker: broker_present,
+                    permission_mode: mode_present,
+                },
             );
-            assert_eq!(
-                facts.approval,
-                !set.contains("PermissionMiddleware") && same_rule,
-                "策略投影与装配同源规则一致（D3）"
-            );
-            assert_eq!(facts.ask_user, expected.ask_user, "ask_user 对拍");
-            assert_eq!(facts.subagent, expected.subagent, "subagent 对拍");
-            assert_eq!(facts.skills, expected.skills, "skills 对拍");
+            let sections = chain.collect_prompt_sections();
+            for owner in [
+                ChainSlot::Skills,
+                ChainSlot::Permission,
+                ChainSlot::AskUser,
+                ChainSlot::SubAgent,
+            ] {
+                assert_eq!(
+                    sections.iter().any(|s| s.owner == Some(owner)),
+                    plan.declares_sections(owner)
+                );
+            }
         }
     }
 }

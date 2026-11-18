@@ -415,6 +415,7 @@ async fn child_history_filters_descriptors_and_rechecks_body_audience() {
     let replacement = PersistedPayload::Message(BaseMessage::System {
         id: visible_id,
         content: "now private".into(),
+        child_skill_ceiling: None,
     });
     sqlx::query("UPDATE messages SET content = ?1 WHERE message_id = ?2")
         .bind(store::serialize_persisted_payload(&replacement).unwrap())

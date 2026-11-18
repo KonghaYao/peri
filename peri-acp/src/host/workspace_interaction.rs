@@ -178,7 +178,7 @@ where
         frozen_skill_summary: None,
         system_prompt_for_sub: String::new(),
         llm_factory,
-        system_builder: Arc::new(|_overrides, _cwd| String::new()),
+        system_builder: Arc::new(|_overrides, _cwd, _skill_access, _projection| String::new()),
         todo_tx,
         goal_controller: None,
         meta_harness_disabled: disabled_middlewares.clone(),

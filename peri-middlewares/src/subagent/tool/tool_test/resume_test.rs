@@ -853,7 +853,11 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
     }
     crate::subagent::test_support::fixture_model_impl!(ForkLoopLLM);
 
-    let parent_tools = vec![super::make_tool("Read"), super::make_tool("Agent")];
+    let parent_tools = vec![
+        super::make_tool("Read"),
+        super::make_tool("Agent"),
+        super::make_tool("AskUserQuestion"),
+    ];
     let t = SubAgentTool::new(
         Arc::new(parent_tools),
         None,
@@ -904,10 +908,12 @@ async fn test_resume_thread_id_fork_title_uses_parent_tools_and_default_iteratio
         "fork resume 必须耗尽配置预算，不能因无效工具调用提前退出"
     );
     let captured = tools_capture.lock().unwrap();
+    assert!(captured.iter().any(|tool| tool == "Read"), "{captured:?}");
     assert!(
-        captured.contains(&"Agent".to_string()),
-        "fork resume 应继承父工具集（无过滤，含 Agent）: {:?}",
-        *captured
+        captured
+            .iter()
+            .all(|tool| tool != "Agent" && tool != "AskUserQuestion"),
+        "fork resume must preserve the spawn-time child boundary: {captured:?}",
     );
 }
 

@@ -1,3 +1,6 @@
+use peri_acp_types::meta_harness::{AssemblyPlan, ExecutionProfile};
+use peri_agent::session::factory::AssemblyError;
+
 use super::{
     default_requires_approval, hooks, mcp, preparation, prompt, AgentEventHandler, Arc,
     AssemblyContext, AtMentionMiddleware, BaseMessage, BaseTool, ChainAssembly, ChainSlot,
@@ -12,14 +15,14 @@ use super::{
 /// **单一事实源**（W5）：链装配的跳过判据、Agent registry 的本地面关闭位
 /// （`McpAgentRegistry::for_session` 内派生）与宿主装配的派生都引用本常量，
 /// 不在别处第三次写字面量。
-pub const SUB_AGENT_FACE_CLOSED_KEY: &str = "SubAgentMiddleware";
+pub const SUB_AGENT_FACE_CLOSED_KEY: &str = ChainSlot::SubAgent.name();
 
 /// `PluginMiddleware` 链槽关闭键（M6 插件来源闭合位）。
 ///
 /// **单一事实源**：链槽跳过判据（`ChainSlot::Plugin` 分支）、宿主装配的资源
 /// roots / 命令 / hooks / MCP 合并 / 继承面派生与插件来源准入
 /// （`plugin::PluginSourceAdmission`）都引用本常量，不在别处重复字面量。
-pub const PLUGIN_FACE_CLOSED_KEY: &str = "PluginMiddleware";
+pub const PLUGIN_FACE_CLOSED_KEY: &str = ChainSlot::Plugin.name();
 
 /// 插件来源注入是否关闭（M6）：`PLUGIN_FACE_CLOSED_KEY ∈ disabled_middlewares`。
 ///
@@ -68,7 +71,25 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         &self,
         blueprint: &[ChainSlot],
         ctx: &Self::Context,
-    ) -> Result<Self::Output, peri_agent::session::factory::AssemblyError> {
+    ) -> Result<Self::Output, AssemblyError> {
+        let mut seen = std::collections::HashSet::new();
+        for &slot in blueprint {
+            if !seen.insert(slot) {
+                return Err(AssemblyError::DuplicateSlot { slot });
+            }
+        }
+        let disabled = &ctx.meta_harness_disabled;
+        let plan = AssemblyPlan::new(disabled, ExecutionProfile::Main);
+        let selected: Vec<_> = blueprint
+            .iter()
+            .copied()
+            .filter(|slot| plan.contains(*slot))
+            .filter(|slot| {
+                *slot != ChainSlot::SkillPreload
+                    || (seen.contains(&ChainSlot::Skills) && plan.contains(ChainSlot::Skills))
+                    || !ctx.preload_skills.is_empty()
+            })
+            .collect();
         let AssemblyContext {
             cwd: _,
             cancel,
@@ -83,7 +104,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             system_builder,
             todo_tx,
             goal_controller,
-            meta_harness_disabled,
             agent_overrides,
             language,
             shared_tools,
@@ -91,22 +111,15 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
             ..
         } = ctx;
 
-        // MetaHarness（设计 §2.5）：装配期关闭的 middleware 名集合。
-        // 关闭判断发生在 middleware 构造之前——关闭语义要求构造副作用
-        // （工具注册 / notifier 注入 / 链注册）也不存在，不能先构造再丢弃。
-        let disabled: &std::collections::HashSet<String> = meta_harness_disabled;
-
         let preparation::ResolvedPorts {
             mcp_pool_concrete,
             mcp_agent_registry,
             tool_search_index_concrete,
             auto_classifier,
-        } = preparation::resolve_ports(ctx)?;
+        } = preparation::resolve_ports(ctx, &selected)?;
 
         // AskUser 工具（2026-08-15 拆分后）由链上 HumanInTheLoopMiddleware
         // 的 collect_tools 提供；宿主级 shared_tools 不再注册任何工具。
-
-        let parent_tools = preparation::build_parent_tools(ctx, (mcp_pool_concrete).as_ref());
 
         // SubAgent middleware（L3 瘦身：只声明工具与发起意图）。
         // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md/Skills
@@ -120,37 +133,44 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // 子 agent 生命周期 hook（SubagentStart/Stop）：唯一装配准入下按事件过滤，
         // 经 HookDispatcher 分发（matcher/if/once/async/超时/取消/进程树 owner），
         // 默认非阻断。空组保持空（不造半开接线）。
-        let subagent_lifecycle_hooks: Vec<crate::hooks::types::RegisteredHook> = hook_groups
-            .iter()
-            .flatten()
-            .filter(|hook| {
-                matches!(
-                    hook.event,
-                    crate::hooks::types::HookEvent::SubagentStart
-                        | crate::hooks::types::HookEvent::SubagentStop
-                )
-            })
-            .cloned()
-            .collect();
-
-        let mut subagent: Option<SubAgentMiddleware> =
-            if disabled.contains(SUB_AGENT_FACE_CLOSED_KEY) {
-                None
+        let mut subagent: Option<SubAgentMiddleware> = if selected.contains(&ChainSlot::SubAgent) {
+            let subagent_lifecycle_hooks = if selected.contains(&ChainSlot::Hook) {
+                hook_groups
+                    .iter()
+                    .flatten()
+                    .filter(|hook| {
+                        matches!(
+                            hook.event,
+                            crate::hooks::types::HookEvent::SubagentStart
+                                | crate::hooks::types::HookEvent::SubagentStop
+                        )
+                    })
+                    .cloned()
+                    .collect()
             } else {
-                Some(
-                    SubAgentMiddleware::new(
-                        parent_tools,
-                        Some(Arc::clone(event_handler) as Arc<dyn AgentEventHandler>),
-                        llm_factory.clone(),
-                    )
-                    .with_mcp_agents(mcp_agent_registry.clone(), Arc::clone(broker))
-                    .with_mcp_skills(ctx.mcp_skill_registry.clone())
-                    .with_system_builder(system_builder.clone())
-                    .with_cancel(cancel.clone())
-                    .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
-                    .with_registered_hooks(subagent_lifecycle_hooks),
-                )
+                Vec::new()
             };
+            Some(
+                SubAgentMiddleware::new(
+                    preparation::build_parent_tools(
+                        ctx,
+                        mcp_pool_concrete
+                            .as_ref()
+                            .filter(|_| selected.contains(&ChainSlot::Mcp)),
+                    ),
+                    Some(Arc::clone(event_handler) as Arc<dyn AgentEventHandler>),
+                    llm_factory.clone(),
+                )
+                .with_mcp_agents(mcp_agent_registry.clone(), Arc::clone(broker))
+                .with_mcp_skills(ctx.mcp_skill_registry.clone())
+                .with_system_builder(system_builder.clone())
+                .with_cancel(cancel.clone())
+                .with_parent_messages(Arc::new(RwLock::new(Vec::<BaseMessage>::new())))
+                .with_registered_hooks(subagent_lifecycle_hooks),
+            )
+        } else {
+            None
+        };
         if let Some(ref mut mw) = subagent {
             if let Some(factory) = child_handler_factory {
                 *mw = mw.clone().with_child_handler_factory(Arc::clone(factory));
@@ -166,50 +186,40 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         // 直接构造 MiddlewareChain（顺序由 Agent 层 production_blueprint 保证）。
         // 中间件顺序是 [TRAP] 守护契约（禁止重排），详见 docs/code-index/peri-middlewares.md。
         let mut chain = MiddlewareChain::new();
-        for slot in blueprint {
+        for slot in selected.iter().copied() {
             match slot {
                 // ── MetaHarness（设计 §2.5）：关闭的 middleware 不构造、不进链。
                 // 判断先于构造——关闭语义要求构造副作用也不存在。
                 // ── 波 4 演进 2：基础系统提示词段持有者（内容载体；渲染走
                 // PromptTemplate 段落装配，链序不参与渲染排序——契约 2）──
-                ChainSlot::DefaultSystemPrompt
-                    if disabled.contains("DefaultSystemPromptMiddleware") => {}
                 ChainSlot::DefaultSystemPrompt => {
                     chain.add(Box::new(DefaultSystemPromptMiddleware::new(
                         agent_overrides.clone(),
                     )));
                 }
-                ChainSlot::Lang if disabled.contains("LangMiddleware") => {}
                 ChainSlot::Lang => {
                     chain.add(Box::new(LangMiddleware::new(language.clone())));
                 }
                 // ── 第一组：上下文注入器（system prompt 段落 / agent 定义 / 插件 / skills） ──
-                ChainSlot::AgentsMd if disabled.contains("AgentsMdMiddleware") => {}
                 ChainSlot::AgentsMd => {
                     prompt::add_agents_md(ctx, &mut chain);
                 }
                 // M6：关闭位与插件来源准入同一常量（`plugin_face_closed`），
                 // 装配面不再重复字面量。
-                ChainSlot::Plugin if plugin_face_closed(disabled) => {}
                 ChainSlot::Plugin => {
                     chain.add(Box::new(PluginMiddleware::new(plugin_loaded.clone())));
                 }
                 // 构造 SkillsMiddleware：collect_tools 提供统一 skill 协议
                 // （SkillTool(skill_name) + DiscoverSkillsTool）；旧 Skill(skill, args)
                 // 双协议已按 D3 移除，不再单独注册 SkillToolMiddleware。
-                ChainSlot::Skills if disabled.contains("SkillsMiddleware") => {}
                 ChainSlot::Skills => {
                     prompt::add_skills(ctx, &mut chain);
                 }
-                ChainSlot::SkillPreload if disabled.contains("SkillPreloadMiddleware") => {}
                 // 主 Agent 的 slash token 自动预载属于宿主技能面；关闭该面时
                 // 不装配自动预载，显式声明的子任务名单仍按原契约处理。
-                ChainSlot::SkillPreload
-                    if disabled.contains("SkillsMiddleware") && ctx.preload_skills.is_empty() => {}
                 ChainSlot::SkillPreload => {
                     prompt::add_skill_preload(ctx, &mut chain);
                 }
-                ChainSlot::AtMention if disabled.contains("AtMentionMiddleware") => {}
                 ChainSlot::AtMention => {
                     let reader = Arc::new(crate::workspace_io::McpWorkspaceFileReader::new(
                         mcp_pool_concrete.clone(),
@@ -219,7 +229,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     chain.add(Box::new(AtMentionMiddleware::new(reader)));
                 }
                 // 新增：图片附件处理（在 @mention 之后，将 @image <path> 转换为 ContentBlock::Image）
-                ChainSlot::Image if disabled.contains("ImageMiddleware") => {}
                 ChainSlot::Image => {
                     let image = match mcp_pool_concrete.as_ref() {
                         Some(pool) => ImageMiddleware::new().with_mcp_pool(
@@ -238,7 +247,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // v4 wave 4：原 GitWatch 槽位已删除——git ref 变化改由 builtin `workspace`
                 // 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传（提醒映射
                 // 内置在宿主订阅消费侧），本组只剩留名中间件（ARC-MIDDLEWARE-001）。
-                ChainSlot::GitAttribution if disabled.contains("GitAttributionMiddleware") => {}
                 ChainSlot::GitAttribution => {
                     let reader = Arc::new(crate::workspace_io::McpWorkspaceFileReader::new(
                         mcp_pool_concrete.clone(),
@@ -248,15 +256,13 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     chain.add(Box::new(GitAttributionMiddleware::new(model_name, reader)));
                 }
                 // ── 第三组：Todo ──
-                ChainSlot::Todo if disabled.contains("TodoMiddleware") => {}
                 ChainSlot::Todo => {
                     chain.add(Box::new(TodoMiddleware::new(todo_tx.clone())));
                 }
                 // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
                 // MetaHarness：Hook 关闭 → 全部 hook group 都不构造。
-                ChainSlot::Hook if disabled.contains("HookMiddleware") => {}
                 ChainSlot::Hook => {
-                    hooks::add_hooks(ctx, &mut chain);
+                    hooks::add_hooks(ctx, &mut chain, selected.contains(&ChainSlot::Permission));
                 }
                 // ── 第五组：Permission + AskUser(HITL) + SubAgent（条件中间件） ──
                 // 2026-08-15 职责拆分（spec/issues/2026-08-15-permission-hitl-split.md）：
@@ -264,19 +270,14 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // HumanInTheLoopMiddleware = 提问通道（AskUserQuestion 工具 +
                 // 12_ask_user 段落），各自独立关闭——关闭提问 → AskUserQuestion
                 // 不进链 → 每 turn 本地视图不含（"关闭不掉"修复）。
-                ChainSlot::Permission if disabled.contains("PermissionMiddleware") => {}
                 ChainSlot::Permission => {
-                    chain.add(Box::new(
-                        PermissionMiddleware::with_shared_mode(
-                            broker.clone(),
-                            default_requires_approval,
-                            permission_mode.clone(),
-                            auto_classifier.clone(),
-                        )
-                        .with_prompt_disabled_builtin((*disabled).clone()),
-                    ));
+                    chain.add(Box::new(PermissionMiddleware::with_shared_mode(
+                        broker.clone(),
+                        default_requires_approval,
+                        permission_mode.clone(),
+                        auto_classifier.clone(),
+                    )));
                 }
-                ChainSlot::AskUser if disabled.contains("HumanInTheLoopMiddleware") => {}
                 ChainSlot::AskUser => {
                     chain.add(Box::new(HumanInTheLoopMiddleware::new(broker.clone())));
                 }
@@ -285,7 +286,6 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // 注入主 agent 身份（共享 cell，见 set_parent_agent_id）。
                 // MetaHarness：SubAgentMiddleware 关闭 → 链上不注册（subagent_mw
                 // 槽位在下方联动置 None）。
-                ChainSlot::SubAgent if disabled.contains(SUB_AGENT_FACE_CLOSED_KEY) => {}
                 ChainSlot::SubAgent => {
                     if let Some(mw) = subagent.as_ref() {
                         let subagent_for_chain = mw.clone();
@@ -295,21 +295,27 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                 // ── 第六组：MCP / Workflow / ToolSearch（工具提供器） ──
                 // MetaHarness：McpMiddleware 关闭 → 即使 pool 存在也不构造、
                 // 不设置 notifier（构造副作用消失）。
-                ChainSlot::Mcp if disabled.contains("McpMiddleware") => {}
                 ChainSlot::Mcp => {
-                    mcp::add_mcp(ctx, &mut chain, (mcp_pool_concrete).as_ref());
+                    mcp::add_mcp(
+                        ctx,
+                        &mut chain,
+                        mcp_pool_concrete.as_ref(),
+                        !selected.contains(&ChainSlot::SubAgent),
+                    );
                 }
                 // ToolSearch 中间件
-                ChainSlot::ToolSearch if disabled.contains("ToolSearch") => {}
                 ChainSlot::ToolSearch => {
                     chain.add(Box::new(ToolSearchMiddleware::new(
-                        Arc::clone(&tool_search_index_concrete),
+                        Arc::clone(
+                            tool_search_index_concrete
+                                .as_ref()
+                                .expect("selected ToolSearch slot resolved its index"),
+                        ),
                         Arc::clone(shared_tools),
                     )));
                 }
                 // ── 第七组：Goal（辅助诊断；Goal 链最后） ──
                 // MetaHarness：Goal 关闭 → 即使运行条件满足也不构造。
-                ChainSlot::Goal if disabled.contains("GoalMiddleware") => {}
                 ChainSlot::Goal => {
                     // goal active 时注入递增紧迫感 steering + 设 block_continue 让 agent 自驱续跑
                     if let Some(controller) = goal_controller {
@@ -350,9 +356,13 @@ pub(crate) fn open_builtin_bridges(
     crate::mcp::tool_bridge::build_typed_tool_bridges(pool)
         .into_iter()
         .filter(|bridge| {
-            !bridge
-                .builtin_mcp_instance()
-                .is_some_and(|instance| crate::mcp::builtin::is_closed(instance, &closed))
+            !bridge.builtin_mcp_instance().is_some_and(|instance| {
+                crate::mcp::builtin::is_tool_closed(
+                    instance,
+                    bridge.mcp_tool_name().unwrap_or(bridge.name()),
+                    &closed,
+                )
+            })
         })
         .filter(|bridge| bridge.is_direct())
         .map(|bridge| Box::new(bridge) as Box<dyn BaseTool>)

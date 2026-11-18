@@ -32,7 +32,7 @@ use peri_agent::interaction::UserInteractionBroker;
 use peri_agent::middleware::chain::MiddlewareChain;
 use peri_agent::session::factory;
 use peri_agent::session::factory::production_blueprint;
-use peri_agent::session::factory::ChainSlot;
+use peri_agent::session::factory::{AssemblyError, ChainSlot, MiddlewareChainAssembler};
 use peri_agent::session::subagent::SubagentLlmSource;
 use peri_agent::tools::BaseTool;
 use peri_model::{
@@ -263,8 +263,9 @@ fn base_context() -> AssemblyContext {
                 "fixture-scripted",
             )
         });
-    let system_builder: SystemPromptBuilder =
-        Arc::new(|_overrides: Option<&AgentOverrides>, _cwd: &str| String::new());
+    let system_builder: SystemPromptBuilder = Arc::new(
+        |_overrides: Option<&AgentOverrides>, _cwd: &str, _skill_access, _projection| String::new(),
+    );
     let on_bg_complete: Option<OnBgCompleteFn> = None;
 
     AssemblyContext {
@@ -381,7 +382,7 @@ async fn production_assembly_passes_session_id_to_command_hook_stdin() {
     ctx.hook_groups = vec![vec![hook]];
 
     let mut chain = MiddlewareChain::new();
-    super::hooks::add_hooks(&ctx, &mut chain);
+    super::hooks::add_hooks(&ctx, &mut chain, false);
     chain
         .run_before_tool(
             &mut AgentState::new(ctx.cwd.clone()),
@@ -393,6 +394,48 @@ async fn production_assembly_passes_session_id_to_command_hook_stdin() {
     let written = std::fs::read_to_string(&output).expect("hook 应把 stdin 写入文件");
     let input: serde_json::Value = serde_json::from_str(&written).unwrap();
     assert_eq!(input["session_id"], "session-contract-test");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_ask_requires_broker_when_permission_is_omitted_from_blueprint() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut hook = make_hook();
+    if let HookType::Command { command, .. } = &mut hook.hook {
+        *command = r#"echo '{"hook_specific_output":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}'"#
+            .to_owned();
+    }
+    let mut ctx = base_context();
+    ctx.cwd = directory.path().to_string_lossy().into_owned();
+    ctx.hook_groups = vec![vec![hook]];
+
+    let assembly = ProductionChainAssembler
+        .assemble(&[ChainSlot::Hook], &ctx)
+        .expect("hook-only blueprint");
+    let mut state = AgentState::new(ctx.cwd.clone()).with_turn_identity(
+        &ctx.session_id,
+        peri_acp_types::session::ExecutionBinding {
+            turn_id: peri_acp_types::session::TurnId::new(),
+            attempt_id: peri_acp_types::identity::AttemptId::new(),
+        },
+    );
+    let result = assembly
+        .chain
+        .run_before_tool(
+            &mut state,
+            ToolCall::new("call", "Bash", serde_json::json!({"command": "test"})),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(peri_agent::error::AgentError::ToolRejected {
+                cause: peri_acp_types::error::ToolRejectionCause::UserRejected,
+                ..
+            })
+        ),
+        "hook must honor the broker's rejection: {result:?}"
+    );
 }
 
 /// deployment pool：两个 builtin 实例（`web` / `artifact`）的假「已连接」handle，
@@ -471,9 +514,9 @@ fn workflow_context_with_disabled(disabled: &[&str]) -> WorkflowAgentContext {
     let model_factory: peri_agent::agent::workflow::factory::WorkflowModelFactory =
         Arc::new(|_model, _max_tokens, _observer| unimplemented!("契约测试不调用"));
     let prompt_builder: peri_agent::agent::workflow::factory::WorkflowAgentPromptBuilder =
-        Arc::new(|_, _, _, _| String::new());
+        Arc::new(|_, _, _, _, _| String::new());
     let fallback: peri_agent::agent::workflow::factory::WorkflowSystemPromptFallback =
-        Arc::new(|_, _, _| String::new());
+        Arc::new(|_, _, _, _| String::new());
     let forwarder: peri_agent::session::exec::executor_helpers::ForwarderLauncherFn =
         Arc::new(|_, _, _| tokio::spawn(async {}));
     WorkflowAgentContext {
@@ -672,6 +715,114 @@ fn agent_catalog_port_mismatch_fails_assembly_when_pool_is_present() {
     assert_port_mismatch(&ctx, "AgentCatalogPort", "AgentCatalogProvider");
 }
 
+#[test]
+fn idle_assembly_ignores_unconsumed_ports() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(ForeignPool));
+    ctx.tool_search_index = Arc::new(ForeignToolSearch);
+    ctx.agent_catalog = Arc::new(crate::host_ports::NoopAgentCatalog);
+
+    let idle = factory::build_invocation_rule_chain(&ProductionChainAssembler, &ctx)
+        .expect("idle invocation rules do not consume MCP, agent catalog or search ports");
+    assert_eq!(idle.shared().names(), [ChainSlot::Permission.name()]);
+}
+
+#[test]
+fn closed_slots_ignore_conflicting_ports() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(ForeignPool));
+    ctx.tool_search_index = Arc::new(ForeignToolSearch);
+    ctx.agent_catalog = Arc::new(crate::host_ports::NoopAgentCatalog);
+    let closed = [
+        ChainSlot::Mcp,
+        ChainSlot::SubAgent,
+        ChainSlot::ToolSearch,
+        ChainSlot::AtMention,
+        ChainSlot::Image,
+        ChainSlot::GitAttribution,
+        ChainSlot::Permission,
+    ];
+    ctx.meta_harness_disabled
+        .extend(closed.map(|slot| slot.name().to_owned()));
+
+    let assembly = factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+        .expect("closed slots have no port requirements");
+    let names = assembly.chain.names();
+    for slot in closed {
+        assert!(!names.contains(&slot_middleware_name(&slot)));
+    }
+    assert!(assembly.subagent_mw.is_none());
+}
+
+#[test]
+fn selected_workspace_consumers_resolve_pool_with_mcp_slot_closed() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(ForeignPool));
+    ctx.meta_harness_disabled
+        .insert(ChainSlot::Mcp.name().to_owned());
+
+    for slot in [
+        ChainSlot::AtMention,
+        ChainSlot::Image,
+        ChainSlot::GitAttribution,
+    ] {
+        let result = ProductionChainAssembler.assemble(&[slot], &ctx);
+        assert!(matches!(
+            result,
+            Err(AssemblyError::PortMismatch {
+                port: "McpPoolPort",
+                expected: "McpClientPool",
+            })
+        ));
+    }
+}
+
+#[test]
+fn closed_subagent_skips_catalog_binding_while_mcp_is_selected() {
+    let mut ctx = base_context();
+    ctx.mcp_pool = Some(Arc::new(McpClientPool::new_pending()));
+    ctx.agent_catalog = Arc::new(crate::host_ports::NoopAgentCatalog);
+    ctx.meta_harness_disabled
+        .insert(ChainSlot::SubAgent.name().to_owned());
+
+    let assembly = ProductionChainAssembler
+        .assemble(&[ChainSlot::SubAgent, ChainSlot::Mcp], &ctx)
+        .expect("MCP does not bind the SubAgent catalog");
+    assert_eq!(assembly.chain.names(), [ChainSlot::Mcp.name()]);
+    assert!(assembly.subagent_mw.is_none());
+}
+
+#[test]
+fn failed_port_resolution_leaves_agent_catalog_unbound() {
+    let mut ctx = base_context();
+    let pool = Arc::new(McpClientPool::new_pending());
+    ctx.mcp_pool = Some(pool.clone());
+    ctx.tool_search_index = Arc::new(ForeignToolSearch);
+    let references = Arc::strong_count(&pool);
+
+    assert_port_mismatch(&ctx, "ToolSearchPort", "ToolSearchIndex");
+    assert_eq!(Arc::strong_count(&pool), references);
+}
+
+#[test]
+fn duplicate_blueprint_slot_is_rejected_before_ports_or_construction() {
+    let mut ctx = base_context();
+    ctx.tool_search_index = Arc::new(ForeignToolSearch);
+    ctx.meta_harness_disabled
+        .insert(ChainSlot::Hook.name().to_owned());
+
+    let result = ProductionChainAssembler.assemble(
+        &[ChainSlot::ToolSearch, ChainSlot::Hook, ChainSlot::Hook],
+        &ctx,
+    );
+    assert!(matches!(
+        result,
+        Err(AssemblyError::DuplicateSlot {
+            slot: ChainSlot::Hook
+        })
+    ));
+}
+
 // ─── offset 0 包装器：safe 装配入口不得把外层分配按内字段类型重建 ───────────
 
 /// `#[repr(C)]` 让内字段落在 offset 0，外层 trait object 数据地址与内字段相同；
@@ -773,17 +924,24 @@ fn concrete_ports_bind_the_injected_instances() {
     ctx.mcp_pool = Some(Arc::clone(&pool) as Arc<dyn peri_acp_types::ports::McpPoolPort>);
     ctx.tool_search_index = Arc::clone(&index) as Arc<dyn peri_acp_types::ports::ToolSearchPort>;
 
-    let resolved = crate::assembly::preparation::resolve_ports(&ctx).expect("生产端口必须可还原");
+    let resolved = crate::assembly::preparation::resolve_ports(
+        &ctx,
+        &[ChainSlot::SubAgent, ChainSlot::ToolSearch],
+    )
+    .expect("生产端口必须可还原");
     assert!(
         Arc::ptr_eq(resolved.mcp_pool_concrete.as_ref().unwrap(), &pool),
         "注入池与装配产物必须是同一实例"
     );
     assert!(
-        Arc::ptr_eq(&resolved.tool_search_index_concrete, &index),
+        Arc::ptr_eq(
+            resolved.tool_search_index_concrete.as_ref().unwrap(),
+            &index
+        ),
         "注入索引与装配产物必须是同一实例"
     );
     assert!(
         resolved.mcp_agent_registry.is_some(),
-        "有池时必须构造 registry"
+        "有池且选择 SubAgent 时必须构造 registry"
     );
 }

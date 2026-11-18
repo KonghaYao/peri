@@ -16,8 +16,6 @@ use crate::hooks::types::RegisteredHook;
 use crate::mcp::McpAgentRegistry;
 use crate::tool_search::core_tools::TOOL_AGENT;
 
-use peri_acp_types::agents::AgentOverrides;
-
 #[path = "define/sub_agent_tool.rs"]
 mod sub_agent_tool;
 pub use sub_agent_tool::SubAgentTool;

@@ -121,12 +121,17 @@ pub type WorkflowModelFactory = Arc<
         + Sync,
 >;
 
+use peri_acp_types::skills::SkillToolAccess;
+
 /// Workflow agent 的 subagent prompt 渲染端口。
 ///
 /// agent type 指定时使用其 `agent.md` overrides 渲染；无 agent type 时继续使用
 /// session 冻结的默认 subagent prompt。
-pub type WorkflowAgentPromptBuilder =
-    Arc<dyn Fn(Option<&AgentOverrides>, &str, Option<&str>, Option<&str>) -> String + Send + Sync>;
+pub type WorkflowAgentPromptBuilder = Arc<
+    dyn Fn(Option<&AgentOverrides>, &str, Option<&str>, Option<&str>, SkillToolAccess) -> String
+        + Send
+        + Sync,
+>;
 
 /// Workflow agent system prompt fallback 渲染闭包（ACP 宿主构造：`PromptTemplate`
 /// 渲染面；参数 = cwd / frozen date / frozen language）。
@@ -134,7 +139,7 @@ pub type WorkflowAgentPromptBuilder =
 /// 仅 `WorkflowAgentContext.system_prompt = None` 时调用（workflow 链不注册
 /// WorkflowTool，fallback 渲染关闭 workflow section——P2-2026-08-02）。
 pub type WorkflowSystemPromptFallback =
-    Arc<dyn Fn(&str, Option<&str>, Option<&str>) -> String + Send + Sync>;
+    Arc<dyn Fn(&str, Option<&str>, Option<&str>, SkillToolAccess) -> String + Send + Sync>;
 
 /// Workflow agent 事件发射钩子（ACP 宿主构造：`Controller::publish_event` 适配；
 /// 事件三层化统一出口，与主 executor 同一发射路径）。

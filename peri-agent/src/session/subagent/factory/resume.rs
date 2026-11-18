@@ -247,12 +247,31 @@ pub(super) async fn resume_subagent_impl(
     let identity = (meta.hidden && meta.parent_thread_id.is_some())
         .then(|| loaded.first().and_then(PersistedPayload::as_message))
         .flatten()
-        .and_then(|message| {
-            matches!(message, BaseMessage::System { .. }).then(|| message.content().to_owned())
-        });
+        .filter(|message| matches!(message, BaseMessage::System { .. }));
+    let persisted_identity = identity.map(BaseMessage::id);
+    let (effective_identity, tool_filter) = match identity {
+        Some(original) => match chain_assembler.project_resumed_identity(
+            &original.content(),
+            &cwd,
+            original.child_skill_ceiling(),
+            parent.map(|session| &session.store().frozen.meta_harness),
+            tool_filter,
+        ) {
+            Ok((projected, filter)) => (Some(projected), filter),
+            Err(detail) => {
+                let rollback = claim.rollback().await;
+                let suffix = rollback
+                    .err()
+                    .map(|error| format!("; {error}"))
+                    .unwrap_or_default();
+                return Err(format!("resume_subagent: {detail}{suffix}").into());
+            }
+        },
+        None => (None, tool_filter),
+    };
     let frozen = crate::session::subagent::factory::context::inherited_frozen_context(
         parent,
-        identity.as_deref(),
+        effective_identity.as_deref(),
         frozen_claude_md.as_deref(),
         frozen_skill_summary.as_deref(),
         frozen_date.as_deref(),
@@ -302,7 +321,7 @@ pub(super) async fn resume_subagent_impl(
             context_budget,
             compact_llm,
             Some(crate::session::subagent::v2_bridge::agent_id_from_child_thread(&thread_id)),
-            identity.is_some(),
+            persisted_identity,
         )
         .await?;
     let parent_thread = crate::session::subagent::factory::spawn::parent_thread_id_of(parent);

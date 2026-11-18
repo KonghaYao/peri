@@ -638,7 +638,7 @@ fn test_render_full_mode_preserves_tool_discipline() {
     );
     assert!(
         // v4 引名约定：段落标题也用模型面名字（裸名 `Bash` 已无提供面）
-        result.contains("## Bash discipline"),
+        result.contains("## Tool selection principles"),
         "full 模式不得移除 Bash 纪律段落（05_using_tools）"
     );
 }
@@ -871,7 +871,7 @@ async fn test_declaration_segment_is_single_source_and_05_has_no_tool_entries() 
 
     let section_05 = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/prompts/sections/05_using_tools.md"
+        "/../peri-middlewares/prompts/sections/05_using_tools.md"
     ));
     // 全量迁移完成态：05 无任何工具条目（"Choosing the right tool" 小节已删除）
     assert!(

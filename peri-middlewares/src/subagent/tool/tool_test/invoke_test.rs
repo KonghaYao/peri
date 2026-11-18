@@ -268,7 +268,9 @@ async fn test_system_builder_injects_system_message() {
         }),
         dir.path().to_str().unwrap().to_string(),
     )
-    .with_system_builder(Arc::new(|_overrides, _cwd| "tone: be concise".to_string()));
+    .with_system_builder(Arc::new(|_overrides, _cwd, _skill_access, _projection| {
+        "tone: be concise".to_string()
+    }));
     let t = host.bind(super::with_agent_face(t, dir.path()).await);
 
     let result = host

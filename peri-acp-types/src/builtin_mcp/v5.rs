@@ -260,11 +260,33 @@ const fn in_process(descriptor: &'static str) -> CapabilityExecution {
     }
 }
 
-/// v5 六项能力的唯一声明表。
-///
-/// 能力顺序即声明与关闭诊断顺序（测试锁定）；工具顺序即 `tools/list` 的声明顺序。
-pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
-    BuiltinCapability {
+/// Typed configuration IDs and the runtime descriptors are generated in the
+/// same order. Both deployment selection and session closure use this registry.
+macro_rules! declare_builtin_registry {
+    ($( $id:ident { name: $name:literal, $($fields:tt)* } ),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum CapabilityId { $($id),* }
+        pub const BUILTIN_CAPABILITY_NAMES: &[&str] = &[$($name),*];
+        pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
+            $(BuiltinCapability { name: $name, $($fields)* }),*
+        ];
+        impl CapabilityId {
+            pub const ALL: [Self; BUILTIN_V5_CAPABILITIES.len()] = [$(Self::$id),*];
+            pub const fn descriptor(self) -> &'static BuiltinCapability {
+                &BUILTIN_V5_CAPABILITIES[self as usize]
+            }
+            pub const fn name(self) -> &'static str { self.descriptor().name }
+            pub const fn legacy_policy_key(self) -> &'static str { self.descriptor().legacy_policy_key }
+            pub const fn legacy_instance_name(self) -> &'static str { self.descriptor().legacy_instance }
+            pub fn from_name(name: &str) -> Option<Self> {
+                Self::ALL.into_iter().find(|id| id.name() == name)
+            }
+        }
+    }
+}
+
+declare_builtin_registry! {
+    Workspace {
         name: "workspace",
         legacy_instance: "workspace",
         legacy_policy_key: "WorkspaceMiddleware",
@@ -319,7 +341,7 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
             state_root: CapabilityStateRoot::SandboxWorkspace,
         },
     },
-    BuiltinCapability {
+    Web {
         name: "web",
         legacy_instance: "web",
         legacy_policy_key: "WebMiddleware",
@@ -339,7 +361,7 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
             state_root: CapabilityStateRoot::Stateless,
         },
     },
-    BuiltinCapability {
+    Artifact {
         name: "artifact",
         legacy_instance: "artifact",
         legacy_policy_key: "ArtifactMiddleware",
@@ -354,7 +376,7 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
             state_root: CapabilityStateRoot::Stateless,
         },
     },
-    BuiltinCapability {
+    Cron {
         name: "cron",
         legacy_instance: "cron",
         legacy_policy_key: "CronMiddleware",
@@ -374,7 +396,7 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
             state_root: CapabilityStateRoot::HostScheduler,
         },
     },
-    BuiltinCapability {
+    Monitor {
         name: "monitor",
         legacy_instance: "monitor",
         legacy_policy_key: "MonitorMiddleware",
@@ -394,7 +416,7 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
             state_root: CapabilityStateRoot::SessionHostMemory,
         },
     },
-    BuiltinCapability {
+    Workflow {
         name: "workflow",
         legacy_instance: "workflow",
         legacy_policy_key: "WorkflowMiddleware",
@@ -427,7 +449,7 @@ pub const BUILTIN_V5_CAPABILITIES: &[BuiltinCapability] = &[
             state_root: CapabilityStateRoot::WorkflowRuntime,
         },
     },
-];
+}
 
 /// 按能力名解析声明；未登记返回 `None`。
 pub fn capability(name: &str) -> Option<&'static BuiltinCapability> {

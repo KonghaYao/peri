@@ -480,7 +480,7 @@ impl HookMiddleware {
 #[async_trait]
 impl Middleware for HookMiddleware {
     fn name(&self) -> &str {
-        "HookMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Hook.name()
     }
 
     async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {

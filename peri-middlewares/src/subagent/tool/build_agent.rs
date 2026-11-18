@@ -77,6 +77,11 @@ impl super::SubAgentTool {
             }
         }
 
+        let tool_filter = crate::subagent::fork::canonical_tool_filter(
+            &agent_def.frontmatter.tools,
+            &agent_def.frontmatter.disallowed_tools,
+        );
+
         // 2. Model alias → LLM factory
         // 工具参数覆盖（model_override）优先于 frontmatter；档位大小写不敏感
         //（档位均为 ASCII，`to_ascii_lowercase` 与 `Profiles::get` 的
@@ -130,28 +135,46 @@ impl super::SubAgentTool {
         let skill_names = agent_def.frontmatter.skills.clone();
 
         // 5. System prompt
-        let system_prompt = if let Some(ref builder) = self.system_builder {
-            let overrides = Self::overrides_from_agent_def(
-                &agent_def.system_prompt,
-                (agent_def.frontmatter.tone).as_deref(),
-                (agent_def.frontmatter.proactiveness).as_deref(),
-                (agent_def.frontmatter.prompt_mode).as_deref(),
-            );
-            Some(builder(overrides.as_ref(), cwd))
-        } else {
-            None
-        };
+        let overrides = Self::overrides_from_agent_def(
+            &agent_def.system_prompt,
+            agent_def.frontmatter.tone.as_deref(),
+            agent_def.frontmatter.proactiveness.as_deref(),
+            agent_def.frontmatter.prompt_mode.as_deref(),
+        );
+        let system_prompt = self.render_child_system(overrides.as_ref(), cwd, &tool_filter);
 
         Ok(AgentBuildResult {
             llm,
             tools: filtered_tools,
-            tool_filter: crate::subagent::fork::canonical_tool_filter(
-                &agent_def.frontmatter.tools,
-                &agent_def.frontmatter.disallowed_tools,
-            ),
+            tool_filter,
             system_prompt,
             skill_names,
             max_iterations,
+        })
+    }
+
+    pub(super) fn render_child_system(
+        &self,
+        overrides: Option<&peri_acp_types::agents::AgentOverrides>,
+        cwd: &str,
+        tool_filter: &peri_agent::session::tool_catalog::ToolFilter,
+    ) -> Option<String> {
+        let builder = self.system_builder.as_ref()?;
+        let access = self.child_skill_access(tool_filter);
+        Some(builder(
+            overrides,
+            cwd,
+            access,
+            peri_agent::session::factory::ChildPromptProjection::Identity,
+        ))
+    }
+
+    pub(super) fn child_skill_access(
+        &self,
+        tool_filter: &peri_agent::session::tool_catalog::ToolFilter,
+    ) -> peri_acp_types::skills::SkillToolAccess {
+        crate::skills::SkillsMiddleware::access_for_filter(|tool| {
+            (self.inherited_tool_filter)(tool) && tool_filter(tool)
         })
     }
 }

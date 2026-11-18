@@ -315,3 +315,18 @@ async fn test_frozen_data_does_not_reread_meta_docs() {
         Some("V2-BODY")
     );
 }
+
+
+#[test]
+fn legacy_switches_freeze_to_their_owner_and_conflicts_only_narrow() {
+    for owner in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        for keys in [
+            vec![(owner.legacy_policy_key, false)],
+            vec![(owner.legacy_policy_key, false), (owner.name, true)],
+            vec![(owner.legacy_policy_key, true), (owner.name, false)],
+        ] {
+            let state = super::super::frozen::build_meta_harness_state(Some(&mh_cfg(&keys)), HashMap::new());
+            assert_eq!(state.disabled_middlewares, std::collections::HashSet::from([owner.name.to_owned()]));
+        }
+    }
+}

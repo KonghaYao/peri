@@ -68,11 +68,15 @@ pub(super) fn register_tool_catalog(
     disabled: HashSet<String>,
     session_mcp_catalog: Option<Arc<dyn peri_acp_types::ports::SessionMcpCatalogPort>>,
 ) -> Result<Arc<SessionToolCatalog>, StageBuildError> {
-    let enabled = !disabled.contains("McpMiddleware");
+    use peri_acp_types::meta_harness::{AssemblyPlan, ChainSlot, ExecutionProfile};
+
+    let plan = AssemblyPlan::new(&disabled, ExecutionProfile::Main);
     let tool_filter = ToolFilterPolicy::with_mcp_policy(disabled, Arc::new(|_| true));
     let catalog = Arc::new(SessionToolCatalog::try_with_filter(
         session_tools.read().clone(),
-        enabled.then_some(session_mcp_catalog).flatten(),
+        plan.contains(ChainSlot::Mcp)
+            .then_some(session_mcp_catalog)
+            .flatten(),
         tool_filter,
     )?);
     // 首个 before_agent 与后续 Reason 使用同一策略过滤后的视图。

@@ -237,7 +237,9 @@ async fn test_fork_system_prompt_consistent() {
             host.cwd.clone(),
         )
         .with_parent_messages(parent_messages)
-        .with_system_builder(Arc::new(|_ov, _cwd| "FORK-TEST-SYSTEM".to_string())),
+        .with_system_builder(Arc::new(|_ov, _cwd, _skill_access, _projection| {
+            "FORK-TEST-SYSTEM".to_string()
+        })),
     );
 
     host.invoke_and_wait(
@@ -288,7 +290,9 @@ async fn test_fork_identity_is_projected_not_parent_bytes() {
             host.cwd.clone(),
         )
         .with_parent_messages(parent_messages)
-        .with_system_builder(Arc::new(|_ov, _cwd| "BUILDER-SYSTEM-PROMPT".to_string())),
+        .with_system_builder(Arc::new(|_ov, _cwd, _skill_access, _projection| {
+            "BUILDER-SYSTEM-PROMPT".to_string()
+        })),
     );
 
     host.invoke_and_wait(

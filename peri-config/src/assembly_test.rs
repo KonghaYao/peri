@@ -11,6 +11,26 @@ use super::SourceIdentity;
 use super::DOMAINS;
 
 #[test]
+fn workspace_snapshot_rejects_duplicate_meta_harness_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let scope = ConfigurationScope::try_new(
+        directory.path().join("project"),
+        directory.path().join("home/settings.json"),
+    )
+    .unwrap();
+    let inputs = ConfigurationInputs {
+        workspace: Some(
+            r#"{"config":{"meta_harness":{"13_skills":true,"13_skills":false}}}"#.into(),
+        ),
+        ..Default::default()
+    };
+    let error = crate::ConfigurationSnapshot::resolve(scope, inputs).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("duplicate meta_harness key '13_skills'"));
+}
+
+#[test]
 fn configuration_errors_preserve_original_parser_causes() {
     use std::error::Error;
     let error =

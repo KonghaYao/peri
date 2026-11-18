@@ -12,7 +12,6 @@ use super::InteractionResponse;
 use super::Middleware;
 use super::PermissionMode;
 use super::PromptSection;
-use super::PromptSectionZone;
 use super::SharedPermissionMode;
 use super::ToolCall;
 use super::ToolRejectionCause;
@@ -34,23 +33,8 @@ pub(crate) const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from
 
 // ─── 默认规则 ──────────────────────────────────────────────────────────────────
 
-/// `cron_register` 的**原始**工具名（不是 effective name）。
-///
-/// 判定分支（[`default_requires_approval`] 的 `cron_register` 行）与模型可见清单
-/// 条目（[`sensitive_tool_entries`] 的查表键）共用同一字面量：同一工具的原始名在本
-/// 模块只允许出现一次，避免两处字面量漂移（effective name 仍只从声明表解析）。
 pub(super) const CRON_REGISTER_TOOL_NAME: &str = "cron_register";
-
-/// `monitor_start` 的**原始**工具名（不是 effective name）。
-///
-/// 与 [`CRON_REGISTER_TOOL_NAME`] 同形：判定分支与敏感清单条目共用同一字面量，
-/// effective name 只从声明表解析。
 pub(super) const MONITOR_START_TOOL_NAME: &str = "monitor_start";
-
-/// `Workflow` 的**原始**工具名（不是 effective name）。
-///
-/// 与 [`CRON_REGISTER_TOOL_NAME`] 同形：判定分支与敏感清单条目共用同一字面量，
-/// effective name 只从声明表解析。
 pub(super) const WORKFLOW_TOOL_NAME: &str = "Workflow";
 
 /// 默认敏感工具判断规则
@@ -132,150 +116,6 @@ pub(super) fn classifier_tool_name(
     .to_string()
 }
 
-// ─── 10_hitl 段落持有（波 4 演进 C3，设计 §3.1.1 归属全景 / §3.1.2）──────────
-
-/// 敏感工具规则的结构化条目（10_hitl 段落动态生成的单一事实源）。
-///
-/// 与 [`default_requires_approval`] 的判定分支一一对应：`prefix_match=false`
-/// 精确匹配工具名，`prefix_match=true` 前缀匹配（渲染为 `` `{name}*` ``）。
-/// 条目顺序 = 段落渲染顺序（现状列表顺序保持）；一致性由测试锁定
-/// （`sensitive_entries_match_default_requires_approval`）。
-#[derive(Debug, Clone, Copy)]
-pub struct SensitiveToolEntry {
-    /// 工具名（精确匹配）或前缀（`prefix_match=true`）
-    pub name: &'static str,
-    /// 敏感原因说明（渲染为 markdown 列表项描述）
-    pub description: &'static str,
-    /// `true` = 前缀匹配（`{name}*`），`false` = 精确匹配
-    pub prefix_match: bool,
-}
-
-/// builtin 工具的模型面名字查表。
-///
-/// v5 单出口是默认路径：模型实际看到的是 `model_name`（direct 原名，
-/// deferred `mcp__peri__*`）。旧 `legacy_name` 只用于旧 transcript 归一，
-/// 不再写入敏感工具清单。
-pub(super) fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static str {
-    peri_acp_types::builtin_mcp::model_tool_name_of(instance, original_name).expect(
-        "builtin 声明表必须声明该 (能力, 原始工具名)：见 peri-acp-types/src/builtin_mcp/v5.rs",
-    )
-}
-
-/// 敏感工具规则清单（10_hitl 段落内容来源）。
-///
-/// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
-/// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
-/// 清单包括精确工具条目和前缀规则；已迁移为 builtin 一等工具的条目
-/// （web×2 + cron×1 + monitor×1 + workflow×1 + workspace×4）名为**模型面名字**，经
-/// [`builtin_tool_effective_name`] 从 `peri_acp_types::builtin_mcp` 声明表解析
-/// （A19/IF-G3：模型看到的名字就是 effective name，条目名若留裸名会点名一个
-/// 已不存在的工具）。只列需审批的 workspace 条目：`Read` / `Glob` / `Grep`
-/// 归一后走免审批分支（[`default_requires_approval`] 为假），进清单即与
-/// 「每条目必须判定为敏感」的一致性断言冲突。
-#[must_use]
-pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 13] {
-    [
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("workspace", TOOL_BASH),
-            description: "shell command execution",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("workspace", TOOL_FOLDER_OPS),
-            description: "folder create/list/exists",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: TOOL_AGENT,
-            description: "sub-agent delegation (see 11_subagent for the authorization boundary)",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("workspace", TOOL_WRITE),
-            description: "file write",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("workspace", TOOL_EDIT),
-            description: "file edit",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: "delete_",
-            description: "any file deletion operation (prefix match)",
-            prefix_match: true,
-        },
-        SensitiveToolEntry {
-            name: "rm_",
-            description: "any file deletion operation (prefix match)",
-            prefix_match: true,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("web", TOOL_WEBFETCH),
-            description: "fetch a URL",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("web", TOOL_WEBSEARCH),
-            description: "web search",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: "mcp__",
-            description: "prefixed MCP server tool; raw external MCP tools also require approval by bound source; builtin first-class capabilities follow their original tool's rule",
-            prefix_match: true,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("cron", CRON_REGISTER_TOOL_NAME),
-            description: "scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("monitor", MONITOR_START_TOOL_NAME),
-            description: "monitor command execution (starts a shell command and watches its output)",
-            prefix_match: false,
-        },
-        SensitiveToolEntry {
-            name: builtin_tool_effective_name("workflow", WORKFLOW_TOOL_NAME),
-            description: "workflow delegation (launches a multi-agent workflow that bypasses HITL, equivalent to delegated execution rights)",
-            prefix_match: false,
-        },
-    ]
-}
-
-/// 渲染敏感工具 markdown 列表（10_hitl 段落动态部分）。
-#[must_use]
-pub fn format_sensitive_tools() -> String {
-    format_sensitive_tools_for_disabled(&std::collections::HashSet::new())
-}
-
-/// Deployment closure only changes the prompt inventory; approval remains conservative.
-#[must_use]
-pub fn format_sensitive_tools_for_disabled(disabled: &std::collections::HashSet<String>) -> String {
-    sensitive_tool_entries()
-        .iter()
-        .filter(|entry| {
-            !peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES
-                .iter()
-                .any(|capability| {
-                    disabled.contains(capability.name)
-                        && capability
-                            .tools
-                            .iter()
-                            .any(|tool| tool.model_name == entry.name)
-                })
-        })
-        .map(|e| {
-            if e.prefix_match {
-                format!("- `{}*` — {}", e.name, e.description)
-            } else {
-                format!("- `{}` — {}", e.name, e.description)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 // ─── PermissionMiddleware ──────────────────────────────────────────────────
 
 /// PermissionMiddleware — 敏感工具调用前需用户确认
@@ -293,7 +133,6 @@ pub struct PermissionMiddleware {
     pub(super) auto_classifier: Option<Arc<dyn AutoClassifier>>,
     /// broker.request 超时，默认 300s；测试可设为短值
     pub(super) broker_timeout: std::time::Duration,
-    pub(super) prompt_disabled_builtin: std::collections::HashSet<String>,
 }
 
 impl Debug for PermissionMiddleware {
@@ -316,41 +155,16 @@ impl PermissionMiddleware {
             || (self.requires_approval)(&super::effective_tool_name(&call.name, &call.input))
     }
 
-    /// 段落声明（渲染面收集与链收集的单一事实源；C3 迁移，设计 §3.1.1）。
-    ///
-    /// 10_hitl 段 = 机制说明（`sections/10_hitl.md`，include_str 零拷贝，
-    /// 文件留在 `peri-acp/prompts/sections/`）+ 动态 sensitive 列表（按
-    /// `default_requires_approval` 代码事实生成，见
-    /// [`sensitive_tool_entries`]）+ 模式决策尾句。Dynamic 内容保证列表与
-    /// 判定函数同源——段落文件不再硬编码列表（设计 §3.1.2）。
-    ///
-    /// 契约 3（gate 原子迁移）：本段 gate = 本 middleware 是否在链上
-    /// （收集即装配）——Bypass 模式下本 middleware 仍在链（装配只按
-    /// disabled 集合过滤），10_hitl 照常渲染（决策记录 C3 D5）。
+    /// Frozen approval guidance. Tool availability comes from the live request,
+    /// and sensitivity is evaluated against the bound target when a call runs.
     #[must_use]
     pub fn sections() -> Vec<PromptSection> {
-        Self::sections_for_disabled(&std::collections::HashSet::new())
-    }
-
-    #[must_use]
-    pub fn sections_for_disabled(
-        disabled: &std::collections::HashSet<String>,
-    ) -> Vec<PromptSection> {
-        let mut content = String::with_capacity(2048);
-        content.push_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../peri-acp/prompts/sections/10_hitl.md"
-        )));
-        content.push_str("\n\n");
-        content.push_str(&format_sensitive_tools_for_disabled(disabled));
-        content.push_str(
-            "\n\nWhether a sensitive tool actually requires approval is decided by the current `PermissionMode`, not by this list alone.",
-        );
-        vec![PromptSection::dynamic(
-            "10_hitl",
-            PromptSectionZone::Uncached,
-            3, // C1 D2 编号事实：gated 10=3（07_runtime=1 之后）
-            content,
+        vec![PromptSection::declared(
+            peri_acp_types::meta_harness::sections::APPROVAL,
+            peri_agent::middleware::PromptSectionContent::Builtin(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/sections/10_hitl.md"
+            ))),
         )]
     }
 
@@ -366,7 +180,6 @@ impl PermissionMiddleware {
             mode: None,
             auto_classifier: None,
             broker_timeout: BROKER_TIMEOUT,
-            prompt_disabled_builtin: Default::default(),
         }
     }
 
@@ -379,7 +192,6 @@ impl PermissionMiddleware {
             mode: None,
             auto_classifier: None,
             broker_timeout: BROKER_TIMEOUT,
-            prompt_disabled_builtin: Default::default(),
         }
     }
 
@@ -443,17 +255,7 @@ impl PermissionMiddleware {
             mode: Some(mode),
             auto_classifier,
             broker_timeout: BROKER_TIMEOUT,
-            prompt_disabled_builtin: Default::default(),
         }
-    }
-
-    #[must_use]
-    pub fn with_prompt_disabled_builtin(
-        mut self,
-        disabled: std::collections::HashSet<String>,
-    ) -> Self {
-        self.prompt_disabled_builtin = disabled;
-        self
     }
 
     /// 设置 broker 审批超时（测试用）
@@ -825,7 +627,7 @@ impl PermissionMiddleware {
 #[async_trait]
 impl Middleware for PermissionMiddleware {
     fn name(&self) -> &str {
-        "PermissionMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Permission.name()
     }
 
     /// 声明持有的系统提示词段落（10_hitl，内容载体；装配期收集，契约 2）。
@@ -837,7 +639,7 @@ impl Middleware for PermissionMiddleware {
         if !self.approval_active() {
             return Vec::new();
         }
-        Self::sections_for_disabled(&self.prompt_disabled_builtin)
+        Self::sections()
     }
 
     /// 批量工具调用前处理：对一批工具调用一次性收集所有需审批的项，

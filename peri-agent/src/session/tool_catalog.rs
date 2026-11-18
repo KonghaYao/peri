@@ -119,17 +119,26 @@ impl ToolFilterPolicy {
     /// 关闭策略只识别 MCP 来源及 builtin 实例身份；同名 core 工具或显式远端
     /// workspace 不能被 builtin 的关闭策略误删。闭包同时用于初始目录和后续刷新。
     pub(crate) fn with_mcp_policy(disabled: HashSet<String>, filter: ToolFilter) -> ToolFilter {
+        use peri_acp_types::meta_harness::{AssemblyPlan, ChainSlot, ExecutionProfile};
+
+        let plan = AssemblyPlan::new(&disabled, ExecutionProfile::Child);
+        // Pre-v5 frozen sessions may retain the legacy switch spelling.
+        let closed: HashSet<_> = disabled
+            .iter()
+            .filter_map(|key| peri_acp_types::builtin_mcp::capability_of_switch(key).ok())
+            .map(|capability| capability.name)
+            .collect();
         Arc::new(move |tool| {
             if tool.mcp_server_name().is_some()
-                && (disabled.contains("McpMiddleware")
+                && (!plan.contains(ChainSlot::Mcp)
                     || tool.builtin_mcp_instance().is_some_and(|instance| {
                         if peri_acp_types::builtin_mcp::is_v5_server_name(instance) {
                             tool.mcp_tool_name()
                                 .and_then(peri_acp_types::builtin_mcp::capability_of_original_tool)
-                                .is_some_and(|(capability, _)| disabled.contains(capability.name))
+                                .is_some_and(|(capability, _)| closed.contains(capability.name))
                         } else {
                             peri_acp_types::builtin_mcp::find(instance)
-                                .is_some_and(|declared| disabled.contains(declared.name))
+                                .is_some_and(|declared| closed.contains(declared.name))
                         }
                     }))
             {

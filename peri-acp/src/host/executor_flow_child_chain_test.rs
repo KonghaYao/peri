@@ -77,17 +77,21 @@ mod captured {
         )
     }
 
-    /// 默认 `is_direct() == false` 的夹具工具：证明真实 ToolSearch 目录进入请求面。
-    struct DeferredFixtureTool;
+    /// ToolSearch fixture and a direct Read fixture with no external side effects.
+    struct FixtureTool(&'static str);
 
     #[async_trait]
-    impl BaseTool for DeferredFixtureTool {
+    impl BaseTool for FixtureTool {
         fn name(&self) -> &str {
-            "FixtureDeferredTool"
+            self.0
+        }
+
+        fn is_direct(&self) -> bool {
+            self.0 == "Read"
         }
 
         fn description(&self) -> &str {
-            "fixture deferred tool for the production child chain"
+            "fixture tool for the production child chain"
         }
 
         fn parameters(&self) -> Value {
@@ -127,6 +131,14 @@ mod captured {
 
     /// 经真实 ACP 装配面跑一次子 Agent（恒后台），返回捕获到的请求。
     async fn run_captured_child(disabled: &[&str], options: ChildOptions) -> Vec<ModelRequest> {
+        run_captured_child_with_tools(disabled, options, None).await
+    }
+
+    async fn run_captured_child_with_tools(
+        disabled: &[&str],
+        options: ChildOptions,
+        allowed: Option<Vec<String>>,
+    ) -> Vec<ModelRequest> {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let child_model = Arc::new(CapturePromptModel {
             requests: Arc::clone(&requests),
@@ -150,6 +162,40 @@ mod captured {
         // 真实子链装配器（与生产同型：`SubagentChainAssemblerImpl::with_registry`；
         // 生产接线在 middlewares 侧 `assembly.rs`，本层不引用）。
         let chain_assembler = child_chain_assembler(&manager, &ctx.session_id);
+        let restrict = allowed.is_some();
+        let tool_filter =
+            peri_agent::session::tool_catalog::ToolFilterPolicy::canonical(allowed, Vec::new());
+        let identity = if restrict {
+            let access = peri_middlewares::skills::SkillsMiddleware::access_for_filter(|tool| {
+                tool_filter(tool)
+            });
+            let state = sentinel.meta_harness();
+            let plan = peri_acp_types::meta_harness::AssemblyPlan::new(
+                &state.disabled_middlewares,
+                peri_acp_types::meta_harness::ExecutionProfile::Child,
+            );
+            let template = crate::session::derived_prompt_template(
+                state,
+                None,
+                sentinel.language(),
+                &plan,
+                access,
+            );
+            template.render(
+                &crate::prompt::PromptEnv::frozen(
+                    &ctx.cwd,
+                    sentinel.date(),
+                    sentinel.runtime_env(),
+                ),
+                ctx.agent_catalog.as_ref(),
+            )
+        } else {
+            IDENTITY.into()
+        };
+        let mut tools: Vec<Arc<dyn BaseTool>> = vec![Arc::new(FixtureTool("FixtureDeferredTool"))];
+        if restrict {
+            tools.push(Arc::new(FixtureTool("Read")));
+        }
         let (bg_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel();
         let config = SubagentSpawnConfig {
             agent_name: "captured-child".into(),
@@ -165,9 +211,9 @@ mod captured {
             skill_names: vec![],
             llm: child_llm(&child_model),
             chain_assembler,
-            tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
-            tool_filter: Arc::new(|_| true),
-            system_prompt: Some(IDENTITY.into()),
+            tools,
+            tool_filter,
+            system_prompt: Some(identity),
             tool_invocation_resolver: Some(child_tool_invocation_resolver()),
             compact_config: None,
             context_budget: None,
@@ -207,6 +253,38 @@ mod captured {
         let captured = requests.lock().unwrap().clone();
         assert_eq!(captured.len(), 1, "首轮恰一个模型请求");
         captured
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn child_wire_skills_follow_the_filtered_catalog() {
+        for (name, load, discover) in [
+            ("Read", false, false),
+            ("SkillTool", true, false),
+            ("DiscoverSkillsTool", false, true),
+        ] {
+            let captured = run_captured_child_with_tools(
+                &[],
+                ChildOptions::DEFINED,
+                Some(vec![name.to_owned()]),
+            )
+            .await;
+            let request = &captured[0];
+            assert_eq!(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>(),
+                [name],
+            );
+            let system = system_plane_text(request);
+            for (name, expected) in [("SkillTool", load), ("DiscoverSkillsTool", discover)] {
+                assert_eq!(request.tools.iter().any(|tool| tool.name == name), expected);
+                assert_eq!(system.contains(name), expected, "{system}");
+            }
+            assert_eq!(system.contains("FROZEN_SKILLS_SENTINEL"), load, "{system}");
+        }
     }
 
     /// 请求面 system 平面聚合：provider 适配器把**任意位置**的 System 消息提升为
@@ -460,7 +538,7 @@ mod captured {
                 skill_names: vec![],
                 llm: child_llm(&spawn_model),
                 chain_assembler: child_chain_assembler(&fixture.manager, &ctx.session_id),
-                tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
+                tools: vec![Arc::new(FixtureTool("FixtureDeferredTool")) as Arc<dyn BaseTool>],
                 tool_filter: Arc::new(|_| true),
                 system_prompt: Some(IDENTITY.into()),
                 tool_invocation_resolver: Some(child_tool_invocation_resolver()),
@@ -492,6 +570,18 @@ mod captured {
         .expect("真实子链 spawn 必须成功");
         wait_child_idle(&spawn_manager).await;
         assert_eq!(spawn_requests.lock().unwrap().len(), 1);
+        let snapshot = ctx
+            .session_resources
+            .as_ref()
+            .unwrap()
+            .load_active_snapshot(&spawned.child_thread_id)
+            .await
+            .unwrap();
+        let persisted_identity = snapshot.payloads[0].as_message().unwrap();
+        assert_eq!(
+            persisted_identity.child_skill_ceiling(),
+            Some(peri_acp_types::skills::SkillToolAccess::Full)
+        );
         // 夹具前置：父宿主必须携带**自己的** thread 身份（resume 的 owning parent 判据）。
         assert!(
             fixture.parent.store().thread_id.is_some()
@@ -525,7 +615,7 @@ mod captured {
                 max_iterations: 1,
                 llm: child_llm(&resume_model),
                 chain_assembler: child_chain_assembler(&fixture.manager, &ctx.session_id),
-                tools: vec![Arc::new(DeferredFixtureTool) as Arc<dyn BaseTool>],
+                tools: vec![Arc::new(FixtureTool("FixtureDeferredTool")) as Arc<dyn BaseTool>],
                 tool_filter: Arc::new(|_| true),
                 tool_invocation_resolver: Some(child_tool_invocation_resolver()),
                 compact_config: None,

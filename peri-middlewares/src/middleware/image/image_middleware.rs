@@ -80,7 +80,7 @@ impl Default for ImageMiddleware {
 #[async_trait]
 impl Middleware for ImageMiddleware {
     fn name(&self) -> &str {
-        "ImageMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Image.name()
     }
 
     async fn before_input(&self, state: &mut dyn hook_state::BeforeInputState) -> AgentResult<()> {

@@ -29,12 +29,9 @@ pub mod state_builders;
 pub use peri_agent::session::async_router::AsyncRouter;
 
 pub(crate) use frozen::{
-    build_collected_sections, build_collected_sections_with_capabilities, build_meta_harness_state,
-    prepare_derived_environment, subagent_chain_capabilities,
+    build_collected_sections, build_collected_sections_for_plan, derived_prompt_template,
+    policy_from_settings, prepare_derived_environment,
 };
-// workflow 链能力事实只服务本地 workflow 装配面（emscripten 不打包 workflow 运行时）。
-#[cfg(not(target_os = "emscripten"))]
-pub(crate) use frozen::workflow_chain_capabilities;
 pub use retry_events::RetryEventForwarder;
 
 #[cfg(test)]

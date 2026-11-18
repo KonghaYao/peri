@@ -296,6 +296,53 @@ fn meta_harness_override_13_skills_gated() {
     assert!(result.contains("SKILLS-OVERRIDE"));
 }
 
+#[test]
+fn derived_skill_override_cannot_widen_restricted_access() {
+    use peri_acp_types::meta_harness::{AssemblyPlan, ExecutionProfile};
+    use peri_acp_types::skills::SkillToolAccess;
+
+    let state = crate::prompt::tests::override_state(
+        "13_skills",
+        "CUSTOM-SKILLS: use SkillTool and DiscoverSkillsTool",
+    );
+    let plan = AssemblyPlan::new(&state.disabled_middlewares, ExecutionProfile::Child);
+    let catalog = AgentCatalogProvider::new();
+    let env = PromptEnv::frozen("/tmp", "2026-11-18", None);
+    for (access, load, discover) in [
+        (SkillToolAccess::Full, true, true),
+        (SkillToolAccess::LoadOnly, true, false),
+        (SkillToolAccess::DiscoverOnly, false, true),
+        (SkillToolAccess::None, false, false),
+    ] {
+        let prompt = crate::session::derived_prompt_template(&state, None, None, &plan, access)
+            .render(&env, &catalog);
+        assert_eq!(
+            prompt.contains("CUSTOM-SKILLS"),
+            access == SkillToolAccess::Full
+        );
+        assert_eq!(prompt.contains("SkillTool"), load);
+        assert_eq!(prompt.contains("DiscoverSkillsTool"), discover);
+    }
+}
+
+#[test]
+fn rendered_skills_owner_has_exact_frozen_override_bytes() {
+    use peri_acp_types::meta_harness::{sections, AssemblyPlan, ExecutionProfile};
+    use peri_acp_types::skills::SkillToolAccess;
+
+    let state = crate::prompt::tests::override_state("13_skills", r"Custom: {{cwd}} and \{{cwd\}}");
+    let plan = AssemblyPlan::new(&state.disabled_middlewares, ExecutionProfile::Child);
+    let catalog = AgentCatalogProvider::new();
+    let env = PromptEnv::frozen("/workspace/child", "2026-11-18", None);
+    let template =
+        crate::session::derived_prompt_template(&state, None, None, &plan, SkillToolAccess::Full);
+    let owner = template
+        .render_owned_section(sections::SKILLS, &env, &catalog)
+        .unwrap();
+    assert_eq!(owner, "Custom: /workspace/child and {{cwd}}");
+    assert!(template.render(&env, &catalog).ends_with(&owner));
+}
+
 /// P2-2（实施质量审查）：persona 段恒声明 + 空内容——无 overrides 时收集的
 /// persona 段内容为空串（渲染面空内容过滤跳过，默认不渲染），但 MetaHarness
 /// 覆盖 `.peri/meta/persona.md` 仍可注入（覆盖合并先于空内容过滤）。
@@ -653,6 +700,7 @@ impl tracing::Subscriber for SectionDiagnostics {
 /// 其它段落为空是异常（显式 warn + 来源），两条路径都不渲染空段。
 #[test]
 fn empty_section_diagnostics_distinguish_optional_from_required() {
+    use peri_acp_types::meta_harness::sections;
     use peri_agent::middleware::{PromptSection, PromptSectionContent, PromptSectionZone};
 
     let diagnostics = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -660,7 +708,10 @@ fn empty_section_diagnostics_distinguish_optional_from_required() {
         tracing::subscriber::set_default(SectionDiagnostics(std::sync::Arc::clone(&diagnostics)));
     let sections = vec![
         PromptSection::dynamic("persona", PromptSectionZone::Uncached, 0, String::new()),
-        PromptSection::dynamic("13_skills", PromptSectionZone::Uncached, 6, String::new()),
+        PromptSection::declared(
+            sections::SKILLS,
+            PromptSectionContent::Dynamic(String::new()),
+        ),
         PromptSection::dynamic("language", PromptSectionZone::Uncached, 8, String::new()),
         PromptSection::dynamic(
             "11_subagent",
@@ -674,7 +725,6 @@ fn empty_section_diagnostics_distinguish_optional_from_required() {
         &sections,
     );
     let recorded = diagnostics.lock().unwrap().clone();
-    let _ = PromptSectionContent::Dynamic(String::new());
 
     let warn: Vec<&String> = recorded
         .iter()
@@ -688,7 +738,7 @@ fn empty_section_diagnostics_distinguish_optional_from_required() {
         warn[0]
     );
     assert!(
-        warn[0].contains("SkillsMiddleware"),
+        warn[0].contains("source=\"SkillsMiddleware\""),
         "诊断必须带来源（持有 middleware）：{}",
         warn[0]
     );

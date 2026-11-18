@@ -190,10 +190,7 @@ pub(super) async fn prepare_for_restore(
             let mut environment = environment;
             let outcome: Result<LegacyAdoption, AcpError> = async {
                 // 内容准入（与 session/new 的 P4 同源）：覆盖文档 / 技能目录 / 项目指令。
-                let enabled_sections = match environment.as_ref() {
-                    Some(env) => session_lifecycle::enabled_meta_sections(&env.cfg),
-                    None => session_lifecycle::enabled_meta_sections(cfg),
-                };
+                let enabled_sections = session_lifecycle::enabled_meta_sections(&prepared.configuration.config);
                 let docs = match environment.as_ref() {
                     Some(env) if !enabled_sections.is_empty() => {
                         env.read_meta_docs(&enabled_sections).await?

@@ -1,3 +1,5 @@
+use peri_acp_types::meta_harness::{AssemblyPlan, ChainSlot, ExecutionProfile};
+
 use super::{
     mpsc, AgentsMdMiddleware, Arc, McpSkillRegistry, Middleware, MiddlewareChain,
     SkillPreloadMiddleware, SkillsMiddleware, SubAgentMiddlewareConfig, SubagentChainAssembler,
@@ -35,11 +37,11 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
 
     // MetaHarness（设计 §2.5）：子链独立装配，关闭面同样生效——
     // 关闭的 middleware 不构造、不进链（构造副作用也不存在）。
-    let disabled = &config.meta_harness_disabled;
+    let plan = AssemblyPlan::new(&config.meta_harness_disabled, ExecutionProfile::Child);
 
     // [TRAP] SubAgent 复用 main agent 在 session/new 时捕获的 frozen CLAUDE.md，
     // 避免文件中途变更导致 system prompt 漂移（第一优先级不变量）。
-    if !disabled.contains("AgentsMdMiddleware") {
+    if plan.contains(ChainSlot::AgentsMd) {
         // M4：main / local 独立贡献（local-only 有效）。
         let agents_md = AgentsMdMiddleware::new()
             .with_frozen_parts(config.frozen_claude_md, config.frozen_claude_local_md);
@@ -49,7 +51,7 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
     // [TRAP] 同上：SubAgent 复用 frozen skill summary。
     // W4b（F5/J5）：子链的目录与正文都只来自 MCP registry（`config.mcp_skill_registry`
     // 由装配面注入父会话的会话级 registry），无本地扫描、无磁盘回落。
-    if !disabled.contains("SkillsMiddleware") {
+    if plan.contains(ChainSlot::Skills) {
         let mut skills =
             SkillsMiddleware::new().with_mcp_registry(config.mcp_skill_registry.clone());
         if let Some(summary) = config.frozen_skill_summary {
@@ -58,19 +60,19 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
         middlewares.push(Box::new(skills));
     }
 
-    if !config.skill_names.is_empty() && !disabled.contains("SkillPreloadMiddleware") {
+    if !config.skill_names.is_empty() && plan.contains(ChainSlot::SkillPreload) {
         middlewares.push(Box::new(
             SkillPreloadMiddleware::new(config.skill_names)
                 .with_mcp_registry(config.mcp_skill_registry.clone()),
         ));
     }
-    if !disabled.contains("TodoMiddleware") {
+    if plan.contains(ChainSlot::Todo) {
         middlewares.push(Box::new(TodoMiddleware::new({
             let (tx, _rx) = mpsc::channel(8);
             tx
         })));
     }
-    if !disabled.contains("ToolSearch") {
+    if plan.contains(ChainSlot::ToolSearch) {
         middlewares.push(Box::new(crate::tool_search::ToolSearchMiddleware::new(
             Arc::new(crate::tool_search::ToolSearchIndex::new()),
             Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),

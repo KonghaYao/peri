@@ -25,6 +25,42 @@ impl SubagentChainAssembler for SessionBoundAssembler {
         self.template.chain_assembler.assemble(context)
     }
 
+    fn project_resumed_identity(
+        &self,
+        identity: &str,
+        cwd: &str,
+        recorded: Option<peri_acp_types::skills::SkillToolAccess>,
+        frozen: Option<&peri_acp_types::meta_harness::MetaHarnessState>,
+        tool_filter: peri_agent::session::tool_catalog::ToolFilter,
+    ) -> Result<(String, peri_agent::session::tool_catalog::ToolFilter), String> {
+        let Some(builder) = self.template.system_builder.as_ref() else {
+            return Ok((identity.to_owned(), tool_filter));
+        };
+        let rendered = recorded.and_then(|_| {
+            frozen?
+                .section_overrides
+                .get(peri_acp_types::meta_harness::sections::SKILLS.id)?;
+            Some(builder(
+                None,
+                cwd,
+                peri_acp_types::skills::SkillToolAccess::Full,
+                peri_agent::session::factory::ChildPromptProjection::SkillsSection,
+            ))
+        });
+        let access = crate::skills::SkillsMiddleware::access_for_filter(|tool| tool_filter(tool));
+        let (identity, access) = crate::skills::SkillsMiddleware::project_resumed_identity(
+            identity,
+            recorded,
+            frozen,
+            access,
+            rendered.as_deref(),
+        )?;
+        Ok((
+            identity,
+            Arc::new(move |tool| tool_filter(tool) && access.permits(tool)),
+        ))
+    }
+
     fn bind_tools(
         &self,
         session: &Arc<Session>,

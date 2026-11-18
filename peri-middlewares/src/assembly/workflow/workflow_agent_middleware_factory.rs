@@ -1,8 +1,15 @@
+use peri_acp_types::meta_harness::{AssemblyPlan, ChainSlot, ExecutionProfile};
+
 use super::{
     AgentsMdMiddleware, Arc, BaseTool, GitAttributionMiddleware, HumanInTheLoopMiddleware,
     McpClientPool, Middleware, PermissionMiddleware, SkillPreloadMiddleware, SkillsMiddleware,
     TodoMiddleware, ToolInvocationResolver, WorkflowAgentContext, WorkflowAgentDefinition,
     WorkflowAgentFactory,
+};
+
+const TOOLS_PROFILE: ExecutionProfile = ExecutionProfile::Workflow {
+    broker: false,
+    permission_mode: false,
 };
 
 /// workflow agent 装配工厂（无池 ZST；既有调用点语义逐位不变）。
@@ -48,8 +55,15 @@ pub(super) fn build_workflow_middlewares(
     // MetaHarness（设计 §2.5）：workflow agent 链独立装配，关闭面同样生效；
     // 未禁用项保持原相对顺序（行为契约，禁止重排）。
     let disabled = &ctx.meta_harness_disabled;
+    let plan = AssemblyPlan::new(
+        disabled,
+        ExecutionProfile::Workflow {
+            broker: ctx.broker.is_some(),
+            permission_mode: ctx.permission_mode.is_some(),
+        },
+    );
 
-    if !disabled.contains("AgentsMdMiddleware") {
+    if plan.contains(ChainSlot::AgentsMd) {
         // M4：main / local 独立贡献（local-only 有效）。
         let agents_md = AgentsMdMiddleware::new().with_frozen_parts(
             ctx.frozen_claude_md.clone(),
@@ -58,9 +72,10 @@ pub(super) fn build_workflow_middlewares(
         middlewares.push(Box::new(agents_md));
     }
 
-    if !disabled.contains("SkillsMiddleware") {
-        let mut skills_mw =
-            SkillsMiddleware::new().with_mcp_registry(ctx.mcp_skill_registry.clone());
+    if plan.contains(ChainSlot::Skills) {
+        let mut skills_mw = SkillsMiddleware::new()
+            .with_mcp_registry(ctx.mcp_skill_registry.clone())
+            .without_tool_registration();
         if let Some(ref summary) = ctx.frozen_skill_summary {
             skills_mw = skills_mw.with_frozen_summary(summary.clone());
         }
@@ -69,7 +84,7 @@ pub(super) fn build_workflow_middlewares(
 
     // 与普通 subagent 一致：agent.md 声明的 skills 在启动时预加载。
     // W4b（F5/J5）：预载只查会话级 MCP registry（与主链同一份）。
-    if !disabled.contains("SkillPreloadMiddleware") {
+    if plan.contains(ChainSlot::SkillPreload) {
         middlewares.push(Box::new(
             SkillPreloadMiddleware::new(skill_names.to_vec())
                 .with_mcp_registry(ctx.mcp_skill_registry.clone()),
@@ -80,7 +95,7 @@ pub(super) fn build_workflow_middlewares(
     // v4-part-4 W3-C1：原 FilesystemMiddleware 段（此处之前）已删除，本槽位不再有
     // 「在 Filesystem 之后」的位置语义；workspace 工具面改由 `build_tools` 的
     // builtin direct bridge 提供，链上不再有文件工具提供器。
-    if !disabled.contains("GitAttributionMiddleware") {
+    if plan.contains(ChainSlot::GitAttribution) {
         middlewares.push(Box::new(GitAttributionMiddleware::new(
             model_name,
             reader.clone(),
@@ -94,7 +109,7 @@ pub(super) fn build_workflow_middlewares(
     // A6 面③：Web 槽位已随 `WebMiddleware` 提供面删除，且此处**不**补 MCP
     // middleware（workflow 链不引入 deferred / ToolSearch 语义）；Web / Artifact
     // 与 workspace 7 工具的能力改由 `build_tools` 的 builtin direct bridge 提供。
-    if !disabled.contains("TodoMiddleware") {
+    if plan.contains(ChainSlot::Todo) {
         let (todo_tx, _todo_rx) = tokio::sync::mpsc::channel::<Vec<crate::tools::TodoItem>>(8);
         middlewares.push(Box::new(TodoMiddleware::new(todo_tx)));
     }
@@ -102,7 +117,7 @@ pub(super) fn build_workflow_middlewares(
     // GAP-03: PermissionMiddleware（审批，原 HITL 审批职责）。
     // broker + permission_mode 均 Some 时启用审批（遵循 session 权限模式）；
     // 否则 Bypass（自主后台 agent 默认行为）。
-    if !disabled.contains("PermissionMiddleware") {
+    if plan.contains(ChainSlot::Permission) {
         // 有效模式规则归 `PermissionMiddleware`（H2/D3）：broker + 共享 mode 齐备
         // ⇒ 共享模式审批；否则 disabled。段落投影消费同一规则。
         middlewares.push(Box::new(PermissionMiddleware::for_workflow(
@@ -116,7 +131,7 @@ pub(super) fn build_workflow_middlewares(
     // ——AskUserQuestion 随 2026-08-15 拆分从 workflow agent 消失
     // （旧行为经宿主级 shared_tools 泄漏 TUI broker 到后台 agent，
     // 非有意设计，见 spec/issues/2026-08-15-permission-hitl-split.md）。
-    if !disabled.contains("HumanInTheLoopMiddleware") {
+    if plan.contains(ChainSlot::AskUser) {
         if let Some(broker) = &ctx.broker {
             middlewares.push(Box::new(HumanInTheLoopMiddleware::new(Arc::clone(broker))));
         }
@@ -165,7 +180,7 @@ impl BuiltinWorkflowAgentFactory {
         &self,
         disabled: &std::collections::HashSet<String>,
     ) -> Vec<Box<dyn BaseTool>> {
-        if disabled.contains("McpMiddleware") {
+        if !AssemblyPlan::new(disabled, TOOLS_PROFILE).contains(ChainSlot::Mcp) {
             return Vec::new();
         }
         match self.builtin.as_ref() {
@@ -264,7 +279,7 @@ impl WorkflowAgentMiddlewareFactory {
         // MetaHarness（设计 §2.5）：关闭的 middleware 连坐，其工具不进列表。
         // D3：统一模型可见协议为 SkillTool(skill_name) + DiscoverSkillsTool，
         // 与主 agent / subagent 链一致，不再注册旧 Skill(skill, args)。
-        if !disabled.contains("SkillsMiddleware") {
+        if AssemblyPlan::new(disabled, TOOLS_PROFILE).contains(ChainSlot::Skills) {
             tools.push(Box::new(crate::skills::tools::SkillTool::new(
                 mcp_skill_registry.clone(),
             )));

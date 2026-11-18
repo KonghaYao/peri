@@ -131,11 +131,11 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
             // async-only：spawn 只登记后台任务；用例必须在同一临时库上下一次写入前
             // 等它结算，否则多个 child 的写事务会叠加并耗尽连接池。
             let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-            let capabilities = crate::session::subagent_chain_capabilities(
+            let capabilities = peri_acp_types::meta_harness::AssemblyPlan::new(
                 &frozen.meta_harness().disabled_middlewares,
+                peri_acp_types::meta_harness::ExecutionProfile::Child,
             );
-            let sections = crate::session::build_collected_sections_with_capabilities(
-                frozen.meta_harness(),
+            let sections = crate::session::build_collected_sections_for_plan(
                 None,
                 frozen.language(),
                 &capabilities,

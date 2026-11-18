@@ -65,7 +65,7 @@ impl GoalMiddleware {
 #[async_trait]
 impl Middleware for GoalMiddleware {
     fn name(&self) -> &str {
-        "GoalMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Goal.name()
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn peri_agent::tools::BaseTool>> {

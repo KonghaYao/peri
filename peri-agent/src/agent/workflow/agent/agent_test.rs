@@ -332,9 +332,9 @@ async fn workflow_bridge_reads_contributions_at_request_time() {
 #[tokio::test]
 async fn workflow_bridge_appends_external_after_each_internal_projection() {
     let builder: crate::agent::workflow::WorkflowAgentPromptBuilder =
-        std::sync::Arc::new(|_, _, _, _| "AGENT_TYPE_INTERNAL".into());
+        std::sync::Arc::new(|_, _, _, _, _| "AGENT_TYPE_INTERNAL".into());
     let fallback: crate::agent::workflow::WorkflowSystemPromptFallback =
-        std::sync::Arc::new(|_, _, _| "FALLBACK_INTERNAL".into());
+        std::sync::Arc::new(|_, _, _, _| "FALLBACK_INTERNAL".into());
     let cases = [
         (None, Some("DEFAULT_INTERNAL"), "DEFAULT_INTERNAL"),
         (
@@ -353,6 +353,7 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
             "/tmp",
             Some("2026-10-10"),
             None,
+            peri_acp_types::skills::SkillToolAccess::Full,
         );
         assert_eq!(internal, expected_internal);
         let chain = std::sync::Arc::new(crate::middleware::chain::MiddlewareChain::new());
@@ -517,7 +518,7 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
         subagent_ctx_builder: Some(
             captured_for_ctx as Arc<dyn crate::session::subagent::SubagentV2ContextBuilder>,
         ),
-        agent_prompt_builder: Arc::new(|_, _, _, _| String::new()),
+        agent_prompt_builder: Arc::new(|_, _, _, _, _| String::new()),
         model_factory: Arc::new(|_, _, _| crate::agent::workflow::WorkflowModel {
             model: Arc::new(WorkflowCaptureModel {
                 requests: std::sync::Mutex::new(Vec::new()),
@@ -526,7 +527,7 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
             tier: None,
         }),
         middleware_factory: Arc::new(EnqueueFailingFactory),
-        system_prompt_fallback: Arc::new(|_, _, _| "fallback".into()),
+        system_prompt_fallback: Arc::new(|_, _, _, _| "fallback".into()),
         forwarder_launcher: Arc::new(move |mut handles, _session_id, _on_event| {
             let done = Arc::clone(&done_for_launcher);
             tokio::spawn(async move {

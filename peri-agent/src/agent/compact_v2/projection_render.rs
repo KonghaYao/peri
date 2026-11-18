@@ -400,7 +400,14 @@ impl<'message> MessageDraft<'message> {
         let content = content.unwrap_or_else(|| source.message_content().clone());
         match source {
             BaseMessage::Human { .. } => BaseMessage::Human { id, content },
-            BaseMessage::System { .. } => BaseMessage::System { id, content },
+            BaseMessage::System {
+                child_skill_ceiling,
+                ..
+            } => BaseMessage::System {
+                id,
+                content,
+                child_skill_ceiling: *child_skill_ceiling,
+            },
             BaseMessage::Ai { .. } => BaseMessage::Ai {
                 id,
                 content,
