@@ -178,6 +178,7 @@ fn make_default_mcp_server() -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
+        dynamic: false,
         subscriptions: None,
         system_mcp: None,
         system_mcp_tools: None,

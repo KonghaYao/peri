@@ -546,6 +546,7 @@ fn acp_cache_identity_fails_closed_and_excludes_credentials() {
             )])),
             oauth: None,
             disabled: None,
+            dynamic: false,
             subscriptions: None,
             system_mcp: None,
             system_mcp_tools: None,

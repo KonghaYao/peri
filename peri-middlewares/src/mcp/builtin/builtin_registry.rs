@@ -585,6 +585,7 @@ fn apply_v5_single_exit(
             headers: None,
             oauth: None,
             disabled,
+            dynamic: false,
             subscriptions,
             system_mcp: (disabled != Some(true)).then_some(true),
             system_mcp_tools: (disabled != Some(true)).then_some(direct_tools),
@@ -672,6 +673,7 @@ pub(super) fn builtin_default_entry(instance: &BuiltinMcpInstance) -> McpServerC
         headers: None,
         oauth: None,
         disabled: None,
+        dynamic: false,
         // 必须为 None：显式版本会跳过 Auto 的 `server/discover` 探测。
         // 规则 7：`workspace` 的默认订阅（其余实例为 None）。
         subscriptions: super::default_subscriptions_for(instance.name),

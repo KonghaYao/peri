@@ -288,6 +288,7 @@ pub(crate) fn expand_server_config_with_context(
             scopes: o.scopes.clone(),
         }),
         disabled: config.disabled,
+        dynamic: config.dynamic,
         source: config.source.clone(),
         subscriptions: config.subscriptions.clone(),
         // System key 原样复制：工具名数组是字面量，不得走 `expand`（否则 `${VAR}`
@@ -927,6 +928,7 @@ fn test_config() -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
+        dynamic: false,
         subscriptions: None,
         system_mcp: None,
         system_mcp_tools: None,

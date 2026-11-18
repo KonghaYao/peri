@@ -114,6 +114,7 @@ fn system_config(required_tools: Option<Vec<String>>, timeout_ms: Option<u64>) -
         headers: None,
         oauth: None,
         disabled: None,
+        dynamic: false,
         subscriptions: None,
         system_mcp: Some(true),
         system_mcp_tools: required_tools,
