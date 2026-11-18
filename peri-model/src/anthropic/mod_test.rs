@@ -586,6 +586,85 @@ fn request_budget_below_thinking_plus_reserve_disables_thinking() {
     assert!(body.get("output_config").is_none());
 }
 
+/// [回归测试] DeepSeek 官方 Anthropic 兼容端点忽略 `budget_tokens`，但独立识别
+/// `output_config.effort`；小输出预算不得让显式 effort 随手动 thinking 预算一起消失。
+#[test]
+fn deepseek_endpoint_keeps_explicit_effort_for_small_output_budgets() {
+    let config = deepseek_config()
+        .with_extended_thinking(10_000, "max")
+        .with_max_tokens(32_000);
+    for (max_tokens, expected_budget) in [
+        (32, None),
+        (2_047, None),
+        (2_048, Some(1_024)),
+        (32_000, Some(10_000)),
+    ] {
+        let body = request_functions::body_for_test(
+            &config,
+            &ModelRequest::default().with_max_tokens(max_tokens),
+        );
+        assert_eq!(body["max_tokens"], max_tokens);
+        assert_eq!(body["output_config"], json!({ "effort": "max" }));
+        // thinking 块仍按手动预算门限决定；effort 不依附该分支。
+        match expected_budget {
+            Some(budget) => assert_eq!(
+                body["thinking"],
+                json!({ "type": "enabled", "budget_tokens": budget })
+            ),
+            None => assert!(body.get("thinking").is_none()),
+        }
+    }
+}
+
+/// 仅官方端点解耦：代理端点上的 `deepseek-*` 模型仍按手动预算门限省略 effort。
+#[test]
+fn deepseek_model_on_proxy_keeps_manual_budget_gate_for_effort() {
+    let mut config = config().with_extended_thinking(10_000, "max");
+    config.model = "deepseek-v4-pro".into();
+    let body =
+        request_functions::body_for_test(&config, &ModelRequest::default().with_max_tokens(32));
+    assert_eq!(body["max_tokens"], 32);
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+}
+
+/// 对照：原生 Anthropic 的手动 thinking 预算规则不因 DeepSeek 解耦而放宽。
+#[test]
+fn native_anthropic_manual_budget_rules_stay_strict_for_small_output_budgets() {
+    let config = AnthropicConfig::new(
+        Url::parse("https://api.anthropic.com").expect("valid endpoint"),
+        "test-credential",
+        "claude-sonnet-4-6",
+    )
+    .with_extended_thinking(10_000, "max")
+    .with_max_tokens(32_000);
+    for (max_tokens, expected_budget) in [
+        (32, None),
+        (2_047, None),
+        (2_048, Some(1_024)),
+        (32_000, Some(10_000)),
+    ] {
+        let body = request_functions::body_for_test(
+            &config,
+            &ModelRequest::default().with_max_tokens(max_tokens),
+        );
+        assert_eq!(body["max_tokens"], max_tokens);
+        match expected_budget {
+            Some(budget) => {
+                assert_eq!(
+                    body["thinking"],
+                    json!({ "type": "enabled", "budget_tokens": budget })
+                );
+                assert_eq!(body["output_config"], json!({ "effort": "max" }));
+            }
+            None => {
+                assert!(body.get("thinking").is_none());
+                assert!(body.get("output_config").is_none());
+            }
+        }
+    }
+}
+
 /// [回归测试] 连续工具轮次必须把 prompt cache 断点推进到最新 tool_result；
 /// 否则长上下文会把新增工具历史持续留在未缓存后缀，命中率逐轮下降。
 #[test]

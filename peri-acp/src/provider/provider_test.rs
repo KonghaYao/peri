@@ -130,6 +130,19 @@ fn anthropic_thinking_provider(model: &str, effort: &str) -> LlmProvider {
     provider
 }
 
+fn deepseek_anthropic_provider(effort: &str) -> LlmProvider {
+    LlmProvider::Anthropic {
+        api_key: "test-key".to_string(),
+        model: "deepseek-v4-pro".to_string(),
+        base_url: Some("https://api.deepseek.com/anthropic".to_string()),
+        effort: Some(effort.to_string()),
+        max_tokens: 32_000,
+        context_1m: false,
+        context_window: 128_000,
+        retry_observer: None,
+    }
+}
+
 #[test]
 fn into_model_anthropic_sonnet_5_5_uses_adaptive_with_default_profile_effort() {
     let profile = ProfileConfig::default();
@@ -254,6 +267,23 @@ fn into_model_anthropic_without_effort_omits_thinking() {
         assert!(body.get("thinking").is_none());
         assert!(body.get("output_config").is_none());
     }
+}
+
+/// [回归测试] Auto Mode 分类器复用会话 provider，并以 32 tokens 覆盖请求上限；
+/// DeepSeek 官方 Anthropic 兼容端点必须仍携带 profile 显式配置的 effort。
+#[test]
+fn into_model_deepseek_anthropic_preserves_effort_for_classifier_budget() {
+    let model = deepseek_anthropic_provider("max").into_model();
+    let prepared = model
+        .prepare_request(&peri_model::ModelRequest::default().with_max_tokens(32))
+        .expect("prepare_request 必须成功");
+    let body = prepared.body().as_value();
+    assert_eq!(body["max_tokens"], serde_json::json!(32));
+    assert!(body.get("thinking").is_none());
+    assert_eq!(
+        body["output_config"],
+        serde_json::json!({ "effort": "max" })
+    );
 }
 
 #[test]
