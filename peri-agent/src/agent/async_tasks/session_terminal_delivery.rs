@@ -5,7 +5,7 @@ use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::tasks::TaskTerminalDelivery;
 use sha2::{Digest, Sha256};
 
-use crate::session::async_result_mailbox::AsyncResultMailbox;
+use crate::session::async_result_mailbox::{AcceptOutcome, AsyncResultMailbox};
 use crate::session::MessageQueue;
 
 pub(crate) fn terminal_delivery_id(
@@ -83,17 +83,27 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
             // 已登记（包括上一次落库失败留下的 Queued）不等于已交付：落库是否成立
             // 只由存储回答。同一稳定 ID 的重放会得到 Existing/AlreadyHandedOff，
             // 所以每次都以存储事实为准入队，不把内存去重当成已投递。
-            self.mailbox.accept(delivery_id, reminder, source.clone())?;
-            self.queue
+            let outcome = self.mailbox.accept(delivery_id, reminder, source.clone())?;
+            let enqueued = self
+                .queue
                 .enqueue(QueuedMessage::system_reminder_with_delivery_id(
                     MessageKind::Defer,
                     source,
                     reminder.clone(),
                     delivery_id,
                 ))
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+                .await;
+            match enqueued {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    // 没有可见通知就不保留接纳责任：同一 ID 的后续重试可能携带
+                    // 不同的放弃原因，fingerprint 冲突会永久阻止任务结算。
+                    if outcome == AcceptOutcome::Accepted {
+                        self.mailbox.discard_queued(delivery_id);
+                    }
+                    Err(error.to_string())
+                }
+            }
         })
     }
 }

@@ -2,6 +2,7 @@ use crate::agent::async_tasks::manager::TaskManager;
 use crate::agent::async_tasks::registry::BackgroundRegistryError;
 use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 use crate::agent::events::BackgroundTaskResult;
+use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::tasks::ExternalTaskRegistration;
 use peri_acp_types::tasks::TaskSnapshot;
@@ -165,6 +166,57 @@ async fn test_abandon_external_settles_with_terminal_record() {
     assert_eq!(manager.active_count(), 0);
     let snapshot = manager.snapshot();
     assert_eq!(snapshot.tasks[0].status, "failed");
+    assert!(!TaskManagerPort::has_unsettled_external(&manager));
+}
+
+// 回归：远端 reason 无界时，完整 monitor 提醒正文会超出 64 KiB 校验上限；
+// 必须在构造 output 前截断，且保留残余通知与结算。
+#[tokio::test]
+async fn test_abandon_external_bounds_remote_reason_before_delivery() {
+    const MONITOR_PREFIX: &str = "Monitor task monitor-0192f0c4-0000-7000-8000-000000000000.\n";
+    let manager = TaskManager::new();
+    let captured = Arc::new(std::sync::Mutex::new(None::<String>));
+    let sink = Arc::clone(&captured);
+    let notify: ExternalNotifyFn = Arc::new(move |result, _| {
+        let output = result.output.clone();
+        *sink.lock().expect("capture lock must not be poisoned") = Some(output.clone());
+        let body_bytes = MONITOR_PREFIX.len() + output.len();
+        Box::pin(async move {
+            if body_bytes > MAX_REMINDER_BODY_BYTES {
+                return Err("system reminder body exceeds limit".to_owned());
+            }
+            Ok(())
+        })
+    });
+    let ticket = manager
+        .register_external(make_registration(notify))
+        .expect("the register external fixture result is required for this assertion");
+
+    let reason = "监视器连接已断开".repeat(MAX_REMINDER_BODY_BYTES);
+    assert!(manager
+        .abandon_external(&ticket, &reason)
+        .await
+        .expect("a bounded reason must still settle the abandoned task"));
+
+    let output = captured
+        .lock()
+        .expect("capture lock must not be poisoned")
+        .clone()
+        .expect("abandonment must deliver one terminal result");
+    assert!(
+        MONITOR_PREFIX.len() + output.len() <= MAX_REMINDER_BODY_BYTES,
+        "the complete monitor reminder body must stay within the limit: {} bytes",
+        MONITOR_PREFIX.len() + output.len()
+    );
+    assert!(
+        output.contains("abandoned as unresolved"),
+        "the unresolved marker must survive truncation: {output}"
+    );
+    assert!(
+        output.contains("remote side effects are unknown"),
+        "the remote side-effects warning must survive truncation: {output}"
+    );
+    assert_eq!(manager.active_count(), 0);
     assert!(!TaskManagerPort::has_unsettled_external(&manager));
 }
 
