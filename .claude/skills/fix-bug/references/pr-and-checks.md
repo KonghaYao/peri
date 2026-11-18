@@ -59,24 +59,30 @@ gh pr checks <PR> --watch --interval 30
 ## 等待 CodeRabbit
 
 ```bash
-# review 活动
-gh api repos/{owner}/{repo}/pulls/<PR>/reviews \
-  --jq '.[] | select(.user.login | test("coderabbit"; "i")) | {state, submitted_at, body}'
+# review 活动（含 commit_id）
+gh api --paginate repos/{owner}/{repo}/pulls/<PR>/reviews \
+  --jq '.[] | select(.user.login | test("coderabbit"; "i")) | {state, submitted_at, commit_id, body}'
 
 # issue comment 活动
-gh api repos/{owner}/{repo}/issues/<PR>/comments \
+gh api --paginate repos/{owner}/{repo}/issues/<PR>/comments \
   --jq '.[] | select(.user.login | test("coderabbit"; "i")) | {created_at, body}'
+
+# 内联 review comment（diff 上的 blocking 意见）
+gh api --paginate repos/{owner}/{repo}/pulls/<PR>/comments \
+  --jq '.[] | select(.user.login | test("coderabbit"; "i")) | {path, line, created_at, commit_id, body}'
 ```
 
-`{owner}/{repo}` 由 `gh repo view --json nameWithOwner -q .nameWithOwner` 获取。
+GitHub 默认每页 30 条且从旧到新返回，三个请求都必须带 `--paginate`，否则较新的活动可能落在后续页。
+
+`{owner}/{repo}` 由 `gh repo view --json nameWithOwner -q .nameWithOwner` 获取；PR head 由 `gh pr view <PR> --json headRefOid -q .headRefOid` 获取。
 
 完成判据：
 
-1. 存在时间晚于最后一次 push 的 CodeRabbit review 或 comment。
+1. review 的 `commit_id` 等于当前 PR head。issue comment 不含 commit 信息，只能提示有新活动，不能单独证明当前提交已被评审。
 2. review 状态为 `CHANGES_REQUESTED` 时，逐条处理。
-3. 评论中的 blocking 意见逐条对照代码判断；成立才修，不成立则在对应 thread 回复证据。
+3. review body、issue comment 与内联 review comment 中的 blocking 意见逐条对照代码判断；成立才修，不成立则在对应 thread 回复证据。
 
-**绿色 `CodeRabbit` check 不等于评审完成。** 必须看 review/comment 内容与时间戳。
+**绿色 `CodeRabbit` check 不等于评审完成。** 必须看 review/comment 内容与 `commit_id`。
 
 - 评论含 `Review limit reached`（或 `rate limited`）：本次没有实质评审。记录该限制并汇报，不要写成"CodeRabbit 已通过"；额度恢复后可再检查一次。
 - 30 分钟内没有任何 CodeRabbit 活动时，检查 PR 是否安装或启用 CodeRabbit，然后汇报"未检测到"，不继续等待。

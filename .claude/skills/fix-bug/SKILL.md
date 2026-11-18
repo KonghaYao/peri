@@ -20,14 +20,15 @@ disable-model-invocation: true
 
 所有读写与命令都在 worktree 内执行；主 checkout 只用于 `git worktree` 管理。
 
-1. 默认先 `git fetch origin`，再从**远程最新目标分支**创建 worktree：通常为 `origin/main`，用户指定 base 时改用 `origin/<base>`。
+1. 默认先 `git fetch --prune origin`（清理远端已删除的跟踪分支，避免基于陈旧 ref），再把选定的 worktree 路径存入 `$WT`：默认 `.worktrees/<slug>`，`.worktrees/` 未被忽略时改用同级仓库外目录 `../<repo>-worktrees/<slug>`，避免污染 `git status`。从**远程最新目标分支**创建：通常为 `origin/main`，用户指定 base 时改用 `origin/<base>`。
    ```bash
-   git worktree add --no-track -b fix/<slug> .worktrees/<slug> origin/main
+   git fetch --prune origin
+   WT=.worktrees/<slug>   # .worktrees/ 未被忽略时改为 ../<repo>-worktrees/<slug>
+   git worktree add --no-track -b fix/<slug> "$WT" origin/main
    ```
    不要直接基于本地 `main` 或其它可能过期的本地分支创建：过期基线会带入已合并的旧改动，增加冲突和无关 diff。只有远程分支不存在或用户明确指定本地基线时才改用，并在汇报中说明原因。
-   `.worktrees/` 未被忽略时改用同级仓库外目录 `../<repo>-worktrees/<slug>`，避免污染 `git status`。
-2. 核对：`git -C .worktrees/<slug> status --short --branch` 不得显示 `[origin/main]`；若显示，执行 `git -C .worktrees/<slug> branch --unset-upstream`。
-3. 在汇报中写明实际基线与 commit（`git -C .worktrees/<slug> log -1 --oneline`）。
+2. 核对：`git -C "$WT" status --short --branch` 不得显示 `[origin/main]`；若显示，执行 `git -C "$WT" branch --unset-upstream`。
+3. 在汇报中写明实际 worktree 路径、基线与 commit（`git -C "$WT" log -1 --oneline`）。
 
 完成标准：worktree 存在、分支未跟踪 main、主 checkout 无新增改动。
 
@@ -82,7 +83,7 @@ Subagent 的 cwd 不能切到 worktree，必须在 prompt 中给出绝对路径�
 2. 跑仓库约定的目标测试、lint、format、build；Peri 仓库优先 `./scripts/check-changed.sh`。
 3. 运行 `git diff --check`；报告必须引用命令真实输出，不以"应该可以"代替。
 4. 任何失败先修；环境/网络失败与产品失败分开记录。
-5. P1 修复完成后，回填 `spec/issues/YYYY-MM-DD-p1-<slug>.md` 的"验证记录"。
+5. P1 修复完成后，回填 `spec/issues/YYYY-MM-DD-p1-<slug>.md` 的"验证记录"，并把状态改为"已修复"。
 
 完成标准：所有改动文件被目标检查覆盖，无未解释失败。
 
@@ -105,7 +106,7 @@ Subagent 的 cwd 不能切到 worktree，必须在 prompt 中给出绝对路径�
 按 [等待与失败处理](references/pr-and-checks.md) 执行：
 
 1. 轮询 CI 直到无 pending；失败时读取 `gh run view <id> --log-failed`。
-2. 以最后一次 push 时间为界，等待 `coderabbitai[bot]` 的 review 或 comment。
+2. 等待 `coderabbitai[bot]` 对当前 head 的 review 或 comment；review 的 `commit_id` 必须等于 PR head，不能只看时间。
 3. 默认最长等待 30 分钟；超时汇报当前状态，不无限等待。
 4. CI 失败或 CodeRabbit blocking 意见成立时：修复 → 本地验证 → commit → push，重新等待，最多 3 轮。
 5. 意见不成立时在对应 thread 回复证据；不静默忽略。
@@ -113,7 +114,7 @@ Subagent 的 cwd 不能切到 worktree，必须在 prompt 中给出绝对路径�
 
 结束前必须确认 CI 与 CodeRabbit 处于终态；不得只输出"继续等待"而没有实际等待动作。
 
-完成标准：CI 全部 pass（非阻塞 skip 需说明）；CodeRabbit 已产生实质 review（或明确记录限流/未启用），blocking 意见已处理或已回复。**CodeRabbit 的绿色 check 不等于评审完成**，必须检查 review/comment 时间戳。
+完成标准：CI 全部 pass（非阻塞 skip 需说明）；CodeRabbit 已产生实质 review（或明确记录限流/未启用），blocking 意见已处理或已回复。**CodeRabbit 的绿色 check 不等于评审完成**，必须核对 review 的 `commit_id` 与 PR head。
 
 ## 10. 最终汇报
 
