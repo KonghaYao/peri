@@ -352,6 +352,7 @@ async fn late_same_session_reset_response_is_discarded() {
 pub(crate) struct MountedPanel {
     pub operation: State<OperationState>,
     pub selected: State<usize>,
+    pub highlighted_plugin: State<Option<super::super::InstalledIdentity>>,
     pub active_tab: State<crate::kit::atoms::PluginViewTab>,
     pub discover: State<super::super::discover::DiscoverState>,
     pub action_index: State<usize>,
@@ -411,6 +412,7 @@ impl MountedPanel {
             &super::super::current_scope(),
             None,
             self.selected,
+            self.highlighted_plugin,
             self.active_tab,
             self.discover,
             self.action_index,

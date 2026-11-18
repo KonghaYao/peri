@@ -13,6 +13,7 @@ pub(super) fn handle_panel_event(
     event_scope: &crate::application::operations::OperationScope,
     area: Option<Rect>,
     selected: State<usize>,
+    highlighted_plugin: State<Option<super::InstalledIdentity>>,
     active_tab: State<PluginViewTab>,
     discover: State<super::discover::DiscoverState>,
     action_index: State<usize>,
@@ -446,10 +447,10 @@ pub(super) fn handle_panel_event(
                 *s = peri_tui_components::list_nav::previous_selection(*s);
             }
         }
-        // ── List: Space → 把选中插件加入/移出下一次任务的待提交上下文 ──
+        // ── List: Space → 把高亮插件加入/移出下一次任务的待提交上下文 ──
         (false, false, KeyCode::Char(' ')) => {
             if *active_tab.read() == PluginViewTab::Installed {
-                toggle_pending_plugin(*selected.read(), event_scope);
+                toggle_pending_plugin(highlighted_plugin.read().clone(), event_scope);
             }
         }
         (false, false, KeyCode::Down) => {
@@ -476,20 +477,22 @@ use crate::kit::atoms::PLUGIN_LIST;
 
 use crate::kit::atoms::PluginViewTab;
 
-/// 把当前选中插件加入/移出待提交上下文。
+/// 把渲染时高亮的插件加入/移出待提交上下文。
 ///
 /// 只登记插件 ID：Host 在提交时按当前会话元数据校验并生成指引，客户端不拼
-/// Loader 名称或可信指引，选择也不能扩大权限。能力未协商时明确提示入口不可用
-/// （不能静默丢弃标签后照常提交）。
+/// Loader 名称或可信指引，选择也不能扩大权限。按 identity 而不是保存的行号
+/// 解析，避免列表在渲染与按键之间重排时切换成另一个插件。能力未协商时明确
+/// 提示入口不可用（不能静默丢弃标签后照常提交）。
 fn toggle_pending_plugin(
-    selected: usize,
+    highlighted: Option<super::InstalledIdentity>,
     event_scope: &crate::application::operations::OperationScope,
 ) {
     let plugins = PLUGIN_LIST.state().read().clone();
-    let Some(plugin) = plugins.get(selected) else {
-        if !crate::kit::steer_state::supports_plugin_selections() {
-            notify(crate::i18n::tr("panel-plugin-selection-unavailable"));
-        }
+    let Some(plugin) = highlighted
+        .as_ref()
+        .and_then(|identity| identity.resolve(&plugins, event_scope))
+    else {
+        // 高亮行已被移除：没有可切换的目标，不能拿旧下标去命中替换项。
         return;
     };
     let plugin_id = super::InstalledIdentity::new(plugin, event_scope.clone()).plugin_id();
