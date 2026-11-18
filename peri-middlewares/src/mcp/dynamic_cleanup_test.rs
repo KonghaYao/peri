@@ -478,8 +478,17 @@ async fn commit_after_removal_is_rejected() {
 async fn removal_waits_for_an_admitted_commit_and_cleans_its_publication() {
     let fixture = Fixture::new(READY_SERVER);
     let pool = fixture.pool.clone();
-    // 停点：提交已通过准入检查，但尚未写入 handle/service。
-    let publication_pause = pool.pause_handle_generation();
+    // 停点：提交已通过准入检查，但尚未写入 handle/service。停点放在阻塞线程，
+    // 测试 future 不持锁跨 await。
+    let pause_pool = pool.clone();
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let publication_pause = tokio::task::spawn_blocking(move || {
+        let _guard = pause_pool.pause_handle_generation();
+        let _ = paused_tx.send(());
+        let _ = release_rx.recv();
+    });
+    paused_rx.await.unwrap();
     let commit_pool = pool.clone();
     let commit = tokio::spawn(async move {
         commit_pool
@@ -513,7 +522,8 @@ async fn removal_waits_for_an_admitted_commit_and_cleans_its_publication() {
         .await
         .is_ok();
 
-    drop(publication_pause);
+    let _ = release_tx.send(());
+    publication_pause.await.unwrap();
     let committed = commit.await.unwrap();
     remove.await.unwrap();
 
