@@ -12,9 +12,9 @@ use super::{history_preview, selection};
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panel_mouse::ListLayout;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEventKind;
@@ -157,8 +157,8 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     if !is_confirming
                         && let Some(area) = area
-                        && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
-                        && let Some(idx) = crate::kit::panel_mouse::hit_item(
+                        && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
+                        && let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                             &mouse,
                             area,
                             ListLayout {
@@ -299,7 +299,8 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         request_more_threads();
                     }
                     KeyCode::Up => {
-                        let selected = crate::kit::list_nav::previous_selection(*cursor.read());
+                        let selected =
+                            peri_tui_components::list_nav::previous_selection(*cursor.read());
                         set_selection(&cursor, &selected_id, selected, &event_threads);
                         selection::keep_selection_visible(
                             &mut sv.write(),
@@ -329,9 +330,10 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Down | KeyCode::PageDown | KeyCode::End => {
                         let selected = match key.code {
-                            KeyCode::Down => {
-                                crate::kit::list_nav::next_selection(*cursor.read(), item_count)
-                            }
+                            KeyCode::Down => peri_tui_components::list_nav::next_selection(
+                                *cursor.read(),
+                                item_count,
+                            ),
                             KeyCode::PageDown => cursor
                                 .read()
                                 .saturating_add(viewport_rows)

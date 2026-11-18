@@ -16,8 +16,8 @@ use crate::kit::atoms::SETUP_WIZARD;
 
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::MouseButton;
 use ratatui_kit::crossterm::event::MouseEventKind;
@@ -124,7 +124,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     };
                     // 命中后移动光标，再复用各 step 的 Enter 分支（构造 Enter KeyEvent）
                     let mut st = SETUP_WIZARD.state().read().clone();
-                    if !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+                    if !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
                         && self::handler::wizard_click(&mouse, area, &mut st)
                     {
                         *SETUP_WIZARD.state().write() = st;

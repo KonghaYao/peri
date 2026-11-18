@@ -21,11 +21,11 @@ use super::BridgeState;
 #[cfg(test)]
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::atoms;
-use crate::kit::history_detail_binding::{
-    DetailDescriptor, HistoryDetailTarget, HistorySource as TuiSource, HistoryV2BodyBinding,
-};
 use crate::kit::history_v2::body::HistoryV2BodyLocator;
 use crate::kit::history_v2::{HistoryV2State, HistoryV2Window, sub_item_descriptor, sub_item_id};
+use crate::kit::history_window::{
+    DetailDescriptor, HistoryDetailTarget, HistorySource as TuiSource, HistoryV2BodyBinding,
+};
 use crate::kit::tui_render_unit::{
     TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiToolCard, TuiUserBubble, tui_hash_str,
 };

@@ -166,6 +166,30 @@ fn char_index_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// Styles supplied by the caller; no theme or application state is read here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextAreaStyles {
+    pub cursor: Style,
+    pub selection: Style,
+    pub placeholder: Style,
+    /// Fallback style for cursor-line text and explicit row padding.
+    pub base: Style,
+}
+
+/// One render request. Width and height describe the text viewport in terminal cells.
+/// Cursor and selection use character indices, not byte offsets or display columns.
+#[derive(Debug, Clone, Copy)]
+pub struct TextAreaRenderOptions<'a> {
+    pub text: &'a str,
+    pub cursor: usize,
+    pub selection_range: Option<(usize, usize)>,
+    pub placeholder: Option<&'a str>,
+    pub styles: TextAreaStyles,
+    pub max_width: usize,
+    pub viewport_height: usize,
+    pub show_cursor: bool,
+}
+
 /// 把文本按 \n 拆成多行 Line，光标以传入的 style 高亮，选区以 selection_style 高亮。
 ///
 /// I22-B：渲染窗口上限——只渲染 viewport_height 行（由调用方传入，等于 composer 可见行数）。
@@ -174,21 +198,23 @@ fn char_index_to_byte(s: &str, char_idx: usize) -> usize {
 ///
 /// selection_range 为 `(start, end)` 字符索引的半开区间，cursor_style 优先级高于 selection_style。
 /// placeholder 非空且 text 为空时，渲染占位符文本（类似 tui-textarea 风格：光标空间 + 占位文）。
-#[allow(clippy::too_many_arguments)]
-pub fn render_multiline_with_cursor(
-    text: &str,
-    cursor: usize,
-    cursor_style: Style,
-    selection_range: Option<(usize, usize)>,
-    selection_style: Style,
-    placeholder: Option<&str>,
-    placeholder_style: Style,
-    default_style: Style,
-    max_width: usize,
-    viewport_height: usize,
-    _loading: bool,
-    show_cursor: bool,
-) -> Vec<Line<'static>> {
+pub fn render_multiline_with_cursor(options: TextAreaRenderOptions<'_>) -> Vec<Line<'static>> {
+    let TextAreaRenderOptions {
+        text,
+        cursor,
+        selection_range,
+        placeholder,
+        styles:
+            TextAreaStyles {
+                cursor: cursor_style,
+                selection: selection_style,
+                placeholder: placeholder_style,
+                base: default_style,
+            },
+        max_width,
+        viewport_height,
+        show_cursor,
+    } = options;
     let viewport_height = viewport_height.max(1);
 
     if text.is_empty() {

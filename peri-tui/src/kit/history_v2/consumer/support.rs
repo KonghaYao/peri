@@ -39,7 +39,7 @@ impl HistoryV2WindowIdentity {
 /// 响应由 `HistoryV2BodyBinding` 的 window/snapshot/bodyRef 校验。requestKey 与
 /// 页/seek/open/initial 共用同一分配器，并且与入队在同一临界区内完成。
 pub(crate) fn submit_body(
-    binding: &crate::kit::history_detail_binding::HistoryV2BodyBinding,
+    binding: &crate::kit::history_window::HistoryV2BodyBinding,
     offset: u64,
     max_bytes: u32,
 ) -> Result<Submit<super::super::request::HistoryV2BodyRequest>, outbound::SubmitError> {

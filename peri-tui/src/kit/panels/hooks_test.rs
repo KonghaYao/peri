@@ -1,7 +1,7 @@
 //! HooksPanel 底部提示与真实动作的一致性回归。
 
-use crate::kit::panels::shared::list::ListMetrics;
-use crate::kit::panels::shared::list::ListViewport;
+use peri_tui_components::list::ListMetrics;
+use peri_tui_components::list::ListViewport;
 use ratatui_kit::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
 use ratatui_kit::ratatui::buffer::Buffer;

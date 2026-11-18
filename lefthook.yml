@@ -39,6 +39,10 @@ pre-commit:
     layer-imports:
       run: bash scripts/check-layer-imports.sh
 
+    tui-components:
+      run: |
+        python3 scripts/test-tui-components.py && python3 scripts/check-tui-components.py
+
     # doc-tests 不在 pre-commit 中运行——cargo check/clippy 不编译 doc test，
     # 显式验证用: ./scripts/cargo-rmcp-patched.sh test --locked --workspace --doc
 

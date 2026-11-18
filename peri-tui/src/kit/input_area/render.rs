@@ -1,4 +1,5 @@
 use fluent_bundle::FluentValue;
+use peri_tui_components::textarea::{TextAreaRenderOptions, TextAreaStyles};
 use unicode_width::UnicodeWidthStr;
 
 use ratatui_kit::ratatui::style::Color;
@@ -271,7 +272,6 @@ pub(super) fn popup_height(item_count: usize) -> u16 {
     (item_count.max(1) as u16 + 2).min(THEME_ATOM.state().read().component.popup.inline_height)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_multiline_with_cursor_for_themed(
     text: &str,
     cursor: usize,
@@ -279,7 +279,6 @@ pub(super) fn render_multiline_with_cursor_for_themed(
     placeholder: Option<&str>,
     max_width: usize,
     viewport_height: usize,
-    loading: bool,
     show_cursor: bool,
 ) -> Vec<ratatui::text::Line<'static>> {
     let tokens = input_tokens();
@@ -293,20 +292,21 @@ pub(super) fn render_multiline_with_cursor_for_themed(
         .add_modifier(Modifier::DIM);
     let placeholder_style = Style::default().fg(tokens.placeholder);
     let default_style = Style::default().bg(Color::Reset);
-    crate::components::textarea::render_multiline_with_cursor(
+    peri_tui_components::textarea::render_multiline_with_cursor(TextAreaRenderOptions {
         text,
         cursor,
-        cursor_style,
         selection_range,
-        selection_style,
         placeholder,
-        placeholder_style,
-        default_style,
+        styles: TextAreaStyles {
+            cursor: cursor_style,
+            selection: selection_style,
+            placeholder: placeholder_style,
+            base: default_style,
+        },
         max_width,
         viewport_height,
-        loading,
         show_cursor,
-    )
+    })
 }
 
 use crate::kit::atoms::PendingAttachment;

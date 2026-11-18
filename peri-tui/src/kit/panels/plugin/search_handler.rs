@@ -1,4 +1,4 @@
-use crate::components::textarea::TextAreaState;
+use peri_tui_components::textarea::TextAreaState;
 
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
@@ -54,7 +54,7 @@ pub(super) fn handle_search_event(
             return EventResult::Ignored;
         }
         if let Some(area) = area
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
         {
             // add_marketplace 输入模式：点击仅消费（文本输入，无动作）
             if *add_marketplace_active.read() {

@@ -2,7 +2,7 @@
 
 use super::{DiscoverDetailAction, PluginSearchResultItem, SearchState};
 use crate::application::operations::{CompletionGate, OperationScope, OperationTicket};
-use crate::components::textarea::TextAreaState;
+use peri_tui_components::textarea::TextAreaState;
 
 pub(super) struct DiscoverState {
     pub editor: TextAreaState,

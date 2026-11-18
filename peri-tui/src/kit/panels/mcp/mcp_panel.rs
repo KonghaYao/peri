@@ -20,13 +20,13 @@ use std::time::Duration;
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panels::shared::list::ListMetrics;
-use crate::kit::panels::shared::list::ListViewport;
 use crate::kit::slash_completion::SlashActionKind;
 use crate::kit::slash_projection::SlashCommandEntry;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::list::ListMetrics;
+use peri_tui_components::list::ListViewport;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEventKind;
@@ -407,7 +407,7 @@ pub(super) fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResu
 
     // ── 鼠标 ──
     if let Event::Mouse(mouse) = &event {
-        let Some((row, col)) = crate::kit::panel_mouse::left_down(mouse) else {
+        let Some((row, col)) = peri_tui_components::panel_mouse::left_down(mouse) else {
             return EventResult::Ignored;
         };
         let Some(area) = ctx.area else {
@@ -417,9 +417,12 @@ pub(super) fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResu
         if *ctx.view.read() != McpView::Detail {
             // 列表视图：区域内左键点击 = 选中该项并执行 Enter（click as enter）。
             // 命中布局与绘制窗口同源（viewport）。
-            if !crate::kit::panel_mouse::is_scrollbar_column(mouse, area)
-                && let Some(idx) =
-                    crate::kit::panel_mouse::hit_item(mouse, area, ctx.viewport.hit_layout())
+            if !peri_tui_components::panel_mouse::is_scrollbar_column(mouse, area)
+                && let Some(idx) = peri_tui_components::panel_mouse::hit_item(
+                    mouse,
+                    area,
+                    ctx.viewport.hit_layout(),
+                )
                 && let Some(summary) = ctx.servers.get(idx)
             {
                 *ctx.selected.write() = idx;
@@ -550,13 +553,13 @@ pub(super) fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResu
         }
         KeyCode::Up => {
             let mut s = ctx.selected.write();
-            *s = crate::kit::list_nav::previous_selection(*s);
+            *s = peri_tui_components::list_nav::previous_selection(*s);
         }
         KeyCode::Down => {
             let mut s = ctx.selected.write();
             let count = MCP_SERVERS.state().read().len();
             if count > 0 {
-                *s = crate::kit::list_nav::next_selection(*s, count);
+                *s = peri_tui_components::list_nav::next_selection(*s, count);
             }
         }
         _ => {}

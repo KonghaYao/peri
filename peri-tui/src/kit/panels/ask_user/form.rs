@@ -1,9 +1,9 @@
 //! One owner for question focus, selections, and the active text editor.
 //! Decisions return effects; channel publication and popup ownership stay in the panel.
 
-use crate::components::textarea::TextAreaState;
 use crate::kit::acp_types::PendingInteraction;
-use crate::kit::list_nav::ListNavAction;
+use peri_tui_components::list_nav::ListNavAction;
+use peri_tui_components::textarea::TextAreaState;
 
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
@@ -82,7 +82,7 @@ impl FormState {
     pub fn accepts_key(&self, key: &KeyEvent, pending: Option<&AskUser>) -> bool {
         self.is_typing
             || (key.modifiers, key.code) == (KeyModifiers::NONE, KeyCode::Char(' '))
-            || match crate::kit::list_nav::classify_list_nav(key) {
+            || match peri_tui_components::list_nav::classify_list_nav(key) {
                 Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) => {
                     pending.is_some_and(|p| !p.questions.is_empty())
                 }
@@ -110,7 +110,10 @@ impl FormState {
             }
             return FormOutcome::Consumed;
         }
-        self.navigate(crate::kit::list_nav::classify_list_nav(key), pending)
+        self.navigate(
+            peri_tui_components::list_nav::classify_list_nav(key),
+            pending,
+        )
     }
 
     fn navigate(
@@ -123,7 +126,7 @@ impl FormState {
             Some(ListNavAction::MoveUp) => {
                 if !self.is_typing {
                     self.focused_option =
-                        crate::kit::list_nav::previous_selection(self.focused_option);
+                        peri_tui_components::list_nav::previous_selection(self.focused_option);
                 }
             }
             Some(ListNavAction::MoveDown) => {
@@ -133,8 +136,10 @@ impl FormState {
                         .map(|q| q.options.len() + 1)
                         .unwrap_or(0);
                     if limit > 0 {
-                        self.focused_option =
-                            crate::kit::list_nav::next_selection(self.focused_option, limit);
+                        self.focused_option = peri_tui_components::list_nav::next_selection(
+                            self.focused_option,
+                            limit,
+                        );
                         if self.focused_option == limit.saturating_sub(1) {
                             self.begin_custom_input(self.focused);
                         }
@@ -144,9 +149,9 @@ impl FormState {
             Some(ListNavAction::CycleForward | ListNavAction::CycleBackward) if count > 0 => {
                 if !self.is_typing {
                     self.focused = if action == Some(ListNavAction::CycleForward) {
-                        crate::kit::list_nav::cycle_next(self.focused, count)
+                        peri_tui_components::list_nav::cycle_next(self.focused, count)
                     } else {
-                        crate::kit::list_nav::cycle_previous(self.focused, count)
+                        peri_tui_components::list_nav::cycle_previous(self.focused, count)
                     };
                     self.focused_option = self
                         .answers

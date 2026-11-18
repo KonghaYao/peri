@@ -7,6 +7,7 @@
 //! 通过 panel_shell! 渲染。
 
 use super::form;
+use peri_tui_components::textarea::{TextAreaRenderOptions, TextAreaStyles};
 
 use crate::app::panel_types::PanelKind;
 
@@ -27,9 +28,9 @@ use ratatui_kit::ratatui::text::Line;
 use crate::kit::acp_types::PendingInteraction;
 use crate::kit::ask_user_action::AskUserResponseAction;
 
-use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::panel_registry;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::panel_mouse::AreaTracker;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
@@ -112,7 +113,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
                     return EventResult::Consumed;
                 }
-                if crate::kit::panel_mouse::is_scrollbar_column(&mouse, area) {
+                if peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area) {
                     return EventResult::Consumed;
                 }
                 // Typing 模式：点击仅消费（光标定位不在本次范围）
@@ -378,7 +379,7 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if typing {
                     // Typing 模式：使用 TextArea 渲染
                     let st_read = &form_read.typing_state;
-                    let wrap = crate::components::textarea::wrap_text(
+                    let wrap = peri_tui_components::textarea::wrap_text(
                         &st_read.text,
                         st_read.cursor,
                         wrap_width,
@@ -393,19 +394,22 @@ pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let placeholder_style = Style::default().fg(semantic.text.dim);
                     let default_style = Style::default().bg(Color::Reset);
 
-                    let typed_lines = crate::components::textarea::render_multiline_with_cursor(
-                        &st_read.text,
-                        st_read.cursor,
-                        cursor_style,
-                        None,
-                        cursor_style,
-                        Some(&i18n::tr("ask-user-placeholder")),
-                        placeholder_style,
-                        default_style,
-                        wrap_width,
-                        viewport,
-                        false,
-                        true,
+                    let typed_lines = peri_tui_components::textarea::render_multiline_with_cursor(
+                        TextAreaRenderOptions {
+                            text: &st_read.text,
+                            cursor: st_read.cursor,
+                            selection_range: None,
+                            placeholder: Some(&i18n::tr("ask-user-placeholder")),
+                            styles: TextAreaStyles {
+                                cursor: cursor_style,
+                                selection: cursor_style,
+                                placeholder: placeholder_style,
+                                base: default_style,
+                            },
+                            max_width: wrap_width,
+                            viewport_height: viewport,
+                            show_cursor: true,
+                        },
                     );
                     for line in typed_lines {
                         // 保留 textarea 返回的 Span 级样式（含光标高亮），仅前置缩进

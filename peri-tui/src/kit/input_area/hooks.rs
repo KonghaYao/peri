@@ -1,5 +1,4 @@
 use ratatui_kit::prelude::*;
-use ratatui_kit::ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 /// 在 post_component_draw 时修复 CJK 续接 cell 的 diff 不可见性。
@@ -49,18 +48,5 @@ impl Hook for CjkGhostFix {
                 }
             }
         }
-    }
-}
-
-/// 追踪 composer 段落区域，供鼠标点击→光标定位使用。
-/// 仿照 MsgAreaTracker 模式：rect 是值类型，每帧 pre_component_draw 更新后在
-/// handler 注册前取出副本传给闭包。
-pub(super) struct AreaTracker {
-    pub(super) rect: Option<Rect>,
-}
-
-impl Hook for AreaTracker {
-    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        self.rect = Some(drawer.area);
     }
 }

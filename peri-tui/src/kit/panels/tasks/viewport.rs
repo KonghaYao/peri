@@ -125,10 +125,13 @@ impl TasksViewport {
         counts: SegmentCounts,
         selected: usize,
     ) -> Self {
-        let selected = crate::kit::list_nav::clamp_selection(selected, counts.total());
+        let selected = peri_tui_components::list_nav::clamp_selection(selected, counts.total());
         let capacity = (content_rows as usize).saturating_sub(fixed_rows(counts));
-        let scroll_start =
-            crate::kit::list_nav::scroll_start_for_selected(selected, counts.total(), capacity);
+        let scroll_start = peri_tui_components::list_nav::scroll_start_for_selected(
+            selected,
+            counts.total(),
+            capacity,
+        );
         let mut rows = build_rows(counts, capacity, scroll_start);
         // 面板矮于固定行时按预算截行：绘制本来也会被裁掉，截断保证行表不会给出
         // 屏幕外的命中（`panel_mouse::hit_row` 同款「越界不可点」语义）。
@@ -183,7 +186,7 @@ impl TasksViewport {
     /// 行号，而本面板的段标题与段间空行把任务行切成三段，同一算式会把空行算成任务行。
     /// 行表长度已被内容行预算截断，因此行号越界（含上下边框）自然落空。
     pub(super) fn hit_item(&self, mouse: &MouseEvent, area: Rect) -> Option<usize> {
-        let (row, _column) = crate::kit::panel_mouse::left_down(mouse)?;
+        let (row, _column) = peri_tui_components::panel_mouse::left_down(mouse)?;
         // 顶部边框行不可点
         let visual = row.checked_sub(area.y.saturating_add(1))?;
         self.item_at_row(visual as usize)

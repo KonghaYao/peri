@@ -27,11 +27,11 @@ use ratatui_kit::ratatui::widgets::Paragraph;
 use crate::i18n;
 
 use crate::kit::inline_nav::InlineNavAction;
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panel_mouse::ListLayout;
 use crate::kit::slash_projection::ArgsSchema;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::ListLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashActionKind {
@@ -191,7 +191,7 @@ pub fn SlashCompletion(
             // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
             if let Event::Mouse(mouse) = event {
                 if let Some(area) = area
-                    && let Some(idx) = crate::kit::panel_mouse::hit_item(
+                    && let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                         &mouse,
                         area,
                         ListLayout {

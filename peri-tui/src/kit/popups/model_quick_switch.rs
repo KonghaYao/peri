@@ -36,9 +36,9 @@ use ratatui_kit::ratatui::widgets::Block;
 use ratatui_kit::ratatui::widgets::Borders;
 use ratatui_kit::ratatui::widgets::Paragraph;
 
-use crate::kit::list_nav::ListNavAction;
 use crate::kit::mouse_router;
 use crate::kit::panels::model::PROFILE_KEYS;
+use peri_tui_components::list_nav::ListNavAction;
 
 use peri_theme::atoms::THEME_ATOM;
 use unicode_width::UnicodeWidthStr;
@@ -239,15 +239,15 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
         if let Event::Key(key) = event
             && key.kind == KeyEventKind::Press
         {
-            match crate::kit::list_nav::classify_list_nav(&key) {
+            match peri_tui_components::list_nav::classify_list_nav(&key) {
                 Some(ListNavAction::MoveUp) => {
                     let mut s = sel.write();
-                    *s = crate::kit::list_nav::previous_selection(*s);
+                    *s = peri_tui_components::list_nav::previous_selection(*s);
                     return EventResult::Consumed;
                 }
                 Some(ListNavAction::MoveDown) => {
                     let mut s = sel.write();
-                    *s = crate::kit::list_nav::next_selection(*s, PROFILE_KEYS.len());
+                    *s = peri_tui_components::list_nav::next_selection(*s, PROFILE_KEYS.len());
                     return EventResult::Consumed;
                 }
                 Some(ListNavAction::Confirm) => {

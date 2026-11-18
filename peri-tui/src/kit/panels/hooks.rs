@@ -22,11 +22,11 @@ use ratatui_kit::ratatui::widgets::Paragraph;
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panels::shared::list::ListMetrics;
-use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::list::ListMetrics;
+use peri_tui_components::list::ListViewport;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 /// Map event name to human-readable description。
 fn event_description(event: &str) -> String {
@@ -205,9 +205,9 @@ fn handle_hooks_event(
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = area
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
             && let Some(idx) =
-                crate::kit::panel_mouse::hit_item(&mouse, area, viewport.hit_layout())
+                peri_tui_components::panel_mouse::hit_item(&mouse, area, viewport.hit_layout())
         {
             *selected.write() = idx;
             close_panel();
@@ -233,13 +233,13 @@ fn handle_hooks_event(
         }
         KeyCode::Up => {
             let mut s = selected.write();
-            *s = crate::kit::list_nav::previous_selection(*s);
+            *s = peri_tui_components::list_nav::previous_selection(*s);
         }
         KeyCode::Down => {
             let mut s = selected.write();
             let count = HOOK_LIST.state().read().len();
             if count > 0 {
-                *s = crate::kit::list_nav::next_selection(*s, count);
+                *s = peri_tui_components::list_nav::next_selection(*s, count);
             }
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {

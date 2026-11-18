@@ -8,7 +8,7 @@
 
 use crate::app::panel_types::PanelKind;
 
-use crate::kit::panels::shared::list::ListViewport;
+use peri_tui_components::list::ListViewport;
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEventKind;
@@ -195,8 +195,11 @@ pub(super) fn handle_model_event_with(
                 }
             }
             if mouse.column < left_column_end(area)
-                && let Some(idx) =
-                    crate::kit::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
+                && let Some(idx) = peri_tui_components::panel_mouse::hit_item(
+                    &mouse,
+                    area,
+                    ctx.viewport.hit_layout(),
+                )
             {
                 *ctx.selected_alias.write() = PROFILE_KEYS[idx].to_owned();
                 switch_alias(idx);
@@ -236,14 +239,14 @@ pub(super) fn handle_model_event_with(
         KeyCode::Up => {
             if *ctx.right_focus.read() {
                 let mut c = ctx.right_cursor.write();
-                *c = crate::kit::list_nav::previous_selection(*c);
+                *c = peri_tui_components::list_nav::previous_selection(*c);
             } else {
                 // 从面板选中档位出发上移（与渲染高亮一致）
                 let idx = PROFILE_KEYS
                     .iter()
                     .position(|k| *k == current_alias)
                     .unwrap_or(1);
-                let next = crate::kit::list_nav::previous_selection(idx);
+                let next = peri_tui_components::list_nav::previous_selection(idx);
                 *ctx.selected_alias.write() = PROFILE_KEYS[next].to_owned();
                 switch_alias(next);
                 *ctx.render_version.write() += 1;
@@ -252,14 +255,14 @@ pub(super) fn handle_model_event_with(
         KeyCode::Down => {
             if *ctx.right_focus.read() {
                 let mut c = ctx.right_cursor.write();
-                *c = crate::kit::list_nav::next_selection(*c, FIELD_COUNT);
+                *c = peri_tui_components::list_nav::next_selection(*c, FIELD_COUNT);
             } else {
                 // 从面板选中档位出发下移（与渲染高亮一致）
                 let idx = PROFILE_KEYS
                     .iter()
                     .position(|k| *k == current_alias)
                     .unwrap_or(1);
-                let next = crate::kit::list_nav::next_selection(idx, PROFILE_KEYS.len());
+                let next = peri_tui_components::list_nav::next_selection(idx, PROFILE_KEYS.len());
                 *ctx.selected_alias.write() = PROFILE_KEYS[next].to_owned();
                 switch_alias(next);
                 *ctx.render_version.write() += 1;

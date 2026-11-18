@@ -16,10 +16,10 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEventKind;
@@ -399,7 +399,7 @@ fn hit_item_at(content_row: u16, spans: &[ItemSpan]) -> Option<usize> {
 fn handle_agent_event(event: Event, ctx: &AgentEventCtx) -> EventResult {
     if let Event::Mouse(mouse) = &event {
         // 滚轮/拖拽让给面板滚轮仲裁（panel_scroll::register_panel_scroll）
-        let Some((row, _col)) = crate::kit::panel_mouse::left_down(mouse) else {
+        let Some((row, _col)) = peri_tui_components::panel_mouse::left_down(mouse) else {
             return EventResult::Ignored;
         };
         let Some(area) = ctx.area else {
@@ -407,7 +407,7 @@ fn handle_agent_event(event: Event, ctx: &AgentEventCtx) -> EventResult {
         };
         // 顶部边框行与滚动条列不参与列表命中
         if row < area.y.saturating_add(1)
-            || crate::kit::panel_mouse::is_scrollbar_column(mouse, area)
+            || peri_tui_components::panel_mouse::is_scrollbar_column(mouse, area)
         {
             return EventResult::Consumed;
         }
@@ -433,15 +433,15 @@ fn handle_agent_event(event: Event, ctx: &AgentEventCtx) -> EventResult {
         KeyCode::Enter => close_panel(),
         KeyCode::Up => {
             let mut c = ctx.cursor.write();
-            *c = crate::kit::list_nav::clamp_selection(
-                crate::kit::list_nav::previous_selection(*c),
+            *c = peri_tui_components::list_nav::clamp_selection(
+                peri_tui_components::list_nav::previous_selection(*c),
                 ctx.item_count,
             );
         }
         KeyCode::Down => {
             let mut c = ctx.cursor.write();
-            *c = crate::kit::list_nav::next_selection(
-                crate::kit::list_nav::clamp_selection(*c, ctx.item_count),
+            *c = peri_tui_components::list_nav::next_selection(
+                peri_tui_components::list_nav::clamp_selection(*c, ctx.item_count),
                 ctx.item_count,
             );
         }

@@ -60,7 +60,7 @@ fn window_and_hit_layout_agree() {
             let visual_row = layout.header_rows + (slot as u16) * layout.item_rows;
             let mouse_row = rect.y + 1 + visual_row;
             assert_eq!(
-                crate::kit::panel_mouse::hit_row(mouse_row, rect, layout),
+                crate::panel_mouse::hit_row(mouse_row, rect, layout),
                 Some(*expected),
                 "第 {slot} 个可见槽位命中索引应与 window 一致"
             );
@@ -76,21 +76,64 @@ fn row_beyond_rendered_items_does_not_hit() {
     let layout = vp.hit_layout();
     let third_slot_row = rect.y + 1 + layout.header_rows + 2 * layout.item_rows;
     assert_eq!(
-        crate::kit::panel_mouse::hit_row(third_slot_row, rect, layout),
+        crate::panel_mouse::hit_row(third_slot_row, rect, layout),
         None
     );
 }
 
 #[test]
-fn first_frame_prediction_is_not_empty() {
-    // 首帧 AreaTracker 未测量（Rect::default()）：不能按 0 行渲染空面板
-    let predicted = super::content_rows(None, 30);
-    assert_eq!(predicted, crate::kit::panel_overlay::panel_content_rows(30));
-    assert!(predicted > 0);
+fn zero_row_height_normalizes_for_both_drawing_and_hits() {
+    let items: Vec<usize> = (0..20).collect();
+    let rect = area(8);
+    let viewport = ListViewport::for_content_rows(6, ListMetrics::new(1, 0, 1), 20, 2);
+    let layout = viewport.hit_layout();
+    let visible: Vec<usize> = viewport.window(&items).map(|(index, _)| index).collect();
+    assert_eq!(visible, vec![1, 2, 3, 4]);
+    assert_eq!(layout.item_rows, 1);
+    for (slot, expected) in visible.into_iter().enumerate() {
+        let row = rect.y + 1 + layout.header_rows + slot as u16;
+        assert_eq!(
+            crate::panel_mouse::hit_row(row, rect, layout),
+            Some(expected)
+        );
+    }
+    let footer_row = rect.y + 1 + layout.header_rows + layout.visible_items;
+    assert_eq!(crate::panel_mouse::hit_row(footer_row, rect, layout), None);
 }
 
 #[test]
-fn measured_height_wins_over_prediction() {
-    let measured = Some(area(18));
-    assert_eq!(super::content_rows(measured, 30), 16);
+fn oversized_header_and_footer_leave_no_drawable_or_hittable_rows() {
+    for (header_rows, footer_rows) in [(u16::MAX, 1), (1, u16::MAX), (u16::MAX, u16::MAX)] {
+        let viewport = ListViewport::for_content_rows(
+            12,
+            ListMetrics::new(header_rows, 1, footer_rows),
+            10,
+            0,
+        );
+        assert_eq!(viewport.visible_items, 0);
+        assert_eq!(viewport.window(&[(); 10]).count(), 0);
+        let rect = area(14);
+        for row in rect.y..rect.y + rect.height {
+            assert_eq!(
+                crate::panel_mouse::hit_row(row, rect, viewport.hit_layout()),
+                None
+            );
+        }
+    }
+}
+
+#[test]
+fn large_list_indices_survive_hit_testing_without_terminal_coordinate_truncation() {
+    let items = vec![(); 70_010];
+    let rect = area(12);
+    let viewport =
+        ListViewport::for_content_rows(10, ListMetrics::new(0, 1, 0), items.len(), 70_000);
+    assert!(viewport.scroll_start > usize::from(u16::MAX));
+    for (slot, (expected, _)) in viewport.window(&items).enumerate() {
+        let row = rect.y + 1 + slot as u16;
+        assert_eq!(
+            crate::panel_mouse::hit_row(row, rect, viewport.hit_layout()),
+            Some(expected),
+        );
+    }
 }

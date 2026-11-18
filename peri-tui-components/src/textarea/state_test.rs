@@ -1,5 +1,6 @@
 use super::CharCategory;
 use super::TextAreaState;
+use super::{TextAreaRenderOptions, TextAreaStyles};
 use ratatui::style::{Color, Style};
 
 #[test]
@@ -107,20 +108,21 @@ fn ph_style() -> Style {
 
 #[test]
 fn test_render_multiline_empty_shows_cursor() {
-    let lines = super::render_multiline_with_cursor(
-        "",
-        0,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        1,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "",
+        cursor: 0,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 1,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 1);
     // 空态：单行，光标为反色 space（字符反色风格）
     let spans = &lines[0].spans;
@@ -129,43 +131,49 @@ fn test_render_multiline_empty_shows_cursor() {
 }
 
 #[test]
-fn test_render_multiline_empty_loading_shows_cursor() {
-    // loading + empty + focused 应显示光标（show_cursor=true 优先于 loading）
-    let lines = super::render_multiline_with_cursor(
-        "",
-        0,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        1,
-        true,
-        true,
-    );
+fn test_render_multiline_empty_unfocused_has_no_cursor() {
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "",
+        cursor: 0,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 1,
+        show_cursor: false,
+    });
     assert_eq!(lines.len(), 1);
-    assert!(!lines[0].spans.is_empty(), "loading 时空文本应显示光标");
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style == Style::default())
+    );
 }
 
 #[test]
 fn test_render_multiline_cjk_cursor_mid_line() {
     // "你好世界" (4 CJK chars, 8 display cols), cursor 在位置 2（"好"之后即"世"上）
-    let lines = super::render_multiline_with_cursor(
-        "你好世界",
-        2,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "你好世界",
+        cursor: 2,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 1);
     // spans: [Span("你好"), Span("世", cursor_style), Span("界")]
     assert_eq!(lines[0].spans.len(), 3);
@@ -181,20 +189,21 @@ fn test_render_multiline_cjk_cursor_mid_line() {
 #[test]
 fn test_render_multiline_cjk_cursor_at_start() {
     // "你好", cursor 在位置 0（"你"上）
-    let lines = super::render_multiline_with_cursor(
-        "你好",
-        0,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "你好",
+        cursor: 0,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 1);
     // spans: [Span("你", cursor_style), Span("好")]
     assert_eq!(lines[0].spans.len(), 2);
@@ -208,20 +217,21 @@ fn test_render_multiline_cjk_cursor_at_start() {
 #[test]
 fn test_render_multiline_cjk_cursor_at_end() {
     // "你好", cursor 在位置 2（末尾）
-    let lines = super::render_multiline_with_cursor(
-        "你好",
-        2,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "你好",
+        cursor: 2,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 1);
     // spans: [Span("你好"), Span(" ", cursor_style)]
     assert_eq!(lines[0].spans.len(), 2);
@@ -232,20 +242,21 @@ fn test_render_multiline_cjk_cursor_at_end() {
 #[test]
 fn test_render_multiline_cjk_cursor_second_line() {
     // "abc\n你好", cursor 在位置 5（第二行"好"上）
-    let lines = super::render_multiline_with_cursor(
-        "abc\n你好",
-        5,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "abc\n你好",
+        cursor: 5,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 2);
     // 第一行无光标
     assert_eq!(lines[0].spans.len(), 1);
@@ -270,20 +281,21 @@ fn test_display_width_before_cjk() {
 
 #[test]
 fn test_render_multiline_splits_newlines() {
-    let lines = super::render_multiline_with_cursor(
-        "a\nb\nc",
-        0,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "a\nb\nc",
+        cursor: 0,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 3);
 }
 
@@ -484,20 +496,21 @@ fn test_delete_forward_at_line_end_merges_next() {
 
 #[test]
 fn test_render_selection_single_line() {
-    let lines = super::render_multiline_with_cursor(
-        "hello world",
-        0,
-        cursor_style(),
-        Some((0, 5)),
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "hello world",
+        cursor: 0,
+        selection_range: Some((0, 5)),
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 1);
     // 应该有带 bg=DarkGray 的 Span（选区部分）
     let has_selection_bg = lines[0]
@@ -509,20 +522,21 @@ fn test_render_selection_single_line() {
 
 #[test]
 fn test_render_selection_none_renders_normally() {
-    let lines = super::render_multiline_with_cursor(
-        "hello",
-        0,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        true,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "hello",
+        cursor: 0,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: true,
+    });
     assert_eq!(lines.len(), 1);
     // 无选区时，不应有 DarkGray bg span
     let has_dark_bg = lines[0]
@@ -535,20 +549,21 @@ fn test_render_selection_none_renders_normally() {
 #[test]
 fn test_render_show_cursor_false_no_cursor_highlight() {
     // show_cursor=false：光标位置字符不应用 cursor_style，无行尾 styled space
-    let lines = super::render_multiline_with_cursor(
-        "hello",
-        2,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        12,
-        12,
-        false,
-        false,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "hello",
+        cursor: 2,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 12,
+        show_cursor: false,
+    });
     assert_eq!(lines.len(), 1);
     // 所有 span 都应是默认 style（无 cursor_style 高亮）
     for span in &lines[0].spans {
@@ -563,20 +578,21 @@ fn test_render_show_cursor_false_no_cursor_highlight() {
 #[test]
 fn test_render_show_cursor_false_empty_with_placeholder() {
     // show_cursor=false + 空文本 + placeholder：渲染占位文本，无光标 space
-    let lines = super::render_multiline_with_cursor(
-        "",
-        0,
-        cursor_style(),
-        None,
-        sel_style(),
-        Some("输入消息..."),
-        ph_style(),
-        Style::default(),
-        12,
-        1,
-        false,
-        false,
-    );
+    let lines = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "",
+        cursor: 0,
+        selection_range: None,
+        placeholder: Some("输入消息..."),
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 12,
+        viewport_height: 1,
+        show_cursor: false,
+    });
     assert_eq!(lines.len(), 1);
     // 第一个 span 是 placeholder 文本（作为当前行显示的 placeholder 不被 cursor_style 干扰）
     // 不应该有 cursor_style 的 space
@@ -661,36 +677,38 @@ fn test_cjk_delete_no_cursor_ghost() {
     let ds = Style::default().bg(Color::Black);
 
     // 模拟：输入 "你好世界"，cursor 在位置 1（'好' 上）
-    let _before = super::render_multiline_with_cursor(
-        "你好世界",
-        1,
-        cs,
-        None,
-        ss,
-        None,
-        ps,
-        ds,
-        12,
-        3,
-        false,
-        true,
-    );
+    let _before = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "你好世界",
+        cursor: 1,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cs,
+            selection: ss,
+            placeholder: ps,
+            base: ds,
+        },
+        max_width: 12,
+        viewport_height: 3,
+        show_cursor: true,
+    });
 
     // 模拟：删除 '你' 后，text="好世界"，cursor 移到位置 0（'好' 上）
-    let after = super::render_multiline_with_cursor(
-        "好世界",
-        0,
-        cs,
-        None,
-        ss,
-        None,
-        ps,
-        ds,
-        12,
-        3,
-        false,
-        true,
-    );
+    let after = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: "好世界",
+        cursor: 0,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cs,
+            selection: ss,
+            placeholder: ps,
+            base: ds,
+        },
+        max_width: 12,
+        viewport_height: 3,
+        show_cursor: true,
+    });
 
     // 旧光标在 "好"（before 中 index 1）上，bg 应为 CURSOR_BG
     // 新光标在 "好"（after 中 index 0）上，bg 也应为 CURSOR_BG

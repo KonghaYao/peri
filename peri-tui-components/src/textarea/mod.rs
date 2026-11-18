@@ -7,7 +7,8 @@ pub use self::text_area as widget;
 mod word;
 pub use history::{History, Snapshot};
 pub use render::{
-    VisualLine, WrapResult, display_width_before, render_multiline_with_cursor, wrap_text,
+    TextAreaRenderOptions, TextAreaStyles, VisualLine, WrapResult, display_width_before,
+    render_multiline_with_cursor, wrap_text,
 };
 pub use state::{TextAreaState, YankText};
 pub use widget::TextArea;

@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use parking_lot::RwLock;
 
-use crate::components::textarea::TextAreaState;
+use peri_tui_components::textarea::TextAreaState;
 
 use crate::kit::slash_completion::{SlashActionKind, SlashCompletionItem};
 
@@ -22,7 +22,7 @@ pub(super) fn reset_slash_popup() {
 
 pub(super) fn replace_last_mention(state: &mut TextAreaState, replacement: &str) {
     if let Some(at_byte) = state.text.rfind('@') {
-        let before = crate::components::textarea::History::snapshot(state);
+        let before = peri_tui_components::textarea::History::snapshot(state);
         let after_at_byte = at_byte + 1;
         let keep_until_byte = state.text[after_at_byte..]
             .char_indices()

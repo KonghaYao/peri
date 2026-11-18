@@ -360,7 +360,7 @@ pub(crate) struct MountedPanel {
     pub detail_plugin: State<Option<super::super::InstalledIdentity>>,
     pub marketplace_detail: State<Option<super::super::MarketplaceIdentity>>,
     pub marketplace_detail_action: State<usize>,
-    pub add_marketplace_input: State<crate::components::textarea::TextAreaState>,
+    pub add_marketplace_input: State<peri_tui_components::textarea::TextAreaState>,
     pub add_marketplace_active: State<bool>,
 }
 

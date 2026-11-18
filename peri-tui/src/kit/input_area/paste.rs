@@ -19,8 +19,8 @@ use base64::Engine;
 use fluent_bundle::FluentValue;
 use ratatui_kit::prelude::{EventResult, State};
 
-use crate::components::textarea::TextAreaState;
 use crate::i18n;
+use peri_tui_components::textarea::TextAreaState;
 
 use crate::kit::clipboard;
 use crate::kit::image_safety::MAX_IMAGE_BYTES;

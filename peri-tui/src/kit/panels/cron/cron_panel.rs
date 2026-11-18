@@ -22,11 +22,11 @@ use ratatui_kit::ratatui::widgets::Paragraph;
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panels::shared::list::ListMetrics;
-use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::list::ListMetrics;
+use peri_tui_components::list::ListViewport;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 /// cron 动作方法名（host 侧 ACP 方法）。
 pub(super) const CRON_TOGGLE_METHOD: &str = "cron/toggle";
@@ -300,9 +300,9 @@ pub(super) fn handle_cron_event_with(
         // 确认删除模式：点击不触发 toggle（防止误删），仅消费事件
         if ctx.confirm_delete.read().is_none()
             && let Some(area) = ctx.area
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
             && let Some(idx) =
-                crate::kit::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
+                peri_tui_components::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
         {
             *ctx.selected.write() = idx;
             // 目标取自与命中布局同一份列表快照，避免命中行与待执行目标错位
@@ -364,12 +364,12 @@ pub(super) fn handle_cron_event_with(
         }
         KeyCode::Up => {
             let mut s = ctx.selected.write();
-            *s = crate::kit::list_nav::previous_selection(*s);
+            *s = peri_tui_components::list_nav::previous_selection(*s);
         }
         KeyCode::Down => {
             let mut s = ctx.selected.write();
             if !ctx.jobs.is_empty() {
-                *s = crate::kit::list_nav::next_selection(*s, ctx.jobs.len());
+                *s = peri_tui_components::list_nav::next_selection(*s, ctx.jobs.len());
             }
         }
         KeyCode::Enter | KeyCode::Char(' ') => {

@@ -16,9 +16,9 @@
 //! 若 `ACTIVE_PANEL` 为 Some，调用 `close_active_panel`；否则交由子组件。
 
 use crate::kit::atoms;
-use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::panel_registry;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Constraint;
 use ratatui_kit::ratatui::layout::Direction;

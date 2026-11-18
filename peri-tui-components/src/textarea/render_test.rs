@@ -1,3 +1,4 @@
+use super::{TextAreaRenderOptions, TextAreaStyles};
 use ratatui::style::{Color, Style};
 
 fn cursor_style() -> Style {
@@ -39,20 +40,21 @@ fn test_viewport_50_lines_cursor_at_25_returns_10_lines() {
     let cursor = line_starts[25] + 2;
     let viewport_height = 10;
 
-    let result = super::render_multiline_with_cursor(
-        &text,
+    let result = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: &text,
         cursor,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        80,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 80,
         viewport_height,
-        false,
-        true,
-    );
+        show_cursor: true,
+    });
 
     assert_eq!(
         result.len(),
@@ -93,20 +95,21 @@ fn test_viewport_cursor_at_last_line() {
     let cursor = line_starts[49] + 2;
     let viewport_height = 10;
 
-    let result = super::render_multiline_with_cursor(
-        &text,
+    let result = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: &text,
         cursor,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        80,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 80,
         viewport_height,
-        false,
-        true,
-    );
+        show_cursor: true,
+    });
 
     assert_eq!(result.len(), 10, "最后一行场景，窗口应返回 10 行");
 
@@ -130,20 +133,21 @@ fn test_viewport_cursor_at_first_line() {
     let cursor = line_starts[0] + 2;
     let viewport_height = 10;
 
-    let result = super::render_multiline_with_cursor(
-        &text,
+    let result = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: &text,
         cursor,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        80,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 80,
         viewport_height,
-        false,
-        true,
-    );
+        show_cursor: true,
+    });
 
     assert_eq!(result.len(), 10, "第一行场景，窗口应返回 10 行");
 
@@ -165,20 +169,21 @@ fn test_viewport_small_text_returns_all_lines() {
     let cursor = 8; // line1 的 'n' 位置: "line0\n"=6 chars, "li"=2 chars → 6+2=8
     let viewport_height = 10;
 
-    let result = super::render_multiline_with_cursor(
+    let result = super::render_multiline_with_cursor(TextAreaRenderOptions {
         text,
         cursor,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        80,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 80,
         viewport_height,
-        false,
-        true,
-    );
+        show_cursor: true,
+    });
 
     assert_eq!(
         result.len(),
@@ -196,20 +201,21 @@ fn test_viewport_cursor_centered_in_window() {
     let cursor = line_starts[15] + 2;
     let viewport_height = 10;
 
-    let result = super::render_multiline_with_cursor(
-        &text,
+    let result = super::render_multiline_with_cursor(TextAreaRenderOptions {
+        text: &text,
         cursor,
-        cursor_style(),
-        None,
-        sel_style(),
-        None,
-        ph_style(),
-        Style::default(),
-        80,
+        selection_range: None,
+        placeholder: None,
+        styles: TextAreaStyles {
+            cursor: cursor_style(),
+            selection: sel_style(),
+            placeholder: ph_style(),
+            base: Style::default(),
+        },
+        max_width: 80,
         viewport_height,
-        false,
-        true,
-    );
+        show_cursor: true,
+    });
 
     assert_eq!(result.len(), 10);
 
@@ -236,34 +242,36 @@ fn test_viewport_smooth_scroll_on_cursor_move() {
         let from = target[0];
         let to = target[1];
 
-        let result_from = super::render_multiline_with_cursor(
-            &text,
-            line_starts[from] + 2,
-            cursor_style(),
-            None,
-            sel_style(),
-            None,
-            ph_style(),
-            Style::default(),
-            80,
+        let result_from = super::render_multiline_with_cursor(TextAreaRenderOptions {
+            text: &text,
+            cursor: line_starts[from] + 2,
+            selection_range: None,
+            placeholder: None,
+            styles: TextAreaStyles {
+                cursor: cursor_style(),
+                selection: sel_style(),
+                placeholder: ph_style(),
+                base: Style::default(),
+            },
+            max_width: 80,
             viewport_height,
-            false,
-            true,
-        );
-        let result_to = super::render_multiline_with_cursor(
-            &text,
-            line_starts[to] + 2,
-            cursor_style(),
-            None,
-            sel_style(),
-            None,
-            ph_style(),
-            Style::default(),
-            80,
+            show_cursor: true,
+        });
+        let result_to = super::render_multiline_with_cursor(TextAreaRenderOptions {
+            text: &text,
+            cursor: line_starts[to] + 2,
+            selection_range: None,
+            placeholder: None,
+            styles: TextAreaStyles {
+                cursor: cursor_style(),
+                selection: sel_style(),
+                placeholder: ph_style(),
+                base: Style::default(),
+            },
+            max_width: 80,
             viewport_height,
-            false,
-            true,
-        );
+            show_cursor: true,
+        });
 
         // 两次渲染的窗口起始偏移差应为 1
         let first_text_from: String = result_from[0]

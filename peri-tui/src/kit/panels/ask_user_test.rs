@@ -224,7 +224,7 @@ fn test_wrap_text_zero_width_returns_original() {
 
 #[test]
 fn test_textarea_state_insert_and_retrieve() {
-    use crate::components::textarea::TextAreaState;
+    use peri_tui_components::textarea::TextAreaState;
     let mut state = TextAreaState::default();
     state.insert_char('h');
     state.insert_char('i');
@@ -233,7 +233,7 @@ fn test_textarea_state_insert_and_retrieve() {
 
 #[test]
 fn test_textarea_state_backspace_clears() {
-    use crate::components::textarea::TextAreaState;
+    use peri_tui_components::textarea::TextAreaState;
     let mut state = TextAreaState::default();
     state.insert_char('x');
     state.backspace();
@@ -242,7 +242,7 @@ fn test_textarea_state_backspace_clears() {
 
 #[test]
 fn test_textarea_state_replace_all_no_undo_resets() {
-    use crate::components::textarea::TextAreaState;
+    use peri_tui_components::textarea::TextAreaState;
     let mut state = TextAreaState::default();
     state.insert_str("old text");
     state.replace_all_no_undo("new".to_string());
@@ -251,7 +251,7 @@ fn test_textarea_state_replace_all_no_undo_resets() {
 
 #[test]
 fn test_textarea_state_delete_word_backward() {
-    use crate::components::textarea::TextAreaState;
+    use peri_tui_components::textarea::TextAreaState;
     let mut state = TextAreaState::default();
     state.insert_str("hello");
     state.cursor = state.text.len();

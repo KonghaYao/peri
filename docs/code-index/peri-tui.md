@@ -2,6 +2,12 @@
 
 更新：2026-11-17
 
+通用输入编辑、固定行高视口、导航与鼠标命中由 `peri-tui-components`
+提供，TUI 直接单向消费。组件 API 与使用示例见
+[`peri-tui-components/README.md`](../../peri-tui-components/README.md)。
+`panels/shared/list.rs` 仅保留应用的首帧高度策略；业务对象转换、主题解析、
+焦点路由及动作执行仍由 TUI 持有。
+
 子任务临时预览的保留边界在 `kit/acp_types/subagent_preview.rs`、`current_turn/preview.rs`、`acp_events/subagent_preview.rs` 与 `bg_task_live_preview.rs`：按字段、正文和终态目录限制保留，停止后释放原始累加器；超限标记 `preview_omitted`，不产生持久化副本，也不借用 canonical 窗口额度。删除未映射预览槽时由 `DisplayLedger::remove_unmapped_slot` 维护后续持久条目位置，并释放对应折叠键。回归见 `acp_events_test/memory_retention_audit_test.rs` 与 `bg_task_live_preview_test.rs`。
 
 子事件身份沿 `peri_acp_types::event::ChildEventOrigin` → ACP `_meta.peri.childRun` → `AcpEventWithEpoch` → `kit/child_run_routing.rs` 校验。新 execution 不复用旧累加器；重复、陈旧或未知 child 事件不进入主回复。相同会话的视图 reset 保留真实活动 execution 与已观察序号，重建带缺失标记的预览；仍可接收该运行未观察到的后续事件，不宣称建立生产端时间屏障。后台任务业务终态不受预览门禁影响。
@@ -241,7 +247,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 面板目录（tasks/cron/agent/model/config/thread_browser/mcp/plugin/…） | kit/panels/ + kit/panel_registry.rs | `open_panel`；面板渲染按 PanelKind 分发；`PanelOverlay`；各面板的状态 owner、数据来源、动作入口与完成门见 [TUI 面板架构](../design/tui-panel-architecture.md) 的职责映射表 |
-| 面板列表视口与鼠标命中 | kit/panels/shared/list.rs + kit/panel_overlay.rs + kit/panel_mouse.rs | `ListMetrics`（header/item/footer 行度量）与 `ListViewport::for_content_rows`：绘制窗口 `window()` 与鼠标命中 `hit_layout()` 必须来自同一实例；`content_rows(area, term_h)` 首帧按 `panel_content_rows` 预测；`panel_height`/`panel_content_rows` 是面板高度唯一权威（主题 min/max 与终端高度）。设计见 [TUI 面板架构](../design/tui-panel-architecture.md) |
+| 面板列表视口与鼠标命中 | peri-tui-components/src/{list,panel_mouse}.rs + kit/panels/shared/list.rs + kit/panel_overlay.rs | `ListMetrics`（header/item/footer 行度量）与 `ListViewport::for_content_rows`：绘制窗口 `window()` 与鼠标命中 `hit_layout()` 必须来自同一实例；`content_rows(area, term_h)` 首帧按 `panel_content_rows` 预测；`panel_height`/`panel_content_rows` 是面板高度唯一权威（主题 min/max 与终端高度）。设计见 [TUI 面板架构](../design/tui-panel-architecture.md) |
 | 历史详情面板 | kit/panels/history_detail.rs + kit/panel_registry.rs + kit/message_area/handlers.rs | `HistoryDetailPanel`；`open_detail_from_slot`；`request_detail_chunk`；`HistoryDetailWindow::{request,apply_chunk,scroll_to,loaded_text,export_stream,close}` | `PanelKind::HistoryDetail` 复用 `PanelOverlay`；Enter 打开占位 note、Esc/q 关闭；滚动缺块时请求；`e` 复制已加载正文；4 MiB 预算按离视口最远淘汰；关闭释放 chunks；inherited 详情使用冻结 source；回归 `history_detail_test.rs` |
 | 会话服务与 Cron 操作 | kit/service_snapshot/session_services.rs + kit/panels/cron/actions.rs + acp_client/client/requests.rs | stable session identity 隔离 last-good；plugin/list、mcp/list、cron/list 查询实际会话环境；Cron 会话守卫与 mutation 经 `OperationScope`（会话 id + `BRIDGE_RESET_COUNTER`）与完成门经受控 ACP 请求，超时结果未知不自动重试，失败与无会话来源显式显示 |
 | 面板操作作用域与完成门 | application/operations/ + kit/panels/plugin/{discover_state,operation}.rs + kit/panels/{cron,tasks}/ + kit/panels/workflow/{workflow_panel,table_layout}.rs | `OperationScope`（会话身份 + 前端重置标识）与 `CompletionGate`：`begin` 取消前任并推进代次，`accept` 在取消/作用域/代次不符时拒收且不改状态，门的 `Drop` 取消在途票；`OperationOutcome` 分成功、失败与结果未知，取消不表达为撤销成功。纯状态机不读 atom，作用域由调用方构造；作用域覆盖插件搜索、插件操作、Cron 会话守卫、Tasks 取消与 Workflow kill；同作用域同目标的在途重复触发判定为「拒绝」（不发、不提示） |
@@ -270,7 +276,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 线程存储 | src/thread/mod.rs | 仅 re-export `ThreadStore`/`ThreadMeta`/`SqliteThreadStore`（事实源 peri-acp-types / 实现在 peri-resources） |
-| 通用组件 | src/components/textarea/、spinner/ | 文本编辑 widget（text_area.rs/text_area_state.rs/word.rs/history.rs）；动画 spinner（spinner_state.rs/animation.rs/verb.rs） |
+| 通用组件 | peri-tui-components/src/textarea/；src/components/spinner/ | 文本编辑 widget（text_area.rs/text_area_state.rs/word.rs/history.rs）；动画 spinner（spinner_state.rs/animation.rs/verb.rs） |
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 
