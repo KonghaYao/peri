@@ -36,6 +36,11 @@ jobs:
                   fetch-depth: 0
                   persist-credentials: false
 
+            - name: Check feature and authority documentation
+              run: |
+                  python3 scripts/test-feature-catalog.py
+                  python3 scripts/check-feature-catalog.py
+
             - name: Classify changed paths
               id: classify
               env:

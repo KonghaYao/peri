@@ -3,7 +3,7 @@
 - 状态：**已批准目标设计**；实现状态以代码和验收为准。
 - 范围：主会话与异步子 Agent 的按需续跑、MQ 恢复、context 占用展示、外围存活任务发现。
 - 仓库文档位置：`docs/design/session-durability.md`。
-- 前置设计：[Thread MQ](https://chatgpt.com/library?file_id=libfile_522d76ed8ac88191ac4ad25bd0909ca5&account_id=personal)。先完成 MQ 重构，再落实本文。
+- 前置设计：[Thread MQ](thread-mq.md)。先完成 MQ 重构，再落实本文。
 - MQ 文档中留待后续决定的结果处理恢复范围，以本文第 7 节为准：本版本不持久化逐条处理记录。
 
 ## 1. 恢复契约
@@ -53,15 +53,14 @@ CHECK (work_state IN ('idle', 'working', 'stopped'));
 | 操作 | `work_state` 的目标值 |
 | --- | --- |
 | 主会话执行获得准入 | `working` |
-| async child 开始执行，或 sync 委派实际转为后台继续执行 | `working` |
-| sync child 开始执行，本次执行不纳入自动恢复 | `idle`；现有 `agent_status`／运行事件仍正常表达它正在工作 |
+| 后台 child 开始执行 | `working` |
 | Receive 将输入移交历史 | 保持当前继续工作意图，不因 MQ 行消失而写 `idle` |
 | 正常完成、明确失败、或交还控制等待显式 resume | `idle`，并维护既有终态 |
 | 用户 Stop | 受现有取消策略影响的对象写 `stopped` |
-| 用户明确继续或发起允许解除停止的新执行 | 在获得准入时写 `working`；sync child 仍按上面的规则 |
+| 用户明确继续或发起允许解除停止的新执行 | 在获得准入时写 `working` |
 | 进程异常退出 | 不写终态，保留最后提交的值 |
 
-sync 无须新增持久 run-mode 字段。自动恢复只选择 `working`；业务入口负责写对续跑意图，不从 `cancel_policy` 猜同步／异步模式。
+历史 sync 记录无须新增持久 run-mode 字段；v5 不产生新的同步执行。自动恢复只选择 `working`；业务入口负责写对续跑意图，不从 `cancel_policy` 猜同步／异步模式。
 
 旧数据的新增列初始化为 `idle` 和 `NULL`。旧 `agent_status = 'active'` 不构成自动恢复资格，不批量唤醒历史会话。
 
@@ -194,7 +193,7 @@ pub trait SessionRecovery: Send + Sync {
 
 需要推动目标继续工作的消息，按现有 typed policy 和执行绑定判定，在 MQ 接纳事务内维护目标工作意图：允许时从 `idle` 转为 `working`；`stopped` 不被被动回调解除；Info／UI-only／Passive 不自行授予执行资格。
 
-该判定同时遵守第 2.1 节：本次同步执行不因为收到消息就被改成可自动恢复的 async 执行。收消息与实际后台交接是不同的生命周期操作。
+该判定同时遵守第 2.1 节：消息接纳的工作意图更新不构成执行模式切换；新 Agent 委派恒为后台运行，历史 sync 记录不因此获得旧同步 runner。
 
 这只记录工作意图。本进程尚未进入的根范围仍不能启动执行。已经激活的范围沿现有调度继续。
 
@@ -228,7 +227,7 @@ Stop 按既有取消策略确定实际受影响对象，在持久操作中保存
 
 恢复准备与 Stop 竞争时，旧快照不能覆盖新的 `stopped`。已经进入提交阶段的消息与当前执行按既有协调结算；Stop 不回删已提交历史，待发消息继续留在 MQ。
 
-### 5.5 sync 中断的收敛
+### 5.5 历史 sync 中断的收敛
 
 进入根会话时，在根级 single-flight 门内、读取恢复候选之前收敛该根子树中遗留的 `Active` child：非根、`agent_status = active`、`work_state` 为 `idle` 或 `stopped`、本进程没有活动实例（无 runtime、无 turn 令牌、未 closing），且 close 已结清。`idle` 收敛为 `Error`，`stopped` 收敛为 `Cancelled`；`work_state` 保持原值，不写 `Done`。
 
@@ -291,8 +290,8 @@ Peri 启动时不执行恢复查询。进入 `root-a` 后，第 3 节查询返�
 | 重复进入／并发进入同一根 | 每个 thread 最多一个当前运行实例；不重复注入同一次恢复提醒。 |
 | 主会话 idle、async child working | 进入阶段 child 可恢复；不因装配 child 而启动父级模型。 |
 | 嵌套 async Agent | 保留原 thread 与直接会话归属，结果不统一转投 root。 |
-| sync 中断 | 不自动续跑、不伪报 Done；进入根时把非根、非 working、非活实例且 close 已结清的遗留 Active 收敛为 Error（idle）或 Cancelled（stopped）；后续显式 resume 可用。 |
-| sync 实际转为后台继续 | 交接提交后带 working 意图；终态、工作意图与父结果由 handoff worker 一次 finalize；无 terminal route 时不 detach。 |
+| 历史 sync 中断 | 不自动续跑、不伪报 Done；进入根时把非根、非 working、非活实例且 close 已结清的遗留 Active 收敛为 Error（idle）或 Cancelled（stopped）；后续显式 resume 可用。 |
+| 历史 child 显式 resume | 重新按 [Session 异步任务](session-async-tasks.md) 后台准入；不恢复已删除同步 runner。 |
 | 恢复准备期间 Stop／关闭／手动 resume | 启动前复核生效；旧快照、旧事件和旧 worker 不覆盖新状态。 |
 | MQ 已移交、模型推进前退出 | 历史存在且 MQ 不重复；working 让进入后从历史继续。 |
 | child 完成提交边界退出 | SQLite 单事务、远端托管批：终态与父 MQ 全有或全无；未实现原子结算的后端返回 Unsupported，零部分写入。 |
@@ -314,16 +313,7 @@ Peri 启动时不执行恢复查询。进入 `root-a` 后，第 3 节查询返�
 
 所有业务写入经 Rust 行为接口和同一 Session Store。恢复入口负责装配与准入，普通执行负责正常状态变化；TUI、ACP 和回调不直接执行 SQL。
 
-## 10. 实施顺序
+## 10. 验收追踪
 
-| 顺序 | 交付内容 | 进入下一步的条件 |
-| --- | --- | --- |
-| 1 | 完成 Thread MQ 独立重构：统一入口、待发事实、原子移交与区域过滤。 | MQ 文档中的事务、路由和界面契约通过。 |
-| 2 | 迁移 `threads` 两列，接入 context 展示与工作意图写入。 | 旧库迁移正确；主会话、async、sync、Stop 和后台交接不会写错意图。 |
-| 3 | 在真正的会话进入入口接入根范围检查、运行协调、父子装配与恢复提醒。 | 重复进入、嵌套 child、idle 父级和恢复／Stop 竞争通过。 |
-| 4 | Workspace 提供按 owner 发现存活 Shell，恢复当前订阅与任务投影。 | owner 隔离、查询失败和查询／订阅间变化通过；不补播 downtime。 |
-| 5 | 整体验证异常退出与再次进入。 | 使用真实 SQLite 提交边界验证 MQ、历史、工作意图及本地完成事务，无重放和错误冷启动。 |
-
-本文是实现契约，不宣称验收已通过；实现状态以代码和测试为准。文档 SQL 可独立仿真，但不能替代运行时验收。
-
-文档校验已使用 SQLite 执行上述两列迁移，写入第 8 节七行数据并重新打开数据库，验证根范围隔离、idle 父级、stopped child、旧数据默认值以及字段约束。该校验没有运行 Peri Agent，也没有验证运行时崩溃恢复。
+实施顺序与历史 SQL 仿真记录见 [遗留验收追踪](../../spec/issues/2026-11-18-session-durability-verification.md)。
+本文维护行为契约；文档 SQL 不是升级指令，也不替代真实运行时验收。实际 schema 版本与迁移以源码为准。
