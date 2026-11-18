@@ -128,8 +128,6 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 **验证入口**：`cargo test -p peri-middlewares --lib -- mcp::control::load_attempt_tests`、`mcp::control::dynamic_cleanup_tests` 与 `mcp::loader::tests` 覆盖并发单次加载、失败共享、停止/卸载竞争、保留计数、授权未就绪与下一轮目录；`cargo test -p peri-agent --lib -- session::exec::executor::plugin_guidance` 覆盖选择合并、指引文本与投递。用户闭环由 `peri-e2e` 的 P01 场景覆盖：选择插件后提交任务，模型只经 `ToolSearch` / `ToolInvoke` 调用 Loader，下一轮搜索到业务工具 schema 并执行真实本地 HTTP MCP，同会话复用连接，关闭后 socket 归零；录制基线为 Ubuntu 24.04，随 `.github/peri-e2e.rev` 在 CI 回放。
 
-**实现差距**：PR A/B/C 已覆盖名称、配置分流、单次 attempt、Loader/目录投影、下一轮刷新、B6 的错误/授权/停止/清理面，以及插件选择入口、输入队列往返与用户 E2E；端到端证据为 `peri-e2e` commit `002afc0` 的 P01 场景（录制 run 44304311873，CI run 44305234011 的 Ubuntu 24.04 完整回放 62 passed）。
-
 ## 3. 配置权威
 
 **现行**：普通会话的 MCP 配置由 `ConfigurationSnapshot` 投影，`McpConfigFile` 解析 `.mcp.json` 的 `mcpServers`；builtin 默认层由宿主注入一个 `peri` 条目，能力集合来自 `.mcp.json` 旧逐实例条目的确定性映射（`disabled` → 能力关闭）与会话冻结关闭集。`PERI_MCP_BUILTIN` 由 `mcp::builtin_enabled`/overlay 单一解释：缺省 v5、`off` 零注入、`legacy` 回滚六实例。`peri mcp-start peri --capability ...` 在配置加载前分派，standalone 不读取完整 settings。
