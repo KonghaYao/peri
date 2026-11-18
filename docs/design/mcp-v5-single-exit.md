@@ -114,6 +114,20 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 关闭 `peri` 时按 capability 有界关闭其宿主任务（cron tick、monitor 轮询、shell 任务等），沿用现有 bounded converge 语义；不得遗留 detached 执行。
 
+### 2.6 Dynamic MCP 按需加载（外部 server）
+
+**现行（PR A/B）**：`dynamic: true` 的外部 server 只登记受控配置，首次显式 Loader 调用前不启动进程、不联网、不建立连接。每个配置投影为一条 deferred 宿主工具 `LoadMCP__<规范键>_<身份摘要>`；模型经 `ToolSearch` 发现、`ToolInvoke` 执行，工具名不含地址、headers、env 或凭证，调用不接受任何参数。
+
+1. 加载走与 initialize/reconnect 相同的连接、发现与提交路径：只有 transport、initialize 与真实成功的 live `tools/list` 全部完成，才允许提交 `Connected`。失败、需要 OAuth 或会话目录无法验证时报告错误，不伪造 ready，不重放业务操作。
+2. 每个 server slot 最多一个在建 attempt；并发调用共享同一结果。单个等待者退出不影响其他等待者；全部退出或显式 stop/unload/会话关闭时取消 attempt。
+3. stop/unload 先取消 attempt、撤销调用门并撤下目录，再排空与关闭；`stopped`、配置版本或取消状态不匹配的迟到连接一律拒绝提交，不能复活已停止或已卸载的 server。
+4. 失败 attempt 在收口时关闭未提交的 service/process；重复 load/close 不累积连接、进程、任务或保留 owner。Loader 成功不产生额外授权：新工具在下一轮 Reason 进入目录后仍走既有审批与 runtime authorization。
+5. 子 Agent、fork 与 workflow 沿用各自冻结配置与目录过滤；继承配置不触发首次加载，已连接能力能否复用仍由既有会话准入决定。
+
+**验证入口**：`cargo test -p peri-middlewares --lib -- mcp::control::load_attempt_tests`、`mcp::control::dynamic_cleanup_tests` 与 `mcp::loader::tests` 覆盖并发单次加载、失败共享、停止/卸载竞争、保留计数、授权未就绪与下一轮目录。
+
+**实现差距**：PR A/B 已覆盖名称、配置分流、单次 attempt、Loader/目录投影、下一轮刷新与 B6 的错误/授权/停止/清理面；插件选择入口与一条完整用户 E2E 由 PR C 完成。
+
 ## 3. 配置权威
 
 **现行**：普通会话的 MCP 配置由 `ConfigurationSnapshot` 投影，`McpConfigFile` 解析 `.mcp.json` 的 `mcpServers`；builtin 默认层由宿主注入一个 `peri` 条目，能力集合来自 `.mcp.json` 旧逐实例条目的确定性映射（`disabled` → 能力关闭）与会话冻结关闭集。`PERI_MCP_BUILTIN` 由 `mcp::builtin_enabled`/overlay 单一解释：缺省 v5、`off` 零注入、`legacy` 回滚六实例。`peri mcp-start peri --capability ...` 在配置加载前分派，standalone 不读取完整 settings。

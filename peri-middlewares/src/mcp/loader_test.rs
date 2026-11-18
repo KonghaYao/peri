@@ -642,3 +642,45 @@ async fn load_fails_at_the_catalog_stage_without_closing_the_connection() {
 
     fixture.shutdown().await;
 }
+
+/// 需要 OAuth 的 dynamic server：加载报告失败而不是 ready，且不留下可调用连接
+/// 或 OAuth 流程（plan 10 / 12-B6 授权面）。
+#[cfg(not(target_os = "emscripten"))]
+#[tokio::test]
+async fn load_requiring_authorization_is_not_ready_and_starts_no_flow() {
+    let fixture = Fixture::new();
+    let config: McpServerConfig = serde_json::from_value(json!({
+        "url": "https://mcp.example.test/rpc",
+        "oauth": {},
+        "dynamic": true,
+    }))
+    .expect("valid oauth dynamic config");
+    fixture.pool.configs.write().insert("lazy".into(), config);
+    let loader = fixture.single_loader();
+
+    let error = loader
+        .invoke(json!({}), fixture.context())
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("OAuth authorization required"),
+        "loader must surface the authorization requirement: {error}"
+    );
+    let handle = fixture
+        .pool
+        .client("lazy")
+        .expect("authorization requirement must be queryable");
+    assert!(matches!(handle.status, ClientStatus::Failed(_)));
+    assert!(matches!(
+        handle.oauth_status,
+        crate::mcp::OAuthStatus::NeedsAuthorization
+    ));
+    assert!(handle.tools.is_empty());
+    assert!(
+        fixture.pool.active_oauth_flow("lazy").is_none(),
+        "loader must not start an interactive OAuth flow"
+    );
+    assert_eq!(fixture.pool.retained_service_count(), 0);
+
+    fixture.shutdown().await;
+}

@@ -92,6 +92,27 @@ impl McpClientPool {
         owner
     }
 
+    /// 丢弃已经收口的失败/取消连接，避免重复加载让 service/process 保留表增长。
+    ///
+    /// 只移除已停止的 owner：关闭超时或仍可重试的 owner 继续由关闭事务持有。
+    pub(crate) fn release_stopped_resources(&self, server_name: &str) {
+        let _admission = self.lifecycle_registration.lock();
+        self.shared_services
+            .lock()
+            .retain(|service| !service.is_stopped());
+        #[cfg(not(target_os = "emscripten"))]
+        self.processes
+            .lock()
+            .retain(|process| !process.is_stopped());
+        if let Some(slot) = self.existing_server_slot(server_name) {
+            slot.services.lock().retain(|service| !service.is_stopped());
+            #[cfg(not(target_os = "emscripten"))]
+            slot.processes
+                .lock()
+                .retain(|process| !process.is_stopped());
+        }
+    }
+
     #[cfg(all(test, not(target_os = "emscripten")))]
     pub(crate) fn retained_service_count(&self) -> usize {
         self.shared_services.lock().len()
@@ -138,6 +159,8 @@ impl McpClientPool {
     }
 
     pub async fn remove_server(self: &Arc<Self>, server_name: &str) {
+        // 卸载同时取消在建首次加载：不能只靠配置版本在连接完成后才拒绝。
+        let cancelled_attempt = self.cancel_load_attempt(server_name);
         self.stop_background(&crate::mcp::task_scope::McpTaskKey::Subscription(
             server_name.to_string(),
         ))
@@ -162,6 +185,12 @@ impl McpClientPool {
         // 会话级 ACP 声明身份随连接一并消失（M7）：此后该名不再有可证明的
         // cache 身份，任何持久化 cache 准入都按 fail-closed 拒绝。
         self.acp_connections.write().remove(server_name);
+        // 取消可能仍处于 connect 中的 attempt：任务被 abort 后不会执行自身清理，
+        // 由卸载路径收口它已登记的 service/process。
+        if cancelled_attempt {
+            self.task_spawner.stop_load_attempts(server_name).await;
+        }
+        self.discard_uncommitted_resources(server_name).await;
         // 句柄与配置同时消失：本代发现证据一律失效，等待方立即重读事实。
         self.system_readiness.clear_evidence(server_name);
     }
