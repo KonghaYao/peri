@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_acp_types::mcp_control::{SessionMcpCatalogPort, SessionMcpCatalogSnapshot};
+use peri_acp_types::mcp_control::{
+    SessionMcpCatalogPort, SessionMcpCatalogSnapshot, SessionToolCatalogPreparationPort,
+    SessionToolSource,
+};
 use serde_json::json;
 
 use crate::session::tool_catalog::CatalogRefreshError;
@@ -591,4 +594,75 @@ fn duplicate_required_declaration_cannot_hide_a_filtered_winner() {
         CatalogRefreshError::RequiredToolUnavailable { .. }
     ));
     assert!(catalog.snapshot().tools.is_empty());
+}
+
+// ─── 下一轮目录准备（B5）───────────────────────────────────────────────────
+
+/// 准备端口读取当前 pool generation，但不替换已发布的 Reason 快照。
+#[test]
+fn prepare_next_reports_generation_and_sources_without_publishing() {
+    let remote: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("mcp__docs__lookup", "docs"));
+    let source = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
+        SessionMcpCatalogSnapshot {
+            generation: 4,
+            tools: vec![Arc::clone(&remote)],
+        },
+    ))));
+    let catalog = SessionToolCatalog::new(
+        BTreeMap::from([(
+            "Read".into(),
+            Arc::new(NamedTool::new("Read", "core")) as Arc<dyn BaseTool>,
+        )]),
+        Some(source.clone()),
+    );
+    let published = catalog.snapshot();
+
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 5,
+        tools: vec![remote],
+    });
+    let prepared = catalog
+        .prepare_next()
+        .expect("valid candidate must be prepared");
+    assert_eq!(prepared.generation, 5);
+    let core = prepared.admitted_for(&SessionToolSource::CoreOrMiddleware);
+    assert_eq!(core.len(), 1);
+    assert_eq!(core[0], "Read");
+    let docs = prepared.admitted_for(&SessionToolSource::Mcp("docs".into()));
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0], "mcp__docs__lookup");
+
+    assert_eq!(
+        catalog.snapshot().generation,
+        4,
+        "preparation must not publish the candidate generation"
+    );
+    assert!(Arc::ptr_eq(&published, &catalog.snapshot()));
+}
+
+/// 候选目录构造失败以 typed 错误返回，已发布视图保持不变。
+#[test]
+fn prepare_next_rejects_an_invalid_candidate_and_keeps_the_published_view() {
+    let source = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
+        SessionMcpCatalogSnapshot {
+            generation: 1,
+            tools: vec![Arc::new(BridgeTool::bridge("mcp__docs__lookup", "docs"))],
+        },
+    ))));
+    let catalog = SessionToolCatalog::new(BTreeMap::new(), Some(source.clone()));
+    let published = catalog.snapshot();
+
+    // 新一代候选缺少来源身份：只能拒绝，不能发布半份目录。
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 2,
+        tools: vec![Arc::new(NamedTool::new("mystery", "no source identity"))],
+    });
+    let error = SessionToolCatalogPreparationPort::prepare_next(&catalog)
+        .expect_err("candidate without source identity must be rejected");
+    assert!(
+        error.to_string().contains("no source identity"),
+        "unexpected preparation error: {error}"
+    );
+    assert_eq!(catalog.snapshot().generation, 1);
+    assert!(Arc::ptr_eq(&published, &catalog.snapshot()));
 }

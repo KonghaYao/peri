@@ -552,6 +552,8 @@ async fn dispatch_concurrent(
             // 模型 / 嵌套来源沿用环境归属（真实 turn 事实）。
             let attribution = ctx.attribution_for(&origin);
             let session_resources = session_resources.clone();
+            // 下一轮目录端口按单条执行复制：工具只做只读准备，不能替换本批快照。
+            let session_tool_catalog = ctx.session_tool_catalog();
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
                 let invoke_fut = crate::agent::model_call::scope_tool_parent(model_parent, async {
@@ -570,6 +572,9 @@ async fn dispatch_concurrent(
                         )
                         .with_tool_call_id(model_tool_call_id)
                         .with_context_usage(context_usage);
+                    if let Some(port) = session_tool_catalog {
+                        ctx_param = ctx_param.with_session_tool_catalog(port);
+                    }
                     // 会话身份缺失即 `None`：不调用 `with_session_identity`（它会把
                     // 身份写成 `Some`），否则工具侧的交互归属会拿到伪造的会话事实。
                     // turn_generation 来自真实 turn（本管线前面已 `require_turn`），

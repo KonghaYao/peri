@@ -6,10 +6,15 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use peri_acp_types::mcp_control::SessionMcpCatalogSnapshot;
+use peri_acp_types::mcp_control::{
+    SessionMcpCatalogSnapshot, SessionToolCatalogPreparation, SessionToolCatalogPreparationPort,
+    SessionToolCatalogPrepareError,
+};
+use peri_agent::session::tool_catalog::SessionToolCatalog;
 
 use super::*;
 use crate::mcp::task_scope::McpTaskOwner;
+use crate::tool_search::ExecuteExtraTool;
 use crate::tool_search::ToolSearchIndex;
 
 struct Fixture {
@@ -54,6 +59,27 @@ impl Fixture {
         loaders.remove(0)
     }
 
+    /// 与生产装配同一来源：PoolCatalog 投影 + 会话工具目录。
+    fn session_catalog(&self) -> Arc<SessionToolCatalog> {
+        Arc::new(SessionToolCatalog::new(
+            std::collections::BTreeMap::new(),
+            Some(crate::mcp::control::catalog_source(
+                self.pool.clone(),
+                "session-1",
+            )),
+        ))
+    }
+
+    fn context_with(catalog: &Arc<SessionToolCatalog>) -> ToolContext<'static> {
+        let concrete = Arc::clone(catalog);
+        let port: Arc<dyn SessionToolCatalogPreparationPort> = concrete;
+        ToolContext::new(&[], ".").with_session_tool_catalog(port)
+    }
+
+    fn context(&self) -> ToolContext<'static> {
+        Self::context_with(&self.session_catalog())
+    }
+
     async fn shutdown(mut self) {
         self.pool.begin_shutdown();
         self.tasks.begin_shutdown();
@@ -79,10 +105,6 @@ fn secret_bearing_config() -> McpServerConfig {
         "dynamic": true,
     }))
     .expect("valid dynamic config")
-}
-
-fn context() -> ToolContext<'static> {
-    ToolContext::new(&[], ".")
 }
 
 /// Loader 是 deferred 宿主工具：可被索引发现，且身份只声明受控来源，没有 wire 工具名。
@@ -182,14 +204,17 @@ async fn loader_rejects_target_injection_without_touching_the_source() {
         json!({"config": {"url": "https://evil.example/mcp"}}),
         json!({"force": true}),
     ] {
-        let error = loader.invoke(injected, context()).await.unwrap_err();
+        let error = loader
+            .invoke(injected, fixture.context())
+            .await
+            .unwrap_err();
         assert!(
             error.to_string().contains("takes no arguments"),
             "unexpected error for injected args: {error}"
         );
     }
     let error = loader
-        .invoke(json!(["not-an-object"]), context())
+        .invoke(json!(["not-an-object"]), fixture.context())
         .await
         .unwrap_err();
     assert!(error.to_string().contains("takes no arguments"));
@@ -226,7 +251,10 @@ async fn closing_the_source_disables_the_loader() {
         fixture.loaders().is_empty(),
         "stopped source must not keep a loader in the catalog"
     );
-    let error = loader.invoke(json!({}), context()).await.unwrap_err();
+    let error = loader
+        .invoke(json!({}), fixture.context())
+        .await
+        .unwrap_err();
     assert!(
         error.to_string().contains("lazy"),
         "stale loader must fail with the source name: {error}"
@@ -234,7 +262,10 @@ async fn closing_the_source_disables_the_loader() {
 
     fixture.pool.remove_server("lazy").await;
     assert!(fixture.loaders().is_empty());
-    let error = loader.invoke(json!({}), context()).await.unwrap_err();
+    let error = loader
+        .invoke(json!({}), fixture.context())
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("lazy"));
     assert!(fixture.pool.client("lazy").is_none());
 }
@@ -335,7 +366,17 @@ function handle(line) {
     serverInfo: { name: 'loader-fixture', version: '1' },
   };
   else if (request.method === 'tools/list') result = {
-    tools: [{ name: 'echo', description: 'Echo input', inputSchema: { type: 'object', properties: {} } }],
+    tools: [{
+      name: 'echo',
+      description: 'Echo input',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'Text to echo back' },
+        },
+        required: ['message'],
+      },
+    }],
   };
   else if (request.method === 'resources/list') result = { resources: [] };
   else if (request.method === 'resources/templates/list') result = { resourceTemplates: [] };
@@ -366,7 +407,7 @@ async fn loader_loads_bound_config_and_reports_ready_catalog() {
     let loader = fixture.single_loader();
 
     let output = loader
-        .invoke(json!({}), context())
+        .invoke(json!({}), fixture.context())
         .await
         .expect("first load must succeed");
     let result: Value = serde_json::from_str(&output).unwrap();
@@ -391,7 +432,7 @@ async fn loader_loads_bound_config_and_reports_ready_catalog() {
 
     let reused: Value = serde_json::from_str(
         &loader
-            .invoke(json!({}), context())
+            .invoke(json!({}), fixture.context())
             .await
             .expect("second load must reuse the connection"),
     )
@@ -400,5 +441,204 @@ async fn loader_loads_bound_config_and_reports_ready_catalog() {
     assert_eq!(reused["available_tool_count"], 1);
 
     tokio::time::sleep(Duration::from_millis(20)).await;
+    fixture.shutdown().await;
+}
+
+/// B5：加载提交后准备当前会话目录——下一轮可搜完整 schema，当前 Act 视图不变，
+/// 失效目标由既有 call gate 拒绝（plan 7 / 8 / 12-B5）。
+#[cfg(not(target_os = "emscripten"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_prepares_the_next_reason_without_replacing_the_current_act() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.cwd.join("server.js"), ECHO_SERVER).unwrap();
+    fixture
+        .pool
+        .configs
+        .write()
+        .insert("lazy".into(), dynamic_stdio_config());
+    let catalog = fixture.session_catalog();
+    let act_view = catalog.snapshot();
+    assert!(
+        !act_view.tools.contains_key("mcp__lazy__echo"),
+        "fixture must start before the server is loaded"
+    );
+
+    let loader = fixture.single_loader();
+    let output = loader
+        .invoke(json!({}), Fixture::context_with(&catalog))
+        .await
+        .expect("load must verify the next session catalog");
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["status"], "ready");
+    assert_eq!(
+        result["session_tool_count"], 1,
+        "the loaded server must contribute its business tool"
+    );
+    assert!(
+        result["session_catalog_generation"].as_u64().unwrap()
+            >= result["catalog_generation"].as_u64().unwrap(),
+        "prepared generation must include the committed connection"
+    );
+
+    // 当前 Act 持有的快照还是同一份对象，加载不会中途替换执行目录。
+    assert!(Arc::ptr_eq(&act_view, &catalog.snapshot()));
+    assert!(!act_view.tools.contains_key("mcp__lazy__echo"));
+    let tool_invoke =
+        ExecuteExtraTool::new(Arc::new(parking_lot::RwLock::new(act_view.tool_map())));
+    let not_in_act = tool_invoke
+        .invoke(
+            json!({"name": "mcp__lazy__echo", "arguments": {"message": "hi"}}),
+            Fixture::context_with(&catalog),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        not_in_act.to_string().contains("Tool not found"),
+        "the current Act must not resolve a tool that only the next Reason sees: {not_in_act}"
+    );
+
+    // 下一轮 Reason 刷新后，业务工具与完整 schema 进入搜索索引。
+    let next = catalog
+        .refresh()
+        .expect("the next Reason must publish the committed connection");
+    assert!(next.generation > act_view.generation);
+    let echo = next
+        .tools
+        .get("mcp__lazy__echo")
+        .expect("loaded business tool must be admitted");
+    assert_eq!(echo.tool.mcp_server_name(), Some("lazy"));
+    assert_eq!(echo.tool.mcp_tool_name(), Some("echo"));
+    let index = ToolSearchIndex::new();
+    index.build(
+        next.tools
+            .values()
+            .filter(|entry| !entry.tool.is_direct() && entry.tool.visible_to_model())
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect(),
+    );
+    let hits = index.search("echo", 5);
+    let hit = hits
+        .iter()
+        .find(|hit| hit.name == "mcp__lazy__echo")
+        .unwrap_or_else(|| panic!("ToolSearch must find the loaded tool: {hits:?}"));
+    assert_eq!(hit.parameters["properties"]["message"]["type"], "string");
+    assert_eq!(hit.parameters["required"], json!(["message"]));
+
+    // 旧快照里的目标在来源停止后不能再执行（call gate 拒绝失效调用）。
+    let pinned_echo = Arc::clone(&echo.tool);
+    fixture
+        .pool
+        .close_server_connection("lazy", true)
+        .await
+        .expect("closing the loaded source must settle");
+    let mut ctx = Fixture::context_with(&catalog);
+    ctx.session_id = Some("session-1".into());
+    let stale = pinned_echo
+        .invoke(json!({"message": "hi"}), ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        stale.to_string().contains("draining or closed"),
+        "call gate must reject a target from a stopped source: {stale}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// 服务器有工具但本会话全部过滤：仍可 ready，但必须明确没有可调用工具。
+#[cfg(not(target_os = "emscripten"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_reports_zero_session_tools_when_the_session_filters_them_all() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.cwd.join("server.js"), ECHO_SERVER).unwrap();
+    fixture
+        .pool
+        .configs
+        .write()
+        .insert("lazy".into(), dynamic_stdio_config());
+    // 只保留没有 wire 工具名的候选（Loader），过滤掉远端业务工具。
+    let catalog = Arc::new(SessionToolCatalog::with_filter(
+        std::collections::BTreeMap::new(),
+        Some(crate::mcp::control::catalog_source(
+            fixture.pool.clone(),
+            "session-1",
+        )),
+        Arc::new(|tool: &dyn BaseTool| tool.mcp_tool_name().is_none()),
+    ));
+    let loader = fixture.single_loader();
+
+    let output = loader
+        .invoke(json!({}), Fixture::context_with(&catalog))
+        .await
+        .expect("a fully filtered session still connects");
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["status"], "ready");
+    assert_eq!(result["available_tool_count"], 1);
+    assert_eq!(result["session_tool_count"], 0);
+    let note = result["note"]
+        .as_str()
+        .expect("filtered-but-present tools require an explicit note");
+    assert!(
+        note.contains("none are callable"),
+        "unexpected note: {note}"
+    );
+    assert!(
+        !catalog
+            .refresh()
+            .expect("filtered refresh must stay constructible")
+            .tools
+            .contains_key("mcp__lazy__echo"),
+        "the session policy must keep filtering the business tool"
+    );
+
+    fixture.shutdown().await;
+}
+/// 连接与发现成功但当前会话目录构造失败：返回目录阶段错误，连接仍归 pool 所有。
+#[cfg(not(target_os = "emscripten"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_fails_at_the_catalog_stage_without_closing_the_connection() {
+    struct FailingCatalog;
+
+    impl SessionToolCatalogPreparationPort for FailingCatalog {
+        fn prepare_next(
+            &self,
+        ) -> Result<SessionToolCatalogPreparation, SessionToolCatalogPrepareError> {
+            Err(SessionToolCatalogPrepareError::new(
+                "candidate alias conflict",
+            ))
+        }
+    }
+
+    let fixture = Fixture::new();
+    std::fs::write(fixture.cwd.join("server.js"), ECHO_SERVER).unwrap();
+    fixture
+        .pool
+        .configs
+        .write()
+        .insert("lazy".into(), dynamic_stdio_config());
+    let loader = fixture.single_loader();
+    let port: Arc<dyn SessionToolCatalogPreparationPort> = Arc::new(FailingCatalog);
+
+    let error = loader
+        .invoke(
+            json!({}),
+            ToolContext::new(&[], ".").with_session_tool_catalog(port),
+        )
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("session catalog could not be prepared"),
+        "loader must report the catalog stage: {message}"
+    );
+    assert!(
+        message.contains("candidate alias conflict"),
+        "loader must preserve the original catalog error: {message}"
+    );
+    assert!(
+        fixture.pool.client("lazy").is_some(),
+        "a session-specific catalog failure must not close the pooled connection"
+    );
+
     fixture.shutdown().await;
 }
