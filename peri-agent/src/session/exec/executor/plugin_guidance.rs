@@ -10,7 +10,9 @@ use std::sync::Arc;
 use peri_acp_types::mcp_control::DynamicLoaderBinding;
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::plugin::LoadedPlugin;
+use peri_acp_types::session::ExecutionBinding;
 use peri_acp_types::session::MessageKind;
+use peri_acp_types::session::MessagePolicy;
 use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::session::MqEnqueueDisposition;
@@ -191,9 +193,13 @@ fn failed_chunk_may_be_persisted(error: &anyhow::Error) -> bool {
 ///
 /// 逐段入队不是原子操作：任一段失败都把错误、已提交前缀与失败片段身份返回给调用方。
 /// 失败片段的 id 在入队前固定，因此即使存储报告结果未知也能按身份清理。
+///
+/// 每行绑定产生它的执行且不唤醒新执行：同一执行正常消费，后续执行在 Receive 中按
+/// 过期行 Suppress，即使失败清理没查回该行也不会污染新 transcript。
 pub(crate) async fn push_plugin_guidance(
     queue: &MessageQueue,
     texts: &[String],
+    execution: &ExecutionBinding,
 ) -> Result<Vec<MqEntry>, GuidanceEnqueueFailure> {
     let mut enqueued = Vec::new();
     for text in texts {
@@ -224,7 +230,8 @@ pub(crate) async fn push_plugin_guidance(
                 MessageSource::SystemInjected,
                 reminder,
                 message_id,
-            );
+            )
+            .with_policy(MessagePolicy::execution_scoped(execution.clone()));
             match queue.enqueue(message).await {
                 Ok(outcome) => {
                     if outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff {

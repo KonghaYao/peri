@@ -346,9 +346,12 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // system prompt，也不改写用户正文（Model-only canonical reminder）。
     // 逐段入队失败必须终止本轮：部分指引已落库时不能继续并报告成功。
     if !req.plugin_guidance.is_empty() {
+        // 指引绑定本 attempt：行本身不唤醒新执行，后续执行会把遗留行按过期处理。
+        let execution_binding = v2_out.context.session.turn.execution_binding();
         if let Err(failure) = crate::session::exec::executor::plugin_guidance::push_plugin_guidance(
             &v2_out.context.session.queue,
             &req.plugin_guidance,
+            &execution_binding,
         )
         .await
         {
@@ -369,7 +372,6 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             // 逐段入队失败时，前面已提交的指引片段与结果未知但已查回的片段必须随本次
             // attempt 一起清理，否则下一次 Receive 会把它当作完整指引消费。这里只允许
             // 删除 SystemInjected 行，用户输入仍由取消/重投递契约管理。
-            let execution_binding = v2_out.context.session.turn.execution_binding();
             if let Err(cleanup_error) = v2_out
                 .context
                 .session

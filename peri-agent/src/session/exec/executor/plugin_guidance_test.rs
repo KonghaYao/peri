@@ -15,11 +15,14 @@ use peri_acp_types::session::ExecutionBinding;
 use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::session::MqFilter;
+use peri_acp_types::session::MqReceiveDisposition;
+use peri_acp_types::session::MqReceivePurpose;
 use peri_acp_types::session::MqReceiveStatus;
 use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::QueuedMessage;
 use peri_acp_types::session::QueuedPayload;
 use peri_acp_types::session::TurnId;
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::ReminderAudience;
 use peri_acp_types::system_reminder::ReminderCategory;
 use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
@@ -99,6 +102,13 @@ fn loader(loader: &str, plugin: &str, marketplace: &str) -> DynamicLoaderBinding
         loader: loader.into(),
         server_key: format!("plugin:{plugin}:search"),
         plugin_source: Some(format!("{plugin}@{marketplace}")),
+    }
+}
+
+fn execution() -> ExecutionBinding {
+    ExecutionBinding {
+        turn_id: TurnId::new(),
+        attempt_id: AttemptId::new(),
     }
 }
 
@@ -251,8 +261,12 @@ fn test_merge_keeps_explicit_then_handed_off_then_slash_without_duplicates() {
 fn test_guidance_is_delivered_as_model_only_canonical_reminder() {
     let queue = MessageQueue::new();
     let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
-    futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
-        .expect("open queue accepts guidance");
+    futures::executor::block_on(push_plugin_guidance(
+        &queue,
+        std::slice::from_ref(&body),
+        &execution(),
+    ))
+    .expect("open queue accepts guidance");
 
     assert!(!queue.has_wake_up_sync(), "指引不单独唤醒新执行");
     let reminders: Vec<_> = queue
@@ -284,6 +298,7 @@ fn test_guidance_enqueue_failure_is_returned() {
     let error = futures::executor::block_on(push_plugin_guidance(
         &queue,
         &["selected plugin guidance".to_string()],
+        &execution(),
     ))
     .expect_err("关闭入队闸门后指引投递必须失败");
     assert!(
@@ -310,14 +325,14 @@ fn test_failed_guidance_cleanup_removes_only_attempt_rows() {
     .expect("用户输入必须能进入 MQ")
     .entry;
     let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
-    let enqueued =
-        futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
-            .expect("开放队列接受指引");
+    let execution = execution();
+    let enqueued = futures::executor::block_on(push_plugin_guidance(
+        &queue,
+        std::slice::from_ref(&body),
+        &execution,
+    ))
+    .expect("开放队列接受指引");
     assert!(enqueued.len() > 1, "指引必须分段以覆盖部分提交前缀");
-    let execution = ExecutionBinding {
-        turn_id: TurnId::new(),
-        attempt_id: AttemptId::new(),
-    };
 
     let outcome = futures::executor::block_on(
         queue.discard_system_injected_for_attempt(&enqueued, &execution),
@@ -366,9 +381,13 @@ fn test_uncertain_guidance_enqueue_removes_written_failed_chunk() {
     // 第一段正常写入，第二段写入后返回 PersistenceUncertain。
     resources.fail_mq_enqueue_uncertain_after_write(1);
     let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
-    let failure =
-        futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
-            .expect_err("写入结果未知必须让入队失败");
+    let origin = execution();
+    let failure = futures::executor::block_on(push_plugin_guidance(
+        &queue,
+        std::slice::from_ref(&body),
+        &origin,
+    ))
+    .expect_err("写入结果未知必须让入队失败");
     let uncertain = failure.uncertain.expect("失败片段身份必须保留");
     assert_eq!(
         failure.cleanup.len(),
@@ -389,12 +408,8 @@ fn test_uncertain_guidance_enqueue_removes_written_failed_chunk() {
         "失败片段必须按入队前固定的身份进入清理集合"
     );
 
-    let execution = ExecutionBinding {
-        turn_id: TurnId::new(),
-        attempt_id: AttemptId::new(),
-    };
     let outcome = futures::executor::block_on(
-        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &origin),
     )
     .expect("失败 attempt 的 SystemInjected 行必须可清理");
     assert!(
@@ -413,7 +428,7 @@ fn test_uncertain_guidance_enqueue_removes_written_failed_chunk() {
 
     // 幂等：同一清理集合再次提交只报 Missing，不产生新的写入或错误。
     let again = futures::executor::block_on(
-        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &origin),
     )
     .expect("重复清理必须幂等");
     assert!(
@@ -448,9 +463,13 @@ fn test_uncertain_guidance_enqueue_without_write_is_idempotent() {
     // 第一段正常写入，第二段不写入并返回 PersistenceUncertain。
     resources.fail_mq_enqueue_uncertain_without_write(1);
     let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
-    let failure =
-        futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
-            .expect_err("写入结果未知必须让入队失败");
+    let origin = execution();
+    let failure = futures::executor::block_on(push_plugin_guidance(
+        &queue,
+        std::slice::from_ref(&body),
+        &origin,
+    ))
+    .expect_err("写入结果未知必须让入队失败");
     let uncertain = failure.uncertain.expect("失败片段身份必须保留");
     assert_eq!(failure.cleanup.len(), 1, "只有已确认前缀可以进入清理集合");
     let remaining =
@@ -460,12 +479,8 @@ fn test_uncertain_guidance_enqueue_without_write_is_idempotent() {
         "未写入的片段不得凭空出现在 MQ: {remaining:?}"
     );
 
-    let execution = ExecutionBinding {
-        turn_id: TurnId::new(),
-        attempt_id: AttemptId::new(),
-    };
     let outcome = futures::executor::block_on(
-        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &origin),
     )
     .expect("已确认前缀必须可清理");
     assert!(
@@ -477,7 +492,7 @@ fn test_uncertain_guidance_enqueue_without_write_is_idempotent() {
         outcome.items
     );
     let again = futures::executor::block_on(
-        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &origin),
     )
     .expect("重复清理必须幂等");
     assert!(
@@ -493,4 +508,101 @@ fn test_uncertain_guidance_enqueue_without_write_is_idempotent() {
     assert_eq!(remaining.len(), 1, "只应保留用户输入行: {remaining:?}");
     assert_eq!(remaining[0].id(), prompt.id);
     assert_eq!(remaining[0].source, MessageSource::UserInput);
+}
+
+/// store 提交失败 chunk 后清理查询立即失败：行仍带 origin execution，后续执行
+/// Receive 必须把它按过期行 Suppress，不能写进新 transcript。
+#[test]
+fn test_unresolved_written_guidance_is_suppressed_by_later_execution() {
+    let resources = MockSessionResources::new();
+    let queue = MessageQueue::bind(resources.clone(), "guidance-foreign-execution".into());
+    // 未发送的用户输入留在待发送区：Receive 只验证遗留 guidance，不替用户提交输入。
+    let prompt = futures::executor::block_on(queue.enqueue(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("run the selected plugin"),
+    )))
+    .expect("用户输入必须能进入 MQ")
+    .entry;
+    // 第一段正常写入；第二段写入后返回 PersistenceUncertain，且失败查回立即失败。
+    resources.fail_mq_enqueue_uncertain_after_write(1);
+    resources.fail_next_mq_queries(1);
+    let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
+    let origin = execution();
+    let failure = futures::executor::block_on(push_plugin_guidance(
+        &queue,
+        std::slice::from_ref(&body),
+        &origin,
+    ))
+    .expect_err("写入结果未知必须让入队失败");
+    let uncertain = failure.uncertain.expect("失败片段身份必须保留");
+    assert_eq!(failure.cleanup.len(), 1, "查询失败时只能清理已确认前缀");
+
+    // 快速路径删掉已确认前缀；未查回的 chunk 仍由 store 提交。
+    futures::executor::block_on(
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &origin),
+    )
+    .expect("已确认前缀必须可清理");
+    let rows = futures::executor::block_on(queue.query(MqFilter::default())).expect("MQ query");
+    assert!(
+        rows.iter().any(|row| row.id == uncertain),
+        "失败 chunk 已由 store 提交: {rows:?}"
+    );
+
+    // 后续执行只应 Suppress 遗留行：删行、不写历史，也不影响用户输入。
+    let later = execution();
+    let owner = queue.owner();
+    let permit = owner.begin_receive(MqReceivePurpose::ModelLoop, later);
+    let selected =
+        futures::executor::block_on(owner.select_for_receive(&permit)).expect("Receive selection");
+    assert_eq!(selected.len(), 1, "只选中遗留的 guidance 行: {selected:?}");
+    assert_eq!(selected[0].entry.id, uncertain);
+    assert_eq!(
+        selected[0].disposition,
+        MqReceiveDisposition::Suppress,
+        "其他执行不得提交失败 attempt 的 guidance"
+    );
+    let outcome =
+        futures::executor::block_on(owner.receive(permit, selected)).expect("Receive outcome");
+    assert_eq!(outcome.items[0].status, MqReceiveStatus::Suppressed);
+
+    let remaining = futures::executor::block_on(queue.snapshot()).expect("MQ snapshot");
+    assert_eq!(remaining.len(), 1, "只应保留用户输入行: {remaining:?}");
+    assert_eq!(remaining[0].id(), prompt.id);
+    assert_eq!(remaining[0].source, MessageSource::UserInput);
+}
+
+/// 绑定到当前执行的 guidance 仍能被同一执行正常消费。
+#[test]
+fn test_guidance_is_consumed_by_originating_execution() {
+    let queue = MessageQueue::new();
+    let body = "selected plugin guidance".to_string();
+    let origin = execution();
+    futures::executor::block_on(push_plugin_guidance(
+        &queue,
+        std::slice::from_ref(&body),
+        &origin,
+    ))
+    .expect("open queue accepts guidance");
+
+    let owner = queue.owner();
+    let permit = owner.begin_receive(MqReceivePurpose::ModelLoop, origin);
+    let selected =
+        futures::executor::block_on(owner.select_for_receive(&permit)).expect("Receive selection");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(
+        selected[0].disposition,
+        MqReceiveDisposition::Commit,
+        "同一执行必须正常提交自己的指引"
+    );
+    let outcome =
+        futures::executor::block_on(owner.receive(permit, selected)).expect("Receive outcome");
+    assert_eq!(outcome.items[0].status, MqReceiveStatus::Committed);
+
+    let entry = outcome.items[0].entry.as_ref().expect("committed entry");
+    let PersistedPayload::SystemReminder { reminder, .. } = &entry.payload else {
+        panic!("插件指引必须是受控 Reminder");
+    };
+    assert_eq!(reminder.as_reminder().category, ReminderCategory::Guidance);
+    assert_eq!(reminder.as_reminder().body, body);
+    assert!(queue.is_empty_sync(), "同一执行消费后不应留下 MQ 行");
 }
