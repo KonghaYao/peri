@@ -445,6 +445,11 @@ impl McpClientPool {
                 {
                     Ok(tools) => tools,
                     Err(error) => {
+                        // 未提交连接必须当场收口：失败 attempt 不得留下半开 transport
+                        // 或让后续重复加载累积 service/process。
+                        let mut service = rs;
+                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                        self.release_stopped_resources(server_name);
                         // 不留下「无句柄」的模糊状态：显式 Failed + 本代发现失败
                         // 证据，闸门据此立即判定，而不是等到 deadline。
                         if admit() {
@@ -465,6 +470,7 @@ impl McpClientPool {
                         ) {
                             let mut service = rs;
                             let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                            self.release_stopped_resources(server_name);
                             if admit() {
                                 initialize::fail_workspace_resource_discovery(
                                     self,
@@ -558,6 +564,7 @@ impl McpClientPool {
         ) {
             // 提交被拒：关闭新获得的资源，不把旧结果挂回已停止的服务器。
             let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+            self.release_stopped_resources(server_name);
             self.clear_discovery_evidence(server_name);
             let reason = if self.is_open() {
                 "MCP connection was superseded before commit"

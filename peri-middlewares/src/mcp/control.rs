@@ -36,7 +36,7 @@ pub(crate) struct ServerSlot {
     pub(crate) control_operation: tokio::sync::Mutex<()>,
     pub(crate) stopped: AtomicBool,
     pub(crate) transient: AtomicBool,
-    services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
+    pub(crate) services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
     #[cfg(not(target_os = "emscripten"))]
     pub(crate) processes: parking_lot::Mutex<Vec<Arc<super::client::process::McpProcessOwner>>>,
     /// 当前进行中的首次加载 attempt；`None` 表示可发起下一次显式加载。
@@ -201,6 +201,46 @@ impl McpClientPool {
     /// lifecycle state for servers that were never touched.
     pub(crate) fn existing_server_slot(&self, name: &str) -> Option<Arc<ServerSlot>> {
         self.control.slots.lock().get(name).cloned()
+    }
+    /// 取消该 server 当前的首次加载 attempt；返回是否有 attempt 需要任务收口。
+    pub(crate) fn cancel_load_attempt(&self, name: &str) -> bool {
+        let Some(slot) = self.existing_server_slot(name) else {
+            return false;
+        };
+        let attempt = slot.load_attempt.lock().take();
+        if let Some(attempt) = attempt {
+            attempt.cancel.cancel();
+            attempt.finish(LoadOutcome::Cancelled);
+            true
+        } else {
+            false
+        }
+    }
+    /// 没有就绪句柄时收口该 slot 已登记但未提交的连接。
+    ///
+    /// attempt 任务被 abort 后不会执行自身清理；卸载/取消路径用它释放迟到连接。
+    pub(crate) async fn discard_uncommitted_resources(&self, name: &str) {
+        if self
+            .client(name)
+            .is_some_and(|handle| handle.status == ClientStatus::Connected)
+        {
+            return;
+        }
+        let Some(slot) = self.existing_server_slot(name) else {
+            return;
+        };
+        let services = slot.services.lock().clone();
+        for service in services {
+            let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            let processes = slot.processes.lock().clone();
+            for process in processes {
+                let _ = peri_time::timeout(SHUTDOWN_TIMEOUT, process.close()).await;
+            }
+        }
+        self.release_stopped_resources(name);
     }
     pub(crate) fn track_server_service(
         &self,
@@ -385,6 +425,11 @@ impl McpClientPool {
             }
             Some(Err(error)) => LoadOutcome::Failed(error),
         };
+        // 取消可能丢弃了已建立但未提交的连接：在释放 operation 前收口，
+        // 避免取消后的重试与旧 attempt 的 service 同时存活。
+        if matches!(outcome, LoadOutcome::Cancelled) {
+            self.discard_uncommitted_resources(&server_name).await;
+        }
         drop(operation);
         self.finish_load_attempt(&slot, &attempt, outcome);
     }
@@ -544,6 +589,8 @@ impl McpClientPool {
             }
             slot.processes.lock().retain(|p| !p.is_stopped());
         }
+        // 已收口的 owner 不再留在共享保留表；重复 load/close 不随轮次增长。
+        self.release_stopped_resources(name);
         if failed {
             return Err(incomplete());
         }
@@ -787,3 +834,7 @@ mod tests;
 #[cfg(test)]
 #[path = "load_attempt_test.rs"]
 mod load_attempt_tests;
+
+#[cfg(test)]
+#[path = "dynamic_cleanup_test.rs"]
+mod dynamic_cleanup_tests;
