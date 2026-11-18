@@ -760,10 +760,6 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let ctx_usage = hooks.use_atom(&CONTEXT_USAGE);
     let attachments_handle = hooks.use_atom(&PENDING_ATTACHMENTS);
     let plugin_selections_handle = hooks.use_atom(&PENDING_PLUGIN_SELECTIONS);
-    let composer_tags = render::build_composer_tags(
-        render::build_plugin_label(&plugin_selections_handle.read()),
-        render::build_attachments_label(&attachments_handle.read()),
-    );
     // 右侧资源线：CPU%（>50 显示）→ MEM（恒显）→ ctx，保持原状态栏顺序；
     // 全部 muted，不启用资源阈值色（与 composer footer 其余文本同色系）。
     let sem = THEME_ATOM.state().read().semantic;
@@ -800,6 +796,15 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         }
         (!spans.is_empty()).then(|| Line::from(spans))
     };
+    // 左侧标签与右侧资源线共用同一行：先按右侧实际宽度留位，再生成左侧标签。
+    // 放不下时 `build_composer_tags` 截断插件 ID，附件提示保持在行尾可见。
+    let composer_max_width = usize::from(composer_area.map(|area| area.width).unwrap_or(80));
+    let right_width = footer_right.as_ref().map_or(0, |line| line.width());
+    let composer_tags = render::build_composer_tags(
+        render::build_plugin_label(&plugin_selections_handle.read()),
+        render::build_attachments_label(&attachments_handle.read()),
+        composer_max_width.saturating_sub(right_width + 2),
+    );
     // 当前会话标题：service_snapshot 周期性派生；空标题或 §11 高度降级
     // （h<12，session_title_visible=false）时上边栏不渲染标签。
     let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();

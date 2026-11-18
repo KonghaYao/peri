@@ -99,19 +99,42 @@ pub(super) fn build_plugin_label(
     ))
 }
 
-/// composer 底部左侧标签：插件选择在前、附件在后，窄屏由 Block 自行截断。
+/// composer 底部左侧标签：插件选择在前、附件在后。
+///
+/// `max_width` 是右侧资源线之外可用的列数。放不下时先截断插件 ID，
+/// 不能因为插件标签过长把附件提示裁掉。
 pub(super) fn build_composer_tags(
     plugin_label: Option<String>,
     attachments_label: Option<String>,
+    max_width: usize,
 ) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(plugin) = plugin_label {
-        parts.push(plugin);
+    let plugin_label = plugin_label.filter(|label| !label.is_empty());
+    let attachments_label = attachments_label.filter(|label| !label.is_empty());
+    match (plugin_label, attachments_label) {
+        (None, None) => None,
+        (Some(plugin), None) => Some(crate::truncate::truncate_by_width(&plugin, max_width)),
+        (None, Some(attachments)) => {
+            Some(crate::truncate::truncate_by_width(&attachments, max_width))
+        }
+        (Some(plugin), Some(attachments)) => {
+            let separator = " · ";
+            let full = format!("{plugin}{separator}{attachments}");
+            if full.width() <= max_width {
+                return Some(full);
+            }
+            // `truncate_by_width` 的省略号不占预算，先留 1 列避免覆盖右侧资源线。
+            let plugin_budget = max_width
+                .saturating_sub(attachments.width() + separator.width())
+                .saturating_sub(1);
+            if plugin_budget == 0 {
+                return Some(crate::truncate::truncate_by_width(&attachments, max_width));
+            }
+            Some(format!(
+                "{}{separator}{attachments}",
+                crate::truncate::truncate_by_width(&plugin, plugin_budget)
+            ))
+        }
     }
-    if let Some(attachments) = attachments_label {
-        parts.push(attachments);
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧附件标签
@@ -149,12 +172,18 @@ pub(super) fn build_composer_block(
         }
     }
     if show_bottom {
-        // 左侧插件/附件标签 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
+        // 左侧插件/附件标签 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）。
+        // 右侧 title 不预留空间时会直接覆盖左侧单元格，窄屏必须按右侧宽度截断。
+        let right_width = footer_right.as_ref().map_or(0, |line| line.width());
+        let left_budget = usize::from(max_width).saturating_sub(right_width + 2);
         if let Some(f) = composer_tags {
-            block = block.title_bottom(Line::from(Span::styled(
-                format!(" {f} "),
-                Style::default().fg(sem.text.muted),
-            )));
+            let fitted = crate::truncate::truncate_by_width(f, left_budget);
+            if !fitted.is_empty() {
+                block = block.title_bottom(Line::from(Span::styled(
+                    format!(" {fitted} "),
+                    Style::default().fg(sem.text.muted),
+                )));
+            }
         }
         if let Some(line) = footer_right {
             block = block.title_bottom(line.right_aligned());
