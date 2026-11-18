@@ -31,6 +31,22 @@ impl ResumeLoadGate {
     }
 }
 
+/// MQ 入队故障注入：模拟「写入结果未知」的两种终态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MqEnqueueUncertainty {
+    /// 行已写入，但调用方收到 `PersistenceUncertain`。
+    AfterWrite,
+    /// 行未写入，调用方收到 `PersistenceUncertain`。
+    WithoutWrite,
+}
+
+/// 一次性 MQ 入队故障：先放行 `skip` 次入队，再按 [`MqEnqueueUncertainty`] 返回未知结果。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct MqEnqueueFault {
+    pub(super) skip: usize,
+    pub(super) uncertainty: MqEnqueueUncertainty,
+}
+
 /// 故障注入与观察计数（只针对被测试的行为）。
 #[derive(Default)]
 pub(super) struct Injection {
@@ -159,6 +175,8 @@ pub(crate) struct MockSessionResources {
     pub(super) mq: peri_acp_types::session::InMemoryMqStore,
     /// 故障注入：置位后所有 MQ 入队返回内部错误（验证启动路径不得吞掉接纳失败）。
     pub(super) mq_enqueue_failure: AtomicBool,
+    /// 故障注入：下一次 MQ 入队按 [`MqEnqueueFault`] 返回「结果未知」（一次性）。
+    pub(super) mq_enqueue_uncertainty: Mutex<Option<MqEnqueueFault>>,
     /// 故障注入：置位后历史查询返回内部错误（验证 `Unknown` 不得被当作不存在）。
     pub(super) mq_history_failure: AtomicBool,
     /// 故障注入：剩余多少次 MQ 查询返回内部错误（验证查询失败不清理运行期状态）。
@@ -210,6 +228,7 @@ impl MockSessionResources {
             compaction_applied_hook: Mutex::new(None),
             mq: peri_acp_types::session::InMemoryMqStore::new(),
             mq_enqueue_failure: AtomicBool::new(false),
+            mq_enqueue_uncertainty: Mutex::new(None),
             mq_history_failure: AtomicBool::new(false),
             mq_query_failures: AtomicUsize::new(0),
             mq_cancel_gate: Mutex::new(None),
@@ -234,6 +253,26 @@ impl MockSessionResources {
     /// 故障注入：让后续 MQ 入队全部失败。
     pub(crate) fn fail_mq_enqueues(&self) {
         self.mq_enqueue_failure.store(true, Ordering::SeqCst);
+    }
+
+    /// 故障注入：先放行 `skip` 次入队，再写入并返回 `PersistenceUncertain`（一次性）。
+    pub(crate) fn fail_mq_enqueue_uncertain_after_write(&self, skip: usize) {
+        *self.mq_enqueue_uncertainty.lock().expect(
+            "self mq enqueue uncertainty mutex must remain unpoisoned throughout the test",
+        ) = Some(MqEnqueueFault {
+            skip,
+            uncertainty: MqEnqueueUncertainty::AfterWrite,
+        });
+    }
+
+    /// 故障注入：先放行 `skip` 次入队，再在不写入的情况下返回 `PersistenceUncertain`（一次性）。
+    pub(crate) fn fail_mq_enqueue_uncertain_without_write(&self, skip: usize) {
+        *self.mq_enqueue_uncertainty.lock().expect(
+            "self mq enqueue uncertainty mutex must remain unpoisoned throughout the test",
+        ) = Some(MqEnqueueFault {
+            skip,
+            uncertainty: MqEnqueueUncertainty::WithoutWrite,
+        });
     }
 
     /// 故障注入：让后续 MQ 历史查询全部失败。

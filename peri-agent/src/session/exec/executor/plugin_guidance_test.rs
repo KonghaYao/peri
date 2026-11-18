@@ -14,6 +14,7 @@ use peri_acp_types::plugin::PluginScope;
 use peri_acp_types::session::ExecutionBinding;
 use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session::MessageSource;
+use peri_acp_types::session::MqFilter;
 use peri_acp_types::session::MqReceiveStatus;
 use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::QueuedMessage;
@@ -27,6 +28,7 @@ use crate::session::exec::executor::plugin_guidance::guidance_texts;
 use crate::session::exec::executor::plugin_guidance::merge_plugin_selections;
 use crate::session::exec::executor::plugin_guidance::push_plugin_guidance;
 use crate::session::exec::executor::plugin_guidance::retain_effective_loaders;
+use crate::session::test_resources::mock::MockSessionResources;
 
 const RESEARCH_LOADER: &str = "LoadMCP__research_a1b2c3d4";
 
@@ -288,7 +290,11 @@ fn test_guidance_enqueue_failure_is_returned() {
         error.to_string().contains("closed to new enqueues"),
         "必须保留队列关闭原因: {error}"
     );
-    assert!(error.enqueued.is_empty(), "本次失败没有已提交前缀");
+    assert!(error.cleanup.is_empty(), "本次失败没有已提交前缀");
+    assert!(
+        error.uncertain.is_none(),
+        "准入关闭发生在写入前，不得伪报结果未知"
+    );
     assert!(queue.is_empty_sync(), "失败时不得留下部分指引");
 }
 
@@ -343,4 +349,148 @@ fn test_failed_guidance_cleanup_removes_only_attempt_rows() {
         1,
         "拒绝清理后用户输入行必须仍在 MQ"
     );
+}
+
+/// enqueue 返回 PersistenceUncertain 且行已写入：失败 chunk 不在已确认前缀里，
+/// 也必须按固定投递身份查回并纳入同一 attempt 清理。
+#[test]
+fn test_uncertain_guidance_enqueue_removes_written_failed_chunk() {
+    let resources = MockSessionResources::new();
+    let queue = MessageQueue::bind(resources.clone(), "guidance-uncertain-written".into());
+    let prompt = futures::executor::block_on(queue.enqueue_sent(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("run the selected plugin"),
+    )))
+    .expect("用户输入必须能进入 MQ")
+    .entry;
+    // 第一段正常写入，第二段写入后返回 PersistenceUncertain。
+    resources.fail_mq_enqueue_uncertain_after_write(1);
+    let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
+    let failure =
+        futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
+            .expect_err("写入结果未知必须让入队失败");
+    let uncertain = failure.uncertain.expect("失败片段身份必须保留");
+    assert_eq!(
+        failure.cleanup.len(),
+        2,
+        "已确认前缀与结果未知但已查回的片段都必须进入清理集合"
+    );
+    assert!(
+        failure
+            .cleanup
+            .iter()
+            .all(|row| row.source == MessageSource::SystemInjected),
+        "清理集合只允许 SystemInjected 行: {:?}",
+        failure.cleanup
+    );
+    assert_eq!(
+        failure.cleanup.last().map(|row| row.id),
+        Some(uncertain),
+        "失败片段必须按入队前固定的身份进入清理集合"
+    );
+
+    let execution = ExecutionBinding {
+        turn_id: TurnId::new(),
+        attempt_id: AttemptId::new(),
+    };
+    let outcome = futures::executor::block_on(
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+    )
+    .expect("失败 attempt 的 SystemInjected 行必须可清理");
+    assert!(
+        outcome
+            .items
+            .iter()
+            .all(|item| item.status == MqReceiveStatus::Suppressed),
+        "清理只删除 MQ 行，不写历史: {:?}",
+        outcome.items
+    );
+
+    let remaining = futures::executor::block_on(queue.snapshot()).expect("MQ snapshot");
+    assert_eq!(remaining.len(), 1, "只应保留用户输入行: {remaining:?}");
+    assert_eq!(remaining[0].id(), prompt.id);
+    assert_eq!(remaining[0].source, MessageSource::UserInput);
+
+    // 幂等：同一清理集合再次提交只报 Missing，不产生新的写入或错误。
+    let again = futures::executor::block_on(
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+    )
+    .expect("重复清理必须幂等");
+    assert!(
+        again
+            .items
+            .iter()
+            .all(|item| item.status == MqReceiveStatus::Missing),
+        "已删除的行只能报 Missing: {:?}",
+        again.items
+    );
+    assert_eq!(
+        futures::executor::block_on(queue.snapshot())
+            .expect("MQ snapshot")
+            .len(),
+        1,
+        "重复清理不得影响用户输入行"
+    );
+}
+
+/// enqueue 返回 PersistenceUncertain 但行未写入：只清理已确认前缀，失败身份仍被记录，
+/// 重复清理幂等且不制造新行。
+#[test]
+fn test_uncertain_guidance_enqueue_without_write_is_idempotent() {
+    let resources = MockSessionResources::new();
+    let queue = MessageQueue::bind(resources.clone(), "guidance-uncertain-missing".into());
+    let prompt = futures::executor::block_on(queue.enqueue_sent(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("run the selected plugin"),
+    )))
+    .expect("用户输入必须能进入 MQ")
+    .entry;
+    // 第一段正常写入，第二段不写入并返回 PersistenceUncertain。
+    resources.fail_mq_enqueue_uncertain_without_write(1);
+    let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
+    let failure =
+        futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
+            .expect_err("写入结果未知必须让入队失败");
+    let uncertain = failure.uncertain.expect("失败片段身份必须保留");
+    assert_eq!(failure.cleanup.len(), 1, "只有已确认前缀可以进入清理集合");
+    let remaining =
+        futures::executor::block_on(queue.query(MqFilter::default())).expect("MQ query");
+    assert!(
+        remaining.iter().all(|row| row.id != uncertain),
+        "未写入的片段不得凭空出现在 MQ: {remaining:?}"
+    );
+
+    let execution = ExecutionBinding {
+        turn_id: TurnId::new(),
+        attempt_id: AttemptId::new(),
+    };
+    let outcome = futures::executor::block_on(
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+    )
+    .expect("已确认前缀必须可清理");
+    assert!(
+        outcome
+            .items
+            .iter()
+            .all(|item| item.status == MqReceiveStatus::Suppressed),
+        "清理只删除 MQ 行，不写历史: {:?}",
+        outcome.items
+    );
+    let again = futures::executor::block_on(
+        queue.discard_system_injected_for_attempt(&failure.cleanup, &execution),
+    )
+    .expect("重复清理必须幂等");
+    assert!(
+        again
+            .items
+            .iter()
+            .all(|item| item.status == MqReceiveStatus::Missing),
+        "已删除的行只能报 Missing: {:?}",
+        again.items
+    );
+
+    let remaining = futures::executor::block_on(queue.snapshot()).expect("MQ snapshot");
+    assert_eq!(remaining.len(), 1, "只应保留用户输入行: {remaining:?}");
+    assert_eq!(remaining[0].id(), prompt.id);
+    assert_eq!(remaining[0].source, MessageSource::UserInput);
 }

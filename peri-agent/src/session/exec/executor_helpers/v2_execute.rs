@@ -354,23 +354,33 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         {
             let crate::session::exec::executor::plugin_guidance::GuidanceEnqueueFailure {
                 error,
-                enqueued,
+                cleanup,
+                uncertain,
             } = failure;
             error!(session_id = %req.session_id, %error, "plugin guidance enqueue failed");
-            // 逐段入队失败时，前面已提交的指引片段必须随本次 attempt 一起清理，
-            // 否则下一次 Receive 会把它当作完整指引消费。这里只允许删除
-            // SystemInjected 行，用户输入仍由取消/重投递契约管理。
+            if let Some(uncertain_id) = uncertain {
+                // 写入结果未知：即使存储暂时查不到该行，也必须留下身份，便于诊断遗留指引。
+                warn!(
+                    session_id = %req.session_id,
+                    message_id = ?uncertain_id,
+                    "plugin guidance enqueue outcome is uncertain; attempting attempt-scoped cleanup"
+                );
+            }
+            // 逐段入队失败时，前面已提交的指引片段与结果未知但已查回的片段必须随本次
+            // attempt 一起清理，否则下一次 Receive 会把它当作完整指引消费。这里只允许
+            // 删除 SystemInjected 行，用户输入仍由取消/重投递契约管理。
             let execution_binding = v2_out.context.session.turn.execution_binding();
             if let Err(cleanup_error) = v2_out
                 .context
                 .session
                 .queue
-                .discard_system_injected_for_attempt(&enqueued, &execution_binding)
+                .discard_system_injected_for_attempt(&cleanup, &execution_binding)
                 .await
             {
                 error!(
                     session_id = %req.session_id,
                     error = %cleanup_error,
+                    ?uncertain,
                     "plugin guidance cleanup failed"
                 );
             }

@@ -8,14 +8,19 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use peri_acp_types::mcp_control::DynamicLoaderBinding;
+use peri_acp_types::messages::MessageId;
 use peri_acp_types::plugin::LoadedPlugin;
 use peri_acp_types::session::MessageKind;
 use peri_acp_types::session::MessageQueue;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::session::MqEnqueueDisposition;
 use peri_acp_types::session::MqEntry;
+use peri_acp_types::session::MqFilter;
 use peri_acp_types::session::PluginSelection;
+use peri_acp_types::session::QueueClosed;
 use peri_acp_types::session::QueuedMessage;
+use peri_acp_types::session_resources::MutationOutcome;
+use peri_acp_types::session_resources::SessionResourceError;
 use peri_acp_types::system_reminder::ReminderAudience;
 use peri_acp_types::system_reminder::ReminderAudiences;
 use peri_acp_types::system_reminder::ReminderCategory;
@@ -142,14 +147,18 @@ fn guidance_for_plugin(name: &str, loaders: &[&str]) -> String {
     )
 }
 
-/// 指引入队失败：携带已提交的前缀，调用方必须按 attempt 清理。
+/// 指引入队失败：携带已确认前缀与结果未知的片段身份，调用方必须按 attempt 清理。
 ///
-/// 逐段入队不是原子操作；丢弃 `enqueued` 会让失败 attempt 的片段留在 MQ，
-/// 被下一次 Receive 当成完整指引消费。
+/// 逐段入队不是原子操作；丢弃 `cleanup` 会让失败 attempt 的片段留在 MQ，
+/// 被下一次 Receive 当成完整指引消费。失败片段可能已经提交，因此它的行也会在
+/// 可查回时进入 `cleanup`；`uncertain` 保留身份，供查询不可用时记录与诊断。
 #[derive(Debug)]
 pub(crate) struct GuidanceEnqueueFailure {
     pub(crate) error: anyhow::Error,
-    pub(crate) enqueued: Vec<MqEntry>,
+    /// 本次 attempt 必须删除的 SystemInjected 行：已确认前缀 + 失败片段中已查回的行。
+    pub(crate) cleanup: Vec<MqEntry>,
+    /// 写入结果未知的失败片段身份；不能只返回前缀。
+    pub(crate) uncertain: Option<MessageId>,
 }
 
 impl std::fmt::Display for GuidanceEnqueueFailure {
@@ -164,10 +173,24 @@ impl std::error::Error for GuidanceEnqueueFailure {
     }
 }
 
+/// 失败片段的写入结果是否可能已经生效。
+///
+/// 只有能证明「未写入」的错误才排除：准入关闭发生在存储调用之前，存储明确报告
+/// `NotApplied` 时也从未提交。其余错误（尤其 `PersistenceUncertain`）都必须按
+/// 可能已提交处理，否则该 attempt 的行会遗留到下一次 Receive。
+fn failed_chunk_may_be_persisted(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<QueueClosed>().is_some() {
+        return false;
+    }
+    error
+        .downcast_ref::<SessionResourceError>()
+        .is_none_or(|error| error.effect() != MutationOutcome::NotApplied)
+}
+
 /// 以 Model-only canonical reminder 投递指引；不修改 frozen system prompt。
 ///
-/// 逐段入队不是原子操作：任一段失败都把错误与已提交前缀返回给调用方，
-/// 不能把已写入的片段当作完整指引继续执行。
+/// 逐段入队不是原子操作：任一段失败都把错误、已提交前缀与失败片段身份返回给调用方。
+/// 失败片段的 id 在入队前固定，因此即使存储报告结果未知也能按身份清理。
 pub(crate) async fn push_plugin_guidance(
     queue: &MessageQueue,
     texts: &[String],
@@ -194,10 +217,13 @@ pub(crate) async fn push_plugin_guidance(
                     metadata: serde_json::json!({}),
                 })
                 .expect("plugin guidance is bounded before reminder construction");
-            let message = QueuedMessage::system_reminder(
+            // 入队失败后返回值里不再有 MqEntry，必须在消费消息前固定投递身份。
+            let message_id = MessageId::new();
+            let message = QueuedMessage::system_reminder_with_delivery_id(
                 MessageKind::Info,
                 MessageSource::SystemInjected,
                 reminder,
+                message_id,
             );
             match queue.enqueue(message).await {
                 Ok(outcome) => {
@@ -205,7 +231,25 @@ pub(crate) async fn push_plugin_guidance(
                         enqueued.push(outcome.entry);
                     }
                 }
-                Err(error) => return Err(GuidanceEnqueueFailure { error, enqueued }),
+                Err(error) => {
+                    let uncertain = failed_chunk_may_be_persisted(&error);
+                    if uncertain {
+                        // 失败片段可能已经提交：按固定 id 查回该行，纳入同一清理集合；
+                        // 查询本身失败时保留身份，由调用方记录并保守处理。
+                        if let Ok(rows) = queue.query(MqFilter::default()).await {
+                            if let Some(row) = rows.into_iter().find(|row| {
+                                row.id == message_id && row.source == MessageSource::SystemInjected
+                            }) {
+                                enqueued.push(row);
+                            }
+                        }
+                    }
+                    return Err(GuidanceEnqueueFailure {
+                        error,
+                        cleanup: enqueued,
+                        uncertain: uncertain.then_some(message_id),
+                    });
+                }
             }
             remaining = &remaining[end..];
         }
