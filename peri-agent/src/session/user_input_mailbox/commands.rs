@@ -134,6 +134,7 @@ impl UserInputMailbox {
             },
         )
         .with_original_draft(request.original_draft.clone())
+        .with_plugin_selections(request.plugin_selections.clone())
         // 用户输入是必须处理的消息；「未 dispatch 不激活」由 MQ 的发送选择
         // （`send_inputs`）保证，而不是把策略降级为 passive。
         .with_policy(peri_acp_types::session::MessagePolicy::ensure_processing());

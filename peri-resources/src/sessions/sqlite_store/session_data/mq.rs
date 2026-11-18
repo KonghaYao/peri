@@ -165,7 +165,8 @@ impl SqliteSessionData {
                 "MQ payload id must match the queued message id",
             ));
         }
-        let payload = crate::sessions::mq_rows::payload_json(&input.payload)?;
+        let payload =
+            crate::sessions::mq_rows::payload_json(&input.payload, &input.plugin_selections)?;
         let policy = crate::sessions::mq_rows::policy_json(&input.policy);
         let kind = crate::sessions::mq_rows::kind_token(input.kind)?;
         let source = crate::sessions::mq_rows::source_token(&input.source)?;
@@ -574,7 +575,10 @@ impl SqliteSessionData {
                         if owner == thread_id.as_str()
                             && crate::sessions::mq_rows::same_payload(
                                 &content,
-                                &crate::sessions::mq_rows::payload_json(&entry.payload)?,
+                                &crate::sessions::mq_rows::payload_json(
+                                    &entry.payload,
+                                    &entry.plugin_selections,
+                                )?,
                             )
                         {
                             MqReceiveStatus::AlreadyPresent
@@ -588,7 +592,10 @@ impl SqliteSessionData {
                             .bind(&message_id)
                             .bind(thread_id.as_str())
                             .bind(crate::sessions::canonical::payload_role(&entry.payload))
-                            .bind(crate::sessions::mq_rows::payload_json(&entry.payload)?)
+                            .bind(crate::sessions::mq_rows::payload_json(
+                                &entry.payload,
+                                &entry.plugin_selections,
+                            )?)
                             .execute(&mut *connection)
                             .await
                             .map_err(|error| super::map_sqlx(&error))?;
@@ -679,7 +686,8 @@ impl SqliteSessionData {
         if target != child {
             self.require_session(&mut tx, target).await?;
         }
-        let payload = crate::sessions::mq_rows::payload_json(&input.payload)?;
+        let payload =
+            crate::sessions::mq_rows::payload_json(&input.payload, &input.plugin_selections)?;
         let policy = crate::sessions::mq_rows::policy_json(&input.policy);
         let ensures_processing = input.policy.ensures_processing();
         let kind = crate::sessions::mq_rows::kind_token(input.kind)?;
@@ -976,6 +984,7 @@ fn settled_without_write(input: MqInput) -> MqEnqueueOutcome {
             payload: input.payload,
             policy: input.policy,
             original_draft: input.original_draft,
+            plugin_selections: input.plugin_selections,
         },
     }
 }

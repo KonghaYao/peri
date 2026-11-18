@@ -36,7 +36,11 @@ pub use thread_store::PersistedPayload;
 
 pub use thread_store::serialize_persisted_payload;
 
+pub use thread_store::serialize_persisted_payload_with_selections;
+
 pub use thread_store::deserialize_persisted_payload;
+
+pub use thread_store::deserialize_persisted_payload_with_selections;
 
 pub use thread_store::InheritedContext;
 
@@ -114,6 +118,38 @@ mod persisted_payload_tests {
         future["version"] = serde_json::json!(PERSISTED_PAYLOAD_VERSION);
         future["reminder"]["body"] = serde_json::json!({"not": "text"});
         assert!(deserialize_persisted_payload(&future.to_string()).is_err());
+    }
+
+    /// MQ 待发行用 payload JSON 的附带字段持久化插件选择；历史读取不暴露该字段。
+    #[test]
+    fn plugin_selections_round_trip_inside_payload_envelope() {
+        use crate::session::PluginSelection;
+
+        let payload = PersistedPayload::Message(BaseMessage::human("select alpha"));
+        let selections = vec![
+            PluginSelection::new("alpha"),
+            PluginSelection::new("beta@market"),
+        ];
+        let encoded = serialize_persisted_payload_with_selections(&payload, &selections).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            value["pluginSelections"],
+            serde_json::json!([{"pluginId": "alpha"}, {"pluginId": "beta@market"}])
+        );
+
+        let (restored, restored_selections) =
+            deserialize_persisted_payload_with_selections(&encoded).unwrap();
+        assert_eq!(restored.id(), payload.id());
+        assert_eq!(restored_selections, selections);
+        assert_eq!(
+            deserialize_persisted_payload(&encoded).unwrap().id(),
+            payload.id(),
+            "历史读取仍按原语义只取 payload"
+        );
+
+        let legacy = serialize_persisted_payload(&payload).unwrap();
+        let (_, empty) = deserialize_persisted_payload_with_selections(&legacy).unwrap();
+        assert!(empty.is_empty(), "旧行缺省为空选择");
     }
 }
 

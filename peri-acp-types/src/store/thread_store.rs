@@ -6,6 +6,8 @@ use super::{
     ThreadMeta, TrustedSystemReminder, TrustedSystemReminderFactory, WorkState,
 };
 
+use crate::session::PluginSelection;
+
 /// Current inline history envelope version.
 pub const PERSISTED_PAYLOAD_VERSION: u16 = 1;
 
@@ -55,6 +57,13 @@ pub(super) struct PersistedEnvelopeRef<'payload> {
     pub(super) version: u16,
     #[serde(flatten)]
     pub(super) payload: PersistedPayloadRef<'payload>,
+    /// MQ 待发行携带的插件选择；随 input_id 冻结，历史读取不保留。
+    #[serde(
+        rename = "pluginSelections",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(super) plugin_selections: Vec<&'payload PluginSelection>,
 }
 
 #[derive(Serialize)]
@@ -74,6 +83,8 @@ pub(super) struct RawPersistedEnvelope {
     pub(super) version: u16,
     #[serde(flatten)]
     pub(super) payload: RawPersistedPayload,
+    #[serde(rename = "pluginSelections", default)]
+    pub(super) plugin_selections: Vec<PluginSelection>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +100,17 @@ pub(super) enum RawPersistedPayload {
 }
 
 pub fn serialize_persisted_payload(payload: &PersistedPayload) -> Result<String> {
+    serialize_persisted_payload_with_selections(payload, &[])
+}
+
+/// 持久化 MQ 待发行时一并写入插件选择。
+///
+/// 选择属于 input_id 的事实，复用既有 JSON payload 扩展，不新增表列；
+/// 历史读取仍走 [`deserialize_persisted_payload`]，不会把选择投影给客户端。
+pub fn serialize_persisted_payload_with_selections(
+    payload: &PersistedPayload,
+    plugin_selections: &[PluginSelection],
+) -> Result<String> {
     let payload = match payload {
         PersistedPayload::Message(message) => PersistedPayloadRef::Message { message },
         PersistedPayload::SystemReminder { id, reminder } => PersistedPayloadRef::SystemReminder {
@@ -99,31 +121,47 @@ pub fn serialize_persisted_payload(payload: &PersistedPayload) -> Result<String>
     Ok(serde_json::to_string(&PersistedEnvelopeRef {
         version: PERSISTED_PAYLOAD_VERSION,
         payload,
+        plugin_selections: plugin_selections.iter().collect(),
     })?)
 }
 
 /// Reads the V1 envelope or an unwrapped legacy `BaseMessage` row.
 /// Unknown/corrupt envelopes return an error and can never establish recovery trust.
 pub fn deserialize_persisted_payload(input: &str) -> Result<PersistedPayload> {
+    deserialize_persisted_payload_with_selections(input).map(|(payload, _)| payload)
+}
+
+/// 读取 payload 与其附带的 MQ 插件选择；历史行没有该字段时返回空集合。
+pub fn deserialize_persisted_payload_with_selections(
+    input: &str,
+) -> Result<(PersistedPayload, Vec<PluginSelection>)> {
     let value: serde_json::Value = serde_json::from_str(input)?;
     if value.get("version").is_none() && value.get("type").is_none() {
-        return Ok(PersistedPayload::Message(serde_json::from_value(value)?));
+        return Ok((
+            PersistedPayload::Message(serde_json::from_value(value)?),
+            Vec::new(),
+        ));
     }
-    let envelope: RawPersistedEnvelope = serde_json::from_value(value)?;
-    if envelope.version != PERSISTED_PAYLOAD_VERSION {
-        anyhow::bail!("unsupported persisted payload version {}", envelope.version);
+    let RawPersistedEnvelope {
+        version,
+        payload,
+        plugin_selections,
+    } = serde_json::from_value(value)?;
+    if version != PERSISTED_PAYLOAD_VERSION {
+        anyhow::bail!("unsupported persisted payload version {version}");
     }
-    match envelope.payload {
-        RawPersistedPayload::Message { message } => Ok(PersistedPayload::Message(*message)),
+    let payload = match payload {
+        RawPersistedPayload::Message { message } => PersistedPayload::Message(*message),
         RawPersistedPayload::SystemReminder { id, reminder } => {
             let reminder = serde_json::to_vec(&reminder)?;
             let reminder = system_reminder::decode_system_reminder_json(&reminder)?;
-            Ok(PersistedPayload::SystemReminder {
+            PersistedPayload::SystemReminder {
                 id,
                 reminder: TrustedSystemReminderFactory::for_recovery().construct(reminder)?,
-            })
+            }
         }
-    }
+    };
+    Ok((payload, plugin_selections))
 }
 
 /// Frozen, read-only context inherited by a child thread, including projection state.

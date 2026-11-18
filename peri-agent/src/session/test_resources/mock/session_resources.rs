@@ -358,6 +358,7 @@ impl SessionResources for MockSessionResources {
                     payload: input.payload,
                     policy: input.policy,
                     original_draft: input.original_draft,
+                    plugin_selections: input.plugin_selections,
                 },
             });
         }

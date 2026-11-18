@@ -119,6 +119,7 @@ fn pending_input(text: &str, policy: MessagePolicy) -> MqInput {
         }),
         policy,
         original_draft: None,
+        plugin_selections: Vec::new(),
     }
 }
 

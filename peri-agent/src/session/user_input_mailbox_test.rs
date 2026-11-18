@@ -12,6 +12,7 @@ use peri_acp_types::session::DispatchUserInputsRequest;
 use peri_acp_types::session::EnqueueUserInputRequest;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::session::MqCancelOutcome;
+use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::SessionInbox;
 use peri_acp_types::session::TakeBackUserInputRequest;
 use peri_acp_types::session::TurnId;
@@ -719,6 +720,43 @@ async fn refresh_prunes_only_confirmed_mq_absence() {
             .iter()
             .all(|item| item.input_id != removed.input_id),
         "成功查询确认不存在的 Queued 才允许清理"
+    );
+}
+
+/// [回归] 实例重建后从 MQ 行恢复插件选择，快照标签不丢。
+#[tokio::test]
+async fn hydrate_restores_plugin_selections_from_store() {
+    let resources = MockSessionResources::new();
+    let (first, _queue) = make_mock_mailbox(Arc::clone(&resources));
+    first
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .expect("the attach external attempt fixture result is required for this assertion");
+    let mut input = make_input(&first, "选择插件");
+    input.plugin_selections = vec![
+        PluginSelection::new("alpha"),
+        PluginSelection::new("beta@market"),
+    ];
+    first
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+
+    // 新实例只从 MQ 查询恢复，不依赖上一实例的内存记录。
+    let (restarted, _queue) = make_mock_mailbox(resources);
+    restarted
+        .hydrate()
+        .await
+        .expect("the hydrate fixture result is required for this assertion");
+    let snapshot = restarted.snapshot().await;
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.input_id == input.input_id)
+        .expect("待发行必须在重建后恢复");
+    assert_eq!(
+        item.plugin_selections, input.plugin_selections,
+        "选择随 input_id 持久化，重启后仍要生成标签与指引"
     );
 }
 

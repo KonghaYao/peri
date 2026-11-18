@@ -140,6 +140,7 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
                 }),
                 policy: MessagePolicy::ensure_processing(),
                 original_draft: Some(format!("{id} draft")),
+                plugin_selections: Vec::new(),
             },
         )
         .await

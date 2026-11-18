@@ -36,6 +36,7 @@ fn with_policy(id: MessageId, text: &str, kind: MessageKind, policy: MessagePoli
         }),
         policy,
         original_draft: Some(text.to_owned()),
+        plugin_selections: Vec::new(),
     }
 }
 
