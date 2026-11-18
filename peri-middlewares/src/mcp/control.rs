@@ -196,6 +196,12 @@ impl McpClientPool {
             .or_default()
             .clone()
     }
+
+    /// Read-only slot lookup for catalog projection: snapshots must not create
+    /// lifecycle state for servers that were never touched.
+    pub(crate) fn existing_server_slot(&self, name: &str) -> Option<Arc<ServerSlot>> {
+        self.control.slots.lock().get(name).cloned()
+    }
     pub(crate) fn track_server_service(
         &self,
         name: &str,
@@ -210,7 +216,6 @@ impl McpClientPool {
     /// 首次加载（plan 6.2）：已就绪直接复用；否则加入或发起该 server 的唯一 attempt。
     ///
     /// 等待者共享同一结果；单个等待者退出不影响其他等待者，全部退出才取消连接。
-    #[allow(dead_code)] // 动态 Loader（B4）是唯一生产调用方。
     pub(crate) async fn ensure_loaded(
         self: &Arc<Self>,
         server_name: &str,
@@ -752,13 +757,16 @@ impl SessionMcpCatalogPort for PoolCatalog {
             if generation != self.pool.catalog_generation.load(Ordering::Acquire) {
                 continue;
             }
-            return Arc::new(SessionMcpCatalogSnapshot {
-                generation,
-                tools: bridges
-                    .into_iter()
-                    .map(|b| Arc::new(b) as Arc<dyn peri_acp_types::tools::BaseTool>)
-                    .collect(),
-            });
+            let mut tools: Vec<Arc<dyn BaseTool>> = bridges
+                .into_iter()
+                .map(|bridge| Arc::new(bridge) as Arc<dyn BaseTool>)
+                .collect();
+            // Dynamic Loader 与远端工具同属池内目录：来源关闭/禁用即消失（plan 5.2）。
+            tools.extend(super::loader::dynamic_loader_tools(
+                &self.pool,
+                Some(&self.session),
+            ));
+            return Arc::new(SessionMcpCatalogSnapshot { generation, tools });
         }
     }
 }
