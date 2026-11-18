@@ -163,6 +163,10 @@ pub(crate) struct MockSessionResources {
     pub(super) mq_history_failure: AtomicBool,
     /// 故障注入：剩余多少次 MQ 查询返回内部错误（验证查询失败不清理运行期状态）。
     pub(super) mq_query_failures: AtomicUsize,
+    /// 失败补偿的撤回门：`mq_cancel` 进入后暂停，用例可在撤回进行中取消调用方。
+    pub(crate) mq_cancel_gate: Mutex<Option<ResumeLoadGate>>,
+    /// 故障注入：剩余多少次 `mq_cancel` 返回「提交未知」（验证撤回未确认时不回滚）。
+    pub(crate) mq_cancel_failures: AtomicUsize,
     /// 故障注入：剩余多少次终态结算在写入前返回错误（验证同身份重试）。
     pub(super) finalize_failures: AtomicUsize,
     /// 已发生的终态结算次数（含注入失败）。
@@ -208,6 +212,8 @@ impl MockSessionResources {
             mq_enqueue_failure: AtomicBool::new(false),
             mq_history_failure: AtomicBool::new(false),
             mq_query_failures: AtomicUsize::new(0),
+            mq_cancel_gate: Mutex::new(None),
+            mq_cancel_failures: AtomicUsize::new(0),
             finalize_failures: AtomicUsize::new(0),
             finalize_attempts: AtomicUsize::new(0),
             finalize_message_ids: Mutex::new(Vec::new()),

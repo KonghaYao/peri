@@ -1,12 +1,14 @@
 //! Existing child-thread claim, history reconstruction and pre-run rollback.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use peri_acp_types::session::MqCancelOutcome;
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::MqFilter;
 use peri_acp_types::store::PersistedPayload;
 
 use crate::messages::BaseMessage;
-use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
+use crate::session::queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 
 use crate::session::subagent::factory::claim::ResumeClaim;
 
@@ -376,24 +378,21 @@ pub(super) async fn resume_subagent_impl(
     {
         Ok(()) => {}
         Err(e) => {
-            // 注册失败时 child 未执行，本次已接纳的 prompt 必须撤回；否则重试会在
-            // 同一 thread 再次投递同一条指令，child 收到两遍。
-            let withdrawal = prompt_queue.cancel_user_input(&prompt_message_id).await;
-            // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
-            // register_with_kind 撞 per-kind 上限）时任务未执行——status
-            // 回滚至原值，防 thread 永久停留 active（R-M1 执行前失败回滚
-            // 契约，与 load_messages 失败回滚同款）；错误携带 thread_id
-            let rollback = claim.rollback().await;
-            let mut suffix = rollback.err().map(|e| format!("; {e}")).unwrap_or_default();
-            match withdrawal {
-                Ok(MqCancelOutcome::Cancelled(_)) | Ok(MqCancelOutcome::NotFound) => {}
-                Ok(MqCancelOutcome::AlreadyHandedOff) => {
-                    suffix.push_str("; admitted prompt was already handed off");
-                }
-                Err(error) => suffix.push_str(&format!(
-                    "; admitted prompt could not be withdrawn: {error}"
-                )),
-            }
+            // 失败补偿必须是不可拆分的整体：owned task 先确认撤回本次已接纳的
+            // prompt，再回滚认领。调用方取消只丢弃 JoinHandle，不会留下
+            // 「状态已回滚、prompt 仍在队列」的重试重复投递窗口。
+            let compensation = tokio::spawn(compensate_failed_resume(
+                prompt_queue,
+                prompt_message_id,
+                claim,
+            ));
+            let suffix = match tokio::time::timeout(RESUME_COMPENSATION_WAIT, compensation).await {
+                Ok(Ok(Ok(()))) => String::new(),
+                Ok(Ok(Err(rollback))) => format!("; {rollback}"),
+                Ok(Err(join)) => format!("; resume compensation task failed: {join}"),
+                // 补偿仍由 owned task 持有认领并在后台重试；调用方只报告未结清。
+                Err(_) => "; resume compensation is still running".to_string(),
+            };
             return Err(format!("resume_subagent: thread {}: {}{}", thread_id, e, suffix).into());
         }
     }
@@ -403,6 +402,54 @@ pub(super) async fn resume_subagent_impl(
         session,
         cancel_token,
     })
+}
+
+/// 失败补偿的调用方等待上限；超时后 owned task 继续持有认领并重试撤回。
+const RESUME_COMPENSATION_WAIT: Duration = Duration::from_secs(10);
+/// 撤回重试的初始/上限间隔；只控制频率，不改变「未确认不继续」的次序。
+const WITHDRAW_RETRY_INITIAL: Duration = Duration::from_millis(50);
+const WITHDRAW_RETRY_MAX: Duration = Duration::from_secs(1);
+
+/// 失败派发的 owned 补偿：先撤回本次 prompt，再回滚认领。
+///
+/// 两步由同一个任务顺序执行，调用方取消不会把它们拆开；撤回未确认提交时
+/// `rollback` 不会运行，认领保持 Active，避免重试重复投递。
+async fn compensate_failed_resume(
+    queue: MessageQueue,
+    prompt_id: MessageId,
+    claim: ResumeClaim,
+) -> Result<(), String> {
+    withdraw_admitted_prompt(&queue, prompt_id).await;
+    claim.rollback().await
+}
+
+/// 撤回已接纳的 prompt，直到结果可判定。
+///
+/// `mq_cancel` 在各后端都以单次事务删除：内存后端同步删除；SQLite 与远端在提交
+/// 失败时可能只报告「未知」。因此一次 `Err` 既不能当作「行还在」，也不能当作
+/// 「行已删」；重查 MQ 后行已消失才算撤回完成，仍在则按退避重试。
+async fn withdraw_admitted_prompt(queue: &MessageQueue, prompt_id: MessageId) {
+    let mut delay = WITHDRAW_RETRY_INITIAL;
+    loop {
+        match queue.cancel_user_input(&prompt_id).await {
+            Ok(_) => return,
+            Err(error) => {
+                match queue.query(MqFilter::default()).await {
+                    Ok(rows) if !rows.iter().any(|row| row.id == prompt_id) => return,
+                    Ok(_) => {}
+                    Err(query_error) => {
+                        tracing::warn!(
+                            %query_error,
+                            "resume compensation could not verify prompt withdrawal"
+                        );
+                    }
+                }
+                tracing::warn!(%error, "resume prompt withdrawal failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(WITHDRAW_RETRY_MAX);
+            }
+        }
+    }
 }
 
 /// 隐式 continue 指令（prompt 缺省时注入，issue 决策 9）
