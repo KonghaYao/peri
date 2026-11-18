@@ -149,31 +149,8 @@ pub(super) fn dispatch_submit_request<F>(
 pub(super) fn commit_input(state: State<TextAreaState>) {
     super::exit_entry_focus_on_edit();
     let mut s = state.write();
-    if crate::kit::steer_state::is_enabled()
-        && crate::kit::atoms::ACP_STATE.state().read().is_loading
-        && is_remote_command(&s.text)
-    {
-        show_submit_blocked_notification(&crate::kit::submit_request::SubmitRequest::AgentText {
-            text: s.text.clone(),
-            attachments: Vec::new(),
-            plugin_selections: Vec::new(),
-        });
-        return;
-    }
-    // 旧 Host 的 EnqueueUserInputRequest 拒绝 pluginSelections：能力未协商时必须
-    // 保留草稿与选择并说明入口不可用，不能静默丢弃标签后照常提交。
-    if !crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
-        .state()
-        .read()
-        .is_empty()
-        && !crate::kit::steer_state::is_enabled()
-    {
-        *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
-            message: i18n::tr("submit-plugin-selection-unavailable"),
-            until: peri_time::monotonic_now() + std::time::Duration::from_secs(3),
-        });
-        crate::kit::atoms::RENDER_HEARTBEAT
-            .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
+    if let Some(blocked) = commit_block_reason(&s.text) {
+        handle_commit_block(blocked, &s.text);
         return;
     }
     let submitted = s.take_text();
@@ -183,6 +160,57 @@ pub(super) fn commit_input(state: State<TextAreaState>) {
     super::popup::reset_mention_popup();
     super::popup::reset_slash_popup();
     *crate::kit::atoms::PREDICTION.state().write() = crate::kit::atoms::PredictionState::default();
+}
+
+/// `commit_input` 的提交前阻断分支；返回 `Some` 时草稿与选择必须原样保留。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommitBlock {
+    RemoteCommand,
+    PluginSelectionUnavailable,
+}
+
+/// 旧 Host 的 EnqueueUserInputRequest 拒绝 pluginSelections：能力未协商时
+/// 必须在取走草稿前阻断，不能静默丢弃标签后照常提交。
+pub(super) fn commit_block_reason(text: &str) -> Option<CommitBlock> {
+    if crate::kit::steer_state::is_enabled()
+        && crate::kit::atoms::ACP_STATE.state().read().is_loading
+        && is_remote_command(text)
+    {
+        return Some(CommitBlock::RemoteCommand);
+    }
+    if !crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+        .state()
+        .read()
+        .is_empty()
+        && !crate::kit::steer_state::supports_plugin_selections()
+    {
+        return Some(CommitBlock::PluginSelectionUnavailable);
+    }
+    None
+}
+
+pub(super) fn handle_commit_block(blocked: CommitBlock, text: &str) {
+    match blocked {
+        CommitBlock::RemoteCommand => {
+            show_submit_blocked_notification(
+                &crate::kit::submit_request::SubmitRequest::AgentText {
+                    text: text.to_owned(),
+                    attachments: Vec::new(),
+                    plugin_selections: Vec::new(),
+                },
+            );
+        }
+        CommitBlock::PluginSelectionUnavailable => notify_plugin_selection_unavailable(),
+    }
+}
+
+fn notify_plugin_selection_unavailable() {
+    *crate::kit::atoms::NOTIFICATION.state().write() = Some(crate::kit::atoms::Notification {
+        message: i18n::tr("submit-plugin-selection-unavailable"),
+        until: peri_time::monotonic_now() + std::time::Duration::from_secs(3),
+    });
+    crate::kit::atoms::RENDER_HEARTBEAT
+        .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
 }
 
 pub(super) fn show_submit_blocked_notification(request: &SubmitRequest) {

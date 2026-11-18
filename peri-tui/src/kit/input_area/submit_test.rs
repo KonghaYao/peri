@@ -326,6 +326,48 @@ fn test_submit_text_control_request_keeps_pending_plugin_selection() {
     );
 }
 
+/// 未协商 `peri.userInputQueue.pluginSelections` 时，提交必须在取走草稿前阻断：
+/// 草稿与选择原样保留，并提示入口不可用（R2/R3）。
+#[test]
+#[serial]
+fn test_commit_input_keeps_draft_and_selection_without_plugin_capability() {
+    use super::CommitBlock;
+    use super::commit_block_reason;
+    use super::handle_commit_block;
+
+    super::super::reset_submit_side_effect_state();
+    let mut text = peri_tui_components::textarea::TextAreaState::default();
+    text.insert_str("选择插件后提交");
+    let selections = vec![peri_acp_types::session::PluginSelection::new("alpha")];
+    crate::kit::atoms::PENDING_PLUGIN_SELECTIONS.set(selections.clone());
+    {
+        let steers_atom = crate::kit::steer_state::STEERS.state();
+        let mut steers = steers_atom.write();
+        steers.enabled = true;
+        steers.plugin_selections = false;
+    }
+
+    let blocked = commit_block_reason(&text.text).expect("旧 Host 必须阻断带选择的提交");
+    assert_eq!(blocked, CommitBlock::PluginSelectionUnavailable);
+    handle_commit_block(blocked, &text.text);
+
+    assert_eq!(text.text, "选择插件后提交", "阻断分支不得取走草稿");
+    assert_eq!(
+        crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+            .state()
+            .read()
+            .clone(),
+        selections,
+        "阻断分支不得丢弃插件选择"
+    );
+    assert!(
+        crate::kit::atoms::NOTIFICATION.state().read().is_some(),
+        "必须明确提示选择入口不可用"
+    );
+
+    crate::kit::steer_state::STEERS.state().write().enabled = false;
+}
+
 #[test]
 #[serial]
 fn test_submit_text_loading_clear_shows_notification_without_history_or_buffer() {
