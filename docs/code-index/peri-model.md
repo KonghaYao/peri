@@ -1,5 +1,7 @@
 # peri-model 代码索引
 
+更新：2026-11-18
+
 模型重试的异步等待由 [peri-time](peri-time.md) 提供；可见增量、重试资格和
 取消结果仍由模型 runtime 判定。
 
