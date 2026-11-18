@@ -7,7 +7,12 @@ use super::ACP_STATE;
 use super::INPUT_BUFFER;
 use super::SubmitRequest;
 
+use std::cell::RefCell;
+
 use crate::app::panel_types::PanelKind;
+
+use peri_tui_components::textarea::TextAreaState;
+use ratatui_kit::prelude::{Component, ComponentUpdater, Hooks, Props, State, UseState, element};
 
 use serial_test::serial;
 
@@ -326,18 +331,66 @@ fn test_submit_text_control_request_keeps_pending_plugin_selection() {
     );
 }
 
+// `commit_input` 探针：只有组件 update 里的 `use_state` 能拿到生产同款
+// `State<TextAreaState>`，辅助函数测试无法证明真实提交入口没有取走草稿。
+type CommitInputVisitor = Box<dyn FnOnce(State<TextAreaState>)>;
+
+thread_local! {
+    static COMMIT_INPUT_VISITOR: RefCell<Option<CommitInputVisitor>> = const { RefCell::new(None) };
+}
+
+#[derive(Default, Props)]
+struct CommitInputProbeProps;
+
+struct CommitInputProbe;
+
+impl Component for CommitInputProbe {
+    type Props<'request> = CommitInputProbeProps;
+
+    fn new(_props: &Self::Props<'_>) -> Self {
+        Self
+    }
+
+    fn update(
+        &mut self,
+        _props: &mut Self::Props<'_>,
+        mut hooks: Hooks,
+        _updater: &mut ComponentUpdater,
+    ) {
+        let state = hooks.use_state(|| {
+            let mut text = TextAreaState::default();
+            text.insert_str("选择插件后提交");
+            text
+        });
+        COMMIT_INPUT_VISITOR.with(|slot| {
+            if let Some(visitor) = slot.borrow_mut().take() {
+                visitor(state);
+            }
+        });
+    }
+}
+
+/// 在真实 `commit_input` 落点上执行一次探针，返回阻断后的编辑区文本。
+fn probe_commit_input() -> String {
+    let observed = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+    let sink = observed.clone();
+    COMMIT_INPUT_VISITOR.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |state: State<TextAreaState>| {
+            super::commit_input(state);
+            *sink.lock() = state.read().text.clone();
+        }));
+    });
+    let _ = ratatui_kit::test_util::render_frame(element!(CommitInputProbe()), 1, 1);
+    COMMIT_INPUT_VISITOR.with(|slot| *slot.borrow_mut() = None);
+    observed.lock().clone()
+}
+
 /// 未协商 `peri.userInputQueue.pluginSelections` 时，提交必须在取走草稿前阻断：
 /// 草稿与选择原样保留，并提示入口不可用（R2/R3）。
 #[test]
 #[serial]
 fn test_commit_input_keeps_draft_and_selection_without_plugin_capability() {
-    use super::CommitBlock;
-    use super::commit_block_reason;
-    use super::handle_commit_block;
-
     super::super::reset_submit_side_effect_state();
-    let mut text = peri_tui_components::textarea::TextAreaState::default();
-    text.insert_str("选择插件后提交");
     let selections = vec![peri_acp_types::session::PluginSelection::new("alpha")];
     crate::kit::atoms::PENDING_PLUGIN_SELECTIONS.set(selections.clone());
     {
@@ -347,11 +400,9 @@ fn test_commit_input_keeps_draft_and_selection_without_plugin_capability() {
         steers.plugin_selections = false;
     }
 
-    let blocked = commit_block_reason(&text.text).expect("旧 Host 必须阻断带选择的提交");
-    assert_eq!(blocked, CommitBlock::PluginSelectionUnavailable);
-    handle_commit_block(blocked, &text.text);
+    let text = probe_commit_input();
 
-    assert_eq!(text.text, "选择插件后提交", "阻断分支不得取走草稿");
+    assert_eq!(text, "选择插件后提交", "阻断分支不得取走草稿");
     assert_eq!(
         crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
             .state()
@@ -363,6 +414,10 @@ fn test_commit_input_keeps_draft_and_selection_without_plugin_capability() {
     assert!(
         crate::kit::atoms::NOTIFICATION.state().read().is_some(),
         "必须明确提示选择入口不可用"
+    );
+    assert!(
+        crate::kit::atoms::INPUT_BUFFER.state().read().is_empty(),
+        "阻断分支不得进入旧服务端排队"
     );
 
     crate::kit::steer_state::STEERS.state().write().enabled = false;
