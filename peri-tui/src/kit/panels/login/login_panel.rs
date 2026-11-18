@@ -16,9 +16,9 @@ use super::{auth_render, auth_ui, browse_render, config_store, edit_handler, edi
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
+use peri_tui_components::list::ListViewport;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::crossterm::event::Event;
@@ -382,7 +382,7 @@ pub(super) fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResu
             return EventResult::Consumed;
         }
         if current_mode == LoginPanelMode::AuthDetail {
-            if !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            if !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
                 && let Some(action) = self::auth_ui::hit_auth_detail_button(ctx, &mouse, area)
             {
                 ctx.auth.write().set_detail_focus(action);
@@ -391,7 +391,7 @@ pub(super) fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResu
             return EventResult::Consumed;
         }
         if current_mode == LoginPanelMode::ConfirmLogout {
-            if !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            if !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
                 && let Some(focus) = self::auth_ui::hit_logout_button(ctx, &mouse, area)
             {
                 self::auth_ui::execute_logout_focus(ctx, focus);
@@ -399,7 +399,7 @@ pub(super) fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResu
             return EventResult::Consumed;
         }
         if current_mode == LoginPanelMode::Edit {
-            if !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            if !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
                 && let Some(hit) = hit_edit_target(ctx, &mouse, area)
             {
                 activate_edit_hit(ctx, hit);
@@ -407,7 +407,7 @@ pub(super) fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResu
             return EventResult::Consumed;
         }
         if current_mode == LoginPanelMode::ConfirmTypeChange {
-            if !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            if !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
                 && let Some(hit) = hit_type_change_target(ctx, &mouse, area)
             {
                 activate_type_change_hit(ctx, hit);
@@ -415,9 +415,9 @@ pub(super) fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResu
             return EventResult::Consumed;
         }
         if current_mode == LoginPanelMode::Browse
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
             && let Some(idx) =
-                crate::kit::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
+                peri_tui_components::panel_mouse::hit_item(&mouse, area, ctx.viewport.hit_layout())
         {
             *ctx.cursor.write() = idx;
             reset_panel_scroll(ctx);
@@ -487,13 +487,13 @@ pub(super) fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResu
             KeyCode::Esc => close_panel(),
             KeyCode::Up => {
                 let mut c = ctx.cursor.write();
-                *c = crate::kit::list_nav::previous_selection(*c);
+                *c = peri_tui_components::list_nav::previous_selection(*c);
             }
             KeyCode::Down => {
                 let latest = PROVIDER_LIST.state().read().len();
                 let mut c = ctx.cursor.write();
                 if latest > 0 {
-                    *c = crate::kit::list_nav::next_selection(*c, latest);
+                    *c = peri_tui_components::list_nav::next_selection(*c, latest);
                 }
             }
             // Ctrl+N：新建 provider（进入编辑模式，空表单）

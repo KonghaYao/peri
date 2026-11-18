@@ -3,7 +3,7 @@ use crate::application::operations::{
     CompletionGate, OperationOutcome, OperationScope, OperationTicket, OutcomeUnknownReason,
 };
 
-use crate::kit::panel_mouse::ListLayout;
+use peri_tui_components::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui_kit::prelude::State;
 use ratatui_kit::ratatui::layout::Rect;
@@ -25,10 +25,10 @@ pub(super) fn detail_action_index(
         }
         Event::Mouse(mouse) => {
             let area = area?;
-            if crate::kit::panel_mouse::is_scrollbar_column(mouse, area) {
+            if peri_tui_components::panel_mouse::is_scrollbar_column(mouse, area) {
                 return None;
             }
-            crate::kit::panel_mouse::hit_item(
+            peri_tui_components::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {

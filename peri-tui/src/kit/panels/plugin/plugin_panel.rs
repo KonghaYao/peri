@@ -8,12 +8,12 @@ use super::{data, discover, identity, operation, panel_handler, render, search_h
 
 use crate::app::panel_types::PanelKind;
 use crate::application::operations::OperationScope;
-use crate::components::textarea::TextAreaState;
 use crate::i18n;
+use peri_tui_components::textarea::TextAreaState;
 
-use crate::kit::panel_mouse::AreaTracker;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
@@ -272,7 +272,8 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let current_tab = *active_tab.read();
     let detail_identity = detail_plugin.read().clone();
     let ai = *action_index.read();
-    let scroll_start = crate::kit::list_nav::scroll_start_for_selected(sel, count, VISIBLE_ITEMS);
+    let scroll_start =
+        peri_tui_components::list_nav::scroll_start_for_selected(sel, count, VISIBLE_ITEMS);
 
     // cursor blink toggle for Discover search box
     let show_cursor = {
@@ -450,7 +451,7 @@ pub fn PluginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             PluginViewTab::Discover => {
                 let local = self::data::get_discover_cache();
                 let items = discover_read.visible_items(&local);
-                let scroll = crate::kit::list_nav::scroll_start_for_selected(
+                let scroll = peri_tui_components::list_nav::scroll_start_for_selected(
                     discover_read.selected,
                     items.len(),
                     VISIBLE_ITEMS,

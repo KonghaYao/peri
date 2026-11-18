@@ -19,11 +19,11 @@ mod submit;
 mod tests;
 
 #[cfg(test)]
-use crate::components::textarea::TextAreaState;
-#[cfg(test)]
 use crate::i18n;
 #[cfg(test)]
 use attachment::AttachmentEdge;
+#[cfg(test)]
+use peri_tui_components::textarea::TextAreaState;
 #[cfg(test)]
 use popup::{apply_slash_selection, build_slash_items, detect_slash_token};
 #[cfg(test)]

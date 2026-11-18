@@ -31,9 +31,9 @@ use ratatui_kit::ratatui::text::Line;
 
 use crate::i18n;
 
-use crate::kit::list_nav::ListNavAction;
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panel_mouse::ListLayout;
+use peri_tui_components::list_nav::ListNavAction;
+use peri_tui_components::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::ListLayout;
 
 use crate::kit::rewind_action::RewindAction;
 
@@ -133,7 +133,8 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // 鼠标：候选区左键点击 = 选中 + 发送 Preview（与键盘 Enter 一致）
             if let Event::Mouse(mouse) = event {
                 if let (Some(area), true) = (area, view == RewindView::Candidates)
-                    && let Some(idx) = crate::kit::panel_mouse::hit_item(&mouse, area, msg_layout)
+                    && let Some(idx) =
+                        peri_tui_components::panel_mouse::hit_item(&mouse, area, msg_layout)
                 {
                     *msg_sel.write() = idx;
                     let target = preview_for_closure
@@ -158,17 +159,17 @@ pub fn RewindPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Event::Key(key) = event
                 && key.kind == KeyEventKind::Press
             {
-                match crate::kit::list_nav::classify_list_nav(&key) {
+                match peri_tui_components::list_nav::classify_list_nav(&key) {
                     Some(ListNavAction::MoveUp) if view == RewindView::Candidates => {
                         let mut s = msg_sel.write();
-                        *s = crate::kit::list_nav::previous_selection(*s);
+                        *s = peri_tui_components::list_nav::previous_selection(*s);
                         return EventResult::Consumed;
                     }
                     Some(ListNavAction::MoveDown) if view == RewindView::Candidates => {
                         let mut s = msg_sel.write();
                         // 钳制到渲染窗口（take(8)）——否则选中可移出可视区，
                         // Enter 会对屏幕外目标发送 Preview
-                        *s = crate::kit::list_nav::next_selection(*s, msg_rendered);
+                        *s = peri_tui_components::list_nav::next_selection(*s, msg_rendered);
                         return EventResult::Consumed;
                     }
                     Some(ListNavAction::Confirm) => match view {

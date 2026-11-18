@@ -15,11 +15,12 @@
 use super::{attachment, hooks, paste, popup, render, submit};
 
 use attachment::AttachmentEdge;
-use hooks::{AreaTracker, CjkGhostFix};
+use hooks::CjkGhostFix;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 use render::QUEUE_VISIBLE_MAX;
 
-use crate::components::textarea::TextAreaState;
+use peri_tui_components::textarea::TextAreaState;
 
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
@@ -495,7 +496,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                                     .saturating_sub(render::prompt_and_border_width(grid_cl))
                                     .max(1) as usize;
                                 let wr =
-                                    crate::components::textarea::wrap_text(&s.text, s.cursor, tw);
+                                    peri_tui_components::textarea::wrap_text(&s.text, s.cursor, tw);
                                 if click_visual_row < wr.total_visual_rows {
                                     let vl = &wr.visual_lines[click_visual_row];
                                     let mut col = 0usize;
@@ -604,7 +605,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 .max(1) as usize
         })
         .unwrap_or(80);
-    let wrap = crate::components::textarea::wrap_text(&text, cursor, text_width);
+    let wrap = peri_tui_components::textarea::wrap_text(&text, cursor, text_width);
     // [Slice 1c] §11 高度降级：h<8 时钳制编辑行数上限（max_lines），
     // 默认上限 10 保持不变。
     let max_editor_rows = props.max_lines.unwrap_or(10);
@@ -619,7 +620,6 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
         placeholder_str,
         text_width,
         editor_rows as usize,
-        loading,
         show_cursor,
     );
 

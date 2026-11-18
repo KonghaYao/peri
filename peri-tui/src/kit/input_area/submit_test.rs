@@ -316,7 +316,7 @@ fn test_submit_after_removal_sends_remaining_attachments_only() {
 
     // 空文本 Backspace：移除尾部一张（图片 2）。
     assert!(super::super::remove_pending_attachment(
-        &crate::components::textarea::TextAreaState::default(),
+        &peri_tui_components::textarea::TextAreaState::default(),
         super::super::AttachmentEdge::Last,
     ));
 

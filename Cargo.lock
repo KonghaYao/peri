@@ -3835,6 +3835,7 @@ dependencies = [
  "peri-resources",
  "peri-theme",
  "peri-time",
+ "peri-tui-components",
  "peri-workflow",
  "png",
  "pulldown-cmark 0.12.2",
@@ -3862,6 +3863,15 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.2",
  "uuid",
+]
+
+[[package]]
+name = "peri-tui-components"
+version = "0.2.0"
+dependencies = [
+ "ratatui",
+ "ratatui-kit",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

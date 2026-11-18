@@ -120,7 +120,7 @@ pub fn hit_row(mouse_row: u16, area: Rect, layout: ListLayout) -> Option<usize> 
         return None;
     }
     let in_view = (visual - layout.header_rows) / layout.item_rows;
-    let idx = (layout.scroll_start as u16).saturating_add(in_view) as usize;
+    let idx = layout.scroll_start.checked_add(usize::from(in_view))?;
     (idx < layout.item_count).then_some(idx)
 }
 

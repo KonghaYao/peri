@@ -74,6 +74,12 @@ jobs:
               if: runner.os == 'Linux'
               run: bash scripts/check-mcp-data-boundary.sh
 
+            - name: Check TUI component boundary
+              if: runner.os == 'Linux'
+              run: |
+                  python3 scripts/test-tui-components.py
+                  python3 scripts/check-tui-components.py
+
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@master
               with:

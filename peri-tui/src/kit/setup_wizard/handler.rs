@@ -12,7 +12,7 @@ use crate::i18n;
 use crate::kit::atoms;
 use crate::kit::atoms::SETUP_WIZARD;
 
-use crate::kit::panel_mouse::ListLayout;
+use peri_tui_components::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui_kit::prelude::EventResult;
 
@@ -52,7 +52,7 @@ pub(super) fn wizard_click(
     match state.step {
         SetupStep::Language => {
             // 布局：空行 + prompt + 空行（header 3），每语言项 2 行（label + 空行）
-            if let Some(idx) = crate::kit::panel_mouse::hit_item(
+            if let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -71,7 +71,7 @@ pub(super) fn wizard_click(
         }
         SetupStep::Choose => {
             // 布局：空行 + prompt + 空行（header 3），每项 3 行（label + desc + 空行）
-            if let Some(idx) = crate::kit::panel_mouse::hit_item(
+            if let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -90,7 +90,7 @@ pub(super) fn wizard_click(
             }
         }
         SetupStep::ChatGpt => {
-            if let Some(idx) = crate::kit::panel_mouse::hit_item(
+            if let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -109,7 +109,7 @@ pub(super) fn wizard_click(
         }
         SetupStep::Preset => {
             // 布局：空行 + prompt + 空行（header 3），每预设 1 行
-            if let Some(idx) = crate::kit::panel_mouse::hit_item(
+            if let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                 mouse,
                 area,
                 ListLayout {
@@ -166,7 +166,7 @@ pub(super) fn wizard_click(
                     FormField::TestConnectivity,
                     FormField::ApiKey,
                 ];
-                if let Some(idx) = crate::kit::panel_mouse::hit_row(
+                if let Some(idx) = peri_tui_components::panel_mouse::hit_row(
                     mouse.row,
                     area,
                     ListLayout {
@@ -190,7 +190,7 @@ pub(super) fn wizard_click(
                     FormField::HaikuModel,
                     FormField::Confirm,
                 ];
-                if let Some(idx) = crate::kit::panel_mouse::hit_row(
+                if let Some(idx) = peri_tui_components::panel_mouse::hit_row(
                     mouse.row,
                     area,
                     ListLayout {

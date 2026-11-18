@@ -23,6 +23,7 @@ members = [
     "peri-time",
     "peri-runtime",
     "peri-tui",
+    "peri-tui-components",
     "langfuse-client",
     "peri-js-runtime",
     "peri-workflow",

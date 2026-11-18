@@ -23,7 +23,7 @@ use crate::i18n;
 
 use crate::kit::bg_task_status::BgTaskStatus;
 
-use crate::kit::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
 use fluent_bundle::FluentValue;
@@ -216,7 +216,7 @@ pub(super) fn handle_tasks_event(event: Event, ctx: &TasksEventCtx) -> EventResu
     // ── 鼠标：区域内左键点击某行 = 选中该行并执行该行的 Enter 语义（click as enter）──
     if let Event::Mouse(mouse) = event {
         if let Some(area) = ctx.area
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
             && let Some(index) = ctx.viewport.hit_item(&mouse, area)
         {
             *ctx.selected.write() = index;
@@ -244,11 +244,11 @@ pub(super) fn handle_tasks_event(event: Event, ctx: &TasksEventCtx) -> EventResu
         // 导航一律基于当帧收敛后的选中值：列表刚刷新过也不会从越界位置起跳
         KeyCode::Up => {
             let mut s = ctx.selected.write();
-            *s = crate::kit::list_nav::previous_selection(ctx.viewport.selected());
+            *s = peri_tui_components::list_nav::previous_selection(ctx.viewport.selected());
         }
         KeyCode::Down => {
             let mut s = ctx.selected.write();
-            *s = crate::kit::list_nav::next_selection(
+            *s = peri_tui_components::list_nav::next_selection(
                 ctx.viewport.selected(),
                 ctx.viewport.counts().total(),
             );

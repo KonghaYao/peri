@@ -22,7 +22,7 @@ use ratatui_kit::ratatui::text::Line;
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
 
-use crate::kit::panel_mouse::AreaTracker;
+use peri_tui_components::panel_mouse::AreaTracker;
 
 use peri_theme::atoms::THEME_ATOM;
 

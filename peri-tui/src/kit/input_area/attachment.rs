@@ -7,7 +7,7 @@
 //! 不引入占位字符的好处：折行宽度、@mention 检测、选区、undo 与提交内容形状都保持
 //! 原样（附件记录只在呈现层与提交载荷中出现）。
 
-use crate::components::textarea::TextAreaState;
+use peri_tui_components::textarea::TextAreaState;
 
 /// 文本为空时删除键对附件的去处。
 #[derive(Clone, Copy)]

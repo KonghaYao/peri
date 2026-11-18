@@ -386,12 +386,12 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 各列占满剩余空间，ScrollView 动态裁剪可见项。
     const VISIBLE_ITEMS: usize = 20;
 
-    let phase_scroll = crate::kit::list_nav::scroll_start_for_selected(
+    let phase_scroll = peri_tui_components::list_nav::scroll_start_for_selected(
         sel_phase,
         phase_lines.len(),
         VISIBLE_ITEMS,
     );
-    let agent_scroll = crate::kit::list_nav::scroll_start_for_selected(
+    let agent_scroll = peri_tui_components::list_nav::scroll_start_for_selected(
         sel_agent,
         filtered_agents.len(),
         VISIBLE_ITEMS,
@@ -613,9 +613,9 @@ pub(super) fn handle_workflow_event(event: Event, ctx: &WorkflowEventCtx<'_>) ->
         KeyCode::Tab | KeyCode::BackTab => {
             let current = selected_run_index(ctx.run_ids, ctx.selected_run_id.read().as_deref());
             let next = if key.code == KeyCode::Tab {
-                crate::kit::list_nav::cycle_next(current, ctx.run_ids.len())
+                peri_tui_components::list_nav::cycle_next(current, ctx.run_ids.len())
             } else {
-                crate::kit::list_nav::cycle_previous(current, ctx.run_ids.len())
+                peri_tui_components::list_nav::cycle_previous(current, ctx.run_ids.len())
             };
             // 切 run 时列内选择回到首项（既有语义）
             if let Some(run_id) = ctx.run_ids.get(next) {
@@ -636,10 +636,10 @@ pub(super) fn handle_workflow_event(event: Event, ctx: &WorkflowEventCtx<'_>) ->
         KeyCode::Up => {
             if *ctx.focus_left.read() {
                 let mut phase = ctx.phase_sel.write();
-                *phase = crate::kit::list_nav::previous_selection(*phase);
+                *phase = peri_tui_components::list_nav::previous_selection(*phase);
             } else {
                 let mut agent = ctx.agent_sel.write();
-                *agent = crate::kit::list_nav::previous_selection(*agent);
+                *agent = peri_tui_components::list_nav::previous_selection(*agent);
             }
             EventResult::Consumed
         }

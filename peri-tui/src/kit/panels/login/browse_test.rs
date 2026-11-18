@@ -399,7 +399,7 @@ fn window_and_hit_layout_agree() {
         for (slot, expected) in iteration_items {
             let visual_row = layout.header_rows + (slot as u16) * layout.item_rows;
             assert_eq!(
-                crate::kit::panel_mouse::hit_row(rect.y + 1 + visual_row, rect, layout),
+                peri_tui_components::panel_mouse::hit_row(rect.y + 1 + visual_row, rect, layout),
                 Some(*expected),
                 "第 {slot} 个可见槽位命中的全量索引必须与 window 一致"
             );
@@ -408,11 +408,11 @@ fn window_and_hit_layout_agree() {
 
     // 提示行与底部边框不可点
     assert_eq!(
-        crate::kit::panel_mouse::hit_row(rect.y + 1 + 21, rect, layout),
+        peri_tui_components::panel_mouse::hit_row(rect.y + 1 + 21, rect, layout),
         None
     );
     assert_eq!(
-        crate::kit::panel_mouse::hit_row(rect.y + 23, rect, layout),
+        peri_tui_components::panel_mouse::hit_row(rect.y + 23, rect, layout),
         None
     );
 }

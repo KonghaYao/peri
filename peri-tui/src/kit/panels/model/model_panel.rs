@@ -15,10 +15,10 @@ use super::panel_render;
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
-use crate::kit::panel_mouse::AreaTracker;
-use crate::kit::panels::shared::list::ListMetrics;
-use crate::kit::panels::shared::list::ListViewport;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::list::ListMetrics;
+use peri_tui_components::list::ListViewport;
+use peri_tui_components::panel_mouse::AreaTracker;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Constraint;
 use ratatui_kit::ratatui::layout::Direction;

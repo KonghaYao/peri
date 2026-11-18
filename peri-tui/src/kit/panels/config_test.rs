@@ -26,8 +26,8 @@ fn test_parse_permission_mode_invalid() {
 
 use crate::app::panel_types::PanelKind;
 
-use crate::kit::panels::shared::list::ListViewport;
 use fluent_bundle::FluentValue;
+use peri_tui_components::list::ListViewport;
 use ratatui_kit::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State, element};
 use ratatui_kit::ratatui::buffer::Buffer;

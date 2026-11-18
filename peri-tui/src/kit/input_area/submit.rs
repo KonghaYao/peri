@@ -1,10 +1,10 @@
 use ratatui_kit::prelude::State;
 
-use crate::components::textarea::TextAreaState;
 use crate::i18n;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::atoms::{ACP_STATE, INPUT_BUFFER, SUBMIT_TX, WIZARD_ACTIVE, local_event_tx};
 use crate::kit::submit_request::{SessionControlRequest, SubmitRequest};
+use peri_tui_components::textarea::TextAreaState;
 
 /// 取出待发送附件。附件只在「确定要提交 agent 文本」时消费——控制类请求
 /// （`/clear` 等）不碰 `PENDING_ATTACHMENTS`，图片保留在 composer 供下次提交。

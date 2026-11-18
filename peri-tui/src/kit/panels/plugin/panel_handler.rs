@@ -1,6 +1,6 @@
-use crate::components::textarea::TextAreaState;
+use peri_tui_components::textarea::TextAreaState;
 
-use crate::kit::panel_mouse::ListLayout;
+use peri_tui_components::panel_mouse::ListLayout;
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::{EventResult, State};
 use ratatui_kit::ratatui::layout::Rect;
@@ -43,7 +43,7 @@ pub(super) fn handle_panel_event(
     // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
     if let Event::Mouse(mouse) = event {
         if let Some(area) = area
-            && !crate::kit::panel_mouse::is_scrollbar_column(&mouse, area)
+            && !peri_tui_components::panel_mouse::is_scrollbar_column(&mouse, area)
         {
             // ── 确认模式（uninstall / delete_marketplace）：点击 = 确认（Enter @L625）──
             let confirmation = confirm_action.read().clone();
@@ -79,7 +79,7 @@ pub(super) fn handle_panel_event(
             // 同上：提取为 bool，避免 if-let scrutinee guard 存活到块内
             let in_marketplace_detail = marketplace_detail.read().is_some();
             if in_marketplace_detail
-                && let Some(idx) = crate::kit::panel_mouse::hit_item(
+                && let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                     &mouse,
                     area,
                     ListLayout {
@@ -150,12 +150,12 @@ pub(super) fn handle_panel_event(
             match *active_tab.read() {
                 PluginViewTab::Installed => {
                     let count = PLUGIN_LIST.state().read().len();
-                    let scroll_start = crate::kit::list_nav::scroll_start_for_selected(
+                    let scroll_start = peri_tui_components::list_nav::scroll_start_for_selected(
                         *selected.read(),
                         count,
                         VISIBLE_ITEMS,
                     );
-                    if let Some(idx) = crate::kit::panel_mouse::hit_item(
+                    if let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                         &mouse,
                         area,
                         ListLayout {
@@ -179,7 +179,7 @@ pub(super) fn handle_panel_event(
                 PluginViewTab::Marketplaces => {
                     let entries_len = super::data::get_marketplace_cache().len();
                     // Add 行（内容行 3）单独命中：激活 add 输入（Enter @L722）
-                    if crate::kit::panel_mouse::hit_row(
+                    if peri_tui_components::panel_mouse::hit_row(
                         mouse.row,
                         area,
                         ListLayout {
@@ -199,7 +199,7 @@ pub(super) fn handle_panel_event(
                         return EventResult::Consumed;
                     }
                     // 条目（内容行 5 起，每项 3 行）：点击 = 进详情（Enter @L726）
-                    if let Some(idx) = crate::kit::panel_mouse::hit_item(
+                    if let Some(idx) = peri_tui_components::panel_mouse::hit_item(
                         &mouse,
                         area,
                         ListLayout {
@@ -440,10 +440,10 @@ pub(super) fn handle_panel_event(
         (false, false, KeyCode::Up) => {
             if *active_tab.read() == PluginViewTab::Installed {
                 let mut s = selected.write();
-                *s = crate::kit::list_nav::previous_selection(*s);
+                *s = peri_tui_components::list_nav::previous_selection(*s);
             } else if *active_tab.read() == PluginViewTab::Marketplaces {
                 let mut s = selected.write();
-                *s = crate::kit::list_nav::previous_selection(*s);
+                *s = peri_tui_components::list_nav::previous_selection(*s);
             }
         }
         (false, false, KeyCode::Down) => {
@@ -451,13 +451,13 @@ pub(super) fn handle_panel_event(
                 let mut s = selected.write();
                 let c = PLUGIN_LIST.state().read().len();
                 if c > 0 {
-                    *s = crate::kit::list_nav::next_selection(*s, c);
+                    *s = peri_tui_components::list_nav::next_selection(*s, c);
                 }
             } else if *active_tab.read() == PluginViewTab::Marketplaces {
                 let mut s = selected.write();
                 let c = super::data::get_marketplace_cache().len() + 1; // +1 for Add，非阻塞缓存读取
                 if c > 0 {
-                    *s = crate::kit::list_nav::next_selection(*s, c);
+                    *s = peri_tui_components::list_nav::next_selection(*s, c);
                 }
             }
         }
