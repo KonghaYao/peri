@@ -173,17 +173,11 @@ pub(super) enum CommitBlock {
 ///
 /// 能力闸门只约束会携带选择发送的请求；本地命令（如 `/setup`）不经过
 /// 入队协议，不能被升级后残留的选择阻断。
-fn submits_agent_text(text: &str) -> bool {
+fn submits_agent_text(text: &str, has_attachments: bool) -> bool {
     match crate::kit::submit_request::parse_submit_request(text) {
         Some(SubmitRequest::AgentText { .. }) => true,
         Some(_) => false,
-        None => {
-            crate::kit::steer_state::is_enabled()
-                && !crate::kit::atoms::PENDING_ATTACHMENTS
-                    .state()
-                    .read()
-                    .is_empty()
-        }
+        None => crate::kit::steer_state::is_enabled() && has_attachments,
     }
 }
 
@@ -196,11 +190,16 @@ pub(super) fn commit_block_reason(text: &str) -> Option<CommitBlock> {
     {
         return Some(CommitBlock::RemoteCommand);
     }
-    if submits_agent_text(text)
-        && !crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+    if submits_agent_text(
+        text,
+        !crate::kit::atoms::PENDING_ATTACHMENTS
             .state()
             .read()
-            .is_empty()
+            .is_empty(),
+    ) && !crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+        .state()
+        .read()
+        .is_empty()
         && !crate::kit::steer_state::supports_plugin_selections()
     {
         return Some(CommitBlock::PluginSelectionUnavailable);

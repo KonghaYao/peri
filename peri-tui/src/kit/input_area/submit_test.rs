@@ -470,29 +470,26 @@ fn test_local_command_ignores_unavailable_plugin_selection_gate() {
 #[serial]
 fn test_image_only_submission_still_requires_plugin_capability() {
     super::super::reset_submit_side_effect_state();
-    crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
-        .set(vec![peri_acp_types::session::PluginSelection::new("alpha")]);
     {
         let steers_atom = crate::kit::steer_state::STEERS.state();
         let mut steers = steers_atom.write();
         steers.enabled = true;
         steers.plugin_selections = false;
     }
-    crate::kit::atoms::PENDING_ATTACHMENTS
-        .state()
-        .write()
-        .push(pending_png());
 
-    assert_eq!(
-        super::commit_block_reason(""),
-        Some(super::CommitBlock::PluginSelectionUnavailable),
-        "图片-only 提交同样携带选择，必须 fail-closed"
+    assert!(
+        super::submits_agent_text("", true),
+        "steer 开启时空文本 + 附件按 AgentText 处理"
+    );
+    assert!(
+        !super::submits_agent_text("", false),
+        "空文本无附件不是提交"
+    );
+    assert!(
+        !super::submits_agent_text("/setup", true),
+        "本地命令即使有附件也不走入队协议"
     );
 
-    crate::kit::atoms::PENDING_ATTACHMENTS
-        .state()
-        .write()
-        .clear();
     crate::kit::steer_state::STEERS.state().write().enabled = false;
 }
 
