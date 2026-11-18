@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use peri_acp_types::mcp_control::DynamicLoaderBinding;
 use peri_acp_types::plugin::InstallScope;
@@ -18,8 +19,48 @@ use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
 use crate::session::exec::executor::plugin_guidance::guidance_texts;
 use crate::session::exec::executor::plugin_guidance::merge_plugin_selections;
 use crate::session::exec::executor::plugin_guidance::push_plugin_guidance;
+use crate::session::exec::executor::plugin_guidance::retain_effective_loaders;
 
 const RESEARCH_LOADER: &str = "LoadMCP__research_a1b2c3d4";
+
+struct CatalogTool {
+    name: String,
+    server: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl crate::tools::BaseTool for CatalogTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        ""
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    fn mcp_server_name(&self) -> Option<&str> {
+        self.server.as_deref()
+    }
+
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(String::new())
+    }
+}
+
+fn catalog_tool(name: &str, server: &str) -> Arc<dyn crate::tools::BaseTool> {
+    Arc::new(CatalogTool {
+        name: name.into(),
+        server: Some(server.into()),
+    })
+}
 
 fn loaded_plugin(name: &str, marketplace: &str) -> LoadedPlugin {
     LoadedPlugin {
@@ -108,6 +149,35 @@ fn test_guidance_resolves_plugin_scope_before_loader_binding() {
     assert!(
         !text.contains("LoadMCP__research_beta"),
         "未选择来源的 Loader 不得进入指引: {text}"
+    );
+}
+
+#[test]
+fn test_guidance_omits_loaders_outside_the_effective_reason_catalog() {
+    let binding = loader(RESEARCH_LOADER, "research", "market");
+    let matching = [catalog_tool(RESEARCH_LOADER, &binding.server_key)];
+
+    assert_eq!(
+        retain_effective_loaders(vec![binding.clone()], &matching, &|_| true),
+        vec![binding.clone()],
+        "有效目录中的 Loader 保留"
+    );
+    assert!(
+        retain_effective_loaders(vec![binding.clone()], &matching, &|_| false).is_empty(),
+        "会话工具策略拒绝的 Loader 不得进入指引"
+    );
+    assert!(
+        retain_effective_loaders(
+            vec![binding.clone()],
+            &[catalog_tool(RESEARCH_LOADER, "plugin:other:search")],
+            &|_| true,
+        )
+        .is_empty(),
+        "同名但来源不同的工具不能冒充 Loader"
+    );
+    assert!(
+        retain_effective_loaders(vec![binding], &[], &|_| true).is_empty(),
+        "目录不可用时不得提示调用"
     );
 }
 

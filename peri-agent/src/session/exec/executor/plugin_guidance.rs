@@ -5,6 +5,7 @@
 //! MCP，也不自行拼装指引。
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use peri_acp_types::mcp_control::DynamicLoaderBinding;
 use peri_acp_types::plugin::LoadedPlugin;
@@ -23,6 +24,8 @@ use peri_acp_types::system_reminder::SystemReminder;
 use peri_acp_types::system_reminder::TrustedSystemReminderFactory;
 use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
 use peri_acp_types::system_reminder::SYSTEM_REMINDER_VERSION;
+
+use crate::tools::BaseTool;
 
 /// 合并本轮插件选择：显式选择在前，已移交队列输入居中，slash 来源在后。
 ///
@@ -91,6 +94,27 @@ fn plugin_matches(selection: &str, plugin: &LoadedPlugin) -> bool {
     selection == plugin_source_id(plugin)
         || selection == plugin.name
         || selection == plugin.scope.plugin_id
+}
+
+/// 只保留同时出现在有效 Reason 目录中的 Loader。
+///
+/// `catalog` 是 Reason 边界用于分发的候选工具集，`filter` 是会话工具策略；
+/// 名称与来源必须同时命中。被策略拒绝或目录不可用时不能提示模型调用。
+pub(crate) fn retain_effective_loaders(
+    bindings: Vec<DynamicLoaderBinding>,
+    catalog: &[Arc<dyn BaseTool>],
+    filter: &(dyn Fn(&dyn BaseTool) -> bool + Send + Sync),
+) -> Vec<DynamicLoaderBinding> {
+    bindings
+        .into_iter()
+        .filter(|binding| {
+            catalog.iter().any(|tool| {
+                filter(tool.as_ref())
+                    && tool.name() == binding.loader
+                    && tool.mcp_server_name() == Some(binding.server_key.as_str())
+            })
+        })
+        .collect()
 }
 
 /// 与 `collect_plugin_mcp_servers` 的来源标识同源（marketplace 为空仍保留分隔符）。

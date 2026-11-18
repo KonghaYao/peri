@@ -324,11 +324,32 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let plugin_guidance_texts = if plugin_selections.is_empty() {
         Vec::new()
     } else {
-        let loader_bindings = ctx
+        let pool_bindings = ctx
             .mcp_pool
             .as_ref()
             .map(|pool| Arc::clone(pool).dynamic_loader_bindings(&ctx.session_id))
             .unwrap_or_default();
+        // 指引只能点名 Reason 真正会分发的 Loader：会话工具策略拒绝或目录
+        // 不可用的 Loader 不能提示模型调用。
+        let loader_bindings = match &ctx.session_mcp_catalog {
+            Some(catalog) => {
+                let disabled = frozen
+                    .as_ref()
+                    .map(|frozen| frozen.meta_harness().disabled_middlewares.clone())
+                    .unwrap_or_default();
+                let filter = crate::session::tool_catalog::ToolFilterPolicy::with_mcp_policy(
+                    disabled,
+                    Arc::new(|_| true),
+                );
+                let snapshot = catalog.snapshot();
+                plugin_guidance::retain_effective_loaders(
+                    pool_bindings,
+                    &snapshot.tools,
+                    filter.as_ref(),
+                )
+            }
+            None => Vec::new(),
+        };
         plugin_guidance::guidance_texts(&plugin_selections, &ctx.plugin_loaded, &loader_bindings)
     };
 
