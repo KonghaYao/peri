@@ -409,10 +409,12 @@ impl McpClientPool {
                 return;
             }
         };
+        // 启动分母只统计实际需要首次连接的服务器：disabled 不连接；dynamic
+        // 只登记配置，首次连接由 Loader 触发（plan 4.2）。
         let connectable = config
             .mcp_servers
             .iter()
-            .filter(|(_, sc)| !sc.disabled.unwrap_or(false))
+            .filter(|(_, sc)| !sc.disabled.unwrap_or(false) && !sc.dynamic)
             .count();
         if config.mcp_servers.is_empty() {
             // 空集合也是**完整**清单：此后 system 依赖（零个）是可信事实。
@@ -475,6 +477,13 @@ impl McpClientPool {
                 // 影响它们自己的工具可用时间，不再拖住会话创建。
                 if index == system_total {
                     pool.mark_system_settled();
+                }
+                // Dynamic 只登记配置：不构建 transport、不启动进程、不做 OAuth
+                // 首次连接或远端发现；首次连接延迟到 Loader（plan 4.2）。
+                // disabled 仍走下面的既有分支（面板显示 Disabled、不连接）。
+                if server_config.dynamic {
+                    tracing::info!(server = %name, "MCP 服务器为 dynamic：延迟首次连接");
+                    continue;
                 }
                 let slot = pool.server_slot(name);
                 let Ok(_operation) = slot.operation.clone().try_lock_owned() else {
