@@ -2,6 +2,7 @@
 
 use peri_acp_types::event_v2::StateEvent;
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::UserInputState;
 use tokio_util::sync::CancellationToken;
 
@@ -104,6 +105,29 @@ impl UserInputMailbox {
             .active
             .as_ref()
             .map(|active| active.ticket.clone())
+    }
+
+    /// 当前执行已移交输入的插件选择（只读，按记录顺序）。
+    ///
+    /// Reason 准备阶段据此生成指引：选择随 input_id 走，不能投影成“当前全局
+    /// 已选插件”。没有 active 执行或输入尚未移交时为空。
+    pub fn handed_off_plugin_selections(&self) -> Vec<PluginSelection> {
+        let state = self.state.lock();
+        if state.active.is_none() {
+            return Vec::new();
+        }
+        state
+            .records
+            .iter()
+            .filter(|record| {
+                record.handed_off
+                    && matches!(
+                        record.state,
+                        UserInputState::Dispatching | UserInputState::Claimed
+                    )
+            })
+            .flat_map(|record| record.plugin_selections.iter().cloned())
+            .collect()
     }
 
     /// 宿主须可靠投递此 Agent 事件后才开始执行，确保客户端 HITL lease 已存在。

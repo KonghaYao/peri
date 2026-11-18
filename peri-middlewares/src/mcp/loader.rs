@@ -403,6 +403,28 @@ pub(crate) fn dynamic_loader_tools(
     loaders
 }
 
+/// 当前池内可投影的 dynamic Loader 绑定（Host 生成插件指引的受控投影）。
+///
+/// 与 [`dynamic_loader_tools`] 走同一条可见性 / 关闭 / 去重 / 排序规则；
+/// 调用方只需模型可见名称与插件归属，不接触具体工具实例。
+pub(crate) fn dynamic_loader_bindings(
+    pool: &Arc<McpClientPool>,
+    session: Option<&str>,
+) -> Vec<peri_acp_types::mcp_control::DynamicLoaderBinding> {
+    dynamic_loader_tools(pool, session)
+        .into_iter()
+        .filter_map(|tool| {
+            let server_key = tool.mcp_server_name()?.to_owned();
+            let plugin_source = pool.plugin_source_of(&server_key);
+            Some(peri_acp_types::mcp_control::DynamicLoaderBinding {
+                loader: tool.name().to_owned(),
+                server_key,
+                plugin_source,
+            })
+        })
+        .collect()
+}
+
 fn not_connected(server: &str) -> McpPoolError {
     McpPoolError::NotConnected {
         server: server.to_owned(),

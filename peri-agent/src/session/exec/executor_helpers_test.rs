@@ -29,6 +29,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::messages::MessageContent;
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
+use crate::session::exec::executor_helpers::intercept::InjectPayload;
 use crate::session::exec::executor_helpers::intercept::InterceptOutcome;
 use crate::session::exec::executor_helpers::intercept::InterceptRequest;
 
@@ -764,6 +765,9 @@ async fn test_intercept_immediate_ok_always_true() {
 
 // ── intercept_immediate_command: Inject / args 解析 / cancel 分发验证 ───────
 
+#[path = "intercept_plugin_test.rs"]
+mod intercept_plugin_test;
+
 /// handler 返回 Inject：回传 Inject(text)（不 push_done——agent pump 负责，
 /// executor.rs 调用点转 AgentInput::blocks(text) 进 agent 管线）。
 #[tokio::test]
@@ -791,7 +795,7 @@ async fn test_intercept_inject_outcome_returns_inject() {
 
     // Assert：Inject 原样回传（注入文本进 agent 管线），不 push_done
     assert!(
-        matches!(result, InterceptOutcome::Inject(ref text) if text == "/skill tdd"),
+        matches!(result, InterceptOutcome::Inject(InjectPayload { ref text, .. }) if text == "/skill tdd"),
         "Inject 应原样回传注入文本"
     );
     assert_eq!(
@@ -866,7 +870,7 @@ async fn test_intercept_skill_passthrough_injects_original_text() {
 
     // Assert：skill 命中 → Inject 回传原文（含 `/skill-name` token），不 push_done
     assert!(
-        matches!(result, InterceptOutcome::Inject(ref text) if text == "/diagnose 帮我调试一下"),
+        matches!(result, InterceptOutcome::Inject(InjectPayload { ref text, .. }) if text == "/diagnose 帮我调试一下"),
         "skill 命中应将原文整段回传 agent 管线（原文被吞 = skill 预加载失效）"
     );
     assert_eq!(

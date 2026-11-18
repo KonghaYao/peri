@@ -273,6 +273,16 @@ pub trait McpPoolPort: Any + Send + Sync {
     ) -> Option<Arc<dyn SessionMcpCatalogPort>> {
         None
     }
+    /// 当前会话可见的 dynamic Loader 绑定（Host 生成插件指引的受控来源）。
+    ///
+    /// 与 `catalog_source` 的 Loader 面同源：关闭 / 禁用 / 不可见来源不产出。
+    /// 默认返回空——替换实现未声明该能力时不生成任何指引。
+    fn dynamic_loader_bindings(
+        self: Arc<Self>,
+        _session_id: &str,
+    ) -> Vec<crate::mcp_control::DynamicLoaderBinding> {
+        Vec::new()
+    }
     /// Cancel an exact active OAuth flow in this pool.
     fn cancel_oauth_flow(&self, _flow_id: &str) -> Result<bool, String> {
         Err("MCP OAuth flow unavailable".into())

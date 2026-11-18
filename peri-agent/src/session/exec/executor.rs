@@ -65,6 +65,7 @@ use crate::agent::react::AgentInput;
 use crate::session::async_router::AsyncRouter;
 
 mod input_recalls;
+pub(crate) mod plugin_guidance;
 
 // 子流程 helper 同 crate 迁移（`session::exec::executor_helpers`）：
 // intercept_immediate_command / InterceptRequest / spawn_event_pump /
@@ -75,8 +76,8 @@ mod input_recalls;
 pub use crate::session::exec::executor_helpers::{
     build_and_execute_agent_v2, close_channel, collect_result, intercept_immediate_command,
     spawn_event_pump, wait_for_pump, CollectRequest, CommandLookupFn, ExecOutcome,
-    ForwarderLauncherFn, InterceptOutcome, InterceptRequest, PumpHandle, SpawnPumpRequest,
-    StageBuildFn, V2ExecuteRequest,
+    ForwarderLauncherFn, InjectPayload, InterceptOutcome, InterceptRequest, PumpHandle,
+    SpawnPumpRequest, StageBuildFn, V2ExecuteRequest,
 };
 
 mod agent_build;

@@ -141,6 +141,44 @@ fn test_queued_inputs_keep_their_own_plugin_selection_through_withdraw() {
     );
 }
 
+/// 已移交输入的插件选择按记录投影，供 Reason 准备阶段生成指引。
+#[test]
+fn test_handed_off_plugin_selections_follow_the_dispatched_inputs() {
+    let (mailbox, _) = crate::session::user_input_mailbox::tests::make_mailbox();
+    mailbox
+        .attach_external_attempt_sync(CancellationToken::new(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let mut first = crate::session::user_input_mailbox::tests::make_input(&mailbox, "第一个任务");
+    first.plugin_selections = vec![PluginSelection::new("alpha")];
+    let mut second = crate::session::user_input_mailbox::tests::make_input(&mailbox, "第二个任务");
+    second.plugin_selections = vec![PluginSelection::new("beta@market")];
+    for input in [&first, &second] {
+        mailbox
+            .enqueue_sync(input)
+            .expect("the enqueue sync fixture result is required for this assertion");
+    }
+    assert!(
+        mailbox.handed_off_plugin_selections().is_empty(),
+        "未移交的输入不能提前成为本轮指引来源"
+    );
+
+    mailbox
+        .dispatch_sync(&crate::session::user_input_mailbox::tests::make_dispatch(
+            &mailbox,
+            &[&first, &second],
+        ))
+        .expect("the dispatch sync fixture result is required for this assertion");
+
+    assert_eq!(
+        mailbox.handed_off_plugin_selections(),
+        vec![
+            PluginSelection::new("alpha"),
+            PluginSelection::new("beta@market")
+        ],
+        "本轮执行的选择必须来自已移交输入，而不是当前全局选择"
+    );
+}
+
 #[test]
 fn test_mailbox_dispatch_takeback_race_has_one_winner() {
     let (mailbox, _) = crate::session::user_input_mailbox::tests::make_mailbox();

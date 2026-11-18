@@ -255,6 +255,20 @@ pub trait SessionMcpCatalogPort: Send + Sync {
     fn snapshot(&self) -> Arc<SessionMcpCatalogSnapshot>;
 }
 
+/// 一条当前会话可见的 dynamic MCP Loader 绑定（plan 9.1 / 9.3）。
+///
+/// Host 生成插件指引时只消费本投影：Loader 名称由池按受控配置身份计算，
+/// 客户端不提交名称、地址或凭证。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicLoaderBinding {
+    /// 模型可见的 Loader 工具名（`LoadMCP__...`）。
+    pub loader: String,
+    /// 受控配置的 server key（不含传输地址与凭证）。
+    pub server_key: String,
+    /// 插件来源标识（`name@marketplace`）；非插件来源为 `None`。
+    pub plugin_source: Option<String>,
+}
+
 /// Source identity of one admitted tool in a prepared session catalog.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SessionToolSource {
