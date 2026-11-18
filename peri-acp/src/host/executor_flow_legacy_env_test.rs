@@ -128,6 +128,9 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
             let model = Arc::new(CapturePromptModel {
                 requests: Arc::clone(&requests),
             });
+            // async-only：spawn 只登记后台任务；用例必须在同一临时库上下一次写入前
+            // 等它结算，否则多个 child 的写事务会叠加并耗尽连接池。
+            let task_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
             let capabilities = crate::session::subagent_chain_capabilities(
                 &frozen.meta_harness().disabled_middlewares,
             );
@@ -171,9 +174,7 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
                     session_resources: ctx.session_resources.clone(),
                     event_handler: None,
                     bg_event_sender: None,
-                    task_manager: Some(
-                        Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
-                    ),
+                    task_manager: Some(Arc::clone(&task_manager)),
                     on_bg_complete: None,
                     langfuse_bridge: None,
                     on_subagent_start: None,
@@ -202,20 +203,38 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            let requests = requests.lock().unwrap();
-            assert!(!requests.is_empty());
-            for request in requests.iter() {
-                let wire = crate::host::executor_flow_tests::system_text(request);
-                assert_eq!(wire.matches("<env>").count(), 1, "{wire}");
-                assert!(wire.contains("Platform: frozen-platform"));
-                assert!(wire.contains("Today's date: 1999-12-31"));
-                assert!(wire.ends_with(&format!("Session ID: {}\n</env>", child.child_thread_id)));
-                assert!(!wire.contains(LEGACY_SYSTEM));
+            {
+                let requests = requests.lock().unwrap();
+                assert!(!requests.is_empty());
+                for request in requests.iter() {
+                    let wire = crate::host::executor_flow_tests::system_text(request);
+                    assert_eq!(wire.matches("<env>").count(), 1, "{wire}");
+                    assert!(wire.contains("Platform: frozen-platform"));
+                    assert!(wire.contains("Today's date: 1999-12-31"));
+                    assert!(
+                        wire.ends_with(&format!("Session ID: {}\n</env>", child.child_thread_id))
+                    );
+                    assert!(!wire.contains(LEGACY_SYSTEM));
+                }
             }
             assert!(!child.session.store().frozen.legacy_embedded_environment);
             assert!(child.session.store().frozen.environment_prompt.is_some());
+            wait_background_child(&task_manager).await;
         }
     }
+}
+
+/// 等待后台 child 结算完毕：spawn 返回不代表执行结束，下一轮写入前必须排空。
+async fn wait_background_child(manager: &peri_agent::agent::async_tasks::TaskManager) {
+    use peri_acp_types::tasks::TaskManager as _;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !manager.is_execution_idle() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background child must settle before the next spawn");
 }
 
 /// Legacy missing facts remain unavailable; modern explicit absence and rejected V1 stay absent.

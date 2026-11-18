@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use peri_acp_types::session::MqCancelOutcome;
 use peri_acp_types::store::PersistedPayload;
 
 use crate::messages::BaseMessage;
@@ -315,6 +316,9 @@ pub(super) async fn resume_subagent_impl(
         MessageSource::UserInput,
         BaseMessage::human(prompt_text.clone()),
     );
+    // 注册失败时要撤回的就是这一行；稳定 ID 必须在入队移动前取出。
+    let prompt_message_id = prompt_message.id();
+    let prompt_queue = v2_ctx.context.session.queue.clone();
     if let Err(error) = v2_ctx
         .context
         .session
@@ -372,12 +376,24 @@ pub(super) async fn resume_subagent_impl(
     {
         Ok(()) => {}
         Err(e) => {
+            // 注册失败时 child 未执行，本次已接纳的 prompt 必须撤回；否则重试会在
+            // 同一 thread 再次投递同一条指令，child 收到两遍。
+            let withdrawal = prompt_queue.cancel_user_input(&prompt_message_id).await;
             // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
             // register_with_kind 撞 per-kind 上限）时任务未执行——status
             // 回滚至原值，防 thread 永久停留 active（R-M1 执行前失败回滚
             // 契约，与 load_messages 失败回滚同款）；错误携带 thread_id
             let rollback = claim.rollback().await;
-            let suffix = rollback.err().map(|e| format!("; {e}")).unwrap_or_default();
+            let mut suffix = rollback.err().map(|e| format!("; {e}")).unwrap_or_default();
+            match withdrawal {
+                Ok(MqCancelOutcome::Cancelled(_)) | Ok(MqCancelOutcome::NotFound) => {}
+                Ok(MqCancelOutcome::AlreadyHandedOff) => {
+                    suffix.push_str("; admitted prompt was already handed off");
+                }
+                Err(error) => suffix.push_str(&format!(
+                    "; admitted prompt could not be withdrawn: {error}"
+                )),
+            }
             return Err(format!("resume_subagent: thread {}: {}{}", thread_id, e, suffix).into());
         }
     }

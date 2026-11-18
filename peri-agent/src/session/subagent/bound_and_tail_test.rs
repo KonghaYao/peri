@@ -756,3 +756,31 @@ async fn test_spawn_subagent_fails_when_initial_prompt_cannot_be_admitted() {
         "失败启动的 child 必须标记为 Error"
     );
 }
+
+/// [回归] 初始指令已接纳但后台 dispatch 不可用时，已持久化的 child 不得停留在
+/// hidden/Active 且没有任务支撑。
+#[tokio::test(flavor = "current_thread")]
+async fn test_spawn_dispatch_failure_marks_persisted_child_error() {
+    let store = MockSessionResources::new();
+    let config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+
+    let error = match SessionFactory::spawn_subagent(None, config).await {
+        Ok(_) => panic!("后台任务不可用时 spawn 必须失败"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("Background tasks not available"),
+        "必须保留原始 dispatch 错误: {error}"
+    );
+
+    let child = store
+        .threads()
+        .into_iter()
+        .find(|meta| meta.parent_thread_id.as_deref() == Some("tail-parent"))
+        .expect("child thread was persisted before the failed dispatch");
+    assert_eq!(
+        child.agent_status,
+        AgentStatus::Error,
+        "dispatch 失败后已持久化的 child 必须标记为 Error"
+    );
+}

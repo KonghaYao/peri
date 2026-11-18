@@ -752,3 +752,49 @@ async fn test_resume_binding_preflight_reads_no_session_snapshot() {
         "预检只能读 binding；完整快照只用于认领后的执行装载"
     );
 }
+
+/// [回归测试] resume 已接纳 prompt 但后台注册失败时，失败尝试必须撤回该行：
+/// 同一 thread 的重试若再投递一条，child 会收到两条相同指令。
+#[tokio::test]
+async fn test_resume_dispatch_failure_withdraws_admitted_prompt() {
+    use peri_acp_types::session::MqFilter;
+    use peri_acp_types::session_resources::SessionResources as _;
+
+    let store = MockSessionResources::new();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    crate::session::subagent::tests::preset_resumable_thread(&store, &thread_id, None).await;
+    let mut config = crate::session::subagent::tests::resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        crate::session::test_resources::mock::model::fixture_source(
+            Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
+        None,
+        None,
+    );
+    config.prompt = Some("retry-once-only".into());
+
+    let error = crate::session::subagent::tests::resume_err(None, config).await;
+    assert!(
+        error.contains("Background tasks not available"),
+        "dispatch 失败必须原样交给调用方: {error}"
+    );
+    assert_eq!(
+        store
+            .load_meta(&thread_id)
+            .await
+            .expect("the load meta fixture result is required for this assertion")
+            .agent_status,
+        AgentStatus::Done,
+        "失败尝试仍须回滚认领状态"
+    );
+    let rows = store
+        .mq_query(&ThreadId::from(thread_id.as_str()), MqFilter::default())
+        .await
+        .expect("the MQ query fixture result is required for this assertion");
+    assert!(
+        rows.is_empty(),
+        "失败尝试不得留下已接纳的 prompt 行: {rows:?}"
+    );
+}

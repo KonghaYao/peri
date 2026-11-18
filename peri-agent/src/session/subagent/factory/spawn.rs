@@ -412,7 +412,10 @@ pub(super) async fn spawn_subagent_impl(
         _ => None,
     };
     let task_id_clone = task_id.clone();
-    crate::session::subagent::background::spawn_background_subagent(
+    // dispatch 失败时 child 不会运行；保留存储句柄把已持久化的记录标为 Error，
+    // 避免留下 hidden/Active 且没有任务支撑的悬挂行。
+    let dispatch_store = session_resources.clone();
+    if let Err(error) = crate::session::subagent::background::spawn_background_subagent(
         task_id,
         child_thread_id.clone(),
         agent_name.clone(),
@@ -435,7 +438,21 @@ pub(super) async fn spawn_subagent_impl(
         v2_ctx,
         None,
     )
-    .await?;
+    .await
+    {
+        if let Some(store) = dispatch_store.as_ref() {
+            let patch = peri_acp_types::session_resources::SessionMetaPatch {
+                status: Some(peri_acp_types::thread::AgentStatus::Error),
+                ..Default::default()
+            };
+            if let Err(mark) = store.update_session_meta(&child_thread_id, &patch).await {
+                return Err(
+                    format!("{error}; child error status could not be recorded: {mark}").into(),
+                );
+            }
+        }
+        return Err(error);
+    }
     Ok(SubagentSpawned {
         child_thread_id,
         task_id: task_id_clone,
