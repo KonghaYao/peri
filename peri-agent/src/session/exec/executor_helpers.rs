@@ -49,8 +49,8 @@ mod v2_execute;
 pub use collect::{close_channel, collect_result, wait_for_pump, CollectRequest};
 pub use event_pump::{spawn_event_pump, LangfuseEndFn, PumpHandle, SpawnPumpRequest};
 pub use intercept::{
-    emit_command_feedback, intercept_immediate_command, CommandLookupFn, InterceptOutcome,
-    InterceptRequest,
+    emit_command_feedback, intercept_immediate_command, CommandLookupFn, InjectPayload,
+    InterceptOutcome, InterceptRequest,
 };
 pub use v2_execute::{
     build_and_execute_agent_v2, ForwarderLauncherFn, StageBuildFn, StageBuildRequest,

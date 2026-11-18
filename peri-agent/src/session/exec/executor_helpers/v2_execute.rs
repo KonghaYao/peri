@@ -157,6 +157,11 @@ pub struct V2ExecuteRequest {
     pub continuation_notify: Option<
         tokio::sync::mpsc::UnboundedSender<crate::session::exec::executor::ContinuationRequest>,
     >,
+    /// 本轮插件指引文本（Host 依据会话元数据生成；随当前请求投递）。
+    ///
+    /// 以 Model-only canonical reminder 入队，不修改 frozen system prompt；
+    /// 空表示本轮没有已选插件或没有可见 Loader。
+    pub plugin_guidance: Vec<String>,
 }
 
 /// 通过注入的 stage 装配面构造 StageContext，再由 [`run_react_loop`](crate::agent::stages::run_react_loop) 驱动循环
@@ -335,6 +340,16 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 agent_state: AgentState::new(&req.cwd),
             };
         }
+    }
+
+    // 插件指引随当前请求投递：与用户 Prompt 同批进入 Receive，但不写入 frozen
+    // system prompt，也不改写用户正文（Model-only canonical reminder）。
+    if !req.plugin_guidance.is_empty() {
+        crate::session::exec::executor::plugin_guidance::push_plugin_guidance(
+            &v2_out.context.session.queue,
+            &req.plugin_guidance,
+        )
+        .await;
     }
 
     // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）
@@ -887,6 +902,7 @@ impl Debug for V2ExecuteRequest {
                 "continuation_notify_present",
                 &self.continuation_notify.is_some(),
             )
+            .field("plugin_guidance_len", &self.plugin_guidance.len())
             .finish_non_exhaustive()
     }
 }
