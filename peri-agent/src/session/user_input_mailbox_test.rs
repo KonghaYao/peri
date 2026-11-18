@@ -493,6 +493,55 @@ fn test_mailbox_terminal_snapshot_is_bounded() {
         .all(|item| item.state == UserInputState::Delivered));
 }
 
+/// [回归] 同一 input_id 的并发 enqueue 都通过前置指纹检查时，MQ 的 Existing
+/// 只比较正文/原稿；选择不同必须按身份冲突拒绝，不能返回先到者的成功回执。
+#[tokio::test]
+async fn test_concurrent_enqueue_with_different_plugin_selections_conflicts() {
+    let (mailbox, inbox) = make_mailbox();
+    let mut first = make_input(&mailbox, "同一输入");
+    first.plugin_selections = vec![PluginSelection::new("alpha")];
+    mailbox
+        .enqueue_sync(&first)
+        .expect("first enqueue must be admitted");
+    let entry = inbox
+        .queue_for_test()
+        .query(peri_acp_types::session::MqFilter::default())
+        .await
+        .expect("MQ row query")
+        .into_iter()
+        .find(|entry| entry.id.as_uuid().to_string() == first.input_id)
+        .expect("first request row must exist");
+
+    assert_eq!(
+        super::commands::existing_selection_match(
+            peri_acp_types::session::MqEnqueueDisposition::Existing,
+            &entry,
+            &[PluginSelection::new("beta")],
+        )
+        .unwrap_err(),
+        UserInputQueueError::IdentityConflict,
+        "选择不同时不得把先到者的 MQ 行当作本次请求的成功回执"
+    );
+    assert!(
+        super::commands::existing_selection_match(
+            peri_acp_types::session::MqEnqueueDisposition::Existing,
+            &entry,
+            &[PluginSelection::new("alpha")],
+        )
+        .is_ok(),
+        "相同选择的重试必须保持幂等"
+    );
+    assert!(
+        super::commands::existing_selection_match(
+            peri_acp_types::session::MqEnqueueDisposition::Inserted,
+            &entry,
+            &[PluginSelection::new("beta")],
+        )
+        .is_ok(),
+        "新插入的行由本次请求定义，无需比较"
+    );
+}
+
 /// [回归] 对账查询进行期间入队：旧查询结果不得清理新记录，快照 revision 必须覆盖其内容。
 #[tokio::test]
 async fn refresh_keeps_records_enqueued_while_its_mq_query_is_in_flight() {

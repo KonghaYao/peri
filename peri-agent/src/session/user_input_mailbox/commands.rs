@@ -7,7 +7,9 @@ use peri_acp_types::session::DispatchUserInputsRequest;
 use peri_acp_types::session::EnqueueUserInputRequest;
 use peri_acp_types::session::MqCancelOutcome;
 use peri_acp_types::session::MqEnqueueDisposition;
+use peri_acp_types::session::MqEntry;
 use peri_acp_types::session::MqSendStatus;
+use peri_acp_types::session::PluginSelection;
 use peri_acp_types::session::QueuedMessage;
 use peri_acp_types::session::TakeBackUserInputRequest;
 use peri_acp_types::session::UserInput;
@@ -26,6 +28,21 @@ pub(super) const PENDING_CAPACITY: usize = 32;
 /// 「已接纳 vs 已移交」歧义，必须远小于用户可感知的停顿。
 pub(super) const DISPATCH_HANDOFF_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(50);
+
+/// 并发 enqueue 的既有行裁决。
+///
+/// 前置指纹检查与 MQ 提交之间存在窗口；存储对 `Existing` 只比较正文/原稿，
+/// 选择不同的请求不能借用先到者的成功回执。
+pub(super) fn existing_selection_match(
+    disposition: MqEnqueueDisposition,
+    entry: &MqEntry,
+    requested: &[PluginSelection],
+) -> Result<(), UserInputQueueError> {
+    if disposition == MqEnqueueDisposition::Existing && entry.plugin_selections != requested {
+        return Err(UserInputQueueError::IdentityConflict);
+    }
+    Ok(())
+}
 
 impl UserInputMailbox {
     pub async fn enqueue(
@@ -150,6 +167,13 @@ impl UserInputMailbox {
         let (sent_ready, results, cancel_inserted) = {
             let mut state = self.state.lock();
             state.admissions_in_flight = state.admissions_in_flight.saturating_sub(1);
+            // 并发 enqueue 都可能通过前置指纹检查：MQ 的 Existing 只比较正文/原稿，
+            // 选择不同时存储行属于先到者，本次请求必须按身份冲突拒绝。
+            existing_selection_match(
+                outcome.disposition,
+                &outcome.entry,
+                &request.plugin_selections,
+            )?;
             // 撤回与 enqueue 的 MQ await 可以交错：take_back 在等待期间清理了
             // Queued 记录并写入 `Withdrawn` 身份，而本调用仍持有已提交的 MQ 行。
             // 终态身份优先，既不复活待发记录，也要取消本次插入的行。
