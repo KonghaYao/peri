@@ -88,6 +88,8 @@ fn test_toggle_pending_plugin_reports_unavailable_capability() {
     crate::kit::steer_state::STEERS.state().write().enabled = false;
     PENDING_PLUGIN_SELECTIONS.set(Vec::new());
     PLUGIN_LIST.set(vec![plugin("alpha", "")]);
+    // 上一测试可能留下移除提示；先清空才能证明本次拒绝本身产生了反馈。
+    *crate::kit::atoms::NOTIFICATION.state().write() = None;
 
     toggle_pending_plugin(0, &OperationScope::new("session", 0));
 
