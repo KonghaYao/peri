@@ -9,7 +9,7 @@
 
 ### Agent 委派模式（v5 常态）
 
-`Agent` 工具调用恒为后台委派：schema 不提供执行模式参数，非 active resume 同样后台启动。旧客户端传入的 `run_in_background` 只被兼容忽略，不参与路由（[Issue #443](https://github.com/KonghaYao/peri/issues/443)）。同步 runner（`SubagentRunMode::Sync` / `run_sync.rs` / 同步 fork）已随 [Issue #450](https://github.com/KonghaYao/peri/issues/450) 移除，也不存在被唤醒的同步路径。
+`Agent` 工具调用恒为后台委派：schema 不提供执行模式参数，非 active resume 同样后台启动。旧客户端传入的 `run_in_background` 只被兼容忽略，不参与路由（[Issue #450](https://github.com/KonghaYao/peri/issues/450)）。同步 runner（`SubagentRunMode::Sync` / `run_sync.rs` / 同步 fork）已随 [Issue #450](https://github.com/KonghaYao/peri/issues/450) 移除，也不存在被唤醒的同步路径。
 
 - MCP Agent 没有同步激活例外：定义准入（内容绑定审批门）在后台启动之前完成，后台 loader 不得成为绕过审批的入口。
 - 无任务管理器时显式报错，不静默落回同步。
@@ -70,9 +70,9 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 
 该 mailbox 只存在于当前会话进程，不提供跨进程恢复保证：进程重启后不重建 mailbox、不扫描旧提醒，也不接管旧执行；当前进程内的处理责任跨 prompt 保留。
 
-## 4. 移除冷恢复
+## 4. 旧执行与任务目录不恢复
 
-不在 session/load/resume、新输入或进程重启时扫描旧 task owner、重建旧 invocation、接管 owner 或自动续跑 child。缺少旧 callback/任务身份不写 Work quarantine，不阻塞新的普通执行。
+不在 session/load/resume、新输入或进程重启时扫描旧 task owner、重建旧 invocation、接管旧 owner 或仅凭旧任务记录自动续跑 child。进入会话后按持久 `work_state` 新建运行的契约只由 [Session Durability](session-durability.md) 维护；这不恢复旧 TaskManager 或调用身份。缺少旧 callback/任务身份不写 Work quarantine，不阻塞新的普通执行。
 
 历史状态可显示，但不是当前 running。重启后不保证外部后台结果再次送达；外部任务可能继续存在，显式工具查询或人工处理不等于恢复旧 Agent 执行。
 
@@ -119,7 +119,7 @@ sync wrapper 只在收到已提交 receipt 后 detach；无父投递宿主时等
 
 ## 8. 验收
 
-覆盖当前任务结果/进度/取消、父子消息路由与展示身份、连接关闭失败和新输入处理。覆盖历史加载不触发任务发现或旧副作用；不再验收冷恢复、永久 terminal ACK 和跨进程处理义务。
+覆盖当前任务结果/进度/取消、父子消息路由与展示身份、连接关闭失败和新输入处理。覆盖历史加载不触发任务发现或旧副作用；本任务目录不验收旧执行恢复、永久 terminal ACK 和跨进程处理义务；按工作意图建立新运行的验收归 Session Durability。
 
 Child 收尾回归使用 paused-time：永久 Working 无通知、activity/任务新增不重置 D、D 前/后/同刻完成、task 终态但结果未消费、Receive 跨 D、已准入 Act 完成、预算/HookStop、cancel 与 D 同刻、sync/bg × 新建/resume、父注册竞争、交接/状态写失败、late result 后 resume、close 消息结算、A→B→C 归属。真实进程组（父 `sh` + 子 `sleep`）与输出管道清理的回归见 `real_blocking_shell_tree_survives_deadline_then_cancel_cleans_tree`；TUI 手测与真实 MCP wire 按仓库 testing 规范验收。
 

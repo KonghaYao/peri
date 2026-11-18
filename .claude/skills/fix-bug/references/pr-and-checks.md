@@ -81,6 +81,7 @@ GitHub 默认每页 30 条且从旧到新返回，三个请求都必须带 `--pa
 1. review 的 `commit_id` 等于当前 PR head。issue comment 不含 commit 信息，只能提示有新活动，不能单独证明当前提交已被评审。
 2. review 状态为 `CHANGES_REQUESTED` 时，逐条处理。
 3. review body、issue comment 与内联 review comment 中的 blocking 意见逐条对照代码判断；成立才修，不成立则在对应 thread 回复证据。
+4. 对匹配当前 head 的 review 设总截止时间（默认从推送 head 起 30 分钟）。issue comment 或内联评论持续出现只算活动，不能重置截止时间；到点仍无 `commit_id` 等于当前 head 的 review 时，停止等待并汇报 "review incomplete"。
 
 **绿色 `CodeRabbit` check 不等于评审完成。** 必须看 review/comment 内容与 `commit_id`。
 

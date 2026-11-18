@@ -23,7 +23,7 @@
 | 请求 | 当前事实源 | 状态与所有者 |
 | --- | --- | --- |
 | 模型 HTTP/SSE | [`peri-model` transport](../../peri-model/src/transport/http.rs)、[流式 runtime](../../peri-model/src/runtime/stream.rs)、[retry](../../peri-model/src/runtime/retry.rs) | HTTP 连接、分块 body、取消及首次可见增量前的重试由 `peri-model` 持有；provider 的 `Completed`/`Interrupted` 是模型流语义。现有 `HttpTransport` 可注入假实现，但 `HttpRequest` 直接包 `reqwest::Request`，两个 provider 构造请求时还持有 `reqwest::Client`，因此尚未隔离编译依赖。 |
-| ACP 请求/响应 | [`RequestRouter`](../../peri-acp/src/transport/router.rs)、[ACP 契约](../design/peri-acp-protocol.md) | pending、响应匹配、调用者 drop 和 transport close 是连接内状态；router 通过 owner token 防止旧句柄删除复用 ID 的新请求，不负责 Agent 执行结果。 |
+| ACP 请求/响应 | [`RequestRouter`](../../peri-acp/src/transport/request_router.rs)、[ACP 契约](../design/peri-acp-protocol.md) | pending、响应匹配、调用者 drop 和 transport close 是连接内状态；router 通过 owner token 防止旧句柄删除复用 ID 的新请求，不负责 Agent 执行结果。 |
 | Agent/turn 执行 | [`AgentStatus`](../../peri-acp-types/src/thread/types.rs)、[`TurnStatus`](../../peri-acp-types/src/event.rs)、[执行身份设计](../design/serverless-execution-identity.md) | 活跃、完成、取消、错误及执行接管由 Agent、Store 与协议层各自持有；HTTP 200 或 SSE EOF 不构成执行完成证据。 |
 
 其他 HTTP 消费方也没有一套同构语义：远程 MCP 在 [`rmcp` transport](../../peri-middlewares/src/mcp/client/transport.rs) 上显式使用 `reqwest::Client` 和 OAuth 包装；[Web 工具](../../mcp-packages/web/src/web_fetch.rs)、[artifact](../../mcp-packages/artifact/src/client.rs) 与 [Langfuse](../../langfuse-client/src/client.rs) 各有请求协议。远程 Store 生产路径使用 [`turso_serverless`](../../peri-resources/Cargo.toml)；该 crate 的 `reqwest` 仅为云端探测测试的 dev dependency，不能靠替换 Peri 自己的 HTTP client 覆盖其内部传输。

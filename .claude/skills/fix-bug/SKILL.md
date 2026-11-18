@@ -20,15 +20,18 @@ disable-model-invocation: true
 
 所有读写与命令都在 worktree 内执行；主 checkout 只用于 `git worktree` 管理。
 
-1. 默认先 `git fetch --prune origin`（清理远端已删除的跟踪分支，避免基于陈旧 ref），再把选定的 worktree 路径存入 `$WT`：默认 `.worktrees/<slug>`，`.worktrees/` 未被忽略时改用同级仓库外目录 `../<repo>-worktrees/<slug>`，避免污染 `git status`。从**远程最新目标分支**创建：通常为 `origin/main`，用户指定 base 时改用 `origin/<base>`。
+1. 默认先 `git fetch --prune origin`（清理远端已删除的跟踪分支，避免基于陈旧 ref），再无条件对选定的 base 显式 fetch：`git fetch origin "+refs/heads/<base>:refs/remotes/origin/<base>"`。只执行默认 fetch 时，若 `remote.origin.fetch` 未覆盖该分支，`origin/<base>` 可能仍是旧值，worktree 会基于陈旧 ref 创建。默认使用远端 base，**fetch 失败必须停止并汇报**，不能因为本地已有 `origin/main` 缓存就继续。仅当用户明确指定本地基线，或 `git ls-remote --exit-code origin <base>` 确认远端分支不存在时，才允许跳过该显式 fetch 并改用本地 `<base>`；汇报中写明实际 base 的来源。随后把选定的 worktree 路径存入 `$WT`：默认 `"$PWD/.worktrees/<slug>"`，`.worktrees/` 未被忽略时改用 `"$PWD/../<repo>-worktrees/<slug>"`，避免污染 `git status`。从**远程最新目标分支**创建：通常为 `origin/main`，用户指定 base 时改用 `origin/<base>`。
    ```bash
    git fetch --prune origin
-   WT=.worktrees/<slug>   # .worktrees/ 未被忽略时改为 ../<repo>-worktrees/<slug>
-   git worktree add --no-track -b fix/<slug> "$WT" origin/main
+   git fetch origin "+refs/heads/<base>:refs/remotes/origin/<base>"   # 显式刷新 base，main 也要执行
+   WT="$PWD/.worktrees/<slug>"   # .worktrees/ 未被忽略时改为 "$PWD/../<repo>-worktrees/<slug>"
+   git worktree add --no-track -b fix/<slug> "$WT" origin/<base>
+   # 本地 base 例外：跳过第二条 fetch，改用
+   # git worktree add --no-track -b fix/<slug> "$WT" <base>
    ```
-   不要直接基于本地 `main` 或其它可能过期的本地分支创建：过期基线会带入已合并的旧改动，增加冲突和无关 diff。只有远程分支不存在或用户明确指定本地基线时才改用，并在汇报中说明原因。
+   不要直接基于本地 `main` 或其它可能过期的本地分支创建：过期基线会带入已合并的旧改动，增加冲突和无关 diff。只有用户明确指定本地基线或 `git ls-remote --exit-code origin <base>` 确认远端分支不存在时才改用本地 base，并在汇报中写明 base 来源（本地/远端）。
 2. 核对：`git -C "$WT" status --short --branch` 不得显示 `[origin/main]`；若显示，执行 `git -C "$WT" branch --unset-upstream`。
-3. 在汇报中写明实际 worktree 路径、基线与 commit（`git -C "$WT" log -1 --oneline`）。
+3. 在汇报中写明实际 worktree 路径、base（本地/远端）与 commit（`git -C "$WT" log -1 --oneline`）。
 
 完成标准：worktree 存在、分支未跟踪 main、主 checkout 无新增改动。
 

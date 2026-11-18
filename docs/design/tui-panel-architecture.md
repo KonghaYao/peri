@@ -13,7 +13,7 @@
 > 状态：已批准目标设计（部分已落地）；未完成项见
 > [2026-10-15 TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)
 > 范围：`peri-tui` 的面板外壳、列表视口、面板事件路由、面板操作的作用域与完成门
-> 边界：不改变 ACP 协议、后端能力、依赖与 release profile；新增生产代码只落在 `peri-tui`
+> 边界：不改变 ACP 协议、后端能力、依赖与 release profile；业务代码落在 `peri-tui`，无业务组件落在 `peri-tui-components`
 
 当前实现、入口与动态面板清单以 [`peri-tui` 代码索引](../code-index/peri-tui.md)、
 源码与契约测试为准。

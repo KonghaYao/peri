@@ -37,7 +37,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
 | 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口 |
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
-| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 当前会话任务归属、结果/取消/关闭；**不做冷恢复**，消息与执行服从 RCRA 权威 |
+| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 当前会话任务归属、结果/取消/关闭；**不恢复旧任务目录或执行身份**，消息与执行服从 RCRA 权威 |
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | 子 Agent 活动数据源、状态聚合与行投影 |
 | Compact | [micro-compact.md](micro-compact.md) | Step/交换投影、原文回查、原子提交与 Full/fork/rewind 生命周期；门控和能力边界 |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、附件与记录绑定、多路数据隔离 |
@@ -59,6 +59,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MCP v5 单出口 | [mcp-v5-single-exit.md](mcp-v5-single-exit.md) | builtin 单 `peri` 出口、capability router、workspace 代理、能力关闭矩阵与迁移回滚契约；`peri` 已是宿主默认装配，旧 policy 键保留为确定性映射 adapter（M4 删除），`PERI_MCP_BUILTIN=legacy` 保留六实例回滚到 M4 截止决定；Sandbox workspace 代理接线与端到端验收见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；WASM 完整验收与既有公开 Chrono 契约范围仍待核实；入口见 [peri-time 索引](../code-index/peri-time.md) |
 | RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/执行、canonical 历史与普通执行；待发送消息持久化见 [Thread MQ](thread-mq.md)，**持久执行恢复仍剥离** |
+| Session Durability | [session-durability.md](session-durability.md) | 进入会话时按持久工作意图建立新运行；不恢复旧执行身份；后端能力与验收缺口见本文 |
 | Thread MQ 持久收件箱 | [thread-mq.md](thread-mq.md) | 主、子与 Workflow Agent 的统一持久 MQ、原子 Receive 与 Rust 操作接口；实施与验收见 [active issue](../../spec/issues/2026-11-01-thread-mq-implementation.md) |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；真实远端验收待执行 |
 | Command 系统 | [command-system.md](command-system.md) | 命令协议与执行边界以代码和契约测试为准 |
@@ -76,3 +77,14 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
    引用，并运行本地链接检查。
 4. 动态 inventory、固定源码行号和命令输出不复制进设计；定位信息放
    `docs/code-index/`。
+
+## 专用装配与部署设计
+
+| 主题 | 唯一维护位置 | 边界 |
+| --- | --- | --- |
+| SDK 部署归属 | [OWNERSHIP-MODEL](../../npm-packages/@peri-sdk/OWNERSHIP-MODEL.md) | 使用方 User/Workspace/SessionDB 约束；不替代 SDK Chat 运行设计 |
+| Rivet 对接 | [Rivet DESIGN](../../npm-packages/peri-rivet/DESIGN.md) | actor 接线、活动投影与资源生命周期；无第三运行时 |
+| Sandbox 实例 | [Sandbox 设计](../../npm-packages/peri-sandbox/peri-sandbox-design.md) | 单实例 HTTP MCP 与宿主资源管理；不承诺多租户隔离 |
+
+这些包内设计继续原位维护，本索引只路由；不复制另一份 owner 或控制表。
+`peri-cf` 已退役，不能作为当前部署入口；历史研究不构成部署验收。

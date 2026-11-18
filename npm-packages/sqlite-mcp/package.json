@@ -1,0 +1,42 @@
+{
+  "name": "sqlite-mcp",
+  "version": "0.1.0",
+  "description": "本地 SQLite MCP 服务器（Streamable HTTP，仅回环监听）",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KonghaYao/peri.git",
+    "directory": "npm-packages/sqlite-mcp"
+  },
+  "bin": {
+    "sqlite-mcp": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "scripts": {
+    "start:threads": "bash scripts/serve-threads.sh",
+    "build": "rm -rf dist && tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "test:pack": "node scripts/verify-pack.mjs",
+    "prepack": "npm run build",
+    "format": "biome format --write src tests scripts package.json tsconfig.json biome.json",
+    "format:check": "biome format src tests scripts package.json tsconfig.json biome.json"
+  },
+  "dependencies": {
+    "@tursodatabase/database": "0.8.3",
+    "mcp-use": "2.12.6",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/node": "22.20.0",
+    "typescript": "5.9.3"
+  }
+}

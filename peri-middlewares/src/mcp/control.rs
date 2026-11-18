@@ -218,7 +218,10 @@ impl McpClientPool {
     }
     /// 没有就绪句柄时收口该 slot 已登记但未提交的连接。
     ///
-    /// attempt 任务被 abort 后不会执行自身清理；卸载/取消路径用它释放迟到连接。
+    /// attempt 任务被 abort 后不会执行自身清理；卸载/取消/握手失败路径用它释放
+    /// 迟到连接。process owner 的 `Drop` 只 terminate，不 join 也不置 `is_stopped`，
+    /// 因此这里必须显式 `close`：未收敛的 owner 保留在表内，后续连接由
+    /// `spawn_process_command` 的未结算检查拒绝。
     pub(crate) async fn discard_uncommitted_resources(&self, name: &str) {
         if self
             .client(name)
@@ -231,13 +234,23 @@ impl McpClientPool {
         };
         let services = slot.services.lock().clone();
         for service in services {
-            let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+            if service.close_with_timeout(SHUTDOWN_TIMEOUT).await.is_err() {
+                tracing::warn!(server = name, "MCP failed attempt service cleanup failed");
+            }
         }
         #[cfg(not(target_os = "emscripten"))]
         {
             let processes = slot.processes.lock().clone();
             for process in processes {
-                let _ = peri_time::timeout(SHUTDOWN_TIMEOUT, process.close()).await;
+                if !matches!(
+                    peri_time::timeout(SHUTDOWN_TIMEOUT, process.close()).await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::warn!(
+                        server = name,
+                        "MCP failed attempt process owner did not settle"
+                    );
+                }
             }
         }
         self.release_stopped_resources(name);

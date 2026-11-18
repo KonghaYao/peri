@@ -6,8 +6,11 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
+use super::McpServiceWrapper;
 use super::{Arc, ClientStatus, McpClientPool};
+use crate::mcp::client::McpClientHandle;
 use crate::mcp::task_scope::McpTaskOwner;
 
 /// 快速连接：initialize、空工具列表与资源列表。
@@ -102,6 +105,84 @@ const timer = setInterval(() => {
 }, 20);
 "#;
 
+/// 首次启动立即退出（握手失败），之后正常应答：验证失败 attempt 的 owner 结算。
+const FAIL_FIRST_START_SERVER: &str = r#"
+const fs = require('node:fs');
+const prior = fs.existsSync('starts')
+  ? fs.readFileSync('starts', 'utf8').split('\n').filter(Boolean).length
+  : 0;
+fs.appendFileSync('starts', 'started\n');
+if (prior === 0) process.exit(1);
+const readline = require('node:readline').createInterface({ input: process.stdin });
+function handle(line) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result;
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25', capabilities: { tools: {}, resources: {} },
+    serverInfo: { name: 'retry-fixture', version: '1' },
+  };
+  else if (request.method === 'tools/list') result = { tools: [] };
+  else if (request.method === 'resources/list') result = { resources: [] };
+  else if (request.method === 'resources/templates/list') result = { resourceTemplates: [] };
+  else if (request.method === 'ping') result = {};
+  else {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+}
+readline.on('line', handle);
+"#;
+
+/// 首次启动正常并在 initialize 声明 cache version，之后 `tools/list` 失败：
+/// 用于验证 dynamic ready 不能被磁盘缓存命中替代。
+const WARM_CACHE_LIVE_FAIL_SERVER: &str = r#"
+const fs = require('node:fs');
+const prior = fs.existsSync('starts')
+  ? fs.readFileSync('starts', 'utf8').split('\n').filter(Boolean).length
+  : 0;
+fs.appendFileSync('starts', 'started\n');
+const readline = require('node:readline').createInterface({ input: process.stdin });
+function handle(line) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result;
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25',
+    capabilities: {
+      tools: {}, resources: {},
+      extensions: { 'io.mcpp/server-cache-version': { cacheVersion: 'warm-v1' } },
+    },
+    serverInfo: { name: 'warm-cache-fixture', version: '1' },
+  };
+  else if (request.method === 'tools/list') {
+    if (prior === 0) {
+      result = { tools: [{
+        name: 'warm-echo',
+        description: 'Echo from a previous generation',
+        inputSchema: { type: 'object', properties: {}, additionalProperties: true },
+      }] };
+    } else {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+        error: { code: -32603, message: 'live tools unavailable' } }) + '\n');
+      return;
+    }
+  }
+  else if (request.method === 'resources/list') result = { resources: [] };
+  else if (request.method === 'resources/templates/list') result = { resourceTemplates: [] };
+  else if (request.method === 'ping') result = {};
+  else {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+}
+readline.on('line', handle);
+"#;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     cwd: PathBuf,
@@ -111,13 +192,29 @@ struct Fixture {
 
 impl Fixture {
     fn new(script: &str) -> Self {
+        Self::build(script, false)
+    }
+
+    /// 缓存可用的池：dynamic live 发现测试需要一次真实命中机会。
+    fn with_cache(script: &str) -> Self {
+        Self::build(script, true)
+    }
+
+    fn build(script: &str, cache: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("project");
         std::fs::create_dir(&cwd).unwrap();
         std::fs::write(cwd.join("server.js"), script).unwrap();
         let (tasks, spawner) = McpTaskOwner::new();
-        let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+        let mut pool = McpClientPool::new_pending_with_spawner(spawner);
         pool.bind_execution_cwd(&cwd).unwrap();
+        if cache {
+            pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
+                .unwrap();
+            pool.bind_cache_policy(crate::mcp::config::McpCachePolicy::Enabled)
+                .unwrap();
+            pool.resource_cache = crate::mcp::resource_cache::McpResourceCache::isolated_for_test();
+        }
         let config: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
             "command": "node",
             "args": ["server.js"],
@@ -128,7 +225,7 @@ impl Fixture {
         Self {
             _dir: dir,
             cwd,
-            pool,
+            pool: Arc::new(pool),
             tasks,
         }
     }
@@ -192,6 +289,25 @@ fn spawn_load(
 ) -> tokio::task::JoinHandle<Result<(), super::McpPoolError>> {
     let pool = pool.clone();
     tokio::spawn(async move { pool.ensure_loaded("lazy").await })
+}
+
+fn connected_handle(name: &str) -> Arc<McpClientHandle> {
+    Arc::new(McpClientHandle {
+        call_gate: Default::default(),
+        name: name.into(),
+        version: None,
+        cache_version: None,
+        connected_at: None,
+        protocol_version: None,
+        peer: None,
+        tools: vec![],
+        resources: vec![],
+        status: ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source: None,
+        url: None,
+        skills_capable: false,
+    })
 }
 
 /// live discovery 失败：不提交 Connected，未提交连接当场收口，可重新发起 attempt。
@@ -333,5 +449,175 @@ async fn removing_the_source_cancels_load_and_rejects_late_commit() {
         fixture.pool.ensure_loaded("lazy").await.is_err(),
         "已卸载来源不得再加载"
     );
+    fixture.shutdown().await;
+}
+
+/// 卸载先完成：迟到的提交必须被准入拒绝，不得复活已 unload 的 server。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn commit_after_removal_is_rejected() {
+    let fixture = Fixture::new(READY_SERVER);
+    fixture.pool.remove_server("lazy").await;
+
+    let rejected = fixture.pool.try_commit_connection(
+        "lazy".into(),
+        connected_handle("lazy"),
+        McpServiceWrapper::Closed,
+    );
+    assert!(rejected.is_err(), "卸载后提交必须失败，实际已发布");
+    assert!(fixture.pool.client("lazy").is_none());
+    assert!(fixture.pool.services.lock().is_empty());
+    assert_eq!(fixture.slot_resources(), (0, 0));
+    fixture.shutdown().await;
+}
+
+/// 提交已过准入、尚未发布时并发卸载：两者必须由同一把准入锁串行化。
+///
+/// 旧实现里 `remove_server` 不持准入锁，会先移除配置并完成清理；提交恢复后
+/// 仍发布 Connected，`discard_uncommitted_resources` 因看到 Connected 跳过收口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removal_waits_for_an_admitted_commit_and_cleans_its_publication() {
+    let fixture = Fixture::new(READY_SERVER);
+    let pool = fixture.pool.clone();
+    // 停点：提交已通过准入检查，但尚未写入 handle/service。停点放在阻塞线程，
+    // 测试 future 不持锁跨 await。
+    let pause_pool = pool.clone();
+    let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let publication_pause = tokio::task::spawn_blocking(move || {
+        let _guard = pause_pool.pause_handle_generation();
+        let _ = paused_tx.send(());
+        let _ = release_rx.recv();
+    });
+    paused_rx.await.unwrap();
+    let commit_pool = pool.clone();
+    let commit = tokio::spawn(async move {
+        commit_pool
+            .try_commit_connection_guarded(
+                "lazy".into(),
+                connected_handle("lazy"),
+                McpServiceWrapper::Closed,
+                || true,
+            )
+            .is_ok()
+    });
+    // 观察提交确实已持有准入锁并停在发布前，避免用 sleep 猜窗口。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let held = pool.lifecycle_registration.try_lock().is_none();
+        if held {
+            break;
+        }
+        assert!(Instant::now() < deadline, "提交未在超时内取得准入锁");
+        tokio::task::yield_now().await;
+    }
+
+    // 有界确认卸载任务已运行到共享准入边界：它随后只能阻塞在提交持有的准入锁上。
+    // 只靠「超时内未完成」不能证明卸载已被调度到准入点。
+    let admission_hits_before = pool.removal_admission_hits.load(Ordering::SeqCst);
+    let remove_pool = pool.clone();
+    let remove = tokio::spawn(async move {
+        remove_pool.remove_server("lazy").await;
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pool.removal_admission_hits.load(Ordering::SeqCst) == admission_hits_before {
+        assert!(
+            Instant::now() < deadline,
+            "卸载未在超时内到达准入边界（remove_server 未被调度到共享准入）"
+        );
+        tokio::task::yield_now().await;
+    }
+    // 修复后移除只能阻塞在准入锁上；旧实现会在提交恢复前完成卸载。
+    assert!(
+        !remove.is_finished(),
+        "移除不得先于已准入的提交完成（两者未共用准入锁）"
+    );
+
+    let _ = release_tx.send(());
+    publication_pause.await.unwrap();
+    let committed = commit.await.unwrap();
+    remove.await.unwrap();
+
+    assert!(committed, "已过准入的提交必须完成发布");
+    assert!(
+        pool.client("lazy").is_none(),
+        "已卸载 server 不得残留可调用句柄"
+    );
+    assert!(
+        pool.services.lock().is_empty(),
+        "已卸载 server 不得残留 service"
+    );
+    assert_eq!(fixture.slot_resources(), (0, 0));
+    fixture.shutdown().await;
+}
+
+/// 握手失败的 attempt 必须 close/join 已登记 owner；重试后只有一个 owner。
+///
+/// transport 的 Drop 只 terminate 子进程，不 join 也不置 `is_stopped`；旧实现
+/// 在 `connect_managed` 返回 Failed 时跳过清理，重试会把第二个 owner 叠进
+/// pool/slot。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_attempt_settles_process_owner_before_retry() {
+    let fixture = Fixture::new(FAIL_FIRST_START_SERVER);
+    fixture.pool.ensure_loaded("lazy").await.unwrap_err();
+    assert_eq!(
+        fixture.slot_resources(),
+        (0, 0),
+        "失败 attempt 必须收口已登记的 service/process"
+    );
+    assert_eq!(
+        fixture.pool.retained_process_count(),
+        0,
+        "失败 attempt 的 owner 不得留在保留表"
+    );
+    assert_eq!(fixture.starts(), 1);
+
+    fixture.pool.ensure_loaded("lazy").await.unwrap();
+    assert!(matches!(
+        fixture.pool.client("lazy").unwrap().status,
+        ClientStatus::Connected
+    ));
+    assert_eq!(
+        fixture.slot_resources(),
+        (1, 1),
+        "重试后 pool/slot 只能有一个 owner"
+    );
+    assert_eq!(fixture.pool.retained_process_count(), 1);
+    assert_eq!(fixture.starts(), 2);
+    fixture.shutdown().await;
+}
+
+/// 缓存命中不能替代 dynamic 的 live `tools/list`：本次连接证明不了就不 ready。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dynamic_ready_requires_live_tools_list_even_with_warm_cache() {
+    let fixture = Fixture::with_cache(WARM_CACHE_LIVE_FAIL_SERVER);
+    fixture.pool.ensure_loaded("lazy").await.unwrap();
+    assert_eq!(fixture.pool.client("lazy").unwrap().tools.len(), 1);
+
+    // 保留磁盘缓存与 cache version，只重建连接：第二次 live 发现会失败。
+    fixture
+        .pool
+        .close_server_connection("lazy", true)
+        .await
+        .unwrap();
+    fixture
+        .pool
+        .server_slot("lazy")
+        .stopped
+        .store(false, Ordering::Release);
+
+    let error = fixture.pool.ensure_loaded("lazy").await.unwrap_err();
+    assert!(
+        error.to_string().contains("live tools unavailable"),
+        "dynamic 必须走 live tools/list，实际: {error}"
+    );
+    let handle = fixture.pool.client("lazy").expect("失败必须发布状态");
+    assert!(
+        !matches!(handle.status, ClientStatus::Connected),
+        "缓存工具不得让 dynamic 连接变成 Connected"
+    );
+    assert!(handle.tools.is_empty(), "缓存工具不得进入失败句柄");
+    fixture.wait_for_idle().await;
+    assert_eq!(fixture.slot_resources(), (0, 0));
+    assert_eq!(fixture.starts(), 2);
     fixture.shutdown().await;
 }

@@ -5,7 +5,7 @@
 ## 1. 从 worktree 构建
 
 ```bash
-cd .worktrees/<slug>
+cd "$WT"   # 第 1 步选定的 worktree 绝对路径；已在其中时直接用当前目录
 ./scripts/cargo-rmcp-patched.sh build -p peri --locked
 ```
 
@@ -14,17 +14,19 @@ cd .worktrees/<slug>
 ## 2. 启动隔离的真实终端
 
 ```bash
-tmux new-session -d -s fixrepro -x 140 -y 40
-tmux send-keys -t fixrepro "HOME=$PWD/.tmp/home ./target/debug/peri" Enter
+tmux new-session -d -s fixrepro-wide -x 140 -y 40
+# 路径可能含空格：在 pane 命令内 cd 并给变量加引号，避免被 shell 二次拆分
+tmux send-keys -t fixrepro-wide "cd \"$WT\" && HOME=\"$WT/.tmp/home\" ./target/debug/peri" Enter
+# 80 列复验另建会话（send-keys 方式同上）：tmux new-session -d -s fixrepro-80 -x 80 -y 40
 ```
 
 - 用隔离的 `HOME`，避免真实会话、插件和历史干扰。
 - 需要模型时用本地假模型或回放服务（仓库 `e2e/helpers/replay-model.ts` 可复用），不要让复现依赖真实 API。
-- 宽终端至少 120 列；同时保留一个 <100 列会话验证 `left_pad = 0` 的回归。
+- 宽终端至少 120 列（`fixrepro-wide`）；同时保留一个 <100 列会话（`fixrepro-80`）验证 `left_pad = 0` 的回归，两个会话分开命名。
 
 ## 3. 记录渲染坐标
 
-1. 用 `tmux capture-pane -p -J -t fixrepro` 抓取可见帧。
+1. 用 `tmux capture-pane -p -J -t fixrepro-wide` 抓取可见帧（80 列会话改用 `-t fixrepro-80`）。
 2. 在测试文本中放唯一锚点（例如 `MOUSE-REPRO-ANCHOR`），记录它的 0-based 行列。
 3. 计算 `GridSpec::grid_for(width)` 的 `left_pad` 与 `band_width`，记录按钮/文本的视觉列。
 
@@ -42,8 +44,8 @@ SGR 鼠标序列格式（坐标是 1-based）：
 
 1. 点击按钮视觉列 `C`，记录是否命中；再点 `C ± left_pad`，确认偏移方向与数值。
 2. 在可见文本列 `A..B` 拖动，读取剪贴板或应用反馈，核对复制内容是否与光标范围一致。
-3. 缩窄到 80 列重复一次，确认行为不变。
-4. 修复后重新构建并重启再复验：`./scripts/cargo-rmcp-patched.sh build -p peri --locked`，退出旧进程后按第 2 步重新启动 TUI。复用修复前的进程仍在运行旧二进制，结果无效。然后用同一组坐标重复测试，记录新的命中列与复制内容。
+3. 在 `fixrepro-80`（80 列）会话重复一次，确认行为不变。
+4. 修复后重新构建并重启再复验：`./scripts/cargo-rmcp-patched.sh build -p peri --locked`，退出旧进程并分别执行 `tmux kill-session -t fixrepro-wide`、`tmux kill-session -t fixrepro-80`，再按第 2 步以宽终端（`fixrepro-wide`）和 80 列（`fixrepro-80`）新建会话启动 TUI。复用修复前的进程或旧会话会保留旧二进制/旧尺寸，结果无效。然后用同一组坐标重复测试，记录新的命中列与复制内容。
 
 ## 5. 记录模板
 
@@ -58,7 +60,8 @@ SGR 鼠标序列格式（坐标是 1-based）：
 ## 6. 清理
 
 ```bash
-tmux kill-session -t fixrepro
+tmux kill-session -t fixrepro-wide
+tmux kill-session -t fixrepro-80
 rm -rf .tmp/home
 ```
 

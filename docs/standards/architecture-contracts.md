@@ -20,7 +20,7 @@
 - **Rule**：Session ID 是会话身份，父子关系由 parent ID 与父链确定；cwd、ProjectId / WorkspaceId / SessionBinding 用于定位、展示与 scoped 查询，不作为按 ID 恢复的路径/owner 认领门槛。v2 机器归属由 `threads.workspace_id → workspaces.machine_id` 推导；Session 即现有 thread，`archived` 为独立展示状态。`ThreadScope::Environment` 显式过滤列表，按 ID 读取不追加当前 Machine/cwd 条件；本地与远端旧库经压缩前形状的单条迁移（机器归属建立、执行所有权移除、执行登记并入归属行，登记表删除，绑定 ID 收敛到会话归属行），未知远端来源保留占位 Machine，不因打开而迁移归属。默认机器身份是 `$HOME/.peri/machine-id` 的持久 UUIDv4，`PERI_MACHINE_ID` 接受 UUID override，不用硬件指纹；Unix 新建临时文件 `0600`、hardlink 原子发布只保护身份创建，不扩展为目录/既有文件权限、崩溃持久性或全系统并发保证。load/resume 按 ID 恢复历史，不以请求 cwd、执行 sidecar 锁或 dirty reset 为条件；先判 env/执行资格，仅可执行才 legacy 冻结/接纳并读取 frozen，避免读异机路径；只读历史查询不要求 frozen 存在，可执行路径与存储完整性检查保留。保存 cwd 实际目录检查属于执行/工具准入，不阻断历史读取；跨 env 或缺目录时执行加载明确失败，历史仍可独立查询，不在本机同名路径装配可执行环境。session 文件锁、`peri/session_reset_dirty` 路由及相应 TUI 恢复确认已移除，`peri.sessionRecoveryV1` 与执行恢复协商已移除，history load/resume 保留。会话执行唯一性、Agent 持有关系、跨实例协调与替换均由 `peri-sdk` 负责。Peri 不持有执行租约、不续租、不认领或校验执行 owner，不以 Store token 或 Workspace fencing 限制加载、写入和工具执行。存储仍负责访问模式、事务、绑定完整性、未决持久化与显式关闭意图；这些约束不构成执行所有权。Session ID 与 env 不是认证凭证，外部访问授权独立。
 - **Verify**：检查 `peri-resources/src/sessions/machine.rs`、`canonical.rs`、`sqlite_store/{schema,session_rows,workspace}.rs`、`remote/{session_data,session_sql}.rs` 与 `resources.rs`；检查 ACP `host/workspace.rs`、`host/requests/session_restore.rs` 和 TUI `acp_client/client/session.rs` 没有路径认领/dirty reset 交互。针对性验证入口为 `machine_test.rs`、`sqlite_store/session_id_environment_test.rs` 与 TUI `client/recovery_test.rs`；存在测试不等于通过，尚未完成的跨层/远端/并发验收须单独报告。
 
-任务执行 owner 与会话执行唯一性分离：会话执行管理归 SDK，不以 Store 租约或 owner CAS 恢复可写身份。当前任务与关闭、冷恢复移除边界见[Session 异步任务架构](../design/session-async-tasks.md)，消息与激活目标见 [RCRA 消息权威](../design/rcra-message-activation.md)。
+任务执行 owner 与会话执行唯一性分离：会话执行管理归 SDK，不以 Store 租约或 owner CAS 恢复可写身份。当前任务与关闭、旧执行恢复移除边界见[Session 异步任务架构](../design/session-async-tasks.md)，消息与激活目标见 [RCRA 消息权威](../design/rcra-message-activation.md)。
 
 ### ARC-TURSO-STORAGE-001
 
@@ -44,7 +44,7 @@
 ### ARC-SUBAGENT-IDENTITY-001
 
 - **Scope**：Agent 子会话委派、ACP 子 Agent 生命周期事件与 TUI 分组。
-- **Rule**：当前调用身份与模型 tool-call 身份分别表达。子 Agent 启动事件使用原模型 tool-call ID，不把 invocation/task ID 填进工具卡片；当前工厂通过可信调用上下文取得展示归属，不从删除的执行恢复账本读取。spawn/resume 与 sync/background 共用身份规则；身份缺失时明确失败，不按到达顺序猜测。
+- **Rule**：当前调用身份与模型 tool-call 身份分别表达。子 Agent 启动事件使用原模型 tool-call ID，不把 invocation/task ID 填进工具卡片；当前工厂通过可信调用上下文取得展示归属，不从删除的执行恢复账本读取。spawn/resume 的后台委派共用身份规则；身份缺失时明确失败，不按到达顺序猜测。
 - **Verify**：身份回归使用不同 invocation/tool-call ID，验证同名并发子 Agent、取消与结果事件归属；手动续聊不恢复旧委托。
 
 ### ARC-CANCEL-001
