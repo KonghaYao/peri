@@ -51,9 +51,10 @@ pub use runtime::{
     cancel_cascade_in, AgentRuntime,
 };
 pub use user_input::{
-    DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest, UserInput,
-    UserInputItemResult, UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot,
-    UserInputQueueSnapshotRequest, UserInputQueueTerminalItem, UserInputState,
+    DispatchUserInputsRequest, EnqueueUserInputRequest, PluginSelection, TakeBackUserInputRequest,
+    UserInput, UserInputItemResult, UserInputQueueItem, UserInputQueueReceipt,
+    UserInputQueueSnapshot, UserInputQueueSnapshotRequest, UserInputQueueTerminalItem,
+    UserInputState,
 };
 
 mod turn_id;

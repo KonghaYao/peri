@@ -337,6 +337,7 @@ async fn admit(
                     input_id: input.input_id.clone(),
                     content: input.content.clone(),
                     original_draft: input.original_draft.clone(),
+                    plugin_selections: input.plugin_selections.clone(),
                 })
                 .await?
         }

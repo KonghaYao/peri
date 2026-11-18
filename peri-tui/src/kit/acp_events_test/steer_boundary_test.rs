@@ -243,6 +243,7 @@ async fn agent_execution_failure_clears_submitting_and_shows_error() {
                 input_id: "f".into(),
                 content: MessageContent::text("F"),
                 original_draft: "F".into(),
+                plugin_selections: Vec::new(),
             }),
         });
         assert!(steers.direct_submitting("s", epoch));

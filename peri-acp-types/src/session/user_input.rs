@@ -3,6 +3,25 @@
 use crate::messages::MessageContent;
 use serde::{Deserialize, Serialize};
 
+/// 用户在提交时选择的插件身份。
+///
+/// 只携带插件 ID：指引、URL、凭证与 Loader 名称由 Host 依据当前会话元数据生成，
+/// 客户端不能借此扩大权限或替换绑定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginSelection {
+    pub plugin_id: String,
+}
+
+impl PluginSelection {
+    #[must_use]
+    pub fn new(plugin_id: impl Into<String>) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInput {
@@ -11,6 +30,9 @@ pub struct UserInput {
     pub content: MessageContent,
     /// 未经 trim 或输入准备改写的编辑器原文。
     pub original_draft: String,
+    /// 随这条输入一起提交的插件选择；撤回重发必须保持同一集合。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_selections: Vec<PluginSelection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +53,9 @@ pub struct UserInputQueueItem {
     pub input_id: String,
     pub content: MessageContent,
     pub original_draft: String,
+    /// 与该输入绑定的插件选择；快照客户端据此恢复标签。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_selections: Vec<PluginSelection>,
     pub state: UserInputState,
 }
 
@@ -67,6 +92,9 @@ pub struct EnqueueUserInputRequest {
     pub input_id: String,
     pub content: MessageContent,
     pub original_draft: String,
+    /// 插件选择随 input_id 走，不读取 Host 的“当前全局选择”。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_selections: Vec<PluginSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

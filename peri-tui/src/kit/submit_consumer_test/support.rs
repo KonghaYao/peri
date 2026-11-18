@@ -66,6 +66,7 @@ pub(super) fn agent_text(text: &str) -> SubmitRequest {
     SubmitRequest::AgentText {
         text: text.to_string(),
         attachments: Vec::new(),
+        plugin_selections: Vec::new(),
     }
 }
 

@@ -89,6 +89,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
     let TurnInput {
         event_sink,
         content,
+        plugin_selections: _,
         continuation,
         frozen,
         history_payloads,

@@ -215,8 +215,20 @@ async fn handle_submit(
     admission: Option<&SubmitAdmission>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match request {
-        SubmitRequest::AgentText { text, attachments } => {
-            handle_agent_text_submit(acp_client, cwd, text, attachments, admission).await
+        SubmitRequest::AgentText {
+            text,
+            attachments,
+            plugin_selections,
+        } => {
+            handle_agent_text_submit(
+                acp_client,
+                cwd,
+                text,
+                attachments,
+                plugin_selections,
+                admission,
+            )
+            .await
         }
         SubmitRequest::KeepGoing => handle_keepgoing_submit(acp_client, cwd, admission).await,
         SubmitRequest::SessionControl(SessionControlRequest::Clear) => {
@@ -271,6 +283,7 @@ async fn handle_agent_text_submit(
     cwd: &str,
     text: String,
     attachments: Vec<crate::kit::atoms::PendingAttachment>,
+    plugin_selections: Vec<peri_acp_types::session::PluginSelection>,
     admission: Option<&SubmitAdmission>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 入队时绑定的会话已切换，或所属 cohort 已作废：显式取消，不得改投新会话（P1）。
@@ -280,7 +293,7 @@ async fn handle_agent_text_submit(
     }
 
     if acp_client.supports_user_input_queue() && !crate::kit::input_area::is_remote_command(&text) {
-        if let Err(error) = crate::kit::steer_state::enqueue(text, attachments) {
+        if let Err(error) = crate::kit::steer_state::enqueue(text, attachments, plugin_selections) {
             warn!(error = %error, "user input enqueue failed; draft retained for recovery");
         }
         return Ok(());
@@ -341,7 +354,12 @@ async fn handle_agent_text_submit(
     // 原有的 MessageContent::text（不改变无附件提交的在线形态）。
     let content = crate::kit::steer_state::content_with_attachments(trimmed, &attachments);
     let result = acp_client
-        .prompt_in_session(&content, Some(request_id.clone()), &identity)
+        .prompt_in_session(
+            &content,
+            Some(request_id.clone()),
+            &identity,
+            &plugin_selections,
+        )
         .await;
     if let Err(e) = result {
         warn!(session_id = %identity.0, request_id = %request_id, error = ?e, "kit submit_consumer: prompt RPC failed");
@@ -521,6 +539,7 @@ async fn handle_keepgoing_submit(
             &MessageContent::text(""),
             Some(request_id.clone()),
             &identity,
+            &[],
         )
         .await
     {

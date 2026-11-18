@@ -90,6 +90,7 @@ fn test_submit_text_compact_appends_bubble_and_history_and_sends_agent_text() {
         Some(SubmitRequest::AgentText {
             text: "/compact".to_string(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
     );
 }
@@ -108,6 +109,7 @@ fn test_submit_text_unknown_slash_appends_bubble_and_history_and_sends_agent_tex
         Some(SubmitRequest::AgentText {
             text: "/foo".to_string(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
     );
 }
@@ -170,6 +172,7 @@ fn test_submit_text_not_loading_sends_bubble_and_agent_text() {
         Some(SubmitRequest::AgentText {
             text: "/foo".to_string(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
     );
     // 本地气泡经 LOCAL_EVENT_TX 异步发送（send_local_user_bubble），
@@ -223,6 +226,7 @@ fn test_submit_text_agent_text_carries_pending_attachments() {
         SubmitRequest::AgentText {
             text: "/foo".to_string(),
             attachments,
+            plugin_selections: Vec::new(),
         }
     };
     super::dispatch_submit_request(request, false, |request| recorder.lock().push(request));
@@ -278,6 +282,48 @@ fn test_submit_text_image_only_enqueues_when_steer_enabled() {
     assert_eq!(pending.len(), 1, "失败的入队必须留下可恢复的待办");
 
     crate::kit::steer_state::STEERS.state().write().enabled = false;
+}
+
+/// 待提交插件选择随本条第输入一起冻结：提交后清空，排队项带回原选择。
+#[test]
+#[serial]
+fn test_submit_text_loading_queue_freezes_plugin_selection_with_input() {
+    super::super::reset_submit_side_effect_state();
+    ACP_STATE.state().write().is_loading = true;
+    PENDING_PLUGIN_SELECTIONS.set(vec![peri_acp_types::session::PluginSelection::new("alpha")]);
+
+    super::submit_text("第一个任务".to_string());
+
+    assert!(
+        PENDING_PLUGIN_SELECTIONS.state().read().is_empty(),
+        "选择随本条输入消费，不能泄漏到下一个任务"
+    );
+    let state = INPUT_BUFFER.state();
+    let buf = state.read();
+    assert_eq!(buf.len(), 1);
+    assert_eq!(
+        buf.front()
+            .expect("the queued fixture must stay visible")
+            .plugin_selections,
+        vec![peri_acp_types::session::PluginSelection::new("alpha")],
+        "排队序列化必须保留插件选择，drain 时不得静默丢弃"
+    );
+}
+
+/// 控制类请求不消费待提交插件选择：选择属于下一次 AgentText。
+#[test]
+#[serial]
+fn test_submit_text_control_request_keeps_pending_plugin_selection() {
+    super::super::reset_submit_side_effect_state();
+    PENDING_PLUGIN_SELECTIONS.set(vec![peri_acp_types::session::PluginSelection::new("alpha")]);
+
+    super::submit_text("/clear".to_string());
+
+    assert_eq!(
+        PENDING_PLUGIN_SELECTIONS.state().read().clone(),
+        vec![peri_acp_types::session::PluginSelection::new("alpha")],
+        "控制类请求不得消费下一次任务的插件选择"
+    );
 }
 
 #[test]
@@ -340,6 +386,7 @@ fn test_submit_after_removal_sends_remaining_attachments_only() {
         SubmitRequest::AgentText {
             text: "看一下".to_string(),
             attachments,
+            plugin_selections: Vec::new(),
         },
         false,
         |request| recorder.lock().push(request),
@@ -354,5 +401,6 @@ fn test_submit_after_removal_sends_remaining_attachments_only() {
 }
 
 use crate::kit::atoms::PENDING_ATTACHMENTS;
+use crate::kit::atoms::PENDING_PLUGIN_SELECTIONS;
 
 use crate::kit::atoms::VIEW_MODELS;

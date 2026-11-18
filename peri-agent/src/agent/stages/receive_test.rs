@@ -234,6 +234,7 @@ async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
         input_id: uuid::Uuid::now_v7().to_string(),
         content: MessageContent::text(text),
         original_draft: text.into(),
+        plugin_selections: Vec::new(),
     };
 
     for _ in 0..128 {
@@ -300,6 +301,7 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
         input_id: uuid::Uuid::now_v7().to_string(),
         content: MessageContent::text("A"),
         original_draft: "A".into(),
+        plugin_selections: Vec::new(),
     };
     let b = EnqueueUserInputRequest {
         command_id: "enqueue-b".into(),
@@ -421,6 +423,7 @@ async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
         input_id: uuid::Uuid::now_v7().to_string(),
         content: MessageContent::text("问题"),
         original_draft: "问题".into(),
+        plugin_selections: Vec::new(),
     };
     mailbox
         .enqueue_sync(&request)

@@ -72,6 +72,7 @@ impl UserInputMailbox {
                 input_id: record.input_id.clone(),
                 content: record.content.clone(),
                 original_draft: record.original_draft.clone(),
+                plugin_selections: record.plugin_selections.clone(),
                 state: record.state,
             })
             .collect();
@@ -153,6 +154,7 @@ fn merge_store_entries(
             &input_id,
             &content,
             &original_draft,
+            &[],
         );
         state.records.push(InputRecord::new(
             input_id,
@@ -160,6 +162,7 @@ fn merge_store_entries(
             seq,
             content,
             original_draft,
+            Vec::new(),
         ));
         changed = true;
     }

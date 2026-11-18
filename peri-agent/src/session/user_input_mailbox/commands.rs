@@ -52,6 +52,7 @@ impl UserInputMailbox {
             &request.input_id,
             &request.content,
             &request.original_draft,
+            &request.plugin_selections,
         );
         let early = {
             let mut state = self.state.lock();
@@ -175,6 +176,7 @@ impl UserInputMailbox {
                                     seq,
                                     request.content.clone(),
                                     request.original_draft.clone(),
+                                    request.plugin_selections.clone(),
                                 ),
                             );
                             state.revision += 1;
@@ -454,6 +456,14 @@ impl UserInputMailbox {
             let mut taken_back = None;
             match cancel_outcome {
                 MqCancelOutcome::Cancelled(entry) => {
+                    // 撤回回执必须带上原输入的选择：选择随 input_id 走，
+                    // 只从 MQ 行重建会丢掉只在 Host 运行期记录里的字段。
+                    let selections = state
+                        .records
+                        .iter()
+                        .find(|record| record.input_id == request.input_id)
+                        .map(|record| record.plugin_selections.clone())
+                        .unwrap_or_default();
                     if let Some(record) = state
                         .records
                         .iter_mut()
@@ -470,8 +480,9 @@ impl UserInputMailbox {
                         Some((input_fingerprint, UserInputState::Withdrawn)),
                     );
                     crate::session::user_input_mailbox::window::prune_terminal_records(&mut state);
-                    taken_back =
-                        crate::session::user_input_mailbox::state::user_input_from_entry(&entry);
+                    taken_back = crate::session::user_input_mailbox::state::user_input_from_entry(
+                        &entry, selections,
+                    );
                 }
                 MqCancelOutcome::AlreadyHandedOff => {
                     // 已移交历史：不能回删冒充取消；保留运行期记录等待 Receive

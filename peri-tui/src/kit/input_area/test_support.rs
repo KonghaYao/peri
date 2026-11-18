@@ -23,5 +23,6 @@ pub(in super::super) fn reset_submit_side_effect_state() {
         .state()
         .write()
         .clear();
+    crate::kit::atoms::PENDING_PLUGIN_SELECTIONS.set(Vec::new());
     ACP_STATE.state().write().is_loading = false;
 }

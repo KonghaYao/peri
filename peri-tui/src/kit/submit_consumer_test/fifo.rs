@@ -28,6 +28,7 @@ async fn test_drained_input_buffer_prompts_preserve_fifo() {
         tx.send(SubmitRequest::AgentText {
             text: format!("m{index}"),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
         .expect("drained input buffer prompts preserve fifo: fixture channel must deliver its expected message");
     }
@@ -66,6 +67,7 @@ async fn test_failed_prompt_does_not_block_following_prompts() {
         tx.send(SubmitRequest::AgentText {
             text: format!("m{index}"),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
         .expect("failed prompt does not block following prompts: fixture channel must deliver its expected message");
     }
@@ -110,6 +112,7 @@ async fn test_pending_prompt_blocks_same_session_successor() {
         tx.send(SubmitRequest::AgentText {
             text: format!("m{index}"),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
         .expect("pending prompt blocks same session successor: fixture channel must deliver its expected message");
     }
@@ -149,6 +152,7 @@ async fn test_pending_prompt_does_not_block_another_session() {
     tx.send(SubmitRequest::AgentText {
         text: "a".to_string(),
         attachments: Vec::new(),
+        plugin_selections: Vec::new(),
     })
     .expect("pending prompt does not block another session: fixture channel must deliver its expected message");
     let (first_id, first_session, first_text) = super::support::expect_prompt(&server).await;
@@ -160,6 +164,7 @@ async fn test_pending_prompt_does_not_block_another_session() {
     tx.send(SubmitRequest::AgentText {
         text: "b".to_string(),
         attachments: Vec::new(),
+        plugin_selections: Vec::new(),
     })
     .expect("pending prompt does not block another session: fixture channel must deliver its expected message");
     let (second_id, second_session, second_text) = tokio::time::timeout(

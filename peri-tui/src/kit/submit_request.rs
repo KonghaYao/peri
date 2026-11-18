@@ -4,11 +4,13 @@ use crate::kit::ui_command::UiCommandAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitRequest {
-    /// agent 文本提交。附件随请求一起下发——提交链上任何一环都不得丢弃它
-    /// （丢弃即静默丢失用户已提交的图片）。
+    /// agent 文本提交。附件与插件选择随请求一起下发——提交链上任何一环都不得
+    /// 丢弃它们（丢弃即静默丢失用户已提交的图片或插件意图）。
     AgentText {
         text: String,
         attachments: Vec<PendingAttachment>,
+        /// 随 `input_id` 冻结的插件选择；只含插件 ID，指引由 Host 生成。
+        plugin_selections: Vec<peri_acp_types::session::PluginSelection>,
     },
     /// keepgoing：发送空白 user prompt，服务端不插入 user 消息但继续运行 agent loop。
     /// 由消息区 footer 的 keepgoing 按钮触发，不产生本地 user bubble。
@@ -96,6 +98,7 @@ pub fn parse_submit_request(input: &str) -> Option<SubmitRequest> {
     Some(SubmitRequest::AgentText {
         text: trimmed.to_string(),
         attachments: Vec::new(),
+        plugin_selections: Vec::new(),
     })
 }
 

@@ -898,6 +898,7 @@ composer-attachments = @ { $count } files
 # images add the count and the first few names.
 composer-image-attachment = [Image] { $name }
 composer-image-attachments = [Image] ×{ $count } · { $names }
+composer-plugin-selections = Plugin: { $plugins }
 composer-context-usage = { $pct }% ctx
 composer-context-usage-unknown = ctx unknown
 
@@ -944,6 +945,7 @@ paste-in-progress = Clipboard paste in progress, please wait
 paste-image-failed = Could not paste image: invalid PNG or over 20 MiB
 paste-terminal-hint = Cannot read this machine's clipboard here — paste with your terminal (Cmd+V / Ctrl+Shift+V)
 submit-blocked = Request in progress, try again later
+submit-plugin-selection-unavailable = Plugin selection needs a newer agent; draft and selection were kept
 export-success = Exported messages to: { $path }
 export-fail = Failed to export messages: { $error }
 cancel-request-sent = Cancel request sent
@@ -1261,7 +1263,10 @@ panel-plugin-list-count = { $count } plugins found
 panel-plugin-discover-hint-keys = Enter: details  |  type: filter  |  ←/→/Tab: switch view
 
 # ---- Plugin Panel Navigation ----
-panel-plugin-list-hint = ←/→/Tab: switch view  |  ↑/↓: navigate  |  Enter: details  |  Esc: close
+panel-plugin-list-hint = ←/→/Tab: switch view  |  ↑/↓: navigate  |  Space: use next task  |  Enter: details  |  Esc: close
+panel-plugin-selection-added = Added to next task: { $name }
+panel-plugin-selection-removed = Removed from next task: { $name }
+panel-plugin-selection-unavailable = Plugin selection needs a newer agent
 
 # ---- Tasks Panel ----
 panel-tasks-total-label =   Total: 

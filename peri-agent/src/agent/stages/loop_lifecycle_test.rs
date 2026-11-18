@@ -190,6 +190,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
                 input_id: input_id.clone(),
                 content: MessageContent::text(text),
                 original_draft: text.into(),
+                plugin_selections: Vec::new(),
             })
             .expect("the enqueue sync fixture result is required for this assertion");
         assert_eq!(receipt.results[0].state, UserInputState::Queued);

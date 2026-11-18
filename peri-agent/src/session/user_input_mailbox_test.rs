@@ -44,6 +44,7 @@ fn make_input(mailbox: &UserInputMailbox, text: &str) -> EnqueueUserInputRequest
         input_id: uuid::Uuid::now_v7().to_string(),
         content: MessageContent::text(text),
         original_draft: text.into(),
+        plugin_selections: Vec::new(),
     }
 }
 

@@ -19,6 +19,7 @@ fn test_parse_submit_request_treats_plain_text_as_agent_text() {
         Some(SubmitRequest::AgentText {
             text: "hello world".to_string(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
     );
 }
@@ -30,6 +31,7 @@ fn test_parse_submit_request_treats_compact_as_agent_text() {
         Some(SubmitRequest::AgentText {
             text: "/compact now".to_string(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
     );
 }
@@ -41,6 +43,7 @@ fn test_parse_submit_request_treats_unknown_slash_as_agent_text() {
         Some(SubmitRequest::AgentText {
             text: "/unknown".to_string(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         })
     );
 }

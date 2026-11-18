@@ -125,6 +125,7 @@ fn newer_or_identical(previous: &UserInputQueueSnapshot, next: &UserInputQueueSn
                 && left.state == right.state
                 && left.content == right.content
                 && left.original_draft == right.original_draft
+                && left.plugin_selections == right.plugin_selections
         })
 }
 
@@ -767,6 +768,7 @@ pub(crate) fn establish_session_snapshot(snapshot: UserInputQueueSnapshot) {
 pub(crate) fn enqueue(
     original_draft: String,
     attachments: Vec<PendingAttachment>,
+    plugin_selections: Vec<peri_acp_types::session::PluginSelection>,
 ) -> Result<(), String> {
     let session_id = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let epoch = atoms::BRIDGE_RESET_COUNTER.get();
@@ -774,6 +776,7 @@ pub(crate) fn enqueue(
         input_id: uuid::Uuid::now_v7().to_string(),
         content: content_with_attachments(&original_draft, &attachments),
         original_draft,
+        plugin_selections,
     };
     let command = SteerCommand {
         session_id,
