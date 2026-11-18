@@ -1,5 +1,7 @@
 //! Implementation of the APIs re-exported by the parent module.
 
+use peri_acp_types::meta_harness::{AssemblyPlan, ChainSlot, ExecutionProfile};
+
 use super::{
     assemble, task_scope, AcpError, AcpServerConfig, Arc, BindingRecheck, McpBuiltinWorkspaceState,
     ResolvedWorkspace, SessionResourceError, ThreadId,
@@ -271,6 +273,34 @@ impl SessionEnvironment {
         // ACP 会话任务仍由 SessionManager 登记；Workspace Bash owner 独立，
         // 通过 MCP Tasks 回执和订阅与本会话通信。
         let task_manager = host.session_manager.new_session_task_manager();
+        // A24 关闭集：从**同一份 frozen snapshot** 派生（设计 §2.5：禁止回退当轮 config；
+        // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，
+        // 不改变 pool 级就绪与面板连接状态（ARC-CAPABILITY-CLOSURE-001）。
+        //
+        // W4b 收口：同一份 disabled 集合同批派生**宿主技能面关闭位**
+        //（`"SkillsMiddleware" ∈ disabled`，与链槽装配的跳过判据同一字面量，见
+        // `peri_middlewares/src/assembly.rs` 的 `ChainSlot::Skills` 分支）——链槽关闭
+        // 时发现管线的 `core:{skill}` 裸名投影同批撤下（不得留幽灵路由）；workspace
+        // 实例本身不受影响；系统来源不注册 `{server}:{skill}` 路由。两个位一次派生、随 builtin 实例
+        // 上下文注入 pool，不在别处第三次读配置。
+        let disabled_middlewares: std::collections::HashSet<String> = match frozen {
+            Some(frozen) => frozen.meta_harness().disabled_middlewares.clone(),
+            None => {
+                crate::session::policy_from_settings(
+                    configuration.config.config.meta_harness.as_ref(),
+                )
+                .disabled_middlewares
+            }
+        };
+        let capabilities = source
+            .capabilities
+            .limit_session_sources(&disabled_middlewares);
+        let no_plugins = assemble::PreparedPlugins::default();
+        let plugins = if capabilities.plugins && !source.bare {
+            plugins
+        } else {
+            &no_plugins
+        };
         // ── W4b：builtin `workspace` 实例的**真实资源面**输入 ──
         //
         // 技能来源（J5）整体归位 MCP 侧：user/project 根 + 插件根 + builtin
@@ -303,26 +333,8 @@ impl SessionEnvironment {
                 .unwrap_or_default(),
             disable_bundled,
         );
-        // A24 关闭集：从**同一份 frozen snapshot** 派生（设计 §2.5：禁止回退当轮 config；
-        // fork 复用 source 的 frozen 字节时两者可能不同）。它是订阅建立门的唯一输入，
-        // 不改变 pool 级就绪与面板连接状态（ARC-CAPABILITY-CLOSURE-001）。
-        //
-        // W4b 收口：同一份 disabled 集合同批派生**宿主技能面关闭位**
-        //（`"SkillsMiddleware" ∈ disabled`，与链槽装配的跳过判据同一字面量，见
-        // `peri_middlewares/src/assembly.rs` 的 `ChainSlot::Skills` 分支）——链槽关闭
-        // 时发现管线的 `core:{skill}` 裸名投影同批撤下（不得留幽灵路由）；workspace
-        // 实例本身不受影响；系统来源不注册 `{server}:{skill}` 路由。两个位一次派生、随 builtin 实例
-        // 上下文注入 pool，不在别处第三次读配置。
-        let disabled_middlewares: std::collections::HashSet<String> = match frozen {
-            Some(frozen) => frozen.meta_harness().disabled_middlewares.clone(),
-            None => {
-                crate::session::build_meta_harness_state(
-                    configuration.config.config.meta_harness.as_ref(),
-                    std::collections::HashMap::new(),
-                )
-                .disabled_middlewares
-            }
-        };
+        let plan = AssemblyPlan::new(&disabled_middlewares, ExecutionProfile::Main);
+        let mcp_enabled = plan.contains(ChainSlot::Mcp);
         let builtin_closed =
             peri_middlewares::assembly::builtin_closed_instances(&disabled_middlewares);
         // ── beta flag（设计 §消费契约）──
@@ -340,7 +352,7 @@ impl SessionEnvironment {
         for (id, origin) in beta_flags.enabled() {
             tracing::info!(flag = %id, origin = ?origin, "beta flag enabled for session");
         }
-        let skills_face_closed = disabled_middlewares.contains("SkillsMiddleware");
+        let skills_face_closed = !plan.contains(ChainSlot::Skills);
         // M6：插件来源闭合位与上面两个是同**一份** disabled 集合的投影（链槽
         // 装配的跳过判据、资源 roots / 命令 / hooks / MCP 合并 / 继承面的派生
         // 与 `PluginSourceAdmission` 引用同一常量，不在别处第三次读配置）。
@@ -393,7 +405,7 @@ impl SessionEnvironment {
             source.mcp_profile.clone(),
             true,
             Some(activation.clone()),
-            source.capabilities,
+            capabilities,
         )
         .await;
         cfg.session_manager
@@ -435,7 +447,11 @@ impl SessionEnvironment {
         // blob 的渲染结果，提前绑定只是同形覆盖，不改变可见性。
         // 无 MCP 装配（`mcp_pool = None`）不调用本函数；端口存在但类型不符 ⇒
         // 显式 Err（不生成空目录，也不回落降级实例）。
-        if let Some(pool) = cfg.mcp_pool.as_ref() {
+        if let Some(pool) = cfg
+            .mcp_pool
+            .as_ref()
+            .filter(|_| plan.contains(ChainSlot::SubAgent))
+        {
             peri_middlewares::host_ports::bind_agent_catalog_from_pool(
                 &cfg.agent_catalog,
                 pool,
@@ -458,7 +474,7 @@ impl SessionEnvironment {
                 Arc::clone(&interaction_gate),
             ),
         );
-        let session_invocation = {
+        let session_invocation = if mcp_enabled {
             let pool = cfg
                 .mcp_pool
                 .as_ref()
@@ -492,7 +508,7 @@ impl SessionEnvironment {
                 &task_manager, // 会话级管理器（同一实例）：idle 期异步 hook 须挂会话作用域
             )
             .map_err(|error| AcpError::new(-32603, error.to_string()))?;
-            Arc::new(
+            Some(Arc::new(
                 peri_middlewares::mcp::session_invocation::SessionInvocationService::new(
                     peri_middlewares::mcp::session_invocation::SessionInvocationInputs {
                         pool: Arc::clone(&pool),
@@ -524,12 +540,17 @@ impl SessionEnvironment {
                         session_cancel: cancel,
                     },
                 ),
-            )
+            ))
+        } else {
+            None
         };
         // App 面 relay：canonical 入口在构造期注入（`PoolMcpAppsRelay::new` 必填），
         // 未装配入口的运行时状态不存在。仅 apps 能力开启时构造（其余情况 App 面
         // 本就不可达，relay 为 None 即显式拒绝）。
-        if source.mcp_profile.apps_enabled() {
+        if let Some(session_invocation) = session_invocation
+            .as_ref()
+            .filter(|_| source.mcp_profile.apps_enabled())
+        {
             let pool = cfg
                 .mcp_pool
                 .as_ref()
@@ -546,7 +567,7 @@ impl SessionEnvironment {
                 })?;
             let runtime_epoch = session_invocation.runtime_epoch();
             let invocation_port: Arc<dyn peri_acp_types::mcp_apps::SessionInvocationPort> =
-                Arc::clone(&session_invocation)
+                Arc::clone(session_invocation)
                     as Arc<dyn peri_acp_types::mcp_apps::SessionInvocationPort>;
             let apps_relay = peri_middlewares::mcp::apps_relay::PoolMcpAppsRelay::new(
                 pool,
@@ -580,11 +601,11 @@ impl SessionEnvironment {
             interaction_gate,
             interaction_router,
             #[cfg(test)]
-            session_invocation: Some(Arc::clone(&session_invocation)),
+            session_invocation,
             task_owner: tokio::sync::Mutex::new(task_owner),
             mcp_owner: tokio::sync::Mutex::new(mcp_owner),
             session_id: session_id.to_owned(),
-            mcp_control_enabled: !source.bare && !disabled_middlewares.contains("McpMiddleware"),
+            mcp_control_enabled: !source.bare && mcp_enabled,
             skills_face_closed,
             cwd,
             end_hooks: tokio::sync::Mutex::new(SessionEndState::Pending),

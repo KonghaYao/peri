@@ -43,9 +43,18 @@ async fn idle_lifetime_server_config(
     tmp: &tempfile::TempDir,
     startup_cwd: String,
 ) -> AcpServerConfig {
-    let config = crate::host::requests::tests::make_peri_config_with_provider(
+    idle_lifetime_server_config_with_mcp(tmp, startup_cwd, true).await
+}
+
+async fn idle_lifetime_server_config_with_mcp(
+    tmp: &tempfile::TempDir,
+    startup_cwd: String,
+    mcp_enabled: bool,
+) -> AcpServerConfig {
+    let mut config = crate::host::requests::tests::make_peri_config_with_provider(
         crate::host::requests::tests::make_provider_config("test", "openai", "key", "model"),
     );
+    config.config.meta_harness = Some(HashMap::from([("McpMiddleware".into(), mcp_enabled)]));
     let provider = LlmProvider::from_config(&config).unwrap();
     let mut cfg = crate::host::requests::tests::make_server_config(config, provider, tmp).await;
     // 生产 stdio 装配**不注入** entitlement 身份层 ⇒ `apps/*` 默认拒绝（R4 方案 b）；
@@ -639,4 +648,83 @@ async fn idle_rules_consume_the_session_task_manager_and_fail_closed_on_type_mis
         peri_acp_types::tasks::TaskManager::spawn_owned(&*fallback, Box::pin(async {})).is_err(),
         "downcast 失败必须交出 no-op 管理器（作用域已关闭），不得回落可接收任务的游离实例"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn frozen_mcp_closure_rejects_idle_apps_and_host_invoke() {
+    use peri_acp_types::mcp_apps::{MCP_APPS_ENVELOPE_VERSION, MCP_APPS_PROTOCOL_VERSION};
+
+    let (tmp, target) = idle_lifetime_fixture();
+    let cfg = idle_lifetime_server_config_with_mcp(&tmp, target.clone(), false).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let mut sessions = HashMap::new();
+    let created = crate::host::requests::handle_request(
+        "session/new",
+        &json!({"cwd": target}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let id = created["sessionId"].as_str().unwrap();
+    let state = &sessions[id];
+    assert!(state
+        .frozen
+        .as_ref()
+        .unwrap()
+        .meta_harness()
+        .disabled_middlewares
+        .contains("McpMiddleware"));
+    let environment = state.environment.as_ref().unwrap();
+    let pool = environment
+        .cfg
+        .mcp_pool
+        .clone()
+        .unwrap()
+        .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+        .unwrap_or_else(|_| panic!("concrete session MCP pool"));
+    let (calls, _, peer) = install_assembly_peer(&pool).await;
+
+    let mut connection = crate::host::connection::ConnectionContext::new(true);
+    connection.commit_initialize(peri_acp_types::PeriCaps::default());
+    environment
+        .interaction_router()
+        .register_connection(connection.id(), Arc::clone(&transport))
+        .unwrap();
+    assert!(connection.apps_enabled());
+
+    let list = crate::host::mcp_apps::handle_request(
+        "peri/mcp/apps/list",
+        &json!({"sessionId": id}),
+        &mut connection,
+        environment.apps_facade(),
+    )
+    .await
+    .expect_err("the frozen closure must disable the Apps route");
+    assert_eq!(list.data.unwrap()["kind"], "capability_disabled");
+
+    let invoke = crate::host::mcp_apps::handle_invoke(
+        &json!({
+            "envelopeVersion": MCP_APPS_ENVELOPE_VERSION,
+            "appsProtocolVersion": MCP_APPS_PROTOCOL_VERSION,
+            "serverId": ASSEMBLY_SERVER,
+            "toolName": ASSEMBLY_TOOL,
+            "ownerSessionId": id,
+            "arguments": {},
+        }),
+        &connection,
+        environment.cfg.mcp_apps_relay.as_ref(),
+        environment.apps_facade(),
+        crate::host::mcp_apps::InvokeSessionGate {
+            known: true,
+            open: true,
+        },
+    )
+    .await
+    .expect_err("the frozen closure must disable retained ACP aliases");
+    assert_eq!(invoke.data.unwrap()["kind"], "capability_disabled");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    peer.close().await;
 }

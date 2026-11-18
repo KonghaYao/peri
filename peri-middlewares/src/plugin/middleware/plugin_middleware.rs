@@ -29,7 +29,7 @@ impl PluginMiddleware {
 #[async_trait::async_trait]
 impl Middleware for PluginMiddleware {
     fn name(&self) -> &str {
-        "PluginMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Plugin.name()
     }
 
     async fn before_agent(

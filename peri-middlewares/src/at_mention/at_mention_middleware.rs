@@ -70,7 +70,7 @@ impl AtMentionMiddleware {
 #[async_trait]
 impl Middleware for AtMentionMiddleware {
     fn name(&self) -> &str {
-        "AtMentionMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::AtMention.name()
     }
 
     /// 输入准备（`before_input`）：首批由 `run_before_agent` 按链序交错调用本钩子

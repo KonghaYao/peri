@@ -1,7 +1,7 @@
 use super::{
-    async_trait, fmt, AgentCancellationToken, AgentEventHandler, AgentId, AgentOverrides, Arc,
-    BaseMessage, BaseTool, Debug, Formatter, InvocationArgs, McpAgentRegistry, RegisteredHook,
-    RwLock, SubagentHost, TOOL_AGENT,
+    async_trait, fmt, AgentCancellationToken, AgentEventHandler, AgentId, Arc, BaseMessage,
+    BaseTool, Debug, Formatter, InvocationArgs, McpAgentRegistry, RegisteredHook, RwLock,
+    SubagentHost, TOOL_AGENT,
 };
 
 /// SubAgentTool - implements the `Agent` tool, allowing LLM to delegate sub-tasks to specialized sub-agents
@@ -31,8 +31,7 @@ pub struct SubAgentTool {
         Arc<dyn Fn(Option<&str>) -> peri_agent::session::subagent::SubagentLlmSource + Send + Sync>,
     /// System prompt builder: (agent overrides, cwd) -> system prompt string
     #[allow(clippy::type_complexity)]
-    pub(crate) system_builder:
-        Option<Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>>,
+    pub(crate) system_builder: Option<peri_agent::session::factory::SystemPromptBuilder>,
     /// Optional cancellation token for interrupting sub-agent execution
     pub(crate) cancel: Option<AgentCancellationToken>,
     /// Shared reference to parent agent message snapshot (used by Fork path)

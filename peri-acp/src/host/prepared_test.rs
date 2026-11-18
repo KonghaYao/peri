@@ -873,3 +873,6 @@ async fn restore_and_fork_take_the_plugin_decision_from_the_frozen_snapshot() {
         .disabled_middlewares
         .contains("PluginMiddleware"));
 }
+
+#[path = "prepared_deployment_test.rs"]
+mod deployment;

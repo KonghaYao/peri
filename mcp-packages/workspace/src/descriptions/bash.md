@@ -41,3 +41,12 @@ Background mode (run_in_background: true):
 - Run the service in the foreground inside this already-backgrounded shell: do not add `&`, use `Start-Job`, or detach it with `Start-Process` without `-Wait`.
 - Stop a running task through the host's task cancellation interface; killing only a shell PID can leave the service and its output pipes alive. If cancellation is unavailable, the process may keep running until it exits on its own.
 - Preserve cleanup errors and verify actual process exit. Do not hide a failed kill with `2>/dev/null` or report success merely because a trailing `echo cleaned` succeeded.
+
+## Bash discipline
+
+`Bash` is the most powerful tool and the most common source of unintended damage. Before running a command:
+
+- Quote file paths that may contain spaces.
+- Prefer non-destructive forms (`git status` over `git clean -f`, `ls` over `rm`).
+- Never pipe `curl` into `sh`/`bash` unless the user explicitly asks.
+- Avoid commands with glob expansion you have not verified (`rm *.log`) — list first, then act.

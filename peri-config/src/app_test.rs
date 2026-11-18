@@ -974,3 +974,14 @@ fn removed_compact_keys_are_reported_once_and_only_when_present() {
         );
     }
 }
+
+#[test]
+fn duplicate_meta_harness_sections_are_rejected_before_freeze() {
+    let error = serde_json::from_str::<super::AppConfig>(
+        r#"{"meta_harness":{"13_skills":true,"13_skills":false}}"#,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("duplicate meta_harness key '13_skills'"));
+}

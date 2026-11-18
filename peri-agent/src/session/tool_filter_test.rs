@@ -112,10 +112,19 @@ fn test_mcp_policy_maps_capability_and_legacy_key_to_same_closure() {
     };
     let base = ToolFilterPolicy::canonical(None, vec![]);
     // 三种输入：v5 能力名、迁移期旧关闭键、未命中键。
-    for key in ["workspace", "workspace"] {
+    let v5 = SourceTool {
+        name: "Read",
+        server: Some("peri"),
+        builtin: Some("peri"),
+    };
+    for key in ["workspace", "WorkspaceMiddleware"] {
         let policy =
             ToolFilterPolicy::with_mcp_policy(HashSet::from([key.to_owned()]), base.clone());
         assert!(!policy(&builtin), "{key} 必须关闭 builtin workspace");
+        assert!(
+            !policy(&v5),
+            "{key} must also close the v5 single-exit binding"
+        );
         assert!(policy(&external), "同名外部 server 不继承 builtin 关闭");
     }
     let open = ToolFilterPolicy::with_mcp_policy(HashSet::new(), base);

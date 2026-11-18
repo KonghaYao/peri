@@ -61,7 +61,9 @@ async fn test_integration_fork_parent_messages_passthrough() {
             "/tmp".to_string(),
         )
         .with_parent_messages(Arc::clone(&parent_messages))
-        .with_system_builder(Arc::new(|_ov, _cwd| "FORK-CONTEXT-SP".to_string())),
+        .with_system_builder(Arc::new(|_ov, _cwd, _skill_access, _projection| {
+            "FORK-CONTEXT-SP".to_string()
+        })),
     );
 
     // Act: fork 模式触发端到端路径

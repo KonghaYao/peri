@@ -19,106 +19,22 @@ pub use peri_acp_types::frozen::{
     DeregisterRuntimeFn, FrozenData, RegisterRuntimeFn, ThreadPersistence,
 };
 
-/// 生产链槽位（顺序 = 行为契约，ARC-MIDDLEWARE-001，禁止重排）。
-///
-/// 顺序与迁移前 `peri-acp/src/agent/builder.rs` 的 `MiddlewareChain`
-/// 构造顺序完全一致，按功能分组；条件注册（MCP/Workflow/Goal）与
-/// Hook 组展开由装配实现按上下文判断。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChainSlot {
-    // ── 第一组：上下文注入器（system prompt 段落 / agent 定义 / 插件 / skills） ──
-    /// DefaultSystemPrompt（基础系统提示词段持有者，波 4 演进 2）
-    DefaultSystemPrompt,
-    /// Lang（语言指令段持有者，波 4 演进 2）
-    Lang,
-    /// AgentsMd（CLAUDE.md 指引注入）
-    AgentsMd,
-    /// Plugin（插件加载结果注入）
-    Plugin,
-    /// Skills（技能摘要注入）
-    Skills,
-    /// SkillPreload（预加载技能工具）
-    SkillPreload,
-    /// AtMention（@mention 解析）
-    AtMention,
-    /// Image（@image 附件转 ContentBlock::Image）
-    Image,
-    // ── 第二组：工作区观察类注入器 ──
-    // v4-part-4 W3-C1：原 `Filesystem` / `Terminal` 两槽位已删除——7 个文件/终端工具
-    // （Read / Write / Edit / Glob / Grep / folder_operations / Bash）的唯一提供面是
-    // builtin `workspace` 实例的 bridge（模型面名字 `mcp__workspace__*`）。
-    // v4 wave 4：原 `GitWatch` 槽位已删除——git ref 变化改由 builtin `workspace` 实例的
-    // `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传（提醒映射内置在宿主侧），
-    // 本组只剩 `GitAttribution`。
-    /// GitAttribution（git 归属注入）
-    GitAttribution,
-    // ── 第三组：Todo ──
-    /// Todo（todo 工具）
-    Todo,
-    // ── 第四组：Hook 中间件（插件 hooks + 自定义 hooks） ──
-    /// Hook 哨兵：每个非空 hook group 展开一个 HookMiddleware 实例
-    Hook,
-    // ── 第五组：Permission + AskUser + SubAgent（条件中间件） ──
-    /// Permission（敏感工具审批，原 Hitl 槽位；2026-08-15 职责拆分）
-    Permission,
-    /// AskUser（提问通道 HumanInTheLoopMiddleware，持有 AskUserQuestion 工具）
-    AskUser,
-    /// SubAgent（子 Agent 工具）
-    SubAgent,
-    // ── 第六组：MCP / ToolSearch（工具提供器，条件注册） ──
-    // P5：原 `Workflow` 槽位已删除——编排能力是 builtin `workflow` 实例的
-    // MCP 工具面（`mcp__workflow__*`），不再有链上 middleware（见
-    // `docs/design/workflow-mcp.md` §7 删除清单）。
-    /// Mcp（MCP 工具，pool 可用时注册）
-    Mcp,
-    /// ToolSearch（deferred 工具搜索/执行代理）
-    ToolSearch,
-    // ── 第七组：Goal（steering，条件注册；在链最后） ──
-    /// Goal（goal 紧迫感 steering，controller 可用时注册）
-    Goal,
-}
+pub use peri_acp_types::meta_harness::ChainSlot;
 
-/// 生产链蓝本：槽位顺序 = 链序事实源（ARC-MIDDLEWARE-001）。
-///
-/// 迁移自 `peri-acp/src/agent/builder.rs` 的 `MiddlewareChain` 构造顺序，
-/// 是行为契约，不得按名称/便利性/局部需求重排。
+/// The contract declaration preserves production hook order across executors.
 #[must_use]
 pub fn production_blueprint() -> Vec<ChainSlot> {
-    vec![
-        // 第一组：上下文注入器
-        ChainSlot::DefaultSystemPrompt,
-        ChainSlot::Lang,
-        ChainSlot::AgentsMd,
-        ChainSlot::Plugin,
-        ChainSlot::Skills,
-        ChainSlot::SkillPreload,
-        ChainSlot::AtMention,
-        ChainSlot::Image,
-        // 第二组：工作区观察类注入器（文件/终端/GitWatch 均已离开链：
-        // 文件/终端工具迁 builtin `workspace` 实例，git ref 变化迁该实例的订阅回传）
-        ChainSlot::GitAttribution,
-        // 第三组：Todo
-        ChainSlot::Todo,
-        // 第四组：Hook 中间件
-        ChainSlot::Hook,
-        // 第五组：Permission + AskUser + SubAgent
-        ChainSlot::Permission,
-        ChainSlot::AskUser,
-        ChainSlot::SubAgent,
-        // 第六组：MCP / ToolSearch（Workflow 槽位已随 P5 删除）
-        ChainSlot::Mcp,
-        ChainSlot::ToolSearch,
-        // 第七组：Goal
-        ChainSlot::Goal,
-    ]
+    ChainSlot::ALL.to_vec()
 }
 
-/// 装配失败：注入端口不是装配实现要求的具体类型。
+/// 装配失败：蓝本重复声明 owner，或注入端口与实际消费者不匹配。
 ///
 /// 端口存在但无法还原时必须显式失败——静默替换为空池/默认索引会让装配产物
 /// 与注入实例分离（MCP 工具、检索索引不生效）且不可观察。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AssemblyError {
+    #[error("assembly blueprint contains duplicate slot `{}`", .slot.name())]
+    DuplicateSlot { slot: ChainSlot },
     #[error("assembly port `{port}` is not the required implementation `{expected}`")]
     PortMismatch {
         /// 端口名（`McpPoolPort` / `ToolSearchPort` / `AgentCatalogPort`）。
@@ -270,8 +186,23 @@ use crate::tools::BaseTool;
 
 /// 后台任务完成回调类型（第二参为任务 kind，供 continuation scheduler 过滤）。
 pub use peri_acp_types::tasks::OnBgCompleteFn;
-/// System prompt 构建器类型。
-pub type SystemPromptBuilder = Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>;
+/// Which part of the frozen child prompt the caller needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildPromptProjection {
+    Identity,
+    SkillsSection,
+}
+
+pub type SystemPromptBuilder = Arc<
+    dyn Fn(
+            Option<&AgentOverrides>,
+            &str,
+            peri_acp_types::skills::SkillToolAccess,
+            ChildPromptProjection,
+        ) -> String
+        + Send
+        + Sync,
+>;
 
 /// SubAgent 中间件端口（L5：装配产物经本端口向主 session 注入父身份）。
 ///

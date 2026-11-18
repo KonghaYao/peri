@@ -578,7 +578,7 @@ impl SkillPreloadMiddleware {
 #[async_trait]
 impl Middleware for SkillPreloadMiddleware {
     fn name(&self) -> &str {
-        "SkillPreloadMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::SkillPreload.name()
     }
 
     /// 宿主显式名单路径（子代理 / workflow 定义）——**只在初始化执行一次**，

@@ -158,6 +158,7 @@ pub struct PromptTemplate {
     pub(super) environment_sections: Vec<ResolvedSection>,
     /// available agents catalog 是否包含 compile-time built-ins（会话冻结）。
     pub(super) built_in_subagents_enabled: bool,
+    catalog_available: bool,
 }
 
 /// 段落内容来源（实现裁定 Q2：内置静态文本零拷贝借用，覆盖全文持 Arc）。
@@ -189,20 +190,11 @@ impl SectionContent {
 /// 空串——这是正常状态，不是异常：只记 debug，不刷 warn。
 pub(crate) const OPTIONAL_EMPTY_SECTIONS: [&str; 2] = ["persona", "language"];
 
-/// 空段落的来源标签（L2 日志字段）：已知持有者映射取 middleware 名，
-/// 其余归链上收集（日志只带 id/source/状态，不带段落正文）。
-pub(super) fn section_source(section_id: &str) -> &'static str {
-    peri_acp_types::meta_harness::SECTION_HOLDER_MIDDLEWARE
-        .iter()
-        .find(|(id, _)| *id == section_id)
-        .map(|(_, holder)| *holder)
-        .unwrap_or("chain")
-}
-
 /// 构造期解析后的段落（`id` 为段落覆盖与持有权迁移的定位键，渲染只消费
 /// zone/order/content）。
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedSection {
+    pub(super) owner: Option<peri_acp_types::meta_harness::ChainSlot>,
     pub(super) id: &'static str,
     pub(super) zone: PromptSectionZone,
     pub(super) order: u16,
@@ -230,10 +222,16 @@ impl PromptTemplate {
         if let Err(conflict) = peri_agent::middleware::validate_section_layout(collected) {
             panic!("PromptTemplate 段落装配冲突：{conflict}");
         }
+        let catalog_available = collected.iter().any(|s| s.provides_agent_catalog);
         let filtered_section = collected
             .iter()
             .filter(|section| section.zone == PromptSectionZone::Cached);
         for section in filtered_section {
+            assert!(
+                matches!(section.content, PromptSectionContent::Builtin(_)),
+                "cached section '{}' must contain static text",
+                section.id
+            );
             if let Some(token) = placeholder_tokens(section.content.as_str()).first() {
                 panic!(
                     "PromptTemplate Cached 段落 '{}' 含动态占位符 '{}'：缓存区只接收纯静态模板",
@@ -245,6 +243,7 @@ impl PromptTemplate {
             .iter()
             .map(|section| ResolvedSection {
                 id: section.id,
+                owner: section.owner,
                 zone: section.zone,
                 order: section.order,
                 content: match &section.content {
@@ -255,9 +254,18 @@ impl PromptTemplate {
             .collect();
         // 3. MetaHarness 覆盖合并（覆盖 = 替换持有者对应段落贡献，覆盖优先）；
         //    非法覆盖拒绝应用（保留内置）并记录来源 + 错误类别。
-        for section in &mut sections {
+        for id in state.section_overrides.keys() {
+            if !collected.iter().any(|section| section.id == id) {
+                tracing::warn!(section = %id, category = "section-absent", "prompt override has no installed owner");
+            }
+        }
+        for (section, binding) in sections.iter_mut().zip(collected) {
             if let Some(overridden) = state.section_overrides.get(section.id) {
-                match section_validation::validate_section_override(section.zone, overridden) {
+                match section_validation::validate_bound_override(
+                    binding,
+                    overridden,
+                    catalog_available,
+                ) {
                     Ok(()) => section.content = SectionContent::Override(Arc::clone(overridden)),
                     Err(reason) => tracing::warn!(
                         section = section.id,
@@ -282,14 +290,14 @@ impl PromptTemplate {
             if OPTIONAL_EMPTY_SECTIONS.contains(&section.id) {
                 tracing::debug!(
                     section = section.id,
-                    source = section_source(section.id),
+                    source = section.owner.map(|owner| owner.name()).unwrap_or("chain"),
                     status = "intentionally-empty",
                     "可选段落内容为空：跳过渲染（不是异常）"
                 );
             } else {
                 tracing::warn!(
                     section = section.id,
-                    source = section_source(section.id),
+                    source = section.owner.map(|owner| owner.name()).unwrap_or("chain"),
                     status = "empty-required",
                     "必需段落内容为空：跳过渲染并把该段按缺失处理（不伪造正文；检查持有 middleware 的投递条件）"
                 );
@@ -313,6 +321,7 @@ impl PromptTemplate {
             uncached_sections,
             environment_sections,
             built_in_subagents_enabled: state.built_in_subagents_enabled,
+            catalog_available,
         }
     }
 
@@ -383,6 +392,23 @@ impl PromptTemplate {
         Some(self.render_text(&body, env, agent_catalog))
     }
 
+    pub(crate) fn render_owned_section(
+        &self,
+        spec: peri_acp_types::meta_harness::SectionSpec,
+        env: &PromptEnv,
+        agent_catalog: &dyn AgentCatalogPort,
+    ) -> Option<String> {
+        let sections = match spec.zone {
+            PromptSectionZone::Cached => &self.cached_sections,
+            PromptSectionZone::Uncached => &self.uncached_sections,
+            PromptSectionZone::Environment => &self.environment_sections,
+        };
+        sections
+            .iter()
+            .find(|section| section.id == spec.id && section.owner == Some(spec.owner))
+            .map(|section| self.render_text(section.content.as_str(), env, agent_catalog))
+    }
+
     pub(super) fn render_text(
         &self,
         text: &str,
@@ -397,8 +423,12 @@ impl PromptTemplate {
                 "prompt 重渲染缺少冻结运行环境快照：运行环境占位符标记为 unavailable（不重探本地值）"
             );
         }
-        let agents = format_available_agents(agent_catalog, self.built_in_subagents_enabled);
         let escaped = escape_literal_braces(text);
+        let agents = if self.catalog_available && escaped.contains("{{available_agents}}") {
+            format_available_agents(agent_catalog, self.built_in_subagents_enabled)
+        } else {
+            String::new()
+        };
         let rendered = render_placeholders_once(&escaped, env, &agents);
         restore_literal_braces(&rendered)
     }

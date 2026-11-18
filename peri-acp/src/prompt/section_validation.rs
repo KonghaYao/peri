@@ -37,10 +37,18 @@ pub(crate) enum OverrideRejection {
     Empty,
     /// 覆盖目标段落不在本会话装配面（键存在但无段可覆盖）。
     SectionAbsent,
+    MissingAgentCatalog,
+    RestrictedBinding,
     /// 单段超出字节预算。
-    TooLarge { bytes: usize, limit: usize },
+    TooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     /// 整批累计超出字节预算。
-    TotalBudgetExceeded { bytes: usize, limit: usize },
+    TotalBudgetExceeded {
+        bytes: usize,
+        limit: usize,
+    },
     /// 含 reserved cache boundary token（跨 String handoff 的唯一控制字）。
     ReservedBoundaryToken,
     /// 未知或未闭合的 `{{name}}`（模板错误；字面量用 `\{{` 转义）。
@@ -55,6 +63,8 @@ impl OverrideRejection {
         match self {
             Self::Empty => "empty",
             Self::SectionAbsent => "section-absent",
+            Self::MissingAgentCatalog => "missing-binding",
+            Self::RestrictedBinding => "restricted-binding",
             Self::TooLarge { .. } => "single-section-budget",
             Self::TotalBudgetExceeded { .. } => "total-budget",
             Self::ReservedBoundaryToken => "reserved-boundary-token",
@@ -67,6 +77,12 @@ impl OverrideRejection {
     pub(crate) fn detail(&self) -> String {
         match self {
             Self::Empty => "空覆盖内容".to_string(),
+            Self::MissingAgentCatalog => {
+                "available_agents requires an installed catalog provider".into()
+            }
+            Self::RestrictedBinding => {
+                "the owner requires instructions for the selected binding".into()
+            }
             Self::SectionAbsent => "目标段落未装配（覆盖无效果，拒绝持久化）".to_string(),
             Self::TooLarge { bytes, limit } => format!("{bytes} bytes > 单段上限 {limit}"),
             Self::TotalBudgetExceeded { bytes, limit } => {
@@ -110,6 +126,26 @@ pub(crate) fn validate_section_override(
     Ok(())
 }
 
+/// Dynamic override bindings must be supplied by the same assembly.
+pub(super) fn validate_bound_override(
+    section: &PromptSection,
+    text: &str,
+    catalog_available: bool,
+) -> Result<(), OverrideRejection> {
+    if !section.accepts_override {
+        return Err(OverrideRejection::RestrictedBinding);
+    }
+    validate_section_override(section.zone, text)?;
+    if !catalog_available
+        && super::prompt_template::placeholder_tokens(text)
+            .iter()
+            .any(|token| token == "available_agents")
+    {
+        return Err(OverrideRejection::MissingAgentCatalog);
+    }
+    Ok(())
+}
+
 /// 冻结准入：按收集到的段落（id → zone）校验全部覆盖，非法项拒绝应用。
 ///
 /// 返回被拒绝的 `(section id, 原因)` 列表（确定性顺序：按 id 排序，见
@@ -118,9 +154,12 @@ pub(crate) fn sanitize_section_overrides(
     state: &mut MetaHarnessState,
     sections: &[PromptSection],
 ) -> Vec<(String, OverrideRejection)> {
-    let zones: HashMap<&str, PromptSectionZone> = sections
+    let catalog_available = sections
         .iter()
-        .map(|section| (section.id, section.zone))
+        .any(|section| section.provides_agent_catalog);
+    let bindings: HashMap<_, _> = sections
+        .iter()
+        .map(|section| (section.id, section))
         .collect();
     let mut rejected = Vec::new();
     let mut accepted_total = 0usize;
@@ -130,12 +169,12 @@ pub(crate) fn sanitize_section_overrides(
         let Some(text) = state.section_overrides.get(&id).cloned() else {
             continue;
         };
-        let Some(zone) = zones.get(id.as_str()).copied() else {
+        let Some(binding) = bindings.get(id.as_str()) else {
             state.section_overrides.remove(&id);
             rejected.push((id, OverrideRejection::SectionAbsent));
             continue;
         };
-        match validate_section_override(zone, &text) {
+        match validate_bound_override(binding, &text, catalog_available) {
             Ok(()) => {
                 let total = accepted_total + text.len();
                 if total > MAX_TOTAL_OVERRIDE_BYTES {

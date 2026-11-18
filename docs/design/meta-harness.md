@@ -59,7 +59,7 @@ serde 类型错误 fail**——"warn 不 fail"仅适用于成功解析后的未�
 合法键集合由 `peri-acp-types/src/meta_harness.rs` 的 `SECTION_IDS`、
 `MIDDLEWARE_NAMES`、v5 能力名（`BUILTIN_V5_CAPABILITIES`）与
 `BUILT_IN_SUBAGENTS_KEY` 共同定义；校验实现为 `peri-config/src/app.rs::AppConfig::validate_meta_harness`，设计不复制校验代码。
-段落的 `false` 与链槽位/实例策略的 `true` 都是合法的显式恢复值。
+段落的 `false` 与链槽位/实例策略的 `true` 都是合法的显式恢复值。单个 JSON 对象中重复声明同一个 key 会返回解析错误。不同来源对同一 key 继续按层合并。对同一 builtin 能力混用旧名和新名会产生诊断，其中任一值为 `false` 时关闭该能力。旧会话中的旧拼写在执行侧继续有效。
 
 ### 2.2 段落覆盖来源：workspace `peri-meta://`
 
@@ -71,9 +71,7 @@ serde 类型错误 fail**——"warn 不 fail"仅适用于成功解析后的未�
 - **来源白名单（X7）**：只消费 host 绑定为真实 builtin `workspace` 实例的句柄
   （`ConfigSource::Builtin { instance: "workspace" }` 且 `Connected`）；外部 origin 的同 scheme
   资源一律拒绝并记录，判定依据是实例身份而非资源文本自称。
-- **关闭与失败（X8）**：覆盖不可得（实例关闭 / 文档缺失 / 读取失败）⇒ warn 并保持内置段落、
-  不阻塞会话创建、**不回落磁盘**；必选输入的读取失败仍按其契约走发布前失败补偿，legacy 首次接纳
-  无执行环境 ⇒ 覆盖不可得（保持内置）。
+- **缺失与失败（X8）**：实例关闭、未连接或文档缺失时保留内置段落。来自已连接受信来源的读取错误或同一目标出现两次，会在发布前返回错误。legacy 首次接纳没有资源环境时保留内置正文。
 - **扫描语义**（provider 侧）：仅一级目录 `{cwd}/.peri/meta/*.md`（不递归、symlink 条目跳过）；
   非 `.md` 文件忽略；文件 stem 即 section_id（`"01_intro.md"` → `"01_intro"`）；读取失败跳过该文件、
   不 fail 扫描。
@@ -95,6 +93,8 @@ serde 类型错误 fail**——"warn 不 fail"仅适用于成功解析后的未�
   session/new 构建进冻结状态后，**全部装配入口统一消费冻结副本**——主链
   每 turn 重新装配只复用，不再直读可变 `peri_config`（否则配置变更会在
   会话中途生效，违背 ARC-FROZEN-001）；SubAgent/fork 经冻结状态传播。
+
+首次冻结同时记录部署未提供的 builtin、cron、插件、stdio MCP 和 settings hooks 来源。恢复按历史上限与当前部署取交集。关闭 stdio 时其他 MCP 传输仍可按策略使用；关闭 settings hooks 时获准的插件 hooks 仍可注册。旧快照没有记录的来源标记无法事后推断，继续受其已存策略和当前部署限制。
 
 ### 2.4 段落覆盖
 
@@ -120,33 +120,18 @@ MetaHarnessState 传入——冻结渲染与后续重渲染必须同一覆盖源
   `PromptTemplate::render` 生成，不在段落文件内；段落位置属性（契约 2）负责
   装配，保留控制字负责把 seam 跨越 `String` handoff 传给 provider。provider
   必须消费该控制字，wire prompt 不得包含它（ARC-SERIAL-001）。
-- **冻结语义**：覆盖在冻结期构造时一次应用，产出后即 frozen，无运行时
-  开销、无中途重读（ARC-FROZEN-001）。
+- **冻结语义**：新会话冻结有效覆盖。重渲染消费已保存的覆盖，并依据派生 owner 再次校验适用性。缺失 owner 或缺失 `available_agents` 绑定会记录诊断。
 
 ### 2.5 middleware 关闭
 
-**配置来源**：`AppConfig.meta_harness` 的 false 条目 → `disabled` 集合
-（`AssemblyContext.meta_harness_disabled: HashSet<String>` 透传）。
+设置按来源逐键合并，冻结阶段将链槽位、builtin 兼容名和部署关闭位写入同一份会话策略。`AssemblyPlan` 从该策略选择执行面的 owner。主链与 idle 的具体蓝本在端口还原前校验并裁剪，子 Agent 与 workflow 的工厂消费相同的 owner 判断。
 
-**关闭面 = 全部装配入口**（禁止只过滤顶层链——否则产生系统性链下泄漏：
-parent_tools / Workflow agent 链 / 子链独立装配、无条件注入工具，关闭
-Todo / SubAgent / Mcp 后子 agent 仍携带这些工具）：
-
-```rust
-// 每个装配入口内：
-let disabled: HashSet<String> = meta_harness.iter()
-    .filter(|(_, v)| !**v)
-    .map(|(k, _)| k.clone())
-    .collect();
-
-if !disabled.contains("TodoMiddleware") {
-    chain.add(Box::new(TodoMiddleware::new(...)));   // 关闭 → 不构造、不进链
-}
-
-// builtin MCP 能力（`workspace` / `web` / `artifact` / `cron` / `monitor` /
-// `workflow`）不走链构造：能力名进入关闭集，再交给工具面过滤（`assembly.rs`）。
-let closed_instances = crate::mcp::builtin::closed_instances(&disabled);
-```
+| 原先分散的入口 | 现在的控制路径 |
+| --- | --- |
+| 配置校验、冻结前覆盖资源选择 | 从同一份选定的 workspace 配置读取，`SECTION_IDS`、开关及工具名由类型声明派生。 |
+| 链装配、空闲调用及子链构造 | 从冻结策略选择 owner。Hook 组按被选中的审批路径运行；无 MCP owner 时没有 idle 调用服务。 |
+| 直连、延迟工具、旧显示名 | 注册表绑定提供真实身份，每次模型目录发布或执行解析都受同一策略约束。 |
+| 冻结渲染、子身份、workflow | 同一 owner 产生静态段落。工具限制可继续收窄其内容，逐请求贡献只来自运行中的链。 |
 
 **联动清理**：关闭 SubAgentMiddleware 时，其关联构造（parent_tools 注入、
 subagent_mw 槽位）联动置空，禁止半开状态。
@@ -160,7 +145,7 @@ subagent_mw 槽位）联动置空，禁止半开状态。
   prompt_contribution / first_turn_reminder）全部不执行——工具与提示词贡献
   同时消失。
 - **段落所有权跟随关闭面**：middleware 缺席时，其持有的 gated 段落与
-  request-time contribution 同时消失；无持有者兼容段只按显式 gate 判定。
+  request-time contribution 同时消失。
 - **工具视图每 turn 重建**：禁用效果经
   `build_session_tool_view`（每 turn 从基础 shared_tools + 当前链工具重建
   session-local 视图）实现，**不修改宿主持有的全局共享表**（并发会话配置
@@ -202,6 +187,6 @@ subagent_mw 槽位）联动置空，禁止半开状态。
 | --- | --- | --- |
 | `MetaHarnessState` 类型 | `peri-acp-types/src/meta_harness.rs` | 跨层冻结载体，简单类型 |
 | settings 字段解析/合并 | `peri-config/src/app.rs` | `AppConfig.meta_harness` + merge 特例 + 校验 |
-| 冻结组装 | `peri-acp/src/session/frozen.rs` | build_frozen_data + 冻结载体三结构加字段 |
+| 冻结组装 | `peri-acp/src/session/frozen.rs` | 从选定配置、工作区资源与部署上限冻结会话 |
 | 段落覆盖读取 | `peri-acp/src/prompt/mod.rs` | `PromptTemplate::new` 构造期合并（`SectionContent` 零拷贝双态） |
-| 装配期过滤 | `peri-middlewares/src/assembly.rs` | disabled 集合裁剪链 + 全装配入口联动 |
+| 装配期过滤 | `peri-middlewares/src/assembly.rs` | 按 AssemblyPlan 安装选定的 owner 与端口 |

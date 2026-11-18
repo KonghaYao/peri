@@ -158,7 +158,7 @@ impl ToolSearchMiddleware {
 #[async_trait]
 impl Middleware for ToolSearchMiddleware {
     fn name(&self) -> &str {
-        "ToolSearch"
+        peri_acp_types::meta_harness::ChainSlot::ToolSearch.name()
     }
 
     fn collect_tools(&self, _cwd: &str) -> Vec<Box<dyn BaseTool>> {

@@ -325,3 +325,35 @@ fn inserted_cwd_is_not_parsed_as_a_template() {
         "模板 token 应替换一次，插入值与转义 token 应保持原文：{rendered}"
     );
 }
+
+#[test]
+fn override_cannot_request_a_catalog_without_its_provider() {
+    let mut state = MetaHarnessState::default();
+    state
+        .section_overrides
+        .insert("runtime".into(), "agents: {{available_agents}}".into());
+    let sections = [PromptSection::builtin(
+        "runtime",
+        PromptSectionZone::Uncached,
+        1,
+        "original",
+    )];
+    let rejected = section_validation::sanitize_section_overrides(&mut state, &sections);
+    assert_eq!(
+        rejected,
+        vec![("runtime".into(), OverrideRejection::MissingAgentCatalog)]
+    );
+    assert!(state.section_overrides.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "must contain static text")]
+fn cache_prefix_rejects_computed_text_even_without_placeholders() {
+    let section = PromptSection::dynamic(
+        "now",
+        PromptSectionZone::Cached,
+        1,
+        "today is Monday".into(),
+    );
+    PromptTemplate::new(&MetaHarnessState::default(), &[section]);
+}

@@ -114,19 +114,19 @@ pub(crate) fn build_workflow_forwarder_launcher() -> ForwarderLauncherFn {
 pub(crate) fn build_workflow_system_prompt_fallback(
     agent_catalog: Arc<dyn AgentCatalogPort>,
     meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
-    capabilities: peri_agent::middleware::SectionCapabilities,
+    capabilities: peri_acp_types::meta_harness::AssemblyPlan,
     frozen_runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 ) -> WorkflowSystemPromptFallback {
     Arc::new(
-        move |cwd: &str, frozen_date: Option<&str>, frozen_language: Option<&str>| {
+        move |cwd: &str, frozen_date: Option<&str>, frozen_language: Option<&str>, skill_access| {
             // C2：收集结果 = 能力事实驱动（冻结 disabled 集合 + 冻结语言）。
-            let collected = crate::session::build_collected_sections_with_capabilities(
+            let template = crate::session::derived_prompt_template(
                 &meta_harness,
                 None,
                 frozen_language,
                 &capabilities,
+                skill_access,
             );
-            let template = crate::prompt::PromptTemplate::new(&meta_harness, &collected);
             let date = frozen_date.map(str::to_string).unwrap_or_else(|| {
                 peri_time::calendar_date(
                     peri_time::now_wall(),
@@ -151,22 +151,26 @@ pub(crate) fn build_workflow_system_prompt_fallback(
 pub(crate) fn build_workflow_agent_prompt_builder(
     agent_catalog: Arc<dyn AgentCatalogPort>,
     meta_harness: peri_acp_types::meta_harness::MetaHarnessState,
-    capabilities: peri_agent::middleware::SectionCapabilities,
+    capabilities: peri_acp_types::meta_harness::AssemblyPlan,
     frozen_runtime_env: Option<peri_acp_types::frozen::FrozenRuntimeEnv>,
 ) -> WorkflowAgentPromptBuilder {
     Arc::new(
-        move |overrides: Option<&AgentOverrides>, cwd, frozen_date, frozen_language| {
+        move |overrides: Option<&AgentOverrides>,
+              cwd,
+              frozen_date,
+              frozen_language,
+              skill_access| {
             // C2：收集结果 = 能力事实驱动（冻结 disabled 集合 + overrides +
             // 冻结语言驱动；persona 段内容依赖 overrides，调用期计算）。
             // H2：不再按执行类型硬编码排除 10_hitl——审批有效性由能力事实
             // （PermissionMiddleware 有效模式）决定。
-            let collected = crate::session::build_collected_sections_with_capabilities(
+            let template = crate::session::derived_prompt_template(
                 &meta_harness,
                 overrides,
                 frozen_language,
                 &capabilities,
+                skill_access,
             );
-            let template = crate::prompt::PromptTemplate::new(&meta_harness, &collected);
             let date = frozen_date.map(str::to_string).unwrap_or_else(|| {
                 peri_time::calendar_date(
                     peri_time::now_wall(),
@@ -188,8 +192,14 @@ pub(crate) fn workflow_capabilities(
     disabled: &std::collections::HashSet<String>,
     broker_present: bool,
     permission_mode_present: bool,
-) -> peri_agent::middleware::SectionCapabilities {
-    crate::session::workflow_chain_capabilities(disabled, broker_present, permission_mode_present)
+) -> peri_acp_types::meta_harness::AssemblyPlan {
+    peri_acp_types::meta_harness::AssemblyPlan::new(
+        disabled,
+        peri_acp_types::meta_harness::ExecutionProfile::Workflow {
+            broker: broker_present,
+            permission_mode: permission_mode_present,
+        },
+    )
 }
 
 /// 按 workflow 能力事实投影冻结输入后的 system prompt（H2 生产路径共用）。
@@ -199,12 +209,11 @@ pub(crate) fn workflow_capabilities(
 /// 基础段）按 workflow 能力投影重建；运行环境消费冻结快照（H3）。
 pub(crate) fn project_workflow_system_prompt(
     frozen_data: &FrozenSessionData,
-    capabilities: &peri_agent::middleware::SectionCapabilities,
+    capabilities: &peri_acp_types::meta_harness::AssemblyPlan,
     agent_catalog: &dyn AgentCatalogPort,
     cwd: &str,
 ) -> String {
-    let collected = crate::session::build_collected_sections_with_capabilities(
-        frozen_data.meta_harness(),
+    let collected = crate::session::build_collected_sections_for_plan(
         None,
         frozen_data.language(),
         capabilities,

@@ -161,7 +161,7 @@ Sampled after a tool run. Run `git status` and `git log -1` before irreversible 
 
 ## 6. 链装配
 
-链上**无** GitWatch 槽位；能力由 builtin `workspace` 实例的 `workspace://git/ref` 资源 + 订阅提供。链序事实源是 `peri-agent/src/session/factory.rs::production_blueprint`（ARC-MIDDLEWARE-001）；`GitWatchMiddleware` 配置键是**未知键**（解析期 warn + 忽略，判例同其他已删除 middleware 键）。
+链上**无** GitWatch 槽位；能力由 builtin `workspace` 实例的 `workspace://git/ref` 资源 + 订阅提供。链序事实源是 `peri-acp-types/src/meta_harness/owners.rs`（ARC-MIDDLEWARE-001）；`GitWatchMiddleware` 配置键是**未知键**（解析期 warn + 忽略，判例同其他已删除 middleware 键）。
 
 ## 7. 安全与信任边界
 

@@ -232,7 +232,11 @@ pub struct AppConfig {
     pub persona: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tone: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_meta_harness",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub meta_harness: Option<HashMap<String, bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_md_excludes: Option<Vec<String>>,
@@ -476,6 +480,50 @@ fn all_middleware_disabled(map: &HashMap<String, bool>) -> bool {
                     .iter()
                     .any(|key| map.get(*key).copied() == Some(false))
             })
+}
+
+/// Keep duplicate keys observable before JSON is collected into a map.
+fn deserialize_meta_harness<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, bool>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniqueSwitches;
+    impl<'de> serde::de::Visitor<'de> for UniqueSwitches {
+        type Value = HashMap<String, bool>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a map of unique MetaHarness keys to booleans")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut switches = HashMap::new();
+            while let Some((key, enabled)) = map.next_entry::<String, bool>()? {
+                match switches.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(enabled);
+                    }
+                    std::collections::hash_map::Entry::Occupied(slot) => {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate meta_harness key '{}'",
+                            slot.key()
+                        )));
+                    }
+                }
+            }
+            Ok(switches)
+        }
+    }
+    #[derive(Deserialize)]
+    struct Switches(#[serde(deserialize_with = "unique")] HashMap<String, bool>);
+    fn unique<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HashMap<String, bool>, D::Error> {
+        d.deserialize_map(UniqueSwitches)
+    }
+    Ok(Option::<Switches>::deserialize(deserializer)?.map(|switches| switches.0))
 }
 
 impl Default for AppConfig {

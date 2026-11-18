@@ -279,3 +279,47 @@ async fn test_auto_mode_classifies_external_mcp_with_server_and_wire_identity() 
     assert_eq!(external["wire_tool"], "Write");
     assert_eq!(names[1], "Write");
 }
+
+#[tokio::test]
+async fn bound_direct_and_deferred_targets_keep_their_approval_policy() {
+    let mw = PermissionMiddleware::new(Arc::new(RejectBroker), default_requires_approval);
+    let owner = test_owner();
+    for (capability, wire_tool, expected_builtin_approval) in [
+        ("workspace", "Read", false),
+        ("workspace", "Write", true),
+        ("cron", "cron_list", false),
+        ("cron", "cron_register", true),
+    ] {
+        let model_name = peri_acp_types::builtin_mcp::model_tool_name_of(capability, wire_tool)
+            .expect("fixture tool must be declared");
+        let call = make_tool_call(model_name);
+        let mut origin = BoundToolOrigin {
+            mcp_server_name: Some("source".to_owned()),
+            mcp_tool_name: Some(wire_tool.to_owned()),
+            builtin_mcp_instance: Some(capability.to_owned()),
+        };
+        let builtin = mw
+            .process_batch_with_origins(
+                std::slice::from_ref(&call),
+                &[Some(origin.clone())],
+                Some(&owner),
+                None,
+            )
+            .await;
+        assert_eq!(
+            builtin[0].is_err(),
+            expected_builtin_approval,
+            "{model_name}"
+        );
+
+        // Identical spelling, including a builtin's deferred model name, does
+        // not grant an external target the builtin's approval policy.
+        origin.builtin_mcp_instance = None;
+        let external = mw
+            .process_batch_with_origins(&[call], &[Some(origin)], Some(&owner), None)
+            .await;
+        assert!(
+            matches!(&external[0], Err(AgentError::ToolRejected { tool, .. }) if tool == model_name)
+        );
+    }
+}

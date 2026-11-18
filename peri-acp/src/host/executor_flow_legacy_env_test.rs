@@ -129,11 +129,11 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
             let model = Arc::new(CapturePromptModel {
                 requests: Arc::clone(&requests),
             });
-            let capabilities = crate::session::subagent_chain_capabilities(
+            let capabilities = peri_acp_types::meta_harness::AssemblyPlan::new(
                 &frozen.meta_harness().disabled_middlewares,
+                peri_acp_types::meta_harness::ExecutionProfile::Child,
             );
-            let sections = crate::session::build_collected_sections_with_capabilities(
-                frozen.meta_harness(),
+            let sections = crate::session::build_collected_sections_for_plan(
                 None,
                 frozen.language(),
                 &capabilities,

@@ -2,7 +2,7 @@ use peri_acp_types::builtin_mcp;
 use peri_acp_types::builtin_mcp::BuiltinMcpTool;
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 use peri_agent::agent::state::AgentState;
-use peri_agent::middleware::Middleware as _;
+use peri_agent::middleware::{Middleware as _, PromptSectionZone};
 
 use super::async_trait;
 use super::default_requires_approval;
@@ -15,7 +15,6 @@ use super::InteractionContext;
 use super::InteractionResponse;
 use super::PermissionMiddleware;
 use super::PermissionMode;
-use super::PromptSectionZone;
 use super::SharedPermissionMode;
 use super::ToolCall;
 use super::TrustedInteractionOwner;
@@ -23,8 +22,6 @@ use super::UserInteractionBroker;
 use super::TOOL_BASH;
 use super::TOOL_EDIT;
 use super::TOOL_FOLDER_OPS;
-use super::TOOL_WEBFETCH;
-use super::TOOL_WEBSEARCH;
 use super::TOOL_WRITE;
 
 /// 自动批准 broker
@@ -552,99 +549,41 @@ async fn test_broker_hang_rejects_with_timeout() {
 
 // ─── 10_hitl 段落持有（波 4 演进 C3）────────────────────────────────────
 
-/// 契约（设计 §3.1.2）：sensitive 条目与 `default_requires_approval` 判定
-/// 一一对应——精确条目按名、前缀条目按前缀探测名必须判定为敏感；代表性
-/// 非敏感工具必须判定为不敏感。列表与判定函数失同步即测试失败。
-#[test]
-fn sensitive_entries_match_default_requires_approval() {
-    for entry in super::sensitive_tool_entries() {
-        let probe = if entry.prefix_match {
-            format!("{}some_tool", entry.name)
-        } else {
-            entry.name.to_string()
-        };
-        assert!(
-            super::default_requires_approval(&probe),
-            "条目 `{}`（prefix={}）应在 default_requires_approval 判定为敏感",
-            entry.name,
-            entry.prefix_match
-        );
-    }
-    // 反向抽查：常规工具不敏感（与 test_default_requires_approval 的负例一致）
-    for tool in [
-        "Read",
-        "Glob",
-        "Grep",
-        "TodoWrite",
-        "AskUserQuestion",
-        "cron_list",
-        "cron_remove",
-        "monitor_read",
-        "monitor_stop",
-        "monitor_list",
-        "mcp_read_resource",
-    ] {
-        assert!(
-            !super::default_requires_approval(tool),
-            "{tool} 不应判定为敏感（条目列表与判定函数失同步）"
-        );
-    }
-}
-
-/// 条目集合与判定分支数一致（精确 10 项 + 前缀 3 项 = 13 项；
-/// 变更 `default_requires_approval` 分支时必须同步条目清单）。
-#[test]
-fn sensitive_entries_cover_all_requires_approval_branches() {
-    let entries = super::sensitive_tool_entries();
-    assert_eq!(
-        entries.len(),
-        13,
-        "条目清单应覆盖 default_requires_approval 全部分支"
-    );
-    // 前缀条目恰好 3 项（delete_ / rm_ / mcp__）
-    let prefix_count = entries.iter().filter(|e| e.prefix_match).count();
-    assert_eq!(prefix_count, 3, "前缀匹配条目应恰好 3 项");
-}
-
-/// 10_hitl 段落声明：位置属性（Uncached order=3）与内容结构（机制说明 +
-/// 动态列表 + 模式决策尾句）。
 #[test]
 fn hitl_section_declaration_shape() {
     let sections = PermissionMiddleware::sections();
-    assert_eq!(sections.len(), 1, "10_hitl 段应唯一");
-    let section = &sections[0];
+    let [section] = sections.as_slice() else {
+        panic!("expected one approval section");
+    };
     assert_eq!(section.id, "10_hitl");
     assert_eq!(section.zone, PromptSectionZone::Uncached);
     assert_eq!(section.order, 3);
-    let content = section.content.as_str();
-    assert!(
-        content.contains("# Human-in-the-Loop (HITL) Approval Mode"),
-        "机制说明标题应保留（include_str 零拷贝）"
-    );
-    assert!(
-        content.contains("## Which tools are sensitive"),
-        "sensitive 小节引导保留"
-    );
-    assert!(
-        content.contains(&format!(
-            "- `{}` — shell command execution",
-            registry_effective_name("workspace", TOOL_BASH)
-        )),
-        "动态列表按代码事实生成（workspace 迁移后条目名是 effective name）"
-    );
-    assert!(
-        content.contains("Whether a sensitive tool actually requires approval is decided by the current `PermissionMode`"),
-        "模式决策尾句保留"
-    );
-    // 段落文件不再硬编码列表（失同步防线）
-    let file_content = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../peri-acp/prompts/sections/10_hitl.md"
+    assert!(matches!(
+        &section.content,
+        peri_agent::middleware::PromptSectionContent::Builtin(_)
     ));
-    assert!(
-        !file_content.contains("- `Bash`"),
-        "10_hitl.md 不应再硬编码 sensitive 列表（列表由代码事实生成）"
-    );
+    let content = section.content.as_str();
+    assert!(content.contains("## Which tools are sensitive"));
+    assert!(content.contains("bound target"));
+    // The approval decision and the file-edit tool share the name "Edit".
+    let edit_decision = "- **Edit** supplies replacement arguments";
+    assert!(content.contains(edit_decision));
+    let tool_policy = content.replace(edit_decision, "");
+    let policy_words: std::collections::HashSet<_> = tool_policy
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .collect();
+    for capability in builtin_mcp::BUILTIN_V5_CAPABILITIES {
+        for tool in capability.tools {
+            assert!(
+                !policy_words.contains(tool.model_name) && !policy_words.contains(tool.legacy_name),
+                "approval policy hardcodes tool name {} or {}",
+                tool.model_name,
+                tool.legacy_name
+            );
+        }
+    }
+    assert!(!content.contains("`Agent`"));
+    assert!(!content.contains("mcp__*"));
 }
 
 // ─── A4 生效名归一（IF-D6 判定型 ①② / IF-D15）─────────────────────────────
@@ -657,10 +596,7 @@ fn declared_builtin_tools() -> Vec<&'static BuiltinMcpTool> {
         .collect()
 }
 
-/// 从注册表解析 effective name 作为**期望值**。
-///
-/// 不复用生产查表助手 `builtin_tool_effective_name`：复用会让「助手退回裸名」这类
-/// 回归与断言同向变化而无法失败（同 `cron_sensitive_markdown_uses_registry_effective_name`）。
+/// 从注册表取得旧记录使用的工具别名。
 fn registry_effective_name(instance: &str, original: &str) -> &'static str {
     peri_acp_types::builtin_mcp::find(instance)
         .unwrap_or_else(|| panic!("实例 `{instance}` 应有声明"))
@@ -854,95 +790,11 @@ fn builtin_reserved_name_is_not_parity_hijackable() {
     );
 }
 
-/// A19 / IF-G3：已迁移条目的 `name` 为 effective name；`mcp__` 前缀条目的
-/// description 不再宣称「所有 `mcp__*` 一律敏感」（对 builtin 一等工具已不充分）。
 #[test]
-fn sensitive_entries_use_model_names_and_parity_description() {
-    let entries = super::sensitive_tool_entries();
-    let names: Vec<&str> = entries.iter().map(|entry| entry.name).collect();
-
-    // system MCP 原名就是模型面名字。
-    assert!(
-        names.contains(&TOOL_WEBFETCH),
-        "条目名应为原名 `{TOOL_WEBFETCH}`"
-    );
-    assert!(
-        names.contains(&TOOL_WEBSEARCH),
-        "条目名应为原名 `{TOOL_WEBSEARCH}`"
-    );
-
-    // 两个 Web 工具以 effective name 精确条目出现
-    let web = peri_acp_types::builtin_mcp::find("web").expect("web 实例应有声明");
-    for tool in web.tools {
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.name == tool.legacy_name && !entry.prefix_match),
-            "`{}` 应以 effective name 的精确条目出现",
-            tool.legacy_name
-        );
-    }
-
-    // artifact 不在敏感清单（IF-G2 决策 1）——条目表与判定同源
-    let artifact = peri_acp_types::builtin_mcp::find("artifact").expect("artifact 实例应有声明");
-    for tool in artifact.tools {
-        assert!(
-            !names.contains(&tool.legacy_name),
-            "`{}` 不应在敏感清单（artifact 不审批）",
-            tool.legacy_name
-        );
-    }
-
-    // 前缀条目条文与归一后的判定一致
-    let prefix_entry = entries
-        .iter()
-        .find(|entry| entry.prefix_match && entry.name == "mcp__")
-        .expect("`mcp__` 前缀条目应存在");
-    assert!(
-        prefix_entry
-            .description
-            .contains("follow their original tool's rule"),
-        "`mcp__` 条目条文必须说明 builtin 一等工具按原始名规则，实际：{}",
-        prefix_entry.description
-    );
-}
-
-/// N8：workspace 四个需审批条目以模型面 effective name 出现（裸名不得残留——
-/// 迁移后模型面已不存在裸名），免审批的 Read/Glob/Grep 不得进清单，判定与
-/// 条目同源。
-#[test]
-fn workspace_sensitive_entries_use_model_names() {
-    let entries = super::sensitive_tool_entries();
-    let names: Vec<&str> = entries.iter().map(|entry| entry.name).collect();
-
+fn workspace_approval_uses_direct_and_legacy_names() {
     let gated = [TOOL_BASH, TOOL_FOLDER_OPS, TOOL_WRITE, TOOL_EDIT];
 
-    // 原名作为模型面条目名出现。
-    for bare in gated {
-        assert!(names.contains(&bare), "条目名应为原名 `{bare}`");
-    }
-
-    // 四个需审批工具以 effective name 的精确条目出现
-    for original in gated {
-        let effective = registry_effective_name("workspace", original);
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.name == effective && !entry.prefix_match),
-            "`{effective}` 应以 effective name 的精确条目出现"
-        );
-    }
-
-    // 免审批的 workspace 工具不得进清单
-    for original in ["Read", "Glob", "Grep"] {
-        let effective = registry_effective_name("workspace", original);
-        assert!(
-            !names.contains(&effective),
-            "`{effective}` 归一后走免审批分支，不得进敏感清单"
-        );
-    }
-
-    // 判定与条目同源（两种名字形态逐项）
+    // Direct model names and legacy transcript aliases preserve the same policy.
     for original in gated {
         let effective = registry_effective_name("workspace", original);
         assert!(

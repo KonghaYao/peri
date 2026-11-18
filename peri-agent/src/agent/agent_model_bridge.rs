@@ -52,9 +52,8 @@ pub struct AgentModelBridge {
     system_contribution_provider: Option<SystemContributionProvider>,
     session_id: Option<String>,
     call_context: Option<peri_model::ModelCallContext>,
-    /// M3/H1 子身份归一化：模型投影中吸收与 base system 逐字相同的第一条
-    /// System 消息（历史本体与持久化不变；仅影响请求投影）。
-    absorb_system_message: bool,
+    /// Historical child identity replaced by the base system in model requests.
+    absorb_system_message: Option<crate::messages::MessageId>,
 }
 
 /// 构造模型请求时同步读取当前 middleware prompt contribution 的 provider。
@@ -77,7 +76,7 @@ impl AgentModelBridge {
             system_contribution_provider: None,
             session_id: None,
             call_context: None,
-            absorb_system_message: false,
+            absorb_system_message: None,
         }
     }
 
@@ -163,15 +162,12 @@ impl AgentModelBridge {
         self
     }
 
-    /// M3/H1 子身份归一化：开启后，模型投影丢弃与 base system 逐字相同的第一条
-    /// System 消息（恰一条）。
-    ///
-    /// 子会话的 own history 起始处持久化一条身份 System（spawn 写入；v1 子会话
-    /// 的历史同形），而 H1 起的身份由 bridge base system 注入。该规则按**内容
-    /// 相等**定向吸收，不过滤其它 System 消息（命令反馈 / 预测指令等保持原样），
-    /// 也不修改 transcript 本体与持久化数据（历史仍可读）。
-    pub(crate) fn with_absorbed_system_message(mut self, enabled: bool) -> Self {
-        self.absorb_system_message = enabled;
+    /// Absorb the exact persisted identity message when the child base system replaces it.
+    pub(crate) fn with_absorbed_system_message(
+        mut self,
+        identity: Option<crate::messages::MessageId>,
+    ) -> Self {
+        self.absorb_system_message = identity;
         self
     }
 
@@ -298,16 +294,11 @@ impl AgentModelBridge {
                 return Err(AgentError::LlmError("V1 frozen external instructions contain a reserved cache boundary; create a new session".into()));
             }
         }
-        // M3/H1：吸收与 base system 逐字相同的第一条 System 消息（持久子身份）。
-        let absorbed = if self.absorb_system_message {
-            self.system.as_deref().and_then(|system| {
-                messages.iter().position(|message| {
-                    matches!(message, BaseMessage::System { .. }) && message.content() == system
-                })
+        let absorbed = self.absorb_system_message.and_then(|identity| {
+            messages.iter().position(|message| {
+                matches!(message, BaseMessage::System { .. }) && message.id() == identity
             })
-        } else {
-            None
-        };
+        });
         let mut messages = Self::convert_messages_skipping(messages, absorbed)?;
         let dynamic = match self.system_contribution_provider.as_ref() {
             Some(provider) => Some(provider().map_err(|error| AgentError::MiddlewareError {
@@ -380,7 +371,7 @@ impl AgentModelBridge {
             _ => {
                 return Err(AgentError::LlmError(
                     "model response must be assistant".into(),
-                ))
+                ));
             }
         };
         let thought: String = content
@@ -642,7 +633,7 @@ impl AgentModelBridge {
                 None => {
                     return Err(AgentError::ModelError(peri_model::ModelError::protocol(
                         peri_model::ProtocolErrorKind::StreamEndedWithoutCompleted,
-                    )))
+                    )));
                 }
             }
         }
@@ -816,7 +807,10 @@ impl Debug for AgentModelBridge {
             )
             .field("session_id_present", &self.session_id.is_some())
             .field("call_context_present", &self.call_context.is_some())
-            .field("absorb_system_message", &self.absorb_system_message)
+            .field(
+                "absorb_system_message",
+                &self.absorb_system_message.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }

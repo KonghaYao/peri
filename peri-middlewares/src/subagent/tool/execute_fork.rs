@@ -31,7 +31,8 @@ impl super::SubAgentTool {
         // 子身份 system（H2 子能力投影）：fork 无 agent 定义 overrides，
         // 由注入的 system_builder 重建；不复制父冻结字节（父能力声明不得
         // 进入子请求面——父字节经 system_builder 的冻结输入投影后才是子身份）。
-        let system_prompt = self.system_builder.as_ref().map(|b| b(None, cwd));
+        let tool_filter = crate::subagent::fork::child_inheritance_filter();
+        let system_prompt = self.render_child_system(None, cwd, &tool_filter);
 
         // LLM（fork 用默认 provider，无 model alias）。v1 `inject_event_handler`
         // 已随流式事件中间态退役（v1-retire）：LLM 重试/流式事件统一经 v2
@@ -51,7 +52,7 @@ impl super::SubAgentTool {
             SubagentRunMode::Sync,
             llm,
             tools,
-            crate::subagent::fork::child_inheritance_filter(),
+            tool_filter,
             system_prompt,
             Vec::new(),
             cwd.to_string(),

@@ -7,7 +7,6 @@ use peri_agent::agent::AgentCancellationToken;
 use peri_agent::error::AgentResult;
 use peri_agent::messages::BaseMessage;
 use peri_agent::middleware::prompt_sections::PromptSection;
-use peri_agent::middleware::prompt_sections::PromptSectionZone;
 use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::session::Session;
 use peri_agent::tools::BaseTool;
@@ -15,7 +14,6 @@ use peri_agent::tools::BaseTool;
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 
 use crate::tools::BoxToolWrapper;
-use peri_acp_types::agents::AgentOverrides;
 use peri_mcp_core::agent_definition::{ClaudeAgentFrontmatter, ToolsValue};
 
 mod agent_result;

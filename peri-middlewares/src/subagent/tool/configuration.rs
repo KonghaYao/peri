@@ -3,7 +3,6 @@ use super::SubagentChainAssemblerImpl;
 use crate::hooks::types::RegisteredHook;
 use crate::mcp::McpAgentRegistry;
 use parking_lot::RwLock;
-use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::identity::AgentId;
 use peri_agent::agent::events::AgentEventHandler;
 use peri_agent::messages::BaseMessage;
@@ -69,7 +68,7 @@ impl super::SubAgentTool {
     #[must_use]
     pub fn with_system_builder(
         mut self,
-        builder: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
+        builder: peri_agent::session::factory::SystemPromptBuilder,
     ) -> Self {
         self.system_builder = Some(builder);
         self

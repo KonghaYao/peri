@@ -55,7 +55,7 @@ pub(super) async fn build_subagent_session_v2(
     context_budget: Option<ContextBudget>,
     compact_llm: Option<Arc<dyn peri_model::Model>>,
     agent_id: Option<AgentId>,
-    normalize_persisted_identity: bool,
+    persisted_identity: Option<crate::messages::MessageId>,
 ) -> Result<(Arc<Session>, V2SubagentContext), Box<dyn std::error::Error + Send + Sync>> {
     // 子身份（H1/M3）：唯一事实源 = 子 FrozenContext.system_prompt（子能力投影
     // 后的身份字节）。装配不重新探测、不复制父字节——父字节在 spawn/resume/cold
@@ -224,7 +224,7 @@ pub(super) async fn build_subagent_session_v2(
         // 同形），模型投影吸收与身份逐字相同的那一条（恰一条），身份在请求面
         // 只由 bridge base system 出现一次。其余 System 消息（命令反馈等）不受
         // 影响。
-        normalize_persisted_identity,
+        persisted_identity,
     );
 
     // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；

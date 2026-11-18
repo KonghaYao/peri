@@ -10,9 +10,9 @@ use super::AgentCapability;
 use super::Arc;
 use super::BaseTool;
 use super::InvalidModelTier;
-use super::PromptSectionZone;
 use super::RwLock;
 use super::SubAgentMiddleware;
+use peri_agent::middleware::PromptSectionZone;
 use peri_mcp_core::agent_definition;
 
 #[derive(Clone)]

@@ -47,7 +47,8 @@ impl super::SubAgentTool {
         let llm = (self.llm_factory)(None);
         // 子身份 system（H2 子能力投影）：fork 无定义 overrides，由
         // system_builder 重建；不复制父冻结字节。
-        let system_prompt = self.system_builder.as_ref().map(|b| b(None, &cwd));
+        let tool_filter = crate::subagent::fork::child_inheritance_filter();
+        let system_prompt = self.render_child_system(None, &cwd, &tool_filter);
         let tools: Vec<Arc<dyn BaseTool>> = self.parent_tools.iter().cloned().collect();
         let config = self.spawn_config_base(
             "fork".to_string(),
@@ -59,7 +60,7 @@ impl super::SubAgentTool {
             SubagentRunMode::Background,
             llm,
             tools,
-            crate::subagent::fork::child_inheritance_filter(),
+            tool_filter,
             system_prompt,
             Vec::new(),
             cwd,

@@ -54,7 +54,7 @@ impl Default for AgentsMdMiddleware {
 #[async_trait]
 impl Middleware for AgentsMdMiddleware {
     fn name(&self) -> &str {
-        "AgentsMdMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::AgentsMd.name()
     }
 
     fn prompt_contribution(&self) -> Option<String> {

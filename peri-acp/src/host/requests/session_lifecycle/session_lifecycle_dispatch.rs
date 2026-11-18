@@ -168,10 +168,9 @@ pub(crate) fn initialize_client_meta(params: &Value) -> serde_json::Map<String, 
 }
 
 pub(in super::super) fn enabled_meta_sections(
-    cfg: &AcpServerConfig,
+    config: &crate::provider::PeriConfig,
 ) -> std::collections::HashSet<String> {
-    cfg.peri_config
-        .read()
+    config
         .config
         .meta_harness
         .as_ref()
@@ -325,7 +324,7 @@ pub(crate) async fn new_session_from_prepared(
     // 读取失败走 J2 补偿 fail-closed）：先排空本次已起的环境，再撤销未发布的创建
     // ——不进入 commit，也不留任何半提交。
     // 无启用 section 时不去等 workspace 连接（覆盖不可得即内置，X8；不扩大请求时延）。
-    let enabled_sections = enabled_meta_sections(cfg);
+    let enabled_sections = enabled_meta_sections(&prepared.configuration.config);
     let docs = match environment.as_ref() {
         Some(env) if !enabled_sections.is_empty() => {
             match env.read_meta_docs(&enabled_sections).await {

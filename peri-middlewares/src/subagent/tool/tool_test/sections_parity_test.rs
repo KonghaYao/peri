@@ -5,10 +5,9 @@
 //! （由会话冻结模板继承，policy 里的 `base_prompt` / `language` 表达继承面，
 //! 不是子链声明）。
 
-use crate::prompt_policy;
 use crate::subagent::SubAgentMiddlewareConfig;
+use peri_acp_types::meta_harness::{AssemblyPlan, ChainSlot, ExecutionProfile};
 use peri_agent::middleware::chain::MiddlewareChain;
-use peri_agent::middleware::prompt_sections::SectionCapabilities;
 
 #[test]
 fn subagent_capability_policy_matches_real_assembly() {
@@ -29,25 +28,25 @@ fn subagent_capability_policy_matches_real_assembly() {
             chain.add(middleware);
         }
 
-        let facts = SectionCapabilities::from_sections(&chain.collect_prompt_sections());
-        let expected = prompt_policy::subagent_chain_capabilities(&set);
-        assert_eq!(facts.approval, expected.approval, "disabled={disabled:?}");
-        assert_eq!(facts.ask_user, expected.ask_user, "disabled={disabled:?}");
-        assert_eq!(facts.subagent, expected.subagent, "disabled={disabled:?}");
-        assert_eq!(facts.skills, expected.skills, "disabled={disabled:?}");
-        assert!(
-            !facts.base_prompt && !facts.language,
-            "子链不持有基础段 / 语言段：由冻结模板继承（disabled={disabled:?}）"
-        );
+        let plan = AssemblyPlan::new(&set, ExecutionProfile::Child);
+        let sections = chain.collect_prompt_sections();
+        for owner in [
+            ChainSlot::Skills,
+            ChainSlot::Permission,
+            ChainSlot::AskUser,
+            ChainSlot::SubAgent,
+        ] {
+            assert_eq!(
+                sections.iter().any(|s| s.owner == Some(owner)),
+                plan.declares_sections(owner)
+            );
+        }
+        assert!(!chain
+            .names()
+            .contains(&ChainSlot::DefaultSystemPrompt.name()));
         assert_eq!(
-            expected.base_prompt,
-            !set.contains("DefaultSystemPromptMiddleware"),
-            "policy 的继承面由冻结 disabled 决策表达（disabled={disabled:?}）"
-        );
-        assert_eq!(
-            expected.language,
-            !set.contains("LangMiddleware"),
-            "policy 的语言继承面由冻结 disabled 决策表达（disabled={disabled:?}）"
+            plan.contains(ChainSlot::DefaultSystemPrompt),
+            !set.contains(ChainSlot::DefaultSystemPrompt.name())
         );
     }
 }

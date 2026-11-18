@@ -174,14 +174,14 @@ fn workflow_context(
         frozen_language: None,
         progress_tx: None,
         subagent_ctx_builder: None,
-        agent_prompt_builder: Arc::new(|_, _, _, _| String::new()),
+        agent_prompt_builder: Arc::new(|_, _, _, _, _| String::new()),
         model_factory: Arc::new(move |_, _, _| crate::agent::workflow::WorkflowModel {
             model: Arc::clone(&model),
             model_name: "workflow-test".into(),
             tier: None,
         }),
         middleware_factory: Arc::new(NoopFactory),
-        system_prompt_fallback: Arc::new(|_, _, _| "fallback".into()),
+        system_prompt_fallback: Arc::new(|_, _, _, _| "fallback".into()),
         forwarder_launcher: Arc::new(|mut handles, _session_id, _on_event| {
             tokio::spawn(async move {
                 loop {

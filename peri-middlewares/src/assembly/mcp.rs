@@ -7,6 +7,7 @@ pub(super) fn add_mcp(
     ctx: &AssemblyContext,
     chain: &mut MiddlewareChain,
     mcp_pool_concrete: Option<&Arc<McpClientPool>>,
+    sub_agent_face_closed: bool,
 ) {
     if let Some(pool) = mcp_pool_concrete {
         let mw = McpMiddleware::new(Arc::clone(pool))
@@ -16,10 +17,7 @@ pub(super) fn add_mcp(
             .with_builtin_closures(crate::mcp::builtin::closed_instances(
                 &ctx.meta_harness_disabled,
             ))
-            .with_sub_agent_face_closed(
-                ctx.meta_harness_disabled
-                    .contains(crate::assembly::SUB_AGENT_FACE_CLOSED_KEY),
-            );
+            .with_sub_agent_face_closed(sub_agent_face_closed);
         mw.ensure_discovery();
         crate::mcp::middleware::attach_connection_notifier(
             pool,

@@ -1,10 +1,6 @@
 //! v5 builtin capability selection for `peri mcp-start` and `.mcp.json`.
 //!
-//! Capability names mirror `peri-acp-types::builtin_mcp::BUILTIN_V5_CAPABILITIES`
-//! (the declaration authority); the local list exists only for the typed parser,
-//! and a unit test locks both lists together. This module only parses and
-//! resolves selection so configuration errors are typed and carry their source;
-//! `peri-middlewares::mcp::builtin::router` serves the resolved capability set.
+//! The parser consumes the same typed identities and aliases as the builtin router.
 //!
 //! The `.mcp.json` extension key is `mcpServers.peri.x-peri.capabilities`.
 //! `x-peri` is provisional: the design (#416) leaves the key name undecided
@@ -21,17 +17,10 @@ use std::fmt;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const BUILTIN_CAPABILITY_NAMES: &[&str] = &[
-    "workspace",
-    "web",
-    "artifact",
-    "cron",
-    "monitor",
-    "workflow",
-];
-
-/// Server entry reserved for the single builtin exit and for standalone clients.
-pub const PERI_SERVER_NAME: &str = "peri";
+pub use peri_acp_types::builtin_mcp::v5::{
+    CapabilityId as BuiltinCapability, BUILTIN_CAPABILITY_NAMES,
+    BUILTIN_V5_SERVER_NAME as PERI_SERVER_NAME,
+};
 
 /// Provisional namespace extension on the `peri` server entry.
 pub const PERI_EXTENSION_KEY: &str = "x-peri";
@@ -41,62 +30,6 @@ pub const CAPABILITIES_FIELD: &str = "capabilities";
 
 /// Legacy settings section that held per-instance policy keys.
 const LEGACY_POLICY_MAP: &str = "meta_harness";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BuiltinCapability {
-    Workspace,
-    Web,
-    Artifact,
-    Cron,
-    Monitor,
-    Workflow,
-}
-
-impl BuiltinCapability {
-    pub const ALL: [Self; 6] = [
-        Self::Workspace,
-        Self::Web,
-        Self::Artifact,
-        Self::Cron,
-        Self::Monitor,
-        Self::Workflow,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Workspace => "workspace",
-            Self::Web => "web",
-            Self::Artifact => "artifact",
-            Self::Cron => "cron",
-            Self::Monitor => "monitor",
-            Self::Workflow => "workflow",
-        }
-    }
-
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|capability| capability.name() == name)
-    }
-
-    /// Legacy `meta_harness` policy key that used to switch this instance.
-    pub fn legacy_policy_key(self) -> &'static str {
-        match self {
-            Self::Workspace => "WorkspaceMiddleware",
-            Self::Web => "WebMiddleware",
-            Self::Artifact => "ArtifactMiddleware",
-            Self::Cron => "CronMiddleware",
-            Self::Monitor => "MonitorMiddleware",
-            Self::Workflow => "WorkflowMiddleware",
-        }
-    }
-
-    /// Legacy per-instance `.mcp.json` key; separate from the v5 model name
-    /// because the router may later rename the exposed server.
-    pub fn legacy_instance_name(self) -> &'static str {
-        self.name()
-    }
-}
 
 pub fn capability_from_legacy_policy_key(key: &str) -> Option<BuiltinCapability> {
     BuiltinCapability::ALL

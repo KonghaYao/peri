@@ -176,6 +176,7 @@ async fn body_rechecks_visibility_even_after_descriptor_was_issued() {
     let hidden = PersistedPayload::Message(BaseMessage::System {
         id,
         content: "hidden_changed_body".into(),
+        child_skill_ceiling: None,
     });
     let pool = sqlx::SqlitePool::connect_with(
         sqlx::sqlite::SqliteConnectOptions::new().filename(tmp.path().join("threads.db")),

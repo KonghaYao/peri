@@ -22,14 +22,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use peri_acp_types::mcp_skills;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
-use peri_acp_types::skills::SkillOrigin;
+use peri_acp_types::skills::{SkillOrigin, DISCOVER_SKILLS_TOOL_NAME, SKILL_TOOL_NAME};
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{json, Value};
 
 use super::SkillMetadata;
-
-const SKILL_TOOL_NAME: &str = "SkillTool";
-const DISCOVER_SKILLS_TOOL_NAME: &str = "DiscoverSkillsTool";
 
 // ─── SkillTool ────────────────────────────────────────────────────────────────
 

@@ -195,47 +195,30 @@ fn meta_harness_disabling_gated_holder_removes_section_and_tools() {
     }
 }
 
-/// 链收集与 `project_enabled_sections` 投影一致性（契约 3 显式视图）：
-/// 链上收集到的 gated 段落 ID 集合 == 映射表投影（持有者在链上 → 段落开启）。
 #[test]
-fn chain_collected_gated_sections_match_projection() {
-    use peri_agent::middleware;
-    use std::collections::HashSet;
-
-    // 默认装配：持有者全部在链 → 投影包含全部三个 gated 段
-    let ctx = super::base_context();
-    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
-        .expect("assembly");
-    let names: HashSet<&str> = out.chain.names().into_iter().collect();
-    let projected = middleware::project_enabled_sections(&names);
-    for id in ["10_hitl", "11_subagent", "13_skills"] {
-        assert!(
-            projected.contains(id),
-            "持有者装配时投影应开启 {id}: {projected:?}"
-        );
+fn each_owner_disappears_from_hooks_tools_and_prompt_at_assembly() {
+    use peri_acp_types::meta_harness::ChainSlot;
+    for &owner in ChainSlot::ALL {
+        let mut ctx = super::base_context();
+        ctx.meta_harness_disabled.insert(owner.name().into());
+        let out =
+            peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
+                .expect("assembly");
+        assert!(!out.chain.names().contains(&owner.name()));
+        for tool in out.chain.collect_tools(&ctx.cwd) {
+            assert!(
+                !owner.tool_names().contains(&tool.name()),
+                "{} still published {} after closure",
+                owner.name(),
+                tool.name()
+            );
+        }
+        assert!(out
+            .chain
+            .collect_prompt_sections()
+            .iter()
+            .all(|s| s.owner != Some(owner)));
     }
-    // 关闭 SubAgentMiddleware → 投影与链收集同时失去 11_subagent
-    let mut ctx = super::base_context();
-    ctx.meta_harness_disabled
-        .insert("SubAgentMiddleware".to_string());
-    let out = peri_agent::session::factory::build_middleware_chain(&ProductionChainAssembler, &ctx)
-        .expect("assembly");
-    let names: HashSet<&str> = out.chain.names().into_iter().collect();
-    let projected = middleware::project_enabled_sections(&names);
-    assert!(
-        !projected.contains("11_subagent"),
-        "关闭 SubAgentMiddleware 后投影应关闭 11_subagent: {projected:?}"
-    );
-    let collected_ids: HashSet<&str> = out
-        .chain
-        .collect_prompt_sections()
-        .iter()
-        .map(|s| s.id)
-        .collect();
-    assert!(
-        !collected_ids.contains("11_subagent"),
-        "链收集与投影一致（11_subagent 消失）: {collected_ids:?}"
-    );
 }
 
 struct ReminderGoalController(std::sync::atomic::AtomicUsize);
@@ -343,7 +326,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 }),
                 provider_fp: "test".into(),
                 render_system_prompt: Arc::new(|_, _| String::new()),
-                system_builder: Arc::new(|_, _| String::new()),
+                system_builder: Arc::new(|_, _, _, _| String::new()),
                 langfuse_bridge_factory: None,
                 shared_queue: queue.clone(),
                 idle_inbox: Some(Arc::new(SessionInbox::new(Arc::new(queue)))),

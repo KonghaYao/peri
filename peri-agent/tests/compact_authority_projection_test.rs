@@ -2,7 +2,7 @@
 //!
 //! 锁定的是可观察事实（条目身份、最终请求的角色与顺序），不是模型行为：
 //! 文本存在不等于模型必然遵循，因此这里断言的是 harness 交给模型的**输入结构**。
-//! 配套声明在 `peri-acp/prompts/sections/07_runtime.md`（主 runtime 段）。
+//! 配套声明在 `peri-middlewares/prompts/sections/07_runtime.md`（主 runtime 段）。
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;

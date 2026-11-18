@@ -659,7 +659,7 @@ fn test_all_real_tool_declarations_byte_stable_across_calls() {
 fn test_declarations_no_verbatim_line_overlap_with_05() {
     const SECTION_05: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../peri-acp/prompts/sections/05_using_tools.md"
+        "/prompts/sections/05_using_tools.md"
     ));
     // 05 无工具条目残留（删条守护）
     assert!(

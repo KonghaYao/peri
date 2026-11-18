@@ -9,12 +9,7 @@ use url::Url;
 #[test]
 fn prompt_template_to_anthropic_preserves_cache_seam_and_dynamic_order() {
     let sections = vec![
-        PromptSection::dynamic(
-            "cached-test",
-            PromptSectionZone::Cached,
-            1,
-            "BASE-STATIC".into(),
-        ),
+        PromptSection::builtin("cached-test", PromptSectionZone::Cached, 1, "BASE-STATIC"),
         PromptSection::dynamic(
             "uncached-test",
             PromptSectionZone::Uncached,

@@ -94,6 +94,8 @@ pub enum BaseMessage {
     System {
         id: MessageId,
         content: MessageContent,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_skill_ceiling: Option<crate::skills::SkillToolAccess>,
     },
 
     #[serde(rename = "tool")]
@@ -168,6 +170,28 @@ impl BaseMessage {
         Self::System {
             id: MessageId::new(),
             content: content.into(),
+            child_skill_ceiling: None,
+        }
+    }
+
+    pub fn with_child_skill_ceiling(mut self, ceiling: crate::skills::SkillToolAccess) -> Self {
+        if let Self::System {
+            child_skill_ceiling,
+            ..
+        } = &mut self
+        {
+            *child_skill_ceiling = Some(ceiling);
+        }
+        self
+    }
+
+    pub fn child_skill_ceiling(&self) -> Option<crate::skills::SkillToolAccess> {
+        match self {
+            Self::System {
+                child_skill_ceiling,
+                ..
+            } => *child_skill_ceiling,
+            _ => None,
         }
     }
 
@@ -306,7 +330,15 @@ impl BaseMessage {
                 content,
                 tool_calls: tool_calls.clone(),
             },
-            Self::System { id, .. } => Self::System { id: *id, content },
+            Self::System {
+                id,
+                child_skill_ceiling,
+                ..
+            } => Self::System {
+                id: *id,
+                content,
+                child_skill_ceiling: *child_skill_ceiling,
+            },
             Self::Tool {
                 id,
                 tool_call_id,

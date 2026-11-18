@@ -1,6 +1,7 @@
 //! Implementation leaf for `crate::agent::workflow::agent`.
 
 use super::{execution, result};
+use peri_acp_types::skills::SkillToolAccess;
 pub(super) use std::fmt::{self, Debug, Formatter};
 pub(super) use std::sync::Arc;
 
@@ -176,7 +177,7 @@ pub fn create_default_executor(
         frozen_language: None,
         progress_tx: None,
         subagent_ctx_builder: None,
-        agent_prompt_builder: Arc::new(|_, _, _, _| String::new()),
+        agent_prompt_builder: Arc::new(|_, _, _, _, _| String::new()),
         model_factory,
         middleware_factory,
         system_prompt_fallback,
@@ -363,6 +364,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 4. 指定 agent type 时按相同的 subagent overrides 渲染 prompt；否则
         // 继续复用 session 冻结的默认 subagent prompt。
+        let skill_access = SkillToolAccess::from_tools(tools.iter().map(Box::as_ref));
         let system_prompt = select_workflow_system_prompt(
             agent_definition.as_ref(),
             self.ctx.system_prompt.as_deref(),
@@ -371,6 +373,7 @@ impl AgentExecutor for WorkflowAgentExecutor {
             &self.ctx.cwd,
             self.ctx.frozen_date.as_deref(),
             self.ctx.frozen_language.as_deref(),
+            skill_access,
         );
 
         // 5. 构建中间件链（端口装配；frozen data / HITL 语义自 ctx 读取）
@@ -744,14 +747,20 @@ pub(super) fn select_workflow_system_prompt(
     cwd: &str,
     date: Option<&str>,
     language: Option<&str>,
+    skill_access: SkillToolAccess,
 ) -> String {
     match definition {
-        Some(definition) => {
-            agent_prompt_builder(definition.prompt_overrides.as_ref(), cwd, date, language)
-        }
+        Some(definition) => agent_prompt_builder(
+            definition.prompt_overrides.as_ref(),
+            cwd,
+            date,
+            language,
+            skill_access,
+        ),
         None => frozen_default
+            .filter(|_| skill_access == SkillToolAccess::Full)
             .map(str::to_owned)
-            .unwrap_or_else(|| fallback(cwd, date, language)),
+            .unwrap_or_else(|| fallback(cwd, date, language, skill_access)),
     }
 }
 

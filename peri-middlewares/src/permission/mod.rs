@@ -12,7 +12,6 @@ use peri_agent::interaction::InteractionResponse;
 use peri_agent::interaction::TrustedInteractionOwner;
 use peri_agent::interaction::UserInteractionBroker;
 use peri_agent::middleware::prompt_sections::PromptSection;
-use peri_agent::middleware::prompt_sections::PromptSectionZone;
 use peri_agent::middleware::r#trait::Middleware;
 
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
@@ -64,12 +63,7 @@ pub use permission_middleware::is_edit_tool;
 
 pub(crate) use permission_middleware::is_external_mcp;
 
-pub use permission_middleware::SensitiveToolEntry;
-
 pub(crate) use permission_middleware::apply_decision;
-pub use permission_middleware::format_sensitive_tools;
-pub use permission_middleware::format_sensitive_tools_for_disabled;
-pub use permission_middleware::sensitive_tool_entries;
 pub use permission_middleware::PermissionMiddleware;
 
 #[cfg(test)]

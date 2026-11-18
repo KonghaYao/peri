@@ -1,4 +1,4 @@
-The environment values in the final environment block were captured at the start of the session; its session ID identifies your current execution session. Assume the working directory and git state may have changed since then — verify with `Bash` (`pwd`, `git status`) before relying on them for irreversible operations. The date is a snapshot, not a clock.
+The environment values in the final environment block were captured at the start of the session; its session ID identifies your current execution session. Assume the working directory and git state may have changed since then — verify the current working directory and repository state before relying on them for irreversible operations. The date is a snapshot, not a clock.
 
 ## System Reminders
 

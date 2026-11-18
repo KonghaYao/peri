@@ -207,104 +207,74 @@ pub(crate) fn prepare_derived_environment(
     )
 }
 
-/// 渲染面段落收集：按**执行面能力事实**投影段落集合（H2 单一权威）。
-///
-/// 全部 `PromptTemplate` 构造点（冻结渲染 / 主重渲染 / SubAgent builder /
-/// workflow fallback / workflow agent builder / 测试 helper）统一经本模块的
-/// 收集入口计算收集结果，能力事实由 `peri_middlewares::prompt_policy` 的装配
-/// 条件投影提供（主链 / 子链 / workflow 链各自的 `*_chain_capabilities`），与
-/// 各链的真实装配结果由 parity 测试对拍。**单一事实源，禁止双轨**：这里不再
-/// 有「按执行类型排除某段」的第二份名单。
-///
-/// 契约 3（gate 原子迁移，C2/C3 落地）：段落可见性 = 持有 middleware 是否在
-/// 装配面且有效（例如 PermissionMiddleware 的 disabled 实例不声明 10_hitl）。
-///
-/// 落点说明（layer-imports 依赖门）：函数体直接引用 `peri_middlewares` 的
-/// 策略模块——本模块为 §0 边 2 豁免的 ACP 宿主装配面
-/// （`scripts/import-exemptions.conf`），渲染核心 `prompt/mod.rs` 不持有
-/// middlewares 引用。
+use peri_acp_types::meta_harness::{AssemblyPlan, ExecutionProfile};
+
 pub(crate) fn build_collected_sections(
     state: &peri_acp_types::meta_harness::MetaHarnessState,
     overrides: Option<&AgentOverrides>,
     language: Option<&str>,
 ) -> Vec<peri_agent::middleware::PromptSection> {
-    let capabilities = main_chain_capabilities(&state.disabled_middlewares);
-    build_collected_sections_with_capabilities(state, overrides, language, &capabilities)
+    let plan = AssemblyPlan::new(&state.disabled_middlewares, ExecutionProfile::Main);
+    build_collected_sections_for_plan(overrides, language, &plan)
 }
 
-/// 主链能力事实（H2）：ACP 宿主装配面对 `prompt_policy` 的薄包装。
-///
-/// 单一权威仍在 `peri_middlewares::prompt_policy`（与真实装配对拍）；
-/// 本文件是 §0 边 2 豁免的宿主装配面，middlewares 引用集中在此，
-/// `host/stage_builder.rs` / `host/workflow_agent.rs` 只调用本模块。
-pub(crate) fn main_chain_capabilities(
-    disabled: &std::collections::HashSet<String>,
-) -> peri_agent::middleware::SectionCapabilities {
-    peri_middlewares::prompt_policy::main_chain_capabilities(disabled)
-}
-
-/// 子链能力事实（H2）：子链不装配审批 / 提问 / 子代理持有者等装配事实投影。
-pub(crate) fn subagent_chain_capabilities(
-    disabled: &std::collections::HashSet<String>,
-) -> peri_agent::middleware::SectionCapabilities {
-    peri_middlewares::prompt_policy::subagent_chain_capabilities(disabled)
-}
-
-/// workflow 链能力事实（H2）：含审批有效模式（broker + permission_mode 齐备）。
-///
-/// `not(emscripten)`：唯一消费方是本地 workflow 装配面
-/// （`host/workflow_agent.rs`，随目标门控）。
-#[cfg(not(target_os = "emscripten"))]
-pub(crate) fn workflow_chain_capabilities(
-    disabled: &std::collections::HashSet<String>,
-    broker_present: bool,
-    permission_mode_present: bool,
-) -> peri_agent::middleware::SectionCapabilities {
-    peri_middlewares::prompt_policy::workflow_chain_capabilities(
-        disabled,
-        broker_present,
-        permission_mode_present,
-    )
-}
-
-/// 指定执行面能力事实的段落收集（子链 / workflow 链；能力来自其装配条件投影）。
-pub(crate) fn build_collected_sections_with_capabilities(
-    state: &peri_acp_types::meta_harness::MetaHarnessState,
+pub(crate) fn build_collected_sections_for_plan(
     overrides: Option<&AgentOverrides>,
     language: Option<&str>,
-    capabilities: &peri_agent::middleware::SectionCapabilities,
+    plan: &AssemblyPlan,
 ) -> Vec<peri_agent::middleware::PromptSection> {
-    peri_middlewares::prompt_policy::collect_prompt_sections(
-        state,
-        overrides,
-        language,
-        capabilities,
-    )
+    peri_middlewares::prompt_policy::collect_prompt_sections(overrides, language, plan)
 }
 
-/// 由合并后的 meta_harness 配置与扫描结果构建冻结期 MetaHarnessState
-/// （设计 §2.3；纯函数，不读盘——`build_frozen_data` 是唯一扫描入口）。
-///
-/// 组合规则：
-/// - section + true + 文档存在 → `section_overrides`；
-/// - section + true + 文档缺失 → warn + 忽略（保持内置段落）；
-/// - section + false → 显式不覆盖；
-/// - middleware + false → `disabled_middlewares`；
-/// - middleware + true → 不放入 disabled（显式恢复）。
-///
-/// **v5**：`false` 键的判定面是「链槽位名 ∪ builtin 旧键 ∪ v5 能力名」并集。旧
-/// `*Middleware` key 保留为确定性映射 adapter（M4 删除）：进入
-/// `disabled_middlewares` 后由 `closed_instances` 映射到能力，不出现「键存在但无效果」
-/// 的静默路径。
-/// `disabled_middlewares` 既被链装配消费（关闭槽位），也被 builtin 关闭集消费
-/// （`closed_instances`，IF-D10），漏项即能力闭合退化
-/// （ARC-CAPABILITY-CLOSURE-001）。
+/// Render derived prompts from frozen inputs and the execution's effective skill surface.
+pub(crate) fn derived_prompt_template(
+    state: &peri_acp_types::meta_harness::MetaHarnessState,
+    overrides: Option<&peri_acp_types::agents::AgentOverrides>,
+    language: Option<&str>,
+    plan: &peri_acp_types::meta_harness::AssemblyPlan,
+    skill_access: peri_acp_types::skills::SkillToolAccess,
+) -> crate::prompt::PromptTemplate {
+    let sections = peri_middlewares::prompt_policy::collect_prompt_sections_for_tools(
+        overrides,
+        language,
+        plan,
+        skill_access,
+    );
+    crate::prompt::PromptTemplate::new(state, &sections)
+}
+
+/// Assemble the frozen text from the same settings that admitted this workspace.
 pub(crate) fn build_meta_harness_state(
     config: Option<&HashMap<String, bool>>,
-    docs: HashMap<String, String>,
+    mut docs: HashMap<String, String>,
+) -> peri_acp_types::meta_harness::MetaHarnessState {
+    let mut state = policy_from_settings(config);
+    if let Some(config) = config {
+        for &id in peri_acp_types::meta_harness::SECTION_IDS {
+            if config.get(id) == Some(&true) {
+                if let Some(body) = docs.remove(id) {
+                    state
+                        .section_overrides
+                        .insert(id.to_owned(), Arc::from(body));
+                } else {
+                    tracing::warn!(
+                        section = id,
+                        "meta_harness: requested workspace override is missing"
+                    );
+                }
+            }
+        }
+    }
+    state
+}
+
+/// Resource admission precedes the workspace read. Evaluating switches at that
+/// point must not diagnose a requested document as missing before it can arrive.
+pub(crate) fn policy_from_settings(
+    config: Option<&HashMap<String, bool>>,
 ) -> peri_acp_types::meta_harness::MetaHarnessState {
     use peri_acp_types::meta_harness::{
-        MetaHarnessState, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES, SECTION_IDS,
+        MetaHarnessState, BUILT_IN_SUBAGENTS_KEY, MIDDLEWARE_NAMES,
     };
 
     let mut state = MetaHarnessState::default();
@@ -312,34 +282,21 @@ pub(crate) fn build_meta_harness_state(
         return state;
     };
     for (key, enabled) in config {
-        if SECTION_IDS.contains(&key.as_str()) {
-            if *enabled {
-                match docs.get(key) {
-                    Some(content) => {
-                        state
-                            .section_overrides
-                            .insert(key.clone(), Arc::from(content.as_str()));
-                    }
-                    None => {
-                        tracing::warn!(
-                            section = %key,
-                            "meta_harness: section enabled but the workspace resource list \
-                             has no entry for it, keeping builtin"
-                        );
-                    }
-                }
-            }
-            // section + false：显式不覆盖，静默
-        } else if key == BUILT_IN_SUBAGENTS_KEY {
+        if key == BUILT_IN_SUBAGENTS_KEY {
             state.built_in_subagents_enabled = *enabled;
-        } else if (MIDDLEWARE_NAMES.contains(&key.as_str())
-            || peri_acp_types::builtin_mcp::capability(key).is_some())
-            && !*enabled
-        {
+        } else if let Ok(capability) = peri_acp_types::builtin_mcp::capability_of_switch(key) {
+            if !*enabled {
+                state
+                    .disabled_middlewares
+                    .insert(capability.name.to_owned());
+            }
+            if key == capability.legacy_policy_key && config.contains_key(capability.name) {
+                tracing::warn!(owner = capability.name, alias = %key,
+                    "duplicate builtin switch; either spelling set to false closes the capability");
+            }
+        } else if MIDDLEWARE_NAMES.contains(&key.as_str()) && !*enabled {
             state.disabled_middlewares.insert(key.clone());
-            // middleware / capability + true：显式恢复装配，静默
         }
-        // 未知 key 已在解析期校验移除（provider::config::validate_meta_harness）
     }
     state
 }

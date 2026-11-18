@@ -65,6 +65,45 @@ impl Default for HostCapabilities {
     }
 }
 
+// These are frozen source restrictions, separate from MetaHarness middleware keys.
+const STDIO_MCP_UNAVAILABLE: &str = "deployment:stdio-mcp";
+const SETTINGS_HOOKS_UNAVAILABLE: &str = "deployment:settings-hooks";
+
+impl HostCapabilities {
+    pub(crate) fn frozen_closures(self) -> std::collections::HashSet<String> {
+        let mut closed = std::collections::HashSet::new();
+        for capability in peri_acp_types::builtin_mcp::BUILTIN_V5_CAPABILITIES {
+            if !self.builtin_mcp || (capability.name == "cron" && !self.cron) {
+                closed.insert(capability.name.to_owned());
+            }
+        }
+        if !self.plugins {
+            closed.insert(peri_middlewares::assembly::PLUGIN_FACE_CLOSED_KEY.to_owned());
+        }
+        if !self.stdio_mcp {
+            closed.insert(STDIO_MCP_UNAVAILABLE.to_owned());
+        }
+        if !self.settings_hooks {
+            closed.insert(SETTINGS_HOOKS_UNAVAILABLE.to_owned());
+        }
+        closed
+    }
+
+    /// Reopening may only narrow deployment availability. Older snapshots did
+    /// not record the two source-only limits and retain their prior behavior.
+    pub(crate) fn limit_session_sources(
+        self,
+        disabled: &std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            plugins: self.plugins && !peri_middlewares::assembly::plugin_face_closed(disabled),
+            stdio_mcp: self.stdio_mcp && !disabled.contains(STDIO_MCP_UNAVAILABLE),
+            settings_hooks: self.settings_hooks && !disabled.contains(SETTINGS_HOOKS_UNAVAILABLE),
+            ..self
+        }
+    }
+}
+
 /// 会话准备面的严格只读插件发现（无合成清单、无插件缓存写）。
 ///
 /// 会话准备面（`host/prepared.rs`）经本函数调用：具体实现与插件装配同属宿主
@@ -141,7 +180,7 @@ pub(super) fn pending_mcp_pool(
 ///
 /// 装配面消费同一对象，不重读插件目录；准备失败与 host 级/bare 的
 /// `data: None` 分开记录，以便 MCP 侧遵守本会话的降级决定。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PreparedPlugins {
     pub data: Option<PluginLoadResult>,
     pub skill_roots: Vec<SkillRoot>,

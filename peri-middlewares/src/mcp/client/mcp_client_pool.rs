@@ -708,6 +708,7 @@ impl McpClientPool {
             .await
             .map_err(|error| format!("resources/list failed: {error}"))?;
         let mut docs = HashMap::new();
+        let mut seen = HashSet::new();
         for resource in resources {
             let Some(meta) = peri_acp_types::workspace_resources::parse_meta_uri(&resource.uri)
             else {
@@ -717,6 +718,12 @@ impl McpClientPool {
                 || !peri_acp_types::meta_harness::SECTION_IDS.contains(&meta.section_id.as_str())
             {
                 continue;
+            }
+            if !seen.insert(meta.section_id.clone()) {
+                return Err(format!(
+                    "duplicate workspace prompt override for section {} from {server}",
+                    meta.section_id
+                ));
             }
             let (result, ticket) = self
                 .read_resource_cached(server, &resource.uri, peer)

@@ -58,7 +58,7 @@ impl Middleware for TodoMiddleware {
     }
 
     fn name(&self) -> &str {
-        "TodoMiddleware"
+        peri_acp_types::meta_harness::ChainSlot::Todo.name()
     }
 
     async fn after_agent(

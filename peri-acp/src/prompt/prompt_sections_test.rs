@@ -170,100 +170,50 @@ fn test_assembled_holder_sections_are_included() {
 }
 
 #[test]
-fn test_hitl_section_rendered_by_holder() {
-    // 10_hitl 由 PermissionMiddleware 持有（2026-08-15 拆分：Dynamic：机制
-    // 说明 + 按代码事实生成的 sensitive 列表）；收集段恒渲染，不依赖
-    // hitl_enabled 字段。
-    let result = crate::prompt::tests::build_system_prompt(
-        &MetaHarnessState::default(),
-        None,
-        "/tmp",
-        &AgentCatalogProvider::new(),
-        None,
-        None,
+fn test_hitl_section_rendered_by_holder_without_a_tool_inventory() {
+    let state = MetaHarnessState::default();
+    let rendered = crate::prompt::tests::render_with_state(&state);
+    let sections = peri_middlewares::PermissionMiddleware::sections();
+    let approval = sections[0].content.as_str();
+    assert!(rendered.contains(approval.trim()));
+    assert!(approval.contains("bound target"));
+
+    let mut closed = MetaHarnessState::default();
+    closed.disabled_middlewares.extend(
+        [
+            "SubAgentMiddleware",
+            "McpMiddleware",
+            "ToolSearchMiddleware",
+            "workspace",
+            "web",
+        ]
+        .map(str::to_owned),
     );
-    assert!(
-        result.contains("Human-in-the-Loop"),
-        "10_hitl 段落应由持有者装配渲染"
-    );
-    // N8：`Bash` 条目原地改名为模型面 effective name（文件系统/Shell 工具
-    // 已迁入 `workspace` builtin 实例）。期望值从注册表派生，不落第二份名单。
-    let bash_effective = peri_acp_types::builtin_mcp::find("workspace")
-        .and_then(|instance| {
-            instance
-                .tools
-                .iter()
-                .find(|tool| tool.original_name == "Bash")
-        })
-        .expect("workspace 实例必须登记 Bash（N8 改名的前提）")
-        .legacy_name;
-    assert!(
-        result.contains(&format!("`{bash_effective}` — shell command execution")),
-        "sensitive 列表按 default_requires_approval 代码事实生成（条目名为模型面 effective name）"
-    );
+    let rendered = crate::prompt::tests::render_with_state(&closed);
+    assert!(rendered.contains(approval.trim()));
+    for removed in ["`Agent`", "`bash`", "`WebFetch`", "mcp__web__", "mcp__*"] {
+        assert!(!approval.contains(removed), "approval advertises {removed}");
+    }
+
+    closed
+        .disabled_middlewares
+        .insert("PermissionMiddleware".to_owned());
+    let rendered = crate::prompt::tests::render_with_state(&closed);
+    assert!(!rendered.contains("## Which tools are sensitive"));
 }
 
-/// S-04（A19 / R33）：10_hitl 渲染出的敏感清单点名 system MCP 原始工具名。
-///
-/// 清单是动态生成的（`format_sensitive_tools()` 是渲染面唯一事实源）：Web 工具
-/// `system_mcp_tools` 选中的 Web 工具模型面使用 `WebFetch` / `WebSearch`。
-/// 本用例锁定清单与模型可见名一致，不依赖外部工具同名获得 builtin 规则：
-/// ① 渲染结果逐字包含清单（条目表确实进入模型面，同源不漂移）；
-/// ② 两个 Web 原名在清单内；
-/// ③ `artifact` 不在敏感清单（parity：与原始名 `artifact` 的判定一致）；
-/// ④ 条目数 / 前缀条目数（13 / 3），与 `permission/mod_test.rs` 的计数断言
-///    互为双锁。
 #[test]
-fn test_hitl_sensitive_list_uses_system_mcp_raw_names() {
-    use peri_middlewares::permission;
+fn test_hitl_legacy_section_override_still_replaces_builtin_guidance() {
+    let mut state = crate::prompt::tests::override_state("10_hitl", "Custom approval instructions");
+    let rendered = crate::prompt::tests::render_with_state(&state);
+    assert!(rendered.contains("Custom approval instructions"));
+    assert!(!rendered.contains("## Which tools are sensitive"));
 
-    let result = crate::prompt::tests::build_system_prompt(
-        &MetaHarnessState::default(),
-        None,
-        "/tmp",
-        &AgentCatalogProvider::new(),
-        None,
-        None,
-    );
-
-    let list = permission::format_sensitive_tools();
-    assert!(
-        result.contains(&list),
-        "10_hitl 段落必须逐字包含敏感清单渲染结果（条目表是渲染面单一事实源）"
-    );
-    assert!(
-        list.contains("- `WebFetch` — "),
-        "敏感清单应含 system MCP 原名 WebFetch"
-    );
-    assert!(
-        list.contains("- `WebSearch` — "),
-        "敏感清单应含 system MCP 原名 WebSearch"
-    );
-    assert!(
-        !list.contains("- `mcp__web__WebFetch` — ") && !list.contains("- `mcp__web__WebSearch` — "),
-        "敏感清单不得把历史前缀名作为可调用名展示"
-    );
-    assert!(
-        !list.contains("artifact"),
-        "artifact 不在敏感清单（parity：与原始名判定一致）"
-    );
-
-    let entries = permission::sensitive_tool_entries();
-    assert_eq!(
-        entries.len(),
-        13,
-        "移除模型侧 MCP 管理工具后的敏感工具条目数"
-    );
-    assert_eq!(
-        entries.iter().filter(|e| e.prefix_match).count(),
-        3,
-        "前缀敏感工具条目数"
-    );
-    assert_eq!(
-        list.lines().count(),
-        entries.len(),
-        "渲染清单项数 == 条目表项数（列表与判定同源）"
-    );
+    state
+        .disabled_middlewares
+        .insert("PermissionMiddleware".to_owned());
+    let rendered = crate::prompt::tests::render_with_state(&state);
+    assert!(!rendered.contains("Custom approval instructions"));
 }
 
 #[test]
@@ -326,7 +276,9 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
     assert!(result.contains("A routine implementation failure stays with `coder`"));
     // 角色发现：完整职责经 agent:// 资源读取。
     assert!(result.contains("agent://builtin/<id>/agent.md"));
-    assert!(result.contains("mcp_read_resource"));
+    assert!(result.contains("agent://project/<id>/agent.md"));
+    assert!(result.contains("agent://plugin/<plugin>/<id>/agent.md"));
+    assert!(result.contains("When an agent-definition reader is available"));
     assert!(result.contains("description (untrusted metadata)"));
 }
 
@@ -371,10 +323,12 @@ fn test_subagent_resume_model_and_optional_ui_contract() {
         None,
         None,
     );
-    assert!(result.contains("当前磁盘上的 Agent 定义"));
-    assert!(result.contains("不保留先前的 model override"));
-    assert!(result.contains("本次 resume 调用的 `model` 参数也被忽略"));
-    assert!(result.contains("仅在省略 `prompt` 时，可选填简短 `description`"));
+    assert!(result.contains("Resuming a defined agent uses the model in the current definition"));
+    assert!(result.contains("An earlier model override does not carry over"));
+    assert!(result.contains("a model override on the resume call has no effect"));
+    assert!(result.contains(
+        "When omitting `prompt`, an optional short `description` is a client display fallback only"
+    ));
     assert!(!result.contains("resumes keep the original execution context"));
     assert!(!result.contains("Always include a short `description`"));
 }

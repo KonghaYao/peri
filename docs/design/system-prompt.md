@@ -29,23 +29,21 @@ middleware contribution、最终环境块组成。各自保留独立来源；外
 
 基础段、语言、审批、提问、Skills、SubAgent 等提示词分别由对应 middleware 持有。
 middleware 缺席时，其工具、hook 和段落必须同时消失；不能保留“能力可用”的静态
-说明。生产链与条件装配以 `peri-agent/src/session/factory.rs::production_blueprint`
-及 `peri-middlewares/src/assembly.rs` 为准。
+说明。槽位、段落 ID、zone 与 order 声明在 `peri-acp-types/src/meta_harness/owners.rs`。正文由 `peri-middlewares` 的持有者构造。内核只依赖 `PromptSection`、中间件接口及公共类型。ACP 渲染器校验声明和覆盖，按位置确定性输出。
 
-段落可见性按**执行面能力事实**投影（`peri-agent` 的 `SectionCapabilities` +
-`peri-middlewares::prompt_policy`），事实来自真实装配结果或由其装配条件投影，
-主链 / 子链 / workflow 共用同一策略；不维护第二份按执行类型硬编码的排除表。
-除持有者是否存在，还要检查**有效模式**：例如 `PermissionMiddleware::disabled()`
-（无 broker、无 mode）不声明审批段。子链没有基础段持有者时，基础段由会话冻结
-模板继承，不因“子链收集为空”而得到空 system。
+| 内容 | 来源与生效条件 |
+| --- | --- |
+| 基础行为、身份、persona、环境 | DefaultSystemPrompt 的冻结声明。基本工程行为独立于具体工具。shell 操作细节随 Bash 的工具描述交付。 |
+| 语言 | LangMiddleware 使用已冻结的语言输入。 |
+| 审批与提问 | Permission 持有审批模式和绑定来源的规则；HumanInTheLoop 持有提问工具及用法。交互 workflow 的审批段要求 broker 和 permission mode 同时在场。 |
+| 委派 | SubAgent 持有目录绑定、单层委派与调度说明。建链前或覆盖中使用目录占位符也需要这个绑定。 |
+| 技能 | Skills 根据实际绑定交付完整、仅发现、仅加载或空段。目录摘要也按有效绑定裁剪。显式技能预载由 SkillPreload 独立持有。 |
+| 项目说明、署名、工具目录 | 已装配的 owner 提供逐请求贡献，读取当前会话的投影。 |
+| 外部指令 | 宿主准入后单独冻结。工具、审批和执行资格由运行时授权。 |
 
-MetaHarness 在冻结期按 section ID 替换持有者提供的段落内容，并按 middleware 名关闭
-整个能力。section ID 与 middleware 名清单的代码事实源是
-`peri-acp-types/src/meta_harness.rs`。运行时不得另建平行清单。
+主、子、fork 与 workflow 根据同一冻结策略调用这些 owner 的 section 构造器。默认主链已有的 section ID 和覆盖键继续可用。某段不适用于派生执行面时，覆盖不会为它创建新段。技能能力部分开放时，交付该子集的内置指引，避免全能力覆盖扩大声明。
 
-所有段落由 middleware 持有，是否装配持有者决定段落可见性；不保留无持有者的兼容段或独立 feature gate。
-新增能力时必须同时确定：段落所有者、session-local 开关、工具/route/event/TUI 暴露面
-以及 SubAgent/Workflow 继承语义。
+子 Agent 新建时把实际技能权限写进已有身份消息的可选字段。恢复取历史权限与当前允许工具的交集。缺少该字段的历史身份不能证明当时拥有哪些技能工具，因而移除可识别的技能段并保留其他获准工作。带权限记录的自定义段落按同一冻结 cwd、日期与模板规则渲染。无法唯一定位身份中的目标段落时显式拒绝恢复，避免向模型交付无法核实的身份。
 
 ## 3. 构建与冻结
 
@@ -107,7 +105,7 @@ cached/uncached seam 的唯一控制字。`combine_system_prompt_with_dynamic` �
 contribution 放在边界之后；provider 在构造 wire request 前必须消费控制字，wire 上
 不得泄漏。
 
-- `Cached` 段只接收纯静态模板：不得含任何模板占位符（构造期显式失败）；段落
+- `Cached` 段只接收静态正文，动态正文类型与未转义模板占位符都在构造期显式失败；段落
   id 与 `(zone, order)` 必须唯一，冲突在构造期显式失败并指出来源；
 - MetaHarness 段落覆盖在冻结准入点校验（单段 / 总字节预算、reserved 控制字、
   未知 `{{name}}` 占位符、空覆盖）：非法覆盖拒绝应用并保留内置段，结构化诊断
