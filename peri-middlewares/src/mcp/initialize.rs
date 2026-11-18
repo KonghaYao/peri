@@ -120,6 +120,13 @@ pub(super) fn commit_discovery_failure(
 /// `tools/list` 失败的统一收口：不提交 `Connected`（那会伪装成「发现完成且无工具」），
 /// 改为显式 `Failed` + 本代 `tools_list_ok = false` 的证据。
 pub(super) fn fail_tool_discovery(pool: &Arc<McpClientPool>, server_name: &str, error: &str) {
+    if pool
+        .server_slot(server_name)
+        .stopped
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
     let reason = format!("工具发现失败: {}", error);
     tracing::warn!(server = %server_name, error = %reason, "MCP tools/list 失败，不发布连接与 ready 证据");
     McpClientPool::insert_failed(pool, server_name, reason);
@@ -142,6 +149,13 @@ pub(super) fn fail_workspace_resource_discovery(
     server_name: &str,
     error: &str,
 ) {
+    if pool
+        .server_slot(server_name)
+        .stopped
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
     let reason = format!("资源发现失败: {}", error);
     tracing::warn!(server = %server_name, error = %reason, "Workspace resources/list 失败，不发布连接与 ready 证据");
     McpClientPool::insert_failed(pool, server_name, reason);

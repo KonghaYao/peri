@@ -158,6 +158,7 @@ impl McpClientPool {
         // builtin 实例的 server 半边是本进程 task：随 `services` 一并收口，不留 orphan。
         self.close_builtin_task(server_name).await;
         self.configs.write().remove(server_name);
+        self.server_slot(server_name).note_config_revision();
         // 会话级 ACP 声明身份随连接一并消失（M7）：此后该名不再有可证明的
         // cache 身份，任何持久化 cache 准入都按 fail-closed 拒绝。
         self.acp_connections.write().remove(server_name);
@@ -338,6 +339,9 @@ impl McpClientPool {
         }
         self.lifecycle
             .store(1, std::sync::atomic::Ordering::Release);
+        // 关闭事务开始：未完成的首次加载 attempt 先取消并唤醒等待方；
+        // 受管任务随后由 task owner 统一终止，迟到结果无法提交。
+        self.control.cancel_load_attempts();
         // 关闭事务开始：全部发现证据失效并唤醒等待方（它们在重读时看到 PoolClosed）。
         self.system_readiness.clear_all_evidence();
         for handle in self.clients.read().values() {
@@ -382,8 +386,28 @@ impl McpClientPool {
         handle: Arc<McpClientHandle>,
         service: McpServiceWrapper,
     ) -> Result<(), McpServiceWrapper> {
+        self.try_commit_connection_guarded(name, handle, service, || true)
+    }
+
+    /// Commit a verified connection only if the caller's admission still holds.
+    ///
+    /// The admission check runs under the same lifecycle registration as the
+    /// pool/stopped checks, so a concurrent stop either observes the committed
+    /// handle (and cleans it) or makes this commit fail — a late load result
+    /// cannot revive a stopped server. The caller must not hold the lifecycle
+    /// gate or a `ServerSlot` attempt lock.
+    pub(crate) fn try_commit_connection_guarded<F>(
+        &self,
+        name: String,
+        handle: Arc<McpClientHandle>,
+        service: McpServiceWrapper,
+        admit: F,
+    ) -> Result<(), McpServiceWrapper>
+    where
+        F: FnOnce() -> bool,
+    {
         let _admission = self.lifecycle_registration.lock();
-        if !self.is_open() || self.server_slot(&name).stopped.load(Ordering::Acquire) {
+        if !self.is_open() || self.server_slot(&name).stopped.load(Ordering::Acquire) || !admit() {
             return Err(service);
         }
         self.advance_handle_generation(&handle);

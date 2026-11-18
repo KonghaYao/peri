@@ -97,7 +97,13 @@ impl McpClientPool {
     pub(crate) fn insert_failed(pool: &Arc<Self>, name: &str, reason: String) {
         let old_status = {
             let _admission = pool.lifecycle_registration.lock();
-            if !pool.is_open() {
+            // 停止后的迟到失败不得覆盖停止态（迟到结果不能复活 server）。
+            if !pool.is_open()
+                || pool
+                    .server_slot(name)
+                    .stopped
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
                 return;
             }
             let (source, url) = pool
@@ -148,7 +154,13 @@ impl McpClientPool {
         tracing::info!(server = %name, "HTTP 服务器需要 OAuth 授权，可在 MCP 面板按 r 键触发");
         let old_status = {
             let _admission = pool.lifecycle_registration.lock();
-            if !pool.is_open() {
+            // 停止后的迟到授权要求同样不得覆盖停止态。
+            if !pool.is_open()
+                || pool
+                    .server_slot(name)
+                    .stopped
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
                 return;
             }
             let (source, url) = pool

@@ -78,7 +78,7 @@ pub struct ServerInfo {
 }
 
 /// 连接池级别错误
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum McpPoolError {
     #[error("MCP 服务器 \"{server}\" 连接失败: {reason}")]
     ConnectionFailed { server: String, reason: String },
