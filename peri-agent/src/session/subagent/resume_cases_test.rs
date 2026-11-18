@@ -14,7 +14,6 @@ use crate::session::subagent::tests::RecordingLLM;
 use crate::session::subagent::types::SubagentHost;
 use crate::session::subagent::util::extract_last_ai_text;
 use crate::session::subagent::SessionFactory;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::FrozenContext;
 use crate::session::Session;
@@ -90,7 +89,7 @@ async fn test_resume_subagent_active_thread_rejected() {
         .await
         .expect("非 active 后可恢复");
     assert_eq!(spawned.child_thread_id, id);
-    assert!(!spawned.interrupted);
+    crate::session::subagent::tests::wait_resume_settled(&store, &id).await;
     let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -126,6 +125,7 @@ async fn test_resume_subagent_legacy_history_starts_a_fresh_run_without_runtime_
     );
     let llm = RecordingLLM::new();
     let calls = llm.received.clone();
+    let manager = Arc::new(TaskManager::new());
     let config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         id.clone(),
@@ -133,15 +133,14 @@ async fn test_resume_subagent_legacy_history_starts_a_fresh_run_without_runtime_
             std::sync::Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager.clone()),
         None,
     );
     let resumed = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("the resume subagent fixture result is required for this assertion");
     assert_eq!(resumed.child_thread_id, id);
-    assert!(!resumed.interrupted);
+    crate::session::subagent::tests::wait_background_idle(&manager).await;
     assert!(
         resumed.session.store().frozen.system_prompt.is_empty(),
         "非 hidden legacy 历史的首条 System 不得升级为子身份"
@@ -185,6 +184,7 @@ async fn test_resume_subagent_main_agent_via_host_parent_id() {
         .await
         .expect("主 agent 场景恢复应成功");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
+    crate::session::subagent::tests::wait_resume_settled(&store, &id).await;
     let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -220,7 +220,7 @@ async fn test_resume_subagent_validation_passes_and_runs() {
         .await
         .expect("校验通过后恢复执行");
     assert_eq!(spawned.child_thread_id, id, "thread_id 不变");
-    assert!(!spawned.interrupted);
+    crate::session::subagent::tests::wait_resume_settled(&store, &id).await;
     let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),
@@ -261,6 +261,7 @@ async fn test_resume_subagent_replays_transcript_and_preserves_thread_id() {
     let spawned = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("resume ok");
+    crate::session::subagent::tests::wait_resume_settled(&store, &thread_id).await;
 
     // transcript 完整重放（顺序断言：旧消息 → 隐式 continue prompt → AI echo）
     let tx = spawned.session.transcript();
@@ -347,6 +348,7 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
         .expect("the append messages fixture result is required for this assertion");
 
     let llm = RecordingLLM::new();
+    let manager = Arc::new(TaskManager::new());
     let config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         thread_id.clone(),
@@ -354,14 +356,13 @@ async fn test_resume_subagent_pops_unpaired_tool_call_ai() {
             std::sync::Arc::new(llm.clone()),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager.clone()),
         None,
     );
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
-    assert!(!spawned.interrupted);
+    crate::session::subagent::tests::wait_background_idle(&manager).await;
 
     // transcript 层面：末条未配对 AI 被 pop，已配对轮次保留
     let tx = spawned.session.transcript();
@@ -453,6 +454,7 @@ async fn test_resume_subagent_keeps_complete_tool_round() {
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
+    crate::session::subagent::tests::wait_resume_settled(&store, &thread_id).await;
 
     let tx = spawned.session.transcript();
     let guard = tx.read();
@@ -486,6 +488,7 @@ async fn test_resume_subagent_new_prompt_appended() {
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("resume ok");
+    crate::session::subagent::tests::wait_resume_settled(&store, &thread_id).await;
 
     let tx = spawned.session.transcript();
     let guard = tx.read();
@@ -519,6 +522,7 @@ async fn test_resume_subagent_interrupted_then_manual_history_continue() {
     // 第一次恢复：进入 Reason 后取消，覆盖 stage-local Interrupted 规范化。
     let token = CancellationToken::new();
     let (gate, entered_rx) = CancelGateLLM::new();
+    let manager = Arc::new(TaskManager::new());
     let config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         thread_id.clone(),
@@ -526,30 +530,31 @@ async fn test_resume_subagent_interrupted_then_manual_history_continue() {
             std::sync::Arc::new(gate),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager.clone()),
         Some(token.clone()),
     );
-    let first_resume =
-        tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
-    entered_rx.await.expect("sync subagent 必须进入 Reason");
-    token.cancel();
-    let spawned1 = first_resume
+    let spawned1 = SessionFactory::resume_subagent(None, config)
         .await
-        .expect("sync resume task 不得 panic")
         .expect("resume 1 ok（中断不是 Err）");
-    assert!(spawned1.interrupted, "Reason 内 cancel 必须是 Interrupted");
+    assert_eq!(spawned1.child_thread_id, thread_id);
+    entered_rx
+        .await
+        .expect("background subagent 必须进入 Reason");
+    token.cancel();
+    crate::session::subagent::tests::wait_resume_settled(&store, &thread_id).await;
+    crate::session::subagent::tests::wait_background_idle(&manager).await;
     {
         let statuses = store.statuses();
         assert_eq!(
             statuses.last().map(|(_, s)| s.as_str()),
             Some("cancelled"),
-            "A3：真实取消的 sync 中断收尾写 cancelled"
+            "A3：真实取消的中断收尾写 cancelled"
         );
     }
 
     let llm = RecordingLLM::new();
     let calls = llm.received.clone();
+    let manager = Arc::new(TaskManager::new());
     let config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         thread_id.clone(),
@@ -557,14 +562,14 @@ async fn test_resume_subagent_interrupted_then_manual_history_continue() {
             std::sync::Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager.clone()),
         None,
     );
     let resumed = SessionFactory::resume_subagent(None, config)
         .await
         .expect("the resume subagent fixture result is required for this assertion");
-    assert!(!resumed.interrupted);
+    assert_eq!(resumed.child_thread_id, thread_id);
+    crate::session::subagent::tests::wait_background_idle(&manager).await;
     assert_eq!(calls.read().len(), 1);
 }
 
@@ -577,9 +582,11 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
     crate::session::subagent::tests::preset_resumable_thread(&store, &thread_id, None).await;
 
     let (gate, release_tx) = GateLLM::new();
+    let manager = Arc::new(TaskManager::new());
     let store1 = Arc::clone(&store);
     let thread_id1 = thread_id.clone();
     let gate1 = gate.clone();
+    let manager1 = manager.clone();
     let t1 = tokio::spawn(async move {
         let config = crate::session::subagent::tests::resume_config_with(
             store1.clone(),
@@ -588,8 +595,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
                 std::sync::Arc::new(gate1.clone()),
                 "fixture-scripted",
             ),
-            SubagentRunMode::Sync,
-            None,
+            Some(manager1),
             None,
         );
         SessionFactory::resume_subagent(None, config).await
@@ -606,6 +612,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
     })
     .await
     .expect("t1 应完成置 active");
+    let spawned = t1.await.expect("t1 task ok").expect("t1 resume ok");
 
     // 第二个并发 resume：锁内看到 active → 拒绝
     let store2 = Arc::clone(&store);
@@ -626,8 +633,7 @@ async fn test_resume_subagent_concurrent_resume_mutex() {
 
     // 放行 t1 → 完成（oneshot 有缓冲，send 先于 LLM await 也不丢）
     let _ = release_tx.send(());
-    let spawned = t1.await.expect("t1 task ok").expect("t1 resume ok");
-    assert!(!spawned.interrupted);
+    crate::session::subagent::tests::wait_background_idle(&manager).await;
     assert_eq!(spawned.child_thread_id, thread_id);
     let statuses = store.statuses();
     assert_eq!(
@@ -678,6 +684,7 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
         .await
         .expect("回滚后可再次恢复");
     assert_eq!(spawned.child_thread_id, thread_id);
+    crate::session::subagent::tests::wait_resume_settled(&store, &thread_id).await;
 }
 
 /// parent None 组合：meta.parent_thread_id = Some(x) 且调用方无 parent session
@@ -703,7 +710,7 @@ async fn test_resume_subagent_explicit_delegation_runs_without_parent_session_ha
         .await
         .expect("parent None 时无 parent 链校验，恢复成功");
     assert_eq!(spawned.child_thread_id, thread_id);
-    assert!(!spawned.interrupted);
+    crate::session::subagent::tests::wait_resume_settled(&store, &thread_id).await;
     let statuses = store.statuses();
     assert_eq!(
         statuses.last().map(|(_, s)| s.as_str()),

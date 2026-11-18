@@ -12,6 +12,7 @@
 //! `LateChildContribution` 是 Agent 层的模拟中间件，只证明请求时读取与组合
 //! 语义，不代表真实生产链已验收。
 
+use crate::agent::async_tasks::TaskManager;
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::session::subagent::types::SubagentChainAssembler;
@@ -20,7 +21,6 @@ use crate::session::subagent::types::SubagentLlmSource;
 use crate::session::subagent::ForkDirectiveKind;
 use crate::session::subagent::SessionFactory;
 use crate::session::subagent::SubagentCancelPolicy;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::subagent::SubagentSpawnConfig;
 use crate::session::FrozenContext;
 use crate::session::Session;
@@ -94,6 +94,27 @@ impl CaptureModel {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// 后台执行在独立任务内发请求；断言前先等到预期请求数（超时即失败）。
+    async fn wait_for_requests(&self, count: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if self
+                .requests
+                .lock()
+                .expect("self requests mutex must remain unpoisoned throughout the test")
+                .len()
+                >= count
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "model did not receive {count} requests before timeout"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 }
 
@@ -234,7 +255,6 @@ fn child_config(
         cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 3,
         fork_directive_kind: fork.then_some(ForkDirectiveKind::Fork),
-        run_mode: SubagentRunMode::Sync,
         skill_names: vec![],
         // H1：生产模型来源（bridge 在子链装配点构造）。
         llm: SubagentLlmSource::model(
@@ -252,7 +272,7 @@ fn child_config(
         session_resources: Some(store),
         event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(Arc::new(TaskManager::new())),
         on_bg_complete: None,
         langfuse_bridge: None,
         on_subagent_start: None,
@@ -348,6 +368,9 @@ async fn concurrent_child_requests_keep_parent_tool_causality_across_resume() {
     );
     let first = first.expect("first fixture must contain the expected element");
     let second = second.expect("the second fixture result is required for this assertion");
+    model.wait_for_requests(2).await;
+    crate::session::subagent::tests::wait_status_settled(&*store, &first.child_thread_id).await;
+    crate::session::subagent::tests::wait_status_settled(&*store, &second.child_thread_id).await;
     let contexts: Vec<_> = model
         .requests
         .lock()
@@ -383,8 +406,7 @@ async fn concurrent_child_requests_keep_parent_tool_causality_across_resume() {
             Arc::clone(&model) as Arc<dyn peri_model::Model>,
             "capture-model",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(Arc::new(TaskManager::new())),
         None,
     );
     resume.parent_tool_call_id = Some("resume-first".into());
@@ -394,6 +416,7 @@ async fn concurrent_child_requests_keep_parent_tool_causality_across_resume() {
     )
     .await
     .expect("the scope tool parent fixture result is required for this assertion");
+    model.wait_for_requests(3).await;
     let requests = model
         .requests
         .lock()
@@ -437,6 +460,8 @@ async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork
     )
     .await
     .expect("the spawn subagent fixture result is required for this assertion");
+    model.wait_for_requests(1).await;
+    crate::session::subagent::tests::wait_status_settled(&*store, &first.child_thread_id).await;
     assert!(model.last_system().ends_with(&format!(
         "<env>\nWorking directory: /frozen-child-env\nSession ID: {}\n</env>",
         first.child_thread_id
@@ -464,13 +489,13 @@ async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork
             Arc::clone(&resumed_model) as Arc<dyn peri_model::Model>,
             "capture-model",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(Arc::new(TaskManager::new())),
         None,
     );
     let resumed = SessionFactory::resume_subagent(Some(&parent), resume)
         .await
         .expect("the resume subagent fixture result is required for this assertion");
+    resumed_model.wait_for_requests(1).await;
     assert!(resumed_model.last_system().ends_with(&format!(
         "<env>\nWorking directory: /frozen-child-env\nSession ID: {}\n</env>",
         first.child_thread_id
@@ -511,6 +536,7 @@ async fn child_external_instructions_are_wire_only_across_resume_and_nested_fork
     let second = SessionFactory::spawn_subagent(Some(&resumed.session), grandchild)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
+    grandchild_model.wait_for_requests(1).await;
     assert!(grandchild_model.last_system().ends_with(&format!(
         "<env>\nWorking directory: /frozen-child-env\nSession ID: {}\n</env>",
         second.child_thread_id
@@ -551,10 +577,10 @@ async fn defined_child_request_carries_identity_and_contributions_exactly_once()
         false,
         &cwd,
     );
-    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
+    let _spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
-    assert!(!spawned.interrupted);
+    model.wait_for_requests(1).await;
 
     let system = model.last_system();
     let expected = format!(
@@ -604,10 +630,10 @@ async fn fork_child_request_keeps_single_identity_with_parent_ancestors() {
         true,
         &cwd,
     );
-    let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
+    let _spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
-    assert!(!spawned.interrupted);
+    model.wait_for_requests(1).await;
 
     let system = model.last_system();
     assert_eq!(
@@ -651,6 +677,8 @@ async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions(
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
+    first.wait_for_requests(1).await;
+    crate::session::subagent::tests::wait_status_settled(&*store, &spawned.child_thread_id).await;
 
     let second = CaptureModel::new("resumed run");
     let resume_contribution = Arc::new(Mutex::new(None));
@@ -662,17 +690,16 @@ async fn resumed_child_request_reads_persisted_identity_and_fresh_contributions(
             Arc::clone(&second) as Arc<dyn peri_model::Model>,
             "capture-model",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(Arc::new(TaskManager::new())),
         None,
     );
     resume.chain_assembler = Arc::new(ContributionAssembler {
         contribution: Arc::clone(&resume_contribution),
     });
-    let resumed = SessionFactory::resume_subagent(Some(&parent), resume)
+    let _resumed = SessionFactory::resume_subagent(Some(&parent), resume)
         .await
         .expect("the resume subagent fixture result is required for this assertion");
-    assert!(!resumed.interrupted);
+    second.wait_for_requests(1).await;
 
     let system = second.last_system();
     assert_eq!(
@@ -706,7 +733,7 @@ async fn nested_fork_request_excludes_parent_child_identity() {
         Some(&root),
         child_config(
             Arc::clone(&store),
-            first_model,
+            Arc::clone(&first_model),
             Arc::new(ContributionAssembler {
                 contribution: Arc::new(Mutex::new(None)),
             }),
@@ -716,6 +743,7 @@ async fn nested_fork_request_excludes_parent_child_identity() {
     )
     .await
     .expect("the spawn subagent fixture result is required for this assertion");
+    first_model.wait_for_requests(1).await;
     let inherited = first
         .session
         .transcript()
@@ -738,10 +766,10 @@ async fn nested_fork_request_excludes_parent_child_identity() {
     );
     config.parent_messages = inherited;
     config.system_prompt = Some("GRANDCHILD_IDENTITY_SENTINEL".into());
-    let second = SessionFactory::spawn_subagent(Some(&first.session), config)
+    let _second = SessionFactory::spawn_subagent(Some(&first.session), config)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
-    assert!(!second.interrupted);
+    second_model.wait_for_requests(1).await;
     let system = second_model.last_system();
     assert_eq!(
         system,
@@ -788,10 +816,10 @@ async fn fork_from_root_preserves_own_system_even_when_it_matches_frozen_prompt(
         &cwd,
     );
     config.parent_messages = vec![root_system, BaseMessage::human("root task")];
-    let spawned = SessionFactory::spawn_subagent(Some(&root), config)
+    let _spawned = SessionFactory::spawn_subagent(Some(&root), config)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
-    assert!(!spawned.interrupted);
+    model.wait_for_requests(1).await;
     let system = model.last_system();
     assert!(system.contains("ROOT_SYSTEM_SENTINEL"));
     assert!(system.contains("CHILD_IDENTITY_SENTINEL"));
@@ -828,14 +856,12 @@ async fn background_child_request_carries_single_identity_and_contributions() {
         false,
         &cwd,
     );
-    config.run_mode = SubagentRunMode::Background;
-    config.task_manager = Some(Arc::new(crate::agent::async_tasks::TaskManager::new()));
     let (bg_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel();
     config.bg_event_sender = Some(bg_tx);
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
-    assert!(spawned.task_id.is_some());
+    assert!(spawned.task_id.starts_with("bg-"));
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while model

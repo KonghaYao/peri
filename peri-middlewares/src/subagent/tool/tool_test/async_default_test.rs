@@ -1,7 +1,7 @@
 //! v5 `Agent` 工具契约：后台是唯一执行模式。
 //!
 //! 覆盖四条边界：
-//! - 省略 `run_in_background`：后台启动（schema 声明 `default: true`）；
+//! - 省略 `run_in_background`：后台启动（schema 不再提供模式参数）；
 //! - 显式 `false`：仍后台启动，不唤回同步路径；
 //! - 无任务管理器：显式报错，不静默落回同步；
 //! - MCP Agent：审批门仍在后台启动之前执行，后台 loader 不能成为绕过入口。
@@ -47,24 +47,16 @@ async fn bind_tool(host: &HostFixture, dir: &std::path::Path) -> SubAgentTool {
     host.bind(with_agent_face(tool, dir).await)
 }
 
-/// 默认模式：schema `default: true`，省略字段的调用走后台。
+/// 恒后台：schema 不再提供执行模式参数，省略字段的调用直接后台。
 #[tokio::test]
 async fn async_default_omitted_field_starts_background_subagent() {
     let (dir, host, manager) = setup_background_host("async-bg-default").await;
     let tool = bind_tool(&host, dir.path()).await;
 
     let params = tool.parameters();
-    assert_eq!(
-        params["properties"]["run_in_background"]["default"],
-        serde_json::json!(true),
-        "schema default 必须声明后台为默认"
-    );
     assert!(
-        params["properties"]["run_in_background"]["description"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("mandatory"),
-        "描述必须说明后台是强制模式"
+        params["properties"].get("run_in_background").is_none(),
+        "schema 不得再暴露执行模式开关：{params}"
     );
 
     let result = tool

@@ -35,8 +35,8 @@ pub fn fork_context_usage_gate(usage: Option<ContextUsage>) -> Result<(), String
         "Error: fork mode is unavailable: the parent context is at {percent:.1}% usage, \
          above the {limit:.0}% fork limit. A fork inherits the full parent context, so it \
          cannot start at this context pressure. Use a non-fork sub-agent instead: call Agent \
-         with a subagent_type and a self-contained prompt (optionally run_in_background: true), \
-         or resume an existing child thread with resume_thread_id.",
+         with a subagent_type and a self-contained prompt (subagents always run in the \
+         background), or resume an existing child thread with resume_thread_id.",
         limit = FORK_CONTEXT_USAGE_LIMIT_PERCENT
     ))
 }

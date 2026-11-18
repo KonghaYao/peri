@@ -21,7 +21,6 @@ async fn test_resume_subagent_background_mode_done() {
             std::sync::Arc::new(gate.clone()),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
     );
@@ -30,7 +29,7 @@ async fn test_resume_subagent_background_mode_done() {
         .expect("bg resume ok");
 
     // 新 task_id：与 thread_id 分离、bg- 前缀
-    let task_id = spawned.task_id.expect("bg 模式必须有 task_id");
+    let task_id = spawned.task_id;
     assert!(task_id.starts_with("bg-"), "task_id 格式 bg-{{uuid}}");
     assert_ne!(task_id, thread_id, "task_id 与 thread_id 分离");
 
@@ -90,7 +89,6 @@ async fn test_resume_subagent_background_mode_cancelled() {
             std::sync::Arc::new(gate),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         Some(token.clone()),
     );
@@ -107,8 +105,7 @@ async fn test_resume_subagent_background_mode_cancelled() {
     let spawned = SessionFactory::resume_subagent(None, config)
         .await
         .expect("bg resume ok");
-    assert!(spawned.task_id.is_some(), "bg 模式必须有 task_id");
-    assert!(!spawned.interrupted, "bg 模式返回值恒 false（异步收尾）");
+    assert!(spawned.task_id.starts_with("bg-"), "恒为后台任务 ID");
     entered_rx
         .await
         .expect("background subagent 必须进入 Reason");
@@ -145,7 +142,6 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
             std::sync::Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         None,
         None,
     );
@@ -186,7 +182,6 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
             std::sync::Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
     );
@@ -194,7 +189,7 @@ async fn test_resume_subagent_bg_registration_failure_rolls_back() {
         .await
         .expect("回滚后可再次恢复");
     assert_eq!(spawned.child_thread_id, thread_id);
-    assert!(spawned.task_id.is_some(), "bg 模式必须有 task_id");
+    assert!(spawned.task_id.starts_with("bg-"));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if store.statuses().last().map(|(_, s)| s.as_str()) == Some("done") {
@@ -252,7 +247,6 @@ async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
             std::sync::Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
     );
@@ -260,7 +254,7 @@ async fn test_resume_subagent_bg_beyond_previous_agent_cap() {
         .await
         .expect("超过 3 个在跑任务时 bg 恢复不得被拒绝");
     assert_eq!(spawned.child_thread_id, thread_id);
-    let task_id = spawned.task_id.expect("bg 模式必须有 task_id");
+    let task_id = spawned.task_id;
     assert!(task_id.starts_with("bg-"), "task_id 格式 bg-{{uuid}}");
 
     // 任务完成：status done；registry 收敛回 5 个占位任务（无泄漏/无丢弃）
@@ -320,7 +314,6 @@ async fn test_resume_subagent_bg_scope_closed_rejected_before_claim() {
             std::sync::Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(Arc::clone(&task_manager)),
         None,
     );

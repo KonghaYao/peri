@@ -593,12 +593,12 @@ mod workflow;
 
 // ─── Agent 工具缺省后台（装配面 → 工具 schema）───────────────────────────────
 
-/// 生产链装配出的 `Agent` 工具必须声明 `run_in_background.default = true`。
+/// 生产链装配出的 `Agent` 工具恒后台：schema 不提供执行模式开关。
 ///
 /// v5 起后台是唯一执行模式；装配面不再构造 SubAgent 工具（或 schema 回退成
 /// 显式开关）时本用例报红。
 #[test]
-fn agent_tool_schema_declares_mandatory_background() {
+fn agent_tool_schema_has_no_background_mode_switch() {
     let ctx = base_context();
     let out = factory::build_middleware_chain(&ProductionChainAssembler, &ctx).expect("assembly");
     let tools = out.chain.collect_tools(&ctx.cwd);
@@ -606,9 +606,10 @@ fn agent_tool_schema_declares_mandatory_background() {
         .iter()
         .find(|tool| tool.name() == "Agent")
         .expect("生产链必须提供 Agent 工具");
-    assert_eq!(
-        agent.parameters()["properties"]["run_in_background"]["default"],
-        serde_json::json!(true)
+    let params = agent.parameters();
+    assert!(
+        params["properties"].get("run_in_background").is_none(),
+        "Agent schema 不得再暴露执行模式开关：{params}"
     );
 }
 

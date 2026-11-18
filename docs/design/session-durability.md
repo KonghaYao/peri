@@ -11,7 +11,7 @@
 1. Peri 启动、会话列表、历史分页和只读查询不启动恢复执行。只有进入某个会话，才判断其根 thread 范围内的恢复需求。
 2. 以已有 `thread_id`、`parent_thread_id` 和持久工作意图选择恢复对象。根 thread 只确定范围，不是所有结果的统一收件人。
 3. 主会话及其范围内需要继续工作的 async Agent 使用原 thread 恢复历史、MQ 和配置，再注入恢复提醒并继续执行。
-4. sync Agent 不自动续跑；按中断语义结束遗留执行，保留显式 resume 能力。已经实际转为后台继续执行的委派按 async 处理；仅停驻资源等待显式 resume 的 child 不自动复活。v5 起 `Agent` 工具只产生 async 委派（同步执行实现保留但不可唤醒），恢复对象因此以 async child 为主；历史遗留的 sync 委派仍按本条处理。
+4. sync Agent 不自动续跑；按中断语义结束遗留执行，保留显式 resume 能力。已经实际转为后台继续执行的委派按 async 处理；仅停驻资源等待显式 resume 的 child 不自动复活。v5 起 `Agent` 工具只产生 async 委派；同步 runner 已随 [Issue #450](https://github.com/KonghaYao/peri/issues/450) 移除，历史遗留的 sync 委派只能按中断语义处理、转后台 resume。
 5. TaskManager、运行锁、取消令牌、订阅和当前执行身份在本进程重新建立。稳定恢复身份是 thread，不要求复原旧内存 `task_id`、request ID 或回调闭包。
 6. 读取已提交事实后开始新的运行，不重放旧工具调用、发送命令或停机期间的外围事件。
 7. MQ 只保存待发送消息；历史消息仍归 `messages`。不新增异步任务绑定表或逐条结果处理标记。
@@ -212,7 +212,7 @@ child 的终态、`work_state` 收尾、结果接纳到目标 MQ，以及适用�
 
 同一 child 的终态只写一次：重复结算（含 panic 兜底）不得改写已写下的终态，也不得因正文不同产生身份冲突。同一 child 的多次恢复使用各自恢复提醒的稳定 ID 作为结果身份；只有同一次恢复的重复结算才幂等，后续恢复的结果不得被上一条历史身份跳过。
 
-sync 委派实际转为后台继续执行时，worker 持有 `working` 写入并向调用方确认；写入失败取消子执行并返回错误，成功确认前不能返回 Pending。调用方在 `working` 已提交后消失时，调用方消失后仍存活的认领 worker 负责把 `agent_status` 与 `work_state` 一起恢复到认领前的值，不留「终态 + working」。终态写入只归 handoff worker。执行体与 worker 用进程内 `TerminalOwnership` CAS 决定唯一写入者；worker 先建立父 `AsyncResultMailbox` 的 Queued 责任，再用 `finalize_child_terminal` 一次提交 child 终态、`work_state` 与父 MQ 结果。没有可用 terminal route 时不 detach，按同步路径执行并用 `settle_terminal_without_result` 收尾；worker 准入被拒时同样回退同步，由 wrapper/执行体按同一 CAS 唯一写终态，不产生父回执。映射为：正常结束 `Done + Idle`；明确取消 `Cancelled + Stopped`；其他中断、失败、交接未完成或 close 失败 `Error + Idle`。finalize 失败时结果未确认，child 仍按 `working` 交给下一次进入，并用同一消息身份重试（若提交实际已落地，重试为幂等 no-op），不伪报完成。
+后台委派的启动顺序固定：`working` 先写入并确认后才放行子执行，写入失败即拒绝启动并返回错误。调用方在 `working` 已提交后消失时，仍存活的认领 worker 负责把 `agent_status` 与 `work_state` 一起恢复到认领前的值，不留「终态 + working」。终态写入只归本次后台执行：先建立父 `AsyncResultMailbox` 的 Queued 责任，再由 `TerminalMqRoute::settle` 一次提交 child 终态、`work_state` 与父 MQ 结果；无终态路由的路径（workflow hidden child 等）用 `settle_terminal_without_result` 写入终态与工作意图。映射为：正常结束 `Done + Idle`；明确取消 `Cancelled + Stopped`；其他中断、失败、交接未完成或 close 失败 `Error + Idle`。投递失败时结果未确认，child 仍按 `working` 交给下一次进入，并用同一消息身份重试（若提交实际已落地，重试为幂等 no-op），不伪报完成。
 
 workflow agent 的 hidden child 没有父 MQ 结果，但在 `execute` 的每个退出路径尝试复用 `settle_terminal_without_result` 写同一组终态映射；显式完成路径 close 未结清时降级为 `Error + Idle`，future 被 workflow kill 或会话关闭 drop 时由结算守卫先取消并结清会话作用域，再按取消语义写 `Cancelled + Stopped`（close 失败只记录 warn）。结算成功后不再留给父会话恢复；写入失败时 child 仍可能为 `working`，继续按本节前面的终态门与恢复复核处理，并由 error 日志暴露。
 

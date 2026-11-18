@@ -7,11 +7,7 @@ use peri_acp_types::store::{InheritedContext, PersistedPayload};
 use crate::messages::BaseMessage;
 use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 
-use crate::session::subagent::run_sync::SyncCompletion;
-use crate::session::subagent::types::{
-    ChildRunOutcome, ForkDirectiveKind, SubagentFailure, SubagentRunMode, SubagentSpawnConfig,
-    SubagentSpawned,
-};
+use crate::session::subagent::types::{ForkDirectiveKind, SubagentSpawnConfig, SubagentSpawned};
 
 use crate::session::Session;
 
@@ -41,7 +37,7 @@ pub(super) fn parent_thread_id_of(parent: Option<&Arc<Session>>) -> Option<Strin
 /// 4. 构造子 session（frozen copy + transcript with_persistence 绑定存储）
 /// 5. 注入 parent_messages / system_prompt 到 transcript，push prompt 到 queue
 /// 6. 经 chain_assembler 装配子链（frozen 注入链上下文），构造 StageContext
-/// 7. Sync：直接 run_react_loop；Background：tokio::spawn + TaskManager 注册
+/// 7. Background：tokio::spawn + TaskManager 注册（无同步执行路径，Issue #450）
 /// 8. 收尾：update_thread_status（done/cancelled/error）+ 事件 + hook 闭包
 ///
 /// 并发限制：Agent 类后台任务不设上限（shell/workflow 的 kind 上限无关本路径），
@@ -65,7 +61,6 @@ pub(super) async fn spawn_subagent_impl(
         cancel_policy,
         max_iterations,
         fork_directive_kind,
-        run_mode,
         skill_names,
         llm,
         chain_assembler,
@@ -77,7 +72,7 @@ pub(super) async fn spawn_subagent_impl(
         context_budget,
         compact_llm,
         session_resources,
-        event_handler,
+        event_handler: _,
         bg_event_sender,
         task_manager,
         on_bg_complete,
@@ -412,140 +407,56 @@ pub(super) async fn spawn_subagent_impl(
             crate::session::subagent::terminal_settlement::TerminalMqRoute {
                 store: Arc::clone(store),
                 target: peri_acp_types::thread::ThreadId::from(target.as_str()),
-                mailbox: parent
-                    .filter(|_| parent_thread_id.as_ref() == Some(&target))
-                    .map(|parent| parent.async_result_mailbox()),
             },
         ),
         _ => None,
     };
-    match run_mode {
-        SubagentRunMode::Sync => {
-            let run_thread_id = child_thread_id.clone();
-            let run_agent_name = agent_name.clone();
-            let run_cwd = cwd.clone();
-            let run_session = session.clone();
-            let sync_task_id = crate::session::subagent::run_sync::new_sync_task_id();
-            let completion = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
-                session.clone(),
-                child_thread_id.clone(),
-                agent_name.clone(),
-                parent
-                    .and_then(|session| session.subagent_host())
-                    .and_then(|host| host.task_manager.clone()),
-                Some(sync_task_id.clone()),
-                crate::session::subagent::factory::completion_delivery(parent, on_bg_complete),
-                terminal_route,
-                move |handoff_start, handed_off| async move {
-                    crate::session::subagent::run_sync::run_sync_subagent(
-                        &run_thread_id,
-                        &run_agent_name,
-                        &run_cwd,
-                        max_iterations,
-                        crate::session::subagent::run_sync::handoff_event_handler(
-                            event_handler,
-                            bg_event_sender,
-                            handed_off,
-                        ),
-                        on_subagent_start,
-                        on_subagent_stop,
-                        session_resources,
-                        register_runtime,
-                        deregister_runtime,
-                        langfuse_bridge,
-                        parent_agent_id,
-                        parent_tool_call_id,
-                        v2_ctx,
-                        run_session,
-                        None,
-                        Some(handoff_start),
-                    )
-                    .await
-                },
-            )
-            .await?;
-            let (interrupted, pending_tasks, pending_task_id, handoff) = match completion {
-                SyncCompletion::Finished(ChildRunOutcome::Settled) => {
-                    (false, Vec::new(), None, None)
-                }
-                SyncCompletion::Finished(ChildRunOutcome::Interrupted) => {
-                    (true, Vec::new(), None, None)
-                }
-                SyncCompletion::Finished(ChildRunOutcome::HandedOff { receipt }) => {
-                    let tasks = receipt
-                        .tasks
-                        .iter()
-                        .map(|task| task.task_id.clone())
-                        .collect();
-                    (false, tasks, None, Some(receipt))
-                }
-                SyncCompletion::Finished(ChildRunOutcome::Failed { error, .. }) => {
-                    return Err(Box::new(SubagentFailure::new(
-                        child_thread_id.clone(),
-                        agent_name.clone(),
-                        error,
-                    )))
-                }
-                SyncCompletion::Finished(ChildRunOutcome::HandoffFailed { cause, failure }) => {
-                    return Err(Box::new(SubagentFailure::handoff_failed(
-                        child_thread_id.clone(),
-                        agent_name.clone(),
-                        cause,
-                        &failure,
-                    )))
-                }
-                SyncCompletion::Pending(pending) => (
-                    false,
-                    pending.pending_tasks,
-                    Some(sync_task_id),
-                    Some(pending.receipt),
-                ),
+    let task_id_clone = task_id.clone();
+    // dispatch 失败时 child 不会运行；保留存储句柄把已持久化的记录标为 Error，
+    // 避免留下 hidden/Active 且没有任务支撑的悬挂行。
+    let dispatch_store = session_resources.clone();
+    if let Err(error) = crate::session::subagent::background::spawn_background_subagent(
+        task_id,
+        child_thread_id.clone(),
+        agent_name.clone(),
+        prompt,
+        cwd.clone(),
+        max_iterations,
+        bg_event_sender,
+        task_manager,
+        crate::session::subagent::factory::completion_delivery(parent, on_bg_complete),
+        langfuse_bridge,
+        session_resources,
+        terminal_route,
+        deregister_runtime,
+        on_subagent_start,
+        on_subagent_stop,
+        register_runtime,
+        parent_agent_id,
+        parent_tool_call_id,
+        cancel_token.clone(),
+        v2_ctx,
+        None,
+    )
+    .await
+    {
+        if let Some(store) = dispatch_store.as_ref() {
+            let patch = peri_acp_types::session_resources::SessionMetaPatch {
+                status: Some(peri_acp_types::thread::AgentStatus::Error),
+                ..Default::default()
             };
-            Ok(SubagentSpawned {
-                child_thread_id,
-                task_id: pending_task_id,
-                session,
-                cancel_token,
-                interrupted,
-                pending_tasks,
-                handoff,
-            })
+            if let Err(mark) = store.update_session_meta(&child_thread_id, &patch).await {
+                return Err(
+                    format!("{error}; child error status could not be recorded: {mark}").into(),
+                );
+            }
         }
-        SubagentRunMode::Background => {
-            let task_id_clone = task_id.clone();
-            crate::session::subagent::background::spawn_background_subagent(
-                task_id.clone(),
-                child_thread_id.clone(),
-                agent_name.clone(),
-                prompt,
-                cwd.clone(),
-                max_iterations,
-                bg_event_sender,
-                task_manager,
-                crate::session::subagent::factory::completion_delivery(parent, on_bg_complete),
-                langfuse_bridge,
-                session_resources,
-                terminal_route,
-                deregister_runtime,
-                on_subagent_start,
-                on_subagent_stop,
-                register_runtime,
-                parent_agent_id,
-                parent_tool_call_id,
-                cancel_token.clone(),
-                v2_ctx,
-                None,
-            )
-            .await?;
-            Ok(SubagentSpawned {
-                child_thread_id,
-                task_id: Some(task_id_clone),
-                session,
-                cancel_token,
-                interrupted: false,
-                pending_tasks: Vec::new(),
-                handoff: None,
-            })
-        }
+        return Err(error);
     }
+    Ok(SubagentSpawned {
+        child_thread_id,
+        task_id: task_id_clone,
+        session,
+        cancel_token,
+    })
 }

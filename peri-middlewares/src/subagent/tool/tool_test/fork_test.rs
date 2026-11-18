@@ -531,7 +531,7 @@ fn definition_and_fork_share_one_inheritance_policy() {
 /// 仍然闭合扩展面（直接检查 `SubagentSpawnConfig.tool_filter` 决策）。
 #[tokio::test]
 async fn fork_spawn_config_filter_closes_extension_tools() {
-    use peri_agent::session::subagent::{ForkDirectiveKind, SubagentCancelPolicy, SubagentRunMode};
+    use peri_agent::session::subagent::{ForkDirectiveKind, SubagentCancelPolicy};
     let model = super::mock_model::RecordingModel::new("done");
     let parent_tools = Arc::new(capability_tools());
     let tool = SubAgentTool::new(
@@ -552,7 +552,6 @@ async fn fork_spawn_config_filter_closes_extension_tools() {
         SubagentCancelPolicy::Cascade,
         200,
         Some(ForkDirectiveKind::Fork),
-        SubagentRunMode::Sync,
         SubagentLlmSource::model(
             Arc::clone(&model) as Arc<dyn peri_model::Model>,
             "mock-model",

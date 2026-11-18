@@ -408,9 +408,9 @@ pub fn build_stage_context(
     // [时序契约] 工具注入必须晚于 parent_session 注入：SubAgentTool 在
     // build_tool（collect_tools）时读取 parent_session 以获取运行时 host
     // （task_manager / bg_event_sender / thread_store / frozen 回退）——先于
-    // 注入则 host 为空，`run_in_background: true` 会静默降级为同步执行
-    // （bg subagent 不注册 TaskManager，BgTaskArea 无运行条目，
-    // issue 2026-08-06-e2e-bg-task-area-entry-missing）。每轮重建，顺序不可调换。
+    // 注入则 host 为空，后台委派拿不到任务目录与事件通道
+    // （BgTaskArea 无运行条目，issue 2026-08-06-e2e-bg-task-area-entry-missing）。
+    // 每轮重建，顺序不可调换。
     // 当前链的有状态工具覆盖本地同名项；宿主级共享表保持不变。
     //
     // MetaHarness（设计 §2.5）：session/turn 级工具视图——基础 shared_tools

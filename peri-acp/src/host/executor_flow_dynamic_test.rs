@@ -234,7 +234,7 @@ pub(super) async fn bind_child_fixture_resources(
 #[tokio::test]
 async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
     use peri_agent::session::subagent::{
-        SessionFactory, SubagentCancelPolicy, SubagentRunMode, SubagentSpawnConfig,
+        SessionFactory, SubagentCancelPolicy, SubagentSpawnConfig,
     };
 
     let mut ctx =
@@ -273,7 +273,6 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
             cancel_policy: SubagentCancelPolicy::Cascade,
             max_iterations: 1,
             fork_directive_kind: None,
-            run_mode: SubagentRunMode::Sync,
             skill_names: vec![],
             llm: prepared_child_model(),
             chain_assembler: Arc::new(RecordingSubagentAssembler {
@@ -293,7 +292,7 @@ async fn test_production_stage_propagates_frozen_snapshot_to_main_and_child() {
             session_resources: ctx.session_resources.clone(),
             event_handler: None,
             bg_event_sender: None,
-            task_manager: None,
+            task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
             on_bg_complete: None,
             langfuse_bridge: None,
             on_subagent_start: None,
@@ -513,7 +512,6 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
             cancel_policy: peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
             max_iterations: 1,
             fork_directive_kind: None,
-            run_mode: peri_agent::session::subagent::SubagentRunMode::Sync,
             skill_names: vec![],
             llm: prepared_child_model(),
             chain_assembler: Arc::new(RecordingSubagentAssembler {
@@ -532,7 +530,7 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
             session_resources: ctx.session_resources.clone(),
             event_handler: None,
             bg_event_sender: None,
-            task_manager: None,
+            task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
             on_bg_complete: None,
             langfuse_bridge: None,
             on_subagent_start: None,

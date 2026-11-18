@@ -65,5 +65,5 @@
 
 1. **P1-04 Agent 默认后台、beta 区块已移除**（[设计](../../../docs/design/beta-flags.md)）
    1. 打开 Config 面板：注册表为空，不再渲染 beta 开关区块。
-   2. 调用省略 `run_in_background` 的 `Agent` 与显式 `run_in_background: false` 的 `Agent`：两者都立即返回后台回执，不阻塞等待结果。
+   2. 调用 `Agent`（schema 不再提供 `run_in_background`；旧参数省略或显式 `false` 都被兼容忽略）：立即返回后台回执，不阻塞等待结果。
    3. 调用省略 `run_in_background` 的 `Bash`：仍前台执行；只有显式 `true` 才转后台。

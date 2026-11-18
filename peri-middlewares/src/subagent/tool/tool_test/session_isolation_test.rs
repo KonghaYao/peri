@@ -9,9 +9,7 @@ use super::ThreadMeta;
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::tasks::TaskManager as _;
 use peri_agent::agent::async_tasks::TaskManager;
-use peri_agent::session::subagent::{
-    SubagentCancelPolicy, SubagentChainAssembler, SubagentHost, SubagentRunMode,
-};
+use peri_agent::session::subagent::{SubagentCancelPolicy, SubagentChainAssembler, SubagentHost};
 use peri_agent::session::{FrozenContext, Session};
 use peri_agent::tools::ToolContext;
 
@@ -80,7 +78,6 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         SubagentCancelPolicy::Cascade,
         20,
         None,
-        SubagentRunMode::Sync,
         crate::subagent::test_support::fixture_source(
             std::sync::Arc::new(EchoLLM),
             "fixture-scripted",
@@ -100,8 +97,16 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         .task_manager
         .clone()
         .unwrap();
+    wait_for_child_settled(&child).await;
+    // 后台子 Agent 的完成结果会投递给直接父会话；这条投递不属于嵌套路由断言。
+    let parent_deliveries = parent.queue().drain_all_async().await;
+    assert_eq!(
+        parent_deliveries.len(),
+        1,
+        "子 Agent 完成必须投递给直接父会话"
+    );
     assert!(!Arc::ptr_eq(&parent_manager, &child_manager));
-    // B′：sync 子 Agent 结束后停驻 inbox（binding/owner/queue 保留供 resume 复用）。
+    // B′：后台子 Agent 结束后停驻 inbox（binding/owner/queue 保留供 resume 复用）。
     {
         let bindings = pool.session_bindings.read();
         assert!(
@@ -190,7 +195,6 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
     let mut config = tool.resume_config_base(
         child.child_thread_id.clone(),
         Some("resume".into()),
-        SubagentRunMode::Sync,
         20,
         crate::subagent::test_support::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -220,6 +224,7 @@ async fn nested_delegation_uses_direct_parent_catalog_and_inbox() {
         );
     }));
     let resumed = tool.resume(config).await.unwrap();
+    wait_for_child_settled(&resumed).await;
     assert!(Arc::ptr_eq(
         &child_manager,
         resumed
@@ -332,6 +337,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     );
     parent.set_subagent_host(SubagentHost {
         session_resources: Some(store.facade()),
+        task_manager: Some(Arc::new(TaskManager::new())),
         mcp_pool: Some(pool.clone()),
         ..Default::default()
     });
@@ -339,7 +345,6 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     let mut config = tool.resume_config_base(
         child_id.clone(),
         Some("complete naturally".into()),
-        SubagentRunMode::Sync,
         20,
         crate::subagent::test_support::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -362,7 +367,8 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         *captured_shell.lock().unwrap() = Some(handle.task_id);
     }));
     let child = tool.resume(config).await.unwrap();
-    assert!(!child.interrupted);
+    wait_for_child_settled(&child).await;
+    wait_for_agent_status(&store, &child_id, peri_agent::thread::AgentStatus::Done).await;
     assert_eq!(
         store.load_meta(&child_id).await.unwrap().agent_status,
         peri_agent::thread::AgentStatus::Done
@@ -404,7 +410,6 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     let config = tool.resume_config_base(
         child_id.clone(),
         Some("new conversation turn".into()),
-        SubagentRunMode::Sync,
         20,
         crate::subagent::test_support::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -424,6 +429,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
         .task_manager
         .clone()
         .unwrap();
+    wait_for_child_settled(&reopened).await;
     assert!(!Arc::ptr_eq(&old_manager, &new_manager));
     assert_eq!(old_queue.len().await.expect("test MQ len"), 0);
     assert!(reopened
@@ -459,7 +465,6 @@ async fn spawn_completed_child(
         SubagentCancelPolicy::Cascade,
         20,
         None,
-        SubagentRunMode::Sync,
         crate::subagent::test_support::fixture_source(Arc::new(EchoLLM), "fixture-scripted"),
         Vec::new(),
         Arc::new(|_| true),
@@ -468,12 +473,57 @@ async fn spawn_completed_child(
         cwd.into(),
         None,
     );
-    tool.spawn(config).await.unwrap()
+    let spawned = tool.spawn(config).await.unwrap();
+    wait_for_child_settled(&spawned).await;
+    spawned
+}
+
+/// 等待后台子执行完成并释放资源准入。
+///
+/// TaskManager 先变 idle，之后才停驻 inbox 与释放执行许可；只看 idle 会与
+/// 紧接着的 resume/关闭断言竞争。
+async fn wait_for_child_settled(spawned: &peri_agent::session::subagent::SubagentSpawned) {
+    let owner = spawned
+        .session
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .expect("后台子 Agent 必须持有资源 owner");
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while owner.check_resume().is_err() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "后台子执行必须完成结算: {:?}",
+        owner.check_resume().err()
+    );
 }
 
 async fn wait_for_background_idle(manager: &TaskManager) {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while !manager.is_execution_idle() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn wait_for_agent_status(
+    store: &SessionFixture,
+    thread_id: &str,
+    status: peri_agent::thread::AgentStatus,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while store
+            .load_meta(&thread_id.to_string())
+            .await
+            .unwrap()
+            .agent_status
+            != status
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -503,9 +553,12 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
     });
     let root_tool = super::make_subagent_tool(Vec::new()).with_parent_session(root.clone());
     let child = spawn_completed_child(&root_tool, &cwd, "child").await;
+    // 先取走直接子 Agent 的完成投递，后续断言只关心孙任务的路由。
+    assert_eq!(root.queue().drain_all_async().await.len(), 1);
     let child_tool =
         super::make_subagent_tool(Vec::new()).with_parent_session(child.session.clone());
     let grandchild = spawn_completed_child(&child_tool, &cwd, "grandchild").await;
+    assert_eq!(child.session.queue().drain_all_async().await.len(), 1);
     assert_eq!(
         store
             .load_meta(&grandchild.child_thread_id)
@@ -514,13 +567,6 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
             .parent_thread_id,
         Some(child.child_thread_id.clone())
     );
-    let manager = child
-        .session
-        .subagent_host()
-        .unwrap()
-        .task_manager
-        .clone()
-        .unwrap();
     let mut task_ids = std::collections::HashSet::new();
     let mut delivery_ids = std::collections::HashSet::new();
     for index in 0..2 {
@@ -528,7 +574,6 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
         let mut config = child_tool.resume_config_base(
             grandchild.child_thread_id.clone(),
             Some(format!("explicit resume {index}")),
-            SubagentRunMode::Background,
             20,
             crate::subagent::test_support::fixture_source(Arc::new(EchoLLM), "fixture-scripted"),
             Vec::new(),
@@ -539,8 +584,8 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
         );
         config.bg_event_sender = Some(event_tx);
         let resumed = child_tool.resume(config).await.unwrap();
-        wait_for_background_idle(&manager).await;
-        assert!(task_ids.insert(resumed.task_id.clone().unwrap()));
+        wait_for_child_settled(&resumed).await;
+        assert!(task_ids.insert(resumed.task_id.clone()));
         assert_eq!(resumed.child_thread_id, grandchild.child_thread_id);
         assert!(root.queue().is_empty().await.expect("test MQ len"));
         assert!(resumed
@@ -559,7 +604,7 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
             }
         }
         let result = terminal.unwrap();
-        assert_eq!(result.task_id, resumed.task_id.unwrap());
+        assert_eq!(result.task_id, resumed.task_id);
         // 事件只有可读任务身份，不能重新取得 producer 的结算资格。
         // 原票据的重复回调/淘汰后幂等由 registry projection_retention_tests 覆盖。
         assert!(child.session.queue().is_empty().await.expect("test MQ len"));
@@ -598,6 +643,8 @@ async fn configured_background_callback_overrides_live_parent_and_retries_origin
     });
     let tool = super::make_subagent_tool(Vec::new()).with_parent_session(parent.clone());
     let child = spawn_completed_child(&tool, &cwd, "child").await;
+    // 直接子 Agent 的完成投递先取走；本用例只验证自定义回调的目标。
+    assert_eq!(parent.queue().drain_all_async().await.len(), 1);
     let target = Session::new(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
@@ -625,7 +672,6 @@ async fn configured_background_callback_overrides_live_parent_and_retries_origin
     let mut config = tool.resume_config_base(
         child.child_thread_id.clone(),
         Some("background resume".into()),
-        SubagentRunMode::Background,
         20,
         crate::subagent::test_support::fixture_source(Arc::new(EchoLLM), "fixture-scripted"),
         Vec::new(),
