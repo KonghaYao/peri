@@ -205,6 +205,32 @@ impl SkillsMiddleware {
         SkillToolAccess::from_tools(tools.iter().map(Box::as_ref).filter(|tool| filter(*tool)))
     }
 
+    /// 冻结身份可能来自 Windows 检出/构建（CRLF）；匹配按 LF 归一化进行，
+    /// `offsets` 以归一化字节下标映射回原串字节下标。
+    fn line_ending_normalized(identity: &str) -> (String, Vec<usize>) {
+        let mut normalized = String::with_capacity(identity.len());
+        let mut offsets = Vec::with_capacity(identity.len() + 1);
+        let bytes = identity.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                offsets.push(index);
+                normalized.push('\n');
+                index += 2;
+            } else {
+                let ch = identity[index..]
+                    .chars()
+                    .next()
+                    .expect("offset follows a char boundary");
+                offsets.extend(std::iter::repeat_n(index, ch.len_utf8()));
+                normalized.push(ch);
+                index += ch.len_utf8();
+            }
+        }
+        offsets.push(identity.len());
+        (normalized, offsets)
+    }
+
     pub(crate) fn project_resumed_identity(
         identity: &str,
         recorded: Option<SkillToolAccess>,
@@ -234,16 +260,17 @@ impl SkillsMiddleware {
         let variants =
             [Full, LoadOnly, DiscoverOnly].map(|access| (access, Self::sections_for_tools(access)));
         let overridden = frozen.and_then(|state| state.section_overrides.get(sections::SKILLS.id));
+        let (normalized, offsets) = Self::line_ending_normalized(identity);
         let is_section = |start: usize, end: usize| {
-            (start == 0 || identity[..start].ends_with("\n\n"))
-                && (end == identity.len() || identity[end..].starts_with("\n\n"))
+            (start == 0 || normalized[..start].ends_with("\n\n"))
+                && (end == normalized.len() || normalized[end..].starts_with("\n\n"))
         };
-        let mut matches = variants
+        let bodies = variants
             .iter()
             .flat_map(|(access, sections)| {
                 sections
                     .iter()
-                    .map(|section| (*access, section.content.as_str()))
+                    .map(move |section| (*access, section.content.as_str()))
             })
             .chain(
                 rendered_section
@@ -251,16 +278,26 @@ impl SkillsMiddleware {
                     .map(|body| (Full, body)),
             )
             .filter(|(_, body)| !body.is_empty())
+            // 段落正文同样按 LF 归一化（Windows 构建的 include_str! 产物为 CRLF）。
+            .map(|(access, body)| (access, body.replace("\r\n", "\n")))
+            .collect::<Vec<_>>();
+        let mut matches = bodies
+            .iter()
             .flat_map(|(access, body)| {
-                identity.match_indices(body).filter_map(move |(start, _)| {
-                    let end = start + body.len();
-                    is_section(start, end).then_some((start, end, access))
-                })
+                normalized
+                    .match_indices(body.as_str())
+                    .filter_map(move |(start, _)| {
+                        let end = start + body.len();
+                        is_section(start, end).then_some((start, end, *access))
+                    })
             })
             .collect::<Vec<_>>();
-        for (start, _) in identity.match_indices("# Skills\n") {
+        for (start, _) in normalized.match_indices("# Skills\n") {
             let end = start + LEGACY_LEN;
-            if let Some(body) = identity.get(start..end).filter(|_| is_section(start, end)) {
+            if let Some(body) = normalized
+                .get(start..end)
+                .filter(|_| is_section(start, end))
+            {
                 if Sha256::digest(body.as_bytes())[..] == LEGACY_DIGEST {
                     matches.push((start, end, SkillToolAccess::None));
                 }
@@ -276,7 +313,7 @@ impl SkillsMiddleware {
         });
         let (start, end, allowed) = match matches.as_slice() {
             [(start, end, allowed)] => (*start, *end, *allowed),
-            [] if !identity.contains("# Skills")
+            [] if !normalized.contains("# Skills")
                 && (recorded == Some(SkillToolAccess::None)
                     || (recorded.is_none()
                         && overridden.is_none_or(|body| !body.contains("{{")))) =>
@@ -285,6 +322,8 @@ impl SkillsMiddleware {
             }
             _ => return Err("cannot identify the frozen Skills section for resume".into()),
         };
+        // 归一化偏移回到原串，保留未命中部分的原始行尾。
+        let (start, end) = (offsets[start], offsets[end]);
         let ceiling = recorded.unwrap_or(SkillToolAccess::None);
         let access = requested.intersect(allowed).intersect(ceiling);
         if recorded.is_none() || allowed == SkillToolAccess::None {
@@ -300,10 +339,17 @@ impl SkillsMiddleware {
         let replacement = Self::sections_for_tools(access);
         let projected = if let Some(section) = replacement.first() {
             format!("{before}{}{after}", section.content.as_str())
-        } else if let Some(after) = after.strip_prefix("\n\n") {
+        } else if let Some(after) = after
+            .strip_prefix("\n\n")
+            .or_else(|| after.strip_prefix("\r\n\r\n"))
+        {
             format!("{before}{after}")
         } else {
-            before.strip_suffix("\n\n").unwrap_or(before).to_owned()
+            before
+                .strip_suffix("\n\n")
+                .or_else(|| before.strip_suffix("\r\n\r\n"))
+                .unwrap_or(before)
+                .to_owned()
         };
         Ok((projected, access))
     }

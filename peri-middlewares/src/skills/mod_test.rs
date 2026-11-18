@@ -428,6 +428,28 @@ fn resumes_released_skills_bytes_and_preserves_the_frozen_operation_ceiling() {
 }
 
 #[test]
+fn resumes_crlf_frozen_skills_sections_produced_on_windows() {
+    use peri_acp_types::skills::SkillToolAccess::{self, DiscoverOnly, Full};
+
+    // Windows checkouts/builds may store frozen sections with CRLF line endings;
+    // recognition must not depend on the line endings of the producing platform.
+    let old = include_str!("fixtures/released_25c183e_section.txt").replace('\n', "\r\n");
+    let identity = format!("frozen persona\r\n\r\n{old}\r\n\r\nfrozen language");
+    let (projected, access) =
+        SkillsMiddleware::project_resumed_identity(&identity, None, None, Full, None).unwrap();
+    assert_eq!(access, SkillToolAccess::None);
+    assert_eq!(projected, "frozen persona\r\n\r\nfrozen language");
+
+    let sections = SkillsMiddleware::sections_for_tools(DiscoverOnly);
+    let body = sections[0].content.as_str().replace('\n', "\r\n");
+    let discover = format!("frozen persona\r\n\r\n{body}\r\n\r\nfrozen language");
+    let (unchanged, access) =
+        SkillsMiddleware::project_resumed_identity(&discover, Some(DiscoverOnly), None, Full, None)
+            .unwrap();
+    assert_eq!((unchanged, access), (discover.clone(), DiscoverOnly));
+}
+
+#[test]
 fn historical_custom_skills_need_a_recorded_ceiling() {
     use peri_acp_types::messages::BaseMessage;
     use peri_acp_types::meta_harness::{sections, MetaHarnessState};
