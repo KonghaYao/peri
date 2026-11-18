@@ -340,6 +340,15 @@ thread_local! {
     static COMMIT_INPUT_DRAFT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
+/// 恢复共享向导状态，避免测试顺序影响断言。
+struct WizardActiveRestore(bool);
+
+impl Drop for WizardActiveRestore {
+    fn drop(&mut self) {
+        *crate::kit::atoms::WIZARD_ACTIVE.state().write() = self.0;
+    }
+}
+
 #[derive(Default, Props)]
 struct CommitInputProbeProps;
 
@@ -447,6 +456,8 @@ fn test_local_command_ignores_unavailable_plugin_selection_gate() {
         None,
         "本地向导入口不受插件选择能力闸门约束"
     );
+    let _wizard_restore = WizardActiveRestore(*crate::kit::atoms::WIZARD_ACTIVE.state().read());
+    *crate::kit::atoms::WIZARD_ACTIVE.state().write() = false;
     let text = probe_commit_input("/setup");
     assert_eq!(text, "", "本地命令必须正常提交而不是阻断");
     assert_eq!(
