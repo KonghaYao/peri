@@ -388,5 +388,9 @@ async fn admit(
 mod tests;
 
 #[cfg(test)]
+#[path = "steer_consumer_admission_test.rs"]
+mod admission_tests;
+
+#[cfg(test)]
 #[path = "steer_consumer_preparation_test.rs"]
 mod preparation_tests;
