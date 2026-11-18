@@ -15,7 +15,8 @@ cd "$WT"   # 第 1 步选定的 worktree 绝对路径；已在其中时直接用
 
 ```bash
 tmux new-session -d -s fixrepro-wide -x 140 -y 40
-tmux send-keys -t fixrepro-wide "HOME=$PWD/.tmp/home ./target/debug/peri" Enter
+# 路径可能含空格：在 pane 命令内 cd 并给变量加引号，避免被 shell 二次拆分
+tmux send-keys -t fixrepro-wide "cd \"$WT\" && HOME=\"$WT/.tmp/home\" ./target/debug/peri" Enter
 # 80 列复验另建会话（send-keys 方式同上）：tmux new-session -d -s fixrepro-80 -x 80 -y 40
 ```
 
