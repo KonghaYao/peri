@@ -89,9 +89,23 @@ fn conflicting_arguments_fields_are_rejected() {
 fn empty_name_and_non_object_arguments_are_rejected() {
     for input in [
         serde_json::json!({"name": "", "arguments": {}}),
+        serde_json::json!({"name": 42, "arguments": {}}),
+        serde_json::json!({"name": null, "arguments": {}}),
+        serde_json::json!({"name": "", "tool_name": "CronRegister", "arguments": {}}),
         serde_json::json!({"name": "CronRegister"}),
         serde_json::json!({"name": "CronRegister", "arguments": []}),
         serde_json::json!({"name": "CronRegister", "arguments": null}),
+    ] {
+        assert!(super::parse_proxy_call(&input).is_err(), "{input}");
+    }
+}
+
+#[test]
+fn present_invalid_legacy_name_is_rejected_even_with_valid_canonical_name() {
+    for input in [
+        serde_json::json!({"name": "CronRegister", "tool_name": "", "arguments": {}}),
+        serde_json::json!({"name": "CronRegister", "tool_name": 7, "arguments": {}}),
+        serde_json::json!({"name": "CronRegister", "tool_name": null, "arguments": {}}),
     ] {
         assert!(super::parse_proxy_call(&input).is_err(), "{input}");
     }

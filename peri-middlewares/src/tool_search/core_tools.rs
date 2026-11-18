@@ -48,15 +48,23 @@ pub fn parse_proxy_call(input: &Value) -> Result<ProxyCall, String> {
     })
 }
 
-fn non_empty_str(value: Option<&Value>) -> Option<&str> {
-    value
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
+/// 读取一个 name 字段：**存在即必须是**非空字符串；缺失才是 None。
+///
+/// 空串、数字、null 都是畸形输入，不能静默回退到另一字段，否则畸形代理调用会
+/// 被当成合法目标执行。
+fn parse_name_field<'a>(input: &'a Value, field: &str) -> Result<Option<&'a str>, String> {
+    match input.get(field) {
+        None => Ok(None),
+        Some(Value::String(name)) if !name.is_empty() => Ok(Some(name)),
+        Some(_) => Err(format!(
+            "malformed ToolInvoke invocation: '{field}' must be a non-empty string"
+        )),
+    }
 }
 
 fn parse_proxy_name(input: &Value) -> Result<String, String> {
-    let canonical = non_empty_str(input.get(PROXY_NAME_FIELD));
-    let legacy = non_empty_str(input.get(LEGACY_PROXY_NAME_FIELD));
+    let canonical = parse_name_field(input, PROXY_NAME_FIELD)?;
+    let legacy = parse_name_field(input, LEGACY_PROXY_NAME_FIELD)?;
     match (canonical, legacy) {
         (Some(canonical), Some(legacy)) if canonical != legacy => {
             Err("conflicting ToolInvoke name fields".to_string())

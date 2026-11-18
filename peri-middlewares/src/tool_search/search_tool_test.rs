@@ -72,7 +72,7 @@ fn test_description_uses_real_deferred_examples() {
     assert!(description.contains("select:mcp__peri__cron_list,mcp__peri__cron_remove"));
     assert!(!description.contains("CronCreate"));
     assert!(!description.contains("Snip"));
-    assert!(description.contains("Returns an empty array when nothing matches"));
+    assert!(description.contains("`results` is an empty array when nothing matches"));
     assert!(description.contains("ToolInvoke"));
     assert!(!description.contains("SearchExtraTools"));
     assert!(!description.contains("ExecuteExtraTool"));

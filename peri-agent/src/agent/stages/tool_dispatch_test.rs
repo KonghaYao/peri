@@ -525,6 +525,83 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
     assert!(ended, "resolution error must emit ToolEnded");
 }
 
+#[test]
+fn settled_render_suppression_requires_host_proxy_identity() {
+    struct IdentityTool {
+        name: &'static str,
+        server: Option<&'static str>,
+        namespace: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl BaseTool for IdentityTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "identity fixture"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+        fn mcp_server_name(&self) -> Option<&str> {
+            self.server
+        }
+        fn namespace(&self) -> Option<&str> {
+            self.namespace
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(String::new())
+        }
+    }
+
+    let build = |tool: Arc<dyn BaseTool>| {
+        let tools = BTreeMap::from([("ToolInvoke".to_string(), tool)]);
+        let shared: crate::agent::stages::SharedToolMap = Arc::new(parking_lot::RwLock::new(tools));
+        let catalog = Arc::new(
+            crate::session::tool_catalog::SessionToolCatalog::try_new(shared.read().clone(), None)
+                .expect("identity fixtures must not collide"),
+        );
+        let turn = TurnContext::new(Arc::from("/tmp"), Arc::new(CancellationToken::new()));
+        let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+        StageContext::builder(turn, transcript, MessageQueue::new())
+            .with_tools(shared)
+            .with_tool_catalog(catalog)
+            .build()
+    };
+    let call = ToolCall::new("proxy-1", "ToolInvoke", json!({}));
+
+    let host = build(Arc::new(IdentityTool {
+        name: "ToolInvoke",
+        server: None,
+        namespace: Some("meta"),
+    }));
+    assert!(
+        !super::tool_dispatcher::should_emit_settled_tool_render(&host, &call),
+        "宿主代理解析失败时不投影 wrapper 行"
+    );
+
+    let external = build(Arc::new(IdentityTool {
+        name: "ToolInvoke",
+        server: Some("ext"),
+        namespace: None,
+    }));
+    assert!(
+        super::tool_dispatcher::should_emit_settled_tool_render(&external, &call),
+        "外部 MCP 同名工具不是宿主代理，必须保留 settled render"
+    );
+
+    let unresolved = make_test_ctx();
+    assert!(
+        super::tool_dispatcher::should_emit_settled_tool_render(&unresolved, &call),
+        "无法解析的名字保持成对 emit"
+    );
+}
+
 // ── 结算路径逐条日志（本文件专用内联最小捕获，不引入公共测试工具/依赖）──────
 //
 // `dispatch_tools` 由测试线程 await，`warn!` 就发生在该线程，线程局部

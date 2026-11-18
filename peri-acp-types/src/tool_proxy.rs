@@ -48,6 +48,17 @@ pub fn is_host_proxy_tool_name(name: &str) -> bool {
     is_search_proxy_name(name) || is_invoke_proxy_name(name)
 }
 
+/// 工具对象是否为宿主调用代理：名字命中代理集合，且身份是宿主 meta 工具。
+///
+/// 外部 MCP 同名工具没有宿主身份，不得按代理处理（否则会丢 settled render 或
+/// 被错误地禁止直接调用）。
+#[must_use]
+pub fn is_host_invoke_proxy(tool: &dyn crate::tools::BaseTool) -> bool {
+    is_invoke_proxy_name(tool.name())
+        && tool.mcp_server_name().is_none()
+        && tool.namespace() == Some("meta")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

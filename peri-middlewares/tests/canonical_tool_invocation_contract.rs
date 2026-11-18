@@ -16,6 +16,7 @@ use peri_agent::agent::stages::SharedToolMap;
 use peri_agent::agent::stages::StageContext;
 use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::middleware::MiddlewareChain;
+use peri_agent::session::tool_catalog::CatalogRefreshError;
 use peri_agent::session::tool_catalog::SessionToolCatalog;
 use peri_agent::session::FrozenContext;
 use peri_agent::session::Session;
@@ -96,7 +97,7 @@ fn make_context(
     let shared: SharedToolMap = Arc::new(RwLock::new(tools));
     let catalog = Arc::new(
         SessionToolCatalog::try_new(shared.read().clone(), None)
-            .unwrap_or_else(|_| SessionToolCatalog::new(BTreeMap::new(), None)),
+            .expect("test fixture catalog must be constructible"),
     );
     let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
         .with_tools(shared)
@@ -276,7 +277,7 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
 }
 
 #[tokio::test]
-async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invoke_side_effects() {
+async fn malformed_and_unknown_wrapper_targets_have_no_policy_or_invoke_side_effects() {
     let invoked = Arc::new(Mutex::new(Vec::new()));
     let policy = Arc::new(Mutex::new(Vec::new()));
     let target: Arc<dyn BaseTool> = Arc::new(RecordingTool {
@@ -287,7 +288,7 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
     });
     let conflicting: Arc<dyn BaseTool> = Arc::new(RecordingTool {
         name: "OtherBash",
-        aliases: &["Shell"],
+        aliases: &[],
         calls: Arc::clone(&invoked),
         schema: json!({}),
     });
@@ -323,11 +324,6 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
                 json!({"name": "missing", "arguments": {}}),
             ),
             ToolCall::new(
-                "ambiguous",
-                TOOL_INVOKE_NAME,
-                json!({"name": "shell", "arguments": {}}),
-            ),
-            ToolCall::new(
                 "legacy-malformed",
                 EXECUTE_EXTRA_TOOL_NAME,
                 json!({"params": {}}),
@@ -348,6 +344,29 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
     assert!(invoked.lock().is_empty());
     assert!(outcome.results.iter().all(|(_, result)| result.is_error));
     assert!(events.render_rx.try_recv().is_err());
+}
+
+/// 重复 alias 的 fixture 无法构成合法目录：这是目录层的唯一防线，单独断言，
+/// 避免它把上面的解析拒绝用例退化成「空目录」测试。
+#[test]
+fn duplicate_alias_fixture_is_rejected_by_catalog() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let bash: Arc<dyn BaseTool> = Arc::new(RecordingTool {
+        name: "Bash",
+        aliases: &["Shell"],
+        calls: Arc::clone(&calls),
+        schema: json!({}),
+    });
+    let other: Arc<dyn BaseTool> = Arc::new(RecordingTool {
+        name: "OtherBash",
+        aliases: &["Shell"],
+        calls: Arc::clone(&calls),
+        schema: json!({}),
+    });
+    let tools = BTreeMap::from([("Bash".to_string(), bash), ("OtherBash".to_string(), other)]);
+    let error = SessionToolCatalog::try_new(tools, None)
+        .expect_err("duplicate alias must not build a catalog");
+    assert!(matches!(error, CatalogRefreshError::AliasConflict));
 }
 
 #[cfg(unix)]

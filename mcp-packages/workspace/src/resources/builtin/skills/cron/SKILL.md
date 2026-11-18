@@ -31,7 +31,7 @@ Do NOT register a cron task just because the user mentions a time — only when 
 | `mcp__cron__cron_list()` | List all registered tasks with status, next fire time, and prompt. |
 | `mcp__cron__cron_remove(id)` | Remove a task by its ID (shown by `mcp__cron__cron_list`). |
 
-If `ToolSearch` returns no `mcp__cron__*` tool, the built-in `cron` instance is disabled for this session (MetaHarness `CronMiddleware: false`, the `{"cron": {"disabled": true}}` config entry, or `PERI_MCP_BUILTIN=off`); tell the user instead of trying to work around it.
+If `ToolSearch` returns no `mcp__peri__cron_*` (v5) or `mcp__cron__*` (legacy sessions) tool, the built-in `cron` instance is disabled for this session (MetaHarness `CronMiddleware: false`, the `{"cron": {"disabled": true}}` config entry, or `PERI_MCP_BUILTIN=off`); tell the user instead of trying to work around it.
 
 ## Cron Expression Format
 

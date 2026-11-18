@@ -66,9 +66,7 @@ fn resolve_extra_tool_target(
 }
 
 fn is_host_invoke_proxy(tool: &dyn BaseTool) -> bool {
-    peri_acp_types::tool_proxy::is_invoke_proxy_name(tool.name())
-        && tool.mcp_server_name().is_none()
-        && tool.namespace() == Some("meta")
+    peri_acp_types::tool_proxy::is_host_invoke_proxy(tool)
 }
 
 impl ToolInvocationResolver for ExecuteExtraToolResolver {
