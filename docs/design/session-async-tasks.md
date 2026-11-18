@@ -9,7 +9,7 @@
 
 ### Agent 委派模式（v5 常态）
 
-`Agent` 工具调用恒为后台委派：省略 `run_in_background` 与显式 `false` 都后台启动，非 active resume 同样后台；显式 `false` 只被宽容解析，不再唤醒同步路径。同步执行实现（`SubagentRunMode::Sync` / `run_sync.rs` / 同步 fork）保留在 Agent 层，但工具不产生该路径。
+`Agent` 工具调用恒为后台委派：schema 不提供执行模式参数，非 active resume 同样后台启动。旧客户端传入的 `run_in_background` 只被兼容忽略，不参与路由（[Issue #443](https://github.com/KonghaYao/peri/issues/443)）。同步 runner（`SubagentRunMode::Sync` / `run_sync.rs` / 同步 fork）已随 [Issue #450](https://github.com/KonghaYao/peri/issues/450) 移除，也不存在被唤醒的同步路径。
 
 - MCP Agent 没有同步激活例外：定义准入（内容绑定审批门）在后台启动之前完成，后台 loader 不得成为绕过审批的入口。
 - 无任务管理器时显式报错，不静默落回同步。

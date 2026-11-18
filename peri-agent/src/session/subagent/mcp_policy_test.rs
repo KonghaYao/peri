@@ -8,7 +8,6 @@ use crate::session::subagent::types::SubagentLlmSource;
 use crate::session::subagent::v2_bridge::V2SubagentContext;
 use crate::session::subagent::SessionFactory;
 use crate::session::subagent::SubagentCancelPolicy;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::subagent::SubagentSpawnConfig;
 use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::FrozenContext;
@@ -531,7 +530,6 @@ fn spawn_config(
         cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 3,
         fork_directive_kind: None,
-        run_mode: SubagentRunMode::Sync,
         skill_names: vec![],
         llm: SubagentLlmSource::model(Arc::new(model), "policy-fixture"),
         chain_assembler: Arc::new(probe),
@@ -545,7 +543,7 @@ fn spawn_config(
         session_resources: Some(store),
         event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(Arc::new(crate::agent::async_tasks::TaskManager::new())),
         on_bg_complete: None,
         langfuse_bridge: None,
         on_subagent_start: None,
@@ -585,6 +583,7 @@ async fn spawn_and_resume_keep_parent_mcp_policy_through_reason_refresh() {
                     source: source.clone(),
                     requests: requests.clone(),
                 };
+                let manager = Arc::new(crate::agent::async_tasks::TaskManager::new());
                 let spawned = if resume {
                     let mut config = crate::session::subagent::tests::resume_config(
                         store.clone(),
@@ -598,19 +597,19 @@ async fn spawn_and_resume_keep_parent_mcp_policy_through_reason_refresh() {
                     config.chain_assembler = Arc::new(probe.clone());
                     config.tools = core_tools().into_iter().chain(mcp_tools(false)).collect();
                     config.tool_filter = child_filter(wildcard);
+                    config.task_manager = Some(manager.clone());
                     SessionFactory::resume_subagent(Some(&parent), config)
                         .await
                         .expect("the resume subagent fixture result is required for this assertion")
                 } else {
-                    SessionFactory::spawn_subagent(
-                        Some(&parent),
-                        spawn_config(store.clone(), model, probe.clone(), wildcard),
-                    )
-                    .await
-                    .expect("the spawn subagent fixture result is required for this assertion")
+                    let mut config = spawn_config(store.clone(), model, probe.clone(), wildcard);
+                    config.task_manager = Some(manager.clone());
+                    SessionFactory::spawn_subagent(Some(&parent), config)
+                        .await
+                        .expect("the spawn subagent fixture result is required for this assertion")
                 };
+                crate::session::subagent::tests::wait_background_idle(&manager).await;
                 child_id = Some(spawned.child_thread_id);
-                assert!(!spawned.interrupted);
                 let initial = expected_names(policy, closed, false);
                 let refreshed = expected_names(policy, closed, true);
                 assert_eq!(

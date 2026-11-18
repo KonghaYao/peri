@@ -2,14 +2,13 @@
 //!
 //! 语义（issue 决策）：主 agent 凭中断/错误/bg 通知文本携带的 `child_thread_id`
 //! 恢复被中断 subagent——从磁盘 thread 恢复现场继续执行，不创建新 subagent。
-//! - 工具集：`meta.title == "fork"` → 父工具集 clone（execute_fork.rs 同款，无过滤）；
+//! - 工具集：`meta.title == "fork"` → 父工具集 clone（无过滤）；
 //!   否则 `load_agent_def(title)` 重新应用 tools/disallowed 过滤（权限漂移防护，
 //!   issue 决策 11）
 //! - skill_names 恒不注入（R-H1：旧 transcript 已含首轮 SkillPreload 内容，
 //!   重复注入会随多次恢复无界增长；`SubagentResumeConfig` 无该字段，结构性禁止）
 //! - 不传 system_prompt（F4：identity System 已在旧 transcript 中，重复注入会重复）
-//! - run mode：v5 起非 active 恢复恒为 Background（同步唤醒路径不再可用；
-//!   同步实现保留在 Agent 层，`run_sync.rs` 不受影响）。
+//! - 执行：非 active 恢复恒为后台（Issue #450：没有同步唤醒路径）。
 //!
 //! L3：校验/重建/运行/收尾统一经
 //! `peri_agent::session::subagent::resume_subagent`（Agent 层统一入口），
@@ -18,8 +17,6 @@
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::SessionResourceErrorKind;
-use peri_agent::session::subagent;
-use peri_agent::session::subagent::SubagentRunMode;
 use peri_agent::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode};
 
 fn preflight_rejected(
@@ -248,7 +245,6 @@ impl super::SubAgentTool {
         let config = self.resume_config_base(
             thread_id.clone(),
             prompt,
-            SubagentRunMode::Background,
             max_iterations,
             llm,
             tools,
@@ -261,41 +257,15 @@ impl super::SubAgentTool {
         // 4. 统一恢复入口（Agent 层完成校验 / 重建 / 执行 / 收尾）
         let spawned = self.resume(config).await?;
 
-        if let Some(pending) = spawned.pending_message() {
-            return Ok(format!("action: resume\n{pending}"));
-        }
-
-        // 5. 返回文本（见方法注释格式约定）
-        if let Some(task_id) = &spawned.task_id {
-            // 与 execute_bg.rs 同形：新 task 身份 + 可直接复用的线程身份规范句
-            // （与 bg 完成通知逐字同形），不保留无指引的 `(thread: …)` 标注。
-            return Ok(format!(
-                "action: resume\nBackground task {} started. You will be notified when it completes. \
-                 You can continue with other tasks in the meantime.\n\
-                 child_thread_id: {} (resume with Agent(resume_thread_id: {}))\n\
-                 While active, include a non-empty prompt to send supplemental instructions; \
-                 omit prompt only when resuming a non-active thread.",
-                task_id, spawned.child_thread_id, spawned.child_thread_id
-            ));
-        }
-
-        if spawned.interrupted {
-            return Ok(format!(
-                "child_thread_id: {}\naction: resume\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
-                spawned.child_thread_id, spawned.child_thread_id
-            ));
-        }
-
+        // 5. 返回文本（见方法注释格式约定）：恢复恒为后台，无条件返回任务回执。
+        //    与 execute_bg.rs 同形：新 task 身份 + 可直接复用的线程身份规范句。
         Ok(format!(
-            "child_thread_id: {}\naction: resume\n{}",
-            spawned.child_thread_id,
-            subagent::format_subagent_result(&peri_agent::agent::react::AgentOutput {
-                text: subagent::extract_last_ai_text(&spawned.session),
-                steps: 0,
-                tool_calls: Vec::new(),
-                stop_reason: None,
-                block_continue: None,
-            })
+            "action: resume\nBackground task {} started. You will be notified when it completes. \
+             You can continue with other tasks in the meantime.\n\
+             child_thread_id: {} (resume with Agent(resume_thread_id: {}))\n\
+             While active, include a non-empty prompt to send supplemental instructions; \
+             omit prompt only when resuming a non-active thread.",
+            spawned.task_id, spawned.child_thread_id, spawned.child_thread_id
         ))
     }
 }

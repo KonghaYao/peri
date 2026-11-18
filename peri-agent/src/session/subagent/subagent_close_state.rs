@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
-use std::future::Future;
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -13,16 +11,9 @@ use crate::session::Session;
 type CloseResult = Result<(), String>;
 type CloseReceiver = watch::Receiver<Option<CloseResult>>;
 
-tokio::task_local! {
-    static CURRENT_SYNC_WORKER: Arc<SubagentCloseState>;
-}
-
 #[derive(Default)]
 pub struct SubagentCloseState {
     attempt: parking_lot::Mutex<Option<CloseReceiver>>,
-    pub(super) sync_workers: tokio_util::task::TaskTracker,
-    sync_delivery: parking_lot::Mutex<HashMap<String, Option<String>>>,
-    sync_delivery_changed: tokio::sync::Notify,
     closing_cancel: CancellationToken,
 }
 
@@ -30,88 +21,6 @@ impl SubagentCloseState {
     #[must_use]
     pub fn is_closing(&self) -> bool {
         self.attempt.lock().is_some()
-    }
-
-    /// Admit parent registration and its completion worker as one synchronous step.
-    /// Lock order: close gate -> registry admission/tasks -> sync delivery. The
-    /// registration path only publishes watch/broadcast messages; it cannot call
-    /// back into this gate. The factory must not await or re-enter close state.
-    pub(super) fn spawn_sync_worker<F>(
-        self: &Arc<Self>,
-        task_id: String,
-        build: impl FnOnce() -> Result<F, String>,
-    ) -> Result<tokio::task::JoinHandle<F::Output>, String>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let attempt = self.attempt.lock();
-        if attempt.is_some() {
-            return Err(
-                "Incomplete: sync child worker registered after session close began".into(),
-            );
-        }
-        let worker = build()?;
-        self.sync_delivery.lock().insert(task_id, None);
-        let handle = self
-            .sync_workers
-            .spawn(CURRENT_SYNC_WORKER.scope(Arc::clone(self), worker));
-        drop(attempt);
-        Ok(handle)
-    }
-
-    pub(super) fn record_sync_delivery_failure(&self, task_id: &str, error: &str) {
-        self.sync_delivery.lock().insert(
-            task_id.to_owned(),
-            Some(format!("Incomplete: sync child delivery failed: {error}")),
-        );
-        self.sync_delivery_changed.notify_waiters();
-    }
-
-    pub(super) fn settle_sync_delivery(&self, task_id: &str) {
-        self.sync_delivery.lock().remove(task_id);
-    }
-
-    #[cfg(test)]
-    pub(super) fn sync_delivery_errors(&self) -> Vec<String> {
-        self.sync_delivery
-            .lock()
-            .values()
-            .filter_map(|error| error.clone())
-            .collect()
-    }
-
-    async fn wait_sync_workers(&self) -> CloseResult {
-        loop {
-            let changed = self.sync_delivery_changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            let errors = {
-                let failures = self.sync_delivery.lock();
-                failures
-                    .iter()
-                    .filter_map(|(thread_id, error)| {
-                        error.as_ref().map(|error| format!("{thread_id}: {error}"))
-                    })
-                    .collect::<Vec<_>>()
-            };
-            if !errors.is_empty() {
-                return Err(errors.join("; "));
-            }
-            tokio::select! {
-                _ = self.sync_workers.wait() => {
-                    let pending = self.sync_delivery.lock();
-                    if pending.is_empty() {
-                        return Ok(());
-                    }
-                    return Err(pending.iter().map(|(thread_id, error)| {
-                        format!("{thread_id}: {}", error.as_deref().unwrap_or(
-                            "Incomplete: sync child worker ended without delivery settlement"))
-                    }).collect::<Vec<_>>().join("; "));
-                }
-                _ = changed => {}
-            }
-        }
     }
 }
 
@@ -121,6 +30,7 @@ impl SubagentCloseState {
 /// 仅限“settlement/handoff unconfirmed”两类：真实资源关闭失败和
 /// `child history persistence unconfirmed` 属于持久化/资源未确认，必须保持
 /// Active，不能借取消认领写入 Cancelled。
+#[cfg_attr(not(test), allow(dead_code))] // 同步 runner 删除后无生产调用；关闭失败分类规则仍供测试与后续结算复用。
 pub(crate) fn close_failure_allows_terminal_finalization(error: &str) -> bool {
     error.starts_with("Incomplete: child handoff is unconfirmed")
         || error.starts_with("Incomplete: child settlement is unconfirmed")
@@ -139,7 +49,6 @@ pub async fn close_subagent_session_scope(session: Arc<Session>) -> CloseResult 
         if let Some(receiver) = existing {
             receiver
         } else {
-            host.close_state.sync_workers.close();
             host.close_state.closing_cancel.cancel();
             let (sender, receiver) = watch::channel(None);
             *attempt = Some(receiver.clone());
@@ -165,14 +74,7 @@ pub async fn close_subagent_session_scope(session: Arc<Session>) -> CloseResult 
             .await
             .map_err(|_| "Incomplete: child close worker lost".to_owned())?;
     };
-    resource_result?;
-    if CURRENT_SYNC_WORKER
-        .try_with(|worker| Arc::ptr_eq(worker, &host.close_state))
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-    host.close_state.wait_sync_workers().await
+    resource_result
 }
 
 async fn drain_child_scope(session: Arc<Session>) -> CloseResult {

@@ -19,7 +19,7 @@ impl FailWithUnwritableStore {
 }
 crate::fixture_model_impl!(FailWithUnwritableStore);
 
-async fn test_unconfirmed_handoff_blocks_factory_resume(background: bool) {
+async fn test_unconfirmed_handoff_blocks_factory_resume() {
     use crate::agent::async_tasks::BgTaskKind;
     use crate::session::subagent::resource_owner::ParkedChildOwner;
     use crate::session::{FrozenContext, MessageQueue, Session};
@@ -78,11 +78,6 @@ async fn test_unconfirmed_handoff_blocks_factory_resume(background: bool) {
             Arc::new(FailWithUnwritableStore(store.clone())),
             "fixture-scripted",
         ),
-        if background {
-            SubagentRunMode::Background
-        } else {
-            SubagentRunMode::Sync
-        },
         Some(parent_manager),
         None,
     );
@@ -102,16 +97,12 @@ async fn test_unconfirmed_handoff_blocks_factory_resume(background: bool) {
         Ok(())
     }));
     let first = SessionFactory::resume_subagent(Some(&parent), config).await;
-    if background {
-        first.expect("后台执行须成功启动");
-        let result = tokio::time::timeout(Duration::from_secs(10), result_rx)
-            .await
-            .expect("后台失败必须完成")
-            .expect("the expect fixture result is required for this assertion");
-        assert!(!result.success);
-    } else {
-        assert!(first.is_err(), "持久化失败必须返回错误");
-    }
+    first.expect("后台执行须成功启动");
+    let result = tokio::time::timeout(Duration::from_secs(10), result_rx)
+        .await
+        .expect("后台失败必须完成")
+        .expect("the expect fixture result is required for this assertion");
+    assert!(!result.success);
     tokio::time::timeout(Duration::from_secs(10), finished_rx)
         .await
         .expect("旧执行必须完成")
@@ -128,14 +119,8 @@ async fn test_unconfirmed_handoff_blocks_factory_resume(background: bool) {
     assert!(error.contains("handoff is unconfirmed"), "{error}");
 }
 
-/// [回归测试] 同步交接真实写入失败时，factory 明确拒绝恢复。
-#[tokio::test(start_paused = true)]
-async fn test_sync_unconfirmed_handoff_blocks_factory_resume() {
-    test_unconfirmed_handoff_blocks_factory_resume(false).await;
-}
-
 /// [回归测试] 后台交接真实写入失败时，factory 明确拒绝恢复。
 #[tokio::test(start_paused = true)]
 async fn test_background_unconfirmed_handoff_blocks_factory_resume() {
-    test_unconfirmed_handoff_blocks_factory_resume(true).await;
+    test_unconfirmed_handoff_blocks_factory_resume().await;
 }

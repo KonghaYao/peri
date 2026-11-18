@@ -520,43 +520,6 @@ async fn test_close_rejects_active_execution_until_it_ends() {
         .expect("the close fixture result is required for this assertion");
 }
 
-#[test]
-fn test_missing_handoff_capability_is_not_classified_as_persistence_failure() {
-    use crate::agent::async_tasks::handoff::HandoffCommitError;
-    use crate::session::subagent::{ChildHandoffFailure, SubagentFailure};
-
-    let missing = ChildHandoffFailure {
-        error: HandoffCommitError::MissingCapability,
-        receipt: None,
-        flush_error: None,
-    };
-    let failure = SubagentFailure::handoff_failed("child", "agent", None, &missing);
-    assert_eq!(
-        failure.error().category_name(),
-        "child_handoff_capability_unavailable"
-    );
-    assert!(failure
-        .public_message()
-        .contains("handoff_capability_unavailable"));
-    assert!(!failure
-        .public_message()
-        .contains("handoff_persistence_failed"));
-
-    let persistence = ChildHandoffFailure {
-        error: HandoffCommitError::Persistence(anyhow::anyhow!("append failed")),
-        receipt: None,
-        flush_error: None,
-    };
-    let failure = SubagentFailure::handoff_failed("child", "agent", None, &persistence);
-    assert_eq!(
-        failure.error().category_name(),
-        "child_handoff_persistence_failed"
-    );
-    assert!(failure
-        .public_message()
-        .contains("handoff_persistence_failed"));
-}
-
 /// [回归测试] prepare 与 acquire 共用锁内准入，未确认 receipt 不能被清除。
 #[tokio::test]
 async fn test_prepare_resume_preserves_exclusion_and_pending_handoff() {

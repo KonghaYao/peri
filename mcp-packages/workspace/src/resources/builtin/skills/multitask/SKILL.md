@@ -109,8 +109,9 @@ normally the execution definition; its build/test checks do not combine roles.
 
 Require a small first probe of a necessary tool. A missing-tool result ends that
 assignment; choose a capable fresh target. Do not narrate an unrun command as evidence.
-For direct Agent assignments, use `run_in_background: true`; MCP agent IDs beginning
-with `mcp__` support synchronous activation only. Respect the available model tiers and
+For direct Agent assignments, subagents always run in the background; collect results from
+the completion notification. MCP agent IDs beginning with `mcp__` follow the same
+background path after approval. Respect the available model tiers and
 any explicit user model choice. Do not weaken an implementation merely to reduce cost.
 
 Active clarifications may use `Agent(resume_thread_id: <child_thread_id>, prompt: ...,

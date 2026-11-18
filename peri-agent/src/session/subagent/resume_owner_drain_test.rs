@@ -13,20 +13,11 @@ impl crate::agent::LangfuseBridgeLike for FailOnStopBridge {
     }
 }
 
-/// [回归测试] 同步模型失败已交接后，终态事件排空失败仍拒绝恢复。
-#[tokio::test(start_paused = true)]
-async fn test_sync_confirmed_handoff_event_drain_failure_blocks_resume() {
-    crate::session::subagent::tests::resume_owner_reuse::test_failed_model_handoff_then_resume(
-        false, true,
-    )
-    .await;
-}
-
 /// [回归测试] 后台模型失败已交接后，终态事件排空失败仍拒绝恢复。
 #[tokio::test(start_paused = true)]
 async fn test_background_confirmed_handoff_event_drain_failure_blocks_resume() {
     crate::session::subagent::tests::resume_owner_reuse::test_failed_model_handoff_then_resume(
-        true, true,
+        true,
     )
     .await;
 }

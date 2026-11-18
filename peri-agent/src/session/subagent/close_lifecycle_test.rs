@@ -4,7 +4,6 @@ use crate::agent::async_tasks::TaskManager;
 use crate::session::subagent::tests::CancelGateLLM;
 use crate::session::subagent::types::SubagentHost;
 use crate::session::subagent::SessionFactory;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::FrozenContext;
 use crate::session::Session;
@@ -57,7 +56,6 @@ async fn background_close_resource_failure_keeps_delegation_unfinished() {
             std::sync::Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(manager.clone()),
         Some(token.clone()),
     );
@@ -95,57 +93,4 @@ async fn background_close_resource_failure_keeps_delegation_unfinished() {
         manager.list_tasks_full()[0].status,
         BackgroundTaskStatus::Running
     ));
-}
-
-#[tokio::test]
-async fn running_caller_drop_resource_failure_keeps_close_and_claim_unfinished() {
-    let store = MockSessionResources::new();
-    let thread_id = uuid::Uuid::now_v7().to_string();
-    crate::session::subagent::tests::preset_resumable_thread(&store, &thread_id, None).await;
-    let pool = Arc::new(UnavailableClosePool::default());
-    let parent = Session::new(
-        Arc::from("/tmp/work"),
-        FrozenContext::builder().build(),
-        Some("parent".into()),
-    );
-    parent.set_subagent_host(SubagentHost {
-        mcp_pool: Some(pool.clone()),
-        ..Default::default()
-    });
-    let (llm, entered) = CancelGateLLM::new();
-    let config = crate::session::subagent::tests::resume_config_with(
-        store.clone(),
-        thread_id.clone(),
-        crate::session::test_resources::mock::model::fixture_source(
-            std::sync::Arc::new(llm),
-            "fixture-scripted",
-        ),
-        SubagentRunMode::Sync,
-        None,
-        None,
-    );
-    let running =
-        tokio::spawn(async move { SessionFactory::resume_subagent(Some(&parent), config).await });
-    entered
-        .await
-        .expect("the entered fixture result is required for this assertion");
-    running.abort();
-    assert!(matches!(running.await, Err(error) if error.is_cancelled()));
-    tokio::time::timeout(std::time::Duration::from_secs(2), pool.entered.notified())
-        .await
-        .expect("the timeout fixture result is required for this assertion");
-    assert_eq!(
-        store
-            .load_meta(&thread_id)
-            .await
-            .expect("the load meta fixture result is required for this assertion")
-            .agent_status,
-        AgentStatus::Active
-    );
-    assert!(SessionFactory::resume_subagent(
-        None,
-        crate::session::subagent::tests::resume_config(store.clone(), thread_id.clone())
-    )
-    .await
-    .is_err());
 }

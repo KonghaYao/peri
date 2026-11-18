@@ -391,6 +391,26 @@ impl SessionResources for MockSessionResources {
         id: peri_acp_types::messages::MessageId,
     ) -> SessionResourceResult<peri_acp_types::session::MqCancelOutcome> {
         self.ensure_writable()?;
+        if self
+            .mq_cancel_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            // 提交结果未知：撤回方必须重查/重试，不能把一次 Err 当作未删除。
+            return Err(SessionResourceError::persistence_uncertain(Some(
+                thread_id.clone(),
+            )));
+        }
+        let gate = self
+            .mq_cancel_gate
+            .lock()
+            .expect("mq cancel gate mutex must remain unpoisoned")
+            .take();
+        if let Some(gate) = gate {
+            gate.wait().await;
+        }
         self.mq.mq_cancel(thread_id, id).await
     }
 
@@ -480,6 +500,34 @@ impl SessionResources for MockSessionResources {
             });
             Ok(true)
         })
+    }
+
+    async fn settle_retained_mq(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[peri_acp_types::session::MqEntry],
+    ) -> SessionResourceResult<()> {
+        self.ensure_writable()?;
+        // 内存后端用单把锁串行化：先落提醒，再物理删除 MQ 行；提醒按稳定 ID 幂等。
+        for reminder in reminders {
+            self.with_region(thread_id, |region| {
+                if !region
+                    .payloads
+                    .iter()
+                    .any(|payload| payload.id() == reminder.id)
+                {
+                    region.payloads.push(PersistedPayload::SystemReminder {
+                        id: reminder.id,
+                        reminder: reminder.reminder.clone(),
+                    });
+                }
+            });
+        }
+        for row in rows {
+            self.mq.mq_cancel(thread_id, row.id).await?;
+        }
+        Ok(())
     }
 
     async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {

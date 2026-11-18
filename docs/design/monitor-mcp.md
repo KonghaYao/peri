@@ -266,6 +266,10 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   仍投递终态提醒并照常执行 `deliver_managed_task_status` / `settle_external`——结算
   不依赖 meta 是否可用，名称回退匹配到的 server 也不会因此把终态任务永远留在
   unsettled。
+- **实例/连接丢失**：宿主存活时 monitor 实例被关闭、替换或 transport 断开，
+  `tasks/get` 的 transport closed 或 `unknown task`（`INVALID_PARAMS`）视为确定性
+  丢失：立即投递一条 unresolved 终态提醒并结算，不再等待有界重试窗口。宿主进程
+  自身退出或重启不在保证内——进程内没有可用的提醒路径，旧任务仍不可恢复。
 - **审批**：提醒路径不经过任何交互审批；`monitor_start` 的工具审批覆盖后续提醒。
 - **终态唤醒**：任务成功、失败、取消或 deadline 都会向发起会话投递最多一条
   best-effort Defer 终态提醒，正文含终态、monitor id，必要时含合并后的命中计数。命令在命中 alert 后
@@ -276,8 +280,8 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   不跨会话、不阻塞结算。
 - **可观测性**：delivered / offline_dropped / suppressed / meta_missing 走 tracing
   warn/debug，不新增指标面。
-- **不做**：资源通知 hint、`notifications/resources/updated`、unknown task 快速
-  收口、cron 改动、持久化、跨会话共享。
+- **不做**：资源通知 hint、`notifications/resources/updated`、非 monitor 的
+  unknown task 快速收口、cron 改动、持久化、跨会话共享。
 
 ## 5. 生命周期与所有权
 
@@ -325,5 +329,5 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 - **P2 已实现**：alert 提醒走宿主既有任务订阅轮询 + 既有 inbox `Defer`，不新增
   ACP 方法，也没有独立泵 / outbox / ack。实例缺失时订阅无法建立；pool 或任务作用域
   关闭时订阅循环停止。
-- **明确不做**：poll source、file source、WS source、资源通知 hint、unknown task
-  快速收口、任务持久化、跨实例重放、owner 转移、跨会话共享。
+- **明确不做**：poll source、file source、WS source、资源通知 hint、非 monitor 的
+  unknown task 快速收口、任务持久化、跨实例重放、owner 转移、跨会话共享。

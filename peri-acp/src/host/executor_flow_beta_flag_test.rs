@@ -1,9 +1,9 @@
 //! Agent 工具恒后台的 ACP 装配面证据（`full-async-tools` 移除后的回归）。
 //!
 //! `host/stage_builder.rs` 不再从 `FrozenContext::beta_flags` 派生 Agent 缺省：
-//! 后台是唯一执行模式，链上 `Agent` 工具声明的 `run_in_background.default` 恒为
-//! `true`。旧会话的冻结 blob 仍可能携带已删除的 `full-async-tools` 键——它必须
-//! 被忽略，不能改变 schema 或导致装配失败。
+//! 后台是唯一执行模式，链上 `Agent` 工具 schema 不再提供执行模式开关。旧会话的
+//! 冻结 blob 仍可能携带已删除的 `full-async-tools` 键——它必须被忽略，不能改变
+//! schema 或导致装配失败。
 
 use std::sync::Arc;
 
@@ -40,9 +40,9 @@ fn frozen_with_legacy_flag() -> FrozenSessionData {
     )
 }
 
-/// 空投影与旧 flag 冻结值都必须得到同一个强制后台 schema。
+/// 空投影与旧 flag 冻结值都必须得到同一个不含模式开关的恒后台 schema。
 #[tokio::test]
-async fn agent_tool_schema_is_mandatory_background_regardless_of_legacy_flag() {
+async fn agent_tool_schema_has_no_background_mode_regardless_of_legacy_flag() {
     let ctx = executor_flow_tests::make_session_context("legacy-beta-flag-agent-schema").await;
     let cases = [
         (
@@ -85,17 +85,10 @@ async fn agent_tool_schema_is_mandatory_background_regardless_of_legacy_flag() {
                     tools.keys().collect::<Vec<_>>()
                 )
             });
-        assert_eq!(
-            agent.parameters()["properties"]["run_in_background"]["default"],
-            serde_json::json!(true),
-            "{label}: Agent 工具 schema 缺省必须恒为 true"
-        );
+        let params = agent.parameters();
         assert!(
-            agent.parameters()["properties"]["run_in_background"]["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("mandatory"),
-            "{label}: 描述必须声明后台为强制模式"
+            params["properties"].get("run_in_background").is_none(),
+            "{label}: Agent 工具 schema 不得再暴露执行模式开关：{params}"
         );
     }
 }

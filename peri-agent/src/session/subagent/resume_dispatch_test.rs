@@ -9,7 +9,6 @@ use crate::session::subagent::types::SubagentChainAssembler;
 use crate::session::subagent::types::SubagentChainContext;
 use crate::session::subagent::SessionFactory;
 use crate::session::subagent::SubagentResumeConfig;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::test_resources::mock::ResumeLoadGate;
 use crate::session::FrozenContext;
@@ -35,7 +34,6 @@ async fn background_resume_without_custom_callback_wakes_parent() {
     let manager = Arc::new(TaskManager::new());
     let mut config =
         crate::session::subagent::tests::resume_config(store.clone(), thread_id.clone());
-    config.run_mode = SubagentRunMode::Background;
     config.task_manager = Some(manager.clone());
     config.prompt = Some("resume-result-anchor".into());
     let spawned = SessionFactory::resume_subagent(Some(&parent), config)
@@ -193,7 +191,7 @@ async fn wait_for_resume_status(
     thread_id: &ThreadId,
     status: AgentStatus,
 ) {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let changed = store.status_changed.notified();
             if store
@@ -208,8 +206,17 @@ async fn wait_for_resume_status(
             changed.await;
         }
     })
-    .await
-    .expect("cancelled resume must finalize persisted status before the thread can resume");
+    .await;
+    if outcome.is_err() {
+        let current = store
+            .load_meta(thread_id)
+            .await
+            .expect("the load meta fixture result is required for this assertion")
+            .agent_status;
+        panic!(
+            "cancelled resume must finalize persisted status before the thread can resume: expected {status:?}, current {current:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -240,7 +247,6 @@ async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
     );
@@ -291,7 +297,6 @@ async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
     );
@@ -361,6 +366,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     let starts = Arc::new(AtomicUsize::new(0));
     let llm = RecordingLLM::new();
     let received = Arc::clone(&llm.received);
+    let manager = Arc::new(TaskManager::new());
     let mut config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         thread_id.clone(),
@@ -368,8 +374,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager.clone()),
         Some(cancel.clone()),
     );
     config.chain_assembler = Arc::new(CancelDuringAssembly {
@@ -386,10 +391,9 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     )
     .await
     .expect("the timeout fixture result is required for this assertion")
-    .expect("cancelled sync preparation retains the interrupted result contract");
-    assert!(result.interrupted);
+    .expect("pre-cancelled resume still registers the background execution");
+    assert!(result.task_id.starts_with("bg-"));
     assert_eq!(result.child_thread_id, thread_id);
-    assert!(result.task_id.is_none());
     assert_eq!(
         result.session.store().thread_id.as_deref(),
         Some(thread_id.as_str())
@@ -398,13 +402,10 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
         assembled.load(Ordering::SeqCst),
         "the cancellation must happen after constructing the real session"
     );
-    assert_eq!(
-        starts.load(Ordering::SeqCst),
-        0,
-        "cancelled preparation must not emit lifecycle Start"
-    );
     assert!(received.read().is_empty());
-    wait_for_resume_status(&store, &thread_id, AgentStatus::Done).await;
+    wait_for_resume_status(&store, &thread_id, AgentStatus::Cancelled).await;
+    // 生命周期 Start 由已注册的后台执行发出，但取消先于模型调用落定。
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
     let resumed = SessionFactory::resume_subagent(
         None,
         crate::session::subagent::tests::resume_config(store.clone(), thread_id.clone()),
@@ -450,6 +451,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     let starts = Arc::new(AtomicUsize::new(0));
     let stops = Arc::new(AtomicUsize::new(0));
     let cancel = CancellationToken::new();
+    let manager = Arc::new(TaskManager::new());
     let mut config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         thread_id.clone(),
@@ -463,8 +465,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
             ))))),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager),
         Some(cancel.clone()),
     );
     let starts_hook = starts.clone();
@@ -475,10 +476,16 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     config.on_subagent_stop = Some(Arc::new(move |_, _, _, _, _| {
         stops_hook.fetch_add(1, Ordering::SeqCst);
     }));
-    cancel_resume_at_gate(config, &cancel, entered_rx, &store, &thread_id).await;
-    // dispatch 取消后 wrapper 被 drop；子执行由独立任务继续，异步走正常
-    // Interrupted 收尾（flush / close / 终态 / Stop hook），
-    // claim Drop 不再是最终收尾者。这里等待收尾，而不是同步断言。
+    let spawned = SessionFactory::resume_subagent(None, config)
+        .await
+        .expect("resume returns once the background execution is registered");
+    assert_eq!(spawned.child_thread_id, thread_id);
+    entered_rx
+        .await
+        .expect("background child execution must reach the model call");
+    cancel.cancel();
+    // 取消后子执行异步走正常 Interrupted 收尾（flush / close / 终态 / Stop hook），
+    // claim Drop 不是最终收尾者。这里等待收尾，而不是同步断言。
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !llm_dropped.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -541,7 +548,6 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(task_manager),
         Some(token),
     );
@@ -559,13 +565,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         .await
         .expect("background cancellation retains real registration and completion");
     assert_eq!(spawned.child_thread_id, thread_id);
-    let task_id = spawned
-        .task_id
-        .expect("background must return a registered task");
-    assert!(
-        !spawned.interrupted,
-        "background interruption is reported asynchronously"
-    );
+    let task_id = spawned.task_id.clone();
     let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx)
         .await
         .expect("the timeout fixture result is required for this assertion")
@@ -586,6 +586,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         AgentStatus::Cancelled
     );
     let parent = test.session(&cwd, FrozenContext::builder().build());
+    let manager = Arc::new(TaskManager::new());
     let resumed = SessionFactory::resume_subagent(
         Some(&parent),
         crate::session::subagent::tests::resume_config_with(
@@ -595,14 +596,14 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
                 Arc::new(EchoLLM),
                 "fixture-scripted",
             ),
-            SubagentRunMode::Sync,
-            None,
+            Some(manager.clone()),
             None,
         ),
     )
     .await
     .expect("the resume subagent fixture result is required for this assertion");
     assert_eq!(resumed.child_thread_id, thread_id);
+    crate::session::subagent::tests::wait_background_idle(&manager).await;
 }
 
 /// Newly added provenance reads remain inside the existing real dispatch claim.
@@ -641,7 +642,6 @@ async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_sta
                 Arc::new(llm),
                 "fixture-scripted",
             ),
-            SubagentRunMode::Sync,
             None,
             Some(cancel.clone()),
         );
@@ -751,4 +751,207 @@ async fn test_resume_binding_preflight_reads_no_session_snapshot() {
         1,
         "预检只能读 binding；完整快照只用于认领后的执行装载"
     );
+}
+
+/// [回归测试] resume 已接纳 prompt 但后台注册失败时，失败尝试必须撤回该行：
+/// 同一 thread 的重试若再投递一条，child 会收到两条相同指令。
+#[tokio::test]
+async fn test_resume_dispatch_failure_withdraws_admitted_prompt() {
+    use peri_acp_types::session::MqFilter;
+    use peri_acp_types::session_resources::SessionResources as _;
+
+    let store = MockSessionResources::new();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    crate::session::subagent::tests::preset_resumable_thread(&store, &thread_id, None).await;
+    let mut config = crate::session::subagent::tests::resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        crate::session::test_resources::mock::model::fixture_source(
+            Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
+        None,
+        None,
+    );
+    config.prompt = Some("retry-once-only".into());
+
+    let error = crate::session::subagent::tests::resume_err(None, config).await;
+    assert!(
+        error.contains("Background tasks not available"),
+        "dispatch 失败必须原样交给调用方: {error}"
+    );
+    assert_eq!(
+        store
+            .load_meta(&thread_id)
+            .await
+            .expect("the load meta fixture result is required for this assertion")
+            .agent_status,
+        AgentStatus::Done,
+        "失败尝试仍须回滚认领状态"
+    );
+    let rows = store
+        .mq_query(&ThreadId::from(thread_id.as_str()), MqFilter::default())
+        .await
+        .expect("the MQ query fixture result is required for this assertion");
+    assert!(
+        rows.is_empty(),
+        "失败尝试不得留下已接纳的 prompt 行: {rows:?}"
+    );
+}
+
+/// 等待 owned 补偿完成：prompt 行消失且状态回到认领前。
+async fn wait_resume_compensated(store: &MockSessionResources, thread_id: &str) {
+    use peri_acp_types::session::MqFilter;
+    use peri_acp_types::session_resources::SessionResources as _;
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let thread_id = ThreadId::from(thread_id);
+        loop {
+            let status = store
+                .load_meta(&thread_id)
+                .await
+                .expect("the load meta fixture result is required for this assertion")
+                .agent_status;
+            let rows = store
+                .mq_query(&thread_id, MqFilter::default())
+                .await
+                .expect("the MQ query fixture result is required for this assertion");
+            if status == AgentStatus::Done && rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("owned compensation must withdraw the prompt and roll back the claim");
+}
+
+/// [回归] 调用方在撤回进行中被取消时，owned 补偿仍须完成撤回与回滚，不能留下
+/// 「prompt 仍在队列、状态已回滚」的重试重复投递窗口。
+#[tokio::test]
+async fn test_resume_compensation_survives_caller_cancel_during_withdrawal() {
+    use std::sync::atomic::AtomicBool;
+
+    let store = MockSessionResources::new();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    crate::session::subagent::tests::preset_resumable_thread(&store, &thread_id, None).await;
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *store
+        .mq_cancel_gate
+        .lock()
+        .expect("mq cancel gate mutex must remain unpoisoned") = Some(ResumeLoadGate {
+        entered: entered_tx,
+        release: release_rx,
+        dropped: Arc::new(AtomicBool::new(false)),
+    });
+    let mut config = crate::session::subagent::tests::resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        crate::session::test_resources::mock::model::fixture_source(
+            Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
+        None,
+        None,
+    );
+    config.prompt = Some("cancel-during-withdrawal".into());
+
+    let mut caller = Box::pin(SessionFactory::resume_subagent(None, config));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            entered = entered_rx => entered.expect("withdrawal must begin"),
+            result = &mut caller => panic!(
+                "resume ended before the withdrawal gate: {}",
+                result.is_ok()
+            ),
+        }
+    })
+    .await
+    .expect("resume must reach the withdrawal gate");
+    // 调用方在撤回 await 中被取消：owned task 必须继续完成撤回与回滚。
+    drop(caller);
+    release_tx
+        .send(())
+        .expect("owned compensation must still be waiting");
+
+    wait_resume_compensated(&store, &thread_id).await;
+}
+
+/// [回归] 撤回结果未确认时不得回滚认领：首次 cancel 返回提交未知后，认领保持
+/// Active；只有重查确认行仍在、重试成功提交后才回滚。
+#[tokio::test]
+async fn test_resume_compensation_defers_rollback_until_withdrawal_commits() {
+    use peri_acp_types::session::MqFilter;
+    use peri_acp_types::session_resources::SessionResources as _;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    let store = MockSessionResources::new();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    crate::session::subagent::tests::preset_resumable_thread(&store, &thread_id, None).await;
+    store.mq_cancel_failures.store(1, Ordering::SeqCst);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *store
+        .mq_cancel_gate
+        .lock()
+        .expect("mq cancel gate mutex must remain unpoisoned") = Some(ResumeLoadGate {
+        entered: entered_tx,
+        release: release_rx,
+        dropped: Arc::new(AtomicBool::new(false)),
+    });
+    let mut config = crate::session::subagent::tests::resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        crate::session::test_resources::mock::model::fixture_source(
+            Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
+        None,
+        None,
+    );
+    config.prompt = Some("defer-rollback".into());
+
+    let mut caller = Box::pin(SessionFactory::resume_subagent(None, config));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            entered = entered_rx => entered.expect("withdrawal retry must begin"),
+            result = &mut caller => panic!(
+                "resume ended before the withdrawal retry gate: {}",
+                result.is_ok()
+            ),
+        }
+    })
+    .await
+    .expect("resume must reach the withdrawal retry gate");
+
+    assert_eq!(
+        store
+            .load_meta(&thread_id)
+            .await
+            .expect("the load meta fixture result is required for this assertion")
+            .agent_status,
+        AgentStatus::Active,
+        "撤回未提交时不得回滚认领"
+    );
+    assert_eq!(
+        store
+            .mq_query(&ThreadId::from(thread_id.as_str()), MqFilter::default())
+            .await
+            .expect("the MQ query fixture result is required for this assertion")
+            .len(),
+        1,
+        "提交未知的首次撤回不得被当作已删除"
+    );
+
+    release_tx
+        .send(())
+        .expect("compensation retry must be waiting");
+    let error = caller.await.expect_err("后台任务不可用时 resume 必须失败");
+    assert!(
+        error.to_string().contains("Background tasks not available"),
+        "必须保留原始 dispatch 错误: {error}"
+    );
+    wait_resume_compensated(&store, &thread_id).await;
 }

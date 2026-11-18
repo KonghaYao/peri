@@ -183,17 +183,13 @@ async fn stop_handler_writes_status_with_terminal_work_state() {
             .set_work_state(&ThreadId::from(id.clone()), WorkState::Working)
             .await
             .expect("the set work state fixture result is required for this assertion");
-        crate::session::subagent::lifecycle::on_subagent_stop_handler(
-            None,
-            Some(&store),
-            "fixture",
-            &id,
-            "done",
+        crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+            store.as_ref(),
+            &ThreadId::from(id.clone()),
             status,
-            "/tmp",
         )
         .await
-        .expect("the on subagent stop handler fixture result is required for this assertion");
+        .expect("the terminal settlement fixture result is required for this assertion");
         let meta = resources
             .load_session_meta(&id)
             .await
@@ -218,14 +214,10 @@ async fn stop_handler_failure_never_leaves_done_working() {
     resources.fail_next_terminal_status_writes(1);
     let store: Arc<dyn SessionResources> = resources.clone();
 
-    crate::session::subagent::lifecycle::on_subagent_stop_handler(
-        None,
-        Some(&store),
-        "fixture",
-        &id,
-        "done",
+    crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+        store.as_ref(),
+        &ThreadId::from(id.clone()),
         AgentStatus::Done,
-        "/tmp",
     )
     .await
     .unwrap_err();
@@ -240,17 +232,13 @@ async fn stop_handler_failure_never_leaves_done_working() {
     );
     assert_eq!(meta.work_state, WorkState::Idle);
 
-    crate::session::subagent::lifecycle::on_subagent_stop_handler(
-        None,
-        Some(&store),
-        "fixture",
-        &id,
-        "done",
+    crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+        store.as_ref(),
+        &ThreadId::from(id.clone()),
         AgentStatus::Done,
-        "/tmp",
     )
     .await
-    .expect("the on subagent stop handler fixture result is required for this assertion");
+    .expect("the terminal settlement fixture result is required for this assertion");
     let meta = resources
         .load_session_meta(&id)
         .await
@@ -268,28 +256,20 @@ async fn repeated_terminal_settlement_does_not_overwrite() {
     resources.register_bound_session(&id, "/tmp");
     let store: Arc<dyn SessionResources> = resources.clone();
 
-    crate::session::subagent::lifecycle::on_subagent_stop_handler(
-        None,
-        Some(&store),
-        "fixture",
-        &id,
-        "done",
+    crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+        store.as_ref(),
+        &ThreadId::from(id.clone()),
         AgentStatus::Done,
-        "/tmp",
     )
     .await
-    .expect("the on subagent stop handler fixture result is required for this assertion");
-    crate::session::subagent::lifecycle::on_subagent_stop_handler(
-        None,
-        Some(&store),
-        "fixture",
-        &id,
-        "late failure",
+    .expect("the terminal settlement fixture result is required for this assertion");
+    crate::session::subagent::terminal_settlement::settle_terminal_without_result(
+        store.as_ref(),
+        &ThreadId::from(id.clone()),
         AgentStatus::Error,
-        "/tmp",
     )
     .await
-    .expect("the on subagent stop handler fixture result is required for this assertion");
+    .expect("the terminal settlement fixture result is required for this assertion");
 
     let meta = resources
         .load_session_meta(&id)

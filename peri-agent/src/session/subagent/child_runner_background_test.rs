@@ -287,36 +287,3 @@ async fn background_drain_failure_blocks_resume() {
         "排空失败后不得开放新 run 准入"
     );
 }
-
-#[test]
-fn sync_handoff_routes_late_events_to_background_pump() {
-    use crate::agent::events::{AgentEventHandler, ExecutorEvent, FnEventHandler};
-    use std::sync::atomic::AtomicBool;
-
-    let foreground = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&foreground);
-    let handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler(move |_| {
-        observed.fetch_add(1, Ordering::SeqCst);
-    }));
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let handed_off = Arc::new(AtomicBool::new(false));
-    let routed = crate::session::subagent::run_sync::handoff_event_handler(
-        Some(handler),
-        Some(sender),
-        Arc::clone(&handed_off),
-    )
-    .expect("the handoff event handler fixture result is required for this assertion");
-    let event = || ExecutorEvent::SubagentStarted {
-        agent_name: "fixture".into(),
-        instance_id: "child".into(),
-        parent_tool_call_id: None,
-        is_background: false,
-    };
-    routed.on_event(event());
-    assert_eq!(foreground.load(Ordering::SeqCst), 1);
-    assert!(receiver.try_recv().is_err());
-    handed_off.store(true, Ordering::Release);
-    routed.on_event(event());
-    assert!(receiver.try_recv().is_ok());
-    assert_eq!(foreground.load(Ordering::SeqCst), 1);
-}

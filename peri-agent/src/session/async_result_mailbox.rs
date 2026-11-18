@@ -326,6 +326,41 @@ impl AsyncResultMailbox {
         Ok(AcceptOutcome::Accepted)
     }
 
+    /// 入队失败时撤销本次接纳的 Queued 责任。
+    ///
+    /// 只移除尚未规范提交、未进入任何 attempt 的 Queued 记录；已可见或已处理
+    /// 的记录保持不动。撤销后同一 delivery ID 的重试可以按新的正文重新接纳，
+    /// 而不是被 fingerprint 校验永久拒绝；真正冲突的已接纳结果仍会报错。
+    pub(crate) fn discard_queued(&self, delivery_id: MessageId) -> bool {
+        let mut state = self.state.lock();
+        let discardable = state.records.get(&delivery_id).is_some_and(|record| {
+            record.state == AsyncResultState::Queued
+                && !record.canonical_committed
+                && record.attempt_id.is_none()
+                && record.request_id.is_none()
+        });
+        if !discardable {
+            return false;
+        }
+        state.records.remove(&delivery_id);
+        state.order.retain(|existing| existing != &delivery_id);
+        state.bump();
+        #[cfg(test)]
+        state
+            .trace
+            .push(format!("result_discarded {}", delivery_id.as_uuid()));
+        let version = state.version;
+        drop(state);
+        self.state_version.send_replace(version);
+        tracing::info!(
+            session_id = %self.scope.session_id,
+            initiator = %self.scope.initiator,
+            delivery_id = %delivery_id.as_uuid(),
+            "result_admission_discarded"
+        );
+        true
+    }
+
     /// Receive 成功写入或确认规范提醒后调用。
     ///
     /// 已 Cover 的重复消息不重新激活；Suspended 保持暂停，等待显式继续。

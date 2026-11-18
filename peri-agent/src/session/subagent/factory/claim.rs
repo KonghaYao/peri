@@ -1,12 +1,11 @@
-//! Ownership of resume status from its initial claim through terminal reporting.
+//! Ownership of resume status from its initial claim through background hand-off.
 //!
 //! A worker owns the claim's active write and its compensating write. Dropping the
-//! caller requests preparation rollback or running cancellation; it never cancels an
-//! in-flight resource write. Explicit rollback / finish await the same worker and
-//! report its failure.
+//! caller requests preparation rollback; it never cancels an in-flight child or
+//! resource write. Explicit rollback awaits the same worker and reports its failure.
 //!
 //! 认领的状态写入与「恢复到认领前」由资源侧持有（`ChildResumeClaim`），调用方只提交
-//! 领域结果：开始运行 / 移交后台 / 准备失败 / 终止。
+//! 领域结果：移交后台 / 准备失败。
 
 use std::sync::Arc;
 
@@ -15,7 +14,7 @@ use tokio::task::JoinHandle;
 
 use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
 use peri_acp_types::session_resources::{SessionResourceErrorKind, SessionResources};
-use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
+use peri_acp_types::thread::{ThreadId, ThreadMeta};
 
 /// 调用方提交给认领 worker 的领域结果。
 enum ClaimDecision {
@@ -24,21 +23,13 @@ enum ClaimDecision {
         ready: oneshot::Sender<Result<(), String>>,
         accepted: oneshot::Receiver<()>,
     },
-    /// 同步收尾：先结清认领，再写领域终态。
-    Finish {
-        status: AgentStatus,
-    },
-    /// 终态由 handoff worker 的 finalize 提交：只结束认领，不写任何状态。
-    Release,
-    CancelRunning(Arc<crate::session::Session>),
 }
 
 pub(in crate::session::subagent) struct ResumeClaim {
-    /// 决定通道；调用方消失（Drop）时按当前阶段发送取消或直接关闭。
+    /// 决定通道；调用方消失（Drop）时直接关闭，由 worker 回滚准备阶段。
     decision: Option<oneshot::Sender<ClaimDecision>>,
     /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
-    running: Option<Arc<crate::session::Session>>,
 }
 
 pub(in crate::session::subagent) struct BackgroundHandoff(oneshot::Sender<()>);
@@ -73,7 +64,6 @@ impl ResumeClaim {
         let claim = Self {
             decision: Some(decision_tx),
             worker,
-            running: None,
         };
         let meta = meta_rx.await.map_err(|error| {
             format!("resume_subagent: status claim worker ended before reporting: {error}")
@@ -97,37 +87,6 @@ impl ResumeClaim {
         Ok(BackgroundHandoff(accepted_tx))
     }
 
-    pub(in crate::session::subagent) fn mark_running(
-        &mut self,
-        session: Arc<crate::session::Session>,
-    ) {
-        self.running = Some(session);
-    }
-
-    /// 同步 Stop 已运行 hook：把领域终态交给 worker，由它先结清认领再写入。
-    pub(in crate::session::subagent) async fn finish(
-        mut self,
-        status: AgentStatus,
-    ) -> Result<(), String> {
-        self.decide(ClaimDecision::Finish { status });
-        (&mut self.worker)
-            .await
-            .map_err(|error| format!("resume status completion worker failed: {error}"))?
-    }
-
-    /// handoff worker 持有终态：只结束认领 worker，不写任何状态。
-    ///
-    /// 认领事实就是记录仍为 `active`；这里保留 active 直到 finalize 提交终态，
-    /// 远端存储的 `active` 守卫因此仍能命中唯一一次终态写入。
-    pub(in crate::session::subagent) async fn release_without_terminal(
-        mut self,
-    ) -> Result<(), String> {
-        self.decide(ClaimDecision::Release);
-        (&mut self.worker)
-            .await
-            .map_err(|error| format!("resume status release worker failed: {error}"))?
-    }
-
     /// 准备失败：关闭决定通道，worker 恢复到认领前的记录并报告其失败。
     pub(super) async fn rollback(mut self) -> Result<(), String> {
         self.decision = None;
@@ -146,13 +105,9 @@ impl ResumeClaim {
 
 impl Drop for ResumeClaim {
     fn drop(&mut self) {
-        // 运行中被取消 → 领域终态「取消」；准备阶段被取消 → 直接关闭决定通道，
-        // 由 worker 恢复认领前的记录。两者都不取消资源侧正在进行的写入。
-        if let Some(session) = self.running.take() {
-            if let Some(decision_tx) = self.decision.take() {
-                let _ = decision_tx.send(ClaimDecision::CancelRunning(session));
-            }
-        }
+        // 准备阶段被取消 → 直接关闭决定通道，由 worker 恢复认领前的记录。
+        // 不取消资源侧正在进行的写入。
+        self.decision = None;
     }
 }
 
@@ -226,53 +181,6 @@ async fn own_claim(
                     .await
                     .map_err(|error| format!("resume hand-off rollback failed: {error}"))?;
             }
-        }
-        Ok(ClaimDecision::Finish { status }) => {
-            // 终态与「恢复到认领前」必须由同一个归属校验提交：分开写时，新认领
-            // 可以插在结清与终态之间，旧终态会覆盖新认领的 Active。
-            let applied = handle
-                .finish_with_status(status)
-                .await
-                .map_err(|error| format!("resume terminal status write failed: {error}"))?;
-            if !applied {
-                tracing::warn!(
-                    %thread_id,
-                    ?status,
-                    "resume terminal status write skipped: claim no longer owns this child"
-                );
-            }
-        }
-        Ok(ClaimDecision::Release) => {
-            // 不写记录：认领事实由 finalize 写入的终态解除；提前写回 previous
-            // 会让远端 `active` 守卫拒绝随后唯一的 finalize。
-        }
-        Ok(ClaimDecision::CancelRunning(session)) => {
-            // 资源关闭可能因未确认交接返回 Incomplete；此时仍须先结清认领并
-            // 写入 Cancelled，避免线程永久停留 Active。真实资源关闭失败则保留
-            // Active，由资源和持久层继续暴露未结清事实。
-            let close_result =
-                crate::session::subagent::close::close_subagent_session_scope(session).await;
-            let finalize = match &close_result {
-                Ok(()) => true,
-                Err(error) => {
-                    crate::session::subagent::close::close_failure_allows_terminal_finalization(
-                        error,
-                    )
-                }
-            };
-            if finalize {
-                let applied = handle
-                    .finish_with_status(AgentStatus::Cancelled)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if !applied {
-                    tracing::warn!(
-                        %thread_id,
-                        "resume cancellation status write skipped: claim no longer owns this child"
-                    );
-                }
-            }
-            close_result?;
         }
         // 准备阶段调用方消失：恢复到认领前的状态，不留 active 残留。
         Err(_) => {

@@ -201,7 +201,7 @@ impl ChildResumeClaimHandle {
                     );
                     return Ok(SettleOutcome::NotOwned);
                 }
-                // 工作意图可能已被本次运行写成终态（run_sync 在提交终态前先写
+                // 工作意图可能已被本次运行写成终态（后台执行在提交终态前先写
                 // work_state）：此时只跳过这一列的回滚，终态仍由本次认领提交。
                 if current_work_state == WorkState::Working
                     || current_work_state == self.previous_work_state

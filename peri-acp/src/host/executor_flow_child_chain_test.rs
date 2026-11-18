@@ -28,9 +28,10 @@ use std::sync::Mutex;
 #[cfg(not(windows))]
 mod captured {
     use super::*;
+    use peri_acp_types::tasks::TaskManager as _;
     use peri_agent::session::subagent::{
         ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentLlmSource,
-        SubagentResumeConfig, SubagentRunMode, SubagentSpawnConfig,
+        SubagentResumeConfig, SubagentSpawnConfig,
     };
     use peri_agent::tools::BaseTool;
     use serde_json::{json, Value};
@@ -109,29 +110,26 @@ mod captured {
     #[derive(Clone, Copy)]
     struct ChildOptions {
         fork: bool,
-        background: bool,
     }
 
     impl ChildOptions {
-        const DEFINED: Self = Self {
-            fork: false,
-            background: false,
-        };
-        const FORK: Self = Self {
-            fork: true,
-            background: false,
-        };
-        const DEFINED_BACKGROUND: Self = Self {
-            fork: false,
-            background: true,
-        };
-        const FORK_BACKGROUND: Self = Self {
-            fork: true,
-            background: true,
-        };
+        const DEFINED: Self = Self { fork: false };
+        const FORK: Self = Self { fork: true };
     }
 
-    /// 经真实 ACP 装配面跑一次子 Agent（Sync 或 Background），返回捕获到的请求。
+    /// 等待后台子执行完成首轮请求并结束，避免恢复/断言与执行竞争。
+    ///
+    /// 必须等待注册该子任务的 TaskManager（父侧目录）；子会话自己的目录在
+    /// spawn 返回时还没有任何任务，立即判空闲会把「尚未开始」误当成「已完成」。
+    async fn wait_child_idle(manager: &peri_agent::agent::async_tasks::TaskManager) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !manager.is_execution_idle() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(manager.is_execution_idle(), "后台子执行必须结束");
+    }
+
+    /// 经真实 ACP 装配面跑一次子 Agent（恒后台），返回捕获到的请求。
     async fn run_captured_child(disabled: &[&str], options: ChildOptions) -> Vec<ModelRequest> {
         run_captured_child_with_tools(disabled, options, None).await
     }
@@ -198,7 +196,8 @@ mod captured {
         if restrict {
             tools.push(Arc::new(FixtureTool("Read")));
         }
-        let mut config = SubagentSpawnConfig {
+        let (bg_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = SubagentSpawnConfig {
             agent_name: "captured-child".into(),
             prompt: "finish".into(),
             parent_messages: if options.fork {
@@ -209,7 +208,6 @@ mod captured {
             cancel_policy: SubagentCancelPolicy::Independent,
             max_iterations: 1,
             fork_directive_kind: options.fork.then_some(ForkDirectiveKind::Fork),
-            run_mode: SubagentRunMode::Sync,
             skill_names: vec![],
             llm: child_llm(&child_model),
             chain_assembler,
@@ -222,8 +220,8 @@ mod captured {
             compact_llm: None,
             session_resources: ctx.session_resources.clone(),
             event_handler: None,
-            bg_event_sender: None,
-            task_manager: None,
+            bg_event_sender: Some(bg_tx),
+            task_manager: Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new())),
             on_bg_complete: None,
             langfuse_bridge: None,
             on_subagent_start: None,
@@ -240,29 +238,18 @@ mod captured {
             frozen_skill_summary: None,
             frozen_date: None,
         };
-        if options.background {
-            config.run_mode = SubagentRunMode::Background;
-            config.task_manager =
-                Some(Arc::new(peri_agent::agent::async_tasks::TaskManager::new()));
-            let (bg_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel();
-            config.bg_event_sender = Some(bg_tx);
-        }
         let spawned = SessionFactory::spawn_subagent(Some(&out.session), config)
             .await
             .expect("真实子链 spawn 必须成功");
-        if options.background {
-            assert!(spawned.task_id.is_some(), "后台模式必须登记任务");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while requests.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            assert!(
-                !requests.lock().unwrap().is_empty(),
-                "后台子会话必须发出模型请求"
-            );
-        } else {
-            assert!(!spawned.interrupted, "sync 子 Agent 必须跑完首轮");
+        assert!(spawned.task_id.starts_with("bg-"), "后台委派必须登记任务");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while requests.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        assert!(
+            !requests.lock().unwrap().is_empty(),
+            "后台子会话必须发出模型请求"
+        );
         let captured = requests.lock().unwrap().clone();
         assert_eq!(captured.len(), 1, "首轮恰一个模型请求");
         captured
@@ -436,20 +423,6 @@ mod captured {
         );
     }
 
-    /// 后台（定义型与 fork）：请求在后台任务内发出，请求面契约与前台一致。
-    #[tokio::test]
-    #[serial]
-    async fn background_child_requests_keep_the_same_single_contribution_contract() {
-        for options in [
-            ChildOptions::DEFINED_BACKGROUND,
-            ChildOptions::FORK_BACKGROUND,
-        ] {
-            let captured = run_captured_child(&[], options).await;
-            assert_base_system_first(&captured[0]);
-            assert_single_contributions(&captured[0]);
-        }
-    }
-
     /// 关闭位生效：AgentsMd / Skills / ToolSearch 关闭后对应贡献缺席，身份仍在。
     #[tokio::test]
     #[serial]
@@ -551,6 +524,8 @@ mod captured {
         let spawn_model = Arc::new(CapturePromptModel {
             requests: Arc::clone(&spawn_requests),
         });
+        let (bg_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let spawn_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
         let spawned = SessionFactory::spawn_subagent(
             Some(&fixture.parent),
             SubagentSpawnConfig {
@@ -560,7 +535,6 @@ mod captured {
                 cancel_policy: SubagentCancelPolicy::Independent,
                 max_iterations: 1,
                 fork_directive_kind: None,
-                run_mode: SubagentRunMode::Sync,
                 skill_names: vec![],
                 llm: child_llm(&spawn_model),
                 chain_assembler: child_chain_assembler(&fixture.manager, &ctx.session_id),
@@ -573,8 +547,8 @@ mod captured {
                 compact_llm: None,
                 session_resources: ctx.session_resources.clone(),
                 event_handler: None,
-                bg_event_sender: None,
-                task_manager: None,
+                bg_event_sender: Some(bg_tx),
+                task_manager: Some(Arc::clone(&spawn_manager)),
                 on_bg_complete: None,
                 langfuse_bridge: None,
                 on_subagent_start: None,
@@ -594,7 +568,7 @@ mod captured {
         )
         .await
         .expect("真实子链 spawn 必须成功");
-        assert!(!spawned.interrupted);
+        wait_child_idle(&spawn_manager).await;
         assert_eq!(spawn_requests.lock().unwrap().len(), 1);
         let snapshot = ctx
             .session_resources
@@ -630,13 +604,14 @@ mod captured {
         let resume_model = Arc::new(CapturePromptModel {
             requests: Arc::clone(&resume_requests),
         });
+        let (bg_tx, _bg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let resume_manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
         let resumed = SessionFactory::resume_subagent(
             Some(&fixture.parent),
             SubagentResumeConfig {
                 thread_id: spawned.child_thread_id.clone(),
                 prompt: Some("continue".into()),
                 agent_name: None,
-                run_mode: SubagentRunMode::Sync,
                 max_iterations: 1,
                 llm: child_llm(&resume_model),
                 chain_assembler: child_chain_assembler(&fixture.manager, &ctx.session_id),
@@ -648,8 +623,8 @@ mod captured {
                 compact_llm: None,
                 session_resources: ctx.session_resources.clone().expect("fixture resources"),
                 event_handler: None,
-                bg_event_sender: None,
-                task_manager: None,
+                bg_event_sender: Some(bg_tx),
+                task_manager: Some(Arc::clone(&resume_manager)),
                 on_bg_complete: None,
                 langfuse_bridge: None,
                 on_subagent_start: None,
@@ -668,7 +643,7 @@ mod captured {
         )
         .await
         .expect("resume 必须成功（同一 durable 子会话）");
-        assert!(!resumed.interrupted, "sync resume 必须跑完首轮");
+        wait_child_idle(&resume_manager).await;
         assert_eq!(
             resumed.child_thread_id, spawned.child_thread_id,
             "resume 不得换子线程"

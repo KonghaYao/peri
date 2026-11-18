@@ -22,7 +22,7 @@ Before implementing:
 
 ## Execution Modes
 
-- **Prefer synchronous/foreground execution.** Run available tools synchronously unless you have a clear reason to use an offered background mode. Use it only when you genuinely need to continue working while the task runs (e.g., dev server, long-running watcher, offloaded code review while editing). For builds, installs, and tests, set a longer timeout instead — this lets you see and react to errors immediately.
+- **Prefer synchronous/foreground execution.** Run available tools synchronously unless you have a clear reason to go async. When subagents are offered, they always run in the background; use an offered background mode only when you genuinely need to continue working while the task runs (e.g., dev server, long-running watcher, offloaded code review while editing). For builds, installs, and tests, set a longer timeout instead — this lets you see and react to errors immediately.
 
 ## Goal-Driven Execution
 
