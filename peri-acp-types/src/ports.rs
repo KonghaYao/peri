@@ -19,6 +19,7 @@ use crate::acp_mcp::{AcpMcpError, AcpMcpInbound, AcpMcpRegistry, AcpMcpServerSpe
 use crate::agents::AgentCatalogEntry;
 use crate::command_registry::CommandRegistry;
 pub use crate::mcp_control::SessionMcpCatalogPort;
+pub use crate::mcp_control::SessionToolCatalogPreparationPort;
 use crate::mcp_control::{
     McpControlError, McpControlRequest, McpControlResponse, McpServerControl,
 };

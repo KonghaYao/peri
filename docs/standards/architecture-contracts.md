@@ -161,8 +161,8 @@
 ### ARC-MCP-CONTROL-001
 
 - **Scope**：ACP MCP 运行控制、会话 MCP pool 与 TUI 面板。
-- **Rule**：`peri/mcp/control` 是 register/restart/stop 的唯一客户端控制入口，按当前已初始化连接的 `peri.mcpControlV1` 能力准入，必须指定已建立、开放的 session 环境，不得回落启动池。控制配置与状态仅在内存中；普通 MCP 调用授权与 frozen prompt 保持各自边界。pool 是连接、调用 gate、目录来源与清理事务的单一权威；initialize/OAuth/reconnect/control 共用 per-server 准入与代次校验。关闭先拒绝旧 handle 新调用，再排空与关闭；Incomplete 保留清理 owner，不能发布 stopped 或创建新代。TUI 只消费服务端可管理性投影，经 ACP 调用并按会话完成门刷新。完整 wire、受保护实例与错误契约见 [ACP MCP 运行控制](../design/acp-mcp-control.md)。
-- **Verify**：运行 `peri-acp-types` 的 `mcp_control` DTO 测试、`peri-middlewares` 的控制真实 wire/生命周期测试、`peri-acp` 的当前连接与会话路由测试、`peri-agent` 的 `session::tool_catalog` 测试及 TUI 控制动作测试；沿源码确认旧动态 Agent 工具与独立 registry 已移除。测试命令须核对非零目标用例及终态。
+- **Rule**：`peri/mcp/control` 是 register/restart/stop 的唯一客户端控制入口，按当前已初始化连接的 `peri.mcpControlV1` 能力准入，必须指定已建立、开放的 session 环境，不得回落启动池。控制配置与状态仅在内存中；普通 MCP 调用授权与 frozen prompt 保持各自边界。pool 是连接、调用 gate、目录来源与清理事务的单一权威；initialize/OAuth/reconnect/control 共用 per-server 准入与代次校验。关闭先拒绝旧 handle 新调用，再排空与关闭；Incomplete 保留清理 owner，不能发布 stopped 或创建新代。TUI 只消费服务端可管理性投影，经 ACP 调用并按会话完成门刷新。dynamic server 的首次加载只由模型调用的 deferred Loader 触发；Loader 绑定受控配置，不接受地址/headers/env/凭证参数，成功不产生额外授权，也不改变审批与子 Agent 继承边界。每个 server slot 最多一个在建 attempt：并发调用共享结果，全部取消、stop、unload 或会话关闭会取消 attempt；迟到连接按 stopped、配置版本或取消状态拒绝，不能复活已停止来源。失败或需要 OAuth 的 attempt 发布 Failed / NeedsAuthorization 而不是 ready，并收口其未提交 service/process，重复 load/close 不得累积连接、进程或任务。完整 wire、受保护实例与错误契约见 [ACP MCP 运行控制](../design/acp-mcp-control.md)。
+- **Verify**：运行 `peri-acp-types` 的 `mcp_control` DTO 测试、`peri-middlewares` 的控制真实 wire/生命周期测试、`peri-acp` 的当前连接与会话路由测试、`peri-agent` 的 `session::tool_catalog` 测试及 TUI 控制动作测试；dynamic 面另运行 `cargo test -p peri-middlewares --lib -- mcp::control::load_attempt_tests`、`mcp::control::dynamic_cleanup_tests` 与 `mcp::loader::tests`（live discovery 失败、停止/卸载竞争、重复 load/close 保留计数、授权未就绪与迟到连接拒绝）；沿源码确认旧动态 Agent 工具与独立 registry 已移除。测试命令须核对非零目标用例及终态。
 
 ### ARC-WORKFLOW-RPC-001
 

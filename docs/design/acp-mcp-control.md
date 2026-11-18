@@ -81,6 +81,8 @@ stdio 注册使用同一 action，`args`、`env` 缺省为空；执行目录由�
 8. initialize、OAuth、reconnect 与三个控制动作共用 per-server 准入门和连接代次；建连前取得代次，提交时复核，stop 之后旧初始化不能迟到发布。pool begin-close 后拒绝控制准入/连接发布。任务继续纳入现有 non-Clone McpTaskOwner；关闭顺序遵循 ARC-HOST-SHUTDOWN-001。不同 server 仍共享 pool 生命周期与 service 所有权锁，连接发布和关闭转移必须遵守相同锁顺序；不得持有 service 表锁后反向获取生命周期准入锁。
 9. stdio 复用既有进程隔离、执行 cwd、环境与平台准入；HTTP 复用部署网络能力。客户端配置不能伪造可信来源。
 
+**Dynamic server（`dynamic: true`）**：控制面不提供 load 动作，首次连接只由模型经 deferred Loader（`LoadMCP__<key>_<digest>`）显式触发；Loader 绑定池内受控配置，不接受地址、headers、env 或凭证参数。加载与 initialize/reconnect 共用 per-server 准入门和连接提交路径：成功必须包含真实 live `tools/list`；失败或需要 OAuth 时发布 `Failed` / `NeedsAuthorization`，不得报告 `connected`，也不启动交互 OAuth。stop/unload/会话关闭会取消在建 attempt 并撤销调用门，迟到连接按 stopped、配置版本或取消状态拒绝；加载期间的控制请求立即返回 `server_busy`，不并发关闭。restart 不复用旧 attempt。Loader 成功不改变审批、session 授权或子 Agent 继承边界。完整规则见 [MCP v5 单出口目标设计 §2.6](mcp-v5-single-exit.md) 与 ARC-MCP-CONTROL-001。
+
 ## 5. 能力目录与可观察性
 
 1. pool 是唯一 MCP 连接事实源；工具/资源/skill/command 投影从当前可调用 handle 推导。

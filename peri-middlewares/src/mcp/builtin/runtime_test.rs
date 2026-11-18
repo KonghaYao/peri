@@ -680,6 +680,7 @@ fn builtin_config(instance: &str) -> McpServerConfig {
         headers: None,
         oauth: None,
         disabled: None,
+        dynamic: false,
         subscriptions: None,
         system_mcp: Some(true),
         system_mcp_tools: Some(Vec::new()),

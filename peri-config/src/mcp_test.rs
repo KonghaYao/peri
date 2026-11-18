@@ -170,3 +170,96 @@ fn parsing_errors_identify_invalid_fields() {
         }
     }
 }
+
+/// dynamic 是配置字段：global / project / plugin / 覆盖合并均不得丢失。
+#[test]
+fn dynamic_flag_survives_global_project_and_plugin_merge() {
+    let global = serde_json::json!({
+        "mcpServers": {
+            "global_dynamic": {"command": "echo", "dynamic": true},
+            "shared": {"command": "global", "dynamic": true}
+        }
+    });
+    let project = serde_json::json!({
+        "mcpServers": {
+            "project_dynamic": {"url": "https://example.test/mcp", "dynamic": true},
+            "shared": {"command": "project", "dynamic": true}
+        }
+    });
+    let plugin: peri_acp_types::plugin::McpServerConfig =
+        serde_json::from_value(serde_json::json!({"command": "plugin", "dynamic": true})).unwrap();
+    let plugins = HashMap::from([("plugin:sample:lazy".to_string(), plugin)]);
+
+    let merged = super::resolve(&global, &project, &plugins, &BTreeMap::new()).unwrap();
+    assert!(merged.mcp_servers["global_dynamic"].dynamic);
+    assert!(merged.mcp_servers["project_dynamic"].dynamic);
+    assert!(merged.mcp_servers["plugin:sample:lazy"].dynamic);
+    assert!(merged.mcp_servers["shared"].dynamic);
+}
+
+/// dynamic = true 与 system_mcp = true 在合并准入期按 server 名拒绝。
+#[test]
+fn dynamic_with_system_mcp_is_rejected_with_server_name() {
+    let conflict = || {
+        serde_json::json!({
+            "mcpServers": {
+                "conflict": {"command": "echo", "dynamic": true, "system_mcp": true}
+            }
+        })
+    };
+    for (global, project) in [
+        (conflict(), serde_json::json!({})),
+        (serde_json::json!({}), conflict()),
+    ] {
+        let error = super::resolve(&global, &project, &HashMap::new(), &BTreeMap::new())
+            .expect_err("system MCP 不得改为延迟连接");
+        let diagnostic = format!("{error}");
+        assert!(
+            diagnostic.contains("conflict"),
+            "必须定位到 server 名: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("dynamic = true cannot be combined with system_mcp = true"),
+            "{diagnostic}"
+        );
+    }
+
+    let plugin: peri_acp_types::plugin::McpServerConfig = serde_json::from_value(
+        serde_json::json!({"command": "echo", "dynamic": true, "system_mcp": true}),
+    )
+    .unwrap();
+    let plugins = HashMap::from([("plugin:sample:conflict".to_string(), plugin)]);
+    let error = super::resolve(
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        &plugins,
+        &BTreeMap::new(),
+    )
+    .expect_err("插件来源同样拒绝");
+    let diagnostic = format!("{error}");
+    assert!(
+        diagnostic.contains("plugin:sample:conflict"),
+        "必须定位到插件 server 键: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("dynamic = true cannot be combined with system_mcp = true"),
+        "{diagnostic}"
+    );
+}
+
+/// 插件 dynamic 配置与内容相同的 eager 手动配置不是重复项，不得被 hash 去重丢弃。
+#[test]
+fn dynamic_plugin_config_is_not_deduplicated_against_eager_manual_server() {
+    let manual = serde_json::json!({"mcpServers": {"manual": {"command": "echo"}}});
+    let plugin: peri_acp_types::plugin::McpServerConfig =
+        serde_json::from_value(serde_json::json!({"command": "echo", "dynamic": true})).unwrap();
+    let plugins = HashMap::from([("plugin:sample:lazy".to_string(), plugin)]);
+
+    let merged =
+        super::resolve(&manual, &serde_json::json!({}), &plugins, &BTreeMap::new()).unwrap();
+    assert!(
+        merged.mcp_servers.contains_key("plugin:sample:lazy"),
+        "dynamic 差异必须保留"
+    );
+    assert!(merged.mcp_servers["plugin:sample:lazy"].dynamic);
+}

@@ -43,6 +43,12 @@ pub struct McpClientPool {
     /// Pool-wide admission gate. 0=open, 1=closing, 2=closed.
     pub(super) lifecycle: std::sync::atomic::AtomicU8,
     pub(crate) lifecycle_registration: parking_lot::Mutex<()>,
+    /// 测试观测点：`remove_server` 触及准入边界的次数（仅测试构建）。
+    ///
+    /// 计数发生在获取准入锁之前，测试据此确认卸载任务已运行到共享准入，
+    /// 而不是把「超时未完成」当作阻塞证据。
+    #[cfg(test)]
+    pub(crate) removal_admission_hits: std::sync::atomic::AtomicUsize,
     /// Pool-owned terminal service-close transaction. Awaiting a borrowed
     /// handle is cancellation-safe: a dropped waiter cannot detach the worker
     /// or the drained services it owns.
@@ -252,6 +258,8 @@ impl McpClientPool {
             execution_cwd: std::sync::OnceLock::new(),
             lifecycle: std::sync::atomic::AtomicU8::new(0),
             lifecycle_registration: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            removal_admission_hits: std::sync::atomic::AtomicUsize::new(0),
             service_shutdown: tokio::sync::Mutex::new(ServiceShutdownState::Idle),
             task_spawner: spawner,
             clients: parking_lot::RwLock::new(HashMap::new()),

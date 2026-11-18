@@ -22,6 +22,12 @@ pub enum McpTaskKey {
     OAuth(String),
     Reconnect(String),
     Subscription(String),
+    /// 首次加载 attempt（plan 6.2）。`attempt` 是该 slot 内分配的序号：
+    /// 单个 attempt 在受管任务中收尾，连接受 slot 生命周期约束。
+    LoadAttempt {
+        server: String,
+        attempt: u64,
+    },
     /// 宿主面按实例资源订阅（`McpPoolPort::subscribe_instance_resource` 的转发任务）。
     ///
     /// 与 [`Self::Subscription`]（配置驱动的 server 级订阅循环）分开：本键按**每次
@@ -374,6 +380,27 @@ impl McpTaskSpawner {
             self.stop_key(&key).await;
         }
     }
+    /// 停止某个 server 的全部首次加载 attempt（close / stop 路径调用）。
+    pub(crate) async fn stop_load_attempts(&self, server: &str) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let keys: Vec<McpTaskKey> = inner
+            .state
+            .lock()
+            .expect("MCP task state poisoned")
+            .records
+            .keys()
+            .filter(
+                |key| matches!(key, McpTaskKey::LoadAttempt { server: name, .. } if name == server),
+            )
+            .cloned()
+            .collect();
+        for key in keys {
+            self.stop_key(&key).await;
+        }
+    }
+
     pub(crate) async fn stop_instance_resource_subscriptions(&self, instance: &str) {
         let Some(inner) = self.inner.upgrade() else {
             return;

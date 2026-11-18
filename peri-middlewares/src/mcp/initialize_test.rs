@@ -896,5 +896,8 @@ async fn system_requirement_is_discovered_before_gated_ordinary_server() {
     assert!(pool.shutdown().await.is_complete());
 }
 
+#[path = "dynamic_initialize_test.rs"]
+mod dynamic_initialization_tests;
+
 #[path = "initialize_builtin_test.rs"]
 mod builtin_initialization_tests;

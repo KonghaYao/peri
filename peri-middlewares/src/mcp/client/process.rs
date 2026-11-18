@@ -130,6 +130,21 @@ impl super::McpClientPool {
         if !self.stdio_available.load(Ordering::Acquire) {
             return Err(io::Error::other(crate::platform::STDIO_UNAVAILABLE));
         }
+        // 未结算的 owner 说明上一次 attempt 只终止、未 join：再起一个会叠加进程。
+        // 调用方的失败清理会重试 close；结算完成前拒绝新连接。
+        if let Some(name) = server_name {
+            let slot = self.server_slot(name);
+            if slot
+                .processes
+                .lock()
+                .iter()
+                .any(|owner| !owner.is_stopped())
+            {
+                return Err(io::Error::other(
+                    "previous MCP process owner has not settled; refusing to spawn another",
+                ));
+            }
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(if stderr_label.is_some() {

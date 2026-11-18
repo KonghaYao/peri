@@ -92,9 +92,46 @@ impl McpClientPool {
         owner
     }
 
+    /// 丢弃已经收口的失败/取消连接，避免重复加载让 service/process 保留表增长。
+    ///
+    /// 只移除已停止的 owner：关闭超时或仍可重试的 owner 继续由关闭事务持有。
+    pub(crate) fn release_stopped_resources(&self, server_name: &str) {
+        let _admission = self.lifecycle_registration.lock();
+        self.shared_services
+            .lock()
+            .retain(|service| !service.is_stopped());
+        #[cfg(not(target_os = "emscripten"))]
+        self.processes
+            .lock()
+            .retain(|process| !process.is_stopped());
+        if let Some(slot) = self.existing_server_slot(server_name) {
+            slot.services.lock().retain(|service| !service.is_stopped());
+            #[cfg(not(target_os = "emscripten"))]
+            slot.processes
+                .lock()
+                .retain(|process| !process.is_stopped());
+        }
+    }
+
     #[cfg(all(test, not(target_os = "emscripten")))]
     pub(crate) fn retained_service_count(&self) -> usize {
         self.shared_services.lock().len()
+    }
+
+    #[cfg(all(test, not(target_os = "emscripten")))]
+    pub(crate) fn retained_process_count(&self) -> usize {
+        self.processes.lock().len()
+    }
+
+    /// 测试停点：持锁可把提交卡在「已过准入、尚未发布」之间。
+    #[cfg(test)]
+    pub(crate) fn pause_handle_generation(
+        &self,
+    ) -> parking_lot::MutexGuard<
+        '_,
+        std::collections::HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>,
+    > {
+        self.handle_generations.lock()
     }
 
     async fn close_shared_services(&self) -> usize {
@@ -138,6 +175,31 @@ impl McpClientPool {
     }
 
     pub async fn remove_server(self: &Arc<Self>, server_name: &str) {
+        // 准入锁下完成「不可再提交」与条目取走：已通过准入的提交要么先于此完成、
+        // 由这里收口，要么在此之后因 stopped/配置版本失效被拒绝。不可把 await 放进锁内。
+        #[cfg(test)]
+        self.removal_admission_hits.fetch_add(1, Ordering::SeqCst);
+        let (cancelled_attempt, service) = {
+            let _admission = self.lifecycle_registration.lock();
+            self.server_slot(server_name)
+                .stopped
+                .store(true, Ordering::Release);
+            // 卸载同时取消在建首次加载：不能只靠配置版本在连接完成后才拒绝。
+            let cancelled_attempt = self.cancel_load_attempt(server_name);
+            if let Some(handle) = self.clients.write().remove(server_name) {
+                handle.call_gate.revoke();
+            }
+            let service = { self.services.lock().remove(server_name) };
+            self.bump_catalog_generation();
+            self.configs.write().remove(server_name);
+            self.server_slot(server_name).note_config_revision();
+            // 会话级 ACP 声明身份随连接一并消失（M7）：此后该名不再有可证明的
+            // cache 身份，任何持久化 cache 准入都按 fail-closed 拒绝。
+            self.acp_connections.write().remove(server_name);
+            // 句柄与配置同时消失：本代发现证据一律失效，等待方立即重读事实。
+            self.system_readiness.clear_evidence(server_name);
+            (cancelled_attempt, service)
+        };
         self.stop_background(&crate::mcp::task_scope::McpTaskKey::Subscription(
             server_name.to_string(),
         ))
@@ -147,22 +209,17 @@ impl McpClientPool {
         self.task_spawner
             .stop_instance_resource_subscriptions(server_name)
             .await;
-        if let Some(handle) = self.clients.write().remove(server_name) {
-            handle.call_gate.revoke();
-        }
-        self.bump_catalog_generation();
-        let service = { self.services.lock().remove(server_name) };
         if let Some(mut svc) = service {
             let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
         }
         // builtin 实例的 server 半边是本进程 task：随 `services` 一并收口，不留 orphan。
         self.close_builtin_task(server_name).await;
-        self.configs.write().remove(server_name);
-        // 会话级 ACP 声明身份随连接一并消失（M7）：此后该名不再有可证明的
-        // cache 身份，任何持久化 cache 准入都按 fail-closed 拒绝。
-        self.acp_connections.write().remove(server_name);
-        // 句柄与配置同时消失：本代发现证据一律失效，等待方立即重读事实。
-        self.system_readiness.clear_evidence(server_name);
+        // 取消可能仍处于 connect 中的 attempt：任务被 abort 后不会执行自身清理，
+        // 由卸载路径收口它已登记的 service/process。
+        if cancelled_attempt {
+            self.task_spawner.stop_load_attempts(server_name).await;
+        }
+        self.discard_uncommitted_resources(server_name).await;
     }
 
     /// 会话级 ACP（MCP over ACP）连接的可见性过滤。
@@ -338,6 +395,9 @@ impl McpClientPool {
         }
         self.lifecycle
             .store(1, std::sync::atomic::Ordering::Release);
+        // 关闭事务开始：未完成的首次加载 attempt 先取消并唤醒等待方；
+        // 受管任务随后由 task owner 统一终止，迟到结果无法提交。
+        self.control.cancel_load_attempts();
         // 关闭事务开始：全部发现证据失效并唤醒等待方（它们在重读时看到 PoolClosed）。
         self.system_readiness.clear_all_evidence();
         for handle in self.clients.read().values() {
@@ -382,8 +442,28 @@ impl McpClientPool {
         handle: Arc<McpClientHandle>,
         service: McpServiceWrapper,
     ) -> Result<(), McpServiceWrapper> {
+        self.try_commit_connection_guarded(name, handle, service, || true)
+    }
+
+    /// Commit a verified connection only if the caller's admission still holds.
+    ///
+    /// The admission check runs under the same lifecycle registration as the
+    /// pool/stopped checks, so a concurrent stop either observes the committed
+    /// handle (and cleans it) or makes this commit fail — a late load result
+    /// cannot revive a stopped server. The caller must not hold the lifecycle
+    /// gate or a `ServerSlot` attempt lock.
+    pub(crate) fn try_commit_connection_guarded<F>(
+        &self,
+        name: String,
+        handle: Arc<McpClientHandle>,
+        service: McpServiceWrapper,
+        admit: F,
+    ) -> Result<(), McpServiceWrapper>
+    where
+        F: FnOnce() -> bool,
+    {
         let _admission = self.lifecycle_registration.lock();
-        if !self.is_open() || self.server_slot(&name).stopped.load(Ordering::Acquire) {
+        if !self.is_open() || self.server_slot(&name).stopped.load(Ordering::Acquire) || !admit() {
             return Err(service);
         }
         self.advance_handle_generation(&handle);

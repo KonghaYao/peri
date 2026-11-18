@@ -303,3 +303,17 @@ fn idle_source_dispatch_keeps_history_view_and_owned_fallback() {
     assert_eq!(dispatch[1].id(), synthetic.id());
     assert_eq!(context.messages().len(), 1, "回退不改变 hook 视图");
 }
+
+/// canonical 执行投影会话目录准备端口；idle 入口没有目录，不能伪造。
+#[test]
+fn canonical_context_projects_the_session_catalog_port_and_idle_does_not() {
+    let stage = test_stage();
+    assert!(
+        model_batch_context(&stage).session_tool_catalog().is_some(),
+        "model execution must let dynamic MCP loaders verify the next Reason catalog"
+    );
+    assert!(
+        idle_context(&stage).session_tool_catalog().is_none(),
+        "idle execution has no session catalog to prepare"
+    );
+}

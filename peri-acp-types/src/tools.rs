@@ -653,6 +653,11 @@ pub struct ToolContext<'context> {
     /// 当前 turn generation；用于撤销跨 turn 的宿主调用租约。
     pub turn_generation: Option<String>,
     pub session_resources: Option<std::sync::Arc<dyn crate::session_resources::SessionResources>>,
+    /// 当前会话下一轮目录的只读准备端口；canonical 执行中由会话目录投影。
+    ///
+    /// 工具只能用它验证候选目录，不能替换当前 Act 固定的工具视图。
+    pub session_tool_catalog:
+        Option<std::sync::Arc<dyn crate::mcp_control::SessionToolCatalogPreparationPort>>,
     /// 当前会话上下文用量快照；`None` = 无预算或无估算，工具无法评估。
     pub context_usage: Option<ContextUsage>,
 }
@@ -672,6 +677,7 @@ impl<'context> ToolContext<'context> {
             task_terminal_delivery: None,
             turn_generation: None,
             session_resources: None,
+            session_tool_catalog: None,
             context_usage: None,
         }
     }
@@ -679,6 +685,15 @@ impl<'context> ToolContext<'context> {
     /// 绑定 dispatch 时刻的会话上下文用量快照。
     pub fn with_context_usage(mut self, usage: Option<ContextUsage>) -> Self {
         self.context_usage = usage;
+        self
+    }
+
+    /// 绑定当前会话的下一轮目录准备端口（执行期持有，不跨执行常驻）。
+    pub fn with_session_tool_catalog(
+        mut self,
+        port: std::sync::Arc<dyn crate::mcp_control::SessionToolCatalogPreparationPort>,
+    ) -> Self {
+        self.session_tool_catalog = Some(port);
         self
     }
 
@@ -805,8 +820,9 @@ pub trait BaseTool: Send + Sync {
         Ok(None)
     }
 
-    /// Static MCP source identity used by session catalog shadowing and collision
-    /// checks. Non-MCP tools return `None`; wrappers must forward this value.
+    /// MCP source binding used by session catalog ownership, shadowing and
+    /// revocation. It is **not** a remote `tools/call` target: entries that need
+    /// wire identity must also validate [`BaseTool::mcp_tool_name`].
     fn mcp_server_name(&self) -> Option<&str> {
         None
     }

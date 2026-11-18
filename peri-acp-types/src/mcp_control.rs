@@ -3,7 +3,7 @@ use crate::plugin::McpServerConfig;
 use crate::plugin::OAuthConfig;
 use crate::tools::BaseTool;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +141,7 @@ impl McpRegistrationConfig {
             headers: None,
             oauth: None,
             disabled: None,
+            dynamic: false,
             subscriptions: None,
             system_mcp: None,
             system_mcp_tools: None,
@@ -252,6 +253,57 @@ pub struct SessionMcpCatalogSnapshot {
 /// Reads the published catalog without retaining a mutable registry guard.
 pub trait SessionMcpCatalogPort: Send + Sync {
     fn snapshot(&self) -> Arc<SessionMcpCatalogSnapshot>;
+}
+
+/// Source identity of one admitted tool in a prepared session catalog.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SessionToolSource {
+    /// Core tools and middleware-contributed tools (including meta tools).
+    CoreOrMiddleware,
+    /// Tools projected from one MCP server, including its dynamic loader.
+    Mcp(String),
+}
+
+/// Candidate catalog the next Reason would publish, built without committing it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionToolCatalogPreparation {
+    /// Pool generation the candidate was built from.
+    pub generation: u64,
+    /// Admitted tool names grouped by source identity.
+    pub admitted: BTreeMap<SessionToolSource, Vec<String>>,
+}
+
+impl SessionToolCatalogPreparation {
+    /// Admitted tool names for one source; empty when the source contributed none.
+    #[must_use]
+    pub fn admitted_for(&self, source: &SessionToolSource) -> &[String] {
+        self.admitted.get(source).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// The session catalog rejected the candidate view (filter collision or invalid source).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("session tool catalog cannot be prepared: {reason}")]
+pub struct SessionToolCatalogPrepareError {
+    pub reason: String,
+}
+
+impl SessionToolCatalogPrepareError {
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Read-only preparation port for the catalog the next Reason will use.
+///
+/// Implementations must reuse the session's candidate construction and tool filter
+/// but must not publish the candidate or change the current Act view.
+pub trait SessionToolCatalogPreparationPort: Send + Sync {
+    fn prepare_next(&self)
+        -> Result<SessionToolCatalogPreparation, SessionToolCatalogPrepareError>;
 }
 
 #[cfg(test)]

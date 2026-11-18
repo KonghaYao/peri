@@ -61,11 +61,13 @@ pub(super) fn transport_label(kind: TransportKind) -> &'static str {
     }
 }
 
-/// 启动发现的 `tools/list` 来源：System MCP 必须走本次 live round-trip。
+/// 启动发现的 `tools/list` 来源：System MCP 与 dynamic 连接必须走本次 live round-trip。
 ///
 /// System MCP 的 ready 证据不得来自历史持久缓存——缓存命中只说明「过去某次列出过
-/// 这些工具」，不能证明本次启动的 server 仍能列出工具。`system_mcp_tools` 为空数组
-/// 时同样要走完这次 round-trip（清单可以是空数组）。普通 MCP 保持既有 cache 策略。
+/// 这些工具」，不能证明本次启动的 server 仍能列出工具。dynamic 连接同理：按需加载
+/// 的 ready 必须由本次连接证明，匿名 server 的版本命中不能替代 `tools/list`。
+/// System MCP 的 `system_mcp_tools` 为空数组时同样要走完这次 round-trip（清单可以
+/// 是空数组）。其余 eager server 保持既有 cache 策略。
 ///
 /// `Err` 一律表示发现失败：既不等于「服务器没有工具」，也不产生任何 ready 证据。
 pub(super) async fn list_discovered_tools(
@@ -74,7 +76,7 @@ pub(super) async fn list_discovered_tools(
     peer: &Peer<RoleClient>,
     config: &McpServerConfig,
 ) -> Result<Vec<Tool>, ServiceError> {
-    if config.system_mcp == Some(true) {
+    if config.system_mcp == Some(true) || config.dynamic {
         peer.list_all_tools().await
     } else {
         pool.list_all_tools_cached_for_startup(server_name, peer, config)
@@ -120,6 +122,13 @@ pub(super) fn commit_discovery_failure(
 /// `tools/list` 失败的统一收口：不提交 `Connected`（那会伪装成「发现完成且无工具」），
 /// 改为显式 `Failed` + 本代 `tools_list_ok = false` 的证据。
 pub(super) fn fail_tool_discovery(pool: &Arc<McpClientPool>, server_name: &str, error: &str) {
+    if pool
+        .server_slot(server_name)
+        .stopped
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
     let reason = format!("工具发现失败: {}", error);
     tracing::warn!(server = %server_name, error = %reason, "MCP tools/list 失败，不发布连接与 ready 证据");
     McpClientPool::insert_failed(pool, server_name, reason);
@@ -142,6 +151,13 @@ pub(super) fn fail_workspace_resource_discovery(
     server_name: &str,
     error: &str,
 ) {
+    if pool
+        .server_slot(server_name)
+        .stopped
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
     let reason = format!("资源发现失败: {}", error);
     tracing::warn!(server = %server_name, error = %reason, "Workspace resources/list 失败，不发布连接与 ready 证据");
     McpClientPool::insert_failed(pool, server_name, reason);
@@ -409,10 +425,12 @@ impl McpClientPool {
                 return;
             }
         };
+        // 启动分母只统计实际需要首次连接的服务器：disabled 不连接；dynamic
+        // 只登记配置，首次连接由 Loader 触发（plan 4.2）。
         let connectable = config
             .mcp_servers
             .iter()
-            .filter(|(_, sc)| !sc.disabled.unwrap_or(false))
+            .filter(|(_, sc)| !sc.disabled.unwrap_or(false) && !sc.dynamic)
             .count();
         if config.mcp_servers.is_empty() {
             // 空集合也是**完整**清单：此后 system 依赖（零个）是可信事实。
@@ -475,6 +493,13 @@ impl McpClientPool {
                 // 影响它们自己的工具可用时间，不再拖住会话创建。
                 if index == system_total {
                     pool.mark_system_settled();
+                }
+                // Dynamic 只登记配置：不构建 transport、不启动进程、不做 OAuth
+                // 首次连接或远端发现；首次连接延迟到 Loader（plan 4.2）。
+                // disabled 仍走下面的既有分支（面板显示 Disabled、不连接）。
+                if server_config.dynamic {
+                    tracing::info!(server = %name, "MCP 服务器为 dynamic：延迟首次连接");
+                    continue;
                 }
                 let slot = pool.server_slot(name);
                 let Ok(_operation) = slot.operation.clone().try_lock_owned() else {
