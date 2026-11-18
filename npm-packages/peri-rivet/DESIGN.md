@@ -1,5 +1,8 @@
 # @peri-code/rivet — 设计
 
+> 状态：现行对接设计；真实运行时与长时连续性验收仍由 [#448](https://github.com/KonghaYao/peri/issues/448) 跟踪，本文存在不等于验收通过。
+> SDK 通用运行边界归 [SDK Chat](../../docs/design/peri-sdk-chat.md)；本文只维护 Rivet 接线。
+
 ## 1. 定位
 
 本包是 [Rivet](https://rivet.dev) actor 与 Peri SDK 之间的对接层，不实现第三个运行时：

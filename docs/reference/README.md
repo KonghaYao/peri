@@ -17,3 +17,7 @@
 - [time-platform-research.md](time-platform-research.md)：时间库的 Emscripten 支持范围与计时器行为；权威目标见[时间能力边界](../design/time-runtime.md)。
 
 参考资料不记录某次执行的勾选状态、临时日志或 active issue 进度。
+
+- [功能目录](feature-catalog.md)：稳定 ID 与分级登记；评级提案/未决项以 [登记标准](../standards/features.md) 为准，不复制运行时控制权威。
+- [功能验收映射](../verification/feature-acceptance.md)：基线代码定位、历史证据和本轮缺口；不将登记视为通过。
+- [#446 文档处置清单](../verification/authority-inventory-446.md)：静态盘点与实际处置记录。

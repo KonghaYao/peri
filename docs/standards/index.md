@@ -20,6 +20,8 @@
 | Git 分支创建、upstream、历史整理与 push 安全 | [git.md](git.md) |
 | 测试（根 workspace、submodule、独立/side project 的范围与命令） | [testing.md](testing.md) |
 | 环境变量控制项、默认值与维护 | [environment-variables.md](environment-variables.md)；TUI 专属项见 [tui-environment-variables.md](tui-environment-variables.md) |
+| 功能分级、稳定 ID 与验收映射 | [features.md](features.md) |
+| 功能登记、五级重要度与验收映射 | [features.md](features.md) |
 | 权威设计与参考资料的生命周期 | [documentation.md](documentation.md) |
 
 ## 规则
