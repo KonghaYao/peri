@@ -6,11 +6,51 @@ use serde::{Deserialize, Serialize};
 /// 用户在提交时选择的插件身份。
 ///
 /// 只携带插件 ID：指引、URL、凭证与 Loader 名称由 Host 依据当前会话元数据生成，
-/// 客户端不能借此扩大权限或替换绑定。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// 客户端不能借此扩大权限或替换绑定。wire 形态只接受对象
+/// `{"pluginId":"alpha"}`；Serde 默认的位置形式会被拒绝。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginSelection {
     pub plugin_id: String,
+}
+
+impl<'de> Deserialize<'de> for PluginSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SelectionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SelectionVisitor {
+            type Value = PluginSelection;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a plugin selection object with pluginId")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut plugin_id = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key != "pluginId" {
+                        return Err(serde::de::Error::unknown_field(&key, &["pluginId"]));
+                    }
+                    if plugin_id.is_some() {
+                        return Err(serde::de::Error::duplicate_field("pluginId"));
+                    }
+                    plugin_id = Some(map.next_value()?);
+                }
+                plugin_id
+                    .map(|plugin_id| PluginSelection { plugin_id })
+                    .ok_or_else(|| serde::de::Error::missing_field("pluginId"))
+            }
+        }
+
+        // `deserialize_map` 明确拒绝数组等非对象形状；默认 struct 路径会接受位置形式。
+        deserializer.deserialize_map(SelectionVisitor)
+    }
 }
 
 impl PluginSelection {

@@ -125,3 +125,23 @@ fn test_user_input_plugin_selection_rejects_smuggled_fields() {
         "客户端不得随选择夹带指引或权限信息"
     );
 }
+
+#[test]
+fn test_user_input_plugin_selection_requires_object_shape() {
+    let value = serde_json::json!({
+        "sessionId":"s","generation":"g","commandId":"c","inputId":"i",
+        "content":"hello","originalDraft":"hello",
+        "pluginSelections":[["alpha"]]
+    });
+    assert!(
+        serde_json::from_value::<EnqueueUserInputRequest>(value).is_err(),
+        "位置形式数组不得被解释为插件选择"
+    );
+
+    let object = serde_json::json!({"pluginId":"alpha"});
+    assert_eq!(
+        serde_json::from_value::<PluginSelection>(object).unwrap(),
+        PluginSelection::new("alpha"),
+        "合法对象形式必须保持可读"
+    );
+}
