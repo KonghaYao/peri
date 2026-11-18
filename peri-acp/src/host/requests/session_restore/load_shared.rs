@@ -106,31 +106,16 @@ pub(crate) async fn handle_load_shared(
         // 会话已恢复：之后 initial 交付失败只回领域错误、保留会话（同 requestKey 可重试），
         // 不能再走 cold publication 回滚把已装配的会话拆掉。
         restored = true;
-        if let Some(initial) = history {
-            attach_history_initial(
-                local,
-                sessions,
-                &prepared.id,
-                &connection,
-                initial,
-                &mut response,
-            )
-            .await?;
-        } else {
-            if connection.history_pagination {
-                crate::host::history_page::attach_initial_cursor(
-                    cfg,
-                    sessions,
-                    &prepared.id,
-                    &mut response,
-                )
-                .await?;
-            }
-            // 非 V2 连接成功接管会话：撤销上一条连接留下的实时投递绑定，事件回到 V1
-            // wire 形状。失败路径（装配/回放拒绝）不破坏既有交付；cursor 失败同样
-            // 保留旧流，因此 detach 放在它之后。
-            crate::host::live_delivery::detach_session(sessions, &prepared.id).await;
-        }
+        attach_load_history(
+            local,
+            cfg,
+            sessions,
+            &prepared.id,
+            &connection,
+            history,
+            &mut response,
+        )
+        .await?;
         Ok(response)
     }
     .await;
@@ -253,6 +238,41 @@ async fn attach_history_initial(
     }
     response_meta(response)?.insert(HISTORY_META_KEY.to_owned(), value);
     Ok(())
+}
+
+/// 恢复完成后交付历史：V2 initial 优先，否则按协商挂 V1 cursor 并撤销旧实时投递。
+///
+/// 非 V2 连接成功接管会话后，事件回到 V1 wire 形状；装配/回放拒绝不破坏既有交付，
+/// cursor 失败同样保留旧流，因此 detach 只能放在 cursor 之后。两条 load 路径对 V2
+/// initial 与 V1 cursor 取用的配置来源不同，故分别传入。
+async fn attach_load_history(
+    initial_cfg: &AcpServerConfig,
+    cursor_cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    session_id: &str,
+    connection: &ConnectionFacts,
+    history: Option<LoadInitial>,
+    response: &mut Value,
+) -> Result<(), AcpError> {
+    let Some(initial) = history else {
+        if connection.history_pagination {
+            crate::host::history_page::attach_initial_cursor(
+                cursor_cfg, sessions, session_id, response,
+            )
+            .await?;
+        }
+        crate::host::live_delivery::detach_session(sessions, session_id).await;
+        return Ok(());
+    };
+    attach_history_initial(
+        initial_cfg,
+        sessions,
+        session_id,
+        connection,
+        initial,
+        response,
+    )
+    .await
 }
 
 fn response_meta(response: &mut Value) -> Result<&mut serde_json::Map<String, Value>, AcpError> {
@@ -959,29 +979,17 @@ async fn serve_view_only_load(
         // 只读会话同样在恢复完成后才交付历史；initial 失败不得回滚已发布状态。
         restored = true;
         response["_meta"]["peri.recovery"] = view_only_recovery_view(&thread, failure)?;
-        if let Some(initial) = history {
-            // 历史可读与执行可用是独立事实：只读进入也遵守已协商的 initial 契约。
-            attach_history_initial(
-                cfg,
-                sessions,
-                &session_id,
-                connection,
-                initial,
-                &mut response,
-            )
-            .await?;
-        } else {
-            if connection.history_pagination {
-                crate::host::history_page::attach_initial_cursor(
-                    cfg,
-                    sessions,
-                    &session_id,
-                    &mut response,
-                )
-                .await?;
-            }
-            crate::host::live_delivery::detach_session(sessions, &session_id).await;
-        }
+        // 历史可读与执行可用是独立事实：只读进入也遵守已协商的 initial 契约。
+        attach_load_history(
+            cfg,
+            cfg,
+            sessions,
+            &session_id,
+            connection,
+            history,
+            &mut response,
+        )
+        .await?;
         Ok(response)
     }
     .await;

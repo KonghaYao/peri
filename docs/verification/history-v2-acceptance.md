@@ -126,7 +126,7 @@ crate 级计数不替代单项场景证明，未覆盖部分不记为通过。
 | T12 | 配额边界连续重开/失败重试 | `initial_replacement_at_capacity_is_bounded_across_success_failure_and_replay`、`server_loop_history_capacity_saturation_rejects_without_waiting` | 已覆盖 |
 | T13 | 初始加载与实时通知交错 | `history_v2_load_test::session_load_v2_live_updates_follow_boundary_and_reload_replaces_stream`、`live_delivery_test::candidate_keeps_old_stream_identity_and_buffers_independently`、`acp_client/client/history_v2_test.rs::failed_initial_accepts_events_racing_with_recovery_once` | 已覆盖 |
 | T14 | local rewind、删除后继续读旧窗 | 服务端 `session_close_invalidates_v2_windows`；rewind 的 V2 端到端缺失 | 部分覆盖 |
-| T15 | 旧私有协议退出 | CLEAN-01 行所列负向测试 | 已覆盖 |
+| T15 | 已退役旧私有协议退出（V1 本轮保留） | CLEAN-01 行所列负向测试；V1 能力仍按协商可用 | 已覆盖 |
 | T16 | 标准 ACP 兼容边界 | `history_v2_load_test::session_load_v2_legacy_response_is_unchanged_and_missing_meta_is_rejected` | 已覆盖 |
 | T17 | 长历史读取预算 | adapter 有界读取测试；未记录数据规模/读取量/耗时 | 部分覆盖 |
 | T18 | 详情、滚动位置和实时尾部 | `history_v2_view_test::{seek_keeps_live_tail_and_marks_it_as_live,seek_dedupes_live_message_already_in_the_new_page,reopen_keeps_streaming_content_not_in_the_new_page}`、`history_detail_test` | 已覆盖 |
@@ -179,7 +179,7 @@ crate 级计数不替代单项场景证明，未覆盖部分不记为通过。
 
 ## 7. 回滚
 
-1. 回退到上一软件版本或撤销本次提交；不存在“关闭 beta 回到旧协议”的路径。
+1. beta 关闭 = 回滚到 V1（V1 本轮保留）；也可回退到上一软件版本或撤销本次提交。
 2. 服务端侧无需迁移：V2 不新增表/列，窗口与实时流均为进程内状态；服务端重启即清空。
 3. 标准 ACP 客户端的完整回放语义未变；回滚不涉及数据格式转换。
 4. 残留 V2 会话状态随 TUI 重启消失，不需要清理持久化数据。
@@ -188,7 +188,7 @@ crate 级计数不替代单项场景证明，未覆盖部分不记为通过。
 
 | 门禁 | 要求 | 本轮记录 |
 | --- | --- | --- |
-| 旧协议退出 | 旧能力/方法/通知不可达 | 静态命中已核对；负向测试存在 |
+| 旧协议退出（V1 保留） | 已退役的旧能力/方法/通知不可达；V1 能力按协商仍可用 | 静态命中已核对；负向测试存在 |
 | 本地链路 | initial/page/seek/body/close 有端到端证据 | `history_v2_end_to_end_test` 两例 |
 | 修复回归 | FIX-01～05 各有可定位用例 | 见 §3 |
 | 文档一致性 | 设计、索引、验收与 CLAUDE 路由同步 | 本轮更新 |
