@@ -8,6 +8,10 @@ use parking_lot::RwLock;
 
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 use peri_acp_types::mcp_control::SessionMcpCatalogSnapshot;
+use peri_acp_types::mcp_control::SessionToolCatalogPreparation;
+use peri_acp_types::mcp_control::SessionToolCatalogPreparationPort;
+use peri_acp_types::mcp_control::SessionToolCatalogPrepareError;
+use peri_acp_types::mcp_control::SessionToolSource;
 use peri_acp_types::ports::SessionMcpCatalogPort;
 
 use crate::tools::{BaseTool, ToolDefinition};
@@ -345,6 +349,25 @@ impl SessionToolCatalog {
         Ok(next)
     }
 
+    /// Build the catalog the next Reason would publish, without replacing the
+    /// current Act view.
+    ///
+    /// Reuses [`build_published`], so filtering and collision handling match the
+    /// published path exactly; only the caller's claim is narrower.
+    pub fn prepare_next(&self) -> Result<SessionToolCatalogPreparation, CatalogRefreshError> {
+        let capability = self.capability.as_ref().map(|port| port.snapshot());
+        let state = self.state.read();
+        let next = build_published(
+            capability
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.generation),
+            &state.base_tools,
+            capability.as_deref(),
+            self.tool_filter.as_ref(),
+        )?;
+        Ok(preparation_of(&next))
+    }
+
     /// 把启动闸门准入的整批静态 MCP bridge 原子提交到 static base。
     ///
     /// 只更新 base：Reason 边界仍完整走 ARC-TOOLS-001 的
@@ -454,6 +477,32 @@ impl SessionToolCatalog {
             })
             .collect();
         finalize(current.generation, tools).map(Arc::new)
+    }
+}
+
+/// Read-only port used by dynamic MCP loaders to prove that this session can
+/// build its next request catalog. Delegates to the same candidate builder.
+impl SessionToolCatalogPreparationPort for SessionToolCatalog {
+    fn prepare_next(
+        &self,
+    ) -> Result<SessionToolCatalogPreparation, SessionToolCatalogPrepareError> {
+        SessionToolCatalog::prepare_next(self)
+            .map_err(|error| SessionToolCatalogPrepareError::new(error.to_string()))
+    }
+}
+
+fn preparation_of(snapshot: &SessionToolCatalogSnapshot) -> SessionToolCatalogPreparation {
+    let mut admitted: BTreeMap<SessionToolSource, Vec<String>> = BTreeMap::new();
+    for (name, entry) in &snapshot.tools {
+        let source = match &entry.source {
+            ToolSource::CoreOrMiddleware => SessionToolSource::CoreOrMiddleware,
+            ToolSource::Mcp(server) => SessionToolSource::Mcp(server.clone()),
+        };
+        admitted.entry(source).or_default().push(name.clone());
+    }
+    SessionToolCatalogPreparation {
+        generation: snapshot.generation,
+        admitted,
     }
 }
 

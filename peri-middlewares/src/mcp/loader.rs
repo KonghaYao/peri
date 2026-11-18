@@ -11,6 +11,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use peri_acp_types::mcp_control::SessionToolCatalogPreparation;
+use peri_acp_types::mcp_control::SessionToolCatalogPreparationPort;
+use peri_acp_types::mcp_control::SessionToolSource;
 use peri_agent::tools::BaseTool;
 use peri_agent::tools::ToolContext;
 use serde_json::json;
@@ -142,6 +145,18 @@ enum LoaderError {
     InvalidArguments { loader: String },
     #[error("MCP loader \"{loader}\" is stale: its dynamic MCP source changed or was closed")]
     Stale { loader: String },
+    #[error(
+        "MCP loader \"{loader}\" cannot verify the next request catalog: this execution has no session tool catalog"
+    )]
+    CatalogUnavailable { loader: String },
+    #[error(
+        "MCP loader \"{loader}\" loaded MCP server \"{server}\" but the session catalog could not be prepared: {reason}"
+    )]
+    CatalogPrepare {
+        loader: String,
+        server: String,
+        reason: String,
+    },
 }
 
 /// 绑定一条 dynamic 配置的 deferred Loader。
@@ -232,6 +247,28 @@ impl DynamicToolLoader {
         }
         Ok(())
     }
+
+    /// 连接提交后验证当前会话的下一轮目录（plan 7 / 7.1）。
+    ///
+    /// 只读：不发布候选、不改变当前 Act 的工具视图；端口在执行期由 canonical
+    /// dispatch 投影，Loader 不持久持有它。
+    fn prepare_session_catalog(
+        &self,
+        port: Option<&Arc<dyn SessionToolCatalogPreparationPort>>,
+        server: &str,
+    ) -> Result<SessionToolCatalogPreparation, LoaderError> {
+        let Some(port) = port else {
+            return Err(LoaderError::CatalogUnavailable {
+                loader: self.name.clone(),
+            });
+        };
+        port.prepare_next()
+            .map_err(|error| LoaderError::CatalogPrepare {
+                loader: self.name.clone(),
+                server: server.to_owned(),
+                reason: error.to_string(),
+            })
+    }
 }
 
 #[async_trait]
@@ -260,7 +297,7 @@ impl BaseTool for DynamicToolLoader {
     async fn invoke(
         &self,
         input: Value,
-        _ctx: ToolContext<'_>,
+        ctx: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.validate_arguments(&input)?;
         self.check_binding()?;
@@ -281,14 +318,33 @@ impl BaseTool for DynamicToolLoader {
                 status: handle.status.clone(),
             }));
         }
-        Ok(json!({
+        // 目录验证是“可用”的一部分：无法构造下一轮目录时不得报告 ready。
+        let preparation =
+            self.prepare_session_catalog(ctx.session_tool_catalog.as_ref(), server)?;
+        let session_tool_count = preparation
+            .admitted_for(&SessionToolSource::Mcp(server.clone()))
+            .iter()
+            .filter(|name| name.as_str() != self.name)
+            .count();
+        let mut result = json!({
             "status": "ready",
             "server": server,
             "reused": reused,
             "catalog_generation": self.pool.catalog_generation.load(Ordering::Acquire),
             "available_tool_count": handle.tools.len(),
-        })
-        .to_string())
+            "session_catalog_generation": preparation.generation,
+            "session_tool_count": session_tool_count,
+        });
+        // 服务器有工具但本会话一个都不能调用时必须明说，不能暗示业务能力可用。
+        if !handle.tools.is_empty() && session_tool_count == 0 {
+            result["note"] = json!(format!(
+                "MCP server \"{server}\" exposes {} tool(s), but none are callable in this \
+                 session under its current tool policy; do not assume its business \
+                 capabilities are available.",
+                handle.tools.len()
+            ));
+        }
+        Ok(result.to_string())
     }
 }
 

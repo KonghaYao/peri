@@ -27,6 +27,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use peri_acp_types::mcp_apps::SkippedPostHook;
+use peri_acp_types::mcp_control::SessionToolCatalogPreparationPort;
 
 use crate::agent::events_v2::{EventBus, RenderEvent};
 use crate::agent::stages::context::StageContext;
@@ -157,6 +158,8 @@ pub struct InvocationContext {
     context_usage: Option<ContextUsage>,
     /// 会话资源端口（idempotent reminder 等）。
     session_resources: Option<Arc<dyn SessionResources>>,
+    /// 下一轮会话目录的准备端口（执行期持有，供 dynamic MCP Loader 验证）。
+    session_tool_catalog: Option<Arc<dyn SessionToolCatalogPreparationPort>>,
     /// 会话级后台结果处理责任 owner；`None` = 本入口没有可关联的会话 mailbox
     /// （idle App / Host 入口），终态投递退回一次性实例。
     async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
@@ -279,6 +282,8 @@ impl InvocationContext {
             dispatch_message_id,
             context_usage,
             session_resources,
+            session_tool_catalog: Some(Arc::clone(&stage.runtime.tool_catalog)
+                as Arc<dyn SessionToolCatalogPreparationPort>),
             async_result_mailbox: Some(Arc::clone(&stage.session.async_result_mailbox)),
             resolver: Arc::clone(&stage.runtime.tool_invocation_resolver),
             chain: Arc::clone(&stage.runtime.middleware_chain),
@@ -441,6 +446,13 @@ impl InvocationContext {
         self.session_resources.as_ref()
     }
 
+    /// 下一轮目录准备端口；按执行生命周期持有，不写入被调工具的持久状态。
+    pub(crate) fn session_tool_catalog(
+        &self,
+    ) -> Option<Arc<dyn SessionToolCatalogPreparationPort>> {
+        self.session_tool_catalog.clone()
+    }
+
     /// 会话级后台结果处理责任 owner；idle 入口没有时可回退到一次性实例。
     pub(crate) fn async_result_mailbox(
         &self,
@@ -526,6 +538,8 @@ impl InvocationContext {
             dispatch_message_id: None,
             context_usage: source.context_usage,
             session_resources: source.session_resources,
+            // idle 入口没有 session catalog 投影：不能为其伪造下一轮目录。
+            session_tool_catalog: None,
             async_result_mailbox: None,
             resolver: source.resolver,
             chain: source.chain,
