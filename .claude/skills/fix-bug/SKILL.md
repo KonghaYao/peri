@@ -20,12 +20,12 @@ disable-model-invocation: true
 
 所有读写与命令都在 worktree 内执行；主 checkout 只用于 `git worktree` 管理。
 
-1. 默认先 `git fetch --prune origin`（清理远端已删除的跟踪分支，避免基于陈旧 ref）；base 不是 `main` 时，再显式 `git fetch origin "+refs/heads/<base>:refs/remotes/origin/<base>"`，确保 `remote.origin.fetch` 未覆盖该分支时也会刷新。**fetch 失败必须停止并汇报**，不能因为本地已有 `origin/main` 缓存就继续。随后把选定的 worktree 路径存入 `$WT`：默认 `"$PWD/.worktrees/<slug>"`，`.worktrees/` 未被忽略时改用 `"$PWD/../<repo>-worktrees/<slug>"`，避免污染 `git status`。从**远程最新目标分支**创建：通常为 `origin/main`，用户指定 base 时改用 `origin/<base>`。
+1. 默认先 `git fetch --prune origin`（清理远端已删除的跟踪分支，避免基于陈旧 ref），再无条件对选定的 base 显式 fetch：`git fetch origin "+refs/heads/<base>:refs/remotes/origin/<base>"`。只执行默认 fetch 时，若 `remote.origin.fetch` 未覆盖该分支，`origin/<base>` 可能仍是旧值，worktree 会基于陈旧 ref 创建。**任一次 fetch 失败都必须停止并汇报**，不能因为本地已有 `origin/main` 缓存就继续。随后把选定的 worktree 路径存入 `$WT`：默认 `"$PWD/.worktrees/<slug>"`，`.worktrees/` 未被忽略时改用 `"$PWD/../<repo>-worktrees/<slug>"`，避免污染 `git status`。从**远程最新目标分支**创建：通常为 `origin/main`，用户指定 base 时改用 `origin/<base>`。
    ```bash
    git fetch --prune origin
-   # base 非 main 时补充：git fetch origin "+refs/heads/<base>:refs/remotes/origin/<base>"
+   git fetch origin "+refs/heads/<base>:refs/remotes/origin/<base>"   # 显式刷新 base，main 也要执行
    WT="$PWD/.worktrees/<slug>"   # .worktrees/ 未被忽略时改为 "$PWD/../<repo>-worktrees/<slug>"
-   git worktree add --no-track -b fix/<slug> "$WT" origin/main
+   git worktree add --no-track -b fix/<slug> "$WT" origin/<base>
    ```
    不要直接基于本地 `main` 或其它可能过期的本地分支创建：过期基线会带入已合并的旧改动，增加冲突和无关 diff。只有远程分支不存在或用户明确指定本地基线时才改用，并在汇报中说明原因。
 2. 核对：`git -C "$WT" status --short --branch` 不得显示 `[origin/main]`；若显示，执行 `git -C "$WT" branch --unset-upstream`。
