@@ -117,7 +117,13 @@ fn guidance_for_plugin(name: &str, loaders: &[&str]) -> String {
 }
 
 /// 以 Model-only canonical reminder 投递指引；不修改 frozen system prompt。
-pub(crate) async fn push_plugin_guidance(queue: &MessageQueue, texts: &[String]) {
+///
+/// 逐段入队不是原子操作：任一段失败都把错误返回给调用方，不能把已写入的
+/// 前缀当作完整指引继续执行。
+pub(crate) async fn push_plugin_guidance(
+    queue: &MessageQueue,
+    texts: &[String],
+) -> anyhow::Result<()> {
     for text in texts {
         let mut remaining = text.as_str();
         while !remaining.is_empty() {
@@ -144,12 +150,11 @@ pub(crate) async fn push_plugin_guidance(queue: &MessageQueue, texts: &[String])
                 MessageSource::SystemInjected,
                 reminder,
             );
-            if let Err(error) = queue.enqueue(message).await {
-                tracing::warn!(%error, "plugin guidance enqueue failed");
-            }
+            queue.enqueue(message).await?;
             remaining = &remaining[end..];
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

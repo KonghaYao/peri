@@ -344,12 +344,48 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
 
     // 插件指引随当前请求投递：与用户 Prompt 同批进入 Receive，但不写入 frozen
     // system prompt，也不改写用户正文（Model-only canonical reminder）。
+    // 逐段入队失败必须终止本轮：部分指引已落库时不能继续并报告成功。
     if !req.plugin_guidance.is_empty() {
-        crate::session::exec::executor::plugin_guidance::push_plugin_guidance(
+        if let Err(error) = crate::session::exec::executor::plugin_guidance::push_plugin_guidance(
             &v2_out.context.session.queue,
             &req.plugin_guidance,
         )
-        .await;
+        .await
+        {
+            error!(session_id = %req.session_id, %error, "plugin guidance enqueue failed");
+            let failure = ExecutionFailure::internal(format!(
+                "Plugin guidance could not be admitted to the thread MQ: {error}"
+            ));
+            let source = UnstampedEvent::new(
+                String::new(),
+                String::new(),
+                None,
+                EventDeliveryClass::Critical,
+            );
+            req.publisher.publish_event(
+                &req.session_id,
+                &source,
+                ExecutorEvent::AgentExecutionFailed {
+                    message: failure.public_message.clone(),
+                },
+            );
+            if let (Some(mailbox), Some(ticket)) = (&req.user_input_mailbox, &input_ticket) {
+                mailbox.record_attempt_outcome(
+                    ticket,
+                    crate::session::user_input_mailbox::UserInputAttemptOutcome::Failed,
+                );
+            }
+            return ExecOutcome {
+                execution_binding: Some(v2_out.context.session.turn.execution_binding()),
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                failure: Some(failure),
+                history_replaced_by_compaction: false,
+                persisted_payloads: req.history_payloads,
+                persistence_inconsistent: false,
+                agent_state: AgentState::new(&req.cwd),
+            };
+        }
     }
 
     // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）

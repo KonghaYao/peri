@@ -172,7 +172,8 @@ fn test_merge_keeps_explicit_then_handed_off_then_slash_without_duplicates() {
 fn test_guidance_is_delivered_as_model_only_canonical_reminder() {
     let queue = MessageQueue::new();
     let body = "x".repeat(MAX_REMINDER_BODY_BYTES + 10);
-    futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)));
+    futures::executor::block_on(push_plugin_guidance(&queue, std::slice::from_ref(&body)))
+        .expect("open queue accepts guidance");
 
     assert!(!queue.has_wake_up_sync(), "指引不单独唤醒新执行");
     let reminders: Vec<_> = queue
@@ -194,4 +195,21 @@ fn test_guidance_is_delivered_as_model_only_canonical_reminder() {
 
     assert!(reminders.len() > 1, "超限内容应按 UTF-8 边界安全分段");
     assert_eq!(reminders.concat(), body, "分段不能丢字");
+}
+
+/// 入队失败必须返回给调用方：不能只记录日志后把部分投递当作成功。
+#[test]
+fn test_guidance_enqueue_failure_is_returned() {
+    let queue = MessageQueue::new();
+    queue.close_admission();
+    let error = futures::executor::block_on(push_plugin_guidance(
+        &queue,
+        &["selected plugin guidance".to_string()],
+    ))
+    .expect_err("关闭入队闸门后指引投递必须失败");
+    assert!(
+        error.to_string().contains("closed to new enqueues"),
+        "必须保留队列关闭原因: {error}"
+    );
+    assert!(queue.is_empty_sync(), "失败时不得写入部分指引");
 }
