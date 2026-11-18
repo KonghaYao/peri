@@ -19,6 +19,7 @@ pub mod discover_tool;
 #[allow(clippy::result_large_err)]
 pub mod initialize;
 mod invocation;
+pub(crate) mod loader;
 pub mod middleware;
 pub mod oauth_flow;
 pub mod reconnect;

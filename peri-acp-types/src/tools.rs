@@ -805,8 +805,9 @@ pub trait BaseTool: Send + Sync {
         Ok(None)
     }
 
-    /// Static MCP source identity used by session catalog shadowing and collision
-    /// checks. Non-MCP tools return `None`; wrappers must forward this value.
+    /// MCP source binding used by session catalog ownership, shadowing and
+    /// revocation. It is **not** a remote `tools/call` target: entries that need
+    /// wire identity must also validate [`BaseTool::mcp_tool_name`].
     fn mcp_server_name(&self) -> Option<&str> {
         None
     }
