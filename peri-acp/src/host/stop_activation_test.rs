@@ -382,6 +382,7 @@ async fn stop_on_steered_managed_turn_suppresses_activation_and_continuation() {
             input_id: STOP_RUNNING_ID.into(),
             content: MessageContent::text("Stop 前的在途提问"),
             original_draft: "Stop 前的在途提问".into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("在途输入应入队");
@@ -407,6 +408,7 @@ async fn stop_on_steered_managed_turn_suppresses_activation_and_continuation() {
             input_id: STOP_INPUT_ID.into(),
             content: MessageContent::text(STOP_INPUT_TEXT),
             original_draft: STOP_INPUT_TEXT.into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("暂存区入队应被接受");

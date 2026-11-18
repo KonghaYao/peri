@@ -397,6 +397,7 @@ async fn enqueue_racing_with_withdrawal_does_not_resurrect_input() {
         &input.input_id,
         &input.content,
         &input.original_draft,
+        &input.plugin_selections,
     );
     super::super::window::retain_terminal(
         &mut mailbox.state.lock(),

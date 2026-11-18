@@ -446,6 +446,12 @@ pub(super) fn handle_panel_event(
                 *s = peri_tui_components::list_nav::previous_selection(*s);
             }
         }
+        // ── List: Space → 把选中插件加入/移出下一次任务的待提交上下文 ──
+        (false, false, KeyCode::Char(' ')) => {
+            if *active_tab.read() == PluginViewTab::Installed {
+                toggle_pending_plugin(*selected.read(), event_scope);
+            }
+        }
         (false, false, KeyCode::Down) => {
             if *active_tab.read() == PluginViewTab::Installed {
                 let mut s = selected.write();
@@ -469,3 +475,62 @@ pub(super) fn handle_panel_event(
 use crate::kit::atoms::PLUGIN_LIST;
 
 use crate::kit::atoms::PluginViewTab;
+
+/// 把当前选中插件加入/移出待提交上下文。
+///
+/// 只登记插件 ID：Host 在提交时按当前会话元数据校验并生成指引，客户端不拼
+/// Loader 名称或可信指引，选择也不能扩大权限。能力未协商时明确提示入口不可用
+/// （不能静默丢弃标签后照常提交）。
+fn toggle_pending_plugin(
+    selected: usize,
+    event_scope: &crate::application::operations::OperationScope,
+) {
+    if !crate::kit::steer_state::is_enabled() {
+        notify(crate::i18n::tr("panel-plugin-selection-unavailable"));
+        return;
+    }
+    let plugins = PLUGIN_LIST.state().read().clone();
+    let Some(plugin) = plugins.get(selected) else {
+        return;
+    };
+    let plugin_id = super::InstalledIdentity::new(plugin, event_scope.clone()).plugin_id();
+    let added = {
+        let atom = crate::kit::atoms::PENDING_PLUGIN_SELECTIONS.state();
+        let mut pending = atom.write();
+        if let Some(index) = pending
+            .iter()
+            .position(|selection| selection.plugin_id == plugin_id)
+        {
+            pending.remove(index);
+            false
+        } else {
+            pending.push(peri_acp_types::session::PluginSelection::new(
+                plugin_id.clone(),
+            ));
+            true
+        }
+    };
+    notify(crate::i18n::tr_args(
+        if added {
+            "panel-plugin-selection-added"
+        } else {
+            "panel-plugin-selection-removed"
+        },
+        &[(
+            "name".to_string(),
+            fluent_bundle::FluentValue::from(plugin_id),
+        )],
+    ));
+}
+
+/// 状态栏提示：选择标签变化必须可见，不能只留日志。
+fn notify(message: String) {
+    crate::kit::atoms::NOTIFICATION.set(Some(crate::kit::atoms::Notification {
+        message,
+        until: peri_time::monotonic_now() + std::time::Duration::from_secs(3),
+    }));
+}
+
+#[cfg(test)]
+#[path = "panel_handler_test.rs"]
+mod tests;

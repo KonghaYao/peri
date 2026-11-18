@@ -92,6 +92,7 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
         input_id: uuid::Uuid::now_v7().to_string(),
         content: MessageContent::text("问题"),
         original_draft: "问题".into(),
+        plugin_selections: Vec::new(),
     };
     mailbox
         .enqueue_sync(&request)

@@ -291,6 +291,11 @@ pub struct TurnInput {
     pub event_sink: Arc<dyn peri_acp_types::event::EventSink>,
     /// 用户本轮输入。
     pub content: MessageContent,
+    /// 本轮随输入提交的插件选择（只含插件 ID）。
+    ///
+    /// 客户端不提交可信指引、URL 或 Loader 名称；Host 依据当前会话元数据生成指引，
+    /// 选择只表达使用意图，不改变权限。
+    pub plugin_selections: Vec<peri_acp_types::session::PluginSelection>,
     /// 内部异步续跑（bg 完成唤醒被取消的 turn）。
     ///
     /// 与 keepgoing（空白 user prompt = TUI 按钮"继续跑 loop"）语义隔离：

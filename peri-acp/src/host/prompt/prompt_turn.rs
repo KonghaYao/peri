@@ -256,6 +256,9 @@ pub(super) async fn run_prompt_attempt(
     let stdio_command_filter = deployment.stdio_command_filter;
     let (session_id, content, _attachments) =
         crate::dispatch::prompt::extract_and_validate_run_prompt_params(&params)?;
+    // 旧 prompt 路径的插件选择：只解析插件 ID 并随本轮携带；指引生成在 Reason
+    // 准备阶段消费这一事实，客户端不能提交可信指引或 Loader 绑定。
+    let plugin_selections = crate::dispatch::prompt::extract_plugin_selections(&params)?;
     // v2 路径下 MessageQueue 由 run_session_loop 从 session_manager.v2_message_queue
     // 解析（executor.rs:368），不再作为 PromptExecutionContext 字段传入。
 
@@ -622,6 +625,7 @@ pub(super) async fn run_prompt_attempt(
     let turn = executor::TurnInput {
         event_sink,
         content,
+        plugin_selections,
         continuation,
         frozen: Some(frozen),
         history_payloads,

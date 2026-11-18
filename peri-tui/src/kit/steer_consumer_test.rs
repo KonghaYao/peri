@@ -192,6 +192,7 @@ async fn test_steer_uncertain_receipt_retries_identical_command_and_input() {
             input_id: uuid::Uuid::now_v7().to_string(),
             original_draft: "  中文\n@image /tmp/a.png\n".into(),
             content: MessageContent::text("  中文\n@image /tmp/a.png\n"),
+            plugin_selections: Vec::new(),
         }),
     };
     projection.begin(command.clone());
@@ -325,6 +326,7 @@ async fn fatal_failure_keeps_queued_b_recoverable_with_attachments_and_does_not_
             input_id: "a".into(),
             original_draft: "正在执行的 A".into(),
             content: MessageContent::text("正在执行的 A"),
+            plugin_selections: Vec::new(),
         }),
     };
     let b_input = UserInput {
@@ -334,6 +336,7 @@ async fn fatal_failure_keeps_queued_b_recoverable_with_attachments_and_does_not_
             peri_acp_types::messages::ContentBlock::text("B 的完整原稿"),
             peri_acp_types::messages::ContentBlock::image_base64("image/png", "AQID"),
         ]),
+        plugin_selections: Vec::new(),
     };
     let mut b_command = SteerCommand {
         session_id: "s".into(),
@@ -406,6 +409,7 @@ async fn initial_session_failure_recovers_draft(snapshot_failure: bool) {
             input_id: uuid::Uuid::now_v7().to_string(),
             original_draft: raw.into(),
             content: MessageContent::text(raw),
+            plugin_selections: Vec::new(),
         }),
     };
     STEERS.state().write().begin(command.clone());
@@ -599,6 +603,7 @@ async fn test_steer_queued_retry_never_replays_into_a_new_server_generation() {
             input_id: input_id.clone(),
             original_draft: "原回执尚未核实".into(),
             content: MessageContent::text("原回执尚未核实"),
+            plugin_selections: Vec::new(),
         }),
     };
     projection.begin(command.clone());
@@ -743,6 +748,7 @@ pub(super) fn first_input_command(
             input_id: input_id.into(),
             original_draft: draft.into(),
             content: MessageContent::text(draft),
+            plugin_selections: Vec::new(),
         }),
     }
 }

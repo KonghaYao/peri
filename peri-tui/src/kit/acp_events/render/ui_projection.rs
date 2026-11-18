@@ -65,11 +65,12 @@ pub(crate) fn drain_input_buffer() {
     if let Some(tx) = tx {
         for input in drained {
             // [Slice 3 D4] 本地气泡 + 提交（镜像非 loading 路径）。
-            // 附件随排队项一起出队——排队不得成为图片的丢弃点。
+            // 附件与插件选择随排队项一起出队——排队不得成为图片或插件意图的丢弃点。
             crate::kit::input_area::send_local_user_bubble(&input.text, &input.attachments);
             let _ = tx.send(SubmitRequest::AgentText {
                 text: input.text,
                 attachments: input.attachments,
+                plugin_selections: input.plugin_selections,
             });
         }
     }

@@ -88,6 +88,7 @@ async fn test_user_input_events_use_queue_capability_without_duplicate_chat_proj
             input_id: "input-1".into(),
             content: MessageContent::text("用户原文"),
             original_draft: "用户原文".into(),
+            plugin_selections: Vec::new(),
             state: peri_acp_types::session::UserInputState::Queued,
         }],
         terminal_items: vec![],

@@ -732,6 +732,8 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
                 PENDING_ATTACHMENTS.set(crate::kit::steer_state::attachments_from_content(
                     &input.content,
                 ));
+                // 撤回回执带回同一组插件选择；重新提交时不再读取“当前全局选择”。
+                PENDING_PLUGIN_SELECTIONS.set(input.plugin_selections);
                 crate::kit::input_history::reset_history_cursor();
                 popup::reset_mention_popup();
                 popup::reset_slash_popup();
@@ -750,14 +752,18 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     // §10 composer 标题/footer（Slice 3a）：
     // - title_top 右侧 session title；
-    // - title_bottom 左侧附件标签（`[图片] 图片 1` / `@ N 个文件`，
-    //   见 render::build_attachments_label），右侧资源线（CPU% · MEM · ctx，
-    //   原状态栏 Row1 第 4/5/7 项迁移）。
+    // - title_bottom 左侧插件选择与附件标签（`插件: id · [图片] 图片 1`，
+    //   见 render::build_plugin_label / build_attachments_label），右侧资源线
+    //   （CPU% · MEM · ctx，原状态栏 Row1 第 4/5/7 项迁移）。
     // 窄屏逐级隐藏：h<12（session_title_visible=false）隐藏 title_top 整行；
     // h<8（max_lines=Some(2)）再隐藏 title_bottom。
     let ctx_usage = hooks.use_atom(&CONTEXT_USAGE);
     let attachments_handle = hooks.use_atom(&PENDING_ATTACHMENTS);
-    let attachments_label = render::build_attachments_label(&attachments_handle.read());
+    let plugin_selections_handle = hooks.use_atom(&PENDING_PLUGIN_SELECTIONS);
+    let composer_tags = render::build_composer_tags(
+        render::build_plugin_label(&plugin_selections_handle.read()),
+        render::build_attachments_label(&attachments_handle.read()),
+    );
     // 右侧资源线：CPU%（>50 显示）→ MEM（恒显）→ ctx，保持原状态栏顺序；
     // 全部 muted，不启用资源阈值色（与 composer footer 其余文本同色系）。
     let sem = THEME_ATOM.state().read().semantic;
@@ -818,7 +824,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let composer_paragraph = Paragraph::new(composer_lines).block(render::build_composer_block(
         loading,
         shown_session_title,
-        attachments_label.as_deref(),
+        composer_tags.as_deref(),
         footer_right,
         props.session_title_visible || direct_submitting,
         props.max_lines.is_none(),
@@ -941,6 +947,8 @@ use crate::kit::atoms::LANG_VERSION;
 use crate::kit::atoms::MENTION_PREFIX;
 
 use crate::kit::atoms::PENDING_ATTACHMENTS;
+
+use crate::kit::atoms::PENDING_PLUGIN_SELECTIONS;
 
 use crate::kit::atoms::POPUP_KIND;
 

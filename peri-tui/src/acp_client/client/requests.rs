@@ -223,7 +223,7 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
-        self.send_prompt(content, request_id, None)
+        self.send_prompt(content, request_id, None, &[])
             .await
             .map(|_| ())
     }
@@ -233,13 +233,16 @@ impl AcpTuiClient {
     /// 身份校验与 Stable 选择在同一 operation gate 内完成；切换会话后迟到的
     /// 排队提交返回 [`crate::acp_client::SESSION_BINDING_CHANGED_CODE`]，由
     /// 调用方显式取消并反馈，绝不改投新会话。
+    ///
+    /// `plugin_selections` 只含插件 ID；空集合不写 wire 字段，保持旧 Host 形态。
     pub(crate) async fn prompt_in_session(
         &self,
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
         expected: &(String, u64),
+        plugin_selections: &[peri_acp_types::session::PluginSelection],
     ) -> Result<(), AcpError> {
-        self.send_prompt(content, request_id, Some(expected))
+        self.send_prompt(content, request_id, Some(expected), plugin_selections)
             .await
             .map(|_| ())
     }
@@ -250,7 +253,7 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<PromptResponse, AcpError> {
-        let response = self.send_prompt(content, request_id, None).await?;
+        let response = self.send_prompt(content, request_id, None, &[]).await?;
         serde_json::from_value(response).map_err(|error| {
             AcpError::new(-32603, format!("invalid session/prompt response: {error}"))
         })
@@ -261,6 +264,7 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
         expected: Option<&(String, u64)>,
+        plugin_selections: &[peri_acp_types::session::PluginSelection],
     ) -> Result<Value, AcpError> {
         let (session_id, lease) = self
             .open_prompt_after_session_loads(request_id.clone(), expected)
@@ -271,6 +275,9 @@ impl AcpTuiClient {
         });
         if let Some(rid) = request_id {
             params["requestId"] = json!(rid);
+        }
+        if !plugin_selections.is_empty() {
+            params["pluginSelections"] = json!(plugin_selections);
         }
         let session_id = params.get("sessionId").cloned();
         let request_id = params.get("requestId").cloned();

@@ -295,6 +295,7 @@ fn make_turn_input(
     TurnInput {
         event_sink,
         content,
+        plugin_selections: vec![],
         continuation,
         frozen: None,
         history_payloads: history
@@ -526,6 +527,7 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
             input_id: uuid::Uuid::now_v7().to_string(),
             content: MessageContent::text("首条输入尚未领取"),
             original_draft: "首条输入尚未领取".into(),
+            plugin_selections: Vec::new(),
         })
         .expect("the enqueue sync fixture result is required for this assertion");
     mailbox.stop_sync();

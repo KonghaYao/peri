@@ -16,11 +16,15 @@ use peri_acp_types::session::{UserInputQueueItem, UserInputQueueTerminalItem};
 #[path = "steer_state_projection_test.rs"]
 mod projection_tests;
 
+#[path = "steer_state_selection_test.rs"]
+mod selection_tests;
+
 pub(super) fn make_input(id: &str) -> UserInput {
     UserInput {
         input_id: id.to_owned(),
         content: MessageContent::text("  中文\n@image /tmp/test.png\n"),
         original_draft: "  中文\n@image /tmp/test.png\n".to_owned(),
+        plugin_selections: Vec::new(),
     }
 }
 
@@ -35,6 +39,7 @@ pub(super) fn make_snapshot(revision: u64) -> UserInputQueueSnapshot {
             input_id: input.input_id,
             content: input.content,
             original_draft: input.original_draft,
+            plugin_selections: Vec::new(),
             state: UserInputState::Queued,
         }],
         terminal_items: vec![],
@@ -506,6 +511,7 @@ fn test_steer_idle_submission_skips_queue_until_delivery() {
         input_id: input.input_id,
         content: input.content,
         original_draft: input.original_draft,
+        plugin_selections: Vec::new(),
         state: UserInputState::Dispatching,
     });
     state.settle(
@@ -531,6 +537,7 @@ fn input_with_attachment(id: &str, draft: &str) -> UserInput {
             &[PendingAttachment::image("image/png", "AQID")],
         ),
         original_draft: draft.to_owned(),
+        plugin_selections: Vec::new(),
     }
 }
 

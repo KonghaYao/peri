@@ -93,6 +93,7 @@ async fn test_user_input_enqueue_preserves_wire_identity_and_raw_draft() {
             input_id: "i".into(),
             content: peri_acp_types::messages::MessageContent::text("  中文\n@image /tmp/a.png\n"),
             original_draft: "  中文\n@image /tmp/a.png\n".into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("user input enqueue preserves wire identity and raw draft: fixture task and request must complete successfully");

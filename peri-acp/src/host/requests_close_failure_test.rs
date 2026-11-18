@@ -740,6 +740,7 @@ async fn stop_revoked_queued_input_rolls_back_admission_token() {
             input_id: "00000000-0000-0000-0000-000000000181".into(),
             content: MessageContent::text("被 Stop 撤销的队列输入"),
             original_draft: "被 Stop 撤销的队列输入".into(),
+            plugin_selections: Vec::new(),
         })
         .await
         .expect("队列输入应入队");

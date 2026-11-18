@@ -78,8 +78,45 @@ pub(super) fn build_attachments_label(attachments: &[PendingAttachment]) -> Opti
     Some(parts.join(" · "))
 }
 
+/// composer 底部左侧的插件选择标签。
+///
+/// 只展示插件 ID（`插件: a@mkt · b`）；提交后选择随该条输入冻结，标签不再代表
+/// “当前全局选择”。
+pub(super) fn build_plugin_label(
+    selections: &[peri_acp_types::session::PluginSelection],
+) -> Option<String> {
+    if selections.is_empty() {
+        return None;
+    }
+    let ids = selections
+        .iter()
+        .map(|selection| selection.plugin_id.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(i18n::tr_args(
+        "composer-plugin-selections",
+        &[("plugins".to_string(), FluentValue::from(ids))],
+    ))
+}
+
+/// composer 底部左侧标签：插件选择在前、附件在后，窄屏由 Block 自行截断。
+pub(super) fn build_composer_tags(
+    plugin_label: Option<String>,
+    attachments_label: Option<String>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(plugin) = plugin_label {
+        parts.push(plugin);
+    }
+    if let Some(attachments) = attachments_label {
+        parts.push(attachments);
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 /// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧附件标签
-/// （`[图片] 图片 1`，见 [`build_attachments_label`]）+ 右侧资源线
+/// （`[图片] 图片 1`，见 [`build_attachments_label`]；插件选择见
+/// [`build_plugin_label`]）+ 右侧资源线
 /// （`footer_right`：CPU% · MEM · ctx，原状态栏迁移）。
 /// 窄屏（§11）逐级隐藏：`show_top=false`（h<12）隐藏 title_top 整行；
 /// `show_bottom=false`（h<8）隐藏 title_bottom。
@@ -88,7 +125,7 @@ pub(super) fn build_attachments_label(attachments: &[PendingAttachment]) -> Opti
 pub(super) fn build_composer_block(
     loading: bool,
     session_title: &str,
-    attachments_label: Option<&str>,
+    composer_tags: Option<&str>,
     footer_right: Option<Line<'static>>,
     show_top: bool,
     show_bottom: bool,
@@ -112,8 +149,8 @@ pub(super) fn build_composer_block(
         }
     }
     if show_bottom {
-        // 左侧附件标签 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
-        if let Some(f) = attachments_label {
+        // 左侧插件/附件标签 / 右侧资源线（CPU·MEM·ctx，muted + 资源阈值色）
+        if let Some(f) = composer_tags {
             block = block.title_bottom(Line::from(Span::styled(
                 format!(" {f} "),
                 Style::default().fg(sem.text.muted),

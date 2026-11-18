@@ -849,6 +849,40 @@ fn test_composer_label_non_image_keeps_file_count() {
     assert_eq!(render::build_attachments_label(&[]), None);
 }
 
+/// 插件选择标签只列插件 ID，空选择不产生标签。
+#[test]
+#[serial]
+fn test_composer_plugin_label_lists_selected_ids() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    assert_eq!(
+        render::build_plugin_label(&[
+            peri_acp_types::session::PluginSelection::new("alpha"),
+            peri_acp_types::session::PluginSelection::new("beta@market"),
+        ])
+        .as_deref(),
+        Some("插件: alpha · beta@market")
+    );
+    assert_eq!(render::build_plugin_label(&[]), None);
+}
+
+/// 插件选择在附件之前，两者都存在时共用一个标签行。
+#[test]
+#[serial]
+fn test_composer_tags_put_plugin_selection_before_attachments() {
+    crate::kit::atoms::init_atoms();
+    i18n::init(Some("zh-CN"));
+    assert_eq!(
+        render::build_composer_tags(
+            render::build_plugin_label(&[peri_acp_types::session::PluginSelection::new("alpha")]),
+            render::build_attachments_label(&[png_attachment()]),
+        )
+        .as_deref(),
+        Some("插件: alpha · [图片] 图片 1")
+    );
+    assert_eq!(render::build_composer_tags(None, None), None);
+}
+
 /// 标签 + 边框：composer 底栏确实显示图片标签（端到端，不只测生成函数）。
 #[test]
 #[serial]

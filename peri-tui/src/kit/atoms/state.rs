@@ -239,20 +239,23 @@ impl std::fmt::Debug for PendingAttachment {
 
 /// `INPUT_BUFFER` 排队项：loading 期间缓存的待提交输入。
 ///
-/// 文本与附件必须一起出队——只存文本会在 drain 时静默丢弃用户已提交的图片。
+/// 文本、附件与插件选择必须一起出队——只存文本会在 drain 时静默丢弃用户已提交的
+/// 图片或插件意图。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BufferedInput {
     pub text: String,
     pub attachments: Vec<PendingAttachment>,
+    pub plugin_selections: Vec<peri_acp_types::session::PluginSelection>,
 }
 
 impl BufferedInput {
-    /// 纯文本排队项（无附件）。
+    /// 纯文本排队项（无附件、无插件选择）。
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             attachments: Vec::new(),
+            plugin_selections: Vec::new(),
         }
     }
 
@@ -262,7 +265,18 @@ impl BufferedInput {
         Self {
             text: text.into(),
             attachments,
+            plugin_selections: Vec::new(),
         }
+    }
+
+    /// 带上插件选择的排队项；选择随该条输入冻结，不读取提交时的全局状态。
+    #[must_use]
+    pub fn with_plugin_selections(
+        mut self,
+        plugin_selections: Vec<peri_acp_types::session::PluginSelection>,
+    ) -> Self {
+        self.plugin_selections = plugin_selections;
+        self
     }
 }
 
@@ -270,6 +284,13 @@ impl BufferedInput {
 /// 早期为 OnceLock<Handle<...>>（无消费方）；Slice 3 起输入区订阅显示计数，
 /// 改为 AtomStatic 以获得订阅唤醒（写入自动重渲染）。
 pub static PENDING_ATTACHMENTS: AtomStatic<Vec<PendingAttachment>> = AtomStatic::new(Vec::new);
+
+/// 下一次 AgentText 提交携带的插件选择。
+///
+/// 提交时一次性消费并随输入冻结；撤回恢复时从这里重新显示标签，绝不在 Host
+/// 读取时回退到“当前全局选择”。
+pub static PENDING_PLUGIN_SELECTIONS: AtomStatic<Vec<peri_acp_types::session::PluginSelection>> =
+    AtomStatic::new(Vec::new);
 
 pub static ACP_STATE: AtomStatic<AcpStateSnapshot> = AtomStatic::new(AcpStateSnapshot::default);
 
