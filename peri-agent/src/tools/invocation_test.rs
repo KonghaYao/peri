@@ -168,6 +168,24 @@ fn declared_alias_is_not_rewritten() {
         input
     );
 }
+
+#[test]
+fn normalize_params_is_idempotent() {
+    let tool = SchemaToolStub {
+        name: "Write",
+        properties: vec!["content"],
+    };
+    let once = crate::tools::invocation::normalize_params(
+        json!({"contents": "hello", "path": "/tmp/a"}),
+        Some(&tool),
+    );
+    let twice = crate::tools::invocation::normalize_params(once.clone(), Some(&tool));
+    assert_eq!(
+        once, twice,
+        "proxy dispatch must not re-apply target parameter aliases"
+    );
+    assert_eq!(twice, json!({"content": "hello", "path": "/tmp/a"}));
+}
 struct NamedTool {
     name: &'static str,
     aliases: &'static [&'static str],

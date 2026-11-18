@@ -101,7 +101,7 @@ for aspect in chain:
 | 13 | HumanInTheLoopMiddleware | — | AskUserQuestion | 12_ask_user section | — |
 | 14 | SubAgentMiddleware | before_agent, before_reason_catalog | Agent（+AgentResult） | 11_subagent section | — |
 | 15 | McpMiddleware | before_agent, before_model, before_reason_catalog, before_react_start | MCP 工具（动态）；builtin 实例的 direct 工具 | — | mcp_pool 非空 |
-| 16 | `SearchMiddleware` 槽位（类型 `ToolSearchMiddleware`，关闭键 `ToolSearch`） | before_agent, before_reason_catalog | SearchExtraTools / ExecuteExtraTool | deferred inventory + direct declarations contribution | 默认装配 |
+| 16 | `SearchMiddleware` 槽位（类型 `ToolSearchMiddleware`，关闭键 `ToolSearch`） | before_agent, before_reason_catalog | ToolSearch/ToolInvoke | deferred inventory + direct declarations contribution | 默认装配 |
 | 17 | GoalMiddleware | after_agent | Goal（deferred） | — | goal_controller 非空 |
 
 **脚注**：
@@ -109,7 +109,7 @@ for aspect in chain:
 - **#9 git_attribution**：`before_tool` 暂存 Write/Edit 旧文件内容，`after_tool` 计算贡献字符数；`prompt_contribution()` 声明 Co-Authored-By 指令。
 - **#12/#13**：审批与提问是独立能力。`PermissionMiddleware` 负责审批；`HumanInTheLoopMiddleware::collect_tools()` 使用原始 broker 提供 `AskUserQuestion`。
 - **#14 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResult`；后台任务生命周期遵循 [Session 异步任务架构](session-async-tasks.md)。
-- **#17 goal**：`GoalTool` 是 deferred tool，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问；`after_agent` 注入 steering 并触发自驱续跑。
+- **#17 goal**：`GoalTool` 是 deferred tool，仅通过 `ToolSearch` → `ToolInvoke` 访问；`after_agent` 注入 steering 并触发自驱续跑。
 - **builtin MCP 实例不是链槽位**：Web 搜索 / 抓取、artifact 上传、cron 调度、monitor 输出监控、7 个文件/终端工具与 workflow 编排由 `mcp` 槽位（#15）客户端侧的同进程 builtin MCP 实例（`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow`）提供；实例、原始工具名与逐工具 direct 的单一事实源是 `peri-acp-types/src/builtin_mcp.rs::BUILTIN_MCP_INSTANCES`。关闭键为 v5 能力名（旧 `*Middleware` 键保留为确定性映射 adapter，M4 删除），机制见 [meta-harness.md](meta-harness.md)。v5 默认装配把 builtin 能力收敛为单出口 `peri`：`mcp` 槽位客户端消费一个 builtin server，由 capability router 分派；六实例仅在 `PERI_MCP_BUILTIN=legacy` 回滚路径保留（M4 截止），见 [MCP v5 单出口目标设计](mcp-v5-single-exit.md)。
 
 ---

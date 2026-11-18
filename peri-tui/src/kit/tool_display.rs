@@ -92,19 +92,23 @@ fn format_tool_args_by_name(tool_name: &str, args: &serde_json::Value) -> Option
                 .unwrap_or_default()
                 .to_string(),
         ),
-        "ExecuteExtraTool" | "SearchExtraTools" => {
-            let key = if tool_name == "ExecuteExtraTool" {
-                "tool_name"
-            } else {
-                "query"
-            };
-            Some(
-                args.get(key)
-                    .and_then(|v| v.as_str())
-                    .map(|s| truncate(s, 40))
-                    .unwrap_or_default(),
-            )
+        "ExecuteExtraTool" | "ToolInvoke" => {
+            // 新旧字段成对：canonical `name`/`arguments` 优先，legacy
+            // `tool_name`/`params` 兜底；摘要只读目标名。
+            let target = args
+                .get("name")
+                .or_else(|| args.get("tool_name"))
+                .and_then(|v| v.as_str())
+                .map(|s| truncate(s, 40))
+                .unwrap_or_default();
+            Some(target)
         }
+        "SearchExtraTools" | "ToolSearch" => Some(
+            args.get("query")
+                .and_then(|v| v.as_str())
+                .map(|s| truncate(s, 40))
+                .unwrap_or_default(),
+        ),
         "AgentResult" => Some(
             args.get("task_id")
                 .and_then(|v| v.as_str())

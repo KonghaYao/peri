@@ -16,6 +16,7 @@ use peri_agent::agent::stages::SharedToolMap;
 use peri_agent::agent::stages::StageContext;
 use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::middleware::MiddlewareChain;
+use peri_agent::session::tool_catalog::CatalogRefreshError;
 use peri_agent::session::tool_catalog::SessionToolCatalog;
 use peri_agent::session::FrozenContext;
 use peri_agent::session::Session;
@@ -29,6 +30,7 @@ use peri_middlewares::permission::PermissionMode;
 use peri_middlewares::permission::SharedPermissionMode;
 use peri_middlewares::ExecuteExtraToolResolver;
 use peri_middlewares::EXECUTE_EXTRA_TOOL_NAME;
+use peri_middlewares::TOOL_INVOKE_NAME;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -95,7 +97,7 @@ fn make_context(
     let shared: SharedToolMap = Arc::new(RwLock::new(tools));
     let catalog = Arc::new(
         SessionToolCatalog::try_new(shared.read().clone(), None)
-            .unwrap_or_else(|_| SessionToolCatalog::new(BTreeMap::new(), None)),
+            .expect("test fixture catalog must be constructible"),
     );
     let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
         .with_tools(shared)
@@ -109,63 +111,76 @@ fn make_context(
 
 #[tokio::test]
 async fn wrapper_policy_event_and_result_project_canonical_target() {
-    let invoked = Arc::new(Mutex::new(Vec::new()));
-    let policy = Arc::new(Mutex::new(Vec::new()));
-    let write: Arc<dyn BaseTool> = Arc::new(RecordingTool {
-        name: "Write",
-        aliases: &["Save"],
-        calls: Arc::clone(&invoked),
-        schema: json!({
-            "type": "object",
-            "properties": {"file_path": {"type": "string"}}
-        }),
-    });
-    let shared = Arc::new(RwLock::new(BTreeMap::from([(
-        "Write".to_string(),
-        Arc::clone(&write),
-    )])));
-    let wrapper: Arc<dyn BaseTool> = Arc::new(
-        peri_middlewares::tool_search::ExecuteExtraTool::new(Arc::clone(&shared)),
-    );
-    let mut tools = shared.read().clone();
-    tools.insert(EXECUTE_EXTRA_TOOL_NAME.to_string(), wrapper);
-    let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(PolicyRecorder(Arc::clone(&policy))));
-    let (context, mut events) = make_context(tools, chain);
-    let reasoning = Reasoning::with_tools(
-        "",
-        vec![ToolCall::new(
-            "call-1",
+    for (wrapper_name, input) in [
+        (
+            TOOL_INVOKE_NAME,
+            json!({"name": "SAVE", "arguments": {"path": "/tmp/a"}}),
+        ),
+        (
             EXECUTE_EXTRA_TOOL_NAME,
             json!({"tool_name": "SAVE", "params": {"path": "/tmp/a"}}),
-        )],
-    );
+        ),
+    ] {
+        let invoked = Arc::new(Mutex::new(Vec::new()));
+        let policy = Arc::new(Mutex::new(Vec::new()));
+        let write: Arc<dyn BaseTool> = Arc::new(RecordingTool {
+            name: "Write",
+            aliases: &["Save"],
+            calls: Arc::clone(&invoked),
+            schema: json!({
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}}
+            }),
+        });
+        let shared = Arc::new(RwLock::new(BTreeMap::from([(
+            "Write".to_string(),
+            Arc::clone(&write),
+        )])));
+        let wrapper: Arc<dyn BaseTool> = Arc::new(
+            peri_middlewares::tool_search::ExecuteExtraTool::new(Arc::clone(&shared)),
+        );
+        let mut tools = shared.read().clone();
+        tools.insert(TOOL_INVOKE_NAME.to_string(), wrapper);
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(PolicyRecorder(Arc::clone(&policy))));
+        let (context, mut events) = make_context(tools, chain);
+        let reasoning =
+            Reasoning::with_tools("", vec![ToolCall::new("call-1", wrapper_name, input)]);
 
-    let outcome = tool_dispatch::dispatch_tools(
-        &context,
-        &reasoning,
-        &context.runtime.tool_catalog.snapshot(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+        let outcome = tool_dispatch::dispatch_tools(
+            &context,
+            &reasoning,
+            &context.runtime.tool_catalog.snapshot(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
-    {
-        let policy_calls = policy.lock();
-        assert_eq!(policy_calls.len(), 1);
-        assert_eq!(policy_calls[0].id, "call-1");
-        assert_eq!(policy_calls[0].name, "Write");
-        assert_eq!(policy_calls[0].input, json!({"file_path": "/tmp/a"}));
-    }
-    assert_eq!(*invoked.lock(), vec![json!({"file_path": "/tmp/a"})]);
-    assert_eq!(outcome.results[0].1.tool_name, "Write");
-    let started = events.render_rx.recv().await.unwrap();
-    match started {
-        peri_agent::agent::events_v2::RenderEvent::ToolStarted { name, input, .. } => {
-            assert_eq!(name, "Write");
-            assert_eq!(input, json!({"file_path": "/tmp/a"}));
+        {
+            let policy_calls = policy.lock();
+            assert_eq!(policy_calls.len(), 1, "{wrapper_name}");
+            assert_eq!(policy_calls[0].id, "call-1");
+            assert_eq!(policy_calls[0].name, "Write", "{wrapper_name}");
+            assert_eq!(
+                policy_calls[0].input,
+                json!({"file_path": "/tmp/a"}),
+                "{wrapper_name}"
+            );
         }
-        event => panic!("expected canonical ToolStarted, got {event:?}"),
+        assert_eq!(
+            *invoked.lock(),
+            vec![json!({"file_path": "/tmp/a"})],
+            "{wrapper_name}"
+        );
+        assert_eq!(outcome.results[0].1.tool_name, "Write");
+        let started = events.render_rx.recv().await.unwrap();
+        match started {
+            peri_agent::agent::events_v2::RenderEvent::ToolStarted { name, input, .. } => {
+                assert_eq!(name, "Write");
+                assert_eq!(input, json!({"file_path": "/tmp/a"}));
+            }
+            event => panic!("expected canonical ToolStarted, got {event:?}"),
+        }
     }
 }
 
@@ -196,29 +211,34 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
         peri_middlewares::tool_search::ExecuteExtraTool::new(Arc::clone(&shared)),
     );
     let mut tools = shared.read().clone();
-    tools.insert(EXECUTE_EXTRA_TOOL_NAME.to_string(), wrapper);
+    tools.insert(TOOL_INVOKE_NAME.to_string(), wrapper);
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(PolicyRecorder(Arc::clone(&policy))));
     let (context, _) = make_context(tools, chain);
 
-    // 1) ExecuteExtraTool wrapper 路径
-    let reasoning = Reasoning::with_tools(
-        "",
-        vec![ToolCall::new(
-            "call-grep-1",
+    // 1) ToolInvoke wrapper 路径（新旧入参各一次）
+    for (wrapper_name, input) in [
+        (
+            TOOL_INVOKE_NAME,
+            json!({"name": "Grep", "arguments": {"pattern": "tokio|serde", "path": "/tmp/a"}}),
+        ),
+        (
             EXECUTE_EXTRA_TOOL_NAME,
             json!({"tool_name": "Grep", "params": {"pattern": "tokio|serde", "path": "/tmp/a"}}),
-        )],
-    );
-    let outcome = tool_dispatch::dispatch_tools(
-        &context,
-        &reasoning,
-        &context.runtime.tool_catalog.snapshot(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert!(!outcome.results[0].1.is_error);
+        ),
+    ] {
+        let reasoning =
+            Reasoning::with_tools("", vec![ToolCall::new("call-grep-1", wrapper_name, input)]);
+        let outcome = tool_dispatch::dispatch_tools(
+            &context,
+            &reasoning,
+            &context.runtime.tool_catalog.snapshot(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.results[0].1.is_error, "{wrapper_name}");
+    }
 
     // 2) 直接调用路径（tool_dispatch 本地归一化）
     let reasoning = Reasoning::with_tools(
@@ -242,6 +262,7 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
     // policy 与执行 input 都保留 path，不重命名为 file_path
     let expected = vec![
         json!({"pattern": "tokio|serde", "path": "/tmp/a"}),
+        json!({"pattern": "tokio|serde", "path": "/tmp/a"}),
         json!({"pattern": "tokio", "path": "/tmp/a"}),
     ];
     let policy_calls = policy.lock();
@@ -256,7 +277,7 @@ async fn grep_path_parameter_is_preserved_not_renamed_to_file_path() {
 }
 
 #[tokio::test]
-async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invoke_side_effects() {
+async fn malformed_and_unknown_wrapper_targets_have_no_policy_or_invoke_side_effects() {
     let invoked = Arc::new(Mutex::new(Vec::new()));
     let policy = Arc::new(Mutex::new(Vec::new()));
     let target: Arc<dyn BaseTool> = Arc::new(RecordingTool {
@@ -267,7 +288,7 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
     });
     let conflicting: Arc<dyn BaseTool> = Arc::new(RecordingTool {
         name: "OtherBash",
-        aliases: &["Shell"],
+        aliases: &[],
         calls: Arc::clone(&invoked),
         schema: json!({}),
     });
@@ -279,23 +300,33 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
         peri_middlewares::tool_search::ExecuteExtraTool::new(Arc::clone(&shared)),
     );
     let mut tools = shared.read().clone();
-    tools.insert(EXECUTE_EXTRA_TOOL_NAME.to_string(), wrapper);
+    tools.insert(TOOL_INVOKE_NAME.to_string(), wrapper);
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(PolicyRecorder(Arc::clone(&policy))));
     let (context, mut events) = make_context(tools, chain);
     let reasoning = Reasoning::with_tools(
         "",
         vec![
-            ToolCall::new("malformed", EXECUTE_EXTRA_TOOL_NAME, json!({"params": {}})),
+            ToolCall::new("malformed", TOOL_INVOKE_NAME, json!({"arguments": {}})),
             ToolCall::new(
-                "unknown",
-                EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": "missing", "params": {}}),
+                "conflicting-name",
+                TOOL_INVOKE_NAME,
+                json!({"name": "Bash", "tool_name": "OtherBash", "arguments": {}}),
             ),
             ToolCall::new(
-                "ambiguous",
+                "conflicting-arguments",
+                TOOL_INVOKE_NAME,
+                json!({"name": "Bash", "arguments": {"a": 1}, "params": {"a": 2}}),
+            ),
+            ToolCall::new(
+                "unknown",
+                TOOL_INVOKE_NAME,
+                json!({"name": "missing", "arguments": {}}),
+            ),
+            ToolCall::new(
+                "legacy-malformed",
                 EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": "shell", "params": {}}),
+                json!({"params": {}}),
             ),
         ],
     );
@@ -313,6 +344,29 @@ async fn malformed_unknown_and_ambiguous_wrapper_targets_have_no_policy_or_invok
     assert!(invoked.lock().is_empty());
     assert!(outcome.results.iter().all(|(_, result)| result.is_error));
     assert!(events.render_rx.try_recv().is_err());
+}
+
+/// 重复 alias 的 fixture 无法构成合法目录：这是目录层的唯一防线，单独断言，
+/// 避免它把上面的解析拒绝用例退化成「空目录」测试。
+#[test]
+fn duplicate_alias_fixture_is_rejected_by_catalog() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let bash: Arc<dyn BaseTool> = Arc::new(RecordingTool {
+        name: "Bash",
+        aliases: &["Shell"],
+        calls: Arc::clone(&calls),
+        schema: json!({}),
+    });
+    let other: Arc<dyn BaseTool> = Arc::new(RecordingTool {
+        name: "OtherBash",
+        aliases: &["Shell"],
+        calls: Arc::clone(&calls),
+        schema: json!({}),
+    });
+    let tools = BTreeMap::from([("Bash".to_string(), bash), ("OtherBash".to_string(), other)]);
+    let error = SessionToolCatalog::try_new(tools, None)
+        .expect_err("duplicate alias must not build a catalog");
+    assert!(matches!(error, CatalogRefreshError::AliasConflict));
 }
 
 #[cfg(unix)]
@@ -396,7 +450,7 @@ async fn accept_edit_applies_to_wrapper_write_and_edit_but_not_bash_or_mcp() {
     }
     let shared = Arc::new(RwLock::new(tools.clone()));
     tools.insert(
-        EXECUTE_EXTRA_TOOL_NAME.to_string(),
+        TOOL_INVOKE_NAME.to_string(),
         Arc::new(peri_middlewares::tool_search::ExecuteExtraTool::new(shared)),
     );
     let mut chain = MiddlewareChain::new();
@@ -408,28 +462,110 @@ async fn accept_edit_applies_to_wrapper_write_and_edit_but_not_bash_or_mcp() {
         None,
     )));
     let (context, _) = make_context(tools, chain);
+    for (wrapper_name, inputs) in [
+        (
+            TOOL_INVOKE_NAME,
+            [
+                json!({"name": "save", "arguments": {}}),
+                json!({"name": "Edit", "arguments": {}}),
+                json!({"name": "SHELL", "arguments": {}}),
+                json!({"name": "mcp__server__tool", "arguments": {}}),
+            ],
+        ),
+        (
+            EXECUTE_EXTRA_TOOL_NAME,
+            [
+                json!({"tool_name": "save", "params": {}}),
+                json!({"tool_name": "Edit", "params": {}}),
+                json!({"tool_name": "SHELL", "params": {}}),
+                json!({"tool_name": "mcp__server__tool", "params": {}}),
+            ],
+        ),
+    ] {
+        let reasoning = Reasoning::with_tools(
+            "",
+            vec![
+                ToolCall::new("write", wrapper_name, inputs[0].clone()),
+                ToolCall::new("edit", wrapper_name, inputs[1].clone()),
+                ToolCall::new("bash", wrapper_name, inputs[2].clone()),
+                ToolCall::new("mcp", wrapper_name, inputs[3].clone()),
+            ],
+        );
+
+        let outcome = tool_dispatch::dispatch_tools(
+            &context,
+            &reasoning,
+            &context.runtime.tool_catalog.snapshot(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let result_by_id: std::collections::HashMap<_, _> = outcome
+            .results
+            .iter()
+            .map(|(_, result)| (result.tool_call_id.as_str(), result))
+            .collect();
+        assert!(!result_by_id["write"].is_error && !result_by_id["edit"].is_error);
+        assert!(result_by_id["bash"].is_error && result_by_id["mcp"].is_error);
+    }
+
+    assert_eq!(
+        policy
+            .lock()
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Write",
+            "Edit",
+            "Bash",
+            "mcp__server__tool",
+            "Write",
+            "Edit",
+            "Bash",
+            "mcp__server__tool",
+        ]
+    );
+    assert_eq!(calls.lock().len(), 4);
+}
+
+#[tokio::test]
+async fn canonical_and_legacy_inputs_share_target_policy_and_one_execution() {
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let policy = Arc::new(Mutex::new(Vec::new()));
+    let target: Arc<dyn BaseTool> = Arc::new(RecordingTool {
+        name: "Echo",
+        aliases: &[],
+        calls: Arc::clone(&invoked),
+        schema: json!({"type": "object", "properties": {"value": {"type": "string"}}}),
+    });
+    let shared = Arc::new(RwLock::new(BTreeMap::from([(
+        "Echo".to_string(),
+        Arc::clone(&target),
+    )])));
+    let mut tools = shared.read().clone();
+    tools.insert(
+        TOOL_INVOKE_NAME.to_string(),
+        Arc::new(peri_middlewares::tool_search::ExecuteExtraTool::new(
+            Arc::clone(&shared),
+        )),
+    );
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(PolicyRecorder(Arc::clone(&policy))));
+    let (context, _) = make_context(tools, chain);
     let reasoning = Reasoning::with_tools(
         "",
         vec![
             ToolCall::new(
-                "write",
-                EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": "save", "params": {}}),
+                "canonical",
+                TOOL_INVOKE_NAME,
+                json!({"name": "Echo", "arguments": {"value": "same"}}),
             ),
             ToolCall::new(
-                "edit",
+                "legacy",
                 EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": "Edit", "params": {}}),
-            ),
-            ToolCall::new(
-                "bash",
-                EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": "SHELL", "params": {}}),
-            ),
-            ToolCall::new(
-                "mcp",
-                EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": "mcp__server__tool", "params": {}}),
+                json!({"tool_name": "Echo", "params": {"value": "same"}}),
             ),
         ],
     );
@@ -443,22 +579,16 @@ async fn accept_edit_applies_to_wrapper_write_and_edit_but_not_bash_or_mcp() {
     .await
     .unwrap();
 
+    assert!(outcome.results.iter().all(|(_, result)| !result.is_error));
+    let policy_calls = policy.lock();
+    assert_eq!(policy_calls.len(), 2);
+    assert!(policy_calls.iter().all(|call| call.name == "Echo"));
+    assert_eq!(policy_calls[0].input, policy_calls[1].input);
     assert_eq!(
-        policy
-            .lock()
-            .iter()
-            .map(|call| call.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Write", "Edit", "Bash", "mcp__server__tool"]
+        *invoked.lock(),
+        vec![json!({"value": "same"}), json!({"value": "same"})],
+        "each wrapper call must execute its bound target exactly once"
     );
-    assert_eq!(calls.lock().len(), 2);
-    let result_by_id: std::collections::HashMap<_, _> = outcome
-        .results
-        .iter()
-        .map(|(_, result)| (result.tool_call_id.as_str(), result))
-        .collect();
-    assert!(!result_by_id["write"].is_error && !result_by_id["edit"].is_error);
-    assert!(result_by_id["bash"].is_error && result_by_id["mcp"].is_error);
 }
 
 struct RejectingBroker;

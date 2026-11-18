@@ -368,7 +368,7 @@ mod captured {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect();
-        for expected in ["SearchExtraTools", "ExecuteExtraTool"] {
+        for expected in ["ToolSearch", "ToolInvoke"] {
             assert!(
                 names.contains(&expected),
                 "延迟工具发现/执行入口必须在模型面工具目录: {names:?}"
@@ -456,7 +456,7 @@ mod captured {
             .map(|tool| tool.name.as_str())
             .collect();
         assert!(
-            !names.contains(&"SearchExtraTools") && !names.contains(&"ExecuteExtraTool"),
+            !names.contains(&"ToolSearch") && !names.contains(&"ToolInvoke"),
             "关闭 ToolSearch 后延迟入口不得出现在工具目录: {names:?}"
         );
         assert!(

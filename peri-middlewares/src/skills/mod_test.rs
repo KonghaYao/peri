@@ -69,6 +69,8 @@ fn test_annotation_keeps_source_without_fabricating_tool_prefix() {
         assert!(!annotated.contains("mcp__"));
         assert!(!annotated.contains("SearchExtraTools"));
         assert!(!annotated.contains("ExecuteExtraTool"));
+        assert!(!annotated.contains("ToolSearch"));
+        assert!(!annotated.contains("ToolInvoke"));
         assert!(annotated.ends_with("\n\n# Body"));
     }
 }

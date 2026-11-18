@@ -34,10 +34,22 @@ pub struct DispatchOutcome {
     pub results: Vec<(ToolCall, ToolResult)>,
 }
 
-/// ExecuteExtraTool 在 target 解析失败时尚未投影 canonical tool；与 policy/invoke 一致，
-/// 不产生 render 副作用（避免 UI 仅展示误导性的 wrapper 行）。
-pub(super) fn should_emit_settled_tool_render(call: &ToolCall) -> bool {
-    call.name != "ExecuteExtraTool"
+/// ToolInvoke 在 target 解析失败时尚未投影 canonical tool；与 policy/invoke 一致，
+/// 不产生 render 副作用（避免 UI 仅展示误导性的 wrapper 行）。仅当目录把该名字
+/// 解析为宿主代理时抑制；外部 MCP 同名工具与无法解析的名字保持成对 emit。
+pub(super) fn should_emit_settled_tool_render(ctx: &StageContext, call: &ToolCall) -> bool {
+    if !peri_acp_types::tool_proxy::is_invoke_proxy_name(&call.name) {
+        return true;
+    }
+    let snapshot = ctx.runtime.tool_catalog.snapshot();
+    let canonical = snapshot
+        .aliases
+        .get(&call.name.to_ascii_lowercase())
+        .map_or(call.name.as_str(), String::as_str);
+    match snapshot.tools.get(canonical) {
+        Some(entry) => !peri_acp_types::tool_proxy::is_host_invoke_proxy(entry.tool.as_ref()),
+        None => true,
+    }
 }
 
 /// 为 middleware 前已结算的工具调用（解析失败、畸形 id 等）补全 render 事件。
@@ -164,7 +176,7 @@ pub async fn dispatch_tools(
             reason = %result.output,
             "tool call resolution failed"
         );
-        if should_emit_settled_tool_render(call) {
+        if should_emit_settled_tool_render(ctx, call) {
             emit_settled_tool_render(ctx, call, result, ai_msg_id);
         }
     }

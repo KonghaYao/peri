@@ -7,7 +7,7 @@ use serial_test::serial;
 ///
 /// 两个观察面分别断言，不作字面集合相等：
 /// - **直连面**：`ModelRequest.tools` 不得出现任何 `mcp__cron__*`；
-/// - **deferred 目录面**：`SearchExtraTools` 命中名单必须包含 cron 三工具的
+/// - **deferred 目录面**：`ToolSearch` 命中名单必须包含 cron 三工具的
 ///   effective name。
 ///
 /// 观察面非空洞的正控制（否则「不含」可能只是因为 pool 里根本没有 builtin 实例）：

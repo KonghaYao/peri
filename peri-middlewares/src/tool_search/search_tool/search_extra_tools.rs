@@ -1,12 +1,12 @@
 use super::{
     async_trait, direct_tools_description, fmt, json, Arc, BaseTool, Debug, Formatter,
-    ToolSearchIndex, Value, SEARCH_EXTRA_TOOLS_NAME,
+    ToolSearchIndex, Value, SEARCH_EXTRA_TOOLS_NAME, TOOL_SEARCH_NAME,
 };
 
 /// 搜索延迟加载工具的元工具
 ///
 /// LLM 通过此工具发现不在直接工具列表中的 deferred tools，
-/// 获取完整 schema 后通过 ExecuteExtraTool 调用。
+/// 获取完整 schema 后通过 ToolInvoke 调用。
 pub struct SearchExtraTools {
     pub(super) index: Arc<ToolSearchIndex>,
     /// description 基于当前 session 的实际 direct tool 集合构造。
@@ -16,7 +16,7 @@ pub struct SearchExtraTools {
 impl Debug for SearchExtraTools {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("SearchExtraTools")
+            .debug_struct("ToolSearch")
             .field("description", &self.description)
             .finish_non_exhaustive()
     }
@@ -34,7 +34,7 @@ impl SearchExtraTools {
         direct_tool_names: impl IntoIterator<Item = &'a str>,
     ) -> Self {
         let description = format!(
-            "Search for deferred tools by name or keyword. LOW PRIORITY — only use this tool when no directly available tool can accomplish the task. {} Use directly available tools directly. This tool is for discovering additional capabilities like MCP tools, cron scheduling, etc.\n\nReturns matching tools with their full JSON schemas. 没有匹配时返回空数组。\n\nIMPORTANT: ExecuteExtraTool is available in your tool list. After this search returns tool names, you MUST call ExecuteExtraTool with {{\"tool_name\": \"<returned_name>\", \"params\": {{...}}}} to invoke the deferred tool. This is the ONLY way to execute deferred tools — do not read source code or analyze whether the tool is callable, just use ExecuteExtraTool directly.\n\nQuery forms:\n- \"select:mcp__peri__cron_list,mcp__peri__cron_remove\" — fetch these exact tools by name\n- \"slack send\" — keyword search, best matches returned",
+            "Search for deferred tools by name or keyword. LOW PRIORITY — only use this tool when no directly available tool can accomplish the task. {} Use directly available tools directly. This tool is for discovering additional capabilities like MCP tools, cron scheduling, etc.\n\nReturns matching tools with their full JSON schemas as `{{\"results\": [...], \"total_available\": N}}`; `results` is an empty array when nothing matches.\n\nIMPORTANT: ToolInvoke is available in your tool list. After this search returns tool names, you MUST call ToolInvoke with {{\"name\": \"<returned_name>\", \"arguments\": {{...}}}} to invoke the deferred tool. This is the ONLY way to execute deferred tools — do not read source code or analyze whether the tool is callable, just use ToolInvoke directly.\n\nQuery forms:\n- \"select:mcp__peri__cron_list,mcp__peri__cron_remove\" — fetch these exact tools by name\n- \"slack send\" — keyword search, best matches returned",
             direct_tools_description(direct_tool_names)
         );
         Self { index, description }
@@ -44,7 +44,12 @@ impl SearchExtraTools {
 #[async_trait]
 impl BaseTool for SearchExtraTools {
     fn name(&self) -> &str {
-        SEARCH_EXTRA_TOOLS_NAME
+        TOOL_SEARCH_NAME
+    }
+
+    /// 旧名仅作为 resolver alias，不进入模型 schema。
+    fn aliases(&self) -> &[&str] {
+        &[SEARCH_EXTRA_TOOLS_NAME]
     }
 
     fn is_direct(&self) -> bool {
@@ -57,12 +62,12 @@ impl BaseTool for SearchExtraTools {
     }
 
     /// 提示词层声明模板（design v2 §2.5.3）：说明桥接用途——Deferred 工具
-    /// 对 LLM 不可直接见，必须先经此发现、再由 ExecuteExtraTool 调用。
-    /// title 不覆盖——走派生路径（"SearchExtraTools" → "Search Extra Tools"）。
+    /// 对 LLM 不可直接见，必须先经此发现、再由 ToolInvoke 调用。
+    /// title 不覆盖——走派生路径（"ToolSearch" → "Tool Search"）。
     fn prompt_declaration(&self) -> Option<String> {
         Some(
             "Discover deferred tools by name or keyword → `{{name}}` ({{title}}). \
-             Deferred tools are not directly visible to you; find them here, then invoke them via ExecuteExtraTool."
+             Deferred tools are not directly visible to you; find them here, then invoke them via ToolInvoke."
                 .to_string(),
         )
     }
@@ -96,7 +101,7 @@ impl BaseTool for SearchExtraTools {
         let query = input
             .get("query")
             .and_then(|v| v.as_str())
-            .ok_or("SearchExtraTools: missing required 'query' parameter")?;
+            .ok_or("ToolSearch: missing required 'query' parameter")?;
 
         let max_results = input
             .get("max_results")

@@ -2,14 +2,17 @@
 
 // ─── 共享常量 ────────────────────────────────────────────────────────────────
 
-/// ExecuteExtraTool 元工具名称
-pub const EXECUTE_EXTRA_TOOL_NAME: &str = "ExecuteExtraTool";
-/// SearchExtraTools 元工具名称
-pub const SEARCH_EXTRA_TOOLS_NAME: &str = "SearchExtraTools";
-/// ExecuteExtraTool 输入字段名：目标工具名
-pub const EXTRA_TOOL_NAME_FIELD: &str = "tool_name";
-/// ExecuteExtraTool 输入字段名：目标工具参数
-pub const EXTRA_TOOL_PARAMS_FIELD: &str = "params";
+pub use peri_acp_types::tool_proxy::{
+    EXECUTE_EXTRA_TOOL_NAME, LEGACY_PROXY_ARGUMENTS_FIELD, LEGACY_PROXY_NAME_FIELD,
+    PROXY_ARGUMENTS_FIELD, PROXY_NAME_FIELD, SEARCH_EXTRA_TOOLS_NAME, TOOL_INVOKE_NAME,
+    TOOL_SEARCH_NAME,
+};
+use serde_json::Value;
+
+/// 迁移期调用代理字段：目标工具名（值固定为 `tool_name`）。
+pub const EXTRA_TOOL_NAME_FIELD: &str = LEGACY_PROXY_NAME_FIELD;
+/// 迁移期调用代理字段：目标工具参数（值固定为 `params`）。
+pub const EXTRA_TOOL_PARAMS_FIELD: &str = LEGACY_PROXY_ARGUMENTS_FIELD;
 
 // ─── Core tool name constants ──────────────────────────────────────────────
 
@@ -28,34 +31,89 @@ pub const TOOL_TODO: &str = "TodoWrite";
 pub const TOOL_SKILL: &str = "SkillTool";
 pub const TOOL_DISCOVER_SKILLS: &str = "DiscoverSkillsTool";
 
-pub fn parse_extra_tool_call(
-    input: &serde_json::Value,
-) -> Result<(String, serde_json::Value), String> {
-    let tool_name = input
-        .get(EXTRA_TOOL_NAME_FIELD)
-        .and_then(serde_json::Value::as_str)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| "malformed ExecuteExtraTool invocation".to_string())?;
-    let params = input
-        .get(EXTRA_TOOL_PARAMS_FIELD)
-        .filter(|value| value.is_object())
-        .cloned()
-        .ok_or_else(|| "malformed ExecuteExtraTool invocation".to_string())?;
-    Ok((tool_name.to_string(), params))
+/// 归一化后的代理调用（新字段与旧字段共用同一份事实）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProxyCall {
+    pub target_name: String,
+    pub arguments: Value,
+}
+
+/// 统一解析 ToolInvoke 与 ExecuteExtraTool 的外层参数。
+///
+/// 新旧字段先归一化再校验：字段同时出现且值不同即拒绝，未知字段忽略。
+pub fn parse_proxy_call(input: &Value) -> Result<ProxyCall, String> {
+    Ok(ProxyCall {
+        target_name: parse_proxy_name(input)?,
+        arguments: parse_proxy_arguments(input)?,
+    })
+}
+
+/// 读取一个 name 字段：**存在即必须是**非空字符串；缺失才是 None。
+///
+/// 空串、数字、null 都是畸形输入，不能静默回退到另一字段，否则畸形代理调用会
+/// 被当成合法目标执行。
+fn parse_name_field<'a>(input: &'a Value, field: &str) -> Result<Option<&'a str>, String> {
+    match input.get(field) {
+        None => Ok(None),
+        Some(Value::String(name)) if !name.is_empty() => Ok(Some(name)),
+        Some(_) => Err(format!(
+            "malformed ToolInvoke invocation: '{field}' must be a non-empty string"
+        )),
+    }
+}
+
+fn parse_proxy_name(input: &Value) -> Result<String, String> {
+    let canonical = parse_name_field(input, PROXY_NAME_FIELD)?;
+    let legacy = parse_name_field(input, LEGACY_PROXY_NAME_FIELD)?;
+    match (canonical, legacy) {
+        (Some(canonical), Some(legacy)) if canonical != legacy => {
+            Err("conflicting ToolInvoke name fields".to_string())
+        }
+        (Some(name), _) | (_, Some(name)) => Ok(name.to_string()),
+        (None, None) => {
+            Err("malformed ToolInvoke invocation: missing non-empty 'name'".to_string())
+        }
+    }
+}
+
+fn parse_proxy_arguments(input: &Value) -> Result<Value, String> {
+    let canonical = input.get(PROXY_ARGUMENTS_FIELD);
+    let legacy = input.get(LEGACY_PROXY_ARGUMENTS_FIELD);
+    let canonical_args = canonical.and_then(Value::as_object);
+    let legacy_args = legacy.and_then(Value::as_object);
+    if (canonical.is_some() && canonical_args.is_none())
+        || (legacy.is_some() && legacy_args.is_none())
+    {
+        return Err("malformed ToolInvoke invocation: arguments must be an object".to_string());
+    }
+    match (canonical_args, legacy_args) {
+        (Some(canonical), Some(legacy)) if canonical != legacy => {
+            Err("conflicting ToolInvoke arguments fields".to_string())
+        }
+        (Some(arguments), _) => Ok(Value::Object(arguments.clone())),
+        (_, Some(arguments)) => Ok(Value::Object(arguments.clone())),
+        (None, None) => {
+            Err("malformed ToolInvoke invocation: missing 'arguments' object".to_string())
+        }
+    }
+}
+
+/// ExecuteExtraTool 的兼容入口：唯一转发到 [`parse_proxy_call`]。
+pub fn parse_extra_tool_call(input: &Value) -> Result<(String, Value), String> {
+    parse_proxy_call(input).map(|call| (call.target_name, call.arguments))
 }
 
 /// 解析有效的工具名称
 ///
-/// 当 tool_name 为 [`EXECUTE_EXTRA_TOOL_NAME`] 时，从 `input[EXTRA_TOOL_NAME_FIELD]` 提取目标工具名，
-/// 用于 HITL 权限判断。否则直接返回原始工具名。
+/// 当 tool_name 为调用代理（[`TOOL_INVOKE_NAME`] 或旧名 [`EXECUTE_EXTRA_TOOL_NAME`]）时，
+/// 从统一解析器提取目标工具名，用于 HITL 权限判断。解析失败（字段冲突/畸形）时返回
+/// 外层名，由权限层按 fail-closed 处理，避免畸形代理调用拿到目标工具的免审批资格。
 #[must_use]
-pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -> String {
-    if tool_name == EXECUTE_EXTRA_TOOL_NAME {
-        input
-            .get(EXTRA_TOOL_NAME_FIELD)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| tool_name.to_string())
+pub fn resolve_effective_tool_name(tool_name: &str, input: &Value) -> String {
+    if peri_acp_types::tool_proxy::is_invoke_proxy_name(tool_name) {
+        parse_proxy_call(input)
+            .map(|call| call.target_name)
+            .unwrap_or_else(|_| tool_name.to_string())
     } else {
         tool_name.to_string()
     }

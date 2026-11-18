@@ -8,7 +8,7 @@
 ## 1. 设计原则
 
 1. **工具无状态**：工具实例不持有可变状态。同一工具实例可被多个 Agent 并发调用，互不干扰。执行所需上下文（cwd、对话历史）通过只读引用传入，不写回。
-2. **渐进式可见性**：工具由 `BaseTool::is_direct()` 分为 Direct（直接进入 LLM tools）与 Deferred（经 ToolSearch 按需发现）。`SearchExtraTools` / `ExecuteExtraTool` 是 Direct 元工具；具体可见集合以每个 session/turn 经过 middleware disabled 与 agent filter 后的本地工具视图为准。
+2. **渐进式可见性**：工具由 `BaseTool::is_direct()` 分为 Direct（直接进入 LLM tools）与 Deferred（经 ToolSearch 按需发现）。`ToolSearch` / `ToolInvoke` 是 Direct 元工具；具体可见集合以每个 session/turn 经过 middleware disabled 与 agent filter 后的本地工具视图为准。
 3. **原子提交**：一轮工具调用的 AI 消息和全部 ToolResult 一同写入 MessageTranscript。不产生孤儿 tool_use——任何时候，所有 ToolUse 都有配对的 ToolResult。
 4. **工具失败不中断循环**：工具执行失败不终止 ReAct 循环。错误结果写入 Transcript 后，由 LLM 在下一轮自行判断后续。
 5. **审批在调用前**：编辑类工具在真正执行前完成 HITL 审批。审批拒绝产生结果记录而非跳过，保持 Transcript 完整。
@@ -25,7 +25,7 @@ graph TB
 
     subgraph LAYER["工具可见性"]
         DIRECT["Direct Tools<br/>is_direct() = true<br/>当前 session 直接进入 LLM 请求"]
-        META["Direct Meta Tools<br/>SearchExtraTools<br/>ExecuteExtraTool"]
+        META["Direct Meta Tools<br/>ToolSearch<br/>ToolInvoke"]
         DEFER["Deferred Tools<br/>is_direct() = false<br/>经 ToolSearch 发现/执行"]
 
         DIRECT --> META
@@ -82,7 +82,7 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 | Direct | 当前 session 中直接可见 | 高频工具及桥接元工具 | session-local 工具视图中 `is_direct() = true` |
 | Deferred | 不直接可见 | 低频或动态注册工具 | session-local 工具视图中 `is_direct() = false`，进入 ToolSearch 索引 |
 
-`SearchExtraTools` 与 `ExecuteExtraTool` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则是 builtin `artifact` MCP 实例（`mcp-packages/artifact/src/{server,tool}.rs`）的**工具核心**，模型面名字为原始名 `artifact`，其 Direct 身份来自注册表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。宿主侧实例注册、context 与 dispatch 仍由 `peri-middlewares/src/mcp/builtin/` 持有，插件路径总表见 [MCP packages 代码索引](../code-index/mcp-packages.md)。
+`ToolSearch` 与 `ToolInvoke` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则是 builtin `artifact` MCP 实例（`mcp-packages/artifact/src/{server,tool}.rs`）的**工具核心**，模型面名字为原始名 `artifact`，其 Direct 身份来自注册表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。宿主侧实例注册、context 与 dispatch 仍由 `peri-middlewares/src/mcp/builtin/` 持有，插件路径总表见 [MCP packages 代码索引](../code-index/mcp-packages.md)。
 
 工具集合先由 middleware 收集，再应用 disabled middleware 与 agent allowlist/disallowlist 过滤，形成每 turn 的 session-local 工具视图。ToolSearch 的 direct 能力说明、deferred 索引和最终 LLM tools 都必须从该视图派生，不能从静态名称清单推断。
 
@@ -105,10 +105,10 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 
 ### 2.4 工具搜索
 
-Meta 工具（SearchExtraTools / ExecuteExtraTool）是 LLM 发现和调用 Deferred 工具的通道。
+Meta 工具（ToolSearch / ToolInvoke）是 LLM 发现和调用 Deferred 工具的通道。
 
-- **SearchExtraTools**：按关键词搜索可用 Deferred 工具，返回匹配列表。LLM 据此判断是否有合适工具再决定调用。
-- **ExecuteExtraTool**：按工具名和参数直接执行 Deferred 工具。LLM 先搜索、再执行——两步走而非一步到位。
+- **ToolSearch**：按关键词搜索可用 Deferred 工具，返回匹配列表。LLM 据此判断是否有合适工具再决定调用。
+- **ToolInvoke**：按 `{name, arguments}` 直接执行 Deferred 工具。LLM 先搜索、再执行——两步走而非一步到位。旧名 `SearchExtraTools` / `ExecuteExtraTool`（及其 `tool_name` / `params` 字段）只作为解析别名保留，不再出现在模型面。
 - **搜索范围**：Deferred 工具来自多个来源——builtin `cron` 实例（`mcp__cron__*`）、MCP 外部服务、Plugin 插件、Workflow 工具。它们都经每 turn 重建的 session-local 工具视图进入搜索面：middleware 工具由 `chain.collect_tools()` 提供，MCP 与 builtin 工具是其中的 `McpToolBridge`，搜索时合并结果。
 
 #### 2.4.1 搜索算法
@@ -160,7 +160,7 @@ score = keyword_score × 0.4 + tfidf_score × 0.6
 
 #### 2.4.3 Session-local Direct 能力说明与 Prompt Cache
 
-`ToolSearchMiddleware::before_agent` 从当前 turn 的本地工具视图收集实际 direct 工具名，并以稳定字典序生成 `SearchExtraTools` / `ExecuteExtraTool` 的能力说明。未装配、被 middleware 禁用或被 agent filter 排除的工具不得被描述为当前可直接调用。
+`ToolSearchMiddleware::before_agent` 从当前 turn 的本地工具视图收集实际 direct 工具名，并以稳定字典序生成 `ToolSearch` / `ToolInvoke` 的能力说明。未装配、被 middleware 禁用或被 agent filter 排除的工具不得被描述为当前可直接调用。
 
 `peri-middlewares/src/tool_search/core_tools.rs` 仍保存若干工具名常量，供解析、分类或测试复用；它们不是运行时能力白名单。历史实现曾维护 `CORE_TOOL_NAMES` 并把固定清单写入元工具 description，该做法已退役，因为它会与 session-local 工具视图漂移。
 
@@ -247,7 +247,7 @@ Arc<MiddlewareChain> 同步收集一次，并追加到不变的 frozen base prom
 - **参与集 = 当前 LLM 可见集**：运行时集合为 session-local 工具视图中
   `is_direct() = true` 的工具，并已应用 middleware disabled 与 agent filter。
   ToolSearch 元工具的能力说明也从同一集合生成。Deferred 工具走
-  SearchExtraTools 索引（2.4），数量不可控，不进声明段。
+  ToolSearch 索引（2.4），数量不可控，不进声明段。
 - **合并策略**：`cached_contribution` 原承载 deferred 工具列表（索引
   `cached_prompt()`），声明段与之**拼接共存**——deferred 列表在前、声明段在
   后，`\n\n` 分隔；任一段为空时只保留另一段。不得覆盖 deferred 列表

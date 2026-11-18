@@ -2,7 +2,7 @@
 
 use super::{
     async_trait, json, Arc, BTreeMap, BaseTool, ExecuteExtraTool, ExecuteExtraToolResolver, RwLock,
-    ToolCall, ToolInvocationResolver, Value, EXECUTE_EXTRA_TOOL_NAME,
+    ToolCall, ToolInvocationResolver, Value, EXECUTE_EXTRA_TOOL_NAME, TOOL_INVOKE_NAME,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -108,10 +108,13 @@ fn test_description_preserves_target_permissions_and_real_examples() {
     assert!(!description.contains("runs locally with full permissions"));
     assert!(!description.contains("not a remote or external tool"));
     assert!(description.contains("delegates execution"));
-    assert!(description.contains("本地工具或远端 mcp 工具"));
-    assert!(description.contains("与直接调用相同的权限和审批规则"));
+    assert!(description.contains("local tool or a remote mcp tool"));
+    assert!(description.contains("same permission and approval rules"));
+    assert!(description.contains("toolsearch"));
+    assert!(!description.contains("searchextratools"));
+    assert!(!description.contains("executeextratool"));
     let params = tool.parameters();
-    let example = params["properties"]["tool_name"]["description"]
+    let example = params["properties"]["name"]["description"]
         .as_str()
         .unwrap();
     assert!(example.contains("mcp__peri__cron_list"));
@@ -143,10 +146,11 @@ fn build_test_registry() -> Arc<RwLock<BTreeMap<String, Arc<dyn BaseTool>>>> {
 }
 
 #[test]
-fn test_tool_name_is_execute_extra_tool() {
+fn test_tool_name_is_tool_invoke_with_legacy_alias() {
     let registry = build_test_registry();
     let tool = ExecuteExtraTool::new(registry);
-    assert_eq!(tool.name(), "ExecuteExtraTool");
+    assert_eq!(tool.name(), TOOL_INVOKE_NAME);
+    assert_eq!(tool.aliases(), &[EXECUTE_EXTRA_TOOL_NAME]);
 }
 
 #[test]
@@ -155,11 +159,14 @@ fn test_parameters_schema() {
     let tool = ExecuteExtraTool::new(registry);
     let params = tool.parameters();
     assert_eq!(params["type"], "object");
-    assert!(params["properties"]["tool_name"].is_object());
-    assert!(params["properties"]["params"].is_object());
+    assert!(params["properties"]["name"].is_object());
+    assert!(params["properties"]["arguments"].is_object());
+    assert!(params["properties"].get("tool_name").is_none());
+    assert!(params["properties"].get("params").is_none());
+    assert!(params.get("additionalProperties").is_none());
     let required = params["required"].as_array().unwrap();
-    assert!(required.contains(&json!("tool_name")));
-    assert!(required.contains(&json!("params")));
+    assert!(required.contains(&json!("name")));
+    assert!(required.contains(&json!("arguments")));
 }
 
 #[tokio::test]
@@ -167,11 +174,16 @@ async fn test_invoke_executes_deferred_tool() {
     let registry = build_test_registry();
     let tool = ExecuteExtraTool::new(registry);
 
-    let result = tool
-        .invoke(json!({"tool_name": "CronRegister", "params": {"expression": "* * * * *", "prompt": "test"}}), peri_agent::tools::ToolContext::new(&[], "."))
-        .await
-        .unwrap();
-    assert_eq!(result, "CronRegister executed");
+    for input in [
+        json!({"name": "CronRegister", "arguments": {"expression": "* * * * *", "prompt": "test"}}),
+        json!({"tool_name": "CronRegister", "params": {"expression": "* * * * *", "prompt": "test"}}),
+    ] {
+        let result = tool
+            .invoke(input, peri_agent::tools::ToolContext::new(&[], "."))
+            .await
+            .unwrap();
+        assert_eq!(result, "CronRegister executed");
+    }
 }
 
 #[test]
@@ -182,7 +194,7 @@ fn test_resolver_projects_wrapper_to_canonical_target() {
     let registry = build_test_registry();
     let mut tools = registry.read().clone();
     tools.insert(
-        EXECUTE_EXTRA_TOOL_NAME.to_string(),
+        TOOL_INVOKE_NAME.to_string(),
         Arc::new(ExecuteExtraTool::new(Arc::clone(&registry))),
     );
 
@@ -199,41 +211,111 @@ fn test_resolver_projects_wrapper_to_canonical_target() {
 
     assert_eq!(invocation.raw_call.name, EXECUTE_EXTRA_TOOL_NAME);
     assert_eq!(invocation.policy_call.name, "CronRegister");
-    assert_eq!(
-        invocation.wrapper_name.as_deref(),
-        Some(EXECUTE_EXTRA_TOOL_NAME)
-    );
+    assert_eq!(invocation.wrapper_name.as_deref(), Some(TOOL_INVOKE_NAME));
 }
 
 #[test]
-fn external_mcp_execute_extra_tool_is_not_unwrapped() {
+fn external_mcp_invoke_name_is_not_unwrapped() {
     use peri_agent::agent::react::ToolCall;
     use peri_agent::tools::ToolInvocationResolver;
 
-    let external: Arc<dyn BaseTool> = Arc::new(
-        MockTool::new(EXECUTE_EXTRA_TOOL_NAME, "external system tool")
-            .with_mcp_source("system-server")
-            .with_namespace("meta"),
+    for proxy_name in [TOOL_INVOKE_NAME, EXECUTE_EXTRA_TOOL_NAME] {
+        let external: Arc<dyn BaseTool> = Arc::new(
+            MockTool::new(proxy_name, "external system tool")
+                .with_mcp_source("system-server")
+                .with_namespace("meta"),
+        );
+        let tools = BTreeMap::from([
+            (proxy_name.to_string(), Arc::clone(&external)),
+            (
+                "CronRegister".to_string(),
+                Arc::new(MockTool::new("CronRegister", "internal target")) as Arc<dyn BaseTool>,
+            ),
+        ]);
+        let input = json!({"name": "CronRegister", "arguments": {"value": 1}});
+        let invocation = ExecuteExtraToolResolver::default()
+            .resolve(
+                &ToolCall::new("external_call", proxy_name, input.clone()),
+                &tools,
+            )
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&invocation.target, &external));
+        assert_eq!(invocation.policy_call.name, proxy_name);
+        assert_eq!(invocation.policy_call.input, input);
+        assert_eq!(invocation.wrapper_name, None);
+    }
+}
+
+#[test]
+fn resolver_rejects_recursive_host_proxy_targets() {
+    use peri_agent::agent::react::ToolCall;
+    use peri_agent::tools::ToolInvocationResolver;
+
+    let registry = build_test_registry();
+    let mut tools = registry.read().clone();
+    tools.insert(
+        TOOL_INVOKE_NAME.to_string(),
+        Arc::new(ExecuteExtraTool::new(Arc::clone(&registry))),
     );
-    let tools = BTreeMap::from([
-        (EXECUTE_EXTRA_TOOL_NAME.to_string(), Arc::clone(&external)),
-        (
-            "CronRegister".to_string(),
-            Arc::new(MockTool::new("CronRegister", "internal target")) as Arc<dyn BaseTool>,
-        ),
-    ]);
-    let input = json!({"tool_name": "CronRegister", "params": {"value": 1}});
-    let invocation = ExecuteExtraToolResolver::default()
+
+    for target in [TOOL_INVOKE_NAME, EXECUTE_EXTRA_TOOL_NAME] {
+        let error = ExecuteExtraToolResolver::default()
+            .resolve(
+                &ToolCall::new(
+                    "recursive",
+                    EXECUTE_EXTRA_TOOL_NAME,
+                    json!({"name": target, "arguments": {}}),
+                ),
+                &tools,
+            )
+            .expect_err("host proxy must reject targeting itself");
+        let message = error.to_string();
+        assert!(
+            message.contains("cannot target the host proxy tool itself"),
+            "{message}"
+        );
+        assert!(
+            message.contains(EXECUTE_EXTRA_TOOL_NAME),
+            "error must preserve the raw outer name: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn resolver_rejects_conflicting_proxy_fields_without_invocation() {
+    use peri_agent::agent::react::ToolCall;
+    use peri_agent::tools::ToolInvocationResolver;
+
+    let registry = build_test_registry();
+    let mut tools = registry.read().clone();
+    let wrapper = Arc::new(ExecuteExtraTool::new(Arc::clone(&registry)));
+    tools.insert(TOOL_INVOKE_NAME.to_string(), wrapper.clone());
+
+    let error = ExecuteExtraToolResolver::default()
         .resolve(
-            &ToolCall::new("external_call", EXECUTE_EXTRA_TOOL_NAME, input.clone()),
+            &ToolCall::new(
+                "conflict",
+                TOOL_INVOKE_NAME,
+                json!({"name": "CronRegister", "tool_name": "CronRemove", "arguments": {}}),
+            ),
             &tools,
         )
-        .unwrap();
+        .expect_err("conflicting fields must fail before binding");
+    assert!(error
+        .to_string()
+        .contains("conflicting ToolInvoke name fields"));
 
-    assert!(Arc::ptr_eq(&invocation.target, &external));
-    assert_eq!(invocation.policy_call.name, EXECUTE_EXTRA_TOOL_NAME);
-    assert_eq!(invocation.policy_call.input, input);
-    assert_eq!(invocation.wrapper_name, None);
+    let error = wrapper
+        .invoke(
+            json!({"name": "CronRegister", "arguments": {"value": 1}, "params": {"value": 2}}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("conflicting fields must not execute");
+    assert!(error
+        .to_string()
+        .contains("conflicting ToolInvoke arguments fields"));
 }
 #[tokio::test]
 async fn test_invoke_resolves_case_and_alias() {
@@ -349,7 +431,7 @@ async fn test_missing_tool_name() {
 
     let result = tool
         .invoke(
-            json!({"params": {}}),
+            json!({"arguments": {}}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
@@ -357,7 +439,7 @@ async fn test_missing_tool_name() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("malformed ExecuteExtraTool invocation"));
+        .contains("malformed ToolInvoke invocation: missing non-empty 'name'"));
 }
 
 #[tokio::test]
@@ -367,7 +449,7 @@ async fn test_missing_params() {
 
     let result = tool
         .invoke(
-            json!({"tool_name": "CronRegister"}),
+            json!({"name": "CronRegister"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await;
@@ -375,7 +457,7 @@ async fn test_missing_params() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("malformed ExecuteExtraTool invocation"));
+        .contains("malformed ToolInvoke invocation: missing 'arguments' object"));
 }
 
 #[tokio::test]
@@ -469,7 +551,7 @@ async fn app_only_target_by_case_variant_or_alias_is_rejected_without_invocation
 }
 
 /// 旧索引绕过：索引里仍留有 app-only 条目（模拟未过滤/陈旧索引）时，
-/// `ExecuteExtraTool` 在解析目标后仍必须复检可见性——索引不是执行授权。
+/// `ToolInvoke` 在解析目标后仍必须复检可见性——索引不是执行授权。
 #[tokio::test]
 async fn stale_index_entry_does_not_bypass_execute_time_visibility_check() {
     let (registry, hidden_calls) = build_app_only_registry();

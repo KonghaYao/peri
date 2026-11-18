@@ -332,6 +332,7 @@ fn explorer_definition_is_tool_level_read_only() {
         "folder_operations",
         "cron_register",
         "ExecuteExtraTool",
+        "ToolInvoke",
     ] {
         assert!(!target.permits(tool), "explorer 不得声明写能力工具 {tool}");
     }

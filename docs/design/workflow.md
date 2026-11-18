@@ -381,7 +381,7 @@ saved aggregate evidence instead of restarting finished agents.
 
 ## 13. 能力暴露与关闭
 
-- **工具面**：`Workflow` / `WorkflowStatus` / `WorkflowKill` 经 MCP 桥接成为 deferred 工具（默认 `mcp__peri__*`，legacy 六实例回滚为 `mcp__workflow__*`，经 `SearchExtraTools → ExecuteExtraTool` 发现与调用）；`WorkflowAgentResult` 是 host-only 回填通道，不进入模型可见面。工具与资源声明以 [workflow-mcp.md](workflow-mcp.md) §4 为权威。
+- **工具面**：`Workflow` / `WorkflowStatus` / `WorkflowKill` 经 MCP 桥接成为 deferred 工具（默认 `mcp__peri__*`，legacy 六实例回滚为 `mcp__workflow__*`，经 `ToolSearch → ToolInvoke` 发现与调用）；`WorkflowAgentResult` 是 host-only 回填通道，不进入模型可见面。工具与资源声明以 [workflow-mcp.md](workflow-mcp.md) §4 为权威。
 - **关闭**：v5 能力名 `"workflow": false`（旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter，M4 删除）进会话关闭集；单出口不 spawn 独立 workflow 实例、关闭时不建桥接且宿主消费者不启动；legacy 六实例回滚下命中关闭集时不 spawn 该实例（`ARC-CAPABILITY-CLOSURE-001`）。
 - **模型手册**：builtin skill `ultracode`（`mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md`，宿主注册表经 `include_str!` 引用），按需加载，不常驻系统提示词；复杂全生命周期交付由 `ultra-adlc` skill 与 [Ultra-ADLC 设计](ultra-adlc.md)约束。
 - **入口命令**：`/workflows` 打开面板（`PanelKind::Workflow`）；ACP 方法名（`workflow/list_runs`、`workflow/kill_run`、`workflow/kill_agent`、`workflow/resume`）与 TUI 交互保持不变。

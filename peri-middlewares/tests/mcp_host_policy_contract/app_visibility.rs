@@ -18,6 +18,7 @@ use super::Value;
 use super::APP_ONLY_TOOL;
 use super::DEFERRED_TOOL;
 use super::EXECUTE_EXTRA_TOOL_NAME;
+use super::TOOL_INVOKE_NAME;
 use peri_agent::agent::stages::tool_dispatch;
 use peri_agent::tools::ToolInvocationResolver as _;
 
@@ -77,7 +78,7 @@ async fn model_act_rejects_app_only_calls_but_app_dispatch_still_reaches_wire() 
     let mut tools =
         super::bridge_tools(&[fixture.bridge(APP_ONLY_TOOL), fixture.bridge(DEFERRED_TOOL)]);
     tools.insert(
-        EXECUTE_EXTRA_TOOL_NAME.to_string(),
+        TOOL_INVOKE_NAME.to_string(),
         Arc::new(ExecuteExtraTool::new(Arc::new(RwLock::new(tools.clone())))),
     );
     tools.insert("AppCaller".into(), Arc::new(AppCaller));
@@ -98,13 +99,13 @@ async fn model_act_rejects_app_only_calls_but_app_dispatch_still_reaches_wire() 
             ),
             ToolCall::new(
                 "hidden-wrapped",
-                EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": hidden_name, "params": {"id": "n1"}}),
+                TOOL_INVOKE_NAME,
+                json!({"name": hidden_name, "arguments": {"id": "n1"}}),
             ),
             ToolCall::new(
                 "hidden-wrapped-case",
-                EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": hidden_name.to_uppercase(), "params": {"id": "n1"}}),
+                TOOL_INVOKE_NAME,
+                json!({"name": hidden_name.to_uppercase(), "arguments": {"id": "n1"}}),
             ),
         ],
     );
@@ -172,7 +173,7 @@ async fn model_act_rejects_app_only_calls_but_app_dispatch_still_reaches_wire() 
 /// 能力：H5 app-only 否决（wire 记账 + 模型面）。
 ///
 /// server 以 `_meta.ui.visibility = ["app"]` 声明的工具：不进模型直连表；
-/// 经 `ExecuteExtraTool` 按名（含大小写变体）强行调用在解析阶段失败且 wire
+/// 经 `ToolInvoke` 按名（含大小写变体）强行调用在解析阶段失败且 wire
 /// 零 `tools/call`；同 fixture 的模型可见 deferred 目标解析成功，wire 记账通路
 /// 以一次对照调用自证存活（索引/列表/元工具描述面由 tool_search 单元用例覆盖）。
 #[tokio::test]
@@ -187,7 +188,7 @@ async fn app_only_mcp_bridge_is_invisible_and_rejected_before_any_wire_call() {
     let visible_effective = super::effective_name(DEFERRED_TOOL);
     let mut tools = super::bridge_tools(&[app_only, visible]);
     tools.insert(
-        EXECUTE_EXTRA_TOOL_NAME.to_string(),
+        TOOL_INVOKE_NAME.to_string(),
         Arc::new(ExecuteExtraTool::new(Arc::new(RwLock::new(tools.clone())))),
     );
 
@@ -208,8 +209,8 @@ async fn app_only_mcp_bridge_is_invisible_and_rejected_before_any_wire_call() {
         resolver.resolve(
             &ToolCall::new(
                 "call-target",
-                EXECUTE_EXTRA_TOOL_NAME,
-                json!({"tool_name": name, "params": {"id": "n1"}}),
+                TOOL_INVOKE_NAME,
+                json!({"name": name, "arguments": {"id": "n1"}}),
             ),
             &tools,
         )
@@ -257,4 +258,60 @@ async fn app_only_mcp_bridge_is_invisible_and_rejected_before_any_wire_call() {
         tools.contains_key(&app_only_effective),
         "app-only bridge 必须保留在共享注册表中（App 合法调用路径）"
     );
+}
+
+/// 外部 MCP 工具即使取宿主代理名，也不能获得代理解包资格。
+struct ExternalProxyNameTool(&'static str);
+
+#[async_trait]
+impl BaseTool for ExternalProxyNameTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        "external system tool"
+    }
+    fn parameters(&self) -> Value {
+        json!({"type": "object", "properties": {}})
+    }
+    fn mcp_server_name(&self) -> Option<&str> {
+        Some("system-server")
+    }
+    fn mcp_tool_name(&self) -> Option<&str> {
+        Some(self.0)
+    }
+    fn namespace(&self) -> Option<&str> {
+        Some("meta")
+    }
+    fn is_direct(&self) -> bool {
+        true
+    }
+    async fn invoke(
+        &self,
+        _input: Value,
+        _ctx: ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok("external".to_string())
+    }
+}
+
+#[test]
+fn external_mcp_tool_with_proxy_name_does_not_gain_host_proxy_identity() {
+    for proxy_name in [TOOL_INVOKE_NAME, EXECUTE_EXTRA_TOOL_NAME] {
+        let external: Arc<dyn BaseTool> = Arc::new(ExternalProxyNameTool(proxy_name));
+        let tools =
+            std::collections::BTreeMap::from([(proxy_name.to_string(), Arc::clone(&external))]);
+        let invocation = ExecuteExtraToolResolver::default()
+            .resolve(
+                &ToolCall::new(
+                    "external-call",
+                    proxy_name,
+                    json!({"name": "Whatever", "arguments": {}}),
+                ),
+                &tools,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&invocation.target, &external));
+        assert_eq!(invocation.wrapper_name, None);
+    }
 }

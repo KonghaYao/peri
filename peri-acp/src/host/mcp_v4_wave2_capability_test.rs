@@ -8,7 +8,7 @@ use peri_middlewares::assembly::BuiltinInstanceContext;
 use peri_middlewares::assembly::CronInstanceInput;
 use peri_middlewares::assembly::WorkflowInstanceInput;
 use peri_middlewares::tool_search::core_tools;
-use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
+use peri_middlewares::tool_search::TOOL_SEARCH_NAME;
 use serial_test::serial;
 use std::sync::Arc;
 
@@ -137,7 +137,7 @@ async fn off_has_zero_builtin_injection() {
         // 继续拿裸名当正控制会让本用例永远红，也失去「面非空洞」的证明力。名字取
         // `core_tools` 常量而非字面量，避免新增裸名硬编码。
         for control in [
-            SEARCH_EXTRA_TOOLS_NAME,
+            TOOL_SEARCH_NAME,
             core_tools::TOOL_TODO,
             core_tools::TOOL_AGENT,
             core_tools::TOOL_ASK_USER,

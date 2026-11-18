@@ -2,7 +2,10 @@
 
 /// Both properties are real API fields: approval must describe the same input
 /// that the target receives, including any approved change to `path`.
-async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, wrapped: bool) {
+async fn assert_dual_path_schema_survives_dispatch(
+    approved_path: Option<&str>,
+    wrapper_name: Option<&str>,
+) {
     type InputTrace = Arc<parking_lot::Mutex<Vec<(&'static str, serde_json::Value)>>>;
     struct DualPathTool(InputTrace);
 
@@ -43,6 +46,8 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, 
         }
         fn parameters(&self) -> serde_json::Value {
             json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "arguments": {"type": "object"},
                 "tool_name": {"type": "string"}, "params": {"type": "object"}
             }})
         }
@@ -53,9 +58,14 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, 
             Option<crate::tools::BoundToolInvocation>,
             Box<dyn std::error::Error + Send + Sync>,
         > {
+            let policy_input = input
+                .get("arguments")
+                .or_else(|| input.get("params"))
+                .cloned()
+                .unwrap_or_default();
             Ok(Some(crate::tools::BoundToolInvocation {
                 policy_name: self.0.name().into(),
-                policy_input: input["params"].clone(),
+                policy_input,
                 target: Arc::clone(&self.0),
             }))
         }
@@ -102,13 +112,8 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, 
     ctx.runtime.event_bus = Arc::new(bus);
     let target: Arc<dyn BaseTool> = Arc::new(DualPathTool(Arc::clone(&trace)));
     ctx.runtime.tools.write().insert(
-        if wrapped {
-            "ExecuteExtraTool"
-        } else {
-            "DualPath"
-        }
-        .into(),
-        if wrapped {
+        wrapper_name.unwrap_or("DualPath").into(),
+        if wrapper_name.is_some() {
             Arc::new(Wrapper(target))
         } else {
             target
@@ -120,18 +125,17 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, 
         replacement: approved_path.map(str::to_owned),
     }));
     ctx.runtime.middleware_chain = Arc::new(chain);
+    let call_input = match wrapper_name {
+        Some("ExecuteExtraTool") => {
+            json!({"tool_name": "DualPath", "params": {"path": "requested/root"}})
+        }
+        Some(_) => json!({"name": "DualPath", "arguments": {"path": "requested/root"}}),
+        None => json!({"path": "requested/root"}),
+    };
     let raw_call = ToolCall::new(
         "dual-path",
-        if wrapped {
-            "ExecuteExtraTool"
-        } else {
-            "DualPath"
-        },
-        if wrapped {
-            json!({"tool_name": "DualPath", "params": {"path": "requested/root"}})
-        } else {
-            json!({"path": "requested/root"})
-        },
+        wrapper_name.unwrap_or("DualPath"),
+        call_input,
     );
     let reasoning = Reasoning::with_tools("", vec![raw_call.clone()]);
     // 真实模型路径会带上本条 assistant 消息；审批补发的 ToolStarted 必须携带同一
@@ -217,17 +221,18 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, 
 
 #[tokio::test]
 async fn test_dispatch_preserves_dual_path_schema_after_approval() {
-    assert_dual_path_schema_survives_dispatch(None, false).await;
+    assert_dual_path_schema_survives_dispatch(None, None).await;
 }
 
 #[tokio::test]
 async fn test_dispatch_preserves_approved_replacement_of_declared_path() {
-    assert_dual_path_schema_survives_dispatch(Some("approved/root"), false).await;
+    assert_dual_path_schema_survives_dispatch(Some("approved/root"), None).await;
 }
 
 #[tokio::test]
 async fn test_approved_wrapper_started_uses_edited_target_input() {
-    assert_dual_path_schema_survives_dispatch(Some("approved/root"), true).await;
+    assert_dual_path_schema_survives_dispatch(Some("approved/root"), Some("ExecuteExtraTool")).await;
+    assert_dual_path_schema_survives_dispatch(Some("approved/root"), Some("ToolInvoke")).await;
 }
 
 /// 审批拒绝同样补发 ToolStarted（随后 ToolEnded）：必须携带真实 assistant 消息

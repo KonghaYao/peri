@@ -151,7 +151,12 @@ impl PermissionMiddleware {
     ) -> bool {
         // A raw external MCP name can equal a trusted builtin name such as Read.
         // The pinned dispatch target, rather than the spelling, decides its policy.
+        // Malformed proxy calls fail closed: normalization cannot recover a target,
+        // so they must not inherit a permissive default.
+        let malformed_proxy = peri_acp_types::tool_proxy::is_invoke_proxy_name(&call.name)
+            && crate::tool_search::core_tools::parse_proxy_call(&call.input).is_err();
         is_external_mcp(origin)
+            || malformed_proxy
             || (self.requires_approval)(&super::effective_tool_name(&call.name, &call.input))
     }
 

@@ -13,7 +13,7 @@ use peri_acp_types::interaction::UserInteractionBroker;
 use peri_acp_types::permission::PermissionMode;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::session::MessageSource;
-use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
+use peri_middlewares::tool_search::{TOOL_INVOKE_NAME, TOOL_SEARCH_NAME};
 use peri_model::Model;
 use serde_json::json;
 use serial_test::serial;
@@ -88,14 +88,14 @@ async fn cron_register_tick_approval_continuation() {
     let register_sink = Arc::new(MockEventSink::new());
     let register_model = Arc::new(WireScriptedModel::new(vec![
         ScriptedToolCall::new(
-            SEARCH_EXTRA_TOOLS_NAME,
+            TOOL_SEARCH_NAME,
             json!({ "query": "cron register scheduled task", "max_results": 50 }),
         ),
         ScriptedToolCall::new(
-            "ExecuteExtraTool",
+            TOOL_INVOKE_NAME,
             json!({
-                "tool_name": "mcp__cron__cron_register",
-                "params": { "expression": W2_SPARSE_CRON, "prompt": CRON_PROMPT }
+                "name": "mcp__cron__cron_register",
+                "arguments": { "expression": W2_SPARSE_CRON, "prompt": CRON_PROMPT }
             }),
         ),
     ]));

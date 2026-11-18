@@ -63,7 +63,7 @@ use peri_middlewares::mcp::ClientStatus;
 use peri_middlewares::mcp::McpClientPool;
 use peri_middlewares::mcp::McpInitStatus;
 use peri_middlewares::mcp::McpTaskOwner;
-use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
+use peri_middlewares::tool_search::TOOL_SEARCH_NAME;
 
 use super::assemble::HostAssemblyInput;
 use super::executor_flow_tests::MockEventSink;
@@ -444,7 +444,7 @@ impl BaseTool for FixtureDeferredTool {
     }
 }
 
-/// 脚本化调用一次 `SearchExtraTools`（A20 的唯一等价对照面），取回两类工具名。
+/// 脚本化调用一次 `ToolSearch`（A20 的唯一等价对照面），取回两类工具名。
 ///
 /// `max_results = 50`（与 wave 1 基线同口径）：`search()` 的默认 5 会把断言变成
 /// 「必须排进前 5」，那依赖排序而与迁移语义无关。脚本 = 1 次工具调用 + 1 次收尾
@@ -452,7 +452,7 @@ impl BaseTool for FixtureDeferredTool {
 async fn probe_tool_faces(label: &str, ctx: SessionContext, query: &str) -> ToolFaces {
     let sink = Arc::new(MockEventSink::new());
     let model = Arc::new(WireScriptedModel::new(vec![ScriptedToolCall::new(
-        SEARCH_EXTRA_TOOLS_NAME,
+        TOOL_SEARCH_NAME,
         serde_json::json!({ "query": query, "max_results": 50 }),
     )]));
     let result = mcp_v4_wire_fixture::run_wire_prompt(ctx, &sink, &model).await;
@@ -477,7 +477,7 @@ async fn probe_tool_faces(label: &str, ctx: SessionContext, query: &str) -> Tool
     }
 }
 
-/// 搜索结果里的工具名（`SearchExtraTools` 的 JSON 原文，形状与 wave 1 基线同源）。
+/// 搜索结果里的工具名（`ToolSearch` 的 JSON 原文，形状与 wave 1 基线同源）。
 fn searched_tool_names(result: &PromptResult) -> Vec<String> {
     result
         .messages

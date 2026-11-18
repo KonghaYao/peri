@@ -82,7 +82,7 @@ Tool row 的 `verb` 使用可信 title/canonical name；`primary object` 回答�
 - requested identity：模型请求的 outer name/input；
 - canonical/policy identity：resolver 与审批使用的规范调用；
 - effective identity：实际执行 target 与审批后参数；
-- wrapper/origin：例如 `ExecuteExtraTool`、MCP server、plugin 或 builtin provenance。
+- wrapper/origin：例如 `ToolInvoke`、MCP server、plugin 或 builtin provenance。
 
 只有协议提供可信 effective metadata 时，UI 才能把 wrapper 委托给 target presenter；否则
 必须明确显示 `Requested … via …`，不得把请求名冒充已解析或已执行的 target。
@@ -127,7 +127,7 @@ Presenter 管线固定为：
 | `AskUserQuestion` / permission | pending 或回答摘要 | durable interaction；不作普通 Generic card |
 | `SkillTool` / `DiscoverSkillsTool` | skill 名或发现条件 | source、descriptor；正文默认不展开 |
 | `Agent` / `AgentResult` | 委派身份、模式与终态 | nested activity、thread/task provenance |
-| `SearchExtraTools` / `ExecuteExtraTool` | discovery 或 requested target | wrapper、resolved/effective target、审批 provenance |
+| `ToolSearch` / `ToolInvoke` | discovery 或 requested target | wrapper、resolved/effective target、审批 provenance |
 | Cron / `Workflow` | schedule/run 身份与状态 | phase、agent、log、result、可用操作 |
 | MCP resource / 动态 MCP tool | 外部 server/tool/resource 边界 | 调用时冻结 descriptor、content type 与结果 |
 | 未知工具 | 友好名称、参数数量、明确状态 | 有界脱敏 metadata；不推断 effect 或安全性 |
@@ -176,7 +176,7 @@ Pointer gesture 遵循 `Down → Pressed → Up/Cancel`：只有 Up 与 Down 命
 - 点击正文、边框、空白、scrollbar 或遮罩不得批准；整窗点击批准路径必须移除；
 - 提交后禁用 action，保证每个 request 最多一次响应；失败时保留交互并允许重试；
 - 关闭 Modal 消费 release，禁止 click-through；
-- `ExecuteExtraTool` 展示可信 effective target/args；`Agent` 明示子 Agent 的授权边界；
+- `ToolInvoke` 展示可信 effective target/args；`Agent` 明示子 Agent 的授权边界；
 - 只展示协议实际支持的动作，不虚构 `Always allow`；permission mode 只展示后端事实。
 
 `AskUserQuestion` 在 transcript 保留 pending/resolved 摘要。短单题可 inline；多题、多选、

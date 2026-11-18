@@ -626,10 +626,9 @@ fn middleware_tool_names_match_static_tool_sets() {
             // （`WORKFLOW_TOOLS`），按迁移惯例不再计入本静态并集；链槽删除见 P5。
             // TodoMiddleware
             "TodoWrite",
-            // ToolSearch
+            // ToolSearch（关闭键与搜索工具同名；一个词两层身份）
             "ToolSearch",
-            "SearchExtraTools",
-            "ExecuteExtraTool",
+            "ToolInvoke",
             // GoalMiddleware
             "goal",
             // McpMiddleware（静态部分）
@@ -653,6 +652,27 @@ fn middleware_tool_names_match_static_tool_sets() {
         static_tools, const_tools_wo_migrated,
         "MIDDLEWARE_TOOL_NAMES（去掉已迁移裸名后）必须与各 middleware 静态工具名并集一致"
     );
+
+    // D1：ToolSearch 同时是 middleware 关闭键与工具名，只保留一份；旧代理名只做 alias。
+    let tool_search_count = MIDDLEWARE_TOOL_NAMES
+        .iter()
+        .filter(|name| **name == peri_acp_types::tool_proxy::TOOL_SEARCH_NAME)
+        .count();
+    let tool_invoke_count = MIDDLEWARE_TOOL_NAMES
+        .iter()
+        .filter(|name| **name == peri_acp_types::tool_proxy::TOOL_INVOKE_NAME)
+        .count();
+    assert_eq!(tool_search_count, 1, "ToolSearch 必须恰好出现一次");
+    assert_eq!(tool_invoke_count, 1, "ToolInvoke 必须恰好出现一次");
+    for legacy in [
+        peri_acp_types::tool_proxy::SEARCH_EXTRA_TOOLS_NAME,
+        peri_acp_types::tool_proxy::EXECUTE_EXTRA_TOOL_NAME,
+    ] {
+        assert!(
+            !MIDDLEWARE_TOOL_NAMES.contains(&legacy),
+            "旧代理名 {legacy} 只做 alias，不得进入 MIDDLEWARE_TOOL_NAMES"
+        );
+    }
 }
 
 // ─── F11/W5：Mcp 槽位把链槽关闭键派生给 DiscoverMCP 的 agent 面（装配级差分） ──

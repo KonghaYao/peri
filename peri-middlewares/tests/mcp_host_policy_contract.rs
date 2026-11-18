@@ -14,7 +14,7 @@
 //! | Permission + HITL | broker 收到 effective name；拒绝 → 0 次 wire 调用；批准 → 恰好 1 次 | 本文件的 `hitl_*` 测试 |
 //! | effective tool name | 策略/审批看到 `mcp__{server}__{tool}`，wire 上仍是属于该 namespace 的裸工具名 | 同上 |
 //! | cancel | 在飞 `tools/call` 被取消后不再重试，dispatch 返回 `Interrupted` | `in_flight_cancellation_*` |
-//! | ToolSearch deferral | 未提升的 MCP bridge 不进 `direct_definitions`（与 Reason 阶段下发给 LLM 的工具集用**同一** `is_direct() && visible_to_model()` 谓词），只能经 SearchExtraTools/ExecuteExtraTool 到达 | `deferred_*` |
+//! | ToolSearch deferral | 未提升的 MCP bridge 不进 `direct_definitions`（与 Reason 阶段下发给 LLM 的工具集用**同一** `is_direct() && visible_to_model()` 谓词），只能经 ToolSearch/ToolInvoke 到达 | `deferred_*` |
 //! | session / event / host assembly | **BLOCKED**（见下） | B-07 |
 //!
 //! ## BLOCKED（不在本层假装覆盖）
@@ -82,7 +82,8 @@ use peri_middlewares::tool_search::SearchExtraTools;
 use peri_middlewares::tool_search::ToolSearchIndex;
 use peri_middlewares::tool_search::ToolSearchMiddleware;
 use peri_middlewares::tool_search::EXECUTE_EXTRA_TOOL_NAME;
-use peri_middlewares::tool_search::SEARCH_EXTRA_TOOLS_NAME;
+use peri_middlewares::tool_search::TOOL_INVOKE_NAME;
+use peri_middlewares::tool_search::TOOL_SEARCH_NAME;
 use peri_middlewares::ExecuteExtraToolResolver;
 use rmcp::model::CallToolRequestParams;
 use rmcp::model::ClientCapabilities;

@@ -1,4 +1,7 @@
-use super::{async_trait, json, Arc, BaseTool, SearchExtraTools, Value};
+use super::{
+    async_trait, json, Arc, BaseTool, SearchExtraTools, Value, SEARCH_EXTRA_TOOLS_NAME,
+    TOOL_SEARCH_NAME,
+};
 use crate::tool_search::tool_index::ToolSearchIndex;
 
 struct MockTool {
@@ -55,10 +58,11 @@ fn build_test_index() -> Arc<ToolSearchIndex> {
 }
 
 #[test]
-fn test_tool_name_is_search_extra_tools() {
+fn test_tool_name_is_tool_search_with_legacy_alias() {
     let index = build_test_index();
     let tool = SearchExtraTools::new(index);
-    assert_eq!(tool.name(), "SearchExtraTools");
+    assert_eq!(tool.name(), TOOL_SEARCH_NAME);
+    assert_eq!(tool.aliases(), &[SEARCH_EXTRA_TOOLS_NAME]);
 }
 
 #[test]
@@ -68,7 +72,10 @@ fn test_description_uses_real_deferred_examples() {
     assert!(description.contains("select:mcp__peri__cron_list,mcp__peri__cron_remove"));
     assert!(!description.contains("CronCreate"));
     assert!(!description.contains("Snip"));
-    assert!(description.contains("没有匹配时返回空数组"));
+    assert!(description.contains("`results` is an empty array when nothing matches"));
+    assert!(description.contains("ToolInvoke"));
+    assert!(!description.contains("SearchExtraTools"));
+    assert!(!description.contains("ExecuteExtraTool"));
 }
 
 #[test]
@@ -134,5 +141,5 @@ async fn test_invoke_missing_query() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("missing required 'query' parameter"));
+        .contains("ToolSearch: missing required 'query' parameter"));
 }

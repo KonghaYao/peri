@@ -10,7 +10,7 @@ use super::{
     PermissionMode, Reasoning, RoleClient, RunningService, RwLock, SearchExtraTools, Session,
     SessionToolCatalog, SharedPermissionMode, SharedToolMap, StageContext, ToolCall, ToolContext,
     ToolSearchIndex, ToolSearchMiddleware, TrustedInteractionOwner, UserInteractionBroker, Value,
-    EXECUTE_EXTRA_TOOL_NAME, SEARCH_EXTRA_TOOLS_NAME,
+    TOOL_INVOKE_NAME, TOOL_SEARCH_NAME,
 };
 
 // ─── 真实 MCP wire fixture（duplex + rmcp 官方 client service）─────────────────
@@ -758,7 +758,7 @@ pub(super) async fn in_flight_cancellation_ends_the_call_without_a_second_wire_r
 /// 能力：ToolSearch deferral。
 ///
 /// 未被提升的 MCP bridge 必须：不进 RCRA `direct_definitions`；可被
-/// `SearchExtraTools` 检索；只能经 `ExecuteExtraTool` 到达 wire；链与审批照旧。
+/// `ToolSearch` 检索；只能经 `ToolInvoke` 到达 wire；链与审批照旧。
 /// 探针工具钉住 direct/deferred 的分界是 `is_direct()`，不是别的过滤条件。
 #[tokio::test]
 pub(super) async fn deferred_mcp_bridge_is_reachable_only_through_tool_search() {
@@ -855,7 +855,7 @@ pub(super) async fn deferred_mcp_bridge_is_reachable_only_through_tool_search() 
         "direct 工具不得出现在 deferred 索引中: {probe}"
     );
 
-    // (c) 经 ExecuteExtraTool 调用：审批看到 effective name，wire 收裸工具名一次。
+    // (c) 经 ToolInvoke 调用：审批看到 effective name，wire 收裸工具名一次。
     let broker = RecordingBroker::new(true);
     let chain_seen = Arc::new(Mutex::new(Vec::new()));
     let (context, _events, _catalog) = make_context(
@@ -866,8 +866,8 @@ pub(super) async fn deferred_mcp_bridge_is_reachable_only_through_tool_search() 
         "",
         vec![ToolCall::new(
             "call-deferred",
-            EXECUTE_EXTRA_TOOL_NAME,
-            json!({"tool_name": effective, "params": {"id": "n1"}}),
+            TOOL_INVOKE_NAME,
+            json!({"name": effective, "arguments": {"id": "n1"}}),
         )],
     );
     let outcome = tool_dispatch::dispatch_tools(
@@ -886,7 +886,7 @@ pub(super) async fn deferred_mcp_bridge_is_reachable_only_through_tool_search() 
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>(),
         vec![effective.clone()],
-        "wrapper 必须把 canonical effective name 交给审批，而不是 ExecuteExtraTool"
+        "wrapper 必须把 canonical effective name 交给审批，而不是 ToolInvoke"
     );
     assert_policy_saw(&chain_seen, &effective);
     let (_, result) = &outcome.results[0];
@@ -899,9 +899,9 @@ pub(super) async fn deferred_mcp_bridge_is_reachable_only_through_tool_search() 
     );
 }
 
-/// 能力：契约 6 的「未绕过」补充说明——`SEARCH_EXTRA_TOOLS_NAME` 常量必须与
-/// `ToolSearchMiddleware` 注册的 meta 工具名一致，否则上面的断言会退化成
-/// 「调用了不存在的工具」。这是一条防止 seam 漂移的护栏，不是新能力覆盖。
+/// 能力：契约 6 的「未绕过」补充说明——`TOOL_SEARCH_NAME` / `TOOL_INVOKE_NAME`
+/// 常量必须与 `ToolSearchMiddleware` 注册的 meta 工具名一致，否则上面的断言会
+/// 退化成「调用了不存在的工具」。这是一条防止 seam 漂移的护栏，不是新能力覆盖。
 #[test]
 pub(super) fn tool_search_meta_tool_names_match_the_middleware_registration() {
     let shared: SharedToolMap = Arc::new(RwLock::new(BTreeMap::new()));
@@ -914,9 +914,6 @@ pub(super) fn tool_search_meta_tool_names_match_the_middleware_registration() {
             .collect();
     assert_eq!(
         names,
-        vec![
-            SEARCH_EXTRA_TOOLS_NAME.to_string(),
-            EXECUTE_EXTRA_TOOL_NAME.to_string()
-        ]
+        vec![TOOL_SEARCH_NAME.to_string(), TOOL_INVOKE_NAME.to_string()]
     );
 }

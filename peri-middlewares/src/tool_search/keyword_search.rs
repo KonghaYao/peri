@@ -3,7 +3,7 @@
 /// CamelCase 分词
 ///
 /// `CronCreate` → `["cron", "create"]`
-/// `SearchExtraTools` → `["search", "extra", "tools"]`
+/// `ToolSearch` → `["tool", "search"]`
 #[must_use]
 pub fn split_camel_case(name: &str) -> Vec<String> {
     let mut words = Vec::new();

@@ -26,6 +26,7 @@
 //!   快照 / 能力声明 / 预算常量）
 //! - `tool_invocation` — canonical 执行身份与来源契约（InvocationId/ToolCallId/InvocationOrigin）
 //! - `tool_outcome` — raw 工具结果与远端错误契约（RawToolResult/RemoteToolError 权威定义）
+//! - `tool_proxy` — 宿主工具代理名称与字段契约（ToolSearch/ToolInvoke + 迁移期 alias）
 //! - `compact` — compact 契约（CompactOutcome/FullEscalationReason + 提取函数）
 //! - `error` — 层边界错误契约（AgentError）
 //! - `permission` — 权限模式契约（PermissionMode/SharedPermissionMode）
@@ -110,6 +111,7 @@ pub mod tasks;
 pub mod thread;
 pub mod tool_invocation;
 pub mod tool_outcome;
+pub mod tool_proxy;
 pub mod tools;
 pub mod workflow;
 

@@ -73,6 +73,31 @@ fn test_format_tool_args_folder_operations() {
 }
 
 #[test]
+fn test_format_tool_args_proxy_prefers_name_then_legacy_tool_name() {
+    for tool in ["ToolInvoke", "ExecuteExtraTool"] {
+        assert_eq!(
+            super::format_tool_args(tool, &serde_json::json!({"name": "Read", "arguments": {}})),
+            "Read"
+        );
+        assert_eq!(
+            super::format_tool_args(
+                tool,
+                &serde_json::json!({"tool_name": "Write", "params": {}})
+            ),
+            "Write"
+        );
+        assert_eq!(
+            super::format_tool_args(
+                tool,
+                &serde_json::json!({"name": "Read", "tool_name": "Write"})
+            ),
+            "Read",
+            "canonical 字段优先于 legacy"
+        );
+    }
+}
+
+#[test]
 fn test_format_websearch_query_truncated() {
     // WebSearch query 超过 60 字符时应截断
     let long = "q".repeat(80);

@@ -11,7 +11,7 @@
 //!   client 只反向下发通知）。
 //!
 //! 连接就绪是异步的：会话 setup 只登记声明并后台发现，工具经既有的 deferred
-//! 发现面（`tool_search` 索引 / `SearchExtraTools`）进入模型可见集，因此发现
+//! 发现面（`tool_search` 索引 / `ToolSearch`）进入模型可见集，因此发现
 //! 失败不阻塞会话建立，失败事实留在池状态面。
 
 mod session;

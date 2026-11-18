@@ -359,7 +359,7 @@ impl ToolSearchIndex {
     /// M7：列表总量有字节预算。超预算时**结构化省略**——整条条目不入列表，
     /// 或（单条自身超预算时）只保留工具名与省略原因；绝不按字符串裁切，因此
     /// JSON schema（参数段）不会出现半截结构。省略数量与原因对模型可见，
-    /// 被省略的工具仍可经 `SearchExtraTools` 关键词检索得到。
+    /// 被省略的工具仍可经 `ToolSearch` 关键词检索得到。
     #[must_use]
     pub fn format_deferred_list(&self) -> String {
         let tools = self.tools.read();
@@ -378,7 +378,7 @@ impl ToolSearchIndex {
         }
 
         let mut lines = String::from("## Deferred Tools\n\n");
-        lines.push_str("The following tools are not in your direct tool list. Use `SearchExtraTools` to search for them, then `ExecuteExtraTool` to invoke.\n\n");
+        lines.push_str("The following tools are not in your direct tool list. Use `ToolSearch` to search for them, then `ToolInvoke` to invoke.\n\n");
         // 省略提示的预留额度：最后一行提示也计入总量预算。
         let budget = MAX_DEFERRED_LIST_BYTES.saturating_sub(OMITTED_NOTICE_RESERVE_BYTES);
         let mut omitted = 0usize;
@@ -408,7 +408,7 @@ impl ToolSearchIndex {
         }
         if omitted > 0 || oversized > 0 {
             lines.push_str(&format!(
-                "- … {omitted} more deferred tool(s) omitted ({oversized} oversized): deferred list byte budget ({} bytes) exhausted; search them by keyword with SearchExtraTools.\n",
+                "- … {omitted} more deferred tool(s) omitted ({oversized} oversized): deferred list byte budget ({} bytes) exhausted; search them by keyword with ToolSearch.\n",
                 MAX_DEFERRED_LIST_BYTES
             ));
         }

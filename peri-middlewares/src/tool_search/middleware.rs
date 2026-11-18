@@ -1,5 +1,4 @@
 //! ToolSearchMiddleware — 注册元工具并注入延迟工具列表到 system prompt
-
 use peri_agent::middleware::capabilities as hook_state;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,6 +12,7 @@ use peri_agent::error::AgentResult;
 use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::tools::BaseTool;
 
+use super::core_tools::{TOOL_INVOKE_NAME, TOOL_SEARCH_NAME};
 use super::declaration;
 use super::execute_tool::ExecuteExtraTool;
 use super::search_tool::SearchExtraTools;

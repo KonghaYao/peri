@@ -121,8 +121,8 @@ Before creating an expensive run:
    valid Decision Arbiter result is `needs_user`; at that point, absence is a real
    `blocked` condition.
 3. Discover the deferred Workflow capability with
-   `SearchExtraTools("workflow")`, and execute it only through
-   `ExecuteExtraTool("Workflow", ...)`. If it is unavailable, stop before fan-out.
+   `ToolSearch("workflow")`, and execute it only through
+   `ToolInvoke({"name": "Workflow", "arguments": {...}})`. If it is unavailable, stop before fan-out.
 4. Resolve `{cwd}/.peri/adlc/`, canonicalizing existing ancestors. Refuse symlink
    or `..` traversal that escapes cwd. Never resolve to `~/.peri/` or outside
    cwd. Verify the task directory is writable.
@@ -1062,7 +1062,7 @@ return await run({ agent, parallel, phase }, args)
 Handoff paths stay under `args.adlcTaskRoot` (`{cwd}/.peri/adlc/tasks/<id>/`).
 Use only `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and normal JS.
 
-After `ExecuteExtraTool` returns the run id, append it to the Workflow 1 manifest
+After `ToolInvoke` returns the run id, append it to the Workflow 1 manifest
 slot and wait for the asynchronous completion notification. When notified, read
 `.claude/workflow-runs/<run-id>/state.json`, the Decision Packet, and the
 arbitration Handoff. Apply the required-output check above. A start response or

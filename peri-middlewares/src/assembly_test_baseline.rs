@@ -126,12 +126,7 @@ fn builtin_artifact_instance_can_be_closed_independently() {
     let mut enabled = super::base_context();
     enabled.mcp_pool = Some(super::pool_with_builtin_instances());
     let enabled_tools = super::assemble_tool_names(&enabled);
-    for expected in [
-        "artifact",
-        "WebSearch",
-        "SearchExtraTools",
-        "ExecuteExtraTool",
-    ] {
+    for expected in ["artifact", "WebSearch", "ToolSearch", "ToolInvoke"] {
         assert!(
             enabled_tools.iter().any(|name| name == expected),
             "未关闭时 {expected} 应可见: {enabled_tools:?}"
@@ -149,7 +144,7 @@ fn builtin_artifact_instance_can_be_closed_independently() {
         disabled_tools.iter().any(|name| name == "WebSearch"),
         "关闭 artifact 不影响 web 实例: {disabled_tools:?}"
     );
-    for expected in ["SearchExtraTools", "ExecuteExtraTool"] {
+    for expected in ["ToolSearch", "ToolInvoke"] {
         assert!(disabled_tools.iter().any(|name| name == expected));
     }
 }

@@ -55,7 +55,7 @@ pub struct RuntimeServices {
     pub tool_invocation_resolver: Arc<dyn ToolInvocationResolver>,
     pub middleware_chain: Arc<MiddlewareChain>,
     pub event_bus: Arc<EventBus>,
-    /// Deferred tools 外部注册表（ExecuteExtraTool 代理执行用）
+    /// Deferred tools 外部注册表（ToolInvoke 代理执行用）
     pub shared_tools: Option<SharedToolMap>,
 }
 

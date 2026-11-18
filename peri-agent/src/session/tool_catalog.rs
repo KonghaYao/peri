@@ -154,9 +154,25 @@ impl ToolFilterPolicy {
         let explicit_without_wildcard = allowed
             .as_ref()
             .is_some_and(|names| !names.iter().any(|name| name == "*"));
-        let by_name = Self::name_filter(allowed, disallowed);
+        let by_name = Self::name_filter(allowed.clone(), disallowed.clone());
+        let allow_only = Self::name_filter(allowed, Vec::new());
+        let deny_only = Self::name_filter(None, disallowed);
         Arc::new(move |tool| {
-            if !by_name(tool.name()) {
+            // 旧配置名通过宿主代理工具的 alias 继续命中；外部同名工具没有宿主身份，
+            // 只能按 canonical 名称匹配，不能借用宿主 alias。deny 对 canonical 与 alias 都优先。
+            let is_host_proxy = peri_acp_types::tool_proxy::is_host_proxy_tool_name(tool.name())
+                && tool.mcp_server_name().is_none();
+            let admitted = if is_host_proxy {
+                let aliases = tool.aliases();
+                let allowed_by_name =
+                    allow_only(tool.name()) || aliases.iter().any(|alias| allow_only(alias));
+                let denied =
+                    !deny_only(tool.name()) || aliases.iter().any(|alias| !deny_only(alias));
+                allowed_by_name && !denied
+            } else {
+                by_name(tool.name())
+            };
+            if !admitted {
                 return false;
             }
             if !explicit_without_wildcard
@@ -682,5 +698,81 @@ mod filter_policy_parity_tests {
             deny_wildcard("anything"),
             "deny 侧的 * 不是通配（既有语义）"
         );
+    }
+
+    struct ProxyTool {
+        name: &'static str,
+        aliases: &'static [&'static str],
+        mcp_source: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::BaseTool for ProxyTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "proxy filter fixture"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn aliases(&self) -> &[&str] {
+            self.aliases
+        }
+        fn mcp_server_name(&self) -> Option<&str> {
+            self.mcp_source
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(String::new())
+        }
+    }
+
+    /// allow/deny 的旧代理名只对宿主代理生效；外部同名工具不能冒领 alias 身份。
+    #[test]
+    fn canonical_alias_matching_is_limited_to_host_proxy_tools() {
+        use peri_acp_types::tool_proxy::{EXECUTE_EXTRA_TOOL_NAME, TOOL_INVOKE_NAME};
+
+        let host = ProxyTool {
+            name: TOOL_INVOKE_NAME,
+            aliases: &[EXECUTE_EXTRA_TOOL_NAME],
+            mcp_source: None,
+        };
+        let external = ProxyTool {
+            name: TOOL_INVOKE_NAME,
+            aliases: &[EXECUTE_EXTRA_TOOL_NAME],
+            mcp_source: Some("system-server"),
+        };
+
+        // 旧文件名配置命中宿主代理的 canonical 与 alias。
+        for entry in [TOOL_INVOKE_NAME, EXECUTE_EXTRA_TOOL_NAME] {
+            let allowed = ToolFilterPolicy::canonical(Some(vec![entry.to_string()]), Vec::new());
+            assert!(allowed(&host), "allow 条目 {entry} 必须放行宿主代理");
+            let denied = ToolFilterPolicy::canonical(None, vec![entry.to_string()]);
+            assert!(!denied(&host), "deny 条目 {entry} 必须命中宿主代理");
+        }
+
+        // 外部同名工具只能按 canonical 名称匹配，不能借用宿主 alias。
+        let alias_allow = ToolFilterPolicy::canonical(
+            Some(vec![EXECUTE_EXTRA_TOOL_NAME.to_string()]),
+            Vec::new(),
+        );
+        assert!(!alias_allow(&external), "旧别名不得放行同名外部工具");
+        let canonical_allow =
+            ToolFilterPolicy::canonical(Some(vec![TOOL_INVOKE_NAME.to_string()]), Vec::new());
+        assert!(
+            canonical_allow(&external),
+            "canonical 名称仍按普通 allow 规则匹配外部工具"
+        );
+        let alias_deny =
+            ToolFilterPolicy::canonical(None, vec![EXECUTE_EXTRA_TOOL_NAME.to_string()]);
+        assert!(alias_deny(&external), "旧别名不得误伤同名外部工具");
+
+        let other = ToolFilterPolicy::canonical(Some(vec!["Read".to_string()]), Vec::new());
+        assert!(!other(&host), "未列入 allow 的工具照旧被过滤");
     }
 }
