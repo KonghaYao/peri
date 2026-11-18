@@ -12,7 +12,6 @@ use crate::session::subagent::tests::RecordingLLM;
 use crate::session::subagent::ForkDirectiveKind;
 use crate::session::subagent::SessionFactory;
 use crate::session::subagent::SubagentCancelPolicy;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::subagent::SubagentSpawnConfig;
 use crate::session::FrozenContext;
 use crate::session::Session;
@@ -115,7 +114,6 @@ fn spawn_config(
         cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 10,
         fork_directive_kind: Some(ForkDirectiveKind::Fork),
-        run_mode: SubagentRunMode::Sync,
         skill_names: vec![],
         llm: crate::session::test_resources::mock::model::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -132,7 +130,7 @@ fn spawn_config(
         session_resources: Some(store),
         event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(Arc::new(crate::agent::async_tasks::TaskManager::new())),
         on_bg_complete: None,
         langfuse_bridge: None,
         on_subagent_start: None,
@@ -245,6 +243,8 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("the spawn subagent fixture result is required for this assertion");
+    // 后台执行完成后再接管 transcript：spawn 返回时子会话仍可能持有写者。
+    crate::session::subagent::tests::wait_status_settled(&*store, &spawned.child_thread_id).await;
     let child_id = spawned.child_thread_id.clone();
     assert_eq!(
         spawned.session.transcript().read().ancestor_len(),
@@ -315,7 +315,14 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         .await
         .expect("the load session snapshot fixture result is required for this assertion")
         .flags;
-    assert!(child_flags.values().any(|flags| flags.excluded));
+    // 排除标记属于父消息，持久化在继承区；own flags 只保留子消息自己的指令。
+    let child_inherited_flags = store
+        .load_session_snapshot(&child_id)
+        .await
+        .expect("the load session snapshot fixture result is required for this assertion")
+        .inherited
+        .flags;
+    assert!(child_inherited_flags.values().any(|flags| flags.excluded));
     assert!(child_flags[&own_tool.id()].truncated);
     assert!(parent_messages
         .iter()
@@ -369,14 +376,14 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
             std::sync::Arc::new(recording),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(Arc::new(crate::agent::async_tasks::TaskManager::new())),
         None,
     );
     config.tools.push(Arc::new(RecoveryTool));
     let resumed = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("the resume subagent fixture result is required for this assertion");
+    crate::session::subagent::tests::wait_status_settled(&*reopened, &child_id).await;
     let archived_ids = {
         let arc = resumed.session.transcript();
         let transcript = arc.read();

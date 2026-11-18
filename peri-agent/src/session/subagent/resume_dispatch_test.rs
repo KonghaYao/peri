@@ -9,7 +9,6 @@ use crate::session::subagent::types::SubagentChainAssembler;
 use crate::session::subagent::types::SubagentChainContext;
 use crate::session::subagent::SessionFactory;
 use crate::session::subagent::SubagentResumeConfig;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::test_resources::mock::ResumeLoadGate;
 use crate::session::FrozenContext;
@@ -35,7 +34,6 @@ async fn background_resume_without_custom_callback_wakes_parent() {
     let manager = Arc::new(TaskManager::new());
     let mut config =
         crate::session::subagent::tests::resume_config(store.clone(), thread_id.clone());
-    config.run_mode = SubagentRunMode::Background;
     config.task_manager = Some(manager.clone());
     config.prompt = Some("resume-result-anchor".into());
     let spawned = SessionFactory::resume_subagent(Some(&parent), config)
@@ -193,7 +191,7 @@ async fn wait_for_resume_status(
     thread_id: &ThreadId,
     status: AgentStatus,
 ) {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let changed = store.status_changed.notified();
             if store
@@ -208,8 +206,17 @@ async fn wait_for_resume_status(
             changed.await;
         }
     })
-    .await
-    .expect("cancelled resume must finalize persisted status before the thread can resume");
+    .await;
+    if outcome.is_err() {
+        let current = store
+            .load_meta(thread_id)
+            .await
+            .expect("the load meta fixture result is required for this assertion")
+            .agent_status;
+        panic!(
+            "cancelled resume must finalize persisted status before the thread can resume: expected {status:?}, current {current:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -240,7 +247,6 @@ async fn test_resume_load_cancelled_by_dispatch_restores_previous_status() {
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
     );
@@ -291,7 +297,6 @@ async fn test_resume_active_write_cancelled_by_dispatch_finishes_before_rollback
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
         None,
         Some(cancel.clone()),
     );
@@ -361,6 +366,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     let starts = Arc::new(AtomicUsize::new(0));
     let llm = RecordingLLM::new();
     let received = Arc::clone(&llm.received);
+    let manager = Arc::new(TaskManager::new());
     let mut config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         thread_id.clone(),
@@ -368,8 +374,7 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager.clone()),
         Some(cancel.clone()),
     );
     config.chain_assembler = Arc::new(CancelDuringAssembly {
@@ -386,10 +391,9 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
     )
     .await
     .expect("the timeout fixture result is required for this assertion")
-    .expect("cancelled sync preparation retains the interrupted result contract");
-    assert!(result.interrupted);
+    .expect("pre-cancelled resume still registers the background execution");
+    assert!(result.task_id.starts_with("bg-"));
     assert_eq!(result.child_thread_id, thread_id);
-    assert!(result.task_id.is_none());
     assert_eq!(
         result.session.store().thread_id.as_deref(),
         Some(thread_id.as_str())
@@ -398,13 +402,10 @@ async fn test_resume_cancelled_during_assembly_never_starts_execution() {
         assembled.load(Ordering::SeqCst),
         "the cancellation must happen after constructing the real session"
     );
-    assert_eq!(
-        starts.load(Ordering::SeqCst),
-        0,
-        "cancelled preparation must not emit lifecycle Start"
-    );
     assert!(received.read().is_empty());
-    wait_for_resume_status(&store, &thread_id, AgentStatus::Done).await;
+    wait_for_resume_status(&store, &thread_id, AgentStatus::Cancelled).await;
+    // 生命周期 Start 由已注册的后台执行发出，但取消先于模型调用落定。
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
     let resumed = SessionFactory::resume_subagent(
         None,
         crate::session::subagent::tests::resume_config(store.clone(), thread_id.clone()),
@@ -450,6 +451,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     let starts = Arc::new(AtomicUsize::new(0));
     let stops = Arc::new(AtomicUsize::new(0));
     let cancel = CancellationToken::new();
+    let manager = Arc::new(TaskManager::new());
     let mut config = crate::session::subagent::tests::resume_config_with(
         store.clone(),
         thread_id.clone(),
@@ -463,8 +465,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
             ))))),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(manager),
         Some(cancel.clone()),
     );
     let starts_hook = starts.clone();
@@ -475,10 +476,16 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
     config.on_subagent_stop = Some(Arc::new(move |_, _, _, _, _| {
         stops_hook.fetch_add(1, Ordering::SeqCst);
     }));
-    cancel_resume_at_gate(config, &cancel, entered_rx, &store, &thread_id).await;
-    // dispatch 取消后 wrapper 被 drop；子执行由独立任务继续，异步走正常
-    // Interrupted 收尾（flush / close / 终态 / Stop hook），
-    // claim Drop 不再是最终收尾者。这里等待收尾，而不是同步断言。
+    let spawned = SessionFactory::resume_subagent(None, config)
+        .await
+        .expect("resume returns once the background execution is registered");
+    assert_eq!(spawned.child_thread_id, thread_id);
+    entered_rx
+        .await
+        .expect("background child execution must reach the model call");
+    cancel.cancel();
+    // 取消后子执行异步走正常 Interrupted 收尾（flush / close / 终态 / Stop hook），
+    // claim Drop 不是最终收尾者。这里等待收尾，而不是同步断言。
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !llm_dropped.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -541,7 +548,6 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
             Arc::new(llm),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(task_manager),
         Some(token),
     );
@@ -559,13 +565,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         .await
         .expect("background cancellation retains real registration and completion");
     assert_eq!(spawned.child_thread_id, thread_id);
-    let task_id = spawned
-        .task_id
-        .expect("background must return a registered task");
-    assert!(
-        !spawned.interrupted,
-        "background interruption is reported asynchronously"
-    );
+    let task_id = spawned.task_id.clone();
     let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx)
         .await
         .expect("the timeout fixture result is required for this assertion")
@@ -586,6 +586,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         AgentStatus::Cancelled
     );
     let parent = test.session(&cwd, FrozenContext::builder().build());
+    let manager = Arc::new(TaskManager::new());
     let resumed = SessionFactory::resume_subagent(
         Some(&parent),
         crate::session::subagent::tests::resume_config_with(
@@ -595,14 +596,14 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
                 Arc::new(EchoLLM),
                 "fixture-scripted",
             ),
-            SubagentRunMode::Sync,
-            None,
+            Some(manager.clone()),
             None,
         ),
     )
     .await
     .expect("the resume subagent fixture result is required for this assertion");
     assert_eq!(resumed.child_thread_id, thread_id);
+    crate::session::subagent::tests::wait_background_idle(&manager).await;
 }
 
 /// Newly added provenance reads remain inside the existing real dispatch claim.
@@ -641,7 +642,6 @@ async fn test_resume_provenance_read_cancelled_by_dispatch_restores_previous_sta
                 Arc::new(llm),
                 "fixture-scripted",
             ),
-            SubagentRunMode::Sync,
             None,
             Some(cancel.clone()),
         );

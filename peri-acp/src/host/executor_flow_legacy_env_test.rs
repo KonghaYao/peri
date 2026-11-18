@@ -8,8 +8,7 @@ use peri_acp_types::agents::AgentOverrides;
 use peri_acp_types::frozen::FrozenRuntimeEnv;
 use peri_acp_types::messages::BaseMessage;
 use peri_agent::session::subagent::{
-    ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentLlmSource, SubagentRunMode,
-    SubagentSpawnConfig,
+    ForkDirectiveKind, SessionFactory, SubagentCancelPolicy, SubagentLlmSource, SubagentSpawnConfig,
 };
 #[cfg(not(windows))]
 use peri_model::Model;
@@ -154,7 +153,6 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
                     cancel_policy: SubagentCancelPolicy::Cascade,
                     max_iterations: 1,
                     fork_directive_kind: fork.then_some(ForkDirectiveKind::Fork),
-                    run_mode: SubagentRunMode::Sync,
                     skill_names: vec![],
                     llm: SubagentLlmSource::model(model, "capture"),
                     chain_assembler: Arc::new(
@@ -173,7 +171,9 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
                     session_resources: ctx.session_resources.clone(),
                     event_handler: None,
                     bg_event_sender: None,
-                    task_manager: None,
+                    task_manager: Some(
+                        Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
+                    ),
                     on_bg_complete: None,
                     langfuse_bridge: None,
                     on_subagent_start: None,
@@ -193,6 +193,15 @@ async fn legacy_env_child_and_fork_receive_own_identity() {
             )
             .await
             .unwrap();
+            // 后台子 Agent 在 spawn 返回后才进入 Reason；等待首个请求落账。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while requests.lock().unwrap().is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child 未在超时内发出首个模型请求"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             let requests = requests.lock().unwrap();
             assert!(!requests.is_empty());
             for request in requests.iter() {

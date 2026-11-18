@@ -10,6 +10,12 @@ pub(super) struct InvocationArgs {
     pub(super) model: Option<String>,
     pub(super) cwd: Option<String>,
     pub(super) is_fork: bool,
+    /// 旧版 `run_in_background` 参数：仅布尔值被识别并记录，绝不参与路由。
+    ///
+    /// Agent 恒后台（Issue #450），保留该字段只为让旧客户端调用继续工作；
+    /// 值本身没有消费方，schema 也不再声明它。
+    #[allow(dead_code)]
+    pub(super) legacy_run_in_background: Option<bool>,
 }
 
 impl InvocationArgs {
@@ -107,6 +113,18 @@ impl InvocationArgs {
             .map(str::to_string);
         let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
             || subagent_type.as_deref() == Some("fork");
+        // 兼容层（Issue #450）：旧客户端仍可能发送该字段。只有布尔值被识别，
+        // 其它类型与缺失一致；不校验、不报错、不改变执行模式。
+        let legacy_run_in_background = match input.get("run_in_background") {
+            Some(serde_json::Value::Bool(value)) => Some(*value),
+            _ => None,
+        };
+        if let Some(value) = legacy_run_in_background {
+            tracing::debug!(
+                run_in_background = value,
+                "Agent.run_in_background is accepted for compatibility and ignored; sub-agents always run in the background"
+            );
+        }
 
         Ok(Self {
             resume_thread_id,
@@ -116,6 +134,7 @@ impl InvocationArgs {
             model,
             cwd,
             is_fork,
+            legacy_run_in_background,
         })
     }
 }

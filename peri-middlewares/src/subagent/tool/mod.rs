@@ -17,7 +17,6 @@ mod configuration;
 mod define;
 mod definitions;
 mod execute_bg;
-mod execute_fork;
 mod execute_resume;
 mod invocation;
 mod mcp_activation;

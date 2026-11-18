@@ -9,10 +9,7 @@ use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 
 use crate::session::subagent::factory::claim::ResumeClaim;
 
-use crate::session::subagent::run_sync::SyncCompletion;
-use crate::session::subagent::types::{
-    ChildRunOutcome, SubagentFailure, SubagentResumeConfig, SubagentRunMode, SubagentSpawned,
-};
+use crate::session::subagent::types::{SubagentResumeConfig, SubagentSpawned};
 
 use crate::session::Session;
 
@@ -40,12 +37,11 @@ use crate::session::Session;
 ///   旧 transcript 已含首轮注入内容，重复注入会重复）
 /// - prompt 入队：`Some(p)` 原样追加（不套 fork directive）；`None` 注入隐式
 ///   continue 常量（issue 决策 9）
-/// - run mode 由本次调用决定（issue 决策 8）：Sync → `run_sync_subagent`；
-///   Background → 新 task_id + `spawn_background_subagent`
+/// - 执行恒为后台（Issue #450）：新 task_id + `spawn_background_subagent`
 ///
 /// 重建/装配失败（load_messages 失败）时回滚 status 至原值（R-M1），防 thread
-/// 永久停留 active（R-M4 崩溃遗留的镜像问题）。执行开始后的失败走
-/// `run_sync_subagent` / bg 各自的收尾路径（error / cancelled），不回滚。
+/// 永久停留 active（R-M4 崩溃遗留的镜像问题）。执行开始后的失败走后台收尾路径
+/// （error / cancelled），不回滚。
 /// 准备阶段调用被 drop 时，由 claim worker 在 active 写完成后异步回滚。
 pub(super) async fn resume_subagent_impl(
     parent: Option<&Arc<Session>>,
@@ -59,7 +55,6 @@ pub(super) async fn resume_subagent_impl(
         thread_id,
         prompt,
         agent_name: agent_name_cfg,
-        run_mode,
         max_iterations,
         llm,
         chain_assembler,
@@ -70,7 +65,7 @@ pub(super) async fn resume_subagent_impl(
         context_budget,
         compact_llm,
         session_resources,
-        event_handler,
+        event_handler: _,
         bg_event_sender,
         task_manager,
         on_bg_complete,
@@ -312,24 +307,6 @@ pub(super) async fn resume_subagent_impl(
         crate::agent::model_call::capture_tool_parent(parent_tool_call_id.as_deref())
             .filter(|parent| Some(parent.owner.as_str()) == parent_thread.as_deref());
 
-    // Assembly is synchronous but can observe cancellation from another task
-    // (or a callback). Sync callers still receive the established interrupted
-    // result with this thread/session identity, without publishing Start.
-    // Background must pass through real registration and asynchronous completion;
-    // returning a task-less success here would violate its launch contract.
-    if matches!(run_mode, SubagentRunMode::Sync) && cancel_token.is_cancelled() {
-        claim.rollback().await?;
-        return Ok(SubagentSpawned {
-            child_thread_id: thread_id,
-            task_id: None,
-            session,
-            cancel_token,
-            interrupted: true,
-            pending_tasks: Vec::new(),
-            handoff: None,
-        });
-    }
-
     // 7. prompt 入队：Some(p) 原样追加（不套 fork directive——恢复目标仍是原
     //    任务，直接追加指令）；None 注入隐式 continue 常量（issue 决策 9）
     let prompt_text = prompt.unwrap_or_else(|| IMPLICIT_CONTINUE_PROMPT.to_string());
@@ -353,7 +330,7 @@ pub(super) async fn resume_subagent_impl(
         return Err(detail.into());
     }
 
-    // 8. 执行（run mode 由本次调用决定，issue 决策 8）
+    // 8. 执行（恒后台，Issue #450）
     // 认领已写入 Active；准备门在进入执行前释放，避免与本次 run 的
     // 执行 permit 互斥（并发的第二次 resume 由 claim/status 拒绝）。
     drop(preparation);
@@ -362,160 +339,54 @@ pub(super) async fn resume_subagent_impl(
         crate::session::subagent::terminal_settlement::TerminalMqRoute {
             store: Arc::clone(&session_resources),
             target: peri_acp_types::thread::ThreadId::from(target.as_str()),
-            mailbox: parent
-                .filter(|_| {
-                    crate::session::subagent::factory::spawn::parent_thread_id_of(parent).as_ref()
-                        == Some(&target)
-                })
-                .map(|parent| parent.async_result_mailbox()),
         }
     });
-    match run_mode {
-        SubagentRunMode::Sync => {
-            let run_thread_id = thread_id.clone();
-            let run_agent_name = agent_name.clone();
-            let run_cwd = cwd.clone();
-            let run_session = session.clone();
-            let sync_task_id = crate::session::subagent::run_sync::new_sync_task_id();
-            let completion = crate::session::subagent::run_sync::run_sync_with_registered_handoff(
-                session.clone(),
-                thread_id.clone(),
-                agent_name.clone(),
-                parent
-                    .and_then(|session| session.subagent_host())
-                    .and_then(|host| host.task_manager.clone()),
-                Some(sync_task_id.clone()),
-                crate::session::subagent::factory::completion_delivery(parent, on_bg_complete),
-                terminal_route,
-                move |handoff_start, handed_off| async move {
-                    crate::session::subagent::run_sync::run_sync_subagent(
-                        &run_thread_id,
-                        &run_agent_name,
-                        &run_cwd,
-                        max_iterations,
-                        crate::session::subagent::run_sync::handoff_event_handler(
-                            event_handler,
-                            bg_event_sender,
-                            handed_off,
-                        ),
-                        on_subagent_start,
-                        on_subagent_stop,
-                        Some(session_resources),
-                        register_runtime,
-                        deregister_runtime,
-                        langfuse_bridge,
-                        parent_agent_id,
-                        parent_tool_call_id,
-                        v2_ctx,
-                        run_session,
-                        Some(claim),
-                        Some(handoff_start),
-                    )
-                    .await
-                },
-            )
-            .await?;
-            let (interrupted, pending_tasks, pending_task_id, handoff) = match completion {
-                SyncCompletion::Finished(ChildRunOutcome::Settled) => {
-                    (false, Vec::new(), None, None)
-                }
-                SyncCompletion::Finished(ChildRunOutcome::Interrupted) => {
-                    (true, Vec::new(), None, None)
-                }
-                SyncCompletion::Finished(ChildRunOutcome::HandedOff { receipt }) => {
-                    let tasks = receipt
-                        .tasks
-                        .iter()
-                        .map(|task| task.task_id.clone())
-                        .collect();
-                    (false, tasks, None, Some(receipt))
-                }
-                SyncCompletion::Finished(ChildRunOutcome::Failed { error, .. }) => {
-                    return Err(Box::new(SubagentFailure::new(
-                        thread_id.clone(),
-                        agent_name.clone(),
-                        error,
-                    )))
-                }
-                SyncCompletion::Finished(ChildRunOutcome::HandoffFailed { cause, failure }) => {
-                    return Err(Box::new(SubagentFailure::handoff_failed(
-                        thread_id.clone(),
-                        agent_name.clone(),
-                        cause,
-                        &failure,
-                    )))
-                }
-                SyncCompletion::Pending(pending) => (
-                    false,
-                    pending.pending_tasks,
-                    Some(sync_task_id),
-                    Some(pending.receipt),
-                ),
-            };
-            Ok(SubagentSpawned {
-                child_thread_id: thread_id,
-                task_id: pending_task_id,
-                session,
-                cancel_token,
-                interrupted,
-                pending_tasks,
-                handoff,
-            })
-        }
-        SubagentRunMode::Background => {
-            // slice 5：后台恢复——生成新 task_id、TaskManager 注册（参数与 spawn
-            // 调用点对齐；prompt 传实际注入文本——用户 prompt 或 continue 常量，
-            // 仅用于 prompt_summary 展示，R2-LOW-3）
-            let task_id = format!("bg-{}", uuid::Uuid::now_v7());
-            match crate::session::subagent::background::spawn_background_subagent(
-                task_id.clone(),
-                thread_id.clone(),
-                agent_name.clone(),
-                prompt_text,
-                cwd,
-                max_iterations,
-                bg_event_sender,
-                task_manager,
-                crate::session::subagent::factory::completion_delivery(parent, on_bg_complete),
-                langfuse_bridge,
-                Some(Arc::clone(&session_resources)),
-                terminal_route,
-                deregister_runtime,
-                on_subagent_start,
-                on_subagent_stop,
-                register_runtime,
-                parent_agent_id,
-                parent_tool_call_id,
-                cancel_token.clone(),
-                v2_ctx,
-                Some(&mut claim),
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(e) => {
-                    // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
-                    // register_with_kind 撞 per-kind 上限）时任务未执行——status
-                    // 回滚至原值，防 thread 永久停留 active（R-M1 执行前失败回滚
-                    // 契约，与 load_messages 失败回滚同款）；错误携带 thread_id
-                    let rollback = claim.rollback().await;
-                    let suffix = rollback.err().map(|e| format!("; {e}")).unwrap_or_default();
-                    return Err(
-                        format!("resume_subagent: thread {}: {}{}", thread_id, e, suffix).into(),
-                    );
-                }
-            }
-            Ok(SubagentSpawned {
-                child_thread_id: thread_id,
-                task_id: Some(task_id),
-                session,
-                cancel_token,
-                interrupted: false,
-                pending_tasks: Vec::new(),
-                handoff: None,
-            })
+    // slice 5：后台恢复——生成新 task_id、TaskManager 注册（参数与 spawn
+    // 调用点对齐；prompt 传实际注入文本——用户 prompt 或 continue 常量，
+    // 仅用于 prompt_summary 展示，R2-LOW-3）
+    let task_id = format!("bg-{}", uuid::Uuid::now_v7());
+    match crate::session::subagent::background::spawn_background_subagent(
+        task_id.clone(),
+        thread_id.clone(),
+        agent_name.clone(),
+        prompt_text,
+        cwd,
+        max_iterations,
+        bg_event_sender,
+        task_manager,
+        crate::session::subagent::factory::completion_delivery(parent, on_bg_complete),
+        langfuse_bridge,
+        Some(Arc::clone(&session_resources)),
+        terminal_route,
+        deregister_runtime,
+        on_subagent_start,
+        on_subagent_stop,
+        register_runtime,
+        parent_agent_id,
+        parent_tool_call_id,
+        cancel_token.clone(),
+        v2_ctx,
+        Some(&mut claim),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(e) => {
+            // review MEDIUM-1 回滚：注册失败（task_manager 缺失 /
+            // register_with_kind 撞 per-kind 上限）时任务未执行——status
+            // 回滚至原值，防 thread 永久停留 active（R-M1 执行前失败回滚
+            // 契约，与 load_messages 失败回滚同款）；错误携带 thread_id
+            let rollback = claim.rollback().await;
+            let suffix = rollback.err().map(|e| format!("; {e}")).unwrap_or_default();
+            return Err(format!("resume_subagent: thread {}: {}{}", thread_id, e, suffix).into());
         }
     }
+    Ok(SubagentSpawned {
+        child_thread_id: thread_id,
+        task_id,
+        session,
+        cancel_token,
+    })
 }
 
 /// 隐式 continue 指令（prompt 缺省时注入，issue 决策 9）

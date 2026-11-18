@@ -12,7 +12,6 @@ use crate::session::subagent::types::SubagentChainContext;
 use crate::session::subagent::types::SubagentHost;
 use crate::session::subagent::ParkedChildOwner;
 use crate::session::subagent::SessionFactory;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::thread::ThreadMeta;
@@ -157,10 +156,7 @@ impl SubagentChainAssembler for CaptureSessionAssembler {
     }
 }
 
-async fn failed_child_resume_preserves_blocked_result_through_full_compact(
-    first_background: bool,
-    background: bool,
-) {
+async fn failed_child_resume_preserves_blocked_result_through_full_compact() {
     let store = MockSessionResources::new();
     let child_id = uuid::Uuid::now_v7().to_string();
     let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
@@ -217,11 +213,6 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
             Arc::new(FailWithoutResidual),
             "fixture-scripted",
         ),
-        if first_background {
-            SubagentRunMode::Background
-        } else {
-            SubagentRunMode::Sync
-        },
         Some(parent_manager.clone()),
         None,
     );
@@ -242,23 +233,15 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
             let _ = sender.send(());
         }
     }));
-    let failed = SessionFactory::resume_subagent(Some(&parent), failed_config).await;
-    if first_background {
-        let spawned = failed.expect("首次后台执行必须启动");
-        let result = tokio::time::timeout(Duration::from_secs(10), failed_rx)
-            .await
-            .expect("首次失败必须交付")
-            .expect("the expect fixture result is required for this assertion");
-        assert!(!result.success);
-        drop(spawned);
-    } else {
-        let error = failed.expect_err("首次同步执行必须报告模型失败");
-        assert!(error
-            .downcast_ref::<crate::session::subagent::SubagentFailure>()
-            .expect("the SubagentFailure fixture result is required for this assertion")
-            .handoff()
-            .is_some());
-    }
+    let spawned = SessionFactory::resume_subagent(Some(&parent), failed_config)
+        .await
+        .expect("首次后台执行必须启动");
+    let result = tokio::time::timeout(Duration::from_secs(10), failed_rx)
+        .await
+        .expect("首次失败必须交付")
+        .expect("the expect fixture result is required for this assertion");
+    assert!(!result.success);
+    drop(spawned);
     let (old_session, old_mailbox, old_delivery) =
         captured.lock().take().expect("必须捕获原会话的资源路由");
     tokio::time::timeout(Duration::from_secs(10), finished_rx)
@@ -303,11 +286,6 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
             Arc::new(model),
             "fixture-scripted",
         ),
-        if background {
-            SubagentRunMode::Background
-        } else {
-            SubagentRunMode::Sync
-        },
         Some(parent_manager),
         None,
     );
@@ -396,15 +374,11 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
         &old_mailbox,
         &resumed.session.async_result_mailbox()
     ));
-    if background {
-        let resumed_result = tokio::time::timeout(Duration::from_secs(10), resumed_rx)
-            .await
-            .expect("恢复执行必须处理 B 后完成")
-            .expect("the expect fixture result is required for this assertion");
-        assert!(resumed_result.success);
-    } else {
-        assert!(resumed.task_id.is_none(), "同步恢复应直接完成");
-    }
+    let resumed_result = tokio::time::timeout(Duration::from_secs(10), resumed_rx)
+        .await
+        .expect("恢复执行必须处理 B 后完成")
+        .expect("the expect fixture result is required for this assertion");
+    assert!(resumed_result.success);
     let seen = messages.lock();
     assert!(seen
         .iter()
@@ -420,25 +394,7 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
 /// [回归测试] 模型失败交接后，后台 resume 的 Full 保留未覆盖结果。
 #[tokio::test(start_paused = true)]
 async fn test_failed_child_background_resume_preserves_blocked_result_through_full_compact() {
-    failed_child_resume_preserves_blocked_result_through_full_compact(true, true).await;
-}
-
-/// [回归测试] 后台失败交接后，同步 resume 的 Full 保留未覆盖结果。
-#[tokio::test(start_paused = true)]
-async fn test_failed_child_sync_resume_preserves_blocked_result_through_full_compact() {
-    failed_child_resume_preserves_blocked_result_through_full_compact(true, false).await;
-}
-
-/// [回归测试] 同步失败交接后，后台 resume 的 Full 保留未覆盖结果。
-#[tokio::test(start_paused = true)]
-async fn test_sync_failed_child_background_resume_preserves_blocked_result_through_full_compact() {
-    failed_child_resume_preserves_blocked_result_through_full_compact(false, true).await;
-}
-
-/// [回归测试] 同步失败交接后，同步 resume 的 Full 保留未覆盖结果。
-#[tokio::test(start_paused = true)]
-async fn test_sync_failed_child_sync_resume_preserves_blocked_result_through_full_compact() {
-    failed_child_resume_preserves_blocked_result_through_full_compact(false, false).await;
+    failed_child_resume_preserves_blocked_result_through_full_compact().await;
 }
 
 /// [回归测试] 没有进程内 owner 的冷恢复只加载历史，不重建任务或结果责任。
@@ -499,7 +455,7 @@ async fn test_cold_resume_does_not_reconstruct_mailbox_or_tasks() {
         .is_empty());
 }
 
-async fn confirmed_handoff_terminal_write_failure(background: bool) {
+async fn confirmed_handoff_terminal_write_failure() {
     let store = MockSessionResources::new();
     let child_id = uuid::Uuid::now_v7().to_string();
     let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
@@ -543,11 +499,6 @@ async fn confirmed_handoff_terminal_write_failure(background: bool) {
             Arc::new(FailWithoutResidual),
             "fixture-scripted",
         ),
-        if background {
-            SubagentRunMode::Background
-        } else {
-            SubagentRunMode::Sync
-        },
         Some(parent_manager),
         None,
     );
@@ -570,19 +521,15 @@ async fn confirmed_handoff_terminal_write_failure(background: bool) {
             let _ = sender.send(());
         }
     }));
-    let first = SessionFactory::resume_subagent(Some(&parent), config).await;
-    if background {
-        first.expect("后台执行必须启动");
-        let result = tokio::time::timeout(Duration::from_secs(10), result_rx)
-            .await
-            .expect("终态写失败必须交付")
-            .expect("the expect fixture result is required for this assertion");
-        assert!(!result.success);
-        assert!(result.output.contains("terminal status write failed"));
-    } else {
-        let error = first.expect_err("终态写失败必须返回错误");
-        assert!(error.to_string().contains("terminal_status_persist_failed"));
-    }
+    SessionFactory::resume_subagent(Some(&parent), config)
+        .await
+        .expect("后台执行必须启动");
+    let result = tokio::time::timeout(Duration::from_secs(10), result_rx)
+        .await
+        .expect("终态写失败必须交付")
+        .expect("the expect fixture result is required for this assertion");
+    assert!(!result.success);
+    assert!(result.output.contains("terminal status write failed"));
     tokio::time::timeout(Duration::from_secs(10), finished_rx)
         .await
         .expect("旧执行必须完成")
@@ -664,7 +611,6 @@ async fn test_failed_resume_registration_keeps_mailbox_blocked() {
             Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         None,
         None,
     );
@@ -684,16 +630,10 @@ async fn test_failed_resume_registration_keeps_mailbox_blocked() {
     );
 }
 
-/// [回归测试] 已确认交接后，同步终态状态写入失败仍拒绝 resume。
-#[tokio::test(start_paused = true)]
-async fn test_sync_confirmed_handoff_terminal_write_failure_blocks_resume() {
-    confirmed_handoff_terminal_write_failure(false).await;
-}
-
 /// [回归测试] 已确认交接后，后台终态状态写入失败仍拒绝 resume。
 #[tokio::test(start_paused = true)]
 async fn test_background_confirmed_handoff_terminal_write_failure_blocks_resume() {
-    confirmed_handoff_terminal_write_failure(true).await;
+    confirmed_handoff_terminal_write_failure().await;
 }
 
 /// [回归测试] 后台 resume 已开始但未结算即被强制取消时，不得保留 Ready 责任。
@@ -770,7 +710,6 @@ async fn test_background_forced_abort_reblocks_unsettled_mailbox() {
             Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        SubagentRunMode::Background,
         Some(parent_manager.clone()),
         None,
     );
@@ -790,12 +729,7 @@ async fn test_background_forced_abort_reblocks_unsettled_mailbox() {
         Some(AsyncResultState::Queued)
     );
     parent_manager
-        .cancel(
-            spawned
-                .task_id
-                .as_deref()
-                .expect("the as deref fixture result is required for this assertion"),
-        )
+        .cancel(&spawned.task_id)
         .expect("the cancel fixture result is required for this assertion");
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(4)).await;

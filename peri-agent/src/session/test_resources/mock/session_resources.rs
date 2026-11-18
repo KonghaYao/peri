@@ -482,6 +482,34 @@ impl SessionResources for MockSessionResources {
         })
     }
 
+    async fn settle_retained_mq(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[peri_acp_types::session::MqEntry],
+    ) -> SessionResourceResult<()> {
+        self.ensure_writable()?;
+        // 内存后端用单把锁串行化：先落提醒，再物理删除 MQ 行；提醒按稳定 ID 幂等。
+        for reminder in reminders {
+            self.with_region(thread_id, |region| {
+                if !region
+                    .payloads
+                    .iter()
+                    .any(|payload| payload.id() == reminder.id)
+                {
+                    region.payloads.push(PersistedPayload::SystemReminder {
+                        id: reminder.id,
+                        reminder: reminder.reminder.clone(),
+                    });
+                }
+            });
+        }
+        for row in rows {
+            self.mq.mq_cancel(thread_id, row.id).await?;
+        }
+        Ok(())
+    }
+
     async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.ensure_writable()?;
         self.closing

@@ -1,8 +1,7 @@
 //! SubAgent 后台路径：v2 stages 实现
 //!
-//! Agent 调用恒为后台（v5 行为）：新建、fork、非 active resume 都经
-//! `SessionFactory` 启动后台执行，主流程立即返回；同步执行实现保留在 Agent 层
-//! （`SubagentRunMode::Sync` / `run_sync.rs`），但本工具不再产生该路径。
+//! Agent 调用恒为后台（Issue #450）：新建、fork、非 active resume 都经
+//! `SessionFactory` 启动后台执行，主流程立即返回；没有同步执行实现。
 //!
 //! 1. 经 `build_agent_from_def` 装配 v2 字段（cancel_policy=Independent）
 //! 2. 组装 [`SubagentSpawnConfig`](peri_agent::session::subagent::SubagentSpawnConfig) 经 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（Agent 层统一入口）：
@@ -15,9 +14,7 @@
 use std::sync::Arc;
 
 use peri_agent::messages::BaseMessage;
-use peri_agent::session::subagent::{
-    ForkDirectiveKind, SubagentCancelPolicy, SubagentRunMode, SubagentSpawned,
-};
+use peri_agent::session::subagent::{ForkDirectiveKind, SubagentCancelPolicy, SubagentSpawned};
 use peri_agent::tools::BaseTool;
 use peri_mcp_core::agent_definition::ClaudeAgent;
 
@@ -56,7 +53,6 @@ impl super::SubAgentTool {
             SubagentCancelPolicy::Independent,
             crate::subagent::DEFAULT_SUBAGENT_MAX_ITERATIONS,
             Some(ForkDirectiveKind::Fork),
-            SubagentRunMode::Background,
             llm,
             tools,
             crate::subagent::fork::child_inheritance_filter(),
@@ -95,7 +91,6 @@ impl super::SubAgentTool {
             SubagentCancelPolicy::Independent,
             build_result.max_iterations,
             None,
-            SubagentRunMode::Background,
             llm,
             build_result
                 .tools
@@ -114,10 +109,7 @@ impl super::SubAgentTool {
 
     /// 后台启动回执。线程身份是 resume 的唯一可用身份（task id 不是）。
     fn background_receipt(&self, spawned: &SubagentSpawned) -> String {
-        let task_id = spawned
-            .task_id
-            .clone()
-            .unwrap_or_else(|| "bg-unknown".to_string());
+        let task_id = spawned.task_id.clone();
         if self.host().session_resources.is_some() {
             // 回执直接给出可复用的线程身份：规范句与 bg 完成通知（peri-acp-types
             // event.rs）逐字同形，模型无需从两个裸 UUID 里推测哪个能 resume；

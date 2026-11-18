@@ -240,11 +240,6 @@ impl MockSessionResources {
         self.mq_query_failures.store(count, Ordering::SeqCst);
     }
 
-    /// 故障注入：让接下来的 `count` 次终态结算在写入前失败。
-    pub(crate) fn fail_next_finalizes(&self, count: usize) {
-        self.finalize_failures.store(count, Ordering::SeqCst);
-    }
-
     /// 故障注入：让接下来的 `count` 次无结果终态写入在写完工作意图、写状态前失败。
     ///
     /// 用来验证「部分写入不产生 Done + working」以及同一轮重试能否收敛。
@@ -252,25 +247,8 @@ impl MockSessionResources {
         self.terminal_status_failures.store(count, Ordering::SeqCst);
     }
 
-    pub(crate) fn finalize_attempts(&self) -> usize {
-        self.finalize_attempts.load(Ordering::SeqCst)
-    }
-
-    /// 每次 finalize 尝试携带的结果消息身份；重试必须保持同一身份。
-    pub(crate) fn finalize_message_ids(&self) -> Vec<MessageId> {
-        self.finalize_message_ids
-            .lock()
-            .expect("self finalize message ids mutex must remain unpoisoned throughout the test")
-            .clone()
-    }
-
     pub(crate) fn status_writes(&self) -> usize {
         self.status_writes.load(Ordering::SeqCst)
-    }
-
-    /// 模拟远端 `active` 守卫：非 active 的 child 不得再被结算。
-    pub(crate) fn require_active_for_finalize(&self) {
-        self.finalize_requires_active.store(true, Ordering::SeqCst);
     }
 
     /// 当前 meta 状态序列（`(thread_id, status)`），只含真实发生变更的写入。

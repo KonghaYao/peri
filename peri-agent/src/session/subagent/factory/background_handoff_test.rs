@@ -8,7 +8,6 @@ use peri_acp_types::tasks::TaskManager as _;
 
 use crate::session::subagent::{
     SessionFactory, SubagentChainAssembler, SubagentChainContext, SubagentResumeConfig,
-    SubagentRunMode,
 };
 
 use peri_acp_types::messages::MessageId;
@@ -117,7 +116,6 @@ fn config(
         thread_id: CHILD.into(),
         prompt: Some("new run".into()),
         agent_name: None,
-        run_mode: SubagentRunMode::Background,
         max_iterations: 2,
         llm: crate::session::test_resources::mock::model::fixture_source(
             Arc::new(QuickModel),

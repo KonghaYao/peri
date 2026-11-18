@@ -124,7 +124,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续；恢复恒为后台（run_in_background 被忽略）。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
+                    "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理。非 active：从磁盘恢复，prompt 可省略以隐式继续；恢复恒为后台。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "send_only": {
                     "type": "boolean",
@@ -142,11 +142,6 @@ impl BaseTool for SubAgentTool {
                 "model": {
                     "type": "string",
                     "description": "Optional model tier override, only applies to NEW defined-type sub-agents (subagent_type path): overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used. Available tiers: 'inherit' (use the parent agent's model), 'haiku' (fastest/cheapest, best for quick lookups), 'sonnet' (balanced default), 'opus' (strongest reasoning), 'fable' (flagship tier). Within the defined-type path, unknown values are rejected with an error — never silently ignored. Ignored (not validated) when fork=true (forks always inherit the parent model) and when resume_thread_id is provided (resume 从当前磁盘上的 Agent 定义重建模型，不保留先前的 model override，本次 resume 调用的 model 参数也被忽略)"
-                },
-                "run_in_background": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Background execution is mandatory: the sub-agent always runs in the background, and an explicit false is ignored (the call still starts in the background). The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks."
                 },
                 "cwd": {
                     "type": "string",
@@ -190,6 +185,7 @@ impl BaseTool for SubAgentTool {
             model,
             cwd,
             is_fork,
+            ..
         } = InvocationArgs::parse(&input)?;
         let cwd = self.validate_cwd(cwd.as_deref()).await?;
         if send_only {
@@ -219,8 +215,7 @@ impl BaseTool for SubAgentTool {
         // 也不会被静默丢弃后转入新建。
         // invoke_resume 先尝试当前会话的 live Defer 投递；只有恢复路径才需要磁盘。
         //
-        // v5：非 active 恢复恒后台唤醒；active 线程的 Defer 投递本就忽略该字段。
-        // `run_in_background` 仍被宽容解析，但不再决定执行模式。
+        // 非 active 恢复恒后台唤醒；active 线程的 Defer 投递不需要执行模式。
         if let Some(thread_id) = resume_thread_id.as_ref() {
             return self
                 .invoke_resume(
@@ -246,9 +241,8 @@ impl BaseTool for SubAgentTool {
             crate::subagent::fork::fork_context_usage_gate(ctx.context_usage)?;
         }
 
-        // v5 行为：Agent 调用恒后台，显式 `run_in_background: false` 只被宽容解析、
-        // 不改变执行模式。同步执行实现保留在 Agent 层（`SubagentRunMode::Sync` /
-        // `run_sync.rs`），本工具不再产生该路径。
+        // Agent 调用恒后台（Issue #450）：没有同步分支，也没有模式参数。
+        // 旧客户端发送的 `run_in_background` 仅在解析层记录并忽略。
         if is_fork {
             // 只有 fork 消费父历史；命名子 agent 从零构建 transcript。
             let parent_messages = self.current_messages(ctx.messages);

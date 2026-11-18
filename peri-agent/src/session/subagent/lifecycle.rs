@@ -6,11 +6,7 @@ use crate::agent::events::ExecutorEvent;
 
 use crate::agent::events_v2::EventBus;
 use crate::session::factory::DeregisterRuntimeFn;
-use crate::session::subagent::types::SubagentLifecycleStop;
-
 use crate::session::TurnContext;
-use peri_acp_types::session_resources::SessionResources;
-use peri_acp_types::thread::{AgentStatus, ThreadId};
 
 // The loop has released its producers before this seam. A cleanup guard must
 // only retain a Weak<EventBus>, otherwise closing the stream would deadlock.
@@ -82,20 +78,6 @@ pub(super) async fn drain_subagent_events(
 
 // ─── 生命周期工具（自 tool/lifecycle.rs 迁移；hook 触发闭包化） ────────────
 
-/// RAII guard that calls deregister on drop (panic-safe cleanup).
-pub(crate) struct DeregisterGuard {
-    pub(crate) thread_id: String,
-    pub(crate) deregister: Option<DeregisterRuntimeFn>,
-}
-
-impl Drop for DeregisterGuard {
-    fn drop(&mut self) {
-        if let Some(ref deregister) = self.deregister {
-            deregister(&self.thread_id);
-        }
-    }
-}
-
 /// v2 SubagentStop 补发参数（BgCleanupGuard 取消兜底路径使用）。
 ///
 /// 字段与 [`build_subagent_stop_v2`] 参数一一对应（C3 配对契约）：
@@ -160,53 +142,6 @@ impl Drop for BgCleanupGuard {
             }
         }
     }
-}
-
-/// 同步 SubAgent 停止统一后处理（fork + agent 定义路径）。
-///
-/// 按顺序执行：
-/// 1. lifecycle hook (SubagentStop，经闭包)
-/// 2. 会话状态定向更新（仅 sync 路径有此步骤）
-///
-/// v1 SubagentStopped 协议化直发不在本函数内——由调用方在
-/// `emit_subagent_stop_v2` 之后经 `forward_subagent_stop_v1` 同步映射发出
-/// （发射语义单一事实源 = v2 事件构造，v1 仅 ACP 协议化载体）。
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn on_subagent_stop_handler(
-    on_subagent_stop: Option<&SubagentLifecycleStop>,
-    session_resources: Option<&Arc<dyn SessionResources>>,
-    agent_id: &str,
-    child_thread_id: &str,
-    output_summary: &str,
-    status: AgentStatus,
-    cwd: &str,
-) -> crate::error::AgentResult<()> {
-    // 1. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
-    if let Some(on_stop) = on_subagent_stop {
-        on_stop(
-            child_thread_id,
-            agent_id,
-            cwd,
-            output_summary,
-            status != AgentStatus::Done,
-        );
-    }
-    // 3. 终态状态（仅 sync 路径有此步骤）：状态与 work_state 一次收尾，
-    // 避免执行期间被 `ensure_processing` 提升为 working 后残留 Done + working。
-    if let Some(store) = session_resources {
-        if let Err(error) =
-            crate::session::subagent::terminal_settlement::settle_terminal_without_result(
-                store.as_ref(),
-                &ThreadId::from(child_thread_id),
-                status,
-            )
-            .await
-        {
-            tracing::error!(thread_id = %child_thread_id, %error, "terminal_status_persist_failed");
-            return Err(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

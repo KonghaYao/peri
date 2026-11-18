@@ -25,7 +25,7 @@ use std::fmt::{Debug, Formatter};
 
 /// 子 Agent 默认迭代上限（agent 定义未显式声明 `max_turns`，或声明为 0 时生效）。
 ///
-/// 定义型构建、同步 fork、后台 fork、fork resume、workflow agent 与 MCP agent
+/// 定义型构建、后台 fork、fork resume、workflow agent 与 MCP agent
 /// 审批 key 共用同一默认规则，各通道不得再硬编码。
 pub(crate) const DEFAULT_SUBAGENT_MAX_ITERATIONS: usize = 400;
 

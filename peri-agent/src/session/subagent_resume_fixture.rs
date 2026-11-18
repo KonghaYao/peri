@@ -2,7 +2,7 @@
 
 // ─── resume_subagent 用例（slice 4/5 重建 + 执行） ─────────────────────────
 
-/// 构造最小 resume config（默认：EchoLLM / Sync / 无 task_manager / 无 cancel_token）
+/// 构造最小 resume config（默认：EchoLLM / 后台执行 / 新 TaskManager / 无 cancel_token）
 fn resume_config(
     session_resources: Arc<MockSessionResources>,
     thread_id: String,
@@ -14,8 +14,7 @@ fn resume_config(
             std::sync::Arc::new(EchoLLM),
             "fixture-scripted",
         ),
-        SubagentRunMode::Sync,
-        None,
+        Some(Arc::new(TaskManager::new())),
         None,
     )
 }
@@ -26,7 +25,6 @@ fn resume_config_with(
     session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
     thread_id: String,
     llm: SubagentLlmSource,
-    run_mode: SubagentRunMode,
     task_manager: Option<Arc<TaskManager>>,
     cancel_token: Option<CancellationToken>,
 ) -> SubagentResumeConfig {
@@ -34,7 +32,6 @@ fn resume_config_with(
         thread_id,
         prompt: None,
         agent_name: None,
-        run_mode,
         max_iterations: 200,
         llm,
         chain_assembler: Arc::new(EmptyChainAssembler),
@@ -208,4 +205,64 @@ async fn resume_err(parent: Option<&Arc<Session>>, config: SubagentResumeConfig)
         Err(e) => e.to_string(),
         Ok(_) => panic!("resume_subagent 应返回 Err（校验失败或重建失败）"),
     }
+}
+
+/// 等待后台 resume 提交终态：状态离开 Active 即本次执行已收尾。
+///
+/// resume 返回时认领已写入 Active，因此这里的等待不会误判「尚未开始」。
+async fn wait_resume_settled(store: &MockSessionResources, thread_id: &str) {
+    let thread_id = thread_id.to_string();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let changed = store.status_changed.notified();
+            if !store
+                .load_meta(&thread_id)
+                .await
+                .expect("the load meta fixture result is required for this assertion")
+                .agent_status
+                .is_active()
+            {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("background resume must settle the persisted status");
+}
+
+/// 等待后台 spawn/resume 的 TaskManager 执行账本清空（终态先于完成提交）。
+async fn wait_background_idle(manager: &TaskManager) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !peri_acp_types::tasks::TaskManager::is_execution_idle(manager) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background execution must settle");
+}
+
+/// 等待任意存储后端上的 child 离开 Active（后台执行已提交终态）。
+///
+/// 后台 spawn/resume 在返回后才执行；以持久状态为完成信号，避免按请求数或
+/// 队列长度判断时把「仍在跑」误当成「已收尾」。
+async fn wait_status_settled(
+    store: &dyn peri_acp_types::session_resources::SessionResources,
+    thread_id: &str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let status = store
+                .load_session_meta(&thread_id.to_string())
+                .await
+                .expect("the load session meta fixture result is required for this assertion")
+                .agent_status;
+            if !status.is_active() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("background child must settle its persisted status");
 }

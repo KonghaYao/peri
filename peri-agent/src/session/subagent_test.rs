@@ -24,7 +24,6 @@ use crate::session::subagent::ForkDirectiveKind;
 use crate::session::subagent::SessionFactory;
 use crate::session::subagent::SubagentCancelPolicy;
 use crate::session::subagent::SubagentResumeConfig;
-use crate::session::subagent::SubagentRunMode;
 use crate::session::subagent::SubagentSpawnConfig;
 use crate::session::test_resources::mock::MockSessionResources;
 use crate::session::FrozenContext;
@@ -318,6 +317,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         Some("parent-thread-1".into()),
     );
 
+    let manager = Arc::new(TaskManager::new());
     let config = SubagentSpawnConfig {
         agent_name: "test-agent".to_string(),
         prompt: "do something".to_string(),
@@ -325,7 +325,6 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 200,
         fork_directive_kind: None,
-        run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
         llm: crate::session::test_resources::mock::model::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -344,7 +343,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
         ),
         event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(manager.clone()),
         on_bg_complete: None,
         langfuse_bridge: None,
         on_subagent_start: None,
@@ -365,6 +364,7 @@ async fn test_spawn_subagent_creates_child_thread_with_parent_link() {
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
+    wait_background_idle(&manager).await;
 
     // 夹具另登记了父会话行：child 必须按 id 定位，不能按登记位置取。
     let threads = store.threads();
@@ -426,6 +426,7 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         ..Default::default()
     });
 
+    let manager = Arc::new(TaskManager::new());
     let config = SubagentSpawnConfig {
         agent_name: "host-agent".to_string(),
         prompt: "do something".to_string(),
@@ -433,7 +434,6 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 200,
         fork_directive_kind: None,
-        run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
         llm: crate::session::test_resources::mock::model::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -452,7 +452,7 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
         ),
         event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(manager.clone()),
         on_bg_complete: None,
         langfuse_bridge: None,
         on_subagent_start: None,
@@ -473,6 +473,7 @@ async fn test_spawn_subagent_main_agent_via_host_writes_parent_link() {
     let _ = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
+    wait_background_idle(&manager).await;
 
     let threads = store.threads();
     let child = threads
@@ -509,6 +510,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         Some("parent-thread-2".into()),
     );
 
+    let manager = Arc::new(TaskManager::new());
     let config = SubagentSpawnConfig {
         agent_name: "fork".to_string(),
         prompt: "continue".to_string(),
@@ -516,7 +518,6 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         cancel_policy: SubagentCancelPolicy::Cascade,
         max_iterations: 200,
         fork_directive_kind: Some(ForkDirectiveKind::Fork),
-        run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
         llm: crate::session::test_resources::mock::model::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -535,7 +536,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
         ),
         event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(manager.clone()),
         on_bg_complete: None,
         langfuse_bridge: None,
         on_subagent_start: None,
@@ -556,6 +557,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
     let spawned = SessionFactory::spawn_subagent(Some(&parent), config)
         .await
         .expect("spawn ok");
+    wait_background_idle(&manager).await;
 
     // 子 session frozen copy：claude_md / skill_summary / date 与父一致
     let child_frozen = &spawned.session.store().frozen;
@@ -588,6 +590,7 @@ async fn test_spawn_subagent_copies_frozen_from_parent() {
 async fn test_spawn_subagent_without_parent_uses_config_fallback() {
     let store = MockSessionResources::new();
     store.register_bound_session("bg-parent", "/tmp/bg");
+    let manager = Arc::new(TaskManager::new());
     let config = SubagentSpawnConfig {
         agent_name: "fork".to_string(),
         prompt: "bg task".to_string(),
@@ -595,7 +598,6 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         cancel_policy: SubagentCancelPolicy::Independent,
         max_iterations: 200,
         fork_directive_kind: Some(ForkDirectiveKind::Bg),
-        run_mode: SubagentRunMode::Sync,
         skill_names: Vec::new(),
         llm: crate::session::test_resources::mock::model::fixture_source(
             std::sync::Arc::new(EchoLLM),
@@ -614,7 +616,7 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
         ),
         event_handler: None,
         bg_event_sender: None,
-        task_manager: None,
+        task_manager: Some(manager.clone()),
         on_bg_complete: None,
         langfuse_bridge: None,
         on_subagent_start: None,
@@ -635,6 +637,7 @@ async fn test_spawn_subagent_without_parent_uses_config_fallback() {
     let spawned = SessionFactory::spawn_subagent(None, config)
         .await
         .expect("spawn ok");
+    wait_background_idle(&manager).await;
 
     let threads = store.threads();
     let child = threads

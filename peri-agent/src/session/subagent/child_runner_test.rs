@@ -823,21 +823,6 @@ fn fixed_context(session: &Arc<Session>, answer: &'static str) -> V2SubagentCont
     )
 }
 
-fn transcript_contains(session: &Session, needle: &str) -> bool {
-    session
-        .transcript()
-        .read()
-        .entries()
-        .iter()
-        .any(|entry| match entry {
-            crate::session::TranscriptEntry::Message(message) => message.content().contains(needle),
-            crate::session::TranscriptEntry::Reminder { reminder, .. } => {
-                reminder.as_reminder().body.contains(needle)
-                    || reminder.as_reminder().metadata.to_string().contains(needle)
-            }
-        })
-}
-
 /// 子 Agent 结束时不走 ACP `finish_prompt_turn`，占用快照必须由 child runner
 /// 在终态结算前写入 `threads.context_usage_tokens`。
 struct UsageSnapshotLlm;

@@ -74,20 +74,15 @@ async fn commit_handoff(
     owner: &Arc<ParkedChildOwner>,
     reason: ChildHandoffReason,
     unprocessed_tool_calls: Vec<String>,
-    handoff_start: &mut Option<tokio::sync::oneshot::Sender<ChildHandoffReceipt>>,
 ) -> Result<ChildHandoffReceipt, crate::agent::async_tasks::handoff::HandoffCommitError> {
-    let receipt = crate::agent::async_tasks::handoff::commit_child_handoff(
+    crate::agent::async_tasks::handoff::commit_child_handoff(
         &context.session,
         owner,
         reason,
         received_after_deadline(context),
         unprocessed_tool_calls,
     )
-    .await?;
-    if let Some(sender) = handoff_start.take() {
-        let _ = sender.send(receipt.clone());
-    }
-    Ok(receipt)
+    .await
 }
 
 fn handoff_failure(
@@ -121,20 +116,10 @@ pub(super) async fn run_child_until_terminal(
     max_iterations: usize,
     session: &Arc<Session>,
 ) -> ChildRunOutcome {
-    run_child_with_handoff_signal(context, max_iterations, session, None).await
-}
-
-pub(super) async fn run_child_with_handoff_signal(
-    context: StageContext,
-    max_iterations: usize,
-    session: &Arc<Session>,
-    handoff_start: Option<tokio::sync::oneshot::Sender<ChildHandoffReceipt>>,
-) -> ChildRunOutcome {
     // tracker 随 StageContext 一起被循环消费；先保留共享句柄，执行结束后
-    // 才能把本轮真实占用快照交给宿主展示（sync/background 共用此入口）。
+    // 才能把本轮真实占用快照交给宿主展示。
     let token_tracker = Arc::clone(&context.compact.token_tracker);
-    let outcome =
-        run_child_with_handoff_signal_inner(context, max_iterations, session, handoff_start).await;
+    let outcome = run_child_until_terminal_inner(context, max_iterations, session).await;
     // 读锁 guard 不能跨 await：先取出快照再落库。
     let tokens = token_tracker.read().estimated_context_tokens();
     persist_context_usage(session, tokens).await;
@@ -161,11 +146,10 @@ async fn persist_context_usage(session: &Arc<Session>, tokens: Option<u64>) {
     }
 }
 
-async fn run_child_with_handoff_signal_inner(
+async fn run_child_until_terminal_inner(
     mut context: StageContext,
     max_iterations: usize,
     session: &Arc<Session>,
-    mut handoff_start: Option<tokio::sync::oneshot::Sender<ChildHandoffReceipt>>,
 ) -> ChildRunOutcome {
     let Some(manager) = session
         .subagent_host()
@@ -247,7 +231,6 @@ async fn run_child_with_handoff_signal_inner(
                     &owner,
                     ChildHandoffReason::SettlementDeadline,
                     unprocessed_tool_calls,
-                    &mut handoff_start,
                 )
                 .await
                 {
@@ -283,7 +266,6 @@ async fn run_child_with_handoff_signal_inner(
                     &owner,
                     ChildHandoffReason::ExecutionFailed,
                     pending_tool_calls,
-                    &mut handoff_start,
                 )
                 .await
                 {
@@ -316,7 +298,6 @@ async fn run_child_with_handoff_signal_inner(
                 &owner,
                 ChildHandoffReason::HookStop,
                 unprocessed_tool_calls,
-                &mut handoff_start,
             )
             .await
             {
@@ -349,14 +330,8 @@ async fn run_child_with_handoff_signal_inner(
             } else {
                 ChildHandoffReason::SettlementDeadline
             };
-            return match commit_handoff(
-                &context,
-                &owner,
-                reason,
-                pending_act_tool_calls(&context),
-                &mut handoff_start,
-            )
-            .await
+            return match commit_handoff(&context, &owner, reason, pending_act_tool_calls(&context))
+                .await
             {
                 Ok(receipt) => ChildRunOutcome::HandedOff { receipt },
                 Err(error) => {
@@ -467,7 +442,6 @@ async fn run_child_with_handoff_signal_inner(
                 &owner,
                 reason,
                 pending_act_tool_calls(&context),
-                &mut handoff_start,
             )
             .await
             {

@@ -4,32 +4,16 @@
 #[tokio::test(start_paused = true)]
 async fn late_result_after_deadline_requires_explicit_resume() {
     let (child, manager, built, initial_calls, result_calls, ticket) = child_with_nested_task();
-    let child_id = child
-        .store()
-        .thread_id
-        .clone()
-        .expect("the clone fixture result is required for this assertion");
-    let first = crate::session::subagent::run_sync::run_sync_subagent(
-        &child_id,
-        "fixture",
-        "/tmp",
-        10,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        built,
-        child.clone(),
-        None,
-        None,
+    let permit = permit_for(&child, &built.context);
+    let first = tokio::time::timeout(
+        Duration::from_secs(125),
+        crate::session::subagent::child_runner::run_child_until_terminal(built.context, 10, &child),
     )
     .await
-    .expect("the run sync subagent fixture result is required for this assertion");
+    .expect("nested result must reach the handoff deadline");
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
     assert!(
         matches!(first, ChildRunOutcome::HandedOff { .. }),
         "{first:?}"
@@ -46,27 +30,20 @@ async fn late_result_after_deadline_requires_explicit_resume() {
         crate::messages::BaseMessage::human("continue explicitly"),
     ));
     let resumed = nested_context(&child, initial_calls.clone(), result_calls.clone());
-    let second = crate::session::subagent::run_sync::run_sync_subagent(
-        &child_id,
-        "fixture",
-        "/tmp",
-        10,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        resumed,
-        child.clone(),
-        None,
-        None,
+    let permit = permit_for(&child, &resumed.context);
+    let second = tokio::time::timeout(
+        Duration::from_secs(125),
+        crate::session::subagent::child_runner::run_child_until_terminal(
+            resumed.context,
+            10,
+            &child,
+        ),
     )
     .await
-    .expect("the run sync subagent fixture result is required for this assertion");
+    .expect("explicit resume must consume the retained result");
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
     assert!(matches!(second, ChildRunOutcome::Settled), "{second:?}");
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert!(crate::session::subagent::util::extract_last_ai_text(&child)
