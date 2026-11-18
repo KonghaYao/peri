@@ -61,11 +61,13 @@ pub(super) fn transport_label(kind: TransportKind) -> &'static str {
     }
 }
 
-/// 启动发现的 `tools/list` 来源：System MCP 必须走本次 live round-trip。
+/// 启动发现的 `tools/list` 来源：System MCP 与 dynamic 连接必须走本次 live round-trip。
 ///
 /// System MCP 的 ready 证据不得来自历史持久缓存——缓存命中只说明「过去某次列出过
-/// 这些工具」，不能证明本次启动的 server 仍能列出工具。`system_mcp_tools` 为空数组
-/// 时同样要走完这次 round-trip（清单可以是空数组）。普通 MCP 保持既有 cache 策略。
+/// 这些工具」，不能证明本次启动的 server 仍能列出工具。dynamic 连接同理：按需加载
+/// 的 ready 必须由本次连接证明，匿名 server 的版本命中不能替代 `tools/list`。
+/// System MCP 的 `system_mcp_tools` 为空数组时同样要走完这次 round-trip（清单可以
+/// 是空数组）。其余 eager server 保持既有 cache 策略。
 ///
 /// `Err` 一律表示发现失败：既不等于「服务器没有工具」，也不产生任何 ready 证据。
 pub(super) async fn list_discovered_tools(
@@ -74,7 +76,7 @@ pub(super) async fn list_discovered_tools(
     peer: &Peer<RoleClient>,
     config: &McpServerConfig,
 ) -> Result<Vec<Tool>, ServiceError> {
-    if config.system_mcp == Some(true) {
+    if config.system_mcp == Some(true) || config.dynamic {
         peer.list_all_tools().await
     } else {
         pool.list_all_tools_cached_for_startup(server_name, peer, config)

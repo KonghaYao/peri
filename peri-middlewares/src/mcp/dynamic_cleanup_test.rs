@@ -136,6 +136,53 @@ function handle(line) {
 readline.on('line', handle);
 "#;
 
+/// 首次启动正常并在 initialize 声明 cache version，之后 `tools/list` 失败：
+/// 用于验证 dynamic ready 不能被磁盘缓存命中替代。
+const WARM_CACHE_LIVE_FAIL_SERVER: &str = r#"
+const fs = require('node:fs');
+const prior = fs.existsSync('starts')
+  ? fs.readFileSync('starts', 'utf8').split('\n').filter(Boolean).length
+  : 0;
+fs.appendFileSync('starts', 'started\n');
+const readline = require('node:readline').createInterface({ input: process.stdin });
+function handle(line) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result;
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25',
+    capabilities: {
+      tools: {}, resources: {},
+      extensions: { 'io.mcpp/server-cache-version': { cacheVersion: 'warm-v1' } },
+    },
+    serverInfo: { name: 'warm-cache-fixture', version: '1' },
+  };
+  else if (request.method === 'tools/list') {
+    if (prior === 0) {
+      result = { tools: [{
+        name: 'warm-echo',
+        description: 'Echo from a previous generation',
+        inputSchema: { type: 'object', properties: {}, additionalProperties: true },
+      }] };
+    } else {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+        error: { code: -32603, message: 'live tools unavailable' } }) + '\n');
+      return;
+    }
+  }
+  else if (request.method === 'resources/list') result = { resources: [] };
+  else if (request.method === 'resources/templates/list') result = { resourceTemplates: [] };
+  else if (request.method === 'ping') result = {};
+  else {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+}
+readline.on('line', handle);
+"#;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     cwd: PathBuf,
@@ -145,13 +192,29 @@ struct Fixture {
 
 impl Fixture {
     fn new(script: &str) -> Self {
+        Self::build(script, false)
+    }
+
+    /// 缓存可用的池：dynamic live 发现测试需要一次真实命中机会。
+    fn with_cache(script: &str) -> Self {
+        Self::build(script, true)
+    }
+
+    fn build(script: &str, cache: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("project");
         std::fs::create_dir(&cwd).unwrap();
         std::fs::write(cwd.join("server.js"), script).unwrap();
         let (tasks, spawner) = McpTaskOwner::new();
-        let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+        let mut pool = McpClientPool::new_pending_with_spawner(spawner);
         pool.bind_execution_cwd(&cwd).unwrap();
+        if cache {
+            pool.bind_workspace_scope(peri_acp_types::workspace::WorkspaceId::new())
+                .unwrap();
+            pool.bind_cache_policy(crate::mcp::config::McpCachePolicy::Enabled)
+                .unwrap();
+            pool.resource_cache = crate::mcp::resource_cache::McpResourceCache::isolated_for_test();
+        }
         let config: crate::mcp::McpServerConfig = serde_json::from_value(serde_json::json!({
             "command": "node",
             "args": ["server.js"],
@@ -162,7 +225,7 @@ impl Fixture {
         Self {
             _dir: dir,
             cwd,
-            pool,
+            pool: Arc::new(pool),
             tasks,
         }
     }
@@ -503,6 +566,42 @@ async fn failed_attempt_settles_process_owner_before_retry() {
         "重试后 pool/slot 只能有一个 owner"
     );
     assert_eq!(fixture.pool.retained_process_count(), 1);
+    assert_eq!(fixture.starts(), 2);
+    fixture.shutdown().await;
+}
+
+/// 缓存命中不能替代 dynamic 的 live `tools/list`：本次连接证明不了就不 ready。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dynamic_ready_requires_live_tools_list_even_with_warm_cache() {
+    let fixture = Fixture::with_cache(WARM_CACHE_LIVE_FAIL_SERVER);
+    fixture.pool.ensure_loaded("lazy").await.unwrap();
+    assert_eq!(fixture.pool.client("lazy").unwrap().tools.len(), 1);
+
+    // 保留磁盘缓存与 cache version，只重建连接：第二次 live 发现会失败。
+    fixture
+        .pool
+        .close_server_connection("lazy", true)
+        .await
+        .unwrap();
+    fixture
+        .pool
+        .server_slot("lazy")
+        .stopped
+        .store(false, Ordering::Release);
+
+    let error = fixture.pool.ensure_loaded("lazy").await.unwrap_err();
+    assert!(
+        error.to_string().contains("live tools unavailable"),
+        "dynamic 必须走 live tools/list，实际: {error}"
+    );
+    let handle = fixture.pool.client("lazy").expect("失败必须发布状态");
+    assert!(
+        !matches!(handle.status, ClientStatus::Connected),
+        "缓存工具不得让 dynamic 连接变成 Connected"
+    );
+    assert!(handle.tools.is_empty(), "缓存工具不得进入失败句柄");
+    fixture.wait_for_idle().await;
+    assert_eq!(fixture.slot_resources(), (0, 0));
     assert_eq!(fixture.starts(), 2);
     fixture.shutdown().await;
 }
