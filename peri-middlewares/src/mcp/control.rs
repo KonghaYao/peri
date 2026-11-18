@@ -822,10 +822,11 @@ impl SessionMcpCatalogPort for PoolCatalog {
                 .map(|bridge| Arc::new(bridge) as Arc<dyn BaseTool>)
                 .collect();
             // Dynamic Loader 与远端工具同属池内目录：来源关闭/禁用即消失（plan 5.2）。
-            tools.extend(super::loader::dynamic_loader_tools(
-                &self.pool,
-                Some(&self.session),
-            ));
+            tools.extend(
+                super::loader::dynamic_loader_tools(&self.pool, Some(&self.session))
+                    .into_iter()
+                    .map(|loader| loader as Arc<dyn BaseTool>),
+            );
             return Arc::new(SessionMcpCatalogSnapshot { generation, tools });
         }
     }
