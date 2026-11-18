@@ -105,6 +105,37 @@ const timer = setInterval(() => {
 }, 20);
 "#;
 
+/// 首次启动立即退出（握手失败），之后正常应答：验证失败 attempt 的 owner 结算。
+const FAIL_FIRST_START_SERVER: &str = r#"
+const fs = require('node:fs');
+const prior = fs.existsSync('starts')
+  ? fs.readFileSync('starts', 'utf8').split('\n').filter(Boolean).length
+  : 0;
+fs.appendFileSync('starts', 'started\n');
+if (prior === 0) process.exit(1);
+const readline = require('node:readline').createInterface({ input: process.stdin });
+function handle(line) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result;
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25', capabilities: { tools: {}, resources: {} },
+    serverInfo: { name: 'retry-fixture', version: '1' },
+  };
+  else if (request.method === 'tools/list') result = { tools: [] };
+  else if (request.method === 'resources/list') result = { resources: [] };
+  else if (request.method === 'resources/templates/list') result = { resourceTemplates: [] };
+  else if (request.method === 'ping') result = {};
+  else {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+}
+readline.on('line', handle);
+"#;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     cwd: PathBuf,
@@ -437,5 +468,41 @@ async fn removal_waits_for_an_admitted_commit_and_cleans_its_publication() {
         "已卸载 server 不得残留 service"
     );
     assert_eq!(fixture.slot_resources(), (0, 0));
+    fixture.shutdown().await;
+}
+
+/// 握手失败的 attempt 必须 close/join 已登记 owner；重试后只有一个 owner。
+///
+/// transport 的 Drop 只 terminate 子进程，不 join 也不置 `is_stopped`；旧实现
+/// 在 `connect_managed` 返回 Failed 时跳过清理，重试会把第二个 owner 叠进
+/// pool/slot。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_attempt_settles_process_owner_before_retry() {
+    let fixture = Fixture::new(FAIL_FIRST_START_SERVER);
+    fixture.pool.ensure_loaded("lazy").await.unwrap_err();
+    assert_eq!(
+        fixture.slot_resources(),
+        (0, 0),
+        "失败 attempt 必须收口已登记的 service/process"
+    );
+    assert_eq!(
+        fixture.pool.retained_process_count(),
+        0,
+        "失败 attempt 的 owner 不得留在保留表"
+    );
+    assert_eq!(fixture.starts(), 1);
+
+    fixture.pool.ensure_loaded("lazy").await.unwrap();
+    assert!(matches!(
+        fixture.pool.client("lazy").unwrap().status,
+        ClientStatus::Connected
+    ));
+    assert_eq!(
+        fixture.slot_resources(),
+        (1, 1),
+        "重试后 pool/slot 只能有一个 owner"
+    );
+    assert_eq!(fixture.pool.retained_process_count(), 1);
+    assert_eq!(fixture.starts(), 2);
     fixture.shutdown().await;
 }

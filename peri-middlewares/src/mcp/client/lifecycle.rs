@@ -118,6 +118,11 @@ impl McpClientPool {
         self.shared_services.lock().len()
     }
 
+    #[cfg(all(test, not(target_os = "emscripten")))]
+    pub(crate) fn retained_process_count(&self) -> usize {
+        self.processes.lock().len()
+    }
+
     /// 测试停点：持锁可把提交卡在「已过准入、尚未发布」之间。
     #[cfg(test)]
     pub(crate) fn pause_handle_generation(

@@ -247,6 +247,9 @@ impl McpClientPool {
                             McpClientPool::insert_failed(self, server_name, reason.clone());
                             initialize::commit_discovery_failure(self, server_name, false);
                         }
+                        // spawn helper 可能已登记 owner（attach 失败）：必须 close/join
+                        // 后重试才能复用同一个 pool/slot 位置。
+                        self.discard_uncommitted_resources(server_name).await;
                         return Err(McpPoolError::ConnectionFailed {
                             server: server_name.to_string(),
                             reason,
@@ -528,6 +531,9 @@ impl McpClientPool {
                     }
                     initialize::commit_discovery_failure(self, server_name, false);
                 }
+                // 握手失败时 transport 的 Drop 只 terminate 子进程；owner 还在
+                // pool/slot 里，必须 close/join 后才能让下一次 attempt 复用位置。
+                self.discard_uncommitted_resources(server_name).await;
                 Err(McpPoolError::ConnectionFailed {
                     server: server_name.to_string(),
                     reason: err_str,
@@ -539,6 +545,8 @@ impl McpClientPool {
                     McpClientPool::insert_failed(self, server_name, msg.to_string());
                     initialize::commit_discovery_failure(self, server_name, false);
                 }
+                // 超时丢弃了 serve future，未提交的 owner 同样需要显式收口。
+                self.discard_uncommitted_resources(server_name).await;
                 Err(McpPoolError::ConnectionFailed {
                     server: server_name.to_string(),
                     reason: msg.to_string(),
