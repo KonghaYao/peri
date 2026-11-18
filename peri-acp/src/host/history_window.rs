@@ -49,33 +49,11 @@ pub(crate) use commit_observer::StoreCompactCommitObserver;
 #[cfg(test)]
 pub(crate) use history_window_coordinator::WindowNotificationSink;
 
-pub(crate) use history_window_coordinator::WindowConnection;
-
-pub(crate) use history_window_coordinator::TransportWindowSink;
-
-pub(crate) use history_window_coordinator::IssuedWindowTicket;
-
-pub(crate) use history_window_coordinator::HistoryWindowCoordinator;
-
-pub(crate) use history_window_coordinator::window_error;
-
-pub(crate) use history_window_coordinator::resource_window_error;
-
-pub(crate) use history_window_coordinator::handle;
-
-pub(crate) use history_window_coordinator::handle_body_chunk;
-
-pub(crate) use history_window_coordinator::notify_commit_if_open;
-
-pub(crate) use history_window_coordinator::publish_commit;
-
-pub(crate) use history_window_coordinator::revoke;
-
-pub(crate) use history_window_coordinator::invalidate;
-
-pub(crate) use history_window_coordinator::begin_rewind;
-
-pub(crate) use history_window_coordinator::finish_rewind;
+pub(crate) use history_window_coordinator::{
+    begin_rewind, finish_rewind, handle, handle_body_chunk, invalidate, notify_commit_if_open,
+    publish_commit, resource_window_error, revoke, window_error, HistoryWindowCoordinator,
+    IssuedWindowTicket, TransportWindowSink, WindowConnection,
+};
 
 #[path = "history_window/history_window_coordinator.rs"]
 mod history_window_coordinator;

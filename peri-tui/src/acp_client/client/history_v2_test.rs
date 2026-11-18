@@ -964,7 +964,7 @@ async fn assert_restored_old_window_page_and_body(server: &MpscServerTransport) 
         .await
         .unwrap();
 
-    let binding = crate::kit::history_detail_binding::HistoryV2BodyBinding {
+    let binding = crate::kit::history_window::HistoryV2BodyBinding {
         session_id: SESSION.into(),
         window_id: "w1".into(),
         snapshot_token: "snapshot-1".into(),
