@@ -337,6 +337,7 @@ type CommitInputVisitor = Box<dyn FnOnce(State<TextAreaState>)>;
 
 thread_local! {
     static COMMIT_INPUT_VISITOR: RefCell<Option<CommitInputVisitor>> = const { RefCell::new(None) };
+    static COMMIT_INPUT_DRAFT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 #[derive(Default, Props)]
@@ -358,8 +359,9 @@ impl Component for CommitInputProbe {
         _updater: &mut ComponentUpdater,
     ) {
         let state = hooks.use_state(|| {
+            let draft = COMMIT_INPUT_DRAFT.with(|slot| slot.borrow().clone());
             let mut text = TextAreaState::default();
-            text.insert_str("选择插件后提交");
+            text.insert_str(&draft);
             text
         });
         COMMIT_INPUT_VISITOR.with(|slot| {
@@ -371,7 +373,8 @@ impl Component for CommitInputProbe {
 }
 
 /// 在真实 `commit_input` 落点上执行一次探针，返回阻断后的编辑区文本。
-fn probe_commit_input() -> String {
+fn probe_commit_input(draft: &str) -> String {
+    COMMIT_INPUT_DRAFT.with(|slot| *slot.borrow_mut() = draft.to_owned());
     let observed = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
     let sink = observed.clone();
     COMMIT_INPUT_VISITOR.with(|slot| {
@@ -382,6 +385,7 @@ fn probe_commit_input() -> String {
     });
     let _ = ratatui_kit::test_util::render_frame(element!(CommitInputProbe()), 1, 1);
     COMMIT_INPUT_VISITOR.with(|slot| *slot.borrow_mut() = None);
+    COMMIT_INPUT_DRAFT.with(|slot| slot.borrow_mut().clear());
     observed.lock().clone()
 }
 
@@ -400,7 +404,7 @@ fn test_commit_input_keeps_draft_and_selection_without_plugin_capability() {
         steers.plugin_selections = false;
     }
 
-    let text = probe_commit_input();
+    let text = probe_commit_input("选择插件后提交");
 
     assert_eq!(text, "选择插件后提交", "阻断分支不得取走草稿");
     assert_eq!(
@@ -420,6 +424,75 @@ fn test_commit_input_keeps_draft_and_selection_without_plugin_capability() {
         "阻断分支不得进入旧服务端排队"
     );
 
+    crate::kit::steer_state::STEERS.state().write().enabled = false;
+}
+
+/// 升级后残留的选择不得阻断本地命令：`/setup` 不经过入队协议，
+/// 必须正常提交并保留选择给下一次 AgentText。
+#[test]
+#[serial]
+fn test_local_command_ignores_unavailable_plugin_selection_gate() {
+    super::super::reset_submit_side_effect_state();
+    let selections = vec![peri_acp_types::session::PluginSelection::new("alpha")];
+    crate::kit::atoms::PENDING_PLUGIN_SELECTIONS.set(selections.clone());
+    {
+        let steers_atom = crate::kit::steer_state::STEERS.state();
+        let mut steers = steers_atom.write();
+        steers.enabled = true;
+        steers.plugin_selections = false;
+    }
+
+    assert_eq!(
+        super::commit_block_reason("/setup"),
+        None,
+        "本地向导入口不受插件选择能力闸门约束"
+    );
+    let text = probe_commit_input("/setup");
+    assert_eq!(text, "", "本地命令必须正常提交而不是阻断");
+    assert_eq!(
+        crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+            .state()
+            .read()
+            .clone(),
+        selections,
+        "本地命令不得消费下一次任务的插件选择"
+    );
+    assert!(
+        *crate::kit::atoms::WIZARD_ACTIVE.state().read(),
+        "本地命令必须执行 ToggleSetup"
+    );
+
+    crate::kit::steer_state::STEERS.state().write().enabled = false;
+}
+
+/// 图片-only 提交仍属于 AgentText：能力未协商时必须继续阻断。
+#[test]
+#[serial]
+fn test_image_only_submission_still_requires_plugin_capability() {
+    super::super::reset_submit_side_effect_state();
+    crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+        .set(vec![peri_acp_types::session::PluginSelection::new("alpha")]);
+    {
+        let steers_atom = crate::kit::steer_state::STEERS.state();
+        let mut steers = steers_atom.write();
+        steers.enabled = true;
+        steers.plugin_selections = false;
+    }
+    crate::kit::atoms::PENDING_ATTACHMENTS
+        .state()
+        .write()
+        .push(pending_png());
+
+    assert_eq!(
+        super::commit_block_reason(""),
+        Some(super::CommitBlock::PluginSelectionUnavailable),
+        "图片-only 提交同样携带选择，必须 fail-closed"
+    );
+
+    crate::kit::atoms::PENDING_ATTACHMENTS
+        .state()
+        .write()
+        .clear();
     crate::kit::steer_state::STEERS.state().write().enabled = false;
 }
 

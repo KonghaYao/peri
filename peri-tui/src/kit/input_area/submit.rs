@@ -169,6 +169,24 @@ pub(super) enum CommitBlock {
     PluginSelectionUnavailable,
 }
 
+/// 本次 Enter 是否作为 AgentText 下发（含图片-only 提交）。
+///
+/// 能力闸门只约束会携带选择发送的请求；本地命令（如 `/setup`）不经过
+/// 入队协议，不能被升级后残留的选择阻断。
+fn submits_agent_text(text: &str) -> bool {
+    match crate::kit::submit_request::parse_submit_request(text) {
+        Some(SubmitRequest::AgentText { .. }) => true,
+        Some(_) => false,
+        None => {
+            crate::kit::steer_state::is_enabled()
+                && !crate::kit::atoms::PENDING_ATTACHMENTS
+                    .state()
+                    .read()
+                    .is_empty()
+        }
+    }
+}
+
 /// 旧 Host 的 EnqueueUserInputRequest 拒绝 pluginSelections：能力未协商时
 /// 必须在取走草稿前阻断，不能静默丢弃标签后照常提交。
 pub(super) fn commit_block_reason(text: &str) -> Option<CommitBlock> {
@@ -178,10 +196,11 @@ pub(super) fn commit_block_reason(text: &str) -> Option<CommitBlock> {
     {
         return Some(CommitBlock::RemoteCommand);
     }
-    if !crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
-        .state()
-        .read()
-        .is_empty()
+    if submits_agent_text(text)
+        && !crate::kit::atoms::PENDING_PLUGIN_SELECTIONS
+            .state()
+            .read()
+            .is_empty()
         && !crate::kit::steer_state::supports_plugin_selections()
     {
         return Some(CommitBlock::PluginSelectionUnavailable);
