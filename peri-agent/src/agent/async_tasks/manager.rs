@@ -1,6 +1,7 @@
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
+use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
 use peri_acp_types::tasks::{
     BgRegistryEvent, BgShellHandle, BgTaskKind, BgTaskRegistration, ExternalTaskRegistration,
     TaskCancelChannel, TaskChange, TaskRegistrationTicket, TaskSnapshot,
@@ -17,6 +18,21 @@ use crate::agent::async_tasks::registry::{
 };
 
 use crate::agent::async_tasks::shell_executor::ShellExecutor;
+
+/// Peer-controlled abandonment reasons are bounded so the terminal reminder
+/// body (fixed notice plus the delivery layer's monitor prefix) stays within
+/// [`MAX_REMINDER_BODY_BYTES`]. An oversized body would fail reminder
+/// construction before `registry.complete`, leaving the task unsettled.
+const ABANDON_REASON_LEAD: &str = "The task owner became unreachable: ";
+const ABANDON_REASON_TAIL: &str = ". The task was abandoned as unresolved. Its remote side \
+     effects are unknown; check the owner directly before assuming it stopped.";
+/// Monitor ids are host-generated (`monitor-{uuid}`); this reserve keeps the
+/// `Monitor task {remote_task_id}.` prefix inside the body budget.
+const MONITOR_TASK_PREFIX_RESERVE_BYTES: usize = 4 * 1024;
+const ABANDON_REASON_MAX_BYTES: usize = MAX_REMINDER_BODY_BYTES
+    - MONITOR_TASK_PREFIX_RESERVE_BYTES
+    - ABANDON_REASON_LEAD.len()
+    - ABANDON_REASON_TAIL.len();
 
 // ── TaskManager（per-session 聚合）────────────────────────────────────────────
 
@@ -623,16 +639,15 @@ impl TaskManager {
             registry: &self.registry,
             ticket,
         };
-        tracing::warn!(task_id, reason, "abandoning unobservable external task");
+        let reason =
+            crate::agent::async_tasks::shell::truncate_bytes(reason, ABANDON_REASON_MAX_BYTES);
+        tracing::warn!(task_id, reason = %reason, "abandoning unobservable external task");
         let mut result = BackgroundTaskResult {
             task_id: task_id.to_owned(),
             agent_name: "mcp".into(),
             prompt_summary: "unobservable task owner".into(),
             success: false,
-            output: "The task owner stayed unobservable for the whole bounded retry window and \
-                     the task was abandoned as unresolved. Its remote side effects are unknown; \
-                     check the owner directly before assuming it stopped."
-                .into(),
+            output: format!("{ABANDON_REASON_LEAD}{reason}{ABANDON_REASON_TAIL}"),
             tool_calls_count: 0,
             duration_ms: 0,
             timed_out: true,

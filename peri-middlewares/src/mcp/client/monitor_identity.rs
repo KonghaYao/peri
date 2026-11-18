@@ -4,10 +4,35 @@
 //! alert delivery path in the task subscription need the same identity check.
 //! It lives here so neither path depends on the other.
 
+use rmcp::model::ErrorCode;
+use rmcp::service::ServiceError;
+
 use super::McpClientPool;
 
 /// Reserved builtin instance name for the monitor server.
 pub(crate) const MONITOR_INSTANCE: &str = "monitor";
+
+/// Whether a failed `tasks/get` proves the builtin monitor owner is gone.
+///
+/// The in-process monitor keeps its task table and transport in the same
+/// `MonitorState`, so a closed transport or an unknown task can never become
+/// observable again. Non-monitor owners may reconnect or replay tasks, so they
+/// keep the bounded retry window.
+pub(crate) fn monitor_owner_lost(
+    is_monitor: bool,
+    transport_closed: bool,
+    error: &ServiceError,
+) -> bool {
+    if !is_monitor {
+        return false;
+    }
+    transport_closed
+        || match error {
+            ServiceError::TransportClosed | ServiceError::TransportSend(_) => true,
+            ServiceError::McpError(error) => error.code == ErrorCode::INVALID_PARAMS,
+            _ => false,
+        }
+}
 
 impl McpClientPool {
     /// Whether a connected server is the builtin monitor instance.
@@ -45,3 +70,7 @@ impl McpClientPool {
         self.session_bindings.read().inbox(owner).is_some()
     }
 }
+
+#[cfg(test)]
+#[path = "monitor_identity_test.rs"]
+mod tests;

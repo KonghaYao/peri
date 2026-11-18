@@ -700,6 +700,72 @@ async fn deadline_monitor_terminal_state_wakes_the_owner() {
     shutdown_link(link, pool, owner).await;
 }
 
+/// monitor 实例与 transport 一起消失：宿主立即结算并只投递一条终态提醒。
+#[cfg(unix)]
+#[tokio::test]
+async fn monitor_instance_loss_settles_immediately_with_one_unresolved_reminder() {
+    let link = connect_monitor().await;
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let pool = pool_with_monitor(&link, spawner);
+    let (queue, manager) = register_bridge_session(&pool, "session-a");
+
+    let receipt = start_monitor_via_bridge(
+        &pool,
+        &link,
+        "session-a",
+        json!({ "command": "sleep 30", "label": "disconnect" }),
+    )
+    .await;
+    let monitor_id = receipt_field(&receipt, "monitor_id");
+    assert!(
+        manager
+            .snapshot()
+            .tasks
+            .iter()
+            .any(|task| task.status == "running"),
+        "the monitor task must be registered before its owner disappears"
+    );
+
+    // Drop the client service and the builtin instance, but keep the pool and
+    // the session manager: only the owner disappears, not the host.
+    let mut link = link;
+    let _ = link.service.close_with_timeout(CLOSE_TIMEOUT).await;
+    let outcome = link.supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await;
+    assert!(
+        !matches!(outcome.server, BuiltinServerExit::AbortedAfterTimeout),
+        "server task must converge, not abort: {outcome:?}"
+    );
+
+    wait_settled_external(&manager).await;
+    let messages = drain(&queue);
+    assert_eq!(
+        messages.len(),
+        1,
+        "an owner loss must settle with exactly one terminal reminder: {messages:?}"
+    );
+    assert_eq!(messages[0].kind, MessageKind::Defer);
+    let body = reminder_body(&messages[0]);
+    assert!(body.contains(&monitor_id), "{body}");
+    assert!(body.contains("unresolved"), "{body}");
+    assert_eq!(
+        manager.snapshot().tasks[0].status,
+        "failed",
+        "the lost task must not stay active"
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        drain(&queue).is_empty(),
+        "the owner loss must not deliver a second reminder"
+    );
+
+    wait_host_registration_release(&owner).await;
+    pool.clients.write().clear();
+    drop(pool);
+    owner.begin_shutdown();
+    let _ = owner.shutdown().await;
+}
+
 /// 重复完成 / 取消 monitor 任务后，宿主登记必须回到基线，终态提醒不重复。
 #[tokio::test]
 async fn completed_and_cancelled_monitor_rounds_release_host_registrations() {
