@@ -323,6 +323,15 @@ impl AcpTuiClient {
     pub(crate) fn force_stable_for_test(&self, session_id: &str, accepting_reverse: bool) {
         self.lifecycle.force_stable(session_id, accepting_reverse);
     }
+
+    /// 仅测试：直接设定 `pluginSelections` 入队能力，模拟 Host 升级/降级。
+    #[cfg(test)]
+    pub(crate) fn force_plugin_selections_for_test(&self, supported: bool) {
+        self.user_input_queue
+            .store(supported, std::sync::atomic::Ordering::Release);
+        self.user_input_queue_plugin_selections
+            .store(supported, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl AcpNotification {

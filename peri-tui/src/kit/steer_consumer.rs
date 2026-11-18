@@ -318,6 +318,9 @@ async fn admit(
         // 旧重试可能仍在 consumer 内；实例改变后保留未知结果，不重投或恢复重复稿。
         return Ok(AdmitOutcome::AlreadySettled);
     }
+    // 本次 admission 之前已绑定 generation：这是一次可能已发出的重试，
+    // 本地闸门拒绝不能证明原请求未被服务端受理。
+    let retrying_bound_generation = command.generation.is_some();
     let generation = command.generation.get_or_insert(current_generation).clone();
     if !matches!(command.kind, SteerCommandKind::Refresh)
         && !STEERS.state().write().bind_command_generation(command)
@@ -331,9 +334,14 @@ async fn admit(
         && !client.supports_plugin_selections()
     {
         // 发送前拒绝而不是先发后失败：旧 Host 的 deny_unknown_fields 会拒绝整个
-        // 入队；reject 路径把完整原稿与选择恢复为草稿并给出提示。
+        // 入队；首次尝试按确定未受理恢复草稿。已绑定 generation 的重试只能拒绝
+        // 本次发送，原请求可能已被受理，结果必须保持未知。
         return Err(AcpError::new(
-            -32602,
+            if retrying_bound_generation {
+                -32603
+            } else {
+                -32602
+            },
             "server does not support plugin selections in queued input",
         )
         .into());
