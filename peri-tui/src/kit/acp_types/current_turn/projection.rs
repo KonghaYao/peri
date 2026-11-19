@@ -372,7 +372,7 @@ impl CurrentTurn {
                     let mut bubble = TuiAssistantBubble {
                         text: Self::materialize_text(text_slice),
                         reasoning,
-                        message_id: self.last_message_id.clone(),
+                        message_id: self.trailing_message_id.clone(),
                         started_at: None,
                         duration_ms: text_dur,
                         content_hash,
@@ -380,7 +380,6 @@ impl CurrentTurn {
                     // [G1] 单点重算：与折叠 pass 冻结后 recompute_hash 公式一致
                     // （build_bubble_parts 的 !running 路径 text_duration=0，
                     // 不含冻结正文时长）。
-                    bubble.apply_unkeyed_fold();
                     bubble.recompute_hash();
                     TuiRenderUnit::TuiAssistantBubble(bubble.into())
                 } else {
@@ -394,19 +393,14 @@ impl CurrentTurn {
                         self.trailing_reasoning_frozen_ms,
                         self.text_started_at,
                     );
-                    let mut bubble = TuiAssistantBubble {
+                    let bubble = TuiAssistantBubble {
                         text: Self::materialize_text(text_slice),
                         reasoning,
-                        message_id: self.last_message_id.clone(),
+                        message_id: self.trailing_message_id.clone(),
                         started_at: self.text_started_at,
                         duration_ms: None,
                         content_hash,
                     };
-                    // 无 message_id 的 reasoning 构造期即落到无身份折叠策略；
-                    // 折叠 pass 同策略不改写，避免破坏 current/committed 共享 Arc。
-                    if bubble.apply_unkeyed_fold() {
-                        bubble.recompute_hash();
-                    }
                     TuiRenderUnit::TuiAssistantBubble(bubble.into())
                 };
                 if self.cached_view_models.len() <= trailing_idx {

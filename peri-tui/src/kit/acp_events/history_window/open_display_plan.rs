@@ -54,7 +54,9 @@ impl RetainedLiveEntries {
                     }
                 }
                 TuiRenderUnit::TuiAssistantBubble(bubble) => {
-                    if let Some(message_id) = &bubble.message_id {
+                    if let Some(message_id) = &bubble.message_id
+                        && !crate::kit::tui_render_unit::is_local_message_id(message_id)
+                    {
                         message_ids.insert(message_id.clone());
                     }
                 }

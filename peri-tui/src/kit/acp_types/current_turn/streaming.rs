@@ -33,7 +33,8 @@ impl CurrentTurn {
                 reasoning_hash: self.open_reasoning_hash,
                 // flush 发生在 last_message_id 更新之前（append_text/append_reasoning
                 // 先 flush 旧段再换新 id）——此处记录的是本段自己的 message id。
-                message_id: self.last_message_id.clone(),
+                // 缺失 ACP id 时使用 trailing 段分配的本地身份（跨 token 稳定）。
+                message_id: self.trailing_message_id.clone(),
                 reasoning_duration_ms,
             });
             while self.cached_view_models.len() > seg_len_before_push {
@@ -43,6 +44,8 @@ impl CurrentTurn {
             self.last_reasoning_flush = current_reasoning;
             self.open_text_hash = 0;
             self.open_reasoning_hash = 0;
+            // 段切走后新消息重新分配展示身份（real id 或本地 id）。
+            self.trailing_message_id = None;
             // 段切走后新消息的推理重新计时（幂等：无增长时 no-op 不重置）。
             self.trailing_reasoning_frozen_ms = None;
         }
@@ -86,6 +89,19 @@ impl CurrentTurn {
             .collect()
     }
 
+    /// 维护 trailing 段的展示身份：ACP `messageId` 优先；缺失时分配一次
+    /// TUI 本地 id 并在该段内保持不变，使逐 token 重建后的折叠覆盖仍命中。
+    fn note_trailing_message_id(&mut self, message_id: Option<&str>) {
+        match message_id {
+            Some(id) => self.trailing_message_id = Some(id.to_owned()),
+            None if self.trailing_message_id.is_none() => {
+                self.trailing_message_id =
+                    Some(crate::kit::tui_render_unit::next_local_message_id());
+            }
+            None => {}
+        }
+    }
+
     /// Append a text chunk from `"text-chunk"`.
     ///
     /// If `message_id` differs from the previous chunk, a new assistant message
@@ -114,6 +130,7 @@ impl CurrentTurn {
                 .map(|t| peri_time::elapsed_since(t).as_millis() as u64);
         }
         self.last_message_id = message_id.map(|s| s.to_string());
+        self.note_trailing_message_id(message_id);
         self.text.push_str(t);
         self.open_text_hash =
             crate::kit::tui_render_unit::tui_hash_roll_update(self.open_text_hash, t);
@@ -136,6 +153,7 @@ impl CurrentTurn {
             self.flush_text_segment();
         }
         self.last_message_id = message_id.map(|s| s.to_string());
+        self.note_trailing_message_id(message_id);
         self.reasoning.push_str(t);
         self.open_reasoning_hash =
             crate::kit::tui_render_unit::tui_hash_roll_update(self.open_reasoning_hash, t);

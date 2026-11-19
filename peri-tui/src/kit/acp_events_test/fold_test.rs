@@ -518,11 +518,11 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
     );
 }
 
-/// 无 message_id 的 reasoning（v1 兼容）：不能写覆盖键，因此不能折叠——
-/// 流式段 Preview、完成态 Expanded，正文始终可见。
+/// 无 ACP message_id 的 reasoning（v1 兼容）：分配本地身份后仍可写折叠覆盖，
+/// 身份在流式重建间保持稳定，展开状态不被后续 chunk 收回。
 #[test]
 #[serial]
-fn test_fold_pass_unkeyed_reasoning_stays_visible() {
+fn test_fold_pass_unkeyed_reasoning_gets_stable_local_identity() {
     let mut state = super::make_fold_test_state();
 
     super::dispatch_and_notify(
@@ -534,46 +534,51 @@ fn test_fold_pass_unkeyed_reasoning_stays_visible() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
+    let reasoning = super::reasoning_of(&snap, 0);
     assert_eq!(
-        super::reasoning_of(&snap, 0).fold,
-        FoldState::Preview,
-        "无身份流式段保留可见 preview"
+        reasoning.fold,
+        FoldState::Collapsed,
+        "有稳定身份 → 默认单行折叠"
     );
+    assert_eq!(reasoning.status, EntryStatus::Running);
     let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
         panic!("expected TuiAssistantBubble");
     };
-    assert!(bubble.message_id.is_none(), "无身份块不伪造 message_id");
+    let local_id = bubble.message_id.clone().expect("无 ACP id 时分配本地身份");
+    assert!(
+        local_id.starts_with("local:"),
+        "本地身份必须带区分前缀，实际 {local_id}"
+    );
     drop(snap);
 
+    // 用户展开（键盘 handler 的持久化等价操作）。
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::Reasoning(local_id.clone()), FoldState::Expanded);
+
+    // 继续流式：重建后必须仍用同一身份命中覆盖。
     super::dispatch_and_notify(
         &mut state,
-        &AcpEventData::TextChunk(TuiTextChunk {
-            text: "回复".into(),
+        &AcpEventData::ReasoningChunk(TuiReasoningChunk {
+            text: "，继续思考".into(),
             message_id: None,
             agent_id: None,
         }),
     );
-    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(
         super::reasoning_of(&snap, 0).fold,
         FoldState::Expanded,
-        "完成后正文完整可见（无法展开时不得隐藏）"
+        "本地身份在流式重建间稳定，展开不被收回"
     );
-
-    // 新一轮重建（fold pass 重跑）不得把可见正文收回。
-    super::dispatch_and_notify(
-        &mut state,
-        &AcpEventData::LocalUserBubble {
-            text: "下一个问题".into(),
-            attachments: Vec::new(),
-        },
-    );
-    let snap = VIEW_MODELS.state().read().clone();
+    let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
+        panic!("expected TuiAssistantBubble");
+    };
     assert_eq!(
-        super::reasoning_of(&snap, 0).fold,
-        FoldState::Expanded,
-        "重建后仍保持可见"
+        bubble.message_id.as_deref(),
+        Some(local_id.as_str()),
+        "同一 trailing 段的身份不变"
     );
 }
 

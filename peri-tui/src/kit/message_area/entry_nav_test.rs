@@ -194,6 +194,68 @@ fn test_fold_toggle_keeps_unkeyed_reasoning_visible() {
     );
 }
 
+/// 运行中 reasoning（ACP message_id 缺失，使用本地身份）可展开；渲染结果
+/// 超过 Preview 的 4 行 tail，证明早期正文可被逐项展开阅读。
+#[test]
+#[serial_test::serial]
+fn test_running_reasoning_local_identity_expands_beyond_preview() {
+    use crate::kit::message_area::grid::GridSpec;
+    use crate::kit::message_area::render::vm_to_lines;
+    use crate::kit::tui_render_unit::{EntryStatus, TuiAssistantBubble, TuiReasoningBlock};
+
+    crate::kit::atoms::init_atoms();
+    crate::i18n::init(Some("en"));
+    FOLD_OVERRIDES.state().write().clear();
+    let reasoning_text = (1..=8)
+        .map(|i| format!("思考行{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let unit = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: String::new(),
+            reasoning: Some(TuiReasoningBlock {
+                text: reasoning_text,
+                fold: FoldState::Collapsed,
+                status: EntryStatus::Running,
+                is_running: true,
+                started_at: Some(std::time::Instant::now()),
+                duration_ms: None,
+            }),
+            message_id: Some(crate::kit::tui_render_unit::next_local_message_id()),
+            content_hash: 0,
+        }
+        .into(),
+    );
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![unit]),
+        generation: 1,
+    };
+
+    assert_eq!(
+        entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+    let lines = vm_to_lines(&snapshot.items[0], &GridSpec::grid_for(80));
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for i in 1..=8 {
+        assert!(
+            rendered.contains(&format!("思考行{i}")),
+            "展开后第 {i} 行应可见（Preview 只有 4 行）:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 fn test_apply_fold_override_sets_fold_user_modified_and_recomputes_hash() {
     use crate::kit::tui_render_unit::TuiToolCard;

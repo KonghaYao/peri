@@ -80,6 +80,11 @@ pub struct CurrentTurn {
     /// a new assistant message starts (message_id change → flush pending text).
     pub(super) last_message_id: Option<String>,
 
+    /// trailing 段的展示身份：ACP `messageId` 优先；缺失时分配 TUI 本地 id
+    /// （`local:` 前缀，进程内唯一），使无身份流式 reasoning 也能写折叠覆盖。
+    /// flush 时随段冻结，段切走后清空。
+    pub(super) trailing_message_id: Option<String>,
+
     /// 当前未冻结（trailing）文本区域的滚动哈希——`append_text` 时增量维护。
     /// 与 `TuiAssistantBubble::compute_hash` 的文本部分共用同一公式。
     pub(super) open_text_hash: u64,
@@ -345,6 +350,7 @@ impl CurrentTurn {
         self.last_text_flush = 0;
         self.last_reasoning_flush = 0;
         self.last_message_id = None;
+        self.trailing_message_id = None;
         self.open_text_hash = 0;
         self.open_reasoning_hash = 0;
         self.reasoning_started_at = None;

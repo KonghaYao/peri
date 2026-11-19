@@ -129,11 +129,17 @@ fn bridge_snapshot_dedups_shared_arc_between_current_and_committed() {
     state.committed.push_back(shared);
 
     let snapshot = state.memory_snapshot();
-    assert_eq!(snapshot.committed_body_bytes, text.len());
-    assert_eq!(snapshot.current_turn_body_bytes, text.len());
+    // assistant 的保留正文含 text + message_id（无 ACP id 时是本地身份）。
+    let id_len = match &state.committed[0] {
+        TuiRenderUnit::TuiAssistantBubble(bubble) => {
+            bubble.message_id.as_deref().map_or(0, str::len)
+        }
+        other => panic!("expected TuiAssistantBubble, got {other:?}"),
+    };
+    assert_eq!(snapshot.committed_body_bytes, text.len() + id_len);
+    assert_eq!(snapshot.current_turn_body_bytes, text.len() + id_len);
     assert_eq!(
-        snapshot.unique_body_bytes,
-        text.len(),
+        snapshot.unique_body_bytes, snapshot.committed_body_bytes,
         "committed/current 共享同一 Arc 只能计入一次"
     );
     assert!(snapshot.deduped_allocations >= 1);
