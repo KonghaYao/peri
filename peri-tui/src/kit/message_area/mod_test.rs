@@ -16,8 +16,7 @@ use super::scroll;
 use ratatui_kit::prelude::*;
 
 use crate::kit::tui_render_unit::{
-    InteractionKind, TuiCollapsedGroup, TuiSystemReminder, TuiToolCard, TuiToolPresentation,
-    TuiUserBubble,
+    InteractionKind, TuiSystemReminder, TuiToolCard, TuiToolPresentation, TuiUserBubble,
 };
 use ratatui_kit::ratatui::layout::Rect;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
@@ -727,10 +726,68 @@ fn test_apply_fold_toggle_tool_writes_override() {
     );
 }
 
+/// 多条目独立：点击一张工具卡只切换该项，其余条目保持默认折叠；
+/// 折叠变化必须改变该项 content_hash（渲染分片缓存失效 / 高度重算）。
+#[test]
+#[serial]
+fn test_apply_fold_toggle_only_changes_clicked_entry() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
+    let card = |id: &str| {
+        let mut card = TuiToolCard {
+            tool_id: id.into(),
+            tool_name: "Read".into(),
+            input_summary: "a.rs".into(),
+            output_summary: String::new(),
+            is_error: false,
+            is_running: false,
+            running_duration_ms: None,
+            completed_duration_ms: None,
+            diff: None,
+            presentation: TuiToolPresentation::Generic,
+            fold: FoldState::Collapsed,
+            user_modified: false,
+            tool_calls_count: 0,
+            content_hash: 0,
+        };
+        card.recompute_hash();
+        TuiRenderUnit::TuiToolCard(card)
+    };
+    let hash_of = |vm: &TuiRenderUnit| vm.content_hash();
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![card("tool-a"), card("tool-b")]),
+        generation: 0,
+    };
+    let before = hash_of(&snapshot.items[0]);
+    let other_before = hash_of(&snapshot.items[1]);
+
+    assert_eq!(
+        super::apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+
+    match (&snapshot.items[0], &snapshot.items[1]) {
+        (TuiRenderUnit::TuiToolCard(a), TuiRenderUnit::TuiToolCard(b)) => {
+            assert_eq!(a.fold, FoldState::Expanded, "被点击项展开");
+            assert_eq!(b.fold, FoldState::Collapsed, "其它项保持默认单行折叠");
+        }
+        other => panic!("expected two tool cards, got {other:?}"),
+    }
+    assert_ne!(
+        hash_of(&snapshot.items[0]),
+        before,
+        "折叠变化必须使 hash 失效"
+    );
+    assert_eq!(
+        hash_of(&snapshot.items[1]),
+        other_before,
+        "未点击项的 hash 不变（不整段重建）"
+    );
+}
+
 #[test]
 #[serial]
 fn test_apply_fold_toggle_system_reminder_writes_override() {
-    crate::kit::atoms::init_atoms();
     *crate::kit::atoms::FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
     let reminder = TuiSystemReminder::legacy("maintenance notice".into());
     let reminder_id = reminder.reminder_id;

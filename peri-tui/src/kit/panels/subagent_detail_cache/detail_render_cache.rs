@@ -483,7 +483,6 @@ pub(super) fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
         TuiRenderUnit::TuiSystemReminder(reminder) => Some(reminder.fold),
         TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
         TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.reasoning.as_ref().map(|r| r.fold),
-        TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
         _ => None,
     }
 }
@@ -496,21 +495,6 @@ pub(super) fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
         TuiRenderUnit::TuiToolCard(card) => Some(FoldKey::Tool(card.tool_id.clone())),
         TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
             bubble.message_id.clone().map(FoldKey::Reasoning)
-        }
-        TuiRenderUnit::TuiCollapsedGroup(group) => {
-            let ids: Vec<_> = group
-                .view_models
-                .iter()
-                .filter_map(|vm| match vm {
-                    TuiRenderUnit::TuiToolCard(card) => Some(card.tool_id.clone()),
-                    _ => None,
-                })
-                .collect();
-            if ids.is_empty() {
-                None
-            } else {
-                Some(FoldKey::Group(ids))
-            }
         }
         _ => None,
     }
@@ -536,10 +520,6 @@ pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, 
                 reasoning.fold = fold;
                 bubble.recompute_hash();
             }
-        }
-        TuiRenderUnit::TuiCollapsedGroup(group) => {
-            group.fold = fold;
-            group.recompute_hash();
         }
         _ => {}
     }

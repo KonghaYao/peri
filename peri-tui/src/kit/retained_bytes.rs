@@ -11,9 +11,9 @@ use std::sync::Arc;
 use ratatui_kit::ratatui::text::Line;
 
 use super::tui_render_unit::{
-    TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiRenderUnit,
-    TuiSubAgentGroup, TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard,
-    TuiToolPresentation, TuiUserBubble,
+    TuiAskUserBlock, TuiAssistantBubble, TuiDivider, TuiRenderUnit, TuiSubAgentGroup,
+    TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiToolPresentation,
+    TuiUserBubble,
 };
 
 /// `body` = 已使用正文字节；`reserved` = `String`/容器的 capacity 下界。
@@ -213,7 +213,6 @@ pub fn retained_unit_bytes(unit: &TuiRenderUnit, seen: &mut SeenAllocations) -> 
         TuiRenderUnit::TuiSystemNote(note) => retained_note_bytes(note),
         TuiRenderUnit::TuiSystemReminder(reminder) => retained_reminder_bytes(reminder),
         TuiRenderUnit::TuiSubAgentGroup(group) => retained_subagent_group_bytes(group, seen),
-        TuiRenderUnit::TuiCollapsedGroup(group) => retained_collapsed_group_bytes(group, seen),
         TuiRenderUnit::TuiDivider(divider) => retained_divider_bytes(divider),
         TuiRenderUnit::TuiAskUserBlock(block) => retained_ask_user_bytes(block),
         TuiRenderUnit::TuiTodoSummary(summary) => retained_todo_bytes(summary),
@@ -336,16 +335,6 @@ pub fn retained_ask_user_bytes(block: &TuiAskUserBlock) -> usize {
             .map_or(0, |owner| owner.session_id.capacity())
 }
 
-pub fn retained_collapsed_group_bytes(
-    group: &TuiCollapsedGroup,
-    seen: &mut SeenAllocations,
-) -> usize {
-    std::mem::size_of::<TuiCollapsedGroup>()
-        + group.title.capacity()
-        + retained_vec_bytes(&group.view_models)
-        + retained_units_bytes(group.view_models.iter(), seen)
-}
-
 pub fn retained_subagent_group_bytes(
     group: &TuiSubAgentGroup,
     seen: &mut SeenAllocations,
@@ -356,23 +345,6 @@ pub fn retained_subagent_group_bytes(
         + group.agent_name.capacity()
         + group.error_reason.as_ref().map_or(0, String::capacity)
         + retained_units_bytes(group.view_models.iter(), seen)
-}
-
-/// 组内成员的“深复制正文”字节：不按共享 Arc 去重，用于识别 `Vec<TuiRenderUnit>`
-/// 复制带来的额外持有（与 `retained_*_group_bytes` 的共享计量对照）。
-pub fn group_deep_copy_bytes(group: &TuiCollapsedGroup) -> usize {
-    let mut seen = SeenAllocations::default();
-    group
-        .view_models
-        .iter()
-        .map(|unit| match unit {
-            TuiRenderUnit::TuiAssistantBubble(bubble) => {
-                // 共享 Arc 也按“若复制正文”口径计一次完整正文。
-                std::mem::size_of::<TuiAssistantBubble>() + bubble.text.capacity()
-            }
-            other => retained_unit_bytes(other, &mut seen),
-        })
-        .sum()
 }
 
 #[cfg(test)]

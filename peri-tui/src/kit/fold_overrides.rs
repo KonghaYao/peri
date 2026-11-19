@@ -27,10 +27,6 @@ fn key_bytes(key: &FoldKey) -> usize {
             | FoldKey::Tool(id)
             | FoldKey::SubAgent(id)
             | FoldKey::Interaction(id) => id.capacity(),
-            FoldKey::Group(ids) => {
-                ids.capacity() * size_of::<String>()
-                    + ids.iter().map(String::capacity).sum::<usize>()
-            }
             FoldKey::SystemReminder(_) => 0,
         }
 }
@@ -40,7 +36,7 @@ impl Retention {
         self.order
             .retain(|old| old != &key && values.contains_key(old));
         values.remove(&key);
-        // Count both owners of each key, including a group's member directory.
+        // Count both owners of each key (values + retention order).
         // An oversized key still applies to the current snapshot, but cannot
         // displace the entire session's manual choices just to persist itself.
         if key_bytes(&key).saturating_mul(2) <= MAX_KEY_BYTES {

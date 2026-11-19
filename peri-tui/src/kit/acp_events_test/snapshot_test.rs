@@ -129,7 +129,7 @@ fn p0_new_prompt_preserves_running_tool_result() {
     );
 }
 
-// ── Slice 3：快照后处理流水线（turn divider / todo 摘要 / 工具分组）─────────
+// ── Slice 3：快照后处理流水线（turn divider / todo 摘要）─────────────────
 
 /// [回归测试] 旧 divider 依赖 current_turn 非空，回合结束后会消失并造成闪动。
 /// 现在分隔线与下一条 user prompt 一起进入时间轴，完成后仍保留。
@@ -326,11 +326,11 @@ fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
     crate::kit::atoms::TODO_ITEMS.state().write().clear();
 }
 
-/// §7 工具分组：相邻成功 Generic 工具压成 TuiCollapsedGroup（标题含隐藏数）；
-/// running/error/diff-edit 不合并；不跨越 assistant 正文。
+/// 工具不再聚合：相邻成功工具各自成 entry，且全部默认折叠为单行。
+/// running/error 同样独立且折叠——正文之间的过程 entry 只占一行（用户需求）。
 #[test]
 #[serial]
-fn test_snapshot_group_successful_tools() {
+fn test_snapshot_tools_stay_individual_and_collapsed() {
     let mut state = super::make_fold_test_state();
 
     let start_read = |st: &mut BridgeState, id: &str, path: &str| {
@@ -359,114 +359,72 @@ fn test_snapshot_group_successful_tools() {
         );
     };
 
-    // 相邻成功：Read t1, Read t2 → 分组
+    // 相邻成功：t1, t2 各自一张卡片（不再合并为组行）。
     start_read(&mut state, "t1", "a.rs");
     end_tool(&mut state, "t1", false);
     start_read(&mut state, "t2", "b.rs");
     end_tool(&mut state, "t2", false);
-    let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 1, "两个相邻成功工具 → 1 个分组");
-    match &snap.items[0] {
-        TuiRenderUnit::TuiCollapsedGroup(g) => {
-            assert_eq!(g.count, 2);
-            assert!(
-                g.title.contains("Read 2"),
-                "标题含隐藏数，实际 {:?}",
-                g.title
-            );
-            assert_eq!(g.view_models.len(), 2, "隐藏 VM 保留在组内");
-        }
-        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
-    }
-
-    // running 工具不合并（新工具开始 → 分组与 running 分离）
+    // running：t3 同样独立且单行折叠。
     start_read(&mut state, "t3", "c.rs");
-    let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 2, "running 工具不得并入分组");
-    assert!(matches!(
-        &snap.items[0],
-        TuiRenderUnit::TuiCollapsedGroup(_)
-    ));
-    assert!(matches!(&snap.items[1], TuiRenderUnit::TuiToolCard(t) if t.is_running));
+    // error：t4 同样独立且单行折叠（失败由状态符号 + Failed 文案表达）。
+    start_read(&mut state, "t4", "d.rs");
+    end_tool(&mut state, "t4", true);
 
-    // error 工具不合并——组后**连续相邻** error 计入 failed_count（D2）
-    end_tool(&mut state, "t3", true);
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 2, "error 工具不得并入分组");
-    assert!(matches!(&snap.items[1], TuiRenderUnit::TuiToolCard(t) if t.is_error));
-    match &snap.items[0] {
-        TuiRenderUnit::TuiCollapsedGroup(g) => {
-            assert_eq!(
-                g.failed_count, 1,
-                "紧邻 error 工具计入失败数（error 仍保持独立状态行，不入组）"
-            );
-            // [G1] failed_count 纳入 hash——变化必须触发分片缓存重建
-            assert_ne!(
-                g.content_hash, 0,
-                "组 hash 由 recompute_hash 计算（含 failed_count）"
-            );
-        }
-        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    assert_eq!(snap.items.len(), 4, "相邻工具各自独立成 entry，不聚合");
+    let ids: Vec<&str> = snap
+        .items
+        .iter()
+        .map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(t) => t.tool_id.as_str(),
+            other => panic!("expected TuiToolCard, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(ids, ["t1", "t2", "t3", "t4"]);
+    for vm in snap.items.iter() {
+        let TuiRenderUnit::TuiToolCard(card) = vm else {
+            unreachable!("遍历目标已在上方断言为工具卡")
+        };
+        assert_eq!(
+            card.fold,
+            crate::kit::tui_render_unit::FoldState::Collapsed,
+            "工具 {} 默认单行折叠（含 running/error）",
+            card.tool_id
+        );
     }
 
-    // 正文打断相邻性：Read + text + Read → 不跨正文分组
-    let mut state2 = super::make_fold_test_state();
-    let start2 = |st: &mut BridgeState, id: &str| {
-        super::dispatch_and_notify(
-            st,
-            &AcpEventData::ToolStarted(TuiToolStarted {
-                tool_id: id.into(),
-                tool_name: "Read".into(),
-                input_summary: "x".into(),
-                raw_input: serde_json::json!({"path": "x"}),
-                agent_id: None,
-                origin_message_id: None,
-                origin_readable: None,
-            }),
-        );
-    };
-    start2(&mut state2, "s1");
+    // 正文插入后仍各自独立：不跨正文合并，也不因正文出现而改变折叠。
     super::dispatch_and_notify(
-        &mut state2,
-        &AcpEventData::ToolEnded(TuiToolEnded {
-            tool_id: "s1".into(),
-            output_summary: "ok".into(),
-            is_error: false,
-            agent_id: None,
-        }),
-    );
-    super::dispatch_and_notify(
-        &mut state2,
+        &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
             text: "中间正文".into(),
-            message_id: None,
-            agent_id: None,
-        }),
-    );
-    start2(&mut state2, "s2");
-    super::dispatch_and_notify(
-        &mut state2,
-        &AcpEventData::ToolEnded(TuiToolEnded {
-            tool_id: "s2".into(),
-            output_summary: "ok".into(),
-            is_error: false,
+            message_id: Some("m1".into()),
             agent_id: None,
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 3, "正文打断 → 不跨正文分组");
-    assert!(matches!(&snap.items[0], TuiRenderUnit::TuiToolCard(_)));
+    assert_eq!(
+        snap.items.len(),
+        5,
+        "正文追加后仍保持 4 张工具卡 + 1 条正文"
+    );
     assert!(matches!(
-        &snap.items[1],
-        TuiRenderUnit::TuiAssistantBubble(_)
+        snap.items.last(),
+        Some(TuiRenderUnit::TuiAssistantBubble(_))
     ));
-    assert!(matches!(&snap.items[2], TuiRenderUnit::TuiToolCard(_)));
+    assert!(
+        snap.items.iter().all(|vm| matches!(
+            vm,
+            TuiRenderUnit::TuiToolCard(_) | TuiRenderUnit::TuiAssistantBubble(_)
+        )),
+        "正文之间只保留独立工具卡，不存在聚合组行"
+    );
 }
 
-/// Skill/Todo 语义卡不分组（低信息密度才分组，语义卡保留）。
+/// Skill/Todo 语义卡同样保持独立 entry（不再有「可分组」例外）。
 #[test]
 #[serial]
-fn test_snapshot_group_excludes_semantic_cards() {
+fn test_snapshot_semantic_tools_stay_individual() {
     let mut state = super::make_fold_test_state();
     let indexed_tool_names = ["Skill", "TodoWrite"].iter().enumerate();
     for (i, name) in indexed_tool_names {
@@ -493,146 +451,11 @@ fn test_snapshot_group_excludes_semantic_cards() {
         );
     }
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 2, "语义卡不参与分组");
+    assert_eq!(snap.items.len(), 2, "语义卡各自独立");
     assert!(
         snap.items
             .iter()
             .all(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
-    );
-}
-
-/// [§7 免疫] 焦点所在工具（`FOCUSED_ENTRY` 的 key）完成也不得并入折叠组。
-///
-/// 回归（review MED-2/F1）：用户 Alt+Down 聚焦运行中的工具，其完成后若被并入
-/// 组——焦点 index 落到组上、展开态丢失（组不可展开且每帧重建）。当前
-/// selected entry 按身份键免疫；焦点移走（Esc/导航）后恢复自动合并。
-#[test]
-#[serial]
-fn test_snapshot_group_excludes_focused_tool() {
-    use crate::kit::atoms::{FOCUSED_ENTRY, FocusedEntry};
-    let mut state = super::make_fold_test_state();
-    *FOCUSED_ENTRY.state().write() = None;
-    let start_read = |st: &mut BridgeState, id: &str, path: &str| {
-        super::dispatch_and_notify(
-            st,
-            &AcpEventData::ToolStarted(TuiToolStarted {
-                tool_id: id.into(),
-                tool_name: "Read".into(),
-                input_summary: path.into(),
-                raw_input: serde_json::json!({"path": path}),
-                agent_id: None,
-                origin_message_id: None,
-                origin_readable: None,
-            }),
-        );
-    };
-    let end_tool = |st: &mut BridgeState, id: &str| {
-        super::dispatch_and_notify(
-            st,
-            &AcpEventData::ToolEnded(TuiToolEnded {
-                tool_id: id.into(),
-                output_summary: "ok".into(),
-                is_error: false,
-                agent_id: None,
-            }),
-        );
-    };
-
-    start_read(&mut state, "t1", "a.rs");
-    // 用户 Alt+Down 聚焦运行中的 t1（§7：当前 selected entry 免疫）。
-    // 分组免疫只读 key（slot 不参与判定——含 slot 会使 key=None 的焦点
-    // 移动无谓失效 TOOL_GROUP_CACHE 指纹）。
-    *FOCUSED_ENTRY.state().write() = Some(FocusedEntry {
-        slot: 0,
-        key: Some(crate::kit::tui_render_unit::FoldKey::Tool("t1".into())),
-    });
-    end_tool(&mut state, "t1");
-    start_read(&mut state, "t2", "b.rs");
-    end_tool(&mut state, "t2");
-
-    // t1 完成（焦点仍在其上）→ 不得并入分组：两个工具保持独立 entry。
-    let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(
-        snap.items.len(),
-        2,
-        "焦点工具免疫 → 保持独立 entry（不并入折叠组）"
-    );
-    assert!(matches!(&snap.items[0], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t1"));
-    assert!(matches!(&snap.items[1], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t2"));
-
-    // 焦点移走（Esc → 单一事实源清除）→ 下一帧快照恢复自动合并。
-    *FOCUSED_ENTRY.state().write() = None;
-    super::dispatch_and_notify(
-        &mut state,
-        &AcpEventData::TextChunk(TuiTextChunk {
-            text: "总结".into(),
-            message_id: Some("m1".into()),
-            agent_id: None,
-        }),
-    );
-    let snap = VIEW_MODELS.state().read().clone();
-    assert!(
-        matches!(&snap.items[0], TuiRenderUnit::TuiCollapsedGroup(g) if g.count == 2),
-        "焦点清除后两个相邻成功工具应并入分组"
-    );
-}
-
-/// [Slice 3 探针] 真实 E2E 场景：两个相邻成功 Read + 尾部文本 → 应分组。
-#[test]
-#[serial]
-fn test_probe_two_reads_then_text_grouped() {
-    let mut state = super::make_fold_test_state();
-    for id in ["t1", "t2"] {
-        super::dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ToolStarted(TuiToolStarted {
-                tool_id: id.into(),
-                tool_name: "Read".into(),
-                input_summary: "Cargo.toml".into(),
-                raw_input: serde_json::json!({"path": "Cargo.toml"}),
-                agent_id: None,
-                origin_message_id: None,
-                origin_readable: None,
-            }),
-        );
-        super::dispatch_and_notify(
-            &mut state,
-            &AcpEventData::ToolEnded(TuiToolEnded {
-                tool_id: id.into(),
-                output_summary: "line1\nline2".into(),
-                is_error: false,
-                agent_id: None,
-            }),
-        );
-    }
-    super::dispatch_and_notify(
-        &mut state,
-        &AcpEventData::TextChunk(TuiTextChunk {
-            text: "已使用 Read 工具读取 Cargo.toml。".into(),
-            message_id: Some("m1".into()),
-            agent_id: None,
-        }),
-    );
-    let snap = VIEW_MODELS.state().read().clone();
-    let types: Vec<&str> = snap
-        .items
-        .iter()
-        .map(|vm| match vm {
-            TuiRenderUnit::TuiCollapsedGroup(g) => {
-                eprintln!("GROUP: {:?} count={}", g.title, g.count);
-                "group"
-            }
-            TuiRenderUnit::TuiToolCard(_) => "tool",
-            TuiRenderUnit::TuiAssistantBubble(_) => "assistant",
-            _ => "other",
-        })
-        .collect();
-    eprintln!("SNAPSHOT: {types:?}");
-    assert!(
-        snap.items
-            .iter()
-            .any(|vm| matches!(vm, TuiRenderUnit::TuiCollapsedGroup(_))),
-        "两个相邻成功 Read + 尾部文本应分组，实际 {types:?}"
     );
 }
 
@@ -649,7 +472,8 @@ fn assistant_of(
 }
 
 /// §6.3 空 reasoning 占位：仅文本（无 reasoning chunk）流式 → 占位块
-/// （text 空、Running、Preview）；TurnDone 后翻转 Completed + Collapsed 单行。
+/// （text 空、Running、默认 Collapsed 单行）；TurnDone 后翻转 Completed，
+/// 仍保持 Collapsed 单行（过程 entry 高度不变）。
 #[test]
 #[serial]
 fn test_empty_reasoning_placeholder_streams_then_folds() {
@@ -671,7 +495,11 @@ fn test_empty_reasoning_placeholder_streams_then_folds() {
     );
     assert_eq!(r.status, EntryStatus::Running, "流式中占位块为 Running");
     assert!(r.is_running);
-    assert_eq!(r.fold, FoldState::Preview, "§7 running 行 → Preview");
+    assert_eq!(
+        r.fold,
+        FoldState::Collapsed,
+        "running 占位块同样默认单行折叠"
+    );
 
     super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let snap = VIEW_MODELS.state().read().clone();
@@ -684,7 +512,7 @@ fn test_empty_reasoning_placeholder_streams_then_folds() {
     assert_eq!(
         r.fold,
         FoldState::Collapsed,
-        "§7 completed 行 → Collapsed（收束为单行）"
+        "completed 仍保持 Collapsed（高度不因终态改变）"
     );
 }
 

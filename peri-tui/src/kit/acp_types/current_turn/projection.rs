@@ -35,7 +35,7 @@ impl CurrentTurn {
     /// 值或冻结段存储值），组合公式与 [`TuiAssistantBubble::compute_hash`] 完全
     /// 一致——保证增量路径与从零重建（recompute_hash）产出相同的 hash。
     ///
-    /// `reasoning_running`：true = trailing 流式段（status=Running、fold=Preview、
+    /// `reasoning_running`：true = trailing 流式段（status=Running、fold=Collapsed、
     /// started_at=推理起点）；false = 冻结段（status=Completed、fold=Collapsed、
     /// duration_ms=flush 时刻冻结值）。折叠 pass 在 phase 离开 PromptRunning 时
     /// 把 trailing 段翻转成 Completed。bubble 的 `message_id` 由调用方直接赋值

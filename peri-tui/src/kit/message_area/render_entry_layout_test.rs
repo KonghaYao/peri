@@ -3,7 +3,6 @@ use super::FoldState;
 use super::Line;
 use super::TuiAskUserBlock;
 use super::TuiAssistantBubble;
-use super::TuiCollapsedGroup;
 use super::TuiDivider;
 use super::TuiNoteLevel;
 use super::TuiReasoningBlock;
@@ -78,15 +77,6 @@ fn test_vm_to_lines_all_variants_width_1() {
         content_hash: 46,
     });
 
-    let collapsed = TuiRenderUnit::TuiCollapsedGroup(TuiCollapsedGroup {
-        title: "折叠组标题".to_string(),
-        count: 3,
-        failed_count: 0,
-        view_models: vec![],
-        fold: FoldState::Collapsed,
-        content_hash: 47,
-    });
-
     let ask_user = TuiRenderUnit::TuiAskUserBlock(TuiAskUserBlock {
         items: vec![],
         is_error: false,
@@ -133,7 +123,6 @@ fn test_vm_to_lines_all_variants_width_1() {
         ("表格 AssistantBubble", table_bubble),
         ("SystemNote", system_note),
         ("Divider", divider),
-        ("CollapsedGroup", collapsed),
         ("AskUserBlock", ask_user),
         ("TodoSummary", todo),
         ("SubAgentGroup", subagent),

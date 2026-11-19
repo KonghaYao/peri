@@ -249,8 +249,8 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
     // 重定位是**身份重定位**而不是几何补偿：目标偏移在 `Transcript::prepare` 里用
     // 「发布前视口顶行所在单元的身份 + 该单元内位移」在**发布后**的新索引里重查得出
     // （`ctx.prepend_relocation`，语义与身份口径见 `viewport_anchor` 模块文档）；
-    // 这里只负责在浏览态把它落到 offset 上。身份认不出（单元被替换 / 被并入折叠组 /
-    // 新窗口里出现多次）时 `prepend_relocation` 为 `None` → **不补偿**（安全方向：
+    // 这里只负责在浏览态把它落到 offset 上。身份认不出（单元被替换 / 新窗口里
+    // 出现多次）时 `prepend_relocation` 为 `None` → **不补偿**（安全方向：
     // 宁可少补一次，也不把视口推到窗口底部）。
     let browsing = !*ctx.follow_bottom.read();
     let scroll_y = ctx.scroll_state.read().offset();

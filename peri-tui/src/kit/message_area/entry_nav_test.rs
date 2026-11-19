@@ -1,13 +1,11 @@
 use super::FOLD_OVERRIDES;
 use super::FoldKey;
 use super::FoldState;
-use super::TuiCollapsedGroup;
 use super::TuiRenderUnit;
 use super::TuiSystemReminder;
 use super::TuiToolCard;
 use super::TuiToolPresentation;
 use super::TuiUserBubble;
-use super::serial;
 use crate::kit::message_area::entry_nav;
 use ratatui_kit::prelude::*;
 
@@ -182,60 +180,6 @@ fn test_apply_fold_override_sets_fold_user_modified_and_recomputes_hash() {
     // 无折叠能力（user bubble）→ no-op 不 panic
     let mut user = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
     entry_nav::apply_fold_override(&mut user, FoldState::Expanded);
-}
-
-#[test]
-#[serial]
-fn test_collapsed_group_toggle_persists_override() {
-    crate::kit::atoms::init_atoms();
-    FOLD_OVERRIDES.state().write().clear();
-    let child = TuiRenderUnit::TuiToolCard(TuiToolCard {
-        tool_id: "group-tool-1".into(),
-        tool_name: "Read".into(),
-        input_summary: "a.rs".into(),
-        output_summary: "done".into(),
-        is_error: false,
-        is_running: false,
-        running_duration_ms: None,
-        completed_duration_ms: None,
-        diff: None,
-        presentation: TuiToolPresentation::Generic,
-        fold: FoldState::Collapsed,
-        user_modified: false,
-        tool_calls_count: 0,
-        content_hash: 1,
-    });
-    let mut group = TuiCollapsedGroup {
-        title: "Read 1".into(),
-        count: 1,
-        failed_count: 0,
-        view_models: vec![child],
-        fold: FoldState::Collapsed,
-        content_hash: 0,
-    };
-    group.recompute_hash();
-    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
-        items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(group)]),
-        generation: 7,
-    };
-
-    assert_eq!(
-        entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
-        EventResult::Consumed
-    );
-    assert!(matches!(
-        &snapshot.items[0],
-        TuiRenderUnit::TuiCollapsedGroup(g) if g.fold == FoldState::Expanded
-    ));
-    assert_eq!(snapshot.generation, 8);
-    assert_eq!(
-        FOLD_OVERRIDES
-            .state()
-            .read()
-            .get(&FoldKey::Group(vec!["group-tool-1".into()])),
-        Some(&FoldState::Expanded)
-    );
-    FOLD_OVERRIDES.state().write().clear();
 }
 
 /// 展开工具卡片会认领超预算历史结果的补读定位（进入在途，避免重复 RPC）。

@@ -40,10 +40,12 @@ active issue。
 3. **Inspector**：显示协议可达的完整详情、分页内容或流式 tail；非模态。
 4. **Modal**：只显示审批、OAuth、不可逆确认或复杂用户问题。
 
-默认 fold：running 为 `Preview`，成功为 `Collapsed`；失败、拒绝、取消和超时显示明确
-摘要，完整内容仍进 Inspector。用户手动 fold 后，生命周期更新不得覆盖其选择。
-相邻、成功、低信息密度且 provenance 相同的调用可分组，但每个调用仍须独立可达；
-待审批、运行中、失败、外部边界和 durable interaction 不得被隐藏进成功组。
+默认 fold：正文之间的工具与 thinking（reasoning）一律收束为单行 `Collapsed`——
+running、成功、失败同一高度，状态由符号、摘要与 duration 表达；点击该行（或键盘
+聚焦后 Enter）只切换该项，展开正文仍进 Inspector 承担完整核对。用户手动 fold 后，
+生命周期更新不得覆盖其选择。失败、拒绝、取消和超时保持明确摘要可见。
+工具不再聚合分组：每次调用保留独立 entry，相邻成功调用也不合并为组行；交互、
+待审批等 durable entry 不参与任何自动隐藏。
 
 布局规则：
 
@@ -53,7 +55,7 @@ active issue。
 - transcript 延续 `GridSpec`、语义 theme token 与响应式断点；组件不得硬编码颜色；
 - 文本区（user 气泡与 assistant 长正文）保持基准列（块内所有行——含 md 复制按钮行——
   同带竖线前缀，左缘时间线不断链）；工具卡片、系统注记/提醒、提问块、
-  Todo 摘要、折叠组、气泡内 reasoning，以及 **assistant 短回复**（`TuiAssistantBubble::is_brief`：
+  Todo 摘要、气泡内 reasoning，以及 **assistant 短回复**（`TuiAssistantBubble::is_brief`：
   `chars().count() < 120`；空正文的纯 reasoning/工具轮恒为短回复）等过程区 entry 在
   Wide/Standard（≥60 列）整体右移 2 格，其正文可用宽度相应收窄 2 格，右缘（duration 等
   metadata 对齐列）和整带居中不变；短回复判定只作用于 assistant——user 气泡永不缩进；

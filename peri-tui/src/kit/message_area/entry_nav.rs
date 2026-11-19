@@ -31,7 +31,7 @@ pub(super) fn move_entry_focus(
 mod shared_bubble_tests;
 
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
-/// 与折叠 pass（`acp_events/render.rs::apply_fold_pass`）的键控口径一致：
+/// 与折叠 pass（`acp_events/fold.rs::apply_fold_pass`）的键控口径一致：
 /// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) /
 /// Interaction(request_id) / SystemReminder(reminder_id)。
 pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
@@ -44,18 +44,6 @@ pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             Some((FoldKey::SubAgent(g.instance_id.clone()), g.fold))
         }
-        TuiRenderUnit::TuiCollapsedGroup(g) => Some((
-            FoldKey::Group(
-                g.view_models
-                    .iter()
-                    .filter_map(|vm| match vm {
-                        TuiRenderUnit::TuiToolCard(t) => Some(t.tool_id.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            g.fold,
-        )),
         TuiRenderUnit::TuiAskUserBlock(a) => {
             Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
         }
@@ -86,8 +74,8 @@ pub(super) fn set_entry_focus(snapshot: &ViewModelsSnapshot, slot: usize) {
 /// 被消费前的唯一判定路径。
 ///
 /// 单击 = Down 冻结 + 手势从未升级（`gesture` 保持 Pending 到 Up）：
-/// `gesture` 为 Some 且冻结的 `entry_hit` 命中首行 `(slot, 0)` →
-/// `Some(slot)`；否则 `None`（无 Down 记录 / 正文行 / 非首行）。
+/// `gesture` 为 Some 且冻结的 `entry_hit` 命中可点击 header →
+/// `Some(slot)`；否则 `None`（无 Down 记录 / 正文行 / 非 header 行）。
 ///
 /// [防御 Up 坐标] `mouse_row` 必须在 `area` 内且非滚动条列——防御检查
 /// 基于 Up 时点坐标，比 D2 设计表述（pending.screen）更严格（S1 review
@@ -111,8 +99,10 @@ pub(super) fn entry_click_decision(
         return None;
     }
     let pending = gesture?;
+    // `entry_hit` 在 Down 时已按「可点击 header」解析（过程区台阶占第 0 行时
+    // local_idx 为 1）；Up 只消费该结果，不再对行号做二次假设。
     match pending.entry_hit {
-        Some((slot, 0)) => Some(slot),
+        Some((slot, _)) => Some(slot),
         _ => None,
     }
 }
@@ -143,10 +133,6 @@ pub(super) fn apply_fold_override(vm: &mut TuiRenderUnit, fold: FoldState) {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             g.fold = fold;
             g.user_modified = true;
-            g.recompute_hash();
-        }
-        TuiRenderUnit::TuiCollapsedGroup(g) => {
-            g.fold = fold;
             g.recompute_hash();
         }
         TuiRenderUnit::TuiAskUserBlock(a) => {

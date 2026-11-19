@@ -68,11 +68,11 @@ fn test_turn_interrupted_stops_running_tool_card_animation() {
     );
 }
 
-/// §7 reasoning 行：流式（PromptRunning + trailing）→ Preview/Running；
-/// TurnDone 后 phase 离开 PromptRunning → 全 Completed → Collapsed 单行。
+/// 过程 entry 默认单行：流式（PromptRunning + trailing）reasoning 也是 Collapsed；
+/// TurnDone 后 Completed 仍 Collapsed（同一行摘要，不因终态改变高度）。
 #[test]
 #[serial]
-fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
+fn test_fold_pass_reasoning_running_collapsed_then_completed_collapsed() {
     let mut state = super::make_fold_test_state();
 
     super::dispatch_and_notify(
@@ -91,10 +91,14 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
         "流式中 reasoning 应为 Running"
     );
     assert!(r.is_running);
-    assert_eq!(r.fold, FoldState::Preview, "§7 running 行 → Preview");
+    assert_eq!(
+        r.fold,
+        FoldState::Collapsed,
+        "过程 entry 默认折叠为单行（running 同样）"
+    );
     assert!(
-        !r.collapsed(),
-        "Preview 经 collapsed() 访问器视为展开（body 可见）"
+        r.collapsed(),
+        "Collapsed 经 collapsed() 访问器视为收起（body 不可见）"
     );
 
     // 追加文本 chunk——文本到达 = 本消息 thinking 块结束（方案 1）：
@@ -142,10 +146,10 @@ fn test_fold_pass_reasoning_running_preview_then_completed_collapsed() {
     assert!(r.collapsed());
 }
 
-/// §7 tool 行：running → Preview；success/error 终态均 → Collapsed。
+/// 工具默认单行：running / success / error 一律 Collapsed（终态不改变高度）。
 #[test]
 #[serial]
-fn test_fold_pass_tool_preview_then_terminal_collapsed() {
+fn test_fold_pass_tool_collapsed_across_lifecycle() {
     let mut state = super::make_fold_test_state();
 
     // running：ToolStarted
@@ -162,7 +166,11 @@ fn test_fold_pass_tool_preview_then_terminal_collapsed() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(tool_card_of(&snap, 0).fold, FoldState::Preview);
+    assert_eq!(
+        tool_card_of(&snap, 0).fold,
+        FoldState::Collapsed,
+        "running 工具同样默认单行折叠"
+    );
     assert!(!tool_card_of(&snap, 0).user_modified);
 
     // success：ToolEnded（is_error=false）
@@ -466,7 +474,7 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
     );
 }
 
-/// 手动覆盖免疫：running reasoning 被用户展开后，流式继续不得强制收回 Preview。
+/// 手动覆盖免疫：running reasoning 被用户展开后，流式继续不得强制收回 Collapsed。
 #[test]
 #[serial]
 fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
@@ -481,7 +489,11 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(super::reasoning_of(&snap, 0).fold, FoldState::Preview);
+    assert_eq!(
+        super::reasoning_of(&snap, 0).fold,
+        FoldState::Collapsed,
+        "默认单行折叠"
+    );
 
     // 用户手动展开（流式中）
     FOLD_OVERRIDES
@@ -489,7 +501,7 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
         .write()
         .insert(FoldKey::Reasoning("msg_r2".into()), FoldState::Expanded);
 
-    // 继续 streaming——不得收回 Preview
+    // 继续 streaming——不得收回 Collapsed
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ReasoningChunk(TuiReasoningChunk {
@@ -621,6 +633,75 @@ fn test_local_user_bubble_carries_attachment_records() {
     assert_eq!(bubble.attachments.len(), 2, "两条附件记录随气泡冻结");
     assert_eq!(bubble.attachments[0].bytes, 45);
     assert_eq!(bubble.attachments[1].bytes, 2048);
+}
+
+/// 历史冷重建：replay 构造的工具卡与 committed 中的 reasoning 都回到默认单行折叠。
+///
+/// 旧快照/旧版本可能留下 `Preview` 或 running 形态；冷投影（phase != PromptRunning）
+/// 必须归一为 `Collapsed`，与实时流式路径同一默认。
+#[test]
+#[serial]
+fn test_cold_history_rebuild_keeps_default_collapsed() {
+    let mut state = super::make_fold_test_state();
+
+    // replay 工具：起始（结果缺失）与终态都按折叠策略构造。
+    let started = crate::kit::acp_events::tool::replay_tool_started_unit(
+        "h1",
+        "Read",
+        "a.rs",
+        &serde_json::json!({"path": "a.rs"}),
+        None,
+        false,
+    );
+    let TuiRenderUnit::TuiToolCard(started_card) = started else {
+        panic!("replay tool unit 应为 TuiToolCard")
+    };
+    let completed = crate::kit::acp_events::tool::completed_tool_card(&started_card, "ok", false);
+    assert_eq!(
+        completed.fold,
+        FoldState::Collapsed,
+        "replay 构造即默认单行折叠"
+    );
+
+    // committed 中残留 Running/Preview 形态的 reasoning（例如旧快照）。
+    let mut bubble = crate::kit::tui_render_unit::TuiAssistantBubble {
+        text: "历史正文".into(),
+        reasoning: Some(crate::kit::tui_render_unit::TuiReasoningBlock {
+            text: "历史思考".into(),
+            fold: FoldState::Preview,
+            status: EntryStatus::Running,
+            is_running: true,
+            started_at: None,
+            duration_ms: None,
+        }),
+        message_id: Some("msg_h1".into()),
+        started_at: None,
+        duration_ms: None,
+        content_hash: 0,
+    };
+    bubble.recompute_hash();
+
+    state.committed = im::Vector::from(vec![
+        TuiRenderUnit::TuiToolCard(completed),
+        TuiRenderUnit::TuiAssistantBubble(bubble.into()),
+    ]);
+    state.phase = super::SessionPhase::Idle;
+    crate::kit::acp_events::render::push_view_models(&mut state);
+
+    let snap = VIEW_MODELS.state().read().clone();
+    let tool = tool_card_of(&snap, 0);
+    assert_eq!(tool.fold, FoldState::Collapsed, "冷重建工具卡保持单行");
+    let reasoning = super::reasoning_of(&snap, 1);
+    assert_eq!(
+        reasoning.status,
+        EntryStatus::Completed,
+        "冷重建把残留 running 归一为 Completed"
+    );
+    assert_eq!(
+        reasoning.fold,
+        FoldState::Collapsed,
+        "冷重建 reasoning 保持单行折叠"
+    );
 }
 
 use crate::kit::atoms::{FOLD_OVERRIDES, VIEW_MODELS, ViewModelsSnapshot};

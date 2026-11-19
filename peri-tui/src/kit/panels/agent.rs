@@ -496,10 +496,6 @@ fn scan_vm_for_subagents(
         for child in d.view_models.iter() {
             scan_vm_for_subagents(child, out, seen);
         }
-    } else if let TuiRenderUnit::TuiCollapsedGroup(g) = vm {
-        for child in g.view_models.iter() {
-            scan_vm_for_subagents(child, out, seen);
-        }
     }
 }
 

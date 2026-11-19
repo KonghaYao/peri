@@ -5,7 +5,7 @@ use super::Rect;
 use super::ScrollbarGeometry;
 use super::TuiRenderUnit;
 
-use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiSubAgentGroup, TuiUserBubble};
+use crate::kit::tui_render_unit::{TuiSubAgentGroup, TuiUserBubble};
 
 #[must_use]
 fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
@@ -152,27 +152,6 @@ fn test_find_selected_subagent_unknown_id_returns_none() {
         generation: 0,
     };
     assert!(super::find_selected_subagent(&snap, Some("nope")).is_none());
-}
-
-#[test]
-fn test_find_selected_subagent_recurses_into_collapsed_group() {
-    // TuiCollapsedGroup 内嵌 SubAgent（分组后 subagent 行被压入组内）——仍可找到
-    let collapsed = TuiCollapsedGroup {
-        title: "batch".to_string(),
-        count: 1,
-        failed_count: 0,
-        view_models: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
-            "hidden", "Hidden",
-        ))],
-        fold: crate::kit::tui_render_unit::FoldState::Collapsed,
-        content_hash: 0,
-    };
-    let snap = ViewModelsSnapshot {
-        items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(collapsed)]),
-        generation: 0,
-    };
-    let g = super::find_selected_subagent(&snap, Some("hidden")).expect("应找到组内 subagent");
-    assert_eq!(g.agent_id, "hidden");
 }
 
 #[test]

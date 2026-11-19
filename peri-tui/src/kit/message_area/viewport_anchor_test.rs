@@ -5,11 +5,9 @@
 //! 不另造坐标换算。身份重定位的判据只有一条：**同一个可见单元在屏幕上的行号不变**，
 //! 屏幕行 = `slot_visual_start(单元) − 视口偏移`。
 
-use super::FoldKey;
 use super::PrependRelocation;
 use super::SlotIndex;
 use super::TuiRenderUnit;
-use super::UnitIdentity;
 use super::ViewportAnchor;
 
 use crate::kit::entry_render_cache::{EntryRenderContext, EntrySurface};
@@ -83,21 +81,6 @@ fn tool_card(tool_id: &str) -> TuiRenderUnit {
     })
 }
 
-/// 折叠组：成员 tool id 序列就是它的身份（`FoldKey::Group`，与折叠 pass 同口径）。
-fn collapsed_group(member_ids: &[&str]) -> TuiRenderUnit {
-    use crate::kit::tui_render_unit::TuiCollapsedGroup;
-    let mut group = TuiCollapsedGroup {
-        title: "Read".into(),
-        count: member_ids.len() as u32,
-        failed_count: 0,
-        view_models: member_ids.iter().map(|id| tool_card(id)).collect(),
-        fold: FoldState::Collapsed,
-        content_hash: 0,
-    };
-    group.recompute_hash();
-    TuiRenderUnit::TuiCollapsedGroup(group)
-}
-
 /// 屏幕行 = 单元视觉起始 − 视口偏移（对本测试的索引：起始即单元首行的视觉行号）。
 fn screen_row(index: &SlotIndex, slot: usize, offset: usize) -> isize {
     index.slot_visual_start(slot).expect("单元视觉起始") as isize - offset as isize
@@ -149,60 +132,33 @@ fn relocate_is_zero_when_the_inserted_block_is_below_the_viewport() {
     assert_eq!(screen_row(&after, 0, target), screen_row(&before, 0, 0));
 }
 
-// ── ③ 折叠组：相邻工具卡压成一组导致槽位数变化（S7d 反例的本体）──────────
+// ── ③ 折叠：相邻工具卡收束为单行后上方高度减少（身份重定位不看槽位号）────
 
+/// 相邻工具卡从展开收束为单行（每个工具高度变小）：tail 的屏幕行不变（A20）。
 #[test]
 #[serial_test::serial]
-fn relocate_survives_neighbouring_tool_cards_collapsing_into_one_group() {
-    // 发布前：`[tool t1(2), tool t2(2), tail(3)]`（3 槽），视口顶行 5 落在 tail 内。
+fn relocate_survives_neighbouring_tool_cards_collapsing_to_single_lines() {
+    // 发布前：`[tool t1(3 行), tool t2(3 行), tail(3 行)]`，视口顶行 4 落在 t2 内。
     let before = index(
         vec![tool_card("t1"), tool_card("t2"), bubble("tail")],
-        &[2, 2, 3],
+        &[3, 3, 3],
     );
-    let anchor = ViewportAnchor::capture(&before, 5).expect("锚点可取");
-    assert_eq!(anchor.offset_within_unit, 1, "5 − tail 起始 4");
+    let anchor = ViewportAnchor::capture(&before, 4).expect("锚点落在 t2 内");
+    assert_eq!(anchor.offset_within_unit, 1, "4 − t2 起始 3");
 
-    // 发布后：t1/t2 被压成一张折叠组（2 槽）——**槽位数变少**，旧「桥接槽位号索引
-    // 渲染槽位」的口径在这里必然错位；身份重定位不看槽位号，只看身份。
+    // 发布后：两张工具卡分别收束为 1 行——槽位数不变，但上方高度减少。
     let after = index(
-        vec![collapsed_group(&["t1", "t2"]), bubble("tail")],
-        &[3, 3],
+        vec![tool_card("t1"), tool_card("t2"), bubble("tail")],
+        &[1, 1, 3],
     );
-    let target = anchor.relocate(&after).expect("tail 身份在新窗口里唯一");
-    assert_eq!(target, 3 + 1, "新起始 3 + 单元内位移 1");
+    let target = anchor.relocate(&after).expect("t2 身份在新窗口里唯一");
+    assert_eq!(target, 1 + 1, "新起始 1 + 单元内位移 1");
     assert_eq!(
         screen_row(&after, 1, target),
-        screen_row(&before, 2, 5),
-        "tail 屏幕行不变（A20）——尽管槽位数从 3 变 2"
+        screen_row(&before, 1, 4),
+        "tail 屏幕行不变（A20）——尽管上方工具高度变小"
     );
-    assert_eq!(target as isize - 5, -1, "重定位量 = 折叠把上方压掉的 1 行");
-}
-
-/// 反向形态：折叠组把**锚点自己**吞掉（原单元身份在新窗口里不存在）→
-/// 不补偿（安全方向）。组身份是成员序列，与被吞掉的工具卡身份不同。
-#[test]
-#[serial_test::serial]
-fn relocate_refuses_when_the_anchored_unit_was_absorbed_into_a_group() {
-    let before = index(
-        vec![tool_card("t1"), tool_card("t2"), bubble("tail")],
-        &[2, 2, 3],
-    );
-    let anchor = ViewportAnchor::capture(&before, 3).expect("锚点落在 t2 内");
-    assert_eq!(
-        super::identity_of(&before.canonical_items().expect("relocate refuses when the anchored unit was absorbed into a group: the canonical_items fixture operation uses valid inputs")[1]),
-        UnitIdentity::Fold(FoldKey::Tool("t2".into())),
-        "工具卡身份 = 既有折叠键"
-    );
-
-    let after = index(
-        vec![collapsed_group(&["t1", "t2"]), bubble("tail")],
-        &[3, 3],
-    );
-    assert_eq!(
-        anchor.relocate(&after),
-        None,
-        "锚点被并入折叠组后身份消失 → 不补偿（宁可少补一次）"
-    );
+    assert_eq!(target as isize - 4, -2, "重定位量 = 上方两张卡各压掉 2 行");
 }
 
 // ── ④ 安全方向：身份认不出 / 身份歧义 → 不补偿 ───────────────────────────

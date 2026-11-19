@@ -1,6 +1,6 @@
 use super::{
-    TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiSubAgentGroup,
-    TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiUserBubble,
+    TuiAskUserBlock, TuiAssistantBubble, TuiDivider, TuiSubAgentGroup, TuiSystemNote,
+    TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiUserBubble,
 };
 use std::sync::Arc;
 
@@ -17,7 +17,6 @@ pub enum TuiRenderUnit {
     TuiSystemNote(TuiSystemNote),
     TuiSystemReminder(TuiSystemReminder),
     TuiSubAgentGroup(TuiSubAgentGroup),
-    TuiCollapsedGroup(TuiCollapsedGroup),
     TuiDivider(TuiDivider),
     TuiAskUserBlock(TuiAskUserBlock),
     /// §6.9 活动 turn 的 todo 进度摘要行（`3/7 tasks · Running tests`），
@@ -41,7 +40,6 @@ impl TuiRenderUnit {
             Self::TuiSystemNote(d) => d.content_hash,
             Self::TuiSystemReminder(d) => d.content_hash,
             Self::TuiSubAgentGroup(d) => d.content_hash,
-            Self::TuiCollapsedGroup(d) => d.content_hash,
             Self::TuiDivider(d) => d.content_hash,
             Self::TuiAskUserBlock(d) => d.content_hash,
             Self::TuiTodoSummary(d) => d.content_hash,

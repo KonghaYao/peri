@@ -5,13 +5,9 @@ use super::super::{BridgeState, SessionPhase};
 use crate::i18n;
 use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
 
-use crate::kit::tui_render_unit::FoldKey;
-use crate::kit::tui_render_unit::FoldState;
 use crate::kit::tui_render_unit::TuiDivider;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::tui_render_unit::TuiTodoSummary;
-use crate::kit::tui_render_unit::TuiToolCard;
-use crate::kit::tui_render_unit::TuiToolPresentation;
 use fluent_bundle::FluentValue;
 // These replaceable derived snapshots are committed through whole-value assignments.
 use parking_lot::Mutex;
@@ -26,8 +22,8 @@ use parking_lot::Mutex;
 /// 快照后处理流水线（均为纯视觉变换，不触碰 segment↔cache 对齐）：
 /// 1. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
 /// 2. 按完整消息顺序投影 turn 分隔线（随下一条用户 prompt 保留）；
-/// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
-/// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
+/// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）。
+/// 工具卡不再聚合分组：相邻工具各自成 entry，由折叠策略收束为单行。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
     super::super::subagent_preview::enforce(state);
     super::super::display_retention::enforce(state);
@@ -132,19 +128,11 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         __t = peri_time::monotonic_now();
     }
 
-    // [§7] 相邻成功工具分组——作用于完整 snapshot。TurnDone 会先把 current_turn
-    // 搬入 committed 再发布终态快照；若只扫描 current_turn 段，归档边界会让同一批
-    // 工具从 TuiCollapsedGroup 退回独立卡片。用户气泡、divider、文本及不可分组工具
-    // 仍作为天然边界，因此完整扫描不会跨 turn 合并。
-    let changed_from = group_successful_tools_from(&mut items, 0, confirmed_prefix);
-    #[cfg(test)]
-    {
-        crate::kit::acp_bridge::observe_perf(
-            crate::kit::acp_bridge::PerfCounter::StageGroupNs,
-            peri_time::elapsed_since(__t).as_nanos() as u64,
-        );
-        __t = peri_time::monotonic_now();
-    }
+    // [阅读效率] 工具不再聚合：每张工具卡独立成行，由折叠策略收束为单行
+    // （相邻成功的多个工具仍各自可点击展开/收起，不再合并为一张组行）。
+    // `changed_from` 仍取稳定前缀长度：`[0, confirmed_prefix)` 的槽位内容未变，
+    // Transcript 可保留其渲染缓存。
+    let changed_from = confirmed_prefix.min(items.len());
 
     let view_models = VIEW_MODELS.state();
     let mut published_snapshot = view_models.write();
@@ -345,159 +333,14 @@ pub(super) fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: 
     items.insert(insert_at, summary);
 }
 
-/// [PERF] group_successful_tools 结果缓存（纯 memoization）。
-///
-/// 判定分两层：
-/// - [`group_aux_fingerprint`] 覆盖「段内容之外」的分组输入（焦点键、Group 覆盖
-///   折叠态、语言版本）——变化即全量重建（无法定位影响范围）；
-/// - 段内容是否变化由 [`same_entry`] **逐条**比较判定。逐条比较能定位首个差异
-///   下标，配合 [`ToolGroupCache::cuts`] 只重建变化后缀——旧实现把整段折成一个
-///   u64，任何一处变化都触发全量重建（O(历史) 深拷贝），长会话下每事件成本随
-///   历史线性增长。
-pub(super) struct ToolGroupCache {
-    /// 上次分组的输入段（O(1) clone，与快照共享节点）。
-    pub(super) input: im::Vector<TuiRenderUnit>,
-    /// 上次分组的输出（含合并组）。
-    pub(super) grouped: im::Vector<TuiRenderUnit>,
-    /// 稳定切点表（升序），见 [`GroupCut`]。
-    pub(super) cuts: Vec<GroupCut>,
-    /// 见 [`group_aux_fingerprint`]。
-    pub(super) aux: u64,
-}
-
-/// 稳定切点：输出 `[0, output)` 就是输入 `[0, input)` 的分组结果，且该结果只依赖
-/// 前缀内部——复用它等价于对前缀重跑分组（纯函数 memoization，见 [`CutAnchor`]）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct GroupCut {
-    pub(super) input: usize,
-    pub(super) output: usize,
-    pub(super) anchor: CutAnchor,
-}
-
-/// 切点的稳定依据。分组是局部判定（相邻可合并连串 / error 失败 lookahead），
-/// 故稳定条件可按切点两侧的**相邻条目**给出；复用时前缀内部条目已由
-/// [`same_entry`] 逐条比对确认未变，只需按**新输入**重判切点这一处（[`cut_stable`]）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CutAnchor {
-    /// 切点前一条目（`input - 1`）是不可合并、非 error 的普通条目：它既是天然
-    /// 边界（其前的可合并连串已收口，不会跨切点续接），也不会替更前的组补记失败
-    /// 计数（失败 lookahead 只数 error 条目）。error 条目除外——它是失败 lookahead
-    /// 的一部分，其计数取决于切点之后的条目，故按新输入重判。
-    AfterCard,
-    /// 切点位于折叠组的收口处（`input - 1` 是该组最后一张可合并卡）：组是否已
-    /// 封口取决于切点**处**的条目——可合并则会继续并入、error 则会改写组的失败
-    /// 计数，两者都须按新输入重判。
-    AfterGroup,
-}
-
-/// 切点表上限——只需覆盖「近期尾部」的变化，超出后丢弃最旧切点（最坏退化为
-/// 从 0 重建，不影响正确性）。
-pub(super) const GROUP_CUT_CAP: usize = 512;
-
-pub(super) static TOOL_GROUP_CACHE: Mutex<Option<ToolGroupCache>> = Mutex::new(None);
-
-/// 结构性释放：丢弃所有持有旧 `committed` 节点的投影/分组缓存。
-pub(crate) fn invalidate_structural_caches() {
-    *TRANSCRIPT_HISTORY.lock() = None;
-    *DIVIDER_HISTORY.lock() = None;
-    *TOOL_GROUP_CACHE.lock() = None;
-    *TODO_SUMMARY_CACHE.lock() = None;
-}
-
-#[cfg(test)]
-pub(crate) fn debug_cache_lengths() -> (Option<usize>, Option<usize>, Option<usize>) {
-    (
-        TRANSCRIPT_HISTORY
-            .lock()
-            .as_ref()
-            .map(|(history, _, _)| history.len()),
-        DIVIDER_HISTORY.lock().as_ref().map(|cache| cache.raw.len()),
-        TOOL_GROUP_CACHE
-            .lock()
-            .as_ref()
-            .map(|cache| cache.input.len()),
-    )
-}
-
-/// 清空分组缓存（测试用——全局单例缓存会跨用例残留）。
-#[cfg(test)]
-pub(crate) fn reset_tool_group_cache() {
-    *TOOL_GROUP_CACHE.lock() = None;
-}
-
-/// 单独运行一次分组（测试用）——等价于 `push_view_models` 的 §7 阶段，
-/// 供 `acp_events_test/legacy_group_probe_test.rs` 与旧实现做逐条等价对照。
-#[cfg(test)]
-pub(crate) fn regroup_at_start(items: &mut im::Vector<TuiRenderUnit>) {
-    group_successful_tools(items, 0);
-}
-
-/// 分组决策的辅助输入指纹——与段内容无关、但会改变分组结果的全局输入：
-/// 焦点键（焦点工具免疫——焦点所在 entry 不入组）、Group 覆盖折叠态（用户手动
-/// 展开/折叠后不再自动合并）、语言版本（组标题经 `format_tool_name` 生成）。
-///
-/// `focused` 由调用方传入（同一次 [`FOCUSED_ENTRY`] 读值既供免疫判定、又供指纹），
-/// 避免在已持有该 atom 读锁时重入读取。
-pub(super) fn group_aux_fingerprint(focused: Option<&str>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h: u64 = 0;
-    let mut fh = std::collections::hash_map::DefaultHasher::new();
-    focused.hash(&mut fh);
-    h = crate::kit::tui_render_unit::tui_hash_combine(h, fh.finish());
-    // 分组自身的展开覆盖不会写回源 tool card，因此必须直接参与缓存判定；
-    // 否则下一帧会复用旧的 collapsed group，表现为点击/Enter 后不展开。
-    let mut oh = std::collections::hash_map::DefaultHasher::new();
-    let overrides_state = FOLD_OVERRIDES.state();
-    let overrides_guard = overrides_state.read();
-    let mut group_overrides: Vec<_> = overrides_guard
-        .iter()
-        .filter_map(|(key, fold)| match key {
-            FoldKey::Group(ids) => Some((ids, crate::kit::tui_render_unit::fold_state_code(*fold))),
-            _ => None,
-        })
-        .collect();
-    group_overrides.sort_by_key(|(ids, _)| *ids);
-    group_overrides.hash(&mut oh);
-    h = crate::kit::tui_render_unit::tui_hash_combine(h, oh.finish());
-    crate::kit::tui_render_unit::tui_hash_combine(h, crate::kit::atoms::LANG_VERSION.get())
-}
-
-/// 工具卡参与合并决策的字段（值比较；旧整段指纹把它们拼进 hash）。
-pub(super) fn tool_merge_fields(t: &TuiToolCard) -> (&str, &str, u8) {
-    let flags = u8::from(t.is_running)
-        | (u8::from(t.is_error) << 1)
-        | (u8::from(t.diff.is_some()) << 2)
-        | (u8::from(t.user_modified) << 3)
-        | (u8::from(matches!(t.presentation, TuiToolPresentation::Generic)) << 4);
-    (&t.tool_id, &t.tool_name, flags)
-}
-
-/// 单条 render unit 的分组身份比较——与旧整段指纹**逐条同口径**（变体码 +
-/// content_hash；工具卡显式补充合并决策字段，兜底手造条目 content_hash=0 的
-/// 测试场景）。
-pub(super) fn same_entry(a: &TuiRenderUnit, b: &TuiRenderUnit) -> bool {
-    if std::mem::discriminant(a) != std::mem::discriminant(b)
-        || a.content_hash() != b.content_hash()
-    {
-        return false;
-    }
-    match (a, b) {
-        (TuiRenderUnit::TuiToolCard(x), TuiRenderUnit::TuiToolCard(y)) => {
-            tool_merge_fields(x) == tool_merge_fields(y)
-        }
-        _ => true,
-    }
-}
-
 /// [PERF] 把 `tail` 并入 `items`——按尾长选择代价更低的合并方式。
 ///
 /// `im::Vector::append` 在「大向量接小向量」路径上**退化为整树重建**：实测
 /// （release，`TuiRenderUnit` 320 B）base=1000 时并入 1 个元素耗时 157 µs、
 /// 并入 256 个元素 186 µs，成本 ∝ `items.len()`；同等条件下逐元素 `push_back`
 /// 只用 5.2 / 64 µs（只复制右脊与右端 chunk）。快照组装（committed 接
-/// current_turn）与分组重建（复用前缀接变化后缀）都是「大主体接小尾巴」，
-/// 故尾部明显更小时走 `push_back`；两者量级相当时仍交给 im 的树合并
-/// （尾长 ≥ 主体一半时树合并更省）。
+/// current_turn）正是「大主体接小尾巴」，故尾部明显更小时走 `push_back`；
+/// 两者量级相当时仍交给 im 的树合并（尾长 ≥ 主体一半时树合并更省）。
 ///
 /// 纯搬运：元素顺序与内容不变。`tail` 按值传入——独占来源（`split_off` /
 /// `slice` 的结果）直接移动零复制；共享来源（如 `current_turn` 缓存）需先
@@ -515,354 +358,22 @@ pub(super) fn join_into(items: &mut im::Vector<TuiRenderUnit>, tail: im::Vector<
     items.append(tail);
 }
 
-/// 切点在**新输入**下是否仍然稳定（见 [`CutAnchor`]）。
-pub(super) fn cut_stable(
-    anchor: CutAnchor,
-    segment: &im::Vector<TuiRenderUnit>,
-    cut: usize,
-    focused: Option<&str>,
-) -> bool {
-    match anchor {
-        CutAnchor::AfterCard => match cut.checked_sub(1).and_then(|p| segment.get(p)) {
-            // 空前缀：不复用任何内容，恒稳定。
-            None => cut == 0,
-            Some(prev) if is_mergeable(prev, focused) => false,
-            // error 条目的失败计数取决于其后的 error 连串——按新输入重判。
-            Some(prev) if is_error_card(prev) => {
-                !matches!(segment.get(cut), Some(v) if is_error_card(v))
-            }
-            Some(_) => true,
-        },
-        CutAnchor::AfterGroup => match segment.get(cut) {
-            // 段尾：可合并连串与失败连串都已收口。
-            None => true,
-            Some(v) => !is_mergeable(v, focused) && !is_error_card(v),
-        },
-    }
+/// 结构性释放：丢弃所有持有旧 `committed` 节点的投影缓存。
+pub(crate) fn invalidate_structural_caches() {
+    *TRANSCRIPT_HISTORY.lock() = None;
+    *DIVIDER_HISTORY.lock() = None;
+    *TODO_SUMMARY_CACHE.lock() = None;
 }
 
-/// 不大于 `d` 的最大稳定切点（按新输入重判，见 [`cut_stable`]）；无则 `None`
-/// （须从 0 全量重建）。
-pub(super) fn stable_cut(
-    cuts: &[GroupCut],
-    segment: &im::Vector<TuiRenderUnit>,
-    d: usize,
-    focused: Option<&str>,
-) -> Option<(usize, usize)> {
-    cuts.iter()
-        .rev()
-        .filter(|c| c.input <= d)
-        .find(|c| cut_stable(c.anchor, segment, c.input, focused))
-        .map(|c| (c.input, c.output))
-}
-
-/// 条目是否可并入折叠组——与 §7 表口径一致（见 [`group_successful_tools`]）。
-#[must_use]
-pub(super) fn is_mergeable(vm: &TuiRenderUnit, focused: Option<&str>) -> bool {
-    matches!(
-        vm,
-        TuiRenderUnit::TuiToolCard(t)
-            if !t.is_running && !t.is_error && t.diff.is_none()
-                && matches!(t.presentation, TuiToolPresentation::Generic)
-                && !t.user_modified
-                && focused != Some(t.tool_id.as_str())
-    )
-}
-
-#[must_use]
-pub(super) fn is_error_card(vm: &TuiRenderUnit) -> bool {
-    matches!(vm, TuiRenderUnit::TuiToolCard(t) if t.is_error)
-}
-
-/// 原样输出区间内的稳定切点登记——区间按原样输出，故输出下标 =
-/// `out_before + (c - span_start)`。只有**非可合并条目**能作切点：可合并条目的
-/// 分组结果依赖后一条目（相邻性）。error 条目除外——可能是前一组失败 lookahead
-/// 的一部分，故不登记（其收口处的切点由 [`group_successful_tools`] 单独登记）。
-pub(super) fn register_span_cuts(
-    cuts: &mut Vec<GroupCut>,
-    span: &im::Vector<TuiRenderUnit>,
-    span_start: usize,
-    out_before: usize,
-    focused: Option<&str>,
-) {
-    {
-        let iteration_items = span.iter().enumerate();
-        for (k, vm) in iteration_items {
-            if !is_error_card(vm) && !is_mergeable(vm, focused) {
-                cuts.push(GroupCut {
-                    input: span_start + k + 1,
-                    output: out_before + k + 1,
-                    anchor: CutAnchor::AfterCard,
-                });
-            }
-        }
-    }
-}
-
-/// [§7] 相邻、成功、低信息密度 tools 压成 `TuiCollapsedGroup`。
-///
-/// - 可合并：已完成（!running）、非 error、无 diff（diff-edit 不隐藏）、
-///   Generic presentation（Skill/Todo 语义卡片保留）、未被用户手动操作
-///   （`user_modified`——折叠 pass 已把 FOLD_OVERRIDES 复写到该标志）、
-///   非当前 selected entry（`FOCUSED_ENTRY` atom，消息区焦点导航写入）。
-/// - 不可合并：running、error、interaction、含 diff 的 edit（当前无生产 diff，
-///   由 `diff.is_some()` 守卫未来 Slice 5 路径）、当前 selected entry（焦点在
-///   消息区侧，按身份键免疫——见 atoms.rs `FOCUSED_ENTRY` 注释）。
-/// - 只扫描 `[start..]` 段（current_turn 部分），不跨 assistant 正文 /
-///   system event / turn 边界。
-/// - 标题按工具名聚合成 `Read 3 · Glob 2` 形式（隐藏数随 title 展示）。
-///
-/// [Why 位置] 必须放在快照组装（push_view_models）而非 sync_cache：分组会删除
-/// cached_view_models 元素，破坏 segment↔cache 索引对齐；快照层是纯视觉变换。
-///
-/// [PERF] 增量重建（纯函数 memoization，命中即与全量重建等价，视觉行为不变）：
-/// 1. 段与上次**逐条一致**（[`same_entry`]）→ 整段复用缓存输出，零重建；
-/// 2. 仅尾部变化 → 取「首个差异下标 ≤ d 的最大稳定切点」（[`stable_cut`]），
-///    复用其前缀（与缓存共享节点），只重建变化后缀——成本 ∝ 变化量，不随历史
-///    长度增长；
-/// 3. 辅助输入（焦点键 / Group 覆盖折叠态 / 语言版本，见 [`group_aux_fingerprint`]）
-///    变化或缓存缺失 → 全量重建（无法定位影响范围）。
-///
-/// 旧实现把整段折成一个指纹、任何变化都全量重建，并在整段上逆序 `remove` +
-/// `insert` 就地改写：im::Vector 的节点与快照共享，每次 remove/insert 都触发
-/// COW 路径复制（整 chunk 渲染单元深拷贝），长会话下每事件成本随历史线性增长。
 #[cfg(test)]
-pub(super) fn group_successful_tools(items: &mut im::Vector<TuiRenderUnit>, start: usize) {
-    group_successful_tools_from(items, start, 0);
-}
-
-pub(super) fn group_successful_tools_from(
-    items: &mut im::Vector<TuiRenderUnit>,
-    start: usize,
-    confirmed_prefix: usize,
-) -> usize {
-    // 拆分 current_turn 段——快照层是纯视觉变换，不触碰 segment↔cache 索引对齐。
-    // [PERF] `start == 0`（生产唯一取值）等价于取走整个向量：`std::mem::take`
-    // 是 O(1)，而 `split_off(0)` 实测有 ~17 µs 的常数开销（`Focus` 窗口重建）。
-    let segment = if start == 0 {
-        std::mem::take(&mut *items)
-    } else {
-        items.split_off(start)
-    };
-
-    // [§7 免疫] 焦点所在 entry 的身份键——焦点工具不得被并入折叠组
-    // （用户正与之交互；入组后焦点 index 落到组上、展开态丢失）。
-    // [S2 单一事实源] 读 FOCUSED_ENTRY 的派生 key（guard 绑定变量——focused
-    // 借用 guard，生命周期须覆盖使用侧）；该读值同时供辅助指纹使用。
-    let focus_state = crate::kit::atoms::FOCUSED_ENTRY.state();
-    let focused_entry = focus_state.read();
-    let focused = focused_entry
-        .as_ref()
-        .and_then(|f| f.key.as_ref())
-        .and_then(|k| match k {
-            FoldKey::Tool(id) => Some(id.as_str()),
-            _ => None,
-        });
-    let aux = group_aux_fingerprint(focused);
-
-    // ── 复用判定：首个差异下标 → ≤ 差异点的最大稳定切点 ──
-    let cache = TOOL_GROUP_CACHE.lock();
-    let (rebuild_from, mut grouped, mut cuts) = match cache.as_ref() {
-        Some(c) if c.aux == aux => {
-            let prefix = confirmed_prefix.min(c.input.len()).min(segment.len());
-            let d = (prefix..c.input.len().min(segment.len()))
-                .find(|&index| !same_entry(&c.input[index], &segment[index]))
-                .unwrap_or(c.input.len().min(segment.len()));
-            if d == segment.len() && d == c.input.len() {
-                // 段与上次逐条一致（无变化的重复发布）——整段复用。
-                (d, c.grouped.clone(), c.cuts.clone())
-            } else {
-                match stable_cut(&c.cuts, &segment, d, focused) {
-                    Some((in_cut, out_cut)) => {
-                        // 复用前缀与缓存共享节点（O(log n) 切片，元素零克隆）。
-                        let mut prefix = c.grouped.clone();
-                        prefix.split_off(out_cut);
-                        let kept = c
-                            .cuts
-                            .iter()
-                            .copied()
-                            .take_while(|cut| cut.input <= in_cut)
-                            .collect();
-                        (in_cut, prefix, kept)
-                    }
-                    None => (0, im::Vector::new(), Vec::new()),
-                }
-            }
-        }
-        _ => (0, im::Vector::new(), Vec::new()),
-    };
-    let changed_from = start.saturating_add(grouped.len());
-    if rebuild_from == segment.len() {
-        #[cfg(test)]
-        crate::kit::acp_bridge::observe_perf(
-            crate::kit::acp_bridge::PerfCounter::GroupFullReuse,
-            1,
-        );
-        drop(cache);
-        join_into(items, grouped);
-        return changed_from;
-    }
-    #[cfg(test)]
-    {
-        crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::GroupRebuild, 1);
-        crate::kit::acp_bridge::observe_perf(
-            crate::kit::acp_bridge::PerfCounter::GroupRebuiltUnits,
-            (segment.len() - rebuild_from) as u64,
-        );
-    }
-    drop(cache);
-
-    // ── 单趟重建 [rebuild_from..)：原样区间与合并组交替输出 ──
-    // 旧实现在整段上逆序 `remove` + `insert` 就地改写：im::Vector 的每个节点都是
-    // Arc 共享节点（与 state.committed / 快照共享），任何 remove/insert 都触发
-    // COW 路径复制（整 chunk 元素深拷贝）——成本 O(段长)、且每次事件全量重来。
-    // 新实现只做 `append`/`push_back`（不改写共享节点），deep clone 仅限真正进入
-    // 折叠组的卡片。
-    // 完整输入留作下次比较基准（O(1) clone；im 为持久化结构——对 `rest` 的
-    // split_off 不会改动共享节点，`input` 始终是完整段）。
-    let input = segment.clone();
-    let mut rest = segment;
-    if rebuild_from > 0 {
-        rest = rest.split_off(rebuild_from);
-    }
-    let mut base = rebuild_from;
-    #[cfg(test)]
-    let mut copied_units: u64 = 0;
-    let mut i = 0usize;
-    while i < rest.len() {
-        if !is_mergeable(rest.get(i).expect("i < rest.len()"), focused) {
-            i += 1;
-            continue;
-        }
-        let run_start = i;
-        while i < rest.len() && is_mergeable(rest.get(i).expect("i < rest.len()"), focused) {
-            i += 1;
-        }
-        // 单张可合并卡不组——留在原样区间内（其分组结果依赖相邻条目）。
-        let run_len = i - run_start;
-        if run_len < 2 {
-            continue;
-        }
-        // 原样区间 [0, run_start)：整体 append（与源树共享节点，元素零克隆）。
-        if run_start > 0 {
-            let tail = rest.split_off(run_start);
-            let span = std::mem::replace(&mut rest, tail);
-            register_span_cuts(&mut cuts, &span, base, grouped.len(), focused);
-            base += span.len();
-            join_into(&mut grouped, span);
-        }
-        // 该 run → 一张折叠组；组内容（隐藏卡片）是本函数唯一的深拷贝来源。
-        let after = rest.split_off(run_len);
-        let run = std::mem::replace(&mut rest, after);
-        let failed_count = rest.iter().take_while(|vm| is_error_card(vm)).count() as u32;
-        #[cfg(test)]
-        {
-            copied_units += run_len as u64;
-        }
-        grouped.push_back(build_collapsed_group(run, failed_count));
-        // 组收口处的稳定切点（见 [`CutAnchor::AfterGroup`]）——长会话最常见的
-        // 切点：末组之后新增内容时，前缀（含本组）可直接复用。
-        cuts.push(GroupCut {
-            input: base + run_len,
-            output: grouped.len(),
-            anchor: CutAnchor::AfterGroup,
-        });
-        // 失败连串收口处的稳定切点：前缀含完整 error 连串，组的 failed_count
-        // 已定（见 [`CutAnchor::AfterCard`]）。
-        let err_run = rest.iter().take_while(|vm| is_error_card(vm)).count();
-        if err_run > 0 {
-            cuts.push(GroupCut {
-                input: base + run_len + err_run,
-                output: grouped.len() + err_run,
-                anchor: CutAnchor::AfterCard,
-            });
-        }
-        base += run_len;
-        i = 0;
-    }
-    if !rest.is_empty() {
-        register_span_cuts(&mut cuts, &rest, base, grouped.len(), focused);
-        base += rest.len();
-        join_into(&mut grouped, rest);
-    }
-    // 段尾切点：整段（或 [rebuild_from..] 末尾）总是可复用的复选点——按新输入
-    // 重判，尾条目可合并/可续接 error 时由 [`cut_stable`] 拒绝。
-    cuts.push(GroupCut {
-        input: base,
-        output: grouped.len(),
-        anchor: CutAnchor::AfterCard,
-    });
-    cuts.dedup_by_key(|cut| cut.input);
-    if cuts.len() > GROUP_CUT_CAP {
-        cuts.drain(0..cuts.len() - GROUP_CUT_CAP);
-    }
-
-    #[cfg(test)]
-    crate::kit::acp_bridge::observe_perf(
-        crate::kit::acp_bridge::PerfCounter::GroupCopiedUnits,
-        copied_units,
-    );
-
-    // [PERF] 缓存本次分组结果（clone = O(1) 引用计数共享）。
-    *TOOL_GROUP_CACHE.lock() = Some(ToolGroupCache {
-        input,
-        grouped: grouped.clone(),
-        cuts,
-        aux,
-    });
-    join_into(items, grouped);
-    changed_from
-}
-
-/// 由一段相邻可合并工具卡构造折叠组（§7 标题聚合 `Read 3 · Glob 2`）。
-pub(super) fn build_collapsed_group(
-    run: im::Vector<TuiRenderUnit>,
-    failed_count: u32,
-) -> TuiRenderUnit {
-    use crate::kit::tui_render_unit::TuiCollapsedGroup;
-
-    let mut names: Vec<(String, u32)> = Vec::new();
-    for vm in run.iter() {
-        if let TuiRenderUnit::TuiToolCard(t) = vm {
-            let display = crate::kit::tool_display::format_tool_name(&t.tool_name);
-            match names.iter_mut().find(|(n, _)| *n == display) {
-                Some((_, c)) => *c += 1,
-                None => names.push((display, 1)),
-            }
-        }
-    }
-    let title = names
-        .into_iter()
-        .map(|(name, count)| format!("{name} {count}"))
-        .collect::<Vec<_>>()
-        .join(" \u{b7} ");
-    let count = run.len() as u32;
-    let hidden_vms: Vec<TuiRenderUnit> = run.into_iter().collect();
-    let group_key = FoldKey::Group(
-        hidden_vms
-            .iter()
-            .filter_map(|vm| match vm {
-                TuiRenderUnit::TuiToolCard(t) => Some(t.tool_id.clone()),
-                _ => None,
-            })
-            .collect(),
-    );
-    let fold = FOLD_OVERRIDES
-        .state()
-        .read()
-        .get(&group_key)
-        .copied()
-        .unwrap_or(FoldState::Collapsed);
-    let mut group = TuiCollapsedGroup {
-        title,
-        count,
-        failed_count,
-        view_models: hidden_vms,
-        fold,
-        content_hash: 0,
-    };
-    group.recompute_hash();
-    TuiRenderUnit::TuiCollapsedGroup(group)
+pub(crate) fn debug_cache_lengths() -> (Option<usize>, Option<usize>) {
+    (
+        TRANSCRIPT_HISTORY
+            .lock()
+            .as_ref()
+            .map(|(history, _, _)| history.len()),
+        DIVIDER_HISTORY.lock().as_ref().map(|cache| cache.raw.len()),
+    )
 }
 
 /// 由 acp_bridge 在 BRIDGE_RESET_COUNTER 复位时调用——
