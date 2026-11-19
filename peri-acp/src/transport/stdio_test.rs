@@ -1131,4 +1131,21 @@ async fn test_matching_response_dispatches_while_notification_waits_for_capacity
         .expect("task panic")
         .expect("应答应成功");
     assert_eq!(answer, json!("pong"));
+
+    // result 为 null 的合法响应同样必须配对（`Option<Value>` 不能把它当缺失）。
+    let asking_null = Arc::clone(&transport);
+    let pending_null =
+        tokio::spawn(async move { asking_null.send_request("client/null", json!({})).await });
+    let null_id = read_stdout_line(&mut output).await["id"].clone();
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{null_id},"result":null}}"#),
+    )
+    .await;
+    let answer = tokio::time::timeout(Duration::from_millis(1), pending_null)
+        .await
+        .expect("null result 响应不得等入站队列排水")
+        .expect("task panic")
+        .expect("null 应答应成功");
+    assert_eq!(answer, Value::Null);
 }

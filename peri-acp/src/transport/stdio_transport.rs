@@ -594,27 +594,29 @@ where
 /// 等待期间读到的行若是匹配 pending 的响应，立即交给 router：否则 host 在
 /// 等待该响应时不会继续 `recv()`，通知入队与响应配对会互相等待。
 fn dispatch_matching_response(router: &RequestRouter, line: &str) -> bool {
-    let Ok(envelope) = serde_json::from_str::<JsonRpcEnvelope>(line) else {
+    // 按原始 JSON 判断字段存在性：`Option<Value>` 会把 `"result": null` 读成
+    // `None`，而 null 是合法成功响应，不能因此漏配对。
+    let Ok(raw) = serde_json::from_str::<Value>(line) else {
         return false;
     };
-    if envelope.jsonrpc != "2.0" || envelope.method.is_some() {
+    if raw.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || raw.get("method").is_some() {
         return false;
     }
-    let Some(id) = envelope.id.as_ref().filter(|id| is_domain_id(id)) else {
+    let Some(id) = raw.get("id").filter(|id| is_domain_id(id)) else {
         return false;
     };
-    let message = match (envelope.result, envelope.error) {
-        (Some(result), None) => IncomingMessage::Response {
-            id: value_to_request_id(id),
-            result: Ok(result),
-        },
-        (None, Some(error)) => IncomingMessage::Response {
-            id: value_to_request_id(id),
-            result: Err(error),
+    let result = match (raw.get("result"), raw.get("error")) {
+        (Some(result), None) => Ok(result.clone()),
+        (None, Some(error)) => match serde_json::from_value::<AcpError>(error.clone()) {
+            Ok(error) => Err(error),
+            Err(_) => return false,
         },
         _ => return false,
     };
-    router.dispatch(&message)
+    router.dispatch(&IncomingMessage::Response {
+        id: value_to_request_id(id),
+        result,
+    })
 }
 
 async fn write_envelope(
