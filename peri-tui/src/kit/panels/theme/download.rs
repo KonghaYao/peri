@@ -16,11 +16,33 @@ use crate::i18n;
 
 static DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// A stalled peer must not hold the single download lease forever.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Both the catalog listing and each theme file are small; the budget keeps an
+/// endless or oversized response from holding the lease or filling the disk.
+const MAX_BODY_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DownloadLimits {
+    pub(super) request_timeout: Duration,
+    pub(super) max_body_bytes: u64,
+}
+
+impl Default for DownloadLimits {
+    fn default() -> Self {
+        Self {
+            request_timeout: REQUEST_TIMEOUT,
+            max_body_bytes: MAX_BODY_BYTES,
+        }
+    }
+}
+
 pub(super) struct DownloadRequest {
     pub(super) home: Result<String, std::env::VarError>,
     pub(super) contents_url: String,
     pub(super) raw_prefix: String,
     pub(super) scan_catalog: Box<dyn FnOnce() -> Vec<String> + Send>,
+    pub(super) limits: DownloadLimits,
 }
 
 impl DownloadRequest {
@@ -33,6 +55,7 @@ impl DownloadRequest {
             raw_prefix: "https://raw.githubusercontent.com/konghayao/perihelion/main/.peri/theme/"
                 .to_string(),
             scan_catalog: Box::new(list_available_themes),
+            limits: DownloadLimits::default(),
         }
     }
 }
@@ -169,16 +192,19 @@ async fn run_download(request: DownloadRequest, run: &mut DownloadRun) -> anyhow
     std::fs::create_dir_all(&directory).context("failed to create theme directory")?;
     let client = reqwest::Client::builder()
         .user_agent("peri-tui/0.1")
+        .timeout(request.limits.request_timeout)
         .build()
         .context("failed to create HTTP client")?;
-    let entries: Vec<serde_json::Value> = client
+    let response = client
         .get(&request.contents_url)
         .send()
         .await
-        .context("GitHub API request failed")?
-        .json()
+        .context("GitHub API request failed")?;
+    let body = read_body(response, request.limits.max_body_bytes, "GitHub API")
         .await
-        .context("failed to parse GitHub API response")?;
+        .map_err(anyhow::Error::msg)?;
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&body).context("failed to parse GitHub API response")?;
     run.list(
         entries
             .iter()
@@ -192,7 +218,13 @@ async fn run_download(request: DownloadRequest, run: &mut DownloadRun) -> anyhow
         let filename = run.progress.items[index].filename.clone();
         run.downloading(index);
         let raw_url = format!("{}{filename}", request.raw_prefix);
-        let result = download_file(&client, &raw_url, &directory.join(&filename)).await;
+        let result = download_file(
+            &client,
+            &raw_url,
+            &directory.join(&filename),
+            request.limits.max_body_bytes,
+        )
+        .await;
         match &result {
             Ok(()) => tracing::info!(
                 "download themes: downloaded {} ({}/{})",
@@ -216,18 +248,49 @@ async fn run_download(request: DownloadRequest, run: &mut DownloadRun) -> anyhow
     Ok(())
 }
 
-/// Keep the existing response-body/write policy, including its status handling.
-async fn download_file(client: &reqwest::Client, url: &str, path: &Path) -> Result<(), String> {
+/// Status handling and the write target stay unchanged; the bounded read keeps a
+/// stalled or oversized peer from holding the lease or filling the disk.
+async fn download_file(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    max_body_bytes: u64,
+) -> Result<(), String> {
     let response = client
         .get(url)
         .send()
         .await
         .map_err(|error| format!("HTTP error: {error}"))?;
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("read error: {error}"))?;
+    let body = read_body(response, max_body_bytes, "theme").await?;
     std::fs::write(path, body).map_err(|error| format!("write error: {error}"))
+}
+
+/// `Content-Length` is only a fast-fail hint: it may be absent or untrusted, so
+/// the streamed total is authoritative.
+async fn read_body(
+    mut response: reqwest::Response,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    if let Some(length) = response.content_length()
+        && length > max_bytes
+    {
+        return Err(format!(
+            "{label} response exceeds {max_bytes} byte limit (Content-Length: {length})"
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("{label} read error: {error}"))?
+    {
+        if body.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(format!("{label} response exceeds {max_bytes} byte limit"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 use crate::kit::atoms::DOWNLOAD_PROGRESS;
