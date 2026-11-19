@@ -119,9 +119,7 @@ impl RetainedHeap for MarkdownSegment {
                 .capacity()
                 .saturating_add(size_of::<peri_genui::ParseResult>() + 2 * size_of::<usize>())
                 .saturating_add(segment.parsed.retained_bytes())
-                .saturating_add(
-                    segment.buttons.capacity() * size_of::<crate::kit::genui::GenUiButton>(),
-                )
+                .saturating_add(segment.buttons.capacity() * size_of::<crate::genui::GenUiButton>())
                 .saturating_add(
                     segment
                         .buttons

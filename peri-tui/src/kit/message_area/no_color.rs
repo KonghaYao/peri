@@ -27,7 +27,9 @@ pub(super) fn strip_line_colors(
 
 /// 剥离单个 Style 的颜色字段（fg/bg/underline_color），保留 modifier。
 #[must_use]
-fn strip_style_color(s: ratatui_kit::ratatui::style::Style) -> ratatui_kit::ratatui::style::Style {
+pub(super) fn strip_style_color(
+    s: ratatui_kit::ratatui::style::Style,
+) -> ratatui_kit::ratatui::style::Style {
     ratatui_kit::ratatui::style::Style {
         fg: None,
         bg: None,

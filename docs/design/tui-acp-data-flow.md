@@ -84,6 +84,10 @@ BridgeState.committed + CurrentTurn
 固定帧预算内合并连续主 Agent 更新，但首块边界、终态和 reset 必须及时发布。Markdown、wrap
 和 viewport 性能契约见 [TUI 流式 Markdown 性能设计](tui-streaming-markdown-performance.md)。
 
+GenUI 按钮在有效的左键 Down 上立即分发动作。按下态仅属于消息区当次鼠标手势：绘制后按
+可见命中行覆盖样式，不改缓存或布局，也不属于 `Set`/`Reset` 的会话态。拖出仍保持按下；
+左键 Up、滚轮、离开、焦点丢失或按钮内容重建会清除它。
+
 ## 历史窗口与段生命周期（服务端能力门控）
 
 `peri.historyWindowV1` 复用 `session/load` 的 `history` 字段（`open`/`page`/`seek`），正文分块

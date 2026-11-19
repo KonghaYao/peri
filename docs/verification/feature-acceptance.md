@@ -167,7 +167,7 @@
 | F-TUI-018 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：Markdown 渲染的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-TUI-019 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：鼠标交互的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-TUI-020 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：输入编辑的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-TUI-021 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：GenUI 展示的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
+| F-TUI-021 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | 本地工作区（`2cd1a5b5c` + 未提交改动）：[消息区回归](../../peri-tui/src/kit/message_area/genui_action_test.rs)覆盖 Down 分发、折行样式和取消；[storybook 回归](../../peri-tui-components/src/bin/storybook/app_test.rs)覆盖实际鼠标事件下 Buffer 样式变化、恢复与滚动命中。GenUI 整体场景仍待测试仓对账 | 按下态本地复验；未做完整 E2E |
 | F-TUI-022 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；按受影响展示测试检查；不强制独立 E2E | 未复验 |
 | F-TUI-023 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；按受影响展示测试检查；不强制独立 E2E | 未复验 |
 | F-SDK-001 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/@peri-sdk/src/chat)；缺口：ChatManager的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |

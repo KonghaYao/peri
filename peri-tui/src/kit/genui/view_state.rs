@@ -1,27 +1,10 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use peri_genui::{EvalContext, ParseResult};
 
-use super::GenUiAction;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GenUiBlockId(u64);
-
-impl GenUiBlockId {
-    pub(super) fn new(source: &str, parsed: &ParseResult) -> Self {
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        source.hash(&mut hash);
-        parsed
-            .root
-            .as_ref()
-            .and_then(|root| root.statement_id.as_deref())
-            .hash(&mut hash);
-        Self(hash.finish())
-    }
-}
+use super::{GenUiAction, GenUiBlockId};
 
 #[derive(Default)]
 struct BlockState {

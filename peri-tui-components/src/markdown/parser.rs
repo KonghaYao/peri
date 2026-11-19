@@ -84,14 +84,11 @@ pub fn parse_markdown(
     // 保证未闭合代码块内容不被丢弃。简单按行扫描，3+ backtick 开头记一次 fence。
     with_prepared_markdown(input, true, |prepared| {
         let parsed = ratatui_kit_markdown::parse_markdown(prepared.placeholder);
-        #[cfg(test)]
-        {
-            crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::FullParse, 1);
-            crate::kit::acp_bridge::observe_perf(
-                crate::kit::acp_bridge::PerfCounter::FullParsedBytes,
-                prepared.placeholder.len() as u64,
-            );
-        }
+        super::metrics::observe(super::metrics::MarkdownCounter::FullParse, 1);
+        super::metrics::observe(
+            super::metrics::MarkdownCounter::FullParsedBytes,
+            prepared.placeholder.len() as u64,
+        );
         let theme = MarkdownTheme::from_palette(&palette);
         let lookup = convert::image_lookup(prepared.image_infos);
         let fences = fence::bind_fences(&parsed.blocks, prepared.fences);
@@ -106,9 +103,8 @@ pub fn parse_markdown(
                 fences: &fences,
             },
         );
-        #[cfg(test)]
-        crate::kit::acp_bridge::observe_perf(
-            crate::kit::acp_bridge::PerfCounter::MaterializedLines,
+        super::metrics::observe(
+            super::metrics::MarkdownCounter::MaterializedLines,
             segment_line_count(&segments),
         );
         segments
@@ -276,15 +272,14 @@ pub fn parse_markdown_chunks_cached(
             cache.stable_source_end,
             false,
         );
-        #[cfg(test)]
         {
-            crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::TailParse, 1);
-            crate::kit::acp_bridge::observe_perf(
-                crate::kit::acp_bridge::PerfCounter::TailParsedBytes,
+            super::metrics::observe(super::metrics::MarkdownCounter::TailParse, 1);
+            super::metrics::observe(
+                super::metrics::MarkdownCounter::TailParsedBytes,
                 (next_end - cache.stable_source_end) as u64,
             );
-            crate::kit::acp_bridge::observe_perf(
-                crate::kit::acp_bridge::PerfCounter::MaterializedLines,
+            super::metrics::observe(
+                super::metrics::MarkdownCounter::MaterializedLines,
                 segment_line_count(&chunk),
             );
         }
@@ -309,15 +304,14 @@ pub fn parse_markdown_chunks_cached(
             image.byte_end += cache.stable_source_end;
         }
     }
-    #[cfg(test)]
     if !tail_input.is_empty() {
-        crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::TailParse, 1);
-        crate::kit::acp_bridge::observe_perf(
-            crate::kit::acp_bridge::PerfCounter::TailParsedBytes,
+        super::metrics::observe(super::metrics::MarkdownCounter::TailParse, 1);
+        super::metrics::observe(
+            super::metrics::MarkdownCounter::TailParsedBytes,
             tail_input.len() as u64,
         );
-        crate::kit::acp_bridge::observe_perf(
-            crate::kit::acp_bridge::PerfCounter::MaterializedLines,
+        super::metrics::observe(
+            super::metrics::MarkdownCounter::MaterializedLines,
             segment_line_count(&tail),
         );
     }
@@ -359,8 +353,7 @@ pub fn parse_markdown_terminal(
     }
 }
 
-#[cfg(test)]
-pub(super) fn segment_line_count(segments: &[MarkdownSegment]) -> u64 {
+fn segment_line_count(segments: &[MarkdownSegment]) -> u64 {
     segments
         .iter()
         .map(|segment| match segment {
@@ -558,8 +551,8 @@ impl MarkdownRenderCache {
         self.stable_chunks.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn stable_parsed_blocks(&self) -> usize {
+    /// 已冻结 chunk 中累计的已解析 block 数（测试/内存观测用）。
+    pub fn stable_parsed_blocks(&self) -> usize {
         self.stable_chunk_blocks.iter().map(Vec::len).sum()
     }
 }
@@ -613,28 +606,27 @@ pub fn parse_markdown_cached(
         && cache.stable_state.processed_block_count <= parsed.blocks.len()
         && !cache.stable_state.has_table_in_processed_blocks
         && !cache.stable_state.has_potential_table_header;
-    #[cfg(test)]
     {
         let (count, bytes) = if can_reuse {
             (
-                crate::kit::acp_bridge::PerfCounter::TailParse,
+                super::metrics::MarkdownCounter::TailParse,
                 prefix_delta
                     .expect("the append-only prefix branch computed a prefix delta")
                     .len(),
             )
         } else {
             (
-                crate::kit::acp_bridge::PerfCounter::FullParse,
+                super::metrics::MarkdownCounter::FullParse,
                 placeholder.len(),
             )
         };
         let byte_counter = if can_reuse {
-            crate::kit::acp_bridge::PerfCounter::TailParsedBytes
+            super::metrics::MarkdownCounter::TailParsedBytes
         } else {
-            crate::kit::acp_bridge::PerfCounter::FullParsedBytes
+            super::metrics::MarkdownCounter::FullParsedBytes
         };
-        crate::kit::acp_bridge::observe_perf(count, 1);
-        crate::kit::acp_bridge::observe_perf(byte_counter, bytes as u64);
+        super::metrics::observe(count, 1);
+        super::metrics::observe(byte_counter, bytes as u64);
     }
 
     // [perf] can_reuse 路径用 mem::take 把累积状态移出缓存（零深拷贝），
@@ -658,9 +650,8 @@ pub fn parse_markdown_cached(
             fences: &fences,
         },
     );
-    #[cfg(test)]
-    crate::kit::acp_bridge::observe_perf(
-        crate::kit::acp_bridge::PerfCounter::MaterializedLines,
+    super::metrics::observe(
+        super::metrics::MarkdownCounter::MaterializedLines,
         segment_line_count(&segments),
     );
 

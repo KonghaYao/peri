@@ -43,6 +43,8 @@
 - **Scope**：`peri-tui-components`。
 - **Rule**：仅包含通用展示、局部交互状态与明确输入输出；不得读取应用 atom，
   不依赖 Agent、Session、MCP、配置或持久化 crate。业务对象转换和动作执行归 TUI。
+  允许依赖纯展示的 workspace crate `peri-genui` 与 `peri-theme`；OpenUI 交互
+  上下文（会话 epoch / `EvalContext`）由应用注入 `genui::render`，组件不持有会话状态。
 - **Verify**：Python 3.11+ 的 `python3 scripts/test-tui-components.py` 与
   `python3 scripts/check-tui-components.py`（CI/pre-commit 执行）；
   `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui-components`。

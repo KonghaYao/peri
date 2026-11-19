@@ -8,7 +8,7 @@ use ratatui_kit_markdown::{MarkdownTheme, ParsedBlock};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::kit::image_safety::UrlKind;
+use crate::markdown::safety::UrlKind;
 
 use super::list::LIST_ITEM_GAP_MAX_DEPTH;
 use super::scan::ImageInfo;
@@ -361,7 +361,7 @@ pub(crate) fn convert_to_segments_with_state(
                         let source = code_lines
                             .join("\n")
                             .replace(super::parser::GENUI_BACKTICKS, "```");
-                        match crate::kit::genui::library::library() {
+                        match crate::genui::library::library() {
                             Ok(library) => state.segments.push(MarkdownSegment::GenUi(
                                 super::types::GenUiSegment::parse(
                                     source,
@@ -501,7 +501,7 @@ fn style_line(line: &Line<'static>, theme: &MarkdownTheme, base_style: Style) ->
 /// 统一套前缀，竖线保持连续，且每行宽 ≤ max_width（前缀 + 内容 ≤ 视口，不触发二次折行）。
 ///
 /// 度量口径与 §12 一致：按 grapheme cluster + display width（CJK 双宽 / emoji ZWJ /
-/// combining mark 不被从中间切开），同 [`crate::truncate::wrap_by_width`]；超宽单词
+/// combining mark 不被从中间切开），同 [`crate::text::wrap_by_width`]；超宽单词
 /// 按宽度切分，**不丢内容**。`max_width == 0`（极端窄屏）时原样返回单行。
 pub(super) fn wrap_styled_line(line: &Line<'static>, max_width: usize) -> Vec<Line<'static>> {
     if max_width == 0 || line.width() <= max_width {
@@ -651,12 +651,12 @@ fn image_degraded_spans(
     theme: &MarkdownTheme,
     base_style: Style,
 ) -> Vec<Span<'static>> {
-    let sanitized_alt = crate::kit::image_safety::sanitize_for_terminal(&info.alt);
+    let sanitized_alt = crate::markdown::safety::sanitize_for_terminal(&info.alt);
     let alt = truncate_chars(&sanitized_alt, 64);
-    let sanitized_url = crate::kit::image_safety::sanitize_for_terminal(&info.url);
+    let sanitized_url = crate::markdown::safety::sanitize_for_terminal(&info.url);
     let url = truncate_chars(&sanitized_url, 200);
     // scheme 分类用原始 url（截断可能破坏 scheme 前缀）
-    let is_remote = crate::kit::image_safety::classify_url(&info.url) == UrlKind::RemoteHttp;
+    let is_remote = crate::markdown::safety::classify_url(&info.url) == UrlKind::RemoteHttp;
     let label: String = if is_remote {
         if alt.is_empty() {
             "[Remote image] ".to_string()
@@ -686,23 +686,23 @@ fn build_image_segment(
     let lines = wrap_styled_line(&Line::from(spans), max_width);
     ImageSegment {
         alt: truncate_chars(
-            &crate::kit::image_safety::sanitize_for_terminal(&info.alt),
+            &crate::markdown::safety::sanitize_for_terminal(&info.alt),
             64,
         )
         .into_owned(),
         url: truncate_chars(
-            &crate::kit::image_safety::sanitize_for_terminal(&info.url),
+            &crate::markdown::safety::sanitize_for_terminal(&info.url),
             200,
         )
         .into_owned(),
         title: (!info.title.is_empty()).then(|| {
             truncate_chars(
-                &crate::kit::image_safety::sanitize_for_terminal(&info.title),
+                &crate::markdown::safety::sanitize_for_terminal(&info.title),
                 200,
             )
             .into_owned()
         }),
-        is_remote: crate::kit::image_safety::classify_url(&info.url) == UrlKind::RemoteHttp,
+        is_remote: crate::markdown::safety::classify_url(&info.url) == UrlKind::RemoteHttp,
         standalone,
         byte_start: info.byte_start,
         byte_end: info.byte_end,

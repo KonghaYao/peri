@@ -74,11 +74,6 @@ pub(crate) enum PerfCounter {
     ProjectionCopiedBytes,
     AssistantCloneCalls,
     AssistantCloneBytes,
-    FullParse,
-    FullParsedBytes,
-    TailParse,
-    TailParsedBytes,
-    MaterializedLines,
     WrapRecalculatedLines,
     AggregateAllocation,
     AggregateCopiedItems,
@@ -114,11 +109,6 @@ pub(crate) fn observe_perf(counter: PerfCounter, value: u64) {
             PerfCounter::ProjectionCopiedBytes => counters.projection_copied_bytes += value,
             PerfCounter::AssistantCloneCalls => counters.assistant_clone_calls += value,
             PerfCounter::AssistantCloneBytes => counters.assistant_clone_bytes += value,
-            PerfCounter::FullParse => counters.full_parses += value,
-            PerfCounter::FullParsedBytes => counters.full_parsed_bytes += value,
-            PerfCounter::TailParse => counters.tail_parses += value,
-            PerfCounter::TailParsedBytes => counters.tail_parsed_bytes += value,
-            PerfCounter::MaterializedLines => counters.materialized_lines += value,
             PerfCounter::WrapRecalculatedLines => counters.wrap_recalculated_lines += value,
             PerfCounter::AggregateAllocation => counters.aggregate_allocations += value,
             PerfCounter::AggregateCopiedItems => counters.aggregate_copied_items += value,
@@ -142,11 +132,21 @@ pub(crate) fn observe_perf(counter: PerfCounter, value: u64) {
 #[cfg(test)]
 pub(crate) fn reset_perf_counters() {
     PERF_COUNTERS.with(|counters| *counters.borrow_mut() = PerfCounters::default());
+    peri_tui_components::markdown::metrics::reset();
 }
 
 #[cfg(test)]
 pub(crate) fn perf_counters() -> PerfCounters {
-    PERF_COUNTERS.with(|counters| *counters.borrow())
+    let mut counters = PERF_COUNTERS.with(|counters| *counters.borrow());
+    // Markdown 解析器位于 peri-tui-components，计数在那里累加；这里做快照合并，
+    // 保持既有测试对 full_parses / tail_parses 等字段的断言。
+    let markdown = peri_tui_components::markdown::metrics::snapshot();
+    counters.full_parses = markdown.full_parses;
+    counters.full_parsed_bytes = markdown.full_parsed_bytes;
+    counters.tail_parses = markdown.tail_parses;
+    counters.tail_parsed_bytes = markdown.tail_parsed_bytes;
+    counters.materialized_lines = markdown.materialized_lines;
+    counters
 }
 
 #[cfg(test)]

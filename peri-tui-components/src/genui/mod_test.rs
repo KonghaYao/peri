@@ -1,5 +1,5 @@
 use super::*;
-use crate::kit::markdown::GenUiSegment;
+use crate::markdown::GenUiSegment;
 
 const COMPONENTS: &str = r#"
 root = Stack([
@@ -39,7 +39,7 @@ fn components_render_within_40_80_120_columns() {
         peri_theme::builtin::light_theme(),
     ] {
         for width in [40, 80, 120] {
-            let rendered = render(&segment, width, &theme);
+            let rendered = render(&segment, width, &theme, None);
             let text = rendered
                 .lines
                 .iter()
@@ -88,7 +88,7 @@ fn partial_streaming_tree_renders_every_prefix_without_panicking() {
         .chain(std::iter::once((source.len(), ' ')))
     {
         let segment = GenUiSegment::parse(source[..end].into(), true, library::library().unwrap());
-        let rendered = render(&segment, 40, &peri_theme::builtin::dark_theme());
+        let rendered = render(&segment, 40, &peri_theme::builtin::dark_theme(), None);
         assert!(rendered.lines.iter().all(|line| line.width() <= 40));
     }
     let segment = GenUiSegment::parse(
@@ -96,7 +96,7 @@ fn partial_streaming_tree_renders_every_prefix_without_panicking() {
         true,
         library::library().unwrap(),
     );
-    let rendered = render(&segment, 40, &peri_theme::builtin::dark_theme());
+    let rendered = render(&segment, 40, &peri_theme::builtin::dark_theme(), None);
     assert!(
         rendered
             .lines
@@ -135,7 +135,7 @@ root = Stack([
         segment.buttons[4].action,
         Ok(GenUiAction::OpenUrl("https://example.com".into()))
     );
-    let rendered = render(&segment, 80, &peri_theme::builtin::dark_theme());
+    let rendered = render(&segment, 80, &peri_theme::builtin::dark_theme(), None);
     assert!(rendered.buttons[0].parsed.is_none());
     assert!(rendered.buttons[1].parsed.is_some());
     assert!(rendered.buttons[2].parsed.is_some());
@@ -157,7 +157,7 @@ fn unsupported_actions_are_visible_muted_errors_without_hit_areas() {
             false,
             library::library().unwrap(),
         );
-        let rendered = render(&segment, 80, &theme);
+        let rendered = render(&segment, 80, &theme, None);
         assert!(rendered.buttons.is_empty());
         assert!(
             rendered
@@ -180,7 +180,7 @@ fn text_reports_non_string_content() {
     let theme = peri_theme::builtin::dark_theme();
     let render_source = |source: &str| {
         let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
-        let rendered = render(&segment, 80, &theme);
+        let rendered = render(&segment, 80, &theme, None);
         (
             rendered
                 .lines
@@ -219,7 +219,7 @@ fn generation_budget_errors_render_as_genui_errors() {
         source.push_str(&format!("$s{i} = $s{} + $s{}\n", i - 1, i - 1));
     }
     let segment = GenUiSegment::parse(source, false, library::library().unwrap());
-    let rendered = render(&segment, 80, &peri_theme::builtin::dark_theme());
+    let rendered = render(&segment, 80, &peri_theme::builtin::dark_theme(), None);
     let text = rendered
         .lines
         .iter()
@@ -238,7 +238,7 @@ fn narrow_nested_layouts_and_oversized_tables_do_not_panic() {
     );
     let segment = GenUiSegment::parse(source, false, library::library().unwrap());
     for width in [0, 1, 2, 3, 4, 8, 40] {
-        let rendered = render(&segment, width, &peri_theme::builtin::dark_theme());
+        let rendered = render(&segment, width, &peri_theme::builtin::dark_theme(), None);
         assert!(rendered.lines.iter().all(|line| line.width() <= width));
     }
 }
@@ -254,7 +254,7 @@ root = Stack([
 ])"#;
     let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
     assert!(segment.errors.is_empty(), "{:?}", segment.errors);
-    let rendered = render(&segment, 40, &theme);
+    let rendered = render(&segment, 40, &theme, None);
     let text = rendered
         .lines
         .iter()
@@ -310,7 +310,7 @@ root = Stack([
         peri_theme::builtin::light_theme(),
     ] {
         for width in [40, 80, 120] {
-            let rendered = render(&segment, width, &theme);
+            let rendered = render(&segment, width, &theme, None);
             let text = rendered
                 .lines
                 .iter()
@@ -342,7 +342,7 @@ fn charts_report_invalid_data() {
         "root = Stack([Sparkline([1, \"x\"])])",
     ] {
         let segment = GenUiSegment::parse(source.into(), false, library::library().unwrap());
-        let rendered = render(&segment, 80, &theme);
+        let rendered = render(&segment, 80, &theme, None);
         let text = rendered
             .lines
             .iter()

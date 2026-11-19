@@ -153,6 +153,7 @@ Requires Rust with Edition 2024 support and native build tools.
 git clone https://github.com/konghayao/peri.git
 cd peri
 ./dev.sh   # 开发模式；读取仓库根 .env（可选）
+./dev-tui.sh   # TUI 组件 storybook（textarea/list/scrollbar/markdown/OpenUI）；鼠标优先，q 退出，--dump 供无 TTY 检查
 # 构建发布二进制：
 ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --bin peri
 ```

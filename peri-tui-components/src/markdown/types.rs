@@ -43,7 +43,7 @@ pub struct GenUiSegment {
     pub source: String,
     pub parsed: std::sync::Arc<peri_genui::ParseResult>,
     pub partial: bool,
-    pub buttons: Vec<crate::kit::genui::GenUiButton>,
+    pub buttons: Vec<crate::genui::GenUiButton>,
     pub(crate) root: Option<serde_json::Value>,
     pub(crate) errors: Vec<String>,
 }

@@ -186,16 +186,19 @@ fn click_dispatch_accounts_for_entry_prefix_card_and_scrolled_viewport() {
                 &click(hit.row, hit.x_start - 1),
                 &hits,
                 &fixture.snapshot,
-                false
+                false,
+                |key| assert!(key.is_none()),
             ),
             EventResult::Ignored
         );
         assert_eq!(
-            dispatch_click(&click(hit.row, hit.x_end), &hits, &fixture.snapshot, false),
-            EventResult::Ignored
-        );
-        assert_eq!(
-            dispatch_click(&click(hit.row, hit.x_start), &hits, &fixture.snapshot, true),
+            dispatch_click(
+                &click(hit.row, hit.x_end),
+                &hits,
+                &fixture.snapshot,
+                false,
+                |_| {}
+            ),
             EventResult::Ignored
         );
         assert_eq!(
@@ -203,7 +206,18 @@ fn click_dispatch_accounts_for_entry_prefix_card_and_scrolled_viewport() {
                 &click(hit.row, hit.x_start),
                 &hits,
                 &fixture.snapshot,
-                false
+                true,
+                |_| {}
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            dispatch_click(
+                &click(hit.row, hit.x_start),
+                &hits,
+                &fixture.snapshot,
+                false,
+                |key| assert!(key.is_some_and(|key| key.matches(&hit.key))),
             ),
             EventResult::Consumed
         );
@@ -235,7 +249,13 @@ fn click_dispatch_accounts_for_entry_prefix_card_and_scrolled_viewport() {
         );
         let empty = ViewModelsSnapshot::default();
         assert_eq!(
-            dispatch_click(&click(hit.row, hit.x_start), &hits, &empty, false),
+            dispatch_click(
+                &click(hit.row, hit.x_start),
+                &hits,
+                &empty,
+                false,
+                |key| assert!(key.is_none())
+            ),
             EventResult::Consumed
         );
         assert!(INPUT_RESTORE_TEXT.get().unwrap().lock().is_none());
@@ -244,7 +264,13 @@ fn click_dispatch_accounts_for_entry_prefix_card_and_scrolled_viewport() {
             .items
             .set(1, bubble("replacement message".into()));
         assert_eq!(
-            dispatch_click(&click(hit.row, hit.x_start), &hits, &replacement, false),
+            dispatch_click(
+                &click(hit.row, hit.x_start),
+                &hits,
+                &replacement,
+                false,
+                |key| assert!(key.is_none())
+            ),
             EventResult::Consumed
         );
         let epoch = BRIDGE_RESET_COUNTER.get();
@@ -254,7 +280,8 @@ fn click_dispatch_accounts_for_entry_prefix_card_and_scrolled_viewport() {
                 &click(hit.row, hit.x_start),
                 &hits,
                 &fixture.snapshot,
-                false
+                false,
+                |key| assert!(key.is_none()),
             ),
             EventResult::Consumed
         );
@@ -299,6 +326,110 @@ fn wrapped_button_hit_rows_match_paragraph_after_viewport_width_correction() {
             .map(|col| buffer[(col, row)].symbol())
             .collect();
         assert!(!text.trim().is_empty());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn pressed_overlay_covers_wrapped_hit_rows_without_changing_text() {
+    use ratatui_kit::ratatui::widgets::{Paragraph, Widget, Wrap};
+
+    let _guard = Guard::new();
+    let source = "root = Stack([Button(\"继续中文 continue with a long label\", @ToAssistant(\"next\"), \"primary\")])";
+    let mut fixture = Fixture::new(source, 80);
+    let index = fixture.prepare();
+    let slot = &fixture.caches[1];
+    let logical = slot.genui_buttons[0].line_start;
+    let scroll_y = index.slot_visual_start(1).unwrap() + slot.wrap_map[logical].visual_start;
+    let area = Rect::new(3, 2, 17, 6);
+    let hits = button_hits(
+        &fixture.caches,
+        &fixture.snapshot,
+        area,
+        area.height,
+        scroll_y,
+        &index,
+    );
+    assert!(hits.len() > 1);
+    let key = hits.last().unwrap().key.clone();
+    let line = slot.lines.as_ref().unwrap().line(logical).unwrap();
+    let mut normal = Buffer::empty(area);
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .render(
+            Rect {
+                width: area.width - 1,
+                ..area
+            },
+            &mut normal,
+        );
+    let mut pressed = normal.clone();
+    draw_pressed(&mut pressed, &hits, &key, &fixture.context.theme, false);
+    for hit in &hits {
+        for col in hit.x_start..hit.x_end {
+            let cell = &pressed[(col, hit.row)];
+            assert!(cell.modifier.contains(Modifier::BOLD));
+            assert!(!cell.modifier.contains(Modifier::REVERSED));
+        }
+        assert_eq!(pressed[(hit.x_end, hit.row)], normal[(hit.x_end, hit.row)]);
+    }
+    assert!(
+        normal
+            .content()
+            .iter()
+            .zip(pressed.content())
+            .all(|(a, b)| a.symbol() == b.symbol())
+    );
+
+    // 同一按钮坐标与 VM 身份下，重建后的行仍然不得承接旧手势。
+    let mut rebuilt = Fixture::new(source, 80);
+    let index = rebuilt.prepare();
+    let hits = button_hits(
+        &rebuilt.caches,
+        &rebuilt.snapshot,
+        area,
+        area.height,
+        scroll_y,
+        &index,
+    );
+    assert_eq!(hits.last().unwrap().key.vm_hash, key.vm_hash);
+    assert!(!hits.last().unwrap().key.matches(&key));
+    let mut after_rebuild = normal.clone();
+    draw_pressed(
+        &mut after_rebuild,
+        &hits,
+        &key,
+        &fixture.context.theme,
+        false,
+    );
+    assert_eq!(after_rebuild, normal);
+}
+
+#[test]
+fn press_cancels_on_up_wheel_leave_or_focus_loss_but_not_drag() {
+    let outside = |kind| {
+        Event::Mouse(MouseEvent {
+            kind,
+            row: 0,
+            column: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let snapshot = ViewModelsSnapshot::default();
+    for (event, should_clear) in [
+        (outside(MouseEventKind::Drag(MouseButton::Left)), false),
+        (outside(MouseEventKind::Up(MouseButton::Left)), true),
+        (outside(MouseEventKind::ScrollDown), true),
+        (outside(MouseEventKind::Moved), true),
+        (Event::FocusLost, true),
+    ] {
+        let mut cleared = false;
+        let result = dispatch_click(&event, &[], &snapshot, false, |key| {
+            assert!(key.is_none());
+            cleared = true;
+        });
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(cleared, should_clear, "{event:?}");
     }
 }
 

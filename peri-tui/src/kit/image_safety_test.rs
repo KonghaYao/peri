@@ -1,4 +1,3 @@
-use super::Cow;
 use super::ImageSafetyError;
 use super::LimitKind;
 use super::MAX_IMAGE_BYTES;
@@ -6,6 +5,7 @@ use super::Path;
 use super::PathBuf;
 use super::PathGrade;
 use super::UrlKind;
+use std::borrow::Cow;
 
 /// 跨平台 symlink 创建（unix: `symlink` / windows: `symlink_file`）。
 fn make_symlink(

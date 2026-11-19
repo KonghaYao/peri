@@ -1,0 +1,8 @@
+sequenceDiagram
+  participant User as 用户
+  participant Peri as Peri
+  participant Renderer as 渲染器
+  User->>Peri: 提交图表源码
+  Peri->>Renderer: 确认可信前缀
+  Renderer-->>Peri: 返回字符图
+  Peri-->>User: 展示预览

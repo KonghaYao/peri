@@ -81,7 +81,7 @@ fn parse_action(value: &Value) -> Result<GenUiAction, String> {
 }
 
 impl GenUiAction {
-    pub(crate) fn retained_bytes(&self) -> usize {
+    pub fn retained_bytes(&self) -> usize {
         match self {
             Self::ToAssistant(text) | Self::Run(text) | Self::OpenUrl(text) => text.capacity(),
             Self::Reset(names) => {

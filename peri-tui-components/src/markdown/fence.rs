@@ -8,12 +8,11 @@
 
 use pulldown_cmark_012::CodeBlockKind;
 use pulldown_cmark_012::Event;
-use pulldown_cmark_012::Options;
 use pulldown_cmark_012::Parser;
 use pulldown_cmark_012::Tag;
 use pulldown_cmark_012::TagEnd;
 
-pub use peri_tui_components::mermaid::fence::{
+pub use crate::mermaid::fence::{
     FenceClose, FenceKind, MermaidFence, MermaidFenceKey, MermaidMessageIdentity,
     MermaidMessageRef, is_mermaid_info,
 };
@@ -145,7 +144,7 @@ pub(super) fn scan_mermaid_fences(input: &str, terminal: bool) -> Vec<MermaidFen
     {
         return Vec::new();
     }
-    let options = Options::all() - Options::ENABLE_SMART_PUNCTUATION;
+    let options = super::scan::md_options();
     let mut fences = Vec::new();
     let mut pending: Option<PendingFence> = None;
     for (event, range) in Parser::new_ext(input, options).into_offset_iter() {

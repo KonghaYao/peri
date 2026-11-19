@@ -92,3 +92,7 @@ pub mod workflow_snapshot;
 pub use app_shell::AppShell;
 pub use layout::SessionColumn;
 pub use status_bar::StatusBar;
+
+#[cfg(test)]
+#[path = "markdown_profile_test.rs"]
+mod markdown_profile_tests;

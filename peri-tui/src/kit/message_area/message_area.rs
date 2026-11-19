@@ -9,6 +9,7 @@
 #![allow(clippy::needless_update)]
 
 use super::footer;
+use super::genui_action::{self, GenUiButtonHit, PressedGenuiKey, PressedOverlay};
 use super::handlers;
 use super::hits;
 use super::no_color;
@@ -147,7 +148,16 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [T4 §4] @image 行屏幕点击/hover 热区（每帧由渲染 body 更新，点击与
     // Moved handler 实时读取——同 CopyButtonHit 模式）。
     let image_rects = hooks.use_state(Arc::<Vec<ImageLineHit>>::default);
-    let genui_rects = hooks.use_state(Arc::<Vec<super::genui_action::GenUiButtonHit>>::default);
+    let genui_rects = hooks.use_state(Arc::<Vec<GenUiButtonHit>>::default);
+    let pressed_genui = hooks.use_state(|| Option::<PressedGenuiKey>::None);
+    let pressed_overlay = hooks.use_hook(|| PressedOverlay {
+        hits: genui_rects,
+        pressed: pressed_genui,
+        area: area_rect,
+        strip_color,
+    });
+    pressed_overlay.area = area_rect;
+    pressed_overlay.strip_color = strip_color;
     // hover 高亮即时更新；预览需在同一目标稳定停留后才写入独立 atom。
     // gate 用 Arc<Mutex<_>> 跨异步计时任务保活，组件卸载后旧任务也只会自行失效。
     let image_preview_hover_gate = hooks.use_state(|| {
@@ -322,7 +332,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     handlers::register_interaction_option_click(&mut hooks, interaction_rects, view_models);
 
     handlers::register_image_click(&mut hooks, image_rects, view_models);
-    super::genui_action::register_click(&mut hooks, genui_rects, view_models);
+    genui_action::register_click(&mut hooks, genui_rects, view_models, pressed_genui);
 
     handlers::register_image_hover(&mut hooks, image_rects, image_preview_hover_gate);
 
@@ -431,6 +441,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         // 清空 @image 行热区映射（同 copy_buttons——Welcome 页面无消息可点）
         *image_rects.write_no_update() = Arc::new(Vec::new());
         *genui_rects.write_no_update() = Arc::new(Vec::new());
+        *pressed_genui.write_no_update() = None;
         if let Some(lines) = brewed_lines {
             return element!(
                 View(
@@ -543,8 +554,8 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         warm_start,
         Some("includes-local-cache-locks"),
     );
-    *genui_rects.write_no_update() = Arc::new(area_rect.map_or_else(Vec::new, |area| {
-        super::genui_action::button_hits(
+    let genui_hits = area_rect.map_or_else(Vec::new, |area| {
+        genui_action::button_hits(
             &vm_caches.read(),
             &snapshot,
             area,
@@ -552,7 +563,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
             scroll_y,
             &slot_index,
         )
-    }));
+    });
+    genui_action::validate_press(pressed_genui, &genui_hits);
+    *genui_rects.write_no_update() = Arc::new(genui_hits);
     drop(snapshot);
     if vm_cache::render_timing_enabled() {
         let transcript_guard = transcript.read();

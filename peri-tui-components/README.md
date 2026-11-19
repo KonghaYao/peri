@@ -1,9 +1,12 @@
 # Terminal components
 
-`peri-tui -> peri-tui-components -> ratatui / ratatui-kit`.
+`peri-tui -> peri-tui-components -> ratatui / ratatui-kit / peri-genui / peri-theme`.
 
 This crate owns rendering and local interaction state only. It does not import
-Peri Agent, Session, MCP, configuration, persistence, or application atoms.
+Peri Agent, Session, MCP, configuration, persistence, or application atoms. It
+also owns the business-independent renderers moved down from the app: Markdown
+(`markdown::*`), OpenUI fence rendering (`genui::*`), width-safe text wrapping
+(`text::wrap_by_width`) and terminal text safety (`markdown::safety`).
 
 | Primitive | Caller supplies | Component owns |
 | --- | --- | --- |
@@ -13,18 +16,84 @@ Peri Agent, Session, MCP, configuration, persistence, or application atoms.
 | `list_nav` | key events and selection | navigation intent and bounds |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
 | `scrollbar::vertical_scrollbar` | thumb and arrow styles | scrollbar appearance |
+| `markdown::parse_markdown*` | source text, width, palette, base foreground | typed segments (text/table/image/genui/mermaid), chunk cache |
+| `markdown::table_data_to_lines` | table data, table theme, width | unicode grid layout |
+| `markdown::safety` | untrusted display fields | control-character filtering and URL classification |
+| `genui::render` | parsed OpenUI segment, width, theme, optional `EvalContext` | layout, styling and button hit ranges |
+| `text::wrap_by_width` | text and width | grapheme/display-width wrapping without content loss |
 | `mermaid` | confirmed source, closed flag, width, job results | statement confirmation, layout, overview and preview state |
 
 The application resolves theme tokens, chooses first-frame panel height, routes
 focus, translates business objects to rows and executes actions. A list index is
 not a stable business identity; resolve the selected item in the application.
-No background tasks, subscriptions or process-wide caches are added here. Local
-state is dropped with its owner. The application still owns transcript retention.
+OpenUI interaction state (session epoch, evaluation context) stays in the app and
+is passed into `genui::render`. No business background tasks or subscriptions are
+added here. Local state is dropped with its owner. The application still owns
+transcript retention.
 
 Run `./scripts/cargo-rmcp-patched.sh run --locked -p peri-tui-components --example textarea` for deterministic buffer
 output at four sizes, focused/unfocused states and empty/CJK/wrapped input.
 `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui-components` exercises editing, selection, undo, navigation,
 resize and hit-layout agreement. Full terminal E2E remains in `KonghaYao/peri-e2e`.
+
+Run `./dev-tui.sh` from the repository root for the interactive storybook. Mouse
+is the primary input and mirrors the real TUI:
+
+- clicking a story or variant row switches views in one click, matching the
+  panel "click as enter" rule;
+- clicking inside a `TextArea` focuses it and places the caret with the app's
+  rule — visual row from `wrap_text` plus display column — so wide characters
+  map by cell width and clicks past the last visual row are ignored;
+- clicking a list row selects that item; header/footer rows are inert and the
+  scrollbar column is excluded (`panel_mouse::is_scrollbar_column`);
+- the wheel scrolls lists by three rows per notch — the host's `SCROLL_LINES` — and
+  drives the scrollbar story, without moving the list selection; the bar itself has
+  no click handler, as in the app;
+- the Markdown and OpenUI stories feed real source through `parse_markdown` →
+  typed segments → `table_data_to_lines` / `genui::render`; the wheel scrolls the
+  document by the same three rows and clamps at the rendered content height.
+
+Seven stories cover `textarea`, `list`, `scrollbar`, `markdown` (rich text,
+headings, lists, code, table, image, gen-ui fence, streaming), `openui` (stack
+column/row, card, text, heading, list, table, key-value, progress, divider,
+button, bar chart, sparkline, streaming), `mermaid` (flowchart, sequence,
+collaboration, dense, long-workflow and streaming) and `charts` — one static frame per
+`tui-chart` 0.6.6 example (MIT,
+Copyright (c) 2025 Sorin Irimies), themed with the storybook palette. The
+`rich-text` variant is the kitchen-sink document: headings,
+paragraphs with soft/hard breaks, all inline styles, inline/reference/autolinks,
+escapes and entities, inline HTML stripping, nested quotes and lists, five code
+block languages plus fallbacks, aligned tables, rules, images and an OpenUI fence.
+The `streaming` variants hold a fixed mid-stream cursor, so dumps stay
+deterministic. Playback only starts on demand: the last row of the preview is a
+draggable progress bar — click or drag to seek — prefixed by an `[ auto ]` button that
+plays from the current cursor to 100% in three seconds; dragging the bar during
+playback cancels it immediately.
+Markdown shows complete blocks followed by a growing code block, and the OpenUI
+fence renders its finished components while the unfinished argument degrades to
+a visible `gen-ui:` error until the fence closes. Mermaid loads its `.mmd`
+fixtures at compile time. The streaming variant shows the diagram for the
+confirmed prefix, the unfinished source and any preview notice; at 100% it
+validates and renders the final diagram. Large static diagrams show the
+component's semantic overview.
+Dumps accept `--width`/`--height` (default `100x32`) so wide documents and narrow
+layouts can be inspected without a TTY.
+
+Navigation is mouse-only, matching the host TUI: there are no story or variant
+keys. The wheel over the Stories panel scrolls the story/variant list when the
+panel cannot show every entry, so the full chart gallery stays reachable at the
+default `100x32` and at the `40x10` minimum. `q`, `Esc` or `Ctrl-C` quit, and
+while a `TextArea` variant is focused
+keys edit its text instead of leaving the storybook (only `Esc`/`Ctrl-C` still
+quit there). Without a TTY, use
+`./dev-tui.sh --list` for story keys and
+`./dev-tui.sh --dump` (optionally `--story <key> --variant <key>`) or
+`./dev-tui.sh --dump-all` for deterministic `TestBackend` snapshots. Stories and
+their fixtures live in `src/bin/storybook/{main,app,stories}.rs` and the chart
+gallery in `src/bin/storybook/charts/`; each story is a
+`Story` of static `Variant` initial states and render functions, so adding a case
+means appending a variant, not changing the widget under test. Hit testing is
+covered by `src/bin/storybook/app_test.rs`.
 
 ## Text input composition
 
@@ -79,12 +148,14 @@ style applied to the whole buffer. Both rendering APIs share one implementation.
 | `preview` | trusted-prefix state machine, 80 ms commit coalescing, cancellation and version checks |
 | `fence` | fence metadata and stable graph identity (`session + message + open_start`) |
 
-The application still scans CommonMark fences, chooses widths from its viewport,
-dispatches due jobs to its background worker, colors/wraps lines and owns panels,
-focus and i18n. The worker executes `render_source`/`render_final` and returns the
-result through `PreviewEngine::complete`; only results matching session, graph,
-prefix version and layout params are published. The component declares no globals,
-threads or timers; `mermaid-text = "=0.58.0"` is the only added dependency.
+The component's Markdown parser scans the original CommonMark fences with
+`pulldown-cmark` 0.12; `mermaid-text = "=0.58.0"` handles diagram layout. The
+application chooses widths from its viewport, dispatches due jobs to its
+background worker, colors/wraps lines and owns panels, focus and i18n. The worker
+executes `render_source`/`render_final` and returns the result through
+`PreviewEngine::complete`; only results matching session, graph, prefix version
+and layout params are published. The Mermaid pipeline declares no globals,
+threads or timers.
 
 ## Boundary checks
 
@@ -92,8 +163,14 @@ CI and pre-commit run `python3 scripts/test-tui-components.py` and
 `python3 scripts/check-tui-components.py`. These checks require Python 3.11+
 for the standard-library TOML parser; select that `python3` on PATH. They cover
 all direct dependency tables and source patterns, not macro expansion or a
-transitive dependency audit. The component depends on ratatui-kit without its
-optional `full` feature; workspace feature unification is not an isolation test.
+transitive dependency audit. Approved direct dependencies are presentation
+primitives plus the presentation-only workspace crates `peri-genui` and
+`peri-theme`; application crates are still rejected, and approved path
+dependencies must point at `../<package>`. Renderer-level `static` caches
+(OnceLock/LazyLock/thread-local counters) are allowlisted per file with a
+reason; `static mut` and `lazy_static!`/`atom!` are rejected everywhere. The
+component depends on ratatui-kit without its optional `full` feature; workspace
+feature unification is not an isolation test.
 
 ## Scope of this extraction
 
