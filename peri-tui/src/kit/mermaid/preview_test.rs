@@ -699,3 +699,71 @@ fn layout_publication_bumps_only_the_owning_message_revision() {
     assert!(engine.message_revision(&identity(own)) > own_before);
     assert_eq!(engine.message_revision(&identity(other)), other_before);
 }
+
+#[test]
+fn a_retracted_preview_is_rescheduled_when_the_fence_returns() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let key = key("m1");
+    let source = fence("graph TD\nA-->B\n", false);
+    engine.observe(key.clone(), &source, 60, false, now);
+    assert_eq!(engine.pending_count(), 1);
+
+    let known = std::collections::HashSet::from([key.clone()]);
+    engine.retract_unseen(&std::collections::HashSet::new(), &known);
+    assert_eq!(engine.pending_count(), 0);
+
+    // 源码与列宽都没变，仍必须补排，否则预览永远停在源码。
+    engine.observe(key, &source, 60, false, now + Duration::from_millis(10));
+    assert_eq!(engine.pending_count(), 1);
+    let job = engine
+        .take_due(now + Duration::from_millis(10))
+        .expect("the recovered preview is due");
+    assert_eq!(job.kind, JobKind::Preview);
+    assert_eq!(job.source.as_str(), "graph TD\nA-->B\n");
+}
+
+#[test]
+fn a_queue_rejected_preview_is_retried_after_capacity_frees() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    for index in 0..super::MAX_PENDING_JOBS {
+        engine.observe(
+            key(&format!("m{index}")),
+            &fence(&format!("graph TD\nA{index}-->B{index}\n"), false),
+            60,
+            false,
+            now,
+        );
+    }
+    assert_eq!(engine.pending_count(), super::MAX_PENDING_JOBS);
+
+    let target = key("target");
+    let source = fence("graph TD\nX-->Y\n", false);
+    engine.observe(target.clone(), &source, 60, false, now);
+    assert_eq!(
+        engine.pending_count(),
+        super::MAX_PENDING_JOBS,
+        "队列满时不得挤掉已有任务"
+    );
+
+    engine
+        .take_due(now)
+        .expect("one queued diagram starts and frees a slot");
+    assert_eq!(engine.pending_count(), super::MAX_PENDING_JOBS - 1);
+    engine.observe(target, &source, 60, false, now + Duration::from_millis(1));
+    assert_eq!(
+        engine.pending_count(),
+        super::MAX_PENDING_JOBS,
+        "容量释放后目标图必须重新入队"
+    );
+
+    let mut sources = Vec::new();
+    while let Some(job) = engine.take_due(now + Duration::from_millis(2)) {
+        sources.push(job.source.to_string());
+    }
+    assert!(
+        sources.iter().any(|source| source == "graph TD\nX-->Y\n"),
+        "target preview is missing from the queue: {sources:?}"
+    );
+}

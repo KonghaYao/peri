@@ -169,6 +169,7 @@ pub fn MermaidDiagramPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     lines.push(Line::from(
         "y 复制源码 · s 源码 · f 全图 · Tab 分组 · Enter 展开 · Esc 返回",
     ));
+    let line_count = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let content = Paragraph::new(ratatui::text::Text::from(lines));
     crate::kit::panel_scroll::register_panel_scroll(PanelKind::MermaidDiagram, area, sv);
     panel_shell!(PanelKind::MermaidDiagram, {
@@ -178,7 +179,9 @@ pub fn MermaidDiagramPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            Text(text: content)
+            View(height: Constraint::Length(line_count)) {
+                Text(text: content)
+            }
         }
     })
 }

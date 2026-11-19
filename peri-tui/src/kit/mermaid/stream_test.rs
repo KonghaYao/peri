@@ -319,6 +319,20 @@ fn plain_dotted_and_thick_edges_are_recognized() {
 }
 
 #[test]
+fn ampersand_fan_out_is_recognized() {
+    let body = "graph LR\nA & B --> C & D\n";
+    let mut stream = MermaidStream::new();
+    let update = stream.observe(body, false);
+    assert!(
+        update.paused.is_none(),
+        "unexpected pause: {:?}",
+        update.paused
+    );
+    assert_eq!(update.trusted, body);
+    assert!(update.drawable);
+}
+
+#[test]
 fn sequence_title_is_not_committed_because_the_renderer_cannot_consume_it() {
     let mut stream = MermaidStream::new();
     let update = stream.observe("sequenceDiagram\nA->>B: hi\ntitle Flow\n", false);

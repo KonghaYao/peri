@@ -220,6 +220,26 @@ impl FenceState {
         self.pending = None;
     }
 
+    /// 滚动离开会撤销尚未开始的任务；回到视口时源码与列宽都可能没变，
+    /// 仍需在缺少对应帧与任务时补排一次，否则预览会一直停留在源码。
+    fn needs_preview_job(&self, source: &str, width: usize) -> bool {
+        if self.running.is_some() {
+            return false;
+        }
+        if self
+            .frame
+            .as_ref()
+            .is_some_and(|frame| frame.width == width && frame.source.as_str() == source)
+        {
+            return false;
+        }
+        !self.pending.as_ref().is_some_and(|pending| {
+            pending.kind == JobKind::Preview
+                && pending.width == width
+                && pending.source.as_str() == source
+        })
+    }
+
     fn schedule_preview(&mut self, source: &str, width: usize, now: Instant, queue_full: bool) {
         let source = Arc::new(source.to_string());
         if source.len() > MAX_LAYOUT_SOURCE_BYTES {
@@ -554,6 +574,9 @@ impl PreviewEngine {
                     state.clear_pending();
                 } else if (trusted_changed || width_changed) && state.drawable {
                     state.version = state.version.wrapping_add(1);
+                    state.schedule_preview(&trusted_input, width, now, queue_full);
+                } else if state.drawable && state.needs_preview_job(&trusted_input, width) {
+                    // 队列满或任务被撤销时不能留下空档：下一帧仍会重试。
                     state.schedule_preview(&trusted_input, width, now, queue_full);
                 }
             }

@@ -1,4 +1,6 @@
+use super::render_final;
 use super::render_source;
+use crate::kit::mermaid::stream::DiagramMode;
 
 #[test]
 fn renders_flowchart_and_sequence_to_unicode_lines() {
@@ -35,6 +37,28 @@ fn rendering_is_deterministic_for_the_same_input_and_width() {
     let first = render_source(source, 80).expect("first render succeeds");
     let second = render_source(source, 80).expect("second render succeeds");
     assert_eq!(first.lines(), second.lines());
+}
+
+#[test]
+fn closed_fan_out_is_valid_and_renders() {
+    let source = "graph LR\nA & B --> C & D\n";
+    let rendered = render_final(source, DiagramMode::Flowchart, 80)
+        .expect("the upstream renderer accepts fan-out in a closed fence");
+    let text = rendered.lines().join("\n");
+    for node in ["A", "B", "C", "D"] {
+        assert!(text.contains(node), "{node} missing from fan-out: {text}");
+    }
+}
+
+#[test]
+fn closed_unterminated_statement_is_still_rejected() {
+    let failure = render_final("graph LR\nA[\"x\n", DiagramMode::Flowchart, 80)
+        .expect_err("an unterminated label is not a valid closed diagram");
+    assert!(
+        failure.reason().contains("unterminated"),
+        "unexpected reason: {}",
+        failure.reason()
+    );
 }
 
 #[test]

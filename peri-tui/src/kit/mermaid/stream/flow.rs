@@ -263,14 +263,14 @@ fn validate_flow_chain(statement: &str) -> bool {
         text: statement,
         pos: 0,
     };
-    if !tokens.next_node() {
+    if !tokens.next_node_group() {
         return false;
     }
     loop {
         if !tokens.next_edge() {
             return tokens.at_end();
         }
-        if !tokens.next_node() {
+        if !tokens.next_node_group() {
             return false;
         }
     }
@@ -294,6 +294,23 @@ impl FlowTokens<'_> {
     fn at_end(&mut self) -> bool {
         self.skip_whitespace();
         self.pos >= self.text.len()
+    }
+
+    /// 节点组：`A & B` 扇出在同一侧共享后续边，与上游 0.58.0 的语法一致。
+    fn next_node_group(&mut self) -> bool {
+        if !self.next_node() {
+            return false;
+        }
+        loop {
+            self.skip_whitespace();
+            if !self.text[self.pos..].starts_with('&') {
+                return true;
+            }
+            self.pos += 1;
+            if !self.next_node() {
+                return false;
+            }
+        }
     }
 
     fn next_node(&mut self) -> bool {
