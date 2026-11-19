@@ -1503,6 +1503,9 @@ fn auto_button_presses_with_selected_style_and_restores_on_up() {
         cursor,
         "点击按钮本身不改变 cursor"
     );
+    let started = crate::stories::streaming::autoplay(&app.state)
+        .expect("按下 auto 后播放开始")
+        .start;
     let held = dump_buffer(&mut app, 100, 32);
     let pressed = &held[(auto.x, auto.y)];
     assert_eq!(pressed.symbol(), "[");
@@ -1530,6 +1533,7 @@ fn auto_button_presses_with_selected_style_and_restores_on_up() {
     assert!(auto_pressed(&app), "拖回按钮恢复按下样式");
     let play = crate::stories::streaming::autoplay(&app.state).expect("播放仍在进行");
     assert_eq!(play.from, cursor, "拖出再拖回不重启播放");
+    assert_eq!(play.start, started, "拖出再拖回不重启播放");
     assert_eq!(streaming_cursor(&app).0, cursor, "拖出再拖回不 seek");
     assert_eq!(
         dump_buffer(&mut app, 100, 32)[(auto.x, auto.y)].bg,
