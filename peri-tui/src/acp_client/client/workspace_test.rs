@@ -230,6 +230,11 @@ async fn continue_query_failure_blocks_ensure_until_explicit_new_session() {
     let create = tokio::spawn(async move { creator.new_session("/main", None).await });
     let (id, params) = request(&server, "session/new").await;
     assert_eq!(params["cwd"], "/main");
+    // Headless 客户端不注入 TUI 专属指令：`_meta` 整体缺席。
+    assert!(
+        params.get("_meta").is_none(),
+        "headless session/new 不得带 _meta"
+    );
     server.send_response(id, Ok(json!({"sessionId":"fresh","_meta":{"peri.sessionWorkspaceV1":{"workspace":{"cwd":"/canonical/main"}}}}))).await.expect("continue query failure blocks ensure until explicit new session: fixture task and request must complete successfully");
     assert_eq!(create.await.expect("continue query failure blocks ensure until explicit new session: the fixture operation must finish without an inner failure").expect("continue query failure blocks ensure until explicit new session: the fixture operation must finish without an inner failure"), "fresh");
     assert_eq!(

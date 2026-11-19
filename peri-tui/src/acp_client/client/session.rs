@@ -13,6 +13,10 @@ mod transition;
 mod recovery_tests;
 
 #[cfg(test)]
+#[path = "session/instructions_test.rs"]
+mod instructions_tests;
+
+#[cfg(test)]
 use super::AcpTuiClient;
 
 mod session_transition;

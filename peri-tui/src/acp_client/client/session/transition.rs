@@ -179,7 +179,15 @@ impl AcpTuiClient {
             self.clear_pending_close();
         }
 
-        let params = json!({ "cwd": cwd, "model": model });
+        let mut params = json!({ "cwd": cwd, "model": model });
+        // 只有交互式 TUI 冻结专属指令：`-p/--print`（Headless）与 `acp` 子命令
+        // 不建这个 client，`session/load` 恢复旧会话时也沿用服务端已冻结的值。
+        // 重试路径同样走本函数，因此每次 `session/new` 都带同一份指令。
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            params["_meta"] = json!({
+                "peri.instructions": crate::acp_client::TUI_SESSION_INSTRUCTIONS,
+            });
+        }
         let result = match self.transport.send_request("session/new", params).await {
             Ok(result) => result,
             Err(error) => {

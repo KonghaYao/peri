@@ -76,6 +76,14 @@ fork 继承 source snapshot 的精确字节，不能以当前磁盘内容重新�
 视为损坏）；冷 load/resume、普通 fork 与子 Agent 从同一份 owner snapshot 继承，
 不从现有 prompt 文本反解析。
 
+交互式 TUI 是该字段的生产者：`peri-tui/src/acp_client/client/session/transition.rs`
+的 `new_session_under_gate` 仅在 `ClientProjectionMode::Interactive` 时把
+`peri-tui/prompts/tui.md`（`TUI_SESSION_INSTRUCTIONS`）写入 `session/new` 的
+`_meta["peri.instructions"]`，因此正文随首次准入冻结一次，重试路径同样携带。
+`-p/--print`（Headless）与 `acp` 子命令不注入；`session/load` 不补注入，恢复会话
+沿用服务端已冻结的旧值。正文只覆盖 TUI 的 GenUI/Mermaid 围栏约定与 `peri` CLI
+速查，不改变上述准入规则（仍须为字符串、≤64 KiB、不含保留控制字）。
+
 模型请求的唯一组合顺序是：**内部静态段 → 唯一缓存分界 → 内部动态段 → 外部
 指令段 → 逐请求 contribution → env**。外部段的固定标签保护正文边缘空白；正文在
 provider JSON 的 system text 中作为连续子串恰好出现一次，transport 控制字不进
