@@ -12,11 +12,12 @@ use super::ParsedBlock;
 use super::TableData;
 
 fn cache_for_source(source: &str) -> MarkdownRenderCache {
-    let (segments, blocks) =
+    let (segments, blocks, fences) =
         super::parse_markdown_piece(source, 80, Palette::default(), Color::Reset);
     MarkdownRenderCache {
         chunk_source: source.to_owned(),
         stable_chunk_blocks: vec![blocks],
+        stable_chunk_fences: vec![fences],
         stable_chunks: vec![Arc::new(segments)],
         ..Default::default()
     }
@@ -85,9 +86,11 @@ fn clear_releases_payload_but_still_charges_spare_capacity() {
     let before = cache.retained_bytes();
     cache.chunk_source.clear();
     cache.stable_chunk_blocks.clear();
+    cache.stable_chunk_fences.clear();
     cache.stable_chunks.clear();
     let remaining = cache.chunk_source.capacity()
         + cache.stable_chunk_blocks.capacity() * size_of::<Vec<ParsedBlock>>()
+        + cache.stable_chunk_fences.capacity() * size_of::<Vec<Option<super::MermaidFence>>>()
         + cache.stable_chunks.capacity() * size_of::<Arc<Vec<MarkdownSegment>>>();
     assert_eq!(cache.retained_bytes(), remaining);
     assert!(remaining < before);

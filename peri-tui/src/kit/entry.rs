@@ -52,6 +52,8 @@ pub async fn run_kit_fullscreen(
 ) -> Result<()> {
     // 1. 初始化全局 atoms（必须在 element! 之前）
     atoms::init_atoms();
+    // Mermaid 流式预览的唯一排版线程；无 TUI 的测试/CLI 路径不启动。
+    crate::kit::mermaid::init_preview_worker();
 
     // 1a. 终端能力探测（一次）：NO_COLOR / TERM=dumb / COLORTERM / TERM_PROGRAM。
     //     写入 TERMINAL_CAPS atom，渲染层据此做 NO_COLOR 剥离与符号降级（§4.1/§12）。

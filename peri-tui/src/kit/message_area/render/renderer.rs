@@ -58,13 +58,15 @@ pub(crate) struct ImageLineInfo {
 }
 
 /// `vm_to_lines_cached_with_layout` 的渲染产物：行、复制按钮、交互布局、
-/// 图片行、GenUI 按钮。元组过长，用别名避免调用方被类型签名淹没。
+/// 图片行、GenUI 按钮、Mermaid 围栏范围。元组过长，用别名避免调用方被类型
+/// 签名淹没。
 type RenderOutput = (
     Vec<Line<'static>>,
     Option<CopyButtonInfo>,
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
     Vec<GenUiButtonInfo>,
+    Vec<crate::kit::mermaid::FenceSpan>,
 );
 
 /// md 复制按钮的最小内容长度（字符数，`chars().count()` 口径——与复制反馈
@@ -112,6 +114,41 @@ pub(super) fn copy_button_line(
     Some((line, x_start, x_end))
 }
 
+/// 正文行是否为只有网格前缀的空白分隔行（空行经 `body_line` 后仍带竖线前缀）。
+fn is_blank_body_line(line: &Line<'static>) -> bool {
+    line.spans
+        .iter()
+        .all(|span| span.content.trim().is_empty() || span.content == "\u{2502}")
+}
+
+/// 渲染一处 Mermaid 围栏并记录它在消息行里的逻辑范围；渲染本身不排队。
+fn mermaid_block(
+    segment: &crate::kit::markdown::MermaidSegment,
+    scope: &crate::kit::mermaid::PreviewScope,
+    width: usize,
+    frozen: bool,
+    foreground: ratatui_kit::ratatui::style::Color,
+    start: usize,
+    schedule: bool,
+) -> (Vec<Line<'static>>, crate::kit::mermaid::FenceSpan) {
+    let (lines, layout_bytes) = if schedule {
+        let lines = crate::kit::mermaid::display_lines(segment, scope, width, frozen, foreground);
+        let bytes = 0;
+        (lines, bytes)
+    } else {
+        crate::kit::mermaid::display_lines_peek(segment, scope, width, frozen, foreground)
+    };
+    let span = crate::kit::mermaid::FenceSpan {
+        key: scope.key(segment.fence.open_start),
+        fence: Arc::new(segment.fence.clone()),
+        width,
+        frozen,
+        logical: start..start.saturating_add(lines.len()),
+        layout_bytes,
+    };
+    (lines, span)
+}
+
 /// 将单个 TuiRenderUnit 变体转换为渲染行。
 /// 使用 kit::markdown 进行 markdown 解析（无缓存，每次全量）。
 ///
@@ -155,21 +192,44 @@ pub(crate) fn vm_to_lines_cached(
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
-    let (lines, copy_button, interaction, image_lines, _) = vm_to_lines_cached_with_layout(
+    let (lines, copy_button, interaction, image_lines, _, _) = vm_to_lines_impl(
         vm,
         grid,
         md_cache,
         None,
         render_copy_button,
         ZoneTransition::None,
+        true,
     );
     (lines, copy_button, interaction, image_lines)
 }
 
+/// 直接渲染入口（详情面板/测试）：围栏渲染同时排队。
+///
 /// `transition` 为 entry 的过程区转场形态（§6，transcript 按相邻 entry 的起止
 /// zone 判定）：入口台阶行（进入 ` ╰─╮` / 退出 ` ╭─╯`）统一在本入口插入并顺延
 /// 各 layout 索引；`AssistantBubble` 内部 reasoning → 正文的转场由该分支自画
 /// （entry 内部事务）；正文段保持基准列。
+pub(crate) fn vm_to_lines_cached_with_layout_scheduled(
+    vm: &TuiRenderUnit,
+    grid: &GridSpec,
+    md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
+    md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
+    render_copy_button: bool,
+    transition: ZoneTransition,
+) -> RenderOutput {
+    vm_to_lines_impl(
+        vm,
+        grid,
+        md_cache,
+        md_lines,
+        render_copy_button,
+        transition,
+        true,
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn vm_to_lines_cached_with_layout(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
@@ -177,6 +237,46 @@ pub(crate) fn vm_to_lines_cached_with_layout(
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
     transition: ZoneTransition,
+) -> RenderOutput {
+    vm_to_lines_cached_with_layout_scheduled(
+        vm,
+        grid,
+        md_cache,
+        md_lines,
+        render_copy_button,
+        transition,
+    )
+}
+
+/// 消息区缓存路径：渲染只读当前帧；可见围栏由 transcript 统一调度。
+pub(crate) fn vm_to_lines_cached_with_layout_gated(
+    vm: &TuiRenderUnit,
+    grid: &GridSpec,
+    md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
+    md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
+    render_copy_button: bool,
+    transition: ZoneTransition,
+) -> RenderOutput {
+    vm_to_lines_impl(
+        vm,
+        grid,
+        md_cache,
+        md_lines,
+        render_copy_button,
+        transition,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vm_to_lines_impl(
+    vm: &TuiRenderUnit,
+    grid: &GridSpec,
+    md_cache: &mut crate::kit::markdown::MarkdownRenderCache,
+    md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
+    render_copy_button: bool,
+    transition: ZoneTransition,
+    schedule_mermaid: bool,
 ) -> RenderOutput {
     let mut md_lines = md_lines;
     if let Some(layout) = md_lines.as_deref_mut() {
@@ -187,6 +287,7 @@ pub(crate) fn vm_to_lines_cached_with_layout(
     let rendered = match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
+            let mut mermaid_fences: Vec<crate::kit::mermaid::FenceSpan> = Vec::new();
 
             // §3.2 垂直节奏：Wide/Standard 的正文块分隔由转场台阶承担，不再保留
             // 节拍空行；Compact/Narrow 无台阶，正文块上下仍各保留 1 空行（带竖线
@@ -194,7 +295,7 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             // 台阶，上下也各保留 1 空行（过程带前缀）作分隔。reasoning 是过程
             // entry，不自行增加空行。空 bubble（无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
-                return (lines, None, None, Vec::new(), Vec::new());
+                return (lines, None, None, Vec::new(), Vec::new(), Vec::new());
             }
 
             // AI 正文竖线颜色——正文行与前后 turn 节拍空行共用；主题值在
@@ -216,6 +317,13 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             } else {
                 grid.content_width()
             };
+            let mermaid_frozen = data.started_at.is_none();
+            let mermaid_scope = crate::kit::mermaid::PreviewScope::for_bubble(
+                crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone(),
+                data.message_id.as_deref(),
+                data.started_at,
+                data.content_hash,
+            );
             let body_line = |line: Line<'static>| -> Line<'static> {
                 if brief {
                     self::helpers::process_prefixed_cont_line(grid, line_color, line)
@@ -290,9 +398,10 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                 .get(chunk_index)
                                 .is_some_and(|cached| cached.identity == identity)
                             {
-                                return (identity, Vec::new());
+                                return (identity, Vec::new(), Vec::new());
                             }
                             let mut chunk_lines = Vec::new();
+                            let mut chunk_fences = Vec::new();
                             if chunk_index > 0 {
                                 chunk_lines.push(body_line(Line::default()));
                             }
@@ -301,12 +410,34 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                     segment
                                 {
                                     chunk_lines.extend(seg_lines.iter().cloned().map(&body_line));
+                                } else if let crate::kit::markdown::MarkdownSegment::Mermaid(
+                                    segment,
+                                ) = segment
+                                {
+                                    if !chunk_lines.is_empty()
+                                        && !chunk_lines.last().is_some_and(is_blank_body_line)
+                                    {
+                                        chunk_lines.push(body_line(Line::default()));
+                                    }
+                                    let start = chunk_lines.len();
+                                    let (mermaid_lines, span) = mermaid_block(
+                                        segment,
+                                        &mermaid_scope,
+                                        body_width,
+                                        mermaid_frozen,
+                                        md_text_fg,
+                                        start,
+                                        schedule_mermaid,
+                                    );
+                                    chunk_fences.push(span);
+                                    chunk_lines.extend(mermaid_lines.into_iter().map(&body_line));
                                 }
                             }
-                            (Arc::as_ptr(chunk) as usize, chunk_lines)
+                            (Arc::as_ptr(chunk) as usize, chunk_lines, chunk_fences)
                         })
                         .collect();
-                    layout.retain_and_wrap(grid.line_width(), stable_lines);
+                    layout.retain_and_wrap_with_fences(grid.line_width(), stable_lines);
+                    mermaid_fences.extend(layout.stable_fences());
                     for chunk in &layout.stable {
                         lines.resize(
                             lines.len().saturating_add(chunk.lines.len()),
@@ -325,6 +456,27 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                     segment
                                 {
                                     lines.extend(seg_lines.iter().cloned().map(&body_line));
+                                } else if let crate::kit::markdown::MarkdownSegment::Mermaid(
+                                    segment,
+                                ) = segment
+                                {
+                                    if !lines.is_empty()
+                                        && !lines.last().is_some_and(is_blank_body_line)
+                                    {
+                                        lines.push(body_line(Line::default()));
+                                    }
+                                    let start = lines.len();
+                                    let (mermaid_lines, span) = mermaid_block(
+                                        segment,
+                                        &mermaid_scope,
+                                        body_width,
+                                        mermaid_frozen,
+                                        md_text_fg,
+                                        start,
+                                        schedule_mermaid,
+                                    );
+                                    mermaid_fences.push(span);
+                                    lines.extend(mermaid_lines.into_iter().map(&body_line));
                                 }
                             }
                         }
@@ -369,6 +521,23 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                 // 前缀/空行逻辑与 Text 分支一致。
                                 for line in &img.lines {
                                     lines.push(body_line(line.clone()));
+                                }
+                            }
+                            crate::kit::markdown::MarkdownSegment::Mermaid(segment) => {
+                                // 帧可异步到达；渲染只读当前帧，调度由可见性决定。
+                                let start = lines.len();
+                                let (mermaid_lines, span) = mermaid_block(
+                                    segment,
+                                    &mermaid_scope,
+                                    body_width,
+                                    mermaid_frozen,
+                                    md_text_fg,
+                                    start,
+                                    schedule_mermaid,
+                                );
+                                mermaid_fences.push(span);
+                                for line in mermaid_lines {
+                                    lines.push(body_line(line));
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::GenUi(segment) => {
@@ -462,7 +631,7 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 lines.push(body_line(Line::default()));
             }
 
-            (lines, copy_button, None, Vec::new())
+            (lines, copy_button, None, Vec::new(), mermaid_fences)
         }
         TuiRenderUnit::TuiUserBubble(data) => {
             if let Some(ref info) = data.reminder {
@@ -472,16 +641,18 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                     None,
                     None,
                     Vec::new(),
+                    Vec::new(),
                 )
             } else {
                 let (lines, image_lines) = self::user::render_user_bubble_lines(data, grid);
-                (lines, None, None, image_lines)
+                (lines, None, None, image_lines, Vec::new())
             }
         }
         TuiRenderUnit::TuiToolCard(data) => (
             self::tool_card::render_tool_card_lines(data, grid),
             data.is_error.then(|| error::icon_button(grid, 0)),
             None,
+            Vec::new(),
             Vec::new(),
         ),
         TuiRenderUnit::TuiSystemNote(data) => (
@@ -490,11 +661,13 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                 .then(|| error::icon_button(grid, 0)),
             None,
             Vec::new(),
+            Vec::new(),
         ),
         TuiRenderUnit::TuiSystemReminder(data) => (
             self::user::render_system_reminder_lines(data, grid),
             None,
             None,
+            Vec::new(),
             Vec::new(),
         ),
         TuiRenderUnit::TuiSubAgentGroup(data) => (
@@ -502,11 +675,13 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             None,
             None,
             Vec::new(),
+            Vec::new(),
         ),
         TuiRenderUnit::TuiCollapsedGroup(data) => (
             self::group::render_collapsed_group_lines(data, grid),
             None,
             None,
+            Vec::new(),
             Vec::new(),
         ),
         TuiRenderUnit::TuiDivider(data) => (
@@ -514,15 +689,17 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             None,
             None,
             Vec::new(),
+            Vec::new(),
         ),
         TuiRenderUnit::TuiAskUserBlock(data) => {
             let (lines, layout) = self::interaction::render_ask_user_block_lines(data, grid);
-            (lines, None, layout, Vec::new())
+            (lines, None, layout, Vec::new(), Vec::new())
         }
         TuiRenderUnit::TuiTodoSummary(data) => (
             self::system::render_todo_summary_lines(data, grid),
             None,
             None,
+            Vec::new(),
             Vec::new(),
         ),
     };
@@ -532,7 +709,8 @@ pub(crate) fn vm_to_lines_cached_with_layout(
     // 使后续行索引 +1——copy / interaction / image 的 logical_idx 与 markdown
     // stable overlay 起点同步顺延（台阶行由本函数插入，各 renderer 产出的
     // 索引以自身行序为基准）。
-    let (mut lines, mut copy_button, mut interaction, mut image_lines) = rendered;
+    let (mut lines, mut copy_button, mut interaction, mut image_lines, mut mermaid_fences) =
+        rendered;
     if grid.indent > 0 && !lines.is_empty() {
         let step = match transition {
             ZoneTransition::EnterProcess(source) => Some(self::helpers::step_line(
@@ -558,6 +736,10 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             for info in image_lines.iter_mut() {
                 info.logical_idx += 1;
             }
+            for fence in &mut mermaid_fences {
+                fence.logical =
+                    fence.logical.start.saturating_add(1)..fence.logical.end.saturating_add(1);
+            }
             for button in &mut genui_buttons {
                 button.line_start = button.line_start.saturating_add(1);
                 button.line_end = button.line_end.saturating_add(1);
@@ -573,7 +755,14 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             }
         }
     }
-    (lines, copy_button, interaction, image_lines, genui_buttons)
+    (
+        lines,
+        copy_button,
+        interaction,
+        image_lines,
+        genui_buttons,
+        mermaid_fences,
+    )
 }
 
 /// running reasoning header 在 entry lines 中的索引：入口台阶（§6）占 lines[0]

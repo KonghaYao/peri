@@ -45,6 +45,7 @@ pub mod input_history;
 pub mod layout;
 pub mod markdown;
 pub mod mention_popup;
+pub(crate) mod mermaid;
 pub mod message_area;
 pub mod mouse_router;
 pub mod panel_overlay;

@@ -16,12 +16,14 @@
 //!   （智能断词换行 + unicode 网格线渲染）
 //! - `convert`：convert_to_segments（块级分发）
 //! - `scan`：图片前置扫描 + 占位替换
+//! - `fence`：原始 Markdown 的 Mermaid 围栏范围与闭合状态
 //! - `safety`：终端控制字符过滤与 URL scheme 分类
 //! - `metrics`：解析路径观测计数
 
 mod boundary;
 mod code_block;
 mod convert;
+pub mod fence;
 mod heading;
 mod list;
 mod memory;
@@ -65,6 +67,10 @@ mod cache_lifecycle_tests;
 mod boundary_tests;
 
 #[cfg(test)]
+#[path = "fence_test.rs"]
+mod fence_tests;
+
+#[cfg(test)]
 #[path = "genui_test.rs"]
 mod genui_tests;
 
@@ -90,6 +96,10 @@ use std::sync::Arc;
 mod parser;
 pub use parser::*;
 
+pub use fence::{
+    FenceClose, FenceKind, MermaidFence, MermaidFenceKey, MermaidMessageIdentity,
+    MermaidMessageRef, is_mermaid_info,
+};
 pub use safety::{UrlKind, classify_url, sanitize_for_terminal};
 pub use table::table_data_to_lines;
-pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, TableData};
+pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, MermaidSegment, TableData};

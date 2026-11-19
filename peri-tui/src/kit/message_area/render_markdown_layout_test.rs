@@ -576,3 +576,92 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
         );
     }
 }
+
+/// Mermaid 围栏进入稳定块后仍能拿到当前可信帧，不能只剩前后正文。
+#[test]
+#[serial_test::serial]
+fn test_mermaid_preview_survives_stable_fast_path() {
+    crate::kit::mermaid::reset_for_test();
+    let text = "intro\n\n```mermaid\ngraph TD\n开始-->结束\n```\n\nafter";
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: Some(Instant::now()),
+            duration_ms: None,
+            text: text.to_string(),
+            reasoning: None,
+            message_id: Some("stable-path-mermaid".to_string()),
+            content_hash: 91,
+        }
+        .into(),
+    );
+    let grid = GridSpec::grid_for(80);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (first, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let first_rendered = super::all_text(&first);
+    assert!(
+        first_rendered.contains("graph TD") && first_rendered.contains("开始-->结束"),
+        "首帧在排版完成前应显示源码，实际 {first_rendered:?}"
+    );
+
+    crate::kit::mermaid::drain_preview_jobs_now();
+    let (second, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let rendered = super::all_text(&second);
+    assert!(rendered.contains("intro"), "正文应保留，实际 {rendered:?}");
+    assert!(
+        rendered.contains("开始") && rendered.contains("结束"),
+        "稳定块复用后应显示图，实际 {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("graph TD"),
+        "终稿应替换稳定块里的源码，实际 {rendered:?}"
+    );
+    assert!(
+        rendered.contains("after"),
+        "尾部正文应保留，实际 {rendered:?}"
+    );
+    let index_of = |needle: &str| {
+        second
+            .iter()
+            .position(|line| super::line_text(line).contains(needle))
+            .unwrap_or_else(|| panic!("应渲染出 {needle:?}，实际 {rendered:?}"))
+    };
+    assert!(
+        index_of("开始") > index_of("intro"),
+        "图应位于正文之后，实际 {rendered:?}"
+    );
+    assert!(
+        super::is_blank_separator(&second[index_of("intro") + 1]),
+        "正文与图之间应有空行，实际 {rendered:?}"
+    );
+}
+
+/// 冻结消息走完整解析（tail）时，闭合围栏显示终稿而不是源码。
+#[test]
+#[serial_test::serial]
+fn test_mermaid_terminal_parse_shows_the_final_diagram() {
+    crate::kit::mermaid::reset_for_test();
+    let text = "```mermaid\ngraph TD\n开始-->结束\n```";
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: text.to_string(),
+            reasoning: None,
+            message_id: Some("terminal-mermaid".to_string()),
+            content_hash: 92,
+        }
+        .into(),
+    );
+    let grid = GridSpec::grid_for(80);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let rendered = super::all_text(&lines);
+    assert!(
+        rendered.contains("开始") && rendered.contains("结束"),
+        "闭合围栏应显示字符图，实际 {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("graph TD"),
+        "闭合终稿不应退回源码，实际 {rendered:?}"
+    );
+}

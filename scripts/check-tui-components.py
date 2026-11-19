@@ -23,7 +23,9 @@ ALLOWED_PACKAGES = {
     "ratatui",
     "ratatui-kit",
     "ratatui-kit-markdown",
+    # CommonMark fence scanning and Mermaid layout are presentation-only.
     "pulldown-cmark",
+    "mermaid-text",
     "syntect",
     "tui-chart",
     "unicode-width",

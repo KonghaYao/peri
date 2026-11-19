@@ -46,6 +46,10 @@ mod window_viewport_tests;
 mod p_matrix_tui_tests;
 
 #[cfg(test)]
+#[path = "mermaid_viewport_test.rs"]
+mod mermaid_viewport_tests;
+
+#[cfg(test)]
 use std::sync::Arc;
 
 #[cfg(test)]

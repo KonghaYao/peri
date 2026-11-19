@@ -294,3 +294,167 @@ fn target_for_skips_follow_bottom_and_bottom_sentinel() {
         "usize::MAX 是「跟随到底」哨兵 → 不参与偏移换算"
     );
 }
+
+// ── 同条消息内的阅读锚点（图完成/缩放/异步结果） ─────────────────────────
+
+use super::ReadingAnchor;
+use crate::kit::markdown::{
+    FenceClose, FenceKind, MermaidFence, MermaidFenceKey, MermaidMessageIdentity, MermaidMessageRef,
+};
+use crate::kit::mermaid::FenceSpan;
+use crate::kit::tui_render_unit::TuiAssistantBubble;
+
+fn fence_key(name: &str, open_start: usize) -> MermaidFenceKey {
+    MermaidFenceKey {
+        message: MermaidMessageIdentity {
+            session_id: "session".to_string(),
+            message: MermaidMessageRef::Persistent(name.to_string()),
+        },
+        open_start,
+    }
+}
+
+fn fence_span(name: &str, open_start: usize, start: usize, end: usize) -> FenceSpan {
+    FenceSpan {
+        key: fence_key(name, open_start),
+        fence: Arc::new(MermaidFence {
+            kind: FenceKind::Backtick,
+            marker_len: 3,
+            language: "mermaid".to_string(),
+            info: "mermaid".to_string(),
+            open_start,
+            body_start: 0,
+            body_end: 0,
+            end: 0,
+            close: FenceClose::Closed,
+            opener_confirmed: true,
+            opening_line: "```mermaid".to_string(),
+            raw: String::new(),
+            source: "graph TD\nA-->B".to_string(),
+        }),
+        width: 80,
+        frozen: true,
+        logical: start..end,
+        layout_bytes: 0,
+    }
+}
+
+fn reading_index(
+    lines: usize,
+    text: &str,
+) -> (SlotIndex, super::super::vm_cache_slot::VmCacheSlot) {
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: text.to_string(),
+            reasoning: None,
+            message_id: Some("reading".to_string()),
+            content_hash: 7,
+        }
+        .into(),
+    );
+    let grid = GridSpec::grid_for(80);
+    let mut index = SlotIndex::default();
+    index.set_source(im::Vector::from(vec![vm]), grid, context(), 0);
+    let slot_lines: Vec<Line<'static>> = (0..lines)
+        .map(|line| Line::from(format!("line-{line}")))
+        .collect();
+    let map: Vec<WrappedLineInfo> = (0..lines)
+        .map(|line| WrappedLineInfo {
+            logical_idx: line,
+            visual_start: line,
+            visual_end: line + 1,
+            slot_index: 0,
+        })
+        .collect();
+    index.set_slot(
+        0,
+        Arc::new(SlotLines::single(Arc::new(slot_lines))),
+        &map,
+        true,
+    );
+    let cache = super::super::vm_cache_slot::VmCacheSlot {
+        wrap_map: Arc::new(map),
+        ..Default::default()
+    };
+    (index, cache)
+}
+
+#[test]
+fn reading_anchor_keeps_a_text_line_after_a_diagram_grows() {
+    let (before, mut cache) = reading_index(10, "text");
+    cache.mermaid_fences = vec![fence_span("m", 10, 2, 5)];
+    // 顶行 3 在围栏内第 1 行。
+    let anchor = ReadingAnchor::capture(&before, 3, &[cache]).expect("anchor");
+    assert_eq!(
+        anchor.relocate(
+            &before,
+            &[{
+                let (_, mut c) = reading_index(10, "text");
+                c.mermaid_fences = vec![fence_span("m", 10, 2, 5)];
+                c
+            }]
+        ),
+        Some(3)
+    );
+
+    // 围栏长到 5..9，下面的正文整体下移 4 行；顶行若是正文（原第 5 行
+    // 之前的围栏外行）保持相对围栏的位置。
+    let (grown, mut grown_cache) = reading_index(14, "text");
+    grown_cache.mermaid_fences = vec![fence_span("m", 10, 2, 9)];
+    // 原顶行 1 = 围栏前第 1 行；新布局仍应是围栏前第 1 行。
+    let before_fence = ReadingAnchor::capture(
+        &before,
+        1,
+        &[{
+            let (_, mut c) = reading_index(10, "text");
+            c.mermaid_fences = vec![fence_span("m", 10, 2, 5)];
+            c
+        }],
+    )
+    .expect("before-fence anchor");
+    assert_eq!(before_fence.relocate(&grown, &[grown_cache]), Some(1));
+}
+
+#[test]
+fn reading_anchor_finds_the_same_paragraph_after_80_40_80_roundtrip() {
+    let (wide, mut wide_cache) = reading_index(12, "text");
+    wide_cache.mermaid_fences = vec![
+        fence_span("first", 1, 2, 5),
+        fence_span("second", 20, 8, 10),
+    ];
+    // 顶行 10 在第二张图之后第 0 行。
+    let wide_caches = vec![wide_cache];
+    let anchor = ReadingAnchor::capture(&wide, 10, &wide_caches).expect("anchor");
+
+    let (narrow, mut narrow_cache) = reading_index(30, "text");
+    narrow_cache.mermaid_fences = vec![
+        fence_span("first", 1, 2, 9),
+        fence_span("second", 20, 20, 26),
+    ];
+    let narrow_caches = vec![narrow_cache];
+    assert_eq!(
+        anchor.relocate(&narrow, &narrow_caches),
+        Some(26),
+        "40 列时仍落在第二张图后的第一行"
+    );
+
+    assert_eq!(
+        anchor.relocate(&wide, &wide_caches),
+        Some(10),
+        "回到 80 列时回到原行"
+    );
+    let text = crate::kit::message_area::selection::extract_visual_range_index(
+        &wide,
+        (10, 0),
+        (10, 10),
+        80,
+        wide.canonical_items(),
+        Some(GridSpec::grid_for(80)),
+    );
+    assert!(
+        text.is_some_and(|text| text.contains("line-10")),
+        "同一阅读位置仍可选中原段落"
+    );
+}

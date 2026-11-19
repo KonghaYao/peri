@@ -1,0 +1,20 @@
+block
+  columns 3
+  A["请求入口"]
+  block
+    columns 2
+    B["鉴权服务"]
+    block
+      columns 1
+      C["调度服务"]
+      D["执行服务"]
+    end
+    E["审计服务"]
+  end
+  F["交付出口"]
+  A --> B
+  B --> C
+  C --> D
+  C --> E
+  D --> F
+  E --> F

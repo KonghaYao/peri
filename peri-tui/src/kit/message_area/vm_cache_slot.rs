@@ -118,6 +118,8 @@ pub(super) struct VmCacheSlot {
     pub(super) interaction: Option<render::InteractionLayout>,
     pub(super) image_lines: Vec<ImageLineInfo>,
     pub(super) genui_buttons: Vec<crate::kit::genui::GenUiButtonInfo>,
+    /// 本消息内的 Mermaid 围栏及其逻辑行范围（视口调度与阅读锚点共用）。
+    pub(super) mermaid_fences: Vec<crate::kit::mermaid::FenceSpan>,
 }
 
 impl VmCacheSlot {
@@ -166,6 +168,7 @@ impl VmCacheSlot {
         self.interaction = None;
         self.image_lines = Vec::new();
         self.genui_buttons = Vec::new();
+        self.mermaid_fences = Vec::new();
     }
 }
 

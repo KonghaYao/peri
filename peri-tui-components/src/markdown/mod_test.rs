@@ -16,6 +16,7 @@ fn flatten(segments: &[MarkdownSegment]) -> Vec<ratatui::text::Line<'static>> {
             MarkdownSegment::GenUi(segment) => {
                 crate::genui::render(segment, 80, &peri_theme::builtin::dark_theme(), None).lines
             }
+            MarkdownSegment::Mermaid(segment) => segment.lines.clone(),
         })
         .collect()
 }

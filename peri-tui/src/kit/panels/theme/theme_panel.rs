@@ -103,6 +103,7 @@ pub(super) fn build_preview(theme_name: &str) -> Vec<Line<'static>> {
             MarkdownSegment::GenUi(segment) => {
                 crate::kit::genui::render(segment, PREVIEW_WIDTH, &theme).lines
             }
+            MarkdownSegment::Mermaid(segment) => segment.lines.clone(),
         })
         .collect()
 }

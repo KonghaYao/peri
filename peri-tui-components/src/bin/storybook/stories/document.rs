@@ -125,6 +125,7 @@ fn layout_lines(source: &str, width: usize) -> (Vec<Line<'static>>, Vec<Document
                 lines.extend(table_data_to_lines(data, &table_theme, width));
             }
             MarkdownSegment::Image(image) => lines.extend(image.lines.iter().cloned()),
+            MarkdownSegment::Mermaid(segment) => lines.extend(segment.lines.iter().cloned()),
             MarkdownSegment::GenUi(segment) => {
                 let rendered = genui::render(segment, width, &theme, None);
                 let offset = lines.len();

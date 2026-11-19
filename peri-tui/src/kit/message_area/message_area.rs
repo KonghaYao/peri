@@ -46,6 +46,7 @@ pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
 }
 
 use self::hits::CopyButtonHit;
+use self::hits::MermaidActionHit;
 
 use self::hits::ImageLineHit;
 use self::hits::InteractionOptionHit;
@@ -141,6 +142,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let keepgoing_rect = hooks.use_state(|| Option::<(u16, u16, u16)>::None);
     // md 复制按钮屏幕点击区域（每帧更新，点击 handler 实时读取——同上）
     let copy_buttons = hooks.use_state(Arc::<Vec<CopyButtonHit>>::default);
+    // Mermaid「查看图」入口与当前选中的图（slot, fence 序号）。
+    let mermaid_actions = hooks.use_state(Arc::<Vec<MermaidActionHit>>::default);
+    let mermaid_action = hooks.use_state(|| Option::<(usize, usize)>::None);
     // [T4 §4] @image 行屏幕点击/hover 热区（每帧由渲染 body 更新，点击与
     // Moved handler 实时读取——同 CopyButtonHit 模式）。
     let image_rects = hooks.use_state(Arc::<Vec<ImageLineHit>>::default);
@@ -253,6 +257,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [REQ-C01-3 / A20] 本次发布的重定位结果（一次性；`prepare` 内完成身份重定位，
     // 见 `viewport_anchor`）。取走后交给并入分支消费。
     let prepend_relocation = transcript_guard.take_prepend_relocation();
+    let reflow_relocation = transcript_guard.take_reflow_relocation();
     drop(caches_guard);
     drop(transcript_guard);
     let t_rebuild = peri_time::monotonic_now();
@@ -302,6 +307,14 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     handlers::register_copy_click(&mut hooks, copy_buttons, view_models);
 
+    handlers::register_mermaid_action_click(
+        &mut hooks,
+        mermaid_actions,
+        view_models,
+        vm_caches,
+        mermaid_action,
+    );
+
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
@@ -332,6 +345,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         scrollbar_area,
         gesture,
         interaction_option,
+        mermaid_action,
         text_sel,
     );
 
@@ -355,7 +369,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         Arc::clone(&slot_index),
     );
 
-    handlers::register_keyboard_nav(&mut hooks, interaction_option);
+    handlers::register_keyboard_nav(&mut hooks, interaction_option, vm_caches, mermaid_action);
 
     // [S2 单一事实源] 焦点同步已删除：外部清除（输入区点击 / session 复位）
     // 在事件边界直接写 FOCUSED_ENTRY = None，仲裁与渲染同源读取——不再需要
@@ -398,6 +412,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     // 「发布前锚点身份 + 发布后新索引」换算完成，effect 只消费
                     // （一次性取值见上方 `take_prepend_relocation` 调用点）。
                     prepend_relocation,
+                    reflow_relocation,
                     // [Slice 4 §6.8] pending interaction block 锚定范围
                     // （每帧派生值；effect 依赖不含它——block 完成时 generation
                     // 变化触发 effect，用当帧最新值）。
@@ -562,6 +577,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     hits::update_copy_button_hits(
         copy_buttons,
+        &vm_caches,
+        &view_models,
+        area_rect,
+        vp_height as u16,
+        scroll_y,
+        &slot_index,
+        grid,
+    );
+
+    hits::update_mermaid_action_hits(
+        mermaid_actions,
         &vm_caches,
         &view_models,
         area_rect,

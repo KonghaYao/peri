@@ -16,11 +16,12 @@ also owns the business-independent renderers moved down from the app: Markdown
 | `list_nav` | key events and selection | navigation intent and bounds |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
 | `scrollbar::vertical_scrollbar` | thumb and arrow styles | scrollbar appearance |
-| `markdown::parse_markdown*` | source text, width, palette, base foreground | typed segments (text/table/image/genui), chunk cache |
+| `markdown::parse_markdown*` | source text, width, palette, base foreground | typed segments (text/table/image/genui/mermaid), chunk cache |
 | `markdown::table_data_to_lines` | table data, table theme, width | unicode grid layout |
 | `markdown::safety` | untrusted display fields | control-character filtering and URL classification |
 | `genui::render` | parsed OpenUI segment, width, theme, optional `EvalContext` | layout, styling and button hit ranges |
 | `text::wrap_by_width` | text and width | grapheme/display-width wrapping without content loss |
+| `mermaid` | confirmed source, closed flag, width, job results | statement confirmation, layout, overview and preview state |
 
 The application resolves theme tokens, chooses first-frame panel height, routes
 focus, translates business objects to rows and executes actions. A list index is
@@ -52,10 +53,11 @@ is the primary input and mirrors the real TUI:
   typed segments → `table_data_to_lines` / `genui::render`; the wheel scrolls the
   document by the same three rows and clamps at the rendered content height.
 
-Six stories cover `textarea`, `list`, `scrollbar`, `markdown` (rich text,
+Seven stories cover `textarea`, `list`, `scrollbar`, `markdown` (rich text,
 headings, lists, code, table, image, gen-ui fence, streaming), `openui` (stack
 column/row, card, text, heading, list, table, key-value, progress, divider,
-button, bar chart, sparkline, streaming) and `charts` — one static frame per
+button, bar chart, sparkline, streaming), `mermaid` (flowchart, sequence,
+collaboration, dense, long-workflow and streaming) and `charts` — one static frame per
 `tui-chart` 0.6.6 example (MIT,
 Copyright (c) 2025 Sorin Irimies), themed with the storybook palette. The
 `rich-text` variant is the kitchen-sink document: headings,
@@ -128,6 +130,28 @@ let lines = render_multiline_with_cursor(TextAreaRenderOptions {
 `styles.base` retains the existing cursor-line fallback and row-padding semantics;
 non-cursor spans may inherit their containing line's style. It is not a blanket
 style applied to the whole buffer. Both rendering APIs share one implementation.
+
+## Mermaid pipeline
+
+`peri_tui_components::mermaid` owns the pure Mermaid pipeline:
+
+| Module | Responsibility |
+| --- | --- |
+| `stream` | confirms complete statements from streamed source |
+| `frame` | lays out a full or trusted prefix with `mermaid-text` |
+| `overview` | derives groups, cross-group edges and path summaries for large flowcharts |
+| `layout` | shares geometry by source, exact width, engine version and layout params |
+| `preview` | trusted-prefix state machine, 80 ms commit coalescing, cancellation and version checks |
+| `fence` | fence metadata and stable graph identity (`session + message + open_start`) |
+
+The component's Markdown parser scans the original CommonMark fences with
+`pulldown-cmark` 0.12; `mermaid-text = "=0.58.0"` handles diagram layout. The
+application chooses widths from its viewport, dispatches due jobs to its
+background worker, colors/wraps lines and owns panels, focus and i18n. The worker
+executes `render_source`/`render_final` and returns the result through
+`PreviewEngine::complete`; only results matching session, graph, prefix version
+and layout params are published. The Mermaid pipeline declares no globals,
+threads or timers.
 
 ## Boundary checks
 

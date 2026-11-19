@@ -71,7 +71,7 @@
 
 1. **P1-12 全部面板均可打开与返回**
    1. 准备问答、子任务、后台 shell 与 Goal 夹具，再依次打开常规设置和资源面板。
-   2. 通过各自实际入口打开 Threads、AskUser、SubAgentDetail、ShellDetail、Goal 等详情。
+   2. 通过各自实际入口打开 Threads、AskUser、SubAgentDetail、ShellDetail、Goal、MermaidDiagram 等详情。
    3. 逐个核对标题、空态、滚动与关闭后焦点；无白屏、明显裁切或旧面板残影。
 2. **P1-13 设置类面板窄屏可编辑**
    1. 在窄屏中打开 Model、Login、Config 和 Theme，浏览长名称及多行描述。

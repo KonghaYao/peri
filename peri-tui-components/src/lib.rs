@@ -6,6 +6,7 @@ pub mod genui;
 pub mod list;
 pub mod list_nav;
 pub mod markdown;
+pub mod mermaid;
 pub mod panel_mouse;
 pub mod scrollbar;
 pub mod text;
