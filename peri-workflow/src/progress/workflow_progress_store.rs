@@ -20,6 +20,12 @@ pub trait ProgressObserver: Send + Sync {
     /// `workflow://runs` 索引正文包含 run 集合：清理是唯一不经进度事件的集合变更
     /// 路径，必须在此补发索引唤醒（对抗审查 F5）。
     fn on_runs_changed(&self) {}
+
+    /// run 退役且生产者已结束：该 run 的外部运行期簿记（事件水位、取消栅栏）
+    /// 可回收；默认无操作。
+    ///
+    /// 回调在 store 锁之外执行，实现不得提交进度事件。
+    fn on_runs_reclaimable(&self, _run_ids: &[String]) {}
 }
 
 // ─── Data structures ───────────────────────────────────────
@@ -80,6 +86,10 @@ pub(super) struct TrackedRun {
     /// 相位内 agent 时长求和**——那是另一维度的量，并行相位会被读成超长
     /// （2026-10-11 issue 缺陷 3）。
     pub(super) phase_wall_ms: HashMap<String, u64>,
+    /// 生产者（runner + completion 投影）已结束，但 run 仍可见：退役时才可回收
+    /// 事件水位与取消栅栏（#468）。与退役在同一把 `runs` 写锁内判定，避免
+    /// 「清理已移除、标记迟到」的悬挂窗口。
+    pub(super) producer_finished: bool,
 }
 
 pub struct WorkflowProgressStore {
@@ -174,6 +184,7 @@ impl WorkflowProgressStore {
                             started_agents: HashSet::new(),
                             phase_started_at: HashMap::new(),
                             phase_wall_ms: HashMap::new(),
+                            producer_finished: false,
                         },
                     );
                 }
@@ -243,27 +254,73 @@ impl WorkflowProgressStore {
 
     /// 清理过保留窗口的终态 run；集合确有移除时，在提交（`retain` 完成）之后
     /// 通知观察者（先提交后通知；无移除不制造唤醒）。
+    ///
+    /// 生产者已结束的退役 run 在移除后追加回收通知：外部逐 run 簿记（事件水位、
+    /// 取消栅栏）只在「退役 + 生产者结束」同时成立后释放（#468）。
     pub(crate) fn cleanup_completed_at(&self, now: std::time::Instant) {
-        let removed = {
+        let (removed, reclaimable) = {
             let mut runs = self.runs.write();
-            let before = runs.len();
-            runs.retain(|_, tracked| {
+            let mut removed = Vec::new();
+            let mut reclaimable = Vec::new();
+            runs.retain(|run_id, tracked| {
                 let run = &tracked.progress;
-                matches!(run.status, RunStatus::Running)
+                let keep = matches!(run.status, RunStatus::Running)
                     || run
                         .completed_at
                         .map(|at| now.saturating_duration_since(at) < Self::COMPLETED_RETENTION)
-                        .unwrap_or(true)
+                        .unwrap_or(true);
+                if !keep {
+                    removed.push(run_id.clone());
+                    if tracked.producer_finished {
+                        reclaimable.push(run_id.clone());
+                    }
+                }
+                keep
             });
-            runs.len() != before
+            (removed, reclaimable)
         };
-        if !removed {
+        if removed.is_empty() {
             return;
         }
         // 与 `commit` 同款：先克隆 `Arc` 并释放读锁，再回调。
         let observer = self.observer.read().clone();
         if let Some(observer) = observer {
             observer.on_runs_changed();
+            if !reclaimable.is_empty() {
+                observer.on_runs_reclaimable(&reclaimable);
+            }
+        }
+    }
+
+    /// 生产者结束（runner 返回、completion 投影完成后调用）。
+    ///
+    /// run 仍可见时只登记标记，等清理退役后再回收外部逐 run 簿记——可见 run 的
+    /// 水位必须保持单调。run 已退役（或从未可见）时立即通知回收；与清理在同一把
+    /// `runs` 写锁内判定，不会留下「已移除但没人回收」的悬挂条目（#468）。
+    pub fn note_producer_finished(&self, run_id: &str) {
+        let reclaim_now = {
+            let mut runs = self.runs.write();
+            match runs.get_mut(run_id) {
+                Some(tracked) => {
+                    tracked.producer_finished = true;
+                    None
+                }
+                None => Some(run_id.to_string()),
+            }
+        };
+        if let Some(run_id) = reclaim_now {
+            self.notify_reclaimable(&[run_id]);
+        }
+    }
+
+    /// 退役 + 生产者结束的回收通知（store 锁之外）。
+    fn notify_reclaimable(&self, run_ids: &[String]) {
+        if run_ids.is_empty() {
+            return;
+        }
+        let observer = self.observer.read().clone();
+        if let Some(observer) = observer {
+            observer.on_runs_reclaimable(run_ids);
         }
     }
 }
