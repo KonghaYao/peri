@@ -23,6 +23,7 @@ use parking_lot::Mutex;
 /// 1. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
 /// 2. 按完整消息顺序投影 turn 分隔线（随下一条用户 prompt 保留）；
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）。
+///
 /// 工具卡不再聚合分组：相邻工具各自成 entry，由折叠策略收束为单行。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
     super::super::subagent_preview::enforce(state);
