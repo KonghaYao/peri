@@ -4,9 +4,12 @@
 //! Background pump task dispatches Response messages to the pending request map,
 //! forwards Requests/Notifications to the bounded incoming channel. Overflow
 //! requests are rejected with an explicit backpressure error instead of being
-//! queued without limit or silently dropped.
+//! queued without limit or silently dropped. Pump-side waits on the writer lock
+//! or on queue capacity are bounded by `STDIO_STALL_TIMEOUT`: a stalled peer must
+//! still converge on the same terminal settlement as EOF.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -36,6 +39,11 @@ const STDIO_INCOMING_CAPACITY: usize = 256;
 const STDIO_BACKPRESSURE_CODE: i64 = -32000;
 
 const STDIO_BACKPRESSURE_MESSAGE: &str = "ACP transport backpressure: inbound queue is full";
+
+/// pump 等待 writer 锁或入站容量的上限。有界队列下，pump 一旦停在写或入队上
+/// 就读不到 stdin EOF，`pump_router.close()` 也不会执行；该窗口把不可恢复的
+/// 等待转成 terminal 结算，量级与 MPSC transport 的 500 ms 背压窗口一致。
+const STDIO_STALL_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// JSON-RPC 2.0 envelope for (de)serialization over stdio.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -186,7 +194,7 @@ impl StdioTransport {
                     Ok(value) => value,
                     Err(error) => {
                         tracing::warn!(%error, "Stdio transport: malformed JSON-RPC input");
-                        if send_protocol_error(
+                        if !send_protocol_error_within_deadline(
                             &pump_writer,
                             &pump_router,
                             Value::Null,
@@ -194,7 +202,6 @@ impl StdioTransport {
                             "Parse error",
                         )
                         .await
-                        .is_err()
                         {
                             break;
                         }
@@ -210,7 +217,7 @@ impl StdioTransport {
                     Ok(envelope) => envelope,
                     Err(error) => {
                         tracing::warn!(%error, "Stdio transport: invalid JSON-RPC envelope");
-                        if send_protocol_error(
+                        if !send_protocol_error_within_deadline(
                             &pump_writer,
                             &pump_router,
                             invalid_id,
@@ -218,7 +225,6 @@ impl StdioTransport {
                             "Invalid Request",
                         )
                         .await
-                        .is_err()
                         {
                             break;
                         }
@@ -240,7 +246,7 @@ impl StdioTransport {
                         .filter(|id| is_domain_id(id))
                         .cloned()
                         .unwrap_or(Value::Null);
-                    if send_protocol_error(
+                    if !send_protocol_error_within_deadline(
                         &pump_writer,
                         &pump_router,
                         id,
@@ -248,7 +254,6 @@ impl StdioTransport {
                         "Invalid Request",
                     )
                     .await
-                    .is_err()
                     {
                         break;
                     }
@@ -307,7 +312,7 @@ impl StdioTransport {
                                 id = %id,
                                 "Rejecting JSON-RPC request with out-of-domain id"
                             );
-                            if send_protocol_error(
+                            if !send_protocol_error_within_deadline(
                                 &pump_writer,
                                 &pump_router,
                                 Value::Null,
@@ -315,7 +320,6 @@ impl StdioTransport {
                                 "Invalid Request",
                             )
                             .await
-                            .is_err()
                             {
                                 break;
                             }
@@ -338,7 +342,7 @@ impl StdioTransport {
                                     method = %method,
                                     "stdio 入站队列已满，显式拒绝请求"
                                 );
-                                if send_protocol_error(
+                                if !send_protocol_error_within_deadline(
                                     &pump_writer,
                                     &pump_router,
                                     id,
@@ -346,7 +350,6 @@ impl StdioTransport {
                                     STDIO_BACKPRESSURE_MESSAGE,
                                 )
                                 .await
-                                .is_err()
                                 {
                                     break;
                                 }
@@ -356,16 +359,24 @@ impl StdioTransport {
                     // Notification (no id, has method)
                     (None, Some(method)) => {
                         // 通知没有应答通道，不能像请求那样显式拒绝：队列满时等待
-                        // 消费者排水（取消等控制消息不丢），并与 terminal 竞速。
-                        let enqueued = tokio::select! {
+                        // 消费者排水（取消等控制消息不丢）。等待必须有停滞上限，
+                        // 否则 pump 停在这里既读不到 stdin EOF 也到不了 close。
+                        let admitted = tokio::select! {
                             biased;
                             () = pump_router.wait_closed() => false,
-                            result = incoming_tx.send(IncomingMessage::Notification {
-                                method,
-                                params: envelope.params.unwrap_or(Value::Null),
-                            }) => result.is_ok(),
+                            outcome = tokio::time::timeout(
+                                STDIO_STALL_TIMEOUT,
+                                incoming_tx.send(IncomingMessage::Notification {
+                                    method,
+                                    params: envelope.params.unwrap_or(Value::Null),
+                                }),
+                            ) => matches!(outcome, Ok(Ok(()))),
                         };
-                        if !enqueued {
+                        if !admitted {
+                            tracing::warn!(
+                                event = "acp_stdio_backpressure",
+                                "stdio 入站队列停滞，终止传输以结算 pending"
+                            );
                             break;
                         }
                     }
@@ -483,6 +494,25 @@ async fn send_protocol_error(
         error: Some(AcpError::new(code, message)),
     };
     write_envelope(writer, router, &envelope).await
+}
+
+/// pump 内协议错误应答的写入上限：等待 writer 锁或 stdout 排空超过停滞窗口
+/// 即返回 `false`，调用方据此终止 pump 并让 `pump_router.close()` 结算 pending。
+async fn send_protocol_error_within_deadline(
+    writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    router: &RequestRouter,
+    id: Value,
+    code: i64,
+    message: &'static str,
+) -> bool {
+    matches!(
+        tokio::time::timeout(
+            STDIO_STALL_TIMEOUT,
+            send_protocol_error(writer, router, id, code, message),
+        )
+        .await,
+        Ok(Ok(()))
+    )
 }
 
 async fn write_envelope(

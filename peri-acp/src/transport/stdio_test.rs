@@ -1031,3 +1031,58 @@ async fn test_eof_settles_pending_request_while_backlog_full() {
         .unwrap_err();
     assert_transport_closed(error);
 }
+
+/// [回归测试 #470 / CR] 满队列 + 通知 + EOF 不排水：通知等待容量不得掩盖
+/// terminal，pump 须在停滞窗口内 close 并按 `-32603` 结算 pending。
+#[tokio::test(start_paused = true)]
+async fn test_stalled_notification_admission_still_settles_pending() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let pending = tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let _ = read_stdout_line(&mut output).await;
+
+    fill_incoming_backlog(&mut input, 0).await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#,
+    )
+    .await;
+    drop(input);
+
+    let error = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("通知等待容量时断开仍须结算 pending")
+        .expect("task panic")
+        .unwrap_err();
+    assert_transport_closed(error);
+}
+
+/// [回归测试 #470 / CR] writer 阻塞 + 满队列 + overflow 请求 + EOF：背压应答
+/// 等待写锁不得挡住 terminal，pending 须在停滞窗口内结算。
+#[tokio::test(start_paused = true)]
+async fn test_blocked_writer_overflow_reply_does_not_block_pending_settlement() {
+    let (input, reader) = tokio::io::duplex(64 * 1024);
+    let (started_tx, started_rx) = oneshot::channel();
+    let transport = Arc::new(StdioTransport::from_reader_writer(
+        reader,
+        BlockingWriter {
+            started: Some(started_tx),
+        },
+    ));
+    let pending =
+        tokio::spawn(async move { transport.send_request("blocked/write", json!({})).await });
+    started_rx.await.expect("first poll_write should start");
+
+    let mut input = input;
+    fill_incoming_backlog(&mut input, 1).await;
+    drop(input);
+
+    let error = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("overflow 应答等待 writer 时断开仍须结算 pending")
+        .expect("task panic")
+        .unwrap_err();
+    assert_transport_closed(error);
+}
