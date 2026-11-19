@@ -2,6 +2,8 @@
 
 pub mod anthropic;
 mod auth;
+#[cfg(test)]
+mod client_failure_test;
 pub mod openai_compatible;
 pub mod openai_responses;
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -30,12 +31,66 @@ impl HttpRequest {
     }
 }
 
+/// 模型实例的 HTTP 边界：client 与 transport 共享同一连接池。
+///
+/// `ClientBuilder::build` 会因平台 TLS 根证书不可用等原因失败；构造失败保留为
+/// `ModelError`，首次 `prepare_stream`/`stream` 时返回，适配器装配期不 unwind。
+pub(crate) enum ModelHttp {
+    Ready {
+        client: reqwest::Client,
+        transport: Arc<dyn HttpTransport>,
+    },
+    Unavailable(ModelError),
+}
+
+impl ModelHttp {
+    pub(crate) fn for_runtime(runtime: &ModelRuntimeConfig, follow_redirects: bool) -> Self {
+        match client_for_runtime(runtime, follow_redirects) {
+            Ok(client) => Self::Ready {
+                transport: Arc::new(ReqwestTransport::new(client.clone())),
+                client,
+            },
+            Err(error) => Self::Unavailable(error),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_transport(transport: Arc<dyn HttpTransport>) -> Self {
+        Self::Ready {
+            client: reqwest::Client::new(),
+            transport,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable(error: ModelError) -> Self {
+        Self::Unavailable(error)
+    }
+
+    /// 请求构造与发送共用的 client/transport；构造期失败在此暴露。
+    pub(crate) fn client_and_transport(
+        &self,
+    ) -> ModelResult<(reqwest::Client, Arc<dyn HttpTransport>)> {
+        match self {
+            Self::Ready { client, transport } => Ok((client.clone(), Arc::clone(transport))),
+            Self::Unavailable(error) => Err(error.clone()),
+        }
+    }
+}
+
 /// 显式代理路由不跟随重定向或环境代理，防止关联头越过已配置的传输边界。
 pub(crate) fn client_for_runtime(
     runtime: &ModelRuntimeConfig,
     follow_redirects: bool,
-) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
+) -> ModelResult<reqwest::Client> {
+    build_client(reqwest::Client::builder(), runtime, follow_redirects)
+}
+
+pub(crate) fn build_client(
+    mut builder: reqwest::ClientBuilder,
+    runtime: &ModelRuntimeConfig,
+    follow_redirects: bool,
+) -> ModelResult<reqwest::Client> {
     if !follow_redirects || runtime.transport_route().is_some() {
         builder = builder.redirect(reqwest::redirect::Policy::none());
     }
@@ -43,7 +98,10 @@ pub(crate) fn client_for_runtime(
         // HTTP 客户端的隐式重试会绕过 runtime 的物理发送序号。
         builder = builder.no_proxy().retry(reqwest::retry::never());
     }
-    builder.build().expect("Model HTTP client construction")
+    // 本 workspace 只启用 rustls 后端，build 失败来自 TLS 配置或平台 verifier 初始化。
+    builder.build().map_err(|error| {
+        ModelError::transport(TransportErrorKind::Tls, None::<&str>).with_error(&error)
+    })
 }
 
 /// 已建立连接后的安全响应元数据与可取消 body。

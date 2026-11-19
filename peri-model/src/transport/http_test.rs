@@ -11,7 +11,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use super::{HttpBody, HttpRequest, HttpResponse, HttpTransport};
-use crate::{ModelError, ModelResult, TransportErrorKind};
+use crate::{ModelError, ModelResult, ModelRuntimeConfig, TransportErrorKind};
 
 #[test]
 fn reqwest_error_keeps_message_and_underlying_parse_cause() {
@@ -138,6 +138,29 @@ async fn fake_transport_reports_midstream_body_failure() {
         response.body.next().await.expect("body error"),
         Err(error) if error.transport_kind() == Some(TransportErrorKind::Connection)
     ));
+}
+
+#[test]
+fn client_builder_failure_returns_displayable_error_instead_of_panicking() {
+    // 平台 TLS 根证书不可用等 builder 失败只影响该 client（#478）。
+    let error = super::http::build_client(
+        reqwest::Client::builder().tls_backend_preconfigured(()),
+        &ModelRuntimeConfig::with_full_observation(),
+        true,
+    )
+    .expect_err("builder 失败必须返回错误");
+
+    assert_eq!(error.transport_kind(), Some(TransportErrorKind::Tls));
+    assert!(error.to_string().contains("tls"));
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.message(), Some("builder error"));
+    assert!(
+        diagnostic
+            .causes()
+            .iter()
+            .any(|cause| cause.contains("Unknown TLS backend")),
+        "错误必须保留 builder 原始诊断: {diagnostic:?}"
+    );
 }
 
 #[tokio::test]

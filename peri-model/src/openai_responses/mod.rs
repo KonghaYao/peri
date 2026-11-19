@@ -21,8 +21,9 @@ use url::Url;
 
 use crate::runtime::stream::runtime_http_sse_stream;
 use crate::transport::HttpRequest;
+#[cfg(test)]
 use crate::transport::HttpTransport;
-use crate::transport::ReqwestTransport;
+use crate::transport::ModelHttp;
 use crate::ModelCapabilities;
 use crate::ModelError;
 use crate::ModelRequest;

@@ -247,6 +247,9 @@ impl LlmProvider {
     }
 
     /// 宿主显式注入传输路由；provider 身份、请求内容与认证配置保持原值。
+    ///
+    /// 装配期不失败：HTTP client 构造失败（如平台 TLS 根证书不可用）保留为模型错误，
+    /// 由首次 `prepare_stream`/`stream` 返回，避免进程 panic。
     #[must_use]
     pub fn into_model_with_transport_route(
         self,
