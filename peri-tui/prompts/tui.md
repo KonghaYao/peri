@@ -85,7 +85,8 @@ SDK/browser components such as `H1`/`H2`/`H3`, `Row`/`Grid`, `TextInput`, `TextA
   The action takes exactly one argument, and there is no second "context" argument.
 - `@Set($name, value)` and `@Reset($name)` change only the block-local view state for
   this rendered block. They are not persisted, never enter the transcript, and are
-  disabled while the block is still streaming.
+  disabled while the block is still streaming. Blocks whose source is identical share that
+  state; give blocks that need independent state distinct programs.
 - `@Run(...)` and `@OpenUrl(...)` are reported as unsupported. Query and Mutation
   actions are never executed in this environment.
 - Multiple actions are not supported inside one Button. Emit several buttons instead.
