@@ -255,23 +255,22 @@ async fn permanent_delivery_failure_backs_off_and_close_drains_worker() {
         )
         .is_err());
     tokio::task::yield_now().await;
-    // 重试在阻塞池执行：退避计时可能晚于推进才登记，按固定步长推进到预算以内。
-    // 预算 = 八次退避总和 + 3/4 次退避余量：覆盖登记漂移，又不让第 10 次重试落地。
-    let retries = 8_u32;
-    let retry_budget: std::time::Duration =
-        (0..retries).map(super::delivery_retry::retry_delay).sum();
+    // 重试在阻塞池执行，退避计时可能晚于虚拟时间推进才登记：按尝试次数等待，
+    // 由真实时间兜底，不用固定虚拟步数估算预算。
+    let retries = 8_usize;
     let step = std::time::Duration::from_millis(100);
-    let steps = (retry_budget + super::delivery_retry::retry_delay(retries) * 3 / 4).as_millis()
-        / step.as_millis();
-    for _ in 0..steps {
-        if attempts.load(Ordering::SeqCst) >= 9 {
-            break;
-        }
-        tokio::time::advance(step).await;
-        for _ in 0..4 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    for retry in 0..retries {
+        let expected = retry + 2;
+        while attempts.load(Ordering::SeqCst) < expected {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "retry {retry} must land within the real-time bound"
+            );
+            tokio::time::advance(step).await;
             tokio::task::yield_now().await;
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert_eq!(attempts.load(Ordering::SeqCst), 9);
     assert_eq!(registry.active_count(), 1);
