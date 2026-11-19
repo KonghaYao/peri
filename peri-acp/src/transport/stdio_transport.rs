@@ -549,7 +549,13 @@ where
             () = router.wait_closed() => return PumpWait::Stop,
             value = &mut operation => return PumpWait::Done(value),
             line = lines.next_line() => match line {
-                Ok(Some(line)) => deferred.push_back(line),
+                Ok(Some(line)) => {
+                    // 匹配响应不能等入站容量：host 可能正等这个响应才继续 recv，
+                    // 排到 deferred 会让双方互相等待。
+                    if !dispatch_matching_response(router, &line) {
+                        deferred.push_back(line);
+                    }
+                }
                 Ok(None) => return PumpWait::Stop,
                 Err(error) => {
                     tracing::warn!(%error, "Stdio transport: stdin read failed");
@@ -583,6 +589,32 @@ where
         .await,
         PumpWait::Done(Ok(()))
     )
+}
+
+/// 等待期间读到的行若是匹配 pending 的响应，立即交给 router：否则 host 在
+/// 等待该响应时不会继续 `recv()`，通知入队与响应配对会互相等待。
+fn dispatch_matching_response(router: &RequestRouter, line: &str) -> bool {
+    let Ok(envelope) = serde_json::from_str::<JsonRpcEnvelope>(line) else {
+        return false;
+    };
+    if envelope.jsonrpc != "2.0" || envelope.method.is_some() {
+        return false;
+    }
+    let Some(id) = envelope.id.as_ref().filter(|id| is_domain_id(id)) else {
+        return false;
+    };
+    let message = match (envelope.result, envelope.error) {
+        (Some(result), None) => IncomingMessage::Response {
+            id: value_to_request_id(id),
+            result: Ok(result),
+        },
+        (None, Some(error)) => IncomingMessage::Response {
+            id: value_to_request_id(id),
+            result: Err(error),
+        },
+        _ => return false,
+    };
+    router.dispatch(&message)
 }
 
 async fn write_envelope(

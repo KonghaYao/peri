@@ -1101,3 +1101,34 @@ async fn test_blocked_writer_overflow_reply_does_not_block_pending_settlement() 
         .unwrap_err();
     assert_transport_closed(error);
 }
+
+/// [回归测试 #470 / CR] 通知等待容量时，后续匹配响应必须直接配对：若它排进
+/// deferred，host 等该响应而不再 `recv()` 就会活锁。
+#[tokio::test(start_paused = true)]
+async fn test_matching_response_dispatches_while_notification_waits_for_capacity() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let pending = tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let ask_id = read_stdout_line(&mut output).await["id"].clone();
+
+    fill_incoming_backlog(&mut input, 0).await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#,
+    )
+    .await;
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{ask_id},"result":"pong"}}"#),
+    )
+    .await;
+
+    let answer = tokio::time::timeout(Duration::from_millis(1), pending)
+        .await
+        .expect("匹配响应不得等入站队列排水")
+        .expect("task panic")
+        .expect("应答应成功");
+    assert_eq!(answer, json!("pong"));
+}
