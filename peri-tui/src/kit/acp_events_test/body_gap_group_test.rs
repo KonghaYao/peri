@@ -260,6 +260,71 @@ fn test_system_note_between_tools_is_grouped() {
     );
 }
 
+/// 详情目标（超大正文占位 note / 外置正文工具卡）必须保持独立槽位：
+/// 组行只暴露一个槽位，藏进组内的多个详情目标无法分别打开。
+#[test]
+#[serial]
+fn test_detail_target_note_stays_visible_instead_of_grouped() {
+    use crate::kit::history_window::{DetailDescriptor, HistoryDetailTarget, HistorySource};
+
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[text("正文 A", "m1"), tool_started("t1"), tool_ended("t1")],
+    );
+    state.inject_system_note(
+        "超大内容 · 8.0 KiB · 按需加载详情".into(),
+        TuiNoteLevel::Info,
+    );
+    dispatch_all(
+        &mut state,
+        &[tool_started("t2"), tool_ended("t2"), text("正文 B", "m2")],
+    );
+    let note_hash = current_snapshot()
+        .items
+        .iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiCollapsedGroup(group) => {
+                group.view_models.iter().find_map(|vm| match vm {
+                    TuiRenderUnit::TuiSystemNote(note) => Some(note.content_hash),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("占位 note 在注册详情目标前应位于组内");
+
+    crate::kit::atoms::HISTORY_DETAIL_TARGETS.set(vec![HistoryDetailTarget {
+        content_hash: note_hash,
+        descriptor: DetailDescriptor::new(
+            HistorySource::Own,
+            "s1:m1",
+            8192,
+            4096,
+            "snap-1",
+            "ticket-1",
+        ),
+    }]);
+    crate::kit::acp_events::push_view_models(&mut state);
+    let snapshot = current_snapshot();
+    assert_eq!(
+        snapshot.items.len(),
+        5,
+        "正文 A + 组(1) + 占位 note + 组(1) + 正文 B，实际 {:?}",
+        snapshot.items
+    );
+    assert_eq!(group_at(&snapshot, 1).count, 1);
+    assert!(
+        matches!(&snapshot.items[2], TuiRenderUnit::TuiSystemNote(note) if note.content_hash == note_hash),
+        "详情目标占位 note 必须独立可见"
+    );
+    assert_eq!(group_at(&snapshot, 3).count, 1);
+    assert_eq!(body_text(&snapshot.items[4]), Some("正文 B"));
+
+    crate::kit::atoms::HISTORY_DETAIL_TARGETS.set(Vec::new());
+    crate::kit::acp_events::render::reset_body_gap_group_cache();
+}
+
 /// 冷重建一致：清空分组缓存后重新装配，快照逐条结构相等（组身份与成员不变）。
 #[test]
 #[serial]

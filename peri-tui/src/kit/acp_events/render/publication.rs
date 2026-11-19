@@ -118,7 +118,8 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // 是天然边界，不会跨 turn 合并。
     // `changed_from` 取分组输出的稳定前缀长度：`[0, changed_from)` 的槽位内容
     // 未变，Transcript 可保留其渲染缓存。
-    let changed_from = group_body_gaps(&mut items, &overrides);
+    let detail_hashes = detail_target_hashes();
+    let changed_from = group_body_gaps(&mut items, &overrides, &detail_hashes);
     drop(overrides);
 
     let view_models = VIEW_MODELS.state();
@@ -319,8 +320,17 @@ pub(super) fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: 
 /// 子 Agent 组是可交互的 durable entry（聚焦后 Enter 打开详情），不参与自动
 /// 隐藏；纯 reasoning 气泡（无正文）与工具 / 普通通知 / info 级提醒属于过程单元。
 /// [§15] 错误级通知与 required / warning 及以上的提醒保持可见，不折进组行。
+///
+/// 详情目标（超大正文占位 note、外置正文的工具卡）同样保持可见：组行只暴露
+/// 一个槽位，组内多个目标无法分别打开详情，分组不能把它们藏到同一槽位后面。
 #[must_use]
-pub(super) fn is_body_unit(vm: &TuiRenderUnit) -> bool {
+pub(super) fn is_body_unit(
+    vm: &TuiRenderUnit,
+    detail_hashes: &std::collections::HashSet<u64>,
+) -> bool {
+    if detail_hashes.contains(&vm.content_hash()) {
+        return true;
+    }
     match vm {
         TuiRenderUnit::TuiAssistantBubble(b) => !b.text.is_empty(),
         TuiRenderUnit::TuiSystemNote(note) => note.level == TuiNoteLevel::Error,
@@ -464,8 +474,12 @@ fn build_collapsed_group(
 }
 
 /// 分组辅助输入指纹——与快照内容无关但会改变分组结果的输入：语言版本
-/// （组摘要 i18n 标签）与组折叠覆盖（用户手动展开/收起）。
-fn body_gap_aux_fingerprint(overrides: &std::collections::HashMap<FoldKey, FoldState>) -> u64 {
+/// （组摘要 i18n 标签）、组折叠覆盖（用户手动展开/收起）与详情目标集合
+/// （详情目标单元必须保持独立槽位）。
+fn body_gap_aux_fingerprint(
+    overrides: &std::collections::HashMap<FoldKey, FoldState>,
+    detail_hashes: &std::collections::HashSet<u64>,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut group_overrides: Vec<(&str, u64)> = overrides
         .iter()
@@ -478,12 +492,25 @@ fn body_gap_aux_fingerprint(overrides: &std::collections::HashMap<FoldKey, FoldS
         })
         .collect();
     group_overrides.sort_unstable();
+    let mut details: Vec<u64> = detail_hashes.iter().copied().collect();
+    details.sort_unstable();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     group_overrides.hash(&mut hasher);
+    details.hash(&mut hasher);
     crate::kit::tui_render_unit::tui_hash_combine(
         crate::kit::atoms::LANG_VERSION.get(),
         hasher.finish(),
     )
+}
+
+/// 当前可打开详情的目标内容哈希——这些单元各自保留独立槽位。
+fn detail_target_hashes() -> std::collections::HashSet<u64> {
+    crate::kit::atoms::HISTORY_DETAIL_TARGETS
+        .state()
+        .read()
+        .iter()
+        .map(|target| target.content_hash)
+        .collect()
 }
 
 /// 稳定切点（输入下标升序）：输出 `[0, output)` 只依赖输入 `[0, input)`。
@@ -539,17 +566,25 @@ fn same_group_entry(a: &TuiRenderUnit, b: &TuiRenderUnit) -> bool {
             x.message_id == y.message_id
         }
         (TuiRenderUnit::TuiToolCard(x), TuiRenderUnit::TuiToolCard(y)) => x.tool_id == y.tool_id,
+        (TuiRenderUnit::TuiSystemReminder(x), TuiRenderUnit::TuiSystemReminder(y)) => {
+            x.reminder_id == y.reminder_id
+        }
         _ => true,
     }
 }
 
 /// 切点在新输入下是否仍稳定（见 [`GroupCutAnchor`]）。
-fn cut_stable(anchor: GroupCutAnchor, input: &im::Vector<TuiRenderUnit>, cut: usize) -> bool {
+fn cut_stable(
+    anchor: GroupCutAnchor,
+    input: &im::Vector<TuiRenderUnit>,
+    cut: usize,
+    detail_hashes: &std::collections::HashSet<u64>,
+) -> bool {
     match anchor {
         GroupCutAnchor::AfterBody => true,
         GroupCutAnchor::AfterGroup => match input.get(cut) {
             None => true,
-            Some(vm) => is_body_unit(vm),
+            Some(vm) => is_body_unit(vm, detail_hashes),
         },
     }
 }
@@ -561,38 +596,39 @@ fn rebuild_grouped_suffix(
     grouped: &mut im::Vector<TuiRenderUnit>,
     cuts: &mut Vec<GroupCut>,
     overrides: &std::collections::HashMap<FoldKey, FoldState>,
+    detail_hashes: &std::collections::HashSet<u64>,
 ) {
-    let mut i = 0usize;
-    while i < suffix.len() {
-        if is_body_unit(&suffix[i]) {
-            let start = i;
-            while i < suffix.len() && is_body_unit(&suffix[i]) {
-                i += 1;
-            }
-            for (offset, unit) in suffix.iter().skip(start).take(i - start).enumerate() {
-                grouped.push_back(unit.clone());
-                // 正文逐条透传：每个边界都是稳定切点，尾部变化时可就近复用前缀。
-                cuts.push(GroupCut {
-                    input: input_base + start + offset + 1,
-                    output: grouped.len(),
-                    anchor: GroupCutAnchor::AfterBody,
-                });
-            }
+    // 单游标推进：正文段与过程段共享同一个迭代器，避免对每段重复 skip 开头。
+    let mut iter = suffix.iter().enumerate().peekable();
+    while let Some((offset, unit)) = iter.next() {
+        if is_body_unit(unit, detail_hashes) {
+            grouped.push_back(unit.clone());
+            // 正文逐条透传：每个边界都是稳定切点，尾部变化时可就近复用前缀。
+            cuts.push(GroupCut {
+                input: input_base + offset + 1,
+                output: grouped.len(),
+                anchor: GroupCutAnchor::AfterBody,
+            });
             continue;
         }
-        let start = i;
-        while i < suffix.len() && !is_body_unit(&suffix[i]) {
-            i += 1;
+        let mut run = vec![unit.clone()];
+        let mut consumed = offset + 1;
+        while let Some((next_offset, next)) = iter.peek() {
+            if is_body_unit(next, detail_hashes) {
+                break;
+            }
+            run.push((**next).clone());
+            consumed = next_offset + 1;
+            iter.next();
         }
-        let run: Vec<TuiRenderUnit> = suffix.iter().skip(start).take(i - start).cloned().collect();
         cuts.push(GroupCut {
-            input: input_base + start,
+            input: input_base + offset,
             output: grouped.len(),
             anchor: GroupCutAnchor::AfterBody,
         });
         grouped.push_back(build_collapsed_group(run, overrides));
         cuts.push(GroupCut {
-            input: input_base + i,
+            input: input_base + consumed,
             output: grouped.len(),
             anchor: GroupCutAnchor::AfterGroup,
         });
@@ -606,9 +642,10 @@ fn rebuild_grouped_suffix(
 pub(super) fn group_body_gaps(
     items: &mut im::Vector<TuiRenderUnit>,
     overrides: &std::collections::HashMap<FoldKey, FoldState>,
+    detail_hashes: &std::collections::HashSet<u64>,
 ) -> usize {
     let input = items.clone();
-    let aux = body_gap_aux_fingerprint(overrides);
+    let aux = body_gap_aux_fingerprint(overrides, detail_hashes);
     let cache = BODY_GAP_GROUP_CACHE.lock();
     let (rebuild_from, mut grouped, mut cuts) = match cache.as_ref() {
         Some(cached) if cached.aux == aux => {
@@ -628,7 +665,7 @@ pub(super) fn group_body_gaps(
                 .iter()
                 .rev()
                 .filter(|cut| cut.input <= d)
-                .find(|cut| cut_stable(cut.anchor, &input, cut.input))
+                .find(|cut| cut_stable(cut.anchor, &input, cut.input, detail_hashes))
             {
                 Some(cut) => {
                     let mut prefix = cached.grouped.clone();
@@ -653,7 +690,14 @@ pub(super) fn group_body_gaps(
     } else {
         input.clone().split_off(rebuild_from)
     };
-    rebuild_grouped_suffix(suffix, rebuild_from, &mut grouped, &mut cuts, overrides);
+    rebuild_grouped_suffix(
+        suffix,
+        rebuild_from,
+        &mut grouped,
+        &mut cuts,
+        overrides,
+        detail_hashes,
+    );
     if cuts.len() > GROUP_CUT_CAP {
         cuts.drain(0..cuts.len() - GROUP_CUT_CAP);
     }
