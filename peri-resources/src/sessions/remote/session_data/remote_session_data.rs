@@ -542,14 +542,30 @@ impl SessionDataPort for RemoteSessionData {
     }
 
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
+        // 删除范围由批内重新计算；这里预读只用来辨认缓存项，读失败退回按 id 与 root 回收。
+        let subtree: Option<Vec<ThreadId>> = if self.roots.read().await.is_empty() {
+            None
+        } else {
+            match self.read_tree(id).await {
+                Ok(tree) => Some(tree.into_iter().map(|meta| meta.id).collect()),
+                Err(error) => {
+                    tracing::warn!(%error, %id, "remote root cache invalidation skipped");
+                    None
+                }
+            }
+        };
         let result = self.write_tree_deletion(id).await;
         if result.is_ok() {
-            // 删除以 `id` 为根的子树：`id` 自己与沿父链上溯到它的后代都不再可解析。
+            // 删除以 `id` 为根的子树：整棵子树的 thread 都不再可解析。中间节点的后代
+            // 缓存的 root 可能位于子树之外，不能只按 `root == id` 判断。
             // 删除失败时保留缓存——会话行仍在，解析结果仍成立。
-            self.roots
-                .write()
-                .await
-                .retain(|thread, root| thread != id && root != id);
+            let mut roots = self.roots.write().await;
+            match subtree {
+                Some(ids) => {
+                    roots.retain(|thread, root| !ids.contains(thread) && thread != id && root != id)
+                }
+                None => roots.retain(|thread, root| thread != id && root != id),
+            }
         }
         result
     }

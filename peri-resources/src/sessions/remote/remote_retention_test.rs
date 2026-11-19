@@ -159,23 +159,40 @@ fn session_input(thread_id: &str, cwd: &std::path::Path, binding: SessionBinding
 }
 
 #[tokio::test]
-async fn deleting_a_tree_reclaims_its_cached_roots_and_keeps_other_trees() {
+async fn deleting_a_subtree_reclaims_its_cached_roots_and_keeps_other_trees() {
     let fixture = fixture().await;
     seed_thread(&fixture.pool, "ret-root", None).await;
     seed_thread(&fixture.pool, "ret-child", Some("ret-root")).await;
+    seed_thread(&fixture.pool, "ret-grandchild", Some("ret-child")).await;
     seed_thread(&fixture.pool, "keep-root", None).await;
     let data = remote_adapter(&fixture.transport, "machine".to_owned());
 
-    for id in ["ret-root", "ret-child", "keep-root"] {
+    for id in ["ret-root", "ret-child", "ret-grandchild", "keep-root"] {
         data.session_root(&id.to_owned()).await.unwrap();
     }
-    assert_eq!(data.cached_roots().await.len(), 3);
+    assert_eq!(data.cached_roots().await.len(), 4);
 
-    data.delete_tree(&"ret-root".to_owned()).await.unwrap();
+    // 删除中间节点：后代缓存的 root 位于子树之外（ret-grandchild → ret-root）。
+    data.delete_tree(&"ret-child".to_owned()).await.unwrap();
 
     let roots = data.cached_roots().await;
-    assert!(!roots.contains_key("ret-root"));
     assert!(!roots.contains_key("ret-child"));
+    assert!(!roots.contains_key("ret-grandchild"));
+    assert_eq!(
+        roots.get("ret-root").map(String::as_str),
+        Some("ret-root"),
+        "子树之外的根必须保留"
+    );
+    assert_eq!(
+        roots.get("keep-root").map(String::as_str),
+        Some("keep-root"),
+        "其他会话树的缓存必须保留"
+    );
+
+    // 删除根：自身条目同样回收。
+    data.delete_tree(&"ret-root".to_owned()).await.unwrap();
+    let roots = data.cached_roots().await;
+    assert!(!roots.contains_key("ret-root"));
     assert_eq!(
         roots.get("keep-root").map(String::as_str),
         Some("keep-root"),
@@ -204,6 +221,7 @@ async fn deleted_session_directories_release_observations_and_other_bindings_sti
     let sub_workspace = facade.resolve_workspace(&sub).await.unwrap();
     let root_id = "retention-root".to_owned();
     let sub_id = "retention-sub".to_owned();
+    let sibling_id = "retention-sibling".to_owned();
     facade
         .create_session(&session_input(
             &root_id,
@@ -220,6 +238,15 @@ async fn deleted_session_directories_release_observations_and_other_bindings_sti
         ))
         .await
         .unwrap();
+    // 与 root_id 共享 cwd 的另一个会话：按工作目录回收会连它的观测一起清掉。
+    facade
+        .create_session(&session_input(
+            &sibling_id,
+            &root,
+            SessionBinding::from_workspace(&root_workspace),
+        ))
+        .await
+        .unwrap();
     assert_eq!(execution.observation_cwds().len(), 2);
 
     facade.delete_session_tree(&root_id).await.unwrap();
@@ -233,7 +260,17 @@ async fn deleted_session_directories_release_observations_and_other_bindings_sti
         observed.contains(&sub),
         "其他会话的观测必须保留: {observed:?}"
     );
-    // 回收的是本机观测缓存，不是持久绑定：另一个会话仍能按保存的证据验证与恢复。
+    // 回收的是本机观测缓存，不是持久绑定：共享目录的会话仍能按保存的证据重新观测。
+    let sibling = facade
+        .validate_bound_workspace(&sibling_id, BindingRecheck::Full)
+        .await
+        .unwrap();
+    assert_eq!(sibling.cwd, root);
+    assert_eq!(sibling.workspace_id, root_workspace.workspace_id);
+    assert!(
+        execution.observation_cwds().contains(&root),
+        "恢复时必须按保存的绑定证据重新观测"
+    );
     let restored = facade
         .validate_bound_workspace(&sub_id, BindingRecheck::Full)
         .await
