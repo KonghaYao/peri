@@ -1,0 +1,1273 @@
+use std::time::{Duration, Instant};
+
+use super::{App, dump_buffer, dump_screen, handle_mouse};
+use crate::stories::{
+    ACCENT, BG, STORIES, StoryState, document_lines, document_max_scroll, handle_story_mouse,
+};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn every_story_variant_renders() {
+    for (story_index, story) in STORIES.iter().enumerate() {
+        for (variant_index, variant) in story.variants.iter().enumerate() {
+            let mut app = App::new(story_index);
+            app.select_variant(variant_index);
+            let screen = dump_screen(&mut app, 100, 32);
+            assert!(screen.contains("peri-tui storybook"));
+            assert!(screen.contains(story.title));
+            assert!(screen.contains(variant.key));
+            assert!(screen.lines().count() >= 10);
+        }
+    }
+}
+
+#[test]
+fn minimum_size_renders_help_instead_of_panicking() {
+    let mut app = App::new(0);
+    assert!(dump_screen(&mut app, 30, 8).contains("Terminal too small"));
+    assert!(dump_screen(&mut app, 40, 10).contains("peri-tui storybook"));
+}
+
+#[test]
+fn wide_characters_are_not_padded_in_dumps() {
+    let mut app = App::new(0);
+    app.select_variant(2);
+    assert!(dump_screen(&mut app, 100, 32).contains("你好，世界"));
+}
+
+#[test]
+fn textarea_click_focuses_and_maps_display_column_to_char() {
+    let mut app = App::new(0);
+    app.select_variant(0);
+    let area = Rect::new(0, 10, 40, 10);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 2, 10);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::TextArea { focused, .. } = &app.state else {
+        panic!("expected textarea state");
+    };
+    assert!(*focused);
+
+    app.select_variant(2);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 4, 10);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::TextArea { editor, .. } = &app.state else {
+        panic!("expected textarea state");
+    };
+    // "你好，世界": display column 4 lands after the second CJK character.
+    assert_eq!(editor.cursor, 2);
+}
+
+#[test]
+fn list_click_selects_item_and_excludes_scrollbar_column() {
+    let mut app = App::new(1);
+    app.select_variant(0);
+    let area = Rect::new(0, 10, 40, 12);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 5, 14);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::List { selected, .. } = &app.state else {
+        panic!("expected list state");
+    };
+    assert_eq!(*selected, 3);
+
+    let bar_click = mouse(MouseEventKind::Down(MouseButton::Left), 39, 14);
+    assert!(handle_story_mouse(&mut app.state, &bar_click, area));
+    let StoryState::List { selected, .. } = &app.state else {
+        panic!("expected list state");
+    };
+    assert_eq!(*selected, 3);
+}
+
+#[test]
+fn list_wheel_scrolls_view_without_moving_selection() {
+    let mut app = App::new(1);
+    app.select_variant(0);
+    // 12 rows − header − footer → 10 item rows; 60 items → max scroll 50.
+    let area = Rect::new(0, 10, 40, 12);
+    let wheel = mouse(MouseEventKind::ScrollDown, 5, 10);
+    assert!(handle_story_mouse(&mut app.state, &wheel, area));
+    let StoryState::List {
+        selected, scroll, ..
+    } = &app.state
+    else {
+        panic!("expected list state");
+    };
+    assert_eq!((*selected, *scroll), (0, 3));
+
+    // Clicks map through the scrolled viewport.
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 5, 11);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::List {
+        selected, scroll, ..
+    } = &app.state
+    else {
+        panic!("expected list state");
+    };
+    assert_eq!((*selected, *scroll), (3, 3));
+
+    // Header and footer rows stay inert.
+    for row in [area.y, area.bottom() - 1] {
+        let inert = mouse(MouseEventKind::Down(MouseButton::Left), 5, row);
+        assert!(handle_story_mouse(&mut app.state, &inert, area));
+        let StoryState::List { selected, .. } = &app.state else {
+            panic!("expected list state");
+        };
+        assert_eq!(*selected, 3);
+    }
+
+    // The wheel clamps at the last page and at the top.
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &wheel, area);
+    }
+    let StoryState::List { scroll, .. } = &app.state else {
+        panic!("expected list state");
+    };
+    assert_eq!(*scroll, 50);
+    let wheel_up = mouse(MouseEventKind::ScrollUp, 5, 10);
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &wheel_up, area);
+    }
+    let StoryState::List { scroll, .. } = &app.state else {
+        panic!("expected list state");
+    };
+    assert_eq!(*scroll, 0);
+}
+
+#[test]
+fn scrollbar_wheel_moves_position() {
+    let mut app = App::new(2);
+    app.select_variant(1);
+    let area = Rect::new(0, 10, 40, 10);
+    let wheel = mouse(MouseEventKind::ScrollDown, 1, 10);
+    assert!(handle_story_mouse(&mut app.state, &wheel, area));
+    let StoryState::Scrollbar { position, total } = &app.state else {
+        panic!("expected scrollbar state");
+    };
+    assert_eq!(*position, 53);
+    assert_eq!(*total, 100);
+
+    // A click on the bar itself is consumed without moving it.
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 1, 10);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::Scrollbar { position, .. } = &app.state else {
+        panic!("expected scrollbar state");
+    };
+    assert_eq!(*position, 53);
+}
+
+#[test]
+fn textarea_click_past_last_visual_row_keeps_cursor() {
+    let mut app = App::new(0);
+    app.select_variant(2);
+    let area = Rect::new(0, 10, 40, 10);
+    let StoryState::TextArea { editor, .. } = &app.state else {
+        panic!("expected textarea state");
+    };
+    let before = editor.cursor;
+
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 4, 18);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::TextArea { editor, .. } = &app.state else {
+        panic!("expected textarea state");
+    };
+    assert_eq!(editor.cursor, before);
+}
+
+#[test]
+fn textarea_click_outside_narrow_viewport_is_ignored() {
+    let mut app = App::new(0);
+    app.select_variant(4);
+    // The narrow variant reserves 14 columns; clicks to its right are not its input.
+    let area = Rect::new(0, 10, 40, 10);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 30, 10);
+    assert!(!handle_story_mouse(&mut app.state, &click, area));
+}
+
+#[test]
+fn nav_click_switches_story_and_variant() {
+    let mut app = App::new(0);
+    let _ = dump_screen(&mut app, 100, 32);
+    let story_rows = app.metrics.story_rows;
+    assert!(story_rows.height >= 2);
+    handle_mouse(
+        &mut app,
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            story_rows.x + 1,
+            story_rows.y + 1,
+        ),
+    );
+    assert_eq!(app.story, 1);
+    assert_eq!(app.variant, 0);
+
+    let _ = dump_screen(&mut app, 100, 32);
+    let variant_rows = app.metrics.variant_rows;
+    assert!(variant_rows.height >= 2);
+    handle_mouse(
+        &mut app,
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            variant_rows.x + 1,
+            variant_rows.y + 1,
+        ),
+    );
+    assert_eq!(app.variant, 1);
+}
+
+fn story_index(key: &str) -> usize {
+    STORIES
+        .iter()
+        .position(|story| story.key == key)
+        .expect("story registered")
+}
+
+#[test]
+fn rich_text_document_covers_markdown_features() {
+    let mut app = App::new(story_index("markdown"));
+    app.select_variant(0); // rich-text
+    let screen = dump_screen(&mut app, 100, 200);
+    for needle in [
+        "Peri 富文本渲染",
+        "inline code",
+        "Peri 文档 (https://example.com/docs)",
+        "Peri 组件文档 (https://example.com/components)",
+        "& < >",
+        "*不是斜体*",
+        "Ctrl+C",
+        "Setext 二级标题",
+        "• 嵌套三级",
+        "3. 有序列表从 3 开始编号",
+        "│ fn render_markdown",
+        "│ {",
+        "左对齐",
+        "────",
+        "[Image: 本地架构图] (docs/architecture.png)",
+        "[Remote image: 远程示意图] (https://example.com/diagram.png)",
+        "组件预览",
+    ] {
+        assert!(screen.contains(needle), "missing {needle}: {screen}");
+    }
+}
+
+#[test]
+fn markdown_table_renders_unicode_grid() {
+    let mut app = App::new(story_index("markdown"));
+    app.select_variant(4); // table
+    let screen = dump_screen(&mut app, 100, 40);
+    for drawing in ["┌", "┬", "├", "┼", "└"] {
+        assert!(screen.contains(drawing), "missing {drawing}: {screen}");
+    }
+    for cell in ["左对齐", "居中", "右对齐", "1,024", "空单元格"] {
+        assert!(screen.contains(cell), "missing {cell}: {screen}");
+    }
+}
+
+#[test]
+fn markdown_code_block_keeps_source_text() {
+    let mut app = App::new(story_index("markdown"));
+    app.select_variant(3); // code
+    let screen = dump_screen(&mut app, 100, 45);
+    assert!(
+        screen.contains("fn render_markdown(source: &str)"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("parse_markdown(source, 80, palette, base_fg)"),
+        "{screen}"
+    );
+    assert!(screen.contains("+ new line"), "{screen}");
+    assert!(
+        screen.contains("unknown info string falls back to plain text"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn openui_components_render_from_genui_fences() {
+    let mut app = App::new(story_index("openui"));
+
+    app.select_variant(8); // progress
+    let progress = dump_screen(&mut app, 100, 32);
+    assert!(progress.contains("解析 70%"), "{progress}");
+    assert!(progress.contains('━'), "{progress}");
+
+    app.select_variant(10); // button
+    let button = dump_screen(&mut app, 100, 32);
+    assert!(button.contains("继续"), "{button}");
+    assert!(button.contains("查看文档"), "{button}");
+
+    app.select_variant(11); // bar-chart
+    let chart = dump_screen(&mut app, 100, 32);
+    assert!(chart.contains('█'), "{chart}");
+    assert!(chart.contains("Markdown"), "{chart}");
+    assert!(chart.contains(" 42"), "{chart}");
+
+    app.select_variant(12); // sparkline
+    let sparkline = dump_screen(&mut app, 100, 32);
+    assert!(sparkline.contains("延迟抖动"), "{sparkline}");
+    assert!(sparkline.contains('▁'), "{sparkline}");
+    assert!(sparkline.contains('█'), "{sparkline}");
+}
+
+#[test]
+fn openui_button_shows_pressed_style_until_mouse_up_or_cancel() {
+    let mut app = App::new(story_index("openui"));
+    let variant = app
+        .current()
+        .variants
+        .iter()
+        .position(|variant| variant.key == "button")
+        .unwrap();
+    app.select_variant(variant);
+    let pressed_index = |app: &App| match &app.state {
+        StoryState::Document { pressed_button, .. } => *pressed_button,
+        _ => panic!("应为文档预览"),
+    };
+
+    let before = dump_buffer(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let (x, y) = (area.top()..area.bottom())
+        .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| before[(x, y)].symbol() == "继")
+        .expect("主按钮必须出现在预览中");
+    let normal = &before[(x, y)];
+    assert!(normal.modifier.contains(Modifier::REVERSED));
+    assert_eq!(pressed_index(&app), None);
+
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+    handle_mouse(&mut app, down);
+    assert_eq!(pressed_index(&app), Some(0));
+    let held = dump_buffer(&mut app, 100, 32);
+    assert_eq!(held[(x, y)].symbol(), normal.symbol());
+    assert_ne!(held[(x, y)].style(), normal.style());
+    assert!(held[(x, y)].modifier.contains(Modifier::BOLD));
+    assert!(!held[(x, y)].modifier.contains(Modifier::REVERSED));
+    assert_eq!(held[(x + 5, y)], before[(x + 5, y)]);
+
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Drag(MouseButton::Left), x, area.bottom()),
+    );
+    assert_eq!(pressed_index(&app), Some(0));
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Up(MouseButton::Left), x, area.bottom()),
+    );
+    assert_eq!(pressed_index(&app), None);
+    assert_eq!(dump_buffer(&mut app, 100, 32), before);
+
+    for cancel in [
+        mouse(MouseEventKind::Down(MouseButton::Left), x + 5, y),
+        mouse(MouseEventKind::Down(MouseButton::Left), x, area.bottom()),
+        mouse(MouseEventKind::ScrollDown, x, y),
+    ] {
+        handle_mouse(&mut app, down);
+        assert_eq!(pressed_index(&app), Some(0));
+        handle_mouse(&mut app, cancel);
+        assert_eq!(pressed_index(&app), None);
+        assert_eq!(dump_buffer(&mut app, 100, 32), before);
+    }
+}
+
+#[test]
+fn document_button_hit_accounts_for_segment_gap_card_and_scroll() {
+    let mut app = App::new(story_index("openui"));
+    app.state = StoryState::Document {
+        source: "正文\n\n```gen-ui\nroot = Card([Button(\"继续\", @ToAssistant(\"go\"))])\n```\n\n结尾",
+        scroll: 0,
+        pressed_button: None,
+        layout: None,
+    };
+    let area = Rect::new(4, 7, 25, 4);
+    let wheel = mouse(MouseEventKind::ScrollDown, area.x, area.y);
+    assert!(handle_story_mouse(&mut app.state, &wheel, area));
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut buffer);
+    let (x, y) = (area.top()..area.bottom())
+        .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| buffer[(x, y)].symbol() == "继")
+        .expect("滚动后应看得到卡片里的按钮");
+    assert_eq!(x, area.x + 3, "卡片边框、卡片留白与按钮留白各占一列");
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), x, y),
+        area,
+    ));
+    assert!(matches!(
+        app.state,
+        StoryState::Document {
+            pressed_button: Some(0),
+            scroll: 1..,
+            ..
+        }
+    ));
+    crate::stories::render_story(&mut app.state, area, &mut buffer);
+    assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+    assert!(!buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn document_wheel_scrolls_three_rows_and_clamps() {
+    let mut app = App::new(story_index("markdown"));
+    app.select_variant(2); // lists: taller than the viewport
+    let area = Rect::new(0, 10, 40, 6);
+
+    let StoryState::Document { source, scroll, .. } = &app.state else {
+        panic!("expected document state");
+    };
+    assert_eq!(*scroll, 0);
+    let source = *source;
+    let max_scroll = document_max_scroll(source, area.width as usize, area.height as usize);
+    assert!(max_scroll > 3, "fixture must overflow the viewport");
+
+    let wheel = mouse(MouseEventKind::ScrollDown, 5, 10);
+    assert!(handle_story_mouse(&mut app.state, &wheel, area));
+    let StoryState::Document { scroll, .. } = &app.state else {
+        panic!("expected document state");
+    };
+    assert_eq!(*scroll, 3);
+
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &wheel, area);
+    }
+    let StoryState::Document { scroll, .. } = &app.state else {
+        panic!("expected document state");
+    };
+    assert_eq!(*scroll, max_scroll);
+
+    let wheel_up = mouse(MouseEventKind::ScrollUp, 5, 10);
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &wheel_up, area);
+    }
+    let StoryState::Document { scroll, .. } = &app.state else {
+        panic!("expected document state");
+    };
+    assert_eq!(*scroll, 0);
+
+    // Left clicks inside the document are consumed but stay inert.
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 5, 10);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::Document { scroll, .. } = &app.state else {
+        panic!("expected document state");
+    };
+    assert_eq!(*scroll, 0);
+}
+
+#[test]
+fn rich_text_applies_inline_styles() {
+    let initial = STORIES[story_index("markdown")].variants[0].initial;
+    let StoryState::Document { source, .. } = initial() else {
+        panic!("expected document state");
+    };
+    let lines = document_lines(source, 68);
+
+    // Wrapping splits styled runs into per-grapheme spans, so resolve the style of
+    // the span that covers the first character of the needle.
+    let style_at = |needle: &str| {
+        for line in &lines {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            if let Some(byte_index) = text.find(needle) {
+                let char_index = text[..byte_index].chars().count();
+                let mut offset = 0;
+                for span in &line.spans {
+                    offset += span.content.chars().count();
+                    if char_index < offset {
+                        return span.style;
+                    }
+                }
+            }
+        }
+        panic!("missing styled text {needle:?}");
+    };
+
+    assert!(style_at("粗体").add_modifier.contains(Modifier::BOLD));
+    assert!(style_at("斜体").add_modifier.contains(Modifier::ITALIC));
+    let bold_italic = style_at("粗斜体").add_modifier;
+    assert!(bold_italic.contains(Modifier::BOLD) && bold_italic.contains(Modifier::ITALIC));
+    assert!(
+        style_at("删除线")
+            .add_modifier
+            .contains(Modifier::CROSSED_OUT)
+    );
+    assert!(
+        style_at("Peri 文档")
+            .add_modifier
+            .contains(Modifier::UNDERLINED)
+    );
+    assert!(style_at("inline code").fg.is_some());
+    assert!(
+        style_at("Peri 富文本渲染")
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+
+    let rule = "─".repeat(68);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content == rule))
+    );
+}
+
+fn variant_index(story: usize, key: &str) -> usize {
+    STORIES[story]
+        .variants
+        .iter()
+        .position(|variant| variant.key == key)
+        .expect("variant registered")
+}
+
+fn streaming_cursor(app: &App) -> (usize, &'static str) {
+    let StoryState::Streaming(document) = &app.state else {
+        panic!("expected streaming state");
+    };
+    (document.cursor(), document.source())
+}
+
+#[test]
+fn streaming_variants_dump_the_same_mid_stream_frame() {
+    for (story_key, note) in [
+        (
+            "markdown",
+            "逐块到达的 Markdown 渐进渲染；dump 固定在中段。",
+        ),
+        (
+            "openui",
+            "逐字符到达的 GenUI 围栏：闭合前按文本降级，闭合后渲染组件。",
+        ),
+    ] {
+        let story = story_index(story_key);
+        let variant = variant_index(story, "streaming");
+        let mut first = App::new(story);
+        first.select_variant(variant);
+        let mid = dump_screen(&mut first, 100, 32);
+        let mut second = App::new(story);
+        second.select_variant(variant);
+        assert_eq!(
+            mid,
+            dump_screen(&mut second, 100, 32),
+            "{story_key}: 固定中段必须逐字节一致"
+        );
+        assert!(mid.contains(note), "{story_key}: note 可见");
+
+        let (cursor, source) = streaming_cursor(&first);
+        assert!(source.is_char_boundary(cursor));
+        if story_key == "markdown" {
+            let percent = cursor * 100 / source.len();
+            assert!(
+                (45..=60).contains(&percent),
+                "markdown 初始进度 {percent}% 应落在 45%~60%"
+            );
+            assert!(mid.contains("代码块"), "已渲染的完整块应可见");
+            assert!(mid.contains("fn s"), "正在增长的代码块应可见");
+        } else {
+            assert!(mid.contains("流式卡片"), "半截围栏应解析出已到达的组件");
+            assert!(mid.contains("gen-ui:"), "未闭合参数应按文本降级");
+        }
+    }
+}
+
+#[test]
+fn streaming_auto_plays_to_the_complete_document() {
+    let cases = [("markdown", "整篇文档抵达末尾"), ("openui", "生成进度")];
+    for (story_key, tail) in cases {
+        let mut app = streaming_app(story_key);
+        // 先渲染一次建立布局缓存：起播后 cursor 变化必须让它失效，画面才会增长。
+        let mid = dump_screen(&mut app, 100, 32);
+        let area = app.metrics.story_area;
+        let auto = crate::stories::streaming::test_progress_layout(area)
+            .0
+            .expect("100x32 下 auto 按钮可见");
+        let (from, source) = streaming_cursor(&app);
+        assert!(!crate::stories::streaming::is_animating(&app.state));
+
+        let click = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
+        assert!(handle_story_mouse(&mut app.state, &click, area));
+        assert_eq!(streaming_cursor(&app).0, from, "点击按钮本身不 seek");
+        let play = crate::stories::streaming::autoplay(&app.state).expect("点击后开始播放");
+        assert_eq!(play.from, from, "{story_key}: 从当前 cursor 起播");
+        assert!(crate::stories::streaming::is_animating(&app.state));
+        let up = mouse(MouseEventKind::Up(MouseButton::Left), auto.x + 1, auto.y);
+        assert!(handle_story_mouse(&mut app.state, &up, area));
+
+        // 1.5 秒 → 约一半；误差不超过源码长度的 2%。
+        crate::stories::streaming::tick_at(
+            &mut app.state,
+            play.start + Duration::from_millis(1500),
+        );
+        let (half, _) = streaming_cursor(&app);
+        assert!(
+            from < half && half < source.len(),
+            "{story_key}: 中点应在两端之间（{from} < {half} < {}）",
+            source.len()
+        );
+        let expected = from + (source.len() - from) / 2;
+        let tolerance = source.len() * 2 / 100;
+        assert!(
+            half.abs_diff(expected) <= tolerance,
+            "{story_key}: 1.5s 偏差 {} 超过 2% 源码长度（{}）",
+            half.abs_diff(expected),
+            tolerance
+        );
+        assert!(
+            crate::stories::streaming::is_animating(&app.state),
+            "{story_key}: 播放中"
+        );
+        assert_ne!(
+            mid,
+            dump_screen(&mut app, 100, 32),
+            "{story_key}: 播放期间画面随 cursor 刷新"
+        );
+
+        // 播放中再点一次：以当前 cursor 重新计时 3 秒。
+        let click = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
+        assert!(handle_story_mouse(&mut app.state, &click, area));
+        let replay = crate::stories::streaming::autoplay(&app.state).expect("重新播放");
+        assert_eq!(replay.from, half, "{story_key}: 再次点击从当前 cursor 重播");
+
+        crate::stories::streaming::tick_at(&mut app.state, replay.start + Duration::from_secs(3));
+        assert_eq!(streaming_cursor(&app), (source.len(), source));
+        assert!(
+            !crate::stories::streaming::is_animating(&app.state),
+            "{story_key}: 到点清空播放态"
+        );
+        // 到点后的 tick 无副作用。
+        crate::stories::streaming::tick_at(&mut app.state, replay.start + Duration::from_secs(30));
+        assert_eq!(streaming_cursor(&app), (source.len(), source));
+
+        let screen = dump_screen(&mut app, 100, 200);
+        assert!(screen.contains(tail), "{story_key}: 完整文档可见");
+        if story_key == "openui" {
+            assert!(!screen.contains("gen-ui:"), "围栏闭合后不再降级");
+            assert!(screen.contains("继续"), "闭合后渲染出真实组件");
+        }
+    }
+}
+
+#[test]
+fn streaming_tick_without_auto_never_advances() {
+    for story_key in ["markdown", "openui"] {
+        let mut app = streaming_app(story_key);
+        let before = streaming_cursor(&app);
+        assert!(!crate::stories::streaming::is_animating(&app.state));
+        // 停住不动 10 秒：没有点击 auto 就不得有任何自动推进。
+        crate::stories::streaming::tick_at(
+            &mut app.state,
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(
+            streaming_cursor(&app),
+            before,
+            "{story_key}: 空闲 tick 不得自动播放"
+        );
+    }
+
+    // 非 streaming 状态不看时钟也不变。
+    let mut state = (STORIES[0].variants[0].initial)();
+    crate::stories::streaming::tick_at(&mut state, Instant::now() + Duration::from_secs(10));
+    assert!(!crate::stories::streaming::is_animating(&state));
+    let StoryState::TextArea { editor, .. } = &state else {
+        panic!("expected textarea state");
+    };
+    assert!(editor.text.is_empty());
+}
+
+#[test]
+fn typing_edits_the_focused_textarea() {
+    let mut state = (STORIES[0].variants[1].initial)();
+    let before = match &state {
+        StoryState::TextArea { editor, .. } => editor.text.clone(),
+        other => panic!(
+            "expected textarea state, got {}",
+            std::any::type_name_of_val(other)
+        ),
+    };
+    for key in [
+        KeyEvent::new(KeyCode::Char('你'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+    ] {
+        assert!(
+            !super::handle_key(&mut state, key),
+            "typing must not quit the storybook"
+        );
+    }
+    // `q` is text inside the text area, never a quit key.
+    assert!(!super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+    ));
+    let StoryState::TextArea { editor, .. } = &state else {
+        panic!("expected textarea state");
+    };
+    assert!(editor.text.ends_with("你hiq"), "text: {:?}", editor.text);
+    assert!(editor.text.len() > before.len());
+
+    // Editing keys keep working through the same path.
+    assert!(!super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
+    ));
+    assert!(!super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    ));
+    let StoryState::TextArea { editor, .. } = &state else {
+        panic!("expected textarea state");
+    };
+    assert!(editor.text.ends_with("你hi\n"), "text: {:?}", editor.text);
+
+    // Exit keys still work while the text area owns the keyboard.
+    assert!(super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    ));
+}
+
+#[test]
+fn navigation_keys_do_not_switch_stories() {
+    let mut state = (STORIES[1].variants[1].initial)();
+    for key in [
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Char('1'),
+        KeyCode::Char('g'),
+        KeyCode::Tab,
+    ] {
+        assert!(
+            !super::handle_key(&mut state, KeyEvent::new(key, KeyModifiers::NONE)),
+            "{key:?} must not quit"
+        );
+    }
+    assert!(super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+    ));
+    assert!(super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    ));
+    assert!(super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// 流式进度条
+// ---------------------------------------------------------------------------
+
+fn streaming_app(story_key: &str) -> App {
+    let story = story_index(story_key);
+    let variant = variant_index(story, "streaming");
+    let mut app = App::new(story);
+    app.select_variant(variant);
+    app
+}
+
+/// `(cursor, source, scroll, pressed_button)`；后两者用于证明进度条不掺和文档交互。
+fn streaming_progress(app: &App) -> (usize, &'static str, usize, Option<usize>) {
+    let StoryState::Streaming(document) = &app.state else {
+        panic!("expected streaming state");
+    };
+    (
+        document.cursor(),
+        document.source(),
+        document.scroll(),
+        document.pressed_button(),
+    )
+}
+
+fn progress_label(cursor: usize, source: &str) -> String {
+    let percent = (cursor * 100 + source.len() / 2) / source.len();
+    format!("{percent:>4}%")
+}
+
+/// 进度条行的 dump 文本：标签在最右端，`dump_screen` 去行尾空白不会削掉它。
+fn progress_line(app: &App, screen: &str) -> String {
+    let bar = crate::stories::streaming::test_bar_area(app.metrics.story_area);
+    screen
+        .lines()
+        .nth(usize::from(bar.y))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn streaming_progress_bar_dump_is_deterministic() {
+    for (story_key, range) in [("markdown", 50..=65), ("openui", 62..=78)] {
+        let mut first = streaming_app(story_key);
+        let screen = dump_screen(&mut first, 100, 32);
+        let mut second = streaming_app(story_key);
+        assert_eq!(
+            screen,
+            dump_screen(&mut second, 100, 32),
+            "{story_key}: 进度条初始帧必须逐字节一致"
+        );
+
+        let (cursor, source, scroll, pressed) = streaming_progress(&first);
+        assert_eq!(
+            (scroll, pressed),
+            (0, None),
+            "{story_key}: dump 不产生交互状态"
+        );
+        let label = progress_label(cursor, source);
+        let percent: usize = label.trim_end_matches('%').trim().parse().unwrap();
+        assert!(
+            range.contains(&percent),
+            "{story_key}: 初始进度 {percent}% 应落在 {range:?}"
+        );
+
+        let line = progress_line(&first, &screen);
+        assert!(line.contains('█'), "{story_key}: 已到达部分: {line:?}");
+        assert!(line.contains('░'), "{story_key}: 未到达轨道: {line:?}");
+        assert!(
+            line.contains(&label),
+            "{story_key}: 百分比标签 {label:?}: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn streaming_progress_bar_clicks_seek_the_source() {
+    for (story_key, tail) in [("markdown", "整篇文档抵达末尾"), ("openui", "生成进度")]
+    {
+        let mut app = streaming_app(story_key);
+        let _ = dump_screen(&mut app, 100, 32);
+        let area = app.metrics.story_area;
+        let bar = crate::stories::streaming::test_bar_area(area);
+        assert!(bar.width > 20, "{story_key}: 轨道宽度 {}", bar.width);
+
+        let mut previous = 0;
+        for fraction in [25u16, 75, 100] {
+            let column = bar.x + (bar.width * fraction / 100).min(bar.width - 1);
+            let click = mouse(MouseEventKind::Down(MouseButton::Left), column, bar.y);
+            assert!(
+                handle_story_mouse(&mut app.state, &click, area),
+                "{story_key}: 进度条行内点击应被消费"
+            );
+            let (cursor, source, scroll, pressed) = streaming_progress(&app);
+            assert!(
+                source.is_char_boundary(cursor),
+                "{story_key}: {fraction}% 落在 UTF-8 边界"
+            );
+            assert!(
+                cursor > previous,
+                "{story_key}: {fraction}% 列推进 cursor（{previous} → {cursor}）"
+            );
+            assert_eq!(
+                (scroll, pressed),
+                (0, None),
+                "{story_key}: 点击不改滚动/按钮态"
+            );
+            previous = cursor;
+            let up = mouse(MouseEventKind::Up(MouseButton::Left), column, bar.y);
+            assert!(handle_story_mouse(&mut app.state, &up, area));
+        }
+
+        let (cursor, source, scroll, pressed) = streaming_progress(&app);
+        assert_eq!(cursor, source.len(), "{story_key}: 100% 列到达源码末尾");
+        assert_eq!((scroll, pressed), (0, None));
+
+        // 100% 时整条轨道都是已到达色，标签读数固定为 100%。
+        let screen = dump_screen(&mut app, 100, 32);
+        let line = progress_line(&app, &screen);
+        assert!(
+            !line.contains('░'),
+            "{story_key}: 100% 无未到达轨道: {line:?}"
+        );
+        assert!(
+            line.contains(" 100%"),
+            "{story_key}: 标签应为 100%: {line:?}"
+        );
+
+        // 结尾文本只在完整文档出现；用高画面确认尾部确实抵达。
+        let full = dump_screen(&mut app, 100, 200);
+        assert!(full.contains(tail), "{story_key}: 结尾文本 {tail:?} 可见");
+    }
+}
+
+#[test]
+fn streaming_progress_bar_drag_tracks_the_column_until_up() {
+    let mut app = streaming_app("markdown");
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let bar = crate::stories::streaming::test_bar_area(area);
+    assert!(bar.width > 20, "轨道宽度 {}", bar.width);
+
+    let down = mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        bar.x + bar.width / 4,
+        bar.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &down, area));
+    let (down_cursor, _, _, _) = streaming_progress(&app);
+
+    // 纵向离开进度条行仍按列继续拖拽。
+    let drag = mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        bar.x + bar.width / 2,
+        bar.y.saturating_sub(2),
+    );
+    assert!(
+        handle_story_mouse(&mut app.state, &drag, area),
+        "拖拽中的 Drag 应被消费"
+    );
+    let (drag_cursor, _, scroll, pressed) = streaming_progress(&app);
+    assert!(drag_cursor > down_cursor, "拖拽推进 cursor");
+    assert_eq!((scroll, pressed), (0, None));
+
+    // 两端越界按列 clamp。
+    let beyond = mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        bar.right() + 20,
+        bar.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &beyond, area));
+    let (end_cursor, source, _, _) = streaming_progress(&app);
+    assert_eq!(end_cursor, source.len(), "右端越界 clamp 到源码末尾");
+    assert!(source.is_char_boundary(end_cursor));
+
+    let before = mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        bar.x.saturating_sub(10),
+        bar.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &before, area));
+    let (zero_cursor, _, _, _) = streaming_progress(&app);
+    assert_eq!(zero_cursor, 0, "左端越界 clamp 到 0");
+
+    let up = mouse(MouseEventKind::Up(MouseButton::Left), bar.x, bar.y);
+    assert!(handle_story_mouse(&mut app.state, &up, area));
+    let after = mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        bar.x + bar.width * 3 / 4,
+        bar.y,
+    );
+    assert!(
+        !handle_story_mouse(&mut app.state, &after, area),
+        "未拖拽的 Drag 返回 false"
+    );
+    let (after_cursor, _, _, _) = streaming_progress(&app);
+    assert_eq!(after_cursor, 0, "Up 之后的 Drag 不改 cursor");
+}
+
+#[test]
+fn streaming_progress_row_never_presses_document_buttons() {
+    let mut app = streaming_app("openui");
+    let _ = dump_screen(&mut app, 100, 60);
+    let area = app.metrics.story_area;
+    let last_doc_row = area.bottom() - 1;
+    let bar = crate::stories::streaming::test_bar_area(area);
+    assert_eq!(bar.y, last_doc_row, "轨道就是预览区最后一行");
+
+    // 拖到 100%：完整文档（含 GenUI 按钮）一次可见，热区坐标与真实布局一致。
+    let seek = mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        bar.right() - 1,
+        bar.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &seek, area));
+    let up = mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        bar.right() - 1,
+        bar.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &up, area));
+    let (cursor, source, _, _) = streaming_progress(&app);
+    assert_eq!(cursor, source.len(), "拖到 100% 显示完整文档");
+    let _ = dump_screen(&mut app, 100, 60);
+
+    // 先在文档区探出按钮热区：证明这份文档确实有可命中的按钮。
+    let mut button_cell = None;
+    'probe: for _ in 0..40 {
+        for row in area.y..last_doc_row {
+            for column in area.x..area.right().saturating_sub(1) {
+                let down = mouse(MouseEventKind::Down(MouseButton::Left), column, row);
+                handle_story_mouse(&mut app.state, &down, area);
+                let pressed = streaming_progress(&app).3;
+                let up = mouse(MouseEventKind::Up(MouseButton::Left), column, row);
+                handle_story_mouse(&mut app.state, &up, area);
+                if pressed.is_some() {
+                    button_cell = Some((column, row));
+                    break 'probe;
+                }
+            }
+        }
+        let wheel = mouse(MouseEventKind::ScrollDown, area.x, area.y);
+        handle_story_mouse(&mut app.state, &wheel, area);
+    }
+    let (_button_column, button_row) = button_cell.expect("完整文档的按钮热区应可命中");
+    assert!(button_row < last_doc_row, "按钮热区位于文档区");
+
+    let before = streaming_progress(&app);
+    let click = mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        bar.x + bar.width / 2,
+        last_doc_row,
+    );
+    assert!(
+        handle_story_mouse(&mut app.state, &click, area),
+        "进度条行点击被消费"
+    );
+    let after = streaming_progress(&app);
+    assert_eq!(after.3, None, "进度条行点击不得命中按钮热区");
+    assert_eq!(after.2, before.2, "进度条行点击不改滚动");
+    assert_ne!(after.0, before.0, "进度条行点击只改进度");
+}
+
+#[test]
+fn streaming_document_area_of_one_row_skips_the_progress_bar() {
+    let mut app = streaming_app("markdown");
+    let area = Rect::new(0, 0, 24, 1);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut buf);
+
+    let mut text = String::new();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            text.push_str(buf[(x, y)].symbol());
+        }
+    }
+    assert!(
+        !text.contains('░') && !text.contains('█'),
+        "高度 1 不画进度条: {text:?}"
+    );
+    assert!(!text.trim().is_empty(), "高度 1 仍渲染文档首行: {text:?}");
+
+    // 高度 2 是边界：最后一行让给进度条，文档只剩首行。
+    let mut app = streaming_app("markdown");
+    let area = Rect::new(0, 0, 24, 2);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut buf);
+    let bar = crate::stories::streaming::test_bar_area(area);
+    assert_eq!(bar.y, area.bottom() - 1, "高度 2 的进度条在最后一行");
+    let bar_line: String = (area.x..area.right())
+        .map(|x| buf[(x, bar.y)].symbol())
+        .collect();
+    assert!(
+        bar_line.contains('█') || bar_line.contains('░'),
+        "高度 2 画进度条: {bar_line:?}"
+    );
+    let doc_line: String = (area.x..area.right())
+        .map(|x| buf[(x, area.y)].symbol())
+        .collect();
+    assert!(
+        !doc_line.trim().is_empty(),
+        "高度 2 仍渲染文档首行: {doc_line:?}"
+    );
+}
+
+#[test]
+fn auto_at_full_progress_restarts_from_zero() {
+    let mut app = streaming_app("markdown");
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let bar = crate::stories::streaming::test_bar_area(area);
+    let auto = crate::stories::streaming::test_progress_layout(area)
+        .0
+        .expect("auto 按钮可见");
+
+    // 先把进度拖到 100%。
+    let seek = mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        bar.right() - 1,
+        bar.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &seek, area));
+    let up = mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        bar.right() - 1,
+        bar.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &up, area));
+    let (cursor, source) = streaming_cursor(&app);
+    assert_eq!(cursor, source.len(), "拖到 100%");
+
+    // 100% 时点击 auto：先归零，再从 0 播到 100%。
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
+    assert!(handle_story_mouse(&mut app.state, &click, area));
+    assert_eq!(streaming_cursor(&app).0, 0, "100% 起播先回到 0");
+    let play = crate::stories::streaming::autoplay(&app.state).expect("重新播放");
+    assert_eq!(play.from, 0);
+    crate::stories::streaming::tick_at(&mut app.state, play.start + Duration::from_secs(3));
+    assert_eq!(streaming_cursor(&app), (source.len(), source));
+    assert!(!crate::stories::streaming::is_animating(&app.state));
+}
+
+#[test]
+fn dragging_the_track_cancels_playback_and_seeks() {
+    let mut app = streaming_app("markdown");
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let (auto, bar, _) = crate::stories::streaming::test_progress_layout(area);
+    let auto = auto.expect("auto 按钮可见");
+
+    let start = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
+    assert!(handle_story_mouse(&mut app.state, &start, area));
+    assert!(crate::stories::streaming::is_animating(&app.state));
+
+    // 播放中按住轨道：立即取消播放并按列 seek（拖拽优先）。
+    let (_, source) = streaming_cursor(&app);
+    let column = bar.x + bar.width / 3;
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), column, bar.y);
+    assert!(handle_story_mouse(&mut app.state, &down, area));
+    assert!(
+        !crate::stories::streaming::is_animating(&app.state),
+        "按住拖拽条立刻取消播放"
+    );
+    let expected = source.floor_char_boundary(
+        source.len() * usize::from(column - bar.x + 1) / usize::from(bar.width),
+    );
+    let (seeked, _, _, _) = streaming_progress(&app);
+    assert_eq!(seeked, expected, "按下位置立刻生效");
+
+    crate::stories::streaming::tick_at(&mut app.state, Instant::now() + Duration::from_secs(3));
+    assert_eq!(streaming_progress(&app).0, seeked, "取消后 tick 不再推进");
+
+    // 松开后也不会自动继续。
+    let up = mouse(MouseEventKind::Up(MouseButton::Left), column, bar.y);
+    assert!(handle_story_mouse(&mut app.state, &up, area));
+    crate::stories::streaming::tick_at(&mut app.state, Instant::now() + Duration::from_secs(3));
+    assert_eq!(streaming_progress(&app).0, seeked, "松开后不自动继续");
+}
+
+#[test]
+fn auto_button_presses_with_selected_style_and_restores_on_up() {
+    let mut app = streaming_app("markdown");
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let auto = crate::stories::streaming::test_progress_layout(area)
+        .0
+        .expect("auto 按钮可见");
+    assert_eq!(auto.width, 8, "[ auto ] 占 8 列");
+
+    let before = dump_buffer(&mut app, 100, 32);
+    let label: String = (auto.x..auto.right())
+        .map(|x| before[(x, auto.y)].symbol())
+        .collect();
+    assert_eq!(label, "[ auto ]", "按钮文本来自 ButtonChrome");
+    let normal = before[(auto.x, auto.y)].clone();
+    assert_eq!(normal.fg, ACCENT, "未按下用 accent 前景");
+    assert_eq!(normal.bg, BG);
+    assert!(!normal.modifier.contains(Modifier::BOLD));
+
+    let (cursor, _) = streaming_cursor(&app);
+    let auto_pressed = |app: &App| {
+        let StoryState::Streaming(document) = &app.state else {
+            panic!("expected streaming state");
+        };
+        document.auto_pressed()
+    };
+    assert!(!auto_pressed(&app));
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
+    assert!(handle_story_mouse(&mut app.state, &down, area));
+    assert!(auto_pressed(&app));
+    assert_eq!(
+        streaming_cursor(&app).0,
+        cursor,
+        "点击按钮本身不改变 cursor"
+    );
+    let held = dump_buffer(&mut app, 100, 32);
+    let pressed = &held[(auto.x, auto.y)];
+    assert_eq!(pressed.symbol(), "[");
+    assert_eq!(pressed.fg, BG, "按下用反色前景");
+    assert_eq!(pressed.bg, ACCENT, "按下用反色背景");
+    assert!(pressed.modifier.contains(Modifier::BOLD));
+
+    // 拖出按钮即恢复未按下态。
+    let drag_out = mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        auto.right() + 2,
+        auto.y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &drag_out, area));
+    assert!(!auto_pressed(&app), "拖出按钮恢复未按下态");
+    assert_eq!(
+        dump_buffer(&mut app, 100, 32),
+        before,
+        "拖出按钮恢复未按下态且不 seek"
+    );
+
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
+    assert!(handle_story_mouse(&mut app.state, &down, area));
+    let up = mouse(MouseEventKind::Up(MouseButton::Left), auto.x + 1, auto.y);
+    assert!(handle_story_mouse(&mut app.state, &up, area));
+    assert!(!auto_pressed(&app), "Up 后恢复未按下态");
+    assert_eq!(dump_buffer(&mut app, 100, 32), before, "Up 后恢复未按下态");
+    assert_eq!(streaming_cursor(&app).0, cursor, "按钮只负责播放，不 seek");
+}
+
+#[test]
+fn streaming_progress_layout_is_responsive() {
+    // 阈值全部来自行宽：20 列起有按钮，9 列起有百分比，再窄只剩轨道。
+    // 预览区最右一列留给文档滚动条，所以行宽 = 预览区宽 - 1。
+    let geometry = |row_width: u16| {
+        crate::stories::streaming::test_progress_layout(Rect::new(0, 0, row_width + 1, 2))
+    };
+    let (auto, bar, label) = geometry(20);
+    assert!(auto.is_some(), "20 列仍然显示按钮");
+    assert_eq!((bar.x, bar.width), (9, 6), "按钮 8 列 + 1 列间隔");
+    assert!(label);
+    for width in [19, 9] {
+        let (auto, bar, label) = geometry(width);
+        assert!(auto.is_none(), "{width} 列隐藏按钮");
+        assert_eq!(bar.width, width - 5);
+        assert!(label, "{width} 列仍显示百分比");
+    }
+    let (auto, bar, label) = geometry(8);
+    assert!(auto.is_none());
+    assert_eq!(bar.width, 8);
+    assert!(!label, "窄轨道不画百分比");
+
+    // 预览区被压到 40 列总宽：渲染不 panic、进度条行在、按钮按阈值隐藏。
+    let mut app = streaming_app("markdown");
+    let screen = dump_screen(&mut app, 40, 10);
+    assert!(screen.contains("peri-tui storybook"));
+    let area = app.metrics.story_area;
+    let (auto, bar, label) = crate::stories::streaming::test_progress_layout(area);
+    assert!(auto.is_none(), "40x10 的预览行宽放不下按钮");
+    assert!(label && bar.width > 0);
+    let line = progress_line(&app, &screen);
+    assert!(
+        line.contains('█') || line.contains('░'),
+        "进度条行存在: {line:?}"
+    );
+    assert!(line.contains('%'), "残留百分比标签: {line:?}");
+}
+
+#[test]
+fn clicking_the_percentage_label_does_not_seek() {
+    let mut app = streaming_app("markdown");
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let (_, bar, label) = crate::stories::streaming::test_progress_layout(area);
+    assert!(label, "100 列宽应显示百分比标签");
+    let before = streaming_cursor(&app).0;
+    // 标签紧贴轨道右缘，第一格就是 bar.right()。
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), bar.right(), bar.y);
+    assert!(handle_story_mouse(&mut app.state, &down, area));
+    assert_eq!(
+        streaming_cursor(&app).0,
+        before,
+        "百分比标签不是 seek 区，误点不应跳到 100%"
+    );
+}

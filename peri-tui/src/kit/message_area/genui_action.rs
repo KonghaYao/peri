@@ -1,12 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use peri_theme::theme::ThemeDefinition;
+use peri_tui_components::{button::hit_test, genui::render::pressed_button_style};
 use ratatui_kit::crossterm::event::{Event, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::*;
-use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 use unicode_width::UnicodeWidthStr;
 
-use super::selection::SlotIndex;
+use super::selection::{SlotIndex, SlotLines};
 use super::vm_cache::VmCacheSlot;
 use crate::kit::atoms::{
     AT_MENTION_ACTIVE, BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, INPUT_RESTORE_TEXT, NOTIFICATION,
@@ -15,13 +17,33 @@ use crate::kit::atoms::{
 use crate::kit::genui::{GenUiAction, GenUiButtonInfo, view_state};
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit};
 
+#[derive(Clone)]
+pub(super) struct PressedGenuiKey {
+    slot_index: usize,
+    vm_hash: u64,
+    epoch: u64,
+    line_start: usize,
+    x_start: u16,
+    // 区分同一 VM 的内容重建（例如 Set/Reset），不延长缓存行的生命周期。
+    source: Weak<SlotLines>,
+}
+
+impl PressedGenuiKey {
+    fn matches(&self, other: &Self) -> bool {
+        self.slot_index == other.slot_index
+            && self.vm_hash == other.vm_hash
+            && self.epoch == other.epoch
+            && self.line_start == other.line_start
+            && self.x_start == other.x_start
+            && self.source.ptr_eq(&other.source)
+    }
+}
+
 pub(super) struct GenUiButtonHit {
     row: u16,
     x_start: u16,
     x_end: u16,
-    slot_index: usize,
-    vm_hash: u64,
-    epoch: u64,
+    key: PressedGenuiKey,
     button: GenUiButtonInfo,
 }
 
@@ -45,7 +67,11 @@ pub(super) fn button_hits(
         let Some(TuiRenderUnit::TuiAssistantBubble(bubble)) = snapshot.items.get(slot_index) else {
             continue;
         };
+        let Some(lines) = slot.lines.as_ref() else {
+            continue;
+        };
         let slot_start = index.slot_visual_start(slot_index).unwrap_or(0);
+        let mut vm_hash = None;
         for button in &slot.genui_buttons {
             for (visual, start, end) in button_rows(slot, button, width) {
                 let Some(row) = slot_start
@@ -59,12 +85,19 @@ pub(super) fn button_hits(
                     row: area.y.saturating_add(row as u16),
                     x_start: area.x.saturating_add(start),
                     x_end: area.x.saturating_add(end),
-                    slot_index,
-                    vm_hash: TuiAssistantBubble::stable_identity_hash(
-                        &bubble.text,
-                        bubble.reasoning.as_ref(),
-                    ),
-                    epoch: BRIDGE_RESET_COUNTER.get(),
+                    key: PressedGenuiKey {
+                        slot_index,
+                        vm_hash: *vm_hash.get_or_insert_with(|| {
+                            TuiAssistantBubble::stable_identity_hash(
+                                &bubble.text,
+                                bubble.reasoning.as_ref(),
+                            )
+                        }),
+                        epoch: BRIDGE_RESET_COUNTER.get(),
+                        line_start: button.line_start,
+                        x_start: button.x_start,
+                        source: Arc::downgrade(lines),
+                    },
                     button: button.clone(),
                 });
             }
@@ -112,10 +145,80 @@ fn button_rows(slot: &VmCacheSlot, button: &GenUiButtonInfo, width: u16) -> Vec<
     rows
 }
 
+pub(super) struct PressedOverlay {
+    pub(super) hits: State<Arc<Vec<GenUiButtonHit>>>,
+    pub(super) pressed: State<Option<PressedGenuiKey>>,
+    pub(super) area: Option<Rect>,
+    pub(super) strip_color: bool,
+}
+
+impl Hook for PressedOverlay {
+    fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        // resize 的校正帧可能还带着上帧的热区，等几何对齐后再应用。
+        if self.area != Some(drawer.area) {
+            return;
+        }
+        if let Some(key) = self.pressed.read().as_ref() {
+            let theme = peri_theme::atoms::THEME_ATOM.state();
+            draw_pressed(
+                drawer.buffer_mut(),
+                &self.hits.read(),
+                key,
+                &theme.read(),
+                self.strip_color,
+            );
+        }
+    }
+}
+
+fn draw_pressed(
+    buffer: &mut Buffer,
+    hits: &[GenUiButtonHit],
+    key: &PressedGenuiKey,
+    theme: &ThemeDefinition,
+    strip_color: bool,
+) {
+    for hit in hits.iter().filter(|hit| key.matches(&hit.key)) {
+        let rect =
+            buffer
+                .area
+                .intersection(Rect::new(hit.x_start, hit.row, hit.x_end - hit.x_start, 1));
+        if rect.is_empty() {
+            continue;
+        }
+        // 复用已折行的屏幕热区，对含双宽字符补位的整段只覆盖样式。
+        let Some(normal) = (rect.left()..rect.right())
+            .map(|x| &buffer[(x, hit.row)])
+            .find(|cell| cell.modifier.contains(Modifier::REVERSED))
+        else {
+            continue;
+        };
+        let style = pressed_button_style(normal.fg, theme);
+        buffer.set_style(
+            rect,
+            if strip_color {
+                super::no_color::strip_style_color(style)
+            } else {
+                style
+            },
+        );
+    }
+}
+
+pub(super) fn validate_press(pressed: State<Option<PressedGenuiKey>>, hits: &[GenUiButtonHit]) {
+    let stale = pressed.read().as_ref().is_some_and(|key| {
+        crate::kit::mouse_router::is_occluded() || !hits.iter().any(|hit| key.matches(&hit.key))
+    });
+    if stale {
+        *pressed.write_no_update() = None;
+    }
+}
+
 pub(super) fn register_click(
     hooks: &mut Hooks,
     hits: State<Arc<Vec<GenUiButtonHit>>>,
     view_models: AtomState<ViewModelsSnapshot>,
+    pressed: State<Option<PressedGenuiKey>>,
 ) {
     // 必须先于文本选择注册，按钮点击不能同时成为拖选起点。
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
@@ -124,8 +227,28 @@ pub(super) fn register_click(
             &hits.read(),
             &view_models.read(),
             crate::kit::mouse_router::is_occluded(),
+            |key| {
+                let was_pressed = pressed.read().is_some();
+                if key.is_some() || was_pressed {
+                    *pressed.write() = key.cloned();
+                }
+            },
         )
     });
+}
+
+fn press_cancelled(event: &Event) -> bool {
+    matches!(event, Event::FocusLost | Event::Resize(..))
+        || matches!(event, Event::Mouse(mouse) if matches!(
+            mouse.kind,
+            MouseEventKind::Up(MouseButton::Left)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+                // 无键移动可以清掉丢失 Up 的手势；Drag 离开按钮不取消。
+                | MouseEventKind::Moved
+        ))
 }
 
 fn dispatch_click(
@@ -133,22 +256,31 @@ fn dispatch_click(
     hits: &[GenUiButtonHit],
     snapshot: &ViewModelsSnapshot,
     occluded: bool,
+    set_pressed: impl FnOnce(Option<&PressedGenuiKey>),
 ) -> EventResult {
+    if occluded || press_cancelled(event) {
+        set_pressed(None);
+        return EventResult::Ignored;
+    }
     let Event::Mouse(mouse) = event else {
         return EventResult::Ignored;
     };
-    if occluded || mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
         return EventResult::Ignored;
     }
-    let Some(hit) = hits.iter().find(|hit| {
-        mouse.row == hit.row && mouse.column >= hit.x_start && mouse.column < hit.x_end
-    }) else {
+    let Some(hit) = hits
+        .iter()
+        .find(|hit| hit_test(mouse.row, mouse.column, hit.row, hit.x_start, hit.x_end))
+    else {
+        set_pressed(None);
         return EventResult::Ignored;
     };
-    let matched = hit.epoch == BRIDGE_RESET_COUNTER.get() && snapshot.items.get(hit.slot_index).is_some_and(|vm| {
+    let key = &hit.key;
+    let matched = key.epoch == BRIDGE_RESET_COUNTER.get() && snapshot.items.get(key.slot_index).is_some_and(|vm| {
         matches!(vm, TuiRenderUnit::TuiAssistantBubble(bubble)
-            if TuiAssistantBubble::stable_identity_hash(&bubble.text, bubble.reasoning.as_ref()) == hit.vm_hash)
+            if TuiAssistantBubble::stable_identity_hash(&bubble.text, bubble.reasoning.as_ref()) == key.vm_hash)
     });
+    set_pressed(matched.then_some(key));
     if matched {
         dispatch_action(&hit.button);
     }

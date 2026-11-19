@@ -41,6 +41,7 @@ use ratatui_kit::ratatui::text::Span;
 
 use crate::i18n;
 
+use peri_tui_components::button::ButtonChrome;
 use peri_tui_components::panel_mouse::AreaTracker;
 
 use peri_theme::atoms::THEME_ATOM;
@@ -212,7 +213,10 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     {
                         let iteration_items = labels.iter().enumerate();
                         for (i, label) in iteration_items {
-                            let w = format!("[ {label} ]").chars().count() as u16;
+                            let w = ButtonChrome::Bracketed { padded: true }
+                                .text(label)
+                                .chars()
+                                .count() as u16;
                             if col >= x && col < x + w {
                                 activate(i, info);
                                 return EventResult::Consumed;
@@ -374,7 +378,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if i > 0 {
                         btn_line.push(Span::raw("  "));
                     }
-                    let text = format!("[ {label} ]");
+                    let text = ButtonChrome::Bracketed { padded: true }.text(label);
                     btn_line.push(Span::styled(text, btn_style(i)));
                 }
             }

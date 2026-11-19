@@ -14,8 +14,11 @@ use crate::kit::genui::GenUiButtonInfo;
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::button::{
+    ButtonChrome, ButtonSpec, ButtonState, ButtonTone, button_visual,
+};
 use ratatui_kit::prelude::*;
-use ratatui_kit::ratatui::style::{Color, Modifier, Style};
+use ratatui_kit::ratatui::style::{Color, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -81,15 +84,17 @@ pub(super) fn copy_button_line(
     grid: &GridSpec,
     line_color: Color,
 ) -> Option<(Line<'static>, u16, u16)> {
-    let semantic = THEME_ATOM.state().read().semantic;
-    let btn_text = i18n::tr("msg-copy-md");
-    let btn_span = Span::styled(
-        format!(" {btn_text} "),
-        // 反色：accent 前景 + REVERSED → 终端
-        Style::default()
-            .fg(semantic.accent)
-            .add_modifier(Modifier::REVERSED),
+    let theme = THEME_ATOM.state();
+    let button = button_visual(
+        ButtonSpec {
+            label: &i18n::tr("msg-copy-md"),
+            chrome: ButtonChrome::Filled,
+            tone: ButtonTone::Primary,
+            state: ButtonState::Normal,
+        },
+        &theme.read(),
     );
+    let btn_span = Span::styled(button.text, button.style);
     let btn_width = btn_span.width();
     // 按钮行宽度 = 前缀（outer+accent+gap）+ content——按钮右对齐在 content 列右缘。
     let line_width = grid.first_prefix_width() + grid.content_width();

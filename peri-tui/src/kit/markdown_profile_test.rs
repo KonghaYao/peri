@@ -1,7 +1,8 @@
-use super::Color;
-use super::MarkdownRenderCache;
-use super::MarkdownSegment;
-use super::Palette;
+use peri_tui_components::markdown::{
+    MarkdownRenderCache, MarkdownSegment, parse_markdown, parse_markdown_chunks_cached,
+};
+use ratatui::style::Color;
+use ratatui_kit::prelude::Palette;
 
 const TEST_BASE_FG: Color = Color::White;
 
@@ -70,13 +71,19 @@ fn test_release_synthetic_matrix() {
             for width in [40, 80, 160] {
                 reset_perf_counters();
                 let mut cache = MarkdownRenderCache::default();
-                let _ = super::parse_markdown_cached(
+                let rendered = parse_markdown_chunks_cached(
                     &fixture,
                     width,
                     Palette::default(),
                     TEST_BASE_FG,
                     &mut cache,
                 );
+                let mut lines = rendered
+                    .stable
+                    .iter()
+                    .flat_map(|chunk| flatten(chunk))
+                    .collect::<Vec<_>>();
+                lines.extend(flatten(&rendered.tail));
                 let counters = perf_counters();
                 println!(
                     "RENDER_SAMPLE {bytes},{shape_name},{width},{},{},{},{},{}",
@@ -101,7 +108,7 @@ fn test_release_synthetic_matrix() {
             reset_perf_counters();
             let stream_chunk_ends = (chunk_bytes..bytes).step_by(chunk_bytes).chain([bytes]);
             for end in stream_chunk_ends {
-                let segments = super::parse_markdown(
+                let segments = parse_markdown(
                     &fixture[..end],
                     usize::from(width),
                     Palette::default(),
@@ -116,7 +123,7 @@ fn test_release_synthetic_matrix() {
             let mut cache = MarkdownRenderCache::default();
             let cached_chunk_ends = (chunk_bytes..bytes).step_by(chunk_bytes).chain([bytes]);
             for end in cached_chunk_ends {
-                let rendered = super::parse_markdown_chunks_cached(
+                let rendered = parse_markdown_chunks_cached(
                     &fixture[..end],
                     usize::from(width),
                     Palette::default(),

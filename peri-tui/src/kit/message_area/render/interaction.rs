@@ -3,6 +3,7 @@ use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{FoldState, TuiAskUserBlock};
 
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::button::ButtonChrome;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -70,7 +71,7 @@ pub(super) fn render_ask_user_block_lines(
         };
         if grid.is_narrow() || data.options.len() <= 1 {
             for label in &data.options {
-                let text = format!("[{label}]");
+                let text = ButtonChrome::Bracketed { padded: false }.text(label);
                 let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
                 spans.push(Span::styled(
                     crate::truncate::truncate_by_width(&text, content),
@@ -85,7 +86,7 @@ pub(super) fn render_ask_user_block_lines(
             let text = data
                 .options
                 .iter()
-                .map(|o| format!("[{o}]"))
+                .map(|o| ButtonChrome::Bracketed { padded: false }.text(o))
                 .collect::<Vec<_>>()
                 .join("  ");
             let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
@@ -101,7 +102,9 @@ pub(super) fn render_ask_user_block_lines(
             // 不生成点击区间——点击事件按列命中，超宽部分不可点）。
             let mut col = prefix_w;
             for label in &data.options {
-                let w = format!("[{label}]").width();
+                let w = ButtonChrome::Bracketed { padded: false }
+                    .text(label)
+                    .width();
                 if col + w <= prefix_w + content {
                     layout
                         .option_cols
@@ -167,9 +170,10 @@ pub(super) fn render_ask_user_block_lines(
                     let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
                     let is_chosen = Some(i) == chosen_idx;
                     let text = if is_chosen {
-                        format!("[{} {label}]", super::helpers::sym().success)
+                        ButtonChrome::Bracketed { padded: false }
+                            .text(&format!("{} {label}", super::helpers::sym().success))
                     } else {
-                        format!("[{label}]")
+                        ButtonChrome::Bracketed { padded: false }.text(label)
                     };
                     spans.push(Span::styled(
                         crate::truncate::truncate_by_width(&text, content),
@@ -189,9 +193,10 @@ pub(super) fn render_ask_user_block_lines(
                 .enumerate()
                 .map(|(i, label)| {
                     if Some(i) == chosen_idx {
-                        format!("[{} {label}]", super::helpers::sym().success)
+                        ButtonChrome::Bracketed { padded: false }
+                            .text(&format!("{} {label}", super::helpers::sym().success))
                     } else {
-                        format!("[{label}]")
+                        ButtonChrome::Bracketed { padded: false }.text(label)
                     }
                 })
                 .collect::<Vec<_>>()

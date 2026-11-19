@@ -35,7 +35,7 @@ fn test_closed_fence_with_blank_lines_shares_body_after_publication() {
     );
     assert_eq!(cache.stable_source_end, prefix.len());
     assert_eq!(first.stable.len(), 1);
-    crate::kit::acp_bridge::reset_perf_counters();
+    crate::markdown::metrics::reset();
     boundary::SCANNED_BYTES.with(|count| count.set(0));
     let mut source = prefix.clone();
     let mut expected_bytes = 0;
@@ -51,7 +51,7 @@ fn test_closed_fence_with_blank_lines_shares_body_after_publication() {
         );
         assert!(Arc::ptr_eq(&first.stable[0], &rendered.stable[0]));
     }
-    let counters = crate::kit::acp_bridge::perf_counters();
+    let counters = crate::markdown::metrics::snapshot();
     assert_eq!(counters.full_parses, 0);
     assert_eq!(counters.tail_parses, 32);
     assert_eq!(counters.tail_parsed_bytes, expected_bytes);
@@ -59,7 +59,7 @@ fn test_closed_fence_with_blank_lines_shares_body_after_publication() {
     boundary::SCANNED_BYTES.with(|count| assert_eq!(count.get(), expected_bytes as usize));
     let terminal =
         super::parse_markdown_terminal(&source, 80, Palette::default(), Color::Reset, &mut cache);
-    assert_eq!(crate::kit::acp_bridge::perf_counters().full_parses, 1);
+    assert_eq!(crate::markdown::metrics::snapshot().full_parses, 1);
     assert_eq!(
         terminal.tail,
         super::parse_markdown(&source, 80, Palette::default(), Color::Reset)
@@ -231,7 +231,7 @@ fn test_stable_chunks_refresh_text_and_code_background_without_reparse() {
     let mut cache = MarkdownRenderCache::default();
     let first =
         super::parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Red, &mut cache);
-    crate::kit::acp_bridge::reset_perf_counters();
+    crate::markdown::metrics::reset();
     let recolored = super::parse_markdown_chunks_cached(
         source,
         80,
@@ -240,7 +240,7 @@ fn test_stable_chunks_refresh_text_and_code_background_without_reparse() {
         &mut cache,
     );
     assert!(!Arc::ptr_eq(&first.stable[0], &recolored.stable[0]));
-    assert_eq!(crate::kit::acp_bridge::perf_counters().tail_parses, 0);
+    assert_eq!(crate::markdown::metrics::snapshot().tail_parses, 0);
     assert_eq!(
         semantic_segments(recolored.segments()),
         semantic_segments(
@@ -255,7 +255,7 @@ fn test_stable_chunks_refresh_text_and_code_background_without_reparse() {
         Color::Magenta
     };
     peri_theme::atoms::THEME_ATOM.state().set(Arc::new(updated));
-    crate::kit::acp_bridge::reset_perf_counters();
+    crate::markdown::metrics::reset();
     let background_changed = super::parse_markdown_chunks_cached(
         source,
         80,
@@ -267,7 +267,7 @@ fn test_stable_chunks_refresh_text_and_code_background_without_reparse() {
         &recolored.stable[0],
         &background_changed.stable[0]
     ));
-    assert_eq!(crate::kit::acp_bridge::perf_counters().tail_parses, 0);
+    assert_eq!(crate::markdown::metrics::snapshot().tail_parses, 0);
     assert_eq!(
         semantic_segments(background_changed.segments()),
         semantic_segments(

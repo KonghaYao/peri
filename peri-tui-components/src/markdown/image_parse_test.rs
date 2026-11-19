@@ -22,7 +22,7 @@ fn flatten(segments: &[MarkdownSegment]) -> Vec<ratatui::text::Line<'static>> {
             MarkdownSegment::Table(_) => vec![],
             MarkdownSegment::Image(img) => img.lines.clone(),
             MarkdownSegment::GenUi(segment) => {
-                crate::kit::genui::render(segment, 80, &peri_theme::builtin::dark_theme()).lines
+                crate::genui::render(segment, 80, &peri_theme::builtin::dark_theme(), None).lines
             }
         })
         .collect()
@@ -36,7 +36,7 @@ fn segments_to_text(segments: &[MarkdownSegment]) -> String {
             MarkdownSegment::Table(_) => vec![],
             MarkdownSegment::Image(img) => img.lines.clone(),
             MarkdownSegment::GenUi(segment) => {
-                crate::kit::genui::render(segment, 80, &peri_theme::builtin::dark_theme()).lines
+                crate::genui::render(segment, 80, &peri_theme::builtin::dark_theme(), None).lines
             }
         })
         .flat_map(|l| l.spans)
@@ -360,7 +360,7 @@ fn test_image_cross_paragraph_keeps_separate_segments() {
         .flat_map(|s| match s {
             MarkdownSegment::Image(img) => img.lines.clone(),
             MarkdownSegment::GenUi(segment) => {
-                crate::kit::genui::render(segment, 80, &peri_theme::builtin::dark_theme()).lines
+                crate::genui::render(segment, 80, &peri_theme::builtin::dark_theme(), None).lines
             }
             _ => vec![],
         })

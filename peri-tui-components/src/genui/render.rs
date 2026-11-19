@@ -1,13 +1,17 @@
+use peri_genui::EvalContext;
 use peri_theme::{bridge::ThemeDefinitionExt, theme::ThemeDefinition};
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use ratatui_kit::{ComponentTheme, components::TableTheme};
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
-use crate::kit::markdown::{GenUiSegment, TableData, table_data_to_lines};
+use crate::button::{
+    ButtonChrome, ButtonSpec, ButtonState, ButtonTone, button_style, button_visual,
+};
+use crate::markdown::{GenUiSegment, TableData, table_data_to_lines};
 
 use super::{GenUiAction, GenUiButton, GenUiButtonInfo};
 
@@ -29,13 +33,22 @@ impl GenUiRender {
     }
 }
 
-pub fn render(segment: &GenUiSegment, width: usize, theme: &ThemeDefinition) -> GenUiRender {
+/// Render one OpenUI segment.
+///
+/// `context` carries the host's interaction state (`Set`/`Reset` actions); pass
+/// `None` for a read-only preview. Rendering itself is pure.
+pub fn render(
+    segment: &GenUiSegment,
+    width: usize,
+    theme: &ThemeDefinition,
+    context: Option<&EvalContext>,
+) -> GenUiRender {
     if width == 0 {
         return GenUiRender::default();
     }
     let width = width.min(4096);
     let block = segment.block_id();
-    let updated = super::view_state::context(block).map(|context| segment.with_context(&context));
+    let updated = context.map(|context| segment.with_context(context));
     let segment = updated.as_ref().unwrap_or(segment);
     let mut remaining = 100_000;
     let mut output = segment
@@ -291,21 +304,27 @@ fn button(
         &sanitize(&descriptor.label).replace('\n', " "),
         width.saturating_sub(2),
     );
-    let primary = props.get("variant").and_then(Value::as_str) == Some("primary");
-    // 复制按钮同款：两侧 padding + 反色填充，无括号；primary 用 accent，普通按钮用弱化文字色。
-    let style = Style::default()
-        .fg(if primary {
-            theme.semantic.accent
-        } else {
-            theme.semantic.text.muted
-        })
-        .add_modifier(Modifier::REVERSED);
+    let tone = if props.get("variant").and_then(Value::as_str) == Some("primary") {
+        ButtonTone::Primary
+    } else {
+        ButtonTone::Secondary
+    };
+    let visual = button_visual(
+        ButtonSpec {
+            label: &label,
+            chrome: ButtonChrome::Filled,
+            tone,
+            state: ButtonState::Normal,
+        },
+        theme,
+    );
     GenUiRender {
-        lines: vec![Line::from(Span::styled(format!(" {label} "), style))],
+        lines: vec![Line::from(Span::styled(visual.text, visual.style))],
         buttons: vec![GenUiButtonInfo {
             line_start: 0,
             line_end: 1,
             x_start: 0,
+            // 命中宽度沿用标签宽度加两列留白的既有契约。
             x_end: label.width().saturating_add(2).min(u16::MAX as usize) as u16,
             block: None,
             parsed: None,
@@ -314,6 +333,16 @@ fn button(
             label: descriptor.label,
         }],
     }
+}
+
+/// 从 Normal 按钮的前景色恢复 tone，无需在按钮布局数据中保存样式。
+pub fn pressed_button_style(normal_fg: Color, theme: &ThemeDefinition) -> Style {
+    let tone = if normal_fg == theme.semantic.accent {
+        ButtonTone::Primary
+    } else {
+        ButtonTone::Secondary
+    };
+    button_style(ButtonChrome::Filled, tone, ButtonState::Pressed, theme)
 }
 
 fn progress(
@@ -651,7 +680,7 @@ fn sanitize(text: &str) -> String {
 fn plain(text: &str, width: usize, style: Style) -> GenUiRender {
     let lines = sanitize(text)
         .split('\n')
-        .flat_map(|line| crate::truncate::wrap_by_width(line, width.max(1)))
+        .flat_map(|line| crate::text::wrap_by_width(line, width.max(1)))
         .map(|line| Line::from(Span::styled(fit(&line, width), style)))
         .collect();
     GenUiRender {

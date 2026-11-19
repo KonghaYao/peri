@@ -13,7 +13,7 @@ fn segments_to_text(segments: &[MarkdownSegment]) -> String {
             MarkdownSegment::Table(_) => vec![],
             MarkdownSegment::Image(img) => img.lines.clone(),
             MarkdownSegment::GenUi(segment) => {
-                crate::kit::genui::render(segment, 80, &peri_theme::builtin::dark_theme()).lines
+                crate::genui::render(segment, 80, &peri_theme::builtin::dark_theme(), None).lines
             }
         })
         .flat_map(|l| l.spans)
@@ -717,7 +717,7 @@ fn test_incremental_reference_definition_keeps_reference_region_mutable() {
 #[test]
 #[serial_test::serial]
 fn test_rendered_chunks_reuse_stable_identity_and_only_parse_suffix() {
-    use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+    use crate::markdown::metrics::{reset as reset_perf_counters, snapshot as perf_counters};
 
     let mut cache = MarkdownRenderCache::default();
     let first = super::parse_markdown_chunks_cached(
@@ -751,7 +751,7 @@ fn test_rendered_chunks_reuse_stable_identity_and_only_parse_suffix() {
 #[test]
 #[serial_test::serial]
 fn test_rendered_chunks_fixed_length_more_publications_do_not_reparse_prefix() {
-    use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+    use crate::markdown::metrics::{reset as reset_perf_counters, snapshot as perf_counters};
 
     let stable = "stable words\n\n".repeat(128);
     let suffix = "mutable suffix split across publications";
@@ -857,7 +857,7 @@ fn test_unclosed_fence_stays_mutable_until_closed() {
 #[test]
 #[serial_test::serial]
 fn test_width_and_theme_invalidate_rendered_chunks() {
-    use crate::kit::acp_bridge::{perf_counters, reset_perf_counters};
+    use crate::markdown::metrics::{reset as reset_perf_counters, snapshot as perf_counters};
 
     let input = "stable paragraph with 中文\n\nmutable";
     let mut cache = MarkdownRenderCache::default();

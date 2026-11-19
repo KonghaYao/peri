@@ -12,6 +12,7 @@
 //!
 //! 本模块不读全局状态；默认 store 的判断在 `LoginEditState`，不在这里。
 
+use peri_tui_components::button::ButtonChrome;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -452,7 +453,11 @@ pub(super) fn action_row(
     let n = labels.len();
     let widths: Vec<usize> = labels
         .iter()
-        .map(|label| format!("[{label}]").width())
+        .map(|label| {
+            ButtonChrome::Bracketed { padded: false }
+                .text(label)
+                .width()
+        })
         .collect();
     let item_widths: Vec<usize> = widths.iter().map(|width| width + ACTION_MARKER).collect();
     let available = metrics.content_width.saturating_sub(ACTION_INDENT).max(1);
@@ -502,7 +507,10 @@ pub(super) fn action_row(
                 .content_width
                 .saturating_sub(column + reserve)
                 .max(1);
-            let label = fit_value(&format!("[{}]", labels[index]), max_label);
+            let label = fit_value(
+                &ButtonChrome::Bracketed { padded: false }.text(&labels[index]),
+                max_label,
+            );
             let width = label.width();
             let start = column;
             let style = if selected == Some(index) {
@@ -580,7 +588,13 @@ pub(super) fn button_line(
     Line::from(vec![
         Span::raw(" ".repeat(INDENT)),
         Span::styled(marker, Style::default().fg(colors.cursor)),
-        Span::styled(fit_value(&format!("[{label}]"), budget), style),
+        Span::styled(
+            fit_value(
+                &ButtonChrome::Bracketed { padded: false }.text(label),
+                budget,
+            ),
+            style,
+        ),
     ])
 }
 

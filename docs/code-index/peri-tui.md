@@ -1,10 +1,13 @@
 # peri-tui 代码索引
 
-更新：2026-11-17
+更新：2026-11-19
 
-通用输入编辑、固定行高视口、导航与鼠标命中由 `peri-tui-components`
-提供，TUI 直接单向消费。组件 API 与使用示例见
-[`peri-tui-components/README.md`](../../peri-tui-components/README.md)。
+通用输入编辑、固定行高视口、导航与鼠标命中，以及 Markdown/OpenUI 渲染器
+由 `peri-tui-components` 提供，TUI 直接单向消费：`kit/markdown/` 与
+`kit/genui/` 只保留应用侧出口（`genui::view_state` 注入会话 epoch）。
+组件 API 与使用示例见
+[`peri-tui-components/README.md`](../../peri-tui-components/README.md)；
+组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/markdown/openui，`--list`/`--dump` 支持无 TTY）。
 `panels/shared/list.rs` 仅保留应用的首帧高度策略；业务对象转换、主题解析、
 焦点路由及动作执行仍由 TUI 持有。
 
@@ -28,7 +31,7 @@ Turn 分隔线由 `kit/acp_events/render/publication.rs::insert_turn_dividers` �
 
 待发送鼠标入口：`kit/steer_queue.rs` 按最近绘制帧命中控件；正文点击只选择发送动作（下划线），按钮命中才触发提交。持续中文流式输出与长中文队列的真实点击回归见 `KonghaYao/peri-e2e` 的 `tests/smoke/steer-queue-live.test.ts`。
 
-Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅不做语法着色；`markdown/workload_test.rs` 与 `code_block_test.rs` 覆盖复杂结构及预算边界。`perf.render` 的 `message-body-total` 只覆盖消息组件准备，不能当作终端 draw/flush 或 Enter 端到端计时。
+Markdown 高亮预算在 `peri-tui-components/src/markdown/code_block.rs`，超限保留原文，仅不做语法着色；`markdown/workload_test.rs` 与 `code_block_test.rs` 覆盖复杂结构及预算边界。`perf.render` 的 `message-body-total` 只覆盖消息组件准备，不能当作终端 draw/flush 或 Enter 端到端计时。
 
 显式停止入口 `src/acp_client/client/requests.rs::cancel` 在当前交互 gate 内读取会话与 managed run，结清本地待处理交互后发送 `session/cancel` 通知。通知发送不等于执行已静止，loading/交互终结仍等待执行结束通知；回归见 `src/acp_client/client/cancel_test.rs`。
 
@@ -117,7 +120,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 改 System Reminder 展示 | `src/kit/acp_types/event_data.rs` + `src/kit/acp_events/system.rs` + `src/kit/tui_render_unit/{reminder,fold}.rs` + `src/kit/message_area/{entry_nav.rs,render/user.rs}` | `AcpEventData::SystemReminder`；canonical event handler；`TuiSystemReminder::from_wire` / `legacy` / `attach_relay`；`ReminderRelay`；`FoldKey::SystemReminder`；reminder render | canonical 路径只按 DTO 字段建模；reminder 默认只显示 dim 非 bold header，左侧以 `▸/▾` 表达折叠态，点击/Enter 经通用 fold override 展开正文；子 Agent 转发（wire `source_agent_id`）仅在展开态追加一行来源标注，`{name}` 优先取 `current_turn.subagent_name`，未登记回退 child_thread_id，折叠态与本地提醒一致；`detect_reminder` 仅处理无结构化事件的 legacy 文本 fallback；reminder 独立于用户气泡 |
 | 改消息流渲染 | `src/kit/message_area/message_area.rs` + `message_area/render/renderer.rs` + `message_area/vm_cache_slot.rs` + `message_area/selection.rs` + `grid.rs` + `kit/tui_render_unit/bubble.rs` | `MessageArea`；`vm_to_lines_cached`；`MarkdownLineCache`；`SlotLines::{single,composite}`；`SlotIndex::{new,visual_lookup,logical_lookup}`；`TuiAssistantBubble::is_brief` | 变化 Markdown 复用 stable rendered chunks 与 local wrap map；slot 用 chrome/tail slice + stable chunk `Arc` composite access，避免把稳定 `Line` clone 回 contiguous Vec；全局坐标通过 O(VM) prefix + slot-local lookup，production 不 flatten transcript wrap map；Unicode 按显示宽度映射。assistant 短回复（正文 `chars().count() < 120`，判定在 `is_brief` 且 zone 判定与渲染前缀共用）并入过程带：正文前缀走 `process_prefixed_cont_line`、wrap 宽度收窄为 `process_content_width`，无台阶故正文上下各 1 行过程带前缀空行；user 气泡永不缩进。Compact/Narrow（`indent == 0`）回退基准形态 |
 | 改图片链接预览与打开行为 | `src/kit/message_area/{handlers,image_action,hits}.rs` + `src/kit/image_overlay.rs` + `src/kit/atoms/{state,input_snapshot}.rs` | `register_image_hover`；`schedule_image_preview_hover`；`resolve_preview_target`；`request_preview`；`register_image_click` | 图片链接 Moved 命中后即时高亮，但需在同一目标稳定悬停 300 ms 才进入预览源；移出或换链接立即清空并使旧计时任务失效；预览仲裁为稳定 hover > cursor > focus，点击打开仍走 T5 校验与参数化命令 |
-| 改图片读取与资源限制 | `src/kit/image_safety.rs` + `image_safety_test.rs` | `grade_path` / `read_validated_image` / `sanitize_for_terminal` / `classify_url` | 路径分级与头部/MIME/尺寸/字节限额在真实读取入口校验，显示文本过滤控制字符；测试经原私有 tests 模块挂载 |
+| 改图片读取与资源限制 | `src/kit/image_safety.rs` + `image_safety_test.rs`（过滤与 URL 分类在 `peri-tui-components/src/markdown/safety.rs`） | `grade_path` / `read_validated_image` / `sanitize_for_terminal` / `classify_url` | 路径分级与头部/MIME/尺寸/字节限额在真实读取入口校验，显示文本过滤控制字符；测试经原私有 tests 模块挂载 |
 | 改 keepgoing 按钮行为 | `src/kit/message_area/{handlers,hits,footer}.rs` + `src/kit/submit_consumer.rs` | `register_keepgoing_click`；`KEEPGOING_DEBOUNCE`；`compute_keepgoing_rect`；`build_footer_lines`；`handle_keepgoing_submit` | 命中最近一帧按钮 rect；冷却期内 Consumed 不提交；点击发送空内容 prompt，服务端仅继续 loop；布局与命中使用同一 KeepGoingLayout（ARC-KEEPGOING-001） |
 | 改事件消费（新增/变更事件） | `src/kit/acp_bridge.rs` + `src/kit/acp_events/` + `acp_notifier.rs` | `spawn_acp_bridge_inner` / `PublicationScheduler`；`dispatch_for_bridge` → `PublicationIntent`；`push_view_models` | 事件先 canonical ingest；主/子 Streaming 与子 Block 共用 50 ms fixed deadline（不 debounce），主 Block 保留 boundary；首块与终态立即可见，None 保留积累；投影读取不消费发布状态，handler 同步 barrier 返回 Published 结算 pending；reset/session/receiver-close/shutdown 失效 pending；终止事件必须离开 loading；root usage_update 仍按 session envelope 处理 |
 | 改历史分页（滚动加载更早历史） | `src/kit/history_paging.rs` + `src/kit/history_page_consumer.rs` + `src/kit/acp_events/history_page.rs` + `src/acp_client/client/history_page.rs` + `src/kit/message_area/{viewport_anchor.rs,scroll/{event,auto_follow,throttle}.rs}` | `HISTORY_PAGING` / `HISTORY_SPANS`；`viewport_at_forward_boundary`；`request_older_page_if_due`；`request_older_page_at_scroll_facts` / `request_older_page_after_scroll`；`spawn_history_page_consumer` / `fetch_page` / `settle_request` / `invalidate_browsing`；`ViewportAnchor::{capture,relocate}` / `PrependRelocation::target_for` / `HISTORY_PREPEND_EPOCH`（并合代数）/ `MergeOutcome::inserted_slot_range`（仅桥接层） | 触发判据只有一份（`viewport_at_forward_boundary`），渲染 effect（内容变化/稀疏首屏）与滚动事件（空闲会话里滚到顶端、键盘 Ctrl+Up/Home）两条路径共用；认领在同步边界完成（同 cursor+limit 合并、`REQUEST_BACKOFF_MS` 退避、在途只一个）；取页经 `HISTORY_PAGES_TX → 单消费者`（`PAGE_FETCH_TIMEOUT` 预算——transport 无内建超时；空页按 `nextCursor` 续读，上限 `MAX_AUTO_CONTINUE_PAGES`），响应注入 `LOCAL_EVENT_TX` 由桥接并入，消费者不碰执行状态；迟到页双层身份判据（消费者侧 + 桥接侧）整体丢弃，`-32011/-32012` 停止本次浏览（`invalidate_browsing`）；并入按区间索引插到更早位置、只对历史来源槽位补配对终点（A10）；阅读锚点用**身份重定位**：`HISTORY_PREPEND_EPOCH` 是桥接对渲染唯一的事实（「并合发生过」，不带槽位号），渲染侧在发布前捕获视口顶行所在单元的身份与单元内位移、发布后在新索引里重查（组身份 = 成员序列，认不出或身份不唯一 → 不补偿，仅浏览态，A20） |
@@ -160,13 +163,13 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 滚动条外观 | `scrollbar_chrome.rs` + `message_area/props.rs` + `panels/subagent_detail/detail_panel.rs` | `draw_scrollbar` 统一主体与 subagent 详情的留白滑块、上下箭头和主题色；各视图提供自身的内容高度、偏移及右侧绘制区域 |
 | 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic`，复制时剥视觉前缀） |
 | 文本剪贴板 | `src/kit/clipboard.rs` + `clipboard_test.rs`、`src/kit/input_area/paste.rs` + `paste_test.rs` | `copy_text` 统一消息拖拽、错误原文、MCP 详情与 OAuth 链接复制。`select_channel` 选通道：`PERI_CLIPBOARD` 覆盖优先；SSH/herdr 或非 macOS 的 Unix 上无 `DISPLAY`/`WAYLAND_DISPLAY` 时走终端 OSC 52，其余走系统剪贴板（arboard）；主通道失败回落另一条通道。tmux 下同时发原生 OSC 52 与 `\ePtmux;` DCS 透传副本（两种 tmux 配置互不覆盖）。Ctrl+V 只读本机剪贴板：同一探测判定本机剪贴板非用户剪贴板且读不到内容时，提示改用终端原生粘贴（bracketed paste 不受影响），本机保持静默。终端写入无确认响应，发送成功不保证客户端已接受；外层终端需允许 OSC 52，tmux 还需 `set -g set-clipboard on`（原生路径，且客户端终端 terminfo 带 `Ms`）或 `set -g allow-passthrough on`（透传路径）。回归命令：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib -- kit::clipboard::tests`、`... -- input_area::paste::tests` |
-| markdown 渲染 | `markdown/`（convert.rs / list.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描；列表项之间的空行范围由 `list.rs::LIST_ITEM_GAP_MAX_DEPTH` 单点控制（`None` 恢复紧凑） |
-| Markdown 解析测试 | `src/kit/markdown/{mod_test.rs,list_test.rs,cache_test.rs,table_parse_test.rs,wrap_test.rs,image_parse_test.rs,profile_test.rs}` | 按基本解析、列表项间距、增量缓存、表格、Unicode 折行、图片与显式 release profile 分组；统一过滤 `kit::markdown::`，profile 用例默认 ignored |
+| markdown 渲染 | `peri-tui-components/src/markdown/`（convert.rs / list.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描；列表项之间的空行范围由 `list.rs::LIST_ITEM_GAP_MAX_DEPTH` 单点控制（`None` 恢复紧凑） |
+| Markdown 解析测试 | `peri-tui-components/src/markdown/{mod_test.rs,list_test.rs,cache_test.rs,table_parse_test.rs,wrap_test.rs,image_parse_test.rs}` + `src/kit/markdown_profile_test.rs` | 按基本解析、列表项间距、增量缓存表格、Unicode 折行、图片与显式 release profile 分组；profile 用例依赖应用侧 perf 计数，默认 ignored |
 | Assistant VM 共享 payload | `src/kit/tui_render_unit/{unit.rs,bubble.rs,shared_bubble_test.rs}` + `src/kit/acp_types/current_turn/{projection.rs,projection_test.rs}` | assistant 气泡通过 Arc 进入 im 快照，节点 COW 不深拷贝正文/推理；变更 fold/终态时显式复制，旧快照保持不可变。计量区分 source→VM 文本物化与气泡 Clone 的正文/推理字节；非 allocator/RSS 指标 |
-| Markdown 缓存生命周期 | `src/kit/markdown/{parser.rs,cache_lifecycle_test.rs,code_block.rs,code_block_test.rs}` | terminal full parse 释放流式原文 buffer；高亮缓存共享 Arc，按 32 条 / 4 MiB 高亮 payload 预算淘汰，超预算单项不入缓存；旧增量 convert API 只编入测试，生产 ConvertState 保留 |
-| Markdown 流式边界 | `src/kit/markdown/{boundary.rs,boundary_test.rs,parser.rs}` + `src/kit/message_area/{message_area.rs,vm_cache.rs}` | 单次逐行扫描跨 fence 内部空行冻结已闭合代码块；后续只解析可变尾部，stable chunks 共享 Arc；引用、列表、表格与未闭合 fence 保守保留，terminal full parse 校正；尾部图片字节范围映射回完整输入；内外层 key 包含正文前景与代码背景，变化时从 parsed blocks 重物化 |
+| Markdown 缓存生命周期 | `peri-tui-components/src/markdown/{parser.rs,cache_lifecycle_test.rs,code_block.rs,code_block_test.rs}` | terminal full parse 释放流式原文 buffer；高亮缓存共享 Arc，按 32 条 / 4 MiB 高亮 payload 预算淘汰，超预算单项不入缓存；旧增量 convert API 只编入测试，生产 ConvertState 保留 |
+| Markdown 流式边界 | `peri-tui-components/src/markdown/{boundary.rs,boundary_test.rs,parser.rs}` + `src/kit/message_area/{message_area.rs,vm_cache.rs}` | 单次逐行扫描跨 fence 内部空行冻结已闭合代码块；后续只解析可变尾部，stable chunks 共享 Arc；引用、列表、表格与未闭合 fence 保守保留，terminal full parse 校正；尾部图片字节范围映射回完整输入；内外层 key 包含正文前景与代码背景，变化时从 parsed blocks 重物化 |
 | Transcript 增量布局与预算 | `src/kit/message_area/{transcript.rs,transcript_index.rs,vm_cache.rs}` + `src/kit/acp_events/render/publication.rs` | generation 连续的 publication 后缀提示驱动持久树点更新；可见动画不扫描历史；轻量行高与 Weak 行缓存分离，主区 16 MiB 派生预算，冷复制按 slot 临时恢复；过程区转场形态（`zone_transition`）按相邻 entry 起止 zone 判定，形态翻转只重渲染对应 slot |
-| 共享 entry 缓存与内存计量 | `src/kit/entry_render_cache.rs` + `src/kit/markdown/{memory.rs,memory_test.rs}` | 真实主消息/详情共享内容、布局（含过程区转场形态翻转）、主题、语言、occurrence 与 surface 失效；retained_bytes 递归容量计量、同 cache Arc 去重，非 RSS 指标 |
+| 共享 entry 缓存与内存计量 | `src/kit/entry_render_cache.rs` + `peri-tui-components/src/markdown/{memory.rs,memory_test.rs}` | 真实主消息/详情共享内容、布局（含过程区转场形态翻转）、主题、语言、occurrence 与 surface 失效；retained_bytes 递归容量计量、同 cache Arc 去重，非 RSS 指标 |
 | Subagent 详情缓存 | `src/kit/panels/{subagent_detail/detail_panel.rs,subagent_detail_cache/detail_cache.rs,subagent_detail_cache_test.rs}` + `src/kit/panel_scroll.rs` | 自定义 viewport 绘制、完整 usize 高度、滚轮逐事件驱动的虚拟滚动目标；8 MiB 派生预算，不物化全历史 ScrollView buffer |
 | 后台 subagent 文本合帧 | `src/kit/{bg_task_live/live_projection.rs,bg_task_live_test.rs,bg_publication_test.rs,acp_bridge.rs}` | BgStream 独占累积正文/推理并维护增量 hash；独立 50ms deadline 发布 BG_LIVE_DETAIL，不受主流 Streaming/Block/None 与主 turn 结束影响；工具/终态/接收关闭 flush，会话边界清空，同会话 replay 保留 dirty stream 并重新安排 deadline |
 | subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`、`subagent_tool_line`（组内工具行与组头同列：过程区续行前缀、无独立缩进、label 无 bold）、`subagent_error_reason_lines`（错误预览最多三行，× 复制完整原文） |
