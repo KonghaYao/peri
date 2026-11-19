@@ -56,7 +56,7 @@ fn forgetting_one_directory_keeps_other_observations() {
     cache.record(key(&first), first.clone());
     cache.record(key(&second), second.clone());
 
-    cache.forget_cwds(&[first.cwd.clone()]);
+    cache.forget_cwds(std::slice::from_ref(&first.cwd));
 
     assert!(cache.get(&key(&first)).is_none());
     assert!(cache.get(&key(&second)).is_some());
