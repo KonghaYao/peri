@@ -494,7 +494,7 @@ pub(super) fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
         }
         TuiRenderUnit::TuiToolCard(card) => Some(FoldKey::Tool(card.tool_id.clone())),
         TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
-            bubble.message_id.clone().map(FoldKey::Reasoning)
+            crate::kit::tui_render_unit::reasoning_fold_key(bubble)
         }
         _ => None,
     }

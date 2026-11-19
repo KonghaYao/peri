@@ -138,27 +138,27 @@ fn relocate_is_zero_when_the_inserted_block_is_below_the_viewport() {
 #[test]
 #[serial_test::serial]
 fn relocate_survives_neighbouring_tool_cards_collapsing_to_single_lines() {
-    // 发布前：`[tool t1(3 行), tool t2(3 行), tail(3 行)]`，视口顶行 4 落在 t2 内。
+    // 发布前：`[tool t1(3 行), tool t2(3 行), tail(3 行)]`，视口顶行 7 落在 tail 内。
     let before = index(
         vec![tool_card("t1"), tool_card("t2"), bubble("tail")],
         &[3, 3, 3],
     );
-    let anchor = ViewportAnchor::capture(&before, 4).expect("锚点落在 t2 内");
-    assert_eq!(anchor.offset_within_unit, 1, "4 − t2 起始 3");
+    let anchor = ViewportAnchor::capture(&before, 7).expect("锚点落在 tail 内");
+    assert_eq!(anchor.offset_within_unit, 1, "7 − tail 起始 6");
 
     // 发布后：两张工具卡分别收束为 1 行——槽位数不变，但上方高度减少。
     let after = index(
         vec![tool_card("t1"), tool_card("t2"), bubble("tail")],
         &[1, 1, 3],
     );
-    let target = anchor.relocate(&after).expect("t2 身份在新窗口里唯一");
-    assert_eq!(target, 1 + 1, "新起始 1 + 单元内位移 1");
+    let target = anchor.relocate(&after).expect("tail 身份在新窗口里唯一");
+    assert_eq!(target, 2 + 1, "新起始 2 + 单元内位移 1");
     assert_eq!(
-        screen_row(&after, 1, target),
-        screen_row(&before, 1, 4),
+        screen_row(&after, 2, target),
+        screen_row(&before, 2, 7),
         "tail 屏幕行不变（A20）——尽管上方工具高度变小"
     );
-    assert_eq!(target as isize - 4, -2, "重定位量 = 上方两张卡各压掉 2 行");
+    assert_eq!(target as isize - 7, -4, "重定位量 = 上方两张卡各压掉 2 行");
 }
 
 // ── ④ 安全方向：身份认不出 / 身份歧义 → 不补偿 ───────────────────────────

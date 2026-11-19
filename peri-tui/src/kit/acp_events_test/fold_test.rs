@@ -518,6 +518,79 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
     );
 }
 
+/// 无 message_id 的 reasoning（v1 兼容 / 回放）：流式段保留 Preview（没有稳定
+/// 键可写覆盖，折叠等于永久隐藏正文）；完成后默认单行，并按内容身份可展开。
+#[test]
+#[serial]
+fn test_fold_pass_unkeyed_reasoning_preview_then_content_key_override() {
+    let mut state = super::make_fold_test_state();
+
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ReasoningChunk(TuiReasoningChunk {
+            text: "无身份思考".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        super::reasoning_of(&snap, 0).fold,
+        FoldState::Preview,
+        "无身份流式段保持正文可见"
+    );
+    let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
+        panic!("expected TuiAssistantBubble");
+    };
+    assert!(
+        crate::kit::tui_render_unit::reasoning_fold_key(bubble).is_none(),
+        "流式内容逐 chunk 变化，不能作为稳定覆盖键"
+    );
+    drop(snap);
+
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "回复".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        super::reasoning_of(&snap, 0).fold,
+        FoldState::Collapsed,
+        "完成后默认单行折叠"
+    );
+    let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
+        panic!("expected TuiAssistantBubble");
+    };
+    let key =
+        crate::kit::tui_render_unit::reasoning_fold_key(bubble).expect("已完成块按内容身份键控");
+    drop(snap);
+
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(key, FoldState::Expanded);
+
+    // 新一轮开始触发重建：覆盖必须按同一内容身份命中。
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::LocalUserBubble {
+            text: "下一个问题".into(),
+            attachments: Vec::new(),
+        },
+    );
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        super::reasoning_of(&snap, 0).fold,
+        FoldState::Expanded,
+        "内容身份键在重建后仍命中"
+    );
+}
+
 /// tool 覆盖：手动展开已完成工具后，重建（output 更新）仍保持 + user_modified 恢复。
 #[test]
 #[serial]

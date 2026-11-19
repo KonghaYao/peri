@@ -393,17 +393,28 @@ impl CurrentTurn {
                         self.trailing_reasoning_frozen_ms,
                         self.text_started_at,
                     );
-                    TuiRenderUnit::TuiAssistantBubble(
-                        TuiAssistantBubble {
-                            text: Self::materialize_text(text_slice),
-                            reasoning,
-                            message_id: self.last_message_id.clone(),
-                            started_at: self.text_started_at,
-                            duration_ms: None,
-                            content_hash,
+                    let mut bubble = TuiAssistantBubble {
+                        text: Self::materialize_text(text_slice),
+                        reasoning,
+                        message_id: self.last_message_id.clone(),
+                        started_at: self.text_started_at,
+                        duration_ms: None,
+                        content_hash,
+                    };
+                    // 无 message_id 的流式 reasoning 无法写覆盖键：构造期即定
+                    // Preview（正文可见）。折叠 pass 使用同一策略，避免首次 pass
+                    // 改写 fold 而克隆 bubble（current/committed 共享 Arc）。
+                    if bubble.message_id.is_none()
+                        && let Some(r) = bubble.reasoning.as_mut()
+                    {
+                        let fold =
+                            crate::kit::tui_render_unit::fold_for_unkeyed_reasoning(r.status);
+                        if r.fold != fold {
+                            r.fold = fold;
+                            bubble.recompute_hash();
                         }
-                        .into(),
-                    )
+                    }
+                    TuiRenderUnit::TuiAssistantBubble(bubble.into())
                 };
                 if self.cached_view_models.len() <= trailing_idx {
                     self.cached_view_models.push_back(trailing);

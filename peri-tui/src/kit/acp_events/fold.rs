@@ -102,21 +102,25 @@ pub(super) fn apply_fold_pass(
                         if phase != SessionPhase::PromptRunning && status == EntryStatus::Running {
                             status = EntryStatus::Completed;
                         }
-                        // 用户手动展开（覆盖表中存在 Reasoning(message_id)）→ 覆盖优先。
+                        // 用户手动展开（覆盖表中存在 reasoning 身份键）→ 覆盖优先。
                         // 空表短路：无手动覆盖时不构造 FoldKey（避免逐 token 克隆
-                        // message_id）。
+                        // message_id / 哈希正文）。
                         let override_fold = if has_overrides {
-                            b.message_id.as_ref().and_then(|id| {
-                                overrides.get(&FoldKey::Reasoning(id.clone())).copied()
-                            })
+                            crate::kit::tui_render_unit::reasoning_fold_key(b)
+                                .and_then(|key| overrides.get(&key).copied())
                         } else {
                             None
                         };
                         let target_fold = override_fold.unwrap_or_else(|| {
-                            crate::kit::tui_render_unit::fold_for_status(
-                                FoldTarget::Reasoning,
-                                status,
-                            )
+                            if b.message_id.is_some() {
+                                crate::kit::tui_render_unit::fold_for_status(
+                                    FoldTarget::Reasoning,
+                                    status,
+                                )
+                            } else {
+                                // 无身份块不能写覆盖键：流式段保持可见，完成态可展开。
+                                crate::kit::tui_render_unit::fold_for_unkeyed_reasoning(status)
+                            }
                         });
                         let fold_changed = r.fold != target_fold;
                         let status_changed =

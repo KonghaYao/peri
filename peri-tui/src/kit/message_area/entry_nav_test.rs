@@ -62,7 +62,7 @@ fn test_fold_key_of_maps_vm_identities() {
     assert_eq!(k, FoldKey::Reasoning("msg_9".into()));
     assert_eq!(f, FoldState::Preview);
 
-    // 无 message_id 的 reasoning bubble → 无折叠键（不可作为覆盖目标）
+    // 无 message_id 的已完成 reasoning → 内容身份键（历史回放/历史页可展开）
     let vm_noid = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
@@ -82,7 +82,21 @@ fn test_fold_key_of_maps_vm_identities() {
         }
         .into(),
     );
-    assert!(entry_nav::fold_key_of(&vm_noid).is_none());
+    let (local_key, _) = entry_nav::fold_key_of(&vm_noid).expect("已完成块按内容身份可折叠");
+    assert!(
+        matches!(local_key, FoldKey::ReasoningLocal(_)),
+        "无 message_id 时使用本地内容身份"
+    );
+    // 内容身份稳定：同一内容重建后键不变；内容不同则键不同。
+    let mut rebuilt = match &vm_noid {
+        TuiRenderUnit::TuiAssistantBubble(b) => (**b).clone(),
+        other => panic!("expected TuiAssistantBubble, got {other:?}"),
+    };
+    rebuilt.recompute_hash();
+    assert_eq!(
+        entry_nav::fold_key_of(&TuiRenderUnit::TuiAssistantBubble(rebuilt.into())).map(|(k, _)| k),
+        Some(local_key.clone())
+    );
 
     // tool / subagent 按 tool_id / agent_id 键控
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
@@ -141,6 +155,59 @@ fn test_fold_key_of_maps_vm_identities() {
         )),
         "subagent 折叠恒 Collapsed（§7 表），Enter 分派以此为锚"
     );
+}
+
+/// 无 message_id 的已完成 reasoning：内容身份键写入覆盖表后，当帧快照展开；
+/// 覆盖键与折叠 pass 共用 `reasoning_fold_key`（重建后仍能命中）。
+#[test]
+#[serial_test::serial]
+fn test_fold_toggle_expands_completed_reasoning_without_message_id() {
+    use crate::kit::tui_render_unit::{EntryStatus, TuiAssistantBubble, TuiReasoningBlock};
+
+    crate::kit::atoms::init_atoms();
+    FOLD_OVERRIDES.state().write().clear();
+    let unit = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "回复".into(),
+            reasoning: Some(TuiReasoningBlock {
+                text: "历史思考".into(),
+                fold: FoldState::Collapsed,
+                status: EntryStatus::Completed,
+                is_running: false,
+                started_at: None,
+                duration_ms: None,
+            }),
+            message_id: None,
+            content_hash: 0,
+        }
+        .into(),
+    );
+    let key = entry_nav::fold_key_of(&unit).expect("已完成块可展开").0;
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![unit]),
+        generation: 1,
+    };
+
+    assert_eq!(
+        entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+    let TuiRenderUnit::TuiAssistantBubble(updated) = &snapshot.items[0] else {
+        panic!("expected TuiAssistantBubble");
+    };
+    assert_eq!(
+        updated.reasoning.as_ref().map(|r| r.fold),
+        Some(FoldState::Expanded),
+        "点击后当帧展开"
+    );
+    assert_eq!(
+        FOLD_OVERRIDES.state().read().get(&key),
+        Some(&FoldState::Expanded),
+        "覆盖表按同一内容身份键持久化"
+    );
+    FOLD_OVERRIDES.state().write().clear();
 }
 
 #[test]
