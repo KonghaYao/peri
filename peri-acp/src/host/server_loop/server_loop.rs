@@ -22,6 +22,21 @@ pub(super) fn cleanup_incomplete_session_id(result: &Result<Value, AcpError>) ->
         .filter(|session_id| !session_id.is_empty())
 }
 
+/// 关闭成功后回收 per-session prompt 锁。
+///
+/// 只有映射里这一份 Arc 时才能移除：仍有等待者持有时必须复用同一把锁，
+/// 同 ID 重开才能与旧等待者继续互斥（#465 验收）。没有等待者的成功关闭
+/// 若不移除，同连接轮换 ID 会让锁表只增不减。
+async fn retire_prompt_lock_if_idle(prompt_locks: &PromptLocks, session_id: &str) {
+    let mut locks = prompt_locks.lock().await;
+    if locks
+        .get(session_id)
+        .is_some_and(|lock| Arc::strong_count(lock) == 1)
+    {
+        locks.remove(session_id);
+    }
+}
+
 pub(in super::super) struct ServerLoop<'host> {
     pub(in super::super) transport: &'host Arc<dyn crate::transport::AcpTransport>,
     pub(in super::super) cfg: &'host Arc<AcpServerConfig>,
@@ -851,6 +866,11 @@ impl ServerLoop<'_> {
             .await
         };
         drop(lifecycle_lock);
+        if result.is_ok() {
+            if let Some(session_id) = closed_session_id.as_deref() {
+                retire_prompt_lock_if_idle(self.prompt_locks, session_id).await;
+            }
+        }
         // 进入会话时的恢复（设计 §3/§4）：装配成功后、响应发出前完成准备。
         // 生命周期锁已在上面释放；准备阶段只读范围并接纳提醒，不启动执行。
         // 装配成功 + 恢复准备失败 = 部分成功：历史保留、响应 Ok，结果放 `_meta`。

@@ -415,6 +415,9 @@ impl SessionManager {
                 anyhow::bail!("Session close incomplete: owned resources are still active");
             }
         }
+        // 会话已确定性退出：caps 是 session 级登记，成功关闭后离开本进程视图；
+        // 上面的失败分支保留它，会话仍可续聊。同 ID 重新 load 会按当前连接重建（#465）。
+        self.inner.caps_registry.remove(session_id);
         Ok(())
     }
 

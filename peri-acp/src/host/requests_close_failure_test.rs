@@ -330,6 +330,13 @@ impl CloseHarness {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
+    /// 撤销故障注入：用于验证关闭失败后的重试。
+    fn disarm(&self) {
+        self.switch
+            .armed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
     async fn close(&self) -> Result<Value, AcpError> {
         self.close_session(&self.sid).await
     }
@@ -363,15 +370,52 @@ impl CloseHarness {
     }
 
     async fn prompt(&self) -> Result<Value, AcpError> {
+        self.prompt_session(&self.sid).await
+    }
+
+    async fn prompt_session(&self, session_id: &str) -> Result<Value, AcpError> {
         self.client
             .send_request(
                 "session/prompt",
                 json!({
-                    "sessionId": self.sid,
+                    "sessionId": session_id,
                     "prompt": [{ "type": "text", "text": "继续" }],
                 }),
             )
             .await
+    }
+
+    /// 同连接建立新会话（`session/new` 要求当前连接没有未关闭的会话）。
+    async fn new_session_on_connection(&self) -> String {
+        let cwd = self._directory.path().to_str().unwrap();
+        let response = self
+            .client
+            .send_request("session/new", json!({ "cwd": cwd }))
+            .await
+            .expect("同连接新建会话必须成功");
+        response["sessionId"]
+            .as_str()
+            .expect("session/new 必须返回会话 id")
+            .to_owned()
+    }
+
+    /// #465 三张运行期表：Controller/Runtime 句柄、caps registry、prompt 锁。
+    async fn runtime_table_rows(&self) -> (Vec<String>, usize, Vec<String>) {
+        let runtime = self.cfg.controller.session_ids();
+        let caps = self.cfg.session_manager.caps_registry().len();
+        let locks = self.locks.lock().await.keys().cloned().collect();
+        (runtime, caps, locks)
+    }
+
+    /// 成功关闭后三张表都必须回到基线（空），不得随会话轮换累积。
+    async fn assert_runtime_tables_empty(&self, context: &str) {
+        let (runtime, caps, locks) = self.runtime_table_rows().await;
+        assert!(
+            runtime.is_empty(),
+            "{context}：Runtime 句柄未回收：{runtime:?}"
+        );
+        assert_eq!(caps, 0, "{context}：caps registry 未回收，残留 {caps} 条");
+        assert!(locks.is_empty(), "{context}：prompt 锁未回收：{locks:?}");
     }
 
     /// 会话必须仍是可续聊的热态：准入闸门未置位、运行期令牌未被取消
@@ -794,6 +838,169 @@ async fn stop_revoked_queued_input_rolls_back_admission_token() {
         !harness.sessions.lock().await.contains_key(&harness.sid),
         "关闭成功后内存会话必须移除"
     );
+}
+
+/// #465 回归：成功关闭后 Runtime 句柄、caps registry 与 prompt 锁都必须回收。
+#[tokio::test]
+async fn successful_close_releases_runtime_caps_and_prompt_lock() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    let reply = harness.prompt().await.expect("首轮必须成功");
+    assert_eq!(reply["stopReason"], "end_turn", "{reply}");
+    {
+        let (runtime, caps, locks) = harness.runtime_table_rows().await;
+        assert_eq!(
+            runtime,
+            vec![harness.sid.clone()],
+            "prompt 执行后应登记本轮句柄"
+        );
+        assert_eq!(caps, 1, "session/new 应登记 caps");
+        assert_eq!(locks, vec![harness.sid.clone()], "prompt 应建立会话锁");
+    }
+
+    harness.close().await.expect("空闲会话关闭必须成功");
+    harness.assert_runtime_tables_empty("单会话成功关闭").await;
+}
+
+/// #465 验收：同连接轮流打开不同 ID，完成一轮再成功关闭，三张表回到基线。
+#[tokio::test]
+async fn repeated_round_trips_return_runtime_tables_to_baseline() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    harness.prompt().await.expect("首轮必须成功");
+    harness.close().await.expect("首轮关闭必须成功");
+    harness.assert_runtime_tables_empty("初始会话关闭后").await;
+
+    for round in 0..3 {
+        let session_id = harness.new_session_on_connection().await;
+        let reply = harness
+            .prompt_session(&session_id)
+            .await
+            .expect("轮换会话必须能完成一轮");
+        assert_eq!(reply["stopReason"], "end_turn", "{reply}");
+        harness
+            .close_session(&session_id)
+            .await
+            .expect("轮换会话必须能成功关闭");
+        harness
+            .assert_runtime_tables_empty(&format!("第 {round} 轮关闭后"))
+            .await;
+    }
+}
+
+/// #465 验收：关闭失败不得提前回收运行期资源，重试成功后三张表仍回到基线。
+#[tokio::test]
+async fn failed_close_keeps_runtime_tables_for_retry_then_success_clears_them() {
+    let harness = CloseHarness::new(CloseFault::ReadMeta).await;
+    harness.prompt().await.expect("首轮必须成功");
+    harness.arm();
+    harness
+        .close()
+        .await
+        .expect_err("注入读取失败时关闭必须失败");
+
+    let (runtime, caps, locks) = harness.runtime_table_rows().await;
+    assert_eq!(
+        runtime,
+        vec![harness.sid.clone()],
+        "关闭失败不得回收 Runtime 句柄"
+    );
+    assert_eq!(caps, 1, "关闭失败不得回收 caps，会话仍可续聊");
+    assert_eq!(
+        locks,
+        vec![harness.sid.clone()],
+        "关闭失败不得回收 prompt 锁"
+    );
+
+    harness.disarm();
+    harness.close().await.expect("撤销故障后重试必须成功");
+    harness.assert_runtime_tables_empty("关闭重试成功后").await;
+}
+
+/// #465 验收：关闭成功但有旧等待者持有同一把锁时，必须保留锁映射，
+/// 同 ID 重开才能与旧等待者继续互斥。
+#[tokio::test]
+async fn close_success_keeps_prompt_lock_while_an_old_waiter_holds_it() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    harness.prompt().await.expect("首轮必须成功");
+    // 模拟已经拿到 Arc、正在等锁的旧请求（真实等待者同样持有这份 Arc）。
+    let waiter = {
+        let mut locks = harness.locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(harness.sid.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+
+    harness.close().await.expect("空闲会话关闭必须成功");
+
+    let current = {
+        let locks = harness.locks.lock().await;
+        locks
+            .get(&harness.sid)
+            .cloned()
+            .expect("存在旧等待者时不得移除 prompt 锁")
+    };
+    assert!(
+        Arc::ptr_eq(&current, &waiter),
+        "同 ID 重开必须复用旧等待者持有的同一把锁"
+    );
+    let guard = waiter.lock_owned().await;
+    assert!(
+        current.try_lock().is_err(),
+        "旧等待者持锁期间同 ID 重开必须互斥"
+    );
+    drop(guard);
+}
+
+/// #465：成功关闭回收三张表后，同 ID 重开必须重新登记并再次完成一轮。
+#[tokio::test]
+async fn closed_session_can_reopen_and_close_again() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    harness.prompt().await.expect("首轮必须成功");
+    harness.close().await.expect("首次关闭必须成功");
+    harness.assert_runtime_tables_empty("首次关闭后").await;
+
+    harness
+        .load(&harness.sid)
+        .await
+        .expect("同 ID 重开必须成功");
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .caps_registry()
+            .contains_key(&harness.sid),
+        "重开必须按当前连接重建 caps"
+    );
+    let reply = harness.prompt().await.expect("重开后必须能完成一轮");
+    assert_eq!(reply["stopReason"], "end_turn", "{reply}");
+    harness.close().await.expect("重开后关闭必须成功");
+    harness.assert_runtime_tables_empty("重开关闭后").await;
+}
+
+/// #465：delete 与 close 共用关闭路径，成功后同样回收三张表。
+#[tokio::test]
+async fn successful_delete_releases_runtime_caps_and_prompt_lock() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    // 夹具自带的初始会话不属于本场景：先关闭它，基线才是空表。
+    harness.close().await.expect("初始会话关闭必须成功");
+    let session_id = harness.new_session_on_connection().await;
+    let reply = harness
+        .prompt_session(&session_id)
+        .await
+        .expect("删除前必须能完成一轮");
+    assert_eq!(reply["stopReason"], "end_turn", "{reply}");
+
+    harness
+        .client
+        .send_request("session/delete", json!({ "sessionId": session_id }))
+        .await
+        .expect("session/delete 必须成功");
+    harness.assert_runtime_tables_empty("成功 delete 后").await;
+    harness
+        .load(&session_id)
+        .await
+        .expect_err("已删除会话不得重新加载");
 }
 
 /// 轮询会话态直到条件成立（有界等待，避免用例自身无限阻塞）。
