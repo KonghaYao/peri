@@ -1468,6 +1468,8 @@ exit-resume-hint = To resume this session: peri -r { $session }
 
 panel-title-history-detail = History Detail
 panel-desc-history-detail = Oversized history entry detail
+panel-title-mermaid-diagram = Diagram
+panel-desc-mermaid-diagram = Mermaid overview, groups, full diagram and source
 
 # ACP MCP runtime control
 panel-mcp-detail-btn-restart = Restart
@@ -1486,3 +1488,15 @@ panel-mcp-control-workspace = The workspace connection is managed by the host.
 panel-mcp-control-system = System MCP servers are managed by the host.
 panel-mcp-control-acp = MCP over ACP does not support runtime control.
 panel-mcp-control-session-policy = MCP runtime control is disabled for this session.
+
+# ---- Mermaid streaming preview ----
+
+mermaid-unclosed = Mermaid block is unclosed; showing the received source.
+mermaid-interrupted = Mermaid block interrupted: { $reason }
+mermaid-render-failed = Mermaid preview unavailable: { $reason }
+mermaid-unknown-statement = Source shown: unrecognized Mermaid statement.
+mermaid-too-large = Diagram source is too large to lay out inline ({ $bytes } bytes); showing the source.
+mermaid-open-scope = Group { $label } · { $count } statements confirmed
+mermaid-unsupported = Source shown: { $reason }
+mermaid-open-diagram = View diagram
+mermaid-detail-copied = Diagram source copied.

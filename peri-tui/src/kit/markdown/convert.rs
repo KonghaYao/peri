@@ -13,7 +13,7 @@ use crate::kit::image_safety::UrlKind;
 use super::list::LIST_ITEM_GAP_MAX_DEPTH;
 use super::scan::ImageInfo;
 
-use super::types::{ImageSegment, MarkdownSegment, TableData};
+use super::types::{ImageSegment, MarkdownSegment, MermaidSegment, TableData};
 
 // ── 图片 token 侧表查表（T3）────────────────────────────────────────
 
@@ -28,6 +28,13 @@ pub(crate) fn image_lookup(infos: &[ImageInfo]) -> HashMap<&str, usize> {
         .enumerate()
         .map(|(i, info)| (info.token.as_str(), i))
         .collect()
+}
+
+/// 块转换时按块位置查询的旁路元数据：图片侧表与 Mermaid 围栏槽。
+pub(crate) struct ConvertAux<'a> {
+    pub image_infos: &'a [ImageInfo],
+    pub lookup: &'a HashMap<&'a str, usize>,
+    pub fences: &'a [Option<super::fence::MermaidFence>],
 }
 
 // ── 块级转换 ────────────────────────────────────────────────────────
@@ -128,6 +135,32 @@ pub(crate) fn rollback_trailing_unstable(
     }
 }
 
+/// 普通代码块与 Mermaid 降级源码共用的展示行：高亮、按正文宽折行并补齐背景。
+fn code_block_display_lines(
+    lang: &str,
+    code_lines: &[String],
+    theme: &MarkdownTheme,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for line in super::code_block::code_block_lines(lang, code_lines, theme) {
+        for mut visual_line in wrap_styled_line(&line, max_width) {
+            // code block 的背景必须覆盖整个 content 区，而不只是已有字符。
+            let width = visual_line.width();
+            if width < max_width
+                && let Some(background) = visual_line.spans.first().and_then(|span| span.style.bg)
+            {
+                visual_line.spans.push(Span::styled(
+                    " ".repeat(max_width - width),
+                    Style::default().bg(background),
+                ));
+            }
+            lines.push(visual_line);
+        }
+    }
+    lines
+}
+
 /// 将 ratatui-kit-markdown 的 ParsedBlock 列表转换为 MarkdownSegment 序列。
 ///
 /// 间距规则（统一）：
@@ -142,20 +175,11 @@ pub(crate) fn convert_to_segments(
     theme: &MarkdownTheme,
     max_width: usize,
     base_fg: ratatui::style::Color,
-    image_infos: &[ImageInfo],
-    lookup: &HashMap<&str, usize>,
+    aux: ConvertAux<'_>,
 ) -> Vec<MarkdownSegment> {
     let mut state = ConvertState::default();
     let base_style = Style::default().fg(base_fg);
-    convert_to_segments_with_state(
-        blocks,
-        theme,
-        max_width,
-        base_style,
-        &mut state,
-        image_infos,
-        lookup,
-    )
+    convert_to_segments_with_state(blocks, theme, max_width, base_style, &mut state, aux)
 }
 
 /// 与 `convert_to_segments` 同逻辑，但接受外部 `state` 以支持续跑。
@@ -174,9 +198,13 @@ pub(crate) fn convert_to_segments_with_state(
     max_width: usize,
     base_style: Style,
     state: &mut ConvertState,
-    image_infos: &[ImageInfo],
-    lookup: &HashMap<&str, usize>,
+    aux: ConvertAux<'_>,
 ) -> Vec<MarkdownSegment> {
+    let ConvertAux {
+        image_infos,
+        lookup,
+        fences,
+    } = aux;
     {
         let iteration_items = blocks.iter().enumerate();
         for (i, block) in iteration_items {
@@ -319,6 +347,10 @@ pub(crate) fn convert_to_segments_with_state(
                     }
                 }
                 ParsedBlock::CodeBlock(lang, code_lines) => {
+                    let mermaid_fence = fences
+                        .get(i)
+                        .and_then(Option::as_ref)
+                        .filter(|_| super::fence::is_mermaid_info(lang));
                     if lang == "gen-ui" || lang == "gen-ui-partial" {
                         trim_trailing_blanks(&mut state.current_text);
                         if !state.current_text.is_empty() {
@@ -348,24 +380,27 @@ pub(crate) fn convert_to_segments_with_state(
                         }
                         // 旧测试缓存不能续跑已移出的结构段，沿用动态块的失效条件。
                         state.has_table_in_processed_blocks = true;
-                    } else {
-                        for line in super::code_block::code_block_lines(lang, code_lines, theme) {
-                            for mut visual_line in wrap_styled_line(&line, max_width) {
-                                // code block 的背景必须覆盖整个 content 区，而不只是已有字符。
-                                // 折行后逐视觉行补齐，保证超长代码的每一行也铺满右侧。
-                                let width = visual_line.width();
-                                if width < max_width
-                                    && let Some(background) =
-                                        visual_line.spans.first().and_then(|span| span.style.bg)
-                                {
-                                    visual_line.spans.push(Span::styled(
-                                        " ".repeat(max_width - width),
-                                        Style::default().bg(background),
-                                    ));
-                                }
-                                state.current_text.push(visual_line);
-                            }
+                    } else if let Some(fence) = mermaid_fence {
+                        // Mermaid 段必须独立成段：后续渲染层按围栏身份管理图实例，
+                        // 不能与相邻正文一起滞留在 current_text 的 Text 段里。
+                        trim_trailing_blanks(&mut state.current_text);
+                        if !state.current_text.is_empty() {
+                            state.segments.push(MarkdownSegment::Text(std::mem::take(
+                                &mut state.current_text,
+                            )));
                         }
+                        state
+                            .segments
+                            .push(MarkdownSegment::Mermaid(MermaidSegment {
+                                fence: fence.clone(),
+                                lines: code_block_display_lines(lang, code_lines, theme, max_width),
+                            }));
+                        // 元数据随原文变化（展开闭合/正文增长），不能走旧增量 convert 缓存。
+                        state.has_table_in_processed_blocks = true;
+                    } else {
+                        state
+                            .current_text
+                            .extend(code_block_display_lines(lang, code_lines, theme, max_width));
                     }
                 }
                 ParsedBlock::ListItem(item) => {

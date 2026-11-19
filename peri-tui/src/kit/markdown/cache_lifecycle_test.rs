@@ -15,6 +15,7 @@ fn terminal_cache_does_not_retain_source_or_streaming_blocks() {
     assert_eq!(cache.chunk_source.capacity(), 0);
     assert!(cache.stable_chunks.is_empty());
     assert!(cache.stable_chunk_blocks.is_empty());
+    assert!(cache.stable_chunk_fences.is_empty());
 }
 
 #[test]

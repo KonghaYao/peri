@@ -101,6 +101,9 @@ pub(in super::super) struct AutoFollowCtx {
     /// 「发布前锚点身份 + 发布后新索引」换算；一次性值，取处见 `message_area/mod.rs`）。
     /// `None` = 本帧没有并入、或锚点身份在新窗口里认不出（一律不补偿）。
     pub prepend_relocation: Option<PrependRelocation>,
+    /// 同条消息内高度变化（图完成/缩放/异步结果）的阅读位置重定位；与并入
+    /// 重定位互斥使用，只在浏览态应用。
+    pub reflow_relocation: Option<PrependRelocation>,
     /// [Slice 4 §6.8]「等待时锚定此 block」：pending interaction block 的视觉
     /// 行范围（core 行，含起点/终点）。有值时视口对齐到 block 底部（浏览态与
     /// 跟随态均生效——§6.8：不得被新 streaming chunk 滚出视口）；block 完成

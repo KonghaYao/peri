@@ -3,9 +3,11 @@ name = "peri-tui-components"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "Business-independent terminal input, list and hit-testing primitives"
+description = "Business-independent terminal primitives and Mermaid layout pipeline"
 
 [dependencies]
+# Mermaid 字符图布局；组件只接收已确认源码，流式识别由同一模块持有。
+mermaid-text = "=0.58.0"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
 ratatui-kit = { version = "0.12.0", default-features = false }
 unicode-width = "0.2"

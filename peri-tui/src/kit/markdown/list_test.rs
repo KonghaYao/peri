@@ -16,6 +16,7 @@ fn render(md: &str) -> Vec<String> {
             MarkdownSegment::GenUi(segment) => {
                 crate::kit::genui::render(segment, 80, &peri_theme::builtin::dark_theme()).lines
             }
+            MarkdownSegment::Mermaid(segment) => segment.lines.clone(),
         })
         .map(|line| {
             line.spans

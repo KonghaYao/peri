@@ -13,6 +13,7 @@ Peri Agent, Session, MCP, configuration, persistence, or application atoms.
 | `list_nav` | key events and selection | navigation intent and bounds |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
 | `scrollbar::vertical_scrollbar` | thumb and arrow styles | scrollbar appearance |
+| `mermaid` | confirmed source, closed flag, width, job results | statement confirmation, layout, overview and preview state |
 
 The application resolves theme tokens, chooses first-frame panel height, routes
 focus, translates business objects to rows and executes actions. A list index is
@@ -64,6 +65,26 @@ let lines = render_multiline_with_cursor(TextAreaRenderOptions {
 `styles.base` retains the existing cursor-line fallback and row-padding semantics;
 non-cursor spans may inherit their containing line's style. It is not a blanket
 style applied to the whole buffer. Both rendering APIs share one implementation.
+
+## Mermaid pipeline
+
+`peri_tui_components::mermaid` owns the pure Mermaid pipeline:
+
+| Module | Responsibility |
+| --- | --- |
+| `stream` | confirms complete statements from streamed source |
+| `frame` | lays out a full or trusted prefix with `mermaid-text` |
+| `overview` | derives groups, cross-group edges and path summaries for large flowcharts |
+| `layout` | shares geometry by source, exact width, engine version and layout params |
+| `preview` | trusted-prefix state machine, 80 ms commit coalescing, cancellation and version checks |
+| `fence` | fence metadata and stable graph identity (`session + message + open_start`) |
+
+The application still scans CommonMark fences, chooses widths from its viewport,
+dispatches due jobs to its background worker, colors/wraps lines and owns panels,
+focus and i18n. The worker executes `render_source`/`render_final` and returns the
+result through `PreviewEngine::complete`; only results matching session, graph,
+prefix version and layout params are published. The component declares no globals,
+threads or timers; `mermaid-text = "=0.58.0"` is the only added dependency.
 
 ## Boundary checks
 

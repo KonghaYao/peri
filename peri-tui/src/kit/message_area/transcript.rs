@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::grid::{GridSpec, TextLineSource, ZoneTransition};
 use super::selection::{SlotIndex, SlotLines};
-use super::viewport_anchor::{PrependRelocation, ViewportAnchor};
+use super::viewport_anchor::{PrependRelocation, ReadingAnchor, ViewportAnchor};
 use super::vm_cache::VmCacheSlot;
 
 use crate::kit::entry_render_cache::{EntryInvalidation, EntryRenderContext};
@@ -116,6 +116,17 @@ pub(super) fn zone_transition(items: &im::Vector<TuiRenderUnit>, slot: usize) ->
     ZoneTransition::None
 }
 
+/// 围栏逻辑行范围 → slot 内视觉行范围；空范围或越界返回 None。
+fn fence_visual_range(
+    wrap_map: &[crate::kit::message_area::selection::WrappedLineInfo],
+    logical: &std::ops::Range<usize>,
+) -> Option<std::ops::Range<usize>> {
+    let last = logical.end.checked_sub(1)?;
+    let first = wrap_map.get(logical.start)?;
+    let last = wrap_map.get(last)?;
+    (last.visual_end > first.visual_start).then_some(first.visual_start..last.visual_end)
+}
+
 #[derive(Default)]
 pub(super) struct Transcript {
     index: Arc<SlotIndex>,
@@ -130,6 +141,8 @@ pub(super) struct Transcript {
     stamps: Vec<u64>,
     bytes: Vec<usize>,
     retained_bytes: usize,
+    /// 当前缓存消息引用的图几何字节（同源码共享只计一次）。
+    mermaid_bytes: usize,
     clock: u64,
     frame: Option<u64>,
     genui_revision: u64,
@@ -137,6 +150,8 @@ pub(super) struct Transcript {
     /// 渲染 body 取走（一次性）后交给 `run_auto_follow` 的并入分支消费；
     /// 语义与身份口径见 [`super::viewport_anchor`]。
     prepend: Option<PrependRelocation>,
+    /// 同条消息内高度变化（图完成/缩放/异步结果）时的阅读位置重定位。
+    reflow: Option<PrependRelocation>,
     /// 已观测并配对的并入代数（`HISTORY_PREPEND_EPOCH`）——只在观测到**发布变化**
     /// 时推进，因此「epoch 先于发布被读到」不会漏配（见 `viewport_anchor` 模块文档 4.）。
     merge_epoch_seen: u64,
@@ -239,6 +254,11 @@ impl Transcript {
         } else {
             None
         };
+        let reading_anchor = if published {
+            None
+        } else {
+            ReadingAnchor::capture(&self.index, scroll_y, caches)
+        };
         if global || changed {
             let length = snapshot.items.len();
             let previous_length = caches.len();
@@ -335,6 +355,7 @@ impl Transcript {
             }
             self.merge_epoch_seen = merge_epoch;
         }
+        let capture_scroll = scroll_y;
         let scroll_y = scroll_y.min(self.index.total_visual().saturating_sub(height));
         let viewport = self.index.visible_slots(scroll_y, height);
         let animated: Vec<_> = self
@@ -360,7 +381,11 @@ impl Transcript {
             );
         }
         for slot in viewport.clone() {
-            if caches[slot].lines.is_none() {
+            let preview_stale = caches[slot].lines.is_some()
+                && caches[slot].entry.has_mermaid() == Some(true)
+                && caches[slot].entry.preview_revision()
+                    != crate::kit::mermaid::message_revision_for_vm(&snapshot.items[slot]);
+            if caches[slot].lines.is_none() || preview_stale {
                 let transition = zone_transition(&snapshot.items, slot);
                 self.ensure_slot(
                     slot,
@@ -375,13 +400,14 @@ impl Transcript {
             }
             self.touch(slot);
         }
+        self.refresh_mermaid_bytes(caches);
         self.enforce_budget(caches, &viewport);
         crate::kit::atoms::RENDER_ACHIEVED_EPOCH.set(
             crate::kit::atoms::RENDER_ACHIEVED_EPOCH
                 .get()
                 .max(structural_epoch),
         );
-        crate::kit::atoms::TUI_RENDER_CACHE_BYTES.set(self.retained_bytes);
+        crate::kit::atoms::TUI_RENDER_CACHE_BYTES.set(self.retained_bytes());
         if crate::kit::history_page_consumer::window_path_enabled() {
             let handle = crate::kit::atoms::WINDOW_VIEWPORT.state();
             let follow = handle
@@ -398,6 +424,18 @@ impl Transcript {
                 crate::kit::history_window::publish_viewport_unanchored(follow);
             }
         }
+        self.reflow = if self.updated_slots > 0 {
+            reading_anchor.and_then(|anchor| {
+                anchor
+                    .relocate(&self.index, caches)
+                    .map(|target_offset| PrependRelocation {
+                        from_offset: capture_scroll,
+                        target_offset,
+                    })
+            })
+        } else {
+            None
+        };
         self.generation = Some(snapshot.generation);
         self.reset = reset;
         self.grid = Some(grid);
@@ -441,6 +479,7 @@ impl Transcript {
         cache.interaction = cache.entry.interaction().cloned();
         cache.image_lines = cache.entry.image_lines().to_vec();
         cache.genui_buttons = cache.entry.genui_buttons().to_vec();
+        cache.mermaid_fences = cache.entry.mermaid_fences().to_vec();
         let lines = Arc::new(
             (match cache.entry.markdown_lines().stable_overlay() {
                 Some((start, stable)) => {
@@ -479,7 +518,57 @@ impl Transcript {
 
     #[must_use]
     pub(super) fn retained_bytes(&self) -> usize {
-        self.retained_bytes
+        self.retained_bytes.saturating_add(self.mermaid_bytes)
+    }
+
+    fn refresh_mermaid_bytes(&mut self, caches: &[VmCacheSlot]) {
+        // 相同源码/列宽的几何只计价一次（与 store 的共享口径一致）。
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0usize;
+        for cache in caches {
+            for span in &cache.mermaid_fences {
+                if seen.insert((span.fence.source.clone(), span.width)) {
+                    total = total.saturating_add(span.layout_bytes);
+                }
+            }
+        }
+        self.mermaid_bytes = total;
+    }
+
+    /// 可见消息 → 可见行与围栏范围相交 → 只调度命中的图。预取关闭。
+    fn schedule_visible_fences(&self, caches: &[VmCacheSlot], scroll_y: usize, height: usize) {
+        if height == 0 {
+            return;
+        }
+        let visible_end = scroll_y.saturating_add(height);
+        let mut visible = std::collections::HashSet::new();
+        let mut known = std::collections::HashSet::new();
+        for cache in caches {
+            known.extend(cache.mermaid_fences.iter().map(|span| span.key.clone()));
+        }
+        for slot in self.index.visible_slots(scroll_y, height) {
+            let Some(slot_start) = self.index.slot_visual_start(slot) else {
+                continue;
+            };
+            let Some(cache) = caches.get(slot) else {
+                continue;
+            };
+            if cache.wrap_map.is_empty() {
+                continue;
+            }
+            let local_start = scroll_y.saturating_sub(slot_start);
+            let local_end = visible_end.saturating_sub(slot_start);
+            for span in &cache.mermaid_fences {
+                let Some(range) = fence_visual_range(&cache.wrap_map, &span.logical) else {
+                    continue;
+                };
+                if range.start < local_end && range.end > local_start {
+                    visible.insert(span.key.clone());
+                    crate::kit::mermaid::observe_span(span);
+                }
+            }
+        }
+        crate::kit::mermaid::retract_unseen(&visible, &known);
     }
 
     fn remove_accounting(&mut self, slot: usize) {
@@ -489,8 +578,13 @@ impl Transcript {
     }
 
     fn enforce_budget(&mut self, caches: &mut [VmCacheSlot], pinned: &std::ops::Range<usize>) {
-        if self.retained_bytes > HEAVY_CACHE_BUDGET {
-            self.evict_to_budget(caches, pinned, HEAVY_CACHE_TARGET);
+        if self.retained_bytes.saturating_add(self.mermaid_bytes) > HEAVY_CACHE_BUDGET {
+            crate::kit::mermaid::evict_geometry_to(HEAVY_CACHE_TARGET / 2);
+            self.refresh_mermaid_bytes(caches);
+            let vm_target = HEAVY_CACHE_TARGET.saturating_sub(self.mermaid_bytes);
+            if self.retained_bytes > vm_target {
+                self.evict_to_budget(caches, pinned, vm_target);
+            }
         }
     }
 
@@ -535,6 +629,11 @@ impl Transcript {
         self.prepend.take()
     }
 
+    /// 同条消息内高度变化的重定位结果（一次性）。
+    pub(super) fn take_reflow_relocation(&mut self) -> Option<PrependRelocation> {
+        self.reflow.take()
+    }
+
     pub(super) fn warm_visible(
         &mut self,
         snapshot: &ViewModelsSnapshot,
@@ -567,6 +666,8 @@ impl Transcript {
             }
             self.touch(slot);
         }
+        self.schedule_visible_fences(caches, scroll_y, height);
+        self.refresh_mermaid_bytes(caches);
         self.enforce_budget(caches, &viewport);
         Arc::clone(&self.index)
     }
