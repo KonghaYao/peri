@@ -7,7 +7,7 @@ use pulldown_cmark_012::Alignment;
 use ratatui::text::{Line, Span};
 use ratatui_kit_markdown::ParsedBlock;
 
-use super::{ImageSegment, MarkdownRenderCache, MarkdownSegment, TableData};
+use super::{ImageSegment, MarkdownRenderCache, MarkdownSegment, MermaidFence, TableData};
 
 pub(super) fn cache_retained_bytes(cache: &MarkdownRenderCache) -> usize {
     let MarkdownRenderCache {
@@ -18,6 +18,7 @@ pub(super) fn cache_retained_bytes(cache: &MarkdownRenderCache) -> usize {
         chunk_sunken: _,
         stable_source_end: _,
         stable_chunk_blocks,
+        stable_chunk_fences,
         stable_chunks,
         #[cfg(test)]
             stable_text: _,
@@ -31,6 +32,7 @@ pub(super) fn cache_retained_bytes(cache: &MarkdownRenderCache) -> usize {
     let mut bytes = chunk_source
         .heap_bytes()
         .saturating_add(stable_chunk_blocks.heap_bytes())
+        .saturating_add(stable_chunk_fences.heap_bytes())
         .saturating_add(vec_storage_bytes(stable_chunks));
     let mut seen = HashSet::new();
     for chunk in stable_chunks {
@@ -135,7 +137,28 @@ impl RetainedHeap for MarkdownSegment {
                 )
                 .saturating_add(segment.errors.heap_bytes())
                 .saturating_add(segment.root.as_ref().map_or(0, json_heap_bytes)),
+            Self::Mermaid(segment) => segment
+                .fence
+                .heap_bytes()
+                .saturating_add(segment.lines.heap_bytes()),
         }
+    }
+}
+
+impl RetainedHeap for MermaidFence {
+    fn heap_bytes(&self) -> usize {
+        self.language
+            .capacity()
+            .saturating_add(self.info.capacity())
+            .saturating_add(self.opening_line.capacity())
+            .saturating_add(self.raw.capacity())
+            .saturating_add(self.source.capacity())
+    }
+}
+
+impl RetainedHeap for Option<MermaidFence> {
+    fn heap_bytes(&self) -> usize {
+        self.as_ref().map_or(0, RetainedHeap::heap_bytes)
     }
 }
 

@@ -13,6 +13,29 @@ pub enum MarkdownSegment {
     Image(ImageSegment),
     /// 保留结构和动作，宽度与主题变化时由消息渲染器重新布局。
     GenUi(GenUiSegment),
+    /// Mermaid fenced code block：携带原文坐标、闭合状态与源码，
+    /// `lines` 是渲染层正式出图前的代码块降级形态。
+    Mermaid(MermaidSegment),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MermaidSegment {
+    /// 围栏元数据（范围使用完整消息原文坐标）。
+    pub fence: super::fence::MermaidFence,
+    /// 与普通代码块一致的展示行；出图能力接入前保持源码可见。
+    pub lines: Vec<ratatui::text::Line<'static>>,
+}
+
+impl MermaidSegment {
+    /// 组合会话、消息身份与围栏位置，得到这张图的稳定身份。
+    #[must_use]
+    pub fn key(
+        &self,
+        session_id: impl Into<String>,
+        message: super::fence::MermaidMessageRef,
+    ) -> super::fence::MermaidFenceKey {
+        self.fence.key(session_id, message)
+    }
 }
 
 #[derive(Debug, Clone)]

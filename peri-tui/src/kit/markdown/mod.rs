@@ -20,6 +20,7 @@
 mod boundary;
 mod code_block;
 mod convert;
+mod fence;
 mod heading;
 mod list;
 mod memory;
@@ -65,6 +66,10 @@ mod cache_lifecycle_tests;
 mod boundary_tests;
 
 #[cfg(test)]
+#[path = "fence_test.rs"]
+mod fence_tests;
+
+#[cfg(test)]
 #[path = "genui_test.rs"]
 mod genui_tests;
 
@@ -91,4 +96,9 @@ mod parser;
 pub use parser::*;
 
 pub use table::table_data_to_lines;
-pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, TableData};
+pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, MermaidSegment, TableData};
+
+pub use fence::{
+    FenceClose, FenceKind, MermaidFence, MermaidFenceKey, MermaidMessageIdentity,
+    MermaidMessageRef, is_mermaid_info,
+};

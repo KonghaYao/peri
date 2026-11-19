@@ -576,3 +576,76 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
         );
     }
 }
+
+/// Mermaid 围栏进入稳定块后，稳定快速路径必须继续显示源码，不能只剩前后正文。
+#[test]
+fn test_mermaid_source_survives_stable_fast_path() {
+    let text = "intro\n\n```mermaid\ngraph TD\nA-->B\n```\n\nafter";
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: Some(Instant::now()),
+            duration_ms: None,
+            text: text.to_string(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 91,
+        }
+        .into(),
+    );
+    let grid = GridSpec::grid_for(80);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (first, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let (second, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    for lines in [&first, &second] {
+        let rendered = super::all_text(lines);
+        assert!(rendered.contains("intro"), "正文应保留，实际 {rendered:?}");
+        assert!(
+            rendered.contains("graph TD") && rendered.contains("A-->B"),
+            "Mermaid 源码进入稳定块后仍应可见，实际 {rendered:?}"
+        );
+        assert!(
+            rendered.contains("after"),
+            "尾部正文应保留，实际 {rendered:?}"
+        );
+        let index_of = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| super::line_text(line).contains(needle))
+                .unwrap_or_else(|| panic!("应渲染出 {needle:?}，实际 {rendered:?}"))
+        };
+        assert_eq!(
+            index_of("graph TD"),
+            index_of("intro") + 2,
+            "正文与 Mermaid 源码之间应恰好 1 行空行"
+        );
+        assert!(
+            super::is_blank_separator(&lines[index_of("intro") + 1]),
+            "分隔行不应包含正文内容"
+        );
+    }
+}
+
+/// 冻结消息走完整解析（tail）时同样显示 Mermaid 源码。
+#[test]
+fn test_mermaid_source_survives_terminal_parse() {
+    let text = "```mermaid\ngraph TD\nA-->B\n```";
+    let vm = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: text.to_string(),
+            reasoning: None,
+            message_id: None,
+            content_hash: 92,
+        }
+        .into(),
+    );
+    let grid = GridSpec::grid_for(80);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let rendered = super::all_text(&lines);
+    assert!(
+        rendered.contains("graph TD") && rendered.contains("A-->B"),
+        "完整解析的 Mermaid 源码应可见，实际 {rendered:?}"
+    );
+}

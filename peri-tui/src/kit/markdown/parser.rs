@@ -19,6 +19,7 @@
 
 use super::boundary;
 use super::convert;
+use super::fence;
 use super::memory;
 use super::scan;
 use super::types;
@@ -33,6 +34,37 @@ use ratatui_kit_markdown::MarkdownTheme;
 use ratatui_kit_markdown::ParsedBlock;
 
 use types::MarkdownSegment;
+
+/// 预处理后的解析输入。
+///
+/// [Why 借用而不是返回 String] 无 genui / 图片 / 未闭合围栏时现有管线保持
+/// 零拷贝；共享入口用闭包承载这些可能借用局部缓冲的字段，避免自引用结构。
+struct PreparedMarkdown<'a> {
+    placeholder: &'a str,
+    image_infos: &'a [scan::ImageInfo],
+    fences: &'a [fence::MermaidFence],
+}
+
+fn with_prepared_markdown<R>(
+    input: &str,
+    terminal: bool,
+    prepare: impl FnOnce(PreparedMarkdown<'_>) -> R,
+) -> R {
+    let preprocessed = preprocess_genui_fences(input);
+    let sanitized = ensure_closed_code_fences(&preprocessed);
+    // [图片前置扫描] sanitize 之后、rk_parse 之前：`![alt](url)` → 占位 token
+    // （S1 §4 管线硬性约束）。Options 与 rk_parse 逐位一致（scan::md_options，
+    // S3 §3.5 漂移风险）；side table 供 T3 convert 查表（token → ImageInfo）。
+    let (placeholder, image_infos) = preprocess_images(&sanitized);
+    // 围栏元数据始终扫描**原始输入**：预处理会改写 genui 块、补结束符、替换图片
+    // token，任何后置坐标都不能直接当作原文坐标。
+    let fences = fence::scan_mermaid_fences(input, terminal);
+    prepare(PreparedMarkdown {
+        placeholder: &placeholder,
+        image_infos: &image_infos,
+        fences: &fences,
+    })
+}
 
 // ── 公开 API ───────────────────────────────────────────────────────
 
@@ -50,71 +82,94 @@ pub fn parse_markdown(
     // [防御] ratatui-kit-markdown parser 在 finalize() 已修复未闭合 ``` 代码块，
     // 但 peri-tui 仍保留兜底：流式期间偶发 fence 计数为奇数时，主动补一个闭合 fence，
     // 保证未闭合代码块内容不被丢弃。简单按行扫描，3+ backtick 开头记一次 fence。
-    let preprocessed = preprocess_genui_fences(input);
-    let sanitized = ensure_closed_code_fences(&preprocessed);
-    // [图片前置扫描] sanitize 之后、rk_parse 之前：`![alt](url)` → 占位 token
-    // （S1 §4 管线硬性约束）。Options 与 rk_parse 逐位一致（scan::md_options，
-    // S3 §3.5 漂移风险）；side table 供 T3 convert 查表（token → ImageInfo）。
-    let (placeholder, image_infos) = preprocess_images(&sanitized);
-    let parsed = ratatui_kit_markdown::parse_markdown(&placeholder);
-    #[cfg(test)]
-    {
-        crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::FullParse, 1);
-        crate::kit::acp_bridge::observe_perf(
-            crate::kit::acp_bridge::PerfCounter::FullParsedBytes,
-            placeholder.len() as u64,
+    with_prepared_markdown(input, true, |prepared| {
+        let parsed = ratatui_kit_markdown::parse_markdown(prepared.placeholder);
+        #[cfg(test)]
+        {
+            crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::FullParse, 1);
+            crate::kit::acp_bridge::observe_perf(
+                crate::kit::acp_bridge::PerfCounter::FullParsedBytes,
+                prepared.placeholder.len() as u64,
+            );
+        }
+        let theme = MarkdownTheme::from_palette(&palette);
+        let lookup = convert::image_lookup(prepared.image_infos);
+        let fences = fence::bind_fences(&parsed.blocks, prepared.fences);
+        let segments = convert::convert_to_segments(
+            &parsed.blocks,
+            &theme,
+            max_width,
+            base_fg,
+            convert::ConvertAux {
+                image_infos: prepared.image_infos,
+                lookup: &lookup,
+                fences: &fences,
+            },
         );
-    }
-    let theme = MarkdownTheme::from_palette(&palette);
-    let lookup = convert::image_lookup(&image_infos);
-    let segments = convert::convert_to_segments(
-        &parsed.blocks,
-        &theme,
-        max_width,
-        base_fg,
-        &image_infos,
-        &lookup,
-    );
-    #[cfg(test)]
-    crate::kit::acp_bridge::observe_perf(
-        crate::kit::acp_bridge::PerfCounter::MaterializedLines,
+        #[cfg(test)]
+        crate::kit::acp_bridge::observe_perf(
+            crate::kit::acp_bridge::PerfCounter::MaterializedLines,
+            segment_line_count(&segments),
+        );
         segments
-            .iter()
-            .map(|segment| match segment {
-                MarkdownSegment::Text(lines) => lines.len(),
-                MarkdownSegment::Table(table) => table.rows.len().saturating_add(1),
-                MarkdownSegment::Image(image) => image.lines.len(),
-                MarkdownSegment::GenUi(segment) => segment.source.lines().count(),
-            })
-            .sum::<usize>() as u64,
-    );
-    segments
+    })
 }
 
+#[cfg(test)]
 pub(super) fn parse_markdown_piece(
     input: &str,
     max_width: usize,
     palette: Palette,
     base_fg: Color,
-) -> (Vec<MarkdownSegment>, Vec<ParsedBlock>) {
+) -> (
+    Vec<MarkdownSegment>,
+    Vec<ParsedBlock>,
+    Vec<Option<fence::MermaidFence>>,
+) {
+    parse_markdown_piece_at(input, max_width, palette, base_fg, 0, false)
+}
+
+/// 解析一个片段，并把围栏坐标加回完整消息的全局起点。
+///
+/// `terminal` 表示片段终点就是消息 EOF；流式 tail 传 false，关闭行在缓冲区末尾
+/// 且无换行时保持暂态，避免下一个 token 延长关闭行前就宣称终稿。
+fn parse_markdown_piece_at(
+    input: &str,
+    max_width: usize,
+    palette: Palette,
+    base_fg: Color,
+    origin: usize,
+    terminal: bool,
+) -> (
+    Vec<MarkdownSegment>,
+    Vec<ParsedBlock>,
+    Vec<Option<fence::MermaidFence>>,
+) {
     if input.is_empty() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
-    let preprocessed = preprocess_genui_fences(input);
-    let sanitized = ensure_closed_code_fences(&preprocessed);
-    let (placeholder, image_infos) = preprocess_images(&sanitized);
-    let parsed = ratatui_kit_markdown::parse_markdown(&placeholder);
-    let theme = MarkdownTheme::from_palette(&palette);
-    let lookup = convert::image_lookup(&image_infos);
-    let segments = convert::convert_to_segments(
-        &parsed.blocks,
-        &theme,
-        max_width,
-        base_fg,
-        &image_infos,
-        &lookup,
-    );
-    (segments, parsed.blocks)
+    with_prepared_markdown(input, terminal, |prepared| {
+        let parsed = ratatui_kit_markdown::parse_markdown(prepared.placeholder);
+        let theme = MarkdownTheme::from_palette(&palette);
+        let lookup = convert::image_lookup(prepared.image_infos);
+        let mut frames = prepared.fences.to_vec();
+        for frame in &mut frames {
+            frame.shift_origin(origin);
+        }
+        let fences = fence::bind_fences(&parsed.blocks, &frames);
+        let segments = convert::convert_to_segments(
+            &parsed.blocks,
+            &theme,
+            max_width,
+            base_fg,
+            convert::ConvertAux {
+                image_infos: prepared.image_infos,
+                lookup: &lookup,
+                fences: &fences,
+            },
+        );
+        (segments, parsed.blocks, fences)
+    })
 }
 
 #[cfg(test)]
@@ -138,12 +193,23 @@ pub(super) fn preprocess_images(input: &str) -> (Cow<'_, str>, Vec<scan::ImageIn
 
 pub(super) fn convert_parsed_piece(
     blocks: &[ParsedBlock],
+    fences: &[Option<fence::MermaidFence>],
     max_width: usize,
     palette: Palette,
     base_fg: Color,
 ) -> Vec<MarkdownSegment> {
     let theme = MarkdownTheme::from_palette(&palette);
-    convert::convert_to_segments(blocks, &theme, max_width, base_fg, &[], &Default::default())
+    convert::convert_to_segments(
+        blocks,
+        &theme,
+        max_width,
+        base_fg,
+        convert::ConvertAux {
+            image_infos: &[],
+            lookup: &Default::default(),
+            fences,
+        },
+    )
 }
 
 pub(super) fn stable_chunk_end(input: &str, start: usize) -> usize {
@@ -179,19 +245,37 @@ pub fn parse_markdown_chunks_cached(
         cache.stable_chunks = cache
             .stable_chunk_blocks
             .iter()
-            .map(|blocks| Arc::new(convert_parsed_piece(blocks, max_width, palette, base_fg)))
+            .enumerate()
+            .map(|(index, blocks)| {
+                let fences = cache
+                    .stable_chunk_fences
+                    .get(index)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                Arc::new(convert_parsed_piece(
+                    blocks, fences, max_width, palette, base_fg,
+                ))
+            })
             .collect();
     } else if !append_only {
         cache.chunk_source.clear();
         cache.stable_source_end = 0;
         cache.stable_chunk_blocks.clear();
+        cache.stable_chunk_fences.clear();
         cache.stable_chunks.clear();
     }
 
     let next_end = stable_chunk_end(input, cache.stable_source_end);
     if next_end > cache.stable_source_end {
         let chunk_source = &input[cache.stable_source_end..next_end];
-        let (chunk, blocks) = parse_markdown_piece(chunk_source, max_width, palette, base_fg);
+        let (chunk, blocks, fences) = parse_markdown_piece_at(
+            chunk_source,
+            max_width,
+            palette,
+            base_fg,
+            cache.stable_source_end,
+            false,
+        );
         #[cfg(test)]
         {
             crate::kit::acp_bridge::observe_perf(crate::kit::acp_bridge::PerfCounter::TailParse, 1);
@@ -205,12 +289,20 @@ pub fn parse_markdown_chunks_cached(
             );
         }
         cache.stable_chunk_blocks.push(blocks);
+        cache.stable_chunk_fences.push(fences);
         cache.stable_chunks.push(Arc::new(chunk));
         cache.stable_source_end = next_end;
     }
 
     let tail_input = &input[cache.stable_source_end..];
-    let (mut tail, _) = parse_markdown_piece(tail_input, max_width, palette, base_fg);
+    let (mut tail, _, _) = parse_markdown_piece_at(
+        tail_input,
+        max_width,
+        palette,
+        base_fg,
+        cache.stable_source_end,
+        false,
+    );
     for segment in &mut tail {
         if let MarkdownSegment::Image(image) = segment {
             image.byte_start += cache.stable_source_end;
@@ -259,6 +351,7 @@ pub fn parse_markdown_terminal(
     cache.chunk_palette = palette;
     cache.stable_source_end = 0;
     cache.stable_chunk_blocks.clear();
+    cache.stable_chunk_fences.clear();
     cache.stable_chunks.clear();
     RenderedMarkdown {
         stable: Vec::new(),
@@ -275,6 +368,7 @@ pub(super) fn segment_line_count(segments: &[MarkdownSegment]) -> u64 {
             MarkdownSegment::Table(table) => table.rows.len().saturating_add(1),
             MarkdownSegment::Image(image) => image.lines.len(),
             MarkdownSegment::GenUi(segment) => segment.source.lines().count(),
+            MarkdownSegment::Mermaid(segment) => segment.lines.len(),
         })
         .sum::<usize>() as u64
 }
@@ -421,6 +515,9 @@ pub struct MarkdownRenderCache {
     pub(super) chunk_sunken: Option<Color>,
     pub(super) stable_source_end: usize,
     pub(super) stable_chunk_blocks: Vec<Vec<ratatui_kit_markdown::ParsedBlock>>,
+    /// 与 `stable_chunk_blocks` 等长的围栏元数据槽（已转换为全局原文坐标）。
+    /// 宽度/主题变化重转稳定块时必须一起复用，否则 Mermaid 图会退回普通代码块。
+    pub(super) stable_chunk_fences: Vec<Vec<Option<fence::MermaidFence>>>,
     pub(super) stable_chunks: Vec<Arc<Vec<MarkdownSegment>>>,
 }
 
@@ -496,6 +593,8 @@ pub fn parse_markdown_cached(
     let theme = MarkdownTheme::from_palette(&palette);
     let base_style = ratatui::style::Style::default().fg(base_fg);
     let lookup = convert::image_lookup(&image_infos);
+    // 旧增量路径只为测试保留；围栏按完整输入扫描并按块位置绑定。
+    let fences = fence::bind_fences(&parsed.blocks, &fence::scan_mermaid_fences(input, true));
 
     // 判断是否能复用 stable_state
     // [Table 缓存失效] Table 是动态块：追加行会改变同一 block 的内容（headers/rows），
@@ -553,21 +652,16 @@ pub fn parse_markdown_cached(
         max_width,
         base_style,
         &mut state,
-        &image_infos,
-        &lookup,
+        convert::ConvertAux {
+            image_infos: &image_infos,
+            lookup: &lookup,
+            fences: &fences,
+        },
     );
     #[cfg(test)]
     crate::kit::acp_bridge::observe_perf(
         crate::kit::acp_bridge::PerfCounter::MaterializedLines,
-        segments
-            .iter()
-            .map(|segment| match segment {
-                MarkdownSegment::Text(lines) => lines.len(),
-                MarkdownSegment::Table(table) => table.rows.len().saturating_add(1),
-                MarkdownSegment::Image(image) => image.lines.len(),
-                MarkdownSegment::GenUi(segment) => segment.source.lines().count(),
-            })
-            .sum::<usize>() as u64,
+        segment_line_count(&segments),
     );
 
     // 持久化：先回滚「尾部不稳定块」，再写回缓存。

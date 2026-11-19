@@ -107,6 +107,13 @@ pub(super) fn copy_button_line(
     Some((line, x_start, x_end))
 }
 
+/// 正文行是否为只有网格前缀的空白分隔行（空行经 `body_line` 后仍带竖线前缀）。
+fn is_blank_body_line(line: &Line<'static>) -> bool {
+    line.spans
+        .iter()
+        .all(|span| span.content.trim().is_empty() || span.content == "\u{2502}")
+}
+
 /// 将单个 TuiRenderUnit 变体转换为渲染行。
 /// 使用 kit::markdown 进行 markdown 解析（无缓存，每次全量）。
 ///
@@ -296,6 +303,17 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                     segment
                                 {
                                     chunk_lines.extend(seg_lines.iter().cloned().map(&body_line));
+                                } else if let crate::kit::markdown::MarkdownSegment::Mermaid(
+                                    segment,
+                                ) = segment
+                                {
+                                    if !chunk_lines.is_empty()
+                                        && !chunk_lines.last().is_some_and(is_blank_body_line)
+                                    {
+                                        chunk_lines.push(body_line(Line::default()));
+                                    }
+                                    chunk_lines
+                                        .extend(segment.lines.iter().cloned().map(&body_line));
                                 }
                             }
                             (Arc::as_ptr(chunk) as usize, chunk_lines)
@@ -320,6 +338,16 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                     segment
                                 {
                                     lines.extend(seg_lines.iter().cloned().map(&body_line));
+                                } else if let crate::kit::markdown::MarkdownSegment::Mermaid(
+                                    segment,
+                                ) = segment
+                                {
+                                    if !lines.is_empty()
+                                        && !lines.last().is_some_and(is_blank_body_line)
+                                    {
+                                        lines.push(body_line(Line::default()));
+                                    }
+                                    lines.extend(segment.lines.iter().cloned().map(&body_line));
                                 }
                             }
                         }
@@ -363,6 +391,13 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                 // 降级行已在 convert 阶段折行（wrap_styled_line），
                                 // 前缀/空行逻辑与 Text 分支一致。
                                 for line in &img.lines {
+                                    lines.push(body_line(line.clone()));
+                                }
+                            }
+                            crate::kit::markdown::MarkdownSegment::Mermaid(segment) => {
+                                // 出图能力接入前保持源码可见；元数据随段携带，
+                                // 进入稳定块后不会因快速路径只渲染 Text 而消失。
+                                for line in &segment.lines {
                                     lines.push(body_line(line.clone()));
                                 }
                             }

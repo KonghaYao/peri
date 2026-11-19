@@ -15,6 +15,7 @@ fn segments_to_text(segments: &[MarkdownSegment]) -> String {
             MarkdownSegment::GenUi(segment) => {
                 crate::kit::genui::render(segment, 80, &peri_theme::builtin::dark_theme()).lines
             }
+            MarkdownSegment::Mermaid(segment) => segment.lines.clone(),
         })
         .flat_map(|l| l.spans)
         .map(|s| s.content.into_owned())
