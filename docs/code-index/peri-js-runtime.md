@@ -6,7 +6,7 @@
 ## 架构速览
 
 - 定位：Workflow 使用的 Node lifecycle、NDJSON JSON-RPC 和 execution host；不解释 `workflow/*`、`agent/run` 或 `tool/call` 业务语义。
-- 稳定不变量：pending request 在写帧前登记；每帧有字节上限、换行并 flush；host 结束时统一回收进程树并 wait，收尾超时/失败如实保留错误；stderr 正文不写 tracing，仅在内存保留有界 tail 供上层安全摘要。
+- 稳定不变量：pending request 在写帧前登记，请求 future 取消时注销；每帧有字节上限、换行并 flush；host 结束时统一回收进程树并 wait，收尾超时/失败如实保留错误；stderr 正文不写 tracing，仅在内存保留有界 tail 供上层安全摘要。
 
 生命周期边界：host/process-tree Drop 只请求终止，不能证明 reader 已 join 或 child 已 reap。调用方应显式等待清理。kill 先向 stdout reader 发终止信号：入站队列满且没有消费者时，reader 不阻塞在 send，回收仍有界。单独取消 host 的 wait/kill 等待而仍保留 host 时，child/tree/reader JoinHandle 留在原 owner 中供重试；释放整个 owner 不提供同样的可重试保证。同步 spawn 在进程创建后失败返回 `CleanupFailed`，上层不得把该错误当作已证明回收。Windows Job Object 的真实运行验证不由 Unix 回归或跨编译代替。
 
