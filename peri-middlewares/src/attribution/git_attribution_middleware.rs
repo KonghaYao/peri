@@ -11,6 +11,8 @@ use std::fmt::{Debug, Formatter};
 /// 工具提供器，二者由 builtin `workspace` 实例提供；v4 wave 4 后 GitWatch 已从链上删除，
 /// 本中间件是组内唯一成员），hook 其 Write/Edit 工具调用。
 /// `before_tool` 暂存旧文件内容，`after_tool` 计算贡献字符数。
+/// 审批阶段被拒的调用不执行、不触发 `after_tool`，其暂存由 `on_tool_rejected`
+/// 按调用丢弃，不把未发生的写入计入贡献。
 /// Co-Authored-By 指令由 `build_bare_agent` 在 system prompt 中注入。
 pub struct GitAttributionMiddleware {
     pub(super) reader: Arc<dyn crate::workspace_io::WorkspaceFileReader>,
@@ -152,6 +154,21 @@ impl Middleware for GitAttributionMiddleware {
             .lock()
             .expect("Git attribution state must not contain a partially applied contribution")
             .track_change(file_path, &old_content, &new_content);
+        Ok(())
+    }
+
+    async fn on_tool_rejected(
+        &self,
+        _state: &mut dyn hook_state::StateView,
+        tool_call: &ToolCall,
+    ) -> AgentResult<()> {
+        if tool_call.name != TOOL_WRITE && tool_call.name != TOOL_EDIT {
+            return Ok(());
+        }
+        self.pending_old_content
+            .lock()
+            .expect("Git attribution baseline must remain consistent across tool execution")
+            .remove(&tool_call.id);
         Ok(())
     }
 

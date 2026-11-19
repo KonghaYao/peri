@@ -94,7 +94,7 @@ for aspect in chain:
 | 6 | SkillPreloadMiddleware | before_agent, before_input | — | — | — |
 | 7 | AtMentionMiddleware | before_input | — | — | — |
 | 8 | ImageMiddleware | before_input | — | — | — |
-| 9 | GitAttributionMiddleware | before_agent, before_tool, after_tool | — | 提交署名说明 | — |
+| 9 | GitAttributionMiddleware | before_agent, before_tool, after_tool, on_tool_rejected | — | 提交署名说明 | — |
 | 10 | TodoMiddleware | after_agent | TodoWrite | — | — |
 | 11 | HookMiddleware | before_agent, before_tool, after_tool, after_tools_batch, after_agent | — | — | 非空 hook groups；可展开多实例 |
 | 12 | PermissionMiddleware | before_tools_batch, before_tool | — | 10_hitl section | — |
@@ -106,7 +106,7 @@ for aspect in chain:
 
 **脚注**：
 - **#4 plugin**：`PluginMiddleware` 在 `before_agent` hook 中执行插件兼容性校验（name/version/manifest 字段完整性）。
-- **#9 git_attribution**：`before_tool` 暂存 Write/Edit 旧文件内容，`after_tool` 计算贡献字符数；`prompt_contribution()` 声明 Co-Authored-By 指令。
+- **#9 git_attribution**：`before_tool` 暂存 Write/Edit 旧文件内容，`after_tool` 计算贡献字符数；审批阶段被拒的调用不执行，由 `on_tool_rejected` 只丢弃该调用的暂存（同批其他调用继续用各自快照计算）；`prompt_contribution()` 声明 Co-Authored-By 指令。
 - **#12/#13**：审批与提问是独立能力。`PermissionMiddleware` 负责审批；`HumanInTheLoopMiddleware::collect_tools()` 使用原始 broker 提供 `AskUserQuestion`。
 - **#14 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResult`；后台任务生命周期遵循 [Session 异步任务架构](session-async-tasks.md)。
 - **#17 goal**：`GoalTool` 是 deferred tool，仅通过 `ToolSearch` → `ToolInvoke` 访问；`after_agent` 注入 steering 并触发自驱续跑。

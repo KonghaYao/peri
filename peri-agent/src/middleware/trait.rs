@@ -35,6 +35,7 @@ use crate::tools::BaseTool;
 /// 6.  before_tools_batch     - 批量工具调用前
 /// 7.  before_tool            - 每次工具调用前
 /// 8.  after_tool             - 每次工具调用后
+///     on_tool_rejected       - 审批阶段被拒绝的调用（不执行，不触发 after_tool）
 /// 9.  after_tools_batch      - 批量结果写入后
 /// ── 每轮 ReAct 迭代 ──
 ///
@@ -149,6 +150,19 @@ pub trait Middleware: Send + Sync {
         _state: &mut dyn hook_state::AfterToolState,
         _tool_call: &ToolCall,
         _result: &ToolResult,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    /// 工具调用在审批阶段被拒绝时调用：该调用不会执行，也不会触发 `after_tool`。
+    ///
+    /// `before_tool` 可能已为该调用暂存执行前状态（例如归因用的旧文件正文）；
+    /// 中间件必须在这里按调用结算，不得把未发生的副作用计入结果。
+    /// 同批其他调用的暂存与后续结算不受影响。
+    async fn on_tool_rejected(
+        &self,
+        _state: &mut dyn hook_state::StateView,
+        _tool_call: &ToolCall,
     ) -> AgentResult<()> {
         Ok(())
     }

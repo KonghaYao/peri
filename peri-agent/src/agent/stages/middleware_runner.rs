@@ -511,6 +511,21 @@ pub(crate) async fn run_after_tool(
     .await
 }
 
+/// 通知 middleware chain：该调用在审批阶段被拒绝，不会执行。
+///
+/// 这是 `before_tool` 暂存状态的结算点（`after_tool` 不会为被拒调用触发）。
+/// 不使用取消令牌：清理不得因子句被取消而跳过。
+pub(crate) async fn run_tool_rejected(
+    ctx: &InvocationContext,
+    turn: Option<&ModelTurnFacts>,
+    call: &crate::agent::react::ToolCall,
+) -> crate::error::AgentResult<()> {
+    let mut state = InvocationState { context: ctx, turn };
+    ctx.middleware_chain()
+        .run_tool_rejected(&mut state, call)
+        .await
+}
+
 /// 调用 middleware chain 的 `on_error` 钩子（调用级）。
 ///
 /// 与阶段级 [`run_on_error`] 分开：canonical 执行有明确的执行入口（会话快照 +

@@ -233,6 +233,30 @@ impl MiddlewareChain {
         Ok(())
     }
 
+    /// 顺序通知 `on_tool_rejected` 钩子。
+    ///
+    /// 审批阶段拒绝的调用不会执行，也不会触发 `after_tool`；该钩子是 `before_tool`
+    /// 暂存状态的唯一结算点。单个中间件失败不阻止后续中间件结算，返回首个错误
+    /// 供调用方记录（拒绝结果本身不变）。
+    pub async fn run_tool_rejected(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        tool_call: &ToolCall,
+    ) -> AgentResult<()> {
+        let mut first_error: Option<AgentError> = None;
+        for middleware in &self.middlewares {
+            if let Err(error) = middleware.on_tool_rejected(state, tool_call).await {
+                tracing::warn!(
+                    middleware = middleware.name(),
+                    error = %error,
+                    "middleware failed to settle a rejected tool call"
+                );
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     /// 顺序执行 after_tools_batch 钩子
     ///
     /// 在一批并行工具调用全部完成并写入 state 后触发。
