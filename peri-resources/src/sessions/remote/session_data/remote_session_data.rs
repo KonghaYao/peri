@@ -543,7 +543,7 @@ impl SessionDataPort for RemoteSessionData {
     }
 
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        // 删除范围由批内重新计算；这里预读只用来辨认缓存项，读失败退回按 id 与 root 回收。
+        // 删除范围由批内重新计算；这里预读只用来辨认缓存项。
         let subtree: Option<Vec<ThreadId>> = if self.roots.read().await.is_empty() {
             None
         } else {
@@ -566,7 +566,8 @@ impl SessionDataPort for RemoteSessionData {
                     let ids: HashSet<ThreadId> = ids.into_iter().collect();
                     roots.retain(|thread, root| !ids.contains(thread) && thread != id && root != id)
                 }
-                None => roots.retain(|thread, root| thread != id && root != id),
+                // 读失败时无法辨认后代；解析缓存不是持久事实，清空比留下不可达条目更安全。
+                None => roots.clear(),
             }
         }
         result
