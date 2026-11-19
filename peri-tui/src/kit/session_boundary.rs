@@ -115,6 +115,9 @@ fn project_session_boundary_inner(target_session_id: Option<&str>, retire_histor
         panel_registry::close_panel(PanelKind::ShellDetail);
         panel_registry::close_panel(PanelKind::SubAgentDetail);
         panel_registry::close_panel(PanelKind::Workflow);
+        panel_registry::close_panel(PanelKind::MermaidDiagram);
+        *crate::kit::mermaid::MERMAID_DETAIL.state().write() = None;
+        crate::kit::mermaid::select_action(None);
     }
     input_history::reset_history_cursor();
 }

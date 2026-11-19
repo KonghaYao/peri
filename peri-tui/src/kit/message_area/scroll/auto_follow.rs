@@ -266,6 +266,19 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
             "auto_follow: history page prepended → relocate viewport onto the anchored unit",
         );
         ctx.scroll_state.write().set_offset(target);
+    } else if let Some(relocation) = ctx.reflow_relocation
+        && let Some(target) = relocation.target_for(!browsing, scroll_y)
+    {
+        // 图完成/缩放/异步结果只改变同条消息内的高度：顶行内容不变时保持阅读
+        // 位置；在底部时交给后续跟随分支。
+        tracing::trace!(
+            target: "msg_scroll_diag",
+            from = relocation.from_offset,
+            to = relocation.target_offset,
+            scroll_y,
+            "auto_follow: intra-message reflow → keep reading anchor",
+        );
+        ctx.scroll_state.write().set_offset(target);
     }
     // [F6] 拖选进行中：暂停输出增长驱动的吸底跟随。暂停点放在历史前插
     // 重定位之后——结构变化时视口仍要按身份补偿，否则鼠标下的内容会跳走；

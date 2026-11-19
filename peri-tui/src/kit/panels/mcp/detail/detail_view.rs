@@ -10,6 +10,7 @@ use crate::i18n;
 
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::button::{self, ButtonChrome, ButtonState, ButtonTone};
 use ratatui_kit::ratatui::style::Modifier;
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
@@ -73,8 +74,10 @@ impl DetailAction {
     #[must_use]
     pub(in super::super) fn text(self, label: &str) -> String {
         match self {
-            Self::CopyError => format!(" {label} "),
-            Self::Auth | Self::Restart | Self::Stop | Self::Back => format!("[ {label} ]"),
+            Self::CopyError => ButtonChrome::Filled.text(label),
+            Self::Auth | Self::Restart | Self::Stop | Self::Back => {
+                ButtonChrome::Bracketed { padded: true }.text(label)
+            }
         }
     }
 }
@@ -104,16 +107,8 @@ impl DetailButton {
     }
 }
 
-/// 按钮样式——复用 chat 消息区按钮的视觉（样式为组件内私有内联实现，故在此
-/// 精确复刻构造并注明出处；未改动 chat 组件）：
-///
-/// - 复制（header）：`message_area/render.rs:91` `copy_button_line` 的 md 复制
-///   按钮——`fg(accent) + REVERSED` 反色块。选中态叠加 `BOLD`：chat「当前项」
-///   样式（`message_area/mod.rs:719`）是 `bg(surface.selection) + BOLD`，反色块下
-///   bg 不可见，故取其中的 BOLD 增量。
-/// - 授权/返回（底行）：`message_area/render/interaction.rs` 选项（权限）按钮——
-///   默认 `fg(text.primary)`，选中态同 `message_area/mod.rs:719` 的
-///   `bg(surface.selection) + BOLD`（与改动前的 MCP 底行按钮一致）。
+/// 复制（header）沿用 md 复制按钮，选中时只叠加 BOLD。
+/// 授权/返回等底行按钮保留独立样式：默认正文色，选中时为 selection + BOLD。
 pub(in super::super) fn button_style(
     action: DetailAction,
     selected: bool,
@@ -121,16 +116,16 @@ pub(in super::super) fn button_style(
 ) -> Style {
     let semantic = &theme.semantic;
     match action {
-        DetailAction::CopyError => {
-            let style = Style::default()
-                .fg(semantic.accent)
-                .add_modifier(Modifier::REVERSED);
+        DetailAction::CopyError => button::button_style(
+            ButtonChrome::Filled,
+            ButtonTone::Primary,
             if selected {
-                style.add_modifier(Modifier::BOLD)
+                ButtonState::Focused
             } else {
-                style
-            }
-        }
+                ButtonState::Normal
+            },
+            theme,
+        ),
         DetailAction::Auth | DetailAction::Restart | DetailAction::Stop | DetailAction::Back => {
             let style = Style::default().fg(semantic.text.primary);
             if selected {

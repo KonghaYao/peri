@@ -35,6 +35,7 @@ pub mod hooks;
 pub mod login;
 pub mod mcp;
 pub mod memory;
+pub mod mermaid_diagram;
 pub mod model;
 pub mod plugin;
 pub(crate) mod shared;

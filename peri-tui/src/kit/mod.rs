@@ -45,6 +45,7 @@ pub mod input_history;
 pub mod layout;
 pub mod markdown;
 pub mod mention_popup;
+pub(crate) mod mermaid;
 pub mod message_area;
 pub mod mouse_router;
 pub mod panel_overlay;
@@ -91,3 +92,7 @@ pub mod workflow_snapshot;
 pub use app_shell::AppShell;
 pub use layout::SessionColumn;
 pub use status_bar::StatusBar;
+
+#[cfg(test)]
+#[path = "markdown_profile_test.rs"]
+mod markdown_profile_tests;

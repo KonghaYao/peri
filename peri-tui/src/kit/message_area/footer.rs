@@ -7,6 +7,9 @@ use crate::components::spinner::{SpinnerMode, SpinnerState};
 use crate::i18n;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::button::{
+    ButtonChrome, ButtonSpec, ButtonState, ButtonTone, button_visual,
+};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
@@ -102,7 +105,9 @@ pub(super) fn build_footer_lines(
     keepgoing_blocked: bool,
     vis_width: u16,
 ) -> (Vec<Line<'static>>, Option<KeepGoingLayout>, bool) {
-    let semantic = THEME_ATOM.state().read().semantic;
+    let theme = THEME_ATOM.state();
+    let theme = std::sync::Arc::clone(&theme.read());
+    let semantic = theme.semantic;
 
     let spinner_state = hooks.use_state(|| SpinnerState::new(SpinnerMode::Thinking));
     let load_start = hooks.use_state(|| Option::<Instant>::None);
@@ -186,20 +191,21 @@ pub(super) fn build_footer_lines(
             summary_text,
             Style::default().fg(semantic.text.muted),
         ));
-        let btn_text = i18n::tr("msg-keepgoing");
-        // keepgoing 按钮：仅 agent 空闲（spinner 不转）时右对齐渲染于 summary 行。
-        // 样式与 md 复制按钮统一：左右各 1 空格 + 反色（REVERSED）。
-        // 防抖期间以 muted 色渲染（不可点击）。
-        let btn_span = Span::styled(
-            format!(" {btn_text} "),
-            Style::default()
-                .fg(if keepgoing_blocked {
-                    semantic.text.muted
+        // 防抖期间沿用 muted 反色填充；是否可点击仍由现有 handler 决定。
+        let button = button_visual(
+            ButtonSpec {
+                label: &i18n::tr("msg-keepgoing"),
+                chrome: ButtonChrome::Filled,
+                tone: if keepgoing_blocked {
+                    ButtonTone::Secondary
                 } else {
-                    semantic.accent
-                })
-                .add_modifier(Modifier::REVERSED),
+                    ButtonTone::Primary
+                },
+                state: ButtonState::Normal,
+            },
+            &theme,
         );
+        let btn_span = Span::styled(button.text, button.style);
         let btn_width = btn_span.width() as u16;
         // 右对齐：按钮起始列 = vis_width - btn_width，summary 文本与按钮之间填充空格。
         let start_col = vis_width.saturating_sub(btn_width);

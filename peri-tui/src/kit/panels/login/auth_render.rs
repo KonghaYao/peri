@@ -9,6 +9,7 @@
 //! 序列化完整保存）；凭据目录只在“高级”区只读展示。
 
 use fluent_bundle::FluentValue;
+use peri_tui_components::button::ButtonChrome;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -357,7 +358,10 @@ pub(super) fn build_auth_detail_layout(
         buttons.push((lines.len(), action));
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(colors.cursor)),
-            Span::styled(format!("[{}]", i18n::tr(action.i18n_key())), style),
+            Span::styled(
+                ButtonChrome::Bracketed { padded: false }.text(&i18n::tr(action.i18n_key())),
+                style,
+            ),
         ]));
     }
 
@@ -412,7 +416,7 @@ pub(super) fn build_logout_layout(
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(colors.cursor)),
             Span::styled(
-                format!("[{}]", i18n::tr(key)),
+                ButtonChrome::Bracketed { padded: false }.text(&i18n::tr(key)),
                 if confirm.focus == focus {
                     Style::default()
                         .fg(colors.focus)

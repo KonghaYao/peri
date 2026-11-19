@@ -190,6 +190,27 @@ pub struct TextAreaRenderOptions<'a> {
     pub show_cursor: bool,
 }
 
+/// 视口窗口 `[start, end)`（视觉行下标）。
+///
+/// 总行数不超过 `viewport_height` 时窗口从 0 开始；否则以光标视觉行为中心，
+/// 保证光标始终落在窗口内。渲染与命中测试共用本函数，避免两处各算一套滚动口径。
+pub fn viewport_window(
+    total_visual_rows: usize,
+    cursor_visual_row: usize,
+    viewport_height: usize,
+) -> (usize, usize) {
+    let viewport_height = viewport_height.max(1);
+    if total_visual_rows <= viewport_height {
+        (0, total_visual_rows)
+    } else {
+        let half_window = viewport_height / 2;
+        let center_start = cursor_visual_row.saturating_sub(half_window);
+        let end = (center_start + viewport_height).min(total_visual_rows);
+        let start = end.saturating_sub(viewport_height);
+        (start, end)
+    }
+}
+
 /// 把文本按 \n 拆成多行 Line，光标以传入的 style 高亮，选区以 selection_style 高亮。
 ///
 /// I22-B：渲染窗口上限——只渲染 viewport_height 行（由调用方传入，等于 composer 可见行数）。
@@ -215,7 +236,6 @@ pub fn render_multiline_with_cursor(options: TextAreaRenderOptions<'_>) -> Vec<L
         viewport_height,
         show_cursor,
     } = options;
-    let viewport_height = viewport_height.max(1);
 
     if text.is_empty() {
         return if !show_cursor {
@@ -241,15 +261,11 @@ pub fn render_multiline_with_cursor(options: TextAreaRenderOptions<'_>) -> Vec<L
     let wrap = wrap_text(text, cursor, max_width);
 
     // 视口裁剪基于视觉行
-    let (start, end) = if wrap.total_visual_rows <= viewport_height {
-        (0, wrap.total_visual_rows)
-    } else {
-        let half_window = viewport_height / 2;
-        let center_start = wrap.cursor_visual_row.saturating_sub(half_window);
-        let end = (center_start + viewport_height).min(wrap.total_visual_rows);
-        let start = end.saturating_sub(viewport_height);
-        (start, end)
-    };
+    let (start, end) = viewport_window(
+        wrap.total_visual_rows,
+        wrap.cursor_visual_row,
+        viewport_height,
+    );
 
     let mut result: Vec<Line<'static>> = Vec::with_capacity(end - start);
 

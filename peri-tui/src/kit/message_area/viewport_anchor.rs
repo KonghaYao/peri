@@ -65,7 +65,9 @@
 use crate::kit::tui_render_unit::{FoldKey, TuiAssistantBubble, TuiRenderUnit};
 
 use super::selection::SlotIndex;
+use super::vm_cache_slot::VmCacheSlot;
 use crate::kit::history_window::WindowUnitToken;
+use crate::kit::markdown::MermaidFenceKey;
 use std::hash::{Hash, Hasher};
 
 /// 单元身份：优先既有折叠键，其次既有内容身份。
@@ -177,6 +179,180 @@ impl ViewportAnchor {
     #[must_use]
     pub(super) fn offset_within_unit(&self) -> usize {
         self.offset_within_unit
+    }
+}
+
+/// 顶行落在围栏内、邻接正文或普通行时的源位置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReadingPosition {
+    Fence {
+        key: MermaidFenceKey,
+        /// 围栏内逻辑行偏移。
+        offset: usize,
+        /// 折行内的视觉行偏移。
+        row: usize,
+    },
+    AfterFence {
+        key: MermaidFenceKey,
+        /// 顶行在围栏之后第几行（0 = 围栏后第一行）。
+        distance: usize,
+        row: usize,
+    },
+    BeforeFence {
+        key: MermaidFenceKey,
+        /// 顶行在围栏之前第几行（1 = 紧邻围栏上一行）。
+        distance: usize,
+        row: usize,
+    },
+    Line {
+        /// 无围栏消息里的逻辑行号。
+        index: usize,
+        row: usize,
+    },
+}
+
+/// 同一单元内的阅读位置锚点：图完成、缩放或异步结果改变高度后，把顶行
+/// 按围栏/相邻正文关系找回同一内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReadingAnchor {
+    identity: UnitIdentity,
+    position: ReadingPosition,
+}
+
+impl ReadingAnchor {
+    /// 布局重建**前**捕获（旧索引 + 旧缓存仍在位）。
+    pub(super) fn capture(
+        index: &SlotIndex,
+        scroll_y: usize,
+        caches: &[VmCacheSlot],
+    ) -> Option<Self> {
+        let items = index.canonical_items()?;
+        let lookup = index.visual_lookup(scroll_y)?;
+        let vm = items.get(lookup.slot_index)?;
+        let cache = caches.get(lookup.slot_index)?;
+        if cache.wrap_map.is_empty() {
+            return None;
+        }
+        let row = scroll_y.saturating_sub(lookup.global_visual_start);
+        let local = lookup.local_logical;
+        let fences = &cache.mermaid_fences;
+        let position = fences
+            .iter()
+            .find_map(|span| {
+                if span.logical.contains(&local) {
+                    Some(ReadingPosition::Fence {
+                        key: span.key.clone(),
+                        offset: local.saturating_sub(span.logical.start),
+                        row,
+                    })
+                } else if span.logical.start > local {
+                    Some(ReadingPosition::BeforeFence {
+                        key: span.key.clone(),
+                        distance: span.logical.start - local,
+                        row,
+                    })
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                fences
+                    .iter()
+                    .rev()
+                    .find(|span| span.logical.end <= local)
+                    .map(|span| ReadingPosition::AfterFence {
+                        key: span.key.clone(),
+                        distance: local.saturating_sub(span.logical.end),
+                        row,
+                    })
+            })
+            .unwrap_or(ReadingPosition::Line { index: local, row });
+        Some(Self {
+            identity: identity_of(vm),
+            position,
+        })
+    }
+
+    /// 布局重建**后**按身份与围栏关系找回目标偏移。
+    pub(super) fn relocate(&self, index: &SlotIndex, caches: &[VmCacheSlot]) -> Option<usize> {
+        let slot = if let Some(key) = self.position.fence_key() {
+            // 围栏身份已含消息 + 原文位置，可直接定位到唯一槽位。
+            caches
+                .iter()
+                .position(|cache| cache.mermaid_fences.iter().any(|span| span.key == *key))?
+        } else {
+            let items = index.canonical_items()?;
+            let mut hit = None;
+            for (slot, vm) in items.iter().enumerate() {
+                if !self.identity.is(vm) {
+                    continue;
+                }
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(slot);
+            }
+            hit?
+        };
+        let start = index.slot_visual_start(slot)?;
+        let cache = caches.get(slot)?;
+        let logical = self.position.resolve(cache)?;
+        let line = cache.wrap_map.get(logical)?;
+        let row = self.position.row();
+        let height = line.visual_end.saturating_sub(line.visual_start);
+        Some(
+            start
+                .saturating_add(line.visual_start)
+                .saturating_add(row.min(height.saturating_sub(1))),
+        )
+    }
+}
+
+impl ReadingPosition {
+    fn fence_key(&self) -> Option<&MermaidFenceKey> {
+        match self {
+            Self::Fence { key, .. }
+            | Self::AfterFence { key, .. }
+            | Self::BeforeFence { key, .. } => Some(key),
+            Self::Line { .. } => None,
+        }
+    }
+
+    fn row(&self) -> usize {
+        match self {
+            Self::Fence { row, .. }
+            | Self::AfterFence { row, .. }
+            | Self::BeforeFence { row, .. }
+            | Self::Line { row, .. } => *row,
+        }
+    }
+
+    fn resolve(&self, cache: &VmCacheSlot) -> Option<usize> {
+        let lines = cache.wrap_map.len();
+        if lines == 0 {
+            return None;
+        }
+        let clamp = |value: usize| value.min(lines.saturating_sub(1));
+        match self {
+            Self::Fence { key, offset, .. } => {
+                let span = cache.mermaid_fences.iter().find(|span| span.key == *key)?;
+                let length = span.logical.end.saturating_sub(span.logical.start);
+                Some(clamp(
+                    span.logical
+                        .start
+                        .saturating_add((*offset).min(length.saturating_sub(1))),
+                ))
+            }
+            Self::AfterFence { key, distance, .. } => {
+                let span = cache.mermaid_fences.iter().find(|span| span.key == *key)?;
+                Some(clamp(span.logical.end.saturating_add(*distance)))
+            }
+            Self::BeforeFence { key, distance, .. } => {
+                let span = cache.mermaid_fences.iter().find(|span| span.key == *key)?;
+                Some(clamp(span.logical.start.saturating_sub(*distance)))
+            }
+            Self::Line { index, .. } => Some(clamp(*index)),
+        }
     }
 }
 

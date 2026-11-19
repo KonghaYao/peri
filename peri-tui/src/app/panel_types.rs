@@ -29,6 +29,8 @@ pub enum PanelKind {
     Goal,
     /// 超大历史条目详情（占位 note 焦点/点击后 Enter 打开）。
     HistoryDetail,
+    /// 聊天中的 Mermaid 图详情：概览、分组、全图与源码。
+    MermaidDiagram,
 }
 
 // ─── EventResult ────────────────────────────────────────────────────────────

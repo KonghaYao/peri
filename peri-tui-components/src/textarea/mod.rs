@@ -8,7 +8,7 @@ mod word;
 pub use history::{History, Snapshot};
 pub use render::{
     TextAreaRenderOptions, TextAreaStyles, VisualLine, WrapResult, display_width_before,
-    render_multiline_with_cursor, wrap_text,
+    render_multiline_with_cursor, viewport_window, wrap_text,
 };
 pub use state::{TextAreaState, YankText};
 pub use widget::TextArea;

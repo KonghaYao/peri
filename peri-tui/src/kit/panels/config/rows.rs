@@ -10,6 +10,7 @@ use crate::i18n;
 use peri_acp_types::beta_flags::BETA_FLAGS;
 use peri_acp_types::permission::PermissionMode;
 use peri_theme::theme::ThemeDefinition;
+use peri_tui_components::button::ButtonChrome;
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::text::Span;
@@ -168,7 +169,7 @@ pub(super) fn build_row_line(
                             let label = cycle_display_label(opt);
                             if j == idx {
                                 spans.push(Span::styled(
-                                    format!("[{}]", label),
+                                    ButtonChrome::Bracketed { padded: false }.text(&label),
                                     Style::new().fg(theme.semantic.status.success).bold(),
                                 ));
                             } else {
@@ -194,9 +195,15 @@ fn toggle_texts(val: bool) -> (String, String) {
     let on_label = i18n::tr("config-value-on");
     let off_label = i18n::tr("config-value-off");
     if val {
-        (format!("[{}]", on_label), format!(" {}", off_label))
+        (
+            ButtonChrome::Bracketed { padded: false }.text(&on_label),
+            format!(" {}", off_label),
+        )
     } else {
-        (format!(" {}", on_label), format!("[{}]", off_label))
+        (
+            format!(" {}", on_label),
+            ButtonChrome::Bracketed { padded: false }.text(&off_label),
+        )
     }
 }
 

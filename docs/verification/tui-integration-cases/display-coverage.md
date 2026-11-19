@@ -31,8 +31,9 @@
 | `Workflow` | P1-12、P1-14 |
 | `AskUser` | P0-65、P1-12 |
 | `Status`、`Memory`、`Goal` | P1-12、P1-15 |
+| `HistoryDetail`、`MermaidDiagram` | P1-12；Mermaid 另见流式预览回归 |
 
-`PanelKind` 当前共 18 个变体。P1-12 是逐项打开与关闭的目录巡检；其他用例核对身份、状态和失败，不能由目录巡检替代。ChatGPT 登录/状态/注销是 Login 面板内的认证子视图，不是 `PopupKind::OAuth`，对应 P0-87、P0-88。
+`PanelKind` 当前共 20 个变体。P1-12 是逐项打开与关闭的目录巡检；其他用例核对身份、状态和失败，不能由目录巡检替代。ChatGPT 登录/状态/注销是 Login 面板内的认证子视图，不是 `PopupKind::OAuth`，对应 P0-87、P0-88。
 
 ## PopupKind
 

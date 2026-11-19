@@ -191,6 +191,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
+name = "ascii-dag"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd898d2dcffeeb51015c511a2849a8637c894b833afc946936d48b1e5c8aa6ec"
+
+[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2853,6 +2859,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mermaid-text"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90fa78f1bb32963ed114d9c318d880901ee4fa7103e133c3c3e530ebe5a09090"
+dependencies = [
+ "ascii-dag",
+ "chrono",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
 name = "miette"
 version = "5.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3869,8 +3886,20 @@ dependencies = [
 name = "peri-tui-components"
 version = "0.2.0"
 dependencies = [
+ "mermaid-text",
+ "parking_lot",
+ "peri-genui",
+ "peri-theme",
+ "pulldown-cmark 0.12.2",
  "ratatui",
  "ratatui-kit",
+ "ratatui-kit-markdown",
+ "serde_json",
+ "serial_test",
+ "syntect",
+ "tracing",
+ "tui-chart",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
 ]
 
@@ -6248,6 +6277,37 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tui-chart"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3eb044159cfdbdb8806d48e4bbc0a7ac3c390e0ab4deb68d958d4852563a0ab0"
+dependencies = [
+ "ratatui",
+ "tui-nuances",
+ "tui-piechart",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "tui-nuances"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71a55e1ee7052a2409c91486005043da038bf44f72978a69747986dc64ca6068"
+dependencies = [
+ "ratatui",
+]
+
+[[package]]
+name = "tui-piechart"
+version = "1.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d65272d25bb3799d827de6d07f7c4885eb40761693ea0db6eafe051fa63457ac"
+dependencies = [
+ "ratatui",
+ "tui-nuances",
+]
 
 [[package]]
 name = "tui-input"

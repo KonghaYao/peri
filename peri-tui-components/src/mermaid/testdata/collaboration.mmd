@@ -1,0 +1,87 @@
+flowchart TD
+  subgraph Intake["请求接入"]
+    Intake1["接收工单"]
+    Intake2["辨别类型"]
+    Intake3["确认范围"]
+    Intake4["检查权限"]
+    Intake5["分派负责人"]
+    Intake6["通知请求方"]
+    Intake1 --> Intake2
+    Intake2 --> Intake3
+    Intake3 --> Intake4
+    Intake4 --> Intake5
+    Intake5 --> Intake6
+  end
+  subgraph Plan["方案规划"]
+    Plan1["梳理需求"]
+    Plan2["评估风险"]
+    Plan3["编制计划"]
+    Plan4["确定依赖"]
+    Plan5["预估工期"]
+    Plan6["确认方案"]
+    Plan1 --> Plan2
+    Plan2 --> Plan3
+    Plan3 --> Plan4
+    Plan4 --> Plan5
+    Plan5 --> Plan6
+  end
+  subgraph Build["实施开发"]
+    Build1["创建分支"]
+    Build2["修改代码"]
+    Build3["运行构建"]
+    Build4["补充测试"]
+    Build5["整理变更"]
+    Build6["提交评审"]
+    Build1 --> Build2
+    Build2 --> Build3
+    Build3 --> Build4
+    Build4 --> Build5
+    Build5 --> Build6
+  end
+  subgraph Review["质量评审"]
+    Review1["检查规范"]
+    Review2["运行测试"]
+    Review3["评估性能"]
+    Review4["复核权限"]
+    Review5["验收变更"]
+    Review6["确认合并"]
+    Review1 --> Review2
+    Review2 --> Review3
+    Review3 --> Review4
+    Review4 --> Review5
+    Review5 --> Review6
+  end
+  subgraph Deploy["交付运维"]
+    Deploy1["冻结版本"]
+    Deploy2["生成构件"]
+    Deploy3["试点部署"]
+    Deploy4["跟踪指标"]
+    Deploy5["扩大流量"]
+    Deploy6["确认上线"]
+    Deploy1 --> Deploy2
+    Deploy2 --> Deploy3
+    Deploy3 --> Deploy4
+    Deploy4 --> Deploy5
+    Deploy5 --> Deploy6
+  end
+  subgraph Support["运行支持"]
+    Support1["创建看板"]
+    Support2["审核告警"]
+    Support3["收集反馈"]
+    Support4["登记缺陷"]
+    Support5["更新手册"]
+    Support6["关闭工单"]
+    Support1 --> Support2
+    Support2 --> Support3
+    Support3 --> Support4
+    Support4 --> Support5
+    Support5 --> Support6
+  end
+  Intake5 -->|范围移交| Plan1
+  Plan6 -->|计划下达| Build1
+  Plan4 -->|依赖确认| Review1
+  Build6 -->|提交送审| Review2
+  Review6 -->|质量放行| Deploy1
+  Build5 -->|构件清单| Deploy2
+  Deploy6 -->|运行交接| Support1
+  Review5 -->|风险通告| Support2
