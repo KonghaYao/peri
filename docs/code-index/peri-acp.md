@@ -229,7 +229,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 传输 trait | transport/mod.rs | `AcpTransport` |
 | mpsc 实现 | transport/mpsc.rs | `spawn_pump` 对任一方向关闭执行 pair 级 terminal；`send_or_close` 统一 outbound failure；`mpsc_transport_pair` 共享 router/ID 空间；两条方向均为有界队列（1024），发送等待 500 ms，对端不排水即关闭并按 `-32000` backpressure 错误结算 |
 | 原始帧桥 | transport/wire_bridge.rs | `WireBridge` 在外部 JSON-RPC 帧与现有 MPSC client transport 间双向转发；ACP 方法仍由共享 Host 分发，显式 `close` 结算 pending；出站/响应帧队列有界（256），500 ms 未排空即 `acp_wire_backpressure` 并关闭连接 |
-| stdio 实现 | transport/stdio_transport.rs | 入站请求/通知队列有界（`STDIO_INCOMING_CAPACITY=256`）：匹配响应在 pump 内直接交给 router，普通请求满队列显式回 `-32000` 背压（不静默丢弃），通知按序等待入队（取消不丢）；pump 对 writer 锁与入站容量的等待受 `STDIO_STALL_TIMEOUT=500 ms` 约束，超窗 close 并按 terminal 结算；pump 显式处理 EOF/read error 并观察 router close；`write_envelope` 让 writer mutex/write/flush 全程竞速 terminal；legacy cancel 与入站 id 域校验保持不变 |
+| stdio 实现 | transport/stdio_transport.rs | 入站请求/通知队列有界（`STDIO_INCOMING_CAPACITY=256`）：匹配响应在 pump 内直接交给 router，普通请求满队列显式回 `-32000` 背压（不静默丢弃），通知按序等待入队（取消不丢）；pump 等待 writer 锁或入站容量时继续读 stdin，读到行按序暂存于 `STDIO_DEFERRED_CAPACITY=256`，EOF 直接汇入 terminal、暂存满即终止；pump 显式处理 EOF/read error 并观察 router close；`write_envelope` 让 writer mutex/write/flush 全程竞速 terminal；legacy cancel 与入站 id 域校验保持不变 |
 | 请求-响应匹配 | transport/request_router.rs | `RequestRouter` 原子持有 pending/terminal 状态；`PendingRequest` Drop 同步按 owner identity 注销；`CancellationToken` 提供 lost-wake-safe close 观察 |
 
 ### src/dispatch/（共享业务纯函数）

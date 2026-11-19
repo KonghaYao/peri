@@ -134,7 +134,7 @@
 ### ARC-TRANSPORT-001
 
 - **Scope**：ACP stdio、MPSC transport 与原始帧桥的 request 生命周期。
-- **Rule**：transport 终止必须以稳定的 `AcpError(-32603, "Transport closed")` 结算当前及后续 request；匹配 response、caller cancellation 与 terminal close 对同一 pending request 至多生效一次。stdio 与 MPSC 的入站请求/通知队列必须有界：满队列时普通请求必须以明确的 JSON-RPC 背压错误结算，不得静默丢弃；匹配 response 与取消通知不得因积压被静默丢弃，EOF/read error、断开与 stdio pump 的停滞窗口（等待 writer 锁或入站容量超窗）仍须汇入 terminal。连接仍存活但对端静默不等于终止，不得为 `send_request` 隐式增加通用 timeout；发起 I/O 失败的调用保留其具体 write/flush 错误，同时使同一逻辑连接进入 terminal 状态。原始帧桥只映射 JSON-RPC 帧并复用现有 MPSC request router，不实现第二份 ACP 方法分发。
+- **Rule**：transport 终止必须以稳定的 `AcpError(-32603, "Transport closed")` 结算当前及后续 request；匹配 response、caller cancellation 与 terminal close 对同一 pending request 至多生效一次。stdio 与 MPSC 的入站请求/通知队列必须有界：满队列时普通请求必须以明确的 JSON-RPC 背压错误结算，不得静默丢弃；匹配 response 与取消通知不得因积压被静默丢弃，EOF/read error 与断开仍须汇入 terminal（stdio pump 在等待 writer 锁或入站容量期间继续读 stdin，暂存有界）。连接仍存活但对端静默不等于终止，不得为 `send_request` 隐式增加通用 timeout；发起 I/O 失败的调用保留其具体 write/flush 错误，同时使同一逻辑连接进入 terminal 状态。原始帧桥只映射 JSON-RPC 帧并复用现有 MPSC request router，不实现第二份 ACP 方法分发。
 - **Verify**：`cargo test -p peri-acp --lib -- transport::router`、`cargo test -p peri-acp --lib -- transport::mpsc`、`cargo test -p peri-acp --lib -- transport::stdio`、`cargo test -p peri-acp --lib -- transport::wire_bridge`；人工检查 stdio EOF/read/write/flush 与任一 MPSC pump/channel 关闭均汇入同一 terminal 生命周期，以及帧桥正反向请求、错误码、取消和关闭时 pending 结算。
 
 ### ARC-HOST-SHUTDOWN-001

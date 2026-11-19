@@ -4,12 +4,12 @@
 //! Background pump task dispatches Response messages to the pending request map,
 //! forwards Requests/Notifications to the bounded incoming channel. Overflow
 //! requests are rejected with an explicit backpressure error instead of being
-//! queued without limit or silently dropped. Pump-side waits on the writer lock
-//! or on queue capacity are bounded by `STDIO_STALL_TIMEOUT`: a stalled peer must
-//! still converge on the same terminal settlement as EOF.
+//! queued without limit or silently dropped. While the pump waits on the writer
+//! lock or on queue capacity it keeps reading stdin into a bounded deferred
+//! buffer, so EOF still reaches the same terminal settlement.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -40,10 +40,9 @@ const STDIO_BACKPRESSURE_CODE: i64 = -32000;
 
 const STDIO_BACKPRESSURE_MESSAGE: &str = "ACP transport backpressure: inbound queue is full";
 
-/// pump 等待 writer 锁或入站容量的上限。有界队列下，pump 一旦停在写或入队上
-/// 就读不到 stdin EOF，`pump_router.close()` 也不会执行；该窗口把不可恢复的
-/// 等待转成 terminal 结算，量级与 MPSC transport 的 500 ms 背压窗口一致。
-const STDIO_STALL_TIMEOUT: Duration = Duration::from_millis(500);
+/// pump 等待 writer 锁或入站容量时暂存 stdin 行的上限。暂存让 EOF 不被等待
+/// 挡住，又不必把积压挪进无界缓冲；达到上限即判定对端不再排水并终止传输。
+const STDIO_DEFERRED_CAPACITY: usize = 256;
 
 /// JSON-RPC 2.0 envelope for (de)serialization over stdio.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -148,21 +147,28 @@ impl StdioTransport {
         // Background pump: read stdin → dispatch responses / forward messages
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
+            // 等待 writer/容量期间读到的行：按到达顺序重放，保证入站全序。
+            let mut deferred: VecDeque<String> = VecDeque::new();
 
             loop {
-                let next_line = tokio::select! {
-                    result = lines.next_line() => Some(result),
-                    () = pump_router.wait_closed() => None,
-                };
-                let Some(next_line) = next_line else {
-                    break;
-                };
-                let line = match next_line {
-                    Ok(Some(line)) => line,
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::warn!(%error, "Stdio transport: stdin read failed");
-                        break;
+                let line = match deferred.pop_front() {
+                    Some(line) => line,
+                    None => {
+                        let next_line = tokio::select! {
+                            result = lines.next_line() => Some(result),
+                            () = pump_router.wait_closed() => None,
+                        };
+                        let Some(next_line) = next_line else {
+                            break;
+                        };
+                        match next_line {
+                            Ok(Some(line)) => line,
+                            Ok(None) => break,
+                            Err(error) => {
+                                tracing::warn!(%error, "Stdio transport: stdin read failed");
+                                break;
+                            }
+                        }
                     }
                 };
                 if line.is_empty() {
@@ -194,7 +200,9 @@ impl StdioTransport {
                     Ok(value) => value,
                     Err(error) => {
                         tracing::warn!(%error, "Stdio transport: malformed JSON-RPC input");
-                        if !send_protocol_error_within_deadline(
+                        if !send_protocol_error_while_reading(
+                            &mut lines,
+                            &mut deferred,
                             &pump_writer,
                             &pump_router,
                             Value::Null,
@@ -217,7 +225,9 @@ impl StdioTransport {
                     Ok(envelope) => envelope,
                     Err(error) => {
                         tracing::warn!(%error, "Stdio transport: invalid JSON-RPC envelope");
-                        if !send_protocol_error_within_deadline(
+                        if !send_protocol_error_while_reading(
+                            &mut lines,
+                            &mut deferred,
                             &pump_writer,
                             &pump_router,
                             invalid_id,
@@ -246,7 +256,9 @@ impl StdioTransport {
                         .filter(|id| is_domain_id(id))
                         .cloned()
                         .unwrap_or(Value::Null);
-                    if !send_protocol_error_within_deadline(
+                    if !send_protocol_error_while_reading(
+                        &mut lines,
+                        &mut deferred,
                         &pump_writer,
                         &pump_router,
                         id,
@@ -312,7 +324,9 @@ impl StdioTransport {
                                 id = %id,
                                 "Rejecting JSON-RPC request with out-of-domain id"
                             );
-                            if !send_protocol_error_within_deadline(
+                            if !send_protocol_error_while_reading(
+                                &mut lines,
+                                &mut deferred,
                                 &pump_writer,
                                 &pump_router,
                                 Value::Null,
@@ -342,7 +356,9 @@ impl StdioTransport {
                                     method = %method,
                                     "stdio 入站队列已满，显式拒绝请求"
                                 );
-                                if !send_protocol_error_within_deadline(
+                                if !send_protocol_error_while_reading(
+                                    &mut lines,
+                                    &mut deferred,
                                     &pump_writer,
                                     &pump_router,
                                     id,
@@ -359,25 +375,29 @@ impl StdioTransport {
                     // Notification (no id, has method)
                     (None, Some(method)) => {
                         // 通知没有应答通道，不能像请求那样显式拒绝：队列满时等待
-                        // 消费者排水（取消等控制消息不丢）。等待必须有停滞上限，
-                        // 否则 pump 停在这里既读不到 stdin EOF 也到不了 close。
-                        let admitted = tokio::select! {
-                            biased;
-                            () = pump_router.wait_closed() => false,
-                            outcome = tokio::time::timeout(
-                                STDIO_STALL_TIMEOUT,
-                                incoming_tx.send(IncomingMessage::Notification {
-                                    method,
-                                    params: envelope.params.unwrap_or(Value::Null),
-                                }),
-                            ) => matches!(outcome, Ok(Ok(()))),
+                        // 消费者排水（取消等控制消息不丢）。等待期间继续读 stdin，
+                        // EOF 与 router close 都不必等消费者排水才被发现。
+                        let notification = IncomingMessage::Notification {
+                            method,
+                            params: envelope.params.unwrap_or(Value::Null),
                         };
-                        if !admitted {
-                            tracing::warn!(
-                                event = "acp_stdio_backpressure",
-                                "stdio 入站队列停滞，终止传输以结算 pending"
-                            );
-                            break;
+                        match incoming_tx.try_send(notification) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            Err(mpsc::error::TrySendError::Full(notification)) => {
+                                if !matches!(
+                                    wait_while_reading(
+                                        &mut lines,
+                                        &mut deferred,
+                                        &pump_router,
+                                        incoming_tx.send(notification),
+                                    )
+                                    .await,
+                                    PumpWait::Done(Ok(()))
+                                ) {
+                                    break;
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -496,22 +516,72 @@ async fn send_protocol_error(
     write_envelope(writer, router, &envelope).await
 }
 
-/// pump 内协议错误应答的写入上限：等待 writer 锁或 stdout 排空超过停滞窗口
-/// 即返回 `false`，调用方据此终止 pump 并让 `pump_router.close()` 结算 pending。
-async fn send_protocol_error_within_deadline(
+/// [`wait_while_reading`] 的结果：被等待操作完成，或 pump 必须终止（EOF、
+/// read error、router close、暂存已满）。
+enum PumpWait<T> {
+    Done(T),
+    Stop,
+}
+
+/// 等待 `operation` 完成期间继续读 stdin：读到的行按序暂存到 `deferred`，由主
+/// 循环重放。等待不再挡住 EOF，暂存上限保证积压有界。
+async fn wait_while_reading<R, T, F>(
+    lines: &mut tokio::io::Lines<BufReader<R>>,
+    deferred: &mut VecDeque<String>,
+    router: &RequestRouter,
+    operation: F,
+) -> PumpWait<T>
+where
+    R: AsyncRead + Unpin,
+    F: std::future::Future<Output = T>,
+{
+    tokio::pin!(operation);
+    loop {
+        if deferred.len() >= STDIO_DEFERRED_CAPACITY {
+            tracing::warn!(
+                event = "acp_stdio_backpressure",
+                "stdio 等待期暂存已满，终止传输以结算 pending"
+            );
+            return PumpWait::Stop;
+        }
+        tokio::select! {
+            biased;
+            () = router.wait_closed() => return PumpWait::Stop,
+            value = &mut operation => return PumpWait::Done(value),
+            line = lines.next_line() => match line {
+                Ok(Some(line)) => deferred.push_back(line),
+                Ok(None) => return PumpWait::Stop,
+                Err(error) => {
+                    tracing::warn!(%error, "Stdio transport: stdin read failed");
+                    return PumpWait::Stop;
+                }
+            },
+        }
+    }
+}
+
+/// pump 内协议错误应答的写入：等待期间继续读 stdin，stdout 阻塞不再挡住 EOF。
+async fn send_protocol_error_while_reading<R>(
+    lines: &mut tokio::io::Lines<BufReader<R>>,
+    deferred: &mut VecDeque<String>,
     writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
     router: &RequestRouter,
     id: Value,
     code: i64,
     message: &'static str,
-) -> bool {
+) -> bool
+where
+    R: AsyncRead + Unpin,
+{
     matches!(
-        tokio::time::timeout(
-            STDIO_STALL_TIMEOUT,
+        wait_while_reading(
+            lines,
+            deferred,
+            router,
             send_protocol_error(writer, router, id, code, message),
         )
         .await,
-        Ok(Ok(()))
+        PumpWait::Done(Ok(()))
     )
 }
 
