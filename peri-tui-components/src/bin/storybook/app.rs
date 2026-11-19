@@ -351,15 +351,20 @@ impl Drop for RestoreGuard {
 
 pub(crate) fn run(start_story: usize, start_variant: usize) -> io::Result<()> {
     terminal::enable_raw_mode()?;
+    // 守卫必须早于任何可能失败的终端操作：`execute!` 失败时也要恢复
+    // raw mode 与备用屏，否则 shell 会停留在异常终端状态。
+    let _guard = RestoreGuard;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture, cursor::Hide)?;
-    let _guard = RestoreGuard;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::new(start_story);
     app.select_variant(start_variant);
 
     loop {
+        // 动画进度由 wall clock 决定；每轮都推进，否则连续到达的鼠标事件会让
+        // `poll` 一直返回 true，播放表停在原地。
+        crate::stories::streaming::tick_at(&mut app.state, Instant::now());
         terminal.draw(|frame| draw(frame, &mut app))?;
         // 只有 `[ auto ]` 播放中才缩短轮询间隔；进度完全由 wall clock 决定。
         let timeout = if crate::stories::streaming::is_animating(&app.state) {
@@ -368,7 +373,6 @@ pub(crate) fn run(start_story: usize, start_variant: usize) -> io::Result<()> {
             Duration::from_millis(200)
         };
         if !event::poll(timeout)? {
-            crate::stories::streaming::tick_at(&mut app.state, Instant::now());
             continue;
         }
         match event::read()? {

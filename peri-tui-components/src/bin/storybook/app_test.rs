@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use super::{App, dump_buffer, dump_screen, handle_mouse};
 use crate::stories::{
     ACCENT, BG, STORIES, StoryState, document_lines, document_max_scroll, handle_story_mouse,
+    place_caret,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1270,4 +1271,20 @@ fn clicking_the_percentage_label_does_not_seek() {
         before,
         "百分比标签不是 seek 区，误点不应跳到 100%"
     );
+}
+
+/// 点击映射必须使用渲染器同一套视口窗口：文本超出高度时，屏幕首行不是源码首行。
+#[test]
+fn textarea_click_maps_through_scrolled_viewport() {
+    let mut editor = peri_tui_components::textarea::TextAreaState::default();
+    editor.text = "0\n1\n2\n3\n4\n5".to_string();
+    editor.cursor = editor.text.chars().count();
+    let area = Rect::new(0, 0, 20, 2);
+    place_caret(
+        &mut editor,
+        &mouse(MouseEventKind::Down(MouseButton::Left), 0, 0),
+        area,
+    );
+    // 光标在第 6 个视觉行，高度 2 的窗口为 [4, 6)：屏幕首行是源码行 "4"（字符索引 8）。
+    assert_eq!(editor.cursor, 8);
 }

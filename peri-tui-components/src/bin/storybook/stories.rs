@@ -25,7 +25,7 @@ use peri_tui_components::list::ListMetrics;
 use peri_tui_components::list_nav::scroll_start_for_selected;
 use peri_tui_components::panel_mouse::is_scrollbar_column;
 use peri_tui_components::scrollbar::vertical_scrollbar;
-use peri_tui_components::textarea::{TextArea, TextAreaState, wrap_text};
+use peri_tui_components::textarea::{TextArea, TextAreaState, viewport_window, wrap_text};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -906,7 +906,7 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
     }
 }
 
-fn place_caret(editor: &mut TextAreaState, mouse: &MouseEvent, area: Rect) {
+pub(crate) fn place_caret(editor: &mut TextAreaState, mouse: &MouseEvent, area: Rect) {
     if editor.text.is_empty() || area.width == 0 || area.height == 0 {
         return;
     }
@@ -914,10 +914,18 @@ fn place_caret(editor: &mut TextAreaState, mouse: &MouseEvent, area: Rect) {
     let display_col = mouse.column.saturating_sub(area.x) as usize;
     let max_width = area.width.saturating_sub(2).max(1) as usize;
     let wrapped = wrap_text(&editor.text, editor.cursor, max_width);
-    if visual_row >= wrapped.total_visual_rows {
+    // 渲染器在文本超出视口时以光标行为中心裁剪窗口，命中测试必须用同一窗口，
+    // 否则滚动态下点击会落到错误源码行。
+    let (start, end) = viewport_window(
+        wrapped.total_visual_rows,
+        wrapped.cursor_visual_row,
+        area.height as usize,
+    );
+    let source_row = start + visual_row;
+    if source_row >= end {
         return;
     }
-    let line = &wrapped.visual_lines[visual_row];
+    let line = &wrapped.visual_lines[source_row];
     let mut column = 0usize;
     let mut target = line.char_range.0;
     for (offset, ch) in line.text.char_indices() {

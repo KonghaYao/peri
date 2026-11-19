@@ -110,6 +110,12 @@ fn content_rows(auth_url: &str) -> (u16, u16) {
     (6 + n, 8 + n)
 }
 
+/// 按钮命中宽度：与渲染同一口径的显示列宽（CJK 字符占 2 列），
+/// 不能用 `chars().count()`——否则点击会落到相邻按钮。
+fn button_label_width(label: &str) -> u16 {
+    Line::from(ButtonChrome::Bracketed { padded: true }.text(label)).width() as u16
+}
+
 /// 瞬时反馈提示（复制链接 / 打开浏览器），3 秒后自动消失。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OauthHint {
@@ -213,10 +219,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     {
                         let iteration_items = labels.iter().enumerate();
                         for (i, label) in iteration_items {
-                            let w = ButtonChrome::Bracketed { padded: true }
-                                .text(label)
-                                .chars()
-                                .count() as u16;
+                            let w = button_label_width(label);
                             if col >= x && col < x + w {
                                 activate(i, info);
                                 return EventResult::Consumed;
@@ -445,6 +448,10 @@ fn open_auth_url_in_browser(url: &str) {
         tracing::warn!(%error, "OAuthPopup: 调用系统浏览器失败，用户可复制 URL");
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_popup_test.rs"]
+mod tests;
 
 use peri_acp_types::event_data::OauthNeeded;
 

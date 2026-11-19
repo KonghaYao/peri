@@ -384,3 +384,14 @@ fn test_wrap_text_empty_lines_preserved() {
     assert_eq!(result.cursor_visual_row, 1); // 光标在空行
     assert_eq!(result.cursor_visual_col, 0);
 }
+
+/// `viewport_window` 是渲染与命中测试共用的滚动口径：
+/// 全部行放得下时窗口从 0 开始，否则以光标视觉行为中心。
+#[test]
+fn test_viewport_window_centers_on_cursor_only_when_needed() {
+    assert_eq!(super::viewport_window(6, 5, 10), (0, 6));
+    assert_eq!(super::viewport_window(6, 5, 2), (4, 6));
+    assert_eq!(super::viewport_window(6, 0, 2), (0, 2));
+    // 视口高度 0 被 clamp 到 1，光标行仍落在窗口内
+    assert_eq!(super::viewport_window(6, 5, 0), (5, 6));
+}
