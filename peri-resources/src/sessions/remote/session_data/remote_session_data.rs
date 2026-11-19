@@ -27,6 +27,7 @@ pub(super) use tokio::sync::RwLock;
 pub(super) use turso_serverless::Value;
 
 pub(super) use super::connection_lifecycle::{connection_closed, ConnectionSlot};
+use std::collections::HashSet;
 
 /// 本次打开对远端 store 身份做了什么：首次登记资格的唯一证据。
 ///
@@ -562,6 +563,7 @@ impl SessionDataPort for RemoteSessionData {
             let mut roots = self.roots.write().await;
             match subtree {
                 Some(ids) => {
+                    let ids: HashSet<ThreadId> = ids.into_iter().collect();
                     roots.retain(|thread, root| !ids.contains(thread) && thread != id && root != id)
                 }
                 None => roots.retain(|thread, root| thread != id && root != id),
