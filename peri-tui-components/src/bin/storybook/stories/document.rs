@@ -431,8 +431,8 @@ impl DocumentView<'_> {
                     return false;
                 }
                 let cached = DocumentLayout::cached(layout, content, area);
-                // Shift+滚轮在字符图上横向平移；没有横向条时退回纵向滚动。
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) && cached.has_h_bar {
+                // Shift+滚轮在字符图上横向平移；没有横向溢出时退回纵向滚动。
+                if mouse.modifiers.contains(KeyModifiers::SHIFT) && cached.max_h_scroll > 0 {
                     *h_scroll = if mouse.kind == MouseEventKind::ScrollUp {
                         h_scroll.saturating_sub(WHEEL_COLS)
                     } else {
@@ -455,7 +455,8 @@ impl DocumentView<'_> {
                     return false;
                 }
                 let cached = DocumentLayout::cached(layout, content, area);
-                if !cached.has_h_bar {
+                // 一行高的视口放不下滚动条，但溢出列仍要能平移。
+                if cached.max_h_scroll == 0 {
                     return false;
                 }
                 *h_scroll = if mouse.kind == MouseEventKind::ScrollLeft {
@@ -465,9 +466,10 @@ impl DocumentView<'_> {
                 };
                 true
             }
-            // 终端丢失左键 release 后只剩移动事件：清除悬空的按下态。
+            // 终端丢失左键 release 后只剩移动事件：清除悬空的按下态与 thumb 拖拽。
             MouseEventKind::Moved => {
                 *pressed_button = None;
+                *h_drag = None;
                 false
             }
             _ => false,

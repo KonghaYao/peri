@@ -1060,6 +1060,55 @@ fn mermaid_horizontal_scroll_uses_wheel_and_draggable_bar() {
     assert!(handle_story_mouse(&mut app.state, &up, area));
     let stray = mouse(MouseEventKind::Drag(MouseButton::Left), area.x + 10, bar_y);
     assert!(!handle_story_mouse(&mut app.state, &stray, area));
+
+    // 终端丢失 release 后只剩 Moved：按下态与 thumb 拖拽一起清掉。
+    let press = mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        area.right() - 3,
+        bar_y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &press, area));
+    assert_eq!(h_scroll(&app.state), max);
+    let moved = mouse(MouseEventKind::Moved, area.x + 20, bar_y);
+    assert!(!handle_story_mouse(&mut app.state, &moved, area));
+    let stray = mouse(MouseEventKind::Drag(MouseButton::Left), area.x + 1, bar_y);
+    assert!(!handle_story_mouse(&mut app.state, &stray, area));
+    assert_eq!(h_scroll(&app.state), max, "Moved 之后散落的 Drag 不得移动");
+}
+
+#[test]
+fn one_row_mermaid_pans_horizontally_without_a_scrollbar() {
+    let mut app = App::new(story_index("mermaid"));
+    let area = Rect::new(0, 0, 20, 1);
+    let content = match &app.state {
+        StoryState::Document { content, .. } => *content,
+        _ => panic!("expected document state"),
+    };
+    let max = document_h_scroll_max(content, area.width as usize, area.height as usize);
+    assert!(max > 20, "20 列视口应明显放不下官方流程图");
+
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut buf);
+    assert!(
+        !row_text(&buf, area, area.y).contains('◄'),
+        "一行高的视口没有空间渲染横向滚动条"
+    );
+
+    // 没有条也要能平移，否则被裁掉的列永远看不到。
+    let right = mouse(MouseEventKind::ScrollRight, 2, 0);
+    assert!(handle_story_mouse(&mut app.state, &right, area));
+    assert_eq!(h_scroll(&app.state), 8);
+    let left = mouse(MouseEventKind::ScrollLeft, 2, 0);
+    assert!(handle_story_mouse(&mut app.state, &left, area));
+    assert_eq!(h_scroll(&app.state), 0);
+    let shift_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 2,
+        row: 0,
+        modifiers: KeyModifiers::SHIFT,
+    };
+    assert!(handle_story_mouse(&mut app.state, &shift_down, area));
+    assert_eq!(h_scroll(&app.state), 8, "Shift+滚轮同样不受滚动条影响");
 }
 
 #[test]
