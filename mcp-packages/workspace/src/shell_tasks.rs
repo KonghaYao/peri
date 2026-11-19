@@ -638,6 +638,7 @@ impl ShellTasks {
         owner: Option<&str>,
         thread_owner: Option<&str>,
     ) -> Task {
+        self.start_retention_sweep();
         let now = peri_time::now_utc_rfc3339();
         let record = DetailedTask::new(
             Task::new(task_id, TaskStatus::Working, &now, &now)

@@ -548,3 +548,38 @@ async fn terminal_records_do_not_accumulate_across_completed_tasks() {
     assert!(owner.live_tasks(Some("session-a")).tasks.is_empty());
     assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
 }
+
+#[test]
+fn promoted_task_starts_retention_sweep_without_spawn() {
+    const RETENTION: Duration = Duration::from_millis(50);
+    // Constructing outside a runtime skips the constructor's lazy sweep start;
+    // a promoted foreground task is then the first activity on this instance.
+    let owner = ShellTasks::with_retention_for_test(RETENTION);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        owner.track_promoted_scoped("promoted-foreground", None, None);
+        let callback = owner.completion_callback_for_scope(None, None);
+        let result = BackgroundTaskResult {
+            task_id: "promoted-foreground".into(),
+            agent_name: "shell".into(),
+            prompt_summary: "promoted command".into(),
+            success: true,
+            output: "done".into(),
+            tool_calls_count: 0,
+            duration_ms: 1,
+            timed_out: false,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        };
+        callback(&result, BgTaskKind::Shell).expect("terminal result is recorded");
+        assert_eq!(owner.retained_record_count(), 1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while owner.retained_record_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sweep starts even when the promoted task is the first activity");
+    });
+}
