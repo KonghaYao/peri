@@ -345,3 +345,16 @@ fn a_single_dash_stays_part_of_the_node_id() {
     );
     assert_eq!(update.trusted, "graph TD\nA-1 --> B\n");
 }
+
+#[test]
+fn a_multiline_quoted_label_stays_one_statement() {
+    let body = "graph TD\nA[\"第一行\n第二行\"] --> B\n";
+    let mut stream = MermaidStream::new();
+    let update = stream.observe(body, false);
+    assert!(
+        update.paused.is_none(),
+        "unexpected pause: {:?}",
+        update.paused
+    );
+    assert_eq!(update.trusted, body);
+}
