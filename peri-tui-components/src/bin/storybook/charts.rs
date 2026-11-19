@@ -3,16 +3,27 @@
 //! Demo data and widget configuration are adapted from tui-chart 0.6.6
 //! (`examples/*.rs`), MIT licensed:
 //!
-//! Copyright (c) 2025 Sorin Irimies
+//! MIT License
+//!
+//! Copyright (c) 2025 Sorin Albu-Irimies
 //!
 //! Permission is hereby granted, free of charge, to any person obtaining a copy
 //! of this software and associated documentation files (the "Software"), to deal
 //! in the Software without restriction, including without limitation the rights
 //! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 //! copies of the Software, and to permit persons to whom the Software is
-//! furnished to do so, subject to the following conditions: the above copyright
-//! notice and this permission notice shall be included in all copies or
-//! substantial portions of the Software.
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 //!
 //! Every demo is a deterministic, non-animated frame: no clock and no
 //! terminal I/O. Rectangles smaller than [`MIN_WIDTH`] × [`MIN_HEIGHT`] are
@@ -301,6 +312,20 @@ mod tests {
             );
         }
         assert_eq!(DEMOS.len(), 35);
+    }
+
+    #[test]
+    fn bench_data_is_built_once_and_renders_deterministically() {
+        let area = Rect::new(0, 0, 100, 32);
+        let mut first = Buffer::empty(area);
+        let mut second = Buffer::empty(area);
+        dashboard::bench(area, &mut first);
+        dashboard::bench(area, &mut second);
+        assert_eq!(first.content(), second.content());
+        assert!(std::ptr::eq(
+            dashboard::bench_charts(),
+            dashboard::bench_charts()
+        ));
     }
 
     #[test]

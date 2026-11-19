@@ -24,8 +24,10 @@ const LABEL_WIDTH: u16 = 5;
 const AUTO_SECONDS: f64 = 3.0;
 /// `[ auto ]` 的显示宽度，与 [`auto_text`] 的输出一致。
 const AUTO_WIDTH: u16 = 8;
-/// 按钮 + 1 列间隔 + 百分比 + 至少 6 列轨道才显示按钮。
-const FULL_MIN_WIDTH: u16 = AUTO_WIDTH + 1 + LABEL_WIDTH + 6;
+/// 按钮 + 1 列间隔 + 百分比 + 至少 4 列轨道才三者齐全。
+const FULL_MIN_WIDTH: u16 = AUTO_WIDTH + 1 + LABEL_WIDTH + 4;
+/// 按钮 + 1 列间隔 + 至少 4 列轨道：窄行先丢百分比、保留按钮。
+const AUTO_MIN_WIDTH: u16 = AUTO_WIDTH + 1 + 4;
 /// 百分比 + 至少 4 列轨道才显示标签（无按钮）。
 const LABEL_MIN_WIDTH: u16 = LABEL_WIDTH + 4;
 /// 未到达的轨道字符与已到达的填充字符。
@@ -99,7 +101,9 @@ pub(crate) struct StreamingDocument {
     layout: Option<DocumentLayout>,
     /// 进度条上的左键拖拽中：只有此时散落的 `Drag` 才改位置。
     dragging: bool,
-    /// `[ auto ]` 按钮按下未松开：只影响按钮反色。
+    /// `[ auto ]` 上按下未松开：松开前一直保留，拖出只改视觉按下态。
+    auto_hold: bool,
+    /// `[ auto ]` 按钮视觉按下态：指针在按钮内时为真。
     auto_pressed: bool,
     /// 播放中的线性插值；`None` 表示静止。
     auto: Option<AutoPlay>,
@@ -114,6 +118,7 @@ pub(super) fn streaming_state(source: DocumentContent<'static>, percent: usize) 
         pressed_button: None,
         layout: None,
         dragging: false,
+        auto_hold: false,
         auto_pressed: false,
         auto: None,
     })
@@ -154,7 +159,7 @@ struct ProgressLayout {
     label: bool,
 }
 
-/// 全部阈值只看 `row.width`：宽行给按钮让位，窄行先丢按钮、再丢标签。
+/// 分区按「先丢百分比标签、再丢按钮」降级：窄行仍能启动播放。
 fn progress_layout(row: Rect) -> ProgressLayout {
     if row.width >= FULL_MIN_WIDTH {
         ProgressLayout {
@@ -166,6 +171,12 @@ fn progress_layout(row: Rect) -> ProgressLayout {
                 1,
             ),
             label: true,
+        }
+    } else if row.width >= AUTO_MIN_WIDTH {
+        ProgressLayout {
+            auto: Some(Rect::new(row.x, row.y, AUTO_WIDTH, 1)),
+            bar: Rect::new(row.x + AUTO_WIDTH + 1, row.y, row.width - AUTO_WIDTH - 1, 1),
+            label: false,
         }
     } else if row.width >= LABEL_MIN_WIDTH {
         ProgressLayout {
@@ -206,11 +217,19 @@ pub(crate) fn test_progress_layout(area: Rect) -> (Option<Rect>, Rect, bool) {
 }
 
 /// 已到达比例，四舍五入到整数百分比；空源码按 0% 处理。
+///
+/// 只有 cursor 真正抵达源码末尾才显示 100%，否则差 1 字节也会被四舍五入
+/// 成 100%，让不完整正文谎报完成。
 fn percent(source: &str, cursor: usize) -> usize {
     if source.is_empty() {
         return 0;
     }
-    (cursor * 100 + source.len() / 2) / source.len()
+    let rounded = (cursor * 100 + source.len() / 2) / source.len();
+    if cursor < source.len() {
+        rounded.min(99)
+    } else {
+        100
+    }
 }
 
 /// 已到达列数：与百分比同口径的四舍五入，100% 时整条填满。
@@ -302,6 +321,7 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             state.dragging = false;
+            state.auto_hold = false;
             state.auto_pressed = false;
             if let Some(row) = row
                 && rect_contains(row, mouse.column, mouse.row)
@@ -312,6 +332,7 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
                 if let Some(auto) = layout.auto
                     && rect_contains(auto, mouse.column, mouse.row)
                 {
+                    state.auto_hold = true;
                     state.auto_pressed = true;
                     start_auto(state);
                     return true;
@@ -333,8 +354,8 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
         }
         // 只有拖拽中的 Drag 生效；行外（含纵向越界）仍按列比例 clamp。
         MouseEventKind::Drag(MouseButton::Left) => {
-            if state.auto_pressed {
-                // 拖出按钮即恢复未按下态；拖回来重新按下（播放已开始，不会重启）。
+            if state.auto_hold {
+                // 按下起点保留到 release：拖出只恢复视觉，拖回重新按下，播放不重启。
                 let auto_rect = row.map(progress_layout).and_then(|layout| layout.auto);
                 state.auto_pressed =
                     auto_rect.is_some_and(|auto| rect_contains(auto, mouse.column, mouse.row));
@@ -350,7 +371,8 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
             }
             true
         }
-        MouseEventKind::Up(MouseButton::Left) if state.auto_pressed => {
+        MouseEventKind::Up(MouseButton::Left) if state.auto_hold => {
+            state.auto_hold = false;
             state.auto_pressed = false;
             true
         }
@@ -358,6 +380,14 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
             state.dragging = false;
             state.pressed_button = None;
             true
+        }
+        // 终端丢失左键 release 后只剩移动事件：清掉按下态并结束 seek 拖拽；
+        // 正在播放的 auto 不取消（与 Up 一致，只清按下态）。
+        MouseEventKind::Moved => {
+            state.auto_hold = false;
+            state.auto_pressed = false;
+            state.dragging = false;
+            handle_document(state, mouse, area)
         }
         _ => handle_document(state, mouse, area),
     }
@@ -373,6 +403,15 @@ fn handle_document(state: &mut StreamingDocument, mouse: &MouseEvent, area: Rect
         &mut state.pressed_button,
         &mut state.layout,
     )
+}
+
+impl StreamingDocument {
+    /// 终端 resize 后按钮热区已重建：清掉按下态，播放进度与滚动位置保留。
+    pub(crate) fn cancel_press(&mut self) {
+        self.pressed_button = None;
+        self.auto_pressed = false;
+        self.auto_hold = false;
+    }
 }
 
 /// 从当前 cursor 起播；已在 100% 时先回到 0，再从 0 播到末尾。
@@ -440,5 +479,21 @@ impl StreamingDocument {
 
     pub(crate) fn auto_pressed(&self) -> bool {
         self.auto_pressed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_document_never_reports_100_percent() {
+        let source = OPENUI_STREAMING;
+        assert!(source.len() > 200, "OpenUI 文档必须超过 200 字节");
+        // 差 1 字节时旧的四舍五入会显示 100%，但正文仍是不完整前缀。
+        assert_eq!(percent(source, source.len() - 1), 99);
+        assert_eq!(percent(source, source.len()), 100);
+        assert_eq!(percent(source, 0), 0);
+        assert_eq!(percent("", 0), 0);
     }
 }

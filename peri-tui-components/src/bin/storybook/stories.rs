@@ -87,6 +87,8 @@ pub(crate) enum StoryState {
         scroll: usize,
         header: bool,
         footer: bool,
+        /// 首帧按真实视口把选中项滚到底部，只应用一次，之后滚轮自由移动。
+        reveal_last: bool,
     },
     Scrollbar {
         position: usize,
@@ -140,12 +142,19 @@ fn textarea_state(text: &str, placeholder: &str, focused: bool, width: Option<u1
     }
 }
 
-fn list_state(selected: usize, scroll: usize, header: bool, footer: bool) -> StoryState {
+fn list_state(
+    selected: usize,
+    scroll: usize,
+    header: bool,
+    footer: bool,
+    reveal_last: bool,
+) -> StoryState {
     StoryState::List {
         selected,
         scroll,
         header,
         footer,
+        reveal_last,
     }
 }
 
@@ -184,7 +193,7 @@ fn textarea_narrow_initial() -> StoryState {
 }
 
 fn list_first_initial() -> StoryState {
-    list_state(0, 0, true, true)
+    list_state(0, 0, true, true, false)
 }
 
 fn list_middle_initial() -> StoryState {
@@ -193,21 +202,18 @@ fn list_middle_initial() -> StoryState {
         scroll_start_for_selected(14, LIST_ITEMS.len(), LIST_INITIAL_VIEWPORT),
         true,
         true,
+        false,
     )
 }
 
 fn list_last_initial() -> StoryState {
     let last = LIST_ITEMS.len() - 1;
-    list_state(
-        last,
-        scroll_start_for_selected(last, LIST_ITEMS.len(), LIST_INITIAL_VIEWPORT),
-        true,
-        true,
-    )
+    // 视口高度只在绘制时才知道：首帧把选中项贴到底部。
+    list_state(last, 0, true, true, true)
 }
 
 fn list_plain_initial() -> StoryState {
-    list_state(2, 0, false, false)
+    list_state(2, 0, false, false, false)
 }
 
 fn scrollbar_top_initial() -> StoryState {
@@ -677,7 +683,8 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
             scroll,
             header,
             footer,
-        } => render_list(area, buf, *selected, *scroll, *header, *footer),
+            reveal_last,
+        } => render_list(area, buf, *selected, scroll, *header, *footer, reveal_last),
         StoryState::Scrollbar { position, total } => {
             render_scrollbar(area, buf, *position, *total);
         }
@@ -762,16 +769,25 @@ fn render_list(
     area: Rect,
     buf: &mut Buffer,
     selected: usize,
-    scroll: usize,
+    scroll: &mut usize,
     header: bool,
     footer: bool,
+    reveal_last: &mut bool,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let metrics = ListMetrics::new(u16::from(header), 1, u16::from(footer));
     let count = LIST_ITEMS.len();
-    let (visible, scroll) = list_viewport(area.height, metrics, count, scroll);
+    let (visible, _) = list_viewport(area.height, metrics, count, *scroll);
+    let max_scroll = count.saturating_sub(visible);
+    // 初始底部偏移按真实视口算一次；之后滚轮移动不再被拉回。
+    if *reveal_last {
+        *reveal_last = false;
+        *scroll = max_scroll;
+    }
+    *scroll = (*scroll).min(max_scroll);
+    let scroll = *scroll;
     let content_width = area.width.saturating_sub(1);
 
     if header && area.height > 0 {
@@ -820,7 +836,11 @@ fn render_list(
 
     if count > visible && area.height >= 3 {
         let bar_area = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
-        let mut state = ScrollbarState::new(count.saturating_sub(visible)).position(scroll);
+        // ratatui 的 position 取值是 0..=max_scroll：content_length 取
+        // max_scroll + 1，thumb 才会在最后一页贴到轨道底；视口高度单独给出。
+        let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
+            .position(scroll)
+            .viewport_content_length(visible);
         StatefulWidget::render(
             vertical_scrollbar(Style::new().bg(ACCENT), muted_style()),
             bar_area,
@@ -904,6 +924,7 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
             scroll,
             header,
             footer,
+            ..
         } => match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 click_list(area, mouse, selected, *scroll, *header, *footer);
