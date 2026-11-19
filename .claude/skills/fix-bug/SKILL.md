@@ -1,6 +1,6 @@
 ---
 name: fix-bug
-description: 在独立 worktree 中排查并修复 bug：按证据定 P 级（P0 停止汇报；P1 由 explorer 确认并写 spec/issues 后交给 coder 修复；P2/P3 主 agent 一次性修复），验证后提交 GitHub PR，并等待 CI 与 CodeRabbit，失败自动修复重推最多 3 轮。用户通过 /fix-bug 主动调用。
+description: 在独立 worktree 中排查并修复 bug：按证据定 P 级（P0 停止汇报；P1 由 explorer 确认并写 spec/issues 后交给 coder 修复；P2/P3 主 agent 一次性修复），验证后提交 GitHub PR，并等待 CI 与 CodeRabbit，失败自动修复重推最多 3 轮。默认不合并 PR，仅在用户明确授权时用 squash 合并。用户通过 /fix-bug 主动调用。
 argumentHint: "<bug 描述 | issue 链接 | 报错/日志 | 复现步骤>"
 disable-model-invocation: true
 ---
@@ -101,8 +101,9 @@ Subagent 的 cwd 不能切到 worktree，必须在 prompt 中给出绝对路径�
    ```
    目标分支默认 `main`；用户或仓库约定另有要求时按其执行。
 5. 用 `gh pr view --json url,baseRefName,headRefName` 核对 PR。
+6. 默认不合并 PR，交付停在"可合并"状态等待用户。只有用户明确授权合并时才执行 `gh pr merge <PR> --squash`；禁止 merge commit（`--merge`）与 `--rebase` 合并，远端分支保留与否按用户指示。
 
-完成标准：PR 已创建，URL、目标分支、head 分支正确。
+完成标准：PR 已创建，URL、目标分支、head 分支正确；未合并（除非用户明确授权）。
 
 ## 9. 等待 CI 与 CodeRabbit
 
@@ -136,4 +137,5 @@ Subagent 的 cwd 不能切到 worktree，必须在 prompt 中给出绝对路径�
 - 不修改数据库 schema、不 force push、不跳过 hook、不 stash/reset/clean 用户改动。
 - 不把环境或网络故障当成产品 bug；无法复现必须标注证据等级。
 - PR、commit、日志中不得出现密钥、token、连接串或完整环境变量。
+- 默认不合并 PR；仅在用户明确授权时合并，且必须用 squash（`gh pr merge --squash`），不得使用 merge commit 或 rebase 合并。
 - 同类修复只做一次；需要产品决策或扩大范围时先问用户。
