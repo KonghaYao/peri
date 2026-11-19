@@ -145,17 +145,23 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
         manager: host.clone(),
         session_id: "session-a".into(),
         token,
-        deliver: Arc::new(move |_| {
-            if reject_delivery.load(Ordering::SeqCst) {
-                return Err("mailbox unavailable".into());
-            }
-            assert_eq!(
-                host_for_delivery.active_count(),
-                1,
-                "terminal delivery precedes active-count release"
-            );
-            delivered.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+        deliver: Arc::new(move |_: &WorkflowTaskResult| {
+            let reject_delivery = reject_delivery.clone();
+            let host_for_delivery = host_for_delivery.clone();
+            let delivered = delivered.clone();
+            Box::pin(async move {
+                if reject_delivery.load(Ordering::SeqCst) {
+                    return Err("mailbox unavailable".into());
+                }
+                assert_eq!(
+                    host_for_delivery.active_count(),
+                    1,
+                    "terminal delivery precedes active-count release"
+                );
+                delivered.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         }),
         scan: tokio::sync::Mutex::new(()),
         registrations: parking_lot::Mutex::default(),
@@ -337,9 +343,13 @@ async fn workflow_real_engine_start_ack_cancel_and_close_cross_mcp_wire() {
         manager: host.clone(),
         session_id: "engine-session".into(),
         token,
-        deliver: Arc::new(move |_| {
-            delivered.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+        deliver: Arc::new(move |_: &WorkflowTaskResult| {
+            let delivered = delivered.clone();
+            Box::pin(async move {
+                delivered.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         }),
         scan: tokio::sync::Mutex::new(()),
         registrations: parking_lot::Mutex::default(),
@@ -378,4 +388,153 @@ async fn workflow_real_engine_start_ack_cancel_and_close_cross_mcp_wire() {
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
     let _ = service.close_with_timeout(Duration::from_secs(1)).await;
     server.abort();
+}
+
+/// 只提供一页已终结 Workflow 数据的来源，不经过真实 MCP wire。
+struct PagePool {
+    page: String,
+    acks: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl McpPoolPort for PagePool {
+    fn snapshot(&self) -> serde_json::Value {
+        json!({})
+    }
+    async fn shutdown(&self) -> McpPoolShutdownReport {
+        McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
+    }
+    async fn read_instance_resource(&self, instance: &str, uri: &str) -> Result<String, String> {
+        assert_eq!(instance, "workflow");
+        assert_eq!(uri, "workflow://background-tasks");
+        Ok(self.page.clone())
+    }
+    async fn call_instance_tool(
+        &self,
+        instance: &str,
+        tool: &str,
+        _: serde_json::Value,
+        _: Option<serde_json::Value>,
+    ) -> Result<String, String> {
+        assert_eq!(instance, "workflow");
+        if tool == "WorkflowCompletionAck" {
+            self.acks.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok("{}".into())
+    }
+}
+
+/// [回归] Workflow 真实投递等待持久 MQ 提交时，投影所在 worker 仍能推进其他运行；
+/// ACK 只发生在提交之后。
+#[test]
+fn workflow_terminal_delivery_waits_for_the_queue_without_blocking_the_worker() {
+    use peri_acp_types::session::{MessageQueue, SessionInbox};
+    use peri_acp_types::tasks::{TaskRecord, TaskSnapshot};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let terminal = WorkflowTaskResult {
+        run_id: "run-gated".into(),
+        workflow_name: "gated".into(),
+        success: true,
+        status: WorkflowRunStatus::Completed,
+        execution_status: Default::default(),
+        acceptance_status: Default::default(),
+        post_processing_status: Default::default(),
+        delivery_status: Default::default(),
+        outcome: Default::default(),
+        state_artifact_exists: false,
+        duration_ms: 1,
+        agent_count: 0,
+        tool_calls_count: 0,
+        error: None,
+        result_preview: None,
+        phase_summaries: vec![],
+        attempts: vec![],
+    };
+    let page = serde_json::to_string(&json!({
+        "snapshot": TaskSnapshot {
+            revision: 0,
+            tasks: vec![TaskRecord {
+                task_id: terminal.run_id.clone(),
+                kind: BgTaskKind::Workflow,
+                summary: "gated".into(),
+                started_at: "2026-01-01T00:00:00Z".into(),
+                status: "completed".into(),
+                duration_ms: 1,
+                output_preview: None,
+                initiator_session_id: Some("session-gated".into()),
+                child_thread_id: None,
+            }],
+        },
+        "completions": [terminal],
+    }))
+    .expect("the workflow page fixture must serialize");
+
+    let queue = MessageQueue::new();
+    let (entered, release) = queue.gate_next_enqueue();
+    let router = peri_agent::session::async_router::AsyncRouter::new(
+        SessionInbox::new(Arc::new(queue.clone())).handle(),
+    );
+    let acks = Arc::new(AtomicUsize::new(0));
+    let host: Arc<dyn TaskManager> = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let client = Arc::new(Client {
+        pool: Arc::new(PagePool {
+            page,
+            acks: Arc::clone(&acks),
+        }),
+        manager: host.clone(),
+        session_id: "session-gated".into(),
+        token: "token".into(),
+        deliver: Arc::new(move |result: &WorkflowTaskResult| {
+            let router = router.clone();
+            let result = result.clone();
+            Box::pin(async move { router.route_workflow_task_result_async(&result).await })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        }),
+        scan: tokio::sync::Mutex::new(()),
+        registrations: parking_lot::Mutex::default(),
+    });
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("the single-worker runtime fixture must build");
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let reconcile = {
+        let client = Arc::clone(&client);
+        runtime.spawn(async move { client.reconcile().await })
+    };
+    runtime
+        .block_on(entered)
+        .expect("the enqueue gate must report the pending commit");
+    runtime.spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = progress_tx.send(());
+    });
+    let progressed = progress_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    assert_eq!(
+        acks.load(Ordering::SeqCst),
+        0,
+        "workflow ACK must wait for the queue commit"
+    );
+    assert_eq!(host.active_count(), 1);
+    release
+        .send(())
+        .expect("the enqueue gate release must remain available");
+    runtime
+        .block_on(reconcile)
+        .expect("the reconcile task must join")
+        .expect("the workflow projection must settle");
+    assert_eq!(acks.load(Ordering::SeqCst), 1);
+    assert_eq!(queue.len_sync(), 1);
+    assert_eq!(host.active_count(), 0);
+    assert!(
+        progressed,
+        "waiting for the persistent queue must not block the projection worker"
+    );
 }

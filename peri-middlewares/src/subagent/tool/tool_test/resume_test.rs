@@ -11,6 +11,17 @@ use super::ThreadMeta;
 
 // ─── Slice 6:Agent 工具 resume_thread_id 参数（tool 层） ──────────────────────
 
+/// 完成事件先于持久终态投递发出：等父任务目录真正结算，再做落库断言。
+async fn wait_for_settlement(registry: &peri_agent::agent::async_tasks::TaskManager) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while registry.active_count() != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("父任务目录必须在完成事件后完成结算");
+}
+
 /// 解析层三分语义：缺省 / null / 空串 → 未提供（新建）；合法 UUID → 恢复；
 /// 非 UUID 非空值 → 明确错误（保留原始值），不得静默忽略该字段。
 #[test]
@@ -589,6 +600,7 @@ async fn test_resume_thread_id_background_combination() {
         Some(id.as_str()),
         "BackgroundTaskResult 必须携带 child_thread_id"
     );
+    wait_for_settlement(&registry).await;
     assert_eq!(registry.active_count(), 0, "父任务目录必须已结算新任务");
     let delivered = parent.queue().drain_all_sync();
     assert_eq!(delivered.len(), 1, "完成结果必须投递给直接发起的父会话");
@@ -690,6 +702,7 @@ async fn test_resume_thread_id_background_forced() {
         Some(id.as_str()),
         "BackgroundTaskResult 必须携带 child_thread_id"
     );
+    wait_for_settlement(&registry).await;
     assert_eq!(registry.active_count(), 0, "父任务目录必须已结算新任务");
 
     // 显式 false 也不能落回同步。
@@ -732,6 +745,7 @@ async fn test_resume_thread_id_background_forced() {
         explicit_false_completed.child_thread_id.as_deref(),
         Some(explicit_false_id.as_str())
     );
+    wait_for_settlement(&registry).await;
     assert_eq!(registry.active_count(), 0);
 }
 

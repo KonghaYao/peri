@@ -481,7 +481,14 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             .expect("关闭 producer 后必须完成排空，不能被 guard 持有死锁")
             .expect("the expect fixture result is required for this assertion");
     assert_eq!(active_at_callback, 1, "通知先于 TaskManager 终态");
-    assert_eq!(manager.active_count(), 0, "真实执行收尾后任务结束");
+    // 投递结论返回后终态才提交；结算可能落在阻塞池，等待它完成而不是假设同拍发生。
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while manager.active_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("真实执行收尾后任务结束");
     let turns = lifecycle_turns.lock();
     assert_eq!(turns.len(), if panic_forwarder { 1 } else { 2 });
     if !panic_forwarder {

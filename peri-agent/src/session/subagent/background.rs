@@ -622,7 +622,8 @@ pub(super) async fn spawn_background_subagent(
         }
         // 终态提交失败时仍按既有协议交付失败结果：父会话需要知道结算没完成，
         // 而这次提交没有留下任何事实（终态、意图与 MQ 行都没写）。
-        settle_background_terminal(&task_manager_spawn, &registration, result, on_bg_complete);
+        settle_background_terminal(&task_manager_spawn, &registration, result, on_bg_complete)
+            .await;
         let owner = session
             .subagent_host()
             .and_then(|host| host.child_owner.clone());
@@ -702,13 +703,15 @@ pub(super) async fn spawn_background_subagent(
                     panic_terminal_route.as_ref(),
                 )
                 .await;
-                if let Some(registration) = panic_registration.lock().clone() {
+                let registration = panic_registration.lock().clone();
+                if let Some(registration) = registration {
                     settle_background_terminal(
                         &panic_manager,
                         &registration,
                         result,
                         panic_on_complete,
-                    );
+                    )
+                    .await;
                 }
             }
             // panic 已在边界内收敛；正常返回让 spawn_owned 确认执行已停止。
@@ -859,15 +862,18 @@ async fn persist_background_terminal(
     true
 }
 
-fn settle_background_terminal(
-    manager: &TaskManager,
+async fn settle_background_terminal(
+    manager: &Arc<TaskManager>,
     registration: &peri_acp_types::tasks::TaskRegistrationTicket,
     result: crate::agent::events::BackgroundTaskResult,
     delivery: Option<peri_acp_types::tasks::OnBgCompleteFn>,
 ) {
     let task_id = result.task_id.clone();
     if let Some(delivery) = delivery {
-        if let Err(error) = manager.settle_completed(registration, result, delivery) {
+        if let Err(error) = manager
+            .settle_completed_awaited(registration, result, delivery)
+            .await
+        {
             tracing::error!(%task_id, %error, "subagent terminal delivery is pending");
         }
     } else {
