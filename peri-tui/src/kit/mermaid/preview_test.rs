@@ -701,6 +701,46 @@ fn layout_publication_bumps_only_the_owning_message_revision() {
 }
 
 #[test]
+fn a_failed_preview_is_not_retried_until_the_input_changes() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let key = key("m1");
+    let source = fence("graph TD\nA-->B\n", false);
+    engine.observe(key.clone(), &source, 60, false, now);
+    let job = engine.take_due(now).expect("first preview is due");
+    assert!(engine.complete(
+        job,
+        Err(RenderFailure::new("layout failed")),
+        now + Duration::from_millis(1)
+    ));
+    assert!(matches!(
+        engine.view(&key).expect("state").notice,
+        Some(PreviewNotice::Failed(_))
+    ));
+
+    engine.observe(
+        key.clone(),
+        &source,
+        60,
+        false,
+        now + Duration::from_millis(10),
+    );
+    assert_eq!(
+        engine.pending_count(),
+        0,
+        "the same failed input must not requeue every frame"
+    );
+
+    let changed = fence("graph TD\nA-->B\nB-->C\n", false);
+    engine.observe(key, &changed, 60, false, now + Duration::from_millis(20));
+    assert_eq!(
+        engine.pending_count(),
+        1,
+        "changed input clears the stale error and schedules again"
+    );
+}
+
+#[test]
 fn a_retracted_preview_is_rescheduled_when_the_fence_returns() {
     let mut engine = PreviewEngine::new();
     let now = Instant::now();

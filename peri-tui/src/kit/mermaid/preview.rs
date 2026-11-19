@@ -227,6 +227,15 @@ impl FenceState {
             return false;
         }
         if self
+            .error_input
+            .as_ref()
+            .is_some_and(|(error_width, error_source)| {
+                *error_width == width && error_source == source
+            })
+        {
+            return false;
+        }
+        if self
             .frame
             .as_ref()
             .is_some_and(|frame| frame.width == width && frame.source.as_str() == source)
