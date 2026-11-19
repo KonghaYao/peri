@@ -1,6 +1,6 @@
 //! Workspace discovery and saved-binding validation for a remote session store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +22,12 @@ use crate::sessions::local_port::LocalExecutionPort;
 use super::environment::RemoteWorkspaceEnvironment;
 use super::session_data::RemoteSessionData;
 
+/// 进程内工作区观测的保留上限。
+///
+/// 观测只是准入前的本机复核证据，不是持久事实：未命中时调用方按持久化快照重新观测。
+/// 因此缓存有界不会影响恢复，只影响同一进程内重复准入的命中率。
+const MAX_WORKSPACE_OBSERVATIONS: usize = 256;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VirtualSnapshot {
@@ -29,10 +35,63 @@ struct VirtualSnapshot {
     root: PathBuf,
 }
 
+/// 有界的 workspace/cwd 观测表：命中刷新顺序，超限淘汰最久未使用的一条。
+#[derive(Default)]
+struct ObservationCache {
+    entries: HashMap<(WorkspaceId, PathBuf), ResolvedWorkspace>,
+    /// 插入/命中顺序，队首是下一次淘汰候选；可能残留已移除的键。
+    order: VecDeque<(WorkspaceId, PathBuf)>,
+}
+
+impl ObservationCache {
+    fn record(&mut self, key: (WorkspaceId, PathBuf), resolved: ResolvedWorkspace) {
+        if self.entries.contains_key(&key) {
+            self.touch(&key);
+            self.entries.insert(key, resolved);
+            return;
+        }
+        while self.entries.len() >= MAX_WORKSPACE_OBSERVATIONS {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, resolved);
+    }
+
+    fn get(&mut self, key: &(WorkspaceId, PathBuf)) -> Option<ResolvedWorkspace> {
+        let resolved = self.entries.get(key).cloned()?;
+        self.touch(key);
+        Some(resolved)
+    }
+
+    fn touch(&mut self, key: &(WorkspaceId, PathBuf)) {
+        if let Some(position) = self.order.iter().position(|candidate| candidate == key) {
+            self.order.remove(position);
+        }
+        self.order.push_back(key.clone());
+    }
+
+    fn forget_cwds(&mut self, cwds: &[PathBuf]) {
+        if cwds.is_empty() {
+            return;
+        }
+        self.entries
+            .retain(|_, resolved| !cwds.contains(&resolved.cwd));
+        self.order.retain(|key| self.entries.contains_key(key));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 pub(super) struct RemoteExecution {
     data: Arc<RemoteSessionData>,
     read_only: bool,
-    observations: Mutex<HashMap<(WorkspaceId, PathBuf), ResolvedWorkspace>>,
+    observations: Mutex<ObservationCache>,
     environment: RemoteWorkspaceEnvironment,
 }
 
@@ -49,7 +108,7 @@ impl RemoteExecution {
         Self {
             data,
             read_only,
-            observations: Mutex::new(HashMap::new()),
+            observations: Mutex::new(ObservationCache::default()),
             environment,
         }
     }
@@ -171,6 +230,17 @@ impl LocalExecutionPort for RemoteExecution {
         self.read_only
     }
 
+    fn retains_workspace_observations(&self) -> bool {
+        true
+    }
+
+    fn forget_workspace_observations(&self, cwds: &[PathBuf]) {
+        // 回收是缓存清理，不是删除结果的一部分；锁中毒只放弃回收。
+        if let Ok(mut observations) = self.observations.lock() {
+            observations.forget_cwds(cwds);
+        }
+    }
+
     fn machine_id(&self) -> Result<String> {
         self.environment.machine_id()
     }
@@ -225,7 +295,7 @@ impl LocalExecutionPort for RemoteExecution {
             self.observations
                 .lock()
                 .map_err(|_| WorkspaceError::Unavailable)?
-                .insert(
+                .record(
                     (workspace_id, resolved.relative_cwd.clone()),
                     resolved.clone(),
                 );
@@ -260,7 +330,7 @@ impl LocalExecutionPort for RemoteExecution {
             self.observations
                 .lock()
                 .map_err(|_| WorkspaceError::Unavailable)?
-                .insert(
+                .record(
                     (workspace_id, resolved.relative_cwd.clone()),
                     resolved.clone(),
                 );
@@ -285,7 +355,6 @@ impl LocalExecutionPort for RemoteExecution {
                 binding.workspace_id,
                 binding.cwd_relative_to_workspace.clone(),
             ))
-            .cloned()
             .ok_or(WorkspaceError::InvalidBinding)?;
         if binding.project_id != observed.project_id
             || binding.cwd_relative_to_workspace != observed.relative_cwd
@@ -311,7 +380,7 @@ impl LocalExecutionPort for RemoteExecution {
         self.observations
             .lock()
             .map_err(|_| WorkspaceError::Unavailable)?
-            .insert(
+            .record(
                 (
                     binding.workspace_id,
                     binding.cwd_relative_to_workspace.clone(),
@@ -323,5 +392,22 @@ impl LocalExecutionPort for RemoteExecution {
 
     async fn legacy_confirmed(&self, _id: &ThreadId) -> Result<bool> {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+#[path = "remote_execution_test.rs"]
+mod tests;
+
+#[cfg(test)]
+impl RemoteExecution {
+    pub(super) fn observation_cwds(&self) -> Vec<PathBuf> {
+        self.observations
+            .lock()
+            .expect("observation cache lock poisoned")
+            .entries
+            .values()
+            .map(|resolved| resolved.cwd.clone())
+            .collect()
     }
 }

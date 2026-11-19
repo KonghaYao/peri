@@ -79,6 +79,17 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
     /// 本机来源证据是否足以把无绑定历史表达成 legacy（远端组合由门面固定为 `false`）。
     async fn legacy_confirmed(&self, id: &ThreadId) -> Result<bool>;
 
+    /// 本组合是否在进程内保留工作区观测（仅远程适配器为真）。
+    fn retains_workspace_observations(&self) -> bool {
+        false
+    }
+
+    /// 删除会话树成功后回收这些工作目录的观测缓存。
+    ///
+    /// 观测不是持久事实：未命中时调用方按保存的绑定证据重新观测，因此回收只影响
+    /// 缓存命中率，不影响有效绑定的验证与恢复。
+    fn forget_workspace_observations(&self, _cwds: &[std::path::PathBuf]) {}
+
     /// 测试用：本机 SQLite 连接池。
     #[cfg(all(test, not(target_os = "emscripten")))]
     fn sqlite_pool(&self) -> Option<&sqlx::SqlitePool> {

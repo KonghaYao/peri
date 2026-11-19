@@ -128,6 +128,10 @@ mod schema;
 mod schema_upgrade;
 
 #[cfg(test)]
+#[path = "remote_retention_test.rs"]
+mod remote_retention_tests;
+
+#[cfg(test)]
 #[path = "schema_upgrade_test.rs"]
 mod schema_upgrade_tests;
 

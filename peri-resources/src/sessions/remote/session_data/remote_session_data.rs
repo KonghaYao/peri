@@ -27,6 +27,7 @@ pub(super) use tokio::sync::RwLock;
 pub(super) use turso_serverless::Value;
 
 pub(super) use super::connection_lifecycle::{connection_closed, ConnectionSlot};
+use std::collections::HashSet;
 
 /// 本次打开对远端 store 身份做了什么：首次登记资格的唯一证据。
 ///
@@ -90,6 +91,11 @@ impl RemoteSessionData {
             }
             Err(_) => id.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::sessions::remote) async fn cached_roots(&self) -> HashMap<ThreadId, ThreadId> {
+        self.roots.read().await.clone()
     }
 }
 
@@ -537,7 +543,35 @@ impl SessionDataPort for RemoteSessionData {
     }
 
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        self.write_tree_deletion(id).await
+        // 删除范围由批内重新计算；这里预读只用来辨认缓存项。
+        let subtree: Option<Vec<ThreadId>> = if self.roots.read().await.is_empty() {
+            None
+        } else {
+            match self.read_tree(id).await {
+                Ok(tree) => Some(tree.into_iter().map(|meta| meta.id).collect()),
+                Err(error) => {
+                    tracing::warn!(%error, %id, "remote root cache invalidation skipped");
+                    None
+                }
+            }
+        };
+        let result = self.write_tree_deletion(id).await;
+        if result.is_ok() {
+            // 删除以 `id` 为根的子树：整棵子树的 thread 都不再可解析。中间节点的后代
+            // 缓存的 root 可能位于子树之外，不能只按 `root == id` 判断。
+            // 删除失败时保留缓存——会话行仍在，解析结果仍成立。
+            let mut roots = self.roots.write().await;
+            match subtree {
+                Some(ids) => {
+                    let ids: HashSet<ThreadId> = ids.into_iter().collect();
+                    roots.retain(|thread, root| !ids.contains(thread) && thread != id && root != id)
+                }
+                // 读失败时不整表清空：root_for 解析失败会退回自身，收窄未决写入的阻塞范围；
+                // 保留旧条目最多多阻塞，不会放行。此时中间节点的后代可能残留到进程结束。
+                None => roots.retain(|thread, root| thread != id && root != id),
+            }
+        }
+        result
     }
 
     async fn mq_enqueue(
