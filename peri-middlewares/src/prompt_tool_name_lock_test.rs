@@ -16,7 +16,6 @@ use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 const MANAGED_PROMPT_FILES: &[&str] = &[
     ".claude/agents/advisor.md",
     ".claude/agents/code-reviewer.md",
-    ".claude/skills/blog-writer/SKILL.md",
     ".claude/skills/codebase-index/SKILL.md",
     "peri-middlewares/prompts/sections/03_doing_tasks.md",
     "peri-middlewares/prompts/sections/05_using_tools.md",
