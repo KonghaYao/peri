@@ -14,7 +14,11 @@ use super::{
     view_lines,
 };
 
-const DENSE: &str = include_str!("testdata/dense.mmd");
+// 概览与详情共用同一份大图夹具，避免两处副本漂移。
+const DENSE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../peri-tui-components/src/mermaid/testdata/dense.mmd"
+));
 
 fn fence(body: &str) -> MermaidFence {
     MermaidFence {

@@ -14,7 +14,7 @@ if sys.version_info < (3, 11):
 import tomllib
 
 
-ALLOWED_PACKAGES = {"ratatui", "ratatui-kit", "unicode-width"}
+ALLOWED_PACKAGES = {"ratatui", "ratatui-kit", "unicode-width", "mermaid-text"}
 DEPENDENCY_SECTIONS = ("dependencies", "dev-dependencies", "build-dependencies")
 BUSINESS_IMPORT = re.compile(r"\bperi_(?:agent|acp|resources|config|tui|middlewares)\b")
 GLOBAL_STATE = re.compile(r"(?<!')\bstatic\s+(?:mut\s+)?[A-Za-z_]|\b(?:lazy_static|atom)!")

@@ -274,8 +274,7 @@ fn group_detail_lists_every_intra_edge_with_labels() {
 fn full_render_stays_available_for_the_detail_panel() {
     let overview = overview::build(DENSE).expect("dense parses");
     let compact = overview.lines(40, 21);
-    let full =
-        crate::kit::mermaid::frame::render_full(DENSE, 120).expect("full layout still renders");
+    let full = crate::mermaid::frame::render_full(DENSE, 120).expect("full layout still renders");
     assert!(
         full.lines().len() > compact.len(),
         "详情必须能回到比概览更完整的图"

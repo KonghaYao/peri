@@ -3,7 +3,7 @@ use super::MermaidStream;
 use super::StreamUpdate;
 use super::detect_mode;
 
-use crate::kit::mermaid::frame::render_source;
+use crate::mermaid::frame::render_source;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {

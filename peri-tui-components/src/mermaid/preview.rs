@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::markdown::{MermaidFence, MermaidFenceKey, MermaidMessageIdentity};
+use super::fence::{MermaidFence, MermaidFenceKey, MermaidMessageIdentity};
 
 use super::frame::{RenderFailure, RenderOutput, render_final, render_source};
 use super::layout::{
@@ -18,29 +18,29 @@ use super::layout::{
 use super::stream::{DiagramMode, MermaidStream, detect_mode};
 
 /// 连续输入时最多每 80ms 提交一次新的可信前缀。
-pub(crate) const COALESCE: Duration = Duration::from_millis(80);
+pub const COALESCE: Duration = Duration::from_millis(80);
 
 const MAX_STATES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JobKind {
+pub enum JobKind {
     Preview,
     Final,
 }
 
 #[derive(Debug)]
-pub(crate) struct RenderJob {
-    pub(crate) key: MermaidFenceKey,
-    pub(crate) kind: JobKind,
-    pub(crate) mode: DiagramMode,
-    pub(crate) source: Arc<String>,
-    pub(crate) width: usize,
+pub struct RenderJob {
+    pub key: MermaidFenceKey,
+    pub kind: JobKind,
+    pub mode: DiagramMode,
+    pub source: Arc<String>,
+    pub width: usize,
     version: u64,
     epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PreviewNotice {
+pub enum PreviewNotice {
     Unclosed,
     Interrupted(String),
     Failed(String),
@@ -58,7 +58,7 @@ pub(crate) enum PreviewNotice {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum PreviewContent {
+pub enum PreviewContent {
     /// 没有可用帧：调用方继续展示完整源码。
     Source,
     Frame {
@@ -70,9 +70,9 @@ pub(crate) enum PreviewContent {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PreviewView {
-    pub(crate) content: PreviewContent,
-    pub(crate) notice: Option<PreviewNotice>,
+pub struct PreviewView {
+    pub content: PreviewContent,
+    pub notice: Option<PreviewNotice>,
 }
 
 #[derive(Debug, Clone)]
@@ -378,7 +378,7 @@ impl FenceState {
 
 /// 预览状态机。测试可直接用注入的 `Instant` 驱动它，不依赖线程与真实时间。
 #[derive(Debug, Default)]
-pub(crate) struct PreviewEngine {
+pub struct PreviewEngine {
     states: HashMap<MermaidFenceKey, FenceState>,
     geometry: GeometryCache,
     message_revisions: HashMap<MermaidMessageIdentity, u64>,
@@ -390,39 +390,39 @@ pub(crate) struct PreviewEngine {
 
 impl PreviewEngine {
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn revision(&self) -> u64 {
+    pub fn revision(&self) -> u64 {
         self.revision
     }
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn pending_count(&self) -> usize {
+    pub fn pending_count(&self) -> usize {
         self.states
             .values()
             .filter(|state| state.pending.is_some())
             .count()
     }
 
-    #[cfg(test)]
+    /// 实际排版次数（缓存命中不计）；验收与诊断使用。
     #[must_use]
-    pub(crate) fn layouts(&self) -> u64 {
+    pub fn layouts(&self) -> u64 {
         self.layouts
     }
 
     #[must_use]
-    pub(crate) fn message_revision(&self, message: &MermaidMessageIdentity) -> u64 {
+    pub fn message_revision(&self, message: &MermaidMessageIdentity) -> u64 {
         self.message_revisions.get(message).copied().unwrap_or(0)
     }
 
-    #[cfg(test)]
+    /// 当前几何缓存保留的字节数；验收与诊断使用。
     #[must_use]
-    pub(crate) fn retained_geometry_bytes(&self) -> usize {
+    pub fn retained_geometry_bytes(&self) -> usize {
         self.geometry.retained_bytes()
     }
 
@@ -466,7 +466,7 @@ impl PreviewEngine {
     }
 
     /// 淘汰几何到给定预算，并释放仍引用被淘汰条目的实例帧。
-    pub(crate) fn evict_geometry_to(&mut self, budget: usize) {
+    pub fn evict_geometry_to(&mut self, budget: usize) {
         let removed = self.geometry.evict_to(budget);
         if removed.is_empty() {
             return;
@@ -489,7 +489,7 @@ impl PreviewEngine {
     }
 
     /// 观察一个围栏的最新正文，返回当前可展示的帧与提示。
-    pub(crate) fn observe(
+    pub fn observe(
         &mut self,
         key: MermaidFenceKey,
         fence: &MermaidFence,
@@ -618,7 +618,7 @@ impl PreviewEngine {
     }
 
     /// 只读当前可展示帧：不创建实例、不排队。未观察到或参数不匹配时回退源码。
-    pub(crate) fn peek(
+    pub fn peek(
         &mut self,
         key: &MermaidFenceKey,
         fence: &MermaidFence,
@@ -653,7 +653,7 @@ impl PreviewEngine {
 
     /// 运行前查几何缓存：相同源码/列宽的图只排版一次。
     #[must_use]
-    pub(crate) fn cached_output(&mut self, job: &RenderJob) -> Option<RenderOutput> {
+    pub fn cached_output(&mut self, job: &RenderJob) -> Option<RenderOutput> {
         let kind = match job.kind {
             JobKind::Preview => LayoutKind::Preview,
             JobKind::Final => LayoutKind::Final,
@@ -663,7 +663,7 @@ impl PreviewEngine {
     }
 
     /// 快速滚动后取消未开始的离屏任务；运行中的结果仍由版本校验丢弃。
-    pub(crate) fn retract_unseen(
+    pub fn retract_unseen(
         &mut self,
         visible: &std::collections::HashSet<MermaidFenceKey>,
         known: &std::collections::HashSet<MermaidFenceKey>,
@@ -676,7 +676,7 @@ impl PreviewEngine {
     }
 
     /// 取走一个到期任务并标记为运行中。运行中的图实例不会再入队。
-    pub(crate) fn take_due(&mut self, now: Instant) -> Option<RenderJob> {
+    pub fn take_due(&mut self, now: Instant) -> Option<RenderJob> {
         let mut chosen: Option<(MermaidFenceKey, Instant)> = None;
         for (key, state) in &self.states {
             if state.running.is_some() {
@@ -718,7 +718,7 @@ impl PreviewEngine {
 
     /// 距离下一个到期任务还有多久；无任务时返回 `None`。
     #[must_use]
-    pub(crate) fn wait_duration(&self, now: Instant) -> Option<Duration> {
+    pub fn wait_duration(&self, now: Instant) -> Option<Duration> {
         self.states
             .values()
             .filter(|state| state.running.is_none())
@@ -728,7 +728,7 @@ impl PreviewEngine {
     }
 
     /// 回传排版结果。版本、列宽、闭合状态或实例已变化时返回 `false` 并丢弃。
-    pub(crate) fn complete(
+    pub fn complete(
         &mut self,
         job: RenderJob,
         result: Result<RenderOutput, RenderFailure>,
@@ -829,7 +829,7 @@ impl PreviewEngine {
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn view(&self, key: &MermaidFenceKey) -> Option<PreviewView> {
+    pub fn view(&self, key: &MermaidFenceKey) -> Option<PreviewView> {
         let state = self.states.get(key)?;
         Some(state.view(&state.source_seen))
     }
@@ -848,14 +848,14 @@ impl PreviewEngine {
 }
 
 /// 历史重建：闭合正文复用实时终稿的纯函数；前半段重建最后可信帧并标记未闭合。
-pub(crate) struct HistoryReplay {
+pub struct HistoryReplay {
     #[cfg(test)]
-    pub(crate) mode: DiagramMode,
-    pub(crate) content: PreviewContent,
-    pub(crate) notice: Option<PreviewNotice>,
+    pub mode: DiagramMode,
+    pub content: PreviewContent,
+    pub notice: Option<PreviewNotice>,
 }
 
-pub(crate) fn rebuild_history(
+pub fn rebuild_history(
     fence: &MermaidFence,
     width: usize,
     interrupted: Option<&str>,

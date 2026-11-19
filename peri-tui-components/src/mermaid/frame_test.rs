@@ -1,6 +1,6 @@
 use super::render_final;
 use super::render_source;
-use crate::kit::mermaid::stream::DiagramMode;
+use crate::mermaid::stream::DiagramMode;
 
 #[test]
 fn renders_flowchart_and_sequence_to_unicode_lines() {

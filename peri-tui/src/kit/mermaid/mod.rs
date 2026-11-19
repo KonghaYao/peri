@@ -1,16 +1,13 @@
 //! Mermaid 边生成边预览：可信中间帧、闭合定稿与视口调度。
 //!
-//! 渲染只接收已确认的源码前缀；未确认部分始终以源码尾部显示。排版任务只由
-//! 消息区按真实视口相交发起，结果按源码/列宽/引擎参数共享几何。
+//! 语句确认、字符图排版、语义概览与预览状态机由 `peri-tui-components::mermaid`
+//! 持有；本模块只保留消息区展示、详情面板、后台线程与全局状态接线。
 
 mod detail;
 mod display;
-mod frame;
-mod layout;
-mod overview;
-mod preview;
 mod store;
-mod stream;
+
+pub(crate) use peri_tui_components::mermaid::{frame, overview, preview};
 
 pub(crate) use detail::{
     DetailMode, MERMAID_DETAIL, MermaidDetail, close_detail_and_restore, copy_to_clipboard,

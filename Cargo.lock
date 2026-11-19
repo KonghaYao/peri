@@ -3840,7 +3840,6 @@ dependencies = [
  "fuzzy-matcher",
  "im",
  "image",
- "mermaid-text",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -3887,6 +3886,7 @@ dependencies = [
 name = "peri-tui-components"
 version = "0.2.0"
 dependencies = [
+ "mermaid-text",
  "ratatui",
  "ratatui-kit",
  "unicode-width 0.2.2",

@@ -7,7 +7,7 @@
 
 /// 首行声明的图型。只有流图与时序图支持边生成边预览。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum DiagramMode {
+pub enum DiagramMode {
     /// 首行还不完整，无法判断类型。
     #[default]
     Unknown,
@@ -22,12 +22,12 @@ pub(crate) enum DiagramMode {
 
 impl DiagramMode {
     #[must_use]
-    pub(crate) fn streams(self) -> bool {
+    pub fn streams(self) -> bool {
         matches!(self, Self::Flowchart | Self::Sequence)
     }
 
     #[must_use]
-    pub(crate) fn renders_when_closed(self) -> bool {
+    pub fn renders_when_closed(self) -> bool {
         matches!(
             self,
             Self::Flowchart | Self::Sequence | Self::State | Self::Class | Self::Er
@@ -37,7 +37,7 @@ impl DiagramMode {
 
 /// 只检查首行是否已经完整到达；未完整的行仍可能被下一个 token 改写。
 #[must_use]
-pub(crate) fn detect_mode(source: &str, terminal: bool) -> DiagramMode {
+pub fn detect_mode(source: &str, terminal: bool) -> DiagramMode {
     let Some(line) = first_content_line(source, terminal) else {
         return DiagramMode::Unknown;
     };
@@ -73,7 +73,7 @@ fn first_content_line(source: &str, terminal: bool) -> Option<&str> {
 
 /// 闭合围栏的完整语义校验。流图/时序图走与流式相同的语句识别器；
 /// 状态图、类图、ER 图交给上游解析器验收。
-pub(crate) fn validate_final(source: &str, mode: DiagramMode) -> Result<(), String> {
+pub fn validate_final(source: &str, mode: DiagramMode) -> Result<(), String> {
     if !mode.streams() {
         return Ok(());
     }
@@ -93,32 +93,32 @@ pub(crate) fn validate_final(source: &str, mode: DiagramMode) -> Result<(), Stri
 
 /// 最外层尚未闭合的作用域，供预览界面显示组名与内部语句数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OpenScopeView<'a> {
-    pub(crate) label: &'a str,
-    pub(crate) statements: usize,
+pub struct OpenScopeView<'a> {
+    pub label: &'a str,
+    pub statements: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct StreamUpdate<'a> {
-    pub(crate) mode: DiagramMode,
+pub struct StreamUpdate<'a> {
+    pub mode: DiagramMode,
     /// 已经确认、可以交给渲染器的源码前缀。
-    pub(crate) trusted: &'a str,
+    pub trusted: &'a str,
     /// 已确认前缀在原始正文中的结束字节位置。
-    pub(crate) trusted_end: usize,
+    pub trusted_end: usize,
     /// 已经消费的语句数（含作用域内部）。只供测试诊断。
     #[cfg(test)]
-    pub(crate) statements: usize,
+    pub statements: usize,
     /// 是否已有可画的节点/参与者/消息/边。
-    pub(crate) drawable: bool,
-    pub(crate) paused: Option<&'a str>,
-    pub(crate) open_scope: Option<OpenScopeView<'a>>,
+    pub drawable: bool,
+    pub paused: Option<&'a str>,
+    pub open_scope: Option<OpenScopeView<'a>>,
     /// 仅在 `terminal` 为真时给出：未闭合作用域或未完成语句。
-    pub(crate) final_issue: Option<&'a str>,
+    pub final_issue: Option<&'a str>,
 }
 
 /// 一个 Mermaid 正文的增量确认状态。接收完整正文，只扫描新增字节。
 #[derive(Debug, Default)]
-pub(crate) struct MermaidStream {
+pub struct MermaidStream {
     mode: DiagramMode,
     source_seen: String,
     scanned: usize,
@@ -186,12 +186,12 @@ impl SequenceBlock {
 
 impl MermaidStream {
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// 观察整份正文。`terminal` 表示正文已经真实闭合（或消息 EOF）。
-    pub(crate) fn observe(&mut self, source: &str, terminal: bool) -> StreamUpdate<'_> {
+    pub fn observe(&mut self, source: &str, terminal: bool) -> StreamUpdate<'_> {
         if !source.starts_with(self.source_seen.as_str()) {
             *self = Self::new();
         }

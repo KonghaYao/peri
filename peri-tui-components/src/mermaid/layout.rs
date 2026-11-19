@@ -100,7 +100,6 @@ impl GeometryCache {
         true
     }
 
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn retained_bytes(&self) -> usize {
         self.retained

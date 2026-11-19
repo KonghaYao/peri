@@ -11,13 +11,13 @@ use super::stream::{DiagramMode, validate_final};
 
 /// 排版失败。`reason` 已压缩成单行短文案，直接展示给用户。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RenderFailure {
+pub struct RenderFailure {
     reason: String,
 }
 
 impl RenderFailure {
     #[must_use]
-    pub(crate) fn new(reason: impl Into<String>) -> Self {
+    pub fn new(reason: impl Into<String>) -> Self {
         let reason: String = reason.into();
         Self {
             reason: truncate_reason(&reason),
@@ -25,7 +25,7 @@ impl RenderFailure {
     }
 
     #[must_use]
-    pub(crate) fn reason(&self) -> &str {
+    pub fn reason(&self) -> &str {
         &self.reason
     }
 }
@@ -38,30 +38,30 @@ impl std::fmt::Display for RenderFailure {
 
 /// 一份可发布的字符图。行文本保持上游输出，不做额外着色。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RenderOutput {
+pub struct RenderOutput {
     lines: Arc<Vec<String>>,
 }
 
 impl RenderOutput {
     #[must_use]
-    pub(crate) fn lines(&self) -> &[String] {
+    pub fn lines(&self) -> &[String] {
         &self.lines
     }
 
     #[must_use]
-    pub(crate) fn from_lines(lines: Arc<Vec<String>>) -> Self {
+    pub fn from_lines(lines: Arc<Vec<String>>) -> Self {
         Self { lines }
     }
 
     #[must_use]
-    pub(crate) fn into_lines(self) -> Arc<Vec<String>> {
+    pub fn into_lines(self) -> Arc<Vec<String>> {
         self.lines
     }
 }
 
 /// 渲染整份 Mermaid 源码。小图先用紧凑间距与严格列宽，超宽时退回常规压缩
 /// 一次；大图先给语义概览，避免先排一遍注定放不下的全图。
-pub(crate) fn render_source(source: &str, width: usize) -> Result<RenderOutput, RenderFailure> {
+pub fn render_source(source: &str, width: usize) -> Result<RenderOutput, RenderFailure> {
     let overview = super::overview::build_unchecked(source).ok();
     if let Some(overview) = overview.as_ref()
         && overview.prefers_overview()
@@ -117,7 +117,7 @@ fn render_layout(source: &str, width: usize) -> Result<RenderOutput, RenderFailu
 }
 
 /// 闭合终稿：先按图型验收完整语义，再排版。验收失败时不产生可能误导的图。
-pub(crate) fn render_final(
+pub fn render_final(
     source: &str,
     mode: DiagramMode,
     width: usize,
@@ -129,7 +129,7 @@ pub(crate) fn render_final(
 }
 
 /// 详情面板用的完整布局：不经过概览裁剪，保留原始宽高供双轴滚动。
-pub(crate) fn render_full(source: &str, width: usize) -> Result<RenderOutput, RenderFailure> {
+pub fn render_full(source: &str, width: usize) -> Result<RenderOutput, RenderFailure> {
     render_layout(source, width)
 }
 

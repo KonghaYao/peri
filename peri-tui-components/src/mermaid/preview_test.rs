@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::kit::markdown::{
+use crate::mermaid::fence::{
     FenceClose, FenceKind, MermaidFence, MermaidFenceKey, MermaidMessageIdentity, MermaidMessageRef,
 };
 
@@ -12,7 +12,7 @@ use super::PreviewView;
 use super::RenderJob;
 use super::rebuild_history;
 use super::render_source;
-use crate::kit::mermaid::frame::{RenderFailure, RenderOutput, render_final};
+use crate::mermaid::frame::{RenderFailure, RenderOutput, render_final};
 
 fn fence(body: &str, closed: bool) -> MermaidFence {
     MermaidFence {

@@ -12,19 +12,19 @@ use mermaid_text::{Graph, parser};
 
 /// 概览一次最多展示的里程碑数量；超过时仍保留首尾并均分取样。
 /// 概览默认行预算：对应 40×24 内容区扣除标题后的 21 行。
-pub(crate) const OVERVIEW_ROW_BUDGET: usize = 21;
+pub const OVERVIEW_ROW_BUDGET: usize = 21;
 
 const MAX_MILESTONES: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OverviewError {
+pub enum OverviewError {
     Unsupported(String),
     Parse(String),
 }
 
 impl OverviewError {
     #[must_use]
-    pub(crate) fn reason(&self) -> &str {
+    pub fn reason(&self) -> &str {
         match self {
             Self::Unsupported(reason) | Self::Parse(reason) => reason,
         }
@@ -32,31 +32,31 @@ impl OverviewError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Endpoint {
-    pub(crate) id: String,
-    pub(crate) label: String,
+pub struct Endpoint {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Relation {
-    pub(crate) from: Endpoint,
-    pub(crate) to: Endpoint,
-    pub(crate) label: Option<String>,
+pub struct Relation {
+    pub from: Endpoint,
+    pub to: Endpoint,
+    pub label: Option<String>,
     /// 最内层分组；`None` 表示端点未归组或是直接节点。
-    pub(crate) from_group: Option<String>,
-    pub(crate) to_group: Option<String>,
+    pub from_group: Option<String>,
+    pub to_group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Group {
-    pub(crate) id: String,
-    pub(crate) label: String,
-    pub(crate) depth: usize,
-    pub(crate) parent: Option<String>,
+pub struct Group {
+    pub id: String,
+    pub label: String,
+    pub depth: usize,
+    pub parent: Option<String>,
     /// 直接成员节点（嵌套组内的节点归子组所有）。
-    pub(crate) node_ids: Vec<String>,
-    pub(crate) child_ids: Vec<String>,
-    pub(crate) intra_edges: Vec<Relation>,
+    pub node_ids: Vec<String>,
+    pub child_ids: Vec<String>,
+    pub intra_edges: Vec<Relation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,12 +68,12 @@ struct PathPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Overview {
-    pub(crate) node_count: usize,
-    pub(crate) edge_count: usize,
-    pub(crate) groups: Vec<Group>,
-    pub(crate) cross_edges: Vec<Relation>,
-    pub(crate) ungrouped: Vec<Endpoint>,
+pub struct Overview {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub groups: Vec<Group>,
+    pub cross_edges: Vec<Relation>,
+    pub ungrouped: Vec<Endpoint>,
     ungrouped_edges: Vec<Relation>,
     all_edges: Vec<Relation>,
     labels: HashMap<String, String>,
@@ -84,7 +84,7 @@ pub(crate) struct Overview {
 impl Overview {
     /// 大图才交给概览：有显式分组时按规模判断，无分组时长链优先路径摘要。
     #[must_use]
-    pub(crate) fn prefers_overview(&self) -> bool {
+    pub fn prefers_overview(&self) -> bool {
         if !self.groups.is_empty() {
             self.node_count >= 24 || self.edge_count >= 32 || self.groups.len() >= 8
         } else {
@@ -93,7 +93,7 @@ impl Overview {
     }
 
     /// 消息区概览：分组图先列跨组关系，无分组长链列路径里程碑。
-    pub(crate) fn lines(&self, width: usize, max_rows: usize) -> Vec<String> {
+    pub fn lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         if max_rows == 0 || width == 0 {
             return Vec::new();
         }
@@ -105,7 +105,7 @@ impl Overview {
     }
 
     /// 跨组边逐条详情（保持原图声明顺序与重复边）。
-    pub(crate) fn cross_lines(&self, width: usize) -> Vec<String> {
+    pub fn cross_lines(&self, width: usize) -> Vec<String> {
         self.cross_edges
             .iter()
             .map(|relation| {
@@ -133,7 +133,7 @@ impl Overview {
     }
 
     /// 展开一个分组：原始节点、直接子组与组内全部边。
-    pub(crate) fn group_detail_lines(&self, group_id: &str, width: usize) -> Vec<String> {
+    pub fn group_detail_lines(&self, group_id: &str, width: usize) -> Vec<String> {
         let Some(group) = self.groups.iter().find(|group| group.id == group_id) else {
             return vec![fit(&format!("找不到分组 {group_id}"), width)];
         };
@@ -188,7 +188,7 @@ impl Overview {
     }
 
     #[cfg(test)]
-    pub(crate) fn summary_edges(&self) -> Vec<Relation> {
+    pub fn summary_edges(&self) -> Vec<Relation> {
         self.path
             .as_ref()
             .map(|path| path.cited_edges.clone())
@@ -196,7 +196,7 @@ impl Overview {
     }
 
     #[cfg(test)]
-    pub(crate) fn edge_exists(&self, from: &str, to: &str) -> bool {
+    pub fn edge_exists(&self, from: &str, to: &str) -> bool {
         self.all_edges
             .iter()
             .any(|edge| edge.from.id == from && edge.to.id == to)
@@ -484,7 +484,7 @@ fn fit(line: &str, width: usize) -> String {
     out
 }
 
-pub(crate) fn build(source: &str) -> Result<Overview, OverviewError> {
+pub fn build(source: &str) -> Result<Overview, OverviewError> {
     let overview = build_unchecked(source)?;
     if let Err(reason) =
         super::stream::validate_final(source, super::stream::DiagramMode::Flowchart)
@@ -496,7 +496,7 @@ pub(crate) fn build(source: &str) -> Result<Overview, OverviewError> {
 
 /// 流式可信前缀可能还没有真实闭合的围栏，但语句本身已经完整；预览排版
 /// 只需要可解析的 Graph，不重复做终稿作用域验收。
-pub(crate) fn build_unchecked(source: &str) -> Result<Overview, OverviewError> {
+pub fn build_unchecked(source: &str) -> Result<Overview, OverviewError> {
     let keyword = source
         .lines()
         .map(str::trim)
