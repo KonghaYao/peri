@@ -7,6 +7,14 @@ use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 
+/// 第 `attempt` 次重试（0 起）前的退避。worker 与定时测试共用同一调度，
+/// 避免测试预算写死成与调度脱节的步数。
+pub(super) fn retry_delay(attempt: u32) -> Duration {
+    INITIAL_RETRY_DELAY
+        .saturating_mul(1_u32 << attempt.min(16))
+        .min(MAX_RETRY_DELAY)
+}
+
 impl BackgroundTaskRegistry {
     pub(super) fn start_delivery_worker(self: &Arc<Self>) {
         let mut running = self.delivery_worker_running.lock();
@@ -20,12 +28,12 @@ impl BackgroundTaskRegistry {
         let owner = Arc::downgrade(self);
         let cancel = self.scope.cancel_token();
         match self.scope.spawn(async move {
-            let mut delay = INITIAL_RETRY_DELAY;
+            let mut attempt = 0_u32;
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break,
-                    _ = peri_time::sleep(delay) => {}
+                    _ = peri_time::sleep(retry_delay(attempt)) => {}
                 }
                 let Some(registry) = owner.upgrade() else {
                     break;
@@ -50,7 +58,7 @@ impl BackgroundTaskRegistry {
                 }
                 drop(running);
                 drop(registry);
-                delay = delay.saturating_mul(2).min(MAX_RETRY_DELAY);
+                attempt = attempt.saturating_add(1);
             }
             Self::finish_delivery_worker(&owner);
         }) {

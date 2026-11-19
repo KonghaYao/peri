@@ -255,13 +255,19 @@ async fn permanent_delivery_failure_backs_off_and_close_drains_worker() {
         )
         .is_err());
     tokio::task::yield_now().await;
-    // 重试在阻塞池执行：退避计时可能晚于推进才登记，按固定步长推进到总预算
-    //（16.3s 退避总和）以内，直到八次重试全部落地。
-    for _ in 0..200 {
+    // 重试在阻塞池执行：退避计时可能晚于推进才登记，按固定步长推进到预算以内。
+    // 预算 = 八次退避总和 + 3/4 次退避余量：覆盖登记漂移，又不让第 10 次重试落地。
+    let retries = 8_u32;
+    let retry_budget: std::time::Duration =
+        (0..retries).map(super::delivery_retry::retry_delay).sum();
+    let step = std::time::Duration::from_millis(100);
+    let steps = (retry_budget + super::delivery_retry::retry_delay(retries) * 3 / 4).as_millis()
+        / step.as_millis();
+    for _ in 0..steps {
         if attempts.load(Ordering::SeqCst) >= 9 {
             break;
         }
-        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::time::advance(step).await;
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
@@ -734,29 +740,41 @@ fn terminal_settlement_must_not_block_the_only_runtime_worker() {
     );
 }
 
-/// [回归] awaited 结算仍以存储事实为准：首次提交失败保持 delivery_pending，
+/// [回归] awaited 结算仍以存储事实为准：首次入队被存储拒绝保持 delivery_pending，
 /// 重试成功后同一结果才结算并落库。
 #[tokio::test]
 async fn awaited_settlement_retries_a_failed_commit_before_acknowledging() {
+    use crate::session::async_result_mailbox::AsyncResultMailbox;
+    use crate::session::test_resources::TestSession;
     use peri_acp_types::session::MessageSource;
     use peri_acp_types::system_reminder::TrustedSystemReminder;
     use peri_acp_types::tasks::TaskTerminalDelivery;
 
-    struct FailOnceDelivery {
-        route: Arc<dyn TaskTerminalDelivery>,
+    /// 首次投递绑定只读门面，让失败发生在真实 `queue.enqueue`；重试换可写门面。
+    struct FirstCommitReadOnly {
+        failing: Arc<dyn TaskTerminalDelivery>,
+        writable: Arc<dyn TaskTerminalDelivery>,
         attempts: AtomicUsize,
     }
-    impl TaskTerminalDelivery for FailOnceDelivery {
+
+    impl FirstCommitReadOnly {
+        fn route(&self) -> &Arc<dyn TaskTerminalDelivery> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                &self.failing
+            } else {
+                &self.writable
+            }
+        }
+    }
+
+    impl TaskTerminalDelivery for FirstCommitReadOnly {
         fn accept(
             &self,
             delivery_id: peri_acp_types::messages::MessageId,
             reminder: &TrustedSystemReminder,
             source: MessageSource,
         ) -> Result<(), String> {
-            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err("queue acceptance refused".into());
-            }
-            self.route.accept(delivery_id, reminder, source)
+            self.route().accept(delivery_id, reminder, source)
         }
 
         fn deliver<'a>(
@@ -766,15 +784,23 @@ async fn awaited_settlement_retries_a_failed_commit_before_acknowledging() {
             source: MessageSource,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
         {
-            Box::pin(async move { self.route.deliver(delivery_id, reminder, source).await })
+            Box::pin(async move { self.route().deliver(delivery_id, reminder, source).await })
         }
     }
 
-    let queue = MessageQueue::new();
-    let route = Arc::new(FailOnceDelivery {
-        route: crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
-            queue.clone(),
-        ),
+    let session = TestSession::open().await;
+    let mailbox = Arc::new(AsyncResultMailbox::new("session", "thread"));
+    let route = Arc::new(FirstCommitReadOnly {
+        failing:
+            crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue_with_mailbox(
+                MessageQueue::bind(session.read_only_resources().await, session.thread_id()),
+                Arc::clone(&mailbox),
+            ),
+        writable:
+            crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue_with_mailbox(
+                session.queue(),
+                Arc::clone(&mailbox),
+            ),
         attempts: AtomicUsize::new(0),
     });
     let delivery = crate::session::bg_complete::task_bg_complete_callback(route.clone());
@@ -783,14 +809,32 @@ async fn awaited_settlement_retries_a_failed_commit_before_acknowledging() {
         .settle_completed_awaited(&ticket, result(), delivery)
         .await
         .expect_err("a refused commit must not acknowledge the terminal");
-    assert!(error.contains("queue acceptance refused"), "{error}");
+    assert!(!error.is_empty(), "存储拒绝必须原样返回给生产者");
     assert!(!ticket.is_settled());
     assert_eq!(manager.snapshot().tasks[0].status, "delivery_pending");
-    assert!(queue.is_empty_sync());
+    assert_eq!(
+        session
+            .queue()
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
+        0,
+        "提交失败不得留下 MQ 行"
+    );
 
     assert_eq!(manager.retry_pending_deliveries(), 1);
     assert!(ticket.is_settled());
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
-    assert_eq!(queue.len_sync(), 1);
+    assert_eq!(
+        session
+            .queue()
+            .snapshot()
+            .await
+            .expect("the snapshot fixture result is required for this assertion")
+            .len(),
+        1,
+        "重试后结果必须落库且只落一条"
+    );
     assert_eq!(route.attempts.load(Ordering::SeqCst), 2);
 }
