@@ -7,9 +7,11 @@ use super::BuiltResponsesRequest;
 use super::CancellationToken;
 use super::Deserialize;
 use super::HttpRequest;
+#[cfg(test)]
 use super::HttpTransport;
 use super::ModelCapabilities;
 use super::ModelError;
+use super::ModelHttp;
 use super::ModelRequest;
 use super::ModelResult;
 use super::ModelRuntimeConfig;
@@ -19,7 +21,6 @@ use super::PreparedModelRequest;
 use super::ProtocolErrorKind;
 use super::RequestAuth;
 use super::RequestCredential;
-use super::ReqwestTransport;
 use super::Serialize;
 use super::Url;
 use std::fmt::{Debug, Formatter};
@@ -137,8 +138,7 @@ impl fmt::Debug for ResponsesConfig {
 
 pub struct ResponsesModel {
     pub(super) config: ResponsesConfig,
-    pub(super) transport: Arc<dyn HttpTransport>,
-    pub(super) client: reqwest::Client,
+    pub(super) http: ModelHttp,
 }
 
 impl Debug for ResponsesModel {
@@ -150,15 +150,12 @@ impl Debug for ResponsesModel {
 }
 
 impl ResponsesModel {
+    /// client 构造失败（如平台 TLS 根证书不可用）保留到首次调用返回，构造期不 panic。
     #[must_use]
     pub fn new(config: ResponsesConfig) -> Self {
         // In particular, never forward a ChatGPT grant to a redirect target.
-        let client = crate::transport::http::client_for_runtime(&config.runtime, false);
-        Self {
-            config,
-            transport: Arc::new(ReqwestTransport::new(client.clone())),
-            client,
-        }
+        let http = ModelHttp::for_runtime(&config.runtime, false);
+        Self { config, http }
     }
 
     #[cfg(test)]
@@ -168,8 +165,15 @@ impl ResponsesModel {
     ) -> Self {
         Self {
             config,
-            transport,
-            client: reqwest::Client::new(),
+            http: ModelHttp::with_transport(transport),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_client_failure(config: ResponsesConfig, error: ModelError) -> Self {
+        Self {
+            config,
+            http: ModelHttp::unavailable(error),
         }
     }
 
@@ -218,6 +222,7 @@ impl crate::Model for ResponsesModel {
     }
 
     fn prepare_stream(&self, request: ModelRequest) -> ModelResult<PreparedModelCall> {
+        let (client, transport) = self.http.client_and_transport()?;
         let call_context = request.call_context.clone();
         let built = Arc::new(request::build_request(&self.config, &request)?);
         let checkpoint = serde_json::json!({
@@ -228,9 +233,7 @@ impl crate::Model for ResponsesModel {
             "body": built.body,
         });
         let runtime = self.config.runtime.clone();
-        let client = self.client.clone();
         let bearer = self.config.bearer.clone();
-        let transport = Arc::clone(&self.transport);
         let decoders = stream::decoders(built.binding.clone(), built.tool_names.clone());
         if let Some(auth) = self.config.auth.clone() {
             let endpoint_auth = Arc::clone(&auth);

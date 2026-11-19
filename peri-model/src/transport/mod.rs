@@ -10,7 +10,9 @@ pub(crate) mod http;
 mod route;
 pub(crate) mod sse;
 
-pub(crate) use http::{HttpBody, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
+pub(crate) use http::{
+    HttpBody, HttpRequest, HttpResponse, HttpTransport, ModelHttp, ReqwestTransport,
+};
 pub(crate) use route::routed_transport;
 pub(crate) use sse::{SseEvent, SseParser};
 
