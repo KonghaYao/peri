@@ -77,7 +77,7 @@ impl RetryableErrorClasses {
         }
         if self.protocol {
             // 瞬态集合；ToolCallMissingId/Name/InvalidArguments、AssistantMessageRequired、
-            // InvalidEndpoint、ProviderTerminal、Other 保持不重试。
+            // InvalidEndpoint、ProviderTerminal、SseDecodeBudgetExceeded、Other 保持不重试。
             if let Some(protocol) = error.protocol_error() {
                 if matches!(
                     protocol.kind(),
