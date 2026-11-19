@@ -495,6 +495,7 @@ impl Page {
                     Some(AcpEventData::CommittedAssistantText {
                         text: body,
                         reasoning,
+                        ..
                     }) => {
                         append(&mut text, &i18n::tr("thread-history-assistant"))?;
                         if let Some(reasoning) = reasoning {

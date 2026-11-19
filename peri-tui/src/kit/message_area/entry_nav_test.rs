@@ -62,7 +62,8 @@ fn test_fold_key_of_maps_vm_identities() {
     assert_eq!(k, FoldKey::Reasoning("msg_9".into()));
     assert_eq!(f, FoldState::Preview);
 
-    // 无 message_id 的已完成 reasoning → 内容身份键（历史回放/历史页可展开）
+    // 无 message_id 的 reasoning bubble → 无折叠键：不能写覆盖，正文在渲染侧
+    // 保持可见（流式 Preview / 完成 Expanded），不做假身份键控。
     let vm_noid = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
@@ -71,7 +72,7 @@ fn test_fold_key_of_maps_vm_identities() {
             text: "t".into(),
             reasoning: Some(TuiReasoningBlock {
                 text: "r".into(),
-                fold: FoldState::Collapsed,
+                fold: FoldState::Expanded,
                 status: EntryStatus::Completed,
                 is_running: false,
                 started_at: None,
@@ -82,21 +83,7 @@ fn test_fold_key_of_maps_vm_identities() {
         }
         .into(),
     );
-    let (local_key, _) = entry_nav::fold_key_of(&vm_noid).expect("已完成块按内容身份可折叠");
-    assert!(
-        matches!(local_key, FoldKey::ReasoningLocal(_)),
-        "无 message_id 时使用本地内容身份"
-    );
-    // 内容身份稳定：同一内容重建后键不变；内容不同则键不同。
-    let mut rebuilt = match &vm_noid {
-        TuiRenderUnit::TuiAssistantBubble(b) => (**b).clone(),
-        other => panic!("expected TuiAssistantBubble, got {other:?}"),
-    };
-    rebuilt.recompute_hash();
-    assert_eq!(
-        entry_nav::fold_key_of(&TuiRenderUnit::TuiAssistantBubble(rebuilt.into())).map(|(k, _)| k),
-        Some(local_key.clone())
-    );
+    assert!(entry_nav::fold_key_of(&vm_noid).is_none());
 
     // tool / subagent 按 tool_id / agent_id 键控
     let tool = TuiRenderUnit::TuiToolCard(TuiToolCard {
@@ -157,11 +144,11 @@ fn test_fold_key_of_maps_vm_identities() {
     );
 }
 
-/// 无 message_id 的已完成 reasoning：内容身份键写入覆盖表后，当帧快照展开；
-/// 覆盖键与折叠 pass 共用 `reasoning_fold_key`（重建后仍能命中）。
+/// 无 message_id 的 reasoning 不能写覆盖键：完成后正文保持完整可见，
+/// Enter 消费但不切换（不伪造身份键，也不把无法展开的正文藏起来）。
 #[test]
 #[serial_test::serial]
-fn test_fold_toggle_expands_completed_reasoning_without_message_id() {
+fn test_fold_toggle_keeps_unkeyed_reasoning_visible() {
     use crate::kit::tui_render_unit::{EntryStatus, TuiAssistantBubble, TuiReasoningBlock};
 
     crate::kit::atoms::init_atoms();
@@ -173,7 +160,7 @@ fn test_fold_toggle_expands_completed_reasoning_without_message_id() {
             text: "回复".into(),
             reasoning: Some(TuiReasoningBlock {
                 text: "历史思考".into(),
-                fold: FoldState::Collapsed,
+                fold: FoldState::Expanded,
                 status: EntryStatus::Completed,
                 is_running: false,
                 started_at: None,
@@ -184,7 +171,6 @@ fn test_fold_toggle_expands_completed_reasoning_without_message_id() {
         }
         .into(),
     );
-    let key = entry_nav::fold_key_of(&unit).expect("已完成块可展开").0;
     let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
         items: im::Vector::from(vec![unit]),
         generation: 1,
@@ -200,14 +186,12 @@ fn test_fold_toggle_expands_completed_reasoning_without_message_id() {
     assert_eq!(
         updated.reasoning.as_ref().map(|r| r.fold),
         Some(FoldState::Expanded),
-        "点击后当帧展开"
+        "无身份时保持正文可见"
     );
-    assert_eq!(
-        FOLD_OVERRIDES.state().read().get(&key),
-        Some(&FoldState::Expanded),
-        "覆盖表按同一内容身份键持久化"
+    assert!(
+        FOLD_OVERRIDES.state().read().is_empty(),
+        "不得为无身份块写覆盖"
     );
-    FOLD_OVERRIDES.state().write().clear();
 }
 
 #[test]

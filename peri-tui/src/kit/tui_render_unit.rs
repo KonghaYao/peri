@@ -32,7 +32,7 @@ pub use bubble::{
 pub use diff::{TuiDiffBlock, TuiHunk, TuiHunkLine, TuiHunkLineKind, diff_change_counts};
 pub use fold::{
     EntryStatus, FoldKey, FoldState, FoldTarget, entry_status_code, fold_for_status,
-    fold_for_unkeyed_reasoning, fold_state_code, reasoning_fold_key,
+    fold_for_unkeyed_reasoning, fold_state_code,
 };
 pub use group::{TuiDivider, TuiNoteLevel, TuiSubAgentGroup, TuiSystemNote, TuiTodoSummary};
 pub use hash::{tui_hash_combine, tui_hash_roll, tui_hash_roll_update, tui_hash_str};

@@ -2,9 +2,6 @@
 // 折叠状态机——折叠策略的**唯一**定义点（契约见 docs/design/tui-chat-workbench.md）
 // ---------------------------------------------------------------------------
 
-use super::bubble::TuiAssistantBubble;
-use super::hash::{tui_hash_combine, tui_hash_roll};
-
 /// 折叠三态——`Collapsed` 单行 / `Preview` 有界 tail / `Expanded` 完整 body。
 /// 默认策略只产出 `Collapsed` / `Expanded`；`Preview` 是用户 Space 手动覆盖的中态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -43,10 +40,6 @@ pub enum FoldTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FoldKey {
     Reasoning(String),
-    /// 无 ACP `message_id` 的已完成 reasoning：按内容身份键控
-    /// （见 [`reasoning_fold_key`]）。历史回放/历史页不携带 messageId，
-    /// 仍需保留逐项展开能力。
-    ReasoningLocal(u64),
     Tool(String),
     SubAgent(String),
     /// Interaction block 按事件携带的本地 request_id 键控；测试构造为 None 时
@@ -86,35 +79,18 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
     }
 }
 
-/// 无 `message_id` 的 reasoning 折叠策略：这类 entry 无法写稳定覆盖键，因此
-/// 不能安全折叠——流式段保留 `Preview`（正文可见），完成后走常规表
-/// （`Collapsed`，由内容身份键展开）。
+/// 无 `message_id` 的 reasoning 折叠策略：没有稳定身份就无法写覆盖键，
+/// 也不能安全折叠——流式段保留 `Preview`（有界 tail），完成后 `Expanded`
+/// （正文完整可见）。
 ///
 /// [Why] 默认单行折叠依赖「点击可展开」；键缺失时折叠等于永久隐藏正文。
+/// 正常路径（live / 回放 / 历史页）都应携带 message_id；此分支只服务
+/// 缺失该字段的兼容数据。
 pub fn fold_for_unkeyed_reasoning(status: EntryStatus) -> FoldState {
     match status {
         EntryStatus::Running => FoldState::Preview,
-        _ => fold_for_status(FoldTarget::Reasoning, status),
+        _ => FoldState::Expanded,
     }
-}
-
-/// reasoning 的折叠身份——导航、折叠 pass 与详情面板共用同一口径。
-///
-/// 有 ACP `message_id` → `Reasoning(id)`；缺失时仅已完成块可按内容键控
-/// （历史回放/历史页的正文不再变化）。流式块逐 chunk 变化、没有稳定身份，
-/// 返回 `None`：Enter 不切换，渲染侧由 [`fold_for_unkeyed_reasoning`] 保持可见。
-#[must_use]
-pub fn reasoning_fold_key(bubble: &TuiAssistantBubble) -> Option<FoldKey> {
-    let reasoning = bubble.reasoning.as_ref()?;
-    if let Some(id) = &bubble.message_id {
-        return Some(FoldKey::Reasoning(id.clone()));
-    }
-    if reasoning.is_running || reasoning.status == EntryStatus::Running {
-        return None;
-    }
-    let mut hash = tui_hash_roll(&bubble.text);
-    hash = tui_hash_combine(hash, tui_hash_roll(&reasoning.text));
-    Some(FoldKey::ReasoningLocal(hash))
 }
 
 /// `FoldState` 的确定性 hash 代码——纳入 content_hash 公式（G1）。

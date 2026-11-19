@@ -68,6 +68,7 @@ fn test_replay_events_defer_publication_until_scheduler_boundary() {
             &AcpEventData::CommittedAssistantText {
                 text: text.into(),
                 reasoning: None,
+                message_id: None,
             },
         );
         assert_eq!(intent, PublicationIntent::Deferred);

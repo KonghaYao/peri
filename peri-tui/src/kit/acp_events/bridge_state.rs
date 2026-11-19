@@ -596,9 +596,16 @@ pub(crate) fn dispatch_for_bridge(
         LocalLoadingReset => turn::handle_loading_reset(state),
         PromptFailed { request_id } => turn::handle_prompt_failed(state, request_id),
         BgCallbackBubble { .. } => turn::handle_bg_callback_bubble(state),
-        CommittedAssistantText { text, reasoning } => {
-            turn::handle_committed_assistant_text(state, text, (reasoning).as_deref())
-        }
+        CommittedAssistantText {
+            text,
+            reasoning,
+            message_id,
+        } => turn::handle_committed_assistant_text(
+            state,
+            text,
+            reasoning.as_deref(),
+            message_id.as_deref(),
+        ),
         ReplayToolStarted {
             tool_id,
             tool_name,

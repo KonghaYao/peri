@@ -777,12 +777,13 @@ fn reopen_keeps_streaming_content_not_in_the_new_page() {
     let mut state = make_fold_test_state();
     state.active_session_id = "s1".into();
     dispatch_view(&mut state, &v2);
-    state
-        .committed
-        .push_back(crate::kit::acp_events::turn::committed_assistant_unit(
+    state.committed.push_back(
+        crate::kit::acp_events::turn::committed_assistant_unit_with_message_id(
             "streaming",
             None,
-        ));
+            None,
+        ),
+    );
 
     let mut reopened = page(
         Some("before-2"),

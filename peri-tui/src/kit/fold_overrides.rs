@@ -27,7 +27,7 @@ fn key_bytes(key: &FoldKey) -> usize {
             | FoldKey::Tool(id)
             | FoldKey::SubAgent(id)
             | FoldKey::Interaction(id) => id.capacity(),
-            FoldKey::ReasoningLocal(_) | FoldKey::SystemReminder(_) => 0,
+            FoldKey::SystemReminder(_) => 0,
         }
 }
 

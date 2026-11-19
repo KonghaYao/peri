@@ -167,6 +167,26 @@ impl Clone for TuiAssistantBubble {
 }
 
 impl TuiAssistantBubble {
+    /// 无 `message_id` 的 reasoning 在构造期应用无身份折叠策略（流式 `Preview` /
+    /// 完成 `Expanded`）：折叠 pass 使用同一策略后不再改写 fold，避免复制
+    /// bubble 破坏 current/committed 的共享 Arc。
+    ///
+    /// 返回 fold 是否被改动；改动后调用方需 `recompute_hash`。
+    pub(crate) fn apply_unkeyed_fold(&mut self) -> bool {
+        if self.message_id.is_some() {
+            return false;
+        }
+        let Some(reasoning) = self.reasoning.as_mut() else {
+            return false;
+        };
+        let fold = super::fold::fold_for_unkeyed_reasoning(reasoning.status);
+        if reasoning.fold == fold {
+            return false;
+        }
+        reasoning.fold = fold;
+        true
+    }
+
     /// 计算包含以下内容的 hash：text、reasoning.text、
     /// reasoning.fold/status/is_running/duration、
     /// 正文时长（`duration_secs`，None→0，秒取整）、冻结判别位（`frozen`）。

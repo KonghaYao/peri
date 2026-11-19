@@ -227,6 +227,7 @@ fn test_publication_none_resume_and_replay_are_not_lost() {
         AcpEventData::CommittedAssistantText {
             text: "history".into(),
             reasoning: None,
+            message_id: None,
         },
         now,
     );

@@ -307,9 +307,9 @@ fn test_fold_for_status_matches_spec_table() {
     assert_eq!(super::fold_for_status(Interaction, Completed), Expanded);
     assert_eq!(super::fold_for_status(Interaction, Error), Expanded);
     // 无身份 reasoning 不能折叠（无法写覆盖键）：流式段保留可见 preview，
-    // 完成态沿用常规表，展开由内容身份键承担。
+    // 完成态完整可见——不隐藏无法展开的正文。
     assert_eq!(super::fold_for_unkeyed_reasoning(Running), Preview);
-    assert_eq!(super::fold_for_unkeyed_reasoning(Completed), Collapsed);
+    assert_eq!(super::fold_for_unkeyed_reasoning(Completed), Expanded);
 }
 
 #[test]

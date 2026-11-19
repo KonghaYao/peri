@@ -265,6 +265,7 @@ fn test_replay_receiver_close_publishes_committed_tail() {
         &AcpEventData::CommittedAssistantText {
             text: "连接关闭前的最终回答".into(),
             reasoning: None,
+            message_id: None,
         },
     );
     scheduler.accept(intent, &mut state);
@@ -522,6 +523,7 @@ fn test_compact_replay_events_keep_bridge_idle_after_reset() {
         &AcpEventData::CommittedAssistantText {
             text: "old answer".into(),
             reasoning: None,
+            message_id: None,
         },
     );
 

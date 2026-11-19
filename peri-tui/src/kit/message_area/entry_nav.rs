@@ -32,13 +32,13 @@ mod shared_bubble_tests;
 
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
 /// 与折叠 pass（`acp_events/fold.rs::apply_fold_pass`）的键控口径一致：
-/// Reasoning（message_id，缺失时已完成块用内容身份）/ Tool(tool_id) /
-/// SubAgent(agent_id) / Interaction(request_id) / SystemReminder(reminder_id)。
+/// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) /
+/// Interaction(request_id) / SystemReminder(reminder_id)。
 pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(b) => {
             let r = b.reasoning.as_ref()?;
-            Some((crate::kit::tui_render_unit::reasoning_fold_key(b)?, r.fold))
+            Some((FoldKey::Reasoning(b.message_id.clone()?), r.fold))
         }
         TuiRenderUnit::TuiToolCard(t) => Some((FoldKey::Tool(t.tool_id.clone()), t.fold)),
         TuiRenderUnit::TuiSubAgentGroup(g) => {

@@ -391,6 +391,16 @@ pub(super) fn project_items(
     let mut tool_slots: HashMap<String, (usize, usize)> = HashMap::new();
     for item in items {
         let mut units: Vec<TuiRenderUnit> = Vec::new();
+        // 历史条目身份 `{session}:{uuid}`：own 会话的 uuid 即 ACP messageId，
+        // reasoning 折叠键与 live/history_v2 同口径。继承前缀不伪造本会话身份。
+        let message_id = match &item.source {
+            HistorySource::Own => item
+                .entry_id
+                .split_once(':')
+                .map(|(_, uuid)| uuid.to_owned())
+                .filter(|uuid| !uuid.is_empty()),
+            HistorySource::Inherited { .. } => None,
+        };
         for sub in &item.sub_items {
             if sub.system_reminder {
                 if let Ok(reminder) = serde_json::from_value(sub.update.clone())
@@ -405,10 +415,13 @@ pub(super) fn project_items(
                 continue;
             };
             match event {
-                AcpEventData::CommittedAssistantText { text, reasoning } => {
-                    units.push(super::turn::committed_assistant_unit(
+                AcpEventData::CommittedAssistantText {
+                    text, reasoning, ..
+                } => {
+                    units.push(super::turn::committed_assistant_unit_with_message_id(
                         &text,
                         reasoning.as_deref(),
+                        message_id.clone(),
                     ));
                 }
                 AcpEventData::ReplayToolStarted {

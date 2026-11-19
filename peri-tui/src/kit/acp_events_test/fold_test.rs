@@ -518,11 +518,11 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
     );
 }
 
-/// 无 message_id 的 reasoning（v1 兼容 / 回放）：流式段保留 Preview（没有稳定
-/// 键可写覆盖，折叠等于永久隐藏正文）；完成后默认单行，并按内容身份可展开。
+/// 无 message_id 的 reasoning（v1 兼容）：不能写覆盖键，因此不能折叠——
+/// 流式段 Preview、完成态 Expanded，正文始终可见。
 #[test]
 #[serial]
-fn test_fold_pass_unkeyed_reasoning_preview_then_content_key_override() {
+fn test_fold_pass_unkeyed_reasoning_stays_visible() {
     let mut state = super::make_fold_test_state();
 
     super::dispatch_and_notify(
@@ -537,15 +537,12 @@ fn test_fold_pass_unkeyed_reasoning_preview_then_content_key_override() {
     assert_eq!(
         super::reasoning_of(&snap, 0).fold,
         FoldState::Preview,
-        "无身份流式段保持正文可见"
+        "无身份流式段保留可见 preview"
     );
     let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
         panic!("expected TuiAssistantBubble");
     };
-    assert!(
-        crate::kit::tui_render_unit::reasoning_fold_key(bubble).is_none(),
-        "流式内容逐 chunk 变化，不能作为稳定覆盖键"
-    );
+    assert!(bubble.message_id.is_none(), "无身份块不伪造 message_id");
     drop(snap);
 
     super::dispatch_and_notify(
@@ -560,22 +557,11 @@ fn test_fold_pass_unkeyed_reasoning_preview_then_content_key_override() {
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(
         super::reasoning_of(&snap, 0).fold,
-        FoldState::Collapsed,
-        "完成后默认单行折叠"
+        FoldState::Expanded,
+        "完成后正文完整可见（无法展开时不得隐藏）"
     );
-    let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
-        panic!("expected TuiAssistantBubble");
-    };
-    let key =
-        crate::kit::tui_render_unit::reasoning_fold_key(bubble).expect("已完成块按内容身份键控");
-    drop(snap);
 
-    FOLD_OVERRIDES
-        .state()
-        .write()
-        .insert(key, FoldState::Expanded);
-
-    // 新一轮开始触发重建：覆盖必须按同一内容身份命中。
+    // 新一轮重建（fold pass 重跑）不得把可见正文收回。
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
@@ -587,7 +573,7 @@ fn test_fold_pass_unkeyed_reasoning_preview_then_content_key_override() {
     assert_eq!(
         super::reasoning_of(&snap, 0).fold,
         FoldState::Expanded,
-        "内容身份键在重建后仍命中"
+        "重建后仍保持可见"
     );
 }
 

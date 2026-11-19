@@ -314,6 +314,7 @@ fn test_history_page_fills_gap_between_loaded_entries() {
         &AcpEventData::CommittedAssistantText {
             text: "own-b".to_string(),
             reasoning: None,
+            message_id: None,
         },
     );
     super::dispatch_for_bridge(&mut state, &AcpEventData::SessionReplayDone);
@@ -337,6 +338,34 @@ fn test_history_page_fills_gap_between_loaded_entries() {
         vec!["before-all", "own-a", "between", "own-b"],
         "{}",
         paging_probe()
+    );
+}
+
+/// own 条目的 `{session}:{uuid}` 持久身份转换为 ACP messageId：reasoning
+/// 折叠键与 live/history_v2 同口径，wire update 的占位 id 不覆盖条目身份。
+#[test]
+#[serial]
+fn test_history_page_own_assistant_unit_uses_entry_message_id() {
+    let mut state = browsing_state("tok");
+    let response = page(
+        "tok",
+        None,
+        vec![("s1:entry-7", 10, vec![sub(0, text_update("answer"))])],
+    );
+    dispatch_landing_page(&mut state, "tok", response);
+
+    let bubble = state
+        .committed
+        .iter()
+        .find_map(|unit| match unit {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble),
+            _ => None,
+        })
+        .expect("assistant unit 已并入 committed");
+    assert_eq!(
+        bubble.message_id.as_deref(),
+        Some("entry-7"),
+        "历史页按条目 uuid 键控 reasoning 折叠"
     );
 }
 

@@ -380,6 +380,7 @@ impl CurrentTurn {
                     // [G1] 单点重算：与折叠 pass 冻结后 recompute_hash 公式一致
                     // （build_bubble_parts 的 !running 路径 text_duration=0，
                     // 不含冻结正文时长）。
+                    bubble.apply_unkeyed_fold();
                     bubble.recompute_hash();
                     TuiRenderUnit::TuiAssistantBubble(bubble.into())
                 } else {
@@ -401,18 +402,10 @@ impl CurrentTurn {
                         duration_ms: None,
                         content_hash,
                     };
-                    // 无 message_id 的流式 reasoning 无法写覆盖键：构造期即定
-                    // Preview（正文可见）。折叠 pass 使用同一策略，避免首次 pass
-                    // 改写 fold 而克隆 bubble（current/committed 共享 Arc）。
-                    if bubble.message_id.is_none()
-                        && let Some(r) = bubble.reasoning.as_mut()
-                    {
-                        let fold =
-                            crate::kit::tui_render_unit::fold_for_unkeyed_reasoning(r.status);
-                        if r.fold != fold {
-                            r.fold = fold;
-                            bubble.recompute_hash();
-                        }
+                    // 无 message_id 的 reasoning 构造期即落到无身份折叠策略；
+                    // 折叠 pass 同策略不改写，避免破坏 current/committed 共享 Arc。
+                    if bubble.apply_unkeyed_fold() {
+                        bubble.recompute_hash();
                     }
                     TuiRenderUnit::TuiAssistantBubble(bubble.into())
                 };
