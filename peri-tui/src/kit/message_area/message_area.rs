@@ -575,6 +575,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         vp_height as u16,
         scroll_y,
         &slot_index,
+        grid,
     );
 
     hits::update_image_line_hits(

@@ -114,10 +114,16 @@ pub(super) fn update_mermaid_action_hits(
     vis_height: u16,
     scroll_y: usize,
     index: &super::selection::SlotIndex,
+    grid: GridSpec,
 ) {
     let mut hits: Vec<MermaidActionHit> = Vec::new();
     if let Some(area) = area_rect {
         let vp_end = area.y.saturating_add(vis_height);
+        let x_start = area
+            .x
+            .saturating_add(grid.cont_prefix_width().min(u16::MAX as usize) as u16)
+            .min(area.x.saturating_add(area.width.saturating_sub(1)));
+        let x_end = area.x.saturating_add(area.width.saturating_sub(1));
         let caches = vm_caches.read();
         let vms = view_models.read();
         for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
@@ -160,8 +166,8 @@ pub(super) fn update_mermaid_action_hits(
                 }
                 hits.push(MermaidActionHit {
                     row: row as u16,
-                    x_start: area.x,
-                    x_end: area.x.saturating_add(area.width.saturating_sub(1)),
+                    x_start,
+                    x_end,
                     slot_index,
                     vm_hash,
                     key: span.key.clone(),
