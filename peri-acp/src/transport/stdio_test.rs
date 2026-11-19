@@ -1149,3 +1149,28 @@ async fn test_matching_response_dispatches_while_notification_waits_for_capacity
         .expect("null 应答应成功");
     assert_eq!(answer, Value::Null);
 }
+
+/// [回归测试 #470 / CR] 队列未满时，`result: null` 的合法响应也必须结算
+/// pending（按字段存在性判断，不能被 `Option<Value>` 吞成缺失）。
+#[tokio::test]
+async fn test_null_result_response_settles_pending_without_backlog() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let pending = tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let ask_id = read_stdout_line(&mut output).await["id"].clone();
+
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{ask_id},"result":null}}"#),
+    )
+    .await;
+
+    let answer = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .expect("null result 应答应结算 pending")
+        .expect("task panic")
+        .expect("应答应成功");
+    assert_eq!(answer, Value::Null);
+}

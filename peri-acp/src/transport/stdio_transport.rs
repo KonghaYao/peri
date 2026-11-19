@@ -221,6 +221,10 @@ impl StdioTransport {
                     .filter(|id| is_domain_id(id))
                     .cloned()
                     .unwrap_or(Value::Null);
+                // 字段存在性按原始 JSON 判断：`Option<Value>` 会把 `"result": null`
+                // 读成 `None`，而 null 是合法成功响应。
+                let result_present = raw.get("result").is_some();
+                let error_present = raw.get("error").is_some();
                 let mut envelope: JsonRpcEnvelope = match serde_json::from_value(raw) {
                     Ok(envelope) => envelope,
                     Err(error) => {
@@ -247,8 +251,9 @@ impl StdioTransport {
                 let error_val = envelope.error.take();
 
                 if envelope.jsonrpc != "2.0"
-                    || (has_method && (result_val.is_some() || error_val.is_some()))
-                    || (!has_method && result_val.is_some() == error_val.is_some())
+                    || (has_method && (result_present || error_present))
+                    || (!has_method && result_present == error_present)
+                    || (error_present && error_val.is_none())
                 {
                     let id = envelope
                         .id
