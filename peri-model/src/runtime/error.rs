@@ -51,6 +51,8 @@ pub enum ProtocolErrorKind {
     InvalidJsonObject,
     AssistantMessageRequired,
     StreamEndedWithoutCompleted,
+    /// 单行或单事件超过 SSE 解码预算；重放同一响应不会恢复。
+    SseDecodeBudgetExceeded,
     ToolCallMissingId,
     ToolCallMissingName,
     ToolCallInvalidArguments,
@@ -69,6 +71,7 @@ impl fmt::Display for ProtocolErrorKind {
             Self::InvalidJsonObject => "invalid JSON object",
             Self::AssistantMessageRequired => "assistant message required",
             Self::StreamEndedWithoutCompleted => "stream ended without completion",
+            Self::SseDecodeBudgetExceeded => "SSE decode budget exceeded",
             Self::ToolCallMissingId => "tool call missing id",
             Self::ToolCallMissingName => "tool call missing name",
             Self::ToolCallInvalidArguments => "tool call has invalid arguments",

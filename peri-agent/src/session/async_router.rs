@@ -221,6 +221,33 @@ impl AsyncRouter {
         Ok(())
     }
 
+    /// [`Self::route_workflow_task_result`] 的异步形式：等待真实提交而不占住 worker。
+    ///
+    /// Workflow 投影运行在 Tokio 任务里，投递必须 await；同步桥只留给
+    /// 真正同步的调用方。
+    pub async fn route_workflow_task_result_async(
+        &self,
+        result: &WorkflowTaskResult,
+    ) -> Result<(), String> {
+        self.push_workflow_reminder_async(
+            &result.run_id,
+            &result.workflow_name,
+            result.notification_status_phrase(),
+            result.agent_facing_success(),
+            result.to_notification(),
+            result.duration_ms,
+            result.agent_count,
+            result.tool_calls_count,
+        )
+        .await?;
+        debug!(
+            run_id = %result.run_id,
+            workflow_name = %result.workflow_name,
+            "AsyncRouter: routed workflow task result to inbox"
+        );
+        Ok(())
+    }
+
     /// Route a workflow completion event into the session inbox.
     ///
     /// Formats the workflow metadata (name, duration, agent count, tool calls)
@@ -291,8 +318,7 @@ impl AsyncRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn push_workflow_reminder(
-        &self,
+    fn workflow_reminder_message(
         run_id: &str,
         workflow_name: &str,
         status: &str,
@@ -301,7 +327,7 @@ impl AsyncRouter {
         duration_ms: u64,
         agent_count: usize,
         tool_calls_count: usize,
-    ) -> Result<(), String> {
+    ) -> QueuedMessage {
         let kind = match status {
             "completed" => "completed",
             "killed" => "cancelled",
@@ -328,15 +354,70 @@ impl AsyncRouter {
                 "tool_calls_count": tool_calls_count,
             }),
         );
-        let message = QueuedMessage::system_reminder_with_delivery_id(
+        QueuedMessage::system_reminder_with_delivery_id(
             MessageKind::Defer,
             MessageSource::WorkflowComplete,
             reminder,
             crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
         )
-        .with_policy(MessagePolicy::ensure_processing());
+        .with_policy(MessagePolicy::ensure_processing())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_workflow_reminder(
+        &self,
+        run_id: &str,
+        workflow_name: &str,
+        status: &str,
+        success: bool,
+        body: String,
+        duration_ms: u64,
+        agent_count: usize,
+        tool_calls_count: usize,
+    ) -> Result<(), String> {
         // 终态投递与后台结果同等对待：等到真实提交，失败返回给调用方。
-        crate::session::queue::enqueue_blocking(self.inbox.queue(), message)
+        crate::session::queue::enqueue_blocking(
+            self.inbox.queue(),
+            Self::workflow_reminder_message(
+                run_id,
+                workflow_name,
+                status,
+                success,
+                body,
+                duration_ms,
+                agent_count,
+                tool_calls_count,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn push_workflow_reminder_async(
+        &self,
+        run_id: &str,
+        workflow_name: &str,
+        status: &str,
+        success: bool,
+        body: String,
+        duration_ms: u64,
+        agent_count: usize,
+        tool_calls_count: usize,
+    ) -> Result<(), String> {
+        self.inbox
+            .queue()
+            .enqueue(Self::workflow_reminder_message(
+                run_id,
+                workflow_name,
+                status,
+                success,
+                body,
+                duration_ms,
+                agent_count,
+                tool_calls_count,
+            ))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 

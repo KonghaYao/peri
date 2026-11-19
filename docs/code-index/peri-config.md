@@ -22,7 +22,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | 配置 scope 与稳定 revision | `peri-config/src/system.rs`：`ConfigurationScope`、`ConfigurationInputs`、`ConfigurationRevision` | scope 为绝对 cwd + 全局 settings 路径，revision 覆盖 scope 与输入正文/具名环境 |
 | 统一配置实体装配 | `peri-config/src/assembly.rs`：`DOMAINS`、`resolve`、`resolve_mcp`、`environment_keys`、`explain` | 一处声明领域参与来源、合并规则与敏感性，并装配 settings/MCP/provider/观测/UI/资源投影；具名环境采集和来源解释由同一声明驱动，具体合并算法仍由各领域模块持有 |
 | 纯 typed 快照 | `system.rs`：`ConfigurationSnapshot::resolve`、`settings`、`mcp`、`provider`、`observability`、`ui` | 多项目隔离，字段只读；Langfuse 使用 global settings，UI 使用合并后的 settings extra |
-| 发布、解释与更新 | `system.rs`：`ConfigurationSystem::{resolve,current,explain,update,update_mcp}` | 校验、来源 revision 与目标文件字节 CAS 成功才 publish；失败保留 current |
+| 发布、解释与更新 | `system.rs`：`ConfigurationSystem::{resolve,current,explain,update,update_mcp}` | 校验、来源 revision 与目标文件字节 CAS 成功才 publish；失败保留 current。源 I/O 与发布由写闸串行，`current` 只读映射，不等待配置源或目标文件 I/O |
 | 来源输入 | `source.rs`：`ConfigurationSource`、`McpConfigurationSource`、`read_environment`、`collect_with_layout` | 独立 bootstrap；可注入其他 adapter，不委托 provider 决定领域规则 |
 | settings schema 与合并 | `app.rs`：`PeriConfig`、`AppConfig`、`Profiles`、`ProfileConfig`、`ProviderConfig`、`BetasConfig` | `merge_overrides`、`extract_overrides`；profile 整体替换、MetaHarness 与 beta flag 逐 key 合并 |
 | 固定加载/保存布局 | `settings/config_source.rs`：`ConfigSource::{load_at,load_standalone,load_lenient,snapshot,reload_merged,preview}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>` | 编辑开始捕获 revision 随草稿提交；保存返回 accepted snapshot。`preview` 用同一候选解析将发布的 snapshot 但不写目标文件，供提交前校验 accepted 投影；随后 save 仍核对 revision。正常持有 system、同文件不拆层；lenient 临时可读/不可写 |
@@ -72,7 +72,8 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 ## 验证入口与限制
 
 - `system_test.rs`：scope/revision、隔离、冻结、失败不 publish、stale revision、
-  外部环境/文件变更、CAS/I/O 失败、兄弟域保留、global 失效，以及来源解释省略密钥而 Debug 保留原始输入。
+  外部环境/文件变更、CAS/I/O 失败、兄弟域保留、global 失效，以及来源解释省略密钥而 Debug 保留原始输入；
+  其 `system_test/concurrency.rs` 验证暂停配置源时读已发布快照不阻塞、并发写仅一个 revision 成功。
 - `settings_test.rs`：固定布局、同文件身份、差异保存、显式 reload、lenient
   错误禁止写错层、unknown 顶层字段保留。
 - `app_test.rs`、`mcp_test.rs`、`observability_test.rs`、`ui_test.rs`、`resources_test.rs`：领域规则。

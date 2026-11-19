@@ -118,7 +118,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 2. 内核保证「先可见后通知」：任务先进入任务表与事件日志，再发 `notifications/resources/updated`；消费者收到通知后 read，按 eventId 去重（幂等）。
 3. 通知丢失/连接重建：重新 `subscriptions/listen` 后重复步骤 1 的全量扫描；扫描幂等，不重复执行已终态任务。
 4. 事件日志读取使用稳定索引 URI + 分页参数（`?after={sequence}&limit=N`）；`headSequence` 为已提交上界；读取方发现游标早于保留边界时重新建立快照，不假装连续。
-5. 清理：终态 run 与终态任务按 5 分钟保留窗口回收（`WorkflowProgressStore::cleanup_completed`、`TASK_RETENTION_MS`）；清理后 `workflow://runs/{runId}*` 返回 not-found，`workflow://tasks` 聚合仍保留其终态摘要直至窗口过期。
+5. 清理：终态 run 与终态任务按 5 分钟保留窗口回收（`WorkflowProgressStore::cleanup_completed`、`TASK_RETENTION_MS`）；逐 run 运行时簿记（事件水位、run/agent 取消栅栏）只在 **run 退役且生产者结束** 后回收（`note_producer_finished` + 清理通知）：生产者结束前迟到任务仍受栅栏约束，可见 run 的水位保持单调。清理后 `workflow://runs/{runId}*` 返回 not-found，`workflow://tasks` 聚合仍保留其终态摘要直至窗口过期。
 
 资源内容为不可信模型输入边界：事件日志正文不经模型上下文注入；TUI/ACP 投影由宿主读取资源生成（数据源单一，不新增第二事实源——内存投影 + journal 为真相）。
 

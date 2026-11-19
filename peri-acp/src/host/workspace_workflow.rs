@@ -111,13 +111,23 @@ impl SessionEnvironment {
                 self.task_manager(),
                 session_id.clone(),
                 token.clone(),
-                Arc::new(move |result| {
-                    let inbox = inbox
-                        .as_ref()
-                        .ok_or_else(|| "workflow session inbox unavailable".to_string())?;
-                    peri_agent::session::async_router::AsyncRouter::new(inbox.clone())
-                        .route_workflow_task_result(result)
-                }),
+                Arc::new(
+                    move |result: &peri_acp_types::workflow::WorkflowTaskResult| {
+                        let inbox = inbox.clone();
+                        let result = result.clone();
+                        Box::pin(async move {
+                            let inbox = inbox
+                                .as_ref()
+                                .ok_or_else(|| "workflow session inbox unavailable".to_string())?;
+                            peri_agent::session::async_router::AsyncRouter::new(inbox.clone())
+                                .route_workflow_task_result_async(&result)
+                                .await
+                        })
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                            >
+                    },
+                ),
             )
         });
         let consumer = crate::host::workflow_consumer::WorkflowTaskConsumer::start(

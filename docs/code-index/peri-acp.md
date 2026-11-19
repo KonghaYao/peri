@@ -108,6 +108,13 @@ close/delete 成功响应发送后释放。拒绝使用 `-32010` 与稳定 `data
 `host/recovery/coordinator.rs` 读取整棵 session tree；内部 child 装配不经过 wire gate。外部集成
 必须在切换前自行 `session/close`/`delete` 当前会话；Peri 不自动回收旧会话，未按约定关闭的
 资源驻留或泄露由客户端承担，边界见 `docs/design/peri-acp-protocol.md` §2.1。
+成功 close/delete 会回收本会话的执行句柄（`Controller::destroy_session`）、caps 与 prompt
+锁；存在旧等待者时保留同一把锁，同 ID 重开仍与旧等待者互斥。失败处理随阶段不同：
+`mark_session_closing` 仅在明确未生效且非 persistence-uncertain 时恢复尝试前的 `closing`
+（首次尝试仍可续聊，重试仍处 closing）；其他未确认情况与意图确认后的失败保持 closing，
+只能重试关闭，部分资源可能已回收；view-only 与只读路径不写关闭意图，但它们先移除 caps、
+后释放句柄，句柄释放失败时 caps 已离开本进程视图。三张表回到基线的回归在
+`host/requests_close_failure_test.rs`（#465）。
 Cold restore publication 的唯一权威在 `host/requests/session_restore/load_shared.rs`：
 `prepare_shared` 返回 `RestorePublication(session_id, session_generation)`；load 在同一 handler 内完成
 replay、响应与 initial cursor，失败按 generation 标记 closing 并排空；fork 在 target 创建前清理
@@ -229,7 +236,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 传输 trait | transport/mod.rs | `AcpTransport` |
 | mpsc 实现 | transport/mpsc.rs | `spawn_pump` 对任一方向关闭执行 pair 级 terminal；`send_or_close` 统一 outbound failure；`mpsc_transport_pair` 共享 router/ID 空间；两条方向均为有界队列（1024），发送等待 500 ms，对端不排水即关闭并按 `-32000` backpressure 错误结算 |
 | 原始帧桥 | transport/wire_bridge.rs | `WireBridge` 在外部 JSON-RPC 帧与现有 MPSC client transport 间双向转发；ACP 方法仍由共享 Host 分发，显式 `close` 结算 pending；出站/响应帧队列有界（256），500 ms 未排空即 `acp_wire_backpressure` 并关闭连接 |
-| stdio 实现 | transport/stdio_transport.rs | pump 显式处理 EOF/read error 并观察 router close；`write_envelope` 让 writer mutex/write/flush 全程竞速 terminal；legacy cancel 与入站 id 域校验保持不变 |
+| stdio 实现 | transport/stdio_transport.rs | 入站请求/通知队列有界（`STDIO_INCOMING_CAPACITY=256`）：匹配响应在 pump 内直接交给 router，普通请求满队列显式回 `-32000` 背压（不静默丢弃），通知按序等待入队（取消不丢）；pump 等待 writer 锁或入站容量时继续读 stdin，读到行按序暂存于 `STDIO_DEFERRED_CAPACITY=256`（匹配响应仍直接交给 router，不等排水），EOF 直接汇入 terminal、暂存满即终止；pump 显式处理 EOF/read error 并观察 router close；`write_envelope` 让 writer mutex/write/flush 全程竞速 terminal；legacy cancel 与入站 id 域校验保持不变 |
 | 请求-响应匹配 | transport/request_router.rs | `RequestRouter` 原子持有 pending/terminal 状态；`PendingRequest` Drop 同步按 owner identity 注销；`CancellationToken` 提供 lost-wake-safe close 观察 |
 
 ### src/dispatch/（共享业务纯函数）
@@ -254,7 +261,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 宿主所有权与服务入口 | host/mod.rs | `run_acp_server` / `run_acp_server_inner` 持有 deployment owner；`SessionState` 保持 frozen/agent_pool/continuation 与关闭状态，不保存执行 lease；正文只经 `history_payloads` 持有，`ContextOwnership::{Resident,HandedOff,ReloadRequired}` 表达执行期所有权；另持 session-owned `interaction_gate`（交互互斥门，跨轮共享，见 `broker` 行）与 `host_request_seq`（Host 程序化交互序号，`SCHEDULED_TRIGGER_NAMESPACE` 用） |
-| 消息循环与请求分类 | host/server_loop.rs | `ServerLoop::run`；`spawn_prompt` / `spawn_mcp_apps_request` / `spawn_acp_mcp_request` 经 task owner 准入；`dispatch_request` 保持 response → after_new_response → 会话 setup 声明受理（`session_setup` + `requests::acp_mcp::attach_session_servers`）；`mcp/message` 通知在 `dispatch_notification` 内就地路由；`session/load` 旧分页与 `historyWindowV1` 分流、初始游标补写分别在生命周期锁前后完成，按当前连接的 `history_pagination` / `history_window_v1` 准入；`session/history/body` 在生命周期路由前单独处理；`session/close` / `session/delete` 在等生命周期锁前只中断在飞 turn（根令牌 + Cascade 子 agent），不置 `closing`、不 `pre_close_session`——不可逆关闭只在 `close_session` 持久化意图成立后；等锁期间用可逆的 `close_in_flight` 闸门阻止排队 prompt 抢锁，关闭失败后归零，会话仍可续聊（回归 `host/requests_close_failure_test.rs`） |
+| 消息循环与请求分类 | host/server_loop.rs | `ServerLoop::run`；`spawn_prompt` / `spawn_mcp_apps_request` / `spawn_acp_mcp_request` 经 task owner 准入；`dispatch_request` 保持 response → after_new_response → 会话 setup 声明受理（`session_setup` + `requests::acp_mcp::attach_session_servers`）；`mcp/message` 通知在 `dispatch_notification` 内就地路由；`session/load` 旧分页与 `historyWindowV1` 分流、初始游标补写分别在生命周期锁前后完成，按当前连接的 `history_pagination` / `history_window_v1` 准入；`session/history/body` 在生命周期路由前单独处理；`session/close` / `session/delete` 在等生命周期锁前只中断在飞 turn（根令牌 + Cascade 子 agent），不置 `closing`、不 `pre_close_session`——不可逆关闭只在 `close_session` 持久化意图成立后；等锁期间用可逆的 `close_in_flight` 闸门阻止排队 prompt 抢锁，关闭失败后归零；`mark_session_closing` 失败仅在明确未生效且非 persistence-uncertain 时恢复先前的 `closing`，其余失败保持 closing 待重试（回归 `host/requests_close_failure_test.rs`） |
 | Prompt 编排 / 预测 | host/prompt_dispatch.rs + host/prediction.rs | `dispatch_prompt_turn` 保留 host 根 re-export；`spawn_prediction` 在原 prompt lock 范围内准入 |
 | OAuth 事件投递 | host/oauth_delivery.rs | `spawn_oauth_consumer` / `deliver_oauth_event`；safe 与 legacy caps 分别裁决 |
 | EOF 收尾 | host/shutdown.rs + host/lifecycle.rs | `shutdown_host` 借用唯一强 owner；先撤销准入，再取消并 drain 会话，最后关闭 MCP；`HostExitContext::finish` 在排空为 `Complete` 之后消费部署关闭权（`AcpServerConfig::session_store_shutdown`，仅装配点注入），未确认的关闭报 `Incomplete` 并保留上下文重试（重复关闭重新做真实检查） |
@@ -317,5 +324,5 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | --- | --- | --- |
 | Workflow 执行消费者 | `src/host/workflow_consumer.rs` | 资源读取 + 订阅发现；鉴权工具领取、就绪、回填；不持运行时/任务表引用；claimId 保证领取请求可重试 |
 | Workflow 会话装配 | `src/host/workspace_workflow.rs` | 绑定实例运行时与消费者令牌；启动 MCP 执行消费者及后台目录投影，实例与 Host 各持独立 TaskManager |
-| Workflow 后台目录与终态 | `src/host/workflow_projection.rs` | `workflow://background-tasks` → Host 外部任务目录；接收终态后 `WorkflowCompletionAck`；取消经 `WorkflowKill`；关闭经 `WorkflowClose` 并确认最终投影 |
+| Workflow 后台目录与终态 | `src/host/workflow_projection.rs` | `workflow://background-tasks` → Host 外部任务目录；异步投递 await 真实会话提交后才 `WorkflowCompletionAck`；取消经 `WorkflowKill`；关闭经 `WorkflowClose` 并确认最终投影 |
 | Cron 触发客户端 | `peri-agent/src/session/cron_events.rs` | Session 与 print 共用 MCP 消费者；失败保留、确认重试不重复本地交付 |

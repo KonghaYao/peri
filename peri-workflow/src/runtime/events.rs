@@ -21,7 +21,7 @@ use crate::progress::ProgressObserver;
 use crate::protocol::ProgressEvent;
 
 use crate::runtime::event_log::{BoundedEventLog, EventLogPage};
-use crate::runtime::WorkflowResourceUpdate;
+use crate::runtime::{WorkflowResourceUpdate, WorkflowTaskTable};
 
 /// run 事件类型（`ProgressEvent` 的粗分类，便于过滤与展示）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -112,6 +112,14 @@ impl WorkflowRunEventLog {
         self.watermarks.lock().get(run_id).copied().unwrap_or(0)
     }
 
+    /// 回收该 run 的已提交水位。
+    ///
+    /// 仅在 run 退役且生产者结束时调用（此后不会再有该 run 的追加）：可见 run 的
+    /// 水位不受清理影响，仍按已提交值单调（#468）。
+    pub fn forget_run(&self, run_id: &str) {
+        self.watermarks.lock().remove(run_id);
+    }
+
     /// 带谓词的过滤分页（跨 run 聚合日志的单 run 视图）。
     #[must_use]
     pub fn page_where(
@@ -128,14 +136,20 @@ impl WorkflowRunEventLog {
 pub(crate) struct RuntimeProgressObserver {
     events: Arc<WorkflowRunEventLog>,
     updates: broadcast::Sender<WorkflowResourceUpdate>,
+    tasks: Arc<WorkflowTaskTable>,
 }
 
 impl RuntimeProgressObserver {
     pub(crate) fn new(
         events: Arc<WorkflowRunEventLog>,
         updates: broadcast::Sender<WorkflowResourceUpdate>,
+        tasks: Arc<WorkflowTaskTable>,
     ) -> Self {
-        Self { events, updates }
+        Self {
+            events,
+            updates,
+            tasks,
+        }
     }
 }
 
@@ -168,5 +182,13 @@ impl ProgressObserver for RuntimeProgressObserver {
         // 清理淘汰改变了 `workflow://runs` 的正文（且被清理 run 的 scoped 资源
         // 转为 not-found）：提交后唤醒索引订阅者。
         let _ = self.updates.send(WorkflowResourceUpdate::RunsIndex);
+    }
+
+    fn on_runs_reclaimable(&self, run_ids: &[String]) {
+        // run 退役且生产者结束：逐 run 簿记不再有读取方或迟到发布依赖它。
+        for run_id in run_ids {
+            self.tasks.forget_run_fences(run_id);
+            self.events.forget_run(run_id);
+        }
     }
 }

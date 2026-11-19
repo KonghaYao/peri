@@ -523,3 +523,207 @@ async fn unsettled_child_scope_fences_real_engine_retries_and_forces_failed_comp
     assert!(runtime.tasks().active().is_empty());
     let _ = launch.await.unwrap();
 }
+
+/// [回归测试] 终态 run 退役后必须回收事件水位与 run/agent 取消栅栏（#468）。
+///
+/// 隔离运行结果：8 个 run 完成后把清理时钟推进 301 秒，可见 run 归零、环形日志
+/// 只剩保留窗口内的条目，但仍能按 8/8 个退役 run ID 查到水位。
+#[test]
+fn retired_runs_release_event_watermarks_and_cancel_fences() {
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+
+    let run_count: u64 = 8;
+    let mut completed_at = None;
+    for index in 0..run_count {
+        let run_id = format!("run-{index}");
+        apply_run_started(&runtime, &run_id);
+        // Log 也会进入 run 事件日志（水位前进），但不改变 run 可读状态。
+        runtime
+            .progress_store()
+            .apply_event(&crate::protocol::ProgressEvent::Log {
+                run_id: run_id.clone(),
+                message: "noise".into(),
+            });
+        let _ = runtime
+            .tasks()
+            .publish(format!("t-{index}"), task_params(&run_id, index));
+        runtime
+            .tasks()
+            .cancel_run(&run_id, Some("workflow run killed".into()));
+        runtime
+            .tasks()
+            .cancel_agent(&run_id, index + 1000, Some("agent killed".into()));
+        apply_run_done(&runtime, &run_id, "killed");
+        let snapshot = runtime
+            .progress_store()
+            .run_snapshot(&run_id)
+            .expect("the fixture run must be visible before retirement");
+        completed_at = snapshot.completed_at;
+        assert!(
+            runtime.event_watermark(&run_id) > 0,
+            "可见 run 的已提交事件必须留下水位"
+        );
+        assert_eq!(
+            publish_state(&runtime, &run_id, index + 100, "before"),
+            Some(crate::runtime::WorkflowTaskState::Cancelled),
+            "退役前迟到任务仍受 run 级取消栅栏约束"
+        );
+        assert_eq!(
+            publish_state(&runtime, &run_id, index + 1000, "before"),
+            Some(crate::runtime::WorkflowTaskState::Cancelled),
+            "退役前迟到任务仍受 agent 级取消栅栏约束"
+        );
+        // 生产者的终态收敛点（runner 返回 + completion 投影完成）：run 仍可见。
+        runtime.progress_store().note_producer_finished(&run_id);
+    }
+
+    // 退役前：水位仍单调可读（清理时钟未过保留窗口时不得回收）。
+    let completed_at = completed_at.expect("the fixture run must be terminal");
+    runtime
+        .progress_store()
+        .cleanup_completed_at(completed_at + std::time::Duration::from_secs(1));
+    assert_eq!(
+        runtime.progress_store().list_runs().len(),
+        run_count as usize
+    );
+    for index in 0..run_count {
+        assert!(
+            runtime.event_watermark(&format!("run-{index}")) > 0,
+            "可见 run 的水位不得因清理尝试而回退或消失"
+        );
+    }
+
+    // 退役：清理时钟推进 301 秒（超过 300 秒保留窗口）。
+    runtime
+        .progress_store()
+        .cleanup_completed_at(completed_at + std::time::Duration::from_secs(301));
+    assert!(
+        runtime.progress_store().list_runs().is_empty(),
+        "终态 run 必须按保留窗口退役"
+    );
+    for index in 0..run_count {
+        let run_id = format!("run-{index}");
+        assert_eq!(
+            runtime.event_watermark(&run_id),
+            0,
+            "退役 run 的水位必须随 run 一起回收"
+        );
+        assert_eq!(
+            publish_state(&runtime, &run_id, index + 100, "after"),
+            Some(crate::runtime::WorkflowTaskState::Published),
+            "退役后不再有生产者，run 级取消栅栏不得继续驻留"
+        );
+        assert_eq!(
+            publish_state(&runtime, &run_id, index + 1000, "after"),
+            Some(crate::runtime::WorkflowTaskState::Published),
+            "退役后不再有生产者，agent 级取消栅栏不得继续驻留"
+        );
+    }
+}
+
+/// [回归测试] 回收必须等 run 退役与生产者结束同时成立（#468）：退役但生产者
+/// 仍可能发布时，水位与取消栅栏都不得提前释放。
+#[test]
+fn retirement_without_producer_end_keeps_watermark_and_cancel_fence() {
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    let run_id = "run-live-producer";
+    apply_run_started(&runtime, run_id);
+    runtime
+        .progress_store()
+        .apply_event(&crate::protocol::ProgressEvent::Log {
+            run_id: run_id.to_string(),
+            message: "noise".into(),
+        });
+    let _ = runtime
+        .tasks()
+        .publish("t-live".into(), task_params(run_id, 1));
+    runtime
+        .tasks()
+        .cancel_run(run_id, Some("workflow run killed".into()));
+    apply_run_done(&runtime, run_id, "killed");
+    let completed_at = runtime
+        .progress_store()
+        .run_snapshot(run_id)
+        .and_then(|snapshot| snapshot.completed_at)
+        .expect("the fixture run must be terminal");
+
+    // 清理未过保留窗口：run 仍可见，水位保持。
+    runtime
+        .progress_store()
+        .cleanup_completed_at(completed_at + std::time::Duration::from_secs(1));
+    assert_eq!(runtime.progress_store().list_runs().len(), 1);
+    assert!(runtime.event_watermark(run_id) > 0);
+
+    // 退役但生产者未结束：水位与栅栏继续驻留（迟到任务仍受取消约束）。
+    runtime
+        .progress_store()
+        .cleanup_completed_at(completed_at + std::time::Duration::from_secs(301));
+    assert!(runtime.progress_store().list_runs().is_empty());
+    assert!(
+        runtime.event_watermark(run_id) > 0,
+        "生产者未结束前不得回收水位"
+    );
+    assert_eq!(
+        publish_state(&runtime, run_id, 7, "before-producer-end"),
+        Some(crate::runtime::WorkflowTaskState::Cancelled),
+        "生产者未结束前迟到任务仍受取消约束"
+    );
+
+    // 生产者结束：立即回收已退役 run 的水位与栅栏。
+    runtime.progress_store().note_producer_finished(run_id);
+    assert_eq!(runtime.event_watermark(run_id), 0);
+    assert_eq!(
+        publish_state(&runtime, run_id, 7, "after-producer-end"),
+        Some(crate::runtime::WorkflowTaskState::Published),
+        "生产者结束后不再有迟到发布，栅栏可以回收"
+    );
+}
+
+fn apply_run_started(runtime: &WorkflowRuntime, run_id: &str) {
+    runtime
+        .progress_store()
+        .apply_event(&crate::protocol::ProgressEvent::RunStarted {
+            run_id: run_id.to_string(),
+            workflow_name: "t".into(),
+            meta: None,
+        });
+}
+
+fn apply_run_done(runtime: &WorkflowRuntime, run_id: &str, status: &str) {
+    runtime
+        .progress_store()
+        .apply_event(&crate::protocol::ProgressEvent::RunDone {
+            run_id: run_id.to_string(),
+            status: status.to_string(),
+            return_value: None,
+            error: None,
+        });
+}
+
+/// 发布一个迟到任务并返回其提交后的状态（不存在时 `None`）。
+fn publish_state(
+    runtime: &WorkflowRuntime,
+    run_id: &str,
+    agent_id: u64,
+    phase: &str,
+) -> Option<crate::runtime::WorkflowTaskState> {
+    let task_id = format!("{run_id}-probe-{agent_id}-{phase}");
+    match runtime
+        .tasks()
+        .publish(task_id, task_params(run_id, agent_id))
+    {
+        crate::runtime::PublishOutcome::Published(record) => Some(record.state),
+        crate::runtime::PublishOutcome::AlreadyKnown(record) => Some(record.state),
+        crate::runtime::PublishOutcome::Closed => None,
+    }
+}

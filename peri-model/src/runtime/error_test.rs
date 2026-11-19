@@ -195,6 +195,10 @@ fn test_protocol_error_kinds_are_explicit_and_stable() {
             ProtocolErrorKind::StreamEndedWithoutCompleted,
             "stream ended without completion",
         ),
+        (
+            ProtocolErrorKind::SseDecodeBudgetExceeded,
+            "SSE decode budget exceeded",
+        ),
         (ProtocolErrorKind::ToolCallMissingId, "tool call missing id"),
         (
             ProtocolErrorKind::ToolCallMissingName,

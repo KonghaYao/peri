@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::tasks::TaskShutdownReport;
 use peri_agent::agent::async_tasks::{BackgroundTaskRegistry, TaskManager};
 use rmcp::model::{Task, TaskPayload, TaskStatus};
@@ -438,4 +440,146 @@ async fn cancellation_during_spawn_cancels_only_initiating_owner() {
         .map(|result| result.task.status().is_terminal())
         .unwrap_or(true));
     assert_eq!(tasks.tracked_count(), 0);
+}
+
+#[tokio::test]
+async fn terminal_result_advertises_ttl_and_is_reclaimed_after_retention() {
+    const RETENTION: Duration = Duration::from_millis(200);
+    let dir = tempfile::tempdir().expect("workspace");
+    let owner = ShellTasks::with_retention_for_test(RETENTION);
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let live = owner
+        .spawn("sleep 30".into(), cwd.clone(), None)
+        .await
+        .expect("live task");
+    let ended = owner
+        .spawn("printf 'finished'".into(), cwd, None)
+        .await
+        .expect("terminal task");
+
+    let completed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = owner.get(&ended.task_id).expect("task");
+            if state.task.status().is_terminal() {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("shell completes");
+    let ttl_ms = completed
+        .task
+        .task
+        .ttl_ms
+        .expect("terminal task declares a finite TTL");
+    assert!(ttl_ms >= RETENTION.as_millis() as u64, "ttl {ttl_ms}");
+    assert!(
+        ttl_ms < (RETENTION + Duration::from_secs(5)).as_millis() as u64,
+        "ttl {ttl_ms}"
+    );
+    assert!(
+        owner.get(&ended.task_id).is_ok(),
+        "a result stays queryable within its declared TTL"
+    );
+
+    // The idle sweep must reclaim the record without another state query.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while owner.retained_record_count() > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retention sweep reclaims expired terminal records");
+    assert_eq!(
+        owner.retained_record_count(),
+        1,
+        "live task stays registered"
+    );
+    assert!(
+        owner.get(&ended.task_id).is_err(),
+        "expired result is unknown, not stale"
+    );
+    assert!(owner.get(&live.task_id).is_ok());
+
+    owner.cancel(&live.task_id).expect("cancel live task");
+    assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
+}
+
+#[tokio::test]
+async fn terminal_records_do_not_accumulate_across_completed_tasks() {
+    const RETENTION: Duration = Duration::from_millis(120);
+    let owner = ShellTasks::with_retention_for_test(RETENTION);
+    let callback = owner.completion_callback_for_scope(Some("session-a".into()), None);
+    for index in 0..64 {
+        let result = BackgroundTaskResult {
+            task_id: format!("shell-history-{index}"),
+            agent_name: "shell".into(),
+            prompt_summary: format!("command {index}"),
+            success: true,
+            output: "x".repeat(4096),
+            tool_calls_count: 0,
+            duration_ms: 1,
+            timed_out: false,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        };
+        callback(&result, BgTaskKind::Shell).expect("terminal result is recorded");
+    }
+    assert_eq!(owner.retained_record_count(), 64);
+    assert!(owner.belongs_to("shell-history-0", "session-a"));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while owner.retained_record_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal history is bounded by its retention window");
+    assert!(
+        owner.get("shell-history-0").is_err(),
+        "evicted result must not be resurrected by a read"
+    );
+    assert!(
+        !owner.belongs_to("shell-history-0", "session-a"),
+        "owner index is released with the record"
+    );
+    assert!(owner.live_tasks(Some("session-a")).tasks.is_empty());
+    assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
+}
+
+#[test]
+fn promoted_task_starts_retention_sweep_without_spawn() {
+    const RETENTION: Duration = Duration::from_millis(50);
+    // Constructing outside a runtime skips the constructor's lazy sweep start;
+    // a promoted foreground task is then the first activity on this instance.
+    let owner = ShellTasks::with_retention_for_test(RETENTION);
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        owner.track_promoted_scoped("promoted-foreground", None, None);
+        let callback = owner.completion_callback_for_scope(None, None);
+        let result = BackgroundTaskResult {
+            task_id: "promoted-foreground".into(),
+            agent_name: "shell".into(),
+            prompt_summary: "promoted command".into(),
+            success: true,
+            output: "done".into(),
+            tool_calls_count: 0,
+            duration_ms: 1,
+            timed_out: false,
+            child_thread_id: None,
+            subagent_failure: None,
+            shell_output: None,
+        };
+        callback(&result, BgTaskKind::Shell).expect("terminal result is recorded");
+        assert_eq!(owner.retained_record_count(), 1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while owner.retained_record_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("sweep starts even when the promoted task is the first activity");
+    });
 }

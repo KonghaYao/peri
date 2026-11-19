@@ -56,6 +56,10 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
         // 调用方可能是 runtime 线程（shell 监视线程不会），也可能完全没有 runtime
         // （同步测试）。统一在独立线程的新 runtime 上等待真实提交：既不依赖调用
         // 线程模型，也不允许先返回成功再 detached 写入。
+        //
+        // 这是同步能力面，等待期间占住调用线程。异步 owner 必须在阻塞池执行
+        // （`TaskManager::settle_completed_awaited`），或直接 await `deliver`；
+        // 不能在 Tokio worker 上调用本方法等待存储。
         std::thread::scope(|scope| {
             scope
                 .spawn(move || {

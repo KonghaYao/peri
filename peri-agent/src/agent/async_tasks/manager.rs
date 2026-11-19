@@ -393,7 +393,13 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             // Deployment/transport release must never cancel remote MCP tasks.
             self.cancel_all();
             let execution_stopped = self.registry.scope.wait().await;
-            self.registry.retry_pending_deliveries();
+            // 关闭结算同样不能占住 worker：重试复用同步投递桥。
+            let retry_registry = Arc::clone(&self.registry);
+            if let Err(error) =
+                tokio::task::spawn_blocking(move || retry_registry.retry_pending_deliveries()).await
+            {
+                tracing::warn!(%error, "shutdown terminal delivery retry task failed");
+            }
             if execution_stopped && self.registry.external_settled() {
                 peri_acp_types::tasks::TaskShutdownReport::Complete
             } else {
@@ -865,6 +871,33 @@ impl TaskManager {
         delivery: peri_acp_types::tasks::OnBgCompleteFn,
     ) -> Result<bool, BackgroundRegistryError> {
         self.registry.settle_completed(ticket, result, delivery)
+    }
+
+    /// 等待终态投递真实提交后再结算，但不占住 Tokio worker。
+    ///
+    /// 投递桥本身仍是同步能力面（`accept` 要听到存储结论才返回）；后台子 Agent
+    /// 的结算发生在异步任务里，直接在 worker 上调用会让存储等待拖住同一 runtime
+    /// 的其他运行。这里把同步桥交给阻塞池，本方法仍 await 到提交结论：提交前不
+    /// 结算，失败原样返回给生产者重试。
+    pub async fn settle_completed_awaited(
+        self: &Arc<Self>,
+        ticket: &TaskRegistrationTicket,
+        result: BackgroundTaskResult,
+        delivery: peri_acp_types::tasks::OnBgCompleteFn,
+    ) -> Result<bool, String> {
+        let ticket = ticket.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            // 无 runtime 的同步宿主/测试保持原有语义。
+            return self
+                .settle_completed(&ticket, result, delivery)
+                .map_err(|error| error.to_string());
+        };
+        let manager = Arc::clone(self);
+        runtime
+            .spawn_blocking(move || manager.settle_completed(&ticket, result, delivery))
+            .await
+            .map_err(|error| format!("terminal settlement task failed: {error}"))?
+            .map_err(|error| error.to_string())
     }
 
     pub fn retry_pending_deliveries(&self) -> usize {

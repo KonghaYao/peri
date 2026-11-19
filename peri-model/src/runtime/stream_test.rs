@@ -272,6 +272,34 @@ async fn fake_http_sse_chain_retries_invalid_utf8_before_decoded_delta() {
 }
 
 #[tokio::test]
+async fn fake_http_sse_chain_rejects_oversized_line_without_retry() {
+    let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
+        status: 200,
+        chunks: vec![Ok(vec![
+            b'x';
+            crate::transport::sse::MAX_SSE_LINE_BYTES + 1
+        ])],
+    }]));
+    let mut stream = Box::pin(stream_for(
+        transport.clone(),
+        CancellationToken::new(),
+        config(),
+    ));
+
+    let error = stream
+        .next()
+        .await
+        .expect("budget error event")
+        .expect_err("oversized SSE line");
+    assert_eq!(
+        error.protocol_error().map(|protocol| protocol.kind()),
+        Some(crate::ProtocolErrorKind::SseDecodeBudgetExceeded)
+    );
+    assert_eq!(transport.calls(), 1);
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
 async fn fake_http_sse_chain_returns_midstream_failure_after_delta_without_retry() {
     let transport = Arc::new(FakeTransport::new(vec![Response::Ready {
         status: 200,

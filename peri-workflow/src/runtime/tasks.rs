@@ -526,6 +526,18 @@ impl WorkflowTaskTable {
         )
     }
 
+    /// 回收某 run 的 run / agent 级取消栅栏。
+    ///
+    /// 仅在 run 退役且生产者结束后调用：此后不会再有迟到发布，栅栏不再承担取消
+    /// 约束（#468）。终态任务记录仍按自身保留窗口淘汰，聚合视图不提前丢失摘要。
+    pub fn forget_run_fences(&self, run_id: &str) {
+        let mut inner = self.inner.lock();
+        inner.run_kills.remove(run_id);
+        inner
+            .agent_kills
+            .retain(|(run_id_key, _), _| run_id_key != run_id);
+    }
+
     /// 单次临界区内取消全部命中任务：CAS → 追加事件 → 收集取消句柄（锁外触发）。
     fn cancel_matching_locked(
         &self,

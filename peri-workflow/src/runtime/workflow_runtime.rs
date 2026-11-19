@@ -201,12 +201,13 @@ impl WorkflowRuntime {
         let (updates, _) = broadcast::channel(UPDATE_CHANNEL_CAPACITY);
         let run_events = Arc::new(WorkflowRunEventLog::new(RUN_EVENT_LOG_CAPACITY));
         let gate = Arc::new(CloseGate::new());
+        let tasks = Arc::new(WorkflowTaskTable::new(updates.clone(), Arc::clone(&gate)));
         progress_store.set_observer(Arc::new(RuntimeProgressObserver::new(
             Arc::clone(&run_events),
             updates.clone(),
+            Arc::clone(&tasks),
         )));
         let budgets = Arc::new(RunBudgets::new());
-        let tasks = Arc::new(WorkflowTaskTable::new(updates.clone(), Arc::clone(&gate)));
         // P6 wire 面注入：`agent/task` 发布（关闭 / maxAgents 准入）与终态投递
         // （`agent/result`）。sink 持 Weak<WorkflowRunner>，不构成所有权环。
         runner.bind_agent_task_sink(Arc::new(RuntimeAgentTaskSink {
@@ -583,6 +584,37 @@ impl WorkflowRuntime {
         };
         self.registry.attach_child(&run_id, child_handle);
 
+        // run 终态收敛（design §5.3：不存在 detached 执行）：完成提交后取消残留任务
+        // （迟到的取消由任务表幂等吸收）、回收执行权威预算，并登记生产者结束。
+        // 先于 fast path 启动：快速失败路径同样必须收敛（#468）。
+        let tasks_for_completion = Arc::clone(&self.tasks);
+        let budgets_for_completion = Arc::clone(&self.budgets);
+        let progress_for_completion = Arc::clone(&self.progress_store);
+        let run_id_for_completion = run_id.clone();
+        let mut completion_for_settlement = fast_rx.clone();
+        tokio::spawn(async move {
+            if crate::completion::receive_completion(&mut completion_for_settlement)
+                .await
+                .is_none()
+            {
+                return;
+            }
+            let cancelled = tasks_for_completion
+                .cancel_run(&run_id_for_completion, Some("workflow run finished".into()));
+            if !cancelled.is_empty() {
+                tracing::debug!(
+                    target: "workflow",
+                    run_id = %run_id_for_completion,
+                    cancelled = cancelled.len(),
+                    "workflow run finished with non-terminal tasks; cancelled",
+                );
+            }
+            budgets_for_completion.forget(&run_id_for_completion);
+            // 生产者已结束（runner 返回、completion 投影完成）：run 仍可见时登记标记，
+            // 退役后由清理回收水位与取消栅栏；已退役时立即回收（#468）。
+            progress_for_completion.note_producer_finished(&run_id_for_completion);
+        });
+
         // The one-second fast path observes the same already-published terminal projection.
         // Dropping this caller cannot cancel the registered execution/completion task.
         if let Ok(Some(completed)) = peri_time::timeout(
@@ -610,31 +642,6 @@ impl WorkflowRuntime {
         }
 
         let _ = self.updates.send(WorkflowResourceUpdate::RunsIndex);
-
-        // run 终态收敛（design §5.3：不存在 detached 执行）：完成提交后取消残留任务
-        // （迟到的取消由任务表幂等吸收），并回收执行权威预算。监视任务随 run 结束退出。
-        let tasks_for_completion = Arc::clone(&self.tasks);
-        let budgets_for_completion = Arc::clone(&self.budgets);
-        let run_id_for_completion = run_id.clone();
-        tokio::spawn(async move {
-            if crate::completion::receive_completion(&mut fast_rx)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let cancelled = tasks_for_completion
-                .cancel_run(&run_id_for_completion, Some("workflow run finished".into()));
-            if !cancelled.is_empty() {
-                tracing::debug!(
-                    target: "workflow",
-                    run_id = %run_id_for_completion,
-                    cancelled = cancelled.len(),
-                    "workflow run finished with non-terminal tasks; cancelled",
-                );
-            }
-            budgets_for_completion.forget(&run_id_for_completion);
-        });
 
         Ok(WorkflowStartOutcome {
             run_id,

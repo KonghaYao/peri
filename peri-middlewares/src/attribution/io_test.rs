@@ -140,3 +140,70 @@ async fn overlapping_calls_to_same_file_keep_independent_before_snapshots() {
     assert_eq!(middleware.pending_old_content.lock().unwrap().len(), 1);
     assert!(middleware.state.lock().unwrap().contributions.is_empty());
 }
+
+#[tokio::test]
+async fn rejected_call_settles_only_its_own_staged_snapshot() {
+    let reader = Arc::new(MemoryReader {
+        text: Mutex::new(Some("r".repeat(4096))),
+        reads: Mutex::new(Vec::new()),
+    });
+    let middleware = GitAttributionMiddleware::new("test", reader.clone());
+    let mut state = TestState {
+        queue: MessageQueue::new(),
+        messages: Vec::new(),
+    };
+    let rejected = ToolCall::new(
+        "rejected",
+        TOOL_WRITE,
+        serde_json::json!({"file_path": "rejected.rs"}),
+    );
+    let in_flight = ToolCall::new(
+        "in-flight",
+        TOOL_WRITE,
+        serde_json::json!({"file_path": "in-flight.rs"}),
+    );
+
+    middleware.before_tool(&mut state, &rejected).await.unwrap();
+    *reader.text.lock().unwrap() = Some("in flight old".to_string());
+    middleware
+        .before_tool(&mut state, &in_flight)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_stats(&middleware),
+        (2, 4096 + "in flight old".len())
+    );
+
+    middleware
+        .on_tool_rejected(&mut state, &rejected)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_stats(&middleware),
+        (1, "in flight old".len()),
+        "只结算被拒调用，其他在途调用的快照保持完整"
+    );
+    assert_eq!(
+        middleware.pending_old_content.lock().unwrap()["in-flight"],
+        "in flight old"
+    );
+
+    *reader.text.lock().unwrap() = Some("in flight new content".to_string());
+    middleware
+        .after_tool(
+            &mut state,
+            &in_flight,
+            &ToolResult::success("in-flight", TOOL_WRITE, "ok"),
+        )
+        .await
+        .unwrap();
+    assert!(middleware.pending_old_content.lock().unwrap().is_empty());
+    let contributions = middleware.state.lock().unwrap();
+    assert!(!contributions.contributions.contains_key("rejected.rs"));
+    assert_eq!(contributions.contributions["in-flight.rs"].claude_chars, 11);
+}
+
+fn pending_stats(middleware: &GitAttributionMiddleware) -> (usize, usize) {
+    let pending = middleware.pending_old_content.lock().unwrap();
+    (pending.len(), pending.values().map(String::len).sum())
+}

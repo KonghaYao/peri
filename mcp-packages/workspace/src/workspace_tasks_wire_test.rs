@@ -354,7 +354,7 @@ async fn task_result_remains_queryable_across_connections() {
     let (second, second_server) = connect(server.clone(), capabilities).await;
     first.cancel().await.expect("close first connection");
     first_server.await.expect("join first server");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let terminal = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let state = second
                 .peer()
@@ -362,13 +362,17 @@ async fn task_result_remains_queryable_across_connections() {
                 .await
                 .expect("result survives first connection");
             if state.task.status() == TaskStatus::Completed {
-                break;
+                break state;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .expect("task completion deadline");
+    assert!(
+        terminal.task.task.ttl_ms.is_some_and(|ttl| ttl > 0),
+        "terminal record must declare a finite ttlMs so a reconnect knows when it ends"
+    );
     second.cancel().await.expect("close second connection");
     second_server.await.expect("join second server");
     assert_eq!(
