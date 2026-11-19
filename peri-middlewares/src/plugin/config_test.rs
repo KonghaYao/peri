@@ -262,6 +262,102 @@ fn test_plugins_dir_uses_claude_home() {
     assert!(path_str.contains("plugins"));
 }
 
+/// 改写 `HOME` 的进程级守卫：与其它依赖真实主目录的测试互斥，drop 时还原。
+struct HomeGuard {
+    _lock: peri_mcp_common::process_env::EnvLockFile,
+    previous_home: Option<std::ffi::OsString>,
+    previous_userprofile: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn set(home: &std::path::Path) -> Self {
+        let lock = peri_mcp_common::process_env::lock().expect("process env lock");
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", home);
+        std::env::set_var("USERPROFILE", home);
+        Self {
+            _lock: lock,
+            previous_home,
+            previous_userprofile,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.previous_userprofile.take() {
+            Some(profile) => std::env::set_var("USERPROFILE", profile),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+    }
+}
+
+/// 兼容回填只在写盘成功后生效：写失败时面板不得把未登记的插件报告给用户，
+/// 否则面板（默认读取）与会话（显式读取）状态分叉；失败后下次读取仍重试回填。
+#[test]
+fn test_backfill_write_failure_is_not_reported_as_installed() {
+    let home = tempfile::tempdir().unwrap();
+    let _env = HomeGuard::set(home.path());
+
+    let claude_dir = home.path().join(".claude");
+    let plugins_dir = claude_dir.join("plugins");
+    let installed_path = plugins_dir.join("installed_plugins.json");
+    let cache_manifest = plugins_dir.join("cache/market/demo/1.0.0/.claude-plugin/plugin.json");
+    std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
+    std::fs::write(&cache_manifest, r#"{"name":"demo","version":"1.0.0"}"#).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["demo@market"]}"#,
+    )
+    .unwrap();
+    // 故障注入：原子写的临时文件路径被目录占用，写盘必然失败且跨平台。
+    std::fs::create_dir(plugins_dir.join("installed_plugins.tmp")).unwrap();
+
+    let panel = super::load_installed_plugins(None).unwrap();
+    assert!(
+        panel.plugins.is_empty(),
+        "写盘失败时面板不得报告未登记的插件: {:?}",
+        panel.plugins
+    );
+    assert!(
+        !installed_path.exists(),
+        "写盘失败时不得留下已登记的 installed_plugins.json"
+    );
+
+    let session = super::load_installed_plugins(Some(&installed_path)).unwrap();
+    assert!(
+        session.plugins.is_empty(),
+        "会话读取必须与面板一致: {:?}",
+        session.plugins
+    );
+    // 再次读取仍会重试回填，但仍不假报。
+    let panel_retry = super::load_installed_plugins(None).unwrap();
+    assert!(panel_retry.plugins.is_empty());
+
+    // 恢复可写后回填成功，面板与会话看到同一份登记。
+    std::fs::remove_dir(plugins_dir.join("installed_plugins.tmp")).unwrap();
+    let recovered = super::load_installed_plugins(None).unwrap();
+    assert_eq!(recovered.plugins.len(), 1);
+    assert_eq!(recovered.plugins[0].id, "demo@market");
+    assert_eq!(
+        recovered.plugins[0].origin,
+        PluginOrigin::ClaudeCodeInstalled
+    );
+    let persisted = super::load_installed_plugins(Some(&installed_path)).unwrap();
+    assert_eq!(persisted.plugins.len(), 1);
+
+    // 已登记后修改缓存清单不再触发回填。
+    std::fs::write(&cache_manifest, r#"{"name":"demo","version":"9.9.9"}"#).unwrap();
+    let after_manifest_change = super::load_installed_plugins(None).unwrap();
+    assert_eq!(after_manifest_change.plugins.len(), 1);
+    assert_eq!(after_manifest_change.plugins[0].version, "1.0.0");
+}
+
 /// `claude_home()` 的 HOME 优先契约：Windows 的 `dirs::home_dir()` 走 Profile
 /// known-folder，不读 HOME/USERPROFILE，只有 HOME 维度能重定向 `~/.claude`；插件目录
 /// 解析依赖这一点（各入口各拼一份 home 会在 Windows 上分叉），故在此钉住——

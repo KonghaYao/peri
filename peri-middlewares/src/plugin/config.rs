@@ -334,10 +334,19 @@ pub fn load_installed_plugins(
                             }
 
                             if !migrated_plugins.is_empty() {
-                                // 将回填的插件添加到现有列表
+                                // 只有落盘成功的回填才能进入返回值：否则面板（默认读取）
+                                // 会报告“已登记”，而会话（显式路径读取）看不到；不并入
+                                // 即保持两者一致，且下次读取会重新尝试回填。
+                                let recorded_len = result.plugins.len();
                                 result.plugins.extend(migrated_plugins);
-                                // 保存更新后的数据
-                                let _ = save_installed_plugins(&result, Some(&path));
+                                if let Err(error) = save_installed_plugins(&result, Some(&path)) {
+                                    result.plugins.truncate(recorded_len);
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %error,
+                                        "插件兼容回填保存失败，跳过本次未持久化的回填"
+                                    );
+                                }
                                 return Ok(result);
                             }
                         }
