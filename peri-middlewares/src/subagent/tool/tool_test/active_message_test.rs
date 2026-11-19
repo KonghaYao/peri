@@ -185,6 +185,14 @@ impl MessageFixture {
         })
         .await
         .unwrap();
+        // 完成事件先于持久终态投递发出，结算仍在异步推进：等任务真正离开 active。
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while self.manager.active_count() != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("后台任务必须在完成事件后完成结算");
         assert_eq!(self.manager.active_count(), 0);
     }
 }
