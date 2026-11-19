@@ -17,7 +17,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::stories::{
     ACCENT, BG, BORDER, STORIES, StoryState, accent_style, handle_story_mouse, muted_style,
@@ -138,22 +138,25 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
 fn draw_header(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let buf = frame.buffer_mut();
     buf.set_style(area, Style::new().bg(BG));
+    let title = " peri-tui storybook ";
+    let count = format!(" {} / {} ", app.story + 1, STORIES.len());
+    let right = " peri-tui-components ";
+    // 左右两段都按显示列宽计：只有右侧标签不会覆盖计数时才渲染。
+    let left_width = UnicodeWidthStr::width(title) + UnicodeWidthStr::width(count.as_str());
+    let show_right = left_width + UnicodeWidthStr::width(right) <= area.width as usize;
     Line::from(vec![
         Span::styled(
-            " peri-tui storybook ",
+            title,
             Style::new()
                 .fg(BG)
                 .bg(ACCENT)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" {} / {} ", app.story + 1, STORIES.len()),
-            muted_style(),
-        ),
+        Span::styled(count, muted_style()),
     ])
     .render(area, buf);
-    if area.width > 32 {
-        Paragraph::new(" peri-tui-components ")
+    if show_right {
+        Paragraph::new(right)
             .alignment(Alignment::Right)
             .style(muted_style())
             .render(area, buf);
@@ -231,7 +234,10 @@ fn draw_stories(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         for (index, story) in STORIES.iter().enumerate().take(story_end).skip(first) {
             let selected = index == app.story;
             let marker = if selected { "▸ " } else { "  " };
-            let text = format!("{marker}{:<18} {:>2}", story.title, story.variants.len());
+            // 标题字段吃满剩余宽度，右侧 variant 计数始终可见。
+            let title_width = inner.width.saturating_sub(5) as usize;
+            let title = truncate_to_width(story.title, title_width);
+            let text = format!("{marker}{title:<title_width$} {:>2}", story.variants.len());
             let style = if selected {
                 selected_style()
             } else {
@@ -239,7 +245,7 @@ fn draw_stories(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             };
             let row = Rect::new(inner.x, inner.y + (index - first) as u16, inner.width, 1);
             buf.set_style(row, style);
-            buf.set_string(row.x, row.y, &text, style);
+            buf.set_stringn(row.x, row.y, &text, row.width as usize, style);
         }
     }
 
@@ -274,14 +280,30 @@ fn draw_stories(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 1,
             );
             buf.set_style(row, style);
-            buf.set_string(
+            buf.set_stringn(
                 row.x,
                 row.y,
                 format!(" {} {}", index + 1, variants[index].key),
+                row.width as usize,
                 style,
             );
         }
     }
+}
+
+/// 按显示列宽截断，避免 CJK 标题越过侧栏内宽。
+fn truncate_to_width(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + char_width > width {
+            break;
+        }
+        out.push(ch);
+        used += char_width;
+    }
+    out
 }
 
 fn draw_preview(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
@@ -389,11 +411,20 @@ fn handle_key(state: &mut StoryState, key: KeyEvent) -> bool {
     if key.code == KeyCode::Esc {
         return true;
     }
-    if matches!(state, StoryState::TextArea { .. }) {
+    if matches!(state, StoryState::TextArea { focused: true, .. }) {
         forward_textarea_key(state, key);
         return false;
     }
     key.code == KeyCode::Char('q')
+}
+
+/// 终端尺寸变化后布局已重建：清掉按钮按下态，但保留选中 variant 与滚动位置。
+fn handle_resize(state: &mut StoryState) {
+    match state {
+        StoryState::Document { pressed_button, .. } => *pressed_button = None,
+        StoryState::Streaming(document) => document.cancel_press(),
+        _ => {}
+    }
 }
 
 fn forward_textarea_key(state: &mut StoryState, key: KeyEvent) {
@@ -482,6 +513,7 @@ pub(crate) fn run(start_story: usize, start_variant: usize) -> io::Result<()> {
                 }
             }
             Event::Mouse(mouse) => handle_mouse(&mut app, mouse),
+            Event::Resize(..) => handle_resize(&mut app.state),
             _ => {}
         }
     }

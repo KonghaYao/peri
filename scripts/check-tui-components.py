@@ -46,6 +46,8 @@ GLOBAL_STATE = re.compile(r"(?<!')\bstatic\s+(?:mut\s+)?[A-Za-z_]")
 # Renderer-level caches/singletons with no application or session state. Each file
 # is reviewed once here; `MUTABLE_GLOBAL` still rejects unsynchronized mutable state.
 GLOBAL_STATE_ALLOWED = {
+    "peri-tui-components/src/bin/storybook/charts/dashboard.rs":
+        "immutable OnceLock for deterministic storybook bench fixtures (no session state)",
     "peri-tui-components/src/genui/library.rs":
         "immutable OnceLock for the static OpenUI schema",
     "peri-tui-components/src/markdown/boundary.rs":
