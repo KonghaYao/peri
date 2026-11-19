@@ -133,6 +133,7 @@ pub(super) struct Transcript {
     clock: u64,
     frame: Option<u64>,
     genui_revision: u64,
+    preview_revision: u64,
     /// [REQ-C01-3 / A20] 最近一次发布的重定位结果（仅当该次发布与一次更早历史并入配对）。
     /// 渲染 body 取走（一次性）后交给 `run_auto_follow` 的并入分支消费；
     /// 语义与身份口径见 [`super::viewport_anchor`]。
@@ -174,6 +175,7 @@ impl Transcript {
         }
         let structural_epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get();
         let structural_changed = structural_epoch != self.structural_epoch_seen;
+        let preview_revision = crate::kit::mermaid::revision();
         if structural_changed {
             for cache in caches.iter_mut() {
                 cache.evict();
@@ -360,7 +362,11 @@ impl Transcript {
             );
         }
         for slot in viewport.clone() {
-            if caches[slot].lines.is_none() {
+            let preview_stale = caches[slot].lines.is_some()
+                && caches[slot].entry.preview_revision() != Some(preview_revision)
+                && caches[slot].entry.has_mermaid() != Some(false)
+                && crate::kit::mermaid::vm_might_have_mermaid(&snapshot.items[slot]);
+            if caches[slot].lines.is_none() || preview_stale {
                 let transition = zone_transition(&snapshot.items, slot);
                 self.ensure_slot(
                     slot,
@@ -404,6 +410,7 @@ impl Transcript {
         self.width = width;
         self.context = Some(context);
         self.frame = Some(frame);
+        self.preview_revision = preview_revision;
         Arc::clone(&self.index)
     }
 

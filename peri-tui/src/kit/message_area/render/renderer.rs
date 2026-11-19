@@ -218,6 +218,13 @@ pub(crate) fn vm_to_lines_cached_with_layout(
             } else {
                 grid.content_width()
             };
+            let mermaid_frozen = data.started_at.is_none();
+            let mermaid_scope = crate::kit::mermaid::PreviewScope::for_bubble(
+                crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone(),
+                data.message_id.as_deref(),
+                data.started_at,
+                data.content_hash,
+            );
             let body_line = |line: Line<'static>| -> Line<'static> {
                 if brief {
                     self::helpers::process_prefixed_cont_line(grid, line_color, line)
@@ -312,8 +319,14 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                     {
                                         chunk_lines.push(body_line(Line::default()));
                                     }
-                                    chunk_lines
-                                        .extend(segment.lines.iter().cloned().map(&body_line));
+                                    let mermaid_lines = crate::kit::mermaid::display_lines(
+                                        segment,
+                                        &mermaid_scope,
+                                        body_width,
+                                        mermaid_frozen,
+                                        md_text_fg,
+                                    );
+                                    chunk_lines.extend(mermaid_lines.into_iter().map(&body_line));
                                 }
                             }
                             (Arc::as_ptr(chunk) as usize, chunk_lines)
@@ -347,7 +360,14 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                     {
                                         lines.push(body_line(Line::default()));
                                     }
-                                    lines.extend(segment.lines.iter().cloned().map(&body_line));
+                                    let mermaid_lines = crate::kit::mermaid::display_lines(
+                                        segment,
+                                        &mermaid_scope,
+                                        body_width,
+                                        mermaid_frozen,
+                                        md_text_fg,
+                                    );
+                                    lines.extend(mermaid_lines.into_iter().map(&body_line));
                                 }
                             }
                         }
@@ -395,10 +415,17 @@ pub(crate) fn vm_to_lines_cached_with_layout(
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::Mermaid(segment) => {
-                                // 出图能力接入前保持源码可见；元数据随段携带，
-                                // 进入稳定块后不会因快速路径只渲染 Text 而消失。
-                                for line in &segment.lines {
-                                    lines.push(body_line(line.clone()));
+                                // 帧可异步到达；每帧都向预览状态机取当前可信帧，
+                                // 未确认部分继续以源码尾部显示。
+                                let mermaid_lines = crate::kit::mermaid::display_lines(
+                                    segment,
+                                    &mermaid_scope,
+                                    body_width,
+                                    mermaid_frozen,
+                                    md_text_fg,
+                                );
+                                for line in mermaid_lines {
+                                    lines.push(body_line(line));
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::GenUi(segment) => {

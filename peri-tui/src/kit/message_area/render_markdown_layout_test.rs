@@ -577,17 +577,19 @@ fn test_streaming_table_without_leading_pipe_stays_visible() {
     }
 }
 
-/// Mermaid 围栏进入稳定块后，稳定快速路径必须继续显示源码，不能只剩前后正文。
+/// Mermaid 围栏进入稳定块后仍能拿到当前可信帧，不能只剩前后正文。
 #[test]
-fn test_mermaid_source_survives_stable_fast_path() {
-    let text = "intro\n\n```mermaid\ngraph TD\nA-->B\n```\n\nafter";
+#[serial_test::serial]
+fn test_mermaid_preview_survives_stable_fast_path() {
+    crate::kit::mermaid::reset_for_test();
+    let text = "intro\n\n```mermaid\ngraph TD\n开始-->结束\n```\n\nafter";
     let vm = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             started_at: Some(Instant::now()),
             duration_ms: None,
             text: text.to_string(),
             reasoning: None,
-            message_id: None,
+            message_id: Some("stable-path-mermaid".to_string()),
             content_hash: 91,
         }
         .into(),
@@ -595,47 +597,57 @@ fn test_mermaid_source_survives_stable_fast_path() {
     let grid = GridSpec::grid_for(80);
     let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
     let (first, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let first_rendered = super::all_text(&first);
+    assert!(
+        first_rendered.contains("graph TD") && first_rendered.contains("开始-->结束"),
+        "首帧在排版完成前应显示源码，实际 {first_rendered:?}"
+    );
+
+    crate::kit::mermaid::drain_preview_jobs_now();
     let (second, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
-    for lines in [&first, &second] {
-        let rendered = super::all_text(lines);
-        assert!(rendered.contains("intro"), "正文应保留，实际 {rendered:?}");
-        assert!(
-            rendered.contains("graph TD") && rendered.contains("A-->B"),
-            "Mermaid 源码进入稳定块后仍应可见，实际 {rendered:?}"
-        );
-        assert!(
-            rendered.contains("after"),
-            "尾部正文应保留，实际 {rendered:?}"
-        );
-        let index_of = |needle: &str| {
-            lines
-                .iter()
-                .position(|line| super::line_text(line).contains(needle))
-                .unwrap_or_else(|| panic!("应渲染出 {needle:?}，实际 {rendered:?}"))
-        };
-        assert_eq!(
-            index_of("graph TD"),
-            index_of("intro") + 2,
-            "正文与 Mermaid 源码之间应恰好 1 行空行"
-        );
-        assert!(
-            super::is_blank_separator(&lines[index_of("intro") + 1]),
-            "分隔行不应包含正文内容"
-        );
-    }
+    let rendered = super::all_text(&second);
+    assert!(rendered.contains("intro"), "正文应保留，实际 {rendered:?}");
+    assert!(
+        rendered.contains("开始") && rendered.contains("结束"),
+        "稳定块复用后应显示图，实际 {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("graph TD"),
+        "终稿应替换稳定块里的源码，实际 {rendered:?}"
+    );
+    assert!(
+        rendered.contains("after"),
+        "尾部正文应保留，实际 {rendered:?}"
+    );
+    let index_of = |needle: &str| {
+        second
+            .iter()
+            .position(|line| super::line_text(line).contains(needle))
+            .unwrap_or_else(|| panic!("应渲染出 {needle:?}，实际 {rendered:?}"))
+    };
+    assert!(
+        index_of("开始") > index_of("intro"),
+        "图应位于正文之后，实际 {rendered:?}"
+    );
+    assert!(
+        super::is_blank_separator(&second[index_of("intro") + 1]),
+        "正文与图之间应有空行，实际 {rendered:?}"
+    );
 }
 
-/// 冻结消息走完整解析（tail）时同样显示 Mermaid 源码。
+/// 冻结消息走完整解析（tail）时，闭合围栏显示终稿而不是源码。
 #[test]
-fn test_mermaid_source_survives_terminal_parse() {
-    let text = "```mermaid\ngraph TD\nA-->B\n```";
+#[serial_test::serial]
+fn test_mermaid_terminal_parse_shows_the_final_diagram() {
+    crate::kit::mermaid::reset_for_test();
+    let text = "```mermaid\ngraph TD\n开始-->结束\n```";
     let vm = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             started_at: None,
             duration_ms: None,
             text: text.to_string(),
             reasoning: None,
-            message_id: None,
+            message_id: Some("terminal-mermaid".to_string()),
             content_hash: 92,
         }
         .into(),
@@ -645,7 +657,11 @@ fn test_mermaid_source_survives_terminal_parse() {
     let (lines, ..) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
     let rendered = super::all_text(&lines);
     assert!(
-        rendered.contains("graph TD") && rendered.contains("A-->B"),
-        "完整解析的 Mermaid 源码应可见，实际 {rendered:?}"
+        rendered.contains("开始") && rendered.contains("结束"),
+        "闭合围栏应显示字符图，实际 {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("graph TD"),
+        "闭合终稿不应退回源码，实际 {rendered:?}"
     );
 }

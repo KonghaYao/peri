@@ -191,6 +191,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
+name = "ascii-dag"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd898d2dcffeeb51015c511a2849a8637c894b833afc946936d48b1e5c8aa6ec"
+
+[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2853,6 +2859,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mermaid-text"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90fa78f1bb32963ed114d9c318d880901ee4fa7103e133c3c3e530ebe5a09090"
+dependencies = [
+ "ascii-dag",
+ "chrono",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
 name = "miette"
 version = "5.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3823,6 +3840,7 @@ dependencies = [
  "fuzzy-matcher",
  "im",
  "image",
+ "mermaid-text",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

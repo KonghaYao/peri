@@ -1486,3 +1486,11 @@ panel-mcp-control-workspace = The workspace connection is managed by the host.
 panel-mcp-control-system = System MCP servers are managed by the host.
 panel-mcp-control-acp = MCP over ACP does not support runtime control.
 panel-mcp-control-session-policy = MCP runtime control is disabled for this session.
+
+# ---- Mermaid streaming preview ----
+
+mermaid-unclosed = Mermaid block is unclosed; showing the received source.
+mermaid-interrupted = Mermaid block interrupted: { $reason }
+mermaid-render-failed = Mermaid preview unavailable: { $reason }
+mermaid-unknown-statement = Source shown: unrecognized Mermaid statement.
+mermaid-open-scope = Group { $label } · { $count } statements confirmed

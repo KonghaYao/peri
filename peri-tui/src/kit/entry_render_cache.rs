@@ -51,6 +51,9 @@ pub(crate) struct EntryRenderCache {
     image_lines: Vec<ImageLineInfo>,
     genui_buttons: Vec<GenUiButtonInfo>,
     genui_revisions: Vec<(crate::kit::genui::GenUiBlockId, u64)>,
+    /// 上次渲染时的 Mermaid 预览版本；只有含 Mermaid 的消息需要据此重算。
+    preview_revision: Option<u64>,
+    has_mermaid: Option<bool>,
 }
 
 impl EntryRenderCache {
@@ -68,6 +71,14 @@ impl EntryRenderCache {
                 previous.occurrence != context.occurrence || previous.surface != context.surface
             });
         let content_changed = identity_changed || self.hash != Some(vm.content_hash());
+        if content_changed || self.has_mermaid.is_none() {
+            self.has_mermaid = Some(crate::kit::mermaid::vm_might_have_mermaid(vm));
+        }
+        let preview_revision = crate::kit::mermaid::revision();
+        let preview_changed = self.has_mermaid == Some(true)
+            && self
+                .preview_revision
+                .is_some_and(|previous| previous != preview_revision);
         // 转场翻转（相邻 entry 的起止 zone 变化，§6）改变本 slot 的入口台阶行——
         // 按 Layout 级重渲染本 slot，不牵动其他 slot 的缓存。
         let layout_changed = self.grid != Some(*grid)
@@ -76,7 +87,8 @@ impl EntryRenderCache {
                 previous.language != context.language
                     || !Arc::ptr_eq(&previous.theme, &context.theme)
             })
-            || self.genui_state_changed();
+            || self.genui_state_changed()
+            || preview_changed;
         let period = vm.animation_period_frames();
         let animated = period != 0 && self.frame / period != frame / period;
         let invalidation = if content_changed {
@@ -155,7 +167,18 @@ impl EntryRenderCache {
         self.transition = Some(transition);
         self.context = Some(context);
         self.frame = frame;
+        self.preview_revision = Some(preview_revision);
         invalidation
+    }
+
+    #[must_use]
+    pub(crate) fn preview_revision(&self) -> Option<u64> {
+        self.preview_revision
+    }
+
+    #[must_use]
+    pub(crate) fn has_mermaid(&self) -> Option<bool> {
+        self.has_mermaid
     }
 
     #[must_use]
