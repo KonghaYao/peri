@@ -185,6 +185,7 @@ pub(super) fn register_mermaid_action_click(
     actions: State<Arc<Vec<MermaidActionHit>>>,
     view_models: AtomState<ViewModelsSnapshot>,
     vm_caches: State<Vec<VmCacheSlot>>,
+    mermaid_action: State<Option<(usize, usize)>>,
 ) {
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         let Event::Mouse(mouse) = event else {
@@ -225,6 +226,8 @@ pub(super) fn register_mermaid_action_click(
             })
         });
         if identity == Some(hit.vm_hash) && still_same_fence {
+            *mermaid_action.write() = None;
+            crate::kit::mermaid::select_action(None);
             crate::kit::mermaid::open_detail(
                 hit.key.clone(),
                 &hit.fence,

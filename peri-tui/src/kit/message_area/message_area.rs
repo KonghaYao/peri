@@ -297,7 +297,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
 
     handlers::register_copy_click(&mut hooks, copy_buttons, view_models);
 
-    handlers::register_mermaid_action_click(&mut hooks, mermaid_actions, view_models, vm_caches);
+    handlers::register_mermaid_action_click(
+        &mut hooks,
+        mermaid_actions,
+        view_models,
+        vm_caches,
+        mermaid_action,
+    );
 
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
