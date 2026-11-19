@@ -671,6 +671,32 @@ fn runtime_shutdown_does_not_release_the_blocked_pumps_workspace_lease() {
     panic!("读泵退出后应归还工作区租约");
 }
 
+/// [D6] 读泵退出只是正文读完：HTTP 阶段仍在用同一租金（框架缓冲与响应缓冲），
+/// 必须等 `drain` 确认收敛后才回池，否则会提前复用工作区。
+#[tokio::test]
+async fn pump_exit_keeps_the_http_workspace_until_drain() {
+    let store = TestStore::new();
+    let budget = deployment();
+    let payload = file_payload(&store, &budget, &[0x94; 1024], Compression::None);
+    let mut owner = BodyTaskOwner::new();
+
+    owner.arm(&payload).expect("文件正文可 arm");
+    for _ in 0..2_000 {
+        if store.closes() > 0 {
+            break;
+        }
+        peri_time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(store.closes(), 1, "读泵已读完并释放读句柄");
+    assert!(
+        budget.try_http_workspace().is_err(),
+        "HTTP 结算完成前租约不得因读泵退出而提前归还"
+    );
+
+    owner.drain().await.expect("drain 确认读泵收敛");
+    assert!(budget.try_http_workspace().is_ok(), "drain 后租约回池");
+}
+
 #[tokio::test]
 async fn blocked_pump_converges_when_the_bridge_channel_stays_full() {
     let store = TestStore::new();

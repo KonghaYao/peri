@@ -4,9 +4,10 @@
 //! 重开正文并重建请求 → HTTP execute → 完整响应解析 → drain 读泵」执行：不依赖
 //! `Request::try_clone`，同一个不可变正文每次从头重开，请求逐次重建。
 //!
-//! 读泵是 `spawn_blocking` 的 blocking job，join 句柄与取消位握在 [`BodyTaskOwner`] 手里，
-//! 固定池工作区许可随读泵任务本身释放：没有脱离 owner 的 spawn，owner 被丢弃时读泵由
-//! 取消位与通道关闭收敛；`drain` 才确认 join，并按其结果决定是否允许上报成功。
+//! 读泵是 `spawn_blocking` 的 blocking job，join 句柄与取消位握在 [`BodyTaskOwner`] 手里；
+//! 固定池工作区许可由 owner 与读泵任务共享，读泵结束前不会被提前归还：没有脱离 owner 的
+//! spawn，owner 被丢弃时读泵由取消位与通道关闭收敛；`drain` 才确认 join，并按其结果决定
+//! 是否允许上报成功。
 //!
 //! checkpoint 有两条实现：内存路径的 [`MemoryCheckpoint`] 只登记累计尝试次数，文件路径的
 //! [`FileCheckpoint`] 独占交付句柄，在 blocking job 里持久更新 `attempts`/`state` 后才允许
@@ -222,12 +223,15 @@ fn poisoned_slot() -> LangfuseError {
     LangfuseError::IngestionApi("telemetry checkpoint slot poisoned".into())
 }
 
-/// 本次 attempt 的正文所有权：读泵 join 与取消位；HTTP 工作区许可随读泵任务释放。
+/// 本次 attempt 的正文所有权：读泵 join、取消位与 HTTP 工作区许可。
 ///
 /// 字段私有：调用方只能通过 [`BodyTaskOwner::drain`] 确认读泵已停，不能自己 join 或复用流。
 #[derive(Default)]
 pub(crate) struct BodyTaskOwner {
     pump: Option<Pump>,
+    /// HTTP 阶段工作区租约；与读泵任务共享。`drain` 或移交时释放本侧引用，读泵任务的
+    /// 引用保证租约不会在读泵真正结束前回池。
+    lease: Option<Arc<WorkspaceLease>>,
 }
 
 struct Pump {
@@ -239,7 +243,10 @@ struct Pump {
 
 impl BodyTaskOwner {
     pub(crate) fn new() -> Self {
-        Self { pump: None }
+        Self {
+            pump: None,
+            lease: None,
+        }
     }
 
     /// 为本次 attempt 从 byte 0 打开正文；内存正文克隆共享 `Bytes`，文件正文重开读泵。
@@ -255,7 +262,9 @@ impl BodyTaskOwner {
             PayloadBody::Memory(bytes) => Ok(body::memory_body(bytes.bytes().clone())),
             PayloadBody::File(object) => {
                 // 通道与读块从 payload 绑定的部署预算取工作区，不在 client 内另建预算。
-                let lease = payload.budget().try_http_workspace()?;
+                // 租约与读泵共享：读泵读到 EOF 时 HTTP 可能仍在等响应，本侧引用要到
+                // `drain` 确认整次 HTTP 阶段结束才释放。
+                let lease = Arc::new(payload.budget().try_http_workspace()?);
                 let (sender, chunks) = mpsc::channel(2);
                 let cancel = Arc::new(AtomicBool::new(false));
                 let job = spawn_file_pump(
@@ -263,8 +272,9 @@ impl BodyTaskOwner {
                     object.meta().id,
                     Arc::clone(&cancel),
                     sender,
-                    lease,
+                    Arc::clone(&lease),
                 );
+                self.lease = Some(lease);
                 self.pump = Some(Pump {
                     cancel,
                     job: Some(job),
@@ -288,6 +298,7 @@ impl BodyTaskOwner {
             failed = job.await.is_err();
         }
         self.pump = None;
+        self.lease = None;
         if failed {
             return Err(LangfuseError::IngestionApi(
                 "OTLP body read pump did not complete".into(),
@@ -300,7 +311,8 @@ impl BodyTaskOwner {
 /// 未确认 join 的读泵：交给常驻回收，等到任务真的结束才释放内存。
 ///
 /// 取消位只能让读泵在下一个检查点停下，既不能中断已经进入的阻塞 IO，也不能归还它占用的
-/// 工作区许可；许可随读泵任务释放，所以「确认不了 join」时既不能丢弃句柄，也不能假装已归还。
+/// 工作区许可；许可与 HTTP owner 共享，读泵任务的引用活到任务结束，所以「确认不了 join」
+/// 时既不能丢弃句柄，也不能假装已归还。
 struct OrphanPump {
     cancel: Arc<AtomicBool>,
     job: Option<JoinHandle<()>>,
@@ -325,6 +337,8 @@ fn hand_to_reaper(owner: &mut BodyTaskOwner) {
     let Some(pump) = owner.pump.take() else {
         return;
     };
+    // 本 attempt 已结束：释放 HTTP 侧引用，读泵任务的共享引用继续护住租约直到读泵退出。
+    owner.lease = None;
     pump.cancel.store(true, Ordering::Release);
     push_orphan(OrphanPump {
         cancel: pump.cancel,
@@ -336,7 +350,7 @@ fn hand_to_reaper(owner: &mut BodyTaskOwner) {
 fn push_orphan(orphan: OrphanPump) {
     let mut pending = ORPHAN_PUMPS.lock();
     pending.push(orphan);
-    // 拿不到 runtime 时先留存，等下一次移交再接管；读泵与租约仍归 orphan。
+    // 拿不到 runtime 时先留存，等下一次移交再接管；读泵仍归 orphan。
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
@@ -361,7 +375,7 @@ pub(crate) async fn retire(owner: &mut BodyTaskOwner, deadline: peri_time::Insta
 
 impl Drop for BodyTaskOwner {
     /// Drop 不能 await（D6），但也不能只置取消位就丢句柄：未确认 join 的读泵移交常驻回收，
-    /// 每路由独立任务等到真正退出；工作区租约随读泵任务释放，不受 join 侧存活影响。
+    /// 每路由独立任务等到真正退出；此时本侧租约引用已释放，读泵侧引用仍护住租约。
     fn drop(&mut self) {
         hand_to_reaper(self);
     }
@@ -369,7 +383,8 @@ impl Drop for BodyTaskOwner {
 
 /// 文件读泵：blocking job 每次最多读一块，每块投进容量 2 的桥接 channel。
 ///
-/// 工作区租约按值随本任务走，任务结束才回池，因此 join 任务所在 runtime 关闭也不会提前归还。
+/// 工作区租约以共享引用随本任务走：读泵侧引用活到任务结束，因此 join 任务所在 runtime
+/// 关闭也不会提前归还；HTTP 侧的引用由 owner 在 `drain`/移交时释放。
 ///
 /// 对象不可变，每次 attempt 都从 byte 0 重新 `open`；读到的字节数由 payload 的 `wire_len`
 /// 与端口元数据交叉核对，读泵自身不改变正文。
@@ -378,7 +393,7 @@ fn spawn_file_pump(
     id: ObjectId,
     cancel: Arc<AtomicBool>,
     sender: mpsc::Sender<Result<Bytes, std::io::Error>>,
-    lease: WorkspaceLease,
+    lease: Arc<WorkspaceLease>,
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
