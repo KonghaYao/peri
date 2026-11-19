@@ -288,6 +288,10 @@ impl ConfigurationSnapshot {
 pub struct ConfigurationSystem {
     source: Arc<dyn ConfigurationSource>,
     snapshots: Mutex<HashMap<ConfigurationScope, Arc<ConfigurationSnapshot>>>,
+    /// 串行化配置源 I/O 与发布，避免并发写互相覆盖；读路径不经过此锁。
+    ///
+    /// `snapshots` 只在读取或替换映射项的瞬间持有，不得跨越 `source` 调用。
+    write_gate: Mutex<()>,
 }
 
 impl Debug for ConfigurationSystem {
@@ -310,6 +314,7 @@ impl ConfigurationSystem {
         Self {
             source,
             snapshots: Mutex::new(HashMap::new()),
+            write_gate: Mutex::new(()),
         }
     }
 
@@ -318,16 +323,19 @@ impl ConfigurationSystem {
         scope: ConfigurationScope,
     ) -> Result<Arc<ConfigurationSnapshot>, ConfigurationError> {
         scope.validate()?;
-        let mut snapshots = self
-            .snapshots
+        let _writer = self
+            .write_gate
             .lock()
-            .expect("configuration snapshots must not expose a partially completed update");
+            .expect("configuration writes must be serialized");
         let inputs = self
             .source
             .collect(&scope)
             .map_err(ConfigurationError::InputUnavailable)?;
         let snapshot = Arc::new(ConfigurationSnapshot::resolve(scope.clone(), inputs)?);
-        snapshots.insert(scope, snapshot.clone());
+        self.snapshots
+            .lock()
+            .expect("configuration snapshots must not expose a partially completed update")
+            .insert(scope, snapshot.clone());
         Ok(snapshot)
     }
 
@@ -372,12 +380,16 @@ impl ConfigurationSystem {
         expected_revision: ConfigurationRevision,
         settings: &PeriConfig,
     ) -> Result<Arc<ConfigurationSnapshot>, ConfigurationError> {
-        let snapshots = self
+        let _writer = self
+            .write_gate
+            .lock()
+            .expect("configuration writes must be serialized");
+        let current = self
             .snapshots
             .lock()
-            .expect("configuration snapshots must not expose a partially completed update");
-        let current = snapshots
+            .expect("configuration snapshots must not expose a partially completed update")
             .get(scope)
+            .cloned()
             .ok_or(ConfigurationError::UnresolvedScope)?;
         if current.revision != expected_revision {
             return Err(ConfigurationError::Conflict);
@@ -389,7 +401,7 @@ impl ConfigurationSystem {
         if revision_of(scope, &inputs)? != expected_revision {
             return Err(ConfigurationError::Conflict);
         }
-        settings_update_document(scope, current, &mut inputs, settings)?;
+        settings_update_document(scope, &current, &mut inputs, settings)?;
         Ok(Arc::new(ConfigurationSnapshot::resolve(
             scope.clone(),
             inputs,
@@ -450,12 +462,16 @@ impl ConfigurationSystem {
             &mut ConfigurationInputs,
         ) -> Result<(PathBuf, Option<String>, String), ConfigurationError>,
     ) -> Result<Arc<ConfigurationSnapshot>, ConfigurationError> {
-        let mut snapshots = self
+        let _writer = self
+            .write_gate
+            .lock()
+            .expect("configuration writes must be serialized");
+        let current = self
             .snapshots
             .lock()
-            .expect("configuration snapshots must not expose a partially completed update");
-        let current = snapshots
+            .expect("configuration snapshots must not expose a partially completed update")
             .get(scope)
+            .cloned()
             .ok_or(ConfigurationError::UnresolvedScope)?;
         if current.revision != expected_revision {
             return Err(ConfigurationError::Conflict);
@@ -467,7 +483,7 @@ impl ConfigurationSystem {
         if revision_of(scope, &inputs)? != expected_revision {
             return Err(ConfigurationError::Conflict);
         }
-        let (path, expected, content) = changes(current, &mut inputs)?;
+        let (path, expected, content) = changes(&current, &mut inputs)?;
         let next = Arc::new(ConfigurationSnapshot::resolve(scope.clone(), inputs)?);
         if !self
             .source
@@ -476,6 +492,10 @@ impl ConfigurationSystem {
         {
             return Err(ConfigurationError::Conflict);
         }
+        let mut snapshots = self
+            .snapshots
+            .lock()
+            .expect("configuration snapshots must not expose a partially completed update");
         snapshots.retain(|other_scope, _| {
             other_scope.global_settings != scope.global_settings || other_scope == scope
         });

@@ -922,3 +922,4 @@ fn explanations_omit_environment_secrets_while_debug_preserves_inputs() {
 }
 
 include!("system_test/beta_configuration.rs");
+include!("system_test/concurrency.rs");
