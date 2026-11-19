@@ -805,6 +805,9 @@ async fn awaited_settlement_retries_a_failed_commit_before_acknowledging() {
     });
     let delivery = crate::session::bg_complete::task_bg_complete_callback(route.clone());
     let (manager, ticket) = manager_fixture();
+    // 关闭执行作用域后 settle 不会启动自动重试 worker，显式重试才是唯一投递者；
+    // 否则两者竞争会导致 retry_pending_deliveries 返回值随调度变化。
+    manager.registry().scope.close();
     let error = manager
         .settle_completed_awaited(&ticket, result(), delivery)
         .await
