@@ -468,9 +468,12 @@ impl PreviewEngine {
     /// 淘汰几何到给定预算，并释放仍引用被淘汰条目的实例帧。
     pub fn evict_geometry_to(&mut self, budget: usize) {
         let removed = self.geometry.evict_to(budget);
-        if removed.is_empty() {
-            return;
-        }
+        self.release_evicted_frames(&removed);
+    }
+
+    /// 清掉仍展示这些几何键的实例帧；帧只持有共享行分配，几何已不在缓存里时
+    /// 保留它只会让内存越过几何预算。缺帧会在下一次观察时重新排队。
+    fn release_evicted_frames(&mut self, removed: &[LayoutKey]) {
         for key in removed {
             for state in self.states.values_mut() {
                 let matches = |frame: &Option<FrameState>| {
@@ -778,10 +781,11 @@ impl PreviewEngine {
                     JobKind::Preview => LayoutKind::Preview,
                     JobKind::Final => LayoutKind::Final,
                 };
-                if self.geometry.insert(
+                let (inserted, evicted) = self.geometry.insert(
                     LayoutKey::new(kind, Arc::clone(&job.source), job.width),
                     Arc::clone(&lines),
-                ) {
+                );
+                if inserted {
                     self.layouts = self.layouts.wrapping_add(1);
                 }
                 let frame = FrameState {
@@ -808,6 +812,7 @@ impl PreviewEngine {
                 }
                 state.error = None;
                 state.error_input = None;
+                self.release_evicted_frames(&evicted);
                 self.revision = self.revision.wrapping_add(1);
                 self.bump_message(&job.key);
                 true

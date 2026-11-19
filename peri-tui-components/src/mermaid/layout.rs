@@ -78,10 +78,16 @@ impl GeometryCache {
         Some((Arc::clone(&entry.lines), entry.bytes))
     }
 
-    /// 插入一份几何；返回是否为新的排版结果（缓存命中返回 `false`）。
-    pub(crate) fn insert(&mut self, key: LayoutKey, lines: Arc<Vec<String>>) -> bool {
+    /// 插入一份几何；返回是否为新的排版结果（缓存命中返回 `false`），以及为守住
+    /// 预算而淘汰的键。调用方须释放仍引用这些键的实例帧，否则帧会继续持有行分配。
+    #[must_use]
+    pub(crate) fn insert(
+        &mut self,
+        key: LayoutKey,
+        lines: Arc<Vec<String>>,
+    ) -> (bool, Vec<LayoutKey>) {
         if self.entries.contains_key(&key) {
-            return false;
+            return (false, Vec::new());
         }
         let bytes = geometry_bytes(&lines);
         self.clock = self.clock.wrapping_add(1);
@@ -94,10 +100,12 @@ impl GeometryCache {
                 accessed: self.clock,
             },
         );
-        if self.retained > GEOMETRY_BUDGET {
-            self.evict_to(GEOMETRY_BUDGET * 3 / 4);
-        }
-        true
+        let removed = if self.retained > GEOMETRY_BUDGET {
+            self.evict_to(GEOMETRY_BUDGET * 3 / 4)
+        } else {
+            Vec::new()
+        };
+        (true, removed)
     }
 
     #[must_use]
@@ -167,12 +175,35 @@ mod tests {
         let mut cache = GeometryCache::default();
         let key = LayoutKey::new(LayoutKind::Final, source("graph TD\nA-->B"), 80);
         let lines = Arc::new(vec!["┌───┐".to_string(), "└───┘".to_string()]);
-        assert!(cache.insert(key.clone(), Arc::clone(&lines)));
-        assert!(!cache.insert(key.clone(), Arc::clone(&lines)));
+        assert!(cache.insert(key.clone(), Arc::clone(&lines)).0);
+        assert!(!cache.insert(key.clone(), Arc::clone(&lines)).0);
         assert_eq!(cache.retained_bytes(), geometry_bytes(&lines));
         assert!(cache.get(&key).is_some());
         let removed = cache.evict_to(0);
         assert_eq!(removed, vec![key]);
         assert_eq!(cache.retained_bytes(), 0);
+    }
+
+    #[test]
+    fn budgeting_during_insert_reports_the_evicted_keys() {
+        let mut cache = GeometryCache::default();
+        let mut keys = Vec::new();
+        for index in 0..5 {
+            let key = LayoutKey::new(
+                LayoutKind::Final,
+                source(&format!("graph TD\nA{index}-->B")),
+                80,
+            );
+            let lines = Arc::new(vec!["x".repeat(512 * 1024); 3]);
+            let (inserted, removed) = cache.insert(key.clone(), lines);
+            assert!(inserted);
+            keys.push(key);
+            if !removed.is_empty() {
+                assert_eq!(removed[0], keys[0], "oldest entry goes first");
+            }
+        }
+        assert!(cache.get(&keys[0]).is_none());
+        assert!(cache.get(&keys[4]).is_some());
+        assert!(cache.retained_bytes() <= GEOMETRY_BUDGET);
     }
 }

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::mermaid::fence::{
@@ -661,6 +662,53 @@ fn evicting_geometry_drops_the_instance_frame_too() {
         engine.peek(&key("m1"), &closed, 60).content,
         PreviewContent::Source
     ));
+}
+
+/// 插入触发的自动淘汰同样要收回实例帧，否则旧行分配继续留在状态里。
+#[test]
+fn budget_overflow_eviction_drops_the_instance_frames_it_removed() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let bulky = || {
+        Arc::new(vec![
+            "x".repeat(512 * 1024),
+            "x".repeat(512 * 1024),
+            "x".repeat(512 * 1024),
+        ])
+    };
+    let mut diagrams = Vec::new();
+    for index in 0..5 {
+        let fence_key = key(&format!("m{index}"));
+        let closed = fence(&format!("graph TD\nA{index}-->B\n"), true);
+        engine.observe(fence_key.clone(), &closed, 60, true, now);
+        let job = engine.take_due(now).expect("job is due");
+        assert!(engine.complete(job, Ok(RenderOutput::from_lines(bulky())), now));
+        if index == 0 {
+            assert!(matches!(
+                engine.peek(&fence_key, &closed, 60).content,
+                PreviewContent::Frame { .. }
+            ));
+        }
+        diagrams.push((fence_key, closed));
+    }
+    let (first_key, first_fence) = &diagrams[0];
+    assert!(
+        matches!(
+            engine.peek(first_key, first_fence, 60).content,
+            PreviewContent::Source
+        ),
+        "the oldest frame must not keep evicted geometry alive"
+    );
+    assert!(
+        engine.retained_geometry_bytes() <= super::super::layout::GEOMETRY_BUDGET,
+        "retained geometry stays within the budget"
+    );
+    let (last_key, last_fence) = diagrams.last().expect("diagrams recorded");
+    assert!(matches!(
+        engine.peek(last_key, last_fence, 60).content,
+        PreviewContent::Frame { .. }
+    ));
+    assert_eq!(engine.layouts(), 5);
 }
 
 #[test]
