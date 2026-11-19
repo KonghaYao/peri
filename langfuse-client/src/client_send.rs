@@ -4,9 +4,9 @@
 //! 重开正文并重建请求 → HTTP execute → 完整响应解析 → drain 读泵」执行：不依赖
 //! `Request::try_clone`，同一个不可变正文每次从头重开，请求逐次重建。
 //!
-//! 读泵是 `spawn_blocking` 的 blocking job，join 句柄、取消位与固定池工作区许可都握在
-//! [`BodyTaskOwner`] 手里：没有脱离 owner 的 spawn，owner 被丢弃时读泵由取消位与通道关闭
-//! 收敛；`drain` 才确认 join，并按其结果决定是否允许上报成功。
+//! 读泵是 `spawn_blocking` 的 blocking job，join 句柄与取消位握在 [`BodyTaskOwner`] 手里，
+//! 固定池工作区许可随读泵任务本身释放：没有脱离 owner 的 spawn，owner 被丢弃时读泵由
+//! 取消位与通道关闭收敛；`drain` 才确认 join，并按其结果决定是否允许上报成功。
 //!
 //! checkpoint 有两条实现：内存路径的 [`MemoryCheckpoint`] 只登记累计尝试次数，文件路径的
 //! [`FileCheckpoint`] 独占交付句柄，在 blocking job 里持久更新 `attempts`/`state` 后才允许
@@ -222,14 +222,12 @@ fn poisoned_slot() -> LangfuseError {
     LangfuseError::IngestionApi("telemetry checkpoint slot poisoned".into())
 }
 
-/// 本次 attempt 的正文所有权：读泵 join、取消位与 HTTP 工作区许可。
+/// 本次 attempt 的正文所有权：读泵 join 与取消位；HTTP 工作区许可随读泵任务释放。
 ///
 /// 字段私有：调用方只能通过 [`BodyTaskOwner::drain`] 确认读泵已停，不能自己 join 或复用流。
 #[derive(Default)]
 pub(crate) struct BodyTaskOwner {
     pump: Option<Pump>,
-    /// 文件读泵的桥接缓冲工作区（固定池租约）；内存正文不需要。
-    lease: Option<WorkspaceLease>,
 }
 
 struct Pump {
@@ -241,10 +239,7 @@ struct Pump {
 
 impl BodyTaskOwner {
     pub(crate) fn new() -> Self {
-        Self {
-            pump: None,
-            lease: None,
-        }
+        Self { pump: None }
     }
 
     /// 为本次 attempt 从 byte 0 打开正文；内存正文克隆共享 `Bytes`，文件正文重开读泵。
@@ -268,8 +263,8 @@ impl BodyTaskOwner {
                     object.meta().id,
                     Arc::clone(&cancel),
                     sender,
+                    lease,
                 );
-                self.lease = Some(lease);
                 self.pump = Some(Pump {
                     cancel,
                     job: Some(job),
@@ -293,7 +288,6 @@ impl BodyTaskOwner {
             failed = job.await.is_err();
         }
         self.pump = None;
-        self.lease = None;
         if failed {
             return Err(LangfuseError::IngestionApi(
                 "OTLP body read pump did not complete".into(),
@@ -303,14 +297,13 @@ impl BodyTaskOwner {
     }
 }
 
-/// 未确认 join 的读泵：连工作区租约一起交给常驻回收，等到任务真的结束才释放内存。
+/// 未确认 join 的读泵：交给常驻回收，等到任务真的结束才释放内存。
 ///
 /// 取消位只能让读泵在下一个检查点停下，既不能中断已经进入的阻塞 IO，也不能归还它占用的
-/// 工作区许可。因此「确认不了 join」时既不丢弃句柄、也不假装已归还租约（契约 D6）。
+/// 工作区许可；许可随读泵任务释放，所以「确认不了 join」时既不能丢弃句柄，也不能假装已归还。
 struct OrphanPump {
     cancel: Arc<AtomicBool>,
     job: Option<JoinHandle<()>>,
-    lease: Option<WorkspaceLease>,
 }
 
 impl OrphanPump {
@@ -320,7 +313,6 @@ impl OrphanPump {
         if let Some(job) = self.job {
             let _ = job.await;
         }
-        drop(self.lease);
     }
 }
 
@@ -337,7 +329,6 @@ fn hand_to_reaper(owner: &mut BodyTaskOwner) {
     push_orphan(OrphanPump {
         cancel: pump.cancel,
         job: pump.job,
-        lease: owner.lease.take(),
     });
 }
 
@@ -369,14 +360,16 @@ pub(crate) async fn retire(owner: &mut BodyTaskOwner, deadline: peri_time::Insta
 }
 
 impl Drop for BodyTaskOwner {
-    /// Drop 不能 await（D6），但也不能只置取消位就丢句柄与租约：未确认 join 的读泵移交
-    /// 常驻回收，每路由独立任务等到真正退出后再归还工作区。
+    /// Drop 不能 await（D6），但也不能只置取消位就丢句柄：未确认 join 的读泵移交常驻回收，
+    /// 每路由独立任务等到真正退出；工作区租约随读泵任务释放，不受 join 侧存活影响。
     fn drop(&mut self) {
         hand_to_reaper(self);
     }
 }
 
 /// 文件读泵：blocking job 每次最多读一块，每块投进容量 2 的桥接 channel。
+///
+/// 工作区租约按值随本任务走，任务结束才回池，因此 join 任务所在 runtime 关闭也不会提前归还。
 ///
 /// 对象不可变，每次 attempt 都从 byte 0 重新 `open`；读到的字节数由 payload 的 `wire_len`
 /// 与端口元数据交叉核对，读泵自身不改变正文。
@@ -385,8 +378,10 @@ fn spawn_file_pump(
     id: ObjectId,
     cancel: Arc<AtomicBool>,
     sender: mpsc::Sender<Result<Bytes, std::io::Error>>,
+    lease: WorkspaceLease,
 ) -> JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
+        let _lease = lease;
         let mut reader = match store.open(id) {
             Ok(reader) => reader,
             Err(error) => {

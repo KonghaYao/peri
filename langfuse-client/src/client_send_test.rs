@@ -632,6 +632,45 @@ async fn blocked_pump_does_not_delay_another_pumps_workspace_lease() {
     assert_eq!(blocked_store.closes(), 1, "阻塞读返回后自己的租约才归还");
 }
 
+/// [D6] 承载 join 任务的 runtime 关闭时，工作区租约仍须绑定在读泵任务本身：
+/// join future 被丢弃不能提前归还租约，否则仍阻塞的读泵会超出并发上限。
+#[test]
+fn runtime_shutdown_does_not_release_the_blocked_pumps_workspace_lease() {
+    let store = TestStore::gated();
+    let budget = deployment();
+    let payload = file_payload(&store, &budget, &[0x93; 1024], Compression::None);
+    let gate = store.gate();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("测试 runtime");
+
+    // arm 与移交都发生在该 runtime：关闭它会把仍 pending 的 join 任务一并丢弃。
+    runtime.block_on(async {
+        let mut owner = BodyTaskOwner::new();
+        owner.arm(&payload).expect("文件正文可 arm");
+        pump_reaches_gated_read(&gate).await;
+        drop(owner);
+        wait_for_no_orphan_pumps().await;
+    });
+    runtime.shutdown_background();
+
+    assert!(
+        budget.try_http_workspace().is_err(),
+        "join 任务随 runtime 关闭被丢弃后，读泵仍须持有工作区租约"
+    );
+    assert_eq!(store.closes(), 0, "阻塞读未返回前读句柄不可能释放");
+
+    gate.release();
+    for _ in 0..2_000 {
+        if store.closes() > 0 && budget.try_http_workspace().is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("读泵退出后应归还工作区租约");
+}
+
 #[tokio::test]
 async fn blocked_pump_converges_when_the_bridge_channel_stays_full() {
     let store = TestStore::new();
