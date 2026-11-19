@@ -415,6 +415,19 @@ async fn run_before_tool_approvals(
                 // （`EffectiveToolDispatcher::dispatch`）据此还原「无人可答 ⇒ 未执行」。
                 rejection_result.effective_error_code = Some(rejection_error_code(*cause));
                 rejection_result.rejection_cause = Some(*cause);
+                // 被拒调用不会执行，也不会触发 after_tool：按调用结算 before_tool
+                // 暂存的执行前状态，避免旧文件全文留到下一轮；同批其他调用不受影响。
+                if let Err(error) =
+                    crate::agent::stages::middleware_runner::run_tool_rejected(ctx, turn, tool_call)
+                        .await
+                {
+                    tracing::warn!(
+                        tool.name = %tool_call.name,
+                        tool.call_id = %tool_call.id,
+                        error = %error,
+                        "rejected tool call settlement failed"
+                    );
+                }
                 if let Some(turn_id) = turn_id {
                     ctx.emit_render(RenderEvent::ToolStarted {
                         turn_id,

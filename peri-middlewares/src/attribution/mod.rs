@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! before_tool (Write/Edit) → 读取旧文件内容 → 存入 pending
-//!   → [工具执行]
-//! after_tool  (Write/Edit) → 读取新文件内容 → track_change()
+//!   → [工具执行]         → after_tool       → 读取新文件内容 → track_change()
+//!   → [审批阶段被拒绝]   → on_tool_rejected → 丢弃该调用的 pending（不计算贡献）
 //! ```
 
 mod model_email;
@@ -36,6 +36,10 @@ mod tests;
 #[cfg(test)]
 #[path = "io_test.rs"]
 mod io_tests;
+
+#[cfg(test)]
+#[path = "rejected_settlement_test.rs"]
+mod rejected_settlement_tests;
 
 mod git_attribution_middleware;
 pub use git_attribution_middleware::GitAttributionMiddleware;
