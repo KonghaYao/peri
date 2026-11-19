@@ -45,6 +45,8 @@ pub(crate) enum PreviewNotice {
     Interrupted(String),
     Failed(String),
     UnknownStatement,
+    /// 图型没有可用的字符图布局（如 `block`/`block-beta`）：保留源码并说明原因。
+    Unsupported(String),
     /// 源码或排版结果超过几何预算：保留源码，等待概览视图（第 4 部分）。
     TooLarge {
         bytes: usize,
@@ -327,6 +329,10 @@ impl FenceState {
             })
         } else if self.paused.is_some() {
             Some(PreviewNotice::UnknownStatement)
+        } else if self.closed && !self.mode.renders_when_closed() {
+            Some(PreviewNotice::Unsupported(
+                "diagram type keeps its source in preview".to_string(),
+            ))
         } else if !self.closed && self.frozen {
             Some(PreviewNotice::Unclosed)
         } else {
@@ -831,6 +837,11 @@ pub(crate) fn rebuild_history(
         notice: None,
     };
     if !mode.renders_when_closed() {
+        if fence.closed() {
+            replay.notice = Some(PreviewNotice::Unsupported(
+                "diagram type keeps its source in preview".to_string(),
+            ));
+        }
         return replay;
     }
     if fence.closed() {

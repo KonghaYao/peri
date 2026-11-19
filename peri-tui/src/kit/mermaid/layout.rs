@@ -9,7 +9,7 @@ use std::sync::Arc;
 /// 上游库版本或排版选项语义变化时递增，使旧几何失效。
 pub(crate) const ENGINE_VERSION: u32 = 1;
 /// `RenderOptions` 的紧凑参数标识；修改参数时递增。
-pub(crate) const LAYOUT_PARAMS: u32 = 1;
+pub(crate) const LAYOUT_PARAMS: u32 = 2;
 
 /// 单张图源码上限：超过后不排队完整排版，保留源码（概览由第 4 部分承接）。
 pub(crate) const MAX_LAYOUT_SOURCE_BYTES: usize = 128 * 1024;

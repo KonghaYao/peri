@@ -1468,6 +1468,8 @@ exit-resume-hint = To resume this session: peri -r { $session }
 
 panel-title-history-detail = History Detail
 panel-desc-history-detail = Oversized history entry detail
+panel-title-mermaid-diagram = Diagram
+panel-desc-mermaid-diagram = Mermaid overview, groups, full diagram and source
 
 # ACP MCP runtime control
 panel-mcp-detail-btn-restart = Restart
@@ -1495,3 +1497,6 @@ mermaid-render-failed = Mermaid preview unavailable: { $reason }
 mermaid-unknown-statement = Source shown: unrecognized Mermaid statement.
 mermaid-too-large = Diagram source is too large to lay out inline ({ $bytes } bytes); showing the source.
 mermaid-open-scope = Group { $label } · { $count } statements confirmed
+mermaid-unsupported = Source shown: { $reason }
+mermaid-open-diagram = View diagram
+mermaid-detail-copied = Diagram source copied.

@@ -94,7 +94,8 @@ pub(crate) fn display_lines(
         // 无后台线程（CLI/测试）时，历史消息直接按同一纯函数重建，
         // 避免留下永不发布的待排版任务。
         let replay = rebuild_history(&segment.fence, width, None);
-        return render_content(segment, replay.content, replay.notice, foreground);
+        let selected = super::action_selected(&scope.key(segment.fence.open_start));
+        return render_content(segment, replay.content, replay.notice, foreground, selected);
     }
     let view = store::observe(
         scope.key(segment.fence.open_start),
@@ -102,7 +103,8 @@ pub(crate) fn display_lines(
         width,
         frozen,
     );
-    render_content(segment, view.content, view.notice, foreground)
+    let selected = super::action_selected(&scope.key(segment.fence.open_start));
+    render_content(segment, view.content, view.notice, foreground, selected)
 }
 
 /// 消息区渲染路径：只读取当前帧，不排队。可见性调度由 transcript 用围栏
@@ -116,8 +118,9 @@ pub(crate) fn display_lines_peek(
 ) -> (Vec<Line<'static>>, usize) {
     let view = store::peek(scope.key(segment.fence.open_start), &segment.fence, width);
     let bytes = content_bytes(&view.content);
+    let selected = super::action_selected(&scope.key(segment.fence.open_start));
     (
-        render_content(segment, view.content, view.notice, foreground),
+        render_content(segment, view.content, view.notice, foreground, selected),
         bytes,
     )
 }
@@ -134,6 +137,7 @@ fn render_content(
     content: PreviewContent,
     notice: Option<PreviewNotice>,
     foreground: Color,
+    action_selected: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = match content {
         PreviewContent::Source => segment.lines.clone(),
@@ -154,6 +158,7 @@ fn render_content(
     if let Some(notice) = notice {
         lines.push(notice_line(notice, foreground));
     }
+    lines.push(open_action_line(foreground, action_selected));
     lines
 }
 
@@ -193,6 +198,24 @@ fn frame_lines(lines: &[String], foreground: Color) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn open_action_line(foreground: Color, selected: bool) -> Line<'static> {
+    let text = if selected {
+        format!("▸ [{}]", i18n::tr("mermaid-open-diagram"))
+    } else {
+        format!("▸ {}", i18n::tr("mermaid-open-diagram"))
+    };
+    let style = if selected {
+        Style::default()
+            .fg(foreground)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(foreground)
+            .add_modifier(Modifier::DIM | Modifier::UNDERLINED)
+    };
+    Line::from(Span::styled(text, style))
+}
+
 fn notice_line(notice: PreviewNotice, foreground: Color) -> Line<'static> {
     let text = match notice {
         PreviewNotice::Unclosed => i18n::tr("mermaid-unclosed"),
@@ -205,6 +228,10 @@ fn notice_line(notice: PreviewNotice, foreground: Color) -> Line<'static> {
             &[("reason".to_string(), reason.into())],
         ),
         PreviewNotice::UnknownStatement => i18n::tr("mermaid-unknown-statement"),
+        PreviewNotice::Unsupported(reason) => i18n::tr_args(
+            "mermaid-unsupported",
+            &[("reason".to_string(), reason.into())],
+        ),
         PreviewNotice::TooLarge { bytes } => i18n::tr_args(
             "mermaid-too-large",
             &[("bytes".to_string(), bytes.to_string().into())],

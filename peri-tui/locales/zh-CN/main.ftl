@@ -1465,6 +1465,8 @@ exit-resume-hint = 恢复本会话：peri -r { $session }
 
 panel-title-history-detail = 历史详情
 panel-desc-history-detail = 超大历史条目详情
+panel-title-mermaid-diagram = 图详情
+panel-desc-mermaid-diagram = Mermaid 概览、分组、全图与源码
 
 # ACP MCP 运行控制
 panel-mcp-detail-btn-restart = 重启
@@ -1492,3 +1494,6 @@ mermaid-render-failed = Mermaid 预览不可用：{ $reason }
 mermaid-unknown-statement = 已展示源码：无法识别的 Mermaid 语句。
 mermaid-too-large = 图源码过大，无法内联排版（{ $bytes } 字节），当前展示源码。
 mermaid-open-scope = 分组 { $label } · 已确认 { $count } 条语句
+mermaid-unsupported = 当前展示源码：{ $reason }
+mermaid-open-diagram = 查看图
+mermaid-detail-copied = 已复制图源码。

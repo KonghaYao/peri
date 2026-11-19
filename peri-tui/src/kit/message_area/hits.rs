@@ -91,6 +91,89 @@ pub(crate) struct ImageHoverState {
     pub(crate) size_text: String,
 }
 
+// ── Mermaid「查看图」入口屏幕位置（每帧更新）──
+// 动作行是围栏逻辑范围的最后一行；屏幕行由 wrap_map 的视觉偏移换算，
+// 只登记视口内命中。点击时再用 slot + vm_hash + fence key/source 校验实例。
+pub(super) struct MermaidActionHit {
+    pub(super) row: u16,
+    pub(super) x_start: u16,
+    pub(super) x_end: u16,
+    pub(super) slot_index: usize,
+    pub(super) vm_hash: u64,
+    pub(super) key: crate::kit::markdown::MermaidFenceKey,
+    pub(super) fence: Arc<crate::kit::markdown::MermaidFence>,
+    pub(super) width: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update_mermaid_action_hits(
+    actions: State<Arc<Vec<MermaidActionHit>>>,
+    vm_caches: &State<Vec<VmCacheSlot>>,
+    view_models: &AtomState<ViewModelsSnapshot>,
+    area_rect: Option<Rect>,
+    vis_height: u16,
+    scroll_y: usize,
+    index: &super::selection::SlotIndex,
+) {
+    let mut hits: Vec<MermaidActionHit> = Vec::new();
+    if let Some(area) = area_rect {
+        let vp_end = area.y.saturating_add(vis_height);
+        let caches = vm_caches.read();
+        let vms = view_models.read();
+        for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
+            let Some(slot) = caches.get(slot_index) else {
+                continue;
+            };
+            if slot.mermaid_fences.is_empty() {
+                continue;
+            }
+            let vm_hash = vms
+                .items
+                .get(slot_index)
+                .map(|vm| match vm {
+                    TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                        TuiAssistantBubble::stable_identity_hash(
+                            &bubble.text,
+                            bubble.reasoning.as_ref(),
+                        )
+                    }
+                    _ => vm.content_hash(),
+                })
+                .unwrap_or(slot.content_hash);
+            for span in &slot.mermaid_fences {
+                let Some(action) = span.logical.end.checked_sub(1) else {
+                    continue;
+                };
+                if action < span.logical.start {
+                    continue;
+                }
+                let Some(entry) = slot.wrap_map.get(action) else {
+                    continue;
+                };
+                let vis_row = index
+                    .slot_visual_start(slot_index)
+                    .unwrap_or(0)
+                    .saturating_add(entry.visual_start);
+                let row = area.y as i64 + vis_row as i64 - scroll_y as i64;
+                if row < area.y as i64 || row >= vp_end as i64 {
+                    continue;
+                }
+                hits.push(MermaidActionHit {
+                    row: row as u16,
+                    x_start: area.x,
+                    x_end: area.x.saturating_add(area.width.saturating_sub(1)),
+                    slot_index,
+                    vm_hash,
+                    key: span.key.clone(),
+                    fence: Arc::clone(&span.fence),
+                    width: span.width,
+                });
+            }
+        }
+    }
+    *actions.write_no_update() = Arc::new(hits);
+}
+
 // ── md 复制按钮屏幕位置（每帧更新）──
 // 按钮行在 slot 内是唯一视觉行（copy_button_line 已保证不折行），
 // 屏幕行 = area.y + slot 视觉偏移 + 行内视觉偏移 - scroll_y。

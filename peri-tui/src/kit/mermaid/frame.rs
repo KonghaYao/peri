@@ -59,14 +59,53 @@ impl RenderOutput {
     }
 }
 
-/// 渲染整份 Mermaid 源码。宽度作为软预算交给上游压缩，超宽由消息区折行兜底。
+/// 渲染整份 Mermaid 源码。小图先用紧凑间距与严格列宽，超宽时退回常规压缩
+/// 一次；大图先给语义概览，避免先排一遍注定放不下的全图。
 pub(crate) fn render_source(source: &str, width: usize) -> Result<RenderOutput, RenderFailure> {
+    let overview = super::overview::build_unchecked(source).ok();
+    if let Some(overview) = overview.as_ref()
+        && overview.prefers_overview()
+    {
+        return Ok(overview_output(overview, width));
+    }
+    let full = render_layout(source, width)?;
+    if let Some(overview) = overview.as_ref()
+        && full.lines().len() > super::overview::OVERVIEW_ROW_BUDGET
+    {
+        // 排版后才发现高出内容区：交给同源的语义摘要，不在消息里铺 500 行。
+        return Ok(overview_output(overview, width));
+    }
+    Ok(full)
+}
+
+fn overview_output(overview: &super::overview::Overview, width: usize) -> RenderOutput {
+    RenderOutput {
+        lines: Arc::new(overview.lines(width, super::overview::OVERVIEW_ROW_BUDGET)),
+    }
+}
+
+fn render_layout(source: &str, width: usize) -> Result<RenderOutput, RenderFailure> {
     let options = RenderOptions {
         max_width: (width > 0).then_some(width),
+        max_width_strict: true,
+        gaps_override: Some((1, 0)),
         ..RenderOptions::default()
     };
-    let rendered = mermaid_text::render_with_options(source, &options)
-        .map_err(|error| RenderFailure::new(error.to_string()))?;
+    let rendered = match mermaid_text::render_with_options(source, &options) {
+        Ok(rendered) => rendered,
+        Err(mermaid_text::Error::TooWide { .. }) => {
+            // 紧凑间距仍放不下：常规压缩只尝试一次，之后交给消息区折行。
+            let compressed = RenderOptions {
+                max_width: (width > 0).then_some(width),
+                max_width_strict: false,
+                gaps_override: None,
+                ..RenderOptions::default()
+            };
+            mermaid_text::render_with_options(source, &compressed)
+                .map_err(|error| RenderFailure::new(error.to_string()))?
+        }
+        Err(error) => return Err(RenderFailure::new(error.to_string())),
+    };
     let trimmed = rendered.trim_end_matches('\n');
     let lines: Vec<String> = trimmed.lines().map(str::to_string).collect();
     if lines.iter().all(|line| line.trim().is_empty()) {
@@ -87,6 +126,11 @@ pub(crate) fn render_final(
         return Err(RenderFailure::new(reason));
     }
     render_source(source, width)
+}
+
+/// 详情面板用的完整布局：不经过概览裁剪，保留原始宽高供双轴滚动。
+pub(crate) fn render_full(source: &str, width: usize) -> Result<RenderOutput, RenderFailure> {
+    render_layout(source, width)
 }
 
 fn truncate_reason(reason: &str) -> String {

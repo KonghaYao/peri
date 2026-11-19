@@ -4,7 +4,10 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use super::grid::GridSpec;
-use super::hits::{CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit};
+use super::hits::{
+    CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit, MermaidActionHit,
+};
+use super::vm_cache_slot::VmCacheSlot;
 
 use super::props::ScrollbarFields;
 use super::scroll::{self, DragThrottle, ScrollbarDragState};
@@ -173,6 +176,66 @@ fn copy_text_for_hit(snapshot: &ViewModelsSnapshot, hit: &CopyButtonHit) -> Opti
 #[cfg(test)]
 #[path = "handlers_copy_test.rs"]
 mod copy_tests;
+
+// ── Mermaid「查看图」点击 ──
+// 动作行是围栏最后一行；点击范围与视觉行映射由渲染帧写入。打开前校验
+// slot 身份与当前 cache 中的 fence key/source，避免 Rewind/重排后指向旧图。
+pub(super) fn register_mermaid_action_click(
+    hooks: &mut Hooks,
+    actions: State<Arc<Vec<MermaidActionHit>>>,
+    view_models: AtomState<ViewModelsSnapshot>,
+    vm_caches: State<Vec<VmCacheSlot>>,
+) {
+    hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
+        let Event::Mouse(mouse) = event else {
+            return EventResult::Ignored;
+        };
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return EventResult::Ignored;
+        }
+        if mouse_router::is_occluded() {
+            return EventResult::Ignored;
+        }
+        let (x, y) = (mouse.column, mouse.row);
+        let hits = actions.read();
+        let Some(hit) = hits
+            .iter()
+            .find(|hit| y == hit.row && x >= hit.x_start && x < hit.x_end)
+        else {
+            return EventResult::Ignored;
+        };
+        let identity = view_models
+            .read()
+            .items
+            .get(hit.slot_index)
+            .map(|vm| match vm {
+                TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                    TuiAssistantBubble::stable_identity_hash(
+                        &bubble.text,
+                        bubble.reasoning.as_ref(),
+                    )
+                }
+                _ => vm.content_hash(),
+            });
+        let still_same_fence = vm_caches.read().get(hit.slot_index).is_some_and(|slot| {
+            slot.mermaid_fences.iter().any(|span| {
+                span.key == hit.key
+                    && span.fence.source == hit.fence.source
+                    && span.fence.raw == hit.fence.raw
+            })
+        });
+        if identity == Some(hit.vm_hash) && still_same_fence {
+            crate::kit::mermaid::open_detail(
+                hit.key.clone(),
+                &hit.fence,
+                hit.width,
+                Some(hit.slot_index),
+                Some(hit.vm_hash),
+            );
+        }
+        EventResult::Consumed
+    });
+}
 
 // ── `↓ New output` 指示器点击（§8.1：滚回底部并恢复跟随）──
 // [Why 注册顺序] 必须注册在 scroll handler（下方）之前：scroll::handle_event
@@ -399,6 +462,7 @@ pub(super) fn register_entry_click(
     scrollbar_rect: Option<Rect>,
     gesture: State<Option<scroll::GesturePending>>,
     interaction_option: State<usize>,
+    mermaid_action: State<Option<(usize, usize)>>,
     text_sel: State<TextSelection>,
 ) {
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
@@ -447,6 +511,8 @@ pub(super) fn register_entry_click(
         // 重置 interaction option 到首项。
         tracing::trace!(target: "frozen_diag", slot, "click: hit entry, setting focus");
         *interaction_option.write() = 0;
+        *mermaid_action.write() = None;
+        crate::kit::mermaid::select_action(None);
         // 持 VIEW_MODELS 写锁期间不再读其他可能被同一帧写入的 atom
         //（FOLD_OVERRIDES / SELECTED_SUBAGENT_ID 是独立锁）——键盘同模式。
         tracing::trace!(target: "frozen_diag", slot, "click: acquiring VIEW_MODELS write lock");
@@ -535,8 +601,15 @@ pub(super) fn register_scroll_events(
 // 键盘：Alt+Up/Down 移焦点；Enter/Space 切折叠（写覆盖表 + 当帧快照）；
 // Tab/←/→ 切换 pending interaction 选项、Enter 提交（§6.8）；
 // Esc 单层取消（退出导航）。仲裁见 focus_router::message_nav_accepts。
-pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State<usize>) {
+pub(super) fn register_keyboard_nav(
+    hooks: &mut Hooks,
+    interaction_option: State<usize>,
+    vm_caches: State<Vec<VmCacheSlot>>,
+    mermaid_action: State<Option<(usize, usize)>>,
+) {
     let option_state = interaction_option;
+    let caches_state = vm_caches;
+    let action_state = mermaid_action;
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         let Event::Key(key) = event else {
             return EventResult::Ignored;
@@ -562,6 +635,8 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
             // §7 免疫是读者派生行为——读者读 FOCUSED_ENTRY 的 key 消失
             // 即恢复自动合并，无需在此同步清除。
             *FOCUSED_ENTRY.state().write() = None;
+            *action_state.write() = None;
+            crate::kit::mermaid::select_action(None);
             return EventResult::Consumed;
         }
         let focused = FOCUSED_ENTRY.state().read().is_some();
@@ -590,8 +665,10 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                     Some(next_slot) => super::entry_nav::set_entry_focus(&snapshot, next_slot),
                     None => *FOCUSED_ENTRY.state().write() = None,
                 }
-                // 焦点移动到其他 entry——重置 interaction option 到首项
+                // 焦点移动到其他 entry——重置 interaction option 与图动作选择
                 *option_state.write() = 0;
+                *action_state.write() = None;
+                crate::kit::mermaid::select_action(None);
                 EventResult::Consumed
             }
             // [Slice 4 §6.8] Tab/←/→：焦点在 pending interaction block 时
@@ -605,23 +682,54 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                 // 顺序无冲突；保持先读后用的 guard 最小化）。
                 let idx = FOCUSED_ENTRY.state().read().as_ref().map(|f| f.slot);
                 let vm_guard = VIEW_MODELS.state();
-                let items = &vm_guard.read().items;
-                let block = idx
-                    .and_then(|i| items.get(i))
-                    .and_then(super::entry_nav::pending_interaction_of);
-                let Some(block) = block else {
-                    return EventResult::Ignored;
+                let block_options = {
+                    let snapshot = vm_guard.read();
+                    idx.and_then(|i| snapshot.items.get(i))
+                        .and_then(super::entry_nav::pending_interaction_of)
+                        .map(|block| block.options.len().max(1))
                 };
-                let opt_count = block.options.len().max(1);
-                let opt = *option_state.read();
-                // Tab/← 后退、→ 前进；首末回绕（循环语义，浏览器 Tab 直觉）
-                let next_opt = super::entry_nav::cycle_interaction_option(
-                    opt,
-                    opt_count,
-                    matches!(key.code, KeyCode::Left | KeyCode::Tab),
-                );
-                *option_state.write() = next_opt;
-                EventResult::Consumed
+                if let Some(opt_count) = block_options {
+                    let opt = *option_state.read();
+                    // Tab/← 后退、→ 前进；首末回绕（循环语义，浏览器 Tab 直觉）
+                    let next_opt = super::entry_nav::cycle_interaction_option(
+                        opt,
+                        opt_count,
+                        matches!(key.code, KeyCode::Left | KeyCode::Tab),
+                    );
+                    *option_state.write() = next_opt;
+                    return EventResult::Consumed;
+                }
+                // 消息导航态且回复含图：Tab 按文档顺序循环选中「查看图」。
+                if key.code == KeyCode::Tab {
+                    let count = idx
+                        .and_then(|slot| {
+                            caches_state
+                                .read()
+                                .get(slot)
+                                .map(|cache| cache.mermaid_fences.len())
+                        })
+                        .unwrap_or(0);
+                    if count > 0 {
+                        let slot = idx.unwrap_or(0);
+                        let current = action_state
+                            .read()
+                            .as_ref()
+                            .filter(|(selected, _)| *selected == slot)
+                            .map(|(_, index)| *index);
+                        let next = crate::kit::mermaid::next_action(count, current);
+                        let next_key = next.and_then(|index| {
+                            caches_state
+                                .read()
+                                .get(slot)
+                                .and_then(|cache| cache.mermaid_fences.get(index))
+                                .map(|span| span.key.clone())
+                        });
+                        *action_state.write() = next.map(|index| (slot, index));
+                        crate::kit::mermaid::select_action(next_key);
+                        return EventResult::Consumed;
+                    }
+                }
+                EventResult::Ignored
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let next_is_preview = key.code == KeyCode::Char(' ');
@@ -633,6 +741,52 @@ pub(super) fn register_keyboard_nav(hooks: &mut Hooks, interaction_option: State
                         && crate::kit::panels::history_detail::open_detail_from_slot(slot)
                     {
                         return EventResult::Consumed;
+                    }
+                    // 图动作优先于折叠：仅在选中项仍属于当前焦点 entry 时打开。
+                    if let Some(slot) = focused_slot {
+                        let selection = *action_state.read();
+                        if let Some((selected_slot, index)) = selection
+                            && selected_slot == slot
+                        {
+                            let target = caches_state
+                                .read()
+                                .get(slot)
+                                .and_then(|cache| cache.mermaid_fences.get(index))
+                                .map(|span| {
+                                    (
+                                        span.key.clone(),
+                                        std::sync::Arc::clone(&span.fence),
+                                        span.width,
+                                    )
+                                });
+                            *action_state.write() = None;
+                            crate::kit::mermaid::select_action(None);
+                            if let Some((key, fence, width)) = target {
+                                let vm_hash = {
+                                    let handle = VIEW_MODELS.state();
+                                    let snapshot = handle.read();
+                                    snapshot.items.get(slot).map(|vm| match vm {
+                                        TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                                            TuiAssistantBubble::stable_identity_hash(
+                                                &bubble.text,
+                                                bubble.reasoning.as_ref(),
+                                            )
+                                        }
+                                        _ => vm.content_hash(),
+                                    })
+                                };
+                                if let Some(vm_hash) = vm_hash {
+                                    crate::kit::mermaid::open_detail(
+                                        key,
+                                        &fence,
+                                        width,
+                                        Some(slot),
+                                        Some(vm_hash),
+                                    );
+                                }
+                            }
+                            return EventResult::Consumed;
+                        }
                     }
                 }
                 // 读当前快照：对焦点 entry 应用切换。持 VIEW_MODELS 写锁期间

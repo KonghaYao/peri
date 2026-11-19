@@ -115,3 +115,42 @@ fn vm_detection_only_matches_mermaid_fences() {
         "> ```mermaid\n> graph TD\n> A-->B\n> ```"
     )));
 }
+
+#[test]
+#[serial_test::serial]
+fn tab_selection_highlights_the_action_and_invalidates_the_message() {
+    crate::kit::mermaid::reset_for_test();
+    let segment = segment("```mermaid\ngraph TD\nA-->B\n```");
+    let scope = PreviewScope::for_bubble("session", Some("msg-select"), None, 41);
+    let key = scope.key(segment.fence.open_start);
+    let vm = TuiRenderUnit::TuiAssistantBubble(Arc::new(TuiAssistantBubble {
+        text: "```mermaid\ngraph TD\nA-->B\n```".to_string(),
+        reasoning: None,
+        message_id: Some("msg-select".to_string()),
+        started_at: None,
+        duration_ms: None,
+        content_hash: 41,
+    }));
+    let before_revision = crate::kit::mermaid::message_revision_for_vm(&vm)
+        .expect("message contains a Mermaid fence");
+
+    crate::kit::mermaid::select_action(Some(key.clone()));
+    let rendered = text(&display_lines(&segment, &scope, 60, false, Color::Reset));
+    assert!(
+        rendered.contains("[View diagram]") || rendered.contains("[查看图]"),
+        "Tab 选中后入口应有可见标记: {rendered}"
+    );
+    let after_revision = crate::kit::mermaid::message_revision_for_vm(&vm)
+        .expect("message contains a Mermaid fence");
+    assert_ne!(
+        before_revision, after_revision,
+        "选中态变化必须让所属消息重新渲染"
+    );
+
+    crate::kit::mermaid::select_action(None);
+    let cleared = text(&display_lines(&segment, &scope, 60, false, Color::Reset));
+    assert!(
+        !cleared.contains("[View diagram]") && !cleared.contains("[查看图]"),
+        "清除选中后不能保留高亮: {cleared}"
+    );
+}

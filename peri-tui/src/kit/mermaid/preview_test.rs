@@ -506,6 +506,10 @@ fn block_diagrams_keep_source_even_when_closed() {
     let closed = fence("block-beta\n A B\n", true);
     let view = engine.observe(key("m1"), &closed, 60, false, now);
     assert!(matches!(view.content, PreviewContent::Source));
+    assert!(
+        matches!(view.notice, Some(PreviewNotice::Unsupported(_))),
+        "原生 block 必须保留源码并给出简短原因"
+    );
     assert!(engine.take_due(now).is_none());
 }
 

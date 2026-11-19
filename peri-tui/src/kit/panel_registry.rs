@@ -1,6 +1,6 @@
 //! Panel registry——`PanelKind` 元数据 + open/close/toggle 操作。
 //!
-//! 这是 kit 路径"面板系统"的入口——所有 14 种面板的快捷键映射、标题、互斥组
+//! 这是 kit 路径"面板系统"的入口——所有面板的快捷键映射、标题、互斥组
 //! 规则、原子操作都集中在这里。
 //!
 //! ## 互斥组语义
@@ -32,6 +32,7 @@ use crate::kit::panels::hooks::HooksPanel;
 use crate::kit::panels::login::LoginPanel;
 use crate::kit::panels::mcp::McpPanel;
 use crate::kit::panels::memory::MemoryPanel;
+use crate::kit::panels::mermaid_diagram::MermaidDiagramPanel;
 use crate::kit::panels::model::ModelPanel;
 use crate::kit::panels::plugin::PluginPanel;
 use crate::kit::panels::shell_detail::ShellDetailPanel;
@@ -168,6 +169,10 @@ fn render_goal_panel() -> AnyElement<'static> {
 
 fn render_history_detail_panel() -> AnyElement<'static> {
     element!(HistoryDetailPanel()).into()
+}
+
+fn render_mermaid_diagram_panel() -> AnyElement<'static> {
+    element!(MermaidDiagramPanel()).into()
 }
 
 /// 所有面板的元数据。
@@ -415,6 +420,18 @@ pub const PANELS: &[PanelMeta] = &[
         layout: PanelLayout::fixed(80, 24),
         render: render_history_detail_panel,
     },
+    PanelMeta {
+        kind: PanelKind::MermaidDiagram,
+        title: "Diagram",
+        shortcut_letter: '\0',
+        slash_command: "",
+        description: "Mermaid diagram overview, groups and source",
+        priority: 19,
+        mutex_group: MutexGroup::Info,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(90, 22),
+        render: render_mermaid_diagram_panel,
+    },
 ];
 
 pub fn panel_title(kind: PanelKind) -> String {
@@ -438,6 +455,7 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::ShellDetail => "panel-title-shell-detail",
         PanelKind::Goal => "panel-title-goal",
         PanelKind::HistoryDetail => "panel-title-history-detail",
+        PanelKind::MermaidDiagram => "panel-title-mermaid-diagram",
     };
     if matches!(
         kind,
@@ -488,6 +506,7 @@ pub fn panel_description(kind: PanelKind) -> String {
         PanelKind::ShellDetail => "panel-desc-shell-detail",
         PanelKind::Goal => "panel-desc-goal",
         PanelKind::HistoryDetail => "panel-desc-history-detail",
+        PanelKind::MermaidDiagram => "panel-desc-mermaid-diagram",
     };
     i18n::tr(key)
 }

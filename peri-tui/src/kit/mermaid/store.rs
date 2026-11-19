@@ -202,4 +202,6 @@ pub(crate) fn reset_for_test() {
     let hub = hub();
     *lock_engine(hub) = PreviewEngine::new();
     hub.revision.store(0, Ordering::Relaxed);
+    *super::MERMAID_ACTION_SELECTED.state().write() = None;
+    super::MERMAID_ACTION_REVISION.set(0);
 }

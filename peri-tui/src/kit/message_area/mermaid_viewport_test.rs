@@ -158,6 +158,33 @@ fn count_visible_fences(
 
 #[test]
 #[serial_test::serial]
+fn mermaid_action_line_is_the_clickable_last_line_of_the_fence() {
+    crate::kit::mermaid::reset_for_test();
+    let sources = vec!["graph TD\nA-->B".to_string()];
+    let mut harness = Harness::new(&sources, 80);
+    let index = harness.layout(0, 40);
+    assert!(index.slot_visual_start(0).is_some(), "首屏应能定位消息");
+    let span = harness.caches[0]
+        .mermaid_fences
+        .first()
+        .expect("围栏已渲染")
+        .clone();
+    let action = span.logical.end.checked_sub(1).expect("动作行");
+    assert!(action >= span.logical.start);
+    let lines = harness.caches[0].lines.as_ref().expect("slot lines");
+    let text = lines.get(action).expect("动作行可见").to_string();
+    assert!(
+        text.contains("View diagram") || text.contains("查看图"),
+        "最后一行应是可点击的查看图入口: {text}"
+    );
+    assert!(
+        harness.caches[0].wrap_map.get(action).is_some(),
+        "动作行必须有视觉行映射，点击才能换算屏幕坐标"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn viewport_schedules_only_visible_fences_and_reuses_geometry() {
     crate::kit::mermaid::reset_for_test();
     let sources = unique_sources(50);
