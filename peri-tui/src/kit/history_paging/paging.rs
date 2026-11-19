@@ -427,8 +427,8 @@ pub(crate) struct MergeOutcome {
     ///
     /// [Why 保留] 这是**桥接层内部**的并合事实（`state.committed` 槽位坐标）：
     /// 用于并入日志与 merge 层用例断言。它**不得**参与渲染侧计算——渲染槽位是发布后
-    /// `VIEW_MODELS.items` 的下标，发布前的折叠 pass 会改变槽位数（相邻成功工具卡
-    /// 压成折叠组），两套坐标不可互换；跨层用槽位号正是 `.recon/S7d-verification.md`
+    /// `VIEW_MODELS.items` 的下标，发布前的折叠 pass / turn divider / todo 摘要会改变
+    /// 槽位数，两套坐标不可互换；跨层用槽位号正是 `.recon/S7d-verification.md`
     /// §5.1 判定 FAIL 的路径。阅读锚点已改为渲染侧身份重定位
     /// （`message_area::viewport_anchor`）。
     pub inserted_slot_range: Option<(usize, usize)>,

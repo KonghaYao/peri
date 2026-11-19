@@ -25,8 +25,8 @@ enum EntryZone {
 /// entry 起点 zone（§7）：AssistantBubble 有 reasoning 时 reasoning 先行 → 过程区；
 /// 短回复（`text` 字符数 < `BRIEF_REPLY_MAX_CHARS`，见 `TuiAssistantBubble::is_brief`）
 /// 整体并入过程区（缩进形态）；其余 AssistantBubble 与 UserBubble、turn 边界
-/// Divider 属文本区；其余变体（工具卡片 / 子 Agent 组 / 折叠组 / 系统 / 交互 /
-/// Todo）整体属过程区。human（user 气泡）不参与短回复缩进。
+/// Divider 属文本区；其余变体（工具卡片 / 子 Agent 组 / 系统 / 交互 / Todo）
+/// 整体属过程区。human（user 气泡）不参与短回复缩进。
 fn start_zone(vm: &TuiRenderUnit) -> EntryZone {
     match vm {
         TuiRenderUnit::TuiAssistantBubble(data) if data.reasoning.is_some() || data.is_brief() => {
@@ -338,8 +338,8 @@ impl Transcript {
         // ── [REQ-C01-3 / A20] 发布**后**的重定位：同一身份在新索引里重查视觉起点 ──
         // 只在「本次发布」与「一次更早历史并入」配对时产出：`HISTORY_PREPEND_EPOCH`
         // 仍是唯一的跨层事实（并合发生过），`merge_epoch_seen` 只在观测到发布变化时
-        // 推进——epoch 早于/晚于发布被读到都不会漏配。身份认不出（被替换 / 被并入
-        // 折叠组而消失 / 新窗口里出现多次）→ `relocate` 返回 `None` → 不补偿。
+        // 推进——epoch 早于/晚于发布被读到都不会漏配。身份认不出（被替换 /
+        // 新窗口里出现多次）→ `relocate` 返回 `None` → 不补偿。
         // `from_offset` 取**未夹取**的当帧 scroll_y：它就是旧布局上视口顶行的位置。
         self.prepend = None;
         if published {

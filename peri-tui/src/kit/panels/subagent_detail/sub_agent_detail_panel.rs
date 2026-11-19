@@ -541,7 +541,7 @@ pub(super) fn resolve_selected_subagent(
 }
 
 /// 从 VIEW_MODELS 快照扫描 `TuiSubAgentGroup`，按 instance_id / agent_id 匹配选中项。
-/// 扫描口径与 agent.rs `collect_subagents` 一致（含折叠组内嵌套递归）。
+/// 扫描口径与 agent.rs `collect_subagents` 一致（含嵌套 SubAgent 递归）。
 pub(super) fn find_selected_subagent(
     snap: &crate::kit::atoms::ViewModelsSnapshot,
     selected_id: Option<&str>,
@@ -555,7 +555,7 @@ pub(super) fn find_selected_subagent(
     None
 }
 
-/// 递归扫描单个 VM（含 TuiCollapsedGroup 内层与嵌套 SubAgent 内层）。
+/// 递归扫描单个 VM（含嵌套 SubAgent 内层）。
 pub(super) fn scan_vm_for_subagent(
     vm: &TuiRenderUnit,
     selected_id: &str,

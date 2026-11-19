@@ -271,16 +271,23 @@ fn test_turn_done_archives_orphan_tool_not_running() {
     );
     let running = VIEW_MODELS.state().read().clone();
     assert!(
-        matches!(&running.items[0], TuiRenderUnit::TuiToolCard(t) if t.is_running),
+        matches!(
+            &running.items[0],
+            TuiRenderUnit::TuiCollapsedGroup(group)
+                if matches!(&group.view_models[0], TuiRenderUnit::TuiToolCard(t) if t.is_running)
+        ),
         "precondition: tool card running before TurnDone"
     );
     super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     let done = VIEW_MODELS.state().read().clone();
     match &done.items[0] {
-        TuiRenderUnit::TuiToolCard(t) => {
-            assert!(!t.is_running, "TurnDone 归档后工具卡不得继续 loading");
-        }
-        other => panic!("expected TuiToolCard, got {other:?}"),
+        TuiRenderUnit::TuiCollapsedGroup(group) => match &group.view_models[0] {
+            TuiRenderUnit::TuiToolCard(t) => {
+                assert!(!t.is_running, "TurnDone 归档后工具卡不得继续 loading");
+            }
+            other => panic!("expected TuiToolCard, got {other:?}"),
+        },
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
     }
 }
 

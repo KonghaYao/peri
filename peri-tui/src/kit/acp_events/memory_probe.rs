@@ -179,7 +179,9 @@ fn subagent_group_bytes(group: &TuiSubAgentGroup) -> LayerBytes {
 }
 
 fn collapsed_group_bytes(group: &TuiCollapsedGroup) -> LayerBytes {
-    string_layer_bytes(&group.title) + vec_slot_layer_bytes(&group.view_models)
+    string_layer_bytes(&group.key)
+        + string_layer_bytes(&group.title)
+        + vec_slot_layer_bytes(&group.view_models)
 }
 
 fn divider_bytes(divider: &TuiDivider) -> LayerBytes {

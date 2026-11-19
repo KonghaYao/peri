@@ -425,13 +425,18 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
         "每个 Agent 调用必须紧跟自己的子分组，不得挂到上一个 loading 的 Agent 调用之下"
     );
 
-    // 已发布快照同样保持该顺序（用户可见的消息区投影）。
+    // 已发布快照同样保持该顺序（用户可见的消息区投影）：父工具卡被正文空档
+    // 分组收进组行，组内首成员仍是该父卡片。
     let published = VIEW_MODELS.state().read().clone();
     let published_layout: Vec<String> = published
         .items
         .iter()
         .map(|vm| match vm {
             TuiRenderUnit::TuiToolCard(card) => format!("card:{}", card.tool_id),
+            TuiRenderUnit::TuiCollapsedGroup(group) => match group.view_models.first() {
+                Some(TuiRenderUnit::TuiToolCard(card)) => format!("card:{}", card.tool_id),
+                other => format!("group:unexpected:{other:?}"),
+            },
             TuiRenderUnit::TuiSubAgentGroup(group) => format!("group:{}", group.agent_id),
             other => format!("other:{other:?}"),
         })

@@ -241,7 +241,7 @@ fn release_removes_committed_and_invalidates_holders_before_ack() {
     assert!(state.committed.is_empty());
     assert!(state.window.displayed_range(&key).is_none());
     assert_eq!(state.folded_history.debug_cached_len(), 0);
-    assert!(crate::kit::acp_events::render::debug_cache_lengths() == (None, None, None));
+    assert!(crate::kit::acp_events::render::debug_cache_lengths() == (None, None));
     assert!(crate::kit::atoms::FOCUSED_ENTRY.state().read().is_none());
     assert_eq!(state.window.pending_release_bytes(), 128);
     assert_eq!(crate::kit::atoms::STRUCTURAL_EPOCH.get(), 1);

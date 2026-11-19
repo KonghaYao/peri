@@ -497,21 +497,7 @@ pub(super) fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
         TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
             bubble.message_id.clone().map(FoldKey::Reasoning)
         }
-        TuiRenderUnit::TuiCollapsedGroup(group) => {
-            let ids: Vec<_> = group
-                .view_models
-                .iter()
-                .filter_map(|vm| match vm {
-                    TuiRenderUnit::TuiToolCard(card) => Some(card.tool_id.clone()),
-                    _ => None,
-                })
-                .collect();
-            if ids.is_empty() {
-                None
-            } else {
-                Some(FoldKey::Group(ids))
-            }
-        }
+        TuiRenderUnit::TuiCollapsedGroup(group) => Some(FoldKey::Group(group.key.clone())),
         _ => None,
     }
 }

@@ -165,6 +165,7 @@ pub(super) fn decode_stream_update_with(
                 Some(AcpEventData::CommittedAssistantText {
                     text,
                     reasoning: None,
+                    message_id,
                 })
             } else {
                 let text_chunk = crate::kit::stream_data::TuiTextChunk {
@@ -190,6 +191,7 @@ pub(super) fn decode_stream_update_with(
                 Some(AcpEventData::CommittedAssistantText {
                     text: String::new(),
                     reasoning: Some(text),
+                    message_id,
                 })
             } else {
                 let reasoning_chunk = crate::kit::stream_data::TuiReasoningChunk {
