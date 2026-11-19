@@ -2,8 +2,8 @@
 //!
 //! 覆盖：内存正文无需读泵、同一 attempt 未 drain 前的重复 `arm` 被拒、**取消/超期的 `drain`
 //! 不把读泵句柄与工作区租约交给别人**（可重入等待且失败前不放行下一次 attempt）、桥接通道
-//! 满时读泵仍按取消位收敛、`settle` 在期限上按「未确认 join」上报、文件 checkpoint 先落水位
-//! 再放行、发送结果只把确认送达映射为已交付。
+//! 满时读泵仍按取消位收敛、`settle` 在期限上按「未确认 join」上报、**移交给常驻回收的读泵
+//! 各自独立结算租约**、文件 checkpoint 先落水位再放行、发送结果只把确认送达映射为已交付。
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -567,6 +567,69 @@ async fn retired_owner_hands_the_blocked_pump_to_the_reaper() {
     store.gate().release();
     wait_for_reaper_release(&store, &budget).await;
     assert_eq!(store.closes(), 1, "回收任务确认 join 后读句柄释放");
+}
+
+/// 等待移交表被回收侧取空。旧实现只有一个回收任务：表空即证明它正 await 表首的读泵，
+/// 此时再移交的读泵不会被任何人等待。新实现每次移交都独立 spawn，表始终为空。
+async fn wait_for_no_orphan_pumps() {
+    for _ in 0..2_000 {
+        let empty = super::ORPHAN_PUMPS.lock().is_empty();
+        if empty {
+            return;
+        }
+        peri_time::sleep(Duration::from_millis(1)).await;
+    }
+    panic!("常驻回收没有接管移交的读泵");
+}
+
+/// [L9] 两路读泵独立结算：一路阻塞在 OS 读里不退出时，另一路已经读完的读泵必须立刻归还
+/// 自己的工作区租约；仍阻塞的一路保留自己的租约，直到它真正退出。
+#[tokio::test]
+async fn blocked_pump_does_not_delay_another_pumps_workspace_lease() {
+    let blocked_store = TestStore::gated();
+    let blocked_budget = deployment();
+    let blocked_payload = file_payload(
+        &blocked_store,
+        &blocked_budget,
+        &[0x91; 1024],
+        Compression::None,
+    );
+    let mut blocked = BodyTaskOwner::new();
+    let release_blocked = GateRelease(blocked_store.gate());
+
+    blocked.arm(&blocked_payload).expect("阻塞读泵可 arm");
+    pump_reaches_gated_read(&blocked_store.gate()).await;
+    drop(blocked);
+    // 让回收任务先接管阻塞的这一路，复现「后移交的读泵排在它后面」。
+    wait_for_no_orphan_pumps().await;
+    assert!(
+        blocked_budget.try_http_workspace().is_err(),
+        "阻塞读返回前必须保留自己的工作区租约"
+    );
+
+    let done_store = TestStore::gated();
+    let done_budget = deployment();
+    let done_payload = file_payload(&done_store, &done_budget, &[0x92; 1024], Compression::None);
+    let mut done = BodyTaskOwner::new();
+    let release_done = GateRelease(done_store.gate());
+
+    done.arm(&done_payload).expect("第二路读泵可 arm");
+    pump_reaches_gated_read(&done_store.gate()).await;
+    drop(done);
+    release_done.0.release();
+
+    // 第二路读泵退出后就该归还自己的租约，不能被仍阻塞的第一路拖住。
+    wait_for_reaper_release(&done_store, &done_budget).await;
+    assert_eq!(done_store.closes(), 1, "已读完的读泵独立结清读句柄");
+    assert!(
+        blocked_budget.try_http_workspace().is_err(),
+        "仍阻塞的读泵不得因另一路回收而被提前归还租约"
+    );
+    assert_eq!(blocked_store.closes(), 0, "阻塞读未返回前读句柄不可能释放");
+
+    release_blocked.0.release();
+    wait_for_reaper_release(&blocked_store, &blocked_budget).await;
+    assert_eq!(blocked_store.closes(), 1, "阻塞读返回后自己的租约才归还");
 }
 
 #[tokio::test]

@@ -303,7 +303,7 @@ impl BodyTaskOwner {
     }
 }
 
-/// 未确认 join 的读泵：连工作区租约一起交给常驻回收任务，等到任务真的结束才释放内存。
+/// 未确认 join 的读泵：连工作区租约一起交给常驻回收，等到任务真的结束才释放内存。
 ///
 /// 取消位只能让读泵在下一个检查点停下，既不能中断已经进入的阻塞 IO，也不能归还它占用的
 /// 工作区许可。因此「确认不了 join」时既不丢弃句柄、也不假装已归还租约（契约 D6）。
@@ -325,12 +325,10 @@ impl OrphanPump {
 }
 
 /// 进程级待回收读泵；只在拿不到 runtime（进程退出、runtime 已关）时短暂滞留。
-// The registry only moves whole owners; joining pumps always happens after unlocking.
+/// 表只暂存尚无 runtime 可托付的读泵，等待 join 永远在锁外。
 static ORPHAN_PUMPS: parking_lot::Mutex<Vec<OrphanPump>> = parking_lot::Mutex::new(Vec::new());
-/// 常驻回收任务是否在跑；同一时刻至多一个。
-static REAPER_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// 把还持有读泵与工作区租约的 owner 移交给常驻回收：绝不静默丢弃未 join 的 owner。
+/// 把未确认 join 的读泵移交给常驻回收：绝不静默丢弃句柄，也不提前归还工作区。
 fn hand_to_reaper(owner: &mut BodyTaskOwner) {
     let Some(pump) = owner.pump.take() else {
         return;
@@ -343,40 +341,23 @@ fn hand_to_reaper(owner: &mut BodyTaskOwner) {
     });
 }
 
+/// 每路读泵由独立任务等待 join：一路卡在阻塞 IO 里不退出，不影响其他读泵归还工作区。
 fn push_orphan(orphan: OrphanPump) {
-    ORPHAN_PUMPS.lock().push(orphan);
-    start_reaper();
-}
-
-/// 起一个常驻回收任务（表空即退出）；拿不到 runtime 时先留存，等下一次移交再接管。
-fn start_reaper() {
-    if REAPER_RUNNING.swap(true, Ordering::AcqRel) {
-        return;
-    }
+    let mut pending = ORPHAN_PUMPS.lock();
+    pending.push(orphan);
+    // 拿不到 runtime 时先留存，等下一次移交再接管；读泵与租约仍归 orphan。
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        REAPER_RUNNING.store(false, Ordering::Release);
         return;
     };
-    handle.spawn(async move {
-        loop {
-            let next = ORPHAN_PUMPS.lock().pop();
-            if let Some(orphan) = next {
-                orphan.join().await;
-                continue;
-            }
-            // 与 `push_orphan` 的竞态只有这一处：持锁确认空表后才落标志，push 侧才会重起任务。
-            let pending = ORPHAN_PUMPS.lock();
-            REAPER_RUNNING.store(false, Ordering::Release);
-            if pending.is_empty() || REAPER_RUNNING.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            drop(pending);
-        }
-    });
+    let orphan_pumps: Vec<_> = pending.drain(..).collect();
+    drop(pending);
+    for orphan in orphan_pumps {
+        handle.spawn(orphan.join());
+    }
 }
 
 /// 周期退出前的读泵收口：能在期限内 join 就 join；确认不了（期限已到、阻塞 IO 未返回）
-/// 交给常驻回收任务。降级到回收仍然不丢 owner，只是归还延后（契约 §3.5、D6）。
+/// 交给常驻回收。降级到回收仍然不丢 owner，只是归还延后（契约 §3.5、D6）。
 pub(crate) async fn retire(owner: &mut BodyTaskOwner, deadline: peri_time::Instant) {
     if owner.pump.is_none() {
         return;
@@ -388,8 +369,8 @@ pub(crate) async fn retire(owner: &mut BodyTaskOwner, deadline: peri_time::Insta
 }
 
 impl Drop for BodyTaskOwner {
-    /// Drop 不能 await（D6），但也不能只置取消位就丢句柄与租约：未确认 join 的读泵整体移交
-    /// 常驻回收任务，由它等到任务结束再归还工作区。
+    /// Drop 不能 await（D6），但也不能只置取消位就丢句柄与租约：未确认 join 的读泵移交
+    /// 常驻回收，每路由独立任务等到真正退出后再归还工作区。
     fn drop(&mut self) {
         hand_to_reaper(self);
     }
