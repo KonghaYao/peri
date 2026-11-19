@@ -9,6 +9,27 @@ use peri_acp_types::session_resources::{CloseSettlement, SessionResourceErrorKin
 
 use std::collections::HashMap;
 
+/// 关闭成功后回收 Controller/Runtime 登记的本轮执行句柄。
+///
+/// 句柄按轮 `register_or_replace`，轮次结束不会自行注销；只有会话确定性关闭时
+/// 才能按 §9 销毁并移除映射，否则同连接轮换 ID 时 Runtime 表只增不减（#465）。
+/// 关闭失败路径不调用，重试仍可续聊。
+async fn release_runtime_handle(cfg: &AcpServerConfig, session_id: &str) -> Result<(), AcpError> {
+    if !cfg.controller.contains_session(session_id) {
+        return Ok(());
+    }
+    cfg.controller
+        .destroy_session(session_id, std::time::Duration::from_secs(1))
+        .await
+        .map_err(|error| {
+            AcpError::new(
+                -32010,
+                format!("Session close incomplete: runtime handle release failed: {error}"),
+            )
+        })?;
+    Ok(())
+}
+
 pub(in crate::host::requests) async fn close_session(
     cfg: &AcpServerConfig,
     sessions: &mut HashMap<String, SessionState>,
@@ -22,6 +43,7 @@ pub(in crate::host::requests) async fn close_session(
             if sessions.get(session_id).is_some_and(|state| !state.closing) {
                 return Err(workspace::resource_error(error));
             }
+            release_runtime_handle(cfg, session_id).await?;
             sessions.remove(session_id);
             return Ok(());
         }
@@ -45,6 +67,7 @@ pub(in crate::host::requests) async fn close_session(
             .close_session(session_id)
             .await
             .map_err(workspace::workspace_error)?;
+        release_runtime_handle(cfg, session_id).await?;
         sessions.remove(session_id);
         return Ok(());
     }
@@ -61,6 +84,7 @@ pub(in crate::host::requests) async fn close_session(
             .map_err(workspace::resource_error)?
         {
             CloseSettlement::Finished => {
+                release_runtime_handle(cfg, session_id).await?;
                 sessions.remove(session_id);
                 return Ok(());
             }
@@ -181,6 +205,7 @@ pub(in crate::host::requests) async fn close_session(
             _ => return Err(workspace::resource_error(error)),
         }
     }
+    release_runtime_handle(cfg, session_id).await?;
     sessions.remove(session_id);
     Ok(())
 }

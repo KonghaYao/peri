@@ -108,6 +108,9 @@ close/delete 成功响应发送后释放。拒绝使用 `-32010` 与稳定 `data
 `host/recovery/coordinator.rs` 读取整棵 session tree；内部 child 装配不经过 wire gate。外部集成
 必须在切换前自行 `session/close`/`delete` 当前会话；Peri 不自动回收旧会话，未按约定关闭的
 资源驻留或泄露由客户端承担，边界见 `docs/design/peri-acp-protocol.md` §2.1。
+成功 close/delete 会回收本会话的执行句柄（`Controller::destroy_session`）、caps 与 prompt
+锁；存在旧等待者时保留同一把锁，同 ID 重开仍与旧等待者互斥。关闭失败不回收，会话保持
+可续聊、可重试；三表回到基线的回归在 `host/requests_close_failure_test.rs`（#465）。
 Cold restore publication 的唯一权威在 `host/requests/session_restore/load_shared.rs`：
 `prepare_shared` 返回 `RestorePublication(session_id, session_generation)`；load 在同一 handler 内完成
 replay、响应与 initial cursor，失败按 generation 标记 closing 并排空；fork 在 target 创建前清理
