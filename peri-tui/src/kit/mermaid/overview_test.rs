@@ -354,3 +354,18 @@ fn too_many_groups_show_names_and_counts_before_edges() {
         "跨组依赖超高时应先给组名与剩余数量: {text}"
     );
 }
+
+#[test]
+fn multiline_labels_stay_on_one_summary_line() {
+    let source = "flowchart TD\n  A[\"第一行<br/>第二行\"] --> B[\"结束\"]\n";
+    let overview = overview::build(source).expect("multiline label parses");
+    let lines = overview.lines(40, 21);
+    let text = lines.join("\n");
+    assert!(text.contains("第一行"), "{text}");
+    assert!(text.contains("第二行"), "{text}");
+    assert!(
+        lines.iter().all(|line| !line.contains('\n')),
+        "摘要行不能携带标签内换行: {lines:#?}"
+    );
+    assert!(max_width(&lines) <= 40);
+}

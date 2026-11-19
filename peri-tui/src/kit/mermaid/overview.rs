@@ -519,7 +519,7 @@ impl Overview {
         let labels: HashMap<String, String> = graph
             .nodes
             .iter()
-            .map(|node| (node.id.clone(), node.label.clone()))
+            .map(|node| (node.id.clone(), clean_label(&node.label)))
             .collect();
         let mut groups = Vec::new();
         for subgraph in &graph.subgraphs {
@@ -540,7 +540,7 @@ impl Overview {
                 Relation {
                     from: endpoint(&edge.from, &labels, &group_labels),
                     to: endpoint(&edge.to, &labels, &group_labels),
-                    label: edge.label.clone(),
+                    label: edge.label.as_deref().map(clean_label),
                     from_group,
                     to_group,
                 }
@@ -634,7 +634,16 @@ fn strip_quotes(label: &str) -> String {
         .strip_prefix('"')
         .and_then(|rest| rest.strip_suffix('"'))
         .unwrap_or(trimmed);
-    unquoted.to_string()
+    clean_label(unquoted)
+}
+
+/// 概览是单行字符摘要：节点/边标签里的换行（`<br/>` 解析结果）折成空格。
+fn clean_label(label: &str) -> String {
+    label
+        .replace(['\n', '\r'], " ")
+        .trim()
+        .trim_matches('"')
+        .to_string()
 }
 
 fn endpoint_group(
