@@ -1,0 +1,23 @@
+classDiagram
+  class Customer {
+    +String name
+    +String email
+    +register()
+    +placeOrder()
+  }
+  class Order {
+    +Date createdAt
+    +List~OrderItem~ items
+    +total() float
+  }
+  class OrderItem {
+    +int quantity
+    +float unitPrice
+  }
+  class Product {
+    +String name
+    +float price
+  }
+  Customer --> Order : places
+  Order *-- OrderItem : contains
+  OrderItem --> Product : refers to

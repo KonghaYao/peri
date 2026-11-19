@@ -7,7 +7,8 @@
 //!   (the host's `SCROLL_LINES`) without moving the selection.
 //! - Scrollbar: the wheel moves the position; clicking the bar itself is ignored.
 //! - 文档：Markdown 与 OpenUI 围栏走真实渲染链路；滚轮滚动 `WHEEL_ROWS` 行。
-//!   GenUI 按钮只展示鼠标按下态，不执行动作。
+//!   正文按列宽折行；Mermaid 字符图不折行，超出宽度时底部出现可拖动的横向
+//!   滚动条，横向滚轮与拖动都能移动视图。GenUI 按钮只展示鼠标按下态，不执行动作。
 
 mod document;
 mod list_items;
@@ -18,7 +19,9 @@ pub(crate) mod streaming;
 pub(crate) use self::document::DocumentContent;
 use self::document::DocumentLayout;
 #[cfg(test)]
-pub(crate) use self::document::{document_lines, document_max_scroll};
+pub(crate) use self::document::{
+    document_h_scroll_max, document_line_count, document_lines, document_max_scroll,
+};
 use self::list_items::LIST_ITEMS;
 use self::markdown::MARKDOWN_VARIANTS;
 use self::streaming::StreamingDocument;
@@ -44,6 +47,8 @@ pub(crate) const BORDER: Style = Style::new().fg(Color::DarkGray);
 
 /// Rows a single wheel notch scrolls; the host uses `SCROLL_LINES` (3 rows).
 const WHEEL_ROWS: usize = 3;
+/// Columns a horizontal wheel notch scrolls; the bar drag is the precise path.
+const WHEEL_COLS: usize = 8;
 
 /// Viewport height assumed when seeding a scrolled variant; rendering clamps the
 /// offset against the real preview height.
@@ -96,7 +101,11 @@ pub(crate) enum StoryState {
         content: DocumentContent<'static>,
         /// First rendered row; wheel-driven and clamped to the rendered height.
         scroll: usize,
+        /// First rendered column for unwrapped diagrams; bar/wheel driven.
+        h_scroll: usize,
         pressed_button: Option<usize>,
+        /// Horizontal thumb drag in progress (grab offset inside the thumb).
+        h_drag: Option<usize>,
         layout: Option<DocumentLayout>,
     },
     /// 流式文档：只渲染已到达的前缀；进度由拖拽条或 `[ auto ]` 的 3 秒播放决定。
@@ -226,7 +235,9 @@ fn document_state(source: &'static str, scroll: usize) -> StoryState {
     StoryState::Document {
         content: DocumentContent::Markdown(source),
         scroll,
+        h_scroll: 0,
         pressed_button: None,
+        h_drag: None,
         layout: None,
     }
 }
@@ -464,28 +475,88 @@ const SCROLLBAR_VARIANTS: &[Variant] = &[
 const MERMAID_VARIANTS: &[Variant] = &[
     Variant {
         key: "flowchart",
-        note: "Small flowchart rendered with the Mermaid frame API.",
+        note: "官方 CI/CD 流程：三个 subgraph 与判定分支。",
         initial: mermaid::flowchart_initial,
     },
     Variant {
         key: "sequence",
-        note: "Sequence diagram rendered as terminal characters.",
+        note: "官方支付流程：autonumber、activate 与 alt 分支。",
         initial: mermaid::sequence_initial,
     },
     Variant {
-        key: "collaboration",
-        note: "Large collaboration flowchart uses the semantic overview path.",
-        initial: mermaid::collaboration_initial,
+        key: "state",
+        note: "官方基础状态机：起点、终态与转移边。",
+        initial: mermaid::state_initial,
     },
     Variant {
-        key: "dense",
-        note: "密集流图：以语义概览保留分组和边的信息。",
-        initial: mermaid::dense_initial,
+        key: "class",
+        note: "官方电商类图：属性、方法、组合与依赖。",
+        initial: mermaid::class_initial,
     },
     Variant {
-        key: "long-workflow",
-        note: "Long workflow remains bounded by the overview renderer.",
-        initial: mermaid::long_workflow_initial,
+        key: "er",
+        note: "官方基础 ER 图：四实体、属性与基数关系。",
+        initial: mermaid::er_initial,
+    },
+    Variant {
+        key: "pie",
+        note: "官方饼图：标题、分片标签与占比。",
+        initial: mermaid::pie_initial,
+    },
+    Variant {
+        key: "journey",
+        note: "官方用户旅程：分组任务与满意度评分。",
+        initial: mermaid::journey_initial,
+    },
+    Variant {
+        key: "gantt",
+        note: "官方甘特图：日期轴、分组任务与持续时长。",
+        initial: mermaid::gantt_initial,
+    },
+    Variant {
+        key: "timeline",
+        note: "官方时间线：时间段与多事件。",
+        initial: mermaid::timeline_initial,
+    },
+    Variant {
+        key: "gitgraph",
+        note: "官方 Git 图：分支、合并与 tag。",
+        initial: mermaid::gitgraph_initial,
+    },
+    Variant {
+        key: "mindmap",
+        note: "官方思维导图：根节点与多层子树。",
+        initial: mermaid::mindmap_initial,
+    },
+    Variant {
+        key: "quadrant",
+        note: "官方象限图：坐标轴、四个象限与散点。",
+        initial: mermaid::quadrant_initial,
+    },
+    Variant {
+        key: "requirement",
+        note: "官方需求图：六类需求、元素与全部关系。",
+        initial: mermaid::requirement_initial,
+    },
+    Variant {
+        key: "sankey",
+        note: "官方桑基图：来源、去向与流量宽度。",
+        initial: mermaid::sankey_initial,
+    },
+    Variant {
+        key: "xychart",
+        note: "官方 XY 图：柱状与折线叠加。",
+        initial: mermaid::xychart_initial,
+    },
+    Variant {
+        key: "architecture",
+        note: "官方架构图：分组、服务与连线。",
+        initial: mermaid::architecture_initial,
+    },
+    Variant {
+        key: "packet",
+        note: "官方报文图：位区间与字段标签。",
+        initial: mermaid::packet_initial,
     },
     Variant {
         key: "streaming",
@@ -684,9 +755,18 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
         StoryState::Document {
             content,
             scroll,
+            h_scroll,
             pressed_button,
+            h_drag,
             layout,
-        } => document::render(area, buf, *content, scroll, pressed_button, layout),
+        } => document::DocumentView {
+            scroll,
+            h_scroll,
+            pressed_button,
+            h_drag,
+            layout,
+        }
+        .render(area, buf, *content),
         StoryState::Streaming(document) => streaming::render(document, area, buf),
         StoryState::Chart { demo } => crate::charts::render_demo(*demo, area, buf),
     }
@@ -936,9 +1016,18 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
         StoryState::Document {
             content,
             scroll,
+            h_scroll,
             pressed_button,
+            h_drag,
             layout,
-        } => document::handle_mouse(area, mouse, *content, scroll, pressed_button, layout),
+        } => document::DocumentView {
+            scroll,
+            h_scroll,
+            pressed_button,
+            h_drag,
+            layout,
+        }
+        .handle_mouse(area, mouse, *content),
         StoryState::Streaming(document) => streaming::handle_mouse(document, mouse, area),
         // Chart frames are static; clicks are consumed like document clicks.
         StoryState::Chart { .. } => matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),

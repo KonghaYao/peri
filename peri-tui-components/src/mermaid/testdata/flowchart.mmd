@@ -1,6 +1,15 @@
 flowchart LR
-  Input[输入] --> Parse[解析]
-  subgraph Display[显示]
-    Render[字符图] --> Preview[预览]
+  subgraph dev[Development]
+    Code[Write code] --> PR[Open pull request]
   end
-  Parse --> Render
+  subgraph ci[Continuous Integration]
+    Build[Build] --> Test[Run tests]
+    Test --> Gate{Tests pass?}
+  end
+  subgraph cd[Deployment]
+    Stage[Deploy to staging] --> Approve[Manual approval]
+    Approve --> Prod[Deploy to production]
+  end
+  PR --> Build
+  Gate -->|Yes| Stage
+  Gate -->|No| Code

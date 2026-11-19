@@ -1,8 +1,21 @@
 sequenceDiagram
-  participant User as 用户
-  participant Peri as Peri
-  participant Renderer as 渲染器
-  User->>Peri: 提交图表源码
-  Peri->>Renderer: 确认可信前缀
-  Renderer-->>Peri: 返回字符图
-  Peri-->>User: 展示预览
+  autonumber
+  actor Customer
+  participant Shop as Web Shop
+  participant Pay as Payment Service
+  participant Bank
+  Customer->>Shop: Place order
+  activate Shop
+  Shop->>Pay: Create payment request
+  activate Pay
+  Pay->>Bank: Authorize card
+  Bank-->>Pay: Authorization result
+  alt Payment approved
+    Pay-->>Shop: Payment confirmed
+    Shop-->>Customer: Show receipt
+  else Payment declined
+    Pay-->>Shop: Payment failed
+    Shop-->>Customer: Ask for another card
+  end
+  deactivate Pay
+  deactivate Shop

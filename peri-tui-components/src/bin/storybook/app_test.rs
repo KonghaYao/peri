@@ -2,14 +2,17 @@ use std::time::{Duration, Instant};
 
 use super::{App, dump_buffer, dump_screen, handle_mouse};
 use crate::stories::{
-    ACCENT, BG, DocumentContent, STORIES, StoryState, document_lines, document_max_scroll,
-    handle_story_mouse, place_caret,
+    ACCENT, BG, DocumentContent, STORIES, StoryState, document_h_scroll_max, document_line_count,
+    document_lines, document_max_scroll, handle_story_mouse, place_caret,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
+
+use peri_tui_components::mermaid::frame::{render_final, render_source};
+use peri_tui_components::mermaid::stream::detect_mode;
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     MouseEvent {
@@ -390,7 +393,9 @@ fn document_button_hit_accounts_for_segment_gap_card_and_scroll() {
             "正文\n\n```gen-ui\nroot = Card([Button(\"继续\", @ToAssistant(\"go\"))])\n```\n\n结尾",
         ),
         scroll: 0,
+        h_scroll: 0,
         pressed_button: None,
+        h_drag: None,
         layout: None,
     };
     let area = Rect::new(4, 7, 25, 4);
@@ -673,22 +678,208 @@ fn streaming_auto_plays_to_the_complete_document() {
 }
 
 #[test]
-fn mermaid_static_variants_render_diagrams_and_overviews() {
+fn mermaid_static_variants_render_diagrams() {
     let story = story_index("mermaid");
-    for (variant, visible) in [
-        ("flowchart", "字符图"),
-        ("sequence", "提交图表源码"),
-        ("collaboration", "36 节点"),
-        ("dense", "144 节点"),
-        ("long-workflow", "72 节点"),
-    ] {
+    let mut static_variants = 0;
+    for (index, variant) in STORIES[story].variants.iter().enumerate() {
         let mut app = App::new(story);
-        app.select_variant(variant_index(story, variant));
-        let screen = dump_screen(&mut app, 100, 32);
-        assert!(screen.contains(visible), "{variant}:\n{screen}");
-        assert!(!screen.contains("flowchart LR") && !screen.contains("sequenceDiagram"));
-        assert!(!screen.contains("[ auto ]"), "{variant} 是静态变体");
+        app.select_variant(index);
+        let source = match &app.state {
+            StoryState::Document {
+                content: DocumentContent::Mermaid { source, .. },
+                ..
+            } => *source,
+            _ => {
+                assert_eq!(
+                    variant.key, "streaming",
+                    "{} 不是 Mermaid 文档",
+                    variant.key
+                );
+                continue;
+            }
+        };
+        static_variants += 1;
+        // 每个静态变体都必须画出字符图：既不能退回源码，也不能走大图概览。
+        let mode = detect_mode(source, true);
+        assert!(
+            mode.renders_when_closed(),
+            "{} 的图型 {mode:?} 不可渲染",
+            variant.key
+        );
+        let lines = render_source(source, 200)
+            .unwrap_or_else(|error| panic!("{}: {error}", variant.key))
+            .into_lines();
+        assert!(
+            lines.iter().any(|line| {
+                line.contains('┌')
+                    || line.contains('╭')
+                    || line.contains('├')
+                    || line.contains('└')
+                    || line.contains('●')
+                    || line.contains('█')
+                    || line.contains('│')
+            }),
+            "{} 没有画出字符图:\n{}",
+            variant.key,
+            lines.join("\n")
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("节点")),
+            "{} 退回了概览:\n{}",
+            variant.key,
+            lines.join("\n")
+        );
     }
+    assert_eq!(static_variants, 17, "静态图型覆盖");
+}
+
+/// 从已完成文档里取 Mermaid 原文。
+fn mermaid_source(state: &StoryState) -> &'static str {
+    match state {
+        StoryState::Document {
+            content:
+                DocumentContent::Mermaid {
+                    source,
+                    terminal: true,
+                },
+            ..
+        } => source,
+        _ => panic!("expected a finished Mermaid document"),
+    }
+}
+
+fn h_scroll(state: &StoryState) -> usize {
+    match state {
+        StoryState::Document { h_scroll, .. } => *h_scroll,
+        _ => panic!("expected document state"),
+    }
+}
+
+fn row_text(buf: &ratatui::buffer::Buffer, area: Rect, row: u16) -> String {
+    (area.left()..area.right())
+        .map(|x| buf[(x, row)].symbol())
+        .collect()
+}
+
+#[test]
+fn mermaid_diagrams_keep_their_rendered_width_instead_of_wrapping() {
+    let story = story_index("mermaid");
+    for (index, variant) in STORIES[story].variants.iter().enumerate() {
+        if variant.key == "streaming" {
+            continue;
+        }
+        let mut app = App::new(story);
+        app.select_variant(index);
+        let source = mermaid_source(&app.state);
+        let content = DocumentContent::Mermaid {
+            source,
+            terminal: true,
+        };
+        // 足够高，纵向滚动条不会参与；行数只能来自渲染器本身。
+        let (width, height) = (80, 200);
+        let frame = render_final(source, detect_mode(source, true), width)
+            .unwrap_or_else(|error| panic!("{}: {error}", variant.key));
+        assert_eq!(
+            document_line_count(content, width, height),
+            frame.lines().len(),
+            "{} 的字符图不能折行",
+            variant.key
+        );
+        let widest = frame
+            .lines()
+            .iter()
+            .map(|line| ratatui::text::Line::from(line.as_str()).width())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            document_h_scroll_max(content, width, height),
+            widest.saturating_sub(width),
+            "{} 的横向溢出量应等于最宽行与列宽之差",
+            variant.key
+        );
+    }
+}
+
+#[test]
+fn mermaid_horizontal_scroll_uses_wheel_and_draggable_bar() {
+    let mut app = App::new(story_index("mermaid"));
+    let area = Rect::new(0, 0, 60, 20);
+    let content = match &app.state {
+        StoryState::Document { content, .. } => *content,
+        _ => panic!("expected document state"),
+    };
+    let max = document_h_scroll_max(content, area.width as usize, area.height as usize);
+    assert!(max > 20, "官方流程图应远超 60 列视口");
+
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut buf);
+    let bar_row = row_text(&buf, area, area.bottom() - 1);
+    assert!(
+        bar_row.contains('◄') && bar_row.contains('►'),
+        "底部应有横向滚动条: {bar_row:?}"
+    );
+    let top_border = row_text(&buf, area, area.y + 1);
+
+    // 横向滚轮按列推进，两端 clamp；内容真的按列左移。
+    let right = mouse(MouseEventKind::ScrollRight, 2, 2);
+    assert!(handle_story_mouse(&mut app.state, &right, area));
+    assert_eq!(h_scroll(&app.state), 8);
+    let mut shifted = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut shifted);
+    assert_ne!(
+        row_text(&shifted, area, area.y + 1),
+        top_border,
+        "滚动后同一行应显示不同的列"
+    );
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &right, area);
+    }
+    assert_eq!(h_scroll(&app.state), max);
+    let left = mouse(MouseEventKind::ScrollLeft, 2, 2);
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &left, area);
+    }
+    assert_eq!(h_scroll(&app.state), 0);
+
+    // 按在轨道右端：thumb 跳到最右并开始拖拽；拖回左端回到 0。
+    let bar_y = area.bottom() - 1;
+    let press = mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        area.right() - 3,
+        bar_y,
+    );
+    assert!(handle_story_mouse(&mut app.state, &press, area));
+    assert_eq!(h_scroll(&app.state), max);
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), area.x + 1, bar_y);
+    assert!(handle_story_mouse(&mut app.state, &drag, area));
+    assert_eq!(h_scroll(&app.state), 0);
+    // 拖出左边界仍停在 0；松开后拖拽态结束，散落的 Drag 不再消费。
+    let drag_out = mouse(MouseEventKind::Drag(MouseButton::Left), area.x, bar_y);
+    assert!(handle_story_mouse(&mut app.state, &drag_out, area));
+    assert_eq!(h_scroll(&app.state), 0);
+    let up = mouse(MouseEventKind::Up(MouseButton::Left), area.x, bar_y);
+    assert!(handle_story_mouse(&mut app.state, &up, area));
+    let stray = mouse(MouseEventKind::Drag(MouseButton::Left), area.x + 10, bar_y);
+    assert!(!handle_story_mouse(&mut app.state, &stray, area));
+}
+
+#[test]
+fn markdown_documents_stay_wrapped_without_a_horizontal_bar() {
+    let mut app = App::new(story_index("markdown"));
+    app.select_variant(0);
+    let area = Rect::new(0, 0, 40, 6);
+    let content = match &app.state {
+        StoryState::Document { content, .. } => *content,
+        _ => panic!("expected document state"),
+    };
+    assert_eq!(document_h_scroll_max(content, 40, 6), 0);
+    let right = mouse(MouseEventKind::ScrollRight, 2, 2);
+    assert!(!handle_story_mouse(&mut app.state, &right, area));
+
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut buf);
+    let bottom = row_text(&buf, area, area.bottom() - 1);
+    assert!(!bottom.contains('◄'), "Markdown 不应出现横向滚动条");
 }
 
 #[test]
@@ -698,9 +889,9 @@ fn mermaid_streaming_shows_tail_and_uses_shared_mouse_playback() {
     let mut app = streaming_app("mermaid");
     let initial = dump_screen(&mut app, 100, 32);
     assert_eq!(initial, dump_screen(&mut streaming_app("mermaid"), 100, 32));
-    assert!(initial.contains("输入"), "已确认的边应显示字符图");
+    assert!(initial.contains("客户端"), "已确认的边应显示字符图");
     assert!(initial.contains("未确认源码"));
-    assert!(initial.contains("subgraph Display[显示]"));
+    assert!(initial.contains("Gateway --> Worker[工作线程]"));
     assert!(initial.contains("未闭合"));
 
     let area = app.metrics.story_area;

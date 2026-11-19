@@ -286,8 +286,35 @@ fn mode_detection_requires_a_complete_header_line() {
     assert_eq!(detect_mode("stateDiagram-v2\n", false), DiagramMode::State);
     assert_eq!(detect_mode("classDiagram\n", false), DiagramMode::Class);
     assert_eq!(detect_mode("erDiagram\n", false), DiagramMode::Er);
+    assert_eq!(detect_mode("pie\n", false), DiagramMode::Pie);
+    assert_eq!(detect_mode("journey\n", false), DiagramMode::Journey);
+    assert_eq!(detect_mode("gantt\n", false), DiagramMode::Gantt);
+    assert_eq!(detect_mode("timeline\n", false), DiagramMode::Timeline);
+    assert_eq!(detect_mode("gitGraph\n", false), DiagramMode::GitGraph);
+    assert_eq!(detect_mode("mindmap\n", false), DiagramMode::Mindmap);
+    assert_eq!(detect_mode("quadrantChart\n", false), DiagramMode::Quadrant);
+    assert_eq!(
+        detect_mode("requirementDiagram\n", false),
+        DiagramMode::Requirement
+    );
+    assert_eq!(detect_mode("sankey-beta\n", false), DiagramMode::Sankey);
+    assert_eq!(detect_mode("xychart-beta\n", false), DiagramMode::XyChart);
+    assert_eq!(
+        detect_mode("architecture-beta\n", false),
+        DiagramMode::Architecture
+    );
+    assert_eq!(detect_mode("packet-beta\n", false), DiagramMode::Packet);
     assert_eq!(detect_mode("block-beta\n", false), DiagramMode::SourceOnly);
-    assert_eq!(detect_mode("pie\n", false), DiagramMode::SourceOnly);
+    assert_eq!(detect_mode("radar-beta\n", false), DiagramMode::SourceOnly);
+    for mode in [
+        DiagramMode::State,
+        DiagramMode::Pie,
+        DiagramMode::GitGraph,
+        DiagramMode::Packet,
+    ] {
+        assert!(mode.renders_when_closed(), "{mode:?} 闭合后应交由渲染器");
+        assert!(!mode.streams(), "{mode:?} 不支持边生成边预览");
+    }
 }
 
 #[test]

@@ -52,12 +52,19 @@ is the primary input and mirrors the real TUI:
 - the Markdown and OpenUI stories feed real source through `parse_markdown` →
   typed segments → `table_data_to_lines` / `genui::render`; the wheel scrolls the
   document by the same three rows and clamps at the rendered content height.
+- Mermaid character art never wraps: a frame keeps its natural rendered width, so
+  a diagram wider than the preview gets a bottom `◄ … ►` bar. Horizontal wheel
+  notches move eight columns; the thumb can be grabbed and dragged, and clicking
+  the track jumps to that position. Markdown prose still wraps at the column
+  width, so only unwrapped diagrams show the bar.
 
 Seven stories cover `textarea`, `list`, `scrollbar`, `markdown` (rich text,
 headings, lists, code, table, image, gen-ui fence, streaming), `openui` (stack
 column/row, card, text, heading, list, table, key-value, progress, divider,
 button, bar chart, sparkline, streaming), `mermaid` (flowchart, sequence,
-collaboration, dense, long-workflow and streaming) and `charts` — one static frame per
+state, class, ER, pie, journey, gantt, timeline, gitGraph, mindmap, quadrant,
+requirement, sankey, xychart, architecture, packet and streaming) and `charts`
+— one static frame per
 `tui-chart` 0.6.6 example (MIT,
 Copyright (c) 2025 Sorin Irimies), themed with the storybook palette. The
 `rich-text` variant is the kitchen-sink document: headings,
@@ -72,10 +79,14 @@ playback cancels it immediately.
 Markdown shows complete blocks followed by a growing code block, and the OpenUI
 fence renders its finished components while the unfinished argument degrades to
 a visible `gen-ui:` error until the fence closes. Mermaid loads its `.mmd`
-fixtures at compile time. The streaming variant shows the diagram for the
-confirmed prefix, the unfinished source and any preview notice; at 100% it
-validates and renders the final diagram. Large static diagrams show the
-component's semantic overview.
+fixtures at compile time. The static variants cover every diagram type the
+component closes and renders — the seventeen `mermaid-text` kinds except
+`block-beta`, whose label parsing is lossy in 0.58.0 — so unsupported types
+keep their source and never appear as a story. The streaming variant
+shows the diagram for the confirmed prefix, the unfinished source and any
+preview notice; at 100% it validates and renders the final diagram. Large
+flowcharts in the host fall back to the component's semantic overview; the
+storybook keeps that path in unit tests instead of a static variant.
 Dumps accept `--width`/`--height` (default `100x32`) so wide documents and narrow
 layouts can be inspected without a TTY.
 
