@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::transport::stdio_transport::CancelHook;
 use crate::transport::stdio_transport::JsonRpcEnvelope;
 use crate::transport::stdio_transport::StdioTransport;
+use crate::transport::stdio_transport::STDIO_INCOMING_CAPACITY;
 use crate::transport::types::AcpError;
 use crate::transport::types::IncomingMessage;
 use crate::transport::types::RequestId;
@@ -879,4 +880,297 @@ async fn test_type_cancel_line_trim_matching() {
         vec!["  {\"type\":\"cancel\"}  ".to_string()],
         "hook 收到原始行（trim 仅用于匹配）"
     );
+}
+
+// ── 入站背压（#470）───────────────────────────────────────────────────────
+
+/// 写入入站队列容量 + `overflow` 条请求行（消费者不 recv）。
+async fn fill_incoming_backlog(input: &mut DuplexStream, overflow: usize) {
+    for i in 0..(STDIO_INCOMING_CAPACITY + overflow) {
+        write_line(
+            input,
+            &format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"m/req","params":{{}}}}"#),
+        )
+        .await;
+    }
+}
+
+/// 读一行 stdout 并解析；实现若继续无界积压而不应答，测试在 5s 内显式失败。
+async fn read_stdout_line(output: &mut DuplexStream) -> Value {
+    serde_json::from_str(
+        &tokio::time::timeout(Duration::from_secs(5), read_line(output))
+            .await
+            .expect("等待 stdout 报文超时：入站积压必须显式拒绝而不是继续堆在内存"),
+    )
+    .expect("stdout 应为 JSON-RPC 报文")
+}
+
+/// [回归测试 #470] 慢消费者（不 recv）时入站积压有界：超过容量的请求立刻收到
+/// 显式 `-32000` 背压应答而非静默丢弃；队列内请求一条不少、顺序不变。
+#[tokio::test]
+async fn test_slow_consumer_bounds_incoming_queue_and_rejects_overflow_explicitly() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let overflow = 8;
+    fill_incoming_backlog(&mut input, overflow).await;
+
+    for expected in STDIO_INCOMING_CAPACITY..(STDIO_INCOMING_CAPACITY + overflow) {
+        let response = read_stdout_line(&mut output).await;
+        assert_eq!(response["id"], json!(expected), "背压应答必须带回原请求 id");
+        assert_eq!(response["error"]["code"], -32000);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("backpressure"),
+            "背压错误应可识别: {response}"
+        );
+    }
+
+    for expected in 0..STDIO_INCOMING_CAPACITY {
+        match recv(&transport).await {
+            Some(IncomingMessage::Request { id, .. }) => {
+                assert_eq!(
+                    id,
+                    RequestId::Number(expected as i64),
+                    "积压请求不得乱序或丢失"
+                );
+            }
+            other => panic!("期望积压请求 {expected}，实际 {other:?}"),
+        }
+    }
+
+    // 积水排空后恢复接收：背压是流量控制，不是永久拒绝。
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","id":9001,"method":"m/after","params":{}}"#,
+    )
+    .await;
+    match recv(&transport).await {
+        Some(IncomingMessage::Request { id, method, .. }) => {
+            assert_eq!(id, RequestId::Number(9001));
+            assert_eq!(method, "m/after");
+        }
+        other => panic!("积水排空后应恢复接收，实际 {other:?}"),
+    }
+}
+
+/// [回归测试 #470] 积压满时：客户端 RPC 应答仍即时配对，取消通知不丢，
+/// EOF 断开仍能终止接收。
+#[tokio::test]
+async fn test_full_backlog_keeps_responses_cancel_and_eof_reachable() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let ask = tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let ask_id = read_stdout_line(&mut output).await["id"].clone();
+
+    let overflow = 4;
+    fill_incoming_backlog(&mut input, overflow).await;
+    for _ in 0..overflow {
+        let rejected = read_stdout_line(&mut output).await;
+        assert_eq!(rejected["error"]["code"], -32000);
+    }
+
+    // 1) 队列满且无人消费时，客户端应答仍直接经 router 配对（不排在积压之后）。
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{ask_id},"result":"pong"}}"#),
+    )
+    .await;
+    let answer = tokio::time::timeout(Duration::from_secs(1), ask)
+        .await
+        .expect("积压满时 RPC 应答必须继续被处理")
+        .expect("task panic")
+        .unwrap_or_else(|error| panic!("应答应成功: {error}"));
+    assert_eq!(answer, json!("pong"));
+
+    // 2) 取消通知不丢：排在已接收的积压之后按序到达（取消不得静默丢弃）。
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#,
+    )
+    .await;
+    for expected in 0..STDIO_INCOMING_CAPACITY {
+        match recv(&transport).await {
+            Some(IncomingMessage::Request { id, .. }) => {
+                assert_eq!(id, RequestId::Number(expected as i64));
+            }
+            other => panic!("期望积压请求 {expected}，实际 {other:?}"),
+        }
+    }
+    match recv(&transport).await {
+        Some(IncomingMessage::Notification { method, .. }) => {
+            assert_eq!(method, "session/cancel");
+        }
+        other => panic!("取消通知不得被丢弃，实际 {other:?}"),
+    }
+
+    // 3) 断开仍能被观察：EOF 后接收结束。
+    drop(input);
+    assert!(recv(&transport).await.is_none(), "EOF 后 recv 应返回 None");
+}
+
+/// [回归测试 #470] 积压满时断线仍能结算 pending request：pump 不因满队列
+/// 停止读 stdin，EOF 继续汇入 terminal。
+#[tokio::test]
+async fn test_eof_settles_pending_request_while_backlog_full() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let pending = tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let _ = read_stdout_line(&mut output).await;
+    fill_incoming_backlog(&mut input, 0).await;
+    drop(input);
+
+    let error = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("满队列断线仍须结算 pending request")
+        .expect("task panic")
+        .unwrap_err();
+    assert_transport_closed(error);
+}
+
+/// [回归测试 #470 / CR] 满队列 + 通知 + EOF 不排水：通知等待容量期间 pump
+/// 仍须读 stdin，EOF 必须在虚拟时间推进前结算 pending，而不是靠超时。
+#[tokio::test(start_paused = true)]
+async fn test_stalled_notification_admission_still_settles_pending() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let mut pending =
+        tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let _ = read_stdout_line(&mut output).await;
+
+    fill_incoming_backlog(&mut input, 0).await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#,
+    )
+    .await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !pending.is_finished(),
+        "关闭 stdin 前结算不应依赖消费者排水或时间推进"
+    );
+
+    drop(input);
+    let error = tokio::time::timeout(Duration::from_millis(1), &mut pending)
+        .await
+        .expect("EOF 必须在虚拟时间推进前结算 pending")
+        .expect("task panic")
+        .unwrap_err();
+    assert_transport_closed(error);
+}
+
+/// [回归测试 #470 / CR] writer 阻塞 + 满队列 + overflow 请求 + EOF：背压应答
+/// 等待写锁期间 pump 仍须读 stdin，EOF 必须在虚拟时间推进前结算 pending。
+#[tokio::test(start_paused = true)]
+async fn test_blocked_writer_overflow_reply_does_not_block_pending_settlement() {
+    let (input, reader) = tokio::io::duplex(64 * 1024);
+    let (started_tx, started_rx) = oneshot::channel();
+    let transport = Arc::new(StdioTransport::from_reader_writer(
+        reader,
+        BlockingWriter {
+            started: Some(started_tx),
+        },
+    ));
+    let mut pending =
+        tokio::spawn(async move { transport.send_request("blocked/write", json!({})).await });
+    started_rx.await.expect("first poll_write should start");
+
+    let mut input = input;
+    fill_incoming_backlog(&mut input, 1).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !pending.is_finished(),
+        "关闭 stdin 前结算不应依赖 stdout 恢复或时间推进"
+    );
+
+    drop(input);
+    let error = tokio::time::timeout(Duration::from_millis(1), &mut pending)
+        .await
+        .expect("EOF 必须在虚拟时间推进前结算 pending")
+        .expect("task panic")
+        .unwrap_err();
+    assert_transport_closed(error);
+}
+
+/// [回归测试 #470 / CR] 通知等待容量时，后续匹配响应必须直接配对：若它排进
+/// deferred，host 等该响应而不再 `recv()` 就会活锁。
+#[tokio::test(start_paused = true)]
+async fn test_matching_response_dispatches_while_notification_waits_for_capacity() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let pending = tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let ask_id = read_stdout_line(&mut output).await["id"].clone();
+
+    fill_incoming_backlog(&mut input, 0).await;
+    write_line(
+        &mut input,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#,
+    )
+    .await;
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{ask_id},"result":"pong"}}"#),
+    )
+    .await;
+
+    let answer = tokio::time::timeout(Duration::from_millis(1), pending)
+        .await
+        .expect("匹配响应不得等入站队列排水")
+        .expect("task panic")
+        .expect("应答应成功");
+    assert_eq!(answer, json!("pong"));
+
+    // result 为 null 的合法响应同样必须配对（`Option<Value>` 不能把它当缺失）。
+    let asking_null = Arc::clone(&transport);
+    let pending_null =
+        tokio::spawn(async move { asking_null.send_request("client/null", json!({})).await });
+    let null_id = read_stdout_line(&mut output).await["id"].clone();
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{null_id},"result":null}}"#),
+    )
+    .await;
+    let answer = tokio::time::timeout(Duration::from_millis(1), pending_null)
+        .await
+        .expect("null result 响应不得等入站队列排水")
+        .expect("task panic")
+        .expect("null 应答应成功");
+    assert_eq!(answer, Value::Null);
+}
+
+/// [回归测试 #470 / CR] 队列未满时，`result: null` 的合法响应也必须结算
+/// pending（按字段存在性判断，不能被 `Option<Value>` 吞成缺失）。
+#[tokio::test]
+async fn test_null_result_response_settles_pending_without_backlog() {
+    let (transport, mut input, mut output) = duplex_transport();
+    let transport = Arc::new(transport);
+
+    let asking = Arc::clone(&transport);
+    let pending = tokio::spawn(async move { asking.send_request("client/ask", json!({})).await });
+    let ask_id = read_stdout_line(&mut output).await["id"].clone();
+
+    write_line(
+        &mut input,
+        &format!(r#"{{"jsonrpc":"2.0","id":{ask_id},"result":null}}"#),
+    )
+    .await;
+
+    let answer = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .expect("null result 应答应结算 pending")
+        .expect("task panic")
+        .expect("应答应成功");
+    assert_eq!(answer, Value::Null);
 }
