@@ -775,16 +775,33 @@ impl SessionResources for SessionResourcesImpl {
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         // root 在删除前解析：删除整棵树后无法再从存储确认归属。
         let root = self.gate.data().session_root(id).await?;
-        // 子树身份也必须在删除前取得：删除后无法再知道哪些认领世代随行消失。
-        // 没有认领登记时跳过这次读取；读取失败只放弃回收，不影响删除本身。
-        let claim_targets: Vec<ThreadId> = if self.gate.has_claims() {
+        // 子树身份与目录也必须在删除前取得：删除后既不知道哪些认领世代随行消失，
+        // 也不知道本进程缓存了哪些工作目录。没有认领登记且本组合不缓存观测时跳过读取；
+        // 读取失败只放弃回收，不影响删除本身。
+        let reclaim_observations = self.gate.local().retains_workspace_observations();
+        let tree = if self.gate.has_claims() || reclaim_observations {
             match self.gate.data().list_session_tree(id).await {
-                Ok(tree) => tree.into_iter().map(|meta| meta.id).collect(),
+                Ok(tree) => Some(tree),
                 Err(error) => {
-                    tracing::warn!(%error, %id, "session tree claim cleanup skipped");
-                    Vec::new()
+                    tracing::warn!(%error, %id, "session tree cache cleanup skipped");
+                    None
                 }
             }
+        } else {
+            None
+        };
+        let claim_targets: Vec<ThreadId> = tree
+            .as_ref()
+            .map(|tree| tree.iter().map(|meta| meta.id.clone()).collect())
+            .unwrap_or_default();
+        let observed_cwds: Vec<std::path::PathBuf> = if reclaim_observations {
+            tree.as_ref()
+                .map(|tree| {
+                    tree.iter()
+                        .map(|meta| std::path::Path::new(&meta.cwd).to_path_buf())
+                        .collect()
+                })
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -797,6 +814,9 @@ impl SessionResources for SessionResourcesImpl {
             if root == *id {
                 self.gate.release_pending_for(&root);
             }
+            self.gate
+                .local()
+                .forget_workspace_observations(&observed_cwds);
         }
         result
     }

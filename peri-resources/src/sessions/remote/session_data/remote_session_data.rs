@@ -91,6 +91,11 @@ impl RemoteSessionData {
             Err(_) => id.clone(),
         }
     }
+
+    #[cfg(test)]
+    pub(in crate::sessions::remote) async fn cached_roots(&self) -> HashMap<ThreadId, ThreadId> {
+        self.roots.read().await.clone()
+    }
 }
 
 pub(in crate::sessions::remote) fn not_found() -> SessionResourceError {
@@ -537,7 +542,16 @@ impl SessionDataPort for RemoteSessionData {
     }
 
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        self.write_tree_deletion(id).await
+        let result = self.write_tree_deletion(id).await;
+        if result.is_ok() {
+            // 删除以 `id` 为根的子树：`id` 自己与沿父链上溯到它的后代都不再可解析。
+            // 删除失败时保留缓存——会话行仍在，解析结果仍成立。
+            self.roots
+                .write()
+                .await
+                .retain(|thread, root| thread != id && root != id);
+        }
+        result
     }
 
     async fn mq_enqueue(
