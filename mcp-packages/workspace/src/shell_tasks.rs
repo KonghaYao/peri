@@ -6,7 +6,10 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use peri_acp_types::event::BackgroundTaskResult;
@@ -37,9 +40,35 @@ struct ShellState {
     /// Tasks whose process has started but whose request future may not have
     /// registered a visible record yet (cancellation during spawn).
     tracked: HashSet<String>,
+    /// Completion instants for terminal records. Records and their identity
+    /// indexes are released when `TERMINAL_RETENTION` elapses.
+    terminal_at: HashMap<String, peri_time::Instant>,
 }
 
 impl ShellState {
+    /// Drop terminal records whose declared TTL elapsed. Reads and mutations
+    /// call this first, so an expired record is never observable even before
+    /// the maintenance sweep runs.
+    fn prune_expired(&mut self, retention: Duration) {
+        if self.terminal_at.is_empty() {
+            return;
+        }
+        let now = peri_time::monotonic_now();
+        let mut expired = Vec::new();
+        self.terminal_at.retain(|task_id, finished| {
+            let due = now.saturating_duration_since(*finished) >= retention;
+            if due {
+                expired.push(task_id.clone());
+            }
+            !due
+        });
+        for task_id in expired {
+            self.records.remove(&task_id);
+            self.owners.remove(&task_id);
+            self.thread_owners.remove(&task_id);
+        }
+    }
+
     fn owned_by(&self, id: &str, owner: &str) -> bool {
         self.owners
             .get(id)
@@ -91,6 +120,27 @@ impl ShellState {
 /// (design §6). It is answered directly by the handler, not advertised in
 /// `tools/list`: the model-facing surface stays the seven workspace tools.
 pub(crate) const SHELL_TASK_LIST_TOOL: &str = "shell_task_list";
+
+/// Terminal records stay queryable for this window, then their result payload,
+/// summary and owner entries are dropped. `tasks/get` advertises the matching
+/// finite `ttlMs`, so a reconnecting client knows when the record ends.
+const TERMINAL_RETENTION: Duration = Duration::from_secs(5 * 60);
+
+/// Upper bound on how long an expired record can outlive its TTL while idle.
+const TERMINAL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// MCP `ttlMs` counts from task creation, while retention starts at completion;
+/// publish the resulting death instant instead of the remaining window.
+fn terminal_ttl_ms(created_at: &str, retention: Duration) -> u64 {
+    let lifetime_ms = chrono::DateTime::parse_from_rfc3339(created_at)
+        .ok()
+        .map(|created| {
+            chrono::Utc::now().signed_duration_since(created.with_timezone(&chrono::Utc))
+        })
+        .and_then(|lifetime| u64::try_from(lifetime.num_milliseconds()).ok())
+        .unwrap_or_default();
+    lifetime_ms.saturating_add(u64::try_from(retention.as_millis()).unwrap_or(u64::MAX))
+}
 
 /// One live shell task in the query result.
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -192,6 +242,9 @@ pub(crate) struct ShellTasks {
     state: Arc<Mutex<ShellState>>,
     updates: tokio::sync::broadcast::Sender<DetailedTask>,
     owner_references: Arc<()>,
+    /// Terminal retention window; also the `ttlMs` advertised on completion.
+    retention: Duration,
+    sweep_started: Arc<AtomicBool>,
     #[cfg(test)]
     spawn_after_gate: Option<Arc<SpawnAfterGate>>,
 }
@@ -241,15 +294,55 @@ impl Drop for SpawnCancelGuard {
 
 impl ShellTasks {
     pub(crate) fn new() -> Self {
+        Self::with_terminal_retention(TERMINAL_RETENTION)
+    }
+
+    fn with_terminal_retention(retention: Duration) -> Self {
         let (updates, _) = tokio::sync::broadcast::channel(64);
-        Self {
+        let tasks = Self {
             manager: Arc::new(peri_mcp_common::create_local_task_manager()),
             state: Arc::new(Mutex::new(ShellState::default())),
             updates,
             owner_references: Arc::new(()),
+            retention,
+            sweep_started: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             spawn_after_gate: None,
+        };
+        tasks.start_retention_sweep();
+        tasks
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_retention_for_test(retention: Duration) -> Self {
+        Self::with_terminal_retention(retention)
+    }
+
+    /// Release expired terminal records while the instance is idle. Access
+    /// paths enforce the same deadline; the sweep only bounds how long a burst
+    /// of finished tasks stays resident without further traffic.
+    ///
+    /// Started lazily because `new` may run before a runtime exists.
+    fn start_retention_sweep(&self) {
+        if self.sweep_started.swap(true, Ordering::AcqRel) {
+            return;
         }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            self.sweep_started.store(false, Ordering::Release);
+            return;
+        };
+        let state = Arc::downgrade(&self.state);
+        let retention = self.retention;
+        let interval = retention.min(TERMINAL_SWEEP_INTERVAL);
+        runtime.spawn(async move {
+            loop {
+                peri_time::sleep(interval).await;
+                let Some(state) = state.upgrade() else {
+                    break;
+                };
+                state.lock().prune_expired(retention);
+            }
+        });
     }
 
     #[cfg(test)]
@@ -265,6 +358,11 @@ impl ShellTasks {
     #[cfg(test)]
     pub(crate) fn tracked_count(&self) -> usize {
         self.state.lock().tracked.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_record_count(&self) -> usize {
+        self.state.lock().records.len()
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<DetailedTask> {
@@ -290,11 +388,13 @@ impl ShellTasks {
     ) -> OnBgCompleteFn {
         let state = Arc::clone(&self.state);
         let updates = self.updates.clone();
+        let retention = self.retention;
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
             if kind != BgTaskKind::Shell {
                 return Err("shell task owner received a non-shell result".into());
             }
             let mut state = state.lock();
+            state.prune_expired(retention);
             if let Some(owner) = &owner {
                 state
                     .owners
@@ -356,8 +456,13 @@ impl ShellTasks {
                 };
                 record.task.status = TaskStatus::Completed;
             }
+            let ttl_ms = terminal_ttl_ms(&record.task.created_at, retention);
+            record.task.ttl_ms = Some(ttl_ms);
             let detail = record.clone();
             state.tracked.remove(&result.task_id);
+            state
+                .terminal_at
+                .insert(result.task_id.clone(), peri_time::monotonic_now());
             drop(state);
             let _ = updates.send(detail);
             Ok(())
@@ -450,6 +555,8 @@ impl ShellTasks {
         let updates = self.updates.clone();
         let owner = owner.map(str::to_owned);
         let thread_owner = thread_owner.map(str::to_owned);
+        let retention = self.retention;
+        self.start_retention_sweep();
         #[cfg(test)]
         let spawn_after_gate = self.spawn_after_gate.clone();
         let handle: BgShellHandle = tokio::task::spawn_blocking(move || {
@@ -470,6 +577,7 @@ impl ShellTasks {
                 TaskPayload::Working,
             );
             let mut state = state.lock();
+            state.prune_expired(retention);
             let already_terminal = state
                 .records
                 .get(&handle.task_id)
@@ -530,6 +638,7 @@ impl ShellTasks {
         owner: Option<&str>,
         thread_owner: Option<&str>,
     ) -> Task {
+        self.start_retention_sweep();
         let now = peri_time::now_utc_rfc3339();
         let record = DetailedTask::new(
             Task::new(task_id, TaskStatus::Working, &now, &now)
@@ -538,6 +647,7 @@ impl ShellTasks {
             TaskPayload::Working,
         );
         let mut state = self.state.lock();
+        state.prune_expired(self.retention);
         let already_terminal = state
             .records
             .get(task_id)
@@ -568,8 +678,9 @@ impl ShellTasks {
     }
 
     pub(crate) fn get(&self, task_id: &str) -> Result<GetTaskResult, McpError> {
-        self.state
-            .lock()
+        let mut state = self.state.lock();
+        state.prune_expired(self.retention);
+        state
             .records
             .get(task_id)
             .cloned()
@@ -584,6 +695,7 @@ impl ShellTasks {
     fn cancel_inner(&self, task_id: &str, owner: Option<&str>) -> Result<(), McpError> {
         {
             let mut state = self.state.lock();
+            state.prune_expired(self.retention);
             if let Some(owner) = owner {
                 if !state.owned_by(task_id, owner) {
                     return Err(McpError::invalid_params("unknown task", None));
@@ -642,8 +754,9 @@ impl ShellTasks {
     }
 
     pub(crate) fn update(&self, task_id: &str) -> Result<(), McpError> {
-        self.state
-            .lock()
+        let mut state = self.state.lock();
+        state.prune_expired(self.retention);
+        state
             .records
             .contains_key(task_id)
             .then_some(())
@@ -663,7 +776,9 @@ impl ShellTasks {
 
     /// Read live tasks for one direct owner (design §6 recovery query).
     pub(crate) fn live_tasks(&self, owner: Option<&str>) -> ShellTaskList {
-        ShellTaskList::known(self.state.lock().live_tasks(owner))
+        let mut state = self.state.lock();
+        state.prune_expired(self.retention);
+        ShellTaskList::known(state.live_tasks(owner))
     }
 
     pub(crate) fn cancel_owned(&self, id: &str, owner: &str) -> Result<(), McpError> {
