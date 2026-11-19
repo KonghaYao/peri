@@ -54,9 +54,10 @@ is the primary input and mirrors the real TUI:
   document by the same three rows and clamps at the rendered content height.
 - Mermaid character art never wraps: a frame keeps its natural rendered width, so
   a diagram wider than the preview gets a bottom `◄ … ►` bar. Horizontal wheel
-  notches move eight columns; the thumb can be grabbed and dragged, and clicking
-  the track jumps to that position. Markdown prose still wraps at the column
-  width, so only unwrapped diagrams show the bar.
+  notches move eight columns, and Shift+wheel does the same on a vertical notch;
+  the thumb can be grabbed and dragged, and clicking the track jumps to that
+  position. Markdown prose still wraps at the column width, so only unwrapped
+  diagrams show the bar.
 
 Seven stories cover `textarea`, `list`, `scrollbar`, `markdown` (rich text,
 headings, lists, code, table, image, gen-ui fence, streaming), `openui` (stack

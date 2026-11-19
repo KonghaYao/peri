@@ -357,7 +357,8 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
                 return true;
             }
             if !state.dragging {
-                return false;
+                // 进度条没在拖：交给文档处理横向滚动条 thumb 的拖拽。
+                return handle_document(state, mouse, area);
             }
             state.pressed_button = None;
             if let Some(row) = row {
@@ -449,6 +450,10 @@ impl StreamingDocument {
 
     pub(crate) fn scroll(&self) -> usize {
         self.scroll
+    }
+
+    pub(crate) fn h_scroll(&self) -> usize {
+        self.h_scroll
     }
 
     pub(crate) fn pressed_button(&self) -> Option<usize> {

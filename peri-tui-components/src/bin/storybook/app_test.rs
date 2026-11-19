@@ -841,6 +841,30 @@ fn mermaid_horizontal_scroll_uses_wheel_and_draggable_bar() {
     }
     assert_eq!(h_scroll(&app.state), 0);
 
+    // Shift+滚轮等价于横向滚轮：逐列推进而不是纵向滚动，两端同样 clamp。
+    let shift_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 2,
+        row: 2,
+        modifiers: KeyModifiers::SHIFT,
+    };
+    assert!(handle_story_mouse(&mut app.state, &shift_down, area));
+    assert_eq!(h_scroll(&app.state), 8, "Shift+滚轮应横向平移");
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &shift_down, area);
+    }
+    assert_eq!(h_scroll(&app.state), max);
+    let shift_up = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 2,
+        row: 2,
+        modifiers: KeyModifiers::SHIFT,
+    };
+    for _ in 0..40 {
+        handle_story_mouse(&mut app.state, &shift_up, area);
+    }
+    assert_eq!(h_scroll(&app.state), 0);
+
     // 按在轨道右端：thumb 跳到最右并开始拖拽；拖回左端回到 0。
     let bar_y = area.bottom() - 1;
     let press = mouse(
@@ -875,6 +899,15 @@ fn markdown_documents_stay_wrapped_without_a_horizontal_bar() {
     assert_eq!(document_h_scroll_max(content, 40, 6), 0);
     let right = mouse(MouseEventKind::ScrollRight, 2, 2);
     assert!(!handle_story_mouse(&mut app.state, &right, area));
+    // 没有横向条时 Shift+滚轮退回纵向滚动，横向偏移保持 0。
+    let shift_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 2,
+        row: 2,
+        modifiers: KeyModifiers::SHIFT,
+    };
+    assert!(handle_story_mouse(&mut app.state, &shift_down, area));
+    assert_eq!(h_scroll(&app.state), 0);
 
     let mut buf = ratatui::buffer::Buffer::empty(area);
     crate::stories::render_story(&mut app.state, area, &mut buf);
@@ -934,6 +967,42 @@ fn mermaid_streaming_shows_tail_and_uses_shared_mouse_playback() {
     );
     assert_eq!(streaming_cursor(&app).0, source.len());
     assert_eq!(dump_screen(&mut app, 100, 32), final_screen);
+}
+
+#[test]
+fn streaming_mermaid_horizontal_thumb_drags_without_touching_progress() {
+    let mut app = streaming_app("mermaid");
+    // 首帧渲染填充 story_area；60 列窗口的预览区只有 28 列，
+    // 中途字符图会溢出，底部出现横向滚动条。
+    let _ = dump_screen(&mut app, 60, 32);
+    let area = app.metrics.story_area;
+    let (cursor_before, source, ..) = streaming_cursor(&app);
+
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    crate::stories::render_story(&mut app.state, area, &mut buf);
+    let bar_row = (area.top()..area.bottom())
+        .find(|&row| row_text(&buf, area, row).contains('◄'))
+        .expect("流式字符图应有横向滚动条");
+    assert_eq!(streaming_h_scroll(&app), 0);
+
+    // 按在轨道右端：thumb 跳到最右；拖回左端必须真的改变横向偏移。
+    let press = mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        area.right() - 3,
+        bar_row,
+    );
+    handle_mouse(&mut app, press);
+    let grabbed = streaming_h_scroll(&app);
+    assert!(grabbed > 0, "按在轨道右端应跳到最右");
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), area.x + 1, bar_row);
+    handle_mouse(&mut app, drag);
+    assert!(streaming_h_scroll(&app) < grabbed, "拖回左端应减小横向偏移");
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Up(MouseButton::Left), area.x + 1, bar_row),
+    );
+    // 横向拖拽不掺和进度：光标一动不动。
+    assert_eq!(streaming_cursor(&app), (cursor_before, source));
 }
 
 #[test]
@@ -1070,6 +1139,13 @@ fn streaming_progress(app: &App) -> (usize, &'static str, usize, Option<usize>) 
         document.scroll(),
         document.pressed_button(),
     )
+}
+
+fn streaming_h_scroll(app: &App) -> usize {
+    let StoryState::Streaming(document) = &app.state else {
+        panic!("expected streaming state");
+    };
+    document.h_scroll()
 }
 
 fn progress_label(cursor: usize, source: &str) -> String {

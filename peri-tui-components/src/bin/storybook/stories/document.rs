@@ -6,7 +6,7 @@ use peri_tui_components::genui;
 use peri_tui_components::markdown::{MarkdownSegment, parse_markdown, table_data_to_lines};
 use peri_tui_components::scrollbar::{HorizontalBar, horizontal_scrollbar, vertical_scrollbar};
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -427,16 +427,26 @@ impl DocumentView<'_> {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 *pressed_button = None;
                 *h_drag = None;
-                if inside {
-                    let max = DocumentLayout::cached(layout, content, area).max_scroll;
-                    *scroll = if mouse.kind == MouseEventKind::ScrollUp {
-                        scroll.saturating_sub(WHEEL_ROWS)
-                    } else {
-                        scroll.saturating_add(WHEEL_ROWS)
-                    }
-                    .min(max);
+                if !inside {
+                    return false;
                 }
-                inside
+                let cached = DocumentLayout::cached(layout, content, area);
+                // Shift+滚轮在字符图上横向平移；没有横向条时退回纵向滚动。
+                if mouse.modifiers.contains(KeyModifiers::SHIFT) && cached.has_h_bar {
+                    *h_scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                        h_scroll.saturating_sub(WHEEL_COLS)
+                    } else {
+                        h_scroll.saturating_add(WHEEL_COLS).min(cached.max_h_scroll)
+                    };
+                    return true;
+                }
+                *scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                    scroll.saturating_sub(WHEEL_ROWS)
+                } else {
+                    scroll.saturating_add(WHEEL_ROWS)
+                }
+                .min(cached.max_scroll);
+                true
             }
             MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
                 *pressed_button = None;
