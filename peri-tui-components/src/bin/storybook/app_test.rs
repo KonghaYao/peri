@@ -1362,3 +1362,39 @@ fn selecting_a_variant_scrolls_it_into_view() {
     assert!(30 >= app.metrics.variant_first);
     assert!(30 < app.metrics.variant_first + rows.height as usize);
 }
+
+/// 侧栏滚轮被消费前必须先转发给文档清除按下态，否则按钮会停在按下样式。
+#[test]
+fn sidebar_wheel_clears_a_pressed_document_button() {
+    let mut app = App::new(story_index("openui"));
+    let variant = app
+        .current()
+        .variants
+        .iter()
+        .position(|variant| variant.key == "button")
+        .expect("button variant");
+    app.select_variant(variant);
+    let before = dump_buffer(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let (x, y) = (area.top()..area.bottom())
+        .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| before[(x, y)].symbol() == "继")
+        .expect("主按钮必须出现在预览中");
+    let pressed_index = |app: &App| match &app.state {
+        StoryState::Document { pressed_button, .. } => *pressed_button,
+        _ => panic!("应为文档预览"),
+    };
+
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), x, y),
+    );
+    assert_eq!(pressed_index(&app), Some(0));
+
+    let nav = app.metrics.nav_area;
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::ScrollDown, nav.x + 1, nav.y + 1),
+    );
+    assert_eq!(pressed_index(&app), None, "侧栏滚轮应清除按下态");
+}

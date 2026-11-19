@@ -349,12 +349,15 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     // Stories 面板放不下全部条目时，滚轮移动面板内容。
     if crate::stories::rect_contains(app.metrics.nav_area, mouse.column, mouse.row) {
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                app.nav_scroll = app.nav_scroll.saturating_sub(NAV_WHEEL_ROWS);
-                return;
-            }
-            MouseEventKind::ScrollDown => {
-                app.nav_scroll = (app.nav_scroll + NAV_WHEEL_ROWS).min(app.metrics.nav_max_scroll);
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // 指针在侧栏内，预览只清除按下态、不会滚动；先转发拿到取消语义，
+                // 否则被消费的滚轮会让文档按钮停在按下样式。
+                handle_story_mouse(&mut app.state, &mouse, app.metrics.story_area);
+                app.nav_scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                    app.nav_scroll.saturating_sub(NAV_WHEEL_ROWS)
+                } else {
+                    (app.nav_scroll + NAV_WHEEL_ROWS).min(app.metrics.nav_max_scroll)
+                };
                 return;
             }
             _ => {}
