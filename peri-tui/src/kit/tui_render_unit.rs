@@ -29,10 +29,11 @@ mod unit;
 pub use bubble::{
     TuiAssistantBubble, TuiReasoningBlock, TuiUserBubble, UserAttachment, user_attachment_name,
 };
+pub(crate) use bubble::{is_local_message_id, next_local_message_id};
 pub use diff::{TuiDiffBlock, TuiHunk, TuiHunkLine, TuiHunkLineKind, diff_change_counts};
 pub use fold::{
     EntryStatus, FoldKey, FoldState, FoldTarget, entry_status_code, fold_for_status,
-    fold_state_code,
+    fold_for_unkeyed_reasoning, fold_state_code,
 };
 pub use group::{
     TuiCollapsedGroup, TuiDivider, TuiNoteLevel, TuiSubAgentGroup, TuiSystemNote, TuiTodoSummary,
@@ -46,6 +47,8 @@ pub use tool_card::{
     TuiTodoStatus, TuiToolCard, TuiToolPresentation,
 };
 pub use unit::TuiRenderUnit;
+#[cfg(test)]
+pub(crate) use unit::flatten_units;
 
 #[cfg(test)]
 use crate::i18n;

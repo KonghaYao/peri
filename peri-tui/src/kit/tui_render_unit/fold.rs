@@ -1,8 +1,12 @@
 // ---------------------------------------------------------------------------
-// 折叠状态机（spec §7）——折叠策略的**唯一**定义点
+// 折叠状态机——折叠策略的**唯一**定义点（契约见 docs/design/tui-chat-workbench.md）
+//
+// 正文空档折叠组是唯一的过程区折叠层级：组行默认 `Collapsed`（由分组 pass 构造），
+// 组内成员强制 `Expanded`；本表的工具 / reasoning 默认值只服务非分组语境。
 // ---------------------------------------------------------------------------
 
-/// 折叠三态（spec §7）——`Collapsed` 单行 / `Preview` 有界 tail / `Expanded` 完整 body。
+/// 折叠三态——`Collapsed` 单行 / `Preview` 有界 tail / `Expanded` 完整 body。
+/// 默认策略只产出 `Collapsed` / `Expanded`；`Preview` 是用户 Space 手动覆盖的中态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FoldState {
     #[default]
@@ -20,7 +24,7 @@ pub enum EntryStatus {
     Error,
 }
 
-/// §7 折叠表的 entry 类型维度。
+/// 折叠策略表的 entry 类型维度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldTarget {
     User,
@@ -32,8 +36,8 @@ pub enum FoldTarget {
     Interaction,
 }
 
-/// 折叠覆盖键——用户手动操作过的 entry 身份（spec §7「用户手动改变 fold state
-/// 后，本 turn 内不再被自动策略覆盖」）。按 ACP 身份字段键控：
+/// 折叠覆盖键——用户手动操作过的 entry 身份（手动改变 fold state 后，本 turn 内
+/// 不再被自动策略覆盖）。按 ACP 身份字段键控：
 /// `Reasoning(message_id)` / `Tool(tool_id)` / `SubAgent(agent_id)` /
 /// `Interaction(request_id)` / `SystemReminder(reminder_id)`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -41,8 +45,9 @@ pub enum FoldKey {
     Reasoning(String),
     Tool(String),
     SubAgent(String),
-    /// Batched tool group keyed by the ordered member tool ids.
-    Group(Vec<String>),
+    /// 正文空档折叠组——键为组首成员的稳定身份（`tool:<id>` / `reasoning:<id>` 等）。
+    /// 流式追加只在组尾增员，键不变，用户展开选择跨重建保持。
+    Group(String),
     /// Interaction block 按事件携带的本地 request_id 键控；测试构造为 None 时
     /// `fold_key_of` 返回 None——与 reasoning 的 message_id 先例一致）。
     Interaction(String),
@@ -50,7 +55,7 @@ pub enum FoldKey {
     SystemReminder(u64),
 }
 
-/// \[G2\] spec §7 折叠表——每个 entry 类型 × 状态的默认折叠目标。
+/// \[G2\] 折叠策略表——每个 entry 类型 × 状态的默认折叠目标。
 ///
 /// 唯一折叠策略单点：`push_view_models` 的折叠 pass（以及未来所有消费者）
 /// 只能从这里取值，禁止在别处内联折叠决策。
@@ -60,14 +65,11 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
     match (target, status) {
         // user / assistant 正文永远展开（user 长文折叠归 Slice 3 截断层）
         (User, _) | (Assistant, _) => FoldState::Expanded,
-        // reasoning：running = tail preview，completed 自动收束为单行
-        (Reasoning, Running) | (Reasoning, Error) => FoldState::Preview,
-        (Reasoning, Completed) => FoldState::Collapsed,
-        // tool：running = tail preview；完成后（成功或失败）默认收束为单行，
-        // 避免终态到达时展开正文导致消息区高度突变。失败仍由状态符号与 Failed
-        // 文案保持可见，详情可由用户显式展开。
-        (Tool, Running) => FoldState::Preview,
-        (Tool, Completed) | (Tool, Error) => FoldState::Collapsed,
+        // reasoning / tool：非分组语境（历史详情面板、正文气泡内的 thinking
+        // 摘要）收束为单行。正文空档分组 pass 会把组内成员统一置为 Expanded——
+        // 折叠层级只保留组行一层，展开组即原样显示成员。
+        (Reasoning, _) => FoldState::Collapsed,
+        (Tool, _) => FoldState::Collapsed,
         // subagent：running = Collapsed + live summary（裁决 C4：按 spec §7 表）
         (SubAgent, Running) | (SubAgent, Completed) => FoldState::Collapsed,
         (SubAgent, Error) => FoldState::Expanded,
@@ -79,6 +81,20 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
         (Interaction, Running) => FoldState::Expanded,
         (Interaction, Completed) => FoldState::Expanded,
         (Interaction, Error) => FoldState::Expanded,
+    }
+}
+
+/// 无 `message_id` 的 reasoning 折叠策略：没有稳定身份就无法写覆盖键，
+/// 也不能安全折叠——流式段保留 `Preview`（有界 tail），完成后 `Expanded`
+/// （正文完整可见）。
+///
+/// [Why] 默认单行折叠依赖「点击可展开」；键缺失时折叠等于永久隐藏正文。
+/// 正常路径（live / 回放 / 历史页）都应携带 message_id；此分支只服务
+/// 缺失该字段的兼容数据。
+pub fn fold_for_unkeyed_reasoning(status: EntryStatus) -> FoldState {
+    match status {
+        EntryStatus::Running => FoldState::Preview,
+        _ => FoldState::Expanded,
     }
 }
 

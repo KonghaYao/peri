@@ -1,7 +1,9 @@
 //! Multi-panel gallery demos (dashboards, instruments and benchmarks).
 //!
 //! Data adapted from tui-chart 0.6.6 `examples/*.rs`
-//! (MIT, Copyright (c) 2025 Sorin Irimies).
+//! (MIT, Copyright (c) 2025 Sorin Albu-Irimies).
+
+use std::sync::OnceLock;
 
 use peri_tui_components::charts::preview_theme;
 use ratatui::buffer::Buffer;
@@ -267,23 +269,7 @@ pub(super) fn interactive(area: Rect, buf: &mut Buffer) {
 }
 
 pub(super) fn bench(area: Rect, buf: &mut Buffer) {
-    let theme = preview_theme();
-    let points: Vec<(f64, f64)> = (0..100_000)
-        .map(|i| (i as f64, (i as f64 / 300.0).sin() * 50.0 + (i % 17) as f64))
-        .collect();
-    let candles: Vec<Candle> = (0..5000)
-        .map(|i| {
-            let base = 100.0 + (i as f64 / 20.0).sin() * 10.0;
-            Candle::new(base, base + 3.0, base - 3.0, base + 1.0).volume(100.0 + (i % 7) as f64)
-        })
-        .collect();
-    let rows: Vec<Vec<f64>> = (0..200)
-        .map(|row| {
-            (0..400)
-                .map(|column| ((column * row) % 97) as f64)
-                .collect()
-        })
-        .collect();
+    let charts = bench_charts();
     let [top, bottom] =
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
     let [line_area, candle_area] =
@@ -291,21 +277,55 @@ pub(super) fn bench(area: Rect, buf: &mut Buffer) {
     let [heat_area, spark_area] =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(bottom);
 
-    LineChart::new(vec![Series::new("a").data(points)])
-        .theme(&theme)
-        .block(block(" line 100k pts "))
-        .render(line_area, buf);
-    CandlestickChart::new(candles)
-        .show_volume(true)
-        .theme(&theme)
-        .block(block(" candles 5k "))
-        .render(candle_area, buf);
-    Heatmap::new(rows)
-        .theme(&theme)
-        .block(block(" heatmap 400x200 "))
-        .render(heat_area, buf);
-    Sparkline::new((0..100_000).map(|i| (i % 50) as f64))
-        .theme(&theme)
-        .block(block(" sparkline 100k "))
-        .render(spark_area, buf);
+    Widget::render(&charts.line, line_area, buf);
+    Widget::render(&charts.candles, candle_area, buf);
+    Widget::render(&charts.heatmap, heat_area, buf);
+    Widget::render(&charts.sparkline, spark_area, buf);
+}
+
+/// Bench 图表的固定数据与配置：数据量大，进程内只构建一次，之后每次 draw 复用。
+pub(super) struct BenchCharts {
+    line: LineChart,
+    candles: CandlestickChart,
+    heatmap: Heatmap,
+    sparkline: Sparkline<'static>,
+}
+
+static BENCH_CHARTS: OnceLock<BenchCharts> = OnceLock::new();
+
+pub(super) fn bench_charts() -> &'static BenchCharts {
+    BENCH_CHARTS.get_or_init(|| {
+        let theme = preview_theme();
+        let points: Vec<(f64, f64)> = (0..100_000)
+            .map(|i| (i as f64, (i as f64 / 300.0).sin() * 50.0 + (i % 17) as f64))
+            .collect();
+        let candles: Vec<Candle> = (0..5000)
+            .map(|i| {
+                let base = 100.0 + (i as f64 / 20.0).sin() * 10.0;
+                Candle::new(base, base + 3.0, base - 3.0, base + 1.0).volume(100.0 + (i % 7) as f64)
+            })
+            .collect();
+        let rows: Vec<Vec<f64>> = (0..200)
+            .map(|row| {
+                (0..400)
+                    .map(|column| ((column * row) % 97) as f64)
+                    .collect()
+            })
+            .collect();
+        BenchCharts {
+            line: LineChart::new(vec![Series::new("a").data(points)])
+                .theme(&theme)
+                .block(block(" line 100k pts ")),
+            candles: CandlestickChart::new(candles)
+                .show_volume(true)
+                .theme(&theme)
+                .block(block(" candles 5k ")),
+            heatmap: Heatmap::new(rows)
+                .theme(&theme)
+                .block(block(" heatmap 400x200 ")),
+            sparkline: Sparkline::new((0..100_000).map(|i| (i % 50) as f64))
+                .theme(&theme)
+                .block(block(" sparkline 100k ")),
+        }
+    })
 }

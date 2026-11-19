@@ -3,9 +3,8 @@
 //! ## 为什么只能在渲染侧做
 //!
 //! 更早历史并入发生在桥接任务（`state.committed` 的槽位坐标），而屏幕上的槽位是
-//! **发布后** `VIEW_MODELS.items` 的下标——发布前会跑折叠 pass 与
-//! `group_successful_tools`（相邻成功工具卡压成一张 `TuiCollapsedGroup`），
-//! **槽位数会变少**，两套槽位坐标不可互换（S7d 复核 §5.1 判据 5 = FAIL 的那条路径）。
+//! **发布后** `VIEW_MODELS.items` 的下标——发布前会跑折叠 pass、插入 turn divider
+//! 与 todo 摘要，两套槽位坐标不可互换（S7d 复核 §5.1 判据 5 = FAIL 的那条路径）。
 //! 因此本模块不接收任何桥接槽位号：锚点用**单元自身的稳定身份**表达，重定位在拥有
 //! 发布后 `snapshot.items` 与 `SlotIndex` 的渲染侧完成。
 //!
@@ -25,12 +24,10 @@
 //! ## 身份缺失（安全方向）
 //!
 //! 新窗口里**认不出**锚点身份时一律**不补偿**（`None` → 偏移不动），并在
-//! `msg_scroll_diag` 目标下留 trace 记录。认不出的三种来源：
+//! `msg_scroll_diag` 目标下留 trace 记录。认不出的两种来源：
 //!
 //! 1. 锚点单元被移除 / 被 rewind 替换（身份不在新 `items` 里）；
-//! 2. 锚点单元自身被折叠 pass 或 `group_successful_tools` **并入新折叠组**而消失
-//!    （组身份是组成员序列，与原单元身份不同）；
-//! 3. 同一身份在新窗口出现**多次**（内容完全相同的单元，如两条一样的用户气泡）→
+//! 2. 同一身份在新窗口出现**多次**（内容完全相同的单元，如两条一样的用户气泡）→
 //!    歧义，不猜。
 //!
 //! 不补偿的代价是这一次并入后视口按内容插入量下移（A20 未覆盖），但绝不会把视口
@@ -39,7 +36,7 @@
 //! ## 仍未覆盖的边界（不是乐观表述）
 //!
 //! 1. **锚点粒度 = 顶层单元**：锚点是视口顶行所在的顶层渲染单元，不含嵌套子项
-//!    （`TuiCollapsedGroup.view_models` / `TuiSubAgentGroup.view_models` 的内部单元）。
+//!    （`TuiSubAgentGroup.view_models` 的内部单元）。
 //!    `SlotIndex` 只给整槽的视觉区间，给不出嵌套子项的视觉起点——锚点落在展开的组内部
 //!    时，组**位置**会被钉住，组内那一行不保证。
 //! 2. **单元内位移越界**：锚点单元在新布局里变矮（内容被折叠 / 缩短）时，
@@ -79,8 +76,8 @@ use std::hash::{Hash, Hasher};
 /// `message_area::entry_nav::fold_key_of`，内容身份见 `hits.rs` 的点击陈旧校验）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UnitIdentity {
-    /// 折叠键（`FoldKey`）：工具 `tool_id` / 折叠组成员 tool_id 序列 / 子 agent 实例 /
-    /// 交互 `request_id` / 系统提醒 id / reasoning `message_id`。
+    /// 折叠键（`FoldKey`）：工具 `tool_id` / 子 agent 实例 / 交互 `request_id` /
+    /// 系统提醒 id / reasoning `message_id`。
     Fold(FoldKey),
     /// 其余单元：既有内容身份 hash + 单元种类判别位。
     Content { kind: u8, hash: u64 },

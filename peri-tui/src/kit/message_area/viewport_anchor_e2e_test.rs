@@ -4,9 +4,9 @@
 //!
 //! 1. 桥接事件（`ReplayEntryMarked` / `ReplayedUserBubble` / `HistoryPageLoaded`）
 //!    经 `handle_history_page_loaded` 真的并入 `state.committed`；
-//! 2. `push_view_models` 真的发布 `VIEW_MODELS.items`（含 `group_successful_tools`
-//!    折叠 pass——相邻成功工具卡被压成一张 `TuiCollapsedGroup`，**桥接槽位数与渲染
-//!    槽位数因此不相等**，这是 S7d 判 FAIL 的反例形状）；
+//! 2. `push_view_models` 真的发布 `VIEW_MODELS.items`（含折叠 pass / turn divider /
+//!    todo 摘要投影——**桥接槽位数与渲染槽位数因此可能不相等**，这是 S7d 判 FAIL
+//!    的反例形状）；
 //! 3. `Transcript::prepare` 用该发布快照做发布前捕获 / 发布后重定位（渲染侧生产路径）。
 //!
 //! 判据仍只有一条：同一个可见单元在屏幕上的行号不变（`slot_visual_start − offset`）。
@@ -338,13 +338,13 @@ fn a20_e2e_middle_gap_fill_does_not_move_the_viewport() {
     );
 }
 
-/// S7d 反例形状（**跨层槽位坐标**不复存在）：相邻成功工具卡被折叠成一张
-/// `TuiCollapsedGroup`，桥接 `committed` 槽位数 ≠ 渲染 `VIEW_MODELS.items` 槽位数。
-/// 旧路径用桥接槽位包络去索引渲染槽位，在**这次发布**上会过补偿；身份重定位不看
-/// 槽位号，锚点（自有气泡）的屏幕行必须不变。
+/// S7d 反例形状（**跨层槽位坐标**不复存在）：相邻工具合成一张正文空档组，
+/// 桥接 `committed` 槽位数与渲染 `VIEW_MODELS.items` 槽位数可因组行 / divider 不同。
+/// 旧路径用桥接槽位包络去索引渲染槽位会在这次发布上过补偿；身份重定位不看槽位号，
+/// 锚点（自有气泡）的屏幕行必须不变。
 #[test]
 #[serial_test::serial]
-fn a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row() {
+fn a20_e2e_grouped_tool_cards_keep_the_anchored_unit_screen_row() {
     let mut state = browsing_state("tok");
     seed_inherited_prefix(&mut state, "inherited");
     seed_own_entry(&mut state, "s1:own", 100, "first-screen-own");
@@ -362,65 +362,45 @@ fn a20_e2e_collapsed_group_shape_keeps_the_anchored_unit_screen_row() {
 
     let probe = publish_then_relocate(&mut state, "tok", 2, 0, tools);
 
-    // 两把尺子的实测事实（同一份发布，同一时刻）：
-    //   桥接 committed = [继承, 卡 t1, 卡 t2, 自有] = 4 槽；
-    //   渲染 VIEW_MODELS = [继承, GROUP(2 张卡), turn divider, 自有] = 4 槽。
-    // 计数在这份夹具上相等（折叠 −1 槽、divider +1 槽），下标因此巧合对齐；跨层坐标
-    // 不可互换的形态由下面的拆组用例覆盖，本条覆盖的是**高度**必须按渲染布局算。
-    assert_eq!(
-        state.committed.len(),
-        4,
-        "桥接槽位数（插入块在桥接坐标里占 [1, 3)）"
-    );
+    // 桥接 committed = [继承, 卡 t1, 卡 t2, 自有] = 4 槽；
+    // 渲染 VIEW_MODELS = [继承, 折叠组(t1,t2), turn divider, 自有] = 4 槽。
+    assert_eq!(state.committed.len(), 4, "桥接槽位数");
     assert_eq!(
         probe.after.slot_count(),
         4,
-        "渲染槽位数（相邻成功工具卡压成折叠组 −1、turn divider +1）"
+        "渲染槽位数（组行 + turn divider）"
     );
-    assert!(
-        matches!(
-            crate::kit::atoms::VIEW_MODELS.state().read().items.get(1),
-            Some(TuiRenderUnit::TuiCollapsedGroup(_))
-        ),
-        "槽位 1 必须是折叠组"
-    );
+    let view_models = crate::kit::atoms::VIEW_MODELS.state();
+    let published = view_models.read();
+    assert!(matches!(
+        published.items.get(1),
+        Some(TuiRenderUnit::TuiCollapsedGroup(group))
+            if matches!(&group.view_models[0], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t1")
+                && matches!(&group.view_models[1], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t2")
+    ));
+    drop(published);
 
-    // 插入块在**渲染布局**里的净增行数：折叠组 + divider 的实际行数，减去旧布局里自有
-    // 单元上方已有的那 1 行 divider。
-    let own_in_render = 3usize;
-    let inserted_rows = probe
-        .after
-        .slot_visual_start(own_in_render)
-        .expect("自有单元起始")
-        - probe.after.slot_visual_start(1).expect("折叠组起始")
-        - (probe.before.slot_visual_start(2).expect("自有单元起始")
-            - probe.before.slot_visual_start(1).expect("divider 起始"));
+    // 一张组行插入在锚点上方 → 重定位量 = 3 行（组行 + 进入/退出过程区的两条
+    // 转场台阶；旧实现两张独立工具卡时为 4 行）。
     assert_eq!(
-        probe.screen_row(&probe.after, own_in_render, probe.target()),
+        probe.screen_row(&probe.after, 3, probe.target()),
         probe.screen_row(&probe.before, 2, probe.scroll_y),
-        "折叠组形态：同一可见单元屏幕行不变（A20）"
+        "正文空档组形态：同一可见单元屏幕行不变（A20）"
     );
     assert_eq!(
         probe.target() as isize - probe.scroll_y as isize,
-        inserted_rows as isize,
-        "重定位量 = 插入块在**渲染布局**里的净增高度（{inserted_rows} 行）"
-    );
-    let bridge_inserted_slots = 2isize;
-    assert_ne!(
-        probe.target() as isize - probe.scroll_y as isize,
-        bridge_inserted_slots,
-        "不是桥接槽位数（两张卡 = 2 槽）"
+        3,
+        "重定位量 = 组行与转场台阶的渲染高度"
     );
 }
 
-/// 第二种跨层重排形态：**插入把已有的折叠组拆开**。首屏两张相邻成功工具卡被压成
-/// 一张组；更早一页的条目插到两张卡中间 → 组消失、槽位变多，锚点（下方自有气泡）
-/// 被整体下推。锚点身份仍是同一个单元 → 重定位把它钉回原屏幕行。
+/// 第二种跨层重排形态：更早条目插到同一空档的工具之间（折叠组被正文拆开）。
+/// 锚点（下方自有气泡）的身份仍是同一个单元 → 重定位把它钉回原屏幕行。
 #[test]
 #[serial_test::serial]
-fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
+fn a20_e2e_insert_between_grouped_tool_cards_keeps_the_anchored_unit_screen_row() {
     let mut state = browsing_state("tok");
-    // 首屏两条自有工具条目（各一条成功卡）+ 一条自有气泡；两张卡相邻 → 渲染侧成组。
+    // 首屏两条自有工具条目（各一条成功卡）。
     seed_own_entry_via(&mut state, "s1:c1", 10, |state| {
         crate::kit::acp_events::dispatch_and_notify(
             state,
@@ -468,34 +448,38 @@ fn a20_e2e_group_split_keeps_the_anchored_unit_screen_row() {
         vec![("s1:mid", 15, vec![sub(0, user_update("between-cards"))])],
     );
 
-    let probe = publish_then_relocate(&mut state, "tok", 1, 1, split);
+    // 锚点 = 自有气泡（首屏槽位 1；上方是包含两张卡的折叠组）。
+    let probe = publish_then_relocate(&mut state, "tok", 1, 0, split);
 
-    // 发布前：两张卡相邻 → 一张折叠组，渲染侧槽位 = [GROUP(2 张卡), 自有]。
+    // 发布前：两张卡同组，渲染侧槽位 = [组(t1,t2), 自有]（自有是首个
+    // user prompt，不插 turn divider）。
+    assert_eq!(probe.before.slot_count(), 2);
     assert!(
         matches!(
             probe
                 .before
                 .canonical_items()
                 .and_then(|items| items.get(0)),
-            Some(TuiRenderUnit::TuiCollapsedGroup(_))
+            Some(TuiRenderUnit::TuiCollapsedGroup(group))
+                if group.count == 2
+                    && matches!(&group.view_models[0], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t1")
+                    && matches!(&group.view_models[1], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t2")
         ),
-        "首屏两张成功卡必须已经成组"
+        "首屏两张成功卡同属一张正文空档组"
     );
-    // 发布后：组被拆开且中间条目自带 turn divider → 槽位变多（组 → 卡 + 中间条目 + 卡 + divider）。
-    let own_after = 4usize;
-    assert!(
-        probe.after.slot_count() > probe.before.slot_count(),
-        "拆组后槽位数必须变多（{} → {}）",
-        probe.before.slot_count(),
-        probe.after.slot_count()
+    // 发布后：中间条目插入，组被拆成两段，槽位变多（中间 prompt 前插分隔线）。
+    assert_eq!(
+        probe.after.slot_count(),
+        5,
+        "组(t1) + divider + 中间气泡 + 组(t2) + 自有"
     );
     assert_eq!(
-        probe.screen_row(&probe.after, own_after, probe.target()),
+        probe.screen_row(&probe.after, 4, probe.target()),
         probe.screen_row(&probe.before, 1, probe.scroll_y),
-        "拆组形态：同一可见单元屏幕行不变（A20）"
+        "插入形态：同一可见单元屏幕行不变（A20）"
     );
     assert!(
         probe.target() > probe.scroll_y,
-        "拆组后锚点上方内容变高 → 目标偏移必须增大"
+        "锚点上方内容变高 → 目标偏移必须增大"
     );
 }

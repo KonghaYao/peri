@@ -23,8 +23,12 @@ fn assert_owned_groups(state: &mut BridgeState, stopped: bool) {
     let snapshot = VIEW_MODELS.state().read().clone();
     assert_eq!(snapshot.items.len(), 6);
     for index in 0..3 {
-        let TuiRenderUnit::TuiToolCard(card) = &snapshot.items[index * 2] else {
-            panic!("each child group must follow its own parent card");
+        // 父调用工具卡属过程区，单独成组（组行紧跟其子 Agent 组）。
+        let TuiRenderUnit::TuiCollapsedGroup(parent) = &snapshot.items[index * 2] else {
+            panic!("each child group must follow its own parent card group");
+        };
+        let TuiRenderUnit::TuiToolCard(card) = &parent.view_models[0] else {
+            panic!("parent group must contain the launcher tool card");
         };
         assert_eq!(card.tool_id, format!("model-call:{index}"));
         let TuiRenderUnit::TuiSubAgentGroup(group) = &snapshot.items[index * 2 + 1] else {

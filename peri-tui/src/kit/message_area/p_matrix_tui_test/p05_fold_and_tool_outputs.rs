@@ -151,7 +151,7 @@ fn p05_fold_and_long_tool_outputs_reclaim_caches_and_pairing() {
         let (pending_entries, pending_bytes) =
             crate::kit::acp_events::history_window::pending_tool_ends_fingerprint();
         let structural = crate::kit::acp_events::render::debug_cache_lengths();
-        let structural_max = [structural.0, structural.1, structural.2]
+        let structural_max = [structural.0, structural.1]
             .into_iter()
             .flatten()
             .max()

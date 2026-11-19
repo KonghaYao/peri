@@ -209,18 +209,18 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
     }
 }
 
-/// §7 折叠分组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · N failed]`（title
-/// 含隐藏数，如 `Read 3 · Glob 2`；failed 后缀仅组后相邻 error 数 >0 时渲染，D2）。
+/// 正文空档折叠组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · N failed]`。
 ///
-/// 展开时组内成员按过程区接续渲染（`vm_to_lines_cached` 固定
-/// [`ZoneTransition::None`](crate::kit::message_area::grid::ZoneTransition::None)）
-/// ——同区继续，不重复画入口台阶；成员与组头同列。
+/// 折叠 = 一组一行；展开时组内成员按过程区接续渲染
+/// （[`ZoneTransition::None`](crate::kit::message_area::grid::ZoneTransition::None)），
+/// 同区继续、不重复画入口台阶；成员与组头同列。组成员在分组时已统一置为
+/// `Expanded`，展开即原样显示，不再逐项折叠。
 pub(super) fn render_collapsed_group_lines(
     data: &TuiCollapsedGroup,
     grid: &GridSpec,
 ) -> Vec<Line<'static>> {
     let sem = THEME_ATOM.state().read().semantic;
-    let expanded = data.fold == FoldState::Expanded;
+    let expanded = data.fold != FoldState::Collapsed;
     let symbol = if expanded {
         super::helpers::sym().expanded
     } else {
@@ -228,8 +228,8 @@ pub(super) fn render_collapsed_group_lines(
     };
     let mut spans =
         super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
-    // 先截 title 使 (title + failed 后缀) 总宽 ≤ 过程区预算——失败数不可被截断吞掉
-    // （§15「error 永不隐藏」），title 截断在前。
+    // 先截 title 使 (title + failed 后缀) 总宽 ≤ 过程区预算——失败数不可被截断
+    // 吞掉（§15「error 永不隐藏」），title 截断在前。
     let suffix = if data.failed_count > 0 {
         format!(
             " \u{b7} {}",

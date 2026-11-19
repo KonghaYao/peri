@@ -4,16 +4,15 @@ use super::TuiToolEnded;
 use super::TuiToolStarted;
 use super::serial;
 
-// ── [G-Diff] Slice 5：含 diff 的 Edit 不入组 + 生产路径 diff 解析 ─────────
+// ── [G-Diff] Slice 5：含 diff 的 Edit 进正文空档组 + 生产路径 diff 解析 ─────────
 
-/// §7「不得合并含 diff 的 edit」：Edit 输出含 unified diff（解析成功）→
-/// 独立展开渲染，不并入 TuiCollapsedGroup（`group_successful_tools` 的
-/// `t.diff.is_none()` 守卫自动生效）。
-/// [Fix flaky] 与 `test_edit_plain_output_grouped_normally` 等共享全局
-/// VIEW_MODELS atom——非 serial 时并行写读交错会读到对方快照。
+/// 含 unified diff 的 Edit 在消息区进入正文空档折叠组，展开后解析并展示 diff
+/// （G-Diff 生产路径）。
+/// [Fix flaky] 与同文件其它用例共享全局 VIEW_MODELS atom——非 serial 时并行
+/// 写读交错会读到对方快照。
 #[test]
 #[serial]
-fn test_edit_with_diff_not_grouped() {
+fn test_edit_with_diff_keeps_diff_in_group() {
     let mut state = super::make_fold_test_state();
     let diff_text = "\
 --- a/src/main.rs
@@ -67,15 +66,20 @@ fn test_edit_with_diff_not_grouped() {
     );
 
     let snap = VIEW_MODELS.state().read().clone();
-    // Read 单独成组（run_len >= 2 才压缩——1 个 Read 不组）；Edit 保持独立卡片
-    let edit = snap
-        .items
-        .iter()
+    // 正文空档内相邻工具同组：Edit 与 Read 共享一张组行，展开后按原样显示。
+    assert_eq!(snap.items.len(), 1, "相邻工具合成一张折叠组");
+    let group = match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => group,
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    };
+    assert_eq!(group.count, 2);
+    let edit = crate::kit::tui_render_unit::flatten_units(&snap.items)
+        .into_iter()
         .find_map(|vm| match vm {
             TuiRenderUnit::TuiToolCard(t) if t.tool_name == "Edit" => Some(t),
             _ => None,
         })
-        .expect("Edit 卡片独立存在（未并入分组）");
+        .expect("Edit 卡片在组内");
     assert!(
         edit.diff.is_some(),
         "Edit 输出中的 unified diff 被解析（G-Diff 生产路径）"
@@ -83,7 +87,7 @@ fn test_edit_with_diff_not_grouped() {
     let diff = edit
         .diff
         .as_ref()
-        .expect("edit with diff not grouped: fixture must have the expected variant");
+        .expect("edited diff fixture must carry the parsed diff block");
     assert_eq!(
         diff.path, "src/main.rs",
         "path hint 来自 raw_input.file_path"
@@ -102,25 +106,15 @@ fn test_edit_with_diff_not_grouped() {
         })
         .collect();
     assert_eq!(change_lines.len(), 2, "+1 −1");
-    // 组内不得出现 Edit（含 diff 不合并）
-    for vm in snap.items.iter() {
-        if let TuiRenderUnit::TuiCollapsedGroup(g) = vm {
-            assert!(
-                g.view_models.iter().all(
-                    |inner| !matches!(inner, TuiRenderUnit::TuiToolCard(t) if t.tool_name == "Edit")
-                ),
-                "含 diff 的 Edit 永不并入分组"
-            );
-        }
-    }
 }
 
-/// 非 diff 输出（Edit 结果不含 unified diff）→ diff=None → 可正常分组。
+/// 非 diff 输出（Edit 结果不含 unified diff）→ diff=None；相邻工具同一组行，
+/// 归档前后组形状不变。
 /// [Fix flaky] 共享全局 VIEW_MODELS atom——非 serial 时与 serial 测试
 /// 并行写读交错（serial_test 只互斥 serial 测试之间）。
 #[test]
 #[serial]
-fn test_edit_plain_output_grouped_normally() {
+fn test_edit_plain_output_same_group_across_archive() {
     let mut state = super::make_fold_test_state();
     super::dispatch_and_notify(
         &mut state,
@@ -165,18 +159,30 @@ fn test_edit_plain_output_grouped_normally() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    // 两个无 diff 的相邻成功工具 → 分组（标题含 Edit/Write 计数）
-    assert_eq!(snap.items.len(), 1, "无 diff 的相邻工具仍正常分组");
-    match &snap.items[0] {
-        TuiRenderUnit::TuiCollapsedGroup(g) => {
-            assert_eq!(g.count, 2);
-            assert!(
-                g.title.contains("Edit") || g.title.contains("Write"),
-                "标题含工具名，实际 {:?}",
-                g.title
-            );
-        }
+    // 两个无 diff 的相邻成功工具同一空档 → 一张组行。
+    assert_eq!(snap.items.len(), 1, "相邻工具合成一张折叠组");
+    let group = match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => group,
         other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    };
+    assert_eq!(group.count, 2);
+    let names: Vec<_> = crate::kit::tui_render_unit::flatten_units(&snap.items)
+        .into_iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => Some(card.tool_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["Edit", "Write"], "组内保持调用顺序");
+    for card in crate::kit::tui_render_unit::flatten_units(&snap.items) {
+        let TuiRenderUnit::TuiToolCard(card) = card else {
+            panic!("expected TuiToolCard, got {card:?}")
+        };
+        assert_eq!(
+            card.fold,
+            crate::kit::tui_render_unit::FoldState::Expanded,
+            "组内工具按原样展开"
+        );
     }
 
     super::dispatch_and_notify(
@@ -190,10 +196,10 @@ fn test_edit_plain_output_grouped_normally() {
     assert_eq!(committed_checkpoint.items.len(), 1);
     assert!(
         matches!(
-            committed_checkpoint.items.front(),
-            Some(TuiRenderUnit::TuiCollapsedGroup(group)) if group.count == 2
+            &committed_checkpoint.items[0],
+            TuiRenderUnit::TuiCollapsedGroup(group) if group.count == 2
         ),
-        "TurnCommitted 检查点应保持流式期间的工具分组"
+        "TurnCommitted 检查点保持同一组"
     );
 
     super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -201,18 +207,18 @@ fn test_edit_plain_output_grouped_normally() {
     assert_eq!(final_snapshot.items.len(), 1);
     assert!(
         matches!(
-            final_snapshot.items.front(),
-            Some(TuiRenderUnit::TuiCollapsedGroup(group)) if group.count == 2
+            &final_snapshot.items[0],
+            TuiRenderUnit::TuiCollapsedGroup(group) if group.count == 2
         ),
-        "TurnDone 将 current_turn 归档到 committed 后仍应保持工具分组"
+        "TurnDone 归档到 committed 后组形状稳定"
     );
 }
 
 /// [Slice 5] 真实摘要路径：Edit 输出 `Added 2 lines to P`（真实工具形态，
-/// 无 unified diff）→ 摘要 fallback 解析出 diff 块（adds=2）→ 不入组。
+/// 无 unified diff）→ 摘要 fallback 解析出 diff 块（adds=2）→ 组内卡片保留 diff。
 #[test]
 #[serial]
-fn test_edit_with_real_summary_diff_not_grouped() {
+fn test_edit_with_real_summary_diff_keeps_diff_in_group() {
     let mut state = super::make_fold_test_state();
     super::dispatch_and_notify(
         &mut state,
@@ -236,10 +242,13 @@ fn test_edit_with_real_summary_diff_not_grouped() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let edit = match &snap.items[0] {
-        TuiRenderUnit::TuiToolCard(c) => c.clone(),
-        other => panic!("expected TuiToolCard, got {other:?}"),
-    };
+    let edit = crate::kit::tui_render_unit::flatten_units(&snap.items)
+        .into_iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(c) if c.tool_id == "s1" => Some(c.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected TuiToolCard s1, got {:?}", snap.items));
     let diff = edit
         .diff
         .expect("真实摘要应解析出 diff 块（G-Diff fallback）");
@@ -248,7 +257,7 @@ fn test_edit_with_real_summary_diff_not_grouped() {
     let (adds, dels) = crate::kit::tui_render_unit::diff_change_counts(&diff);
     assert_eq!((adds, dels), (2, 0), "摘要计数进入顶层字段");
 
-    // 相邻成功 Read（可合并）+ 带 diff 的 Edit → Edit 不入组
+    // 相邻成功 Read + 带 diff 的 Edit → 各自独立 entry
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
@@ -271,23 +280,23 @@ fn test_edit_with_real_summary_diff_not_grouped() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let has_edit_tool = snap.items.iter().any(
-        |vm| matches!(vm, TuiRenderUnit::TuiToolCard(t) if t.tool_name == "Edit" && t.diff.is_some()),
-    );
-    assert!(has_edit_tool, "带 diff 的 Edit 保持独立展开渲染");
-    let has_group = snap
-        .items
-        .iter()
-        .any(|vm| matches!(vm, TuiRenderUnit::TuiCollapsedGroup(_)));
-    assert!(!has_group, "含 diff 的 Edit 不并入相邻 Read 组");
+    let has_edit_tool = crate::kit::tui_render_unit::flatten_units(&snap.items)
+        .into_iter()
+        .any(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(t) if t.tool_name == "Edit" && t.diff.is_some()));
+    assert!(has_edit_tool, "带 diff 的 Edit 在组内保持 diff 块");
+    assert_eq!(snap.items.len(), 1, "Edit 与 Read 同一组行");
+    let group = match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => group,
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    };
+    assert_eq!(group.count, 2);
 }
 
 /// [Slice 5] 真实摘要同行数替换（`Replaced 1 line to P`，middleware 新形态）
-/// → 解析出 diff 块（adds=dels=1）→ 含 diff 工具不合并、不分组
-/// （§7：diff 工具独立展示变更摘要）。
+/// → 解析出 diff 块（adds=dels=1）→ 组内卡片展示变更摘要。
 #[test]
 #[serial]
-fn test_edit_same_line_replacement_with_count_not_grouped() {
+fn test_edit_same_line_replacement_with_count_in_group() {
     let mut state = super::make_fold_test_state();
     for (id, output) in [
         ("r1", "Replaced 1 line to src/a.rs"),
@@ -316,12 +325,13 @@ fn test_edit_same_line_replacement_with_count_not_grouped() {
         );
     }
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(
-        snap.items.len(),
-        2,
-        "带 diff 计数的相邻 Edit 各自独立，不并入折叠组"
-    );
-    for item in &snap.items {
+    assert_eq!(snap.items.len(), 1, "相邻 Edit 合成一张折叠组");
+    let group = match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => group,
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    };
+    assert_eq!(group.count, 2);
+    for item in crate::kit::tui_render_unit::flatten_units(&snap.items) {
         match item {
             TuiRenderUnit::TuiToolCard(c) => {
                 let diff = c.diff.as_ref().expect("同行数替换摘要应解析出 diff 块");

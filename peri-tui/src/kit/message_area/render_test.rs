@@ -10,11 +10,11 @@ use ratatui_kit::ratatui::text::Line;
 
 use crate::kit::message_area::selection::build_wrap_map;
 use crate::kit::tui_render_unit::{
-    EntryStatus, FoldState, TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDiffBlock,
-    TuiDivider, TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSkillPresentation,
-    TuiSubAgentGroup, TuiSystemNote, TuiSystemReminder, TuiTodoChange, TuiTodoChangeKind,
-    TuiTodoItem, TuiTodoPresentation, TuiTodoStatus, TuiTodoSummary, TuiToolCard,
-    TuiToolPresentation, TuiUserBubble,
+    EntryStatus, FoldState, TuiAskUserBlock, TuiAssistantBubble, TuiDiffBlock, TuiDivider,
+    TuiNoteLevel, TuiReasoningBlock, TuiRenderUnit, TuiSkillPresentation, TuiSubAgentGroup,
+    TuiSystemNote, TuiSystemReminder, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem,
+    TuiTodoPresentation, TuiTodoStatus, TuiTodoSummary, TuiToolCard, TuiToolPresentation,
+    TuiUserBubble,
 };
 use std::time::{Duration, Instant};
 

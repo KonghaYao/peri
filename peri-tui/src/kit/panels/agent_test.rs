@@ -13,7 +13,7 @@ use super::VIEW_MODELS;
 use super::i18n;
 use ratatui_kit::prelude::*;
 
-use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiSubAgentGroup, TuiUserBubble};
+use crate::kit::tui_render_unit::{TuiSubAgentGroup, TuiUserBubble};
 use ratatui_kit::crossterm::event::{
     KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -110,28 +110,6 @@ fn test_collect_subagents_preserves_insertion_order() {
     let result = super::collect_subagents(&snap);
     let ids: Vec<_> = result.iter().map(|s| s.agent_id.as_str()).collect();
     assert_eq!(ids, vec!["alpha", "beta", "gamma"]);
-}
-
-#[test]
-fn test_collect_subagents_recurses_into_collapsed_group() {
-    // TuiCollapsedGroup 内嵌 SubAgent——应被扫描到
-    let collapsed = TuiCollapsedGroup {
-        title: "batch".to_string(),
-        count: 1,
-        failed_count: 0,
-        view_models: vec![TuiRenderUnit::TuiSubAgentGroup(make_subagent(
-            "hidden", "Hidden",
-        ))],
-        fold: crate::kit::tui_render_unit::FoldState::Collapsed,
-        content_hash: 0,
-    };
-    let snap = ViewModelsSnapshot {
-        items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(collapsed)]),
-        generation: 0,
-    };
-    let result = super::collect_subagents(&snap);
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].agent_id, "hidden");
 }
 
 #[test]

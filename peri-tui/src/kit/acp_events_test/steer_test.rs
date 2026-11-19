@@ -244,7 +244,13 @@ fn p0_delivered_prompt_preserves_running_tool_result() {
 
     let snapshot = VIEW_MODELS.state().read().clone();
     let items = &snapshot.items;
-    let tool = items.iter().position(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-1" && card.output_summary == "file contents"));
+    let tool = items.iter().position(|vm| {
+        matches!(
+            vm,
+            TuiRenderUnit::TuiCollapsedGroup(group)
+                if group.view_models.iter().any(|inner| matches!(inner, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-1" && card.output_summary == "file contents"))
+        )
+    });
     let prompt = items
         .iter()
         .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "新的输入"));

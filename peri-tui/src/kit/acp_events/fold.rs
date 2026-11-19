@@ -113,10 +113,16 @@ pub(super) fn apply_fold_pass(
                             None
                         };
                         let target_fold = override_fold.unwrap_or_else(|| {
-                            crate::kit::tui_render_unit::fold_for_status(
-                                FoldTarget::Reasoning,
-                                status,
-                            )
+                            if b.message_id.is_some() {
+                                crate::kit::tui_render_unit::fold_for_status(
+                                    FoldTarget::Reasoning,
+                                    status,
+                                )
+                            } else {
+                                // 无身份块不能写覆盖键：流式段 Preview、完成态 Expanded，
+                                // 不隐藏无法展开的正文。
+                                crate::kit::tui_render_unit::fold_for_unkeyed_reasoning(status)
+                            }
                         });
                         let fold_changed = r.fold != target_fold;
                         let status_changed =

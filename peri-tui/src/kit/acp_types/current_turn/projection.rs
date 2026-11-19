@@ -35,7 +35,7 @@ impl CurrentTurn {
     /// 值或冻结段存储值），组合公式与 [`TuiAssistantBubble::compute_hash`] 完全
     /// 一致——保证增量路径与从零重建（recompute_hash）产出相同的 hash。
     ///
-    /// `reasoning_running`：true = trailing 流式段（status=Running、fold=Preview、
+    /// `reasoning_running`：true = trailing 流式段（status=Running、fold=Collapsed、
     /// started_at=推理起点）；false = 冻结段（status=Completed、fold=Collapsed、
     /// duration_ms=flush 时刻冻结值）。折叠 pass 在 phase 离开 PromptRunning 时
     /// 把 trailing 段翻转成 Completed。bubble 的 `message_id` 由调用方直接赋值
@@ -372,7 +372,7 @@ impl CurrentTurn {
                     let mut bubble = TuiAssistantBubble {
                         text: Self::materialize_text(text_slice),
                         reasoning,
-                        message_id: self.last_message_id.clone(),
+                        message_id: self.trailing_message_id.clone(),
                         started_at: None,
                         duration_ms: text_dur,
                         content_hash,
@@ -393,17 +393,15 @@ impl CurrentTurn {
                         self.trailing_reasoning_frozen_ms,
                         self.text_started_at,
                     );
-                    TuiRenderUnit::TuiAssistantBubble(
-                        TuiAssistantBubble {
-                            text: Self::materialize_text(text_slice),
-                            reasoning,
-                            message_id: self.last_message_id.clone(),
-                            started_at: self.text_started_at,
-                            duration_ms: None,
-                            content_hash,
-                        }
-                        .into(),
-                    )
+                    let bubble = TuiAssistantBubble {
+                        text: Self::materialize_text(text_slice),
+                        reasoning,
+                        message_id: self.trailing_message_id.clone(),
+                        started_at: self.text_started_at,
+                        duration_ms: None,
+                        content_hash,
+                    };
+                    TuiRenderUnit::TuiAssistantBubble(bubble.into())
                 };
                 if self.cached_view_models.len() <= trailing_idx {
                     self.cached_view_models.push_back(trailing);

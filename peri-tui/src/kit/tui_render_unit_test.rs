@@ -7,7 +7,6 @@ use super::FoldTarget;
 use super::InteractionKind;
 use super::TuiAskUserBlock;
 use super::TuiAssistantBubble;
-use super::TuiCollapsedGroup;
 use super::TuiDivider;
 use super::TuiNoteLevel;
 use super::TuiReasoningBlock;
@@ -286,12 +285,13 @@ fn test_fold_for_status_matches_spec_table() {
     assert_eq!(super::fold_for_status(Assistant, Running), Expanded);
     assert_eq!(super::fold_for_status(Assistant, Completed), Expanded);
     assert_eq!(super::fold_for_status(Assistant, Error), Expanded);
-    // reasoning：Running → Preview / Completed → Collapsed / Error → Preview
-    assert_eq!(super::fold_for_status(Reasoning, Running), Preview);
+    // reasoning：过程 entry 默认单行——running/completed/error 均为 Collapsed
+    // （点击 header 才展开；Preview 只由用户 Space 覆盖进入）
+    assert_eq!(super::fold_for_status(Reasoning, Running), Collapsed);
     assert_eq!(super::fold_for_status(Reasoning, Completed), Collapsed);
-    assert_eq!(super::fold_for_status(Reasoning, Error), Preview);
-    // tool：流式 Preview，成功或失败完成后均收束为 Collapsed
-    assert_eq!(super::fold_for_status(Tool, Running), Preview);
+    assert_eq!(super::fold_for_status(Reasoning, Error), Collapsed);
+    // tool：同样默认单行——运行中不展示 tail，完成后高度不变
+    assert_eq!(super::fold_for_status(Tool, Running), Collapsed);
     assert_eq!(super::fold_for_status(Tool, Completed), Collapsed);
     assert_eq!(super::fold_for_status(Tool, Error), Collapsed);
     // subagent：Collapsed + live summary → Collapsed → Expanded summary
@@ -306,6 +306,10 @@ fn test_fold_for_status_matches_spec_table() {
     assert_eq!(super::fold_for_status(Interaction, Running), Expanded);
     assert_eq!(super::fold_for_status(Interaction, Completed), Expanded);
     assert_eq!(super::fold_for_status(Interaction, Error), Expanded);
+    // 无身份 reasoning 不能折叠（无法写覆盖键）：流式段保留可见 preview，
+    // 完成态完整可见——不隐藏无法展开的正文。
+    assert_eq!(super::fold_for_unkeyed_reasoning(Running), Preview);
+    assert_eq!(super::fold_for_unkeyed_reasoning(Completed), Expanded);
 }
 
 #[test]
@@ -747,42 +751,6 @@ fn test_compute_hash_frozen_discriminator() {
         running_hash, running.content_hash,
         "running→frozen 翻转（即使同秒）hash 必须变化（缓存失效依据）"
     );
-}
-
-/// [D2][G1] TuiCollapsedGroup hash 含 failed_count：变化必须触发分片缓存重建；
-/// 相同内容 recompute 稳定（跨 rebuild hash 不变）。
-#[test]
-fn test_collapsed_group_hash_includes_failed_count() {
-    let base = || TuiCollapsedGroup {
-        title: "Read 2".into(),
-        count: 2,
-        failed_count: 0,
-        view_models: vec![],
-        fold: FoldState::Collapsed,
-        content_hash: 0,
-    };
-    let mut a = base();
-    a.recompute_hash();
-    let mut b = base();
-    b.failed_count = 1;
-    b.recompute_hash();
-    assert_ne!(
-        a.content_hash, b.content_hash,
-        "failed_count 必须纳入组 hash（G1）"
-    );
-    // 稳定性：同内容重复 recompute 结果一致
-    let mut c = base();
-    c.recompute_hash();
-    assert_eq!(a.content_hash, c.content_hash, "组 hash 跨 rebuild 稳定");
-    // 与 count 区别：count 变化也改变 hash（既有语义保留）
-    let mut d = base();
-    d.count = 3;
-    d.recompute_hash();
-    assert_ne!(a.content_hash, d.content_hash);
-
-    let mut expanded = base();
-    expanded.fold = FoldState::Expanded;
-    assert_ne!(a, expanded, "仅 fold 不同时组也必须不相等");
 }
 
 // ── [Slice 4] TuiAskUserBlock：InteractionKind + pending/options/result hash ──

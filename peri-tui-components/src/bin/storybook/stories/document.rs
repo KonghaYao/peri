@@ -279,6 +279,13 @@ pub(super) fn handle_mouse(
             *pressed_button = None;
             false
         }
+        // 终端丢失左键 release 后只剩移动事件：清除悬空的按下态。
+        MouseEventKind::Moved => {
+            *pressed_button = None;
+            false
+        }
+        // 拖拽期间保留按下态，等 Up 统一收尾。
+        MouseEventKind::Drag(MouseButton::Left) => false,
         _ => false,
     }
 }

@@ -147,6 +147,8 @@ fn system_reminder_fold_override_survives_snapshot_rebuild() {
 
     super::push_view_models(&mut state);
 
+    // required / warning 及以上提醒保持可见（不折进正文空档组），覆盖直接作用于
+    // 该 entry。
     assert!(matches!(
         &VIEW_MODELS.state().read().items[0],
         TuiRenderUnit::TuiSystemReminder(vm) if vm.fold == FoldState::Expanded

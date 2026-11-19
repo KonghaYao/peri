@@ -31,6 +31,8 @@ use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningB
 mod append_probe_test;
 #[path = "acp_events_test/bg_task_live_test.rs"]
 mod bg_task_live_test;
+#[path = "acp_events_test/body_gap_group_test.rs"]
+mod body_gap_group_test;
 #[path = "acp_events_test/command_feedback_test.rs"]
 mod command_feedback_test;
 #[path = "acp_events_test/diff_grouping_test.rs"]
@@ -39,8 +41,6 @@ mod diff_grouping_test;
 mod display_retention_test;
 #[path = "acp_events_test/fold_test.rs"]
 mod fold_test;
-#[path = "acp_events_test/group_incremental_test.rs"]
-mod group_incremental_test;
 #[path = "acp_events_test/history_page_test.rs"]
 mod history_page_test;
 #[path = "acp_events_test/history_runtime_test.rs"]
@@ -57,22 +57,16 @@ mod history_window_release_test;
 mod input_buffer_test;
 #[path = "acp_events_test/interaction_test.rs"]
 mod interaction_test;
-#[path = "acp_events_test/legacy_group_probe_test.rs"]
-mod legacy_group_probe_test;
 #[path = "acp_events_test/memory_probe_test.rs"]
 mod memory_probe_test;
 #[path = "acp_events_test/memory_retention_audit_test.rs"]
 mod memory_retention_audit_test;
 #[path = "acp_events_test/pending_tool_ends_test.rs"]
 mod pending_tool_ends_test;
-#[path = "acp_events_test/perf_probe_test.rs"]
-mod perf_probe_test;
 #[path = "acp_events_test/prefix_archive_test.rs"]
 mod prefix_archive_test;
 #[path = "acp_events_test/program_status_test.rs"]
 mod program_status_test;
-#[path = "acp_events_test/render_cache_invalidation_test.rs"]
-mod render_cache_invalidation_test;
 #[path = "acp_events_test/session_events_test.rs"]
 mod session_events_test;
 #[path = "acp_events_test/snapshot_test.rs"]

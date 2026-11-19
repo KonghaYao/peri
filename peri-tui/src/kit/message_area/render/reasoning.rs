@@ -11,9 +11,11 @@ const REASONING_BODY_MAX_LINES: usize = 100;
 
 /// §6.3 Reasoning 三态视觉。
 ///
-/// - Running/Preview：`[│][gap]Thinking…`（bold, status.running）+ elapsed（三档放置）
-///   + 最近 ≤4 个视觉行 tail（wrap 后取尾，长行显示尾部而非截断头部；muted+italic，
-///     无 italic → dim；`│` 续行前缀与 md 正文一致）。
+/// - 默认 `Collapsed`（running / completed 同一高度）：单行活动或完成摘要，不渲染
+///   tail——正文气泡内的 thinking 摘要只占一行。正文空档组展开时成员为 `Expanded`，
+///   渲染完整推理正文。
+/// - 用户 Space 覆盖 `Preview`：running 时 `[│][gap]Thinking…` + elapsed + 最近
+///   ≤4 个视觉行 tail（wrap 后取尾；muted+italic，无 italic → dim）。
 /// - Completed/Collapsed：单行 `[│][gap]Thought for 12s · N lines`（N = 视觉行总数）。
 /// - Completed/Expanded：`[│][gap]Thought for 12s · N lines` + 前 ≤100 个视觉行正文。
 /// - 空 reasoning 仍显示 `Thinking…`（不出现空白 block）。
@@ -55,10 +57,8 @@ pub(super) fn render_reasoning_block(
     let line_count = visual_lines.len();
 
     if reasoning.is_running {
-        // Running（fold=Preview 或用户覆盖 Expanded）：│ Thinking… + elapsed + tail。
-        // [Fix §6.3] 用户手动折叠（Collapsed）→ 仅活动状态行，不渲染 tail——
-        // 「隐藏 reasoning 只影响 body；活动状态行仍需可见」（§7 running 默认
-        // Preview，Collapsed 只能来自用户覆盖——Space 切换必须有视觉反馈）。
+        // Running：默认 Collapsed 只看活动状态行；用户 Space 覆盖 Preview 时再看
+        // ≤4 行 tail，Expanded 看完整正文。活动状态行在任何 fold 下都可见。
         // 首行 icon 统一竖线（用户需求）；活动感由 running 色 + elapsed + tail
         // 增长承担（§8.2 动画帧不再用于 reasoning）。
         lines.push(render_running_reasoning_header(reasoning, grid));
