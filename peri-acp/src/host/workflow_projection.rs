@@ -13,7 +13,18 @@ use tokio_util::sync::CancellationToken;
 
 const URI: &str = "workflow://background-tasks";
 const CONSUMER_META: &str = "peri/workflowConsumer";
-type Deliver = Arc<dyn Fn(&WorkflowTaskResult) -> Result<(), String> + Send + Sync>;
+/// Workflow 终态投递：必须 await 到真实提交。
+///
+/// 投影运行在 Tokio 任务里，同步等待会把存储写入的等待转嫁到 worker；
+/// 这里用异步回调保持「提交后才 ACK」的契约。
+type Deliver = Arc<
+    dyn for<'a> Fn(
+            &'a WorkflowTaskResult,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>,
+        > + Send
+        + Sync,
+>;
 
 #[derive(Deserialize)]
 struct Page {
@@ -227,7 +238,7 @@ impl Client {
                     let result = completion.ok_or_else(|| {
                         "workflow terminal has not been read through MCP".to_string()
                     })?;
-                    deliver(&result)
+                    deliver(&result).await
                 })
                     as std::pin::Pin<
                         Box<dyn std::future::Future<Output = Result<(), String>> + Send>,

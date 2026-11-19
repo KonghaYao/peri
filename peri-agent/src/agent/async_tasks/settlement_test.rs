@@ -255,9 +255,17 @@ async fn permanent_delivery_failure_backs_off_and_close_drains_worker() {
         )
         .is_err());
     tokio::task::yield_now().await;
-    for millis in [100, 200, 400, 800, 1600, 3200, 5000, 5000] {
-        tokio::time::advance(std::time::Duration::from_millis(millis)).await;
-        tokio::task::yield_now().await;
+    // 重试在阻塞池执行：退避计时可能晚于推进才登记，按固定步长推进到总预算
+    //（16.3s 退避总和）以内，直到八次重试全部落地。
+    for _ in 0..200 {
+        if attempts.load(Ordering::SeqCst) >= 9 {
+            break;
+        }
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert_eq!(attempts.load(Ordering::SeqCst), 9);
     assert_eq!(registry.active_count(), 1);
@@ -638,4 +646,151 @@ async fn aborted_agent_does_not_fabricate_cleanup_delivery() {
         !registry.scope.is_idle(),
         "abort lost execution cleanup evidence"
     );
+}
+
+fn manager_fixture() -> (
+    Arc<crate::agent::async_tasks::TaskManager>,
+    TaskRegistrationTicket,
+) {
+    use peri_acp_types::tasks::TaskManager as _;
+    let manager = Arc::new(crate::agent::async_tasks::TaskManager::new());
+    let ticket = manager
+        .register_with_kind(BackgroundTask {
+            id: "task".into(),
+            agent_name: "fixture".into(),
+            prompt_summary: "task".into(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            chrono_started_at: chrono::Utc::now(),
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Kill(Some(Box::new(|| {}))),
+            cancel_token: None,
+            pid: None,
+            output_preview: None,
+            agent_inbox: None,
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
+        })
+        .expect("the register fixture result is required for this assertion");
+    manager.confirm_external_execution_stopped(&ticket);
+    (manager, ticket)
+}
+
+/// [回归] 单 worker 上等待持久 MQ 提交时，终态结算不能占住 worker。
+///
+/// 存储门控期间心跳任务必须仍能推进；提交前不得结算，提交后必须能看到 MQ 行。
+#[test]
+fn terminal_settlement_must_not_block_the_only_runtime_worker() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let queue = MessageQueue::new();
+    let (entered, release) = queue.gate_next_enqueue();
+    let delivery = crate::session::bg_complete::task_bg_complete_callback(
+        crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(queue.clone()),
+    );
+    let (manager, ticket) = manager_fixture();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("the single-worker runtime fixture must build");
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let settlement = {
+        let manager = Arc::clone(&manager);
+        let ticket = ticket.clone();
+        runtime.spawn(async move {
+            manager
+                .settle_completed_awaited(&ticket, result(), delivery)
+                .await
+        })
+    };
+    runtime
+        .block_on(entered)
+        .expect("the enqueue gate must report the pending commit");
+    runtime.spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = progress_tx.send(());
+    });
+    let progressed = progress_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+    assert!(
+        !ticket.is_settled(),
+        "terminal must not be acknowledged before the queue commit"
+    );
+    release
+        .send(())
+        .expect("the enqueue gate release must remain available");
+    let settled = runtime
+        .block_on(settlement)
+        .expect("the settlement task must join")
+        .expect("the settlement fixture must succeed");
+    assert!(settled);
+    assert!(ticket.is_settled());
+    assert_eq!(queue.len_sync(), 1);
+    assert!(
+        progressed,
+        "waiting for the persistent queue must not block the only runtime worker"
+    );
+}
+
+/// [回归] awaited 结算仍以存储事实为准：首次提交失败保持 delivery_pending，
+/// 重试成功后同一结果才结算并落库。
+#[tokio::test]
+async fn awaited_settlement_retries_a_failed_commit_before_acknowledging() {
+    use peri_acp_types::session::MessageSource;
+    use peri_acp_types::system_reminder::TrustedSystemReminder;
+    use peri_acp_types::tasks::TaskTerminalDelivery;
+
+    struct FailOnceDelivery {
+        route: Arc<dyn TaskTerminalDelivery>,
+        attempts: AtomicUsize,
+    }
+    impl TaskTerminalDelivery for FailOnceDelivery {
+        fn accept(
+            &self,
+            delivery_id: peri_acp_types::messages::MessageId,
+            reminder: &TrustedSystemReminder,
+            source: MessageSource,
+        ) -> Result<(), String> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err("queue acceptance refused".into());
+            }
+            self.route.accept(delivery_id, reminder, source)
+        }
+
+        fn deliver<'a>(
+            &'a self,
+            delivery_id: peri_acp_types::messages::MessageId,
+            reminder: &'a TrustedSystemReminder,
+            source: MessageSource,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            Box::pin(async move { self.route.deliver(delivery_id, reminder, source).await })
+        }
+    }
+
+    let queue = MessageQueue::new();
+    let route = Arc::new(FailOnceDelivery {
+        route: crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
+            queue.clone(),
+        ),
+        attempts: AtomicUsize::new(0),
+    });
+    let delivery = crate::session::bg_complete::task_bg_complete_callback(route.clone());
+    let (manager, ticket) = manager_fixture();
+    let error = manager
+        .settle_completed_awaited(&ticket, result(), delivery)
+        .await
+        .expect_err("a refused commit must not acknowledge the terminal");
+    assert!(error.contains("queue acceptance refused"), "{error}");
+    assert!(!ticket.is_settled());
+    assert_eq!(manager.snapshot().tasks[0].status, "delivery_pending");
+    assert!(queue.is_empty_sync());
+
+    assert_eq!(manager.retry_pending_deliveries(), 1);
+    assert!(ticket.is_settled());
+    assert_eq!(manager.snapshot().tasks[0].status, "completed");
+    assert_eq!(queue.len_sync(), 1);
+    assert_eq!(route.attempts.load(Ordering::SeqCst), 2);
 }

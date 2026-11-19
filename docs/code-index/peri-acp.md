@@ -317,5 +317,5 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | --- | --- | --- |
 | Workflow 执行消费者 | `src/host/workflow_consumer.rs` | 资源读取 + 订阅发现；鉴权工具领取、就绪、回填；不持运行时/任务表引用；claimId 保证领取请求可重试 |
 | Workflow 会话装配 | `src/host/workspace_workflow.rs` | 绑定实例运行时与消费者令牌；启动 MCP 执行消费者及后台目录投影，实例与 Host 各持独立 TaskManager |
-| Workflow 后台目录与终态 | `src/host/workflow_projection.rs` | `workflow://background-tasks` → Host 外部任务目录；接收终态后 `WorkflowCompletionAck`；取消经 `WorkflowKill`；关闭经 `WorkflowClose` 并确认最终投影 |
+| Workflow 后台目录与终态 | `src/host/workflow_projection.rs` | `workflow://background-tasks` → Host 外部任务目录；异步投递 await 真实会话提交后才 `WorkflowCompletionAck`；取消经 `WorkflowKill`；关闭经 `WorkflowClose` 并确认最终投影 |
 | Cron 触发客户端 | `peri-agent/src/session/cron_events.rs` | Session 与 print 共用 MCP 消费者；失败保留、确认重试不重复本地交付 |

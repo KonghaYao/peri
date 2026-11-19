@@ -15,6 +15,9 @@ pub use peri_acp_types::session::{
 /// 中间件 hook 与后台完成回调都还是同步 `fn`，但投递结果必须是可观察的事实：
 /// 内存存储就地提交，真实存储用独立 runtime 等到写入结束，失败原样交给生产者重试，
 /// 不允许「先返回成功、再 detached 写入」。
+///
+/// 等待期间占住调用线程；异步 owner 必须改用 `enqueue` 或把本调用放到阻塞池，
+/// 不能在 Tokio worker 上等待存储。
 pub(crate) fn enqueue_blocking(
     producer: ProducerQueue<'_>,
     message: QueuedMessage,
