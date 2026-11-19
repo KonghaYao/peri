@@ -566,8 +566,9 @@ impl SessionDataPort for RemoteSessionData {
                     let ids: HashSet<ThreadId> = ids.into_iter().collect();
                     roots.retain(|thread, root| !ids.contains(thread) && thread != id && root != id)
                 }
-                // 读失败时无法辨认后代；解析缓存不是持久事实，清空比留下不可达条目更安全。
-                None => roots.clear(),
+                // 读失败时不整表清空：root_for 解析失败会退回自身，收窄未决写入的阻塞范围；
+                // 保留旧条目最多多阻塞，不会放行。此时中间节点的后代可能残留到进程结束。
+                None => roots.retain(|thread, root| thread != id && root != id),
             }
         }
         result
