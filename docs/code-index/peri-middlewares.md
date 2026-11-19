@@ -297,7 +297,7 @@ CI 回归：`assembly_once_scope_test.rs` 用原生 shell 与 UTF-8 日志验证
 | --- | --- |
 | AGENTS.md 注入 | agents_md/agents_md_middleware.rs（AgentsMdMiddleware / read_frozen_content） |
 | Goal steering | goal/middleware/goal_middleware.rs（GoalMiddleware / after_agent）；goal/tool/goal_tool.rs（GoalTool） |
-| Agent 定义 / 默认 prompt / @mention / 归属 | 定义走 `mcp/agent_registry.rs`；default_system_prompt/；at_mention/；attribution/ 的写前/写后正文与 before_agent 分支走 `workspace_io.rs::WorkspaceFileReader`，分别经 Workspace `workspace/readText`、`workspace/readMention`、`workspace/gitBranch`，按 tool-call 身份暂存；审批拒绝由 `on_tool_rejected` 按调用结算暂存。 |
+| Agent 定义 / 默认 prompt / @mention / 归属 | 定义走 `mcp/agent_registry.rs`；default_system_prompt/；at_mention/；attribution/ 的写前/写后正文与 before_agent 分支走 `workspace_io.rs::WorkspaceFileReader`，分别经 Workspace `workspace/readText`、`workspace/readMention`、`workspace/gitBranch`，按 tool-call 身份暂存。 |
 | 工具包装 / 定义消费 / 辅助 | tools/（ArcToolWrapper / BoxToolWrapper）；Agent 定义类型与 `parse_agent_file` 在 `peri-mcp-core::agent_definition`（`peri-mcp-core/src/agent_definition/`），本 crate 不保留 parser 模块或兼容 re-export；meta_harness/（段落覆盖经 workspace `peri-meta://` 资源）；SubAgentTool 动态建议（subagent/tool/definitions.rs，`fuzzy_rank` 本地排序）；host_ports.rs |
 
 ### 跨 crate 事实源（不在本 crate 内，改前先看这里）
