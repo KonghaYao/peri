@@ -96,6 +96,65 @@ async fn test_notification_writes_newline_and_flushes_frame() {
 }
 
 #[tokio::test]
+async fn test_cancelled_request_waiting_for_write_lock_releases_pending() {
+    let (channel, mut child) = make_channel().await;
+    let channel = Arc::new(channel);
+
+    // 持有写锁，让请求停在「已登记 pending、尚未写帧」的位置。
+    let stdin_guard = channel.stdin.lock().await;
+    let request_channel = Arc::clone(&channel);
+    let request = tokio::spawn(async move {
+        request_channel
+            .send_request("test/start", serde_json::json!({}))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while channel.pending_requests.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("request 应先登记 pending");
+
+    request.abort();
+    let join_error = request.await.expect_err("取消后的请求任务应返回 JoinError");
+    assert!(join_error.is_cancelled());
+    assert!(
+        channel.pending_requests.is_empty(),
+        "取消等待写锁的请求后应释放 pending 登记"
+    );
+
+    drop(stdin_guard);
+
+    // 通道仍需能完成下一次请求。
+    let next_channel = Arc::clone(&channel);
+    let next = tokio::spawn(async move {
+        next_channel
+            .send_request("test/next", serde_json::json!({"value": 1}))
+            .await
+    });
+    let id = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Some(entry) = channel.pending_requests.iter().next() {
+                break *entry.key();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("下一次 request 应登记 pending");
+    assert!(channel
+        .handle_incoming(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"result":{{"ok":true}}}}"#
+        ))
+        .is_none());
+    let result = next.await.unwrap().unwrap();
+    assert_eq!(result, serde_json::json!({"ok": true}));
+    assert!(channel.pending_requests.is_empty());
+    child.kill().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_drain_pending_settles_waiting_request_with_reason() {
     let (channel, mut child) = make_channel().await;
     let channel = Arc::new(channel);

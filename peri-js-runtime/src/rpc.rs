@@ -72,6 +72,20 @@ impl Debug for RpcChannel {
     }
 }
 
+/// 请求 future 被取消（drop）时注销登记。
+///
+/// 取消可能发生在等待写锁或等待响应时；不注销会让未完成的登记在长驻通道里累积。
+struct PendingRegistration<'a> {
+    channel: &'a RpcChannel,
+    id: u64,
+}
+
+impl Drop for PendingRegistration<'_> {
+    fn drop(&mut self) {
+        self.channel.pending_requests.remove(&self.id);
+    }
+}
+
 impl RpcChannel {
     #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn new(stdin: ChildStdin, max_frame_bytes: usize) -> Self {
@@ -91,10 +105,8 @@ impl RpcChannel {
             message["params"] = params;
         }
         self.pending_requests.insert(id, tx);
-        if let Err(error) = self.write_line(&message).await {
-            self.pending_requests.remove(&id);
-            return Err(error);
-        }
+        let _registration = PendingRegistration { channel: self, id };
+        self.write_line(&message).await?;
         match rx.await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(error)) => Err(JsRuntimeError::RpcResponse(error)),
