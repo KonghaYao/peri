@@ -2,7 +2,9 @@
 //!
 //! Reads JSON-RPC messages from stdin (one per line) and writes to stdout.
 //! Background pump task dispatches Response messages to the pending request map,
-//! forwards Requests/Notifications to the incoming channel.
+//! forwards Requests/Notifications to the bounded incoming channel. Overflow
+//! requests are rejected with an explicit backpressure error instead of being
+//! queued without limit or silently dropped.
 
 use std::sync::Arc;
 
@@ -23,6 +25,17 @@ use super::types::AcpError;
 use super::types::IncomingMessage;
 use super::types::RequestId;
 use super::AcpTransport;
+
+/// 入站队列容量。stdio 单连接的请求/通知积压必须有界：host 循环被生命周期
+/// 锁或存储 I/O 占住时，不能把 stdin 无界读进宿主内存。量级与外部帧桥（256）
+/// 一致，按单连接交互突发设置。
+const STDIO_INCOMING_CAPACITY: usize = 256;
+
+/// JSON-RPC 2.0 保留的 server error 段（-32000..=-32099）中表达「传输层背压」
+/// 的首值，与进程内 mpsc 传输的 `TRANSPORT_BACKPRESSURE_CODE` 同义。
+const STDIO_BACKPRESSURE_CODE: i64 = -32000;
+
+const STDIO_BACKPRESSURE_MESSAGE: &str = "ACP transport backpressure: inbound queue is full";
 
 /// JSON-RPC 2.0 envelope for (de)serialization over stdio.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -51,7 +64,7 @@ pub type CancelHook = Arc<dyn Fn(&str) + Send + Sync>;
 /// stdin lines, dispatches responses to pending requests, and forwards
 /// requests/notifications to the `recv()` channel.
 pub struct StdioTransport {
-    incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
+    incoming_rx: tokio::sync::Mutex<mpsc::Receiver<IncomingMessage>>,
     router: RequestRouter,
     writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
     /// legacy `{"type":"cancel"}` 逐行拦截回调（全 session 兜底中断，移植自
@@ -115,7 +128,7 @@ impl StdioTransport {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let (incoming_tx, incoming_rx) = mpsc::channel(STDIO_INCOMING_CAPACITY);
         let router = RequestRouter::new();
         let pump_router = router.clone();
         let writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>> =
@@ -272,8 +285,19 @@ impl StdioTransport {
                             Ok(result_val.unwrap_or(Value::Null))
                         };
                         let msg = IncomingMessage::Response { id: req_id, result };
-                        if !pump_router.dispatch(&msg) && incoming_tx.send(msg).is_err() {
-                            break;
+                        if !pump_router.dispatch(&msg) {
+                            // 未匹配响应主机侧不消费（ServerLoop 忽略），队列满时
+                            // 不为它阻塞读取：匹配响应已在上面直接交给 router。
+                            match incoming_tx.try_send(msg) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    tracing::warn!(
+                                        event = "acp_stdio_backpressure",
+                                        "stdio 入站队列已满，未匹配响应被丢弃"
+                                    );
+                                }
+                            }
                         }
                     }
                     // Request (has id + method)
@@ -298,26 +322,50 @@ impl StdioTransport {
                             continue;
                         }
                         let req_id = value_to_request_id(&id);
-                        if incoming_tx
-                            .send(IncomingMessage::Request {
-                                id: req_id,
-                                method,
-                                params: envelope.params.unwrap_or(Value::Null),
-                            })
-                            .is_err()
-                        {
-                            break;
+                        match incoming_tx.try_send(IncomingMessage::Request {
+                            id: req_id,
+                            method: method.clone(),
+                            params: envelope.params.unwrap_or(Value::Null),
+                        }) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            // 背压：不静默丢请求，也不停读 stdin——显式回错误后
+                            // 继续处理其后的响应、取消和 EOF。
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    event = "acp_stdio_backpressure",
+                                    id = %id,
+                                    method = %method,
+                                    "stdio 入站队列已满，显式拒绝请求"
+                                );
+                                if send_protocol_error(
+                                    &pump_writer,
+                                    &pump_router,
+                                    id,
+                                    STDIO_BACKPRESSURE_CODE,
+                                    STDIO_BACKPRESSURE_MESSAGE,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
                         }
                     }
                     // Notification (no id, has method)
                     (None, Some(method)) => {
-                        if incoming_tx
-                            .send(IncomingMessage::Notification {
+                        // 通知没有应答通道，不能像请求那样显式拒绝：队列满时等待
+                        // 消费者排水（取消等控制消息不丢），并与 terminal 竞速。
+                        let enqueued = tokio::select! {
+                            biased;
+                            () = pump_router.wait_closed() => false,
+                            result = incoming_tx.send(IncomingMessage::Notification {
                                 method,
                                 params: envelope.params.unwrap_or(Value::Null),
-                            })
-                            .is_err()
-                        {
+                            }) => result.is_ok(),
+                        };
+                        if !enqueued {
                             break;
                         }
                     }
