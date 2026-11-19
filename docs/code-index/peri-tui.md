@@ -8,7 +8,7 @@
 语句确认、排版、概览与预览状态机由组件的 `mermaid` 模块持有。
 组件 API 与使用示例见
 [`peri-tui-components/README.md`](../../peri-tui-components/README.md)；
-组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/markdown/openui/charts，`--list`/`--dump` 支持无 TTY）。
+组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/markdown/openui/mermaid/charts，`--list`/`--dump` 支持无 TTY）。Mermaid 的终稿与流式前缀示例见 `peri-tui-components/src/bin/storybook/stories/mermaid.rs`。
 `panels/shared/list.rs` 仅保留应用的首帧高度策略；业务对象转换、主题解析、
 焦点路由及动作执行仍由 TUI 持有。
 

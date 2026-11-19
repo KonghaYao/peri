@@ -1,4 +1,4 @@
-//! Streaming 变体：Markdown / OpenUI 文档按固定比例渐进到达。
+//! Streaming 变体：Markdown / OpenUI / Mermaid 文档按固定比例渐进到达。
 //!
 //! dump 只绘制一帧，因此初始进度是源码全长的固定百分比——两次运行画面一致。
 //! 交互运行时没有自动播放：进度只由底部拖拽条 seek，或点击 `[ auto ]` 用 3 秒播到 100%。
@@ -13,7 +13,7 @@ use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use super::StoryState;
-use super::document::{self, DocumentLayout};
+use super::document::{self, DocumentContent, DocumentLayout};
 use super::{accent_style, muted_style, rect_contains, selected_style};
 
 /// 进度条占用的预览区行数；高度不足两行时整块都留给文档。
@@ -89,9 +89,9 @@ pub(crate) struct AutoPlay {
     pub(crate) from: usize,
 }
 
-/// 流式进度：`source[..cursor]` 是已到达的前缀，其余状态与普通文档一致。
+/// 流式进度：只排版已到达的 `source` 前缀，其余状态与普通文档一致。
 pub(crate) struct StreamingDocument {
-    source: &'static str,
+    source: DocumentContent<'static>,
     /// 已到达的字节偏移；始终落在字符边界上。
     cursor: usize,
     scroll: usize,
@@ -105,10 +105,11 @@ pub(crate) struct StreamingDocument {
     auto: Option<AutoPlay>,
 }
 
-fn streaming_state(source: &'static str, percent: usize) -> StoryState {
+pub(super) fn streaming_state(source: DocumentContent<'static>, percent: usize) -> StoryState {
+    let text = source.text();
     StoryState::Streaming(StreamingDocument {
         source,
-        cursor: source.floor_char_boundary(source.len() * percent / 100),
+        cursor: text.floor_char_boundary(text.len() * percent / 100),
         scroll: 0,
         pressed_button: None,
         layout: None,
@@ -119,11 +120,11 @@ fn streaming_state(source: &'static str, percent: usize) -> StoryState {
 }
 
 pub(super) fn markdown_streaming_initial() -> StoryState {
-    streaming_state(MARKDOWN_STREAMING, 58)
+    streaming_state(DocumentContent::Markdown(MARKDOWN_STREAMING), 58)
 }
 
 pub(super) fn openui_streaming_initial() -> StoryState {
-    streaming_state(OPENUI_STREAMING, 70)
+    streaming_state(DocumentContent::Markdown(OPENUI_STREAMING), 70)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,11 +248,10 @@ fn set_cursor(state: &mut StreamingDocument, cursor: usize) {
 // ---------------------------------------------------------------------------
 
 pub(super) fn render(state: &mut StreamingDocument, area: Rect, buf: &mut Buffer) {
-    let source = state.source;
     document::render(
         document_area(area),
         buf,
-        &source[..state.cursor],
+        state.source.prefix(state.cursor),
         &mut state.scroll,
         &mut state.pressed_button,
         &mut state.layout,
@@ -271,8 +271,9 @@ fn render_progress(state: &StreamingDocument, row: Rect, buf: &mut Buffer) {
         };
         buf.set_string(auto.x, auto.y, auto_text(), style);
     }
+    let source = state.source.text();
     if layout.bar.width > 0 {
-        let filled = filled_columns(state.source, state.cursor, layout.bar.width);
+        let filled = filled_columns(source, state.cursor, layout.bar.width);
         buf.set_string(
             layout.bar.x,
             layout.bar.y,
@@ -290,7 +291,7 @@ fn render_progress(state: &StreamingDocument, row: Rect, buf: &mut Buffer) {
         buf.set_string(
             row.right() - LABEL_WIDTH,
             row.y,
-            format!("{:>4}%", percent(state.source, state.cursor)),
+            format!("{:>4}%", percent(source, state.cursor)),
             accent_style(),
         );
     }
@@ -322,7 +323,10 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
                 }
                 state.auto = None;
                 state.dragging = true;
-                set_cursor(state, cursor_at(state.source, layout.bar, mouse.column));
+                set_cursor(
+                    state,
+                    cursor_at(state.source.text(), layout.bar, mouse.column),
+                );
                 return true;
             }
             handle_document(state, mouse, area)
@@ -342,7 +346,7 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
             state.pressed_button = None;
             if let Some(row) = row {
                 let bar = progress_layout(row).bar;
-                set_cursor(state, cursor_at(state.source, bar, mouse.column));
+                set_cursor(state, cursor_at(state.source.text(), bar, mouse.column));
             }
             true
         }
@@ -361,11 +365,10 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
 
 /// 进度条之外的鼠标事件仍完全交给文档处理，只是区域少了一行。
 fn handle_document(state: &mut StreamingDocument, mouse: &MouseEvent, area: Rect) -> bool {
-    let source = state.source;
     document::handle_mouse(
         document_area(area),
         mouse,
-        &source[..state.cursor],
+        state.source.prefix(state.cursor),
         &mut state.scroll,
         &mut state.pressed_button,
         &mut state.layout,
@@ -374,7 +377,7 @@ fn handle_document(state: &mut StreamingDocument, mouse: &MouseEvent, area: Rect
 
 /// 从当前 cursor 起播；已在 100% 时先回到 0，再从 0 播到末尾。
 fn start_auto(state: &mut StreamingDocument) {
-    if state.cursor >= state.source.len() {
+    if state.cursor >= state.source.text().len() {
         set_cursor(state, 0);
     }
     state.auto = Some(AutoPlay {
@@ -398,11 +401,10 @@ pub(crate) fn tick_at(state: &mut StoryState, now: Instant) {
     };
     let fraction =
         (now.saturating_duration_since(auto.start).as_secs_f64() / AUTO_SECONDS).min(1.0);
-    let len = document.source.len();
+    let source = document.source.text();
+    let len = source.len();
     let target = auto.from as f64 + (len - auto.from) as f64 * fraction;
-    let cursor = document
-        .source
-        .floor_char_boundary((target as usize).min(len));
+    let cursor = source.floor_char_boundary((target as usize).min(len));
     set_cursor(document, cursor);
     if fraction >= 1.0 {
         document.auto = None;
@@ -425,7 +427,7 @@ impl StreamingDocument {
     }
 
     pub(crate) fn source(&self) -> &'static str {
-        self.source
+        self.source.text()
     }
 
     pub(crate) fn scroll(&self) -> usize {

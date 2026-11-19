@@ -13,7 +13,31 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, ScrollbarState, StatefulWidget, Widget};
 use ratatui_kit::{ComponentTheme, components::TableTheme};
 
-use super::{MUTED, WHEEL_ROWS, muted_style, rect_contains};
+use super::{MUTED, WHEEL_ROWS, mermaid, muted_style, rect_contains};
+
+#[derive(Clone, Copy)]
+pub(crate) enum DocumentContent<'a> {
+    Markdown(&'a str),
+    Mermaid { source: &'a str, terminal: bool },
+}
+
+impl<'a> DocumentContent<'a> {
+    pub(super) fn text(self) -> &'a str {
+        match self {
+            Self::Markdown(source) | Self::Mermaid { source, .. } => source,
+        }
+    }
+
+    pub(super) fn prefix(self, cursor: usize) -> Self {
+        match self {
+            Self::Markdown(source) => Self::Markdown(&source[..cursor]),
+            Self::Mermaid { source, terminal } => Self::Mermaid {
+                source: &source[..cursor],
+                terminal: terminal && cursor == source.len(),
+            },
+        }
+    }
+}
 
 struct DocumentButton {
     rows: Range<usize>,
@@ -53,13 +77,19 @@ pub(crate) struct DocumentLayout {
 }
 
 impl DocumentLayout {
-    fn new(source: &str, width: usize, height: usize) -> Self {
+    fn new(content: DocumentContent<'_>, width: usize, height: usize) -> Self {
+        let layout = |width| match content {
+            DocumentContent::Markdown(source) => layout_lines(source, width),
+            DocumentContent::Mermaid { source, terminal } => {
+                (mermaid::lines(source, terminal, width), Vec::new())
+            }
+        };
         let mut content_width = width.max(1);
-        let (mut lines, mut buttons) = layout_lines(source, content_width);
+        let (mut lines, mut buttons) = layout(content_width);
         // 保留原有滚动条列；正文与热区必须都使用最终的内容宽度。
         if lines.len() > height && content_width > 1 {
             content_width -= 1;
-            (lines, buttons) = layout_lines(source, content_width);
+            (lines, buttons) = layout(content_width);
         }
         Self {
             size: (width, height),
@@ -70,12 +100,16 @@ impl DocumentLayout {
         }
     }
 
-    fn cached<'a>(layout: &'a mut Option<Self>, source: &str, area: Rect) -> &'a Self {
+    fn cached<'a>(
+        layout: &'a mut Option<Self>,
+        content: DocumentContent<'_>,
+        area: Rect,
+    ) -> &'a Self {
         let size = (area.width as usize, area.height as usize);
         if layout.as_ref().is_some_and(|layout| layout.size != size) {
             *layout = None;
         }
-        layout.get_or_insert_with(|| Self::new(source, size.0, size.1))
+        layout.get_or_insert_with(|| Self::new(content, size.0, size.1))
     }
 
     fn content_area(&self, area: Rect) -> Rect {
@@ -149,13 +183,13 @@ pub(crate) fn document_lines(source: &str, width: usize) -> Vec<Line<'static>> {
 
 #[cfg(test)]
 pub(crate) fn document_max_scroll(source: &str, width: usize, height: usize) -> usize {
-    DocumentLayout::new(source, width, height).max_scroll
+    DocumentLayout::new(DocumentContent::Markdown(source), width, height).max_scroll
 }
 
 pub(super) fn render(
     area: Rect,
     buf: &mut Buffer,
-    source: &str,
+    content: DocumentContent<'_>,
     scroll: &mut usize,
     pressed_button: &mut Option<usize>,
     layout: &mut Option<DocumentLayout>,
@@ -170,7 +204,7 @@ pub(super) fn render(
     if area.is_empty() {
         return;
     }
-    let layout = DocumentLayout::cached(layout, source, area);
+    let layout = DocumentLayout::cached(layout, content, area);
     *scroll = (*scroll).min(layout.max_scroll);
     let content_area = layout.content_area(area);
     let mut lines = layout.lines[*scroll..].to_vec();
@@ -211,7 +245,7 @@ pub(super) fn render(
 pub(super) fn handle_mouse(
     area: Rect,
     mouse: &MouseEvent,
-    source: &str,
+    content: DocumentContent<'_>,
     scroll: &mut usize,
     pressed_button: &mut Option<usize>,
     layout: &mut Option<DocumentLayout>,
@@ -221,7 +255,7 @@ pub(super) fn handle_mouse(
         MouseEventKind::Up(MouseButton::Left) => pressed_button.take().is_some(),
         MouseEventKind::Down(MouseButton::Left) => {
             *pressed_button = if inside {
-                let layout = DocumentLayout::cached(layout, source, area);
+                let layout = DocumentLayout::cached(layout, content, area);
                 layout.button_at(area, (*scroll).min(layout.max_scroll), mouse)
             } else {
                 None
@@ -231,7 +265,7 @@ pub(super) fn handle_mouse(
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             *pressed_button = None;
             if inside {
-                let max = DocumentLayout::cached(layout, source, area).max_scroll;
+                let max = DocumentLayout::cached(layout, content, area).max_scroll;
                 *scroll = if mouse.kind == MouseEventKind::ScrollUp {
                     scroll.saturating_sub(WHEEL_ROWS)
                 } else {

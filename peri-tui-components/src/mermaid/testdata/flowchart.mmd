@@ -1,0 +1,6 @@
+flowchart LR
+  Input[输入] --> Parse[解析]
+  subgraph Display[显示]
+    Render[字符图] --> Preview[预览]
+  end
+  Parse --> Render

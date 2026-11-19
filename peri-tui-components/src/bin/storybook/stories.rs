@@ -12,8 +12,10 @@
 mod document;
 mod list_items;
 mod markdown;
+mod mermaid;
 pub(crate) mod streaming;
 
+pub(crate) use self::document::DocumentContent;
 use self::document::DocumentLayout;
 #[cfg(test)]
 pub(crate) use self::document::{document_lines, document_max_scroll};
@@ -91,8 +93,7 @@ pub(crate) enum StoryState {
         total: usize,
     },
     Document {
-        /// Markdown source rendered through the real parse → segment → line pipeline.
-        source: &'static str,
+        content: DocumentContent<'static>,
         /// First rendered row; wheel-driven and clamped to the rendered height.
         scroll: usize,
         pressed_button: Option<usize>,
@@ -223,7 +224,7 @@ fn scrollbar_bottom_initial() -> StoryState {
 
 fn document_state(source: &'static str, scroll: usize) -> StoryState {
     StoryState::Document {
-        source,
+        content: DocumentContent::Markdown(source),
         scroll,
         pressed_button: None,
         layout: None,
@@ -460,6 +461,39 @@ const SCROLLBAR_VARIANTS: &[Variant] = &[
     },
 ];
 
+const MERMAID_VARIANTS: &[Variant] = &[
+    Variant {
+        key: "flowchart",
+        note: "Small flowchart rendered with the Mermaid frame API.",
+        initial: mermaid::flowchart_initial,
+    },
+    Variant {
+        key: "sequence",
+        note: "Sequence diagram rendered as terminal characters.",
+        initial: mermaid::sequence_initial,
+    },
+    Variant {
+        key: "collaboration",
+        note: "Large collaboration flowchart uses the semantic overview path.",
+        initial: mermaid::collaboration_initial,
+    },
+    Variant {
+        key: "dense",
+        note: "密集流图：以语义概览保留分组和边的信息。",
+        initial: mermaid::dense_initial,
+    },
+    Variant {
+        key: "long-workflow",
+        note: "Long workflow remains bounded by the overview renderer.",
+        initial: mermaid::long_workflow_initial,
+    },
+    Variant {
+        key: "streaming",
+        note: "拖动进度条或自动播放；只把已确认的语句绘成字符图。",
+        initial: mermaid::streaming_initial,
+    },
+];
+
 const OPENUI_VARIANTS: &[Variant] = &[
     Variant {
         key: "stack-column",
@@ -616,6 +650,11 @@ pub(crate) const STORIES: &[Story] = &[
         variants: OPENUI_VARIANTS,
     },
     Story {
+        key: "mermaid",
+        title: "Mermaid",
+        variants: MERMAID_VARIANTS,
+    },
+    Story {
         key: "charts",
         title: "tui-chart",
         variants: CHART_VARIANTS,
@@ -643,11 +682,11 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
             render_scrollbar(area, buf, *position, *total);
         }
         StoryState::Document {
-            source,
+            content,
             scroll,
             pressed_button,
             layout,
-        } => document::render(area, buf, source, scroll, pressed_button, layout),
+        } => document::render(area, buf, *content, scroll, pressed_button, layout),
         StoryState::Streaming(document) => streaming::render(document, area, buf),
         StoryState::Chart { demo } => crate::charts::render_demo(*demo, area, buf),
     }
@@ -895,11 +934,11 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
             _ => false,
         },
         StoryState::Document {
-            source,
+            content,
             scroll,
             pressed_button,
             layout,
-        } => document::handle_mouse(area, mouse, source, scroll, pressed_button, layout),
+        } => document::handle_mouse(area, mouse, *content, scroll, pressed_button, layout),
         StoryState::Streaming(document) => streaming::handle_mouse(document, mouse, area),
         // Chart frames are static; clicks are consumed like document clicks.
         StoryState::Chart { .. } => matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),

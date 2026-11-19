@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use super::{App, dump_buffer, dump_screen, handle_mouse};
 use crate::stories::{
-    ACCENT, BG, STORIES, StoryState, document_lines, document_max_scroll, handle_story_mouse,
-    place_caret,
+    ACCENT, BG, DocumentContent, STORIES, StoryState, document_lines, document_max_scroll,
+    handle_story_mouse, place_caret,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -386,7 +386,9 @@ fn openui_button_shows_pressed_style_until_mouse_up_or_cancel() {
 fn document_button_hit_accounts_for_segment_gap_card_and_scroll() {
     let mut app = App::new(story_index("openui"));
     app.state = StoryState::Document {
-        source: "正文\n\n```gen-ui\nroot = Card([Button(\"继续\", @ToAssistant(\"go\"))])\n```\n\n结尾",
+        content: DocumentContent::Markdown(
+            "正文\n\n```gen-ui\nroot = Card([Button(\"继续\", @ToAssistant(\"go\"))])\n```\n\n结尾",
+        ),
         scroll: 0,
         pressed_button: None,
         layout: None,
@@ -425,7 +427,12 @@ fn document_wheel_scrolls_three_rows_and_clamps() {
     app.select_variant(2); // lists: taller than the viewport
     let area = Rect::new(0, 10, 40, 6);
 
-    let StoryState::Document { source, scroll, .. } = &app.state else {
+    let StoryState::Document {
+        content: DocumentContent::Markdown(source),
+        scroll,
+        ..
+    } = &app.state
+    else {
         panic!("expected document state");
     };
     assert_eq!(*scroll, 0);
@@ -469,7 +476,11 @@ fn document_wheel_scrolls_three_rows_and_clamps() {
 #[test]
 fn rich_text_applies_inline_styles() {
     let initial = STORIES[story_index("markdown")].variants[0].initial;
-    let StoryState::Document { source, .. } = initial() else {
+    let StoryState::Document {
+        content: DocumentContent::Markdown(source),
+        ..
+    } = initial()
+    else {
         panic!("expected document state");
     };
     let lines = document_lines(source, 68);
@@ -659,6 +670,79 @@ fn streaming_auto_plays_to_the_complete_document() {
             assert!(screen.contains("继续"), "闭合后渲染出真实组件");
         }
     }
+}
+
+#[test]
+fn mermaid_static_variants_render_diagrams_and_overviews() {
+    let story = story_index("mermaid");
+    for (variant, visible) in [
+        ("flowchart", "字符图"),
+        ("sequence", "提交图表源码"),
+        ("collaboration", "36 节点"),
+        ("dense", "144 节点"),
+        ("long-workflow", "72 节点"),
+    ] {
+        let mut app = App::new(story);
+        app.select_variant(variant_index(story, variant));
+        let screen = dump_screen(&mut app, 100, 32);
+        assert!(screen.contains(visible), "{variant}:\n{screen}");
+        assert!(!screen.contains("flowchart LR") && !screen.contains("sequenceDiagram"));
+        assert!(!screen.contains("[ auto ]"), "{variant} 是静态变体");
+    }
+}
+
+#[test]
+fn mermaid_streaming_shows_tail_and_uses_shared_mouse_playback() {
+    use crate::stories::streaming::{autoplay, is_animating, test_progress_layout, tick_at};
+
+    let mut app = streaming_app("mermaid");
+    let initial = dump_screen(&mut app, 100, 32);
+    assert_eq!(initial, dump_screen(&mut streaming_app("mermaid"), 100, 32));
+    assert!(initial.contains("输入"), "已确认的边应显示字符图");
+    assert!(initial.contains("未确认源码"));
+    assert!(initial.contains("subgraph Display[显示]"));
+    assert!(initial.contains("未闭合"));
+
+    let area = app.metrics.story_area;
+    let (auto, bar, _) = test_progress_layout(area);
+    let auto = auto.expect("默认宽度显示 auto 按钮");
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), auto.x, auto.y);
+    handle_mouse(&mut app, click);
+    let play = autoplay(&app.state).expect("点击后开始播放");
+    tick_at(&mut app.state, play.start + Duration::from_secs(3));
+    let (cursor, source) = streaming_cursor(&app);
+    assert_eq!(cursor, source.len());
+    assert!(!is_animating(&app.state));
+    let final_screen = dump_screen(&mut app, 100, 32);
+    assert!(final_screen.contains("100%"));
+    assert!(final_screen.contains("字符图"));
+    assert!(!final_screen.contains("未确认源码"));
+
+    handle_mouse(&mut app, click);
+    assert!(is_animating(&app.state));
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), bar.x, bar.y),
+    );
+    assert!(!is_animating(&app.state), "轨道按下立即取消播放");
+    handle_mouse(
+        &mut app,
+        mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            bar.right() - 1,
+            bar.y,
+        ),
+    );
+    handle_mouse(
+        &mut app,
+        mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            bar.right() - 1,
+            bar.y,
+        ),
+    );
+    assert_eq!(streaming_cursor(&app).0, source.len());
+    assert_eq!(dump_screen(&mut app, 100, 32), final_screen);
 }
 
 #[test]
