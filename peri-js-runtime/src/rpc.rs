@@ -106,9 +106,7 @@ impl RpcChannel {
         }
         self.pending_requests.insert(id, tx);
         let _registration = PendingRegistration { channel: self, id };
-        if let Err(error) = self.write_line(&message).await {
-            return Err(error);
-        }
+        self.write_line(&message).await?;
         match rx.await {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(error)) => Err(JsRuntimeError::RpcResponse(error)),
