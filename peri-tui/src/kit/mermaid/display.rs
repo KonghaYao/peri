@@ -6,11 +6,39 @@ use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 
 use crate::i18n;
-use crate::kit::markdown::{MermaidFenceKey, MermaidMessageRef, MermaidSegment};
+use crate::kit::markdown::{MermaidFence, MermaidFenceKey, MermaidMessageRef, MermaidSegment};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
 use super::preview::{PreviewContent, PreviewNotice, rebuild_history};
 use super::store;
+
+/// 一处围栏在消息行里的位置与调度信息。
+#[derive(Debug, Clone)]
+pub(crate) struct FenceSpan {
+    pub(crate) key: MermaidFenceKey,
+    pub(crate) fence: std::sync::Arc<MermaidFence>,
+    pub(crate) width: usize,
+    pub(crate) frozen: bool,
+    /// 消息内逻辑行范围（wrap 前，end 为开区间）。
+    pub(crate) logical: std::ops::Range<usize>,
+    pub(crate) layout_bytes: usize,
+}
+
+impl FenceSpan {
+    /// 稳定块内的局部范围 → 整条消息的绝对范围。
+    #[must_use]
+    pub(crate) fn shifted(&self, delta: usize) -> Self {
+        Self {
+            key: self.key.clone(),
+            fence: std::sync::Arc::clone(&self.fence),
+            width: self.width,
+            frozen: self.frozen,
+            logical: self.logical.start.saturating_add(delta)
+                ..self.logical.end.saturating_add(delta),
+            layout_bytes: self.layout_bytes,
+        }
+    }
+}
 
 /// 一处围栏的稳定身份：会话 + 消息 + 原文位置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +62,14 @@ impl PreviewScope {
     }
 
     #[must_use]
+    pub(crate) fn message_identity(&self) -> crate::kit::markdown::MermaidMessageIdentity {
+        crate::kit::markdown::MermaidMessageIdentity {
+            session_id: self.session_id.clone(),
+            message: self.message.clone(),
+        }
+    }
+
+    #[must_use]
     pub(crate) fn key(&self, open_start: usize) -> MermaidFenceKey {
         MermaidFenceKey {
             message: crate::kit::markdown::MermaidMessageIdentity {
@@ -46,6 +82,7 @@ impl PreviewScope {
 }
 
 /// 消息区展示行：有可信帧时显示图 + 未确认源码尾部；否则保持完整源码。
+/// 直接渲染入口（测试/嵌套渲染）使用；消息区走 [`display_lines_peek`]。
 pub(crate) fn display_lines(
     segment: &MermaidSegment,
     scope: &PreviewScope,
@@ -68,6 +105,30 @@ pub(crate) fn display_lines(
     render_content(segment, view.content, view.notice, foreground)
 }
 
+/// 消息区渲染路径：只读取当前帧，不排队。可见性调度由 transcript 用围栏
+/// 视觉范围与视口相交后统一发起，避免离屏消息触发排版。
+pub(crate) fn display_lines_peek(
+    segment: &MermaidSegment,
+    scope: &PreviewScope,
+    width: usize,
+    _frozen: bool,
+    foreground: Color,
+) -> (Vec<Line<'static>>, usize) {
+    let view = store::peek(scope.key(segment.fence.open_start), &segment.fence, width);
+    let bytes = content_bytes(&view.content);
+    (
+        render_content(segment, view.content, view.notice, foreground),
+        bytes,
+    )
+}
+
+fn content_bytes(content: &PreviewContent) -> usize {
+    match content {
+        PreviewContent::Source => 0,
+        PreviewContent::Frame { layout_bytes, .. } => *layout_bytes,
+    }
+}
+
 fn render_content(
     segment: &MermaidSegment,
     content: PreviewContent,
@@ -76,7 +137,7 @@ fn render_content(
 ) -> Vec<Line<'static>> {
     let mut lines = match content {
         PreviewContent::Source => segment.lines.clone(),
-        PreviewContent::Frame { lines, tail } => {
+        PreviewContent::Frame { lines, tail, .. } => {
             let mut rendered = frame_lines(&lines, foreground);
             if !tail.is_empty() {
                 rendered.push(Line::default());
@@ -144,6 +205,10 @@ fn notice_line(notice: PreviewNotice, foreground: Color) -> Line<'static> {
             &[("reason".to_string(), reason.into())],
         ),
         PreviewNotice::UnknownStatement => i18n::tr("mermaid-unknown-statement"),
+        PreviewNotice::TooLarge { bytes } => i18n::tr_args(
+            "mermaid-too-large",
+            &[("bytes".to_string(), bytes.to_string().into())],
+        ),
         PreviewNotice::OpenScope { label, statements } => i18n::tr_args(
             "mermaid-open-scope",
             &[

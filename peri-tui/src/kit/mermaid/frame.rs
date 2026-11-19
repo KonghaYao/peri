@@ -43,10 +43,14 @@ pub(crate) struct RenderOutput {
 }
 
 impl RenderOutput {
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn lines(&self) -> &[String] {
         &self.lines
+    }
+
+    #[must_use]
+    pub(crate) fn from_lines(lines: Arc<Vec<String>>) -> Self {
+        Self { lines }
     }
 
     #[must_use]

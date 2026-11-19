@@ -54,6 +54,8 @@ pub(crate) struct EntryRenderCache {
     /// 上次渲染时的 Mermaid 预览版本；只有含 Mermaid 的消息需要据此重算。
     preview_revision: Option<u64>,
     has_mermaid: Option<bool>,
+    /// 本消息内每处围栏的逻辑行范围；调度与阅读锚点共用。
+    mermaid_fences: Vec<crate::kit::mermaid::FenceSpan>,
 }
 
 impl EntryRenderCache {
@@ -74,11 +76,9 @@ impl EntryRenderCache {
         if content_changed || self.has_mermaid.is_none() {
             self.has_mermaid = Some(crate::kit::mermaid::vm_might_have_mermaid(vm));
         }
-        let preview_revision = crate::kit::mermaid::revision();
-        let preview_changed = self.has_mermaid == Some(true)
-            && self
-                .preview_revision
-                .is_some_and(|previous| previous != preview_revision);
+        let preview_revision = crate::kit::mermaid::message_revision_for_vm(vm);
+        let preview_changed =
+            self.has_mermaid == Some(true) && self.preview_revision != preview_revision;
         // 转场翻转（相邻 entry 的起止 zone 变化，§6）改变本 slot 的入口台阶行——
         // 按 Layout 级重渲染本 slot，不牵动其他 slot 的缓存。
         let layout_changed = self.grid != Some(*grid)
@@ -121,37 +121,61 @@ impl EntryRenderCache {
                     );
                 }
             } else {
-                let (lines, copy_button, interaction, image_lines, genui_buttons) =
-                    crate::kit::message_area::render::vm_to_lines_cached_with_layout(
-                        vm,
-                        grid,
-                        &mut self.markdown,
-                        None,
-                        context.surface == EntrySurface::Message,
-                        transition,
-                    );
+                let (lines, copy_button, interaction, image_lines, genui_buttons, mermaid_fences) =
+                    if context.surface == EntrySurface::Message {
+                        crate::kit::message_area::render::vm_to_lines_cached_with_layout_gated(
+                            vm,
+                            grid,
+                            &mut self.markdown,
+                            None,
+                            true,
+                            transition,
+                        )
+                    } else {
+                        crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(
+                            vm,
+                            grid,
+                            &mut self.markdown,
+                            None,
+                            false,
+                            transition,
+                        )
+                    };
                 self.lines = Arc::new(lines);
                 self.copy_button = copy_button;
                 self.interaction = interaction;
                 self.image_lines = image_lines;
                 self.genui_buttons = genui_buttons;
+                self.mermaid_fences = mermaid_fences;
             }
         } else {
             self.markdown_lines.stable_start = None;
-            let (lines, copy_button, interaction, image_lines, genui_buttons) =
-                crate::kit::message_area::render::vm_to_lines_cached_with_layout(
-                    vm,
-                    grid,
-                    &mut self.markdown,
-                    Some(&mut self.markdown_lines),
-                    context.surface == EntrySurface::Message,
-                    transition,
-                );
+            let (lines, copy_button, interaction, image_lines, genui_buttons, mermaid_fences) =
+                if context.surface == EntrySurface::Message {
+                    crate::kit::message_area::render::vm_to_lines_cached_with_layout_gated(
+                        vm,
+                        grid,
+                        &mut self.markdown,
+                        Some(&mut self.markdown_lines),
+                        true,
+                        transition,
+                    )
+                } else {
+                    crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(
+                        vm,
+                        grid,
+                        &mut self.markdown,
+                        Some(&mut self.markdown_lines),
+                        false,
+                        transition,
+                    )
+                };
             self.lines = Arc::new(lines);
             self.copy_button = copy_button;
             self.interaction = interaction;
             self.image_lines = image_lines;
             self.genui_buttons = genui_buttons;
+            self.mermaid_fences = mermaid_fences;
         }
         self.genui_revisions = self
             .markdown_lines
@@ -167,7 +191,7 @@ impl EntryRenderCache {
         self.transition = Some(transition);
         self.context = Some(context);
         self.frame = frame;
-        self.preview_revision = Some(preview_revision);
+        self.preview_revision = preview_revision;
         invalidation
     }
 
@@ -179,6 +203,11 @@ impl EntryRenderCache {
     #[must_use]
     pub(crate) fn has_mermaid(&self) -> Option<bool> {
         self.has_mermaid
+    }
+
+    #[must_use]
+    pub(crate) fn mermaid_fences(&self) -> &[crate::kit::mermaid::FenceSpan] {
+        &self.mermaid_fences
     }
 
     #[must_use]
@@ -298,6 +327,8 @@ pub(crate) struct MarkdownLineChunk {
     pub(crate) lines: Arc<Vec<Line<'static>>>,
     pub(crate) wrap_map: Arc<Vec<WrappedLineInfo>>,
     pub(crate) visual_rows: usize,
+    /// 本 chunk 行内的 Mermaid 围栏（局部逻辑行范围）。
+    fences: Vec<crate::kit::mermaid::FenceSpan>,
 }
 
 #[derive(Clone, Default)]
@@ -311,7 +342,25 @@ pub(crate) struct MarkdownLineCache {
 }
 
 impl MarkdownLineCache {
+    #[cfg(test)]
     pub(crate) fn retain_and_wrap(&mut self, width: u16, chunks: Vec<(usize, Vec<Line<'static>>)>) {
+        let chunks = chunks
+            .into_iter()
+            .map(|(identity, lines)| (identity, lines, Vec::new()))
+            .collect();
+        self.retain_and_wrap_with_fences(width, chunks);
+    }
+
+    /// 稳定块重建时同时保留其中围栏的局部行范围；块命中缓存时范围随块复用。
+    pub(crate) fn retain_and_wrap_with_fences(
+        &mut self,
+        width: u16,
+        chunks: Vec<(
+            usize,
+            Vec<Line<'static>>,
+            Vec<crate::kit::mermaid::FenceSpan>,
+        )>,
+    ) {
         if self.width != width {
             self.stable.clear();
             self.width = width;
@@ -319,7 +368,7 @@ impl MarkdownLineCache {
         let chunk_count = chunks.len();
         {
             let iteration_items = chunks.into_iter().enumerate();
-            for (index, (identity, lines)) in iteration_items {
+            for (index, (identity, lines, fences)) in iteration_items {
                 if self
                     .stable
                     .get(index)
@@ -336,6 +385,7 @@ impl MarkdownLineCache {
                     lines,
                     wrap_map: Arc::new(wrap_map),
                     visual_rows,
+                    fences,
                 });
             }
         }
@@ -361,6 +411,23 @@ impl MarkdownLineCache {
                 .map(|chunk| Arc::clone(&chunk.lines))
                 .collect(),
         ))
+    }
+
+    /// 稳定块里的围栏，逻辑行范围换算到整条消息。
+    #[must_use]
+    pub(crate) fn stable_fences(&self) -> Vec<crate::kit::mermaid::FenceSpan> {
+        let Some(stable_start) = self.stable_start else {
+            return Vec::new();
+        };
+        let mut fences = Vec::new();
+        for (index, chunk) in self.stable.iter().enumerate() {
+            let Some(chunk_start) = self.prefix.get(index) else {
+                continue;
+            };
+            let offset = stable_start.saturating_add(*chunk_start);
+            fences.extend(chunk.fences.iter().map(|fence| fence.shifted(offset)));
+        }
+        fences
     }
 
     pub(crate) fn build_slot_wrap_map(

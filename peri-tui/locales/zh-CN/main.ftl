@@ -1490,4 +1490,5 @@ mermaid-unclosed = Mermaid 块未闭合，当前展示已收到的源码。
 mermaid-interrupted = Mermaid 块中断：{ $reason }
 mermaid-render-failed = Mermaid 预览不可用：{ $reason }
 mermaid-unknown-statement = 已展示源码：无法识别的 Mermaid 语句。
+mermaid-too-large = 图源码过大，无法内联排版（{ $bytes } 字节），当前展示源码。
 mermaid-open-scope = 分组 { $label } · 已确认 { $count } 条语句

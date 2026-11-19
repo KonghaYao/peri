@@ -437,7 +437,7 @@ fn unclosed_history_rebuilds_the_last_trusted_preview() {
     let replay = rebuild_history(&fence("graph TD\nA-->B\nC--", false), 60, None);
     assert_eq!(replay.notice, Some(PreviewNotice::Unclosed));
     match replay.content {
-        PreviewContent::Frame { lines, tail } => {
+        PreviewContent::Frame { lines, tail, .. } => {
             assert!(lines.join("\n").contains('A'));
             assert_eq!(tail, "C--");
         }
@@ -582,4 +582,116 @@ fn history_rebuild_keeps_the_full_source_when_the_closed_fence_fails_validation(
         }
         other => panic!("unexpected notice: {other:?}"),
     }
+}
+
+#[test]
+fn identical_sources_share_one_layout_and_one_geometry_entry() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let shared = fence("graph TD\nA-->B\n", true);
+    engine.observe(key("m1"), &shared, 60, true, now);
+    let first = engine.take_due(now).expect("first diagram is due");
+    let output = render_job(&first).expect("render succeeds");
+    assert!(engine.complete(first, Ok(output), now));
+    assert_eq!(engine.layouts(), 1);
+
+    let mut second_key = key("m2");
+    second_key.message.message = MermaidMessageRef::Persistent("m2".to_string());
+    engine.observe(second_key, &shared, 60, true, now);
+    let second = engine.take_due(now).expect("second diagram is due");
+    let cached = engine
+        .cached_output(&second)
+        .expect("identical source hits geometry");
+    assert!(engine.complete(second, Ok(cached), now));
+    assert_eq!(engine.layouts(), 1, "shared geometry is counted once");
+    assert_eq!(
+        engine.retained_geometry_bytes(),
+        engine.retained_geometry_bytes()
+    );
+}
+
+#[test]
+fn switching_sessions_discards_in_flight_results() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let old = fence("graph TD\nA-->B\n", true);
+    engine.observe(key("m1"), &old, 60, true, now);
+    let job = engine.take_due(now).expect("job is due");
+
+    let mut other = key("m2");
+    other.message.session_id = "other-session".to_string();
+    engine.observe(other, &old, 60, true, now);
+    let result = render_job(&job);
+    assert!(!engine.complete(job, result, now));
+    assert_eq!(engine.layouts(), 0);
+}
+
+#[test]
+fn oversized_sources_keep_the_source_without_queueing() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let mut source = String::from("graph TD\n");
+    source.push_str(&"A-->B\n".repeat(super::MAX_LAYOUT_SOURCE_BYTES / 6 + 8));
+    let large = fence(&source, true);
+    let view = engine.observe(key("m1"), &large, 60, true, now);
+    assert_eq!(engine.wait_duration(now), None);
+    assert!(matches!(view.notice, Some(PreviewNotice::TooLarge { .. })));
+    assert!(matches!(view.content, PreviewContent::Source));
+}
+
+#[test]
+fn evicting_geometry_drops_the_instance_frame_too() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let closed = fence("graph TD\nA-->B\n", true);
+    engine.observe(key("m1"), &closed, 60, true, now);
+    let job = engine.take_due(now).expect("job is due");
+    let result = render_job(&job);
+    assert!(engine.complete(job, result, now));
+    assert!(matches!(
+        engine.peek(&key("m1"), &closed, 60).content,
+        PreviewContent::Frame { .. }
+    ));
+    engine.evict_geometry_to(0);
+    assert!(matches!(
+        engine.peek(&key("m1"), &closed, 60).content,
+        PreviewContent::Source
+    ));
+}
+
+#[test]
+fn layout_publication_bumps_only_the_owning_message_revision() {
+    let mut engine = PreviewEngine::new();
+    let now = Instant::now();
+    let first = fence("graph TD\nA-->B\n", true);
+    let second = fence("graph TD\nC-->D\n", true);
+    engine.observe(key("m1"), &first, 60, true, now);
+    engine.observe(key("m2"), &second, 60, true, now);
+    let identity = |name: &str| MermaidMessageIdentity {
+        session_id: "session".to_string(),
+        message: MermaidMessageRef::Persistent(name.to_string()),
+    };
+    let first_before = engine.message_revision(&identity("m1"));
+    let second_before = engine.message_revision(&identity("m2"));
+    let job = engine.take_due(now).expect("first job is due");
+    let completed = job.key.message.message.clone();
+    let result = render_job(&job);
+    assert!(engine.complete(job, result, now));
+    let (own, other) = if completed == MermaidMessageRef::Persistent("m1".to_string()) {
+        ("m1", "m2")
+    } else {
+        ("m2", "m1")
+    };
+    let own_before = if own == "m1" {
+        first_before
+    } else {
+        second_before
+    };
+    let other_before = if other == "m1" {
+        first_before
+    } else {
+        second_before
+    };
+    assert!(engine.message_revision(&identity(own)) > own_before);
+    assert_eq!(engine.message_revision(&identity(other)), other_before);
 }

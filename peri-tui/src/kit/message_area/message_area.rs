@@ -243,6 +243,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [REQ-C01-3 / A20] 本次发布的重定位结果（一次性；`prepare` 内完成身份重定位，
     // 见 `viewport_anchor`）。取走后交给并入分支消费。
     let prepend_relocation = transcript_guard.take_prepend_relocation();
+    let reflow_relocation = transcript_guard.take_reflow_relocation();
     drop(caches_guard);
     drop(transcript_guard);
     let t_rebuild = peri_time::monotonic_now();
@@ -388,6 +389,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
                     // 「发布前锚点身份 + 发布后新索引」换算完成，effect 只消费
                     // （一次性取值见上方 `take_prepend_relocation` 调用点）。
                     prepend_relocation,
+                    reflow_relocation,
                     // [Slice 4 §6.8] pending interaction block 锚定范围
                     // （每帧派生值；effect 依赖不含它——block 完成时 generation
                     // 变化触发 effect，用当帧最新值）。

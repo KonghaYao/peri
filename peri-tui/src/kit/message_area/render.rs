@@ -26,7 +26,10 @@ pub(crate) use renderer::running_header_index;
 #[cfg(test)]
 pub(crate) use renderer::vm_to_lines;
 pub(crate) use renderer::vm_to_lines_cached;
+#[cfg(test)]
 pub(crate) use renderer::vm_to_lines_cached_with_layout;
+pub(crate) use renderer::vm_to_lines_cached_with_layout_gated;
+pub(crate) use renderer::vm_to_lines_cached_with_layout_scheduled;
 
 pub(crate) use self::error::{copy_text_at, subagent_error_buttons};
 pub(crate) use self::interaction::InteractionLayout;

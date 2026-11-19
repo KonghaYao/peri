@@ -8,9 +8,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kit::markdown::{MermaidFence, MermaidFenceKey};
+use crate::kit::markdown::{MermaidFence, MermaidFenceKey, MermaidMessageIdentity};
 
 use super::frame::{RenderFailure, RenderOutput, render_final, render_source};
+use super::layout::{
+    GeometryCache, LayoutKey, LayoutKind, MAX_LAYOUT_OUTPUT_BYTES, MAX_LAYOUT_SOURCE_BYTES,
+    MAX_PENDING_JOBS, geometry_bytes,
+};
 use super::stream::{DiagramMode, MermaidStream, detect_mode};
 
 /// 连续输入时最多每 80ms 提交一次新的可信前缀。
@@ -41,7 +45,14 @@ pub(crate) enum PreviewNotice {
     Interrupted(String),
     Failed(String),
     UnknownStatement,
-    OpenScope { label: String, statements: usize },
+    /// 源码或排版结果超过几何预算：保留源码，等待概览视图（第 4 部分）。
+    TooLarge {
+        bytes: usize,
+    },
+    OpenScope {
+        label: String,
+        statements: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +63,7 @@ pub(crate) enum PreviewContent {
         lines: Arc<Vec<String>>,
         /// 尚未确认的源码尾部，显示在图下方。
         tail: String,
+        layout_bytes: usize,
     },
 }
 
@@ -66,6 +78,23 @@ struct FrameState {
     lines: Arc<Vec<String>>,
     width: usize,
     source: Arc<String>,
+    bytes: usize,
+}
+
+impl FrameState {
+    fn with_bytes(
+        lines: Arc<Vec<String>>,
+        width: usize,
+        source: Arc<String>,
+        bytes: usize,
+    ) -> Self {
+        Self {
+            bytes,
+            lines,
+            width,
+            source,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -102,6 +131,7 @@ struct FenceState {
     drawable: bool,
     paused: Option<String>,
     open_scope: Option<(String, usize)>,
+    over_budget: bool,
     frame: Option<FrameState>,
     final_frame: Option<FrameState>,
     pending: Option<PendingJob>,
@@ -129,6 +159,7 @@ impl Default for FenceState {
             drawable: false,
             paused: None,
             open_scope: None,
+            over_budget: false,
             frame: None,
             final_frame: None,
             pending: None,
@@ -141,7 +172,39 @@ impl Default for FenceState {
     }
 }
 
+/// 一次观察前后可展示内容是否变化；用于只让其所属消息失效。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViewDigest {
+    version: u64,
+    trusted_end: usize,
+    width: usize,
+    error: Option<String>,
+    paused: bool,
+    open_scope: Option<(String, usize)>,
+    has_frame: bool,
+    has_final: bool,
+    over_budget: bool,
+    closed: bool,
+    frozen: bool,
+}
+
 impl FenceState {
+    fn digest(&self) -> ViewDigest {
+        ViewDigest {
+            version: self.version,
+            trusted_end: self.trusted_end,
+            width: self.width,
+            error: self.error.clone(),
+            paused: self.paused.is_some(),
+            open_scope: self.open_scope.clone(),
+            has_frame: self.frame.is_some(),
+            has_final: self.final_frame.is_some(),
+            over_budget: self.over_budget,
+            closed: self.closed,
+            frozen: self.frozen,
+        }
+    }
+
     fn reset(&mut self, epoch: u64) {
         let accessed = self.accessed;
         *self = Self {
@@ -155,13 +218,21 @@ impl FenceState {
         self.pending = None;
     }
 
-    fn schedule_preview(&mut self, source: &str, width: usize, now: Instant) {
+    fn schedule_preview(&mut self, source: &str, width: usize, now: Instant, queue_full: bool) {
         let source = Arc::new(source.to_string());
+        if source.len() > MAX_LAYOUT_SOURCE_BYTES {
+            self.pending = None;
+            return;
+        }
         if self
             .frame
             .as_ref()
             .is_some_and(|frame| frame.width == width && frame.source == source)
         {
+            self.pending = None;
+            return;
+        }
+        if queue_full {
             self.pending = None;
             return;
         }
@@ -179,13 +250,21 @@ impl FenceState {
         });
     }
 
-    fn schedule_final(&mut self, source: &str, width: usize, now: Instant) {
+    fn schedule_final(&mut self, source: &str, width: usize, now: Instant, queue_full: bool) {
         let source = Arc::new(source.to_string());
+        if source.len() > MAX_LAYOUT_SOURCE_BYTES {
+            self.pending = None;
+            return;
+        }
         if self
             .final_frame
             .as_ref()
             .is_some_and(|frame| frame.width == width && frame.source.as_str() == source.as_str())
         {
+            self.pending = None;
+            return;
+        }
+        if queue_full {
             self.pending = None;
             return;
         }
@@ -224,6 +303,7 @@ impl FenceState {
             PreviewContent::Frame {
                 lines: Arc::clone(&frame.lines),
                 tail: String::new(),
+                layout_bytes: frame.bytes,
             }
         } else if let Some(frame) = &self.frame {
             let tail = if self.trusted_end <= source.len() {
@@ -234,12 +314,17 @@ impl FenceState {
             PreviewContent::Frame {
                 lines: Arc::clone(&frame.lines),
                 tail,
+                layout_bytes: frame.bytes,
             }
         } else {
             PreviewContent::Source
         };
         let notice = if let Some(reason) = &self.error {
             Some(PreviewNotice::Failed(reason.clone()))
+        } else if self.over_budget {
+            Some(PreviewNotice::TooLarge {
+                bytes: source.len(),
+            })
         } else if self.paused.is_some() {
             Some(PreviewNotice::UnknownStatement)
         } else if !self.closed && self.frozen {
@@ -260,8 +345,12 @@ impl FenceState {
 #[derive(Debug, Default)]
 pub(crate) struct PreviewEngine {
     states: HashMap<MermaidFenceKey, FenceState>,
+    geometry: GeometryCache,
+    message_revisions: HashMap<MermaidMessageIdentity, u64>,
+    current_session: Option<String>,
     clock: u64,
     revision: u64,
+    layouts: u64,
 }
 
 impl PreviewEngine {
@@ -285,6 +374,85 @@ impl PreviewEngine {
             .count()
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn layouts(&self) -> u64 {
+        self.layouts
+    }
+
+    #[must_use]
+    pub(crate) fn message_revision(&self, message: &MermaidMessageIdentity) -> u64 {
+        self.message_revisions.get(message).copied().unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn retained_geometry_bytes(&self) -> usize {
+        self.geometry.retained_bytes()
+    }
+
+    fn bump_message(&mut self, key: &MermaidFenceKey) {
+        let revision = self
+            .message_revisions
+            .entry(key.message.clone())
+            .or_insert(0);
+        *revision = revision.wrapping_add(1);
+    }
+
+    /// 进入会话：释放上一会话的实例状态（排队/运行中任务随之失效），几何保留。
+    fn enter_session(&mut self, session_id: &str) {
+        if self.current_session.as_deref() == Some(session_id) {
+            return;
+        }
+        if let Some(previous) = self.current_session.take() {
+            self.states
+                .retain(|key, _| key.message.session_id != previous);
+            self.message_revisions
+                .retain(|message, _| message.session_id != previous);
+        }
+        self.current_session = Some(session_id.to_string());
+    }
+
+    /// 只读几何：缓存命中时无需实例状态（滚动离开再回到原位可直接复用）。
+    fn geometry_for(
+        &mut self,
+        kind: LayoutKind,
+        source: &Arc<String>,
+        width: usize,
+    ) -> Option<FrameState> {
+        let key = LayoutKey::new(kind, Arc::clone(source), width);
+        let (lines, bytes) = self.geometry.get_with_bytes(&key)?;
+        Some(FrameState::with_bytes(
+            lines,
+            width,
+            Arc::clone(source),
+            bytes,
+        ))
+    }
+
+    /// 淘汰几何到给定预算，并释放仍引用被淘汰条目的实例帧。
+    pub(crate) fn evict_geometry_to(&mut self, budget: usize) {
+        let removed = self.geometry.evict_to(budget);
+        if removed.is_empty() {
+            return;
+        }
+        for key in removed {
+            for state in self.states.values_mut() {
+                let matches = |frame: &Option<FrameState>| {
+                    frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.width == key.width && frame.source == key.source)
+                };
+                if key.kind == LayoutKind::Final && matches(&state.final_frame) {
+                    state.final_frame = None;
+                }
+                if key.kind == LayoutKind::Preview && matches(&state.frame) {
+                    state.frame = None;
+                }
+            }
+        }
+    }
+
     /// 观察一个围栏的最新正文，返回当前可展示的帧与提示。
     pub(crate) fn observe(
         &mut self,
@@ -294,15 +462,24 @@ impl PreviewEngine {
         frozen: bool,
         now: Instant,
     ) -> PreviewView {
+        self.enter_session(&key.message.session_id);
         self.clock = self.clock.wrapping_add(1);
         if self.states.len() >= MAX_STATES && !self.states.contains_key(&key) {
             self.evict_one();
         }
+        let queue_full = self
+            .states
+            .values()
+            .filter(|state| state.pending.is_some())
+            .count()
+            >= MAX_PENDING_JOBS;
         let clock = self.clock;
         let state = self.states.entry(key.clone()).or_default();
+        let digest_before = state.digest();
         state.accessed = clock;
         state.frozen = frozen;
         let source = fence.source.as_str();
+        state.over_budget = source.len() > MAX_LAYOUT_SOURCE_BYTES;
         if !state.source_seen.is_empty() && !source.starts_with(state.source_seen.as_str()) {
             let epoch = state.epoch.wrapping_add(1);
             state.reset(epoch);
@@ -347,7 +524,7 @@ impl PreviewEngine {
                         state.version = state.version.wrapping_add(1);
                         state.final_input = Some((width, source.to_string()));
                     }
-                    state.schedule_final(source, width, now);
+                    state.schedule_final(source, width, now, queue_full);
                 }
             } else {
                 let update = state.stream.observe(source, false);
@@ -371,7 +548,7 @@ impl PreviewEngine {
                     state.clear_pending();
                 } else if (trusted_changed || width_changed) && state.drawable {
                     state.version = state.version.wrapping_add(1);
-                    state.schedule_preview(&trusted_input, width, now);
+                    state.schedule_preview(&trusted_input, width, now, queue_full);
                 }
             }
         } else if state.mode.renders_when_closed() && closed {
@@ -388,13 +565,76 @@ impl PreviewEngine {
                     state.version = state.version.wrapping_add(1);
                     state.final_input = Some((width, source.to_string()));
                 }
-                state.schedule_final(source, width, now);
+                state.schedule_final(source, width, now, queue_full);
             }
         } else {
             state.clear_pending();
         }
 
-        state.view(source)
+        let changed = state.digest() != digest_before;
+        let view = state.view(source);
+        if changed {
+            self.bump_message(&key);
+        }
+        view
+    }
+
+    /// 只读当前可展示帧：不创建实例、不排队。未观察到或参数不匹配时回退源码。
+    pub(crate) fn peek(
+        &mut self,
+        key: &MermaidFenceKey,
+        fence: &MermaidFence,
+        width: usize,
+    ) -> PreviewView {
+        self.enter_session(&key.message.session_id);
+        let source = fence.source.as_str();
+        if let Some(state) = self.states.get(key)
+            && state.source_seen == source
+            && state.width == width
+        {
+            return state.view(source);
+        }
+        if fence.closed()
+            && let Some(frame) =
+                self.geometry_for(LayoutKind::Final, &Arc::new(source.to_string()), width)
+        {
+            return PreviewView {
+                content: PreviewContent::Frame {
+                    lines: frame.lines,
+                    tail: String::new(),
+                    layout_bytes: frame.bytes,
+                },
+                notice: None,
+            };
+        }
+        PreviewView {
+            content: PreviewContent::Source,
+            notice: None,
+        }
+    }
+
+    /// 运行前查几何缓存：相同源码/列宽的图只排版一次。
+    #[must_use]
+    pub(crate) fn cached_output(&mut self, job: &RenderJob) -> Option<RenderOutput> {
+        let kind = match job.kind {
+            JobKind::Preview => LayoutKind::Preview,
+            JobKind::Final => LayoutKind::Final,
+        };
+        let key = LayoutKey::new(kind, Arc::clone(&job.source), job.width);
+        self.geometry.get(&key).map(RenderOutput::from_lines)
+    }
+
+    /// 快速滚动后取消未开始的离屏任务；运行中的结果仍由版本校验丢弃。
+    pub(crate) fn retract_unseen(
+        &mut self,
+        visible: &std::collections::HashSet<MermaidFenceKey>,
+        known: &std::collections::HashSet<MermaidFenceKey>,
+    ) {
+        for (key, state) in &mut self.states {
+            if state.pending.is_some() && known.contains(key) && !visible.contains(key) {
+                state.pending = None;
+            }
+        }
     }
 
     /// 取走一个到期任务并标记为运行中。运行中的图实例不会再入队。
@@ -459,6 +699,9 @@ impl PreviewEngine {
         let Some(state) = self.states.get_mut(&job.key) else {
             return false;
         };
+        if self.current_session.as_deref() != Some(job.key.message.session_id.as_str()) {
+            return false;
+        }
         let Some(running) = state.running.as_ref() else {
             return false;
         };
@@ -479,8 +722,33 @@ impl PreviewEngine {
         }
         match result {
             Ok(output) => {
+                let bytes = geometry_bytes(output.lines());
+                if bytes > MAX_LAYOUT_OUTPUT_BYTES {
+                    let reason = RenderFailure::new("rendered diagram exceeds the layout budget");
+                    if job.kind == JobKind::Final {
+                        state.frame = None;
+                        state.final_frame = None;
+                        state.clear_pending();
+                    }
+                    state.set_error(reason.reason().to_string(), job.width, job.source.as_str());
+                    self.revision = self.revision.wrapping_add(1);
+                    self.bump_message(&job.key);
+                    return true;
+                }
+                let lines = output.into_lines();
+                let kind = match job.kind {
+                    JobKind::Preview => LayoutKind::Preview,
+                    JobKind::Final => LayoutKind::Final,
+                };
+                if self.geometry.insert(
+                    LayoutKey::new(kind, Arc::clone(&job.source), job.width),
+                    Arc::clone(&lines),
+                ) {
+                    self.layouts = self.layouts.wrapping_add(1);
+                }
                 let frame = FrameState {
-                    lines: output.into_lines(),
+                    bytes,
+                    lines,
                     width: job.width,
                     source: Arc::clone(&job.source),
                 };
@@ -503,6 +771,7 @@ impl PreviewEngine {
                 state.error = None;
                 state.error_input = None;
                 self.revision = self.revision.wrapping_add(1);
+                self.bump_message(&job.key);
                 true
             }
             Err(error) => {
@@ -514,6 +783,7 @@ impl PreviewEngine {
                 }
                 state.set_error(reason, job.width, job.source.as_str());
                 self.revision = self.revision.wrapping_add(1);
+                self.bump_message(&job.key);
                 true
             }
         }
@@ -566,8 +836,10 @@ pub(crate) fn rebuild_history(
     if fence.closed() {
         match render_final(source, mode, width) {
             Ok(output) => {
+                let lines = output.into_lines();
                 replay.content = PreviewContent::Frame {
-                    lines: output.into_lines(),
+                    layout_bytes: geometry_bytes(&lines),
+                    lines,
                     tail: String::new(),
                 };
             }
@@ -596,8 +868,10 @@ pub(crate) fn rebuild_history(
     match render_source(update.trusted, width) {
         Ok(output) => {
             let tail = source[update.trusted_end..].to_string();
+            let lines = output.into_lines();
             replay.content = PreviewContent::Frame {
-                lines: output.into_lines(),
+                layout_bytes: geometry_bytes(&lines),
+                lines,
                 tail,
             };
         }

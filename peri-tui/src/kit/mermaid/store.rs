@@ -34,12 +34,6 @@ fn lock_engine(hub: &PreviewHub) -> std::sync::MutexGuard<'_, PreviewEngine> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 全进程的预览版本。渲染缓存据此只重算含 Mermaid 的可见消息。
-#[must_use]
-pub(crate) fn revision() -> u64 {
-    hub().revision.load(Ordering::Relaxed)
-}
-
 /// 观察一个围栏并返回当前可展示的帧。没有启动后台线程时仍会记录状态，
 /// 只是不会自动发布新帧（测试与无 TUI 的调用方保持确定性）。
 pub(crate) fn observe(
@@ -55,6 +49,48 @@ pub(crate) fn observe(
     };
     hub.wake.notify_one();
     view
+}
+
+/// 只读当前帧：不创建实例、不排队。消息区渲染路径使用。
+pub(crate) fn peek(key: MermaidFenceKey, fence: &MermaidFence, width: usize) -> PreviewView {
+    let hub = hub();
+    let mut engine = lock_engine(hub);
+    engine.peek(&key, fence, width)
+}
+
+/// 只保留当前可见围栏的待执行任务（运行中的任务仅靠版本校验丢弃结果）。
+pub(crate) fn retract_unseen(
+    visible: &std::collections::HashSet<MermaidFenceKey>,
+    known: &std::collections::HashSet<MermaidFenceKey>,
+) {
+    let hub = hub();
+    lock_engine(hub).retract_unseen(visible, known);
+}
+
+/// 一处消息的预览版本。只有该消息的图布局变化时才递增。
+#[must_use]
+pub(crate) fn message_revision(message: &crate::kit::markdown::MermaidMessageIdentity) -> u64 {
+    let hub = hub();
+    let engine = lock_engine(hub);
+    engine.message_revision(message)
+}
+
+/// 全进程实际排版次数（缓存命中不计）。验收与诊断使用。
+#[cfg(test)]
+#[must_use]
+pub(crate) fn layout_count() -> u64 {
+    lock_engine(hub()).layouts()
+}
+
+#[cfg(test)]
+#[must_use]
+pub(crate) fn retained_geometry_bytes() -> usize {
+    lock_engine(hub()).retained_geometry_bytes()
+}
+
+/// 几何硬预算淘汰；由 transcript 在重缓存预算超限时调用。
+pub(crate) fn evict_geometry_to(budget: usize) {
+    lock_engine(hub()).evict_geometry_to(budget);
 }
 
 /// 后台排版线程是否已启动。无 TUI 的调用方据此走同步历史重建。
@@ -83,14 +119,18 @@ fn run_worker(hub: Arc<PreviewHub>) {
     loop {
         let now = Instant::now();
         if let Some(job) = engine.take_due(now) {
+            let cached = engine.cached_output(&job);
             drop(engine);
-            let result = match job.kind {
-                super::preview::JobKind::Preview => {
-                    frame::render_source(job.source.as_str(), job.width)
-                }
-                super::preview::JobKind::Final => {
-                    frame::render_final(job.source.as_str(), job.mode, job.width)
-                }
+            let result = match cached {
+                Some(output) => Ok(output),
+                None => match job.kind {
+                    super::preview::JobKind::Preview => {
+                        frame::render_source(job.source.as_str(), job.width)
+                    }
+                    super::preview::JobKind::Final => {
+                        frame::render_final(job.source.as_str(), job.mode, job.width)
+                    }
+                },
             };
             engine = lock_engine(&hub);
             if engine.complete(job, result, Instant::now()) {
@@ -133,13 +173,20 @@ pub(crate) fn drain_preview_jobs_now() {
         let Some(job) = job else {
             break;
         };
-        let result = match job.kind {
-            super::preview::JobKind::Preview => {
-                frame::render_source(job.source.as_str(), job.width)
-            }
-            super::preview::JobKind::Final => {
-                frame::render_final(job.source.as_str(), job.mode, job.width)
-            }
+        let cached = {
+            let mut engine = lock_engine(hub);
+            engine.cached_output(&job)
+        };
+        let result = match cached {
+            Some(output) => Ok(output),
+            None => match job.kind {
+                super::preview::JobKind::Preview => {
+                    frame::render_source(job.source.as_str(), job.width)
+                }
+                super::preview::JobKind::Final => {
+                    frame::render_final(job.source.as_str(), job.mode, job.width)
+                }
+            },
         };
         let mut engine = lock_engine(hub);
         if engine.complete(job, result, Instant::now()) {

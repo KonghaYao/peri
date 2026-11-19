@@ -1493,4 +1493,5 @@ mermaid-unclosed = Mermaid block is unclosed; showing the received source.
 mermaid-interrupted = Mermaid block interrupted: { $reason }
 mermaid-render-failed = Mermaid preview unavailable: { $reason }
 mermaid-unknown-statement = Source shown: unrecognized Mermaid statement.
+mermaid-too-large = Diagram source is too large to lay out inline ({ $bytes } bytes); showing the source.
 mermaid-open-scope = Group { $label } · { $count } statements confirmed
