@@ -157,6 +157,42 @@ fn test_sse_parser_rejects_terminated_line_beyond_budget() {
 }
 
 #[test]
+fn test_sse_parser_accepts_exact_limit_crlf_across_chunk_boundaries() {
+    let prefix = b"data: ";
+    let mut content = prefix.to_vec();
+    content.extend(std::iter::repeat_n(b'x', MAX_SSE_LINE_BYTES - prefix.len()));
+    let expected_data = "x".repeat(MAX_SSE_LINE_BYTES - prefix.len());
+
+    let mut unsplit = content.clone();
+    unsplit.extend_from_slice(b"\r\n\r\n");
+    let mut parser = SseParser::new();
+    let events = push(&mut parser, &unsplit).expect("unsplit CRLF");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].data, expected_data);
+
+    // 切在 \r 之后：pending 比内容上限多出 1 字节，仍属于未完成的 CRLF 终止符。
+    let mut split_at_cr = content.clone();
+    split_at_cr.push(b'\r');
+    let mut parser = SseParser::new();
+    assert!(push(&mut parser, &split_at_cr)
+        .expect("awaiting LF")
+        .is_empty());
+    let events = push(&mut parser, b"\n\r\n").expect("split CRLF");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].data, expected_data);
+
+    // 同样多出 1 字节但若是内容而非 \r，仍须判超限。
+    let mut over_limit = content;
+    over_limit.extend_from_slice(b"x\r");
+    let mut parser = SseParser::new();
+    let error = push(&mut parser, &over_limit).expect_err("over-limit line");
+    assert_eq!(
+        error.protocol_error().map(|error| error.kind()),
+        Some(ProtocolErrorKind::SseDecodeBudgetExceeded)
+    );
+}
+
+#[test]
 fn test_sse_parser_rejects_event_beyond_budget() {
     let mut parser = SseParser::new();
     let line = format!("data: {}\n", "x".repeat(512 * 1024));

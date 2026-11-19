@@ -47,7 +47,7 @@ impl SseParser {
             .rposition(|byte| *byte == b'\n')
             .map(|index| index + 1)
         else {
-            if self.pending_bytes.len() > MAX_SSE_LINE_BYTES {
+            if self.pending_line_exceeds_budget() {
                 return vec![Err(self.budget_exceeded("line", MAX_SSE_LINE_BYTES))];
             }
             return Vec::new();
@@ -113,10 +113,17 @@ impl SseParser {
                 self.event = Some(value.strip_prefix(' ').unwrap_or(value).to_owned());
             }
         }
-        if !self.done && !self.failed && self.pending_bytes.len() > MAX_SSE_LINE_BYTES {
+        if !self.done && !self.failed && self.pending_line_exceeds_budget() {
             events.push(Err(self.budget_exceeded("line", MAX_SSE_LINE_BYTES)));
         }
         events
+    }
+
+    /// 行尾 `\r` 可能属于尚未收齐的 CRLF 终止符，不计入内容预算，保证判定与分块无关。
+    fn pending_line_exceeds_budget(&self) -> bool {
+        let content_bytes =
+            self.pending_bytes.len() - usize::from(self.pending_bytes.ends_with(b"\r"));
+        content_bytes > MAX_SSE_LINE_BYTES
     }
 
     pub(crate) fn is_done(&self) -> bool {
