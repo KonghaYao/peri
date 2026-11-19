@@ -394,6 +394,7 @@ async fn test_session_replay_agent_message_chunk_to_committed_assistant_text() {
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": "历史回答"},
+                    "messageId": "m-replay",
                     "_meta": {"periReplay": true}
                 }
             }),
@@ -403,11 +404,20 @@ async fn test_session_replay_agent_message_chunk_to_committed_assistant_text() {
 
     let ev = bridge_rx.recv().await.expect("expected one event");
     match ev.event {
-        AcpEventData::CommittedAssistantText { text, reasoning } => {
+        AcpEventData::CommittedAssistantText {
+            text,
+            reasoning,
+            message_id,
+        } => {
             assert_eq!(text, "历史回答");
             assert!(
                 reasoning.is_none(),
                 "agent_message_chunk replay 不应有 reasoning"
+            );
+            assert_eq!(
+                message_id.as_deref(),
+                Some("m-replay"),
+                "回放必须保留 ACP messageId（reasoning 折叠键）"
             );
         }
         other => panic!("expected CommittedAssistantText, got {other:?}"),

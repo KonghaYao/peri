@@ -223,12 +223,16 @@ impl BridgeState {
                     None,
                 )
             }),
-            TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.message_id.as_ref().map(|id| {
-                (
-                    PersistentEntryKey::own(format!("{}:{id}", self.active_session_id)),
-                    None,
-                )
-            }),
+            TuiRenderUnit::TuiAssistantBubble(bubble) => bubble
+                .message_id
+                .as_ref()
+                .filter(|id| !crate::kit::tui_render_unit::is_local_message_id(id))
+                .map(|id| {
+                    (
+                        PersistentEntryKey::own(format!("{}:{id}", self.active_session_id)),
+                        None,
+                    )
+                }),
             TuiRenderUnit::TuiToolCard(card) => {
                 live_tool_links::owner_for_tool(&self.active_session_id, &card.tool_id)
                     .map(|owner| (owner.entry, owner.position))

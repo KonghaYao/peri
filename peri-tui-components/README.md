@@ -26,8 +26,9 @@ also owns the business-independent renderers moved down from the app: Markdown
 The application resolves theme tokens, chooses first-frame panel height, routes
 focus, translates business objects to rows and executes actions. A list index is
 not a stable business identity; resolve the selected item in the application.
-OpenUI interaction state (session epoch, evaluation context) stays in the app and
-is passed into `genui::render`. No business background tasks or subscriptions are
+OpenUI interaction state stays in the app: the app passes the evaluation context
+to `genui::render` and validates the session epoch separately when it dispatches
+an action. No business background tasks or subscriptions are
 added here. Local state is dropped with its owner. The application still owns
 transcript retention.
 
@@ -67,7 +68,7 @@ state, class, ER, pie, journey, gantt, timeline, gitGraph, mindmap, quadrant,
 requirement, sankey, xychart, architecture, packet and streaming) and `charts`
 — one static frame per
 `tui-chart` 0.6.6 example (MIT,
-Copyright (c) 2025 Sorin Irimies), themed with the storybook palette. The
+Copyright (c) 2025 Sorin Albu-Irimies), themed with the storybook palette. The
 `rich-text` variant is the kitchen-sink document: headings,
 paragraphs with soft/hard breaks, all inline styles, inline/reference/autolinks,
 escapes and entities, inline HTML stripping, nested quotes and lists, five code
@@ -75,8 +76,8 @@ block languages plus fallbacks, aligned tables, rules, images and an OpenUI fenc
 The `streaming` variants hold a fixed mid-stream cursor, so dumps stay
 deterministic. Playback only starts on demand: the last row of the preview is a
 draggable progress bar — click or drag to seek — prefixed by an `[ auto ]` button that
-plays from the current cursor to 100% in three seconds; dragging the bar during
-playback cancels it immediately.
+plays from the current cursor to 100% in three seconds; at 100% it first rewinds to 0
+and replays the whole document. Dragging the bar during playback cancels it immediately.
 Markdown shows complete blocks followed by a growing code block, and the OpenUI
 fence renders its finished components while the unfinished argument degrades to
 a visible `gen-ui:` error until the fence closes. Mermaid loads its `.mmd`

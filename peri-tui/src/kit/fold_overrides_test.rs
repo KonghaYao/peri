@@ -49,11 +49,11 @@ fn updating_a_manual_fold_refreshes_its_retention() {
 }
 
 #[test]
-fn growing_group_keys_are_bounded_by_bytes_before_entry_limit() {
+fn growing_key_sizes_are_bounded_by_bytes_before_entry_limit() {
     let mut values = HashMap::new();
     let mut retention = Retention::default();
     for count in 1..300 {
-        let key = FoldKey::Group((0..count).map(|id| format!("tool-{id:08}")).collect());
+        let key = FoldKey::Tool("x".repeat(count * 32));
         retention.insert(&mut values, key, FoldState::Expanded);
         assert!(retained_keys(&values, &retention) <= MAX_KEY_BYTES);
     }
@@ -62,14 +62,14 @@ fn growing_group_keys_are_bounded_by_bytes_before_entry_limit() {
 }
 
 #[test]
-fn oversized_group_does_not_evict_existing_manual_choices() {
+fn oversized_key_does_not_evict_existing_manual_choices() {
     let mut values = HashMap::new();
     let mut retention = Retention::default();
     let keep = FoldKey::Tool("keep".into());
     retention.insert(&mut values, keep.clone(), FoldState::Expanded);
     let mut large_id = String::with_capacity(MAX_KEY_BYTES);
     large_id.push('x');
-    let oversized = FoldKey::Group(vec![large_id]);
+    let oversized = FoldKey::Tool(large_id);
     retention.insert(&mut values, oversized, FoldState::Expanded);
     assert_eq!(values.len(), 1);
     assert_eq!(values.get(&keep), Some(&FoldState::Expanded));

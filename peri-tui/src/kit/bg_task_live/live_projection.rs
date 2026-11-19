@@ -259,7 +259,9 @@ pub(super) fn unit_body_bytes(unit: &TuiRenderUnit) -> usize {
                 + group.view_models.iter().map(unit_body_bytes).sum::<usize>()
         }
         TuiRenderUnit::TuiCollapsedGroup(group) => {
-            group.title.len() + group.view_models.iter().map(unit_body_bytes).sum::<usize>()
+            group.key.len()
+                + group.title.len()
+                + group.view_models.iter().map(unit_body_bytes).sum::<usize>()
         }
         TuiRenderUnit::TuiDivider(divider) => divider.label.as_ref().map_or(0, String::len),
         TuiRenderUnit::TuiAskUserBlock(block) => {

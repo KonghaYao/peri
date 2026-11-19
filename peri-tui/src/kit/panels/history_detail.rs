@@ -576,15 +576,17 @@ mod tests;
 
 /// 事件层：聚焦/点击后的占位 note（按 content_hash 关联 descriptor）。
 pub fn open_detail_from_slot(slot: usize) -> bool {
-    let hash = {
+    // 槽位可能是正文空档折叠组：组内占位 note 仍须可按需打开详情，
+    // 因此收集组内成员的 content_hash 一并匹配。
+    let hashes = {
         let handle = crate::kit::atoms::VIEW_MODELS.state();
-        handle
-            .read()
-            .items
-            .get(slot)
-            .map(|unit| unit.content_hash())
+        handle.read().items.get(slot).map(|unit| {
+            let mut hashes = Vec::new();
+            collect_unit_hashes(unit, &mut hashes);
+            hashes
+        })
     };
-    let Some(hash) = hash else {
+    let Some(hashes) = hashes else {
         return false;
     };
     let target = {
@@ -592,7 +594,7 @@ pub fn open_detail_from_slot(slot: usize) -> bool {
         handle
             .read()
             .iter()
-            .find(|target| target.content_hash == hash)
+            .find(|target| hashes.contains(&target.content_hash))
             .map(|target| target.descriptor.clone())
     };
     let Some(descriptor) = target else {
@@ -608,6 +610,16 @@ pub fn open_detail_from_slot(slot: usize) -> bool {
             true
         }
         Err(_) => false,
+    }
+}
+
+/// 收集单元自身与其折叠组成员的 content_hash（组内占位 note 的详情入口）。
+fn collect_unit_hashes(unit: &crate::kit::tui_render_unit::TuiRenderUnit, out: &mut Vec<u64>) {
+    out.push(unit.content_hash());
+    if let crate::kit::tui_render_unit::TuiRenderUnit::TuiCollapsedGroup(group) = unit {
+        for child in &group.view_models {
+            collect_unit_hashes(child, out);
+        }
     }
 }
 

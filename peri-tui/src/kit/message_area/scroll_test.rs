@@ -685,6 +685,53 @@ fn test_entry_click_target_wrapped_header_all_visual_rows_hit() {
     assert_eq!(super::entry_click_target(&wm, &offsets, 1), Some((0, 0)));
 }
 
+/// 过程区转场台阶（` ╰─╮`）占第 0 行时，可点击 header 顺延到第 1 行：
+/// 「点击工具/thinking 的单行摘要展开」在最常见的文本→过程转场处必须命中。
+#[test]
+fn test_entry_click_target_index_skips_leading_step_row() {
+    use crate::kit::message_area::selection::{SlotIndex, SlotLines, build_wrap_map};
+    use ratatui_kit::ratatui::text::Line;
+    use std::sync::Arc;
+
+    let with_step = Arc::new(vec![
+        Line::from(" \u{2570}\u{2500}\u{256e}"),
+        Line::from("\u{2713} Read a.rs"),
+    ]);
+    let (_, map) = build_wrap_map(&with_step, 80);
+    let index = SlotIndex::new(
+        vec![SlotLines::single(Arc::clone(&with_step))],
+        vec![Arc::new(map)],
+    );
+    assert_eq!(
+        index.header_local(0),
+        1,
+        "台阶行占第 0 行 → header 为第 1 行"
+    );
+    assert_eq!(
+        super::gesture::entry_click_target_index(&index, 0),
+        None,
+        "台阶行本身不是可点击 header"
+    );
+    assert_eq!(
+        super::gesture::entry_click_target_index(&index, 1),
+        Some((0, 1)),
+        "点击工具/thinking 的单行 header 命中该项"
+    );
+
+    // 无台阶（回合首个过程 entry）：header 仍是第 0 行。
+    let plain = Arc::new(vec![Line::from("\u{2713} Read a.rs")]);
+    let (_, map) = build_wrap_map(&plain, 80);
+    let index = SlotIndex::new(
+        vec![SlotLines::single(Arc::clone(&plain))],
+        vec![Arc::new(map)],
+    );
+    assert_eq!(index.header_local(0), 0);
+    assert_eq!(
+        super::gesture::entry_click_target_index(&index, 0),
+        Some((0, 0))
+    );
+}
+
 // ── 手势状态机：Down 冻结 → Drag 升级判定 → Up 结算（纯函数层）────────
 // [Why 纯函数] handle_event 的 State 参数无法在测试中构造（ratatui-kit 未
 // 暴露 `State<T>`（SingleWaker）构造 API——`ReactiveHandle::new` 仅存在于
@@ -823,7 +870,7 @@ fn test_gesture_up_settle_decision() {
 // 覆盖位置：
 //   - `viewport_anchor_test.rs`：捕获 / 重定位 / 单元内位移 / 认不出身份的安全方向；
 //   - `viewport_anchor_e2e_test.rs`：真实发布路径（`handle_history_page_loaded` →
-//     `push_view_models` → `Transcript::prepare`），含折叠组导致的槽位数变化形状。
+//     `push_view_models` → `Transcript::prepare`），含工具卡收束导致的高度变化形状。
 
 #[path = "scroll_test/paging_triggers.rs"]
 mod paging_triggers;

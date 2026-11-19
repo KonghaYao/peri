@@ -1,14 +1,13 @@
 use super::FOLD_OVERRIDES;
 use super::FoldKey;
 use super::FoldState;
-use super::TuiCollapsedGroup;
 use super::TuiRenderUnit;
 use super::TuiSystemReminder;
 use super::TuiToolCard;
 use super::TuiToolPresentation;
 use super::TuiUserBubble;
-use super::serial;
 use crate::kit::message_area::entry_nav;
+use crate::kit::tui_render_unit::TuiCollapsedGroup;
 use ratatui_kit::prelude::*;
 
 // ── Slice 2：entry 焦点导航纯函数 ─────────────────────────────────────────
@@ -64,7 +63,8 @@ fn test_fold_key_of_maps_vm_identities() {
     assert_eq!(k, FoldKey::Reasoning("msg_9".into()));
     assert_eq!(f, FoldState::Preview);
 
-    // 无 message_id 的 reasoning bubble → 无折叠键（不可作为覆盖目标）
+    // 无 message_id 的 reasoning bubble → 无折叠键：不能写覆盖，正文在渲染侧
+    // 保持可见（流式 Preview / 完成 Expanded），不做假身份键控。
     let vm_noid = TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {
             // [Slice 1] 正文时长（§6.2 `12.4s`）：测试构造默认无起点/冻结值。
@@ -73,7 +73,7 @@ fn test_fold_key_of_maps_vm_identities() {
             text: "t".into(),
             reasoning: Some(TuiReasoningBlock {
                 text: "r".into(),
-                fold: FoldState::Collapsed,
+                fold: FoldState::Expanded,
                 status: EntryStatus::Completed,
                 is_running: false,
                 started_at: None,
@@ -145,6 +145,118 @@ fn test_fold_key_of_maps_vm_identities() {
     );
 }
 
+/// 无 message_id 的 reasoning 不能写覆盖键：完成后正文保持完整可见，
+/// Enter 消费但不切换（不伪造身份键，也不把无法展开的正文藏起来）。
+#[test]
+#[serial_test::serial]
+fn test_fold_toggle_keeps_unkeyed_reasoning_visible() {
+    use crate::kit::tui_render_unit::{EntryStatus, TuiAssistantBubble, TuiReasoningBlock};
+
+    crate::kit::atoms::init_atoms();
+    FOLD_OVERRIDES.state().write().clear();
+    let unit = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: "回复".into(),
+            reasoning: Some(TuiReasoningBlock {
+                text: "历史思考".into(),
+                fold: FoldState::Expanded,
+                status: EntryStatus::Completed,
+                is_running: false,
+                started_at: None,
+                duration_ms: None,
+            }),
+            message_id: None,
+            content_hash: 0,
+        }
+        .into(),
+    );
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![unit]),
+        generation: 1,
+    };
+
+    assert_eq!(
+        entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+    let TuiRenderUnit::TuiAssistantBubble(updated) = &snapshot.items[0] else {
+        panic!("expected TuiAssistantBubble");
+    };
+    assert_eq!(
+        updated.reasoning.as_ref().map(|r| r.fold),
+        Some(FoldState::Expanded),
+        "无身份时保持正文可见"
+    );
+    assert!(
+        FOLD_OVERRIDES.state().read().is_empty(),
+        "不得为无身份块写覆盖"
+    );
+}
+
+/// 运行中 reasoning（ACP message_id 缺失，使用本地身份）可展开；渲染结果
+/// 超过 Preview 的 4 行 tail，证明早期正文可被逐项展开阅读。
+#[test]
+#[serial_test::serial]
+fn test_running_reasoning_local_identity_expands_beyond_preview() {
+    use crate::kit::message_area::grid::GridSpec;
+    use crate::kit::message_area::render::vm_to_lines;
+    use crate::kit::tui_render_unit::{EntryStatus, TuiAssistantBubble, TuiReasoningBlock};
+
+    crate::kit::atoms::init_atoms();
+    crate::i18n::init(Some("en"));
+    FOLD_OVERRIDES.state().write().clear();
+    let reasoning_text = (1..=8)
+        .map(|i| format!("思考行{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let unit = TuiRenderUnit::TuiAssistantBubble(
+        TuiAssistantBubble {
+            started_at: None,
+            duration_ms: None,
+            text: String::new(),
+            reasoning: Some(TuiReasoningBlock {
+                text: reasoning_text,
+                fold: FoldState::Collapsed,
+                status: EntryStatus::Running,
+                is_running: true,
+                started_at: Some(std::time::Instant::now()),
+                duration_ms: None,
+            }),
+            message_id: Some(crate::kit::tui_render_unit::next_local_message_id()),
+            content_hash: 0,
+        }
+        .into(),
+    );
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![unit]),
+        generation: 1,
+    };
+
+    assert_eq!(
+        entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+    let lines = vm_to_lines(&snapshot.items[0], &GridSpec::grid_for(80));
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for i in 1..=8 {
+        assert!(
+            rendered.contains(&format!("思考行{i}")),
+            "展开后第 {i} 行应可见（Preview 只有 4 行）:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 fn test_apply_fold_override_sets_fold_user_modified_and_recomputes_hash() {
     use crate::kit::tui_render_unit::TuiToolCard;
@@ -182,60 +294,6 @@ fn test_apply_fold_override_sets_fold_user_modified_and_recomputes_hash() {
     // 无折叠能力（user bubble）→ no-op 不 panic
     let mut user = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new("hi".into()));
     entry_nav::apply_fold_override(&mut user, FoldState::Expanded);
-}
-
-#[test]
-#[serial]
-fn test_collapsed_group_toggle_persists_override() {
-    crate::kit::atoms::init_atoms();
-    FOLD_OVERRIDES.state().write().clear();
-    let child = TuiRenderUnit::TuiToolCard(TuiToolCard {
-        tool_id: "group-tool-1".into(),
-        tool_name: "Read".into(),
-        input_summary: "a.rs".into(),
-        output_summary: "done".into(),
-        is_error: false,
-        is_running: false,
-        running_duration_ms: None,
-        completed_duration_ms: None,
-        diff: None,
-        presentation: TuiToolPresentation::Generic,
-        fold: FoldState::Collapsed,
-        user_modified: false,
-        tool_calls_count: 0,
-        content_hash: 1,
-    });
-    let mut group = TuiCollapsedGroup {
-        title: "Read 1".into(),
-        count: 1,
-        failed_count: 0,
-        view_models: vec![child],
-        fold: FoldState::Collapsed,
-        content_hash: 0,
-    };
-    group.recompute_hash();
-    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
-        items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(group)]),
-        generation: 7,
-    };
-
-    assert_eq!(
-        entry_nav::apply_fold_toggle(&mut snapshot, 0, false),
-        EventResult::Consumed
-    );
-    assert!(matches!(
-        &snapshot.items[0],
-        TuiRenderUnit::TuiCollapsedGroup(g) if g.fold == FoldState::Expanded
-    ));
-    assert_eq!(snapshot.generation, 8);
-    assert_eq!(
-        FOLD_OVERRIDES
-            .state()
-            .read()
-            .get(&FoldKey::Group(vec!["group-tool-1".into()])),
-        Some(&FoldState::Expanded)
-    );
-    FOLD_OVERRIDES.state().write().clear();
 }
 
 /// 展开工具卡片会认领超预算历史结果的补读定位（进入在途，避免重复 RPC）。
@@ -289,6 +347,72 @@ fn test_tool_expand_claims_deferred_history_result_refetch() {
     assert!(
         crate::kit::atoms::NOTIFICATION.state().read().is_some(),
         "expanding the card must reach the refetch entry and report a missing client/runtime"
+    );
+    FOLD_OVERRIDES.state().write().clear();
+    crate::kit::acp_events::history_window::clear_pending_tool_ends();
+}
+
+/// 展开正文空档组时，组内工具成员的延迟历史结果同样要认领补读（组行是唯一入口）。
+#[test]
+#[serial_test::serial]
+fn test_group_expand_claims_deferred_history_result_refetch() {
+    use crate::kit::acp_events::history_window::{
+        ToolResultSource, insert_deferred_tool_result_for_tests,
+    };
+
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::NOTIFICATION.set(None);
+    *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = "s1".into();
+    crate::kit::acp_events::history_window::clear_pending_tool_ends();
+    insert_deferred_tool_result_for_tests(
+        "t-big",
+        ToolResultSource {
+            session_id: "s1".into(),
+            snapshot_token: "tok".into(),
+            cursor: "cursor-result".into(),
+            limit: 50,
+            entry_id: "s1:result".into(),
+            entry_position: 20,
+            sub_item_position: 0,
+            tool_id: "t-big".into(),
+        },
+    );
+    let mut card = TuiToolCard {
+        tool_id: "t-big".into(),
+        tool_name: "Bash".into(),
+        input_summary: String::new(),
+        output_summary: "结果正文较大，展开后按需加载".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: None,
+        diff: None,
+        presentation: Default::default(),
+        fold: FoldState::Expanded,
+        user_modified: false,
+        tool_calls_count: 0,
+        content_hash: 0,
+    };
+    card.recompute_hash();
+    let mut group = TuiCollapsedGroup {
+        key: "tool:t-big".into(),
+        title: "Bash".into(),
+        count: 1,
+        failed_count: 0,
+        view_models: vec![TuiRenderUnit::TuiToolCard(card)],
+        fold: FoldState::Collapsed,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(group)]),
+        generation: 1,
+    };
+    let claimed = entry_nav::apply_fold_toggle(&mut snapshot, 0, false);
+    assert_eq!(claimed, EventResult::Consumed);
+    assert!(
+        crate::kit::atoms::NOTIFICATION.state().read().is_some(),
+        "展开组行必须递归到组内工具，认领延迟结果补读"
     );
     FOLD_OVERRIDES.state().write().clear();
     crate::kit::acp_events::history_window::clear_pending_tool_ends();

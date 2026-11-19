@@ -1,9 +1,9 @@
 //! Interactive storybook for `peri-tui-components`.
 //!
-//! Run with `./dev-tui.sh`, or directly:
-//! `cargo run -p peri-tui-components --bin storybook`.
+//! Run with `./dev-tui.sh` from the repository root; the script pins the
+//! patched dependency graph and `--locked`, so it never rewrites `Cargo.lock`.
 //!
-//! Mouse is the primary input; keys stay available as a convenience.
+//! Mouse is the primary input; `q`, `Esc` and `Ctrl-C` quit.
 
 mod app;
 mod charts;
@@ -19,6 +19,21 @@ fn list_stories() {
             println!("{}\t{}", story.key, variant.key);
         }
     }
+}
+
+/// 未知 story/variant 的 key 只写 stderr；stdout 不产生可被当成快照的内容。
+fn unknown_key(kind: &str, value: &str) -> io::Error {
+    eprintln!("unknown {kind}: {value}");
+    eprintln!("available story/variant keys:");
+    for story in STORIES {
+        for variant in story.variants {
+            eprintln!("{}\t{}", story.key, variant.key);
+        }
+    }
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("unknown {kind}: {value}"),
+    )
 }
 
 fn story_arg(args: &[String]) -> Option<&str> {
@@ -91,11 +106,7 @@ fn main() -> io::Result<()> {
             .position(|story| story.key.eq_ignore_ascii_case(value))
         {
             Some(index) => index,
-            None => {
-                eprintln!("unknown story: {value}");
-                list_stories();
-                return Ok(());
-            }
+            None => return Err(unknown_key("story", value)),
         },
         None => 0,
     };
@@ -106,11 +117,7 @@ fn main() -> io::Result<()> {
             .position(|variant| variant.key.eq_ignore_ascii_case(value))
         {
             Some(index) => index,
-            None => {
-                eprintln!("unknown variant: {value}");
-                list_stories();
-                return Ok(());
-            }
+            None => return Err(unknown_key("variant", value)),
         },
         None => 0,
     };

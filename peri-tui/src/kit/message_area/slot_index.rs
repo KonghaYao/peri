@@ -20,6 +20,18 @@ struct LayoutSlot {
     lines: Weak<SlotLines>,
     resident: Option<Arc<SlotLines>>,
     visual_prefix: Arc<Vec<usize>>,
+    /// entry 首行在逻辑行中的下标——过程区转场台阶（` ╰─╮` / ` ╭─╯`）会占掉
+    /// 第 0 行，此时可点击的 header 是第 1 行。点击命中只认这一行（正文行留给
+    /// 文本选区）。
+    header_local: u8,
+}
+
+/// entry 的可点击 header 逻辑行下标：首行是过程区转场台阶时为 1，否则 0。
+fn header_local_of(lines: &SlotLines) -> u8 {
+    match lines.line(0) {
+        Some(line) if crate::kit::message_area::render::is_step_row(line) => 1,
+        _ => 0,
+    }
 }
 
 struct Node {
@@ -137,6 +149,7 @@ impl SlotIndex {
             logical: lines.len(),
             visual: visual_prefix.last().copied().unwrap_or(0),
             kind: NodeKind::Leaf(LayoutSlot {
+                header_local: header_local_of(&lines),
                 lines: Arc::downgrade(&lines),
                 resident: retain.then_some(lines),
                 visual_prefix: Arc::new(visual_prefix),
@@ -169,12 +182,19 @@ impl SlotIndex {
             logical: old.visual_prefix.len().saturating_sub(1),
             visual: old.visual_prefix.last().copied().unwrap_or(0),
             kind: NodeKind::Leaf(LayoutSlot {
+                header_local: header_local_of(&lines),
                 lines: Arc::downgrade(&lines),
                 resident: None,
                 visual_prefix: Arc::clone(&old.visual_prefix),
             }),
         });
         self.root = Some(Node::set(self.root.as_ref(), self.capacity, slot, leaf));
+    }
+
+    /// entry 可点击 header 的逻辑行下标（过程区台阶行占第 0 行时为 1）。
+    pub(super) fn header_local(&self, slot: usize) -> usize {
+        self.slot(slot)
+            .map_or(0, |(leaf, _, _)| usize::from(leaf.header_local))
     }
 
     fn slot(&self, slot: usize) -> Option<(&LayoutSlot, usize, usize)> {

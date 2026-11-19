@@ -465,6 +465,11 @@ impl DocumentView<'_> {
                 };
                 true
             }
+            // 终端丢失左键 release 后只剩移动事件：清除悬空的按下态。
+            MouseEventKind::Moved => {
+                *pressed_button = None;
+                false
+            }
             _ => false,
         }
     }

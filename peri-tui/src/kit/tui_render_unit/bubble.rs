@@ -107,6 +107,25 @@ impl TuiUserBubble {
 
 tui_impl_partial_eq!(TuiUserBubble: text, attachments, reminder, source, message_id);
 
+/// TUI 本地消息身份前缀：仅用于缺失 ACP `messageId` 的展示单元折叠键控，
+/// 不参与持久条目归属（`live_seal` 必须忽略本地身份）。
+pub(crate) const LOCAL_MESSAGE_ID_PREFIX: &str = "local:";
+
+static NEXT_LOCAL_MESSAGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 分配进程内唯一的本地消息身份（单调递增，跨 turn/会话不复用）。
+#[must_use]
+pub(crate) fn next_local_message_id() -> String {
+    let id = NEXT_LOCAL_MESSAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{LOCAL_MESSAGE_ID_PREFIX}{id}")
+}
+
+/// 是否为 TUI 分配的本地身份（非 ACP `messageId`）。
+#[must_use]
+pub(crate) fn is_local_message_id(id: &str) -> bool {
+    id.starts_with(LOCAL_MESSAGE_ID_PREFIX)
+}
+
 /// 短回复阈值（字符数，`chars().count()` 口径）：AI 正文**少于**该值时按
 /// 过程区形态渲染（缩进 2 格并入过程带）；user 气泡永远不缩进（§6）。
 ///
@@ -125,7 +144,8 @@ pub struct TuiAssistantBubble {
     pub text: String,
     /// Optional reasoning / thinking block (Anthropic extended thinking etc.).
     pub reasoning: Option<TuiReasoningBlock>,
-    /// 身份字段——ACP `messageId`，折叠覆盖键 `FoldKey::Reasoning(message_id)` 用。
+    /// 身份字段——ACP `messageId`；缺失时由 TUI 分配 `local:` 前缀的本地身份
+    /// （进程内唯一，仅供折叠覆盖键，不参与持久条目归属；见 `live_seal`）。
     /// \[G1\] 不进 content_hash（同一消息内容变化不应因 id 失效），进 partial_eq。
     pub message_id: Option<String>,
     /// 本 bubble 文本流式开始的时刻（§6.2 `12.4s`）——仅 trailing 流式段有值；

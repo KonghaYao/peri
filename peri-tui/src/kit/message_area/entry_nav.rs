@@ -31,8 +31,8 @@ pub(super) fn move_entry_focus(
 mod shared_bubble_tests;
 
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
-/// 与折叠 pass（`acp_events/render.rs::apply_fold_pass`）的键控口径一致：
-/// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) /
+/// 与折叠 pass（`acp_events/fold.rs::apply_fold_pass`）的键控口径一致：
+/// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) / Group(key) /
 /// Interaction(request_id) / SystemReminder(reminder_id)。
 pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
     match vm {
@@ -44,18 +44,7 @@ pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             Some((FoldKey::SubAgent(g.instance_id.clone()), g.fold))
         }
-        TuiRenderUnit::TuiCollapsedGroup(g) => Some((
-            FoldKey::Group(
-                g.view_models
-                    .iter()
-                    .filter_map(|vm| match vm {
-                        TuiRenderUnit::TuiToolCard(t) => Some(t.tool_id.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            g.fold,
-        )),
+        TuiRenderUnit::TuiCollapsedGroup(g) => Some((FoldKey::Group(g.key.clone()), g.fold)),
         TuiRenderUnit::TuiAskUserBlock(a) => {
             Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
         }
@@ -86,8 +75,8 @@ pub(super) fn set_entry_focus(snapshot: &ViewModelsSnapshot, slot: usize) {
 /// 被消费前的唯一判定路径。
 ///
 /// 单击 = Down 冻结 + 手势从未升级（`gesture` 保持 Pending 到 Up）：
-/// `gesture` 为 Some 且冻结的 `entry_hit` 命中首行 `(slot, 0)` →
-/// `Some(slot)`；否则 `None`（无 Down 记录 / 正文行 / 非首行）。
+/// `gesture` 为 Some 且冻结的 `entry_hit` 命中可点击 header →
+/// `Some(slot)`；否则 `None`（无 Down 记录 / 正文行 / 非 header 行）。
 ///
 /// [防御 Up 坐标] `mouse_row` 必须在 `area` 内且非滚动条列——防御检查
 /// 基于 Up 时点坐标，比 D2 设计表述（pending.screen）更严格（S1 review
@@ -111,8 +100,10 @@ pub(super) fn entry_click_decision(
         return None;
     }
     let pending = gesture?;
+    // `entry_hit` 在 Down 时已按「可点击 header」解析（过程区台阶占第 0 行时
+    // local_idx 为 1）；Up 只消费该结果，不再对行号做二次假设。
     match pending.entry_hit {
-        Some((slot, 0)) => Some(slot),
+        Some((slot, _)) => Some(slot),
         _ => None,
     }
 }
@@ -307,12 +298,23 @@ pub(super) fn apply_fold_toggle(
     let mut updated = snapshot.items[idx].clone();
     apply_fold_override(&mut updated, next);
     // 展开/打开工具卡片：若该跨页结果超出内存预算，按来源页定位补读完整正文。
+    // 折叠组展开时组内每个工具成员都要补读（组行是唯一可点击入口）。
     if next != FoldState::Collapsed {
-        let _ = crate::kit::acp_events::history_window::maybe_request_tool_result(&updated);
+        request_visible_tool_results(&updated);
     }
     snapshot.items.set(idx, updated);
     snapshot.generation = snapshot.generation.wrapping_add(1);
     EventResult::Consumed
+}
+
+/// 对展开后的单元递归补读延迟工具结果——组内成员不再单独可点击。
+fn request_visible_tool_results(vm: &TuiRenderUnit) {
+    let _ = crate::kit::acp_events::history_window::maybe_request_tool_result(vm);
+    if let TuiRenderUnit::TuiCollapsedGroup(group) = vm {
+        for child in &group.view_models {
+            request_visible_tool_results(child);
+        }
+    }
 }
 
 use crate::kit::atoms::FOCUSED_ENTRY;

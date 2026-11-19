@@ -56,10 +56,11 @@ fn test_display_retention_notes_plateau_across_turns_without_spending_canonical_
     assert!(retained(&state) <= MAX_BYTES);
     assert_eq!(state.window.budget().unattributed_live_bytes, 0);
     let snapshot = VIEW_MODELS.state().read().clone();
-    assert!(snapshot.items.iter().any(|unit| {
+    let units = crate::kit::tui_render_unit::flatten_units(&snapshot.items);
+    assert!(units.iter().any(|unit| {
         matches!(unit, TuiRenderUnit::TuiSystemNote(note) if note.text == "notice-2047")
     }));
-    assert!(!snapshot.items.iter().any(|unit| {
+    assert!(!units.iter().any(|unit| {
         matches!(unit, TuiRenderUnit::TuiSystemNote(note) if note.text == "notice-0")
     }));
 }

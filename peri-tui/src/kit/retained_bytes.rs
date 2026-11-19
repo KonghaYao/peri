@@ -336,16 +336,6 @@ pub fn retained_ask_user_bytes(block: &TuiAskUserBlock) -> usize {
             .map_or(0, |owner| owner.session_id.capacity())
 }
 
-pub fn retained_collapsed_group_bytes(
-    group: &TuiCollapsedGroup,
-    seen: &mut SeenAllocations,
-) -> usize {
-    std::mem::size_of::<TuiCollapsedGroup>()
-        + group.title.capacity()
-        + retained_vec_bytes(&group.view_models)
-        + retained_units_bytes(group.view_models.iter(), seen)
-}
-
 pub fn retained_subagent_group_bytes(
     group: &TuiSubAgentGroup,
     seen: &mut SeenAllocations,
@@ -358,21 +348,15 @@ pub fn retained_subagent_group_bytes(
         + retained_units_bytes(group.view_models.iter(), seen)
 }
 
-/// 组内成员的“深复制正文”字节：不按共享 Arc 去重，用于识别 `Vec<TuiRenderUnit>`
-/// 复制带来的额外持有（与 `retained_*_group_bytes` 的共享计量对照）。
-pub fn group_deep_copy_bytes(group: &TuiCollapsedGroup) -> usize {
-    let mut seen = SeenAllocations::default();
-    group
-        .view_models
-        .iter()
-        .map(|unit| match unit {
-            TuiRenderUnit::TuiAssistantBubble(bubble) => {
-                // 共享 Arc 也按“若复制正文”口径计一次完整正文。
-                std::mem::size_of::<TuiAssistantBubble>() + bubble.text.capacity()
-            }
-            other => retained_unit_bytes(other, &mut seen),
-        })
-        .sum()
+pub fn retained_collapsed_group_bytes(
+    group: &TuiCollapsedGroup,
+    seen: &mut SeenAllocations,
+) -> usize {
+    std::mem::size_of::<TuiCollapsedGroup>()
+        + group.key.capacity()
+        + group.title.capacity()
+        + retained_vec_bytes(&group.view_models)
+        + retained_units_bytes(group.view_models.iter(), seen)
 }
 
 #[cfg(test)]

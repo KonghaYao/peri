@@ -1,7 +1,7 @@
 //! Single-widget gallery demos (one per upstream example).
 //!
 //! Data adapted from tui-chart 0.6.6 `examples/*.rs`
-//! (MIT, Copyright (c) 2025 Sorin Irimies).
+//! (MIT, Copyright (c) 2025 Sorin Albu-Irimies).
 
 use peri_tui_components::charts::preview_theme;
 use ratatui::buffer::Buffer;
@@ -393,7 +393,7 @@ pub(super) fn lollipop(area: Rect, buf: &mut Buffer) {
     .show_values(true)
     .head('●')
     .theme(&theme)
-    .block(block(" Language satisfaction (now vs last year) "))
+    .block(block(" Current language satisfaction scores "))
     .render(area, buf);
 }
 

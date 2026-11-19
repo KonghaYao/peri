@@ -104,19 +104,21 @@ pub(in crate::kit::message_area) fn text_selection_accepts_pointer(
     }
 }
 
-/// entry 单击命中解析：视觉行 → `(slot_index, local_idx)`；仅当该行属于
-/// entry 的逻辑首行（`local_idx == 0`，即 header/label 行）时命中。
+/// entry 单击命中解析：视觉行 → `(slot_index, local_idx)`；仅当该行是 entry 的
+/// 可点击 header（`local_idx == index.header_local(slot)`）时命中。
 ///
-/// [Why 仅首行] 正文行保留给文本选区/复制；展开动作只挂在 header 上，
-/// 与键盘 Enter（焦点在 entry 时切换）语义一致。wrap_map 越界
-/// （footer 区域无映射）→ `None`。header 换行成多视觉行时，所属视觉行
+/// [Why 仅 header] 正文行保留给文本选区/复制；展开动作只挂在 header 上，与键盘
+/// Enter（焦点在 entry 时切换）语义一致。过程区转场台阶占第 0 行，header 顺延到
+/// 第 1 行——否则「点击工具/thinking 的单行展开」在最常见的文本→过程转场处失效。
+/// wrap_map 越界（footer 区域无映射）→ `None`。header 换行成多视觉行时，所属视觉行
 /// 均反查到同一逻辑行，全部命中。
 pub(in crate::kit::message_area) fn entry_click_target_index(
     index: &SlotIndex,
     visual_row: usize,
 ) -> Option<(usize, usize)> {
     let lookup = index.visual_lookup(visual_row)?;
-    (lookup.local_logical == 0).then_some((lookup.slot_index, 0))
+    (lookup.local_logical == index.header_local(lookup.slot_index))
+        .then_some((lookup.slot_index, lookup.local_logical))
 }
 
 #[cfg(test)]

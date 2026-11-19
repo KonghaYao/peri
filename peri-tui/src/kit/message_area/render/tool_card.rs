@@ -25,8 +25,8 @@ const TOOL_OUTPUT_MAX_LINES: usize = 4;
 /// - 续行 `[outer][留空][│][gap]{内容}`：与首行标签同列（§4/§5）。
 /// - summary 着色：Bash → syntax.command；Read/Write/Edit → syntax.path；其余 muted。
 /// - error：× + status.error 符号色 + 明确错误词（`— Failed`），正文不整块染红。
-/// - running（Preview）：仅活动行（运行中无 output）；completed：折叠单行 /
-///   展开输出（≤4 行）；Bash 展开显示 `$ command` + 分隔线 + 输出。
+/// - 默认 Collapsed：running / completed / error 都只有单行 header；展开后
+///   completed 输出 ≤4 行，Bash 展开显示 `$ command` + 分隔线 + 输出。
 pub(super) fn render_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Line<'static>> {
     let plan = project_tool_render_plan(data, grid);
     let resolved = resolve_tool_render_plan(data, plan);

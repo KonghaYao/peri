@@ -17,6 +17,7 @@ pub enum TuiRenderUnit {
     TuiSystemNote(TuiSystemNote),
     TuiSystemReminder(TuiSystemReminder),
     TuiSubAgentGroup(TuiSubAgentGroup),
+    /// 正文空档折叠组（正文段落之间的工具 / thinking / 通知等）。
     TuiCollapsedGroup(TuiCollapsedGroup),
     TuiDivider(TuiDivider),
     TuiAskUserBlock(TuiAskUserBlock),
@@ -28,6 +29,23 @@ pub enum TuiRenderUnit {
 #[cfg(test)]
 #[path = "shared_bubble_test.rs"]
 mod shared_bubble_tests;
+
+/// [test] 递归展平正文空档折叠组——测试按真实单元查找工具 / thinking / 通知。
+#[cfg(test)]
+pub(crate) fn flatten_units<'a>(
+    items: impl IntoIterator<Item = &'a TuiRenderUnit>,
+) -> Vec<&'a TuiRenderUnit> {
+    let mut out = Vec::new();
+    for vm in items {
+        match vm {
+            TuiRenderUnit::TuiCollapsedGroup(group) => {
+                out.extend(flatten_units(group.view_models.iter()));
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
 
 impl TuiRenderUnit {
     /// 返回该 VM 内部存储的 content_hash。
@@ -59,6 +77,14 @@ impl TuiRenderUnit {
         match self {
             Self::TuiToolCard(data) if data.is_running => 1,
             Self::TuiSubAgentGroup(data) if data.is_running => 1,
+            // 组内任一成员运行中且组已展开 → 按 1 帧刷新（成员 spinner / elapsed
+            // 可见）；组行本身静态，折叠时无需逐帧重渲染。
+            Self::TuiCollapsedGroup(data)
+                if data.fold != super::fold::FoldState::Collapsed
+                    && data.view_models.iter().any(TuiRenderUnit::is_animating) =>
+            {
+                1
+            }
             Self::TuiAssistantBubble(data)
                 if data
                     .reasoning

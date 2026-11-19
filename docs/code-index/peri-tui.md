@@ -53,7 +53,17 @@ Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_i
 移除其它槽位后就地左移，不以空驻留索引覆盖。
 手动折叠偏好经 `kit/fold_overrides.rs` 保留最近操作，限制为 1024 项及 256 KiB 键目录
 （含顺序目录的副本），会话重置同时释放覆盖表和顺序目录。
-回归入口：`acp_events_test::display_retention_test`、`fold_overrides::tests`。
+默认 fold 由 `kit/tui_render_unit/fold.rs::fold_for_status` 单点定义；正文空档分组由
+`kit/acp_events/render/publication.rs::group_body_gaps` 在快照装配后执行：相邻正文段落
+之间的连续过程单元（工具 / 纯 reasoning / 普通通知 / info 提醒）合成一张
+`TuiCollapsedGroup`，默认 `Collapsed` 一组一行，点击组行或聚焦后 Enter 展开整组，组内
+成员强制 `Expanded`（不再逐项折叠）。组键取组首成员稳定身份（`tool:` / `reasoning:` /
+`reminder:` 等），流式追加入同组不换键；分组缓存按稳定切点复用前缀，只重建变化后缀。
+错误级通知、required / warning 及以上提醒、交互块与子 Agent 组保持可见，不自动隐藏。
+点击命中行由 `message_area/slot_index.rs` 的 `header_local` 扣除过程区转场台阶行，
+`scroll/gesture.rs` 只认该行。回归入口：`acp_events_test::display_retention_test`、
+`fold_overrides::tests`、`acp_events_test::{body_gap_group_test,fold_test,snapshot_test,
+diff_grouping_test}`、`message_area::{transcript_index_test,scroll_test}`。
 
 内部续跑与定时审批通过 `ExecutionStarted` 建立真实 execution 身份及 HITL 许可；`acp_client/interaction_lifecycle/prompt.rs` 对 managed 输入与 external execution 共用代际、重复和终态归属规则，但仅 managed 输入的 Stop 携带 mailbox 票据身份。`kit/acp_notifier/notifier.rs` 保留终态 request ID；bridge 不让陈旧结束或迟到提交失败清除新执行。`kit/acp_events/bridge_state.rs::SubmittedInputRollback` 将 composer 回滚文本绑定提交请求，`turn.rs` 只允许所属请求取消回滚，internal execution 开始不重绑它。日常提交失败只发布原会话/请求所属事件，不直接写全局 loading。定向入口 `acp_client::client::pump::user_input_run_tests` 与 `kit::acp_events::acp_events_test`。
 
@@ -226,7 +236,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 历史窗口页与提交 | kit/acp_events/history_window/{page_admission,open_display}.rs + kit/history_page_consumer/window.rs + kit/acp_notifier/agent_event.rs | `handle_history_page_loaded` / `prepare_open_display` / `remove_displayed_ranges` / `handle_history_committed` / `clear_pending_tool_ends`；`WindowPagingState`；`HistoryCommitted` decoder；页只在 session/snapshot/window/request 身份全匹配时合并；open 先取 `switch_snapshot` 再按展示区间与 `committed` 同一事务协调（重试只合并新页，无法确认边界时不预留/不接纳）；`peri/history_committed` 按 checkpoint 幂等封印 durable 段；页响应自带的 `committedTail/checkpointId` 同样触发封印，提交 tail 先按 message 身份提升对应 LiveSeal 的 position；`CompactCompleted` 不触发释放；`BridgeState::archive_current_turn` 归档当前回合并登记带 message 身份的 LiveSeal（无 position、Unpersisted pin）；running subagent 存在时先按 `CurrentTurn::take_archivable_prefix` 归档第一个运行中工具/子 Agent 之前的稳定前缀（按段重基准正文偏移、压缩容器与 pending 分组索引），再消费已停止子 Agent；回归 `acp_events_test/prefix_archive_test.rs` 与 `current_turn/archive_test.rs`；页被采纳后按同身份提升 position，提交仅在有 anchor 时走统一释放；reopen 保留并重登记 live 槽位；running 容器保留至最后一个子 Agent 停止；失败/失效进入 Degraded 并重试 `open`，不回退全量 load |
 | 历史窗口模型 | kit/history_window/{model,budget,admission,index,commit,release,anchor,display,viewport,switch,diagnostics}.rs | `HistoryWindow`；`switch_snapshot`；`WindowSwitchSnapshot`；`DisplayLedger::slot_ranges`；`WindowBudget`；`ResidentSegment`；`HistoryGap`；`WindowAnchor`；`ResidentIndex`；`release_window_plans`；段身份 = source + entryId + subItem；`SegmentKey` 仅本地代次；预算按字节（16 MiB 正文、512 KiB 页、1 MiB pending tool、75% 水位）；`unattributed_live_bytes` 记录无持久身份的工具/子 Agent 正文，计入总驻留预算但不可淘汰；工具卡按窗口实例+代次键控，归属成功（`take_unattributed`）或释放后回落，预算重置后旧代次记录作废。`DisplayLedger::{insert_block,insert_existing_slot}` 区分「页插入位移」与「回填已存在槽位不位移」；pin 覆盖 viewport/unpersisted/running/durable-pending/inherited-unsupported/detail/anchor-missing；淘汰只生成计划，正文释放走统一事务；`structural_epoch` 与 render ack 控制预算归还 |
 | 流式/工具/边界/系统 handler | kit/acp_events/{streaming,tool,turn,system}.rs | `handle_text_chunk`、`handle_tool_started`、`handle_turn_done`、`handle_hitl_pending` 等；subagent / agent / compact handler 在对应模块 |
-| 渲染管线 | kit/acp_events/render/publication.rs | `push_view_models`/`push_acp_state`/`push_view_models_for_reset`/`handle_plan_update`；分组 `group_successful_tools`（增量：稳定切点复用前缀、只重建变化后缀；见 `join_into`） |
+| 渲染管线 | kit/acp_events/render/publication.rs | `push_view_models`/`push_acp_state`/`push_view_models_for_reset`/`handle_plan_update`；`group_body_gaps`（正文空档分组，增量：稳定切点复用前缀、只重建变化后缀；见 `join_into`）；`changed_from` 取分组输出的稳定前缀长度 |
 
 ### 状态与模型（src/kit/atoms/{state,input_snapshot}.rs + acp_types.rs）
 

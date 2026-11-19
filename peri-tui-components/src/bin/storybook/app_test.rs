@@ -86,7 +86,8 @@ fn list_click_selects_item_and_excludes_scrollbar_column() {
     };
     assert_eq!(*selected, 3);
 
-    let bar_click = mouse(MouseEventKind::Down(MouseButton::Left), 39, 14);
+    // 换一个可见条目行点滚动条列：若未排除，这里会选中第 2 项。
+    let bar_click = mouse(MouseEventKind::Down(MouseButton::Left), 39, 12);
     assert!(handle_story_mouse(&mut app.state, &bar_click, area));
     let StoryState::List { selected, .. } = &app.state else {
         panic!("expected list state");
@@ -147,6 +148,83 @@ fn list_wheel_scrolls_view_without_moving_selection() {
         panic!("expected list state");
     };
     assert_eq!(*scroll, 0);
+}
+
+#[test]
+fn list_last_variant_reveals_the_selection_at_the_real_viewport() {
+    let mut app = App::new(1);
+    app.select_variant(2); // last
+    let screen = dump_screen(&mut app, 40, 10);
+    let StoryState::List {
+        selected,
+        scroll,
+        reveal_last,
+        ..
+    } = &app.state
+    else {
+        panic!("expected list state");
+    };
+    // 40x10 的预览只有 3 个条目行：60 - 3 = 57 才是真正的底部偏移。
+    assert_eq!(*selected, 59);
+    assert_eq!(*scroll, 57, "初始偏移按真实视口计算");
+    assert!(!*reveal_last, "贴底只应用一次");
+    assert!(
+        screen.contains("tests/panel_"),
+        "选中项必须在 18 列预览内可见: {screen}"
+    );
+
+    // 之后滚轮可以离开底部，重绘不会把它拉回来。
+    let area = app.metrics.story_area;
+    let wheel_up = mouse(MouseEventKind::ScrollUp, area.x, area.y);
+    assert!(handle_story_mouse(&mut app.state, &wheel_up, area));
+    let _ = dump_screen(&mut app, 40, 10);
+    let StoryState::List { scroll, .. } = &app.state else {
+        panic!("expected list state");
+    };
+    assert_eq!(*scroll, 54, "首帧之后滚轮自由移动");
+}
+
+#[test]
+fn list_scrollbar_thumb_reaches_the_track_end_only_at_max_scroll() {
+    let mut app = App::new(1);
+    app.select_variant(0);
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let bar_x = area.right() - 1;
+    let thumb_bottom = |app: &mut App| -> u16 {
+        let buffer = dump_buffer(app, 100, 32);
+        (area.y..area.bottom())
+            .rev()
+            .find(|&y| buffer[(bar_x, y)].bg == ACCENT)
+            .expect("滚动条 thumb 可见")
+    };
+
+    // 100x32 有 25 个条目行：max_scroll = 35。offset 33 仍有 2 行可滚。
+    let wheel = mouse(MouseEventKind::ScrollDown, area.x, area.y);
+    for _ in 0..11 {
+        assert!(handle_story_mouse(&mut app.state, &wheel, area));
+    }
+    let _ = dump_screen(&mut app, 100, 32);
+    let StoryState::List { scroll, .. } = &app.state else {
+        panic!("expected list state");
+    };
+    assert_eq!(*scroll, 33);
+    assert!(
+        thumb_bottom(&mut app) < area.bottom() - 2,
+        "offset 33 时 thumb 不应贴到轨道底"
+    );
+
+    assert!(handle_story_mouse(&mut app.state, &wheel, area));
+    let _ = dump_screen(&mut app, 100, 32);
+    let StoryState::List { scroll, .. } = &app.state else {
+        panic!("expected list state");
+    };
+    assert_eq!(*scroll, 35, "列表滚到最后一页");
+    assert_eq!(
+        thumb_bottom(&mut app),
+        area.bottom() - 2,
+        "max_scroll 时 thumb 贴到轨道底"
+    );
 }
 
 #[test]
@@ -228,6 +306,74 @@ fn nav_click_switches_story_and_variant() {
         ),
     );
     assert_eq!(app.variant, 1);
+}
+
+#[test]
+fn header_keeps_the_story_count_when_the_right_label_does_not_fit() {
+    let mut app = App::new(0);
+    let count = format!("1 / {}", STORIES.len());
+
+    let narrow = dump_screen(&mut app, 40, 10);
+    let first = narrow.lines().next().expect("header row");
+    assert!(first.contains(&count), "窄终端计数被覆盖: {first:?}");
+    assert!(
+        !first.contains("peri-tui-components"),
+        "40 列放不下右侧标签: {first:?}"
+    );
+
+    let wide = dump_screen(&mut app, 100, 32);
+    let first = wide.lines().next().expect("header row");
+    assert!(first.contains(&count), "100 列计数可见: {first:?}");
+    assert!(
+        first.contains("peri-tui-components"),
+        "100 列两段都放得下: {first:?}"
+    );
+}
+
+#[test]
+fn narrow_sidebar_rows_stay_inside_the_border_and_keep_the_variant_count() {
+    let mut app = App::new(0);
+    let buffer = dump_buffer(&mut app, 40, 10);
+    let rows = app.metrics.story_rows;
+    let border_x = app.metrics.nav_area.right() - 1;
+    assert!(rows.height > 0, "40x10 仍显示 story 行");
+    for y in rows.y..rows.bottom() {
+        let story = &STORIES[app.metrics.story_first + (y - rows.y) as usize];
+        assert_eq!(
+            buffer[(border_x, y)].symbol(),
+            "│",
+            "story 行不得写到右边框 ({y})"
+        );
+        let text: String = (rows.x..rows.right())
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        assert!(
+            text.trim_end()
+                .ends_with(&format!("{:>2}", story.variants.len())),
+            "{} variant 计数必须可见: {text:?}",
+            story.key
+        );
+    }
+
+    // 滚轮滚出 variant 行后，这些行同样截断在边框内。
+    let nav = app.metrics.nav_area;
+    for _ in 0..3 {
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollDown, nav.x + 1, nav.y + 1),
+        );
+    }
+    let _ = dump_screen(&mut app, 40, 10);
+    let rows = app.metrics.variant_rows;
+    assert!(rows.height > 0, "滚轮后显示 variant 行");
+    let buffer = dump_buffer(&mut app, 40, 10);
+    for y in rows.y..rows.bottom() {
+        assert_eq!(
+            buffer[(border_x, y)].symbol(),
+            "│",
+            "variant 行不得写到右边框 ({y})"
+        );
+    }
 }
 
 fn story_index(key: &str) -> usize {
@@ -363,6 +509,18 @@ fn openui_button_shows_pressed_style_until_mouse_up_or_cancel() {
     handle_mouse(
         &mut app,
         mouse(MouseEventKind::Drag(MouseButton::Left), x, area.bottom()),
+    );
+    assert_eq!(pressed_index(&app), Some(0), "拖拽期间保留按下态");
+    handle_mouse(&mut app, mouse(MouseEventKind::Moved, x, area.bottom()));
+    assert_eq!(
+        pressed_index(&app),
+        None,
+        "终端丢失 release 后 Moved 必须清除按下态"
+    );
+    assert_eq!(dump_buffer(&mut app, 100, 32), before);
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), x, y),
     );
     assert_eq!(pressed_index(&app), Some(0));
     handle_mouse(
@@ -608,6 +766,7 @@ fn streaming_auto_plays_to_the_complete_document() {
         // 先渲染一次建立布局缓存：起播后 cursor 变化必须让它失效，画面才会增长。
         let mid = dump_screen(&mut app, 100, 32);
         let area = app.metrics.story_area;
+        let mid_body = body_text(&mid, area);
         let auto = crate::stories::streaming::test_progress_layout(area)
             .0
             .expect("100x32 下 auto 按钮可见");
@@ -646,10 +805,12 @@ fn streaming_auto_plays_to_the_complete_document() {
             crate::stories::streaming::is_animating(&app.state),
             "{story_key}: 播放中"
         );
+        // 同一 100x32 尺寸下只比正文（去掉进度行），证明新文本真的进了正文。
+        let half_screen = dump_screen(&mut app, 100, 32);
+        let half_body = body_text(&half_screen, area);
         assert_ne!(
-            mid,
-            dump_screen(&mut app, 100, 32),
-            "{story_key}: 播放期间画面随 cursor 刷新"
+            mid_body, half_body,
+            "{story_key}: 播放期间正文随 cursor 增长"
         );
 
         // 播放中再点一次：以当前 cursor 重新计时 3 秒。
@@ -668,11 +829,25 @@ fn streaming_auto_plays_to_the_complete_document() {
         crate::stories::streaming::tick_at(&mut app.state, replay.start + Duration::from_secs(30));
         assert_eq!(streaming_cursor(&app), (source.len(), source));
 
-        let screen = dump_screen(&mut app, 100, 200);
-        assert!(screen.contains(tail), "{story_key}: 完整文档可见");
+        // 完成后的正文继续增长；滚到底后在同一 100x32 画面里应看到结尾文本。
+        let done = dump_screen(&mut app, 100, 32);
+        assert_ne!(
+            half_body,
+            body_text(&done, area),
+            "{story_key}: 完成后正文再次增长"
+        );
+        let wheel = mouse(MouseEventKind::ScrollDown, area.x, area.y);
+        for _ in 0..40 {
+            handle_story_mouse(&mut app.state, &wheel, area);
+        }
+        let end_body = body_text(&dump_screen(&mut app, 100, 32), area);
+        assert!(
+            end_body.contains(tail),
+            "{story_key}: 结尾文本 {tail:?} 应在同一尺寸的正文中"
+        );
         if story_key == "openui" {
-            assert!(!screen.contains("gen-ui:"), "围栏闭合后不再降级");
-            assert!(screen.contains("继续"), "闭合后渲染出真实组件");
+            assert!(!end_body.contains("gen-ui:"), "围栏闭合后不再降级");
+            assert!(end_body.contains("继续"), "闭合后渲染出真实组件");
         }
     }
 }
@@ -1086,6 +1261,46 @@ fn typing_edits_the_focused_textarea() {
 }
 
 #[test]
+fn unfocused_textarea_does_not_swallow_the_quit_key() {
+    let mut state = (STORIES[0].variants[0].initial)();
+    assert!(matches!(state, StoryState::TextArea { focused: false, .. }));
+    assert!(
+        super::handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+        ),
+        "未聚焦的 TextArea 不得吞掉 q"
+    );
+    let StoryState::TextArea { editor, .. } = &state else {
+        panic!("expected textarea state");
+    };
+    assert!(editor.text.is_empty(), "未聚焦时 q 不应插入文本");
+
+    assert!(super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    ));
+    assert!(super::handle_key(
+        &mut state,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    ));
+
+    // 聚焦时 q 仍是文本；Esc/Ctrl-C 之外只有编辑键。
+    let mut focused = (STORIES[0].variants[1].initial)();
+    assert!(
+        !super::handle_key(
+            &mut focused,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+        ),
+        "聚焦的 TextArea 中 q 是文本"
+    );
+    let StoryState::TextArea { editor, .. } = &focused else {
+        panic!("expected textarea state");
+    };
+    assert!(editor.text.ends_with('q'));
+}
+
+#[test]
 fn navigation_keys_do_not_switch_stories() {
     let mut state = (STORIES[1].variants[1].initial)();
     for key in [
@@ -1149,7 +1364,12 @@ fn streaming_h_scroll(app: &App) -> usize {
 }
 
 fn progress_label(cursor: usize, source: &str) -> String {
-    let percent = (cursor * 100 + source.len() / 2) / source.len();
+    let rounded = (cursor * 100 + source.len() / 2) / source.len();
+    let percent = if cursor < source.len() {
+        rounded.min(99)
+    } else {
+        100
+    };
     format!("{percent:>4}%")
 }
 
@@ -1161,6 +1381,18 @@ fn progress_line(app: &App, screen: &str) -> String {
         .nth(usize::from(bar.y))
         .unwrap_or_default()
         .to_owned()
+}
+
+/// 进度条行之外的正文文本：同一尺寸下比较，避免 resize 重建布局混入结论。
+fn body_text(screen: &str, area: Rect) -> String {
+    let body_end = area.bottom().saturating_sub(1) as usize;
+    screen
+        .lines()
+        .enumerate()
+        .filter(|(row, _)| (area.y as usize..body_end).contains(row))
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -1538,6 +1770,9 @@ fn auto_button_presses_with_selected_style_and_restores_on_up() {
         cursor,
         "点击按钮本身不改变 cursor"
     );
+    let started = crate::stories::streaming::autoplay(&app.state)
+        .expect("按下 auto 后播放开始")
+        .start;
     let held = dump_buffer(&mut app, 100, 32);
     let pressed = &held[(auto.x, auto.y)];
     assert_eq!(pressed.symbol(), "[");
@@ -1559,6 +1794,20 @@ fn auto_button_presses_with_selected_style_and_restores_on_up() {
         "拖出按钮恢复未按下态且不 seek"
     );
 
+    // 未松开前拖回按钮：恢复按下样式，但不重启播放、不 seek。
+    let drag_in = mouse(MouseEventKind::Drag(MouseButton::Left), auto.x + 1, auto.y);
+    assert!(handle_story_mouse(&mut app.state, &drag_in, area));
+    assert!(auto_pressed(&app), "拖回按钮恢复按下样式");
+    let play = crate::stories::streaming::autoplay(&app.state).expect("播放仍在进行");
+    assert_eq!(play.from, cursor, "拖出再拖回不重启播放");
+    assert_eq!(play.start, started, "拖出再拖回不重启播放");
+    assert_eq!(streaming_cursor(&app).0, cursor, "拖出再拖回不 seek");
+    assert_eq!(
+        dump_buffer(&mut app, 100, 32)[(auto.x, auto.y)].bg,
+        ACCENT,
+        "拖回后仍是按下样式"
+    );
+
     let down = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
     assert!(handle_story_mouse(&mut app.state, &down, area));
     let up = mouse(MouseEventKind::Up(MouseButton::Left), auto.x + 1, auto.y);
@@ -1569,19 +1818,60 @@ fn auto_button_presses_with_selected_style_and_restores_on_up() {
 }
 
 #[test]
+fn lost_release_clears_the_auto_press_on_move() {
+    let mut app = streaming_app("markdown");
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let auto = crate::stories::streaming::test_progress_layout(area)
+        .0
+        .expect("auto 按钮可见");
+    let auto_pressed = |app: &App| {
+        let StoryState::Streaming(document) = &app.state else {
+            panic!("expected streaming state");
+        };
+        document.auto_pressed()
+    };
+
+    let down = mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y);
+    assert!(handle_story_mouse(&mut app.state, &down, area));
+    assert!(auto_pressed(&app), "按下 auto 进入按下态");
+
+    // 终端丢失 release：只剩 Moved 也要清掉悬空的按下态。
+    let moved = mouse(MouseEventKind::Moved, auto.x + 1, auto.y);
+    handle_story_mouse(&mut app.state, &moved, area);
+    assert!(!auto_pressed(&app), "Moved 清除悬空的按下态");
+    assert!(
+        crate::stories::streaming::is_animating(&app.state),
+        "只清按下态，不取消正在播放的 auto"
+    );
+}
+
+#[test]
 fn streaming_progress_layout_is_responsive() {
-    // 阈值全部来自行宽：20 列起有按钮，9 列起有百分比，再窄只剩轨道。
+    // 先丢百分比、再丢按钮：18 列三者齐全，13 列起保留按钮，9 列起只剩标签。
     // 预览区最右一列留给文档滚动条，所以行宽 = 预览区宽 - 1。
     let geometry = |row_width: u16| {
         crate::stories::streaming::test_progress_layout(Rect::new(0, 0, row_width + 1, 2))
     };
     let (auto, bar, label) = geometry(20);
-    assert!(auto.is_some(), "20 列仍然显示按钮");
+    assert!(auto.is_some(), "20 列三者齐全");
     assert_eq!((bar.x, bar.width), (9, 6), "按钮 8 列 + 1 列间隔");
     assert!(label);
-    for width in [19, 9] {
+
+    let (auto, bar, label) = geometry(18);
+    assert!(auto.is_some(), "18 列仍三者齐全");
+    assert_eq!((bar.x, bar.width), (9, 4));
+    assert!(label);
+
+    for width in [17, 13] {
         let (auto, bar, label) = geometry(width);
-        assert!(auto.is_none(), "{width} 列隐藏按钮");
+        assert!(auto.is_some(), "{width} 列先丢百分比、保留按钮");
+        assert_eq!((bar.x, bar.width), (9, width - 9));
+        assert!(!label, "{width} 列不再显示百分比");
+    }
+    for width in [12, 9] {
+        let (auto, bar, label) = geometry(width);
+        assert!(auto.is_none(), "{width} 列放不下按钮");
         assert_eq!(bar.width, width - 5);
         assert!(label, "{width} 列仍显示百分比");
     }
@@ -1590,20 +1880,22 @@ fn streaming_progress_layout_is_responsive() {
     assert_eq!(bar.width, 8);
     assert!(!label, "窄轨道不画百分比");
 
-    // 预览区被压到 40 列总宽：渲染不 panic、进度条行在、按钮按阈值隐藏。
+    // 预览区被压到 40 列总宽：行宽 17，按钮必须保留，否则无法启动播放。
     let mut app = streaming_app("markdown");
     let screen = dump_screen(&mut app, 40, 10);
     assert!(screen.contains("peri-tui storybook"));
     let area = app.metrics.story_area;
     let (auto, bar, label) = crate::stories::streaming::test_progress_layout(area);
-    assert!(auto.is_none(), "40x10 的预览行宽放不下按钮");
-    assert!(label && bar.width > 0);
+    assert!(auto.is_some(), "40x10 的预览行仍保留 [ auto ]");
+    assert!(!label, "40x10 先丢百分比标签");
+    assert_eq!(bar.width, 8);
     let line = progress_line(&app, &screen);
+    assert!(line.contains("[ auto ]"), "按钮可见: {line:?}");
     assert!(
         line.contains('█') || line.contains('░'),
         "进度条行存在: {line:?}"
     );
-    assert!(line.contains('%'), "残留百分比标签: {line:?}");
+    assert!(!line.contains('%'), "窄行不再显示百分比: {line:?}");
 }
 
 #[test]
@@ -1691,12 +1983,17 @@ fn minimum_size_reaches_variants_with_the_wheel() {
     }
     let _ = dump_screen(&mut app, 40, 10);
     let rows = app.metrics.variant_rows;
-    assert!(rows.height > 0, "滚轮后应能看到 variant 行");
+    assert!(rows.height > 1, "滚轮后至少应看到两行 variant");
+    // 点第二行：variant 0 本来就是选中项，点它无法证明点击生效。
     handle_mouse(
         &mut app,
-        mouse(MouseEventKind::Down(MouseButton::Left), rows.x + 1, rows.y),
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x + 1,
+            rows.y + 1,
+        ),
     );
-    assert_eq!(app.variant, app.metrics.variant_first);
+    assert_eq!(app.variant, 1);
 }
 
 /// `--variant` 直接选中靠后的变体时，首帧必须把它滚进视口。
@@ -1748,4 +2045,81 @@ fn sidebar_wheel_clears_a_pressed_document_button() {
         mouse(MouseEventKind::ScrollDown, nav.x + 1, nav.y + 1),
     );
     assert_eq!(pressed_index(&app), None, "侧栏滚轮应清除按下态");
+}
+
+/// 终端 resize 后按钮热区已重建：清掉按下态，但选中项与滚动位置不变。
+#[test]
+fn resize_clears_pressed_states_without_resetting_navigation() {
+    let mut app = App::new(story_index("openui"));
+    let variant = app
+        .current()
+        .variants
+        .iter()
+        .position(|variant| variant.key == "button")
+        .expect("button variant");
+    app.select_variant(variant);
+    let before = dump_buffer(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let (x, y) = (area.top()..area.bottom())
+        .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+        .find(|&(x, y)| before[(x, y)].symbol() == "继")
+        .expect("主按钮必须出现在预览中");
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), x, y),
+    );
+    let StoryState::Document {
+        scroll: document_scroll,
+        pressed_button,
+        ..
+    } = &app.state
+    else {
+        panic!("应为文档预览");
+    };
+    assert_eq!(*pressed_button, Some(0));
+    let document_scroll = *document_scroll;
+    let selected_variant = app.variant;
+
+    super::handle_resize(&mut app.state);
+    let StoryState::Document {
+        scroll,
+        pressed_button,
+        ..
+    } = &app.state
+    else {
+        panic!("应为文档预览");
+    };
+    assert_eq!(*pressed_button, None, "resize 清除文档按钮按下态");
+    assert_eq!(*scroll, document_scroll, "resize 不重置滚动位置");
+    assert_eq!(app.variant, selected_variant, "resize 不重置选中 variant");
+
+    // 流式 auto 按钮：resize 只清按下态，播放与 cursor 保留。
+    let mut app = streaming_app("markdown");
+    let _ = dump_screen(&mut app, 100, 32);
+    let area = app.metrics.story_area;
+    let auto = crate::stories::streaming::test_progress_layout(area)
+        .0
+        .expect("auto 按钮可见");
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), auto.x + 1, auto.y),
+        area
+    ));
+    let auto_pressed = |app: &App| {
+        let StoryState::Streaming(document) = &app.state else {
+            panic!("expected streaming state");
+        };
+        document.auto_pressed()
+    };
+    assert!(auto_pressed(&app));
+    let (cursor, _, scroll, _) = streaming_progress(&app);
+
+    super::handle_resize(&mut app.state);
+    assert!(!auto_pressed(&app), "resize 清除 auto 按下态");
+    assert_eq!(streaming_progress(&app).0, cursor, "resize 不重置 cursor");
+    assert_eq!(streaming_progress(&app).2, scroll, "resize 不重置滚动位置");
+    assert!(
+        crate::stories::streaming::is_animating(&app.state),
+        "resize 不取消播放"
+    );
 }

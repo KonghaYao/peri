@@ -461,8 +461,10 @@ pub(super) fn handle_committed_assistant_text(
     state: &mut BridgeState,
     text: &str,
     reasoning: Option<&str>,
+    message_id: Option<&str>,
 ) {
-    let vm = committed_assistant_unit(text, reasoning);
+    let vm =
+        committed_assistant_unit_with_message_id(text, reasoning, message_id.map(str::to_owned));
     state.committed.push_back(vm);
     // Replay publication 由 bridge scheduler 合帧；避免每条历史消息完整扫描 committed。
     super::render::push_acp_state(state);
@@ -472,13 +474,6 @@ pub(super) fn handle_committed_assistant_text(
 ///
 /// 历史页与回放共用同一份构造：两者的入口差别只在「怎么进窗口」（回放 push_back、
 /// 历史页按区间插入，见 `acp_events::history_page`）。
-pub(super) fn committed_assistant_unit(text: &str, reasoning: Option<&str>) -> TuiRenderUnit {
-    committed_assistant_unit_with_message_id(text, reasoning, None)
-}
-
-/// 与 [`committed_assistant_unit`] 相同，但携带持久消息身份。
-///
-/// 历史页从 `entryId` 解析出裸消息 uuid，才能与 live `messageId` 做稳定去重。
 pub(super) fn committed_assistant_unit_with_message_id(
     text: &str,
     reasoning: Option<&str>,
@@ -502,8 +497,10 @@ pub(super) fn committed_assistant_unit_with_message_id(
     let mut bubble = TuiAssistantBubble {
         text: text.to_string(),
         reasoning: reason_block,
-        // 非流式通道通常无 message_id 来源；历史页从 entryId 解析后传入。
-        message_id,
+        // 回放/历史页无 message_id 来源时分配本地身份：reasoning 仍可逐项展开
+        // 且互不串键；本地 id 不参与持久条目归属（见 `live_seal`）。
+        message_id: message_id
+            .or_else(|| Some(crate::kit::tui_render_unit::next_local_message_id())),
         // 非流式通道无文本起始时刻——正文时长不可得（G-Tokens 降级：
         // 不显示 `12.4s`）。
         started_at: None,
