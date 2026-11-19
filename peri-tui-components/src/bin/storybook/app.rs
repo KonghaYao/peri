@@ -26,17 +26,31 @@ use crate::stories::{
 
 #[derive(Clone, Copy)]
 struct LayoutMetrics {
+    /// 可见 story 行（含首行对应的 story 下标偏移）。
     story_rows: Rect,
+    story_first: usize,
+    /// 可见 variant 行（含首行对应的 variant 下标偏移）。
     variant_rows: Rect,
+    variant_first: usize,
     story_area: Rect,
+    /// Stories 面板整体（含边框），滚轮命中范围。
+    nav_area: Rect,
+    /// 最近一次绘制时 Stories 面板内容区高度与最大滚动行数。
+    nav_height: u16,
+    nav_max_scroll: usize,
 }
 
 impl Default for LayoutMetrics {
     fn default() -> Self {
         Self {
             story_rows: Rect::new(0, 0, 0, 0),
+            story_first: 0,
             variant_rows: Rect::new(0, 0, 0, 0),
+            variant_first: 0,
             story_area: Rect::new(0, 0, 0, 0),
+            nav_area: Rect::new(0, 0, 0, 0),
+            nav_height: 0,
+            nav_max_scroll: 0,
         }
     }
 }
@@ -46,6 +60,10 @@ struct App {
     variant: usize,
     state: StoryState,
     metrics: LayoutMetrics,
+    /// Stories 面板内容的滚动行数：面板放不下全部 story + variant 时由滚轮移动。
+    nav_scroll: usize,
+    /// 选择变化后请求下一次绘制把当前 variant 滚进视口（只揭示一次，避免抢走滚轮）。
+    pending_reveal: bool,
 }
 
 impl App {
@@ -56,6 +74,8 @@ impl App {
             variant: 0,
             state: (STORIES[story].variants[0].initial)(),
             metrics: LayoutMetrics::default(),
+            nav_scroll: 0,
+            pending_reveal: false,
         }
     }
 
@@ -77,6 +97,7 @@ impl App {
         }
         self.story = index;
         self.variant = 0;
+        self.pending_reveal = true;
         self.reset_state();
     }
 
@@ -85,6 +106,7 @@ impl App {
             return;
         }
         self.variant = index;
+        self.pending_reveal = true;
         self.reset_state();
     }
 }
@@ -138,6 +160,40 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 }
 
+/// Stories 面板的虚拟行布局：story 行 → 空行 → `Variants` 标题 → variant 行。
+struct NavLayout {
+    story_count: usize,
+    variant_title: usize,
+    variant_first: usize,
+    total: usize,
+}
+
+fn nav_layout(app: &App) -> NavLayout {
+    let story_count = STORIES.len();
+    let variant_title = story_count + 1;
+    let variant_first = story_count + 2;
+    NavLayout {
+        story_count,
+        variant_title,
+        variant_first,
+        total: variant_first + app.current().variants.len(),
+    }
+}
+
+/// 把当前 variant 滚进视口。只在选择变化后执行一次，之后的滚轮位置由用户决定。
+fn reveal_variant(app: &mut App, nav: &NavLayout) {
+    let height = app.metrics.nav_height as usize;
+    if height == 0 {
+        return;
+    }
+    let target = nav.variant_first + app.variant;
+    if target < app.nav_scroll {
+        app.nav_scroll = target;
+    } else if target >= app.nav_scroll + height {
+        app.nav_scroll = target + 1 - height;
+    }
+}
+
 fn draw_stories(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let block = Block::bordered()
         .border_style(BORDER)
@@ -145,61 +201,86 @@ fn draw_stories(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         .title_style(accent_style());
     let inner = block.inner(area);
     block.render(area, frame.buffer_mut());
-    if inner.width == 0 || inner.height == 0 {
-        app.metrics.story_rows = Rect::new(0, 0, 0, 0);
-        app.metrics.variant_rows = Rect::new(0, 0, 0, 0);
-        return;
-    }
 
-    let story_rows_height = (STORIES.len() as u16).min(inner.height);
-    app.metrics.story_rows = Rect::new(inner.x, inner.y, inner.width, story_rows_height);
-    let buf = frame.buffer_mut();
-    for (index, story) in STORIES.iter().enumerate().take(story_rows_height as usize) {
-        let selected = index == app.story;
-        let marker = if selected { "▸ " } else { "  " };
-        let text = format!("{marker}{:<18} {:>2}", story.title, story.variants.len());
-        let style = if selected {
-            selected_style()
-        } else {
-            normal_style()
-        };
-        let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1);
-        buf.set_style(row, style);
-        buf.set_string(row.x, row.y, &text, style);
-    }
-
+    let nav = nav_layout(app);
+    let height = inner.height as usize;
+    let max_scroll = nav.total.saturating_sub(height);
+    app.metrics.nav_area = area;
+    app.metrics.nav_height = inner.height;
+    app.metrics.nav_max_scroll = max_scroll;
+    app.metrics.story_rows = Rect::new(0, 0, 0, 0);
     app.metrics.variant_rows = Rect::new(0, 0, 0, 0);
-    let title_y = inner.y.saturating_add(story_rows_height).saturating_add(1);
-    if title_y >= inner.bottom() {
+    if inner.width == 0 || height == 0 {
         return;
     }
-    Line::from(Span::styled(" Variants", accent_style()))
-        .render(Rect::new(inner.x, title_y, inner.width, 1), buf);
-    let variants_y = title_y.saturating_add(1);
-    if variants_y >= inner.bottom() {
-        return;
+    if app.pending_reveal {
+        app.pending_reveal = false;
+        reveal_variant(app, &nav);
     }
-    let variants = app.current().variants;
-    let variants_height = (variants.len() as u16).min(inner.bottom().saturating_sub(variants_y));
-    if variants_height == 0 {
-        return;
+    app.nav_scroll = app.nav_scroll.min(max_scroll);
+
+    let buf = frame.buffer_mut();
+    let first = app.nav_scroll;
+    let last = (first + height).min(nav.total);
+
+    let story_end = last.min(nav.story_count);
+    if first < story_end {
+        app.metrics.story_rows =
+            Rect::new(inner.x, inner.y, inner.width, (story_end - first) as u16);
+        app.metrics.story_first = first;
+        for (index, story) in STORIES.iter().enumerate().take(story_end).skip(first) {
+            let selected = index == app.story;
+            let marker = if selected { "▸ " } else { "  " };
+            let text = format!("{marker}{:<18} {:>2}", story.title, story.variants.len());
+            let style = if selected {
+                selected_style()
+            } else {
+                normal_style()
+            };
+            let row = Rect::new(inner.x, inner.y + (index - first) as u16, inner.width, 1);
+            buf.set_style(row, style);
+            buf.set_string(row.x, row.y, &text, style);
+        }
     }
-    app.metrics.variant_rows = Rect::new(inner.x, variants_y, inner.width, variants_height);
-    for (index, variant) in variants.iter().enumerate().take(variants_height as usize) {
-        let selected = index == app.variant;
-        let style = if selected {
-            selected_style()
-        } else {
-            normal_style()
-        };
-        let row = Rect::new(inner.x, variants_y + index as u16, inner.width, 1);
-        buf.set_style(row, style);
-        buf.set_string(
-            row.x,
-            row.y,
-            format!(" {} {}", index + 1, variant.key),
-            style,
+
+    if first <= nav.variant_title && nav.variant_title < last {
+        let y = inner.y + (nav.variant_title - first) as u16;
+        Line::from(Span::styled(" Variants", accent_style()))
+            .render(Rect::new(inner.x, y, inner.width, 1), buf);
+    }
+
+    let variant_start = first.max(nav.variant_first);
+    if variant_start < last {
+        let variants = app.current().variants;
+        app.metrics.variant_rows = Rect::new(
+            inner.x,
+            inner.y + (variant_start - first) as u16,
+            inner.width,
+            (last - variant_start) as u16,
         );
+        app.metrics.variant_first = variant_start - nav.variant_first;
+        for virtual_row in variant_start..last {
+            let index = virtual_row - nav.variant_first;
+            let selected = index == app.variant;
+            let style = if selected {
+                selected_style()
+            } else {
+                normal_style()
+            };
+            let row = Rect::new(
+                inner.x,
+                inner.y + (virtual_row - first) as u16,
+                inner.width,
+                1,
+            );
+            buf.set_style(row, style);
+            buf.set_string(
+                row.x,
+                row.y,
+                format!(" {} {}", index + 1, variants[index].key),
+                style,
+            );
+        }
     }
 }
 
@@ -241,7 +322,7 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         app.variant + 1,
         story.variants.len()
     );
-    let right = " wheel/click in preview · q quit ";
+    let right = " wheel: stories/preview · q quit ";
     let show_right = left.len() + right.len() <= area.width as usize;
     Paragraph::new(left).style(muted_style()).render(area, buf);
     if show_right {
@@ -262,14 +343,30 @@ fn row_index(rows: Rect, column: u16, row: u16) -> Option<usize> {
     Some((row - rows.y) as usize)
 }
 
+const NAV_WHEEL_ROWS: usize = 3;
+
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    // Stories 面板放不下全部条目时，滚轮移动面板内容。
+    if crate::stories::rect_contains(app.metrics.nav_area, mouse.column, mouse.row) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                app.nav_scroll = app.nav_scroll.saturating_sub(NAV_WHEEL_ROWS);
+                return;
+            }
+            MouseEventKind::ScrollDown => {
+                app.nav_scroll = (app.nav_scroll + NAV_WHEEL_ROWS).min(app.metrics.nav_max_scroll);
+                return;
+            }
+            _ => {}
+        }
+    }
     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-        if let Some(index) = row_index(app.metrics.story_rows, mouse.column, mouse.row) {
-            app.select_story(index);
+        if let Some(offset) = row_index(app.metrics.story_rows, mouse.column, mouse.row) {
+            app.select_story(app.metrics.story_first + offset);
             return;
         }
-        if let Some(index) = row_index(app.metrics.variant_rows, mouse.column, mouse.row) {
-            app.select_variant(index);
+        if let Some(offset) = row_index(app.metrics.variant_rows, mouse.column, mouse.row) {
+            app.select_variant(app.metrics.variant_first + offset);
             return;
         }
     }

@@ -74,7 +74,10 @@ Dumps accept `--width`/`--height` (default `100x32`) so wide documents and narro
 layouts can be inspected without a TTY.
 
 Navigation is mouse-only, matching the host TUI: there are no story or variant
-keys. `q`, `Esc` or `Ctrl-C` quit, and while a `TextArea` variant is focused
+keys. The wheel over the Stories panel scrolls the story/variant list when the
+panel cannot show every entry, so the full chart gallery stays reachable at the
+default `100x32` and at the `40x10` minimum. `q`, `Esc` or `Ctrl-C` quit, and
+while a `TextArea` variant is focused
 keys edit its text instead of leaving the storybook (only `Esc`/`Ctrl-C` still
 quit there). Without a TTY, use
 `./dev-tui.sh --list` for story keys and

@@ -1288,3 +1288,77 @@ fn textarea_click_maps_through_scrolled_viewport() {
     // 光标在第 6 个视觉行，高度 2 的窗口为 [4, 6)：屏幕首行是源码行 "4"（字符索引 8）。
     assert_eq!(editor.cursor, 8);
 }
+
+/// 35 个图表变体放不进 100x32 侧栏首屏：滚轮到底后必须能点到最后一个。
+#[test]
+fn nav_wheel_reaches_the_last_chart_variant() {
+    let charts = STORIES
+        .iter()
+        .position(|story| story.key == "charts")
+        .expect("charts story");
+    let last = STORIES[charts].variants.len() - 1;
+    let mut app = App::new(charts);
+    let _ = dump_screen(&mut app, 100, 32);
+    assert!(app.metrics.nav_max_scroll > 0, "侧栏内容应超出视口");
+    let nav = app.metrics.nav_area;
+    for _ in 0..12 {
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollDown, nav.x + 1, nav.y + 1),
+        );
+    }
+    let _ = dump_screen(&mut app, 100, 32);
+    let rows = app.metrics.variant_rows;
+    assert_eq!(
+        app.metrics.variant_first + rows.height as usize - 1,
+        last,
+        "滚到底后最后一行应是最后一个变体"
+    );
+    handle_mouse(
+        &mut app,
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rows.x + 1,
+            rows.y + rows.height - 1,
+        ),
+    );
+    assert_eq!(app.variant, last);
+}
+
+/// 最小尺寸 40x10 下侧栏只放得下 story 行；滚轮后必须出现 variant 行并可点选。
+#[test]
+fn minimum_size_reaches_variants_with_the_wheel() {
+    let mut app = App::new(0);
+    let _ = dump_screen(&mut app, 40, 10);
+    assert_eq!(app.metrics.variant_rows.height, 0);
+    let nav = app.metrics.nav_area;
+    for _ in 0..3 {
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::ScrollDown, nav.x + 1, nav.y + 1),
+        );
+    }
+    let _ = dump_screen(&mut app, 40, 10);
+    let rows = app.metrics.variant_rows;
+    assert!(rows.height > 0, "滚轮后应能看到 variant 行");
+    handle_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), rows.x + 1, rows.y),
+    );
+    assert_eq!(app.variant, app.metrics.variant_first);
+}
+
+/// `--variant` 直接选中靠后的变体时，首帧必须把它滚进视口。
+#[test]
+fn selecting_a_variant_scrolls_it_into_view() {
+    let charts = STORIES
+        .iter()
+        .position(|story| story.key == "charts")
+        .expect("charts story");
+    let mut app = App::new(charts);
+    app.select_variant(30);
+    let _ = dump_screen(&mut app, 100, 32);
+    let rows = app.metrics.variant_rows;
+    assert!(30 >= app.metrics.variant_first);
+    assert!(30 < app.metrics.variant_first + rows.height as usize);
+}

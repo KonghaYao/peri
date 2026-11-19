@@ -59,6 +59,7 @@ fn print_help() {
          MOUSE:\n\
          \x20   click story / variant   switch views\n\
          \x20   click preview           use the component (caret, selection)\n\
+         \x20   wheel over stories      scroll the story/variant list\n\
          \x20   wheel over preview      scroll list / scrollbar / document\n\n\
          KEYS:\n\
          \x20   q/Esc/Ctrl-C   quit (other keys edit the focused TextArea)\n\
