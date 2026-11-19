@@ -2,6 +2,7 @@
 
 use super::DownloadRequest;
 use super::THEME_LIST;
+use super::download::DownloadLimits;
 
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
@@ -56,6 +57,19 @@ impl Drop for AtomsGuard {
     }
 }
 
+#[derive(Clone)]
+enum PeerReply {
+    Body(String),
+    /// No `Content-Length`, so only the streaming total can enforce the budget.
+    UnmeasuredBody(String),
+    /// Close without a response.
+    Close,
+    /// Send headers plus a partial body, then hold the connection open.
+    StallBody(String),
+    /// Accept the request and keep the connection open without responding.
+    Stall,
+}
+
 struct ListingServer {
     url: String,
     seen: oneshot::Receiver<()>,
@@ -70,6 +84,16 @@ impl ListingServer {
     }
 
     async fn with_bodies(bodies: Vec<Option<String>>) -> Self {
+        Self::with_replies(
+            bodies
+                .into_iter()
+                .map(|body| body.map_or(PeerReply::Close, PeerReply::Body))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn with_replies(replies: Vec<PeerReply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("with bodies: fixture task and request must complete successfully");
@@ -83,7 +107,7 @@ impl ListingServer {
         let (release, mut release_rx) = oneshot::channel();
         let (stop, mut stop_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let mut bodies = std::collections::VecDeque::from(bodies);
+            let mut replies = std::collections::VecDeque::from(replies);
             let mut seen_tx = Some(seen_tx);
             let mut requests = Vec::new();
             loop {
@@ -117,13 +141,35 @@ impl ListingServer {
                     let _ = seen_tx.send(());
                     let _ = (&mut release_rx).await;
                 }
-                if let Some(body) = bodies.pop_front().flatten() {
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    // An aborted client may close before the gate is released.
-                    let _ = stream.write_all(response.as_bytes()).await;
+                match replies.pop_front() {
+                    Some(PeerReply::Body(body)) => {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        // An aborted client may close before the gate is released.
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                    Some(PeerReply::UnmeasuredBody(body)) => {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                    Some(PeerReply::StallBody(partial)) => {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{partial}"
+                        );
+                        let _ = stream.write_all(head.as_bytes()).await;
+                        let _ = (&mut stop_rx).await;
+                        break;
+                    }
+                    Some(PeerReply::Stall) => {
+                        // The client's request deadline is the only exit for this peer.
+                        let _ = (&mut stop_rx).await;
+                        break;
+                    }
+                    Some(PeerReply::Close) | None => {}
                 }
             }
             requests
@@ -143,6 +189,7 @@ impl ListingServer {
             contents_url: self.url.clone(),
             raw_prefix: format!("{}/raw/", self.url),
             scan_catalog: Box::new(|| panic!("an empty/failed listing must not scan themes")),
+            limits: DownloadLimits::default(),
         }
     }
 
@@ -529,6 +576,217 @@ async fn test_theme_download_abort_in_flight_releases_owner() {
     assert!(aborted.finished);
     assert_eq!(aborted.fail_count, 1);
     assert!(retry_succeeded);
+}
+
+fn bounded_limits(max_body_bytes: u64) -> DownloadLimits {
+    DownloadLimits {
+        request_timeout: Duration::from_millis(500),
+        max_body_bytes,
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn test_theme_download_listing_timeout_finishes_and_releases_owner() {
+    let _atoms = AtomsGuard::capture_and_reset();
+    let directory = tempfile::tempdir().expect("theme download listing timeout finishes and releases owner: isolated fixture workspace must remain accessible");
+    let mut server = ListingServer::with_replies(vec![PeerReply::Stall]).await;
+    let mut request = server.request(home(directory.path()));
+    request.limits = bounded_limits(1024);
+    let worker = super::trigger_download_themes_with(move || request);
+    let accepted = worker.is_some();
+    let requested = server.wait_until_requested().await;
+    let outcomes = join_workers(worker.into_iter().collect()).await;
+    let requests = server.finish().await;
+    let completed = DOWNLOAD_PROGRESS.state().read().clone();
+    let retry_succeeded = complete_empty_retry(directory.path()).await;
+
+    assert!(accepted && requested);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert_eq!(
+        requests
+            .expect("theme download listing timeout finishes and releases owner: the fixture operation must finish without an inner failure")
+            .len(),
+        1,
+        "the stalled listing was never requested"
+    );
+    assert!(
+        completed.finished,
+        "a stalled listing left progress unfinished"
+    );
+    assert!(completed.items.is_empty());
+    assert_eq!((completed.success_count, completed.fail_count), (0, 1));
+    assert!(
+        retry_succeeded,
+        "the deadline must release the download lease"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_theme_download_listing_body_stall_times_out_and_releases_owner() {
+    let _atoms = AtomsGuard::capture_and_reset();
+    let directory = tempfile::tempdir().expect("theme download listing body stall times out and releases owner: isolated fixture workspace must remain accessible");
+    let mut server = ListingServer::with_replies(vec![PeerReply::StallBody("[".to_string())]).await;
+    let mut request = server.request(home(directory.path()));
+    request.limits = bounded_limits(8192);
+    let worker = super::trigger_download_themes_with(move || request);
+    let accepted = worker.is_some();
+    let requested = server.wait_until_requested().await;
+    server.release();
+    let outcomes = join_workers(worker.into_iter().collect()).await;
+    let requests = server.finish().await;
+    let completed = DOWNLOAD_PROGRESS.state().read().clone();
+    let retry_succeeded = complete_empty_retry(directory.path()).await;
+
+    assert!(accepted && requested);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert_eq!(
+        requests
+            .expect("theme download listing body stall times out and releases owner: the fixture operation must finish without an inner failure")
+            .len(),
+        1
+    );
+    assert!(
+        completed.finished,
+        "a stalled listing body left progress unfinished"
+    );
+    assert!(completed.items.is_empty());
+    assert_eq!((completed.success_count, completed.fail_count), (0, 1));
+    assert!(
+        retry_succeeded,
+        "the deadline must release the download lease"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_theme_download_theme_file_timeout_finishes_and_releases_owner() {
+    let _atoms = AtomsGuard::capture_and_reset();
+    let directory = tempfile::tempdir().expect("theme download theme file timeout finishes and releases owner: isolated fixture workspace must remain accessible");
+    let mut server = ListingServer::with_replies(vec![
+        PeerReply::Body(r#"[{"name":"stalled-theme.json"}]"#.to_string()),
+        PeerReply::Stall,
+    ])
+    .await;
+    let mut request = server.request(home(directory.path()));
+    request.limits = bounded_limits(1024);
+    let worker = super::trigger_download_themes_with(move || request);
+    let accepted = worker.is_some();
+    let requested = server.wait_until_requested().await;
+    server.release();
+    let outcomes = join_workers(worker.into_iter().collect()).await;
+    let requests = server.finish().await;
+    let completed = DOWNLOAD_PROGRESS.state().read().clone();
+    let retry_succeeded = complete_empty_retry(directory.path()).await;
+
+    assert!(accepted && requested);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    let requests = requests.expect("theme download theme file timeout finishes and releases owner: the fixture operation must finish without an inner failure");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].starts_with("GET /contents/raw/stalled-theme.json HTTP/1.1\r\n"));
+    assert!(
+        completed.finished,
+        "a stalled theme file left progress unfinished"
+    );
+    assert_eq!((completed.success_count, completed.fail_count), (0, 1));
+    assert_eq!(completed.items.len(), 1);
+    assert!(matches!(
+        completed.items[0].status,
+        FileDownloadStatus::Failed(_)
+    ));
+    assert!(
+        retry_succeeded,
+        "the deadline must release the download lease"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_theme_download_listing_body_over_budget_finishes_and_releases_owner() {
+    let _atoms = AtomsGuard::capture_and_reset();
+    let directory = tempfile::tempdir().expect("theme download listing body over budget finishes and releases owner: isolated fixture workspace must remain accessible");
+    let mut server = ListingServer::with_replies(vec![PeerReply::Body(
+        r#"[{"name":"listing-theme.json"}]"#.to_string(),
+    )])
+    .await;
+    let mut request = server.request(home(directory.path()));
+    request.limits = bounded_limits(8);
+    let worker = super::trigger_download_themes_with(move || request);
+    let accepted = worker.is_some();
+    let requested = server.wait_until_requested().await;
+    server.release();
+    let outcomes = join_workers(worker.into_iter().collect()).await;
+    let requests = server.finish().await;
+    let completed = DOWNLOAD_PROGRESS.state().read().clone();
+    let retry_succeeded = complete_empty_retry(directory.path()).await;
+
+    assert!(accepted && requested);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert_eq!(
+        requests
+            .expect("theme download listing body over budget finishes and releases owner: the fixture operation must finish without an inner failure")
+            .len(),
+        1,
+        "an over-budget listing must not start theme downloads"
+    );
+    assert!(
+        completed.finished,
+        "an over-budget listing left progress unfinished"
+    );
+    assert!(completed.items.is_empty());
+    assert_eq!((completed.success_count, completed.fail_count), (0, 1));
+    assert!(
+        retry_succeeded,
+        "the body budget must release the download lease"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_theme_download_theme_body_over_budget_is_not_written_and_releases_owner() {
+    let _atoms = AtomsGuard::capture_and_reset();
+    let directory = tempfile::tempdir().expect("theme download theme body over budget is not written and releases owner: isolated fixture workspace must remain accessible");
+    let theme_directory = directory.path().join(".peri/themes");
+    let mut server = ListingServer::with_replies(vec![
+        PeerReply::UnmeasuredBody(r#"[{"name":"oversized-theme.json"}]"#.to_string()),
+        PeerReply::UnmeasuredBody("x".repeat(512)),
+    ])
+    .await;
+    let mut request = server.request(home(directory.path()));
+    request.limits = bounded_limits(64);
+    let worker = super::trigger_download_themes_with(move || request);
+    let accepted = worker.is_some();
+    let requested = server.wait_until_requested().await;
+    server.release();
+    let outcomes = join_workers(worker.into_iter().collect()).await;
+    let requests = server.finish().await;
+    let completed = DOWNLOAD_PROGRESS.state().read().clone();
+    let retry_succeeded = complete_empty_retry(directory.path()).await;
+
+    assert!(accepted && requested);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    let requests = requests.expect("theme download theme body over budget is not written and releases owner: the fixture operation must finish without an inner failure");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].starts_with("GET /contents/raw/oversized-theme.json HTTP/1.1\r\n"));
+    assert!(
+        completed.finished,
+        "an over-budget theme left progress unfinished"
+    );
+    assert_eq!((completed.success_count, completed.fail_count), (0, 1));
+    assert_eq!(completed.items.len(), 1);
+    assert!(matches!(
+        &completed.items[0].status,
+        FileDownloadStatus::Failed(message) if message.contains("exceeds")
+    ));
+    assert!(
+        !theme_directory.join("oversized-theme.json").exists(),
+        "an over-budget body must not reach disk"
+    );
+    assert!(
+        retry_succeeded,
+        "the body budget must release the download lease"
+    );
 }
 
 use crate::kit::atoms::DOWNLOAD_PROGRESS;
