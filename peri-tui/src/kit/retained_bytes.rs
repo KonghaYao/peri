@@ -11,9 +11,9 @@ use std::sync::Arc;
 use ratatui_kit::ratatui::text::Line;
 
 use super::tui_render_unit::{
-    TuiAskUserBlock, TuiAssistantBubble, TuiDivider, TuiRenderUnit, TuiSubAgentGroup,
-    TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiToolPresentation,
-    TuiUserBubble,
+    TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiRenderUnit,
+    TuiSubAgentGroup, TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard,
+    TuiToolPresentation, TuiUserBubble,
 };
 
 /// `body` = 已使用正文字节；`reserved` = `String`/容器的 capacity 下界。
@@ -213,6 +213,7 @@ pub fn retained_unit_bytes(unit: &TuiRenderUnit, seen: &mut SeenAllocations) -> 
         TuiRenderUnit::TuiSystemNote(note) => retained_note_bytes(note),
         TuiRenderUnit::TuiSystemReminder(reminder) => retained_reminder_bytes(reminder),
         TuiRenderUnit::TuiSubAgentGroup(group) => retained_subagent_group_bytes(group, seen),
+        TuiRenderUnit::TuiCollapsedGroup(group) => retained_collapsed_group_bytes(group, seen),
         TuiRenderUnit::TuiDivider(divider) => retained_divider_bytes(divider),
         TuiRenderUnit::TuiAskUserBlock(block) => retained_ask_user_bytes(block),
         TuiRenderUnit::TuiTodoSummary(summary) => retained_todo_bytes(summary),
@@ -344,6 +345,17 @@ pub fn retained_subagent_group_bytes(
         + group.agent_id.capacity()
         + group.agent_name.capacity()
         + group.error_reason.as_ref().map_or(0, String::capacity)
+        + retained_units_bytes(group.view_models.iter(), seen)
+}
+
+pub fn retained_collapsed_group_bytes(
+    group: &TuiCollapsedGroup,
+    seen: &mut SeenAllocations,
+) -> usize {
+    std::mem::size_of::<TuiCollapsedGroup>()
+        + group.key.capacity()
+        + group.title.capacity()
+        + retained_vec_bytes(&group.view_models)
         + retained_units_bytes(group.view_models.iter(), seen)
 }
 

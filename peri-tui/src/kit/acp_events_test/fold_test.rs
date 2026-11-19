@@ -9,16 +9,39 @@ use super::TuiToolEnded;
 use super::TuiToolStarted;
 use super::serial;
 
+use crate::kit::tui_render_unit::TuiCollapsedGroup;
+
 // ── Slice 2：折叠状态机（spec §7 表）经 push_view_models 单点 pass ──────────
 
 fn tool_card_of(
     snapshot: &ViewModelsSnapshot,
     idx: usize,
 ) -> &crate::kit::tui_render_unit::TuiToolCard {
-    match &snapshot.items[idx] {
-        TuiRenderUnit::TuiToolCard(t) => t,
-        other => panic!("expected TuiToolCard at [{idx}], got {other:?}"),
-    }
+    crate::kit::tui_render_unit::flatten_units(&snapshot.items)
+        .into_iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(t) => Some(t),
+            _ => None,
+        })
+        .nth(idx)
+        .unwrap_or_else(|| panic!("expected TuiToolCard #{idx}, got {:?}", snapshot.items))
+}
+
+fn group_of(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiCollapsedGroup {
+    snapshot
+        .items
+        .iter()
+        .filter_map(|vm| match vm {
+            TuiRenderUnit::TuiCollapsedGroup(group) => Some(group),
+            _ => None,
+        })
+        .nth(idx)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected TuiCollapsedGroup #{idx}, got {:?}",
+                snapshot.items
+            )
+        })
 }
 
 /// [回归测试] 工具运行中取消 turn 后，归档卡片必须停止 loading 动画。
@@ -68,11 +91,12 @@ fn test_turn_interrupted_stops_running_tool_card_animation() {
     );
 }
 
-/// 过程 entry 默认单行：流式（PromptRunning + trailing）reasoning 也是 Collapsed；
-/// TurnDone 后 Completed 仍 Collapsed（同一行摘要，不因终态改变高度）。
+/// 纯 reasoning 段（无正文）属过程区：进入正文空档折叠组，组默认单行；
+/// 组内成员按原样展开（不再逐项折叠）。文本到达后同一 bubble 变成正文，
+/// reasoning 回到正文气泡内的单行摘要。
 #[test]
 #[serial]
-fn test_fold_pass_reasoning_running_collapsed_then_completed_collapsed() {
+fn test_fold_pass_reasoning_only_grouped_then_body_summary() {
     let mut state = super::make_fold_test_state();
 
     super::dispatch_and_notify(
@@ -84,25 +108,27 @@ fn test_fold_pass_reasoning_running_collapsed_then_completed_collapsed() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let r = super::reasoning_of(&snap, 0);
+    let group = group_of(&snap, 0);
+    assert_eq!(group.fold, FoldState::Collapsed, "组默认折叠为一行");
+    assert_eq!(group.count, 1, "纯 reasoning 段成组");
+    let r = crate::kit::tui_render_unit::flatten_units(&snap.items)
+        .into_iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(b) => b.reasoning.as_ref(),
+            _ => None,
+        })
+        .expect("组内应含 reasoning");
     assert_eq!(
         r.status,
         EntryStatus::Running,
         "流式中 reasoning 应为 Running"
     );
     assert!(r.is_running);
-    assert_eq!(
-        r.fold,
-        FoldState::Collapsed,
-        "过程 entry 默认折叠为单行（running 同样）"
-    );
-    assert!(
-        r.collapsed(),
-        "Collapsed 经 collapsed() 访问器视为收起（body 不可见）"
-    );
+    assert_eq!(r.fold, FoldState::Expanded, "组内成员按原样展开");
 
     // 追加文本 chunk——文本到达 = 本消息 thinking 块结束（方案 1）：
-    // 推理块立即冻结为 Completed/Collapsed（`◐ Thinking…` 停止），正文继续流式。
+    // 推理块立即冻结为 Completed/Collapsed（`◐ Thinking…` 停止），正文继续流式；
+    // 同一 bubble 成为正文，reasoning 是正文前的单行摘要。
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
@@ -112,6 +138,12 @@ fn test_fold_pass_reasoning_running_collapsed_then_completed_collapsed() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
+    assert!(
+        snap.items
+            .iter()
+            .all(|vm| !matches!(vm, TuiRenderUnit::TuiCollapsedGroup(_))),
+        "正文到达后不再是过程组"
+    );
     let r = super::reasoning_of(&snap, 0);
     assert_eq!(
         r.status,
@@ -122,7 +154,7 @@ fn test_fold_pass_reasoning_running_collapsed_then_completed_collapsed() {
     assert_eq!(
         r.fold,
         FoldState::Collapsed,
-        "推理结束后自动收束为单行 Collapsed"
+        "正文前的 thinking 收束为单行摘要"
     );
     assert!(
         r.duration_ms.is_some(),
@@ -138,18 +170,15 @@ fn test_fold_pass_reasoning_running_collapsed_then_completed_collapsed() {
         "TurnDone 后 reasoning 应为 Completed"
     );
     assert!(!r.is_running);
-    assert_eq!(
-        r.fold,
-        FoldState::Collapsed,
-        "§7 completed 行 → Collapsed（自动收束为单行）"
-    );
+    assert_eq!(r.fold, FoldState::Collapsed);
     assert!(r.collapsed());
 }
 
-/// 工具默认单行：running / success / error 一律 Collapsed（终态不改变高度）。
+/// 工具属过程区：进入正文空档折叠组，组行默认单行（running / success / error
+/// 同一高度）；组内工具按原样展开。失败数在组行摘要上保持可见。
 #[test]
 #[serial]
-fn test_fold_pass_tool_collapsed_across_lifecycle() {
+fn test_fold_pass_tool_grouped_across_lifecycle() {
     let mut state = super::make_fold_test_state();
 
     // running：ToolStarted
@@ -167,9 +196,14 @@ fn test_fold_pass_tool_collapsed_across_lifecycle() {
     );
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(
-        tool_card_of(&snap, 0).fold,
+        group_of(&snap, 0).fold,
         FoldState::Collapsed,
-        "running 工具同样默认单行折叠"
+        "组默认单行折叠"
+    );
+    assert_eq!(
+        tool_card_of(&snap, 0).fold,
+        FoldState::Expanded,
+        "组内工具展开"
     );
     assert!(!tool_card_of(&snap, 0).user_modified);
 
@@ -184,15 +218,15 @@ fn test_fold_pass_tool_collapsed_across_lifecycle() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let t = tool_card_of(&snap, 0);
     assert_eq!(
-        t.fold,
+        group_of(&snap, 0).fold,
         FoldState::Collapsed,
-        "§7 tool completed → Collapsed"
+        "终态不改变组行高度"
     );
-    assert!(!t.is_running);
+    assert_eq!(group_of(&snap, 0).failed_count, 0);
+    assert!(!tool_card_of(&snap, 0).is_running);
 
-    // error：新工具失败
+    // error：新工具失败——仍属同一组，组行保留失败计数。
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::ToolStarted(TuiToolStarted {
@@ -215,12 +249,11 @@ fn test_fold_pass_tool_collapsed_across_lifecycle() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let t = tool_card_of(&snap, 1);
-    assert_eq!(
-        t.fold,
-        FoldState::Collapsed,
-        "§7 tool error → Collapsed，完成时不得自动展开导致高度突变"
-    );
+    let group = group_of(&snap, 0);
+    assert_eq!(group.count, 2, "同一空档内的工具同组");
+    assert_eq!(group.failed_count, 1, "失败数在组行保持可见");
+    assert!(tool_card_of(&snap, 1).is_error);
+    assert_eq!(tool_card_of(&snap, 1).fold, FoldState::Expanded);
 }
 
 /// §7 subagent 行：running 与 completed 均为 Collapsed（running 靠 live summary 表达）。
@@ -474,10 +507,10 @@ fn test_fold_pass_reasoning_manual_override_survives_following_turn() {
     );
 }
 
-/// 手动覆盖免疫：running reasoning 被用户展开后，流式继续不得强制收回 Collapsed。
+/// 手动覆盖免疫：组在流式中被用户展开后，流式继续不得强制收回 Collapsed。
 #[test]
 #[serial]
-fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
+fn test_fold_pass_group_manual_override_immune_during_streaming() {
     let mut state = super::make_fold_test_state();
 
     super::dispatch_and_notify(
@@ -489,8 +522,10 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
+    let key = group_of(&snap, 0).key.clone();
+    assert_eq!(key, "reasoning:msg_r2");
     assert_eq!(
-        super::reasoning_of(&snap, 0).fold,
+        group_of(&snap, 0).fold,
         FoldState::Collapsed,
         "默认单行折叠"
     );
@@ -499,7 +534,7 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
     FOLD_OVERRIDES
         .state()
         .write()
-        .insert(FoldKey::Reasoning("msg_r2".into()), FoldState::Expanded);
+        .insert(FoldKey::Group(key.clone()), FoldState::Expanded);
 
     // 继续 streaming——不得收回 Collapsed
     super::dispatch_and_notify(
@@ -511,15 +546,16 @@ fn test_fold_pass_reasoning_manual_override_immune_during_streaming() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(group_of(&snap, 0).key, key, "组身份跨流式稳定");
     assert_eq!(
-        super::reasoning_of(&snap, 0).fold,
+        group_of(&snap, 0).fold,
         FoldState::Expanded,
         "手动展开在流式期间免疫自动策略"
     );
 }
 
-/// 无 ACP message_id 的 reasoning（v1 兼容）：分配本地身份后仍可写折叠覆盖，
-/// 身份在流式重建间保持稳定，展开状态不被后续 chunk 收回。
+/// 无 ACP message_id 的 reasoning（v1 兼容）：分配本地身份后组键稳定，
+/// 流式重建间身份不变，用户展开该组的选择不被后续 chunk 收回。
 #[test]
 #[serial]
 fn test_fold_pass_unkeyed_reasoning_gets_stable_local_identity() {
@@ -534,28 +570,32 @@ fn test_fold_pass_unkeyed_reasoning_gets_stable_local_identity() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    let reasoning = super::reasoning_of(&snap, 0);
-    assert_eq!(
-        reasoning.fold,
-        FoldState::Collapsed,
-        "有稳定身份 → 默认单行折叠"
-    );
-    assert_eq!(reasoning.status, EntryStatus::Running);
-    let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
-        panic!("expected TuiAssistantBubble");
+    let group = group_of(&snap, 0);
+    assert_eq!(group.fold, FoldState::Collapsed);
+    let local_id = {
+        let bubble = crate::kit::tui_render_unit::flatten_units(&snap.items)
+            .into_iter()
+            .find_map(|vm| match vm {
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble),
+                _ => None,
+            })
+            .expect("expected TuiAssistantBubble");
+        let local_id = bubble.message_id.clone().expect("无 ACP id 时分配本地身份");
+        assert!(
+            local_id.starts_with("local:"),
+            "本地身份必须带区分前缀，实际 {local_id}"
+        );
+        local_id
     };
-    let local_id = bubble.message_id.clone().expect("无 ACP id 时分配本地身份");
-    assert!(
-        local_id.starts_with("local:"),
-        "本地身份必须带区分前缀，实际 {local_id}"
-    );
+    assert_eq!(group.key, format!("reasoning:{local_id}"), "组键取本地身份");
+    let key = group.key.clone();
     drop(snap);
 
-    // 用户展开（键盘 handler 的持久化等价操作）。
+    // 用户展开该组（键盘 handler 的持久化等价操作）。
     FOLD_OVERRIDES
         .state()
         .write()
-        .insert(FoldKey::Reasoning(local_id.clone()), FoldState::Expanded);
+        .insert(FoldKey::Group(key.clone()), FoldState::Expanded);
 
     // 继续流式：重建后必须仍用同一身份命中覆盖。
     super::dispatch_and_notify(
@@ -567,14 +607,19 @@ fn test_fold_pass_unkeyed_reasoning_gets_stable_local_identity() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(group_of(&snap, 0).key, key, "同一 trailing 段的组键不变");
     assert_eq!(
-        super::reasoning_of(&snap, 0).fold,
+        group_of(&snap, 0).fold,
         FoldState::Expanded,
         "本地身份在流式重建间稳定，展开不被收回"
     );
-    let TuiRenderUnit::TuiAssistantBubble(bubble) = &snap.items[0] else {
-        panic!("expected TuiAssistantBubble");
-    };
+    let bubble = crate::kit::tui_render_unit::flatten_units(&snap.items)
+        .into_iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble),
+            _ => None,
+        })
+        .expect("expected TuiAssistantBubble");
     assert_eq!(
         bubble.message_id.as_deref(),
         Some(local_id.as_str()),
@@ -582,10 +627,10 @@ fn test_fold_pass_unkeyed_reasoning_gets_stable_local_identity() {
     );
 }
 
-/// tool 覆盖：手动展开已完成工具后，重建（output 更新）仍保持 + user_modified 恢复。
+/// 组覆盖：手动展开工具组后，重建（新 prompt 触发装配）仍保持展开。
 #[test]
 #[serial]
-fn test_fold_pass_tool_manual_override_restores_user_modified() {
+fn test_fold_pass_group_manual_override_survives_rebuild() {
     let mut state = super::make_fold_test_state();
 
     super::dispatch_and_notify(
@@ -610,15 +655,14 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(tool_card_of(&snap, 0).fold, FoldState::Collapsed);
+    assert_eq!(group_of(&snap, 0).fold, FoldState::Collapsed);
 
     FOLD_OVERRIDES
         .state()
         .write()
-        .insert(FoldKey::Tool("t1".into()), FoldState::Expanded);
+        .insert(FoldKey::Group("tool:t1".into()), FoldState::Expanded);
 
-    // 新一轮 push（LocalUserBubble 触发 view_models 重建）——
-    // 卡片重建后覆盖与 user_modified 恢复
+    // 新一轮 push（LocalUserBubble 触发 view_models 重建）——组重建后覆盖恢复
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::LocalUserBubble {
@@ -627,12 +671,14 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
         },
     );
     let snap = VIEW_MODELS.state().read().clone();
-    // 已结束的工具卡先归档，新 prompt 排在旧输出之后。
-    let t = tool_card_of(&snap, 0);
-    assert_eq!(t.fold, FoldState::Expanded, "手动展开跨重建保持");
-    assert!(
-        t.user_modified,
-        "覆盖存在的 entry 恢复 user_modified=true（免疫自动策略）"
+    // 已结束的工具组先归档，新 prompt 排在旧输出之后。
+    let group = group_of(&snap, 0);
+    assert_eq!(group.key, "tool:t1");
+    assert_eq!(group.fold, FoldState::Expanded, "手动展开跨重建保持");
+    assert_eq!(
+        tool_card_of(&snap, 0).fold,
+        FoldState::Expanded,
+        "组内成员随组展开按原样显示"
     );
 }
 
@@ -753,8 +799,13 @@ fn test_cold_history_rebuild_keeps_default_collapsed() {
     crate::kit::acp_events::render::push_view_models(&mut state);
 
     let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(
+        group_of(&snap, 0).fold,
+        FoldState::Collapsed,
+        "冷重建工具组保持单行"
+    );
     let tool = tool_card_of(&snap, 0);
-    assert_eq!(tool.fold, FoldState::Collapsed, "冷重建工具卡保持单行");
+    assert_eq!(tool.fold, FoldState::Expanded, "组内工具随组展开按原样显示");
     let reasoning = super::reasoning_of(&snap, 1);
     assert_eq!(
         reasoning.status,

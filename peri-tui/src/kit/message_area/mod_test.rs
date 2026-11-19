@@ -16,7 +16,8 @@ use super::scroll;
 use ratatui_kit::prelude::*;
 
 use crate::kit::tui_render_unit::{
-    InteractionKind, TuiSystemReminder, TuiToolCard, TuiToolPresentation, TuiUserBubble,
+    InteractionKind, TuiCollapsedGroup, TuiSystemReminder, TuiToolCard, TuiToolPresentation,
+    TuiUserBubble,
 };
 use ratatui_kit::ratatui::layout::Rect;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
@@ -815,6 +816,60 @@ fn test_apply_fold_toggle_system_reminder_writes_override() {
             .get(&FoldKey::SystemReminder(reminder_id)),
         Some(&FoldState::Expanded)
     );
+}
+
+/// 正文空档折叠组：Enter/点击切换整组折叠，覆盖键为组身份（组首成员身份），
+/// 折叠变化必须改变 content_hash。
+#[test]
+#[serial]
+fn test_apply_fold_toggle_collapsed_group_writes_override() {
+    crate::kit::atoms::init_atoms();
+    *crate::kit::atoms::FOLD_OVERRIDES.state().write() = std::collections::HashMap::new();
+    let mut group = TuiCollapsedGroup {
+        key: "tool:t1".into(),
+        title: "Read 2".into(),
+        count: 2,
+        failed_count: 0,
+        view_models: Vec::new(),
+        fold: FoldState::Collapsed,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+    let hash_before = group.content_hash;
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(group)]),
+        generation: 0,
+    };
+    assert_eq!(
+        super::apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+    match &snapshot.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => {
+            assert_eq!(group.fold, FoldState::Expanded, "点击整组展开");
+            assert_ne!(group.content_hash, hash_before);
+        }
+        other => panic!("expected collapsed group, got {other:?}"),
+    }
+    assert_eq!(
+        crate::kit::atoms::FOLD_OVERRIDES
+            .state()
+            .read()
+            .get(&FoldKey::Group("tool:t1".into())),
+        Some(&FoldState::Expanded)
+    );
+
+    // 再点一次收起整组。
+    assert_eq!(
+        super::apply_fold_toggle(&mut snapshot, 0, false),
+        EventResult::Consumed
+    );
+    match &snapshot.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => {
+            assert_eq!(group.fold, FoldState::Collapsed);
+        }
+        other => panic!("expected collapsed group, got {other:?}"),
+    }
 }
 
 // ── [S3] entry 单击结算判定（entry_click_decision 直调）────────────────────

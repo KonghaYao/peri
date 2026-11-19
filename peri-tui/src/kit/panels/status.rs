@@ -331,6 +331,11 @@ fn count_vm(vm: &TuiRenderUnit, s: &mut VmStats) {
             }
         }
         TuiRenderUnit::TuiSystemNote(_) => s.system_notes += 1,
+        TuiRenderUnit::TuiCollapsedGroup(g) => {
+            for child in g.view_models.iter() {
+                count_vm(child, s);
+            }
+        }
         _ => {}
     }
 }

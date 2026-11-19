@@ -7,7 +7,7 @@ use super::SessionPhase;
 use super::acp_events;
 use super::atoms;
 
-use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit};
+use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit, flatten_units};
 use serial_test::serial;
 
 struct ModeGuard {
@@ -120,9 +120,13 @@ fn test_publication_main_stream_survives_projection_read() {
         assert!(scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL));
         assert_eq!(state.generation, 2);
         let snapshot = atoms::VIEW_MODELS.state().read().clone();
-        let TuiRenderUnit::TuiAssistantBubble(b) = &snapshot.items[0] else {
-            panic!("应为主回复")
-        };
+        let b = flatten_units(&snapshot.items)
+            .into_iter()
+            .find_map(|vm| match vm {
+                TuiRenderUnit::TuiAssistantBubble(b) => Some(b),
+                _ => None,
+            })
+            .expect("应为主回复");
         assert_eq!(
             if reasoning {
                 &b.reasoning.as_ref().expect("publication main stream survives projection read: the fixture must retain its expected variant").text
@@ -278,9 +282,13 @@ fn test_publication_loading_reset_flushes_and_cancels_deadline() {
     assert!(!scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL));
     assert!(!atoms::ACP_STATE.state().read().is_loading);
     let snapshot = atoms::VIEW_MODELS.state().read().clone();
-    let TuiRenderUnit::TuiAssistantBubble(b) = &snapshot.items[0] else {
-        panic!("应保留取消前已接收的推理")
-    };
+    let b = flatten_units(&snapshot.items)
+        .into_iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiAssistantBubble(b) => Some(b),
+            _ => None,
+        })
+        .expect("应保留取消前已接收的推理");
     let reasoning = b.reasoning.as_ref().expect("publication loading reset flushes and cancels deadline: fixture must have the expected variant");
     assert_eq!(reasoning.text, "ab");
     assert!(!reasoning.is_running);
@@ -478,11 +486,15 @@ fn test_publication_history_cache_invalidates_same_length_update_and_replacement
     );
     acp_events::push_view_models(&mut state);
     let cached = atoms::VIEW_MODELS.state().read().clone().items;
-    let TuiRenderUnit::TuiToolCard(card) = &cached[0] else {
-        panic!("应为失败工具")
-    };
+    let card = flatten_units(&cached)
+        .into_iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-0" => Some(card),
+            _ => None,
+        })
+        .expect("应为失败工具");
     assert_eq!(card.output_summary, "failed");
-    assert_eq!(card.fold, FoldState::Collapsed);
+    assert_eq!(card.fold, FoldState::Expanded, "组内工具按原样展开");
     state.folded_history = Default::default();
     acp_events::push_view_models(&mut state);
     assert_eq!(cached, atoms::VIEW_MODELS.state().read().clone().items);

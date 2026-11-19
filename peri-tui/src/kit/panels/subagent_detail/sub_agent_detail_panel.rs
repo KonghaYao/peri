@@ -571,6 +571,10 @@ pub(super) fn scan_vm_for_subagent(
                     .find_map(|inner| scan_vm_for_subagent(inner, selected_id))
             }
         }
+        TuiRenderUnit::TuiCollapsedGroup(g) => g
+            .view_models
+            .iter()
+            .find_map(|inner| scan_vm_for_subagent(inner, selected_id)),
         _ => None,
     }
 }

@@ -280,8 +280,8 @@ async fn agent_execution_failure_clears_submitting_and_shows_error() {
     );
     let items: Vec<TuiRenderUnit> = VIEW_MODELS.state().read().items.iter().cloned().collect();
     assert!(
-        items
-            .iter()
+        crate::kit::tui_render_unit::flatten_units(&items)
+            .into_iter()
             .any(|unit| matches!(unit, TuiRenderUnit::TuiSystemNote(_)))
     );
 

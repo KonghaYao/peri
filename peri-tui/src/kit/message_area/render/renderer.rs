@@ -137,9 +137,8 @@ pub(crate) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'stat
 /// 其余变体恒 None / 空 Vec。
 ///
 /// 与 [`vm_to_lines_cached_with_layout`] 同逻辑，不带 markdown stable overlay；
-/// 转场形态固定 [`ZoneTransition::None`]：本入口服务嵌套渲染（子 Agent 组内成员 /
-/// 详情面板）与测试，孤立渲染的 entry 没有相邻 entry 可判定转场（§6）。
-#[cfg(test)]
+/// 转场形态固定 [`ZoneTransition::None`]：本入口服务嵌套渲染（折叠组内成员 /
+/// 子 Agent 组内成员）与测试，孤立渲染的 entry 没有相邻 entry 可判定转场（§6）。
 pub(crate) fn vm_to_lines_cached(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
@@ -495,6 +494,12 @@ pub(crate) fn vm_to_lines_cached_with_layout(
         ),
         TuiRenderUnit::TuiSubAgentGroup(data) => (
             self::group::render_subagent_group_lines(data, grid),
+            None,
+            None,
+            Vec::new(),
+        ),
+        TuiRenderUnit::TuiCollapsedGroup(data) => (
+            self::group::render_collapsed_group_lines(data, grid),
             None,
             None,
             Vec::new(),

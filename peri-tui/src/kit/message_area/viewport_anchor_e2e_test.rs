@@ -338,13 +338,13 @@ fn a20_e2e_middle_gap_fill_does_not_move_the_viewport() {
     );
 }
 
-/// S7d 反例形状（**跨层槽位坐标**不复存在）：相邻成功工具各自独立，桥接
-/// `committed` 槽位数与渲染 `VIEW_MODELS.items` 槽位数可因 divider 不同。
+/// S7d 反例形状（**跨层槽位坐标**不复存在）：相邻工具合成一张正文空档组，
+/// 桥接 `committed` 槽位数与渲染 `VIEW_MODELS.items` 槽位数可因组行 / divider 不同。
 /// 旧路径用桥接槽位包络去索引渲染槽位会在这次发布上过补偿；身份重定位不看槽位号，
 /// 锚点（自有气泡）的屏幕行必须不变。
 #[test]
 #[serial_test::serial]
-fn a20_e2e_individual_tool_cards_keep_the_anchored_unit_screen_row() {
+fn a20_e2e_grouped_tool_cards_keep_the_anchored_unit_screen_row() {
     let mut state = browsing_state("tok");
     seed_inherited_prefix(&mut state, "inherited");
     seed_own_entry(&mut state, "s1:own", 100, "first-screen-own");
@@ -363,40 +363,42 @@ fn a20_e2e_individual_tool_cards_keep_the_anchored_unit_screen_row() {
     let probe = publish_then_relocate(&mut state, "tok", 2, 0, tools);
 
     // 桥接 committed = [继承, 卡 t1, 卡 t2, 自有] = 4 槽；
-    // 渲染 VIEW_MODELS = [继承, 卡 t1, 卡 t2, turn divider, 自有] = 5 槽。
+    // 渲染 VIEW_MODELS = [继承, 折叠组(t1,t2), turn divider, 自有] = 4 槽。
     assert_eq!(state.committed.len(), 4, "桥接槽位数");
-    assert_eq!(probe.after.slot_count(), 5, "渲染槽位数（含 turn divider）");
+    assert_eq!(
+        probe.after.slot_count(),
+        4,
+        "渲染槽位数（组行 + turn divider）"
+    );
     let view_models = crate::kit::atoms::VIEW_MODELS.state();
     let published = view_models.read();
     assert!(matches!(
         published.items.get(1),
-        Some(TuiRenderUnit::TuiToolCard(t)) if t.tool_id == "t1"
-    ));
-    assert!(matches!(
-        published.items.get(2),
-        Some(TuiRenderUnit::TuiToolCard(t)) if t.tool_id == "t2"
+        Some(TuiRenderUnit::TuiCollapsedGroup(group))
+            if matches!(&group.view_models[0], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t1")
+                && matches!(&group.view_models[1], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t2")
     ));
     drop(published);
 
-    // 两张单行工具卡插入在锚点上方 → 重定位量 = 4 行（渲染布局净增高度）：
-    // 2 行工具 header + 进入/退出过程区的两条转场台阶。
+    // 一张组行插入在锚点上方 → 重定位量 = 3 行（组行 + 进入/退出过程区的两条
+    // 转场台阶；旧实现两张独立工具卡时为 4 行）。
     assert_eq!(
-        probe.screen_row(&probe.after, 4, probe.target()),
+        probe.screen_row(&probe.after, 3, probe.target()),
         probe.screen_row(&probe.before, 2, probe.scroll_y),
-        "独立工具卡形态：同一可见单元屏幕行不变（A20）"
+        "正文空档组形态：同一可见单元屏幕行不变（A20）"
     );
     assert_eq!(
         probe.target() as isize - probe.scroll_y as isize,
-        4,
-        "重定位量 = 工具卡与转场台阶的渲染高度"
+        3,
+        "重定位量 = 组行与转场台阶的渲染高度"
     );
 }
 
-/// 第二种跨层重排形态：更早条目插到两张独立工具卡之间。锚点（下方 t2 卡位）的
-/// 身份仍是同一个单元 → 重定位把它钉回原屏幕行。
+/// 第二种跨层重排形态：更早条目插到同一空档的工具之间（折叠组被正文拆开）。
+/// 锚点（下方自有气泡）的身份仍是同一个单元 → 重定位把它钉回原屏幕行。
 #[test]
 #[serial_test::serial]
-fn a20_e2e_insert_between_individual_tool_cards_keeps_the_anchored_unit_screen_row() {
+fn a20_e2e_insert_between_grouped_tool_cards_keeps_the_anchored_unit_screen_row() {
     let mut state = browsing_state("tok");
     // 首屏两条自有工具条目（各一条成功卡）。
     seed_own_entry_via(&mut state, "s1:c1", 10, |state| {
@@ -446,31 +448,33 @@ fn a20_e2e_insert_between_individual_tool_cards_keeps_the_anchored_unit_screen_r
         vec![("s1:mid", 15, vec![sub(0, user_update("between-cards"))])],
     );
 
-    // 锚点 = t2 卡（槽位 1，单行折叠 → 单元内位移 0）。
+    // 锚点 = 自有气泡（首屏槽位 1；上方是包含两张卡的折叠组）。
     let probe = publish_then_relocate(&mut state, "tok", 1, 0, split);
 
-    // 发布前：两张卡相邻（各自独立），渲染侧槽位 = [t1, t2, 自有]（自有是首个
+    // 发布前：两张卡同组，渲染侧槽位 = [组(t1,t2), 自有]（自有是首个
     // user prompt，不插 turn divider）。
-    assert_eq!(probe.before.slot_count(), 3);
+    assert_eq!(probe.before.slot_count(), 2);
     assert!(
         matches!(
             probe
                 .before
                 .canonical_items()
                 .and_then(|items| items.get(0)),
-            Some(TuiRenderUnit::TuiToolCard(t)) if t.tool_id == "t1"
+            Some(TuiRenderUnit::TuiCollapsedGroup(group))
+                if group.count == 2
+                    && matches!(&group.view_models[0], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t1")
+                    && matches!(&group.view_models[1], TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t2")
         ),
-        "首屏两张成功卡各自独立"
+        "首屏两张成功卡同属一张正文空档组"
     );
-    // 发布后：中间条目插入，槽位变多。
-    assert!(
-        probe.after.slot_count() > probe.before.slot_count(),
-        "插入后槽位数必须变多（{} → {}）",
-        probe.before.slot_count(),
-        probe.after.slot_count()
+    // 发布后：中间条目插入，组被拆成两段，槽位变多（中间 prompt 前插分隔线）。
+    assert_eq!(
+        probe.after.slot_count(),
+        5,
+        "组(t1) + divider + 中间气泡 + 组(t2) + 自有"
     );
     assert_eq!(
-        probe.screen_row(&probe.after, 2, probe.target()),
+        probe.screen_row(&probe.after, 4, probe.target()),
         probe.screen_row(&probe.before, 1, probe.scroll_y),
         "插入形态：同一可见单元屏幕行不变（A20）"
     );

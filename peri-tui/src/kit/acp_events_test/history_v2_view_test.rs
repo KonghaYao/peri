@@ -378,7 +378,14 @@ fn full_flow_pages_seeks_reads_body_and_survives_window_expiry() {
         .read()
         .items
         .iter()
-        .position(|unit| matches!(unit, TuiRenderUnit::TuiSystemNote(_)))
+        .position(|unit| match unit {
+            TuiRenderUnit::TuiSystemNote(_) => true,
+            TuiRenderUnit::TuiCollapsedGroup(group) => group
+                .view_models
+                .iter()
+                .any(|inner| matches!(inner, TuiRenderUnit::TuiSystemNote(_))),
+            _ => false,
+        })
         .expect("opaque placeholder");
     assert!(crate::kit::panels::history_detail::open_detail_from_slot(
         slot
@@ -466,7 +473,14 @@ fn opaque_placeholder_opens_detail_and_loads_v2_chunk() {
         .read()
         .items
         .iter()
-        .position(|unit| matches!(unit, TuiRenderUnit::TuiSystemNote(_)))
+        .position(|unit| match unit {
+            TuiRenderUnit::TuiSystemNote(_) => true,
+            TuiRenderUnit::TuiCollapsedGroup(group) => group
+                .view_models
+                .iter()
+                .any(|inner| matches!(inner, TuiRenderUnit::TuiSystemNote(_))),
+            _ => false,
+        })
         .expect("placeholder slot");
     assert!(crate::kit::panels::history_detail::open_detail_from_slot(
         slot
@@ -560,7 +574,14 @@ fn same_epoch_page_keeps_detail_but_seek_closes_it() {
         .read()
         .items
         .iter()
-        .position(|unit| matches!(unit, TuiRenderUnit::TuiSystemNote(_)))
+        .position(|unit| match unit {
+            TuiRenderUnit::TuiSystemNote(_) => true,
+            TuiRenderUnit::TuiCollapsedGroup(group) => group
+                .view_models
+                .iter()
+                .any(|inner| matches!(inner, TuiRenderUnit::TuiSystemNote(_))),
+            _ => false,
+        })
         .expect("opaque placeholder");
     assert!(crate::kit::panels::history_detail::open_detail_from_slot(
         slot

@@ -1,0 +1,291 @@
+//! 正文空档分组回归——正文段落之间连续的过程单元（工具 / thinking / 通知等）
+//! 合成一张折叠组，一组一行；点击展开整组，组内不再逐项折叠。
+//!
+//! 这里从 ACP 事件驱动 `push_view_models` 的完整装配路径，断言快照槽位、
+//! 组身份、流式追加入组与冷重建一致性。
+
+use super::AcpEventData;
+use super::FoldKey;
+use super::FoldState;
+use super::TuiReasoningChunk;
+use super::TuiRenderUnit;
+use super::TuiTextChunk;
+use super::TuiToolEnded;
+use super::TuiToolStarted;
+use super::serial;
+
+use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
+use crate::kit::tui_render_unit::{TuiCollapsedGroup, TuiNoteLevel};
+
+fn text(t: &str, id: &str) -> AcpEventData {
+    AcpEventData::TextChunk(TuiTextChunk {
+        text: t.into(),
+        message_id: Some(id.into()),
+        agent_id: None,
+    })
+}
+
+fn reasoning(t: &str, id: &str) -> AcpEventData {
+    AcpEventData::ReasoningChunk(TuiReasoningChunk {
+        text: t.into(),
+        message_id: Some(id.into()),
+        agent_id: None,
+    })
+}
+
+fn tool_started(id: &str) -> AcpEventData {
+    AcpEventData::ToolStarted(TuiToolStarted {
+        tool_id: id.into(),
+        tool_name: "Read".into(),
+        input_summary: format!("{id}.rs"),
+        raw_input: serde_json::json!({ "path": format!("{id}.rs") }),
+        agent_id: None,
+        origin_message_id: None,
+        origin_readable: None,
+    })
+}
+
+fn tool_ended(id: &str) -> AcpEventData {
+    AcpEventData::ToolEnded(TuiToolEnded {
+        tool_id: id.into(),
+        output_summary: "ok".into(),
+        is_error: false,
+        agent_id: None,
+    })
+}
+
+fn dispatch_all(state: &mut super::BridgeState, events: &[AcpEventData]) {
+    for event in events {
+        super::dispatch_and_notify(state, event);
+    }
+}
+
+fn current_snapshot() -> ViewModelsSnapshot {
+    VIEW_MODELS.state().read().clone()
+}
+
+fn body_text(vm: &TuiRenderUnit) -> Option<&str> {
+    match vm {
+        TuiRenderUnit::TuiAssistantBubble(bubble) => Some(&bubble.text),
+        _ => None,
+    }
+}
+
+fn group_at(snapshot: &ViewModelsSnapshot, idx: usize) -> &TuiCollapsedGroup {
+    match &snapshot.items[idx] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => group,
+        other => panic!("expected TuiCollapsedGroup at [{idx}], got {other:?}"),
+    }
+}
+
+fn prompt_state() -> super::BridgeState {
+    let mut state = super::make_fold_test_state();
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::PromptSubmitted {
+            request_id: Some("r1".into()),
+        },
+    );
+    state
+}
+
+/// 正文 A + 3 个过程项（工具 / thinking / 工具）+ 正文 B → 两个正文段 + 一张
+/// 折叠组；组行只有一行，展开后组内 3 项原样可见。
+#[test]
+#[serial]
+fn test_body_gap_groups_tools_and_thinking_between_paragraphs() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[
+            text("正文 A", "m1"),
+            tool_started("t1"),
+            tool_ended("t1"),
+            reasoning("先读一下再回答", "m2"),
+            tool_started("t2"),
+            tool_ended("t2"),
+            text("正文 B", "m3"),
+        ],
+    );
+    let snapshot = current_snapshot();
+    assert_eq!(
+        snapshot.items.len(),
+        3,
+        "正文 A + 过程区 + 正文 B 应合成 3 个槽位，实际 {:?}",
+        snapshot.items
+    );
+    assert_eq!(body_text(&snapshot.items[0]), Some("正文 A"));
+    assert_eq!(body_text(&snapshot.items[2]), Some("正文 B"));
+
+    let group = group_at(&snapshot, 1);
+    assert_eq!(group.count, 3, "组内 3 个过程单元");
+    assert_eq!(group.fold, FoldState::Collapsed, "组默认折叠为一行");
+    assert_eq!(group.key, "tool:t1", "组身份取首个成员的工具身份");
+    assert!(
+        group
+            .view_models
+            .iter()
+            .any(|vm| matches!(vm, TuiRenderUnit::TuiAssistantBubble(b) if b.reasoning.is_some())),
+        "thinking 必须进组"
+    );
+
+    // 组行 = 一行；展开后组内 3 项按原样显示。
+    let grid = crate::kit::message_area::grid::GridSpec::grid_for(120);
+    let collapsed_lines = crate::kit::message_area::render::vm_to_lines(&snapshot.items[1], &grid);
+    assert_eq!(collapsed_lines.len(), 1, "折叠组只显示一行摘要");
+
+    crate::kit::fold_overrides::insert(FoldKey::Group(group.key.clone()), FoldState::Expanded);
+    crate::kit::acp_events::push_view_models(&mut state);
+    let expanded = current_snapshot();
+    let expanded_group = group_at(&expanded, 1);
+    assert_eq!(expanded_group.fold, FoldState::Expanded);
+    let expanded_lines = crate::kit::message_area::render::vm_to_lines(&expanded.items[1], &grid);
+    assert!(
+        expanded_lines.len() > 3,
+        "展开整组后 3 个成员的正文都应渲染，实际 {} 行",
+        expanded_lines.len()
+    );
+    assert!(
+        expanded_lines
+            .iter()
+            .any(|line| { line.spans.iter().any(|span| span.content.contains("t1.rs")) }),
+        "展开后工具输入摘要可见"
+    );
+}
+
+/// 相邻正文之间没有过程单元 → 不产生组。
+#[test]
+#[serial]
+fn test_adjacent_paragraphs_without_process_units_have_no_group() {
+    let mut state = prompt_state();
+    dispatch_all(&mut state, &[text("第一段", "m1"), text("第二段", "m2")]);
+    let snapshot = current_snapshot();
+    assert_eq!(snapshot.items.len(), 2);
+    assert!(
+        snapshot
+            .items
+            .iter()
+            .all(|vm| !matches!(vm, TuiRenderUnit::TuiCollapsedGroup(_))),
+        "相邻正文无过程单元时不得出组"
+    );
+}
+
+/// 末尾正文之后的过程单元同样归入末尾组，默认一行。
+#[test]
+#[serial]
+fn test_trailing_process_units_form_tail_group() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[
+            text("回答", "m1"),
+            tool_started("t1"),
+            tool_ended("t1"),
+            tool_started("t2"),
+            tool_ended("t2"),
+        ],
+    );
+    let snapshot = current_snapshot();
+    assert_eq!(snapshot.items.len(), 2);
+    assert_eq!(body_text(&snapshot.items[0]), Some("回答"));
+    let group = group_at(&snapshot, 1);
+    assert_eq!(group.count, 2);
+    assert_eq!(group.fold, FoldState::Collapsed);
+    assert_eq!(group.key, "tool:t1");
+}
+
+/// 流式追加：同一空档内的新过程项进入既有组，组身份与用户展开选择保持稳定。
+#[test]
+#[serial]
+fn test_streaming_append_joins_same_group_and_keeps_key() {
+    let mut state = prompt_state();
+    dispatch_all(&mut state, &[text("开始", "m1"), tool_started("t1")]);
+    let first = current_snapshot();
+    assert_eq!(first.items.len(), 2, "items={:?}", first.items);
+    let first_group = group_at(&first, 1);
+    assert_eq!(first_group.count, 1);
+    let key = first_group.key.clone();
+    let first_hash = first_group.content_hash;
+
+    dispatch_all(&mut state, &[tool_started("t2")]);
+    let second = current_snapshot();
+    assert_eq!(second.items.len(), 2, "追加过程项不得新建组槽位");
+    let second_group = group_at(&second, 1);
+    assert_eq!(second_group.count, 2, "新项进入同一组");
+    assert_eq!(second_group.key, key, "组身份跨流式追加稳定");
+    assert_ne!(
+        second_group.content_hash, first_hash,
+        "组成员变化必须改变内容哈希（渲染缓存失效）"
+    );
+
+    // 用户展开该组后继续追加：覆盖键不变，展开态保持。
+    crate::kit::fold_overrides::insert(FoldKey::Group(key.clone()), FoldState::Expanded);
+    crate::kit::acp_events::push_view_models(&mut state);
+    dispatch_all(&mut state, &[tool_started("t3")]);
+    let third = current_snapshot();
+    let third_group = group_at(&third, 1);
+    assert_eq!(third_group.count, 3);
+    assert_eq!(third_group.key, key);
+    assert_eq!(
+        third_group.fold,
+        FoldState::Expanded,
+        "同一组的展开覆盖在流式追加后仍生效"
+    );
+}
+
+/// 通知类单元（system note）与工具同属过程区，进入同一组。
+#[test]
+#[serial]
+fn test_system_note_between_tools_is_grouped() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[text("正文 A", "m1"), tool_started("t1"), tool_ended("t1")],
+    );
+    state.inject_system_note("通知：模型已切换".into(), TuiNoteLevel::Info);
+    dispatch_all(
+        &mut state,
+        &[tool_started("t2"), tool_ended("t2"), text("正文 B", "m2")],
+    );
+    let snapshot = current_snapshot();
+    assert_eq!(snapshot.items.len(), 3);
+    let group = group_at(&snapshot, 1);
+    assert_eq!(group.count, 3, "工具 + 通知 + 工具同组");
+    assert!(
+        group
+            .view_models
+            .iter()
+            .any(|vm| matches!(vm, TuiRenderUnit::TuiSystemNote(_))),
+        "通知必须包含在组内"
+    );
+}
+
+/// 冷重建一致：清空分组缓存后重新装配，快照逐条结构相等（组身份与成员不变）。
+#[test]
+#[serial]
+fn test_group_snapshot_matches_cold_rebuild() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[
+            text("正文 A", "m1"),
+            tool_started("t1"),
+            tool_ended("t1"),
+            reasoning("想一想", "m2"),
+            tool_started("t2"),
+            tool_ended("t2"),
+            text("正文 B", "m3"),
+        ],
+    );
+    super::dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let hot = current_snapshot();
+
+    crate::kit::acp_events::render::reset_body_gap_group_cache();
+    crate::kit::fold_overrides::clear();
+    crate::kit::acp_events::push_view_models(&mut state);
+    let cold = current_snapshot();
+
+    assert_eq!(hot.items, cold.items, "冷重建必须与热缓存逐条一致");
+    assert_eq!(group_at(&hot, 1).key, group_at(&cold, 1).key);
+    assert_eq!(group_at(&cold, 1).count, 3);
+}

@@ -1,7 +1,10 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup, TuiToolCard};
+use crate::kit::tui_render_unit::{
+    FoldState, TuiCollapsedGroup, TuiRenderUnit, TuiSubAgentGroup, TuiToolCard,
+};
 
+use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::ratatui::style::{Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
@@ -204,4 +207,56 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// 正文空档折叠组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · N failed]`。
+///
+/// 折叠 = 一组一行；展开时组内成员按过程区接续渲染
+/// （[`ZoneTransition::None`](crate::kit::message_area::grid::ZoneTransition::None)），
+/// 同区继续、不重复画入口台阶；成员与组头同列。组成员在分组时已统一置为
+/// `Expanded`，展开即原样显示，不再逐项折叠。
+pub(super) fn render_collapsed_group_lines(
+    data: &TuiCollapsedGroup,
+    grid: &GridSpec,
+) -> Vec<Line<'static>> {
+    let sem = THEME_ATOM.state().read().semantic;
+    let expanded = data.fold != FoldState::Collapsed;
+    let symbol = if expanded {
+        super::helpers::sym().expanded
+    } else {
+        super::helpers::sym().collapsed
+    };
+    let mut spans =
+        super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
+    // 先截 title 使 (title + failed 后缀) 总宽 ≤ 过程区预算——失败数不可被截断
+    // 吞掉（§15「error 永不隐藏」），title 截断在前。
+    let suffix = if data.failed_count > 0 {
+        format!(
+            " \u{b7} {}",
+            i18n::tr_args(
+                "render-group-failed-count",
+                &[("count".to_string(), FluentValue::from(data.failed_count))],
+            )
+        )
+    } else {
+        String::new()
+    };
+    let content_width = grid.process_content_width();
+    let keep = content_width.saturating_sub(suffix.width()).max(1);
+    let title_trunc = crate::truncate::truncate_by_width(&data.title, keep);
+    spans.push(Span::styled(
+        title_trunc,
+        Style::default().fg(sem.text.muted),
+    ));
+    if !suffix.is_empty() {
+        spans.push(Span::styled(suffix, Style::default().fg(sem.status.error)));
+    }
+    let mut lines = vec![Line::from(spans)];
+    if expanded {
+        let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+        for vm in &data.view_models {
+            lines.extend(super::vm_to_lines_cached(vm, grid, &mut md_cache, false).0);
+        }
+    }
+    lines
 }

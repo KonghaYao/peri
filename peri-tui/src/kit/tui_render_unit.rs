@@ -35,7 +35,9 @@ pub use fold::{
     EntryStatus, FoldKey, FoldState, FoldTarget, entry_status_code, fold_for_status,
     fold_for_unkeyed_reasoning, fold_state_code,
 };
-pub use group::{TuiDivider, TuiNoteLevel, TuiSubAgentGroup, TuiSystemNote, TuiTodoSummary};
+pub use group::{
+    TuiCollapsedGroup, TuiDivider, TuiNoteLevel, TuiSubAgentGroup, TuiSystemNote, TuiTodoSummary,
+};
 pub use hash::{tui_hash_combine, tui_hash_roll, tui_hash_roll_update, tui_hash_str};
 pub use interaction::{InteractionKind, TuiAskUserBlock, TuiAskUserItem, interaction_kind_code};
 pub(crate) use reminder::DisplayTrusted;
@@ -45,6 +47,8 @@ pub use tool_card::{
     TuiTodoStatus, TuiToolCard, TuiToolPresentation,
 };
 pub use unit::TuiRenderUnit;
+#[cfg(test)]
+pub(crate) use unit::flatten_units;
 
 #[cfg(test)]
 use crate::i18n;

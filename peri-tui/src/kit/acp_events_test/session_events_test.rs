@@ -46,7 +46,8 @@ fn test_transcript_publication_preserves_stable_history_and_resets_hint() {
     );
     assert!(
         publication.changed_from >= 255,
-        "unchanged history should not be scanned by render"
+        "unchanged history should not be scanned by render (got {})",
+        publication.changed_from
     );
     super::push_view_models_for_reset();
     assert_eq!(

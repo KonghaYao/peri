@@ -193,7 +193,7 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 
 已知边界（不得写成已完成）：
 
-- 子 Agent 组尚未真正惰性化。当前 `TuiSubAgentGroup.view_models` 通过 `im::Vector` 结构共享持有成员，构造不深复制正文；但释放时只做 `FoldedHistory::invalidate()` 与整组缓存失效，没有按段精准惰性物化/清理。
+- 折叠组/子 Agent 组尚未真正惰性化。当前 `TuiCollapsedGroup.view_models`（`Vec`，成员单元共享 `Arc` 正文）与 `TuiSubAgentGroup.view_models`（`im::Vector` 结构共享）构造时不深复制正文；但释放时只做 `FoldedHistory::invalidate()` 与整组缓存失效，没有按段精准惰性物化/清理。
 - 结构性失效目前清空全部渲染 slot，尚未按段精准清理。
 - 旧 `HISTORY_PAGING` 路径仍使用轻量静态 `PENDING_TOOL_ENDS` 表，未完全迁移到 `ResidentIndex`；窗口路径与旧路径共享该表的清理入口。
 - 超大条目详情与 inherited 详情已交付（`HistoryDetailPanel`、`session/history/body`、4 MiB 预算、UTF-8 跨块重组、关闭释放 chunks）。限制：鼠标单击只设焦点需再 Enter；UI 导出为剪贴板复制已加载正文（模型支持分块流式）；未做 JSON 字段级展示；inherited 段内部不插入独立占位行；TUI 仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已不再发送该形状。

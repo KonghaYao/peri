@@ -7,6 +7,7 @@ use super::TuiToolCard;
 use super::TuiToolPresentation;
 use super::TuiUserBubble;
 use crate::kit::message_area::entry_nav;
+use crate::kit::tui_render_unit::TuiCollapsedGroup;
 use ratatui_kit::prelude::*;
 
 // ── Slice 2：entry 焦点导航纯函数 ─────────────────────────────────────────
@@ -346,6 +347,72 @@ fn test_tool_expand_claims_deferred_history_result_refetch() {
     assert!(
         crate::kit::atoms::NOTIFICATION.state().read().is_some(),
         "expanding the card must reach the refetch entry and report a missing client/runtime"
+    );
+    FOLD_OVERRIDES.state().write().clear();
+    crate::kit::acp_events::history_window::clear_pending_tool_ends();
+}
+
+/// 展开正文空档组时，组内工具成员的延迟历史结果同样要认领补读（组行是唯一入口）。
+#[test]
+#[serial_test::serial]
+fn test_group_expand_claims_deferred_history_result_refetch() {
+    use crate::kit::acp_events::history_window::{
+        ToolResultSource, insert_deferred_tool_result_for_tests,
+    };
+
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::NOTIFICATION.set(None);
+    *crate::kit::atoms::ACTIVE_SESSION_ID.state().write() = "s1".into();
+    crate::kit::acp_events::history_window::clear_pending_tool_ends();
+    insert_deferred_tool_result_for_tests(
+        "t-big",
+        ToolResultSource {
+            session_id: "s1".into(),
+            snapshot_token: "tok".into(),
+            cursor: "cursor-result".into(),
+            limit: 50,
+            entry_id: "s1:result".into(),
+            entry_position: 20,
+            sub_item_position: 0,
+            tool_id: "t-big".into(),
+        },
+    );
+    let mut card = TuiToolCard {
+        tool_id: "t-big".into(),
+        tool_name: "Bash".into(),
+        input_summary: String::new(),
+        output_summary: "结果正文较大，展开后按需加载".into(),
+        is_error: false,
+        is_running: false,
+        running_duration_ms: None,
+        completed_duration_ms: None,
+        diff: None,
+        presentation: Default::default(),
+        fold: FoldState::Expanded,
+        user_modified: false,
+        tool_calls_count: 0,
+        content_hash: 0,
+    };
+    card.recompute_hash();
+    let mut group = TuiCollapsedGroup {
+        key: "tool:t-big".into(),
+        title: "Bash".into(),
+        count: 1,
+        failed_count: 0,
+        view_models: vec![TuiRenderUnit::TuiToolCard(card)],
+        fold: FoldState::Collapsed,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+    let mut snapshot = crate::kit::atoms::ViewModelsSnapshot {
+        items: im::Vector::from(vec![TuiRenderUnit::TuiCollapsedGroup(group)]),
+        generation: 1,
+    };
+    let claimed = entry_nav::apply_fold_toggle(&mut snapshot, 0, false);
+    assert_eq!(claimed, EventResult::Consumed);
+    assert!(
+        crate::kit::atoms::NOTIFICATION.state().read().is_some(),
+        "展开组行必须递归到组内工具，认领延迟结果补读"
     );
     FOLD_OVERRIDES.state().write().clear();
     crate::kit::acp_events::history_window::clear_pending_tool_ends();

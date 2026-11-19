@@ -86,6 +86,51 @@ impl TuiSubAgentGroup {
 
 tui_impl_partial_eq!(TuiSubAgentGroup: instance_id, agent_id, agent_name, view_models, preview_omitted, collapsed, is_running, is_error, error_reason, fold, user_modified);
 
+/// 正文空档折叠组——相邻正文段落之间的过程单元（工具 / thinking / 通知等）。
+///
+/// 快照装配时由 `acp_events/render/publication.rs` 的正文空档分组 pass 生成：
+/// 连续非正文单元合成一个组，默认 `Collapsed` 单行；点击/Enter 切换整组折叠，
+/// 展开时组内成员按 `Expanded` 原样渲染（组内不再逐项折叠）。
+#[derive(Debug, Clone)]
+pub struct TuiCollapsedGroup {
+    /// 稳定组身份——取首个成员的持久/本地身份键（`tool:<id>` / `reasoning:<id>` 等）。
+    /// 流式追加只在组尾新增成员，键不变，用户展开选择与渲染缓存键因此保持稳定。
+    pub key: String,
+    /// 单行摘要（成员类型统计，如 `Read 2 · Thought 1`）。
+    pub title: String,
+    /// 组内成员数（折叠时隐藏的单元数）。
+    pub count: u32,
+    /// 组内失败单元数（error 工具 / error 级通知）——组行保留失败信号。
+    pub failed_count: u32,
+    /// 组内成员（展开时渲染）。
+    pub view_models: Vec<TuiRenderUnit>,
+    /// 当前折叠态——用户覆盖（FOLD_OVERRIDES）或默认 `Collapsed`。
+    pub fold: FoldState,
+    /// 内容哈希——rebuild 时用于检测是否需重新渲染
+    pub content_hash: u64,
+}
+
+impl TuiCollapsedGroup {
+    /// \[G1\] 内容哈希公式单点——分组 pass 构造与折叠切换共用。
+    /// 成员变化（摘要/数量/失败数/成员内容）必须触发按 hash 分片的渲染缓存重建。
+    pub fn recompute_hash(&mut self) {
+        let mut child_hash_total: u64 = 0;
+        for vm in self.view_models.iter() {
+            child_hash_total = super::hash::tui_hash_combine(child_hash_total, vm.content_hash());
+        }
+        let mut h = super::hash::tui_hash_combine(0, super::hash::tui_hash_str(&self.key));
+        h = super::hash::tui_hash_combine(h, super::hash::tui_hash_str(&self.title));
+        h = super::hash::tui_hash_combine(h, u64::from(self.count));
+        h = super::hash::tui_hash_combine(h, u64::from(self.failed_count));
+        h = super::hash::tui_hash_combine(h, self.view_models.len() as u64);
+        h = super::hash::tui_hash_combine(h, child_hash_total);
+        h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(self.fold));
+        self.content_hash = h;
+    }
+}
+
+tui_impl_partial_eq!(TuiCollapsedGroup: key, title, count, failed_count, view_models, fold);
+
 /// Visual separator between iteration rounds.
 #[derive(Debug, Clone)]
 pub struct TuiDivider {

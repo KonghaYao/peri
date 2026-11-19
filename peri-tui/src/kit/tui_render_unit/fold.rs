@@ -1,5 +1,8 @@
 // ---------------------------------------------------------------------------
 // 折叠状态机——折叠策略的**唯一**定义点（契约见 docs/design/tui-chat-workbench.md）
+//
+// 正文空档折叠组是唯一的过程区折叠层级：组行默认 `Collapsed`（由分组 pass 构造），
+// 组内成员强制 `Expanded`；本表的工具 / reasoning 默认值只服务非分组语境。
 // ---------------------------------------------------------------------------
 
 /// 折叠三态——`Collapsed` 单行 / `Preview` 有界 tail / `Expanded` 完整 body。
@@ -42,6 +45,9 @@ pub enum FoldKey {
     Reasoning(String),
     Tool(String),
     SubAgent(String),
+    /// 正文空档折叠组——键为组首成员的稳定身份（`tool:<id>` / `reasoning:<id>` 等）。
+    /// 流式追加只在组尾增员，键不变，用户展开选择跨重建保持。
+    Group(String),
     /// Interaction block 按事件携带的本地 request_id 键控；测试构造为 None 时
     /// `fold_key_of` 返回 None——与 reasoning 的 message_id 先例一致）。
     Interaction(String),
@@ -59,10 +65,9 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
     match (target, status) {
         // user / assistant 正文永远展开（user 长文折叠归 Slice 3 截断层）
         (User, _) | (Assistant, _) => FoldState::Expanded,
-        // reasoning / tool：正文与正文之间的过程 entry 一律单行摘要，点击该项
-        // 才展开（用户需求：提升纵向阅读效率；不再按状态做 tail preview）。
-        // running 的活动感由状态符号、elapsed 与摘要文本承担；失败仍由状态符号
-        // 与 Failed 文案保持可见。
+        // reasoning / tool：非分组语境（历史详情面板、正文气泡内的 thinking
+        // 摘要）收束为单行。正文空档分组 pass 会把组内成员统一置为 Expanded——
+        // 折叠层级只保留组行一层，展开组即原样显示成员。
         (Reasoning, _) => FoldState::Collapsed,
         (Tool, _) => FoldState::Collapsed,
         // subagent：running = Collapsed + live summary（裁决 C4：按 spec §7 表）

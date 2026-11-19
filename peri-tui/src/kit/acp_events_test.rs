@@ -31,6 +31,8 @@ use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningB
 mod append_probe_test;
 #[path = "acp_events_test/bg_task_live_test.rs"]
 mod bg_task_live_test;
+#[path = "acp_events_test/body_gap_group_test.rs"]
+mod body_gap_group_test;
 #[path = "acp_events_test/command_feedback_test.rs"]
 mod command_feedback_test;
 #[path = "acp_events_test/diff_grouping_test.rs"]

@@ -281,7 +281,7 @@ fn test_replay_receiver_close_publishes_committed_tail() {
 fn test_replay_tool_completion_publishes_same_length_update() {
     let _restore = ReplayAtomsGuard::new();
     use crate::kit::atoms::VIEW_MODELS;
-    use crate::kit::tui_render_unit::TuiRenderUnit;
+    use crate::kit::tui_render_unit::{TuiRenderUnit, flatten_units};
     let mut state = scheduler_state();
     let mut scheduler = PublicationScheduler::default();
     let now = peri_time::Instant::now();
@@ -308,9 +308,13 @@ fn test_replay_tool_completion_publishes_same_length_update() {
     assert!(scheduler.fire_at(&mut state, now + PUBLICATION_INTERVAL * 2));
     let snapshot = VIEW_MODELS.state().read().clone();
     assert_eq!(snapshot.items.len(), 1);
-    let TuiRenderUnit::TuiToolCard(card) = &snapshot.items[0] else {
-        panic!("应保留工具卡")
-    };
+    let card = flatten_units(&snapshot.items)
+        .into_iter()
+        .find_map(|vm| match vm {
+            TuiRenderUnit::TuiToolCard(card) => Some(card),
+            _ => None,
+        })
+        .expect("应保留工具卡");
     assert!(!card.is_running);
     assert!(card.is_error);
     assert_eq!(card.output_summary, "合成失败结果");

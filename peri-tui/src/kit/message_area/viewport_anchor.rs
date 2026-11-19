@@ -246,6 +246,7 @@ fn content_kind(vm: &TuiRenderUnit) -> u8 {
         TuiRenderUnit::TuiAssistantBubble(_) => 2,
         TuiRenderUnit::TuiSystemNote(_) => 3,
         TuiRenderUnit::TuiSubAgentGroup(_) => 4,
+        TuiRenderUnit::TuiCollapsedGroup(_) => 5,
         TuiRenderUnit::TuiDivider(_) => 6,
         TuiRenderUnit::TuiAskUserBlock(_) => 7,
         TuiRenderUnit::TuiSystemReminder(_) => 8,

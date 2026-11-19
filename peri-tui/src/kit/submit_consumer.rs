@@ -651,6 +651,17 @@ fn extract_vm_text(vm: &crate::kit::tui_render_unit::TuiRenderUnit) -> String {
             }
             text
         }
+        TuiRenderUnit::TuiCollapsedGroup(data) => {
+            let mut text = format!("[Collapsed: {} ({} items)]", data.title, data.count);
+            for child in data.view_models.iter() {
+                let child_text = extract_vm_text(child);
+                if !child_text.is_empty() {
+                    text.push_str("\n  ");
+                    text.push_str(&child_text);
+                }
+            }
+            text
+        }
         TuiRenderUnit::TuiDivider(data) => data.label.as_deref().unwrap_or("---").to_string(),
         TuiRenderUnit::TuiTodoSummary(data) => data.text.clone(),
         TuiRenderUnit::TuiAskUserBlock(data) => data

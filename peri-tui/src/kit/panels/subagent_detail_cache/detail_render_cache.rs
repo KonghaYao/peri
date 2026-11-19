@@ -483,6 +483,7 @@ pub(super) fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
         TuiRenderUnit::TuiSystemReminder(reminder) => Some(reminder.fold),
         TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
         TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.reasoning.as_ref().map(|r| r.fold),
+        TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
         _ => None,
     }
 }
@@ -496,6 +497,7 @@ pub(super) fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
         TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
             bubble.message_id.clone().map(FoldKey::Reasoning)
         }
+        TuiRenderUnit::TuiCollapsedGroup(group) => Some(FoldKey::Group(group.key.clone())),
         _ => None,
     }
 }
@@ -520,6 +522,10 @@ pub(super) fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, 
                 reasoning.fold = fold;
                 bubble.recompute_hash();
             }
+        }
+        TuiRenderUnit::TuiCollapsedGroup(group) => {
+            group.fold = fold;
+            group.recompute_hash();
         }
         _ => {}
     }

@@ -9,8 +9,8 @@ use super::BridgeState;
 
 use crate::kit::bg_task_live::BgLiveMemoryBytes;
 use crate::kit::tui_render_unit::{
-    TuiAskUserBlock, TuiDivider, TuiRenderUnit, TuiSubAgentGroup, TuiSystemReminder, TuiToolCard,
-    TuiToolPresentation,
+    TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiRenderUnit, TuiSubAgentGroup,
+    TuiSystemReminder, TuiToolCard, TuiToolPresentation,
 };
 use std::collections::HashSet;
 
@@ -141,6 +141,13 @@ fn measure_unit(
             }
             bytes
         }
+        TuiRenderUnit::TuiCollapsedGroup(group) => {
+            let mut bytes = collapsed_group_bytes(group);
+            for child in &group.view_models {
+                bytes += measure_unit(child, seen, dedup_hits);
+            }
+            bytes
+        }
         TuiRenderUnit::TuiDivider(divider) => divider_bytes(divider),
         TuiRenderUnit::TuiAskUserBlock(block) => ask_user_bytes(block),
         TuiRenderUnit::TuiTodoSummary(summary) => string_layer_bytes(&summary.text),
@@ -169,6 +176,12 @@ fn subagent_group_bytes(group: &TuiSubAgentGroup) -> LayerBytes {
         + string_layer_bytes(&group.agent_name)
         + option_string_layer_bytes(group.error_reason.as_ref())
         + im_vector_slot_layer_bytes(&group.view_models)
+}
+
+fn collapsed_group_bytes(group: &TuiCollapsedGroup) -> LayerBytes {
+    string_layer_bytes(&group.key)
+        + string_layer_bytes(&group.title)
+        + vec_slot_layer_bytes(&group.view_models)
 }
 
 fn divider_bytes(divider: &TuiDivider) -> LayerBytes {

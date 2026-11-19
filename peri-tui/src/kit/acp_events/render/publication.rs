@@ -5,7 +5,11 @@ use super::super::{BridgeState, SessionPhase};
 use crate::i18n;
 use crate::kit::atoms::{VIEW_MODELS, ViewModelsSnapshot};
 
+use crate::kit::tui_render_unit::FoldKey;
+use crate::kit::tui_render_unit::FoldState;
+use crate::kit::tui_render_unit::TuiCollapsedGroup;
 use crate::kit::tui_render_unit::TuiDivider;
+use crate::kit::tui_render_unit::TuiNoteLevel;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::tui_render_unit::TuiTodoSummary;
 use fluent_bundle::FluentValue;
@@ -22,9 +26,9 @@ use parking_lot::Mutex;
 /// 快照后处理流水线（均为纯视觉变换，不触碰 segment↔cache 对齐）：
 /// 1. `apply_fold_pass`（spec §7 表 + FOLD_OVERRIDES）；
 /// 2. 按完整消息顺序投影 turn 分隔线（随下一条用户 prompt 保留）；
-/// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）。
-///
-/// 工具卡不再聚合分组：相邻工具各自成 entry，由折叠策略收束为单行。
+/// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
+/// 4. `group_body_gaps`（正文空档分组：正文段落之间的工具 / thinking / 通知等
+///    合成一张折叠组，一组一行）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
     super::super::subagent_preview::enforce(state);
     super::super::display_retention::enforce(state);
@@ -72,7 +76,6 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // [共享安全] items 通过 join_into 与 current_turn 缓存共享元素——pass 先收集
     // 翻转目标，再用 im::Vector::set（内部 COW）应用，避免就地修改共享节点。
     super::super::fold::apply_fold_pass(&mut active, state.phase, &overrides);
-    drop(overrides);
     #[cfg(test)]
     {
         crate::kit::acp_bridge::observe_perf(
@@ -83,27 +86,7 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     }
 
     let history = items.clone();
-    let active_start = history.len().saturating_sub(1);
     let previous_generation = VIEW_MODELS.state().read().generation;
-    let confirmed_prefix =
-        TRANSCRIPT_HISTORY
-            .lock()
-            .as_ref()
-            .map_or(0, |(old, start, generation)| {
-                if *generation == previous_generation
-                    && (old.ptr_eq(&history) || (history.is_inline() && old == &history))
-                {
-                    (*start).min(active_start)
-                } else {
-                    0
-                }
-            });
-    let preceding_prompts = history
-        .iter()
-        .take(confirmed_prefix)
-        .filter(|vm| is_visible_user_prompt(vm))
-        .count();
-    let confirmed_prefix = confirmed_prefix + preceding_prompts.saturating_sub(1);
     let (mut items, has_history_prompt) = decorated_history(&history);
     let visual_active_start = items.len();
     join_into(&mut items, active);
@@ -129,11 +112,14 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         __t = peri_time::monotonic_now();
     }
 
-    // [阅读效率] 工具不再聚合：每张工具卡独立成行，由折叠策略收束为单行
-    // （相邻成功的多个工具仍各自可点击展开/收起，不再合并为一张组行）。
-    // `changed_from` 仍取稳定前缀长度：`[0, confirmed_prefix)` 的槽位内容未变，
-    // Transcript 可保留其渲染缓存。
-    let changed_from = confirmed_prefix.min(items.len());
+    // [阅读效率] 正文空档分组：正文段落之间的所有过程单元（工具 / thinking /
+    // 通知等）合成一张折叠组，默认一组一行；点击该行展开整组。分组是纯视觉
+    // 变换，作用于完整快照（committed + current_turn），用户气泡与 turn 分隔线
+    // 是天然边界，不会跨 turn 合并。
+    // `changed_from` 取分组输出的稳定前缀长度：`[0, changed_from)` 的槽位内容
+    // 未变，Transcript 可保留其渲染缓存。
+    let changed_from = group_body_gaps(&mut items, &overrides);
+    drop(overrides);
 
     let view_models = VIEW_MODELS.state();
     let mut published_snapshot = view_models.write();
@@ -155,15 +141,6 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
             crate::kit::acp_bridge::PublicationReason::Terminal
         },
     });
-    let mut previous = TRANSCRIPT_HISTORY.lock();
-    if history.len() > 1024 {
-        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
-        let bytes = crate::kit::retained_bytes::retained_units_bytes(history.iter(), &mut seen);
-        *previous = (bytes <= 8 * 1024 * 1024).then_some((history, active_start, state.generation));
-    } else {
-        *previous = Some((history, active_start, state.generation));
-    }
-    drop(previous);
     *crate::kit::atoms::TRANSCRIPT_PUBLICATION.state().write() =
         crate::kit::atoms::TranscriptPublication {
             generation: state.generation,
@@ -190,8 +167,6 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
 /// 纯 memoization：文本只依赖 (todos 内容, 语言版本)，命中即与重建等价。
 pub(super) static TODO_SUMMARY_CACHE: Mutex<Option<(u64, u64, String)>> = Mutex::new(None);
 
-pub(super) static TRANSCRIPT_HISTORY: Mutex<Option<(im::Vector<TuiRenderUnit>, usize, u64)>> =
-    Mutex::new(None);
 pub(super) struct DividerHistoryCache {
     pub(super) raw: im::Vector<TuiRenderUnit>,
     pub(super) decorated: im::Vector<TuiRenderUnit>,
@@ -334,6 +309,364 @@ pub(super) fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: 
     items.insert(insert_at, summary);
 }
 
+// ---------------------------------------------------------------------------
+// [阅读效率] 正文空档分组
+// ---------------------------------------------------------------------------
+
+/// 正文单元（分组边界）：用户气泡、含正文的 assistant 气泡、turn 分隔线、
+/// todo 摘要与交互块。
+///
+/// 子 Agent 组是可交互的 durable entry（聚焦后 Enter 打开详情），不参与自动
+/// 隐藏；纯 reasoning 气泡（无正文）与工具 / 普通通知 / info 级提醒属于过程单元。
+/// [§15] 错误级通知与 required / warning 及以上的提醒保持可见，不折进组行。
+#[must_use]
+pub(super) fn is_body_unit(vm: &TuiRenderUnit) -> bool {
+    match vm {
+        TuiRenderUnit::TuiAssistantBubble(b) => !b.text.is_empty(),
+        TuiRenderUnit::TuiSystemNote(note) => note.level == TuiNoteLevel::Error,
+        TuiRenderUnit::TuiSystemReminder(reminder) => {
+            reminder.required
+                || reminder.severity >= peri_acp_types::system_reminder::ReminderSeverity::Warning
+        }
+        TuiRenderUnit::TuiUserBubble(_)
+        | TuiRenderUnit::TuiDivider(_)
+        | TuiRenderUnit::TuiTodoSummary(_)
+        | TuiRenderUnit::TuiAskUserBlock(_)
+        | TuiRenderUnit::TuiSubAgentGroup(_) => true,
+        _ => false,
+    }
+}
+
+/// 组身份——取组首成员的稳定身份：流式追加只在组尾增员，键不变，用户展开
+/// 选择与渲染缓存键因此跨重建稳定。
+fn group_key_of(vm: &TuiRenderUnit) -> String {
+    match vm {
+        TuiRenderUnit::TuiToolCard(t) => format!("tool:{}", t.tool_id),
+        TuiRenderUnit::TuiAssistantBubble(b) => match b.message_id.as_deref() {
+            Some(id) => format!("reasoning:{id}"),
+            // 兼容无身份数据：内容身份可跨重建稳定，仅极端内容冲突会共享折叠态。
+            None => format!("reasoning#{:016x}", b.content_hash),
+        },
+        TuiRenderUnit::TuiSystemNote(note) => format!("note#{:016x}", note.content_hash),
+        TuiRenderUnit::TuiSystemReminder(reminder) => format!("reminder:{}", reminder.reminder_id),
+        other => format!("unit#{:016x}", other.content_hash()),
+    }
+}
+
+/// 组内失败单元：error 工具与 error 级通知——组行摘要保留失败信号。
+fn is_failed_unit(vm: &TuiRenderUnit) -> bool {
+    match vm {
+        TuiRenderUnit::TuiToolCard(t) => t.is_error,
+        TuiRenderUnit::TuiSystemNote(note) => note.level == TuiNoteLevel::Error,
+        _ => false,
+    }
+}
+
+/// 组行摘要：成员类型统计（`Read 2 · Thought 1`），运行中追加 `running`。
+fn group_title(run: &[TuiRenderUnit]) -> String {
+    let mut parts: Vec<(String, u32)> = Vec::new();
+    for vm in run {
+        let label = match vm {
+            TuiRenderUnit::TuiToolCard(t) => {
+                Some(crate::kit::tool_display::format_tool_name(&t.tool_name))
+            }
+            TuiRenderUnit::TuiAssistantBubble(b) if b.reasoning.is_some() => {
+                Some(i18n::tr("render-group-thought"))
+            }
+            TuiRenderUnit::TuiSystemNote(_) => Some(i18n::tr("render-group-note")),
+            TuiRenderUnit::TuiSystemReminder(_) => Some(i18n::tr("render-group-reminder")),
+            _ => None,
+        };
+        let Some(label) = label else { continue };
+        match parts.iter_mut().find(|(name, _)| *name == label) {
+            Some((_, count)) => *count += 1,
+            None => parts.push((label, 1)),
+        }
+    }
+    let mut title = parts
+        .into_iter()
+        .map(|(name, count)| {
+            if count > 1 {
+                format!("{name} \u{d7}{count}")
+            } else {
+                name
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    if title.is_empty() {
+        title = i18n::tr_args(
+            "render-group-steps",
+            &[("count".to_string(), FluentValue::from(run.len()))],
+        );
+    }
+    if run.iter().any(TuiRenderUnit::is_animating) {
+        title.push_str(" \u{b7} ");
+        title.push_str(&i18n::tr("render-group-running"));
+    }
+    title
+}
+
+/// 展开组成员按原样渲染——组内不再逐项折叠：工具 / reasoning / 提醒统一
+/// 置为 `Expanded`（组折叠态是唯一折叠层级）。
+fn expand_group_member(vm: TuiRenderUnit) -> TuiRenderUnit {
+    match vm {
+        TuiRenderUnit::TuiToolCard(mut t) => {
+            if t.fold != FoldState::Expanded {
+                t.fold = FoldState::Expanded;
+                t.recompute_hash();
+            }
+            TuiRenderUnit::TuiToolCard(t)
+        }
+        TuiRenderUnit::TuiAssistantBubble(arc) => {
+            let mut bubble = (*arc).clone();
+            if let Some(reasoning) = bubble.reasoning.as_mut()
+                && reasoning.fold != FoldState::Expanded
+            {
+                reasoning.fold = FoldState::Expanded;
+                bubble.recompute_hash();
+            }
+            TuiRenderUnit::TuiAssistantBubble(bubble.into())
+        }
+        TuiRenderUnit::TuiSystemReminder(mut reminder) => {
+            if reminder.fold != FoldState::Expanded {
+                reminder.fold = FoldState::Expanded;
+                reminder.recompute_hash();
+            }
+            TuiRenderUnit::TuiSystemReminder(reminder)
+        }
+        other => other,
+    }
+}
+
+/// 由一段连续过程单元构造折叠组。
+fn build_collapsed_group(
+    run: Vec<TuiRenderUnit>,
+    overrides: &std::collections::HashMap<FoldKey, FoldState>,
+) -> TuiRenderUnit {
+    let key = group_key_of(&run[0]);
+    let failed_count = run.iter().filter(|vm| is_failed_unit(vm)).count() as u32;
+    let fold = overrides
+        .get(&FoldKey::Group(key.clone()))
+        .copied()
+        .unwrap_or(FoldState::Collapsed);
+    let mut group = TuiCollapsedGroup {
+        key,
+        title: group_title(&run),
+        count: run.len() as u32,
+        failed_count,
+        view_models: run.into_iter().map(expand_group_member).collect(),
+        fold,
+        content_hash: 0,
+    };
+    group.recompute_hash();
+    TuiRenderUnit::TuiCollapsedGroup(group)
+}
+
+/// 分组辅助输入指纹——与快照内容无关但会改变分组结果的输入：语言版本
+/// （组摘要 i18n 标签）与组折叠覆盖（用户手动展开/收起）。
+fn body_gap_aux_fingerprint(overrides: &std::collections::HashMap<FoldKey, FoldState>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut group_overrides: Vec<(&str, u64)> = overrides
+        .iter()
+        .filter_map(|(key, fold)| match key {
+            FoldKey::Group(id) => Some((
+                id.as_str(),
+                crate::kit::tui_render_unit::fold_state_code(*fold),
+            )),
+            _ => None,
+        })
+        .collect();
+    group_overrides.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    group_overrides.hash(&mut hasher);
+    crate::kit::tui_render_unit::tui_hash_combine(
+        crate::kit::atoms::LANG_VERSION.get(),
+        hasher.finish(),
+    )
+}
+
+/// 稳定切点（输入下标升序）：输出 `[0, output)` 只依赖输入 `[0, input)`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GroupCut {
+    pub(super) input: usize,
+    pub(super) output: usize,
+    pub(super) anchor: GroupCutAnchor,
+}
+
+/// 切点的稳定依据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupCutAnchor {
+    /// 前缀以正文单元收口（或空前缀）——组不能跨过正文，恒稳定。
+    AfterBody,
+    /// 前缀以完整折叠组收口——切点后的单元若仍是非正文，组会继续并入，
+    /// 须按新输入重判。
+    AfterGroup,
+}
+
+pub(super) const GROUP_CUT_CAP: usize = 512;
+
+#[derive(Debug, Clone)]
+pub(super) struct BodyGapGroupCache {
+    input: im::Vector<TuiRenderUnit>,
+    grouped: im::Vector<TuiRenderUnit>,
+    cuts: Vec<GroupCut>,
+    aux: u64,
+}
+
+/// [PERF] 正文空档分组结果缓存（纯函数 memoization）。
+///
+/// 复用判定：逐条比较输入找出首个差异下标 `d`，取 `input <= d` 的最大稳定
+/// 切点复用输出前缀，只重建变化后缀——成本 ∝ 变化量，不随历史长度增长。
+pub(super) static BODY_GAP_GROUP_CACHE: Mutex<Option<BodyGapGroupCache>> = Mutex::new(None);
+
+/// 清空分组缓存（测试用——全局单例缓存会跨用例残留）。
+#[cfg(test)]
+pub(crate) fn reset_body_gap_group_cache() {
+    *BODY_GAP_GROUP_CACHE.lock() = None;
+}
+
+/// 分组身份比较——变体 + content_hash；assistant 气泡补 message_id（折叠键
+/// 身份变化也必须重建组）。
+fn same_group_entry(a: &TuiRenderUnit, b: &TuiRenderUnit) -> bool {
+    if std::mem::discriminant(a) != std::mem::discriminant(b)
+        || a.content_hash() != b.content_hash()
+    {
+        return false;
+    }
+    match (a, b) {
+        (TuiRenderUnit::TuiAssistantBubble(x), TuiRenderUnit::TuiAssistantBubble(y)) => {
+            x.message_id == y.message_id
+        }
+        (TuiRenderUnit::TuiToolCard(x), TuiRenderUnit::TuiToolCard(y)) => x.tool_id == y.tool_id,
+        _ => true,
+    }
+}
+
+/// 切点在新输入下是否仍稳定（见 [`GroupCutAnchor`]）。
+fn cut_stable(anchor: GroupCutAnchor, input: &im::Vector<TuiRenderUnit>, cut: usize) -> bool {
+    match anchor {
+        GroupCutAnchor::AfterBody => true,
+        GroupCutAnchor::AfterGroup => match input.get(cut) {
+            None => true,
+            Some(vm) => is_body_unit(vm),
+        },
+    }
+}
+
+/// 重建 `[input_base..]` 后缀的分组输出（追加到 `grouped`，切点追加到 `cuts`）。
+fn rebuild_grouped_suffix(
+    suffix: im::Vector<TuiRenderUnit>,
+    input_base: usize,
+    grouped: &mut im::Vector<TuiRenderUnit>,
+    cuts: &mut Vec<GroupCut>,
+    overrides: &std::collections::HashMap<FoldKey, FoldState>,
+) {
+    let mut i = 0usize;
+    while i < suffix.len() {
+        if is_body_unit(&suffix[i]) {
+            let start = i;
+            while i < suffix.len() && is_body_unit(&suffix[i]) {
+                i += 1;
+            }
+            for (offset, unit) in suffix.iter().skip(start).take(i - start).enumerate() {
+                grouped.push_back(unit.clone());
+                // 正文逐条透传：每个边界都是稳定切点，尾部变化时可就近复用前缀。
+                cuts.push(GroupCut {
+                    input: input_base + start + offset + 1,
+                    output: grouped.len(),
+                    anchor: GroupCutAnchor::AfterBody,
+                });
+            }
+            continue;
+        }
+        let start = i;
+        while i < suffix.len() && !is_body_unit(&suffix[i]) {
+            i += 1;
+        }
+        let run: Vec<TuiRenderUnit> = suffix.iter().skip(start).take(i - start).cloned().collect();
+        cuts.push(GroupCut {
+            input: input_base + start,
+            output: grouped.len(),
+            anchor: GroupCutAnchor::AfterBody,
+        });
+        grouped.push_back(build_collapsed_group(run, overrides));
+        cuts.push(GroupCut {
+            input: input_base + i,
+            output: grouped.len(),
+            anchor: GroupCutAnchor::AfterGroup,
+        });
+    }
+}
+
+/// 正文空档分组：把每个「正文段落之间的连续过程单元」替换为一张折叠组。
+///
+/// 返回分组输出的稳定前缀长度（`changed_from`）：`[0, changed_from)` 的槽位
+/// 内容与上一帧一致，Transcript 可保留其渲染缓存。
+pub(super) fn group_body_gaps(
+    items: &mut im::Vector<TuiRenderUnit>,
+    overrides: &std::collections::HashMap<FoldKey, FoldState>,
+) -> usize {
+    let input = items.clone();
+    let aux = body_gap_aux_fingerprint(overrides);
+    let cache = BODY_GAP_GROUP_CACHE.lock();
+    let (rebuild_from, mut grouped, mut cuts) = match cache.as_ref() {
+        Some(cached) if cached.aux == aux => {
+            let common = cached.input.len().min(input.len());
+            let d = (0..common)
+                .find(|&i| !same_group_entry(&cached.input[i], &input[i]))
+                .unwrap_or(common);
+            if d == input.len() && d == cached.input.len() {
+                // 输入逐条一致——整段复用（O(1) 引用计数）。
+                let grouped = cached.grouped.clone();
+                drop(cache);
+                *items = grouped;
+                return items.len();
+            }
+            match cached
+                .cuts
+                .iter()
+                .rev()
+                .filter(|cut| cut.input <= d)
+                .find(|cut| cut_stable(cut.anchor, &input, cut.input))
+            {
+                Some(cut) => {
+                    let mut prefix = cached.grouped.clone();
+                    prefix.split_off(cut.output);
+                    let kept = cached
+                        .cuts
+                        .iter()
+                        .copied()
+                        .take_while(|c| c.input <= cut.input)
+                        .collect();
+                    (cut.input, prefix, kept)
+                }
+                None => (0, im::Vector::new(), Vec::new()),
+            }
+        }
+        _ => (0, im::Vector::new(), Vec::new()),
+    };
+    drop(cache);
+    let changed_from = grouped.len();
+    let suffix = if rebuild_from == 0 {
+        input.clone()
+    } else {
+        input.clone().split_off(rebuild_from)
+    };
+    rebuild_grouped_suffix(suffix, rebuild_from, &mut grouped, &mut cuts, overrides);
+    if cuts.len() > GROUP_CUT_CAP {
+        cuts.drain(0..cuts.len() - GROUP_CUT_CAP);
+    }
+    *BODY_GAP_GROUP_CACHE.lock() = Some(BodyGapGroupCache {
+        input,
+        grouped: grouped.clone(),
+        cuts,
+        aux,
+    });
+    *items = grouped;
+    changed_from.min(items.len())
+}
+
 /// [PERF] 把 `tail` 并入 `items`——按尾长选择代价更低的合并方式。
 ///
 /// `im::Vector::append` 在「大向量接小向量」路径上**退化为整树重建**：实测
@@ -361,18 +694,18 @@ pub(super) fn join_into(items: &mut im::Vector<TuiRenderUnit>, tail: im::Vector<
 
 /// 结构性释放：丢弃所有持有旧 `committed` 节点的投影缓存。
 pub(crate) fn invalidate_structural_caches() {
-    *TRANSCRIPT_HISTORY.lock() = None;
     *DIVIDER_HISTORY.lock() = None;
     *TODO_SUMMARY_CACHE.lock() = None;
+    *BODY_GAP_GROUP_CACHE.lock() = None;
 }
 
 #[cfg(test)]
 pub(crate) fn debug_cache_lengths() -> (Option<usize>, Option<usize>) {
     (
-        TRANSCRIPT_HISTORY
+        BODY_GAP_GROUP_CACHE
             .lock()
             .as_ref()
-            .map(|(history, _, _)| history.len()),
+            .map(|cache| cache.input.len()),
         DIVIDER_HISTORY.lock().as_ref().map(|cache| cache.raw.len()),
     )
 }
@@ -392,7 +725,7 @@ pub fn push_view_models_for_reset() {
     // [S2 §3.4] 焦点单一事实源同源清空（跨 session 身份不唯一——slot 与 key
     // 都依赖旧会话索引/身份，残留会让新会话焦点/免疫错误指向）。
     *crate::kit::atoms::FOCUSED_ENTRY.state().write() = None;
-    *TRANSCRIPT_HISTORY.lock() = None;
+    *BODY_GAP_GROUP_CACHE.lock() = None;
     let snapshot = ViewModelsSnapshot {
         items: im::Vector::new(),
         generation: 0,

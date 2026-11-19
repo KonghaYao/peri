@@ -112,7 +112,9 @@ fn p0_new_prompt_preserves_running_tool_result() {
 
     let snapshot = VIEW_MODELS.state().read().clone();
     let items = &snapshot.items;
-    let tool = items.iter().position(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-1" && card.output_summary == "file contents"));
+    let tool = items.iter().position(
+        |vm| matches!(vm, TuiRenderUnit::TuiCollapsedGroup(group) if group.view_models.iter().any(|inner| matches!(inner, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-1" && card.output_summary == "file contents"))),
+    );
     let prompt = items
         .iter()
         .position(|vm| matches!(vm, TuiRenderUnit::TuiUserBubble(b) if b.text == "q2"));
@@ -326,11 +328,11 @@ fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
     crate::kit::atoms::TODO_ITEMS.state().write().clear();
 }
 
-/// 工具不再聚合：相邻成功工具各自成 entry，且全部默认折叠为单行。
-/// running/error 同样独立且折叠——正文之间的过程 entry 只占一行（用户需求）。
+/// 正文空档分组：空档内相邻工具（含 running/error）合成一张组行，组内按
+/// 原样展开；正文出现后成为下一段的边界，不跨正文合并。
 #[test]
 #[serial]
-fn test_snapshot_tools_stay_individual_and_collapsed() {
+fn test_snapshot_tools_grouped_in_body_gap() {
     let mut state = super::make_fold_test_state();
 
     let start_read = |st: &mut BridgeState, id: &str, path: &str| {
@@ -371,29 +373,41 @@ fn test_snapshot_tools_stay_individual_and_collapsed() {
     end_tool(&mut state, "t4", true);
 
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 4, "相邻工具各自独立成 entry，不聚合");
-    let ids: Vec<&str> = snap
-        .items
-        .iter()
+    assert_eq!(snap.items.len(), 1, "同一空档内的工具只占一张组行");
+    let group = match &snap.items[0] {
+        TuiRenderUnit::TuiCollapsedGroup(group) => group,
+        other => panic!("expected TuiCollapsedGroup, got {other:?}"),
+    };
+    assert_eq!(group.count, 4);
+    assert_eq!(group.failed_count, 1, "error 工具计数在组行保留");
+    assert_eq!(group.fold, FoldState::Collapsed, "组默认单行");
+    let ids: Vec<&str> = crate::kit::tui_render_unit::flatten_units(&snap.items)
+        .into_iter()
         .map(|vm| match vm {
             TuiRenderUnit::TuiToolCard(t) => t.tool_id.as_str(),
             other => panic!("expected TuiToolCard, got {other:?}"),
         })
         .collect();
     assert_eq!(ids, ["t1", "t2", "t3", "t4"]);
-    for vm in snap.items.iter() {
+    for vm in crate::kit::tui_render_unit::flatten_units(&snap.items) {
         let TuiRenderUnit::TuiToolCard(card) = vm else {
             unreachable!("遍历目标已在上方断言为工具卡")
         };
         assert_eq!(
             card.fold,
-            crate::kit::tui_render_unit::FoldState::Collapsed,
-            "工具 {} 默认单行折叠（含 running/error）",
+            FoldState::Expanded,
+            "组内工具 {} 按原样展开（不再逐项折叠）",
             card.tool_id
         );
     }
+    assert!(
+        crate::kit::tui_render_unit::flatten_units(&snap.items)
+            .into_iter()
+            .any(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(t) if t.tool_id == "t3" && t.is_running)),
+        "running 工具留在组内并保持 running 状态"
+    );
 
-    // 正文插入后仍各自独立：不跨正文合并，也不因正文出现而改变折叠。
+    // 正文追加：过程组之后出现正文，组成下一段边界。
     super::dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(TuiTextChunk {
@@ -405,26 +419,23 @@ fn test_snapshot_tools_stay_individual_and_collapsed() {
     let snap = VIEW_MODELS.state().read().clone();
     assert_eq!(
         snap.items.len(),
-        5,
-        "正文追加后仍保持 4 张工具卡 + 1 条正文"
+        2,
+        "过程组 + 正文各占一个槽位，不跨正文合并"
     );
     assert!(matches!(
         snap.items.last(),
         Some(TuiRenderUnit::TuiAssistantBubble(_))
     ));
-    assert!(
-        snap.items.iter().all(|vm| matches!(
-            vm,
-            TuiRenderUnit::TuiToolCard(_) | TuiRenderUnit::TuiAssistantBubble(_)
-        )),
-        "正文之间只保留独立工具卡，不存在聚合组行"
-    );
+    assert!(matches!(
+        &snap.items[0],
+        TuiRenderUnit::TuiCollapsedGroup(group) if group.count == 4
+    ));
 }
 
-/// Skill/Todo 语义卡同样保持独立 entry（不再有「可分组」例外）。
+/// Skill/Todo 语义卡与普通工具同属过程区：同一空档内合成一张组行。
 #[test]
 #[serial]
-fn test_snapshot_semantic_tools_stay_individual() {
+fn test_snapshot_semantic_tools_in_group() {
     let mut state = super::make_fold_test_state();
     let indexed_tool_names = ["Skill", "TodoWrite"].iter().enumerate();
     for (i, name) in indexed_tool_names {
@@ -451,11 +462,15 @@ fn test_snapshot_semantic_tools_stay_individual() {
         );
     }
     let snap = VIEW_MODELS.state().read().clone();
-    assert_eq!(snap.items.len(), 2, "语义卡各自独立");
-    assert!(
-        snap.items
-            .iter()
-            .all(|vm| matches!(vm, TuiRenderUnit::TuiToolCard(_)))
+    assert_eq!(snap.items.len(), 1, "语义卡同一空档合成一张组行");
+    assert!(matches!(
+        &snap.items[0],
+        TuiRenderUnit::TuiCollapsedGroup(group) if group.count == 2
+    ));
+    assert_eq!(
+        crate::kit::tui_render_unit::flatten_units(&snap.items).len(),
+        2,
+        "两张语义卡都在组内"
     );
 }
 

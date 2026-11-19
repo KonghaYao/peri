@@ -32,7 +32,7 @@ mod shared_bubble_tests;
 
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
 /// 与折叠 pass（`acp_events/fold.rs::apply_fold_pass`）的键控口径一致：
-/// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) /
+/// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) / Group(key) /
 /// Interaction(request_id) / SystemReminder(reminder_id)。
 pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
     match vm {
@@ -44,6 +44,7 @@ pub(super) fn fold_key_of(vm: &TuiRenderUnit) -> Option<(FoldKey, FoldState)> {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             Some((FoldKey::SubAgent(g.instance_id.clone()), g.fold))
         }
+        TuiRenderUnit::TuiCollapsedGroup(g) => Some((FoldKey::Group(g.key.clone()), g.fold)),
         TuiRenderUnit::TuiAskUserBlock(a) => {
             Some((FoldKey::Interaction(a.request_id.clone()?), a.fold))
         }
@@ -133,6 +134,10 @@ pub(super) fn apply_fold_override(vm: &mut TuiRenderUnit, fold: FoldState) {
         TuiRenderUnit::TuiSubAgentGroup(g) => {
             g.fold = fold;
             g.user_modified = true;
+            g.recompute_hash();
+        }
+        TuiRenderUnit::TuiCollapsedGroup(g) => {
+            g.fold = fold;
             g.recompute_hash();
         }
         TuiRenderUnit::TuiAskUserBlock(a) => {
@@ -293,12 +298,23 @@ pub(super) fn apply_fold_toggle(
     let mut updated = snapshot.items[idx].clone();
     apply_fold_override(&mut updated, next);
     // 展开/打开工具卡片：若该跨页结果超出内存预算，按来源页定位补读完整正文。
+    // 折叠组展开时组内每个工具成员都要补读（组行是唯一可点击入口）。
     if next != FoldState::Collapsed {
-        let _ = crate::kit::acp_events::history_window::maybe_request_tool_result(&updated);
+        request_visible_tool_results(&updated);
     }
     snapshot.items.set(idx, updated);
     snapshot.generation = snapshot.generation.wrapping_add(1);
     EventResult::Consumed
+}
+
+/// 对展开后的单元递归补读延迟工具结果——组内成员不再单独可点击。
+fn request_visible_tool_results(vm: &TuiRenderUnit) {
+    let _ = crate::kit::acp_events::history_window::maybe_request_tool_result(vm);
+    if let TuiRenderUnit::TuiCollapsedGroup(group) = vm {
+        for child in &group.view_models {
+            request_visible_tool_results(child);
+        }
+    }
 }
 
 use crate::kit::atoms::FOCUSED_ENTRY;

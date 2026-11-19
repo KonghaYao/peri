@@ -12,7 +12,8 @@ const REASONING_BODY_MAX_LINES: usize = 100;
 /// §6.3 Reasoning 三态视觉。
 ///
 /// - 默认 `Collapsed`（running / completed 同一高度）：单行活动或完成摘要，不渲染
-///   tail——正文之间的过程 entry 只占一行（用户需求：点击 header 才展开）。
+///   tail——正文气泡内的 thinking 摘要只占一行。正文空档组展开时成员为 `Expanded`，
+///   渲染完整推理正文。
 /// - 用户 Space 覆盖 `Preview`：running 时 `[│][gap]Thinking…` + elapsed + 最近
 ///   ≤4 个视觉行 tail（wrap 后取尾；muted+italic，无 italic → dim）。
 /// - Completed/Collapsed：单行 `[│][gap]Thought for 12s · N lines`（N = 视觉行总数）。

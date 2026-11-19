@@ -25,7 +25,6 @@ pub(crate) use renderer::is_step_row;
 pub(crate) use renderer::running_header_index;
 #[cfg(test)]
 pub(crate) use renderer::vm_to_lines;
-#[cfg(test)]
 pub(crate) use renderer::vm_to_lines_cached;
 pub(crate) use renderer::vm_to_lines_cached_with_layout;
 
