@@ -1,4 +1,4 @@
-//! S6b2/S6b3/S6c1b: a real Loom deployment with **two** logical databases: the
+//! S6b2/S6b3/S6c2: a real Loom deployment with **two** logical databases: the
 //! Peri session store (session/history/MQ facts) and the independent Swarm
 //! state store (`swarm_meta` + `swarm_*` rows, `design §4.1`, §4.3, §7.2-S6).
 //!
@@ -11,8 +11,9 @@
 //!   It must be a different logical database (the bootstrap rejects a shared
 //!   locator); the test asserts the two locators differ.
 //! - `PERI_SWARM_STORE_TOKEN` — the Loom project API key. Only the **name** is
-//!   part of the deployment (credential source); the test never reads, prints,
-//!   or embeds the value.
+//!   part of the deployment (credential source). The raw schema probes read the
+//!   value to authenticate their own connection; it is never printed, asserted,
+//!   or written into a failure message.
 //! - `HOME` — a scratch directory (set by the harness). The test asserts that no
 //!   local Peri session database appears under it.
 //!
@@ -23,13 +24,16 @@
 //!
 //! S6c1b rewired this test away from the removed single-database adapter (the
 //! S6b path that read `peri-resources`' Swarm port) to [`SwarmStateStore`]
-//! opened from `PERI_SWARM_STATE_STORE`. The real dual-database acceptance run
-//! belongs to **S6c2**; the test is kept here so that stage does not have to
-//! rebuild the harness.
+//! opened from `PERI_SWARM_STATE_STORE`. S6c2 is the real dual-database
+//! acceptance run: provision the state database with
+//! `peri-swarm/scripts/provision_state_db.py`, then run these tests against the
+//! two locators it prints.
 //!
 //! Commands and observed output for the single-database era live in
-//! `.peri/plans/S6b2-report.md` and `.peri/plans/S6b3-report.md`.
+//! `.peri/plans/S6b2-report.md` and `.peri/plans/S6b3-report.md`; the
+//! dual-database run is recorded in `.peri/plans/S6c2-report.md`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -56,13 +60,19 @@ use peri_resources::{RemoteWorkspaceEnvironment, Resources};
 use peri_swarm::actor::reader::TurnOutcome;
 use peri_swarm::actor::runtime::{AcpChild, ChildConfig, ChildError, SessionStoreDeployment};
 use peri_swarm::actor::ItemLog;
+use peri_swarm::bootstrap::{
+    BootstrapConfig, MACHINE_ID_ENV, SESSION_STORE_ENV, STATE_STORE_ENV, STORE_TOKEN_ENV,
+};
+use peri_swarm::config::{ConfigError, API_KEY_ENV, WORKSPACE_ROOT_ENV};
 use peri_swarm::domain::{
-    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, LogicalId, SessionState,
+    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, LogicalId, McpHeader,
+    McpToolSpec, SessionState,
 };
 use peri_swarm::store::{
-    InputPut, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow, SwarmStateStore,
-    SwarmStateStoreConfig, SwarmStore,
+    InputPut, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow, SwarmStateError,
+    SwarmStateStore, SwarmStateStoreConfig, SwarmStore, SWARM_STATE_SCHEMA_VERSION,
 };
+use turso_serverless::{Builder, Value as SqlValue};
 
 const LOCATOR_ENV: &str = "PERI_SWARM_LOOM_LOCATOR";
 /// Swarm state database locator (`design §4.1`, S6c1a). A separate logical
@@ -299,7 +309,7 @@ fn machine_id() -> uuid::Uuid {
 fn workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let temp = tempfile::tempdir().expect("workspace root");
     let root = std::fs::canonicalize(temp.path()).expect("canonical workspace root");
-    let cwd = root.join("agent-s6b2-cwd");
+    let cwd = root.join("agent-s6c2-cwd");
     std::fs::create_dir_all(&cwd).expect("workspace cwd");
     let cwd = std::fs::canonicalize(&cwd).expect("canonical cwd");
     (temp, root, cwd)
@@ -330,6 +340,184 @@ async fn close(resources: Resources) {
         .shutdown()
         .await
         .expect("close the remote Loom store");
+}
+
+// ── raw schema probes ───────────────────────────────────────────────────────
+
+/// The Peri session schema this build writes and accepts
+/// (`peri-resources/src/sessions/canonical.rs`, `CURRENT_SCHEMA_VERSION`, 15
+/// since S6c1b). A remote database carries it in `peri_store_meta`.
+const PERI_SCHEMA_VERSION: &str = "15";
+
+/// Tables the Swarm state database owns (`peri-swarm/src/store/turso.rs`).
+const SWARM_TABLES: [&str; 5] = [
+    "swarm_bindings",
+    "swarm_inputs",
+    "swarm_items",
+    "swarm_meta",
+    "swarm_sessions",
+];
+
+/// A read-only connection to one logical database. Schema facts
+/// (`sqlite_master`, `peri_store_meta`, `swarm_meta`) have no business API, so
+/// the test reads them the way an operator would.
+///
+/// The credential is read from the process environment just to authenticate
+/// this connection; it is never printed, compared, or embedded in a panic.
+struct SchemaProbe {
+    label: &'static str,
+    connection: turso_serverless::Connection,
+}
+
+impl SchemaProbe {
+    async fn open(label: &'static str, locator_env: &str) -> Self {
+        let locator = required_env(locator_env);
+        let token = std::env::var(CREDENTIAL_ENV).unwrap_or_else(|_| {
+            panic!("{label}: {CREDENTIAL_ENV} must hold the Loom project API key")
+        });
+        let database = Builder::new_remote(&locator)
+            .with_auth_token(&token)
+            .build()
+            .await
+            .unwrap_or_else(|error| panic!("{label}: schema probe cannot connect: {error}"));
+        let connection = database
+            .connect()
+            .unwrap_or_else(|error| panic!("{label}: schema probe cannot open: {error}"));
+        Self { label, connection }
+    }
+
+    async fn rows(&self, sql: &str) -> Vec<Vec<String>> {
+        self.rows_with(sql, Vec::new()).await
+    }
+
+    async fn rows_with(&self, sql: &str, params: Vec<SqlValue>) -> Vec<Vec<String>> {
+        let mut rows = self
+            .connection
+            .query(sql, params)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: schema probe query failed: {error}; sql: {sql}",
+                    self.label
+                )
+            });
+        let mut collected = Vec::new();
+        loop {
+            match rows
+                .next()
+                .await
+                .unwrap_or_else(|error| panic!("{}: schema probe row failed: {error}", self.label))
+            {
+                Some(row) => collected.push(
+                    (0..row.column_count())
+                        .map(|index| {
+                            let value = row.get_value(index).unwrap_or_else(|error| {
+                                panic!("{}: schema probe column failed: {error}", self.label)
+                            });
+                            render_value(&value)
+                        })
+                        .collect(),
+                ),
+                None => return collected,
+            }
+        }
+    }
+
+    async fn close(self) {
+        self.connection
+            .close()
+            .await
+            .unwrap_or_else(|error| panic!("{}: schema probe cannot close: {error}", self.label));
+    }
+}
+
+fn render_value(value: &SqlValue) -> String {
+    match value {
+        SqlValue::Null => "NULL".to_owned(),
+        SqlValue::Integer(number) => number.to_string(),
+        SqlValue::Real(number) => number.to_string(),
+        SqlValue::Text(text) => text.clone(),
+        SqlValue::Blob(bytes) => format!("<blob:{}>", bytes.len()),
+    }
+}
+
+/// Everything the isolation check compares: every schema object (so a stray
+/// `swarm_*` table or index shows up) and the single `peri_store_meta` row.
+#[derive(Debug, PartialEq)]
+struct PeriSchema {
+    objects: Vec<Vec<String>>,
+    swarm_objects: Vec<Vec<String>>,
+    meta: Vec<Vec<String>>,
+}
+
+async fn peri_schema(probe: &SchemaProbe) -> PeriSchema {
+    PeriSchema {
+        objects: probe
+            .rows("SELECT type, name, tbl_name FROM sqlite_master ORDER BY type, name")
+            .await,
+        swarm_objects: probe
+            .rows("SELECT type, name FROM sqlite_master WHERE name LIKE 'swarm%' ORDER BY type, name")
+            .await,
+        meta: probe
+            .rows("SELECT singleton, schema_version, store_id, contract FROM peri_store_meta ORDER BY singleton")
+            .await,
+    }
+}
+
+/// The state database owns exactly the Swarm schema, at the version this build
+/// writes, and carries no Peri canonical object.
+async fn assert_swarm_schema(probe: &SchemaProbe) {
+    let versions = probe.rows("SELECT version FROM swarm_meta").await;
+    assert_eq!(
+        versions,
+        vec![vec![SWARM_STATE_SCHEMA_VERSION.to_string()]],
+        "swarm_meta holds exactly one version row"
+    );
+
+    let tables = probe
+        .rows("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'swarm_%' ORDER BY name")
+        .await;
+    let expected: Vec<Vec<String>> = SWARM_TABLES
+        .iter()
+        .map(|name| vec![(*name).to_owned()])
+        .collect();
+    assert_eq!(
+        tables, expected,
+        "the state database owns the four Swarm tables plus swarm_meta"
+    );
+
+    let index = probe
+        .rows("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'swarm_items_by_id'")
+        .await;
+    assert_eq!(
+        index,
+        vec![vec![
+            "swarm_items_by_id".to_owned(),
+            "swarm_items".to_owned()
+        ]],
+        "the non-unique (logical_id, item_id) index exists on swarm_items"
+    );
+
+    let foreign = probe
+        .rows("SELECT name FROM sqlite_master WHERE name LIKE 'peri%' OR name IN ('threads', 'messages', 'session_bindings') ORDER BY name")
+        .await;
+    assert!(
+        foreign.is_empty(),
+        "the state database must not adopt Peri canonical objects: {foreign:?}"
+    );
+}
+
+/// Canonical MCP declarations for the round trip: `mcp_json` is the only place
+/// the store keeps them, and the value is a test marker, not a credential.
+fn declared_mcp_tools() -> Vec<McpToolSpec> {
+    let mut tool = McpToolSpec::new("s6c2-state", "https://mcp.example.invalid/state");
+    tool.headers.push(McpHeader {
+        name: "x-s6c2-run".to_owned(),
+        value: "not-a-credential".to_owned(),
+    });
+    tool.require_approval = Some(json!("never"));
+    tool.allowed_tools = Some(json!(["lookup"]));
+    vec![tool]
 }
 
 fn now() -> String {
@@ -400,23 +588,73 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     // database; Swarm rows go to the independent state database with its own
     // `swarm_meta` schema.
     let resources = open(&store, &env).await;
+
+    // ── schema, before the state database exists in this process ────────────
+    // The session database carries the Peri schema only, at the version this
+    // build writes (15 since S6c1b removed the `swarm_*` tables from it).
+    let peri_probe = SchemaProbe::open("peri", LOCATOR_ENV).await;
+    let peri_before = peri_schema(&peri_probe).await;
+    assert_eq!(
+        peri_before.meta.len(),
+        1,
+        "peri_store_meta holds exactly one row: {:?}",
+        peri_before.meta
+    );
+    assert_eq!(
+        peri_before.meta[0][1], PERI_SCHEMA_VERSION,
+        "the session database is at the Peri schema version: {:?}",
+        peri_before.meta
+    );
+    assert!(
+        peri_before.swarm_objects.is_empty(),
+        "the session database must carry no swarm table or index: {:?}",
+        peri_before.swarm_objects
+    );
+    eprintln!(
+        "S6c2: peri schema_version={} contract={} schema_objects={} swarm_objects={}",
+        peri_before.meta[0][1],
+        peri_before.meta[0][3],
+        peri_before.objects.len(),
+        peri_before.swarm_objects.len()
+    );
+
+    // The state store opens a second, independent database. Its first open in a
+    // fresh database creates the owned schema and pins `swarm_meta.version`.
     let state_store = Arc::new(
         SwarmStateStore::open(&state_store_config())
             .await
             .expect("open the independent swarm state store"),
     );
+    let swarm_probe = SchemaProbe::open("swarm", STATE_LOCATOR_ENV).await;
+    assert_swarm_schema(&swarm_probe).await;
+    let swarm_schema = swarm_probe
+        .rows("SELECT type, name FROM sqlite_master ORDER BY type, name")
+        .await;
+    eprintln!(
+        "S6c2: swarm schema_version={} objects={:?}",
+        SWARM_STATE_SCHEMA_VERSION,
+        swarm_schema
+            .iter()
+            .map(|row| format!("{}:{}", row[0], row[1]))
+            .collect::<Vec<_>>()
+    );
+
     let store_rows = Arc::clone(&state_store);
     let run = run_id();
-    eprintln!("S6b2 run id: {run}");
-    let logical = LogicalId::parse(&format!("agent-s6b2-child-{run}")).expect("logical id");
+    eprintln!("S6c2 run id: {run}");
+    let logical = LogicalId::parse(&format!("agent-s6c2-child-{run}")).expect("logical id");
     let root_session_id = uuid::Uuid::now_v7().to_string();
     let created_at = now();
+    let declared_mcp = declared_mcp_tools();
+    let declared_mcp_json = McpToolSpec::encode_declaration(&declared_mcp)
+        .expect("encode the canonical MCP declaration")
+        .expect("a non-empty declaration has canonical JSON");
 
-    // The child's item log writes into the **same** Loom database: S4 persists
-    // one row per text delta with a stable `itemId`, and the turn terminal adds
-    // a complete row with the same id. Schema 16 allows that repeated id (it was
-    // fixed in S6b3), so this is the real delta + complete projection — not a
-    // fabricated row set.
+    // The child's item log writes into the **state** database: S4 persists one
+    // row per text delta with a stable `itemId`, and the turn terminal adds a
+    // complete row with the same id. `swarm_items` allows that repeated id
+    // (`item_id` is not unique; S6b3/S6c1a), so this is the real delta + complete
+    // projection — not a fabricated row set.
     let item_store: Arc<dyn SwarmStore> = store_rows.clone();
 
     // The Swarm session row for the Peri root session: the same identity
@@ -429,8 +667,8 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
             cwd: cwd.to_string_lossy().into_owned(),
             state: SessionState::Idle,
             model: Some("stub-model".to_owned()),
-            instructions: Some("s6b2 shared loom store".to_owned()),
-            mcp_tools: Vec::new(),
+            instructions: Some("s6c2 shared loom store".to_owned()),
+            mcp_tools: declared_mcp.clone(),
             environment: EnvironmentRef::none(&logical),
             created_at: created_at.clone(),
             last_activity_at: created_at.clone(),
@@ -448,7 +686,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     // ── a. real Peri host on the remote store, one turn ─────────────────────
     // Open the Swarm turn exactly like `AcpSwarmService::run_turn`: the log owns
     // `running`, the delta rows and the terminal.
-    let request_id = "s6b2-turn-1";
+    let request_id = "s6c2-turn-1";
     log.begin_turn(request_id)
         .await
         .expect("open the swarm turn on the remote store");
@@ -460,7 +698,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
             workspace_root: Some(root.clone()),
             settings_json: Some(settings_json(&base_url)),
             model: None,
-            instructions: Some("s6b2 shared loom store".to_owned()),
+            instructions: Some("s6c2 shared loom store".to_owned()),
             root_session_id: root_session_id.clone(),
         },
         Arc::clone(&log),
@@ -552,6 +790,66 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         "the cached projection equals MAX(seq)"
     );
 
+    // Independent SQL over the state database: the same turn rows exist there,
+    // with one repeated item id across several seqs (the deltas and the
+    // terminal complete row).
+    let item_rows = swarm_probe
+        .rows_with(
+            "SELECT seq, item_id, payload_json FROM swarm_items WHERE logical_id = ?1 ORDER BY seq",
+            vec![SqlValue::Text(logical.as_str().to_owned())],
+        )
+        .await;
+    assert_eq!(
+        item_rows.len(),
+        child_items.len(),
+        "the database holds exactly the rows the store read: {item_rows:?}"
+    );
+    assert!(
+        item_rows.iter().all(|row| row[1] == stream_id),
+        "every persisted row reuses item id {stream_id}: {item_rows:?}"
+    );
+    assert_eq!(
+        item_rows
+            .iter()
+            .filter(|row| row[2].contains("\"complete\":true"))
+            .count(),
+        1,
+        "the complete row is persisted in the state database: {item_rows:?}"
+    );
+    assert!(
+        item_rows
+            .iter()
+            .filter(|row| row[2].contains("\"delta\":true"))
+            .count()
+            >= 2,
+        "delta rows are persisted in the state database: {item_rows:?}"
+    );
+    eprintln!(
+        "S6c2: swarm item rows={} seqs={:?} item_id={stream_id}",
+        item_rows.len(),
+        item_rows
+            .iter()
+            .map(|row| row[0].as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // `mcp_json` is the canonical declaration text, not a derived shape.
+    let mcp_rows = swarm_probe
+        .rows_with(
+            "SELECT mcp_json FROM swarm_sessions WHERE logical_id = ?1",
+            vec![SqlValue::Text(logical.as_str().to_owned())],
+        )
+        .await;
+    assert_eq!(
+        mcp_rows,
+        vec![vec![declared_mcp_json.clone()]],
+        "the state database persists the canonical MCP declaration verbatim"
+    );
+    assert_eq!(
+        child_session_live.mcp_tools, declared_mcp,
+        "the child session row reads its declaration back"
+    );
+
     // Peri session + history, read through the session database.
     let reader = resources.session_resources();
     let session_id = root_session_id.clone();
@@ -602,7 +900,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     // hands its input off to history, leaving no MQ row behind, so this row is
     // what makes MQ persistence observable across the reopen.
     let mq_id = MessageId::new();
-    let mq_text = "s6b2 durable mq row";
+    let mq_text = "s6c2 durable mq row";
     let outcome = reader
         .mq_enqueue(
             &root_session_id,
@@ -629,8 +927,8 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     );
 
     // ── b. Swarm rows through the process-level state store ─────────────────
-    let rows_logical = LogicalId::parse(&format!("agent-s6b2-rows-{run}")).expect("logical id");
-    let binding_env_id = format!("logical-env-s6b2-{run}");
+    let rows_logical = LogicalId::parse(&format!("agent-s6c2-rows-{run}")).expect("logical id");
+    let binding_env_id = format!("logical-env-s6c2-{run}");
     let rows_root_session = uuid::Uuid::now_v7().to_string();
     store_rows
         .swarm_upsert_session(SwarmSessionRow {
@@ -640,8 +938,8 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
             cwd: cwd.to_string_lossy().into_owned(),
             state: SessionState::Running,
             model: Some("stub-model".to_owned()),
-            instructions: Some("s6b2 swarm rows".to_owned()),
-            mcp_tools: Vec::new(),
+            instructions: Some("s6c2 swarm rows".to_owned()),
+            mcp_tools: declared_mcp.clone(),
             environment: EnvironmentRef {
                 kind: EnvironmentKind::None,
                 id: Some(rows_logical.as_str().to_owned()),
@@ -658,11 +956,11 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
             .swarm_append_item(SwarmItemRow {
                 logical_id: rows_logical.as_str().to_owned(),
                 seq,
-                item_id: format!("itim_s6b2_{run}_{seq}"),
+                item_id: format!("itim_s6c2_{run}_{seq}"),
                 kind: ItemKind::Message,
                 source: ItemSource::root(),
                 payload: json!({
-                    "s6b2": true,
+                    "s6c2": true,
                     "seq": seq,
                     "text": format!("swarm row {seq}"),
                     "complete": true,
@@ -676,8 +974,8 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
 
     let input_row = SwarmInputRow {
         logical_id: rows_logical.as_str().to_owned(),
-        input_id: format!("s6b2-input-{run}"),
-        fingerprint: "fp-s6b2-1".to_owned(),
+        input_id: format!("s6c2-input-{run}"),
+        fingerprint: "fp-s6c2-1".to_owned(),
         state: InputState::Accepted,
         created_at: now(),
     };
@@ -692,12 +990,12 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     let binding_row = SwarmBindingRow {
         logical_env_id: binding_env_id.clone(),
         logical_id: rows_logical.as_str().to_owned(),
-        sandbox_id: "sandbox-s6b2".to_owned(),
+        sandbox_id: "sandbox-s6c2".to_owned(),
         workspace_path: cwd.to_string_lossy().into_owned(),
         sandbox_root: root.to_string_lossy().into_owned(),
         settings_profile: Some("sonnet".to_owned()),
         token_file: None,
-        last_run_id: Some("run-s6b2".to_owned()),
+        last_run_id: Some("run-s6c2".to_owned()),
         last_used_at: now(),
     };
     store_rows
@@ -721,6 +1019,27 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         })
         .await
         .expect("project last_item_seq");
+
+    // ── isolation: the state database changed, the session schema did not ────
+    let peri_after_swarm = peri_schema(&peri_probe).await;
+    assert_eq!(
+        peri_after_swarm, peri_before,
+        "creating and writing the Swarm state database must leave the session \
+         database's sqlite_master and peri_store_meta untouched"
+    );
+    eprintln!(
+        "S6c2: isolation OK; peri schema_version={} objects={} swarm_objects={}",
+        peri_after_swarm.meta[0][1],
+        peri_after_swarm.objects.len(),
+        peri_after_swarm.swarm_objects.len()
+    );
+    let swarm_schema_after_writes = swarm_probe
+        .rows("SELECT type, name FROM sqlite_master ORDER BY type, name")
+        .await;
+    assert_eq!(
+        swarm_schema_after_writes, swarm_schema,
+        "writing rows does not change the state database's own objects"
+    );
 
     // ── c. close the child and every deployment connection ──────────────────
     let report = child.shutdown().await;
@@ -797,7 +1116,11 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     assert_eq!(child_session.state, SessionState::Idle);
     assert_eq!(
         child_session.instructions.as_deref(),
-        Some("s6b2 shared loom store")
+        Some("s6c2 shared loom store")
+    );
+    assert_eq!(
+        child_session.mcp_tools, declared_mcp,
+        "the child session's mcp_json round-trips the canonical declaration"
     );
     let reopened_child_items = reopened_swarm
         .swarm_items_after(logical.as_str(), 0, 100)
@@ -822,7 +1145,22 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     assert_eq!(rows_session.state, SessionState::Running);
     assert_eq!(
         rows_session.instructions.as_deref(),
-        Some("s6b2 swarm rows")
+        Some("s6c2 swarm rows")
+    );
+    assert_eq!(
+        rows_session.mcp_tools, declared_mcp,
+        "the second session's mcp_json survives the reopen"
+    );
+    let reopened_mcp = swarm_probe
+        .rows_with(
+            "SELECT mcp_json FROM swarm_sessions WHERE logical_id = ?1",
+            vec![SqlValue::Text(rows_logical.as_str().to_owned())],
+        )
+        .await;
+    assert_eq!(
+        reopened_mcp,
+        vec![vec![declared_mcp_json.clone()]],
+        "the persisted mcp_json is still the canonical declaration after reopen"
     );
     assert_eq!(
         reopened_swarm
@@ -840,7 +1178,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         items.iter().map(|item| item.seq).collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert!(items.iter().all(|item| item.payload["s6b2"] == true));
+    assert!(items.iter().all(|item| item.payload["s6c2"] == true));
     let newest = reopened_swarm
         .swarm_items_before(rows_logical.as_str(), None, 10)
         .await
@@ -870,6 +1208,16 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         .await
         .expect("close the reopened swarm state store");
 
+    // The reopened state store ran its schema check again; that must not touch
+    // the session database either.
+    let peri_after_reopen = peri_schema(&peri_probe).await;
+    assert_eq!(
+        peri_after_reopen, peri_before,
+        "reopening both stores leaves the session database's schema untouched"
+    );
+    peri_probe.close().await;
+    swarm_probe.close().await;
+
     // ── e. no local session database was ever created ───────────────────────
     assert!(
         !local_db.exists(),
@@ -877,12 +1225,118 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         local_db.display()
     );
     eprintln!(
-        "S6c1b: dual-database Loom run OK; checked absent: {}",
+        "S6c2: dual-database Loom run OK; checked absent: {}",
         local_db.display()
     );
 }
 
-// ── 2. connection failure is visible and never falls back locally ──────────
+// ── 2. the second locator is mandatory ──────────────────────────────────────
+
+/// A missing or unreachable Swarm state locator must fail closed: the process
+/// never substitutes the session database for it, and no local SQLite store is
+/// created. `bootstrap::run` maps the open failure to `StateStoreOpen` and
+/// closes the session store instead of continuing on one database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a running Loom for the session-store half of the probe"]
+async fn missing_or_unreachable_state_locator_fails_closed() {
+    clear_telemetry_env();
+    assert_credential_present();
+    let home = home_dir();
+    let local_db = local_session_db(&home);
+    assert!(
+        !local_db.exists(),
+        "precondition: no local session database before the failure probe: {}",
+        local_db.display()
+    );
+
+    let (_workspace_temp, root, _cwd) = workspace();
+    let machine = machine_id();
+    let env = environment(&machine, &root);
+    let session_locator = required_env(LOCATOR_ENV);
+    let mut configuration: BTreeMap<&str, String> = BTreeMap::new();
+    configuration.insert(
+        API_KEY_ENV,
+        "test-deployment-key-not-a-credential".to_owned(),
+    );
+    configuration.insert(SESSION_STORE_ENV, session_locator.clone());
+    configuration.insert(STATE_STORE_ENV, required_env(STATE_LOCATOR_ENV));
+    configuration.insert(STORE_TOKEN_ENV, CREDENTIAL_ENV.to_owned());
+    // The credential value goes into the map (the parser validates that the
+    // named variable is non-empty); it is never printed.
+    configuration.insert(CREDENTIAL_ENV, required_env(CREDENTIAL_ENV));
+    configuration.insert(MACHINE_ID_ENV, MACHINE_ID.to_owned());
+    configuration.insert(WORKSPACE_ROOT_ENV, root.to_string_lossy().into_owned());
+
+    // Missing: a deployment with only the session locator must not parse.
+    let missing = BootstrapConfig::from_env_map(|name| {
+        if name == STATE_STORE_ENV {
+            None
+        } else {
+            configuration.get(name).cloned()
+        }
+    })
+    .expect_err("a deployment without a state store must not parse");
+    assert!(
+        matches!(missing, ConfigError::MissingEnv(STATE_STORE_ENV)),
+        "missing state locator: {missing:?}"
+    );
+    eprintln!("S6c2: missing {STATE_STORE_ENV} -> {missing}");
+
+    // Shared: the same database for both would put the Swarm schema back into
+    // the session database, so it is rejected as a configuration error.
+    let shared = BootstrapConfig::from_env_map(|name| {
+        if name == STATE_STORE_ENV {
+            Some(session_locator.clone())
+        } else {
+            configuration.get(name).cloned()
+        }
+    })
+    .expect_err("a shared locator must not parse");
+    assert!(
+        matches!(&shared, ConfigError::Invalid { variable, .. } if *variable == STATE_STORE_ENV),
+        "shared locator: {shared:?}"
+    );
+    eprintln!("S6c2: shared locator -> {shared}");
+
+    // Unreachable: the session store is real and opens, then the state store
+    // fails on its own connection. Keeping the session database open here shows
+    // that the failure cannot degrade into single-database operation.
+    let resources = open(&deployment(), &env).await;
+    let unreachable = SwarmStateStoreConfig {
+        locator: Url::parse("http://127.0.0.1:9/db/local_default/swarm/main/")
+            .expect("unreachable state locator"),
+        credential_env: CREDENTIAL_ENV.to_owned(),
+    };
+    let error = SwarmStateStore::open(&unreachable)
+        .await
+        .expect_err("an unreachable state database must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("127.0.0.1:9"),
+        "the failure names the state store: {message}"
+    );
+    let credential = required_env(CREDENTIAL_ENV);
+    assert!(
+        !message.contains(&credential),
+        "the failure must not echo the credential"
+    );
+    assert!(
+        matches!(
+            error,
+            SwarmStateError::Connect(_) | SwarmStateError::Schema(_)
+        ),
+        "state store failure class: {error:?}"
+    );
+    close(resources).await;
+    assert!(
+        !local_db.exists(),
+        "a failed state-store open must not create {}",
+        local_db.display()
+    );
+    eprintln!("S6c2: unreachable state store -> {message}");
+}
+
+// ── 3. connection failure is visible and never falls back locally ──────────
 
 /// `d`: an unreachable locator fails the deployment **and** the child open, and
 /// neither path creates a local SQLite session database.
@@ -923,10 +1377,10 @@ async fn unreachable_loom_fails_without_creating_a_local_store() {
         "a failed remote open must not create {}",
         local_db.display()
     );
-    eprintln!("S6b2 failure probe: {message}");
+    eprintln!("S6c2 failure probe: {message}");
 
     // The child path must refuse as well: no silent downgrade to SQLite.
-    let logical = LogicalId::parse("agent-s6b2-failure").expect("logical id");
+    let logical = LogicalId::parse("agent-s6c2-failure").expect("logical id");
     let log = Arc::new(ItemLog::new(
         logical.as_str(),
         Arc::new(peri_swarm::store::MemorySwarmStore::new()),
@@ -956,7 +1410,7 @@ async fn unreachable_loom_fails_without_creating_a_local_store() {
         "the child failure must not create {}",
         local_db.display()
     );
-    eprintln!("S6b2 child failure: {child_error}");
+    eprintln!("S6c2 child failure: {child_error}");
 
     assert!(
         !local_db.exists(),
@@ -964,7 +1418,7 @@ async fn unreachable_loom_fails_without_creating_a_local_store() {
         local_db.display()
     );
     eprintln!(
-        "S6b2: failure path OK; checked absent: {}",
+        "S6c2: failure path OK; checked absent: {}",
         local_db.display()
     );
 }
