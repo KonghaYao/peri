@@ -290,9 +290,12 @@ async fn create_rejects_identity_model_and_validation_errors() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(value["error"]["code"], json!("invalid_logical_id"));
 
+    let missing = std::env::temp_dir()
+        .join("peri-swarm-missing-cwd")
+        .join("definitely-missing");
     let (status, value) = create_session(
         &harness,
-        json!({ "logicalId": "agent-02", "cwd": "/definitely/missing/peri-swarm" }),
+        json!({ "logicalId": "agent-02", "cwd": missing.to_string_lossy() }),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

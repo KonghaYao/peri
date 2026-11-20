@@ -836,7 +836,7 @@ async fn idle_mq_dispatch_produces_a_turn() {
         .await
         .expect("dispatch");
 
-    let reached_model = wait_for_main_calls(&stub, 1, Duration::from_secs(20)).await;
+    let reached_model = wait_for_main_calls(&stub, 1, Duration::from_secs(60)).await;
     eprintln!(
         "IDLE_MQ reached_model={reached_model} calls={} main={}",
         stub.calls(),

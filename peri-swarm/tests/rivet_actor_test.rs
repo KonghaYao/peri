@@ -317,6 +317,7 @@ fn is_strictly_increasing(items: &[peri_swarm::domain::ItemView]) -> bool {
 
 // ── test ────────────────────────────────────────────────────────────────────
 
+#[ignore = "requires a local Rivet engine; run with --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
     if std::env::var_os("SWARM_TRACE_LOG").is_some() {
