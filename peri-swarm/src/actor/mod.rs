@@ -12,7 +12,9 @@ pub mod projection;
 pub mod reader;
 pub mod runtime;
 pub mod service;
+pub mod swarm;
 
 pub use reader::ItemLog;
 pub use runtime::{AcpChild, CancelTarget, ChildConfig, ChildShutdown};
 pub use service::{AcpSwarmService, ActorServiceConfig};
+pub use swarm::{SwarmActor, ACTOR_NAME};

@@ -17,6 +17,9 @@ async-trait.workspace = true
 axum.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
+# Pinned to the engine generation verified in `.peri/plans/env-probe.md`
+# (`Rivet 3.1.1`). 3.1.2-rc.1 is deliberately excluded.
+rivetkit = "=3.1.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
