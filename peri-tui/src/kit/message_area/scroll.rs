@@ -16,13 +16,6 @@ use self::auto_follow::{
     anchor_scroll_target, consume_reset_force_bottom, should_follow_after_user_scroll,
 };
 #[cfg(test)]
-use self::geometry::round_divide;
-use self::geometry::{
-    ScrollbarPress, compute_thumb_geometry, scrollbar_drag_offset, scrollbar_press,
-};
-#[cfg(test)]
-use self::geometry::{position_to_scroll_y, thumb_start_to_position};
-#[cfg(test)]
 use self::gesture::{entry_click_target, freeze_down, is_click, is_click_for};
 use self::gesture::{selection_bounds_on_release, selection_captures_pointer, selection_position};
 use self::throttle::apply_scroll;

@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use crate::kit::message_area::props::ScrollbarFields;
 use ratatui_kit::prelude::*;
 
@@ -7,9 +5,13 @@ use super::ScrollPos;
 
 // ── 滚动速度控制 ──────────────────────────────────────────────────────────
 
-/// 鼠标滚轮每格的滚动行数倍数。
-/// pub(crate)：面板滚轮仲裁（panel_scroll.rs）复用同一步长，统一跨区域滚动速度。
-pub(crate) const SCROLL_LINES: u16 = 3;
+/// 鼠标滚轮步长来自组件，面板滚轮仲裁（panel_scroll.rs）复用同一步长。
+pub(crate) use peri_tui_components::scrollbar::SCROLL_LINES;
+
+/// 有界偏移运算由组件共享；宿主提供时钟与配置。
+#[cfg(test)]
+pub(super) use peri_tui_components::scrollbar::bounded_offset as apply_delta_to_offset;
+pub(in crate::kit::message_area) type DragThrottle = peri_tui_components::scrollbar::Throttle;
 
 /// mod.rs 在 total_visual_rows 上追加的滚动缓冲行数（仅影响 max_scroll /
 /// content_length，不计入实际渲染内容）。吸底跟随恢复判定需扣除该缓冲，
@@ -56,31 +58,15 @@ pub(crate) fn scroll_frame_ms() -> u64 {
 }
 
 // ── 拖拽选中节流 ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub(in crate::kit::message_area) struct DragThrottle {
-    pub(in crate::kit::message_area) last_flush: Instant,
-}
-
-impl Default for DragThrottle {
-    fn default() -> Self {
-        Self {
-            last_flush: peri_time::monotonic_now(),
-        }
-    }
-}
+// `DragThrottle` 是组件的 `Throttle`：宿主传入 monotonic 时钟与 fps 间隔。
 
 // ── 滚动落地（私有）────────────────────────────────────────────────────
 
 /// 纯函数：offset 应用滚动量后的新位置（正=向下，负=向上；越界封顶/封底）。
 /// 调用方负责先做哨兵归一化（见 [`land_scroll_delta`]）。
 #[must_use]
-pub(super) fn apply_delta_to_offset(offset: usize, delta: i32, max_scroll: usize) -> usize {
-    if delta > 0 {
-        offset.saturating_add(delta as usize).min(max_scroll)
-    } else {
-        offset.saturating_sub((-delta) as usize)
-    }
+fn apply_delta(offset: usize, delta: i32, max_scroll: usize) -> usize {
+    peri_tui_components::scrollbar::bounded_offset(offset, delta, max_scroll)
 }
 
 /// 纯函数：一次滚轮事件落地后的 offset。
@@ -89,7 +75,7 @@ pub(super) fn apply_delta_to_offset(offset: usize, delta: i32, max_scroll: usize
 /// 底部，再应用 delta。每个事件独立调用，不做时间窗合并——合并会让一次落地行数
 /// = `SCROLL_LINES` × 窗口内事件数，随轮速/相位变化，步长忽大忽小。
 pub(super) fn land_scroll_delta(offset: usize, delta: i32, max_scroll: usize) -> usize {
-    apply_delta_to_offset(offset.min(max_scroll), delta, max_scroll)
+    apply_delta(offset.min(max_scroll), delta, max_scroll)
 }
 
 /// 滚轮事件入口：每个事件立即把 delta（正=向下，负=向上）落进 scroll_state，

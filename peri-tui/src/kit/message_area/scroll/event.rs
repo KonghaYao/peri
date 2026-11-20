@@ -7,6 +7,7 @@ use crate::kit::message_area::selection::AnchorResolution;
 use crate::kit::message_area::selection::SlotIndex;
 use crate::kit::mouse_router;
 use crate::kit::text_selection::TextSelection;
+use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
 use ratatui_kit::crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
@@ -272,14 +273,17 @@ pub(in crate::kit::message_area) fn handle_event(
             if scrollbar_owns_pointer(drag_active, on_scrollbar_col, selection_captured) {
                 let fields = *scrollbar_fields.read();
                 let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
-                if let Some(geo) = super::compute_thumb_geometry(&fields, sb_area) {
+                if let Some(bar) = VerticalBar::new(
+                    sb_area.height,
+                    fields.viewport_length,
+                    fields.content_length,
+                    fields.offset,
+                ) {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) if on_scrollbar_col => {
                             // 端点、拖块与空轨的命中语义由几何层统一给出（与绘制同源）。
-                            let grab = match super::scrollbar_press(
-                                mouse.row, sb_area, &geo, max_scroll,
-                            ) {
-                                super::ScrollbarPress::Top => {
+                            let grab = match bar.press(sb_area, mouse.row) {
+                                VerticalPress::Top => {
                                     scroll_state.write_no_update().set_offset(0);
                                     super::update_follow_on_scroll(follow_bottom, max_scroll, 0);
                                     request_pages_after_scroll(
@@ -290,7 +294,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                     );
                                     return EventResult::Consumed;
                                 }
-                                super::ScrollbarPress::Bottom => {
+                                VerticalPress::Bottom => {
                                     scroll_state.write_no_update().set_offset(max_scroll);
                                     super::update_follow_on_scroll(
                                         follow_bottom,
@@ -299,8 +303,8 @@ pub(in crate::kit::message_area) fn handle_event(
                                     );
                                     return EventResult::Consumed;
                                 }
-                                super::ScrollbarPress::Thumb { grab } => grab,
-                                super::ScrollbarPress::Track { offset } => {
+                                VerticalPress::Thumb { grab } => grab,
+                                VerticalPress::Track { offset } => {
                                     scroll_state.write_no_update().set_offset(offset);
                                     super::update_follow_on_scroll(
                                         follow_bottom,
@@ -315,7 +319,7 @@ pub(in crate::kit::message_area) fn handle_event(
                                         None,
                                     );
                                     // 轨道点击后继续拖拽时，thumb 中心跟随鼠标。
-                                    (geo.thumb_length / 2) as u16
+                                    (bar.thumb_len / 2) as u16
                                 }
                             };
                             // 记录拖拽状态——render 不依赖 active，用 write_no_update
@@ -323,29 +327,25 @@ pub(in crate::kit::message_area) fn handle_event(
                                 let mut s = scrollbar_drag.write_no_update();
                                 s.active = true;
                                 s.thumb_offset = grab;
-                                s.last_flush = peri_time::monotonic_now();
+                                s.throttle.reset();
                             }
                             // 清除手势按下记录，防止 fallthrough 冲突
                             *gesture.write_no_update() = None;
                             return EventResult::Consumed;
                         }
                         MouseEventKind::Drag(MouseButton::Left) if drag_active => {
-                            // 16ms 节流——和滚轮 / 文本 Drag 保持一致
+                            // 节流间隔由宿主配置，时间由宿主时钟提供。
                             let now = peri_time::monotonic_now();
+                            if !scrollbar_drag
+                                .write_no_update()
+                                .throttle
+                                .allow(now, Duration::from_millis(super::scroll_frame_ms()))
                             {
-                                let d = scrollbar_drag.read();
-                                if now.duration_since(d.last_flush)
-                                    < Duration::from_millis(super::scroll_frame_ms())
-                                {
-                                    return EventResult::Consumed;
-                                }
+                                return EventResult::Consumed;
                             }
-                            scrollbar_drag.write_no_update().last_flush = now;
                             // 保持 grab：new_thumb_start_row = mouse.row - grab
                             let grab = scrollbar_drag.read().thumb_offset;
-                            let target = super::scrollbar_drag_offset(
-                                mouse.row, grab, sb_area, &geo, max_scroll,
-                            );
+                            let target = bar.drag_offset(sb_area, mouse.row, grab);
                             scroll_state.write_no_update().set_offset(target);
                             super::update_follow_on_scroll(follow_bottom, max_scroll, target);
                             // 拖到顶端同样是「滚动贴边」（REQ-C01-1）。
@@ -444,11 +444,9 @@ pub(in crate::kit::message_area) fn handle_event(
                         // parking_lot 同 thread read+write 冲突会 panic。
                         let pending = *gesture.read();
                         let now = peri_time::monotonic_now();
-                        let within_throttle_window = {
-                            let dt = drag_throttle.read();
-                            now.duration_since(dt.last_flush)
-                                < Duration::from_millis(super::scroll_frame_ms())
-                        };
+                        let interval = Duration::from_millis(super::scroll_frame_ms());
+                        let within_throttle_window =
+                            !drag_throttle.read().would_allow(now, interval);
                         match super::drag_step(
                             pending,
                             (mouse.column, mouse.row),
@@ -489,7 +487,7 @@ pub(in crate::kit::message_area) fn handle_event(
                             DragAction::Throttled => return EventResult::Consumed,
                             DragAction::UpdateOnly => {
                                 // 节流通过（未升级）——刷新节流时间戳
-                                drag_throttle.write_no_update().last_flush = now;
+                                drag_throttle.write_no_update().allow(now, interval);
                                 // gesture 为 None（无 Down 记录，如事件丢失）→
                                 // 现状行为：update_drag 空转（dragging=false 时
                                 // no-op；已升级后的拖拽延续则跟随鼠标）。
@@ -517,7 +515,7 @@ pub(in crate::kit::message_area) fn handle_event(
                             DragAction::KeepPending => {
                                 // 容差内（手抖）：Pending 原样保留，零副作用——
                                 // 仅刷新节流时间戳（与现状节流逻辑一致）。
-                                drag_throttle.write_no_update().last_flush = now;
+                                drag_throttle.write_no_update().allow(now, interval);
                                 return EventResult::Consumed;
                             }
                         }

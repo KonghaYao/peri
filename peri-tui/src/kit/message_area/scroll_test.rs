@@ -11,6 +11,7 @@ use super::WrappedLineInfo;
 
 use super::event;
 
+use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
 use ratatui_kit::crossterm::event::{MouseButton, MouseEventKind};
 
 // ── ScrollPos（usize 滚动状态）测试 ───────────────────────────────────
@@ -238,100 +239,16 @@ fn test_is_scrollbar_column_text_area() {
     assert!(!super::is_scrollbar_column(88, area));
 }
 
-#[test]
-fn test_compute_thumb_geometry_no_overflow_returns_none() {
-    let fields = ScrollbarFields {
-        content_length: 50,
-        position: 0,
-        viewport_length: 60,
-    };
-    let area = make_rect(0, 0, 80, 24);
-    assert!(super::compute_thumb_geometry(&fields, area).is_none());
-}
-
-#[test]
-fn test_compute_thumb_geometry_thumb_length_clamped_to_one() {
-    let fields = ScrollbarFields {
-        content_length: 1000,
-        position: 0,
-        viewport_length: 10,
-    };
-    let area = make_rect(0, 0, 80, 24);
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
-    assert!(geo.thumb_length >= 1);
-    assert!(geo.thumb_length <= geo.track_length);
-    // content=1000, viewport=10, track=22 → thumb ≈ round(10*22/1009) = round(0.218) = 0 → clamp 到 1
-    assert_eq!(geo.thumb_length, 1);
-}
-
-#[test]
-fn test_compute_thumb_geometry_track_length_minus_two() {
-    let fields = ScrollbarFields {
-        content_length: 200,
-        position: 100,
-        viewport_length: 20,
-    };
-    let area = make_rect(0, 0, 80, 24);
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
-    assert_eq!(geo.track_length, 22); // 24 - 2
-}
-
-#[test]
-fn test_thumb_start_to_position_at_top() {
-    let fields = ScrollbarFields {
-        content_length: 200,
-        position: 100,
-        viewport_length: 20,
-    };
-    let area = make_rect(0, 0, 80, 24);
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
-    let pos = super::thumb_start_to_position(0, &geo);
-    assert_eq!(pos, 0);
-}
-
-#[test]
-fn test_thumb_start_to_position_at_bottom() {
-    let fields = ScrollbarFields {
-        content_length: 200,
-        position: 0,
-        viewport_length: 20,
-    };
-    let area = make_rect(0, 0, 80, 24);
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
-    let max_thumb_start = geo.track_length - geo.thumb_length;
-    let pos = super::thumb_start_to_position(max_thumb_start, &geo);
-    // thumb 到底 → position 应接近 max_position（=199），允许 ±2 舍入误差
-    assert!(
-        pos >= geo.max_position.saturating_sub(2),
-        "thumb 到底时 position 应接近 max_position，实际 = {}，max = {}",
-        pos,
-        geo.max_position
-    );
-}
-
-#[test]
-fn test_thumb_start_to_position_clamps_to_max() {
-    let fields = ScrollbarFields {
-        content_length: 100,
-        position: 0,
-        viewport_length: 10,
-    };
-    let area = make_rect(0, 0, 80, 24);
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
-    let pos = super::thumb_start_to_position(usize::MAX, &geo);
-    assert_eq!(pos, geo.max_position);
-}
-
-// ── 纵向滚动条：真实 Buffer 命中 + 拖到底 ────────────────────────────────
+// ── 纵向滚动条：消息区字段 → 组件几何 → 真实 Buffer ──────────────────────
 
 /// 验收几何：内容 1000 行、视口/滚动条高 10 行 → 真实底部偏移 990。
 const LONG_CONTENT: usize = 1000;
 const LONG_VIEWPORT: usize = 10;
 
-fn long_fields(position: usize) -> ScrollbarFields {
+fn long_fields(offset: usize) -> ScrollbarFields {
     ScrollbarFields {
         content_length: LONG_CONTENT,
-        position,
+        offset,
         viewport_length: LONG_VIEWPORT,
     }
 }
@@ -355,12 +272,23 @@ fn paint_scrollbar(area: Rect, fields: &ScrollbarFields) -> ratatui::buffer::Buf
                 &mut drawer,
                 area,
                 fields.content_length,
-                fields.position,
+                fields.offset,
                 fields.viewport_length,
             );
         })
         .expect("滚动条渲染成功");
     terminal.backend().buffer().clone()
+}
+
+/// 滚轮事件层用同一组字段构造的命中几何。
+fn fields_bar(fields: &ScrollbarFields, area: Rect) -> VerticalBar {
+    VerticalBar::new(
+        area.height,
+        fields.viewport_length,
+        fields.content_length,
+        fields.offset,
+    )
+    .expect("应有溢出")
 }
 
 /// Buffer 中实际涂成拖块的轨道行（thumb 样式 = 主题 dim 前景+背景）。
@@ -377,72 +305,50 @@ fn painted_thumb_rows(buf: &ratatui::buffer::Buffer, area: Rect) -> Vec<u16> {
 }
 
 #[test]
-fn scrollbar_thumb_painted_rows_match_hit_geometry() {
+fn scrollbar_painted_thumb_rows_match_hit_geometry_at_both_ends() {
     let area = scrollbar_area();
-    // 拖块在最底部：position = content - 1（消息区正向映射的终点）。
-    let fields = long_fields(LONG_CONTENT - 1);
-    let buf = paint_scrollbar(area, &fields);
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
-    let expected: Vec<u16> = (0..geo.thumb_length as u16)
-        .map(|i| area.y + 1 + geo.thumb_start as u16 + i)
-        .collect();
-    assert_eq!(
-        painted_thumb_rows(&buf, area),
-        expected,
-        "真实 Buffer 的拖块行必须与命中几何一致"
-    );
-    // 到底时拖块画在可移动轨道最后一格（▼ 之上）：命中该格即拖到底。
-    assert_eq!(expected, vec![area.y + area.height - 2]);
+    for (offset, expected_start) in [(0, 0), (LONG_CONTENT - LONG_VIEWPORT, 7)] {
+        let fields = long_fields(offset);
+        let buf = paint_scrollbar(area, &fields);
+        let bar = fields_bar(&fields, area);
+        assert_eq!(bar.thumb_start, expected_start);
+        let expected: Vec<u16> = (0..bar.thumb_len as u16)
+            .map(|i| area.y + 1 + bar.thumb_start as u16 + i)
+            .collect();
+        assert_eq!(
+            painted_thumb_rows(&buf, area),
+            expected,
+            "真实 Buffer 的拖块行必须与命中几何一致"
+        );
+    }
 }
 
 #[test]
-fn scrollbar_drag_to_last_cell_reaches_bottom_offset() {
+fn scrollbar_drag_to_last_cell_reaches_990_in_message_area() {
     let area = scrollbar_area();
-    let fields = long_fields(LONG_CONTENT - 1);
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
     let max_scroll = LONG_CONTENT - LONG_VIEWPORT;
     assert_eq!(max_scroll, 990);
-
-    // 可移动轨道最后一格 = track_length - 1（thumb 为 1 格时即 thumb_start 上限）。
-    let last_track_cell = geo.track_length - 1;
-    let position = super::thumb_start_to_position(last_track_cell, &geo);
-    assert_eq!(
-        super::position_to_scroll_y(position, geo.max_position, max_scroll),
-        max_scroll,
-        "拖块拖到最后一格必须与点击 ▼ 一样得到偏移 990（旧公式为 876）"
-    );
-}
-
-#[test]
-fn scrollbar_press_track_end_and_bottom_arrow_reach_bottom_offset() {
-    let area = scrollbar_area();
-    let max_scroll = LONG_CONTENT - LONG_VIEWPORT;
-    let top = long_fields(0);
-    let geo = super::compute_thumb_geometry(&top, area).expect("应有溢出");
-    let last_track_row = area.y + area.height - 2;
 
     // 拖块在顶部时点击轨道最后一格 → 990（与 ▼ 一致）。
+    let top = fields_bar(&long_fields(0), area);
     assert_eq!(
-        super::scrollbar_press(last_track_row, area, &geo, max_scroll),
-        super::ScrollbarPress::Track { offset: 990 }
+        top.press(area, area.y + area.height - 2),
+        VerticalPress::Track { offset: 990 }
     );
-    // ▼ 箭头行 → Bottom，事件层写入 max_scroll = 990。
     assert_eq!(
-        super::scrollbar_press(area.y + area.height - 1, area, &geo, max_scroll),
-        super::ScrollbarPress::Bottom
+        top.press(area, area.y + area.height - 1),
+        VerticalPress::Bottom
     );
-    assert_eq!(max_scroll, 990);
 
     // 拖块已在最后一格：按下不跳转，继续拖拽仍是 990。
-    let bottom = long_fields(LONG_CONTENT - 1);
-    let geo = super::compute_thumb_geometry(&bottom, area).expect("应有溢出");
+    let bottom = fields_bar(&long_fields(max_scroll), area);
     assert_eq!(
-        super::scrollbar_press(last_track_row, area, &geo, max_scroll),
-        super::ScrollbarPress::Thumb { grab: 0 }
+        bottom.press(area, area.y + area.height - 2),
+        VerticalPress::Thumb { grab: 0 }
     );
     assert_eq!(
-        super::scrollbar_drag_offset(last_track_row, 0, area, &geo, max_scroll),
-        990
+        bottom.drag_offset(area, area.y + area.height - 2, 0),
+        max_scroll
     );
 }
 
@@ -453,24 +359,27 @@ fn scrollbar_drag_from_thumb_middle_off_column_reaches_bottom_and_restores_follo
     let content = 100usize;
     let viewport = 20usize;
     let max_scroll = content - viewport;
-    let scroll_y = 40usize;
-    // 消息区正向映射：position = scroll_y * (content - 1) / max_scroll。
     let fields = ScrollbarFields {
         content_length: content,
-        position: scroll_y * (content - 1) / max_scroll,
+        offset: 40,
         viewport_length: viewport,
     };
-    let geo = super::compute_thumb_geometry(&fields, area).expect("应有溢出");
+    let bar = fields_bar(&fields, area);
     let rows = painted_thumb_rows(&paint_scrollbar(area, &fields), area);
     assert!(rows.len() >= 2, "用例需要多格拖块才能从「中部」按下");
 
     // 1) 从拖块中部按下：锁定抓取偏移，不跳转。
     let press_row = rows[rows.len() / 2];
-    let grab = match super::scrollbar_press(press_row, area, &geo, max_scroll) {
-        super::ScrollbarPress::Thumb { grab } => grab,
+    let grab = match bar.press(area, press_row) {
+        VerticalPress::Thumb { grab } => grab,
         other => panic!("拖块中部按下应命中拖块，实际 {other:?}"),
     };
     assert_eq!(grab, 1);
+    assert_eq!(
+        bar.drag_offset(area, press_row, grab),
+        fields.offset,
+        "按下后未移动不改变偏移"
+    );
 
     // 2) 指针移出滚动条列：拖拽仍归滚动条所有。
     let off_column = area.x - 10;
@@ -478,8 +387,7 @@ fn scrollbar_drag_from_thumb_middle_off_column_reaches_bottom_and_restores_follo
     assert!(super::event::scrollbar_owns_pointer(true, false, false));
 
     // 3) 拖到 ▼ 上方的最后一格 → 真实底部。
-    let offset =
-        super::scrollbar_drag_offset(area.y + area.height - 2, grab, area, &geo, max_scroll);
+    let offset = bar.drag_offset(area, area.y + area.height - 2, grab);
     assert_eq!(offset, max_scroll);
     assert_eq!(offset, 80);
 
@@ -489,57 +397,10 @@ fn scrollbar_drag_from_thumb_middle_off_column_reaches_bottom_and_restores_follo
 }
 
 #[test]
-fn test_round_divide_basic() {
-    assert_eq!(super::round_divide(10, 4), 3); // (10+2)/4 = 3
-    assert_eq!(super::round_divide(8, 4), 2); // (8+2)/4 = 2
-    assert_eq!(super::round_divide(7, 0), 0);
-    assert_eq!(super::round_divide(0, 5), 0);
-}
-
-#[test]
 fn test_scrollbar_drag_state_default() {
     let s = ScrollbarDragState::default();
     assert!(!s.active);
     assert_eq!(s.thumb_offset, 0);
-}
-
-#[test]
-fn test_position_to_scroll_y_linear() {
-    // max_position=99, max_scroll=90（content=100, viewport=10）
-    // position=0 → scroll_y=0
-    assert_eq!(super::position_to_scroll_y(0, 99, 90), 0);
-    // position=99 → scroll_y=99*90/99 = 90
-    assert_eq!(super::position_to_scroll_y(99, 99, 90), 90);
-    // position=50 → ceil(50*90/99) = ceil(45.45) = 46（ceil 反推，与正向 floor 互逆）
-    assert_eq!(super::position_to_scroll_y(50, 99, 90), 46);
-}
-
-#[test]
-fn test_position_to_scroll_y_ceil_hits_bottom() {
-    // [Fix] 用 ceil 后，thumb 拖到接近底部时就该映射到 max_scroll，
-    // 而不是必须恰好拖到 max_position。例如 max_scroll=2, max_position=9 时，
-    // position=8（89%）应映射到 scroll_y=2（到底）
-    // ceil(8*2/9) = ceil(1.78) = 2
-    assert_eq!(super::position_to_scroll_y(8, 9, 2), 2);
-    // ceil(7*2/9) = ceil(1.56) = 2
-    assert_eq!(super::position_to_scroll_y(7, 9, 2), 2);
-    // ceil(6*2/9) = ceil(1.33) = 2
-    assert_eq!(super::position_to_scroll_y(6, 9, 2), 2);
-    // ceil(4*2/9) = ceil(0.89) = 1
-    assert_eq!(super::position_to_scroll_y(4, 9, 2), 1);
-}
-
-#[test]
-fn test_position_to_scroll_y_zero_max_position() {
-    // max_position=0（content=1）→ 总是 0
-    assert_eq!(super::position_to_scroll_y(0, 0, 0), 0);
-    assert_eq!(super::position_to_scroll_y(5, 0, 10), 0);
-}
-
-#[test]
-fn test_position_to_scroll_y_zero_max_scroll() {
-    // max_scroll=0（content <= viewport）→ 总是 0
-    assert_eq!(super::position_to_scroll_y(5, 100, 0), 0);
 }
 
 // ── §8.1 `↓ New output` 指示器（Slice 2）────────────────────────────────

@@ -6,7 +6,8 @@ This crate owns rendering and local interaction state only. It does not import
 Peri Agent, Session, MCP, configuration, persistence, or application atoms. It
 also owns the business-independent renderers moved down from the app: Markdown
 (`markdown::*`), OpenUI fence rendering (`genui::*`), width-safe text wrapping
-(`text::wrap_by_width`) and terminal text safety (`markdown::safety`).
+(`text::wrap_by_width`), display-column selection slices (`selection::*`) and
+terminal text safety (`markdown::safety`).
 
 | Primitive | Caller supplies | Component owns |
 | --- | --- | --- |
@@ -18,7 +19,10 @@ also owns the business-independent renderers moved down from the app: Markdown
 | `overlay::OverlayFrame` | title line, border/title styles, area | top/bottom borders, centred title, `inner()` region and `hit()` (inside/border/outside); never clears |
 | `spinner::Spinner` | frame set, external frame index, icon style, pre-formatted text line | frame selection (`frame % len`) and `icon + space + text` composition |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
-| `scrollbar::vertical_scrollbar` | thumb and arrow styles | scrollbar appearance |
+| `panel_layout` | terminal height, theme min/max panel height | transcript reserve, border rows and first-frame content height |
+| `scrollbar::VerticalBar` | bar height, viewport rows, content rows, raw offset, thumb/arrow styles | thumb geometry shared by painting and hit testing; `press`/`drag_offset` map both movable-track ends to `0`/`max_offset` |
+| `scrollbar::{SCROLL_LINES, bounded_offset, Throttle}` | delta, max offset, caller clock and interval | three-row wheel step, bounded offset arithmetic and caller-time throttling |
+| `selection` | line, plain text, visual endpoints | display-column→byte conversion, grapheme-safe slices, Paragraph-based wrap row starts and per-line byte ranges |
 | `markdown::parse_markdown*` | source text, width, palette, base foreground | typed segments (text/table/image/genui/mermaid), chunk cache |
 | `markdown::table_data_to_lines` | table data, table theme, width | unicode grid layout |
 | `markdown::safety` | untrusted display fields | control-character filtering and URL classification |
@@ -57,8 +61,10 @@ is the primary input and mirrors the real TUI:
   the selection by three rows, and the popup's own height/rows are printed below
   the frame;
 - the wheel scrolls lists by three rows per notch — the host's `SCROLL_LINES` — and
-  drives the scrollbar story, without moving the list selection; the bar itself has
-  no click handler, as in the app;
+  drives the scrollbar story, without moving the list selection. The scrollbar
+  story presses and drags the thumb through the same `VerticalBar` geometry it
+  paints, so grabbing the thumb middle does not jump and the last movable cell
+  reaches the real bottom;
 - the Markdown and OpenUI stories feed real source through `parse_markdown` →
   typed segments → `table_data_to_lines` / `genui::render`; the wheel scrolls the
   document by the same three rows and clamps at the rendered content height.

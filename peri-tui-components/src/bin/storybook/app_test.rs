@@ -234,19 +234,44 @@ fn scrollbar_wheel_moves_position() {
     let area = Rect::new(0, 10, 40, 10);
     let wheel = mouse(MouseEventKind::ScrollDown, 1, 10);
     assert!(handle_story_mouse(&mut app.state, &wheel, area));
-    let StoryState::Scrollbar { position, total } = &app.state else {
+    let StoryState::Scrollbar {
+        position, total, ..
+    } = &app.state
+    else {
         panic!("expected scrollbar state");
     };
     assert_eq!(*position, 53);
     assert_eq!(*total, 100);
 
-    // A click on the bar itself is consumed without moving it.
-    let click = mouse(MouseEventKind::Down(MouseButton::Left), 1, 10);
+    // Pressing empty track jumps to the centred offset and starts a drag.
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 0, 12);
     assert!(handle_story_mouse(&mut app.state, &click, area));
+    let StoryState::Scrollbar { position, grab, .. } = &app.state else {
+        panic!("expected scrollbar state");
+    };
+    assert_eq!(*position, 13, "track cell 1 of 7 maps to 13/90");
+    assert_eq!(*grab, Some(0), "track press grabs the thumb centre");
+}
+
+#[test]
+fn scrollbar_thumb_press_keeps_offset_and_drag_reaches_bottom() {
+    let mut app = App::new(2);
+    app.select_variant(1); // offset 50 / content 100 / viewport 10 → thumb at track cell 4
+    let area = Rect::new(0, 10, 40, 10);
+    let press = mouse(MouseEventKind::Down(MouseButton::Left), 0, 15);
+    assert!(handle_story_mouse(&mut app.state, &press, area));
+    let StoryState::Scrollbar { position, grab, .. } = &app.state else {
+        panic!("expected scrollbar state");
+    };
+    assert_eq!(*position, 50, "grabbing the thumb must not jump");
+    assert_eq!(*grab, Some(0));
+
+    let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 30, 18);
+    assert!(handle_story_mouse(&mut app.state, &drag, area));
     let StoryState::Scrollbar { position, .. } = &app.state else {
         panic!("expected scrollbar state");
     };
-    assert_eq!(*position, 53);
+    assert_eq!(*position, 90, "last movable cell is the real bottom");
 }
 
 #[test]

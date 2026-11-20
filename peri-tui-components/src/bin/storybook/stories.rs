@@ -5,7 +5,8 @@
 //! - List: left-click is "click as enter" (selection); header/footer rows are inert and
 //!   the scrollbar column is excluded; the wheel scrolls the viewport by `WHEEL_ROWS`
 //!   (the host's `SCROLL_LINES`) without moving the selection.
-//! - Scrollbar: the wheel moves the position; clicking the bar itself is ignored.
+//! - Scrollbar: the wheel moves the offset; press/drag uses the same `VerticalBar`
+//!   geometry as painting, so grabbing the thumb middle does not jump.
 //! - 文档：Markdown 与 OpenUI 围栏走真实渲染链路；滚轮滚动 `WHEEL_ROWS` 行。
 //!   正文按列宽折行；Mermaid 字符图不折行，超出宽度时底部出现可拖动的横向
 //!   滚动条，横向滚轮与拖动都能移动视图。GenUI 按钮只展示鼠标按下态，不执行动作。
@@ -32,14 +33,14 @@ use peri_tui_components::completion::{CompletionPopup, CompletionRow, Completion
 use peri_tui_components::list::ListMetrics;
 use peri_tui_components::list_nav::scroll_start_for_selected;
 use peri_tui_components::panel_mouse::is_scrollbar_column;
-use peri_tui_components::scrollbar::vertical_scrollbar;
+use peri_tui_components::scrollbar::{VerticalBar, VerticalPress, bounded_offset};
 use peri_tui_components::textarea::{TextArea, TextAreaState, viewport_window, wrap_text};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, ScrollbarState, StatefulWidget, StatefulWidgetRef, Widget};
+use ratatui::widgets::{Paragraph, StatefulWidgetRef, Widget};
 use unicode_width::UnicodeWidthChar;
 
 pub(crate) const ACCENT: Color = Color::Cyan;
@@ -99,8 +100,11 @@ pub(crate) enum StoryState {
         reveal_last: bool,
     },
     Scrollbar {
+        /// First visible content row (raw offset, not ratatui's item position).
         position: usize,
         total: usize,
+        /// Thumb drag in progress (grab offset inside the thumb).
+        grab: Option<u16>,
     },
     /// 内联补全列表：固定输入，点击命中与绘制共用同一个 `CompletionPopup` 窗口。
     Completion {
@@ -121,9 +125,7 @@ pub(crate) enum StoryState {
     /// 流式文档：只渲染已到达的前缀；进度由拖拽条或 `[ auto ]` 的 3 秒播放决定。
     Streaming(StreamingDocument),
     /// A non-animated tui-chart gallery frame; `demo` indexes `charts::DEMOS`.
-    Chart {
-        demo: usize,
-    },
+    Chart { demo: usize },
     /// 确认 / 下载弹窗：共享外框，确认与滚轮路由留在宿主。
     Overlay(overlay::OverlayState),
     /// 无状态活动指示器：帧序号与帧集由宿主提供。
@@ -180,7 +182,11 @@ fn list_state(
 }
 
 fn scrollbar_state(position: usize, total: usize) -> StoryState {
-    StoryState::Scrollbar { position, total }
+    StoryState::Scrollbar {
+        position,
+        total,
+        grab: None,
+    }
 }
 
 fn textarea_placeholder_initial() -> StoryState {
@@ -892,8 +898,10 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
             footer,
             reveal_last,
         } => render_list(area, buf, *selected, scroll, *header, *footer, reveal_last),
-        StoryState::Scrollbar { position, total } => {
-            render_scrollbar(area, buf, *position, *total);
+        StoryState::Scrollbar {
+            position, total, ..
+        } => {
+            render_scrollbar(area, buf, *position, *total, area.height);
         }
         StoryState::Completion { fixture, selected } => {
             render_completion(fixture, *selected, area, buf);
@@ -1057,45 +1065,37 @@ fn render_list(
 
     if count > visible && area.height >= 3 {
         let bar_area = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
-        // ratatui 的 position 取值是 0..=max_scroll：content_length 取
-        // max_scroll + 1，thumb 才会在最后一页贴到轨道底；视口高度单独给出。
-        let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
-            .position(scroll)
-            .viewport_content_length(visible);
-        StatefulWidget::render(
-            vertical_scrollbar(Style::new().bg(ACCENT), muted_style()),
-            bar_area,
-            buf,
-            &mut state,
-        );
+        // Raw offset and viewport; the same bar paints and hit-tests in the host.
+        if let Some(bar) = VerticalBar::new(area.height, visible, count, scroll) {
+            bar.paint(bar_area, buf, Style::new().bg(ACCENT), muted_style());
+        }
     }
 }
 
-fn render_scrollbar(area: Rect, buf: &mut Buffer, position: usize, total: usize) {
+/// Fixed viewport height for the scrollbar story so variants stay comparable.
+const SCROLLBAR_VIEWPORT: usize = 10;
+
+fn render_scrollbar(area: Rect, buf: &mut Buffer, offset: usize, total: usize, height: u16) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let bar_area = Rect::new(area.x, area.y, 1, area.height);
-    let mut state = ScrollbarState::new(total).position(position);
-    StatefulWidget::render(
-        vertical_scrollbar(Style::new().bg(ACCENT), muted_style()),
-        bar_area,
-        buf,
-        &mut state,
-    );
+    let bar_area = Rect::new(area.x, area.y, 1, height);
+    if let Some(bar) = VerticalBar::new(height, SCROLLBAR_VIEWPORT, total, offset) {
+        bar.paint(bar_area, buf, Style::new().bg(ACCENT), muted_style());
+    }
     let text_x = area.x.saturating_add(3);
     if text_x < area.right() {
         Paragraph::new(vec![
             Line::from(Span::styled(
-                format!("position {position} / {total}"),
+                format!("offset {offset} / {total} · viewport {SCROLLBAR_VIEWPORT}"),
                 accent_style(),
             )),
             Line::from(Span::styled(
-                "vertical_scrollbar(thumb, arrow)",
+                "VerticalBar::new(height, viewport, content, offset)",
                 muted_style(),
             )),
             Line::from(Span::styled(
-                "track_symbol(None), ▲/▼ arrow heads",
+                "paint + press share thumb geometry · drag the thumb",
                 muted_style(),
             )),
         ])
@@ -1243,20 +1243,49 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
             }
             _ => false,
         },
-        StoryState::Scrollbar { position, total } => match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                *position = position.saturating_sub(WHEEL_ROWS);
-                true
+        StoryState::Scrollbar {
+            position,
+            total,
+            grab,
+        } => {
+            let max_offset = total.saturating_sub(SCROLLBAR_VIEWPORT);
+            let bar_area = Rect::new(area.x, area.y, 1, area.height);
+            let bar = VerticalBar::new(area.height, SCROLLBAR_VIEWPORT, *total, *position);
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    *position = bounded_offset(*position, -(WHEEL_ROWS as i32), max_offset);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    *position = bounded_offset(*position, WHEEL_ROWS as i32, max_offset);
+                    true
+                }
+                MouseEventKind::Down(MouseButton::Left) if mouse.column == bar_area.x => {
+                    *grab = None;
+                    if let Some(bar) = bar {
+                        match bar.press(bar_area, mouse.row) {
+                            VerticalPress::Top => *position = 0,
+                            VerticalPress::Bottom => *position = max_offset,
+                            VerticalPress::Thumb { grab: held } => *grab = Some(held),
+                            VerticalPress::Track { offset } => {
+                                *position = offset;
+                                *grab = Some((bar.thumb_len / 2) as u16);
+                            }
+                        }
+                    }
+                    true
+                }
+                MouseEventKind::Drag(MouseButton::Left) if grab.is_some() => {
+                    if let Some(bar) = bar {
+                        *position =
+                            bar.drag_offset(bar_area, mouse.row, grab.expect("checked by guard"));
+                    }
+                    true
+                }
+                MouseEventKind::Up(MouseButton::Left) => grab.take().is_some(),
+                _ => false,
             }
-            MouseEventKind::ScrollDown => {
-                *position = (*position + WHEEL_ROWS).min(total.saturating_sub(1));
-                true
-            }
-            // The real TUI excludes the scrollbar column from list clicks; the bar
-            // itself has no click handler.
-            MouseEventKind::Down(MouseButton::Left) => true,
-            _ => false,
-        },
+        }
         StoryState::Completion { fixture, selected } => {
             let target = completion_target(area);
             match mouse.kind {

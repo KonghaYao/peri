@@ -9,6 +9,12 @@
 补全的可见窗口、选中标记与命中共用组件的 `completion::CompletionPopup`；
 确认与下载弹窗共用 `overlay::OverlayFrame`（宿主在既有位置只清屏一次），消息区底部
 与运行中工具图标共用无状态的 `spinner::Spinner`（帧集、节奏与文案留在应用）。
+消息区与子 Agent 详情的纵向滚动条共用 `scrollbar::VerticalBar`：宿主传原始内容偏移，
+绘制、端点/空轨命中与拖拽反推使用同一份滑块几何，两端显式映射 0 与最大偏移；
+三行滚轮步长、有界偏移与调用方时钟节流也由该模块提供。文本选区的显示列→字节换算、
+字素切片与真实 `Paragraph` 折行行首由 `selection` 提供，`SelectionAnchor` 的消息身份、
+历史前插重绑与剪贴板仍在宿主。面板高度/内容行数由 `panel_layout` 按终端高度与主题上下限
+统一计算（首帧预测与实测扣除同一组边框行）。
 组件 API 与使用示例见
 [`peri-tui-components/README.md`](../../peri-tui-components/README.md)；
 组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/completion/overlay/spinner/markdown/openui/mermaid/charts，`--list`/`--dump` 支持无 TTY）。Mermaid 的终稿与流式前缀示例见 `peri-tui-components/src/bin/storybook/stories/mermaid.rs`。
@@ -176,8 +182,8 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | footer/spinner 行 | `message_area/footer.rs` | `build_footer_lines`：loading spinner / summary / todo 行 + `KeepGoingLayout`；防抖期按钮禁用样式 |
 | GridSpec 网格 | `message_area/grid.rs`（`grid_for` / `line_width`）+ `layout.rs`（`center_band_area` / `CenterBand`） | 断点（`Breakpoint`）、文本区基准列与过程区缩进（`indent`：≥60 列 +2；`ZoneTransition` 转场台阶（`TextLineSource` 决定线色）；`process_marker_col` / `process_prefix_width` / `process_content_width`）及行首/续行前缀宽度；全部行渲染的对齐基准。过程区右缘（`line_width`）与整带居中不变。content 触顶后整条带按 `left_pad` 居中（`band_width` = 前缀 + content + metadata gutter + 滚动条列），MessageArea / InputArea / StatusBar / BgTaskArea 都由 `CenterBand` 包装组件在 draw 期收窄，左右边缘互相对齐。例外：滚动条是窗口级 chrome（`props.rs::ScrollbarHook`），render body 每帧写入终端宽度与网格，在 `pre_component_draw` 由 band 显式还原整幅外框（`term_width == 0` 回退 band），渲染与命中测试（`scroll/event.rs`）共用它，锚在终端最右列 |
 | scroll 滚动引擎 | `message_area/scroll/scroll_state.rs` + `scroll/{event,gesture,auto_follow}.rs` | `handle_event`；滚轮逐事件落地、拖拽选中、键盘滚动、吸底跟随；文本手势持有 Drag/Up pointer capture，拖出消息带或进入滚动条列仍收尾，越界终点夹到视口，Up 不受节流并更新复制终点；回归见 `scroll/gesture_test.rs` |
-| 滚动条外观 | `scrollbar_chrome.rs` + `message_area/props.rs` + `panels/subagent_detail/detail_panel.rs` | `draw_scrollbar` 统一主体与 subagent 详情的留白滑块、上下箭头和主题色；各视图提供自身的内容高度、偏移及右侧绘制区域 |
-| 语义选区 | `message_area/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic`，复制时剥视觉前缀） |
+| 滚动条外观与拖拽 | `scrollbar_chrome.rs` + `message_area/props.rs` + `panels/subagent_detail/detail_panel.rs` + `peri-tui-components/src/scrollbar.rs` | `draw_scrollbar` 统一主体与 subagent 详情；`VerticalBar` 用原始内容偏移一次换算滑块，绘制、`press`/`drag_offset` 共用几何，可移动轨道两端映射 0/最大偏移。宿主保留追底哨兵、分页、鼠标捕获与滚动配置；共享 `SCROLL_LINES`、`bounded_offset`、`Throttle` |
+| 语义选区 | `message_area/selection.rs` + `peri-tui-components/src/selection.rs` | 拖拽选区与语义复制（`map_slice_to_semantic`，复制时剥视觉前缀）；显示列→字节、字素切片与 `Paragraph` 折行行首在组件，`SelectionAnchor` 身份与重绑在宿主 |
 | 文本剪贴板 | `src/kit/clipboard.rs` + `clipboard_test.rs`、`src/kit/input_area/paste.rs` + `paste_test.rs` | `copy_text` 统一消息拖拽、错误原文、MCP 详情与 OAuth 链接复制。`select_channel` 选通道：`PERI_CLIPBOARD` 覆盖优先；SSH/herdr 或非 macOS 的 Unix 上无 `DISPLAY`/`WAYLAND_DISPLAY` 时走终端 OSC 52，其余走系统剪贴板（arboard）；主通道失败回落另一条通道。tmux 下同时发原生 OSC 52 与 `\ePtmux;` DCS 透传副本（两种 tmux 配置互不覆盖）。Ctrl+V 只读本机剪贴板：同一探测判定本机剪贴板非用户剪贴板且读不到内容时，提示改用终端原生粘贴（bracketed paste 不受影响），本机保持静默。终端写入无确认响应，发送成功不保证客户端已接受；外层终端需允许 OSC 52，tmux 还需 `set -g set-clipboard on`（原生路径，且客户端终端 terminfo 带 `Ms`）或 `set -g allow-passthrough on`（透传路径）。回归命令：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib -- kit::clipboard::tests`、`... -- input_area::paste::tests` |
 | markdown 渲染 | `peri-tui-components/src/markdown/`（convert.rs / list.rs / code_block.rs / table.rs / scan.rs） | 文本 → 带样式的行渲染；代码块、表格、扫描；列表项之间的空行范围由 `list.rs::LIST_ITEM_GAP_MAX_DEPTH` 单点控制（`None` 恢复紧凑） |
 | Markdown 解析测试 | `peri-tui-components/src/markdown/{mod_test.rs,list_test.rs,cache_test.rs,table_parse_test.rs,wrap_test.rs,image_parse_test.rs,fence_test.rs}` + `src/kit/markdown_profile_test.rs` | 按基本解析、列表项间距、增量缓存、表格、Unicode 折行、图片、Mermaid 围栏与显式 release profile 分组；profile 用例依赖应用侧 perf 计数，默认 ignored |
@@ -269,7 +275,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 面板目录（tasks/cron/agent/model/config/thread_browser/mcp/plugin/…） | kit/panels/ + kit/panel_registry.rs | `open_panel`；面板渲染按 PanelKind 分发；`PanelOverlay`；各面板的状态 owner、数据来源、动作入口与完成门见 [TUI 面板架构](../design/tui-panel-architecture.md) 的职责映射表 |
-| 面板列表视口与鼠标命中 | peri-tui-components/src/{list,panel_mouse}.rs + kit/panels/shared/list.rs + kit/panel_overlay.rs | `ListMetrics`（header/item/footer 行度量）与 `ListViewport::for_content_rows`：绘制窗口 `window()` 与鼠标命中 `hit_layout()` 必须来自同一实例；`content_rows(area, term_h)` 首帧按 `panel_content_rows` 预测；`panel_height`/`panel_content_rows` 是面板高度唯一权威（主题 min/max 与终端高度）。设计见 [TUI 面板架构](../design/tui-panel-architecture.md) |
+| 面板列表视口与鼠标命中 | peri-tui-components/src/{list,panel_mouse,panel_layout}.rs + kit/panels/shared/list.rs + kit/panel_overlay.rs | `ListMetrics`（header/item/footer 行度量）与 `ListViewport::for_content_rows`：绘制窗口 `window()` 与鼠标命中 `hit_layout()` 必须来自同一实例；`content_rows(area, term_h)` 首帧按 `panel_layout::panel_content_rows` 预测，实测与首帧共用 `content_rows_for_height`；`panel_height` 是面板高度唯一权威（组件纯计算，应用读取主题 min/max）。设计见 [TUI 面板架构](../design/tui-panel-architecture.md) |
 | 历史详情面板 | kit/panels/history_detail.rs + kit/panel_registry.rs + kit/message_area/handlers.rs | `HistoryDetailPanel`；`open_detail_from_slot`；`request_detail_chunk`；`HistoryDetailWindow::{request,apply_chunk,scroll_to,loaded_text,export_stream,close}` | `PanelKind::HistoryDetail` 复用 `PanelOverlay`；Enter 打开占位 note、Esc/q 关闭；滚动缺块时请求；`e` 复制已加载正文；4 MiB 预算按离视口最远淘汰；关闭释放 chunks；inherited 详情使用冻结 source；回归 `history_detail_test.rs` |
 | 会话服务与 Cron 操作 | kit/service_snapshot/session_services.rs + kit/panels/cron/actions.rs + acp_client/client/requests.rs | stable session identity 隔离 last-good；plugin/list、mcp/list、cron/list 查询实际会话环境；Cron 会话守卫与 mutation 经 `OperationScope`（会话 id + `BRIDGE_RESET_COUNTER`）与完成门经受控 ACP 请求，超时结果未知不自动重试，失败与无会话来源显式显示 |
 | 面板操作作用域与完成门 | application/operations/ + kit/panels/plugin/{discover_state,operation}.rs + kit/panels/{cron,tasks}/ + kit/panels/workflow/{workflow_panel,table_layout}.rs | `OperationScope`（会话身份 + 前端重置标识）与 `CompletionGate`：`begin` 取消前任并推进代次，`accept` 在取消/作用域/代次不符时拒收且不改状态，门的 `Drop` 取消在途票；`OperationOutcome` 分成功、失败与结果未知，取消不表达为撤销成功。纯状态机不读 atom，作用域由调用方构造；作用域覆盖插件搜索、插件操作、Cron 会话守卫、Tasks 取消与 Workflow kill；同作用域同目标的在途重复触发判定为「拒绝」（不发、不提示） |

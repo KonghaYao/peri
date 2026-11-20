@@ -20,6 +20,7 @@ use crate::kit::tui_render_unit::FoldTarget;
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use crate::kit::tui_render_unit::TuiSubAgentGroup;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
 use ratatui_kit::crossterm::event::Event;
 use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEventKind;
@@ -40,7 +41,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
     // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(|| 0usize);
-    let scrollbar_grab = hooks.use_state(|| None::<usize>);
+    let scrollbar_grab = hooks.use_state(|| None::<u16>);
     let render_cache = hooks.use_state(render_cache::DetailRenderCache::default);
     let history = hooks.use_state(child_history::ChildHistoryView::default);
     let _ = hooks.use_atom(&ACTIVE_SESSION_ID);
@@ -103,31 +104,49 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     {
                         let cache = render_cache.read();
                         let current = *sv.read();
-                        let geometry = ScrollbarGeometry::new(
-                            cache.height(),
+                        let bar = VerticalBar::new(
+                            viewport.height,
                             viewport.height as usize,
+                            cache.height(),
                             current,
                         );
-                        let track_row =
-                            mouse.row.saturating_sub(viewport.y).saturating_sub(1) as usize;
-                        let grab = geometry.grab_offset(track_row);
-                        *scrollbar_grab.write() = Some(grab);
-                        if !geometry.contains_thumb(track_row) {
-                            *sv.write() = geometry.offset_for(track_row, grab);
+                        let Some(bar) = bar else {
+                            return EventResult::Consumed;
+                        };
+                        let bar_area = Rect::new(scrollbar_col, viewport.y, 1, viewport.height);
+                        match bar.press(bar_area, mouse.row) {
+                            VerticalPress::Top => {
+                                *sv.write() = 0;
+                                *scrollbar_grab.write() = None;
+                            }
+                            VerticalPress::Bottom => {
+                                *sv.write() = bar.max_offset();
+                                *scrollbar_grab.write() = None;
+                            }
+                            VerticalPress::Thumb { grab } => {
+                                *scrollbar_grab.write() = Some(grab);
+                            }
+                            VerticalPress::Track { offset } => {
+                                *sv.write() = offset;
+                                *scrollbar_grab.write() = Some((bar.thumb_len / 2) as u16);
+                            }
                         }
                         return EventResult::Consumed;
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some(grab) = *scrollbar_grab.read() {
                             let cache = render_cache.read();
-                            let geometry = ScrollbarGeometry::new(
-                                cache.height(),
+                            let current = *sv.read();
+                            let Some(bar) = VerticalBar::new(
+                                viewport.height,
                                 viewport.height as usize,
-                                *sv.read(),
-                            );
-                            let track_row =
-                                mouse.row.saturating_sub(viewport.y.saturating_add(1)) as usize;
-                            *sv.write() = geometry.offset_for(track_row, grab);
+                                cache.height(),
+                                current,
+                            ) else {
+                                return EventResult::Consumed;
+                            };
+                            let bar_area = Rect::new(scrollbar_col, viewport.y, 1, viewport.height);
+                            *sv.write() = bar.drag_offset(bar_area, mouse.row, grab);
                             return EventResult::Consumed;
                         }
                     }
@@ -422,73 +441,6 @@ pub(super) fn initial_detail_offset(running: bool, height: usize, viewport: usiz
     } else {
         0
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ScrollbarGeometry {
-    pub(super) track: usize,
-    pub(super) thumb: usize,
-    pub(super) thumb_start: usize,
-    pub(super) max_scroll: usize,
-}
-
-impl ScrollbarGeometry {
-    pub(super) fn new(content: usize, viewport: usize, offset: usize) -> Self {
-        let track = viewport.saturating_sub(2);
-        let max_scroll = content.saturating_sub(viewport);
-        if track == 0 || max_scroll == 0 {
-            return Self {
-                track,
-                thumb: track,
-                thumb_start: 0,
-                max_scroll,
-            };
-        }
-        // Keep the thumb hit area in step with ratatui's Scrollbar::part_lengths.
-        let denom = content.saturating_sub(1).saturating_add(viewport);
-        let thumb = round_ratio(viewport, track, denom).clamp(1, track);
-        let thumb_start = round_ratio(offset.min(content.saturating_sub(1)), track, denom)
-            .min(track.saturating_sub(thumb));
-        Self {
-            track,
-            thumb,
-            thumb_start,
-            max_scroll,
-        }
-    }
-
-    pub(super) fn grab_offset(self, row: usize) -> usize {
-        if self.contains_thumb(row) {
-            row - self.thumb_start
-        } else {
-            self.thumb / 2
-        }
-    }
-
-    #[must_use]
-    pub(super) fn contains_thumb(self, row: usize) -> bool {
-        row >= self.thumb_start && row < self.thumb_start.saturating_add(self.thumb)
-    }
-
-    pub(super) fn offset_for(self, row: usize, grab: usize) -> usize {
-        let travel = self.track.saturating_sub(self.thumb);
-        if travel == 0 {
-            return 0;
-        }
-        let start = row
-            .min(self.track.saturating_sub(1))
-            .saturating_sub(grab)
-            .min(travel);
-        round_ratio(start, self.max_scroll, travel).min(self.max_scroll)
-    }
-}
-
-pub(super) fn round_ratio(a: usize, b: usize, divisor: usize) -> usize {
-    if divisor == 0 {
-        return 0;
-    }
-    (((a as u128).saturating_mul(b as u128) + (divisor as u128 / 2)) / divisor as u128)
-        .min(usize::MAX as u128) as usize
 }
 
 pub(super) fn follow_detail_offset(

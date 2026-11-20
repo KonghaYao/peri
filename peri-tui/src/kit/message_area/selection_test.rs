@@ -94,62 +94,77 @@ fn test_concat_wrap_maps_supports_multi_visual_rows_per_line() {
     );
 }
 
-// ── wrap_byte_starts ──
+// ── wrap_row_byte_starts ──
 
 #[test]
-fn test_wrap_byte_starts_ascii_no_wrap() {
+fn test_wrap_row_byte_starts_ascii_no_wrap() {
     let line = make_line("abcdef");
-    assert_eq!(super::wrap_byte_starts(&line, "abcdef", 10), vec![0, 6]);
+    assert_eq!(
+        peri_tui_components::selection::wrap_row_byte_starts(&line, "abcdef", 10),
+        vec![0, 6]
+    );
 }
 
 #[test]
-fn test_wrap_byte_starts_ascii_wrap() {
+fn test_wrap_row_byte_starts_ascii_wrap() {
     let line = make_line("abcdef");
     // width=3: 行 0="abc", 行 1="def"
-    assert_eq!(super::wrap_byte_starts(&line, "abcdef", 3), vec![0, 3, 6]);
+    assert_eq!(
+        peri_tui_components::selection::wrap_row_byte_starts(&line, "abcdef", 3),
+        vec![0, 3, 6]
+    );
 }
 
 #[test]
-fn test_wrap_byte_starts_cjk_no_wrap() {
+fn test_wrap_row_byte_starts_cjk_no_wrap() {
     let line = make_line("你好");
-    assert_eq!(super::wrap_byte_starts(&line, "你好", 10), vec![0, 6]);
+    assert_eq!(
+        peri_tui_components::selection::wrap_row_byte_starts(&line, "你好", 10),
+        vec![0, 6]
+    );
 }
 
 #[test]
-fn test_wrap_byte_starts_mixed_cjk_word_wrap() {
+fn test_wrap_row_byte_starts_mixed_cjk_word_wrap() {
     // ratatui WordWrapper 行为：CJK 整段算一个 word，超宽不拆分
     // plain="abc你好你好" w=5 → 行 0="abc你"(byte 0..6), 行 1="好你好"(byte 6..15, 溢出但保留)
     let line = make_line("abc你好你好");
     assert_eq!(
-        super::wrap_byte_starts(&line, "abc你好你好", 5),
+        peri_tui_components::selection::wrap_row_byte_starts(&line, "abc你好你好", 5),
         vec![0, 6, 15]
     );
 }
 
 #[test]
-fn test_wrap_byte_starts_mixed_cjk_wider() {
+fn test_wrap_row_byte_starts_mixed_cjk_wider() {
     // w=4: 行 0="abc", 行 1="你好"(trim:false 下 WordWrapper 在 word 边界处拆，但 CJK 无空格
     // 整段 word "abc你好你好" 超过 4 列。观察：abc 你好 / 你好
     let line = make_line("abc你好你好");
-    let starts = super::wrap_byte_starts(&line, "abc你好你好", 4);
+    let starts = peri_tui_components::selection::wrap_row_byte_starts(&line, "abc你好你好", 4);
     assert_eq!(starts, vec![0, 3, 9, 15]);
 }
 
 #[test]
-fn test_wrap_byte_starts_empty() {
+fn test_wrap_row_byte_starts_empty() {
     let line = make_line("");
-    assert_eq!(super::wrap_byte_starts(&line, "", 10), vec![0]);
+    assert_eq!(
+        peri_tui_components::selection::wrap_row_byte_starts(&line, "", 10),
+        vec![0]
+    );
 }
 
 #[test]
-fn test_wrap_byte_starts_single_cjk() {
+fn test_wrap_row_byte_starts_single_cjk() {
     let line = make_line("你");
-    assert_eq!(super::wrap_byte_starts(&line, "你", 10), vec![0, 3]);
+    assert_eq!(
+        peri_tui_components::selection::wrap_row_byte_starts(&line, "你", 10),
+        vec![0, 3]
+    );
 }
 
 #[test]
-fn test_wrap_byte_starts_row_count_matches_ratatui() {
-    // 关键不变量：wrap_byte_starts 推算的视觉行数必须与 ratatui Paragraph::line_count
+fn test_wrap_row_byte_starts_row_count_matches_ratatui() {
+    // 关键不变量：wrap_row_byte_starts 推算的视觉行数必须与 ratatui Paragraph::line_count
     // 一致——否则鼠标点击的视觉行号与提取算法的视觉行号错位
     for (text, width) in [
         ("abc你好你好", 5u16),
@@ -164,13 +179,13 @@ fn test_wrap_byte_starts_row_count_matches_ratatui() {
         let line_count = Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
             .wrap(Wrap { trim: false })
             .line_count(width);
-        let our_rows = super::wrap_byte_starts(&line, text, width)
+        let our_rows = peri_tui_components::selection::wrap_row_byte_starts(&line, text, width)
             .len()
             .saturating_sub(1)
             .max(1);
         assert_eq!(
             our_rows, line_count,
-            "wrap_byte_starts 行数 {} 与 ratatui line_count {} 不一致（text={:?}, width={}）",
+            "wrap_row_byte_starts 行数 {} 与 ratatui line_count {} 不一致（text={:?}, width={}）",
             our_rows, line_count, text, width
         );
     }
@@ -800,10 +815,10 @@ fn test_slot_index_visual_and_logical_lookup_match_flatten_reference() {
 }
 
 #[test]
-fn test_wrap_byte_starts_large_line_does_not_truncate_u16_height() {
+fn test_wrap_row_byte_starts_large_line_does_not_truncate_u16_height() {
     let text = "x".repeat(u16::MAX as usize + 2);
     let line = make_line(&text);
-    let starts = super::wrap_byte_starts(&line, &text, 1);
+    let starts = peri_tui_components::selection::wrap_row_byte_starts(&line, &text, 1);
 
     assert_eq!(starts.len(), text.len() + 1);
     assert_eq!(starts[u16::MAX as usize + 1], u16::MAX as usize + 1);
