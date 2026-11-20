@@ -696,3 +696,184 @@ DELETE /v1/sandboxes/env_01a1fa1d-f43e-…?deleteData=true
 - 本阶段未覆盖网关/actor 重启后的环境恢复（`environment_id` 重新绑定）。
 - 原始 `e2e.json`、stub/Bun/gateway 日志在 `/private/tmp/peri-swarm-s9a3b1/logs/`，
   不入库。
+
+## 12. S9a3b2：SSE 断流重连与输入幂等验收
+
+- 状态：真实链路验收（2026-11-20，S9a3b1 之后的断流/幂等阶段）
+- 基线：`16ce894df`（S1..S9a3b1）+ 本阶段脚本与记录；工作树
+  `/Users/konghayao/code/ai/peri/.worktrees/peri-swarm-local-dev`
+- Peri 二进制：`target/debug/peri`（`peri 0.2.0`），sha256
+  `93ccfb0b168fd6a47a67f06dc99c3a09f4f0ae3fc1a6b73f36504ba4ce0b2cc9`
+  （未重建；本阶段未改 Rust 源码）
+- 环境：Peri Loom `12dd01a159`（9497，双库）、Bun 1.4.2（8081）、Node v26.9.0、
+  网关 + Rivet engine（18080 / 6420）、模型 stub（9496）；
+  运行目录 `/private/tmp/peri-swarm-s9a3b2/`
+- 驱动：`peri-swarm/scripts/sdk_reconnect_idempotency_e2e.mjs`（新增，纯 HTTP/SSE；
+  直接读取 SSE `id:`，不依赖 SDK 的事件对象）
+
+### 12.1 场景与判定
+
+| 场景 | 输入 | 判定 |
+| --- | --- | --- |
+| R：断流重连 | `openai_hosted`；`[[tool:slow-reconnect]]` → Bash 循环 `tick-1..6`，每步 `sleep 0.4`，末尾 `slow-done` | 读取部分 SSE 后主动断开；无订阅时 turn 继续并完成；`GET /items` 补齐；按 `Last-Event-ID`/`afterSeq` 续读无重复、无缺口 |
+| I：输入幂等 | `environment:none`；同一 UUID `Idempotency-Key` + 相同文本；无 directive | 并发两次 POST 只产生一轮执行；同 key 不同内容 409 且不入队；完成后同 key 同内容重放返回同一受理 |
+
+驱动共 79 条断言；run2/run3/run4 三次连续运行均为 79/79，通过结果一致。本节引用
+run4（`/private/tmp/peri-swarm-s9a3b2/logs/e2e-run4.json`）。
+
+### 12.2 断流时间线（run4）
+
+| 时刻（UTC） | 事件 |
+| --- | --- |
+| 18:10:46.475 | 打开 SSE `GET /events?after=0`（HTTP 200） |
+| 18:10:46.476 | `POST /events`（`Idempotency-Key: a5a95392-…`，`kind=user`、`mode=turn`） |
+| 18:10:47.955 | stub 首轮主调用：`Bash` tool call，命令为慢循环 |
+| 18:10:48.133 | SSE 已收到 item `seq=1,2`（tool_call 开始 + 带 command 的更新）；客户端 abort，`Last-Event-ID=2` |
+| 18:10:48.201 | 无订阅时 `GET /items`：`[1,2]`，会话 `state=running` |
+| 18:10:51.022 | items 出现 `seq=3` tool_result：`tick-1..tick-6` + `slow-done` |
+| 18:10:51.097 | stub 第二轮主调用（final 文本），发生在断开之后 |
+| 18:10:51.815 | items 采样到 `seq=8`：message:complete；此前 4 条 delta（4..7） |
+| 18:10:52.210 | 无订阅读取确认会话 `idle`；用 `Last-Event-ID: 2` 打开新 SSE |
+| 18:10:52.738 | 重连流已回放 3..8；stub final 文本与 item 折叠一致 |
+| 18:10:54.687 | 幂等会话开始并发双 POST |
+| 18:10:58.015 | 两个 POST 均返回 202（inserted / existing） |
+| 18:10:58.107 | 同 key 不同内容 → 409 `input_conflict` |
+| 18:10:58.220 | 同 key 同内容重放 → 202 `existing` |
+
+### 12.3 断流期间的 `GET /items`
+
+断开时（18:10:48.201）item log 只有工具调用的两行，turn 仍在运行；之后完全依靠
+`GET /items` 观察到完整结果：
+
+| seq | itemId | kind | 内容 |
+| --- | --- | --- | --- |
+| 1 | `itim_01a1fa27-6414-…` | tool_call | `call_stub_1`，status `in_progress` |
+| 2 | `itim_01a1fa27-6468-…` | tool_call | 同一 `toolCallId`，带 `{"command": "for i in 1 2 3 4 5 6; …"}` |
+| 3 | `itim_01a1fa27-6f4a-…` | tool_result | completed；`tick-1\ntick-2\ntick-3\ntick-4\ntick-5\ntick-6\nslow-done\n` |
+| 4 | `itim_01a1fa27-705a-…` | message delta | `stub-e` |
+| 5 | 同一 itemId | message delta | `cho:b6` |
+| 6 | 同一 itemId | message delta | `e87772` |
+| 7 | 同一 itemId | message delta | `fecc#2` |
+| 8 | 同一 itemId | message complete | `stub-echo:b6e87772fecc#2` |
+
+- 断开到完成之间没有 SSE 订阅；`tool_result`、4 条 delta 与 complete 全部由 items
+  读出，说明输出没有依赖订阅者存活。
+- Bun 日志中该工具的 `tools/call` `durationMs=2467`，即慢命令真实执行于 SRT。
+
+### 12.4 重连游标：`Last-Event-ID` 与 `afterSeq`
+
+- SSE1 在 abort 前收到 item id `[1,2]`，`lastEventId=2`；
+- SSE2 请求头 `Last-Event-ID: 2` → 收到 item id `[3,4,5,6,7,8]`：
+  - 首条为 `2+1`；连续、无重复、无缺口（`len = 8-2`）；
+  - 每条回放 payload 与持久化 item 逐字段相等；
+  - 0 条 `turn` 帧（turn 状态不持久化，重放只含 item）；
+- SSE3 `?afterSeq=7` → 只收到 `[8]`，查询参数游标与头部游标结果一致；
+- `[1,2] ∪ [3..8] = [1..8]`，每个 seq 恰好一次；
+- `GET /items?afterSeq=2` 的 seq 列表与 SSE2 完全一致。
+
+### 12.5 delta + complete 折叠与稳定 item ID
+
+- 本轮所有 message item 共享一个 `itemId`（`itim_01a1fa27-705a…`）与一个
+  `messageId`；重复读取 items 时 itemId 不变；
+- 4 条 delta 的 `delta=true`，complete 行 `complete=true`；delta 文本按 seq 拼接
+  等于 complete 文本，也等于 stub 的 final 回复
+  `stub-echo:b6e87772fecc#2`；
+- `lateDeltas=0`（run2/3/4 均为 0）；驱动仍保留“complete 后的同
+  `messageId` delta 追加”折叠路径。
+
+### 12.6 items 分页与跨重连游标
+
+从断流游标 `afterSeq=2` 起以 `limit=2` 翻页：
+
+| 请求 | seqs | nextCursor | hasMore | lastItemSeq |
+| --- | --- | --- | --- | --- |
+| `afterSeq=2` | `[3,4]` | 4 | true | 8 |
+| `afterSeq=4` | `[5,6]` | 6 | true | 8 |
+| `afterSeq=6` | `[7,8]` | null | false | 8 |
+
+- 每页 `nextCursor` 等于该页最后一个 seq；末页 `hasMore=false`、
+  `nextCursor=null`；三页并集 `[3..8]` 无重复/无缺口；
+- 每页 `lastItemSeq=8`，与 SSE 的 `Last-Event-ID` 和 items 最终 seq 对齐。
+
+### 12.7 模型调用数（断流 turn）
+
+- stub `mainCalls=2`：`#1` tool_call（18:10:47.955）、`#2` final
+  （18:10:51.097）；`toolCalls=1`；prediction/title helper 不计入 mainCalls；
+- final 调用发生在 SSE 断开（18:10:48.133）之后约 3 s，证明断开没有中止 turn；
+- 只有一个 tool turn 与一个 final turn，没有因重连触发重复执行。
+
+### 12.8 同一 `Idempotency-Key` 并发两次
+
+会话 `agent-01a1fa27-76c3-…`（`environment:none`），key
+`f353f898-5384-4596-b5f0-ee05c2eafdfe`，请求体不含 `inputId`，仅由请求头提供：
+
+| 请求 | 状态 | `accepted` | `disposition` | `lastItemSeq` | 耗时 |
+| --- | --- | --- | --- | --- | --- |
+| A | 202 | true | `inserted` | 5 | 3328 ms |
+| B（并发） | 202 | true | `existing` | 0 | 391 ms |
+
+- 两个响应都回显同一 `inputId`，都 `accepted=true`；恰好一次 `inserted`；
+- B 的 `lastItemSeq=0` 是响应时刻（A 的 turn 尚未写入 item）的日志长度，
+  不代表第二轮执行；A 的 5 是 turn 完成后的长度；
+- 该对请求只产生 1 个 completion item（seq 5）和 1 次模型 final 调用
+  （stub `mainCalls` 2→3）；
+- 状态库 `swarm_inputs` 只有一行：`(input_id, accepted, SHA-256 fingerprint)`；
+  `swarm_items` 为 5 行，与 items API 一致。
+
+### 12.9 同 key 不同内容与完成后重放
+
+| 操作 | 响应 | 追加执行 | 证据 |
+| --- | --- | --- | --- |
+| 同 key + 文本追加 ` different` | `409`，`error.code=input_conflict`，`details.inputId` 为该 key | 无 | items 仍为 `[1..5]`；stub `mainCalls` 3→3；会话 `idle` |
+| 完成后同 key + 原文本 | `202`，`accepted=true`，`disposition=existing`，`lastItemSeq=5` | 无 | items 仍为 `[1..5]`；stub `mainCalls` 3→3 |
+
+### 12.10 teardown 与端口
+
+```text
+DELETE /v1/sandboxes/env_01a1fa27-5a0f-…?deleteData=true
+→ {"logicalEnvId":"env_01a1fa27-5a0f-…","closed":true,"deletedData":true}
+GET → 404；sandbox 目录不存在；SRT 进程组 0
+```
+
+- 只删除本测试创建的 `openai_hosted` 环境；`~/.peri-swarm/sandboxes` 根目录
+  与 `bindings.json` 回到测试前基线（无目录、`{}`）；
+- 停止网关、Rivet engine、Bun、模型 stub、Loom（含 authority/platform/worker）；
+- 端口核对：8081/9496/9497/6420/18080 无本任务监听；8080 仍为用户 OrbStack；
+  `ps` 无 `peri-swarm` / `sandbox-runtime` / `mcp-start` / stub / Loom 残留。
+
+### 12.11 门禁
+
+```text
+cargo test --locked -p peri-swarm
+  lib 154；actor_runtime 3；http_contract 19；items_pagination 6；
+  mcp_injection 4；openai_hosted 7；rivet_actor 1；streaming 9；
+  loom_store 3 ignored；0 failed（203 passed）
+
+npm-packages/peri-sandbox
+  bun run build                  ok
+  node --test dist/tests/swarm/*.test.js   30 pass / 0 fail
+  bun run typecheck              ok
+  bun run format:check           58 files, no fixes
+
+lefthook run pre-commit          见提交前运行记录
+git status                       仅本阶段脚本与本节记录
+```
+
+未提交 token：网关/Bun 使用本地随机测试串，Loom 项目 key 只存在于运行目录的
+connection 文件与进程环境；驱动仅将其放入 Hrana 的 Authorization 头，不打印、
+不写入仓库。
+
+### 12.12 观测与局限
+
+- 模型是确定性 stub；本阶段验证传输/续读/幂等语义，不评估真实模型的计划能力。
+- 断流后重连发生在本轮已完成之后，验证的是持久化 backlog 的回放；同一连接
+  “先回放再实时续读”的混合窗口由 S9a2/S9a3b1 的实时 SSE 覆盖，本阶段未重复。
+- 未覆盖：网关/actor 重启后的会话与 `environment_id` 恢复；客户端断开后沙箱
+  回收/重启时机；被中断的慢命令清理。按计划留 S9a4。
+- 并发重复请求在原始 turn 未完成时可读到 `lastItemSeq=0`（受理时刻的日志长度）；
+  驱动断言两个响应共享 `inputId` 且只有一轮执行，不要求该字段相等。
+- `tool_call` 会先产生开始行、再产生带 command 的更新行，因此断开前已收到
+  seq 1、2 两条；这不影响 `Last-Event-ID` 语义。
+- 原始 `e2e-run2/3/4.json`、stub/Bun/gateway 日志在
+  `/private/tmp/peri-swarm-s9a3b2/logs/`，不入库。
+
