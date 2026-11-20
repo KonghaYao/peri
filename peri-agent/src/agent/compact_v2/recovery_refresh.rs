@@ -105,10 +105,12 @@ pub fn refresh_recovery_memory(
         if verified {
             report.rendered += 1;
         }
-        rebuilt
+        if let Some(target) = rebuilt
             .get_or_insert_with(|| messages.to_vec())
             .get_mut(index)
-            .map(|target| *target = replace_body(*id, replacement));
+        {
+            *target = replace_body(*id, replacement);
+        }
     }
     (rebuilt, report)
 }

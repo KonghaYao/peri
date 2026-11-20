@@ -730,7 +730,5 @@ fn has_hard_memory_only_recognizes_harness_messages() {
     assert!(!has_hard_memory(&[BaseMessage::human(
         "ordinary user turn"
     )]));
-    assert!(!has_hard_memory(&[BaseMessage::ai(format!(
-        "{HARD_MEMORY_HEADER}"
-    ))]));
+    assert!(!has_hard_memory(&[BaseMessage::ai(HARD_MEMORY_HEADER)]));
 }
