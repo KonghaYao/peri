@@ -69,6 +69,7 @@ MCP（Bun 托管的沙箱）→ 两个 Loom 逻辑库。设计边界见
    `--no-build` 不会替你构建；没有源码构建产物时用预构建二进制：
 
    ```bash
+   mkdir -m 700 /absolute/path/to/loom-run
    cd <peri-loom>/prototypes/v1/platform
    PERI_HRANA_EXPERIMENTAL=1 \
    PERI_RUST_BINARY=/absolute/path/to/peri-loom-v1 \
@@ -77,10 +78,17 @@ MCP（Bun 托管的沙箱）→ 两个 Loom 逻辑库。设计边界见
      --run-dir /absolute/path/to/loom-run
    ```
 
-   就绪日志是 `{"ready": true, "service": "local-project", ...}`，随后 9497 进入
-   LISTEN。用普通 `&` 从一次性 shell 启动的进程会随 shell 退出；请放到受管后台任务
-   或长驻 shell。失败后会留下 `launcher-stop.json`（`outcome: unclean`），用新的
-   `--run-dir` 重试。
+   `--run-dir` **必须是私有目录（0700）且不是符号链接**；否则 Loom 会在启动阶段
+   拒绝并输出 `project stopped: runtime directory must be private and not a symlink`。
+   这个检查发生在 launcher 写状态之前，失败目录可能为空、`launcher-stop.json` 也
+   可能不出现。失败后用**新的** run-dir（先 `mkdir -m 700` 或 `chmod 700`）重试，
+   不要复用被拒绝的目录。
+
+   就绪信号是日志行 `{"ready": true, "service": "local-project", ...}`，随后 9497
+   进入 LISTEN（可用 `lsof -nP -iTCP:9497 -sTCP:LISTEN` 核对）。**Loom 没有
+   `/healthz`**：`/healthz`、`/readyz`、`/health` 都是 404，`/v1/healthz` 需要鉴权
+   （无凭据时 403）；不要把 HTTP 探针当作就绪条件。用普通 `&` 从一次性 shell 启动
+   的进程会随 shell 退出；请放到受管后台任务或长驻 shell。
 
 2. **provision Swarm 状态库**：
 
@@ -95,7 +103,11 @@ MCP（Bun 托管的沙箱）→ 两个 Loom 逻辑库。设计边界见
 
 3. **Rivet**：本地 engine 为 Rivet 3.1.1（`~/.rivetkit/engine/v3`），endpoint 固定
    `http://127.0.0.1:6420`。首次运行设置 `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1`，网关会按需
-   拉起；预装 engine 时无需额外步骤。
+   拉起；预装 engine 时无需额外步骤。**6420 是本地共享的 engine 进程，不归网关所有**：
+   网关停止后它可能继续运行，下一次启动会直接复用它。确认占用用
+   `lsof -nP -iTCP:6420 -sTCP:LISTEN`，再用 `ps -p <pid> -o pid,command` 核对它确实是
+   `~/.rivetkit/engine/v3` 下的 engine；只停止你自己启动的那个 PID（例如 `kill <pid>`），
+   不要为了释放端口去杀无关进程，也不要要求用户手动清理端口。
 4. **网关**：按上表导出环境变量后运行 `./target/debug/peri-swarm`。`/healthz` 是不鉴权
    的常量探针；启动日志不带 token。
 5. **Bun 沙箱服务**（`openai_hosted` 会话必需）：
@@ -142,10 +154,10 @@ const client = new OpenAI({
   baseURL,
 });
 
-// create：首轮同步完成；environment 省略等价于 {type:'none'}
+// create：不带 input 时只建立会话；environment 省略等价于 {type:'none'}。
+// 也可以传 input 让 create 同步跑完首轮（语义见“同步 POST”）。
 const session = await client.beta.agents.sessions.create({
   agent: { model: 'stub-model', instructions: 'Answer briefly.' },
-  input: 'hello',
 });
 const id = session.id; // 等于 logicalId
 
@@ -169,28 +181,33 @@ for (;;) {
   });
   const body = /** @type {any} */ (page).body;
   for (const item of body.items) {
-    // item 是事件级帧：delta 与 complete 共享 itemId/id，按 payload.messageId 聚合；
+    // 用户输入：kind=message、payload.role === 'user'，单帧、没有 complete。
+    // assistant：delta 与 complete 共享 itemId/id，按 payload.messageId 聚合，
     // 最终文本以 payload.complete === true 的那一帧为准。
+    // tool：tool_call/tool_update/tool_result，按 payload.toolCallId 聚合。
   }
   if (!body.hasMore) break;
   after = body.nextCursor;
 }
 
-// 回放首轮：必须显式三个实参。
-// 两实参时 openai SDK 会把 { after } 当成 RequestOptions，after 不会进入 query。
-const replay = await client.beta.agents.sessions.events.stream(
+// 实时：先建立流，再 POST。必须显式三个实参；两实参时 openai SDK 会把
+// { after } 当成 RequestOptions，after 不会进入 query。
+// 从会话当前末尾开始，流里只会出现这次 POST 产生的新帧。
+const tail = (await client.beta.agents.sessions.retrieve(id)).lastItemSeq;
+const live = await client.beta.agents.sessions.events.stream(
   id,
-  { after: 0 },
+  { after: tail },
   {},
 );
-for await (const event of replay) {
-  // 回放只有 item 帧，没有 turn 控制帧；忽略心跳（只有 lastItemSeq）。
-  if (typeof event?.seq !== 'number') continue;
-  if (event?.payload?.complete === true) break; // 回放终止条件
-}
+const observed = (async () => {
+  for await (const event of live) {
+    if (event?.state === 'started') continue; // turn 开始
+    if (event?.state === 'completed' || event?.state === 'failed') break; // turn 终止
+    if (typeof event?.seq !== 'number') continue; // 心跳 { lastItemSeq }
+    // item 帧：user / assistant delta / assistant complete / tool_*
+  }
+})();
 
-// 追问：POST /events 是同步的——202 返回时本轮已进入终态，
-// lastItemSeq 已包含本轮所有 item。不要把它当异步排队再轮询第二次。
 const ack = await client.post(`/agents/sessions/${id}/events`, {
   body: {
     inputId: crypto.randomUUID(),
@@ -199,32 +216,44 @@ const ack = await client.post(`/agents/sessions/${id}/events`, {
     text: 'follow up',
   },
 });
-console.log(ack.lastItemSeq);
+await observed;
+console.log(ack.lastItemSeq); // POST 同步：202 返回时本轮已进入终态
 
-// 实时续读：从 ack.lastItemSeq 之后开始，同样用三个实参。
-const live = await client.beta.agents.sessions.events.stream(
+// 回放：after=0（或更早的 seq）读历史 item。回放段只有 item 帧 + 心跳，
+// 没有 turn 帧；终止条件是目标 assistant message 的 payload.complete === true。
+const replay = await client.beta.agents.sessions.events.stream(
   id,
-  { after: ack.lastItemSeq },
+  { after: 0 },
   {},
 );
-for await (const event of live) {
-  if (event?.state === 'completed' || event?.state === 'failed') break; // turn 控制帧
-  if (typeof event?.seq !== 'number') continue; // 心跳 { lastItemSeq }
-  if (event?.payload?.complete === true) console.log('assistant message complete');
+for await (const event of replay) {
+  if (typeof event?.seq !== 'number') continue; // 心跳或非 item
+  if (event?.payload?.complete === true) break; // 回放终止条件
 }
 ```
 
-### SSE 终止条件与游标
+### SSE 帧、终止条件与游标
 
 | 场景 | 帧类型 | 终止条件 |
 | --- | --- | --- |
-| 回放（`after` 小于已有 seq） | 只有 `item` | 目标 assistant message 的 `payload.complete === true`；没有 `turn` 帧，`event.state` 不存在 |
-| 实时 | `item` + `turn`（可能有 `gap`） | `event.state === 'completed' \| 'failed'` |
-| 心跳 | `{ "lastItemSeq": N }` | 无 `seq`、无 `state`；忽略即可，不推进游标 |
+| 实时（先开流，再 POST） | `item` + `turn`（先 `started`，后 `completed` \| `failed`），可能有 `gap` | `turn.state === 'completed' \| 'failed'` |
+| 回放（`after` 小于会话末尾） | 只有 `item`（+ 心跳）；没有 `turn` 帧 | 目标 assistant message 的 `payload.complete === true` |
+| `after` 等于/超过会话末尾 | 没有 `item`，只有心跳 | **不会自行关闭**；用客户端超时、`AbortController`/`{ signal }` 或 `items.list` 分页 |
+| 心跳 | `{ "lastItemSeq": N }` | 无 `seq`、无 `state`；`N` 是会话当前最后 item 的 seq（进度信息），不是本流已投递的位置 |
 
-`after` 是「只补 `seq > after` 的 item」；`after=0`（或省略查询参数）回放全部历史。
-`Last-Event-ID` 头与 `after` 等价（都按 seq 续读），区别只在传输方式：官方 SDK 没
-暴露该头，所以 SDK 用户必须用 `events.stream(id, { after }, {})`；直接用 HTTP 时可以写：
+- **不要用同步 POST 之后的 `ack.lastItemSeq` 开流来观察本轮**：POST 返回时本轮可能
+  已完成，该 `after` 之后没有可回放的帧，流会保持打开并只发心跳。要观察本轮，先开流
+  再 POST。
+- POST 失败（如 `turn_in_progress`）时不会产生 `turn.completed`/`failed`，实时循环不会
+  自行退出；用 `AbortController`/`{ signal }` 在请求失败时取消流。
+- 回放没有可读 item 时同样不会关闭；这是“实时段保持打开”的 SSE 语义，不是错误。
+  只读历史时优先用 `items.list` 分页。
+- 心跳的 `lastItemSeq` 反映会话真实的 `MAX(seq)`，可用于显示进度；恢复游标仍应取最后
+  一条已投递 `item` 帧的 `seq`（SSE `id:`），不要用心跳值跳过 `gap` 覆盖的 item。
+- `after` 是「只补 `seq > after` 的 item」；`after=0`（或省略查询参数）回放全部历史。
+  `Last-Event-ID` 头与 `after`/`afterSeq` 等价（都按 seq 续读），区别只在传输方式：
+  官方 SDK 没暴露该头，所以 SDK 用户必须用 `events.stream(id, { after }, {})`；直接
+  用 HTTP 时可以写：
 
 ```js
 const response = await fetch(
@@ -237,17 +266,30 @@ const response = await fetch(
     },
   },
 );
-// 响应是 SSE 字节流；每个 item 帧的 `id:` 字段就是 seq。
+// 等价的查询参数是 ?after= / ?afterSeq=；与 Last-Event-ID 同时给出时必须一致，
+// 否则 400 conflicting_cursor。必须按流读取 response.body（例如
+// for await (const chunk of response.body)），不要 res.json()/res.text()，
+// 否则会一直等到流关闭。每个 item 帧的 `id:` 字段就是 seq；
 // turn 与 gap 帧不持久化、不带 `id:`，不会推进 Last-Event-ID。
 ```
 
 ### items 与官方 item 形状的差异
 
-- items 是**事件日志**，不是高层 message/run item：`kind` 为 `message`、`tool_call`、
-  `tool_update`、`tool_result` 等，delta 帧与 complete 帧都各占一行。
-- 每帧现在同时有 `id` 与 `itemId`（同值，`itim_...`）；同一消息的 delta/complete 帧
-  共享这个 id，因此不能用 `id` 去重成一条消息。按 `payload.messageId` 聚合，最后以
+- items 是**会话日志**（事件级帧），不是官方高层 message/run item：`kind` 为 `message`、
+  `tool_call`、`tool_update`、`tool_result` 等，assistant 的 delta 帧与 complete 帧都
+  各占一行。
+- **用户输入是单帧 item**：`kind=user` 的输入在 `swarm_inputs` 受理
+  （`disposition=inserted`，202）后追加一条 `kind=message` 帧，`payload` 为
+  `{ role: 'user', text, inputId }`，`id`/`itemId` 为 `itim_input_<inputId>`。它没有
+  `delta`/`complete` 字段，因此不会终止回放，也不参与 assistant 聚合。同一
+  `Idempotency-Key`/`inputId` 重试返回 `existing`，不会重复追加。`kind=control` 不写
+  用户帧。`create` 的 `input` 同样记为 user 帧（每次 create 调用各一条；重试 create
+  会按既有语义重跑该轮）。
+- 每帧同时有 `id` 与 `itemId`（同值，`itim_...`）；同一 assistant 消息的 delta/complete
+  帧共享这个 id，因此不能用 `id` 去重成一条消息。按 `payload.messageId` 聚合，最后以
   `payload.complete === true` 帧的 `payload.text` 为准。
+- `tool_call` 可能分两帧到达：先 `in_progress`（无 `input`），再补 `input` 的同状态帧；
+  两帧共享 `payload.toolCallId`，按它聚合。
 - `nextCursor` 是这页最后一条的 seq；下一页把它传给 `after`（也接受 `afterSeq`）。
   传 `cursor` 会得到 `400 invalid_query`。`order=desc` 时 `after` 表示「更旧于该 seq」。
 - SDK `CursorPage` 要求 item 有 `id` 并自动翻页；这里的 item 是事件帧，语义不同，
@@ -273,8 +315,9 @@ const response = await fetch(
 - `AgentSession.status` 不存在，状态字段是 `state`；`sessions.stream()` 依赖
   `status`，因此用 `events.stream()`。
 - `POST /events` 目前是**同步**语义：网关在返回 HTTP 202 前等待本轮进入终态
-  （`mode=turn`），回执中的 `lastItemSeq` 已经包含本轮 item。它不是「已排队、稍后
-  执行」的异步受理。
+  （`mode=turn`），回执中的 `lastItemSeq` 已经包含本轮 item。对客户端而言，**返回时
+  本轮可能已经完成**；它不是「已排队、稍后执行」的异步受理，也不能靠 POST 之后再开
+  流补看本轮（见上文实时用法）。
 
 ## 已知限制
 
