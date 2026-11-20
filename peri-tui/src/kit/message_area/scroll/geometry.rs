@@ -81,10 +81,83 @@ pub(super) fn compute_thumb_geometry(
 }
 
 /// 把「目标 thumb_start（track 内偏移）」反推为「scroll position」。
-/// clamp 到合法 thumb 范围，再线性反推 + clamp 到 [0, max_position]。
+///
+/// 可移动轨道两端显式映射到 0 / max_position：ratatui 的正向公式在末端饱和——
+/// position=883 与 999 都画在最后一格，线性反推只能得到 883（→ 偏移 876）。
+/// 中间格仍用正向公式的逆运算（ceil 由 `position_to_scroll_y` 负责）。
 pub(super) fn thumb_start_to_position(thumb_start: usize, geo: &ThumbGeometry) -> usize {
-    let clamped = thumb_start.min(geo.track_length.saturating_sub(geo.thumb_length));
+    let span = geo.track_length.saturating_sub(geo.thumb_length);
+    if span == 0 {
+        return 0;
+    }
+    let clamped = thumb_start.min(span);
+    if clamped == 0 {
+        return 0;
+    }
+    if clamped == span {
+        return geo.max_position;
+    }
     round_divide(clamped * geo.max_viewport_position, geo.track_length).min(geo.max_position)
+}
+
+/// 滚动条按下命中的语义：端点跳转、拖块抓取或空轨跳转。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScrollbarPress {
+    /// ▲（area 顶行）：跳到顶部。
+    Top,
+    /// ▼（area 底行）：跳到底部（调用方写入 max_scroll）。
+    Bottom,
+    /// 拖块：抓取偏移，按下时不跳转。
+    Thumb { grab: u16 },
+    /// 空轨：thumb 中心对齐鼠标后的目标偏移。
+    Track { offset: usize },
+}
+
+/// 按下滚动条的命中判定（渲染、事件与测试共用同一份几何）。
+pub(super) fn scrollbar_press(
+    mouse_row: u16,
+    area: Rect,
+    geo: &ThumbGeometry,
+    max_scroll: usize,
+) -> ScrollbarPress {
+    let bottom_row = area.y.saturating_add(area.height).saturating_sub(1);
+    if mouse_row == area.y {
+        return ScrollbarPress::Top;
+    }
+    if mouse_row == bottom_row {
+        return ScrollbarPress::Bottom;
+    }
+    let thumb_start_row = area
+        .y
+        .saturating_add(1)
+        .saturating_add(geo.thumb_start as u16);
+    let thumb_end_row = thumb_start_row.saturating_add(geo.thumb_length as u16);
+    if mouse_row >= thumb_start_row && mouse_row < thumb_end_row {
+        return ScrollbarPress::Thumb {
+            grab: mouse_row.saturating_sub(thumb_start_row),
+        };
+    }
+    let track_click = mouse_row.saturating_sub(area.y).saturating_sub(1) as usize;
+    let target_thumb_start = track_click.saturating_sub(geo.thumb_length / 2);
+    let position = thumb_start_to_position(target_thumb_start, geo);
+    ScrollbarPress::Track {
+        offset: position_to_scroll_y(position, geo.max_position, max_scroll),
+    }
+}
+
+/// 拖拽中的目标偏移：`grab` 是按下时鼠标相对 thumb 顶部的偏移（锁定后不跳变）。
+/// 鼠标移出滚动条列只影响命中归属，坐标换算仍以轨道 row 为准。
+pub(super) fn scrollbar_drag_offset(
+    mouse_row: u16,
+    grab: u16,
+    area: Rect,
+    geo: &ThumbGeometry,
+    max_scroll: usize,
+) -> usize {
+    let new_thumb_start_row = mouse_row.saturating_sub(grab);
+    let target_track_click = new_thumb_start_row.saturating_sub(area.y).saturating_sub(1) as usize;
+    let position = thumb_start_to_position(target_track_click, geo);
+    position_to_scroll_y(position, geo.max_position, max_scroll)
 }
 
 /// 把 ratatui 语义的「scroll position」反推为「scroll offset（scroll_state.offset().y）」。

@@ -17,7 +17,11 @@ use self::auto_follow::{
 };
 #[cfg(test)]
 use self::geometry::round_divide;
-use self::geometry::{compute_thumb_geometry, position_to_scroll_y, thumb_start_to_position};
+use self::geometry::{
+    ScrollbarPress, compute_thumb_geometry, scrollbar_drag_offset, scrollbar_press,
+};
+#[cfg(test)]
+use self::geometry::{position_to_scroll_y, thumb_start_to_position};
 #[cfg(test)]
 use self::gesture::{entry_click_target, freeze_down, is_click, is_click_for};
 use self::gesture::{selection_bounds_on_release, selection_captures_pointer, selection_position};

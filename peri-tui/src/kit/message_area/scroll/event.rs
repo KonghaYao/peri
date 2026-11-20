@@ -171,6 +171,16 @@ fn cancel_left_gesture(
     }
 }
 
+/// 滚动条是否拥有该指针事件：拖拽激活后即使指针移出滚动条列也继续由滚动条
+/// 处理（否则 Drag 会 fallthrough 到文本选区触发误复制）。
+pub(super) fn scrollbar_owns_pointer(
+    drag_active: bool,
+    on_scrollbar_column: bool,
+    selection_captured: bool,
+) -> bool {
+    drag_active || (on_scrollbar_column && !selection_captured)
+}
+
 /// 从 `use_event_handler` 闭包提取的鼠标/键盘处理逻辑。
 /// 包含：鼠标滚轮（逐事件落地）、文本拖拽选中（Down/Drag/Up）、键盘滚动、
 /// PERI_DISABLE_DRAG_SELECT 分支、parking_lot 死锁规避。
@@ -259,79 +269,60 @@ pub(in crate::kit::message_area) fn handle_event(
                 crate::kit::message_area::props::mouse_in_area(mouse.row, mouse.column, sb_area)
                     && super::is_scrollbar_column(mouse.column, sb_area);
             let drag_active = scrollbar_drag.read().active;
-            if drag_active || (on_scrollbar_col && !selection_captured) {
+            if scrollbar_owns_pointer(drag_active, on_scrollbar_col, selection_captured) {
                 let fields = *scrollbar_fields.read();
                 let max_scroll = fields.content_length.saturating_sub(fields.viewport_length);
                 if let Some(geo) = super::compute_thumb_geometry(&fields, sb_area) {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) if on_scrollbar_col => {
-                            // ▲ 端点（area 顶行）—— 直接跳到顶部
-                            if mouse.row == sb_area.y {
-                                scroll_state.write_no_update().set_offset(0);
-                                super::update_follow_on_scroll(follow_bottom, max_scroll, 0);
-                                request_pages_after_scroll(
-                                    scroll_state,
-                                    scrollbar_fields,
-                                    follow_bottom,
-                                    None,
-                                );
-                                return EventResult::Consumed;
-                            }
-                            // ▼ 端点（area 底行）—— 直接跳到底部
-                            let bottom_row =
-                                sb_area.y.saturating_add(sb_area.height).saturating_sub(1);
-                            if mouse.row == bottom_row {
-                                scroll_state.write_no_update().set_offset(max_scroll);
-                                super::update_follow_on_scroll(
-                                    follow_bottom,
-                                    max_scroll,
-                                    max_scroll,
-                                );
-                                return EventResult::Consumed;
-                            }
-                            // thumb / track
-                            let thumb_start_row = sb_area
-                                .y
-                                .saturating_add(1)
-                                .saturating_add(geo.thumb_start as u16);
-                            let thumb_end_row =
-                                thumb_start_row.saturating_add(geo.thumb_length as u16);
-                            let on_thumb =
-                                mouse.row >= thumb_start_row && mouse.row < thumb_end_row;
-                            // 点击 thumb：锁定 thumb_offset、不跳转；
-                            // 点击轨道：thumb 中心对齐鼠标并立即跳转
-                            let thumb_offset = if on_thumb {
-                                mouse.row.saturating_sub(thumb_start_row)
-                            } else {
-                                (geo.thumb_length / 2) as u16
+                            // 端点、拖块与空轨的命中语义由几何层统一给出（与绘制同源）。
+                            let grab = match super::scrollbar_press(
+                                mouse.row, sb_area, &geo, max_scroll,
+                            ) {
+                                super::ScrollbarPress::Top => {
+                                    scroll_state.write_no_update().set_offset(0);
+                                    super::update_follow_on_scroll(follow_bottom, max_scroll, 0);
+                                    request_pages_after_scroll(
+                                        scroll_state,
+                                        scrollbar_fields,
+                                        follow_bottom,
+                                        None,
+                                    );
+                                    return EventResult::Consumed;
+                                }
+                                super::ScrollbarPress::Bottom => {
+                                    scroll_state.write_no_update().set_offset(max_scroll);
+                                    super::update_follow_on_scroll(
+                                        follow_bottom,
+                                        max_scroll,
+                                        max_scroll,
+                                    );
+                                    return EventResult::Consumed;
+                                }
+                                super::ScrollbarPress::Thumb { grab } => grab,
+                                super::ScrollbarPress::Track { offset } => {
+                                    scroll_state.write_no_update().set_offset(offset);
+                                    super::update_follow_on_scroll(
+                                        follow_bottom,
+                                        max_scroll,
+                                        offset,
+                                    );
+                                    // 轨道点击可能落在已载入窗口顶端（REQ-C01-1）。
+                                    request_pages_after_scroll(
+                                        scroll_state,
+                                        scrollbar_fields,
+                                        follow_bottom,
+                                        None,
+                                    );
+                                    // 轨道点击后继续拖拽时，thumb 中心跟随鼠标。
+                                    (geo.thumb_length / 2) as u16
+                                }
                             };
-                            if !on_thumb {
-                                let track_click =
-                                    mouse.row.saturating_sub(sb_area.y).saturating_sub(1) as usize;
-                                let target_thumb_start =
-                                    track_click.saturating_sub(geo.thumb_length / 2);
-                                let position =
-                                    super::thumb_start_to_position(target_thumb_start, &geo);
-                                let target = super::position_to_scroll_y(
-                                    position,
-                                    geo.max_position,
-                                    max_scroll,
-                                );
-                                scroll_state.write_no_update().set_offset(target);
-                                super::update_follow_on_scroll(follow_bottom, max_scroll, target);
-                                // 轨道点击可能落在已载入窗口顶端（REQ-C01-1）。
-                                request_pages_after_scroll(
-                                    scroll_state,
-                                    scrollbar_fields,
-                                    follow_bottom,
-                                    None,
-                                );
-                            }
                             // 记录拖拽状态——render 不依赖 active，用 write_no_update
                             {
                                 let mut s = scrollbar_drag.write_no_update();
                                 s.active = true;
-                                s.thumb_offset = thumb_offset;
+                                s.thumb_offset = grab;
                                 s.last_flush = peri_time::monotonic_now();
                             }
                             // 清除手势按下记录，防止 fallthrough 冲突
@@ -350,16 +341,11 @@ pub(in crate::kit::message_area) fn handle_event(
                                 }
                             }
                             scrollbar_drag.write_no_update().last_flush = now;
-                            // 保持 thumb_offset：new_thumb_start_row = mouse.row - thumb_offset
-                            let thumb_offset = scrollbar_drag.read().thumb_offset;
-                            let new_thumb_start_row = mouse.row.saturating_sub(thumb_offset);
-                            let target_track_click = new_thumb_start_row
-                                .saturating_sub(sb_area.y)
-                                .saturating_sub(1)
-                                as usize;
-                            let position = super::thumb_start_to_position(target_track_click, &geo);
-                            let target =
-                                super::position_to_scroll_y(position, geo.max_position, max_scroll);
+                            // 保持 grab：new_thumb_start_row = mouse.row - grab
+                            let grab = scrollbar_drag.read().thumb_offset;
+                            let target = super::scrollbar_drag_offset(
+                                mouse.row, grab, sb_area, &geo, max_scroll,
+                            );
                             scroll_state.write_no_update().set_offset(target);
                             super::update_follow_on_scroll(follow_bottom, max_scroll, target);
                             // 拖到顶端同样是「滚动贴边」（REQ-C01-1）。

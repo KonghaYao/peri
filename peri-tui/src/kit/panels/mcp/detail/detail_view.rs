@@ -19,12 +19,24 @@ use ratatui_kit::ratatui::text::Span;
 
 use self::tables::{SectionSpec, TableRow};
 
-/// 详情视图正文换行宽度（错误摘要与 URL 共用）。
+/// 详情视图正文换行宽度上限（错误摘要与 URL 共用）。
 ///
-/// 面板实际宽度未知且行号契约（鼠标命中反推行号）必须与终端宽度无关，故取固定
-/// 值：正文缩进 4 列 + 52 列 ≈ 56 列，覆盖默认面板宽度。与 URL 同宽，使两块
-/// 长文本的换行行为一致。
+/// 宽面板保持既有 52 列版式；面板更窄时按实际可用宽度收窄（[`detail_wrap_width`]）。
+/// 行号契约（鼠标命中反推行号）与渲染必须使用同一个宽度。
 pub(in super::super) const DETAIL_WRAP_WIDTH: usize = 52;
+
+/// 错误摘要与 URL 行的左缩进列数。
+const DETAIL_TEXT_INDENT: usize = 4;
+
+/// 详情长文本的实际换行宽度：面板内容宽扣除左缩进与右侧滚动条预留列，
+/// 上限为 [`DETAIL_WRAP_WIDTH`]。
+///
+/// 渲染与按钮行号（鼠标命中反推）共用此函数，窄屏下不会各自按 52 列换行。
+pub(in super::super) fn detail_wrap_width(width: u16) -> usize {
+    usize::from(width)
+        .saturating_sub(DETAIL_TEXT_INDENT + usize::from(DETAIL_RIGHT_RESERVE))
+        .clamp(1, DETAIL_WRAP_WIDTH)
+}
 
 /// 详情视图 header（标题）行号——server 名/状态/版本/授权徽标与右对齐复制按钮
 /// 同行。鼠标命中反推用；列偏移由 [`detail_buttons`] 按面板宽度算出。
@@ -418,22 +430,23 @@ pub(in super::super) fn detail_btn_row(
     skills_count: usize,
     width: u16,
 ) -> u16 {
+    let wrap_width = detail_wrap_width(width);
     let url_lines = s
         .url
         .as_ref()
-        .map(|url| crate::kit::text_util::wrap_text(url, DETAIL_WRAP_WIDTH).len() as u16)
+        .map(|url| crate::kit::text_util::wrap_text(url, wrap_width).len() as u16)
         .unwrap_or(1);
-    let error_block = detail_error_lines(s)
+    let error_block = detail_error_lines(s, width)
         .map(|lines| lines as u16 + 2)
         .unwrap_or(0);
     8 + url_lines + error_block + tables_line_count(s, skills_count, width)
 }
 
-/// 错误摘要换行后的行数；None = 无错误摘要。
-pub(in super::super) fn detail_error_lines(s: &McpServerSummary) -> Option<usize> {
+/// 错误摘要按同一可用宽度换行后的行数；None = 无错误摘要。
+pub(in super::super) fn detail_error_lines(s: &McpServerSummary, width: u16) -> Option<usize> {
     s.error_summary
         .as_deref()
-        .map(|error| crate::kit::text_util::wrap_text(error, DETAIL_WRAP_WIDTH).len())
+        .map(|error| crate::kit::text_util::wrap_text(error, detail_wrap_width(width)).len())
 }
 
 /// 渲染底行按钮行：`DetailButton::col` 与 `render_button_row` 的输出列一一对应
@@ -583,6 +596,7 @@ pub(in super::super) fn build_detail_lines(
 ) -> Vec<Line<'static>> {
     let semantic = &theme.semantic;
     let mut lines: Vec<Line<'_>> = Vec::new();
+    let wrap_width = detail_wrap_width(width);
     lines.push(Line::from(""));
     // 标题（header）：server 名 + 状态 + 版本 + 授权徽标 [+ 右对齐复制按钮]。
     // 片段保留逐段样式，供窄终端下按预算截断（见 render_header_row）。
@@ -655,7 +669,7 @@ pub(in super::super) fn build_detail_lines(
                 .fg(semantic.status.error),
         );
         // 长错误按面板可用宽度换行完整展示（行数与 detail_btn_row 同源）
-        for error_line in crate::kit::text_util::wrap_text(error, DETAIL_WRAP_WIDTH) {
+        for error_line in crate::kit::text_util::wrap_text(error, wrap_width) {
             lines.push(Line::from(format!("    {error_line}")).fg(semantic.text.muted));
         }
         lines.push(Line::from(""));
@@ -664,7 +678,7 @@ pub(in super::super) fn build_detail_lines(
     lines.push(Line::from(format!("  {}", i18n::tr("panel-mcp-detail-url"))).fg(semantic.text.dim));
     match &s.url {
         Some(url) => {
-            for url_line in crate::kit::text_util::wrap_text(url, DETAIL_WRAP_WIDTH) {
+            for url_line in crate::kit::text_util::wrap_text(url, wrap_width) {
                 lines.push(Line::from(format!("    {url_line}")).fg(semantic.text.primary));
             }
         }

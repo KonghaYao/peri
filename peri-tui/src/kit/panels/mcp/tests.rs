@@ -199,8 +199,59 @@ fn long_error_summary_wraps_and_stays_complete() {
         error
     );
     assert_eq!(
-        super::detail::detail_error_lines(&summary),
+        super::detail::detail_error_lines(&summary, TEST_WIDTH),
         Some(wrapped.len())
+    );
+}
+
+/// 窄面板：CJK 错误按显示列宽换行（不按码点），行宽不越过可用宽度，
+/// 按钮行号与渲染同源。
+#[test]
+fn narrow_panel_wraps_cjk_error_by_display_width() {
+    let width: u16 = 24;
+    let wrap_width = super::detail::detail_wrap_width(width);
+    assert!(wrap_width < DETAIL_WRAP_WIDTH, "用例必须落在窄屏分支");
+    let error = "中文错误信息".repeat(5);
+    let summary = McpServerSummary {
+        error_summary: Some(error.clone()),
+        ..McpServerSummary::default()
+    };
+    let lines = super::detail::build_detail_lines(
+        &summary,
+        &[],
+        0,
+        &peri_theme::builtin::dark_theme(),
+        width,
+    );
+    let label = i18n::tr("panel-mcp-detail-error");
+    let start = lines
+        .iter()
+        .position(|line| line_text(line).contains(&label))
+        .expect("错误标题必须渲染");
+    let wrapped = crate::kit::text_util::wrap_text(&error, wrap_width);
+    assert!(wrapped.len() > 1, "用例必须覆盖多行换行");
+    let rendered: Vec<String> = lines[start + 1..start + 1 + wrapped.len()]
+        .iter()
+        .map(line_text)
+        .collect();
+    assert_eq!(
+        rendered,
+        wrapped
+            .iter()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rendered
+            .iter()
+            .all(|line| UnicodeWidthStr::width(line.as_str()) <= width as usize),
+        "窄屏换行后每行不得超过面板宽度"
+    );
+    let back = DetailAction::Back.text(&i18n::tr("panel-mcp-detail-btn-back"));
+    assert_eq!(
+        rendered_row(&lines, &back),
+        super::detail::detail_btn_row(&summary, 0, width) as usize,
+        "窄屏按钮行号必须与渲染一致"
     );
 }
 
@@ -475,7 +526,10 @@ fn detail_button_row_shifts_with_error_summary() {
         error_summary: Some("E".repeat(120)),
         ..McpServerSummary::default()
     };
-    assert_eq!(super::detail::detail_error_lines(&long_error), Some(3));
+    assert_eq!(
+        super::detail::detail_error_lines(&long_error, TEST_WIDTH),
+        Some(3)
+    );
     assert_eq!(
         super::detail::detail_btn_row(&long_error, 0, TEST_WIDTH),
         26
