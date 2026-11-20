@@ -12,7 +12,6 @@ use super::footer;
 use super::genui_action::{self, GenUiButtonHit, PressedGenuiKey, PressedOverlay};
 use super::handlers;
 use super::hits;
-use super::no_color;
 use super::props;
 use super::render;
 use super::scroll;
@@ -499,19 +498,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         scroll_state.write_no_update().set_offset(max_scroll);
     }
 
-    // 更新 scrollbar fields——post_component_draw 时基于此渲染滚动条
-    //
-    // [Fix] ratatui Scrollbar 的 position 模型是 "item index"，max_position =
-    // content_length - 1。但我们的 scroll_y 是 scroll offset，max = content_length -
-    // vis_height。直接传 scroll_y 会导致 thumb 永远到不了底部（因为 scroll_y <
-    // content_length - 1）。需要把 [0, max_scroll] 线性映射到 [0, content_length-1]。
+    // 更新 scrollbar fields——post_component_draw 时基于此渲染滚动条。
+    // 这里是原始内容偏移；thumb 位置与拖拽反推由组件的 `VerticalBar` 用同一份
+    // [0, max_offset] 映射完成，不再额外换算 ratatui 的 item position。
     {
         let mut g = scrollbar_fields.write_no_update();
         g.content_length = total_visual_rows;
-        g.position = scroll_y
-            .saturating_mul(total_visual_rows.saturating_sub(1))
-            .checked_div(max_scroll)
-            .unwrap_or(0);
+        g.offset = scroll_y;
         g.viewport_length = vis_height as usize;
     }
 
@@ -624,7 +617,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 视口外选区不参与 highlight，selection state 保留供复制
     // [Why] 字符级高亮——旧版只存 (first_logical, last_logical) 整逻辑行范围，
     // 导致整行背景色覆盖；与字符级复制提取不一致。现在保留完整 (sr, sc, er, ec)，
-    // highlight_line_in_selection 用 wrap_byte_starts 算 byte 范围，拆分 spans。
+    // highlight_line_in_selection 用 wrap_row_byte_starts 算 byte 范围，拆分 spans。
     // sr/er 为视觉行（usize，内容可超 65535 视觉行），sc/ec 为视觉列（u16）。
     let sel_bounds: Option<(usize, usize, usize, u16, usize, u16)> = if !no_highlight {
         let sel = text_sel.read();
@@ -801,7 +794,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         ));
         let line = Line::from(spans);
         Some(if strip_color {
-            self::no_color::strip_line_colors(&line)
+            peri_tui_components::style::strip_line_colors(&line)
         } else {
             line
         })
@@ -819,7 +812,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 剥离颜色但保留 modifier（bold/italic/dim）与符号、文本——状态不依赖颜色。
     if strip_color {
         for line in viewport_lines.iter_mut() {
-            *line = self::no_color::strip_line_colors(line);
+            *line = peri_tui_components::style::strip_line_colors(line);
         }
     }
     // [PERI_RENDER_TIMING] 视口裁剪耗时

@@ -13,7 +13,6 @@ pub(crate) mod grid;
 mod handlers;
 mod hits;
 mod image_action;
-mod no_color;
 mod props;
 pub(crate) mod render;
 pub(crate) mod scroll;

@@ -539,7 +539,7 @@ pub(super) fn background_task_line(
     } else {
         format!(
             "{}{}",
-            crate::truncate::truncate_by_width(&task.summary, 60),
+            crate::truncate::truncate_to_width(&task.summary, 60),
             pid_str
         )
     };
@@ -594,7 +594,7 @@ pub(super) fn cron_job_line(
         .map(|t| t.format("%H:%M:%S").to_string())
         .unwrap_or_else(|| i18n::tr("common-na"));
     // 按终端显示宽度截断（CJK 双宽按 2 列计），避免字符数截断导致行溢出
-    let prompt_preview: String = crate::truncate::truncate_by_width(&job.prompt, 50);
+    let prompt_preview: String = crate::truncate::truncate_to_width(&job.prompt, 50);
     Line::from(vec![
         Span::styled(
             cursor_marker(selected),

@@ -206,4 +206,41 @@ fn test_click_inside_popup() {
     assert!(!super::click_inside_popup(a.y + 3, a.x + a.width, &a)); // 右侧
 }
 
+/// 左键裁决：内容行选中，边框内消费不关闭，矩形外 dismiss。
+#[test]
+fn test_click_action_selects_dismisses_or_consumes() {
+    use super::QuickSwitchClick;
+    let a = area();
+    assert_eq!(
+        super::click_action(a.y + 1, a.x + 5, &a),
+        QuickSwitchClick::Select(0)
+    );
+    assert_eq!(
+        super::click_action(a.y + ROW_COUNT as u16, a.x + 5, &a),
+        QuickSwitchClick::Select(ROW_COUNT - 1)
+    );
+    assert_eq!(
+        super::click_action(a.y, a.x + 5, &a),
+        QuickSwitchClick::Consume,
+        "上边框不关闭弹窗"
+    );
+    assert_eq!(
+        super::click_action(a.y + a.height - 1, a.x + 5, &a),
+        QuickSwitchClick::Consume,
+        "下边框不关闭弹窗"
+    );
+    assert_eq!(
+        super::click_action(a.y - 1, a.x + 5, &a),
+        QuickSwitchClick::Dismiss
+    );
+    assert_eq!(
+        super::click_action(a.y + a.height, a.x + 5, &a),
+        QuickSwitchClick::Dismiss
+    );
+    assert_eq!(
+        super::click_action(a.y + 1, a.x.saturating_sub(1), &a),
+        QuickSwitchClick::Dismiss
+    );
+}
+
 use unicode_width::UnicodeWidthStr;

@@ -9,7 +9,7 @@ use super::{error, group, helpers, interaction, reasoning, system, tool_card, us
 use std::sync::Arc;
 
 use crate::i18n;
-use crate::kit::genui::GenUiButtonInfo;
+use peri_tui_components::genui::GenUiButtonInfo;
 
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::tui_render_unit::TuiRenderUnit;

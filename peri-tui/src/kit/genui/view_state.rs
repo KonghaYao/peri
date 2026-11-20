@@ -3,8 +3,7 @@ use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use peri_genui::{EvalContext, ParseResult};
-
-use super::{GenUiAction, GenUiBlockId};
+use peri_tui_components::genui::{GenUiAction, GenUiBlockId};
 
 #[derive(Default)]
 struct BlockState {

@@ -15,7 +15,7 @@ pub(super) fn cache_retained_bytes(cache: &MarkdownRenderCache) -> usize {
         chunk_width: _,
         chunk_palette: _,
         chunk_base_fg: _,
-        chunk_sunken: _,
+        chunk_theme: _,
         stable_source_end: _,
         stable_chunk_blocks,
         stable_chunk_fences,

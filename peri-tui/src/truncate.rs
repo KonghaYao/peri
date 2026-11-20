@@ -20,7 +20,6 @@
 //! 非 cwd 前缀的路径保持原样。cwd 由 `set_display_cwd` 在启动时设置一次。
 
 use std::sync::OnceLock;
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 /// TUI 启动时的工作目录（进程生命周期内不变），用于路径显示精简。
@@ -73,34 +72,34 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
 
 /// Truncate text by **terminal display width**（CJK 双宽字符按 2 列计），超长补省略号。
 ///
-/// 与 `truncate_text`（按码点数截断）的区别：按码点截断在混合 CJK / ASCII 文本中
-/// 实际显示宽度不可控（60 个汉字占 120 列），且可能切断 emoji 组合序列；本函数按
-/// `unicode-width` 的显示宽度截断，保证输出宽度 ≤ `max_width` 列，并按 grapheme
-/// cluster 迭代（emoji ZWJ 序列 / 组合字符不会被从中间切开）。
+/// **前缀预算语义**：`max_width` 只约束保留的正文列数，省略号额外占 1 列
+/// （输出最多 `max_width + 1` 列）。这是既有公开契约，保留给尚未迁移的调用方；
+/// 需要「输出含省略号 ≤ 预算」的布局调用应使用
+/// [`peri_tui_components::text::truncate_to_width`]。
+///
+/// 按 grapheme cluster 迭代（emoji ZWJ 序列 / 组合字符不会被从中间切开）。
 pub fn truncate_by_width(s: &str, max_width: usize) -> String {
-    let mut width = 0usize;
-    let mut out = String::new();
-    let mut truncated = false;
-    for g in s.graphemes(true) {
-        let w = g.width();
-        if width + w > max_width {
-            truncated = true;
-            break;
-        }
-        out.push_str(g);
-        width += w;
+    use unicode_width::UnicodeWidthStr;
+    if s.width() <= max_width {
+        return s.to_string();
     }
-    if truncated {
-        out.push('…');
-    }
+    let mut out = peri_tui_components::text::prefix_by_width(s, max_width);
+    out.push('…');
     out
+}
+
+/// Truncate text to **at most** `max_width` terminal display columns, ellipsis included.
+///
+/// 布局预算调用方使用此入口：输出列宽不会超过给定预算。
+pub fn truncate_to_width(s: &str, max_width: usize) -> String {
+    peri_tui_components::text::truncate_to_width(s, max_width)
 }
 
 /// Middle-truncate text to `max_width` terminal display columns, keeping head and tail.
 ///
-/// 与尾部截断的 [`truncate_by_width`] 相对：路径/URL 的尾部通常比中段更有辨识度，
-/// 因此保留头尾、用单个 `…` 连接，输出显示宽度 ≤ `max_width`。预算过小（< 4 列）
-/// 时退化为尾部截断，避免只剩省略号。
+/// 与尾部截断的 [`truncate_to_width`] 相对：路径/URL 的尾部通常比中段更有辨识度，
+/// 因此保留头尾、用单个 `…` 连接，输出显示宽度 ≤ `max_width`。预算过小时退化为
+/// 尾部严格截断，避免只剩省略号。
 pub fn middle_truncate_by_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_string();
@@ -109,48 +108,14 @@ pub fn middle_truncate_by_width(s: &str, max_width: usize) -> String {
         return String::new();
     }
     if max_width < 4 {
-        // truncate_by_width 的省略号不占预算，这里预留 1 列保证输出不超宽。
-        return truncate_by_width(s, max_width - 1);
+        return truncate_to_width(s, max_width);
     }
     // 省略号占 1 列，其余头尾平分（头部略多 1 列，保留路径根）。
     let head_budget = (max_width - 1) / 2;
     let tail_budget = max_width - 1 - head_budget;
-    let head = prefix_by_width(s, head_budget);
-    let tail = suffix_by_width(s, tail_budget);
+    let head = peri_tui_components::text::prefix_by_width(s, head_budget);
+    let tail = peri_tui_components::text::suffix_by_width(s, tail_budget);
     format!("{head}…{tail}")
-}
-
-/// 按显示宽度取前缀（不追加省略号，按 grapheme cluster 迭代）。
-fn prefix_by_width(s: &str, max_width: usize) -> String {
-    let mut width = 0usize;
-    let mut out = String::new();
-    for g in s.graphemes(true) {
-        let w = g.width();
-        if width + w > max_width {
-            break;
-        }
-        out.push_str(g);
-        width += w;
-    }
-    out
-}
-
-/// 按显示宽度取后缀（从尾部反向累计，不追加省略号）。
-fn suffix_by_width(s: &str, max_width: usize) -> String {
-    let mut width = 0usize;
-    let mut parts: Vec<&str> = Vec::new();
-    {
-        let iteration_items = s.graphemes(true).rev();
-        for g in iteration_items {
-            let w = g.width();
-            if width + w > max_width {
-                break;
-            }
-            parts.push(g);
-            width += w;
-        }
-    }
-    parts.into_iter().rev().collect()
 }
 
 /// Wrap text into lines of at most `max_width` terminal display columns.

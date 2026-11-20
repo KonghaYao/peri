@@ -4,9 +4,11 @@
 //! - `push_history(text)`：提交后追加。空文本/纯空白不入栈；与栈顶相同则去重。
 //! - `history_up(current_text)`：从 None 或当前浏览位置向旧方向移动一步，
 //!   返回该位置的历史文本。已在最旧位置则不变。
-//! - `history_down()`：向新方向移动。到达最新之后清空指针（返回 None），
-//!   调用方应恢复用户编辑中的草稿。
+//! - `history_down()`：向新方向移动。到达最新之后清空指针，调用方恢复草稿。
 //! - `reset_history_cursor()`：清空浏览指针，回到"编辑新文本"状态。
+//!
+//! 上下移动、退出与重置的状态转换由 `peri-tui-components::history` 持有；
+//! 本模块只负责 atom 加锁、容量淘汰与持久化。
 //!
 //! ## 容量限制
 //!
@@ -14,13 +16,15 @@
 //! 头部（最旧）淘汰；单条超过 `MAX_ENTRY_BYTES` 不入栈（输入照常提交）。
 //! 浏览路径只复制选中项；持久化由单个 worker 合并写，提交路径不复制整栈。
 
-use crate::kit::atoms::DRAFT as HISTORY_DRAFT;
+use super::atoms::INPUT_HISTORY_CURSOR;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
+
+use peri_tui_components::history::HistoryDown;
 
 /// 最大保留历史条数。
 const MAX_HISTORY: usize = 1000;
@@ -43,11 +47,10 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(25);
 /// 提交后写入历史。空白去重，与栈顶相同则不重复入栈。
 pub fn push_history(text: &str) {
     let history_atom = INPUT_HISTORY.state();
-    let index_atom = INPUT_HISTORY_INDEX.state();
 
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        *index_atom.write() = None;
+        INPUT_HISTORY_CURSOR.state().write().reset();
         return;
     }
     if trimmed.len() > MAX_ENTRY_BYTES {
@@ -56,7 +59,7 @@ pub fn push_history(text: &str) {
             limit = MAX_ENTRY_BYTES,
             "input_history: entry exceeds per-entry budget, not retained"
         );
-        *index_atom.write() = None;
+        INPUT_HISTORY_CURSOR.state().write().reset();
         return;
     }
 
@@ -78,7 +81,8 @@ pub fn push_history(text: &str) {
             true
         }
     };
-    *index_atom.write() = None;
+    // [锁序] 历史（写）先于游标（写），与浏览路径的读历史→写游标一致。
+    INPUT_HISTORY_CURSOR.state().write().reset();
     if changed {
         request_history_save(history_path());
     }
@@ -88,62 +92,34 @@ pub fn push_history(text: &str) {
 ///
 /// 空历史直接返回 None；已在最旧位置则维持并返回该位置文本。
 ///
-/// 首次进入历史模式时（`current_text` 非空且非纯空白），
-/// 自动将 `current_text` 保存为草稿——`history_down()` 回到编辑态时会返回该草稿。
+/// 首次进入历史模式时把 `current_text` 保存为草稿（包括显式空串）——
+/// `history_down()` 回到编辑态时原样返回，避免把最旧历史项留在编辑器里。
 pub fn history_up(current_text: Option<&str>) -> Option<String> {
-    // 先取 index 再取 history，保持与 history_down 相同的加锁顺序。
-    let current = *INPUT_HISTORY_INDEX.state().read();
     let history_atom = INPUT_HISTORY.state();
     let history = history_atom.read();
-    if history.is_empty() {
-        return None;
-    }
-
-    let new_idx = match current {
-        None => {
-            // 进入历史模式：保存当前草稿（包括空串），history_down 回到底部时
-            // 必须能明确恢复为空输入，而不是把旧历史项留在编辑器里。
-            *HISTORY_DRAFT.state().write() = current_text.map(str::to_string);
-            history.len() - 1
-        }
-        Some(0) => 0,
-        Some(i) => i - 1,
-    };
-    *INPUT_HISTORY_INDEX.state().write() = Some(new_idx);
-    // 只复制选中项，不复制整栈。
-    history.get(new_idx).cloned()
+    // [锁序] 先历史读锁、后游标写锁；push_history 同序，避免交叉等待。
+    INPUT_HISTORY_CURSOR
+        .state()
+        .write()
+        .up(&history, current_text)
 }
 
 /// 向新方向浏览一步。返回历史文本，或 None（已回到编辑状态）。
 ///
-/// 超过最新位置时回到编辑状态，返回 `DRAFT` atom 中保存的草稿文本。
+/// 超过最新位置时回到编辑状态并恢复草稿（显式空串返回 `Some("")`）。
 pub fn history_down() -> Option<String> {
-    let current = *INPUT_HISTORY_INDEX.state().read();
-    let Some(index) = current else {
-        return None; // 已经在编辑状态，无需下移
-    };
-
     let history_atom = INPUT_HISTORY.state();
     let history = history_atom.read();
-    let new_idx = index + 1;
-    if new_idx >= history.len() {
-        // 超过最新——回到编辑状态
-        drop(history);
-        *INPUT_HISTORY_INDEX.state().write() = None;
-        // 返回草稿并清除（take 避免复制）
-        HISTORY_DRAFT.state().write().take()
-    } else {
-        let selected = history.get(new_idx).cloned();
-        drop(history);
-        *INPUT_HISTORY_INDEX.state().write() = Some(new_idx);
-        selected
+    match INPUT_HISTORY_CURSOR.state().write().down(&history) {
+        HistoryDown::Entry(text) => Some(text),
+        HistoryDown::Draft(draft) => draft,
+        HistoryDown::Idle => None,
     }
 }
 
-/// 清空浏览指针，回到编辑新文本状态。提交成功后必须调用。
+/// 清空浏览指针与草稿，回到编辑新文本状态。提交成功后必须调用。
 pub fn reset_history_cursor() {
-    *INPUT_HISTORY_INDEX.state().write() = None;
-    let _ = HISTORY_DRAFT.state().write().take();
+    INPUT_HISTORY_CURSOR.state().write().reset();
 }
 
 /// ~/.peri/input-history.json
@@ -294,5 +270,3 @@ fn persist_history(path: &Path, json: &str) {
 mod tests;
 
 use crate::kit::atoms::INPUT_HISTORY;
-
-use crate::kit::atoms::INPUT_HISTORY_INDEX;

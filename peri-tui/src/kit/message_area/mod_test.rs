@@ -21,8 +21,6 @@ use crate::kit::tui_render_unit::{
     TuiUserBubble,
 };
 use ratatui_kit::ratatui::layout::Rect;
-use ratatui_kit::ratatui::style::{Color, Modifier, Style};
-use ratatui_kit::ratatui::text::{Line, Span};
 use serial_test::serial;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,98 +60,8 @@ fn test_total_visual_rows_exceeds_u16_max() {
     );
 }
 
-// ── NO_COLOR 剥离 pass（§12，G3）───────────────────────────────────────────
-
-#[test]
-fn test_strip_line_colors_removes_all_colors_keeps_modifiers() {
-    // 混合多 span：前景/背景/下划线色 + bold 与 italic modifier + 符号与文本
-    let line = Line::from(vec![
-        Span::styled(
-            "◐ ",
-            Style::default()
-                .fg(Color::Rgb(125, 207, 255))
-                .bg(Color::Rgb(10, 10, 10)),
-        ),
-        Span::styled(
-            "Running",
-            Style::default()
-                .fg(Color::Rgb(255, 107, 128))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            " 12s",
-            Style::default()
-                .fg(Color::Rgb(80, 80, 80))
-                .underline_color(Color::Rgb(1, 2, 3)),
-        ),
-    ]);
-    let stripped = super::no_color::strip_line_colors(&line);
-
-    assert_eq!(stripped.spans.len(), 3, "span 结构保持不变");
-    // 颜色全部剥离（前景/背景/下划线），文本与符号原样保留
-    {
-        let iteration_items = line.spans.iter().zip(stripped.spans.iter());
-        for (orig, s) in iteration_items {
-            assert_eq!(orig.content, s.content, "文本/符号不得被剥离");
-            assert_eq!(s.style.fg, None, "前景色必须剥离");
-            assert_eq!(s.style.bg, None, "背景色必须剥离");
-            assert_eq!(s.style.underline_color, None, "下划线色必须剥离");
-        }
-    }
-    // modifier 保留（NO_COLOR 下状态仍需可辨认）
-    assert!(
-        stripped.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD)
-    );
-    assert!(
-        !stripped.spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD)
-    );
-}
-
-#[test]
-fn test_strip_line_colors_keeps_unicode_symbols() {
-    // §12：符号与明确状态文本不被剥离——unicode 符号 + CJK 文本原样保留
-    let line = Line::from(vec![
-        Span::styled("✓", Style::default().fg(Color::Rgb(78, 186, 101))),
-        Span::styled(" 完成", Style::default().fg(Color::Rgb(200, 200, 200))),
-    ]);
-    let stripped = super::no_color::strip_line_colors(&line);
-    assert_eq!(stripped.spans[0].content, "✓");
-    assert_eq!(stripped.spans[1].content, " 完成");
-}
-
-#[test]
-fn test_strip_line_colors_preserves_alignment() {
-    use ratatui_kit::ratatui::layout::Alignment;
-    let line = Line {
-        spans: vec![Span::styled(
-            "title",
-            Style::default().fg(Color::Rgb(1, 2, 3)),
-        )],
-        alignment: Some(Alignment::Center),
-        style: Style::default().fg(Color::Rgb(9, 9, 9)),
-    };
-    let stripped = super::no_color::strip_line_colors(&line);
-    assert_eq!(stripped.alignment, Some(Alignment::Center));
-    // Line 级 style 的颜色同样剥离，modifier 保留
-    assert_eq!(stripped.style.fg, None);
-    assert_eq!(stripped.style.bg, None);
-    assert_eq!(stripped.style.add_modifier, line.style.add_modifier);
-}
-
-#[test]
-fn test_strip_line_colors_plain_style_unchanged_content() {
-    // 无颜色的 span：剥离后内容与结构不变
-    let line = Line::from(vec![Span::raw("plain")]);
-    let stripped = super::no_color::strip_line_colors(&line);
-    assert_eq!(stripped.spans[0].content, "plain");
-    assert_eq!(stripped.spans[0].style, Style::default());
-}
+// NO_COLOR 纯样式剥离的单测随实现迁到 peri-tui-components::style；
+// 这里只保留与消息区渲染集成的选区用例（见 selection_test.rs）。
 
 #[must_use]
 fn layout_at(line_index: usize, start_col: u16, width: u16) -> KeepGoingLayout {

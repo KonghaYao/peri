@@ -57,7 +57,7 @@ pub(super) fn render_ask_user_block_lines(
         if !data.question.is_empty() {
             let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
-                crate::truncate::truncate_by_width(&data.question, content),
+                crate::truncate::truncate_to_width(&data.question, content),
                 Style::default().fg(sem.text.muted),
             ));
             lines.push(Line::from(spans));
@@ -74,7 +74,7 @@ pub(super) fn render_ask_user_block_lines(
                 let text = ButtonChrome::Bracketed { padded: false }.text(label);
                 let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
                 spans.push(Span::styled(
-                    crate::truncate::truncate_by_width(&text, content),
+                    crate::truncate::truncate_to_width(&text, content),
                     Style::default().fg(sem.text.primary),
                 ));
                 lines.push(Line::from(spans));
@@ -94,7 +94,7 @@ pub(super) fn render_ask_user_block_lines(
             // 回退 cont_prefix，§9）——与渲染出的 spans 同源，命中列不会漂移。
             let prefix_w: usize = spans.iter().map(|s| s.content.width()).sum();
             spans.push(Span::styled(
-                crate::truncate::truncate_by_width(&text, content),
+                crate::truncate::truncate_to_width(&text, content),
                 Style::default().fg(sem.text.primary),
             ));
             lines.push(Line::from(spans));
@@ -138,7 +138,7 @@ pub(super) fn render_ask_user_block_lines(
         let mut spans =
             super::helpers::process_first_prefix(grid, symbol, Style::default().fg(color));
         spans.push(Span::styled(
-            crate::truncate::truncate_by_width(&title, content),
+            crate::truncate::truncate_to_width(&title, content),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
         spans
@@ -151,7 +151,7 @@ pub(super) fn render_ask_user_block_lines(
     if !data.question.is_empty() {
         let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
-            crate::truncate::truncate_by_width(&data.question, content),
+            crate::truncate::truncate_to_width(&data.question, content),
             Style::default().fg(sem.text.muted),
         ));
         lines.push(Line::from(spans));
@@ -176,7 +176,7 @@ pub(super) fn render_ask_user_block_lines(
                         ButtonChrome::Bracketed { padded: false }.text(label)
                     };
                     spans.push(Span::styled(
-                        crate::truncate::truncate_by_width(&text, content),
+                        crate::truncate::truncate_to_width(&text, content),
                         Style::default().fg(if is_chosen {
                             sem.status.success
                         } else {
@@ -203,7 +203,7 @@ pub(super) fn render_ask_user_block_lines(
                 .join("  ");
             let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
             spans.push(Span::styled(
-                crate::truncate::truncate_by_width(&text, content),
+                crate::truncate::truncate_to_width(&text, content),
                 Style::default().fg(sem.text.primary),
             ));
             lines.push(Line::from(spans));
@@ -214,7 +214,7 @@ pub(super) fn render_ask_user_block_lines(
         let text = format!("{} \u{2192} {}", item.header, item.answer);
         let mut spans = super::helpers::process_cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
-            crate::truncate::truncate_by_width(&text, content),
+            crate::truncate::truncate_to_width(&text, content),
             Style::default().fg(sem.text.muted),
         ));
         lines.push(Line::from(spans));

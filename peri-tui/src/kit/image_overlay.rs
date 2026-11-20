@@ -369,7 +369,7 @@ fn draw_preview_overlay(
     let meta = crate::kit::image_safety::sanitize_for_terminal(&meta_text);
     if !meta.is_empty() {
         let inner_w = usize::from(rect.width.saturating_sub(2).max(1));
-        let text = crate::truncate::truncate_by_width(&meta, inner_w);
+        let text = crate::truncate::truncate_to_width(&meta, inner_w);
         let sem = THEME_ATOM.state().read().semantic;
         buf.set_stringn(
             rect.x.saturating_add(1),
@@ -418,7 +418,7 @@ fn paint_no_protocol_hint(buf: &mut Buffer, area: &Rect) {
         return;
     }
     let inner_w = usize::from(area.width.saturating_sub(2).max(1));
-    let text = crate::truncate::truncate_by_width(&hint, inner_w);
+    let text = crate::truncate::truncate_to_width(&hint, inner_w);
     let x = area.x + (area.width.saturating_sub(text.width() as u16)) / 2;
     let y = area.y + area.height.saturating_div(2);
     let secondary = THEME_ATOM.state().read().semantic.text.secondary;

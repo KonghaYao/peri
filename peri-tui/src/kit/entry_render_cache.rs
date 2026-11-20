@@ -4,7 +4,6 @@ use std::sync::Arc;
 use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::ratatui::text::Line;
 
-use crate::kit::genui::GenUiButtonInfo;
 use crate::kit::markdown::MarkdownRenderCache;
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::render::CopyButtonInfo;
@@ -12,6 +11,7 @@ use crate::kit::message_area::render::ImageLineInfo;
 use crate::kit::message_area::render::InteractionLayout;
 use crate::kit::message_area::selection::{WrappedLineInfo, build_wrap_map};
 use crate::kit::tui_render_unit::TuiRenderUnit;
+use peri_tui_components::genui::GenUiButtonInfo;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EntrySurface {
@@ -50,7 +50,7 @@ pub(crate) struct EntryRenderCache {
     interaction: Option<InteractionLayout>,
     image_lines: Vec<ImageLineInfo>,
     genui_buttons: Vec<GenUiButtonInfo>,
-    genui_revisions: Vec<(crate::kit::genui::GenUiBlockId, u64)>,
+    genui_revisions: Vec<(peri_tui_components::genui::GenUiBlockId, u64)>,
     /// 上次渲染时的 Mermaid 预览版本；只有含 Mermaid 的消息需要据此重算。
     preview_revision: Option<u64>,
     has_mermaid: Option<bool>,
@@ -313,9 +313,9 @@ impl EntryRenderCache {
             + crate::kit::retained_bytes::retained_arc_lines_bytes(&self.lines, seen)
             + self.markdown_lines.retained_bytes_with(seen)
             + self.genui_revisions.capacity()
-                * std::mem::size_of::<(crate::kit::genui::GenUiBlockId, u64)>()
+                * std::mem::size_of::<(peri_tui_components::genui::GenUiBlockId, u64)>()
             + self.markdown_lines.genui_blocks.capacity()
-                * std::mem::size_of::<crate::kit::genui::GenUiBlockId>()
+                * std::mem::size_of::<peri_tui_components::genui::GenUiBlockId>()
             + self.genui_buttons.capacity() * std::mem::size_of::<GenUiButtonInfo>()
             + self
                 .genui_buttons
@@ -363,7 +363,7 @@ pub(crate) struct MarkdownLineCache {
     pub(crate) stable_start: Option<usize>,
     pub(crate) stable: Vec<MarkdownLineChunk>,
     pub(crate) genui_ranges: Vec<std::ops::Range<usize>>,
-    pub(crate) genui_blocks: Vec<crate::kit::genui::GenUiBlockId>,
+    pub(crate) genui_blocks: Vec<peri_tui_components::genui::GenUiBlockId>,
     prefix: Vec<usize>,
 }
 

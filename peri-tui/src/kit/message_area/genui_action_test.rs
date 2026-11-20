@@ -13,8 +13,7 @@ struct Guard {
     mention: bool,
     slash: bool,
     epoch: u64,
-    history: Option<usize>,
-    draft: Option<String>,
+    history_cursor: peri_tui_components::history::HistoryCursor,
     active_panel: Option<crate::app::panel_types::PanelKind>,
     popup: Option<atoms::PopupKind>,
 }
@@ -33,8 +32,7 @@ impl Guard {
             mention: AT_MENTION_ACTIVE.get(),
             slash: SLASH_HINT_ACTIVE.get(),
             epoch: BRIDGE_RESET_COUNTER.get(),
-            history: atoms::INPUT_HISTORY_INDEX.get(),
-            draft: atoms::DRAFT.state().read().clone(),
+            history_cursor: atoms::INPUT_HISTORY_CURSOR.state().read().clone(),
             active_panel: atoms::ACTIVE_PANEL.state().write().take(),
             popup: atoms::POPUP_KIND.state().write().take(),
         };
@@ -51,8 +49,7 @@ impl Drop for Guard {
         AT_MENTION_ACTIVE.set(self.mention);
         SLASH_HINT_ACTIVE.set(self.slash);
         BRIDGE_RESET_COUNTER.set(self.epoch);
-        atoms::INPUT_HISTORY_INDEX.set(self.history);
-        atoms::DRAFT.set(self.draft.take());
+        atoms::INPUT_HISTORY_CURSOR.set(self.history_cursor.clone());
         atoms::ACTIVE_PANEL.set(self.active_panel);
         atoms::POPUP_KIND.set(self.popup);
     }
@@ -62,7 +59,7 @@ fn segment(source: &str) -> GenUiSegment {
     GenUiSegment::parse(
         source.into(),
         false,
-        crate::kit::genui::library::library().unwrap(),
+        peri_tui_components::genui::library::library().unwrap(),
     )
 }
 
@@ -439,7 +436,7 @@ fn streaming_blocks_reject_state_actions_until_closed() {
     let _guard = Guard::new();
     let source = r#"$count = 1
 root = Stack([Text("stream=" + $count), Button("advance", @Set($count, $count + 1))])"#;
-    let library = crate::kit::genui::library::library().unwrap();
+    let library = peri_tui_components::genui::library::library().unwrap();
     let theme = peri_theme::builtin::dark_theme();
     let partial = GenUiSegment::parse(source.into(), true, library);
     let rendered = crate::kit::genui::render(&partial, 80, &theme);

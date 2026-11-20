@@ -1,5 +1,6 @@
-//! Markdown 渲染已下沉到 `peri-tui-components`；此模块保留应用内路径与类型出口。
+//! 组件 Markdown 的应用内别名。
 //!
-//! 解析、Mermaid 围栏扫描、段落转换、表格/图片/OpenUI 布局都在组件库中实现。
+//! 实现与公开 API 都在 `peri-tui_components::markdown`；这里仅保留 crate 内部路径，
+//! 不再对外转发（应用调用点按原路径即可，避免无谓改名噪音）。
 
-pub use peri_tui_components::markdown::*;
+pub(crate) use peri_tui_components::markdown::*;

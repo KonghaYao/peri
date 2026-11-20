@@ -12,10 +12,10 @@ pub(in super::super) fn reset_submit_side_effect_state() {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     INPUT_BUFFER.state().write().clear();
     crate::kit::atoms::INPUT_HISTORY.state().write().clear();
-    crate::kit::atoms::INPUT_HISTORY_INDEX
+    crate::kit::atoms::INPUT_HISTORY_CURSOR
         .state()
         .write()
-        .take();
+        .reset();
     crate::kit::atoms::OPEN_PANELS.state().write().clear();
     crate::kit::atoms::ACTIVE_PANEL.state().write().take();
     *crate::kit::atoms::NOTIFICATION.state().write() = None;

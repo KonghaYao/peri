@@ -112,9 +112,9 @@ pub(super) fn build_composer_tags(
     let attachments_label = attachments_label.filter(|label| !label.is_empty());
     match (plugin_label, attachments_label) {
         (None, None) => None,
-        (Some(plugin), None) => Some(crate::truncate::truncate_by_width(&plugin, max_width)),
+        (Some(plugin), None) => Some(crate::truncate::truncate_to_width(&plugin, max_width)),
         (None, Some(attachments)) => {
-            Some(crate::truncate::truncate_by_width(&attachments, max_width))
+            Some(crate::truncate::truncate_to_width(&attachments, max_width))
         }
         (Some(plugin), Some(attachments)) => {
             let separator = " · ";
@@ -122,16 +122,13 @@ pub(super) fn build_composer_tags(
             if full.width() <= max_width {
                 return Some(full);
             }
-            // `truncate_by_width` 的省略号不占预算，先留 1 列避免覆盖右侧资源线。
-            let plugin_budget = max_width
-                .saturating_sub(attachments.width() + separator.width())
-                .saturating_sub(1);
+            let plugin_budget = max_width.saturating_sub(attachments.width() + separator.width());
             if plugin_budget == 0 {
-                return Some(crate::truncate::truncate_by_width(&attachments, max_width));
+                return Some(crate::truncate::truncate_to_width(&attachments, max_width));
             }
             Some(format!(
                 "{}{separator}{attachments}",
-                crate::truncate::truncate_by_width(&plugin, plugin_budget)
+                crate::truncate::truncate_to_width(&plugin, plugin_budget)
             ))
         }
     }
@@ -177,7 +174,7 @@ pub(super) fn build_composer_block(
         let right_width = footer_right.as_ref().map_or(0, |line| line.width());
         let left_budget = usize::from(max_width).saturating_sub(right_width + 2);
         if let Some(f) = composer_tags {
-            let fitted = crate::truncate::truncate_by_width(f, left_budget);
+            let fitted = crate::truncate::truncate_to_width(f, left_budget);
             if !fitted.is_empty() {
                 block = block.title_bottom(Line::from(Span::styled(
                     format!(" {fitted} "),
@@ -214,7 +211,7 @@ pub(super) fn build_queue_lines(
     for text in items {
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", sym.queued), muted),
-            Span::styled(crate::truncate::truncate_by_width(text, max_width), muted),
+            Span::styled(crate::truncate::truncate_to_width(text, max_width), muted),
         ]));
     }
     if has_more {
@@ -261,11 +258,12 @@ pub(super) fn stable_hash(s: &str) -> u64 {
     hash
 }
 
-/// 按终端显示宽度截断标题（CJK 双宽字符按 2 列计），超长补省略号。
+/// 按终端显示宽度截断标题（CJK 双宽字符按 2 列计），省略号计入预算。
 ///
-/// 委托共享 helper `crate::truncate::truncate_by_width`（历史实现已迁移，语义不变）。
+/// 委托组件 `truncate_to_width`：`build_composer_block` 的宽度守卫按 32 列
+/// 计算，标题实际列宽不能多出 1 列。
 pub(super) fn truncate_title_to_width(s: &str, max_width: usize) -> String {
-    crate::truncate::truncate_by_width(s, max_width)
+    crate::truncate::truncate_to_width(s, max_width)
 }
 
 /// 根据底色亮度选择黑白对比前景（保证可读性的"反色"效果）。

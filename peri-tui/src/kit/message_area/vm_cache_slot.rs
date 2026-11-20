@@ -117,7 +117,7 @@ pub(super) struct VmCacheSlot {
     pub(super) copy_button: Option<render::CopyButtonInfo>,
     pub(super) interaction: Option<render::InteractionLayout>,
     pub(super) image_lines: Vec<ImageLineInfo>,
-    pub(super) genui_buttons: Vec<crate::kit::genui::GenUiButtonInfo>,
+    pub(super) genui_buttons: Vec<peri_tui_components::genui::GenUiButtonInfo>,
     /// 本消息内的 Mermaid 围栏及其逻辑行范围（视口调度与阅读锚点共用）。
     pub(super) mermaid_fences: Vec<crate::kit::mermaid::FenceSpan>,
 }
@@ -140,7 +140,7 @@ impl VmCacheSlot {
                     + layout.option_cols.capacity() * std::mem::size_of::<Option<(u16, u16)>>()
             })
             + self.genui_buttons.capacity()
-                * std::mem::size_of::<crate::kit::genui::GenUiButtonInfo>()
+                * std::mem::size_of::<peri_tui_components::genui::GenUiButtonInfo>()
             + self
                 .genui_buttons
                 .iter()

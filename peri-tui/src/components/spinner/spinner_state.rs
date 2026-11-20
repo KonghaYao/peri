@@ -2,6 +2,7 @@ use super::{animation, verb};
 
 use std::time::Instant;
 
+use peri_tui_components::spinner::Spinner;
 use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -122,13 +123,8 @@ impl SpinnerState {
         let elapsed_ms = peri_time::elapsed_since(self.start_time).as_millis() as u64;
         let raw_tick = elapsed_ms / 50;
         let frame_tick = raw_tick / 2;
-        let frame = animation::tick_to_frame(frame_tick);
         let mut spans: Vec<Span<'static>> = vec![];
 
-        spans.push(Span::styled(
-            format!("{} ", frame),
-            Style::default().fg(primary),
-        ));
         let verb = verb_override.unwrap_or_else(|| self.verb());
         spans.push(Span::styled(verb.to_string(), Style::default().fg(primary)));
 
@@ -150,6 +146,12 @@ impl SpinnerState {
             spans.push(Span::styled(")", Style::default().fg(secondary)));
         }
 
-        vec![Line::from(spans)]
+        // 图标 + 空格 + 已格式化文字由共享 Spinner 拼装；帧集与节奏仍在应用。
+        vec![
+            Spinner::new(animation::BRAILLE_FRAMES, frame_tick)
+                .icon_style(Style::default().fg(primary))
+                .text(Line::from(spans))
+                .line(),
+        ]
     }
 }

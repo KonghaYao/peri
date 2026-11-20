@@ -808,7 +808,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     // 当前会话标题：service_snapshot 周期性派生；空标题或 §11 高度降级
     // （h<12，session_title_visible=false）时上边栏不渲染标签。
     let session_title = hooks.use_atom(&CURRENT_SESSION_TITLE).read().clone();
-    let submitting_title = crate::truncate::truncate_by_width(
+    let submitting_title = crate::truncate::truncate_to_width(
         &i18n::tr("composer-submitting"),
         usize::from(
             composer_area

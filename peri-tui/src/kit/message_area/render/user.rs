@@ -55,7 +55,7 @@ pub(super) fn render_system_reminder_lines(
     let mut spans =
         super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
     spans.push(Span::styled(
-        crate::truncate::truncate_by_width(&heading, grid.process_content_width()),
+        crate::truncate::truncate_to_width(&heading, grid.process_content_width()),
         Style::default().fg(sem.text.dim),
     ));
     let mut lines = vec![Line::from(spans)];
@@ -353,7 +353,7 @@ pub(crate) fn render_image_hover_line(
     );
     // §4.6 path 显示注入：路径进终端前过 T5 sanitize（控制字符过滤）。
     let text = crate::kit::image_safety::sanitize_for_terminal(&text);
-    let clipped = crate::truncate::truncate_by_width(&text, grid.content_width());
+    let clipped = crate::truncate::truncate_to_width(&text, grid.content_width());
     let mut spans = super::helpers::cont_prefix(grid, sem.text.secondary);
     spans.push(Span::styled(clipped, Style::default().fg(sem.accents.user)));
     Line::from(spans)
@@ -423,7 +423,7 @@ pub(super) fn render_reminder_condensed(
     if !info.summary.is_empty() {
         let mut spans = super::helpers::cont_prefix(grid, sem.text.dim);
         spans.push(Span::styled(
-            crate::truncate::truncate_by_width(&info.summary, grid.content_width()),
+            crate::truncate::truncate_to_width(&info.summary, grid.content_width()),
             Style::default().fg(sem.text.muted),
         ));
         lines.push(Line::from(spans));

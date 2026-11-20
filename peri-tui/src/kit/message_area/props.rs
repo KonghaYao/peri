@@ -49,10 +49,13 @@ impl Hook for MsgAreaTracker {
 // ── 滚动条 Hook ─────────────────────────────────────────────────────────
 
 /// 视口右侧滚动条字段——通过 use_state 存储，避免 use_hook 的 borrow 冲突。
+///
+/// `offset` 是原始内容偏移（`0..=content - viewport`），不再换算成 ratatui 的
+/// item position；绘制与命中都由同一个 `VerticalBar` 从这组字段推导。
 #[derive(Default, Clone, Copy)]
 pub(super) struct ScrollbarFields {
     pub(super) content_length: usize,
-    pub(super) position: usize,
+    pub(super) offset: usize,
     pub(super) viewport_length: usize,
 }
 
@@ -115,7 +118,7 @@ impl Hook for ScrollbarHook {
             drawer,
             area,
             f.content_length,
-            f.position,
+            f.offset,
             f.viewport_length,
         );
     }

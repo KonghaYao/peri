@@ -6,21 +6,37 @@ This crate owns rendering and local interaction state only. It does not import
 Peri Agent, Session, MCP, configuration, persistence, or application atoms. It
 also owns the business-independent renderers moved down from the app: Markdown
 (`markdown::*`), OpenUI fence rendering (`genui::*`), width-safe text wrapping
-(`text::wrap_by_width`) and terminal text safety (`markdown::safety`).
+and strictly budgeted truncation (`text::wrap_by_width` /
+`text::truncate_to_width`), bounded unified diff parsing (`diff::*`), the input
+history cursor state machine (`history::HistoryCursor`), display-column
+selection slices (`selection::*`), `NO_COLOR` style stripping (`style::*`) and
+terminal text safety (`markdown::safety`).
 
 | Primitive | Caller supplies | Component owns |
 | --- | --- | --- |
 | `textarea::TextArea` | text state, cursor/selection/placeholder styles, focus | rendering and wrapping |
 | `textarea::TextAreaState` | editing commands | text, undo history, cursor and selection |
 | `list::ListViewport` | measured content rows, row metrics, item count, selection | visible range and matching hit layout |
+| `completion::CompletionPopup` | pre-styled label/detail rows, selected index, inline height, title, empty text, styles | selected marker, visible window (`ListViewport::window`) and the matching `hit_layout()`; `hit()` returns the full-list index |
 | `list_nav` | key events and selection | navigation intent and bounds |
+| `overlay::OverlayFrame` | title line, border/title styles, area | top/bottom borders, centred title, `inner()` region and `hit()` (inside/border/outside); never clears |
+| `spinner::Spinner` | frame set, external frame index, icon style, pre-formatted text line | frame selection (`frame % len`) and `icon + space + text` composition |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
-| `scrollbar::vertical_scrollbar` | thumb and arrow styles | scrollbar appearance |
+| `panel_layout` | terminal height, theme min/max panel height | transcript reserve, border rows and first-frame content height |
+| `scrollbar::VerticalBar` | bar height, viewport rows, content rows, raw offset, thumb/arrow styles | thumb geometry shared by painting and hit testing; `press`/`drag_offset` map both movable-track ends to `0`/`max_offset` |
+| `scrollbar::{SCROLL_LINES, bounded_offset, Throttle}` | delta, max offset, caller clock and interval | three-row wheel step, bounded offset arithmetic and caller-time throttling |
+| `selection` | line, plain text, visual endpoints | display-column→byte conversion, grapheme-safe slices, Paragraph-based wrap row starts and per-line byte ranges |
 | `markdown::parse_markdown*` | source text, width, palette, base foreground | typed segments (text/table/image/genui/mermaid), chunk cache |
 | `markdown::table_data_to_lines` | table data, table theme, width | unicode grid layout |
 | `markdown::safety` | untrusted display fields | control-character filtering and URL classification |
 | `genui::render` | parsed OpenUI segment, width, theme, optional `EvalContext` | layout, styling and button hit ranges |
 | `text::wrap_by_width` | text and width | grapheme/display-width wrapping without content loss |
+| `text::{truncate_to_width, truncate_to_width_with}` | text and total column budget | ellipsis-inclusive truncation (single `…` or shrinking ASCII dots), grapheme-safe |
+| `text::{prefix_by_width, suffix_by_width}` | text and column budget | grapheme-safe slices without decoration |
+| `style::{strip_line_colors, strip_style_color}` | styled line or style | color removal only; modifiers, symbols, text and alignment stay |
+| `diff::parse_unified_diff` | diff text, path hint, `DiffBudget` | bounded hunks/lines/change counts, line numbers, ranges, truncation counts; `None` for binary or over-budget input |
+| `diff::parse_edit_write_summary` | summary text, path hint | `+N`/`−M` block without hunks for Edit/Write summaries |
+| `history::HistoryCursor` | one `VecDeque<String>`, current editor text | up/down/exit/reset transitions; draft kept as `Option<String>` (`Some("")` is explicit empty input) |
 | `mermaid` | confirmed source, closed flag, width, job results | statement confirmation, layout, overview and preview state |
 
 The application resolves theme tokens, chooses first-frame panel height, routes
@@ -47,12 +63,28 @@ is the primary input and mirrors the real TUI:
   map by cell width and clicks past the last visual row are ignored;
 - clicking a list row selects that item; header/footer rows are inert and the
   scrollbar column is excluded (`panel_mouse::is_scrollbar_column`);
+- the completion story paints the same inline popup used by the host's `@` and `/`
+  input completion: 2-row window borders, eight content rows, and a selection that
+  stays inside `ListViewport`'s window. Clicking a row selects the full-list index
+  the same window painted; the empty variant has no clickable row. The wheel moves
+  the selection by three rows, and the popup's own height/rows are printed below
+  the frame;
 - the wheel scrolls lists by three rows per notch — the host's `SCROLL_LINES` — and
-  drives the scrollbar story, without moving the list selection; the bar itself has
-  no click handler, as in the app;
+  drives the scrollbar story, without moving the list selection. The scrollbar
+  story presses and drags the thumb through the same `VerticalBar` geometry it
+  paints, so grabbing the thumb middle does not jump and the last movable cell
+  reaches the real bottom;
 - the Markdown and OpenUI stories feed real source through `parse_markdown` →
   typed segments → `table_data_to_lines` / `genui::render`; the wheel scrolls the
   document by the same three rows and clamps at the rendered content height.
+- the overlay story centres a fixed-size popup over the transcript: the preview clears
+  the popup once, `OverlayFrame` paints the borders and title, and clicks inside the
+  frame confirm while outside clicks return to the host. The wheel scrolls the
+  transcript only outside the frame (the HITL popup rule); the download variant shows
+  the same shell without a confirm action;
+- the spinner story feeds fixed frames: idle holds frame 0, while active and tool
+  advance the host-owned index on click; the tool variant previews the glyph the host
+  composes into a card header, so dumps stay reproducible;
 - Mermaid character art never wraps: a frame keeps its natural rendered width, so
   a diagram wider than the preview gets a bottom `◄ … ►` bar. Horizontal wheel
   notches move eight columns, and Shift+wheel does the same on a vertical notch;
@@ -60,10 +92,12 @@ is the primary input and mirrors the real TUI:
   position. Markdown prose still wraps at the column width, so only unwrapped
   diagrams show the bar.
 
-Seven stories cover `textarea`, `list`, `scrollbar`, `markdown` (rich text,
-headings, lists, code, table, image, gen-ui fence, streaming), `openui` (stack
-column/row, card, text, heading, list, table, key-value, progress, divider,
-button, bar chart, sparkline, streaming), `mermaid` (flowchart, sequence,
+Ten stories cover `textarea`, `list`, `scrollbar`, `completion` (`@` rows,
+`/` label+description columns, a scrolled window and the empty state),
+`markdown` (rich text, headings, lists, code, table, image, gen-ui fence,
+streaming), `openui` (stack column/row, card, text, heading, list, table, key-value, progress, divider,
+button, bar chart, sparkline, streaming), `overlay` (confirm and download),
+`spinner` (idle, active and tool frames), `mermaid` (flowchart, sequence,
 state, class, ER, pie, journey, gantt, timeline, gitGraph, mindmap, quadrant,
 requirement, sankey, xychart, architecture, packet and streaming) and `charts`
 — one static frame per
