@@ -336,6 +336,27 @@ impl SessionResources for MockSessionResources {
                 },
             ));
         }
+        let gate = self
+            .mq_enqueue_gate
+            .lock()
+            .expect("mq enqueue gate mutex must remain unpoisoned")
+            .take();
+        if let Some(gate) = gate {
+            // 模拟远端：请求已受理，提交由独立任务完成，调用方取消不撤销这次写。
+            let mq = self.mq.clone();
+            let thread = thread_id.clone();
+            let input = input.clone();
+            return tokio::spawn(async move {
+                gate.wait().await;
+                mq.mq_enqueue(&thread, input).await
+            })
+            .await
+            .map_err(|error| {
+                SessionResourceError::new(SessionResourceErrorKind::Internal {
+                    detail: format!("detached mq enqueue task failed: {error}"),
+                })
+            })?;
+        }
         // 历史优先：已移交的 ID 不再回到 MQ（与真实 adapter 的判定顺序一致）。
         let handed_off = self.region(thread_id).is_some_and(|region| {
             region
@@ -420,6 +441,10 @@ impl SessionResources for MockSessionResources {
         id: peri_acp_types::messages::MessageId,
     ) -> SessionResourceResult<peri_acp_types::session::MqCancelOutcome> {
         self.ensure_writable()?;
+        self.mq_cancel_ids
+            .lock()
+            .expect("self mq cancel ids mutex must remain unpoisoned throughout the test")
+            .push(id);
         if self
             .mq_cancel_failures
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

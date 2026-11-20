@@ -11,6 +11,7 @@ use crate::session::subagent::{
 };
 
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::MqFilter;
 use peri_acp_types::session_resources::ChildResumeClaim;
 use peri_acp_types::session_resources::SessionMetaPatch;
 use peri_acp_types::session_resources::SessionResourceError;
@@ -18,6 +19,9 @@ use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::session_resources::SessionResourceResult;
 use peri_acp_types::thread::AgentStatus;
 use peri_acp_types::thread::ThreadMeta;
+
+use crate::messages::BaseMessage;
+use crate::session::queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -191,6 +195,44 @@ async fn idle(manager: &crate::agent::async_tasks::TaskManager) {
     .expect("the timeout fixture result is required for this assertion");
 }
 
+/// 预置一条与本次 resume 无关的 prompt：补偿只能撤回本次入队的行。
+async fn seed_preexisting_prompt(store: &ClaimResources) -> MessageId {
+    let queue = MessageQueue::bind(store.inner.clone(), CHILD.into());
+    let message = QueuedMessage::new(
+        MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("preexisting instruction"),
+    );
+    let id = message.id();
+    queue
+        .enqueue_sent(message)
+        .await
+        .expect("the preexisting prompt fixture result is required for this assertion");
+    id
+}
+
+/// 撤回必须命中本次 resume 的 prompt 且只命中一次；预先存在的 prompt 原地保留。
+async fn assert_only_preexisting_prompt(store: &ClaimResources, preexisting: MessageId) {
+    let rows = store
+        .inner
+        .mq_query(&CHILD.into(), MqFilter::default())
+        .await
+        .expect("the MQ query fixture result is required for this assertion");
+    assert_eq!(rows.len(), 1, "补偿后只应保留预先存在的 prompt: {rows:?}");
+    assert_eq!(rows[0].id, preexisting, "预先存在的 prompt 不得被撤回");
+    let cancelled = store.inner.take_mq_cancel_ids();
+    assert_eq!(
+        cancelled.len(),
+        1,
+        "本次 resume 的 prompt 必须恰好撤回一次: {cancelled:?}"
+    );
+    assert_ne!(cancelled[0], preexisting, "不得撤回其他 prompt");
+    assert!(
+        rows.iter().all(|row| row.id != cancelled[0]),
+        "本次 prompt ID 不得残留在 MQ: {rows:?}"
+    );
+}
+
 fn observe_runtime(config: &mut SubagentResumeConfig) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let registrations = Arc::new(AtomicUsize::new(0));
     let deregistrations = Arc::new(AtomicUsize::new(0));
@@ -242,6 +284,12 @@ async fn background_handoff_blocks_execution_until_active_write_finishes() {
 #[tokio::test]
 async fn background_handoff_caller_drop_rolls_back_without_execution() {
     let (store, gate, manager) = fixture(false).await;
+    let preexisting = seed_preexisting_prompt(&store).await;
+    store
+        .inner
+        .set_work_state(&CHILD.into(), peri_acp_types::thread::WorkState::Stopped)
+        .await
+        .expect("the work state fixture result is required for this assertion");
     let starts = Arc::new(AtomicUsize::new(0));
     let mut config = config(store.clone(), manager.clone());
     let (registrations, deregistrations) = observe_runtime(&mut config);
@@ -274,6 +322,85 @@ async fn background_handoff_caller_drop_rolls_back_without_execution() {
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert_eq!(registrations.load(Ordering::SeqCst), 0);
     assert_eq!(deregistrations.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .expect("the into fixture result is required for this assertion")
+            .work_state,
+        peri_acp_types::thread::WorkState::Stopped,
+        "取消后不得留下 Working"
+    );
+    assert_only_preexisting_prompt(&store, preexisting).await;
+}
+
+/// [回归] prompt 写仍在提交时调用方被取消：撤回必须等入队写结清，不能把
+/// 「取消之后才落库」的行留在 child MQ（重试会重复投递同一指令）。
+#[tokio::test]
+async fn caller_drop_during_prompt_enqueue_withdraws_after_write_settles() {
+    let (store, _gate, manager) = fixture(false).await;
+    let preexisting = seed_preexisting_prompt(&store).await;
+    // 写入由独立任务提交（模拟远端已受理的请求）：放行前调用方会被取消。
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let write_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *store
+        .inner
+        .mq_enqueue_gate
+        .lock()
+        .expect("the mq enqueue gate fixture must remain unpoisoned") =
+        Some(crate::session::test_resources::mock::ResumeLoadGate {
+            entered: entered_tx,
+            release: release_rx,
+            dropped: Arc::clone(&write_dropped),
+        });
+    let config = config(store.clone(), manager.clone());
+    let resume = tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+    entered_rx
+        .await
+        .expect("resume must reach the prompt enqueue");
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    resume.abort();
+    assert!(resume
+        .await
+        .expect_err("caller_drop_during_prompt_enqueue must reject the cancelled fixture")
+        .is_cancelled());
+    assert!(
+        !write_dropped.load(Ordering::SeqCst),
+        "已受理的入队写不得随调用方取消"
+    );
+    // 写未结清前不得回滚：否则重试会与这次提交重复投递。
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .expect("the load session meta fixture result is required for this assertion")
+            .agent_status,
+        AgentStatus::Active,
+        "入队写结清前认领不得回滚"
+    );
+    release_tx
+        .send(())
+        .expect("the release fixture must still be awaited by the detached enqueue write");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .expect("the load session meta fixture result is required for this assertion")
+            .agent_status
+            != AgentStatus::Done
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the timeout fixture result is required for this assertion");
+    assert_only_preexisting_prompt(&store, preexisting).await;
 }
 
 #[tokio::test]

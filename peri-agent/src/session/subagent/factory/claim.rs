@@ -1,20 +1,40 @@
 //! Ownership of resume status from its initial claim through background hand-off.
 //!
-//! A worker owns the claim's active write and its compensating write. Dropping the
-//! caller requests preparation rollback; it never cancels an in-flight child or
-//! resource write. Explicit rollback awaits the same worker and reports its failure.
+//! A worker owns the claim's active write, its compensating write, and the withdrawal
+//! of the prompt admitted by this resume. Dropping the caller requests preparation
+//! rollback; it never cancels an in-flight child or resource write. Explicit rollback
+//! awaits the same worker and reports its failure.
 //!
 //! 认领的状态写入与「恢复到认领前」由资源侧持有（`ChildResumeClaim`），调用方只提交
 //! 领域结果：移交后台 / 准备失败。
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use parking_lot::Mutex;
+use peri_acp_types::messages::MessageId;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::session::queue::MessageQueue;
 use crate::tools::{EffectiveToolError, EffectiveToolErrorCode};
 use peri_acp_types::session_resources::{SessionResourceErrorKind, SessionResources};
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
+
+/// 撤回重试的初始/上限间隔；只控制频率，不改变「未确认不继续」的次序。
+const WITHDRAW_RETRY_INITIAL: Duration = Duration::from_millis(50);
+const WITHDRAW_RETRY_MAX: Duration = Duration::from_secs(1);
+
+/// 本次 resume 已接纳的 prompt；撤回责任随认领补偿，成功移交后台时解除。
+struct AdmittedPrompt {
+    queue: MessageQueue,
+    id: MessageId,
+    /// 入队写的所有者。写在这里存活，撤回才能等到它结清。
+    enqueue: JoinHandle<()>,
+}
+
+/// 与认领 worker 共享的 prompt 责任槽；worker 是唯一撤回者。
+type PromptSlot = Arc<Mutex<Option<AdmittedPrompt>>>;
 
 /// 调用方提交给认领 worker 的领域结果。
 enum ClaimDecision {
@@ -30,6 +50,8 @@ pub(in crate::session::subagent) struct ResumeClaim {
     decision: Option<oneshot::Sender<ClaimDecision>>,
     /// worker 的写入不能被调用方取消：只 detach（不 abort）。
     worker: JoinHandle<Result<(), String>>,
+    /// 本次 resume 的 prompt 责任；成功移交后台后由 worker 清空。
+    prompt: PromptSlot,
 }
 
 pub(in crate::session::subagent) struct BackgroundHandoff(oneshot::Sender<()>);
@@ -52,9 +74,19 @@ impl ResumeClaim {
     ) -> Result<(ThreadMeta, Self), Box<dyn std::error::Error + Send + Sync>> {
         let (meta_tx, meta_rx) = oneshot::channel();
         let (decision_tx, decision_rx) = oneshot::channel();
+        let prompt: PromptSlot = Arc::new(Mutex::new(None));
+        let worker_prompt = Arc::clone(&prompt);
         let worker = tokio::spawn(async move {
-            let result =
-                own_claim(store, thread_id, root_id, meta_tx, decision_rx, ownership).await;
+            let result = own_claim(
+                store,
+                thread_id,
+                root_id,
+                meta_tx,
+                decision_rx,
+                ownership,
+                worker_prompt,
+            )
+            .await;
             if let Err(error) = &result {
                 tracing::error!(%error, "resume claim worker failed");
             }
@@ -64,11 +96,25 @@ impl ResumeClaim {
         let claim = Self {
             decision: Some(decision_tx),
             worker,
+            prompt,
         };
         let meta = meta_rx.await.map_err(|error| {
             format!("resume_subagent: status claim worker ended before reporting: {error}")
         })??;
         Ok((meta, claim))
+    }
+
+    /// 登记本次 prompt 与持有入队写的任务；worker 在后台未接纳时撤回同一行。
+    ///
+    /// 入队写必须在独立任务里完成（见 `resume_subagent_impl`）：调用方在
+    /// `enqueue_sent` 中途被取消时，写仍会结清，worker 才能等到写结束再按 ID 撤回。
+    pub(in crate::session::subagent) fn track_prompt(
+        &self,
+        queue: MessageQueue,
+        id: MessageId,
+        enqueue: JoinHandle<()>,
+    ) {
+        *self.prompt.lock() = Some(AdmittedPrompt { queue, id, enqueue });
     }
 
     /// 成功移交给后台执行：终态状态此后由后台执行持有。
@@ -119,6 +165,7 @@ async fn own_claim(
     mut meta_tx: oneshot::Sender<Result<ThreadMeta, Box<dyn std::error::Error + Send + Sync>>>,
     decision: oneshot::Receiver<ClaimDecision>,
     mut ownership: Option<Box<dyn peri_acp_types::tasks::ExternalExecutionGuard>>,
+    prompt: PromptSlot,
 ) -> Result<(), String> {
     // 校验只读且可被调用方取消；取消后不再进入写入。
     let validated = tokio::select! {
@@ -176,24 +223,83 @@ async fn own_claim(
                 // 只回滚 agent_status 会留下「终态 + working」，下一次进入会误判待继续。
                 // 状态与工作意图的恢复统一由认领 handle 在同一门禁内提交：记录已被
                 // 新任务改写时 handle 放弃补偿，调用方不再独立写工作意图。
-                handle
-                    .mark_failed()
-                    .await
-                    .map_err(|error| format!("resume hand-off rollback failed: {error}"))?;
+                // 本次 prompt 也由这里撤回：调用方可能在任一 await 中被取消。
+                settle_rejected(&prompt, &*handle, "resume hand-off rollback failed").await?;
+            } else {
+                // 后台已接纳执行：prompt 归执行侧消费，认领不再撤回。
+                prompt.lock().take();
             }
         }
         // 准备阶段调用方消失：恢复到认领前的状态，不留 active 残留。
         Err(_) => {
-            handle
-                .mark_failed()
-                .await
-                .map_err(|error| format!("resume status rollback failed: {error}"))?;
+            settle_rejected(&prompt, &*handle, "resume status rollback failed").await?;
         }
     }
     if let Some(owner) = ownership.as_mut() {
         owner.confirm_stopped();
     }
     Ok(())
+}
+
+/// 后台未接纳的收尾：先撤回本次 prompt，再回滚认领。
+///
+/// 两步由同一个 owned worker 顺序执行：调用方取消只丢弃自己的等待，不会把撤回
+/// 与回滚拆开；撤回未确认前不回滚状态（避免重试重复投递）。
+async fn settle_rejected(
+    prompt: &PromptSlot,
+    handle: &dyn peri_acp_types::session_resources::ChildResumeClaim,
+    failure: &str,
+) -> Result<(), String> {
+    // 取出即唯一：即使后续路径再次进入，也不会撤回第二次。
+    let admitted = prompt.lock().take();
+    if let Some(admitted) = admitted {
+        // 入队写的 `DetachedEnqueue` 随调用方 future 一起 drop，但存储写入可能仍在提交；
+        // 在写结清前撤回会漏掉随后才落库的行。取消只可能来自调用方，本任务继续等待。
+        if let Err(error) = admitted.enqueue.await {
+            tracing::warn!(%error, "resume prompt enqueue task ended abnormally");
+        }
+        withdraw_admitted_prompt(&admitted.queue, admitted.id).await;
+    }
+    handle
+        .mark_failed()
+        .await
+        .map_err(|error| format!("{failure}: {error}"))
+}
+
+/// 撤回已接纳的 prompt，直到结果可判定。
+///
+/// `mq_cancel` 在各后端都以单次事务删除：内存后端同步删除；SQLite 与远端在提交
+/// 失败时可能只报告「未知」。因此一次 `Err` 既不能当作「行还在」，也不能当作
+/// 「行已删」；重查 MQ 后行已消失才算撤回完成，仍在则按退避重试。已被 Receive
+/// 消费的行返回 `AlreadyHandedOff`/`NotFound`，撤回幂等结束，不改写历史。
+async fn withdraw_admitted_prompt(queue: &MessageQueue, prompt_id: MessageId) {
+    // 入队先于本槽登记：先等在途提交结束，避免撤回与提交交叉后漏掉同一 ID。
+    queue.await_pending_enqueues().await;
+    queue.withdraw_send_inputs(&[prompt_id]);
+    let mut delay = WITHDRAW_RETRY_INITIAL;
+    loop {
+        match queue.cancel_user_input(&prompt_id).await {
+            Ok(_) => return,
+            Err(error) => {
+                match queue
+                    .query(peri_acp_types::session::MqFilter::default())
+                    .await
+                {
+                    Ok(rows) if !rows.iter().any(|row| row.id == prompt_id) => return,
+                    Ok(_) => {}
+                    Err(query_error) => {
+                        tracing::warn!(
+                            %query_error,
+                            "resume compensation could not verify prompt withdrawal"
+                        );
+                    }
+                }
+                tracing::warn!(%error, "resume prompt withdrawal failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(WITHDRAW_RETRY_MAX);
+            }
+        }
+    }
 }
 
 async fn validate_thread(

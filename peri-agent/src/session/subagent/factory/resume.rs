@@ -3,12 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use peri_acp_types::messages::MessageId;
-use peri_acp_types::session::MqFilter;
 use peri_acp_types::store::PersistedPayload;
 
 use crate::messages::BaseMessage;
-use crate::session::queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
+use crate::session::queue::{MessageKind, MessageSource, QueuedMessage};
 
 use crate::session::subagent::factory::claim::ResumeClaim;
 
@@ -45,7 +43,8 @@ use crate::session::Session;
 /// 重建/装配失败（load_messages 失败）时回滚 status 至原值（R-M1），防 thread
 /// 永久停留 active（R-M4 崩溃遗留的镜像问题）。执行开始后的失败走后台收尾路径
 /// （error / cancelled），不回滚。
-/// 准备阶段调用被 drop 时，由 claim worker 在 active 写完成后异步回滚。
+/// 准备阶段调用被 drop 时，由 claim worker 在 active 写完成后异步回滚，并撤回
+/// 本次已登记的 prompt；两条补偿同属一个 owned worker，不会被调用方取消拆开。
 pub(super) async fn resume_subagent_impl(
     parent: Option<&Arc<Session>>,
     config: SubagentResumeConfig,
@@ -340,19 +339,27 @@ pub(super) async fn resume_subagent_impl(
     // 注册失败时要撤回的就是这一行；稳定 ID 必须在入队移动前取出。
     let prompt_message_id = prompt_message.id();
     let prompt_queue = v2_ctx.context.session.queue.clone();
-    if let Err(error) = v2_ctx
-        .context
-        .session
-        .queue
-        .enqueue_sent(prompt_message)
+    // 入队写必须活过调用方 future：`DetachedEnqueue` 随写入方 drop，而存储提交可能
+    // 在取消之后才落库，撤回若只看队列会漏掉这一行。写由独立任务持有，认领 worker
+    // 在撤回前等它结清（见 `ResumeClaim::track_prompt`）。
+    let (enqueue_tx, enqueue_rx) = tokio::sync::oneshot::channel();
+    let enqueue_queue = prompt_queue.clone();
+    let enqueue = tokio::spawn(async move {
+        let result = enqueue_queue
+            .enqueue_sent(prompt_message)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = enqueue_tx.send(result.clone());
+    });
+    claim.track_prompt(prompt_queue, prompt_message_id, enqueue);
+    let enqueued = enqueue_rx
         .await
-    {
-        // 没有接纳到初始指令的恢复不得继续跑：先撤销本次认领，再把失败交给调用方。
+        .unwrap_or_else(|_| Err("enqueue task stopped before reporting".to_string()));
+    if let Err(error) = enqueued {
+        // 没有接纳到初始指令的恢复不得继续跑：先撤销本次认领与 prompt，再把失败交给调用方。
         let detail = format!("resume prompt enqueue failed: {error}");
-        if let Err(rollback) = claim.rollback().await {
-            return Err(format!("{detail}; resume claim rollback failed: {rollback}").into());
-        }
-        return Err(detail.into());
+        let suffix = rollback_resume_claim(claim).await;
+        return Err(format!("{detail}{suffix}").into());
     }
 
     // 8. 执行（恒后台，Issue #450）
@@ -397,21 +404,9 @@ pub(super) async fn resume_subagent_impl(
     {
         Ok(()) => {}
         Err(e) => {
-            // 失败补偿必须是不可拆分的整体：owned task 先确认撤回本次已接纳的
-            // prompt，再回滚认领。调用方取消只丢弃 JoinHandle，不会留下
-            // 「状态已回滚、prompt 仍在队列」的重试重复投递窗口。
-            let compensation = tokio::spawn(compensate_failed_resume(
-                prompt_queue,
-                prompt_message_id,
-                claim,
-            ));
-            let suffix = match tokio::time::timeout(RESUME_COMPENSATION_WAIT, compensation).await {
-                Ok(Ok(Ok(()))) => String::new(),
-                Ok(Ok(Err(rollback))) => format!("; {rollback}"),
-                Ok(Err(join)) => format!("; resume compensation task failed: {join}"),
-                // 补偿仍由 owned task 持有认领并在后台重试；调用方只报告未结清。
-                Err(_) => "; resume compensation is still running".to_string(),
-            };
+            // 失败补偿由认领 worker 持有：先撤回本次 prompt，再回滚认领。调用方
+            // 取消只丢弃等待，不会留下「状态已回滚、prompt 仍在队列」的窗口。
+            let suffix = rollback_resume_claim(claim).await;
             return Err(format!("resume_subagent: thread {}: {}{}", thread_id, e, suffix).into());
         }
     }
@@ -423,51 +418,16 @@ pub(super) async fn resume_subagent_impl(
     })
 }
 
-/// 失败补偿的调用方等待上限；超时后 owned task 继续持有认领并重试撤回。
+/// 失败补偿的调用方等待上限；超时后 owned worker 继续持有认领并完成撤回与回滚。
 const RESUME_COMPENSATION_WAIT: Duration = Duration::from_secs(10);
-/// 撤回重试的初始/上限间隔；只控制频率，不改变「未确认不继续」的次序。
-const WITHDRAW_RETRY_INITIAL: Duration = Duration::from_millis(50);
-const WITHDRAW_RETRY_MAX: Duration = Duration::from_secs(1);
 
-/// 失败派发的 owned 补偿：先撤回本次 prompt，再回滚认领。
-///
-/// 两步由同一个任务顺序执行，调用方取消不会把它们拆开；撤回未确认提交时
-/// `rollback` 不会运行，认领保持 Active，避免重试重复投递。
-async fn compensate_failed_resume(
-    queue: MessageQueue,
-    prompt_id: MessageId,
-    claim: ResumeClaim,
-) -> Result<(), String> {
-    withdraw_admitted_prompt(&queue, prompt_id).await;
-    claim.rollback().await
-}
-
-/// 撤回已接纳的 prompt，直到结果可判定。
-///
-/// `mq_cancel` 在各后端都以单次事务删除：内存后端同步删除；SQLite 与远端在提交
-/// 失败时可能只报告「未知」。因此一次 `Err` 既不能当作「行还在」，也不能当作
-/// 「行已删」；重查 MQ 后行已消失才算撤回完成，仍在则按退避重试。
-async fn withdraw_admitted_prompt(queue: &MessageQueue, prompt_id: MessageId) {
-    let mut delay = WITHDRAW_RETRY_INITIAL;
-    loop {
-        match queue.cancel_user_input(&prompt_id).await {
-            Ok(_) => return,
-            Err(error) => {
-                match queue.query(MqFilter::default()).await {
-                    Ok(rows) if !rows.iter().any(|row| row.id == prompt_id) => return,
-                    Ok(_) => {}
-                    Err(query_error) => {
-                        tracing::warn!(
-                            %query_error,
-                            "resume compensation could not verify prompt withdrawal"
-                        );
-                    }
-                }
-                tracing::warn!(%error, "resume prompt withdrawal failed; retrying");
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(WITHDRAW_RETRY_MAX);
-            }
-        }
+/// 有界等待认领 worker 结清；超时只影响调用方报告，不取消 worker。
+async fn rollback_resume_claim(claim: ResumeClaim) -> String {
+    match tokio::time::timeout(RESUME_COMPENSATION_WAIT, claim.rollback()).await {
+        Ok(Ok(())) => String::new(),
+        Ok(Err(rollback)) => format!("; {rollback}"),
+        // 补偿仍由 owned worker 持有认领并在后台重试；调用方只报告未结清。
+        Err(_) => "; resume compensation is still running".to_string(),
     }
 }
 
