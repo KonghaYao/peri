@@ -2242,3 +2242,170 @@ fn completion_scrolled_dump_keeps_only_the_window() {
     assert!(!screen.contains("/model:default"), "窗口外的候选不绘制");
     assert!(screen.contains("inline height 10"));
 }
+
+fn story_app(story: &str, variant: &str) -> App {
+    let index = STORIES
+        .iter()
+        .position(|entry| entry.key == story)
+        .unwrap_or_else(|| panic!("{story} story"));
+    let mut app = App::new(index);
+    let variant = app
+        .current()
+        .variants
+        .iter()
+        .position(|entry| entry.key == variant)
+        .unwrap_or_else(|| panic!("{story}/{variant} variant"));
+    app.select_variant(variant);
+    app
+}
+
+fn overlay_state(app: &App) -> &crate::stories::overlay::OverlayState {
+    match &app.state {
+        StoryState::Overlay(state) => state,
+        _ => panic!("expected overlay state"),
+    }
+}
+
+/// 弹窗矩形来自故事自己的布局（与绘制同源）。
+fn overlay_popup(app: &App, area: Rect) -> Rect {
+    crate::stories::overlay::popup_bounds(overlay_state(app), area)
+}
+
+#[test]
+fn overlay_confirm_click_inside_is_an_action_and_outside_is_left_to_the_host() {
+    let mut app = story_app("overlay", "confirm");
+    let area = Rect::new(0, 10, 60, 20);
+    let popup = overlay_popup(&app, area);
+    assert!(popup.width > 0 && popup.height > 0);
+
+    // 外点：不消费、不确认（宿主继续路由）。
+    assert!(!handle_story_mouse(
+        &mut app.state,
+        &mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            popup.x - 2,
+            popup.y + 2
+        ),
+        area
+    ));
+    assert_eq!(overlay_state(&app).confirmed, 0);
+    assert_eq!(overlay_state(&app).outside, 1);
+
+    // 内区点击 = 确认。
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            popup.x + 2,
+            popup.y + 2
+        ),
+        area
+    ));
+    assert_eq!(overlay_state(&app).confirmed, 1);
+
+    // 上边框同样属于弹窗（整窗点击）。
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            popup.x + 2,
+            popup.y
+        ),
+        area
+    ));
+    assert_eq!(overlay_state(&app).confirmed, 2);
+
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("已确认 2 次"));
+    assert!(screen.contains("outside clicks 1"));
+}
+
+#[test]
+fn overlay_download_click_consumes_without_confirming() {
+    let mut app = story_app("overlay", "download");
+    let area = Rect::new(0, 10, 60, 20);
+    let popup = overlay_popup(&app, area);
+
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            popup.x + 2,
+            popup.y + 2
+        ),
+        area
+    ));
+    assert_eq!(overlay_state(&app).confirmed, 0, "下载弹窗没有确认动作");
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("下载主题 3/5"));
+    assert!(screen.contains("→ statusline.toml"));
+}
+
+#[test]
+fn overlay_wheel_inside_is_blocked_and_outside_scrolls_the_transcript() {
+    let mut app = story_app("overlay", "confirm");
+    let area = Rect::new(0, 10, 60, 20);
+    let popup = overlay_popup(&app, area);
+
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::ScrollDown, popup.x + 2, popup.y + 2),
+        area
+    ));
+    assert_eq!(overlay_state(&app).scroll, 0, "弹窗内滚轮不滚消息区");
+
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::ScrollDown, popup.x - 2, popup.y + 2),
+        area
+    ));
+    assert_eq!(
+        overlay_state(&app).scroll,
+        crate::stories::WHEEL_ROWS,
+        "弹窗外滚轮交给宿主消息区"
+    );
+}
+
+fn spinner_state(app: &App) -> &crate::stories::spinner::SpinnerState {
+    match &app.state {
+        StoryState::Spinner(state) => state,
+        _ => panic!("expected spinner state"),
+    }
+}
+
+#[test]
+fn spinner_idle_frame_never_advances() {
+    let mut app = story_app("spinner", "idle");
+    let area = Rect::new(0, 10, 40, 10);
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), 2, 10),
+        area
+    ));
+    assert_eq!(spinner_state(&app).frame, 0, "空闲底部固定第一帧");
+    assert!(dump_screen(&mut app, 100, 32).contains("✳ 格物致知"));
+}
+
+#[test]
+fn spinner_active_frame_is_host_owned_and_dump_is_reproducible() {
+    let mut app = story_app("spinner", "active");
+    let area = Rect::new(0, 10, 40, 10);
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("✶ 思考中… (12s · ↓ 1.5k tokens)"));
+    assert!(screen.contains("host frame 3 / 16"));
+
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), 2, 10),
+        area
+    ));
+    assert_eq!(spinner_state(&app).frame, 4);
+}
+
+#[test]
+fn spinner_tool_glyph_matches_the_host_frame_set() {
+    let mut app = story_app("spinner", "tool");
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("⠼ Bash  cargo test"));
+    assert!(screen.contains("tool glyph ⠼ · host frame 4 / 10"));
+}

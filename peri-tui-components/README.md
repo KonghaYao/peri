@@ -15,6 +15,8 @@ also owns the business-independent renderers moved down from the app: Markdown
 | `list::ListViewport` | measured content rows, row metrics, item count, selection | visible range and matching hit layout |
 | `completion::CompletionPopup` | pre-styled label/detail rows, selected index, inline height, title, empty text, styles | selected marker, visible window (`ListViewport::window`) and the matching `hit_layout()`; `hit()` returns the full-list index |
 | `list_nav` | key events and selection | navigation intent and bounds |
+| `overlay::OverlayFrame` | title line, border/title styles, area | top/bottom borders, centred title, `inner()` region and `hit()` (inside/border/outside); never clears |
+| `spinner::Spinner` | frame set, external frame index, icon style, pre-formatted text line | frame selection (`frame % len`) and `icon + space + text` composition |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
 | `scrollbar::vertical_scrollbar` | thumb and arrow styles | scrollbar appearance |
 | `markdown::parse_markdown*` | source text, width, palette, base foreground | typed segments (text/table/image/genui/mermaid), chunk cache |
@@ -60,6 +62,14 @@ is the primary input and mirrors the real TUI:
 - the Markdown and OpenUI stories feed real source through `parse_markdown` →
   typed segments → `table_data_to_lines` / `genui::render`; the wheel scrolls the
   document by the same three rows and clamps at the rendered content height.
+- the overlay story centres a fixed-size popup over the transcript: the preview clears
+  the popup once, `OverlayFrame` paints the borders and title, and clicks inside the
+  frame confirm while outside clicks return to the host. The wheel scrolls the
+  transcript only outside the frame (the HITL popup rule); the download variant shows
+  the same shell without a confirm action;
+- the spinner story feeds fixed frames: idle holds frame 0, while active and tool
+  advance the host-owned index on click; the tool variant previews the glyph the host
+  composes into a card header, so dumps stay reproducible;
 - Mermaid character art never wraps: a frame keeps its natural rendered width, so
   a diagram wider than the preview gets a bottom `◄ … ►` bar. Horizontal wheel
   notches move eight columns, and Shift+wheel does the same on a vertical notch;
@@ -67,11 +77,12 @@ is the primary input and mirrors the real TUI:
   position. Markdown prose still wraps at the column width, so only unwrapped
   diagrams show the bar.
 
-Eight stories cover `textarea`, `list`, `scrollbar`, `completion` (`@` rows,
+Ten stories cover `textarea`, `list`, `scrollbar`, `completion` (`@` rows,
 `/` label+description columns, a scrolled window and the empty state),
 `markdown` (rich text, headings, lists, code, table, image, gen-ui fence,
 streaming), `openui` (stack column/row, card, text, heading, list, table, key-value, progress, divider,
-button, bar chart, sparkline, streaming), `mermaid` (flowchart, sequence,
+button, bar chart, sparkline, streaming), `overlay` (confirm and download),
+`spinner` (idle, active and tool frames), `mermaid` (flowchart, sequence,
 state, class, ER, pie, journey, gantt, timeline, gitGraph, mindmap, quadrant,
 requirement, sankey, xychart, architecture, packet and streaming) and `charts`
 — one static frame per

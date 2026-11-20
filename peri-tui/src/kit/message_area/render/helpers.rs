@@ -3,6 +3,7 @@ use crate::kit::terminal_caps::SymbolSet;
 use crate::kit::tui_render_unit::TuiDiffBlock;
 
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::spinner::Spinner;
 use ratatui_kit::ratatui::style::{Color, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -103,7 +104,13 @@ fn anim_tick() -> u64 {
 fn running_symbol() -> String {
     let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
     if caps.unicode {
-        crate::components::spinner::animation::braille_frame(anim_tick()).to_string()
+        Spinner::new(
+            crate::components::spinner::animation::BRAILLE_LOADING_FRAMES,
+            anim_tick(),
+        )
+        .glyph()
+        .map(String::from)
+        .unwrap_or_else(|| "*".to_string())
     } else {
         "*".to_string()
     }

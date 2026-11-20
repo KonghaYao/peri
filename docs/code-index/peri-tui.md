@@ -6,10 +6,12 @@
 由 `peri-tui-components` 提供，TUI 直接单向消费：`kit/markdown/` 与
 `kit/genui/` 只保留应用侧出口（`genui::view_state` 注入会话 epoch）。Mermaid
 语句确认、排版、概览与预览状态机由组件的 `mermaid` 模块持有；输入区 `@`/`/`
-补全的可见窗口、选中标记与命中共用组件的 `completion::CompletionPopup`。
+补全的可见窗口、选中标记与命中共用组件的 `completion::CompletionPopup`；
+确认与下载弹窗共用 `overlay::OverlayFrame`（宿主在既有位置只清屏一次），消息区底部
+与运行中工具图标共用无状态的 `spinner::Spinner`（帧集、节奏与文案留在应用）。
 组件 API 与使用示例见
 [`peri-tui-components/README.md`](../../peri-tui-components/README.md)；
-组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/completion/markdown/openui/mermaid/charts，`--list`/`--dump` 支持无 TTY）。Mermaid 的终稿与流式前缀示例见 `peri-tui-components/src/bin/storybook/stories/mermaid.rs`。
+组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/completion/overlay/spinner/markdown/openui/mermaid/charts，`--list`/`--dump` 支持无 TTY）。Mermaid 的终稿与流式前缀示例见 `peri-tui-components/src/bin/storybook/stories/mermaid.rs`。
 `panels/shared/list.rs` 仅保留应用的首帧高度策略；业务对象转换、主题解析、
 焦点路由及动作执行仍由 TUI 持有。
 
@@ -285,6 +287,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | ACP 客户端入口与构造 | src/acp_client/client/acp_tui_client.rs | `AcpTuiClient` / `AcpNotification` / `ClientProjectionMode` 保持公共路径；`new_with_mode` 装配 lifecycle、weak notifier 与 Drop settlement worker |
 | ACP 通知泵与 reverse wire admission | src/acp_client/client/pump.rs | `spawn_pump` / `run_pump` / `plan_reverse_request` / `flush_buffered` / `deliver_or_close`；按原始接收顺序解码，ordinary notification 经 lifecycle 路由，reverse 在投递前注册 owner；通知通道有界（4096），`try_send` 满即记录 `acp_client_notification_backpressure` 并关闭 transport，不静默丢弃 |
 | Session 切换与 load reservation | src/acp_client/client/session/session_transition.rs + src/acp_client/client/session/{transition,admission,reservation,startup,close,guards,delete}.rs + src/acp_client/client/session_load_reservation.rs | `ensure_session` / `new_session` / `load_session` / `load_reserved_session` / `delete_session`；`close_previous_session` 在切换身份前关闭旧会话：`-32010`（close incomplete）按 `@peri-sdk` `closeUntilSettled` 同一语义在预算内重放，重放耗尽返回最后一次错误且不写粘滞 `restore_error`（保持可重试）；`PendingClose` 保留关闭失败的旧身份与被打断的加载目标——下一次建立会话先重放同一关闭，加载目标由 `ensure_session` 续做（不得绕过关闭直接 `session/new`，也不得把「加载 B」换成空会话），非 `-32010` 不保留身份；`SessionLoadReservation` / `reserve_session_load` / `open_prompt_after_session_loads` 保持 reservation 与 operation gate；预约在 load 开始时于同一临界区完成认领与路由切换（`claim_and_begin_transition`）：准入快照按 `reservations → lifecycle` 同一锁序观察，不会读到「已认领 + 旧 Stable」；操作身份贯穿认领、切换与落定。按 ID load 无 dirty 确认、reset 请求或 ownership 只读投影；执行环境不可用明确失败，history RPC 可独立读取；执行唯一性与接管归 `peri-sdk` |
+| 弹窗外框（确认 / 下载） | peri-tui-components/src/overlay.rs + src/kit/popups/{confirm_popup,download_progress}.rs + src/kit/popup_overlay.rs | `OverlayFrame`（上下边框、居中标题、`inner()`）与 `hit()`（内区/边框/外点）；清屏仍由 `PopupOverlay::render_popup` 的 `Positioned(clear)` 在既有位置做一次，确认动作、下载状态与弹窗外点击/滚轮路由留在宿主 |
 | 普通确认弹窗 | src/kit/popups/confirm_popup.rs + src/kit/popup_overlay.rs + src/kit/atoms/confirm.rs | `ConfirmPopup` / `execute_confirm_action` 与普通 popup 生命周期；会话切换确认携带展示时的来源身份，dispatcher 仅对同一来源代次跳过重复确认；session dirty 恢复专用 `RiskPrompt` / `RiskChoice` / `RiskPopup`、RecoverDirty 与风险确认路径已移除，删除等无关确认保持 |
 | ACP 请求封装 | src/acp_client/client/requests.rs | `register_ui_commands` / `prompt` / `prompt_with_bg_results` / `cancel` / `set_config_option` / `send_raw_request`；`send_session_request_with_timeout` 为身份 gate 等待与 wire 共用期限，普通会话请求默认 10 秒；gate 在网络等待前释放，回归 `session_request_timeout_test.rs`；prompt 持 lease，返回后在 gate 内结算 |
 | Interaction response 与 UI publication | src/acp_client/client/interaction.rs | `respond_interaction` / `publish_if_owned` / `reject_interaction` / `settle_claims_owned`；owner first-claim 与同步 UI publication 共用 gate，通知仅升级 weak sender |
@@ -296,7 +299,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 线程存储 | src/thread/mod.rs | 仅 re-export `ThreadStore`/`ThreadMeta`/`SqliteThreadStore`（事实源 peri-acp-types / 实现在 peri-resources） |
-| 通用组件 | peri-tui-components/src/textarea/；src/components/spinner/ | 文本编辑 widget（text_area.rs/text_area_state.rs/word.rs/history.rs）；动画 spinner（spinner_state.rs/animation.rs/verb.rs） |
+| 通用组件 | peri-tui-components/src/{textarea/,spinner.rs}；src/components/spinner/ | 文本编辑 widget（text_area.rs/text_area_state.rs/word.rs/history.rs）；无状态 spinner（帧序号/帧集/已格式化文字由宿主提供）；应用侧模式、时钟、随机动词与耗时/token 文案（spinner_state.rs/animation.rs/verb.rs） |
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 

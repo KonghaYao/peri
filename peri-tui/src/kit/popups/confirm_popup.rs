@@ -16,12 +16,14 @@ use ratatui_kit::crossterm::event::MouseButton;
 use ratatui_kit::crossterm::event::MouseEventKind;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
+use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
 use ratatui_kit::ratatui::text::Line;
 
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
 
+use peri_tui_components::overlay::{OverlayFrame, OverlayHit, hit};
 use peri_tui_components::panel_mouse::AreaTracker;
 
 use peri_theme::atoms::THEME_ATOM;
@@ -117,9 +119,15 @@ fn handle_confirm_event(
     rendered: Option<&RenderedConfirm>,
     area: Option<Rect>,
 ) -> EventResult {
-    // 鼠标：区域内左键点击 = 执行确认动作（click as enter）
+    // 鼠标：区域外忽略（框架 hit_test 已过滤，这里按共享边界再判定一次）；
+    // 内区与上下边框都是「click as enter」。
     if let Event::Mouse(mouse) = event {
-        if area.is_some() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+        let Some(area) = area else {
+            return EventResult::Ignored;
+        };
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && hit(mouse, area) != OverlayHit::Outside
+        {
             return confirm(rendered);
         }
         return EventResult::Ignored;
@@ -200,22 +208,13 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     }
 
-    let popup_block = ratatui_kit::ratatui::widgets::Block::default()
-        .borders(
-            ratatui_kit::ratatui::widgets::Borders::TOP
-                | ratatui_kit::ratatui::widgets::Borders::BOTTOM,
-        )
-        .border_style(ratatui_kit::ratatui::style::Style::new().fg(popup_tokens.border))
-        .title_top(
-            Line::from(i18n::tr("popup-confirm-title"))
-                .fg(popup_tokens.action_primary)
-                .bold()
-                .centered(),
-        );
+    let frame = OverlayFrame::new(Line::from(i18n::tr("popup-confirm-title")))
+        .border(Style::new().fg(popup_tokens.border))
+        .title_style(Style::new().fg(popup_tokens.action_primary).bold());
     let text_render = ratatui_kit::ratatui::widgets::Paragraph::new(
         ratatui_kit::ratatui::text::Text::from(lines),
     )
-    .block(popup_block);
+    .block(frame.widget());
 
     element!(
         View(

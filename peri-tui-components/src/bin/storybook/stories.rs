@@ -14,6 +14,8 @@ mod document;
 mod list_items;
 mod markdown;
 mod mermaid;
+pub(crate) mod overlay;
+pub(crate) mod spinner;
 pub(crate) mod streaming;
 
 pub(crate) use self::document::DocumentContent;
@@ -47,7 +49,7 @@ pub(crate) const MUTED: Color = Color::DarkGray;
 pub(crate) const BORDER: Style = Style::new().fg(Color::DarkGray);
 
 /// Rows a single wheel notch scrolls; the host uses `SCROLL_LINES` (3 rows).
-const WHEEL_ROWS: usize = 3;
+pub(crate) const WHEEL_ROWS: usize = 3;
 /// Columns a horizontal wheel notch scrolls; the bar drag is the precise path.
 const WHEEL_COLS: usize = 8;
 
@@ -122,6 +124,10 @@ pub(crate) enum StoryState {
     Chart {
         demo: usize,
     },
+    /// 确认 / 下载弹窗：共享外框，确认与滚轮路由留在宿主。
+    Overlay(overlay::OverlayState),
+    /// 无状态活动指示器：帧序号与帧集由宿主提供。
+    Spinner(spinner::SpinnerState),
 }
 
 pub(crate) struct Variant {
@@ -852,6 +858,16 @@ pub(crate) const STORIES: &[Story] = &[
         variants: MERMAID_VARIANTS,
     },
     Story {
+        key: "overlay",
+        title: "Overlay",
+        variants: overlay::VARIANTS,
+    },
+    Story {
+        key: "spinner",
+        title: "Spinner",
+        variants: spinner::VARIANTS,
+    },
+    Story {
         key: "charts",
         title: "tui-chart",
         variants: CHART_VARIANTS,
@@ -899,6 +915,8 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
         .render(area, buf, *content),
         StoryState::Streaming(document) => streaming::render(document, area, buf),
         StoryState::Chart { demo } => crate::charts::render_demo(*demo, area, buf),
+        StoryState::Overlay(overlay) => overlay::render(overlay, area, buf),
+        StoryState::Spinner(spinner) => spinner::render(spinner, area, buf),
     }
 }
 
@@ -1282,6 +1300,8 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
         StoryState::Streaming(document) => streaming::handle_mouse(document, mouse, area),
         // Chart frames are static; clicks are consumed like document clicks.
         StoryState::Chart { .. } => matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),
+        StoryState::Overlay(overlay) => overlay::handle_mouse(overlay, mouse, area),
+        StoryState::Spinner(spinner) => spinner::handle_mouse(spinner, mouse, area),
     }
 }
 
