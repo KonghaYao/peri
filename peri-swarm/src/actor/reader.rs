@@ -326,6 +326,7 @@ impl ItemLog {
                     task_id: None,
                 },
                 payload: json!({
+                    "role": "assistant",
                     "messageId": message_id,
                     "text": stream.text,
                     "complete": true,
@@ -435,8 +436,14 @@ impl ItemLog {
                 item_id
             };
             // Deltas keep the `messageId` so clients can associate a delta with
-            // the final item even when they join mid-stream.
-            let payload = json!({ "messageId": message_id, "text": text, "delta": true });
+            // the final item even when they join mid-stream. `role` lets a
+            // client filter assistant frames without assuming an item kind.
+            let payload = json!({
+                "role": "assistant",
+                "messageId": message_id,
+                "text": text,
+                "delta": true,
+            });
             let projected = ProjectedItem {
                 kind: item.kind,
                 source: item.source,

@@ -427,6 +427,7 @@ impl InMemorySwarmService {
         );
 
         let payload = json!({
+            "role": "assistant",
             "messageId": format!("msg_{}", Uuid::now_v7()),
             "text": format!("fake-echo: {text}"),
         });

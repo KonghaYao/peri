@@ -92,8 +92,10 @@ async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
         .collect();
     assert_eq!(items.len(), 3, "two deltas plus one completion item");
     assert!(items.iter().all(|item| item.item_id == items[0].item_id));
+    assert_eq!(items[0].payload["role"], "assistant");
     assert_eq!(items[0].payload["text"], "hel");
     assert_eq!(items[0].payload["delta"], true);
+    assert_eq!(items[2].payload["role"], "assistant");
     assert_eq!(items[2].payload["text"], "hello");
     assert_eq!(items[2].payload["complete"], true);
     assert!(items[0].seq < items[1].seq && items[1].seq < items[2].seq);

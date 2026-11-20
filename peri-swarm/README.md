@@ -52,7 +52,7 @@ MCP（Bun 托管的沙箱）→ 两个 Loom 逻辑库。设计边界见
 | `PERI_SWARM_SETTINGS_JSON` | 否 | 可信 settings 文档（JSON），提供 providers/profiles 与 `config.active_alias` |
 | `PERI_SWARM_BUN_URL` | 否 | Bun 沙箱桥地址；同时设置 `PERI_SWARM_BUN_BASE_URL` 时后者优先 |
 | `PERI_SWARM_BUN_TOKEN` | 否 | Bun 外层 Bearer 值；与 `PERI_SWARM_BUN_BEARER_ENV`（变量名）互斥 |
-| `PERI_SWARM_SSE_HEARTBEAT_MS` | 否 | SSE 心跳，默认 15000 |
+| `PERI_SWARM_SSE_HEARTBEAT_MS` | 否 | SSE 心跳间隔（毫秒），取值 `1..=600000`，默认 `15000`；非法值让进程启动失败 |
 
 未配置 Bun 桥时，`environment.type=openai_hosted` 在创建会话时显式失败；
 `environment.type=none` 不受影响。
@@ -182,8 +182,9 @@ for (;;) {
   const body = /** @type {any} */ (page).body;
   for (const item of body.items) {
     // 用户输入：kind=message、payload.role === 'user'，单帧、没有 complete。
-    // assistant：delta 与 complete 共享 itemId/id，按 payload.messageId 聚合，
-    // 最终文本以 payload.complete === true 的那一帧为准。
+    // assistant：只认 payload.role === 'assistant'；delta 与 complete 共享
+    // itemId/id，按 payload.messageId 聚合，最终文本以
+    // payload.complete === true 的那一帧为准。
     // tool：tool_call/tool_update/tool_result，按 payload.toolCallId 聚合。
   }
   if (!body.hasMore) break;
@@ -236,11 +237,15 @@ for await (const event of replay) {
 
 | 场景 | 帧类型 | 终止条件 |
 | --- | --- | --- |
-| 实时（先开流，再 POST） | `item` + `turn`（先 `started`，后 `completed` \| `failed`），可能有 `gap` | `turn.state === 'completed' \| 'failed'` |
+| 实时（先开流，再 POST） | `item`（用户输入先于 `turn.started`）+ `turn`（`started` → `completed` \| `failed`），可能有 `gap` | `turn.state === 'completed' \| 'failed'` |
 | 回放（`after` 小于会话末尾） | 只有 `item`（+ 心跳）；没有 `turn` 帧 | 目标 assistant message 的 `payload.complete === true` |
 | `after` 等于/超过会话末尾 | 没有 `item`，只有心跳 | **不会自行关闭**；用客户端超时、`AbortController`/`{ signal }` 或 `items.list` 分页 |
 | 心跳 | `{ "lastItemSeq": N }` | 无 `seq`、无 `state`；`N` 是会话当前最后 item 的 seq（进度信息），不是本流已投递的位置 |
 
+- **实时帧序不是「先 `turn.started`」**：`POST /events` 受理时先追加用户输入 item，
+  再开 turn，所以第一帧通常是 `item`（用户输入），随后才是 `turn.started`，最后是
+  assistant/tool 的 `item` 帧和 `turn.completed`/`failed`。收集器不要在收到
+  `turn.started` 时清空已到达的帧，否则会丢掉用户输入。
 - **不要用同步 POST 之后的 `ack.lastItemSeq` 开流来观察本轮**：POST 返回时本轮可能
   已完成，该 `after` 之后没有可回放的帧，流会保持打开并只发心跳。要观察本轮，先开流
   再 POST。
@@ -250,6 +255,8 @@ for await (const event of replay) {
   只读历史时优先用 `items.list` 分页。
 - 心跳的 `lastItemSeq` 反映会话真实的 `MAX(seq)`，可用于显示进度；恢复游标仍应取最后
   一条已投递 `item` 帧的 `seq`（SSE `id:`），不要用心跳值跳过 `gap` 覆盖的 item。
+- 心跳间隔由网关的 `PERI_SWARM_SSE_HEARTBEAT_MS` 决定（默认 15s，最短 1ms）。空流是否
+  能按时收到心跳取决于网关进程的环境变量，而不是客户端；用短超时探测时先确认该值。
 - `after` 是「只补 `seq > after` 的 item」；`after=0`（或省略查询参数）回放全部历史。
   `Last-Event-ID` 头与 `after`/`afterSeq` 等价（都按 seq 续读），区别只在传输方式：
   官方 SDK 没暴露该头，所以 SDK 用户必须用 `events.stream(id, { after }, {})`；直接
@@ -286,11 +293,20 @@ const response = await fetch(
   `Idempotency-Key`/`inputId` 重试返回 `existing`，不会重复追加。`kind=control` 的
   输入不写用户帧。`create` 的 `input` 同样记为 user message 帧（每次 create 调用
   各一条；重试 create 会按既有语义重跑该轮）。
+- **assistant 消息的 payload 带 `role`**：delta 帧为
+  `{ role: 'assistant', messageId, text, delta: true }`，complete 帧为
+  `{ role: 'assistant', messageId, text, complete: true }`。用户输入帧是
+  `role: 'user'`，没有 `delta`/`complete`。
 - 每帧同时有 `id` 与 `itemId`（同值，`itim_...`）；同一 assistant 消息的 delta/complete
   帧共享这个 id，因此不能用 `id` 去重成一条消息。按 `payload.messageId` 聚合，最后以
   `payload.complete === true` 帧的 `payload.text` 为准。
-- `tool_call` 可能分两帧到达：先 `in_progress`（无 `input`），再补 `input` 的同状态帧；
-  两帧共享 `payload.toolCallId`，按它聚合。
+- `tool_call` 的 payload 为 `{ toolCallId, title, status }`，另有可选的 `input`
+  （来自 `rawInput`）或 `body`（来自 `content`，二者至多一个），以及调用方提供的
+  `originMessageId`。`title`/`status` 在 host 未提供时可能为 `null`。
+- `tool_call` 可能分两帧到达：先 `pending`/`in_progress`（无 `input`），再补 `input` 的
+  同状态帧；两帧共享 `payload.toolCallId`，按它聚合。终态（`completed`/`failed`）或
+  带 `rawOutput` 的更新会变成 `kind=tool_result`，payload 为
+  `{ toolCallId, status, title?, output? }`；文件内容不在 `output`，只有退出摘要。
 - `nextCursor` 是这页最后一条的 seq；下一页把它传给 `after`（也接受 `afterSeq`）。
   传 `cursor` 会得到 `400 invalid_query`。`order=desc` 时 `after` 表示「更旧于该 seq」。
 - SDK `CursorPage` 要求 item 有 `id` 并自动翻页；这里的 item 是事件帧，语义不同，
@@ -299,12 +315,17 @@ const response = await fetch(
 
 ### hosted 会话的 sandbox / workspace
 
-- `environment` 仍是 `{ type: 'openai_hosted', id: 'env_...' }`；`logicalEnvId` 就是 Bun
-  的逻辑环境 id。
+- `environment` 仍是 `{ type: 'openai_hosted', id: 'env_...' }`；`environment.id` 就是
+  `sandbox.logicalEnvId`，也是 Bun 的逻辑环境 id。
+- `environment.type=none` 时返回 `{ type: 'none', id: '<logicalId>' }`：这个 `id` 当前
+  等于会话 id（`logicalId`/`session.id`），只是统一的环境引用形状，**不是**沙箱 id；
+  `none` 会话没有 Bun 环境，也没有 `sandbox` 字段。
 - `sandbox` 字段在 hosted 会话上非 null：`sandboxId`、`runId`（懒预留时为 null）、
-  `workspacePath` 来自 `swarm_bindings`。`state` 为 null，因为网关不跟踪 Bun 的实时
-  SRT 状态；需要 `ready`/`stopped` 等实时状态时调用 Bun 的
-  `GET /v1/sandboxes/{environment.id}`（外层 Bearer）。
+  `workspacePath` 来自 `swarm_bindings`。**`runId` 不会在沙箱真实运行后回填**：网关只
+  持久化预留结果，首个 MCP 请求启动沙箱也不更新这条投影。要判断「是否真实跑过」或读取
+  实时状态，调用 Bun 的 `GET /v1/sandboxes/{logicalEnvId}` 并看 `runId`/`state`（外层
+  Bearer），不要以会话投影的 `sandbox.runId === null` 推断沙箱未运行。`state` 在投影里
+  固定为 null，因为网关不跟踪 Bun 的实时 SRT 状态。
 - 会话的 `cwd` 是网关会话工作目录，不是工具执行目录；工具在
   `sandbox.workspacePath` 下执行。文件内容不在 items 的 `tool_result.output` 里
   （当前只有退出摘要），需要读 workspace 或 Bun 的状态接口。
@@ -328,8 +349,9 @@ const response = await fetch(
   `session/resume`，返回 `502 session_resume_required`。
 - 后台任务引用（MCP `resultType:"task"`）尚未进入空闲回收判定；长任务期间可能被
   回收，需要重新 ensure。
-- `sandbox.state` 在会话投影中固定为 `null`：网关只持久化绑定，不跟踪 Bun 的实时
-  启停；实时状态以 Bun `GET /v1/sandboxes/{id}` 为准。
+- `sandbox.state` 在会话投影中固定为 `null`，`sandbox.runId` 也不会在沙箱真实运行后
+  回填：网关只持久化绑定，不跟踪 Bun 的实时启停；实时状态以 Bun
+  `GET /v1/sandboxes/{logicalEnvId}` 为准。
 - 仅绑定 loopback + 单 Bearer；无生产 TLS、多租户与跨机调度。1000 Agent 规模、
   Linux SRT 与真实第三方 MCP 未验收。
 

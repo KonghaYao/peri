@@ -241,6 +241,7 @@ async fn item_shape_carries_stable_identity() {
     let assistant = &page["items"][1];
     assert_eq!(assistant["seq"], json!(2));
     assert_eq!(assistant["kind"], json!("message"));
+    assert_eq!(assistant["payload"]["role"], json!("assistant"));
     assert_eq!(assistant["payload"]["text"], json!("fake-echo: message 1"));
     assert!(assistant["payload"]["messageId"].is_string());
 }
