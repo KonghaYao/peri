@@ -22,6 +22,7 @@ members = [
     "peri-resources",
     "peri-time",
     "peri-runtime",
+    "peri-swarm",
     "peri-tui",
     "peri-tui-components",
     "langfuse-client",
@@ -140,4 +141,5 @@ tikv-jemalloc-sys = "0.7"
 sha2 = "0.11.1"
 
 axum = { version = "0.8.9", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
 serial_test = { version = "4.0.1", features = ["async"] }

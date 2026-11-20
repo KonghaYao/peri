@@ -3799,6 +3799,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-swarm"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures",
+ "peri-time",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "peri-theme"
 version = "0.2.0"
 dependencies = [
@@ -6291,6 +6311,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tui-input"
+version = "0.15.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4eb7c7ddaef6dcc58fae905d0f89a3df49ef77e93822df7447a5bb0babc9ece3"
+dependencies = [
+ "ratatui",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
 name = "tui-nuances"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6307,17 +6338,6 @@ checksum = "d65272d25bb3799d827de6d07f7c4885eb40761693ea0db6eafe051fa63457ac"
 dependencies = [
  "ratatui",
  "tui-nuances",
-]
-
-[[package]]
-name = "tui-input"
-version = "0.15.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4eb7c7ddaef6dcc58fae905d0f89a3df49ef77e93822df7447a5bb0babc9ece3"
-dependencies = [
- "ratatui",
- "unicode-segmentation",
- "unicode-width 0.2.2",
 ]
 
 [[package]]
