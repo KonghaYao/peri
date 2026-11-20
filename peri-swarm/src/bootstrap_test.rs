@@ -5,6 +5,7 @@
 //! instead of degrading to a local store.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use peri_acp_types::session_store::SessionStoreLocator;
 
@@ -14,7 +15,8 @@ use super::{
 };
 use crate::config::{
     ConfigError, API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV,
-    BUN_URL_ALIAS_ENV, MODEL_ENV, WORKSPACE_ROOT_ENV,
+    BUN_URL_ALIAS_ENV, DEFAULT_SSE_HEARTBEAT_MS, MODEL_ENV, SSE_HEARTBEAT_MS_ENV,
+    WORKSPACE_ROOT_ENV,
 };
 
 const TOKEN_ENV_NAME: &str = "PERI_TEST_LOOM_TOKEN";
@@ -88,6 +90,39 @@ fn complete_environment_parses_with_bootstrap_defaults() {
     assert!(config.settings_json.is_none());
     assert_eq!(config.session_store_locator.as_str(), SESSION_STORE_VALUE);
     assert_eq!(config.state_store_locator.as_str(), STATE_STORE_VALUE);
+}
+
+#[test]
+fn heartbeat_defaults_to_fifteen_seconds_and_reaches_the_gateway_config() {
+    let config = parse(&[]).expect("configuration");
+    assert_eq!(
+        config.sse_heartbeat,
+        Duration::from_millis(DEFAULT_SSE_HEARTBEAT_MS)
+    );
+    // The SSE handler reads this value from `AppState::config`, so the entry
+    // must not reset it while building the gateway configuration.
+    assert_eq!(config.swarm_config().sse_heartbeat, config.sse_heartbeat);
+}
+
+#[test]
+fn a_configured_heartbeat_reaches_the_gateway_config() {
+    for value in ["1000", "3000"] {
+        let config = parse(&[(SSE_HEARTBEAT_MS_ENV, Some(value))]).expect("configuration");
+        let expected = Duration::from_millis(value.parse().expect("milliseconds"));
+        assert_eq!(config.sse_heartbeat, expected);
+        assert_eq!(config.swarm_config().sse_heartbeat, expected);
+    }
+}
+
+#[test]
+fn invalid_heartbeat_fails_the_start() {
+    for value in ["0", "abc", "600001"] {
+        let reason = expect_invalid(
+            parse(&[(SSE_HEARTBEAT_MS_ENV, Some(value))]),
+            SSE_HEARTBEAT_MS_ENV,
+        );
+        assert!(reason.contains("1..=600000"), "{reason}");
+    }
 }
 
 #[test]

@@ -181,20 +181,6 @@ impl SwarmConfig {
             credential_env: optional_env_name(lookup(MODEL_CREDENTIAL_ENV), MODEL_CREDENTIAL_ENV)?,
         };
 
-        let heartbeat_ms = match lookup(SSE_HEARTBEAT_MS_ENV) {
-            Some(value) => value
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value > 0 && *value <= MAX_SSE_HEARTBEAT_MS)
-                .ok_or_else(|| {
-                    ConfigError::invalid(
-                        SSE_HEARTBEAT_MS_ENV,
-                        format!("expected 1..={MAX_SSE_HEARTBEAT_MS}"),
-                    )
-                })?,
-            None => DEFAULT_SSE_HEARTBEAT_MS,
-        };
-
         Ok(Self {
             bind_addr,
             api_key,
@@ -202,7 +188,7 @@ impl SwarmConfig {
             session_store,
             bun,
             model,
-            sse_heartbeat: Duration::from_millis(heartbeat_ms),
+            sse_heartbeat: parse_sse_heartbeat(&lookup)?,
         })
     }
 
@@ -210,6 +196,31 @@ impl SwarmConfig {
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
+}
+
+/// Parse the SSE heartbeat from the same lookup as the rest of the process
+/// configuration.
+///
+/// The bootstrap entry and the standalone [`SwarmConfig`] both call this, so
+/// the environment name, the default and the accepted bound have one owner.
+pub(crate) fn parse_sse_heartbeat<F>(lookup: &F) -> Result<Duration, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let heartbeat_ms = match lookup(SSE_HEARTBEAT_MS_ENV) {
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0 && *value <= MAX_SSE_HEARTBEAT_MS)
+            .ok_or_else(|| {
+                ConfigError::invalid(
+                    SSE_HEARTBEAT_MS_ENV,
+                    format!("expected 1..={MAX_SSE_HEARTBEAT_MS}"),
+                )
+            })?,
+        None => DEFAULT_SSE_HEARTBEAT_MS,
+    };
+    Ok(Duration::from_millis(heartbeat_ms))
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf, ConfigError> {

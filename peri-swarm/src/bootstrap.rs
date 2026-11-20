@@ -43,6 +43,7 @@
 //! | `PERI_SWARM_BUN_URL` | alias for the Bun base URL |
 //! | `PERI_SWARM_BUN_TOKEN` | optional Bun outer bearer token (value; not rendered) |
 //! | `PERI_SWARM_BUN_BEARER_ENV` | alternative: **name** of the variable holding that token |
+//! | `PERI_SWARM_SSE_HEARTBEAT_MS` | SSE heartbeat in milliseconds, default `15000` |
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -64,10 +65,10 @@ use crate::actor::runtime::SessionStoreDeployment;
 use crate::actor::service::ActorServiceConfig;
 use crate::actor::swarm;
 use crate::config::{
-    is_env_var_name, optional_non_empty, validate_bun_url, validate_store_locator, BunConfig,
-    ConfigError, DeploymentApiKey, ModelConfig, SessionStoreConfig, StoreAccess, SwarmConfig,
-    API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV,
-    DEFAULT_SSE_HEARTBEAT_MS, MODEL_ENV, WORKSPACE_ROOT_ENV,
+    is_env_var_name, optional_non_empty, parse_sse_heartbeat, validate_bun_url,
+    validate_store_locator, BunConfig, ConfigError, DeploymentApiKey, ModelConfig,
+    SessionStoreConfig, StoreAccess, SwarmConfig, API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV,
+    BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV, MODEL_ENV, WORKSPACE_ROOT_ENV,
 };
 use crate::gateway::{RivetServiceConfig, RivetSwarmService};
 use crate::http::{build_router, AppState};
@@ -332,7 +333,7 @@ impl BootstrapConfig {
             workspace_root,
             model,
             settings_json,
-            sse_heartbeat: Duration::from_millis(DEFAULT_SSE_HEARTBEAT_MS),
+            sse_heartbeat: parse_sse_heartbeat(&lookup)?,
             bun: BunConfig {
                 base_url: bun_base_url,
                 bearer_env: bun_bearer_env,
