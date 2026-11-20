@@ -101,6 +101,8 @@ mkdirSync(path.join(stage, 'scripts'), { recursive: true });
 cpSync(path.join(packageDir, 'scripts/rivet-engine-wrapper.sh'), path.join(stage, 'scripts/rivet-engine-wrapper.sh'));
 cpSync(path.join(packageDir, 'README.md'), path.join(stage, 'README.md'));
 cpSync(path.join(packageDir, '.env.example'), path.join(stage, '.env.example'));
+// README links to docs/agents-api.md, so the installed kit must carry the document it points at.
+cpSync(path.join(packageDir, 'docs'), path.join(stage, 'docs'), { recursive: true });
 
 const base = readJson(path.join(packageDir, 'package.json'));
 const dependencies = { ...base.dependencies };

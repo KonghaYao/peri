@@ -6,6 +6,8 @@ import { ApiClientError } from '@/lib/api-client';
 
 export interface ChatRuntimeNoticeProps {
   readonly mode: 'wasm' | 'not_configured';
+  /** Engine health after `ensureReady()`; a `wasm` mode can still be starting or failed. */
+  readonly ready: boolean;
   readonly reasons: readonly string[];
 }
 
@@ -109,22 +111,29 @@ export function runtimeReasonsFromError(error: unknown): string[] {
  */
 export { isRetryableRuntime };
 
-export function ChatRuntimeNotice({ mode, reasons }: ChatRuntimeNoticeProps) {
-  if (mode === 'wasm') return null;
+export function ChatRuntimeNotice({ mode, ready, reasons }: ChatRuntimeNoticeProps) {
+  if (mode === 'wasm' && ready) return null;
   const summary = runtimeSummary('unknown', reasons);
+  // Configured but not ready: the engine is still starting, or it failed without a Store reason.
+  const engineNotReady = mode === 'wasm' && reasons.length === 0;
 
   return (
     <Alert>
       <AlertTriangle />
-      <AlertTitle>{summary.label}</AlertTitle>
+      <AlertTitle>{engineNotReady ? '对话引擎暂不可用' : summary.label}</AlertTitle>
       <AlertDescription>
-        {isRetryableRuntime(reasons) ? (
+        {engineNotReady ? (
+          <p>
+            运行时已配置，但引擎尚未就绪（启动中或启动失败）。请稍后刷新；持续出现时查看 /api/health 的
+            engine.status 与 API 日志。
+          </p>
+        ) : isRetryableRuntime(reasons) ? (
           <p>网络问题会在 Store 恢复后自动重试，无需重启本地 API：</p>
         ) : (
           <p>以下问题需要修正后重启本地 API：</p>
         )}
         <ul className="mt-2 list-disc space-y-1 pl-5">
-          {reasons.length === 0 ? <li>未提供具体原因，请查看 API 日志。</li> : null}
+          {reasons.length === 0 && !engineNotReady ? <li>未提供具体原因，请查看 API 日志。</li> : null}
           {reasons.map((reason) => (
             <li key={reason}>{REASON_HINTS[reason] ?? reason}</li>
           ))}

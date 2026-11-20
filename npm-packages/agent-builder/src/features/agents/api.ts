@@ -77,6 +77,11 @@ export function useCapabilities() {
     queryKey: ['capabilities'],
     queryFn: fetchCapabilities,
     staleTime: 5_000,
+    // The engine boots asynchronously and can recover from a failed start, so poll while it is not ready.
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return data?.chatRuntime === 'wasm' && !data.chatRuntimeReady ? 1_500 : false;
+    },
   });
 }
 

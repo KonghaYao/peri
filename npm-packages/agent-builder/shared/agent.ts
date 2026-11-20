@@ -18,6 +18,11 @@ export const McpHttpServerDraft = z.strictObject({
   type: z.literal('http'),
   url: McpHttpUrl,
   headers: z.record(z.string(), z.string()).optional(),
+  /**
+   * Runtime authorization value persisted by the platform layer. It mirrors the documented
+   * HTTP transport field and never appears in a credential-free tool resource.
+   */
+  authorization: z.string().optional(),
 });
 
 export const McpStdioServerDraft = z.strictObject({
@@ -25,6 +30,13 @@ export const McpStdioServerDraft = z.strictObject({
   command: z.string().trim().min(1, 'MCP stdio commands cannot be blank'),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  /** Platform-persisted working directory for the stdio process. */
+  cwd: z.string().optional(),
+  /**
+   * Environment variable names inherited from the execution environment. The snake_case name is
+   * the documented transport field and the spelling the platform layer persists.
+   */
+  env_vars: z.array(z.string()).optional(),
 });
 
 /** Only declarative transports can be persisted; the SDK's ACP transport needs a live instance. */
@@ -115,9 +127,16 @@ export const AgentCapabilities = z.strictObject({
   metaHarnessKeys: z.array(z.string().min(1)),
   sendTextMaxLength: z.number().int().positive(),
   providers: z.array(ProviderCapability),
+  /** Configured runtime mode; `wasm` does not by itself mean the engine is usable. */
   chatRuntime: z.enum(['wasm', 'not_configured']),
+  /**
+   * True only after `ensureReady()` when the engine reports `ready`. A `wasm` mode with a failed
+   * or still-starting engine is `false`; chat routes answer 503 `engine_unavailable`.
+   */
+  chatRuntimeReady: z.boolean(),
   /** Codes, not secrets: the UI turns these into actionable hints. */
   chatRuntimeReasons: z.array(z.string().min(1)),
+  /** True only when chat history can actually be persisted, i.e. `chatRuntimeReady`. */
   historyPersisted: z.boolean(),
   sandbox: SandboxStatus,
 });

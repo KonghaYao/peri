@@ -2,6 +2,7 @@ import type { EngineHealth } from '@shared/api';
 import type { ChatRuntimeReason, ChatRuntimeStatus } from '@shared/chat';
 import { isRetryableRuntime } from '@shared/chat';
 import { AppError } from '../errors';
+import { type EngineTermination, terminateEngineProcess } from '../rivet/engine-process';
 import type { SandboxActorPort } from '../sandbox/coordinator';
 import type { ChatActorPort, ChatEngine } from './engine';
 import type { StoreProbeResult } from './store-probe';
@@ -117,6 +118,16 @@ export class StoreProbeChatEngine implements ChatEngine {
     this.#degraded = true;
     if (ready !== null) await ready.shutdown();
     this.#ready = null;
+  }
+
+  /** The engine child belongs to the wrapped engine even when ordered shutdown stopped early. */
+  async forceStop(): Promise<EngineTermination> {
+    this.#closing = true;
+    const ready = this.#ready;
+    if (ready !== null && ready.forceStop !== undefined) return ready.forceStop();
+    // No live wrapper (shutdown already ran or the engine never started): clear or retry the
+    // recorded child directly. The pid file is per host, so this needs no engine instance.
+    return terminateEngineProcess();
   }
 
   async #refresh(): Promise<void> {

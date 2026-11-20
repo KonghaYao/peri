@@ -18,6 +18,7 @@ const capabilities = {
     { type: 'openai' as const, configured: false },
   ],
   chatRuntime: 'not_configured' as const,
+  chatRuntimeReady: false,
   chatRuntimeReasons: ['store_token_missing'],
   historyPersisted: false,
   sandbox: { mode: 'disabled' as const, reasons: [] },

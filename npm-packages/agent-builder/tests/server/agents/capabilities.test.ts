@@ -2,11 +2,14 @@ import type { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { BareHarnessConfig } from '@peri-code/sdk';
 import { AgentCapabilities } from '@shared/agent';
+import type { EngineHealth } from '@shared/api';
 import { ProviderCreate } from '@shared/provider';
 import type { Hono } from 'hono';
 import { createApp } from '../../../server/app';
+import type { ChatEngine } from '../../../server/chats/engine';
 import { openDatabase } from '../../../server/db/database';
 import { migrate } from '../../../server/db/migrate';
+import { AppError } from '../../../server/errors';
 import { ProvidersRepository } from '../../../server/providers/repository';
 import { ProviderService } from '../../../server/providers/service';
 import { testEnv } from '../helpers';
@@ -18,7 +21,25 @@ afterEach(() => {
   db = null;
 });
 
-function setup(envOverrides: Parameters<typeof testEnv>[0] = {}): {
+/** A configured (wasm) engine whose observed health the test controls. */
+function configuredEngine(status: EngineHealth['status']): ChatEngine {
+  return {
+    status: { mode: 'wasm', reasons: [] },
+    start: async () => {},
+    health: () => ({ mode: 'embedded', status }),
+    actor: () => {
+      throw new AppError('engine_unavailable', 'unused');
+    },
+    sandbox: () => null,
+    endpoint: null,
+    shutdown: async () => {},
+  };
+}
+
+function setup(
+  envOverrides: Parameters<typeof testEnv>[0] = {},
+  engine?: ChatEngine,
+): {
   app: Hono;
   env: ReturnType<typeof testEnv>;
   providers: ProviderService;
@@ -28,7 +49,7 @@ function setup(envOverrides: Parameters<typeof testEnv>[0] = {}): {
   db = database;
   const env = testEnv(envOverrides);
   return {
-    app: createApp({ env, db: database }),
+    app: createApp({ env, db: database, ...(engine === undefined ? {} : { engine }) }),
     env,
     providers: new ProviderService(new ProvidersRepository(database)),
   };
@@ -61,6 +82,29 @@ describe('GET /api/capabilities', () => {
     expect(body.chatRuntimeReasons).not.toContain('provider_key_missing');
     expect(body.historyPersisted).toBe(false);
     expect(body.sandbox).toEqual({ mode: 'disabled', reasons: [] });
+  });
+
+  test('separates the configured wasm mode from observed engine readiness', async () => {
+    const { app } = setup({}, configuredEngine('ready'));
+    const body = AgentCapabilities.parse(await (await app.request('/api/capabilities')).json());
+
+    expect(body.chatRuntime).toBe('wasm');
+    expect(body.chatRuntimeReady).toBe(true);
+    expect(body.historyPersisted).toBe(true);
+  });
+
+  test('never claims readiness or persisted history for a wasm engine that is not ready', async () => {
+    for (const status of ['starting', 'unavailable', 'unknown'] as const) {
+      const { app } = setup({}, configuredEngine(status));
+      const body = AgentCapabilities.parse(await (await app.request('/api/capabilities')).json());
+
+      expect(body.chatRuntime).toBe('wasm');
+      expect(body.chatRuntimeReady).toBe(false);
+      expect(body.chatRuntimeReasons).toEqual([]);
+      expect(body.historyPersisted).toBe(false);
+      db?.close();
+      db = null;
+    }
   });
 
   test('never serializes API keys or store tokens', async () => {

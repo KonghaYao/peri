@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import type { ChatOpenResult, ChatOpenTarget } from '@peri-code/rivet/rivet';
 import { createHostResourceOwner } from '@peri-code/rivet/rivet';
 import type { ChatRuntimeStatus } from '@shared/chat';
+import { UserError } from 'rivetkit';
 import {
   createChatEngine,
   createChatEngineWithStoreProbe,
@@ -211,6 +213,33 @@ describe('RivetChatEngine shutdown', () => {
     expect(wrapper.endpoint).toBeNull();
   });
 
+  test('forwards the terminal engine cleanup through the Store wrapper', async () => {
+    let calls = 0;
+    const engine = {
+      status: { mode: 'wasm', reasons: [] } as ChatRuntimeStatus,
+      async start() {},
+      health: () => ({ mode: 'embedded', status: 'ready' }) as const,
+      actor: () => {
+        throw new Error('unused');
+      },
+      sandbox: () => null,
+      endpoint: 'http://127.0.0.1:8961',
+      async shutdown() {},
+      async forceStop() {
+        calls += 1;
+        return { status: 'terminated' as const, pids: [7] };
+      },
+    };
+    const wrapper = new StoreProbeChatEngine({
+      probe: async () => ({ reachable: true }),
+      createReadyEngine: () => engine,
+      initialEngine: engine,
+    });
+
+    expect(await wrapper.forceStop()).toEqual({ status: 'terminated', pids: [7] });
+    expect(calls).toBe(1);
+  });
+
   test('rejects a start after shutdown is terminal', async () => {
     let started = false;
     const engine = new RivetChatEngine(
@@ -230,5 +259,116 @@ describe('RivetChatEngine shutdown', () => {
     await engine.shutdown();
     await expect(engine.start()).rejects.toMatchObject({ code: 'engine_unavailable' });
     expect(started).toBe(false);
+  });
+});
+
+describe('RivetChatEngine health', () => {
+  const status: ChatRuntimeStatus = { mode: 'wasm', reasons: [] };
+
+  type ChatHandle = {
+    open(target: ChatOpenTarget): Promise<ChatOpenResult>;
+    execute(): Promise<never>;
+    facts(): Promise<never>;
+    close(): Promise<{ closed: true }>;
+    connect(): { on(): () => void; dispose(): Promise<void> };
+  };
+
+  function handleWith(open: ChatHandle['open']): ChatHandle {
+    return {
+      open,
+      execute: async () => {
+        throw new Error('unused');
+      },
+      facts: async () => {
+        throw new Error('unused');
+      },
+      close: async () => ({ closed: true }),
+      connect: () => ({ on: () => () => {}, dispose: async () => {} }),
+    };
+  }
+
+  function engineWith(handle: ChatHandle, endpoint: string): RivetChatEngine {
+    return new RivetChatEngine(
+      { ...testEnv(), ...READY_ENV },
+      status,
+      '/tmp/unused.js',
+      createHostResourceOwner(),
+      null,
+      {
+        startRegistry: async () => ({
+          registry: {} as StartedRegistry['registry'],
+          client: { chat: { getOrCreate: () => handle } } as unknown as StartedRegistry['client'],
+          endpoint,
+          shutdown: async () => {},
+        }),
+      },
+    );
+  }
+
+  const target = { chatId: 'chat-1' } as unknown as ChatOpenTarget;
+
+  test('a business failure from the actor keeps the engine ready', async () => {
+    const engine = engineWith(
+      handleWith(async () => {
+        throw new UserError('session missing', { code: 'not_found' });
+      }),
+      'http://127.0.0.1:1',
+    );
+    await engine.start();
+
+    await expect(engine.actor('chat-1').open(target)).rejects.toBeInstanceOf(UserError);
+    expect(engine.health()).toEqual({ mode: 'embedded', status: 'ready' });
+  });
+
+  test('an opaque failure marks health unavailable when the child does not answer', async () => {
+    const failure = new Error('opaque actor defect');
+    const engine = engineWith(
+      handleWith(async () => {
+        throw failure;
+      }),
+      'http://127.0.0.1:1',
+    );
+    await engine.start();
+    expect(engine.health()).toEqual({ mode: 'embedded', status: 'ready' });
+
+    await expect(engine.actor('chat-1').open(target)).rejects.toBe(failure);
+    expect(engine.health()).toEqual({ mode: 'embedded', status: 'unavailable' });
+  });
+
+  test('a failure against a live engine keeps health ready, so the defect stays a 500', async () => {
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('ok') });
+    try {
+      const engine = engineWith(
+        handleWith(async () => {
+          throw new Error('synthetic actor defect');
+        }),
+        `http://127.0.0.1:${server.port}`,
+      );
+      await engine.start();
+
+      await expect(engine.actor('chat-1').open(target)).rejects.toThrow('synthetic actor defect');
+      expect(engine.health()).toEqual({ mode: 'embedded', status: 'ready' });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('a later successful call restores readiness after a transport failure', async () => {
+    let fail = true;
+    const engine = engineWith(
+      handleWith(async (openTarget) => {
+        if (fail) throw new Error('child is gone');
+        return { chatId: openTarget.chatId, workspace: 'peri+sandbox://m/w', binding: null, reused: false };
+      }),
+      'http://127.0.0.1:1',
+    );
+    await engine.start();
+
+    await expect(engine.actor('chat-1').open(target)).rejects.toThrow('child is gone');
+    expect(engine.health().status).toBe('unavailable');
+
+    fail = false;
+    await engine.actor('chat-1').open(target);
+    expect(engine.health()).toEqual({ mode: 'embedded', status: 'ready' });
   });
 });

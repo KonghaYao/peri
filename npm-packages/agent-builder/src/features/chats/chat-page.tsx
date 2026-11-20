@@ -184,8 +184,10 @@ export function ChatPage() {
     },
   });
 
+  // A retryable Store outage keeps the composer enabled so a send can trigger the lazy re-probe.
   const notConfigured =
-    capabilities.data?.chatRuntime === 'not_configured' &&
+    capabilities.data !== undefined &&
+    capabilities.data.chatRuntimeReady === false &&
     !isRetryableRuntime(capabilities.data.chatRuntimeReasons);
 
   if (chat === undefined) {
@@ -237,7 +239,12 @@ export function ChatPage() {
     <div className="flex min-h-[calc(100vh-7rem)] flex-col gap-4">
       <PageHeader
         title={`与 ${chat.agentName} 的对话`}
-        description={stream.sessionId === null ? '会话将在第一条消息后建立' : `会话 ${stream.sessionId}`}
+        description={
+          stream.sessionId === null
+            ? // Lazy binding: the session row appears on the first SSE subscribe or first send.
+              '会话将在首次订阅事件流或首次发送消息后建立'
+            : `会话 ${stream.sessionId}`
+        }
         actions={
           <div className="flex gap-2">
             <Button
@@ -297,6 +304,7 @@ export function ChatPage() {
       {capabilities.data !== undefined ? (
         <ChatRuntimeNotice
           mode={capabilities.data.chatRuntime}
+          ready={capabilities.data.chatRuntimeReady}
           reasons={capabilities.data.chatRuntimeReasons}
         />
       ) : null}

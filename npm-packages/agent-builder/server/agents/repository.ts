@@ -7,6 +7,7 @@ import {
   isReferenceProvider,
 } from '@shared/agent';
 import { AppError } from '../errors';
+import { isHiddenAgentId } from '../platform/agents/visibility';
 
 interface AgentRow {
   readonly id: string;
@@ -86,12 +87,17 @@ export class AgentsRepository {
   }
 
   list(): AgentSummary[] {
-    return this.db
-      .query<AgentRow, []>(`SELECT ${SELECT_COLUMNS} FROM agents ORDER BY updated_at DESC, id ASC`)
-      .all()
-      .map(toSummary);
+    return (
+      this.db
+        .query<AgentRow, []>(`SELECT ${SELECT_COLUMNS} FROM agents ORDER BY updated_at DESC, id ASC`)
+        .all()
+        // Reserved rows back internal sessions; they are not user-created agents.
+        .filter((row) => !isHiddenAgentId(row.id))
+        .map(toSummary)
+    );
   }
   get(agentId: string): Agent | null {
+    if (isHiddenAgentId(agentId)) return null;
     const row = this.db
       .query<AgentRow, [string]>(`SELECT ${SELECT_COLUMNS} FROM agents WHERE id = ?`)
       .get(agentId);

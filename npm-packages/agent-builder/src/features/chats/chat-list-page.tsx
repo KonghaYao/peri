@@ -41,6 +41,7 @@ export function ChatListPage() {
       {capabilities.data !== undefined ? (
         <ChatRuntimeNotice
           mode={capabilities.data.chatRuntime}
+          ready={capabilities.data.chatRuntimeReady}
           reasons={capabilities.data.chatRuntimeReasons}
         />
       ) : null}

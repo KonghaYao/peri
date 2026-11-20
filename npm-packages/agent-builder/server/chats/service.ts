@@ -1,5 +1,5 @@
 import type { ChatExecuteResult, ChatOpenResult, ChatOpenTarget } from '@peri-code/rivet/rivet';
-import type { ChatUserAction } from '@peri-code/sdk';
+import type { ChatUserAction, InteractionAnswer } from '@peri-code/sdk';
 import type { Agent, AgentDraft, AgentPreviewTarget } from '@shared/agent';
 import { ApiErrorCode, PUBLIC_ERROR_MESSAGES } from '@shared/api';
 import type {
@@ -44,18 +44,25 @@ function errorCode(error: unknown): string {
   return diagnosticCode(error);
 }
 
-function toAppError(error: unknown): never {
-  if (error instanceof AppError) throw error;
-  const parsed = ApiErrorCode.safeParse(errorCode(error));
-  const code = parsed.success ? parsed.data : 'internal_error';
-  throw new AppError(code, PUBLIC_ERROR_MESSAGES[code], {
-    retryable: code === 'engine_unavailable' || code === 'session_creation_failed',
-    cause: error,
-  });
-}
-
 function asDraft(agent: Agent): AgentDraft {
   return { name: agent.name, description: agent.description, config: agent.config };
+}
+
+/**
+ * Sandbox holder selection for one chat. `null` means the chat runs without an injected
+ * environment; the default (no policy) always uses the chat id, which is today's behavior.
+ */
+export interface ChatEnvironmentPolicy {
+  holderFor(chatId: string): string | null;
+}
+
+/** Optional creation seams used by the platform session surface; every field defaults away. */
+export interface ChatCreateOptions {
+  /** Caller-owned chat id, so a platform session id and its chat key stay identical. */
+  readonly chatId?: string;
+  /** Effective agent configuration resolved by the caller (inline agent snapshots). */
+  readonly draft?: AgentDraft;
+  readonly policy?: ChatEnvironmentPolicy;
 }
 
 export interface ChatServiceOptions {
@@ -66,6 +73,8 @@ export interface ChatServiceOptions {
   readonly providers?: ProviderService;
   readonly sandbox?: SandboxCoordinator;
   readonly generateId?: () => string;
+  /** Last-resort draft source when no in-memory run exists yet (durable inline agents). */
+  readonly draftFor?: (chatId: string) => AgentDraft | null;
 }
 
 /**
@@ -87,6 +96,9 @@ export class ChatService {
   readonly #agents: AgentsRepository;
   readonly #sandbox: SandboxCoordinator | null;
   readonly #generateId: () => string;
+  readonly #draftFor: ((chatId: string) => AgentDraft | null) | null;
+  readonly #drafts = new Map<string, AgentDraft>();
+  readonly #policies = new Map<string, ChatEnvironmentPolicy>();
   readonly #hubs = new Map<string, ChatStreamHub>();
   readonly #receipts = new Map<string, Map<string, Receipt>>();
   readonly #inflight = new Map<string, Map<string, Inflight>>();
@@ -106,6 +118,7 @@ export class ChatService {
     this.providers = options.providers ?? new ProviderService(new ProvidersRepository(options.agents.db));
     this.#sandbox = options.sandbox ?? null;
     this.#generateId = options.generateId ?? (() => crypto.randomUUID());
+    this.#draftFor = options.draftFor ?? null;
   }
 
   get runtime(): ChatRuntimeStatus {
@@ -116,15 +129,28 @@ export class ChatService {
     return this.#chats.list(agentId).map((chat) => this.#withSandbox(chat));
   }
 
-  async create(request: ChatCreateRequest): Promise<ChatSummary> {
+  async create(request: ChatCreateRequest, options: ChatCreateOptions = {}): Promise<ChatSummary> {
     this.#assertAccepting();
     await this.#ensureRuntime();
     this.#assertAccepting();
     const agent = this.#agents.get(request.agentId);
-    if (!agent) throw new AppError('not_found', 'Agent not found');
-    const chatId = this.#generateId();
-    const created = this.#chats.create(chatId, agent.id);
-    const chat = this.#chats.getWithAgent(chatId);
+    // A caller-supplied draft (inline platform agent) is authoritative: reserved agent rows are
+    // hidden from the domain repository, so its presence check cannot apply to them.
+    if (!agent && options.draft === undefined) throw new AppError('not_found', 'Agent not found');
+    const chatId = options.chatId ?? this.#generateId();
+    // Reserve the caller-owned seams before the row exists: `#freeze` runs inside the per-chat
+    // queue and must already see the effective draft and environment policy.
+    if (options.draft) this.#drafts.set(chatId, structuredClone(options.draft));
+    if (options.policy) this.#policies.set(chatId, options.policy);
+    let created: ChatSummary;
+    try {
+      created = this.#chats.create(chatId, agent?.id ?? request.agentId);
+    } catch (error) {
+      this.#drafts.delete(chatId);
+      this.#policies.delete(chatId);
+      throw error;
+    }
+    const chat = this.#chats.get(chatId);
     if (!chat) throw new AppError('internal_error', 'Chat row disappeared after creation');
 
     return this.#queue(chatId, async () => {
@@ -133,11 +159,11 @@ export class ChatService {
         this.#freeze(chatId);
         const target = await this.#target(chatId);
         openAttempted = true;
-        await this.#open(chat.chat, target);
+        await this.#open(chat, target);
         return this.#withSandbox(created);
       } catch (error) {
         await this.#rollbackCreate(chatId, openAttempted);
-        toAppError(error);
+        this.#normalize(error);
       }
     });
   }
@@ -172,15 +198,16 @@ export class ChatService {
   async #send(chatId: string, requestId: string, text: string): Promise<ChatSendResponse> {
     const chat = this.#chats.get(chatId);
     if (!chat) throw new AppError('not_found', 'Chat not found');
-    this.#freeze(chatId);
+    // Runtime first: a Store/engine outage must not freeze a target for a request that cannot run.
     await this.#ensureRuntime();
+    this.#freeze(chatId);
     const target = await this.#target(chatId);
     const opened = await this.#open(chat, target);
     try {
       await this.#ensureSession(chat, opened.actor, opened.result);
     } catch (error) {
       // A refused session is the actor's public outcome; map it instead of surfacing a bare 500.
-      toAppError(error);
+      this.#normalize(error);
     }
 
     let result: ChatExecuteResult;
@@ -191,7 +218,7 @@ export class ChatService {
         payload: { text },
       } satisfies ChatUserAction);
     } catch (error) {
-      toAppError(error);
+      this.#normalize(error);
     }
     if (result.type !== 'send') {
       throw new AppError('internal_error', 'Chat actor returned an unexpected send result');
@@ -216,8 +243,8 @@ export class ChatService {
   async #cancel(chatId: string, requestId?: string): Promise<ChatCancelResponse> {
     const chat = this.#chats.get(chatId);
     if (!chat) throw new AppError('not_found', 'Chat not found');
-    this.#freeze(chatId);
     await this.#ensureRuntime();
+    this.#freeze(chatId);
     const { actor } = await this.#open(chat, await this.#target(chatId));
     let result: ChatExecuteResult;
     try {
@@ -227,12 +254,39 @@ export class ChatService {
         payload: {},
       } satisfies ChatUserAction);
     } catch (error) {
-      toAppError(error);
+      this.#normalize(error);
     }
     if (result.type !== 'cancel') {
       throw new AppError('internal_error', 'Chat actor returned an unexpected cancel result');
     }
     return { requestId: result.result.requestId, status: result.result.status };
+  }
+
+  /** Answers one pending interaction; the interaction id comes from the session projection. */
+  answer(chatId: string, interactionId: string, answer: InteractionAnswer): Promise<void> {
+    this.#assertAccepting(chatId);
+    return this.#queue(chatId, () => this.#answer(chatId, interactionId, answer));
+  }
+
+  async #answer(chatId: string, interactionId: string, answer: InteractionAnswer): Promise<void> {
+    const chat = this.#chats.get(chatId);
+    if (!chat) throw new AppError('not_found', 'Chat not found');
+    await this.#ensureRuntime();
+    this.#freeze(chatId);
+    const { actor } = await this.#open(chat, await this.#target(chatId));
+    let result: ChatExecuteResult;
+    try {
+      result = await actor.execute({
+        type: 'answer',
+        requestId: this.#generateId(),
+        payload: { interactionId, answer },
+      } satisfies ChatUserAction);
+    } catch (error) {
+      this.#normalize(error);
+    }
+    if (result.type !== 'answer') {
+      throw new AppError('internal_error', 'Chat actor returned an unexpected answer result');
+    }
   }
 
   close(chatId: string): Promise<ChatCloseResponse> {
@@ -264,7 +318,7 @@ export class ChatService {
     await this.#disposeHub(chatId);
     this.#receipts.delete(chatId);
     this.#inflight.delete(chatId);
-    const sandbox = await this.#sandbox?.release(chatId);
+    const sandbox = await this.#sandbox?.release(this.#holderFor(chatId) ?? chatId);
     if (sandbox !== undefined && !sandbox.released) {
       return { status: 'close_incomplete', errors: sandbox.errors };
     }
@@ -283,7 +337,8 @@ export class ChatService {
     // 未配置且从未取得 holder 的历史映射可以离线删除；活跃 Chat 必须确认关闭。
     if (
       this.#engine.status.mode !== 'wasm' &&
-      (this.#sandbox === null || ['disabled', 'closed'].includes(this.#sandbox.state(chatId).state)) &&
+      (this.#sandbox === null ||
+        ['disabled', 'closed'].includes(this.#sandbox.state(this.#holderFor(chatId) ?? chatId).state)) &&
       !this.#active.has(chatId) &&
       !this.#runs.has(chatId) &&
       !this.#operations.has(chatId)
@@ -316,12 +371,16 @@ export class ChatService {
   async #prepareStream(chatId: string): Promise<ChatStreamHub> {
     const chat = this.#chats.get(chatId);
     if (!chat) throw new AppError('not_found', 'Chat not found');
-    this.#freeze(chatId);
     await this.#ensureRuntime();
+    this.#freeze(chatId);
     const opened = await this.#open(chat, await this.#target(chatId));
     // A fresh chat is bound only after `create_new_session`; starting the projection first would
     // subscribe against a null binding and the first model turn would never reach the stream.
-    await this.#ensureSession(chat, opened.actor, opened.result);
+    try {
+      await this.#ensureSession(chat, opened.actor, opened.result);
+    } catch (error) {
+      this.#normalize(error);
+    }
 
     const existing = this.#hubs.get(chatId);
     if (existing) {
@@ -337,7 +396,7 @@ export class ChatService {
     } catch (error) {
       this.#hubs.delete(chatId);
       await hub.dispose();
-      toAppError(error);
+      this.#normalize(error);
     }
     return hub;
   }
@@ -386,15 +445,16 @@ export class ChatService {
       this.#closed.delete(chat.chatId);
       return { actor, result };
     } catch (error) {
-      toAppError(error);
+      this.#normalize(error);
     }
   }
 
   #freeze(chatId: string): void {
     if (this.#runs.has(chatId)) return;
-    const chat = this.#chats.getWithAgent(chatId);
-    if (!chat) throw new AppError('not_found', 'Chat not found');
-    const draft = structuredClone(asDraft(chat.agent));
+    // Caller-resolved drafts (inline platform agents) and durable snapshots win over the chat row
+    // agent; without either, the stored agent row is the only source and behavior is unchanged.
+    const override = this.#drafts.get(chatId) ?? this.#draftFor?.(chatId) ?? null;
+    const draft = structuredClone(override ?? this.#storedDraft(chatId));
     const resolved = resolveAgentProvider(draft, this.providers);
     if (!resolved || resolved.providerId === null)
       throw new AppError('not_ready', 'Select a shared Provider and fill its SQLite API key in Providers', {
@@ -404,17 +464,33 @@ export class ChatService {
       throw new AppError('not_ready', 'Fill this Provider SQLite API key in Providers', {
         details: { reason: 'api_key_missing' },
       });
-    if (this.#sandbox?.enabled === true) assertSandboxTargetCompatible(draft);
+    if (this.#sandbox?.enabled === true && this.#holderFor(chatId) !== null) {
+      assertSandboxTargetCompatible(draft);
+    }
     const base = structuredClone(buildAgentTarget(this.#env, draft, chatId, { resolved }));
     this.#runs.set(chatId, { draft, base, target: null });
     if (resolved.providerId !== null) this.providers.retain(chatId, resolved.providerId);
+  }
+
+  /** Only used when no caller or durable draft exists, i.e. the unchanged `/api/chats` path. */
+  #storedDraft(chatId: string): AgentDraft {
+    const chat = this.#chats.getWithAgent(chatId);
+    if (!chat) throw new AppError('not_found', 'Chat not found');
+    return asDraft(chat.agent);
+  }
+
+  /** The policy may opt out of an environment entirely; otherwise the chat id is the holder. */
+  #holderFor(chatId: string): string | null {
+    const policy = this.#policies.get(chatId);
+    return policy === undefined ? chatId : policy.holderFor(chatId);
   }
 
   async #target(chatId: string): Promise<AgentPreviewTarget> {
     const run = this.#runs.get(chatId);
     if (!run) throw new AppError('internal_error', 'Missing frozen target');
     if (run.target !== null) return run.target;
-    const injection = await this.#sandbox?.acquire(chatId);
+    const holder = this.#holderFor(chatId);
+    const injection = holder === null ? undefined : await this.#sandbox?.acquire(holder);
     const target = injection
       ? injectSandboxTarget(run.base, run.draft, injection)
       : structuredClone(run.base);
@@ -424,6 +500,8 @@ export class ChatService {
 
   #releaseTarget(chatId: string): void {
     this.#runs.delete(chatId);
+    this.#drafts.delete(chatId);
+    this.#policies.delete(chatId);
     this.#active.delete(chatId);
     this.providers.release(chatId);
   }
@@ -441,15 +519,20 @@ export class ChatService {
    */
   async #rollbackCreate(chatId: string, openAttempted: boolean): Promise<void> {
     if (openAttempted) {
-      try {
-        await this.#engine.actor(chatId).close();
-      } catch (error) {
-        // The failed activation may still be using the environment; keep the row and holder so the
-        // user can retry a real close instead of orphaning a running Chat.
-        console.error('[agent-builder] failed create could not close its actor', {
-          code: errorCode(error),
-        });
-        return;
+      // `actor()` throwing means the engine never produced a handle, so no activation exists and
+      // the row can be removed even while the runtime is unavailable.
+      const actor = this.#actorOrNull(chatId);
+      if (actor !== null) {
+        try {
+          await actor.close();
+        } catch (error) {
+          // The failed activation may still be using the environment; keep the row and holder so the
+          // user can retry a real close instead of orphaning a running Chat.
+          console.error('[agent-builder] failed create could not close its actor', {
+            code: errorCode(error),
+          });
+          return;
+        }
       }
     }
     if (this.#sandbox === null) {
@@ -457,7 +540,7 @@ export class ChatService {
       this.#chats.delete(chatId);
       return;
     }
-    const released = await this.#sandbox.release(chatId);
+    const released = await this.#sandbox.release(this.#holderFor(chatId) ?? chatId);
     if (released.released) {
       this.#releaseTarget(chatId);
       this.#chats.delete(chatId);
@@ -466,6 +549,14 @@ export class ChatService {
     console.error('[agent-builder] failed chat create left an unconfirmed sandbox holder', {
       errors: released.errors,
     });
+  }
+
+  #actorOrNull(chatId: string): ChatActorPort | null {
+    try {
+      return this.#engine.actor(chatId);
+    } catch {
+      return null;
+    }
   }
 
   async #openWithRetry(actor: ChatActorPort, target: ChatOpenTarget): Promise<ChatOpenResult> {
@@ -568,9 +659,15 @@ export class ChatService {
   }
 
   async #ensureRuntime(): Promise<void> {
-    await this.#engine.ensureReady?.();
-    this.#assertRuntime();
-    await this.#engine.start();
+    try {
+      await this.#engine.ensureReady?.();
+      this.#assertRuntime();
+      await this.#engine.start();
+    } catch (error) {
+      // Every guarded entry point goes through here, so a raw start/probe failure is typed 503
+      // exactly once instead of leaking as an untyped 500 from `create` or `send`.
+      this.#normalize(error);
+    }
   }
 
   #assertRuntime(): void {
@@ -581,6 +678,46 @@ export class ChatService {
         retryable: isRetryableRuntime(reasons),
       });
     }
+  }
+
+  /**
+   * Narrow error normalization for the chat entry points.
+   *
+   * A typed `AppError` already owns its status and retryability (for example the SSE replay 503).
+   * The remaining failures are transport errors from a dead Store/engine child: they carry no
+   * trusted API code, so they must become the runtime's own 503 instead of an untyped 500. While
+   * the engine reports `ready`, unknown failures keep the 500 fallback so real defects stay visible.
+   */
+  #normalize(error: unknown): never {
+    if (error instanceof AppError) throw error;
+    const parsed = ApiErrorCode.safeParse(errorCode(error));
+    if (parsed.success && parsed.data === 'engine_unavailable') throw this.#engineUnavailable(error);
+    if (!parsed.success || parsed.data === 'internal_error') {
+      if (!this.#runtimeReady()) throw this.#engineUnavailable(error);
+      throw new AppError('internal_error', PUBLIC_ERROR_MESSAGES.internal_error, { cause: error });
+    }
+    throw new AppError(parsed.data, PUBLIC_ERROR_MESSAGES[parsed.data], {
+      retryable: parsed.data === 'session_creation_failed',
+      cause: error,
+    });
+  }
+
+  #engineUnavailable(cause: unknown): AppError {
+    const reasons = this.#runtimeReasons();
+    return new AppError('engine_unavailable', PUBLIC_ERROR_MESSAGES.engine_unavailable, {
+      details: { reasons },
+      retryable: isRetryableRuntime(reasons),
+      cause,
+    });
+  }
+
+  /** The engine's observed health; `wasm` only states the configured mode. */
+  #runtimeReady(): boolean {
+    return this.#engine.health().status === 'ready';
+  }
+
+  #runtimeReasons(): ChatRuntimeReason[] {
+    return [...(this.#engine.health().reasons ?? this.#engine.status.reasons)];
   }
 
   async #disposeHub(chatId: string): Promise<void> {

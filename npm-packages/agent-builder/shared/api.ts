@@ -122,6 +122,11 @@ export const EngineHealth = z.strictObject({
 export type EngineHealth = z.infer<typeof EngineHealth>;
 
 export const HealthResponse = z.strictObject({
+  /**
+   * Process liveness only: the API process is running and could answer this HTTP request.
+   * Chat readiness is owned by `engine.status === 'ready'`; `ok:true` does not mean the chat
+   * runtime or the Store is usable, and a non-ready engine still answers with `ok:true`.
+   */
   ok: z.boolean(),
   engine: EngineHealth,
   runtime: z.strictObject({

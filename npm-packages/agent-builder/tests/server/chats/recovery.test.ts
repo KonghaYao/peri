@@ -353,8 +353,10 @@ describe('Store recovery', () => {
     harness.reachable.value = true;
     harness.clock.value = 1_001;
     const recovered = await harness.app.request('/api/capabilities');
+    // The harness builds a fake engine whose health is already `ready`; readiness follows health.
     expect(await recovered.json()).toMatchObject({
       chatRuntime: 'wasm',
+      chatRuntimeReady: true,
       chatRuntimeReasons: [],
       historyPersisted: true,
     });

@@ -39,14 +39,19 @@ const chat: ChatSummary = {
   sandbox: { state: 'disabled', reason: null },
 };
 
-function capabilities(mode: AgentCapabilities['chatRuntime'], reasons: string[] = []): AgentCapabilities {
+function capabilities(
+  mode: AgentCapabilities['chatRuntime'],
+  reasons: string[] = [],
+  ready = mode === 'wasm',
+): AgentCapabilities {
   return {
     metaHarnessKeys: [],
     sendTextMaxLength: 32_768,
     providers: [{ type: 'anthropic', configured: true }],
     chatRuntime: mode,
+    chatRuntimeReady: ready,
     chatRuntimeReasons: reasons,
-    historyPersisted: mode === 'wasm',
+    historyPersisted: ready,
     sandbox: { mode: 'disabled', reasons: [] },
   };
 }
@@ -488,6 +493,19 @@ describe('chat pages', () => {
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   });
 
+  test('ChatNewPage disables creation when the runtime is configured but the engine is not ready', async () => {
+    stubFetch({
+      capabilities: capabilities('wasm', [], false),
+      agents: [agent],
+    });
+    renderPage(<ChatNewPage />, '/chats/new');
+
+    expect(await screen.findByText('对话引擎暂不可用')).toBeTruthy();
+    expect(await screen.findByText(/引擎尚未就绪/)).toBeTruthy();
+    const button = await screen.findByRole('button', { name: /开始对话/ });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
   test('ChatNewPage clears the store outage notice after a successful create', async () => {
     const calls: string[] = [];
     let runtime: AgentCapabilities['chatRuntime'] = 'not_configured';
@@ -574,6 +592,21 @@ describe('chat pages', () => {
 
     const textarea = await screen.findByLabelText('消息内容');
     await waitFor(() => expect((textarea as HTMLTextAreaElement).disabled).toBe(false));
+  });
+
+  test('ChatPage explains a configured but not-ready engine and the lazy session binding', async () => {
+    const sse = createSse();
+    stubFetch({
+      capabilities: capabilities('wasm', [], false),
+      chats: [chat],
+      events: sse,
+    });
+    renderPage(<ChatPage />, '/chats/chat-1');
+
+    expect(await screen.findByText('对话引擎暂不可用')).toBeTruthy();
+    expect(await screen.findByText(/首次订阅事件流或首次发送消息后建立/)).toBeTruthy();
+    const textarea = await screen.findByLabelText('消息内容');
+    await waitFor(() => expect((textarea as HTMLTextAreaElement).disabled).toBe(true));
   });
 
   test('ChatPage appends streamed chunks without duplicating a message id', async () => {

@@ -52,6 +52,7 @@ function setup(options: { late?: Promise<Response>; error?: Error; httpError?: s
     sendTextMaxLength: 32768,
     providers: [{ type: 'anthropic', configured: true }],
     chatRuntime: 'wasm',
+    chatRuntimeReady: true,
     chatRuntimeReasons: [],
     historyPersisted: true,
     sandbox: { mode: 'disabled', reasons: [] },

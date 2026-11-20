@@ -11,6 +11,7 @@ import { ChatService } from './chats/service';
 import type { ServerEnv } from './env';
 import { errorResponse } from './errors';
 import { createHealthRoutes } from './health';
+import { createPlatformRoutes } from './platform/routes';
 import { ProvidersRepository } from './providers/repository';
 import { createProvidersRoutes } from './providers/routes';
 import { ProviderService } from './providers/service';
@@ -66,7 +67,8 @@ export function createApp(deps: AppDependencies): Hono {
       async () => {
         // A query is a recovery trigger too: capabilities must not stay frozen after boot.
         await engine.ensureReady?.();
-        return engine.status;
+        // The mode alone is a deployment fact; readiness is the engine's observed health.
+        return { status: engine.status, ready: engine.health().status === 'ready' };
       },
       sandbox.status,
     ),
@@ -77,6 +79,7 @@ export function createApp(deps: AppDependencies): Hono {
   );
   app.route('/api/providers', createProvidersRoutes(providers));
   app.route('/api/chats', createChatRoutes(chatService));
+  app.route('/v1', createPlatformRoutes({ db: deps.db }));
 
   app.notFound((c) => c.json(createApiErrorBody('not_found', 'Route not found'), 404));
   app.onError((error, c) => errorResponse(error, c));

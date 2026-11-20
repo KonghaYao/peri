@@ -15,8 +15,10 @@ import type { ChatFactEnvelope, ChatUserAction } from '@peri-code/sdk';
 import type { EngineHealth } from '@shared/api';
 import type { ChatRuntimeReason, ChatRuntimeStatus } from '@shared/chat';
 import { isRetryableRuntime } from '@shared/chat';
+import { RivetError } from 'rivetkit';
 import type { ServerEnv } from '../env';
-import { AppError, diagnosticCode } from '../errors';
+import { AppError } from '../errors';
+import { type EngineTermination, terminateEngineProcess } from '../rivet/engine-process';
 import { createChatHost } from '../rivet/host';
 import { type StartedRegistry, type StartRegistryOptions, startChatRegistry } from '../rivet/registry';
 import type { SandboxActorPort } from '../sandbox/coordinator';
@@ -50,8 +52,72 @@ export interface ChatEngine {
   /** Loopback rivet endpoint used for gateway MCP URLs; null until the engine exists. */
   readonly endpoint: string | null;
   shutdown(): Promise<void>;
+  /**
+   * Terminal fallback for the native engine child. Called after shutdown, including when ordered
+   * teardown stopped early; a no-op when the engine already exited.
+   */
+  forceStop?(): Promise<EngineTermination>;
   /** Optional lazy recovery hook: engines that can re-probe the Store implement it. */
   ensureReady?(): Promise<void>;
+}
+
+/** Rivet error groups that name the failing layer without echoing an untrusted code or message. */
+const RIVET_FAILURE_GROUPS = new Set(['client', 'actor', 'engine', 'user', 'rivetkit']);
+
+/**
+ * Log-safe failure layer for a failed engine call. The group is a closed enum from rivetkit;
+ * unknown shapes and groups are dropped so no message, stack or credential reaches the log.
+ */
+export function rivetFailureGroup(error: unknown): string | null {
+  if (!RivetError.isRivetError(error)) return null;
+  const group = (error as { group?: unknown }).group;
+  return typeof group === 'string' && RIVET_FAILURE_GROUPS.has(group) ? group : null;
+}
+
+/**
+ * A `client`-group Rivet failure means the engine child never answered (connection refused/lost).
+ * Business failures (`user`/`actor`) keep the engine ready.
+ */
+function isClientTransportFailure(error: unknown): boolean {
+  return RivetError.isRivetError(error) && (error as { group?: unknown }).group === 'client';
+}
+
+/** The engine answered the call, so its own health is unaffected even though the call failed. */
+function isBusinessFailure(error: unknown): boolean {
+  if (!RivetError.isRivetError(error)) return false;
+  const group = (error as { group?: unknown }).group;
+  return group === 'user' || group === 'actor';
+}
+
+/** Read-only loopback probe of the rivet engine, the same endpoint rivetkit health-checks. */
+const ENGINE_HEALTH_PROBE_TIMEOUT_MS = 1_000;
+const ENGINE_HEALTH_PATH = '/health';
+
+/** Log-safe startup/engine diagnostic: whitelisted codes, health and ports only. */
+export interface EngineStartupDiagnostic {
+  readonly code: 'engine_unavailable';
+  readonly status: EngineHealth['status'];
+  readonly reasons: readonly ChatRuntimeReason[];
+  readonly enginePort: number;
+  readonly hint: string;
+}
+
+/**
+ * Builds the log payload for a failed engine start. It takes no error object on purpose: a raw
+ * message, stack or path can never be logged, and the hint names the actionable deployment knobs.
+ */
+export function engineStartupDiagnostic(
+  health: EngineHealth,
+  fallbackReasons: readonly ChatRuntimeReason[],
+  enginePort: number,
+): EngineStartupDiagnostic {
+  return {
+    code: 'engine_unavailable',
+    status: health.status,
+    reasons: [...(health.reasons ?? fallbackReasons)],
+    enginePort,
+    hint: `检查 RIVETKIT_STORAGE_PATH 是否存在，以及 PERI_ENGINE_PORT=${enginePort} 与端口 ${enginePort + 1} 是否被占用；修正后重启 API`,
+  };
 }
 
 /** Where the SDK keeps the wasm runtime; checked before claiming the real mode works. */
@@ -203,19 +269,65 @@ export class RivetChatEngine implements ChatEngine {
 
     const handle = this.#started.client.chat.getOrCreate([chatId]) as unknown as RawChatHandle;
     return {
-      open: (target) => handle.open(target),
-      execute: (action) => handle.execute(action),
-      facts: () => handle.facts(),
-      close: () => handle.close(),
+      open: (target) => this.#observe(() => handle.open(target)),
+      execute: (action) => this.#observe(() => handle.execute(action)),
+      facts: () => this.#observe(() => handle.facts()),
+      close: () => this.#observe(() => handle.close()),
       onFact: async (listener) => {
         const connection = handle.connect();
         const detach = connection.on('chatFact', listener);
         return async () => {
           detach();
-          await connection.dispose();
+          await this.#observe(() => connection.dispose());
         };
       },
     };
+  }
+
+  /**
+   * Keeps `health()` honest about a child that died after a successful start. A transport failure
+   * flips it to `unavailable`; the next successful call restores `ready`. Business failures do not
+   * change it, so a real defect on a healthy engine stays a 500 instead of becoming a 503.
+   */
+  #observe<T>(operation: () => Promise<T>): Promise<T> {
+    return operation().then(
+      (value) => {
+        if (!this.#closing && this.#started !== null && this.#health === 'unavailable') {
+          this.#health = 'ready';
+        }
+        return value;
+      },
+      (error: unknown) =>
+        this.#recordFailure(error).then(() => {
+          throw error;
+        }),
+    );
+  }
+
+  /**
+   * Opaque failures are ambiguous: the actor's own untyped defect also arrives as an internal
+   * error. Ask the child before changing health, so a real defect on a live engine keeps its 500.
+   */
+  async #recordFailure(error: unknown): Promise<void> {
+    if (this.#closing || this.#started === null || isBusinessFailure(error)) return;
+    if (isClientTransportFailure(error)) {
+      this.#health = 'unavailable';
+      return;
+    }
+    this.#health = (await this.#engineAnswers()) ? 'ready' : 'unavailable';
+  }
+
+  async #engineAnswers(): Promise<boolean> {
+    const endpoint = this.#started?.endpoint;
+    if (endpoint === undefined) return false;
+    try {
+      const response = await fetch(new URL(ENGINE_HEALTH_PATH, endpoint), {
+        signal: AbortSignal.timeout(ENGINE_HEALTH_PROBE_TIMEOUT_MS),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 
   sandbox(workspaceUri: string): SandboxActorPort | null {
@@ -249,6 +361,18 @@ export class RivetChatEngine implements ChatEngine {
     this.#started = null;
     this.#startPromise = null;
     this.#health = 'unknown';
+    // The registry teardown is the graceful path; the recorded child is the invariant. This is a
+    // no-op when the engine already exited and clears the stale pid file.
+    await terminateEngineProcess();
+  }
+
+  /**
+   * The engine is a native child process that `process.exit()` does not reap. This only signals
+   * the PID recorded by our wrapper, so a failed or skipped graceful shutdown cannot orphan it.
+   */
+  forceStop(): Promise<EngineTermination> {
+    this.#closing = true;
+    return terminateEngineProcess();
   }
 
   async #startOnce(): Promise<void> {
@@ -280,10 +404,14 @@ export class RivetChatEngine implements ChatEngine {
     } catch (error) {
       this.#health = 'unavailable';
       this.#startPromise = null;
-      console.error('[agent-builder] rivet engine failed to start', { code: diagnosticCode(error) });
+      // Whitelisted fields only: the raw message/stack may carry paths or environment values.
+      console.error('[agent-builder] rivet engine failed to start', {
+        ...engineStartupDiagnostic(this.health(), this.status.reasons, this.#env.enginePort),
+        group: rivetFailureGroup(error) ?? 'unknown',
+      });
       throw new AppError('engine_unavailable', 'Chat runtime failed to start', {
         details: { reasons: [...this.status.reasons] },
-        retryable: true,
+        retryable: isRetryableRuntime(this.status.reasons),
         cause: error,
       });
     }

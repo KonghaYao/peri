@@ -19,6 +19,7 @@ const capabilities: AgentCapabilities = {
   sendTextMaxLength: 32768,
   providers: [],
   chatRuntime: 'not_configured',
+  chatRuntimeReady: false,
   chatRuntimeReasons: ['store_token_missing'],
   historyPersisted: false,
   sandbox: { mode: 'disabled', reasons: [] },

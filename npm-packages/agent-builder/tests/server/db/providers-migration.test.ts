@@ -63,7 +63,7 @@ describe('Provider v2 migration and private SQLite', () => {
     const chatsSql = db
       .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = 'chats'")
       .get()?.sql;
-    expect(migrate(db)).toBe(2);
+    expect(migrate(db, 2)).toBe(2);
     const rows = db
       .query<{ config: string; provider_id: string | null; revision: number }, []>(
         'SELECT config, provider_id, revision FROM agents ORDER BY id',
@@ -99,15 +99,15 @@ describe('Provider v2 migration and private SQLite', () => {
     db.close();
     databases.splice(databases.indexOf(db), 1);
     const reopened = open(file);
-    expect(migrate(reopened)).toBe(2);
-    expect(migrate(reopened)).toBe(2);
+    expect(migrate(reopened, 2)).toBe(2);
+    expect(migrate(reopened, 2)).toBe(2);
   });
 
   test('failed v2 rolls back all DDL and user_version, never leaving a partial Provider schema', () => {
     const db = open();
     v1(db);
     db.exec('CREATE INDEX idx_agents_provider_id ON agents(name)');
-    expect(() => migrate(db)).toThrow();
+    expect(() => migrate(db, 2)).toThrow();
     expect(db.query<{ user_version: number }, []>('PRAGMA user_version').get()?.user_version).toBe(1);
     expect(db.query("SELECT name FROM sqlite_master WHERE name = 'providers'").get()).toBeNull();
     expect(
@@ -117,7 +117,7 @@ describe('Provider v2 migration and private SQLite', () => {
         .map((row) => row.name),
     ).not.toContain('provider_id');
     db.exec('DROP INDEX idx_agents_provider_id');
-    expect(migrate(db)).toBe(2);
+    expect(migrate(db, 2)).toBe(2);
   });
 
   test('new and existing DB/WAL/SHM are 0600 in a 0700 parent, including a committed secret write and reopen', () => {

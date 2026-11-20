@@ -50,4 +50,15 @@ unset RIVET__STORAGE__LOG_SHARD__MAX_DISK_BYTES RIVET__STORAGE__COLD_STORE__DISK
 export RIVET__STORAGE__LOG_SHARD__MAX_DISK_BYTES="${PERI_RIVET_LOG_SHARD_MAX_DISK_BYTES:-536870912}"
 export RIVET__STORAGE__COLD_STORE__DISK_CACHE_BYTES="${PERI_RIVET_COLD_STORE_DISK_CACHE_BYTES:-0}"
 
+# Record the PID for the host's last-resort cleanup. `exec` below keeps this PID, and the host
+# appends one line per launch so a failed start retry can still be cleaned up. rivetkit spawns this
+# wrapper directly from the API process, so PPID is the host; the file name therefore matches the
+# host's `host-<pid>.pid` lookup. Nothing is ever matched by process name.
+if [ -n "${RIVETKIT_STORAGE_PATH:-}" ]; then
+  ENGINE_PID_FILE="${RIVETKIT_STORAGE_PATH%/}/.rivetkit/var/engine/host-${PPID}.pid"
+  if ! { mkdir -p "$(dirname "$ENGINE_PID_FILE")" && printf '%s\n' "$$" >>"$ENGINE_PID_FILE"; }; then
+    echo "rivet-engine: could not record the engine pid for host cleanup" >&2
+  fi
+fi
+
 exec "$BINARY" "$@"

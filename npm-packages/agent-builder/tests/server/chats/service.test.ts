@@ -9,7 +9,7 @@ import { ChatService } from '../../../server/chats/service';
 import { openDatabase } from '../../../server/db/database';
 import { migrate } from '../../../server/db/migrate';
 import { testEnv, withStoredProvider } from '../helpers';
-import { BINDING, FakeEngine, userInput } from './helpers';
+import { BINDING, FakeEngine, transportFailure, userInput } from './helpers';
 
 let db: Database | null = null;
 
@@ -281,6 +281,87 @@ describe('ChatService', () => {
       cause: expect.objectContaining({ message: 'engine failed' }),
     });
     expect(actor.actions.map((action) => action.type)).not.toContain('create_new_session');
+  });
+
+  test('normalizes untyped transport failures to engine_unavailable while the engine is not ready', async () => {
+    const { service, engine, agent } = setup();
+    const chat = await service.create({ agentId: agent.id });
+    const actor = engine.actors.get(chat.chatId);
+    if (!actor) throw new Error('actor missing');
+    actor.failOpenAlwaysWith = transportFailure();
+    engine.healthStatus = 'unavailable';
+
+    for (const call of [
+      () => service.send(chat.chatId, 'request-1', 'hello'),
+      () => service.cancel(chat.chatId),
+      () => service.prepareStream(chat.chatId),
+    ]) {
+      await expect(call()).rejects.toMatchObject({
+        code: 'engine_unavailable',
+        status: 503,
+        details: { reasons: [] },
+        retryable: false,
+      });
+    }
+
+    // The same transport error on an engine that reports ready stays a real 500.
+    engine.healthStatus = 'ready';
+    await expect(service.send(chat.chatId, 'request-2', 'hello')).rejects.toMatchObject({
+      code: 'internal_error',
+      status: 500,
+    });
+  });
+
+  test('prepareStream maps a failed session creation like send', async () => {
+    const { service, engine, agent } = setup();
+    const chat = await service.create({ agentId: agent.id });
+    const actor = engine.actors.get(chat.chatId);
+    if (!actor) throw new Error('actor missing');
+    actor.failCreateSessionWith = transportFailure();
+    engine.healthStatus = 'unavailable';
+
+    await expect(service.prepareStream(chat.chatId)).rejects.toMatchObject({
+      code: 'engine_unavailable',
+      status: 503,
+    });
+
+    actor.failCreateSessionWith = Object.assign(new Error('bad session'), { code: 'internal_error' });
+    engine.healthStatus = 'ready';
+    await expect(service.prepareStream(chat.chatId)).rejects.toMatchObject({
+      code: 'internal_error',
+      status: 500,
+    });
+  });
+
+  test('a raw engine start failure is a typed 503 before any chat row exists', async () => {
+    const engine = new FakeEngine();
+    engine.start = async () => {
+      engine.started += 1;
+      throw transportFailure();
+    };
+    engine.healthStatus = 'unavailable';
+    const { service, agent } = setup({ engine });
+
+    await expect(service.create({ agentId: agent.id })).rejects.toMatchObject({
+      code: 'engine_unavailable',
+      status: 503,
+      details: { reasons: [] },
+      retryable: false,
+    });
+    expect(service.list()).toEqual([]);
+  });
+
+  test('a create that never obtained an actor handle removes its chat row', async () => {
+    const engine = new FakeEngine();
+    engine.actorsAvailable = false;
+    engine.healthStatus = 'starting';
+    const { service, agent } = setup({ engine });
+
+    await expect(service.create({ agentId: agent.id })).rejects.toMatchObject({
+      code: 'engine_unavailable',
+      status: 503,
+    });
+    expect(service.list()).toEqual([]);
   });
 
   test('falls back to a new session only when the stored session is typed not_found', async () => {

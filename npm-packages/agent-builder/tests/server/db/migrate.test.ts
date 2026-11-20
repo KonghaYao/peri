@@ -17,12 +17,12 @@ function setup(): Database {
 }
 
 describe('migrate', () => {
-  test('creates schema version 2 while preserving both original tables and the chats index', () => {
+  test('creates schema version 3 while preserving both original tables and the chats index', () => {
     const database = setup();
 
-    expect(migrate(database)).toBe(2);
-    expect(LATEST_SCHEMA_VERSION).toBe(2);
-    expect(getSchemaVersion(database)).toBe(2);
+    expect(migrate(database)).toBe(3);
+    expect(LATEST_SCHEMA_VERSION).toBe(3);
+    expect(getSchemaVersion(database)).toBe(3);
 
     const tables = database
       .query<{ name: string }, []>(
@@ -43,9 +43,9 @@ describe('migrate', () => {
   test('is idempotent', () => {
     const database = setup();
 
-    expect(migrate(database)).toBe(2);
-    expect(migrate(database)).toBe(2);
-    expect(getSchemaVersion(database)).toBe(2);
+    expect(migrate(database)).toBe(3);
+    expect(migrate(database)).toBe(3);
+    expect(getSchemaVersion(database)).toBe(3);
   });
 
   test('enables foreign keys and enforces ON DELETE RESTRICT', () => {
@@ -77,7 +77,7 @@ describe('migrate', () => {
 
   test('refuses a database newer than the supported schema', () => {
     const database = setup();
-    database.exec('PRAGMA user_version = 3');
+    database.exec('PRAGMA user_version = 4');
 
     expect(() => migrate(database)).toThrow(/newer than the supported version/);
   });

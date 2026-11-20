@@ -4,10 +4,19 @@ import type { ChatRuntimeStatus, SandboxStatus } from '@shared/chat';
 import { Hono } from 'hono';
 import type { ProviderService } from './providers/service';
 
+/**
+ * Runtime snapshot taken after `ensureReady()`. `status` is the configured mode; `ready` is the
+ * engine's observed health, so `wasm` with a failed/starting engine stays `ready:false`.
+ */
+export interface ChatRuntimeView {
+  readonly status: ChatRuntimeStatus;
+  readonly ready: boolean;
+}
+
 /** 基础设施状态与 SQLite 凭据存在状态分离；均不代表模型已认证。 */
 export function buildCapabilities(
   providers: ProviderService,
-  runtime: ChatRuntimeStatus,
+  runtime: ChatRuntimeView,
   sandbox: SandboxStatus,
 ): AgentCapabilities {
   const configured = providers.list().filter((provider) => provider.hasCredential);
@@ -18,14 +27,16 @@ export function buildCapabilities(
       { type: 'anthropic', configured: configured.some((provider) => provider.type === 'anthropic') },
       { type: 'openai', configured: configured.some((provider) => provider.type === 'openai') },
     ],
-    chatRuntime: runtime.mode,
-    chatRuntimeReasons: [...runtime.reasons],
-    historyPersisted: runtime.mode === 'wasm',
+    chatRuntime: runtime.status.mode,
+    chatRuntimeReady: runtime.ready,
+    chatRuntimeReasons: [...runtime.status.reasons],
+    // History is only persisted when the engine can actually run, not merely configured.
+    historyPersisted: runtime.ready,
     sandbox,
   };
 }
 
-export type RuntimeResolver = () => ChatRuntimeStatus | Promise<ChatRuntimeStatus>;
+export type RuntimeResolver = () => ChatRuntimeView | Promise<ChatRuntimeView>;
 
 export function createCapabilitiesRoutes(
   providers: ProviderService,

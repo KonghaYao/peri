@@ -8,7 +8,23 @@ import type { ChatFactEnvelope, ChatUserAction } from '@peri-code/sdk';
 import type { EngineHealth } from '@shared/api';
 import type { ChatRuntimeStatus } from '@shared/chat';
 import type { ChatActorPort, ChatEngine } from '../../../server/chats/engine';
+import { AppError } from '../../../server/errors';
 import type { SandboxActorPort } from '../../../server/sandbox/coordinator';
+
+/**
+ * Transport-shaped Rivet failure: the child never answered. `publicDiagnosticCode` rejects the
+ * code, so only the engine health decides whether it is a 503 or an internal 500.
+ */
+export function transportFailure(code = 'connection_open_interrupted', secret = ''): Error {
+  return Object.assign(new Error(`engine unreachable${secret === '' ? '' : ` ${secret}`}`), {
+    __type: 'RivetError' as const,
+    name: 'RivetError',
+    group: 'client',
+    code,
+    public: false,
+    statusCode: 500,
+  });
+}
 
 export const BINDING = {
   chatId: 'chat-1',
@@ -196,6 +212,10 @@ export class FakeEngine implements ChatEngine {
   readonly endpoint = 'http://127.0.0.1:8961';
   started = 0;
   shutdownCalls = 0;
+  /** Observed engine health, as the real engine reports after a child dies or a start fails. */
+  healthStatus: EngineHealth['status'] = 'ready';
+  /** False simulates an engine that never produced an actor handle (start failed / not started). */
+  actorsAvailable = true;
 
   constructor(status: ChatRuntimeStatus = { mode: 'wasm', reasons: [] }) {
     this.status = status;
@@ -207,10 +227,13 @@ export class FakeEngine implements ChatEngine {
   }
 
   health(): EngineHealth {
-    return { mode: 'embedded', status: 'ready' };
+    return { mode: 'embedded', status: this.healthStatus };
   }
 
   actor(chatId: string): ChatActorPort {
+    if (!this.actorsAvailable) {
+      throw new AppError('engine_unavailable', 'Chat runtime is still starting', { retryable: true });
+    }
     let actor = this.actors.get(chatId);
     if (!actor) {
       actor = new FakeActor();

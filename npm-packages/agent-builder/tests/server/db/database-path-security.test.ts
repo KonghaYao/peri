@@ -219,7 +219,7 @@ describe('canonical private database paths', () => {
     const data = directory(root, 'data');
     const databasePath = path.join(data, 'agent-builder.db');
     const db = open(databasePath);
-    expect(migrate(db)).toBe(2);
+    expect(migrate(db, 2)).toBe(2);
 
     const key = randomBytes(24).toString('hex');
     const id = randomUUID();
@@ -249,7 +249,7 @@ describe('canonical private database paths', () => {
 
     close(db);
     const reopened = open(databasePath);
-    expect(migrate(reopened)).toBe(2);
+    expect(migrate(reopened, 2)).toBe(2);
     expect(modeOf(data)).toBe('700');
     expect(modeOf(databasePath)).toBe('600');
   });
@@ -260,7 +260,7 @@ describe('canonical private database paths', () => {
     const databasePath = path.join(shared, 'new', 'deep', 'agent-builder.db');
     const env = loadEnv(source(databasePath, directory(root, 'workspace'), root));
     const db = open(env.databasePath);
-    expect(migrate(db)).toBe(2);
+    expect(migrate(db, 2)).toBe(2);
     db.query('INSERT INTO providers (id, name, type, credential_source, api_key) VALUES (?, ?, ?, ?, ?)').run(
       randomUUID(),
       'Local',

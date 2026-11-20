@@ -49,9 +49,10 @@ export function ChatNewPage() {
   const queryClient = useQueryClient();
   const agentsQuery = useAgentList();
   const capabilities = useCapabilities();
-  // A store-only outage is retryable: the POST itself performs the lazy re-probe.
+  // A store-only outage is retryable: the POST itself performs the lazy re-probe. Readiness comes
+  // from the engine's health, so a configured-but-failed engine does not enable creation.
   const runtimeReady =
-    capabilities.data?.chatRuntime === 'wasm' ||
+    capabilities.data?.chatRuntimeReady === true ||
     isRetryableRuntime(capabilities.data?.chatRuntimeReasons ?? []);
 
   const createMutation = useMutation({
@@ -78,7 +79,7 @@ export function ChatNewPage() {
     <div className="space-y-5">
       <PageHeader
         title="新建对话"
-        description="选择 Agent 后创建对话；会话在第一次发送时建立并持久化到 Store。"
+        description="选择 Agent 后创建对话；会话在首次订阅事件流或首次发送消息后建立并持久化到 Store。"
         actions={
           <Button asChild variant="outline">
             <Link to="/chats">返回列表</Link>
@@ -89,6 +90,7 @@ export function ChatNewPage() {
       {capabilities.data !== undefined ? (
         <ChatRuntimeNotice
           mode={capabilities.data.chatRuntime}
+          ready={capabilities.data.chatRuntimeReady}
           reasons={capabilities.data.chatRuntimeReasons}
         />
       ) : null}
@@ -107,7 +109,7 @@ export function ChatNewPage() {
       ) : null}
 
       {createMutation.isError && errorReasons.length > 0 ? (
-        <ChatRuntimeNotice mode="not_configured" reasons={errorReasons} />
+        <ChatRuntimeNotice mode="not_configured" ready={false} reasons={errorReasons} />
       ) : null}
 
       {createMutation.isError ? <ErrorState title="无法创建对话" error={createMutation.error} /> : null}

@@ -16,7 +16,7 @@ import { ChatService } from '../../../server/chats/service';
 import { openDatabase } from '../../../server/db/database';
 import { migrate } from '../../../server/db/migrate';
 import { testEnv, withStoredProvider } from '../helpers';
-import { agentChunk, BINDING, FakeEngine, userInput } from './helpers';
+import { agentChunk, BINDING, FakeActor, FakeEngine, transportFailure, userInput } from './helpers';
 
 let db: Database | null = null;
 
@@ -258,6 +258,72 @@ describe('chat routes', () => {
     expect(capabilities.chatRuntime).toBe('not_configured');
     expect(capabilities.chatRuntimeReasons).toEqual(['store_unreachable']);
     expect(capabilities.historyPersisted).toBe(false);
+  });
+
+  test('a failed create leaves no untyped 500 on list/events/delete', async () => {
+    const database = openDatabase(':memory:');
+    migrate(database);
+    db = database;
+    const agents = new AgentsRepository(database);
+    const agent = agents.create(withStoredProvider(database, draft));
+    const env = testEnv({ storeToken: 'store-token', rivetStoragePath: '/tmp/rivet' });
+
+    // An engine that reports unavailable and whose actor handle cannot open or close: the exact
+    // shape of a child that died after a successful start.
+    class DeadEngine extends FakeEngine {
+      override actor(chatId: string): FakeActor {
+        let actor = this.actors.get(chatId);
+        if (!actor) {
+          actor = new FakeActor();
+          actor.failOpenAlwaysWith = transportFailure();
+          actor.failCloseWith = transportFailure();
+          this.actors.set(chatId, actor);
+        }
+        return actor;
+      }
+    }
+    const engine = new DeadEngine();
+    engine.healthStatus = 'unavailable';
+    const service = new ChatService({ env, engine, agents, chats: new ChatsRepository(database) });
+    const app = createApp({ env, db: database, engine, chatService: service });
+
+    const created = await app.request('/api/chats', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: agent.id }),
+    });
+    expect(created.status).toBe(503);
+    const createdBody = ApiErrorBody.parse(await created.json());
+    expect(createdBody.error.code).toBe('engine_unavailable');
+    expect(createdBody.error.details.reasons).toEqual([]);
+
+    // The activation could not be confirmed closed, so the row is kept — but every later
+    // operation must stay typed instead of surfacing a bare 500.
+    const list = await app.request('/api/chats');
+    expect(list.status).toBe(200);
+    const chats = ChatListResponse.parse(await list.json()).chats;
+    expect(chats).toHaveLength(1);
+    expect(chats[0]?.sessionId).toBeNull();
+    const chatId = chats[0]?.chatId ?? '';
+
+    const events = await app.request(`/api/chats/${chatId}/events`);
+    expect(events.status).toBe(503);
+    expect(ApiErrorBody.parse(await events.json()).error).toMatchObject({
+      code: 'engine_unavailable',
+      retryable: false,
+    });
+
+    const send = await app.request(`/api/chats/${chatId}/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: crypto.randomUUID(), text: 'hello' }),
+    });
+    expect(send.status).toBe(503);
+    expect(ApiErrorBody.parse(await send.json()).error.code).toBe('engine_unavailable');
+
+    const deleted = await app.request(`/api/chats/${chatId}`, { method: 'DELETE' });
+    expect(deleted.status).toBe(409);
+    expect(ApiErrorBody.parse(await deleted.json()).error.code).toBe('close_incomplete');
   });
 
   test('replays events after the Last-Event-ID header without a snapshot', async () => {

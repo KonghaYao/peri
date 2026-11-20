@@ -76,6 +76,7 @@
     "server",
     "shared",
     "scripts/rivet-engine-wrapper.sh",
+    "docs",
     "README.md",
     ".env.example",
     "vite.config.ts",

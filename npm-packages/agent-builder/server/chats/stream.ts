@@ -79,6 +79,7 @@ function messageFingerprint(message: ChatMessage): string {
 }
 
 type Listener = (event: StreamEvent) => void;
+type ProjectionListener = (snapshot: ChatStateSnapshot) => void;
 
 /**
  * Transports the SDK's single projection over SSE.
@@ -104,6 +105,8 @@ export class ChatStreamHub {
   #startPromise: Promise<void> | null = null;
   #detach: (() => Promise<void>) | null = null;
   #listeners = new Map<Listener, () => void>();
+  /** Read-only projection taps (platform recorder); they never enqueue or alter hub events. */
+  #taps = new Set<ProjectionListener>();
   #live = false;
   #refresh: Promise<void> | null = null;
   #refreshBuffer: ChatFactEnvelope[] | null = null;
@@ -127,6 +130,26 @@ export class ChatStreamHub {
 
   get lastSeq(): number {
     return this.#log.lastSeq;
+  }
+
+  /** Live projection; taps read the same frozen snapshot the hub itself projects. */
+  get snapshot(): ChatStateSnapshot {
+    return this.#state.snapshot;
+  }
+
+  get pendingInteractions(): ChatStateSnapshot['pendingInteractions'] {
+    return this.#state.snapshot.pendingInteractions;
+  }
+
+  /**
+   * Observes every projection update after the hub has emitted its own boundary events.
+   * With no taps the hub behaves exactly as before; taps never mutate hub state.
+   */
+  tap(listener: ProjectionListener): () => void {
+    this.#taps.add(listener);
+    return () => {
+      this.#taps.delete(listener);
+    };
   }
 
   start(): Promise<void> {
@@ -206,6 +229,7 @@ export class ChatStreamHub {
     this.#refreshError = null;
     for (const disconnect of [...this.#listeners.values()]) disconnect();
     this.#listeners.clear();
+    this.#taps.clear();
     this.#unsubscribeState?.();
     this.#unsubscribeState = null;
     const detach = this.#detach;
@@ -383,6 +407,9 @@ export class ChatStreamHub {
         snapshot.closedReason?.code === undefined ? null : publicDiagnosticCode(snapshot.closedReason.code);
       void this.close(reason);
     }
+
+    // Taps run after the hub's own events so a recorder always observes post-boundary state.
+    for (const tap of [...this.#taps]) tap(snapshot);
   }
 
   #resetProjection(reason: ChatResetEvent['reason']): void {
