@@ -204,7 +204,7 @@ const observed = (async () => {
     if (event?.state === 'started') continue; // turn 开始
     if (event?.state === 'completed' || event?.state === 'failed') break; // turn 终止
     if (typeof event?.seq !== 'number') continue; // 心跳 { lastItemSeq }
-    // item 帧：user / assistant delta / assistant complete / tool_*
+    // item 帧：user message / assistant delta / assistant complete / tool_*
   }
 })();
 
@@ -278,13 +278,14 @@ const response = await fetch(
 - items 是**会话日志**（事件级帧），不是官方高层 message/run item：`kind` 为 `message`、
   `tool_call`、`tool_update`、`tool_result` 等，assistant 的 delta 帧与 complete 帧都
   各占一行。
-- **用户输入是单帧 item**：`kind=user` 的输入在 `swarm_inputs` 受理
-  （`disposition=inserted`，202）后追加一条 `kind=message` 帧，`payload` 为
-  `{ role: 'user', text, inputId }`，`id`/`itemId` 为 `itim_input_<inputId>`。它没有
+- **用户输入是单帧 item**：`POST /events` 的请求 `kind` 为 `user`（`InputKind`，省略
+  时默认）；在 `swarm_inputs` 受理（`disposition=inserted`，202）后追加一条
+  `kind=message` item，`payload` 为 `{ role: 'user', text, inputId }`，`id`/`itemId`
+  为 `itim_input_<inputId>`。item 的 `kind` 只有 `message`，没有 `user`。它没有
   `delta`/`complete` 字段，因此不会终止回放，也不参与 assistant 聚合。同一
-  `Idempotency-Key`/`inputId` 重试返回 `existing`，不会重复追加。`kind=control` 不写
-  用户帧。`create` 的 `input` 同样记为 user 帧（每次 create 调用各一条；重试 create
-  会按既有语义重跑该轮）。
+  `Idempotency-Key`/`inputId` 重试返回 `existing`，不会重复追加。`kind=control` 的
+  输入不写用户帧。`create` 的 `input` 同样记为 user message 帧（每次 create 调用
+  各一条；重试 create 会按既有语义重跑该轮）。
 - 每帧同时有 `id` 与 `itemId`（同值，`itim_...`）；同一 assistant 消息的 delta/complete
   帧共享这个 id，因此不能用 `id` 去重成一条消息。按 `payload.messageId` 聚合，最后以
   `payload.complete === true` 帧的 `payload.text` 为准。
