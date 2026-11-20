@@ -175,13 +175,28 @@ SQLite 与远端 Turso adapter 使用同一有界读取规则。未实现这些�
 
 Full 从与 Reason 相同的已提交模型视图生成摘要；摘要生成与取消/失败预算遵守 [ARC-COMPACT-001](../standards/architecture-contracts.md)。未消费后台结果依旧受 [异步任务设计](session-async-tasks.md) 保护，摘要模型不承担消费确认。
 
-Full 提交两段 Human 消息。第一段是软记忆：LLM 按提取提示词生成、带 `CONTINUATION_HINT` 的摘要。第二段是硬记忆：摘要完成后由 Harness 从会话 `TaskManager` 与 `GoalController` 读取活跃 shell / background agent / workflow / MCP（含 monitor）任务和 Active goal，使用运行时真实 id，并为每类附查看、恢复或取消 helper。硬记忆不进入摘要请求，不消耗摘要模型输出；再次 Full 时旧硬记忆按普通历史归档，但会从新摘要请求中排除，由本次快照重新生成。终态任务与终态 goal 不列入；快照为空时不追加第二段，保持旧单摘要输出。旧版本只识别第一段的续接标记，第二段按普通 Human 历史兼容；手动 `/compact` 与自动路径都读取会话任务注册表和 goal，来源缺失时降级为空快照。
+Full 提交两段 Human 消息。第一段是软记忆：LLM 按提取提示词生成、带 `CONTINUATION_HINT` 的摘要。第二段是硬记忆：摘要完成后由 Harness 从会话 `TaskManager` 与 `GoalController` 读取活跃 shell / background agent / workflow / MCP（含 monitor）任务和 Active goal，列出宿主任务 ID、可用的子会话 ID 及各类任务的恢复提示。硬记忆不进入摘要请求，不消耗摘要模型输出；再次 Full 时旧硬记忆按普通历史归档，但会从新摘要请求中排除，由本次快照重新生成。终态任务与终态 goal 不列入；快照为空时不追加第二段，保持旧单摘要输出。旧版本只识别第一段的续接标记，第二段按普通 Human 历史兼容；手动 `/compact` 与自动路径都读取会话任务注册表和 goal，来源缺失时降级为空快照。
 
 Full 清除被取代的渲染动作，同时保留旧锚点的目录及组链接。原锚点即使变成 excluded，授权的点查仍可访问。目录根按来源合并范围，随新摘要与 excluded transitions 同事务提交，不复制所有旧成员 ID。renderer 从摘要元数据确定性渲染入口，摘要正文无需复述任何引用。
 
 子会话继承的是冻结 payload/flags，不能修改 ancestor。独立 fork 经 `SessionResources::load_fork_snapshot` 合并冻结 inherited 与 own 历史；父 Full 后只剩根入口时，按冻结 roots 的授权范围与尾界分块补齐目录成员，并验证目录身份及内容摘要。补齐正文标记 `recovery_only` 并保持 excluded：授权成员可能只含一个结果，或包含多工具 AI 批次的一部分结果，因此这些副本仅供归档回查，不作为可执行历史参与 fork 协议闭合检查；普通历史的闭合检查保持不变。删除摘要的 rewind 与再次 Full、refork 均不能激活这些副本。来源缺失、内容变化或依赖超出冻结授权时拒绝复制，不纳入父会话后来追加的内容。随后重映射消息、目录成员/锚点、依赖、来源与根边界，按目标载荷重新计算内容摘要。canonical 工具参数中已经存在的旧字面引用不被伪改；未经授权的旧源引用明确拒绝，目标目录提供新的可发现入口。
 
 rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代依赖；必要成员或依据消失时撤销整组省略及失效入口，完整目录保持原身份。固定尾界或锚点已删除的旧游标明确失效。显式 rewind 导致原文重新可见属于历史变换，不是低于门槛的新自动压缩。
+
+### 7.1 Full 后的第一步
+
+软摘要交代下一项决定、负责人、解除依赖的条件和验收依据。硬记忆记录采样时刻的运行时观察。恢复提示按每项事实能支持的动作指导 Agent。
+
+| 已有证据 | 现在能做什么 | 哪一步需要补证 |
+| --- | --- | --- |
+| 当前会话的已知任务有活跃负责人 | 保留派工，推进独立工作，或进入现有有界等待 | 验收、发布或重派前，先消费该负责人对应任务和产物版本的结果 |
+| 对象身份有注册记录 | 用对应服务的句柄查询该对象 | 只有宿主 ID、句柄失效或对应多个对象时，查该服务的有界索引。副作用要求唯一目标与当前授权 |
+| 文件或提交已有核验记录 | 在原版本、原范围内沿用结论 | 源版本前移时标出待更新的产物，只复核会改变决定的文件、提交或 PR 状态 |
+| 有适用的执行契约 | 当前请求中可见的完整 skill 正文可直接使用 | 已归档的正文须由当前可用的 SkillTool 成功重载，显式退出的模式结束。缺口只阻断依赖该契约的动作 |
+
+**运行时目标（#509，待实现）。** 从可信注册端保留作用域与带类型的 owner 句柄，在恢复后首个 Reason 按最终工具目录生成可调用的入口。Workflow 的 `runId` 取服务端运行 ID。Monitor 的请求键 `task_id` 取 monitor 端 ID，排他游标 `after_seq` 只沿用同一 monitor 已处理页面的 `nextSeq`。告警命中序号不足以跳过此前事件。对活跃子 Agent 的定向消息用 `child_thread_id` 和 `send_only`，`queued` 只代表成功入队。外部 CLI 的 attempt 取该服务回执或版本化接口说明。
+
+沿用现有 Full 原子提交保存有来源的资源引用，以及同一会话运行时的快照 revision。首个 Reason 优先消费已到达的真实结果，只刷新影响下一步的对象。结构化资源状态依据作用域、成功回执和最终可见正文判定。冷加载、旧摘要缺字段或来源不可用时保留未知，在最终请求中消解过期的恢复提示。沿用现有消息投影及 [RCRA 唤醒与交接](rcra-message-activation.md)。
 
 ## 8. 观测、测试与能力边界
 
@@ -198,6 +213,7 @@ rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代�
 | 批次提交、失败与冷恢复视图 | `compact_v2/micro_test.rs`、`session/transcript_persistence_test.rs` |
 | 两次 Micro + 两次 Full、无 ID 摘要、实际新进程读取 | `compact_v2/archive_lifecycle_test.rs` |
 | 软/硬记忆两段、运行时 id、空快照、任务上限与终态过滤 | `compact_v2/hard_memory_test.rs`、`compact_v2/hard_memory_compact_test.rs` |
+| Full 后的动作依据、句柄缺失时的恢复提示与旧标记识别 | `compact_v2/full_prompt_contract_test.rs`、`compact_v2/hard_memory_test.rs`、`compact_v2/hard_memory_compact_test.rs` |
 | 原文分页、继承权限、摘要冲突、媒体、fork/rewind | `peri-agent/src/context_archive_test.rs`、`peri-acp-types/src/store/history_archive_test.rs` |
 | 子会话 Full 后独立 fork 的冻结归档授权 | `peri-acp/src/dispatch/session_fork_archive_test.rs` |
 | 远端有界读取与真实 MCP 调用 | `peri-resources/src/sessions/remote/session_archive_test.rs`、`peri-middlewares/src/mcp/context_archive_test.rs` |
