@@ -462,12 +462,16 @@ fn bar_chart(
         }
         // tui-chart 的 y 轴 gutter 上限 16 列；先按显示宽度截断，避免 CJK 标签
         // 按字符截断后溢出绘图区。
-        entries.push((fit(&sanitize(label).replace('\n', " "), 16), value));
+        entries.push((
+            fit(&sanitize(label).replace('\n', " "), 16),
+            value,
+            display_value(raw),
+        ));
     }
     let max = match props.get("max") {
         None => entries
             .iter()
-            .map(|(_, value)| *value)
+            .map(|(_, value, _)| *value)
             .fold(0.0, f64::max)
             .max(1.0),
         Some(raw) => match raw.as_f64() {
@@ -477,27 +481,42 @@ fn bar_chart(
     };
     let gutter = entries
         .iter()
-        .map(|(label, _)| label.width())
+        .map(|(label, _, _)| label.width())
         .max()
         .unwrap_or(0);
-    if width < gutter + 3 {
+    // tui-chart 的 outside 数值标签在条形贴边或值为 0 时不绘制（`total > 0`
+    // 与右边界检查），这里保留独立数值列：绘图区让出最宽数值 + 1 列间隔，
+    // 数值由本函数逐行补齐，保证每个条目都可见。
+    let value_width = entries
+        .iter()
+        .map(|(_, _, text)| text.width())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let chart_width = width.saturating_sub(value_width + 1);
+    if chart_width < gutter + 3 {
         return muted_error("bar chart needs more width", width, theme);
     }
     // 1 行 x 轴 + 1 行刻度 + 至少 2 行绘图区；该高度下每条 bar 正好 1 行。
     let height = (entries.len() + 2).max(4);
     let area = Rect::new(0, 0, width as u16, height as u16);
+    let chart_area = Rect::new(0, 0, chart_width as u16, height as u16);
     let mut buffer = Buffer::empty(area);
     let groups = entries
         .iter()
-        .map(|(label, value)| BarGroup::new(label.clone(), [*value]))
+        .map(|(label, value, _)| BarGroup::new(label.clone(), [*value]))
         .collect::<Vec<_>>();
     BarChart::new(groups)
         .orientation(BarOrientation::Horizontal)
-        .show_values(true)
+        .show_values(false)
         .max(max)
         .theme(theme_for(theme))
-        .render(area, &mut buffer);
-    if buffer.content().iter().all(|cell| cell.symbol() == " ") {
+        .render(chart_area, &mut buffer);
+    let value_style = Style::default().fg(theme.component.markdown.text);
+    for (row, (_, _, text)) in entries.iter().enumerate() {
+        buffer.set_string(chart_width as u16 + 1, row as u16, text, value_style);
+    }
+    if (0..chart_width).all(|x| (0..height).all(|y| buffer[(x as u16, y as u16)].symbol() == " ")) {
         return muted_error("bar chart needs more width", width, theme);
     }
     let heading = Style::default()

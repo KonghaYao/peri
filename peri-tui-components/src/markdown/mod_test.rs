@@ -301,3 +301,19 @@ fn test_ensure_closed_code_fences_multiple_blocks() {
         "补完后 fence 数应为偶数"
     );
 }
+
+#[test]
+fn buffer_to_lines_keeps_combining_graphemes() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Style;
+
+    // 每个 "é" 是 e + U+0301 两个码位、显示宽度 1；宽字符后跟 ghost cell。
+    let area = Rect::new(0, 0, 6, 1);
+    let mut buf = Buffer::empty(area);
+    buf.set_string(0, 0, "e\u{301}e\u{301}", Style::default());
+    buf.set_string(2, 0, "中中", Style::default());
+    let lines = crate::markdown::buffer_to_lines(&buf, area);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].to_string(), "e\u{301}e\u{301}中中");
+}

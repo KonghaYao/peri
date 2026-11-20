@@ -46,6 +46,24 @@ fn bar_chart_uses_tui_chart_axes_and_bars() {
 }
 
 #[test]
+fn bar_chart_shows_every_value_including_zero_and_max() {
+    // tui-chart 的 outside 数值标签对 value=0 和贴右边界的最长条会跳过绘制，
+    // 数值列必须由 render 侧补齐，不能依赖图表库。
+    let lines = lines(
+        r#"root = BarChart([{label: "Zero", value: 0}, {label: "Max", value: 50}, {label: "Mid", value: 10}])"#,
+        40,
+    );
+    for (label, value) in [("Zero", "0"), ("Max", "50"), ("Mid", "10")] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(label) && line.contains(value)),
+            "{label} 行缺少数值 {value}: {lines:#?}"
+        );
+    }
+}
+
+#[test]
 fn sparkline_uses_tui_chart_glyphs_beside_the_value() {
     let lines = lines(
         r#"root = Sparkline([1, 3, 2, 5, 4, 7, 6, 9, 8, 11], "延迟抖动")"#,

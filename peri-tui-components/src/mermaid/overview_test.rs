@@ -431,15 +431,36 @@ fn architecture_overview_keeps_edges_from_off_path_sources() {
         assert!(text.contains(edge), "概览漏掉非路径边 {edge}: {text}");
     }
 
-    assert_eq!(overview.summary_edges().len(), 15, "摘要必须覆盖全部原图边");
-    for relation in overview.summary_edges() {
-        assert!(
-            overview.edge_exists(&relation.from.id, &relation.to.id),
-            "摘要补出了原图不存在的边 {}→{}",
-            relation.from.id,
-            relation.to.id
-        );
-    }
+    // 摘要边必须与原图边一一对应：多重集比对同时覆盖端点、label 与重复次数，
+    // 单纯计数或逐条 contains 无法发现「重复一条 + 漏掉一条」。
+    let mut expected: Vec<(String, String, Option<String>)> = [
+        ("Model", "Agent"),
+        ("Agent", "Runtime"),
+        ("Runtime", "Controller"),
+        ("Controller", "ACP"),
+        ("ACP", "TUI"),
+        ("Middleware", "Agent"),
+        ("Resources", "Middleware"),
+        ("Resources", "Agent"),
+        ("Resources", "Controller"),
+        ("Process", "Agent"),
+        ("Process", "Middleware"),
+        ("Config", "ACP"),
+        ("Config", "Middleware"),
+        ("Config", "Controller"),
+        ("Config", "TUI"),
+    ]
+    .into_iter()
+    .map(|(from, to)| (from.to_string(), to.to_string(), None))
+    .collect();
+    expected.sort();
+    let mut actual: Vec<(String, String, Option<String>)> = overview
+        .summary_edges()
+        .into_iter()
+        .map(|relation| (relation.from.id, relation.to.id, relation.label))
+        .collect();
+    actual.sort();
+    assert_eq!(actual, expected, "摘要边必须与原图边一一对应");
     for node_id in [
         "Model",
         "Agent",
