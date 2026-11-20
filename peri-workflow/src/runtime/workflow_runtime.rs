@@ -3,11 +3,11 @@
 use super::{
     broadcast, fmt, params, AgentExecutor, AgentRunParams, AgentRunResult, AgentTaskPublish,
     AgentTaskSink, Arc, AtomicBool, CloseGate, Debug, Duration, Formatter, HashMap, Instant,
-    Ordering, ProgressEvent, PublishOutcome, RunProgress, RuntimeProgressObserver, RwLock,
-    SettleAdmission, SettleOutcome, TaskManager, UnboundedReceiver, WorkflowInput,
-    WorkflowJournalStore, WorkflowProgressStore, WorkflowRunEventLog, WorkflowRunner,
-    WorkflowTaskRecord, WorkflowTaskRegistry, WorkflowTaskResult, WorkflowTaskState,
-    WorkflowTaskTable,
+    Ordering, ProgressEvent, ProgressExpirySweeper, PublishOutcome, RunProgress,
+    RuntimeProgressObserver, RwLock, SettleAdmission, SettleOutcome, TaskManager,
+    UnboundedReceiver, WorkflowInput, WorkflowJournalStore, WorkflowProgressStore,
+    WorkflowRunEventLog, WorkflowRunner, WorkflowTaskRecord, WorkflowTaskRegistry,
+    WorkflowTaskResult, WorkflowTaskState, WorkflowTaskTable,
 };
 
 /// run 事件日志容量（保留边界随淘汰前进）。
@@ -178,6 +178,8 @@ pub struct WorkflowRuntime {
     pub(super) consumer_ready: AtomicBool,
     /// 关闭门（关闭顺序第 ① 步：停止接受新 run 与新任务发布；任务表共享同一实例）。
     pub(super) gate: Arc<CloseGate>,
+    /// 终态 run 的到期清扫（实例级可取消唤醒；关闭即撤销）。
+    pub(super) expiry: Arc<ProgressExpirySweeper>,
     /// per-run 执行权威预算（maxConcurrency / limits；见 [`RunExecutionBudget`]）。
     pub(super) budgets: Arc<RunBudgets>,
 }
@@ -202,10 +204,12 @@ impl WorkflowRuntime {
         let run_events = Arc::new(WorkflowRunEventLog::new(RUN_EVENT_LOG_CAPACITY));
         let gate = Arc::new(CloseGate::new());
         let tasks = Arc::new(WorkflowTaskTable::new(updates.clone(), Arc::clone(&gate)));
+        let expiry = Arc::new(ProgressExpirySweeper::new(Arc::downgrade(&progress_store)));
         progress_store.set_observer(Arc::new(RuntimeProgressObserver::new(
             Arc::clone(&run_events),
             updates.clone(),
             Arc::clone(&tasks),
+            Arc::clone(&expiry),
         )));
         let budgets = Arc::new(RunBudgets::new());
         // P6 wire 面注入：`agent/task` 发布（关闭 / maxAgents 准入）与终态投递
@@ -247,6 +251,7 @@ impl WorkflowRuntime {
             consumer_token: RwLock::new(None),
             consumer_ready: AtomicBool::new(false),
             gate,
+            expiry,
             budgets,
         }
     }
@@ -424,8 +429,10 @@ impl WorkflowRuntime {
     ///
     /// 返回后：不再放行新的 run 准入，run 注册与任务发布要么整体发生在关闭前，
     /// 要么被拒绝（在途准入持票期间本调用阻塞；`settle` / 取消不经此门）。
+    /// 同时撤销终态到期清扫的唤醒：实例存活期结束后不再需要按窗口释放快照。
     pub fn mark_closed(&self) {
         self.gate.mark_closed();
+        self.expiry.shutdown();
     }
 
     #[must_use]

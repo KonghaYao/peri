@@ -28,6 +28,8 @@ dirs.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true
+# 到期清扫的虚拟时钟（`tokio::time::pause` / `advance`）：不真等 300 秒保留窗口。
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
