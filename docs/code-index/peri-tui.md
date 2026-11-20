@@ -5,10 +5,11 @@
 通用输入编辑、固定行高视口、导航与鼠标命中，以及 Markdown/OpenUI 渲染器
 由 `peri-tui-components` 提供，TUI 直接单向消费：`kit/markdown/` 与
 `kit/genui/` 只保留应用侧出口（`genui::view_state` 注入会话 epoch）。Mermaid
-语句确认、排版、概览与预览状态机由组件的 `mermaid` 模块持有。
+语句确认、排版、概览与预览状态机由组件的 `mermaid` 模块持有；输入区 `@`/`/`
+补全的可见窗口、选中标记与命中共用组件的 `completion::CompletionPopup`。
 组件 API 与使用示例见
 [`peri-tui-components/README.md`](../../peri-tui-components/README.md)；
-组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/markdown/openui/mermaid/charts，`--list`/`--dump` 支持无 TTY）。Mermaid 的终稿与流式前缀示例见 `peri-tui-components/src/bin/storybook/stories/mermaid.rs`。
+组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/completion/markdown/openui/mermaid/charts，`--list`/`--dump` 支持无 TTY）。Mermaid 的终稿与流式前缀示例见 `peri-tui-components/src/bin/storybook/stories/mermaid.rs`。
 `panels/shared/list.rs` 仅保留应用的首帧高度策略；业务对象转换、主题解析、
 焦点路由及动作执行仍由 TUI 持有。
 
@@ -258,6 +259,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 提交/清除/keepgoing 消费者 | kit/submit_consumer.rs + kit/submit_admission.rs | `spawn_submit_consumer`、`handle_submit`、`handle_keepgoing_submit`、`spawn_cancel_consumer`；`SubmitLanes` 仅在服务端不支持 user-input queue 时按 `(sessionId, generation)` 串行用户消息（同会话 FIFO、跨会话并行，失败/panic 不阻断后续；新式服务端走 session inbox，不占车道以免挡住挂起注入）；身份尚未落定的提交按 cohort 分道（`CohortKey { operation }`，见 `register_admission`），`NoSession → Transitioning → Stable` 共用同一条车道；目标操作取最新未认领预约、否则取路由上的操作身份，cohort 落定只接受同一操作产生的身份（`AdmissionGuard::with_operation`），`ensure_session` 与采纳在 operation gate 内一次完成（`resolve_session_admission`），cohort 一旦失效即 `Cancelled`，后继成员取消而不重新初始化；`/clear` 等控制请求不占车道；`prompt_in_session` 准入失配时取消并反馈 |
 | 本地请求解析 | kit/submit_request.rs | `parse_submit_request`（/clear、/rewind、/export 等本地命令） |
 | 键盘/鼠标/焦点分发 | kit/event_handlers.rs、focus_router.rs、mouse_router.rs | `register_global_handlers`（含 Ctrl+C 判定）、`register_root_handlers`；`active_layer`/`classify_global_shortcut` |
+| 输入补全列表（@ / /） | peri-tui-components/src/completion.rs + kit/mention_popup.rs + kit/slash_completion.rs | `CompletionPopup` 的 `widget()` 与 `hit_layout()` 来自同一 `ListViewport`，点击返回全量下标；宿主保留搜索、`@` 的 20 条候选上限、描述/三级颜色与回调，空候选 Enter 在 `@` 关闭、在 `/` 先关闭再提交一次 |
 | 快照与回写消费者 | kit/service_snapshot/refresh.rs、rewind_action.rs、hitl_response.rs、ask_user_action.rs、thread_load_consumer.rs | `spawn_service_snapshot`：2s 轮询 + client 执行目录 watch 唤醒，采样跨越 session commit 时保留通知并重采，取消可中止等待中的查询；启动回归在 `service_snapshot_test.rs::startup`。其他入口：`spawn_rewind_consumer`、`spawn_hitl_response_consumer`、`spawn_ask_user_consumer`、`spawn_thread_load_consumer` |
 
 ### 面板与弹窗（src/kit/panels/ + popups/ + overlay）

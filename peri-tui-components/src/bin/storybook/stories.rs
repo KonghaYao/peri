@@ -26,6 +26,7 @@ use self::list_items::LIST_ITEMS;
 use self::markdown::MARKDOWN_VARIANTS;
 use self::streaming::StreamingDocument;
 
+use peri_tui_components::completion::{CompletionPopup, CompletionRow, CompletionStyles};
 use peri_tui_components::list::ListMetrics;
 use peri_tui_components::list_nav::scroll_start_for_selected;
 use peri_tui_components::panel_mouse::is_scrollbar_column;
@@ -98,6 +99,11 @@ pub(crate) enum StoryState {
     Scrollbar {
         position: usize,
         total: usize,
+    },
+    /// 内联补全列表：固定输入，点击命中与绘制共用同一个 `CompletionPopup` 窗口。
+    Completion {
+        fixture: &'static CompletionFixture,
+        selected: usize,
     },
     Document {
         content: DocumentContent<'static>,
@@ -235,6 +241,92 @@ fn scrollbar_middle_initial() -> StoryState {
 
 fn scrollbar_bottom_initial() -> StoryState {
     scrollbar_state(99, 100)
+}
+
+// ---------------------------------------------------------------------------
+// Completion fixtures (inline height mirrors the host's theme `inline_height`)
+// ---------------------------------------------------------------------------
+
+const COMPLETION_HEIGHT: u16 = 10;
+
+pub(crate) struct CompletionFixture {
+    pub(crate) title: &'static str,
+    pub(crate) empty_text: &'static str,
+    pub(crate) rows: &'static [(&'static str, &'static str, Color)],
+}
+
+const COMPLETION_MENTION: CompletionFixture = CompletionFixture {
+    title: " @ src/ ",
+    empty_text: "No matches",
+    rows: &[
+        ("src/main.rs", "", FG),
+        ("src/lib.rs", "", FG),
+        ("src/kit/mod.rs", "", FG),
+        ("src/kit/input_area.rs", "", FG),
+        ("src/kit/slash_completion.rs", "", FG),
+        ("src/kit/mention_popup.rs", "", FG),
+        ("Cargo.toml", "", FG),
+        ("README.md", "", FG),
+    ],
+};
+
+const COMPLETION_SLASH: CompletionFixture = CompletionFixture {
+    title: " / ",
+    empty_text: "No matches",
+    rows: &[
+        ("/help", "Show help and shortcuts", ACCENT),
+        ("/clear", "Clear the transcript", FG),
+        ("/compact", "Compact the conversation", FG),
+        ("/model", "Switch model profile", FG),
+        ("/plugin", "Open the plugin panel", ACCENT),
+        ("/skill:review", "Run a packaged skill", Color::Yellow),
+    ],
+};
+
+const COMPLETION_SCROLLED: CompletionFixture = CompletionFixture {
+    title: " /model ",
+    empty_text: "No matches",
+    rows: &[
+        ("/model:default", "Active profile", ACCENT),
+        ("/model:review", "Review profile", FG),
+        ("/model:fast", "Low latency profile", FG),
+        ("/model:deep", "Reasoning profile", FG),
+        ("/model:local", "Local provider", FG),
+        ("/model:vision", "Image input profile", FG),
+        ("/model:plan", "Planning profile", FG),
+        ("/model:long", "Large context profile", FG),
+        ("/model:cheap", "Budget profile", FG),
+        ("/model:staging", "Staging profile", FG),
+        ("/model:prod", "Production profile", FG),
+        ("/model:experimental", "Opt-in profile", Color::Yellow),
+    ],
+};
+
+const COMPLETION_EMPTY: CompletionFixture = CompletionFixture {
+    title: " /missing ",
+    empty_text: "No matches",
+    rows: &[],
+};
+
+fn completion_state(fixture: &'static CompletionFixture, selected: usize) -> StoryState {
+    StoryState::Completion { fixture, selected }
+}
+
+fn completion_mention_initial() -> StoryState {
+    completion_state(&COMPLETION_MENTION, 1)
+}
+
+fn completion_slash_initial() -> StoryState {
+    completion_state(&COMPLETION_SLASH, 2)
+}
+
+fn completion_scrolled_initial() -> StoryState {
+    // 8 行窗口放不下 12 行：max_scroll = 4，选中项 10 仍在窗口内。
+    completion_state(&COMPLETION_SCROLLED, 10)
+}
+
+fn completion_empty_initial() -> StoryState {
+    completion_state(&COMPLETION_EMPTY, 0)
 }
 
 fn document_state(source: &'static str, scroll: usize) -> StoryState {
@@ -478,6 +570,29 @@ const SCROLLBAR_VARIANTS: &[Variant] = &[
     },
 ];
 
+const COMPLETION_VARIANTS: &[Variant] = &[
+    Variant {
+        key: "mention",
+        note: "Click a row to select it; @ rows have no description column.",
+        initial: completion_mention_initial,
+    },
+    Variant {
+        key: "slash",
+        note: "Label and description columns; tier colours are written by the host.",
+        initial: completion_slash_initial,
+    },
+    Variant {
+        key: "scrolled",
+        note: "Eight-row window; clicks map painted rows back to full-list indexes.",
+        initial: completion_scrolled_initial,
+    },
+    Variant {
+        key: "empty",
+        note: "No candidates: empty text is painted and no row is clickable.",
+        initial: completion_empty_initial,
+    },
+];
+
 const MERMAID_VARIANTS: &[Variant] = &[
     Variant {
         key: "flowchart",
@@ -717,6 +832,11 @@ pub(crate) const STORIES: &[Story] = &[
         variants: SCROLLBAR_VARIANTS,
     },
     Story {
+        key: "completion",
+        title: "Completion",
+        variants: COMPLETION_VARIANTS,
+    },
+    Story {
         key: "markdown",
         title: "Markdown",
         variants: MARKDOWN_VARIANTS,
@@ -758,6 +878,9 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
         } => render_list(area, buf, *selected, scroll, *header, *footer, reveal_last),
         StoryState::Scrollbar { position, total } => {
             render_scrollbar(area, buf, *position, *total);
+        }
+        StoryState::Completion { fixture, selected } => {
+            render_completion(fixture, *selected, area, buf);
         }
         StoryState::Document {
             content,
@@ -971,6 +1094,88 @@ fn render_scrollbar(area: Rect, buf: &mut Buffer, position: usize, total: usize)
 }
 
 // ---------------------------------------------------------------------------
+// Completion
+// ---------------------------------------------------------------------------
+
+fn completion_popup(
+    fixture: &'static CompletionFixture,
+    selected: usize,
+    height: u16,
+) -> CompletionPopup<'static> {
+    let rows = fixture
+        .rows
+        .iter()
+        .map(|(label, detail, color)| {
+            let label = CompletionRow::new(Line::from(Span::styled(
+                (*label).to_string(),
+                Style::new().fg(*color),
+            )));
+            if detail.is_empty() {
+                label
+            } else {
+                label.with_detail(Line::from(Span::styled(
+                    (*detail).to_string(),
+                    muted_style(),
+                )))
+            }
+        })
+        .collect();
+    CompletionPopup {
+        rows,
+        selected,
+        height,
+        title: Line::from(Span::styled(
+            fixture.title,
+            accent_style().add_modifier(Modifier::BOLD),
+        )),
+        empty_text: Line::from(Span::styled(fixture.empty_text, muted_style())),
+        styles: CompletionStyles {
+            border: MUTED,
+            selected_label: Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            selected_detail: Style::new().fg(ACCENT),
+            empty: muted_style(),
+        },
+    }
+}
+
+/// 弹窗占据预览区顶部 `COMPLETION_HEIGHT` 行——与宿主的内联高度一致。
+fn completion_target(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        COMPLETION_HEIGHT.min(area.height),
+    )
+}
+
+fn render_completion(
+    fixture: &'static CompletionFixture,
+    selected: usize,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let target = completion_target(area);
+    completion_popup(fixture, selected, target.height)
+        .widget()
+        .render(target, buf);
+    let note_y = target.bottom().saturating_add(1);
+    if note_y < area.bottom() {
+        Line::from(Span::styled(
+            format!(
+                "inline height {} · {} rows · selected #{selected}",
+                target.height,
+                fixture.rows.len()
+            ),
+            muted_style(),
+        ))
+        .render(Rect::new(area.x, note_y, area.width, 1), buf);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mouse semantics
 // ---------------------------------------------------------------------------
 
@@ -1034,6 +1239,31 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
             MouseEventKind::Down(MouseButton::Left) => true,
             _ => false,
         },
+        StoryState::Completion { fixture, selected } => {
+            let target = completion_target(area);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !rect_contains(target, mouse.column, mouse.row) {
+                        return false;
+                    }
+                    // 与绘制同一个 popup 实例：命中下标就是被画出的那一行。
+                    let popup = completion_popup(fixture, *selected, target.height);
+                    if let Some(index) = popup.hit(mouse, target) {
+                        *selected = index;
+                    }
+                    true
+                }
+                MouseEventKind::ScrollUp => {
+                    *selected = selected.saturating_sub(WHEEL_ROWS);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    *selected = (*selected + WHEEL_ROWS).min(fixture.rows.len().saturating_sub(1));
+                    true
+                }
+                _ => rect_contains(target, mouse.column, mouse.row),
+            }
+        }
         StoryState::Document {
             content,
             scroll,

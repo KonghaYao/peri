@@ -13,6 +13,7 @@ also owns the business-independent renderers moved down from the app: Markdown
 | `textarea::TextArea` | text state, cursor/selection/placeholder styles, focus | rendering and wrapping |
 | `textarea::TextAreaState` | editing commands | text, undo history, cursor and selection |
 | `list::ListViewport` | measured content rows, row metrics, item count, selection | visible range and matching hit layout |
+| `completion::CompletionPopup` | pre-styled label/detail rows, selected index, inline height, title, empty text, styles | selected marker, visible window (`ListViewport::window`) and the matching `hit_layout()`; `hit()` returns the full-list index |
 | `list_nav` | key events and selection | navigation intent and bounds |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
 | `scrollbar::vertical_scrollbar` | thumb and arrow styles | scrollbar appearance |
@@ -47,6 +48,12 @@ is the primary input and mirrors the real TUI:
   map by cell width and clicks past the last visual row are ignored;
 - clicking a list row selects that item; header/footer rows are inert and the
   scrollbar column is excluded (`panel_mouse::is_scrollbar_column`);
+- the completion story paints the same inline popup used by the host's `@` and `/`
+  input completion: 2-row window borders, eight content rows, and a selection that
+  stays inside `ListViewport`'s window. Clicking a row selects the full-list index
+  the same window painted; the empty variant has no clickable row. The wheel moves
+  the selection by three rows, and the popup's own height/rows are printed below
+  the frame;
 - the wheel scrolls lists by three rows per notch — the host's `SCROLL_LINES` — and
   drives the scrollbar story, without moving the list selection; the bar itself has
   no click handler, as in the app;
@@ -60,9 +67,10 @@ is the primary input and mirrors the real TUI:
   position. Markdown prose still wraps at the column width, so only unwrapped
   diagrams show the bar.
 
-Seven stories cover `textarea`, `list`, `scrollbar`, `markdown` (rich text,
-headings, lists, code, table, image, gen-ui fence, streaming), `openui` (stack
-column/row, card, text, heading, list, table, key-value, progress, divider,
+Eight stories cover `textarea`, `list`, `scrollbar`, `completion` (`@` rows,
+`/` label+description columns, a scrolled window and the empty state),
+`markdown` (rich text, headings, lists, code, table, image, gen-ui fence,
+streaming), `openui` (stack column/row, card, text, heading, list, table, key-value, progress, divider,
 button, bar chart, sparkline, streaming), `mermaid` (flowchart, sequence,
 state, class, ER, pie, journey, gantt, timeline, gitGraph, mindmap, quadrant,
 requirement, sankey, xychart, architecture, packet and streaming) and `charts`

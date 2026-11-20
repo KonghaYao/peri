@@ -2,6 +2,7 @@
 //! Callers own data, focus routing, theme resolution and action execution.
 pub mod button;
 pub mod charts;
+pub mod completion;
 pub mod genui;
 pub mod list;
 pub mod list_nav;

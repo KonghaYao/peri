@@ -20,9 +20,6 @@ use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::text::Span;
-use ratatui_kit::ratatui::widgets::Block;
-use ratatui_kit::ratatui::widgets::Borders;
-use ratatui_kit::ratatui::widgets::Paragraph;
 
 use crate::i18n;
 
@@ -30,8 +27,8 @@ use crate::kit::inline_nav::InlineNavAction;
 use crate::kit::slash_projection::ArgsSchema;
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::completion::{CompletionPopup, CompletionRow, CompletionStyles};
 use peri_tui_components::panel_mouse::AreaTracker;
-use peri_tui_components::panel_mouse::ListLayout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashActionKind {
@@ -149,6 +146,57 @@ pub(crate) fn confirm_outcome(selection: usize, item_count: usize) -> ConfirmOut
     }
 }
 
+/// 执行 Confirm 结果；状态读锁已在此之前释放，回调里可以安全写回同一 atom。
+fn run_confirm<T: Clone>(
+    outcome: ConfirmOutcome,
+    items: &[T],
+    mut on_select: impl FnMut(T),
+    mut on_cancel: impl FnMut(),
+    mut on_submit: impl FnMut(),
+) {
+    match outcome {
+        ConfirmOutcome::Select(index) => match items.get(index) {
+            Some(item) => on_select(item.clone()),
+            // 防御：钳制后下标仍越界（条目表在两帧之间收缩）
+            None => on_cancel(),
+        },
+        ConfirmOutcome::Submit => {
+            // 无候选：先关弹窗（清 SLASH_HINT_ACTIVE，输入区守卫恢复），
+            // 再走提交通道——Enter 只提交一次，也不被静默吞掉。
+            on_cancel();
+            on_submit();
+        }
+    }
+}
+
+/// 把条目映射为补全行：label 列宽对齐，描述列独立着色（S16 三层颜色）。
+fn slash_rows(
+    items: &[SlashCompletionItem],
+    semantic: &peri_theme::semantic::SemanticTokens,
+) -> Vec<CompletionRow<'static>> {
+    // 双列布局：label 列最大宽度（含 / 前缀），描述列自然对齐
+    let max_label_width = items
+        .iter()
+        .map(|item| item.label.chars().count() + 1) // +1 for '/'
+        .max()
+        .unwrap_or(0);
+    items
+        .iter()
+        .map(|item| {
+            let tier_color = slash_kind_color(&item.kind, semantic);
+            let padded_label = format!("/{:<width$}", item.label, width = max_label_width);
+            CompletionRow::new(Line::from(Span::styled(
+                padded_label,
+                Style::default().fg(tier_color),
+            )))
+            .with_detail(Line::from(Span::styled(
+                item.description.clone(),
+                Style::default().fg(semantic.text.dim),
+            )))
+        })
+        .collect()
+}
+
 #[component]
 pub fn SlashCompletion(
     props: &SlashCompletionProps,
@@ -171,17 +219,34 @@ pub fn SlashCompletion(
         area = tracker.rect;
     }
 
-    // 可见窗口（渲染时 skip(scroll_start).take(visible_rows)）——选中项保持在
-    // 可视区域上 1/3 处；鼠标命中反推需要与渲染使用同一 scroll_start。
-    let sel_idx = crate::kit::inline_nav::clamp_selection(*selection.read(), item_count);
-    let popup_h = THEME_ATOM.state().read().component.popup.inline_height;
-    let visible_rows = popup_h.saturating_sub(2) as usize; // 减去上下边框
-    let scroll_start = if item_count <= visible_rows {
-        0
-    } else {
-        let max_scroll = item_count.saturating_sub(visible_rows);
-        sel_idx.saturating_sub(visible_rows / 3).min(max_scroll)
+    // 绘制与命中共用同一次视口计算（候选变化/缩放后由下一帧整体重建）。
+    let popup = {
+        let state = THEME_ATOM.state();
+        let guard = state.read();
+        let popup_tokens = &guard.component.popup;
+        CompletionPopup {
+            rows: slash_rows(&filtered, &guard.semantic),
+            selected: *selection.read(),
+            height: popup_tokens.inline_height,
+            title: Line::from(i18n::tr_args(
+                "slash-completion-title",
+                &[("name".to_string(), FluentValue::from(props.prefix.as_str()))],
+            ))
+            .fg(popup_tokens.action_primary)
+            .bold(),
+            empty_text: Line::from(i18n::tr("common-no-matches")),
+            styles: CompletionStyles {
+                border: popup_tokens.border,
+                selected_label: Style::default()
+                    .fg(popup_tokens.selected_fg)
+                    .add_modifier(Modifier::BOLD),
+                selected_detail: Style::default().fg(popup_tokens.selected_fg),
+                empty: Style::default().fg(guard.semantic.text.muted),
+            },
+        }
     };
+    let popup_h = popup.height;
+    let hit_layout = popup.hit_layout();
 
     hooks.use_event_handler_with_options(
         EventScope::Current,
@@ -191,18 +256,8 @@ pub fn SlashCompletion(
             // 鼠标：区域内左键点击 = 选中该项并执行 Enter 动作（click as enter）
             if let Event::Mouse(mouse) = event {
                 if let Some(area) = area
-                    && let Some(idx) = peri_tui_components::panel_mouse::hit_item(
-                        &mouse,
-                        area,
-                        ListLayout {
-                            header_rows: 0,
-                            item_rows: 1,
-                            footer_rows: 0,
-                            visible_items: visible_rows as u16,
-                            scroll_start,
-                            item_count,
-                        },
-                    )
+                    && let Some(idx) =
+                        peri_tui_components::panel_mouse::hit_item(&mouse, area, hit_layout)
                 {
                     *selection.write() = idx;
                     if let Some(item) = filtered_for_handler.get(idx).cloned() {
@@ -248,36 +303,28 @@ pub fn SlashCompletion(
                     // （SLASH_SELECTED_INDEX）——同线程 read→write 自锁，
                     // 主线程卡在 parking_lot wait_for_readers，UI 永久冻结。
                     let outcome = confirm_outcome(*selection.read(), item_count);
-                    match outcome {
-                        ConfirmOutcome::Select(idx) => {
-                            if let Some(item) = filtered_for_handler.get(idx).cloned() {
-                                let mut on_select = on_select
-                                    .lock()
-                                    .expect("SlashCompletion on_select poisoned");
-                                (*on_select)(item);
-                            } else {
-                                // 防御：钳制后下标仍越界（条目表在两帧之间收缩）
-                                let mut on_cancel = on_cancel
-                                    .lock()
-                                    .expect("SlashCompletion on_cancel poisoned");
-                                (*on_cancel)(());
-                            }
-                        }
-                        ConfirmOutcome::Submit => {
-                            // 无候选：先关弹窗（清 SLASH_HINT_ACTIVE，输入区守卫
-                            // 恢复），再走提交通道——Enter 不再被静默吞掉。
-                            {
-                                let mut on_cancel = on_cancel
-                                    .lock()
-                                    .expect("SlashCompletion on_cancel poisoned");
-                                (*on_cancel)(());
-                            }
+                    run_confirm(
+                        outcome,
+                        &filtered_for_handler,
+                        |item| {
+                            let mut on_select = on_select
+                                .lock()
+                                .expect("SlashCompletion on_select poisoned");
+                            (*on_select)(item);
+                        },
+                        || {
+                            let mut on_cancel = on_cancel
+                                .lock()
+                                .expect("SlashCompletion on_cancel poisoned");
+                            (*on_cancel)(());
+                        },
+                        || {
                             let mut on_submit = on_submit
                                 .lock()
                                 .expect("SlashCompletion on_submit poisoned");
                             (*on_submit)(());
-                        }
-                    }
+                        },
+                    );
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::Cancel) => {
@@ -292,87 +339,13 @@ pub fn SlashCompletion(
         },
     );
 
-    let state = THEME_ATOM.state();
-    let guard = state.read();
-    let popup_tokens = &guard.component.popup;
-    let semantic = guard.semantic;
-
-    // 双列布局：计算 label 列最大宽度（含 / 前缀），描述列自然对齐
-    let max_label_width = filtered
-        .iter()
-        .map(|item| item.label.chars().count() + 1) // +1 for '/'
-        .max()
-        .unwrap_or(0);
-    let display_lines: Vec<Line<'_>> = filtered
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let selected = i == sel_idx;
-            let marker = if selected { "> " } else { "  " };
-
-            // S16：三层 slash 用颜色区分，不用方括号标签
-            let tier_color = slash_kind_color(&item.kind, &semantic);
-
-            let line_style = if selected {
-                Style::default()
-                    .fg(popup_tokens.selected_fg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(tier_color)
-            };
-
-            let detail_style = if selected {
-                Style::default().fg(popup_tokens.selected_fg)
-            } else {
-                Style::default().fg(semantic.text.dim)
-            };
-
-            // 双列：label 左对齐补足到 max_label_width，描述从固定列开始
-            let padded_label = format!("/{:<width$}", item.label, width = max_label_width);
-
-            Line::from(vec![
-                Span::styled(marker, line_style),
-                Span::styled(padded_label, line_style),
-                Span::styled(format!("  {}", item.description), detail_style),
-            ])
-        })
-        .collect();
-
-    let empty = display_lines.is_empty();
-    let popup_block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::new().fg(popup_tokens.border))
-        .title_top(
-            Line::from(i18n::tr_args(
-                "slash-completion-title",
-                &[("name".to_string(), FluentValue::from(props.prefix.as_str()))],
-            ))
-            .fg(popup_tokens.action_primary)
-            .bold(),
-        );
-
-    // 可见窗口：只渲染可见区域内的项，避免选中项滚出视野
-    // （scroll_start/visible_rows 与鼠标命中测试共用，见 handler 注册处）
-    let visible_lines: Vec<Line<'_>> = display_lines
-        .into_iter()
-        .skip(scroll_start)
-        .take(visible_rows)
-        .collect();
-
-    let text_render = if empty {
-        Paragraph::new(Line::from(i18n::tr("common-no-matches")).fg(semantic.text.muted))
-    } else {
-        Paragraph::new(ratatui::text::Text::from(visible_lines))
-    }
-    .block(popup_block);
-
     element!(
         View(
             flex_direction: Direction::Vertical,
             width: Constraint::Fill(1),
             height: Constraint::Length(popup_h),
         ) {
-            Text(text: text_render)
+            Text(text: popup.widget())
         }
     )
 }
@@ -493,5 +466,64 @@ mod tests {
             slash_kind_color(&SlashActionKind::Skill, &s),
             s.status.warning
         );
+    }
+
+    fn row_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// 描述列与三级颜色保持不变：label 按最大宽度对齐，描述另起两列。
+    #[test]
+    fn test_slash_rows_keep_aligned_label_and_description() {
+        let s = semantic();
+        let items = vec![
+            SlashCompletionItem {
+                description: "Show help".to_string(),
+                ..item("help", "")
+            },
+            SlashCompletionItem {
+                description: "Swap model".to_string(),
+                ..item("model", "")
+            },
+        ];
+        let rows = slash_rows(&items, &s);
+        assert_eq!(row_text(&rows[0].label), "/help  ");
+        assert_eq!(row_text(&rows[1].label), "/model ");
+        let detail = rows[0].detail.as_ref().expect("slash 行必须保留描述列");
+        assert_eq!(row_text(detail), "Show help");
+        assert_eq!(rows[0].label.spans[0].style.fg, Some(s.text.muted));
+        assert_eq!(detail.spans[0].style.fg, Some(s.text.dim));
+    }
+
+    /// 空候选 Enter：先关闭弹窗，再提交输入一次（且只提交一次）。
+    #[test]
+    fn test_confirm_empty_cancels_then_submits_once() {
+        let log = std::cell::RefCell::new(Vec::new());
+        run_confirm(
+            confirm_outcome(0, 0),
+            &[] as &[SlashCompletionItem],
+            |_| log.borrow_mut().push("select"),
+            || log.borrow_mut().push("cancel"),
+            || log.borrow_mut().push("submit"),
+        );
+        assert_eq!(*log.borrow(), ["cancel", "submit"]);
+    }
+
+    /// 有候选时 Confirm 只选中，不关闭也不提交。
+    #[test]
+    fn test_confirm_with_items_does_not_submit() {
+        let items = vec![item("help", "")];
+        let log = std::cell::RefCell::new(Vec::new());
+        run_confirm(
+            confirm_outcome(0, items.len()),
+            &items,
+            |_| log.borrow_mut().push("select"),
+            || log.borrow_mut().push("cancel"),
+            || log.borrow_mut().push("submit"),
+        );
+        assert_eq!(*log.borrow(), ["select"]);
     }
 }

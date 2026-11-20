@@ -2172,3 +2172,73 @@ fn resize_clears_pressed_states_without_resetting_navigation() {
         "resize 不取消播放"
     );
 }
+
+fn completion_app(variant: &str) -> App {
+    let story = STORIES
+        .iter()
+        .position(|story| story.key == "completion")
+        .expect("completion story");
+    let mut app = App::new(story);
+    let variant = app
+        .current()
+        .variants
+        .iter()
+        .position(|entry| entry.key == variant)
+        .expect("completion variant");
+    app.select_variant(variant);
+    app
+}
+
+#[test]
+fn completion_click_maps_the_scrolled_window_to_full_index() {
+    let mut app = completion_app("scrolled");
+    let area = Rect::new(0, 10, 60, 12);
+    // 12 行、8 行窗口 → max_scroll = 4，第一内容行对应下标 4。
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), 5, 11),
+        area
+    ));
+    let StoryState::Completion { selected, .. } = &app.state else {
+        panic!("expected completion state");
+    };
+    assert_eq!(*selected, 4, "第一内容行对应窗口起点 max_scroll");
+
+    // 弹窗下边框之外不改变选择
+    assert!(!handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), 5, 20),
+        area
+    ));
+    let StoryState::Completion { selected, .. } = &app.state else {
+        panic!("expected completion state");
+    };
+    assert_eq!(*selected, 4);
+}
+
+#[test]
+fn completion_empty_popup_has_no_clickable_row() {
+    let mut app = completion_app("empty");
+    let area = Rect::new(0, 10, 60, 12);
+    // 弹窗区域内点击被消费但不选中（空列表）
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), 5, 11),
+        area
+    ));
+    let StoryState::Completion { selected, .. } = &app.state else {
+        panic!("expected completion state");
+    };
+    assert_eq!(*selected, 0);
+    assert!(dump_screen(&mut app, 100, 32).contains("No matches"));
+}
+
+#[test]
+fn completion_scrolled_dump_keeps_only_the_window() {
+    let mut app = completion_app("scrolled");
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("> /model:prod"), "选中行留在窗口内");
+    assert!(screen.contains("/model:staging"));
+    assert!(!screen.contains("/model:default"), "窗口外的候选不绘制");
+    assert!(screen.contains("inline height 10"));
+}
