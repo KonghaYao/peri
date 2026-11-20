@@ -6,7 +6,7 @@ use peri_acp_types::system_reminder::{
     ReminderSource as CanonicalReminderSource, SystemReminder, TrustedSystemReminderFactory,
     SYSTEM_REMINDER_VERSION,
 };
-use peri_acp_types::tasks::{BgTaskKind, ExternalTaskRegistration, TaskManager};
+use peri_acp_types::tasks::{BgTaskKind, ExternalTaskOwner, ExternalTaskRegistration, TaskManager};
 use rmcp::model::{CancelTaskParams, CancelTaskRequest, ClientRequest, ServerResult};
 use rmcp::service::PeerRequestOptions;
 use serde_json::json;
@@ -311,13 +311,19 @@ impl McpClientPool {
             .get(&wire_server)
             .map(|client| format!("mcp:{server}:{:?}", client.source))
             .ok_or_else(|| "MCP task owner unavailable".to_owned())?;
+        // Monitor 的请求键是 monitor 端任务 ID；其他 MCP 任务保留 server 作用域。
+        let owner = if self.is_monitor_server(server) {
+            ExternalTaskOwner::monitor(raw_task_id)
+        } else {
+            ExternalTaskOwner::mcp(server, raw_task_id)
+        };
         Ok((
             manager,
             ExternalTaskRegistration {
                 session_id: session_id.to_owned(),
                 initiator_session_id: Some(initiator_session_id.to_owned()),
                 owner_identity,
-                owner_task_id: raw_task_id.to_owned(),
+                owner,
                 kind,
                 summary: summary.to_owned(),
                 started_at: Some(started_at.to_owned()),

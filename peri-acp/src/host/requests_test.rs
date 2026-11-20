@@ -66,6 +66,7 @@ fn task_snapshot_value_preserves_child_thread_identity() {
             output_preview: None,
             initiator_session_id: None,
             child_thread_id: Some("child-1".into()),
+            external_owner: None,
         }],
     };
     let value = crate::host::requests::task_snapshot_value(snapshot);

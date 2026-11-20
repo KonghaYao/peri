@@ -63,6 +63,8 @@ pub enum BackgroundRegistryError {
     },
     #[error("External task {0} is Unroutable: initiator is unknown")]
     ExternalUnroutable(String),
+    #[error("External task owner handle `{service}` does not match kind `{kind}`")]
+    ExternalOwnerKindMismatch { service: String, kind: String },
     #[error("Kind concurrent limit reached: {kind} ({current}/{limit})")]
     KindConcurrentLimit {
         kind: String,
@@ -588,7 +590,8 @@ impl BackgroundTaskRegistry {
             .scope
             .admit()
             .map_err(|_| BackgroundRegistryError::Closing)?;
-        self.register_external_admitted(task)
+        let limit = Self::kind_limit(task.kind);
+        self.register_task(task, limit, TaskRegistration::Created, None, None)
     }
 
     pub(in crate::agent::async_tasks) fn register_pending_start(
@@ -600,7 +603,7 @@ impl BackgroundTaskRegistry {
             .admit()
             .map_err(|_| BackgroundRegistryError::Closing)?;
         let limit = Self::kind_limit(task.kind);
-        self.register_task(task, limit, TaskRegistration::PendingStart, None)
+        self.register_task(task, limit, TaskRegistration::PendingStart, None, None)
     }
 
     /// Caller holds scope admission across external process creation and registration.
@@ -609,12 +612,13 @@ impl BackgroundTaskRegistry {
         task: BackgroundTask,
     ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
         let limit = Self::kind_limit(task.kind);
-        self.register_task(task, limit, TaskRegistration::Created, None)
+        self.register_task(task, limit, TaskRegistration::Created, None, None)
     }
 
     pub(in crate::agent::async_tasks) fn register_external_task(
         &self,
         task: BackgroundTask,
+        external_owner: Option<peri_acp_types::tasks::ExternalTaskOwner>,
         source_identity: String,
         terminal: bool,
     ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
@@ -634,7 +638,13 @@ impl BackgroundTaskRegistry {
         } else {
             (Self::kind_limit(task.kind), TaskRegistration::Created)
         };
-        self.register_task(task, limit, registration, Some(source_identity))
+        self.register_task(
+            task,
+            limit,
+            registration,
+            Some(source_identity),
+            external_owner,
+        )
     }
 
     pub(super) fn register_task(
@@ -643,6 +653,7 @@ impl BackgroundTaskRegistry {
         limit: Option<usize>,
         registration: TaskRegistration,
         source_identity: Option<String>,
+        external_owner: Option<peri_acp_types::tasks::ExternalTaskOwner>,
     ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
         let kind = task.kind;
         let task_id = task.id.clone();
@@ -715,6 +726,7 @@ impl BackgroundTaskRegistry {
             output_preview: None,
             initiator_session_id: task.initiator_session_id.clone(),
             child_thread_id: child_thread_id.clone(),
+            external_owner,
         });
         tasks.insert(task.id.clone(), task);
         let event = match registration {

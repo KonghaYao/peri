@@ -57,7 +57,7 @@ fn external_source_identity(request: &ExternalTaskRegistration) -> String {
     for part in [
         &request.session_id,
         &request.owner_identity,
-        &request.owner_task_id,
+        request.owner_task_id(),
     ] {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
@@ -559,15 +559,20 @@ impl TaskManager {
         terminal: bool,
     ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
         let _registration = self.external_registration.lock();
+        if !request.owner.handle.matches_kind(request.kind) {
+            return Err(BackgroundRegistryError::ExternalOwnerKindMismatch {
+                service: request.owner.handle.service().to_owned(),
+                kind: request.kind.as_str().to_owned(),
+            });
+        }
         let started_at = external_started_at(&request)?;
         // A new source admission has a fresh public identity. Callback refresh
         // and terminal replay must retain its ticket, never reconstruct by ID.
+        let source_identity = external_source_identity(&request);
         let task_id = format!("mcp-{}", uuid::Uuid::now_v7());
-        self.registry.register_external_task(
-            external_background_task(&request, task_id, started_at),
-            external_source_identity(&request),
-            terminal,
-        )
+        let task = external_background_task(&request, task_id, started_at);
+        self.registry
+            .register_external_task(task, Some(request.owner), source_identity, terminal)
     }
 
     pub fn refresh_external(
@@ -576,6 +581,12 @@ impl TaskManager {
         request: ExternalTaskRegistration,
     ) -> Result<(), BackgroundRegistryError> {
         let _registration = self.external_registration.lock();
+        if !request.owner.handle.matches_kind(request.kind) {
+            return Err(BackgroundRegistryError::ExternalOwnerKindMismatch {
+                service: request.owner.handle.service().to_owned(),
+                kind: request.kind.as_str().to_owned(),
+            });
+        }
         self.registry.validate_ticket(ticket)?;
         if ticket.source_identity() != Some(external_source_identity(&request).as_str()) {
             return Err(BackgroundRegistryError::ExternalIdentityConflict(

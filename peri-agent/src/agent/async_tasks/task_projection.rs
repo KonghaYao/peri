@@ -31,6 +31,14 @@ fn retained_bytes(record: &TaskRecord) -> usize {
             .as_ref()
             .map_or(0, String::capacity)
         + record.child_thread_id.as_ref().map_or(0, String::capacity)
+        + record.external_owner.as_ref().map_or(0, |owner| {
+            owner.handle.owner_task_id().len()
+                + owner.handle.service().len()
+                + owner.artifact_ref.as_ref().map_or(0, |artifact| {
+                    artifact.reference.capacity()
+                        + artifact.version.as_ref().map_or(0, String::capacity)
+                })
+        })
 }
 
 impl TaskProjection {

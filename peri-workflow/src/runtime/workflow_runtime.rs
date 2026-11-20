@@ -559,6 +559,7 @@ impl WorkflowRuntime {
                 output_preview: None,
                 initiator_session_id: None,
                 child_thread_id: None,
+                external_owner: None,
             }
         };
 

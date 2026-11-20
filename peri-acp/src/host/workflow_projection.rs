@@ -249,7 +249,7 @@ impl Client {
             session_id: self.session_id.clone(),
             initiator_session_id: Some(self.session_id.clone()),
             owner_identity: "workflow".into(),
-            owner_task_id: record.task_id.clone(),
+            owner: peri_acp_types::tasks::ExternalTaskOwner::workflow(record.task_id.clone()),
             kind: peri_acp_types::tasks::BgTaskKind::Workflow,
             summary: record.summary.clone(),
             started_at: Some(record.started_at.clone()),

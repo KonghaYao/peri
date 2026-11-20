@@ -7,7 +7,7 @@ use crate::agent::async_tasks::registry::BgCancelHandle;
 use crate::agent::events::BackgroundTaskResult;
 use peri_acp_types::tasks::BgRegistryEvent;
 use peri_acp_types::tasks::BgTaskKind;
-use peri_acp_types::tasks::{ExternalTaskRegistration, TaskRegistrationTicket};
+use peri_acp_types::tasks::{ExternalTaskOwner, ExternalTaskRegistration, TaskRegistrationTicket};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -219,7 +219,7 @@ fn external(deliveries: Arc<AtomicUsize>) -> ExternalTaskRegistration {
         session_id: "owner".into(),
         initiator_session_id: Some("owner".into()),
         owner_identity: "fixture".into(),
-        owner_task_id: "opaque-source-id".into(),
+        owner: ExternalTaskOwner::mcp("fixture", "opaque-source-id"),
         kind: BgTaskKind::Mcp,
         summary: "remote".into(),
         started_at: Some("2026-01-01T00:00:00Z".into()),

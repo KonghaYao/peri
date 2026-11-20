@@ -22,7 +22,7 @@ use crate::agent::async_tasks::shell::FOREGROUND_MAX_TIMEOUT_MS;
 use crate::agent::events::BackgroundTaskResult;
 use peri_acp_types::tasks::BgRegistryEvent;
 use peri_acp_types::tasks::BgTaskKind;
-use peri_acp_types::tasks::ExternalTaskRegistration;
+use peri_acp_types::tasks::{ExternalTaskOwner, ExternalTaskRegistration};
 use tokio_util::sync::CancellationToken;
 
 fn make_registry() -> BackgroundTaskRegistry {
@@ -60,7 +60,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
             session_id: "session-a".into(),
             initiator_session_id: Some("session-a".into()),
             owner_identity: "workspace-a".into(),
-            owner_task_id: "same-raw-id".into(),
+            owner: ExternalTaskOwner::mcp("fixture", "same-raw-id"),
             kind: BgTaskKind::Shell,
             summary: "sleep 1".into(),
             started_at: None,
@@ -139,7 +139,7 @@ async fn external_cancel_request_keeps_task_active_until_owner_settles() {
             session_id: "session-a".into(),
             initiator_session_id: Some("session-a".into()),
             owner_identity: "workspace-a".into(),
-            owner_task_id: "cancel-raw-id".into(),
+            owner: ExternalTaskOwner::mcp("fixture", "cancel-raw-id"),
             kind: BgTaskKind::Mcp,
             summary: "remote task".into(),
             started_at: None,
@@ -188,7 +188,7 @@ async fn cold_terminal_restore_tracks_pending_delivery_without_started_event() {
             session_id: "session-a".into(),
             initiator_session_id: Some("session-a".into()),
             owner_identity: "workspace-a".into(),
-            owner_task_id: "finished-raw-id".into(),
+            owner: ExternalTaskOwner::mcp("fixture", "finished-raw-id"),
             kind: BgTaskKind::Shell,
             summary: "finished shell".into(),
             started_at: Some("2026-10-03T00:00:00Z".into()),

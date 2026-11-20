@@ -848,6 +848,7 @@ async fn expiry_keeps_unacked_completion_and_cancel_fences() {
             output_preview: None,
             initiator_session_id: None,
             child_thread_id: None,
+            external_owner: None,
         },
     ));
 
