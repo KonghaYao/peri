@@ -254,14 +254,22 @@ impl VerticalBar {
     /// Moving off the scrollbar column does not change the row mapping.
     #[must_use]
     pub fn drag_offset(&self, area: Rect, row: u16, grab: u16) -> usize {
-        let new_thumb_top = row.saturating_sub(grab);
-        let track_cell = new_thumb_top.saturating_sub(area.y).saturating_sub(1) as usize;
         let span = self.track - self.thumb_len;
-        if span == 0 {
-            // 满轨 thumb 没有可移动空间——保持既有语义返回 0。
+        let track_start = area.y.saturating_add(1);
+        let new_thumb_top = row.saturating_sub(grab);
+        // 先处理越过端点的拖拽：拖到箭头/轨道外要到达真实端点，不能停在最后
+        // 一个格子（该格子覆盖的偏移区间可能不含 max_offset）。
+        if new_thumb_top < track_start {
             return 0;
         }
-        let target = track_cell.min(span);
+        if new_thumb_top > track_start.saturating_add(span as u16) {
+            return self.max_offset();
+        }
+        if span == 0 {
+            // 满轨 thumb 没有可移动空间——保留原始偏移，避免拖拽跳到顶部。
+            return self.offset;
+        }
+        let target = usize::from(new_thumb_top - track_start).min(span);
         // 偏移→格子是有损映射：格子未变时保留原始偏移，避免同一格内按下即跳动。
         if target == self.thumb_start {
             self.offset
@@ -534,6 +542,34 @@ mod tests {
     }
 
     #[test]
+    fn vertical_bar_drag_past_endpoints_reaches_them() {
+        let area = vertical_area(10);
+        // offset 950 已落在 thumb 格 7（底部格覆盖 920..990）；
+        // 拖到底部箭头仍应到 990，而不是停在 950。
+        let bottom = vertical_bar(area.height, LONG_CONTENT, LONG_VIEWPORT, 950);
+        assert_eq!(bottom.thumb_start, 7);
+        assert_eq!(
+            bottom.drag_offset(area, area.y + area.height - 1, 0),
+            990,
+            "拖到下箭头到达底部"
+        );
+        assert_eq!(
+            bottom.drag_offset(area, area.y + area.height - 2, 0),
+            950,
+            "最后一个 track 格内同格保持原偏移"
+        );
+
+        let top = vertical_bar(area.height, LONG_CONTENT, LONG_VIEWPORT, 40);
+        assert_eq!(top.thumb_start, 0);
+        assert_eq!(top.drag_offset(area, area.y, 0), 0, "拖到上箭头到达顶部");
+        assert_eq!(
+            top.drag_offset(area, area.y + 1, 0),
+            40,
+            "首个 track 格内同格保持原偏移"
+        );
+    }
+
+    #[test]
     fn vertical_bar_tiny_and_full_track_heights_are_stable() {
         for height in 0..=2 {
             assert_eq!(VerticalBar::new(height, 10, LONG_CONTENT, 0), None);
@@ -548,7 +584,11 @@ mod tests {
             VerticalPress::Thumb { grab: 0 }
         );
         assert_eq!(bar.press(area, area.y + 2), VerticalPress::Bottom);
-        assert_eq!(bar.drag_offset(area, area.y + 1, 0), 0);
+        assert_eq!(
+            bar.drag_offset(area, area.y + 1, 0),
+            500,
+            "满轨拖拽保留原始偏移，不跳到顶部"
+        );
 
         // 11 rows in 10-row viewport, height 6 → track 4, thumb fills it.
         let bar = vertical_bar(6, 11, 10, 1);

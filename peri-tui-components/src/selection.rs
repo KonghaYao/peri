@@ -175,22 +175,21 @@ pub fn wrap_row_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usi
             // Else: trailing padding space, not part of the content.
         }
         // Ratatui 在单词换行边界会丢弃分隔空白（即使 `trim: false`），例如
-        // "hello world" 在宽度 5 下第二行从 `world` 开始。只按 cell 匹配会让
-        // 下一行起点停在未渲染的空格上——对齐到下一行实际渲染的首个字符。
+        // "hello world" 在宽度 5 下第二行从 `world` 开始。下一行保留的空白
+        // 数量可能与原文不同：按「原文空白连续段 - 下一行实际渲染的前导空白」
+        // 跳过被丢弃的部分，行起点才能对齐到首个渲染字素。
         if consumed < total {
-            let next_symbol = (0..width).find_map(|col| {
-                buf.cell((col, row + 1))
-                    .map(|cell| cell.symbol())
-                    .filter(|symbol| !symbol.is_empty())
-            });
-            if let Some(symbol) = next_symbol {
-                while consumed < total
-                    && graphemes[consumed] != symbol
-                    && graphemes[consumed].chars().all(char::is_whitespace)
-                {
-                    consumed += 1;
-                }
-            }
+            let rendered_lead = (0..width)
+                .filter_map(|col| buf.cell((col, row + 1)))
+                .map(|cell| cell.symbol())
+                .filter(|symbol| !symbol.is_empty())
+                .take_while(|symbol| symbol.chars().all(char::is_whitespace))
+                .count();
+            let run = graphemes[consumed..]
+                .iter()
+                .take_while(|grapheme| grapheme.chars().all(char::is_whitespace))
+                .count();
+            consumed += run.saturating_sub(rendered_lead);
         }
         starts.push(*grapheme_bytes.get(consumed).unwrap_or(&plain.len()));
     }
@@ -381,6 +380,27 @@ mod tests {
         )
         .expect("row 1 selection");
         assert_eq!(&plain[range], "world", "整行选择不带上丢弃的空格");
+    }
+
+    #[test]
+    fn wrap_start_skips_only_separators_dropped_before_kept_spaces() {
+        // 20 个 A 后接 4 个空格再 "AAA"：换行只丢 1 个分隔空格，
+        // 下一行渲染 3 个前导空格 + "AAA"，起点应是第 2 个空格。
+        let text = format!("{}    AAA", "A".repeat(20));
+        let line = line(&text);
+        let plain = line_plain_text(&line);
+        let width = 20;
+        let starts = wrap_row_byte_starts(&line, &plain, width);
+        assert_eq!(&plain[starts[1]..starts[2]], "   AAA", "保留的前导空格");
+        let range = line_byte_range(
+            &plain,
+            &starts,
+            0..2,
+            SelectionPoint::new(1, 3),
+            SelectionPoint::new(1, 6),
+        )
+        .expect("row 1 selection");
+        assert_eq!(&plain[range], "AAA", "列 3..6 不带上行首空格");
     }
 
     #[test]
