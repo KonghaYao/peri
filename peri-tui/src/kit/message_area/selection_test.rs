@@ -280,6 +280,18 @@ fn test_extract_cross_logical_row() {
 }
 
 #[test]
+fn test_extract_preserves_selected_blank_logical_line() {
+    // 中间逻辑行为空时仍是选区的一部分："a\n\nb"，不能退化成 "a\nb"。
+    let lines = vec![make_line("a"), make_line(""), make_line("b")];
+    let (_, wrap_map) = super::build_wrap_map(&lines, 10);
+    let slots = vec![Arc::new(lines)];
+    let offsets = vec![0usize];
+    let result =
+        super::extract_visual_range(&slots, &offsets, &wrap_map, (0, 0), (2, 1), 10, None, None);
+    assert_eq!(result.as_deref(), Some("a\n\nb"));
+}
+
+#[test]
 fn test_extract_swapped_start_end_normalizes() {
     // 反向拖拽：vis_start > vis_end 应规范化
     let lines = vec![make_line("abcdef")];

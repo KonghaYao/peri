@@ -92,7 +92,7 @@ fn painted_rows_and_hit_rows_share_one_window() {
     assert_eq!(popup.hit(&click(7), area(8)), None);
 
     // 内容行 6 行：绘制文本与命中下标必须来自同一窗口
-    for visual in 0..layout.visible_items as u16 {
+    for visual in 0..layout.visible_items {
         let mouse_row = visual + 1;
         let index = popup
             .hit(&click(mouse_row), area(8))

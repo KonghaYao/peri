@@ -167,6 +167,52 @@ fn parse_truncates_over_eight_change_lines() {
     );
     assert_eq!(hunk.truncated_lines, 12, "截断数 = 剩余 change 行");
     assert_eq!(block.more_change_lines, 0);
+    assert_eq!(
+        (block.adds, block.dels),
+        (10, 10),
+        "顶层计数含被截断的 change 行"
+    );
+}
+
+/// 截断点之后的 context 不再保留（避免携带错误行号）。
+#[test]
+fn parse_truncation_drops_following_context() {
+    let mut text = String::from("--- a/x\n+++ b/x\n@@ -1,10 +1,10 @@\n");
+    for i in 0..9 {
+        text.push_str(&format!("+ new {i}\n"));
+    }
+    text.push_str(" context after truncation\n");
+    let block = default_parse(&text, Some("x")).expect("超限 change 行应截断而非降级");
+    let hunk = &block.hunks[0];
+    assert_eq!(
+        hunk.lines.len(),
+        MAX_CHANGE_LINES_PER_HUNK,
+        "只保留预算内行"
+    );
+    assert_eq!(hunk.truncated_lines, 1, "第 9 个 change 行被截断");
+    assert!(
+        hunk.lines.iter().all(|l| l.kind == DiffHunkLineKind::Add),
+        "截断点之后的 context 不保留"
+    );
+    assert_eq!(block.adds, 9, "被截断的 change 仍计入顶层总数");
+}
+
+/// 超出 hunk 预算的 `--- ` / `+++ ` 行是 hunk 内容，不能当文件头跳过。
+#[test]
+fn parse_overflow_hunk_counts_header_like_changes() {
+    let mut text = String::from("--- a/x\n+++ b/x\n");
+    for i in 0..4 {
+        text.push_str(&format!("@@ -{i},1 +{i},1 @@\n"));
+        text.push_str("-old\n");
+    }
+    text.push_str("@@ -5,1 +5,1 @@\n--- old\n+++ new\n");
+    let block = default_parse(&text, Some("x")).expect("多 hunk 应解析成功");
+    assert_eq!(block.hunks.len(), MAX_HUNKS);
+    assert_eq!(
+        block.more_change_lines, 5,
+        "第二至第四个 hunk 各 1 行 + 溢出 hunk 2 行"
+    );
+    assert_eq!((block.adds, block.dels), (1, 5), "顶层计数含溢出 hunk");
 }
 
 /// 新文件（Write）：`new file mode` 头 → is_new_file，change 上限 6 行。
@@ -276,6 +322,7 @@ fn parse_more_than_max_hunks_counts_remaining() {
     let block = default_parse(&text, Some("x")).expect("多 hunk 应解析成功");
     assert_eq!(block.hunks.len(), MAX_HUNKS, "最多解析 MAX_HUNKS 个 hunk");
     assert_eq!(block.more_change_lines, 5, "剩余 hunk 的 change 行计数");
+    assert_eq!(block.adds, 6, "顶层计数覆盖未建结构的 hunk");
 }
 
 /// 总行数超限 → 静默降级（不构造卡片）。
@@ -316,6 +363,11 @@ fn caller_budget_limits_retention() {
     assert_eq!(block.hunks[0].lines.len(), 2, "每 hunk 最多 2 行");
     assert_eq!(block.hunks[0].truncated_lines, 1, "首个 change 后截断");
     assert_eq!(block.more_change_lines, 1, "第二 hunk 的 change 计数保留");
+    assert_eq!(
+        (block.adds, block.dels),
+        (2, 1),
+        "保留上限不减少顶层 change 总数"
+    );
 }
 
 /// 预算把总行数压到低于输入时，直接回落 None（调用方可用更小预算禁用大卡片）。
@@ -360,6 +412,14 @@ fn summary_write_without_to_separator() {
     assert_eq!(block.path, "/private/tmp/x.txt");
     assert!(block.is_new_file);
     assert_eq!((block.adds, block.dels), (2, 0));
+}
+
+/// 无 `to` 且路径以 `to` 开头时不能被当成分隔符吃掉。
+#[test]
+fn summary_write_path_starting_with_to_is_preserved() {
+    let block = super::parse_edit_write_summary("Wrote 2 lines tools/x.rs", None)
+        .expect("Write 无 to 分隔也应解析成功");
+    assert_eq!(block.path, "tools/x.rs");
 }
 
 /// Edit 加行：`Added N lines to P` → +N（非新文件）。

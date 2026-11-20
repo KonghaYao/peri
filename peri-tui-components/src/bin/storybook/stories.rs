@@ -1198,10 +1198,17 @@ fn render_completion(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, area: Rect) -> bool {
+    let scrollbar_grab = matches!(state, StoryState::Scrollbar { grab: Some(_), .. });
+    let outside = !rect_contains(area, mouse.column, mouse.row);
+    // 滚动条拖拽可能在预览外释放：抓取态下仍要收 Up 事件清 grab，
+    // 普通的外部点击继续忽略。
+    let release_drag =
+        scrollbar_grab && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left));
     if !matches!(
         state,
         StoryState::Document { .. } | StoryState::Streaming(_)
-    ) && !rect_contains(area, mouse.column, mouse.row)
+    ) && outside
+        && !release_drag
     {
         return false;
     }

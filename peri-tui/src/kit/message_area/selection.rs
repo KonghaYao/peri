@@ -563,9 +563,18 @@ pub(super) fn extract_visual_range_index(
                 let p = plain.find(sem.as_str()).unwrap_or(0);
                 (sem, p)
             });
-        // 每个视觉行在该逻辑行 plain text 中的 byte 起始偏移
+        // 中间逻辑行（完整选中）：直接用语义全文。空行也是选区的一部分，
+        // 不能因 `line_byte_range` 返回 None 而跳过（否则 "a\n\nb" 变 "a\nb"）。
+        if li != first && li != last {
+            match &semantic {
+                Some((sem, _)) => parts.push(sem.clone()),
+                None => parts.push(plain),
+            }
+            continue;
+        }
+        // 每个视觉行在该逻辑行 plain text 中的 byte 起始偏移（仅首/末行需要）。
         let row_starts = wrap_row_byte_starts(line, &plain, width);
-        // 首/末行取端点列；中间行由共享布局给出整行范围。
+        // 首/末行取端点列。
         let Some(range) = line_byte_range(
             &plain,
             &row_starts,
@@ -575,21 +584,12 @@ pub(super) fn extract_visual_range_index(
         ) else {
             continue;
         };
-
-        if li == first || li == last {
-            parts.push(map_slice_to_semantic(
-                &plain,
-                range.start,
-                range.end,
-                semantic.as_ref(),
-            ));
-        } else {
-            // 中间行（完整选择）：直接用语义全文
-            match &semantic {
-                Some((sem, _)) => parts.push(sem.clone()),
-                None => parts.push(plain),
-            }
-        }
+        parts.push(map_slice_to_semantic(
+            &plain,
+            range.start,
+            range.end,
+            semantic.as_ref(),
+        ));
     }
     if parts.is_empty() {
         None

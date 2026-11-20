@@ -174,6 +174,24 @@ pub fn wrap_row_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usi
             }
             // Else: trailing padding space, not part of the content.
         }
+        // Ratatui 在单词换行边界会丢弃分隔空白（即使 `trim: false`），例如
+        // "hello world" 在宽度 5 下第二行从 `world` 开始。只按 cell 匹配会让
+        // 下一行起点停在未渲染的空格上——对齐到下一行实际渲染的首个字符。
+        if consumed < total {
+            let next_symbol = (0..width).find_map(|col| {
+                buf.cell((col, row + 1))
+                    .map(|cell| cell.symbol())
+                    .filter(|symbol| !symbol.is_empty())
+            });
+            if let Some(symbol) = next_symbol {
+                while consumed < total
+                    && graphemes[consumed] != symbol
+                    && graphemes[consumed].chars().all(char::is_whitespace)
+                {
+                    consumed += 1;
+                }
+            }
+        }
         starts.push(*grapheme_bytes.get(consumed).unwrap_or(&plain.len()));
     }
     starts.push(plain.len());
@@ -342,6 +360,27 @@ mod tests {
         let end = SelectionPoint::new(2, 3);
         let first = line_byte_range(&plain, &starts, 0..3, start, end).expect("range");
         assert_eq!(&plain[first], "pha beta gam");
+    }
+
+    #[test]
+    fn wrap_start_skips_space_dropped_at_word_boundary() {
+        // Ratatui 的 word wrap 去掉行尾分隔空格：宽度 5 下 "hello world"
+        // 的第二行只渲染 "world"，起点不能停在那个空格上。
+        let line = line("hello world");
+        let plain = line_plain_text(&line);
+        let width = 5;
+        assert_eq!(rendered_rows(&line, width, 2), vec!["hello", "world"]);
+        let starts = wrap_row_byte_starts(&line, &plain, width);
+        assert_eq!(&plain[starts[1]..starts[2]], "world", "第二行从首字符开始");
+        let range = line_byte_range(
+            &plain,
+            &starts,
+            0..2,
+            SelectionPoint::new(1, 0),
+            SelectionPoint::new(1, 5),
+        )
+        .expect("row 1 selection");
+        assert_eq!(&plain[range], "world", "整行选择不带上丢弃的空格");
     }
 
     #[test]

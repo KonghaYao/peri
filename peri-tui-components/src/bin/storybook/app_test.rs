@@ -275,6 +275,33 @@ fn scrollbar_thumb_press_keeps_offset_and_drag_reaches_bottom() {
 }
 
 #[test]
+fn scrollbar_release_outside_preview_clears_grab() {
+    let mut app = App::new(2);
+    app.select_variant(1);
+    let area = Rect::new(0, 10, 40, 10);
+    let press = mouse(MouseEventKind::Down(MouseButton::Left), 0, 15);
+    assert!(handle_story_mouse(&mut app.state, &press, area));
+    let StoryState::Scrollbar { grab, .. } = &app.state else {
+        panic!("expected scrollbar state");
+    };
+    assert_eq!(*grab, Some(0), "press inside the thumb starts the drag");
+
+    let release = mouse(MouseEventKind::Up(MouseButton::Left), 90, 2);
+    assert!(
+        handle_story_mouse(&mut app.state, &release, area),
+        "outside release must be handled while grabbing"
+    );
+    let StoryState::Scrollbar { grab, .. } = &app.state else {
+        panic!("expected scrollbar state");
+    };
+    assert_eq!(*grab, None, "release outside the preview clears the grab");
+
+    // 普通的外部点击仍然忽略，避免误吞其他区域的事件。
+    let outside_click = mouse(MouseEventKind::Down(MouseButton::Left), 90, 2);
+    assert!(!handle_story_mouse(&mut app.state, &outside_click, area));
+}
+
+#[test]
 fn textarea_click_past_last_visual_row_keeps_cursor() {
     let mut app = App::new(0);
     app.select_variant(2);

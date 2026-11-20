@@ -23,11 +23,12 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
 
 /// [`truncate_to_width`] 的可选省略号风格版本。
 pub fn truncate_to_width_with(s: &str, max_width: usize, ellipsis: Ellipsis) -> String {
-    if s.width() <= max_width {
-        return s.to_string();
-    }
+    // 零预算契约优先：零宽组合字符的 `width()` 为 0，不能走下面的原样返回。
     if max_width == 0 {
         return String::new();
+    }
+    if s.width() <= max_width {
+        return s.to_string();
     }
     let marker = match ellipsis {
         Ellipsis::Single => "…".to_string(),
@@ -120,6 +121,11 @@ mod tests {
             "双宽字符放不下时只留省略号"
         );
         assert_eq!(truncate_to_width("", 0), "");
+        assert_eq!(
+            truncate_to_width("\u{301}", 0),
+            "",
+            "零宽组合字符在零预算下仍返回空串"
+        );
     }
 
     /// 刚好填满预算不截断；多一列才补省略号。

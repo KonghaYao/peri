@@ -114,7 +114,8 @@ fn detail_scrollbar_drag_reaches_both_ends_without_thumb_jump() {
     assert!(middle.thumb_start > 0);
     assert_eq!(
         middle.drag_offset(area, area.y + 1 + middle.thumb_start as u16, 0),
-        middle.offset_for_thumb_start(middle.thumb_start)
+        495,
+        "同一 thumb 格内拖拽保持原始偏移（495 反推是 566）"
     );
 }
 

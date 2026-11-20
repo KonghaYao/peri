@@ -126,7 +126,13 @@ pub fn parse_unified_diff(
     let mut is_new_file = false;
     // 首个 hunk 之后的 change 行总数（含预算截断部分）。
     let mut more_change_lines: usize = 0;
+    // 顶层 `+`/`−` 总计数：在保留判断之前累加，截断行与超出 hunk 预算的行同样
+    // 是真实变更，header 计数不能少于实际。
+    let mut adds: usize = 0;
+    let mut dels: usize = 0;
     let mut cur_hunk: Option<DiffHunk> = None;
+    // 当前 hunk 是否已到达截断点——截断点之后的 context 不再保留。
+    let mut hunk_truncated = false;
     // 当前 hunk 的 old/new 行号游标（由 hunk 头起始值初始化）。
     let mut old_no: u32 = 0;
     let mut new_no: u32 = 0;
@@ -172,7 +178,10 @@ pub fn parse_unified_diff(
             }
             // 超出 hunk 预算的部分不再建结构——仅计数其 change 行。
             if hunks.len() >= budget.max_hunks {
-                more_change_lines += count_change_lines(rest);
+                let (more_adds, more_dels) = count_change_lines(rest);
+                adds += more_adds;
+                dels += more_dels;
+                more_change_lines += more_adds + more_dels;
                 break;
             }
             let Some((o, n)) = parse_hunk_header(line) else {
@@ -188,6 +197,7 @@ pub fn parse_unified_diff(
                 lines: Vec::new(),
                 truncated_lines: 0,
             });
+            hunk_truncated = false;
             change_cap = if is_new_file {
                 budget.max_change_lines_new_file
             } else {
@@ -214,19 +224,30 @@ pub fn parse_unified_diff(
         };
         let is_change = matches!(kind, DiffHunkLineKind::Add | DiffHunkLineKind::Del);
         if is_change {
+            if matches!(kind, DiffHunkLineKind::Add) {
+                adds += 1;
+            } else {
+                dels += 1;
+            }
             let change_so_far = h
                 .lines
                 .iter()
                 .filter(|l| matches!(l.kind, DiffHunkLineKind::Add | DiffHunkLineKind::Del))
                 .count();
             if change_so_far >= change_cap || h.lines.len() >= budget.max_lines_per_hunk {
-                // 超上限：hunk 停止收集（含后续 context——截断点之后的行不展示）；
-                // 剩余 change 行计数进 truncated。
+                // 超上限：hunk 停止收集（含后续 context——截断点之后的行不展示）。
+                // 截断行仍推进行号（后续行号依赖它），剩余 change 计数进 truncated。
                 h.truncated_lines += 1;
+                hunk_truncated = true;
+                if matches!(kind, DiffHunkLineKind::Add) {
+                    new_no += 1;
+                } else {
+                    old_no += 1;
+                }
                 continue;
             }
-        } else if h.lines.len() >= budget.max_lines_per_hunk {
-            // context 行超总行数上限——停止收集（change 计数已完成，不再增加）。
+        } else if hunk_truncated || h.lines.len() >= budget.max_lines_per_hunk {
+            // 截断点或总行数上限之后的 context——不再保留。
             continue;
         }
         let (old_line_no, new_line_no) = match kind {
@@ -269,21 +290,8 @@ pub fn parse_unified_diff(
         })
         .sum::<usize>();
 
-    // 顶层 `+`/`−` 总计数 = 全部 hunk 内 change 行数（含截断部分——
-    // 截断行也是真实变更，header 计数不应少于实际）。
-    let (adds, dels) = hunks.iter().fold((0usize, 0usize), |(a, d), h| {
-        let add = h
-            .lines
-            .iter()
-            .filter(|l| matches!(l.kind, DiffHunkLineKind::Add))
-            .count();
-        let del = h
-            .lines
-            .iter()
-            .filter(|l| matches!(l.kind, DiffHunkLineKind::Del))
-            .count();
-        (a + add, d + del)
-    });
+    // 顶层 `+`/`−` 总计数已在扫描时累加（含截断行与超出 hunk 预算的行）——
+    // 截断行也是真实变更，header 计数不应少于实际。
 
     Some(DiffBlock {
         path: path.unwrap_or_default(),
@@ -336,8 +344,13 @@ pub fn parse_edit_write_summary(text: &str, path_hint: Option<&str>) -> Option<D
         .or_else(|| after.strip_prefix("line"))?;
     let after = after.trim_start();
     // Edit 输出含 ` to ` 分隔（"Added 2 lines to P"）；Write 输出无 `to`
-    // （"Wrote 2 lines /path"）。`to` 可选；两侧均需存在路径文本。
-    let after = after.strip_prefix("to").map(str::trim).unwrap_or(after);
+    // （"Wrote 2 lines /path"）。只剥独立的 `to` token——否则 `tools/x.rs`
+    // 会被截成 `ols/x.rs`；两侧均需存在路径文本。
+    let after = after
+        .strip_prefix("to")
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map(str::trim_start)
+        .unwrap_or(after);
     let path = after.trim().to_string();
     if path.is_empty() {
         // 无路径信息（如 "Wrote 3 lines"）——不构造块，保持可合并。
@@ -436,14 +449,34 @@ fn split_hunk_ranges(line: &str) -> (&str, &str) {
     (old, new)
 }
 
-/// 统计文本中 change（`+`/`-` 开头）行数（跳过 `--- ` / `+++ ` / `@@` 头行）。
-/// 头行判定要求 `---`/`+++` 后带空格（git 头格式 `--- a/…`）——否则删除行内容
-/// 以 `--` 开头（行文本 `---foo`）会被误跳过、计数偏低。
-fn count_change_lines(text: &str) -> usize {
-    text.lines()
-        .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
-        .filter(|l| l.starts_with('+') || l.starts_with('-'))
-        .count()
+/// 统计 hunk 内 change（`+`/`-`）行的新增/删除数。
+///
+/// 调用方从 hunk 头之后开始传入文本（首行已在 hunk 内）：hunk 内的
+/// `--- ` / `+++ ` 是真实删除/新增内容（例如删除 `-- old`），不能按文件头
+/// 排除；只有 hunk 之外的头行才跳过。
+fn count_change_lines(text: &str) -> (usize, usize) {
+    let mut in_hunk = true;
+    let mut adds = 0;
+    let mut dels = 0;
+    for line in text.lines() {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        if line.starts_with('+') {
+            adds += 1;
+        } else if line.starts_with('-') {
+            dels += 1;
+        }
+    }
+    (adds, dels)
 }
 
 #[cfg(test)]

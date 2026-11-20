@@ -167,6 +167,8 @@ pub struct VerticalBar {
     pub thumb_len: usize,
     viewport: usize,
     content: usize,
+    /// 原始内容偏移。`thumb_start` 是量化后的格子，同格拖拽要靠它保持不跳动。
+    offset: usize,
 }
 
 impl VerticalBar {
@@ -192,6 +194,7 @@ impl VerticalBar {
             thumb_len,
             viewport,
             content,
+            offset: offset.min(max_offset),
         })
     }
 
@@ -253,7 +256,18 @@ impl VerticalBar {
     pub fn drag_offset(&self, area: Rect, row: u16, grab: u16) -> usize {
         let new_thumb_top = row.saturating_sub(grab);
         let track_cell = new_thumb_top.saturating_sub(area.y).saturating_sub(1) as usize;
-        self.offset_for_thumb_start(track_cell)
+        let span = self.track - self.thumb_len;
+        if span == 0 {
+            // 满轨 thumb 没有可移动空间——保持既有语义返回 0。
+            return 0;
+        }
+        let target = track_cell.min(span);
+        // 偏移→格子是有损映射：格子未变时保留原始偏移，避免同一格内按下即跳动。
+        if target == self.thumb_start {
+            self.offset
+        } else {
+            self.offset_for_thumb_start(target)
+        }
     }
 
     /// Paint `▲`/`▼` ends plus the thumb block in the area's rightmost column,
@@ -500,6 +514,23 @@ mod tests {
         // Moving the thumb up by two cells quantises downward, never out of bounds.
         let up = bar.drag_offset(area, pressed - 2, grab);
         assert!(up < offset && up <= 80);
+    }
+
+    #[test]
+    fn vertical_bar_same_cell_drag_keeps_original_offset() {
+        // 1000 行内容 / 10 行视口：offset 495 落在 thumb 格 4，但 4 反推是 566。
+        // 同一格内按下并拖拽不得把偏移改成 566。
+        let area = vertical_area(10);
+        let bar = vertical_bar(area.height, LONG_CONTENT, LONG_VIEWPORT, 495);
+        assert_eq!(bar.thumb_start, 4);
+        let row = area.y + 1 + bar.thumb_start as u16;
+        assert_eq!(bar.press(area, row), VerticalPress::Thumb { grab: 0 });
+        assert_eq!(bar.drag_offset(area, row, 0), 495, "同格拖拽保持原偏移");
+        // 移到下一格仍按比例映射。
+        assert_eq!(
+            bar.drag_offset(area, row + 1, 0),
+            bar.offset_for_thumb_start(5)
+        );
     }
 
     #[test]

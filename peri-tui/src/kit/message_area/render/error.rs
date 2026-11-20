@@ -25,8 +25,9 @@ pub(super) fn preview_lines(text: &str, width: usize, limit: usize) -> Vec<Strin
                     .expect("error preview starts with one line and never removes it");
                 *last = format!(
                     "{}…",
-                    crate::truncate::truncate_to_width(last, width.saturating_sub(1))
-                        .trim_end_matches('…')
+                    // 省略号由这里追加；用前缀 helper 让正文占满 width - 1 列，
+                    // 不能再让截断函数从预算里扣掉省略号。
+                    peri_tui_components::text::prefix_by_width(last, width.saturating_sub(1))
                 );
                 return lines;
             }
