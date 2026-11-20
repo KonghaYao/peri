@@ -64,6 +64,20 @@ fn bar_chart_shows_every_value_including_zero_and_max() {
 }
 
 #[test]
+fn bar_chart_keeps_combining_graphemes_in_labels() {
+    // tui-chart 按 `chars().take(yw)` 截断 y 标签，含组合字符的标签会丢尾部字符；
+    // 标签必须由渲染侧绘制并完整保留。
+    let lines = lines(
+        "root = BarChart([{label: \"e\u{301}x\", value: 3}, {label: \"ab\", value: 1}])",
+        20,
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("e\u{301}x")),
+        "组合字符标签被截断: {lines:#?}"
+    );
+}
+
+#[test]
 fn sparkline_uses_tui_chart_glyphs_beside_the_value() {
     let lines = lines(
         r#"root = Sparkline([1, 3, 2, 5, 4, 7, 6, 9, 8, 11], "延迟抖动")"#,

@@ -500,11 +500,19 @@ fn bar_chart(
     // 1 行 x 轴 + 1 行刻度 + 至少 2 行绘图区；该高度下每条 bar 正好 1 行。
     let height = (entries.len() + 2).max(4);
     let area = Rect::new(0, 0, width as u16, height as u16);
-    let chart_area = Rect::new(0, 0, chart_width as u16, height as u16);
+    let chart_area = Rect::new(
+        gutter as u16,
+        0,
+        (chart_width - gutter) as u16,
+        height as u16,
+    );
     let mut buffer = Buffer::empty(area);
+    // 标签由本函数绘制：tui-chart 按 `chars().take(yw)` 截断 y 标签，
+    // 组合字符（如 e + U+0301）会被截掉尾部字符；空标签让图表的 gutter 归零，
+    // 坐标轴仍落在同一列（area.x 为标签保留的 gutter，轴在 gutter 列）。
     let groups = entries
         .iter()
-        .map(|(label, value, _)| BarGroup::new(label.clone(), [*value]))
+        .map(|(_, value, _)| BarGroup::new(String::new(), [*value]))
         .collect::<Vec<_>>();
     BarChart::new(groups)
         .orientation(BarOrientation::Horizontal)
@@ -512,13 +520,21 @@ fn bar_chart(
         .max(max)
         .theme(theme_for(theme))
         .render(chart_area, &mut buffer);
-    let value_style = Style::default().fg(theme.component.markdown.text);
-    for (row, (_, _, text)) in entries.iter().enumerate() {
-        // 数值列右对齐，与旧渲染器的补空格行为一致。
+    let label_style = Style::default().fg(theme.component.markdown.text);
+    for (row, (label, _, text)) in entries.iter().enumerate() {
+        // y 标签右对齐到轴列，数值列右对齐，与旧渲染器的空格补齐行为一致。
+        buffer.set_string(
+            gutter.saturating_sub(label.width()) as u16,
+            row as u16,
+            label,
+            label_style,
+        );
         let x = width.saturating_sub(text.width());
-        buffer.set_string(x as u16, row as u16, text, value_style);
+        buffer.set_string(x as u16, row as u16, text, label_style);
     }
-    if (0..chart_width).all(|x| (0..height).all(|y| buffer[(x as u16, y as u16)].symbol() == " ")) {
+    if (gutter..chart_width)
+        .all(|x| (0..height).all(|y| buffer[(x as u16, y as u16)].symbol() == " "))
+    {
         return muted_error("bar chart needs more width", width, theme);
     }
     let heading = Style::default()
