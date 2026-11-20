@@ -32,6 +32,7 @@ use super::ThreadMeta;
 use super::WorkState;
 #[cfg(test)]
 use super::{admission_gate, tree_query_probe};
+use peri_acp_types::session_resources::SessionResourceErrorKind;
 
 /// 根 thread 的恢复协调器；构造一次，由 `ServerLoop` 跨请求复用。
 pub(crate) struct HostSessionRecovery {
@@ -445,20 +446,48 @@ impl HostSessionRecovery {
     ///
     /// 记录带发布代次；实例被替换或经显式 load 推进代次后，记录不再代表它。
     async fn record_recovered_child(&self, root: &ThreadId, publication: &RestorePublication) {
-        let published = {
+        #[cfg(test)]
+        admission_gate::wait(
+            publication.session_id.as_str(),
+            admission_gate::PausePoint::BeforeRecordRecoveredChild,
+        )
+        .await;
+        {
             let states = self.sessions.lock().await;
-            states
+            if !states
                 .get(&publication.session_id)
                 .is_some_and(|state| state.session_generation == publication.session_generation)
-        };
-        if !published {
+            {
+                return;
+            }
+            self.manager.record_recovered_child(
+                &publication.session_id,
+                root,
+                publication.session_generation,
+            );
+        }
+        // 父树删除成功后持久行已整树消失，删除流程只快照它完成前登记的 child。
+        // 本次发布若晚于该快照，只能由恢复方复查持久树并自行收口。
+        let tree_deleted = matches!(
+            self.resources.load_session_meta(root).await,
+            Err(error) if matches!(error.kind(), SessionResourceErrorKind::NotFound)
+        );
+        if !tree_deleted {
             return;
         }
-        self.manager.record_recovered_child(
+        let settled = session_lifecycle::reclaim_orphan_recovered_child(
+            self.cfg.as_ref(),
+            &self.sessions,
             &publication.session_id,
-            root,
             publication.session_generation,
-        );
+        )
+        .await;
+        if !settled {
+            tracing::warn!(
+                session_id = %publication.session_id,
+                "recovery: orphan child reclaim incomplete after parent tree delete"
+            );
+        }
     }
 
     /// 拒绝本次冷装配：只回收尚无 turn 占用的本次发布。

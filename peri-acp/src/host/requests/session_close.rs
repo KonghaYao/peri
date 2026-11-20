@@ -3,6 +3,7 @@
 use crate::host::workspace;
 use crate::host::AcpServerConfig;
 use crate::host::SessionState;
+use crate::host::SharedSessions;
 use crate::transport::types::AcpError;
 
 use peri_acp_types::session_resources::{CloseSettlement, SessionResourceErrorKind};
@@ -45,6 +46,7 @@ pub(in crate::host::requests) async fn close_session(
             }
             release_runtime_handle(cfg, session_id).await?;
             sessions.remove(session_id);
+            cfg.session_manager.forget_recovered_child(session_id);
             return Ok(());
         }
         Err(error) => return Err(workspace::resource_error(error)),
@@ -69,6 +71,7 @@ pub(in crate::host::requests) async fn close_session(
             .map_err(workspace::workspace_error)?;
         release_runtime_handle(cfg, session_id).await?;
         sessions.remove(session_id);
+        cfg.session_manager.forget_recovered_child(session_id);
         return Ok(());
     }
     if sessions.get(session_id).is_some_and(|state| state.closing)
@@ -86,6 +89,7 @@ pub(in crate::host::requests) async fn close_session(
             CloseSettlement::Finished => {
                 release_runtime_handle(cfg, session_id).await?;
                 sessions.remove(session_id);
+                cfg.session_manager.forget_recovered_child(session_id);
                 return Ok(());
             }
             CloseSettlement::Unknown => {
@@ -210,6 +214,7 @@ pub(in crate::host::requests) async fn close_session(
     }
     release_runtime_handle(cfg, session_id).await?;
     sessions.remove(session_id);
+    cfg.session_manager.forget_recovered_child(session_id);
     Ok(())
 }
 
@@ -280,15 +285,19 @@ async fn reclaim_recovered_child(
         None => true,
     };
     // Controller 按轮登记执行句柄，删除后不会再有 close 请求替它释放。
-    if let Err(error) = release_runtime_handle(local, session_id).await {
-        tracing::warn!(
-            session_id,
-            code = error.code,
-            error = %error.message,
-            "recovered child runtime handle release incomplete after parent tree delete"
-        );
-    }
-    if manager_settled && environment_settled {
+    let runtime_settled = match release_runtime_handle(local, session_id).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                code = error.code,
+                error = %error.message,
+                "recovered child runtime handle release incomplete after parent tree delete"
+            );
+            false
+        }
+    };
+    if manager_settled && environment_settled && runtime_settled {
         sessions.remove(session_id);
         true
     } else {
@@ -296,8 +305,36 @@ async fn reclaim_recovered_child(
             session_id,
             manager_settled,
             environment_settled,
+            runtime_settled,
             "recovered child reclaim incomplete; retained for host shutdown"
         );
         false
     }
+}
+
+/// 恢复发布晚于父树删除快照时，由恢复方按同一条收口顺序拆除。
+///
+/// 删除流程只回收它成功删除后快照到的登记；晚到的登记不会被它看到。调用方
+/// 已确认持久树 `NotFound`，这里按发布代次复核后强制收口，避免留下无主 child。
+pub(crate) async fn reclaim_orphan_recovered_child(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    child_session_id: &str,
+    session_generation: u64,
+) -> bool {
+    let mut states = sessions.lock().await;
+    if states
+        .get(child_session_id)
+        .map(|state| state.session_generation)
+        != Some(session_generation)
+    {
+        // 实例已关闭或推进到新代次：本记录不再代表它。
+        cfg.session_manager.forget_recovered_child(child_session_id);
+        return true;
+    }
+    let settled = reclaim_recovered_child(cfg, &mut states, child_session_id).await;
+    if settled {
+        cfg.session_manager.forget_recovered_child(child_session_id);
+    }
+    settled
 }

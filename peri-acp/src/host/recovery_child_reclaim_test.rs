@@ -313,3 +313,60 @@ async fn host_shutdown_still_clears_retained_recovered_child() {
         "宿主 shutdown 必须移除恢复子登记"
     );
 }
+
+/// 恢复登记晚于父树删除快照：删除看不到该登记，恢复方复查持久树后自行回收。
+#[tokio::test]
+async fn child_registered_after_parent_tree_delete_snapshot_is_reclaimed() {
+    use crate::host::recovery::admission_gate::{self, PausePoint};
+    use peri_acp_types::thread::ThreadId;
+
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-race", &root).await;
+    harness.set_working("child-race").await;
+    let recovery = Arc::new(harness.recovery());
+    let gate = admission_gate::install("child-race", PausePoint::BeforeRecordRecoveredChild);
+
+    let entering = {
+        let recovery = Arc::clone(&recovery);
+        let root = ThreadId::from(root.clone());
+        tokio::spawn(async move { recovery.enter(&root).await })
+    };
+    gate.wait_arrived(1).await;
+
+    delete_session(&harness, &root)
+        .await
+        .expect("父树删除必须成功");
+    assert!(
+        harness.sessions.lock().await.contains_key("child-race"),
+        "前提：删除快照早于恢复登记，child 暂未被回收"
+    );
+
+    gate.release(1);
+    entering
+        .await
+        .expect("进入任务不得 panic")
+        .expect("准备本身不是请求错误");
+
+    assert!(
+        !harness.sessions.lock().await.contains_key("child-race"),
+        "晚到的恢复登记必须由恢复方自行回收"
+    );
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session("child-race")
+            .is_none(),
+        "晚到的恢复登记必须从 manager 移除"
+    );
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .recovered_children_of_tree(&root)
+            .is_empty(),
+        "该树的恢复登记必须排空"
+    );
+    admission_gate::uninstall("child-race", PausePoint::BeforeRecordRecoveredChild);
+}

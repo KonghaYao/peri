@@ -439,8 +439,8 @@ impl SessionManager {
 
     /// Transfer the removed record to the host's retryable exit context.
     pub(crate) fn take_for_close(&self, session_id: &str) -> Option<AcpSession> {
-        // 会话实例已确定性退出：恢复登记随之失效，不能留给一次父树删除去回收。
-        self.inner.recovered_children.remove(session_id);
+        // 恢复登记不在这里移除：资源收口仍可能失败并把会话放回，删除流程需要
+        // 凭登记重试回收；由确定性退出完成的调用方在成功路径清理。
         self.inner.sessions.remove(session_id).map(|(_, session)| {
             session.task_events_cancel.cancel();
             if let Some(port) = &session.mcp_subscription {
