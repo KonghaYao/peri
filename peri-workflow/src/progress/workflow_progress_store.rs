@@ -292,6 +292,20 @@ impl WorkflowProgressStore {
         }
     }
 
+    /// 最近的终态到期时刻（`completed_at + COMPLETED_RETENTION`）。
+    ///
+    /// 与 [`Self::cleanup_completed_at`] 的保留判定同源：运行中（或缺少完成时刻）
+    /// 的 run 没有到期时刻。`None` = 当前没有需要唤醒的清扫。
+    pub(crate) fn next_terminal_expiry(&self) -> Option<std::time::Instant> {
+        self.runs
+            .read()
+            .values()
+            .filter(|tracked| !matches!(tracked.progress.status, RunStatus::Running))
+            .filter_map(|tracked| tracked.progress.completed_at)
+            .filter_map(|completed_at| completed_at.checked_add(Self::COMPLETED_RETENTION))
+            .min()
+    }
+
     /// 生产者结束（runner 返回、completion 投影完成后调用）。
     ///
     /// run 仍可见时只登记标记，等清理退役后再回收外部逐 run 簿记——可见 run 的

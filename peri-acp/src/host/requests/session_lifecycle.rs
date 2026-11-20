@@ -78,6 +78,7 @@ pub(crate) use session_tasks::{handle_bg_tasks, handle_cancel_bg_task};
 #[path = "session_close.rs"]
 mod close;
 pub(super) use close::close_session;
+pub(crate) use close::reclaim_orphan_recovered_child;
 
 pub(crate) use session_lifecycle_dispatch::handle_close;
 

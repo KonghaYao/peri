@@ -24,6 +24,9 @@ struct LayoutSlot {
     /// 第 0 行，此时可点击的 header 是第 1 行。点击命中只认这一行（正文行留给
     /// 文本选区）。
     header_local: u8,
+    /// 展开的正文空档组：成员标题逻辑行 → 成员 FoldKey。与行生存期解耦
+    /// （行被淘汰后命中表仍可判定）。
+    fold_hits: Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>>,
 }
 
 /// entry 的可点击 header 逻辑行下标：首行是过程区转场台阶时为 1，否则 0。
@@ -150,6 +153,7 @@ impl SlotIndex {
             visual: visual_prefix.last().copied().unwrap_or(0),
             kind: NodeKind::Leaf(LayoutSlot {
                 header_local: header_local_of(&lines),
+                fold_hits: Arc::clone(lines.fold_hits()),
                 lines: Arc::downgrade(&lines),
                 resident: retain.then_some(lines),
                 visual_prefix: Arc::new(visual_prefix),
@@ -183,6 +187,7 @@ impl SlotIndex {
             visual: old.visual_prefix.last().copied().unwrap_or(0),
             kind: NodeKind::Leaf(LayoutSlot {
                 header_local: header_local_of(&lines),
+                fold_hits: Arc::clone(lines.fold_hits()),
                 lines: Arc::downgrade(&lines),
                 resident: None,
                 visual_prefix: Arc::clone(&old.visual_prefix),
@@ -195,6 +200,19 @@ impl SlotIndex {
     pub(super) fn header_local(&self, slot: usize) -> usize {
         self.slot(slot)
             .map_or(0, |(leaf, _, _)| usize::from(leaf.header_local))
+    }
+
+    /// slot 内该逻辑行是否是一张展开组的成员标题行——是则返回该成员的 FoldKey。
+    pub(super) fn member_fold_hit(
+        &self,
+        slot: usize,
+        local_logical: usize,
+    ) -> Option<crate::kit::tui_render_unit::FoldKey> {
+        let (leaf, _, _) = self.slot(slot)?;
+        leaf.fold_hits
+            .iter()
+            .find(|(row, _)| *row == local_logical)
+            .map(|(_, key)| key.clone())
     }
 
     fn slot(&self, slot: usize) -> Option<(&LayoutSlot, usize, usize)> {
@@ -320,7 +338,8 @@ impl SlotIndex {
                 }
                 None => SlotLines::single(Arc::clone(cache.lines())),
             })
-            .with_genui_ranges(&cache.markdown_lines().genui_ranges),
+            .with_genui_ranges(&cache.markdown_lines().genui_ranges)
+            .with_fold_hits(Arc::clone(cache.fold_hits())),
         ))
     }
     #[cfg(test)]

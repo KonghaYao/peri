@@ -8,6 +8,7 @@ use super::ScrollPos;
 use super::ScrollbarDragState;
 use super::ScrollbarFields;
 use super::WrappedLineInfo;
+use crate::kit::message_area::entry_nav::EntryClickHit;
 
 use super::event;
 
@@ -522,13 +523,13 @@ fn test_click_policy_depends_on_entry_action() {
     assert!(!super::is_click_for(&body, (21, 10)), "正文 +1 列 = 拖拽");
     assert!(!super::is_click_for(&body, (20, 11)), "正文 +1 行 = 拖拽");
     assert_eq!(
-        super::drag_step(Some(body), (21, 10), true),
-        DragAction::Upgrade(body),
+        super::drag_step(Some(body.clone()), (21, 10), true),
+        DragAction::Upgrade(body.clone()),
         "节流窗口内 1 列短拖也必须升级"
     );
 
     let header = GesturePending {
-        entry_hit: Some((3, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 3 }),
         ..body
     };
     assert!(
@@ -563,7 +564,7 @@ fn test_release_upgrades_body_on_final_displacement() {
     );
 
     let header = GesturePending {
-        entry_hit: Some((3, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 3 }),
         ..body
     };
     assert!(
@@ -650,7 +651,7 @@ fn test_entry_click_target_header_line_only() {
     let offsets = vec![0usize, 2usize];
     assert_eq!(
         super::entry_click_target(&wm, &offsets, 0),
-        Some((0, 0)),
+        Some(EntryClickHit::Header { slot: 0 }),
         "slot0 header"
     );
     assert_eq!(
@@ -665,7 +666,7 @@ fn test_entry_click_target_header_line_only() {
     );
     assert_eq!(
         super::entry_click_target(&wm, &offsets, 3),
-        Some((1, 0)),
+        Some(EntryClickHit::Header { slot: 1 }),
         "slot1 header"
     );
     assert_eq!(
@@ -681,8 +682,14 @@ fn test_entry_click_target_header_line_only() {
 fn test_entry_click_target_wrapped_header_all_visual_rows_hit() {
     let wm = vec![wm_entry(0, 0, 2, 0)];
     let offsets = vec![0usize];
-    assert_eq!(super::entry_click_target(&wm, &offsets, 0), Some((0, 0)));
-    assert_eq!(super::entry_click_target(&wm, &offsets, 1), Some((0, 0)));
+    assert_eq!(
+        super::entry_click_target(&wm, &offsets, 0),
+        Some(EntryClickHit::Header { slot: 0 })
+    );
+    assert_eq!(
+        super::entry_click_target(&wm, &offsets, 1),
+        Some(EntryClickHit::Header { slot: 0 })
+    );
 }
 
 /// 过程区转场台阶（` ╰─╮`）占第 0 行时，可点击 header 顺延到第 1 行：
@@ -714,7 +721,7 @@ fn test_entry_click_target_index_skips_leading_step_row() {
     );
     assert_eq!(
         super::gesture::entry_click_target_index(&index, 1),
-        Some((0, 1)),
+        Some(EntryClickHit::Header { slot: 0 }),
         "点击工具/thinking 的单行 header 命中该项"
     );
 
@@ -728,7 +735,7 @@ fn test_entry_click_target_index_skips_leading_step_row() {
     assert_eq!(index.header_local(0), 0);
     assert_eq!(
         super::gesture::entry_click_target_index(&index, 0),
-        Some((0, 0))
+        Some(EntryClickHit::Header { slot: 0 })
     );
 }
 
@@ -775,7 +782,11 @@ fn test_gesture_down_freeze_with_scroll_and_prefix() {
         (15, 4),
         "visual = 视觉行/列（row − area.y + scroll_y、column − area.x）——Down 时冻结"
     );
-    assert_eq!(p.entry_hit, Some((3, 0)), "slot3 header 在视觉行 15");
+    assert_eq!(
+        p.entry_hit,
+        Some(EntryClickHit::Header { slot: 3 }),
+        "slot3 header 在视觉行 15"
+    );
     // 正文行（visual 16 = slot3 第 2 行）不命中——展开动作只挂 header
     let p2 = super::freeze_down((10, 7), (16, 4), &wm, &offsets);
     assert_eq!(p2.entry_hit, None, "正文行不命中");
@@ -788,16 +799,16 @@ fn test_drag_step_within_tolerance_keeps_pending() {
     let p = GesturePending {
         screen: (10, 5),
         visual: (4, 4),
-        entry_hit: Some((3, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 3 }),
     };
     // 容差内（+1 列）：Pending 原样保留（handle_event 中不触碰 text_sel/gesture）
     assert_eq!(
-        super::drag_step(Some(p), (11, 5), false),
+        super::drag_step(Some(p.clone()), (11, 5), false),
         DragAction::KeepPending
     );
     // 节流窗口内且容差内：同样零副作用（节流照常）
     assert_eq!(
-        super::drag_step(Some(p), (11, 5), true),
+        super::drag_step(Some(p.clone()), (11, 5), true),
         DragAction::Throttled
     );
     // 无 Down 记录（事件丢失）：update_drag 空转（现状行为）
@@ -818,7 +829,7 @@ fn test_drag_step_beyond_tolerance_upgrades() {
         entry_hit: None,
     };
     // +5 行（超容差）
-    let DragAction::Upgrade(got) = super::drag_step(Some(p), (10, 10), false) else {
+    let DragAction::Upgrade(got) = super::drag_step(Some(p.clone()), (10, 10), false) else {
         panic!("超容差 Drag 必须升级为拖拽");
     };
     assert_eq!(got.visual, (4, 4), "start 必须是 Down 冻结的 visual");
@@ -836,8 +847,8 @@ fn test_drag_step_upgrade_within_throttle_window() {
         entry_hit: None,
     };
     assert_eq!(
-        super::drag_step(Some(p), (10, 10), true),
-        DragAction::Upgrade(p),
+        super::drag_step(Some(p.clone()), (10, 10), true),
+        DragAction::Upgrade(p.clone()),
         "节流窗口内越容差 Drag 必须升级（升级判定先于节流）"
     );
 }

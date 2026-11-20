@@ -487,7 +487,8 @@ impl Transcript {
                 }
                 None => SlotLines::single(Arc::clone(cache.entry.lines())),
             })
-            .with_genui_ranges(&cache.entry.markdown_lines().genui_ranges),
+            .with_genui_ranges(&cache.entry.markdown_lines().genui_ranges)
+            .with_fold_hits(Arc::clone(cache.entry.fold_hits())),
         );
         if !layout_changed {
             Arc::make_mut(&mut self.index).replace_lines(slot, Arc::clone(&lines));

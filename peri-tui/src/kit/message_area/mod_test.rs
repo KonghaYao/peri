@@ -9,6 +9,7 @@ use super::ImageLineHit;
 use super::ImagePreviewHoverGate;
 use super::KeepGoingLayout;
 use super::TuiRenderUnit;
+use crate::kit::message_area::entry_nav::EntryClickHit;
 #[cfg(target_os = "macos")]
 use crate::kit::message_area::image_action::OpenImageError;
 
@@ -884,20 +885,20 @@ fn test_entry_click_decision_pending_header_hit_returns_slot() {
     let p = GesturePending {
         screen: (10, 6),
         visual: (15, 4),
-        entry_hit: Some((3, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 3 }),
     };
     assert_eq!(
         super::entry_click_decision(Some(&p), 6, area, false),
-        Some(3)
+        Some(EntryClickHit::Header { slot: 3 })
     );
     // 边界行有效：顶行（area.y）与底行（area.y + height - 1）都在 area 内
     assert_eq!(
         super::entry_click_decision(Some(&p), 1, area, false),
-        Some(3)
+        Some(EntryClickHit::Header { slot: 3 })
     );
     assert_eq!(
         super::entry_click_decision(Some(&p), 24, area, false),
-        Some(3)
+        Some(EntryClickHit::Header { slot: 3 })
     );
 }
 
@@ -918,11 +919,11 @@ fn test_entry_click_decision_up_settle_states() {
     let hit = GesturePending {
         screen: (10, 5),
         visual: (5, 4),
-        entry_hit: Some((1, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 1 }),
     };
     assert_eq!(
         super::entry_click_decision(Some(&hit), 5, area, false),
-        Some(1)
+        Some(EntryClickHit::Header { slot: 1 })
     );
     // Pending + 正文行（冻结 entry_hit 为 None）→ 不结算为 entry 单击
     let body = GesturePending {
@@ -949,12 +950,12 @@ fn test_entry_click_decision_no_drag_overtolerance_up_is_click() {
     let p = GesturePending {
         screen: (10, 6), // Down 屏幕坐标 (col, row)
         visual: (5, 4),
-        entry_hit: Some((1, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 1 }),
     };
     // Up：row 16（与 Down 差 10 行，超容差），但无 Drag 事件 → 仍判单击
     assert_eq!(
         super::entry_click_decision(Some(&p), 16, area, false),
-        Some(1),
+        Some(EntryClickHit::Header { slot: 1 }),
         "无 Drag 事件的超容差 Up 必须判单击（升级判定唯一时机是 Drag 事件）"
     );
 }
@@ -966,7 +967,7 @@ fn test_entry_click_decision_row_outside_area_returns_none() {
     let p = GesturePending {
         screen: (10, 6),
         visual: (15, 4),
-        entry_hit: Some((3, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 3 }),
     };
     assert_eq!(
         super::entry_click_decision(Some(&p), 0, area, false),
@@ -988,7 +989,7 @@ fn test_entry_click_decision_scrollbar_col_returns_none() {
     let p = GesturePending {
         screen: (85, 6),
         visual: (15, 4),
-        entry_hit: Some((3, 0)),
+        entry_hit: Some(EntryClickHit::Header { slot: 3 }),
     };
     assert_eq!(super::entry_click_decision(Some(&p), 6, area, true), None);
 }

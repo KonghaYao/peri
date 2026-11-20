@@ -417,38 +417,6 @@ fn group_title(run: &[TuiRenderUnit]) -> String {
     title
 }
 
-/// 展开组成员按原样渲染——组内不再逐项折叠：工具 / reasoning / 提醒统一
-/// 置为 `Expanded`（组折叠态是唯一折叠层级）。
-fn expand_group_member(vm: TuiRenderUnit) -> TuiRenderUnit {
-    match vm {
-        TuiRenderUnit::TuiToolCard(mut t) => {
-            if t.fold != FoldState::Expanded {
-                t.fold = FoldState::Expanded;
-                t.recompute_hash();
-            }
-            TuiRenderUnit::TuiToolCard(t)
-        }
-        TuiRenderUnit::TuiAssistantBubble(arc) => {
-            let mut bubble = (*arc).clone();
-            if let Some(reasoning) = bubble.reasoning.as_mut()
-                && reasoning.fold != FoldState::Expanded
-            {
-                reasoning.fold = FoldState::Expanded;
-                bubble.recompute_hash();
-            }
-            TuiRenderUnit::TuiAssistantBubble(bubble.into())
-        }
-        TuiRenderUnit::TuiSystemReminder(mut reminder) => {
-            if reminder.fold != FoldState::Expanded {
-                reminder.fold = FoldState::Expanded;
-                reminder.recompute_hash();
-            }
-            TuiRenderUnit::TuiSystemReminder(reminder)
-        }
-        other => other,
-    }
-}
-
 /// 由一段连续过程单元构造折叠组。
 fn build_collapsed_group(
     run: Vec<TuiRenderUnit>,
@@ -465,7 +433,9 @@ fn build_collapsed_group(
         title: group_title(&run),
         count: run.len() as u32,
         failed_count,
-        view_models: run.into_iter().map(expand_group_member).collect(),
+        // 成员保留折叠 pass 给出的 fold（默认 Collapsed，FOLD_OVERRIDES 优先）：
+        // 组行只折叠一层，展开后每个成员仍是自己的折叠态、可单独点开。
+        view_models: run,
         fold,
         content_hash: 0,
     };

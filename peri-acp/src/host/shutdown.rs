@@ -113,6 +113,7 @@ pub(super) async fn shutdown_host(
             .expect("closing session retained");
         if session.close_resources().await {
             closing_sessions.remove(&session_id);
+            cfg.session_manager.forget_recovered_child(&session_id);
         } else {
             tracing::warn!(session_id = %session_id, "session resources retained for shutdown retry");
         }

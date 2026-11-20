@@ -8,6 +8,7 @@ use std::fmt::{self, Debug, Formatter};
 mod close_gate;
 pub mod event_log;
 mod events;
+mod expiry;
 pub mod params;
 mod tasks;
 
@@ -39,6 +40,7 @@ use crate::runner::{
 };
 
 use events::RuntimeProgressObserver;
+use expiry::ProgressExpirySweeper;
 
 #[cfg(test)]
 use workflow_runtime::RUN_EVENT_LOG_CAPACITY;

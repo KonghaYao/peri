@@ -32,6 +32,7 @@ use super::ThreadMeta;
 use super::WorkState;
 #[cfg(test)]
 use super::{admission_gate, tree_query_probe};
+use peri_acp_types::session_resources::SessionResourceErrorKind;
 
 /// 根 thread 的恢复协调器；构造一次，由 `ServerLoop` 跨请求复用。
 pub(crate) struct HostSessionRecovery {
@@ -429,9 +430,63 @@ impl HostSessionRecovery {
         };
         match outcome {
             // 已接纳并放行，或已有执行复用本实例：保留本次装配。
-            ThreadOutcome::Injected { .. } | ThreadOutcome::Reused => outcome,
+            ThreadOutcome::Injected { .. } | ThreadOutcome::Reused => {
+                if let Some(publication) = publication.as_ref() {
+                    self.record_recovered_child(&partition.root_thread_id, publication)
+                        .await;
+                }
+                outcome
+            }
             // 本次冷装配最终不能续跑：回收发布，避免 manager-only 残留。
             other => self.reject_cold_child(publication, other).await,
+        }
+    }
+
+    /// 记录本次恢复冷装配的 child：客户端没有与它绑定的会话，父树删除时由宿主代收。
+    ///
+    /// 记录带发布代次；实例被替换或经显式 load 推进代次后，记录不再代表它。
+    async fn record_recovered_child(&self, root: &ThreadId, publication: &RestorePublication) {
+        #[cfg(test)]
+        admission_gate::wait(
+            publication.session_id.as_str(),
+            admission_gate::PausePoint::BeforeRecordRecoveredChild,
+        )
+        .await;
+        {
+            let states = self.sessions.lock().await;
+            if !states
+                .get(&publication.session_id)
+                .is_some_and(|state| state.session_generation == publication.session_generation)
+            {
+                return;
+            }
+            self.manager.record_recovered_child(
+                &publication.session_id,
+                root,
+                publication.session_generation,
+            );
+        }
+        // 父树删除成功后持久行已整树消失，删除流程只快照它完成前登记的 child。
+        // 本次发布若晚于该快照，只能由恢复方复查持久树并自行收口。
+        let tree_deleted = matches!(
+            self.resources.load_session_meta(root).await,
+            Err(error) if matches!(error.kind(), SessionResourceErrorKind::NotFound)
+        );
+        if !tree_deleted {
+            return;
+        }
+        let settled = session_lifecycle::reclaim_orphan_recovered_child(
+            self.cfg.as_ref(),
+            &self.sessions,
+            &publication.session_id,
+            publication.session_generation,
+        )
+        .await;
+        if !settled {
+            tracing::warn!(
+                session_id = %publication.session_id,
+                "recovery: orphan child reclaim incomplete after parent tree delete"
+            );
         }
     }
 

@@ -21,7 +21,7 @@ use crate::progress::ProgressObserver;
 use crate::protocol::ProgressEvent;
 
 use crate::runtime::event_log::{BoundedEventLog, EventLogPage};
-use crate::runtime::{WorkflowResourceUpdate, WorkflowTaskTable};
+use crate::runtime::{ProgressExpirySweeper, WorkflowResourceUpdate, WorkflowTaskTable};
 
 /// run 事件类型（`ProgressEvent` 的粗分类，便于过滤与展示）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -137,6 +137,7 @@ pub(crate) struct RuntimeProgressObserver {
     events: Arc<WorkflowRunEventLog>,
     updates: broadcast::Sender<WorkflowResourceUpdate>,
     tasks: Arc<WorkflowTaskTable>,
+    expiry: Arc<ProgressExpirySweeper>,
 }
 
 impl RuntimeProgressObserver {
@@ -144,11 +145,13 @@ impl RuntimeProgressObserver {
         events: Arc<WorkflowRunEventLog>,
         updates: broadcast::Sender<WorkflowResourceUpdate>,
         tasks: Arc<WorkflowTaskTable>,
+        expiry: Arc<ProgressExpirySweeper>,
     ) -> Self {
         Self {
             events,
             updates,
             tasks,
+            expiry,
         }
     }
 }
@@ -175,6 +178,14 @@ impl ProgressObserver for RuntimeProgressObserver {
         // 索引订阅者（审查 F5：索引不能只靠启动时一次补偿刷新）。
         if kind != WorkflowRunEventKind::Log {
             let _ = self.updates.send(WorkflowResourceUpdate::RunsIndex);
+        }
+        // 终态开窗或新 run 到达：让实例级清扫按当前快照重新计算最近的到期时刻
+        // （最后一个 run 结束后即使没有后续 workflow 工作也按期释放，P1-B）。
+        if matches!(
+            kind,
+            WorkflowRunEventKind::RunStarted | WorkflowRunEventKind::RunDone
+        ) {
+            self.expiry.arm();
         }
     }
 
