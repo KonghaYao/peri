@@ -27,4 +27,4 @@ pub use config::{ConfigError, SwarmConfig};
 pub use domain::{ErrorCode, ItemPage, ItemView, LogicalId, SessionView, StreamEvent, SwarmError};
 pub use http::{build_router, AppState};
 pub use service::{InMemorySwarmService, SwarmService};
-pub use store::{MemorySwarmStore, RemoteSwarmStore, SwarmStateStore, SwarmStore};
+pub use store::{MemorySwarmStore, SwarmStateStore, SwarmStore};

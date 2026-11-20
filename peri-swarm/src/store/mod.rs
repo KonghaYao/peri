@@ -1,21 +1,19 @@
 //! Persistence port for Swarm-owned facts (`design §4.3`–§4.5).
 //!
-//! Since S6c1a the Swarm facts live in their **own** Loom database:
-//! [`SwarmStateStore`] opens `PERI_SWARM_STATE_STORE` directly, owns its DDL and
-//! records `swarm_meta.version`. It is what `bootstrap` installs.
+//! Swarm facts live in their **own** Loom database (`design §4.1`): after
+//! [`SwarmStateStore`] was added in S6c1a, bootstrap opens
+//! `PERI_SWARM_STATE_STORE` directly, owns its DDL and records
+//! `swarm_meta.version`. The Peri session schema never carries `swarm_*`
+//! objects.
 //!
-//! S3 shipped the trait plus an in-memory fake, and S6b added
-//! [`RemoteSwarmStore`], which maps the rows onto the `peri-resources` port
-//! (`design §4.1`) sharing the Peri session connection. That adapter is retained
-//! only until S6c1b removes the single-database path; `bootstrap` no longer uses
-//! it.
+//! S3 shipped the trait plus an in-memory fake; S6c1b removed the S6b adapter
+//! that had mapped these rows onto a `peri-resources` port on the shared
+//! session connection. There is one production implementation now.
 
 mod memory;
-mod remote;
 mod turso;
 
 pub use memory::MemorySwarmStore;
-pub use remote::RemoteSwarmStore;
 pub use turso::{
     SwarmStateError, SwarmStateStore, SwarmStateStoreConfig, SWARM_STATE_SCHEMA_VERSION,
 };

@@ -1,24 +1,34 @@
-//! S6b2/S6b3: one real Loom logical database carries Peri session/history/MQ
-//! facts **and** the Swarm rows (`design §4.1`, §4.2, §7.2-S6).
+//! S6b2/S6b3/S6c1b: a real Loom deployment with **two** logical databases: the
+//! Peri session store (session/history/MQ facts) and the independent Swarm
+//! state store (`swarm_meta` + `swarm_*` rows, `design §4.1`, §4.3, §7.2-S6).
 //!
 //! Both tests are ignored by default because they need a running Loom. They are
 //! driven purely by environment:
 //!
-//! - `PERI_SWARM_LOOM_LOCATOR` — the Hrana base URL of the database branch, e.g.
-//!   `http://127.0.0.1:9497/db/local_default/demo/main/`.
+//! - `PERI_SWARM_LOOM_LOCATOR` — the Hrana base URL of the Peri session database
+//!   branch, e.g. `http://127.0.0.1:9497/db/local_default/demo/main/`.
+//! - `PERI_SWARM_STATE_STORE` — the Hrana base URL of the Swarm state database.
+//!   It must be a different logical database (the bootstrap rejects a shared
+//!   locator); the test asserts the two locators differ.
 //! - `PERI_SWARM_STORE_TOKEN` — the Loom project API key. Only the **name** is
 //!   part of the deployment (credential source); the test never reads, prints,
 //!   or embeds the value.
 //! - `HOME` — a scratch directory (set by the harness). The test asserts that no
 //!   local Peri session database appears under it.
 //!
-//! What is real here: Loom, the Peri ACP host, the session/history/MQ writes,
-//! the `swarm_*` rows (including the turn's delta + complete items), the close,
-//! and the reopen on a new connection. The model endpoint stays a deterministic
-//! stub (`design §7.3`).
+//! What is real here: Loom, the Peri ACP host, the session/history/MQ writes on
+//! the session store, the Swarm rows (including the turn's delta + complete
+//! items) on the state store, the closes, and the reopen on new connections.
+//! The model endpoint stays a deterministic stub (`design §7.3`).
 //!
-//! Commands and observed output live in `.peri/plans/S6b2-report.md` and
-//! `.peri/plans/S6b3-report.md`.
+//! S6c1b rewired this test from the removed single-database adapter
+//! (`RemoteSwarmStore` over `Resources::swarm_store()`) to
+//! [`SwarmStateStore`] opened from `PERI_SWARM_STATE_STORE`. The real
+//! dual-database acceptance run belongs to **S6c2**; the test is kept here so
+//! that stage does not have to rebuild the harness.
+//!
+//! Commands and observed output for the single-database era live in
+//! `.peri/plans/S6b2-report.md` and `.peri/plans/S6b3-report.md`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,6 +44,7 @@ use axum::Router;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
+use url::Url;
 
 use peri_acp_types::messages::{BaseMessage, MessageContent, MessageId};
 use peri_acp_types::session::{
@@ -49,11 +60,14 @@ use peri_swarm::domain::{
     EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, LogicalId, SessionState,
 };
 use peri_swarm::store::{
-    InputPut, RemoteSwarmStore, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow,
-    SwarmStore,
+    InputPut, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow, SwarmStateStore,
+    SwarmStateStoreConfig, SwarmStore,
 };
 
 const LOCATOR_ENV: &str = "PERI_SWARM_LOOM_LOCATOR";
+/// Swarm state database locator (`design §4.1`, S6c1a). A separate logical
+/// database from `LOCATOR_ENV`; the bootstrap rejects sharing one.
+const STATE_LOCATOR_ENV: &str = "PERI_SWARM_STATE_STORE";
 /// Credential **source** name. The deployment carries the name; the value stays
 /// in the process environment and never reaches an assertion or a log line.
 const CREDENTIAL_ENV: &str = "PERI_SWARM_STORE_TOKEN";
@@ -248,6 +262,26 @@ fn deployment() -> SessionStoreDeployment {
         .with_credential_env(CREDENTIAL_ENV)
 }
 
+/// Where the independent Swarm state database is and which variable holds its
+/// token. The credential name is shared with the session store, the locator is
+/// not.
+fn state_store_config() -> SwarmStateStoreConfig {
+    SwarmStateStoreConfig {
+        locator: Url::parse(&required_env(STATE_LOCATOR_ENV)).expect("state store locator URL"),
+        credential_env: CREDENTIAL_ENV.to_owned(),
+    }
+}
+
+/// The two logical databases must differ (bootstrap rejects a shared locator).
+fn assert_distinct_locators() {
+    let session = Url::parse(&required_env(LOCATOR_ENV)).expect("session store locator URL");
+    let state = Url::parse(&required_env(STATE_LOCATOR_ENV)).expect("state store locator URL");
+    assert_ne!(
+        session, state,
+        "the Swarm state store must be a different logical database from the Peri session store"
+    );
+}
+
 fn assert_credential_present() {
     assert!(
         std::env::var_os(CREDENTIAL_ENV).is_some(),
@@ -272,7 +306,7 @@ fn workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 /// Suffix that keeps this run's Swarm identities distinct from earlier runs on
-/// the same Loom database.
+/// the same Swarm state database.
 fn run_id() -> String {
     std::env::var(RUN_ID_ENV).unwrap_or_else(|_| uuid::Uuid::now_v7().to_string())
 }
@@ -285,7 +319,7 @@ fn environment(machine_id: &uuid::Uuid, root: &Path) -> RemoteWorkspaceEnvironme
 async fn open(store: &SessionStoreDeployment, env: &RemoteWorkspaceEnvironment) -> Resources {
     Resources::open_deployment_in_remote_environment(store, env.clone())
         .await
-        .expect("open the shared Loom store")
+        .expect("open the Peri session Loom store")
 }
 
 /// Consume the deployment shutdown owner: drop the business handle, then close.
@@ -331,14 +365,15 @@ fn history_texts(history: &[PersistedPayload]) -> Vec<(String, String)> {
         .collect()
 }
 
-// ── 1. shared logical database ──────────────────────────────────────────────
+// ── 1. two logical databases ────────────────────────────────────────────────
 
-/// `a` + `b` + `c` + `e`: one Loom database carries the Peri session/history/MQ
-/// writes of a real turn **and** the Swarm session/item/input/binding rows, and
-/// both stay readable after the child and every process connection are closed.
+/// `a` + `b` + `c` + `e`: the Peri session store carries the session/history/MQ
+/// writes of a real turn, the independent Swarm state store carries the
+/// session/item/input/binding rows, and both stay readable after the child and
+/// every process connection are closed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a running Loom (see .peri/plans/S6b3-report.md)"]
-async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
+#[ignore = "requires a running Loom; the dual-database acceptance run is S6c2"]
+async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     if std::env::var_os("SWARM_TRACE_LOG").is_some() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -346,6 +381,7 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     }
     clear_telemetry_env();
     assert_credential_present();
+    assert_distinct_locators();
     let home = home_dir();
     let local_db = local_session_db(&home);
     assert!(
@@ -360,10 +396,16 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     let env = environment(&machine, &root);
     let store = deployment();
 
-    // Process-level deployment: Swarm rows, Peri reads and MQ writes share this
-    // connection with the same locator/credential.
+    // Process-level deployment: Peri reads and MQ writes go to the session
+    // database; Swarm rows go to the independent state database with its own
+    // `swarm_meta` schema.
     let resources = open(&store, &env).await;
-    let store_rows = Arc::new(RemoteSwarmStore::new(resources.swarm_store()));
+    let state_store = Arc::new(
+        SwarmStateStore::open(&state_store_config())
+            .await
+            .expect("open the independent swarm state store"),
+    );
+    let store_rows = Arc::clone(&state_store);
     let run = run_id();
     eprintln!("S6b2 run id: {run}");
     let logical = LogicalId::parse(&format!("agent-s6b2-child-{run}")).expect("logical id");
@@ -448,9 +490,9 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
         stub.calls()
     );
 
-    // The turn is projected into `swarm_items` through the real remote store:
+    // The turn is projected into `swarm_items` through the real state store:
     // every delta and the terminal complete row reuse **one** item id, each at
-    // its own strictly increasing seq. With the old `UNIQUE(item_id)` schema the
+    // its own strictly increasing seq. With the old `UNIQUE(item_id)` shape the
     // second delta conflicted and the session ended `failed`; both are checked
     // here (state + row shape), not assumed.
     let child_session_live = store_rows
@@ -510,7 +552,7 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
         "the cached projection equals MAX(seq)"
     );
 
-    // Peri session + history, read through the same logical database.
+    // Peri session + history, read through the session database.
     let reader = resources.session_resources();
     let session_id = root_session_id.clone();
     wait_until("Peri session history", Duration::from_secs(30), || {
@@ -586,7 +628,7 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
         "one durable MQ row before close"
     );
 
-    // ── b. Swarm rows through the process-level store ───────────────────────
+    // ── b. Swarm rows through the process-level state store ─────────────────
     let rows_logical = LogicalId::parse(&format!("agent-s6b2-rows-{run}")).expect("logical id");
     let binding_env_id = format!("logical-env-s6b2-{run}");
     let rows_root_session = uuid::Uuid::now_v7().to_string();
@@ -686,15 +728,24 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     drop(reader);
     drop(log);
     close(resources).await;
+    state_store
+        .close()
+        .await
+        .expect("close the swarm state store");
     assert!(
         !local_db.exists(),
         "the remote deployment must not create a local session database: {}",
         local_db.display()
     );
 
-    // ── c. reopen with the same locator/credential ──────────────────────────
+    // ── c. reopen both databases with the same locators/credential ──────────
     let reopened = open(&store, &env).await;
-    let reopened_swarm = Arc::new(RemoteSwarmStore::new(reopened.swarm_store()));
+    let reopened_state = Arc::new(
+        SwarmStateStore::open(&state_store_config())
+            .await
+            .expect("reopen the independent swarm state store"),
+    );
+    let reopened_swarm = Arc::clone(&reopened_state);
     let reopened_reader = reopened.session_resources();
 
     let meta = reopened_reader
@@ -814,6 +865,10 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     );
 
     close(reopened).await;
+    reopened_state
+        .close()
+        .await
+        .expect("close the reopened swarm state store");
 
     // ── e. no local session database was ever created ───────────────────────
     assert!(
@@ -822,7 +877,7 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
         local_db.display()
     );
     eprintln!(
-        "S6b2: shared Loom run OK; checked absent: {}",
+        "S6c1b: dual-database Loom run OK; checked absent: {}",
         local_db.display()
     );
 }
