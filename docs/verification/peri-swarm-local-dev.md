@@ -107,3 +107,23 @@ cd npm-packages/peri-sandbox && bun run build && node --test dist/tests/swarm/*.
 运行产物、连接文件与日志在各阶段的 `/tmp` 或 `/private/tmp` 运行目录，不入库；
 记录和驱动脚本不含 token：网关/Bun 使用一次性随机测试串，Loom 项目 key 只从
 `connection.json` 读入进程环境。
+
+## 6. 2026-11-21 dogfood 第一轮修复
+
+第一轮「只读发布表面」dogfood 报告记录了默认路径阻塞（macOS SRT 执行 Peri 父目录、
+settings 缺字段无可读错误、SDK 示例两实参丢 `after`、回放无 `turn` 帧、items 无
+`id`、hosted 会话无 sandbox 投影）。本轮修复与自动化证据：
+
+| 修复 | 证据 |
+| --- | --- |
+| SRT policy 自动放行 `periPath` 父目录 | `peri-sandbox` `provider-doctor.test.ts` 的 policy 测试；全量 72 pass |
+| settings 校验错误带字段名 | `settings.test.ts` 的 `periSha256` 缺失/格式与最小合法形状测试 |
+| items 同时给出 `id`（等于 `itemId`） | `peri-swarm` 单测与 `items_pagination_test` |
+| hosted 会话投影 `sandbox`（sandboxId/workspacePath） | `openai_hosted_test` 创建与 GET 断言 |
+| legacy stub 每个用户轮次一次工具调用 | 本地 stub 两轮请求实测（两次 `tool_calls`，两次 `stop`） |
+| README/设计契约同步 | `peri-swarm/README.md`、`docs/design/peri-swarm.md` §4.2/§4.5、`peri-sandbox/README.md` |
+
+门禁结果（2026-11-21，本工作树）：`cargo test -p peri-swarm` 205 passed / 0 failed
+（3 个真实 Loom 测试仍 `ignored`）；`peri-sandbox` 全量 72 pass、swarm 子集 37 pass。
+**本轮没有重跑 Loom/Rivet/Bun 的真实端到端链路**：SRT exec、hosted 工具调用与 SDK
+三实参续读需要第二轮 dogfood 用真实环境复验，不能据此记录为已验收。

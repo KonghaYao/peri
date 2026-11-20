@@ -94,12 +94,19 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 - 每个 item 持久化为一行，`seq` 由 Swarm 状态库单调分配；先落库后广播，订阅者
   不存在也不影响执行。
+- item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
+  游标，不能用 `id` 去重 delta 帧。
 - SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn` 与 `gap` 不持久化，不推进
   `Last-Event-ID`。
 - 重连游标接受 `Last-Event-ID` 头或 `?afterSeq=`；服务端先补 `seq > after` 的
   backlog，再转实时广播。心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。
+- 回放（backlog）只发 `item` 帧，没有 `turn` 控制帧；客户端的回放终止条件是目标
+  message 的 `payload.complete=true`。实时段才用 `turn.state=completed|failed` 终止，
+  只含 `lastItemSeq` 的心跳帧必须忽略。
 - items 支持 `order=asc|desc`、`after`、`limit`，响应给出 `items`、`hasMore`、
   `nextCursor`、`lastItemSeq`；同一消息的 delta 与 complete 共享稳定 `itemId`。
+  item 是事件级帧（delta、tool_call、tool_update、tool_result），不是官方高层
+  item；消费方按 `payload.messageId` 聚合，最终文本取 `payload.complete` 帧。
 
 ### 4.3 创建与首轮
 
@@ -117,6 +124,19 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   或全无。
 - `POST /sessions` 的 `Idempotency-Key` 只用于稳定 `logicalId` 并复用已存在会话，
   不是跨请求的事务承诺。
+
+### 4.5 会话投影与环境
+
+`GET /sessions/{logicalId}`（以及创建响应）的 `environment` 是
+`{type,id}`；hosted 会话另有 `sandbox` 投影，字段来自 `swarm_bindings`：
+`logicalEnvId`、`sandboxId`、`runId`、`workspacePath`。`state` 固定为 `null`：
+网关只持久化绑定，不跟踪 Bun 的实时 SRT 启停；实时状态以 Bun
+`GET /v1/sandboxes/{logicalEnvId}` 为准。会话 `cwd` 是网关工作目录，不是工具执行
+目录；工具在 `sandbox.workspacePath` 下执行。
+
+`POST /sessions/{logicalId}/events` 在 HTTP 层返回 `202`，但 `mode=turn` 的受理在
+本轮进入终态后才返回；响应中的 `lastItemSeq` 已包含本轮 item。它不表示「排队后
+异步执行」。未完成 turn、`session/resume` 与后台任务边界仍是 §8 的未完成项。
 
 ## 5. MCP 注入
 
