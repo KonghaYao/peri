@@ -877,3 +877,216 @@ connection 文件与进程环境；驱动仅将其放入 Hrana 的 Authorization
 - 原始 `e2e-run2/3/4.json`、stub/Bun/gateway 日志在
   `/private/tmp/peri-swarm-s9a3b2/logs/`，不入库。
 
+## 13. S9a4a：Bun 空闲回收与服务不可用错误可见
+
+- 基线：`cd8c91d374b33ea9cb4b85210e31c2dde6ea9880`（S1..S9a3b2）
+- 驱动：`peri-swarm/scripts/sdk_idle_unavailable_e2e.mjs`（新，模式
+  `idle` / `prepare` / `bun-down` / `cleanup-env` / `loom-down`）
+- 运行目录：`/private/tmp/peri-swarm-s9a4a/`；原始记录
+  `logs/idle.json`、`logs/bun-down.json`、`logs/cleanup.json`、
+  `logs/loom-down.json` 与 stub/Bun/gateway 日志同目录，不入库。
+- 本阶段 Rust 源码未改；Bun 服务新增空闲回收与代理在途计数。
+
+### 13.1 实现
+
+| 文件 | 改动 |
+| --- | --- |
+| `npm-packages/peri-sandbox/src/swarm/manager.ts` | `PERI_SWARM_IDLE_MS` 解析（默认 30 分钟，`0` 关闭）、`idleSweepIntervalMs`（窗口 1/4，250 ms…30 s）；每个 logicalEnvId 的 `beginRequest`/`endRequest` 在途计数与 `lastUsedAt`；`sweepIdle()` 只在 `state=ready`、在途=0、空闲 ≥ 阈值时经既有 `close(deleteData:false)` 回收，保留 workspace 与 binding；`reclaiming` 与 `ensure`/`reserve`/`close` 互斥；回收成功/失败均写 JSON 日志 |
+| `npm-packages/peri-sandbox/src/swarm/server.ts` | 代理入口 `beginRequest`，响应体完整交付后 `endRequest`（SSE/流式响应在流结束或取消时才计为结束）；转发失败也释放计数 |
+| `npm-packages/peri-sandbox/src/swarm/main.ts` | 读取 `PERI_SWARM_IDLE_MS`，启动日志带 `idleMs`/`idleSweepIntervalMs`；定时 sweep 串行化并 `unref`；关闭时停止定时器 |
+| `tests/swarm/manager.test.ts`、`tests/swarm/server.test.ts` | 回收条件、在途阻断、`0` 关闭、阈值边界、状态观察、重新 ensure 新 runId、流式响应在途 |
+
+回收后的对外状态是 `stopped`（保留旧 `runId`、`workspacePath`，`mcpUrl=null`）；
+同一 ID 的新 `POST /v1/sandboxes` 走显式 ensure，分配新 `runId` 并复用同一
+`<root>/<sandboxId>/workspace`。被回收的 binding（含 `lastRunId`）不删除，只有
+`DELETE ?deleteData=true` 才移除目录与 binding。
+
+### 13.2 运行环境
+
+沿用 S9a2/S9a3a 的真实 harness：Loom 9497（demo / swarm 双库）、Bun 8081
+（`PERI_PATH=<worktree>/target/debug/peri`，sha256
+`93ccfb0b168fd6a47a67f06dc99c3a09f4f0ae3fc1a6b73f36504ba4ce0b2cc9`）、
+网关 18080 + Rivet 6420、模型 stub 9496。本阶段显式设置：
+
+```text
+PERI_SWARM_IDLE_MS=2000
+HOME=/private/tmp/peri-swarm-s9a4a/home        # 网关
+PERI_SWARM_WORKSPACE_ROOT=/private/tmp/peri-swarm-s9a4a/workspace
+PERI_STUB_COMMANDS={"slow":"sleep 4; echo slow > slow.txt",
+                    "quick":"echo prepared > prepared.txt"}
+```
+
+Bun 启动记录：
+
+```json
+{"event":"swarm_server_listening","url":"http://127.0.0.1:8081",
+ "sandboxesRoot":"/Users/konghayao/.peri-swarm/sandboxes","auth":true,
+ "idleMs":2000,"idleSweepIntervalMs":500,"pid":58010}
+```
+
+### 13.3 慢命令期间不回收（真实链路）
+
+会话 `agent-01a1fa38-036e-77e1-9996-9e06f1e740f4`，
+`environment={type:"openai_hosted",id:"env_01a1fa38-03b2-77d2-bc40-abc3ef0b1292"}`；
+stub 发出 `Bash`：`sleep 4; echo slow > slow.txt`。时间线（UTC）：
+
+| 时刻 | 事件 |
+| --- | --- |
+| 18:28:58.508 | 创建后 Bun 视图 `reserved`，`runId=null`，`sandboxId=sbx_aa9815dca9eb011a8c859532b339d811` |
+| 18:29:00.305 | 首个真实 `tools/call` 后 `starting`（+1798 ms） |
+| 18:29:00.407 | `ready`，`runId=run_a581893c284e1af17ec40ad5`（+1900 ms） |
+| 18:29:02.999 | 在途探针：距 ready 2592 ms（阈值 2000 ms），`state=ready`、同一 runId、1 个进程组（pgid 71573，SRT CLI + Peri provider）、`slow.txt` 尚不存在 |
+| 18:29:04.679 | 最后一个代理请求结束（Bun `lastUsedAt`） |
+| 18:29:05.420 | turn 完成（SSE `turn: completed`） |
+| 18:29:06.994 | `GET` 观察到 `stopped`，旧 `runId` 保留、`mcpUrl=null`；0 进程 |
+| 18:29:07.330 | 同 ID 重新 ensure：`ready`，新 `runId=run_be4df77bcda20dc3859345d5`，pgid 71991 |
+
+Bun 日志证明“在途不回收”：
+
+```json
+{"event":"swarm_idle_sweep","idleMs":2000,"reclaimed":[],
+ "inFlight":["env_01a1fa38-…"]}                       // ×4 次（命令执行中）
+{"event":"swarm_idle_sweep","idleMs":2000,
+ "reclaimed":["env_01a1fa38-…"],"inFlight":[]}
+{"event":"swarm_sandbox_reclaimed","logicalEnvId":"env_01a1fa38-…",
+ "closed":true,"idleMs":2000,"lastUsedAt":"2026-11-20T18:29:04.679Z"}
+```
+
+模型侧 `mainCalls=2`、`toolCalls=1`；`events POST` 在本 harness 中于 turn 结束后
+返回 `202`（`lastItemSeq=8`），驱动因此并发启动探针与 POST，而不是等 POST 返回
+再采样。
+
+### 13.4 回收后的状态、文件与 binding
+
+- `GET /v1/sandboxes/{envId}`：`state=stopped`、`runId=run_a581893c…`、
+  `workspacePath=/Users/konghayao/.peri-swarm/sandboxes/sbx_aa9815…/workspace`、
+  `mcpUrl=null`；
+- SRT 进程组：0（探针 1 → 回收后 0）；
+- `<workspacePath>/slow.txt`：`slow\n`（5 字节，`trim` 后为 `slow`），
+  sandbox 目录存在；
+- `bindings.json`：该 env 的 `sandboxId` 不变、`lastRunId=run_a581893c…`、
+  `workspacePath` 不变；其它 env 不受影响。
+
+### 13.5 重新 ensure 与通过 Bun 读回文件
+
+`POST /v1/sandboxes {"logicalEnvId":"env_01a1fa38-…"}` → `200`、`ready`、
+新 `runId=run_be4df77bcda20dc3859345d5`、同一 `sandboxId`/`workspacePath`、
+1 个进程组（pgid 71991）。随后经真实 Bun 代理 `tools/call`（`Mcp-Method:
+tools/call`、`Mcp-Name: Bash`、2026-07-28 `_meta` 信封）执行 `cat slow.txt`：
+
+```json
+{"result":{"content":[{"type":"text","text":"slow\n"}],"isError":false,
+  "_meta":{"peri.dev/tool-execution-v1":{"status":"completed","exit_code":0},
+           "io.modelcontextprotocol/serverInfo":{"name":"peri","version":"0.2.0"}},
+  "resultType":"complete"}}
+```
+
+即回收只停止运行态，文件与身份仍在；重新 ensure 后新 provider 读到的仍是旧
+workspace 的内容。
+
+### 13.6 Bun 不可用
+
+`prepare` 创建会话 `agent-01a1fa38-4ea8-7852-939e-452f0115dc14`
+（`env_01a1fa38-4eef-71f2-9777-f9b3d434d944`），重新 ensure 到 `ready`
+后停止 Bun（8081 关闭，SRT provider 随 Bun 退出）。
+
+**新建 `openai_hosted` 会话**（Bun 已停）：
+
+```http
+POST /v1/agents/sessions   {"environment":{"type":"openai_hosted"}, …}
+502 {"error":{"code":"upstream_unavailable","message":"swarm upstream is unavailable",
+              "details":{"operation":"sandbox_reserve","reason":"unreachable"}}}
+```
+
+没有创建会话、没有降级本机 agent；网关日志只记录
+`bun sandbox bridge call failed`。
+
+**已有会话的后续输入**：
+
+| 观测 | 结果 |
+| --- | --- |
+| `POST /events` | `202 accepted=true`（actor 仍可用，输入被受理） |
+| SSE / items | turn 正常结束（`completed`）；`tool_result` item `status=failed` |
+| 错误文本（去 URL 尾部） | `MCP 服务器 "workspace" 工具 "Bash" 调用失败: Transport send error: … error sending request for url (http://127.0.0.1:8081/sandboxes…` |
+
+错误在持久化 items 中可见（本次运行第二条失败 item 为 seq 19）。失败原因是
+workspace MCP 传输不可达，不是本机替代执行；turn 仍能因 stub 模型给出最终文本
+而 `completed`，但工具结果明确为失败。
+
+**本机状态核查**：
+
+- 临时 HOME `/private/tmp/peri-swarm-s9a4a/home` 内没有任何
+  `threads.db`/`.db`/`.sqlite*`（只出现 Rivet 自己的 `.rivetkit` 目录）；
+- 失败的创建在 `PERI_SWARM_WORKSPACE_ROOT` 下最多留下一个空 cwd 目录
+  （如 `agent-01a1fa38-fa05-…`，0 个文件）；没有本地会话库或本地执行。
+
+### 13.7 Loom 不可用
+
+停止 9497（dev.py 与 worker 全部退出，端口关闭），网关与模型 stub 仍在：
+
+| 请求 | 结果 |
+| --- | --- |
+| `POST /agents/sessions` | `502 {"code":"upstream_unavailable","details":{"operation":"get_session"}}` |
+| `GET /agents/sessions/{id}/items` | 同上 `502 upstream_unavailable` |
+| `GET /agents/sessions/{id}` | 同上 `502 upstream_unavailable` |
+
+- 临时 HOME 仍无 `threads.db`/`.db`/`.sqlite*`，即没有回退到本机线程库，也没有
+  创建第二套存储；
+- 失败的创建同样只留下空的宿主 cwd 目录，无本地会话状态。
+- 网关日志记录 `swarm store operation failed`/`upstream_unavailable`，不包含
+  store token。
+
+### 13.8 teardown 与端口
+
+```text
+DELETE /v1/sandboxes/env_01a1fa38-4eef-…?deleteData=true
+→ {"logicalEnvId":"env_01a1fa38-4eef-…","closed":false,"deletedData":true}
+GET → 404；sandbox 目录不存在；binding 已删除；SRT 进程 0
+bindings.json → {"version":1,"bindings":{}}
+~/.peri-swarm/sandboxes → 仅 bindings.json（无 sandbox 目录）
+```
+
+停止顺序：gateway → Bun → stub → Rivet engine（gateway 退出后仍短暂存活，按 PID
+单独停止）。端口核对：8081/9496/9497/18080/6420 均无监听；8080 仍为用户
+OrbStack。`ps` 无 `peri-swarm` / `sandbox-runtime` / `mcp-start` /
+`local_model_stub` / `platform/dev.py` / `rivet-engine` 残留。
+
+### 13.9 门禁
+
+```text
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm
+  lib 154；actor_runtime 3；http_contract 19；items_pagination 6；
+  mcp_injection 4；openai_hosted 7；rivet_actor 1；streaming 9；
+  loom_store 3 ignored；0 failed（203 passed）
+
+npm-packages/peri-sandbox
+  bun run build                  ok
+  node --test dist/tests/swarm/*.test.js   37 pass / 0 fail
+  bun run typecheck              ok
+  bun run format:check           58 files, no fixes
+
+lefthook run pre-commit          见提交前运行记录
+git status                       仅本阶段脚本/实现/本节记录
+```
+
+驱动断言：`idle` 40/40、`bun-down` 7/7、`cleanup-env` 5/5、`loom-down` 8/8。
+
+### 13.10 未验证与局限
+
+- **后台任务引用未实现**：Bun `forward.ts` 尚未识别 `resultType:"task"` 与
+  `tasks/get` 终态，回收条件不含“任务台账非空”，本记录不声称已覆盖该路径。
+- 回收按“最后一个代理请求结束”计时；若 turn 在最后一个工具调用后仍有很长的
+  模型输出（无 MCP 在途）或之后再次调用工具，sandbox 可能已回收，代理对该
+  env 的后续调用返回 `404 sandbox_not_found`，需要重新 ensure。本阶段未把
+  会话状态接入回收判定。
+- 只终止 Rust 节点后的恢复（`session/resume`/`state=recovering`）未在本阶段
+  验证，按要求留 S9a4b。
+- 网关在 Bun/Loom 全停时仍受理 `POST /events` 并完成 turn（错误体现在
+  `tool_result`），这是 actor 与 sandbox 分离的既有语义；本阶段只要求“错误
+  可见”，未要求 `POST /events` 同步返回 502。
+- 模型仍是确定性 stub；慢命令时长为 4 s，阈值为 2 s，未覆盖分钟级空闲与
+  大量并发 env 的扫描成本。
+- 驱动脚本未提交任何 token；Bun/网关 token 为运行目录内的一次性随机串，
+  Loom 项目 key 只从 connection 文件读入进程环境。
+
+

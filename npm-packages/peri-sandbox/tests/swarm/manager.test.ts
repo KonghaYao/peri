@@ -5,12 +5,28 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { SwarmError } from '../../src/swarm/errors.js';
 import {
+  DEFAULT_SWARM_IDLE_MS,
   defaultSwarmSandboxesRoot,
+  idleSweepIntervalMs,
   prepareSwarmRoot,
+  resolveSwarmIdleMs,
   resolveSwarmSandboxesRoot,
   SwarmManager,
 } from '../../src/swarm/manager.js';
 import { createFakeStarter, temporarySwarmRoot } from './harness.js';
+
+function controllableClock(start = '2026-01-01T00:00:00.000Z'): {
+  now: () => Date;
+  advance: (milliseconds: number) => void;
+} {
+  let current = new Date(start);
+  return {
+    now: () => current,
+    advance: (milliseconds) => {
+      current = new Date(current.getTime() + milliseconds);
+    },
+  };
+}
 
 test('default persistence root is ~/.peri-swarm/sandboxes', () => {
   assert.equal(defaultSwarmSandboxesRoot(), join(homedir(), '.peri-swarm', 'sandboxes'));
@@ -95,6 +111,111 @@ test('close without data keeps bindings and removes data only when asked', async
   assert.deepEqual(missing, { found: true, closed: false, deletedData: false });
   const unknown = await manager.close('env-missing', { deleteData: false });
   assert.deepEqual(unknown, { found: false, closed: false, deletedData: false });
+});
+
+test('PERI_SWARM_IDLE_MS parsing and sweep cadence', () => {
+  assert.equal(DEFAULT_SWARM_IDLE_MS, 30 * 60_000);
+  assert.equal(resolveSwarmIdleMs(undefined), DEFAULT_SWARM_IDLE_MS);
+  assert.equal(resolveSwarmIdleMs('  '), DEFAULT_SWARM_IDLE_MS);
+  assert.equal(resolveSwarmIdleMs('0'), 0);
+  assert.equal(resolveSwarmIdleMs('2000'), 2000);
+  for (const invalid of ['-1', '1.5', 'soon', '99999999999999999999'])
+    assert.throws(
+      () => resolveSwarmIdleMs(invalid),
+      (error: unknown) => error instanceof SwarmError && error.code === 'invalid_config',
+      invalid,
+    );
+  assert.equal(idleSweepIntervalMs(0), 0);
+  assert.equal(idleSweepIntervalMs(2000), 500);
+  assert.equal(idleSweepIntervalMs(100), 250);
+  assert.equal(idleSweepIntervalMs(30 * 60_000), 30_000);
+});
+
+test('an invalid idle threshold is rejected', (t) => {
+  const root = temporarySwarmRoot(t);
+  assert.throws(
+    () => new SwarmManager({ root, idleMs: -1 }),
+    (error: unknown) => error instanceof SwarmError && error.code === 'invalid_config',
+  );
+});
+
+test('idle sweep reclaims a ready environment, keeps data and bindings, and re-ensures a new run', async (t) => {
+  const root = temporarySwarmRoot(t);
+  const fake = createFakeStarter();
+  const clock = controllableClock();
+  const manager = new SwarmManager({ root, startSandbox: fake.start, now: clock.now, idleMs: 1000 });
+  try {
+    const first = await manager.ensure('env-idle');
+    const marker = join(first.workspacePath, 'slow.txt');
+    writeFileSync(marker, 'slow\n');
+
+    clock.advance(999);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: [], inFlight: [] });
+    assert.equal(manager.get('env-idle')?.runId, first.runId);
+
+    clock.advance(1);
+    const swept = await manager.sweepIdle();
+    assert.deepEqual(swept, { reclaimed: ['env-idle'], inFlight: [] });
+    assert.equal(manager.get('env-idle'), undefined);
+    const stopped = manager.describe('env-idle');
+    assert.equal(stopped?.state, 'stopped');
+    assert.equal(stopped?.runId, first.runId);
+    assert.equal(stopped?.workspacePath, first.workspacePath);
+    assert.equal(manager.binding('env-idle')?.lastRunId, first.runId);
+    assert.equal(fake.instances[0]?.closedWith.at(-1)?.deleteData, false);
+    assert.equal(readFileSync(marker, 'utf8'), 'slow\n');
+
+    const second = await manager.ensure('env-idle');
+    assert.equal(fake.calls.length, 2);
+    assert.notEqual(second.runId, first.runId);
+    assert.equal(second.sandboxId, first.sandboxId);
+    assert.equal(second.workspacePath, first.workspacePath);
+    assert.equal(readFileSync(marker, 'utf8'), 'slow\n');
+    assert.equal(manager.binding('env-idle')?.lastRunId, second.runId);
+  } finally {
+    await manager.closeAll();
+  }
+});
+
+test('idle sweep never reclaims while a proxied request is in flight', async (t) => {
+  const root = temporarySwarmRoot(t);
+  const fake = createFakeStarter();
+  const clock = controllableClock();
+  const manager = new SwarmManager({ root, startSandbox: fake.start, now: clock.now, idleMs: 1000 });
+  try {
+    await manager.ensure('env-busy');
+    manager.beginRequest('env-busy');
+    clock.advance(60_000);
+    const blocked = await manager.sweepIdle();
+    assert.deepEqual(blocked, { reclaimed: [], inFlight: ['env-busy'] });
+    assert.equal(manager.get('env-busy')?.runId, 'run_fake_1');
+    assert.equal(fake.instances[0]?.state, 'ready');
+
+    // The end of the request restarts the idle window.
+    manager.endRequest('env-busy');
+    clock.advance(999);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: [], inFlight: [] });
+    clock.advance(1);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: ['env-busy'], inFlight: [] });
+    assert.equal(fake.instances[0]?.state, 'closed');
+  } finally {
+    await manager.closeAll();
+  }
+});
+
+test('idleMs 0 disables reclaim', async (t) => {
+  const root = temporarySwarmRoot(t);
+  const fake = createFakeStarter();
+  const clock = controllableClock();
+  const manager = new SwarmManager({ root, startSandbox: fake.start, now: clock.now, idleMs: 0 });
+  try {
+    await manager.ensure('env-forever');
+    clock.advance(24 * 60 * 60_000);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: [], inFlight: [] });
+    assert.equal(manager.get('env-forever')?.runId, 'run_fake_1');
+  } finally {
+    await manager.closeAll();
+  }
 });
 
 test('bindings.json is 0600, atomic and omits the inner token', async (t) => {

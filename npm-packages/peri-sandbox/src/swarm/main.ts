@@ -1,5 +1,5 @@
 import { SwarmError } from './errors.js';
-import { resolveSwarmSandboxesRoot, SwarmManager } from './manager.js';
+import { idleSweepIntervalMs, resolveSwarmIdleMs, resolveSwarmSandboxesRoot, SwarmManager } from './manager.js';
 import { createSwarmRequestHandler } from './server.js';
 
 const DEFAULT_BIND = '127.0.0.1:8081';
@@ -54,7 +54,8 @@ export async function main(): Promise<void> {
   const bind = parseSwarmBind(process.env.PERI_SWARM_BUN_BIND ?? DEFAULT_BIND);
   const token = tokenFromEnv(process.env.PERI_SWARM_BUN_TOKEN);
   const root = resolveSwarmSandboxesRoot(process.env.PERI_SWARM_SANDBOXES_ROOT);
-  const manager = new SwarmManager({ root });
+  const idleMs = resolveSwarmIdleMs(process.env.PERI_SWARM_IDLE_MS);
+  const manager = new SwarmManager({ root, idleMs });
   const handler = createSwarmRequestHandler({ manager, ...(token === undefined ? {} : { token }) });
 
   const server = Bun.serve({
@@ -64,12 +65,42 @@ export async function main(): Promise<void> {
     idleTimeout: 255,
     fetch: (request) => handler(request),
   });
+
+  // Idle reclaim: only environments with no in-flight MCP request are eligible
+  // (manager.beginRequest/endRequest). `PERI_SWARM_IDLE_MS=0` disables the timer.
+  const sweepIntervalMs = idleSweepIntervalMs(idleMs);
+  let sweepQueue: Promise<void> = Promise.resolve();
+  const sweepTimer =
+    sweepIntervalMs === 0
+      ? null
+      : setInterval(() => {
+          sweepQueue = sweepQueue
+            .then(async () => {
+              const result = await manager.sweepIdle();
+              if (result.reclaimed.length > 0 || result.inFlight.length > 0)
+                console.log(
+                  JSON.stringify({
+                    event: 'swarm_idle_sweep',
+                    idleMs,
+                    reclaimed: result.reclaimed,
+                    inFlight: result.inFlight,
+                  }),
+                );
+            })
+            .catch((error: unknown) => {
+              console.error('swarm idle sweep failed', error);
+            });
+        }, sweepIntervalMs);
+  sweepTimer?.unref();
+
   console.log(
     JSON.stringify({
       event: 'swarm_server_listening',
       url: `http://${bind.hostname}:${server.port}`,
       sandboxesRoot: manager.root,
       auth: token !== undefined,
+      idleMs,
+      idleSweepIntervalMs: sweepIntervalMs,
       pid: process.pid,
     }),
   );
@@ -79,6 +110,8 @@ export async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(JSON.stringify({ event: 'swarm_server_stopping', signal }));
+    if (sweepTimer !== null) clearInterval(sweepTimer);
+    await sweepQueue.catch(() => undefined);
     server.stop(true);
     try {
       await manager.closeAll();

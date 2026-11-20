@@ -273,7 +273,75 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
     }
   }
 
-  async function proxyMcp(logicalEnvId: string, request: Request): Promise<Response> {
+  function proxyMcp(logicalEnvId: string, request: Request): Promise<Response> {
+    manager.beginRequest(logicalEnvId);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      manager.endRequest(logicalEnvId);
+    };
+    return (async () => {
+      try {
+        // Reclaim first wins: wait for a close that already started, then route.
+        await manager.whenIdleSettled(logicalEnvId);
+        const response = await routeMcp(logicalEnvId, request);
+        return trackResponseBody(response, release);
+      } catch (error) {
+        release();
+        throw error;
+      }
+    })();
+  }
+
+  /**
+   * Keep the environment busy until the proxied body is fully delivered.
+   * Streaming responses (`subscriptions/listen`) must not be reclaimed mid-stream.
+   */
+  function trackResponseBody(response: Response, release: () => void): Response {
+    const body = response.body;
+    if (body === null) {
+      release();
+      return response;
+    }
+    const reader = body.getReader();
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      release();
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            finish();
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk.value);
+        } catch (error) {
+          finish();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          finish();
+        }
+      },
+    });
+    return new Response(stream, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+
+  async function routeMcp(logicalEnvId: string, request: Request): Promise<Response> {
     const running = manager.get(logicalEnvId);
     if (running !== undefined && running.instance.state === 'ready') return await forward(running, request);
 

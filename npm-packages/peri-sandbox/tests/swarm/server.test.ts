@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { SwarmError } from '../../src/swarm/errors.js';
@@ -8,6 +9,19 @@ import { createSwarmRequestHandler } from '../../src/swarm/server.js';
 import { createFakeStarter, temporarySwarmRoot } from './harness.js';
 
 const BASE = 'http://127.0.0.1:8081';
+
+function controllableClock(start = '2026-01-01T00:00:00.000Z'): {
+  now: () => Date;
+  advance: (milliseconds: number) => void;
+} {
+  let current = new Date(start);
+  return {
+    now: () => current,
+    advance: (milliseconds) => {
+      current = new Date(current.getTime() + milliseconds);
+    },
+  };
+}
 
 interface SandboxPayload {
   sandbox: {
@@ -149,6 +163,119 @@ test('DELETE keeps the workspace unless deleteData=true, and re-ensure starts a 
 
     const gone = await handler(authorized(`${BASE}/v1/sandboxes/env-lifecycle`));
     assert.equal(gone.status, 404);
+  } finally {
+    await manager.closeAll();
+  }
+});
+
+test('GET observes an idle-reclaimed environment and a new ensure starts a new run', async (t) => {
+  const root = temporarySwarmRoot(t);
+  const fake = createFakeStarter();
+  const clock = controllableClock();
+  const manager = new SwarmManager({ root, startSandbox: fake.start, now: clock.now, idleMs: 1000 });
+  const handler = createSwarmRequestHandler({ manager, token: 'outer-secret' });
+  try {
+    const created = (await (await handler(ensureRequest('env-reclaimed', 'outer-secret'))).json()) as SandboxPayload;
+    const first = manager.get('env-reclaimed');
+    assert.ok(first !== undefined);
+    const marker = join(first.workspacePath, 'slow.txt');
+    writeFileSync(marker, 'slow');
+
+    clock.advance(1000);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: ['env-reclaimed'], inFlight: [] });
+    assert.equal(manager.get('env-reclaimed'), undefined);
+
+    const reclaimed = (await (
+      await handler(authorized(`${BASE}/v1/sandboxes/env-reclaimed`))
+    ).json()) as SandboxPayload;
+    assert.equal(reclaimed.sandbox.state, 'stopped');
+    assert.equal(reclaimed.sandbox.mcpUrl, null);
+    assert.equal(reclaimed.sandbox.runId, created.sandbox.runId);
+    assert.equal(reclaimed.sandbox.workspacePath, created.sandbox.workspacePath);
+    assert.equal(existsSync(marker), true);
+
+    const restarted = (await (await handler(ensureRequest('env-reclaimed', 'outer-secret'))).json()) as SandboxPayload;
+    assert.equal(restarted.sandbox.state, 'ready');
+    assert.notEqual(restarted.sandbox.runId, created.sandbox.runId);
+    assert.equal(restarted.sandbox.sandboxId, created.sandbox.sandboxId);
+    assert.equal(restarted.sandbox.workspacePath, created.sandbox.workspacePath);
+    assert.equal(existsSync(marker), true);
+    assert.equal(fake.instances[0]?.closedWith.at(-1)?.deleteData, false);
+  } finally {
+    await manager.closeAll();
+  }
+});
+
+test('a proxied request in flight blocks idle reclaim until its body is delivered', async (t) => {
+  const root = temporarySwarmRoot(t);
+  let arrived: () => void = () => undefined;
+  const arrivedAtInner = new Promise<void>((resolve) => {
+    arrived = resolve;
+  });
+  let releaseInner: () => void = () => undefined;
+  const innerGate = new Promise<void>((resolve) => {
+    releaseInner = resolve;
+  });
+  const inner = createServer((request, response) => {
+    request.resume();
+    request.on('end', () => {
+      arrived();
+      void innerGate.then(() => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { ok: true } }));
+      });
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    inner.once('error', reject);
+    inner.listen(0, '127.0.0.1', () => {
+      inner.off('error', reject);
+      resolve();
+    });
+  });
+  t.after(
+    () =>
+      new Promise<void>((resolve) => {
+        inner.closeAllConnections();
+        inner.close(() => resolve());
+      }),
+  );
+  const address = inner.address();
+  if (address === null || typeof address === 'string') throw new Error('inner server did not bind');
+  const clock = controllableClock();
+  const manager = new SwarmManager({
+    root,
+    startSandbox: createFakeStarter({ mcpUrl: () => `http://127.0.0.1:${address.port}/mcp` }).start,
+    now: clock.now,
+    idleMs: 1000,
+  });
+  const handler = createSwarmRequestHandler({ manager, token: 'outer-secret' });
+  try {
+    await manager.ensure('env-inflight');
+    const pending = handler(
+      authorized(`${BASE}/sandboxes/env-inflight/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{"jsonrpc":"2.0","id":1,"method":"tools/call"}',
+      }),
+    );
+    await arrivedAtInner;
+    clock.advance(60_000);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: [], inFlight: ['env-inflight'] });
+    assert.equal(manager.get('env-inflight')?.runId, 'run_fake_1');
+
+    releaseInner();
+    const response = await pending;
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}');
+    assert.equal(manager.inFlightCount('env-inflight'), 0);
+
+    // The idle window starts when the request body was fully delivered.
+    clock.advance(999);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: [], inFlight: [] });
+    clock.advance(1);
+    assert.deepEqual(await manager.sweepIdle(), { reclaimed: ['env-inflight'], inFlight: [] });
+    assert.equal(manager.get('env-inflight'), undefined);
   } finally {
     await manager.closeAll();
   }
