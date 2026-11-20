@@ -22,7 +22,14 @@ use crate::config::{
 const TOKEN_ENV_NAME: &str = "PERI_TEST_LOOM_TOKEN";
 const TOKEN_VALUE: &str = "loom-secret-value";
 const MACHINE_ID: &str = "0192f0c4-0000-7000-8000-0000000000aa";
-const ROOT: &str = "/tmp/peri-swarm-bootstrap-test";
+const ROOT_NAME: &str = "peri-swarm-bootstrap-test";
+/// Platform-absolute workspace root; `/tmp/...` is not absolute on Windows.
+fn workspace_root() -> String {
+    let dir = std::env::temp_dir().join(ROOT_NAME);
+    let _ = std::fs::create_dir_all(&dir);
+    dir.to_string_lossy().into_owned()
+}
+
 const SESSION_STORE_VALUE: &str = "http://127.0.0.1:8342/db/main/main/dev/";
 const STATE_STORE_VALUE: &str = "http://127.0.0.1:9497/db/local_default/swarm/main/";
 
@@ -34,7 +41,7 @@ fn base_env() -> Vec<(&'static str, String)> {
         (STORE_TOKEN_ENV, TOKEN_ENV_NAME.to_owned()),
         (TOKEN_ENV_NAME, TOKEN_VALUE.to_owned()),
         (MACHINE_ID_ENV, MACHINE_ID.to_owned()),
-        (WORKSPACE_ROOT_ENV, ROOT.to_owned()),
+        (WORKSPACE_ROOT_ENV, workspace_root()),
     ]
 }
 
@@ -85,7 +92,8 @@ fn complete_environment_parses_with_bootstrap_defaults() {
     assert_eq!(config.store_engine, DEFAULT_STORE_ENGINE);
     assert_eq!(config.store_token_env, TOKEN_ENV_NAME);
     assert_eq!(config.machine_id.to_string(), MACHINE_ID);
-    assert_eq!(config.workspace_root.to_str(), Some(ROOT));
+    let root = workspace_root();
+    assert_eq!(config.workspace_root.to_str(), Some(root.as_str()));
     assert!(config.model.is_none());
     assert!(config.settings_json.is_none());
     assert_eq!(config.session_store_locator.as_str(), SESSION_STORE_VALUE);
@@ -232,9 +240,10 @@ fn actor_configuration_carries_the_remote_deployment() {
         actor.machine_id.map(|id| id.to_string()),
         Some(MACHINE_ID.to_owned())
     );
+    let root = workspace_root();
     assert_eq!(
         actor.workspace_root.as_deref().and_then(|p| p.to_str()),
-        Some(ROOT)
+        Some(root.as_str())
     );
 }
 
@@ -382,8 +391,9 @@ fn relative_or_unnormalized_workspace_root_is_rejected() {
         parse(&[(WORKSPACE_ROOT_ENV, Some("relative/path"))]),
         WORKSPACE_ROOT_ENV,
     );
+    let unnormalized = format!("{}/../peri", workspace_root());
     expect_invalid(
-        parse(&[(WORKSPACE_ROOT_ENV, Some("/tmp/../tmp/peri"))]),
+        parse(&[(WORKSPACE_ROOT_ENV, Some(unnormalized.as_str()))]),
         WORKSPACE_ROOT_ENV,
     );
 }
