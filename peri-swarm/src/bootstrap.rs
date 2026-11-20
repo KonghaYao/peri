@@ -39,6 +39,10 @@
 //! | `PERI_SWARM_WORKSPACE_ROOT` | absolute, normalized virtual workspace root |
 //! | `PERI_SWARM_MODEL` | optional deployment model |
 //! | `PERI_SWARM_SETTINGS_JSON` | optional trusted settings document (JSON) |
+//! | `PERI_SWARM_BUN_BASE_URL` | optional Bun sandbox bridge (`http://127.0.0.1:<port>`) |
+//! | `PERI_SWARM_BUN_URL` | alias for the Bun base URL |
+//! | `PERI_SWARM_BUN_TOKEN` | optional Bun outer bearer token (value; not rendered) |
+//! | `PERI_SWARM_BUN_BEARER_ENV` | alternative: **name** of the variable holding that token |
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -60,12 +64,14 @@ use crate::actor::runtime::SessionStoreDeployment;
 use crate::actor::service::ActorServiceConfig;
 use crate::actor::swarm;
 use crate::config::{
-    is_env_var_name, optional_non_empty, validate_store_locator, BunConfig, ConfigError,
-    DeploymentApiKey, ModelConfig, SessionStoreConfig, StoreAccess, SwarmConfig, API_KEY_ENV,
-    BIND_ENV, DEFAULT_SSE_HEARTBEAT_MS, MODEL_ENV, WORKSPACE_ROOT_ENV,
+    is_env_var_name, optional_non_empty, validate_bun_url, validate_store_locator, BunConfig,
+    ConfigError, DeploymentApiKey, ModelConfig, SessionStoreConfig, StoreAccess, SwarmConfig,
+    API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV,
+    DEFAULT_SSE_HEARTBEAT_MS, MODEL_ENV, WORKSPACE_ROOT_ENV,
 };
 use crate::gateway::{RivetServiceConfig, RivetSwarmService};
 use crate::http::{build_router, AppState};
+use crate::sandbox::SandboxClientConfig;
 use crate::store::{SwarmStateStore, SwarmStateStoreConfig, SwarmStore};
 
 /// Remote Loom locator for the Peri session store
@@ -147,6 +153,13 @@ pub struct BootstrapConfig {
     pub model: Option<String>,
     pub settings_json: Option<String>,
     pub sse_heartbeat: Duration,
+    /// Bun bridge base URL and outer token name (S8a3a). Not a credential by
+    /// itself; the token is resolved into [`Self::sandbox`].
+    pub bun: BunConfig,
+    /// Configured Bun bridge. `None` means an `openai_hosted` request fails
+    /// with a diagnosable "bridge not configured" error; `none` sessions are
+    /// unaffected.
+    pub sandbox: Option<SandboxClientConfig>,
 }
 
 impl BootstrapConfig {
@@ -258,6 +271,56 @@ impl BootstrapConfig {
             None => None,
         };
 
+        // S8a3a: the Bun sandbox bridge is optional. A hosted environment is
+        // rejected at session creation when it is missing, so a `none`
+        // deployment keeps working unchanged.
+        let (bun_base_url_variable, bun_base_url_value) = match lookup(BUN_BASE_URL_ENV) {
+            Some(value) => (BUN_BASE_URL_ENV, Some(value)),
+            None => (BUN_URL_ALIAS_ENV, lookup(BUN_URL_ALIAS_ENV)),
+        };
+        let bun_base_url = match bun_base_url_value {
+            Some(value) => Some(validate_bun_url(&value, bun_base_url_variable)?),
+            None => None,
+        };
+        let bun_bearer_env =
+            crate::config::optional_env_name(lookup(BUN_BEARER_ENV), BUN_BEARER_ENV)?;
+        let direct_bun_token = optional_non_empty(lookup(BUN_TOKEN_ENV), BUN_TOKEN_ENV)?;
+        if direct_bun_token.is_some() && bun_bearer_env.is_some() {
+            return Err(ConfigError::Invalid {
+                variable: BUN_TOKEN_ENV,
+                reason: format!("must not be combined with {BUN_BEARER_ENV}"),
+            });
+        }
+        let bun_token = match (direct_bun_token, bun_bearer_env.as_deref()) {
+            (Some(value), _) => {
+                validate_bun_token(&value, BUN_TOKEN_ENV)?;
+                Some(value)
+            }
+            (None, Some(name)) => match lookup(name) {
+                Some(value) => {
+                    validate_bun_token(&value, BUN_BEARER_ENV)?;
+                    Some(value)
+                }
+                None => {
+                    return Err(ConfigError::Invalid {
+                        variable: BUN_BEARER_ENV,
+                        reason: format!("{name} is not set"),
+                    });
+                }
+            },
+            (None, None) => None,
+        };
+        if bun_token.is_some() && bun_base_url.is_none() {
+            return Err(ConfigError::Invalid {
+                variable: BUN_TOKEN_ENV,
+                reason: format!("requires {BUN_BASE_URL_ENV}"),
+            });
+        }
+        let sandbox = bun_base_url.clone().map(|base_url| SandboxClientConfig {
+            base_url,
+            token: bun_token,
+        });
+
         Ok(Self {
             bind_addr,
             api_key,
@@ -270,6 +333,11 @@ impl BootstrapConfig {
             model,
             settings_json,
             sse_heartbeat: Duration::from_millis(DEFAULT_SSE_HEARTBEAT_MS),
+            bun: BunConfig {
+                base_url: bun_base_url,
+                bearer_env: bun_bearer_env,
+            },
+            sandbox,
         })
     }
 
@@ -295,6 +363,10 @@ impl BootstrapConfig {
             workspace_root: Some(self.workspace_root.clone()),
             model: self.model.clone(),
             channel_capacity: ACTOR_CHANNEL_CAPACITY,
+            sandbox: self
+                .sandbox
+                .clone()
+                .map(crate::sandbox::BunSandboxClient::new),
         }
     }
 
@@ -309,10 +381,7 @@ impl BootstrapConfig {
                 credential_env: Some(self.store_token_env.clone()),
                 access: StoreAccess::ReadWrite,
             },
-            bun: BunConfig {
-                base_url: None,
-                bearer_env: None,
-            },
+            bun: self.bun.clone(),
             model: ModelConfig {
                 default_model: self.model.clone(),
                 credential_env: None,
@@ -494,6 +563,18 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         Some(error) => Err(error),
         None => outcome,
     }
+}
+
+/// The Bun service rejects empty or whitespace-bearing tokens; fail before the
+/// first session instead of discovering it on the wire.
+fn validate_bun_token(value: &str, variable: &'static str) -> Result<(), ConfigError> {
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        return Err(ConfigError::Invalid {
+            variable,
+            reason: "must be non-empty and contain no whitespace".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Two locators name one database when scheme, host, port and path agree.

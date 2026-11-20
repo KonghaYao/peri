@@ -20,6 +20,7 @@ fn config(machine_id: Option<Uuid>, workspace_root: Option<PathBuf>) -> ChildCon
         model: None,
         instructions: None,
         mcp_tools: Vec::new(),
+        workspace: None,
         root_session_id: "0192f0c4-0000-7000-8000-000000000002".to_owned(),
     }
 }
@@ -53,6 +54,7 @@ async fn workspace_root_without_machine_id_is_an_explicit_error() {
 use serde_json::json;
 
 use crate::domain::{McpHeader, McpToolKind, McpToolSpec};
+use crate::sandbox::SandboxMcpBinding;
 
 use super::{session_new_params, META_ALLOWED_TOOLS, META_EXTRA, META_REQUIRE_APPROVAL};
 
@@ -87,6 +89,7 @@ fn declared_tools_become_http_servers_with_every_openai_field_in_meta() {
     let params = session_new_params(
         "/tmp/ws",
         json!({"peri.rootSessionId": "0192f0c4-0000-7000-8000-000000000002"}),
+        None,
         &declared_tools(),
     );
 
@@ -128,6 +131,7 @@ fn no_declaration_keeps_session_new_without_the_mcp_servers_key() {
     let params = session_new_params(
         "/tmp/ws",
         json!({"peri.rootSessionId": "0192f0c4-0000-7000-8000-000000000002"}),
+        None,
         &[],
     );
     assert_eq!(
@@ -137,5 +141,58 @@ fn no_declaration_keeps_session_new_without_the_mcp_servers_key() {
             "_meta": {"peri.rootSessionId": "0192f0c4-0000-7000-8000-000000000002"},
         }),
         "no tools must keep the S4 request byte-identical"
+    );
+}
+
+#[test]
+fn workspace_binding_becomes_the_first_single_http_server() {
+    let binding = SandboxMcpBinding {
+        logical_env_id: "env_01".to_owned(),
+        sandbox_id: "sbx_0123456789abcdef0123456789abcdef".to_owned(),
+        workspace_path: std::path::PathBuf::from("/tmp/sandbox/workspace"),
+        mcp_url: "http://127.0.0.1:8081/sandboxes/env_01/mcp".to_owned(),
+        token: Some("outer-secret".to_owned()),
+    };
+    let params = session_new_params(
+        "/tmp/ws",
+        json!({"peri.rootSessionId": "0192f0c4-0000-7000-8000-000000000002"}),
+        Some(&binding),
+        &declared_tools(),
+    );
+    let servers = params["mcpServers"].as_array().expect("mcpServers");
+    assert_eq!(servers.len(), 3);
+    assert_eq!(
+        servers[0],
+        json!({
+            "type": "http",
+            "name": "workspace",
+            "url": "http://127.0.0.1:8081/sandboxes/env_01/mcp",
+            "headers": [{"name": "Authorization", "value": "Bearer outer-secret"}],
+            "_meta": {"peri.swarmSandbox": true},
+        })
+    );
+    assert_eq!(servers[1]["name"], json!("deepwiki"));
+    assert_eq!(servers[2]["name"], json!("plain"));
+}
+
+#[test]
+fn a_workspace_binding_without_outer_token_omits_authorization() {
+    let binding = SandboxMcpBinding {
+        logical_env_id: "env_02".to_owned(),
+        sandbox_id: "sbx_0123456789abcdef0123456789abcdef".to_owned(),
+        workspace_path: std::path::PathBuf::from("/tmp/sandbox/workspace"),
+        mcp_url: "http://127.0.0.1:8081/sandboxes/env_02/mcp".to_owned(),
+        token: None,
+    };
+    let params = session_new_params("/tmp/ws", json!({}), Some(&binding), &[]);
+    assert_eq!(
+        params["mcpServers"],
+        json!([{
+            "type": "http",
+            "name": "workspace",
+            "url": "http://127.0.0.1:8081/sandboxes/env_02/mcp",
+            "headers": [],
+            "_meta": {"peri.swarmSandbox": true},
+        }])
     );
 }

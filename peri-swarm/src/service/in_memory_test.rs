@@ -12,6 +12,7 @@ fn create_command(logical_id: &str, cwd: &str) -> CreateSessionCommand {
         mcp_tools: Vec::new(),
         initial_input: None,
         environment: EnvironmentKind::None,
+        environment_id: None,
         root_session_id: None,
     }
 }

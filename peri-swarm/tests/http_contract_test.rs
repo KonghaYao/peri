@@ -338,8 +338,10 @@ async fn unknown_fields_and_out_of_scope_capabilities_are_diagnosable() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["error"]["code"], json!("mcp_mode_unsupported"));
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    assert_eq!(value["environment"]["type"], json!("openai_hosted"));
+    assert!(value["environment"]["id"].as_str().is_some());
+    assert_eq!(value["sandbox"], json!(null));
 
     let (status, value) = create_session(
         &harness,

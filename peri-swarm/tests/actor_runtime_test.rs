@@ -358,6 +358,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             workspace_root: None,
             model: None,
             channel_capacity: 512,
+            sandbox: None,
         },
     ));
     let logical = LogicalId::parse("agent-s4-e2e").expect("logical id");
@@ -375,6 +376,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             mcp_tools: Vec::new(),
             initial_input: Some("hello".to_owned()),
             environment: EnvironmentKind::None,
+            environment_id: None,
             root_session_id: None,
         })
         .await
@@ -795,6 +797,7 @@ async fn idle_mq_dispatch_produces_a_turn() {
             model: None,
             instructions: None,
             mcp_tools: Vec::new(),
+            workspace: None,
             root_session_id: uuid(40),
         },
         Arc::clone(&log),
@@ -855,6 +858,7 @@ async fn model_unavailable_is_a_diagnosable_error() {
             workspace_root: None,
             model: None,
             channel_capacity: 16,
+            sandbox: None,
         },
     );
     let logical = LogicalId::parse("agent-s4-no-model").expect("logical id");
@@ -867,6 +871,7 @@ async fn model_unavailable_is_a_diagnosable_error() {
             mcp_tools: Vec::new(),
             initial_input: None,
             environment: EnvironmentKind::None,
+            environment_id: None,
             root_session_id: None,
         })
         .await

@@ -28,13 +28,14 @@ impl SessionState {
 
 /// Environment requested/allotted for a session.
 ///
-/// `none` is the only kind implemented in S3. `openai_hosted` exists so request
-/// parsing can return a diagnosable `mcp_mode_unsupported` instead of silently
-/// degrading to a local workspace (`design §5.5`).
+/// `none` runs without a session workspace. `openai_hosted` reserves a sandbox
+/// in the local Bun bridge and injects its `workspace` MCP entry (S8a3a); the
+/// sandbox is started lazily by the first real MCP request, not by the gateway.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvironmentKind {
     None,
+    #[serde(rename = "openai_hosted")]
     OpenAiHosted,
 }
 

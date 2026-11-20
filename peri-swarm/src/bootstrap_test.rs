@@ -12,7 +12,10 @@ use super::{
     BootstrapConfig, DEFAULT_BOOTSTRAP_BIND, DEFAULT_STORE_ENGINE, MACHINE_ID_ENV,
     SESSION_STORE_ENV, SETTINGS_JSON_ENV, STATE_STORE_ENV, STORE_ENGINE_ENV, STORE_TOKEN_ENV,
 };
-use crate::config::{ConfigError, API_KEY_ENV, BIND_ENV, MODEL_ENV, WORKSPACE_ROOT_ENV};
+use crate::config::{
+    ConfigError, API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV,
+    BUN_URL_ALIAS_ENV, MODEL_ENV, WORKSPACE_ROOT_ENV,
+};
 
 const TOKEN_ENV_NAME: &str = "PERI_TEST_LOOM_TOKEN";
 const TOKEN_VALUE: &str = "loom-secret-value";
@@ -105,6 +108,75 @@ fn optional_model_and_settings_are_carried_verbatim() {
     .expect("configuration");
     assert_eq!(config.model.as_deref(), Some("stub-model"));
     assert_eq!(config.settings_json.as_deref(), Some(settings));
+}
+
+#[test]
+fn a_configured_bun_bridge_carries_the_url_and_outer_token() {
+    let config = parse(&[
+        (BUN_BASE_URL_ENV, Some("http://127.0.0.1:8081")),
+        (BUN_TOKEN_ENV, Some("outer-secret")),
+    ])
+    .expect("configuration");
+    let sandbox = config.sandbox.as_ref().expect("sandbox bridge");
+    assert_eq!(sandbox.base_url.as_str(), "http://127.0.0.1:8081/");
+    assert_eq!(sandbox.token.as_deref(), Some("outer-secret"));
+    assert_eq!(
+        config.bun.base_url.as_ref().map(url::Url::as_str),
+        Some("http://127.0.0.1:8081/")
+    );
+    let actor = config.actor_config();
+    assert!(actor.sandbox.is_some());
+    let rendered = format!("{actor:?}");
+    assert!(!rendered.contains("outer-secret"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+#[test]
+fn the_bun_url_alias_and_named_token_variable_are_accepted() {
+    let config = parse(&[
+        (BUN_URL_ALIAS_ENV, Some("http://127.0.0.1:8082")),
+        (BUN_BEARER_ENV, Some(TOKEN_ENV_NAME)),
+    ])
+    .expect("configuration");
+    let sandbox = config.sandbox.as_ref().expect("sandbox bridge");
+    assert_eq!(sandbox.base_url.as_str(), "http://127.0.0.1:8082/");
+    assert_eq!(sandbox.token.as_deref(), Some(TOKEN_VALUE));
+    assert_eq!(config.bun.bearer_env.as_deref(), Some(TOKEN_ENV_NAME));
+}
+
+#[test]
+fn an_unconfigured_bridge_leaves_hosted_requests_to_fail_at_session_creation() {
+    let config = parse(&[]).expect("configuration");
+    assert!(config.sandbox.is_none());
+    assert!(config.actor_config().sandbox.is_none());
+}
+
+#[test]
+fn invalid_bun_token_configuration_fails_the_start() {
+    let reason = expect_invalid(
+        parse(&[(BUN_TOKEN_ENV, Some("outer-secret"))]),
+        BUN_TOKEN_ENV,
+    );
+    assert!(reason.contains(BUN_BASE_URL_ENV), "{reason}");
+
+    let reason = expect_invalid(
+        parse(&[
+            (BUN_BASE_URL_ENV, Some("http://127.0.0.1:8081")),
+            (BUN_TOKEN_ENV, Some("outer secret")),
+        ]),
+        BUN_TOKEN_ENV,
+    );
+    assert!(reason.contains("whitespace"), "{reason}");
+
+    let reason = expect_invalid(
+        parse(&[
+            (BUN_BASE_URL_ENV, Some("http://127.0.0.1:8081")),
+            (BUN_TOKEN_ENV, Some("outer-secret")),
+            (BUN_BEARER_ENV, Some(TOKEN_ENV_NAME)),
+        ]),
+        BUN_TOKEN_ENV,
+    );
+    assert!(reason.contains(BUN_BEARER_ENV), "{reason}");
 }
 
 #[test]

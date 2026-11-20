@@ -558,6 +558,9 @@ pub struct Create {
     #[serde(default)]
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
+    /// Caller-supplied hosted environment id (S8a3a); `None` mints one.
+    #[serde(default)]
+    pub environment_id: Option<String>,
     /// Reserved by the gateway before routing; `None` keeps S4 behavior.
     #[serde(default)]
     pub root_session_id: Option<String>,
@@ -587,6 +590,7 @@ impl Handler<Create> for SwarmActor {
             mcp_tools: action.mcp_tools,
             initial_input: action.initial_input,
             environment: action.environment,
+            environment_id: action.environment_id,
             root_session_id: action.root_session_id,
         };
         // A create with an initial input runs a turn: hold the actor awake for

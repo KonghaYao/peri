@@ -46,6 +46,6 @@ fn constructors_keep_actions_diagnosable() {
     assert_eq!(unsupported.kind(), ErrorKind::Unprocessable);
     assert_eq!(
         unsupported.details()["supported"],
-        serde_json::json!(["none"])
+        serde_json::json!(["none", "openai_hosted"])
     );
 }

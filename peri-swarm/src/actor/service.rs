@@ -32,12 +32,14 @@ use uuid::Uuid;
 use super::reader::{ItemLog, TurnOutcome};
 use super::runtime::{
     local_session_store, AcpChild, ChildConfig, ChildError, ChildShutdown, SessionStoreDeployment,
+    WORKSPACE_MCP_SERVER_NAME,
 };
 use crate::domain::{
     new_root_session_id, ActorKey, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
     ErrorKind, InputKind, InputMode, InputOutcome, InputState, InputSubmission, ItemOrder,
     ItemPage, ItemsWindow, LogicalId, SessionState, SessionView, StreamEvent, SwarmError, TurnView,
 };
+use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
 use crate::store::{store_failure, InputPut, SwarmInputRow, SwarmSessionRow, SwarmStore};
 
@@ -77,6 +79,9 @@ pub struct ActorServiceConfig {
     /// rejected: one model per actor (`design §0.4-3`).
     pub model: Option<String>,
     pub channel_capacity: usize,
+    /// Bun sandbox bridge (S8a3a). `None` makes `openai_hosted` fail with a
+    /// diagnosable error; `none` sessions never touch it.
+    pub sandbox: Option<BunSandboxClient>,
 }
 
 impl Default for ActorServiceConfig {
@@ -89,6 +94,7 @@ impl Default for ActorServiceConfig {
             workspace_root: None,
             model: None,
             channel_capacity: 256,
+            sandbox: None,
         }
     }
 }
@@ -555,11 +561,130 @@ impl AcpSwarmService {
         Ok(backlog)
     }
 
+    /// Resolve the session environment and reserve its Bun workspace (S8a3a).
+    ///
+    /// `none` never contacts Bun. `openai_hosted` requires a configured bridge;
+    /// a caller-supplied `environment_id` must already exist in
+    /// `swarm_bindings`, and an anonymous environment mints `env_<uuid>`. The
+    /// reservation writes no credential: the outer Bun token stays in the
+    /// deployment configuration and the inner token never leaves Bun.
+    async fn bind_environment(
+        &self,
+        command: &CreateSessionCommand,
+    ) -> Result<(EnvironmentRef, Option<SandboxMcpBinding>), SwarmError> {
+        if command.environment == EnvironmentKind::None {
+            return Ok((EnvironmentRef::none(&command.logical_id), None));
+        }
+
+        // The injected entry owns the ACP `workspace` name. A caller using the
+        // same label is a real duplicate, not a policy refusal; fail before
+        // touching the bridge so no reservation is leaked.
+        if let Some(tool) = command
+            .mcp_tools
+            .iter()
+            .find(|tool| tool.server_label == WORKSPACE_MCP_SERVER_NAME)
+        {
+            return Err(SwarmError::new(
+                ErrorKind::Conflict,
+                ErrorCode::IdentityConflict,
+                "server_label \"workspace\" is already bound to the session workspace",
+            )
+            .with_details(json!({
+                "field": "tools",
+                "serverLabel": tool.server_label,
+                "reason": "duplicate_server_label",
+            })));
+        }
+
+        let client = self.config.sandbox.as_ref().ok_or_else(|| {
+            SwarmError::new(
+                ErrorKind::Unavailable,
+                ErrorCode::UpstreamUnavailable,
+                "openai_hosted requires the Bun sandbox bridge",
+            )
+            .with_details(json!({
+                "field": "environment",
+                "operation": "sandbox_bridge_unconfigured",
+                "reason": "PERI_SWARM_BUN_BASE_URL is not set",
+            }))
+        })?;
+
+        let logical_env_id = match command.environment_id.as_deref() {
+            Some(requested) => {
+                if !crate::sandbox::is_valid_logical_env_id(requested) {
+                    return Err(SwarmError::invalid_input(
+                        "environment.environment_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+                    )
+                    .with_details(json!({
+                        "field": "environment.environment_id",
+                        "received": requested,
+                    })));
+                }
+                let bound = self
+                    .store
+                    .swarm_get_binding(requested)
+                    .await
+                    .map_err(|error| store_failure("get_binding", error))?;
+                if bound.is_none() {
+                    return Err(SwarmError::invalid_input(
+                        "environment.environment_id is not bound in this deployment",
+                    )
+                    .with_details(json!({
+                        "field": "environment.environment_id",
+                        "received": requested,
+                        "reason": "not_bound",
+                    })));
+                }
+                requested.to_owned()
+            }
+            None => format!("env_{}", Uuid::now_v7()),
+        };
+
+        let reservation = client
+            .reserve(&logical_env_id)
+            .await
+            .map_err(sandbox_bridge_error)?;
+        let workspace_root = reservation
+            .binding
+            .workspace_path
+            .parent()
+            .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+        self.store
+            .swarm_put_binding(crate::store::SwarmBindingRow {
+                logical_env_id: logical_env_id.clone(),
+                logical_id: command.logical_id.as_str().to_owned(),
+                sandbox_id: reservation.binding.sandbox_id.clone(),
+                workspace_path: reservation
+                    .binding
+                    .workspace_path
+                    .to_string_lossy()
+                    .into_owned(),
+                sandbox_root: workspace_root,
+                settings_profile: None,
+                token_file: None,
+                last_run_id: reservation.run_id,
+                last_used_at: reservation
+                    .last_used_at
+                    .unwrap_or_else(peri_time::now_utc_rfc3339),
+            })
+            .await
+            .map_err(|error| store_failure("put_binding", error))?;
+
+        Ok((
+            EnvironmentRef {
+                kind: EnvironmentKind::OpenAiHosted,
+                id: Some(logical_env_id),
+            },
+            Some(reservation.binding),
+        ))
+    }
+
     async fn spawn_runtime(
         &self,
         command: &CreateSessionCommand,
         model: Option<String>,
         root_session_id: String,
+        workspace: Option<&SandboxMcpBinding>,
     ) -> Result<Arc<SessionRuntime>, SwarmError> {
         let channel = self.channel_for(command.logical_id.as_str());
         let log = Arc::new(ItemLog::new(
@@ -582,6 +707,7 @@ impl AcpSwarmService {
                 model,
                 instructions: command.instructions.clone(),
                 mcp_tools: command.mcp_tools.clone(),
+                workspace: workspace.cloned(),
                 root_session_id: root_session_id.clone(),
             },
             Arc::clone(&log),
@@ -619,9 +745,6 @@ impl SwarmService for AcpSwarmService {
         &self,
         command: CreateSessionCommand,
     ) -> Result<CreateSessionResult, SwarmError> {
-        if command.environment != EnvironmentKind::None {
-            return Err(SwarmError::mcp_mode_unsupported());
-        }
         let model = self.resolve_model(command.model.as_deref())?;
         let cwd = command.cwd.to_string_lossy().into_owned();
         let _create = self.create_lock.lock().await;
@@ -666,6 +789,7 @@ impl SwarmService for AcpSwarmService {
                 )
                 .with_details(json!({ "configured": row.model, "requested": model })));
             }
+            check_environment_identity(&row.environment, &command)?;
             let runtime = self.runtime(&command.logical_id).map_err(|_| {
                 // Cross-process/agent recovery (`session/load` into a fresh
                 // child) belongs to S5/S6; S4 must not pretend the session is
@@ -686,12 +810,20 @@ impl SwarmService for AcpSwarmService {
             });
         }
 
+        // S8a3a: reserve (never start) the Bun workspace before the host is
+        // assembled, so `session/new` already carries the workspace entry.
+        let (environment, workspace) = self.bind_environment(&command).await?;
         let root_session_id = command
             .root_session_id
             .clone()
             .unwrap_or_else(new_root_session_id);
         let runtime = self
-            .spawn_runtime(&command, model.clone(), root_session_id.clone())
+            .spawn_runtime(
+                &command,
+                model.clone(),
+                root_session_id.clone(),
+                workspace.as_ref(),
+            )
             .await?;
 
         let now = peri_time::now_utc_rfc3339();
@@ -704,7 +836,7 @@ impl SwarmService for AcpSwarmService {
             model,
             instructions: command.instructions.clone(),
             mcp_tools: command.mcp_tools.clone(),
-            environment: EnvironmentRef::none(&command.logical_id),
+            environment,
             created_at: now.clone(),
             last_activity_at: now,
             last_item_seq: 0,
@@ -912,6 +1044,57 @@ impl SwarmService for AcpSwarmService {
         let live = self.channel_for(logical_id.as_str()).subscribe();
         EventSubscription::new(Vec::new(), live)
     }
+}
+
+/// A retried create must address the same environment identity; changing the
+/// kind or the explicit environment id is a real identity conflict.
+fn check_environment_identity(
+    row: &EnvironmentRef,
+    command: &CreateSessionCommand,
+) -> Result<(), SwarmError> {
+    let conflict = |field: &str| {
+        SwarmError::new(
+            ErrorKind::Conflict,
+            ErrorCode::IdentityConflict,
+            "logicalId already exists with a different environment",
+        )
+        .with_details(json!({ "field": field }))
+    };
+    if row.kind != command.environment {
+        return Err(conflict("environment"));
+    }
+    if let (Some(bound), Some(requested)) = (row.id.as_deref(), command.environment_id.as_deref()) {
+        if bound != requested {
+            return Err(conflict("environment.environment_id"));
+        }
+    }
+    Ok(())
+}
+
+/// Map a Bun bridge failure to the HTTP contract without echoing credentials or
+/// the bridge response body.
+fn sandbox_bridge_error(error: SandboxClientError) -> SwarmError {
+    tracing::warn!(error = %error, "bun sandbox bridge call failed");
+    let (status, upstream_code, reason) = match error {
+        SandboxClientError::Unavailable(_) => (None, None, "unreachable"),
+        SandboxClientError::Rejected {
+            status,
+            code,
+            message: _,
+        } => (Some(status), Some(code), "rejected"),
+        SandboxClientError::Invalid(_) => (None, None, "invalid_response"),
+    };
+    let mut details = json!({
+        "operation": "sandbox_reserve",
+        "reason": reason,
+    });
+    if let Some(status) = status {
+        details["upstreamStatus"] = json!(status);
+    }
+    if let Some(code) = upstream_code {
+        details["upstreamCode"] = json!(code);
+    }
+    SwarmError::upstream_unavailable("sandbox_reserve").with_details(details)
 }
 
 /// Map a child failure to the HTTP contract. Upstream messages are dropped

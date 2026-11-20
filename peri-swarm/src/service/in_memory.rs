@@ -430,9 +430,6 @@ impl SwarmService for InMemorySwarmService {
         self.record(ServiceCall::CreateSession(
             command.logical_id.as_str().to_owned(),
         ));
-        if command.environment != EnvironmentKind::None {
-            return Err(SwarmError::mcp_mode_unsupported());
-        }
         let model = self.resolve_model(command.model.as_deref())?;
         let cwd = command.cwd.to_string_lossy().into_owned();
 
@@ -493,6 +490,20 @@ impl SwarmService for InMemorySwarmService {
         }
 
         let now = peri_time::now_utc_rfc3339();
+        // The fake records the requested environment but never contacts Bun;
+        // hosted allocation and workspace injection are actor behavior.
+        let environment = match command.environment {
+            EnvironmentKind::None => EnvironmentRef::none(&command.logical_id),
+            EnvironmentKind::OpenAiHosted => EnvironmentRef {
+                kind: EnvironmentKind::OpenAiHosted,
+                id: Some(
+                    command
+                        .environment_id
+                        .clone()
+                        .unwrap_or_else(|| format!("env_{}", Uuid::now_v7())),
+                ),
+            },
+        };
         let row = SwarmSessionRow {
             logical_id: command.logical_id.as_str().to_owned(),
             root_session_id: command
@@ -505,7 +516,7 @@ impl SwarmService for InMemorySwarmService {
             model,
             instructions: command.instructions.clone(),
             mcp_tools: command.mcp_tools.clone(),
-            environment: EnvironmentRef::none(&command.logical_id),
+            environment,
             created_at: now.clone(),
             last_activity_at: now,
             last_item_seq: 0,

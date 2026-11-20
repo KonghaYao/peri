@@ -400,9 +400,11 @@ pub fn resolve_create_input(body: &CreateSessionBody) -> Result<Option<String>, 
     Ok(Some(text))
 }
 
-pub fn resolve_environment(body: &CreateSessionBody) -> Result<EnvironmentKind, SwarmError> {
+pub fn resolve_environment(
+    body: &CreateSessionBody,
+) -> Result<(EnvironmentKind, Option<String>), SwarmError> {
     let Some(environment) = &body.environment else {
-        return Ok(EnvironmentKind::None);
+        return Ok((EnvironmentKind::None, None));
     };
     if let Some(id) = &environment.environment_id {
         if id.trim().is_empty() {
@@ -419,10 +421,14 @@ pub fn resolve_environment(body: &CreateSessionBody) -> Result<EnvironmentKind, 
                     "none with environment_id",
                 ));
             }
-            Ok(EnvironmentKind::None)
+            Ok((EnvironmentKind::None, None))
         }
-        // `design §5.5`: never silently degrade hosted MCP to a local workspace.
-        "openai_hosted" => Err(SwarmError::mcp_mode_unsupported()),
+        // S8a3a: hosted environments reserve a Bun workspace. A missing bridge
+        // or an unbound environment id is diagnosed by the service, not here.
+        "openai_hosted" => Ok((
+            EnvironmentKind::OpenAiHosted,
+            environment.environment_id.clone(),
+        )),
         other => Err(SwarmError::unsupported_environment(other)),
     }
 }

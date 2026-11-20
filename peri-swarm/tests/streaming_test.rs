@@ -388,19 +388,19 @@ async fn stream_create_failure_returns_json_instead_of_sse() {
             Some(json!({
                 "logicalId": "agent-01",
                 "stream": true,
-                "environment": { "type": "openai_hosted" }
+                "environment": { "type": "container" }
             })),
             Some(TOKEN),
             &[],
         ))
         .await
         .expect("response");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     let value: Value = serde_json::from_slice(&bytes).expect("json");
-    assert_eq!(value["error"]["code"], json!("mcp_mode_unsupported"));
+    assert_eq!(value["error"]["code"], json!("unsupported_environment"));
 }
 
 #[tokio::test]

@@ -264,6 +264,7 @@ impl Harness {
                 workspace_root: None,
                 model: None,
                 channel_capacity: 256,
+                sandbox: None,
             },
         ));
         Self {

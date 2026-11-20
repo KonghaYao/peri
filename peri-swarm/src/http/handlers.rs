@@ -42,7 +42,8 @@ pub async fn create_session(
         instructions,
         mcp_tools,
         initial_input,
-        environment,
+        environment: environment.0,
+        environment_id: environment.1,
         root_session_id: None,
     };
 

@@ -10,7 +10,13 @@ pub const WORKSPACE_ROOT_ENV: &str = "PERI_SWARM_WORKSPACE_ROOT";
 pub const STORE_LOCATOR_ENV: &str = "PERI_SWARM_STORE_LOCATOR";
 pub const STORE_CREDENTIAL_ENV: &str = "PERI_SWARM_STORE_CREDENTIAL_ENV";
 pub const BUN_BASE_URL_ENV: &str = "PERI_SWARM_BUN_BASE_URL";
+/// Alias accepted for the Bun base URL (S8a3a); the canonical name wins when
+/// both are set.
+pub const BUN_URL_ALIAS_ENV: &str = "PERI_SWARM_BUN_URL";
 pub const BUN_BEARER_ENV: &str = "PERI_SWARM_BUN_BEARER_ENV";
+/// Direct Bun bridge token (S8a3a). Mutually exclusive with
+/// [`BUN_BEARER_ENV`], which names another variable instead.
+pub const BUN_TOKEN_ENV: &str = "PERI_SWARM_BUN_TOKEN";
 pub const MODEL_ENV: &str = "PERI_SWARM_MODEL";
 pub const MODEL_CREDENTIAL_ENV: &str = "PERI_SWARM_MODEL_CREDENTIAL_ENV";
 pub const SSE_HEARTBEAT_MS_ENV: &str = "PERI_SWARM_SSE_HEARTBEAT_MS";
@@ -164,7 +170,7 @@ impl SwarmConfig {
 
         let bun = BunConfig {
             base_url: match lookup(BUN_BASE_URL_ENV) {
-                Some(value) => Some(validate_bun_url(&value)?),
+                Some(value) => Some(validate_bun_url(&value, BUN_BASE_URL_ENV)?),
                 None => None,
             },
             bearer_env: optional_env_name(lookup(BUN_BEARER_ENV), BUN_BEARER_ENV)?,
@@ -244,39 +250,35 @@ pub(crate) fn validate_store_locator(
     Ok(url)
 }
 
-fn validate_bun_url(value: &str) -> Result<Url, ConfigError> {
-    let url =
-        Url::parse(value).map_err(|_| ConfigError::invalid(BUN_BASE_URL_ENV, "expected a URL"))?;
+pub(crate) fn validate_bun_url(value: &str, variable: &'static str) -> Result<Url, ConfigError> {
+    let url = Url::parse(value).map_err(|_| ConfigError::invalid(variable, "expected a URL"))?;
     if url.scheme() != "http" {
         return Err(ConfigError::invalid(
-            BUN_BASE_URL_ENV,
+            variable,
             "Bun bridge must be loopback HTTP",
         ));
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ConfigError::invalid(
-            BUN_BASE_URL_ENV,
+            variable,
             "embedded credentials are not allowed",
         ));
     }
     if url.query().is_some() || url.fragment().is_some() {
         return Err(ConfigError::invalid(
-            BUN_BASE_URL_ENV,
+            variable,
             "query and fragment are not allowed",
         ));
     }
     let loopback = matches!(url.host_str(), Some("127.0.0.1" | "::1" | "localhost"));
     if !loopback {
         return Err(ConfigError::invalid(
-            BUN_BASE_URL_ENV,
+            variable,
             "host must be loopback (127.0.0.1, ::1 or localhost)",
         ));
     }
     if url.port().is_none() {
-        return Err(ConfigError::invalid(
-            BUN_BASE_URL_ENV,
-            "explicit port is required",
-        ));
+        return Err(ConfigError::invalid(variable, "explicit port is required"));
     }
     Ok(url)
 }

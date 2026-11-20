@@ -212,6 +212,7 @@ impl SwarmService for RivetSwarmService {
             mcp_tools: command.mcp_tools,
             initial_input: command.initial_input,
             environment: command.environment,
+            environment_id: command.environment_id,
             root_session_id: Some(root_session_id),
         };
         let envelope: ActionEnvelope<CreateSessionResult> = self.call(&handle, action).await?;

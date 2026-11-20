@@ -342,6 +342,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             workspace_root: None,
             model: None,
             channel_capacity: 512,
+            sandbox: None,
         },
     ));
     let store: Arc<dyn SwarmStore> = deployment.store();
@@ -417,6 +418,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             mcp_tools: vec![declared_mcp.clone()],
             initial_input: Some("hello".to_owned()),
             environment: EnvironmentKind::None,
+            environment_id: None,
             root_session_id: None,
         })
         .await
@@ -477,6 +479,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             mcp_tools: Vec::new(),
             initial_input: None,
             environment: EnvironmentKind::None,
+            environment_id: None,
             root_session_id: Some(reserved.clone()),
         })
         .await
@@ -497,6 +500,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             mcp_tools: vec![declared_mcp.clone()],
             initial_input: None,
             environment: EnvironmentKind::None,
+            environment_id: None,
             root_session_id: None,
         })
         .await
@@ -523,6 +527,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             mcp_tools: vec![other_mcp],
             initial_input: None,
             environment: EnvironmentKind::None,
+            environment_id: None,
             root_session_id: None,
         })
         .await

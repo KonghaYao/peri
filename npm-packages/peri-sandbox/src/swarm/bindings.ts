@@ -19,14 +19,15 @@ import { SwarmError } from './errors.js';
 export interface SwarmBinding {
   readonly sandboxId: string;
   readonly workspacePath: string;
-  readonly lastRunId: string;
+  /** `null` while the environment is reserved and has never started. */
+  readonly lastRunId: string | null;
   readonly lastUsedAt: string;
 }
 
 const bindingSchema = z.strictObject({
   sandboxId: z.string().regex(sandboxIdPattern),
   workspacePath: z.string().refine((value) => isAbsolute(value), 'must be an absolute path'),
-  lastRunId: z.string().min(1),
+  lastRunId: z.string().min(1).nullable(),
   lastUsedAt: z.string().refine((value) => !Number.isNaN(Date.parse(value)), 'must be an ISO timestamp'),
 });
 

@@ -44,6 +44,7 @@ use uuid::Uuid;
 
 use super::reader::ItemLog;
 use crate::domain::McpToolSpec;
+use crate::sandbox::SandboxMcpBinding;
 
 /// `_meta` keys carrying the caller's OpenAI tool declaration on one ACP
 /// `mcpServers` entry (S8a2).
@@ -54,6 +55,13 @@ use crate::domain::McpToolSpec;
 const META_REQUIRE_APPROVAL: &str = "peri.openai.require_approval";
 const META_ALLOWED_TOOLS: &str = "peri.openai.allowed_tools";
 const META_EXTRA: &str = "peri.openai.extra";
+
+/// Internal workspace MCP binding (S8a3a). ACP grants this name
+/// `WorkspaceRemote`/system-server semantics, so the session waits for the
+/// sandbox MCP before the first turn.
+pub const WORKSPACE_MCP_SERVER_NAME: &str = "workspace";
+/// Marks the internally injected entry; caller entries never carry it.
+const META_SWARM_SANDBOX: &str = "peri.swarmSandbox";
 
 /// Everything one child needs that the service already validated.
 #[derive(Clone, Debug)]
@@ -78,6 +86,10 @@ pub struct ChildConfig {
     /// in `session/new.mcpServers`; approval and tool filtering are recorded in
     /// the entry `_meta`, not enforced here (S8a2).
     pub mcp_tools: Vec<McpToolSpec>,
+    /// Internal Bun workspace binding (S8a3a). When present it becomes the
+    /// single `workspace` entry and a caller entry with the same name is
+    /// rejected before assembly.
+    pub workspace: Option<SandboxMcpBinding>,
     /// Reserved root session id (UUIDv7) handed to `session/new`.
     pub root_session_id: String,
 }
@@ -214,14 +226,47 @@ fn mcp_server_entry(tool: &McpToolSpec) -> Value {
     entry
 }
 
+/// One ACP `mcpServers` entry for the internal Bun workspace.
+///
+/// The URL is the Bun bridge proxy (`<bun>/sandboxes/<logicalEnvId>/mcp`); the
+/// `Authorization` value is the deployment's outer Bun token and is only
+/// assembled in memory. `_meta.peri.swarmSandbox` marks the entry as internal.
+fn workspace_mcp_entry(binding: &SandboxMcpBinding) -> Value {
+    let mut headers = Vec::new();
+    if let Some(token) = binding.token.as_deref() {
+        headers.push(json!({ "name": "Authorization", "value": format!("Bearer {token}") }));
+    }
+    let mut entry = json!({
+        "type": "http",
+        "name": WORKSPACE_MCP_SERVER_NAME,
+        "url": binding.mcp_url,
+        "headers": headers,
+    });
+    entry["_meta"] = json!({ META_SWARM_SANDBOX: true });
+    entry
+}
+
 /// `session/new` parameters for one child.
 ///
-/// No declaration keeps the request byte-identical to S4: the key is omitted
-/// rather than sent as an empty array.
-fn session_new_params(cwd: &str, meta: Value, tools: &[McpToolSpec]) -> Value {
+/// The internal workspace entry (if any) comes first, then the caller's
+/// declarations in their normalized order. No declaration and no workspace
+/// keeps the request byte-identical to S4: the key is omitted rather than sent
+/// as an empty array.
+fn session_new_params(
+    cwd: &str,
+    meta: Value,
+    workspace: Option<&SandboxMcpBinding>,
+    tools: &[McpToolSpec],
+) -> Value {
     let mut params = json!({ "cwd": cwd, "_meta": meta });
-    if !tools.is_empty() {
-        params["mcpServers"] = Value::Array(tools.iter().map(mcp_server_entry).collect());
+    let mut servers: Vec<Value> =
+        Vec::with_capacity(tools.len() + usize::from(workspace.is_some()));
+    if let Some(binding) = workspace {
+        servers.push(workspace_mcp_entry(binding));
+    }
+    servers.extend(tools.iter().map(mcp_server_entry));
+    if !servers.is_empty() {
+        params["mcpServers"] = Value::Array(servers);
     }
     params
 }
@@ -334,7 +379,7 @@ impl AcpChild {
         let response = match client
             .send_request(
                 "session/new",
-                session_new_params(&cwd, meta, &config.mcp_tools),
+                session_new_params(&cwd, meta, config.workspace.as_ref(), &config.mcp_tools),
             )
             .await
         {

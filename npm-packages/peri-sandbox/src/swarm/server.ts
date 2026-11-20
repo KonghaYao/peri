@@ -1,20 +1,21 @@
 import { timingSafeEqual } from 'node:crypto';
-import { SandboxError, type SandboxState } from '../instance/types.js';
+import { SandboxError } from '../instance/types.js';
 import { assertLogicalEnvId, SwarmError } from './errors.js';
 import { forwardSandboxMcp } from './forward.js';
-import type { SwarmManager, SwarmSandboxEntry } from './manager.js';
+import type { SwarmManager, SwarmSandboxDescription } from './manager.js';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 
-/** HTTP projection of a running or previously bound sandbox. Never contains the inner token. */
+/** HTTP projection of a reserved, running or previously bound sandbox. Never contains the inner token. */
 export interface SwarmSandboxView {
   readonly logicalEnvId: string;
   readonly sandboxId: string;
-  readonly state: SandboxState;
-  readonly runId: string;
+  readonly state: SwarmSandboxDescription['state'];
+  readonly runId: string | null;
   readonly workspacePath: string;
   readonly mcpUrl: string | null;
   readonly lastUsedAt: string;
+  readonly lastError: { code: string; message: string } | null;
 }
 
 export interface SwarmServerOptions {
@@ -48,15 +49,19 @@ function decodeSegment(value: string): string | null {
   }
 }
 
-function viewOf(entry: SwarmSandboxEntry, origin: string): SwarmSandboxView {
+function viewOf(description: SwarmSandboxDescription, origin: string): SwarmSandboxView {
   return {
-    logicalEnvId: entry.logicalEnvId,
-    sandboxId: entry.sandboxId,
-    state: entry.instance.state,
-    runId: entry.runId,
-    workspacePath: entry.workspacePath,
-    mcpUrl: new URL(`/sandboxes/${encodeURIComponent(entry.logicalEnvId)}/mcp`, origin).toString(),
-    lastUsedAt: entry.lastUsedAt.toISOString(),
+    logicalEnvId: description.logicalEnvId,
+    sandboxId: description.sandboxId,
+    state: description.state,
+    runId: description.runId,
+    workspacePath: description.workspacePath,
+    mcpUrl:
+      description.state === 'stopped'
+        ? null
+        : new URL(`/sandboxes/${encodeURIComponent(description.logicalEnvId)}/mcp`, origin).toString(),
+    lastUsedAt: description.lastUsedAt,
+    lastError: description.lastError,
   };
 }
 
@@ -107,28 +112,25 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
     const logicalEnvId = (body as Record<string, unknown>).logicalEnvId;
     if (typeof logicalEnvId !== 'string')
       return errorResponse(400, 'invalid_request', 'logicalEnvId must be a string.');
+    const lazy = (body as Record<string, unknown>).lazy;
+    if (lazy !== undefined && typeof lazy !== 'boolean')
+      return errorResponse(400, 'invalid_request', 'lazy must be a boolean.');
     assertLogicalEnvId(logicalEnvId);
+    if (lazy === true) {
+      // Lazy reservation: allocate identity/path/URL only, never start SRT here.
+      const reservation = await manager.reserve(logicalEnvId);
+      return jsonResponse(200, { sandbox: viewOf(reservation, url.origin) });
+    }
     const entry = await manager.ensure(logicalEnvId);
-    return jsonResponse(200, { sandbox: viewOf(entry, url.origin) });
+    const description = manager.describe(entry.logicalEnvId);
+    if (description === undefined) throw new SwarmError('invalid_config', 'sandbox started without a description.');
+    return jsonResponse(200, { sandbox: viewOf(description, url.origin) });
   }
 
   function getSandbox(url: URL, logicalEnvId: string): Response {
-    const entry = manager.get(logicalEnvId);
-    if (entry !== undefined) return jsonResponse(200, { sandbox: viewOf(entry, url.origin) });
-    const binding = manager.binding(logicalEnvId);
-    if (binding !== undefined) {
-      const sandbox: SwarmSandboxView = {
-        logicalEnvId,
-        sandboxId: binding.sandboxId,
-        state: 'stopped',
-        runId: binding.lastRunId,
-        workspacePath: binding.workspacePath,
-        mcpUrl: null,
-        lastUsedAt: binding.lastUsedAt,
-      };
-      return jsonResponse(200, { sandbox });
-    }
-    return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
+    const description = manager.describe(logicalEnvId);
+    if (description === undefined) return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
+    return jsonResponse(200, { sandbox: viewOf(description, url.origin) });
   }
 
   async function deleteSandbox(url: URL, logicalEnvId: string): Promise<Response> {
@@ -148,8 +150,13 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
   }
 
   async function proxyMcp(logicalEnvId: string, request: Request): Promise<Response> {
-    const entry = manager.get(logicalEnvId);
-    if (entry === undefined) return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
+    let entry = manager.get(logicalEnvId);
+    if (entry === undefined || entry.instance.state !== 'ready') {
+      // A real MCP request is the start trigger for a reserved environment.
+      // A binding without a reservation (stopped/unknown) is not revived here.
+      if (!manager.canStart(logicalEnvId)) return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
+      entry = await manager.ensure(logicalEnvId);
+    }
     if (entry.instance.state !== 'ready')
       return errorResponse(503, 'sandbox_not_ready', `sandbox is ${entry.instance.state}.`);
     try {

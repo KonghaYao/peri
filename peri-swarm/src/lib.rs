@@ -20,6 +20,7 @@ pub mod domain;
 mod event_stream;
 pub mod gateway;
 pub mod http;
+pub mod sandbox;
 pub mod service;
 pub mod store;
 

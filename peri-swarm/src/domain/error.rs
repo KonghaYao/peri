@@ -261,7 +261,9 @@ impl SwarmError {
             ErrorCode::UnsupportedEnvironment,
             "environment type is outside this deployment's supported range",
         )
-        .with_details(serde_json::json!({ "received": kind, "supported": ["none"] }))
+        .with_details(
+            serde_json::json!({ "received": kind, "supported": ["none", "openai_hosted"] }),
+        )
     }
 
     #[must_use]

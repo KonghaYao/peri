@@ -32,6 +32,10 @@ pub struct CreateSessionCommand {
     pub mcp_tools: Vec<McpToolSpec>,
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
+    /// Caller-supplied hosted environment id (`environment.environment_id`).
+    /// Only meaningful with [`EnvironmentKind::OpenAiHosted`]; an omitted id
+    /// mints `env_<uuid>` at the actor.
+    pub environment_id: Option<String>,
     /// Root ACP session id reserved by the caller (S5 gateway). A trusted host
     /// generates it before routing to the actor so a retried create addresses
     /// the same identity; `None` keeps the S4 behavior (service generates one).
