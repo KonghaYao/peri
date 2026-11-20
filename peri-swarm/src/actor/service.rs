@@ -581,6 +581,7 @@ impl AcpSwarmService {
                 settings_json: self.config.settings_json.clone(),
                 model,
                 instructions: command.instructions.clone(),
+                mcp_tools: command.mcp_tools.clone(),
                 root_session_id: root_session_id.clone(),
             },
             Arc::clone(&log),

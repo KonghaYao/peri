@@ -43,6 +43,17 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::reader::ItemLog;
+use crate::domain::McpToolSpec;
+
+/// `_meta` keys carrying the caller's OpenAI tool declaration on one ACP
+/// `mcpServers` entry (S8a2).
+///
+/// Values are preserved verbatim. S8a2 injects the declaration; it does not
+/// enforce approval or tool filtering, so the host currently reads only
+/// `peri.subscriptions` from that `_meta` and ignores these keys.
+const META_REQUIRE_APPROVAL: &str = "peri.openai.require_approval";
+const META_ALLOWED_TOOLS: &str = "peri.openai.allowed_tools";
+const META_EXTRA: &str = "peri.openai.extra";
 
 /// Everything one child needs that the service already validated.
 #[derive(Clone, Debug)]
@@ -63,6 +74,10 @@ pub struct ChildConfig {
     /// Provider model for this session. `None` keeps the configured default.
     pub model: Option<String>,
     pub instructions: Option<String>,
+    /// Caller-declared MCP tools (`agent.tools`). Each one becomes an HTTP entry
+    /// in `session/new.mcpServers`; approval and tool filtering are recorded in
+    /// the entry `_meta`, not enforced here (S8a2).
+    pub mcp_tools: Vec<McpToolSpec>,
     /// Reserved root session id (UUIDv7) handed to `session/new`.
     pub root_session_id: String,
 }
@@ -163,6 +178,52 @@ pub struct CancelTarget {
 pub struct PromptReply {
     pub stop_reason: String,
     pub pending_tasks: u32,
+}
+
+/// One ACP `mcpServers` entry for a caller-declared MCP tool.
+///
+/// The transport is always HTTP (the OpenAI Agents API MCP tool shape has no
+/// other transport). Headers are forwarded as the caller declared them; the
+/// normalized OpenAI fields ride in `_meta` because ACP only defines transport
+/// fields for a server entry.
+fn mcp_server_entry(tool: &McpToolSpec) -> Value {
+    let headers: Vec<Value> = tool
+        .headers
+        .iter()
+        .map(|header| json!({ "name": header.name, "value": header.value }))
+        .collect();
+    let mut meta = serde_json::Map::new();
+    if let Some(value) = &tool.require_approval {
+        meta.insert(META_REQUIRE_APPROVAL.to_owned(), value.clone());
+    }
+    if let Some(value) = &tool.allowed_tools {
+        meta.insert(META_ALLOWED_TOOLS.to_owned(), value.clone());
+    }
+    if !tool.extra.is_empty() {
+        meta.insert(META_EXTRA.to_owned(), Value::Object(tool.extra.clone()));
+    }
+    let mut entry = json!({
+        "type": "http",
+        "name": tool.server_label,
+        "url": tool.server_url,
+        "headers": headers,
+    });
+    if !meta.is_empty() {
+        entry["_meta"] = Value::Object(meta);
+    }
+    entry
+}
+
+/// `session/new` parameters for one child.
+///
+/// No declaration keeps the request byte-identical to S4: the key is omitted
+/// rather than sent as an empty array.
+fn session_new_params(cwd: &str, meta: Value, tools: &[McpToolSpec]) -> Value {
+    let mut params = json!({ "cwd": cwd, "_meta": meta });
+    if !tools.is_empty() {
+        params["mcpServers"] = Value::Array(tools.iter().map(mcp_server_entry).collect());
+    }
+    params
 }
 
 /// One spawned host + negotiated session + its reader task.
@@ -273,10 +334,7 @@ impl AcpChild {
         let response = match client
             .send_request(
                 "session/new",
-                json!({
-                    "cwd": cwd,
-                    "_meta": meta,
-                }),
+                session_new_params(&cwd, meta, &config.mcp_tools),
             )
             .await
         {
