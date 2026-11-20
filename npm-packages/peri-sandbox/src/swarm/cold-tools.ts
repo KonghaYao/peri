@@ -168,9 +168,15 @@ export function coldInitializeResult(expectedProviderVersion: string): Record<st
 
 /** Cold `server/discover` result (2026-07-28 revision negotiation). */
 export function coldDiscoverResult(expectedProviderVersion: string): Record<string, unknown> {
+  // The 2026-07-28 DiscoverResult schema requires `resultType`, `ttlMs` and
+  // `cacheScope`; rmcp rejects a result missing them as an unknown
+  // `CustomResult` and aborts before any `tools/call` can lazily start SRT.
   return {
+    resultType: 'complete',
     supportedVersions: [COLD_WORKSPACE_PROTOCOL_VERSION],
     capabilities: { tools: { listChanged: false } },
+    ttlMs: 0,
+    cacheScope: 'private',
     _meta: coldMeta(expectedProviderVersion),
   };
 }

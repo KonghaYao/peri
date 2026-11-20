@@ -6,7 +6,8 @@
 - 基线：`89b786a46c6034d24e6a77192218bbea552d041d`（S1..S8b）
 - 范围：两库（Peri 会话库 + Swarm 状态库）真实 Loom、真实 Rivet engine、真实
   `peri-swarm` 进程；模型侧为本地确定性 stub；只覆盖 `environment.type=none` 的
-  文本轮次。沙箱、工具、故障恢复不在本记录内（S9a2/S9a3）。
+  文本轮次。沙箱、工具、故障恢复不在本记录内（S9a2 见
+  [hosted 沙箱工具执行验收](peri-swarm-hosted-sandbox-2026-11-20.md)；S9a3 待做）。
 - 复现脚本（本阶段新增，已入库）：
   `peri-swarm/scripts/local_model_stub.mjs`、`peri-swarm/scripts/sdk_sessions_e2e.mjs`。
   运行产物、连接文件和日志在 `/tmp/peri-swarm-s9/`（不入库）。

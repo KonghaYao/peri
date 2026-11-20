@@ -1,11 +1,19 @@
 #!/usr/bin/env node
-// Local OpenAI-compatible model stub for the S9a1 end-to-end run.
+// Local OpenAI-compatible model stub for the S9a1/S9a2 end-to-end runs.
 //
 // Peri always requests `POST /v1/chat/completions` with `"stream": true`; this
 // stub answers with deterministic SSE text so the Swarm gateway's item log can
 // be checked end to end without a real model. It recognises Peri's background
 // prediction/title helper (the request carries `<prediction_directive>`) and
 // keeps those calls out of the turn counter.
+//
+// S9a2 adds one deterministic tool turn: when the request advertises the
+// workspace `Bash` tool and no tool result is in the messages yet, the stub
+// emits an OpenAI `delta.tool_calls` stream that runs
+// `echo hello-from-swarm > hello.txt` (overridable with PERI_STUB_TOOL_COMMAND).
+// The call id is `call_stub_<n>`, the argument object is `{"command": ...}`, and
+// `finish_reason` is `tool_calls`. The next main call (which carries the tool
+// message) returns the usual text reply.
 //
 // The reply is a pure function of the last user message and the main-call
 // index, so a repeated run produces the same text for the same input:
@@ -31,11 +39,13 @@ const PORT = Number(process.env.PERI_STUB_PORT ?? '9496');
 const CHUNK_SIZE = Number(process.env.PERI_STUB_CHUNK ?? '6');
 const CHUNK_DELAY_MS = Number(process.env.PERI_STUB_CHUNK_DELAY_MS ?? '15');
 const MAX_TURNS = 64;
+const TOOL_COMMAND = process.env.PERI_STUB_TOOL_COMMAND ?? 'echo hello-from-swarm > hello.txt';
 
 const state = {
   mainCalls: 0,
   helperCalls: 0,
   otherCalls: 0,
+  toolCalls: 0,
   turns: [],
   otherRequests: [],
   startedAt: new Date().toISOString(),
@@ -45,6 +55,7 @@ function reset() {
   state.mainCalls = 0;
   state.helperCalls = 0;
   state.otherCalls = 0;
+  state.toolCalls = 0;
   state.turns = [];
   state.otherRequests = [];
   state.startedAt = new Date().toISOString();
@@ -75,6 +86,36 @@ function isBackgroundHelper(body) {
   return messagesOf(body).some((message) =>
     messageText(message?.content).includes('<prediction_directive>'),
   );
+}
+
+/** Model-facing names of the tools advertised in this request. */
+function toolNames(body) {
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  return tools
+    .map((tool) => {
+      if (typeof tool?.function?.name === 'string') return tool.function.name;
+      if (typeof tool?.name === 'string') return tool.name;
+      return '';
+    })
+    .filter((name) => name.length > 0);
+}
+
+/**
+ * The workspace tool is exposed directly (`Bash`) when the session workspace is
+ * a remote MCP; keep the `mcp__<server>__Bash` fallback for other assemblies.
+ */
+function bashToolName(body) {
+  const names = toolNames(body);
+  return (
+    names.find((name) => name === 'Bash') ??
+    names.find((name) => name.endsWith('__Bash')) ??
+    names.find((name) => name.toLowerCase().endsWith('bash')) ??
+    null
+  );
+}
+
+function hasToolResult(body) {
+  return messagesOf(body).some((message) => message?.role === 'tool' || message?.role === 'function');
 }
 
 function lastUserText(body) {
@@ -134,6 +175,86 @@ function sendCompletion(response, { id, model, text }) {
   });
 }
 
+function sendToolCallCompletion(response, { id, model, callId, toolName, argumentsText }) {
+  sendJson(response, 200, {
+    id,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: callId,
+              type: 'function',
+              function: { name: toolName, arguments: argumentsText },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+    ],
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+  });
+}
+
+/**
+ * OpenAI chat-completions streaming shape for one tool call: the first chunk
+ * carries `id`/`type`/`name`, the second carries the full argument string, and
+ * the terminal chunk sets `finish_reason: "tool_calls"`.
+ */
+async function sendToolCallSse(response, { id, model, callId, toolName, argumentsText }) {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  response.flushHeaders?.();
+
+  response.write(
+    `data: ${JSON.stringify(
+      completionChunk({
+        id,
+        model,
+        delta: {
+          role: 'assistant',
+          tool_calls: [
+            {
+              index: 0,
+              id: callId,
+              type: 'function',
+              function: { name: toolName, arguments: '' },
+            },
+          ],
+        },
+      }),
+    )}\n\n`,
+  );
+  if (CHUNK_DELAY_MS > 0) await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY_MS));
+  response.write(
+    `data: ${JSON.stringify(
+      completionChunk({
+        id,
+        model,
+        delta: {
+          tool_calls: [{ index: 0, function: { arguments: argumentsText } }],
+        },
+      }),
+    )}\n\n`,
+  );
+  response.write(
+    `data: ${JSON.stringify(
+      completionChunk({ id, model, delta: {}, finishReason: 'tool_calls' }),
+    )}\n\n`,
+  );
+  response.end('data: [DONE]\n\n');
+}
+
 async function sendSse(response, { id, model, text }) {
   response.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -175,7 +296,6 @@ async function handleChat(_request, response, body) {
     return sendCompletion(response, { id, model, text: 'stub-helper' });
   }
 
-  const userText = lastUserText(body);
   if (messagesOf(body).length === 0) {
     state.otherCalls += 1;
     state.otherRequests.push({ model, reason: 'no messages', at: new Date().toISOString() });
@@ -186,11 +306,43 @@ async function handleChat(_request, response, body) {
 
   state.mainCalls += 1;
   const index = state.mainCalls;
+  const userText = lastUserText(body);
+  const bashName = bashToolName(body);
+  // One tool turn per run: emit the workspace Bash call only while the request
+  // still advertises it and the conversation carries no tool result yet.
+  if (bashName !== null && state.toolCalls === 0 && !hasToolResult(body)) {
+    state.toolCalls += 1;
+    const callId = `call_stub_${index}`;
+    const argumentsText = JSON.stringify({ command: TOOL_COMMAND });
+    state.turns.push({
+      n: index,
+      kind: 'tool_call',
+      toolName: bashName,
+      callId,
+      arguments: argumentsText,
+      toolNames: toolNames(body),
+      lastUserText: userText.slice(0, 400),
+      messageCount: messagesOf(body).length,
+      stream,
+      at: new Date().toISOString(),
+    });
+    if (state.turns.length > MAX_TURNS) state.turns.shift();
+    console.error(
+      `[model-stub] main call #${index} model=${model} tool=${bashName} arguments=${argumentsText}`,
+    );
+    const id = `chatcmpl-stub-tool-${index}`;
+    if (stream) return sendToolCallSse(response, { id, model, callId, toolName: bashName, argumentsText });
+    return sendToolCallCompletion(response, { id, model, callId, toolName: bashName, argumentsText });
+  }
+
   const reply = replyFor(userText, index);
   state.turns.push({
     n: index,
+    kind: 'final',
     reply,
     lastUserText: userText.slice(0, 400),
+    toolNames: toolNames(body),
+    toolResultSeen: hasToolResult(body),
     messageCount: messagesOf(body).length,
     stream,
     at: new Date().toISOString(),
@@ -236,6 +388,7 @@ const server = http.createServer(async (request, response) => {
       mainCalls: state.mainCalls,
       helperCalls: state.helperCalls,
       otherCalls: state.otherCalls,
+      toolCalls: state.toolCalls,
     });
   }
   if (request.method === 'GET' && url.pathname === '/__stats') {
@@ -244,6 +397,7 @@ const server = http.createServer(async (request, response) => {
       mainCalls: state.mainCalls,
       helperCalls: state.helperCalls,
       otherCalls: state.otherCalls,
+      toolCalls: state.toolCalls,
       turns: state.turns,
       otherRequests: state.otherRequests,
     });

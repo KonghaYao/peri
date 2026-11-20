@@ -67,8 +67,11 @@ async function startInnerMcp(options: InnerMcpOptions = {}): Promise<InnerMcp> {
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(
           jsonRpc(id, {
+            resultType: 'complete',
             supportedVersions: ['2026-07-28'],
             capabilities: { tools: {} },
+            ttlMs: 0,
+            cacheScope: 'private',
             _meta: {
               'io.modelcontextprotocol/serverInfo': { name: 'peri', version: options.providerVersion },
             },
@@ -185,6 +188,12 @@ test('cold initialize, discover, ping and tools/list never start the sandbox', a
       await handler(authorized('env-cold', { jsonrpc: '2.0', id: 2, method: 'server/discover', params: {} }))
     ).json()) as JsonRpcResult;
     assert.deepEqual(discover.result.supportedVersions, ['2026-07-28']);
+    // 2026-07-28 `DiscoverResult` fields; rmcp rejects the result as an unknown
+    // `CustomResult` when any of them is absent.
+    assert.equal(discover.result.resultType, 'complete');
+    assert.equal(discover.result.ttlMs, 0);
+    assert.equal(discover.result.cacheScope, 'private');
+    assert.deepEqual(discover.result.capabilities, { tools: { listChanged: false } });
     assert.equal((discover.result._meta as Record<string, unknown>)[COLD_SNAPSHOT_META_KEY], true);
 
     const ping = (await (
