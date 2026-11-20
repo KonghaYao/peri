@@ -420,6 +420,10 @@ impl SessionResources for MockSessionResources {
         id: peri_acp_types::messages::MessageId,
     ) -> SessionResourceResult<peri_acp_types::session::MqCancelOutcome> {
         self.ensure_writable()?;
+        self.mq_cancel_ids
+            .lock()
+            .expect("self mq cancel ids mutex must remain unpoisoned throughout the test")
+            .push(id);
         if self
             .mq_cancel_failures
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

@@ -185,6 +185,8 @@ pub(crate) struct MockSessionResources {
     pub(crate) mq_cancel_gate: Mutex<Option<ResumeLoadGate>>,
     /// 故障注入：剩余多少次 `mq_cancel` 返回「提交未知」（验证撤回未确认时不回滚）。
     pub(crate) mq_cancel_failures: AtomicUsize,
+    /// 每次 `mq_cancel` 的入参；用于断言补偿只撤回本次 prompt 且只撤回一次。
+    pub(crate) mq_cancel_ids: Mutex<Vec<MessageId>>,
     /// 故障注入：剩余多少次终态结算在写入前返回错误（验证同身份重试）。
     pub(super) finalize_failures: AtomicUsize,
     /// 已发生的终态结算次数（含注入失败）。
@@ -233,6 +235,7 @@ impl MockSessionResources {
             mq_query_failures: AtomicUsize::new(0),
             mq_cancel_gate: Mutex::new(None),
             mq_cancel_failures: AtomicUsize::new(0),
+            mq_cancel_ids: Mutex::new(Vec::new()),
             finalize_failures: AtomicUsize::new(0),
             finalize_attempts: AtomicUsize::new(0),
             finalize_message_ids: Mutex::new(Vec::new()),
@@ -283,6 +286,16 @@ impl MockSessionResources {
     /// 故障注入：让接下来的 `count` 次 MQ 查询失败。
     pub(crate) fn fail_next_mq_queries(&self, count: usize) {
         self.mq_query_failures.store(count, Ordering::SeqCst);
+    }
+
+    /// 取走已发生的 `mq_cancel` 入参（每次调用一条，含提交未知后的重试）。
+    pub(crate) fn take_mq_cancel_ids(&self) -> Vec<MessageId> {
+        std::mem::take(
+            &mut *self
+                .mq_cancel_ids
+                .lock()
+                .expect("self mq cancel ids mutex must remain unpoisoned throughout the test"),
+        )
     }
 
     /// 故障注入：让接下来的 `count` 次无结果终态写入在写完工作意图、写状态前失败。

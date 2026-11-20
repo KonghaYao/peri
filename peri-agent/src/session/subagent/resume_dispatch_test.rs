@@ -826,6 +826,61 @@ async fn wait_resume_compensated(store: &MockSessionResources, thread_id: &str) 
     .expect("owned compensation must withdraw the prompt and roll back the claim");
 }
 
+/// [回归] 显式派发失败由认领补偿统一撤回本次 prompt：只撤回一次，且不触碰
+/// 预先存在的其他 prompt。
+#[tokio::test]
+async fn test_resume_dispatch_failure_withdraws_prompt_once_preserving_others() {
+    use peri_acp_types::session::MqFilter;
+    use peri_acp_types::session_resources::SessionResources as _;
+
+    let store = MockSessionResources::new();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    crate::session::subagent::tests::preset_resumable_thread(&store, &thread_id, None).await;
+    let queue =
+        crate::session::MessageQueue::bind(store.clone(), ThreadId::from(thread_id.as_str()));
+    let preexisting = crate::session::QueuedMessage::new(
+        crate::session::MessageKind::Prompt,
+        MessageSource::UserInput,
+        BaseMessage::human("preexisting instruction"),
+    );
+    let preexisting_id = preexisting.id();
+    queue
+        .enqueue_sent(preexisting)
+        .await
+        .expect("the preexisting prompt fixture result is required for this assertion");
+    let mut config = crate::session::subagent::tests::resume_config_with(
+        store.clone(),
+        thread_id.clone(),
+        crate::session::test_resources::mock::model::fixture_source(
+            Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
+        None,
+        None,
+    );
+    config.prompt = Some("retry-once-only".into());
+
+    let error = crate::session::subagent::tests::resume_err(None, config).await;
+    assert!(
+        error.contains("Background tasks not available"),
+        "dispatch 失败必须原样交给调用方: {error}"
+    );
+    let rows = store
+        .mq_query(&ThreadId::from(thread_id.as_str()), MqFilter::default())
+        .await
+        .expect("the MQ query fixture result is required for this assertion");
+    assert_eq!(rows.len(), 1, "只应保留预先存在的 prompt: {rows:?}");
+    assert_eq!(rows[0].id, preexisting_id);
+    let cancelled = store.take_mq_cancel_ids();
+    assert_eq!(
+        cancelled.len(),
+        1,
+        "显式 Err 补偿必须恰好撤回本次 prompt 一次: {cancelled:?}"
+    );
+    assert_ne!(cancelled[0], preexisting_id);
+    assert!(rows.iter().all(|row| row.id != cancelled[0]));
+}
+
 /// [回归] 调用方在撤回进行中被取消时，owned 补偿仍须完成撤回与回滚，不能留下
 /// 「prompt 仍在队列、状态已回滚」的重试重复投递窗口。
 #[tokio::test]

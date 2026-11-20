@@ -130,6 +130,7 @@ async fn resume_working_write_failure_rejects_background_start() {
 #[tokio::test]
 async fn cancel_after_working_commit_restores_work_state() {
     let (store, work_gate, manager) = stopped_fixture(false).await;
+    let preexisting = seed_preexisting_prompt(&store).await;
     work_gate
         .pause_after_commit
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -192,6 +193,61 @@ async fn cancel_after_working_commit_restores_work_state() {
     }
     assert_eq!(starts.load(Ordering::SeqCst), 0, "后台不得启动执行");
     assert_eq!(manager.active_count(), 0);
+    assert_only_preexisting_prompt(&store, preexisting).await;
+}
+
+/// [回归] Working 写等待提交时取消：状态回滚之外，本次已接纳的 prompt 必须与
+/// 认领补偿同一责任撤回，且只撤回这一条。
+#[tokio::test]
+async fn cancel_during_work_state_write_withdraws_only_this_prompt() {
+    let (store, work_gate, manager) = stopped_fixture(false).await;
+    let preexisting = seed_preexisting_prompt(&store).await;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let mut config = config(store.clone(), manager.clone());
+    let observed = starts.clone();
+    config.on_subagent_start = Some(Arc::new(move |_, _, _| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    // 后台 turn 若被错误放行会挂起，不自行收尾掩盖残留。
+    config.llm = crate::session::test_resources::mock::model::fixture_source(
+        Arc::new(HangingModel),
+        "fixture",
+    );
+    let resume = tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+    work_gate.entered.notified().await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    resume.abort();
+    assert!(resume
+        .await
+        .expect_err(
+            "cancel_during_work_state_write_withdraws_only_this_prompt must reject the invalid fixture"
+        )
+        .is_cancelled());
+    // 写方的 future 已随调用方丢弃；放行只是解除测试 gate，不允许重新提交 Working。
+    work_gate.release.add_permits(1);
+    idle(&manager).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let meta = store
+                .inner
+                .load_session_meta(&CHILD.into())
+                .await
+                .expect("the load session meta fixture result is required for this assertion");
+            if meta.agent_status == AgentStatus::Done
+                && meta.work_state == peri_acp_types::thread::WorkState::Stopped
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("取消补偿必须恢复认领前的状态与工作意图");
+    assert_eq!(starts.load(Ordering::SeqCst), 0, "后台不得启动执行");
+    assert_eq!(manager.active_count(), 0);
+    assert_only_preexisting_prompt(&store, preexisting).await;
 }
 
 /// [回归] 旧认领的迟到补偿不得覆盖新 resume 的 `Active + Working`。
