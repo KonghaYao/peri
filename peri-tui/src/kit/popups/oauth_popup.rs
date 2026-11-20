@@ -3,18 +3,19 @@
 //! OAuth 授权弹窗：从 `OAUTH_INFO` atom 读取真实授权信息（由 ACP server
 //! `OauthNeeded` 事件写入）。交互全部走按钮/导航键，不用快捷键：
 //! - **按钮行**（默认焦点；Tab 切到输入框，←→ 选择，Enter 激活；
-//!   鼠标左键直接点击按钮）：
-//!   - \[ 打开浏览器 \]：调用系统 `open` 打开 `auth_url`（best-effort）
-//!   - \[ 复制链接 \]：完整授权链接复制到系统剪贴板
-//!   - \[ 取消 \]：`mcp/oauth_cancel` RPC + 关闭 popup
+//!   鼠标左键直接点击按钮；外观是通用 Button 的 Filled 反色块，无 `[ ]`）：
+//!   - 打开浏览器：调用系统 `open` 打开 `auth_url`（best-effort）
+//!   - 复制链接：完整授权链接复制到系统剪贴板
+//!   - 取消：`mcp/oauth_cancel` RPC + 关闭 popup
 //! - **授权码输入框**（Tab 切回 / 鼠标点击输入行，终端粘贴授权码）：
 //!   - Enter 提交：`mcp/oauth_callback` RPC 回传后台（手动兜底路径；
 //!     state 由后台从授权 URL 解析，本地不缓存凭据）
 //!   - 授权码为空时 Enter 关闭 popup（localhost 回调路径由后台自动收码）
 //! - **Esc**：取消授权 + 关闭
 //!
-//! 视觉契约：焦点区（按钮行或输入框）整行 selection 背景反转，非焦点区
-//! dim——焦点在哪一目了然；复制/打开浏览器等瞬时反馈 3 秒自动消失。
+//! 视觉契约：按钮行是通用 Button 的 Filled 反色块（焦点项 BOLD），输入框聚焦时
+//! 整行 selection 背景反转——焦点在哪一目了然；复制/打开浏览器等瞬时反馈 3 秒
+//! 自动消失。
 //!
 //! 鼠标命中：`use_event_handler_with_options(..., EventOptions { hit_test: true })`
 //! 由 ratatui-kit 按组件绘制区域过滤区域外事件；行号反推用
@@ -41,10 +42,13 @@ use ratatui_kit::ratatui::text::Span;
 
 use crate::i18n;
 
-use peri_tui_components::button::ButtonChrome;
+use peri_tui_components::button::{
+    ButtonChrome, ButtonSpec, ButtonState, ButtonTone, ButtonVisual, button_visual,
+};
 use peri_tui_components::panel_mouse::AreaTracker;
 
 use peri_theme::atoms::THEME_ATOM;
+use peri_theme::theme::ThemeDefinition;
 
 /// 提交授权码（手动兜底路径）：`mcp/oauth_callback` RPC → host 侧投递到
 /// 进行中的 OAuth 流程（state 由后台从授权 URL 解析，TUI 无需感知）。
@@ -127,10 +131,69 @@ fn content_rows(auth_url: &str, popup_width: u16) -> (u16, u16) {
     (6 + n, 8 + n)
 }
 
-/// 按钮命中宽度：与渲染同一口径的显示列宽（CJK 字符占 2 列），
-/// 不能用 `chars().count()`——否则点击会落到相邻按钮。
-fn button_label_width(label: &str) -> u16 {
-    Line::from(ButtonChrome::Bracketed { padded: true }.text(label)).width() as u16
+/// 按钮行三个动作的标签（渲染与鼠标命中同一来源）。
+fn button_labels() -> [String; 3] {
+    [
+        i18n::tr("oauth-btn-open"),
+        i18n::tr("oauth-btn-copy"),
+        i18n::tr("oauth-btn-cancel"),
+    ]
+}
+
+/// 按钮外观：Filled 反色块，tone 区分主次，`focused` = 按钮行聚焦且该项选中。
+/// 渲染与命中宽度共用这一函数（`ButtonVisual.width` 是唯一列宽口径）。
+fn button_visual_for(
+    label: &str,
+    tone: ButtonTone,
+    focused: bool,
+    theme: &ThemeDefinition,
+) -> ButtonVisual {
+    button_visual(
+        ButtonSpec {
+            label,
+            chrome: ButtonChrome::Filled,
+            tone,
+            state: if focused {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            },
+        },
+        theme,
+    )
+}
+
+/// 单个按钮的通用 Button 外观：打开浏览器是主操作（Primary），复制/取消是次要
+/// 操作（Secondary）；按钮行聚焦且当前选中时用 `Focused`。
+fn button_visual_at(idx: usize, focused: bool, theme: &ThemeDefinition) -> ButtonVisual {
+    let labels = button_labels();
+    let label = labels.get(idx).map(String::as_str).unwrap_or_default();
+    let tone = if idx == 0 {
+        ButtonTone::Primary
+    } else {
+        ButtonTone::Secondary
+    };
+    button_visual_for(label, tone, focused, theme)
+}
+
+/// 按钮命中宽度：与渲染共用 [`button_visual_for`] 的 `ButtonVisual.width`
+/// （CJK 标签按显示列宽，不能用 `chars().count()`——否则点击会落到相邻按钮）。
+fn button_label_width(label: &str, theme: &ThemeDefinition) -> u16 {
+    button_visual_for(label, ButtonTone::Secondary, false, theme).width
+}
+
+/// 按钮行渲染：三个 Filled 按钮横向排列（间隔 2 空格），焦点项用 `Focused`。
+/// 文本、列宽与样式全部来自 [`button_visual_at`]，鼠标命中读同一份宽度。
+fn button_row(focused: bool, selected: usize, theme: &ThemeDefinition) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(5);
+    for i in 0..3 {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let visual = button_visual_at(i, focused && i == selected, theme);
+        spans.push(Span::styled(visual.text, visual.style));
+    }
+    Line::from(spans)
 }
 
 /// 瞬时反馈提示（复制链接 / 打开浏览器），3 秒后自动消失。
@@ -226,17 +289,16 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 };
                 let (btn_row, input_row) = content_rows(&info.auth_url, area.width);
                 if content_row == btn_row {
-                    // 按列命中按钮：[ label ]，间隔 2 空格，内容从 area.x 起
-                    let labels = [
-                        i18n::tr("oauth-btn-open"),
-                        i18n::tr("oauth-btn-copy"),
-                        i18n::tr("oauth-btn-cancel"),
-                    ];
+                    // 按列命中按钮：Filled ` label `，间隔 2 空格，内容从 area.x 起。
+                    // 宽度与渲染共用同一 `ButtonVisual`（主题只影响样式，取全局主题）。
+                    let labels = button_labels();
+                    let theme_state = THEME_ATOM.state();
+                    let theme = theme_state.read();
                     let mut x = area.x;
                     {
                         let iteration_items = labels.iter().enumerate();
                         for (i, label) in iteration_items {
-                            let w = button_label_width(label);
+                            let w = button_label_width(label, &theme);
                             if col >= x && col < x + w {
                                 activate(i, info);
                                 return EventResult::Consumed;
@@ -375,38 +437,10 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             lines.push(Line::from(""));
 
-            // ── 按钮行：焦点区 selection 背景反转，非焦点区整体弱化 ──
+            // ── 按钮行：通用 Button 的 Filled 外观，焦点项反色 + BOLD ──
             let btn_focused = *btn_focus.read();
             let sel = *btn_idx.read();
-            let btn_style = |i: usize| -> Style {
-                if btn_focused && i == sel {
-                    Style::new()
-                        .fg(semantic.text.primary)
-                        .bg(sel_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else if btn_focused {
-                    Style::new().fg(semantic.text.primary)
-                } else {
-                    Style::new().fg(semantic.text.dim)
-                }
-            };
-            let labels = [
-                i18n::tr("oauth-btn-open"),
-                i18n::tr("oauth-btn-copy"),
-                i18n::tr("oauth-btn-cancel"),
-            ];
-            let mut btn_line: Vec<Span<'_>> = Vec::new();
-            {
-                let iteration_items = labels.iter().enumerate();
-                for (i, label) in iteration_items {
-                    if i > 0 {
-                        btn_line.push(Span::raw("  "));
-                    }
-                    let text = ButtonChrome::Bracketed { padded: true }.text(label);
-                    btn_line.push(Span::styled(text, btn_style(i)));
-                }
-            }
-            lines.push(Line::from(btn_line));
+            lines.push(button_row(btn_focused, sel, &guard));
             lines.push(Line::from(""));
 
             // ── 授权码输入框（手动兜底路径）：浏览器无法回跳（服务器/网络

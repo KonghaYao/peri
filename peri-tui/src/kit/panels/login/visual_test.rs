@@ -526,7 +526,7 @@ fn action_labels() -> [&'static str; 4] {
 
 #[test]
 #[serial]
-fn auth_actions_render_in_one_row_with_three_space_gaps() {
+fn auth_actions_render_in_one_row_with_fixed_gaps() {
     let (_cfg, state) = plan_state_with_sentinels();
     let mut auth = AuthController::new();
     auth.set_view_for_test(verified_status_for_actions());
@@ -549,7 +549,7 @@ fn auth_actions_render_in_one_row_with_three_space_gaps() {
                 .iter()
                 .filter(|line| {
                     labels.iter().any(|label| {
-                        let label = format!("[{label}]");
+                        let label = format!(" {label} ");
                         line.spans.iter().any(|span| span.content.contains(&label))
                     })
                 })
@@ -579,9 +579,14 @@ fn auth_actions_render_in_one_row_with_three_space_gaps() {
                     "{lang} width={width} 缺少动作 {label}: {row}"
                 );
             }
+            // Filled 按钮自带左右各 1 空格；相邻按钮之间还有 1 列 gap 与 2 列标记槽。
             assert!(
-                row.contains("]   ["),
-                "width={width} 动作之间必须有 3 空格间隔: {row:?}"
+                row.contains(&format!("{}     {}", labels[0], labels[1])),
+                "width={width} Filled 按钮文本之间必须有 5 空格间隔: {row:?}"
+            );
+            assert!(
+                !row.contains('[') && !row.contains(']'),
+                "width={width} Filled 按钮不得再有方括号: {row:?}"
             );
             assert!(
                 render::build_edit_layout(
@@ -647,7 +652,7 @@ fn auth_action_row_stays_single_line_and_keeps_selected_visible_when_narrow() {
                 .collect();
             action_labels()
                 .iter()
-                .any(|label| text.contains(&format!("[{label}]")))
+                .any(|label| text.contains(&format!(" {label} ")))
                 .then_some((index, text))
         })
         .collect();
@@ -879,4 +884,48 @@ fn new_plan_provider_without_model_source_renders_actionable_hint() {
         "没有可复用来源时必须给出可操作提示:\n{text}"
     );
     assert!(!text.contains("login-"), "不得渲染裸 i18n key:\n{text}");
+}
+
+/// 回归：认证动作行是通用 Button 的 Filled 外观——文本无 `[ ]`，按钮 span 带
+/// `REVERSED`，未选中项不带 BOLD。宽度与 `action_spans` 命中区间同源。
+#[test]
+#[serial]
+fn auth_action_row_uses_filled_buttons() {
+    use ratatui_kit::ratatui::style::Modifier;
+
+    let (_cfg, state) = plan_state_with_sentinels();
+    let mut auth = AuthController::new();
+    auth.set_view_for_test(verified_status_for_actions());
+    let theme = peri_theme::builtin::dark_theme();
+    let colors = render::LoginRenderColors::from_theme(&theme);
+    let layout = render::build_edit_layout(&state, &auth, LoginField::AuthActions, 0, &colors, 80);
+    let row = layout
+        .lines
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+        })
+        .expect("动作行必须有 Filled 按钮");
+    let text: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
+    assert!(
+        !text.contains('[') && !text.contains(']'),
+        "Filled 动作按钮不得再有方括号：{text}"
+    );
+    let focused = row
+        .spans
+        .iter()
+        .filter(|span| {
+            span.style.add_modifier.contains(Modifier::REVERSED)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        })
+        .count();
+    assert_eq!(focused, 1, "只有选中项是 Focused（反色 + BOLD）：{text}");
+    for span in layout.action_spans() {
+        assert!(
+            span.end > span.start,
+            "命中区间必须覆盖渲染出的按钮文本：{text}"
+        );
+    }
 }

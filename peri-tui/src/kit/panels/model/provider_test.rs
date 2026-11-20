@@ -73,3 +73,32 @@ fn manage_provider_button_click_matches_ctrl_l() {
     assert_eq!(active, Some(PanelKind::Login));
     assert_eq!(provider_id.as_deref(), Some("resp"));
 }
+
+/// 回归：底部按钮是通用 Button 的 Filled 外观——文本无方括号、样式反色，
+/// 宽度与命中路径共用同一个 `ButtonVisual`。
+#[test]
+fn provider_button_is_filled_generic_button() {
+    use ratatui_kit::ratatui::style::Modifier;
+
+    let theme = peri_theme::builtin::dark_theme();
+    let button = super::super::panel_render::provider_button_visual(&theme);
+    assert!(
+        !button.text.contains('[') && !button.text.contains(']'),
+        "Filled 按钮不得再有方括号：{:?}",
+        button.text
+    );
+    assert_eq!(
+        usize::from(button.width),
+        unicode_width::UnicodeWidthStr::width(button.text.as_str()),
+        "命中宽度必须等于渲染文本宽度"
+    );
+    assert!(
+        button.style.add_modifier.contains(Modifier::REVERSED),
+        "Filled 按钮必须反色"
+    );
+    assert_eq!(
+        button.style.fg,
+        Some(theme.semantic.accent),
+        "Primary tone 使用 accent 前景"
+    );
+}

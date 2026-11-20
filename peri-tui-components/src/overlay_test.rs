@@ -9,7 +9,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui_kit::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use super::{BORDER_ROWS, OverlayFrame, OverlayHit, hit};
+use super::{BORDER_ROWS, OverlayAction, OverlayFrame, OverlayHit, actions, hit};
+use crate::button::{ButtonChrome, ButtonState, ButtonTone, button_style};
 
 fn frame() -> OverlayFrame<'static> {
     OverlayFrame::new(Line::from("确认操作"))
@@ -182,4 +183,58 @@ fn title_and_border_styles_stay_host_owned() {
         .expect("title");
     assert_eq!(buf[(title, 0)].fg, Color::Green);
     assert_eq!(buf[(0, 0)].fg, Color::Red, "边框颜色由宿主传入");
+}
+
+#[test]
+fn actions_render_the_shared_filled_buttons_with_their_hit_columns() {
+    let theme = peri_theme::builtin::dark_theme();
+    let row = actions("确认", "返回", &theme);
+
+    // 通用 Button 的 Filled 文本（两侧各一列内边距）+ 两列缩进与两列间隔。
+    // 「确认」为双宽字符，按钮实际占 6 列。
+    assert_eq!(row.line.to_string(), "   确认    返回 ");
+    assert_eq!(row.confirm, (2, 8));
+    assert_eq!(row.back, (10, 16));
+    assert_eq!(row.action_at(1), None);
+    assert_eq!(row.action_at(2), Some(OverlayAction::Confirm));
+    assert_eq!(row.action_at(7), Some(OverlayAction::Confirm));
+    assert_eq!(row.action_at(8), None);
+    assert_eq!(row.action_at(9), None);
+    assert_eq!(row.action_at(10), Some(OverlayAction::Back));
+    assert_eq!(row.action_at(15), Some(OverlayAction::Back));
+    assert_eq!(row.action_at(16), None);
+}
+
+#[test]
+fn action_buttons_reuse_the_general_button_tones() {
+    let theme = peri_theme::builtin::dark_theme();
+    let row = actions("确认", "返回", &theme);
+    let span_for = |label: &str| {
+        row.line
+            .spans
+            .iter()
+            .find(|span| span.content.contains(label))
+            .unwrap_or_else(|| panic!("{label} span"))
+    };
+
+    assert_eq!(
+        span_for("确认").style,
+        button_style(
+            ButtonChrome::Filled,
+            ButtonTone::Primary,
+            ButtonState::Normal,
+            &theme
+        ),
+        "确认按钮与通用 Button 的主按钮样式同源"
+    );
+    assert_eq!(
+        span_for("返回").style,
+        button_style(
+            ButtonChrome::Filled,
+            ButtonTone::Secondary,
+            ButtonState::Normal,
+            &theme
+        ),
+        "返回按钮与通用 Button 的次按钮样式同源"
+    );
 }

@@ -12,14 +12,22 @@
 //!
 //! 本模块不读全局状态；默认 store 的判断在 `LoginEditState`，不在这里。
 
-use peri_tui_components::button::ButtonChrome;
+use peri_tui_components::button::ButtonTone;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::i18n;
 
-use super::render::LoginRenderColors;
+use super::render::{self, LoginRenderColors};
+
+/// 动作按钮的文本与列宽：`render::button_text` 生成 Filled 文本，宽度从同一份
+/// 文本量出（渲染与命中同源）。主题只影响样式，不影响宽度。
+fn button_text_and_width(label: &str) -> (String, u16) {
+    let text = render::button_text(label);
+    let width = text.width().min(u16::MAX as usize) as u16;
+    (text, width)
+}
 
 /// 字段缩进。
 pub(super) const INDENT: usize = 4;
@@ -429,8 +437,9 @@ pub(super) struct ActionSpan {
     pub(super) end: usize,
 }
 
-/// 每个动作前的标记槽宽度（`❯ `/`» `/两个空格）；槽后固定 1 空格，
-/// 因此未选中动作之间的可见间隔为 3 列。
+/// 每个动作前的标记槽宽度（`❯ `/`» `/两个空格）；槽后固定 1 空格。Filled 按钮
+/// 自带左右各 1 空格，因此相邻按钮的文本之间可见 5 列空白
+/// （1 列 gap + 2 列标记槽 + 两侧内边距）。
 const ACTION_MARKER: usize = 2;
 const ACTION_GAP: usize = 1;
 
@@ -439,10 +448,12 @@ const ACTION_GAP: usize = 1;
 /// [Why] 认证动作只有 3-4 个短标签，竖排会占掉 4 行且与字段层级混淆。单行排列
 /// 在 80 列仍能完整显示中文/英文四动作；更窄时只显示包含选中项的一段并用
 /// `‹`/`›` 标明两侧还有动作，选中项始终可见。标记槽跟随选中动作，`❯`/`»`
-/// 永远紧邻当前焦点项。
+/// 永远紧邻当前焦点项。按钮是通用 Button 的 Filled 外观，`tones` 与 `labels`
+/// 一一对应（主操作 Primary、取消/返回 Secondary、破坏性 Danger）。
 pub(super) fn action_row(
     metrics: &EditViewMetrics,
     labels: &[String],
+    tones: &[ButtonTone],
     selected: Option<usize>,
     focused: bool,
     colors: &LoginRenderColors,
@@ -450,14 +461,11 @@ pub(super) fn action_row(
     if labels.is_empty() {
         return (Line::from(""), Vec::new());
     }
+    debug_assert_eq!(labels.len(), tones.len(), "每个动作标签都必须有 tone");
     let n = labels.len();
     let widths: Vec<usize> = labels
         .iter()
-        .map(|label| {
-            ButtonChrome::Bracketed { padded: false }
-                .text(label)
-                .width()
-        })
+        .map(|label| usize::from(button_text_and_width(label).1))
         .collect();
     let item_widths: Vec<usize> = widths.iter().map(|width| width + ACTION_MARKER).collect();
     let available = metrics.content_width.saturating_sub(ACTION_INDENT).max(1);
@@ -507,23 +515,12 @@ pub(super) fn action_row(
                 .content_width
                 .saturating_sub(column + reserve)
                 .max(1);
-            let label = fit_value(
-                &ButtonChrome::Bracketed { padded: false }.text(&labels[index]),
-                max_label,
-            );
+            let (text, _) = button_text_and_width(&labels[index]);
+            let label = fit_value(&text, max_label);
             let width = label.width();
             let start = column;
-            let style = if selected == Some(index) {
-                if focused {
-                    Style::default()
-                        .fg(colors.focus)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(colors.text)
-                }
-            } else {
-                Style::default().fg(colors.dim)
-            };
+            // 选中/聚焦 = Focused（反色 + BOLD），否则按 tone 的 Filled 普通态。
+            let style = colors.button(tones[index], focused && selected == Some(index));
             spans.push(Span::styled(label, style));
             column += width;
             ranges.push(ActionSpan {
@@ -569,7 +566,7 @@ fn action_window(
     }
 }
 
-/// 按钮行（Confirm）：4 列缩进 + 焦点标记 + `[标签]`。
+/// 按钮行（Confirm）：4 列缩进 + 焦点标记 + 通用 Button 的 Filled 外观。
 pub(super) fn button_line(
     metrics: &EditViewMetrics,
     label: &str,
@@ -577,24 +574,13 @@ pub(super) fn button_line(
     colors: &LoginRenderColors,
 ) -> Line<'static> {
     let marker = if focused { "❯ " } else { "  " };
-    let style = if focused {
-        Style::default()
-            .fg(colors.focus)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(colors.dim)
-    };
+    let style = colors.button(ButtonTone::Primary, focused);
     let budget = metrics.content_width.saturating_sub(INDENT + MARKER).max(1);
+    let (text, _) = button_text_and_width(label);
     Line::from(vec![
         Span::raw(" ".repeat(INDENT)),
         Span::styled(marker, Style::default().fg(colors.cursor)),
-        Span::styled(
-            fit_value(
-                &ButtonChrome::Bracketed { padded: false }.text(label),
-                budget,
-            ),
-            style,
-        ),
+        Span::styled(fit_value(&text, budget), style),
     ])
 }
 

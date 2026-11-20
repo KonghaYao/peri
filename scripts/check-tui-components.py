@@ -48,6 +48,8 @@ GLOBAL_STATE = re.compile(r"(?<!')\bstatic\s+(?:mut\s+)?[A-Za-z_]")
 GLOBAL_STATE_ALLOWED = {
     "peri-tui-components/src/bin/storybook/charts/dashboard.rs":
         "immutable OnceLock for deterministic storybook bench fixtures (no session state)",
+    "peri-tui-components/src/bin/storybook/stories/overlay.rs":
+        "immutable OnceLock for deterministic storybook theme fixture (no session state)",
     "peri-tui-components/src/genui/library.rs":
         "immutable OnceLock for the static OpenUI schema",
     "peri-tui-components/src/markdown/boundary.rs":

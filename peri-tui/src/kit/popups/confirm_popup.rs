@@ -13,6 +13,7 @@ use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEventKind;
 use ratatui_kit::crossterm::event::KeyModifiers;
 use ratatui_kit::crossterm::event::MouseButton;
+use ratatui_kit::crossterm::event::MouseEvent;
 use ratatui_kit::crossterm::event::MouseEventKind;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
@@ -23,7 +24,7 @@ use ratatui_kit::ratatui::text::Line;
 use crate::i18n;
 use crate::kit::ask_user_action::AskUserResponseAction;
 
-use peri_tui_components::overlay::{OverlayFrame, OverlayHit, hit};
+use peri_tui_components::overlay::{OverlayFrame, OverlayHit, actions, hit};
 use peri_tui_components::panel_mouse::AreaTracker;
 
 use peri_theme::atoms::THEME_ATOM;
@@ -36,6 +37,15 @@ use peri_theme::atoms::THEME_ATOM;
 pub(crate) struct RenderedConfirm {
     version: u64,
     action: ConfirmAction,
+    /// 返回按钮的命中区；行相对弹窗上沿，列相对弹窗左沿。测试快照可为空。
+    back_hit: Option<BackHit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BackHit {
+    row: u16,
+    start: u16,
+    end: u16,
 }
 
 impl RenderedConfirm {
@@ -44,7 +54,27 @@ impl RenderedConfirm {
         Self {
             version: payload.version,
             action: payload.pending_action.clone(),
+            back_hit: None,
         }
+    }
+
+    #[must_use]
+    fn with_back_hit(mut self, row: u16, back: (u16, u16)) -> Self {
+        self.back_hit = Some(BackHit {
+            row,
+            start: back.0,
+            end: back.1,
+        });
+        self
+    }
+
+    fn hits_back(&self, mouse: &MouseEvent, area: Rect) -> bool {
+        let Some(back) = self.back_hit else {
+            return false;
+        };
+        mouse.row == area.y.saturating_add(back.row)
+            && (area.x.saturating_add(back.start)..area.x.saturating_add(back.end))
+                .contains(&mouse.column)
     }
 }
 
@@ -113,6 +143,12 @@ fn confirm(rendered: Option<&RenderedConfirm>) -> EventResult {
     EventResult::Consumed
 }
 
+/// 动作行在弹窗正文中的下标：空行、标题、空行、message、空行，再接 details。
+/// 渲染与点击命中都从这里取行号，避免两边偏移漂移。
+fn action_row_index(payload: &ConfirmPayload) -> usize {
+    5 + payload.details.len()
+}
+
 /// 确认弹窗事件判定——组件只做注册；渲染快照由调用方按帧注入（测试直接投喂）。
 fn handle_confirm_event(
     event: &Event,
@@ -128,6 +164,10 @@ fn handle_confirm_event(
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && hit(mouse, area) != OverlayHit::Outside
         {
+            // 返回按钮与 Esc 同义；其余内区/边框仍是 click as enter。
+            if rendered.is_some_and(|rendered| rendered.hits_back(mouse, area)) {
+                return dismiss();
+            }
             return confirm(rendered);
         }
         return EventResult::Ignored;
@@ -140,14 +180,16 @@ fn handle_confirm_event(
     }
     match (key.modifiers, key.code) {
         (KeyModifiers::NONE, KeyCode::Enter) => confirm(rendered),
-        (KeyModifiers::NONE, KeyCode::Esc) => {
-            // 用户选择返回继续作答
-            *CONFIRM_PAYLOAD.state().write() = None;
-            crate::kit::popup_overlay::close_popup();
-            EventResult::Consumed
-        }
+        (KeyModifiers::NONE, KeyCode::Esc) => dismiss(),
         _ => EventResult::Ignored,
     }
+}
+
+/// 返回继续作答：清空待确认项并关闭弹窗。
+fn dismiss() -> EventResult {
+    *CONFIRM_PAYLOAD.state().write() = None;
+    crate::kit::popup_overlay::close_popup();
+    EventResult::Consumed
 }
 
 #[component]
@@ -165,7 +207,25 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     // 本帧渲染的确认目标——与下面渲染用的是同一份 payload，事件闭包据此校验版本
-    let rendered = payload.as_ref().map(RenderedConfirm::from_payload);
+    let _ = hooks.use_atom(&LANG_VERSION);
+    let guard = theme_def.read();
+    let popup_tokens = &guard.component.popup;
+    let semantic = &guard.semantic;
+    let action_row = payload.as_ref().map(|_| {
+        actions(
+            &i18n::tr("popup-confirm-btn-confirm"),
+            &i18n::tr("popup-confirm-btn-back"),
+            &guard,
+        )
+    });
+    let action_row_index = payload.as_ref().map(action_row_index);
+    let rendered = payload.as_ref().map(|payload| {
+        let rendered = RenderedConfirm::from_payload(payload);
+        match (action_row_index, action_row.as_ref()) {
+            (Some(index), Some(row)) => rendered.with_back_hit((index + 1) as u16, row.back),
+            _ => rendered,
+        }
+    });
 
     hooks.use_event_handler_with_options(
         EventScope::Current,
@@ -173,11 +233,7 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         EventOptions { hit_test: true },
         move |event| handle_confirm_event(&event, rendered.as_ref(), area),
     );
-    let _ = hooks.use_atom(&LANG_VERSION);
 
-    let popup_tokens = &theme_def.read().component.popup;
-    let guard = theme_def.read();
-    let semantic = &guard.semantic;
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &payload {
@@ -204,7 +260,12 @@ pub fn ConfirmPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 lines.push(Line::from(detail.clone()).fg(semantic.text.muted));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(i18n::tr("popup-confirm-action-hint")).fg(semantic.text.dim));
+            // 确认/返回与真实点击共用一个动作行：按钮文本、样式和列区间同源。
+            match &action_row {
+                Some(row) => lines.push(row.line.clone()),
+                None => lines
+                    .push(Line::from(i18n::tr("popup-confirm-action-hint")).fg(semantic.text.dim)),
+            }
         }
     }
 

@@ -163,6 +163,61 @@ fn reject_executed() -> bool {
     ASK_USER_PENDING.state().read().is_none()
 }
 
+/// 返回按钮命中与 Esc 同义：清 payload、关闭弹窗、不执行动作。
+#[test]
+#[serial]
+fn test_confirm_back_button_dismisses_without_action() {
+    let _guard = ConfirmAtomsGuard::install();
+    let owner = InteractionOwner {
+        token: 1,
+        ..Default::default()
+    };
+    ask_user_pending(&owner, "A");
+    publish(reject_payload(owner.clone(), "A"));
+
+    let area = ratatui_kit::ratatui::layout::Rect::new(10, 5, 40, 10);
+    let shown = render_snapshot().map(|rendered| rendered.with_back_hit(2, (10, 16)));
+
+    // 返回按钮：第 2 行、行内列 10..16 → 绝对行 7、列 20..26。
+    let click = mouse_down(21, 7);
+    assert_eq!(
+        super::handle_confirm_event(&click, shown.as_ref(), Some(area)),
+        EventResult::Consumed
+    );
+
+    assert!(!reject_executed(), "返回按钮不执行确认动作");
+    assert!(
+        CONFIRM_PAYLOAD.state().read().is_none(),
+        "返回应清空 payload"
+    );
+    assert_eq!(*POPUP_KIND.state().read(), None, "返回应关闭弹窗");
+}
+
+/// 点击确认按钮（非返回区）仍是「click as enter」。
+#[test]
+#[serial]
+fn test_confirm_button_click_confirms() {
+    let _guard = ConfirmAtomsGuard::install();
+    let owner = InteractionOwner {
+        token: 1,
+        ..Default::default()
+    };
+    ask_user_pending(&owner, "A");
+    publish(reject_payload(owner.clone(), "A"));
+
+    let area = ratatui_kit::ratatui::layout::Rect::new(10, 5, 40, 10);
+    let shown = render_snapshot().map(|rendered| rendered.with_back_hit(2, (10, 16)));
+
+    // 确认按钮：行内列 2..8 → 绝对列 12..18。
+    let click = mouse_down(13, 7);
+    assert_eq!(
+        super::handle_confirm_event(&click, shown.as_ref(), Some(area)),
+        EventResult::Consumed
+    );
+    assert!(reject_executed(), "确认按钮执行用户看到的动作");
+    assert_eq!(*POPUP_KIND.state().read(), None);
+}
+
 /// [所见即所确认] 渲染后 payload 未变：Enter 执行用户看到的动作并关闭弹窗。
 #[test]
 #[serial]
@@ -320,3 +375,49 @@ use crate::kit::atoms::OPEN_PANELS;
 use crate::kit::atoms::POPUP_KIND;
 
 use crate::kit::atoms::PopupKind;
+
+/// 缓冲区按行读成文本：跳过双宽字符的续接格。
+fn row_text(buf: &ratatui_kit::ratatui::buffer::Buffer, y: u16) -> String {
+    let mut text = String::new();
+    let mut skip = 0u16;
+    for x in buf.area.x..buf.area.right() {
+        if skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        let symbol = buf[(x, y)].symbol();
+        text.push_str(symbol);
+        skip = unicode_width::UnicodeWidthStr::width(symbol).saturating_sub(1) as u16;
+    }
+    text
+}
+
+/// 真实组件渲染：动作行就是通用 Button 的「确认 / 返回」，
+/// 行号与鼠标命中的偏移（上边框 1 行 + 5 行正文）一致。
+#[test]
+#[serial]
+fn test_confirm_popup_renders_the_shared_action_buttons() {
+    let _guard = ConfirmAtomsGuard::install();
+    crate::i18n::init(Some("zh-CN"));
+    let owner = InteractionOwner {
+        token: 1,
+        ..Default::default()
+    };
+    ask_user_pending(&owner, "A");
+    publish(reject_payload(owner.clone(), "A"));
+
+    let buf = ratatui_kit::test_util::render_frame(element!(super::ConfirmPopup()), 60, 20);
+    let rows: Vec<String> = (0..20).map(|y| row_text(&buf, y)).collect();
+    let row = rows
+        .iter()
+        .position(|line| line.contains("确认") && line.contains("返回"))
+        .expect("动作行同时包含确认与返回按钮");
+
+    assert_eq!(row, 6, "无 details 时动作行 = 上边框 1 行 + 5 行正文");
+    let line = &rows[row];
+    assert!(line.contains(" 确认 "), "确认按钮使用 Filled 文本");
+    assert!(line.contains(" 返回 "), "返回按钮使用 Filled 文本");
+
+    // 与 `with_back_hit(index + 1, ...)` 的行偏移一致。
+    assert_eq!(super::action_row_index(&reject_payload(owner, "A")), 5);
+}

@@ -11,7 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Widget};
 use ratatui_kit::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-use peri_tui_components::overlay::{OverlayFrame, OverlayHit, hit};
+use peri_theme::theme::ThemeDefinition;
+use peri_tui_components::overlay::{OverlayActions, OverlayFrame, OverlayHit, actions, hit};
 
 use super::{
     ACCENT, FG, MUTED, StoryState, Variant, WHEEL_ROWS, accent_style, muted_style, rect_contains,
@@ -37,7 +38,6 @@ const CONFIRM: OverlayFixture = OverlayFixture {
         ("  切换到线程「重构 TUI 组件」？", FG),
         ("  当前未提交的输入会保留。", MUTED),
         ("", FG),
-        ("  Enter 确认 · Esc 返回", MUTED),
     ],
     width: 46,
     height: 11,
@@ -65,6 +65,7 @@ const DOWNLOAD: OverlayFixture = OverlayFixture {
 pub(crate) struct OverlayState {
     fixture: &'static OverlayFixture,
     pub(crate) confirmed: usize,
+    pub(crate) back: usize,
     pub(crate) outside: usize,
     pub(crate) scroll: usize,
 }
@@ -74,6 +75,7 @@ impl OverlayState {
         Self {
             fixture,
             confirmed: 0,
+            back: 0,
             outside: 0,
             scroll: 0,
         }
@@ -91,7 +93,7 @@ fn download_initial() -> StoryState {
 pub(crate) const VARIANTS: &[Variant] = &[
     Variant {
         key: "confirm",
-        note: "Click inside the frame to confirm; outside clicks and the wheel stay with the host.",
+        note: "Confirm/back use the shared Button; host keeps outside clicks.",
         initial: confirm_initial,
     },
     Variant {
@@ -132,6 +134,44 @@ fn background_line(index: usize) -> Line<'static> {
     ))
 }
 
+fn story_theme() -> &'static ThemeDefinition {
+    static THEME: std::sync::OnceLock<ThemeDefinition> = std::sync::OnceLock::new();
+    THEME.get_or_init(peri_theme::builtin::dark_theme)
+}
+
+/// 确认/返回动作行——与真实 ConfirmPopup 共用 `overlay::actions`。
+fn action_row() -> OverlayActions {
+    actions("确认", "返回", story_theme())
+}
+
+/// 动作行的绝对行号与按钮列区间（相对弹窗内区左上角）。
+fn action_geometry(state: &OverlayState, area: Rect) -> Option<(u16, (u16, u16))> {
+    if !state.fixture.click_confirms {
+        return None;
+    }
+    let popup = popup_rect(area, state.fixture);
+    // 正文从内区左上角开始；动作行紧随 fixture 正文之后。
+    let row = popup
+        .y
+        .saturating_add(1)
+        .saturating_add(state.fixture.body.len() as u16);
+    let actions = action_row();
+    let x = popup.x.saturating_add(1);
+    Some((
+        row,
+        (
+            x.saturating_add(actions.back.0),
+            x.saturating_add(actions.back.1),
+        ),
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn back_button_bounds(state: &OverlayState, area: Rect) -> Option<Rect> {
+    let (row, (start, end)) = action_geometry(state, area)?;
+    Some(Rect::new(start, row, end.saturating_sub(start), 1))
+}
+
 fn body_lines(state: &OverlayState) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = state
         .fixture
@@ -140,6 +180,7 @@ fn body_lines(state: &OverlayState) -> Vec<Line<'static>> {
         .map(|(text, color)| Line::from(Span::styled(*text, Style::new().fg(*color))))
         .collect();
     if state.fixture.click_confirms {
+        lines.push(action_row().line);
         lines.push(Line::from(Span::styled(
             format!("  已确认 {} 次", state.confirmed),
             accent_style(),
@@ -151,8 +192,8 @@ fn body_lines(state: &OverlayState) -> Vec<Line<'static>> {
 fn status_line(state: &OverlayState) -> Line<'static> {
     Line::from(Span::styled(
         format!(
-            "{} {} · outside clicks {} · transcript scroll {}",
-            state.fixture.confirm_label, state.confirmed, state.outside, state.scroll
+            "{} {} · back {} · outside clicks {} · transcript scroll {}",
+            state.fixture.confirm_label, state.confirmed, state.back, state.outside, state.scroll
         ),
         muted_style(),
     ))
@@ -207,7 +248,15 @@ pub(crate) fn handle_mouse(state: &mut OverlayState, mouse: &MouseEvent, area: R
             }
             OverlayHit::Border | OverlayHit::Inside => {
                 if state.fixture.click_confirms {
-                    state.confirmed += 1;
+                    let on_back =
+                        action_geometry(state, area).is_some_and(|(row, (start, end))| {
+                            mouse.row == row && (start..end).contains(&mouse.column)
+                        });
+                    if on_back {
+                        state.back += 1;
+                    } else {
+                        state.confirmed += 1;
+                    }
                 }
                 true
             }

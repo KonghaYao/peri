@@ -10,8 +10,10 @@ use crate::i18n;
 
 use fluent_bundle::FluentValue;
 use peri_theme::atoms::THEME_ATOM;
-use peri_tui_components::button::{self, ButtonChrome, ButtonState, ButtonTone};
-use ratatui_kit::ratatui::style::Modifier;
+use peri_theme::theme::ThemeDefinition;
+use peri_tui_components::button::{
+    ButtonChrome, ButtonSpec, ButtonState, ButtonTone, ButtonVisual, button_visual,
+};
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
 use ratatui_kit::ratatui::text::Line;
@@ -80,18 +82,44 @@ impl DetailAction {
         }
     }
 
-    /// 按钮渲染文本：复制按钮沿用 chat md 复制按钮的「左右各 1 空格」块形式
-    /// （`message_area/render.rs::copy_button_line`）；其余沿用 chat 选项按钮的
-    /// `[ label ]` 形式（`message_area/render/interaction.rs`）。
+    /// 按钮渲染文本：所有动作统一走通用 Button 的 Filled 外观（` label `），
+    /// 不再有 `[ label ]` 方括号。生产路径的文本/宽度由 [`action_visual`] 提供，
+    /// 此方法仅供测试按同一口径推导断言用文本。
+    #[cfg(test)]
     #[must_use]
     pub(in super::super) fn text(self, label: &str) -> String {
+        ButtonChrome::Filled.text(label)
+    }
+
+    /// 按钮 tone：授权/重启是主操作，停止是破坏性操作，复制/返回是次要操作。
+    #[must_use]
+    fn tone(self) -> ButtonTone {
         match self {
-            Self::CopyError => ButtonChrome::Filled.text(label),
-            Self::Auth | Self::Restart | Self::Stop | Self::Back => {
-                ButtonChrome::Bracketed { padded: true }.text(label)
-            }
+            Self::Auth | Self::Restart => ButtonTone::Primary,
+            Self::Stop => ButtonTone::Danger,
+            Self::CopyError | Self::Back => ButtonTone::Secondary,
         }
     }
+}
+
+/// 按钮外观：文本、列宽与样式来自同一个 `ButtonVisual`。
+///
+/// `detail_buttons` 取文本/宽度（`selected = false` 不影响宽度），渲染取样式；
+/// 鼠标命中的 `hit_width` 就是这里 `width` 的副本，三处不可能各算一套。
+fn action_visual(action: DetailAction, selected: bool, theme: &ThemeDefinition) -> ButtonVisual {
+    button_visual(
+        ButtonSpec {
+            label: &action.label(),
+            chrome: ButtonChrome::Filled,
+            tone: action.tone(),
+            state: if selected {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            },
+        },
+        theme,
+    )
 }
 
 /// 详情视图按钮：操作 + 渲染文本 + 选择索引（`detail_actions` 下标）+ 所在
@@ -100,58 +128,35 @@ impl DetailAction {
 #[derive(Debug, Clone)]
 pub(in super::super) struct DetailButton {
     pub(in super::super) action: DetailAction,
-    /// 渲染文本（随操作形态不同：` 复制 ` / `[ 授权 ]`）
+    /// 渲染文本（通用 Button 的 Filled 外观：` 复制 ` / ` 授权 `）
     pub(in super::super) text: String,
     pub(in super::super) sel: usize,
     pub(in super::super) row: u16,
     pub(in super::super) col: u16,
-    /// 鼠标命中宽度（列）。右对齐按钮在极窄终端被面板裁切时收窄到可见范围，
-    /// 保证命中区间落在面板内。
+    /// 鼠标命中宽度（列）——生成 `text` 的同一个 `ButtonVisual.width`。右对齐按钮
+    /// 在极窄终端被面板裁切时收窄到可见范围，保证命中区间落在面板内。
     pub(in super::super) hit_width: u16,
 }
 
 impl DetailButton {
-    /// 渲染宽度（显示宽度，CJK label 为双宽字符）。仅布局测试断言使用（生产路径
-    /// 在 `detail_buttons` 内按 text 直接计宽），故 cfg(test)。
+    /// 渲染宽度（显示宽度，CJK label 为双宽字符）。生产路径的列偏移/命中宽度取自
+    /// 同一个 `ButtonVisual.width`；此方法仅供布局测试按渲染文本复核，故 cfg(test)。
     #[cfg(test)]
     pub(in super::super) fn width(&self) -> u16 {
         unicode_width::UnicodeWidthStr::width(self.text.as_str()) as u16
     }
 }
 
-/// 复制（header）沿用 md 复制按钮，选中时只叠加 BOLD。
-/// 授权/返回等底行按钮保留独立样式：默认正文色，选中时为 selection + BOLD。
+/// 按钮样式：全部走通用 Button 的 Filled 外观，选中时为 `Focused`（反色 + BOLD）。
 pub(in super::super) fn button_style(
     action: DetailAction,
     selected: bool,
     theme: &peri_theme::theme::ThemeDefinition,
 ) -> Style {
-    let semantic = &theme.semantic;
-    match action {
-        DetailAction::CopyError => button::button_style(
-            ButtonChrome::Filled,
-            ButtonTone::Primary,
-            if selected {
-                ButtonState::Focused
-            } else {
-                ButtonState::Normal
-            },
-            theme,
-        ),
-        DetailAction::Auth | DetailAction::Restart | DetailAction::Stop | DetailAction::Back => {
-            let style = Style::default().fg(semantic.text.primary);
-            if selected {
-                style
-                    .bg(semantic.surface.selection)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                style
-            }
-        }
-    }
+    action_visual(action, selected, theme).style
 }
 
-/// 详情视图按钮的选择索引空间（视觉顺序）：[复制?] → [授权?] → [返回]。
+/// 详情视图按钮的选择索引空间（视觉顺序）：复制? → 授权/重启/停止? → 返回。
 ///
 /// 无错误摘要时不显示复制按钮——没有可复制的内容，且保持常见（连接失败以外的）
 /// 详情布局与行号契约不变。
@@ -178,7 +183,7 @@ pub(in super::super) fn detail_action_at(s: &McpServerSummary, idx: usize) -> Op
     detail_actions(s).into_iter().nth(idx)
 }
 
-/// 进入详情时的默认选中：显式落在 [ 返回 ]，避免 Enter 误触授权/复制。
+/// 进入详情时的默认选中：显式落在「返回」，避免 Enter 误触授权/复制。
 pub(in super::super) fn default_detail_btn(s: &McpServerSummary) -> usize {
     detail_actions(s).len().saturating_sub(1)
 }
@@ -187,20 +192,24 @@ pub(in super::super) fn default_detail_btn(s: &McpServerSummary) -> usize {
 ///
 /// `skills_count` 参与四段表格的行数推导，渲染与鼠标命中必须传同一个值。
 /// `width` 是面板内容宽度：复制按钮右对齐（`width − 滚动条预留 − 按钮宽`），
-/// 底行按钮左起排布。
+/// 底行按钮左起排布。`theme` 只参与按钮文本/宽度/样式同一份 `ButtonVisual` 的
+/// 生成——几何与渲染必须传同一个主题。
 pub(in super::super) fn detail_buttons(
     s: &McpServerSummary,
     skills_count: usize,
     width: u16,
+    theme: &ThemeDefinition,
 ) -> Vec<DetailButton> {
     let bottom_row = detail_btn_row(s, skills_count, width);
     let mut buttons: Vec<DetailButton> = Vec::with_capacity(3);
-    // 底行按钮从左到右排列：`[ label ]` 之间 2 空格
+    // 底行按钮从左到右排列：Filled ` label ` 之间 2 空格
     let mut bottom_col = 0u16;
     let indexed_actions = detail_actions(s).into_iter().enumerate();
     for (sel, action) in indexed_actions {
-        let text = action.text(&action.label());
-        let text_width = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+        // 文本与列宽来自同一个 ButtonVisual（选中态不影响宽度）。
+        let visual = action_visual(action, false, theme);
+        let text = visual.text;
+        let text_width = visual.width;
         let header = action == DetailAction::CopyError;
         // 右对齐：按钮右缘落在滚动条预留列之前；极窄终端下贴左列渲染（被面板
         // 裁切也要保持可见可点击——按钮优先于标题）
@@ -636,7 +645,7 @@ pub(in super::super) fn build_detail_lines(
     }
     // 复制按钮（仅错误摘要存在时；无错误无可复制内容）与底行按钮共用选择索引，
     // 右对齐渲染在 header 行（行号/列偏移由 detail_buttons 单一权威给出）。
-    let buttons = detail_buttons(s, skills.len(), width);
+    let buttons = detail_buttons(s, skills.len(), width, theme);
     let copy_button = buttons
         .first()
         .filter(|button| button.action == DetailAction::CopyError);
@@ -705,7 +714,7 @@ pub(in super::super) fn build_detail_lines(
     // 四段表格（工具、技能、代理、订阅）：固定在 URL 块之后、底行按钮之前。
     push_detail_tables(&mut lines, s, skills, width, theme);
     lines.push(Line::from(""));
-    // 按钮行：header 复制按钮之外的操作（[授权?] [返回]），列偏移与鼠标命中同源
+    // 按钮行：header 复制按钮之外的操作（Filled 授权/返回），列偏移与鼠标命中同源
     let bottom_buttons: Vec<DetailButton> = buttons
         .into_iter()
         .filter(|button| button.action != DetailAction::CopyError)
