@@ -190,6 +190,7 @@ mod tests {
 
     fn item(seq: u64) -> ItemView {
         ItemView {
+            id: format!("itim_{seq}"),
             seq,
             item_id: format!("itim_{seq}"),
             kind: ItemKind::Message,

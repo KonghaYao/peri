@@ -312,6 +312,7 @@ impl InMemorySwarmService {
         self.broadcast(
             logical_id.as_str(),
             StreamEvent::Item(ItemView {
+                id: item_id.clone(),
                 seq,
                 item_id,
                 kind,

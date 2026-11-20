@@ -104,13 +104,19 @@ impl SandboxState {
     }
 }
 
+/// Bound Bun environment projected from `swarm_bindings`.
+///
+/// The gateway does not observe Bun's live SRT lifecycle, so `state` stays
+/// `null`; the binding identity and `workspacePath` are what the session can
+/// report. Use `GET <bun>/v1/sandboxes/{logicalEnvId}` for the live state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxView {
     pub logical_env_id: String,
     pub sandbox_id: Option<String>,
     pub run_id: Option<String>,
-    pub state: SandboxState,
+    pub state: Option<SandboxState>,
+    pub workspace_path: Option<String>,
 }
 
 /// Response body for `GET /sessions/{logicalId}` and the `session` SSE event.

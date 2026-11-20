@@ -37,7 +37,8 @@ use super::runtime::{
 use crate::domain::{
     new_root_session_id, ActorKey, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
     ErrorKind, InputKind, InputMode, InputOutcome, InputState, InputSubmission, ItemOrder,
-    ItemPage, ItemsWindow, LogicalId, SessionState, SessionView, StreamEvent, SwarmError, TurnView,
+    ItemPage, ItemsWindow, LogicalId, SandboxView, SessionState, SessionView, StreamEvent,
+    SwarmError, TurnView,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
@@ -380,7 +381,12 @@ impl AcpSwarmService {
             .map_err(|error| store_failure("last_seq", error))
     }
 
-    fn session_view(&self, row: &SwarmSessionRow, turn: Option<TurnSlot>) -> SessionView {
+    fn session_view(
+        &self,
+        row: &SwarmSessionRow,
+        turn: Option<TurnSlot>,
+        sandbox: Option<SandboxView>,
+    ) -> SessionView {
         SessionView {
             id: row.logical_id.clone(),
             object: "agent.session".to_owned(),
@@ -400,8 +406,33 @@ impl AcpSwarmService {
                 instructions: row.instructions.clone(),
             },
             environment: row.environment.clone(),
-            sandbox: None,
+            sandbox,
         }
+    }
+
+    /// Project the booked Bun environment without contacting Bun.
+    ///
+    /// `swarm_bindings` is the authority for the sandbox identity and workspace
+    /// path; a missing row keeps `sandbox: null` instead of failing the read.
+    async fn sandbox_view(&self, row: &SwarmSessionRow) -> Result<Option<SandboxView>, SwarmError> {
+        if row.environment.kind != EnvironmentKind::OpenAiHosted {
+            return Ok(None);
+        }
+        let Some(env_id) = row.environment.id.as_deref() else {
+            return Ok(None);
+        };
+        let binding = self
+            .store
+            .swarm_get_binding(env_id)
+            .await
+            .map_err(|error| store_failure("get_binding", error))?;
+        Ok(binding.map(|binding| SandboxView {
+            logical_env_id: binding.logical_env_id,
+            sandbox_id: Some(binding.sandbox_id),
+            run_id: binding.last_run_id,
+            state: None,
+            workspace_path: Some(binding.workspace_path),
+        }))
     }
 
     async fn view_by_id(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError> {
@@ -415,7 +446,8 @@ impl AcpSwarmService {
             .lock()
             .get(logical_id.as_str())
             .and_then(|runtime| runtime.turn.borrow().clone());
-        Ok(self.session_view(&row, turn))
+        let sandbox = self.sandbox_view(&row).await?;
+        Ok(self.session_view(&row, turn, sandbox))
     }
 
     fn resolve_model(&self, requested: Option<&str>) -> Result<Option<String>, SwarmError> {

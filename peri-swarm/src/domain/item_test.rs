@@ -4,6 +4,7 @@ use super::*;
 
 fn item(seq: u64) -> ItemView {
     ItemView {
+        id: "itim_test".to_owned(),
         seq,
         item_id: "itim_test".to_owned(),
         kind: ItemKind::Message,
@@ -35,6 +36,7 @@ fn oversized_payload_keeps_identity_and_original_size() {
 #[test]
 fn item_serializes_with_camel_case_fields() {
     let value = serde_json::to_value(item(7)).expect("item");
+    assert_eq!(value["id"], json!("itim_test"));
     assert_eq!(value["seq"], json!(7));
     assert_eq!(value["itemId"], json!("itim_test"));
     assert_eq!(value["kind"], json!("message"));

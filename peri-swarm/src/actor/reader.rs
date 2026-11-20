@@ -474,6 +474,7 @@ impl ItemLog {
         self.set_session_state(SessionState::Running, Some(seq))
             .await?;
         self.broadcast(StreamEvent::Item(ItemView {
+            id: item_id.clone(),
             seq,
             item_id,
             kind: item.kind,

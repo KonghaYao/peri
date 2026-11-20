@@ -99,6 +99,7 @@ impl SwarmItemRow {
     #[must_use]
     pub fn to_view(&self) -> ItemView {
         ItemView {
+            id: self.item_id.clone(),
             seq: self.seq,
             item_id: self.item_id.clone(),
             kind: self.kind,

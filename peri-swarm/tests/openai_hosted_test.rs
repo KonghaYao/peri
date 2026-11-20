@@ -324,6 +324,27 @@ impl Harness {
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
     }
+
+    async fn get_session(&self, logical_id: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/agents/sessions/{logical_id}"))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(axum::body::Body::empty())
+            .expect("request");
+        let response = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("get response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("get body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
 }
 
 async fn wait_for<F>(stub: &BunStub, within: Duration, predicate: F) -> bool
@@ -398,6 +419,24 @@ async fn an_anonymous_hosted_session_reserves_a_bun_workspace() {
             .into_owned()
     );
     assert_eq!(binding.last_run_id, None);
+
+    // The session projection exposes the booked workspace so a client can read
+    // tool output without guessing the Bun-internal layout.
+    assert_eq!(value["sandbox"]["logicalEnvId"], json!(env_id));
+    assert_eq!(value["sandbox"]["sandboxId"], json!(binding.sandbox_id));
+    assert_eq!(
+        value["sandbox"]["workspacePath"],
+        json!(binding.workspace_path)
+    );
+    assert_eq!(value["sandbox"]["state"], Value::Null);
+
+    let (status, fetched) = harness.get_session("agent-hosted").await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["sandbox"]["sandboxId"], json!(binding.sandbox_id));
+    assert_eq!(
+        fetched["sandbox"]["workspacePath"],
+        json!(binding.workspace_path)
+    );
 
     let workspace_path = format!("/sandboxes/{env_id}/mcp");
     assert!(

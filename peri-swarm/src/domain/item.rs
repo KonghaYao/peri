@@ -52,9 +52,13 @@ impl ItemSource {
 }
 
 /// One append-only item. `seq` is the stable ordering and resume cursor.
+///
+/// `id` mirrors `itemId` so SDK types that extend `{ id }` can traverse the
+/// item log; `seq` stays the pagination cursor (`after`/`nextCursor`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemView {
+    pub id: String,
     pub seq: u64,
     pub item_id: String,
     pub kind: ItemKind,

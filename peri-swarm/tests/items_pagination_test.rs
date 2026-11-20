@@ -217,6 +217,7 @@ async fn item_shape_carries_stable_identity() {
     .await;
     let item = &page["items"][0];
     assert_eq!(item["seq"], json!(1));
+    assert_eq!(item["id"], item["itemId"]);
     assert!(item["itemId"]
         .as_str()
         .expect("item id")
