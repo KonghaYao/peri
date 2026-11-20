@@ -781,6 +781,10 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
     assert_eq!(reports[0].session_id, root_session_id);
 }
 
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "idle enqueue+dispatch measurement is not portable to Windows CI; production idle turns use session/prompt"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_mq_dispatch_produces_a_turn() {
     // Measurement for `design §9 R2`: does `session/input/enqueue` +
