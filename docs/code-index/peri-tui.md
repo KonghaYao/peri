@@ -56,14 +56,17 @@ Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_i
 默认 fold 由 `kit/tui_render_unit/fold.rs::fold_for_status` 单点定义；正文空档分组由
 `kit/acp_events/render/publication.rs::group_body_gaps` 在快照装配后执行：相邻正文段落
 之间的连续过程单元（工具 / 纯 reasoning / 普通通知 / info 提醒）合成一张
-`TuiCollapsedGroup`，默认 `Collapsed` 一组一行，点击组行或聚焦后 Enter 展开整组，组内
-成员强制 `Expanded`（不再逐项折叠）。组键取组首成员稳定身份（`tool:` / `reasoning:` /
+`TuiCollapsedGroup`，默认 `Collapsed` 一组一行，点击组行或聚焦后 Enter 展开整组。
+组成员保留折叠 pass 给出的 fold（默认单行，`FOLD_OVERRIDES` 优先），展开组不强制
+展开成员：组渲染产出「成员标题逻辑行 → `FoldKey`」命中表（`SlotLines::fold_hits`），
+单击成员标题行只切换该成员（`entry_nav::apply_group_member_toggle`），内容行不切换。
+组键取组首成员稳定身份（`tool:` / `reasoning:` /
 `reminder:` 等），流式追加入同组不换键；分组缓存按稳定切点复用前缀，只重建变化后缀。
 错误级通知、required / warning 及以上提醒、交互块与子 Agent 组保持可见，不自动隐藏。
 点击命中行由 `message_area/slot_index.rs` 的 `header_local` 扣除过程区转场台阶行，
-`scroll/gesture.rs` 只认该行。回归入口：`acp_events_test::display_retention_test`、
+`scroll/gesture.rs` 只认 header 行与成员标题行。回归入口：`acp_events_test::display_retention_test`、
 `fold_overrides::tests`、`acp_events_test::{body_gap_group_test,fold_test,snapshot_test,
-diff_grouping_test}`、`message_area::{transcript_index_test,scroll_test}`。
+diff_grouping_test}`、`message_area::{transcript_index_test,scroll_test,render::tests::group_click_tests}`。
 
 内部续跑与定时审批通过 `ExecutionStarted` 建立真实 execution 身份及 HITL 许可；`acp_client/interaction_lifecycle/prompt.rs` 对 managed 输入与 external execution 共用代际、重复和终态归属规则，但仅 managed 输入的 Stop 携带 mailbox 票据身份。`kit/acp_notifier/notifier.rs` 保留终态 request ID；bridge 不让陈旧结束或迟到提交失败清除新执行。`kit/acp_events/bridge_state.rs::SubmittedInputRollback` 将 composer 回滚文本绑定提交请求，`turn.rs` 只允许所属请求取消回滚，internal execution 开始不重绑它。日常提交失败只发布原会话/请求所属事件，不直接写全局 loading。定向入口 `acp_client::client::pump::user_input_run_tests` 与 `kit::acp_events::acp_events_test`。
 

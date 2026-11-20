@@ -180,8 +180,8 @@ fn test_edit_plain_output_same_group_across_archive() {
         };
         assert_eq!(
             card.fold,
-            crate::kit::tui_render_unit::FoldState::Expanded,
-            "组内工具按原样展开"
+            crate::kit::tui_render_unit::FoldState::Collapsed,
+            "组内工具保留折叠 pass 的单行折叠（可单独点开）"
         );
     }
 

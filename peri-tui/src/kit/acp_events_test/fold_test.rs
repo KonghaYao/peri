@@ -92,8 +92,8 @@ fn test_turn_interrupted_stops_running_tool_card_animation() {
 }
 
 /// 纯 reasoning 段（无正文）属过程区：进入正文空档折叠组，组默认单行；
-/// 组内成员按原样展开（不再逐项折叠）。文本到达后同一 bubble 变成正文，
-/// reasoning 回到正文气泡内的单行摘要。
+/// 组内成员保留折叠 pass 给出的单行折叠（不再强制展开）。文本到达后同一
+/// bubble 变成正文，reasoning 回到正文气泡内的单行摘要。
 #[test]
 #[serial]
 fn test_fold_pass_reasoning_only_grouped_then_body_summary() {
@@ -124,7 +124,11 @@ fn test_fold_pass_reasoning_only_grouped_then_body_summary() {
         "流式中 reasoning 应为 Running"
     );
     assert!(r.is_running);
-    assert_eq!(r.fold, FoldState::Expanded, "组内成员按原样展开");
+    assert_eq!(
+        r.fold,
+        FoldState::Collapsed,
+        "组内成员保留折叠 pass 的单行折叠（可单独点开）"
+    );
 
     // 追加文本 chunk——文本到达 = 本消息 thinking 块结束（方案 1）：
     // 推理块立即冻结为 Completed/Collapsed（`◐ Thinking…` 停止），正文继续流式；
@@ -202,8 +206,8 @@ fn test_fold_pass_tool_grouped_across_lifecycle() {
     );
     assert_eq!(
         tool_card_of(&snap, 0).fold,
-        FoldState::Expanded,
-        "组内工具展开"
+        FoldState::Collapsed,
+        "组内工具保留默认单行折叠（可单独点开）"
     );
     assert!(!tool_card_of(&snap, 0).user_modified);
 
@@ -253,7 +257,11 @@ fn test_fold_pass_tool_grouped_across_lifecycle() {
     assert_eq!(group.count, 2, "同一空档内的工具同组");
     assert_eq!(group.failed_count, 1, "失败数在组行保持可见");
     assert!(tool_card_of(&snap, 1).is_error);
-    assert_eq!(tool_card_of(&snap, 1).fold, FoldState::Expanded);
+    assert_eq!(
+        tool_card_of(&snap, 1).fold,
+        FoldState::Collapsed,
+        "组内失败工具同样保留单行折叠（失败信号由组行摘要承载）"
+    );
 }
 
 /// §7 subagent 行：running 与 completed 均为 Collapsed（running 靠 live summary 表达）。
@@ -677,8 +685,22 @@ fn test_fold_pass_group_manual_override_survives_rebuild() {
     assert_eq!(group.fold, FoldState::Expanded, "手动展开跨重建保持");
     assert_eq!(
         tool_card_of(&snap, 0).fold,
+        FoldState::Collapsed,
+        "组内成员保留自己的折叠态（不再随组强制展开）"
+    );
+
+    // 成员自己的覆盖优先：单独展开组内成员后重建，仍只有该成员展开。
+    FOLD_OVERRIDES
+        .state()
+        .write()
+        .insert(FoldKey::Tool("t1".into()), FoldState::Expanded);
+    crate::kit::acp_events::push_view_models(&mut state);
+    let snap = VIEW_MODELS.state().read().clone();
+    assert_eq!(group_of(&snap, 0).fold, FoldState::Expanded, "组展开保持");
+    assert_eq!(
+        tool_card_of(&snap, 0).fold,
         FoldState::Expanded,
-        "组内成员随组展开按原样显示"
+        "成员覆盖经折叠 pass 恢复"
     );
 }
 
@@ -805,7 +827,11 @@ fn test_cold_history_rebuild_keeps_default_collapsed() {
         "冷重建工具组保持单行"
     );
     let tool = tool_card_of(&snap, 0);
-    assert_eq!(tool.fold, FoldState::Expanded, "组内工具随组展开按原样显示");
+    assert_eq!(
+        tool.fold,
+        FoldState::Collapsed,
+        "组内工具按折叠 pass 的单行默认态重建"
+    );
     let reasoning = super::reasoning_of(&snap, 1);
     assert_eq!(
         reasoning.status,

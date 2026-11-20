@@ -140,16 +140,98 @@ fn test_body_gap_groups_tools_and_thinking_between_paragraphs() {
     let expanded_group = group_at(&expanded, 1);
     assert_eq!(expanded_group.fold, FoldState::Expanded);
     let expanded_lines = crate::kit::message_area::render::vm_to_lines(&expanded.items[1], &grid);
-    assert!(
-        expanded_lines.len() > 3,
-        "展开整组后 3 个成员的正文都应渲染，实际 {} 行",
-        expanded_lines.len()
+    assert_eq!(
+        expanded_lines.len(),
+        4,
+        "组头一行 + 3 个成员各保留自身单行折叠，实际 {:?}",
+        expanded_lines
+            .iter()
+            .map(|line| line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>())
+            .collect::<Vec<_>>()
     );
     assert!(
         expanded_lines
             .iter()
             .any(|line| { line.spans.iter().any(|span| span.content.contains("t1.rs")) }),
-        "展开后工具输入摘要可见"
+        "展开后工具标题摘要可见"
+    );
+    for member in &expanded_group.view_models {
+        let fold = match member {
+            TuiRenderUnit::TuiToolCard(card) => card.fold,
+            TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                bubble.reasoning.as_ref().expect("reasoning member").fold
+            }
+            other => panic!("unexpected group member {other:?}"),
+        };
+        assert_eq!(
+            fold,
+            FoldState::Collapsed,
+            "展开组不强制展开成员（保留折叠 pass 的单行折叠）"
+        );
+    }
+}
+
+/// 成员覆盖：单独展开组内成员后重建，只有该成员展开；组摘要/失败计数不变。
+#[test]
+#[serial]
+fn test_member_fold_override_survives_rebuild_without_touching_group() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[text("正文 A", "m1"), tool_started("t1"), tool_ended("t1")],
+    );
+    dispatch_all(
+        &mut state,
+        &[
+            tool_started("t2"),
+            tool_ended("t2"),
+            reasoning("想一想", "m2"),
+            text("正文 B", "m3"),
+        ],
+    );
+    let snapshot = current_snapshot();
+    let group = group_at(&snapshot, 1);
+    assert_eq!(group.count, 3);
+    assert_eq!(group.failed_count, 0);
+    let title = group.title.clone();
+    let key = group.key.clone();
+
+    crate::kit::fold_overrides::insert(FoldKey::Tool("t2".into()), FoldState::Expanded);
+    crate::kit::acp_events::push_view_models(&mut state);
+    let rebuilt = current_snapshot();
+    let group = group_at(&rebuilt, 1);
+    assert_eq!(
+        group.fold,
+        FoldState::Collapsed,
+        "组自身折叠态不受成员覆盖影响"
+    );
+    assert_eq!(group.key, key, "组身份稳定");
+    assert_eq!(group.title, title, "组摘要不被成员折叠变化改写");
+    assert_eq!(group.count, 3);
+    assert_eq!(group.failed_count, 0);
+    let folds: Vec<FoldState> = group
+        .view_models
+        .iter()
+        .map(|member| match member {
+            TuiRenderUnit::TuiToolCard(card) => card.fold,
+            TuiRenderUnit::TuiAssistantBubble(bubble) => {
+                bubble.reasoning.as_ref().expect("reasoning member").fold
+            }
+            other => panic!("unexpected group member {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        folds,
+        vec![
+            FoldState::Collapsed,
+            FoldState::Expanded,
+            FoldState::Collapsed
+        ],
+        "只有被点开的成员展开，其他成员保持默认折叠"
     );
 }
 

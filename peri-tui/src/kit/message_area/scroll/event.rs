@@ -244,7 +244,7 @@ pub(in crate::kit::message_area) fn handle_event(
             // 滚动条几何/命中用收窄前的整幅矩形（缺省回退带内区域，保持旧行为）。
             let sb_area = scrollbar_rect.unwrap_or(area);
             let selection_captured = super::selection_captures_pointer(
-                *gesture.read(),
+                gesture.read().clone(),
                 text_sel.read().dragging,
                 mouse.kind,
             );
@@ -456,7 +456,7 @@ pub(in crate::kit::message_area) fn handle_event(
                         // 丢失）。容差内（手抖）手势保持 Pending，节流照常。
                         // [TRAP] 先 copy 出 gesture 值 drop guard 再 write——
                         // parking_lot 同 thread read+write 冲突会 panic。
-                        let pending = *gesture.read();
+                        let pending = gesture.read().clone();
                         let now = peri_time::monotonic_now();
                         let within_throttle_window = {
                             let dt = drag_throttle.read();
@@ -542,11 +542,11 @@ pub(in crate::kit::message_area) fn handle_event(
                         // [F1] Up 按最终位移补结算：中间 Drag 事件可能丢失，正文
                         // 只要 Up 坐标与 Down 不同就必须建立选区。header 仍按单击
                         // 产品规则（它的 Up 已被 entry handler 消费）。
-                        let pending = *gesture.read();
+                        let pending = gesture.read().clone();
                         let mut dragging = text_sel.read().dragging;
                         if !dragging
-                            && let Some(p) = pending
-                            && super::release_upgrades(&p, (mouse.column, mouse.row))
+                            && let Some(ref p) = pending
+                            && super::release_upgrades(p, (mouse.column, mouse.row))
                         {
                             let scroll_y = scroll_state.read().offset();
                             let (visual_row, visual_col) = super::selection_position(

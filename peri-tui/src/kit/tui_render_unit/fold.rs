@@ -65,9 +65,8 @@ pub fn fold_for_status(target: FoldTarget, status: EntryStatus) -> FoldState {
     match (target, status) {
         // user / assistant 正文永远展开（user 长文折叠归 Slice 3 截断层）
         (User, _) | (Assistant, _) => FoldState::Expanded,
-        // reasoning / tool：非分组语境（历史详情面板、正文气泡内的 thinking
-        // 摘要）收束为单行。正文空档分组 pass 会把组内成员统一置为 Expanded——
-        // 折叠层级只保留组行一层，展开组即原样显示成员。
+        // reasoning / tool：收束为单行。正文空档分组保留这里给出的 fold——
+        // 组行折叠一层，展开组后成员仍是单行、可各自点开。
         (Reasoning, _) => FoldState::Collapsed,
         (Tool, _) => FoldState::Collapsed,
         // subagent：running = Collapsed + live summary（裁决 C4：按 spec §7 表）

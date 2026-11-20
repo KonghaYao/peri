@@ -54,8 +54,8 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use self::entry_nav::{
-    apply_fold_override, apply_fold_toggle, cycle_interaction_option, entry_click_decision,
-    fold_key_of, pending_interaction_of, set_entry_focus,
+    apply_fold_override, apply_fold_toggle, apply_group_member_toggle, cycle_interaction_option,
+    entry_click_decision, fold_key_of, pending_interaction_of, set_entry_focus,
 };
 #[cfg(test)]
 use self::handlers::{ImagePreviewHoverGate, schedule_image_preview_hover};

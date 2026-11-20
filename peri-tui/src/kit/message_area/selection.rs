@@ -66,6 +66,8 @@ pub(super) struct SlotLines {
     parts: Vec<SlotLinePart>,
     prefix: Vec<usize>,
     genui_ranges: Vec<std::ops::Range<usize>>,
+    /// 展开的正文空档组：成员标题逻辑行 → 成员 FoldKey（单击热区来源）。
+    fold_hits: Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>>,
 }
 
 impl SlotLines {
@@ -124,6 +126,7 @@ impl SlotLines {
             parts,
             prefix,
             genui_ranges: Vec::new(),
+            fold_hits: Arc::default(),
         }
     }
 
@@ -137,6 +140,19 @@ impl SlotLines {
         self
     }
 
+    /// 挂上「成员标题逻辑行 → FoldKey」命中表（仅展开的正文空档组有值）。
+    pub(super) fn with_fold_hits(
+        mut self,
+        hits: Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>>,
+    ) -> Self {
+        self.fold_hits = hits;
+        self
+    }
+
+    pub(super) fn fold_hits(&self) -> &Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>> {
+        &self.fold_hits
+    }
+
     pub(super) fn is_genui_line(&self, logical: usize) -> bool {
         super::render::is_genui_line(&self.genui_ranges, logical)
     }
@@ -145,6 +161,8 @@ impl SlotLines {
         self.parts.capacity() * std::mem::size_of::<SlotLinePart>()
             + self.prefix.capacity() * std::mem::size_of::<usize>()
             + self.genui_ranges.capacity() * std::mem::size_of::<std::ops::Range<usize>>()
+            + self.fold_hits.capacity()
+                * std::mem::size_of::<(usize, crate::kit::tui_render_unit::FoldKey)>()
     }
 
     pub(super) fn get(&self, logical: usize) -> Option<&Line<'static>> {

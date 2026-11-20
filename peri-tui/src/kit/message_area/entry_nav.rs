@@ -30,6 +30,15 @@ pub(super) fn move_entry_focus(
 #[path = "entry_nav_shared_test.rs"]
 mod shared_bubble_tests;
 
+/// entry 单击命中：entry 首行（组头 / 工具 header 等）或折叠组内成员标题行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::kit::message_area) enum EntryClickHit {
+    /// entry 可点击 header——整 entry 折叠切换（组 = 整组切换，语义同键盘 Enter）。
+    Header { slot: usize },
+    /// 正文空档组内的成员标题行——只切换该成员的 fold，不影响同组其他成员。
+    GroupMember { slot: usize, key: FoldKey },
+}
+
 /// entry 的折叠键 + 当前 fold（无折叠能力的 entry → `None`）。
 /// 与折叠 pass（`acp_events/fold.rs::apply_fold_pass`）的键控口径一致：
 /// Reasoning(message_id) / Tool(tool_id) / SubAgent(agent_id) / Group(key) /
@@ -75,8 +84,10 @@ pub(super) fn set_entry_focus(snapshot: &ViewModelsSnapshot, slot: usize) {
 /// 被消费前的唯一判定路径。
 ///
 /// 单击 = Down 冻结 + 手势从未升级（`gesture` 保持 Pending 到 Up）：
-/// `gesture` 为 Some 且冻结的 `entry_hit` 命中可点击 header →
-/// `Some(slot)`；否则 `None`（无 Down 记录 / 正文行 / 非 header 行）。
+/// `gesture` 为 Some 且冻结的 `entry_hit` 命中可点击行时返回命中，否则
+/// `None`（无 Down 记录 / 正文行 / 非 header 行）。命中分两级：entry 首行返回
+/// [`EntryClickHit::Header`]（整组），展开组内成员标题返回
+/// [`EntryClickHit::GroupMember`]（只切换该成员）。
 ///
 /// [防御 Up 坐标] `mouse_row` 必须在 `area` 内且非滚动条列——防御检查
 /// 基于 Up 时点坐标，比 D2 设计表述（pending.screen）更严格（S1 review
@@ -90,7 +101,7 @@ pub(super) fn entry_click_decision(
     mouse_row: u16,
     area: ratatui_kit::ratatui::layout::Rect,
     is_scrollbar_col: bool,
-) -> Option<usize> {
+) -> Option<EntryClickHit> {
     // 防御检查基于 Up 坐标：行越界 / 滚动条列不参与 entry 点击
     //（滚动条 Up 分支负责 thumb 释放）
     if mouse_row < area.y || mouse_row >= area.y.saturating_add(area.height) {
@@ -100,12 +111,9 @@ pub(super) fn entry_click_decision(
         return None;
     }
     let pending = gesture?;
-    // `entry_hit` 在 Down 时已按「可点击 header」解析（过程区台阶占第 0 行时
-    // local_idx 为 1）；Up 只消费该结果，不再对行号做二次假设。
-    match pending.entry_hit {
-        Some((slot, _)) => Some(slot),
-        _ => None,
-    }
+    // `entry_hit` 在 Down 时已按「可点击 header / 成员标题」解析（过程区台阶占
+    // 第 0 行时 header_local 为 1）；Up 只消费该结果，不再对行号做二次假设。
+    pending.entry_hit.clone()
 }
 
 /// 对 VM 应用手动折叠覆盖：写 fold + user_modified + 重算 hash（G1）。
@@ -298,7 +306,8 @@ pub(super) fn apply_fold_toggle(
     let mut updated = snapshot.items[idx].clone();
     apply_fold_override(&mut updated, next);
     // 展开/打开工具卡片：若该跨页结果超出内存预算，按来源页定位补读完整正文。
-    // 折叠组展开时组内每个工具成员都要补读（组行是唯一可点击入口）。
+    // 折叠组展开时组内每个工具成员都要补读（成员可能默认 Expanded——如 error /
+    // running），单击单个成员时由 apply_group_member_toggle 只补读该成员。
     if next != FoldState::Collapsed {
         request_visible_tool_results(&updated);
     }
@@ -307,7 +316,53 @@ pub(super) fn apply_fold_toggle(
     EventResult::Consumed
 }
 
-/// 对展开后的单元递归补读延迟工具结果——组内成员不再单独可点击。
+/// 展开组内单个成员的折叠切换（鼠标单击成员标题行）：写 FOLD_OVERRIDES +
+/// 当帧快照 COW set + 重算组哈希，同组其他成员与组折叠态不变。
+///
+/// 与 [`apply_fold_toggle`] 的键控口径一致：成员身份（Tool / Reasoning /
+/// SystemReminder）就是折叠 pass 消费的键，重建后由覆盖表恢复。
+/// 成员已不在组内（流式重建/组消失）时消费但不动作。
+pub(super) fn apply_group_member_toggle(
+    snapshot: &mut ViewModelsSnapshot,
+    idx: usize,
+    key: &FoldKey,
+) -> EventResult {
+    let group = match snapshot.items.get(idx) {
+        Some(TuiRenderUnit::TuiCollapsedGroup(group)) => group.clone(),
+        _ => return EventResult::Consumed,
+    };
+    let Some(member_index) = group
+        .view_models
+        .iter()
+        .position(|vm| fold_key_of(vm).is_some_and(|(member_key, _)| member_key == *key))
+    else {
+        return EventResult::Consumed;
+    };
+    let Some((_, current_fold)) = fold_key_of(&group.view_models[member_index]) else {
+        return EventResult::Consumed;
+    };
+    let next = if current_fold == FoldState::Collapsed {
+        FoldState::Expanded
+    } else {
+        FoldState::Collapsed
+    };
+    crate::kit::fold_overrides::insert(key.clone(), next);
+    let mut updated_group = group;
+    let mut member = updated_group.view_models[member_index].clone();
+    apply_fold_override(&mut member, next);
+    if next != FoldState::Collapsed {
+        request_visible_tool_results(&member);
+    }
+    updated_group.view_models[member_index] = member;
+    updated_group.recompute_hash();
+    snapshot
+        .items
+        .set(idx, TuiRenderUnit::TuiCollapsedGroup(updated_group));
+    snapshot.generation = snapshot.generation.wrapping_add(1);
+    EventResult::Consumed
+}
+
+/// 对展开后的单元递归补读延迟工具结果——组展开与单个成员展开共用。
 fn request_visible_tool_results(vm: &TuiRenderUnit) {
     let _ = crate::kit::acp_events::history_window::maybe_request_tool_result(vm);
     if let TuiRenderUnit::TuiCollapsedGroup(group) = vm {
