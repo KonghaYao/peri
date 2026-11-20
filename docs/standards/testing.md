@@ -383,7 +383,8 @@ world 映射的唯一事实源是 `peri-e2e/scripts/replay-world-sources.mjs`：
 （`01_intro`–`06_tone_style` 组合）、`sys.skills`、`sys.compact.summary`、`sys.compact.user`、
 `sys.block1.{main,replay-worker,subagent}.prefix`（`07_runtime`/`10_hitl`/`11_subagent`/
 `12_ask_user` 源段加固定 catalog/persona 模板）、`tools.Agent.*` 与 `tools.Bash.*`。
-`sys.compact.user` 的 `{summary_target_tokens}` 按运行时目标值替换后冻结；`tools.Agent.*` 只有
+`sys.compact.user` 的 `{summary_target_tokens}` 按录制固定目标 8000 替换后冻结；运行时目标不同
+需更新 replay 映射并重录对应场景。`tools.Agent.*` 只有
 description 与 send_only 从源同步，`tools.Bash.*` 只有 description 从源同步（内置 workspace MCP
 的 `bash.md`），其余字段锚定在 `llm-replay/world-source-templates/` 的全量模板。world-sync 只写
 受影响的 leaf 与 `world/seal.json`：block0 固定为 leaf + seal 两个文件，Bash/Agent 工具描述按
