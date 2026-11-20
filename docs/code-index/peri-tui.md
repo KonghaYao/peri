@@ -13,8 +13,11 @@
 绘制、端点/空轨命中与拖拽反推使用同一份滑块几何，两端显式映射 0 与最大偏移；
 三行滚轮步长、有界偏移与调用方时钟节流也由该模块提供。文本选区的显示列→字节换算、
 字素切片与真实 `Paragraph` 折行行首由 `selection` 提供，`SelectionAnchor` 的消息身份、
-历史前插重绑与剪贴板仍在宿主。面板高度/内容行数由 `panel_layout` 按终端高度与主题上下限
-统一计算（首帧预测与实测扣除同一组边框行）。
+历史前插重绑与剪贴板仍在宿主。文本严格列宽截断与省略号预算由 `text::truncate_to_width`
+统一，旧 `truncate_by_width` 仅保留前缀预算契约；Edit/Write 的 unified diff 在
+`diff::parse_unified_diff` 内按调用方 `DiffBudget` 限制保留量；输入历史游标的上下移动、
+退出与重置由 `history::HistoryCursor` 持有，历史条目仍只有宿主一份 `VecDeque`。
+面板高度/内容行数由 `panel_layout` 按终端高度与主题上下限统一计算（首帧预测与实测扣除同一组边框行）。
 组件 API 与使用示例见
 [`peri-tui-components/README.md`](../../peri-tui-components/README.md)；
 组件视觉检查用 `./dev-tui.sh`（storybook：鼠标优先，覆盖 textarea/list/scrollbar/completion/overlay/spinner/markdown/openui/mermaid/charts，`--list`/`--dump` 支持无 TTY）。Mermaid 的终稿与流式前缀示例见 `peri-tui-components/src/bin/storybook/stories/mermaid.rs`。
@@ -198,7 +201,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 后台 subagent 文本合帧 | `src/kit/{bg_task_live/live_projection.rs,bg_task_live_test.rs,bg_publication_test.rs,acp_bridge.rs}` | BgStream 独占累积正文/推理并维护增量 hash；独立 50ms deadline 发布 BG_LIVE_DETAIL，不受主流 Streaming/Block/None 与主 turn 结束影响；工具/终态/接收关闭 flush，会话边界清空，同会话 replay 保留 dirty stream 并重新安排 deadline |
 | subagent 工具行 | `message_area/render/group.rs` | `render_subagent_group_lines`、`subagent_tool_line`（组内工具行与组头同列：过程区续行前缀、无独立缩进、label 无 bold）、`subagent_error_reason_lines`（错误预览最多三行，× 复制完整原文） |
 | InputArea（输入区） | `input_area/input_area.rs` + `input_area/image.rs` | 编辑、@mention、slash 补全、提交分发（`input_area/submit.rs::dispatch_submit_request`）；图片粘贴由 `PasteGate` 限制为单任务；macOS `read_pasteboard_png_bytes` 优先原样取 ≤20 MiB PNG（只读 IHDR、不解码像素、不套用预览尺寸限制），仅 PNG 缺席回退 arboard owned RGBA + 流式编码；`image_test.rs` 覆盖独立 NSPasteboard 与手动性能对比；多行渲染按显示宽度；文本粘贴统一受 `MAX_PASTE_CHARS`（10_000 字符）约束，由 `input_area/paste.rs::cap_paste_chars` 截断并在状态栏提示（`paste-truncated`）。**粘贴图片为上传式附件**（base64 直进 `PENDING_ATTACHMENTS`，不落盘、不插 `@image` 文本）：composer 标签 `[图片] 图片 N`（多张带 `×N`，`input_area/render.rs::build_attachments_label`）、空文本 Backspace/Delete 移除整张（`input_area/input_area.rs::remove_pending_attachment`）、提交后消息区留附件记录（`message_area/render/user.rs::attachment_meta_text`）。插件待提交选择由 `kit/atoms/state.rs::PENDING_PLUGIN_SELECTIONS` 持有，composer 只显示插件 ID 标签（`input_area/render.rs::build_plugin_label`），提交后随该条输入冻结并清空 |
-| input_history（输入历史） | `input_history.rs` | `push_history`/`history_up`；双预算（1000 条 / 4 MiB UTF-8 载荷，单条上限 64 KiB）淘汰最旧；浏览只复制选中项；单个 writer 合并写 `~/.peri/input-history.json`（原子 rename，`load_history` 先按文件大小拒绝再 parse） |
+| input_history（输入历史） | `input_history.rs` + `peri-tui-components/src/history.rs` | `push_history` 维护唯一一份 `VecDeque`：双预算（1000 条 / 4 MiB UTF-8 载荷，单条上限 64 KiB）淘汰最旧、相邻去重；上下移动/退出/重置是组件 `HistoryCursor` 的状态转换，草稿区分 `None`（无草稿）与 `Some("")`（显式空串），浏览只复制选中项；单个 writer 合并写 `~/.peri/input-history.json`（原子 rename，`load_history` 先按文件大小拒绝再 parse） |
 | StatusBar（状态栏） | `status_bar.rs` | `StatusBarProps`/`StatusBar`：Row1/Row2/NotifRow；`layout_status_bar` 一次产出可见行与模型/Goal 热区，Row1 绘制端直接渲染布局行（命中与绘制同源），权限模式显示、会话建立中的准备提示（`preparing_label`）；由 AppShell 的 `CenterBand` 包装，与 transcript / composer 同宽 |
 | BgTaskArea（后台任务栏） | `bg_task_area/task_area.rs` | `BgTaskArea`：bg agent 运行中条目 + 动画；同样收进居中带，行宽取 `grid.line_width()`，耗时列右对齐到带右缘 |
 | 后台任务会话投影 | `src/kit/session_boundary.rs`、`src/kit/acp_events/system/system_projection.rs`、`src/kit/bg_task_live/live_projection.rs`、`src/kit/acp_types/event_data.rs`、`src/kit/panels/tasks/tasks_panel.rs` + `src/acp_client/client/session/transition.rs` | 切换 session 清空旧任务 atom，同 session replay 保留；建立会话后回读 `session/bg-tasks` 快照，增量按 revision 水位应用、缺口重取快照；快照只恢复事实，非终态不创建当前活跃行或 Running detail，无当前 started 证据为 Unobserved；已有真实活跃状态与开始时间可保留，终态保留已收到的输出。后台 SubagentStarted 不恢复主回合 loading；TasksPanel 经统一 `session/cancel-bg-task` 请求取消 |
@@ -214,7 +217,8 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 模型配置编辑与提交 | panels/model/model_panel.rs + model/{edit,editor_view,panel_input,panel_render}.rs + model/{hit,responses,mouse,provider,commit}_test.rs | `switch_active_alias` 保留面板/快捷弹窗共同入口；`edit_field` 修改唯一 PeriConfig，`commit_snapshot` 在释放配置锁后统一保存、通知、按 `ModelChange` 投影并推送 ACP；inactive 编辑不切换展示，alias 切换独有高亮。右栏固定六行（Provider / Model / Effort / Max tokens / Context window / 1m enable），所有 provider 共用同一渲染与编辑路径；已知订阅模型由配置解析器提供缺失窗口的 1M 默认值，编辑时预填而不自动落盘；窗口输入 Enter 保存、Esc 放弃，其余字段即时保存；底部 `provider_button_label` 命中区与 `Ctrl+L` 共用 `open_provider_management`；真实磁盘/MPSC 回归覆盖保存失败不推送 |
 | tool 展示 | `tool_display.rs` + `tool_semantics.rs` | `format_tool_name`（本地化动词）；skill/todo 语义展示（`tool_semantics`）、todo diff；`format_tool_args` 为**匹配型归一**：先按传入名匹配、未命中再用 `original_tool_name_of_effective` 归一后的原始名重试，因此 当前 Web 原名按绑定来源走 WebSearch / WebFetch 的参数摘要；历史前缀仅用于旧记录兼容；未知名（含外部 `mcp__*`）两次都不命中 ⇒ 通用路径。本模块**不得**硬编码 effective name 字面量或自建反查表（A4 / A8） |
 | 工具卡片门控（生效名归一） | `kit/acp_types/tool_card.rs` + `kit/acp_types/current_turn/current_turn.rs` + `kit/message_area/render/tool_card.rs` | `tool_path_hint`/`parse_tool_diff` 的 Edit/Write diff 门控；`has_running_bash_tool`；`project_generic_tool` 的 `$ command` 前缀行与 `completed_header_suffix` 的 `— N lines` / `— N matches` / `· +N −M` 后缀 | 以上四类判定都先经 `original_tool_name_of_effective` 归一：`Bash` / `Edit` / `Read` 仍显示 Bash 前缀与结果后缀、仍渲染 diff；历史 builtin 前缀仅用于旧 transcript 展示；未命中归一表的未知 / 外部 `mcp__*` 保持通用路径 |
-| 工具字段提取与截断 | `truncate.rs` | 字段提取与折叠同样走上面的匹配型归一（原样优先）；回归 `truncate_test.rs` 覆盖有效名与未知名两态 |
+| 工具字段提取与截断 | `truncate.rs` + `peri-tui-components/src/text.rs` | 字段提取与折叠同样走上面的匹配型归一（原样优先）；布局预算调用 `truncate_to_width`（省略号计入预算），旧入口 `truncate_by_width` 保留前缀预算语义；`middle_truncate_by_width` 小预算退化为严格尾部截断；回归 `truncate_test.rs` 覆盖有效名与未知名两态 |
+| Edit/Write diff 解析 | `kit/diff_parser.rs` + `peri-tui-components/src/diff.rs` | 应用入口固定 `DiffBudget::default()`（最多 300 行 / 4 hunk / 每 hunk 32 行 / 普通 8、新文件 6 个 change）；解析时限制保留量并保留行号、range 与 `truncated_lines`/`more_change_lines` 省略计数；二进制、非法与超限输入返回 `None`，`parse_tool_diff` 回退 Edit/Write 摘要 `+N −M`。渲染类型由 `tui_render_unit::diff` 重导出，hunk 渲染器仍留在应用 |
 
 ## 实现叶模块导航
 

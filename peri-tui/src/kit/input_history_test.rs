@@ -1,9 +1,7 @@
 //! Tests for input_history
 
-use super::HISTORY_DRAFT as DRAFT;
-use super::HISTORY_DRAFT;
 use super::INPUT_HISTORY;
-use super::INPUT_HISTORY_INDEX;
+use super::INPUT_HISTORY_CURSOR;
 use super::MAX_ENTRY_BYTES;
 use super::MAX_HISTORY;
 use super::MAX_HISTORY_BYTES;
@@ -74,8 +72,7 @@ fn setup() -> IsolatedHome {
         PathBuf::from(std::env::var_os("HOME").expect("history child has its isolated HOME"));
     crate::kit::atoms::init_atoms();
     *INPUT_HISTORY.state().write() = VecDeque::new();
-    *INPUT_HISTORY_INDEX.state().write() = None;
-    *HISTORY_DRAFT.state().write() = None;
+    INPUT_HISTORY_CURSOR.state().write().reset();
     IsolatedHome { path }
 }
 
@@ -156,7 +153,7 @@ fn test_history_down_restores_empty_draft_at_bottom() {
         super::history_up(None); // → a
         assert_eq!(super::history_down().as_deref(), Some("b"));
         assert_eq!(super::history_down().as_deref(), Some(""));
-        assert_eq!(*INPUT_HISTORY_INDEX.state().read(), None);
+        assert_eq!(INPUT_HISTORY_CURSOR.state().read().index(), None);
     });
 }
 
@@ -167,9 +164,9 @@ fn test_reset_history_cursor() {
         let _home = setup();
         super::push_history("x");
         super::history_up(None);
-        assert!(INPUT_HISTORY_INDEX.state().read().is_some());
+        assert!(INPUT_HISTORY_CURSOR.state().read().index().is_some());
         super::reset_history_cursor();
-        assert!(INPUT_HISTORY_INDEX.state().read().is_none());
+        assert!(INPUT_HISTORY_CURSOR.state().read().index().is_none());
     });
 }
 
@@ -208,9 +205,12 @@ fn test_draft_saved_on_history_entry_and_restored() {
             super::history_up(Some("current draft")).as_deref(),
             Some("old")
         );
-        assert_eq!(DRAFT.state().read().as_deref(), Some("current draft"));
+        assert_eq!(
+            INPUT_HISTORY_CURSOR.state().read().draft(),
+            Some("current draft")
+        );
         assert_eq!(super::history_down(), Some("current draft".to_string()));
-        assert!(DRAFT.state().read().is_none());
+        assert!(INPUT_HISTORY_CURSOR.state().read().draft().is_none());
     });
 }
 
@@ -221,9 +221,9 @@ fn test_draft_cleared_on_reset() {
         let _home = setup();
         super::push_history("x");
         super::history_up(Some("draft"));
-        assert!(DRAFT.state().read().is_some());
+        assert!(INPUT_HISTORY_CURSOR.state().read().draft().is_some());
         super::reset_history_cursor();
-        assert!(DRAFT.state().read().is_none());
+        assert!(INPUT_HISTORY_CURSOR.state().read().draft().is_none());
     });
 }
 
@@ -235,7 +235,7 @@ fn test_empty_draft_is_preserved_for_restore() {
         super::push_history("old");
         super::history_up(Some(""));
         // 空草稿也要保存，否则 Down 回到底部时无法清空旧历史项。
-        assert_eq!(DRAFT.state().read().as_deref(), Some(""));
+        assert_eq!(INPUT_HISTORY_CURSOR.state().read().draft(), Some(""));
     });
 }
 
@@ -387,14 +387,21 @@ fn test_oversized_entry_is_not_retained() {
     run_isolated("test_oversized_entry_is_not_retained", || {
         let _home = setup();
         super::push_history("small");
-        *INPUT_HISTORY_INDEX.state().write() = Some(0);
+        let snapshot = history_snapshot();
+        INPUT_HISTORY_CURSOR
+            .state()
+            .write()
+            .up(&snapshot, Some("draft"));
 
         super::push_history(&"x".repeat(MAX_ENTRY_BYTES + 1));
 
         let history = history_snapshot();
         assert_eq!(history.len(), 1);
         assert_eq!(history.back().map(String::as_str), Some("small"));
-        assert!(INPUT_HISTORY_INDEX.state().read().is_none());
+        assert!(
+            INPUT_HISTORY_CURSOR.state().read().index().is_none(),
+            "被拒绝的提交同样结束历史浏览"
+        );
     });
 }
 

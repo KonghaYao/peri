@@ -854,13 +854,9 @@ fn pad_label(label: &str, label_col: usize) -> String {
     }
 }
 
-/// 按显示宽度装进 `budget`；超宽时留 1 列给省略号。
+/// 按显示宽度装进 `budget`；输出含省略号不超过预算。
 fn fit_value(value: &str, budget: usize) -> String {
-    if value.width() <= budget {
-        value.to_string()
-    } else {
-        crate::truncate::truncate_by_width(value, budget.saturating_sub(1))
-    }
+    crate::truncate::truncate_to_width(value, budget)
 }
 
 fn wrap_limited(text: &str, budget: usize, max_lines: Option<usize>) -> Vec<String> {

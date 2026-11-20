@@ -6,8 +6,11 @@ This crate owns rendering and local interaction state only. It does not import
 Peri Agent, Session, MCP, configuration, persistence, or application atoms. It
 also owns the business-independent renderers moved down from the app: Markdown
 (`markdown::*`), OpenUI fence rendering (`genui::*`), width-safe text wrapping
-(`text::wrap_by_width`), display-column selection slices (`selection::*`) and
-terminal text safety (`markdown::safety`).
+and strictly budgeted truncation (`text::wrap_by_width` /
+`text::truncate_to_width`), bounded unified diff parsing (`diff::*`), the input
+history cursor state machine (`history::HistoryCursor`), display-column
+selection slices (`selection::*`) and terminal text safety
+(`markdown::safety`).
 
 | Primitive | Caller supplies | Component owns |
 | --- | --- | --- |
@@ -28,6 +31,11 @@ terminal text safety (`markdown::safety`).
 | `markdown::safety` | untrusted display fields | control-character filtering and URL classification |
 | `genui::render` | parsed OpenUI segment, width, theme, optional `EvalContext` | layout, styling and button hit ranges |
 | `text::wrap_by_width` | text and width | grapheme/display-width wrapping without content loss |
+| `text::{truncate_to_width, truncate_to_width_with}` | text and total column budget | ellipsis-inclusive truncation (single `…` or shrinking ASCII dots), grapheme-safe |
+| `text::{prefix_by_width, suffix_by_width}` | text and column budget | grapheme-safe slices without decoration |
+| `diff::parse_unified_diff` | diff text, path hint, `DiffBudget` | bounded hunks/lines/change counts, line numbers, ranges, truncation counts; `None` for binary or over-budget input |
+| `diff::parse_edit_write_summary` | summary text, path hint | `+N`/`−M` block without hunks for Edit/Write summaries |
+| `history::HistoryCursor` | one `VecDeque<String>`, current editor text | up/down/exit/reset transitions; draft kept as `Option<String>` (`Some("")` is explicit empty input) |
 | `mermaid` | confirmed source, closed flag, width, job results | statement confirmation, layout, overview and preview state |
 
 The application resolves theme tokens, chooses first-frame panel height, routes

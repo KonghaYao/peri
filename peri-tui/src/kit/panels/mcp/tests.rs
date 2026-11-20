@@ -338,6 +338,66 @@ fn header_copy_button_is_right_aligned_and_survives_narrow_width() {
     }
 }
 
+/// CJK 长标题按总列宽截断：逐段样式保留，省略号计入预算，复制按钮仍可点。
+#[test]
+fn header_cjk_title_keeps_styles_and_copy_hit() {
+    use super::detail::DETAIL_HEADER_MIN_GAP;
+
+    let summary = McpServerSummary {
+        name: format!("中文服务器{}", "名称很长".repeat(6)),
+        version: Some("1.2.3".into()),
+        error_summary: Some("连接失败".into()),
+        needs_auth: true,
+        ..McpServerSummary::default()
+    };
+    let copy_text = DetailAction::CopyError.text(&i18n::tr("panel-mcp-detail-btn-copy"));
+    for width in [80u16, 60, 40, 30, 20, 12] {
+        let lines = super::detail::build_detail_lines(
+            &summary,
+            &[],
+            1,
+            &peri_theme::builtin::dark_theme(),
+            width,
+        );
+        let header = &lines[DETAIL_HEADER_ROW as usize];
+        let rendered = line_text(header);
+        let button = copy_button(&summary, width);
+        assert!(
+            rendered.contains(&copy_text),
+            "width={width} 复制按钮必须仍渲染"
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(rendered.as_str()) as u16,
+            button.col + button.width(),
+            "width={width} 行宽必须与按钮右缘一致"
+        );
+        // 按钮命中区间完整落在面板内（与绘制同源）。
+        assert!(
+            button.hit_width > 0 && button.col + button.hit_width <= width,
+            "width={width} 命中区间越界"
+        );
+        // 标题首段样式保留（bold + 标题色），截断不会改风格。
+        let first = &header.spans[0];
+        assert!(
+            first.style.add_modifier.contains(Modifier::BOLD),
+            "width={width} 标题样式必须保留"
+        );
+        // 按钮前保留最小间距（极窄且按钮已贴左列时无空间）。
+        let copy_pos = rendered.find(&copy_text).expect("按钮文本必须存在");
+        let prefix = &rendered[..copy_pos];
+        if button.col > 0 {
+            assert!(
+                UnicodeWidthStr::width(prefix.trim_end()) + usize::from(DETAIL_HEADER_MIN_GAP)
+                    <= usize::from(button.col),
+                "width={width} 标题不得侵入按钮间距: {rendered:?}"
+            );
+        }
+        if width <= 40 {
+            assert!(rendered.contains('…'), "width={width} 标题必须截断让位");
+        }
+    }
+}
+
 /// 按钮样式复用 chat 消息区按钮：复制 = md 复制按钮反色块；底行 = 选项/权限
 /// 按钮（选中态 bg(selection)+BOLD）。
 #[test]

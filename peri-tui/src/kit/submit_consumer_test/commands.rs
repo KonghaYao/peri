@@ -277,8 +277,12 @@ async fn test_handle_clear_submit_resets_popup_todo_history_atoms() {
         content: "stale".into(),
         status: crate::kit::message_area::TodoStatus::Pending,
     }];
-    *crate::kit::atoms::INPUT_HISTORY_INDEX.state().write() = Some(3);
-    *crate::kit::atoms::DRAFT.state().write() = Some("stale draft".to_string());
+    let mut cursor = peri_tui_components::history::HistoryCursor::default();
+    cursor.up(
+        &std::collections::VecDeque::from(["stale".to_string()]),
+        Some("stale draft"),
+    );
+    *crate::kit::atoms::INPUT_HISTORY_CURSOR.state().write() = cursor;
 
     let (client, _server) = super::support::make_interactive_client_without_pump();
     let cwd = ".".to_string();
@@ -305,15 +309,20 @@ async fn test_handle_clear_submit_resets_popup_todo_history_atoms() {
         "TODO_ITEMS should be empty after /clear"
     );
     assert!(
-        crate::kit::atoms::INPUT_HISTORY_INDEX
+        crate::kit::atoms::INPUT_HISTORY_CURSOR
             .state()
             .read()
+            .index()
             .is_none(),
-        "INPUT_HISTORY_INDEX should be None after /clear"
+        "INPUT_HISTORY_CURSOR should leave history mode after /clear"
     );
     assert!(
-        crate::kit::atoms::DRAFT.state().read().is_none(),
-        "DRAFT should be None after /clear"
+        crate::kit::atoms::INPUT_HISTORY_CURSOR
+            .state()
+            .read()
+            .draft()
+            .is_none(),
+        "history draft should be dropped after /clear"
     );
 }
 

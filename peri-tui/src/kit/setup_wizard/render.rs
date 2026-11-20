@@ -458,7 +458,7 @@ fn render_browse(
             let indexed_alias_labels = alias_labels.iter().enumerate();
             for (ai, label) in indexed_alias_labels {
                 let model_text =
-                    crate::truncate::truncate_by_width(&mp.aliases[ai], ALIAS_MAX_WIDTH);
+                    crate::truncate::truncate_to_width(&mp.aliases[ai], ALIAS_MAX_WIDTH);
                 lines.push(Line::from(vec![
                     Span::styled("     ", Style::default()),
                     Span::styled(format!("{} → ", label), Style::default().fg(dim)),

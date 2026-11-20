@@ -95,12 +95,7 @@ fn fit_cell(value: &str, width: usize) -> String {
         return String::new();
     }
     let sanitized = sanitize_cell(value);
-    let text = if UnicodeWidthStr::width(sanitized.as_str()) > width {
-        // truncate_by_width 会追加省略号、可能超出 1 列，故先按 width−1 截断。
-        crate::truncate::truncate_by_width(&sanitized, width.saturating_sub(1))
-    } else {
-        sanitized
-    };
+    let text = crate::truncate::truncate_to_width(&sanitized, width);
     let used = UnicodeWidthStr::width(text.as_str());
     format!("{text}{}", " ".repeat(width.saturating_sub(used)))
 }

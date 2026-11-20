@@ -47,7 +47,7 @@ pub(in super::super) const DETAIL_HEADER_ROW: u16 = 1;
 pub(in super::super) const DETAIL_RIGHT_RESERVE: u16 = 1;
 
 /// 标题与右对齐复制按钮之间的最小间距（列）：两者都可见的前提。
-pub(super) const DETAIL_HEADER_MIN_GAP: u16 = 1;
+pub(in super::super) const DETAIL_HEADER_MIN_GAP: u16 = 1;
 
 /// 组件区域尚未测量（首帧）时的内容宽度兜底——仅影响该帧的右对齐位置。
 pub(in super::super) const DETAIL_FALLBACK_WIDTH: u16 = 80;
@@ -232,29 +232,45 @@ pub(in super::super) fn detail_buttons(
     buttons
 }
 
-/// 按显示宽度截断样式化片段（保留逐段样式；超长补省略号）。
+/// 按显示宽度截断样式化片段（保留逐段样式；省略号计入总预算）。
 ///
-/// 省略号可能多占 1 列——调用方按「最小间距」吸收该溢出。
+/// 输出宽度 ≤ `max_width`：前段整段保留，最后一段按剩余列数取字素前缀后补
+/// `…`。调用方传「复制按钮起始列 − 最小间距」，按钮位置与命中同源。
 pub(super) fn truncate_segments(
     segments: &[(String, Style)],
     max_width: u16,
 ) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(segments.len());
-    let mut remaining = max_width as usize;
+    let max_width = usize::from(max_width);
+    let total: usize = segments
+        .iter()
+        .map(|(text, _)| unicode_width::UnicodeWidthStr::width(text.as_str()))
+        .sum();
+    if total <= max_width {
+        return segments
+            .iter()
+            .map(|(text, style)| Span::styled(text.clone(), *style))
+            .collect();
+    }
+    if max_width == 0 {
+        return Vec::new();
+    }
+    // 省略号占 1 列；正文预算 = max_width − 1，最后一段截断后收尾。
+    let body_budget = max_width - 1;
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(segments.len() + 1);
+    let mut used = 0usize;
     for (text, style) in segments {
-        if remaining == 0 {
-            break;
-        }
         let width = unicode_width::UnicodeWidthStr::width(text.as_str());
-        if width <= remaining {
+        if used + width <= body_budget {
             spans.push(Span::styled(text.clone(), *style));
-            remaining -= width;
-        } else {
-            let cut = crate::truncate::truncate_by_width(text, remaining);
-            remaining =
-                remaining.saturating_sub(unicode_width::UnicodeWidthStr::width(cut.as_str()));
-            spans.push(Span::styled(cut, *style));
+            used += width;
+            continue;
         }
+        let fitted = peri_tui_components::text::prefix_by_width(text, max_width - 1 - used);
+        if !fitted.is_empty() {
+            spans.push(Span::styled(fitted, *style));
+        }
+        spans.push(Span::styled("…", *style));
+        return spans;
     }
     spans
 }

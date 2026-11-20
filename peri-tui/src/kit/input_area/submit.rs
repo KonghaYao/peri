@@ -294,11 +294,11 @@ pub(crate) fn send_local_user_bubble(
 /// 退出 history 浏览模式（如果当前正在浏览）。
 ///
 /// 任何改变编辑文本的 handler 都应在写入前调用：保留当前编辑内容作为新草稿，
-/// 但清掉 `INPUT_HISTORY_INDEX` 指针，避免下一次 history_up 复用陈旧的浏览位置。
+/// 但清掉浏览指针，避免下一次 history_up 复用陈旧的浏览位置。
 /// 非历史模式下调用为 no-op。
 pub(super) fn exit_history_mode_if_active() {
-    use crate::kit::atoms::INPUT_HISTORY_INDEX;
-    if INPUT_HISTORY_INDEX.state().read().is_some() {
+    use crate::kit::atoms::INPUT_HISTORY_CURSOR;
+    if INPUT_HISTORY_CURSOR.state().read().index().is_some() {
         crate::kit::input_history::reset_history_cursor();
     }
 }

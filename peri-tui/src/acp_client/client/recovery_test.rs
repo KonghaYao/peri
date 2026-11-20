@@ -52,8 +52,7 @@ impl UiAtomsGuard {
         save_atom!(atoms::REWIND_QUERY_ERROR);
         save_atom!(atoms::TODO_ITEMS);
         save_atom!(atoms::GOAL_SNAPSHOT);
-        save_atom!(atoms::INPUT_HISTORY_INDEX);
-        save_atom!(atoms::DRAFT);
+        save_atom!(atoms::INPUT_HISTORY_CURSOR);
         save_atom!(atoms::FOCUSED_ENTRY);
         save_atom!(atoms::FOLD_OVERRIDES);
         save_atom!(crate::kit::steer_state::STEERS);
