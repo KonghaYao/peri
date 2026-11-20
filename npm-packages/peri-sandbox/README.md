@@ -89,6 +89,17 @@ PERI_PATH=/path/to/peri bun run dev:swarm   # 默认 127.0.0.1:8081
 bun run test:swarm                          # 构建后只跑 tests/swarm/*.test.js
 ```
 
+需要固定 settings（推荐用于可重复运行）时显式传入由 `init` 生成的文件：
+
+```bash
+PERI_SANDBOX_SETTINGS=/absolute/settings.json \
+PERI_SWARM_SANDBOXES_ROOT=/absolute/sandboxes \
+PERI_SWARM_BUN_TOKEN=<outer token> \
+bun run dev:swarm
+```
+
+有 settings 文件时，`periPath` 与 `periSha256` 以文件为准（`PERI_PATH` 只用于没有 settings 文件的默认配置）。settings 中 `periSha256` 必须与当前二进制一致，否则首个沙箱启动会以 `unsupported_environment` 拒绝。
+
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `PERI_SWARM_BUN_BIND` | `127.0.0.1:8081` | `host:port`，只接受 loopback |
@@ -355,7 +366,13 @@ function createPeriSandboxAdapter(options?: {
 
 以上路径都要求 Peri 可被发现：缺失、不是普通文件，或与 settings 记录的 SHA-256 不一致时报 `unsupported_environment`。
 
-`initSettings()` 只做环境固定：写入 `settings.json`（0600）、创建 `sandboxes/`（0700）、把 `periPath` 与 SHA-256 固化进文件、校验目录私有性。它不生成 token、端口或后台服务，也不覆盖已有文件（已存在时报 `conflict`）。需要固定路径/哈希或自定义配置时再使用：
+`initSettings()` 只做环境固定：写入 `settings.json`（0600）、创建 `sandboxes/`（0700）、把 `periPath` 与 SHA-256 固化进文件、校验目录私有性。它不生成 token、端口或后台服务，也不覆盖已有文件（已存在时报 `conflict`）。手写 settings 时最容易漏掉 `periSha256`；校验失败会以字段路径报错（例如 `invalid_options` + `periSha256: ...`），不会要求你从 `init` 输出反推字段。推荐直接生成：
+
+```bash
+cd npm-packages/peri-sandbox
+PERI_PATH=/absolute/path/to/peri \
+  bun run src/cli.ts init --settings /absolute/path/to/settings.json
+```
 
 ```ts
 import { homedir } from "node:os";
@@ -367,25 +384,17 @@ const settingsPath = await initSettings(
 );
 ```
 
-settings 文件结构：
+settings 的最小合法形状（四个顶层字段必填；`profiles` 中这个 profile 的四个资源字段也必填）：
 
 ```json
 {
   "sandboxesRoot": "/Users/you/.peri-sandbox/sandboxes",
   "periPath": "/Users/you/.peri/peri",
-  "periSha256": "<64 hex>",
-  "defaultProfile": "workspace-default",
-  "unitPrefix": "peri-sbx-",
+  "periSha256": "<64 位小写 hex>",
   "profiles": {
     "workspace-default": {
-      "allowedDomains": [
-        "github.com",
-        "api.github.com",
-        "registry.npmjs.org",
-        "api.anthropic.com",
-        "api.openai.com"
-      ],
-      "runtimeReadPaths": ["/usr", "/bin", "/opt/homebrew"],
+      "allowedDomains": ["api.anthropic.com"],
+      "runtimeReadPaths": ["/usr", "/bin"],
       "memoryMax": "1G",
       "tasksMax": 128,
       "cpuQuota": "100%"
@@ -394,17 +403,19 @@ settings 文件结构：
 }
 ```
 
-| 字段 | 说明 |
-| --- | --- |
-| `sandboxesRoot` | 受管根目录；规范化绝对路径 |
-| `periPath` | Peri 可执行文件；规范化绝对路径 |
-| `periSha256` | 启动前比对的 SHA-256 |
-| `defaultProfile` | 默认 profile 名；必须存在于 `profiles` |
-| `unitPrefix` | Linux transient unit 前缀，默认 `peri-sbx-` |
-| `profiles` | 至少一个 profile；SDK/API 可用 `profileName` 或内联 `profile` 覆盖 |
-| `startupTimeoutMs` / `stopTimeoutMs` | 可选默认预算；per-start 参数优先 |
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `sandboxesRoot` | 是 | 受管根目录；规范化绝对路径；已存在时必须是 0700 真实目录 |
+| `periPath` | 是 | Peri 可执行文件；规范化绝对路径 |
+| `periSha256` | 是 | 启动前比对的 64 位小写 SHA-256；缺失或不匹配都会拒绝 |
+| `defaultProfile` | 否 | 默认 profile 名；省略时取 `profiles` 的第一个 |
+| `unitPrefix` | 否 | Linux transient unit 前缀，默认 `peri-sbx-` |
+| `profiles` | 是 | 至少一个 profile；SDK/API 可用 `profileName` 或内联 `profile` 覆盖 |
+| `startupTimeoutMs` / `stopTimeoutMs` | 否 | 可选默认预算；per-start 参数优先 |
 
-`allowedDomains` 只填域名，不支持 URL 或 `*`。`runtimeReadPaths` 必须存在且不能覆盖 `sandboxesRoot`。`memoryMax`、`tasksMax`、`cpuQuota` 只在 Linux 生效。SRT policy 在每次启动时重新生成，因此修改 profile 后需重启实例；同一 workspace 会在新 policy 下启动。
+profile 内必填 `runtimeReadPaths`、`memoryMax`、`tasksMax`、`cpuQuota`；`allowedDomains` 可省略（默认空列表）。`allowedDomains` 只填域名，不支持 URL 或 `*`。`runtimeReadPaths` 必须存在且不能覆盖 `sandboxesRoot`。`memoryMax`、`tasksMax`、`cpuQuota` 只在 Linux 生效。SRT policy 在每次启动时重新生成，因此修改 profile 后需重启实例；同一 workspace 会在新 policy 下启动。
+
+`PERI_PATH`/settings 的 `periPath` 父目录会由 policy 生成器自动加入 `allowRead`：`sandbox-exec` 执行 `<dir>/peri` 需要该目录的 search 权限，默认开发布局 `<repo>/target/debug/peri` 因此可直接启动，不需要手改 policy。显式给出的 `runtimeReadPaths` 仍会保留并在同一 policy 中生效。
 
 `settings.json` 中的路径必须是规范化绝对路径（示例中的 `/Users/you/...` 是占位符）：加载时不展开 `~`，写 `"~/.peri-sandbox/sandboxes"` 会因不是绝对路径而报 `invalid_options`。
 
@@ -412,7 +423,7 @@ settings 文件结构：
 
 ### 隔离边界
 
-1. 文件系统：SRT policy 设置 `denyRead: ["/"]`，`allowRead` 仅包含 profile 的 `runtimeReadPaths`、SRT 包目录、Peri 可执行文件、workspace/home/tmp；workspace 与 home 可写。
+1. 文件系统：SRT policy 设置 `denyRead: ["/"]`，`allowRead` 仅包含 profile 的 `runtimeReadPaths`、SRT 包目录、Peri 可执行文件及其父目录、workspace/home/tmp；workspace 与 home 可写。
 2. `<sandboxRoot>` 下的 `policy.json`、`token`、`.lock`、`diagnostics/` 不在 `allowRead` 中；宿主进程本身仍能读取。
 3. 网络：按域名严格 allowlist，`strictAllowlist: true`，不允许 URL 或通配符，Unix socket 默认拒绝。
 4. Linux 用 cgroup 提供 CPU/内存/进程数硬限制；macOS 没有等价硬限制，double-fork/setsid 后代可能逃逸进程组。

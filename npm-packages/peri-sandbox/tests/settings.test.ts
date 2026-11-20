@@ -140,6 +140,54 @@ test('public or symlinked sandboxes roots are rejected', () => {
   }
 });
 
+test('settings validation names the missing or invalid field', () => {
+  const root = mkdtempSync(join(tmpdir(), 'peri-settings-'));
+  try {
+    const file = join(root, 'settings.json');
+    const profile = {
+      allowedDomains: [],
+      runtimeReadPaths: ['/usr'],
+      memoryMax: '1G',
+      tasksMax: 8,
+      cpuQuota: '100%',
+    };
+    writeFileSync(
+      file,
+      JSON.stringify({
+        sandboxesRoot: join(root, 'sandboxes'),
+        periPath: process.execPath,
+        profiles: { beta: profile },
+      }),
+    );
+    assert.throws(() => loadSettings(file), /periSha256/);
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        sandboxesRoot: join(root, 'sandboxes'),
+        periPath: process.execPath,
+        periSha256: 'not-a-digest',
+        profiles: { beta: profile },
+      }),
+    );
+    assert.throws(() => loadSettings(file), /periSha256/);
+
+    // The minimal valid shape: every required field present.
+    writeFileSync(
+      file,
+      JSON.stringify({
+        sandboxesRoot: join(root, 'sandboxes'),
+        periPath: process.execPath,
+        periSha256: 'a'.repeat(64),
+        profiles: { beta: profile },
+      }),
+    );
+    assert.equal(loadSettings(file).profiles.beta.memoryMax, '1G');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('default profile reads runtime paths and package registries', () => {
   const profile = defaultProfile(process.execPath);
   assert(profile.allowedDomains.includes('registry.npmjs.org'));

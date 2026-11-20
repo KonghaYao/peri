@@ -46,6 +46,34 @@ test('sandbox reads only the required SRT npm package, not its parent project', 
   assert.equal(policy.filesystem.allowGitConfig, true);
 });
 
+test('policy allows the peri binary directory and keeps explicit runtime paths', () => {
+  const root = mkdtempSync(join(tmpdir(), 'peri-policy-'));
+  try {
+    const bin = join(root, 'target', 'debug');
+    mkdirSync(bin, { recursive: true });
+    const periPath = join(bin, 'peri');
+    writeFileSync(periPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const sandboxesRoot = join(root, 'sandboxes');
+    const policy = JSON.parse(
+      policyFor({
+        sandboxesRoot,
+        sandboxId,
+        workspacePath: join(sandboxesRoot, sandboxId, 'workspace'),
+        homePath: join(sandboxesRoot, sandboxId, 'home'),
+        profile,
+        periPath,
+      }).json,
+    );
+    // sandbox-exec needs search permission on the parent to exec <dir>/peri.
+    assert(policy.filesystem.allowRead.includes(bin));
+    assert(policy.filesystem.allowRead.includes(periPath));
+    assert(policy.filesystem.allowRead.includes('/usr'));
+    assert(!policy.filesystem.allowRead.includes(sandboxesRoot));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('probe and production launch use the same isolation and resource limits', () => {
   assert.deepEqual(transientUnitProperties(profile), [
     '-p',
