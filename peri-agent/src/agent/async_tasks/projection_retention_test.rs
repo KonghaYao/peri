@@ -8,6 +8,7 @@ use crate::agent::events::BackgroundTaskResult;
 use peri_acp_types::tasks::BgRegistryEvent;
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::tasks::{ExternalTaskOwner, ExternalTaskRegistration, TaskRegistrationTicket};
+use peri_acp_types::tasks::{TaskOwnerHandle, TaskRecord};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -63,6 +64,55 @@ fn pressure(registry: &BackgroundTaskRegistry, prefix: &str) {
     for index in 0..600 {
         finish(registry, &format!("{prefix}-{index}"));
     }
+}
+
+fn owner_record(handle: TaskOwnerHandle) -> TaskRecord {
+    TaskRecord {
+        task_id: "host-mcp".into(),
+        kind: BgTaskKind::Mcp,
+        summary: "owner".into(),
+        started_at: "2026-01-01T00:00:00Z".into(),
+        status: "running".into(),
+        duration_ms: 0,
+        output_preview: None,
+        initiator_session_id: None,
+        child_thread_id: None,
+        external_owner: Some(ExternalTaskOwner {
+            handle,
+            artifact_ref: None,
+        }),
+    }
+}
+
+/// [回归测试] MCP owner 的 server/task_id 与字符串容量都要计入保留字节。
+#[test]
+fn test_retained_bytes_count_mcp_server_and_handle_allocation_capacity() {
+    let small = projection::retained_bytes(&owner_record(TaskOwnerHandle::Mcp {
+        server: "s".into(),
+        task_id: "t".into(),
+    }));
+
+    let mut server = String::with_capacity(4096);
+    server.push('s');
+    let with_big_server = projection::retained_bytes(&owner_record(TaskOwnerHandle::Mcp {
+        server,
+        task_id: "t".into(),
+    }));
+    assert!(
+        with_big_server - small >= 4095,
+        "server 的容量必须计入，不能只算 \"mcp\" 标签"
+    );
+
+    let mut task_id = String::with_capacity(2048);
+    task_id.push('t');
+    let with_big_task_id = projection::retained_bytes(&owner_record(TaskOwnerHandle::Mcp {
+        server: "s".into(),
+        task_id,
+    }));
+    assert!(
+        with_big_task_id - small >= 2047,
+        "owner task_id 必须按 capacity 计入"
+    );
 }
 
 /// [回归测试] 终态数增长不能使正文投影或去重目录跟随增长。

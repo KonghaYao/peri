@@ -365,7 +365,7 @@ fn scope_mismatch_is_corrected_instead_of_rerendered() {
 }
 
 #[test]
-fn absent_scope_on_both_sides_counts_as_same_runtime() {
+fn absent_scope_on_both_sides_is_not_proof_of_the_same_runtime() {
     let projection = facts(
         vec![task(
             "mcp-host-1",
@@ -389,13 +389,19 @@ fn absent_scope_on_both_sides_counts_as_same_runtime() {
         Some(3),
     );
 
-    assert_eq!(report.rendered, 1);
-    assert!(rebuilt
-        .expect("同一 transcript 内作用域同时缺失仍可重算")
+    let body = rebuilt
+        .expect("两侧都缺作用域必须保留采样正文并校正")
         .pop()
         .unwrap()
-        .content()
-        .contains("run-srv-4"));
+        .content();
+    assert_eq!(report.rendered, 0);
+    assert_eq!(report.corrected, 1);
+    assert!(body.contains("run-srv-4"), "采样正文不得被删除");
+    assert!(
+        !body.contains("WorkflowStatus("),
+        "作用域不可证明时不得生成可执行调用"
+    );
+    assert!(body.ends_with(STALE_RECOVERY_HINT_CORRECTION));
 }
 
 #[test]

@@ -320,6 +320,32 @@ fn workflow_handle_renders_direct_call_without_unbounded_index_fallback() {
 }
 
 #[test]
+fn workflow_kill_is_offered_when_status_is_unavailable() {
+    let task = external_task(
+        "mcp-host-workflow",
+        BgTaskKind::Workflow,
+        ExternalTaskOwner::workflow("run-kill-only"),
+    );
+    let mut tools = RecoveryTools::all();
+    tools.workflow_status = None;
+    let rendered = snapshot_with(vec![task], tools)
+        .render()
+        .expect("non-empty snapshot must render");
+
+    assert!(rendered.contains("WorkflowKill({\"runId\":\"run-kill-only\"})"));
+    assert!(rendered.contains("authorized cancellation"));
+    assert!(rendered.contains("`WorkflowStatus` is not directly available"));
+    assert!(
+        !rendered.contains("WorkflowStatus("),
+        "缺失的能力不得出现在调用示例中"
+    );
+    assert!(
+        !rendered.contains("WorkflowKill` is not directly available"),
+        "有 WorkflowKill 时不得声称取消不可用"
+    );
+}
+
+#[test]
 fn monitor_handle_renders_after_seq_only_from_the_same_monitor_page() {
     let task = external_task(
         "mcp-host-monitor",
@@ -367,6 +393,38 @@ fn monitor_handle_without_cursor_omits_after_seq_instead_of_inventing_zero() {
 }
 
 #[test]
+fn monitor_stop_is_offered_when_read_is_unavailable() {
+    let task = external_task(
+        "mcp-host-monitor",
+        BgTaskKind::Mcp,
+        ExternalTaskOwner {
+            handle: TaskOwnerHandle::Monitor {
+                task_id: "monitor-stop-only".into(),
+                after_seq: Some(7),
+            },
+            artifact_ref: None,
+        },
+    );
+    let mut tools = RecoveryTools::all();
+    tools.monitor_read = None;
+    let rendered = snapshot_with(vec![task], tools)
+        .render()
+        .expect("non-empty snapshot must render");
+
+    assert!(rendered.contains("monitor_stop({\"task_id\":\"monitor-stop-only\"})"));
+    assert!(rendered.contains("authorized stop"));
+    assert!(rendered.contains("`monitor_read` is not directly available"));
+    assert!(
+        !rendered.contains("monitor_read("),
+        "缺失的能力不得出现在调用示例中"
+    );
+    assert!(
+        !rendered.contains("\"after_seq\""),
+        "after_seq 只能进入 read 调用的参数"
+    );
+}
+
+#[test]
 fn duplicate_owner_handle_is_ambiguous_and_never_yields_a_direct_call() {
     let tasks = vec![
         external_task(
@@ -388,6 +446,33 @@ fn duplicate_owner_handle_is_ambiguous_and_never_yields_a_direct_call() {
     assert!(rendered.contains("not unique"));
     assert!(rendered.contains("Do not guess"));
     assert!(rendered.contains("WorkflowStatus` with `{}`"));
+}
+
+#[test]
+fn duplicate_mcp_owner_is_ambiguous_and_never_recommends_the_shared_id() {
+    let tasks = vec![
+        external_task(
+            "mcp-host-a",
+            BgTaskKind::Mcp,
+            ExternalTaskOwner::mcp("shared-server", "shared-task"),
+        ),
+        external_task(
+            "mcp-host-b",
+            BgTaskKind::Mcp,
+            ExternalTaskOwner::mcp("shared-server", "shared-task"),
+        ),
+    ];
+    let rendered = snapshot_with(tasks, RecoveryTools::all())
+        .render()
+        .expect("non-empty snapshot must render");
+
+    assert!(rendered.contains("not unique"));
+    assert!(rendered.contains("Do not guess"));
+    assert!(
+        !rendered.contains("Use that ID with the owning server's direct task tool"),
+        "歧义目标不得推荐按 owner ID 直调"
+    );
+    assert!(rendered.contains("completion reminder"));
 }
 
 #[test]
@@ -470,6 +555,39 @@ fn artifact_versions_are_rendered_with_their_provenance() {
 
     assert!(rendered.contains("artifact: `reports/state.json` @ `v9`"));
     assert!(rendered.contains("reuse the recorded conclusion"));
+}
+
+#[test]
+fn recovery_calls_pass_the_registered_owner_id_without_display_truncation() {
+    let run_id = format!("run-{}", "r".repeat(197));
+    let monitor_id = format!("monitor-{}", "m".repeat(193));
+    let thread_id = format!("thread-{}", "t".repeat(194));
+    assert_eq!(run_id.chars().count(), 201);
+    assert_eq!(monitor_id.chars().count(), 201);
+    assert_eq!(thread_id.chars().count(), 201);
+
+    let mut agent = task("bg-agent", BgTaskKind::Agent);
+    agent.child_thread_id = Some(thread_id.clone());
+    let tasks = vec![
+        external_task(
+            "mcp-host-workflow",
+            BgTaskKind::Workflow,
+            ExternalTaskOwner::workflow(run_id.clone()),
+        ),
+        external_task(
+            "mcp-host-monitor",
+            BgTaskKind::Mcp,
+            ExternalTaskOwner::monitor(monitor_id.clone()),
+        ),
+        agent,
+    ];
+    let rendered = snapshot_with(tasks, RecoveryTools::all())
+        .render()
+        .expect("non-empty snapshot must render");
+
+    assert!(rendered.contains(&format!("\"runId\":\"{run_id}\"")));
+    assert!(rendered.contains(&format!("\"resume_thread_id\":\"{thread_id}\"")));
+    assert!(rendered.contains(&format!("\"task_id\":\"{monitor_id}\"")));
 }
 
 struct CatalogTool {

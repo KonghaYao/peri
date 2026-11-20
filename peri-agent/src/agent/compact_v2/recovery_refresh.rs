@@ -130,9 +130,12 @@ fn rendered_body(
     Some(rendered)
 }
 
-/// 只有同一会话运行时才有资格重算；缺任一侧或两侧不同都按旧记录处理。
+/// 只有两侧都记录且相等时才证明同一运行时；缺任一侧都按旧记录处理。
 fn same_runtime_scope(projection: &RecoveryMemoryProjection, scope: Option<&str>) -> bool {
-    projection.scope.as_deref() == scope
+    matches!(
+        (projection.scope.as_deref(), scope),
+        (Some(recorded), Some(current)) if recorded == current
+    )
 }
 
 fn replace_body(id: MessageId, body: String) -> BaseMessage {

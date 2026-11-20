@@ -468,7 +468,7 @@ fn agent_helper(task: &HardMemoryTask, tools: &RecoveryTools) -> String {
     let call = render_call(
         route,
         &serde_json::json!({
-            "resume_thread_id": owner_text(child_thread_id),
+            "resume_thread_id": child_thread_id,
             "send_only": true,
             "prompt": "<message>",
         }),
@@ -492,25 +492,25 @@ fn workflow_helper(
             "Multiple active tasks report workflow `run_id` `{run_id_text}`; the target is not unique. Do not guess or merge them. If `WorkflowStatus` is directly available, use `WorkflowStatus` with `{{}}` as a bounded index and select an unambiguous match; otherwise use the completion reminder."
         );
     }
-    let Some(status) = tools.workflow_status.as_ref() else {
-        return format!(
-            "The workflow `run_id` is `{run_id_text}`, but `WorkflowStatus` is not directly available in the current catalog. Do not substitute the host task_id; use the completion reminder."
-        );
+    // 取消与状态查询各自独立：只关闭 Status 时仍要保留授权的 Kill 入口。
+    let arguments = serde_json::json!({ "runId": run_id });
+    let mut helper = match tools.workflow_status.as_ref() {
+        Some(status) => format!(
+            "If `WorkflowStatus` is reachable in the current catalog and permitted, call `{}`. Do not pass the host task_id.",
+            render_call(status, &arguments)
+        ),
+        None => format!(
+            "The workflow `run_id` is `{run_id_text}`, but `WorkflowStatus` is not directly available in the current catalog. Do not substitute the host task_id."
+        ),
     };
-    let arguments = serde_json::json!({ "runId": owner_text(run_id) });
-    let mut helper = format!(
-        "If `WorkflowStatus` is reachable in the current catalog and permitted, call `{}`. Do not pass the host task_id.",
-        render_call(status, &arguments)
-    );
-    if let Some(kill) = tools.workflow_kill.as_ref() {
-        helper.push_str(&format!(
+    match tools.workflow_kill.as_ref() {
+        Some(kill) => helper.push_str(&format!(
             " For an authorized cancellation only, call `{}`.",
             render_call(kill, &arguments)
-        ));
-    } else {
-        helper.push_str(
+        )),
+        None => helper.push_str(
             " `WorkflowKill` is not directly available; use host task controls only where authorization permits.",
-        );
+        ),
     }
     helper.push_str(" If the run cannot be identified, use the completion reminder.");
     helper
@@ -531,6 +531,15 @@ fn mcp_helper(
         monitor_handle.is_some() || (owner.is_none() && task.summary.starts_with("monitor_"));
     if !is_monitor {
         return match owner.map(|owner| &owner.handle) {
+            Some(TaskOwnerHandle::Mcp { server, task_id })
+                if resolution == TargetResolution::Ambiguous =>
+            {
+                format!(
+                    "Multiple active tasks report MCP task_id `{}` on server `{}`; the target is not unique. Do not guess or merge them. Use the completion reminder for each host task, or a host task control that identifies the intended host task.",
+                    owner_text(task_id),
+                    owner_text(server)
+                )
+            }
             Some(TaskOwnerHandle::Mcp { server, task_id }) => format!(
                 "The owner task_id is {} on server `{}`. Do not pass the host task_id. Use that ID with the owning server's direct task tool in the current catalog; if no such tool is available, use the completion reminder or the host task controls.",
                 quoted(task_id),
@@ -542,38 +551,42 @@ fn mcp_helper(
     let Some(TaskOwnerHandle::Monitor { task_id, after_seq }) = monitor_handle else {
         return "The owner ID is unknown; use the `monitor_id` from the start receipt. If it is missing and needed, use `taskId` from an unambiguous match in `monitor_list`. Pass the owner ID as `task_id` to `monitor_read` or to `monitor_stop` for an authorized stop. Resolve these names in the current catalog. For `after_seq`, use the `nextSeq` of the last page handled for this monitor. If unknown, omit the cursor and account for repeated events. If the monitor cannot be identified, use its reminders.".to_string();
     };
-    let monitor_id = owner_text(task_id);
+    let monitor_id_text = owner_text(task_id);
     if resolution == TargetResolution::Ambiguous {
         return format!(
-            "Multiple active tasks report monitor `task_id` `{monitor_id}`; the target is not unique. Do not guess. If `monitor_list` is directly available, use it as a bounded index and select an unambiguous match; otherwise use the completion reminder."
+            "Multiple active tasks report monitor `task_id` `{monitor_id_text}`; the target is not unique. Do not guess. If `monitor_list` is directly available, use it as a bounded index and select an unambiguous match; otherwise use the completion reminder."
         );
     }
-    let Some(read) = tools.monitor_read.as_ref() else {
-        return format!(
-            "The monitor-side `task_id` is `{monitor_id}`, but `monitor_read` is not directly available in the current catalog. Do not pass the host task_id to monitor tools; use the completion reminder."
-        );
+    // read 与 stop 各自独立：只关闭 read 时仍要保留授权的 stop 入口。
+    let mut helper = match tools.monitor_read.as_ref() {
+        Some(read) => {
+            let mut arguments = serde_json::Map::new();
+            arguments.insert("task_id".into(), serde_json::json!(task_id));
+            if let Some(seq) = after_seq {
+                arguments.insert("after_seq".into(), serde_json::json!(seq));
+            }
+            let mut read_help = format!(
+                "If `monitor_read` is reachable in the current catalog and permitted, call `{}`.",
+                render_call(read, &serde_json::Value::Object(arguments))
+            );
+            match after_seq {
+                Some(_) => read_help.push_str(
+                    " `after_seq` came from the `nextSeq` of the last page handled for this monitor, not from an alert hit sequence.",
+                ),
+                None => read_help.push_str(
+                    " Omit `after_seq` until you have the `nextSeq` of the last page handled for this monitor; never derive it from an alert hit sequence.",
+                ),
+            }
+            read_help
+        }
+        None => format!(
+            "The monitor-side `task_id` is `{monitor_id_text}`, but `monitor_read` is not directly available in the current catalog."
+        ),
     };
-    let mut arguments = serde_json::Map::new();
-    arguments.insert("task_id".into(), serde_json::json!(monitor_id));
-    if let Some(seq) = after_seq {
-        arguments.insert("after_seq".into(), serde_json::json!(seq));
-    }
-    let mut helper = format!(
-        "If `monitor_read` is reachable in the current catalog and permitted, call `{}`.",
-        render_call(read, &serde_json::Value::Object(arguments))
-    );
-    match after_seq {
-        Some(_) => helper.push_str(
-            " `after_seq` came from the `nextSeq` of the last page handled for this monitor, not from an alert hit sequence.",
-        ),
-        None => helper.push_str(
-            " Omit `after_seq` until you have the `nextSeq` of the last page handled for this monitor; never derive it from an alert hit sequence.",
-        ),
-    }
     if let Some(stop) = tools.monitor_stop.as_ref() {
         helper.push_str(&format!(
             " For an authorized stop, call `{}`.",
-            render_call(stop, &serde_json::json!({ "task_id": monitor_id }))
+            render_call(stop, &serde_json::json!({ "task_id": task_id }))
         ));
     } else {
         helper.push_str(
@@ -584,15 +597,14 @@ fn mcp_helper(
     helper
 }
 
-/// 压成单行并限长；owner ID 进入提示词前必须去掉换行。
+/// 压成单行并限长；只用于提示词中的标签，工具参数必须编码原始 ID。
 fn owner_text(value: &str) -> String {
     one_line(value, 200)
 }
 
-/// JSON 引号同时转义引号、反斜杠和控制字符，避免 owner ID 破坏调用示例。
+/// JSON 引号：转义引号、反斜杠和控制字符；不做展示用的截断。
 fn quoted(value: &str) -> String {
-    serde_json::to_string(&owner_text(value))
-        .unwrap_or_else(|_| format!("\"{}\"", owner_text(value)))
+    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
 }
 
 /// 渲染最终目录中的真实调用：直达工具用其模型面名称，deferred 经调用代理转发。
