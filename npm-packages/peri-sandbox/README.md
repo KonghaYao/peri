@@ -424,11 +424,12 @@ profile 内必填 `runtimeReadPaths`、`memoryMax`、`tasksMax`、`cpuQuota`；`
 ### 隔离边界
 
 1. 文件系统：SRT policy 设置 `denyRead: ["/"]`，`allowRead` 仅包含 profile 的 `runtimeReadPaths`、SRT 包目录、Peri 可执行文件及其父目录、workspace/home/tmp；workspace 与 home 可写。
-2. `<sandboxRoot>` 下的 `policy.json`、`token`、`.lock`、`diagnostics/` 不在 `allowRead` 中；宿主进程本身仍能读取。
-3. 网络：按域名严格 allowlist，`strictAllowlist: true`，不允许 URL 或通配符，Unix socket 默认拒绝。
-4. Linux 用 cgroup 提供 CPU/内存/进程数硬限制；macOS 没有等价硬限制，double-fork/setsid 后代可能逃逸进程组。
-5. token 默认只在内存；不要写入日志、提交到 Git 或交给不可信租户。
-6. 本包提供本机开发隔离，不承诺生产级多租户安全边界；需要强隔离时使用独立 VM 或容器。
+2. 为了让 `sandbox-exec` 执行 `<dir>/peri`，policy 以目录级 `allowRead` 放行 Peri 的父目录；该目录下的其他文件因此对沙箱可读。不要把 Peri 二进制放在含 token/凭据的目录：本地开发用 `<repo>/target/debug/peri`，生产部署用专用 bin 目录。默认布局 `~/.peri/peri` 会使 `~/.peri` 对沙箱可读；若该目录保存 `settings.json` 等配置，请把二进制移到专用目录。
+3. `<sandboxRoot>` 下的 `policy.json`、`token`、`.lock`、`diagnostics/` 不在 `allowRead` 中；宿主进程本身仍能读取。
+4. 网络：按域名严格 allowlist，`strictAllowlist: true`，不允许 URL 或通配符，Unix socket 默认拒绝。
+5. Linux 用 cgroup 提供 CPU/内存/进程数硬限制；macOS 没有等价硬限制，double-fork/setsid 后代可能逃逸进程组。
+6. token 默认只在内存；不要写入日志、提交到 Git 或交给不可信租户。
+7. 本包提供本机开发隔离，不承诺生产级多租户安全边界；需要强隔离时使用独立 VM 或容器。
 
 ### 平台差异
 
