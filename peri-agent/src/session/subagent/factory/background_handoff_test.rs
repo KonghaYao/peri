@@ -335,6 +335,74 @@ async fn background_handoff_caller_drop_rolls_back_without_execution() {
     assert_only_preexisting_prompt(&store, preexisting).await;
 }
 
+/// [回归] prompt 写仍在提交时调用方被取消：撤回必须等入队写结清，不能把
+/// 「取消之后才落库」的行留在 child MQ（重试会重复投递同一指令）。
+#[tokio::test]
+async fn caller_drop_during_prompt_enqueue_withdraws_after_write_settles() {
+    let (store, _gate, manager) = fixture(false).await;
+    let preexisting = seed_preexisting_prompt(&store).await;
+    // 写入由独立任务提交（模拟远端已受理的请求）：放行前调用方会被取消。
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let write_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *store
+        .inner
+        .mq_enqueue_gate
+        .lock()
+        .expect("the mq enqueue gate fixture must remain unpoisoned") =
+        Some(crate::session::test_resources::mock::ResumeLoadGate {
+            entered: entered_tx,
+            release: release_rx,
+            dropped: Arc::clone(&write_dropped),
+        });
+    let config = config(store.clone(), manager.clone());
+    let resume = tokio::spawn(async move { SessionFactory::resume_subagent(None, config).await });
+    entered_rx
+        .await
+        .expect("resume must reach the prompt enqueue");
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    resume.abort();
+    assert!(resume
+        .await
+        .expect_err("caller_drop_during_prompt_enqueue must reject the cancelled fixture")
+        .is_cancelled());
+    assert!(
+        !write_dropped.load(Ordering::SeqCst),
+        "已受理的入队写不得随调用方取消"
+    );
+    // 写未结清前不得回滚：否则重试会与这次提交重复投递。
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .expect("the load session meta fixture result is required for this assertion")
+            .agent_status,
+        AgentStatus::Active,
+        "入队写结清前认领不得回滚"
+    );
+    release_tx
+        .send(())
+        .expect("the release fixture must still be awaited by the detached enqueue write");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .expect("the load session meta fixture result is required for this assertion")
+            .agent_status
+            != AgentStatus::Done
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the timeout fixture result is required for this assertion");
+    assert_only_preexisting_prompt(&store, preexisting).await;
+}
+
 #[tokio::test]
 async fn background_handoff_failure_rolls_back_without_execution() {
     let (store, gate, manager) = fixture(true).await;

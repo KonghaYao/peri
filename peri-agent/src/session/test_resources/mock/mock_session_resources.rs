@@ -177,6 +177,9 @@ pub(crate) struct MockSessionResources {
     pub(super) mq_enqueue_failure: AtomicBool,
     /// 故障注入：下一次 MQ 入队按 [`MqEnqueueFault`] 返回「结果未知」（一次性）。
     pub(super) mq_enqueue_uncertainty: Mutex<Option<MqEnqueueFault>>,
+    /// 入队写门：`mq_enqueue` 在独立任务里等门放行后才提交，模拟远端「请求已受理、
+    /// 响应未返回」——调用方取消不会撤销这次写。
+    pub(crate) mq_enqueue_gate: Mutex<Option<ResumeLoadGate>>,
     /// 故障注入：置位后历史查询返回内部错误（验证 `Unknown` 不得被当作不存在）。
     pub(super) mq_history_failure: AtomicBool,
     /// 故障注入：剩余多少次 MQ 查询返回内部错误（验证查询失败不清理运行期状态）。
@@ -231,6 +234,7 @@ impl MockSessionResources {
             mq: peri_acp_types::session::InMemoryMqStore::new(),
             mq_enqueue_failure: AtomicBool::new(false),
             mq_enqueue_uncertainty: Mutex::new(None),
+            mq_enqueue_gate: Mutex::new(None),
             mq_history_failure: AtomicBool::new(false),
             mq_query_failures: AtomicUsize::new(0),
             mq_cancel_gate: Mutex::new(None),

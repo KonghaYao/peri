@@ -339,16 +339,23 @@ pub(super) async fn resume_subagent_impl(
     // 注册失败时要撤回的就是这一行；稳定 ID 必须在入队移动前取出。
     let prompt_message_id = prompt_message.id();
     let prompt_queue = v2_ctx.context.session.queue.clone();
-    // 撤回责任随认领生命周期：入队前登记，调用方在入队或派发的任一 await 中
-    // 被取消时，同一 worker 都能按 ID 撤回本次 prompt。
-    claim.track_prompt(prompt_queue, prompt_message_id);
-    if let Err(error) = v2_ctx
-        .context
-        .session
-        .queue
-        .enqueue_sent(prompt_message)
+    // 入队写必须活过调用方 future：`DetachedEnqueue` 随写入方 drop，而存储提交可能
+    // 在取消之后才落库，撤回若只看队列会漏掉这一行。写由独立任务持有，认领 worker
+    // 在撤回前等它结清（见 `ResumeClaim::track_prompt`）。
+    let (enqueue_tx, enqueue_rx) = tokio::sync::oneshot::channel();
+    let enqueue_queue = prompt_queue.clone();
+    let enqueue = tokio::spawn(async move {
+        let result = enqueue_queue
+            .enqueue_sent(prompt_message)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = enqueue_tx.send(result.clone());
+    });
+    claim.track_prompt(prompt_queue, prompt_message_id, enqueue);
+    let enqueued = enqueue_rx
         .await
-    {
+        .unwrap_or_else(|_| Err("enqueue task stopped before reporting".to_string()));
+    if let Err(error) = enqueued {
         // 没有接纳到初始指令的恢复不得继续跑：先撤销本次认领与 prompt，再把失败交给调用方。
         let detail = format!("resume prompt enqueue failed: {error}");
         let suffix = rollback_resume_claim(claim).await;

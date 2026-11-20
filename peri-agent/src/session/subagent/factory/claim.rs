@@ -29,6 +29,8 @@ const WITHDRAW_RETRY_MAX: Duration = Duration::from_secs(1);
 struct AdmittedPrompt {
     queue: MessageQueue,
     id: MessageId,
+    /// 入队写的所有者。写在这里存活，撤回才能等到它结清。
+    enqueue: JoinHandle<()>,
 }
 
 /// 与认领 worker 共享的 prompt 责任槽；worker 是唯一撤回者。
@@ -102,12 +104,17 @@ impl ResumeClaim {
         Ok((meta, claim))
     }
 
-    /// 登记本次已接纳的 prompt；worker 在后台未接纳时撤回同一行。
+    /// 登记本次 prompt 与持有入队写的任务；worker 在后台未接纳时撤回同一行。
     ///
-    /// 必须在入队前登记：调用方在 `enqueue_sent` 中途被取消时，worker 仍能确认
-    /// 该行是否已提交并按 ID 撤回。
-    pub(in crate::session::subagent) fn track_prompt(&self, queue: MessageQueue, id: MessageId) {
-        *self.prompt.lock() = Some(AdmittedPrompt { queue, id });
+    /// 入队写必须在独立任务里完成（见 `resume_subagent_impl`）：调用方在
+    /// `enqueue_sent` 中途被取消时，写仍会结清，worker 才能等到写结束再按 ID 撤回。
+    pub(in crate::session::subagent) fn track_prompt(
+        &self,
+        queue: MessageQueue,
+        id: MessageId,
+        enqueue: JoinHandle<()>,
+    ) {
+        *self.prompt.lock() = Some(AdmittedPrompt { queue, id, enqueue });
     }
 
     /// 成功移交给后台执行：终态状态此后由后台执行持有。
@@ -246,6 +253,11 @@ async fn settle_rejected(
     // 取出即唯一：即使后续路径再次进入，也不会撤回第二次。
     let admitted = prompt.lock().take();
     if let Some(admitted) = admitted {
+        // 入队写的 `DetachedEnqueue` 随调用方 future 一起 drop，但存储写入可能仍在提交；
+        // 在写结清前撤回会漏掉随后才落库的行。取消只可能来自调用方，本任务继续等待。
+        if let Err(error) = admitted.enqueue.await {
+            tracing::warn!(%error, "resume prompt enqueue task ended abnormally");
+        }
         withdraw_admitted_prompt(&admitted.queue, admitted.id).await;
     }
     handle
