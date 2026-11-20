@@ -225,7 +225,7 @@ fn transcript_with_full(
         MessageFlags {
             projection: Some(MessageProjectionDirective {
                 policy_version: PROJECTION_POLICY_VERSION,
-                recovery_memory: Some(projection),
+                recovery_memory: Some(Box::new(projection)),
                 ..Default::default()
             }),
             ..Default::default()

@@ -288,7 +288,7 @@ pub(in crate::agent::compact_v2) async fn full_compact_inner_with_hard_memory(
             MessageFlags {
                 projection: Some(MessageProjectionDirective {
                     policy_version: PROJECTION_POLICY_VERSION,
-                    recovery_memory: Some(projection),
+                    recovery_memory: Some(Box::new(projection)),
                     ..Default::default()
                 }),
                 ..Default::default()

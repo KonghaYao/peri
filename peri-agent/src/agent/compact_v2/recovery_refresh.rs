@@ -85,7 +85,7 @@ pub fn refresh_recovery_memory(
         let body = message.content();
         let projection = transcript
             .projection_ref(*id)
-            .and_then(|directive| directive.recovery_memory.as_ref());
+            .and_then(|directive| directive.recovery_memory.as_deref());
         let from_facts = projection.is_some_and(|projection| same_runtime_scope(projection, scope));
         // 结构化事实渲染不出正文（空快照）时同样不可核实：保留原观察值并校正，
         // 不能因为持久化数据残缺就删掉采样时写下的任务记录。

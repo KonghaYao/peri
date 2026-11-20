@@ -123,8 +123,11 @@ pub struct MessageProjectionDirective {
     ///
     /// 只有硬记忆消息携带它；它不产生渲染动作（[`Self::entries`] 仍为空），
     /// 也不替代正文——正文里的 id 与状态保持采样时的观察值。
+    ///
+    /// Box 因为本类型是 `MessageFlags` 的持久化载荷：内联会让每条消息的 flags 都
+    /// 背上采样事实的体积，进而撑大 `PersistOp`；serde 对 `Box` 透明，JSON 形状不变。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_memory: Option<RecoveryMemoryProjection>,
+    pub recovery_memory: Option<Box<RecoveryMemoryProjection>>,
 }
 
 /// Full 硬记忆消息的结构化采样事实（随该消息的投影 JSON 持久化）。

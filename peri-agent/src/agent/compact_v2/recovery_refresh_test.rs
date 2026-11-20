@@ -69,7 +69,7 @@ fn request(
         let flags = MessageFlags {
             projection: Some(MessageProjectionDirective {
                 policy_version: PROJECTION_POLICY_VERSION,
-                recovery_memory: Some(projection.clone()),
+                recovery_memory: Some(Box::new(projection.clone())),
                 ..Default::default()
             }),
             ..Default::default()
