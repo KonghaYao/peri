@@ -8,6 +8,9 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use peri_acp_types::goal::{GoalController, GoalStatus, GoalViewSnapshot};
+use peri_acp_types::projection::{
+    RecoveryGoalProjection, RecoveryMemoryProjection, RecoveryTaskProjection,
+};
 use peri_acp_types::tasks::{
     BgTaskKind, ExternalTaskOwner, TaskManager, TaskOwnerHandle, TaskRecord, TaskSnapshot,
 };
@@ -187,6 +190,10 @@ pub struct HardMemoryGoal {
 /// 一次硬记忆快照；只包含仍需要恢复或等待的运行时状态。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HardMemorySnapshot {
+    /// 采样时任务注册表的 revision（用于判断运行时是否已推进）。
+    pub revision: u64,
+    /// 采样时的会话作用域；`None` = 无法证明同一运行时。
+    pub scope: Option<String>,
     pub tasks: Vec<HardMemoryTask>,
     pub goal: Option<HardMemoryGoal>,
     /// 采样时最终目录可直接调用的恢复能力。
@@ -198,6 +205,36 @@ impl HardMemorySnapshot {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty() && self.goal.is_none()
+    }
+
+    /// 记录采样时的会话作用域（同一运行时才有资格在派生请求中重算入口）。
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<String>) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// 持久化投影：正文的 id/状态是观察值，工具入口另行按最终目录重算。
+    #[must_use]
+    pub fn to_projection(&self) -> RecoveryMemoryProjection {
+        RecoveryMemoryProjection {
+            sampled_revision: self.revision,
+            scope: self.scope.clone(),
+            tasks: self.tasks.iter().map(recovery_task_projection).collect(),
+            goal: self.goal.as_ref().map(recovery_goal_projection),
+        }
+    }
+
+    /// 从持久化投影重建快照；工具能力在渲染时按最终目录重新绑定。
+    #[must_use]
+    pub fn from_projection(projection: &RecoveryMemoryProjection) -> Self {
+        Self {
+            revision: projection.sampled_revision,
+            scope: projection.scope.clone(),
+            tasks: projection.tasks.iter().map(hard_memory_task).collect(),
+            goal: projection.goal.as_ref().map(hard_memory_goal),
+            tools: RecoveryTools::none(),
+        }
     }
 
     /// 渲染为第二条 Human 消息的正文；空快照返回 `None`（不改变无任务时的 compact 语义）。
@@ -601,6 +638,7 @@ pub fn from_parts_with_tools(
     goal: Option<GoalViewSnapshot>,
     tools: RecoveryTools,
 ) -> HardMemorySnapshot {
+    let revision = tasks.revision;
     let tasks = tasks
         .tasks
         .into_iter()
@@ -608,7 +646,66 @@ pub fn from_parts_with_tools(
         .map(HardMemoryTask::from)
         .collect();
     let goal = goal.and_then(HardMemoryGoal::from_view);
-    HardMemorySnapshot { tasks, goal, tools }
+    HardMemorySnapshot {
+        revision,
+        scope: None,
+        tasks,
+        goal,
+        tools,
+    }
+}
+
+fn recovery_task_projection(task: &HardMemoryTask) -> RecoveryTaskProjection {
+    RecoveryTaskProjection {
+        task_id: task.task_id.clone(),
+        kind: task.kind,
+        child_thread_id: task.child_thread_id.clone(),
+        external_owner: task.external_owner.clone(),
+        // 持久化投影只保留渲染会展示的正文，避免摘要正文整段进入 flags。
+        summary: one_line(&task.summary, MAX_SUMMARY_CHARS),
+        status: task.status.clone(),
+        started_at: task.started_at.clone(),
+    }
+}
+
+fn hard_memory_task(task: &RecoveryTaskProjection) -> HardMemoryTask {
+    HardMemoryTask {
+        kind: task.kind,
+        task_id: task.task_id.clone(),
+        child_thread_id: task.child_thread_id.clone(),
+        external_owner: task.external_owner.clone(),
+        summary: task.summary.clone(),
+        status: task.status.clone(),
+        started_at: task.started_at.clone(),
+    }
+}
+
+fn recovery_goal_projection(goal: &HardMemoryGoal) -> RecoveryGoalProjection {
+    RecoveryGoalProjection {
+        goal_id: goal.goal_id.clone(),
+        objective: goal
+            .objective
+            .as_deref()
+            .map(|objective| one_line(objective, MAX_OBJECTIVE_CHARS)),
+        status: goal.status,
+        token_budget: goal.token_budget,
+        tokens_used: goal.tokens_used,
+        blocked_reason: goal
+            .blocked_reason
+            .as_deref()
+            .map(|reason| one_line(reason, MAX_SUMMARY_CHARS)),
+    }
+}
+
+fn hard_memory_goal(goal: &RecoveryGoalProjection) -> HardMemoryGoal {
+    HardMemoryGoal {
+        goal_id: goal.goal_id.clone(),
+        objective: goal.objective.clone(),
+        status: goal.status,
+        token_budget: goal.token_budget,
+        tokens_used: goal.tokens_used,
+        blocked_reason: goal.blocked_reason.clone(),
+    }
 }
 
 impl From<TaskRecord> for HardMemoryTask {
@@ -654,6 +751,7 @@ pub struct RuntimeHardMemory {
     task_manager: Option<Arc<dyn TaskManager>>,
     goal_controller: Option<Arc<dyn GoalController>>,
     tools: RecoveryTools,
+    scope: Option<String>,
 }
 
 impl RuntimeHardMemory {
@@ -667,6 +765,7 @@ impl RuntimeHardMemory {
             goal_controller,
             // 没有目录快照时按未知处理，不生成可能越权的可执行调用。
             tools: RecoveryTools::none(),
+            scope: None,
         }
     }
 
@@ -674,6 +773,13 @@ impl RuntimeHardMemory {
     #[must_use]
     pub fn with_tools(mut self, tools: RecoveryTools) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// 记录采样时的会话作用域。
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<String>) -> Self {
+        self.scope = scope;
         self
     }
 }
@@ -693,6 +799,7 @@ impl HardMemorySource for RuntimeHardMemory {
                 .map(GoalController::snapshot),
             self.tools.clone(),
         )
+        .with_scope(self.scope.clone())
     }
 }
 
@@ -703,6 +810,7 @@ impl std::fmt::Debug for RuntimeHardMemory {
             .field("task_manager_present", &self.task_manager.is_some())
             .field("goal_controller_present", &self.goal_controller.is_some())
             .field("tools", &self.tools)
+            .field("scope", &self.scope)
             .finish()
     }
 }

@@ -44,6 +44,8 @@ fn external_task(task_id: &str, kind: BgTaskKind, owner: ExternalTaskOwner) -> H
 
 fn snapshot_with(tasks: Vec<HardMemoryTask>, tools: RecoveryTools) -> HardMemorySnapshot {
     HardMemorySnapshot {
+        revision: 0,
+        scope: None,
         tasks,
         goal: None,
         tools,
@@ -64,6 +66,8 @@ fn renders_runtime_ids_and_kind_specific_helpers() {
     let mut monitor = task("mcp-monitor", BgTaskKind::Mcp);
     monitor.summary = "monitor_start".into();
     let snapshot = HardMemorySnapshot {
+        revision: 0,
+        scope: None,
         tasks: vec![
             task("shell-0199-shell", BgTaskKind::Shell),
             agent,
@@ -211,6 +215,8 @@ fn task_cap_reports_omissions_without_inventing_ids() {
         })
         .collect();
     let rendered = HardMemorySnapshot {
+        revision: 0,
+        scope: None,
         tasks,
         goal: None,
         tools: RecoveryTools::all(),
@@ -233,6 +239,8 @@ fn summaries_are_flattened_and_bounded() {
     let mut shell = task("shell-long", BgTaskKind::Shell);
     shell.summary = format!("first line\n{}", "x".repeat(300));
     let rendered = HardMemorySnapshot {
+        revision: 0,
+        scope: None,
         tasks: vec![shell],
         goal: None,
         tools: RecoveryTools::all(),

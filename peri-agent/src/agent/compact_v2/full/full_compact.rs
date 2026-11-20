@@ -270,12 +270,31 @@ pub(in crate::agent::compact_v2) async fn full_compact_inner_with_hard_memory(
     }
     // 硬记忆在软摘要生成之后读取：摘要请求期间的终态变化必须反映在第二条消息里。
     // 空快照不追加消息，无任务/无 goal 的会话保持既有 compact 输出。
+    //
+    // 采样事实随消息的投影 JSON 一起提交：首个 Reason 的工具目录可能在本轮准备阶段
+    // 变化（手动 `/compact` 采样时甚至没有目录），届时按最终目录重算可执行入口。
     let hard_memory = hard_memory
         .map(HardMemorySource::snapshot)
-        .and_then(|snapshot| snapshot.render());
+        .and_then(|snapshot| {
+            snapshot
+                .render()
+                .map(|body| (body, snapshot.to_projection()))
+        });
+    let hard_memory_id = MessageId::new();
     let mut appended_messages = vec![build_summary_message(&summary, summary_id)];
-    if let Some(body) = hard_memory {
-        appended_messages.push(build_hard_memory_message(&body));
+    if let Some((body, projection)) = hard_memory {
+        flag_updates.push((
+            hard_memory_id,
+            MessageFlags {
+                projection: Some(MessageProjectionDirective {
+                    policy_version: PROJECTION_POLICY_VERSION,
+                    recovery_memory: Some(projection),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+        appended_messages.push(build_hard_memory_message(&body, hard_memory_id));
     }
     transcript
         .commit_compaction_lifecycle(CompactionChange {
@@ -689,6 +708,8 @@ pub(super) fn build_summary_message(summary: &str, id: MessageId) -> BaseMessage
 
 /// 构造硬记忆消息：独立 Human 段，首行是稳定标记，不复用续接标记
 /// （续接标记只属于软摘要，旧版本读取时把本消息当普通历史即可）。
-pub(super) fn build_hard_memory_message(body: &str) -> BaseMessage {
-    BaseMessage::human(body.to_string())
+///
+/// id 由调用方预先分配：同批 `flag_updates` 把结构化采样事实挂在同一条消息上。
+pub(super) fn build_hard_memory_message(body: &str, id: MessageId) -> BaseMessage {
+    BaseMessage::human(body.to_string()).with_message_id(id)
 }

@@ -108,6 +108,8 @@ async fn full_compact_appends_soft_then_hard_memory_with_runtime_ids() {
     let source = FixedSource {
         log: Arc::clone(&log),
         snapshot: HardMemorySnapshot {
+            revision: 0,
+            scope: None,
             tasks: vec![shell_task()],
             goal: Some(HardMemoryGoal {
                 goal_id: Some("goal-runtime-01".into()),
@@ -177,6 +179,8 @@ async fn second_compaction_keeps_prior_hard_memory_out_of_summary_request() {
     let source = FixedSource {
         log: Arc::new(OrderLog::default()),
         snapshot: HardMemorySnapshot {
+            revision: 0,
+            scope: None,
             tasks: vec![shell_task()],
             goal: None,
             tools: Default::default(),
