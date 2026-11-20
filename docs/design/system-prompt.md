@@ -81,8 +81,8 @@ fork 继承 source snapshot 的精确字节，不能以当前磁盘内容重新�
 `peri-tui/prompts/tui.md`（`TUI_SESSION_INSTRUCTIONS`）写入 `session/new` 的
 `_meta["peri.instructions"]`，因此正文随首次准入冻结一次，重试路径同样携带。
 `-p/--print`（Headless）与 `acp` 子命令不注入；`session/load` 不补注入，恢复会话
-沿用服务端已冻结的旧值。正文只覆盖 TUI 的 GenUI/Mermaid 围栏约定与 `peri` CLI
-速查，不改变上述准入规则（仍须为字符串、≤64 KiB、不含保留控制字）。
+沿用服务端已冻结的旧值。正文只覆盖 TUI 的 Markdown、Mermaid 与 GenUI 围栏约定，
+不改变上述准入规则（仍须为字符串、≤64 KiB、不含保留控制字）。
 
 模型请求的唯一组合顺序是：**内部静态段 → 唯一缓存分界 → 内部动态段 → 外部
 指令段 → 逐请求 contribution → env**。外部段的固定标签保护正文边缘空白；正文在
