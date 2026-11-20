@@ -25,6 +25,8 @@
     "prepack": "npm run build",
     "build": "rm -rf dist && tsc",
     "test": "bun run build && node --test dist/tests/*.test.js",
+    "test:swarm": "bun run build && node --test dist/tests/swarm/*.test.js",
+    "dev:swarm": "bun run src/swarm/main.ts",
     "test:mac": "node dist/tests/integration/mac.js",
     "test:mac:programmatic": "node dist/tests/integration/programmatic-mac.js",
     "check": "tsc --noEmit",
