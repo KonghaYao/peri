@@ -1,9 +1,9 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::item::ItemView;
 
 /// Turn lifecycle event carried by SSE `event: turn` (`design §2.5`).
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TurnEvent {
     Started {
@@ -51,7 +51,7 @@ impl TurnEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TurnFailure {
     pub code: i64,
     pub message: String,

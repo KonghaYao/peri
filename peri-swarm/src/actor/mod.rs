@@ -5,15 +5,18 @@
 //! [`reader`] owns append-only persistence plus broadcast, and [`service`]
 //! implements [`crate::service::SwarmService`] on top of the two.
 //!
-//! This stage deliberately starts no Rivet actor and no HTTP listener; the
-//! integration test drives [`service::AcpSwarmService`] directly.
+//! [`swarm`] hosts one session per Rivet actor and exposes the typed action
+//! plane plus the actor-side SSE endpoint; [`deployment`] is the process-level
+//! install point for the store and service configuration.
 
+pub mod deployment;
 pub mod projection;
 pub mod reader;
 pub mod runtime;
 pub mod service;
 pub mod swarm;
 
+pub use deployment::{install_deployment, ActorDeployment, StaticDeployment};
 pub use reader::ItemLog;
 pub use runtime::{AcpChild, CancelTarget, ChildConfig, ChildShutdown};
 pub use service::{AcpSwarmService, ActorServiceConfig};

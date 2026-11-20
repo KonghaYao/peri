@@ -5,6 +5,8 @@
 //! - [`store`]：`SwarmStore` 写入/读取端口与内存 fake。
 //! - [`service`]：`SwarmService` 端口与内存 fake；S4 起由 [`actor`] 的进程内
 //!   ACP 实现同一端口。
+//! - [`actor::swarm`] + [`gateway`]：S5 的 Rivet actor 与网关适配器；actor 持有
+//!   会话，网关只做 `logicalId → rootSessionId` 路由与 SSE 转发。
 //!
 //! 证据边界：内存 fake 只证明协议与顺序契约，不代表真实 Peri 执行、Loom 持久化或
 //! Rivet 路由行为。真实接线以设计文档 `.peri/plans/peri-swarm-impl.md` 的 S5-S9 为准。
@@ -12,6 +14,8 @@
 pub mod actor;
 pub mod config;
 pub mod domain;
+mod event_stream;
+pub mod gateway;
 pub mod http;
 pub mod service;
 pub mod store;

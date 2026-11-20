@@ -487,7 +487,10 @@ impl SwarmService for InMemorySwarmService {
         let now = peri_time::now_utc_rfc3339();
         let row = SwarmSessionRow {
             logical_id: command.logical_id.as_str().to_owned(),
-            root_session_id: new_root_session_id(),
+            root_session_id: command
+                .root_session_id
+                .clone()
+                .unwrap_or_else(new_root_session_id),
             actor_key: ActorKey::new(command.logical_id.clone()).storage_key(),
             cwd,
             state: SessionState::Idle,

@@ -34,6 +34,7 @@ pub async fn create_session(
         instructions,
         initial_input,
         environment,
+        root_session_id: None,
     };
 
     if stream {

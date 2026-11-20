@@ -11,6 +11,7 @@ pub use in_memory::{InMemorySwarmService, ServiceCall, ServiceConfig, TurnPolicy
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::domain::{
@@ -28,9 +29,15 @@ pub struct CreateSessionCommand {
     pub instructions: Option<String>,
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
+    /// Root ACP session id reserved by the caller (S5 gateway). A trusted host
+    /// generates it before routing to the actor so a retried create addresses
+    /// the same identity; `None` keeps the S4 behavior (service generates one).
+    pub root_session_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+/// Create response payload shared by the in-memory fake and the actor.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateSessionResult {
     pub session: SessionView,
     pub created: bool,

@@ -371,6 +371,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             instructions: Some("keep it short".to_owned()),
             initial_input: Some("hello".to_owned()),
             environment: EnvironmentKind::None,
+            root_session_id: None,
         })
         .await
         .expect("create session");
@@ -855,6 +856,7 @@ async fn model_unavailable_is_a_diagnosable_error() {
             instructions: None,
             initial_input: None,
             environment: EnvironmentKind::None,
+            root_session_id: None,
         })
         .await
         .expect_err("no provider");

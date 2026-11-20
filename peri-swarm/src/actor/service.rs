@@ -184,6 +184,12 @@ impl AcpSwarmService {
             .clone()
     }
 
+    /// Whether this instance owns a live ACP host for `logical_id`.
+    #[must_use]
+    pub fn is_live(&self, logical_id: &LogicalId) -> bool {
+        self.sessions.lock().contains_key(logical_id.as_str())
+    }
+
     fn runtime(&self, logical_id: &LogicalId) -> Result<Arc<SessionRuntime>, SwarmError> {
         self.sessions
             .lock()
@@ -505,7 +511,9 @@ impl AcpSwarmService {
         reports
     }
 
-    async fn replay_after(
+    /// Persisted backlog after `cursor`, used by the actor SSE endpoint and
+    /// the gateway's reconnect path.
+    pub async fn replay_after(
         &self,
         logical_id: &LogicalId,
         cursor: Cursor,
@@ -648,7 +656,10 @@ impl SwarmService for AcpSwarmService {
             });
         }
 
-        let root_session_id = new_root_session_id();
+        let root_session_id = command
+            .root_session_id
+            .clone()
+            .unwrap_or_else(new_root_session_id);
         let runtime = self
             .spawn_runtime(&command, model.clone(), root_session_id.clone())
             .await?;

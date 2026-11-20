@@ -11,6 +11,7 @@ fn create_command(logical_id: &str, cwd: &str) -> CreateSessionCommand {
         instructions: None,
         initial_input: None,
         environment: EnvironmentKind::None,
+        root_session_id: None,
     }
 }
 
@@ -32,6 +33,23 @@ async fn submit(service: &InMemorySwarmService, logical_id: &str, input_id: &str
         .submit_input(&id, submission(input_id, text))
         .await
         .expect("submit");
+}
+
+#[tokio::test]
+async fn create_honors_the_reserved_root_session_id() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    let reserved = "0192f0c5-0000-7000-8000-000000000042".to_owned();
+    let mut command = create_command("agent-01", "/tmp/agent-01");
+    command.root_session_id = Some(reserved.clone());
+    let created = service.create_session(command).await.expect("create");
+    assert_eq!(created.session.root_session_id, reserved);
+    // The identity is retained by the repeat create through the store.
+    let repeated = service
+        .create_session(create_command("agent-01", "/tmp/agent-01"))
+        .await
+        .expect("repeat create");
+    assert!(!repeated.created);
+    assert_eq!(repeated.session.root_session_id, reserved);
 }
 
 #[tokio::test]
