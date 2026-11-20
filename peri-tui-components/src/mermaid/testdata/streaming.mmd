@@ -1,0 +1,7 @@
+flowchart TD
+  Client[客户端] --> Gateway[网关]
+  subgraph Render[渲染]
+    Gateway --> Worker[工作线程]
+    Worker --> Cache[缓存]
+  end
+  Client --> Cache

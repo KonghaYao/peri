@@ -4,6 +4,7 @@
 //! 交互运行时没有自动播放：进度只由底部拖拽条 seek，或点击 `[ auto ]` 用 3 秒播到 100%。
 //! 渲染只取 `source[..cursor]`，其余仍走真实 parse → segment → line 管线。
 //! 预览区底部单列一行进度条：鼠标按下/拖拽把横向比例映射回源码偏移。
+//! 字符图不折行，超宽时进度条上方还有一行文档横向滚动条，两者互不重叠。
 
 use std::time::Instant;
 
@@ -97,7 +98,11 @@ pub(crate) struct StreamingDocument {
     /// 已到达的字节偏移；始终落在字符边界上。
     cursor: usize,
     scroll: usize,
+    /// 横向偏移：流式字符图与静态图一样不折行。
+    h_scroll: usize,
     pressed_button: Option<usize>,
+    /// 横向滚动条 thumb 拖拽中（指针相对 thumb 起点的列偏移）。
+    h_drag: Option<usize>,
     layout: Option<DocumentLayout>,
     /// 进度条上的左键拖拽中：只有此时散落的 `Drag` 才改位置。
     dragging: bool,
@@ -111,11 +116,20 @@ pub(crate) struct StreamingDocument {
 
 pub(super) fn streaming_state(source: DocumentContent<'static>, percent: usize) -> StoryState {
     let text = source.text();
+    let cursor = text.floor_char_boundary(text.len() * percent / 100);
+    streaming_state_at(source, cursor)
+}
+
+pub(super) fn streaming_state_at(source: DocumentContent<'static>, cursor: usize) -> StoryState {
+    let text = source.text();
+    let cursor = text.floor_char_boundary(cursor.min(text.len()));
     StoryState::Streaming(StreamingDocument {
         source,
-        cursor: text.floor_char_boundary(text.len() * percent / 100),
+        cursor,
         scroll: 0,
+        h_scroll: 0,
         pressed_button: None,
+        h_drag: None,
         layout: None,
         dragging: false,
         auto_hold: false,
@@ -267,14 +281,15 @@ fn set_cursor(state: &mut StreamingDocument, cursor: usize) {
 // ---------------------------------------------------------------------------
 
 pub(super) fn render(state: &mut StreamingDocument, area: Rect, buf: &mut Buffer) {
-    document::render(
-        document_area(area),
-        buf,
-        state.source.prefix(state.cursor),
-        &mut state.scroll,
-        &mut state.pressed_button,
-        &mut state.layout,
-    );
+    let content = state.source.prefix(state.cursor);
+    document::DocumentView {
+        scroll: &mut state.scroll,
+        h_scroll: &mut state.h_scroll,
+        pressed_button: &mut state.pressed_button,
+        h_drag: &mut state.h_drag,
+        layout: &mut state.layout,
+    }
+    .render(document_area(area), buf, content);
     if let Some(row) = progress_row(area) {
         render_progress(state, row, buf);
     }
@@ -329,6 +344,7 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
                 let layout = progress_layout(row);
                 // 进度条行内的按下只改进度：不触碰文档点击态与滚动位置。
                 state.pressed_button = None;
+                state.h_drag = None;
                 if let Some(auto) = layout.auto
                     && rect_contains(auto, mouse.column, mouse.row)
                 {
@@ -362,7 +378,8 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
                 return true;
             }
             if !state.dragging {
-                return false;
+                // 进度条没在拖：交给文档处理横向滚动条 thumb 的拖拽。
+                return handle_document(state, mouse, area);
             }
             state.pressed_button = None;
             if let Some(row) = row {
@@ -395,14 +412,15 @@ pub(super) fn handle_mouse(state: &mut StreamingDocument, mouse: &MouseEvent, ar
 
 /// 进度条之外的鼠标事件仍完全交给文档处理，只是区域少了一行。
 fn handle_document(state: &mut StreamingDocument, mouse: &MouseEvent, area: Rect) -> bool {
-    document::handle_mouse(
-        document_area(area),
-        mouse,
-        state.source.prefix(state.cursor),
-        &mut state.scroll,
-        &mut state.pressed_button,
-        &mut state.layout,
-    )
+    let content = state.source.prefix(state.cursor);
+    document::DocumentView {
+        scroll: &mut state.scroll,
+        h_scroll: &mut state.h_scroll,
+        pressed_button: &mut state.pressed_button,
+        h_drag: &mut state.h_drag,
+        layout: &mut state.layout,
+    }
+    .handle_mouse(document_area(area), mouse, content)
 }
 
 impl StreamingDocument {
@@ -471,6 +489,10 @@ impl StreamingDocument {
 
     pub(crate) fn scroll(&self) -> usize {
         self.scroll
+    }
+
+    pub(crate) fn h_scroll(&self) -> usize {
+        self.h_scroll
     }
 
     pub(crate) fn pressed_button(&self) -> Option<usize> {

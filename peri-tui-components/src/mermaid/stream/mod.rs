@@ -5,7 +5,8 @@
 //! 扫描游标，只提交完整且能识别的语句；作用域（`subgraph/end`、`alt/end` 等）
 //! 在最外层闭合后才整组进入已确认前缀。
 
-/// 首行声明的图型。只有流图与时序图支持边生成边预览。
+/// 首行声明的图型。只有流图与时序图支持边生成边预览；其余类型在围栏闭合后
+/// 整份渲染。`SourceOnly` 只留给库能画但当前不接入的类型（`block`）和未知类型。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DiagramMode {
     /// 首行还不完整，无法判断类型。
@@ -16,6 +17,18 @@ pub enum DiagramMode {
     State,
     Class,
     Er,
+    Pie,
+    Journey,
+    Gantt,
+    Timeline,
+    GitGraph,
+    Mindmap,
+    Quadrant,
+    Requirement,
+    Sankey,
+    XyChart,
+    Architecture,
+    Packet,
     /// 其他类型（含 `block` / `block-beta`）保留源码。
     SourceOnly,
 }
@@ -30,7 +43,23 @@ impl DiagramMode {
     pub fn renders_when_closed(self) -> bool {
         matches!(
             self,
-            Self::Flowchart | Self::Sequence | Self::State | Self::Class | Self::Er
+            Self::Flowchart
+                | Self::Sequence
+                | Self::State
+                | Self::Class
+                | Self::Er
+                | Self::Pie
+                | Self::Journey
+                | Self::Gantt
+                | Self::Timeline
+                | Self::GitGraph
+                | Self::Mindmap
+                | Self::Quadrant
+                | Self::Requirement
+                | Self::Sankey
+                | Self::XyChart
+                | Self::Architecture
+                | Self::Packet
         )
     }
 }
@@ -52,6 +81,18 @@ pub fn detect_mode(source: &str, terminal: bool) -> DiagramMode {
         "statediagram" | "statediagram-v2" => DiagramMode::State,
         "classdiagram" => DiagramMode::Class,
         "erdiagram" => DiagramMode::Er,
+        "pie" => DiagramMode::Pie,
+        "journey" => DiagramMode::Journey,
+        "gantt" => DiagramMode::Gantt,
+        "timeline" => DiagramMode::Timeline,
+        "gitgraph" => DiagramMode::GitGraph,
+        "mindmap" => DiagramMode::Mindmap,
+        "quadrantchart" => DiagramMode::Quadrant,
+        "requirementdiagram" => DiagramMode::Requirement,
+        "sankey" | "sankey-beta" => DiagramMode::Sankey,
+        "xychart" | "xychart-beta" => DiagramMode::XyChart,
+        "architecture" | "architecture-beta" => DiagramMode::Architecture,
+        "packet" | "packet-beta" => DiagramMode::Packet,
         _ => DiagramMode::SourceOnly,
     }
 }

@@ -4,16 +4,16 @@ use peri_theme::{bridge::ThemeDefinitionExt, builtin::dark_theme};
 use peri_tui_components::button::hit_test;
 use peri_tui_components::genui;
 use peri_tui_components::markdown::{MarkdownSegment, parse_markdown, table_data_to_lines};
-use peri_tui_components::scrollbar::vertical_scrollbar;
+use peri_tui_components::scrollbar::{HorizontalBar, horizontal_scrollbar, vertical_scrollbar};
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, ScrollbarState, StatefulWidget, Widget};
 use ratatui_kit::{ComponentTheme, components::TableTheme};
 
-use super::{MUTED, WHEEL_ROWS, mermaid, muted_style, rect_contains};
+use super::{MUTED, WHEEL_COLS, WHEEL_ROWS, mermaid, muted_style, rect_contains};
 
 #[derive(Clone, Copy)]
 pub(crate) enum DocumentContent<'a> {
@@ -73,7 +73,11 @@ pub(crate) struct DocumentLayout {
     lines: Vec<Line<'static>>,
     buttons: Vec<DocumentButton>,
     content_width: usize,
+    content_height: usize,
     max_scroll: usize,
+    max_h_scroll: usize,
+    /// 底部横向滚动条是否真的占到一行（视口只有一行或放不下箭头时不显示）。
+    has_h_bar: bool,
 }
 
 impl DocumentLayout {
@@ -85,18 +89,37 @@ impl DocumentLayout {
             }
         };
         let mut content_width = width.max(1);
-        let (mut lines, mut buttons) = layout(content_width);
-        // 保留原有滚动条列；正文与热区必须都使用最终的内容宽度。
-        if lines.len() > height && content_width > 1 {
-            content_width -= 1;
-            (lines, buttons) = layout(content_width);
-        }
+        let mut content_height = height.max(1);
+        // 纵向滚动条占一列、横向滚动条占一行；让位后重新排版可能又产生溢出，
+        // 所以循环到两者都不再变化。滚动条本身最多各让一次。
+        let mut vertical = false;
+        let mut horizontal = false;
+        let mut widest;
+        let (lines, buttons) = loop {
+            let (lines, buttons) = layout(content_width);
+            widest = lines.iter().map(Line::width).max().unwrap_or(0);
+            if lines.len() > content_height && !vertical && content_width > 1 {
+                vertical = true;
+                content_width -= 1;
+                continue;
+            }
+            if widest > content_width && !horizontal && content_height > 1 {
+                horizontal = true;
+                content_height -= 1;
+                continue;
+            }
+            break (lines, buttons);
+        };
+        let max_h_scroll = widest.saturating_sub(content_width);
         Self {
             size: (width, height),
-            max_scroll: lines.len().saturating_sub(height),
+            max_scroll: lines.len().saturating_sub(content_height),
+            max_h_scroll,
+            has_h_bar: horizontal && max_h_scroll > 0 && content_width >= 3,
             lines,
             buttons,
             content_width,
+            content_height,
         }
     }
 
@@ -113,7 +136,42 @@ impl DocumentLayout {
     }
 
     fn content_area(&self, area: Rect) -> Rect {
-        Rect::new(area.x, area.y, self.content_width as u16, area.height)
+        Rect::new(
+            area.x,
+            area.y,
+            self.content_width as u16,
+            self.content_height as u16,
+        )
+    }
+
+    /// 纵向滚动条列：内容区右侧一列；底部横向滚动条存在时不占最后一行。
+    fn vertical_bar_area(&self, area: Rect) -> Rect {
+        Rect::new(
+            area.right().saturating_sub(1),
+            area.y,
+            1,
+            self.content_height as u16,
+        )
+    }
+
+    /// 底部横向滚动条：内容区下方一行；`has_h_bar` 才存在。
+    fn horizontal_bar(&self, area: Rect, h_scroll: usize) -> Option<(Rect, HorizontalBar)> {
+        if !self.has_h_bar {
+            return None;
+        }
+        let rect = Rect::new(
+            area.x,
+            area.y + self.content_height as u16,
+            self.content_width as u16,
+            1,
+        );
+        let bar = HorizontalBar::new(
+            rect.width,
+            self.content_width,
+            self.content_width + self.max_h_scroll,
+            h_scroll,
+        )?;
+        Some((rect, bar))
     }
 
     fn button_at(&self, area: Rect, scroll: usize, mouse: &MouseEvent) -> Option<usize> {
@@ -186,106 +244,235 @@ pub(crate) fn document_max_scroll(source: &str, width: usize, height: usize) -> 
     DocumentLayout::new(DocumentContent::Markdown(source), width, height).max_scroll
 }
 
-pub(super) fn render(
-    area: Rect,
-    buf: &mut Buffer,
+#[cfg(test)]
+pub(crate) fn document_line_count(
     content: DocumentContent<'_>,
-    scroll: &mut usize,
-    pressed_button: &mut Option<usize>,
-    layout: &mut Option<DocumentLayout>,
-) {
-    if area.is_empty()
-        || layout.as_ref().is_some_and(|layout| {
-            layout.size != (usize::from(area.width), usize::from(area.height))
-        })
-    {
-        *pressed_button = None;
-    }
-    if area.is_empty() {
-        return;
-    }
-    let layout = DocumentLayout::cached(layout, content, area);
-    *scroll = (*scroll).min(layout.max_scroll);
-    let content_area = layout.content_area(area);
-    let mut lines = layout.lines[*scroll..].to_vec();
-    if let Some(button) = pressed_button.and_then(|index| layout.buttons.get(index)) {
-        let theme = dark_theme();
-        let rect = button.screen_rect(content_area, *scroll);
-        for row in rect.top()..rect.bottom() {
-            let mut col = content_area.x;
-            for span in &mut lines[(row - content_area.y) as usize].spans {
-                if hit_test(row, col, row, rect.left(), rect.right())
-                    && span.style.add_modifier.contains(Modifier::REVERSED)
-                    && let Some(fg) = span.style.fg
-                {
-                    span.style = genui::render::pressed_button_style(fg, &theme);
-                }
-                col = col.saturating_add(span.width().min(u16::MAX as usize) as u16);
-            }
-        }
-    }
-    Paragraph::new(lines).render(content_area, buf);
-    if layout.max_scroll > 0 {
-        let bar_area = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
-        let mut state = ScrollbarState::new(layout.lines.len())
-            .position(*scroll)
-            .viewport_content_length(area.height as usize);
-        StatefulWidget::render(
-            vertical_scrollbar(
-                Style::new().fg(MUTED).bg(MUTED),
-                muted_style().add_modifier(Modifier::BOLD),
-            ),
-            bar_area,
-            buf,
-            &mut state,
-        );
-    }
+    width: usize,
+    height: usize,
+) -> usize {
+    DocumentLayout::new(content, width.max(1), height.max(1))
+        .lines
+        .len()
 }
 
-pub(super) fn handle_mouse(
-    area: Rect,
-    mouse: &MouseEvent,
+#[cfg(test)]
+pub(crate) fn document_h_scroll_max(
     content: DocumentContent<'_>,
-    scroll: &mut usize,
-    pressed_button: &mut Option<usize>,
-    layout: &mut Option<DocumentLayout>,
-) -> bool {
-    let inside = rect_contains(area, mouse.column, mouse.row);
-    match mouse.kind {
-        MouseEventKind::Up(MouseButton::Left) => pressed_button.take().is_some(),
-        MouseEventKind::Down(MouseButton::Left) => {
-            *pressed_button = if inside {
-                let layout = DocumentLayout::cached(layout, content, area);
-                layout.button_at(area, (*scroll).min(layout.max_scroll), mouse)
-            } else {
-                None
-            };
-            inside
-        }
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+    width: usize,
+    height: usize,
+) -> usize {
+    DocumentLayout::new(content, width.max(1), height.max(1)).max_h_scroll
+}
+
+/// 文档变体共享的可变视图状态：竖直/水平偏移、按下态与缓存的排版。
+/// `StoryState::Document` 和流式文档各持有一份，渲染与命中测试都从这里读写。
+pub(crate) struct DocumentView<'a> {
+    pub(crate) scroll: &'a mut usize,
+    pub(crate) h_scroll: &'a mut usize,
+    pub(crate) pressed_button: &'a mut Option<usize>,
+    /// 横向滚动条 thumb 拖拽中：指针相对 thumb 起点的列偏移。
+    pub(crate) h_drag: &'a mut Option<usize>,
+    pub(crate) layout: &'a mut Option<DocumentLayout>,
+}
+
+/// 横向滚动条轨道内的列号（跳过左箭头）；越界列交给调用方 clamp。
+fn track_cell(rect: Rect, column: u16) -> usize {
+    usize::from(column.saturating_sub(rect.x.saturating_add(1)))
+}
+
+impl DocumentView<'_> {
+    pub(super) fn render(&mut self, area: Rect, buf: &mut Buffer, content: DocumentContent<'_>) {
+        let Self {
+            scroll,
+            h_scroll,
+            pressed_button,
+            h_drag,
+            layout,
+        } = self;
+        // 解构得到的是 `&mut &mut T`；再解一层，读写与普通自由函数一致。
+        let scroll = &mut **scroll;
+        let h_scroll = &mut **h_scroll;
+        let pressed_button = &mut **pressed_button;
+        let h_drag = &mut **h_drag;
+        let layout = &mut **layout;
+        if area.is_empty()
+            || layout.as_ref().is_some_and(|layout| {
+                layout.size != (usize::from(area.width), usize::from(area.height))
+            })
+        {
             *pressed_button = None;
-            if inside {
-                let max = DocumentLayout::cached(layout, content, area).max_scroll;
+            *h_drag = None;
+        }
+        if area.is_empty() {
+            return;
+        }
+        let cached = DocumentLayout::cached(layout, content, area);
+        *scroll = (*scroll).min(cached.max_scroll);
+        *h_scroll = (*h_scroll).min(cached.max_h_scroll);
+        let h_offset = u16::try_from(*h_scroll).unwrap_or(u16::MAX);
+        let content_area = cached.content_area(area);
+        let mut lines = cached.lines[*scroll..].to_vec();
+        if let Some(button) = (*pressed_button).and_then(|index| cached.buttons.get(index)) {
+            let theme = dark_theme();
+            let rect = button.screen_rect(content_area, *scroll);
+            for row in rect.top()..rect.bottom() {
+                // 水平偏移后 span 的屏幕列整体左移；Markdown 文档不横向滚动。
+                let mut col = content_area.x.saturating_sub(h_offset);
+                for span in &mut lines[(row - content_area.y) as usize].spans {
+                    if hit_test(row, col, row, rect.left(), rect.right())
+                        && span.style.add_modifier.contains(Modifier::REVERSED)
+                        && let Some(fg) = span.style.fg
+                    {
+                        span.style = genui::render::pressed_button_style(fg, &theme);
+                    }
+                    col = col.saturating_add(span.width().min(u16::MAX as usize) as u16);
+                }
+            }
+        }
+        Paragraph::new(lines)
+            .scroll((0, h_offset))
+            .render(content_area, buf);
+        if cached.max_scroll > 0 {
+            let mut state = ScrollbarState::new(cached.lines.len())
+                .position(*scroll)
+                .viewport_content_length(cached.content_height);
+            StatefulWidget::render(
+                vertical_scrollbar(
+                    Style::new().fg(MUTED).bg(MUTED),
+                    muted_style().add_modifier(Modifier::BOLD),
+                ),
+                cached.vertical_bar_area(area),
+                buf,
+                &mut state,
+            );
+        }
+        if let Some((rect, bar)) = cached.horizontal_bar(area, *h_scroll) {
+            horizontal_scrollbar(
+                rect,
+                buf,
+                Style::new().fg(MUTED).bg(MUTED),
+                muted_style().add_modifier(Modifier::BOLD),
+                &bar,
+            );
+        }
+    }
+
+    pub(super) fn handle_mouse(
+        &mut self,
+        area: Rect,
+        mouse: &MouseEvent,
+        content: DocumentContent<'_>,
+    ) -> bool {
+        let Self {
+            scroll,
+            h_scroll,
+            pressed_button,
+            h_drag,
+            layout,
+        } = self;
+        // 解构得到的是 `&mut &mut T`；再解一层，读写与普通自由函数一致。
+        let scroll = &mut **scroll;
+        let h_scroll = &mut **h_scroll;
+        let pressed_button = &mut **pressed_button;
+        let h_drag = &mut **h_drag;
+        let layout = &mut **layout;
+        let inside = rect_contains(area, mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Up(MouseButton::Left) => {
+                let dragged = h_drag.take().is_some();
+                dragged || pressed_button.take().is_some()
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                *h_drag = None;
+                *pressed_button = None;
+                if !inside {
+                    return false;
+                }
+                let cached = DocumentLayout::cached(layout, content, area);
+                *pressed_button = cached.button_at(area, (*scroll).min(cached.max_scroll), mouse);
+                let Some((rect, bar)) = cached.horizontal_bar(area, *h_scroll) else {
+                    return true;
+                };
+                if !rect_contains(rect, mouse.column, mouse.row) {
+                    return true;
+                }
+                // 横向条优先于正文热区：按下即抓取；点在 thumb 外时让 thumb
+                // 以指针为中心跳过去，拖动随后从那里继续。
+                *pressed_button = None;
+                let cell = track_cell(rect, mouse.column).min(bar.track - 1);
+                match bar.grab(cell) {
+                    Some(grab) => *h_drag = Some(grab),
+                    None => {
+                        let grab = bar.thumb_len / 2;
+                        *h_drag = Some(grab);
+                        *h_scroll = bar.offset_for(cell.saturating_sub(grab));
+                    }
+                }
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(grab) = *h_drag else {
+                    return false;
+                };
+                let cached = DocumentLayout::cached(layout, content, area);
+                let Some((rect, bar)) = cached.horizontal_bar(area, *h_scroll) else {
+                    *h_drag = None;
+                    return false;
+                };
+                // 纵向越界不取消拖拽，只按列位置换算，和进度条 seek 一致。
+                let cell = track_cell(rect, mouse.column);
+                *h_scroll = bar.offset_for(cell.saturating_sub(grab));
+                true
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                *pressed_button = None;
+                *h_drag = None;
+                if !inside {
+                    return false;
+                }
+                let cached = DocumentLayout::cached(layout, content, area);
+                // Shift+滚轮在字符图上横向平移；没有横向溢出时退回纵向滚动。
+                if mouse.modifiers.contains(KeyModifiers::SHIFT) && cached.max_h_scroll > 0 {
+                    *h_scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                        h_scroll.saturating_sub(WHEEL_COLS)
+                    } else {
+                        h_scroll.saturating_add(WHEEL_COLS).min(cached.max_h_scroll)
+                    };
+                    return true;
+                }
                 *scroll = if mouse.kind == MouseEventKind::ScrollUp {
                     scroll.saturating_sub(WHEEL_ROWS)
                 } else {
                     scroll.saturating_add(WHEEL_ROWS)
                 }
-                .min(max);
+                .min(cached.max_scroll);
+                true
             }
-            inside
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                *pressed_button = None;
+                *h_drag = None;
+                if !inside {
+                    return false;
+                }
+                let cached = DocumentLayout::cached(layout, content, area);
+                // 一行高的视口放不下滚动条，但溢出列仍要能平移。
+                if cached.max_h_scroll == 0 {
+                    return false;
+                }
+                *h_scroll = if mouse.kind == MouseEventKind::ScrollLeft {
+                    h_scroll.saturating_sub(WHEEL_COLS)
+                } else {
+                    h_scroll.saturating_add(WHEEL_COLS).min(cached.max_h_scroll)
+                };
+                true
+            }
+            // 终端丢失左键 release 后只剩移动事件：清除悬空的按下态与 thumb 拖拽。
+            MouseEventKind::Moved => {
+                *pressed_button = None;
+                *h_drag = None;
+                false
+            }
+            _ => false,
         }
-        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
-            *pressed_button = None;
-            false
-        }
-        // 终端丢失左键 release 后只剩移动事件：清除悬空的按下态。
-        MouseEventKind::Moved => {
-            *pressed_button = None;
-            false
-        }
-        // 拖拽期间保留按下态，等 Up 统一收尾。
-        MouseEventKind::Drag(MouseButton::Left) => false,
-        _ => false,
     }
 }
