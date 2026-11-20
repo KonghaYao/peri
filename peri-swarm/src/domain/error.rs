@@ -33,6 +33,7 @@ pub enum ErrorCode {
     ConflictingCursor,
     McpModeUnsupported,
     UnsupportedEnvironment,
+    UnsupportedTool,
     SeqConflict,
 }
 
@@ -68,6 +69,7 @@ impl ErrorCode {
             Self::ConflictingCursor => "conflicting_cursor",
             Self::McpModeUnsupported => "mcp_mode_unsupported",
             Self::UnsupportedEnvironment => "unsupported_environment",
+            Self::UnsupportedTool => "unsupported_tool",
             Self::SeqConflict => "seq_conflict",
         }
     }
@@ -269,6 +271,23 @@ impl SwarmError {
             ErrorCode::McpModeUnsupported,
             "openai_hosted environments are not implemented by this deployment",
         )
+    }
+
+    /// A tool declaration outside the implemented range. S8a records MCP
+    /// declarations only; other official tool types are a stated gap rather
+    /// than a policy refusal (`design §5.1`).
+    #[must_use]
+    pub fn unsupported_tool(kind: &str, field: &str) -> Self {
+        Self::new(
+            ErrorKind::Unprocessable,
+            ErrorCode::UnsupportedTool,
+            "tool type is not implemented by this deployment; only `mcp` declarations are accepted",
+        )
+        .with_details(serde_json::json!({
+            "field": field,
+            "received": kind,
+            "supported": ["mcp"],
+        }))
     }
 
     #[must_use]

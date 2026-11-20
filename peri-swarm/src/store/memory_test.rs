@@ -2,7 +2,8 @@ use serde_json::json;
 
 use super::*;
 use crate::domain::{
-    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, SessionState,
+    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, McpHeader, McpToolSpec,
+    SessionState,
 };
 
 fn session_row(logical_id: &str, cwd: &str) -> SwarmSessionRow {
@@ -14,6 +15,7 @@ fn session_row(logical_id: &str, cwd: &str) -> SwarmSessionRow {
         state: SessionState::Idle,
         model: None,
         instructions: None,
+        mcp_tools: Vec::new(),
         environment: EnvironmentRef {
             kind: EnvironmentKind::None,
             id: Some(logical_id.to_owned()),
@@ -185,6 +187,31 @@ async fn session_upsert_rejects_identity_change() {
         .await
         .expect_err("cwd change");
     assert!(matches!(error, StoreError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn session_rows_keep_the_mcp_declaration_field_by_field() {
+    let store = MemorySwarmStore::new();
+    let mut row = session_row("agent", "/tmp/agent");
+    row.mcp_tools = vec![McpToolSpec {
+        headers: vec![McpHeader {
+            name: "Authorization".to_owned(),
+            value: "Bearer caller".to_owned(),
+        }],
+        require_approval: Some(json!({ "always": { "tool_names": ["write"] } })),
+        allowed_tools: Some(json!(["read"])),
+        extra: serde_json::Map::from_iter([("defer_loading".to_owned(), json!(true))]),
+        ..McpToolSpec::new("deepwiki", "https://mcp.example.test/mcp")
+    }];
+    store
+        .swarm_upsert_session(row.clone())
+        .await
+        .expect("insert");
+
+    assert_eq!(
+        store.swarm_get_session("agent").await.expect("get"),
+        Some(row)
+    );
 }
 
 #[tokio::test]

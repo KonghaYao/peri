@@ -9,6 +9,7 @@ fn create_command(logical_id: &str, cwd: &str) -> CreateSessionCommand {
         cwd: std::path::PathBuf::from(cwd),
         model: None,
         instructions: None,
+        mcp_tools: Vec::new(),
         initial_input: None,
         environment: EnvironmentKind::None,
         root_session_id: None,

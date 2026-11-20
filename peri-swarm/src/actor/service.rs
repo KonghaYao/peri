@@ -649,6 +649,14 @@ impl SwarmService for AcpSwarmService {
                     .with_details(json!({ "field": "instructions" })));
                 }
             }
+            if command.mcp_tools != row.mcp_tools {
+                return Err(SwarmError::new(
+                    ErrorKind::Conflict,
+                    ErrorCode::IdentityConflict,
+                    "logicalId already exists with a different MCP tool declaration",
+                )
+                .with_details(json!({ "field": "tools" })));
+            }
             if model != row.model {
                 return Err(SwarmError::new(
                     ErrorKind::BadRequest,
@@ -694,6 +702,7 @@ impl SwarmService for AcpSwarmService {
             state: SessionState::Idle,
             model,
             instructions: command.instructions.clone(),
+            mcp_tools: command.mcp_tools.clone(),
             environment: EnvironmentRef::none(&command.logical_id),
             created_at: now.clone(),
             last_activity_at: now,

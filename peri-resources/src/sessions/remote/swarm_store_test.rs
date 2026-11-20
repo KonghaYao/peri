@@ -70,6 +70,10 @@ fn session_row() -> SwarmSessionRow {
         state: "idle".to_owned(),
         model: Some("gpt-5".to_owned()),
         instructions: Some("be precise".to_owned()),
+        mcp_json: Some(
+            r#"[{"type":"mcp","server_label":"deepwiki","server_url":"https://mcp.example.test/mcp","headers":[{"name":"Authorization","value":"Bearer caller"}],"require_approval":"never","allowed_tools":["read"],"defer_loading":true}]"#
+                .to_owned(),
+        ),
         environment_json: r#"{"type":"none","id":"agent-one"}"#.to_owned(),
         created_at: "2026-01-01T00:00:00Z".to_owned(),
         last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
@@ -111,7 +115,7 @@ async fn sessions_round_trip_upsert_and_update() {
     assert_eq!(
         port.swarm_get_session("agent-one").await.unwrap(),
         Some(session_row()),
-        "instructions 与 environment 必须逐字落库"
+        "instructions、mcp_json 与 environment 必须逐字落库"
     );
 
     // 同一身份的再次 upsert 更新可变字段（不改 cwd / root_session_id）。
@@ -167,6 +171,25 @@ async fn sessions_round_trip_upsert_and_update() {
         .unwrap_err();
     assert!(matches!(missing.kind(), SessionResourceErrorKind::NotFound));
     assert_eq!(port.swarm_get_session("agent-missing").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_legacy_row_without_mcp_json_reads_back_as_none() {
+    let fixture = Fixture::current_shape().await;
+    let port = port_with(fixture.transport.clone(), StoreAccess::ReadWrite);
+    port.swarm_upsert_session(session_row()).await.unwrap();
+    // schema 16 旧行（尚未写入 mcp_json 的声明）在列上就是 NULL。
+    sqlx::query("UPDATE swarm_sessions SET mcp_json = NULL WHERE logical_id = 'agent-one'")
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+
+    let row = port
+        .swarm_get_session("agent-one")
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.mcp_json, None, "NULL 必须读回 None，不能伪造空数组文本");
 }
 
 #[tokio::test]

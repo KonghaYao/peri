@@ -225,8 +225,8 @@ const THREAD_MQ_COLUMNS: &[&str] = &[
     "original_draft",
 ];
 
-/// Swarm 会话列（v16 追加，design §4.3）：instructions 与 environment 是 S3 行类型的字段，
-/// 分别以可空文本与 canonical JSON 文本保存。
+/// Swarm 会话列（v16 追加，design §4.3）：instructions、mcp_json 与 environment 是 S3
+/// 行类型的字段，分别以可空文本、可空 canonical JSON 文本与 canonical JSON 文本保存。
 const SWARM_SESSIONS_COLUMNS: &[&str] = &[
     "logical_id",
     "root_session_id",
@@ -235,6 +235,7 @@ const SWARM_SESSIONS_COLUMNS: &[&str] = &[
     "state",
     "model",
     "instructions",
+    "mcp_json",
     "environment_json",
     "created_at",
     "last_activity_at",

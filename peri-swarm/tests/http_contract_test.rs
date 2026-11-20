@@ -6,6 +6,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use peri_swarm::config::{SwarmConfig, API_KEY_ENV, SSE_HEARTBEAT_MS_ENV, WORKSPACE_ROOT_ENV};
+use peri_swarm::domain::{McpHeader, McpToolSpec};
 use peri_swarm::http::{build_router, AppState};
 use peri_swarm::service::{InMemorySwarmService, ServiceConfig, SwarmService};
 use peri_swarm::store::{
@@ -796,4 +797,210 @@ async fn append_failure_maps_to_502_upstream_unavailable() {
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(value["error"]["code"], json!("upstream_unavailable"));
+}
+
+// ── caller-declared MCP tools (S8a1) ────────────────────────────────────────
+
+struct StoreHarness {
+    router: Router,
+    /// Kept alive so the configured workspace root outlives the router.
+    _workspace: TempDir,
+    store: Arc<MemorySwarmStore>,
+}
+
+fn harness_with_store() -> StoreHarness {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let config = Arc::new(config_for(&workspace, 15_000));
+    let store = Arc::new(MemorySwarmStore::new());
+    let service = Arc::new(InMemorySwarmService::new(
+        Arc::clone(&store) as Arc<dyn SwarmStore>,
+        ServiceConfig::default(),
+    ));
+    StoreHarness {
+        router: build_router(AppState::new(service, config)),
+        _workspace: workspace,
+        store,
+    }
+}
+
+fn deepwiki_tools() -> Value {
+    json!([{
+        "type": "mcp",
+        "server_label": "deepwiki",
+        "server_url": "https://mcp.example.test/mcp",
+        "headers": { "Authorization": "Bearer caller-token" },
+        "require_approval": "never",
+        "allowed_tools": ["read_wiki_structure"],
+        "defer_loading": true
+    }])
+}
+
+#[tokio::test]
+async fn create_accepts_and_persists_caller_declared_mcp_tools() {
+    let harness = harness_with_store();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01", "agent": { "tools": deepwiki_tools() } })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+
+    let row = harness
+        .store
+        .swarm_get_session("agent-01")
+        .await
+        .expect("store read")
+        .expect("row");
+    let expected = McpToolSpec {
+        headers: vec![McpHeader {
+            name: "Authorization".to_owned(),
+            value: "Bearer caller-token".to_owned(),
+        }],
+        require_approval: Some(json!("never")),
+        allowed_tools: Some(json!(["read_wiki_structure"])),
+        extra: serde_json::Map::from_iter([("defer_loading".to_owned(), json!(true))]),
+        ..McpToolSpec::new("deepwiki", "https://mcp.example.test/mcp")
+    };
+    assert_eq!(row.mcp_tools, vec![expected], "声明必须逐字段落库");
+}
+
+#[tokio::test]
+async fn create_without_tools_persists_no_mcp_declaration() {
+    let harness = harness_with_store();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+
+    let row = harness
+        .store
+        .swarm_get_session("agent-01")
+        .await
+        .expect("store read")
+        .expect("row");
+    assert!(row.mcp_tools.is_empty());
+}
+
+#[tokio::test]
+async fn repeated_create_is_idempotent_for_the_same_declaration_and_conflicts_on_another() {
+    let harness = harness_with_store();
+    let (status, _, first) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01", "tools": deepwiki_tools() })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+
+    // 同一声明：复用同一会话。
+    let (status, _, second) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01", "tools": deepwiki_tools() })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["created"], json!(false));
+    assert_eq!(second["rootSessionId"], first["rootSessionId"]);
+
+    // 数组形式的 headers 与对象形式规范化后相同：仍然幂等。
+    let (status, _, third) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "deepwiki",
+                "server_url": "https://mcp.example.test/mcp",
+                "headers": [{ "name": "Authorization", "value": "Bearer caller-token" }],
+                "require_approval": "never",
+                "allowed_tools": ["read_wiki_structure"],
+                "defer_loading": true
+            }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+
+    // 声明不同：身份冲突，字段路径指向 tools。
+    let (status, _, conflict) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({
+            "logicalId": "agent-01",
+            "tools": [{
+                "type": "mcp",
+                "server_label": "other",
+                "server_url": "https://mcp.example.test/mcp"
+            }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"]["code"], json!("identity_conflict"));
+    assert_eq!(conflict["error"]["details"]["field"], json!("tools"));
+}
+
+#[tokio::test]
+async fn malformed_tools_report_field_paths_and_non_mcp_tools_are_a_stated_gap() {
+    let harness = harness_with_store();
+
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({
+            "logicalId": "agent-01",
+            "tools": [{ "type": "mcp", "server_label": "x" }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert_eq!(value["error"]["code"], json!("invalid_input"));
+    assert_eq!(
+        value["error"]["details"]["field"],
+        json!("tools[0].server_url")
+    );
+
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({
+            "logicalId": "agent-01",
+            "tools": [{ "type": "function", "name": "run" }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{value}");
+    assert_eq!(value["error"]["code"], json!("unsupported_tool"));
+    assert_eq!(value["error"]["details"]["field"], json!("tools[0].type"));
+    assert_eq!(value["error"]["details"]["supported"], json!(["mcp"]));
 }

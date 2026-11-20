@@ -51,7 +51,7 @@ use super::{
     InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow,
     SwarmSessionUpdate, SwarmStore,
 };
-use crate::domain::{EnvironmentRef, InputState, ItemKind, ItemSource, SessionState};
+use crate::domain::{EnvironmentRef, InputState, ItemKind, ItemSource, McpToolSpec, SessionState};
 
 /// [`SwarmStore`] backed by the deployment's remote Loom port.
 pub struct RemoteSwarmStore {
@@ -149,6 +149,8 @@ fn decode<T: serde::de::DeserializeOwned>(
 }
 
 fn to_port_session(row: SwarmSessionRow) -> Result<PortSessionRow, StoreError> {
+    let mcp_json = McpToolSpec::encode_declaration(&row.mcp_tools)
+        .map_err(|error| StoreError::Unavailable(format!("cannot encode mcp tools: {error}")))?;
     Ok(PortSessionRow {
         logical_id: row.logical_id,
         root_session_id: row.root_session_id,
@@ -157,6 +159,7 @@ fn to_port_session(row: SwarmSessionRow) -> Result<PortSessionRow, StoreError> {
         state: row.state.as_str().to_owned(),
         model: row.model,
         instructions: row.instructions,
+        mcp_json,
         environment_json: encode(&row.environment, "environment")?,
         created_at: row.created_at,
         last_activity_at: row.last_activity_at,
@@ -165,6 +168,8 @@ fn to_port_session(row: SwarmSessionRow) -> Result<PortSessionRow, StoreError> {
 }
 
 fn from_port_session(row: PortSessionRow) -> Result<SwarmSessionRow, StoreError> {
+    let mcp_tools = McpToolSpec::decode_declaration(row.mcp_json.as_deref())
+        .map_err(|error| StoreError::Unavailable(format!("cannot decode mcp tools: {error}")))?;
     Ok(SwarmSessionRow {
         logical_id: row.logical_id,
         root_session_id: row.root_session_id,
@@ -173,6 +178,7 @@ fn from_port_session(row: PortSessionRow) -> Result<SwarmSessionRow, StoreError>
         state: parse_session_state(&row.state)?,
         model: row.model,
         instructions: row.instructions,
+        mcp_tools,
         environment: decode::<EnvironmentRef>(&row.environment_json, "environment")?,
         created_at: row.created_at,
         last_activity_at: row.last_activity_at,

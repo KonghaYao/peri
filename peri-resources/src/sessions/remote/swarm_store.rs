@@ -129,13 +129,14 @@ impl SwarmStorePort for RemoteSwarmStore {
 /// `root_session_id` 时走唯一键冲突，同样折成 `Conflict`。
 const UPSERT_SESSION_SQL: &str = "INSERT INTO swarm_sessions (
     logical_id, root_session_id, actor_key, cwd, state, model, instructions,
-    environment_json, created_at, last_activity_at, last_item_seq)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+    mcp_json, environment_json, created_at, last_activity_at, last_item_seq)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
 ON CONFLICT(logical_id) DO UPDATE SET
     actor_key = excluded.actor_key,
     state = excluded.state,
     model = excluded.model,
     instructions = excluded.instructions,
+    mcp_json = excluded.mcp_json,
     environment_json = excluded.environment_json,
     last_activity_at = excluded.last_activity_at,
     last_item_seq = excluded.last_item_seq
@@ -143,7 +144,7 @@ WHERE swarm_sessions.root_session_id = excluded.root_session_id
   AND swarm_sessions.cwd = excluded.cwd";
 
 const SELECT_SESSION_SQL: &str = "SELECT logical_id, root_session_id, actor_key, cwd, state,
-    model, instructions, environment_json, created_at, last_activity_at, last_item_seq
+    model, instructions, mcp_json, environment_json, created_at, last_activity_at, last_item_seq
     FROM swarm_sessions WHERE logical_id = ?1";
 
 const UPDATE_SESSION_SQL: &str = "UPDATE swarm_sessions
@@ -209,6 +210,7 @@ async fn upsert_session(store: &RemoteStore, row: &SwarmSessionRow) -> SessionRe
                 Value::Text(row.state.clone()),
                 optional_param(row.model.clone()),
                 optional_param(row.instructions.clone()),
+                optional_param(row.mcp_json.clone()),
                 Value::Text(row.environment_json.clone()),
                 Value::Text(row.created_at.clone()),
                 Value::Text(row.last_activity_at.clone()),
@@ -448,10 +450,11 @@ fn decode_session(values: &[Value]) -> SessionResourceResult<SwarmSessionRow> {
         state: text_field(values, 4, "state")?,
         model: optional_text_field(values, 5, "model")?,
         instructions: optional_text_field(values, 6, "instructions")?,
-        environment_json: text_field(values, 7, "environment")?,
-        created_at: text_field(values, 8, "created at")?,
-        last_activity_at: text_field(values, 9, "last activity at")?,
-        last_item_seq: seq_field(values, 10, "last item seq")?,
+        mcp_json: optional_text_field(values, 7, "mcp")?,
+        environment_json: text_field(values, 8, "environment")?,
+        created_at: text_field(values, 9, "created at")?,
+        last_activity_at: text_field(values, 10, "last activity at")?,
+        last_item_seq: seq_field(values, 11, "last item seq")?,
     })
 }
 

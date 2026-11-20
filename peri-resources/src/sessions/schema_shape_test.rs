@@ -128,8 +128,8 @@ async fn thread_mq_is_a_mandatory_current_table_with_exactly_the_pending_columns
 
 /// Swarm 四表是 v16 追加且**必需**的表：缺表即拒绝，列清单与 design §4.3 一致。
 ///
-/// `swarm_sessions` 必须能存 S3 行类型的 `instructions` 与 `environment`：前者是可空文本列，
-/// 后者是 canonical JSON 文本列（两者都参与形状判定，不能被悄悄删掉）。
+/// `swarm_sessions` 必须能存 S3 行类型的 `instructions`、调用方 MCP 声明与 `environment`：
+/// 前两者是可空文本列，`environment` 是 canonical JSON 文本列（都参与形状判定，不能被悄悄删掉）。
 #[tokio::test]
 async fn swarm_tables_are_mandatory_and_keep_the_session_fields() {
     let (_directory, mut connection) = fresh_database().await;
@@ -144,6 +144,7 @@ async fn swarm_tables_are_mandatory_and_keep_the_session_fields() {
                 "state",
                 "model",
                 "instructions",
+                "mcp_json",
                 "environment_json",
                 "created_at",
                 "last_activity_at",

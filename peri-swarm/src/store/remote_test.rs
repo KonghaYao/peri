@@ -17,11 +17,12 @@ use peri_resources::{
     SwarmInputRow as PortInputRow, SwarmItemRow as PortItemRow, SwarmSessionRow as PortSessionRow,
     SwarmSessionUpdate as PortSessionUpdate, SwarmStorePort,
 };
-use serde_json::json;
+use serde_json::{json, Map};
 
 use super::RemoteSwarmStore;
 use crate::domain::{
-    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, SessionState,
+    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, McpHeader, McpToolSpec,
+    SessionState,
 };
 use crate::store::{
     InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow,
@@ -266,6 +267,16 @@ fn session_row(logical_id: &str) -> SwarmSessionRow {
         state: SessionState::Idle,
         model: Some("model-a".to_owned()),
         instructions: Some("be brief".to_owned()),
+        mcp_tools: vec![McpToolSpec {
+            headers: vec![McpHeader {
+                name: "Authorization".to_owned(),
+                value: "Bearer caller".to_owned(),
+            }],
+            require_approval: Some(json!("never")),
+            allowed_tools: Some(json!({ "tool_names": ["read"], "read_only": true })),
+            extra: Map::from_iter([("defer_loading".to_owned(), json!(true))]),
+            ..McpToolSpec::new("deepwiki", "https://mcp.example.test/mcp")
+        }],
         environment: environment(logical_id),
         created_at: "2026-01-01T00:00:00.000000Z".to_owned(),
         last_activity_at: "2026-01-01T00:00:00.000000Z".to_owned(),
@@ -338,6 +349,13 @@ async fn session_round_trip_preserves_every_field() {
         serde_json::to_string(&row.environment).expect("environment json")
     );
     assert_eq!(stored.instructions.as_deref(), Some("be brief"));
+    assert_eq!(
+        stored.mcp_json.as_deref(),
+        Some(
+            r#"[{"type":"mcp","server_label":"deepwiki","server_url":"https://mcp.example.test/mcp","headers":[{"name":"Authorization","value":"Bearer caller"}],"require_approval":"never","allowed_tools":{"tool_names":["read"],"read_only":true},"defer_loading":true}]"#
+        ),
+        "MCP 声明必须以 canonical JSON 逐字段落库"
+    );
     assert_eq!(stored.model.as_deref(), Some("model-a"));
     assert_eq!(stored.actor_key, "agent/agent-1");
     assert_eq!(stored.last_item_seq, 0);
@@ -549,6 +567,7 @@ async fn a_corrupt_row_is_unavailable_instead_of_absent() {
         state: "paused".to_owned(),
         model: None,
         instructions: None,
+        mcp_json: None,
         environment_json: "{}".to_owned(),
         created_at: "2026-01-01T00:00:00.000000Z".to_owned(),
         last_activity_at: "2026-01-01T00:00:00.000000Z".to_owned(),
@@ -565,10 +584,51 @@ async fn a_corrupt_row_is_unavailable_instead_of_absent() {
 
     raw.state = "idle".to_owned();
     raw.environment_json = "not json".to_owned();
-    port.insert_raw_session(raw);
+    port.insert_raw_session(raw.clone());
     let error = store
         .swarm_get_session("agent-1")
         .await
         .expect_err("broken environment json is not decodable");
     assert!(matches!(error, StoreError::Unavailable(_)), "{error:?}");
+
+    raw.environment_json = "{}".to_owned();
+    raw.mcp_json = Some("not json".to_owned());
+    port.insert_raw_session(raw);
+    let error = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect_err("broken mcp declaration is not decodable");
+    assert!(matches!(error, StoreError::Unavailable(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_legacy_session_without_mcp_json_reads_an_empty_declaration() {
+    let port = Arc::new(FakePort::new());
+    let mut raw = PortSessionRow {
+        logical_id: "agent-1".to_owned(),
+        root_session_id: "root".to_owned(),
+        actor_key: "agent/agent-1".to_owned(),
+        cwd: "/tmp/agent-1".to_owned(),
+        state: "idle".to_owned(),
+        model: None,
+        instructions: None,
+        mcp_json: None,
+        environment_json: r#"{"type":"none","id":"agent-1"}"#.to_owned(),
+        created_at: "2026-01-01T00:00:00.000000Z".to_owned(),
+        last_activity_at: "2026-01-01T00:00:00.000000Z".to_owned(),
+        last_item_seq: 0,
+    };
+    port.insert_raw_session(raw.clone());
+
+    let store = store(Arc::clone(&port));
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.mcp_tools, Vec::new(), "旧行 NULL 读回空列表");
+
+    // 反向：空声明写回端口时也是 NULL，而不是 `[]` 文本。
+    store.swarm_upsert_session(row).await.expect("upsert");
+    assert_eq!(port.stored_session("agent-1").mcp_json, None);
 }

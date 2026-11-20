@@ -18,6 +18,7 @@ fn session_row() -> SwarmSessionRow {
         state: "idle".to_owned(),
         model: None,
         instructions: None,
+        mcp_json: None,
         environment_json: r#"{"type":"none","id":"agent-local"}"#.to_owned(),
         created_at: "2026-01-01T00:00:00Z".to_owned(),
         last_activity_at: "2026-01-01T00:00:00Z".to_owned(),

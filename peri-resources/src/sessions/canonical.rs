@@ -376,9 +376,10 @@ pub(super) const CREATE_THREAD_MQ_ORDER_INDEX_SQL: &str =
 /// Swarm 会话表（v16 追加）：`logical_id` 是逻辑会话身份，`root_session_id` 是预留给
 /// `session/new` 的 root 会话身份（唯一）。
 ///
-/// `instructions` 与 `environment_json` 是 S3 行类型的两个字段，必须无损落库：
-/// instructions 保持可空文本；environment 存 canonical JSON 对象（`{"type":"none","id":...}`），
-/// 由 peri-swarm 拥有编码形状，本层只保存字节。`last_item_seq` 是投影缓存，权威值仍由
+/// `instructions` 与 `mcp_json` / `environment_json` 是 S3 行类型的字段，必须无损落库：
+/// instructions 保持可空文本；mcp 存调用方声明的 canonical JSON 数组（无声明与旧行为
+/// `NULL`，形状由 peri-swarm 拥有）；environment 存 canonical JSON 对象
+/// （`{"type":"none","id":...}`）。`last_item_seq` 是投影缓存，权威值仍由
 /// `MAX(swarm_items.seq)` 决定（design §4.4）。
 pub(super) const CREATE_SWARM_SESSIONS_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS swarm_sessions (
@@ -389,6 +390,7 @@ pub(super) const CREATE_SWARM_SESSIONS_TABLE_SQL: &str =
     state TEXT NOT NULL,
     model TEXT,
     instructions TEXT,
+    mcp_json TEXT,
     environment_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     last_activity_at TEXT NOT NULL,

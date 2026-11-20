@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 
 use crate::domain::{
     Cursor, EnvironmentKind, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
-    SessionView, StreamEvent, SwarmError,
+    McpToolSpec, SessionView, StreamEvent, SwarmError,
 };
 
 /// Fully validated create command. The HTTP layer owns request parsing and cwd
@@ -27,6 +27,9 @@ pub struct CreateSessionCommand {
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub instructions: Option<String>,
+    /// Caller-declared MCP tools, already normalized by the HTTP layer. S8a
+    /// persists and compares them; ACP injection is S8a2 (`design §5.1`).
+    pub mcp_tools: Vec<McpToolSpec>,
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
     /// Root ACP session id reserved by the caller (S5 gateway). A trusted host

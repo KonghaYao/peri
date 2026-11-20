@@ -41,7 +41,7 @@ use super::service::AcpSwarmService;
 use crate::domain::{
     ActorKey, ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, InputKind, InputMode,
     InputOutcome, InputSubmission, ItemOrder, ItemPage, ItemView, ItemsWindow, LogicalId,
-    SessionState, SessionView, StreamEvent, SwarmError,
+    McpToolSpec, SessionState, SessionView, StreamEvent, SwarmError,
 };
 use crate::event_stream::FrameWriter;
 use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
@@ -552,6 +552,9 @@ pub struct Create {
     pub model: Option<String>,
     #[serde(default)]
     pub instructions: Option<String>,
+    /// Caller-declared MCP tools, already normalized by the HTTP layer.
+    #[serde(default)]
+    pub mcp_tools: Vec<McpToolSpec>,
     #[serde(default)]
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
@@ -581,6 +584,7 @@ impl Handler<Create> for SwarmActor {
             cwd: PathBuf::from(action.cwd),
             model: action.model,
             instructions: action.instructions,
+            mcp_tools: action.mcp_tools,
             initial_input: action.initial_input,
             environment: action.environment,
             root_session_id: action.root_session_id,

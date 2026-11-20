@@ -16,6 +16,7 @@ fn session_row() -> SwarmSessionRow {
         state: SessionState::Idle,
         model: None,
         instructions: None,
+        mcp_tools: Vec::new(),
         environment: crate::domain::EnvironmentRef::none(
             &crate::domain::LogicalId::parse("agent-1").expect("logical id"),
         ),

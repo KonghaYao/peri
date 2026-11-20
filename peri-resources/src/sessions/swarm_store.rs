@@ -12,14 +12,16 @@
 //!
 //! - 枚举值按 `peri-swarm` 的稳定字符串保存（`state` / `kind` / `input_id` 对应的
 //!   `accepted|handed_off|failed` 等），本层不解释取值；
-//! - JSON 事实按**文本**传递（`environment_json` / `source_json` / `payload_json`），与本机
-//!   `thread_mq.payload_json` 同一先例：形状由 `peri-swarm` 拥有，本层只保存与读回字节。
+//! - JSON 事实按**文本**传递（`mcp_json` / `environment_json` / `source_json` /
+//!   `payload_json`），与本机 `thread_mq.payload_json` 同一先例：形状由 `peri-swarm` 拥有，
+//!   本层只保存与读回字节。
 //!
 //! 三条映射约束（S6b 的 `SwarmStore` 实现按此逐字段搬移，不丢字段）：
 //!
 //! | S3 行字段 | 端口行字段 | 落库列 |
 //! | --- | --- | --- |
 //! | `instructions: Option<String>` | `instructions` | `swarm_sessions.instructions` |
+//! | `mcp_tools: Vec<McpToolSpec>` | `mcp_json`（调用方拥有的 canonical JSON 数组文本） | `swarm_sessions.mcp_json` |
 //! | `environment: EnvironmentRef` | `environment_json`（serde JSON） | `swarm_sessions.environment_json` |
 //! | `source: ItemSource` | `source_json`（serde JSON） | `swarm_items.source` |
 //! | `payload: Value` | `payload_json`（serde JSON） | `swarm_items.payload_json` |
@@ -54,6 +56,9 @@ pub struct SwarmSessionRow {
     pub model: Option<String>,
     /// 内联 instructions（S3 行类型字段，原样保存）。
     pub instructions: Option<String>,
+    /// 调用方声明的 MCP 工具（`peri-swarm` 规范化后的完整声明 JSON 数组）。
+    /// 无声明与 v16 之前写入的旧行为 `NULL`，读回为空列表；本层只保存字节。
+    pub mcp_json: Option<String>,
     /// environment 的 canonical JSON 文本（`{"type":...,"id":...}`）。
     pub environment_json: String,
     pub created_at: String,

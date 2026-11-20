@@ -6,6 +6,7 @@ pub mod event;
 pub mod identity;
 pub mod input;
 pub mod item;
+pub mod mcp;
 pub mod session;
 pub mod workspace;
 
@@ -17,6 +18,7 @@ pub use input::{
     ContentBlock, Disposition, InputKind, InputMode, InputOutcome, InputState, InputSubmission,
 };
 pub use item::{ItemKind, ItemOrder, ItemPage, ItemSource, ItemView, ItemsWindow};
+pub use mcp::{McpHeader, McpToolKind, McpToolSpec};
 pub use session::{
     AgentView, CreateSessionResponse, EnvironmentKind, EnvironmentRef, SandboxState, SandboxView,
     SessionState, SessionView, TurnView,

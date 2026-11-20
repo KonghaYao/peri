@@ -1,12 +1,12 @@
 use axum::http::HeaderMap;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{MAX_INSTRUCTIONS_BYTES, MAX_MODEL_BYTES, MAX_TEXT_BYTES};
 use crate::domain::{
     ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, InputKind, InputMode,
-    InputSubmission, ItemOrder, ItemsWindow, LogicalId, SwarmError,
+    InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, SwarmError,
 };
 
 #[derive(Debug, Deserialize)]
@@ -20,6 +20,11 @@ pub struct CreateSessionBody {
     pub instructions: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Caller-declared tools (OpenAI Agents API shape). Kept as a raw value so
+    /// a malformed entry or a non-array `tools` reports its exact field path
+    /// instead of axum's generic rejection (`resolve_tools` owns normalization).
+    #[serde(default)]
+    pub tools: Option<Value>,
     #[serde(default)]
     pub agent: Option<AgentBody>,
     #[serde(default)]
@@ -37,6 +42,29 @@ pub struct AgentBody {
     pub model: Option<String>,
     #[serde(default)]
     pub instructions: Option<String>,
+    #[serde(default)]
+    pub tools: Option<Value>,
+}
+
+/// One raw tool entry. Every known field is read as a [`Value`] so the
+/// normalizer can name the offending path; unknown fields are preserved in
+/// [`McpToolBody::extra`] instead of being rejected.
+#[derive(Debug, Deserialize)]
+struct McpToolBody {
+    #[serde(rename = "type", default)]
+    kind: Option<Value>,
+    #[serde(default)]
+    server_label: Option<Value>,
+    #[serde(default)]
+    server_url: Option<Value>,
+    #[serde(default)]
+    headers: Option<Value>,
+    #[serde(default)]
+    require_approval: Option<Value>,
+    #[serde(default)]
+    allowed_tools: Option<Value>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +181,195 @@ fn merge_agent_field(
         (Some(value), _) | (None, Some(value)) => Ok(Some(value)),
         (None, None) => Ok(None),
     }
+}
+
+/// Normalize caller-declared tools into typed MCP declarations (`design §2.2`).
+///
+/// Accepts the OpenAI Agents API MCP tool shape at both the flat and the nested
+/// `agent` position. Nothing is filtered by name, URL or credential policy:
+/// only shapes that cannot be represented as an [`McpToolSpec`] are rejected,
+/// and every rejection names its field path. Non-MCP tool types are an
+/// implementation gap reported as `unsupported_tool`, never silently dropped.
+pub fn resolve_tools(body: &CreateSessionBody) -> Result<Vec<McpToolSpec>, SwarmError> {
+    let flat = declared_tools(body.tools.as_ref(), "tools")?;
+    let nested = match body.agent.as_ref() {
+        Some(agent) => declared_tools(agent.tools.as_ref(), "agent.tools")?,
+        None => &[],
+    };
+    let (declared, prefix) = match (flat.is_empty(), nested.is_empty()) {
+        (true, true) => return Ok(Vec::new()),
+        (false, true) => (flat, "tools"),
+        (true, false) => (nested, "agent.tools"),
+        (false, false) if flat == nested => (flat, "tools"),
+        (false, false) => {
+            return Err(
+                SwarmError::invalid_input("flat and nested `agent` tools disagree")
+                    .with_details(json!({ "field": "tools" })),
+            );
+        }
+    };
+    declared
+        .iter()
+        .enumerate()
+        .map(|(index, value)| normalize_tool(prefix, index, value))
+        .collect()
+}
+
+fn declared_tools<'a>(value: Option<&'a Value>, field: &'a str) -> Result<&'a [Value], SwarmError> {
+    match value {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(items)) => Ok(items),
+        Some(_) => Err(invalid_tool(field.to_owned(), "tools must be an array")),
+    }
+}
+
+fn normalize_tool(prefix: &str, index: usize, value: &Value) -> Result<McpToolSpec, SwarmError> {
+    let path = format!("{prefix}[{index}]");
+    let body: McpToolBody = serde_json::from_value(value.clone()).map_err(|_| {
+        invalid_tool(
+            path.clone(),
+            "tool entry must be an object in the OpenAI Agents API tool shape",
+        )
+    })?;
+    let kind = match body.kind.as_ref() {
+        Some(Value::String(kind)) => kind.as_str(),
+        Some(_) => {
+            return Err(invalid_tool(
+                format!("{path}.type"),
+                "tool type must be a string",
+            ));
+        }
+        None => {
+            return Err(invalid_tool(
+                format!("{path}.type"),
+                "tool entry must declare `type`",
+            ));
+        }
+    };
+    if kind != "mcp" {
+        return Err(SwarmError::unsupported_tool(kind, &format!("{path}.type")));
+    }
+
+    let mut spec = McpToolSpec::new(
+        required_tool_string(body.server_label.as_ref(), &format!("{path}.server_label"))?,
+        required_tool_string(body.server_url.as_ref(), &format!("{path}.server_url"))?,
+    );
+    spec.headers = normalize_headers(body.headers.as_ref(), &format!("{path}.headers"))?;
+    spec.require_approval = verbatim_tool_value(
+        body.require_approval.as_ref(),
+        &format!("{path}.require_approval"),
+        &[ValueKind::String, ValueKind::Object],
+    )?;
+    spec.allowed_tools = verbatim_tool_value(
+        body.allowed_tools.as_ref(),
+        &format!("{path}.allowed_tools"),
+        &[ValueKind::Array, ValueKind::Object],
+    )?;
+    spec.extra = body.extra;
+    Ok(spec)
+}
+
+fn invalid_tool(field: impl Into<String>, reason: &str) -> SwarmError {
+    SwarmError::invalid_input(reason).with_details(json!({ "field": field.into() }))
+}
+
+fn required_tool_string(value: Option<&Value>, field: &str) -> Result<String, SwarmError> {
+    let Some(value) = value else {
+        return Err(invalid_tool(
+            field,
+            "field is required by the MCP tool shape",
+        ));
+    };
+    let Some(text) = value.as_str() else {
+        return Err(invalid_tool(field, "field must be a string"));
+    };
+    if text.trim().is_empty() {
+        return Err(invalid_tool(field, "field must not be empty"));
+    }
+    Ok(text.to_owned())
+}
+
+fn normalize_headers(value: Option<&Value>, field: &str) -> Result<Vec<McpHeader>, SwarmError> {
+    let mut headers = match value {
+        None | Some(Value::Null) => Vec::new(),
+        // Object form: `{"name": "value"}`. `serde_json`'s map is sorted by
+        // name, so this form is canonical without further sorting.
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(name, value)| {
+                let Some(text) = value.as_str() else {
+                    return Err(invalid_tool(
+                        format!("{field}.{name}"),
+                        "header value must be a string",
+                    ));
+                };
+                Ok(McpHeader {
+                    name: name.clone(),
+                    value: text.to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        // Array form: `[{"name": ..., "value": ...}]`, repeated names allowed.
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let path = format!("{field}[{index}]");
+                let Some(object) = item.as_object() else {
+                    return Err(invalid_tool(
+                        path,
+                        "header must be an object with `name` and `value`",
+                    ));
+                };
+                Ok(McpHeader {
+                    name: required_tool_string(object.get("name"), &format!("{path}.name"))?,
+                    value: required_tool_string(object.get("value"), &format!("{path}.value"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err(invalid_tool(
+                field,
+                "headers must be an object or an array of {name,value}",
+            ));
+        }
+    };
+    // Stable sort so both accepted shapes produce one canonical order while
+    // repeated names keep their relative order.
+    headers.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(headers)
+}
+
+#[derive(Clone, Copy)]
+enum ValueKind {
+    String,
+    Array,
+    Object,
+}
+
+fn verbatim_tool_value(
+    value: Option<&Value>,
+    field: &str,
+    allowed: &[ValueKind],
+) -> Result<Option<Value>, SwarmError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let matches = allowed.iter().any(|kind| match kind {
+        ValueKind::String => value.is_string(),
+        ValueKind::Array => value.is_array(),
+        ValueKind::Object => value.is_object(),
+    });
+    if !matches {
+        return Err(invalid_tool(
+            field,
+            "field has a shape this contract cannot record verbatim",
+        ));
+    }
+    Ok(Some(value.clone()))
 }
 
 pub fn resolve_create_input(body: &CreateSessionBody) -> Result<Option<String>, SwarmError> {
@@ -346,3 +563,7 @@ fn check_len(field: &str, value: &str, max: usize) -> Result<(), SwarmError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "request_test.rs"]
+mod tests;

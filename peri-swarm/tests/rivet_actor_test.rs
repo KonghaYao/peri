@@ -31,8 +31,8 @@ use peri_swarm::actor::service::ActorServiceConfig;
 use peri_swarm::actor::swarm::{registry, Info, InfoOutput, SwarmActor, ACTOR_NAME};
 use peri_swarm::domain::{
     ActorKey, ContentBlock, Cursor, Disposition, EnvironmentKind, ErrorCode, InputKind, InputMode,
-    InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId, SessionState, StreamEvent,
-    TurnEvent,
+    InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId, McpToolSpec, SessionState,
+    StreamEvent, TurnEvent,
 };
 use peri_swarm::gateway::{RivetServiceConfig, RivetSwarmService};
 use peri_swarm::service::{CreateSessionCommand, SwarmService};
@@ -402,12 +402,19 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
         .expect("open_stream returns as soon as the actor sends headers");
     let (_, mut first_turn) = pre_create.into_parts();
 
+    // S8a1: the caller-declared MCP declaration crosses the gateway/actor
+    // action boundary and is persisted; it is not injected into ACP yet.
+    let mut declared_mcp = McpToolSpec::new("deepwiki", "https://mcp.example.test/mcp");
+    declared_mcp.require_approval = Some(json!("never"));
+    declared_mcp.allowed_tools = Some(json!(["read_wiki_structure"]));
+
     let created = service
         .create_session(CreateSessionCommand {
             logical_id: logical_a.clone(),
             cwd: cwd.clone(),
             model: None,
             instructions: Some("keep it short".to_owned()),
+            mcp_tools: vec![declared_mcp.clone()],
             initial_input: Some("hello".to_owned()),
             environment: EnvironmentKind::None,
             root_session_id: None,
@@ -467,6 +474,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             cwd: cwd.clone(),
             model: None,
             instructions: None,
+            mcp_tools: Vec::new(),
             initial_input: None,
             environment: EnvironmentKind::None,
             root_session_id: Some(reserved.clone()),
@@ -486,6 +494,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             cwd: cwd.clone(),
             model: None,
             instructions: Some("keep it short".to_owned()),
+            mcp_tools: vec![declared_mcp.clone()],
             initial_input: None,
             environment: EnvironmentKind::None,
             root_session_id: None,
@@ -494,6 +503,32 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
         .expect("repeat create");
     assert!(!repeated.created, "repeat create must not create");
     assert_eq!(repeated.session.root_session_id, root_session_id);
+
+    // The declaration was persisted through the real actor + store, and a
+    // different declaration for the same logicalId is an identity conflict.
+    let stored = store
+        .swarm_get_session(logical_a.as_str())
+        .await
+        .expect("read the session row")
+        .expect("row");
+    assert_eq!(stored.mcp_tools, vec![declared_mcp.clone()]);
+    let mut other_mcp = declared_mcp.clone();
+    other_mcp.server_label = "other".to_owned();
+    let conflict = service
+        .create_session(CreateSessionCommand {
+            logical_id: logical_a.clone(),
+            cwd: cwd.clone(),
+            model: None,
+            instructions: Some("keep it short".to_owned()),
+            mcp_tools: vec![other_mcp],
+            initial_input: None,
+            environment: EnvironmentKind::None,
+            root_session_id: None,
+        })
+        .await
+        .expect_err("different MCP declaration");
+    assert_eq!(conflict.code(), ErrorCode::IdentityConflict);
+    assert_eq!(conflict.details()["field"], json!("tools"));
 
     // Live SSE: open the stream before the turn, then submit.
     let after_first = created.session.last_item_seq;

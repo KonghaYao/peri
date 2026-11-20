@@ -31,6 +31,7 @@ pub async fn create_session(
         true,
     )?;
     let (model, instructions) = request::resolve_agent(&body)?;
+    let mcp_tools = request::resolve_tools(&body)?;
     let initial_input = request::resolve_create_input(&body)?;
     let environment = request::resolve_environment(&body)?;
     let stream = body.stream;
@@ -39,6 +40,7 @@ pub async fn create_session(
         cwd,
         model,
         instructions,
+        mcp_tools,
         initial_input,
         environment,
         root_session_id: None,

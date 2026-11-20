@@ -209,6 +209,7 @@ impl SwarmService for RivetSwarmService {
             cwd: command.cwd.to_string_lossy().into_owned(),
             model: command.model,
             instructions: command.instructions,
+            mcp_tools: command.mcp_tools,
             initial_input: command.initial_input,
             environment: command.environment,
             root_session_id: Some(root_session_id),

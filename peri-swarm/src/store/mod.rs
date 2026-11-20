@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::domain::{
-    EnvironmentRef, InputState, ItemKind, ItemSource, ItemView, SessionState, SwarmError,
+    EnvironmentRef, InputState, ItemKind, ItemSource, ItemView, McpToolSpec, SessionState,
+    SwarmError,
 };
 
 /// Failure classes of the store port. `Unavailable` and `Conflict` are reported,
@@ -56,6 +57,10 @@ pub struct SwarmSessionRow {
     /// Inline instructions are a Swarm-owned fact (`plan §4`). S6 decides the
     /// column encoding; this port must not drop them.
     pub instructions: Option<String>,
+    /// Caller-declared MCP tools, persisted as canonical JSON in
+    /// `swarm_sessions.mcp_json` (S8a1). No declaration is an empty list; old
+    /// rows with `NULL` read back the same way.
+    pub mcp_tools: Vec<McpToolSpec>,
     pub environment: EnvironmentRef,
     pub created_at: String,
     pub last_activity_at: String,

@@ -388,6 +388,7 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
             state: SessionState::Idle,
             model: Some("stub-model".to_owned()),
             instructions: Some("s6b2 shared loom store".to_owned()),
+            mcp_tools: Vec::new(),
             environment: EnvironmentRef::none(&logical),
             created_at: created_at.clone(),
             last_activity_at: created_at.clone(),
@@ -598,6 +599,7 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
             state: SessionState::Running,
             model: Some("stub-model".to_owned()),
             instructions: Some("s6b2 swarm rows".to_owned()),
+            mcp_tools: Vec::new(),
             environment: EnvironmentRef {
                 kind: EnvironmentKind::None,
                 id: Some(rows_logical.as_str().to_owned()),
