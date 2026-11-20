@@ -127,3 +127,25 @@ settings 缺字段无可读错误、SDK 示例两实参丢 `after`、回放无 `
 （3 个真实 Loom 测试仍 `ignored`）；`peri-sandbox` 全量 72 pass、swarm 子集 37 pass。
 **本轮没有重跑 Loom/Rivet/Bun 的真实端到端链路**：SRT exec、hosted 工具调用与 SDK
 三实参续读需要第二轮 dogfood 用真实环境复验，不能据此记录为已验收。
+
+## 7. 2026-11-21 dogfood 第二轮修复
+
+第二轮独立 dogfood 报告确认 host 创建、workspace Bash、items 翻页与追问链路可用，
+但“只凭 README 一次跑通”仍为 PARTIAL：实时 SSE 示例时序不终止、心跳 `lastItemSeq`
+恒为 0、items 缺少用户输入。本轮修复：
+
+| 修复 | 证据 |
+| --- | --- |
+| 心跳 `lastItemSeq` 反映会话当前 `MAX(seq)`（SSE 订阅与 item 写入方共享 tail） | `streaming_test::heartbeat_reports_the_session_tail_while_the_stream_stays_open`、`heartbeat_has_no_id_and_reports_the_last_item_seq`；`in_memory_test::subscribe_replays_from_the_cursor` 断言订阅 tail |
+| README 推荐的“先开流再 POST”顺序能收到本轮 user/assistant/turn 帧 | `streaming_test::stream_opened_before_post_delivers_the_new_turn` |
+| 用户输入在受理后追加单帧 `message` item（`payload.role=user`、`id=itim_input_<inputId>`），重放同一 `inputId` 不重复 | `reader_test::user_input_is_one_frame_with_a_stable_identity_and_advances_the_tail`、`in_memory_test::input_idempotency_and_conflict`、`http_contract_test::event_submission_is_idempotent_and_conflicts_are_visible`、`items_pagination_test::item_shape_carries_stable_identity`、真实 host 的 `actor_runtime_test` live 断言 |
+| none 与 hosted 会话的 items 都含 user + assistant 帧且 seq 单调 | `http_contract_test::hosted_session_items_carry_user_and_assistant_frames`、`items_pagination_test` 的 asc/desc 分页 |
+| README 实时 SSE 示例改为“先开流再 POST”，补充回放/尾部心跳/终止条件/`Last-Event-ID` 差异 | `peri-swarm/README.md`「官方 SDK 示例」「SSE 帧、终止条件与游标」 |
+| Loom `--run-dir` 私有性、无 `/healthz`、Rivet 6420 共享 engine 的确认/停止方式 | `peri-swarm/README.md`「启动顺序」 |
+| HTTP/items 契约同步 | `docs/design/peri-swarm.md` §4.2/§4.4/§4.5 |
+
+门禁结果（2026-11-21，本工作树）：`./scripts/cargo-rmcp-patched.sh test -p peri-swarm`
+209 passed / 0 failed / 3 ignored（真实 Loom 测试仍 `ignored`）；`clippy -p peri-swarm
+--all-targets -D warnings` 通过。**本轮没有重跑** Loom/Rivet/Bun/SRT 的真实端到端
+链路：hosted 会话的真实 SRT 工具调用、真实 Loom 双库与官方 SDK 的实时/回放序列留给
+第三轮 user agent 复验；本轮只以 actor/HTTP 契约测试与 fake host 断言上述行为。

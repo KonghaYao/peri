@@ -23,6 +23,7 @@
 //! open until that run terminates (`design §2.5` input/append path).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -96,6 +97,8 @@ pub struct ItemLog {
     store: Arc<dyn SwarmStore>,
     channel: broadcast::Sender<StreamEvent>,
     seq_lock: AsyncMutex<()>,
+    /// Shared `MAX(seq)` for SSE heartbeats; updated after each append.
+    tail: Arc<AtomicU64>,
     state: Mutex<LogState>,
     /// Mirror of `state.active` for async waiters (turn handoff to a queued run).
     active_watch: watch::Sender<Option<String>>,
@@ -116,6 +119,7 @@ impl ItemLog {
         logical_id: impl Into<String>,
         store: Arc<dyn SwarmStore>,
         channel: broadcast::Sender<StreamEvent>,
+        tail: Arc<AtomicU64>,
     ) -> Self {
         let (active_watch, _receiver) = watch::channel(None);
         Self {
@@ -123,6 +127,7 @@ impl ItemLog {
             store,
             channel,
             seq_lock: AsyncMutex::new(()),
+            tail,
             state: Mutex::new(LogState::default()),
             active_watch,
         }
@@ -131,6 +136,40 @@ impl ItemLog {
     #[must_use]
     pub fn channel(&self) -> &broadcast::Sender<StreamEvent> {
         &self.channel
+    }
+
+    /// Shared session tail (`MAX(seq)`), also reported by SSE heartbeats.
+    #[must_use]
+    pub fn tail(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.tail)
+    }
+
+    /// Persist one accepted user input as a single-frame `message` item.
+    ///
+    /// The gateway records the input when the `swarm_inputs` receipt is
+    /// inserted; the host's `user_message_chunk` echo is dropped by the
+    /// projection, so this is the only user frame in the log. `inputId` keys
+    /// the item identity (`itim_input_<inputId>`), while `seq` remains the
+    /// ordering cursor. The frame deliberately has no `complete` flag: it is
+    /// not part of an assistant delta stream and must not terminate a replay.
+    pub async fn record_user_input(
+        &self,
+        input_id: Option<&str>,
+        text: &str,
+    ) -> Result<u64, SwarmError> {
+        let mut payload = json!({ "role": "user", "text": text });
+        if let Some(input_id) = input_id {
+            payload["inputId"] = json!(input_id);
+        }
+        self.append_item(
+            ProjectedItem {
+                kind: ItemKind::Message,
+                source: ItemSource::root(),
+                payload,
+            },
+            input_id.map(|input_id| format!("itim_input_{input_id}")),
+        )
+        .await
     }
 
     #[must_use]
@@ -471,6 +510,10 @@ impl ItemLog {
             ));
         };
 
+        // Persisted before the broadcast: a heartbeat may report this seq
+        // before a viewer has rendered the item, which is the intended
+        // "session progressed" meaning.
+        self.tail.fetch_max(seq, Ordering::Relaxed);
         self.set_session_state(SessionState::Running, Some(seq))
             .await?;
         self.broadcast(StreamEvent::Item(ItemView {

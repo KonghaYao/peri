@@ -242,7 +242,8 @@ async fn create_returns_the_documented_shape_and_sdk_aliases() {
     assert_eq!(value["logicalId"], json!("agent-01"));
     assert_eq!(value["created"], json!(true));
     assert_eq!(value["state"], json!("idle"));
-    assert_eq!(value["lastItemSeq"], json!(1));
+    // The create input is logged as a user message; the fake reply follows it.
+    assert_eq!(value["lastItemSeq"], json!(2));
     assert_eq!(value["agent"]["model"], json!("model-a"));
     assert_eq!(value["agent"]["instructions"], json!("be brief"));
     assert_eq!(value["environment"]["type"], json!("none"));
@@ -451,7 +452,8 @@ async fn event_submission_is_idempotent_and_conflicts_are_visible() {
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(value["accepted"], json!(true));
     assert_eq!(value["disposition"], json!("inserted"));
-    assert_eq!(value["lastItemSeq"], json!(1));
+    // user message (acceptance) + fake assistant reply.
+    assert_eq!(value["lastItemSeq"], json!(2));
 
     let (status, _, value) = send(
         &harness.router,
@@ -464,7 +466,34 @@ async fn event_submission_is_idempotent_and_conflicts_are_visible() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(value["disposition"], json!("existing"));
-    assert_eq!(value["lastItemSeq"], json!(1));
+    assert_eq!(value["lastItemSeq"], json!(2));
+
+    let (status, _, page) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?order=asc",
+        None,
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let items = page["items"].as_array().expect("items");
+    assert_eq!(
+        items.len(),
+        2,
+        "a replayed inputId must not duplicate the user frame"
+    );
+    assert_eq!(items[0]["seq"], json!(1));
+    assert_eq!(items[0]["kind"], json!("message"));
+    assert_eq!(items[0]["payload"]["role"], json!("user"));
+    assert_eq!(items[0]["payload"]["text"], json!("hello"));
+    assert_eq!(items[0]["payload"]["inputId"], json!(input_id));
+    assert_eq!(items[0]["id"], items[0]["itemId"]);
+    assert_eq!(items[0]["itemId"], json!(format!("itim_input_{input_id}")));
+    assert_eq!(items[1]["seq"], json!(2));
+    assert_eq!(items[1]["payload"]["text"], json!("fake-echo: hello"));
+    assert_eq!(page["lastItemSeq"], json!(2));
 
     let (status, _, value) = send(
         &harness.router,
@@ -532,6 +561,69 @@ async fn event_submission_is_idempotent_and_conflicts_are_visible() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(value["error"]["code"], json!("unknown_field"));
+}
+
+/// The fake records `openai_hosted` without contacting Bun, so this exercises
+/// the same item path the actor uses for hosted sessions.
+#[tokio::test]
+async fn hosted_session_items_carry_user_and_assistant_frames() {
+    let harness = harness();
+    let (status, created) = create_session(
+        &harness,
+        json!({
+            "logicalId": "agent-hosted",
+            "environment": { "type": "openai_hosted" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["environment"]["type"], json!("openai_hosted"));
+
+    let input_id = uuid::Uuid::now_v7().to_string();
+    let (status, _, ack) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-hosted/events",
+        Some(json!({
+            "inputId": input_id,
+            "kind": "user",
+            "mode": "turn",
+            "text": "hosted hello"
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{ack}");
+    assert_eq!(ack["lastItemSeq"], json!(2));
+
+    let (status, _, page) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-hosted/items?order=asc",
+        None,
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let items = page["items"].as_array().expect("items");
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["seq"].as_u64().expect("seq"))
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(items[0]["payload"]["role"], json!("user"));
+    assert_eq!(items[0]["payload"]["text"], json!("hosted hello"));
+    assert_eq!(items[0]["itemId"], json!(format!("itim_input_{input_id}")));
+    assert_eq!(
+        items[1]["payload"]["text"],
+        json!("fake-echo: hosted hello")
+    );
+    assert_eq!(page["lastItemSeq"], json!(2));
+    assert_eq!(page["hasMore"], json!(false));
 }
 
 #[tokio::test]

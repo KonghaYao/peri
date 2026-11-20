@@ -681,6 +681,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         logical.as_str(),
         item_store,
         broadcast::channel(256).0,
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
     ));
 
     // ── a. real Peri host on the remote store, one turn ─────────────────────
@@ -1387,6 +1388,7 @@ async fn unreachable_loom_fails_without_creating_a_local_store() {
         logical.as_str(),
         Arc::new(peri_swarm::store::MemorySwarmStore::new()),
         broadcast::channel(16).0,
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
     ));
     let child_error = AcpChild::spawn(
         ChildConfig {

@@ -10,6 +10,7 @@
 //! per SSE client: dropping the client drops its broadcast receiver, the task
 //! stops, and the actor's HTTP callback ends. Turns are unaffected.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -156,14 +157,34 @@ impl RivetSwarmService {
             return Err(SwarmError::upstream_unavailable("swarm_actor_stream"));
         }
         let (sender, receiver) = broadcast::channel(self.config.channel_capacity.max(1));
-        tokio::spawn(forward_stream(response, sender));
-        Ok(EventSubscription::new(Vec::new(), receiver))
+        // The actor replays from `cursor`, so the subscription tail starts at
+        // the stored MAX(seq) (or the client cursor if the store read fails)
+        // and advances with every forwarded item.
+        let tail = Arc::new(AtomicU64::new(
+            match self.store.swarm_last_seq(logical_id.as_str()).await {
+                Ok(seq) => seq,
+                Err(error) => {
+                    tracing::warn!(
+                        logical_id = logical_id.as_str(),
+                        error = %error,
+                        "swarm last seq read failed; heartbeat starts from the cursor"
+                    );
+                    cursor.value()
+                }
+            },
+        ));
+        tokio::spawn(forward_stream(response, sender, Arc::clone(&tail)));
+        Ok(EventSubscription::new(Vec::new(), receiver, tail))
     }
 }
 
 /// Parse the actor SSE stream and forward domain events. Ends when the client
 /// side (all broadcast receivers) or the actor stream goes away.
-async fn forward_stream(response: reqwest::Response, sender: broadcast::Sender<StreamEvent>) {
+async fn forward_stream(
+    response: reqwest::Response,
+    sender: broadcast::Sender<StreamEvent>,
+    tail: Arc<AtomicU64>,
+) {
     let mut parser = FrameParser::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
@@ -178,6 +199,10 @@ async fn forward_stream(response: reqwest::Response, sender: broadcast::Sender<S
             let Some(event) = frame.into_stream_event() else {
                 continue;
             };
+            if let Some(seq) = event.item_seq() {
+                // Persisted by the actor before the frame was sent.
+                tail.fetch_max(seq, Ordering::Relaxed);
+            }
             if sender.send(event).is_err() {
                 // No viewer left: dropping the response closes the actor
                 // callback. The turn itself is not cancelled (`design §6.2`).
@@ -298,7 +323,7 @@ impl SwarmService for RivetSwarmService {
                 );
                 let (sender, receiver) = broadcast::channel(1);
                 drop(sender);
-                EventSubscription::new(Vec::new(), receiver)
+                EventSubscription::new(Vec::new(), receiver, Arc::new(AtomicU64::new(0)))
             }
         }
     }

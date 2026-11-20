@@ -187,10 +187,14 @@ async fn stream_create_subscribes_before_the_first_turn() {
     let text = read_until(response.into_body(), "\"stopReason\":\"end_turn\"").await;
     assert!(text.contains("event: session"), "{text}");
     let session_at = text.find("event: session").expect("session event");
+    // The create input is logged before the turn opens, so the subscription
+    // (opened before the turn) sees the user frame first.
+    let user_at = text.find("\"role\":\"user\"").expect("user item");
     let started_at = text.find("\"state\":\"started\"").expect("started");
-    let item_at = text.find("event: item").expect("item event");
+    let item_at = text.find("\"seq\":2").expect("assistant item");
     let completed_at = text.find("\"state\":\"completed\"").expect("completed");
-    assert!(session_at < started_at, "{text}");
+    assert!(session_at < user_at, "{text}");
+    assert!(user_at < started_at, "{text}");
     assert!(started_at < item_at, "{text}");
     assert!(item_at < completed_at, "{text}");
     assert!(text.contains("id: 1"), "{text}");
@@ -294,6 +298,43 @@ async fn conflicting_and_invalid_cursors_are_rejected_before_streaming() {
     assert_eq!(value["error"]["code"], json!("conflicting_cursor"));
 }
 
+/// The README's realtime order: open the stream at the current tail, then POST.
+/// The stream must deliver the new user frame, the assistant frame and the turn
+/// terminal without replaying older items.
+#[tokio::test]
+async fn stream_opened_before_post_delivers_the_new_turn() {
+    let harness = harness(60_000);
+    create_session(&harness).await;
+    submit(&harness, "first").await;
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/v1/agents/sessions/agent-01/events?afterSeq=2",
+            None,
+            Some(TOKEN),
+            &[],
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // POST runs the turn while the body is not polled; the transport buffers
+    // the new frames, which is what the SDK example relies on.
+    submit(&harness, "second").await;
+
+    let text = read_until(response.into_body(), "\"state\":\"completed\"").await;
+    assert!(!text.contains("\"seq\":1"), "{text}");
+    assert!(!text.contains("\"seq\":2"), "{text}");
+    assert!(text.contains("\"seq\":3"), "{text}");
+    assert!(text.contains("\"role\":\"user\""), "{text}");
+    assert!(text.contains("\"text\":\"second\""), "{text}");
+    assert!(text.contains("\"seq\":4"), "{text}");
+    assert!(text.contains("\"state\":\"started\""), "{text}");
+}
+
 #[tokio::test]
 async fn heartbeat_has_no_id_and_reports_the_last_item_seq() {
     let harness = harness(25);
@@ -320,7 +361,57 @@ async fn heartbeat_has_no_id_and_reports_the_last_item_seq() {
     assert!(item_at < heartbeat_at, "{text}");
     let heartbeat_frame = &text[heartbeat_at..];
     assert!(!heartbeat_frame.contains("id:"), "{text}");
-    assert!(heartbeat_frame.contains("\"lastItemSeq\":1"), "{text}");
+    assert!(heartbeat_frame.contains("\"lastItemSeq\":2"), "{text}");
+}
+
+/// A stream opened at the tail has nothing to replay. Its heartbeat must still
+/// report the session's real progress, not a constant 0, and must keep doing so
+/// while the session advances. The stream itself stays open by design.
+#[tokio::test]
+async fn heartbeat_reports_the_session_tail_while_the_stream_stays_open() {
+    let harness = harness(25);
+    create_session(&harness).await;
+    submit(&harness, "first").await;
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/v1/agents/sessions/agent-01/events?afterSeq=2",
+            None,
+            Some(TOKEN),
+            &[],
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut text = String::new();
+    while !text.contains("event: heartbeat") {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("heartbeat timeout")
+            .expect("sse ended early")
+            .expect("sse chunk");
+        text.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(!text.contains("event: item"), "nothing to replay: {text}");
+    assert!(text.contains("\"lastItemSeq\":2"), "{text}");
+
+    // The stream is not closed by `after == tail`; advance the session and
+    // check a later heartbeat reflects the new tail (user 3 + reply 4).
+    submit(&harness, "second").await;
+    text.clear();
+    while !text.contains("\"lastItemSeq\":4") {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("heartbeat timeout after the new turn")
+            .expect("sse ended early")
+            .expect("sse chunk");
+        text.push_str(&String::from_utf8_lossy(&chunk));
+    }
 }
 
 #[tokio::test]

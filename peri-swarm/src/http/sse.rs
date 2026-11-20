@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
@@ -49,6 +51,10 @@ fn event_response_with_initial(
 ///
 /// Only `item` events carry an SSE `id` equal to `seq`; `turn` and `gap` are
 /// not persisted in `swarm_items` and therefore do not advance `Last-Event-ID`.
+///
+/// The heartbeat payload's `lastItemSeq` is the session's current
+/// `MAX(seq)` (read from the shared tail), not the last seq this stream
+/// delivered. It reports progress; a client resumes from an item's `seq`.
 pub fn event_stream(
     subscription: EventSubscription,
     heartbeat: Duration,
@@ -78,7 +84,10 @@ pub fn event_stream(
                 _ = state.heartbeat.tick() => {
                     let event = Event::default()
                         .event("heartbeat")
-                        .data(json!({ "lastItemSeq": state.last_seq }).to_string());
+                        .data(
+                            json!({ "lastItemSeq": state.session_tail.load(Ordering::Relaxed) })
+                                .to_string(),
+                        );
                     return Some((Ok(event), Some(state)));
                 }
             }
@@ -91,11 +100,15 @@ struct StreamState {
     backlog: VecDeque<StreamEvent>,
     live: broadcast::Receiver<StreamEvent>,
     heartbeat: Interval,
+    /// Last seq delivered on this stream (dedupe and gap bookkeeping).
     last_seq: u64,
+    /// Session tail shared with the item log, used by heartbeats.
+    session_tail: Arc<AtomicU64>,
 }
 
 impl StreamState {
     fn new(subscription: EventSubscription, heartbeat: Duration, initial: Vec<Event>) -> Self {
+        let session_tail = subscription.tail();
         let (backlog, live) = subscription.into_parts();
         let mut heartbeat = interval(heartbeat.max(Duration::from_millis(1)));
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -106,6 +119,7 @@ impl StreamState {
             live,
             heartbeat,
             last_seq: 0,
+            session_tail,
         }
     }
 

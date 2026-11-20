@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -156,11 +157,21 @@ pub struct HostHistoryPage {
     pub snapshot_token: Option<String>,
 }
 
+/// Per-session SSE hub: the broadcast sender plus the shared item tail.
+///
+/// The tail is updated by the `ItemLog` after each persisted append and read by
+/// SSE heartbeats, so `lastItemSeq` reflects the session, not one viewer.
+#[derive(Clone, Debug)]
+struct StreamHub {
+    sender: broadcast::Sender<StreamEvent>,
+    tail: Arc<AtomicU64>,
+}
+
 pub struct AcpSwarmService {
     store: Arc<dyn SwarmStore>,
     config: ActorServiceConfig,
     sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
-    channels: Mutex<HashMap<String, broadcast::Sender<StreamEvent>>>,
+    channels: Mutex<HashMap<String, StreamHub>>,
     /// Serializes `create_session` so two concurrent creates cannot reserve two
     /// hosts for the same logical id.
     create_lock: AsyncMutex<()>,
@@ -196,15 +207,18 @@ impl AcpSwarmService {
         Self::new(Arc::new(crate::store::MemorySwarmStore::new()), config)
     }
 
-    /// SSE channel of a session. Callers register the stream before
+    /// SSE channel and tail of a session. Callers register the stream before
     /// `create_session` runs the first turn (`SwarmService::open_stream`).
-    fn channel_for(&self, logical_id: &str) -> broadcast::Sender<StreamEvent> {
+    fn hub_for(&self, logical_id: &str) -> StreamHub {
         let mut channels = self.channels.lock();
         channels
             .entry(logical_id.to_owned())
             .or_insert_with(|| {
                 let (sender, _receiver) = broadcast::channel(self.config.channel_capacity.max(1));
-                sender
+                StreamHub {
+                    sender,
+                    tail: Arc::new(AtomicU64::new(0)),
+                }
             })
             .clone()
     }
@@ -258,11 +272,12 @@ impl AcpSwarmService {
         }
         let model = self.resolve_model(row.model.as_deref())?;
         let workspace = self.reattach_workspace(&row).await?;
-        let channel = self.channel_for(logical_id.as_str());
+        let hub = self.hub_for(logical_id.as_str());
         let log = Arc::new(ItemLog::new(
             logical_id.as_str(),
             Arc::clone(&self.store),
-            channel.clone(),
+            hub.sender.clone(),
+            hub.tail,
         ));
         let session_store = self
             .config
@@ -304,7 +319,7 @@ impl AcpSwarmService {
             );
             return Err(SwarmError::upstream_unavailable("session_id_mismatch"));
         }
-        let runtime = Arc::new(SessionRuntime::new(Arc::new(child), log, channel));
+        let runtime = Arc::new(SessionRuntime::new(Arc::new(child), log, hub.sender));
         self.sessions
             .lock()
             .insert(row.logical_id, Arc::clone(&runtime));
@@ -865,11 +880,12 @@ impl AcpSwarmService {
         root_session_id: String,
         workspace: Option<&SandboxMcpBinding>,
     ) -> Result<Arc<SessionRuntime>, SwarmError> {
-        let channel = self.channel_for(command.logical_id.as_str());
+        let hub = self.hub_for(command.logical_id.as_str());
         let log = Arc::new(ItemLog::new(
             command.logical_id.as_str(),
             Arc::clone(&self.store),
-            channel.clone(),
+            hub.sender.clone(),
+            hub.tail,
         ));
         let session_store = self
             .config
@@ -914,7 +930,11 @@ impl AcpSwarmService {
                 "agent session identity does not match the reserved id",
             ));
         }
-        Ok(Arc::new(SessionRuntime::new(Arc::new(child), log, channel)))
+        Ok(Arc::new(SessionRuntime::new(
+            Arc::new(child),
+            log,
+            hub.sender,
+        )))
     }
 }
 
@@ -983,6 +1003,7 @@ impl SwarmService for AcpSwarmService {
                 .runtime(&command.logical_id)
                 .map_err(|_| SwarmError::upstream_unavailable("session_not_live"))?;
             if let Some(text) = command.initial_input.as_deref() {
+                runtime.log.record_user_input(None, text).await?;
                 self.run_turn(&runtime, text).await?;
             }
             let session = self.view_by_id(&command.logical_id).await?;
@@ -1050,6 +1071,7 @@ impl SwarmService for AcpSwarmService {
             .insert(command.logical_id.as_str().to_owned(), Arc::clone(&runtime));
 
         if let Some(text) = command.initial_input.as_deref() {
+            runtime.log.record_user_input(None, text).await?;
             self.run_turn(&runtime, text).await?;
         }
         let session = self.view_by_id(&command.logical_id).await?;
@@ -1126,6 +1148,17 @@ impl SwarmService for AcpSwarmService {
                 tracing::warn!(error = %error, "swarm input receipt write failed");
                 return Err(SwarmError::queue_unavailable("put_input"));
             }
+        }
+
+        if submission.kind == InputKind::User {
+            // Recorded at acceptance. The host echoes `user_message_chunk`, but
+            // the projection drops that echo, so this is the only user frame in
+            // the log. A retried `inputId` returns `Existing` above and never
+            // reaches this branch, so the item is appended once.
+            runtime
+                .log
+                .record_user_input(Some(&input_id), &submission.effective_text())
+                .await?;
         }
 
         if submission.kind == InputKind::Control {
@@ -1219,12 +1252,22 @@ impl SwarmService for AcpSwarmService {
         // live delivery.
         let live = runtime.channel.subscribe();
         let backlog = self.replay_after(logical_id, cursor).await?;
-        Ok(EventSubscription::new(backlog, live))
+        let tail = runtime.log.tail();
+        // A host restart rebuilds the log with an empty tail; the store is the
+        // authority for items persisted before this process opened a stream.
+        tail.fetch_max(self.last_seq(logical_id).await?, Ordering::Relaxed);
+        Ok(EventSubscription::new(backlog, live, tail))
     }
 
     async fn open_stream(&self, logical_id: &LogicalId) -> EventSubscription {
-        let live = self.channel_for(logical_id.as_str()).subscribe();
-        EventSubscription::new(Vec::new(), live)
+        let hub = self.hub_for(logical_id.as_str());
+        // Best effort: a new session has no items; an existing one may have
+        // history from before this stream was opened (`stream:true` create).
+        if let Ok(last_seq) = self.store.swarm_last_seq(logical_id.as_str()).await {
+            hub.tail.fetch_max(last_seq, Ordering::Relaxed);
+        }
+        let live = hub.sender.subscribe();
+        EventSubscription::new(Vec::new(), live, hub.tail)
     }
 }
 

@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -39,7 +40,12 @@ async fn fixture() -> Fixture {
         .await
         .expect("session row");
     let (channel, events) = broadcast::channel(64);
-    let log = Arc::new(ItemLog::new("agent-1", Arc::clone(&store), channel));
+    let log = Arc::new(ItemLog::new(
+        "agent-1",
+        Arc::clone(&store),
+        channel,
+        Arc::new(AtomicU64::new(0)),
+    ));
     Fixture { log, store, events }
 }
 
@@ -107,6 +113,67 @@ async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
         .expect("row");
     assert_eq!(row.state, SessionState::Idle);
     assert_eq!(row.last_item_seq, 3);
+}
+
+#[tokio::test]
+async fn user_input_is_one_frame_with_a_stable_identity_and_advances_the_tail() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+
+    let input_id = "0192f0c5-0000-7000-8000-00000000abcd";
+    let seq = log
+        .record_user_input(Some(input_id), "hello")
+        .await
+        .expect("user item");
+    assert_eq!(seq, 1);
+
+    let seen = drain(&mut events);
+    assert_eq!(seen.len(), 1, "the user message is a single frame");
+    let StreamEvent::Item(item) = &seen[0] else {
+        panic!("expected the user item, got {:?}", seen[0]);
+    };
+    assert_eq!(item.kind, ItemKind::Message);
+    assert_eq!(item.seq, 1);
+    assert_eq!(item.item_id, format!("itim_input_{input_id}"));
+    assert_eq!(item.id, item.item_id);
+    assert_eq!(item.source.agent_id, "root");
+    assert_eq!(item.payload["role"], json!("user"));
+    assert_eq!(item.payload["text"], json!("hello"));
+    assert_eq!(item.payload["inputId"], json!(input_id));
+    assert!(
+        item.payload.get("complete").is_none(),
+        "a user frame must not terminate an assistant replay: {:?}",
+        item.payload
+    );
+    assert_eq!(
+        log.tail().load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the shared tail tracks the appended seq"
+    );
+
+    // The host's `user_message_chunk` echo is dropped by the projection, so a
+    // turn must not mint a second user row.
+    log.begin_turn("req-user").await.expect("turn");
+    log.ingest(
+        "session/update",
+        &json!({
+            "update": {
+                "sessionUpdate": "user_message_chunk",
+                "content": { "type": "text", "text": "hello" },
+            },
+        }),
+    )
+    .await;
+    log.finish_turn("req-user", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    let rows = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("items");
+    assert_eq!(rows.len(), 1, "no duplicate user frame: {rows:?}");
 }
 
 #[tokio::test]

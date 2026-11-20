@@ -123,7 +123,8 @@ async fn ascending_pages_cover_every_item_once() {
     assert_eq!(seqs(&first), [1, 2]);
     assert_eq!(first["nextCursor"], json!(2));
     assert_eq!(first["hasMore"], json!(true));
-    assert_eq!(first["lastItemSeq"], json!(5));
+    // Five turns, each appending a user message and a fake assistant reply.
+    assert_eq!(first["lastItemSeq"], json!(10));
     assert_eq!(first["order"], json!("asc"));
 
     let (_, _, second) = send(
@@ -139,14 +140,14 @@ async fn ascending_pages_cover_every_item_once() {
     let (_, _, third) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=4",
+        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=8",
         None,
     )
     .await;
-    assert_eq!(seqs(&third), [5]);
+    assert_eq!(seqs(&third), [9, 10]);
     assert_eq!(third["nextCursor"], json!(null));
     assert_eq!(third["hasMore"], json!(false));
-    assert_eq!(third["lastItemSeq"], json!(5));
+    assert_eq!(third["lastItemSeq"], json!(10));
 
     let mut collected = Vec::new();
     let mut cursor: Option<u64> = None;
@@ -162,7 +163,7 @@ async fn ascending_pages_cover_every_item_once() {
             None => break,
         }
     }
-    assert_eq!(collected, [1, 2, 3, 4, 5]);
+    assert_eq!(collected, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 }
 
 #[tokio::test]
@@ -178,28 +179,28 @@ async fn descending_pages_walk_backwards_with_a_stable_cursor() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{newest}");
-    assert_eq!(seqs(&newest), [5, 4]);
-    assert_eq!(newest["nextCursor"], json!(4));
+    assert_eq!(seqs(&newest), [10, 9]);
+    assert_eq!(newest["nextCursor"], json!(9));
     assert_eq!(newest["hasMore"], json!(true));
     assert_eq!(newest["order"], json!("desc"));
 
     let (_, _, older) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&order=desc&after=4",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=desc&after=9",
         None,
     )
     .await;
-    assert_eq!(seqs(&older), [3, 2]);
+    assert_eq!(seqs(&older), [8, 7]);
 
     let (_, _, oldest) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&order=desc&after=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=desc&after=3",
         None,
     )
     .await;
-    assert_eq!(seqs(&oldest), [1]);
+    assert_eq!(seqs(&oldest), [2, 1]);
     assert_eq!(oldest["nextCursor"], json!(null));
     assert_eq!(oldest["hasMore"], json!(false));
 }
@@ -211,28 +212,37 @@ async fn item_shape_carries_stable_identity() {
     let (_, _, page) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=1",
+        "/v1/agents/sessions/agent-01/items?limit=2",
         None,
     )
     .await;
-    let item = &page["items"][0];
-    assert_eq!(item["seq"], json!(1));
-    assert_eq!(item["id"], item["itemId"]);
-    assert!(item["itemId"]
+    let user = &page["items"][0];
+    assert_eq!(user["seq"], json!(1));
+    assert_eq!(user["id"], user["itemId"]);
+    let input_id = user["payload"]["inputId"]
         .as_str()
-        .expect("item id")
-        .starts_with("itim_"));
-    assert_eq!(item["kind"], json!("message"));
-    assert_eq!(item["source"]["agentId"], json!("root"));
-    assert_eq!(item["source"]["taskId"], json!(null));
-    assert_eq!(item["payload"]["text"], json!("fake-echo: message 1"));
-    let created_at = item["createdAt"].as_str().expect("createdAt");
+        .expect("inputId links the user frame");
+    assert_eq!(user["itemId"], json!(format!("itim_input_{input_id}")));
+    assert_eq!(user["kind"], json!("message"));
+    assert_eq!(user["source"]["agentId"], json!("root"));
+    assert_eq!(user["source"]["taskId"], json!(null));
+    assert_eq!(user["payload"]["role"], json!("user"));
+    assert_eq!(user["payload"]["text"], json!("message 1"));
+    assert_eq!(user["payload"]["inputId"], json!(input_id));
+    assert_eq!(user["payload"]["complete"], json!(null));
+    let created_at = user["createdAt"].as_str().expect("createdAt");
     assert!(created_at.contains('T'), "{created_at}");
     assert!(
         created_at.ends_with('Z') || created_at.ends_with("+00:00"),
         "createdAt must be UTC RFC3339: {created_at}"
     );
-    assert_eq!(item["truncated"], json!(false));
+    assert_eq!(user["truncated"], json!(false));
+
+    let assistant = &page["items"][1];
+    assert_eq!(assistant["seq"], json!(2));
+    assert_eq!(assistant["kind"], json!("message"));
+    assert_eq!(assistant["payload"]["text"], json!("fake-echo: message 1"));
+    assert!(assistant["payload"]["messageId"].is_string());
 }
 
 #[tokio::test]
@@ -247,7 +257,7 @@ async fn after_aliases_must_agree_and_limits_are_bounded() {
         None,
     )
     .await;
-    assert_eq!(seqs(&agreed), [3, 4, 5]);
+    assert_eq!(seqs(&agreed), [3, 4, 5, 6, 7, 8, 9, 10]);
 
     let (status, _, value) = send(
         &harness.router,
@@ -288,7 +298,7 @@ async fn cursor_beyond_the_tail_is_an_empty_page() {
     assert_eq!(seqs(&page), Vec::<u64>::new());
     assert_eq!(page["nextCursor"], json!(null));
     assert_eq!(page["hasMore"], json!(false));
-    assert_eq!(page["lastItemSeq"], json!(5));
+    assert_eq!(page["lastItemSeq"], json!(10));
 }
 
 #[tokio::test]

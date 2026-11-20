@@ -9,6 +9,8 @@ mod in_memory;
 pub use in_memory::{InMemorySwarmService, ServiceCall, ServiceConfig, TurnPolicy};
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -54,16 +56,36 @@ pub struct CreateSessionResult {
 ///
 /// Implementations must create the broadcast receiver **before** reading the
 /// backlog so no event can fall between replay and live delivery.
+///
+/// `tail` is the session's current `MAX(seq)`, shared with the writer that
+/// appends items. The SSE heartbeat reports it, so a client can distinguish
+/// "no new items" from "the session is still progressing". It is progress
+/// information only: the resume cursor stays the `seq` of a delivered item.
 #[derive(Debug)]
 pub struct EventSubscription {
     backlog: Vec<StreamEvent>,
     live: broadcast::Receiver<StreamEvent>,
+    tail: Arc<AtomicU64>,
 }
 
 impl EventSubscription {
     #[must_use]
-    pub fn new(backlog: Vec<StreamEvent>, live: broadcast::Receiver<StreamEvent>) -> Self {
-        Self { backlog, live }
+    pub fn new(
+        backlog: Vec<StreamEvent>,
+        live: broadcast::Receiver<StreamEvent>,
+        tail: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            backlog,
+            live,
+            tail,
+        }
+    }
+
+    /// Shared handle to the session tail; readers observe appends live.
+    #[must_use]
+    pub fn tail(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.tail)
     }
 
     #[must_use]

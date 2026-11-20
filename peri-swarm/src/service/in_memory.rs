@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -72,9 +74,16 @@ struct ActiveTurn {
     started_at: String,
 }
 
+#[derive(Clone, Debug)]
+struct StreamHub {
+    sender: broadcast::Sender<StreamEvent>,
+    /// Session tail reported by SSE heartbeats; updated on every append.
+    tail: Arc<AtomicU64>,
+}
+
 #[derive(Debug, Default)]
 struct ServiceInner {
-    channels: HashMap<String, broadcast::Sender<StreamEvent>>,
+    channels: HashMap<String, StreamHub>,
     turns: HashMap<String, ActiveTurn>,
     calls: Vec<ServiceCall>,
 }
@@ -131,7 +140,7 @@ impl InMemorySwarmService {
         self.with_inner(|inner| inner.calls.push(call));
     }
 
-    fn channel_for(&self, logical_id: &str) -> broadcast::Sender<StreamEvent> {
+    fn hub_for(&self, logical_id: &str) -> StreamHub {
         self.with_inner(|inner| {
             inner
                 .channels
@@ -139,14 +148,30 @@ impl InMemorySwarmService {
                 .or_insert_with(|| {
                     let (sender, _receiver) =
                         broadcast::channel(self.config.channel_capacity.max(1));
-                    sender
+                    StreamHub {
+                        sender,
+                        tail: Arc::new(AtomicU64::new(0)),
+                    }
                 })
                 .clone()
         })
     }
 
+    fn note_tail(&self, logical_id: &str, seq: u64) {
+        let tail = self.with_inner(|inner| {
+            inner
+                .channels
+                .get(logical_id)
+                .map(|hub| Arc::clone(&hub.tail))
+        });
+        if let Some(tail) = tail {
+            tail.fetch_max(seq, Ordering::Relaxed);
+        }
+    }
+
     fn broadcast(&self, logical_id: &str, event: StreamEvent) {
-        let sender = self.with_inner(|inner| inner.channels.get(logical_id).cloned());
+        let sender =
+            self.with_inner(|inner| inner.channels.get(logical_id).map(|hub| hub.sender.clone()));
         if let Some(sender) = sender {
             // No receivers is not an error: SSE clients reload from `/items`.
             let _ = sender.send(event);
@@ -256,8 +281,20 @@ impl InMemorySwarmService {
         source: ItemSource,
         payload: serde_json::Value,
     ) -> Result<u64, SwarmError> {
+        self.append_item_with_id(logical_id, kind, source, payload, None)
+            .await
+    }
+
+    async fn append_item_with_id(
+        &self,
+        logical_id: &LogicalId,
+        kind: ItemKind,
+        source: ItemSource,
+        payload: serde_json::Value,
+        stable_item_id: Option<String>,
+    ) -> Result<u64, SwarmError> {
         let (payload, truncated) = ItemView::fit_payload(payload);
-        let item_id = ItemView::new_item_id();
+        let item_id = stable_item_id.unwrap_or_else(ItemView::new_item_id);
         let created_at = peri_time::now_utc_rfc3339();
         let mut appended_seq = None;
 
@@ -307,6 +344,7 @@ impl InMemorySwarmService {
             ));
         };
 
+        self.note_tail(logical_id.as_str(), seq);
         self.set_session_state(logical_id, SessionState::Running, Some(seq))
             .await?;
         self.broadcast(
@@ -323,6 +361,30 @@ impl InMemorySwarmService {
             }),
         );
         Ok(seq)
+    }
+
+    /// Persist one accepted user input as a single-frame `message` item.
+    ///
+    /// Mirrors the actor: `inputId` keys the item identity and the frame has no
+    /// `complete` flag, so it never terminates an assistant replay.
+    async fn record_user_input(
+        &self,
+        logical_id: &LogicalId,
+        input_id: Option<&str>,
+        text: &str,
+    ) -> Result<u64, SwarmError> {
+        let mut payload = json!({ "role": "user", "text": text });
+        if let Some(input_id) = input_id {
+            payload["inputId"] = json!(input_id);
+        }
+        self.append_item_with_id(
+            logical_id,
+            ItemKind::Message,
+            ItemSource::root(),
+            payload,
+            input_id.map(|input_id| format!("itim_input_{input_id}")),
+        )
+        .await
     }
 
     async fn fail_turn(&self, logical_id: &LogicalId, request_id: &str, error: &SwarmError) {
@@ -481,6 +543,8 @@ impl SwarmService for InMemorySwarmService {
                 if row.state == SessionState::Running {
                     return Err(SwarmError::turn_in_progress());
                 }
+                self.record_user_input(&command.logical_id, None, text)
+                    .await?;
                 self.run_turn(&command.logical_id, text).await?;
             }
             let session = self.view_by_id(&command.logical_id).await?;
@@ -536,6 +600,8 @@ impl SwarmService for InMemorySwarmService {
         }
 
         if let Some(text) = command.initial_input.as_deref() {
+            self.record_user_input(&command.logical_id, None, text)
+                .await?;
             self.run_turn(&command.logical_id, text).await?;
         }
         let session = self.view_by_id(&command.logical_id).await?;
@@ -615,6 +681,14 @@ impl SwarmService for InMemorySwarmService {
             }
         }
 
+        if submission.kind == InputKind::User {
+            // Recorded at acceptance, once per inputId (a replayed id takes the
+            // `Existing` branch above). The fake never projects host history, so
+            // this is the only user frame in the log.
+            self.record_user_input(logical_id, Some(&input_id), &submission.effective_text())
+                .await?;
+        }
+
         if submission.kind == InputKind::Control || row.state == SessionState::Running {
             let last_item_seq = self.last_seq(logical_id).await?;
             return Ok(InputOutcome::new(
@@ -689,15 +763,24 @@ impl SwarmService for InMemorySwarmService {
     ) -> Result<EventSubscription, SwarmError> {
         self.record(ServiceCall::Subscribe(logical_id.as_str().to_owned()));
         self.require_session(logical_id).await?;
-        let live = self.channel_for(logical_id.as_str()).subscribe();
+        let hub = self.hub_for(logical_id.as_str());
+        let live = hub.sender.subscribe();
         let backlog = self.replay_after(logical_id, cursor).await?;
-        Ok(EventSubscription::new(backlog, live))
+        hub.tail
+            .fetch_max(self.last_seq(logical_id).await?, Ordering::Relaxed);
+        Ok(EventSubscription::new(backlog, live, hub.tail))
     }
 
     async fn open_stream(&self, logical_id: &LogicalId) -> EventSubscription {
         self.record(ServiceCall::OpenStream(logical_id.as_str().to_owned()));
-        let live = self.channel_for(logical_id.as_str()).subscribe();
-        EventSubscription::new(Vec::new(), live)
+        let hub = self.hub_for(logical_id.as_str());
+        // Best effort: a new session has no items; an existing one may have
+        // history from before this stream was opened (`stream:true` create).
+        if let Ok(last_seq) = self.store.swarm_last_seq(logical_id.as_str()).await {
+            hub.tail.fetch_max(last_seq, Ordering::Relaxed);
+        }
+        let live = hub.sender.subscribe();
+        EventSubscription::new(Vec::new(), live, hub.tail)
     }
 }
 

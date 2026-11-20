@@ -94,19 +94,30 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 - 每个 item 持久化为一行，`seq` 由 Swarm 状态库单调分配；先落库后广播，订阅者
   不存在也不影响执行。
+- 用户输入在 `swarm_inputs` 受理（`disposition=inserted`）后写成一条单帧
+  `message` item：`payload={role:"user",text,inputId}`，`id`/`itemId` 为
+  `itim_input_<inputId>`，没有 `delta`/`complete` 字段。host 的
+  `user_message_chunk` 回显不投影，因此同一 `inputId` 重试不会重复；`create` 的
+  `input` 同样写一条（每次 create 调用各一条，重试 create 仍按既有语义重跑该轮）。
+  assistant 帧仍按 `payload.messageId` 聚合。
 - item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
   游标，不能用 `id` 去重 delta 帧。
 - SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn` 与 `gap` 不持久化，不推进
-  `Last-Event-ID`。
+  `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是 `completed` 或
+  `failed`。
 - 重连游标接受 `Last-Event-ID` 头或 `?afterSeq=`；服务端先补 `seq > after` 的
-  backlog，再转实时广播。心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。
+  backlog，再转实时广播。心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳
+  payload 的 `lastItemSeq` 是该会话当前 `MAX(seq)`（与 item 写入方共享），只表示
+  进度，不能代替已投递 item 的 `seq` 作为恢复游标。
 - 回放（backlog）只发 `item` 帧，没有 `turn` 控制帧；客户端的回放终止条件是目标
-  message 的 `payload.complete=true`。实时段才用 `turn.state=completed|failed` 终止，
-  只含 `lastItemSeq` 的心跳帧必须忽略。
+  message 的 `payload.complete=true`。`after` 已等于或超过会话末尾时没有可回放
+  item，流保持打开并只发心跳；客户端必须自行超时或取消（或改用 items 分页）。
 - items 支持 `order=asc|desc`、`after`、`limit`，响应给出 `items`、`hasMore`、
-  `nextCursor`、`lastItemSeq`；同一消息的 delta 与 complete 共享稳定 `itemId`。
-  item 是事件级帧（delta、tool_call、tool_update、tool_result），不是官方高层
-  item；消费方按 `payload.messageId` 聚合，最终文本取 `payload.complete` 帧。
+  `nextCursor`、`lastItemSeq`；同一 assistant 消息的 delta 与 complete 共享稳定
+  `itemId`。item 是事件级帧（user message、assistant delta、tool_call、
+  tool_update、tool_result），不是官方高层 item；assistant 按
+  `payload.messageId` 聚合，最终文本取 `payload.complete` 帧，`tool_call` 按
+  `payload.toolCallId` 聚合（可能分带/不带 `input` 的两帧）。
 
 ### 4.3 创建与首轮
 
@@ -121,7 +132,8 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   代生成）。同一 key 与同一内容重放返回同一受理，`disposition=existing`；同一 key
   不同内容返回 `409 input_conflict`，且不入队。
 - 受理是逐条的：序列按受理顺序追加，`seq` 前缀可核对；**不**承诺多事件整批全有
-  或全无。
+  或全无。`kind=user` 的受理同时追加一条 user message item；同一 key 与内容的重放
+  返回 `existing`，不重复追加。
 - `POST /sessions` 的 `Idempotency-Key` 只用于稳定 `logicalId` 并复用已存在会话，
   不是跨请求的事务承诺。
 
@@ -135,8 +147,10 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 目录；工具在 `sandbox.workspacePath` 下执行。
 
 `POST /sessions/{logicalId}/events` 在 HTTP 层返回 `202`，但 `mode=turn` 的受理在
-本轮进入终态后才返回；响应中的 `lastItemSeq` 已包含本轮 item。它不表示「排队后
-异步执行」。未完成 turn、`session/resume` 与后台任务边界仍是 §8 的未完成项。
+本轮进入终态后才返回；响应中的 `lastItemSeq` 已包含本轮 item。对调用方而言，**返回
+时本轮可能已经完成**；它不是「排队后异步执行」，也不能在返回后再开流补看本轮——
+要观察本轮，先建立 SSE 再 POST。未完成 turn、`session/resume` 与后台任务边界仍是
+§8 的未完成项。
 
 ## 5. MCP 注入
 

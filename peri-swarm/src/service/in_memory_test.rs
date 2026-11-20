@@ -133,14 +133,15 @@ async fn input_idempotency_and_conflict() {
         .await
         .expect("first");
     assert_eq!(first.disposition, Disposition::Inserted);
-    assert_eq!(first.last_item_seq, 1);
+    // One user message at acceptance plus the fake assistant reply.
+    assert_eq!(first.last_item_seq, 2);
 
     let replay = service
         .submit_input(&id, submission("input-1", "hello"))
         .await
         .expect("replay");
     assert_eq!(replay.disposition, Disposition::Existing);
-    assert_eq!(replay.last_item_seq, 1);
+    assert_eq!(replay.last_item_seq, 2);
 
     let conflict = service
         .submit_input(&id, submission("input-1", "different"))
@@ -159,7 +160,18 @@ async fn input_idempotency_and_conflict() {
         )
         .await
         .expect("items");
-    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        [1, 2],
+        "a replayed inputId must not append a second user item"
+    );
+    assert_eq!(page.items[0].payload["role"], serde_json::json!("user"));
+    assert_eq!(page.items[0].payload["text"], serde_json::json!("hello"));
+    assert_eq!(page.items[0].item_id, "itim_input_input-1");
+    assert_eq!(
+        page.items[1].payload["text"],
+        serde_json::json!("fake-echo: hello")
+    );
 }
 
 #[tokio::test]
@@ -205,7 +217,21 @@ async fn turn_in_progress_and_steer() {
     steer.mode = InputMode::Steer;
     let accepted = service.submit_input(&id, steer).await.expect("steer");
     assert_eq!(accepted.disposition, Disposition::Inserted);
-    assert_eq!(accepted.last_item_seq, 1);
+    // user(1) + fake reply(2) + steered user input(3).
+    assert_eq!(accepted.last_item_seq, 3);
+    let page = service
+        .list_items(
+            &id,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("items");
+    assert_eq!(page.items[2].payload["role"], serde_json::json!("user"));
+    assert_eq!(page.items[2].payload["text"], serde_json::json!("adjust"));
 }
 
 #[tokio::test]
@@ -262,7 +288,8 @@ async fn pagination_is_stable_in_both_orders() {
     );
     assert_eq!(first.next_cursor, Some(2));
     assert!(first.has_more);
-    assert_eq!(first.last_item_seq, 5);
+    // Five turns, each appending user + fake assistant.
+    assert_eq!(first.last_item_seq, 10);
 
     let second = service
         .list_items(
@@ -286,7 +313,7 @@ async fn pagination_is_stable_in_both_orders() {
             &id,
             ItemsWindow {
                 order: ItemOrder::Asc,
-                after: Some(4),
+                after: Some(8),
                 limit: 2,
             },
         )
@@ -294,7 +321,7 @@ async fn pagination_is_stable_in_both_orders() {
         .expect("page 3");
     assert_eq!(
         third.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
-        [5]
+        [9, 10]
     );
     assert_eq!(third.next_cursor, None);
     assert!(!third.has_more);
@@ -312,16 +339,16 @@ async fn pagination_is_stable_in_both_orders() {
         .expect("desc 1");
     assert_eq!(
         newest.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
-        [5, 4]
+        [10, 9]
     );
-    assert_eq!(newest.next_cursor, Some(4));
+    assert_eq!(newest.next_cursor, Some(9));
 
     let older = service
         .list_items(
             &id,
             ItemsWindow {
                 order: ItemOrder::Desc,
-                after: Some(4),
+                after: Some(9),
                 limit: 2,
             },
         )
@@ -329,7 +356,7 @@ async fn pagination_is_stable_in_both_orders() {
         .expect("desc 2");
     assert_eq!(
         older.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
-        [3, 2]
+        [8, 7]
     );
 
     let oldest = service
@@ -337,7 +364,7 @@ async fn pagination_is_stable_in_both_orders() {
             &id,
             ItemsWindow {
                 order: ItemOrder::Desc,
-                after: Some(2),
+                after: Some(3),
                 limit: 2,
             },
         )
@@ -345,7 +372,7 @@ async fn pagination_is_stable_in_both_orders() {
         .expect("desc 3");
     assert_eq!(
         oldest.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
-        [1]
+        [2, 1]
     );
     assert_eq!(oldest.next_cursor, None);
 }
@@ -376,7 +403,14 @@ async fn subscribe_replays_from_the_cursor() {
         .iter()
         .filter_map(StreamEvent::item_seq)
         .collect();
-    assert_eq!(seqs, [2, 3]);
+    assert_eq!(seqs, [2, 3, 4, 5, 6]);
+    assert_eq!(
+        subscription
+            .tail()
+            .load(std::sync::atomic::Ordering::Relaxed),
+        6,
+        "the subscription tail is the persisted MAX(seq)"
+    );
 }
 
 #[tokio::test]
@@ -390,13 +424,25 @@ async fn stream_is_opened_before_the_first_turn_executes() {
 
     let (backlog, mut live) = subscription.into_parts();
     assert!(backlog.is_empty());
+    // The input is logged before the turn starts, so a stream opened first sees
+    // the user frame even though the create call runs the turn synchronously.
+    let user = live.recv().await.expect("user item");
+    assert_eq!(user.item_seq(), Some(1));
+    match user {
+        StreamEvent::Item(item) => {
+            assert_eq!(item.kind, ItemKind::Message);
+            assert_eq!(item.payload["role"], serde_json::json!("user"));
+            assert_eq!(item.payload["text"], serde_json::json!("hello"));
+        }
+        other => panic!("expected the user item, got {other:?}"),
+    }
     let started = live.recv().await.expect("started");
     assert!(matches!(
         started,
         StreamEvent::Turn(TurnEvent::Started { .. })
     ));
-    let item = live.recv().await.expect("item");
-    assert_eq!(item.item_seq(), Some(1));
+    let item = live.recv().await.expect("assistant item");
+    assert_eq!(item.item_seq(), Some(2));
     let completed = live.recv().await.expect("completed");
     assert!(matches!(
         completed,
@@ -439,9 +485,15 @@ async fn sequence_resumes_from_the_store_after_restart() {
         .expect("items");
     assert_eq!(
         page.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
-        [1, 2]
+        [1, 2, 3, 4]
     );
-    assert_eq!(page.last_item_seq, 2);
+    assert_eq!(page.last_item_seq, 4);
+    assert_eq!(page.items[0].payload["role"], serde_json::json!("user"));
+    assert_eq!(page.items[2].payload["role"], serde_json::json!("user"));
+    assert_eq!(
+        page.items[2].payload["text"],
+        serde_json::json!("after restart")
+    );
 }
 
 #[tokio::test]

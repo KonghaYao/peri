@@ -439,11 +439,21 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
     );
     let idle = service.get_session(&logical).await.expect("session view");
     assert_eq!(idle.state, SessionState::Idle, "turn finished");
-    // All deltas and the completion item of one message share one identity.
+    // The accepted input is a single user frame; the host's echo is not
+    // projected, so the log can be folded into the full conversation.
+    let user_items: Vec<_> = first
+        .items
+        .iter()
+        .filter(|item| item.payload["role"] == "user")
+        .collect();
+    assert_eq!(user_items.len(), 1, "one frame per accepted input");
+    assert_eq!(user_items[0].payload["text"], json!("hello"));
+    // All deltas and the completion item of one assistant message share one
+    // identity.
     let message_items: Vec<_> = first
         .items
         .iter()
-        .filter(|item| item.kind == ItemKind::Message)
+        .filter(|item| item.kind == ItemKind::Message && item.payload["messageId"].is_string())
         .collect();
     assert!(message_items.len() >= 2, "deltas plus the completion item");
     let ids: HashSet<_> = message_items
@@ -784,6 +794,7 @@ async fn idle_mq_dispatch_produces_a_turn() {
         logical.as_str(),
         Arc::new(MemorySwarmStore::new()),
         broadcast::channel(64).0,
+        Arc::new(AtomicU64::new(0)),
     ));
     let child = peri_swarm::actor::AcpChild::spawn(
         peri_swarm::actor::ChildConfig {
