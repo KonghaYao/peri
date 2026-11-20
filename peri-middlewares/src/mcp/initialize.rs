@@ -22,6 +22,7 @@ use super::client::STDIO_CONNECT_TIMEOUT;
 use super::config::ConfigSource;
 use super::config::McpServerConfig;
 use super::config::OAuthConfig;
+use super::host_workspace::HOST_WORKSPACE_SERVER_NAME;
 use super::oauth_flow::OAuthFlowEvent;
 use super::transport::TransportConfig;
 use super::transport::TransportKind;
@@ -280,14 +281,23 @@ impl McpClientPool {
         status_tx: tokio::sync::watch::Sender<McpInitStatus>,
     ) {
         pool.seal_builtin_context();
+        // 宿主显式绑定（`Remote` / `Absent`）是 workspace 面的唯一事实源：两种状态
+        // 都跳过 builtin overlay——既不自启本机 workspace，也不探测本机目录。
+        // 未绑定（`None`）保持既有 bare 行为，会话声明的 workspace 仍可替换 builtin。
+        let host_workspace = pool.host_workspace().cloned();
+        let local_workspace = host_workspace.is_none();
         let loaded = match pool.configuration_snapshot.get() {
-            Some(snapshot) => super::config::load_bare_config_from_snapshot_with_mode(
-                snapshot,
-                pool.frozen_builtin_mode.get().copied(),
-            ),
-            None => {
-                super::config::load_bare_config_with_mode(pool.frozen_builtin_mode.get().copied())
+            Some(snapshot) => {
+                super::config::load_bare_config_from_snapshot_with_mode_and_local_workspace(
+                    snapshot,
+                    pool.frozen_builtin_mode.get().copied(),
+                    local_workspace,
+                )
             }
+            None => super::config::load_bare_config_with_mode_and_local_workspace(
+                pool.frozen_builtin_mode.get().copied(),
+                local_workspace,
+            ),
         };
         let mut config = match loaded {
             Ok(config) => config,
@@ -304,17 +314,54 @@ impl McpClientPool {
                 .mcp_servers
                 .retain(|_, server| !matches!(server.source, Some(ConfigSource::Builtin { .. })));
         }
-        // Bare keeps only Workspace, but an explicit session Workspace must still
-        // replace the builtin before discovery and readiness are published.
-        if let Some(workspace) = pool
-            .session_servers
-            .get()
-            .and_then(|servers| servers.get("workspace"))
-        {
-            config
-                .mcp_servers
-                .insert("workspace".to_owned(), workspace.clone());
+        // workspace 面的三段收口：宿主 `Remote` 写入唯一远端条目；宿主 `Absent`
+        // 移除任何 workspace 条目；未绑定时既有的会话声明替换 builtin 行为不变。
+        match &host_workspace {
+            Some(super::host_workspace::ResolvedHostWorkspace::Remote(descriptor)) => {
+                if pool
+                    .session_servers
+                    .get()
+                    .is_some_and(|servers| servers.contains_key(HOST_WORKSPACE_SERVER_NAME))
+                {
+                    tracing::warn!(
+                        server = HOST_WORKSPACE_SERVER_NAME,
+                        "host workspace binding overrides the session MCP declaration"
+                    );
+                }
+                config.mcp_servers.insert(
+                    HOST_WORKSPACE_SERVER_NAME.to_owned(),
+                    descriptor.server_config(),
+                );
+            }
+            Some(super::host_workspace::ResolvedHostWorkspace::Absent) => {
+                if pool
+                    .session_servers
+                    .get()
+                    .is_some_and(|servers| servers.contains_key(HOST_WORKSPACE_SERVER_NAME))
+                {
+                    tracing::warn!(
+                        server = HOST_WORKSPACE_SERVER_NAME,
+                        "host workspace binding is absent; session MCP declaration dropped without fallback"
+                    );
+                }
+                config.mcp_servers.remove(HOST_WORKSPACE_SERVER_NAME);
+            }
+            None => {
+                if let Some(workspace) = pool
+                    .session_servers
+                    .get()
+                    .and_then(|servers| servers.get(HOST_WORKSPACE_SERVER_NAME))
+                {
+                    config
+                        .mcp_servers
+                        .insert(HOST_WORKSPACE_SERVER_NAME.to_owned(), workspace.clone());
+                }
+            }
         }
+        super::builtin::assert_no_builtin_session_collision(
+            &config.mcp_servers,
+            host_workspace.is_some(),
+        );
         Self::initialize_config(pool, cwd, config, Default::default(), status_tx, None).await;
     }
 

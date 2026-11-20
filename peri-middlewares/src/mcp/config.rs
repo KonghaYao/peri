@@ -372,17 +372,33 @@ pub(crate) fn load_bare_config() -> Result<McpConfigFile, McpConfigError> {
     load_bare_config_with_mode(None)
 }
 
+#[cfg(test)]
 pub(crate) fn load_bare_config_with_mode(
     frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
 ) -> Result<McpConfigFile, McpConfigError> {
-    let policy = frozen_mode.map_or_else(
-        || crate::platform::builtin_workspace_policy(true),
-        |mode| {
-            crate::platform::builtin_workspace_policy_for_mode(
-                crate::platform::builtin_policy_for_mode(mode),
-            )
-        },
-    );
+    load_bare_config_with_mode_and_local_workspace(frozen_mode, true)
+}
+
+/// `local_workspace = false` ⇒ 宿主已显式接管/关闭 workspace 面：不注入 builtin
+/// workspace（no overlay），因此既不装配本机实例，也不产生本机 workspace 探测。
+///
+/// 其他条目与既有 bare 规则一致：只保留 `workspace` / v5 出口名。
+pub(crate) fn load_bare_config_with_mode_and_local_workspace(
+    frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
+    local_workspace: bool,
+) -> Result<McpConfigFile, McpConfigError> {
+    let policy = if local_workspace {
+        frozen_mode.map_or_else(
+            || crate::platform::builtin_workspace_policy(true),
+            |mode| {
+                crate::platform::builtin_workspace_policy_for_mode(
+                    crate::platform::builtin_policy_for_mode(mode),
+                )
+            },
+        )
+    } else {
+        super::builtin::BuiltinInjectionPolicy::none()
+    };
     let environment = cache_environment_input()?;
     let mut config = peri_config::mcp::resolve_from_files(
         &McpConfigFile::default(),
@@ -558,16 +574,31 @@ pub(crate) fn load_bare_config_from_snapshot(
     load_bare_config_from_snapshot_with_mode(snapshot, None)
 }
 
+#[cfg(test)]
 pub(crate) fn load_bare_config_from_snapshot_with_mode(
     snapshot: &peri_config::ConfigurationSnapshot,
     frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
 ) -> Result<McpConfigFile, McpConfigError> {
+    load_bare_config_from_snapshot_with_mode_and_local_workspace(snapshot, frozen_mode, true)
+}
+
+/// 见 [`load_bare_config_with_mode_and_local_workspace`]：`local_workspace = false`
+/// 时跳过 builtin overlay，保留 snapshot 的其余 bare 输入（如缓存策略）。
+pub(crate) fn load_bare_config_from_snapshot_with_mode_and_local_workspace(
+    snapshot: &peri_config::ConfigurationSnapshot,
+    frozen_mode: Option<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
+    local_workspace: bool,
+) -> Result<McpConfigFile, McpConfigError> {
     let mut config = snapshot.bare_mcp()?;
-    let policy = crate::platform::builtin_workspace_policy_for_mode(
-        crate::platform::builtin_policy_for_mode(
-            frozen_mode.unwrap_or_else(|| snapshot.builtin_assembly_mode()),
-        ),
-    );
+    let policy = if local_workspace {
+        crate::platform::builtin_workspace_policy_for_mode(
+            crate::platform::builtin_policy_for_mode(
+                frozen_mode.unwrap_or_else(|| snapshot.builtin_assembly_mode()),
+            ),
+        )
+    } else {
+        super::builtin::BuiltinInjectionPolicy::none()
+    };
     super::builtin::apply_builtin_overlay(&mut config.mcp_servers, &policy)
         .map_err(builtin_overlay_error)?;
     config.mcp_servers.retain(|name, _| {

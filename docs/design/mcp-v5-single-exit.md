@@ -100,6 +100,20 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 **未裁决**：descriptor 的来源、连接权限与生命周期，以及代理的并发关联、重连与超时细节，在 wire 门槛实现前裁决并记录到 active spec。
 
+#### 2.4.1 bare 初始化的宿主 workspace 绑定（现行）
+
+bare 路径（`print --bare`）此前只接受会话声明替换 builtin `workspace`。宿主显式绑定由 `peri-middlewares` 的 typed 输入 [`HostWorkspaceBinding`](../code-index/peri-middlewares.md) 表达，三态语义：
+
+1. **未绑定**：既有行为不变——bare 保留 builtin `workspace` 能力，会话声明的 `workspace` 仍可替换 builtin。
+2. **`Remote(WorkspaceDescriptor)`**：descriptor 为 `name` / `url` / `headers`；`name` 只接受 `workspace`（其他名字走既有部署配置路径）。本会话的 workspace 面就是该 HTTP MCP：发现、工具注入与资源面都走它，**不**装配 builtin workspace。header 值只来自调用方内存或环境变量（绑定时解析一次），Debug/错误/日志只出现 header 名与变量名，URL 只投影 scheme/host/port。
+3. **`Absent`**：显式无 workspace——不装配本机 workspace、不探测本机目录、不回落 builtin，也不继续使用会话声明的 `workspace`（丢弃时 warn，不静默回退）。
+
+约束：
+
+- 绑定与 `set_session_servers` 同一注入窗口：MCP 初始化开始后拒绝；每池一次。
+- `Remote` 条目来源身份是 `WorkspaceRemote`、`system_mcp = true`、`system_mcp_tools = None`（工具清单只来自 live `tools/list`）。
+- 非 bare 路径的合并顺序不变：builtin 开启时注入的远端 `workspace` 覆盖同名条目，但 `peri` 仍保留 workspace 能力（两个 workspace 面）。依赖单 workspace 面的部署必须用 `builtin_mcp:false`（或 `PERI_MCP_BUILTIN=off`），不得依赖非 bare 路径去重。
+
 ### 2.5 故障域与关闭
 
 **目标（v5）**：
