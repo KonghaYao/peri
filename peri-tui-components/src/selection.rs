@@ -174,27 +174,55 @@ pub fn wrap_row_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usi
             }
             // Else: trailing padding space, not part of the content.
         }
-        // Ratatui 在单词换行边界会丢弃分隔空白（即使 `trim: false`），例如
-        // "hello world" 在宽度 5 下第二行从 `world` 开始。下一行保留的空白
-        // 数量可能与原文不同：按「原文空白连续段 - 下一行实际渲染的前导空白」
-        // 跳过被丢弃的部分，行起点才能对齐到首个渲染字素。
+        // 行边界对齐：ratatui 可能丢弃换行处的分隔空白，宽字符的续格也会
+        // 出现在 buffer 中。以下一行的首个非空白符号为锚点，回退该行实际
+        // 渲染的前导空白 grapheme 数，得到首个渲染字素的 byte 偏移。
         if consumed < total {
-            let rendered_lead = (0..width)
-                .filter_map(|col| buf.cell((col, row + 1)))
-                .map(|cell| cell.symbol())
-                .filter(|symbol| !symbol.is_empty())
-                .take_while(|symbol| symbol.chars().all(char::is_whitespace))
-                .count();
-            let run = graphemes[consumed..]
-                .iter()
-                .take_while(|grapheme| grapheme.chars().all(char::is_whitespace))
-                .count();
-            consumed += run.saturating_sub(rendered_lead);
+            let mut lead = 0usize;
+            let mut first_content: Option<&str> = None;
+            let mut col = 0u16;
+            while col < width {
+                let Some(cell) = buf.cell((col, row + 1)) else {
+                    break;
+                };
+                let symbol = cell.symbol();
+                if !symbol.is_empty() {
+                    if symbol.chars().all(char::is_whitespace) {
+                        lead += 1;
+                    } else {
+                        first_content = Some(symbol);
+                        break;
+                    }
+                }
+                // 宽字符续格不再计数（按其显示宽度跳过）。
+                col = col.saturating_add(UnicodeWidthStr::width(symbol).max(1) as u16);
+            }
+            if let Some(symbol) = first_content {
+                if let Some(offset) = graphemes[consumed..]
+                    .iter()
+                    .position(|grapheme| *grapheme == symbol || grapheme.starts_with(symbol))
+                {
+                    consumed = (consumed + offset).saturating_sub(lead).max(consumed);
+                }
+            } else if graphemes[consumed].chars().all(char::is_whitespace)
+                && row_has_content(&buf, row, width)
+            {
+                // 下一行整行空白：只有内容行换行才丢 1 个分隔符。
+                consumed += 1;
+            }
         }
         starts.push(*grapheme_bytes.get(consumed).unwrap_or(&plain.len()));
     }
     starts.push(plain.len());
     starts
+}
+
+/// 该行是否有非空白内容（续格的空 symbol 不算内容）。
+fn row_has_content(buf: &ratatui::buffer::Buffer, row: u16, width: u16) -> bool {
+    (0..width).any(|col| {
+        buf.cell((col, row))
+            .is_some_and(|cell| !cell.symbol().chars().all(char::is_whitespace))
+    })
 }
 
 fn wrap_row_byte_starts_large(plain: &str, width: usize) -> Vec<usize> {
@@ -401,6 +429,42 @@ mod tests {
         )
         .expect("row 1 selection");
         assert_eq!(&plain[range], "AAA", "列 3..6 不带上行首空格");
+    }
+
+    #[test]
+    fn wrap_start_handles_wide_spaces_and_blank_rows() {
+        // 宽空格：第二行 "　B"，起点应在宽空格而非其续格。
+        let text = "AAAA\u{3000}\u{3000}B";
+        let wide_line = line(text);
+        let plain = line_plain_text(&wide_line);
+        let starts = wrap_row_byte_starts(&wide_line, &plain, 4);
+        assert_eq!(&plain[starts[1]..starts[2]], "\u{3000}B");
+        let range = line_byte_range(
+            &plain,
+            &starts,
+            0..2,
+            SelectionPoint::new(1, 2),
+            SelectionPoint::new(1, 3),
+        )
+        .expect("wide-space row");
+        assert_eq!(&plain[range], "B", "宽空格后的 B 必须可选");
+
+        // 长空白段跨行：B 行保留的前导空格属于该行，不能被整段跳过。
+        let text = format!("AAAAA{}B", " ".repeat(8));
+        let long_line = line(&text);
+        let plain = line_plain_text(&long_line);
+        let starts = wrap_row_byte_starts(&long_line, &plain, 5);
+        assert!(starts.windows(2).all(|pair| pair[0] <= pair[1]));
+        let last_row = starts.len() - 2;
+        let range = line_byte_range(
+            &plain,
+            &starts,
+            0..(starts.len() - 1),
+            SelectionPoint::new(last_row, 1),
+            SelectionPoint::new(last_row, 2),
+        )
+        .expect("last row");
+        assert_eq!(&plain[range], "B", "跨空白行后 B 必须可选");
     }
 
     #[test]

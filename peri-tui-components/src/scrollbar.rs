@@ -254,22 +254,23 @@ impl VerticalBar {
     /// Moving off the scrollbar column does not change the row mapping.
     #[must_use]
     pub fn drag_offset(&self, area: Rect, row: u16, grab: u16) -> usize {
-        let span = self.track - self.thumb_len;
+        // 端点按指针所在行判定（不是 thumb 顶行）：满轨 thumb 的中部仍属轨道，
+        // 只有按在箭头/轨道外才代表跳到首尾。
         let track_start = area.y.saturating_add(1);
-        let new_thumb_top = row.saturating_sub(grab);
-        // 先处理越过端点的拖拽：拖到箭头/轨道外要到达真实端点，不能停在最后
-        // 一个格子（该格子覆盖的偏移区间可能不含 max_offset）。
-        if new_thumb_top < track_start {
+        let bottom_row = area.y.saturating_add(area.height).saturating_sub(1);
+        if row < track_start {
             return 0;
         }
-        if new_thumb_top > track_start.saturating_add(span as u16) {
+        if row >= bottom_row {
             return self.max_offset();
         }
+        let span = self.track - self.thumb_len;
         if span == 0 {
             // 满轨 thumb 没有可移动空间——保留原始偏移，避免拖拽跳到顶部。
             return self.offset;
         }
-        let target = usize::from(new_thumb_top - track_start).min(span);
+        let new_thumb_top = row.saturating_sub(grab);
+        let target = usize::from(new_thumb_top.saturating_sub(track_start)).min(span);
         // 偏移→格子是有损映射：格子未变时保留原始偏移，避免同一格内按下即跳动。
         if target == self.thumb_start {
             self.offset
