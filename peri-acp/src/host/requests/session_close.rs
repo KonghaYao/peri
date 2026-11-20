@@ -44,8 +44,18 @@ pub(in crate::host::requests) async fn close_session(
             if sessions.get(session_id).is_some_and(|state| !state.closing) {
                 return Err(workspace::resource_error(error));
             }
-            release_runtime_handle(cfg, session_id).await?;
-            sessions.remove(session_id);
+            if sessions.contains_key(session_id) {
+                // 保留的收口对象持久行已不在：仍需完成 manager 与环境结算，
+                // 否则移除 state 后 shutdown 再也收集不到它的环境。
+                if !reclaim_recovered_child(cfg, sessions, session_id).await {
+                    return Err(AcpError::new(
+                        -32010,
+                        "Session close incomplete: resources are still active",
+                    ));
+                }
+            } else {
+                release_runtime_handle(cfg, session_id).await?;
+            }
             cfg.session_manager.forget_recovered_child(session_id);
             return Ok(());
         }

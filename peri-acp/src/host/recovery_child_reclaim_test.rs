@@ -24,6 +24,17 @@ async fn delete_session(harness: &RecoveryHarness, session_id: &str) -> Result<V
     .await
 }
 
+/// 生产同款 `session/close`：按客户端绑定的会话 id 关闭。
+async fn close_session(harness: &RecoveryHarness, session_id: &str) -> Result<Value, AcpError> {
+    let mut states = harness.sessions.lock().await;
+    crate::host::requests::session_lifecycle::handle_close(
+        &json!({ "sessionId": session_id }),
+        &harness.cfg,
+        &mut states,
+    )
+    .await
+}
+
 /// 同一宿主上的另一棵根树：根会话经生产 `session/new` 建立。
 async fn new_root_session(harness: &RecoveryHarness) -> String {
     let cwd = harness.cwd.clone();
@@ -369,4 +380,53 @@ async fn child_registered_after_parent_tree_delete_snapshot_is_reclaimed() {
         "该树的恢复登记必须排空"
     );
     admission_gate::uninstall("child-race", PausePoint::BeforeRecordRecoveredChild);
+}
+
+/// 持久行已删除、宿主仍保留 closing 的收口对象：重试 close 必须完成全部结算。
+#[tokio::test]
+async fn close_after_metadata_gone_settles_retained_child() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-retained", &root).await;
+    harness.set_working("child-retained").await;
+    let recovery = harness.recovery();
+    recovery.enter(&root).await.expect("恢复准备必须成功");
+    {
+        let mut states = harness.sessions.lock().await;
+        let state = states
+            .get_mut("child-retained")
+            .expect("冷装配已发布 child");
+        state.closing = true;
+    }
+    harness
+        .cfg
+        .session_resources
+        .delete_session_tree(&"child-retained".to_owned())
+        .await
+        .expect("持久行删除必须成功");
+
+    close_session(&harness, "child-retained")
+        .await
+        .expect("持久行缺失时关闭必须收口");
+
+    assert!(
+        !harness.sessions.lock().await.contains_key("child-retained"),
+        "关闭成功后宿主状态必须移除"
+    );
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session("child-retained")
+            .is_none(),
+        "关闭成功后 manager 会话必须移除"
+    );
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .recovered_children_of_tree(&root)
+            .is_empty(),
+        "关闭成功后恢复登记必须排空"
+    );
 }
