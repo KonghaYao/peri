@@ -25,7 +25,7 @@ pub(super) fn preview_lines(text: &str, width: usize, limit: usize) -> Vec<Strin
                     .expect("error preview starts with one line and never removes it");
                 *last = format!(
                     "{}…",
-                    crate::truncate::truncate_by_width(last, width.saturating_sub(1))
+                    crate::truncate::truncate_to_width(last, width.saturating_sub(1))
                         .trim_end_matches('…')
                 );
                 return lines;
@@ -34,7 +34,7 @@ pub(super) fn preview_lines(text: &str, width: usize, limit: usize) -> Vec<Strin
             columns = 0;
         }
         if !newline {
-            let visible = crate::truncate::truncate_by_width(grapheme, width);
+            let visible = crate::truncate::truncate_to_width(grapheme, width);
             columns += visible.width();
             lines
                 .last_mut()

@@ -71,7 +71,7 @@ fn subagent_entry_line(data: &TuiSubAgentGroup, grid: &GridSpec) -> Line<'static
         &data.agent_name
     };
     spans.push(Span::styled(
-        crate::truncate::truncate_by_width(name, grid.process_content_width().max(1)),
+        crate::truncate::truncate_to_width(name, grid.process_content_width().max(1)),
         Style::default()
             .fg(sem.text.primary)
             .add_modifier(Modifier::BOLD),
@@ -132,7 +132,7 @@ fn subagent_tool_line(card: &TuiToolCard, grid: &GridSpec) -> Line<'static> {
         .saturating_sub(name.width() + error_word.width() + dur_w + 6)
         .max(1);
     if !card.input_summary.is_empty() {
-        let summary = crate::truncate::truncate_by_width(&card.input_summary, budget);
+        let summary = crate::truncate::truncate_to_width(&card.input_summary, budget);
         if !summary.is_empty() {
             spans.push(Span::styled(
                 format!("  {summary}"),
@@ -243,7 +243,7 @@ pub(super) fn render_collapsed_group_lines(
     };
     let content_width = grid.process_content_width();
     let keep = content_width.saturating_sub(suffix.width()).max(1);
-    let title_trunc = crate::truncate::truncate_by_width(&data.title, keep);
+    let title_trunc = crate::truncate::truncate_to_width(&data.title, keep);
     spans.push(Span::styled(
         title_trunc,
         Style::default().fg(sem.text.muted),

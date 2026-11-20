@@ -308,7 +308,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         match &group {
             Some(g) => {
                 lines.push(Line::from(vec![Span::styled(
-                    crate::truncate::truncate_by_width(
+                    crate::truncate::truncate_to_width(
                         &g.agent_name,
                         area.width.saturating_sub(1) as usize,
                     ),
@@ -317,7 +317,7 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         .bold(),
                 )]));
                 lines.push(Line::from(vec![Span::styled(
-                    crate::truncate::truncate_by_width(
+                    crate::truncate::truncate_to_width(
                         &format!("  [{}]", g.agent_id),
                         area.width.saturating_sub(1) as usize,
                     ),

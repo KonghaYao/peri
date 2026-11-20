@@ -137,7 +137,7 @@ fn render_tool_plan(
         );
     }
     let label =
-        crate::truncate::truncate_by_width(&plan.label, grid.process_content_width().max(1));
+        crate::truncate::truncate_to_width(&plan.label, grid.process_content_width().max(1));
     let label_width = label.width();
     spans.push(Span::styled(
         label,
@@ -158,7 +158,7 @@ fn render_tool_plan(
         .process_content_width()
         .saturating_sub(used_width + fixed_width)
         .max(1);
-    let summary = crate::truncate::truncate_by_width(&plan.summary, budget);
+    let summary = crate::truncate::truncate_to_width(&plan.summary, budget);
     if !summary.is_empty() {
         spans.push(Span::styled(
             format!(" {summary}"),
@@ -256,7 +256,7 @@ fn project_todo_tool(
             };
             if detail_width <= TODO_DETAIL_PREFIX_WIDTH {
                 return Line::from(Span::styled(
-                    crate::truncate::truncate_by_width(icon, detail_width),
+                    crate::truncate::truncate_to_width(icon, detail_width),
                     Style::default().fg(color),
                 ));
             }
@@ -264,14 +264,14 @@ fn project_todo_tool(
             Line::from(vec![
                 Span::styled(format!("{icon} "), Style::default().fg(color)),
                 Span::styled(
-                    crate::truncate::truncate_by_width(&change.content, content_width),
+                    crate::truncate::truncate_to_width(&change.content, content_width),
                     Style::default().fg(sem.text.muted),
                 ),
             ])
         })
         .collect();
     let error_details = vec![Line::from(Span::styled(
-        crate::truncate::truncate_by_width(&data.output_summary, detail_width),
+        crate::truncate::truncate_to_width(&data.output_summary, detail_width),
         Style::default().fg(sem.text.muted),
     ))];
     ToolRenderPlan {
@@ -299,7 +299,7 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
         completed_details.push(Line::from(Span::styled(
             format!(
                 "$ {}",
-                crate::truncate::truncate_by_width(&data.input_summary, content.saturating_sub(2))
+                crate::truncate::truncate_to_width(&data.input_summary, content.saturating_sub(2))
             ),
             Style::default().fg(sem.syntax.command),
         )));
@@ -328,7 +328,7 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
         error_details.push(Line::from(Span::styled(
             format!(
                 "$ {}",
-                crate::truncate::truncate_by_width(&data.input_summary, content.saturating_sub(2))
+                crate::truncate::truncate_to_width(&data.input_summary, content.saturating_sub(2))
             ),
             Style::default().fg(sem.syntax.command),
         )));
@@ -390,7 +390,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
     let mut spans = Vec::new();
     if !diff.path.is_empty() {
         spans.push(Span::styled(
-            crate::truncate::truncate_by_width(
+            crate::truncate::truncate_to_width(
                 &diff.path,
                 content.saturating_sub(count_text.width().min(content)),
             ),
@@ -402,7 +402,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
             spans.push(Span::styled(" ", Style::default()));
         }
         spans.push(Span::styled(
-            crate::truncate::truncate_by_width(&count_text, content),
+            crate::truncate::truncate_to_width(&count_text, content),
             Style::default().fg(sem.text.dim),
         ));
     }
@@ -415,7 +415,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
     // hunk 头（dim）。
     let mut hunk_header = Vec::new();
     hunk_header.push(Span::styled(
-        crate::truncate::truncate_by_width(
+        crate::truncate::truncate_to_width(
             &format!("@@ {} {} @@", hunk.old_range, hunk.new_range),
             content,
         ),
@@ -449,7 +449,7 @@ fn render_diff_lines(diff: &TuiDiffBlock, grid: &GridSpec) -> Vec<Line<'static>>
         // 代码不软换行——超宽硬截断（§6.5「窄屏先隐行号再裁切代码」）。
         let used = spans.iter().map(|s| s.content.width()).sum::<usize>();
         let budget = content.saturating_sub(used).max(1);
-        let body = crate::truncate::truncate_by_width(&l.text, budget);
+        let body = crate::truncate::truncate_to_width(&l.text, budget);
         spans.push(Span::styled(
             body,
             Style::default().fg(sem.text.primary).bg(diff_bg),

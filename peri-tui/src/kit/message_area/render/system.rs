@@ -79,7 +79,7 @@ pub(super) fn render_system_note_lines(
                 Style::default().fg(sem.text.dim),
             );
             spans.push(Span::styled(
-                crate::truncate::truncate_by_width(&label, grid.process_content_width()),
+                crate::truncate::truncate_to_width(&label, grid.process_content_width()),
                 Style::default().fg(sem.text.dim),
             ));
             vec![Line::from(spans)]
@@ -120,7 +120,7 @@ fn render_note_lines(
             };
             let fg = if i == 0 { color } else { sem.text.muted };
             spans.push(Span::styled(
-                crate::truncate::truncate_by_width(text, grid.process_content_width()),
+                crate::truncate::truncate_to_width(text, grid.process_content_width()),
                 Style::default().fg(fg),
             ));
             lines.push(Line::from(spans));
@@ -146,7 +146,7 @@ fn divider_with_label_line(grid: &GridSpec, label: &str) -> Line<'static> {
         "" => "\u{2500}\u{2500}".to_string(),
         l => format!("\u{2500}\u{2500} {l}"),
     };
-    let inner = crate::truncate::truncate_by_width(&inner, content);
+    let inner = crate::truncate::truncate_to_width(&inner, content);
     let fill = content.saturating_sub(inner.width());
     Line::from(vec![
         Span::raw(" "),
@@ -177,7 +177,7 @@ pub(super) fn render_todo_summary_lines(
     let mut spans =
         super::helpers::process_first_prefix(grid, "\u{25fc}", Style::default().fg(sem.accent));
     spans.push(Span::styled(
-        crate::truncate::truncate_by_width(&data.text, grid.process_content_width()),
+        crate::truncate::truncate_to_width(&data.text, grid.process_content_width()),
         Style::default().fg(sem.text.muted),
     ));
     vec![Line::from(spans)]
