@@ -365,14 +365,14 @@ npm --prefix ../peri-e2e run e2e:replay:unit           # 录放代理与动态�
 npm --prefix ../peri-e2e run e2e:replay:verify         # fixture 完整性，source-anchored（CI 入口）
 npm --prefix ../peri-e2e run e2e:replay:verify:strict  # 本地全等核对：任何 drift 都失败
 PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:world-check
-PERI_BINARY="$PWD/target/debug/peri" npm --prefix ../peri-e2e run e2e:replay
+PERI_SOURCE_ROOT="$PWD" PERI_BINARY="$PWD/target/debug/peri" npm --prefix ../peri-e2e run e2e:replay
 npm --prefix ../peri-e2e run e2e:replay:record         # 显式重录，仅本地；CI 拒绝 record 模式
 ```
 
-`PERI_BINARY` 是已构建 `peri` 的绝对路径；`PERI_SOURCE_ROOT` 指向 Peri 检出，world-check 用它
-核对 world seal 与当前提示词/工具来源。默认 runner 不启动录制上游、不生成缺失 cassette、不回退
-在线模型。fixture 的 seed/configure 约束、每场景报告与终态断言以新仓 README 为准，报告落在新仓
-`results/replay-v2/`。
+`PERI_BINARY` 是已构建 `peri` 的绝对路径；`PERI_SOURCE_ROOT` 指向 Peri 检出，须与
+`PERI_BINARY` 同次构建，replay 与 world-check 都依赖它读取提示词/工具来源。默认 runner
+不启动录制上游、不生成缺失 cassette、不回退在线模型。fixture 的 seed/configure 约束、
+每场景报告与终态断言以新仓 README 为准，报告落在新仓 `results/replay-v2/`。
 
 插件动态 MCP 的用户闭环由 P01 覆盖：选择插件后提交任务，模型只经 `ToolSearch` / `ToolInvoke`
 调用 Loader，下一轮搜索到业务工具 schema 并执行真实本地 HTTP MCP，同会话复用连接，关闭会话后
