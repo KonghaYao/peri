@@ -4,6 +4,8 @@ use crate::messages::BaseMessage;
 use crate::system_reminder;
 use crate::system_reminder::ReminderCategory;
 
+const PERSISTED_SKILL_RECOVERY_HINT: &str = "[Context has been compacted. The summary below replaced earlier history. If it contains Recovery resources, before any other tool call use SkillTool to reload each listed, non-preloaded skill by its exact canonical name. If a reload fails, use the failure guidance, including DiscoverSkillsTool when directed, or report that the skill cannot be recovered. Rules in the summary are hints; the reloaded body is authoritative. A newer explicit user instruction takes precedence.]";
+
 #[test]
 fn test_legacy_compact_context_chunks_preserve_unicode_and_escape_tags() {
     let text = format!(
@@ -65,18 +67,26 @@ fn test_legacy_compact_context_recognizes_skill_and_summary() {
 
 #[test]
 fn test_legacy_compact_context_recognizes_current_and_legacy_summary_hints() {
-    for hint in [CONTINUATION_HINT, LEGACY_CONTINUATION_HINT] {
+    for hint in [
+        CONTINUATION_HINT,
+        PERSISTED_SKILL_RECOVERY_HINT,
+        LEGACY_CONTINUATION_HINT,
+    ] {
         let text = format!("{hint}\n\n摘要");
         let reminders =
             crate::compact_reminder::legacy_compact_reminders(&BaseMessage::human(text.as_str()));
-        assert_eq!(reminders.len(), 1, "两个续接标记都必须保持兼容识别");
+        assert_eq!(reminders.len(), 1, "各代续接标记必须保持兼容识别");
         assert_eq!(reminders[0].kind, "compact_summary");
     }
 }
 
 #[test]
 fn test_is_continuation_hint_requires_complete_first_line() {
-    for hint in [CONTINUATION_HINT, LEGACY_CONTINUATION_HINT] {
+    for hint in [
+        CONTINUATION_HINT,
+        PERSISTED_SKILL_RECOVERY_HINT,
+        LEGACY_CONTINUATION_HINT,
+    ] {
         assert!(compact::is_continuation_hint(hint));
         assert!(compact::is_continuation_hint(&format!("{hint}\n\n摘要")));
         assert!(compact::is_continuation_hint(&format!("  {hint}\n摘要")));
@@ -84,4 +94,15 @@ fn test_is_continuation_hint_requires_complete_first_line() {
         assert!(!compact::is_continuation_hint(&format!("前缀 {hint}")));
     }
     assert!(!compact::is_continuation_hint("普通用户文本"));
+}
+
+#[test]
+fn test_current_continuation_prioritizes_archived_skills_and_targeted_checks() {
+    assert!(CONTINUATION_HINT.contains("before any other tool call"));
+    assert!(
+        CONTINUATION_HINT.contains("active skill in Recovery resources whose body was archived")
+    );
+    assert!(CONTINUATION_HINT.contains("including preloads"));
+    assert!(CONTINUATION_HINT.contains("Wait for needed results"));
+    assert!(CONTINUATION_HINT.contains("Check state only if it can change the next action"));
 }

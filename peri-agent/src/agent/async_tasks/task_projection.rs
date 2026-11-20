@@ -1,7 +1,7 @@
 use super::BackgroundTaskStatus;
 use std::collections::{HashMap, VecDeque};
 
-use peri_acp_types::tasks::TaskRecord;
+use peri_acp_types::tasks::{TaskOwnerHandle, TaskRecord};
 
 // Snapshot is a current-task directory with a bounded recent terminal window,
 // not a session's execution history. Business replay uses producer tickets.
@@ -17,7 +17,16 @@ pub(super) struct TaskProjection {
     terminal_bytes: usize,
 }
 
-fn retained_bytes(record: &TaskRecord) -> usize {
+/// 句柄自有的全部字符串分配；`service()` 返回静态标签，不占记录堆内存。
+fn owner_handle_bytes(handle: &TaskOwnerHandle) -> usize {
+    match handle {
+        TaskOwnerHandle::Workflow { run_id } => run_id.capacity(),
+        TaskOwnerHandle::Monitor { task_id, .. } => task_id.capacity(),
+        TaskOwnerHandle::Mcp { server, task_id } => server.capacity() + task_id.capacity(),
+    }
+}
+
+pub(super) fn retained_bytes(record: &TaskRecord) -> usize {
     std::mem::size_of::<TaskRecord>()
         // Record, HashMap key and terminal-order key each own an ID allocation.
         + std::mem::size_of::<String>() * 2
@@ -31,6 +40,13 @@ fn retained_bytes(record: &TaskRecord) -> usize {
             .as_ref()
             .map_or(0, String::capacity)
         + record.child_thread_id.as_ref().map_or(0, String::capacity)
+        + record.external_owner.as_ref().map_or(0, |owner| {
+            owner_handle_bytes(&owner.handle)
+                + owner.artifact_ref.as_ref().map_or(0, |artifact| {
+                    artifact.reference.capacity()
+                        + artifact.version.as_ref().map_or(0, String::capacity)
+                })
+        })
 }
 
 impl TaskProjection {

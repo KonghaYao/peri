@@ -1,6 +1,7 @@
 use crate::agent::async_tasks::manager::TaskManager;
 use crate::agent::async_tasks::registry::BackgroundRegistryError;
 use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::ExternalTaskOwner;
 use peri_acp_types::tasks::ExternalTaskRegistration;
 use std::sync::atomic::Ordering;
 
@@ -13,7 +14,7 @@ fn external_request(
         session_id: "root-session".into(),
         initiator_session_id: initiator.map(str::to_owned),
         owner_identity: "mcp:workspace:Some(Builtin { instance: \"workspace\" })".into(),
-        owner_task_id: owner_task_id.into(),
+        owner: ExternalTaskOwner::mcp("fixture", owner_task_id),
         kind: BgTaskKind::Shell,
         summary: "bg shell".into(),
         started_at: None,

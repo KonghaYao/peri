@@ -147,6 +147,137 @@ impl BgTaskKind {
     }
 }
 
+/// 外部任务 owner 的带类型句柄。
+///
+/// 每个变体只在其服务作用域内有效；宿主 `task_id` 不能替代服务端 ID，
+/// 也不得由任一 ID 推导另一 ID。`after_seq` 只来自同一 monitor 已处理页面的
+/// `nextSeq`，告警命中序号不构成游标。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TaskOwnerHandle {
+    /// Workflow 服务端运行 ID（`WorkflowStatus` / `WorkflowKill` 的 `runId`）。
+    Workflow { run_id: String },
+    /// Monitor 端任务 ID（`monitor_read` / `monitor_stop` 的 `task_id`）。
+    Monitor {
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_seq: Option<u64>,
+    },
+    /// 其他 MCP owner 的任务 ID。
+    Mcp { server: String, task_id: String },
+}
+
+impl TaskOwnerHandle {
+    /// 服务端任务 ID；宿主任务 ID 不是它的替代。
+    #[must_use]
+    pub fn owner_task_id(&self) -> &str {
+        match self {
+            Self::Workflow { run_id } => run_id,
+            Self::Monitor { task_id, .. } | Self::Mcp { task_id, .. } => task_id,
+        }
+    }
+
+    /// 句柄所属服务标签（诊断与稳定身份使用）。
+    #[must_use]
+    pub fn service(&self) -> &'static str {
+        match self {
+            Self::Workflow { .. } => "workflow",
+            Self::Monitor { .. } => "monitor",
+            Self::Mcp { .. } => "mcp",
+        }
+    }
+
+    /// 句柄是否可作为该任务的恢复目标；MCP shell 仍可使用 MCP owner ID。
+    #[must_use]
+    pub fn matches_kind(&self, kind: BgTaskKind) -> bool {
+        match self {
+            Self::Workflow { .. } => kind == BgTaskKind::Workflow,
+            Self::Monitor { .. } | Self::Mcp { .. } => {
+                matches!(kind, BgTaskKind::Mcp | BgTaskKind::Shell)
+            }
+        }
+    }
+
+    /// 两个句柄是否指向同一服务端目标；`after_seq` 不改变目标身份。
+    #[must_use]
+    pub fn same_target(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Workflow { run_id: left }, Self::Workflow { run_id: right }) => left == right,
+            (Self::Monitor { task_id: left, .. }, Self::Monitor { task_id: right, .. }) => {
+                left == right
+            }
+            (
+                Self::Mcp {
+                    server: left_server,
+                    task_id: left_task,
+                },
+                Self::Mcp {
+                    server: right_server,
+                    task_id: right_task,
+                },
+            ) => left_server == right_server && left_task == right_task,
+            _ => false,
+        }
+    }
+}
+
+/// 可信回执中的产物/版本引用；生产者没有回执时保持未知。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskArtifactRef {
+    /// 稳定引用（路径、提交、PR 或产物 ID）。
+    pub reference: String,
+    /// 该引用对应的版本；回执未给出时保持未知。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// 一次外部注册携带的作用域句柄与产物引用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalTaskOwner {
+    pub handle: TaskOwnerHandle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<TaskArtifactRef>,
+}
+
+impl ExternalTaskOwner {
+    #[must_use]
+    pub fn new(handle: TaskOwnerHandle) -> Self {
+        Self {
+            handle,
+            artifact_ref: None,
+        }
+    }
+
+    #[must_use]
+    pub fn workflow(run_id: impl Into<String>) -> Self {
+        Self::new(TaskOwnerHandle::Workflow {
+            run_id: run_id.into(),
+        })
+    }
+
+    #[must_use]
+    pub fn monitor(task_id: impl Into<String>) -> Self {
+        Self::new(TaskOwnerHandle::Monitor {
+            task_id: task_id.into(),
+            after_seq: None,
+        })
+    }
+
+    #[must_use]
+    pub fn mcp(server: impl Into<String>, task_id: impl Into<String>) -> Self {
+        Self::new(TaskOwnerHandle::Mcp {
+            server: server.into(),
+            task_id: task_id.into(),
+        })
+    }
+
+    #[must_use]
+    pub fn with_artifact(mut self, artifact_ref: TaskArtifactRef) -> Self {
+        self.artifact_ref = Some(artifact_ref);
+        self
+    }
+}
+
 /// 后台任务注册表事件（registry → executor 事件推送通道）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -212,6 +343,10 @@ pub struct TaskRecord {
     /// （Shell / Workflow / Mcp）或注册时没有 live inbox。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_thread_id: Option<String>,
+    /// 可信注册端提供的服务作用域句柄与产物引用；`None` = 旧投影或本地 owner
+    /// 任务，不得从 `task_id`、summary 或 kind 猜测补齐。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_owner: Option<ExternalTaskOwner>,
 }
 
 /// A task projection at one revision, paired with the incremental change stream.
@@ -270,13 +405,22 @@ pub struct ExternalTaskRegistration {
     /// is unroutable and never implies delivery to a parent or root session.
     pub initiator_session_id: Option<String>,
     pub owner_identity: String,
-    pub owner_task_id: String,
+    /// Trusted service-side handle; its ID is not interchangeable with the host task ID.
+    pub owner: ExternalTaskOwner,
     pub kind: BgTaskKind,
     pub summary: String,
     /// Owner creation timestamp (RFC3339); absent only when the owner omits it.
     pub started_at: Option<String>,
     pub cancel: ExternalCancelFn,
     pub on_terminal: ExternalNotifyFn,
+}
+
+impl ExternalTaskRegistration {
+    /// 服务端 owner 任务 ID；宿主任务 ID 由注册表另行分配。
+    #[must_use]
+    pub fn owner_task_id(&self) -> &str {
+        self.owner.handle.owner_task_id()
+    }
 }
 
 /// 后台任务注册请求（middleware / workflow 发起面 → `TaskManager::register` 的

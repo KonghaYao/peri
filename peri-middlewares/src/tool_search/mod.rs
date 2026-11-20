@@ -20,3 +20,7 @@ pub use execute_tool::{ExecuteExtraTool, ExecuteExtraToolResolver};
 pub use middleware::ToolSearchMiddleware;
 pub use search_tool::SearchExtraTools;
 pub use tool_index::{SearchResult, ToolSearchIndex};
+
+#[cfg(test)]
+#[path = "recovery_route_test.rs"]
+mod recovery_route_tests;

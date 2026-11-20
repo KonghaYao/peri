@@ -119,6 +119,67 @@ pub struct MessageProjectionDirective {
     /// 保持原有身份，已发布引用继续读取同一 canonical 内容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<MessageId>,
+    /// 硬记忆消息的结构化采样事实；派生请求据此按最终工具目录重算可执行入口。
+    ///
+    /// 只有硬记忆消息携带它；它不产生渲染动作（[`Self::entries`] 仍为空），
+    /// 也不替代正文——正文里的 id 与状态保持采样时的观察值。
+    ///
+    /// Box 因为本类型是 `MessageFlags` 的持久化载荷：内联会让每条消息的 flags 都
+    /// 背上采样事实的体积，进而撑大 `PersistOp`；serde 对 `Box` 透明，JSON 形状不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_memory: Option<Box<RecoveryMemoryProjection>>,
+}
+
+/// Full 硬记忆消息的结构化采样事实（随该消息的投影 JSON 持久化）。
+///
+/// 工具目录在压缩采样之后仍可能变化（`before_reason_catalog`、动态工具发布、
+/// 权限过滤）。首个 Reason 用这些事实按最终目录重新渲染可执行入口，避免把
+/// 采样时的工具名当成当前能力。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryMemoryProjection {
+    /// 采样时任务注册表的 revision；运行期推进记录在 `TaskSnapshot.revision`。
+    #[serde(default)]
+    pub sampled_revision: u64,
+    /// 采样时的会话作用域；`None` = 无法证明同一运行时，派生请求不得重算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<RecoveryTaskProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<RecoveryGoalProjection>,
+}
+
+/// 硬记忆里单个活跃任务的持久化投影；只保留渲染恢复提示需要的事实。
+///
+/// 与 `TaskRecord` 分开：`output_preview` 等不可信正文不进入持久化投影，
+/// 恢复提示只能引用可信注册端给出的身份与状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryTaskProjection {
+    pub task_id: String,
+    pub kind: crate::tasks::BgTaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_owner: Option<crate::tasks::ExternalTaskOwner>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    pub status: String,
+    pub started_at: String,
+}
+
+/// 硬记忆里 Active goal 的持久化投影（`GoalViewSnapshot` 是视图类型，不可序列化）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryGoalProjection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    pub status: crate::goal::GoalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 
 /// A member points to its sole durable catalog; the member table is never duplicated.
@@ -140,6 +201,7 @@ impl Default for MessageProjectionDirective {
             archive_roots: Vec::new(),
             archive_receipt_budget_tokens: None,
             recovery_only: false,
+            recovery_memory: None,
         }
     }
 }

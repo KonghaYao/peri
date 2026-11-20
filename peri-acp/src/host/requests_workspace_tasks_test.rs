@@ -1,5 +1,6 @@
 use crate::host::requests::tests::MockTransport;
 use crate::provider::LlmProvider;
+use peri_acp_types::tasks::ExternalTaskOwner;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -173,7 +174,7 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
             session_id: id.to_owned(),
             initiator_session_id: Some(id.to_owned()),
             owner_identity: "workspace-test".into(),
-            owner_task_id: "shell-1".into(),
+            owner: ExternalTaskOwner::mcp("fixture", "shell-1"),
             kind: BgTaskKind::Shell,
             summary: "sleep 10".into(),
             started_at: None,

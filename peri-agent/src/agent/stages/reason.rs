@@ -122,7 +122,11 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             .model_view
             .view_with_protected(&guard, &capabilities, &protected);
         ctx.model_view.release();
-        (view?, protected)
+        let view = view?;
+        // 目录只在 pin_working_tools 之后才最终确定；硬记忆里的可执行入口按这份
+        // 目录重算，过期工具名不得进入真实请求。
+        let view = refresh_request_recovery(view, ctx, &guard, &catalog);
+        (view, protected)
     };
     // receipt 只绑定最终请求里实际存在的受保护消息：投影或配对修复若丢弃了某条，
     // 它就没有被本次响应消费，不能进入 included_ids。
@@ -393,8 +397,50 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     })
 }
 
+/// 按当次最终工具目录重算硬记忆的可执行入口。
+///
+/// 只在请求里确实存在硬记忆时读取任务注册表 revision；目录未变时返回原 `Arc`，
+/// 不复制正文，也不改写 canonical transcript。
+fn refresh_request_recovery(
+    view: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
+    ctx: &crate::agent::stages::StageContext,
+    transcript: &crate::session::transcript::MessageTranscript,
+    catalog: &crate::session::tool_catalog::SessionToolCatalogSnapshot,
+) -> std::sync::Arc<Vec<crate::messages::BaseMessage>> {
+    if !crate::agent::compact_v2::has_hard_memory(&view) {
+        return view;
+    }
+    let tools = crate::agent::compact_v2::RecoveryTools::from_catalog(catalog);
+    let scope = ctx.project_session_id();
+    let live_revision = ctx
+        .task_manager
+        .as_ref()
+        .map(|manager| manager.snapshot().revision);
+    let (rebuilt, report) = crate::agent::compact_v2::refresh_recovery_memory(
+        &view,
+        transcript,
+        &tools,
+        scope.as_deref(),
+        live_revision,
+    );
+    let Some(rebuilt) = rebuilt else {
+        return view;
+    };
+    tracing::debug!(
+        rendered = report.rendered,
+        corrected = report.corrected,
+        advanced = report.advanced,
+        "Reason: 已按最终工具目录重算恢复入口"
+    );
+    std::sync::Arc::new(rebuilt)
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[path = "reason_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "recovery_request_test.rs"]
+mod recovery_request_tests;

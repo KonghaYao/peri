@@ -25,6 +25,7 @@ pub mod hard_memory;
 pub mod micro;
 pub mod planner;
 pub mod projection;
+pub mod recovery_refresh;
 pub mod smart;
 
 // ─── 公共重导出：保持外部调用路径不变 ─────────────────────────────────────────────
@@ -34,7 +35,8 @@ pub use decision::min_micro_gain_tokens;
 pub use full::{extract_file_info, extract_skill_names};
 pub use hard_memory::{
     from_parts, is_hard_memory_content, snapshot_from_runtime, HardMemoryGoal, HardMemorySnapshot,
-    HardMemorySource, HardMemoryTask, RuntimeHardMemory, HARD_MEMORY_HEADER,
+    HardMemorySource, HardMemoryTask, RecoveryInvocation, RecoveryRoute, RecoveryTools,
+    RuntimeHardMemory, HARD_MEMORY_HEADER,
 };
 pub use micro::micro_compact;
 pub use planner::{
@@ -46,6 +48,10 @@ pub use projection::{
     PersistedDirectiveRestore, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
     ProviderCapabilities, ProviderProtocol, RestoredProjectionDirectives, CORRUPTED_PROJECTION,
     DIRECTIVE_VERSION_MISMATCH, NO_PERSISTED_DIRECTIVES, PROJECTION_POLICY_VERSION,
+};
+pub use recovery_refresh::{
+    has_hard_memory, refresh_recovery_memory, RecoveryRefreshReport, ADVANCED_SNAPSHOT_NOTE,
+    STALE_RECOVERY_HINT_CORRECTION,
 };
 
 pub use compact_engine::CompactResult;

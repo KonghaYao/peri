@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::session::test_resources::TestSession;
+use peri_acp_types::tasks::ExternalTaskOwner;
 
 #[tokio::test(start_paused = true)]
 async fn test_child_window_starts_once_and_expires_without_activity() {
@@ -292,7 +293,7 @@ async fn test_pending_handoff_snapshot_carries_owner_identity() {
             session_id: "root-session".into(),
             initiator_session_id: Some("child-session".into()),
             owner_identity: "mcp:workspace:Builtin".into(),
-            owner_task_id: "raw-1".into(),
+            owner: ExternalTaskOwner::mcp("fixture", "raw-1"),
             kind: BgTaskKind::Shell,
             summary: "sleep 300".into(),
             started_at: None,

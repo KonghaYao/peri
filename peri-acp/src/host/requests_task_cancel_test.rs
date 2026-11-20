@@ -6,6 +6,7 @@ use crate::transport::AcpTransport;
 
 use peri_acp_types::tasks::BgTaskKind;
 use peri_acp_types::tasks::ExternalCancelFn;
+use peri_acp_types::tasks::ExternalTaskOwner;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,7 +19,7 @@ fn external_cancel_registration(
         session_id: session_id.to_owned(),
         initiator_session_id: Some(session_id.to_owned()),
         owner_identity: "fixture".into(),
-        owner_task_id: "remote-task".into(),
+        owner: ExternalTaskOwner::mcp("fixture", "remote-task"),
         kind: BgTaskKind::Mcp,
         summary: "pending cancel".into(),
         started_at: Some("2026-10-24T00:00:00Z".into()),

@@ -4,6 +4,7 @@ use crate::agent::async_tasks::registry::BackgroundTaskRegistry;
 use crate::agent::events::BackgroundTaskResult;
 use peri_acp_types::system_reminder::MAX_REMINDER_BODY_BYTES;
 use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::tasks::ExternalTaskOwner;
 use peri_acp_types::tasks::ExternalTaskRegistration;
 use peri_acp_types::tasks::TaskSnapshot;
 use peri_acp_types::tasks::{
@@ -36,7 +37,7 @@ fn make_registration(on_terminal: ExternalNotifyFn) -> ExternalTaskRegistration 
         session_id: "session".into(),
         initiator_session_id: Some("session".into()),
         owner_identity: "owner".into(),
-        owner_task_id: "owner-task".into(),
+        owner: ExternalTaskOwner::mcp("fixture", "owner-task"),
         kind: BgTaskKind::Mcp,
         summary: "task".into(),
         started_at: Some("2026-01-01T00:00:00Z".into()),
@@ -752,7 +753,7 @@ async fn test_cold_restore_is_not_blocked_by_execution_concurrency_limit() {
     for task_index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
         let mut running = child_registration(ok_notify());
         running.kind = BgTaskKind::Shell;
-        running.owner_task_id = format!("running-{task_index}");
+        running.owner = ExternalTaskOwner::mcp("fixture", format!("running-{task_index}"));
         manager
             .register_external(running)
             .expect("the register external fixture result is required for this assertion");

@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use crate::mcp::client::output_store::tests::Wire;
 use crate::mcp::McpTaskOwner;
+use peri_acp_types::tasks::ExternalTaskOwner;
 
 #[test]
 fn unobservable_owner_reaches_retry_limit_and_resets_after_recovery() {
@@ -483,7 +484,7 @@ async fn cancel_session_external_tasks_uses_one_total_deadline() {
             session_id: "session".into(),
             initiator_session_id: Some("session".into()),
             owner_identity: "fixture".into(),
-            owner_task_id: owner_task_id.into(),
+            owner: ExternalTaskOwner::mcp("fixture", owner_task_id),
             kind: BgTaskKind::Mcp,
             summary: "pending cancel".into(),
             started_at: Some("2026-10-24T00:00:00Z".into()),
@@ -546,7 +547,7 @@ async fn task_subscription_confirms_terminal_after_snapshot_eviction() {
             session_id: "session".into(),
             initiator_session_id: Some("session".into()),
             owner_identity: "server".into(),
-            owner_task_id: "remote".into(),
+            owner: ExternalTaskOwner::mcp("fixture", "remote"),
             kind: BgTaskKind::Mcp,
             summary: "remote".into(),
             started_at: Some("2026-01-01T00:00:00Z".into()),

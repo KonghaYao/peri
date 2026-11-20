@@ -342,7 +342,11 @@ pub(super) async fn compact_core(
                 let hard_memory = crate::agent::compact_v2::RuntimeHardMemory::new(
                     ctx.task_manager.clone(),
                     ctx.goal_controller.clone(),
-                );
+                )
+                .with_tools(crate::agent::compact_v2::RecoveryTools::from_catalog(
+                    &ctx.runtime.tool_catalog.snapshot(),
+                ))
+                .with_scope(ctx.project_session_id());
                 crate::agent::compact_v2::run_compact_with_facts_and_resident(
                     &mut transcript_owned,
                     compact_llm_ref,

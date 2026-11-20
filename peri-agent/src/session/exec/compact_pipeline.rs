@@ -92,7 +92,10 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     let goal_controller = ctx
         .dep::<Arc<dyn peri_acp_types::goal::GoalController>>()
         .map(|goal| (*goal).clone());
-    let hard_memory = compact_v2::RuntimeHardMemory::new(ctx.task_manager.clone(), goal_controller);
+    let hard_memory = compact_v2::RuntimeHardMemory::new(ctx.task_manager.clone(), goal_controller)
+        // 手动路径没有目录快照；可执行入口由首个 Reason 按最终目录重算，
+        // 这里只记录采样作用域，避免在别的会话里重放本次观察。
+        .with_scope(Some(ctx.session_id.clone()));
     let CommandContext {
         session_id,
         history,

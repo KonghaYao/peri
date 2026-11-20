@@ -468,6 +468,7 @@ fn workflow_terminal_delivery_waits_for_the_queue_without_blocking_the_worker() 
                 output_preview: None,
                 initiator_session_id: Some("session-gated".into()),
                 child_thread_id: None,
+                external_owner: None,
             }],
         },
         "completions": [terminal],
