@@ -361,8 +361,8 @@ npm ci --prefix ../peri-e2e
 
 ```bash
 npm --prefix ../peri-e2e run e2e:replay:check          # 录放 runner 与业务场景类型检查
-npm --prefix ../peri-e2e run e2e:replay:unit           # 录放代理与动态绑定契约
-npm --prefix ../peri-e2e run e2e:replay:verify         # fixture 完整性，source-anchored（CI 入口）
+PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:unit           # 录放代理与动态绑定契约
+PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:verify         # fixture 完整性，source-anchored（CI 入口）
 npm --prefix ../peri-e2e run e2e:replay:verify:strict  # 本地全等核对：任何 drift 都失败
 PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:world-check
 PERI_SOURCE_ROOT="$PWD" PERI_BINARY="$PWD/target/debug/peri" npm --prefix ../peri-e2e run e2e:replay
@@ -380,13 +380,15 @@ npm --prefix ../peri-e2e run e2e:replay:record         # 显式重录，仅本�
 完整回放由 `peri-e2e` CI 执行。
 
 world 映射的唯一事实源是 `peri-e2e/scripts/replay-world-sources.mjs`：`sys.block0.main`
-（`01_intro`–`06_tone_style` 组合）、`sys.skills`、`sys.compact.summary`、`sys.compact.user`
-与 `tools.Agent.*`。`sys.compact.user` 的 `{summary_target_tokens}` 按运行时目标值替换后冻结；
-`tools.Agent.*` 只有 description 与 send_only 从源同步，其余字段锚定在
-`llm-replay/world-source-templates/` 的全量模板。只改这些源文件时，world-sync 只写对应 leaf
-与 `world/seal.json`：单个非 block0 源为 1 leaf + seal，block0 固定为 2 个文件；源未变化时
-不写文件。未映射 leaf（如 `block1.prefix`、单条消息）无法由 world-sync 解释，必须重录受影响
-场景。
+（`01_intro`–`06_tone_style` 组合）、`sys.skills`、`sys.compact.summary`、`sys.compact.user`、
+`sys.block1.{main,replay-worker,subagent}.prefix`（`07_runtime`/`10_hitl`/`11_subagent`/
+`12_ask_user` 源段加固定 catalog/persona 模板）、`tools.Agent.*` 与 `tools.Bash.*`。
+`sys.compact.user` 的 `{summary_target_tokens}` 按运行时目标值替换后冻结；`tools.Agent.*` 只有
+description 与 send_only 从源同步，`tools.Bash.*` 只有 description 从源同步（内置 workspace MCP
+的 `bash.md`），其余字段锚定在 `llm-replay/world-source-templates/` 的全量模板。world-sync 只写
+受影响的 leaf 与 `world/seal.json`：block0 固定为 leaf + seal 两个文件，Bash/Agent 工具描述按
+协议成对写 anthropic/responses 两个 leaf；源未变化时不写文件。未映射 leaf（如带内容哈希的
+`sys.block1.<class>.prefix.<sha8>` 变体、单条消息）无法由 world-sync 解释，必须重录受影响场景。
 
 verify 的 drift 策略：CI 入口 `e2e:replay:verify` 使用 `--drift-policy=source-anchored`，
 只放行与当前 Peri 源逐字节等价的 mapped leaf drift，并在 `approvedDrift` 中列出 cassette、
