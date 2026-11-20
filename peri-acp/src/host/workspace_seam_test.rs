@@ -70,6 +70,7 @@ async fn seam_fixture() -> SeamFixture {
         plugin_face_closed: false,
         prepared_plugins: None,
         session_mcp_servers: None,
+        reserved_root_session_id: false,
     })
     .await;
 

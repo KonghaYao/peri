@@ -393,6 +393,8 @@ impl SessionEnvironment {
             builtin_closed,
             skills_face_closed,
             plugin_face_closed,
+            // 部署级授权原样继承：会话级 cfg 不处理 `session/new`，但同源是唯一口径。
+            reserved_root_session_id: host.reserved_root_session_id,
             prepared_plugins: Some(plugins.clone()),
             session_mcp_servers: Some(session_mcp_servers.clone()),
         };

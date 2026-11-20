@@ -97,6 +97,12 @@ pub(crate) struct PreparedSessionInputs {
     pub(crate) frozen_encoded: Option<String>,
     /// 仅 legacy：取自保存的绝对 cwd。
     pub(crate) legacy: Option<LegacyAdoptionInputs>,
+    /// 客户端预留的 root session ID（`session/new` 的 `_meta["peri.rootSessionId"]`）；
+    /// `None` = 由宿主生成 UUIDv7。
+    ///
+    /// 只有部署级 opt-in 打开时才可能为 `Some`（解析/校验在 `handle_new`），且由发布段
+    /// 一次消费：直接作为 P1 草稿的 `thread_id`，不先建后改名。
+    pub(crate) reserved_session_id: Option<String>,
 }
 
 /// 插件发现结果：一次加载的聚合、技能根与失败标记。
@@ -263,6 +269,8 @@ impl PreparedSessionInputs {
             frozen,
             frozen_encoded,
             legacy: None,
+            // 预留 ID 是**请求**输入，不进准备定格：只有 `handle_new` 在读参数后设置。
+            reserved_session_id: None,
         })
     }
 

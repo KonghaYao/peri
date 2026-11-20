@@ -243,6 +243,7 @@ async fn assemble_stdio_config(
             // host 级装配：无准备路径提供的插件聚合，按既有语义自行加载。
             prepared_plugins: None,
             session_mcp_servers: None,
+            reserved_root_session_id: false,
         },
         apps_enabled,
     )

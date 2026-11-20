@@ -387,6 +387,7 @@ async fn assemble_host_with_workspace_input(
             plugin_face_closed: false,
             prepared_plugins: None,
             session_mcp_servers: None,
+            reserved_root_session_id: false,
         },
         peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         true,

@@ -211,6 +211,8 @@ async fn attach_acp_with_transport_route(
                     // TUI 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
                     prepared_plugins: None,
                     session_mcp_servers: None,
+                    // TUI/print 不是可信宿主：预留根会话 ID 保持关闭（默认 UUIDv7）。
+                    reserved_root_session_id: false,
                 },
             )
             .await;

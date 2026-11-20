@@ -187,6 +187,83 @@ pub(in super::super) fn enabled_meta_sections(
         .unwrap_or_default()
 }
 
+/// `session/new` 的根会话 ID 预留解析（wire：`_meta["peri.rootSessionId"]`）。
+///
+/// 语义是**建议值**，不是幂等写：合法且未被占用的 ID 只作为本次创建的草稿身份
+/// （P1），既有会话不被覆盖（重复 ID 由发布段拒绝，见
+/// [`ensure_reserved_session_id_available`]）。校验只在这里做一次：
+///
+/// - 部署级 opt-in 关闭（TUI / print / stdio 默认）⇒ 该键一律拒绝，**不**静默忽略
+///   ——能力关闭必须真正不可达且失败可见。
+/// - 非字符串 / 空串 / 非 UUID / 非 v7 一律 `-32602`；返回规范化（小写连字符）形式。
+pub(crate) fn parse_reserved_root_session_id(
+    params: &Value,
+    enabled: bool,
+) -> Result<Option<String>, AcpError> {
+    let Some(value) = params
+        .get("_meta")
+        .and_then(|meta| meta.get("peri.rootSessionId"))
+    else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(AcpError::new(
+            -32602,
+            "peri.rootSessionId is not enabled for this host",
+        ));
+    }
+    let Some(raw) = value.as_str() else {
+        return Err(AcpError::new(-32602, "peri.rootSessionId must be a string"));
+    };
+    let Ok(id) = uuid::Uuid::parse_str(raw) else {
+        return Err(AcpError::new(-32602, "peri.rootSessionId must be a UUIDv7"));
+    };
+    // v7 是宿主自身的身份口径（与会话数据同寿）：允许 v4 会让「同一身份」在不同
+    // 客户端之间不可比较，也让时间序索引失去意义。
+    if id.get_version_num() != 7 {
+        return Err(AcpError::new(-32602, "peri.rootSessionId must be a UUIDv7"));
+    }
+    Ok(Some(id.to_string()))
+}
+
+/// 预留 ID 与既有身份冲突：`-32010`，不覆盖、不改名、不删除既有会话。
+fn reserved_session_id_taken() -> AcpError {
+    AcpError::new(-32010, "Session id already exists")
+}
+
+/// 预留 ID 的可用性核对：live 会话与持久会话都占住该身份。
+///
+/// 顺序固定为先 live、后持久：live 命中不需要读存储。持久侧用单列
+/// `load_frozen_state`（缺失 = `NotFound`），不把整份历史读进内存。
+///
+/// 两次核对之后仍存在插入竞争窗口：`begin_initialization` 的主键约束是最终判据，
+/// 失败时按既有存储分类上报（`-32010`），这里不伪造「确定未创建」。
+async fn ensure_reserved_session_id_available(
+    cfg: &AcpServerConfig,
+    sessions: &HashMap<String, SessionState>,
+    session_id: &str,
+) -> Result<(), AcpError> {
+    if sessions.contains_key(session_id) {
+        return Err(reserved_session_id_taken());
+    }
+    match cfg
+        .session_resources
+        .load_frozen_state(&session_id.to_owned())
+        .await
+    {
+        Ok(_) => Err(reserved_session_id_taken()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(super::super::super::workspace::resource_error(error)),
+    }
+}
+
 pub(crate) async fn handle_new(
     params: &Value,
     cfg: &AcpServerConfig,
@@ -211,6 +288,8 @@ pub(crate) async fn handle_new(
         }
         Some(_) => return Err(AcpError::new(-32602, "peri.instructions must be a string")),
     };
+    // 预留 root session ID：解析/校验先于任何准备与写库，非法或未授权不做副作用。
+    let reserved_session_id = parse_reserved_root_session_id(params, cfg.reserved_root_session_id)?;
     let requested = params.get("cwd").and_then(Value::as_str).unwrap_or(".");
     let workspace = cfg
         .session_resources
@@ -229,6 +308,7 @@ pub(crate) async fn handle_new(
         super::super::super::prepared::PreparedSessionInputs::prepare_new_deferred(cfg, &cwd)?;
     prepared.agent_instructions = agent_instructions;
     prepared.session_mcp_servers = session_mcp_setup::session_mcp_servers(params)?;
+    prepared.reserved_session_id = reserved_session_id;
     new_session_from_prepared(cfg, &workspace, prepared, sessions).await
 }
 
@@ -251,7 +331,16 @@ pub(crate) async fn new_session_from_prepared(
     // 身份一次生成；「未发布创建」的 frozen 由 P5 一次性提交，因此内容准入（本次的
     // 准备产物）与发布之间不存在「保存了半份」的中间态。数据已保存但准入失败
     // （saved_but_not_admitted）原样上报，不谎称「确定未创建」。
-    let session_id = uuid::Uuid::now_v7().to_string();
+    //
+    // 预留 ID（部署级 opt-in）在这里**一次消费**：它直接成为 P1 草稿身份，不存在
+    // 「先建后改名」；同一 ID 的第二次创建在可用性核对处被拒绝（既有会话不被覆盖）。
+    let reserved_session_id = prepared.reserved_session_id.take();
+    let session_id = reserved_session_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    if let Some(reserved) = reserved_session_id.as_deref() {
+        ensure_reserved_session_id_available(cfg, sessions, reserved).await?;
+    }
     let initialization = resources
         .begin_initialization(&NewSessionDraft {
             thread_id: session_id.clone(),
@@ -954,3 +1043,7 @@ pub(in super::super) fn prewarm_session_mcp_discovery(cfg: &AcpServerConfig, ses
         .attach_connection_notifier(Some(&registry), Some(&command_registry), &cancel);
     pool.prewarm_discovery(&registry, &command_registry, session_id, &cancel);
 }
+
+#[cfg(test)]
+#[path = "session_lifecycle_dispatch_test.rs"]
+mod reserved_root_session_tests;

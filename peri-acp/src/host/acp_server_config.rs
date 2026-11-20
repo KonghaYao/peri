@@ -273,6 +273,16 @@ pub struct AcpServerConfig {
     /// 「这个调用者是否有这个 session 的这项授权」，不是「按 id 取得到哪个对象」。
     pub session_authorization:
         Option<Arc<dyn peri_acp_types::session_authorization::SessionAuthorizationPort>>,
+    /// 根会话 ID 预留权（部署级 opt-in，默认关闭）。
+    ///
+    /// `true` ⇒ 可信 Rust 宿主（例如把 ACP Host 嵌进程内的服务化部署）允许
+    /// `session/new` 用 `_meta["peri.rootSessionId"]` 指定本次创建的会话 ID：该 ID
+    /// 直接作为 P1 草稿的 `thread_id`（不先建后改名）。`false`（TUI / print / stdio
+    /// 三条装配路径的默认）⇒ 该键一律拒绝，ID 仍由宿主生成 UUIDv7。
+    ///
+    /// 这是**部署授权**，不是客户端能力协商：协议客户端不能自行打开它。会话级
+    /// 装配（`session_scoped`）原样继承部署值，但 `session/new` 只在部署级宿主上处理。
+    pub reserved_root_session_id: bool,
     /// OAuth 授权事件通道（host 级，跨 session）：装配点创建 (tx, rx) 并注入
     /// tx（MCP 授权回调经此转发 AcpEvent），run_acp_server take rx 后 spawn
     /// 消费者 task，以 `peri/agent_event` notification（sessionId 为空串，
