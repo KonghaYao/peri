@@ -3805,6 +3805,10 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "parking_lot",
+ "peri-acp",
+ "peri-acp-types",
+ "peri-resources",
  "peri-time",
  "serde",
  "serde_json",
@@ -3814,6 +3818,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
