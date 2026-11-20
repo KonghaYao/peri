@@ -2,8 +2,9 @@
 use super::BgDisplayEntry;
 use super::GridSpec;
 use super::Rect;
-use super::ScrollbarGeometry;
 use super::TuiRenderUnit;
+
+use peri_tui_components::scrollbar::{VerticalBar, VerticalPress};
 
 use crate::kit::tui_render_unit::{TuiSubAgentGroup, TuiUserBubble};
 
@@ -89,14 +90,33 @@ fn running_detail_opens_at_live_tail_and_completed_detail_opens_at_header() {
 
 #[test]
 fn detail_scrollbar_drag_reaches_both_ends_without_thumb_jump() {
-    let top = ScrollbarGeometry::new(100, 10, 0);
-    assert!(top.contains_thumb(0));
-    assert_eq!(top.offset_for(0, top.grab_offset(0)), 0);
-    assert_eq!(top.offset_for(7, top.grab_offset(7)), 90);
-    let middle = ScrollbarGeometry::new(100, 10, 45);
-    assert!(middle.contains_thumb(middle.thumb_start));
-    assert!(middle.offset_for(middle.thumb_start, middle.grab_offset(middle.thumb_start)) <= 45);
-    assert_eq!(middle.offset_for(7, 0), 90);
+    // 详情视口高 10：上下箭头占 2 行，轨道 8 行；内容 1000 / 视口 10 → 底部 990。
+    let area = Rect::new(59, 1, 1, 10);
+    let top = VerticalBar::new(10, 10, 1000, 0).expect("overflowing detail");
+    assert_eq!(top.max_offset(), 990);
+    assert_eq!(top.press(area, area.y), VerticalPress::Top);
+    assert_eq!(
+        top.press(area, area.y + area.height - 2),
+        VerticalPress::Track { offset: 990 }
+    );
+    assert_eq!(
+        top.press(area, area.y + area.height - 1),
+        VerticalPress::Bottom
+    );
+
+    let bottom = VerticalBar::new(10, 10, 1000, 990).expect("overflowing detail");
+    assert_eq!(
+        bottom.press(area, area.y + area.height - 2),
+        VerticalPress::Thumb { grab: 0 }
+    );
+    assert_eq!(bottom.drag_offset(area, area.y + area.height - 2, 0), 990);
+    let middle = VerticalBar::new(10, 10, 1000, 495).expect("overflowing detail");
+    assert!(middle.thumb_start > 0);
+    assert_eq!(
+        middle.drag_offset(area, area.y + 1 + middle.thumb_start as u16, 0),
+        495,
+        "同一 thumb 格内拖拽保持原始偏移（495 反推是 566）"
+    );
 }
 
 #[test]

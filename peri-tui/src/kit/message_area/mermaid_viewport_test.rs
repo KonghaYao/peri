@@ -474,7 +474,7 @@ fn diagram_width_uses_body_columns_with_a_100_column_cap() {
         message_id: Some("wide".to_string()),
         content_hash: 8811,
     }));
-    let (_, _, _, _, _, fences) = super::render::vm_to_lines_cached_with_layout(
+    let (_, _, _, _, _, fences, _) = super::render::vm_to_lines_cached_with_layout(
         &long,
         &grid,
         &mut markdown,
@@ -492,7 +492,7 @@ fn diagram_width_uses_body_columns_with_a_100_column_cap() {
         message_id: Some("brief".to_string()),
         content_hash: 8812,
     }));
-    let (_, _, _, _, _, fences) = super::render::vm_to_lines_cached_with_layout(
+    let (_, _, _, _, _, fences, _) = super::render::vm_to_lines_cached_with_layout(
         &short,
         &grid,
         &mut markdown,

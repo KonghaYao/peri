@@ -161,9 +161,9 @@ fn test_build_queue_lines_caps_at_five_and_more_row() {
     assert_eq!(render::build_queue_lines(&items, false, 40).len(), 5);
     // 空队列 → 无行（不占高度）。
     assert!(render::build_queue_lines(&[], false, 40).is_empty());
-    // 超长文本按宽度截断（truncate_by_width：正文预算 max_width + 省略号 1 列）。
+    // 超长文本按宽度严格截断（含省略号 ≤ max_width）。
     let long = render::build_queue_lines(&["x".repeat(100)], false, 10);
-    assert_eq!(long[0].spans[1].content.width(), 11);
+    assert_eq!(long[0].spans[1].content.width(), 10);
 }
 
 /// 渲染 Block 到 TestBackend，返回按行拼接的文本（titles 是私有字段，
@@ -326,28 +326,27 @@ fn test_filter_files_prefix_start_priority() {
     assert_eq!(result.first().expect("filter files prefix start priority: the fixture collection must contain the expected entry"), "auth.rs");
 }
 
-/// M5：`exit_history_mode_if_active` 在 `INPUT_HISTORY_INDEX` 为 Some 时调用
-/// `reset_history_cursor`，清空 index 与 DRAFT。为 None 时为 no-op。
+/// M5：`exit_history_mode_if_active` 在游标处于浏览态时调用
+/// `reset_history_cursor`，清空 index 与草稿。为 None 时为 no-op。
 #[test]
 #[serial]
 fn test_exit_history_mode_helper_resets_index_and_keeps_draft_unused() {
-    use crate::kit::atoms::DRAFT as HISTORY_DRAFT;
-    use crate::kit::atoms::INPUT_HISTORY_INDEX;
+    use crate::kit::atoms::INPUT_HISTORY_CURSOR;
     crate::kit::atoms::init_atoms();
-    // 先推入一条历史并进入 history 浏览模式（history_up 会保存 DRAFT）。
+    // 先推入一条历史并进入 history 浏览模式（history_up 会保存草稿）。
     crate::kit::input_history::push_history("a");
     let _ = crate::kit::input_history::history_up(Some("orig"));
-    assert!(INPUT_HISTORY_INDEX.state().read().is_some());
-    assert!(HISTORY_DRAFT.state().read().is_some());
+    assert!(INPUT_HISTORY_CURSOR.state().read().index().is_some());
+    assert!(INPUT_HISTORY_CURSOR.state().read().draft().is_some());
 
     submit::exit_history_mode_if_active();
-    // helper 应清空 index + DRAFT，回到"编辑新文本"状态。
-    assert!(INPUT_HISTORY_INDEX.state().read().is_none());
-    assert!(HISTORY_DRAFT.state().read().is_none());
+    // helper 应清空 index + 草稿，回到"编辑新文本"状态。
+    assert!(INPUT_HISTORY_CURSOR.state().read().index().is_none());
+    assert!(INPUT_HISTORY_CURSOR.state().read().draft().is_none());
 
     // 非历史模式调用应为 no-op，不 panic。
     submit::exit_history_mode_if_active();
-    assert!(INPUT_HISTORY_INDEX.state().read().is_none());
+    assert!(INPUT_HISTORY_CURSOR.state().read().index().is_none());
 }
 
 /// L13：粘贴分支应清空 slash/mention 激活态而非重新检测。
@@ -396,7 +395,7 @@ fn test_truncate_title_to_width_handles_cjk() {
     let s = "a".repeat(40);
     let t = super::truncate_title_to_width(&s, 32);
     assert!(t.ends_with('…'));
-    assert_eq!(t.chars().count(), 33); // 32 + 省略号
+    assert_eq!(t.width(), 32, "省略号计入预算");
 
     // CJK 双宽字符：16 个汉字 = 32 列，不截断
     let cjk = "字".repeat(16);

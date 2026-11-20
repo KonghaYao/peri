@@ -27,6 +27,32 @@ fn test_truncate_by_width_short_and_exact() {
     assert_eq!(super::truncate_by_width("hello", 5), "hello");
 }
 
+/// 旧入口保留前缀预算语义：省略号额外占 1 列。
+#[test]
+fn test_truncate_by_width_keeps_prefix_budget_contract() {
+    assert_eq!(super::truncate_by_width("abcdefghijk", 10).width(), 11);
+    assert_eq!(super::truncate_by_width("", 0), "");
+    assert_eq!(super::truncate_by_width("abc", 0), "…");
+}
+
+/// 严格总列宽入口：输出（含省略号）不超过预算。
+#[test]
+fn test_truncate_to_width_counts_ellipsis_in_budget() {
+    assert_eq!(super::truncate_to_width("abcdefghijk", 10), "abcdefghi…");
+    assert_eq!(super::truncate_to_width("abcdefghij", 10), "abcdefghij");
+    assert_eq!(super::truncate_to_width("abcdef", 0), "");
+    assert_eq!(super::truncate_to_width("abcdef", 1), "…");
+    assert_eq!(super::truncate_to_width("啊", 1), "…");
+    assert_eq!(super::truncate_to_width("你好世界", 5), "你好…");
+    assert_eq!(super::truncate_to_width("e\u{301}abcd", 3), "e\u{301}a…");
+    for budget in 0..=20 {
+        assert!(
+            super::truncate_to_width("字a字a字a字a", budget).width() <= budget,
+            "budget={budget}"
+        );
+    }
+}
+
 #[test]
 fn test_truncate_by_width_ascii() {
     // 恰好 10 列不截断（与 truncate_text 语义一致：len <= max 返回原串）
@@ -451,6 +477,9 @@ fn test_middle_truncate_by_width_fits_and_edges() {
     let tiny = super::middle_truncate_by_width("abcdefgh", 3);
     assert!(tiny.width() <= 3, "{tiny:?}");
     assert!(tiny.ends_with('…'), "{tiny:?}");
+    assert_eq!(super::middle_truncate_by_width("abcdefgh", 2), "a…");
+    assert_eq!(super::middle_truncate_by_width("abcdefgh", 1), "…");
+    assert_eq!(super::middle_truncate_by_width("abcdefgh", 0), "");
 }
 
 #[test]

@@ -47,15 +47,16 @@ fn context(surface: EntrySurface) -> EntryRenderContext {
 #[test]
 #[serial_test::serial]
 fn genui_parse_payload_is_counted_once_per_shared_arc() {
-    let library = crate::kit::genui::library::library().unwrap();
+    let library = peri_tui_components::genui::library::library().unwrap();
     let source = format!(
         "$count = 1\nroot = Stack([Text(\"{}\"), Button(\"add\", @Set($count, $count + 1))])",
         "数据".repeat(2048)
     );
     let parsed = Arc::new(peri_genui::parse(&source, library));
     let parsed_bytes = parsed.retained_bytes();
-    let action = crate::kit::genui::GenUiAction::Set("$count".into(), peri_genui::Expr::Null);
-    let make = || crate::kit::genui::GenUiButtonInfo {
+    let action =
+        peri_tui_components::genui::GenUiAction::Set("$count".into(), peri_genui::Expr::Null);
+    let make = || peri_tui_components::genui::GenUiButtonInfo {
         line_start: 0,
         line_end: 1,
         x_start: 0,
@@ -76,7 +77,7 @@ fn genui_parse_payload_is_counted_once_per_shared_arc() {
     };
 
     let sample = make();
-    let per_button = std::mem::size_of::<crate::kit::genui::GenUiButtonInfo>()
+    let per_button = std::mem::size_of::<peri_tui_components::genui::GenUiButtonInfo>()
         + sample.label.capacity()
         + sample.action.retained_bytes();
     let single_bytes = single.retained_bytes();

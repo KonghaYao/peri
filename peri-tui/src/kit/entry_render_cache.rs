@@ -4,7 +4,6 @@ use std::sync::Arc;
 use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::ratatui::text::Line;
 
-use crate::kit::genui::GenUiButtonInfo;
 use crate::kit::markdown::MarkdownRenderCache;
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::message_area::render::CopyButtonInfo;
@@ -12,6 +11,7 @@ use crate::kit::message_area::render::ImageLineInfo;
 use crate::kit::message_area::render::InteractionLayout;
 use crate::kit::message_area::selection::{WrappedLineInfo, build_wrap_map};
 use crate::kit::tui_render_unit::TuiRenderUnit;
+use peri_tui_components::genui::GenUiButtonInfo;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EntrySurface {
@@ -50,12 +50,14 @@ pub(crate) struct EntryRenderCache {
     interaction: Option<InteractionLayout>,
     image_lines: Vec<ImageLineInfo>,
     genui_buttons: Vec<GenUiButtonInfo>,
-    genui_revisions: Vec<(crate::kit::genui::GenUiBlockId, u64)>,
+    genui_revisions: Vec<(peri_tui_components::genui::GenUiBlockId, u64)>,
     /// 上次渲染时的 Mermaid 预览版本；只有含 Mermaid 的消息需要据此重算。
     preview_revision: Option<u64>,
     has_mermaid: Option<bool>,
     /// 本消息内每处围栏的逻辑行范围；调度与阅读锚点共用。
     mermaid_fences: Vec<crate::kit::mermaid::FenceSpan>,
+    /// 展开的正文空档组：成员标题逻辑行 → 成员 FoldKey（单击热区复用）。
+    fold_hits: Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>>,
 }
 
 impl EntryRenderCache {
@@ -121,42 +123,20 @@ impl EntryRenderCache {
                     );
                 }
             } else {
-                let (lines, copy_button, interaction, image_lines, genui_buttons, mermaid_fences) =
-                    if context.surface == EntrySurface::Message {
-                        crate::kit::message_area::render::vm_to_lines_cached_with_layout_gated(
-                            vm,
-                            grid,
-                            &mut self.markdown,
-                            None,
-                            true,
-                            transition,
-                        )
-                    } else {
-                        crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(
-                            vm,
-                            grid,
-                            &mut self.markdown,
-                            None,
-                            false,
-                            transition,
-                        )
-                    };
-                self.lines = Arc::new(lines);
-                self.copy_button = copy_button;
-                self.interaction = interaction;
-                self.image_lines = image_lines;
-                self.genui_buttons = genui_buttons;
-                self.mermaid_fences = mermaid_fences;
-            }
-        } else {
-            self.markdown_lines.stable_start = None;
-            let (lines, copy_button, interaction, image_lines, genui_buttons, mermaid_fences) =
-                if context.surface == EntrySurface::Message {
+                let (
+                    lines,
+                    copy_button,
+                    interaction,
+                    image_lines,
+                    genui_buttons,
+                    mermaid_fences,
+                    fold_hits,
+                ) = if context.surface == EntrySurface::Message {
                     crate::kit::message_area::render::vm_to_lines_cached_with_layout_gated(
                         vm,
                         grid,
                         &mut self.markdown,
-                        Some(&mut self.markdown_lines),
+                        None,
                         true,
                         transition,
                     )
@@ -165,17 +145,55 @@ impl EntryRenderCache {
                         vm,
                         grid,
                         &mut self.markdown,
-                        Some(&mut self.markdown_lines),
+                        None,
                         false,
                         transition,
                     )
                 };
+                self.lines = Arc::new(lines);
+                self.copy_button = copy_button;
+                self.interaction = interaction;
+                self.image_lines = image_lines;
+                self.genui_buttons = genui_buttons;
+                self.mermaid_fences = mermaid_fences;
+                self.fold_hits = Arc::new(fold_hits);
+            }
+        } else {
+            self.markdown_lines.stable_start = None;
+            let (
+                lines,
+                copy_button,
+                interaction,
+                image_lines,
+                genui_buttons,
+                mermaid_fences,
+                fold_hits,
+            ) = if context.surface == EntrySurface::Message {
+                crate::kit::message_area::render::vm_to_lines_cached_with_layout_gated(
+                    vm,
+                    grid,
+                    &mut self.markdown,
+                    Some(&mut self.markdown_lines),
+                    true,
+                    transition,
+                )
+            } else {
+                crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(
+                    vm,
+                    grid,
+                    &mut self.markdown,
+                    Some(&mut self.markdown_lines),
+                    false,
+                    transition,
+                )
+            };
             self.lines = Arc::new(lines);
             self.copy_button = copy_button;
             self.interaction = interaction;
             self.image_lines = image_lines;
             self.genui_buttons = genui_buttons;
             self.mermaid_fences = mermaid_fences;
+            self.fold_hits = Arc::new(fold_hits);
         }
         self.genui_revisions = self
             .markdown_lines
@@ -208,6 +226,12 @@ impl EntryRenderCache {
     #[must_use]
     pub(crate) fn mermaid_fences(&self) -> &[crate::kit::mermaid::FenceSpan] {
         &self.mermaid_fences
+    }
+
+    /// 展开组的成员标题命中表（非组槽位恒为空）。
+    #[must_use]
+    pub(crate) fn fold_hits(&self) -> &Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>> {
+        &self.fold_hits
     }
 
     #[must_use]
@@ -289,9 +313,9 @@ impl EntryRenderCache {
             + crate::kit::retained_bytes::retained_arc_lines_bytes(&self.lines, seen)
             + self.markdown_lines.retained_bytes_with(seen)
             + self.genui_revisions.capacity()
-                * std::mem::size_of::<(crate::kit::genui::GenUiBlockId, u64)>()
+                * std::mem::size_of::<(peri_tui_components::genui::GenUiBlockId, u64)>()
             + self.markdown_lines.genui_blocks.capacity()
-                * std::mem::size_of::<crate::kit::genui::GenUiBlockId>()
+                * std::mem::size_of::<peri_tui_components::genui::GenUiBlockId>()
             + self.genui_buttons.capacity() * std::mem::size_of::<GenUiButtonInfo>()
             + self
                 .genui_buttons
@@ -310,6 +334,8 @@ impl EntryRenderCache {
                 .iter()
                 .map(|image| image.path.capacity() + image.size_text.capacity())
                 .sum::<usize>()
+            + self.fold_hits.capacity()
+                * std::mem::size_of::<(usize, crate::kit::tui_render_unit::FoldKey)>()
             + self
                 .interaction
                 .as_ref()
@@ -337,7 +363,7 @@ pub(crate) struct MarkdownLineCache {
     pub(crate) stable_start: Option<usize>,
     pub(crate) stable: Vec<MarkdownLineChunk>,
     pub(crate) genui_ranges: Vec<std::ops::Range<usize>>,
-    pub(crate) genui_blocks: Vec<crate::kit::genui::GenUiBlockId>,
+    pub(crate) genui_blocks: Vec<peri_tui_components::genui::GenUiBlockId>,
     prefix: Vec<usize>,
 }
 

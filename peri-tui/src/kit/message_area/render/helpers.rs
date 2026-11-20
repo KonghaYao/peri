@@ -3,6 +3,7 @@ use crate::kit::terminal_caps::SymbolSet;
 use crate::kit::tui_render_unit::TuiDiffBlock;
 
 use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::spinner::Spinner;
 use ratatui_kit::ratatui::style::{Color, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -15,7 +16,7 @@ pub(super) fn compact_output_lines(text: &str, max_lines: usize, max_width: usiz
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .take(max_lines)
-        .map(|line| crate::truncate::truncate_by_width(line, max_width))
+        .map(|line| crate::truncate::truncate_to_width(line, max_width))
         .collect();
 
     let total = text.lines().filter(|line| !line.trim().is_empty()).count();
@@ -103,7 +104,13 @@ fn anim_tick() -> u64 {
 fn running_symbol() -> String {
     let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
     if caps.unicode {
-        crate::components::spinner::animation::braille_frame(anim_tick()).to_string()
+        Spinner::new(
+            crate::components::spinner::animation::BRAILLE_LOADING_FRAMES,
+            anim_tick(),
+        )
+        .glyph()
+        .map(String::from)
+        .unwrap_or_else(|| "*".to_string())
     } else {
         "*".to_string()
     }
@@ -266,7 +273,7 @@ pub(super) fn place_meta(
     }
 }
 
-/// 用 `truncate_by_width` 截断超宽行内最后一个可变 span（summary），
+/// 用 `truncate_to_width` 截断超宽行内最后一个可变 span（summary），
 /// 保证正文（含前缀）宽度 ≤ 前缀宽 + 正文预算（避免 Paragraph 在视口宽度处
 /// 二次折行破坏 wrap_map）。
 ///
@@ -307,7 +314,7 @@ pub(super) fn fit_summary_to_content(spans: &mut Vec<Span<'static>>, grid: &Grid
             if w > 0 {
                 let keep = w.saturating_sub(overflow);
                 if keep > 0 {
-                    span.content = crate::truncate::truncate_by_width(&span.content, keep).into();
+                    span.content = crate::truncate::truncate_to_width(&span.content, keep).into();
                 }
                 return;
             }

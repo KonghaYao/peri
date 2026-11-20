@@ -449,6 +449,10 @@ mod behavior_tests;
 #[path = "recovery_child_test.rs"]
 mod recovery_child;
 
+/// P1-A：父树整树删除后回收恢复冷装配的子实例。
+#[path = "recovery_child_reclaim_test.rs"]
+mod recovery_child_reclaim;
+
 #[path = "recovery_parent_binding_test.rs"]
 mod parent_binding_tests;
 

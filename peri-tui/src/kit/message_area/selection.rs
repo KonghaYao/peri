@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::kit::message_area::grid::GridSpec;
-use crate::kit::text_selection::{self, SelectionAnchor, TextSelection};
+use crate::kit::text_selection::{SelectionAnchor, TextSelection};
+use peri_tui_components::selection::{
+    SelectionPoint, line_byte_range, line_plain_text, wrap_row_byte_starts,
+};
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::widgets::{Paragraph, Wrap};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 // ── wrap_map 类型 ──────────────────────────────────────────────────────────
 
@@ -66,6 +67,8 @@ pub(super) struct SlotLines {
     parts: Vec<SlotLinePart>,
     prefix: Vec<usize>,
     genui_ranges: Vec<std::ops::Range<usize>>,
+    /// 展开的正文空档组：成员标题逻辑行 → 成员 FoldKey（单击热区来源）。
+    fold_hits: Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>>,
 }
 
 impl SlotLines {
@@ -124,6 +127,7 @@ impl SlotLines {
             parts,
             prefix,
             genui_ranges: Vec::new(),
+            fold_hits: Arc::default(),
         }
     }
 
@@ -137,6 +141,19 @@ impl SlotLines {
         self
     }
 
+    /// 挂上「成员标题逻辑行 → FoldKey」命中表（仅展开的正文空档组有值）。
+    pub(super) fn with_fold_hits(
+        mut self,
+        hits: Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>>,
+    ) -> Self {
+        self.fold_hits = hits;
+        self
+    }
+
+    pub(super) fn fold_hits(&self) -> &Arc<Vec<(usize, crate::kit::tui_render_unit::FoldKey)>> {
+        &self.fold_hits
+    }
+
     pub(super) fn is_genui_line(&self, logical: usize) -> bool {
         super::render::is_genui_line(&self.genui_ranges, logical)
     }
@@ -145,6 +162,8 @@ impl SlotLines {
         self.parts.capacity() * std::mem::size_of::<SlotLinePart>()
             + self.prefix.capacity() * std::mem::size_of::<usize>()
             + self.genui_ranges.capacity() * std::mem::size_of::<std::ops::Range<usize>>()
+            + self.fold_hits.capacity()
+                * std::mem::size_of::<(usize, crate::kit::tui_render_unit::FoldKey)>()
     }
 
     pub(super) fn get(&self, logical: usize) -> Option<&Line<'static>> {
@@ -250,130 +269,6 @@ pub(super) fn visual_to_logical(visual_row: usize, wrap_map: &[WrappedLineInfo])
         Ok(idx) => Some(wrap_map[idx].logical_idx),
         Err(_) => None,
     }
-}
-
-// ── 折行宽度模拟 ──────────────────────────────────────────────────────────
-
-/// 用 ratatui `Paragraph::wrap` 渲染 `Line` 到 offscreen `Buffer`，按 cell 流匹配
-/// plain text 字符，确定每个视觉行在该 plain text 中的 byte 起始偏移。
-///
-/// [Why] 旧实现用 `c = vis_col + (vis_row - visual_start) * width` 推算逻辑列，
-/// 假设每个视觉行恰好占满 `width` 列。但 ratatui 用 `WordWrapper` 做 word-level
-/// wrap：CJK 文本（无空格）被当成单个 word，超宽也不拆分；ASCII 文本在空格处
-/// 优先换行；行尾字符宽度不一致（每行占列数不固定）。按 width×k 推算会在所有
-/// 这些情况下累积偏移，导致复制结果与终端显示的高亮范围不一致。
-///
-/// 直接渲染到 Buffer 是唯一能 100% 复刻 ratatui wrap 行为的方法——和实际显示
-/// 完全一致，鼠标点击的视觉行号自然对齐。
-///
-/// 返回值长度 = 视觉行数 + 1，元素依次是 row 0 起始 byte、row 1 起始 byte、...
-/// 末行结束 byte（= `plain.len()`）。
-pub(super) fn wrap_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usize> {
-    use ratatui_kit::ratatui::buffer::Buffer;
-    use ratatui_kit::ratatui::layout::Rect;
-    use ratatui_kit::ratatui::widgets::Widget;
-
-    let width = width.max(1);
-    if plain.is_empty() {
-        return vec![0];
-    }
-    let line_count = Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
-        .wrap(Wrap { trim: false })
-        .line_count(width);
-    if line_count <= 1 {
-        return vec![0, plain.len()];
-    }
-
-    if line_count > u16::MAX as usize {
-        return wrap_byte_starts_large_line(plain, usize::from(width));
-    }
-
-    let height = u16::try_from(line_count).expect("line count checked against u16::MAX");
-    let area = Rect::new(0, 0, width, height);
-    let mut buf = Buffer::empty(area);
-    Paragraph::new(ratatui_kit::ratatui::text::Text::from(line.clone()))
-        .wrap(Wrap { trim: false })
-        .render(area, &mut buf);
-
-    // 预计算字素簇的 byte 偏移表（与 ratatui 渲染/折行同一字素边界口径）。
-    let graphemes: Vec<&str> = plain.graphemes(true).collect();
-    let mut grapheme_bytes: Vec<usize> = Vec::with_capacity(graphemes.len() + 1);
-    grapheme_bytes.push(0);
-    let mut byte_off = 0usize;
-    for grapheme in &graphemes {
-        byte_off += grapheme.len();
-        grapheme_bytes.push(byte_off);
-    }
-
-    let mut starts: Vec<usize> = Vec::with_capacity(line_count + 1);
-    starts.push(0);
-    let mut consumed = 0usize;
-    let total = graphemes.len();
-
-    for row in 0..height.saturating_sub(1) {
-        for col in 0..width {
-            if consumed >= total {
-                break;
-            }
-            let Some(cell) = buf.cell((col, row)) else {
-                continue;
-            };
-            let sym = cell.symbol();
-            if sym.is_empty() {
-                continue; // 双宽字素的 continuation cell
-            }
-            let next = graphemes[consumed];
-            if sym == next {
-                consumed += 1;
-            } else if !sym.chars().all(char::is_whitespace) && next.starts_with(sym) {
-                // 某些渲染路径只把字素首标量写入 cell；宽度仍按整个字素消费，
-                // 不能在 ZWJ/组合标记内部切断。
-                consumed += 1;
-            }
-            // 否则是 trailing padding 空格，跳过
-        }
-        starts.push(*grapheme_bytes.get(consumed).unwrap_or(&plain.len()));
-    }
-    starts.push(plain.len());
-    starts
-}
-
-fn wrap_byte_starts_large_line(plain: &str, width: usize) -> Vec<usize> {
-    let mut starts = vec![0];
-    let mut row_width = 0usize;
-    for (byte, grapheme) in plain.grapheme_indices(true) {
-        let grapheme_width = UnicodeWidthStr::width(grapheme);
-        if row_width > 0 && row_width.saturating_add(grapheme_width) > width {
-            starts.push(byte);
-            row_width = 0;
-        }
-        row_width = row_width.saturating_add(grapheme_width);
-    }
-    starts.push(plain.len());
-    starts
-}
-
-/// 选区**起点** byte 偏移：target_col 落在字素簇占的列范围 [col, col+cw) 内时，
-/// 总是返回该字素起点（含字素本身）。字素边界与渲染/折行口径一致，避免在
-/// ZWJ 序列或组合标记内部切断。
-fn row_start_byte(plain: &str, row_start_byte: usize, col_in_row: u16) -> usize {
-    let head = plain.split_at(row_start_byte).1;
-    let mut col = 0u16;
-    for (i, grapheme) in head.grapheme_indices(true) {
-        let cw = UnicodeWidthStr::width(grapheme) as u16;
-        if cw > 0 && col_in_row < col + cw {
-            return row_start_byte + i;
-        }
-        col += cw;
-    }
-    row_start_byte + head.len()
-}
-
-/// 选区**终点** byte 偏移：target_col 落在字符左半 → 返回字符起点（不含）；
-/// 落在右半 → 返回字符终点（含）。语义见 `text_selection::visual_col_to_byte_offset`。
-fn row_end_byte(plain: &str, row_start_byte: usize, col_in_row: u16) -> usize {
-    let head = plain.split_at(row_start_byte).1;
-    row_start_byte + text_selection::visual_col_to_byte_offset(head, col_in_row)
 }
 
 // ── 选区起点的稳定身份（历史前插后重定位）────────────────────────────────
@@ -501,39 +396,18 @@ pub(super) fn highlight_line_in_selection(
     width: u16,
     sel_style: Style,
 ) -> Line<'static> {
-    let plain = text_selection::line_to_plain_text(line);
-    let row_starts = wrap_byte_starts(line, &plain, width);
-    let row_max = row_starts.len().saturating_sub(1);
-
-    let sr_in_line = sel_sr >= entry.visual_start && sel_sr < entry.visual_end;
-    let er_in_line = sel_er >= entry.visual_start && sel_er < entry.visual_end;
-
-    // sr_off / er_off 是选区起点/终点视觉行相对该逻辑行 visual_start 的偏移
-    let sr_off = sel_sr.saturating_sub(entry.visual_start).min(row_max);
-    let er_off = sel_er.saturating_sub(entry.visual_start).min(row_max);
-
-    let (b_start, b_end) = if sr_in_line && er_in_line {
-        // 同一行：byte 范围 = [sr_off 行内 sc, er_off 行内 ec]
-        let s = row_start_byte(&plain, row_starts[sr_off], sel_sc);
-        let e = row_end_byte(&plain, row_starts[er_off], sel_ec);
-        (s, e)
-    } else if sr_in_line {
-        // 仅首行：起始 sc，结束 = plain 末尾
-        let s = row_start_byte(&plain, row_starts[sr_off], sel_sc);
-        (s, plain.len())
-    } else if er_in_line {
-        // 仅末行：起始 = 0，结束 ec
-        let e = row_end_byte(&plain, row_starts[er_off], sel_ec);
-        (0, e)
-    } else {
-        // 中间行：整行高亮
-        (0, plain.len())
-    };
-
-    if b_start >= b_end {
+    let plain = line_plain_text(line);
+    let row_starts = wrap_row_byte_starts(line, &plain, width);
+    let Some(range) = line_byte_range(
+        &plain,
+        &row_starts,
+        entry.visual_start..entry.visual_end,
+        SelectionPoint::new(sel_sr, sel_sc),
+        SelectionPoint::new(sel_er, sel_ec),
+    ) else {
         return line.clone();
-    }
-    split_line_spans_by_byte_range(line, b_start, b_end, sel_style)
+    };
+    split_line_spans_by_byte_range(line, range.start, range.end, sel_style)
 }
 
 /// 按字节范围 `[b_start, b_end)` 拆分 line 的 spans，对落在范围内的字符追加 `sel_style`。
@@ -610,10 +484,10 @@ pub(super) fn mark_copy_message(char_count: usize) {
 
 /// 从逻辑行中按视觉坐标精确提取选中文本（字符级精度）。
 ///
-/// 每个视觉行的起始 byte 偏移由 `wrap_byte_starts` 用 `unicode_width` 模拟
-/// ratatui `Paragraph::wrap` 得到，避免"width×k"假设在 CJK 文本上累积偏移。
-/// 行内列号再由 `visual_col_to_byte_offset` 转为 byte 偏移，二者共享同一套
-/// 宽度语义，保证选区高亮范围与复制结果一致。
+/// 每个视觉行的起始 byte 偏移由组件的 `wrap_row_byte_starts` 从真实
+/// `Paragraph` 渲染结果推导，避免"width×k"假设在 CJK 文本上累积偏移。
+/// 行内列号再由组件的字素切片换算，二者共享同一套宽度语义，保证选区高亮范围
+/// 与复制结果一致。
 ///
 /// [TRAP] 选区可能超出 core 范围（footer 区域无 wrap_map）——clamp 到 wrap_map
 /// 末尾，确保 footer 行的 visual_to_logical 不返回 None 导致整个提取失败。
@@ -625,7 +499,7 @@ pub(super) fn mark_copy_message(char_count: usize) {
 /// 完整行直接用语义全文；首/末部分选择行把列范围映射到语义文本上
 /// （`plain.find(semantic)` 定位；重建行（tool header）定位失败时回退原始
 /// 提取）。`view_models` 为 None 时保持既有行为（列模拟不侵入，剥离只发生
-/// 在提取层——wrap_byte_starts / 高亮列模型零改动）。
+/// 在提取层——wrap_row_byte_starts / 高亮列模型零改动）。
 #[allow(clippy::too_many_arguments)] // 选区提取参数组（与既有调用链签名一致）
 pub(super) fn extract_visual_range_index(
     index: &SlotIndex,
@@ -671,7 +545,7 @@ pub(super) fn extract_visual_range_index(
         if slot_lines.is_genui_line(local_idx) {
             continue;
         }
-        let plain = text_selection::line_to_plain_text(line);
+        let plain = line_plain_text(line);
         // 台阶行（§6 ` ╰─╮` / ` ╭─╯`）是纯结构 chrome——整行跳过，既不进入
         // 复制文本也不为其保留空行。
         if super::render::is_step_row(line) {
@@ -707,45 +581,33 @@ pub(super) fn extract_visual_range_index(
                 let p = plain.find(sem.as_str()).unwrap_or(0);
                 (sem, p)
             });
-        // 每个视觉行在该逻辑行 plain text 中的 byte 起始偏移
-        let row_starts = wrap_byte_starts(line, &plain, width);
-        // 把视觉行号 clamp 到 row_starts 索引范围内（防御：footer 区域等异常 sr/er）
-        let row_max = row_starts.len().saturating_sub(1);
-        let sr_off = sr.saturating_sub(entry.visual_start).min(row_max);
-        let er_off = er.saturating_sub(entry.visual_start).min(row_max);
-
-        if first == last {
-            // 同一逻辑行：起点行 sr_off 内的列 sc → 终点行 er_off 内的列 ec
-            let s_row_byte = row_starts[sr_off];
-            let e_row_byte = row_starts[er_off];
-            let b0 = row_start_byte(&plain, s_row_byte, sc);
-            let b1 = row_end_byte(&plain, e_row_byte, ec);
-            if b0 >= b1 {
-                continue;
-            }
-            parts.push(map_slice_to_semantic(&plain, b0, b1, semantic.as_ref()));
-        } else if li == first {
-            // 首行：从 sr_off 行内的列 sc 到逻辑行末尾
-            let s_row_byte = row_starts[sr_off];
-            let b0 = row_start_byte(&plain, s_row_byte, sc);
-            parts.push(map_slice_to_semantic(
-                &plain,
-                b0,
-                plain.len(),
-                semantic.as_ref(),
-            ));
-        } else if li == last {
-            // 末行：从逻辑行开头到 er_off 行内的列 ec
-            let e_row_byte = row_starts[er_off];
-            let b1 = row_end_byte(&plain, e_row_byte, ec);
-            parts.push(map_slice_to_semantic(&plain, 0, b1, semantic.as_ref()));
-        } else {
-            // 中间行（完整选择）：直接用语义全文
+        // 中间逻辑行（完整选中）：直接用语义全文。空行也是选区的一部分，
+        // 不能因 `line_byte_range` 返回 None 而跳过（否则 "a\n\nb" 变 "a\nb"）。
+        if li != first && li != last {
             match &semantic {
                 Some((sem, _)) => parts.push(sem.clone()),
                 None => parts.push(plain),
             }
+            continue;
         }
+        // 每个视觉行在该逻辑行 plain text 中的 byte 起始偏移（仅首/末行需要）。
+        let row_starts = wrap_row_byte_starts(line, &plain, width);
+        // 首/末行取端点列。
+        let Some(range) = line_byte_range(
+            &plain,
+            &row_starts,
+            entry.visual_start..entry.visual_end,
+            SelectionPoint::new(sr, sc),
+            SelectionPoint::new(er, ec),
+        ) else {
+            continue;
+        };
+        parts.push(map_slice_to_semantic(
+            &plain,
+            range.start,
+            range.end,
+            semantic.as_ref(),
+        ));
     }
     if parts.is_empty() {
         None

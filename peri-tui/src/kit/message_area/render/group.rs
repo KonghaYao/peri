@@ -1,7 +1,7 @@
 use crate::i18n;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{
-    FoldState, TuiCollapsedGroup, TuiRenderUnit, TuiSubAgentGroup, TuiToolCard,
+    FoldKey, FoldState, TuiCollapsedGroup, TuiRenderUnit, TuiSubAgentGroup, TuiToolCard,
 };
 
 use fluent_bundle::FluentValue;
@@ -71,7 +71,7 @@ fn subagent_entry_line(data: &TuiSubAgentGroup, grid: &GridSpec) -> Line<'static
         &data.agent_name
     };
     spans.push(Span::styled(
-        crate::truncate::truncate_by_width(name, grid.process_content_width().max(1)),
+        crate::truncate::truncate_to_width(name, grid.process_content_width().max(1)),
         Style::default()
             .fg(sem.text.primary)
             .add_modifier(Modifier::BOLD),
@@ -132,7 +132,7 @@ fn subagent_tool_line(card: &TuiToolCard, grid: &GridSpec) -> Line<'static> {
         .saturating_sub(name.width() + error_word.width() + dur_w + 6)
         .max(1);
     if !card.input_summary.is_empty() {
-        let summary = crate::truncate::truncate_by_width(&card.input_summary, budget);
+        let summary = crate::truncate::truncate_to_width(&card.input_summary, budget);
         if !summary.is_empty() {
             spans.push(Span::styled(
                 format!("  {summary}"),
@@ -213,12 +213,13 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
 ///
 /// 折叠 = 一组一行；展开时组内成员按过程区接续渲染
 /// （[`ZoneTransition::None`](crate::kit::message_area::grid::ZoneTransition::None)），
-/// 同区继续、不重复画入口台阶；成员与组头同列。组成员在分组时已统一置为
-/// `Expanded`，展开即原样显示，不再逐项折叠。
+/// 同区继续、不重复画入口台阶；成员与组头同列。成员渲染保留自己的 fold
+/// （默认单行），另返回「成员标题逻辑行 → FoldKey」命中表供单击定位——
+/// 组头只切换整组，成员标题只切换该成员。
 pub(super) fn render_collapsed_group_lines(
     data: &TuiCollapsedGroup,
     grid: &GridSpec,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<(usize, FoldKey)>) {
     let sem = THEME_ATOM.state().read().semantic;
     let expanded = data.fold != FoldState::Collapsed;
     let symbol = if expanded {
@@ -243,7 +244,7 @@ pub(super) fn render_collapsed_group_lines(
     };
     let content_width = grid.process_content_width();
     let keep = content_width.saturating_sub(suffix.width()).max(1);
-    let title_trunc = crate::truncate::truncate_by_width(&data.title, keep);
+    let title_trunc = crate::truncate::truncate_to_width(&data.title, keep);
     spans.push(Span::styled(
         title_trunc,
         Style::default().fg(sem.text.muted),
@@ -252,11 +253,20 @@ pub(super) fn render_collapsed_group_lines(
         spans.push(Span::styled(suffix, Style::default().fg(sem.status.error)));
     }
     let mut lines = vec![Line::from(spans)];
+    let mut fold_hits: Vec<(usize, FoldKey)> = Vec::new();
     if expanded {
         let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
         for vm in &data.view_models {
-            lines.extend(super::vm_to_lines_cached(vm, grid, &mut md_cache, false).0);
+            let start = lines.len();
+            let (member_lines, ..) = super::vm_to_lines_cached(vm, grid, &mut md_cache, false);
+            // 成员标题=首行；无折叠键（如普通通知）或空渲染的成员不参与点击。
+            if !member_lines.is_empty()
+                && let Some((key, _)) = super::super::entry_nav::fold_key_of(vm)
+            {
+                fold_hits.push((start, key));
+            }
+            lines.extend(member_lines);
         }
     }
-    lines
+    (lines, fold_hits)
 }

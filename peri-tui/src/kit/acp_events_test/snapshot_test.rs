@@ -328,8 +328,9 @@ fn test_snapshot_cache_tracks_subagent_before_todo_summary() {
     crate::kit::atoms::TODO_ITEMS.state().write().clear();
 }
 
-/// 正文空档分组：空档内相邻工具（含 running/error）合成一张组行，组内按
-/// 原样展开；正文出现后成为下一段的边界，不跨正文合并。
+/// 正文空档分组：空档内相邻工具（含 running/error）合成一张组行，组内成员
+/// 保留折叠 pass 给出的单行折叠（可单独点开）；正文出现后成为下一段的边界，
+/// 不跨正文合并。
 #[test]
 #[serial]
 fn test_snapshot_tools_grouped_in_body_gap() {
@@ -395,8 +396,8 @@ fn test_snapshot_tools_grouped_in_body_gap() {
         };
         assert_eq!(
             card.fold,
-            FoldState::Expanded,
-            "组内工具 {} 按原样展开（不再逐项折叠）",
+            FoldState::Collapsed,
+            "组内工具 {} 保留折叠 pass 的单行折叠（可单独点开）",
             card.tool_id
         );
     }

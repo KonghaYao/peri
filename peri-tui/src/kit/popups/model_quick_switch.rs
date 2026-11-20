@@ -186,6 +186,26 @@ fn click_inside_popup(row: u16, col: u16, area: &Rect) -> bool {
         && col < area.x.saturating_add(area.width)
 }
 
+/// 左键点击裁决：内容行选中、边框内消费、矩形外关闭。
+///
+/// 抽成纯函数是为了让「外点关闭」在组件事件闭包之外可测。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickSwitchClick {
+    Select(usize),
+    Dismiss,
+    Consume,
+}
+
+fn click_action(row: u16, col: u16, area: &Rect) -> QuickSwitchClick {
+    if let Some(index) = row_index_at(row, col, area) {
+        QuickSwitchClick::Select(index)
+    } else if click_inside_popup(row, col, area) {
+        QuickSwitchClick::Consume
+    } else {
+        QuickSwitchClick::Dismiss
+    }
+}
+
 #[component]
 pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
@@ -294,16 +314,18 @@ pub fn ModelQuickSwitchPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>>
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(idx) = row_index_at(mouse.row, mouse.column, &area) {
-                        switch_session_alias(idx);
-                        crate::kit::popup_overlay::close_popup();
-                        return EventResult::Consumed;
-                    }
                     // 点击弹窗矩形（含边框）之外 → 关闭弹窗（dismiss-on-outside-click）。
                     // 矩形内非内容行（边框/padding）点击不关闭也不切换，Consumed 防止
                     // 事件穿透到背景组件。
-                    if !click_inside_popup(mouse.row, mouse.column, &area) {
-                        crate::kit::popup_overlay::close_popup();
+                    match click_action(mouse.row, mouse.column, &area) {
+                        QuickSwitchClick::Select(index) => {
+                            switch_session_alias(index);
+                            crate::kit::popup_overlay::close_popup();
+                        }
+                        QuickSwitchClick::Dismiss => {
+                            crate::kit::popup_overlay::close_popup();
+                        }
+                        QuickSwitchClick::Consume => {}
                     }
                     return EventResult::Consumed;
                 }

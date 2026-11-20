@@ -9,7 +9,7 @@ use super::{error, group, helpers, interaction, reasoning, system, tool_card, us
 use std::sync::Arc;
 
 use crate::i18n;
-use crate::kit::genui::GenUiButtonInfo;
+use peri_tui_components::genui::GenUiButtonInfo;
 
 use crate::kit::message_area::grid::{GridSpec, ZoneTransition};
 use crate::kit::tui_render_unit::TuiRenderUnit;
@@ -58,8 +58,8 @@ pub(crate) struct ImageLineInfo {
 }
 
 /// `vm_to_lines_cached_with_layout` 的渲染产物：行、复制按钮、交互布局、
-/// 图片行、GenUI 按钮、Mermaid 围栏范围。元组过长，用别名避免调用方被类型
-/// 签名淹没。
+/// 图片行、GenUI 按钮、Mermaid 围栏范围、展开组成员标题命中表。元组过长，
+/// 用别名避免调用方被类型签名淹没。
 type RenderOutput = (
     Vec<Line<'static>>,
     Option<CopyButtonInfo>,
@@ -67,6 +67,7 @@ type RenderOutput = (
     Vec<ImageLineInfo>,
     Vec<GenUiButtonInfo>,
     Vec<crate::kit::mermaid::FenceSpan>,
+    Vec<(usize, crate::kit::tui_render_unit::FoldKey)>,
 );
 
 /// md 复制按钮的最小内容长度（字符数，`chars().count()` 口径——与复制反馈
@@ -192,7 +193,7 @@ pub(crate) fn vm_to_lines_cached(
     Option<InteractionLayout>,
     Vec<ImageLineInfo>,
 ) {
-    let (lines, copy_button, interaction, image_lines, _, _) = vm_to_lines_impl(
+    let (lines, copy_button, interaction, image_lines, _, _, _) = vm_to_lines_impl(
         vm,
         grid,
         md_cache,
@@ -284,6 +285,7 @@ fn vm_to_lines_impl(
         layout.genui_blocks.clear();
     }
     let mut genui_buttons = Vec::new();
+    let mut fold_hits: Vec<(usize, crate::kit::tui_render_unit::FoldKey)> = Vec::new();
     let rendered = match vm {
         TuiRenderUnit::TuiAssistantBubble(data) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -295,7 +297,15 @@ fn vm_to_lines_impl(
             // 台阶，上下也各保留 1 空行（过程带前缀）作分隔。reasoning 是过程
             // entry，不自行增加空行。空 bubble（无 text 无 reasoning）仍返回 0 行。
             if data.text.is_empty() && data.reasoning.is_none() {
-                return (lines, None, None, Vec::new(), Vec::new(), Vec::new());
+                return (
+                    lines,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                );
             }
 
             // AI 正文竖线颜色——正文行与前后 turn 节拍空行共用；主题值在
@@ -677,13 +687,11 @@ fn vm_to_lines_impl(
             Vec::new(),
             Vec::new(),
         ),
-        TuiRenderUnit::TuiCollapsedGroup(data) => (
-            self::group::render_collapsed_group_lines(data, grid),
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-        ),
+        TuiRenderUnit::TuiCollapsedGroup(data) => {
+            let (lines, hits) = self::group::render_collapsed_group_lines(data, grid);
+            fold_hits = hits;
+            (lines, None, None, Vec::new(), Vec::new())
+        }
         TuiRenderUnit::TuiDivider(data) => (
             self::system::render_divider_lines(data, grid),
             None,
@@ -744,6 +752,9 @@ fn vm_to_lines_impl(
                 button.line_start = button.line_start.saturating_add(1);
                 button.line_end = button.line_end.saturating_add(1);
             }
+            for (row, _) in &mut fold_hits {
+                *row = row.saturating_add(1);
+            }
             if let Some(layout) = md_lines {
                 if let Some(start) = layout.stable_start.as_mut() {
                     *start += 1;
@@ -762,6 +773,7 @@ fn vm_to_lines_impl(
         image_lines,
         genui_buttons,
         mermaid_fences,
+        fold_hits,
     )
 }
 

@@ -876,37 +876,9 @@ pub(super) fn path_tail(path: &str, width: usize) -> String {
     format!("…{}", suffix.into_iter().rev().collect::<String>())
 }
 
+/// 按显示宽度截断（省略号计入预算）；0 列返回空串，1 列只留省略号。
 pub(super) fn truncate_text(text: &str, width: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    if text.is_empty() {
-        return String::new();
-    }
-    if text
-        .chars()
-        .map(|ch| ch.width().unwrap_or(0))
-        .sum::<usize>()
-        <= width
-    {
-        return text.to_owned();
-    }
-    if width == 1 {
-        return "…".to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut used = 0;
-    let mut out = String::new();
-    for ch in text.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w + 1 > width {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push('…');
-    out
+    crate::truncate::truncate_to_width(text, width)
 }
 
 // ── 过滤器 chip 与相对时间列 ─────────────────────────────────────────────

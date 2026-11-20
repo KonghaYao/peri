@@ -41,7 +41,8 @@
 ### 面板外壳
 
 `PanelOverlay` 按 `ACTIVE_PANEL` 渲染当前面板，`panel_shell!` 提供边框、标题与滚动容器。
-面板高度是终端高度与主题上下限的唯一权威（`panel_height`/`panel_content_rows`），面板
+面板高度是终端高度与主题上下限的唯一权威（`peri-tui-components::panel_layout` 的
+`panel_height`/`content_rows_for_height`，应用侧 `kit/panel_overlay.rs` 读取主题后转发），面板
 组件在首帧尚未测量自身区域时按同一权威预测内容行数。
 
 ### 共享列表视口
@@ -97,10 +98,10 @@ selection 状态，列表刷新缩短后越界选择由调用方自行校正。�
 详情仍指向同一对象。详情目标消失时由更新阶段的 effect 收敛回列表，渲染过程不写状态。
 详情视图的行构造、按钮布局与命中几何是纯推导，渲染与命中共用同一结果。
 
-共享外壳只提取真实重复：目前由 `panel_shell!` 提供框线与底栏，`panel_height` /
-`panel_content_rows`（`kit/panel_overlay.rs`）与 `peri-tui-components::list` 的视口提供高度、
-滚动与命中，其他「详情外壳」不因形态相似而抽取——例如滚动条几何（`ScrollbarGeometry`）
-目前唯一使用者是 SubAgent 详情，保持面板私有，不预先抽象成通用组件。
+共享外壳只提取真实重复：目前由 `panel_shell!` 提供框线与底栏，`peri-tui-components`
+的 `panel_layout`（应用 `kit/panel_overlay.rs` 读取主题后转发）与 `list` 的视口提供高度、
+滚动与命中；`scrollbar::VerticalBar` 同时服务消息区与 SubAgent 详情，绘制与命中共用
+同一份滑块几何。其他「详情外壳」不因形态相似而抽取。
 
 ### 操作作用域与完成门
 

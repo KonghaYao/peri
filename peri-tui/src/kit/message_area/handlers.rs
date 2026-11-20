@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
+use super::entry_nav::EntryClickHit;
 use super::grid::GridSpec;
 use super::hits::{
     CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit, MermaidActionHit,
@@ -448,7 +449,7 @@ pub(super) fn schedule_image_preview_hover(
     });
 }
 
-// ── entry 单击展开（仅首行 header；与键盘 Enter 同语义）──
+// ── entry 单击展开（首行 header + 展开组成员标题行）──
 // [Why 注册顺序] 必须在 scroll handler 之前：scroll::handle_event 对消息区内
 // Up(Left) 也会消费（选区复制/清锚点），在其后注册收不到单击。放在
 // interaction option（Down）之后即可——两者事件类型不重叠。
@@ -457,7 +458,8 @@ pub(super) fn schedule_image_preview_hover(
 // entry 首行 → 设置 entry 焦点 + 折叠切换：tool/reasoning/system reminder/
 // subagent/completed interaction toggle（写 FOLD_OVERRIDES，与键盘 Enter 一致）；subagent
 // 打开详情面板；pending interaction 首行仅聚焦不提交（键盘 Enter 的提交
-// 是明确按键语义）。未命中（手势已升级/滚动条列/非首行/坐标外）→
+// 是明确按键语义）。命中展开组成员标题行 → 只切换该成员的 fold，同组其他
+// 成员与组折叠态不变。未命中（手势已升级/滚动条列/正文行/坐标外）→
 // Ignored，选区逻辑照常。
 pub(super) fn register_entry_click(
     hooks: &mut Hooks,
@@ -500,7 +502,7 @@ pub(super) fn register_entry_click(
         // 见 scroll/event.rs 同款处理）——带内最右列现在只是正文留白列，不是
         // 滚动条列。缺省（首帧）回退带内区域，保持旧行为。
         let sb_area = scrollbar_rect.unwrap_or(area);
-        let Some(slot) = super::entry_nav::entry_click_decision(
+        let Some(hit) = super::entry_nav::entry_click_decision(
             gesture.read().as_ref(),
             mouse.row,
             area,
@@ -508,10 +510,15 @@ pub(super) fn register_entry_click(
         ) else {
             return EventResult::Ignored;
         };
-        // ── 命中 entry 首行：设焦点 + 折叠动作 ──
+        // ── 命中可点击行：设焦点 + 折叠动作 ──
         // 与键盘 Alt+Up/Down 一致：焦点可落在任意 entry，FOCUSED_ENTRY
         // 的 key 仅 foldable 有值（无折叠能力 entry 合法 key: None）；
-        // 重置 interaction option 到首项。
+        // 重置 interaction option 到首项。成员标题行点击也只把焦点落到
+        // 所属组 entry（Enter 仍切换整组——不引入新的焦点模型）。
+        let (slot, member_key) = match hit {
+            EntryClickHit::Header { slot } => (slot, None),
+            EntryClickHit::GroupMember { slot, key } => (slot, Some(key)),
+        };
         tracing::trace!(target: "frozen_diag", slot, "click: hit entry, setting focus");
         *interaction_option.write() = 0;
         *mermaid_action.write() = None;
@@ -542,7 +549,11 @@ pub(super) fn register_entry_click(
         // 点击 = 取消选区语义（与 keepgoing / md 复制按钮点击一致）
         text_sel.write().clear();
         *gesture.write_no_update() = None;
-        let result = super::entry_nav::apply_fold_toggle(&mut snapshot, slot, false);
+        let result = match member_key {
+            // 成员标题行：只切换该成员的 fold，组折叠态与其他成员不变。
+            Some(key) => super::entry_nav::apply_group_member_toggle(&mut snapshot, slot, &key),
+            None => super::entry_nav::apply_fold_toggle(&mut snapshot, slot, false),
+        };
         tracing::trace!(target: "frozen_diag", slot, "click: handler exit");
         result
     });

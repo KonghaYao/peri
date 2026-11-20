@@ -102,11 +102,28 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
+/// 授权链接换行宽度上限（既有 52 列版式）。
+const OAUTH_WRAP_WIDTH: usize = 52;
+/// 授权链接行的左缩进列数（`"  "` 前缀）。
+const OAUTH_URL_INDENT: usize = 2;
+/// 组件区域尚未测量（首帧）时的弹窗宽度兜底：宽度 − 2 = 52，保持既有版式。
+const OAUTH_FALLBACK_WIDTH: u16 = (OAUTH_WRAP_WIDTH + OAUTH_URL_INDENT) as u16;
+
+/// 授权链接的实际换行宽度：弹窗宽度扣除行缩进，上限为 [`OAUTH_WRAP_WIDTH`]。
+///
+/// 渲染与 [`content_rows`]（鼠标命中反推行号）必须共用此函数，窄屏下不能各自
+/// 按 52 列换行。
+fn oauth_wrap_width(popup_width: u16) -> usize {
+    usize::from(popup_width)
+        .saturating_sub(OAUTH_URL_INDENT)
+        .clamp(1, OAUTH_WRAP_WIDTH)
+}
+
 /// 按钮行/输入框在内容区中的行号（渲染行序契约，鼠标命中反推用）。
 /// 内容区行号 0 起：空行、Server、空行、prompt、空行、URL×n、空行、按钮行、
 /// 空行、授权码行、空行、hint → 按钮行 = 6 + n，授权码行 = 8 + n。
-fn content_rows(auth_url: &str) -> (u16, u16) {
-    let n = crate::kit::text_util::wrap_text(auth_url, 52).len() as u16;
+fn content_rows(auth_url: &str, popup_width: u16) -> (u16, u16) {
+    let n = crate::kit::text_util::wrap_text(auth_url, oauth_wrap_width(popup_width)).len() as u16;
     (6 + n, 8 + n)
 }
 
@@ -207,7 +224,7 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let Some(info) = &info_for_event else {
                     return EventResult::Consumed;
                 };
-                let (btn_row, input_row) = content_rows(&info.auth_url);
+                let (btn_row, input_row) = content_rows(&info.auth_url, area.width);
                 if content_row == btn_row {
                     // 按列命中按钮：[ label ]，间隔 2 空格，内容从 area.x 起
                     let labels = [
@@ -324,6 +341,8 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let guard = theme_def.read();
     let semantic = &guard.semantic;
     let sel_bg = semantic.surface.selection;
+    // 绘制与 `content_rows`（鼠标命中）共用同一宽度；首帧未测量时用兜底值。
+    let popup_width = area.map_or(OAUTH_FALLBACK_WIDTH, |rect| rect.width);
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match &info {
@@ -349,7 +368,9 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             lines.push(Line::from(i18n::tr("oauth-prompt")).fg(semantic.text.primary));
             lines.push(Line::from(""));
             // 完整授权链接按宽度换行展示（不截断），可经「复制链接」按钮复制
-            for url_line in crate::kit::text_util::wrap_text(&oauth.auth_url, 52) {
+            for url_line in
+                crate::kit::text_util::wrap_text(&oauth.auth_url, oauth_wrap_width(popup_width))
+            {
                 lines.push(Line::from(format!("  {url_line}")).fg(semantic.text.muted));
             }
             lines.push(Line::from(""));

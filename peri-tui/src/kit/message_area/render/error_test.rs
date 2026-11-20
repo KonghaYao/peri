@@ -66,6 +66,16 @@ fn error_preview_limits_rows_with_an_ellipsis() {
 }
 
 #[test]
+fn error_preview_last_row_uses_the_full_budget() {
+    // 省略号由预览层追加，最后一行的正文应占满 width - 1 列。
+    assert_eq!(
+        super::preview_lines("abcdefghijkl", 10, 1),
+        ["abcdefghi…"],
+        "最后一行的正文不能被省略号再挤掉一列"
+    );
+}
+
+#[test]
 fn error_preview_preserves_graphemes_and_explicit_newlines() {
     assert_eq!(
         super::preview_lines("界界\n👩‍💻e\u{301}", 4, 3),

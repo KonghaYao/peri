@@ -58,16 +58,17 @@ impl ScrollPos {
 ///
 /// [Why 冻结] Down 时一次性换算并冻结内容坐标与 entry 命中——Up 结算只
 /// 消费冻结结果，不再二次换算（滚动偏移/网格前缀的坐标正确性由 Down 保证）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in super::super) struct GesturePending {
     /// 按下点屏幕坐标 `(column, row)`——唯一参与判定的坐标（`is_click` 比较）。
     pub(in super::super) screen: (u16, u16),
     /// 按下点内容坐标（视觉行/列）——Down 时换算冻结，升级时作 `start_drag`
     /// 起点（视觉行 = `row − area.y + scroll_y`，视觉列 = `column − area.x`）。
     pub(in super::super) visual: (usize, u16),
-    /// Down 时命中测试结果：entry header（可折叠行）或 None。
-    /// 冻结命中消除 Up 结算对 wrap_map 的二次反查。
-    pub(in super::super) entry_hit: Option<(usize, usize)>, // (slot, local_idx)
+    /// Down 时命中测试结果：entry header（整 entry 折叠）或展开组成员标题
+    /// （只切换该成员），None = 正文行。冻结命中消除 Up 结算对 wrap_map 的
+    /// 二次反查。
+    pub(in super::super) entry_hit: Option<crate::kit::message_area::entry_nav::EntryClickHit>,
 }
 
 // ── 吸底自动跟随 ─────────────────────────────────────────────────────────

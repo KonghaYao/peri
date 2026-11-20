@@ -494,7 +494,11 @@ fn test_publication_history_cache_invalidates_same_length_update_and_replacement
         })
         .expect("应为失败工具");
     assert_eq!(card.output_summary, "failed");
-    assert_eq!(card.fold, FoldState::Expanded, "组内工具按原样展开");
+    assert_eq!(
+        card.fold,
+        FoldState::Collapsed,
+        "组内工具保留折叠 pass 的单行折叠（可单独点开）"
+    );
     state.folded_history = Default::default();
     acp_events::push_view_models(&mut state);
     assert_eq!(cached, atoms::VIEW_MODELS.state().read().clone().items);

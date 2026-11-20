@@ -118,6 +118,46 @@ fn reject_payload(owner: InteractionOwner, request_id: &str) -> ConfirmPayload {
     )
 }
 
+/// 鼠标命中走共享外框边界：内区与上下边框是「click as enter」，外框外忽略。
+#[test]
+#[serial]
+fn test_confirm_mouse_inside_frame_confirms_and_outside_is_ignored() {
+    let _guard = ConfirmAtomsGuard::install();
+    let owner = InteractionOwner {
+        token: 1,
+        ..Default::default()
+    };
+    ask_user_pending(&owner, "A");
+    publish(reject_payload(owner.clone(), "A"));
+    let shown = render_snapshot();
+    let area = ratatui_kit::ratatui::layout::Rect::new(10, 5, 40, 10);
+
+    let outside = mouse_down(9, 6);
+    assert_eq!(
+        super::handle_confirm_event(&outside, shown.as_ref(), Some(area)),
+        ratatui_kit::prelude::EventResult::Ignored
+    );
+    assert!(!reject_executed(), "外框外点击不触发确认");
+
+    // 上边框行同样是确认区域（弹窗整窗点击 = 确认）。
+    let border = mouse_down(11, 5);
+    assert_eq!(
+        super::handle_confirm_event(&border, shown.as_ref(), Some(area)),
+        ratatui_kit::prelude::EventResult::Consumed
+    );
+    assert!(reject_executed(), "边框点击执行用户看到的拒绝动作");
+}
+
+fn mouse_down(column: u16, row: u16) -> Event {
+    use ratatui_kit::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
 /// 待决请求是否仍未结清——RejectAskUser 执行会清掉匹配 owner 的请求并关闭面板。
 fn reject_executed() -> bool {
     ASK_USER_PENDING.state().read().is_none()

@@ -294,12 +294,11 @@ fn apply_scroll_to_virtual(
     content_height: usize,
     viewport_height: usize,
 ) {
-    let next = if delta >= 0 {
-        offset.saturating_add(delta as usize)
-    } else {
-        offset.saturating_sub(delta.unsigned_abs() as usize)
-    };
-    *offset = next.min(content_height.saturating_sub(viewport_height));
+    *offset = peri_tui_components::scrollbar::bounded_offset(
+        *offset,
+        delta,
+        content_height.saturating_sub(viewport_height),
+    );
 }
 
 /// 把一次滚轮事件的滚动量应用到 ScrollViewState（正=向下，负=向上；边界 clamp）。

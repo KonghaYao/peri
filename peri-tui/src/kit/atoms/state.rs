@@ -39,6 +39,7 @@ use crate::kit::rewind_action::RewindAction;
 use crate::kit::slash_projection::SlashCommandEntry;
 use crate::kit::submit_request::SubmitRequest;
 use image::DynamicImage;
+use peri_tui_components::history::HistoryCursor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
@@ -419,9 +420,10 @@ pub static PANEL_SCROLL_OWNER: AtomStatic<Option<crate::kit::panel_scroll::Panel
 pub static MODEL_SWITCH_ANCHOR: AtomStatic<Option<(u16, u16)>> = AtomStatic::new(|| None);
 
 pub static INPUT_HISTORY: AtomStatic<VecDeque<String>> = AtomStatic::new(VecDeque::new);
-pub static INPUT_HISTORY_INDEX: AtomStatic<Option<usize>> = AtomStatic::new(|| None);
-/// 进入历史模式时保存的用户当前输入文本草稿。
-pub static DRAFT: AtomStatic<Option<String>> = AtomStatic::new(|| None);
+/// 输入历史浏览游标（位置 + 进入历史模式时保存的草稿）。游标状态转换由
+/// `peri-tui-components::history` 持有；历史条目仍只有 [`INPUT_HISTORY`] 一份。
+pub static INPUT_HISTORY_CURSOR: AtomStatic<HistoryCursor> =
+    AtomStatic::new(HistoryCursor::default);
 /// loading 期间缓存的待提交输入（文本 + 附件，见 [`BufferedInput`]）。
 pub static INPUT_BUFFER: AtomStatic<VecDeque<BufferedInput>> = AtomStatic::new(VecDeque::new);
 /// 取消时需恢复到输入框的文本。TurnInterrupted 零产出时写入，input_area 消费后清空。

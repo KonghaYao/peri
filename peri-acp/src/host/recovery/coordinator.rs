@@ -86,6 +86,8 @@ pub(crate) mod admission_gate {
         BeforeAdmit,
         /// 冷 child 已装配、装配后复核之前：构造装配期间目标变化或收尾的竞态。
         AfterColdAssembly,
+        /// 冷 child 已准入、登记之前：构造父树删除快照先于登记的竞态。
+        BeforeRecordRecoveredChild,
     }
 
     pub(crate) struct Gate {

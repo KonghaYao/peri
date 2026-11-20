@@ -14,8 +14,9 @@ use crate::kit::atoms::{
     AT_MENTION_ACTIVE, BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, INPUT_RESTORE_TEXT, NOTIFICATION,
     Notification, RENDER_HEARTBEAT, SLASH_HINT_ACTIVE, ViewModelsSnapshot,
 };
-use crate::kit::genui::{GenUiAction, GenUiButtonInfo, view_state};
+use crate::kit::genui::view_state;
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit};
+use peri_tui_components::genui::{GenUiAction, GenUiButtonInfo};
 
 #[derive(Clone)]
 pub(super) struct PressedGenuiKey {
@@ -117,7 +118,7 @@ fn button_rows(slot: &VmCacheSlot, button: &GenUiButtonInfo, width: u16) -> Vec<
         };
         let plain = line.to_string();
         // 与选择器使用同一折行边界，避免 resize 校正帧把续行热区留在旧列。
-        let starts = super::selection::wrap_byte_starts(line, &plain, width);
+        let starts = peri_tui_components::selection::wrap_row_byte_starts(line, &plain, width);
         for (offset, bytes) in starts.windows(2).enumerate() {
             let Some(before) = plain.get(..bytes[0]) else {
                 continue;
@@ -197,7 +198,7 @@ fn draw_pressed(
         buffer.set_style(
             rect,
             if strip_color {
-                super::no_color::strip_style_color(style)
+                peri_tui_components::style::strip_style_color(style)
             } else {
                 style
             },

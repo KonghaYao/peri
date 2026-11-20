@@ -1,3 +1,8 @@
+//! 内联补全（`@` / `/`）的按键分类。
+//!
+//! 选择钳制与移动原语来自 `peri_tui_components::list_nav`，与通用列表共用；
+//! 这里只保留不区分修饰键的分类（Tab/BackTab 在端点停住）。
+
 use ratatui_kit::crossterm::event::KeyCode;
 use ratatui_kit::crossterm::event::KeyEvent;
 use ratatui_kit::prelude::EventResult;
@@ -18,29 +23,6 @@ pub fn classify_inline_nav(key: &KeyEvent) -> Option<InlineNavAction> {
         KeyCode::Esc => Some(InlineNavAction::Cancel),
         _ => None,
     }
-}
-
-#[must_use]
-pub fn clamp_selection(selection: usize, item_count: usize) -> usize {
-    if item_count == 0 {
-        0
-    } else {
-        selection.min(item_count - 1)
-    }
-}
-
-#[must_use]
-pub fn next_selection(selection: usize, item_count: usize) -> usize {
-    if item_count == 0 {
-        0
-    } else {
-        selection.saturating_add(1).min(item_count - 1)
-    }
-}
-
-#[must_use]
-pub fn previous_selection(selection: usize) -> usize {
-    selection.saturating_sub(1)
 }
 
 pub fn event_result_for_inline_nav(key: &KeyEvent) -> EventResult {

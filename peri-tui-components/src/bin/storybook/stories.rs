@@ -5,7 +5,8 @@
 //! - List: left-click is "click as enter" (selection); header/footer rows are inert and
 //!   the scrollbar column is excluded; the wheel scrolls the viewport by `WHEEL_ROWS`
 //!   (the host's `SCROLL_LINES`) without moving the selection.
-//! - Scrollbar: the wheel moves the position; clicking the bar itself is ignored.
+//! - Scrollbar: the wheel moves the offset; press/drag uses the same `VerticalBar`
+//!   geometry as painting, so grabbing the thumb middle does not jump.
 //! - 文档：Markdown 与 OpenUI 围栏走真实渲染链路；滚轮滚动 `WHEEL_ROWS` 行。
 //!   正文按列宽折行；Mermaid 字符图不折行，超出宽度时底部出现可拖动的横向
 //!   滚动条，横向滚轮与拖动都能移动视图。GenUI 按钮只展示鼠标按下态，不执行动作。
@@ -14,6 +15,8 @@ mod document;
 mod list_items;
 mod markdown;
 mod mermaid;
+pub(crate) mod overlay;
+pub(crate) mod spinner;
 pub(crate) mod streaming;
 
 pub(crate) use self::document::DocumentContent;
@@ -26,17 +29,18 @@ use self::list_items::LIST_ITEMS;
 use self::markdown::MARKDOWN_VARIANTS;
 use self::streaming::StreamingDocument;
 
+use peri_tui_components::completion::{CompletionPopup, CompletionRow, CompletionStyles};
 use peri_tui_components::list::ListMetrics;
 use peri_tui_components::list_nav::scroll_start_for_selected;
 use peri_tui_components::panel_mouse::is_scrollbar_column;
-use peri_tui_components::scrollbar::vertical_scrollbar;
+use peri_tui_components::scrollbar::{VerticalBar, VerticalPress, bounded_offset};
 use peri_tui_components::textarea::{TextArea, TextAreaState, viewport_window, wrap_text};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, ScrollbarState, StatefulWidget, StatefulWidgetRef, Widget};
+use ratatui::widgets::{Paragraph, StatefulWidgetRef, Widget};
 use unicode_width::UnicodeWidthChar;
 
 pub(crate) const ACCENT: Color = Color::Cyan;
@@ -46,7 +50,7 @@ pub(crate) const MUTED: Color = Color::DarkGray;
 pub(crate) const BORDER: Style = Style::new().fg(Color::DarkGray);
 
 /// Rows a single wheel notch scrolls; the host uses `SCROLL_LINES` (3 rows).
-const WHEEL_ROWS: usize = 3;
+pub(crate) const WHEEL_ROWS: usize = 3;
 /// Columns a horizontal wheel notch scrolls; the bar drag is the precise path.
 const WHEEL_COLS: usize = 8;
 
@@ -96,8 +100,16 @@ pub(crate) enum StoryState {
         reveal_last: bool,
     },
     Scrollbar {
+        /// First visible content row (raw offset, not ratatui's item position).
         position: usize,
         total: usize,
+        /// Thumb drag in progress (grab offset inside the thumb).
+        grab: Option<u16>,
+    },
+    /// 内联补全列表：固定输入，点击命中与绘制共用同一个 `CompletionPopup` 窗口。
+    Completion {
+        fixture: &'static CompletionFixture,
+        selected: usize,
     },
     Document {
         content: DocumentContent<'static>,
@@ -113,9 +125,11 @@ pub(crate) enum StoryState {
     /// 流式文档：只渲染已到达的前缀；进度由拖拽条或 `[ auto ]` 的 3 秒播放决定。
     Streaming(StreamingDocument),
     /// A non-animated tui-chart gallery frame; `demo` indexes `charts::DEMOS`.
-    Chart {
-        demo: usize,
-    },
+    Chart { demo: usize },
+    /// 确认 / 下载弹窗：共享外框，确认与滚轮路由留在宿主。
+    Overlay(overlay::OverlayState),
+    /// 无状态活动指示器：帧序号与帧集由宿主提供。
+    Spinner(spinner::SpinnerState),
 }
 
 pub(crate) struct Variant {
@@ -168,7 +182,11 @@ fn list_state(
 }
 
 fn scrollbar_state(position: usize, total: usize) -> StoryState {
-    StoryState::Scrollbar { position, total }
+    StoryState::Scrollbar {
+        position,
+        total,
+        grab: None,
+    }
 }
 
 fn textarea_placeholder_initial() -> StoryState {
@@ -235,6 +253,92 @@ fn scrollbar_middle_initial() -> StoryState {
 
 fn scrollbar_bottom_initial() -> StoryState {
     scrollbar_state(99, 100)
+}
+
+// ---------------------------------------------------------------------------
+// Completion fixtures (inline height mirrors the host's theme `inline_height`)
+// ---------------------------------------------------------------------------
+
+const COMPLETION_HEIGHT: u16 = 10;
+
+pub(crate) struct CompletionFixture {
+    pub(crate) title: &'static str,
+    pub(crate) empty_text: &'static str,
+    pub(crate) rows: &'static [(&'static str, &'static str, Color)],
+}
+
+const COMPLETION_MENTION: CompletionFixture = CompletionFixture {
+    title: " @ src/ ",
+    empty_text: "No matches",
+    rows: &[
+        ("src/main.rs", "", FG),
+        ("src/lib.rs", "", FG),
+        ("src/kit/mod.rs", "", FG),
+        ("src/kit/input_area.rs", "", FG),
+        ("src/kit/slash_completion.rs", "", FG),
+        ("src/kit/mention_popup.rs", "", FG),
+        ("Cargo.toml", "", FG),
+        ("README.md", "", FG),
+    ],
+};
+
+const COMPLETION_SLASH: CompletionFixture = CompletionFixture {
+    title: " / ",
+    empty_text: "No matches",
+    rows: &[
+        ("/help", "Show help and shortcuts", ACCENT),
+        ("/clear", "Clear the transcript", FG),
+        ("/compact", "Compact the conversation", FG),
+        ("/model", "Switch model profile", FG),
+        ("/plugin", "Open the plugin panel", ACCENT),
+        ("/skill:review", "Run a packaged skill", Color::Yellow),
+    ],
+};
+
+const COMPLETION_SCROLLED: CompletionFixture = CompletionFixture {
+    title: " /model ",
+    empty_text: "No matches",
+    rows: &[
+        ("/model:default", "Active profile", ACCENT),
+        ("/model:review", "Review profile", FG),
+        ("/model:fast", "Low latency profile", FG),
+        ("/model:deep", "Reasoning profile", FG),
+        ("/model:local", "Local provider", FG),
+        ("/model:vision", "Image input profile", FG),
+        ("/model:plan", "Planning profile", FG),
+        ("/model:long", "Large context profile", FG),
+        ("/model:cheap", "Budget profile", FG),
+        ("/model:staging", "Staging profile", FG),
+        ("/model:prod", "Production profile", FG),
+        ("/model:experimental", "Opt-in profile", Color::Yellow),
+    ],
+};
+
+const COMPLETION_EMPTY: CompletionFixture = CompletionFixture {
+    title: " /missing ",
+    empty_text: "No matches",
+    rows: &[],
+};
+
+fn completion_state(fixture: &'static CompletionFixture, selected: usize) -> StoryState {
+    StoryState::Completion { fixture, selected }
+}
+
+fn completion_mention_initial() -> StoryState {
+    completion_state(&COMPLETION_MENTION, 1)
+}
+
+fn completion_slash_initial() -> StoryState {
+    completion_state(&COMPLETION_SLASH, 2)
+}
+
+fn completion_scrolled_initial() -> StoryState {
+    // 8 行窗口放不下 12 行：max_scroll = 4，选中项 10 仍在窗口内。
+    completion_state(&COMPLETION_SCROLLED, 10)
+}
+
+fn completion_empty_initial() -> StoryState {
+    completion_state(&COMPLETION_EMPTY, 0)
 }
 
 fn document_state(source: &'static str, scroll: usize) -> StoryState {
@@ -478,6 +582,29 @@ const SCROLLBAR_VARIANTS: &[Variant] = &[
     },
 ];
 
+const COMPLETION_VARIANTS: &[Variant] = &[
+    Variant {
+        key: "mention",
+        note: "Click a row to select it; @ rows have no description column.",
+        initial: completion_mention_initial,
+    },
+    Variant {
+        key: "slash",
+        note: "Label and description columns; tier colours are written by the host.",
+        initial: completion_slash_initial,
+    },
+    Variant {
+        key: "scrolled",
+        note: "Eight-row window; clicks map painted rows back to full-list indexes.",
+        initial: completion_scrolled_initial,
+    },
+    Variant {
+        key: "empty",
+        note: "No candidates: empty text is painted and no row is clickable.",
+        initial: completion_empty_initial,
+    },
+];
+
 const MERMAID_VARIANTS: &[Variant] = &[
     Variant {
         key: "flowchart",
@@ -717,6 +844,11 @@ pub(crate) const STORIES: &[Story] = &[
         variants: SCROLLBAR_VARIANTS,
     },
     Story {
+        key: "completion",
+        title: "Completion",
+        variants: COMPLETION_VARIANTS,
+    },
+    Story {
         key: "markdown",
         title: "Markdown",
         variants: MARKDOWN_VARIANTS,
@@ -730,6 +862,16 @@ pub(crate) const STORIES: &[Story] = &[
         key: "mermaid",
         title: "Mermaid",
         variants: MERMAID_VARIANTS,
+    },
+    Story {
+        key: "overlay",
+        title: "Overlay",
+        variants: overlay::VARIANTS,
+    },
+    Story {
+        key: "spinner",
+        title: "Spinner",
+        variants: spinner::VARIANTS,
     },
     Story {
         key: "charts",
@@ -756,8 +898,13 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
             footer,
             reveal_last,
         } => render_list(area, buf, *selected, scroll, *header, *footer, reveal_last),
-        StoryState::Scrollbar { position, total } => {
-            render_scrollbar(area, buf, *position, *total);
+        StoryState::Scrollbar {
+            position, total, ..
+        } => {
+            render_scrollbar(area, buf, *position, *total, area.height);
+        }
+        StoryState::Completion { fixture, selected } => {
+            render_completion(fixture, *selected, area, buf);
         }
         StoryState::Document {
             content,
@@ -776,6 +923,8 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
         .render(area, buf, *content),
         StoryState::Streaming(document) => streaming::render(document, area, buf),
         StoryState::Chart { demo } => crate::charts::render_demo(*demo, area, buf),
+        StoryState::Overlay(overlay) => overlay::render(overlay, area, buf),
+        StoryState::Spinner(spinner) => spinner::render(spinner, area, buf),
     }
 }
 
@@ -916,45 +1065,37 @@ fn render_list(
 
     if count > visible && area.height >= 3 {
         let bar_area = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
-        // ratatui 的 position 取值是 0..=max_scroll：content_length 取
-        // max_scroll + 1，thumb 才会在最后一页贴到轨道底；视口高度单独给出。
-        let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
-            .position(scroll)
-            .viewport_content_length(visible);
-        StatefulWidget::render(
-            vertical_scrollbar(Style::new().bg(ACCENT), muted_style()),
-            bar_area,
-            buf,
-            &mut state,
-        );
+        // Raw offset and viewport; the same bar paints and hit-tests in the host.
+        if let Some(bar) = VerticalBar::new(area.height, visible, count, scroll) {
+            bar.paint(bar_area, buf, Style::new().bg(ACCENT), muted_style());
+        }
     }
 }
 
-fn render_scrollbar(area: Rect, buf: &mut Buffer, position: usize, total: usize) {
+/// Fixed viewport height for the scrollbar story so variants stay comparable.
+const SCROLLBAR_VIEWPORT: usize = 10;
+
+fn render_scrollbar(area: Rect, buf: &mut Buffer, offset: usize, total: usize, height: u16) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let bar_area = Rect::new(area.x, area.y, 1, area.height);
-    let mut state = ScrollbarState::new(total).position(position);
-    StatefulWidget::render(
-        vertical_scrollbar(Style::new().bg(ACCENT), muted_style()),
-        bar_area,
-        buf,
-        &mut state,
-    );
+    let bar_area = Rect::new(area.x, area.y, 1, height);
+    if let Some(bar) = VerticalBar::new(height, SCROLLBAR_VIEWPORT, total, offset) {
+        bar.paint(bar_area, buf, Style::new().bg(ACCENT), muted_style());
+    }
     let text_x = area.x.saturating_add(3);
     if text_x < area.right() {
         Paragraph::new(vec![
             Line::from(Span::styled(
-                format!("position {position} / {total}"),
+                format!("offset {offset} / {total} · viewport {SCROLLBAR_VIEWPORT}"),
                 accent_style(),
             )),
             Line::from(Span::styled(
-                "vertical_scrollbar(thumb, arrow)",
+                "VerticalBar::new(height, viewport, content, offset)",
                 muted_style(),
             )),
             Line::from(Span::styled(
-                "track_symbol(None), ▲/▼ arrow heads",
+                "paint + press share thumb geometry · drag the thumb",
                 muted_style(),
             )),
         ])
@@ -971,14 +1112,103 @@ fn render_scrollbar(area: Rect, buf: &mut Buffer, position: usize, total: usize)
 }
 
 // ---------------------------------------------------------------------------
+// Completion
+// ---------------------------------------------------------------------------
+
+fn completion_popup(
+    fixture: &'static CompletionFixture,
+    selected: usize,
+    height: u16,
+) -> CompletionPopup<'static> {
+    let rows = fixture
+        .rows
+        .iter()
+        .map(|(label, detail, color)| {
+            let label = CompletionRow::new(Line::from(Span::styled(
+                (*label).to_string(),
+                Style::new().fg(*color),
+            )));
+            if detail.is_empty() {
+                label
+            } else {
+                label.with_detail(Line::from(Span::styled(
+                    (*detail).to_string(),
+                    muted_style(),
+                )))
+            }
+        })
+        .collect();
+    CompletionPopup {
+        rows,
+        selected,
+        height,
+        title: Line::from(Span::styled(
+            fixture.title,
+            accent_style().add_modifier(Modifier::BOLD),
+        )),
+        empty_text: Line::from(Span::styled(fixture.empty_text, muted_style())),
+        styles: CompletionStyles {
+            border: MUTED,
+            selected_label: Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            selected_detail: Style::new().fg(ACCENT),
+            empty: muted_style(),
+        },
+    }
+}
+
+/// 弹窗占据预览区顶部 `COMPLETION_HEIGHT` 行——与宿主的内联高度一致。
+fn completion_target(area: Rect) -> Rect {
+    Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        COMPLETION_HEIGHT.min(area.height),
+    )
+}
+
+fn render_completion(
+    fixture: &'static CompletionFixture,
+    selected: usize,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let target = completion_target(area);
+    completion_popup(fixture, selected, target.height)
+        .widget()
+        .render(target, buf);
+    let note_y = target.bottom().saturating_add(1);
+    if note_y < area.bottom() {
+        Line::from(Span::styled(
+            format!(
+                "inline height {} · {} rows · selected #{selected}",
+                target.height,
+                fixture.rows.len()
+            ),
+            muted_style(),
+        ))
+        .render(Rect::new(area.x, note_y, area.width, 1), buf);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mouse semantics
 // ---------------------------------------------------------------------------
 
 pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, area: Rect) -> bool {
+    let scrollbar_grab = matches!(state, StoryState::Scrollbar { grab: Some(_), .. });
+    let outside = !rect_contains(area, mouse.column, mouse.row);
+    // 滚动条拖拽可能在预览外释放：抓取态下仍要收 Up 事件清 grab，
+    // 普通的外部点击继续忽略。
+    let release_drag =
+        scrollbar_grab && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left));
     if !matches!(
         state,
         StoryState::Document { .. } | StoryState::Streaming(_)
-    ) && !rect_contains(area, mouse.column, mouse.row)
+    ) && outside
+        && !release_drag
     {
         return false;
     }
@@ -1020,20 +1250,74 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
             }
             _ => false,
         },
-        StoryState::Scrollbar { position, total } => match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                *position = position.saturating_sub(WHEEL_ROWS);
-                true
+        StoryState::Scrollbar {
+            position,
+            total,
+            grab,
+        } => {
+            let max_offset = total.saturating_sub(SCROLLBAR_VIEWPORT);
+            let bar_area = Rect::new(area.x, area.y, 1, area.height);
+            let bar = VerticalBar::new(area.height, SCROLLBAR_VIEWPORT, *total, *position);
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    *position = bounded_offset(*position, -(WHEEL_ROWS as i32), max_offset);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    *position = bounded_offset(*position, WHEEL_ROWS as i32, max_offset);
+                    true
+                }
+                MouseEventKind::Down(MouseButton::Left) if mouse.column == bar_area.x => {
+                    *grab = None;
+                    if let Some(bar) = bar {
+                        match bar.press(bar_area, mouse.row) {
+                            VerticalPress::Top => *position = 0,
+                            VerticalPress::Bottom => *position = max_offset,
+                            VerticalPress::Thumb { grab: held } => *grab = Some(held),
+                            VerticalPress::Track { offset } => {
+                                *position = offset;
+                                *grab = Some((bar.thumb_len / 2) as u16);
+                            }
+                        }
+                    }
+                    true
+                }
+                MouseEventKind::Drag(MouseButton::Left) if grab.is_some() => {
+                    if let Some(bar) = bar {
+                        *position =
+                            bar.drag_offset(bar_area, mouse.row, grab.expect("checked by guard"));
+                    }
+                    true
+                }
+                MouseEventKind::Up(MouseButton::Left) => grab.take().is_some(),
+                _ => false,
             }
-            MouseEventKind::ScrollDown => {
-                *position = (*position + WHEEL_ROWS).min(total.saturating_sub(1));
-                true
+        }
+        StoryState::Completion { fixture, selected } => {
+            let target = completion_target(area);
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !rect_contains(target, mouse.column, mouse.row) {
+                        return false;
+                    }
+                    // 与绘制同一个 popup 实例：命中下标就是被画出的那一行。
+                    let popup = completion_popup(fixture, *selected, target.height);
+                    if let Some(index) = popup.hit(mouse, target) {
+                        *selected = index;
+                    }
+                    true
+                }
+                MouseEventKind::ScrollUp => {
+                    *selected = selected.saturating_sub(WHEEL_ROWS);
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    *selected = (*selected + WHEEL_ROWS).min(fixture.rows.len().saturating_sub(1));
+                    true
+                }
+                _ => rect_contains(target, mouse.column, mouse.row),
             }
-            // The real TUI excludes the scrollbar column from list clicks; the bar
-            // itself has no click handler.
-            MouseEventKind::Down(MouseButton::Left) => true,
-            _ => false,
-        },
+        }
         StoryState::Document {
             content,
             scroll,
@@ -1052,6 +1336,8 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
         StoryState::Streaming(document) => streaming::handle_mouse(document, mouse, area),
         // Chart frames are static; clicks are consumed like document clicks.
         StoryState::Chart { .. } => matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),
+        StoryState::Overlay(overlay) => overlay::handle_mouse(overlay, mouse, area),
+        StoryState::Spinner(spinner) => spinner::handle_mouse(spinner, mouse, area),
     }
 }
 

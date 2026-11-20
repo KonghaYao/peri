@@ -286,3 +286,62 @@ fn test_stable_chunks_refresh_text_and_code_background_without_reparse() {
         &unchanged.stable[0]
     ));
 }
+
+/// 切换主题只改 heading 色时，已冻结 chunk 也必须重建，而不是继续用旧颜色。
+#[test]
+#[serial_test::serial]
+fn test_stable_chunks_refresh_heading_color_on_theme_switch() {
+    struct RestoreTheme(Arc<peri_theme::theme::ThemeDefinition>);
+    impl Drop for RestoreTheme {
+        fn drop(&mut self) {
+            peri_theme::atoms::THEME_ATOM.state().set(self.0.clone());
+        }
+    }
+
+    let original = peri_theme::atoms::THEME_ATOM.state().read().clone();
+    let _restore = RestoreTheme(original.clone());
+    let source = "# Heading\n\nbody paragraph\n\n";
+    let mut cache = MarkdownRenderCache::default();
+    let first =
+        super::parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Red, &mut cache);
+    assert!(
+        !first.stable.is_empty(),
+        "heading must freeze in a stable chunk"
+    );
+    assert_eq!(
+        heading_fg(&first),
+        Some(original.semantic.text.primary),
+        "heading uses THEME_ATOM text.primary"
+    );
+
+    let updated_fg = if original.semantic.text.primary == Color::Magenta {
+        Color::Cyan
+    } else {
+        Color::Magenta
+    };
+    let mut updated = (*original).clone();
+    updated.semantic.text.primary = updated_fg;
+    peri_theme::atoms::THEME_ATOM.state().set(Arc::new(updated));
+    crate::markdown::metrics::reset();
+    let recolored =
+        super::parse_markdown_chunks_cached(source, 80, Palette::default(), Color::Red, &mut cache);
+    assert!(!Arc::ptr_eq(&first.stable[0], &recolored.stable[0]));
+    assert_eq!(heading_fg(&recolored), Some(updated_fg));
+    assert_eq!(crate::markdown::metrics::snapshot().tail_parses, 0);
+    assert_eq!(
+        semantic_segments(recolored.segments()),
+        semantic_segments(super::parse_markdown(source, 80, Palette::default(), Color::Red).iter()),
+    );
+}
+
+fn heading_fg(rendered: &super::RenderedMarkdown) -> Option<Color> {
+    rendered.segments().find_map(|segment| match segment {
+        MarkdownSegment::Text(lines) => lines.iter().find_map(|line| {
+            line.spans
+                .iter()
+                .find(|span| span.content.contains("Heading"))
+                .and_then(|span| span.style.fg)
+        }),
+        _ => None,
+    })
+}

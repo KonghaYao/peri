@@ -4,11 +4,14 @@ use super::Line;
 use super::Paragraph;
 use super::Span;
 use super::Style;
-use super::Wrap;
 use super::atoms;
 
 #[cfg(test)]
 use serial_test::serial;
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui_kit::prelude::element;
 
 #[test]
 fn test_permission_mode_display() {
@@ -167,21 +170,14 @@ fn test_status_bar_handles_empty_provider_model() {
     assert_eq!(snap.cpu_percent, 0.0);
 }
 
-// ── model_click_areas：词级折行模拟（点击区域行号/列范围） ──────────────────
+// ── 共享布局：可见行与命中区间一次产出 ───────────────────────────────────────
 //
-// 词级区域按词（非空白段）划分，空白（含跨 span 边界累积）计入词前宽度 ws；
-// 换行判定（WordWrapper 语义）：append 前 `line_x + ws + w - cw_last >= area_w`
-// → 词换行（逐字符增量检查等价形式，cw_last = 词尾字符宽；等号 = 词恰好放满
-// 整行 → 留在行尾走 line_full）；append 后 `line_x >= area_w` → 行推出。
-// row1_spans 模型段词流单行区域：
-//   ·(sep) → (0,24,27) ws=2（sep2 尾部空格 + sep4 前导空格，词首 x26）；
-//   opus → (0,27,32)（词首 x28）；claude-opus-4-20250514 → (0,32,55)（词首 x33）；
-//   high → (0,55,60)（词首 x56）
+// 绘制端直接渲染 `layout.lines`（不再交给 Paragraph 折行），命中也从同一份
+// 可见单元格推导，因此不存在「绘制行」与「命中行」两套计算。
 
-/// 构造与 Row1 布局一致的 spans：模型段前后都有内容（bg 任务在模型段之后；
-/// CPU%/MEM/ctx 已迁移 composer，不再出现在状态栏）。
-/// 返回 (spans, model_start, model_end)。
-fn row1_spans() -> (Vec<Span<'static>>, usize, usize) {
+/// 构造与 Row1 布局一致的 spans：模型段前后都有内容（尾部 bg 任务在模型段之后）。
+/// 返回 (spans, 模型段 span 范围)；模型段包含其前置分隔符（与组件内 model_start 一致）。
+fn row1_spans() -> (Vec<Span<'static>>, std::ops::Range<usize>) {
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled(" Accept Edit", Style::default()), // mode
         super::separator(),
@@ -192,254 +188,332 @@ fn row1_spans() -> (Vec<Span<'static>>, usize, usize) {
         Span::styled(" high", Style::default()),                       // effort
     ];
     let model_end = spans.len();
-    // 尾部：bg 任务（模型段后紧跟一个 sep，折行边界与迁移前一致）
+    // 尾部：bg 任务（模型段后紧跟一个 sep）
     spans.push(super::separator());
     spans.push(Span::styled("2 agent", Style::default()));
-    (spans, 4, model_end)
+    (spans, 4..model_end)
 }
 
-#[test]
-fn test_model_click_areas_single_line_no_wrap() {
-    let (spans, start, end) = row1_spans();
-    // 宽度充足：不折行 → 词级 4 个区域全部在第 0 行
-    let areas = super::model_click_areas(&spans, 200, 1, start, end);
-    assert_eq!(areas.len(), 4); // · + opus + 模型名 + high
-    assert!(areas.iter().all(|&(line, _, _)| line == 0));
-    assert_eq!(areas[0], (0, 24, 27));
-    assert_eq!(areas[1], (0, 27, 32));
-    assert_eq!(areas[2], (0, 32, 55));
-    assert_eq!(areas[3], (0, 55, 60));
-}
-
-#[test]
-fn test_model_click_areas_wrap_after_model_segment() {
-    let (spans, start, end) = row1_spans();
-    // 折行点落在模型段之后（窄终端 + 尾部内容变宽）：模型段完整在第 0 行，
-    // 尾部（bg）折到第 1 行。修复前 line_idx 取循环结束后的值（=1），
-    // 点击判定错位一行、模型文本点击永远落空。
-    // area_w=61：high 结束于 x60（60 < 61 留在 line0），尾部 sep 触发折行到 line1。
-    let areas = super::model_click_areas(&spans, 61, 2, start, end);
-    // 模型段 4 个词都应在第 0 行
-    assert!(areas.iter().all(|&(line, _, _)| line == 0));
-    assert_eq!(areas[0], (0, 24, 27));
-    assert_eq!(areas[1], (0, 27, 32));
-    assert_eq!(areas[2], (0, 32, 55));
-    assert_eq!(areas[3], (0, 55, 60));
-}
-
-#[test]
-fn test_model_click_areas_model_segment_cross_line() {
-    // 模型段跨行（词级死区修复核心）：area_w=30 时 "opus" 整词折到第 1 行，
-    // 模型段跨两行——每行各有区域，点击任意一行都能命中。
-    // 期望：·(sep) 留在 line0；opus 换行到 line1 顶格（行尾回填丢弃词前空白）；
-    // claude 留在 line1；high 触发换行但 line_idx 已达上限，留在 line1 尾部
-    // （真实渲染中 high 被 row_height=2 截断到 row2 不可见，区域覆盖 row1 尾部
-    // 空白——点击空白打开弹窗，轻微误触但无害）。
-    let (spans, start, end) = row1_spans();
-    let areas = super::model_click_areas(&spans, 30, 2, start, end);
-    assert_eq!(areas[0], (0, 24, 27));
-    assert_eq!(areas[1], (1, 0, 4)); // opus：27+1+4 > 30 → 换行，ws 被行尾回填丢弃 → 顶格
-    assert_eq!(areas[2], (1, 4, 27)); // 模型名：4+1+22=27 < 30 留在 line1
-    assert_eq!(areas[3], (1, 27, 32)); // high：行号已达上限，留在 line1（渲染中不可见）
-}
-
-#[test]
-fn test_model_click_areas_row_height_one_ignores_wrap() {
-    // row_height=1（不折行）：即使内容超宽也全部在第 0 行（与渲染截断一致）
-    let (spans, start, end) = row1_spans();
-    let areas = super::model_click_areas(&spans, 20, 1, start, end);
-    assert!(areas.iter().all(|&(line, _, _)| line == 0));
-}
-
-// ── 边界语义：WordWrapper `>`/`>=` 边界 ─────────────────────────────────
-
-#[test]
-fn test_model_click_areas_line_full_exact_boundary() {
-    // append 后 line_x == area_w（line_full）：词留在行尾、行推出到下一行。
-    // "abc def" w=3：'abc' 恰满行0 留行尾；'def' 换行后 ws 前导空白被
-    // WordWrapper 丢弃（L153），模拟区域 (1,0,4) 仍覆盖实际词字符（x0-2）。
-    let spans: Vec<Span<'static>> = vec![Span::styled("abc def", Style::default())];
-    let areas = super::model_click_areas(&spans, 3, 2, 0, 1);
-    assert_eq!(areas, vec![(0, 0, 3), (1, 0, 4)]);
-}
-
-#[test]
-fn test_model_click_areas_word_exact_fill_stays_on_line() {
-    // append 前完整词（含 ws）恰好 == 行宽（`==` 不换行）：词留在行尾，
-    // 走 line_full 行推出。WordWrapper pending_word_overflow 是逐字符增量检查，
-    // 等价于完整词宽 `>`——等号是"留在行尾"，不是"换行"。
-    let spans: Vec<Span<'static>> = vec![
-        Span::styled("ab", Style::default()),
-        Span::styled(" cd", Style::default()),
-    ];
-    let areas = super::model_click_areas(&spans, 5, 2, 0, 2);
-    assert_eq!(areas, vec![(0, 0, 2), (0, 2, 5)]);
-}
-
-// ── 其他布局场景 ──────────────────────────────────────────────────────────
-
-#[test]
-fn test_model_click_areas_wrap_before_model_segment() {
-    // 折行点落在模型段之前：模型段整体在第 1 行，区域 line==1
-    let spans: Vec<Span<'static>> = vec![
-        Span::styled("abcdef", Style::default()), // 非模型段：行满推出到 line1
-        Span::styled(" gh", Style::default()),    // 模型段
-    ];
-    let areas = super::model_click_areas(&spans, 6, 2, 1, 2);
-    assert_eq!(areas, vec![(1, 0, 3)]);
-}
-
-#[test]
-fn test_model_click_areas_word_merges_across_spans() {
-    // 词可跨 span 边界合并（字符流扫描）：'op' + 'us' 是一个词 'opus'
-    let spans: Vec<Span<'static>> = vec![
-        Span::styled("op", Style::default()),
-        Span::styled("us", Style::default()),
-    ];
-    let areas = super::model_click_areas(&spans, 200, 1, 0, 2);
-    assert_eq!(areas, vec![(0, 0, 4)]);
-    // span 边界空白计入下一词 ws（"op" + " us" → 'op' 词宽 2、'us' 词 ws=1）
-    let spans2: Vec<Span<'static>> = vec![
-        Span::styled("op", Style::default()),
-        Span::styled(" us", Style::default()),
-    ];
-    let areas2 = super::model_click_areas(&spans2, 200, 1, 0, 2);
-    assert_eq!(areas2, vec![(0, 0, 2), (0, 2, 5)]);
-}
-
-#[test]
-fn test_model_click_areas_cjk_width() {
-    // CJK 字符宽 2（UnicodeWidthChar 语义）：模型段前的 CJK 内容影响 x 起点
-    let spans: Vec<Span<'static>> = vec![
-        Span::styled(" 中文目录", Style::default()), // 1(空格) + 4×2 = 9
-        Span::styled(" opus", Style::default()),
-    ];
-    let areas = super::model_click_areas(&spans, 200, 1, 1, 2);
-    assert_eq!(areas, vec![(0, 9, 14)]);
-}
-
-// ── 防御 ──────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_model_click_areas_defensive() {
-    let (spans, start, end) = row1_spans();
-    // 空 spans
-    assert!(super::model_click_areas(&[], 100, 2, 0, 0).is_empty());
-    // area_w = 0
-    assert!(super::model_click_areas(&spans, 0, 2, start, end).is_empty());
-    // model_start >= model_end
-    assert!(super::model_click_areas(&spans, 100, 2, 0, 0).is_empty());
-    assert!(super::model_click_areas(&spans, 100, 2, 5, 4).is_empty());
-    // row_height = 0（组件内不可达，纯函数不 panic）
-    assert!(super::model_click_areas(&spans, 100, 0, start, end).is_empty());
-}
-
-// ── ground-truth：TestBackend 渲染真实 Paragraph wrap 对比 ────────────────
-// 模拟算法与真实渲染的最终裁决：渲染同构造 Line（Wrap{trim:false}）到宽度
-// area_w 的 buffer，扫描模型文本字符实际位置，与模拟区域逐位对比。
-
-/// 渲染与组件同构的 Paragraph(wrap)（区域宽 = area_w），返回 buffer。
-fn render_status_bar_buffer(
+fn layout(
     spans: &[Span<'static>],
-    area_w: u16,
-    area_h: u16,
-) -> ratatui::buffer::Buffer {
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(area_w, area_h))
+    width: u16,
+    model: Option<std::ops::Range<usize>>,
+    goal: Option<std::ops::Range<usize>>,
+) -> super::StatusBarLayout {
+    super::layout_status_bar(spans, width, super::ROW1_MAX_LINES, model, goal)
+}
+
+fn layout_text(layout: &super::StatusBarLayout) -> Vec<String> {
+    layout
+        .lines
+        .iter()
+        .map(|line: &Line<'static>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// 与组件绘制端同构：渲染布局行，不启用任何折行。
+fn render_layout(layout: &super::StatusBarLayout, width: u16, height: u16) -> Buffer {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
         .expect("TestBackend 可创建");
     terminal
         .draw(|f| {
-            f.render_widget(
-                Paragraph::new(Line::from(spans.to_vec())).wrap(Wrap { trim: false }),
-                f.area(),
-            );
+            f.render_widget(Paragraph::new(layout.lines.clone()), f.area());
         })
         .expect("渲染成功");
     terminal.backend().buffer().clone()
 }
 
+fn buffer_rows(buf: &Buffer) -> Vec<String> {
+    (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// 命中查询的测试包装：Row1 区域从 (0,0) 起。
+fn hit(hits: &[(u16, u16, u16)], width: u16, column: u16, row: u16) -> bool {
+    super::hit_test(hits, Rect::new(0, 0, width, 2), column, row).is_some()
+}
+
 #[test]
-fn test_model_click_areas_ground_truth_wrap_after_model() {
-    // 主 bug 场景：area_w=61 时模型段 4 词全部在第 0 行、尾部折到第 1 行。
-    // 模拟区域 vs 真实渲染：每个词首字符（= 区域起点 + 词前空白宽）逐位一致。
-    let (spans, start, end) = row1_spans();
-    let areas = super::model_click_areas(&spans, 61, 2, start, end);
+fn test_status_layout_wide_single_line_and_model_hits() {
+    let (spans, model) = row1_spans();
+    let layout = layout(&spans, 200, Some(model), None);
+
+    assert_eq!(layout.lines.len(), 1, "宽屏应保持单行");
     assert_eq!(
-        areas,
-        vec![(0, 24, 27), (0, 27, 32), (0, 32, 55), (0, 55, 60)]
+        layout_text(&layout),
+        [" Accept Edit · project ·  · opus claude-opus-4-20250514 high · 2 agent"]
     );
-    let buf = render_status_bar_buffer(&spans, 61, 2);
-    assert_eq!(buf[(26, 0)].symbol(), "·"); // 24 + ws(2)
-    assert_eq!(buf[(28, 0)].symbol(), "o"); // 27 + ws(1)
-    assert_eq!(buf[(33, 0)].symbol(), "c"); // 32 + ws(1)
-    assert_eq!(buf[(56, 0)].symbol(), "h"); // 55 + ws(1)
-    // 词末断言：区域 (x_start, x_end) 覆盖词的实际字符范围
-    assert_eq!(buf[(31, 0)].symbol(), "s"); // opus 末字符
-    assert_eq!(buf[(54, 0)].symbol(), "4"); // 模型名末字符
-    assert_eq!(buf[(59, 0)].symbol(), "h"); // high 末字符
-    // 尾部 sep 折到 row1 且顶格（词前空白被行尾回填丢弃，remaining=1）
-    assert_eq!(buf[(0, 1)].symbol(), "·");
+    // 模型段命中从它自己的前置分隔符起，到 effort 结束；不含上一段的空格与尾部空白。
+    assert_eq!(layout.model_hits, [(0, 25, 60)]);
+    assert!(layout.goal_hits.is_empty());
+
+    assert!(hit(&layout.model_hits, 200, 25, 0));
+    assert!(hit(&layout.model_hits, 200, 26, 0), "分隔符 · 可点击");
+    assert!(!hit(&layout.model_hits, 200, 24, 0), "上一段尾部空白不响应");
+    assert!(!hit(&layout.model_hits, 200, 60, 0), "段尾空白不响应");
+
+    let buf = render_layout(&layout, 200, 1);
+    assert_eq!(buf[(26, 0)].symbol(), "·");
+    assert_eq!(buf[(28, 0)].symbol(), "o");
+    assert_eq!(buf[(56, 0)].symbol(), "h");
 }
 
 #[test]
-fn test_model_click_areas_ground_truth_cross_line() {
-    // 词级跨行：area_w=30 时 opus 整词折到第 1 行——模拟与真实渲染一致
-    let (spans, start, end) = row1_spans();
-    let areas = super::model_click_areas(&spans, 30, 2, start, end);
-    assert_eq!(areas, vec![(0, 24, 27), (1, 0, 4), (1, 4, 27), (1, 27, 32)]);
-    let buf = render_status_bar_buffer(&spans, 30, 2);
-    assert_eq!(buf[(26, 0)].symbol(), "·"); // sep 仍在 row0
-    assert_eq!(buf[(0, 1)].symbol(), "o"); // opus 换行到 row1 顶格（ws 被回填丢弃）
-    assert_eq!(buf[(5, 1)].symbol(), "c"); // 模型名 row1 x5（opus 后空格 x4）
-    // 词末断言：区域 (x_start, x_end) 覆盖词的实际字符范围
-    assert_eq!(buf[(3, 1)].symbol(), "s"); // opus 末字符
-    assert_eq!(buf[(26, 1)].symbol(), "4"); // 模型名末字符
-    // high 被 row_height=2 截断到 row2 不可见——模拟区域 (1,27,32) 覆盖 row1
-    // 尾部空白，点击该区域打开弹窗（轻微误触，WordWrapper 行数无上限所致）
+fn test_status_layout_narrow_long_word_hits_follow_second_line() {
+    // 偏差一：宽 5 时长词被拆到第二行，旧命中却全留在第一行。
+    let spans = vec![
+        Span::styled("ab ", Style::default()),
+        Span::styled("toolongword", Style::default()),
+    ];
+    let layout = layout(&spans, 5, Some(1..2), None);
+
+    assert_eq!(
+        layout_text(&layout),
+        ["ab", "toolo"],
+        "长词按列宽推进第二行"
+    );
+    assert_eq!(layout.model_hits, [(1, 0, 5)], "命中只在长词实际出现的行");
+    assert!(!hit(&layout.model_hits, 5, 3, 0), "第一行没有模型字符");
+    assert!(hit(&layout.model_hits, 5, 4, 1));
+
+    let buf = render_layout(&layout, 5, 2);
+    assert_eq!(buf[(0, 0)].symbol(), "a");
+    assert_eq!(buf[(1, 0)].symbol(), "b");
+    assert_eq!(buf[(0, 1)].symbol(), "t");
+    assert_eq!(buf[(4, 1)].symbol(), "o");
 }
 
 #[test]
-fn test_model_click_areas_oversize_word_at_line_start() {
-    // 行首超宽词（w > area_w）：模拟整词放行首（区域超界，可点部分有效）。
-    // WordWrapper 实际把超宽词拆分跨行（前缀满行 + 剩余到下一行）——已知差异，
-    // 状态栏场景罕见（词宽 > 终端宽），接受近似（plan-review 已记录）。
-    let spans: Vec<Span<'static>> = vec![Span::styled("toolongword", Style::default())];
-    let areas = super::model_click_areas(&spans, 5, 2, 0, 1);
-    assert_eq!(areas, vec![(0, 0, 11)]);
+fn test_status_layout_clipped_third_line_has_no_phantom_hit() {
+    // 偏差二：被第三行裁掉的 effort 曾在第二行尾部留下热区。
+    let (spans, model) = row1_spans();
+    let layout = layout(&spans, 30, Some(model), None);
+
+    assert_eq!(
+        layout_text(&layout),
+        [" Accept Edit · project ·  ·", "opus claude-opus-4-20250514"]
+    );
+    assert_eq!(layout.model_hits, [(0, 25, 27), (1, 0, 27)]);
+    assert!(
+        !layout_text(&layout)
+            .iter()
+            .any(|line| line.contains("high")),
+        "第三行内容不得出现在可见行"
+    );
+
+    let buf = render_layout(&layout, 30, 2);
+    assert_eq!(buf[(26, 0)].symbol(), "·");
+    assert_eq!(buf[(0, 1)].symbol(), "o");
+    assert_eq!(buf[(26, 1)].symbol(), "4");
+    assert_eq!(buf[(27, 1)].symbol(), " ", "可见行尾部是空白");
+    for column in 27..30 {
+        assert!(
+            !hit(&layout.model_hits, 30, column, 1),
+            "被裁掉内容的位置不应可点：x={column}"
+        );
+    }
 }
 
 #[test]
-fn test_model_click_areas_cjk_tail_word_overflow() {
-    // [major 修复] 词尾宽字符（CJK 宽 2）+ 词恰好超界 1 列：词**留在行尾**
-    // （逐字符增量检查 `line + ws + 前缀宽` 在词尾字符前不触发 overflow），
-    // 与 WordWrapper 一致。旧条件 `line_x + ws + w > area_w` 会错误换行
-    // → 该词区域行号错 1、点击失效（原始 bug 同类型残留）。
-    // area_w=6：词 "pr目" w=4、cw_last=2 → 2+1+4-2=5 < 6 不换行；
-    // append 后 line_x=7 >= 6 → line_full 行推出。
-    let spans: Vec<Span<'static>> = vec![
+fn test_status_layout_goal_hits_cover_only_visible_cells() {
+    let spans = vec![
+        Span::styled("head", Style::default()),
+        super::separator(),
+        Span::styled("Goal: Active · ↻2", Style::default()),
+        super::separator(),
+        Span::styled("1 shell", Style::default()),
+    ];
+    let layout = layout(&spans, 12, None, Some(1..3));
+
+    assert_eq!(layout_text(&layout), ["head · Goal:", "Active · ↻2"]);
+    assert_eq!(layout.goal_hits, [(0, 4, 12), (1, 0, 11)]);
+    assert!(hit(&layout.goal_hits, 12, 5, 0), "Goal 前置分隔符可点击");
+    assert!(hit(&layout.goal_hits, 12, 10, 1), "可见的 ↻2 可点击");
+    assert!(!hit(&layout.goal_hits, 12, 11, 1), "可见行尾部空白不响应");
+    assert!(
+        !hit(&layout.goal_hits, 12, 3, 0),
+        "前置段与 Goal 段之间空白不响应"
+    );
+
+    let buf = render_layout(&layout, 12, 2);
+    assert_eq!(buf[(5, 0)].symbol(), "·");
+    assert_eq!(buf[(0, 1)].symbol(), "A");
+}
+
+#[test]
+fn test_status_layout_overlong_model_name_splits_visible() {
+    // 模型名比整行还宽：按显示列宽拆分，只对可见部分保留热区。
+    let spans = vec![
+        Span::styled("m", Style::default()),
+        super::separator(),
+        Span::styled("abcdefghijklmnopqrstuvwxyz0123456789", Style::default()),
+    ];
+    let layout = layout(&spans, 12, Some(1..3), None);
+
+    assert_eq!(layout_text(&layout), ["m ·", "abcdefghijkl"]);
+    assert_eq!(layout.model_hits, [(0, 1, 3), (1, 0, 12)]);
+    assert!(
+        layout
+            .model_hits
+            .iter()
+            .all(|&(line, start, end)| usize::from(line) < layout.lines.len()
+                && start < end
+                && end <= 12)
+    );
+    assert!(!hit(&layout.model_hits, 12, 12, 1));
+    assert!(
+        layout.lines.iter().all(|line| line.width() <= 12usize),
+        "可见行不得超过终端宽度"
+    );
+}
+
+#[test]
+fn test_status_layout_resize_recomputes_lines_and_hits() {
+    let (spans, model) = row1_spans();
+    let cases = [
+        (120u16, 1usize, false),
+        (40, 2, false),
+        (30, 2, false),
+        (5, 2, true),
+    ];
+    for (width, expected_lines, model_hidden) in cases {
+        let layout = layout(&spans, width, Some(model.clone()), None);
+        assert_eq!(
+            layout.lines.len(),
+            expected_lines,
+            "宽度 {width} 的可见行数"
+        );
+        assert!(
+            layout
+                .lines
+                .iter()
+                .all(|line| line.width() <= usize::from(width)),
+            "宽度 {width} 的可见行超宽"
+        );
+        assert!(
+            layout.model_hits.iter().all(|&(line, start, end)| {
+                usize::from(line) < layout.lines.len() && start < end && end <= width
+            }),
+            "宽度 {width} 的热区必须落在可见行内"
+        );
+        assert_eq!(
+            layout.model_hits.is_empty(),
+            model_hidden,
+            "宽度 {width} 的模型段可见性与热区一致"
+        );
+    }
+}
+
+#[test]
+fn test_status_layout_cjk_word_moves_whole_to_next_line() {
+    // 双宽字符不拆半：整词换行，命中跟着词走（旧实现留在行尾并截断）。
+    let spans = vec![
         Span::styled("ab", Style::default()),
         Span::styled(" pr目", Style::default()),
     ];
-    let areas = super::model_click_areas(&spans, 6, 2, 0, 2);
-    assert_eq!(areas, vec![(0, 0, 2), (0, 2, 7)]);
-    // ground-truth：真实渲染 "pr目" 在行 0（x3-4 可见，'目' 在 x5 超界截断），
-    // 行 1 为空——旧条件（换行）下此断言失败。
-    let buf = render_status_bar_buffer(&spans, 6, 2);
-    assert_eq!(buf[(3, 0)].symbol(), "p"); // 词 "pr目" 留在行 0
-    assert_eq!(buf[(4, 0)].symbol(), "r");
-    assert_eq!(buf[(0, 1)].symbol(), " "); // 行 1 无该词字符
+    let layout = layout(&spans, 6, Some(0..2), None);
+
+    assert_eq!(layout_text(&layout), ["ab", "pr目"]);
+    assert_eq!(layout.model_hits, [(0, 0, 2), (1, 0, 4)]);
+    let buf = render_layout(&layout, 6, 2);
+    assert_eq!(buf[(0, 1)].symbol(), "p");
+    assert_eq!(buf[(2, 1)].symbol(), "目");
+    assert_eq!(buf[(4, 1)].symbol(), " ");
 }
 
 #[test]
-fn test_model_click_areas_cjk_ground_truth() {
-    // CJK 宽度（UnicodeWidthChar 宽 2）影响折行判定与 x 起点：行 0 放满
-    // " 中文目录"（1+8=9），"opus" 词超界换行到行 1 顶格（行尾回填丢弃前导空格）。
-    let spans: Vec<Span<'static>> = vec![
-        Span::styled(" 中文目录", Style::default()),
-        Span::styled(" opus", Style::default()),
+fn test_status_layout_word_merges_across_spans() {
+    // 词可跨 span 边界合并；命中按单元格所属 span 划分。
+    let spans = vec![
+        Span::styled("op", Style::default()),
+        Span::styled("us rest", Style::default()),
     ];
-    let areas = super::model_click_areas(&spans, 10, 2, 1, 2);
-    assert_eq!(areas, vec![(1, 0, 4)]);
-    let buf = render_status_bar_buffer(&spans, 10, 2);
-    assert_eq!(buf[(0, 1)].symbol(), "o"); // opus 换行到 row1 顶格
-    assert_eq!(buf[(3, 1)].symbol(), "s"); // 词末断言
+    let layout = layout(&spans, 200, Some(0..1), None);
+
+    assert_eq!(layout_text(&layout), ["opus rest"]);
+    assert_eq!(layout.model_hits, [(0, 0, 2)], "只覆盖模型 span 的两个字符");
+}
+
+#[test]
+fn test_status_layout_defensive_inputs() {
+    // 空内容仍保留一行（组件高度至少 1）。
+    let empty = layout(&[], 10, None, None);
+    assert_eq!(empty.lines.len(), 1);
+    assert_eq!(layout_text(&empty), [""]);
+    assert!(empty.model_hits.is_empty());
+
+    // 首帧宽度未知：保持单行，且不产生无法校验的热区。
+    let (spans, model) = row1_spans();
+    let unknown = layout(&spans, 0, Some(model), None);
+    assert_eq!(unknown.lines.len(), 1);
+    assert_eq!(layout_text(&unknown).len(), 1);
+    assert!(unknown.model_hits.is_empty());
+}
+
+#[test]
+fn test_hit_test_requires_visible_row_and_column() {
+    let hits = [(0, 2, 5), (1, 0, 3)];
+    let area = Rect::new(4, 10, 40, 2);
+    // 行、列都换算到屏幕坐标；区间右端为开区间。
+    assert_eq!(super::hit_test(&hits, area, 6, 10), Some(6));
+    assert_eq!(super::hit_test(&hits, area, 8, 10), Some(6));
+    assert_eq!(super::hit_test(&hits, area, 9, 10), None);
+    assert_eq!(super::hit_test(&hits, area, 5, 10), None);
+    assert_eq!(super::hit_test(&hits, area, 4, 11), Some(4));
+    assert_eq!(super::hit_test(&hits, area, 7, 11), None);
+    assert_eq!(super::hit_test(&hits, area, 6, 12), None);
+}
+
+// ── 组件接线：Row1 直接消费布局行 ────────────────────────────────────────────
+
+struct ServiceSnapshotGuard(atoms::ServiceSnapshot);
+
+impl ServiceSnapshotGuard {
+    fn install(snapshot: atoms::ServiceSnapshot) -> Self {
+        let previous = std::mem::take(&mut *atoms::SERVICE_SNAPSHOT.state().write());
+        *atoms::SERVICE_SNAPSHOT.state().write() = snapshot;
+        Self(previous)
+    }
+}
+
+impl Drop for ServiceSnapshotGuard {
+    fn drop(&mut self) {
+        *atoms::SERVICE_SNAPSHOT.state().write() = std::mem::take(&mut self.0);
+    }
+}
+
+#[test]
+#[serial]
+fn test_status_bar_row1_draws_layout_lines_at_narrow_width() {
+    crate::kit::atoms::init_atoms();
+    let _guard = ServiceSnapshotGuard::install(atoms::ServiceSnapshot {
+        cwd: "/home/user/test-project".into(),
+        provider_name: "anthropic".into(),
+        model_alias: "sonnet".into(),
+        model_name: "claude-sonnet-4-20250514".into(),
+        effort: "high".into(),
+        permission_mode: "accept-edit".into(),
+        ..Default::default()
+    });
+
+    // 宽 30：Row1 折为两行，第二行只放得下模型段首词；状态栏自身不启用 Paragraph 折行。
+    let buf = ratatui_kit::test_util::render_frames(element!(super::StatusBarRow1()), 30, 2, 3);
+    let rows = buffer_rows(&buf);
+
+    assert_eq!(buf[(28, 0)].symbol(), "·", "模型前置分隔符留在第一行");
+    assert_eq!(rows[1].trim_end(), "sonnet", "第二行由布局产出");
+    assert!(
+        !rows.iter().any(|row| row.contains("claude-sonnet")),
+        "第三行内容被裁掉：{rows:?}"
+    );
 }

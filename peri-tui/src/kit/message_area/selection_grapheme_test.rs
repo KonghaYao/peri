@@ -3,7 +3,7 @@
 use super::Arc;
 use super::Line;
 use super::WrappedLineInfo;
-use super::text_selection;
+use crate::kit::text_selection;
 
 use ratatui_kit::ratatui::style::{Color, Style};
 use ratatui_kit::ratatui::text::Span;

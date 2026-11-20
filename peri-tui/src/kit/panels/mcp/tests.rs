@@ -199,8 +199,59 @@ fn long_error_summary_wraps_and_stays_complete() {
         error
     );
     assert_eq!(
-        super::detail::detail_error_lines(&summary),
+        super::detail::detail_error_lines(&summary, TEST_WIDTH),
         Some(wrapped.len())
+    );
+}
+
+/// 窄面板：CJK 错误按显示列宽换行（不按码点），行宽不越过可用宽度，
+/// 按钮行号与渲染同源。
+#[test]
+fn narrow_panel_wraps_cjk_error_by_display_width() {
+    let width: u16 = 24;
+    let wrap_width = super::detail::detail_wrap_width(width);
+    assert!(wrap_width < DETAIL_WRAP_WIDTH, "用例必须落在窄屏分支");
+    let error = "中文错误信息".repeat(5);
+    let summary = McpServerSummary {
+        error_summary: Some(error.clone()),
+        ..McpServerSummary::default()
+    };
+    let lines = super::detail::build_detail_lines(
+        &summary,
+        &[],
+        0,
+        &peri_theme::builtin::dark_theme(),
+        width,
+    );
+    let label = i18n::tr("panel-mcp-detail-error");
+    let start = lines
+        .iter()
+        .position(|line| line_text(line).contains(&label))
+        .expect("错误标题必须渲染");
+    let wrapped = crate::kit::text_util::wrap_text(&error, wrap_width);
+    assert!(wrapped.len() > 1, "用例必须覆盖多行换行");
+    let rendered: Vec<String> = lines[start + 1..start + 1 + wrapped.len()]
+        .iter()
+        .map(line_text)
+        .collect();
+    assert_eq!(
+        rendered,
+        wrapped
+            .iter()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rendered
+            .iter()
+            .all(|line| UnicodeWidthStr::width(line.as_str()) <= width as usize),
+        "窄屏换行后每行不得超过面板宽度"
+    );
+    let back = DetailAction::Back.text(&i18n::tr("panel-mcp-detail-btn-back"));
+    assert_eq!(
+        rendered_row(&lines, &back),
+        super::detail::detail_btn_row(&summary, 0, width) as usize,
+        "窄屏按钮行号必须与渲染一致"
     );
 }
 
@@ -283,6 +334,66 @@ fn header_copy_button_is_right_aligned_and_survives_narrow_width() {
         // 极窄：标题被截断（省略号），不与按钮重叠
         if width < 40 {
             assert!(rendered.contains('…'), "width={width} 时标题必须被截断让位");
+        }
+    }
+}
+
+/// CJK 长标题按总列宽截断：逐段样式保留，省略号计入预算，复制按钮仍可点。
+#[test]
+fn header_cjk_title_keeps_styles_and_copy_hit() {
+    use super::detail::DETAIL_HEADER_MIN_GAP;
+
+    let summary = McpServerSummary {
+        name: format!("中文服务器{}", "名称很长".repeat(6)),
+        version: Some("1.2.3".into()),
+        error_summary: Some("连接失败".into()),
+        needs_auth: true,
+        ..McpServerSummary::default()
+    };
+    let copy_text = DetailAction::CopyError.text(&i18n::tr("panel-mcp-detail-btn-copy"));
+    for width in [80u16, 60, 40, 30, 20, 12] {
+        let lines = super::detail::build_detail_lines(
+            &summary,
+            &[],
+            1,
+            &peri_theme::builtin::dark_theme(),
+            width,
+        );
+        let header = &lines[DETAIL_HEADER_ROW as usize];
+        let rendered = line_text(header);
+        let button = copy_button(&summary, width);
+        assert!(
+            rendered.contains(&copy_text),
+            "width={width} 复制按钮必须仍渲染"
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(rendered.as_str()) as u16,
+            button.col + button.width(),
+            "width={width} 行宽必须与按钮右缘一致"
+        );
+        // 按钮命中区间完整落在面板内（与绘制同源）。
+        assert!(
+            button.hit_width > 0 && button.col + button.hit_width <= width,
+            "width={width} 命中区间越界"
+        );
+        // 标题首段样式保留（bold + 标题色），截断不会改风格。
+        let first = &header.spans[0];
+        assert!(
+            first.style.add_modifier.contains(Modifier::BOLD),
+            "width={width} 标题样式必须保留"
+        );
+        // 按钮前保留最小间距（极窄且按钮已贴左列时无空间）。
+        let copy_pos = rendered.find(&copy_text).expect("按钮文本必须存在");
+        let prefix = &rendered[..copy_pos];
+        if button.col > 0 {
+            assert!(
+                UnicodeWidthStr::width(prefix.trim_end()) + usize::from(DETAIL_HEADER_MIN_GAP)
+                    <= usize::from(button.col),
+                "width={width} 标题不得侵入按钮间距: {rendered:?}"
+            );
+        }
+        if width <= 40 {
+            assert!(rendered.contains('…'), "width={width} 标题必须截断让位");
         }
     }
 }
@@ -475,7 +586,10 @@ fn detail_button_row_shifts_with_error_summary() {
         error_summary: Some("E".repeat(120)),
         ..McpServerSummary::default()
     };
-    assert_eq!(super::detail::detail_error_lines(&long_error), Some(3));
+    assert_eq!(
+        super::detail::detail_error_lines(&long_error, TEST_WIDTH),
+        Some(3)
+    );
     assert_eq!(
         super::detail::detail_btn_row(&long_error, 0, TEST_WIDTH),
         26

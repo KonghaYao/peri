@@ -1,6 +1,7 @@
 use crate::kit::message_area::selection::SlotIndex;
 
 use super::GesturePending;
+use crate::kit::message_area::entry_nav::EntryClickHit;
 use crate::kit::text_selection::TextSelection;
 use ratatui_kit::crossterm::event::{MouseButton, MouseEventKind};
 use ratatui_kit::ratatui::layout::Rect;
@@ -104,21 +105,29 @@ pub(in crate::kit::message_area) fn text_selection_accepts_pointer(
     }
 }
 
-/// entry 单击命中解析：视觉行 → `(slot_index, local_idx)`；仅当该行是 entry 的
-/// 可点击 header（`local_idx == index.header_local(slot)`）时命中。
+/// entry 单击命中解析：视觉行 → entry 首行（`header`）或展开组的成员标题行。
 ///
-/// [Why 仅 header] 正文行保留给文本选区/复制；展开动作只挂在 header 上，与键盘
-/// Enter（焦点在 entry 时切换）语义一致。过程区转场台阶占第 0 行，header 顺延到
-/// 第 1 行——否则「点击工具/thinking 的单行展开」在最常见的文本→过程转场处失效。
-/// wrap_map 越界（footer 区域无映射）→ `None`。header 换行成多视觉行时，所属视觉行
-/// 均反查到同一逻辑行，全部命中。
+/// [Why 仅 header + 成员标题] 正文行保留给文本选区/复制；entry 首行切换整
+/// entry（组 = 整组），展开组内成员标题只切换该成员（命中表由渲染产出）。过程区
+/// 转场台阶占第 0 行，header 顺延到第 1 行——否则「点击工具/thinking 的单行展开」
+/// 在最常见的文本→过程转场处失效。wrap_map 越界（footer 区域无映射）→ `None`。
+/// header 换行成多视觉行时，所属视觉行均反查到同一逻辑行，全部命中。
 pub(in crate::kit::message_area) fn entry_click_target_index(
     index: &SlotIndex,
     visual_row: usize,
-) -> Option<(usize, usize)> {
+) -> Option<EntryClickHit> {
     let lookup = index.visual_lookup(visual_row)?;
-    (lookup.local_logical == index.header_local(lookup.slot_index))
-        .then_some((lookup.slot_index, lookup.local_logical))
+    if lookup.local_logical == index.header_local(lookup.slot_index) {
+        return Some(EntryClickHit::Header {
+            slot: lookup.slot_index,
+        });
+    }
+    index
+        .member_fold_hit(lookup.slot_index, lookup.local_logical)
+        .map(|key| EntryClickHit::GroupMember {
+            slot: lookup.slot_index,
+            key,
+        })
 }
 
 #[cfg(test)]
@@ -126,11 +135,11 @@ pub(in crate::kit::message_area) fn entry_click_target(
     wrap_map: &[crate::kit::message_area::selection::WrappedLineInfo],
     slot_offsets: &[usize],
     visual_row: usize,
-) -> Option<(usize, usize)> {
+) -> Option<EntryClickHit> {
     let logical = crate::kit::message_area::selection::visual_to_logical(visual_row, wrap_map)?;
     let slot = wrap_map.get(logical)?.slot_index;
     let local = logical.saturating_sub(*slot_offsets.get(slot)?);
-    (local == 0).then_some((slot, 0))
+    (local == 0).then_some(EntryClickHit::Header { slot })
 }
 
 // ── 手势状态机纯函数层 ───────────────────────────────────────────────
@@ -175,7 +184,7 @@ pub(in crate::kit::message_area) fn freeze_down(
 }
 
 /// Drag 分支决策结果（纯函数 `drag_step` 的输出）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::kit::message_area) enum DragAction {
     /// 越过单击判定 → 升级为拖拽（Armed）：`start_drag(pending.visual)` +
     /// `update_drag(当前视觉坐标)` + gesture → None。**升级瞬间不受节流**。

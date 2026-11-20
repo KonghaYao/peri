@@ -10,6 +10,7 @@ use peri_theme::atoms::THEME_ATOM;
 use peri_tui_components::button::{
     ButtonChrome, ButtonSpec, ButtonState, ButtonTone, button_visual,
 };
+use peri_tui_components::spinner::Spinner;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
@@ -70,15 +71,17 @@ pub(super) fn render_todo_lines(items: &[TodoItem]) -> Vec<Line<'static>> {
 ///
 /// spinner 组件常驻——active 时动画转动，inactive 时以此占位，永不 hidden。
 /// [Why 固定帧] render_to_lines 的帧由壁钟纯计算（Idle 态也会转），
-/// inactive 应静止，故单独输出 `tick_to_frame(0)` 而非复用动画路径。
+/// inactive 应静止，故固定传帧序号 0，而不是复用动画路径。
 /// [Why 带 verb] 历史会话恢复等场景没有耗时 summary，若只显示图标会显得
 /// 突兀（只有符号没有文字），附带一句默认成语占位，与 loading 行视觉一致。
 pub(super) fn render_idle_spinner_line(color: Color, verb: &str) -> Line<'static> {
-    let frame = crate::components::spinner::animation::tick_to_frame(0);
-    Line::from(vec![
-        Span::styled(format!("{frame} "), Style::default().fg(color)),
-        Span::styled(verb.to_string(), Style::default().fg(color)),
-    ])
+    Spinner::new(crate::components::spinner::animation::BRAILLE_FRAMES, 0)
+        .icon_style(Style::default().fg(color))
+        .text(Line::from(Span::styled(
+            verb.to_string(),
+            Style::default().fg(color),
+        )))
+        .line()
 }
 
 /// keepgoing 按钮在 footer 行内的布局信息（供 MessageArea 计算屏幕点击区域）。
