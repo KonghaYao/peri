@@ -7,13 +7,14 @@
 // prediction/title helper (the request carries `<prediction_directive>`) and
 // keeps those calls out of the turn counter.
 //
-// S9a2 adds one deterministic tool turn: when the request advertises the
-// workspace `Bash` tool and no tool result is in the messages yet, the stub
-// emits an OpenAI `delta.tool_calls` stream that runs
+// S9a2 adds one deterministic tool turn per user turn: when the request
+// advertises the workspace `Bash` tool and the current turn has no tool result
+// yet, the stub emits an OpenAI `delta.tool_calls` stream that runs
 // `echo hello-from-swarm > hello.txt` (overridable with PERI_STUB_TOOL_COMMAND).
 // The call id is `call_stub_<n>`, the argument object is `{"command": ...}`, and
 // `finish_reason` is `tool_calls`. The next main call (which carries the tool
-// message) returns the usual text reply.
+// message) returns the usual text reply. A later user message starts a new
+// turn, so the same stub process serves repeated tool turns without a restart.
 //
 // S9a3b1 makes the tool command a function of the *input*: the last user
 // message may carry `[[tool:<name>]]`, resolved against `PERI_STUB_COMMANDS`
@@ -21,8 +22,8 @@
 // stateless and concurrency-safe: a tool call is emitted only while the
 // conversation after the directive-bearing user message has no `tool` result
 // yet, so several sessions can interleave turns on one stub. The legacy
-// `PERI_STUB_TOOL_COMMAND` single-tool-turn behaviour is unchanged for
-// requests without a directive.
+// `PERI_STUB_TOOL_COMMAND` fallback uses the same per-turn rule for requests
+// without a directive.
 //
 // The reply is a pure function of the turn's user text (the directive-bearing
 // message when present, else the last user message) and the main-call index, so
@@ -52,7 +53,10 @@ const CHUNK_SIZE = Number(process.env.PERI_STUB_CHUNK ?? '6');
 const CHUNK_DELAY_MS = Number(process.env.PERI_STUB_CHUNK_DELAY_MS ?? '15');
 const MAX_TURNS = 64;
 const TOOL_COMMAND = process.env.PERI_STUB_TOOL_COMMAND ?? 'echo hello-from-swarm > hello.txt';
-/** The single-tool-turn fallback is opt-in: it needs the explicit command. */
+/** Marker of the capability reminder Peri appends as a user message each call. */
+const SYSTEM_REMINDER_MARKER = '<system-reminder>';
+
+/** The legacy per-turn fallback is opt-in: it needs the explicit command. */
 const TOOL_FALLBACK_ENABLED = process.env.PERI_STUB_TOOL_COMMAND !== undefined;
 const DIRECTIVE_PATTERN = /\[\[tool:([A-Za-z0-9._-]+)\]\]/;
 
@@ -158,6 +162,32 @@ function bashToolName(body) {
 
 function hasToolResult(body) {
   return messagesOf(body).some((message) => message?.role === 'tool' || message?.role === 'function');
+}
+
+/**
+ * Index of the user message that started the current turn.
+ *
+ * Peri appends a `<system-reminder>` capability message as the final user
+ * message of every request, so the *last* user message is not the turn input.
+ * The last user message without that marker is the turn boundary; when there
+ * is none, `-1` makes the whole conversation the turn (S9a2 shape).
+ */
+function currentTurnStart(body) {
+  const messages = messagesOf(body);
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== 'user') continue;
+    if (messageText(message?.content).includes(SYSTEM_REMINDER_MARKER)) continue;
+    return index;
+  }
+  return -1;
+}
+
+/** Whether the current user turn already produced a tool result. */
+function toolResultSinceTurnStart(body) {
+  return messagesOf(body)
+    .slice(currentTurnStart(body) + 1)
+    .some((message) => message?.role === 'tool' || message?.role === 'function');
 }
 
 /**
@@ -414,12 +444,12 @@ async function handleChat(_request, response, body) {
     });
   }
   // S9a3b1: a directive is a per-turn tool request and stays enabled for every
-  // turn of every session. The legacy path keeps the S9a2 "one tool turn per
-  // run" contract and only runs when `PERI_STUB_TOOL_COMMAND` was set.
+  // turn of every session. The legacy path applies the same per-turn rule: one
+  // tool call per user message, no process restart needed.
   const directiveTurn =
     directiveCommand !== undefined && bashName !== null && !toolResultSinceDirective(body);
   const legacyTurn =
-    TOOL_FALLBACK_ENABLED && bashName !== null && state.toolCalls === 0 && !hasToolResult(body);
+    TOOL_FALLBACK_ENABLED && bashName !== null && !toolResultSinceTurnStart(body);
   if (directiveTurn || (directiveCommand === undefined && legacyTurn)) {
     state.toolCalls += 1;
     const callId = `call_stub_${index}`;
