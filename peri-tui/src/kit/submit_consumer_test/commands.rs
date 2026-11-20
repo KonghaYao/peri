@@ -221,6 +221,36 @@ async fn test_clear_request_bypasses_prompt() {
     );
 }
 
+/// `/clear` 走交互式 `new_session`：`session/new` 必须冻结 TUI 专属指令。
+///
+/// 只验证载荷：收到 `session/new` 后取消任务，不驱动后续窗口初始化。
+#[tokio::test]
+#[serial]
+async fn test_clear_request_carries_tui_instructions() {
+    crate::kit::atoms::init_atoms();
+    let (client, server) = super::support::make_interactive_client_without_pump();
+    let clearer = client.clone();
+    let clear = tokio::spawn(async move {
+        super::super::handle_submit(
+            &clearer,
+            ".",
+            SubmitRequest::SessionControl(SessionControlRequest::Clear),
+            None,
+        )
+        .await
+    });
+
+    let (_id, params) = super::support::expect_request(&server, "session/new").await;
+    assert_eq!(
+        params["_meta"]["peri.instructions"],
+        crate::acp_client::TUI_SESSION_INSTRUCTIONS,
+        "/clear 的交互式 session/new 必须带 TUI 专属指令"
+    );
+
+    clear.abort();
+    let _ = clear.await;
+}
+
 /// 验证 handle_clear_submit 在调用 new_session 前已同步重置弹窗 / Todo / 历史指针。
 ///
 /// 覆盖 H1（弹窗 payload 残留）/ M3（Todo 残留）/ L5+L10（输入历史指针残留）。

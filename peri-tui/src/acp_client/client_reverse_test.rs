@@ -401,6 +401,11 @@ async fn test_initial_ensure_and_submit_ensure_share_one_lifecycle_request_both_
             tokio::spawn(async move { first_client.ensure_session("/tmp", None).await });
         let (new_id, params) = receive_lifecycle_request(&server_transport, "session/new").await;
         assert_eq!(params["cwd"], "/tmp");
+        // 交互式 TUI 在 `session/new` 冻结专属指令。
+        assert_eq!(
+            params["_meta"]["peri.instructions"],
+            crate::acp_client::TUI_SESSION_INSTRUCTIONS
+        );
 
         let second_ensure =
             tokio::spawn(async move { second_client.ensure_session("/tmp", None).await });

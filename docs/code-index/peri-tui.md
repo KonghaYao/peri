@@ -316,3 +316,5 @@ TUI 生产时间入口统一经 `peri-time`：`kit/entry.rs` 的每日主题以�
 - ARC-HOST-SHUTDOWN-001：TUI 不持有 MCP 池/`McpTaskOwner`（池归 ACP Host 部署）；`teardown_app` 显式关闭 AcpDeployment 并等待 host 收口，Incomplete 不记为已关闭
 
 并发子 Agent 展示归属遵守 `ARC-SUBAGENT-IDENTITY-001`：启动事件 `parent_tool_call_id` 必须是模型工具调用 ID，而非持久化 invocation UUID；TUI 不转换执行身份。三组同名、六种启动顺序与父卡片先到/后到的发布快照回归见 `acp_events_test/subagent_identity_test.rs::three_same_named_subagents_keep_distinct_owners_across_arrival_orders`。
+
+交互式 TUI 会话指令：正文 `prompts/tui.md`（crate 根）由 `src/acp_client/mod.rs::TUI_SESSION_INSTRUCTIONS` 经 `include_str!` 编入二进制；唯一注入点是 `src/acp_client/client/session/transition.rs::new_session_under_gate`，仅 `ClientProjectionMode::Interactive` 时写 `session/new` 的 `_meta["peri.instructions"]`。Headless（`-p/--print`）与 `session/load` 都不写，恢复会话沿用服务端已冻结的旧值；重试路径复用同一函数，因此每次都携带。准入与冻结语义见 [system-prompt](../design/system-prompt.md)。回归见 `src/acp_client/client/session/instructions_test.rs`、`src/acp_client/client_reverse_test.rs`、`src/acp_client/client/recovery_test.rs` 与 `src/kit/submit_consumer_test/commands.rs`。

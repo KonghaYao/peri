@@ -31,6 +31,7 @@
 | F-PROMPT-005 | L2 | Provider 投影；内部边界标记不泄漏 wire | [契约](../design/system-prompt.md) |
 | F-PROMPT-006 | L3 | Persona 与语言；基础文本来源独立可追踪 | [契约](../design/system-prompt.md) |
 | F-PROMPT-007 | L3 | 环境上下文；日期平台与 Git 信息按冻结契约注入 | [契约](../design/system-prompt.md) |
+| F-PROMPT-008 | L3 | TUI 会话指令；仅交互式 TUI 经 session/new 注入，CLI 不注入 | [契约](../design/system-prompt.md) |
 | F-COMPACT-001 | L2 | Micro compact；预算触发上下文投影压缩 | [契约](../design/micro-compact.md) |
 | F-COMPACT-002 | L2 | Full compact；摘要提交与原始历史分离 | [契约](../design/micro-compact.md) |
 | F-COMPACT-003 | L2 | 原文回查；压缩后可按引用读取原始内容 | [契约](../design/micro-compact.md) |

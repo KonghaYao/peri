@@ -151,8 +151,13 @@ async fn new_session_enqueues_window_open_after_initialization_succeeds() {
     let creator = client.clone();
     let create = tokio::spawn(async move { creator.new_session("/tmp", None).await });
 
-    let (id, method, _) = next_request(&server).await;
+    let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/new");
+    // Headless（`-p/--print`）不注入 TUI 专属指令：`_meta` 整体缺席。
+    assert!(
+        params.get("_meta").is_none(),
+        "headless session/new 不得带 _meta"
+    );
     server
         .send_response(id, Ok(json!({ "sessionId": WINDOW_SESSION })))
         .await
@@ -190,8 +195,13 @@ async fn failed_new_session_does_not_enqueue_window_open() {
     let creator = client.clone();
     let create = tokio::spawn(async move { creator.new_session("/tmp", None).await });
 
-    let (id, method, _) = next_request(&server).await;
+    let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/new");
+    // Headless（`-p/--print`）不注入 TUI 专属指令：`_meta` 整体缺席。
+    assert!(
+        params.get("_meta").is_none(),
+        "headless session/new 不得带 _meta"
+    );
     server
         .send_response(id, Ok(json!({ "sessionId": WINDOW_SESSION })))
         .await

@@ -232,6 +232,11 @@ async fn close_incomplete_is_replayed_before_establishing_next_session() {
     let (id, method, params) = next_request(&server).await;
     assert_eq!(method, "session/new");
     assert_eq!(params["cwd"], "/w");
+    // 交互式 TUI 在 `session/new` 冻结专属指令。
+    assert_eq!(
+        params["_meta"]["peri.instructions"],
+        crate::acp_client::TUI_SESSION_INSTRUCTIONS
+    );
     server
         .send_response(id, Ok(json!({ "sessionId": "first" })))
         .await
