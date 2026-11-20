@@ -34,11 +34,13 @@ use peri_acp::transport::mpsc::{mpsc_transport_pair, MpscClientTransport};
 use peri_acp::transport::types::{AcpError, IncomingMessage};
 use peri_acp::transport::AcpTransport;
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
-use peri_acp_types::session_store::SessionStoreDeployment;
+pub use peri_acp_types::session_store::SessionStoreDeployment;
+use peri_resources::RemoteWorkspaceEnvironment;
 use peri_resources::Resources;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use super::reader::ItemLog;
 
@@ -47,9 +49,14 @@ use super::reader::ItemLog;
 pub struct ChildConfig {
     /// Canonical absolute working directory; also the host `startup_cwd`.
     pub cwd: PathBuf,
-    /// Peri session store used by the ACP host (threads/history). S4 opens the
-    /// local deployment; S6 swaps in the Loom locator.
+    /// Peri session store used by the ACP host (threads/history).
     pub session_store: SessionStoreDeployment,
+    /// Stable machine UUID for a remote deployment. `Some` only with
+    /// [`Self::workspace_root`]; a partial pair is an explicit error, never a
+    /// silent fallback to the local SQLite store (S6b).
+    pub machine_id: Option<Uuid>,
+    /// Absolute, normalized virtual workspace root for the remote deployment.
+    pub workspace_root: Option<PathBuf>,
     /// Trusted settings document (tests / future SDK). `None` loads the normal
     /// layered configuration from `cwd`.
     pub settings_json: Option<String>,
@@ -102,6 +109,39 @@ pub fn local_session_store(path: Option<PathBuf>) -> SessionStoreDeployment {
         Some(path) => SessionStoreDeployment::local_path(path),
         None => SessionStoreDeployment::default_local(),
     }
+}
+
+/// Open the child's session store for the configured deployment.
+///
+/// - no remote identity ⇒ the existing local `Resources::open_deployment`
+///   (S4/S5 default, unchanged);
+/// - `machine_id` **and** `workspace_root` ⇒ the remote Loom store with a
+///   virtual workspace identity (`design §4.1`);
+/// - exactly one of the two ⇒ an explicit error. Falling back to the local
+///   SQLite file here would write Swarm facts to a second database.
+async fn open_session_resources(config: &ChildConfig) -> Result<Resources, ChildError> {
+    match (config.machine_id, config.workspace_root.as_ref()) {
+        (None, None) => Resources::open_deployment(&config.session_store).await,
+        (Some(machine_id), Some(root)) => {
+            let environment = RemoteWorkspaceEnvironment::virtual_workspace(
+                &machine_id.to_string(),
+                root.clone(),
+            )
+            .map_err(|error| {
+                ChildError::Local(format!("invalid remote workspace environment: {error:#}"))
+            })?;
+            Resources::open_deployment_in_remote_environment(&config.session_store, environment)
+                .await
+        }
+        _ => {
+            return Err(ChildError::Local(
+                "remote session store requires both machine_id and workspace_root; \
+                 refusing to open the local store"
+                    .to_owned(),
+            ));
+        }
+    }
+    .map_err(|error| ChildError::Local(format!("{error:#}")))
 }
 
 /// Stable shape of the host shutdown report, without re-exporting peri-acp types.
@@ -161,9 +201,7 @@ impl AcpChild {
             _ => provider,
         };
 
-        let resources = Resources::open_deployment(&config.session_store)
-            .await
-            .map_err(|error| ChildError::Local(error.to_string()))?;
+        let resources = open_session_resources(&config).await?;
         let (session_resources, session_store_shutdown) = resources.into_parts();
 
         let host_config = assemble_server_config_with_capabilities(
@@ -543,3 +581,7 @@ async fn read_loop(client: Arc<MpscClientTransport>, log: Arc<ItemLog>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_test.rs"]
+mod tests;

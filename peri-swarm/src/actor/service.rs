@@ -30,7 +30,9 @@ use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 use super::reader::{ItemLog, TurnOutcome};
-use super::runtime::{local_session_store, AcpChild, ChildConfig, ChildError, ChildShutdown};
+use super::runtime::{
+    local_session_store, AcpChild, ChildConfig, ChildError, ChildShutdown, SessionStoreDeployment,
+};
 use crate::domain::{
     new_root_session_id, ActorKey, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
     ErrorKind, InputKind, InputMode, InputOutcome, InputState, InputSubmission, ItemOrder,
@@ -60,8 +62,17 @@ pub struct ActorServiceConfig {
     /// deployment configuration, never from a request.
     pub settings_json: Option<String>,
     /// Local Peri session store used by the host. `None` uses the deployment
-    /// default (`~/.peri/threads/threads.db`).
+    /// default (`~/.peri/threads/threads.db`). Ignored when
+    /// [`Self::session_store`] is set.
     pub session_store_path: Option<PathBuf>,
+    /// Remote Peri session store for the child hosts (S6b). When set, a child
+    /// opens this deployment remotely (`design §4.1`); it never falls back to
+    /// the local SQLite file.
+    pub session_store: Option<SessionStoreDeployment>,
+    /// Stable machine UUID required by the remote/virtual-workspace open.
+    pub machine_id: Option<Uuid>,
+    /// Absolute, normalized virtual workspace root for the remote open.
+    pub workspace_root: Option<PathBuf>,
     /// Deployment default model. A request that names a different model is
     /// rejected: one model per actor (`design §0.4-3`).
     pub model: Option<String>,
@@ -73,6 +84,9 @@ impl Default for ActorServiceConfig {
         Self {
             settings_json: None,
             session_store_path: None,
+            session_store: None,
+            machine_id: None,
+            workspace_root: None,
             model: None,
             channel_capacity: 256,
         }
@@ -553,10 +567,17 @@ impl AcpSwarmService {
             Arc::clone(&self.store),
             channel.clone(),
         ));
+        let session_store = self
+            .config
+            .session_store
+            .clone()
+            .unwrap_or_else(|| local_session_store(self.config.session_store_path.clone()));
         let child = AcpChild::spawn(
             ChildConfig {
                 cwd: command.cwd.clone(),
-                session_store: local_session_store(self.config.session_store_path.clone()),
+                session_store,
+                machine_id: self.config.machine_id,
+                workspace_root: self.config.workspace_root.clone(),
                 settings_json: self.config.settings_json.clone(),
                 model,
                 instructions: command.instructions.clone(),

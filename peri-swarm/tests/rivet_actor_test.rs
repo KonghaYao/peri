@@ -337,6 +337,9 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
         ActorServiceConfig {
             settings_json: Some(settings_json(&base_url)),
             session_store_path: Some(session_store),
+            session_store: None,
+            machine_id: None,
+            workspace_root: None,
             model: None,
             channel_capacity: 512,
         },

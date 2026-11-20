@@ -7,9 +7,10 @@
 //! [`ActorDeployment`].
 //!
 //! S5 ships [`StaticDeployment`] over a shared [`SwarmStore`] (a
-//! [`crate::store::MemorySwarmStore`] in tests and local development). S6
-//! replaces the store with the Loom-backed port from `bootstrap`; the trait and
-//! the install point stay the same.
+//! [`crate::store::MemorySwarmStore`] in tests and local development). S6b
+//! installs the same deployment with a [`crate::store::RemoteSwarmStore`] and
+//! an [`ActorServiceConfig`] that carries the remote session-store deployment;
+//! the trait and the install point stay the same.
 
 use std::sync::{Arc, OnceLock};
 

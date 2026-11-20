@@ -113,6 +113,30 @@ async fn create_session(harness: &Harness, body: Value) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
+async fn healthz_is_unauthenticated_and_session_routes_stay_gated() {
+    let harness = harness();
+
+    // The process entry's liveness probe carries no contract header and no
+    // bearer: it must not require either, and must not open a session path.
+    let (status, _, value) = send(&harness.router, Method::GET, "/healthz", None, None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value, json!({ "status": "ok" }));
+
+    // Adding the probe must not widen the session surface.
+    let (status, _, value) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01",
+        None,
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(value["error"]["code"], json!("unauthorized"));
+}
+
+#[tokio::test]
 async fn missing_or_wrong_bearer_is_401_with_contract_header() {
     let harness = harness();
     let body = json!({ "logicalId": "agent-01" });

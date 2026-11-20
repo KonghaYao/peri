@@ -62,8 +62,13 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+/// Build the gateway router.
+///
+/// `/healthz` is the one route outside the contract/bearer gate: a supervisor
+/// must be able to probe the listener without a deployment secret, and the
+/// response is a constant that contains no session fact (S6b).
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let sessions = Router::new()
         .route("/v1/agents/sessions", post(handlers::create_session))
         .route(
             "/v1/agents/sessions/{logical_id}",
@@ -78,6 +83,9 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_items),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(middleware::from_fn_with_state(state.clone(), auth::guard))
+        .layer(middleware::from_fn_with_state(state.clone(), auth::guard));
+    Router::new()
+        .route("/healthz", get(handlers::healthz))
+        .merge(sessions)
         .with_state(state)
 }

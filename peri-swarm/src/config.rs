@@ -154,7 +154,7 @@ impl SwarmConfig {
 
         let session_store = SessionStoreConfig {
             locator: match lookup(STORE_LOCATOR_ENV) {
-                Some(value) => Some(validate_store_locator(&value)?),
+                Some(value) => Some(validate_store_locator(&value, STORE_LOCATOR_ENV)?),
                 None => None,
             },
             engine: "turso".to_owned(),
@@ -220,18 +220,24 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, ConfigError> {
     Ok(canonical)
 }
 
-fn validate_store_locator(value: &str) -> Result<Url, ConfigError> {
-    let url =
-        Url::parse(value).map_err(|_| ConfigError::invalid(STORE_LOCATOR_ENV, "expected a URL"))?;
+/// Remote session-store locator: HTTP(S), no embedded credentials.
+///
+/// `variable` names the source in errors so the process entry can reuse the
+/// rule for its own environment names without forking the check.
+pub(crate) fn validate_store_locator(
+    value: &str,
+    variable: &'static str,
+) -> Result<Url, ConfigError> {
+    let url = Url::parse(value).map_err(|_| ConfigError::invalid(variable, "expected a URL"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(ConfigError::invalid(
-            STORE_LOCATOR_ENV,
+            variable,
             "scheme must be http or https",
         ));
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ConfigError::invalid(
-            STORE_LOCATOR_ENV,
+            variable,
             "embedded credentials are not allowed; use the credential env var",
         ));
     }
@@ -275,7 +281,7 @@ fn validate_bun_url(value: &str) -> Result<Url, ConfigError> {
     Ok(url)
 }
 
-fn optional_non_empty(
+pub(crate) fn optional_non_empty(
     value: Option<String>,
     variable: &'static str,
 ) -> Result<Option<String>, ConfigError> {
@@ -287,7 +293,7 @@ fn optional_non_empty(
     }
 }
 
-fn optional_env_name(
+pub(crate) fn optional_env_name(
     value: Option<String>,
     variable: &'static str,
 ) -> Result<Option<String>, ConfigError> {
@@ -305,7 +311,7 @@ fn optional_env_name(
     }
 }
 
-fn is_env_var_name(value: &str) -> bool {
+pub(crate) fn is_env_var_name(value: &str) -> bool {
     let mut chars = value.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}

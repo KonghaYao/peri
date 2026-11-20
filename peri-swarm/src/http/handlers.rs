@@ -10,6 +10,13 @@ use super::{sse, AppState};
 use crate::domain::{resolve_cwd, CreateSessionResponse, LogicalId, SwarmError};
 use crate::service::CreateSessionCommand;
 
+/// Process liveness for the bootstrap entry (S6b). Deliberately constant: it
+/// does not touch the store, so a green probe means "the gateway is listening",
+/// not "the upstream deployment works".
+pub async fn healthz() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+}
+
 pub async fn create_session(
     State(state): State<AppState>,
     headers: HeaderMap,

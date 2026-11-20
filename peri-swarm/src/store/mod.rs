@@ -1,12 +1,14 @@
 //! Persistence port for Swarm-owned facts (`design §4.3`–§4.5).
 //!
-//! S3 ships the trait plus an in-memory fake. The remote Loom implementation is
-//! deferred to S6 and must keep this module the only place that knows
-//! `peri-resources` storage details.
+//! S3 ships the trait plus an in-memory fake. S6b adds [`RemoteSwarmStore`],
+//! which maps the rows onto the remote Loom port from `peri-resources`
+//! (`design §4.1`) and is the only module that sees those port types.
 
 mod memory;
+mod remote;
 
 pub use memory::MemorySwarmStore;
+pub use remote::RemoteSwarmStore;
 
 use async_trait::async_trait;
 use serde_json::Value;

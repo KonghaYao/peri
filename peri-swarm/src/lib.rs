@@ -7,11 +7,13 @@
 //!   ACP 实现同一端口。
 //! - [`actor::swarm`] + [`gateway`]：S5 的 Rivet actor 与网关适配器；actor 持有
 //!   会话，网关只做 `logicalId → rootSessionId` 路由与 SSE 转发。
+//! - [`bootstrap`]：S6b 的进程入口（远端 Loom 存储、部署注入、registry + axum）。
 //!
 //! 证据边界：内存 fake 只证明协议与顺序契约，不代表真实 Peri 执行、Loom 持久化或
 //! Rivet 路由行为。真实接线以设计文档 `.peri/plans/peri-swarm-impl.md` 的 S5-S9 为准。
 
 pub mod actor;
+pub mod bootstrap;
 pub mod config;
 pub mod domain;
 mod event_stream;
@@ -24,4 +26,4 @@ pub use config::{ConfigError, SwarmConfig};
 pub use domain::{ErrorCode, ItemPage, ItemView, LogicalId, SessionView, StreamEvent, SwarmError};
 pub use http::{build_router, AppState};
 pub use service::{InMemorySwarmService, SwarmService};
-pub use store::{MemorySwarmStore, SwarmStore};
+pub use store::{MemorySwarmStore, RemoteSwarmStore, SwarmStore};

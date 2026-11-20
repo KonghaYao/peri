@@ -7,9 +7,10 @@ description = "Peri Swarm gateway — HTTP session contract, SSE events, and typ
 
 [dependencies]
 peri-time = { path = "../peri-time" }
-# S4 runtime boundary: only `src/actor/runtime.rs` may import `peri-acp` /
-# `peri-acp-types` / `peri-agent` (design §1.2). The rest of the crate consumes
-# this module's own types.
+# S4 runtime boundary: only `src/actor/runtime.rs`, `src/store/remote.rs` and
+# the `bootstrap` process entry may import `peri-acp` / `peri-acp-types` /
+# `peri-resources` (design §1.2). The rest of the crate consumes their own
+# types: `store` owns the persistence port, `bootstrap` owns the process store.
 peri-acp = { path = "../peri-acp" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-resources = { path = "../peri-resources" }
@@ -27,14 +28,17 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+# The process entry (`src/main.rs`) serves axum on a multi-thread runtime and
+# waits for SIGINT; the library keeps the workspace's minimal feature set.
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal"] }
+# `bootstrap` shares one CancellationToken between the gateway and the registry.
+tokio-util.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio-util.workspace = true
-tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tower.workspace = true

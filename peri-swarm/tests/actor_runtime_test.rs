@@ -353,6 +353,9 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
         ActorServiceConfig {
             settings_json: Some(settings_json(&base_url)),
             session_store_path: Some(session_store_path(&tmp)),
+            session_store: None,
+            machine_id: None,
+            workspace_root: None,
             model: None,
             channel_capacity: 512,
         },
@@ -786,6 +789,8 @@ async fn idle_mq_dispatch_produces_a_turn() {
                 session_store_path(&tmp),
             )),
             settings_json: Some(settings_json(&base_url)),
+            machine_id: None,
+            workspace_root: None,
             model: None,
             instructions: None,
             root_session_id: uuid(40),
@@ -843,6 +848,9 @@ async fn model_unavailable_is_a_diagnosable_error() {
             // *what* is missing (never a credential value).
             settings_json: Some(json!({ "config": {} }).to_string()),
             session_store_path: Some(session_store_path(&tmp)),
+            session_store: None,
+            machine_id: None,
+            workspace_root: None,
             model: None,
             channel_capacity: 16,
         },
