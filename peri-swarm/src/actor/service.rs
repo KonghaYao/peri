@@ -163,6 +163,9 @@ pub struct AcpSwarmService {
     /// Serializes `create_session` so two concurrent creates cannot reserve two
     /// hosts for the same logical id.
     create_lock: AsyncMutex<()>,
+    /// Serializes `ensure_live` so concurrent interactions after a host restart
+    /// attach one host, not one per action.
+    attach_lock: AsyncMutex<()>,
 }
 
 impl std::fmt::Debug for AcpSwarmService {
@@ -183,6 +186,7 @@ impl AcpSwarmService {
             sessions: Mutex::new(HashMap::new()),
             channels: Mutex::new(HashMap::new()),
             create_lock: AsyncMutex::new(()),
+            attach_lock: AsyncMutex::new(()),
         }
     }
 
@@ -216,6 +220,149 @@ impl AcpSwarmService {
             .get(logical_id.as_str())
             .cloned()
             .ok_or_else(|| SwarmError::unknown_agent(logical_id.as_str()))
+    }
+
+    /// Restore a live ACP host for a persisted session after the Rust host was
+    /// killed and restarted (S9a4b).
+    ///
+    /// `Ok(false)` means no session row exists: recovery must not create an
+    /// identity for an unknown id. An idle row is attached with
+    /// `session/load` (persisted root id + `cwd` + `mcpServers`); no turn is
+    /// prompted, no queued input is replayed, and `session/resume` is never
+    /// called. A row whose recorded turn was still running is refused as
+    /// `session_resume_required`, because resuming an interrupted turn is a
+    /// separate recovery path this stage does not implement.
+    pub async fn ensure_live(&self, logical_id: &LogicalId) -> Result<bool, SwarmError> {
+        if self.is_live(logical_id) {
+            return Ok(true);
+        }
+        let _attach = self.attach_lock.lock().await;
+        if self.is_live(logical_id) {
+            return Ok(true);
+        }
+        let Some(row) = self
+            .store
+            .swarm_get_session(logical_id.as_str())
+            .await
+            .map_err(|error| store_failure("get_session", error))?
+        else {
+            return Ok(false);
+        };
+        if row.state == SessionState::Running {
+            tracing::warn!(
+                logical_id = logical_id.as_str(),
+                "swarm session row still records an unfinished turn"
+            );
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
+        }
+        let model = self.resolve_model(row.model.as_deref())?;
+        let workspace = self.reattach_workspace(&row).await?;
+        let channel = self.channel_for(logical_id.as_str());
+        let log = Arc::new(ItemLog::new(
+            logical_id.as_str(),
+            Arc::clone(&self.store),
+            channel.clone(),
+        ));
+        let session_store = self
+            .config
+            .session_store
+            .clone()
+            .unwrap_or_else(|| local_session_store(self.config.session_store_path.clone()));
+        let child = AcpChild::attach(
+            ChildConfig {
+                cwd: PathBuf::from(&row.cwd),
+                session_store,
+                machine_id: self.config.machine_id,
+                workspace_root: self.config.workspace_root.clone(),
+                settings_json: self.config.settings_json.clone(),
+                model,
+                instructions: row.instructions.clone(),
+                mcp_tools: row.mcp_tools.clone(),
+                workspace,
+                root_session_id: row.root_session_id.clone(),
+            },
+            log.clone(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                logical_id = logical_id.as_str(),
+                root_session_id = %row.root_session_id,
+                error = %error,
+                "swarm ACP reattach failed"
+            );
+            child_error(error)
+        })?;
+        if child.session_id() != row.root_session_id {
+            let shutdown = child.shutdown().await;
+            tracing::warn!(
+                logical_id = logical_id.as_str(),
+                expected = %row.root_session_id,
+                report = shutdown.report,
+                "session/load returned a different session identity"
+            );
+            return Err(SwarmError::upstream_unavailable("session_id_mismatch"));
+        }
+        let runtime = Arc::new(SessionRuntime::new(Arc::new(child), log, channel));
+        self.sessions
+            .lock()
+            .insert(row.logical_id, Arc::clone(&runtime));
+        tracing::info!(
+            logical_id = logical_id.as_str(),
+            root_session_id = %row.root_session_id,
+            "swarm reattached the persisted session"
+        );
+        Ok(true)
+    }
+
+    /// Rebuild the internal workspace binding from the stored row (S9a4b).
+    ///
+    /// The store binding is checked first: a missing binding must fail instead
+    /// of reserving a fresh environment, which would silently move an old
+    /// session onto a new workspace. `reserve` is the lazy Bun call; it reuses
+    /// the running sandbox (same `runId`) and never starts SRT by itself.
+    async fn reattach_workspace(
+        &self,
+        row: &SwarmSessionRow,
+    ) -> Result<Option<SandboxMcpBinding>, SwarmError> {
+        if row.environment.kind == EnvironmentKind::None {
+            return Ok(None);
+        }
+        let Some(env_id) = row.environment.id.as_deref() else {
+            return Err(SwarmError::upstream_unavailable("sandbox_binding_missing"));
+        };
+        let bound = self
+            .store
+            .swarm_get_binding(env_id)
+            .await
+            .map_err(|error| store_failure("get_binding", error))?
+            .ok_or_else(|| SwarmError::upstream_unavailable("sandbox_binding_missing"))?;
+        let client = self.config.sandbox.as_ref().ok_or_else(|| {
+            SwarmError::new(
+                ErrorKind::Unavailable,
+                ErrorCode::UpstreamUnavailable,
+                "openai_hosted requires the Bun sandbox bridge",
+            )
+            .with_details(json!({
+                "field": "environment",
+                "operation": "sandbox_bridge_unconfigured",
+                "reason": "PERI_SWARM_BUN_BASE_URL is not set",
+            }))
+        })?;
+        let reservation = client.reserve(env_id).await.map_err(sandbox_bridge_error)?;
+        let same_sandbox = reservation.binding.sandbox_id == bound.sandbox_id;
+        let same_workspace = reservation.binding.workspace_path.as_os_str()
+            == std::ffi::OsStr::new(&bound.workspace_path);
+        if !same_sandbox || !same_workspace {
+            tracing::warn!(
+                logical_env_id = env_id,
+                stored_sandbox = %bound.sandbox_id,
+                bridge_sandbox = %reservation.binding.sandbox_id,
+                "swarm reattach refused a changed sandbox binding"
+            );
+            return Err(SwarmError::upstream_unavailable("sandbox_binding_changed"));
+        }
+        Ok(Some(reservation.binding))
     }
 
     async fn require_row(&self, logical_id: &LogicalId) -> Result<SwarmSessionRow, SwarmError> {
@@ -790,16 +937,19 @@ impl SwarmService for AcpSwarmService {
                 .with_details(json!({ "configured": row.model, "requested": model })));
             }
             check_environment_identity(&row.environment, &command)?;
-            let runtime = self.runtime(&command.logical_id).map_err(|_| {
-                // Cross-process/agent recovery (`session/load` into a fresh
-                // child) belongs to S5/S6; S4 must not pretend the session is
-                // live when no host owns it.
+            // A host restart leaves the row but no in-process child; attach it
+            // with the persisted identity before running an initial input
+            // (`design §6.4-2`, S9a4b). `ensure_live` never prompts or replays.
+            if !self.ensure_live(&command.logical_id).await? {
                 tracing::warn!(
                     logical_id = command.logical_id.as_str(),
-                    "session row exists without a live in-process host"
+                    "session row disappeared during reattach"
                 );
-                SwarmError::upstream_unavailable("session_not_live")
-            })?;
+                return Err(SwarmError::upstream_unavailable("session_not_live"));
+            }
+            let runtime = self
+                .runtime(&command.logical_id)
+                .map_err(|_| SwarmError::upstream_unavailable("session_not_live"))?;
             if let Some(text) = command.initial_input.as_deref() {
                 self.run_turn(&runtime, text).await?;
             }

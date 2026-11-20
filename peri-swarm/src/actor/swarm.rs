@@ -150,9 +150,12 @@ impl SwarmActor {
     }
 
     /// S5 recovery boundary: a rebuilt actor restores a read-only view but owns
-    /// no ACP host. A turn against an existing row must fail as `503` instead of
-    /// the host-less service's `404 unknown_agent`. Re-attaching a live host is
-    /// the S6/S9 gap.
+    /// no ACP host until the first interaction. `ensure_live` attaches the
+    /// persisted session with `session/load` (S9a4b); this check then only
+    /// covers the remaining host-less cases (no row yet, or an attach that
+    /// deliberately did not run) and keeps the error a `502`
+    /// `session_not_live` instead of the host-less service's `404
+    /// unknown_agent`.
     async fn host_less_error(&self, logical_id: &LogicalId) -> Option<SwarmError> {
         if self.service.is_live(logical_id) {
             return None;
@@ -661,6 +664,12 @@ impl Handler<Submit> for SwarmActor {
             Ok(logical_id) => logical_id,
             Err(error) => return Ok(envelope(Err(error))),
         };
+        // A rebuilt actor holds only the read-only view. The first turn is the
+        // interaction that reattaches the persisted session (`session/load`,
+        // no prompt and no queued-input replay).
+        if let Err(error) = self.service.ensure_live(&logical_id).await {
+            return Ok(envelope(Err(error)));
+        }
         if let Some(error) = self.host_less_error(&logical_id).await {
             return Ok(envelope(Err(error)));
         }

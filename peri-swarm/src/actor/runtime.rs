@@ -259,16 +259,42 @@ fn session_new_params(
     tools: &[McpToolSpec],
 ) -> Value {
     let mut params = json!({ "cwd": cwd, "_meta": meta });
+    let servers = mcp_servers(workspace, tools);
+    if !servers.is_empty() {
+        params["mcpServers"] = Value::Array(servers);
+    }
+    params
+}
+
+/// `session/load` parameters for a persisted session (S9a4b reattach).
+///
+/// Initial load is the only ACP entry that restores an existing session into a
+/// fresh host; `cwd` and `mcpServers` are the setup fields that make the
+/// restored environment executable again (`peri-acp-protocol §2.1`). The
+/// session id is the persisted root id, not a new one: reattach must not mint
+/// a second identity.
+fn session_load_params(
+    cwd: &str,
+    root_session_id: &str,
+    workspace: Option<&SandboxMcpBinding>,
+    tools: &[McpToolSpec],
+) -> Value {
+    let mut params = json!({ "sessionId": root_session_id, "cwd": cwd });
+    let servers = mcp_servers(workspace, tools);
+    if !servers.is_empty() {
+        params["mcpServers"] = Value::Array(servers);
+    }
+    params
+}
+
+fn mcp_servers(workspace: Option<&SandboxMcpBinding>, tools: &[McpToolSpec]) -> Vec<Value> {
     let mut servers: Vec<Value> =
         Vec::with_capacity(tools.len() + usize::from(workspace.is_some()));
     if let Some(binding) = workspace {
         servers.push(workspace_mcp_entry(binding));
     }
     servers.extend(tools.iter().map(mcp_server_entry));
-    if !servers.is_empty() {
-        params["mcpServers"] = Value::Array(servers);
-    }
-    params
+    servers
 }
 
 /// One spawned host + negotiated session + its reader task.
@@ -296,6 +322,25 @@ impl AcpChild {
     /// `_meta["peri.rootSessionId"]`; the host therefore owns the identity the
     /// Swarm row was written with (S1).
     pub async fn spawn(config: ChildConfig, log: Arc<ItemLog>) -> Result<Self, ChildError> {
+        Self::build(config, log, false).await
+    }
+
+    /// Assemble a host and attach it to the **persisted** session id (S9a4b).
+    ///
+    /// This is `initialize` → `session/load` with the stored root id, `cwd` and
+    /// `mcpServers`. Load restores the session and replays history; it does not
+    /// run a turn, execute a queued input, or mint a new identity. Replay
+    /// notifications are dropped by [`super::projection`], so `swarm_items`
+    /// stays the single record.
+    pub async fn attach(config: ChildConfig, log: Arc<ItemLog>) -> Result<Self, ChildError> {
+        Self::build(config, log, true).await
+    }
+
+    async fn build(
+        config: ChildConfig,
+        log: Arc<ItemLog>,
+        attach: bool,
+    ) -> Result<Self, ChildError> {
         let cwd = config.cwd.to_string_lossy().into_owned();
         let source = build_config_source(&config)?;
         let peri_config = source.loaded_merged();
@@ -372,29 +417,51 @@ impl AcpChild {
             return Err(shutdown);
         }
 
-        let mut meta = json!({ "peri.rootSessionId": config.root_session_id });
-        if let Some(instructions) = config.instructions.as_deref() {
-            meta["peri.instructions"] = json!(instructions);
-        }
-        let response = match client
-            .send_request(
+        let (method, params) = if attach {
+            (
+                "session/load",
+                session_load_params(
+                    &cwd,
+                    &config.root_session_id,
+                    config.workspace.as_ref(),
+                    &config.mcp_tools,
+                ),
+            )
+        } else {
+            let mut meta = json!({ "peri.rootSessionId": config.root_session_id });
+            if let Some(instructions) = config.instructions.as_deref() {
+                meta["peri.instructions"] = json!(instructions);
+            }
+            (
                 "session/new",
                 session_new_params(&cwd, meta, config.workspace.as_ref(), &config.mcp_tools),
             )
-            .await
-        {
+        };
+        let response = match client.send_request(method, params).await {
             Ok(response) => response,
             Err(error) => return Err(child.finish(Err(ChildError::rpc(error))).await),
         };
-        let Some(session_id) = response.get("sessionId").and_then(Value::as_str) else {
-            return Err(child
-                .finish(Err(ChildError::Local(
-                    "session/new returned no sessionId".to_owned(),
-                )))
-                .await);
+        let session_id = match response.get("sessionId").and_then(Value::as_str) {
+            Some(session_id) => session_id.to_owned(),
+            None if attach => config.root_session_id.clone(),
+            None => {
+                return Err(child
+                    .finish(Err(ChildError::Local(format!(
+                        "{method} returned no sessionId"
+                    ))))
+                    .await)
+            }
         };
+        if attach && session_id != config.root_session_id {
+            return Err(child
+                .finish(Err(ChildError::Local(format!(
+                    "{method} returned session id {session_id} instead of the persisted {}",
+                    config.root_session_id
+                ))))
+                .await);
+        }
         let mut child = child;
-        child.session_id = session_id.to_owned();
+        child.session_id = session_id;
         Ok(child)
     }
 

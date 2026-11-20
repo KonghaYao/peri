@@ -56,7 +56,9 @@ use serde_json::json;
 use crate::domain::{McpHeader, McpToolKind, McpToolSpec};
 use crate::sandbox::SandboxMcpBinding;
 
-use super::{session_new_params, META_ALLOWED_TOOLS, META_EXTRA, META_REQUIRE_APPROVAL};
+use super::{
+    session_load_params, session_new_params, META_ALLOWED_TOOLS, META_EXTRA, META_REQUIRE_APPROVAL,
+};
 
 fn declared_tools() -> Vec<McpToolSpec> {
     let mut extra = serde_json::Map::new();
@@ -194,5 +196,58 @@ fn a_workspace_binding_without_outer_token_omits_authorization() {
             "headers": [],
             "_meta": {"peri.swarmSandbox": true},
         }])
+    );
+}
+
+// ── S9a4b: `session/load` reattach wire shape ───────────────────────────────
+
+#[test]
+fn reattach_loads_the_persisted_id_with_the_same_servers_and_no_new_meta() {
+    let binding = SandboxMcpBinding {
+        logical_env_id: "env_03".to_owned(),
+        sandbox_id: "sbx_0123456789abcdef0123456789abcdef".to_owned(),
+        workspace_path: std::path::PathBuf::from("/tmp/sandbox/workspace"),
+        mcp_url: "http://127.0.0.1:8081/sandboxes/env_03/mcp".to_owned(),
+        token: Some("outer-secret".to_owned()),
+    };
+    let params = session_load_params(
+        "/tmp/ws",
+        "0192f0c4-0000-7000-8000-000000000002",
+        Some(&binding),
+        &declared_tools(),
+    );
+
+    assert_eq!(
+        params["sessionId"],
+        json!("0192f0c4-0000-7000-8000-000000000002"),
+        "reattach must reuse the persisted root session id"
+    );
+    assert_eq!(params["cwd"], json!("/tmp/ws"));
+    assert_eq!(
+        params.get("_meta"),
+        None,
+        "session/load has no rootSessionId/instructions meta: identity comes from sessionId"
+    );
+    let servers = params["mcpServers"].as_array().expect("mcpServers");
+    assert_eq!(servers.len(), 3);
+    assert_eq!(servers[0]["name"], json!("workspace"));
+    assert_eq!(
+        servers[0]["_meta"],
+        json!({"peri.swarmSandbox": true}),
+        "the internal workspace entry is rebuilt identically"
+    );
+    assert_eq!(servers[1]["name"], json!("deepwiki"));
+    assert_eq!(servers[2]["name"], json!("plain"));
+}
+
+#[test]
+fn reattach_without_servers_keeps_the_load_request_minimal() {
+    let params = session_load_params("/tmp/ws", "0192f0c4-0000-7000-8000-000000000002", None, &[]);
+    assert_eq!(
+        params,
+        json!({
+            "sessionId": "0192f0c4-0000-7000-8000-000000000002",
+            "cwd": "/tmp/ws",
+        })
     );
 }

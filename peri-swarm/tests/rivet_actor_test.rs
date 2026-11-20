@@ -628,7 +628,10 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
         recovery.last_item_seq, max_seq,
         "on_start restores MAX(seq) from the store"
     );
-    assert!(!recovered.live, "S5 does not reattach a live ACP host");
+    assert!(
+        !recovered.live,
+        "a rebuilt actor restores only the read-only view (no host before the first turn)"
+    );
 
     let service = RivetSwarmService::new(
         served.client.clone(),
@@ -689,12 +692,71 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
     assert_eq!(replayed.len(), page_after.items.len());
     assert!(is_strictly_increasing(&replayed));
 
-    // No live host: a turn must fail visibly instead of pretending to run.
-    let rejected = service
+    // S9a4b: the first turn after the rebuild attaches the persisted session
+    // (`session/load`), then runs exactly that one new turn. History replay is
+    // not projected into `swarm_items`, so the old items stay byte-identical
+    // and the new items append after them.
+    let before_reattach: Vec<(u64, String)> = page_after
+        .items
+        .iter()
+        .map(|item| (item.seq, item.item_id.clone()))
+        .collect();
+    let resumed = service
         .submit_input(&logical_a, user_input("input-3", "after rebuild"))
         .await
-        .expect_err("no live ACP host after the rebuild");
-    assert_eq!(rejected.code(), ErrorCode::UpstreamUnavailable);
+        .expect("the first turn after the rebuild reattaches the persisted session");
+    assert_eq!(resumed.disposition, Disposition::Inserted);
+    assert_eq!(
+        stub.main_calls(),
+        3,
+        "the reattached turn reached the model exactly once"
+    );
+    let live_after_reattach = served
+        .handle(logical_a.as_str())
+        .send(Info {})
+        .await
+        .expect("info after reattach");
+    assert!(
+        live_after_reattach.live,
+        "the interaction attached a live host"
+    );
+    let page_after_reattach = service
+        .list_items(
+            &logical_a,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                limit: ItemsWindow::MAX_LIMIT,
+            },
+        )
+        .await
+        .expect("items after reattach");
+    assert_eq!(
+        page_after_reattach
+            .items
+            .iter()
+            .take(before_reattach.len())
+            .map(|item| (item.seq, item.item_id.clone()))
+            .collect::<Vec<_>>(),
+        before_reattach,
+        "session/load replay must not duplicate or renumber persisted items"
+    );
+    assert!(
+        page_after_reattach.items.len() > before_reattach.len(),
+        "the reattached turn appended new items"
+    );
+    let last_text = page_after_reattach
+        .items
+        .iter()
+        .rev()
+        .find(|item| item.kind == ItemKind::Message && item.payload["complete"] == true)
+        .and_then(|item| item.payload["text"].as_str())
+        .unwrap_or_default();
+    assert_eq!(
+        last_text,
+        format!("{TURN_PREFIX}2"),
+        "the third model call belongs to the reattached turn"
+    );
 
     // Identity check: an unknown logicalId still has no session row.
     let missing = service

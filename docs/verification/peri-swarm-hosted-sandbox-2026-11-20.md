@@ -1090,3 +1090,173 @@ git status                       仅本阶段脚本/实现/本节记录
   Loom 项目 key 只从 connection 文件读入进程环境。
 
 
+
+## 14. S9a4b：只杀 Rust 宿主后的会话恢复
+
+- 基线：`176040715`（S1..S9a4a）
+- 驱动：`peri-swarm/scripts/sdk_restart_boundary_e2e.mjs`（新，模式
+  `prepare` / `pre-kill` / `after-restart` / `probe`）
+- 运行目录：`/private/tmp/peri-swarm-s9a4b/`；原始 JSON
+  `logs/r6-*.json`、`round1/after-restart.json` 与服务日志同目录，不入库。
+- 本阶段 Rust 改动：`AcpChild::attach`（`initialize` → `session/load`）与
+  `AcpSwarmService::ensure_live`；未改 Bun、Loom 与模型 stub。
+
+### 14.1 场景
+
+```text
+Loom 9497（demo / swarm 双库）
+Bun 8081（真实 SRT，PERI_PATH=target/debug/peri，PERI_SWARM_IDLE_MS=0）
+模型 stub 9496（PERI_STUB_COMMANDS={"once":"printf 'once\n' >> ran.log; printf 'once\n' > once.txt"}）
+网关 18080（target/debug/peri-swarm，Rivet engine 6420）
+```
+
+1. 创建 `openai_hosted` 会话，跑一轮工具调用（`ran.log` 恰好追加一行）；
+2. 记录会话视图、全部 items 页、Bun `runId`、SRT 进程组、`ran.log` 的
+   bytes/sha256/mtime、stub 计数与 Bun 日志指纹；
+3. `kill -9 <peri-swarm pid>`，保留 Loom、Bun、SRT、stub 与 Rivet engine；
+4. 用同一环境重启 `peri-swarm`；
+5. 只做历史读取（`GET /agents/sessions/{id}` 与分页 `GET /items`），再
+   `POST /events` 发一条**纯文本**输入（无工具指令）；
+6. 对照重启前的 items、runId、进程组、文件与 Bun 日志。
+
+### 14.2 实现（最小 reattach）
+
+| 位置 | 行为 |
+| --- | --- |
+| `actor/runtime.rs` `AcpChild::attach` | 同一套 host 装配 + `initialize`，然后 `session/load`（不带 `cursor`） |
+| `session_load_params` | `{sessionId: 持久 root id, cwd, mcpServers[]}`；workspace 条目与 caller 工具条目和 `session/new` 完全一致，不写 `_meta`（身份只来自 `sessionId`） |
+| `actor/service.rs` `ensure_live` | 无行 → `Ok(false)`；`state=running` → `502 session_resume_required`；idle → 重建 host 并登记，`attach_lock` 串行化并发交互 |
+| `reattach_workspace` | 先读 `swarm_get_binding`（缺失即失败，不新建环境），再 Bun 懒 `reserve`；sandboxId/workspacePath 变化 → `sandbox_binding_changed` |
+| `actor/swarm.rs` `Submit` | 首个 turn 前调用 `ensure_live`；`GET` 仍是只读，不 reattach |
+| `actor/service.rs` `create_session` | 已有行且无 host 时同样 reattach，再执行可选 `initial_input` |
+
+禁止项保持不变：不调用 `session/resume`、不 prompt、不重放 MQ 输入、不把
+`session/load` 的回放帧写入 `swarm_items`（projection 的 `periReplay` 过滤）、
+不为旧行新建 root id，也不在 binding 丢失时静默换 workspace。
+
+### 14.3 重启前边界（实现前，pre-change binary）
+
+会话 `agent-01a1fa41-4de7-7ce2-b843-4dea20a3101c`，
+root `01a1fa41-4df2-78c1-aa6b-706e1f050b7b`，env
+`env_01a1fa41-4e40-7ba2-ab6f-47683aac7162`，sandbox
+`sbx_1befdb5a8386818117b3d2445aec9ab2`，`runId=run_26f04ac4bbe5e4247f98c291`，
+SRT pgid `3817`。
+
+```text
+18:39:16.3Z  kill -9 3059              # 只杀 peri-swarm；18080 关闭
+18:39:21.7Z  新 peri-swarm (4558) listening
+18:39:32.9Z  on_start: restored a read-only view（last_item_seq=8, state=Idle）
+18:39:33.x   POST /events → 502 upstream_unavailable, details.operation=session_not_live
+```
+
+| 检查 | 结果 |
+| --- | --- |
+| `GET /agents/sessions/{id}` | `200`，同 id/rootSessionId/environment，`state=idle`、`lastItemSeq=8` |
+| `GET /items`（limit=3） | 页 1-3 → cursor 3；4-6 → 6；7-8 → `null`；与重启前逐项相同 |
+| sandbox `runId` / SRT 进程组 | `run_26f04…` / pgid 3817，均未变化 |
+| `ran.log` | sha256 `ad06e727…`、mtime 未变、1 行 |
+| stub 计数 | `mainCalls=2`、`toolCalls=1`，未变 |
+| 新输入 | **502**（S5 记录为 503；当前 `upstream_unavailable` 映射 `ErrorKind::BadGateway` → 502），`session_not_live` |
+
+该轮证明“只读历史可读、输入仍拒绝”的既有边界，也暴露文档中的 503 与实际
+502 的差异；驱动已按实际响应接受 502/503 并保留 `operation=session_not_live`。
+
+### 14.4 恢复后（实现，最终轮）
+
+会话 `agent-01a1fa4c-08a7-7690-9574-3cb8caf40898`，
+root `01a1fa4c-08b2-7063-ba19-d26862280f9a`，env
+`env_01a1fa4c-08f5-7320-8ae5-de3e33ed0f47`，sandbox
+`sbx_8d30a9ee496915ef5082b53c463441cc`，`runId=run_92989567da11223d41ed5bc2`，
+SRT pgid `40762`（pid 40762 SRT CLI、40764 provider）。
+
+```text
+18:50:37.1Z  第一台 peri-swarm (40041) listening；prepare 完成
+18:50:56.5Z  Bun 日志最后一次变化（pre-kill 指纹 1107 bytes，
+             sha256 bf9814a6…）；runId/pgid/文件均与 prepare 相同
+18:50:59.3Z  kill -9 40041            # 只杀 peri-swarm
+18:51:00.3Z  Bun 32081 / stub 32189 / Loom 36500 / Rivet 3135 仍在监听
+18:51:0x    新 peri-swarm (41524) listening
+18:51:14.6Z  on_start: restored a read-only view（last_item_seq=8, state=Idle）
+18:51:16.0Z  session/load 完成：reattached the persisted session
+18:51:17.9Z  新 turn `completed`（requestId 01a1fa4c-7114-7680-8cb7-d7286065a773）
+```
+
+重启后、任何会话 GET 之前 Bun 日志为 `1107 bytes`；完成
+`GET session` + 5 页 `GET items` 之后仍为 `1107 bytes`。`POST /events` 触发
+reattach 后为 `1334 bytes`（+1 行），即历史读取没有触达 Bun。
+
+| 检查 | 结果 |
+| --- | --- |
+| `GET session` | `200`，同 id/rootSessionId/environment，`state=idle`、`lastItemSeq=8` |
+| `GET items`（3 页） | `[1,2,3]→3`、`[4,5,6]→6`、`[7,8]→null`，seq/itemId/kind 与重启前完全一致 |
+| sandbox | `runId=run_92989567…`、`sandboxId=sbx_8d30a9ee…`、pgid 40762 与 pid 40762/40764 全部不变 |
+| `ran.log` / `once.txt` | sha256 `ad06e727…`、mtime 与 1 行均不变 |
+| stub | `mainCalls=2`、`toolCalls=1`（工具调用仍恰好 1 次，无命令重放） |
+| 新输入 | `202 accepted=true`，SSE `turn: completed`（`end_turn`） |
+| 新 items | seq 9-13 追加（`message`，同一 `itim_01a1fa4c-755a…` 的 delta+complete）；旧 1-8 保持前缀，未重复 |
+| 新 turn 的模型调用 | `mainCalls 2 → 3`（恰好 +1），`toolCalls 1 → 1`；请求含持久历史，但只回复文本 |
+| 新 turn 后进程 | 同一 SRT 进程组 40762，未新增 |
+| Bun 日志 | `1107 → 1107`（历史读取）→ `1334`（reattach 后） |
+
+item 序列（重启前后一致；括号内为 `itemId` 前缀）：
+
+```text
+1-2 tool_call (itim_01a1fa4c-126f / 12c5)
+3   tool_result
+4-8 message    (itim_01a1fa4c-14f4，delta + complete)
+9-13 message   (itim_01a1fa4c-755a，新 turn 的 delta + complete)
+```
+
+### 14.5 未完成项与限制
+
+- **未完成 turn 未恢复**：行 `state=running` 时 `ensure_live` 返回
+  `502 session_resume_required`，没有调用 `session/resume`。按计划 §6.4 的
+  “仅有未完成 turn 证据才 resume”，该分支仍缺失，本记录不声称覆盖崩溃中的
+  turn 续跑。
+- reattach 是**交互触发**：`GET` 不改变状态，只有 `POST /events`（或重复
+  create）会装载 host。计划中的 `state=recovering` 未实现。
+- reattach 会执行 `session/load` 的装配期探测（Bun 日志中可见
+  `resources/list` 等），但不执行任何历史工具调用；`ran.log`/`once.txt`
+  的 sha256 与 mtime 不变是“命令未重放”的直接证据。
+- 首轮（实现前）的 `target/debug/peri-swarm` 在重建时被覆盖，未记录其
+  sha256；边界结论来自该轮 JSON 与 gateway 日志。实现后二进制 sha256
+  `3c518b41d89a3edf235716eed73d653361f39ca4f429b74bd76edff2a0f2b5c0`。
+- 运行期间后台 Loom 包装器到达 10 分钟超时被终止（其子进程一度存活）；
+  最终轮改用新的 `loom2` 运行目录重新启动 Loom。除此之外环境与驱动未变；
+  第 1-4 轮使用 `loom` 目录，最终证据轮使用 `loom2`。
+- 模型仍是确定性 stub；未覆盖并发 reattach、Bun 同时重启、Loom 不可用时的
+  reattach 失败文案与“崩溃时正在执行命令”的中断语义。
+
+### 14.6 teardown
+
+```text
+DELETE /v1/sandboxes/<env>?deleteData=true   # 6 个本阶段 env 全部 deletedData=true
+bindings.json → {"version":1,"bindings":{}}
+~/.peri-swarm/sandboxes → 仅 bindings.json
+```
+
+停止 gateway → Bun → stub → Loom（dev.py + platform + workers）→ Rivet engine。
+端口核对：8080 仍为 OrbStack；8081/9496/9497/6420/18080 无监听；
+无 `peri-swarm`/`sandbox-runtime`/`mcp-start peri`/stub/Loom/Rivet 残留。
+
+### 14.7 门禁
+
+```text
+./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm
+  lib 156；actor_runtime 3；http_contract 19；items_pagination 6；
+  mcp_injection 4；openai_hosted 7；rivet_actor 1；streaming 9；
+  loom_store 3 ignored；0 failed（205 passed）
+
+npm-packages/peri-sandbox
+  bun run build                  ok
+  node --test dist/tests/swarm/*.test.js   37 pass / 0 fail
+  bun run typecheck              ok
+
+./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-swarm --all-targets -- -W clippy::all
+  ok（0 warning）
+cargo fmt --all                 已执行
+lefthook run pre-commit         见提交前运行记录
+```
+
+驱动断言：round1 `after-restart` 19 项只读检查通过（输入按实际 502 记录）；
+round6 `after-restart` 30/30 通过，`prepare` / `pre-kill` 全通过。
