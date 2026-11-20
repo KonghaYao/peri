@@ -149,3 +149,24 @@ settings 缺字段无可读错误、SDK 示例两实参丢 `after`、回放无 `
 --all-targets -D warnings` 通过。**本轮没有重跑** Loom/Rivet/Bun/SRT 的真实端到端
 链路：hosted 会话的真实 SRT 工具调用、真实 Loom 双库与官方 SDK 的实时/回放序列留给
 第三轮 user agent 复验；本轮只以 actor/HTTP 契约测试与 fake host 断言上述行为。
+
+## 8. 2026-11-21 dogfood 第三轮与聚焦修复
+
+第三轮另起全新 checkout 与临时目录，只读 `peri-swarm/README.md`、manifest 与公开 API；
+按 README 一次跑通主链路：Loom 2.6s 就绪、provision 0.37s、`peri-swarm`/`peri` 构建
+69.6s/67.1s、网关 healthz 200、`openai_hosted` 创建与 workspace Bash 写
+`dogfood.txt`、`none` 实时会话；总耗时 7.3 分钟，无 `Operation not permitted`，未手改
+policy/settings。第 6 步 PARTIAL，残留与聚焦修复如下：
+
+| 残留 | 处置 | 证据 |
+| --- | --- | --- |
+| `PERI_SWARM_SSE_HEARTBEAT_MS` 设置 1000/3000 后仍约 15s | 根因是 `BootstrapConfig::from_env_map` 丢弃解析值；`a264ddb65` 统一到 `config::parse_sse_heartbeat` | `bootstrap_test` 默认/1000/3000/非法值；真实 Loom+网关原始 SSE 观测到 1s 与 3s 心跳 |
+| assistant item payload 无 `role`，`delta` 未文档化 | `62a0a72cf` 在 delta/complete 增加 `role:"assistant"`；README 补形状 | `reader_test`、`items_pagination_test`、`in_memory` 契约 |
+| 用户输入 item 帧先于 `turn.started`，与 README 帧表不符 | README 按实际帧序说明，提醒不要清空已到帧 | `peri-swarm/README.md`「SSE 帧、终止条件与游标」 |
+| hosted `sandbox.runId` 懒预留后不回填 | README 明确用 Bun `GET /v1/sandboxes/{logicalEnvId}` 的 `runId/state` 判断真实运行 | 同上 |
+| `environment.type=none` 的 `environment.id` 语义不明 | README 说明其当前等于 session/logicalId，不是沙箱 | 同上 |
+
+门禁结果（2026-11-21，聚焦修复提交后）：`./scripts/cargo-rmcp-patched.sh test --locked
+-p peri-swarm` 全绿（含 `bootstrap` 31、`reader`、`streaming`、`items_pagination`）、
+`clippy` 与 pre-commit 通过。**真实模型供应商、后台任务引用、1000 Agent 规模、生产
+TLS、Linux SRT 与真实第三方 MCP 仍未验证**；本记录不把它们写成已验收。
