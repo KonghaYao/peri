@@ -207,8 +207,10 @@ pub fn wrap_row_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usi
             } else if graphemes[consumed].chars().all(char::is_whitespace)
                 && row_has_content(&buf, row, width)
             {
-                // 下一行整行空白：只有内容行换行才丢 1 个分隔符。
-                consumed += 1;
+                // 下一行整行空白：按上一行的剩余列回放换行状态，被丢掉的空白
+                // 可能不止一个，起点落在该行第一个实际渲染的空白 grapheme。
+                let remaining = width.saturating_sub(row_content_width(&buf, row, width));
+                consumed += dropped_blank_prefix(&graphemes, consumed, usize::from(remaining));
             }
         }
         starts.push(*grapheme_bytes.get(consumed).unwrap_or(&plain.len()));
@@ -223,6 +225,57 @@ fn row_has_content(buf: &ratatui::buffer::Buffer, row: u16, width: u16) -> bool 
         buf.cell((col, row))
             .is_some_and(|cell| !cell.symbol().chars().all(char::is_whitespace))
     })
+}
+
+/// 该行最后一个非空白符号的右边界（列宽）；全空白行返回 0。
+///
+/// Ratatui 在换行处用上一行剩余的列数吞掉排队的空白，剩余列因此由这一行
+/// 实际渲染的内容宽度推出。
+fn row_content_width(buf: &ratatui::buffer::Buffer, row: u16, width: u16) -> u16 {
+    let mut end = 0u16;
+    for col in 0..width {
+        let Some(cell) = buf.cell((col, row)) else {
+            break;
+        };
+        let symbol = cell.symbol();
+        if !symbol.chars().all(char::is_whitespace) {
+            end = col.saturating_add(UnicodeWidthStr::width(symbol) as u16);
+        }
+    }
+    end.min(width)
+}
+
+/// 空白行换行时被丢弃的空白 grapheme 数。
+///
+/// Ratatui 先用上一行的剩余列吞掉排队的空白，再丢掉触发换行的空白
+/// grapheme；其余空白才渲染到下一行。宽空格与 ASCII 空格宽度不同，因此
+/// 这里按宽度回放，而不是固定丢一个。
+fn dropped_blank_prefix(graphemes: &[&str], consumed: usize, remaining: usize) -> usize {
+    let mut remaining = remaining;
+    let mut dropped = 0usize;
+    while let Some(grapheme) = graphemes.get(consumed + dropped) {
+        if !grapheme.chars().all(char::is_whitespace) {
+            break;
+        }
+        let width = UnicodeWidthStr::width(*grapheme);
+        if width > remaining {
+            break;
+        }
+        remaining -= width;
+        dropped += 1;
+    }
+    if dropped == 0 {
+        // 首个空白就放不进上一行：这次换行由它触发，它本身不会渲染。
+        return 1;
+    }
+    if graphemes
+        .get(consumed + dropped)
+        .is_some_and(|grapheme| grapheme.chars().all(char::is_whitespace))
+    {
+        // 吞完排队空白后紧跟的空白触发了换行，同样不渲染。
+        dropped += 1;
+    }
+    dropped
 }
 
 fn wrap_row_byte_starts_large(plain: &str, width: usize) -> Vec<usize> {
@@ -465,6 +518,33 @@ mod tests {
         )
         .expect("last row");
         assert_eq!(&plain[range], "B", "跨空白行后 B 必须可选");
+    }
+
+    #[test]
+    fn wrap_start_derives_multiple_dropped_spaces_before_blank_row() {
+        // 混合宽空白：宽度 5 下 "A" 后三个宽空格都在换行处被丢弃，第二行只渲染
+        // 5 个 ASCII 空格。起点必须落在这些空格上，不能按固定 +1 停在宽空格。
+        let text = "A\u{3000}\u{3000}\u{3000}     B";
+        let line = line(text);
+        let plain = line_plain_text(&line);
+        let width = 5;
+        assert_eq!(rendered_rows(&line, width, 3), vec!["A", "", "B"]);
+        let starts = wrap_row_byte_starts(&line, &plain, width);
+        assert_eq!(
+            &plain[starts[1]..starts[2]],
+            "     ",
+            "空白行从实际渲染的五个空格开始"
+        );
+        assert_eq!(&plain[starts[2]..], "B");
+        let range = line_byte_range(
+            &plain,
+            &starts,
+            0..3,
+            SelectionPoint::new(1, 0),
+            SelectionPoint::new(1, 5),
+        )
+        .expect("blank row selection");
+        assert_eq!(&plain[range], "     ", "空白行整行不带上被丢弃的宽空格");
     }
 
     #[test]
