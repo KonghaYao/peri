@@ -1,17 +1,22 @@
 use peri_genui::EvalContext;
 use peri_theme::{bridge::ThemeDefinitionExt, theme::ThemeDefinition};
 use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::Widget,
 };
 use ratatui_kit::{ComponentTheme, components::TableTheme};
 use serde_json::Value;
+use tui_chart::{BarChart, BarGroup, BarOrientation, Sparkline};
 use unicode_width::UnicodeWidthStr;
 
 use crate::button::{
     ButtonChrome, ButtonSpec, ButtonState, ButtonTone, button_style, button_visual,
 };
-use crate::markdown::{GenUiSegment, TableData, table_data_to_lines};
+use crate::charts::theme_for;
+use crate::markdown::{GenUiSegment, TableData, buffer_to_lines, table_data_to_lines};
 
 use super::{GenUiAction, GenUiButton, GenUiButtonInfo};
 
@@ -23,13 +28,46 @@ pub struct GenUiRender {
 
 impl GenUiRender {
     fn append(&mut self, mut other: Self) {
+        // 标题自带上下空行；块与块相接时只保留一个空行，避免连续标题之间出现双空行。
+        let dropped = usize::from(
+            self.lines.last().is_some_and(|line| line.width() == 0)
+                && other.lines.first().is_some_and(|line| line.width() == 0),
+        );
+        if dropped == 1 {
+            other.lines.remove(0);
+        }
         let offset = self.lines.len();
         for button in &mut other.buttons {
-            button.line_start = button.line_start.saturating_add(offset);
-            button.line_end = button.line_end.saturating_add(offset);
+            button.line_start = button
+                .line_start
+                .saturating_sub(dropped)
+                .saturating_add(offset);
+            button.line_end = button
+                .line_end
+                .saturating_sub(dropped)
+                .saturating_add(offset);
         }
         self.lines.extend(other.lines);
         self.buttons.extend(other.buttons);
+    }
+}
+
+/// 块首/块尾的空行没有隔离对象，裁掉；同时修正按钮的行偏移。
+fn trim_blank_edges(output: &mut GenUiRender) {
+    let leading = output
+        .lines
+        .iter()
+        .take_while(|line| line.width() == 0)
+        .count();
+    if leading > 0 {
+        output.lines.drain(..leading);
+        for button in &mut output.buttons {
+            button.line_start = button.line_start.saturating_sub(leading);
+            button.line_end = button.line_end.saturating_sub(leading);
+        }
+    }
+    while output.lines.last().is_some_and(|line| line.width() == 0) {
+        output.lines.pop();
     }
 }
 
@@ -59,6 +97,7 @@ pub fn render(
     for error in &segment.errors {
         output.append(muted_error(error, width, theme));
     }
+    trim_blank_edges(&mut output);
     for button in &mut output.buttons {
         button.block = Some(block);
         button.partial = segment.partial;
@@ -158,7 +197,7 @@ fn element(
         }
         "Heading" => {
             let level = props.get("level").and_then(Value::as_u64).unwrap_or(1);
-            plain(
+            let mut output = plain(
                 text("text"),
                 width,
                 if level <= 2 {
@@ -166,7 +205,12 @@ fn element(
                 } else {
                     body.add_modifier(Modifier::BOLD)
                 },
-            )
+            );
+            // 标题与相邻内容之间各留一个空行；块首/块尾的空行在 `render` 末尾裁掉，
+            // 相接块之间的重复空行由 `append` 合并。
+            output.lines.insert(0, Line::default());
+            output.lines.push(Line::default());
+            output
         }
         "List" => {
             let mut output = GenUiRender::default();
@@ -402,8 +446,7 @@ fn bar_chart(
         let label = item
             .get("label")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+            .unwrap_or_default();
         let Some(raw) = item.get("value") else {
             return muted_error("bar chart items need a value", width, theme);
         };
@@ -417,12 +460,14 @@ fn bar_chart(
                 theme,
             );
         }
-        entries.push((label, value, display_value(raw)));
+        // tui-chart 的 y 轴 gutter 上限 16 列；先按显示宽度截断，避免 CJK 标签
+        // 按字符截断后溢出绘图区。
+        entries.push((fit(&sanitize(label).replace('\n', " "), 16), value));
     }
     let max = match props.get("max") {
         None => entries
             .iter()
-            .map(|(_, value, _)| *value)
+            .map(|(_, value)| *value)
             .fold(0.0, f64::max)
             .max(1.0),
         Some(raw) => match raw.as_f64() {
@@ -430,57 +475,41 @@ fn bar_chart(
             _ => return muted_error("bar chart max must be a positive number", width, theme),
         },
     };
-    let value_width = entries
+    let gutter = entries
         .iter()
-        .map(|(_, _, value)| value.width())
+        .map(|(label, _)| label.width())
         .max()
-        .unwrap_or(1);
-    let label_cap = width.saturating_sub(value_width.saturating_add(4));
-    let label_width = entries
-        .iter()
-        .map(|(label, _, _)| sanitize(label).width())
-        .max()
-        .unwrap_or(0)
-        .min(label_cap);
-    let label_gap = usize::from(label_width > 0);
-    let bar_width = width.saturating_sub(label_width + label_gap + value_width + 1);
-    if bar_width < 2 {
+        .unwrap_or(0);
+    if width < gutter + 3 {
         return muted_error("bar chart needs more width", width, theme);
     }
-    let body = Style::default().fg(theme.component.markdown.text);
+    // 1 行 x 轴 + 1 行刻度 + 至少 2 行绘图区；该高度下每条 bar 正好 1 行。
+    let height = (entries.len() + 2).max(4);
+    let area = Rect::new(0, 0, width as u16, height as u16);
+    let mut buffer = Buffer::empty(area);
+    let groups = entries
+        .iter()
+        .map(|(label, value)| BarGroup::new(label.clone(), [*value]))
+        .collect::<Vec<_>>();
+    BarChart::new(groups)
+        .orientation(BarOrientation::Horizontal)
+        .show_values(true)
+        .max(max)
+        .theme(theme_for(theme))
+        .render(area, &mut buffer);
+    if buffer.content().iter().all(|cell| cell.symbol() == " ") {
+        return muted_error("bar chart needs more width", width, theme);
+    }
     let heading = Style::default()
         .fg(theme.semantic.accent)
         .add_modifier(Modifier::BOLD);
-    let bar = Style::default().fg(theme.semantic.accent);
-    let track = Style::default().fg(theme.semantic.border.dim);
     let mut output = GenUiRender::default();
     if let Some(title) = props.get("title").and_then(Value::as_str)
         && !title.is_empty()
     {
         output.append(plain(title, width, heading));
     }
-    for (label, value, text) in entries {
-        let label = fit(&sanitize(&label).replace('\n', " "), label_width);
-        let label_padding = label_width.saturating_sub(label.width());
-        let value_padding = value_width.saturating_sub(text.width());
-        let filled = ((value / max).clamp(0.0, 1.0) * bar_width as f64).round() as usize;
-        let mut spans = Vec::new();
-        if label_width > 0 {
-            spans.push(Span::styled(
-                format!("{label}{}", " ".repeat(label_padding)),
-                body,
-            ));
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled("█".repeat(filled), bar));
-        spans.push(Span::styled("░".repeat(bar_width - filled), track));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("{}{text}", " ".repeat(value_padding)),
-            body,
-        ));
-        output.lines.push(Line::from(spans));
-    }
+    output.lines.extend(buffer_to_lines(&buffer, area));
     output
 }
 
@@ -525,26 +554,25 @@ fn sparkline(
         return muted_error("sparkline needs more width", width, theme);
     }
     let visible = &numbers[numbers.len().saturating_sub(available)..];
-    let min = visible.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = visible.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let glyphs = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let spark: String = visible
-        .iter()
-        .map(|value| {
-            let level = if (max - min).abs() < f64::EPSILON {
-                3
-            } else {
-                (((value - min) / (max - min)) * 7.0).round() as usize
-            };
-            glyphs[level.min(7)]
-        })
-        .collect();
+    // tui-chart 每个数据点占一列；按点数给宽度，末值才会紧跟图形而不是被推到行尾。
+    let area = Rect::new(0, 0, visible.len() as u16, 1);
+    let mut buffer = Buffer::empty(area);
+    Sparkline::new(visible.iter().copied())
+        .theme(theme_for(theme))
+        .render(area, &mut buffer);
+    let mut spans = vec![Span::styled(
+        prefix,
+        Style::default().fg(theme.component.markdown.text),
+    )];
+    if let Some(line) = buffer_to_lines(&buffer, area).into_iter().next() {
+        spans.extend(line.spans);
+    }
+    spans.push(Span::styled(
+        suffix,
+        Style::default().fg(theme.semantic.text.muted),
+    ));
     GenUiRender {
-        lines: vec![Line::from(vec![
-            Span::styled(prefix, Style::default().fg(theme.component.markdown.text)),
-            Span::styled(spark, Style::default().fg(theme.semantic.accent)),
-            Span::styled(suffix, Style::default().fg(theme.semantic.text.muted)),
-        ])],
+        lines: vec![Line::from(spans)],
         buttons: vec![],
     }
 }

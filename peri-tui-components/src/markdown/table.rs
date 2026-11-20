@@ -633,7 +633,7 @@ fn put(buf: &mut Buffer, x: u16, y: u16, c: char, style: Style) {
 
 // ── Buffer → Vec<Line>（CJK 安全——跳过双宽字符的 ghost cell） ─────
 
-fn buffer_to_lines(buf: &Buffer, area: Rect) -> Vec<Line<'static>> {
+pub(crate) fn buffer_to_lines(buf: &Buffer, area: Rect) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(area.height as usize);
     for y in 0..area.height {
         let mut spans: Vec<Span<'static>> = Vec::new();

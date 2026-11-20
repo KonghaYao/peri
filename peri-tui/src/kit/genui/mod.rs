@@ -16,3 +16,7 @@ pub fn render(segment: &GenUiSegment, width: usize, theme: &ThemeDefinition) -> 
     let context = view_state::context(segment.block_id());
     peri_tui_components::genui::render(segment, width, theme, context.as_ref())
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

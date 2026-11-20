@@ -11,6 +11,8 @@
 //!   正文按列宽折行；Mermaid 字符图不折行，超出宽度时底部出现可拖动的横向
 //!   滚动条，横向滚轮与拖动都能移动视图。GenUI 按钮只展示鼠标按下态，不执行动作。
 
+use std::time::Instant;
+
 mod document;
 mod list_items;
 mod markdown;
@@ -756,12 +758,12 @@ const OPENUI_VARIANTS: &[Variant] = &[
     },
     Variant {
         key: "bar-chart",
-        note: "BarChart renders proportional bars with labels and values.",
+        note: "BarChart renders with tui-chart horizontal bars (axis + values).",
         initial: openui_bar_chart_initial,
     },
     Variant {
         key: "sparkline",
-        note: "Sparkline compresses a numeric series into one braille-like row.",
+        note: "Sparkline renders with tui-chart glyphs beside the value.",
         initial: openui_sparkline_initial,
     },
     Variant {
@@ -1190,6 +1192,30 @@ fn render_completion(
             muted_style(),
         ))
         .render(Rect::new(area.x, note_y, area.width, 1), buf);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host clock
+// ---------------------------------------------------------------------------
+
+/// 需要 wall clock 重绘的故事：播放中的文档与活动的 spinner。
+pub(crate) fn is_animating(state: &StoryState) -> bool {
+    match state {
+        StoryState::Streaming(_) => streaming::is_animating(state),
+        StoryState::Spinner(spinner) => spinner::is_animating(spinner),
+        _ => false,
+    }
+}
+
+/// 按 wall clock 推进当前故事的动画；无动画的故事无副作用。
+pub(crate) fn tick_at(state: &mut StoryState, now: Instant) {
+    if matches!(state, StoryState::Streaming(_)) {
+        streaming::tick_at(state, now);
+        return;
+    }
+    if let StoryState::Spinner(spinner) = state {
+        spinner::tick_at(spinner, now);
     }
 }
 

@@ -495,10 +495,10 @@ pub(crate) fn run(start_story: usize, start_variant: usize) -> io::Result<()> {
     loop {
         // 动画进度由 wall clock 决定；每轮都推进，否则连续到达的鼠标事件会让
         // `poll` 一直返回 true，播放表停在原地。
-        crate::stories::streaming::tick_at(&mut app.state, Instant::now());
+        crate::stories::tick_at(&mut app.state, Instant::now());
         terminal.draw(|frame| draw(frame, &mut app))?;
-        // 只有 `[ auto ]` 播放中才缩短轮询间隔；进度完全由 wall clock 决定。
-        let timeout = if crate::stories::streaming::is_animating(&app.state) {
+        // 只有播放表或活动 spinner 才缩短轮询间隔；进度完全由 wall clock 决定。
+        let timeout = if crate::stories::is_animating(&app.state) {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(200)
