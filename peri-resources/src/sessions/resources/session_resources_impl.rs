@@ -47,7 +47,6 @@ pub(super) use super::super::local_port::LocalExecutionPort;
 pub(super) use super::super::sqlite_store::execution_failure;
 #[cfg(not(target_os = "emscripten"))]
 pub(super) use super::super::sqlite_store::{LocalExecution, ReadOnlyThreadStoreError};
-pub(super) use super::super::swarm_store::{SwarmStorePort, UnsupportedSwarmStore};
 
 pub(super) use super::claim::ChildResumeClaimHandle;
 pub(super) use super::gate::MutationGate;
@@ -110,9 +109,6 @@ pub struct SessionResourcesImpl {
     pub(super) credential_operations: Arc<tokio::sync::RwLock<()>>,
     /// 会话数据的存放位置：决定 `create_session` 是几次提交（见 [`SessionDataHome`]）。
     pub(super) home: SessionDataHome,
-    /// Swarm 窄口：只有远端组合会装上共享连接的端口；本机库保持 `None`，访问器返回
-    /// 显式 `Unsupported`（不回退本机 SQLite）。
-    pub(super) swarm_store: Option<Arc<dyn SwarmStorePort>>,
 }
 
 impl SessionResourcesImpl {

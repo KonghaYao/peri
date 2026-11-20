@@ -47,18 +47,14 @@ pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::canonical::CURREN
 
 /// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
 ///
-/// `v10` = 当前形状（schema 16）：v15 的九张会话表/索引与数据原样保留，追加 `swarm_*`
-/// 四表与一条索引（Swarm 自有事实）。`v9` 是上一代当前形状（schema 15）：三列退役、两张
-/// inherited 派生索引表退役，写打开只追加 `swarm_*` 对象并推进到 v10。`v8` 是再上一代
-/// （schema 14，含三列与两表，写打开走 v15 清理批次）；`v7` 是 schema 13（已有 `thread_mq`，
-/// 缺两列工作快照）；`v6` 是 schema 12（缺 `thread_mq`）；`v5` 是 schema 11（连派生索引表也
-/// 没有）；`v2` 是统一前远端会话表形状（schema 10|11，执行登记独立成表）。中间的 16..=19 是
-/// 未发布的开发期形状，本构建一律不认识。
-pub(super) const STORE_CONTRACT: &str = "peri.session.store/v10";
-
-/// 上一代当前形状（schema 15）：canonical 会话表齐全且已是 v15 形状，只是还没有 Swarm 表。
-/// 读打开直接可用；写打开只追加 `swarm_*` 四表与索引并推进版本与契约。
-pub(super) const V15_STORE_CONTRACT: &str = "peri.session.store/v9";
+/// `v9` = 当前形状（schema 15）：`projects` 删 `object_identity` 并收窄为 `UNIQUE(locator)`，
+/// `workspaces` 删 `identity`，`session_bindings` 删 `evidence_origin`，两张 inherited 派生
+/// 索引表退役，绑定行的创建证据收缩为最小执行根。`v8` 是上一代当前形状（schema 14，含三列
+/// 与两表，写打开走 v15 清理批次）；`v7` 是再上一代（schema 13，已有 `thread_mq`，缺两列
+/// 工作快照）；`v6` 是 schema 12（缺 `thread_mq`）；`v5` 是 schema 11（连派生索引表也没有）；
+/// `v2` 是统一前远端会话表形状（schema 10|11，执行登记独立成表）。中间的 16..=19 是未发布的
+/// 开发期形状，本构建一律不认识。
+pub(super) const STORE_CONTRACT: &str = "peri.session.store/v9";
 
 /// 唯一升级来源（压缩前形状）：远端会话表形状的上一代（schema 10|11），读得懂，
 /// 写打开先完成一次性搬运升级。
@@ -144,13 +140,12 @@ impl StoreSnapshot {
             && matches!(acceptance(self.schema_version), SchemaAcceptance::Accept)
     }
 
-    /// 本构建的读取面是否覆盖这个库：本代直接读；`v9` + 15、`v8` + 14、`v7` + 13、`v6` + 12
-    /// 与 `v5` + 11（历代当前形状）以及统一前的 `v2`（10|11）只读可用，写打开走各自的升级
-    /// 路径。代际之外的形状一律不认识。
+    /// 本构建的读取面是否覆盖这个库：本代直接读；`v8` + 14、`v7` + 13、`v6` + 12 与
+    /// `v5` + 11（历代当前形状）以及统一前的 `v2`（10|11）只读可用，写打开走各自的升级路径。
+    /// 代际之外的形状一律不认识。
     pub(super) fn readable(&self) -> bool {
         self.matches_build()
             || (self.contract == PREVIOUS_STORE_CONTRACT && matches!(self.schema_version, 10 | 11))
-            || (self.contract == V15_STORE_CONTRACT && self.schema_version == 15)
             || (self.contract == PREVIOUS_CURRENT_STORE_CONTRACT && self.schema_version == 14)
             || (self.contract == LEGACY_CURRENT_STORE_CONTRACT && self.schema_version == 13)
             || (self.contract == OLDER_CURRENT_STORE_CONTRACT && self.schema_version == 12)
@@ -163,8 +158,8 @@ impl StoreSnapshot {
 pub(super) enum SchemaAcceptance {
     /// 本构建可读写。
     Accept,
-    /// 已识别的旧版（10..=15）：只读使用同一组查询，写打开按契约走搬运、增量补齐、
-    /// v15 清理批次或 Swarm 表追加。
+    /// 已识别的旧版（10..=14）：只读使用同一组查询，写打开按契约走搬运、增量补齐或
+    /// v15 清理批次。
     Upgradeable,
     /// 高于本构建：拒绝，不迁移、不降级写入。
     TooNew,
@@ -175,7 +170,7 @@ pub(super) enum SchemaAcceptance {
 pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
     if version == REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::Accept
-    } else if matches!(version, 10..=15) {
+    } else if matches!(version, 10..=14) {
         SchemaAcceptance::Upgradeable
     } else if version > REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::TooNew
@@ -266,13 +261,9 @@ pub(super) fn identity_read_plan() -> Vec<StatementSpec> {
 /// 判定不宽容：读得懂的库其形状必须与契约声明的代数逐项相符。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShapeProbe {
-    /// 当前形状（`v10` + 16）：v15 的九张会话表 + `swarm_*` 四表逐表严格判定；
-    /// 索引集也一并核对。
+    /// 当前形状（`v8` + 14）：canonical 会话表（`threads` 含两列工作快照）+ `thread_mq`
+    /// 逐表严格判定；两张 inherited 派生索引表可选（缺表时读取回退扫描），存在时仍逐项相符。
     Current,
-    /// 上一代当前形状（`v9` + 15）：九张会话表按 v15 冻结声明严格判定，`swarm_*` 表不存在是
-    /// 正常的（写打开只追加它们）。同样退让到 v13/v12 是不可能的：v9 的契约只覆盖 15，
-    /// 形状判定不跨代退让。
-    PreviousV15,
     /// 上一代与再上一代当前形状（`v8` + 14、`v7` + 13、`v6` + 12、`v5` + 11）：先按 v14 声明
     /// 判定（11 张表，含两列工作快照与两张派生索引表），再依次退让到 v13（`threads` 少两列）、
     /// v12（还缺 `thread_mq`）。写打开做增量补齐与 v15 清理。
@@ -297,10 +288,6 @@ pub(super) const CURRENT_TABLE_PRAGMAS: &[(&str, &str)] = &[
         "PRAGMA table_xinfo('session_close_intents')",
     ),
     ("thread_mq", "PRAGMA table_xinfo('thread_mq')"),
-    ("swarm_sessions", "PRAGMA table_xinfo('swarm_sessions')"),
-    ("swarm_items", "PRAGMA table_xinfo('swarm_items')"),
-    ("swarm_inputs", "PRAGMA table_xinfo('swarm_inputs')"),
-    ("swarm_bindings", "PRAGMA table_xinfo('swarm_bindings')"),
 ];
 
 /// 与列形状一起读取；缺失的 canonical 索引由可写打开补齐。
@@ -353,9 +340,7 @@ impl ShapeProbe {
     /// 本机 SQLite 测试使用的单条 SELECT；远端打开使用逐表 PRAGMA，避免不兼容的表值函数。
     pub(super) fn sql(self) -> &'static str {
         match self {
-            Self::Current | Self::PreviousV15 | Self::PreviousCurrent => {
-                schema_shape::CURRENT_COLUMNS_SQL
-            }
+            Self::Current | Self::PreviousCurrent => schema_shape::CURRENT_COLUMNS_SQL,
             Self::Input => schema_shape::INPUT_COLUMNS_SQL,
         }
     }
@@ -363,8 +348,6 @@ impl ShapeProbe {
     pub(super) fn table_names(self) -> impl Iterator<Item = &'static str> {
         match self {
             Self::Current => schema_shape::current_table_names().collect::<Vec<_>>(),
-            // 上一代当前形状（v15）的表集合：九张会话表，不含 `swarm_*`。
-            Self::PreviousV15 => schema_shape::v15_table_names().collect::<Vec<_>>(),
             // 上一代当前形状的表集合：v14 的 11 张表（含 `thread_mq` 与两张派生索引表）。
             // v13/v12/v11 缺表时 PRAGMA 读回空行，判定按 v13/v12 声明继续退让。
             Self::PreviousCurrent => schema_shape::v14_tables()
@@ -406,7 +389,6 @@ impl ShapeProbe {
         }
         let verdict = match self {
             Self::Current => schema_shape::check_current_shape(tables),
-            Self::PreviousV15 => schema_shape::check_v15_shape(tables),
             Self::PreviousCurrent => schema_shape::check_v14_shape(tables)
                 .or_else(|_| schema_shape::check_v13_shape(tables))
                 .or_else(|_| schema_shape::check_v12_shape(tables)),
@@ -444,9 +426,6 @@ pub(super) enum StoreShapeRead {
 pub(super) fn shape_probe(snapshot: &StoreSnapshot) -> Option<ShapeProbe> {
     if snapshot.matches_build() {
         Some(ShapeProbe::Current)
-    } else if snapshot.contract == V15_STORE_CONTRACT && snapshot.schema_version == 15 {
-        // v9 的库已是 v15 形状，只是还没有 `swarm_*`；只按 v15 声明判定，不退让到更早的代际。
-        Some(ShapeProbe::PreviousV15)
     } else if snapshot.contract == PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 14
     {
         Some(ShapeProbe::PreviousCurrent)

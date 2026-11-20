@@ -21,7 +21,6 @@ use super::schema::PREVIOUS_STORE_CONTRACT;
 use super::schema::REMOTE_SCHEMA_VERSION;
 use super::schema::STORE_CONTRACT;
 use super::schema::STORE_META_TABLE;
-use super::schema::V15_STORE_CONTRACT;
 use super::session_data::OpenStep;
 use super::sql::StatementSpec;
 use crate::sessions::schema_shape::{self, ActualColumn};
@@ -37,37 +36,6 @@ fn snapshot(version: i64, contract: &str) -> StoreSnapshot {
         schema_version: version,
         contract: contract.to_owned(),
     }
-}
-
-/// 老投影只服务压缩前形状（`v2`，10|11）：v14/v15 已有工作快照列，只读打开必须用当前投影。
-#[test]
-fn the_legacy_projection_is_reserved_for_the_compressed_before_shape() {
-    use super::session_data::legacy_read_projection;
-    let present = |version, contract| StoreIdentityRead::Present(snapshot(version, contract));
-    assert!(legacy_read_projection(
-        &present(10, PREVIOUS_STORE_CONTRACT),
-        StoreAccess::ReadOnly
-    ));
-    assert!(legacy_read_projection(
-        &present(11, PREVIOUS_STORE_CONTRACT),
-        StoreAccess::ReadOnly
-    ));
-    assert!(!legacy_read_projection(
-        &present(15, V15_STORE_CONTRACT),
-        StoreAccess::ReadOnly
-    ));
-    assert!(!legacy_read_projection(
-        &present(14, PREVIOUS_CURRENT_STORE_CONTRACT),
-        StoreAccess::ReadOnly
-    ));
-    assert!(!legacy_read_projection(
-        &present(REMOTE_SCHEMA_VERSION, STORE_CONTRACT),
-        StoreAccess::ReadOnly
-    ));
-    assert!(!legacy_read_projection(
-        &present(10, PREVIOUS_STORE_CONTRACT),
-        StoreAccess::ReadWrite
-    ));
 }
 
 /// 声明式形状 → 逐表列形状（判定入口的输入形态），用于离线判定漂移。
@@ -117,16 +85,16 @@ fn acceptance_rejects_unknown_versions() {
         super::schema::acceptance(REMOTE_SCHEMA_VERSION),
         SchemaAcceptance::Accept
     );
-    // 10..=15 都是可升级来源（搬运 / 增量补齐 / v15 清理 / Swarm 表追加）。
-    for version in 10..=15 {
+    // 10..=14 都是可升级来源（搬运 / 增量补齐 / v15 清理）。
+    for version in 10..=14 {
         assert_eq!(
             super::schema::acceptance(version),
             SchemaAcceptance::Upgradeable,
             "版本 {version} 是已识别的升级来源"
         );
     }
-    // 未发布的中间代（17..19）：都是「比本构建新」，不迁移也不降级写入。
-    for version in 17..=19 {
+    // 未发布的中间代（16..19）：都是「比本构建新」，不迁移也不降级写入。
+    for version in 16..=19 {
         assert_eq!(
             super::schema::acceptance(version),
             SchemaAcceptance::TooNew,
@@ -138,13 +106,11 @@ fn acceptance_rejects_unknown_versions() {
     assert_eq!(super::schema::acceptance(-1), SchemaAcceptance::Unusable);
 }
 
-/// 读取面只有七个代数：本代（`v10` + 16）、上一代当前形状（`v9` + 15）、再上一代（`v8` + 14）、
-/// `v7` + 13、`v6` + 12、`v5` + 11 与统一前的 `v2`（10|11）。其余一律不认识。
+/// 读取面只有六个代数：本代（`v9` + 15）、上一代当前形状（`v8` + 14）、再上一代（`v7` + 13）、
+/// `v6` + 12、`v5` + 11 与统一前的 `v2`（10|11）。其余一律不认识。
 #[test]
 fn only_the_compatible_contract_and_generation_are_readable() {
     assert!(snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT).readable());
-    assert!(snapshot(15, V15_STORE_CONTRACT).readable());
-    assert!(!snapshot(14, V15_STORE_CONTRACT).readable());
     assert!(snapshot(14, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
     assert!(!snapshot(13, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
     assert!(snapshot(13, LEGACY_CURRENT_STORE_CONTRACT).readable());
@@ -154,15 +120,14 @@ fn only_the_compatible_contract_and_generation_are_readable() {
     assert!(snapshot(11, OLDEST_CURRENT_STORE_CONTRACT).readable());
     assert!(snapshot(10, PREVIOUS_STORE_CONTRACT).readable());
     assert!(snapshot(11, PREVIOUS_STORE_CONTRACT).readable());
-    // 版本与契约必须互相匹配：`v9` 只覆盖 15，`v8` 只覆盖 14，`v7` 只覆盖 13，`v6` 只覆盖
-    // 12，`v5` 只覆盖 11，`v2` 只覆盖 10|11。
-    for version in [10, 11, 12, 13, 14, 15] {
+    // 版本与契约必须互相匹配：`v8` 只覆盖 14，`v7` 只覆盖 13，`v6` 只覆盖 12，
+    // `v5` 只覆盖 11，`v2` 只覆盖 10|11。
+    for version in [10, 11, 12, 13, 14] {
         assert!(
             !snapshot(version, STORE_CONTRACT).readable(),
             "({version}, {STORE_CONTRACT})"
         );
     }
-    assert!(!snapshot(REMOTE_SCHEMA_VERSION, V15_STORE_CONTRACT).readable());
     assert!(!snapshot(REMOTE_SCHEMA_VERSION, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
     assert!(!snapshot(REMOTE_SCHEMA_VERSION, LEGACY_CURRENT_STORE_CONTRACT).readable());
     assert!(!snapshot(REMOTE_SCHEMA_VERSION, OLDER_CURRENT_STORE_CONTRACT).readable());
@@ -277,11 +242,7 @@ fn shape_probe_follows_the_readable_surface() {
 /// 远端形状探测逐表只发 PRAGMA，不使用服务端不支持的表值函数。
 #[test]
 fn shape_probes_use_read_only_pragmas_for_every_declared_table() {
-    for probe in [
-        ShapeProbe::Current,
-        ShapeProbe::PreviousV15,
-        ShapeProbe::Input,
-    ] {
+    for probe in [ShapeProbe::Current, ShapeProbe::Input] {
         for table in probe.table_names() {
             let sql = ShapeProbe::pragma_table_xinfo(table).expect("声明里的表必须有只读 PRAGMA");
             let spec = StatementSpec::bare(sql);

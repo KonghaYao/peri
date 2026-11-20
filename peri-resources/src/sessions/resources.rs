@@ -36,8 +36,6 @@ use session_resources_impl::{ResolvedWorkspace, SessionBinding, WorkspaceError};
 
 use session_resources_impl::SessionDataPort;
 
-use session_resources_impl::{SwarmStorePort, UnsupportedSwarmStore};
-
 #[cfg(target_os = "emscripten")]
 use session_resources_impl::execution_failure;
 

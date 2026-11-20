@@ -13,7 +13,6 @@ pub(super) use peri_acp_types::session_store::SessionStoreDeployment;
 
 pub(super) use crate::sessions::{
     AccessIntent, CredentialError, LocatorError, ResolvedLocator, SessionStoreOpenRequest,
-    SwarmStorePort,
 };
 
 /// 外部系统资源门面
@@ -236,15 +235,6 @@ impl Resources {
     #[must_use]
     pub fn session_resources(&self) -> Arc<dyn SessionResources> {
         self.session_resources.clone()
-    }
-
-    /// Swarm 自有事实的持久化端口（`peri-swarm` 设计 §4.5 方案 A）。
-    ///
-    /// 远端部署返回与门面**共享同一条连接**的端口（生命周期随部署关闭权）；本机 SQLite 与
-    /// 不支持的部署返回显式 `Unsupported`，每次调用都失败——不降级、不回退本机库。
-    #[must_use]
-    pub fn swarm_store(&self) -> Arc<dyn SwarmStorePort> {
-        self.shutdown.facade.swarm_store()
     }
 
     /// 只取业务句柄，随所有权一起放弃部署关闭权。

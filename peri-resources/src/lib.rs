@@ -12,7 +12,4 @@ pub mod context;
 pub mod sessions;
 
 pub use context::{classify_open_failure, Resources, SessionStoreShutdownOwner, StoreOpenFailure};
-pub use sessions::{
-    RemoteWorkspaceEnvironment, SwarmBindingRow, SwarmInputPut, SwarmInputRow, SwarmItemRow,
-    SwarmSessionRow, SwarmSessionUpdate, SwarmStorePort,
-};
+pub use sessions::RemoteWorkspaceEnvironment;

@@ -37,7 +37,7 @@ async fn assert_no_recovery_tables(pool: &sqlx::SqlitePool) {
 }
 
 #[tokio::test]
-async fn current_store_has_the_canonical_business_tables_and_normal_history() {
+async fn current_store_has_nine_business_tables_and_normal_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let store = SqliteThreadStore::try_new(&path).await.unwrap();
@@ -48,9 +48,9 @@ async fn current_store_has_the_canonical_business_tables_and_normal_history() {
     .fetch_one(&store.database.pool)
     .await
     .unwrap();
-    // v16 起十三张 canonical 表：v15 的九张会话表 + 四张 Swarm 自有事实表。
+    // v15 起九张 canonical 表：两张 inherited 派生索引表退役，执行登记并入 `workspaces`。
     // 没有登记表，也没有运行时状态表。
-    assert_eq!(count, 13);
+    assert_eq!(count, 9);
     let registrations: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'legacy_execution_registrations'",
     )
@@ -85,11 +85,11 @@ async fn current_store_has_the_canonical_business_tables_and_normal_history() {
     reopened.close().await;
 }
 
-/// 压缩掉的开发期代数（17..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
-/// 16 是当前代数，不在拒绝面里。
+/// 压缩掉的开发期代数（16..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
+/// 15 是当前代数，不在拒绝面里。
 #[tokio::test]
 async fn compressed_dev_generations_are_refused_without_touching_the_database() {
-    for version in 17..=19_i64 {
+    for version in 16..=19_i64 {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("threads.db");
         let store = SqliteThreadStore::try_new(&path).await.unwrap();

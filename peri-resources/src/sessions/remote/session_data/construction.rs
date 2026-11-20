@@ -58,16 +58,9 @@ impl RemoteSessionData {
         let read = store.read_identity().await?;
         let shape = super::probe_shape(&store, &read).await?;
         let schema_work = shape.clone();
-        // 只读打开保留「压缩前形状」（`v2` 契约，10|11）的老读法：它没有 `archived` /
-        // 工作快照列。v14/v15 等后续代际的列面已被当前查询覆盖，不得再走老投影——否则
-        // 只读读到的 work_state/context_usage_tokens 会被占位列替换。
-        let legacy_shape = super::legacy_read_projection(&read, access);
-        // 旧代际的只读打开仍要在结束前复核身份：另一实例把它升级之后，旧读法不得继续交付。
-        let legacy_open_identity = (matches!(
-            &read,
-            StoreIdentityRead::Present(snapshot) if !snapshot.matches_build()
-        ) && access == StoreAccess::ReadOnly)
-            .then(|| read.clone());
+        let legacy_shape = matches!(&read, StoreIdentityRead::Present(snapshot) if !snapshot.matches_build())
+            && access == StoreAccess::ReadOnly;
+        let legacy_open_identity = legacy_shape.then(|| read.clone());
         let step = super::open_step(read, shape, access)?;
         let upgraded = matches!(step, OpenStep::Upgrade(_));
         let (store_id, initialization) = match step {

@@ -44,43 +44,6 @@ pub(in crate::sessions::remote) fn v15_cleanup_source(snapshot: &StoreSnapshot) 
     snapshot.contract == schema::PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 14
 }
 
-/// v16 追加的升级来源：`v9` + 15（v16 之前的当前形状）。
-///
-/// 它不缺任何列或表，缺的只是 Swarm 自有事实的四表与索引；升级批次只下发
-/// [`canonical::CREATE_SWARM_TABLES`] + [`canonical::CREATE_SWARM_INDEXES`]，不读迁移输入、
-/// 不重建、不删除。
-pub(in crate::sessions::remote) fn swarm_addition_source(snapshot: &StoreSnapshot) -> bool {
-    snapshot.contract == schema::V15_STORE_CONTRACT && snapshot.schema_version == 15
-}
-
-/// v15 → v16 的追加批次：元数据守卫 → `swarm_*` 四表 → Swarm 索引 → 版本/契约推进。
-///
-/// 版本推进必须是最后一条（[`super::super::mutation::RemoteStore::apply_schema_upgrade`]
-/// 按「末条影响 1 行」确认升级落地）；前面的 `CREATE ... IF NOT EXISTS` 影响 0 行。
-pub(in crate::sessions::remote) fn swarm_addition_plan(
-    snapshot: &StoreSnapshot,
-) -> SessionResourceResult<Vec<StatementSpec>> {
-    if !swarm_addition_source(snapshot) {
-        return Err(super::dispatch::unsupported());
-    }
-    let mut statements = vec![StatementSpec::new(
-        GUARD_META_SQL,
-        vec![
-            Value::Integer(snapshot.schema_version),
-            Value::Text(snapshot.store_id.as_str().to_owned()),
-            Value::Text(snapshot.contract.clone()),
-        ],
-    )];
-    statements.extend(
-        canonical::CREATE_SWARM_TABLES
-            .iter()
-            .chain(canonical::CREATE_SWARM_INDEXES)
-            .map(|sql| StatementSpec::bare(sql)),
-    );
-    statements.push(advance_version(snapshot));
-    Ok(statements)
-}
-
 /// 上一代/再上一代当前形状的升级批次：补 `thread_mq` 与两列，末尾接 v15 清理并推进版本。
 /// 整批仍是受管批次，守卫与推进语义与搬运路径一致。
 ///
@@ -468,12 +431,6 @@ pub(in crate::sessions::remote) fn upgrade_plan(
     // `thread_mq` 与索引集里的 `idx_thread_mq_order` 是同一代新增的形状：重建路径不经过
     // `CREATE_TABLES`，必须在这里显式建表，否则末尾的索引重放会撞上「表不存在」。
     statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
-    // v16 的 `swarm_*` 四表同理：索引重放已含 `swarm_items_by_id`，表必须先于索引建出。
-    statements.extend(
-        canonical::CREATE_SWARM_TABLES
-            .iter()
-            .map(|sql| StatementSpec::bare(sql)),
-    );
     // 索引重放：`DROP TABLE` 把被重建的表（`threads` / `session_bindings` / `projects` /
     // `workspaces`）上的索引一并删掉，批次末尾把 canonical 的**整份**索引集一次性重放。
     // `IF NOT EXISTS` 让重放幂等（`messages` 的索引本来就在）。
@@ -664,14 +621,6 @@ pub(super) fn v15_cleanup_statements(
             .map(|sql| StatementSpec::bare(sql)),
     );
     // 6. 索引重放：重建的三张表随 `DROP TABLE` 丢掉了自己的索引。
-    //
-    // v16 的追加表先于索引重放建出：`CREATE_INDEXES` 已含 `swarm_items_by_id`，缺表会让重放
-    // 以「表不存在」失败。对 v15→v16 的纯追加批次，这四张表就是全部增量。
-    statements.extend(
-        canonical::CREATE_SWARM_TABLES
-            .iter()
-            .map(|sql| StatementSpec::bare(sql)),
-    );
     statements.extend(
         canonical::CREATE_INDEXES
             .iter()

@@ -62,7 +62,7 @@ async fn fresh_database() -> (tempfile::TempDir, SqliteConnection) {
     (directory, connection)
 }
 
-/// 声明 == 真实新建库（v16 的十三张表逐列形状）。
+/// 声明 == 真实新建库（8 张表逐列形状）。
 #[tokio::test]
 async fn declared_current_shape_matches_a_fresh_database() {
     let (_directory, mut connection) = fresh_database().await;
@@ -124,90 +124,6 @@ async fn thread_mq_is_a_mandatory_current_table_with_exactly_the_pending_columns
         .unwrap();
     let error = super::check_current_shape(&tables).unwrap_err();
     assert!(error.contains("thread_mq"), "{error}");
-}
-
-/// Swarm 四表是 v16 追加且**必需**的表：缺表即拒绝，列清单与 design §4.3 一致。
-///
-/// `swarm_sessions` 必须能存 S3 行类型的 `instructions`、调用方 MCP 声明与 `environment`：
-/// 前两者是可空文本列，`environment` 是 canonical JSON 文本列（都参与形状判定，不能被悄悄删掉）。
-#[tokio::test]
-async fn swarm_tables_are_mandatory_and_keep_the_session_fields() {
-    let (_directory, mut connection) = fresh_database().await;
-    for (name, columns) in [
-        (
-            "swarm_sessions",
-            &[
-                "logical_id",
-                "root_session_id",
-                "actor_key",
-                "cwd",
-                "state",
-                "model",
-                "instructions",
-                "mcp_json",
-                "environment_json",
-                "created_at",
-                "last_activity_at",
-                "last_item_seq",
-            ][..],
-        ),
-        (
-            "swarm_items",
-            &[
-                "logical_id",
-                "seq",
-                "item_id",
-                "kind",
-                "source",
-                "payload_json",
-                "created_at",
-                "truncated",
-            ][..],
-        ),
-        (
-            "swarm_inputs",
-            &[
-                "logical_id",
-                "input_id",
-                "fingerprint",
-                "state",
-                "created_at",
-            ][..],
-        ),
-        (
-            "swarm_bindings",
-            &[
-                "logical_env_id",
-                "logical_id",
-                "sandbox_id",
-                "workspace_path",
-                "sandbox_root",
-                "settings_profile",
-                "token_file",
-                "last_run_id",
-                "last_used_at",
-            ][..],
-        ),
-    ] {
-        let declared = current_table(name).unwrap_or_else(|| panic!("{name} 必须在 v16 形状里"));
-        assert!(!declared.optional, "{name} 承载 Swarm 事实，缺表不能容忍");
-        assert_eq!(declared.columns, columns, "{name} 的列清单");
-    }
-    // 索引是派生对象：新库建齐，声明不参与列形状比对（`declared_indexes_match` 覆盖）。
-    let indexes: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = ?1")
-            .bind("swarm_items_by_id")
-            .fetch_all(&mut connection)
-            .await
-            .unwrap();
-    assert_eq!(indexes.len(), 1, "新库必须有 swarm_items_by_id");
-
-    execute(&mut connection, "DROP TABLE swarm_items").await;
-    let tables = super::read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
-        .await
-        .unwrap();
-    let error = super::check_current_shape(&tables).unwrap_err();
-    assert!(error.contains("swarm_items"), "{error}");
 }
 
 /// 可选表存在时仍必须同形：同名异形的凭证表是别的对象，不能因为「可选」而放行。

@@ -192,12 +192,11 @@ async fn history_rows(fixture: &Fixture, thread: &ThreadId) -> i64 {
         .unwrap()
 }
 
-/// 契约与版本代数是本代：`v10` + 16（Swarm 表这一代只追加对象）。
+/// 契约与版本代数是本代：`v9` + 15。
 #[test]
 fn the_mq_generation_is_the_current_contract() {
-    assert_eq!(schema::STORE_CONTRACT, "peri.session.store/v10");
-    assert_eq!(schema::REMOTE_SCHEMA_VERSION, 16);
-    assert_eq!(schema::V15_STORE_CONTRACT, "peri.session.store/v9");
+    assert_eq!(schema::STORE_CONTRACT, "peri.session.store/v9");
+    assert_eq!(schema::REMOTE_SCHEMA_VERSION, 15);
     assert_eq!(
         schema::PREVIOUS_CURRENT_STORE_CONTRACT,
         "peri.session.store/v8"

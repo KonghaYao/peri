@@ -81,24 +81,6 @@ pub(in crate::sessions::remote) fn open_step(
     }
 }
 
-/// 只读打开是否使用**压缩前形状**（`v2` 契约，10|11）的老投影。
-///
-/// 老投影用占位列补 `archived` / 工作快照等后加列；v14/v15 等后续代际已经具备这些列，
-/// 继续用老投影会把真实 `work_state` / `context_usage_tokens` 读成 `idle` / NULL。
-/// 判据因此只看形状代数，不看「是否为本构建」。
-pub(in crate::sessions::remote) fn legacy_read_projection(
-    read: &StoreIdentityRead,
-    access: StoreAccess,
-) -> bool {
-    access == StoreAccess::ReadOnly
-        && matches!(
-            read,
-            StoreIdentityRead::Present(snapshot)
-                if snapshot.contract == schema::PREVIOUS_STORE_CONTRACT
-                    && matches!(snapshot.schema_version, 10 | 11)
-        )
-}
-
 /// 只读旧契约打开的末次身份校验；升级或身份替换期间不能交付旧版读法。
 pub(in crate::sessions::remote) fn verify_legacy_open_identity(
     initial: &StoreIdentityRead,

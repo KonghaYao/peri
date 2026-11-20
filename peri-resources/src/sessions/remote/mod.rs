@@ -150,7 +150,6 @@ mod schema_probe_tests;
 #[cfg(test)]
 #[path = "schema_upgrade_input_test.rs"]
 mod schema_upgrade_input_tests;
-
 mod session_archive;
 mod session_catalog;
 mod session_codec;
@@ -165,10 +164,6 @@ mod session_settlement;
 mod session_sql;
 mod session_write;
 mod statement_spec;
-mod swarm_store;
-#[cfg(test)]
-#[path = "swarm_store_test.rs"]
-mod swarm_store_tests;
 use statement_spec as sql;
 
 pub(crate) use composition::open_remote;

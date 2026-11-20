@@ -37,7 +37,7 @@ pub(super) use dispatch::upgrade;
 #[cfg(test)]
 pub(super) use input::read_input;
 #[cfg(test)]
-pub(super) use plan::{additive_upgrade_plan, swarm_addition_plan, upgrade_plan, v15_cleanup_plan};
+pub(super) use plan::{additive_upgrade_plan, upgrade_plan, v15_cleanup_plan};
 #[cfg(test)]
 pub(super) use statements::{
     GUARD_BINDING_COUNT_SQL, GUARD_MESSAGES_COUNT_SQL, GUARD_META_SQL,

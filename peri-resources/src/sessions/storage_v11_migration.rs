@@ -224,13 +224,6 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
     sqlx::query(canonical::CREATE_THREAD_MQ_TABLE_SQL)
         .execute(&mut *connection)
         .await?;
-    // v16 追加的 Swarm 四表：索引重放已含 `swarm_items_by_id`，表必须先于索引建出。
-    for statement in canonical::CREATE_SWARM_TABLES {
-        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
-        sqlx::query(sqlx::AssertSqlSafe(*statement))
-            .execute(&mut *connection)
-            .await?;
-    }
     // 迁移终点必须带齐 canonical 索引集：`DROP TABLE` 会把旧表上的索引一并删掉，而输入库
     // 也可能本来就缺索引（`user_version` 已是 11 的开发期库）。整表重放一次是幂等的，
     // 也是「一个 schema、两种执行器」在索引上的同一份语句（远端批次末尾同样整表重放）。

@@ -127,9 +127,5 @@ mod schema_v14_tests;
 mod schema_v15_tests;
 
 #[cfg(test)]
-#[path = "sqlite_store/schema_v16_test.rs"]
-mod schema_v16_tests;
-
-#[cfg(test)]
 #[path = "sqlite_store/session_id_environment_test.rs"]
 mod session_id_environment_tests;

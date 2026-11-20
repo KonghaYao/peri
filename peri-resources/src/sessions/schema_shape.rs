@@ -225,58 +225,7 @@ const THREAD_MQ_COLUMNS: &[&str] = &[
     "original_draft",
 ];
 
-/// Swarm 会话列（v16 追加，design §4.3）：instructions、mcp_json 与 environment 是 S3
-/// 行类型的字段，分别以可空文本、可空 canonical JSON 文本与 canonical JSON 文本保存。
-const SWARM_SESSIONS_COLUMNS: &[&str] = &[
-    "logical_id",
-    "root_session_id",
-    "actor_key",
-    "cwd",
-    "state",
-    "model",
-    "instructions",
-    "mcp_json",
-    "environment_json",
-    "created_at",
-    "last_activity_at",
-    "last_item_seq",
-];
-
-/// Swarm item 列（v16 追加）：source 与 payload_json 都是 JSON 文本。
-const SWARM_ITEMS_COLUMNS: &[&str] = &[
-    "logical_id",
-    "seq",
-    "item_id",
-    "kind",
-    "source",
-    "payload_json",
-    "created_at",
-    "truncated",
-];
-
-/// Swarm 输入收据列（v16 追加）：fingerprint 只保存事实，冲突由上层判定。
-const SWARM_INPUTS_COLUMNS: &[&str] = &[
-    "logical_id",
-    "input_id",
-    "fingerprint",
-    "state",
-    "created_at",
-];
-
-/// Swarm 绑定列（v16 追加）：logical_id 不唯一，允许诊断/灰度期间多环境映射同一 Agent。
-const SWARM_BINDINGS_COLUMNS: &[&str] = &[
-    "logical_env_id",
-    "logical_id",
-    "sandbox_id",
-    "workspace_path",
-    "sandbox_root",
-    "settings_profile",
-    "token_file",
-    "last_run_id",
-    "last_used_at",
-];
-
-/// 上一代当前形状（v12）的逐表声明：v15 当前形状去掉 `thread_mq` 与两列工作快照后的
+/// 上一代当前形状（v12）的逐表声明：本代（v15）当前形状去掉 `thread_mq` 与两列工作快照后的
 /// **冻结快照**。v13 的 `threads` 形状与它相同，因此同一份声明同时服务 v12 与 v13 的
 /// 形状判定。
 ///
@@ -430,58 +379,6 @@ pub(super) const THREAD_MQ_TABLE: TableShape = TableShape {
     primary_key: &["thread_id", "id"],
 };
 
-/// Swarm 会话表（v16 追加）：缺表即不是本代形状。`last_item_seq` 是投影缓存，不是权威值。
-const SWARM_SESSIONS_TABLE_SHAPE: TableShape = TableShape {
-    name: "swarm_sessions",
-    optional: false,
-    columns: SWARM_SESSIONS_COLUMNS,
-    not_null: &[
-        "root_session_id",
-        "actor_key",
-        "cwd",
-        "state",
-        "environment_json",
-        "created_at",
-        "last_activity_at",
-        "last_item_seq",
-    ],
-    primary_key: &["logical_id"],
-};
-
-/// Swarm item 表（v16 追加）：`(logical_id, seq)` 是主键；`item_id` 允许重复
-/// （同一流式消息的 delta 与 complete 行复用稳定 id）。
-const SWARM_ITEMS_TABLE_SHAPE: TableShape = TableShape {
-    name: "swarm_items",
-    optional: false,
-    columns: SWARM_ITEMS_COLUMNS,
-    not_null: SWARM_ITEMS_COLUMNS,
-    primary_key: &["logical_id", "seq"],
-};
-
-/// Swarm 输入收据表（v16 追加）：`(logical_id, input_id)` 是幂等裁决点。
-const SWARM_INPUTS_TABLE_SHAPE: TableShape = TableShape {
-    name: "swarm_inputs",
-    optional: false,
-    columns: SWARM_INPUTS_COLUMNS,
-    not_null: SWARM_INPUTS_COLUMNS,
-    primary_key: &["logical_id", "input_id"],
-};
-
-/// Swarm 绑定表（v16 追加）：`logical_env_id` 是身份，`logical_id` 不唯一。
-const SWARM_BINDINGS_TABLE_SHAPE: TableShape = TableShape {
-    name: "swarm_bindings",
-    optional: false,
-    columns: SWARM_BINDINGS_COLUMNS,
-    not_null: &[
-        "logical_id",
-        "sandbox_id",
-        "workspace_path",
-        "sandbox_root",
-        "last_used_at",
-    ],
-    primary_key: &["logical_env_id"],
-};
-
 /// 把声明里的 `threads` 换成给定形状，其余表原样保留。///
 /// 各代之间只有 `threads` 在变长（v14 补两列工作快照），逐代另抄一份全表声明会让形状
 /// 第二次各自维护；`TableShape` 没有 `Copy`，所以这里按引用替换。
@@ -531,16 +428,13 @@ const V13_THREADS_TABLE: TableShape = TableShape {
     primary_key: &["id"],
 };
 
-/// 上一代当前形状（v15）的逐表声明：v14 去掉两张 inherited 派生索引表，三张被重建的表换成
+/// 当前形状（v15）的逐表声明：v14 去掉两张 inherited 派生索引表，三张被重建的表换成
 /// v15 形状（`projects` 无 `object_identity`、`workspaces` 无 `identity`、
 /// `session_bindings` 无 `evidence_origin`）。
 ///
-/// **冻结**：v16 只追加 `swarm_*` 表，v15 的九张表与列不随 [`current_tables`] 漂移；升级来源
-/// 的形状判定必须按 v15 自己不按本代声明，否则健康的 v15 库会被判成漂移。
-///
-/// 用函数而不是 `const` 拼接：v15 形状就是「v14 声明 − 退役表 + 本代改形的表」，另抄一份全表
-/// 声明会让两份形状第二次各自维护。
-pub(super) fn v15_tables() -> Vec<&'static TableShape> {
+/// 用函数而不是 `const` 拼接：本代形状就是「上一代声明 − 退役表 + 本代改形的表」，另抄
+/// 一份全表声明会让两份形状第二次各自维护。
+pub(super) fn current_tables() -> Vec<&'static TableShape> {
     let v14 = v14_tables();
     v14.iter()
         .filter(|table| {
@@ -555,33 +449,12 @@ pub(super) fn v15_tables() -> Vec<&'static TableShape> {
         .collect()
 }
 
-/// 当前形状（v16）的逐表声明：v15 的九张表原样保留，追加 `swarm_*` 四表。
-///
-/// 四张新表都是**必需**表：它们承载 Swarm 自有事实，没有回退来源；缺表必须由升级路径建出来，
-/// 不能把「表不在」当成空数据继续服务。
-pub(super) fn current_tables() -> Vec<&'static TableShape> {
-    v15_tables()
-        .into_iter()
-        .chain([
-            &SWARM_SESSIONS_TABLE_SHAPE,
-            &SWARM_ITEMS_TABLE_SHAPE,
-            &SWARM_INPUTS_TABLE_SHAPE,
-            &SWARM_BINDINGS_TABLE_SHAPE,
-        ])
-        .collect()
-}
-
-/// 当前形状（v16）的表名序列：`current_tables()`（九张 v15 表 + 四张 swarm 表）。
+/// 当前形状（v15）的表名序列：`current_tables()`（九张表，两张 inherited 派生索引已退役）。
 ///
 /// 远端打开按它逐表下发 `PRAGMA table_xinfo`：探测面与 [`check_current_shape`] 的判定面
 /// 必须逐表一致，否则会出现「读了却没判」的表。
 pub(super) fn current_table_names() -> impl Iterator<Item = &'static str> {
     current_tables().into_iter().map(|table| table.name)
-}
-
-/// 上一代当前形状（v15）的表名序列：远端只读探测与升级批次使用。
-pub(super) fn v15_table_names() -> impl Iterator<Item = &'static str> {
-    v15_tables().into_iter().map(|table| table.name)
 }
 
 /// 压缩前形状的 `threads` 列（14 列；当前形状的 `workspace_id` / `archived` 与两列工作
@@ -779,10 +652,6 @@ pub(super) const CURRENT_COLUMNS_SQL: &str = "SELECT 'machines' AS t, name, \"no
     UNION ALL SELECT 'mcp_oauth_credentials', name, \"notnull\", pk, cid FROM pragma_table_xinfo('mcp_oauth_credentials')
     UNION ALL SELECT 'session_close_intents', name, \"notnull\", pk, cid FROM pragma_table_xinfo('session_close_intents')
     UNION ALL SELECT 'thread_mq', name, \"notnull\", pk, cid FROM pragma_table_xinfo('thread_mq')
-    UNION ALL SELECT 'swarm_sessions', name, \"notnull\", pk, cid FROM pragma_table_xinfo('swarm_sessions')
-    UNION ALL SELECT 'swarm_items', name, \"notnull\", pk, cid FROM pragma_table_xinfo('swarm_items')
-    UNION ALL SELECT 'swarm_inputs', name, \"notnull\", pk, cid FROM pragma_table_xinfo('swarm_inputs')
-    UNION ALL SELECT 'swarm_bindings', name, \"notnull\", pk, cid FROM pragma_table_xinfo('swarm_bindings')
     ORDER BY 1, 5";
 
 /// 读回迁移输入形状的全部列形状（缺表在结果里没有行，由[`check_input`]判定）。
@@ -918,22 +787,11 @@ pub(super) fn check_v13_shape(tables: &HashMap<String, Vec<ActualColumn>>) -> Re
     Ok(())
 }
 
-/// 完整当前形状（v16）：`current_tables()` 逐表严格判定。
+/// 完整当前形状（v15）：`current_tables()` 逐表严格判定。
 pub(super) fn check_current_shape(
     tables: &HashMap<String, Vec<ActualColumn>>,
 ) -> Result<(), String> {
     for table in current_tables() {
-        let actual = tables.get(table.name).map(Vec::as_slice).unwrap_or(&[]);
-        check_strict(table, actual)?;
-    }
-    Ok(())
-}
-
-/// 上一代当前形状（v15）：只判定九张会话表；`swarm_*` 表不存在是正常的（本代才追加）。
-///
-/// 只用于把 v15 的库认成升级来源（本机写打开与远端写打开），读取面不经过它。
-pub(super) fn check_v15_shape(tables: &HashMap<String, Vec<ActualColumn>>) -> Result<(), String> {
-    for table in v15_tables() {
         let actual = tables.get(table.name).map(Vec::as_slice).unwrap_or(&[]);
         check_strict(table, actual)?;
     }
