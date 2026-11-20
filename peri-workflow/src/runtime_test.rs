@@ -689,6 +689,217 @@ fn retirement_without_producer_end_keeps_watermark_and_cancel_fence() {
     );
 }
 
+/// [回归测试] 最后一个 run 结束后没有后续 workflow 工作：实例必须按最近的终态
+/// 到期时间自行唤醒清扫，释放含完整输出的进度快照（内存审查 P1-B）。
+#[tokio::test(start_paused = true)]
+async fn idle_instance_releases_terminal_run_at_retention_expiry() {
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    let run_id = "run-idle";
+    apply_run_started(&runtime, run_id);
+    apply_run_done(&runtime, run_id, "completed");
+
+    // 未到期：完整结果仍可按产品契约查询。
+    advance_sweeper_clock(std::time::Duration::from_secs(299)).await;
+    assert!(
+        runtime.run_snapshot(run_id).is_some(),
+        "五分钟保留窗口内的终态快照必须可查"
+    );
+
+    // 到期：即使没有下一次 workflow 工作，快照也必须释放。
+    advance_sweeper_clock(std::time::Duration::from_secs(2)).await;
+    assert!(
+        runtime.run_snapshot(run_id).is_none(),
+        "空闲实例必须按到期释放最后一批完整结果（P1-B）"
+    );
+}
+
+/// [回归测试] 新 run 到达重置清扫定时器：到期时间按当前终态重新计算，运行中的
+/// run 不被旧截止时刻提前淘汰（内存审查 P1-B）。
+#[tokio::test(start_paused = true)]
+async fn new_run_resets_expiry_deadline() {
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    apply_run_started(&runtime, "run-a");
+    apply_run_done(&runtime, "run-a", "completed");
+
+    // 新 run 在 run-a 的保留窗口内到达：定时器按当前状态重置。
+    advance_sweeper_clock(std::time::Duration::from_secs(120)).await;
+    apply_run_started(&runtime, "run-b");
+
+    // run-a 到期：只退役自身；运行中的 run-b 继续可见。
+    advance_sweeper_clock(std::time::Duration::from_secs(181)).await;
+    assert!(
+        runtime.run_snapshot("run-a").is_none(),
+        "最早的终态到期时刻必须仍被唤醒清扫"
+    );
+    assert!(
+        runtime.run_snapshot("run-b").is_some(),
+        "运行中的 run 不得被上一次的到期时刻淘汰"
+    );
+
+    // run-b 结束后按它自己的完成时刻重新开窗。
+    apply_run_done(&runtime, "run-b", "completed");
+    advance_sweeper_clock(std::time::Duration::from_secs(299)).await;
+    assert!(
+        runtime.run_snapshot("run-b").is_some(),
+        "新终态的保留窗口从自身完成时刻起算"
+    );
+    advance_sweeper_clock(std::time::Duration::from_secs(2)).await;
+    assert!(
+        runtime.run_snapshot("run-b").is_none(),
+        "新终态同样按到期释放"
+    );
+}
+
+/// [回归测试] 实例关闭撤销到期唤醒：关闭后不再有定时清扫（内存审查 P1-B）。
+#[tokio::test(start_paused = true)]
+async fn close_cancels_expiry_sweep() {
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    let run_id = "run-closed";
+    apply_run_started(&runtime, run_id);
+    apply_run_done(&runtime, run_id, "completed");
+
+    runtime.mark_closed();
+    // 关闭后迟到的终态事件也不得重新登记唤醒。
+    apply_run_done(&runtime, run_id, "completed");
+
+    advance_sweeper_clock(std::time::Duration::from_secs(301)).await;
+    assert!(
+        runtime.run_snapshot(run_id).is_some(),
+        "实例关闭后清扫唤醒必须撤销"
+    );
+}
+
+/// [回归测试] 到期清扫只退役进度快照：未 ACK 的完成通知、迟到事件的取消栅栏与
+/// 事件水位仍按既有保留窗口和生产者结算语义保留（内存审查 P1-B）。
+#[tokio::test(start_paused = true)]
+async fn expiry_keeps_unacked_completion_and_cancel_fences() {
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryStatus, ExecutionStatus, PostProcessingStatus,
+    };
+
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    let run_id = "run-delivery";
+    apply_run_started(&runtime, run_id);
+    runtime
+        .tasks()
+        .cancel_run(run_id, Some("workflow run killed".into()));
+    apply_run_done(&runtime, run_id, "killed");
+
+    let ticket = runtime
+        .registry()
+        .reserve(crate::registry::WorkflowRun {
+            run_id: run_id.into(),
+            workflow_name: "t".into(),
+            script_preview: "return 1".into(),
+            status: crate::registry::WorkflowRunStatus::Running,
+            started_at: std::time::Instant::now(),
+            child_handle: None,
+            kill_tx: None,
+        })
+        .expect("the run reservation fixture result is required for this assertion");
+    assert!(runtime.registry().complete(
+        &ticket,
+        crate::registry::WorkflowTaskResult {
+            run_id: run_id.into(),
+            workflow_name: "t".into(),
+            success: false,
+            status: crate::registry::WorkflowRunStatus::Killed,
+            execution_status: ExecutionStatus::Killed,
+            acceptance_status: AcceptanceStatus::Unknown,
+            post_processing_status: PostProcessingStatus::Unknown,
+            delivery_status: DeliveryStatus::Blocked,
+            outcome: Default::default(),
+            state_artifact_exists: false,
+            duration_ms: 0,
+            agent_count: 0,
+            tool_calls_count: 0,
+            error: Some("killed".into()),
+            result_preview: None,
+            phase_summaries: Vec::new(),
+            attempts: Vec::new(),
+        },
+        peri_acp_types::tasks::TaskRecord {
+            task_id: run_id.into(),
+            kind: peri_acp_types::tasks::BgTaskKind::Workflow,
+            summary: "t".into(),
+            started_at: "2026-11-11T00:00:00Z".into(),
+            status: "cancelled".into(),
+            duration_ms: 0,
+            output_preview: None,
+            initiator_session_id: None,
+            child_thread_id: None,
+        },
+    ));
+
+    // 窗口内：迟到任务仍受取消栅栏约束，完成通知等待 ACK。
+    advance_sweeper_clock(std::time::Duration::from_secs(299)).await;
+    assert_eq!(
+        publish_state(&runtime, run_id, 21, "in-window"),
+        Some(crate::runtime::WorkflowTaskState::Cancelled),
+        "可见 run 的取消栅栏不得被清扫提前释放"
+    );
+    assert_eq!(runtime.registry().pending_completions().len(), 1);
+
+    // 到期：只退役进度快照；生产者未结算时水位与栅栏继续驻留。
+    advance_sweeper_clock(std::time::Duration::from_secs(2)).await;
+    assert!(runtime.run_snapshot(run_id).is_none());
+    assert!(
+        runtime.event_watermark(run_id) > 0,
+        "生产者未结束前事件水位不得回收"
+    );
+    assert_eq!(
+        publish_state(&runtime, run_id, 22, "after-expiry"),
+        Some(crate::runtime::WorkflowTaskState::Cancelled),
+        "生产者未结束前迟到任务仍受取消约束"
+    );
+    assert_eq!(
+        runtime.registry().pending_completions().len(),
+        1,
+        "未 ACK 的完成通知不随进度快照退役"
+    );
+
+    // 生产者结束：既有回收语义不变。
+    runtime.progress_store().note_producer_finished(run_id);
+    assert_eq!(runtime.event_watermark(run_id), 0);
+    assert_eq!(
+        publish_state(&runtime, run_id, 23, "after-producer"),
+        Some(crate::runtime::WorkflowTaskState::Published)
+    );
+    assert_eq!(
+        runtime.registry().pending_completions().len(),
+        1,
+        "完成通知仍等宿主 ACK"
+    );
+}
+
+/// 推进暂停的 tokio 时钟，并给到期清扫任务一次运行机会。
+async fn advance_sweeper_clock(duration: std::time::Duration) {
+    tokio::time::advance(duration).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+}
+
 fn apply_run_started(runtime: &WorkflowRuntime, run_id: &str) {
     runtime
         .progress_store()
