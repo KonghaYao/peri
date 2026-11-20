@@ -1,10 +1,19 @@
 import { timingSafeEqual } from 'node:crypto';
 import { SandboxError } from '../instance/types.js';
+import {
+  COLD_WORKSPACE_PROTOCOL_VERSION,
+  COLD_WORKSPACE_PROVIDER_VERSION,
+  coldDiscoverResult,
+  coldInitializeResult,
+  coldToolsListResult,
+} from './cold-tools.js';
 import { assertLogicalEnvId, SwarmError } from './errors.js';
 import { forwardSandboxMcp } from './forward.js';
-import type { SwarmManager, SwarmSandboxDescription } from './manager.js';
+import type { SwarmManager, SwarmSandboxDescription, SwarmSandboxEntry } from './manager.js';
+import { probeWorkspaceProviderVersion } from './provider-probe.js';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
+const MCP_PROTOCOL_HEADERS = { 'mcp-protocol-version': COLD_WORKSPACE_PROTOCOL_VERSION };
 
 /** HTTP projection of a reserved, running or previously bound sandbox. Never contains the inner token. */
 export interface SwarmSandboxView {
@@ -16,12 +25,20 @@ export interface SwarmSandboxView {
   readonly mcpUrl: string | null;
   readonly lastUsedAt: string;
   readonly lastError: { code: string; message: string } | null;
+  /** `serverInfo.version` reported by the running provider; `null` before the first probe. */
+  readonly providerVersion: string | null;
 }
 
 export interface SwarmServerOptions {
   readonly manager: SwarmManager;
   /** When set, `/v1/*` and `/sandboxes/*` require `Authorization: Bearer <token>`. */
   readonly token?: string;
+  /**
+   * Version the deployment expects from the workspace provider. Defaults to the
+   * version recorded in the generated cold snapshot. A different value never
+   * rejects the tool surface; it is reported in `_meta.peri.swarmDiagnostics`.
+   */
+  readonly workspaceProviderVersion?: string;
 }
 
 export type SwarmRequestHandler = (request: Request) => Promise<Response>;
@@ -49,7 +66,11 @@ function decodeSegment(value: string): string | null {
   }
 }
 
-function viewOf(description: SwarmSandboxDescription, origin: string): SwarmSandboxView {
+function viewOf(
+  description: SwarmSandboxDescription,
+  origin: string,
+  providerVersion: string | null,
+): SwarmSandboxView {
   return {
     logicalEnvId: description.logicalEnvId,
     sandboxId: description.sandboxId,
@@ -62,6 +83,7 @@ function viewOf(description: SwarmSandboxDescription, origin: string): SwarmSand
         : new URL(`/sandboxes/${encodeURIComponent(description.logicalEnvId)}/mcp`, origin).toString(),
     lastUsedAt: description.lastUsedAt,
     lastError: description.lastError,
+    providerVersion,
   };
 }
 
@@ -97,8 +119,94 @@ function mapError(error: unknown): Response {
 export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmRequestHandler {
   if (options.token !== undefined && options.token.length === 0)
     throw new SwarmError('invalid_config', 'PERI_SWARM_BUN_TOKEN must not be empty.');
+  const expectedProviderVersion = options.workspaceProviderVersion ?? COLD_WORKSPACE_PROVIDER_VERSION;
+  if (expectedProviderVersion.trim().length === 0)
+    throw new SwarmError('invalid_config', 'workspaceProviderVersion must not be empty.');
+  if (expectedProviderVersion !== COLD_WORKSPACE_PROVIDER_VERSION)
+    console.warn('cold workspace snapshot provider version differs from the deployment expectation', {
+      expected: expectedProviderVersion,
+      actual: COLD_WORKSPACE_PROVIDER_VERSION,
+    });
   const manager = options.manager;
   const expected = options.token === undefined ? undefined : Buffer.from(options.token);
+  /** Last observed provider version per logical environment, keyed by run id. */
+  const observedVersions = new Map<string, { runId: string; version: string | null }>();
+  const probes = new Map<string, Promise<string | null>>();
+
+  function observedProviderVersion(logicalEnvId: string): string | null {
+    const entry = manager.get(logicalEnvId);
+    if (entry === undefined) return null;
+    const observed = observedVersions.get(logicalEnvId);
+    return observed !== undefined && observed.runId === entry.runId ? observed.version : null;
+  }
+
+  /**
+   * Probe the started provider once per run. A mismatch is logged with version
+   * strings only: URLs and bearer tokens never enter diagnostics or logs.
+   */
+  async function observeProviderVersion(entry: SwarmSandboxEntry): Promise<void> {
+    const cached = observedVersions.get(entry.logicalEnvId);
+    if (cached !== undefined && cached.runId === entry.runId) return;
+    const key = `${entry.logicalEnvId}\u0000${entry.runId}`;
+    let pending = probes.get(key);
+    if (pending === undefined) {
+      pending = probeWorkspaceProviderVersion(entry)
+        .catch(() => null)
+        .finally(() => probes.delete(key));
+      probes.set(key, pending);
+    }
+    const version = await pending;
+    observedVersions.set(entry.logicalEnvId, { runId: entry.runId, version });
+    if (version !== null && version !== expectedProviderVersion)
+      console.warn('workspace provider version mismatch', {
+        logicalEnvId: entry.logicalEnvId,
+        expected: expectedProviderVersion,
+        actual: version,
+      });
+  }
+
+  function jsonRpcResult(id: unknown, result: Record<string, unknown>): Response {
+    return jsonResponse(200, { jsonrpc: '2.0', id, result }, MCP_PROTOCOL_HEADERS);
+  }
+
+  function notificationAccepted(): Response {
+    return new Response(null, { status: 202, headers: MCP_PROTOCOL_HEADERS });
+  }
+
+  /**
+   * Answer the MCP warm-up exchanges that need no sandbox.
+   *
+   * Returns `null` when the message needs the real provider (for example
+   * `tools/call`); the caller then starts the single-flight instance and
+   * forwards the original bytes.
+   */
+  function coldMcpResponse(text: string): Response | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const message = parsed as Record<string, unknown>;
+    const method = message.method;
+    if (typeof method !== 'string') return null;
+    // Notifications (including `notifications/initialized`) are acknowledged
+    // without starting the sandbox: there is nothing to forward yet.
+    if (!Object.hasOwn(message, 'id')) return notificationAccepted();
+    switch (method) {
+      case 'initialize':
+        return jsonRpcResult(message.id, coldInitializeResult(expectedProviderVersion));
+      case 'server/discover':
+        return jsonRpcResult(message.id, coldDiscoverResult(expectedProviderVersion));
+      case 'tools/list':
+        return jsonRpcResult(message.id, coldToolsListResult(expectedProviderVersion));
+      case 'ping':
+        return jsonRpcResult(message.id, {});
+      default:
+        return null;
+    }
+  }
 
   async function ensureSandbox(request: Request, url: URL): Promise<Response> {
     let body: unknown;
@@ -119,18 +227,22 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
     if (lazy === true) {
       // Lazy reservation: allocate identity/path/URL only, never start SRT here.
       const reservation = await manager.reserve(logicalEnvId);
-      return jsonResponse(200, { sandbox: viewOf(reservation, url.origin) });
+      return jsonResponse(200, { sandbox: viewOf(reservation, url.origin, null) });
     }
     const entry = await manager.ensure(logicalEnvId);
     const description = manager.describe(entry.logicalEnvId);
     if (description === undefined) throw new SwarmError('invalid_config', 'sandbox started without a description.');
-    return jsonResponse(200, { sandbox: viewOf(description, url.origin) });
+    return jsonResponse(200, {
+      sandbox: viewOf(description, url.origin, observedProviderVersion(description.logicalEnvId)),
+    });
   }
 
   function getSandbox(url: URL, logicalEnvId: string): Response {
     const description = manager.describe(logicalEnvId);
     if (description === undefined) return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
-    return jsonResponse(200, { sandbox: viewOf(description, url.origin) });
+    return jsonResponse(200, {
+      sandbox: viewOf(description, url.origin, observedProviderVersion(logicalEnvId)),
+    });
   }
 
   async function deleteSandbox(url: URL, logicalEnvId: string): Promise<Response> {
@@ -149,16 +261,7 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
     });
   }
 
-  async function proxyMcp(logicalEnvId: string, request: Request): Promise<Response> {
-    let entry = manager.get(logicalEnvId);
-    if (entry === undefined || entry.instance.state !== 'ready') {
-      // A real MCP request is the start trigger for a reserved environment.
-      // A binding without a reservation (stopped/unknown) is not revived here.
-      if (!manager.canStart(logicalEnvId)) return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
-      entry = await manager.ensure(logicalEnvId);
-    }
-    if (entry.instance.state !== 'ready')
-      return errorResponse(503, 'sandbox_not_ready', `sandbox is ${entry.instance.state}.`);
+  async function forward(entry: SwarmSandboxEntry, request: Request): Promise<Response> {
     try {
       return await forwardSandboxMcp(entry, request);
     } catch (error) {
@@ -168,6 +271,45 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
         error instanceof Error ? error.message : 'sandbox MCP request failed.',
       );
     }
+  }
+
+  async function proxyMcp(logicalEnvId: string, request: Request): Promise<Response> {
+    const running = manager.get(logicalEnvId);
+    if (running !== undefined && running.instance.state === 'ready') return await forward(running, request);
+
+    // A binding without a reservation (stopped/unknown) is not revived here.
+    if (!manager.canStart(logicalEnvId)) return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
+
+    // Stream/session operations have no cold answer. Starting SRT just to open
+    // an idle SSE stream would defeat lazy reservation, so they get an explicit
+    // 405 until a real tool call starts the instance.
+    if (request.method !== 'POST')
+      return errorResponse(405, 'sandbox_cold', 'sandbox is reserved; the first tools/call starts it.', {
+        allow: 'POST',
+      });
+
+    let body: string;
+    try {
+      body = await request.text();
+    } catch {
+      return errorResponse(400, 'invalid_request', 'request body could not be read.');
+    }
+    const cold = coldMcpResponse(body);
+    if (cold !== null) return cold;
+
+    // Everything the snapshot cannot answer (tools/call and every other
+    // request) starts the instance through the manager's single-flight path.
+    const entry = await manager.ensure(logicalEnvId);
+    if (entry.instance.state !== 'ready')
+      return errorResponse(503, 'sandbox_not_ready', `sandbox is ${entry.instance.state}.`);
+    await observeProviderVersion(entry);
+    const forwarded = new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body,
+      signal: request.signal,
+    });
+    return await forward(entry, forwarded);
   }
 
   async function route(request: Request): Promise<Response> {

@@ -34,7 +34,11 @@ function mcpRequest(logicalEnvId: string, method = 'POST'): Request {
   return new Request(`${BASE}/sandboxes/${logicalEnvId}/mcp`, {
     method,
     headers: { authorization: 'Bearer outer-secret', 'content-type': 'application/json' },
-    ...(method === 'POST' ? { body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' } : {}),
+    ...(method === 'POST'
+      ? {
+          body: '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"Read","arguments":{"file_path":"a.txt"}}}',
+        }
+      : {}),
   });
 }
 
