@@ -226,17 +226,12 @@ pub fn parse_markdown_chunks_cached(
     }
 
     let append_only = input.starts_with(cache.chunk_source.as_str());
-    let sunken = peri_theme::atoms::THEME_ATOM
-        .state()
-        .read()
-        .semantic
-        .surface
-        .sunken;
+    let theme_colors = ChunkTheme::current();
     let reusable = append_only
         && cache.chunk_width == max_width as u16
         && cache.chunk_palette == palette
         && cache.chunk_base_fg == base_fg
-        && cache.chunk_sunken == Some(sunken);
+        && cache.chunk_theme == Some(theme_colors);
     if append_only && !reusable && !cache.stable_chunk_blocks.is_empty() {
         cache.stable_chunks = cache
             .stable_chunk_blocks
@@ -324,7 +319,7 @@ pub fn parse_markdown_chunks_cached(
     cache.chunk_width = max_width as u16;
     cache.chunk_palette = palette;
     cache.chunk_base_fg = base_fg;
-    cache.chunk_sunken = Some(sunken);
+    cache.chunk_theme = Some(theme_colors);
     RenderedMarkdown {
         stable: cache.stable_chunks.clone(),
         tail,
@@ -488,6 +483,29 @@ impl RenderedMarkdown {
     }
 }
 
+/// Theme colors read while rendering stable chunks.
+///
+/// The same values gate cache reuse: a theme switch that only changes heading or
+/// muted colors would otherwise keep frozen chunks on the previous palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ChunkTheme {
+    heading_fg: Color,
+    sunken_bg: Color,
+    muted_fg: Color,
+}
+
+impl ChunkTheme {
+    fn current() -> Self {
+        let state = peri_theme::atoms::THEME_ATOM.state();
+        let theme = state.read();
+        Self {
+            heading_fg: theme.semantic.text.primary,
+            sunken_bg: theme.semantic.surface.sunken,
+            muted_fg: theme.semantic.text.muted,
+        }
+    }
+}
+
 /// 单个 markdown 渲染缓存（每个 AssistantBubble / UserBubble 一个）。
 #[derive(Clone, Debug, Default)]
 pub struct MarkdownRenderCache {
@@ -505,7 +523,8 @@ pub struct MarkdownRenderCache {
     pub(super) chunk_width: u16,
     pub(super) chunk_palette: Palette,
     pub(super) chunk_base_fg: Color,
-    pub(super) chunk_sunken: Option<Color>,
+    /// Frozen chunks embed `THEME_ATOM` colors; reuse must compare the same set.
+    pub(super) chunk_theme: Option<ChunkTheme>,
     pub(super) stable_source_end: usize,
     pub(super) stable_chunk_blocks: Vec<Vec<ratatui_kit_markdown::ParsedBlock>>,
     /// 与 `stable_chunk_blocks` 等长的围栏元数据槽（已转换为全局原文坐标）。

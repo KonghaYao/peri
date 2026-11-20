@@ -986,7 +986,7 @@ fn test_selection_reversed_modifier_survives_no_color_strip() {
         10,
         Style::default().add_modifier(Modifier::REVERSED),
     );
-    let stripped = super::super::no_color::strip_line_colors(&highlighted);
+    let stripped = peri_tui_components::style::strip_line_colors(&highlighted);
     assert!(
         stripped.spans.iter().all(|s| s.style.bg.is_none()),
         "NO_COLOR pass 必须剥离背景色"

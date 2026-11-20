@@ -15,6 +15,7 @@ use ratatui_kit::crossterm::event::MouseEventKind;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Constraint;
 use ratatui_kit::ratatui::layout::Direction;
+use ratatui_kit::ratatui::style::Color;
 use ratatui_kit::ratatui::style::Modifier;
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::style::Stylize;
@@ -63,6 +64,14 @@ pub(crate) fn mention_candidates(items: &[String], prefix: &str) -> Vec<String> 
         .collect()
 }
 
+/// 提及行：单列 label，着色由宿主主题给出。
+fn mention_rows(filtered: &[String], label_color: Color) -> Vec<CompletionRow<'static>> {
+    filtered
+        .iter()
+        .map(|item| CompletionRow::new(Line::from(item.clone()).fg(label_color)))
+        .collect()
+}
+
 /// Confirm（Enter）落点：空候选关闭弹窗，否则选中钳制后的条目。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MentionConfirm {
@@ -74,7 +83,7 @@ pub(crate) fn confirm_outcome(selection: usize, item_count: usize) -> MentionCon
     if item_count == 0 {
         MentionConfirm::Cancel
     } else {
-        MentionConfirm::Select(crate::kit::inline_nav::clamp_selection(
+        MentionConfirm::Select(peri_tui_components::list_nav::clamp_selection(
             selection, item_count,
         ))
     }
@@ -135,10 +144,7 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
         )
     };
 
-    let rows: Vec<CompletionRow<'static>> = filtered
-        .iter()
-        .map(|item| CompletionRow::new(Line::from(item.clone()).fg(label_color)))
-        .collect();
+    let rows = mention_rows(&filtered, label_color);
     let popup = CompletionPopup {
         rows,
         selected: *selection.read(),
@@ -192,12 +198,12 @@ pub fn MentionPopup(props: &MentionPopupProps, mut hooks: Hooks) -> impl Into<An
             match crate::kit::inline_nav::classify_inline_nav(&key) {
                 Some(InlineNavAction::MoveUp) => {
                     let mut s = selection.write();
-                    *s = crate::kit::inline_nav::previous_selection(*s);
+                    *s = peri_tui_components::list_nav::previous_selection(*s);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::MoveDown) => {
                     let mut s = selection.write();
-                    *s = crate::kit::inline_nav::next_selection(*s, item_count);
+                    *s = peri_tui_components::list_nav::next_selection(*s, item_count);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::Confirm) => {
@@ -247,9 +253,83 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use ratatui_kit::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui_kit::ratatui::buffer::Buffer;
+    use ratatui_kit::ratatui::layout::Rect;
+    use ratatui_kit::ratatui::widgets::Widget;
 
     fn items(count: usize) -> Vec<String> {
         (0..count).map(|i| format!("src/file-{i:02}.rs")).collect()
+    }
+
+    fn test_styles() -> CompletionStyles {
+        CompletionStyles {
+            border: Color::Blue,
+            selected_label: Style::default().fg(Color::Cyan),
+            selected_detail: Style::default().fg(Color::Cyan),
+            empty: Style::default().fg(Color::DarkGray),
+        }
+    }
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui_kit::crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// @ 真实候选：绘制行与点击命中必须来自同一个滚动窗口。
+    #[test]
+    fn test_mention_rows_and_hits_share_one_window() {
+        let filtered = mention_candidates(&items(30), "");
+        assert_eq!(filtered.len(), MAX_CANDIDATES);
+        let popup = CompletionPopup {
+            rows: mention_rows(&filtered, Color::Gray),
+            selected: 19,
+            height: 8,
+            title: Line::from(" mention "),
+            empty_text: Line::from("no matches"),
+            styles: test_styles(),
+        };
+        let area = Rect::new(4, 6, 40, 8);
+        let mut buffer = Buffer::empty(area);
+        popup.widget().render(area, &mut buffer);
+        let layout = popup.hit_layout();
+        assert_eq!(
+            layout.scroll_start, 14,
+            "选中项保持在可视窗口内，且不越过列表末端"
+        );
+
+        // 边框不可点
+        assert_eq!(popup.hit(&click(area.x + 2, area.y), area), None);
+        assert_eq!(
+            popup.hit(&click(area.x + 2, area.y + area.height - 1), area),
+            None
+        );
+
+        for visual in 0..layout.visible_items {
+            let row = area.y + 1 + visual;
+            let painted: String = (area.x..area.x + area.width)
+                .map(|x| buffer[(x, row)].symbol())
+                .collect();
+            match popup.hit(&click(area.x + 2, row), area) {
+                Some(index) => {
+                    assert_eq!(index, layout.scroll_start + visual as usize);
+                    assert!(
+                        painted
+                            .trim_end()
+                            .ends_with(&format!("src/file-{index:02}.rs")),
+                        "row {row} painted {painted:?} but hit index {index}"
+                    );
+                }
+                None => assert!(
+                    painted.trim().is_empty(),
+                    "row {row} must stay unpainted and unclickable, got {painted:?}"
+                ),
+            }
+        }
     }
 
     /// 保留 @ 的 20 条候选上限（候选条数与模糊命中两条路径）。

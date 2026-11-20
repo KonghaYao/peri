@@ -59,7 +59,7 @@ fn segment(source: &str) -> GenUiSegment {
     GenUiSegment::parse(
         source.into(),
         false,
-        crate::kit::genui::library::library().unwrap(),
+        peri_tui_components::genui::library::library().unwrap(),
     )
 }
 
@@ -436,7 +436,7 @@ fn streaming_blocks_reject_state_actions_until_closed() {
     let _guard = Guard::new();
     let source = r#"$count = 1
 root = Stack([Text("stream=" + $count), Button("advance", @Set($count, $count + 1))])"#;
-    let library = crate::kit::genui::library::library().unwrap();
+    let library = peri_tui_components::genui::library::library().unwrap();
     let theme = peri_theme::builtin::dark_theme();
     let partial = GenUiSegment::parse(source.into(), true, library);
     let rendered = crate::kit::genui::render(&partial, 80, &theme);

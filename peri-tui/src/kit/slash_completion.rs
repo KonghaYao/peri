@@ -140,7 +140,7 @@ pub(crate) fn confirm_outcome(selection: usize, item_count: usize) -> ConfirmOut
     if item_count == 0 {
         ConfirmOutcome::Submit
     } else {
-        ConfirmOutcome::Select(crate::kit::inline_nav::clamp_selection(
+        ConfirmOutcome::Select(peri_tui_components::list_nav::clamp_selection(
             selection, item_count,
         ))
     }
@@ -288,12 +288,12 @@ pub fn SlashCompletion(
             match crate::kit::inline_nav::classify_inline_nav(&key) {
                 Some(InlineNavAction::MoveUp) => {
                     let mut s = selection.write();
-                    *s = crate::kit::inline_nav::previous_selection(*s);
+                    *s = peri_tui_components::list_nav::previous_selection(*s);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::MoveDown) => {
                     let mut s = selection.write();
-                    *s = crate::kit::inline_nav::next_selection(*s, item_count);
+                    *s = peri_tui_components::list_nav::next_selection(*s, item_count);
                     EventResult::Consumed
                 }
                 Some(InlineNavAction::Confirm) => {
@@ -356,9 +356,32 @@ use crate::kit::atoms::SLASH_SELECTED_INDEX;
 mod tests {
     use super::*;
     use peri_theme::prelude::dark_theme;
+    use ratatui_kit::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui_kit::ratatui::buffer::Buffer;
+    use ratatui_kit::ratatui::layout::Rect;
+    use ratatui_kit::ratatui::style::Color;
+    use ratatui_kit::ratatui::widgets::Widget;
 
     fn semantic() -> peri_theme::semantic::SemanticTokens {
         dark_theme().semantic
+    }
+
+    fn test_styles() -> CompletionStyles {
+        CompletionStyles {
+            border: Color::Blue,
+            selected_label: Style::default().fg(Color::Cyan),
+            selected_detail: Style::default().fg(Color::Cyan),
+            empty: Style::default().fg(Color::DarkGray),
+        }
+    }
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: ratatui_kit::crossterm::event::KeyModifiers::NONE,
+        }
     }
 
     #[test]
@@ -496,6 +519,55 @@ mod tests {
         assert_eq!(row_text(detail), "Show help");
         assert_eq!(rows[0].label.spans[0].style.fg, Some(s.text.muted));
         assert_eq!(detail.spans[0].style.fg, Some(s.text.dim));
+    }
+
+    /// / 真实候选：超过可视窗口时，绘制行号与点击命中共用同一个窗口。
+    #[test]
+    fn test_slash_rows_and_hits_share_one_window() {
+        let items: Vec<_> = (0..12)
+            .map(|index| SlashCompletionItem {
+                description: format!("detail-{index:02}"),
+                ..item(&format!("cmd{index:02}"), "")
+            })
+            .collect();
+        let filtered = filter_slash_items(&items, "");
+        assert_eq!(filtered.len(), items.len());
+
+        let popup = CompletionPopup {
+            rows: slash_rows(&filtered, &semantic()),
+            selected: 8,
+            height: 6,
+            title: Line::from(" slash "),
+            empty_text: Line::from("no matches"),
+            styles: test_styles(),
+        };
+        let area = Rect::new(0, 4, 44, 6);
+        let mut buffer = Buffer::empty(area);
+        popup.widget().render(area, &mut buffer);
+        let layout = popup.hit_layout();
+        assert_eq!(layout.scroll_start, 7, "选中项保持在可视窗口内");
+
+        assert_eq!(popup.hit(&click(2, area.y), area), None);
+        assert_eq!(popup.hit(&click(2, area.y + area.height - 1), area), None);
+        for visual in 0..layout.visible_items {
+            let row = area.y + 1 + visual;
+            let painted: String = (area.x..area.x + area.width)
+                .map(|x| buffer[(x, row)].symbol())
+                .collect();
+            match popup.hit(&click(2, row), area) {
+                Some(index) => {
+                    assert_eq!(index, layout.scroll_start + visual as usize);
+                    assert!(
+                        painted.contains(&format!("detail-{index:02}")),
+                        "row {row} painted {painted:?} but hit index {index}"
+                    );
+                }
+                None => assert!(
+                    painted.trim().is_empty(),
+                    "row {row} must stay unpainted and unclickable, got {painted:?}"
+                ),
+            }
+        }
     }
 
     /// 空候选 Enter：先关闭弹窗，再提交输入一次（且只提交一次）。

@@ -12,7 +12,6 @@ use super::footer;
 use super::genui_action::{self, GenUiButtonHit, PressedGenuiKey, PressedOverlay};
 use super::handlers;
 use super::hits;
-use super::no_color;
 use super::props;
 use super::render;
 use super::scroll;
@@ -795,7 +794,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         ));
         let line = Line::from(spans);
         Some(if strip_color {
-            self::no_color::strip_line_colors(&line)
+            peri_tui_components::style::strip_line_colors(&line)
         } else {
             line
         })
@@ -813,7 +812,7 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // 剥离颜色但保留 modifier（bold/italic/dim）与符号、文本——状态不依赖颜色。
     if strip_color {
         for line in viewport_lines.iter_mut() {
-            *line = self::no_color::strip_line_colors(line);
+            *line = peri_tui_components::style::strip_line_colors(line);
         }
     }
     // [PERI_RENDER_TIMING] 视口裁剪耗时

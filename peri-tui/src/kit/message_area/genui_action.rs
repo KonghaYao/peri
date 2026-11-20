@@ -14,8 +14,9 @@ use crate::kit::atoms::{
     AT_MENTION_ACTIVE, BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, INPUT_RESTORE_TEXT, NOTIFICATION,
     Notification, RENDER_HEARTBEAT, SLASH_HINT_ACTIVE, ViewModelsSnapshot,
 };
-use crate::kit::genui::{GenUiAction, GenUiButtonInfo, view_state};
+use crate::kit::genui::view_state;
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit};
+use peri_tui_components::genui::{GenUiAction, GenUiButtonInfo};
 
 #[derive(Clone)]
 pub(super) struct PressedGenuiKey {
@@ -197,7 +198,7 @@ fn draw_pressed(
         buffer.set_style(
             rect,
             if strip_color {
-                super::no_color::strip_style_color(style)
+                peri_tui_components::style::strip_style_color(style)
             } else {
                 style
             },

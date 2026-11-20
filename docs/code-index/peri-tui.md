@@ -3,15 +3,17 @@
 更新：2026-11-19
 
 通用输入编辑、固定行高视口、导航与鼠标命中，以及 Markdown/OpenUI 渲染器
-由 `peri-tui-components` 提供，TUI 直接单向消费：`kit/markdown/` 与
-`kit/genui/` 只保留应用侧出口（`genui::view_state` 注入会话 epoch）。Mermaid
+由 `peri-tui-components` 提供，TUI 直接单向消费：`kit/markdown/` 是 crate 内
+别名（公开转发路径已移除），`kit/genui/` 只保留 `render` 包装与
+`genui::view_state` 会话 epoch 注入，组件类型直接从组件库引用。Mermaid
 语句确认、排版、概览与预览状态机由组件的 `mermaid` 模块持有；输入区 `@`/`/`
 补全的可见窗口、选中标记与命中共用组件的 `completion::CompletionPopup`；
 确认与下载弹窗共用 `overlay::OverlayFrame`（宿主在既有位置只清屏一次），消息区底部
 与运行中工具图标共用无状态的 `spinner::Spinner`（帧集、节奏与文案留在应用）。
 消息区与子 Agent 详情的纵向滚动条共用 `scrollbar::VerticalBar`：宿主传原始内容偏移，
 绘制、端点/空轨命中与拖拽反推使用同一份滑块几何，两端显式映射 0 与最大偏移；
-三行滚轮步长、有界偏移与调用方时钟节流也由该模块提供。文本选区的显示列→字节换算、
+三行滚轮步长、有界偏移与调用方时钟节流也由该模块提供。`NO_COLOR` 的纯样式剥离
+（去色保留 modifier/对齐）由 `style::strip_line_colors` 持有，宿主决定应用时机。文本选区的显示列→字节换算、
 字素切片与真实 `Paragraph` 折行行首由 `selection` 提供，`SelectionAnchor` 的消息身份、
 历史前插重绑与剪贴板仍在宿主。文本严格列宽截断与省略号预算由 `text::truncate_to_width`
 统一，旧 `truncate_by_width` 仅保留前缀预算契约；Edit/Write 的 unified diff 在
@@ -192,8 +194,8 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | Markdown 解析测试 | `peri-tui-components/src/markdown/{mod_test.rs,list_test.rs,cache_test.rs,table_parse_test.rs,wrap_test.rs,image_parse_test.rs,fence_test.rs}` + `src/kit/markdown_profile_test.rs` | 按基本解析、列表项间距、增量缓存、表格、Unicode 折行、图片、Mermaid 围栏与显式 release profile 分组；profile 用例依赖应用侧 perf 计数，默认 ignored |
 | Assistant VM 共享 payload | `src/kit/tui_render_unit/{unit.rs,bubble.rs,shared_bubble_test.rs}` + `src/kit/acp_types/current_turn/{projection.rs,projection_test.rs}` | assistant 气泡通过 Arc 进入 im 快照，节点 COW 不深拷贝正文/推理；变更 fold/终态时显式复制，旧快照保持不可变。计量区分 source→VM 文本物化与气泡 Clone 的正文/推理字节；非 allocator/RSS 指标 |
 | Markdown 缓存生命周期 | `peri-tui-components/src/markdown/{parser.rs,cache_lifecycle_test.rs,code_block.rs,code_block_test.rs}` | terminal full parse 释放流式原文 buffer；高亮缓存共享 Arc，按 32 条 / 4 MiB 高亮 payload 预算淘汰，超预算单项不入缓存；旧增量 convert API 只编入测试，生产 ConvertState 保留 |
-| Markdown 流式边界 | `peri-tui-components/src/markdown/{boundary.rs,boundary_test.rs,parser.rs}` + `src/kit/message_area/{message_area.rs,vm_cache.rs}` | 单次逐行扫描跨 fence 内部空行冻结已闭合代码块；后续只解析可变尾部，stable chunks 共享 Arc；引用、列表、表格与未闭合 fence 保守保留，terminal full parse 校正；尾部图片字节范围映射回完整输入；内外层 key 包含正文前景与代码背景，变化时从 parsed blocks 重物化 |
-| Mermaid 围栏元数据与身份 | `peri-tui-components/src/markdown/{fence.rs,fence_test.rs,types.rs,convert.rs,parser.rs}` + `peri-tui-components/src/mermaid/fence.rs` + `src/kit/message_area/{render/renderer.rs,render_markdown_layout_test.rs}` | 组件在原始 Markdown 上用与 rk_parse 相同的 CommonMark 选项和事件范围提取围栏种类、长度、坐标与真实闭合；`raw` 保留容器前缀供复制，`source` 去前缀供 Mermaid 解析；关闭行在换行或消息 EOF 后确认。`MermaidSegment` 在稳定块重转、流式尾部、完整解析及宽度/主题变化时携带元数据；应用从薄壳 `src/kit/markdown/mod.rs` 消费类型，再经 `kit/mermaid/` 读取可信帧。图身份 = 会话 + 消息稳定身份（`messageId` 或气泡本地身份）+ `open_start`；`reuses_position` 在正文改写后核对开围栏行。回归：组件 `markdown::fence_tests`、`mermaid::fence::tests`，应用 `markdown_layout_tests::test_mermaid` |
+| Markdown 流式边界 | `peri-tui-components/src/markdown/{boundary.rs,boundary_test.rs,parser.rs}` + `src/kit/message_area/{message_area.rs,vm_cache.rs}` | 单次逐行扫描跨 fence 内部空行冻结已闭合代码块；后续只解析可变尾部，stable chunks 共享 Arc；引用、列表、表格与未闭合 fence 保守保留，terminal full parse 校正；尾部图片字节范围映射回完整输入；内外层 key 包含正文/标题/弱化前景与代码背景，任一主题色变化时从 parsed blocks 重物化 |
+| Mermaid 围栏元数据与身份 | `peri-tui-components/src/markdown/{fence.rs,fence_test.rs,types.rs,convert.rs,parser.rs}` + `peri-tui-components/src/mermaid/fence.rs` + `src/kit/message_area/{render/renderer.rs,render_markdown_layout_test.rs}` | 组件在原始 Markdown 上用与 rk_parse 相同的 CommonMark 选项和事件范围提取围栏种类、长度、坐标与真实闭合；`raw` 保留容器前缀供复制，`source` 去前缀供 Mermaid 解析；关闭行在换行或消息 EOF 后确认。`MermaidSegment` 在稳定块重转、流式尾部、完整解析及宽度/主题变化时携带元数据；应用经 crate 内别名 `src/kit/markdown/mod.rs` 消费类型，再经 `kit/mermaid/` 读取可信帧。图身份 = 会话 + 消息稳定身份（`messageId` 或气泡本地身份）+ `open_start`；`reuses_position` 在正文改写后核对开围栏行。回归：组件 `markdown::fence_tests`、`mermaid::fence::tests`，应用 `markdown_layout_tests::test_mermaid` |
 | Mermaid 流式预览与定稿 | `peri-tui-components/src/mermaid/{stream/mod.rs,stream/flow.rs,stream/sequence.rs,frame.rs,layout.rs,preview.rs,overview.rs,fence.rs}` + `stream_test.rs`/`preview_test.rs`/`frame_test.rs`/`overview_test.rs` + `src/kit/mermaid/{mod.rs,store.rs,display.rs,detail.rs}` + `display_test.rs` + `message_area/{render/renderer.rs,transcript.rs,viewport_anchor.rs}` + `entry_render_cache.rs` + `entry.rs` | 组件依赖 MIT `mermaid-text = "=0.58.0"`，不持有全局状态或线程。活动围栏只扫描新增正文：流图按语句确认引号/转义/标签括号/边标签/注释里的分隔符，时序图按完整行且分号属于消息；`subgraph/end`、`alt/else/end` 等按类型配对，最外层闭合后整组进入已确认前缀；未知完整语句展示源码并暂停该块图形，未确认部分始终留在图下源码尾部。首帧立即排版，后续每 80ms 最多提交最新可信前缀；真实闭合绕过等待，用完整原文立即排终稿。状态/类/ER、饼图、旅程、甘特、时间线、Git 图、思维导图、象限图、需求图、桑基图、XY 图、架构图与报文图闭合后渲染，`block`/`block-beta` 与未知类型保留源码。冻结且闭合与实时终稿共用 `render_source`；未闭合重建最后可信帧并标“未闭合”，只有显式中断原因才显示原因；解析/校验失败保留完整源码与短原因。**视口调度**：`FenceSpan` 记录围栏逻辑行范围（视觉范围由 wrap map 派生），`Transcript::warm_visible` 先用 `SlotIndex` 取可见槽位，再与围栏范围相交，只调度命中项并取消离屏待执行任务（预取关闭）；渲染路径只读 `peek`，不排队。**几何缓存**：组件 `layout.rs` 按源码内容、精确列宽、引擎版本与排版参数键控，主题只影响着色；相同模板共享 `Arc` 几何，单张源码/输出超预算与全局排队上限保留源码。**状态边界**：切换会话释放实例状态与消息级版本，运行中结果按会话/宽度/前缀版本丢弃；几何在硬预算内跨会话复用。**增量更新**：消息级预览版本变化只经 `EntryRenderCache` 重算所属消息的行、wrap map、热区与 `SlotIndex` 高度；`ReadingAnchor` 以围栏/邻接正文的源位置 + 行内偏移在重排后找回阅读位置，覆盖缩放、异步结果与同条消息内高度变化，跟随态仍由 `run_auto_follow` 吸底。回归：`peri_tui_components::mermaid`、`markdown_layout_tests::test_mermaid`、`mermaid_viewport_tests`、`viewport_anchor::tests::reading_anchor_*` |
 | Transcript 增量布局与预算 | `src/kit/message_area/{transcript.rs,transcript_index.rs,vm_cache.rs}` + `src/kit/acp_events/render/publication.rs` | generation 连续的 publication 后缀提示驱动持久树点更新；可见动画不扫描历史；轻量行高与 Weak 行缓存分离，主区 16 MiB 派生预算，冷复制按 slot 临时恢复；过程区转场形态（`zone_transition`）按相邻 entry 起止 zone 判定，形态翻转只重渲染对应 slot |
 | 共享 entry 缓存与内存计量 | `src/kit/entry_render_cache.rs` + `peri-tui-components/src/markdown/{memory.rs,memory_test.rs}` | 真实主消息/详情共享内容、布局（含过程区转场形态翻转）、主题、语言、occurrence 与 surface 失效；retained_bytes 递归容量计量、同 cache Arc 去重，非 RSS 指标 |

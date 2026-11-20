@@ -206,6 +206,7 @@ fn ordinary_code_blocks_keep_their_existing_text_segments() {
 }
 
 #[test]
+#[serial_test::serial]
 fn stable_chunks_and_tail_carry_global_fence_coordinates() {
     let source = "intro\n\n```mermaid\ngraph TD\nA-->B\n```\n\nafter";
     let expected_start = source.find("```mermaid").unwrap();

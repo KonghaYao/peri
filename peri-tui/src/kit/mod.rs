@@ -43,7 +43,7 @@ pub mod inline_nav;
 pub mod input_area;
 pub mod input_history;
 pub mod layout;
-pub mod markdown;
+pub(crate) mod markdown;
 pub mod mention_popup;
 pub(crate) mod mermaid;
 pub mod message_area;
