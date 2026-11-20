@@ -514,7 +514,9 @@ fn bar_chart(
         .render(chart_area, &mut buffer);
     let value_style = Style::default().fg(theme.component.markdown.text);
     for (row, (_, _, text)) in entries.iter().enumerate() {
-        buffer.set_string(chart_width as u16 + 1, row as u16, text, value_style);
+        // 数值列右对齐，与旧渲染器的补空格行为一致。
+        let x = width.saturating_sub(text.width());
+        buffer.set_string(x as u16, row as u16, text, value_style);
     }
     if (0..chart_width).all(|x| (0..height).all(|y| buffer[(x as u16, y as u16)].symbol() == " ")) {
         return muted_error("bar chart needs more width", width, theme);
