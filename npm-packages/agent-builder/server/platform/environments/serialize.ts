@@ -1,4 +1,3 @@
-import type { Context } from 'hono';
 import { millisToUnixSeconds } from '../json';
 import type {
   PlatformEnvironmentFileRow,
@@ -37,11 +36,6 @@ export function buildIdListPage<T>(
   };
 }
 
-/** Degradation is part of the response contract, never a silent substitution. */
-export function setDegradationHeader(c: Context, reasons: readonly string[]): void {
-  if (reasons.length > 0) c.header('x-platform-degraded', reasons.join(', '));
-}
-
 /** Rows store workspace-relative paths; the documented resource reports absolute ones. */
 export function environmentFileResource(row: PlatformEnvironmentFileRow): Record<string, unknown> {
   return {
@@ -62,8 +56,9 @@ export function environmentFileMetadata(row: PlatformEnvironmentFileRow): Record
 }
 
 /**
- * Public environment resource. Only the documented fields are exposed; local execution details
- * are reported through `x-platform-degraded` instead of a parallel response shape.
+ * Public environment resource. Only the documented fields are exposed. Rows written before the
+ * strict contract may still say `local`; that value is the same application-hosted workspace and
+ * is reported as the documented `self_hosted`.
  */
 export function environmentResource(
   row: PlatformEnvironmentRow,
@@ -73,7 +68,7 @@ export function environmentResource(
   return {
     id: row.id,
     object: 'agent.environment',
-    type: row.type,
+    type: row.type === 'local' ? 'self_hosted' : row.type,
     status: row.status,
     files: files.map(environmentFileMetadata),
     skills: config.skills,

@@ -7,8 +7,8 @@ import type { SessionItemWire } from '../sessions/serialize';
  * The platform routes only receive a database handle, so the Store client is installed by the
  * process that owns it. Without an installed reader the local platform tables are the source;
  * with one installed, the Store is authoritative and every failure stays visible: a schema probe
- * mismatch answers `store_schema_unsupported` (409) and an unreachable Store degrades the history
- * endpoints to an empty page carrying `x-platform-degraded: subagent_history_unavailable`.
+ * mismatch answers `store_schema_unsupported` (409) and an unreachable Store answers
+ * `subagent_history_unavailable` (503). An empty page is never used to hide a failed read.
  *
  * Readers must probe the columns they read before answering; the probe is a `table_info` query in
  * the SQLite-backed deployment. Nothing here synthesizes history when the reader cannot answer.
@@ -47,7 +47,7 @@ export class StoreSchemaUnsupportedError extends Error {
   }
 }
 
-/** The Store is configured but could not answer; callers must degrade instead of inventing rows. */
+/** The Store is configured but could not answer; callers must fail instead of inventing rows. */
 export class StoreHistoryUnavailableError extends Error {
   readonly code = 'subagent_history_unavailable';
 

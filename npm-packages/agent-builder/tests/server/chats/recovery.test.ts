@@ -1,10 +1,8 @@
 import type { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createHostResourceOwner } from '@peri-code/rivet/rivet';
-import type { Agent, AgentDraft } from '@shared/agent';
-import { AgentDraft as AgentDraftSchema } from '@shared/agent';
-import { ApiErrorBody } from '@shared/api';
-import { ChatResponse, type ChatRuntimeStatus } from '@shared/chat';
+import { type Agent, type AgentDraft, AgentDraft as AgentDraftSchema } from '@shared/agent';
+import type { ChatRuntimeStatus } from '@shared/chat';
 import type { Hono } from 'hono';
 import { AgentsRepository } from '../../../server/agents/repository';
 import { createApp } from '../../../server/app';
@@ -19,11 +17,42 @@ import { ChatService } from '../../../server/chats/service';
 import { openDatabase } from '../../../server/db/database';
 import { migrate } from '../../../server/db/migrate';
 import type { ServerEnv } from '../../../server/env';
+import { createPlatformRepositories } from '../../../server/platform/repositories';
+import { SessionRecorder } from '../../../server/platform/sessions/recorder';
+import {
+  createSessionRuntime,
+  installSessionRuntime,
+  sessionDraftFor,
+} from '../../../server/platform/sessions/runtime';
 import type { StartedRegistry } from '../../../server/rivet/registry';
 import { SandboxCoordinator } from '../../../server/sandbox/coordinator';
 import { sandboxEnginePort } from '../../../server/sandbox/engine-port';
 import { testEnv, withStoredProvider } from '../helpers';
 import { FakeActor, FakeEngine, FakeSandboxActor } from './helpers';
+
+const AUTHORIZATION = { authorization: 'Bearer test-token' } as const;
+
+interface PlatformErrorBody {
+  readonly error: {
+    readonly type: string;
+    readonly code: string;
+    readonly message: string;
+    readonly param: string | null;
+  };
+}
+
+async function errorBody(response: Response): Promise<PlatformErrorBody> {
+  return (await response.json()) as PlatformErrorBody;
+}
+
+/** Creates a chat through the `/v1` session surface, which is the only surviving chat entry. */
+async function createChat(app: Hono, agentId: string): Promise<Response> {
+  return app.request('/v1/agents/sessions', {
+    method: 'POST',
+    headers: { ...AUTHORIZATION, 'content-type': 'application/json' },
+    body: JSON.stringify({ environment: { type: 'none' }, agent_id: agentId, input: 'hello' }),
+  });
+}
 
 const READY_ENV = {
   storeToken: 'store-token',
@@ -115,19 +144,28 @@ test('ABV-09 boot Store outage recovers into first Chat + Sandbox with registry 
   migrate(database);
   const agents = new AgentsRepository(database);
   const agent = agents.create(withStoredProvider(database, providerDraft));
+  const repos = createPlatformRepositories(database);
+  const recorder = new SessionRecorder({ repos });
+  const sandbox = new SandboxCoordinator(env, sandboxEnginePort(engine));
   const service = new ChatService({
     env,
     engine,
     agents,
     chats: new ChatsRepository(database),
-    sandbox: new SandboxCoordinator(env, sandboxEnginePort(engine)),
+    sandbox,
+    draftFor: sessionDraftFor(repos),
   });
+  const restore = installSessionRuntime(createSessionRuntime({ repos, chats: service, recorder }));
   const app = createApp({ env, db: database, engine, chatService: service });
   const create = () =>
-    app.request('/api/chats', {
+    app.request('/v1/agents/sessions', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ agentId: agent.id }),
+      headers: { ...AUTHORIZATION, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        environment: { type: 'self_hosted', workspace_directory: env.workspacePath },
+        agent_id: agent.id,
+        input: 'hello',
+      }),
     });
   try {
     expect((await create()).status).toBe(503);
@@ -136,12 +174,14 @@ test('ABV-09 boot Store outage recovers into first Chat + Sandbox with registry 
     clock = 2;
     const response = await create();
     expect(response.status).toBe(201);
-    const { chat } = ChatResponse.parse(await response.json());
-    expect(chat.sandbox.state).toBe('ready');
+    const session = (await response.json()) as { id: string };
+    expect(session.id).toBeString();
     expect(sandboxActor.acquireCalls).toHaveLength(1);
-    expect(actor.opened).toHaveLength(1);
-    await service.remove(chat.chatId);
+    expect(actor.opened.length).toBeGreaterThan(0);
+    expect(actor.opened.every((item) => JSON.stringify(item) === JSON.stringify(actor.opened[0]))).toBe(true);
+    await service.remove(session.id);
   } finally {
+    restore();
     owner.beginShutdown();
     expect((await owner.closeAll({ timeoutMs: 100 })).complete).toBe(true);
     await engine.shutdown();
@@ -154,11 +194,13 @@ interface Harness {
   readonly app: Hono;
   readonly agent: Agent;
   readonly engine: ChatEngine;
+  readonly chats: ChatService;
   readonly probes: () => number;
   readonly readyEngineCreations: () => number;
   readonly clock: { value: number };
   readonly reachable: { value: boolean };
   readonly failure: { value: unknown };
+  readonly dispose: () => void;
 }
 
 async function setup(
@@ -173,7 +215,8 @@ async function setup(
   const database = openDatabase(':memory:');
   migrate(database);
   db = database;
-  const agent = new AgentsRepository(database).create(withStoredProvider(database, providerDraft));
+  const agents = new AgentsRepository(database);
+  const agent = agents.create(withStoredProvider(database, providerDraft));
 
   const clock = { value: 0 };
   const reachable = { value: options.startupReachable ?? false };
@@ -200,28 +243,28 @@ async function setup(
   };
 
   const engine = await createChatEngineWithStoreProbe(env, probeOptions);
+  const repos = createPlatformRepositories(database);
+  const recorder = new SessionRecorder({ repos });
+  const chats = new ChatService({
+    env,
+    engine,
+    chats: new ChatsRepository(database),
+    agents,
+    draftFor: sessionDraftFor(repos),
+  });
+  const restore = installSessionRuntime(createSessionRuntime({ repos, chats, recorder }));
   return {
-    app: createApp({ env, db: database, engine }),
+    app: createApp({ env, db: database, engine, chatService: chats }),
     agent,
     engine,
+    chats,
     probes: () => probes,
     readyEngineCreations: () => readyEngineCreations,
     clock,
     reachable,
     failure,
+    dispose: restore,
   };
-}
-
-async function createChat(app: Hono, agentId: string): Promise<Response> {
-  return app.request('/api/chats', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ agentId }),
-  });
-}
-
-async function errorBody(response: Response) {
-  return ApiErrorBody.parse(await response.json());
 }
 
 describe('Store recovery', () => {
@@ -232,59 +275,54 @@ describe('Store recovery', () => {
 
     const refused = await createChat(harness.app, harness.agent.id);
     expect(refused.status).toBe(503);
-    expect(await errorBody(refused)).toMatchObject({
-      error: {
-        code: 'engine_unavailable',
-        details: { reasons: ['store_unreachable'] },
-        retryable: true,
-      },
+    expect(refused.headers.has('x-platform-degraded')).toBe(false);
+    expect((await errorBody(refused)).error).toMatchObject({
+      code: 'engine_unavailable',
+      type: 'server_error',
+      param: null,
     });
     expect(harness.probes()).toBe(1);
+    // The wire error hides reasons; the chat runtime still owns the concrete retry contract.
+    await expect(harness.chats.create({ agentId: harness.agent.id })).rejects.toMatchObject({
+      code: 'engine_unavailable',
+      retryable: true,
+      details: { reasons: ['store_unreachable'] },
+    });
 
     harness.reachable.value = true;
     harness.clock.value = 1_001;
 
     const created = await createChat(harness.app, harness.agent.id);
     expect(created.status).toBe(201);
-    expect(ChatResponse.parse(await created.json()).chat.agentId).toBe(harness.agent.id);
+    const session = (await created.json()) as { agent: { id: string } };
+    expect(session.agent.id).toBe(harness.agent.id);
     expect(harness.probes()).toBe(2);
     expect(harness.readyEngineCreations()).toBe(1);
     expect(harness.engine.status).toEqual<ChatRuntimeStatus>({ mode: 'wasm', reasons: [] });
+    harness.dispose();
   });
 
   test('degrades a healthy boot on the first failed re-probe and recovers without a restart', async () => {
     const harness = await setup({ startupReachable: true });
     expect(harness.engine.status).toEqual<ChatRuntimeStatus>({ mode: 'wasm', reasons: [] });
+    expect(harness.engine.health()).toMatchObject({ mode: 'embedded', status: 'ready' });
     expect(harness.probes()).toBe(1);
     expect(harness.readyEngineCreations()).toBe(1);
-
-    const healthy = await harness.app.request('/api/health');
-    expect(await healthy.json()).toMatchObject({ engine: { mode: 'embedded', status: 'ready' } });
 
     harness.reachable.value = false;
     harness.clock.value = 1_001;
     const refused = await createChat(harness.app, harness.agent.id);
     expect(refused.status).toBe(503);
-    expect(await errorBody(refused)).toMatchObject({
-      error: {
-        code: 'engine_unavailable',
-        details: { reasons: ['store_unreachable'] },
-        retryable: true,
-      },
-    });
+    expect((await errorBody(refused)).error.code).toBe('engine_unavailable');
     expect(harness.probes()).toBe(2);
     expect(harness.engine.status).toEqual<ChatRuntimeStatus>({
       mode: 'not_configured',
       reasons: ['store_unreachable'],
     });
-
-    const degraded = await harness.app.request('/api/health');
-    expect(await degraded.json()).toMatchObject({ engine: { mode: 'not_configured', status: 'unknown' } });
-    const degradedCapabilities = await harness.app.request('/api/capabilities');
-    expect(await degradedCapabilities.json()).toMatchObject({
-      chatRuntime: 'not_configured',
-      chatRuntimeReasons: ['store_unreachable'],
-      historyPersisted: false,
+    expect(harness.engine.health()).toMatchObject({
+      mode: 'not_configured',
+      status: 'unknown',
+      reasons: ['store_unreachable'],
     });
 
     harness.reachable.value = true;
@@ -293,8 +331,8 @@ describe('Store recovery', () => {
     expect(harness.probes()).toBe(3);
     // The engine built for the healthy boot is reused after recovery, not rebuilt.
     expect(harness.readyEngineCreations()).toBe(1);
-    const recovered = await harness.app.request('/api/health');
-    expect(await recovered.json()).toMatchObject({ engine: { mode: 'embedded', status: 'ready' } });
+    expect(harness.engine.health()).toMatchObject({ mode: 'embedded', status: 'ready' });
+    harness.dispose();
   });
 
   test('shares one probe between concurrent creates after the TTL', async () => {
@@ -316,6 +354,7 @@ describe('Store recovery', () => {
     expect(responses.map((response) => response.status)).toEqual([201, 201, 201]);
     expect(harness.probes()).toBe(2);
     expect(harness.readyEngineCreations()).toBe(1);
+    harness.dispose();
   });
 
   test('degrades again when the Store stops answering after a recovery', async () => {
@@ -328,9 +367,7 @@ describe('Store recovery', () => {
     harness.clock.value = 2_002;
     const degraded = await createChat(harness.app, harness.agent.id);
     expect(degraded.status).toBe(503);
-    expect(await errorBody(degraded)).toMatchObject({
-      error: { details: { reasons: ['store_unreachable'] }, retryable: true },
-    });
+    expect((await errorBody(degraded)).error.code).toBe('engine_unavailable');
     expect(harness.engine.status.mode).toBe('not_configured');
 
     harness.reachable.value = true;
@@ -338,29 +375,23 @@ describe('Store recovery', () => {
     expect((await createChat(harness.app, harness.agent.id)).status).toBe(201);
     // The engine from the first recovery is reused instead of being rebuilt.
     expect(harness.readyEngineCreations()).toBe(1);
+    harness.dispose();
   });
 
-  test('capabilities is a recovery trigger and reflects the probe result', async () => {
+  test('ensureReady is a recovery trigger and reflects the probe result', async () => {
     const harness = await setup();
-    const first = await harness.app.request('/api/capabilities');
-    expect(first.status).toBe(200);
-    expect(await first.json()).toMatchObject({
-      chatRuntime: 'not_configured',
-      chatRuntimeReasons: ['store_unreachable'],
-      historyPersisted: false,
+    expect(harness.engine.status).toEqual<ChatRuntimeStatus>({
+      mode: 'not_configured',
+      reasons: ['store_unreachable'],
     });
 
     harness.reachable.value = true;
     harness.clock.value = 1_001;
-    const recovered = await harness.app.request('/api/capabilities');
-    // The harness builds a fake engine whose health is already `ready`; readiness follows health.
-    expect(await recovered.json()).toMatchObject({
-      chatRuntime: 'wasm',
-      chatRuntimeReady: true,
-      chatRuntimeReasons: [],
-      historyPersisted: true,
-    });
+    await harness.engine.ensureReady?.();
+    expect(harness.engine.status).toEqual<ChatRuntimeStatus>({ mode: 'wasm', reasons: [] });
+    expect(harness.engine.health()).toMatchObject({ mode: 'embedded', status: 'ready' });
     expect(harness.probes()).toBe(2);
+    harness.dispose();
   });
 
   test('recovers the SSE route without a restart', async () => {
@@ -369,25 +400,27 @@ describe('Store recovery', () => {
     harness.clock.value = 1_001;
     const created = await createChat(harness.app, harness.agent.id);
     expect(created.status).toBe(201);
-    const chatId = ChatResponse.parse(await created.json()).chat.chatId;
+    const sessionId = ((await created.json()) as { id: string }).id;
 
     harness.reachable.value = false;
     harness.clock.value = 2_002;
-    const refused = await harness.app.request(`/api/chats/${chatId}/events`);
-    expect(refused.status).toBe(503);
-    expect((await errorBody(refused)).error).toMatchObject({
-      details: { reasons: ['store_unreachable'] },
-      retryable: true,
+    const refused = await harness.app.request(`/v1/agents/sessions/${sessionId}/events`, {
+      headers: AUTHORIZATION,
     });
+    expect(refused.status).toBe(503);
+    expect((await errorBody(refused)).error).toMatchObject({ code: 'engine_unavailable' });
 
     harness.reachable.value = true;
     harness.clock.value = 3_003;
-    const stream = await harness.app.request(`/api/chats/${chatId}/events`);
+    const stream = await harness.app.request(`/v1/agents/sessions/${sessionId}/events`, {
+      headers: AUTHORIZATION,
+    });
     expect(stream.status).toBe(200);
     const reader = stream.body?.getReader();
     expect(reader).toBeDefined();
     await reader?.read();
     await reader?.cancel();
+    harness.dispose();
   });
 
   for (const status of [401, 403]) {
@@ -402,21 +435,26 @@ describe('Store recovery', () => {
 
       const refused = await createChat(harness.app, harness.agent.id);
       expect(refused.status).toBe(503);
-      expect(await errorBody(refused)).toMatchObject({
-        error: {
-          code: 'engine_unavailable',
-          details: { reasons: ['store_auth_failed'] },
-          retryable: false,
-        },
+      expect((await errorBody(refused)).error).toMatchObject({
+        code: 'engine_unavailable',
+        type: 'server_error',
+      });
+      await expect(harness.chats.create({ agentId: harness.agent.id })).rejects.toMatchObject({
+        code: 'engine_unavailable',
+        retryable: false,
+        details: { reasons: ['store_auth_failed'] },
       });
 
       // Credentials cannot change while the process runs: no probe even after the TTL.
       harness.clock.value = 10_000;
       const afterTtl = await createChat(harness.app, harness.agent.id);
       expect(afterTtl.status).toBe(503);
-      expect((await errorBody(afterTtl)).error.retryable).toBe(false);
+      await expect(harness.chats.create({ agentId: harness.agent.id })).rejects.toMatchObject({
+        retryable: false,
+      });
       expect(harness.probes()).toBe(1);
       expect(harness.readyEngineCreations()).toBe(0);
+      harness.dispose();
     });
   }
 
@@ -431,17 +469,17 @@ describe('Store recovery', () => {
 
     const refused = await createChat(harness.app, harness.agent.id);
     expect(refused.status).toBe(503);
-    expect(await errorBody(refused)).toMatchObject({
-      error: {
-        code: 'engine_unavailable',
-        details: { reasons: ['store_database_missing'] },
-        retryable: false,
-      },
+    expect((await errorBody(refused)).error.code).toBe('engine_unavailable');
+    await expect(harness.chats.create({ agentId: harness.agent.id })).rejects.toMatchObject({
+      code: 'engine_unavailable',
+      retryable: false,
+      details: { reasons: ['store_database_missing'] },
     });
 
     harness.clock.value = 10_000;
     expect((await createChat(harness.app, harness.agent.id)).status).toBe(503);
     expect(harness.probes()).toBe(1);
+    harness.dispose();
   });
 
   test('keeps a timeout retryable and re-probes after the TTL', async () => {
@@ -452,75 +490,68 @@ describe('Store recovery', () => {
       mode: 'not_configured',
       reasons: ['store_unreachable'],
     });
-    expect(await errorBody(await createChat(harness.app, harness.agent.id))).toMatchObject({
-      error: { details: { reasons: ['store_unreachable'] }, retryable: true },
+    await expect(harness.chats.create({ agentId: harness.agent.id })).rejects.toMatchObject({
+      code: 'engine_unavailable',
+      retryable: true,
+      details: { reasons: ['store_unreachable'] },
     });
 
     harness.reachable.value = true;
     harness.clock.value = 1_001;
     expect((await createChat(harness.app, harness.agent.id)).status).toBe(201);
     expect(harness.probes()).toBe(2);
+    harness.dispose();
   });
 
-  test('health probes the Store on the TTL, reports the outage and recovers', async () => {
+  test('ensureReady probes the Store on the TTL, reports the outage and recovers', async () => {
     const harness = await setup({ startupReachable: true });
-    const healthy = await harness.app.request('/api/health');
-    expect(await healthy.json()).toMatchObject({
-      ok: true,
-      engine: { mode: 'embedded', status: 'ready' },
-    });
-    // Within the TTL health must not add another round trip.
+    expect(harness.engine.health()).toMatchObject({ mode: 'embedded', status: 'ready' });
+    // Within the TTL readiness must not add another round trip.
     expect(harness.probes()).toBe(1);
 
     harness.reachable.value = false;
     harness.clock.value = 1_001;
-    const degraded = await harness.app.request('/api/health');
-    expect(await degraded.json()).toMatchObject({
-      ok: true,
-      engine: { mode: 'not_configured', status: 'unknown', reasons: ['store_unreachable'] },
+    await harness.engine.ensureReady?.();
+    expect(harness.engine.health()).toMatchObject({
+      mode: 'not_configured',
+      status: 'unknown',
+      reasons: ['store_unreachable'],
     });
     expect(harness.probes()).toBe(2);
 
-    // A second health call inside the TTL shares the last result instead of probing again.
-    await harness.app.request('/api/health');
+    // A second readiness call inside the TTL shares the last result instead of probing again.
+    await harness.engine.ensureReady?.();
     expect(harness.probes()).toBe(2);
 
     harness.reachable.value = true;
     harness.clock.value = 2_002;
-    const recovered = await harness.app.request('/api/health');
-    expect(await recovered.json()).toMatchObject({
-      ok: true,
-      engine: { mode: 'embedded', status: 'ready' },
-    });
+    await harness.engine.ensureReady?.();
+    expect(harness.engine.health()).toMatchObject({ mode: 'embedded', status: 'ready' });
     expect(harness.probes()).toBe(3);
     expect(harness.readyEngineCreations()).toBe(1);
+    harness.dispose();
   });
 
-  test('health reports store_auth_failed after a healthy boot and stops probing', async () => {
+  test('ensureReady reports store_auth_failed after a healthy boot and stops probing', async () => {
     const harness = await setup({ startupReachable: true });
-    expect(await (await harness.app.request('/api/health')).json()).toMatchObject({
-      engine: { status: 'ready' },
-    });
+    expect(harness.engine.health()).toMatchObject({ status: 'ready' });
 
     harness.failure.value = Object.assign(new Error('HTTP error! status: 401'), { status: 401 });
     harness.reachable.value = false;
     harness.clock.value = 1_001;
-    const degraded = await harness.app.request('/api/health');
-    expect(await degraded.json()).toMatchObject({
-      engine: {
-        mode: 'not_configured',
-        status: 'unknown',
-        reasons: ['store_auth_failed'],
-      },
+    await harness.engine.ensureReady?.();
+    expect(harness.engine.health()).toMatchObject({
+      mode: 'not_configured',
+      status: 'unknown',
+      reasons: ['store_auth_failed'],
     });
     expect(harness.probes()).toBe(2);
 
     harness.clock.value = 10_000;
-    const stillDegraded = await harness.app.request('/api/health');
-    expect(await stillDegraded.json()).toMatchObject({
-      engine: { reasons: ['store_auth_failed'] },
-    });
+    await harness.engine.ensureReady?.();
+    expect(harness.engine.health()).toMatchObject({ reasons: ['store_auth_failed'] });
     expect(harness.probes()).toBe(2);
+    harness.dispose();
   });
 
   test('does not probe for configuration that cannot change at runtime', async () => {

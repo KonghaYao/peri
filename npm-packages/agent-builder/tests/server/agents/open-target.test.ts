@@ -125,7 +125,7 @@ describe('buildPreviewWarnings', () => {
       'mcp_not_connected',
       'history_not_persisted',
     ]);
-    expect(warnings[0]?.message).toContain('共享 Provider');
+    expect(warnings[0]?.message).toContain('PERI_PROVIDER_TYPE');
     expect(warnings[0]?.message).not.toContain('sk-');
   });
 });

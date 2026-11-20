@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { WorkspaceURI } from '@peri-code/rivet/rivet';
 import type { SandboxReason, SandboxStatus } from '@shared/chat';
+import { type ProviderType, validProviderUrl } from '@shared/provider';
 import { z } from 'zod';
 import { ConfigError } from './config-error';
 import { createPrivateFileIfMissing, ensurePrivateDirectory } from './filesystem';
@@ -26,6 +27,14 @@ const BooleanString = z
     return normalized === 'true' || normalized === '1';
   });
 
+/** Provider fields are deployment configuration, not request input: blank means absent. */
+const ProviderTypeEnv = OptionalTrimmedString.pipe(z.enum(['anthropic', 'openai']).optional());
+
+const ProviderBaseUrlEnv = OptionalTrimmedString.refine(
+  (value) => value === undefined || validProviderUrl(value),
+  { message: 'PERI_PROVIDER_BASE_URL 必须是合法的 provider URL' },
+);
+
 const EnvSchema = z.object({
   HOST: z.literal('127.0.0.1').default('127.0.0.1'),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -48,11 +57,13 @@ const EnvSchema = z.object({
   PERI_SANDBOX_TOKEN: OptionalTrimmedString,
   /** Local RivetKit gateway credential. It is not the sandbox actor credential. */
   PERI_SANDBOX_GATEWAY_TOKEN: OptionalTrimmedString,
-  /** Comma-separated extra browser origins (for example a separate Vite dev server). */
+  /** Comma-separated extra browser origins (for example a separate local frontend). */
   PERI_ALLOWED_ORIGINS: OptionalTrimmedString,
-  /** Dev-only origin port allowlist entry. */
-  WEB_PORT: OptionalTrimmedString,
-  PERI_WEB_ROOT: OptionalTrimmedString,
+  /** Single Provider seeded from the environment. Absent type disables seeding. */
+  PERI_PROVIDER_TYPE: ProviderTypeEnv,
+  PERI_PROVIDER_BASE_URL: ProviderBaseUrlEnv,
+  PERI_PROVIDER_API_KEY: OptionalTrimmedString,
+  PERI_PROVIDER_NAME: OptionalTrimmedString,
   PERI_SANDBOX_STARTUP_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
   PERI_SANDBOX_STOP_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
 });
@@ -80,6 +91,14 @@ export interface SandboxEnv {
   readonly workspacePathPrivate: boolean;
 }
 
+export interface ProviderEnv {
+  /** Undefined disables env seeding; the stored provider (if any) is left untouched. */
+  readonly type: ProviderType | undefined;
+  readonly baseUrl: string | undefined;
+  readonly apiKey: string | undefined;
+  readonly name: string;
+}
+
 export interface ServerEnv {
   readonly host: '127.0.0.1';
   readonly port: number;
@@ -95,8 +114,8 @@ export interface ServerEnv {
   readonly machineId: string;
   readonly rivetStoragePath: string | undefined;
   readonly sandbox: SandboxEnv;
-  /** Static web root; undefined when the build has not produced `dist/`. */
-  readonly webRoot: string | undefined;
+  /** Single Provider desired state; `type` absent means no seeding. */
+  readonly provider: ProviderEnv;
   readonly allowedOrigins: readonly string[];
 }
 
@@ -242,14 +261,8 @@ function resolveSandbox(
   });
 }
 
-function defaultAllowedOrigins(port: number, webPort: string | undefined): string[] {
-  const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
-  // Vite forwards the browser Origin unchanged; only the explicitly configured dev port is added.
-  if (webPort !== undefined && /^[1-9][0-9]{0,4}$/.test(webPort)) {
-    origins.add(`http://127.0.0.1:${webPort}`);
-    origins.add(`http://localhost:${webPort}`);
-  }
-  return [...origins];
+function defaultAllowedOrigins(port: number): string[] {
+  return [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
 }
 
 export function parseAllowedOrigins(raw: string | undefined, defaults: readonly string[]): string[] {
@@ -310,13 +323,15 @@ export function loadEnv(
         ? undefined
         : path.resolve(process.cwd(), parsed.data.RIVETKIT_STORAGE_PATH),
     sandbox,
-    webRoot:
-      parsed.data.PERI_WEB_ROOT === undefined
-        ? undefined
-        : path.resolve(process.cwd(), parsed.data.PERI_WEB_ROOT),
+    provider: Object.freeze({
+      type: parsed.data.PERI_PROVIDER_TYPE,
+      baseUrl: parsed.data.PERI_PROVIDER_BASE_URL,
+      apiKey: parsed.data.PERI_PROVIDER_API_KEY,
+      name: parsed.data.PERI_PROVIDER_NAME ?? 'env',
+    }),
     allowedOrigins: parseAllowedOrigins(
       parsed.data.PERI_ALLOWED_ORIGINS,
-      defaultAllowedOrigins(parsed.data.PORT, parsed.data.WEB_PORT),
+      defaultAllowedOrigins(parsed.data.PORT),
     ),
   });
 }

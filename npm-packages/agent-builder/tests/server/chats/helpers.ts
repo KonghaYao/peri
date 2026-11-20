@@ -68,6 +68,8 @@ export class FakeActor implements ChatActorPort {
   readonly opened: ChatOpenTarget[] = [];
   readonly actions: ChatUserAction[] = [];
   readonly listeners = new Set<(envelope: ChatFactEnvelope) => void>();
+  /** Live connections created by the rivet engine seam; each has its own delivery set. */
+  readonly connections = new Set<Set<(envelope: ChatFactEnvelope) => void>>();
   factsResult: ChatFactsResult = { binding: null, envelopes: [], overflow: false };
   bound = false;
   closed = false;
@@ -157,8 +159,31 @@ export class FakeActor implements ChatActorPort {
     };
   }
 
+  /** Raw handle seam used by `RivetChatEngine.actor().onFact`; mirrors a rivet connection. */
+  connect(): {
+    on(event: 'chatFact', handler: (envelope: ChatFactEnvelope) => void): () => void;
+    dispose(): Promise<void>;
+  } {
+    const handlers = new Set<(envelope: ChatFactEnvelope) => void>();
+    this.connections.add(handlers);
+    return {
+      on: (_event, handler) => {
+        handlers.add(handler);
+        return () => {
+          handlers.delete(handler);
+        };
+      },
+      dispose: async () => {
+        this.connections.delete(handlers);
+      },
+    };
+  }
+
   emit(item: ChatFactEnvelope): void {
     for (const listener of [...this.listeners]) listener(item);
+    for (const handlers of [...this.connections]) {
+      for (const handler of [...handlers]) handler(item);
+    }
   }
 }
 

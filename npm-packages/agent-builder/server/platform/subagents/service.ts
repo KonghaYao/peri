@@ -19,13 +19,6 @@ import {
 } from './history';
 import { type SubagentResourceWire, serializeSubagent } from './serialize';
 
-export const SUBAGENT_HISTORY_DEGRADED = 'subagent_history_unavailable';
-
-/** The empty page used whenever history must degrade instead of inventing rows. */
-export function emptyPage<T>(): PlatformListPage<T> {
-  return { object: 'list', data: [], first_id: null, last_id: null, has_more: false };
-}
-
 function ordered<T>(rows: readonly T[], order: PageRequest['order']): readonly T[] {
   return order === 'asc' ? rows : [...rows].reverse();
 }

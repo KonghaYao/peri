@@ -177,39 +177,38 @@ describe('session resources', () => {
     void none;
   });
 
-  test('normalizes an unknown environment type to local and reports the mapping', async () => {
+  test('rejects hosted and undocumented environment types instead of mapping them', async () => {
     const h = setup();
     harness = h;
-    const response = await post(h, '/agents/sessions', {
+    const hosted = await post(h, '/agents/sessions', {
+      environment: { type: 'openai_hosted' },
+      agent_id: h.agentId,
+      input: 'hello',
+    });
+    expect(hosted.status).toBe(501);
+    const hostedError = (await hosted.json()) as { error: { type: string; param: string | null } };
+    expect(hostedError.error.type).toBe('not_implemented_error');
+    expect(hostedError.error.param).toBe('environment.type');
+
+    const unknown = await post(h, '/agents/sessions', {
       environment: { type: 'remote_managed', workspace_directory: '/workspace' },
       agent_id: h.agentId,
       input: 'hello',
     });
-    expect(response.status).toBe(201);
-    expect(response.headers.get('x-platform-degraded')).toContain('environment_type_mapped_to_local');
-    const body = (await response.json()) as Record<string, unknown>;
-    expect(body.environment).toEqual({
-      type: 'self_hosted',
-      remote_url: '',
-      id: expect.any(String),
-      workspace_directory: '',
-      capability_directories: [],
+    expect(unknown.status).toBe(400);
+    const unknownError = (await unknown.json()) as { error: { type: string; param: string | null } };
+    expect(unknownError.error.type).toBe('invalid_request_error');
+    expect(unknownError.error.param).toBe('environment.type');
+
+    const local = await post(h, '/agents/sessions', {
+      environment: { type: 'local', workspace_directory: '/workspace' },
+      agent_id: h.agentId,
+      input: 'hello',
     });
+    expect(local.status).toBe(400);
 
-    const row = h.db
-      .query<{ environment_type: string }, [string]>(
-        'SELECT environment_type FROM platform_sessions WHERE id = ?',
-      )
-      .get(String(body.id));
-    expect(row?.environment_type).toBe('local');
-
-    const fetched = await get(h, `/agents/sessions/${String(body.id)}`);
-    expect(fetched.status).toBe(200);
-    expect(fetched.headers.get('x-platform-degraded')).toContain('environment_type_mapped_to_local');
-
-    const updated = await post(h, `/agents/sessions/${String(body.id)}`, { metadata: { tier: 'x' } });
-    expect(updated.status).toBe(200);
-    expect(updated.headers.get('x-platform-degraded')).toContain('environment_type_mapped_to_local');
+    const stored = h.db.query<{ count: number }, []>('SELECT COUNT(*) AS count FROM platform_sessions').get();
+    expect(stored?.count).toBe(0);
   });
 
   test('validates vault ids against the vault whitelist', async () => {

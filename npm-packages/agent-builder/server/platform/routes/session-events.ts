@@ -21,7 +21,7 @@ export function createSessionEventRoutes(repos: PlatformRepositories): Hono {
     const service = runtime();
     const sessionId = c.req.param('session_id') ?? '';
     if (service === null) return notImplemented(c, 'session event list', [sessionId]);
-    const tap = await service.stream(sessionId, c.req.header('Last-Event-ID'), c.req.raw.signal);
+    const tap = await service.stream(sessionId, c.req.raw.signal);
     return tap.response(200);
   });
 

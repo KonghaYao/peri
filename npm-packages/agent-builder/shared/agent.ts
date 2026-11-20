@@ -142,7 +142,7 @@ export const AgentCapabilities = z.strictObject({
 });
 export type AgentCapabilities = z.infer<typeof AgentCapabilities>;
 
-/** Placeholder chat id used by `/api/agents/preview`; never persisted or opened. */
+/** Placeholder chat id used while rendering a preview target; never persisted or opened. */
 export const PREVIEW_CHAT_ID = 'preview';
 
 export const PreviewProvider = z.strictObject({

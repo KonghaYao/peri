@@ -1,4 +1,3 @@
-import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { AutomationHttpError, automationErrorResponse } from '../automations/errors';
 import { automationRuntimeFor } from '../automations/runtime';
@@ -8,11 +7,6 @@ import type { PlatformRepositories } from '../repositories';
 import { parsePlatformJson } from '../request';
 
 const MAX_FILTER_LENGTH = 1_048_576;
-
-/** Degradation is part of the response contract, never a silent substitution. */
-function setDegradation(c: Context, reasons: readonly string[]): void {
-  if (reasons.length > 0) c.header('x-platform-degraded', reasons.join(','));
-}
 
 /** Routes for `/v1/agents/automations`. */
 export function createAutomationRoutes(repos: PlatformRepositories): Hono {
@@ -34,24 +28,17 @@ export function createAutomationRoutes(repos: PlatformRepositories): Hono {
 
   routes.post('/', async (c) => {
     const params = await parsePlatformJson(c, CreateAutomationParams);
-    const created = service().create(params);
-    setDegradation(c, service().degradation(created.id));
-    return c.json(created, 201);
+    return c.json(service().create(params), 201);
   });
 
   routes.get('/:automation_id', (c) => {
-    const automationId = c.req.param('automation_id');
-    const resource = service().get(automationId);
-    setDegradation(c, service().degradation(automationId));
-    return c.json(resource);
+    return c.json(service().get(c.req.param('automation_id')));
   });
 
   routes.post('/:automation_id', async (c) => {
     const automationId = c.req.param('automation_id');
     const params = await parsePlatformJson(c, UpdateAutomationParams);
-    const updated = service().update(automationId, params);
-    setDegradation(c, service().degradation(automationId));
-    return c.json(updated);
+    return c.json(service().update(automationId, params));
   });
 
   routes.delete('/:automation_id', (c) => {

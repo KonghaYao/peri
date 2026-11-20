@@ -51,7 +51,7 @@ describe('session event stream', () => {
     }
   });
 
-  test('resumes after Last-Event-ID without repeating earlier events', async () => {
+  test('starts a fresh replay from the beginning on every connection', async () => {
     const h = setup();
     harness = h;
     const { id } = await createSession(h, {
@@ -68,18 +68,43 @@ describe('session event stream', () => {
 
     const events = sessionEvents(h, id);
     expect(events.length).toBeGreaterThan(3);
-    const resumeAt = events[2];
-    if (resumeAt === undefined) throw new Error('missing event');
 
-    const response = await get(h, `/agents/sessions/${id}/events`, {
-      'Last-Event-ID': String(resumeAt.seq),
-    });
+    const response = await get(h, `/agents/sessions/${id}/events`);
     const frames = await readFrames(response, 2);
-    expect(frames.map((frame) => frame.id)).toEqual([String(events[3]?.seq), String(events[4]?.seq)]);
+    expect(frames.map((frame) => frame.id)).toEqual([String(events[0]?.seq), String(events[1]?.seq)]);
     expect(new Set(frames.map((frame) => frame.id)).size).toBe(frames.length);
   });
 
-  test('accepts a public event id as Last-Event-ID', async () => {
+  test('ignores Last-Event-ID and starts a full replay from the beginning', async () => {
+    const h = setup();
+    harness = h;
+    const { id } = await createSession(h, {
+      environment: { type: 'none' },
+      agent_id: h.agentId,
+      input: 'hello',
+    });
+    const actor = h.actor(id);
+    actor.runState(true);
+    actor.input('in-1', 'hello');
+    await tick();
+    actor.turnComplete('completed');
+    await tick();
+
+    const events = sessionEvents(h, id);
+    expect(events.length).toBeGreaterThan(2);
+    const last = events.at(-1);
+    if (last === undefined) throw new Error('events missing');
+
+    // The documented stream is a replay from the durable log; a resume header cannot skip it.
+    const response = await get(h, `/agents/sessions/${id}/events`, {
+      'Last-Event-ID': String(last.seq),
+    });
+    expect(response.status).toBe(200);
+    const frames = await readFrames(response, 2);
+    expect(frames.map((frame) => frame.id)).toEqual([String(events[0]?.seq), String(events[1]?.seq)]);
+  });
+
+  test('replays each recorded event once in log order with its public event id', async () => {
     const h = setup();
     harness = h;
     const { id } = await createSession(h, {
@@ -94,20 +119,15 @@ describe('session event stream', () => {
     actor.turnComplete('completed');
     await tick();
     const events = sessionEvents(h, id);
-    const anchor = events[1];
-    if (anchor === undefined) throw new Error('missing event');
 
-    // The id a client reads from the frame payload is the same id stored on the row, so
-    // echoing it back resolves to the row's log position instead of replaying from zero.
+    // The id a client reads from the frame payload is the same id stored on the row.
     for (const event of events) {
       expect(event.data.event_id).toBe(event.event_id);
     }
 
-    const response = await get(h, `/agents/sessions/${id}/events`, {
-      'Last-Event-ID': anchor.event_id,
-    });
-    const frames = await readFrames(response, 1);
-    expect(frames[0]?.id).toBe(String(events[2]?.seq));
+    const response = await get(h, `/agents/sessions/${id}/events`);
+    const frames = await readFrames(response, events.length);
+    expect(frames.map((frame) => frame.id)).toEqual(events.map((event) => String(event.seq)));
   });
 
   test('streams live events after the replay and cleans up the subscription on cancel', async () => {
@@ -125,16 +145,14 @@ describe('session event stream', () => {
     const replayed = await readFrames(response, before);
     expect(replayed).toHaveLength(before);
 
-    // A second stream keeps the replay it has already seen; new facts arrive live.
-    const live = await get(h, `/agents/sessions/${id}/events`, {
-      'Last-Event-ID': String(sessionEvents(h, id).at(-1)?.seq ?? 0),
-    });
-    const framesPromise = readFrames(live, 1);
+    // Every connection starts its own full replay; later facts arrive live on top of it.
+    const live = await get(h, `/agents/sessions/${id}/events`);
+    const framesPromise = readFrames(live, before + 1);
     await tick();
     actor.runState(true);
     await tick();
     const frames = await framesPromise;
-    expect(frames[0]?.event).toBe('agent.session.in_progress');
+    expect(frames.at(-1)?.event).toBe('agent.session.in_progress');
   });
 
   test('creates a session as an event stream when stream=true', async () => {

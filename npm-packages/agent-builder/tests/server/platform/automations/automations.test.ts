@@ -3,7 +3,12 @@ import { SESSION_INLINE_AGENT_ID } from '../../../../server/db/migrate';
 import { automationBody, createSessionRow, del, get, type Harness, post, setup } from './helpers';
 
 interface ErrorBody {
-  readonly error: { readonly code: string; readonly param: string | null; readonly message: string };
+  readonly error: {
+    readonly type: string;
+    readonly code: string;
+    readonly param: string | null;
+    readonly message: string;
+  };
 }
 
 interface AutomationBody {
@@ -121,7 +126,36 @@ describe('automation resources', () => {
     expect(rejected.body.error.param).toBe('expression');
   });
 
-  test('normalizes an unserved new-session environment type to the local sandbox', async () => {
+  test('rejects new-session targets this deployment cannot deliver', async () => {
+    const h = start();
+    const runAt = Math.floor(h.clock.now / 1000) + 60;
+    const body = (environment: Record<string, unknown>) => ({
+      type: 'once',
+      name: 'Fresh session',
+      target: {
+        type: 'new_session',
+        agent_id: SESSION_INLINE_AGENT_ID,
+        environment,
+        input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+      },
+      run_at: runAt,
+    });
+
+    const hosted = await post<ErrorBody>(h, '/agents/automations', body({ type: 'openai_hosted' }));
+    expect(hosted.status).toBe(501);
+    expect(hosted.body.error.type).toBe('not_implemented_error');
+    expect(hosted.body.error.param).toBe('target.environment.type');
+
+    const unknown = await post<ErrorBody>(h, '/agents/automations', body({ type: 'unserved_hosting' }));
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.error.type).toBe('invalid_request_error');
+    expect(unknown.body.error.param).toBe('target.environment.type');
+
+    const list = await get<ListBody>(h, '/agents/automations');
+    expect(list.body.data).toEqual([]);
+  });
+
+  test('stores a documented self-hosted target and delivers it unchanged', async () => {
     const h = start();
     const runAt = Math.floor(h.clock.now / 1000) + 60;
     const created = await post<AutomationBody>(h, '/agents/automations', {
@@ -130,14 +164,13 @@ describe('automation resources', () => {
       target: {
         type: 'new_session',
         agent_id: SESSION_INLINE_AGENT_ID,
-        environment: { type: 'unserved_hosting', workspace_directory: '/srv/work' },
+        environment: { type: 'self_hosted', workspace_directory: '/srv/work' },
         input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
       },
       run_at: runAt,
     });
 
     expect(created.status).toBe(201);
-    expect(created.headers.get('x-platform-degraded')).toContain('environment_type_mapped_to_local');
     expect(created.body.target).toMatchObject({
       type: 'new_session',
       environment: {
@@ -147,21 +180,16 @@ describe('automation resources', () => {
         capability_directories: [],
       },
     });
-    expect(JSON.stringify(created.body)).not.toContain('unserved_hosting');
-
-    const fetched = await get<AutomationBody>(h, `/agents/automations/${created.body.id}`);
-    expect(fetched.headers.get('x-platform-degraded')).toContain('environment_type_mapped_to_local');
-    expect(JSON.stringify(fetched.body)).not.toContain('unserved_hosting');
 
     h.clock.now = runAt * 1000;
     await h.runtime.runtime.service.tick();
     expect(h.port.created[0]?.environment).toEqual({
-      type: 'local',
+      type: 'self_hosted',
       workspace_directory: '/srv/work',
     });
   });
 
-  test('keeps a documented environment type without reporting degradation', async () => {
+  test('keeps a documented environment type as given', async () => {
     const h = start();
     const created = await post<AutomationBody>(h, '/agents/automations', {
       type: 'once',
@@ -176,7 +204,6 @@ describe('automation resources', () => {
     });
 
     expect(created.status).toBe(201);
-    expect(created.headers.get('x-platform-degraded')).toBeNull();
     expect(created.body.target).toMatchObject({ environment: { type: 'none' } });
   });
 

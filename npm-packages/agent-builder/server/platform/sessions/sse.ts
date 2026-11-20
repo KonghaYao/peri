@@ -3,7 +3,7 @@ import type { PlatformEventRow } from '../repositories/sessions';
 import { formatEventFrame } from './events';
 
 export interface SessionEventSource {
-  replay(sessionId: string, afterSeq: number): PlatformEventRow[];
+  replay(sessionId: string): PlatformEventRow[];
   subscribe(sessionId: string, listener: (row: PlatformEventRow) => void): () => void;
 }
 
@@ -24,18 +24,18 @@ const SSE_HEADERS = {
 /**
  * Subscribes before the caller performs any work that produces events.
  *
- * Live rows are buffered until the response body starts, and the durable replay is merged in the
- * same buffer ordered by log position. Subscribing first is what makes "create session, then submit
- * input" lossless: events produced between creation and the first SSE byte are already captured.
+ * Every connection starts from the durable log: the replay and the live subscription are merged in
+ * the same buffer ordered by log position. Subscribing first is what makes "create session, then
+ * submit input" lossless: events produced between creation and the first SSE byte are already
+ * captured.
  */
 export function openSessionEventTap(
   source: SessionEventSource,
   sessionId: string,
-  afterSeq: number,
   requestSignal: AbortSignal,
 ): SessionEventTap {
   const buffered: PlatformEventRow[] = [];
-  let lastSeq = afterSeq;
+  let lastSeq = 0;
   let started = false;
   let disposed = false;
   let deliver: ((row: PlatformEventRow) => void) | null = null;
@@ -48,7 +48,7 @@ export function openSessionEventTap(
     }
     deliver?.(row);
   });
-  for (const row of source.replay(sessionId, afterSeq)) buffered.push(row);
+  for (const row of source.replay(sessionId)) buffered.push(row);
 
   const dispose = () => {
     if (disposed) return;
@@ -124,15 +124,4 @@ export function openSessionEventTap(
       return new Response(stream, { status, headers: SSE_HEADERS });
     },
   };
-}
-
-/** Resolves the documented `Last-Event-ID` header: log position or public event id. */
-export function resumePosition(
-  source: { sequenceOf(sessionId: string, eventId: string): number | null },
-  sessionId: string,
-  header: string | undefined,
-): number {
-  if (header === undefined || header.length === 0) return 0;
-  if (/^\d+$/.test(header)) return Number(header);
-  return source.sequenceOf(sessionId, header) ?? 0;
 }

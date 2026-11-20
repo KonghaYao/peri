@@ -439,8 +439,8 @@ export interface ChatEngineFactoryOptions extends StoreProbeOptions {
 /**
  * Production probe: configuration first, then one read-only Store round trip. Every wasm engine is
  * wrapped in a lazily re-probing wrapper, including the healthy-boot case, so a Store that dies
- * later is reported (and can recover) without a process restart. Capabilities and
- * `POST /api/chats` therefore agree on the current state.
+ * later is reported (and can recover) without a process restart. Session creation therefore
+ * agrees with the health reflected by the engine.
  */
 export async function createChatEngineWithStoreProbe(
   env: ServerEnv,

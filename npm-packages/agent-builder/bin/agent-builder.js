@@ -17,7 +17,7 @@ function usage() {
   console.log(`Peri Agent Builder — 本地单用户 Chat + Sandbox
 
 用法:
-  agent-builder start     启动同源 Web + API（默认）
+  agent-builder start     启动 API 服务（默认）
   agent-builder doctor    检查部署配置（不发起 Store 调用）
   agent-builder --help
   agent-builder --version
@@ -55,10 +55,6 @@ function prepareDirectories() {
   // Never chmod a directory the user already owns; only the one this launcher created.
   if (!existed) chmodSync(storage, 0o700);
   process.env.RIVETKIT_STORAGE_PATH = storage;
-
-  if (process.env.PERI_WEB_ROOT === undefined || process.env.PERI_WEB_ROOT.trim() === '') {
-    process.env.PERI_WEB_ROOT = path.join(packageRoot, 'dist');
-  }
 }
 
 async function main() {

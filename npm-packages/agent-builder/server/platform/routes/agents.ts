@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import { Hono } from 'hono';
-import { buildAgentUpdate, buildAgentWrite, degradationForTools } from '../agents/mapping';
+import { buildAgentUpdate, buildAgentWrite } from '../agents/mapping';
 import { AgentUpdateParams, AgentWriteParams } from '../agents/schemas';
 import { type AgentResourceBody, serializeAgent } from '../agents/serializer';
 import { isHiddenAgentId } from '../agents/visibility';
@@ -14,10 +14,7 @@ const NOT_FOUND_MESSAGE = 'Agent not found';
 const HAS_SESSIONS_MESSAGE = 'Agent still has sessions; delete them first';
 
 function respondWithAgent(c: Context, row: PlatformAgentRow, status: 200 | 201 = 200): Response {
-  const body = serializeAgent(row);
-  const degraded = degradationForTools(body.tools);
-  if (degraded.length > 0) c.header('x-platform-degraded', degraded.join(','));
-  return c.json(body, status);
+  return c.json(serializeAgent(row), status);
 }
 
 function respondWithPage(
@@ -25,10 +22,7 @@ function respondWithPage(
   agents: readonly AgentResourceBody[],
   request: ReturnType<typeof parsePageRequest>,
 ): Response {
-  const page = paginate(agents, request, (agent) => agent.id);
-  const degraded = degradationForTools(page.data.flatMap((agent) => agent.tools));
-  if (degraded.length > 0) c.header('x-platform-degraded', degraded.join(','));
-  return c.json(page);
+  return c.json(paginate(agents, request, (agent) => agent.id));
 }
 
 /** Routes for `/v1/agents` and the single-agent resource. */

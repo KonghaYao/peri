@@ -8,35 +8,35 @@ export const SessionMetadataParams = z
 
 const PromptCacheOptions = z.strictObject({ ttl: z.string().min(1).max(64).optional() });
 
-const KNOWN_ENVIRONMENT_TYPES: ReadonlySet<string> = new Set(['none', 'self_hosted', 'local']);
+/**
+ * The documented environment union. Hosted shapes are accepted at the wire boundary because the
+ * spec allows them; the service answers `501` for a hosting type it cannot provision instead of
+ * rewriting the request to a local environment.
+ */
+const HostedEnvironmentParams = z.strictObject({
+  type: z.literal('openai_hosted'),
+  packages: z.unknown().optional(),
+  setup_commands: z.unknown().optional(),
+  network: z.unknown().optional(),
+  desktop: z.unknown().optional(),
+  env: z.unknown().optional(),
+  capability_directories: z.unknown().optional(),
+  skills: z.unknown().optional(),
+  plugins: z.unknown().optional(),
+  files: z.unknown().optional(),
+  environment_id: z.unknown().optional(),
+  environment_template_id: z.unknown().optional(),
+  container_size: z.unknown().optional(),
+});
 
-const EnvironmentParams = z.union([
-  z.discriminatedUnion('type', [
-    z.strictObject({ type: z.literal('none') }),
-    z.strictObject({
-      type: z.literal('self_hosted'),
-      workspace_directory: z.string().max(MAX_ID_LENGTH),
-      capability_directories: z.array(z.string().max(MAX_ID_LENGTH)).max(16_384).nullish(),
-    }),
-    z.strictObject({
-      type: z.literal('local'),
-      workspace_directory: z.string().max(MAX_ID_LENGTH).optional(),
-      capability_directories: z.array(z.string().max(MAX_ID_LENGTH)).max(16_384).nullish(),
-    }),
-  ]),
-  /**
-   * Any other hosting type is accepted at the wire boundary and normalized to the local
-   * sandbox by the service; the response reports the mapping through `x-platform-degraded`.
-   */
-  z
-    .strictObject({
-      type: z.string().min(1).max(64),
-      workspace_directory: z.string().max(MAX_ID_LENGTH).optional(),
-      capability_directories: z.array(z.string().max(MAX_ID_LENGTH)).max(16_384).nullish(),
-    })
-    .refine((environment) => !KNOWN_ENVIRONMENT_TYPES.has(environment.type), {
-      message: 'known environment types use their documented shape',
-    }),
+const EnvironmentParams = z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('none') }),
+  z.strictObject({
+    type: z.literal('self_hosted'),
+    workspace_directory: z.string().max(MAX_ID_LENGTH),
+    capability_directories: z.array(z.string().max(MAX_ID_LENGTH)).max(16_384).nullish(),
+  }),
+  HostedEnvironmentParams,
 ]);
 
 const SessionAgentParams = z.strictObject({

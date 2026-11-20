@@ -30,6 +30,7 @@ export const CONFIG_ERROR_CODES = [
   'workspace_path_not_directory',
   'workspace_path_not_canonical',
   'workspace_path_filesystem_root',
+  'provider_env_conflict',
   ...SANDBOX_CONFIG_ERROR_CODES,
 ] as const;
 
@@ -45,6 +46,8 @@ const CONFIG_ERROR_HINTS: Record<ConfigErrorCode, string> = {
   workspace_path_not_canonical:
     'PERI_WORKSPACE_PATH 含符号链接目录组件；请用 realpath 后的真实路径（macOS 的 /tmp 实际是 /private/tmp）',
   workspace_path_filesystem_root: 'PERI_WORKSPACE_PATH 不能是文件系统根目录；请指定专用 workspace 目录',
+  provider_env_conflict:
+    '环境中已指定 PERI_PROVIDER_TYPE，但数据库里存在多条 Provider；请先只保留一条后再重启（PERI_PROVIDER_TYPE/PERI_PROVIDER_BASE_URL/PERI_PROVIDER_API_KEY/PERI_PROVIDER_NAME 只同步这一条，不会自动删除）',
   sandbox_peri_missing:
     '缺少 Peri 可执行文件；请设置 PERI_SANDBOX_PERI_PATH（默认 ~/.peri/peri）指向已安装的 peri',
   sandbox_settings_missing: 'PERI_SANDBOX_SETTINGS 指向的文件不存在；请修正路径，或留空由应用生成',

@@ -16,11 +16,11 @@ import { createSessionAutomationPort } from './platform/automations/session-port
 import { createPlatformRepositories } from './platform/repositories';
 import { SessionRecorder } from './platform/sessions/recorder';
 import { createSessionRuntime, installSessionRuntime, sessionDraftFor } from './platform/sessions/runtime';
+import { seedProviderFromEnv } from './providers/env-provider';
 import { SandboxCoordinator } from './sandbox/coordinator';
 import { sandboxEnginePort } from './sandbox/engine-port';
 import { createSandboxRuntime, type SandboxRuntimeHandle } from './sandbox/runtime';
 import { createShutdown } from './shutdown';
-import { findWebRoot } from './static';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -45,6 +45,12 @@ async function main(): Promise<void> {
   try {
     const schemaVersion = migrate(db);
     secureDatabaseFiles(env.databasePath);
+    // The single Provider is deployment configuration: sync it from the environment before any
+    // request can resolve it. Only the protocol type is logged; credentials never reach the log.
+    const seeded = seedProviderFromEnv(db, env);
+    if (seeded !== null) {
+      console.log(`[agent-builder] provider: env ${seeded.type} (${seeded.action})`);
+    }
 
     const sandbox = new SandboxCoordinator(env, sandboxEnginePort(engine));
     // The platform session surface needs the chat service and its recorder; both are installed
@@ -71,8 +77,7 @@ async function main(): Promise<void> {
         `[agent-builder] converged ${interrupted.turns} interrupted turn(s) and ${interrupted.items} open item(s)`,
       );
     }
-    const webRoot = findWebRoot(env.webRoot);
-    const app = createApp({ env, db, engine, chatService, sandbox, webRoot });
+    const app = createApp({ env, db, engine, chatService, sandbox });
     // Idle SSE chats must survive between heartbeats: the heartbeat interval is kept well below
     // this timeout (see `server/chats/keepalive.ts`).
     const server = Bun.serve({
@@ -89,11 +94,6 @@ async function main(): Promise<void> {
     };
 
     console.log(`[agent-builder] api listening on http://${server.hostname}:${server.port}`);
-    if (webRoot === null) {
-      console.warn('[agent-builder] web assets not found; run `vite build` or install the tarball');
-    } else {
-      console.log(`[agent-builder] web root: ${webRoot}`);
-    }
     console.log(`[agent-builder] sqlite schema v${schemaVersion} at ${env.databasePath}`);
     console.log(
       `[agent-builder] chat runtime: ${engine.status.mode}`,
@@ -106,13 +106,13 @@ async function main(): Promise<void> {
     console.log(`[agent-builder] workspace: ${env.workspaceUri}`);
 
     // The API answers immediately; the first chat request waits for the engine if it is still
-    // starting. A boot failure is reported through health/capabilities while the process survives;
-    // if the engine cannot bind its ports, rivetkit terminates the process, so the log carries the
-    // actionable ports instead of a bare code.
+    // starting. A boot failure stays visible through the engine diagnostic while the process
+    // survives; if the engine cannot bind its ports, rivetkit terminates the process, so the log
+    // carries the actionable ports instead of a bare code.
     if (engine.status.mode === 'wasm') {
       void engine.start().catch(() => {
         console.error(
-          '[agent-builder] chat engine failed to start; chat routes will return 503 engine_unavailable',
+          '[agent-builder] chat engine failed to start; session routes will return 503 engine_unavailable',
           engineStartupDiagnostic(engine.health(), engine.status.reasons, env.enginePort),
         );
       });

@@ -561,7 +561,7 @@ export class PlatformEventsRepository {
     return row;
   }
 
-  /** Replays a session's event log in order; `afterSeq` makes replays resumable and idempotent. */
+  /** Replays a session's event log in order; `afterSeq` selects an increment. */
   listBySession(sessionId: string, afterSeq = 0): PlatformEventRow[] {
     return this.db
       .query<PlatformEventRow, [string, number]>(
@@ -569,16 +569,6 @@ export class PlatformEventsRepository {
          WHERE session_id = ? AND seq > ? ORDER BY seq ASC`,
       )
       .all(sessionId, afterSeq);
-  }
-
-  /** Resolves an SSE `Last-Event-ID` that carries the public event id instead of the log position. */
-  findByEventId(sessionId: string, eventId: string): PlatformEventRow | null {
-    const row = this.db
-      .query<PlatformEventRow, [string, string]>(
-        `SELECT ${EVENT_COLUMNS} FROM platform_events WHERE session_id = ? AND event_id = ?`,
-      )
-      .get(sessionId, eventId);
-    return row ?? null;
   }
 }
 

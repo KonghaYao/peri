@@ -311,11 +311,11 @@ describe('subagent history', () => {
     expect(foreign.status).toBe(404);
   });
 
-  test('degrades list reads to an empty page when the Store is unavailable', async () => {
+  test('answers 503 for every history read when the Store is unavailable', async () => {
     const h = start();
     const sessionId = await newSession(h);
     const subagent = seedSubagent(h, sessionId);
-    seedTurn(h, sessionId, subagent.id);
+    const turn = seedTurn(h, sessionId, subagent.id);
     installReader(h, {
       probe: () => {
         throw new StoreHistoryUnavailableError('down');
@@ -328,27 +328,21 @@ describe('subagent history', () => {
     for (const path of [
       `/agents/sessions/${sessionId}/subagents/${subagent.id}/turns`,
       `/agents/sessions/${sessionId}/subagents/${subagent.id}/items`,
+      `/agents/sessions/${sessionId}/subagents/${subagent.id}/turns/${turn.id}`,
+      `/agents/sessions/${sessionId}/subagents/${subagent.id}/turns/${turn.id}/items`,
+      `/agents/sessions/${sessionId}/subagents/${subagent.id}/turns/${crypto.randomUUID()}`,
     ]) {
       const response = await get(h, path);
-      expect(response.status).toBe(200);
-      expect(response.headers.get('x-platform-degraded')).toBe('subagent_history_unavailable');
+      expect(response.status).toBe(503);
       expect(await json(response)).toStrictEqual({
-        object: 'list',
-        data: [],
-        first_id: null,
-        last_id: null,
-        has_more: false,
+        error: {
+          type: 'server_error',
+          code: 'subagent_history_unavailable',
+          message: 'Subagent history is unavailable',
+          param: null,
+        },
       });
     }
-
-    const turn = await get(
-      h,
-      `/agents/sessions/${sessionId}/subagents/${subagent.id}/turns/${crypto.randomUUID()}`,
-    );
-    expect(turn.status).toBe(503);
-    expect(await json(turn)).toMatchObject({
-      error: { code: 'subagent_history_unavailable', type: 'server_error' },
-    });
   });
 
   test('answers 409 when the Store schema does not match the history contract', async () => {

@@ -4,7 +4,7 @@ import { type PageRequest, parsePageRequest } from '../pagination';
 import type { PlatformRepositories } from '../repositories';
 import { sessionErrorResponse } from '../sessions/errors';
 import { StoreHistoryUnavailableError, StoreSchemaUnsupportedError } from '../subagents/history';
-import { emptyPage, SUBAGENT_HISTORY_DEGRADED, SubagentService } from '../subagents/service';
+import { SubagentService } from '../subagents/service';
 
 function pageRequest(c: Context): PageRequest {
   return parsePageRequest({
@@ -18,22 +18,8 @@ function schemaError(c: Context, error: StoreSchemaUnsupportedError): Response {
   return platformError(c, error.code, 'The Store schema does not support subagent history', 409);
 }
 
-/** Lists degrade to an empty page; the header keeps the missing history visible to callers. */
-async function historyPage(c: Context, load: () => Promise<unknown>): Promise<Response> {
-  try {
-    return c.json(await load());
-  } catch (error) {
-    if (error instanceof StoreHistoryUnavailableError) {
-      c.header('x-platform-degraded', SUBAGENT_HISTORY_DEGRADED);
-      return c.json(emptyPage());
-    }
-    if (error instanceof StoreSchemaUnsupportedError) return schemaError(c, error);
-    return sessionErrorResponse(error, c);
-  }
-}
-
-/** A single turn cannot degrade to "not found": an unreadable Store answers 503 explicitly. */
-async function historyValue(c: Context, load: () => Promise<unknown>): Promise<Response> {
+/** A failed Store read is a server fault; answering an empty page would invent a result. */
+async function history(c: Context, load: () => Promise<unknown>): Promise<Response> {
   try {
     return c.json(await load());
   } catch (error) {
@@ -65,21 +51,21 @@ export function createSessionSubagentRoutes(repos: PlatformRepositories): Hono {
     const sessionId = c.req.param('session_id') ?? '';
     const subagentId = c.req.param('subagent_id') ?? '';
     const request = pageRequest(c);
-    return historyPage(c, () => service.items(sessionId, subagentId, request));
+    return history(c, () => service.items(sessionId, subagentId, request));
   });
 
   routes.get('/:subagent_id/turns', (c) => {
     const sessionId = c.req.param('session_id') ?? '';
     const subagentId = c.req.param('subagent_id') ?? '';
     const request = pageRequest(c);
-    return historyPage(c, () => service.turns(sessionId, subagentId, request));
+    return history(c, () => service.turns(sessionId, subagentId, request));
   });
 
   routes.get('/:subagent_id/turns/:turn_id', (c) => {
     const sessionId = c.req.param('session_id') ?? '';
     const subagentId = c.req.param('subagent_id') ?? '';
     const turnId = c.req.param('turn_id') ?? '';
-    return historyValue(c, () => service.turn(sessionId, subagentId, turnId));
+    return history(c, () => service.turn(sessionId, subagentId, turnId));
   });
 
   routes.get('/:subagent_id/turns/:turn_id/items', (c) => {
@@ -87,7 +73,7 @@ export function createSessionSubagentRoutes(repos: PlatformRepositories): Hono {
     const subagentId = c.req.param('subagent_id') ?? '';
     const turnId = c.req.param('turn_id') ?? '';
     const request = pageRequest(c);
-    return historyPage(c, () => service.turnItems(sessionId, subagentId, turnId, request));
+    return history(c, () => service.turnItems(sessionId, subagentId, turnId, request));
   });
 
   routes.onError(sessionErrorResponse);

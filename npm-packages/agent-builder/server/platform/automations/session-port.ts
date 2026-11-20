@@ -3,12 +3,6 @@ import type { CreateSessionParams } from '../sessions/params';
 import { sessionRuntimeFor } from '../sessions/runtime';
 import { SessionService } from '../sessions/service';
 
-/**
- * The session family owns the wire reason; automations re-export it so both families report the
- * same `x-platform-degraded` value from a single definition.
- */
-export { ENVIRONMENT_TYPE_MAPPED_REASON } from '../sessions/service';
-
 /** Narrow seam between automations and the session family; automations never speak to a chat actor. */
 export interface AutomationSessionCreateInput {
   readonly environment: CreateSessionParams['environment'];

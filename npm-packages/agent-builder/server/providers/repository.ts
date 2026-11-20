@@ -82,6 +82,28 @@ export class ProvidersRepository {
     );
   }
 
+  /**
+   * Env seeding owns the stored Provider fields explicitly named by the environment, including
+   * the protocol type (`ProviderService.update` deliberately keeps it immutable).
+   */
+  updateFromEnv(record: ProviderRecord, revision: number): boolean {
+    return (
+      this.db
+        .query(
+          'UPDATE providers SET name = ?, type = ?, base_url = ?, credential_source = ?, api_key = ?, revision = revision + 1 WHERE id = ? AND revision = ?',
+        )
+        .run(
+          record.name,
+          record.type,
+          record.baseUrl,
+          record.credentialSource,
+          record.apiKey,
+          record.id,
+          revision,
+        ).changes === 1
+    );
+  }
+
   delete(id: string, revision: number): boolean {
     return (
       this.db.query('DELETE FROM providers WHERE id = ? AND revision = ?').run(id, revision).changes === 1

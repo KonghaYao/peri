@@ -64,7 +64,10 @@ export function buildDoctorReport(env: ServerEnv): DoctorReport {
   lines.push({
     status: 'ok',
     label: '模型 Provider',
-    detail: '请在 Providers 管理页填写 SQLite API key；doctor 只检查基础设施，不读取凭据，未执行模型认证',
+    detail:
+      env.provider.type === undefined
+        ? '未设置 PERI_PROVIDER_TYPE；启动时不会同步 Provider，doctor 不读取凭据，未执行模型认证'
+        : `由 PERI_PROVIDER_* 环境变量同步为 ${env.provider.type}；doctor 不读取凭据，未执行模型认证`,
   });
   lines.push({
     status: wasmAssetsAvailable() ? 'ok' : 'blocked',
@@ -113,7 +116,7 @@ export function renderDoctor(report: DoctorReport): string {
     ...report.lines.map((line) => `${prefix[line.status]} ${line.label}: ${line.detail}`),
     '',
     report.ready
-      ? '结论：基础设施配置完整，可以启动；Provider 凭据需在管理页逐项检查，未执行模型认证。'
+      ? '结论：基础设施配置完整，可以启动；Provider 由 PERI_PROVIDER_* 同步，未执行模型认证。'
       : '结论：尚未就绪；按上面的 BLOCK 项修正后重试。',
   ].join('\n');
 }

@@ -36,8 +36,6 @@ describe('agent resource round trip', () => {
         },
         { type: 'tool_search' },
         { type: 'web_search', mode: 'live' },
-        { type: 'computer_use' },
-        { type: 'function', name: 'lookup', description: 'Look up', parameters: { type: 'object' } },
       ],
       multi_agent: { enabled: true },
       compaction: { async: true },
@@ -46,10 +44,6 @@ describe('agent resource round trip', () => {
 
     const createResponse = await ctx.app.request('/v1/agents', postJson(createBody));
     expect(createResponse.status).toBe(201);
-    expect(createResponse.headers.get('x-platform-degraded')?.split(',').sort()).toEqual([
-      'computer_use',
-      'function',
-    ]);
     const created = AgentResource.parse(await createResponse.json());
 
     expect(created.object).toBe('agent');
@@ -85,15 +79,6 @@ describe('agent resource round trip', () => {
         context_size: 'medium',
         allowed_domains: null,
         location: null,
-      },
-      { type: 'computer_use', include_screenshots: false },
-      {
-        type: 'function',
-        name: 'lookup',
-        description: 'Look up',
-        parameters: { type: 'object' },
-        defer_loading: false,
-        async: false,
       },
     ]);
 
@@ -157,7 +142,6 @@ describe('agent resource round trip', () => {
     };
     const updateResponse = await ctx.app.request(`/v1/agents/${created.id}`, postJson(updateBody));
     expect(updateResponse.status).toBe(200);
-    expect(updateResponse.headers.get('x-platform-degraded')).toBeNull();
     const updated = AgentResource.parse(await updateResponse.json());
 
     expect(updated.id).toBe(created.id);
@@ -390,7 +374,7 @@ describe('agent resource round trip', () => {
     });
   });
 
-  test('hides the reserved inline-session agent from both agent surfaces', async () => {
+  test('hides the reserved inline-session agent from the agent surface', async () => {
     const ctx = setupAgentApp();
 
     const platformList = AgentListResource.parse(
@@ -404,17 +388,11 @@ describe('agent resource round trip', () => {
       has_more: false,
     });
 
-    const apiList = (await (await ctx.app.request('/api/agents')).json()) as { agents: unknown[] };
-    expect(apiList.agents).toEqual([]);
-
     const platformGet = await ctx.app.request(`/v1/agents/${SESSION_INLINE_AGENT_ID}`, {
       headers: AUTHORIZATION,
     });
     expect(platformGet.status).toBe(404);
     expect(PlatformErrorBody.parse(await platformGet.json()).error.code).toBe('not_found');
-
-    const apiGet = await ctx.app.request(`/api/agents/${SESSION_INLINE_AGENT_ID}`);
-    expect(apiGet.status).toBe(404);
 
     const createResponse = await ctx.app.request(
       '/v1/agents',

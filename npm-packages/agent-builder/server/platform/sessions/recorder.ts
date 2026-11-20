@@ -113,7 +113,7 @@ export class SessionRecorder {
     };
   }
 
-  replay(sessionId: string, afterSeq: number): PlatformEventRow[] {
+  replay(sessionId: string, afterSeq = 0): PlatformEventRow[] {
     return this.#repos.events.listBySession(sessionId, afterSeq);
   }
 
@@ -128,11 +128,6 @@ export class SessionRecorder {
     );
     const state = this.#sessions.get(sessionId);
     if (state !== undefined) for (const listener of [...state.subscribers]) listener(eventRow);
-  }
-
-  /** Resolves a public `event_id` back to its log position for `Last-Event-ID` replay. */
-  sequenceOf(sessionId: string, eventId: string): number | null {
-    return this.#repos.events.findByEventId(sessionId, eventId)?.seq ?? null;
   }
 
   /**
@@ -585,8 +580,8 @@ export class SessionRecorder {
   ): PlatformEventRow {
     return this.#repos.events.append({
       sessionId,
-      // The column and the payload must carry the same public id: clients echo the payload
-      // `event_id` as `Last-Event-ID`, and replay resolves it through the column.
+      // The column and the payload carry the same public id, so a client can correlate a frame
+      // payload with the stored row without a second lookup.
       eventId: data.event_id,
       type: data.type,
       turnId: refs.turnId ?? null,

@@ -91,7 +91,7 @@ export async function createEnvironment(
   body: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
   const response = await request(app, 'POST', '/agents/environments', {
-    environment: { type: 'local', workspace_directory: workspace, ...body },
+    environment: { type: 'self_hosted', workspace_directory: workspace, ...body },
   });
   if (response.status !== 201) {
     throw new Error(`Environment setup failed with status ${response.status}`);

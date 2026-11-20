@@ -472,7 +472,7 @@ export class ChatService {
     if (resolved.providerId !== null) this.providers.retain(chatId, resolved.providerId);
   }
 
-  /** Only used when no caller or durable draft exists, i.e. the unchanged `/api/chats` path. */
+  /** Only used when no caller or durable draft exists, i.e. the stored-agent chat path. */
   #storedDraft(chatId: string): AgentDraft {
     const chat = this.#chats.getWithAgent(chatId);
     if (!chat) throw new AppError('not_found', 'Chat not found');

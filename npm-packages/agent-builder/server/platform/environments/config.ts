@@ -3,9 +3,6 @@ import { parseJsonColumn } from '../json';
 import { decodeInlineFileContent } from './content';
 import { normalizeEnvironmentPath } from './workspace';
 
-export const LOCAL_ENVIRONMENT_TYPES = ['none', 'self_hosted', 'local'] as const;
-export type LocalEnvironmentType = (typeof LOCAL_ENVIRONMENT_TYPES)[number];
-
 export const CONTAINER_SIZES = ['small', 'medium', 'large'] as const;
 export type ContainerSize = (typeof CONTAINER_SIZES)[number];
 
@@ -61,8 +58,6 @@ export interface EnvironmentConfig {
   readonly workspace_directory: string | null;
   readonly vault_ids: string[];
   readonly template_id: string | null;
-  /** Reasons returned in `x-platform-degraded`; persisted so later reads stay honest. */
-  readonly degradation: string[];
 }
 
 /** Everything persisted for one reusable environment template. */
@@ -142,7 +137,7 @@ export const EnvironmentFileParamSchema = z.discriminatedUnion('type', [
 ]);
 
 const ENVIRONMENT_CONFIG_SHAPE = {
-  type: z.string().min(1).max(64).optional(),
+  type: z.string().min(1).max(64),
   name: z.string().min(1).max(256).optional(),
   workspace_directory: z.string().min(1).max(4096).optional(),
   packages: PackagesParamSchema.nullable().optional(),
@@ -341,7 +336,6 @@ export interface EnvironmentConfigInputs {
   readonly workspace_directory: string | null;
   readonly vault_ids: readonly string[];
   readonly template_id: string | null;
-  readonly degradation: readonly string[];
 }
 
 export function buildEnvironmentConfig(inputs: EnvironmentConfigInputs): EnvironmentConfig {
@@ -358,7 +352,6 @@ export function buildEnvironmentConfig(inputs: EnvironmentConfigInputs): Environ
     workspace_directory: inputs.workspace_directory,
     vault_ids: [...inputs.vault_ids],
     template_id: inputs.template_id,
-    degradation: [...inputs.degradation],
   };
 }
 
@@ -389,8 +382,8 @@ export function buildTemplateConfig(inputs: TemplateConfigInputs): TemplateConfi
 }
 
 /**
- * Confidential inputs are never persisted: `setup_commands` and `env` are accepted, validated
- * and factored into the degradation header, then dropped before the configuration is stored.
+ * Confidential inputs are never persisted: `setup_commands` and `env` are validated, then dropped
+ * before the configuration is stored.
  */
 export function withoutConfidentialEnvironmentInput(config: EnvironmentConfig): EnvironmentConfig {
   return { ...config, setup_commands: [], env: {} };
@@ -415,8 +408,18 @@ export function environmentConfigFromColumn(raw: string | null | undefined): Env
     workspace_directory: optionalString(record.workspace_directory),
     vault_ids: stringArray(record.vault_ids),
     template_id: optionalString(record.template_id),
-    degradation: stringArray(record.degradation),
   });
+}
+
+/** Whether a stored template declared a network policy; older rows simply lack the field. */
+/**
+ * Stored template configs always carry a normalized `network` object, so presence alone is not a
+ * declaration; only an active policy means the template asks for enforced network access.
+ */
+export function templateDeclaresNetwork(raw: string | null | undefined): boolean {
+  const record = asRecord(parseJsonColumn<unknown>(raw, {}));
+  const network = asRecord(record.network);
+  return network.access === 'enabled' || network.access === 'restricted';
 }
 
 export function templateConfigFromColumn(raw: string | null | undefined): TemplateConfig {
@@ -432,32 +435,4 @@ export function templateConfigFromColumn(raw: string | null | undefined): Templa
     plugins: record.plugins,
     files: record.files,
   });
-}
-
-/** Emits `x-platform-degraded` only when at least one requested capability was not executed. */
-export function degradationReasons(
-  config: EnvironmentConfig,
-  options: { readonly typeMapped: boolean; readonly hasVaults: boolean },
-): string[] {
-  const reasons: string[] = [];
-  if (options.typeMapped) reasons.push('environment_type_mapped_to_local');
-  if (
-    hasEntries(config.packages.python) ||
-    hasEntries(config.packages.system) ||
-    hasEntries(config.packages.npm)
-  ) {
-    reasons.push('packages_not_installed');
-  }
-  if (config.setup_commands.length > 0) reasons.push('setup_commands_not_executed');
-  if (config.network.access !== 'disabled') reasons.push('network_policy_not_enforced');
-  if (config.desktop.enabled) reasons.push('desktop_not_provisioned');
-  if (config.skills.length > 0) reasons.push('skills_not_installed');
-  if (config.plugins.length > 0) reasons.push('plugins_not_installed');
-  if (config.container_size !== null) reasons.push('container_size_not_enforced');
-  if (options.hasVaults) reasons.push('vaults_not_attached');
-  return reasons;
-}
-
-function hasEntries(values: readonly string[]): boolean {
-  return values.length > 0;
 }

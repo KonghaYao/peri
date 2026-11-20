@@ -248,7 +248,7 @@ export function subagentEvent(
   return { type, event_id: eventId, subagent };
 }
 
-/** One SSE frame: `id` carries the log position so `Last-Event-ID` resumes exactly. */
+/** One SSE frame; `id` is the durable log position of the event. */
 export function formatEventFrame(row: PlatformEventRow): string {
   return `id: ${row.seq}\nevent: ${row.type}\ndata: ${row.data}\n\n`;
 }

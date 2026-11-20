@@ -62,7 +62,6 @@ describe('session artifacts', () => {
     const response = await get(h, `/agents/sessions/${sessionId}/artifacts`);
     expect(response.status).toBe(200);
     expect(await json(response)).toStrictEqual(EMPTY_PAGE);
-    expect(response.headers.get('x-platform-degraded')).toBeNull();
   });
 
   test('returns 404 for an unknown artifact, its content, and its deletion', async () => {

@@ -1,3 +1,4 @@
+import { executableEnvironmentType } from '../environments/type';
 import { serializeMetadataColumn } from '../json';
 import { type PageRequest, type PlatformListPage, paginate } from '../pagination';
 import type { PlatformRepositories } from '../repositories';
@@ -21,7 +22,6 @@ import {
   parseStoredTarget,
   type StoredAutomationTarget,
   serializeTarget,
-  targetEnvironmentDegradation,
   type UpdateAutomationParams,
 } from './schemas';
 import {
@@ -100,13 +100,6 @@ export class AutomationService {
     return serializeAutomation(this.#require(id));
   }
 
-  /** Target degradations; routes report them as `x-platform-degraded` instead of a second shape. */
-  degradation(id: string): readonly string[] {
-    const target = parseStoredTarget(this.#require(id).target);
-    if (target.type !== 'new_session') return [];
-    return targetEnvironmentDegradation(target.environment);
-  }
-
   create(params: CreateAutomationParams): AutomationResource {
     this.#validateTarget(params.target);
     const now = this.#now();
@@ -145,8 +138,8 @@ export class AutomationService {
   update(id: string, params: UpdateAutomationParams): AutomationResource {
     const row = this.#require(id);
     const now = this.#now();
-    const target = params.target === undefined ? null : serializeTarget(params.target);
     if (params.target !== undefined) this.#validateTarget(params.target);
+    const target = params.target === undefined ? null : serializeTarget(params.target);
     const metadata = params.metadata === undefined ? null : serializeMetadataColumn(params.metadata);
 
     let expression: string | null = null;
@@ -484,6 +477,8 @@ export class AutomationService {
     if (target.environment === undefined) {
       throw invalid('target.environment is required', 'target.environment');
     }
+    // A stored target must stay deliverable: only hosting types this deployment runs are accepted.
+    executableEnvironmentType(target.environment.type, 'target.environment.type');
     if (!Array.isArray(target.input)) {
       throw invalid('target.input must be an array of messages', 'target.input');
     }

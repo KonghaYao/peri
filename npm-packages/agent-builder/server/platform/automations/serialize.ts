@@ -108,16 +108,21 @@ function serializeTarget(target: StoredAutomationTarget): AutomationTargetResour
 
 /**
  * The automation contract's environment resource is narrower than the session parameter: it always
- * carries the resolved reference fields. The compatibility layer maps a local session environment
- * onto the documented self-hosted shape.
+ * carries the resolved reference fields. Rows written by earlier versions may still hold the
+ * retired `local` type, which is reported as the documented self-hosted shape.
  */
 function serializeEnvironment(environment: CreateSessionParams['environment']): unknown {
-  if (environment.type === 'self_hosted' || environment.type === 'local') {
+  const stored = environment as {
+    readonly type: string;
+    readonly workspace_directory?: string;
+    readonly capability_directories?: readonly string[] | null;
+  };
+  if (stored.type === 'self_hosted' || stored.type === 'local') {
     return {
       type: 'self_hosted',
       environment_id: null,
-      workspace_directory: environment.workspace_directory ?? '',
-      capability_directories: environment.capability_directories ?? [],
+      workspace_directory: stored.workspace_directory ?? '',
+      capability_directories: stored.capability_directories ?? [],
     };
   }
   return { type: 'none' };

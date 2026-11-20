@@ -59,13 +59,13 @@ describe('platform environments', () => {
   test('creates, lists and retrieves an environment', async () => {
     const created = await request(harness.app, 'POST', '/agents/environments', {
       name: 'Primary',
-      environment: { type: 'local', workspace_directory: harness.workspace },
+      environment: { type: 'self_hosted', workspace_directory: harness.workspace },
     });
     expect(created.status).toBe(201);
     const environment = await body<EnvironmentBody>(created);
     expect(environment).toMatchObject({
       object: 'agent.environment',
-      type: 'local',
+      type: 'self_hosted',
       status: 'ready',
       skills: [],
       plugins: [],
@@ -78,7 +78,6 @@ describe('platform environments', () => {
     expect(environment).not.toHaveProperty('desktop');
     expect(environment).not.toHaveProperty('container_size');
     expect(environment.status).not.toBe('connected');
-    expect(created.headers.get('x-platform-degraded')).toBeNull();
 
     const list = await request(harness.app, 'GET', '/agents/environments');
     expect(list.status).toBe(200);
@@ -104,20 +103,27 @@ describe('platform environments', () => {
     expect((await body<EnvironmentBody>(stillThere)).id).toBe(environment.id);
   });
 
-  test('maps unsupported environment types to local and marks the response degraded', async () => {
+  test('rejects hosted environment types this deployment cannot provision', async () => {
+    const response = await request(harness.app, 'POST', '/agents/environments', {
+      environment: { type: 'openai_hosted' },
+    });
+    expect(response.status).toBe(501);
+    const error = await body<ErrorBody>(response);
+    expect(error.error.type).toBe('not_implemented_error');
+    expect(error.error.param).toBe('type');
+  });
+
+  test('rejects undocumented environment types instead of rewriting them', async () => {
     const response = await request(harness.app, 'POST', '/agents/environments', {
       environment: { type: 'remote_managed' },
     });
-    expect(response.status).toBe(201);
-    const environment = await body<EnvironmentBody>(response);
-    expect(environment.type).toBe('local');
-    expect(response.headers.get('x-platform-degraded')).toContain('environment_type_mapped_to_local');
-
-    const fetched = await request(harness.app, 'GET', `/agents/environments/${environment.id}`);
-    expect(fetched.headers.get('x-platform-degraded')).toContain('environment_type_mapped_to_local');
+    expect(response.status).toBe(400);
+    const error = await body<ErrorBody>(response);
+    expect(error.error.type).toBe('invalid_request_error');
+    expect(error.error.param).toBe('type');
   });
 
-  test('accepts the flat request shape and the local environment types', async () => {
+  test('accepts the flat request shape and the executable environment types', async () => {
     const response = await request(harness.app, 'POST', '/agents/environments', {
       type: 'self_hosted',
       name: 'Flat',
@@ -138,7 +144,7 @@ describe('platform environments', () => {
 
   test('rejects a workspace_directory outside the deployment workspace', async () => {
     const response = await request(harness.app, 'POST', '/agents/environments', {
-      environment: { type: 'local', workspace_directory: path.dirname(harness.workspace) },
+      environment: { type: 'self_hosted', workspace_directory: path.dirname(harness.workspace) },
     });
     expect(response.status).toBe(400);
     const error = await body<ErrorBody>(response);
@@ -148,7 +154,7 @@ describe('platform environments', () => {
 
   test('rejects capability directories that cannot be mounted', async () => {
     const response = await request(harness.app, 'POST', '/agents/environments', {
-      environment: { type: 'local', capability_directories: [harness.workspace] },
+      environment: { type: 'self_hosted', capability_directories: [harness.workspace] },
     });
     expect(response.status).toBe(400);
     const error = await body<ErrorBody>(response);
@@ -158,72 +164,68 @@ describe('platform environments', () => {
 
   test('rejects unknown request fields', async () => {
     const nested = await request(harness.app, 'POST', '/agents/environments', {
-      environment: { type: 'local', unexpected_option: true },
+      environment: { type: 'self_hosted', unexpected_option: true },
     });
     expect(nested.status).toBe(400);
     expect((await body<ErrorBody>(nested)).error.code).toBe('invalid_input');
 
     const topLevel = await request(harness.app, 'POST', '/agents/environments', {
-      environment: { type: 'local' },
+      environment: { type: 'self_hosted' },
       unexpected_option: true,
     });
     expect(topLevel.status).toBe(400);
     expect((await body<ErrorBody>(topLevel)).error.code).toBe('invalid_input');
   });
 
-  test('keeps non-executed settings out of the resource and confidential inputs out of storage', async () => {
-    const response = await request(harness.app, 'POST', '/agents/environments', {
-      environment: {
-        type: 'local',
-        packages: { python: ['numpy'] },
-        setup_commands: [{ command: 'make setup --secret-value' }],
-        env: { SERVICE_TOKEN: 'environment-secret-value' },
-        network: { access: 'enabled' },
-        desktop: { enabled: true },
-        container_size: 'large',
-      },
+  test('fails settings this deployment cannot execute instead of dropping them', async () => {
+    const rejected: readonly (readonly [Record<string, unknown>, string])[] = [
+      [{ packages: { python: ['numpy'] } }, 'packages'],
+      [{ setup_commands: [{ command: 'make setup --secret-value' }] }, 'setup_commands'],
+      [{ env: { SERVICE_TOKEN: 'environment-secret-value' } }, 'env'],
+      [{ network: { access: 'enabled' } }, 'network.access'],
+      [{ desktop: { enabled: true } }, 'desktop'],
+      [{ container_size: 'large' }, 'container_size'],
+      [{ skills: [{ type: 'skill_reference', skill_id: 'skill_one' }] }, 'skills'],
+      [
+        {
+          plugins: [
+            {
+              type: 'inline',
+              name: 'plugin_one',
+              description: 'plugin',
+              source: { type: 'base64', media_type: 'application/zip', data: base64('zip') },
+            },
+          ],
+        },
+        'plugins',
+      ],
+    ];
+
+    for (const [environment, param] of rejected) {
+      const response = await request(harness.app, 'POST', '/agents/environments', {
+        environment: { type: 'self_hosted', ...environment },
+      });
+      expect(response.status).toBe(501);
+      const error = await body<ErrorBody>(response);
+      expect(error.error.type).toBe('not_implemented_error');
+      expect(error.error.param).toBe(param);
+      expect(error.error.message).not.toContain('secret-value');
+    }
+
+    const vault = await request(harness.app, 'POST', '/agents/environments', {
+      environment: { type: 'self_hosted' },
       vault_ids: ['vault_test'],
     });
-    expect(response.status).toBe(201);
-    const environment = await body<EnvironmentBody>(response);
-    for (const localField of [
-      'name',
-      'workspace_directory',
-      'packages',
-      'network',
-      'desktop',
-      'container_size',
-      'capability_directories',
-      'setup_commands',
-      'env',
-    ]) {
-      expect(environment).not.toHaveProperty(localField);
-    }
+    expect(vault.status).toBe(501);
+    expect((await body<ErrorBody>(vault)).error.param).toBe('vault_ids');
 
-    const stored = storedEnvironmentConfig(harness, environment.id);
-    expect(stored.config.packages).toEqual({ python: ['numpy'], system: [], npm: [] });
-    expect(stored.config.setup_commands).toEqual([]);
-    expect(stored.config.env).toEqual({});
-    expect(stored.raw).not.toContain('make setup --secret-value');
-    expect(stored.raw).not.toContain('environment-secret-value');
-
-    const header = response.headers.get('x-platform-degraded') ?? '';
-    for (const reason of [
-      'packages_not_installed',
-      'setup_commands_not_executed',
-      'network_policy_not_enforced',
-      'desktop_not_provisioned',
-      'container_size_not_enforced',
-      'vaults_not_attached',
-    ]) {
-      expect(header).toContain(reason);
-    }
-
-    const fetched = await request(harness.app, 'GET', `/agents/environments/${environment.id}`);
-    expect(fetched.headers.get('x-platform-degraded')).toContain('setup_commands_not_executed');
+    const rows = harness.db
+      .query<{ count: number }, []>('SELECT COUNT(*) AS count FROM platform_environments')
+      .get();
+    expect(rows?.count).toBe(0);
   });
 
-  test('copies an environment template before applying inline overrides', async () => {
+  test('applies executable environment templates and rejects template-declared capabilities', async () => {
     const templateResponse = await request(harness.app, 'POST', '/agents/environments/templates', {
       name: 'Base',
       packages: { python: ['numpy'] },
@@ -233,44 +235,36 @@ describe('platform environments', () => {
     const template = (await templateResponse.json()) as { id: string };
 
     const response = await request(harness.app, 'POST', '/agents/environments', {
-      environment: { type: 'local', environment_template_id: template.id },
+      environment: { type: 'self_hosted', environment_template_id: template.id },
     });
-    expect(response.status).toBe(201);
-    const environment = await body<EnvironmentBody>(response);
-    expect(environment).not.toHaveProperty('packages');
-    expect(environment).not.toHaveProperty('network');
-    expect(storedEnvironmentConfig(harness, environment.id).config.packages).toEqual({
-      python: ['numpy'],
-      system: [],
-      npm: [],
-    });
-    expect(storedEnvironmentConfig(harness, environment.id).config.network).toMatchObject({
-      access: 'restricted',
-      allowed_domains: ['example.test'],
-    });
-    expect(response.headers.get('x-platform-degraded')).toContain('packages_not_installed');
+    expect(response.status).toBe(501);
+    const error = await body<ErrorBody>(response);
+    expect(error.error.type).toBe('not_implemented_error');
+    expect(error.error.param).toBe('packages');
 
     const missing = await request(harness.app, 'POST', '/agents/environments', {
-      environment: { type: 'local', environment_template_id: 'template_missing' },
+      environment: { type: 'self_hosted', environment_template_id: 'template_missing' },
     });
     expect(missing.status).toBe(404);
 
+    const emptyTemplateResponse = await request(harness.app, 'POST', '/agents/environments/templates', {
+      name: 'Empty',
+    });
+    expect(emptyTemplateResponse.status).toBe(201);
+    const emptyTemplate = (await emptyTemplateResponse.json()) as { id: string };
     const aliased = await request(harness.app, 'POST', '/agents/environments', {
-      environment: { type: 'local', template_id: template.id },
+      environment: { type: 'self_hosted', template_id: emptyTemplate.id },
     });
     expect(aliased.status).toBe(201);
     const aliasedEnvironment = await body<EnvironmentBody>(aliased);
-    expect(storedEnvironmentConfig(harness, aliasedEnvironment.id).config.packages).toEqual({
-      python: ['numpy'],
-      system: [],
-      npm: [],
-    });
+    expect(aliasedEnvironment).toMatchObject({ type: 'self_hosted', status: 'ready', files: [] });
+    expect(storedEnvironmentConfig(harness, aliasedEnvironment.id).config.template_id).toBe(emptyTemplate.id);
   });
 
   test('materializes inline files supplied at creation', async () => {
     const response = await request(harness.app, 'POST', '/agents/environments', {
       environment: {
-        type: 'local',
+        type: 'self_hosted',
         files: [{ type: 'inline', data: base64('seed content'), path: 'seed/notes.txt' }],
       },
     });
@@ -294,7 +288,7 @@ describe('platform environments', () => {
   test('paginates environments with ID cursors and filters by type', async () => {
     for (const name of ['one', 'two', 'three']) {
       const created = await request(harness.app, 'POST', '/agents/environments', {
-        environment: { type: 'local' },
+        environment: { type: 'self_hosted' },
         name,
       });
       expect(created.status).toBe(201);
@@ -324,11 +318,19 @@ describe('platform environments', () => {
     expect(filteredBody.data).toHaveLength(1);
     expect(filteredBody.data[0]?.type).toBe('none');
 
-    const mappedFilter = await request(harness.app, 'GET', '/agents/environments?type=remote_managed');
-    const mappedBody = await body<EnvironmentListBody>(mappedFilter);
-    expect(mappedBody.data.every((item) => item.type === 'local')).toBe(true);
-    expect(mappedFilter.headers.get('x-platform-degraded')).toContain(
-      'environment_type_filter_mapped_to_local',
-    );
+    const selfHostedFilter = await request(harness.app, 'GET', '/agents/environments?type=self_hosted');
+    const selfHostedBody = await body<EnvironmentListBody>(selfHostedFilter);
+    expect(selfHostedBody.data).toHaveLength(3);
+    expect(selfHostedBody.data.every((item) => item.type === 'self_hosted')).toBe(true);
+
+    const hostedFilter = await request(harness.app, 'GET', '/agents/environments?type=openai_hosted');
+    expect(hostedFilter.status).toBe(200);
+    expect((await body<EnvironmentListBody>(hostedFilter)).data).toEqual([]);
+
+    const unknownFilter = await request(harness.app, 'GET', '/agents/environments?type=remote_managed');
+    expect(unknownFilter.status).toBe(400);
+    const unknownError = await body<ErrorBody>(unknownFilter);
+    expect(unknownError.error.type).toBe('invalid_request_error');
+    expect(unknownError.error.param).toBe('type');
   });
 });

@@ -1,4 +1,3 @@
-import type { Context } from 'hono';
 import { Hono } from 'hono';
 import { notImplemented } from '../errors';
 import { parsePageRequest } from '../pagination';
@@ -10,10 +9,6 @@ import { sessionRuntimeFor } from '../sessions/runtime';
 import { SessionService } from '../sessions/service';
 
 const MAX_FILTER_LENGTH = 1_048_576;
-
-function setDegradation(c: Context, reasons: readonly string[]): void {
-  if (reasons.length > 0) c.header('x-platform-degraded', reasons.join(','));
-}
 
 /** Routes for `/v1/agents/sessions` and a single session resource. */
 export function createSessionRoutes(repos: PlatformRepositories): Hono {
@@ -48,7 +43,6 @@ export function createSessionRoutes(repos: PlatformRepositories): Hono {
     if (service === null) return notImplemented(c, 'session create');
     const params = await parsePlatformJson(c, CreateSessionParams);
     const created = await service.create(params, { signal: c.req.raw.signal });
-    setDegradation(c, created.degradation);
     if (created.tap === null) return c.json(created.session, 201);
     return created.tap.response(201);
   });
@@ -58,7 +52,6 @@ export function createSessionRoutes(repos: PlatformRepositories): Hono {
     const sessionId = c.req.param('session_id') ?? '';
     if (service === null) return notImplemented(c, 'session', [sessionId]);
     const row = service.require(sessionId);
-    setDegradation(c, service.degradation(row));
     return c.json(service.resource(row));
   });
 
@@ -68,7 +61,6 @@ export function createSessionRoutes(repos: PlatformRepositories): Hono {
     if (service === null) return notImplemented(c, 'session update', [sessionId]);
     const params = await parsePlatformJson(c, UpdateSessionParams);
     const updated = await service.update(sessionId, params);
-    setDegradation(c, service.degradation(service.require(sessionId)));
     return c.json(updated);
   });
 

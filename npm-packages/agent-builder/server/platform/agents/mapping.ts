@@ -3,7 +3,7 @@ import type { BareHarnessConfig } from '@peri-code/sdk';
 import { McpServerDraft, SANDBOX_MCP_SERVER_NAME } from '@shared/agent';
 import { ZodError } from 'zod';
 import { ProvidersRepository } from '../../providers/repository';
-import { PlatformRequestError } from '../errors';
+import { PlatformNotImplementedError, PlatformRequestError } from '../errors';
 import { parseJsonColumn, serializeJsonColumn, serializeMetadataColumn } from '../json';
 import type { PlatformAgentRow } from '../repositories/agents';
 import type { AgentToolParam, AgentUpdateParams, AgentWriteParams } from './schemas';
@@ -12,7 +12,7 @@ import type { AgentToolParam, AgentUpdateParams, AgentWriteParams } from './sche
 export const MAX_INSTRUCTIONS_BYTES = 65_536;
 /** Compact UTF-8 JSON budget for the persisted tool list. */
 export const MAX_TOOLS_BYTES = 3_145_728;
-/** `/api/agents` keeps an 80-character name bound; the wire schema allows more. */
+/** The stored name keeps an 80-character bound; the wire schema allows more. */
 export const MAX_STORED_NAME_LENGTH = 80;
 
 /** Mirrors the MCP server-name contract enforced by the shared agent config. */
@@ -26,9 +26,6 @@ const CAPABILITY_KEY = {
   subAgent: 'SubAgentMiddleware',
   builtInSubagents: 'BuiltInSubagents',
 } as const satisfies Record<string, keyof typeof BareHarnessConfig>;
-
-/** Capabilities that are persisted as declarations but have no local implementation. */
-const DEGRADED_TOOL_TYPES: ReadonlySet<string> = new Set(['computer_use', 'function']);
 
 export type PersistedAgentTool = { readonly type: string } & Record<string, unknown>;
 
@@ -135,17 +132,14 @@ function toMcpServerDraft(tool: Extract<AgentToolParam, { type: 'mcp' }>, param:
   };
 }
 
-function normalizeTool(tool: AgentToolParam): PersistedAgentTool {
+function normalizeTool(tool: AgentToolParam, index: number): PersistedAgentTool {
   switch (tool.type) {
     case 'function':
-      return {
-        type: 'function',
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        defer_loading: tool.defer_loading ?? false,
-        async: tool.async ?? false,
-      };
+    case 'computer_use':
+      throw new PlatformNotImplementedError(
+        `${tool.type} tools are not executed by this deployment`,
+        `tools.${index}`,
+      );
     case 'tool_search':
       return { type: 'tool_search' };
     case 'programmatic_tool_calling':
@@ -180,24 +174,13 @@ function normalizeTool(tool: AgentToolParam): PersistedAgentTool {
         allowed_domains: tool.allowed_domains ?? null,
         location: tool.location ?? null,
       };
-    case 'computer_use':
-      return { type: 'computer_use', include_screenshots: tool.include_screenshots ?? false };
     case 'automations':
       return { type: 'automations' };
   }
 }
 
 function normalizeTools(tools: readonly AgentToolParam[]): PersistedAgentTool[] {
-  return tools.map(normalizeTool);
-}
-
-/** Tool types persisted without a local capability, in first-seen order. */
-export function degradationForTools(tools: readonly { readonly type: string }[]): string[] {
-  const degraded: string[] = [];
-  for (const tool of tools) {
-    if (DEGRADED_TOOL_TYPES.has(tool.type) && !degraded.includes(tool.type)) degraded.push(tool.type);
-  }
-  return degraded;
+  return tools.map((tool, index) => normalizeTool(tool, index));
 }
 
 interface ToolMapping {

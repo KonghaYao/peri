@@ -93,20 +93,17 @@ const OPERATIONS: readonly Operation[] = [
 ];
 
 /**
- * Documented operations still answered by the shared scaffold: vault and credential update.
- * The scaffold assertion below tolerates these handlers landing later, so the shared test does
- * not encode implementation progress.
+ * Formerly scaffolded operations now have real handlers. They are asserted below through a
+ * missing resource so the test proves the handler is wired instead of encoding progress.
  */
-const SCAFFOLD_OPERATIONS: ReadonlySet<string> = new Set([
+const FORMER_SCAFFOLD_OPERATIONS: ReadonlySet<string> = new Set([
   'POST /vaults/{vault_id}',
   'POST /vaults/{vault_id}/credentials/{credential_id}',
 ]);
 
-/** Every other documented operation has a handler in this deployment. */
+/** Every documented operation has a handler in this deployment. */
 const IMPLEMENTED_OPERATIONS: ReadonlySet<string> = new Set(
-  OPERATIONS.map((operation) => `${operation.method} ${operation.path}`).filter(
-    (operation) => !SCAFFOLD_OPERATIONS.has(operation),
-  ),
+  OPERATIONS.map((operation) => `${operation.method} ${operation.path}`),
 );
 
 const AUTHORIZATION = { authorization: 'Bearer test-token' } as const;
@@ -152,23 +149,21 @@ describe('platform route registration', () => {
     expect(missing).toEqual([]);
   });
 
-  test('uses the canonical not_implemented shape for scaffold operations', async () => {
+  test('answers former scaffold operations through their real handlers', async () => {
     const app = setup();
 
-    for (const operation of OPERATIONS) {
-      const key = `${operation.method} ${operation.path}`;
-      if (!SCAFFOLD_OPERATIONS.has(key)) continue;
-      const response = await app.request(requestPath(operation.path), {
-        method: operation.method,
-        headers: AUTHORIZATION,
+    for (const key of FORMER_SCAFFOLD_OPERATIONS) {
+      const path = key.split(' ')[1] ?? '';
+      const response = await app.request(requestPath(path), {
+        method: 'POST',
+        headers: { ...AUTHORIZATION, 'content-type': 'application/json' },
+        body: '{}',
       });
-      // The handler may land later; only the error shape is part of the shared contract.
-      if (response.status !== 501) continue;
-
+      // A real handler reports the missing vault; the shared scaffold would answer 501 instead.
+      expect(response.status).toBe(404);
       const body = PlatformErrorBody.parse(await response.json());
-      expect(body.error.code).toBe('not_implemented');
-      expect(body.error.type).toBe('not_implemented_error');
-      expect(body.error.param).toBeNull();
+      expect(body.error.code).toBe('not_found');
+      expect(body.error.type).toBe('not_found_error');
     }
   });
 
@@ -240,12 +235,5 @@ describe('platform authorization', () => {
       });
       expect({ operation, status: response.status }).not.toEqual({ operation, status: 401 });
     }
-  });
-
-  test('leaves the existing /api surface unauthenticated', async () => {
-    const app = setup();
-    const response = await app.request('/api/agents');
-
-    expect(response.status).toBe(200);
   });
 });

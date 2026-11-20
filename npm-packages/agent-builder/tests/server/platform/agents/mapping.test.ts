@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { SESSION_INLINE_AGENT_ID } from '../../../../server/db/migrate';
 import {
+  AgentListResource,
   AgentResource,
   AUTHORIZATION,
   PlatformErrorBody,
@@ -185,7 +187,7 @@ describe('agent capability mapping', () => {
     });
   });
 
-  test('keeps extended MCP fields readable through the /api agent resource', async () => {
+  test('keeps extended MCP fields in the stored agent config', async () => {
     const ctx = setupAgentApp();
     const secret = 'mcp-authorization-secret-9f2a';
     const response = await ctx.app.request(
@@ -220,12 +222,8 @@ describe('agent capability mapping', () => {
     expect(response.status).toBe(201);
     const agent = AgentResource.parse(await response.json());
 
-    const apiResponse = await ctx.app.request(`/api/agents/${agent.id}`);
-    expect(apiResponse.status).toBe(200);
-    const apiAgent = (await apiResponse.json()) as {
-      agent: { config: { mcpServers: Record<string, unknown> } };
-    };
-    expect(apiAgent.agent.config.mcpServers).toEqual({
+    const stored = storedAgent(ctx, agent.id);
+    expect(stored.config.mcpServers).toEqual({
       remote: {
         type: 'http',
         url: 'http://127.0.0.1:9999/mcp',
@@ -248,7 +246,6 @@ describe('agent capability mapping', () => {
       postJson({
         name: 'Solo',
         model: 'model-1',
-        tools: [{ type: 'function', name: 'f', description: 'd', parameters: {} }],
       }),
     );
     const agent = AgentResource.parse(await response.json());
@@ -262,12 +259,12 @@ describe('agent capability mapping', () => {
     expect(row.config.mcpServers).toEqual({});
   });
 
-  test('degrades unsupported tool types without attaching a local capability', async () => {
+  test('rejects tool types this deployment does not execute', async () => {
     const ctx = setupAgentApp();
     const response = await ctx.app.request(
       '/v1/agents',
       postJson({
-        name: 'Degraded',
+        name: 'Not executed',
         model: 'model-1',
         tools: [
           { type: 'computer_use', include_screenshots: true },
@@ -275,19 +272,28 @@ describe('agent capability mapping', () => {
         ],
       }),
     );
-    expect(response.status).toBe(201);
-    expect(response.headers.get('x-platform-degraded')?.split(',').sort()).toEqual([
-      'computer_use',
-      'function',
-    ]);
-    const row = storedAgent(ctx, AgentResource.parse(await response.json()).id);
-    expect(row.config.metaHarness).toEqual({
-      SubAgentMiddleware: false,
-      BuiltInSubagents: false,
-    });
+    expect(response.status).toBe(501);
+    const body = PlatformErrorBody.parse(await response.json());
+    expect(body.error.type).toBe('not_implemented_error');
+    expect(body.error.param).toBe('tools.0');
+
+    const functionOnly = await ctx.app.request(
+      '/v1/agents',
+      postJson({
+        model: 'model-1',
+        tools: [{ type: 'tool_search' }, { type: 'function', name: 'f', description: 'd', parameters: {} }],
+      }),
+    );
+    expect(functionOnly.status).toBe(501);
+    expect(PlatformErrorBody.parse(await functionOnly.json()).error.param).toBe('tools.1');
+
+    const agents = ctx.db
+      .query<{ count: number }, [string]>('SELECT COUNT(*) AS count FROM agents WHERE id != ?')
+      .get(SESSION_INLINE_AGENT_ID);
+    expect(agents?.count).toBe(0);
   });
 
-  test('preserves exact model names and keeps the full wire name beside the 80-character /api view', async () => {
+  test('preserves exact model names in the stored wire name beside the 80-character name', async () => {
     const ctx = setupAgentApp();
     const longName = 'n'.repeat(128);
     const response = await ctx.app.request('/v1/agents', postJson({ name: longName, model: 'model-1' }));
@@ -297,11 +303,6 @@ describe('agent capability mapping', () => {
     const stored = storedAgent(ctx, agent.id);
     expect(stored.name).toBe('n'.repeat(80));
     expect(stored.wire_name).toBe(longName);
-
-    const apiResponse = await ctx.app.request(`/api/agents/${agent.id}`);
-    expect(apiResponse.status).toBe(200);
-    const apiAgent = (await apiResponse.json()) as { agent: { name: string } };
-    expect(apiAgent.agent.name).toBe('n'.repeat(80));
 
     const unnamedResponse = await ctx.app.request('/v1/agents', postJson({ name: null, model: 'model-1' }));
     const unnamed = AgentResource.parse(await unnamedResponse.json());
@@ -385,18 +386,14 @@ describe('agent capability mapping', () => {
     expect(PlatformErrorBody.parse(await invalidUrl.json()).error.param).toBe('tools.0.transport');
   });
 
-  test('exposes degraded tools through the list header too', async () => {
+  test('keeps unexecuted tool types out of the stored and listed agents', async () => {
     const ctx = setupAgentApp();
     await ctx.app.request(
       '/v1/agents',
-      postJson({
-        name: 'Degraded',
-        model: 'model-1',
-        tools: [{ type: 'computer_use' }],
-      }),
+      postJson({ name: 'Rejected', model: 'model-1', tools: [{ type: 'computer_use' }] }),
     );
     const response = await ctx.app.request('/v1/agents', { headers: AUTHORIZATION });
     expect(response.status).toBe(200);
-    expect(response.headers.get('x-platform-degraded')).toBe('computer_use');
+    expect(AgentListResource.parse(await response.json()).data).toEqual([]);
   });
 });

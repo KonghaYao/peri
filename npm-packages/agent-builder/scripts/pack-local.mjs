@@ -89,7 +89,7 @@ if (!rivetIndex.includes('createHostResourceOwner')) fail('rivet tarball does no
 const rivetSandbox = run('tar', ['-xOzf', input.rivet, 'package/dist/sandbox/index.d.ts'], undefined, 'pipe');
 if (!rivetSandbox.includes('createPeriSandboxMcpRuntime')) fail('rivet tarball has no sandbox adapter');
 
-// Build current sources: the SPA plus the bundled Bun server. This does not touch SDK/rivet dist.
+// Build current sources: the bundled Bun server. This does not touch SDK/rivet dist.
 run('bun', ['run', 'build']);
 
 const stage = path.join(mkdtempSync(path.join(os.tmpdir(), 'agent-builder-stage-')), 'package');
@@ -115,7 +115,7 @@ const manifest = {
   version: base.version,
   private: true,
   type: 'module',
-  description: 'Local single-user Peri Chat + Sandbox web app (private tarball)',
+  description: 'Local single-user Peri API server (private tarball)',
   bin: base.bin,
   engines: base.engines,
   dependencies,
@@ -138,16 +138,12 @@ if (bad.length > 0) fail(`agent-builder tarball contains forbidden paths: ${bad.
 for (const required of [
   'package/package.json',
   'package/bin/agent-builder.js',
-  'package/dist/index.html',
   'package/dist/server/main.js',
   'package/scripts/rivet-engine-wrapper.sh',
   'package/README.md',
   'package/.env.example',
 ]) {
   if (!listing.includes(required)) fail(`agent-builder tarball is missing ${required}`);
-}
-if (!listing.some((entry) => entry.startsWith('package/dist/assets/'))) {
-  fail('agent-builder tarball has no frontend assets');
 }
 const packedManifest = JSON.parse(
   run('tar', ['-xOzf', packed, 'package/package.json'], undefined, 'pipe'),
@@ -173,7 +169,7 @@ const result = writeLocalKit(outDir, archives, {
   package: base.name,
   version: manifest.version,
   dependencies,
-  build: 'bun run build (vite build + bun build server/main.ts --target bun --packages external)',
+  build: 'bun run build (bun build server/main.ts --target bun --packages external)',
 });
 rmSync(path.dirname(stage), { recursive: true, force: true });
 console.log(JSON.stringify(result, null, 2));

@@ -134,7 +134,7 @@ describe('doctor/startup workspace path diagnostics', () => {
     expect(output.includes(source.ANTHROPIC_API_KEY) || output.includes(source.OPENAI_API_KEY)).toBe(false);
     expect(output).not.toContain('ANTHROPIC_API_KEY');
     expect(output).not.toContain('OPENAI_API_KEY');
-    expect(output).toContain('SQLite API key');
+    expect(output).toContain('PERI_PROVIDER_TYPE');
     expect(output).not.toContain('api listening');
     expect(existsSync(path.join(root, 'data', 'agent-builder.db'))).toBe(false);
   });

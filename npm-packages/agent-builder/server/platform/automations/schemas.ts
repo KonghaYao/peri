@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { CreateSessionParams } from '../sessions/params';
-import { ENVIRONMENT_TYPE_MAPPED_REASON } from './session-port';
 
 const MAX_TIMESTAMP_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
 
@@ -91,39 +90,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-const LOCAL_ENVIRONMENT_TYPES: ReadonlySet<string> = new Set(['none', 'self_hosted', 'local']);
-
-/**
- * Reuses the session rule for hosting types this deployment cannot serve: an unknown type runs in
- * the local sandbox instead of failing the request, and the response reports the mapping through
- * `x-platform-degraded`.
- */
-export function normalizeTargetEnvironment(
-  environment: CreateSessionParams['environment'],
-): CreateSessionParams['environment'] {
-  if (LOCAL_ENVIRONMENT_TYPES.has(environment.type)) return environment;
-  const unsupported = environment as {
-    readonly workspace_directory?: string;
-    readonly capability_directories?: readonly string[] | null;
-  };
-  return {
-    type: 'local',
-    ...(unsupported.workspace_directory === undefined
-      ? {}
-      : { workspace_directory: unsupported.workspace_directory }),
-    ...(unsupported.capability_directories === undefined || unsupported.capability_directories === null
-      ? {}
-      : { capability_directories: [...unsupported.capability_directories] }),
-  };
-}
-
-/** Degradations of a stored target environment; empty when the documented shape was kept as-is. */
-export function targetEnvironmentDegradation(
-  environment: CreateSessionParams['environment'],
-): readonly string[] {
-  return normalizeTargetEnvironment(environment).type === 'local' ? [ENVIRONMENT_TYPE_MAPPED_REASON] : [];
-}
-
 /** Persists a validated target; absent optional fields stay absent instead of becoming null. */
 export function serializeTarget(target: AutomationTargetParam): string {
   if (target.type === 'existing_session') {
@@ -135,7 +101,7 @@ export function serializeTarget(target: AutomationTargetParam): string {
   }
   return JSON.stringify({
     type: target.type,
-    environment: normalizeTargetEnvironment(target.environment),
+    environment: target.environment,
     input: target.input,
     ...(target.agent_id === undefined ? {} : { agent_id: target.agent_id }),
     ...(target.agent === undefined ? {} : { agent: target.agent }),
@@ -165,7 +131,7 @@ export function parseStoredTarget(raw: string): StoredAutomationTarget {
   if (parsed.type === 'new_session') {
     return {
       type: 'new_session',
-      environment: normalizeTargetEnvironment(parsed.environment as CreateSessionParams['environment']),
+      environment: parsed.environment as CreateSessionParams['environment'],
       input: parsed.input as CreateSessionParams['input'],
       ...(typeof parsed.agent_id === 'string' ? { agent_id: parsed.agent_id } : {}),
       ...(isRecord(parsed.agent) ? { agent: parsed.agent as CreateSessionParams['agent'] } : {}),

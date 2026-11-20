@@ -1,6 +1,6 @@
 # `/v1` 资源接口
 
-本文面向已经拿到发行包、要在本机写客户端程序的外部开发者。它只描述 HTTP 契约：如何启动、如何设置 `Authorization`、如何用 npm 包 `openai` 的客户端对象发起请求，以及每个资源族的端点、字段和本地降级行为。
+本文面向已经拿到发行包、要在本机写客户端程序的外部开发者。它只描述 HTTP 契约：如何启动、如何设置 `Authorization`、如何用 npm 包 `openai` 的客户端对象发起请求，以及每个资源族的端点、字段和能力边界。
 
 当前部署注册 **57 个操作 / 34 条路径**（按代码中的路由表统计）。所有路径都在 `/v1` 前缀下。
 
@@ -13,13 +13,13 @@
 | 源码工作目录（仓库 checkout 或副本） | `bun run start` | `server/main.ts`；`scripts/api.sh` 在 shell 未设置 `RIVETKIT_STORAGE_PATH` 时把它导出为包根相对的 `.data/rivet` |
 | 安装后的 kit（四个 tarball 的安装目录） | `./node_modules/.bin/agent-builder start` | 包内 `dist/server/main.js` |
 
-源码工作目录里没有可执行的 `./node_modules/.bin/agent-builder`；安装后的 `bin/agent-builder.js` 也只加载 `dist`。在源码里改完代码后必须 `bun run build:server` 重建 `dist/server/main.js`，否则进程继续跑旧产物（`bun run build:web` 只重建前端）。因此 `/v1` 只存在于跑本仓库源码、或已重建 `dist` 的进程里。doctor 也一样：安装后的 kit 用 `./node_modules/.bin/agent-builder doctor`，源码目录需要先有 `dist/server/main.js`，再执行 `bun bin/agent-builder.js doctor`。
+源码工作目录里没有可执行的 `./node_modules/.bin/agent-builder`；安装后的 `bin/agent-builder.js` 也只加载 `dist`。在源码里改完代码后必须 `bun run build` 重建 `dist/server/main.js`，否则进程继续跑旧产物。因此 `/v1` 只存在于跑本仓库源码、或已重建 `dist` 的进程里。doctor 也一样：安装后的 kit 用 `./node_modules/.bin/agent-builder doctor`，源码目录需要先有 `dist/server/main.js`，再执行 `bun bin/agent-builder.js doctor`。
 
-默认地址是 `http://127.0.0.1:3000`，API 根路径是 `http://127.0.0.1:3000/v1`。`PORT` 可以改端口；`HOST` 固定为 `127.0.0.1`，服务不会监听其他网卡。API 与 Web 页面同源，没有单独的 API 进程。
+默认地址是 `http://127.0.0.1:3000`，API 根路径是 `http://127.0.0.1:3000/v1`。`PORT` 可以改端口；`HOST` 固定为 `127.0.0.1`，服务不会监听其他网卡。服务只提供 API，不提供静态资源路由；所有资源操作都在 `/v1` 前缀下。
 
 **`RIVETKIT_STORAGE_PATH` 的优先级取决于启动方式。** `scripts/api.sh` 在启动 Bun 前解析该变量：shell 中已设置的非空值优先（相对路径按包根解析），否则使用包根下的 `.data/rivet`，然后 `export`。由于 shell 环境优先于 `.env`，且导出发生在 Bun 加载 `.env` 之前，`bun run start` 下 `.env` 里的 `RIVETKIT_STORAGE_PATH` **不会**生效。安装后的 launcher 不同：未设置时默认 `<DATABASE_PATH 目录>/rivet`，显式环境变量或 `.env` 值优先，相对路径按启动目录解析，并对该目录做与 `DATABASE_PATH` 相同的祖先符号链接检查。直接运行 `bun server/main.ts`（不经 `scripts/api.sh`）时没有脚本默认值，`.env` 生效，相对路径按启动目录解析。
 
-启动前需要按 README 配好 Store、workspace 等部署配置。`/v1` 本身不管理 Provider：通过同源管理接口 `POST /api/providers` 配置**恰好一条** Provider 记录（Web 的 Providers 页调用同一接口）并保存凭据；本流程创建的 Agent 未指定 Provider，会话执行依赖这条记录。该接口不需要 `Authorization`，只接受回环 Host 与同源 Origin；最小步骤见 §2。检查部署状态可以请求 `/api/health`（不带 `/v1` 前缀，不需要 `Authorization`）。
+启动前需要按 README 配好 Store、workspace 与 `PERI_PROVIDER_*`。`/v1` 不管理 Provider：启动时按 `PERI_PROVIDER_TYPE` 把单一 Provider 同步到私有 SQLite；未设置类型则不同步，存在多条记录时启动失败（`provider_env_conflict`），不会删除记录。部署状态用 `doctor` 与启动日志检查；没有其他管理端点。
 
 ### 1.1 Authorization
 
@@ -47,7 +47,7 @@ JSON 请求体必须带 `Content-Type: application/json`。对象是 strict 的�
 
 ### 1.3 部署前提与启动陷阱
 
-**会话执行前提。** 对于未指定 Provider 的 Agent（`/v1` 创建的 Agent 默认如此），Session 执行要求部署里恰好有一条 Provider 记录（且该记录保存了凭据），且 Store 可达（`PERI_STORE_URL` + `PERI_STORE_TOKEN`）。这类 Agent 在零条或多条 Provider 时创建 Session 返回 400 `invalid_input`；Store 认证/连接失败或引擎未就绪时返回 503 `engine_unavailable`。Provider 通过同源管理接口 `/api/providers` 配置（Web 管理页使用同一接口），`/v1` 没有 Provider 端点；该接口不需要 `Authorization`，但只接受回环 Host 与同源 Origin。`/api/health` 的 `ok` 只表示 HTTP 进程存活并能响应，`engine.status` 才是运行时是否就绪的直接信号；`ok:true` 且 `engine.status` 非 `ready` 是正常组合。`GET /api/capabilities` 的 `chatRuntimeReady` 与之一致（只在 `ready` 时为 `true`），`chatRuntime` 只是配置模式（`wasm` / `not_configured`）。
+**会话执行前提。** 对于未指定 Provider 的 Agent（`/v1` 创建的 Agent 默认如此），Session 执行要求部署里恰好有一条 Provider 记录（且该记录保存了凭据），且 Store 可达（`PERI_STORE_URL` + `PERI_STORE_TOKEN`）。这类 Agent 在零条或多条 Provider 时创建 Session 返回 400 `invalid_input`；Store 认证/连接失败或引擎未就绪时返回 503 `engine_unavailable`。Provider 由启动时的 `PERI_PROVIDER_*` 环境变量同步，`/v1` 没有 Provider 端点。进程存活不代表运行时 ready；引擎状态见启动日志、`doctor` 与会话错误。
 
 **`doctor` 的边界。** `agent-builder doctor` 只校验配置是否存在（例如是否缺 Store token、WASM 资源是否安装），不发起 Store 请求、不启动引擎、不读取 Provider 凭据。`doctor` 通过不代表 Store 或引擎可达，也不代表 Provider 的 key 可用。
 
@@ -55,40 +55,23 @@ JSON 请求体必须带 `Content-Type: application/json`。对象是 strict 的�
 
 **绝对路径要用 realpath 后的真实路径。** macOS 上 `/tmp` 是指向 `/private/tmp` 的符号链接。`DATABASE_PATH` 的目录会逐级检查既有祖先，符号链接或非目录组件会被拒绝；`PERI_WORKSPACE_PATH` 要求路径本身不是 symlink 且 `realpath` 后与原文一致（祖先含 symlink 会得到 `workspace_path_not_canonical`）；安装后的 launcher 还会对 `RIVETKIT_STORAGE_PATH` 做同样的祖先检查。应用不会替你 realpath 归一化（workspace URI 依赖原样路径），所以绝对路径请先 `realpath` 再写进配置。
 
-**端口规划。** 内嵌引擎除 `PERI_ENGINE_PORT`（默认 8961）外还会占用其 +1 端口（默认 8962），两个端口都必须空闲。`PORT`（默认 3000）是 Web/API 端口，与引擎端口无关。任一端口被占用时，`/api/health` 的引擎状态会停在非 ready，错误信息通常不直接点名端口；用 `lsof -nP -iTCP:<port> -sTCP:LISTEN` 检查这两个引擎端口。
+**端口规划。** 内嵌引擎除 `PERI_ENGINE_PORT`（默认 8961）外还会占用其 +1 端口（默认 8962），两个端口都必须空闲。`PORT`（默认 3000）是 API 端口，与引擎端口无关。任一端口被占用时，引擎启动失败并报告 `engine_unavailable`，错误信息通常不直接点名端口；用 `lsof -nP -iTCP:<port> -sTCP:LISTEN` 检查这两个引擎端口。
 
 ## 2. 最小可运行客户端
 
 下面这条链路完成：建 Agent → 建 Session → 提交一条输入 → 读取 SSE 事件直到会话空闲 → 取 turn 和 item。
 
-**先配置 Provider（无浏览器）。** `/v1` 没有 Provider 端点（`POST /v1/providers` 返回 404）；Provider 由同一进程的 `/api/providers` 管理，Web 的 Providers 页也调用它。本流程创建的 Agent 未指定 Provider，会话执行要求部署里恰好一条 Provider 记录，且该记录保存了凭据，因此远端/无浏览器集成者可以先完成这一步。
-
-把请求体写入权限 0600 的临时文件，再用 `--data-binary @file` 发送，使 curl 的命令行参数中只有文件名：
+**先配置 Provider。** `/v1` 没有 Provider 端点（`POST /v1/providers` 返回 404）；Provider 只能由部署环境变量同步。启动进程前设置：
 
 ```bash
-PROVIDER_BODY="$(mktemp)"
-chmod 600 "$PROVIDER_BODY"
-cat > "$PROVIDER_BODY" <<'JSON'
-{
-  "name": "local-default",
-  "type": "<PROVIDER_TYPE>",
-  "baseUrl": null,
-  "credential": { "action": "replace", "value": "<PROVIDER_API_KEY>" }
-}
-JSON
-curl -sS -X POST http://127.0.0.1:3000/api/providers \
-  -H 'content-type: application/json' \
-  --data-binary @"$PROVIDER_BODY"
-rm -f "$PROVIDER_BODY"
+export PERI_PROVIDER_TYPE=openai          # anthropic | openai
+export PERI_PROVIDER_API_KEY='<PROVIDER_API_KEY>'
+# 可选：
+export PERI_PROVIDER_BASE_URL=https://api.example.com/v1
+export PERI_PROVIDER_NAME=local-default
 ```
 
-`<PROVIDER_TYPE>` 取 `GET /api/capabilities` 的 `providers[].type`（创建后不可改）；`<PROVIDER_API_KEY>` 只是占位符。`--data-binary @file` 只把文件名放进 curl 的进程参数，curl 阶段 key 不进入命令行。临时文件仍是明文，用完必须删除；上面的 heredoc 也只写占位符，真实 key 要用编辑器或密码管理器写入该文件，或先 `read -rs` 读入变量后生成 JSON，不要直接敲进 heredoc 或命令行。成功返回 `201`，形如：
-
-```json
-{"provider":{"id":"<uuid>","name":"local-default","type":"<PROVIDER_TYPE>","baseUrl":null,"credentialSource":"local","revision":1,"hasCredential":true,"agentCount":0,"runtimeCount":0}}
-```
-
-用 `GET /api/providers` 确认列表里只有这一条且 `hasCredential` 为 `true`。若已有多条，用 `DELETE /api/providers/<PROVIDER_UUID>` 加 `If-Match: "<revision>"` 删除多余的；被 Agent 或运行引用时返回 409 `provider_in_use`。`/api/providers` 不需要 `Authorization`，但只接受回环 Host 和同源 Origin；不要把 3000 端口暴露到其他机器。
+`PERI_PROVIDER_TYPE` 未设置时启动不同步 Provider。设置后：零条记录会插入一条 `credential_source=local` 的记录；一条记录仅在字段不同时更新并保留 id；多条记录时启动失败，稳定错误码 `provider_env_conflict`，不会删除任何记录。key 只写入本地 SQLite，启动日志只输出类型与动作（`provider: env <type> (<action>)`）。本流程创建的 Agent 未指定 Provider，会话执行要求部署里恰好一条 Provider 记录且存有凭据。
 
 准备一个空目录和客户端包：
 
@@ -169,7 +152,8 @@ const agent = await client.post<Json>('/agents', {
 const session = await client.post<Json>('/agents/sessions', {
   body: {
     agent_id: agent.id,
-    environment: { type: 'local' },
+    environment: { type: 'none' },
+    input: 'Hello!',
   },
 });
 
@@ -349,7 +333,7 @@ ID 游标列表统一使用：
 | 409 | `artifact_too_large` | artifact 超过 16 MiB 下载上限 |
 | 500 | `credential_unavailable` | 凭据的加密密钥不可用 |
 | 500 | `internal_error` | 未分类的服务端错误 |
-| 503 | `engine_unavailable` | 会话运行时未配置或不可用：`/v1` 的会话创建、输入与子 agent 历史；`/api/chats` 的创建、events 订阅、send、cancel 同码，`/api` 错误体的 `details.reasons` 为稳定原因码（`/v1` 信封没有 `details`） |
+| 503 | `engine_unavailable` | 会话运行时未配置或不可用：会话创建、输入与子 agent 历史（错误信封没有 `details`） |
 | 503 | `subagent_history_unavailable` | 子 agent 历史读取不可用 |
 
 ### 3.5 幂等
@@ -396,11 +380,7 @@ ID 游标列表统一使用：
 | `service_tier` | string | 默认 `"auto"` |
 | `created_at` / `updated_at` | number | Unix 秒 |
 
-`tools[].type` 支持 `function`、`tool_search`、`programmatic_tool_calling`、`mcp`、`web_search`、`computer_use`、`automations`。其中 `computer_use` 和 `function` 会被保存，但本地运行时不执行；创建或读取这类 Agent 时响应带：
-
-```
-x-platform-degraded: computer_use,function
-```
+`tools[].type` 支持 `function`、`tool_search`、`programmatic_tool_calling`、`mcp`、`web_search`、`computer_use`、`automations`。其中 `computer_use` 和 `function` 在本部署没有执行路径，创建或更新时返回 501 `not_implemented`，`param` 指向 `tools.<索引>`；请求不会留下 Agent。`tool_search`、`programmatic_tool_calling`、`mcp`、`web_search`、`automations` 会被保存并参与运行。
 
 列表不包含会话内联 Agent 的占位行。会话资源里的 `agent` 是快照；内联会话的 `agent.id` 不是可通过 `/agents/{id}` 读取的资源。
 
@@ -451,14 +431,10 @@ x-platform-degraded: computer_use,function
 ```
 
 ```json
-{ "type": "local", "capability_directories": [] }
-```
-
-```json
 { "type": "self_hosted", "workspace_directory": "<部署 workspace 的绝对路径>", "capability_directories": [] }
 ```
 
-其他 `type` 会被归一为 `local`，响应带 `x-platform-degraded: environment_type_mapped_to_local`。本部署不会按 `workspace_directory` 或 `capability_directories` 建立独立环境；它们不参与本地执行。
+`type` 只接受文档枚举内的 `none`、`self_hosted`；`openai_hosted` 返回 501 `not_implemented`，`param` 为 `environment.type`；其他值在请求校验阶段返回 400 `invalid_input`。本部署不会按 `workspace_directory` 或 `capability_directories` 建立独立环境；它们不参与本地执行。`self_hosted` 的 `workspace_directory` 必填且必须落在部署 workspace 内。
 
 如果部署启用了 Sandbox 但尚未配置好，示例可以改用 `{ "type": "none" }`，并在创建会话时通过 `input` 提供第一条输入（`none` 要求创建时就给输入）。
 
@@ -489,7 +465,7 @@ x-platform-degraded: computer_use,function
 | `prompt_cache_options` | any | 请求原值 |
 | `review` | string \| null | 请求原值 |
 
-`local` 或未知托管类型在响应中统一表现为 `self_hosted`，`workspace_directory` 常为空字符串；同时带 `x-platform-degraded: environment_type_mapped_to_local`。`none` 才是真正的 `{type:"none"}`。
+会话的 `environment` 原样反映创建时的请求：`none` 为 `{type:"none"}`，`self_hosted` 带 `remote_url`、`id`、`workspace_directory`、`capability_directories`。不存在把其他类型改写成 `local` 或 `self_hosted` 的转换。
 
 `vault_ids` 只做存在性校验并记录在会话上；本地运行时不把凭据注入执行。
 
@@ -497,9 +473,9 @@ x-platform-degraded: computer_use,function
 
 删除会同时删除该会话的事件日志。`in_progress` 或 `requires_action` 时先取消或等待结束。
 
-**与 `/api/chats` 的会话边界。** `/v1` 创建会话时会同时建立 platform session 与对应 chat，chat 的 id 就是 `/v1` 的 session id。因此 `/v1` 创建的会话**会**出现在 `GET /api/chats` 的列表里（该列表没有来源过滤）；反过来 `/v1` 的会话列表只读 platform session，**看不到**通过 `POST /api/chats` 创建的对话。`/api/chats` 创建的 chat 不是 platform session，用它的 `chatId` 请求 `GET /v1/agents/sessions/{session_id}` 返回 404 `not_found`。两个 id 不同：`/api/chats` 的 `sessionId` 是 Store 会话 id，创建响应里可以为 `null`，在该 chat 首次订阅 `GET /api/chats/:chatId/events` 或首次 `POST /api/chats/:chatId/send` 后写入（`close` 不创建会话）；`/v1` 的 `session.id` 是 platform session id，并等于对应 `chatId`。两端共享同一本地存储，但列表可见性只有上述单向。
+**会话与 Chat 的标识。** `/v1` 创建会话时会同时建立 platform session 与对应 chat，chat 的 id 就是 `/v1` 的 session id。会话列表只读 platform session；本服务没有其他创建 chat 的接口。
 
-**创建失败后的 Chat 行。** 创建先写入 Chat 行，再打开 actor；打开失败会回滚该行。若回滚无法确认 actor 关闭（`actor.close()` 失败）或 Sandbox holder 未确认释放，该行会保留以便诊断，此时 `sessionId` 仍为 `null`。引擎在创建过程中失联时，`POST /api/chats` 返回 503 `engine_unavailable`（引擎在启动阶段就失败的话，创建发生在写行之前，不会留下行）；若引擎仍报告 `ready`，返回的是打开失败本身的错误，例如 500 `internal_error`。保留的行不会让后续接口退化为 500：`GET /api/chats` 仍为 200；运行时不可用期间，`GET /api/chats/:chatId/events` 与 `POST /api/chats/:chatId/send` 返回 503 `engine_unavailable`；`DELETE /api/chats/:chatId` 返回 409 `close_incomplete`（`details.actorClosed: false`；若只是 Sandbox 未确认释放，则为 `true`，原因码在 `details.sandboxErrors`）。运行时恢复（重启 API 并重新启动引擎）后可再次 `DELETE` 完成清理；服务不会为了“能删掉”而释放未确认关闭的运行。`/v1` 会话创建命中该路径（打开 chat 失败）时同样返回 503 `engine_unavailable`；platform session 行随创建失败删除，保留的 chat 行会出现在 `GET /api/chats`，处理方式与 `/api/chats` 相同（运行时恢复后可 `DELETE /api/chats/:chatId` 清理）。
+**创建失败后的 Chat 行。** 创建先写入 Chat 行，再打开 actor；打开失败会回滚该行。若回滚无法确认 actor 关闭（`actor.close()` 失败）或 Sandbox holder 未确认释放，该行会保留以便诊断，此时 `sessionId` 仍为 `null`。引擎在创建过程中失联时，`POST /v1/agents/sessions` 返回 503 `engine_unavailable`（引擎在启动阶段就失败的话，创建发生在写行之前，不会留下行）；若引擎仍报告 `ready`，返回的是打开失败本身的错误，例如 500 `internal_error`。保留的行不会让后续接口退化为 500：会话列表仍为 200；运行时不可用期间，会话事件与输入返回 503 `engine_unavailable`；删除返回 409 `close_incomplete`（`details.actorClosed: false`；若只是 Sandbox 未确认释放，则为 `true`，原因码在 `details.sandboxErrors`）。运行时恢复（重启 API 并重新启动引擎）后可再次删除完成清理；服务不会为了“能删掉”而释放未确认关闭的运行。
 
 ### 4.3 Turns
 
@@ -564,15 +540,7 @@ data: {"type":"agent.session.turn.output_text.delta","event_id":"...","session_i
 - 空行分隔帧；服务端会周期性发送 `: ping` 注释行作为心跳。
 - 流不会因为一个 turn 结束而关闭；客户端读到 `agent.session.idle` 后自行断开。
 - 默认从日志起点重放，然后继续推送实时事件。
-
-#### Last-Event-ID 重放
-
-请求头 `Last-Event-ID` 可以是：
-
-- 上一帧的 `id:`（十进制日志位置），或
-- 任意事件的 `data.event_id`。
-
-服务端从该位置之后继续。未知值按 0 处理，即从头重放。断开重连时把最后收到的 `id:` 原样带回即可。
+- 每次连接都从头重放；服务端不接受客户端指定的续传位置。客户端按 `id:` 去重，需要“只处理新事件”时记录自己已读到的最后一个 `id:`。
 
 #### POST 输入
 
@@ -644,7 +612,7 @@ Item 与文本事件：
 
 子 agent 事件带 `subagent` 对象：`agent.session.subagent.created`、`agent.session.subagent.active`、`agent.session.subagent.closed`。
 
-所有事件都带 `event_id`。它可用于 `Last-Event-ID`，但不是 SSE 帧的 `id:`。
+所有事件都带 `event_id`，用于标识事件本身；SSE 帧的 `id:` 是十进制日志位置，两者不同。
 
 ### 4.6 Subagents
 
@@ -676,8 +644,8 @@ Item 与文本事件：
 历史来源：
 
 - 默认从本部署记录的子 agent turn/item 读取。
-- 如果部署安装了外部会话存储读取器，则以该存储为准。存储不可用时，列表端点返回 200 空页并带 `x-platform-degraded: subagent_history_unavailable`；单个 turn 返回 503 `subagent_history_unavailable`；存储 schema 不匹配时返回 409 `store_schema_unsupported`。
-- 空页不会伪造 span 或历史行。
+- 如果部署安装了外部会话存储读取器，则以该存储为准。存储不可用时，所有历史读取（列表、单个 turn、turn 的 item）都返回 503 `subagent_history_unavailable`（`type` 为 `server_error`）；存储 schema 不匹配时返回 409 `store_schema_unsupported`。
+- 读取失败不会返回空页，也不会伪造 span 或历史行。
 
 ### 4.7 Artifacts
 
@@ -747,16 +715,9 @@ Item 与文本事件：
   "name": "primary",
   "vault_ids": [],
   "environment": {
-    "type": "local",
+    "type": "self_hosted",
     "workspace_directory": "<部署 workspace 的绝对路径，通常省略>",
     "environment_template_id": "<可选模板 ID>",
-    "packages": { "python": ["numpy"] },
-    "setup_commands": [{ "command": "echo setup", "cwd": null }],
-    "network": { "access": "restricted", "allowed_domains": ["example.test"] },
-    "desktop": { "enabled": true },
-    "skills": [],
-    "plugins": [],
-    "container_size": "small",
     "files": [{ "type": "inline", "path": "notes/a.txt", "data": "<标准 base64>" }]
   }
 }
@@ -764,11 +725,11 @@ Item 与文本事件：
 
 规则：
 
-- `type` 支持 `none`、`self_hosted`、`local`；其他值归一为 `local`，响应带 `environment_type_mapped_to_local`。`type` 缺省时为 `local`。
+- `type` 必须是 `none` 或 `self_hosted`。`openai_hosted` 返回 501 `not_implemented`（`param: "type"`）；其他值返回 400 `invalid_input`（`param: "type"`）。
 - `workspace_directory` 通常省略；传了就必须等于部署 workspace，否则 400 `workspace_not_allowed`。
 - `capability_directories` 必须为空；非空返回 400 `environment_capability_unsupported`。
-- `environment_template_id`（别名 `template_id`）会复制模板配置，再应用内联值；数组和设置以内联值替换模板值。
-- `setup_commands` 和 `env` 会被接受和校验，但不会持久化、也不会回显。
+- `environment_template_id`（别名 `template_id`）会复制模板配置，再应用内联值；数组和设置以内联值替换模板值。模板里的不可执行能力同样在创建环境时返回 501。
+- `packages`、`setup_commands`、`network`、`desktop`、`env`、`skills`、`plugins`、`container_size`、`vault_ids` 在本部署没有执行路径，出现即返回 501 `not_implemented`，`param` 指向对应字段；环境不会被保存。详见 §5。
 - `files` 只支持 `type:"inline"`，`data` 必须是标准 base64；`file_id` 引用返回 400 `environment_file_reference_unsupported`。
 - `name` 被接受，但不在响应中返回。
 
@@ -778,7 +739,7 @@ Item 与文本事件：
 {
   "id": "<uuid>",
   "object": "agent.environment",
-  "type": "local",
+  "type": "self_hosted",
   "status": "ready",
   "files": [
     { "type": "inline", "id": "<uuid>", "path": "/workspace/notes/a.txt", "size_bytes": 5 }
@@ -788,9 +749,9 @@ Item 与文本事件：
 }
 ```
 
-`packages`、`network`、`desktop`、`setup_commands`、`env`、`workspace_directory`、`capability_directories`、`container_size`、`name` 都不在响应中。它们要么不被本地执行，要么按配置丢弃；实际结果通过 `x-platform-degraded` 报告。
+`packages`、`network`、`desktop`、`setup_commands`、`env`、`workspace_directory`、`capability_directories`、`container_size`、`name` 都不在响应中；前八项中的不可执行能力在创建时已被 501 拒绝，`workspace_directory` 与 `name` 只保存在配置里。
 
-`GET /agents/environments?type=...` 的 `type` 过滤同样会把未知值映射为 `local`，并带 `environment_type_filter_mapped_to_local`。
+`GET /agents/environments?type=...` 只接受文档枚举：`self_hosted` 匹配 `self_hosted`（以及旧版本写入的 `local` 行），`openai_hosted` 返回空页，其他值返回 400 `invalid_input`（`param: "type"`）。旧版本写入的 `local` 行在响应中报告为 `self_hosted`，没有迁移。
 
 环境文件：
 
@@ -1002,7 +963,7 @@ Automation：
   - `{ "type": "none" }`
   - 或 `{ "type": "self_hosted", "environment_id": null, "workspace_directory": "...", "capability_directories": [] }`
 
-未知托管类型归一为 `local`，响应带 `environment_type_mapped_to_local`。
+`new_session` 目标的环境只接受 `none` / `self_hosted`：`openai_hosted` 返回 501 `not_implemented`（`param: "target.environment.type"`），其他值返回 400 `invalid_input`（同一 `param`）。目标在保存时校验，不会存下无法投递的环境。
 
 时间规则：
 
@@ -1075,29 +1036,36 @@ Invocation：
 - 手动触发在响应后异步投递；如果进程在投递前退出，该记录可能停留在 `queued`。
 - `existing_session` 目标在投递时失败：周期自动化可能被暂停并记录 `pause_reason`；一次性自动化把失败记录在 invocation 上。
 
-## 5. 本地降级与能力边界
+## 5. 能力边界与显式失败
 
-降级通过响应头 `x-platform-degraded` 暴露，值是逗号分隔的原因列表（可能带空格）。读取资源时也会带上已持久化的原因。
+本服务不会静默丢弃请求中无法执行的能力，也不会用响应头报告“降级”。文档允许、但本部署无法执行的字段返回 501 `not_implemented_error`（`error.code` 为 `not_implemented`），`param` 指向具体字段；请求取值本身不符合文档 schema 时返回 400 `invalid_request_error`。两种情况下请求都不会留下资源。运行时未就绪时返回 503 `engine_unavailable`；外部会话存储不可用时返回 503 `subagent_history_unavailable`。这两种失败都不会退化为 200、空页或伪造结果。
 
-| 原因 | 场景 | 实际行为 |
-| --- | --- | --- |
-| `environment_type_mapped_to_local` | Session/Environment/Automation 使用未知托管类型，或 Session 使用 `local` | 在本地执行；Session 的 `environment` 报告 `self_hosted` 形状，`workspace_directory` 可能为空 |
-| `environment_type_filter_mapped_to_local` | `GET /agents/environments?type=<未知值>` | 过滤条件改为 `local` |
-| `packages_not_installed` | 环境请求包含 packages | 包不会安装 |
-| `setup_commands_not_executed` | 环境请求包含 `setup_commands` | 命令不会执行，也不会保存 |
-| `network_policy_not_enforced` | 环境网络策略不是 `disabled` | 策略不会执行 |
-| `desktop_not_provisioned` | `desktop.enabled:true` | 不提供桌面 |
-| `skills_not_installed` | 环境请求包含 skills | 只保存元数据（名称/描述，或 skill id/version），不安装 |
-| `plugins_not_installed` | 环境请求包含 plugins | 只保存名称/描述，不安装 |
-| `container_size_not_enforced` | 指定 `container_size` | 不限制资源规格 |
-| `vaults_not_attached` | 环境创建带 `vault_ids` | 不注入凭据 |
-| `subagent_history_unavailable` | 外部会话存储不可用 | 子 agent 历史列表为空页；单条 turn 为 503 |
-| `computer_use` / `function` | Agent 包含这些工具 | 工具声明会被保存，但不执行 |
+| 请求 | 状态 | `param` | 行为 |
+| --- | --- | --- | --- |
+| Agent `tools` 含 `function` 或 `computer_use` | 501 | `tools.<索引>` | 不保存 Agent |
+| 环境创建含 `packages` | 501 | `packages` | 不保存环境 |
+| 环境创建含 `setup_commands` | 501 | `setup_commands` | 不保存环境 |
+| 环境创建含 `network`，或引用的模板声明了 `network` | 501 | `network.access` | 不保存环境 |
+| 环境创建 `desktop.enabled:true` | 501 | `desktop` | 不保存环境 |
+| 环境创建含 `env` | 501 | `env` | 不保存环境 |
+| 环境创建含 `skills` | 501 | `skills` | 不保存环境 |
+| 环境创建含 `plugins` | 501 | `plugins` | 不保存环境 |
+| 环境创建含 `container_size` | 501 | `container_size` | 不保存环境 |
+| 环境创建带 `vault_ids` | 501 | `vault_ids` | 不保存环境 |
+| 环境创建 `type:"openai_hosted"` | 501 | `type` | 不保存环境 |
+| Session 创建 `environment.type:"openai_hosted"` | 501 | `environment.type` | 不创建会话 |
+| Automation 目标 `environment.type:"openai_hosted"` | 501 | `target.environment.type` | 不保存自动化 |
+| 环境创建 `type` 不在 `none` / `self_hosted` / `openai_hosted` 内 | 400 | `type` | 不保存环境 |
+| Session / Automation 目标的 `environment.type` 不在文档枚举内 | 400 | `environment.type` / `target.environment.type` | 不创建 |
+| 外部会话存储不可用时读取子 agent 历史 | 503 | `null` | `subagent_history_unavailable`；不返回空页 |
+| 外部会话存储 schema 不匹配 | 409 | `null` | `store_schema_unsupported`；不伪造行 |
+
+检查顺序固定为：`packages` → `setup_commands` → `network.access` → `desktop` → `env` → `skills` → `plugins` → `container_size` → `vault_ids`。一个请求命中多项时，`param` 报告第一项。
 
 其他边界：
 
-- **Provider**：`/v1` 没有 Provider 管理端点；Provider 通过同源管理接口 `/api/providers` 配置（不需要 `Authorization`，只接受回环 Host/同源 Origin），最小步骤见 §2。对于未指定 Provider 的 Agent，会话执行要求部署里恰好一条 Provider 记录（且有凭据），且 Store 可达；这类 Agent 在零条或多条时创建 Session 返回 400 `invalid_input`。运行时未就绪时返回 503 `engine_unavailable`。
-- **会话环境**：Session 只接受托管类型，不接受已创建的 Environment ID。`workspace_directory` / `capability_directories` 不参与本地执行。
+- **Provider**：`/v1` 没有 Provider 管理端点；Provider 由启动时的 `PERI_PROVIDER_*` 环境变量同步（见 §1.3/§2）。对于未指定 Provider 的 Agent，会话执行要求部署里恰好一条 Provider 记录（且有凭据），且 Store 可达；这类 Agent 在零条或多条时创建 Session 返回 400 `invalid_input`。运行时未就绪时返回 503 `engine_unavailable`。
+- **会话环境**：Session 只接受文档枚举的 `none` / `self_hosted`，不接受已创建的 Environment ID。`workspace_directory` / `capability_directories` 不参与本地执行。
 - **Vault 注入**：Session 的 `vault_ids` 只校验存在性并记录；本地运行时不读取或注入 credential。
 - **输入内容**：消息只使用 `input_text` 的文本；其他内容类型（例如图片）不会被处理。文本为空或超过 32,768 字符返回 400。
 - **待处理动作**：`required_actions` 中的 `function_call` 没有对应的输入事件类型，无法从本接口回应；`mcp_approval_request` 可以用 `agent.session.input.mcp_approval_request_result` 回应。
@@ -1114,7 +1082,7 @@ Invocation：
 2. **404**：确认路径带 `/v1` 前缀，且父资源 ID 属于当前部署；子资源还要属于父资源。
 3. **400 `invalid_input`**：确认 `Content-Type: application/json`，没有未知字段，分页参数合法；看 `param` 指向的字段。
 4. **409 `session_active`**：等当前 turn 结束，或先提交 `agent.session.input.cancel`，再删除会话。
-5. **SSE 没有事件**：确认 `Content-Type` 是 `text/event-stream`、请求带 bearer、会话 ID 存在；事件是持久化的，重新连接会从头或从 `Last-Event-ID` 之后重放。
+5. **SSE 没有事件**：确认 `Content-Type` 是 `text/event-stream`、请求带 bearer、会话 ID 存在；事件是持久化的，重新连接会从头重放，客户端按 `id:` 去重。
 6. **输入 400**：确认消息里至少有一个 `input_text` 部分且文本非空；只有图片或其他类型会被视为空输入。
-7. **会话不执行**：检查部署的 `/api/health` 是否为 `engine.status: "ready"`（`ok:true` 不代表运行时 ready），并通过 Providers 页面或 `GET /api/providers` 确认 Provider 与模型可用（未指定 Provider 的 Agent 应恰好一条且有凭据）；Store 不可达时也会停在这里。引擎端口被占用时健康检查同样失败但不点名端口，按 1.3 节检查 `PERI_ENGINE_PORT` 与其 +1 端口。`/v1` 的错误信封只返回稳定的 `code`；具体失败原因见会话或 turn 的 `error` 字段，内容取决于运行时。
+7. **会话不执行**：检查启动日志与 `doctor` 的引擎状态，并用 `PERI_PROVIDER_*` 确认 Provider 与模型可用（未指定 Provider 的 Agent 应恰好一条且有凭据）；Store 不可达时也会停在这里。引擎端口被占用时引擎启动失败但不点名端口，按 1.3 节检查 `PERI_ENGINE_PORT` 与其 +1 端口。`/v1` 的错误信封只返回稳定的 `code`；具体失败原因见会话或 turn 的 `error` 字段，内容取决于运行时。
 8. **时间不对**：所有时间戳都是秒；不要按毫秒解析。

@@ -3,9 +3,9 @@ import type { InteractionAnswer } from '@peri-code/sdk';
 import { SEND_TEXT_MAX_LENGTH } from '@shared/chat';
 import type { ChatEnvironmentPolicy } from '../../chats/service';
 import type { ChatStreamHub } from '../../chats/stream';
+import { executableEnvironmentType } from '../environments/type';
 import { newPlatformId } from '../ids';
 import { type PageRequest, type PlatformListPage, paginate } from '../pagination';
-import type { PlatformEnvironmentType } from '../repositories/environments';
 import type { PlatformSessionRow, PlatformTurnRow } from '../repositories/sessions';
 import { patchSessionAgent, resolveSessionAgent } from './agent-config';
 import { SessionHttpError } from './errors';
@@ -29,21 +29,11 @@ import {
   serializeTurn,
   type TurnResourceWire,
 } from './serialize';
-import { openSessionEventTap, resumePosition, type SessionEventSource, type SessionEventTap } from './sse';
+import { openSessionEventTap, type SessionEventSource, type SessionEventTap } from './sse';
 
 export interface SessionListFilter {
   readonly agentId?: string;
   readonly metadata?: Record<string, string>;
-}
-
-/** Reasons reported in `x-platform-degraded` when a requested capability ran degraded. */
-export const ENVIRONMENT_TYPE_MAPPED_REASON = 'environment_type_mapped_to_local';
-
-const LOCAL_ENVIRONMENT_TYPES: ReadonlySet<string> = new Set(['none', 'self_hosted', 'local']);
-
-/** Unknown hosting types run in the local sandbox instead of failing the DDL check. */
-function normalizeEnvironmentType(requested: string): PlatformEnvironmentType {
-  return LOCAL_ENVIRONMENT_TYPES.has(requested) ? (requested as PlatformEnvironmentType) : 'local';
 }
 
 export interface CreatedSession {
@@ -51,7 +41,6 @@ export interface CreatedSession {
   readonly hub: ChatStreamHub;
   /** Present when `stream:true`; it was subscribed before the initial input was submitted. */
   readonly tap: SessionEventTap | null;
-  readonly degradation: readonly string[];
 }
 
 /**
@@ -69,12 +58,8 @@ export class SessionService {
     this.#recorder = runtime.recorder;
   }
 
-  get eventSource(): SessionEventSource & Pick<SessionRecorder, 'sequenceOf'> {
-    return {
-      replay: (sessionId, afterSeq) => this.#recorder.replay(sessionId, afterSeq),
-      subscribe: (sessionId, listener) => this.#recorder.subscribe(sessionId, listener),
-      sequenceOf: (sessionId, eventId) => this.#recorder.sequenceOf(sessionId, eventId),
-    };
+  get eventSource(): SessionEventSource {
+    return this.#recorder;
   }
 
   require(sessionId: string): PlatformSessionRow {
@@ -87,18 +72,12 @@ export class SessionService {
     return serializeSession(row, this.#runtime.repos.agents, this.#runtime.repos.environments);
   }
 
-  /** Degradations that apply to a stored session resource; routes surface them as headers. */
-  degradation(row: PlatformSessionRow): string[] {
-    return row.environment_type === 'local' ? [ENVIRONMENT_TYPE_MAPPED_REASON] : [];
-  }
-
   async create(
     params: CreateSessionParams,
     options: { readonly signal?: AbortSignal | undefined } = {},
   ): Promise<CreatedSession> {
     const { repos, chats, recorder } = this.#runtime;
-    const environmentType = normalizeEnvironmentType(params.environment.type);
-    const degradation: string[] = environmentType === 'local' ? [ENVIRONMENT_TYPE_MAPPED_REASON] : [];
+    const environmentType = executableEnvironmentType(params.environment.type, 'environment.type');
     if (params.stream !== true && params.stream_options !== undefined) {
       throw new SessionHttpError(
         'invalid_input',
@@ -170,7 +149,7 @@ export class SessionService {
     // first byte can be lost, and a failed submit still returns a JSON error.
     const tap =
       params.stream === true
-        ? openSessionEventTap(this.eventSource, sessionId, 0, options.signal ?? new AbortController().signal)
+        ? openSessionEventTap(this.eventSource, sessionId, options.signal ?? new AbortController().signal)
         : null;
 
     if (text !== null) {
@@ -183,7 +162,7 @@ export class SessionService {
       }
     }
 
-    return { session: this.resource(this.require(sessionId)), hub, tap, degradation };
+    return { session: this.resource(this.require(sessionId)), hub, tap };
   }
 
   async update(sessionId: string, params: UpdateSessionParams): Promise<SessionResourceWire> {
@@ -296,16 +275,11 @@ export class SessionService {
   }
 
   /** Attaches the projection and opens the SSE tap; throws before any byte is committed. */
-  async stream(
-    sessionId: string,
-    lastEventId: string | undefined,
-    signal: AbortSignal,
-  ): Promise<SessionEventTap> {
+  async stream(sessionId: string, signal: AbortSignal): Promise<SessionEventTap> {
     this.require(sessionId);
     const hub = await this.#runtime.chats.prepareStream(sessionId);
     this.#recorder.observe(hub);
-    const after = resumePosition(this.eventSource, sessionId, lastEventId);
-    return openSessionEventTap(this.eventSource, sessionId, after, signal);
+    return openSessionEventTap(this.eventSource, sessionId, signal);
   }
 
   /** `POST .../events`: validated inputs, durable idempotency, then the chat actions. */

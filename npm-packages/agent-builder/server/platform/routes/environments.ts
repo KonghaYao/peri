@@ -1,52 +1,61 @@
 import { Hono } from 'hono';
 import type { z } from 'zod';
+import { assertExecutableEnvironment } from '../environments/capabilities';
 import {
   buildEnvironmentConfig,
   CreateEnvironmentBodySchema,
-  degradationReasons,
   type EnvironmentConfig,
   type EnvironmentConfigurationSchema,
   environmentConfigFromColumn,
-  LOCAL_ENVIRONMENT_TYPES,
-  type LocalEnvironmentType,
   type TemplateConfig,
   templateConfigFromColumn,
+  templateDeclaresNetwork,
   withoutConfidentialEnvironmentInput,
 } from '../environments/config';
 import { EnvironmentRequestError, handleEnvironmentErrors, requiredPathParam } from '../environments/errors';
 import { writeInlineEnvironmentFile } from '../environments/files';
-import { buildIdListPage, environmentResource, setDegradationHeader } from '../environments/serialize';
+import { buildIdListPage, environmentResource } from '../environments/serialize';
+import { executableEnvironmentType } from '../environments/type';
 import { assertDeploymentWorkspace } from '../environments/workspace';
+import { PlatformRequestError } from '../errors';
 import { serializeJsonColumn } from '../json';
 import { parsePageRequest } from '../pagination';
 import type { PlatformRepositories } from '../repositories';
-import type { PlatformEnvironmentRow, PlatformEnvironmentsRepository } from '../repositories/environments';
+import type {
+  PlatformEnvironmentRow,
+  PlatformEnvironmentsRepository,
+  PlatformEnvironmentType,
+} from '../repositories/environments';
 import { parsePlatformJson } from '../request';
 
 type EnvironmentConfiguration = z.infer<typeof EnvironmentConfigurationSchema>;
 
-function isLocalEnvironmentType(value: string): value is LocalEnvironmentType {
-  return (LOCAL_ENVIRONMENT_TYPES as readonly string[]).includes(value);
+interface LoadedTemplate {
+  readonly config: TemplateConfig;
+  readonly declaresNetwork: boolean;
 }
 
-interface MappedType {
-  readonly type: LocalEnvironmentType;
-  readonly mapped: boolean;
-}
-
-/** Types outside the locally executable set run as `local`; callers are told via a header. */
-function mapEnvironmentType(requested: string | undefined): MappedType {
-  if (requested === undefined) return { type: 'local', mapped: false };
-  if (isLocalEnvironmentType(requested)) return { type: requested, mapped: false };
-  return { type: 'local', mapped: true };
-}
-
-function loadTemplateConfig(repos: PlatformRepositories, templateId: string): TemplateConfig {
+function loadTemplate(repos: PlatformRepositories, templateId: string): LoadedTemplate {
   const row = repos.environmentTemplates.get(templateId);
   if (row === null) {
     throw new EnvironmentRequestError('not_found', 'Environment template not found', 404);
   }
-  return templateConfigFromColumn(row.config);
+  return {
+    config: templateConfigFromColumn(row.config),
+    declaresNetwork: templateDeclaresNetwork(row.config),
+  };
+}
+
+/**
+ * The list filter keeps the hosting types this deployment stores. Hosted types match nothing
+ * instead of being rewritten to a local filter, and undocumented values are invalid input.
+ */
+function listTypeFilter(requested: string | undefined): readonly PlatformEnvironmentType[] | null {
+  if (requested === undefined || requested.length === 0) return null;
+  if (requested === 'self_hosted') return ['self_hosted', 'local'];
+  if (requested === 'none') return ['none'];
+  if (requested === 'openai_hosted') return [];
+  throw new PlatformRequestError('Unknown environment type', 'type');
 }
 
 function assertCapabilityDirectoriesSupported(value: unknown, param: string): void {
@@ -101,7 +110,6 @@ function buildMergedEnvironmentConfig(
     workspace_directory: workspaceDirectory,
     vault_ids: vaultIds,
     template_id: templateId,
-    degradation: [],
   });
 }
 
@@ -124,17 +132,11 @@ export function createEnvironmentRoutes(repos: PlatformRepositories): Hono {
         order: query.order,
         after: query.after,
       });
-      const requestedType = query.type;
-      const filterMapped =
-        requestedType !== undefined && requestedType.length > 0 && !isLocalEnvironmentType(requestedType);
-      const typeFilter: LocalEnvironmentType | null =
-        requestedType === undefined || requestedType.length === 0
-          ? null
-          : isLocalEnvironmentType(requestedType)
-            ? requestedType
-            : 'local';
-
-      const rows = repos.environments.list({ ...page, limit: page.limit + 1 }, typeFilter);
+      const types = listTypeFilter(query.type);
+      const rows =
+        types === null || types.length > 0
+          ? repos.environments.list({ ...page, limit: page.limit + 1 }, types)
+          : [];
       const basePage = buildIdListPage(rows, page.limit, (row) => row.id);
       const data = basePage.data.map((row) =>
         environmentResource(
@@ -143,7 +145,6 @@ export function createEnvironmentRoutes(repos: PlatformRepositories): Hono {
           repos.environmentFiles.listByEnvironment(row.id),
         ),
       );
-      if (filterMapped) setDegradationHeader(c, ['environment_type_filter_mapped_to_local']);
       return c.json({ ...basePage, data });
     }),
   );
@@ -156,30 +157,27 @@ export function createEnvironmentRoutes(repos: PlatformRepositories): Hono {
       const input = nested ? body.environment : body;
       const name = body.name ?? input.name ?? '';
       const vaultIds = body.vault_ids ?? [];
-      const requestedType = input.type;
-      const { type, mapped } = mapEnvironmentType(requestedType);
+      const type = executableEnvironmentType(input.type, 'type');
       const templateId = input.environment_template_id ?? input.template_id ?? null;
+      const template = templateId === null ? null : loadTemplate(repos, templateId);
 
       assertCapabilityDirectoriesSupported(input.capability_directories, 'capability_directories');
       const workspaceDirectory = assertDeploymentWorkspace(input.workspace_directory, 'workspace_directory');
-      const templateConfig = templateId === null ? null : loadTemplateConfig(repos, templateId);
       const config = buildMergedEnvironmentConfig(
         input,
         templateId,
-        templateConfig,
+        template?.config ?? null,
         workspaceDirectory,
         vaultIds,
       );
       assertCapabilityDirectoriesSupported(config.capability_directories, 'capability_directories');
-
-      const reasons = degradationReasons(config, {
-        typeMapped: mapped,
-        hasVaults: vaultIds.length > 0,
+      assertExecutableEnvironment(config, {
+        networkRequested:
+          (input.network !== undefined && input.network !== null) || template?.declaresNetwork === true,
+        vaultIds,
       });
-      const persistedConfig: EnvironmentConfig = {
-        ...withoutConfidentialEnvironmentInput(config),
-        degradation: reasons,
-      };
+
+      const persistedConfig = withoutConfidentialEnvironmentInput(config);
 
       // Creating the environment and materializing its inline files is one unit: a rejected
       // file must not leave an environment with a partial configuration.
@@ -209,7 +207,6 @@ export function createEnvironmentRoutes(repos: PlatformRepositories): Hono {
         return created;
       })();
 
-      setDegradationHeader(c, persistedConfig.degradation);
       return c.json(
         environmentResource(row, persistedConfig, repos.environmentFiles.listByEnvironment(row.id)),
         201,
@@ -222,7 +219,6 @@ export function createEnvironmentRoutes(repos: PlatformRepositories): Hono {
     handleEnvironmentErrors((c) => {
       const row = environmentById(repos.environments, requiredPathParam(c, 'environment_id'));
       const config = environmentConfigFromColumn(row.config);
-      setDegradationHeader(c, config.degradation);
       return c.json(environmentResource(row, config, repos.environmentFiles.listByEnvironment(row.id)));
     }),
   );

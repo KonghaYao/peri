@@ -110,8 +110,8 @@ function readServiceTier(raw: string | null): string {
 }
 
 /**
- * Platform rows keep the requested model string in `model`. Rows created through the legacy
- * `/api` surface only carry it inside `config.provider`, so fall back to that value.
+ * Platform rows keep the requested model string in `model`. Legacy rows created before the
+ * `/v1` surface only carry it inside `config.provider`, so fall back to that value.
  */
 function readModel(row: PlatformAgentRow, config: Record<string, unknown>): string {
   if (row.model !== null) return row.model;
@@ -119,7 +119,7 @@ function readModel(row: PlatformAgentRow, config: Record<string, unknown>): stri
   return typeof provider?.model === 'string' ? provider.model : '';
 }
 
-/** The wire name keeps the full documented value; `agents.name` remains the 80-character `/api` view. */
+/** The wire name keeps the full documented value; `agents.name` remains the 80-character stored view. */
 function wireName(row: PlatformAgentRow): string | null {
   const name = row.wire_name ?? row.name;
   return name.length === 0 ? null : name;

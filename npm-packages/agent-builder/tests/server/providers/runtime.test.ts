@@ -4,9 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { AgentCapabilities, AgentDraft, type AgentPreviewTarget } from '@shared/agent';
-import { ApiErrorBody } from '@shared/api';
-import { ChatResponse } from '@shared/chat';
+import { AgentDraft, type AgentPreviewTarget } from '@shared/agent';
 import { ProviderCreate } from '@shared/provider';
 import { createPreviewResponse } from '../../../server/agents/open-target';
 import { AgentsRepository } from '../../../server/agents/repository';
@@ -139,32 +137,27 @@ describe('Provider frozen runtime isolation', () => {
           }),
         );
         const empty = agents.create(AgentDraft.parse({ name: 'Null', config: {} }));
-        const create = (agentId: string) =>
-          app.request('/api/chats', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ agentId }),
-          });
+        const create = (agentId: string) => service.create({ agentId });
         expect(providers.get(provider.id).hasCredential).toBe(false);
         expect(probeChatRuntime(env, true).mode).toBe('not_configured');
         for (const legacy of [false, true]) {
           if (legacy)
             db.query("UPDATE providers SET credential_source = 'env' WHERE id = ?").run(provider.id);
           expect(providers.get(provider.id).hasCredential).toBe(false);
-          const capabilities = AgentCapabilities.parse(await (await app.request('/api/capabilities')).json());
-          expect(capabilities.providers.every((item) => !item.configured)).toBe(true);
-          const refused = await create(agent.id);
-          expect(refused.status).toBe(409);
-          expect(ApiErrorBody.parse(await refused.json()).error.details.reason).toBe('api_key_missing');
+          await expect(create(agent.id)).rejects.toMatchObject({
+            code: 'not_ready',
+            details: { reason: 'api_key_missing' },
+          });
           const preview = createPreviewResponse(env, agent, engine.status, undefined, providers);
           expect(preview.warnings.some((warning) => warning.code === 'api_key_missing')).toBe(true);
           expect(preview.target.agent.settings.config.providers[0]?.apiKey).toBeUndefined();
           expect(providers.get(provider.id).revision).toBe(1);
         }
         for (const item of [inline, empty]) {
-          const refused = await create(item.id);
-          expect(refused.status).toBe(409);
-          expect(ApiErrorBody.parse(await refused.json()).error.details.reason).toBe('provider_missing');
+          await expect(create(item.id)).rejects.toMatchObject({
+            code: 'not_ready',
+            details: { reason: 'provider_missing' },
+          });
         }
         expect(engine.actors.size).toBe(0);
         expect(chats.list()).toHaveLength(0);
@@ -178,10 +171,8 @@ describe('Provider frozen runtime isolation', () => {
           },
           1,
         );
-        expect((await create(inline.id)).status).toBe(409);
-        const created = await create(agent.id);
-        expect(created.status).toBe(201);
-        const { chat } = ChatResponse.parse(await created.json());
+        await expect(create(inline.id)).rejects.toMatchObject({ code: 'not_ready' });
+        const chat = await create(agent.id);
         const target = firstTarget(engine, chat.chatId);
         expect(target.agent.settings.config.providers[0]?.apiKey === key).toBe(true);
         providers.update(
@@ -190,7 +181,7 @@ describe('Provider frozen runtime isolation', () => {
           2,
         );
         expect(providers.get(provider.id).hasCredential).toBe(false);
-        expect((await create(agent.id)).status).toBe(409);
+        await expect(create(agent.id)).rejects.toMatchObject({ code: 'not_ready' });
         await service.send(chat.chatId, 'frozen', 'safe');
         await service.cancel(chat.chatId);
         expect(
@@ -199,12 +190,15 @@ describe('Provider frozen runtime isolation', () => {
             ?.opened.every((item) => JSON.stringify(item) === JSON.stringify(target)),
         ).toBe(true);
         for (const url of [
-          '/api/providers',
-          `/api/providers/${provider.id}`,
-          `/api/agents/${agent.id}`,
-          '/api/capabilities',
+          '/v1/agents',
+          `/v1/agents/${agent.id}`,
+          '/v1/agents/environments',
+          '/v1/vaults',
+          '/v1/agents/sessions',
         ]) {
-          const body = await (await app.request(url)).text();
+          const body = await (
+            await app.request(url, { headers: { authorization: 'Bearer test-token' } })
+          ).text();
           expect(body.includes(sentinel) || body.includes(key)).toBe(false);
         }
         expect(JSON.stringify(env).includes(sentinel)).toBe(false);

@@ -66,6 +66,21 @@ export function platformError(
   return c.json(platformErrorBody(code, message, status, param), status);
 }
 
+/**
+ * A documented capability this deployment cannot execute. The request is valid, but answering it
+ * would require behavior the runtime does not implement, so it fails instead of being dropped.
+ */
+export class PlatformNotImplementedError extends Error {
+  readonly code = 'not_implemented';
+  readonly param: string | null;
+
+  constructor(message: string, param: string | null = null) {
+    super(message);
+    this.name = 'PlatformNotImplementedError';
+    this.param = param;
+  }
+}
+
 /** Request failures raised by the platform layer that carry the offending parameter. */
 export class PlatformRequestError extends AppError {
   readonly param: string | null;
@@ -103,6 +118,9 @@ function appErrorStatus(error: AppError): PlatformErrorStatus {
  * Messages come from the fixed public table, never from caught exception text.
  */
 export function platformErrorFromUnknown(error: unknown, c: Context): Response {
+  if (error instanceof PlatformNotImplementedError) {
+    return platformError(c, error.code, error.message, 501, error.param);
+  }
   if (error instanceof PlatformRequestError) {
     return platformError(c, error.code, error.message, appErrorStatus(error), error.param);
   }

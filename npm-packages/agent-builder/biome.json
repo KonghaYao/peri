@@ -6,18 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": [
-      "src/**",
-      "server/**",
-      "shared/**",
-      "tests/**",
-      "package.json",
-      "tsconfig.json",
-      "tsconfig.server.json",
-      "vite.config.ts",
-      "biome.json",
-      "components.json"
-    ]
+    "includes": ["server/**", "shared/**", "tests/**", "package.json", "tsconfig.json", "biome.json"]
   },
   "formatter": {
     "enabled": true,
@@ -29,11 +18,6 @@
     "enabled": true,
     "rules": {
       "preset": "recommended"
-    }
-  },
-  "css": {
-    "parser": {
-      "tailwindDirectives": true
     }
   },
   "assist": {

@@ -210,12 +210,14 @@ export function buildPreviewWarnings(
   if (!provider || !isReferenceProvider(provider)) {
     warnings.push({
       code: 'provider_missing',
-      message: '请选择共享 Provider，并在 Providers 管理页填写 SQLite API key；旧内嵌配置仅可编辑和预览。',
+      message:
+        '请设置 PERI_PROVIDER_TYPE 与 PERI_PROVIDER_API_KEY 后重启以同步 Provider；旧内嵌配置仅可编辑和预览。',
     });
   } else if (resolved?.apiKey === undefined) {
     warnings.push({
       code: 'api_key_missing',
-      message: '此 Provider 待填写 SQLite API key；请前往 Providers 管理页。凭据存在不表示已通过模型认证。',
+      message:
+        '此 Provider 待填写 API key；请设置 PERI_PROVIDER_API_KEY 后重启。凭据存在不表示已通过模型认证。',
     });
   }
 

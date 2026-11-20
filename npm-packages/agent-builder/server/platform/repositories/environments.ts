@@ -46,14 +46,14 @@ export class PlatformEnvironmentsRepository {
     this.#now = options.now ?? Date.now;
   }
 
-  list(query: ListQuery, type: PlatformEnvironmentType | null = null): PlatformEnvironmentRow[] {
-    if (type === null) {
+  list(query: ListQuery, types: readonly PlatformEnvironmentType[] | null = null): PlatformEnvironmentRow[] {
+    if (types === null) {
       const { sql, params } = buildListStatement('platform_environments', ENVIRONMENT_COLUMNS, query);
       return this.db.query<PlatformEnvironmentRow, (string | number)[]>(sql).all(...params);
     }
     const direction = query.order === 'asc' ? 'ASC' : 'DESC';
-    const params: (string | number)[] = [type];
-    let where = 'WHERE type = ?';
+    const params: (string | number)[] = [...types];
+    let where = `WHERE type IN (${types.map(() => '?').join(', ')})`;
     if (query.after !== null) {
       where += ` AND id ${query.order === 'asc' ? '>' : '<'} ?`;
       params.push(query.after);

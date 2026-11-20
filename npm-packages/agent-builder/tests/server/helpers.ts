@@ -65,7 +65,12 @@ export function testEnv(overrides: Partial<ServerEnv> = {}): ServerEnv {
       dataDir: '/tmp',
       workspacePathPrivate: false,
     },
-    webRoot: undefined,
+    provider: {
+      type: undefined,
+      baseUrl: undefined,
+      apiKey: undefined,
+      name: 'env',
+    },
     allowedOrigins: ['http://127.0.0.1:3000', 'http://localhost:3000'],
     ...overrides,
   };
