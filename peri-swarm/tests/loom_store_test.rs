@@ -21,11 +21,11 @@
 //! items) on the state store, the closes, and the reopen on new connections.
 //! The model endpoint stays a deterministic stub (`design §7.3`).
 //!
-//! S6c1b rewired this test from the removed single-database adapter
-//! (`RemoteSwarmStore` over `Resources::swarm_store()`) to
-//! [`SwarmStateStore`] opened from `PERI_SWARM_STATE_STORE`. The real
-//! dual-database acceptance run belongs to **S6c2**; the test is kept here so
-//! that stage does not have to rebuild the harness.
+//! S6c1b rewired this test away from the removed single-database adapter (the
+//! S6b path that read `peri-resources`' Swarm port) to [`SwarmStateStore`]
+//! opened from `PERI_SWARM_STATE_STORE`. The real dual-database acceptance run
+//! belongs to **S6c2**; the test is kept here so that stage does not have to
+//! rebuild the harness.
 //!
 //! Commands and observed output for the single-database era live in
 //! `.peri/plans/S6b2-report.md` and `.peri/plans/S6b3-report.md`.
