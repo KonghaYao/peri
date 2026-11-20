@@ -214,3 +214,13 @@
 | F-CLI-004 | L3 | 元数据查询；只读查询不更改执行事实 | [契约](../design/meta-control.md) |
 | F-CLI-005 | L3 | Workflow CLI；运行与分发共用工作流语义 | [契约](../design/workflow.md) |
 | F-CLI-006 | L3 | 启动配置；显式参数进入统一配置路径 | [契约](../design/configuration-authority.md) |
+| F-SWARM-001 | L1 | 会话 HTTP 面；五路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
+| F-SWARM-002 | L1 | 会话身份；logicalId 与 rootSessionId 分离 | [契约](../design/peri-swarm.md) |
+| F-SWARM-003 | L1 | 事件续读；SSE 先补 backlog 后实时 | [契约](../design/peri-swarm.md) |
+| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409 | [契约](../design/peri-swarm.md) |
+| F-SWARM-005 | L2 | 双库归属；会话事实与 Swarm 事实互不建表 | [契约](../design/peri-swarm.md) |
+| F-SWARM-006 | L2 | MCP 注入；agent.tools 映射 ACP 会话声明 | [契约](../design/peri-swarm.md) |
+| F-SWARM-007 | L2 | 宿主沙箱；Bun 懒预留与 workspace 代理 | [契约](../design/peri-swarm.md) |
+| F-SWARM-008 | L2 | 空闲回收；在途阻断且文件与绑定保留 | [契约](../design/peri-swarm.md) |
+| F-SWARM-009 | L2 | 宿主恢复；仅杀 Rust 后 reattach 不重放 | [契约](../design/peri-swarm.md) |
+| F-SWARM-010 | L3 | 本地运行面；双库 provision 与启动顺序 | [契约](../design/peri-swarm.md) |

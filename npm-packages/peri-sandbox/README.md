@@ -76,6 +76,45 @@ await sandbox.close({ deleteData: true }); // 停止并删除 <sandboxRoot>
 
 完整示例见 [`examples/peri-mcp-client.json`](examples/peri-mcp-client.json)。不要传 `0.0.0.0`：`host` 只接受 `127.0.0.1` 或 `::1`。
 
+## 本地 swarm 服务（dev:swarm）
+
+`peri-sandbox` 自带一个 loopback HTTP 服务，把「逻辑环境 → 沙箱」的映射、懒启动、
+MCP 反向代理和空闲回收放在一个进程里，供 `peri-swarm` 网关使用。单实例 API 仍是
+权威：本服务只加路由与生命周期编排。
+
+```bash
+cd npm-packages/peri-sandbox
+bun install
+PERI_PATH=/path/to/peri bun run dev:swarm   # 默认 127.0.0.1:8081
+bun run test:swarm                          # 构建后只跑 tests/swarm/*.test.js
+```
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PERI_SWARM_BUN_BIND` | `127.0.0.1:8081` | `host:port`，只接受 loopback |
+| `PERI_SWARM_BUN_TOKEN` | 未设置 | 设置后 `/v1/*` 与 `/sandboxes/*` 要求 `Bearer` |
+| `PERI_SWARM_SANDBOXES_ROOT` | `~/.peri-swarm/sandboxes` | 绝对路径，启动时创建/校验 0700 |
+| `PERI_SWARM_IDLE_MS` | 1800000（30 分钟） | 空闲回收阈值；`0` 关闭 |
+| `PERI_PATH` / `PERI_SANDBOX_SETTINGS` | 沿用既有语义 | 沙箱内 Peri 路径与 settings |
+
+路由：`GET /healthz`、`POST /v1/sandboxes`（按 `logicalEnvId` ensure，单飞）、
+`GET|DELETE /v1/sandboxes/{logicalEnvId}`、`POST|GET|DELETE
+/sandboxes/{logicalEnvId}/mcp`（反向代理，注入内层 Bearer）。
+
+- `POST /v1/sandboxes` 带 `{"lazy":true}` 时只做预留（分配 `sandboxId` 与绑定，不启动
+  SRT）；不带 `lazy` 时立即启动。`peri-swarm` 网关使用懒预留。
+- 冷态 MCP 面不需要实例：`initialize`/`server/discover`/`tools/list`/`ping` 由快照
+  回答，首个 `tools/call` 才启动实例。
+- 回收只在 `ready`、无在途代理请求且空闲达到阈值时发生；回收后状态为 `stopped`，
+  `workspace` 与绑定保留，再次 `POST /v1/sandboxes` 分配新 `runId`、复用同一
+  `sandboxId`。`DELETE ?deleteData=true` 才删除目录与绑定。
+- 持久布局：`~/.peri-swarm/sandboxes/bindings.json` 只记录 `sandboxId`、
+  `workspacePath`、`lastRunId` 与使用时间，**不保存 token**；每个沙箱的
+  `workspace/` 与 `home/` 位于 `<root>/<sandboxId>/`，`close()` 后保留。
+
+与网关的接线、双 Loom 库与恢复边界见
+[Peri Swarm 本地开发宿主](../../docs/design/peri-swarm.md)。
+
 ## 与 SDK 集成
 
 `@peri-code/sdk/sandbox` 的 `SandboxManager` 必填 `adapter`，SDK 不提供默认实现，也不动态 import 任何具体 sandbox。manager 只做按 `sandboxId` 的注册表，不感知 session；调用方拿到 `SandboxHandle` 后自行决定绑定到哪个会话。
