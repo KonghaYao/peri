@@ -28,8 +28,9 @@ use ratatui_kit::ratatui::style::Stylize;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::text::Span;
 use ratatui_kit::ratatui::widgets::Paragraph;
-use ratatui_kit::ratatui::widgets::Wrap;
 use std::time::Duration;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// 状态栏第 1 行：权限模式 · cwd · provider/model · bg tasks
 ///（CPU%/MEM/ctx 已迁移 composer footer 资源线，见 input_area.rs）
@@ -157,12 +158,22 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ));
     }
 
-    // 根据可用宽度动态决定是否需要折行（单行 → 双行）
-    let total_width = Line::from(spans.clone()).width() as u16;
+    // 一次布局同时产出可见行与命中区间：绘制与点击消费同一份结果，
+    // 不再各自模拟折行（窄屏长词、第三行裁剪时两套计算会错位）。
+    // 首帧 use_previous_size 返回 width=0：布局退守单行，命中为空。
     let prev_size = hooks.use_previous_size();
-    // 首帧 use_previous_size 返回 width=0，退守单行；后续帧宽度超过才启用双行折行
-    let needs_wrap = prev_size.width > 0 && total_width > prev_size.width;
-    let row_height: u16 = if needs_wrap { 2 } else { 1 };
+    let StatusBarLayout {
+        lines,
+        model_hits,
+        goal_hits,
+    } = layout_status_bar(
+        &spans,
+        prev_size.width,
+        ROW1_MAX_LINES,
+        model_start.map(|start| start..model_end),
+        goal_start.map(|start| start..goal_end),
+    );
+    let row_height = (lines.len() as u16).max(1);
 
     // ── 模型段点击区域：鼠标左键点击 alias/model 文本 → 打开快速切换弹窗 ──
     // AreaTracker 值拷贝模式（仿 input_area.rs）：每帧从 hook 取出 rect 副本，
@@ -172,27 +183,6 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let tracker = hooks.use_hook(|| AreaTracker { rect: None });
         row1_area = tracker.rect;
     }
-    // 模拟 WordWrapper 词级折行（Wrap { trim: false }，对齐 ratatui-widgets 0.3.2
-    // reflow.rs 语义）计算模型段的点击区域列表——
-    // 每个区域 `(line_idx, x_start, x_end)` 对应模型段内一个词折行后的位置。
-    // [Bug 修复] 旧实现只记录循环结束后的 line_idx（= 最后一个 span 所在行），
-    // 折行点落在模型段之后时模型文本在第 0 行而点击判定用第 1 行，点击永久失效。
-    // 现在按模型段内每个词各自记录行号，模型段跨行/尾部折行时返回多个区域；
-    // 换行判定按 WordWrapper 逐字符增量检查的等价形式（词前缀放不下才换行，
-    // 词恰好放满整行时留在行尾），与真实渲染逐位对齐，
-    // 不再有 span 内部断行的 1-2 列死区。
-    let model_click: Vec<(u16, u16, u16)> =
-        if let (Some(start), Some(area)) = (model_start, row1_area) {
-            model_click_areas(&spans, area.width as usize, row_height, start, model_end)
-        } else {
-            Vec::new()
-        };
-    let goal_click: Vec<(u16, u16, u16)> =
-        if let (Some(start), Some(area)) = (goal_start, row1_area) {
-            model_click_areas(&spans, area.width as usize, row_height, start, goal_end)
-        } else {
-            Vec::new()
-        };
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         if let Event::Mouse(mouse) = event {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
@@ -202,28 +192,18 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if mouse_router::is_occluded() {
                 return EventResult::Ignored;
             }
-            if let Some(area) = row1_area
-                && let Some((_, x_start, _)) = model_click.iter().copied().find(|&(li, xs, xe)| {
-                    mouse.row == area.y.saturating_add(li)
-                        && mouse.column >= area.x.saturating_add(xs)
-                        && mouse.column < area.x.saturating_add(xe)
-                })
-            {
-                // 锚点 = 模型段起点屏幕坐标——小弹窗定位在该点上方
-                *atoms::MODEL_SWITCH_ANCHOR.state().write() =
-                    Some((area.x.saturating_add(x_start), mouse.row));
-                crate::kit::popup_overlay::open_popup(atoms::PopupKind::ModelQuickSwitch);
-                return EventResult::Consumed;
-            }
-            if let Some(area) = row1_area
-                && goal_click.iter().copied().any(|(li, xs, xe)| {
-                    mouse.row == area.y.saturating_add(li)
-                        && mouse.column >= area.x.saturating_add(xs)
-                        && mouse.column < area.x.saturating_add(xe)
-                })
-            {
-                crate::kit::panel_registry::open_panel(PanelKind::Goal);
-                return EventResult::Consumed;
+            if let Some(area) = row1_area {
+                // 命中区间来自与绘制相同的布局：被裁掉的第三行与空白格不再有热区。
+                if let Some(anchor_x) = hit_test(&model_hits, area, mouse.column, mouse.row) {
+                    // 锚点 = 模型段命中起点屏幕坐标——小弹窗定位在该点上方
+                    *atoms::MODEL_SWITCH_ANCHOR.state().write() = Some((anchor_x, mouse.row));
+                    crate::kit::popup_overlay::open_popup(atoms::PopupKind::ModelQuickSwitch);
+                    return EventResult::Consumed;
+                }
+                if hit_test(&goal_hits, area, mouse.column, mouse.row).is_some() {
+                    crate::kit::panel_registry::open_panel(PanelKind::Goal);
+                    return EventResult::Consumed;
+                }
             }
         }
         EventResult::Ignored
@@ -235,7 +215,7 @@ fn StatusBarRow1(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             width: Constraint::Fill(1),
             height: Constraint::Length(row_height),
         ) {
-            Text(text: Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }))
+            Text(text: Paragraph::new(lines))
         }
     )
 }
@@ -421,123 +401,271 @@ pub fn StatusBar(props: &StatusBarProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
-/// [升级护栏] 本函数是对 ratatui-widgets 内部 reflow 算法（`WordWrapper`）的
-/// 复刻模拟——与 message_area 的"真实渲染复刻"方案形成两套 wrap 语义认知。
-/// 升级 ratatui-widgets 依赖（即使 patch 版本）时，必须运行
-/// `cargo test -p peri-tui --lib status_bar_test` 的 ground-truth 差分测试
-/// （TestBackend 真实渲染逐位对比 + 随机差分），并重新评估下方列出的已知差异。
-/// Cargo.toml 中 ratatui 依赖处有同步标注。
+/// Row1 最多显示两行；超出部分裁掉且不产生热区。
+const ROW1_MAX_LINES: usize = 2;
+
+/// Row1 的一次布局：可见行与模型/Goal 热区同源。
+struct StatusBarLayout {
+    /// 实际绘制的行（已按宽度折行并裁到可见高度）。
+    lines: Vec<Line<'static>>,
+    /// 模型段命中区间 `(行号, x 起点, x 终点)`，相对 Row1 区域。
+    model_hits: Vec<(u16, u16, u16)>,
+    /// Goal 段命中区间，语义同上。
+    goal_hits: Vec<(u16, u16, u16)>,
+}
+
+/// 折行后的一个显示单元格；`span` 记录它来自哪个原始 span，供命中区间归属。
+struct Cell {
+    span: usize,
+    text: String,
+    width: usize,
+}
+
+impl Cell {
+    fn new(span: usize, grapheme: &str) -> Self {
+        Self {
+            span,
+            text: grapheme.to_string(),
+            width: grapheme.width(),
+        }
+    }
+}
+
+/// 一次布局产出可见行与命中区间：绘制端直接渲染 `lines`，命中也只看这些单元格。
 ///
-/// 模拟 WordWrapper 词级折行（对齐 ratatui-widgets 0.3.2 reflow.rs `Wrap{trim:false}`
-/// 语义，经 TestBackend ground-truth 渲染逐位验证），返回模型段内每个**词**的
-/// 点击区域 `(line_idx, x_start, x_end)`（相对 Row1 区域）。
-///
-/// 词级规则（reflow.rs 逐行核对 + TestBackend 差分实验确认）：
-/// - 词 = 非空白段；空白（含跨 span 边界累积）为词前宽度 `ws`；
-/// - append 前检查：`line_x > 0 && line_x + ws + w - cw_last >= area_w` 且行非空 →
-///   词整体换到新行。等价推导：reflow.rs L129 `pending_word_overflow` 是逐字符增量
-///   检查（`line_width + ws + 词内前缀宽 >= max`，检查时不含当前字符），词内前缀
-///   最大 = `w - cw_last`（cw_last = 词尾字符宽）→ 触发条件即上式。词恰好放满
-///   整行（ASCII 词尾时 `line + ws + w == area_w`）**留在行尾**，走 line_full 行推出；
-/// - 换行时行尾回填（L139-150）：行尾剩余空间内的词前空白被丢弃（视觉等同行尾
-///   空格），剩余空白随词到下一行——下一行可能顶格；
-/// - 行首词（`line_x == 0`）不触发换行——超宽词放行首（untrimmed_overflow 近似；
-///   WordWrapper 对行首超宽词会拆分跨行，模拟整词放行首，超界部分天然不可达）。
-///   注意边界是 `ws + w > area_w`（词 + 前导空白超宽，L107-109 逐字符检查），
-///   不只是 `w > area_w`：此时区域覆盖真实前缀（可点），词尾剩余字符无区域
-///   （点击失效）。状态栏模型段首词为 sep "·"（宽 1）、模型段恰在行首才触发，
-///   罕见且无害；
-/// - 文本末尾 flush（L178-181）无溢出检查：**最后一个词永不换行**（超界截断
-///   显示），模拟对所有词（含最后一个）做换行检查。状态栏中 MEM 段无条件
-///   存在，模型段永不可能是最后一段 → 差异当前不可达；若尾部段改为可选
-///   需重新评估；
-/// - append 后检查 `line_full`：`line_x >= area_w` → 行推出（词留在行尾）。
-///
-/// 每个词一个区域；点击词（含词前空白）即可命中。模型段跨行时每行各有区域，
-/// 折行点落在模型段之后（尾部 CPU/MEM/bg/ctx 折到下一行）时模型段仍整段在第 0 行——
-/// 修复前 `line_idx` 取循环结束后的值（= 最后一个 span 所在行），
-/// 导致点击判定错位一行、弹窗永久无法打开。
-fn model_click_areas(
+/// 折行以词为单位；行首放不下的长词按 grapheme 显示宽度拆到后续行，前导空白在
+/// 换行处丢弃。`max_lines` 之外的内容既不绘制也不参与命中。
+fn layout_status_bar(
     spans: &[Span<'static>],
-    area_w: usize,
-    row_height: u16,
-    model_start: usize,
-    model_end: usize,
-) -> Vec<(u16, u16, u16)> {
-    // 防御：不可渲染场景直接返回空（组件内 row_height ∈ {1,2}，0 不可达）
-    if area_w == 0 || spans.is_empty() || model_start >= model_end || row_height == 0 {
+    width: u16,
+    max_lines: usize,
+    model: Option<std::ops::Range<usize>>,
+    goal: Option<std::ops::Range<usize>>,
+) -> StatusBarLayout {
+    let cells = wrap_cells(spans, usize::from(width), max_lines);
+    // 首帧宽度未知（0）时无法校验列坐标，不给出可能错位的热区。
+    let hits_available = width > 0;
+    StatusBarLayout {
+        lines: cells_to_lines(&cells, spans),
+        model_hits: if hits_available {
+            model
+                .map(|range| hit_ranges(&cells, &range))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        goal_hits: if hits_available {
+            goal.map(|range| hit_ranges(&cells, &range))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// 把 spans 折成携带来源 span 的单元格行。
+fn wrap_cells(spans: &[Span<'static>], width: usize, max_lines: usize) -> Vec<Vec<Cell>> {
+    if max_lines == 0 {
         return Vec::new();
     }
-    // 词流：把 spans 拼接为字符流逐字符扫描，词可跨 span 边界合并；
-    // in_model 按词起点所在 span 是否 ∈ [model_start, model_end) 标记。
-    let mut words: Vec<(bool, usize, usize, usize)> = Vec::new(); // (in_model, ws, w, cw_last)
-    let mut cur_ws = 0usize;
-    let mut cur_w = 0usize;
-    let mut cur_cw_last = 0usize;
-    let mut cur_model = false;
-    let mut in_word = false;
-    {
-        let iteration_items = spans.iter().enumerate();
-        for (span_idx, s) in iteration_items {
-            let in_model = span_idx >= model_start && span_idx < model_end;
-            for c in s.content.chars() {
-                if c.is_whitespace() {
-                    if in_word {
-                        words.push((cur_model, cur_ws, cur_w, cur_cw_last));
-                        in_word = false;
-                        cur_ws = 0;
+    if width == 0 {
+        // 首帧宽度未知：保持单行，由绘制端按实际区域裁剪。
+        return vec![
+            spans
+                .iter()
+                .enumerate()
+                .flat_map(|(span, text)| {
+                    text.content
+                        .graphemes(true)
+                        .map(move |grapheme| Cell::new(span, grapheme))
+                })
+                .collect(),
+        ];
+    }
+
+    let mut builder = LineBuilder::new(width, max_lines);
+    let mut word: Vec<Cell> = Vec::new();
+    let mut spaces: Vec<Cell> = Vec::new();
+    for (span, text) in spans.iter().enumerate() {
+        for grapheme in text.content.graphemes(true) {
+            let cell = Cell::new(span, grapheme);
+            // 宽于整行的字素无法显示（与 ratatui 的 WordWrapper 一致）。
+            if cell.width > width {
+                continue;
+            }
+            if grapheme.chars().all(char::is_whitespace) {
+                if !word.is_empty() {
+                    builder.append_word(&mut word, &mut spaces);
+                    if builder.exhausted() {
+                        return builder.finish();
                     }
-                    cur_ws += char_width(c);
-                } else {
-                    if !in_word {
-                        in_word = true;
-                        cur_model = in_model;
-                        cur_w = 0;
-                    }
-                    let w = char_width(c);
-                    cur_w += w;
-                    cur_cw_last = w;
                 }
+                spaces.push(cell);
+            } else {
+                word.push(cell);
             }
         }
     }
-    if in_word {
-        words.push((cur_model, cur_ws, cur_w, cur_cw_last));
+    if !word.is_empty() {
+        builder.append_word(&mut word, &mut spaces);
     }
-    // 词级折行模拟（与 WordWrapper 同构）：
-    let max_line = row_height.saturating_sub(1);
-    let mut areas = Vec::new();
-    let mut line_idx = 0u16;
-    let mut line_x = 0usize;
-    for (in_model, mut ws, w, cw_last) in words {
-        // 词 append 前：词前缀（不含词尾字符）放不下（>=）且行非空 → 词整体换行。
-        // 逐字符增量检查的等价形式：前缀最大 = w - cw_last。
-        // 词恰好填满整行时留在行尾（line_full 语义）。
-        if line_x > 0 && line_x + ws + w - cw_last >= area_w && line_idx < max_line {
-            // 行尾回填：行尾剩余空间内的词前空白被丢弃（视觉等同行尾空格），
-            // 剩余空白随词到下一行（下一行可能顶格）。
-            let remaining = area_w.saturating_sub(line_x);
-            ws = ws.saturating_sub(remaining);
-            line_idx += 1;
-            line_x = 0;
-        }
-        if in_model {
-            areas.push((line_idx, line_x as u16, (line_x + ws + w) as u16));
-        }
-        line_x += ws + w;
-        // append 后：行满（>=）→ 行推出（词留在行尾）
-        if line_x >= area_w && line_idx < max_line {
-            line_idx += 1;
-            line_x = 0;
-        }
-    }
-    areas
+    builder.finish()
 }
 
-/// 单个字符的终端显示宽度（UnicodeWidthChar 语义：CJK/全角=2、零宽=0）。
-#[must_use]
-fn char_width(c: char) -> usize {
-    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+/// 词级折行的可变状态；只保留前 `max_lines` 行。
+struct LineBuilder {
+    width: usize,
+    max_lines: usize,
+    lines: Vec<Vec<Cell>>,
+    line: Vec<Cell>,
+    line_width: usize,
+}
+
+impl LineBuilder {
+    fn new(width: usize, max_lines: usize) -> Self {
+        Self {
+            width,
+            max_lines,
+            lines: Vec::new(),
+            line: Vec::new(),
+            line_width: 0,
+        }
+    }
+
+    /// 已收集满 `max_lines` 行且当前行没有内容：后续内容不可见。
+    fn exhausted(&self) -> bool {
+        self.lines.len() >= self.max_lines && self.line.is_empty()
+    }
+
+    fn break_line(&mut self) {
+        if !self.line.is_empty() {
+            self.lines.push(std::mem::take(&mut self.line));
+            self.line_width = 0;
+        }
+    }
+
+    fn push(&mut self, cell: Cell) {
+        self.line_width += cell.width;
+        self.line.push(cell);
+    }
+
+    /// 追加一个词（及其词前空白）。放不下时换行；超宽词按显示宽度拆分。
+    fn append_word(&mut self, word: &mut Vec<Cell>, spaces: &mut Vec<Cell>) {
+        if self.exhausted() {
+            word.clear();
+            spaces.clear();
+            return;
+        }
+        let word_width: usize = word.iter().map(|cell| cell.width).sum();
+        let space_width: usize = spaces.iter().map(|cell| cell.width).sum();
+        if self.line_width + space_width + word_width <= self.width {
+            for cell in spaces.drain(..) {
+                self.push(cell);
+            }
+            for cell in word.drain(..) {
+                self.push(cell);
+            }
+            return;
+        }
+        // 换行：行尾/行首的空白丢弃，避免下一行顶格前多出空格。
+        spaces.clear();
+        self.break_line();
+        if self.exhausted() {
+            word.clear();
+            return;
+        }
+        if word_width <= self.width {
+            for cell in word.drain(..) {
+                self.push(cell);
+            }
+        } else {
+            self.split_word(word);
+        }
+    }
+
+    /// 行首超宽词：按显示宽度切到后续行，不拆开 grapheme。
+    fn split_word(&mut self, word: &mut Vec<Cell>) {
+        for cell in std::mem::take(word) {
+            if self.exhausted() {
+                return;
+            }
+            if self.line_width > 0 && self.line_width + cell.width > self.width {
+                self.break_line();
+                if self.exhausted() {
+                    return;
+                }
+            }
+            self.push(cell);
+        }
+    }
+
+    fn finish(mut self) -> Vec<Vec<Cell>> {
+        if self.lines.len() < self.max_lines && !self.line.is_empty() {
+            self.lines.push(self.line);
+        }
+        if self.lines.is_empty() {
+            self.lines.push(Vec::new());
+        }
+        self.lines
+    }
+}
+
+/// 把单元格行还原为带原始样式的绘制行；相邻同源单元格合并为一个 span。
+fn cells_to_lines(cells: &[Vec<Cell>], spans: &[Span<'static>]) -> Vec<Line<'static>> {
+    cells
+        .iter()
+        .map(|line| {
+            let mut grouped: Vec<(usize, String)> = Vec::new();
+            for cell in line {
+                match grouped.last_mut() {
+                    Some((span, text)) if *span == cell.span => text.push_str(&cell.text),
+                    _ => grouped.push((cell.span, cell.text.clone())),
+                }
+            }
+            Line::from(
+                grouped
+                    .into_iter()
+                    .map(|(span, text)| Span::styled(text, spans[span].style))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// 可见单元格中属于 `region` 的连续区间，按绘制行号返回。
+fn hit_ranges(cells: &[Vec<Cell>], region: &std::ops::Range<usize>) -> Vec<(u16, u16, u16)> {
+    let mut hits = Vec::new();
+    for (line_idx, line) in cells.iter().enumerate() {
+        let mut x = 0u16;
+        let mut start = None;
+        for cell in line {
+            let inside = region.contains(&cell.span);
+            match (inside, start) {
+                (true, None) => start = Some(x),
+                (false, Some(range_start)) => {
+                    hits.push((line_idx as u16, range_start, x));
+                    start = None;
+                }
+                _ => {}
+            }
+            x = x.saturating_add(cell.width as u16);
+        }
+        if let Some(range_start) = start {
+            hits.push((line_idx as u16, range_start, x));
+        }
+    }
+    hits
+}
+
+/// 在 Row1 的命中区间中查找鼠标位置，返回区间起点的屏幕 x（弹窗锚点）。
+fn hit_test(hits: &[(u16, u16, u16)], area: Rect, column: u16, row: u16) -> Option<u16> {
+    hits.iter()
+        .find(|&&(line, start, end)| {
+            row == area.y.saturating_add(line)
+                && column >= area.x.saturating_add(start)
+                && column < area.x.saturating_add(end)
+        })
+        .map(|&(_, start, _)| area.x.saturating_add(start))
 }
 
 /// 追踪 Row1 组件区域，供鼠标点击→打开 alias 快速切换弹窗使用。
