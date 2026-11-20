@@ -203,6 +203,16 @@ impl WorkspaceFileReader for McpWorkspaceFileReader {
     }
 
     async fn current_branch(&self) -> Result<Option<String>, WorkspaceReadError> {
+        // S9a3a：cold 远端 workspace 的 `workspace/gitBranch` 是自定义 MCP 请求，
+        // 与 tools/call 一样会启动真实后端。git 归因的分支观察属于可选探测，
+        // 首个真实调用之前按不可得处理（调用方忽略该错误）；启动后下一轮恢复。
+        if self
+            .pool
+            .as_ref()
+            .is_some_and(|pool| pool.remote_workspace_deferred())
+        {
+            return Err(WorkspaceReadError::Unavailable);
+        }
         let result = self.request("workspace/gitBranch", None).await?;
         match result.get("branch") {
             Some(serde_json::Value::Null) => Ok(None),

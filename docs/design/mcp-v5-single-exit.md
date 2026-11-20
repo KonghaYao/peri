@@ -112,6 +112,11 @@ bare 路径（`print --bare`）此前只接受会话声明替换 builtin `worksp
 
 - 绑定与 `set_session_servers` 同一注入窗口：MCP 初始化开始后拒绝；每池一次。
 - `Remote` 条目来源身份是 `WorkspaceRemote`、`system_mcp = true`、`system_mcp_tools = None`（工具清单只来自 live `tools/list`）。
+- `Remote` 的启动发现只冻结 transport / initialize / 能力协商 / `tools/list`：
+  `resources/list`、指令/覆盖面读取、技能模板探测与宿主侧 `shell_task_list` /
+  `workspace/gitBranch` 都延后到首个真实 `tools/call`（S9a3a；cold provider 面只
+  宣告工具能力）。启动后各探测恢复，资源重发现失败只降级告警，不改变连接。
+  该约束只适用于 `WorkspaceRemote`；builtin `workspace` 与普通 MCP 仍在启动期探测。
 - 非 bare 路径的合并顺序不变：builtin 开启时注入的远端 `workspace` 覆盖同名条目，但 `peri` 仍保留 workspace 能力（两个 workspace 面）。依赖单 workspace 面的部署必须用 `builtin_mcp:false`（或 `PERI_MCP_BUILTIN=off`），不得依赖非 bare 路径去重。
 
 ### 2.5 故障域与关闭

@@ -55,6 +55,10 @@ const SANDBOXES_ROOT = process.env.PERI_SWARM_SANDBOXES_ROOT ?? path.join(homedi
 const TIMEOUT_MS = Number(process.env.PERI_E2E_TIMEOUT_MS ?? '180000');
 const CONTRACT_HEADERS = { 'x-peri-swarm-expect': '1', 'OpenAI-Beta': 'agents=v1' };
 const EXPECTED_FILE_TEXT = 'hello-from-swarm';
+// S9a3a: stay cold for longer than the workspace watcher's 5s retry cadence.
+// Only a real model `tools/call` may start the reservation.
+const COLD_QUIET_WINDOW_MS = Number(process.env.PERI_E2E_COLD_QUIET_MS ?? '6000');
+const HOST_LOG_PATH = process.env.PERI_E2E_HOST_LOG ?? '';
 
 if (!API_KEY) {
   console.error('PERI_SWARM_API_KEY is required');
@@ -334,17 +338,33 @@ async function main() {
     check('creation stage observed zero SRT process groups', creationStage.processGroupCount === 0, creationStage);
     check('reservation wrote no sandbox directory', !rootDirectories().includes(sandboxId), rootDirectories());
   } else {
-    // Observed deviation: the ACP host calls the host-only `shell_task_list`
-    // workspace tool while assembling the session, which is a real tools/call
-    // and starts the reserved sandbox before any model turn. Record it instead
-    // of pretending the reservation stayed cold.
-    check('creation stage is ready after the host workspace probe', creationState === 'ready', reservation);
-    check('creation-stage sandbox has a runId', typeof reservation?.runId === 'string' && reservation.runId.startsWith('run_'), reservation);
-    check('exactly one SRT process group backs the creation-stage sandbox', creationStage.processGroupCount === 1, creationStage);
-    check('creation-stage sandbox exists on disk', fs.existsSync(workspacePath));
-    check('the creation-stage start was not model-driven', summary.creationStage.modelMainCalls === 0);
+    // S9a3a: creation/handshake/tool discovery must never start SRT. A `ready`
+    // reservation here is a regression, not an accepted deviation.
+    check('creation stage is reserved (no eager SRT start)', false, {
+      state: creationState,
+      runId: reservation?.runId,
+      startCount: creationStage.processGroupCount,
+    });
   }
   check('creation stage observed zero model main calls', summary.creationStage.modelMainCalls === 0);
+  // S9a3a: keep the session cold for longer than the workspace watcher's 5s
+  // retry cadence; only a real model tool call may start the reserved sandbox.
+  await sleep(COLD_QUIET_WINDOW_MS);
+  const stillCold = await bunView(envId);
+  const stillColdSandbox = stillCold.body?.sandbox;
+  const stillColdProcesses = matchingProcesses(envId, workspacePath, sandboxId);
+  summary.creationStage.quietWindowMs = COLD_QUIET_WINDOW_MS;
+  summary.creationStage.stillColdAfterQuietWindow = {
+    viewState: stillColdSandbox?.state,
+    runId: stillColdSandbox?.runId,
+    startCount: stillColdProcesses.processGroupCount,
+    modelMainCalls: (await stubStats()).mainCalls,
+  };
+  check(
+    `sandbox stays reserved for ${COLD_QUIET_WINDOW_MS}ms before the first prompt`,
+    stillColdSandbox?.state === 'reserved' && stillColdProcesses.processGroupCount === 0,
+    summary.creationStage.stillColdAfterQuietWindow,
+  );
 
   // `retrieve` must report the same environment; it never contacts Bun again.
   const fetched = await client.beta.agents.sessions.retrieve(created.id, { headers: CONTRACT_HEADERS });
@@ -530,6 +550,7 @@ async function main() {
     trimmed: rawFile.trim(),
     mode: (fs.statSync(filePath).mode & 0o777).toString(8),
     uid: fs.statSync(filePath).uid,
+    mtime: fs.statSync(filePath).mtime.toISOString(),
   };
   check('hello.txt content is hello-from-swarm', rawFile.trim() === EXPECTED_FILE_TEXT, rawFile);
   check(
@@ -627,12 +648,53 @@ async function main() {
   check('stub main calls are exactly tool turn + final turn', stats.mainCalls === 2, stats.mainCalls);
   summary.finalText = { itemSeq: finalComplete.seq, itemId: finalComplete.itemId, text: finalComplete.payload?.text };
 
-  // Policy evidence: the provider was started by SRT with this sandbox policy.
+  // 5. S9a3a: the deferred workspace resource probe is visible after the start.
+  //    The host log records the deferral at session creation and exactly one
+  //    post-start re-discovery (success count or an explicit failure warning).
+  const hostLog = HOST_LOG_PATH && fs.existsSync(HOST_LOG_PATH) ? fs.readFileSync(HOST_LOG_PATH, 'utf8') : '';
+  const stripAnsi = (line) => line.replace(/\u001b\[[0-9;]*m/g, '');
+  const hostLogLines = hostLog
+    .split('\n')
+    .map(stripAnsi)
+    .filter((line) => line.length > 0);
+  const deferredProbeLines = hostLogLines.filter((line) =>
+    line.includes('远端 workspace 资源探测延后到首个真实调用'),
+  );
+  const probeAttemptLines = hostLogLines.filter((line) => line.includes('启动后资源重发现'));
+  const probeSuccessLines = probeAttemptLines.filter((line) => line.includes('资源重发现完成'));
+  const probeFailureLines = hostLogLines.filter(
+    (line) => line.includes('资源重发现超时') || line.includes('MCP resources/list 失败'),
+  );
+  const probedResourceCount = probeSuccessLines
+    .map((line) => /resources=(\d+)/.exec(line))
+    .find(Boolean);
+  summary.resourceProbe = {
+    hostLogPath: HOST_LOG_PATH || null,
+    deferredLineCount: deferredProbeLines.length,
+    attemptLines: probeAttemptLines,
+    success: probeSuccessLines.length,
+    failure: probeFailureLines.length,
+    resources: probedResourceCount ? Number(probedResourceCount[1]) : null,
+  };
+  if (HOST_LOG_PATH) {
+    check('startup deferred the remote workspace resource probe', deferredProbeLines.length >= 1, summary.resourceProbe);
+    check('the first real call started the post-start resource re-discovery', probeAttemptLines.length >= 1, summary.resourceProbe);
+    check(
+      'the post-start resource probe finished visibly (success or warning)',
+      probeSuccessLines.length + probeFailureLines.length >= 1,
+      summary.resourceProbe,
+    );
+  }
+
+  // 6. Policy evidence: the provider was started by SRT with this sandbox policy.
   const policyPath = path.join(SANDBOXES_ROOT, sandboxId, 'policy.json');
   const policy = fs.existsSync(policyPath) ? JSON.parse(fs.readFileSync(policyPath, 'utf8')) : null;
+  const policyStat = fs.existsSync(policyPath) ? fs.statSync(policyPath) : null;
   const periPath = process.env.PERI_E2E_PERI_PATH;
   summary.policy = {
     path: policyPath,
+    createdAt: policyStat?.birthtime?.toISOString() ?? null,
+    mtime: policyStat?.mtime?.toISOString() ?? null,
     allowWrite: policy?.filesystem?.allowWrite ?? null,
     allowWorkspace: policy?.filesystem?.allowWrite?.includes(workspacePath) ?? false,
     allowPeriRead: periPath ? (policy?.filesystem?.allowRead?.includes(periPath) ?? false) : null,

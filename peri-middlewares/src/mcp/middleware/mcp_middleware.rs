@@ -191,11 +191,23 @@ pub(crate) fn run_ensure_discovery(
     let skills_face_closed = builtin_context
         .as_ref()
         .is_some_and(|context| context.skills_face_closed);
+    let remote_workspace_cold = pool.remote_workspace_deferred();
     let connected_handles: Vec<Arc<McpClientHandle>> = pool
         .clients_visible_to(session_id)
         .into_iter()
         .filter(|handle| {
             !super::super::builtin::is_closed_source(&handle.name, handle.source.as_ref(), &closed)
+        })
+        // S9a3a：cold 远端 workspace 不参与技能发现。legacy 探测会发
+        // `resources/templates/list`，与 `resources/list` 一样会启动真实后端；
+        // 冷连接既无 skill 资源也未宣告 skills 能力，跳过不丢任何发现结果。
+        // 首个真实调用后（`workspace_remote_started`）恢复既有投影与探测。
+        .filter(|handle| {
+            !(remote_workspace_cold
+                && matches!(
+                    handle.source,
+                    Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote)
+                ))
         })
         .collect();
     tracing::debug!(

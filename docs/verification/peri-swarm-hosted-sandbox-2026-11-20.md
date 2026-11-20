@@ -20,7 +20,8 @@
 | --- | --- | --- |
 | 本地 Peri 二进制可构建并被 sandbox provider 使用 | 通过 | §2：`target/debug/peri`，sha256 `0e512f4b…`，`peri 0.2.0` |
 | Bun 懒预留不启动 SRT | 通过 | §5.1：`POST /v1/sandboxes {lazy:true}` → `reserved`、`runId:null`、无目录、0 个 SRT 进程组 |
-| **session 创建/发现阶段 start 计数为 0** | **未达成** | §6：创建返回时已是 `ready`、`runId=run_…`、1 个进程组，模型主调用为 0；原因见 §6 |
+| **session 创建/发现阶段 start 计数为 0（S9a2 运行）** | **未达成（已被 §10 修复）** | §6：创建返回时已是 `ready`、`runId=run_…`、1 个进程组，模型主调用为 0；原因见 §6 |
+| **session 创建/发现阶段 start 计数为 0（S9a3a 修复后）** | 通过 | §10.4：创建返回 `reserved`、`runId:null`、0 进程组；6 s 静默窗口后仍 `reserved`；首个真实 `tools/call` 才启动 |
 | 首个非冷可答请求后 start 计数为 1 | 通过 | §6：`resources/list` 启动首个实例；模型 `Bash` 调用复用同一 `runId`，全程仅 1 个进程组 |
 | `GET /v1/sandboxes/{envId}` 状态 ready 并返回 workspacePath | 通过 | §5.2：`state=ready`、`providerVersion=0.2.0`、绝对路径 |
 | `<workspacePath>/hello.txt` 存在且内容为 `hello-from-swarm` | 通过 | §5.3：17 字节，raw 为 `hello-from-swarm\n`，trim 后逐字相等 |
@@ -38,6 +39,10 @@ SRT 中的真实 Peri provider，命令在沙箱内执行并写回
 组装期的 `resources/list`，不是模型 `tools/call`；因此“创建阶段 start=0”在
 session 级不成立。本文不把该断言写成通过，也不为它引入会牺牲 workspace 资源面
 的临时改动，原因与候选处置见 §6。
+
+> 后续（S9a3a，§10）：上述触发点已修复——“创建/握手/工具发现不启动，首个真实调用
+> 才启动”。§2–§9 保留 S9a2 的原始运行与未达成证据，不重写历史；修复后的运行与
+> 时间线见 §10。
 
 ## 2. 组件与版本
 
@@ -395,3 +400,104 @@ fake provider 的 discover 响应同步为真实形状。该修复不改变工�
 - `createMs` 包含预留、ACP 组装、资源发现与 SRT 启动，未单独拆分启动耗时。
 - 原始 `e2e.json`、进程快照、wire 探针日志在 `/tmp/peri-swarm-s9a2/`，不入库；
   本文档保留了断言结论与关键字段。
+
+## 10. S9a3a 修复：冷 workspace 资源探测延后到首次真实调用
+
+- 状态：追加验证（2026-11-20，S9a2 记录的后续修复）
+- 基线：`48f8e7101`（S1..S9a2）+ 本阶段改动；工作树
+  `/Users/konghayao/code/ai/peri/.worktrees/peri-swarm-local-dev`
+- Peri 二进制：`target/debug/peri`（`peri 0.2.0`），sha256
+  `93ccfb0b168fd6a47a67f06dc99c3a09f4f0ae3fc1a6b73f36504ba4ce0b2cc9`
+- 环境：Bun 1.4.2、Node v26.9.0、Peri Loom `12dd01a1…`、`openai@7.62.0`，
+  其余与 §2/§3 相同；本次运行目录 `/private/tmp/peri-swarm-s9a3a/`。
+
+### 10.1 问题与修复点
+
+S9a2 的首个启动触发器是宿主在 session 组装期发出的 `resources/list`（§6.2）。
+本次按“宿主启动期的可选工作区探测延后到实际需要；动态资源内容仅在真实后端读取”
+处理，只改宿主侧，cold 面的 `server/discover` / `tools/list` 与 Bun 转发逻辑不变：
+
+| 触发点 | 修复 |
+| --- | --- |
+| 启动发现的 `resources/list`（`mcp::initialize`） | `ConfigSource::WorkspaceRemote` 启动期不再探测；连接以 cold 工具面发布，资源快照为空 |
+| 内容准入的指令/覆盖面（`read_builtin_workspace_instructions` / `read_builtin_workspace_meta`） | cold 远端 workspace 返回“不可得/空”，不探测 |
+| 技能发现的 legacy `resources/templates/list`（`run_ensure_discovery`） | cold 远端 workspace 不参与技能投影，不 spawn 发现 |
+| 恢复侧 `shell_task_list`（`workspace_watch`） | cold 期跳过扫描，首个真实调用后恢复 |
+| git 归因 `before_agent` 的 `workspace/gitBranch`（`workspace_io`） | cold 期返回 `Unavailable`，首个真实调用后恢复 |
+| 首个真实 `tools/call`（`tool_bridge`） | 置位 `workspace_remote_started`；随后做**一次**启动后 `resources/list` 重发现，失败只 WARN（`downgrade_resource_listing`），不改变连接、不失败 session |
+
+本机 builtin `workspace` 与普通 MCP 行为不变；`fail_workspace_resource_discovery`
+及其“真实失败”判定仍用于 reconnect / OAuth 等真实失败路径，本次未改写。
+
+### 10.2 wire 顺序（本次运行，Bun `mcp_request`）
+
+```text
+（session/new，cold）
+server/discover       (cold 应答)
+tools/list            (cold 应答)
+（创建返回，reserved；6 s 静默窗口内无任何转发请求）
+（首个 prompt）
+tools/call            (Bash；Bun 此时 ensure → SRT 启动)
+resources/list        (启动后一次性重发现)
+resources/templates/list（置位后的下一次技能发现）
+```
+
+cold 期没有出现 `resources/list`、`resources/templates/list`、
+`workspace/gitBranch` 或 `shell_task_list`。
+
+诊断说明（临时探针，已移除、未提交）：在给 `workspace/gitBranch` 加门之前，
+真实链路里的首个 ensure 由 `before_agent` 的 `workspace/gitBranch` 触发
+（2026-11-20T17:12:29.927Z），说明该探针同样是“会话期可选探测”；加门后
+ensure 只由首个 `tools/call` 触发。
+
+### 10.3 start 计数
+
+| 阶段 | Bun 视图 | runId | SRT 进程组 | 模型主调用 |
+| --- | --- | --- | --- | --- |
+| create 返回 | `reserved` | `null` | 0 | 0 |
+| create + 6 s 静默窗口 | `reserved` | `null` | 0 | 0 |
+| 首个 `tools/call` 后 | `ready` | `run_88ad8cdd18ed90248a752bf2` | 1 | 2（首轮 tool_call + 最终文本） |
+| DELETE 后 | 404 | — | 0 | — |
+
+- `createMs=1072`、`eventsPostMs=3173`、`sandboxReadyMs=3175`（本次运行）；
+- 恰好 1 个 SRT CLI（pgid 56833）与 1 个 Peri workspace provider（ppid 56833）；
+- 沙箱根在 create 阶段不存在；`policy.json` 创建于 17:19:56.665Z，
+  `hello.txt` 写于 17:19:56.807Z，说明 SRT 由首个 `tools/call` 启动。
+
+### 10.4 启动后资源探测
+
+- 首次真实调用后 host 日志：
+
+```text
+远端 workspace 首次真实调用已转发；开始启动后资源重发现 server=workspace
+远端 workspace 启动后资源重发现完成 server=workspace resources=15
+```
+
+- 结果非空（15 条），来自真实后端（cold 代理在转发前已启动 provider）；
+- 已知边界：本阶段只记录/缓存这次发现，`McpClientHandle.resources` 仍是 cold
+  快照（面板与按句柄快照投影的资源面不会在会话内刷新）；刷新句柄需替换代数与
+  影响发现证据，留待后续阶段裁决。
+
+### 10.5 其他验收项（本次运行）
+
+- `hello.txt`：17 bytes，raw `hello-from-swarm\n`，mode 644；
+- items：8 条（tool_call ×2、tool_result、4 delta、complete），SSE 10 事件；
+- 模型 stub：`mainCalls=2`、`toolCalls=1`、`helperCalls=1`；
+- tool result 原文：`sandbox=denied: cat: <sandbox>/home/.peri-swarm/sandboxes/bindings.json:
+  No such file or directory`（宿主路径在沙箱 HOME 下不可解析）；
+- teardown：DELETE 200 / `deletedData:true` / GET 404 / 0 进程组；
+  端口 8081/9496/9497/6420/18080 全部关闭，`~/.peri-swarm/sandboxes` 仅剩空
+  `bindings.json`；
+- 驱动断言：81/81 通过（含 `creation stage is reserved`、`sandbox stays reserved
+  for 6000ms before the first prompt`、`startup deferred the remote workspace
+  resource probe`、`the post-start resource probe finished visibly`）。
+
+### 10.6 局限
+
+- 单次真实运行；A/B/C 共享环境、恢复、多 session 并发仍未覆盖；
+- 模型是确定性 stub；
+- hosted session 的冻结 system prompt 不再包含远端工作区指令/覆盖（cold 期不可得，
+  显式降级）；本机 builtin workspace 不受影响；
+- 启动后资源发现结果未回写句柄快照（见 §10.4）；
+- 原始 `e2e.json`、Bun/gateway 日志在 `/private/tmp/peri-swarm-s9a3a/logs/`，
+  不入库。

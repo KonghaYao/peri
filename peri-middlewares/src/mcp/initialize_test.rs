@@ -27,20 +27,26 @@ readline.on('line', line => {
 });
 "#;
 
-const RESOURCE_ERROR_SCRIPT: &str = r#"
+/// S9a3a cold 面夹具：只宣告 tools（与 Bun 冷快照同形），把收到的 method
+/// 追加到 `cold-requests.log`，`resources/list` 明确失败。
+const COLD_RESOURCE_ERROR_SCRIPT: &str = r#"
+const fs = require('node:fs');
+const path = require('node:path');
 const readline = require('node:readline').createInterface({ input: process.stdin });
 readline.on('line', line => {
   const request = JSON.parse(line);
   if (request.id === undefined) return;
+  fs.appendFileSync(path.join(process.cwd(), 'cold-requests.log'), request.method + '\n');
   let result = {};
   if (request.method === 'initialize') result = {
-    protocolVersion: '2025-11-25', capabilities: { resources: {} },
-    serverInfo: { name: 'resource-error', version: '1' },
+    protocolVersion: '2025-11-25',
+    capabilities: { tools: {} },
+    serverInfo: { name: 'cold-workspace', version: '0.2.0' },
   };
   else if (request.method === 'tools/list') result = { tools: [] };
   else if (request.method === 'resources/list') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
-      error: { code: -32603, message: 'resource unavailable' } }) + '\n');
+      error: { code: -32603, message: 'cold workspace has no resource surface' } }) + '\n');
     return;
   } else if (request.method !== 'ping') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
@@ -51,10 +57,14 @@ readline.on('line', line => {
 });
 "#;
 
+/// S9a3a：远端 workspace 的 cold 面只宣告 tools。启动期不探测资源（否则
+/// `resources/list` 会启动真实后端）；首个真实调用后做一次可见的重发现，
+/// 失败只告警、不改变已连接的 session。重连仍沿用既有「真实失败」判定。
 #[tokio::test]
-async fn remote_workspace_resource_discovery_failure_blocks_initial_connection() {
+async fn remote_workspace_resources_are_deferred_until_first_real_call() {
     let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("server.js"), RESOURCE_ERROR_SCRIPT).unwrap();
+    std::fs::write(fixture.path().join("server.js"), COLD_RESOURCE_ERROR_SCRIPT).unwrap();
+    let log = fixture.path().join("cold-requests.log");
     let mut config: super::super::config::McpConfigFile =
         serde_json::from_value(serde_json::json!({
             "mcpServers": { "workspace": { "command": "node", "args": ["server.js"] } }
@@ -73,13 +83,81 @@ async fn remote_workspace_resource_discovery_failure_blocks_initial_connection()
         None,
     )
     .await;
+
+    let handle = pool.client("workspace").expect("workspace handle");
+    assert!(
+        matches!(handle.status, ClientStatus::Connected),
+        "cold 面能答 tools/list，连接必须可用: {:?}",
+        handle.status
+    );
+    assert!(handle.resources.is_empty(), "cold 面没有资源快照");
+    // 启动期与冻结期（指令/覆盖面）都不得发 resources/list。
+    assert!(pool.remote_workspace_deferred());
+    assert_eq!(
+        pool.read_builtin_workspace_instructions().await.unwrap(),
+        (None, None)
+    );
+    let sections = std::collections::HashSet::from(["project".to_string()]);
+    assert!(pool
+        .read_builtin_workspace_meta(&sections)
+        .await
+        .unwrap()
+        .is_empty());
+    // watcher 的 `shell_task_list` 同样是 tools/call，冷期必须跳过（本测试只覆盖
+    // 资源面；watcher 的 gating 由 `remote_workspace_deferred` 同一判定复用）。
+    let requests = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        requests.lines().any(|line| line == "tools/list"),
+        "启动期仍要真实 tools/list: {requests}"
+    );
+    assert!(
+        !requests.lines().any(|line| line == "resources/list"),
+        "cold 阶段不得探测 resources/list: {requests}"
+    );
+
+    // 首个真实调用：解锁并触发一次启动后资源重发现；失败只是一次 WARN。
+    let warns = Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let _capture = tracing::subscriber::set_default(WarnCaptureSubscriber {
+            warns: warns.clone(),
+        });
+        pool.note_remote_workspace_call(&handle).await;
+    }
+    assert!(!pool.remote_workspace_deferred());
+    let after = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        after
+            .lines()
+            .filter(|line| *line == "resources/list")
+            .count(),
+        1,
+        "启动后恰好一次资源重发现: {after}"
+    );
+    let warnings = warns.lock().unwrap().clone();
+    assert!(
+        warnings
+            .iter()
+            .any(|warn| warn.contains("resources/list") && warn.contains("workspace")),
+        "失败必须留下可查告警: {warnings:?}"
+    );
+    // 失败不改变连接：工具面继续可用，session 不崩溃。
     assert!(matches!(
         pool.client("workspace").map(|handle| handle.status.clone()),
-        Some(ClientStatus::Failed(_))
+        Some(ClientStatus::Connected)
     ));
-    assert!(!pool
-        .discovery_evidence("workspace")
-        .is_some_and(|e| e.is_complete()));
+    // 同一 session 不重复探测。
+    pool.note_remote_workspace_call(&handle).await;
+    let after_second = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        after_second
+            .lines()
+            .filter(|line| *line == "resources/list")
+            .count(),
+        1,
+        "启动后重发现只做一次: {after_second}"
+    );
+
+    // 重连仍按既有「真实失败」判定收口（不改 `fail_workspace_resource_discovery`）。
     let reconnect = pool.reconnect("workspace", None).await;
     assert!(matches!(
         reconnect,

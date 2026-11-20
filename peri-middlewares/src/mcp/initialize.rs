@@ -816,27 +816,30 @@ impl McpClientPool {
                                     continue;
                                 }
                             };
-                        let resources = match pool
-                            .list_all_resources_cached_for_startup(name, &peer, server_config)
-                            .await
-                        {
-                            Ok(resources) => resources,
-                            Err(error) => {
-                                if matches!(
-                                    server_config.source,
-                                    Some(ConfigSource::WorkspaceRemote)
-                                ) {
-                                    let mut service = rs;
-                                    let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-                                    fail_workspace_resource_discovery(
-                                        &pool,
-                                        name,
-                                        &error.to_string(),
-                                    );
-                                    continue;
+                        // S9a3a：远端 workspace 的 cold 面只宣告 tools（资源要真实
+                        // 后端才有）。启动期的 `resources/list` 会穿透 cold 代理启动
+                        // SRT —— 把可选资源探测延后到首个真实调用之后（tool bridge
+                        // 的 `note_remote_workspace_call`）。本机 builtin 与普通 MCP
+                        // 仍按既有策略在启动期探测。
+                        let resources = if matches!(
+                            server_config.source,
+                            Some(ConfigSource::WorkspaceRemote)
+                        ) {
+                            tracing::info!(
+                                server = %name,
+                                "远端 workspace 资源探测延后到首个真实调用（cold 面只宣告 tools）"
+                            );
+                            Vec::new()
+                        } else {
+                            match pool
+                                .list_all_resources_cached_for_startup(name, &peer, server_config)
+                                .await
+                            {
+                                Ok(resources) => resources,
+                                Err(error) => {
+                                    downgrade_resource_listing(name, &error.to_string());
+                                    Vec::new()
                                 }
-                                downgrade_resource_listing(name, &error.to_string());
-                                Vec::new()
                             }
                         };
                         tracing::info!(server = %name, tools = tools.len(), resources = resources.len(), "MCP 连接成功");
