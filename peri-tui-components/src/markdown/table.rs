@@ -633,30 +633,34 @@ fn put(buf: &mut Buffer, x: u16, y: u16, c: char, style: Style) {
 
 // ── Buffer → Vec<Line>（CJK 安全——跳过双宽字符的 ghost cell） ─────
 
-fn buffer_to_lines(buf: &Buffer, area: Rect) -> Vec<Line<'static>> {
+pub(crate) fn buffer_to_lines(buf: &Buffer, area: Rect) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(area.height as usize);
     for y in 0..area.height {
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut text = String::new();
         let mut cur: Option<Style> = None;
-        let mut prev_was_double = false;
+        // 宽字符或组合符号会占多列：完整追加 cell 符号，再按它的显示宽度跳过
+        // 后续列，避免把组合字符（如 e + U+0301）截成首字符。
+        let mut skip = 0u16;
 
         for x in 0..area.width {
-            if prev_was_double {
-                prev_was_double = false;
+            if skip > 0 {
+                skip -= 1;
                 continue;
             }
 
             let cell = buf.cell((x, y));
-            let ch = cell.map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '));
+            let symbol = cell.map_or(" ", |c| c.symbol());
             let style = cell.map(|c| c.style()).unwrap_or_default();
-
-            if ch.width().unwrap_or(0) > 1 {
-                prev_was_double = true;
+            let width = symbol.width();
+            if width == 0 {
+                // 宽字符的 ghost cell 或空符号：没有可打印内容。
+                continue;
             }
+            skip = (width - 1) as u16;
 
             match cur {
-                Some(s) if s == style => text.push(ch),
+                Some(s) if s == style => text.push_str(symbol),
                 _ => {
                     if !text.is_empty() {
                         spans.push(Span::styled(
@@ -664,7 +668,7 @@ fn buffer_to_lines(buf: &Buffer, area: Rect) -> Vec<Line<'static>> {
                             cur.unwrap_or_default(),
                         ));
                     }
-                    text.push(ch);
+                    text.push_str(symbol);
                     cur = Some(style);
                 }
             }

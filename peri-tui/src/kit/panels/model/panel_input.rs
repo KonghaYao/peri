@@ -18,7 +18,6 @@ use ratatui_kit::crossterm::event::MouseEvent;
 use ratatui_kit::crossterm::event::MouseEventKind;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
-use unicode_width::UnicodeWidthStr;
 
 use super::edit::switch_active_alias;
 use super::editor_view::PaneHit;
@@ -78,7 +77,8 @@ fn hit_right_pane(
 }
 
 /// 底部按钮命中：仅左键、且落在提示行（面板最底内容行）的按钮文本列范围内。
-/// 其右侧的键盘提示不触发动作。
+/// 其右侧的键盘提示不触发动作。宽度取自渲染同一个 `provider_button_visual`
+/// 的 `width`（主题只影响样式，取事件期的全局主题原子）。
 fn hit_provider_button(mouse: &MouseEvent, area: Rect) -> bool {
     if mouse.kind != MouseEventKind::Down(MouseButton::Left) || area.height < 2 || area.width == 0 {
         return false;
@@ -87,8 +87,9 @@ fn hit_provider_button(mouse: &MouseEvent, area: Rect) -> bool {
     if mouse.row != row {
         return false;
     }
-    let width =
-        UnicodeWidthStr::width(super::panel_render::provider_button_label().as_str()) as u16;
+    let theme_state = peri_theme::atoms::THEME_ATOM.state();
+    let theme = theme_state.read();
+    let width = super::panel_render::provider_button_visual(&theme).width;
     mouse.column >= area.x && mouse.column < area.x.saturating_add(width)
 }
 

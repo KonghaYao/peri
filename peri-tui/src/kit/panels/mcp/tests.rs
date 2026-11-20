@@ -55,7 +55,7 @@ pub(super) fn line_text(line: &ratatui::text::Line<'_>) -> String {
         .collect()
 }
 
-/// 渲染出的行下标（needle 为按钮渲染文本——复制按钮无方括号、底行按钮带方括号）。
+/// 渲染出的行下标（needle 为按钮渲染文本：统一是 Filled ` label `，无方括号）。
 pub(super) fn rendered_row(lines: &[ratatui::text::Line<'_>], needle: &str) -> usize {
     lines
         .iter()
@@ -64,7 +64,7 @@ pub(super) fn rendered_row(lines: &[ratatui::text::Line<'_>], needle: &str) -> u
 }
 
 fn copy_button(summary: &McpServerSummary, width: u16) -> DetailButton {
-    super::detail::detail_buttons(summary, 0, width)
+    super::detail::detail_buttons(summary, 0, width, &peri_theme::builtin::dark_theme())
         .into_iter()
         .find(|button| button.action == DetailAction::CopyError)
         .expect("有错误摘要必须布局复制按钮")
@@ -304,7 +304,7 @@ fn header_copy_button_is_right_aligned_and_survives_narrow_width() {
         let lines = super::detail::build_detail_lines(
             &summary,
             &[],
-            1, // 默认落在 [ 返回 ]：复制按钮为未选中态
+            1, // 默认落在「返回」：复制按钮为未选中态
             &peri_theme::builtin::dark_theme(),
             width,
         );
@@ -398,38 +398,51 @@ fn header_cjk_title_keeps_styles_and_copy_hit() {
     }
 }
 
-/// 按钮样式复用 chat 消息区按钮：复制 = md 复制按钮反色块；底行 = 选项/权限
-/// 按钮（选中态 bg(selection)+BOLD）。
+/// 通用 Button 的 Filled 外观：复制 = Secondary，授权/重启 = Primary，停止 =
+/// Danger；选中态 `Focused`（反色 + BOLD）。底行与 header 用同一套样式。
 #[test]
-fn detail_button_styles_match_chat_buttons() {
+fn detail_button_styles_match_generic_button() {
     let theme = peri_theme::builtin::dark_theme();
     let semantic = &theme.semantic;
-    // message_area/render.rs::copy_button_line
-    let copy_default = Style::default()
-        .fg(semantic.accent)
-        .add_modifier(Modifier::REVERSED);
+    let filled = |fg| Style::default().fg(fg).add_modifier(Modifier::REVERSED);
+    let focused = |fg| {
+        Style::default()
+            .fg(fg)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    };
+    // 复制（Secondary）与返回（Secondary）同色。
     assert_eq!(
         super::detail::button_style(DetailAction::CopyError, false, &theme),
-        copy_default
+        filled(semantic.text.muted)
     );
-    assert_eq!(
-        super::detail::button_style(DetailAction::CopyError, true, &theme),
-        copy_default.add_modifier(Modifier::BOLD)
-    );
-    // message_area/render/interaction.rs 选项按钮 + message_area/mod.rs:719 选中态
-    let plain = Style::default().fg(semantic.text.primary);
     assert_eq!(
         super::detail::button_style(DetailAction::Back, false, &theme),
-        plain
+        filled(semantic.text.muted)
     );
     assert_eq!(
+        super::detail::button_style(DetailAction::Back, true, &theme),
+        focused(semantic.accent)
+    );
+    // 选中态统一用 accent 前景（通用 Button 的 Focused 分支）。
+    assert_eq!(
         super::detail::button_style(DetailAction::Auth, true, &theme),
-        plain
-            .bg(semantic.surface.selection)
-            .add_modifier(Modifier::BOLD)
+        focused(semantic.accent)
+    );
+    // 未选中态按 tone：授权/重启 Primary = accent，停止 Danger = error。
+    assert_eq!(
+        super::detail::button_style(DetailAction::Auth, false, &theme),
+        filled(semantic.accent)
+    );
+    assert_eq!(
+        super::detail::button_style(DetailAction::Restart, false, &theme),
+        filled(semantic.accent)
+    );
+    assert_eq!(
+        super::detail::button_style(DetailAction::Stop, false, &theme),
+        filled(semantic.status.error)
     );
 
-    // 渲染结果与上述样式一致：btn_sel = 1（默认 [ 返回 ]）→ 复制按钮未选中
+    // 渲染结果与上述样式一致：btn_sel = 1（默认 返回）→ 复制按钮未选中
     let summary = McpServerSummary {
         error_summary: Some("boom".into()),
         ..McpServerSummary::default()
@@ -438,12 +451,23 @@ fn detail_button_styles_match_chat_buttons() {
     let lines = detail_lines(&summary, 1);
     assert_eq!(
         span_with(&lines[DETAIL_HEADER_ROW as usize], &copy_text).style,
-        copy_default
+        filled(semantic.text.muted),
+        "header 复制按钮必须是 Filled 反色块"
     );
     let lines = detail_lines(&summary, 0);
     assert_eq!(
         span_with(&lines[DETAIL_HEADER_ROW as usize], &copy_text).style,
-        copy_default.add_modifier(Modifier::BOLD)
+        focused(semantic.accent)
+    );
+    // 回归：Filled 按钮文本不再有方括号。
+    assert!(
+        !copy_text.contains('[') && !copy_text.contains(']'),
+        "Filled 按钮不得再有方括号：{copy_text}"
+    );
+    let bottom = line_text(&lines[super::detail::detail_btn_row(&summary, 0, TEST_WIDTH) as usize]);
+    assert!(
+        !bottom.contains('[') && !bottom.contains(']'),
+        "底行按钮不得再有方括号：{bottom}"
     );
 }
 
@@ -457,7 +481,9 @@ fn detail_button_columns_match_rendered_lines() {
         ..McpServerSummary::default()
     };
     let lines = detail_lines(&summary, 0);
-    for button in super::detail::detail_buttons(&summary, 0, TEST_WIDTH) {
+    for button in
+        super::detail::detail_buttons(&summary, 0, TEST_WIDTH, &peri_theme::builtin::dark_theme())
+    {
         let line = lines
             .get(button.row as usize)
             .expect("按钮行必须在渲染范围内");
@@ -477,7 +503,7 @@ fn detail_button_columns_match_rendered_lines() {
     }
 }
 
-/// 选择索引空间与默认选中：默认显式落在 [ 返回 ]，避免 Enter 误触授权/复制。
+/// 选择索引空间与默认选中：默认显式落在「返回」，避免 Enter 误触授权/复制。
 #[test]
 fn detail_actions_order_and_default_selection() {
     assert_eq!(
@@ -508,7 +534,8 @@ fn detail_actions_order_and_default_selection() {
     );
     assert_eq!(
         super::detail::detail_actions(&summary).len(),
-        super::detail::detail_buttons(&summary, 0, TEST_WIDTH).len(),
+        super::detail::detail_buttons(&summary, 0, TEST_WIDTH, &peri_theme::builtin::dark_theme())
+            .len(),
         "键盘选择索引空间必须与渲染按钮一一对应"
     );
     assert_eq!(super::detail::detail_action_at(&summary, 3), None);
@@ -760,7 +787,7 @@ fn key(code: KeyCode) -> Event {
     Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
-/// 回归：OAuth 弹窗（由本面板详情 [ 授权 ] 触发）打开期间，面板 handler 必须
+/// 回归：OAuth 弹窗（由本面板详情「授权」触发）打开期间，面板 handler 必须
 /// 对所有键让路——弹窗与面板同为 High 且同属 root 输入层，面板注册在先，
 /// 抢先把键消费掉就是「弹窗渲染出来了，键盘却作用在下层面板」的根因。
 #[test]
@@ -777,7 +804,7 @@ fn oauth_popup_open_yields_all_keys_to_popup() {
     });
 
     mount_panel(|panel| {
-        // 详情视图（[ 授权 ] 所在视图）+ 非零选择：面板侧任何抢跑都可见
+        // 详情视图（「授权」所在视图）+ 非零选择：面板侧任何抢跑都可见
         *panel.view.write() = McpView::Detail;
         *panel.selected.write() = 1;
         for code in [
@@ -939,7 +966,7 @@ fn detail_click_accounts_for_scroll_offset() {
         assert_eq!(
             *panel.view.read(),
             McpView::List,
-            "滚动后点击 [ 返回 ] 必须生效"
+            "滚动后点击「返回」必须生效"
         );
         assert_eq!(panel.sv.read().offset().y, 0, "退出详情必须重置滚动偏移");
     });

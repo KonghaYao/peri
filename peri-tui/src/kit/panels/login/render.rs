@@ -5,6 +5,7 @@ use super::auth::{AuthAction, AuthController};
 use super::auth_render;
 use super::edit_state::{LoginEditState, LoginField, ProviderKind};
 use super::edit_view::{self, EditViewMetrics};
+use peri_tui_components::button::{ButtonChrome, ButtonState, ButtonTone, button_style};
 use ratatui_kit::ratatui::style::Color;
 use ratatui_kit::ratatui::style::Modifier;
 use ratatui_kit::ratatui::style::Style;
@@ -182,20 +183,36 @@ pub(super) struct LoginRenderColors {
     pub(super) muted: Color,
     pub(super) warning: Color,
     pub(super) error: Color,
+    /// 动作按钮样式：通用 Button 的 Filled 外观，按 tone 预计算。
+    pub(super) button_primary: Style,
+    pub(super) button_secondary: Style,
+    pub(super) button_danger: Style,
+    /// 选中/聚焦态（`ButtonState::Focused`：反色 + BOLD，与 tone 无关）。
+    pub(super) button_focused: Style,
 }
 
 impl LoginRenderColors {
-    /// 从主题语义令牌派生；分区标题/警告/错误各自有独立角色。
+    /// 从主题派生；分区标题/警告/错误各自有独立角色，按钮样式直接取通用 Button。
     #[must_use]
-    pub(super) fn from_semantic(semantic: &peri_theme::semantic::SemanticTokens) -> Self {
+    pub(super) fn from_theme(theme: &peri_theme::theme::ThemeDefinition) -> Self {
+        let filled = |tone| button_style(ButtonChrome::Filled, tone, ButtonState::Normal, theme);
         Self {
-            cursor: semantic.status.warning,
-            dim: semantic.text.dim,
-            text: semantic.text.primary,
-            focus: semantic.status.success,
-            muted: semantic.text.muted,
-            warning: semantic.status.warning,
-            error: semantic.status.error,
+            cursor: theme.semantic.status.warning,
+            dim: theme.semantic.text.dim,
+            text: theme.semantic.text.primary,
+            focus: theme.semantic.status.success,
+            muted: theme.semantic.text.muted,
+            warning: theme.semantic.status.warning,
+            error: theme.semantic.status.error,
+            button_primary: filled(ButtonTone::Primary),
+            button_secondary: filled(ButtonTone::Secondary),
+            button_danger: filled(ButtonTone::Danger),
+            button_focused: button_style(
+                ButtonChrome::Filled,
+                ButtonTone::Primary,
+                ButtonState::Focused,
+                theme,
+            ),
         }
     }
 
@@ -210,6 +227,23 @@ impl LoginRenderColors {
             muted: Color::Reset,
             warning: Color::Reset,
             error: Color::Reset,
+            button_primary: Style::default(),
+            button_secondary: Style::default(),
+            button_danger: Style::default(),
+            button_focused: Style::default(),
+        }
+    }
+
+    /// 动作按钮样式：聚焦/选中 → `Focused`，否则按 tone 取 Filled 普通态。
+    #[must_use]
+    pub(super) fn button(&self, tone: ButtonTone, focused: bool) -> Style {
+        if focused {
+            return self.button_focused;
+        }
+        match tone {
+            ButtonTone::Primary => self.button_primary,
+            ButtonTone::Secondary => self.button_secondary,
+            ButtonTone::Danger => self.button_danger,
         }
     }
 
@@ -221,6 +255,15 @@ impl LoginRenderColors {
     pub(super) fn label(&self) -> Style {
         Style::default().fg(self.dim)
     }
+}
+
+/// 动作按钮的渲染文本：通用 Button 的 Filled 外观（` label `，无方括号）。
+///
+/// 布局宽度必须从这份文本用 `Span::width()` 量出——文本与列宽同源，不与旧
+/// `[label]` 混算。
+#[must_use]
+pub(super) fn button_text(label: &str) -> String {
+    ButtonChrome::Filled.text(label)
 }
 
 /// 构建 Edit 视图的行与逐行命中区（同一过程，绘制与鼠标命中不各自推导布局）。
@@ -552,10 +595,8 @@ pub(super) fn build_type_change_layout(
         Line::from(vec![
             Span::styled("  ❯ ", Style::default().fg(colors.cursor)),
             Span::styled(
-                format!("[{}]", i18n::tr(candidate.label_key())),
-                Style::default()
-                    .fg(colors.text)
-                    .add_modifier(Modifier::BOLD),
+                button_text(&i18n::tr(candidate.label_key())),
+                colors.button(ButtonTone::Primary, true),
             ),
         ]),
         EditHit::TypeChangeCandidate,

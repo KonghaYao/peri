@@ -258,7 +258,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         &auth.read(),
                         *edit_focus.read(),
                         *edit_cursor.read(),
-                        &render::LoginRenderColors::from_semantic(&semantic),
+                        &render::LoginRenderColors::from_theme(&theme_def.read()),
                         panel_width(area),
                     )
                     .lines,
@@ -274,7 +274,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let layout = auth_render::build_auth_detail_layout(
                 &auth.read(),
                 panel_width(area),
-                &render::LoginRenderColors::from_semantic(&semantic),
+                &render::LoginRenderColors::from_theme(&theme_def.read()),
             );
             lines.extend(layout.lines);
         }
@@ -284,7 +284,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Some(confirm) => {
                     let layout = auth_render::build_logout_layout(
                         confirm,
-                        &render::LoginRenderColors::from_semantic(&semantic),
+                        &render::LoginRenderColors::from_theme(&theme_def.read()),
                     );
                     lines.extend(layout.lines);
                 }
@@ -300,7 +300,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Some(es) => lines.extend(
                     render::build_type_change_layout(
                         es,
-                        &render::LoginRenderColors::from_semantic(&semantic),
+                        &render::LoginRenderColors::from_theme(&theme_def.read()),
                     )
                     .lines,
                 ),

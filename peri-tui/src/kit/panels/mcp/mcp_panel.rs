@@ -5,10 +5,10 @@
 //! 显示初始化阶段摘要。普通 MCP 的重启/关闭经 ACP 会话控制面。
 //!
 //! OAuth 授权入口（详情视图）：列表选中「需要认证」server 按 Enter 进入
-//! 详情视图，详情里选 [ 授权 ] 按钮（Enter/鼠标点击）才触发 mcp/oauth_start
-//! RPC → host 异步授权 → 弹出 OAuthPopup；[ 返回 ] 或 Esc 回列表。
+//! 详情视图，详情里选「授权」按钮（Filled 反色块，Enter/鼠标点击）才触发
+//! mcp/oauth_start RPC → host 异步授权 → 弹出 OAuthPopup；「返回」或 Esc 回列表。
 //!
-//! 错误摘要存在时详情 header 提供 [ 复制 ] 按钮：右对齐渲染在标题（server 名/
+//! 错误摘要存在时详情 header 提供「复制」按钮：右对齐渲染在标题（server 名/
 //! 状态）行右侧，激活后把错误原文写入剪贴板并留在详情视图；共用 ←→ 选择 +
 //! Enter 确认 / 鼠标左键点击的按钮机制。窄终端下标题按预算截断，按钮优先保留。
 
@@ -457,8 +457,11 @@ pub(super) fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResu
             .get(&server_domain_key(&summary.name))
             .map_or(0, Vec::len);
         // 按钮命中：行号与列偏移取自渲染同源的 detail_buttons（header 右对齐
-        // 复制按钮与底行按钮），列按显示宽度计算（CJK label 双宽）
-        for button in self::detail::detail_buttons(summary, skills_count, area.width) {
+        // 复制按钮与底行按钮），列按显示宽度计算（CJK label 双宽）。主题只影响
+        // 按钮样式；几何与渲染读同一份全局主题原子。
+        let theme_state = peri_theme::atoms::THEME_ATOM.state();
+        let theme = theme_state.read();
+        for button in self::detail::detail_buttons(summary, skills_count, area.width, &theme) {
             if content_row != button.row {
                 continue;
             }
@@ -508,7 +511,7 @@ pub(super) fn handle_mcp_event(event: Event, ctx: &McpEventCtx<'_>) -> EventResu
                     return EventResult::Consumed;
                 };
                 // 选择索引空间 = detail_actions（header 复制 → 底行 授权/返回）；
-                // 只有一个按钮（[ 返回 ]）时无选择余地。
+                // 只有一个按钮（返回）时无选择余地。
                 let count = self::detail::detail_actions(summary).len();
                 if count > 1 {
                     let mut b = ctx.detail_btn.write();
@@ -619,7 +622,7 @@ pub(super) fn activate_detail_btn(
             *sv.write() = ScrollViewState::default();
             *view.write() = McpView::List;
         }
-        // 索引失效（详情打开期间列表被刷新）等同 [ 返回 ]
+        // 索引失效（详情打开期间列表被刷新）等同「返回」
         Some(DetailAction::Back) | None => {
             *detail_btn.write() = 0;
             *sv.write() = ScrollViewState::default();
@@ -628,7 +631,7 @@ pub(super) fn activate_detail_btn(
     }
 }
 
-/// [ 复制 ] 按钮的载荷：错误原文（不截断、不重排——换行只影响渲染）。
+/// 「复制」按钮的载荷：错误原文（不截断、不重排——换行只影响渲染）。
 pub(super) fn detail_copy_text(s: &McpServerSummary) -> Option<&str> {
     s.error_summary.as_deref()
 }
@@ -665,11 +668,11 @@ pub(super) fn notify(message: String) {
     }));
 }
 
-/// 发起 OAuth 授权（详情视图 [ 授权 ] 按钮）：`mcp/oauth_start` RPC → host pool
+/// 发起 OAuth 授权（详情视图「授权」按钮）：`mcp/oauth_start` RPC → host pool
 /// spawn_oauth_flow → OauthNeeded 事件 → TUI 弹出授权 popup。
 ///
 /// 会话未就绪或 RPC 被拒（capability 协商不符、缺 flow_id 等）时给出状态栏
-/// 通知：静默失败会让 [ 授权 ] 按钮表现为「点击没反应」。
+/// 通知：静默失败会让「授权」按钮表现为「点击没反应」。
 pub(super) fn start_oauth(server_name: String) {
     if let Some(client_handle) = ACP_CLIENT_HANDLE.get() {
         let client = client_handle.clone();
@@ -705,7 +708,7 @@ pub(super) fn start_oauth(server_name: String) {
 }
 
 /// `Ok` 响应的失败判定：host 在已有活跃授权流程时返回 `success=false`
-/// （status=conflict）而非 RPC 错误——只检查 `Err` 分支会让 [ 授权 ] 按钮
+/// （status=conflict）而非 RPC 错误——只检查 `Err` 分支会让「授权」按钮
 /// 再次静默无反馈。返回需展示的 status（缺失时保底 `conflict`）。
 pub(super) fn oauth_start_failure_message(response: &serde_json::Value) -> Option<String> {
     if response.get("success").and_then(serde_json::Value::as_bool) == Some(false) {

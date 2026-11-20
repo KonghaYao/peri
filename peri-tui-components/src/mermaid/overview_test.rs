@@ -31,6 +31,26 @@ const NESTED: &str = r#"flowchart TD
   E --> A
 "#;
 
+/// 主路径只有一条入度为 0 的链；其余来源节点（Middleware/Resources/Process/
+/// Config）都不在主路径上，10 条边曾全部被概览丢弃。
+const ARCHITECTURE: &str = r#"flowchart BT
+    Model[Model] --> Agent[Agent]
+    Agent --> Runtime[Runtime]
+    Runtime --> Controller[Controller]
+    Controller --> ACP[ACP]
+    ACP --> TUI[TUI]
+    Middleware --> Agent
+    Resources --> Middleware
+    Resources --> Agent
+    Resources --> Controller
+    Process --> Agent
+    Process --> Middleware
+    Config --> ACP
+    Config --> Middleware
+    Config --> Controller
+    Config --> TUI
+"#;
+
 fn max_width(lines: &[String]) -> usize {
     lines.iter().map(|line| line.width()).max().unwrap_or(0)
 }
@@ -367,4 +387,113 @@ fn multiline_labels_stay_on_one_summary_line() {
         "摘要行不能携带标签内换行: {lines:#?}"
     );
     assert!(max_width(&lines) <= 40);
+}
+
+#[test]
+fn self_labeled_nodes_are_not_printed_twice() {
+    let source = "flowchart TD\n  Model[Model] --> Agent[Agent]\n";
+    let overview = overview::build(source).expect("self-labeled nodes parse");
+    let text = overview.lines(40, 21).join("\n");
+    assert!(text.contains("Model"), "缺少节点 Model: {text}");
+    assert!(text.contains("Agent"), "缺少节点 Agent: {text}");
+    assert!(
+        !text.contains("Model Model"),
+        "id 与 label 相同时不应重复: {text}"
+    );
+    assert!(
+        !text.contains("Agent Agent"),
+        "id 与 label 相同时不应重复: {text}"
+    );
+}
+
+#[test]
+fn architecture_overview_keeps_edges_from_off_path_sources() {
+    let overview = overview::build(ARCHITECTURE).expect("architecture parses");
+    assert_eq!(overview.node_count, 10);
+    assert_eq!(overview.edge_count, 15);
+
+    let text = overview.lines(80, 21).join("\n");
+    for name in ["Resources", "Process", "Config", "Middleware"] {
+        assert!(text.contains(name), "概览漏掉非路径来源 {name}: {text}");
+    }
+    for edge in [
+        "↳ Resources → Agent",
+        "↳ Resources → Middleware",
+        "↳ Resources → Controller",
+        "↳ Process → Agent",
+        "↳ Process → Middleware",
+        "↳ Config → ACP",
+        "↳ Config → Middleware",
+        "↳ Config → Controller",
+        "↳ Config → TUI",
+        "↳ Middleware → Agent",
+    ] {
+        assert!(text.contains(edge), "概览漏掉非路径边 {edge}: {text}");
+    }
+
+    // 摘要边必须与原图边一一对应：多重集比对同时覆盖端点、label 与重复次数，
+    // 单纯计数或逐条 contains 无法发现「重复一条 + 漏掉一条」。
+    let mut expected: Vec<(String, String, Option<String>)> = [
+        ("Model", "Agent"),
+        ("Agent", "Runtime"),
+        ("Runtime", "Controller"),
+        ("Controller", "ACP"),
+        ("ACP", "TUI"),
+        ("Middleware", "Agent"),
+        ("Resources", "Middleware"),
+        ("Resources", "Agent"),
+        ("Resources", "Controller"),
+        ("Process", "Agent"),
+        ("Process", "Middleware"),
+        ("Config", "ACP"),
+        ("Config", "Middleware"),
+        ("Config", "Controller"),
+        ("Config", "TUI"),
+    ]
+    .into_iter()
+    .map(|(from, to)| (from.to_string(), to.to_string(), None))
+    .collect();
+    expected.sort();
+    let mut actual: Vec<(String, String, Option<String>)> = overview
+        .summary_edges()
+        .into_iter()
+        .map(|relation| (relation.from.id, relation.to.id, relation.label))
+        .collect();
+    actual.sort();
+    assert_eq!(actual, expected, "摘要边必须与原图边一一对应");
+    for node_id in [
+        "Model",
+        "Agent",
+        "Runtime",
+        "Controller",
+        "ACP",
+        "TUI",
+        "Middleware",
+        "Resources",
+        "Process",
+        "Config",
+    ] {
+        assert!(
+            !text.contains(&format!("{node_id} {node_id}")),
+            "id 与 label 相同时不应重复 {node_id}: {text}"
+        );
+    }
+}
+
+#[test]
+fn architecture_overview_fits_40_and_33_columns_within_row_budget() {
+    let overview = overview::build(ARCHITECTURE).expect("architecture parses");
+    for width in [40usize, 33] {
+        let lines = overview.lines(width, 21);
+        assert!(
+            max_width(&lines) <= width,
+            "宽度 {width} 溢出（实际 {}）: {lines:#?}",
+            max_width(&lines)
+        );
+        assert!(
+            lines.len() <= 21,
+            "宽度 {width} 下高度预算溢出（实际 {} 行）: {lines:#?}",
+            lines.len()
+        );
+    }
 }

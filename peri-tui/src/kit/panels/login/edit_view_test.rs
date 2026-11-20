@@ -8,6 +8,7 @@ use super::StatusEntry;
 use super::StatusTone;
 
 use crate::kit::panels::login::render::LoginRenderColors;
+use peri_tui_components::button::ButtonTone;
 use ratatui_kit::ratatui::text::Line;
 use serial_test::serial;
 use unicode_width::UnicodeWidthStr;
@@ -167,6 +168,12 @@ fn every_line_fits_the_content_width() {
                     "查询状态".to_string(),
                     "使用此账号".to_string(),
                     "注销".to_string(),
+                ],
+                &[
+                    ButtonTone::Primary,
+                    ButtonTone::Primary,
+                    ButtonTone::Primary,
+                    ButtonTone::Danger,
                 ],
                 Some(3),
                 true,

@@ -101,5 +101,6 @@ pub use fence::{
     MermaidMessageRef, is_mermaid_info,
 };
 pub use safety::{UrlKind, classify_url, sanitize_for_terminal};
+pub(crate) use table::buffer_to_lines;
 pub use table::table_data_to_lines;
 pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, MermaidSegment, TableData};

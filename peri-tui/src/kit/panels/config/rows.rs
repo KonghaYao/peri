@@ -10,7 +10,9 @@ use crate::i18n;
 use peri_acp_types::beta_flags::BETA_FLAGS;
 use peri_acp_types::permission::PermissionMode;
 use peri_theme::theme::ThemeDefinition;
-use peri_tui_components::button::ButtonChrome;
+use peri_tui_components::button::{
+    ButtonChrome, ButtonSpec, ButtonState, ButtonTone, button_visual,
+};
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::text::Line;
 use ratatui_kit::ratatui::text::Span;
@@ -99,7 +101,10 @@ pub(super) fn beta_description(id: &str, canonical: &str) -> String {
 // 行显示
 // ---------------------------------------------------------------------------
 
-/// 一行的渲染：选中标记 + 标签 + 值（toggle 的 `[ON] OFF` / cycle 的选项串）。
+/// 一行的渲染：选中标记 + 标签 + 值（toggle 的 ` ON  OFF` / cycle 的选项串）。
+///
+/// 可点击的值不是 `[label]` 文本按钮：生效值/选中项用通用 Button 的 Filled 外观
+/// （反色块），未生效值/未选中项保持纯文本。
 ///
 /// 只依赖行模型与本行是否选中；可见范围由组件的 `ListViewport` 决定（绘制窗口
 /// 与鼠标命中取自同一实例）。
@@ -128,8 +133,7 @@ pub(super) fn build_row_line(
         ConfigRow::BetaFlag(flag_index) => {
             let flag = &BETA_FLAGS[flag_index];
             let val = read_beta_toggle(flag.id);
-            let (on_text, off_text) = toggle_texts(val);
-            let (on_style, off_style) = toggle_styles(theme, val);
+            let ((on_text, on_style), (off_text, off_style)) = toggle_units(val, theme);
             Line::from(vec![
                 Span::styled(cursor_mark, Style::new().fg(theme.component.panel.title)),
                 Span::styled(format!("{:<22}", flag.id), label_style),
@@ -147,8 +151,7 @@ pub(super) fn build_row_line(
             match row_type {
                 RowType::Toggle => {
                     let val = read_toggle(base_row);
-                    let (on_text, off_text) = toggle_texts(val);
-                    let (on_style, off_style) = toggle_styles(theme, val);
+                    let ((on_text, on_style), (off_text, off_style)) = toggle_units(val, theme);
                     Line::from(vec![
                         Span::styled(cursor_mark, Style::new().fg(theme.component.panel.title)),
                         Span::styled(format!("{:<22}", i18n::tr(label)), label_style),
@@ -168,10 +171,21 @@ pub(super) fn build_row_line(
                         for (j, opt) in iteration_items {
                             let label = cycle_display_label(opt);
                             if j == idx {
-                                spans.push(Span::styled(
-                                    ButtonChrome::Bracketed { padded: false }.text(&label),
-                                    Style::new().fg(theme.semantic.status.success).bold(),
-                                ));
+                                // 选中项 = 通用 Button 的 Filled；行聚焦时 Focused。
+                                let visual = button_visual(
+                                    ButtonSpec {
+                                        label: &label,
+                                        chrome: ButtonChrome::Filled,
+                                        tone: ButtonTone::Primary,
+                                        state: if is_active {
+                                            ButtonState::Focused
+                                        } else {
+                                            ButtonState::Normal
+                                        },
+                                    },
+                                    theme,
+                                );
+                                spans.push(Span::styled(visual.text, visual.style));
                             } else {
                                 spans.push(Span::styled(
                                     format!(" {}", label),
@@ -190,36 +204,35 @@ pub(super) fn build_row_line(
     }
 }
 
-/// ON / OFF 文本对（`[ON] OFF` / ` ON [OFF]`）。
-fn toggle_texts(val: bool) -> (String, String) {
+/// ON / OFF 展示对：生效值为通用 Button 的 Filled 外观（ON=Primary，OFF=Secondary），
+/// 未生效值保持纯文本；两段宽度与旧 `[ON] OFF` 相同，行内列对齐不变。
+fn toggle_units(val: bool, theme: &ThemeDefinition) -> ((String, Style), (String, Style)) {
+    let filled = |label: &str, tone: ButtonTone| {
+        let visual = button_visual(
+            ButtonSpec {
+                label,
+                chrome: ButtonChrome::Filled,
+                tone,
+                state: ButtonState::Normal,
+            },
+            theme,
+        );
+        (visual.text, visual.style)
+    };
     let on_label = i18n::tr("config-value-on");
     let off_label = i18n::tr("config-value-off");
+    let inactive = Style::new().fg(theme.semantic.text.muted);
     if val {
         (
-            ButtonChrome::Bracketed { padded: false }.text(&on_label),
-            format!(" {}", off_label),
+            filled(&on_label, ButtonTone::Primary),
+            (format!(" {off_label}"), inactive),
         )
     } else {
         (
-            format!(" {}", on_label),
-            ButtonChrome::Bracketed { padded: false }.text(&off_label),
+            (format!(" {on_label}"), inactive),
+            filled(&off_label, ButtonTone::Secondary),
         )
     }
-}
-
-/// ON / OFF 样式对（生效项高亮绿色，未生效项红色 / 灰）。
-fn toggle_styles(theme: &ThemeDefinition, val: bool) -> (Style, Style) {
-    let on_style = if val {
-        Style::new().fg(theme.semantic.status.success).bold()
-    } else {
-        Style::new().fg(theme.semantic.text.muted)
-    };
-    let off_style = if val {
-        Style::new().fg(theme.semantic.text.muted)
-    } else {
-        Style::new().fg(theme.semantic.status.error).bold()
-    };
-    (on_style, off_style)
 }
 
 /// 将 cycle 选项的内部值转换为 i18n 展示文本。

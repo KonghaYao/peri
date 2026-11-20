@@ -2373,6 +2373,28 @@ fn overlay_confirm_click_inside_is_an_action_and_outside_is_left_to_the_host() {
 }
 
 #[test]
+fn overlay_back_button_reports_back_instead_of_confirming() {
+    let mut app = story_app("overlay", "confirm");
+    let area = Rect::new(0, 10, 60, 20);
+    let back = crate::stories::overlay::back_button_bounds(overlay_state(&app), area)
+        .expect("confirm story renders a back button");
+    assert!(back.width > 0 && back.height == 1);
+
+    assert!(handle_story_mouse(
+        &mut app.state,
+        &mouse(MouseEventKind::Down(MouseButton::Left), back.x, back.y),
+        area
+    ));
+    assert_eq!(overlay_state(&app).back, 1);
+    assert_eq!(overlay_state(&app).confirmed, 0, "返回按钮不算确认");
+
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("确认"), "动作行使用通用 Filled 按钮");
+    assert!(screen.contains("返回"));
+    assert!(screen.contains("back 1"));
+}
+
+#[test]
 fn overlay_download_click_consumes_without_confirming() {
     let mut app = story_app("overlay", "download");
     let area = Rect::new(0, 10, 60, 20);
@@ -2460,4 +2482,47 @@ fn spinner_tool_glyph_matches_the_host_frame_set() {
     let screen = dump_screen(&mut app, 100, 32);
     assert!(screen.contains("⠼ Bash  cargo test"));
     assert!(screen.contains("tool glyph ⠼ · host frame 4 / 10"));
+}
+
+#[test]
+fn spinner_active_advances_with_the_host_clock() {
+    let mut app = story_app("spinner", "active");
+    assert!(crate::stories::is_animating(&app.state));
+    let base = spinner_state(&app).last_tick();
+
+    // 250ms = 两帧，余下 50ms 留到下一次。
+    crate::stories::tick_at(&mut app.state, base + Duration::from_millis(250));
+    assert_eq!(spinner_state(&app).frame, 5);
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("✸ 思考中…"));
+    assert!(screen.contains("host frame 5 / 16"));
+
+    // 距上一帧边界 110ms：再推进一帧，并保留 10ms 余数。
+    crate::stories::tick_at(&mut app.state, base + Duration::from_millis(310));
+    assert_eq!(spinner_state(&app).frame, 6);
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("✹ 思考中…"));
+    assert!(screen.contains("host frame 6 / 16"));
+
+    // 距上一帧边界 60ms：不足一帧。
+    crate::stories::tick_at(&mut app.state, base + Duration::from_millis(360));
+    assert_eq!(spinner_state(&app).frame, 6);
+}
+
+#[test]
+fn spinner_idle_is_not_animated_by_the_host_clock() {
+    let mut app = story_app("spinner", "idle");
+    assert!(!crate::stories::is_animating(&app.state));
+    let base = spinner_state(&app).last_tick();
+    crate::stories::tick_at(&mut app.state, base + Duration::from_secs(5));
+    assert_eq!(spinner_state(&app).frame, 0, "空闲底部固定第一帧");
+}
+
+#[test]
+fn spinner_tool_rotates_with_the_host_clock() {
+    let mut app = story_app("spinner", "tool");
+    assert!(crate::stories::is_animating(&app.state));
+    let base = spinner_state(&app).last_tick();
+    crate::stories::tick_at(&mut app.state, base + Duration::from_millis(200));
+    assert_eq!(spinner_state(&app).frame, 6);
 }

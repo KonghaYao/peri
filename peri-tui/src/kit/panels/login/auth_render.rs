@@ -9,7 +9,7 @@
 //! 序列化完整保存）；凭据目录只在“高级”区只读展示。
 
 use fluent_bundle::FluentValue;
-use peri_tui_components::button::ButtonChrome;
+use peri_tui_components::button::ButtonTone;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -18,13 +18,14 @@ use crate::chatgpt_auth::AccountStatus;
 use crate::i18n;
 
 use crate::kit::panels::login::auth::{
-    AuthController, AuthFailure, AuthViewState, DetailAction, LogoutConfirm, LogoutFocus,
+    AuthAction, AuthController, AuthFailure, AuthViewState, DetailAction, LogoutConfirm,
+    LogoutFocus,
 };
 use crate::kit::panels::login::auth_policy;
 
 use crate::kit::panels::login::edit_state::{LoginEditState, LoginField};
 use crate::kit::panels::login::edit_view::{self, EditViewMetrics, StatusEntry, StatusTone};
-use crate::kit::panels::login::render::{EditLayout, LoginRenderColors};
+use crate::kit::panels::login::render::{self, EditLayout, LoginRenderColors};
 
 /// Authorization sub-view geometry.
 pub(super) struct AuthDetailLayout {
@@ -116,12 +117,14 @@ pub(super) fn plan_auth_layout(
             .iter()
             .map(|action| i18n::tr(action.i18n_key()))
             .collect();
+        let tones: Vec<ButtonTone> = actions.iter().map(|action| action_tone(*action)).collect();
         let selected = auth
             .selected_action(&es.plan)
             .and_then(|selected| actions.iter().position(|action| *action == selected));
         let (line, spans) = edit_view::action_row(
             metrics,
             &labels,
+            &tones,
             selected,
             focus == LoginField::AuthActions,
             colors,
@@ -129,6 +132,24 @@ pub(super) fn plan_auth_layout(
         out.push_action_row(line, &spans, &actions, focus == LoginField::AuthActions);
     }
     out
+}
+
+/// 动作 tone：登录/查询/使用账号是普通动作（Primary），注销是破坏性动作
+/// （Danger），取消等待登出按取消处理（Secondary）。
+fn action_tone(action: AuthAction) -> ButtonTone {
+    match action {
+        AuthAction::Login | AuthAction::Status | AuthAction::UseAccount => ButtonTone::Primary,
+        AuthAction::Logout => ButtonTone::Danger,
+        AuthAction::CancelLogout => ButtonTone::Secondary,
+    }
+}
+
+/// 授权详情动作 tone：打开浏览器是主操作，复制链接与取消是次要操作。
+fn detail_tone(action: DetailAction) -> ButtonTone {
+    match action {
+        DetailAction::OpenBrowser => ButtonTone::Primary,
+        DetailAction::CopyUrl | DetailAction::CancelLogin => ButtonTone::Secondary,
+    }
 }
 
 fn status_entries(es: &LoginEditState, auth: &AuthController) -> Vec<StatusEntry> {
@@ -348,20 +369,11 @@ pub(super) fn build_auth_detail_layout(
     for action in auth.detail_actions() {
         let focused = auth.detail_focus() == action;
         let marker = if focused { "❯ " } else { "  " };
-        let style = if focused {
-            Style::default()
-                .fg(colors.focus)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(colors.text)
-        };
+        let style = colors.button(detail_tone(action), focused);
         buttons.push((lines.len(), action));
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(colors.cursor)),
-            Span::styled(
-                ButtonChrome::Bracketed { padded: false }.text(&i18n::tr(action.i18n_key())),
-                style,
-            ),
+            Span::styled(render::button_text(&i18n::tr(action.i18n_key())), style),
         ]));
     }
 
@@ -412,18 +424,17 @@ pub(super) fn build_logout_layout(
         (LogoutFocus::Confirm, "login-auth-confirm-logout"),
     ] {
         let marker = if confirm.focus == focus { "❯ " } else { "  " };
+        let tone = if focus == LogoutFocus::Confirm {
+            ButtonTone::Danger
+        } else {
+            ButtonTone::Secondary
+        };
         buttons.push((lines.len(), focus));
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(colors.cursor)),
             Span::styled(
-                ButtonChrome::Bracketed { padded: false }.text(&i18n::tr(key)),
-                if confirm.focus == focus {
-                    Style::default()
-                        .fg(colors.focus)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(colors.text)
-                },
+                render::button_text(&i18n::tr(key)),
+                colors.button(tone, confirm.focus == focus),
             ),
         ]));
     }

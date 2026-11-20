@@ -6,15 +6,27 @@
 
 use crate::i18n;
 use peri_theme::theme::ThemeDefinition;
+use peri_tui_components::button::{
+    ButtonChrome, ButtonSpec, ButtonState, ButtonTone, ButtonVisual, button_visual,
+};
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::text::Span;
 
 use super::VALUE_ALIGN_COL;
 
-/// 底部“管理 Provider”按钮文本——渲染与鼠标命中同源，避免两处文本宽度漂移。
+/// 底部“管理 Provider”按钮——渲染与鼠标命中同源（同一份 `ButtonVisual` 的文本
+/// 与宽度），避免两处文本宽度漂移；外观是通用 Button 的 Filled 反色块。
 #[must_use]
-pub(super) fn provider_button_label() -> String {
-    format!("[{}]", i18n::tr("model-panel-provider-manage-hint"))
+pub(super) fn provider_button_visual(theme: &ThemeDefinition) -> ButtonVisual {
+    button_visual(
+        ButtonSpec {
+            label: &i18n::tr("model-panel-provider-manage-hint"),
+            chrome: ButtonChrome::Filled,
+            tone: ButtonTone::Primary,
+            state: ButtonState::Normal,
+        },
+        theme,
+    )
 }
 
 /// 模型名内嵌 effort 后缀（如 "gpt-5.6-luna high"）：主色用 model_info，后缀用 model accent 色高亮。

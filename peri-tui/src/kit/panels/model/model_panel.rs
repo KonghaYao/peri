@@ -383,11 +383,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Style::new().fg(theme.component.panel.title),
         ))
     } else {
+        let button = panel_render::provider_button_visual(&theme);
         Line::from(vec![
-            Span::styled(
-                panel_render::provider_button_label(),
-                Style::new().fg(theme.component.panel.title).bold(),
-            ),
+            Span::styled(button.text, button.style),
             Span::styled(
                 format!("  {hint_text}"),
                 Style::new().fg(theme.semantic.text.dim),

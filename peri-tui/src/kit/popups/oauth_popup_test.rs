@@ -1,18 +1,65 @@
 use super::button_label_width;
+use super::button_row;
 use super::content_rows;
 use super::oauth_wrap_width;
 
-/// CJK 标签按显示列宽计算：`[ 打开浏览器 ]` = 方括号 2 + 空格 2 + 5 个双宽字符 10 = 14。
+use ratatui_kit::ratatui::style::Modifier;
+
+fn dark_theme() -> peri_theme::theme::ThemeDefinition {
+    peri_theme::builtin::dark_theme()
+}
+
+/// CJK 标签按显示列宽计算：Filled ` 打开浏览器 ` = 空格 2 + 5 个双宽字符 10 = 12。
 /// 旧实现用 `chars().count()` 只得到 9，点击会落到相邻按钮。
 #[test]
 fn button_label_width_counts_cjk_as_two_columns() {
-    assert_eq!(button_label_width("打开浏览器"), 14);
+    assert_eq!(button_label_width("打开浏览器", &dark_theme()), 12);
 }
 
-/// ASCII 标签下显示列宽等于字符数：`[ Open Browser ]` = 1 + 1 + 12 + 1 + 1。
+/// ASCII 标签下显示列宽等于字符数：Filled ` Open Browser ` = 1 + 12 + 1。
 #[test]
 fn button_label_width_matches_char_count_for_ascii() {
-    assert_eq!(button_label_width("Open Browser"), 16);
+    assert_eq!(button_label_width("Open Browser", &dark_theme()), 14);
+}
+
+/// 回归：按钮行不再输出 `[ ]`，每个按钮 span 都带 `REVERSED`（Filled 反色块），
+/// 选中项另外加 BOLD。
+#[test]
+fn button_row_is_filled_without_brackets() {
+    let theme = dark_theme();
+    let line = button_row(true, 0, &theme);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        !text.contains('[') && !text.contains(']'),
+        "Filled 按钮不得再有方括号：{text}"
+    );
+    let buttons: Vec<_> = line
+        .spans
+        .iter()
+        .filter(|span| !span.content.trim().is_empty())
+        .collect();
+    assert_eq!(buttons.len(), 3, "按钮行必须渲染三个按钮：{text}");
+    for span in &buttons {
+        assert!(
+            span.style.add_modifier.contains(Modifier::REVERSED),
+            "Filled 按钮必须反色：{:?}",
+            span.content
+        );
+    }
+    assert!(
+        buttons[0].style.add_modifier.contains(Modifier::BOLD),
+        "选中项必须是 Focused 态（BOLD）：{:?}",
+        buttons[0].content
+    );
+    assert!(
+        !buttons[1].style.add_modifier.contains(Modifier::BOLD),
+        "非选中项是 Normal 态：{:?}",
+        buttons[1].content
+    );
 }
 
 /// 宽弹窗保持 52 列版式；窄弹窗按可用宽度收窄，绘制与按钮行号同源。

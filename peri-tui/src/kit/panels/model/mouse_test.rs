@@ -49,10 +49,10 @@ fn model_manage_provider_opens_login_with_one_shot_target() {
     );
     assert!(
         super::buffer_text(&buf).contains(&format!(
-            "[{}]",
+            " {} ",
             i18n::tr("model-panel-provider-manage-hint")
         )),
-        "底部必须渲染可点击的管理 Provider 按钮"
+        "底部必须渲染可点击的管理 Provider 按钮（Filled，无方括号）"
     );
 }
 

@@ -3,6 +3,8 @@
 //! 帧序号、帧集、文案与样式都在宿主侧；点击「推进一帧」模拟宿主的时钟推进，
 //! 组件每帧只做取模与拼装。空闲变体固定帧 0，点击不会让底部占位行转动。
 
+use std::time::{Duration, Instant};
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -25,6 +27,9 @@ const TOOL_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', 
 /// 工具进行中符号色（宿主语义色 `status.running` 的固定替身）。
 const RUNNING: Color = Color::Yellow;
 
+/// 宿主 footer / 工具动画的帧间隔（`animation.rs`：100ms/帧）。
+const FRAME_INTERVAL: Duration = Duration::from_millis(100);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpinnerCase {
     /// 消息区底部空闲占位：宿主固定帧 0，不随时间转动。
@@ -38,6 +43,8 @@ pub(crate) enum SpinnerCase {
 pub(crate) struct SpinnerState {
     pub(crate) case: SpinnerCase,
     pub(crate) frame: u64,
+    /// 上一次按宿主时钟结算的帧边界；只在 `tick_at` 中推进。
+    last: Instant,
 }
 
 impl SpinnerState {
@@ -48,7 +55,37 @@ impl SpinnerState {
             SpinnerCase::Active => 3,
             SpinnerCase::Tool => 4,
         };
-        Self { case, frame }
+        Self {
+            case,
+            frame,
+            last: Instant::now(),
+        }
+    }
+}
+
+/// 只有活动行与工具图标随时间转动；空闲占位由宿主固定帧 0。
+pub(crate) fn is_animating(state: &SpinnerState) -> bool {
+    state.case != SpinnerCase::Idle
+}
+
+/// 按宿主的 100ms 帧节奏推进；一次 tick 可跨多帧，余数留到下次。
+pub(crate) fn tick_at(state: &mut SpinnerState, now: Instant) {
+    if !is_animating(state) {
+        return;
+    }
+    let elapsed = now.saturating_duration_since(state.last);
+    let steps = (elapsed.as_millis() / FRAME_INTERVAL.as_millis()) as u64;
+    if steps == 0 {
+        return;
+    }
+    state.frame = state.frame.saturating_add(steps);
+    state.last += FRAME_INTERVAL * u32::try_from(steps).unwrap_or(u32::MAX);
+}
+
+#[cfg(test)]
+impl SpinnerState {
+    pub(crate) fn last_tick(&self) -> Instant {
+        self.last
     }
 }
 
@@ -72,12 +109,12 @@ pub(crate) const VARIANTS: &[Variant] = &[
     },
     Variant {
         key: "active",
-        note: "Active footer row: click to advance the host-owned frame index.",
+        note: "Active footer row: the host clock advances one frame every 100ms; click also advances.",
         initial: active_initial,
     },
     Variant {
         key: "tool",
-        note: "Running tool icon: the host takes only the glyph and composes the card header.",
+        note: "Running tool icon: the host rotates the glyph every 100ms and composes the card header.",
         initial: tool_initial,
     },
 ];
@@ -121,7 +158,7 @@ pub(crate) fn render(state: &SpinnerState, area: Rect, buf: &mut Buffer) {
             ),
             Line::from(""),
             note(format!(
-                "host frame {} / {} · click advances",
+                "host frame {} / {} · click also advances",
                 state.frame,
                 FOOTER_FRAMES.len()
             )),

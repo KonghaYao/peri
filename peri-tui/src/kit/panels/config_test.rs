@@ -574,3 +574,63 @@ use crate::kit::atoms::Notification;
 use crate::kit::atoms::PANEL_SCROLL_OWNER;
 
 use crate::kit::atoms::PERI_CONFIG_HANDLE;
+
+// ── 行值按钮：通用 Button 的 Filled 外观 ─────────────────────────────────────
+
+/// 回归：Toggle 的生效值与 Cycle 的选中项是通用 Button 的 Filled 反色块——
+/// 文本里不再有 `[ ]`，对应 span 带 `REVERSED`；未生效值/未选中项保持纯文本。
+#[test]
+#[serial]
+fn row_values_render_as_filled_buttons_without_brackets() {
+    use ratatui_kit::ratatui::style::Modifier;
+
+    let _atoms = PanelAtomsGuard::install();
+    let theme = peri_theme::builtin::dark_theme();
+    let line_text = |line: &ratatui_kit::ratatui::text::Line<'_>| -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+
+    let toggle = super::rows::build_row_line(
+        super::ConfigRow::Base(super::rows::ROW_SHOW_DIFF),
+        false,
+        &theme,
+    );
+    let text = line_text(&toggle);
+    assert!(
+        !text.contains('[') && !text.contains(']'),
+        "Toggle 值不得再有方括号：{text}"
+    );
+    let filled: Vec<&str> = toggle
+        .spans
+        .iter()
+        .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert_eq!(filled.len(), 1, "只有生效值是一个填充块：{text}");
+    assert!(
+        filled[0].trim() == i18n::tr("config-value-on")
+            || filled[0].trim() == i18n::tr("config-value-off"),
+        "填充块必须是当前生效值：{text}"
+    );
+
+    let cycle = super::rows::build_row_line(
+        super::ConfigRow::Base(super::rows::ROW_LANGUAGE),
+        true,
+        &theme,
+    );
+    let text = line_text(&cycle);
+    assert!(
+        !text.contains('[') && !text.contains(']'),
+        "Cycle 选中项不得再有方括号：{text}"
+    );
+    assert!(
+        cycle
+            .spans
+            .iter()
+            .any(|span| span.style.add_modifier.contains(Modifier::REVERSED)),
+        "Cycle 选中项必须是 Filled 反色块：{text}"
+    );
+}

@@ -317,18 +317,142 @@ root = Stack([
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            for expected in ["Traffic", "API", "Web", "█", "Requests", "7"] {
+            for expected in ["Traffic", "API", "Web", "█", "│", "└", "─", "Requests", "7"] {
                 assert!(
                     text.contains(expected),
                     "width={width}, missing={expected}: {text}"
                 );
             }
+            let spark = rendered
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .find(|line| line.contains("Requests"))
+                .unwrap_or_default();
+            assert!(spark.contains('7'), "width={width}: {spark}");
+            assert!(
+                spark.chars().any(|glyph| ('▁'..='█').contains(&glyph)),
+                "width={width}: {spark}"
+            );
+            // 末值紧跟图形：`…  7` 之前的字符必须仍是 sparkline 字形，而不是填充空白。
+            let chars = spark.chars().collect::<Vec<_>>();
+            let before_value = chars.get(chars.len().saturating_sub(4)).copied();
+            assert!(
+                before_value.is_some_and(|glyph| ('▁'..='█').contains(&glyph)),
+                "width={width}: value detached from glyphs: {spark}"
+            );
+            assert!(
+                rendered
+                    .lines
+                    .iter()
+                    .any(|line| line.spans.iter().any(|span| {
+                        span.content.contains('█') && span.style.fg == Some(theme.semantic.accent)
+                    })),
+                "width={width}: bar cells should keep the accent color"
+            );
             assert!(
                 rendered.lines.iter().all(|line| line.width() <= width),
                 "{text}"
             );
         }
     }
+}
+
+#[test]
+fn headings_are_isolated_by_one_blank_line() {
+    let theme = peri_theme::builtin::dark_theme();
+    let segment = GenUiSegment::parse(
+        r#"root = Stack([Text("before"), Heading("标题", 2), Text("after"), Heading("第二节", 3), Text("end")])"#
+            .into(),
+        false,
+        library::library().unwrap(),
+    );
+    assert!(segment.errors.is_empty(), "{:?}", segment.errors);
+    let rendered = render(&segment, 40, &theme, None);
+    let lines = rendered
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec!["before", "", "标题", "", "after", "", "第二节", "", "end"]
+    );
+}
+
+#[test]
+fn heading_blank_lines_are_trimmed_at_block_edges() {
+    let theme = peri_theme::builtin::dark_theme();
+    let segment = GenUiSegment::parse(
+        r#"root = Stack([Heading("标题", 1), Text("正文"), Heading("尾节", 1)])"#.into(),
+        false,
+        library::library().unwrap(),
+    );
+    assert!(segment.errors.is_empty(), "{:?}", segment.errors);
+    let rendered = render(&segment, 40, &theme, None);
+    let lines = rendered
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(lines, vec!["标题", "", "正文", "", "尾节"]);
+}
+
+#[test]
+fn consecutive_headings_do_not_double_the_blank_line() {
+    let theme = peri_theme::builtin::dark_theme();
+    let segment = GenUiSegment::parse(
+        r#"root = Stack([Heading("A", 1), Heading("B", 1)])"#.into(),
+        false,
+        library::library().unwrap(),
+    );
+    assert!(segment.errors.is_empty(), "{:?}", segment.errors);
+    let rendered = render(&segment, 40, &theme, None);
+    let lines = rendered
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(lines, vec!["A", "", "B"]);
+}
+
+#[test]
+fn trimmed_heading_blanks_keep_button_hit_rows() {
+    let theme = peri_theme::builtin::dark_theme();
+    let segment = GenUiSegment::parse(
+        r#"root = Stack([Heading("标题", 1), Button("Go", @ToAssistant("继续"))])"#.into(),
+        false,
+        library::library().unwrap(),
+    );
+    assert!(segment.errors.is_empty(), "{:?}", segment.errors);
+    let rendered = render(&segment, 40, &theme, None);
+    assert_eq!(rendered.lines.len(), 3);
+    let button = rendered
+        .buttons
+        .iter()
+        .find(|button| button.label == "Go")
+        .expect("button hit area");
+    assert_eq!((button.line_start, button.line_end), (2, 3));
+}
+
+#[test]
+fn charts_report_narrow_widths() {
+    let theme = peri_theme::builtin::dark_theme();
+    let segment = GenUiSegment::parse(
+        r#"root = Stack([BarChart([{label: "API", value: 3}, {label: "Web", value: 1}])])"#.into(),
+        false,
+        library::library().unwrap(),
+    );
+    assert!(segment.errors.is_empty(), "{:?}", segment.errors);
+    // gutter = 3 ("API"), so anything below 6 columns cannot host axis + bars.
+    let rendered = render(&segment, 5, &theme, None);
+    // The error is wrapped to the narrow width; rejoin the rows before matching.
+    let text = rendered
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>();
+    assert!(text.contains("bar chart needs more width"), "{text}");
 }
 
 #[test]
