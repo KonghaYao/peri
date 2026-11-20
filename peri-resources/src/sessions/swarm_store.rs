@@ -77,7 +77,9 @@ pub struct SwarmItemRow {
     pub logical_id: String,
     /// 稳定顺序与恢复游标；`(logical_id, seq)` 唯一。
     pub seq: u64,
-    /// 全库唯一：同一 item 的重放去重依据。
+    /// 流式消息的稳定身份，**不唯一**：同一 `(agentId, messageId)` 的每个 delta 与终态
+    /// complete 各占一行、复用同一 id，客户端按 id 折叠（delta 行 `delta: true`，
+    /// complete 行带完整文本）。
     pub item_id: String,
     /// `message|thought|tool_call|tool_update|tool_result|receipt`。
     pub kind: String,

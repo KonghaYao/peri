@@ -447,7 +447,8 @@ const SWARM_SESSIONS_TABLE_SHAPE: TableShape = TableShape {
     primary_key: &["logical_id"],
 };
 
-/// Swarm item 表（v16 追加）：`(logical_id, seq)` 是主键，`item_id` 只做唯一去重。
+/// Swarm item 表（v16 追加）：`(logical_id, seq)` 是主键；`item_id` 允许重复
+/// （同一流式消息的 delta 与 complete 行复用稳定 id）。
 const SWARM_ITEMS_TABLE_SHAPE: TableShape = TableShape {
     name: "swarm_items",
     optional: false,

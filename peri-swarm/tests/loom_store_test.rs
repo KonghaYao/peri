@@ -1,5 +1,5 @@
-//! S6b2: one real Loom logical database carries Peri session/history/MQ facts
-//! **and** the Swarm rows (`design §4.1`, §4.2, §7.2-S6).
+//! S6b2/S6b3: one real Loom logical database carries Peri session/history/MQ
+//! facts **and** the Swarm rows (`design §4.1`, §4.2, §7.2-S6).
 //!
 //! Both tests are ignored by default because they need a running Loom. They are
 //! driven purely by environment:
@@ -13,10 +13,12 @@
 //!   local Peri session database appears under it.
 //!
 //! What is real here: Loom, the Peri ACP host, the session/history/MQ writes,
-//! the `swarm_*` rows, the close, and the reopen on a new connection. The model
-//! endpoint stays a deterministic stub (`design §7.3`).
+//! the `swarm_*` rows (including the turn's delta + complete items), the close,
+//! and the reopen on a new connection. The model endpoint stays a deterministic
+//! stub (`design §7.3`).
 //!
-//! Commands and observed output live in `.peri/plans/S6b2-report.md`.
+//! Commands and observed output live in `.peri/plans/S6b2-report.md` and
+//! `.peri/plans/S6b3-report.md`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,6 +42,7 @@ use peri_acp_types::session::{
 use peri_acp_types::session_resources::SessionStoreShutdownPort;
 use peri_acp_types::store::PersistedPayload;
 use peri_resources::{RemoteWorkspaceEnvironment, Resources};
+use peri_swarm::actor::reader::TurnOutcome;
 use peri_swarm::actor::runtime::{AcpChild, ChildConfig, ChildError, SessionStoreDeployment};
 use peri_swarm::actor::ItemLog;
 use peri_swarm::domain::{
@@ -334,7 +337,7 @@ fn history_texts(history: &[PersistedPayload]) -> Vec<(String, String)> {
 /// writes of a real turn **and** the Swarm session/item/input/binding rows, and
 /// both stay readable after the child and every process connection are closed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a running Loom (see .peri/plans/S6b2-report.md)"]
+#[ignore = "requires a running Loom (see .peri/plans/S6b3-report.md)"]
 async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     if std::env::var_os("SWARM_TRACE_LOG").is_some() {
         let _ = tracing_subscriber::fmt()
@@ -367,14 +370,12 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     let root_session_id = uuid::Uuid::now_v7().to_string();
     let created_at = now();
 
-    // The child's item log stays in memory: S4 persists one row per text delta
-    // with a stable `itemId`, while schema 16 declares `swarm_items.item_id`
-    // UNIQUE. Wiring the two together fails the second delta with a conflict
-    // and marks the session `failed`; that incompatibility is reported as an
-    // open S6b2 finding (`.peri/plans/S6b2-report.md` §4) instead of being
-    // encoded here. This stage's Swarm rows are written through the real
-    // `RemoteSwarmStore` below.
-    let item_store: Arc<dyn SwarmStore> = Arc::new(peri_swarm::store::MemorySwarmStore::new());
+    // The child's item log writes into the **same** Loom database: S4 persists
+    // one row per text delta with a stable `itemId`, and the turn terminal adds
+    // a complete row with the same id. Schema 16 allows that repeated id (it was
+    // fixed in S6b3), so this is the real delta + complete projection — not a
+    // fabricated row set.
+    let item_store: Arc<dyn SwarmStore> = store_rows.clone();
 
     // The Swarm session row for the Peri root session: the same identity
     // `AcpSwarmService` writes before its log starts.
@@ -402,6 +403,12 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     ));
 
     // ── a. real Peri host on the remote store, one turn ─────────────────────
+    // Open the Swarm turn exactly like `AcpSwarmService::run_turn`: the log owns
+    // `running`, the delta rows and the terminal.
+    let request_id = "s6b2-turn-1";
+    log.begin_turn(request_id)
+        .await
+        .expect("open the swarm turn on the remote store");
     let child = AcpChild::spawn(
         ChildConfig {
             cwd: cwd.clone(),
@@ -424,15 +431,82 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
     );
 
     let reply = child
-        .prompt("hello shared loom", "s6b2-turn-1")
+        .prompt("hello shared loom", request_id)
         .await
         .expect("run one turn");
+    log.finish_turn(
+        request_id,
+        TurnOutcome::Completed(reply.stop_reason.clone()),
+    )
+    .await;
     assert_eq!(reply.stop_reason, "end_turn", "turn reply: {reply:?}");
     assert_eq!(
         stub.main_calls(),
         1,
         "one turn request (total requests incl. helpers: {})",
         stub.calls()
+    );
+
+    // The turn is projected into `swarm_items` through the real remote store:
+    // every delta and the terminal complete row reuse **one** item id, each at
+    // its own strictly increasing seq. With the old `UNIQUE(item_id)` schema the
+    // second delta conflicted and the session ended `failed`; both are checked
+    // here (state + row shape), not assumed.
+    let child_session_live = store_rows
+        .swarm_get_session(logical.as_str())
+        .await
+        .expect("child swarm session after the turn")
+        .expect("the child swarm session row exists");
+    assert_eq!(
+        child_session_live.state,
+        SessionState::Idle,
+        "a persisted turn ends idle; `failed` would mean an append conflict"
+    );
+    let child_items = store_rows
+        .swarm_items_after(logical.as_str(), 0, 100)
+        .await
+        .expect("child swarm items after the turn");
+    let seqs: Vec<u64> = child_items.iter().map(|row| row.seq).collect();
+    assert!(
+        seqs.len() >= 2,
+        "the streamed answer must persist several rows: {child_items:?}"
+    );
+    assert_eq!(seqs.first(), Some(&1), "seq starts at 1: {seqs:?}");
+    assert!(
+        seqs.windows(2).all(|pair| pair[0] < pair[1]),
+        "seq is strictly increasing: {seqs:?}"
+    );
+    let deltas: Vec<_> = child_items
+        .iter()
+        .filter(|row| row.payload["delta"].as_bool() == Some(true))
+        .collect();
+    let completes: Vec<_> = child_items
+        .iter()
+        .filter(|row| row.payload["complete"].as_bool() == Some(true))
+        .collect();
+    assert!(
+        deltas.len() >= 2,
+        "at least two delta rows share the stream id: {child_items:?}"
+    );
+    assert_eq!(
+        completes.len(),
+        1,
+        "the turn terminal appends exactly one complete row: {child_items:?}"
+    );
+    let stream_id = completes[0].item_id.as_str();
+    assert!(
+        child_items.iter().all(|row| row.item_id == stream_id),
+        "every delta/complete row reuses the stable item id {stream_id}: {child_items:?}"
+    );
+    assert_eq!(
+        completes[0].payload["text"].as_str(),
+        Some(format!("{TURN_PREFIX}0").as_str()),
+        "the complete row carries the whole accumulated text"
+    );
+    assert_eq!(
+        child_session_live.last_item_seq,
+        *seqs.last().expect("at least one row"),
+        "the cached projection equals MAX(seq)"
     );
 
     // Peri session + history, read through the same logical database.
@@ -659,10 +733,8 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
         Some(mq_text.to_owned())
     );
 
-    // Swarm rows: the seeded child session, the turn's items, and every row
-    // written in `b`.
-    // Swarm rows: the session tied to the Peri root id, the items, the input
-    // receipt and the binding written in `b`.
+    // Swarm rows: the child session with its real delta/complete item rows, and
+    // every row written in `b`.
     let child_session = reopened_swarm
         .swarm_get_session(logical.as_str())
         .await
@@ -674,13 +746,18 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
         child_session.instructions.as_deref(),
         Some("s6b2 shared loom store")
     );
+    let reopened_child_items = reopened_swarm
+        .swarm_items_after(logical.as_str(), 0, 100)
+        .await
+        .expect("child swarm items after reopen");
     assert_eq!(
-        reopened_swarm
-            .swarm_items_after(logical.as_str(), 0, 100)
-            .await
-            .expect("child swarm items after reopen"),
-        Vec::new(),
-        "the in-memory item log wrote no fabricated Loom rows"
+        reopened_child_items, child_items,
+        "the delta rows and the complete row survive the close/reopen unchanged"
+    );
+    assert_eq!(
+        child_session.last_item_seq,
+        *seqs.last().expect("at least one row"),
+        "the reopened session still projects MAX(seq)"
     );
 
     let rows_session = reopened_swarm
@@ -753,7 +830,7 @@ async fn loom_carries_peri_session_history_mq_and_swarm_rows() {
 /// `d`: an unreachable locator fails the deployment **and** the child open, and
 /// neither path creates a local SQLite session database.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires the S6b2 environment (see .peri/plans/S6b2-report.md)"]
+#[ignore = "requires a running Loom (see .peri/plans/S6b3-report.md)"]
 async fn unreachable_loom_fails_without_creating_a_local_store() {
     clear_telemetry_env();
     assert_credential_present();

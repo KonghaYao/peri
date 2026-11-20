@@ -238,16 +238,38 @@ async fn items_are_ordered_and_conflicts_are_not_renumbered() {
         duplicate_seq.kind(),
         SessionResourceErrorKind::Conflict { .. }
     ));
-    // 同一 item_id 跨 seq 复用：也是身份冲突。
-    let duplicate_id = port
-        .swarm_append_item(item_row(4, "itim-2"))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        duplicate_id.kind(),
-        SessionResourceErrorKind::Conflict { .. }
-    ));
+    // 同一 item_id 跨 seq 复用**不是**冲突：这是 S4 reader 的 delta + complete 形状，
+    // 由下面的专门用例逐行验证。
     assert_eq!(port.swarm_last_seq("agent-one").await.unwrap(), 3);
+}
+
+/// 回归（S6b2 §4）：同一 `logical_id`、同一 `item_id`、不同 `seq` 的两行都必须 append
+/// 成功，并按 seq 升序读回。schema 16 曾声明 `UNIQUE(item_id)`，使逐 delta 行流在第二个
+/// delta 上撞唯一键、reader 重试后把会话置 `failed`；本用例锁定修正后的端口语义。
+#[tokio::test]
+async fn repeated_item_ids_are_delta_and_complete_rows_not_a_conflict() {
+    let fixture = Fixture::current_shape().await;
+    let port = port_with(fixture.transport.clone(), StoreAccess::ReadWrite);
+
+    let mut delta = item_row(1, "itim-stream-1");
+    delta.payload_json = r#"{"messageId":"m-1","text":"stub-","delta":true}"#.to_owned();
+    let mut complete = item_row(2, "itim-stream-1");
+    complete.payload_json = r#"{"messageId":"m-1","text":"stub-0","complete":true}"#.to_owned();
+
+    port.swarm_append_item(delta.clone()).await.unwrap();
+    port.swarm_append_item(complete.clone())
+        .await
+        .unwrap_or_else(|error| panic!("同一 item_id 的 second row 必须可追加: {error:?}"));
+
+    let rows = port.swarm_items_after("agent-one", 0, 10).await.unwrap();
+    assert_eq!(rows, vec![delta, complete]);
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.seq, row.item_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "itim-stream-1"), (2, "itim-stream-1")]
+    );
+    assert_eq!(port.swarm_last_seq("agent-one").await.unwrap(), 2);
 }
 
 #[tokio::test]

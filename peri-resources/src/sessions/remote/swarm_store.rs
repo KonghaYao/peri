@@ -283,7 +283,8 @@ async fn append_item(store: &RemoteStore, row: &SwarmItemRow) -> SessionResource
         .await?;
     match counts.as_slice() {
         [1] => Ok(()),
-        // 普通 INSERT 要么影响 1 行，要么以唯一键冲突失败；0 行说明回复不完整。
+        // 普通 INSERT 要么影响 1 行，要么以 `(logical_id, seq)` 主键冲突失败；0 行说明回复不完整。
+        // 同一 `item_id` 出现在不同 seq 不是冲突：delta 与 complete 行共用稳定 id。
         _ => Err(unexplained(
             "swarm item append did not report a single affected row",
         )),

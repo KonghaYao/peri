@@ -395,9 +395,17 @@ pub(super) const CREATE_SWARM_SESSIONS_TABLE_SQL: &str =
     last_item_seq INTEGER NOT NULL DEFAULT 0
 )";
 
-/// Swarm item 表（v16 追加）：`(logical_id, seq)` 是稳定顺序与恢复游标，`item_id` 唯一让
-/// 重放去重可判定。`source` 与 `payload_json` 都是 JSON 文本，形状由 peri-swarm 拥有；
-/// 不建外键——子会话生命周期由 Peri 管理，不在 swarm 库做级联删除（design §4.3）。
+/// Swarm item 表（v16 追加）：`(logical_id, seq)` 是稳定顺序与恢复游标；`item_id` **不唯一**，
+/// 因为同一流式消息的每个文本 delta 与终态 complete 都是独立行、复用同一个稳定 id
+/// （`peri-swarm/src/actor/reader.rs` 的模块文档），客户端按 `itemId` 折叠，终态行胜出。
+/// `source` 与 `payload_json` 都是 JSON 文本，形状由 peri-swarm 拥有；不建外键——子会话
+/// 生命周期由 Peri 管理，不在 swarm 库做级联删除（design §4.3）。
+///
+/// **v16 尚未发布。** 这里就地修正了曾经的 `UNIQUE (item_id)`（它会让同一消息的第二个 delta
+/// 撞唯一键）：本代没有 schema 17，也没有静默迁移。上线前创建过旧 v16 本机库的开发者需要
+/// 重建 Swarm 对象（边界：`swarm_sessions` / `swarm_items` / `swarm_inputs` / `swarm_bindings`
+/// 四表与 `swarm_items_by_id` 索引；九张会话表与历史不动），或删除本机 `threads.db`；
+/// 约束差异不会被形状判定发现，也不会被自动改写。远端开发库同理。
 pub(super) const CREATE_SWARM_ITEMS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS swarm_items (
     logical_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
@@ -407,8 +415,7 @@ pub(super) const CREATE_SWARM_ITEMS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXIST
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     truncated INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (logical_id, seq),
-    UNIQUE (item_id)
+    PRIMARY KEY (logical_id, seq)
 )";
 
 /// Swarm 输入收据（v16 追加）：`(logical_id, input_id)` 主键让 `INSERT ... ON CONFLICT
@@ -447,8 +454,9 @@ pub(super) const CREATE_SWARM_TABLES: &[&str] = &[
     CREATE_SWARM_BINDINGS_TABLE_SQL,
 ];
 
-/// 按 `item_id` 查重/重放去重的覆盖索引（`UNIQUE(item_id)` 已有全局索引，这条带
-/// `logical_id` 前缀，服务范围内读取）。
+/// 按 `item_id` 查重的覆盖索引（`(logical_id, item_id)` 前缀服务范围内读取）。
+///
+/// 这是**普通索引**，不是唯一约束：同一 `item_id` 允许多行（delta + complete）。
 pub(super) const CREATE_SWARM_ITEMS_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS swarm_items_by_id ON swarm_items (logical_id, item_id)";
 
