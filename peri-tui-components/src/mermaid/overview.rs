@@ -64,6 +64,8 @@ struct PathPlan {
     path: Vec<String>,
     milestones: Vec<usize>,
     branch_edges: Vec<Relation>,
+    /// 来源不在主路径上的边：保持原图声明顺序与重边，逐条补齐结构信息。
+    off_path: Vec<Relation>,
     cited_edges: Vec<Relation>,
 }
 
@@ -164,11 +166,7 @@ impl Overview {
             lines.push(fit(&format!("子组: {}", children.join(" ")), width));
         }
         for node_id in &group.node_ids {
-            let label = self
-                .labels
-                .get(node_id)
-                .map_or(node_id.as_str(), String::as_str);
-            lines.push(fit(&format!("· {node_id} {label}"), width));
+            lines.push(fit(&format!("· {}", self.node_display(node_id)), width));
         }
         for edge in &group.intra_edges {
             lines.push(fit(&self.edge_label_line(edge), width));
@@ -200,6 +198,16 @@ impl Overview {
         self.all_edges
             .iter()
             .any(|edge| edge.from.id == from && edge.to.id == to)
+    }
+
+    /// 节点行文本：label 与 id 相同或为空时只留 id，避免 `Model Model`。
+    fn node_display(&self, node_id: &str) -> String {
+        let label = self.labels.get(node_id).map_or(node_id, String::as_str);
+        if label.is_empty() || label == node_id {
+            node_id.to_string()
+        } else {
+            format!("{node_id} {label}")
+        }
     }
 
     fn edge_label_line(&self, edge: &Relation) -> String {
@@ -362,11 +370,7 @@ impl Overview {
         let mut body = Vec::new();
         for (position, index) in plan.milestones.iter().enumerate() {
             let node_id = &plan.path[*index];
-            let label = self
-                .labels
-                .get(node_id)
-                .map_or(node_id.as_str(), String::as_str);
-            body.push(fit(&format!("{node_id} {label}"), width));
+            body.push(fit(&self.node_display(node_id), width));
             let Some(next_index) = plan.milestones.get(position + 1) else {
                 continue;
             };
@@ -410,6 +414,9 @@ impl Overview {
                 ),
                 width,
             ));
+        }
+        for edge in &plan.off_path {
+            body.push(fit(&format!("↳ {}", self.edge_label_line(edge)), width));
         }
         let hint = fit(&format!("展开详情查看 {} 节点", self.node_count), width);
         let available = max_rows.saturating_sub(2);
@@ -693,6 +700,7 @@ fn build_path_plan(graph: &Graph, all_edges: &[Relation]) -> PathPlan {
             path: Vec::new(),
             milestones: Vec::new(),
             branch_edges: Vec::new(),
+            off_path: Vec::new(),
             cited_edges: Vec::new(),
         };
     };
@@ -712,6 +720,13 @@ fn build_path_plan(graph: &Graph, all_edges: &[Relation]) -> PathPlan {
             break;
         }
     }
+
+    // 来源不在主路径上的边（如 Resources→Agent）不属于任何分支行，单独收集。
+    let off_path: Vec<Relation> = all_edges
+        .iter()
+        .filter(|edge| !seen.contains(&edge.from.id))
+        .cloned()
+        .collect();
 
     let mut marked: BTreeSet<usize> = BTreeSet::new();
     if !path.is_empty() {
@@ -758,18 +773,15 @@ fn build_path_plan(graph: &Graph, all_edges: &[Relation]) -> PathPlan {
             cited_edges.push((*edge).clone());
         }
     }
-    for pair in milestones.windows(2) {
-        if pair[1] == pair[0] + 1 {
-            let from = &path[pair[0]];
-            let to = &path[pair[1]];
-            if let Some(edge) = all_edges
-                .iter()
-                .find(|edge| edge.from.id == *from && edge.to.id == *to)
-            {
-                cited_edges.push((*edge).clone());
-            }
+    for pair in path.windows(2) {
+        if let Some(edge) = all_edges
+            .iter()
+            .find(|edge| edge.from.id == pair[0] && edge.to.id == pair[1])
+        {
+            cited_edges.push((*edge).clone());
         }
     }
+    cited_edges.extend(off_path.iter().cloned());
     branch_edges.dedup_by(|a, b| a == b);
     cited_edges.dedup_by(|a, b| a == b);
 
@@ -777,6 +789,7 @@ fn build_path_plan(graph: &Graph, all_edges: &[Relation]) -> PathPlan {
         path,
         milestones,
         branch_edges,
+        off_path,
         cited_edges,
     }
 }
