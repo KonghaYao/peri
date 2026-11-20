@@ -2,7 +2,7 @@
 
 use super::{
     Arc, Lifecycle, LocalExecutionPort, MutationGate, SessionDataHome, SessionDataPort,
-    SessionResourcesImpl,
+    SessionResourcesImpl, SwarmStorePort, UnsupportedSwarmStore,
 };
 #[cfg(not(target_os = "emscripten"))]
 use super::{LocalExecution, Path, PathBuf, ReadOnlyThreadStoreError};
@@ -57,6 +57,23 @@ impl SessionResourcesImpl {
             close_confirm: tokio::sync::Mutex::new(()),
             credential_operations: Arc::new(tokio::sync::RwLock::new(())),
             home,
+            swarm_store: None,
         }
+    }
+
+    /// 挂上 Swarm 窄口（只有远端组合调用）：端口必须复用门面持有的同一个会话数据 adapter，
+    /// 不得另开连接。
+    pub(in crate::sessions) fn with_swarm_store(mut self, store: Arc<dyn SwarmStorePort>) -> Self {
+        self.swarm_store = Some(store);
+        self
+    }
+
+    /// Swarm 窄口访问器：远端组合返回共享连接的端口；其余返回显式 `Unsupported`。
+    ///
+    /// 不降级、不回退本机 SQLite：没有 Swarm 持久化的部署必须让调用方看到能力缺失。
+    pub(crate) fn swarm_store(&self) -> Arc<dyn SwarmStorePort> {
+        self.swarm_store
+            .clone()
+            .unwrap_or_else(|| Arc::new(UnsupportedSwarmStore))
     }
 }

@@ -210,6 +210,8 @@ async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(
             && name != "inherited_snapshot_index"
             && name != "inherited_payload_index"
             && name != "thread_mq"
+            // v16 追加的 Swarm 表：升级才建出，不是被保留的既有表。
+            && !crate::sessions::canonical::SWARM_TABLES.contains(&name.as_str())
     });
     rows
 }
@@ -260,6 +262,10 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             "machines".to_owned(),
             "session_close_intents".to_owned(),
             "thread_mq".to_owned(),
+            "swarm_sessions".to_owned(),
+            "swarm_items".to_owned(),
+            "swarm_inputs".to_owned(),
+            "swarm_bindings".to_owned(),
         ]);
         expected.sort();
         assert_eq!(tables_after, expected, "来源版本 {source_version}");
@@ -345,6 +351,10 @@ async fn test_database_without_remote_tables_is_idempotent() {
         "machines".to_owned(),
         "session_close_intents".to_owned(),
         "thread_mq".to_owned(),
+        "swarm_sessions".to_owned(),
+        "swarm_items".to_owned(),
+        "swarm_inputs".to_owned(),
+        "swarm_bindings".to_owned(),
     ]);
     expected.sort();
     assert_eq!(table_names(&mut connection).await, expected);

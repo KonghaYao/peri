@@ -32,6 +32,9 @@ pub(super) enum SchemaState {
     /// 没有 `thread_mq`；13 有 `thread_mq`，只缺 `threads` 的两列工作快照。写打开做一次
     /// 增量补齐，不搬运任何会话事实。
     PreviousCurrent,
+    /// `user_version` 是 v15（Swarm 表之前的一代）：九张会话表齐全，只缺 `swarm_*` 四表与
+    /// 索引。写打开只追加这五个对象并推进版本，不重建、不搬动既有事实。
+    PreviousV15,
     /// `user_version` 已是上一代版本，但形状还是压缩前的登记形状（v4 内部用过）。
     /// 名字取形状而不是版本号：它与 [`PreviousCurrent`](Self::PreviousCurrent) 的差别是
     /// **形状**，不是代数。
@@ -56,6 +59,10 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return current_shape(connection).await,
+        // 15 是 v16 的唯一增量来源：九张会话表齐全，只缺 `swarm_*` 四表与索引。
+        canonical::SWARM_PREVIOUS_SCHEMA_VERSION => {
+            return previous_swarm_shape(connection).await;
+        }
         // 11..=14 都是可升级来源（11 也可能是压缩前的登记形状）：先交给形状判定，再按判定
         // 结果走对应的幂等升级或搬运。v12 已从常量链移出，这里必须显式列出——否则它会落到
         // `other` 分支被当成「不支持的版本」，把可升级的库关在门外。
@@ -189,6 +196,27 @@ async fn previous_shape(connection: &mut SqliteConnection) -> Result<SchemaState
     Err(WorkspaceError::UnsupportedDatabaseSchema.into())
 }
 
+/// v15 的形状判定（fail-closed）：九张会话表必须与 v15 冻结声明逐项相符。
+///
+/// `swarm_*` 表在 v15 里本来就不存在（`CURRENT_COLUMNS_SQL` 对缺表返回零行）；若它们已经
+/// 存在，只可能是手工或别的构建建的——升级仍按 `IF NOT EXISTS` 幂等追加，随后当前形状判定
+/// 会拒绝同名的异形表，不会静默覆盖。
+async fn previous_swarm_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
+    let tables =
+        schema_shape::read_local_columns(&mut *connection, schema_shape::CURRENT_COLUMNS_SQL)
+            .await?;
+    match schema_shape::check_v15_shape(&tables) {
+        Ok(()) => Ok(SchemaState::PreviousV15),
+        Err(reason) => {
+            tracing::warn!(
+                previous = %reason,
+                "session database shape is not a v15 source for the swarm schema"
+            );
+            Err(WorkspaceError::UnsupportedDatabaseSchema.into())
+        }
+    }
+}
+
 /// 升级路径的同名预检：canonical 表名上若已经立着**别的类型**的对象（例如同名 VIEW），
 /// `CREATE TABLE IF NOT EXISTS` 会静默跳过，把一个不是 canonical 形状的对象留在表的位置上。
 /// 这里显式拒绝，保持迁移的 fail-closed（与 v10 删除旧表前的形状校验同一思路）。
@@ -220,6 +248,20 @@ async fn column_names(connection: &mut SqliteConnection, table: &str) -> Result<
         .fetch_all(connection)
         .await?;
     Ok(rows.into_iter().map(|(name,)| name).collect())
+}
+
+/// v16 的追加对象：`swarm_*` 四表 + 索引。只建新对象，既有表与索引不在这里出现。
+async fn create_swarm_schema(connection: &mut SqliteConnection) -> Result<()> {
+    // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+    for statement in canonical::CREATE_SWARM_TABLES
+        .iter()
+        .chain(canonical::CREATE_SWARM_INDEXES)
+    {
+        sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
 }
 
 impl SqliteSessionDatabase {
@@ -266,6 +308,20 @@ impl SqliteSessionDatabase {
                 .await;
             migrated?;
             restored?;
+            return Ok(());
+        }
+        if state == SchemaState::PreviousV15 {
+            // v15 → v16：只追加 `swarm_*` 四表与索引并推进版本。没有删除、没有重建，
+            // 也没有需要搬运的会话事实；整段一个事务，失败时库保持 15，旧二进制仍可打开。
+            ensure_canonical_names_hold_tables(&mut connection, canonical::SWARM_TABLES).await?;
+            let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+            create_swarm_schema(&mut tx).await?;
+            sqlx::query(AssertSqlSafe(format!(
+                "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
+            )))
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
             return Ok(());
         }
         if state == SchemaState::RegistrationShape {
@@ -327,7 +383,9 @@ impl SqliteSessionDatabase {
     /// v11→v15 依次补齐 `thread_mq` 与两列、再重建三张表，v12 多补一张表、v13 只缺两列、
     /// v14 什么都不用补——四者共用同一条路径，避免按代际各写一份。
     async fn upgrade_previous_current(connection: &mut SqliteConnection) -> Result<()> {
-        ensure_canonical_names_hold_tables(connection, &[canonical::THREAD_MQ_TABLE]).await?;
+        let mut appended = vec![canonical::THREAD_MQ_TABLE];
+        appended.extend(canonical::SWARM_TABLES.iter().copied());
+        ensure_canonical_names_hold_tables(connection, &appended).await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         // `thread_mq` 与它的排序索引：12→13 的唯一形状增量；对 13/14 的库是同一份幂等 DDL。
         sqlx::query(canonical::CREATE_THREAD_MQ_TABLE_SQL)
@@ -523,6 +581,11 @@ pub(super) async fn migrate_v15_cleanup(connection: &mut SqliteConnection) -> Re
             .await?;
     }
     // 5. 索引重放：重建的三张表随 `DROP TABLE` 丢掉了自己的索引。
+    //
+    // v16 的追加表先于索引重放建出：`CREATE_INDEXES` 已含 `swarm_items_by_id`，缺表会让重放
+    // 以「表不存在」失败。四张表对 v15→v16 是全部增量，对本段（11..14 → 16）只是同批的
+    // 幂等追加。
+    create_swarm_schema(connection).await?;
     for statement in canonical::CREATE_INDEXES {
         sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
             .execute(&mut *connection)

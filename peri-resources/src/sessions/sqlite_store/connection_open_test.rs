@@ -398,7 +398,7 @@ async fn incompatible_schema_is_rejected_without_wal_or_database_changes() {
     let directory = tempfile::tempdir().unwrap();
     // 0 是「形状读不懂」的未知库；16..=19 是压缩掉的开发期代数（从未正式发布）。
     // 两类都拒绝，且拒绝**不动库**：版本、数据行、库文件字节与侧车文件都保持原样。
-    for version in [0, 16, 17, 18, 19] {
+    for version in [0, 17, 18, 19] {
         let path = directory.path().join(format!("unsupported-{version}.db"));
         let mut connection = sqlx::SqliteConnection::connect_with(
             &SqliteConnectOptions::new()

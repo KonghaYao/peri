@@ -21,6 +21,13 @@ pub(in crate::sessions::remote) async fn upgrade(
     store: &RemoteStore,
     snapshot: &StoreSnapshot,
 ) -> SessionResourceResult<()> {
+    // v15 → v16：只追加 `swarm_*` 四表与一条索引。没有会话事实要搬、没有列要补，
+    // 因此不读 legacy 迁移输入（那些读法只对 10|11 形状成立），也不初始化本机机器身份。
+    if super::plan::swarm_addition_source(snapshot) {
+        return store
+            .apply_schema_upgrade(super::plan::swarm_addition_plan(snapshot)?)
+            .await;
+    }
     // 当前 Machine 也要在批次里立起来（与本机迁移同一条语句）。写打开在此之前从不需要
     // 本机身份，所以这里显式初始化一次：拿不到身份就不发批次。
     crate::sessions::machine::initialize()

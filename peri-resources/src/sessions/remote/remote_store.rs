@@ -655,6 +655,32 @@ impl RemoteStore {
         }
     }
 
+    /// 托管写批的**行数事实**（Swarm 窄口等需要按影响行数判定事实的调用方）。
+    ///
+    /// 与 [`Self::apply_schema`] 的差别是失败语义：单语句批上的唯一键冲突是
+    /// `QualificationConflict`，这里如实折成 `Conflict`（「存储里已有冲突事实」），而不是
+    /// 约束类输入错误；`Unknown` 一律报 `PersistenceUncertain`，调用方**不得**重试写。
+    /// 0 行受影响不是错误：由调用方按自己的语句语义解释。
+    pub(super) async fn apply_batch(
+        &self,
+        statements: Vec<StatementSpec>,
+    ) -> SessionResourceResult<Vec<u64>> {
+        self.access.ensure_writable()?;
+        self.ensure_autocommit()?;
+        match self.run_managed_batch(statements).await {
+            Ok(counts) => Ok(counts),
+            Err(BatchFailure::QualificationConflict) => Err(SessionResourceError::new(
+                SessionResourceErrorKind::Conflict {
+                    detail: "remote store already holds a conflicting row".to_owned(),
+                },
+            )),
+            Err(BatchFailure::NotApplied { class, .. }) => Err(class.into_session_resource_error()),
+            Err(BatchFailure::Unknown { .. }) => {
+                Err(SessionResourceError::persistence_uncertain(None))
+            }
+        }
+    }
+
     /// 只读一致读：同一请求内的 `BEGIN DEFERRED` … `COMMIT`，多段读取落在同一快照上。
     ///
     /// 只读打开（[`StoreAccess::ReadOnly`]）也可用：批内只有 SELECT，不申请写锁。

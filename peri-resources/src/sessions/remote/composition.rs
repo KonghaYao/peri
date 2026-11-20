@@ -18,6 +18,7 @@ use super::environment::RemoteWorkspaceEnvironment;
 use super::execution::RemoteExecution;
 use super::mutation::StoreAccess;
 use super::session_data::RemoteSessionData;
+use super::swarm_store::RemoteSwarmStore;
 
 /// 打开远程会话存储并装配门面。
 ///
@@ -104,12 +105,13 @@ where
     F: FnOnce(Arc<RemoteSessionData>, AccessMode) -> Result<Arc<dyn LocalExecutionPort>>,
 {
     let local_port = execution_factory(Arc::clone(&data), access)?;
+    // Swarm 窄口与门面共用同一个会话数据 adapter（同一条连接、同一份关闭生命周期）。
+    let swarm_store = Arc::new(RemoteSwarmStore::new(Arc::clone(&data)));
     let data_port: Arc<dyn SessionDataPort> = data;
-    Ok(Arc::new(SessionResourcesImpl::from_ports(
-        data_port,
-        local_port,
-        SessionDataHome::RemoteStore,
-    )))
+    Ok(Arc::new(
+        SessionResourcesImpl::from_ports(data_port, local_port, SessionDataHome::RemoteStore)
+            .with_swarm_store(swarm_store),
+    ))
 }
 
 #[cfg(test)]

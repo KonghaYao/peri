@@ -30,6 +30,7 @@ use super::schema::{self, StoreIdentityRead, StoreShapeRead, StoreSnapshot};
 use super::schema_upgrade;
 use super::session_data::OpenStep;
 use super::sql::StatementSpec;
+use crate::sessions::canonical;
 use crate::sessions::canonical::V10_CREATE_INDEXES;
 use crate::sessions::canonical::V10_CREATE_TABLES;
 use crate::sessions::schema_cleanup::LEGACY_EXECUTION_SQL;
@@ -269,6 +270,126 @@ impl Fixture {
         Self {
             snapshot: Self::snapshot_of(&fixture.transport).await,
             ..fixture
+        }
+    }
+
+    /// 当前形状（v16）的空库：canonical 全量 DDL + 元数据（本代版本/契约）。
+    ///
+    /// 只服务端口行为测试；升级测试必须从 [`Self::previous_swarm`] 这类旧形状出发。
+    pub(super) async fn current_shape() -> Self {
+        let fixture = Self::built_from_ddl(
+            canonical::CREATE_TABLES
+                .iter()
+                .chain(canonical::CREATE_INDEXES.iter())
+                .copied()
+                .collect(),
+            schema::REMOTE_SCHEMA_VERSION,
+            schema::STORE_CONTRACT,
+            "",
+        )
+        .await;
+        fixture
+            .store(StoreAccess::ReadWrite)
+            .apply_schema(vec![StatementSpec::new(
+                "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES ('machine', '机器', 'known')",
+                Vec::new(),
+            )])
+            .await
+            .unwrap();
+        fixture
+    }
+
+    /// 上一代当前形状（v15 / `v9`）：九张会话表齐全，`swarm_*` 一概不建。
+    ///
+    /// 同一份夹具服务「v15 → v16 只追加」的升级测试：会话、历史、MQ、凭证各留一行，
+    /// 升级后逐项核对没有丢失。
+    pub(super) async fn previous_swarm() -> Self {
+        let tables = canonical::CREATE_TABLES
+            .iter()
+            .filter(|sql| !sql.contains("swarm_"))
+            .copied()
+            .chain(
+                canonical::CREATE_INDEXES
+                    .iter()
+                    .filter(|sql| !sql.contains("swarm_"))
+                    .copied(),
+            )
+            .collect();
+        Self::built_from_ddl(
+            tables,
+            canonical::SWARM_PREVIOUS_SCHEMA_VERSION,
+            schema::V15_STORE_CONTRACT,
+            "INSERT INTO machines VALUES ('machine', '机器', 'known');
+             INSERT INTO projects (id, locator) VALUES ('project', '/work');
+             INSERT INTO workspaces (id, machine_id, path, path_source, project_id, discovery)
+                 VALUES ('workspace', 'machine', '/work', 'discovered', 'project', '{}');
+             INSERT INTO threads (id, cwd, created_at, updated_at, message_count, workspace_id,
+                 work_state) VALUES ('session', '/work', '2020-01-01T00:00:00Z',
+                 '2020-01-01T00:00:00Z', 1, 'workspace', 'working');
+             INSERT INTO messages (message_id, thread_id, role, content)
+                 VALUES ('message', 'session', 'user', 'kept');
+             INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id,
+                 relative_cwd) VALUES ('session', 1, 'project', 'workspace', '');
+             INSERT INTO thread_mq (thread_id, id, enqueued_at, kind, source, policy_json,
+                 payload_json) VALUES ('session', 'mq-row', '2020-01-01T00:00:01Z', 'message',
+                 '{\"agentId\":\"root\"}', '{}', '{\"text\":\"pending\"}');
+             INSERT INTO session_close_intents VALUES ('session', '2020-01-01T00:00:02Z');
+             INSERT INTO mcp_oauth_credentials VALUES
+                 ('principal', 'workspace', 'server', 'credential bytes', '2020-01-01T00:00:03Z');",
+        )
+        .await
+    }
+
+    /// 由一份 DDL 清单与元数据构造空库（随后由调用方插入数据行）。
+    async fn built_from_ddl(
+        ddl: Vec<&'static str>,
+        version: i64,
+        contract: &str,
+        seed: &str,
+    ) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(directory.path().join("remote.db"))
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        for statement in ddl {
+            // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+            sqlx::raw_sql(sqlx::AssertSqlSafe(statement.to_owned()))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(schema::CREATE_STORE_META_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(super::ledger::CREATE_OP_LEDGER_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO peri_store_meta VALUES (0, ?1, 'existing-store', ?2, 'original timestamp')")
+            .bind(version)
+            .bind(contract)
+            .execute(&pool)
+            .await
+            .unwrap();
+        if !seed.is_empty() {
+            // 种子语句来自本文件的静态夹具，不含外部输入。
+            sqlx::raw_sql(sqlx::AssertSqlSafe(seed.to_owned()))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let transport = Arc::new(SqliteTransport::for_test(pool));
+        let snapshot = Self::snapshot_of(&transport).await;
+        Self {
+            _directory: directory,
+            transport,
+            snapshot,
         }
     }
 

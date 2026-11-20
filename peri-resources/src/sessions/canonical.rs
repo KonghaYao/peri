@@ -46,11 +46,21 @@ use peri_acp_types::store::PersistedPayload;
 /// `session_bindings` 删只写不读的 `evidence_origin`，同时退役两张可重建的 inherited 派生
 /// 索引表；绑定行的 `discovery_snapshot` 收缩为最小执行根。因为被唯一键引用的列不能
 /// `DROP COLUMN`，本机升级路径从「增量补列」升级为「重建」，远端契约推进到 v9。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 15;
-
-/// 上一代当前形状（v14，含两列工作快照）的版本号。
 ///
-/// 只作为升级来源：写打开按 v15 的重建链清理三张表并推进到 15。
+/// 16 是 Swarm 自有事实这一代：只新增 `swarm_sessions` / `swarm_items` / `swarm_inputs` /
+/// `swarm_bindings` 四张表与一条索引，15 的 canonical 会话表、索引与数据原样保留。
+/// 本代**不**改既有表结构，升级只追加对象；远端契约推进到 v10。
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 16;
+
+/// 上一代当前形状（v15，Swarm 表之前的一代）的版本号。
+///
+/// 只作为升级来源：写打开只追加 `swarm_*` 四表与索引并推进到 16，不重建、不搬动任何
+/// 既有会话事实。
+pub(super) const SWARM_PREVIOUS_SCHEMA_VERSION: i64 = 15;
+
+/// 再上一代当前形状（v14，含两列工作快照）的版本号。
+///
+/// 只作为升级来源：写打开按 v15 的重建链清理三张表，再追加 `swarm_*` 并推进到 16。
 pub(super) const PREVIOUS_CURRENT_SCHEMA_VERSION: i64 = 14;
 
 /// 再上一代当前形状（v13，已有 `thread_mq`、缺 `threads` 的两列工作快照）的版本号。
@@ -88,6 +98,26 @@ pub(super) const SESSION_CLOSE_INTENTS_TABLE: &str = "session_close_intents";
 /// 移交/取消/清理一律物理删除行。
 pub(super) const THREAD_MQ_TABLE: &str = "thread_mq";
 
+/// Swarm 会话登记：逻辑会话 → 预留 root session 的映射与投影缓存。
+pub(super) const SWARM_SESSIONS_TABLE: &str = "swarm_sessions";
+
+/// Swarm 追加式 item 流：`(logical_id, seq)` 是稳定顺序与恢复游标。
+pub(super) const SWARM_ITEMS_TABLE: &str = "swarm_items";
+
+/// Swarm 输入收据：`(logical_id, input_id)` 唯一，`fingerprint` 供上层判幂等。
+pub(super) const SWARM_INPUTS_TABLE: &str = "swarm_inputs";
+
+/// Swarm 逻辑环境 → 沙箱绑定。
+pub(super) const SWARM_BINDINGS_TABLE: &str = "swarm_bindings";
+
+/// `swarm_*` 四表（v16 追加的全部新表；升级只建这四张，不触碰既有表）。
+pub(super) const SWARM_TABLES: &[&str] = &[
+    SWARM_SESSIONS_TABLE,
+    SWARM_ITEMS_TABLE,
+    SWARM_INPUTS_TABLE,
+    SWARM_BINDINGS_TABLE,
+];
+
 /// 压缩前形状独有的执行环境表；当前形状不再有它（迁移完成后删除）。
 pub(super) const SESSION_ENVIRONMENTS_TABLE: &str = "session_environments";
 pub(super) const OAUTH_CREDENTIALS_TABLE: &str = "mcp_oauth_credentials";
@@ -113,6 +143,10 @@ pub(super) const CANONICAL_TABLES: &[&str] = &[
     OAUTH_CREDENTIALS_TABLE,
     SESSION_CLOSE_INTENTS_TABLE,
     THREAD_MQ_TABLE,
+    SWARM_SESSIONS_TABLE,
+    SWARM_ITEMS_TABLE,
+    SWARM_INPUTS_TABLE,
+    SWARM_BINDINGS_TABLE,
 ];
 
 /// 迁移输入形状（正式基线 ≤10）的表清单：建表预检与补齐按它判定。
@@ -300,6 +334,10 @@ pub(super) const CREATE_TABLES: &[&str] = &[
     CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
     CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
     CREATE_THREAD_MQ_TABLE_SQL,
+    CREATE_SWARM_SESSIONS_TABLE_SQL,
+    CREATE_SWARM_ITEMS_TABLE_SQL,
+    CREATE_SWARM_INPUTS_TABLE_SQL,
+    CREATE_SWARM_BINDINGS_TABLE_SQL,
 ];
 
 /// 显式关闭已接纳的持久事实；不保存异步任务目录。
@@ -335,6 +373,88 @@ pub(super) const CREATE_THREAD_MQ_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS 
 pub(super) const CREATE_THREAD_MQ_ORDER_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS idx_thread_mq_order ON thread_mq(thread_id, enqueued_at, id)";
 
+/// Swarm 会话表（v16 追加）：`logical_id` 是逻辑会话身份，`root_session_id` 是预留给
+/// `session/new` 的 root 会话身份（唯一）。
+///
+/// `instructions` 与 `environment_json` 是 S3 行类型的两个字段，必须无损落库：
+/// instructions 保持可空文本；environment 存 canonical JSON 对象（`{"type":"none","id":...}`），
+/// 由 peri-swarm 拥有编码形状，本层只保存字节。`last_item_seq` 是投影缓存，权威值仍由
+/// `MAX(swarm_items.seq)` 决定（design §4.4）。
+pub(super) const CREATE_SWARM_SESSIONS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS swarm_sessions (
+    logical_id TEXT PRIMARY KEY,
+    root_session_id TEXT NOT NULL UNIQUE,
+    actor_key TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    state TEXT NOT NULL,
+    model TEXT,
+    instructions TEXT,
+    environment_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_activity_at TEXT NOT NULL,
+    last_item_seq INTEGER NOT NULL DEFAULT 0
+)";
+
+/// Swarm item 表（v16 追加）：`(logical_id, seq)` 是稳定顺序与恢复游标，`item_id` 唯一让
+/// 重放去重可判定。`source` 与 `payload_json` 都是 JSON 文本，形状由 peri-swarm 拥有；
+/// 不建外键——子会话生命周期由 Peri 管理，不在 swarm 库做级联删除（design §4.3）。
+pub(super) const CREATE_SWARM_ITEMS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS swarm_items (
+    logical_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (logical_id, seq),
+    UNIQUE (item_id)
+)";
+
+/// Swarm 输入收据（v16 追加）：`(logical_id, input_id)` 主键让 `INSERT ... ON CONFLICT
+/// DO NOTHING` 成为唯一的幂等裁决点；`fingerprint` 只保存事实，冲突由上层判定。
+pub(super) const CREATE_SWARM_INPUTS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS swarm_inputs (
+    logical_id TEXT NOT NULL,
+    input_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (logical_id, input_id)
+)";
+
+/// Swarm 沙箱绑定（v16 追加）：`logical_env_id` 是逻辑环境身份。
+///
+/// `logical_id` 不设唯一约束：允许诊断/灰度期间多个逻辑环境映射同一 Agent，默认一一对应
+/// （design §4.3）。
+pub(super) const CREATE_SWARM_BINDINGS_TABLE_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS swarm_bindings (
+    logical_env_id TEXT PRIMARY KEY,
+    logical_id TEXT NOT NULL,
+    sandbox_id TEXT NOT NULL,
+    workspace_path TEXT NOT NULL,
+    sandbox_root TEXT NOT NULL,
+    settings_profile TEXT,
+    token_file TEXT,
+    last_run_id TEXT,
+    last_used_at TEXT NOT NULL
+)";
+
+/// v16 追加的四张表（与 [`SWARM_TABLES`] 同序）。升级只下发这一段。
+pub(super) const CREATE_SWARM_TABLES: &[&str] = &[
+    CREATE_SWARM_SESSIONS_TABLE_SQL,
+    CREATE_SWARM_ITEMS_TABLE_SQL,
+    CREATE_SWARM_INPUTS_TABLE_SQL,
+    CREATE_SWARM_BINDINGS_TABLE_SQL,
+];
+
+/// 按 `item_id` 查重/重放去重的覆盖索引（`UNIQUE(item_id)` 已有全局索引，这条带
+/// `logical_id` 前缀，服务范围内读取）。
+pub(super) const CREATE_SWARM_ITEMS_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS swarm_items_by_id ON swarm_items (logical_id, item_id)";
+
+/// v16 追加的索引集（升级只下发这一段）。
+pub(super) const CREATE_SWARM_INDEXES: &[&str] = &[CREATE_SWARM_ITEMS_INDEX_SQL];
+
 /// 索引语句：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
 pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)",
@@ -351,6 +471,8 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_active ON messages(thread_id, excluded)",
     // MQ 读取与 `after` 水位过滤的唯一排序键。
     CREATE_THREAD_MQ_ORDER_INDEX_SQL,
+    // v16 追加的 Swarm 索引。
+    CREATE_SWARM_ITEMS_INDEX_SQL,
 ];
 
 /// 迁移期重建 `threads` 的暂存表（`threads_rebuild`）：`workspace_id` 必须落在 **NOT NULL**

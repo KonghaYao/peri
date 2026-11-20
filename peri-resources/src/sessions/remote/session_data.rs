@@ -74,7 +74,8 @@ pub(in crate::sessions::remote) use remote_session_data::StoreInitialization;
 mod session_open;
 pub(in crate::sessions::remote) use remote_session_data::RemoteSessionData;
 pub(super) use session_open::{
-    open_step, open_verdict, probe_shape, verify_legacy_open_identity, OpenStep,
+    legacy_read_projection, open_step, open_verdict, probe_shape, verify_legacy_open_identity,
+    OpenStep,
 };
 
 pub(in crate::sessions::remote) use remote_session_data::not_found;
