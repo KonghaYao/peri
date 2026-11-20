@@ -153,6 +153,9 @@ pub fn wrap_row_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usi
     let total = graphemes.len();
 
     for row in 0..height.saturating_sub(1) {
+        // 本行最后一个实际匹配到的非空白字素之后的位置。行尾填充格可能把空白
+        // 当成内容先行消费，行边界结算必须从这里重新数。
+        let mut content_end = consumed;
         for col in 0..width {
             if consumed >= total {
                 break;
@@ -165,12 +168,17 @@ pub fn wrap_row_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usi
                 continue; // continuation cell of a wide grapheme
             }
             let next = graphemes[consumed];
+            let whitespace = symbol.chars().all(char::is_whitespace);
             if symbol == next {
                 consumed += 1;
-            } else if !symbol.chars().all(char::is_whitespace) && next.starts_with(symbol) {
+                if !whitespace {
+                    content_end = consumed;
+                }
+            } else if !whitespace && next.starts_with(symbol) {
                 // Some paths write only the grapheme's first scalar; width still
                 // consumes the whole cluster, so do not split inside it.
                 consumed += 1;
+                content_end = consumed;
             }
             // Else: trailing padding space, not part of the content.
         }
@@ -204,13 +212,14 @@ pub fn wrap_row_byte_starts(line: &Line<'_>, plain: &str, width: u16) -> Vec<usi
                 {
                     consumed = (consumed + offset).saturating_sub(lead).max(consumed);
                 }
-            } else if graphemes[consumed].chars().all(char::is_whitespace)
+            } else if graphemes[content_end].chars().all(char::is_whitespace)
                 && row_has_content(&buf, row, width)
             {
-                // 下一行整行空白：按上一行的剩余列回放换行状态，被丢掉的空白
-                // 可能不止一个，起点落在该行第一个实际渲染的空白 grapheme。
-                let remaining = width.saturating_sub(row_content_width(&buf, row, width));
-                consumed += dropped_blank_prefix(&graphemes, consumed, usize::from(remaining));
+                // 下一行整行空白：按换行状态回放被丢弃的空白，起点落在该行
+                // 第一个实际渲染的空白 grapheme。
+                let line_width = usize::from(row_content_width(&buf, row, width));
+                consumed = content_end
+                    + dropped_blank_prefix(&graphemes, content_end, line_width, usize::from(width));
             }
         }
         starts.push(*grapheme_bytes.get(consumed).unwrap_or(&plain.len()));
@@ -247,35 +256,49 @@ fn row_content_width(buf: &ratatui::buffer::Buffer, row: u16, width: u16) -> u16
 
 /// 空白行换行时被丢弃的空白 grapheme 数。
 ///
-/// Ratatui 先用上一行的剩余列吞掉排队的空白，再丢掉触发换行的空白
-/// grapheme；其余空白才渲染到下一行。宽空格与 ASCII 空格宽度不同，因此
-/// 这里按宽度回放，而不是固定丢一个。
-fn dropped_blank_prefix(graphemes: &[&str], consumed: usize, remaining: usize) -> usize {
-    let mut remaining = remaining;
-    let mut dropped = 0usize;
-    while let Some(grapheme) = graphemes.get(consumed + dropped) {
+/// Ratatui 把空白先排进队列，`行宽 + 队列宽 >= 宽度` 的那个 grapheme 触发换行；
+/// 换行时上一行的剩余列会吞掉队首空白，队列清空后触发者本身也不再渲染。宽空格
+/// 与 ASCII 空格宽度不同，因此这里按宽度回放，而不是固定丢一个。
+fn dropped_blank_prefix(
+    graphemes: &[&str],
+    start: usize,
+    line_width: usize,
+    width: usize,
+) -> usize {
+    let mut queued = 0usize;
+    let mut trigger = start;
+    while let Some(grapheme) = graphemes.get(trigger) {
+        if line_width.saturating_add(queued) >= width {
+            break;
+        }
         if !grapheme.chars().all(char::is_whitespace) {
             break;
         }
-        let width = UnicodeWidthStr::width(*grapheme);
+        queued = queued.saturating_add(UnicodeWidthStr::width(*grapheme));
+        trigger += 1;
+    }
+    let mut remaining = width.saturating_sub(line_width);
+    let mut kept = start;
+    while kept < trigger {
+        let width = UnicodeWidthStr::width(graphemes[kept]);
         if width > remaining {
             break;
         }
         remaining -= width;
-        dropped += 1;
+        kept += 1;
     }
-    if dropped == 0 {
-        // 首个空白就放不进上一行：这次换行由它触发，它本身不会渲染。
-        return 1;
+    if kept < trigger {
+        // 队首空白放不进剩余列，它保留到下一行，触发换行的 grapheme 也不丢。
+        return kept - start;
     }
     if graphemes
-        .get(consumed + dropped)
+        .get(trigger)
         .is_some_and(|grapheme| grapheme.chars().all(char::is_whitespace))
     {
-        // 吞完排队空白后紧跟的空白触发了换行，同样不渲染。
-        dropped += 1;
+        trigger - start + 1
+    } else {
+        trigger - start
     }
-    dropped
 }
 
 fn wrap_row_byte_starts_large(plain: &str, width: usize) -> Vec<usize> {
@@ -545,6 +568,55 @@ mod tests {
         )
         .expect("blank row selection");
         assert_eq!(&plain[range], "     ", "空白行整行不带上被丢弃的宽空格");
+    }
+
+    #[test]
+    fn wrap_start_keeps_full_blank_row_after_narrow_content() {
+        // 宽度 5 下 "A" 后 12 个空格：第一行换行丢掉 5 个空格，第二行整行
+        // 渲染 5 个空格，第三个空格是下一处换行丢弃的触发者。
+        let text = format!("A{}B", " ".repeat(12));
+        let line = line(&text);
+        let plain = line_plain_text(&line);
+        let width = 5;
+        let starts = wrap_row_byte_starts(&line, &plain, width);
+        assert_eq!(&starts[..3], [0, 6, 12], "行起点按实际渲染的空白推进");
+        assert_eq!(&plain[starts[2]..], " B");
+        let range = line_byte_range(
+            &plain,
+            &starts,
+            0..3,
+            SelectionPoint::new(2, 1),
+            SelectionPoint::new(2, 2),
+        )
+        .expect("B row selection");
+        assert_eq!(&plain[range], "B", "可见的 B 必须可选");
+    }
+
+    #[test]
+    fn wrap_start_keeps_queued_wide_space_on_partial_row() {
+        // 宽度 5 下 "AA" 后三个宽空格：第一个被剩余列吞掉，第二个放不下而
+        // 留在队首，第二行的起点是它，而不是触发换行的第三个宽空格。
+        let text = "AA\u{3000}\u{3000}\u{3000}     B";
+        let line = line(text);
+        let plain = line_plain_text(&line);
+        let width = 5;
+        let starts = wrap_row_byte_starts(&line, &plain, width);
+        assert_eq!(starts[1], 5, "第二行从留在队列里的宽空格开始");
+        assert_eq!(
+            starts[2], 13,
+            "第三行跳过触发换行的空格，从渲染的首个空格开始"
+        );
+        assert_eq!(&plain[starts[2]..], "   B");
+        let last_row = starts.len() - 2;
+        let range = line_byte_range(
+            &plain,
+            &starts,
+            0..(starts.len() - 1),
+            SelectionPoint::new(last_row, 3),
+            SelectionPoint::new(last_row, 4),
+        )
+        .expect("B selection on the last row");
+        assert_eq!(&plain[range], "B", "可见的 B 必须可选");
     }
 
     #[test]
