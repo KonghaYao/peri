@@ -1,23 +1,29 @@
-//! Process entry for the Swarm gateway (S6b).
+//! Process entry for the Swarm gateway (S6b/S6c1a).
 //!
-//! One process owns:
+//! One process owns **two** Loom databases:
 //!
 //! 1. the **remote Peri session store** (`design §4.1`): opened once with the
-//!    deployment's Loom locator and a virtual workspace identity. Opening also
-//!    runs the schema check/upgrade (`design §4.2`); an unknown or newer store
+//!    deployment's locator and a virtual workspace identity. Opening also runs
+//!    the Peri schema check/upgrade (`design §4.2`); an unknown or newer store
 //!    fails closed. There is no local SQLite fallback on this entry.
-//! 2. the **Swarm store** the actors and the gateway share: the deployment's
-//!    [`peri_resources::SwarmStorePort`] wrapped by
-//!    [`crate::store::RemoteSwarmStore`], installed once through
-//!    [`StaticDeployment`].
+//! 2. the **Swarm state store** (S6c1a): `PERI_SWARM_STATE_STORE` is a separate
+//!    logical database opened by [`SwarmStateStore`] with its own `swarm_meta`
+//!    schema version. Both locators are required and must differ; a failure to
+//!    open either one stops the process instead of reusing the other.
+//!
+//! The installed [`StaticDeployment`] carries the Swarm state store, so the
+//! gateway and every actor read and write Swarm facts there. Actor children
+//! still open their own Peri session store from
+//! [`SessionStoreDeployment`](crate::actor::runtime::SessionStoreDeployment).
+//!
 //! 3. the **Rivet registry** that serves [`crate::actor::SwarmActor`] and the
 //!    **axum gateway** ([`crate::http::build_router`]). Both run on one shared
 //!    [`CancellationToken`]; either failing stops the process with a
 //!    diagnosable error.
 //!
 //! This stage does not require a contactable Loom or a real model: the entry
-//! must fail visibly when the remote configuration is missing, and every actor
-//! child opens its own remote store from the same deployment.
+//! must fail visibly when either remote configuration is missing, and every
+//! actor child opens its own remote session store from the same deployment.
 //!
 //! Environment (secrets are only read by name, never rendered):
 //!
@@ -25,9 +31,10 @@
 //! | --- | --- |
 //! | `PERI_SWARM_BIND` | gateway address, default `127.0.0.1:8080`, loopback only |
 //! | `PERI_SWARM_API_KEY` | deployment bearer key (required) |
-//! | `PERI_SWARM_SESSION_STORE` | remote locator `http(s)://…` (required) |
+//! | `PERI_SWARM_SESSION_STORE` | Peri session store locator `http(s)://…` (required) |
+//! | `PERI_SWARM_STATE_STORE` | Swarm state store locator `http(s)://…` (required, distinct) |
 //! | `PERI_SWARM_STORE_ENGINE` | remote engine name, default `turso` |
-//! | `PERI_SWARM_STORE_TOKEN_ENV` | **name** of the variable holding the store token |
+//! | `PERI_SWARM_STORE_TOKEN_ENV` | **name** of the variable holding the store token (both databases) |
 //! | `PERI_SWARM_MACHINE_ID` | stable machine UUID (required) |
 //! | `PERI_SWARM_WORKSPACE_ROOT` | absolute, normalized virtual workspace root |
 //! | `PERI_SWARM_MODEL` | optional deployment model |
@@ -59,10 +66,16 @@ use crate::config::{
 };
 use crate::gateway::{RivetServiceConfig, RivetSwarmService};
 use crate::http::{build_router, AppState};
-use crate::store::{RemoteSwarmStore, SwarmStore};
+use crate::store::{SwarmStateStore, SwarmStateStoreConfig, SwarmStore};
 
-/// Remote Loom locator (`http://127.0.0.1:<port>/db/<tenant>/<database>/<branch>/`).
+/// Remote Loom locator for the Peri session store
+/// (`http://127.0.0.1:<port>/db/<tenant>/<database>/<branch>/`).
 pub const SESSION_STORE_ENV: &str = "PERI_SWARM_SESSION_STORE";
+/// Remote Loom locator for the **Swarm state** database (S6c1a).
+///
+/// A separate logical database: it must not be the session-store locator, so a
+/// Swarm schema change can never touch Peri's session schema.
+pub const STATE_STORE_ENV: &str = "PERI_SWARM_STATE_STORE";
 /// Remote engine name; only needed when the locator cannot decide it.
 pub const STORE_ENGINE_ENV: &str = "PERI_SWARM_STORE_ENGINE";
 /// **Name** of the environment variable that holds the store credential.
@@ -96,10 +109,15 @@ pub enum BootstrapError {
     Config(#[from] ConfigError),
     #[error("invalid remote workspace environment: {0}")]
     Environment(String),
-    /// Opening the remote store failed (credential, connection, schema). The
-    /// inner text comes from `peri-resources` and contains no credential value.
+    /// Opening the remote session store failed (credential, connection, schema).
+    /// The inner text comes from `peri-resources` and contains no credential
+    /// value.
     #[error("cannot open the remote Peri session store: {0}")]
     StoreOpen(String),
+    /// Opening the independent Swarm state store failed. No fallback exists:
+    /// the process does not run against the session store instead.
+    #[error("cannot open the swarm state store: {0}")]
+    StateStoreOpen(String),
     #[error("cannot bind the gateway on {addr}: {reason}")]
     Bind { addr: SocketAddr, reason: String },
     #[error("cannot wait for a shutdown signal: {0}")]
@@ -110,6 +128,8 @@ pub enum BootstrapError {
     Registry(String),
     #[error("cannot close the remote Peri session store: {0}")]
     StoreClose(String),
+    #[error("cannot close the swarm state store: {0}")]
+    StateStoreClose(String),
 }
 
 /// Validated process configuration. Every remote field is mandatory: a
@@ -119,6 +139,7 @@ pub struct BootstrapConfig {
     pub bind_addr: SocketAddr,
     pub api_key: DeploymentApiKey,
     pub session_store_locator: Url,
+    pub state_store_locator: Url,
     pub store_engine: String,
     pub store_token_env: String,
     pub machine_id: Uuid,
@@ -157,6 +178,20 @@ impl BootstrapConfig {
         let locator_raw =
             lookup(SESSION_STORE_ENV).ok_or(ConfigError::MissingEnv(SESSION_STORE_ENV))?;
         let session_store_locator = validate_store_locator(&locator_raw, SESSION_STORE_ENV)?;
+
+        // The Swarm facts have their own database (S6c1a). Both locators are
+        // required: a missing state store is a startup error, and pointing both
+        // at one database would put the Swarm schema back into the session
+        // store, which is exactly what the split avoids.
+        let state_locator_raw =
+            lookup(STATE_STORE_ENV).ok_or(ConfigError::MissingEnv(STATE_STORE_ENV))?;
+        let state_store_locator = validate_store_locator(&state_locator_raw, STATE_STORE_ENV)?;
+        if same_store_locator(&state_store_locator, &session_store_locator) {
+            return Err(ConfigError::Invalid {
+                variable: STATE_STORE_ENV,
+                reason: format!("must name a database separate from {SESSION_STORE_ENV}"),
+            });
+        }
 
         let store_engine = optional_non_empty(lookup(STORE_ENGINE_ENV), STORE_ENGINE_ENV)?
             .unwrap_or_else(|| DEFAULT_STORE_ENGINE.to_owned());
@@ -227,6 +262,7 @@ impl BootstrapConfig {
             bind_addr,
             api_key,
             session_store_locator,
+            state_store_locator,
             store_engine,
             store_token_env,
             machine_id,
@@ -241,6 +277,13 @@ impl BootstrapConfig {
         SessionStoreDeployment::from_locator(self.session_store_locator.as_str())
             .with_engine(self.store_engine.clone())
             .with_credential_env(self.store_token_env.clone())
+    }
+
+    fn state_store_config(&self) -> SwarmStateStoreConfig {
+        SwarmStateStoreConfig {
+            locator: self.state_store_locator.clone(),
+            credential_env: self.store_token_env.clone(),
+        }
     }
 
     fn actor_config(&self) -> ActorServiceConfig {
@@ -301,11 +344,31 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
     .await
     .map_err(|error| BootstrapError::StoreOpen(format!("{error:#}")))?;
 
-    // The port and the process share one remotely opened store. The process
-    // keeps the close right; actors open their own store from the deployment.
-    let port = resources.swarm_store();
+    // S6c1a: the Swarm facts live in their own database. Failing to open it
+    // closes the session store that was already opened and stops the process;
+    // it never reuses the session store's connection.
+    tracing::info!(
+        state_store = %config.state_store_locator,
+        "opening the independent swarm state store"
+    );
+    let state_store = match SwarmStateStore::open(&config.state_store_config()).await {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            let (_session_resources, store_shutdown) = resources.into_parts();
+            if let Err(close_error) = store_shutdown.shutdown().await {
+                tracing::warn!(
+                    error = %close_error,
+                    "remote Peri session store close failed after the state store failed to open"
+                );
+            }
+            return Err(BootstrapError::StateStoreOpen(error.to_string()));
+        }
+    };
+
+    // The process keeps the close right for both stores; actors open their own
+    // session store from the deployment.
     let (_session_resources, store_shutdown) = resources.into_parts();
-    let store: Arc<dyn SwarmStore> = Arc::new(RemoteSwarmStore::new(port));
+    let store: Arc<dyn SwarmStore> = state_store.clone();
 
     if crate::actor::deployment::current_deployment().is_some() {
         tracing::debug!("a swarm deployment was already installed; the first install wins");
@@ -406,16 +469,40 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         drain("rivet registry", &mut registry_task).await;
     }
 
+    // Close both stores even when the first one fails, and only report a close
+    // failure when nothing else already failed.
+    let mut close_failure = None;
     match store_shutdown.shutdown().await {
         Ok(()) => tracing::info!("remote Peri session store closed"),
         Err(error) => {
             tracing::error!(error = %error, "remote Peri session store close failed");
             if outcome.is_ok() {
-                return Err(BootstrapError::StoreClose(error.to_string()));
+                close_failure = Some(BootstrapError::StoreClose(error.to_string()));
             }
         }
     }
-    outcome
+    match state_store.close().await {
+        Ok(()) => tracing::info!("swarm state store closed"),
+        Err(error) => {
+            tracing::error!(error = %error, "swarm state store close failed");
+            if outcome.is_ok() && close_failure.is_none() {
+                close_failure = Some(BootstrapError::StateStoreClose(error.to_string()));
+            }
+        }
+    }
+    match close_failure {
+        Some(error) => Err(error),
+        None => outcome,
+    }
+}
+
+/// Two locators name one database when scheme, host, port and path agree.
+/// The trailing slash is not part of the identity (`…/main/` == `…/main`).
+fn same_store_locator(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+        && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
 }
 
 /// Flatten one finished server task into a diagnosable reason.

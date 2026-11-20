@@ -14,6 +14,10 @@ peri-time = { path = "../peri-time" }
 peri-acp = { path = "../peri-acp" }
 peri-acp-types = { path = "../peri-acp-types" }
 peri-resources = { path = "../peri-resources" }
+# S6c1a: the Swarm state database has its own Loom connection. Only
+# `src/store/turso.rs` uses the driver directly; it never goes through the
+# `peri-resources` schema probe/initialization for the Peri session store.
+turso_serverless = "0.1.3"
 async-trait.workspace = true
 axum.workspace = true
 futures.workspace = true

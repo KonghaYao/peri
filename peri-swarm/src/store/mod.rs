@@ -1,14 +1,24 @@
 //! Persistence port for Swarm-owned facts (`design §4.3`–§4.5).
 //!
-//! S3 ships the trait plus an in-memory fake. S6b adds [`RemoteSwarmStore`],
-//! which maps the rows onto the remote Loom port from `peri-resources`
-//! (`design §4.1`) and is the only module that sees those port types.
+//! Since S6c1a the Swarm facts live in their **own** Loom database:
+//! [`SwarmStateStore`] opens `PERI_SWARM_STATE_STORE` directly, owns its DDL and
+//! records `swarm_meta.version`. It is what `bootstrap` installs.
+//!
+//! S3 shipped the trait plus an in-memory fake, and S6b added
+//! [`RemoteSwarmStore`], which maps the rows onto the `peri-resources` port
+//! (`design §4.1`) sharing the Peri session connection. That adapter is retained
+//! only until S6c1b removes the single-database path; `bootstrap` no longer uses
+//! it.
 
 mod memory;
 mod remote;
+mod turso;
 
 pub use memory::MemorySwarmStore;
 pub use remote::RemoteSwarmStore;
+pub use turso::{
+    SwarmStateError, SwarmStateStore, SwarmStateStoreConfig, SWARM_STATE_SCHEMA_VERSION,
+};
 
 use async_trait::async_trait;
 use serde_json::Value;

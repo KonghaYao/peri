@@ -7,10 +7,11 @@
 //! [`ActorDeployment`].
 //!
 //! S5 ships [`StaticDeployment`] over a shared [`SwarmStore`] (a
-//! [`crate::store::MemorySwarmStore`] in tests and local development). S6b
-//! installs the same deployment with a [`crate::store::RemoteSwarmStore`] and
-//! an [`ActorServiceConfig`] that carries the remote session-store deployment;
-//! the trait and the install point stay the same.
+//! [`crate::store::MemorySwarmStore`] in tests and local development). S6c1a
+//! installs it with the independent Swarm state store
+//! ([`crate::store::SwarmStateStore`]) and an [`ActorServiceConfig`] that
+//! carries the remote Peri session-store deployment; the trait and the install
+//! point stay the same.
 
 use std::sync::{Arc, OnceLock};
 

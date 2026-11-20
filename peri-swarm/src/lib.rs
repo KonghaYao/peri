@@ -2,7 +2,8 @@
 //!
 //! - [`http`]：`/v1/agents/sessions` 五条路由、Bearer 认证、错误映射与 SSE 编码。
 //! - [`domain`]：会话、输入、item、游标、事件与错误等纯类型。
-//! - [`store`]：`SwarmStore` 写入/读取端口与内存 fake。
+//! - [`store`]：`SwarmStore` 写入/读取端口、内存 fake，以及 S6c1a 的独立
+//!   Swarm 状态库（[`store::SwarmStateStore`]，自有 `swarm_meta` schema）。
 //! - [`service`]：`SwarmService` 端口与内存 fake；S4 起由 [`actor`] 的进程内
 //!   ACP 实现同一端口。
 //! - [`actor::swarm`] + [`gateway`]：S5 的 Rivet actor 与网关适配器；actor 持有
@@ -26,4 +27,4 @@ pub use config::{ConfigError, SwarmConfig};
 pub use domain::{ErrorCode, ItemPage, ItemView, LogicalId, SessionView, StreamEvent, SwarmError};
 pub use http::{build_router, AppState};
 pub use service::{InMemorySwarmService, SwarmService};
-pub use store::{MemorySwarmStore, RemoteSwarmStore, SwarmStore};
+pub use store::{MemorySwarmStore, RemoteSwarmStore, SwarmStateStore, SwarmStore};

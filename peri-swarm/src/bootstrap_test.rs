@@ -10,7 +10,7 @@ use peri_acp_types::session_store::SessionStoreLocator;
 
 use super::{
     BootstrapConfig, DEFAULT_BOOTSTRAP_BIND, DEFAULT_STORE_ENGINE, MACHINE_ID_ENV,
-    SESSION_STORE_ENV, SETTINGS_JSON_ENV, STORE_ENGINE_ENV, STORE_TOKEN_ENV,
+    SESSION_STORE_ENV, SETTINGS_JSON_ENV, STATE_STORE_ENV, STORE_ENGINE_ENV, STORE_TOKEN_ENV,
 };
 use crate::config::{ConfigError, API_KEY_ENV, BIND_ENV, MODEL_ENV, WORKSPACE_ROOT_ENV};
 
@@ -18,14 +18,14 @@ const TOKEN_ENV_NAME: &str = "PERI_TEST_LOOM_TOKEN";
 const TOKEN_VALUE: &str = "loom-secret-value";
 const MACHINE_ID: &str = "0192f0c4-0000-7000-8000-0000000000aa";
 const ROOT: &str = "/tmp/peri-swarm-bootstrap-test";
+const SESSION_STORE_VALUE: &str = "http://127.0.0.1:8342/db/main/main/dev/";
+const STATE_STORE_VALUE: &str = "http://127.0.0.1:9497/db/local_default/swarm/main/";
 
 fn base_env() -> Vec<(&'static str, String)> {
     vec![
         (API_KEY_ENV, "deployment-key".to_owned()),
-        (
-            SESSION_STORE_ENV,
-            "http://127.0.0.1:8342/db/main/main/dev/".to_owned(),
-        ),
+        (SESSION_STORE_ENV, SESSION_STORE_VALUE.to_owned()),
+        (STATE_STORE_ENV, STATE_STORE_VALUE.to_owned()),
         (STORE_TOKEN_ENV, TOKEN_ENV_NAME.to_owned()),
         (TOKEN_ENV_NAME, TOKEN_VALUE.to_owned()),
         (MACHINE_ID_ENV, MACHINE_ID.to_owned()),
@@ -83,10 +83,16 @@ fn complete_environment_parses_with_bootstrap_defaults() {
     assert_eq!(config.workspace_root.to_str(), Some(ROOT));
     assert!(config.model.is_none());
     assert!(config.settings_json.is_none());
-    assert_eq!(
-        config.session_store_locator.as_str(),
-        "http://127.0.0.1:8342/db/main/main/dev/"
-    );
+    assert_eq!(config.session_store_locator.as_str(), SESSION_STORE_VALUE);
+    assert_eq!(config.state_store_locator.as_str(), STATE_STORE_VALUE);
+}
+
+#[test]
+fn state_store_configuration_carries_the_locator_and_the_shared_credential_name() {
+    let config = parse(&[]).expect("configuration");
+    let state = config.state_store_config();
+    assert_eq!(state.locator.as_str(), STATE_STORE_VALUE);
+    assert_eq!(state.credential_env, TOKEN_ENV_NAME);
 }
 
 #[test]
@@ -147,6 +153,19 @@ fn missing_session_store_fails_the_start() {
 }
 
 #[test]
+fn missing_state_store_fails_the_start() {
+    expect_missing(parse(&[(STATE_STORE_ENV, None)]), STATE_STORE_ENV);
+}
+
+#[test]
+fn one_remote_store_alone_is_not_enough() {
+    // Only the state store: the session store is still required.
+    expect_missing(parse(&[(SESSION_STORE_ENV, None)]), SESSION_STORE_ENV);
+    // Only the session store: the state store is still required.
+    expect_missing(parse(&[(STATE_STORE_ENV, None)]), STATE_STORE_ENV);
+}
+
+#[test]
 fn missing_token_variable_name_fails_the_start() {
     expect_missing(parse(&[(STORE_TOKEN_ENV, None)]), STORE_TOKEN_ENV);
 }
@@ -204,6 +223,41 @@ fn embedded_locator_credentials_are_rejected() {
             Some("http://user:pass@127.0.0.1:8342/db/main/main/dev/"),
         )]),
         SESSION_STORE_ENV,
+    );
+}
+
+#[test]
+fn state_store_locators_are_validated_like_the_session_store() {
+    expect_invalid(
+        parse(&[(STATE_STORE_ENV, Some("/tmp/swarm.db"))]),
+        STATE_STORE_ENV,
+    );
+    expect_invalid(
+        parse(&[(STATE_STORE_ENV, Some("libsql://example.test/db"))]),
+        STATE_STORE_ENV,
+    );
+    expect_invalid(
+        parse(&[(
+            STATE_STORE_ENV,
+            Some("http://user:pass@127.0.0.1:9497/db/swarm/main/"),
+        )]),
+        STATE_STORE_ENV,
+    );
+}
+
+#[test]
+fn state_store_must_not_be_the_session_store() {
+    let reason = expect_invalid(
+        parse(&[(STATE_STORE_ENV, Some(SESSION_STORE_VALUE))]),
+        STATE_STORE_ENV,
+    );
+    assert!(reason.contains(SESSION_STORE_ENV), "{reason}");
+
+    // The trailing slash is not part of the database identity.
+    let without_trailing_slash = SESSION_STORE_VALUE.trim_end_matches('/');
+    expect_invalid(
+        parse(&[(STATE_STORE_ENV, Some(without_trailing_slash))]),
+        STATE_STORE_ENV,
     );
 }
 
