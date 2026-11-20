@@ -199,6 +199,9 @@ pub(in crate::host::requests) async fn close_session(
                 _ => return Err(workspace::resource_error(error)),
             }
         }
+        // 持久树已整树删除：恢复路径冷装配的 child 没有客户端会话绑定，不会再收到
+        // 一次自己的 close；不在这里按父树回收，它们会常驻到整连接 shutdown。
+        reclaim_recovered_children(cfg, sessions, &target).await;
     } else if let Err(error) = resources.finish_close(&target).await {
         match resources.close_settlement(&target).await {
             Ok(CloseSettlement::Finished) => {}
@@ -208,4 +211,93 @@ pub(in crate::host::requests) async fn close_session(
     release_runtime_handle(cfg, session_id).await?;
     sessions.remove(session_id);
     Ok(())
+}
+
+/// 父树整树删除后，回收该树内由恢复动作冷装配的 child。
+///
+/// 只按「树根 + 记录代次」匹配：显式 load 推进过代次的实例属于别的生命周期，
+/// 不在这里拆；其他树的登记不参与。回收不依赖请求级 close（存储里已没有它的行，
+/// 那条路径会在清本地状态前以 `NotFound` 早退）。
+async fn reclaim_recovered_children(
+    cfg: &AcpServerConfig,
+    sessions: &mut HashMap<String, SessionState>,
+    root_thread_id: &str,
+) {
+    for registration in cfg
+        .session_manager
+        .recovered_children_of_tree(root_thread_id)
+    {
+        let child_session_id = registration.child_session_id.clone();
+        let live_generation = sessions
+            .get(&child_session_id)
+            .map(|state| state.session_generation);
+        if live_generation != Some(registration.session_generation) {
+            // 实例已被关闭或推进到新代次：本记录不再代表那次恢复发布。
+            cfg.session_manager
+                .forget_recovered_child(&child_session_id);
+            continue;
+        }
+        if reclaim_recovered_child(cfg, sessions, &child_session_id).await {
+            cfg.session_manager
+                .forget_recovered_child(&child_session_id);
+        }
+    }
+}
+
+/// 单个恢复 child 的收口顺序与 cold restore 回滚一致：manager → 环境 → Controller。
+///
+/// 返回是否已完全释放；未释放时保留 `closing` 与登记，由整连接 shutdown 兜底重试。
+async fn reclaim_recovered_child(
+    cfg: &AcpServerConfig,
+    sessions: &mut HashMap<String, SessionState>,
+    session_id: &str,
+) -> bool {
+    let environment = {
+        let Some(state) = sessions.get_mut(session_id) else {
+            return true;
+        };
+        // 已删除的树不再接受任何执行：先封闭入口，再取消在飞 turn。
+        state.closing = true;
+        if let Some(token) = state.cancel_token.as_ref() {
+            token.cancel();
+        }
+        state.environment.clone()
+    };
+    let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    let manager_settled = match local.session_manager.close_session(session_id).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                error = %error,
+                "recovered child manager settlement incomplete after parent tree delete"
+            );
+            false
+        }
+    };
+    let environment_settled = match environment.as_ref() {
+        Some(environment) => environment.shutdown().await,
+        None => true,
+    };
+    // Controller 按轮登记执行句柄，删除后不会再有 close 请求替它释放。
+    if let Err(error) = release_runtime_handle(local, session_id).await {
+        tracing::warn!(
+            session_id,
+            code = error.code,
+            error = %error.message,
+            "recovered child runtime handle release incomplete after parent tree delete"
+        );
+    }
+    if manager_settled && environment_settled {
+        sessions.remove(session_id);
+        true
+    } else {
+        tracing::warn!(
+            session_id,
+            manager_settled,
+            environment_settled,
+            "recovered child reclaim incomplete; retained for host shutdown"
+        );
+        false
+    }
 }

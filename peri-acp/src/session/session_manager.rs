@@ -150,6 +150,8 @@ pub(super) struct SessionManagerInner {
     /// per-session 的 `Arc<dyn TaskManager>`（Agent 层 per-session 聚合）。
     /// None = 未注入时 fallback `NoopTaskManager`（print 等无 bg 场景）。
     pub task_manager_factory: Option<TaskManagerFactory>,
+    /// 恢复动作冷装配的子实例登记（按 child session id）。
+    pub(super) recovered_children: Arc<DashMap<String, RecoveredChild>>,
 }
 
 /// Session-scoped registry and configuration shared across ACP requests.
@@ -172,6 +174,18 @@ pub(crate) struct RecoveryDelivery {
     /// 只在 turn 真正获得准入后挂上；结算或早失败时收尾。父级未 live 时保持
     /// `None`，父级之后进入由恢复协调做 adoption。
     pub(crate) task: Option<RecoveryTaskBinding>,
+}
+
+/// 恢复动作冷装配的子实例登记：父树整树删除时按树根与记录代次回收。
+///
+/// 恢复 child 没有客户端会话绑定，客户端只删除父会话；持久行随整树删除后，
+/// 请求级 close 会因 `NotFound` 在清理本地状态前早退。记录因此挂在 SessionManager
+/// 上，按「树根 + 代次」只回收本次恢复创建、且仍为同一实例的 child。
+#[derive(Clone, Debug)]
+pub(crate) struct RecoveredChild {
+    pub(crate) child_session_id: String,
+    pub(crate) root_thread_id: ThreadId,
+    pub(crate) session_generation: u64,
 }
 
 /// 恢复 child 在直接父级的一次运行登记（不持久化，随会话实例释放）。
@@ -363,6 +377,7 @@ impl SessionManager {
                 agent_catalog,
                 plugin_command_entries,
                 task_manager_factory,
+                recovered_children: Arc::new(DashMap::new()),
             }),
         }
     }
@@ -371,6 +386,7 @@ impl SessionManager {
         let inner = Arc::get_mut(&mut self.inner).expect("fresh session manager");
         inner.sessions = Arc::clone(&host.inner.sessions);
         inner.caps_registry = Arc::clone(&host.inner.caps_registry);
+        inner.recovered_children = Arc::clone(&host.inner.recovered_children);
         *inner.pending_caps.lock() = host.inner.pending_caps.lock().clone();
         *inner.cron_continuation_tx.lock() = host.inner.cron_continuation_tx.lock().clone();
         // The bridge keeps this environment's scheduler: sharing the host scheduler
@@ -423,6 +439,8 @@ impl SessionManager {
 
     /// Transfer the removed record to the host's retryable exit context.
     pub(crate) fn take_for_close(&self, session_id: &str) -> Option<AcpSession> {
+        // 会话实例已确定性退出：恢复登记随之失效，不能留给一次父树删除去回收。
+        self.inner.recovered_children.remove(session_id);
         self.inner.sessions.remove(session_id).map(|(_, session)| {
             session.task_events_cancel.cancel();
             if let Some(port) = &session.mcp_subscription {
@@ -430,6 +448,38 @@ impl SessionManager {
             }
             session
         })
+    }
+
+    /// 记录本次恢复冷装配的 child：父树整树删除时按树根与代次回收。
+    pub(crate) fn record_recovered_child(
+        &self,
+        child_session_id: &str,
+        root_thread_id: &ThreadId,
+        session_generation: u64,
+    ) {
+        self.inner.recovered_children.insert(
+            child_session_id.to_owned(),
+            RecoveredChild {
+                child_session_id: child_session_id.to_owned(),
+                root_thread_id: root_thread_id.clone(),
+                session_generation,
+            },
+        );
+    }
+
+    /// 该父树内仍登记的恢复 child（删除整树后按记录逐个收口）。
+    pub(crate) fn recovered_children_of_tree(&self, root_thread_id: &str) -> Vec<RecoveredChild> {
+        self.inner
+            .recovered_children
+            .iter()
+            .filter(|entry| entry.value().root_thread_id == root_thread_id)
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 移除单条恢复登记：实例已关闭、代次已推进或回收完成。
+    pub(crate) fn forget_recovered_child(&self, child_session_id: &str) {
+        self.inner.recovered_children.remove(child_session_id);
     }
 
     /// Begin terminal shutdown without removing the record needed by a

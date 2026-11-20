@@ -177,6 +177,8 @@ pub trait SessionRecovery: Send + Sync {
 
 冷 child 的 `assemble_for_recovery` 只建立运行实例：调用方必须先校验 `completion_target` 在根树内，装配后复核仍失败或接纳最终跳过时按本次发布的 generation 回收实例与 manager 登记，避免缓存泄漏。调用它的 server loop 必须在响应前补齐 TaskManager 绑定与在线 endpoint。`discard` 只丢弃 `Prepared` 启动资格，MQ 中的提醒保留，下一次进入采纳同一条提醒而不是重复注入。
 
+恢复发布的 child 由 Host 按（树根，发布 generation）登记：父树 `session/delete` 成功后回收仍属于该次发布的实例，排空环境并移除宿主与 `SessionManager` 登记；显式 load 推进过代次的实例与其他树不受影响。回收未完全结算时保留关闭态，由连接 shutdown 兜底。
+
 `enter`、普通执行准入、Stop、关闭和显式 resume 共用同一运行协调。恢复提醒与任务完成仍调用既有设计中的 `ThreadMq` 接口；状态变化由生命周期行为提交到 `SessionResources`，业务方不通过裸 setter 或 SQL 分别修改 MQ、历史与工作意图。
 
 ## 5. 工作意图与 MQ 的事务关系

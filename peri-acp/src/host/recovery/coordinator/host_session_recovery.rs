@@ -429,10 +429,36 @@ impl HostSessionRecovery {
         };
         match outcome {
             // 已接纳并放行，或已有执行复用本实例：保留本次装配。
-            ThreadOutcome::Injected { .. } | ThreadOutcome::Reused => outcome,
+            ThreadOutcome::Injected { .. } | ThreadOutcome::Reused => {
+                if let Some(publication) = publication.as_ref() {
+                    self.record_recovered_child(&partition.root_thread_id, publication)
+                        .await;
+                }
+                outcome
+            }
             // 本次冷装配最终不能续跑：回收发布，避免 manager-only 残留。
             other => self.reject_cold_child(publication, other).await,
         }
+    }
+
+    /// 记录本次恢复冷装配的 child：客户端没有与它绑定的会话，父树删除时由宿主代收。
+    ///
+    /// 记录带发布代次；实例被替换或经显式 load 推进代次后，记录不再代表它。
+    async fn record_recovered_child(&self, root: &ThreadId, publication: &RestorePublication) {
+        let published = {
+            let states = self.sessions.lock().await;
+            states
+                .get(&publication.session_id)
+                .is_some_and(|state| state.session_generation == publication.session_generation)
+        };
+        if !published {
+            return;
+        }
+        self.manager.record_recovered_child(
+            &publication.session_id,
+            root,
+            publication.session_generation,
+        );
     }
 
     /// 拒绝本次冷装配：只回收尚无 turn 占用的本次发布。
