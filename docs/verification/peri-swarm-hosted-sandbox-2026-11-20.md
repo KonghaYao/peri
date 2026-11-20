@@ -501,3 +501,198 @@ ensure 只由首个 `tools/call` 触发。
 - 启动后资源发现结果未回写句柄快照（见 §10.4）；
 - 原始 `e2e.json`、Bun/gateway 日志在 `/private/tmp/peri-swarm-s9a3a/logs/`，
   不入库。
+
+## 11. S9a3b1：A/B/C 共享 `openai_hosted` 环境验收
+
+- 状态：真实链路验收（2026-11-20，S9a3a 之后的共享环境阶段）
+- 基线：`8c01f97fa`（S1..S9a3a）+ 本阶段脚本改动；工作树
+  `/Users/konghayao/code/ai/peri/.worktrees/peri-swarm-local-dev`
+- Peri 二进制：`target/debug/peri`（`peri 0.2.0`），sha256
+  `93ccfb0b168fd6a47a67f06dc99c3a09f4f0ae3fc1a6b73f36504ba4ce0b2cc9`
+  （未重建；本阶段未改 Rust 源码）
+- 环境：Bun 1.4.2、Node v26.9.0、Peri Loom `12dd01a1…`、`openai@7.62.0`；
+  运行目录 `/private/tmp/peri-swarm-s9a3b1/`，网关端口沿用 18080
+  （8080 仍是用户 OrbStack）
+- 驱动：`peri-swarm/scripts/sdk_hosted_share_e2e.mjs`（新增）；
+  模型 stub：`peri-swarm/scripts/local_model_stub.mjs`（扩展）
+
+### 11.1 驱动与模型 stub
+
+驱动通过官方 `openai@7.62.0` Agents API 创建三个会话，每个会话都用真实 Bun
+workspace MCP + 真实 SRT 沙箱执行 `Bash`：
+
+| 场景 | 创建方式 | 期望 |
+| --- | --- | --- |
+| A | `environment:{type:"openai_hosted"}` | 懒预留；首个工具调用启动 SRT；写 `a.txt` |
+| B | 同上（新环境） | 另一个 sandbox；`a.txt` 不存在；写 `b.txt` |
+| C | `environment:{type:"openai_hosted", environment_id:<A 的 env id>}` | 复用 A 的 sandbox/workspace/runId；读到 `a.txt` |
+
+模型 stub 新增 `PERI_STUB_COMMANDS`（JSON：指令名 → shell 命令）和
+`[[tool:<name>]]` 输入标记：每轮首个主调用（该轮尚无 tool 结果）返回
+`Bash` tool call，命令由输入选择；收到工具结果后返回最终文本。判定按
+**携带指令的 user 消息**划定轮次边界，而不是“最后一条 user 消息”——Peri 每次请求
+都会在末尾追加 `<system-reminder>` capability 消息，按最后一条 user 消息判定会把
+工具结果永远排除在外。该判定无会话级状态，因此并发会话可以交错轮次；旧
+`PERI_STUB_TOOL_COMMAND`（单次 tool turn）仅在显式设置时保留。
+
+输入样式的例子（`write-a` 命令）：
+
+```text
+S9a3b1 scenario=A [[tool:write-a]] Run the workspace Bash command for write-a, …
+```
+
+本次运行的启动命令与 §3 相同（Loom 双库 9497、Bun 8081、网关 18080，run-dir
+`/private/tmp/peri-swarm-s9a3b1`），只有两处差异：
+
+```bash
+# stub：指令表 + 与驱动共享的同一份 JSON
+PERI_STUB_PORT=9496 PERI_STUB_CHUNK_DELAY_MS=5 \
+PERI_STUB_COMMANDS="$(cat /private/tmp/peri-swarm-s9a3b1/stub-commands.json)" \
+  node peri-swarm/scripts/local_model_stub.mjs
+
+# 驱动
+NODE_PATH=/tmp/peri-swarm-s9/sdk/node_modules \
+PERI_SWARM_BASE_URL=http://127.0.0.1:18080/v1 \
+PERI_SWARM_API_KEY=<test-gateway-key> \
+PERI_MODEL_STUB_URL=http://127.0.0.1:9496 \
+PERI_SWARM_BUN_URL=http://127.0.0.1:8081 \
+PERI_SWARM_BUN_TOKEN=<test-bun-token> \
+PERI_SWARM_SANDBOXES_ROOT=/Users/konghayao/.peri-swarm/sandboxes \
+PERI_STUB_COMMANDS="$(cat /private/tmp/peri-swarm-s9a3b1/stub-commands.json)" \
+PERI_E2E_OUT=/private/tmp/peri-swarm-s9a3b1/logs/e2e.json \
+  node peri-swarm/scripts/sdk_hosted_share_e2e.mjs
+```
+
+### 11.2 A/B/C 身份
+
+| 字段 | A | B | C |
+| --- | --- | --- | --- |
+| session id | `agent-01a1fa1d-e234-7450-9af3-85362291c81e` | `agent-01a1fa1d-f3f3-7870-872e-a3d51afe4827` | `agent-01a1fa1e-0fd4-71e1-a275-d3710608e340` |
+| rootSessionId | `01a1fa1d-e240-7511-be85-8df63358e522` | `01a1fa1d-f401-7b71-a407-bf27ab05cf84` | `01a1fa1e-0fe4-78f2-9a66-e749dc70cad2` |
+| `environment.id` | `env_01a1fa1d-e294-7241-bea9-c03b959136fc` | `env_01a1fa1d-f43e-72a3-910f-02f32f725f09` | 与 A 相同 |
+| sandboxId | `sbx_65211ce9f47de65c853291b08206d54f` | `sbx_cc2ee4c708f9dfb21d75117f62ec7274` | 与 A 相同 |
+| workspacePath | `~/.peri-swarm/sandboxes/sbx_6521…/workspace` | `~/.peri-swarm/sandboxes/sbx_cc2e…/workspace` | 与 A 相同 |
+| runId | `run_2dac1fa230a2499161c15ff2` | `run_9df295dacea152a6d3571416` | 与 A 相同 |
+| create 返回 | `reserved`、`runId:null`（1148 ms） | `reserved`、`runId:null`（1197 ms） | `ready`、A 的 `runId`（1098 ms） |
+| session cwd（宿主） | `/private/tmp/peri-swarm-s9a3b1/workspace/agent-01a1fa1d-e234…` | 同前缀 `agent-01a1fa1d-f3f3…` | 同前缀 `agent-01a1fa1e-0fd4…` |
+
+C 的创建走 `environment.environment_id` 复用路径：`environment.id` 回显 A 的
+逻辑环境 id，Bun 预留返回同一个 ready 实例，`swarm_bindings` 记录同一
+`sandboxId` 与 `lastRunId`（`bindings.json` 中该 env 的
+`sandboxId=sbx_6521…`、`lastRunId=run_2dac…`）。
+
+### 11.3 文件隔离与共享读取（工具结果为证）
+
+| 断言 | 工具输出（Bash result 原文） |
+| --- | --- |
+| A 写 `a.txt` | `a-file=a-content`；`pwd=<A 的 sandbox workspace>` |
+| B 的沙箱没有 `a.txt` | `a-absent` |
+| B 写 `b.txt` | `b-file=b-content` |
+| A 看不到 B 的 `b.txt`（B 写完后） | `b-absent`；`listing=a.txt,` |
+| A 宿主侧的 workspace 目录 | 仅 `a.txt` |
+| C 读 A 的文件 | `c-read=a-content` |
+| B 宿主侧的 `b.txt` | 存在，内容 `b-content`；B 的 workspace 无 `a.txt` |
+
+A/C 的宿主 workspace 是同一个目录；B 的 `sbx_cc2e…` 目录独立。驱动同时检查了
+宿主侧文件（不只看工具输出）：A 的 `workspace` 只含 `a.txt`，B 的含 `b.txt`。
+
+### 11.4 启动计数：A 启动一次，C 复用同一进程
+
+| 阶段 | Bun 视图 | runId | SRT 进程组 | 进程（pid / ppid / pgid / lstart） |
+| --- | --- | --- | --- | --- |
+| A 创建 | `reserved` | `null` | 0 | — |
+| A 首个工具调用后 | `ready` | `run_2dac…` | 1（pgid 83707） | 83707（SRT CLI，ppid=Bun 77342）、83709（Peri provider，ppid 83707），均为 `02:00:27` |
+| B 首个工具调用后 | `ready` | `run_9df2…` | 1（pgid 84051） | 84051/84053，`02:00:32` |
+| C 首个调用前 | `ready` | `run_2dac…` | 1（pgid 83707） | 同一对 pid |
+| C 首个调用后 | `ready` | `run_2dac…` | 1（pgid 83707） | pid 与 lstart 不变 |
+| 并发/取消阶段后 | `ready` | `run_2dac…` | 1（pgid 83707） | 不变 |
+
+C 的创建没有新建 SRT：pgid、pid、`lstart`、`runId`、`bindings.json.lastRunId`
+在 C 的首个 `tools/call` 前后完全一致。B 是独立的第二个进程组。
+
+### 11.5 并发（phase 1）：A 与 C 同时输入
+
+`POST /events` 在整轮结束后才返回（`submit_input` 内 `run_turn().await`），
+因此并发必须两个请求同时在途；驱动用 `startTurn` 先发起两个 POST，再等待结果。
+
+| 时刻（UTC） | 事件 |
+| --- | --- |
+| 18:00:40.979 | A、C 的 SSE 打开；两条输入在同一次 tick 内发出 |
+| 18:00:41.195 | 中止 C 的 SSE 订阅（C 已收到 1 个事件） |
+| 18:00:42.577 / 42.718 | stub 记录 slow-c / slow-a 的 tool turn |
+| 18:00:44.006 | A 的 final turn（C 仍在执行工具） |
+| 18:00:44.557 | C 的 final turn |
+| 18:00:45.476 | A 的 SSE `turn:completed`（`stopReason=end_turn`） |
+| 18:00:46.643 | C 的 item log 完成（订阅已中止） |
+
+- 交错证据：C 的 tool turn 早于 A 的 final turn，A 的 tool turn 早于 C 的 final
+  turn，两个会话的主调用真实重叠；两条输入的开始时间相差 0 ms。
+- 工具结果：A `a-done=a-content|a-concurrent`；C `c-start=a-content`、
+  `c-end=a-content|a-concurrent`（C 在同一轮内的后一次读取看到了 A 并发追加的
+  内容，共享 workspace 的写入可见）。
+- 订阅中止不影响执行：C 的 SSE 以 `closed` 结束（无异常），item log 仍有完整
+  tool_call → tool_result → message；重新以 `after=8` 打开 SSE 可重放
+  seq 9..17（`turn` 状态事件不持久化，与 §5.4 一致）。
+- 消息隔离：A 的 item log 不含 `c-start=/c-end=/c-read=`，C 的 item log 不含
+  `a-done=/a-file=/a-tail=`；各自完成消息（message:complete）与 stub 的 final
+  turn 文本一致。
+- workspace 末态：`a.txt = "a-content\na-concurrent"`（A 的追加只出现一次）。
+
+### 11.6 取消隔离（phase 2）：取消 C 不影响 A
+
+| 时刻（UTC） | 事件 |
+| --- | --- |
+| 18:00:47.951 | A、C 同时发起（`cancel-a` / `cancel-c`，后者 `sleep 20`） |
+| 18:00:50.155 | C 的 tool_call 落入 item log（seq 19；stub 于 49.856 发出） |
+| 18:00:50.2 左右 | `POST /events {kind:"control", mode:"turn", text:"cancel"}` 发往 C |
+| 18:00:51.237 | cancel 返回 `accepted=true, disposition=inserted, lastItemSeq=20` |
+| 18:00:51.987 | A、C 的 SSE 终态；随后两个 `/events` 返回 |
+
+- C：`turn:completed`，`stopReason=cancelled`；tool_result 为
+  `failed` / `interrupted by user\n[Execution status: cancelled]`；取消后没有新的
+  最终消息。
+- A：`stopReason=end_turn`，工具结果 `a-cancel-done=a-content|a-concurrent|a-cancel-phase`，
+  final 文本来自本轮自己的 stub 回复；item log 不含 C 的输出。
+- A 的工具 turn 在 C 进入被取消工具调用时仍在运行（stub 时间戳），取消没有中断
+  另一个会话，也没有改变共享 SRT 进程组（pgid 83707）或 runId。
+- 取消后共享 workspace 仍可用：A 的追加落盘，`a.txt =
+  "a-content\na-concurrent\na-cancel-phase"`。
+
+### 11.7 stub 计数与 teardown
+
+- stub：`mainCalls=15`、`toolCalls=8`、`helperCalls=8`、`otherCalls=0`；
+  8 个 directive 各有一个 tool turn，`cancel-c` 因在工具调用中被取消而没有 final
+  turn；其余 7 个 directive 各有 tool + final（`mainCalls = 8 + 7`）。
+- teardown（只删本测试的两个环境）：
+
+```text
+DELETE /v1/sandboxes/env_01a1fa1d-e294-…?deleteData=true
+→ {"logicalEnvId":"env_01a1fa1d-e294-…","closed":true,"deletedData":true}   (A/C 共享环境)
+GET → 404；sandbox 目录不存在；SRT 进程组 0
+DELETE /v1/sandboxes/env_01a1fa1d-f43e-…?deleteData=true
+→ 同上；GET → 404；0 进程组
+```
+
+- `~/.peri-swarm/sandboxes` 回到测试前基线：无 sandbox 目录，`bindings.json`
+  为 `{}`；
+- 端口：8081/9496/9497/6420/18080 全部关闭，仅 8080 仍为用户 OrbStack；
+  `ps` 无 `sandbox-runtime` / `mcp-start` / `peri-swarm` / stub 残留；
+- 驱动断言：154/154 通过（含身份、隔离、启动计数、并发、取消、teardown）。
+
+### 11.8 观测与局限
+
+- **观察（非本阶段修复）**：`message:complete` 可能先于最后几个
+  `agent_message_chunk` 落盘。item log 仍完整：同一 `messageId` 的 complete +
+  后续 delta 拼接后等于 stub 的 final 文本。本阶段 6 次完整运行中 3 次出现
+  （`cLateDeltas` 分别为 1、1、2），都发生在被中止 SSE 订阅的 C 轮；A 轮的
+  `aLateDeltas` 始终为 0；本次运行 `cLateDeltas=0`。机制上 `reader.rs` 的
+  `settle()` 只有 15 ms 静默窗口（`INGEST_SETTLE_WINDOW`），通知分发出现 >15 ms
+  抖动时会复现；与中止是否存在因果关系未证实。驱动按“complete + 同 messageId
+  的后续 delta”重建文本并在证据里保留 `lateDeltas` 计数；未改网关代码。
+- 模型是确定性 stub；工具命令由输入 directive 选定，不覆盖真实模型的计划能力。
+- 客户端 SSE 中止（`AbortController`）与 `kind=control` cancel 是两种不同的
+  “取消”路径；本阶段都只验证了“另一会话不受影响”，不验证取消后的会话复用。
+- 重连、`after` 游标跨断线续读的完整语义、同一 `inputId` 的幂等重放留 S9a3b2。
+- 本阶段未覆盖网关/actor 重启后的环境恢复（`environment_id` 重新绑定）。
+- 原始 `e2e.json`、stub/Bun/gateway 日志在 `/private/tmp/peri-swarm-s9a3b1/logs/`，
+  不入库。

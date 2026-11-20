@@ -15,14 +15,26 @@
 // `finish_reason` is `tool_calls`. The next main call (which carries the tool
 // message) returns the usual text reply.
 //
-// The reply is a pure function of the last user message and the main-call
-// index, so a repeated run produces the same text for the same input:
+// S9a3b1 makes the tool command a function of the *input*: the last user
+// message may carry `[[tool:<name>]]`, resolved against `PERI_STUB_COMMANDS`
+// (a JSON object of name -> shell command). That turn-scoped decision is
+// stateless and concurrency-safe: a tool call is emitted only while the
+// conversation after the directive-bearing user message has no `tool` result
+// yet, so several sessions can interleave turns on one stub. The legacy
+// `PERI_STUB_TOOL_COMMAND` single-tool-turn behaviour is unchanged for
+// requests without a directive.
+//
+// The reply is a pure function of the turn's user text (the directive-bearing
+// message when present, else the last user message) and the main-call index, so
+// a repeated run produces the same text for the same input:
 //
 //     stub-echo:<sha1(normalized text)[0..12]>#<main call index>
 //
 // Usage:
 //     node peri-swarm/scripts/local_model_stub.mjs
 //     PERI_STUB_PORT=9496 node peri-swarm/scripts/local_model_stub.mjs
+//     PERI_STUB_COMMANDS='{"write-a":"printf a-content > a.txt"}' \
+//       node peri-swarm/scripts/local_model_stub.mjs
 //
 // Introspection used by the SDK driver:
 //     GET  /healthz   -> liveness + call counters
@@ -40,6 +52,36 @@ const CHUNK_SIZE = Number(process.env.PERI_STUB_CHUNK ?? '6');
 const CHUNK_DELAY_MS = Number(process.env.PERI_STUB_CHUNK_DELAY_MS ?? '15');
 const MAX_TURNS = 64;
 const TOOL_COMMAND = process.env.PERI_STUB_TOOL_COMMAND ?? 'echo hello-from-swarm > hello.txt';
+/** The single-tool-turn fallback is opt-in: it needs the explicit command. */
+const TOOL_FALLBACK_ENABLED = process.env.PERI_STUB_TOOL_COMMAND !== undefined;
+const DIRECTIVE_PATTERN = /\[\[tool:([A-Za-z0-9._-]+)\]\]/;
+
+/** `PERI_STUB_COMMANDS` is a JSON object of directive name -> shell command. */
+function parseCommands(raw) {
+  if (raw === undefined || raw.trim().length === 0) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    console.error(`[model-stub] PERI_STUB_COMMANDS is not JSON: ${error.message}`);
+    process.exit(2);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error('[model-stub] PERI_STUB_COMMANDS must be a JSON object');
+    process.exit(2);
+  }
+  const commands = {};
+  for (const [name, command] of Object.entries(parsed)) {
+    if (!/^[A-Za-z0-9._-]+$/.test(name) || typeof command !== 'string' || command.trim().length === 0) {
+      console.error(`[model-stub] invalid PERI_STUB_COMMANDS entry: ${JSON.stringify(name)}`);
+      process.exit(2);
+    }
+    commands[name] = command;
+  }
+  return commands;
+}
+
+const COMMANDS = parseCommands(process.env.PERI_STUB_COMMANDS);
 
 const state = {
   mainCalls: 0,
@@ -116,6 +158,46 @@ function bashToolName(body) {
 
 function hasToolResult(body) {
   return messagesOf(body).some((message) => message?.role === 'tool' || message?.role === 'function');
+}
+
+/**
+ * Whether the *current* turn already ran its tool call. The turn is bounded by
+ * the user message that carries the directive, not by the last user message:
+ * Peri appends a `<system-reminder>` capability message as the final user
+ * message of every request, so "since the last user message" would never see
+ * the tool result and would call the tool again forever.
+ */
+function toolResultSinceDirective(body) {
+  const messages = messagesOf(body);
+  let directiveIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== 'user') continue;
+    if (DIRECTIVE_PATTERN.test(messageText(message?.content))) {
+      directiveIndex = index;
+      break;
+    }
+  }
+  if (directiveIndex < 0) return hasToolResult(body);
+  return messages
+    .slice(directiveIndex + 1)
+    .some((message) => message?.role === 'tool' || message?.role === 'function');
+}
+
+/** Text of the last user message carrying `[[tool:<name>]]`. */
+function directiveTextOf(body) {
+  const users = messagesOf(body).filter((message) => message?.role === 'user');
+  for (let index = users.length - 1; index >= 0; index -= 1) {
+    const text = messageText(users[index]?.content);
+    if (DIRECTIVE_PATTERN.test(text)) return text;
+  }
+  return null;
+}
+
+/** `[[tool:<name>]]` in a user message selects the tool command. */
+function directiveOf(text) {
+  const match = DIRECTIVE_PATTERN.exec(text);
+  return match === null ? null : match[1];
 }
 
 function lastUserText(body) {
@@ -306,20 +388,50 @@ async function handleChat(_request, response, body) {
 
   state.mainCalls += 1;
   const index = state.mainCalls;
-  const userText = lastUserText(body);
+  const directiveText = directiveTextOf(body);
+  // The reply digest follows the turn's own directive text, not the trailing
+  // `<system-reminder>` user message (which is identical for every turn).
+  const userText = directiveText ?? lastUserText(body);
   const bashName = bashToolName(body);
-  // One tool turn per run: emit the workspace Bash call only while the request
-  // still advertises it and the conversation carries no tool result yet.
-  if (bashName !== null && state.toolCalls === 0 && !hasToolResult(body)) {
+  const directive = directiveText === null ? null : directiveOf(directiveText);
+  const directiveCommand = directive === null ? undefined : COMMANDS[directive];
+  if (directive !== null && directiveCommand === undefined) {
+    state.otherCalls += 1;
+    state.otherRequests.push({
+      model,
+      reason: `unknown tool directive ${directive}`,
+      at: new Date().toISOString(),
+    });
+    console.error(`[model-stub] main call #${index} unknown tool directive ${directive}`);
+    return sendJson(response, 400, { error: { message: `unknown tool directive: ${directive}` } });
+  }
+  if (directiveCommand !== undefined && bashName === null) {
+    state.otherCalls += 1;
+    state.otherRequests.push({
+      model,
+      reason: `tool directive ${directive} without a Bash tool`,
+      at: new Date().toISOString(),
+    });
+  }
+  // S9a3b1: a directive is a per-turn tool request and stays enabled for every
+  // turn of every session. The legacy path keeps the S9a2 "one tool turn per
+  // run" contract and only runs when `PERI_STUB_TOOL_COMMAND` was set.
+  const directiveTurn =
+    directiveCommand !== undefined && bashName !== null && !toolResultSinceDirective(body);
+  const legacyTurn =
+    TOOL_FALLBACK_ENABLED && bashName !== null && state.toolCalls === 0 && !hasToolResult(body);
+  if (directiveTurn || (directiveCommand === undefined && legacyTurn)) {
     state.toolCalls += 1;
     const callId = `call_stub_${index}`;
-    const argumentsText = JSON.stringify({ command: TOOL_COMMAND });
+    const command = directiveTurn ? directiveCommand : TOOL_COMMAND;
+    const argumentsText = JSON.stringify({ command });
     state.turns.push({
       n: index,
       kind: 'tool_call',
       toolName: bashName,
       callId,
       arguments: argumentsText,
+      directive,
       toolNames: toolNames(body),
       lastUserText: userText.slice(0, 400),
       messageCount: messagesOf(body).length,
@@ -340,6 +452,7 @@ async function handleChat(_request, response, body) {
     n: index,
     kind: 'final',
     reply,
+    directive,
     lastUserText: userText.slice(0, 400),
     toolNames: toolNames(body),
     toolResultSeen: hasToolResult(body),
@@ -398,6 +511,7 @@ const server = http.createServer(async (request, response) => {
       helperCalls: state.helperCalls,
       otherCalls: state.otherCalls,
       toolCalls: state.toolCalls,
+      directives: Object.keys(COMMANDS),
       turns: state.turns,
       otherRequests: state.otherRequests,
     });
