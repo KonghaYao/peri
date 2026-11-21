@@ -496,6 +496,26 @@ fn https_engine_endpoints_are_rejected_until_tls_is_designed() {
 }
 
 #[test]
+fn a_public_or_unspecified_literal_endpoint_is_rejected() {
+    // The engine token must never leave for a public address; this is the
+    // environment-level check of the rule owned by `config::validate_rivet_endpoint`.
+    for (value, expected) in [
+        ("http://192.0.2.1:6420", "public address"),
+        ("http://8.8.8.8:6420", "public address"),
+        ("http://0.0.0.0:6420", "unspecified address"),
+        ("http://[::]:6420", "unspecified address"),
+        ("http://[2001:db8::1]:6420", "public address"),
+    ] {
+        let reason = expect_invalid(
+            parse(&[(RIVET_ENDPOINT_ENV, Some(value))]),
+            RIVET_ENDPOINT_ENV,
+        );
+        assert!(reason.contains(expected), "{value}: {reason}");
+        assert!(reason.contains(value), "{value}: {reason}");
+    }
+}
+
+#[test]
 fn engine_endpoint_shape_is_validated() {
     for (value, expected) in [
         ("ws://127.0.0.1:6420", "http"),

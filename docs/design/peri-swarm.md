@@ -16,8 +16,8 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 非目标：
 
-- 不做跨机调度、租约或 fencing；网关默认只绑定 loopback，
-  `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 允许在受信任入口之后绑定私网地址，鉴权仍是
+- 不做跨机调度、租约或 fencing；网关默认只绑定 loopback，非 loopback 绑定（含
+  `0.0.0.0`）需要 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 显式开关并输出 WARN；鉴权仍是
   单个部署 Bearer，TLS 必须由该入口终止。
 - 副本组共享同一 engine、namespace/pool 与两个 Loom 库；多副本不改变本机的恢复
   语义（§7），也不提供跨实例在途 turn 接管。
@@ -272,9 +272,14 @@ Rivet：
   `PERI_SWARM_RIVET_ENGINE_SPAWN=always` 在 `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1` 时按需
   拉起本地 engine。副本组的进程只有共享同一 engine、namespace、pool、两个 Loom 库
   与部署身份时才看到同一批 actor。
-- 配置面：`PERI_SWARM_RIVET_ENDPOINT`（仅私网明文 `http`，必须显式端口；`https`
-  显式拒绝，engine TLS 终止需另行设计）、`PERI_SWARM_RIVET_TOKEN_ENV`（**变量名**，
-  不是值）、`PERI_SWARM_RIVET_NAMESPACE`、`PERI_SWARM_RIVET_POOL`、
+- 配置面：`PERI_SWARM_RIVET_ENDPOINT`（仅明文 `http`，必须显式端口：写下默认端口
+  `http://host:80`、`http://[::1]:80` 也算显式；`https` 显式拒绝，engine TLS 终止需
+  另行设计）。字面地址只接受 loopback（`127.0.0.0/8`、`::1`）、RFC1918（`10/8`、
+  `172.16/12`、`192.168/16`）、ULA（`fc00::/7`）与 link-local（`169.254/16`、
+  `fe80::/10`）；公网、`0.0.0.0`、`::`、组播与广播字面地址在解析阶段失败。域名不做
+  DNS 解析而直接接受，由部署保证指向私网或环回。其余配置面：
+  `PERI_SWARM_RIVET_TOKEN_ENV`（**变量名**，不是值）、
+  `PERI_SWARM_RIVET_NAMESPACE`、`PERI_SWARM_RIVET_POOL`、
   `PERI_SWARM_RIVET_ENGINE_SPAWN`（`always`/`auto`/`never`）。token 值只在启动时
   解析一次；启动日志只记录 endpoint/namespace/pool/spawn。
 - namespace 与 pool 是部署身份：一个环境一套；多个环境共用一个 engine 时必须使用
@@ -348,10 +353,11 @@ Bun：
    与多轮副作用未验收。
 4. **1000 Agent 规模与单 engine 容量**：没有吞吐、并发会话、单 engine 节点的容量或
    多副本压力证据；actor 的并发 SSE 观看者与 engine 池容量都未经真实压力验证。
-5. **生产 TLS 与入口鉴权**：网关默认只绑定 loopback；显式开关允许非 loopback
-   绑定，但 Bearer 是唯一鉴权、TLS 必须由受信任入口终止，组合后的链路未验收。
-   Rivet endpoint 只支持私网明文 HTTP；Loom 侧只能用 loopback HTTP。生产 TLS 与
-   证书轮换未实现。
+5. **生产 TLS 与入口鉴权**：网关默认只绑定 loopback；非 loopback 绑定（含
+   `0.0.0.0`）需要 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 显式开关，启动时输出 WARN；
+   Bearer 是唯一鉴权、TLS 必须由受信任入口终止，组合后的链路未验收。Rivet endpoint
+   只接受私网/环回字面地址或由部署保证指向私网/环回的域名，且只支持明文 HTTP；Loom
+   侧只能用 loopback HTTP。生产 TLS 与证书轮换未实现。
 6. **Linux SRT**：`peri-sandbox` 有 `systemd-run` 路径，但本链路只在 macOS 的
    `sandbox-exec` 上验收；Linux 沙箱与回收行为未验证。
 7. **真实模型工具调用**：工具 wire、冷/热分界与结果回填已在 stub 驱动下验证；

@@ -237,3 +237,109 @@ fn workspace_root_must_exist() {
     let error = parse(env).expect_err("missing workspace root");
     assert!(error.to_string().contains(WORKSPACE_ROOT_ENV));
 }
+
+const RIVET_ENDPOINT_VAR: &str = "PERI_SWARM_RIVET_ENDPOINT";
+
+fn validate_endpoint(value: &str) -> Result<url::Url, ConfigError> {
+    validate_rivet_endpoint(value, RIVET_ENDPOINT_VAR)
+}
+
+#[test]
+fn rivet_endpoint_accepts_loopback_private_ula_and_link_local_literals() {
+    for value in [
+        "http://127.0.0.1:6420",
+        "http://127.255.255.255:6420",
+        "http://10.1.2.3:6420",
+        "http://10.255.255.255:6420",
+        "http://172.16.0.1:6420",
+        "http://172.31.255.255:6420",
+        "http://192.168.1.1:6420",
+        "http://192.168.255.255:6420",
+        "http://169.254.1.1:6420",
+        "http://169.254.255.255:6420",
+        "http://[::1]:6420",
+        "http://[fc00::1]:6420",
+        "http://[fd00::1]:6420",
+        "http://[fe80::1]:6420",
+        "http://[febf::1]:6420",
+    ] {
+        let url = validate_endpoint(value).unwrap_or_else(|error| panic!("{value}: {error}"));
+        assert_eq!(url.scheme(), "http", "{value}");
+    }
+}
+
+#[test]
+fn rivet_endpoint_accepts_domains_without_resolving_them() {
+    // No DNS lookup happens here: the deployment owns the private mapping.
+    for value in [
+        "http://rivet.internal:6420",
+        "http://engine.invalid:6420",
+        "http://localhost:6420",
+    ] {
+        validate_endpoint(value).unwrap_or_else(|error| panic!("{value}: {error}"));
+    }
+}
+
+#[test]
+fn rivet_endpoint_rejects_non_private_literal_addresses() {
+    for (value, expected) in [
+        ("http://192.0.2.1:6420", "public address"),
+        ("http://8.8.8.8:6420", "public address"),
+        ("http://172.32.0.1:6420", "public address"),
+        ("http://192.169.0.1:6420", "public address"),
+        ("http://169.255.0.1:6420", "public address"),
+        ("http://0.0.0.0:6420", "unspecified address"),
+        ("http://224.0.0.1:6420", "multicast address"),
+        ("http://255.255.255.255:6420", "broadcast address"),
+        ("http://[::]:6420", "unspecified address"),
+        ("http://[2001:db8::1]:6420", "public address"),
+        ("http://[ff02::1]:6420", "multicast address"),
+        ("http://[fec0::1]:6420", "public address"),
+    ] {
+        let error = validate_endpoint(value).expect_err(value);
+        let message = error.to_string();
+        assert!(message.contains(expected), "{value}: {message}");
+        // The message names the endpoint and the variable, not just "invalid".
+        assert!(message.contains(RIVET_ENDPOINT_VAR), "{value}: {message}");
+        assert!(message.contains(value), "{value}: {message}");
+    }
+}
+
+#[test]
+fn rivet_endpoint_accepts_a_written_default_port_and_still_requires_a_port() {
+    for value in ["http://host:80", "http://127.0.0.1:80", "http://[::1]:80"] {
+        let url = validate_endpoint(value).unwrap_or_else(|error| panic!("{value}: {error}"));
+        assert_eq!(url.port_or_known_default(), Some(80), "{value}");
+    }
+
+    for value in [
+        "http://host",
+        "http://127.0.0.1",
+        "http://[::1]",
+        "http://host/path",
+    ] {
+        let error = validate_endpoint(value).expect_err(value);
+        assert!(
+            error.to_string().contains("explicit port"),
+            "{value}: {error}"
+        );
+    }
+
+    let error = validate_endpoint("http://host:80/path").expect_err("path");
+    assert!(error.to_string().contains("path must be empty"), "{error}");
+}
+
+#[test]
+fn rivet_endpoint_keeps_the_plaintext_and_shape_rules() {
+    for (value, expected) in [
+        ("https://127.0.0.1:6420", "plaintext"),
+        ("ws://127.0.0.1:6420", "scheme must be http"),
+        ("http://user:pass@127.0.0.1:6420", "embedded credentials"),
+        ("http://127.0.0.1:6420/?a=1", "query and fragment"),
+        ("http://127.0.0.1:6420/#frag", "query and fragment"),
+        ("not-a-url", "expected a URL"),
+    ] {
+        let error = validate_endpoint(value).expect_err(value);
+        assert!(error.to_string().contains(expected), "{value}: {error}");
+    }
+}

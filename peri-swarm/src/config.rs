@@ -312,6 +312,14 @@ pub(crate) fn validate_store_locator(
 /// rather than silently downgraded; TLS termination for the engine needs its
 /// own design.
 ///
+/// The token travels to this endpoint, so a literal address must be private:
+/// loopback (`127.0.0.0/8`, `::1`), RFC1918 (`10/8`, `172.16/12`,
+/// `192.168/16`), ULA (`fc00::/7`) or link-local (`169.254/16`, `fe80::/10`).
+/// Public, unspecified (`0.0.0.0`, `::`), multicast and broadcast literals are
+/// rejected here. A domain is accepted **without DNS resolution**: the
+/// deployment is responsible for pointing it at a private or loopback
+/// address.
+///
 /// The endpoint must carry an explicit port and no userinfo, query, fragment
 /// or path (empty or `/`). Callers use the trailing-slash-free spelling so the
 /// default stays byte-identical to the former constant.
@@ -342,16 +350,92 @@ pub(crate) fn validate_rivet_endpoint(
             "query and fragment are not allowed",
         ));
     }
-    if url.host_str().is_none() {
-        return Err(ConfigError::invalid(variable, "host is required"));
-    }
-    if url.port().is_none() {
+    ensure_private_engine_host(&url, variable)?;
+    // `Url::port()` is not enough here: it reports `None` for the scheme's
+    // default port, so a written-out `http://host:80` would be mistaken for a
+    // missing port. Ask the raw authority instead.
+    if !has_explicit_port(value) {
         return Err(ConfigError::invalid(variable, "explicit port is required"));
     }
     if !matches!(url.path(), "" | "/") {
         return Err(ConfigError::invalid(variable, "path must be empty or /"));
     }
     Ok(url)
+}
+
+/// Accept a literal engine address only when it cannot be a public host.
+///
+/// A domain is deliberately accepted without resolution: refusing it would
+/// either require DNS at parse time or reject every deployment using an
+/// internal name. The documented contract puts that guarantee on the
+/// deployment.
+fn ensure_private_engine_host(url: &Url, variable: &'static str) -> Result<(), ConfigError> {
+    let Some(host) = url.host() else {
+        return Err(ConfigError::invalid(variable, "host is required"));
+    };
+    let rejection = match host {
+        url::Host::Domain(_) => return Ok(()),
+        url::Host::Ipv4(addr) => {
+            if addr.is_loopback() || addr.is_private() || addr.is_link_local() {
+                return Ok(());
+            }
+            if addr.is_unspecified() {
+                "the unspecified address"
+            } else if addr.is_multicast() {
+                "a multicast address"
+            } else if addr.is_broadcast() {
+                "the broadcast address"
+            } else {
+                "a public address"
+            }
+        }
+        url::Host::Ipv6(addr) => {
+            if addr.is_loopback() || addr.is_unique_local() || addr.is_unicast_link_local() {
+                return Ok(());
+            }
+            if addr.is_unspecified() {
+                "the unspecified address"
+            } else if addr.is_multicast() {
+                "a multicast address"
+            } else {
+                "a public address"
+            }
+        }
+    };
+    Err(ConfigError::invalid(
+        variable,
+        format!(
+            "engine endpoint {url} host {host} is {rejection}; use a loopback, RFC1918, ULA or \
+             link-local literal, or a domain that the deployment points at a private network"
+        ),
+    ))
+}
+
+/// Whether the raw URL spells a port.
+///
+/// `Url::port()` returns `None` when the authority carries the scheme's default
+/// port (`http://host:80`), so it cannot distinguish "wrote 80" from "wrote
+/// nothing". Read the raw authority instead, after trimming the whitespace the
+/// URL parser itself tolerates. Userinfo is rejected before this check; the
+/// `@` handling keeps the helper total anyway. Bracketed IPv6 uses `]:` as the
+/// port delimiter, so `[::1]:80` is recognized.
+fn has_explicit_port(value: &str) -> bool {
+    let Some((_, rest)) = value.trim().split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, tail)| tail);
+    let port = if let Some(rest) = host_port.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((_, after)) => after.strip_prefix(':'),
+            None => None,
+        }
+    } else {
+        host_port.rsplit_once(':').map(|(_, port)| port)
+    };
+    port.is_some_and(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Deployment identity for the engine (namespace and pool): non-empty, no
