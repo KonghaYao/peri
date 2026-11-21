@@ -410,7 +410,13 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 | 游标 | `after`/`afterSeq`；`Last-Event-ID` 等价；`cursor` 参数不支持 | 直接 HTTP 时用 header；SDK 用三实参 `events.stream` |
 | hosted 投影 | `sandbox.state` 恒 `null`；`runId` 只保留预留时 Bun 返回的值 | 需要实时状态时查 Bun `GET /v1/sandboxes/{logicalEnvId}` |
 | `environment.type=none` | `id` 等于 logicalId，不是 sandbox id，且无 `sandbox` 字段 | 不要把它当 sandbox id |
-| turn 用量/错误 | `turn.usage` 恒 `null`；失败 `turn.error` 只在实时帧带 `{code:"internal_error"}`，回放为 `null` | 计费与失败详情看网关日志；不要依赖 `usage` |
+| turn 用量/错误 | `turn.usage` 恒 `null`；失败 `turn.error` 只在实时帧带 `{code:"internal_error"}`，SSE 回放为 `null`，`turns.retrieve` 读持久化的 error | 计费看网关日志；失败详情优先 `turns.retrieve` |
+| 会话字段命名 | `metadata`、`prompt_cache_options` 用官方名；官方 `created_at`/`last_active_at`/`usage` 等字段不出现，时间用 Swarm 的 `createdAt`/`lastActivityAt`（字符串） | 读 Swarm 字段；不要把官方 `created_at` 当作存在 |
+| `sessions.list` 排序 | 按 `logicalId` 排序，不是创建时间；默认 `desc`；`agent_id` 只认 `root`（其他值返回空页）；`metadata[key]=value` 最多 16 对、精确匹配 | 不要依赖 `agent_id` 过滤子 agent；需要创建时间顺序时本地排序 |
+| `sessions.update` 字段 | 只映射 `agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`agent.reasoning`/`agent.service_tier`/`review` 返回 `400 invalid_request`；`PATCH` 返回 `405` | 用官方 `POST`；只发已映射字段 |
+| `sessions.delete` | 级联删除 items/inputs/turns/bindings；同一 `logicalId` 重新 create 是新会话；live 运行中 `409`，崩溃遗留 `running` 行 `502 session_resume_required` | 删除前确认会话 idle；重建后重新准备输入/沙箱 |
+| turns | `turns.list/retrieve` 读持久表；`usage`/`subagent_id` 恒 `null`，`agent_id=root`；取消持久为 `cancelled`；`turns/{id}/items` 等未映射资源返回 `404 unsupported_contract` | 取消状态以 `turns.retrieve` 为准；SSE 回放中较早的取消仍显示 `completed` |
+| prompt cache 生效 | `prompt_cache_options` 持久化并回显；本地模型链是否使用该 TTL 未验证 | 需要缓存 TTL 时在模型侧另行配置 |
 
 ```js
 // 单条输入：不要用 sessions.events.create
@@ -425,6 +431,28 @@ const live = await client.beta.agents.sessions.events.stream(id, { after: tail }
 const page = await client.beta.agents.sessions.items.list(id, { order: 'asc', after, limit: 50 });
 const body = /** @type {any} */ (page).body;
 ```
+
+### sessions / turns
+
+| 方法 | 路径 | 语义 |
+| --- | --- | --- |
+| `GET` | `/v1/agents/sessions` | `sessions.list`：`after`（上一页末项 `logicalId`，排他）、`order`（默认 `desc`）、`limit`（1..=500，默认 20）、`agent_id`（仅 `root`）、`metadata[key]=value`（≤16 对，精确匹配）；响应 `{object:"list",data,has_more,hasMore,nextCursor}`，`nextCursor` 仅在 `has_more` 时给出；`cursor` → `400 invalid_query` |
+| `POST` | `/v1/agents/sessions/{logicalId}` | `sessions.update`（官方 SDK 用 POST；`PATCH` → 405）：`agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`metadata`/`prompt_cache_options` 省略保持、`null`/`{}` 清空、值整体替换；无 body 或 JSON `null` 是 no-op；`agent.model:null` 与未映射字段 → `400` |
+| `DELETE` | `/v1/agents/sessions/{logicalId}` | `sessions.delete` → `{id,object:"agent.session.deleted",deleted:true}`；级联 items/inputs/turns/bindings |
+| `GET` | `/v1/agents/sessions/{logicalId}/turns` | `turns.list`：`order`（默认 `desc`）、`limit`（1..=500，默认 20）、`after`（必须是本会话的 turn id，排他；无效 → `400 invalid_query`）；响应同上 |
+| `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | `turns.retrieve`：官方 Turn JSON；不属于该会话 → 404 |
+
+- 准入：`update`/`delete` 在 live 运行中或有未关闭 turn 时 `409 turn_in_progress`；无 live
+  runtime 但持久行 `running` 或仍有开放 turn 行时 `502 session_resume_required`（与
+  `ensure_live` 一致），不会先写后报错。
+- create attach：同一 `logicalId` 已存在时，省略 metadata/prompt cache 保持原值；显式不同
+  值 → `409 identity_conflict`。
+- turns 在 `begin_turn` 写入 `in_progress`，终态在 `finish_turn` 更新；pending 输入不落 turn
+  行；取消（`stop_reason="cancelled"`）持久为 `cancelled`，实时官方帧是 `turn.completed`
+  + `status="cancelled"`（不发送 `agent.session.turn.cancelled`）。
+- 未映射的官方资源一律显式 `404` + `unsupported_contract`（`details.resource`）：
+  `traces`、`artifacts`（含 `content`）、`subagents`、`subagents/{id}/items`、
+  `subagents/{id}/turns*`、`turns/{id}/items`。Bearer 校验先于 404。
 
 ### SSE 语义
 
@@ -515,7 +543,13 @@ stateDiagram-v2
 - 模型侧没有内置真实供应商；本地验收使用确定性 stub。真实模型需要
   `PERI_SWARM_SETTINGS_JSON` 中的 provider/profile 配置。
 - 只杀 Rust 宿主的 reattach 已实现且验证；未完成 turn（行状态 `running`）不会
-  `session/resume`，返回 `502 session_resume_required`。
+  `session/resume`，返回 `502 session_resume_required`。`update`/`delete` 对这类行同样
+  502，网关不提供强制清理；需要运维处理数据库。
+- `swarm_turns` 与新增列的迁移、`json_each` metadata 过滤、五表单事务删除目前只有 SQL
+  单测/内存实现证据；真实 Loom/Turso 未活体验证；两副本同时从旧库启动只有代码级重试，
+  未复现真实竞态。
+- `turns.usage`/`subagent_id` 恒 `null`；`prompt_cache_options` 只持久化/回显，本地模型链
+  是否使用未验证；`DELETE` 的真实 actor 销毁（`ctx.destroy`）未在真实 Rivet engine 验证。
 - 后台任务引用（MCP `resultType:"task"`）尚未进入空闲回收判定；长任务期间可能被
   回收，需要重新 ensure。
 - `sandbox.state` 在会话投影中固定为 `null`；`sandbox.runId` 只反映预留时 Bun 返回的值，
