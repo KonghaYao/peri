@@ -137,10 +137,11 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   （`details.field` 指向官方字段），不静默接受。model 或 MCP tools 变化会停止当前
   ACP host；下一次交互按新配置重新 attach，避免返回一个下一轮不会使用的旧配置。
 - 官方 `update(sessionID, body?: SessionUpdateParams | null | undefined)`
-  （`sessions.d.ts:76`）允许省略 body；SDK 此时不发 body 也不发 content-type。
-  网关把「无 body」（含无 content-type、`Content-Length: 0`）与 JSON `null` 都视为
-  **空更新**：返回当前 `SessionView`，不写任何行（含 `last_activity_at`），也不执行
-  在途/恢复准入判定。只有非空 body 才按上一条解析：非 JSON content-type
+  （`sessions.d.ts:76`）允许省略 body：官方 SDK 省略时发送 `{}`（`application/json`），
+  只有显式 `null` 才不发 body 也不发 content-type。网关把「无 body」（含无
+  content-type、`Content-Length: 0`）与 JSON `null` 都视为 **空更新**：返回当前
+  `SessionView`，不写任何行（含 `last_activity_at`），也不执行在途/恢复准入判定；
+  省略 body 时的 `{}` 同样不写行。只有非空 body 才按上一条解析：非 JSON content-type
   返回 `415 invalid_content_type`，JSON 语法错误返回 `400 invalid_request`；
   两者都不会被降级成 no-op。
 - `sessions.delete` 在 `swarm_sessions`、`swarm_items`、`swarm_inputs`、

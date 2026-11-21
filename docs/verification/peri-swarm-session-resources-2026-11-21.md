@@ -41,7 +41,7 @@
 | D7 create attach 的 metadata 语义与文档不一致 | `CreateSessionCommand` 的 `metadata`/`prompt_cache_options` 改为 `UpdateField` 三态；省略保持行内值且不冲突，显式值（含 `{}`/`null`）必须与行内一致，否则 `409 identity_conflict`；actor action 对 `Keep` 省略序列化，跨进程不把“省略”误读为 `null` |
 | D8 取消 turn 持久化为 `completed` | `finish_turn` 在 `stop_reason == "cancelled"` 时持久 `TurnStatus::Cancelled`，同一帧的官方 `turn.completed.turn.status` 也是 `cancelled`；`turns.list`/`turns.retrieve` 断言同一状态 |
 | D9 文档与证据 | 设计文档的动词、准入、404 清单、attach 语义、取消状态与字段拼写同步；本记录执行结果只写实际执行项 |
-| D10 官方 `update(id)` / `update(id, null)` 被判 `415` | update handler 读原始 body 并区分三态：空 body（含无 content-type、`Content-Length: 0`）与 JSON `null` 是空更新（`200` 当前投影，不写行）；非空 body 才校验 JSON content-type 与语法，非法 JSON 仍 `400 invalid_request`，不降级为 no-op |
+| D10 官方 `update(id, null)` 被判 `415` | `update(id)` 原本已发送 `{}` 并返回 `200`；只有显式 `update(id, null)`（无 body、无 content-type）被判 `415`。update handler 改读原始 body 并区分三态：空 body（含无 content-type、`Content-Length: 0`）与 JSON `null` 是空更新（`200` 当前投影，不写行）；`{}` 同样不写行；非空 body 才校验 JSON content-type 与语法，非法 JSON 仍 `400 invalid_request`，不降级为 no-op |
 
 ## 3. 行为矩阵
 
@@ -70,7 +70,7 @@
 | create attach 显式不同值，或行内非空时显式 `{}`/`null` | `409 identity_conflict` |
 | create/update `agent.model:null` | `400 invalid_request`，`details.field="agent.model"` |
 | PATCH `/v1/agents/sessions/{id}` | `405 Method Not Allowed`（官方动词只有 POST） |
-| POST update 无 body（无 content-type 或 `Content-Length: 0`）/ JSON `null` | `200` 当前 `SessionView`；不写行（含 `last_activity_at`），不做在途/恢复准入判定（官方 `update(id)` / `update(id, null)`） |
+| POST update 无 body（无 content-type 或 `Content-Length: 0`）/ JSON `null` | `200` 当前 `SessionView`；不写行（含 `last_activity_at`），不做在途/恢复准入判定。官方 `update(id, null)` 走此形态；`update(id)` 省略 body 时 SDK 发送 `{}`，同样不写行 |
 | POST update 非空 body + 非 JSON content-type | `415 invalid_content_type` |
 | POST update 非空 body + JSON 语法错误 | `400 invalid_request`，不会被当成 no-op |
 | POST update `metadata:{...}` | 整体替换 |
@@ -147,7 +147,7 @@ npx lefthook@1.13.6 run pre-commit
 
 | 命令 | 结果 |
 | --- | --- |
-| `cargo test -p peri-swarm` | **325 passed, 0 failed, 6 ignored** |
+| `cargo test -p peri-swarm` | **326 passed, 0 failed, 6 ignored** |
 | `cargo clippy -p peri-swarm --all-targets -- -D warnings` | 通过（0 error） |
 | `cargo fmt -p peri-swarm -- --check` | 通过 |
 | `lefthook run pre-commit`（npx 1.13.6） | 第一次运行：`check`/`clippy`/`fmt` 在 mise 安装 `rust@1.99.0` 时因无网络失败（`static.rust-lang.org` DNS 不可达），不是命令本身失败；`feature-catalog`/`layer-imports`/`tui-components` 通过。以 `MISE_DISABLE_TOOLS=rust` 复用已激活的 rustc 1.99.0 对**最终暂存内容**重跑同一 hook：**全部 6 个命令通过**（`check` 3.54s、`clippy` 10.68s、`fmt` 4.12s、`feature-catalog` 0.18s、`layer-imports` 1.21s、`tui-components` 0.11s） |
@@ -164,7 +164,7 @@ npx lefthook@1.13.6 run pre-commit
 | `mcp_injection_test` | 4 | 0 | 0 |
 | `openai_hosted_test` | 7 | 0 | 0 |
 | `rivet_actor_test` | 0 | 0 | 2 |
-| `session_resources_test` | 11 | 0 | 0 |
+| `session_resources_test` | 12 | 0 | 0 |
 | `streaming_test` | 14 | 0 | 0 |
 
 已知 flake：`openai_hosted_test::an_anonymous_hosted_session_reserves_a_bun_workspace`

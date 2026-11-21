@@ -541,9 +541,10 @@ async fn update_replaces_and_clears_official_fields() {
     assert_eq!(missing["error"]["code"], json!("unknown_agent"));
 }
 
-/// Official `sessions.update` allows `update(id)` / `update(id, null)`; the
-/// SDK then sends no body and no content-type. Those are empty updates, not a
-/// `415`, and they must not write any row.
+/// Official `sessions.update` allows `update(id)` / `update(id, null)`.
+/// Omitted body is sent as `{}` with JSON content-type; an explicit `null`
+/// sends no body and no content-type. Both are empty updates, not a `415`,
+/// and neither may write any row.
 #[tokio::test]
 async fn update_accepts_an_absent_or_null_body_as_a_no_op() {
     let harness = harness();
@@ -669,6 +670,10 @@ async fn a_null_agent_model_is_rejected_but_null_tools_clear() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+    // Without this precondition the final `mcp_tools.is_empty()` would pass
+    // vacuously if create had dropped the declaration instead of persisting it.
+    let before = stored_session(&harness, "agent-u").await;
+    assert!(!before.mcp_tools.is_empty(), "{:?}", before.mcp_tools);
 
     // `agent.tools:null` is the official "clear the declaration" spelling and
     // stays valid.
