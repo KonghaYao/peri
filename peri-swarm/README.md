@@ -395,28 +395,37 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 ## 官方 SDK 差异
 
 普通 SDK 初始化按官方文档；把 `baseURL` 指到 `http://127.0.0.1:8080/v1`，`apiKey` 用
-`PERI_SWARM_API_KEY`。下表只列差异。
+`PERI_SWARM_API_KEY`。
 
-| 差异 | 网关行为 | 调用方处理 |
-| --- | --- | --- |
-| 批量事件 | `sessions.events.create({events:[...]})` 仅接受单条 `agent.session.input.message`（一条 `role:"user"` message、纯 `input_text`）；多事件或其他类型返回 `400 invalid_input` | 单条事件用 `events.create`；多事件仍用同一 client 的 `client.post` 逐条提交 |
-| 未知字段 | 未知 query/body 字段返回 `400 unknown_field` | 只发文档字段；不要带官方 SDK 的额外参数 |
-| 状态字段 | `status` 是本地投影，只有 `idle` / `in_progress` / `failed`，不会出现 `requires_action` | 可正常读 `status`；不要实现审批等待分支 |
-| SSE 参数 | `events.stream(id, {after})` 的第二实参被当作 RequestOptions，`after` 丢失 | 必须 `events.stream(id, { after }, {})` |
-| items 默认顺序 | `items.list` 不传 `order` 时默认 `asc`（官方默认 `desc`）；`limit` 计 item 数 | 需要最新优先时显式传 `order: 'desc'` |
-| items 形状 | `data` 每项是 Swarm `ItemView`（`id`/`itemId`/`seq`/`kind`/`payload`），不是官方 `message`/`function_call` 结构；`items` 保留逐帧原始行 | 文本按 `payload.role` / `payload.text` 读；工具调用看自定义 `item` 帧 |
-| 官方帧覆盖 | 缺 `agent.session.created`（create-stream 首帧是自定义 `session`）；`turn.item.added` 只承载消息 item（用户输入、assistant 最终文本），工具调用/结果没有官方帧；`turn.subagent_id` 恒 `null` | 不要用官方 `toolHandlers`；工具调用消费自定义 `item` 帧 |
-| SSE 空流 | `after` 到末尾后不关闭，只发心跳 | 客户端超时、`AbortController`/`{ signal }`，或改用 `items.list` |
-| 游标 | `after`/`afterSeq`；`Last-Event-ID` 等价；`cursor` 参数不支持 | 直接 HTTP 时用 header；SDK 用三实参 `events.stream` |
-| hosted 投影 | `sandbox.state` 恒 `null`；`runId` 只保留预留时 Bun 返回的值 | 需要实时状态时查 Bun `GET /v1/sandboxes/{logicalEnvId}` |
-| `environment.type=none` | `id` 等于 logicalId，不是 sandbox id，且无 `sandbox` 字段 | 不要把它当 sandbox id |
-| turn 用量/错误 | `turn.usage` 恒 `null`；失败 `turn.error` 只在实时帧带 `{code:"internal_error"}`，SSE 回放为 `null`，`turns.retrieve` 读持久化的 error | 计费看网关日志；失败详情优先 `turns.retrieve` |
-| 会话字段命名 | `metadata`、`prompt_cache_options` 用官方名；官方 `created_at`/`last_active_at`/`usage` 等字段不出现，时间用 Swarm 的 `createdAt`/`lastActivityAt`（字符串） | 读 Swarm 字段；不要把官方 `created_at` 当作存在 |
-| `sessions.list` 排序 | 按 `logicalId` 排序，不是创建时间；默认 `desc`；`agent_id` 只认 `root`（其他值返回空页）；`metadata[key]=value` 最多 16 对、精确匹配 | 不要依赖 `agent_id` 过滤子 agent；需要创建时间顺序时本地排序 |
-| `sessions.update` 字段 | 只映射 `agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`agent.reasoning`/`agent.service_tier`/`review` 返回 `400 invalid_request`；`PATCH` 返回 `405` | 用官方 `POST`；只发已映射字段 |
-| `sessions.delete` | 级联删除 items/inputs/turns/bindings；同一 `logicalId` 重新 create 是新会话；live 运行中 `409`，崩溃遗留 `running` 行 `502 session_resume_required` | 删除前确认会话 idle；重建后重新准备输入/沙箱 |
-| turns | `turns.list/retrieve` 读持久表；`usage`/`subagent_id` 恒 `null`，`agent_id=root`；取消持久为 `cancelled`；`turns/{id}/items` 等未映射资源返回 `404 unsupported_contract` | 取消状态以 `turns.retrieve` 为准；SSE 回放中较早的取消仍显示 `completed` |
-| prompt cache 生效 | `prompt_cache_options` 持久化并回显；本地模型链是否使用该 TTL 未验证 | 需要缓存 TTL 时在模型侧另行配置 |
+- **官方**：OpenAI Agents SDK `openai@7.60.0` 与官方 API 的类型、文档约定。
+- **我们**：Peri Swarm 网关的实际行为。
+- 下表只列两者不一致的地方；一致的官方字段和流程不再重复。
+
+| 项目 | 官方 | 我们 | 调用方处理 |
+| --- | --- | --- | --- |
+| 批量事件 | `events.create({events:[...]})` 接受多条、多种输入事件（消息、取消、工具结果、审批响应等） | 只接受一条 `agent.session.input.message`（单条 user 文本）；多条或其他类型 → `400 invalid_input` | 单条用 `events.create`；多条用同一 client 的 `client.post` 逐条提交 |
+| 会话状态 | `idle` / `in_progress` / `requires_action` / `failed` | 只有 `idle` / `in_progress` / `failed`，不产生 `requires_action` | 不要实现审批等待分支 |
+| 会话时间字段 | `created_at`、`last_active_at`，Unix 秒（number） | 时间字段是 `createdAt`、`lastActivityAt`（字符串）；官方名字不出现 | 读 `createdAt` / `lastActivityAt` |
+| 会话其它字段 | `required_actions`、`vault_ids`、`usage`、`error`，以及 `agent.id` / `agent.tools` / `agent.reasoning` 等 | 不出现这些字段；`agent` 只有 `model` / `instructions`。`metadata`、`prompt_cache_options` 用官方名 | 不要依赖这些官方字段 |
+| `sessions.list` 的 `agent_id` | 可按任意根 agent id 过滤 | 只认 `root`；其他值返回空页 | 不要用它过滤子 agent |
+| `sessions.update` 字段 | `agent.model`、`agent.reasoning`、`agent.service_tier`、`agent.tools`（含函数与内置工具）、`metadata`、`prompt_cache_options`、`review` | 只映射 `agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`reasoning` / `service_tier` / `review` → `400 invalid_request`；`agent.model:null` → `400` | 只发已映射字段；要改 reasoning / service tier 需在别处配置 |
+| items 默认顺序 | `order` 默认 `desc`（最新优先） | 默认 `asc`（兼容既有客户端） | 需要最新优先时显式 `order:'desc'` |
+| items 形状 | `AgentSessionItem` 联合：message、reasoning、function_call、mcp_call、web_search_call、command_execution、subagent 调用等 | 每项是 Swarm `ItemView`（`id` / `itemId` / `seq` / `kind` / `payload`）；`items` 保留逐帧原始行（含 delta） | 文本读 `payload.role` / `payload.text`；工具调用看自定义 `item` 帧 |
+| 官方事件覆盖 | 完整事件集：`agent.session.created`、`turn.*`（含工具 item、文本 delta、cancelled）、`requires_action`、subagent 与环境事件等 | 只发 `turn.created` / `turn.item.added` / `turn.completed` / `turn.failed` + `agent.session.idle` / `agent.session.failed`，另有自定义 `item` / `turn` 帧；缺 `agent.session.created`；`turn.item.added` 只承载 message（user 与 assistant 最终文本）；没有工具调用的官方帧；`turn.subagent_id` 恒 `null` | 不要用官方 `toolHandlers`；工具调用消费自定义 `item` 帧 |
+| 环境投影 | `environment` 按类型给出实际内容：hosted 含 `files` / `network` / `packages` / `plugins` / `skills` 等；`none` 只有 `{type:"none"}` | 只有 `{type, id}`；hosted 的 `id` 是 logicalEnvId。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 只保留预留值。`none` 额外带 `id=logicalId`，`sandbox` 为 `null` | hosted 实时状态查 Bun `GET /v1/sandboxes/{logicalEnvId}`；不要把 `environment.id` 当 sandbox id |
+| turn 用量与错误 | `usage` 是 token 用量（未知时 `null`）；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；`error` 实时帧带 `{code:"internal_error"}`，SSE 回放为 `null`，`turns.retrieve` 读持久 error | 计费看网关日志；失败详情优先 `turns.retrieve` |
+| turns 字段 | `agent_id` 可为子 agent、`subagent_id` 可非空、`usage` 有值；`status` 含 `queued` / `waiting` | `agent_id` 恒 `root`、`subagent_id` 恒 `null`、`usage` 恒 `null`；只产生 `in_progress` / `completed` / `failed` / `cancelled` | 不要依赖子 agent 维度或用量 |
+| 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名）；Bearer 校验先于 404 | 不要调用；需要这些数据时另找来源 |
+| 删除会话 | 运行中必须先取消；返回 `agent.session.deleted`；物理清理可异步 | 运行中 `409 turn_in_progress`；无 live runtime 但持久 `running` → `502 session_resume_required`；五表级联同步删除；同一 `logicalId` 重建为新会话 | 删除前确认 idle；遇到 502 需运维处理数据库，网关不提供强删 |
+| prompt cache | 服务端按 `prompt_cache_options` 的 TTL 影响后续 turn 的缓存 | 只持久化并回显；本地模型链是否使用该 TTL 未验证 | 需要缓存 TTL 时在模型侧另行配置 |
+| SSE 续读 | 流参数只有 `include_obfuscation`，没有 `after`；从订阅时刻起只送新事件 | 额外支持 `after` / `afterSeq` / `Last-Event-ID` 回放；追平末尾后连接保持，只发心跳 | 用三实参 `events.stream(id, { after }, {})`；追平后自行超时或 abort，或改用 `items.list` |
+
+调用方式上还有三点不是契约差异，但容易踩：
+
+- `sessions.update` 官方 SDK 用 `POST`；网关同样只接受 `POST`（`PATCH` → `405`）。
+- 空 body、JSON `null`、`{}` 都是 no-op；官方 SDK 省略 body 时会发 `{}`。
+- 网关严格拒绝未知 query/body 字段（`400 unknown_field`）；列表分页用 `after` + `limit`，
+  没有 `cursor` 参数。
 
 ```js
 // 单条输入：不要用 sessions.events.create
