@@ -5,16 +5,24 @@
 //! This module is the single definition of the hop's wire format: one encoder
 //! used by the actor, one incremental parser used by the gateway.
 //!
-//! Only `item` frames carry an SSE `id` (the persisted `seq`); `turn` and `gap`
-//! are not persisted, matching the public contract (`design §2.5`).
+//! Only `item` frames carry an SSE `id` (the persisted `seq`); `turn`, the
+//! official `agent.session.*` frames and `gap` are not persisted, matching the
+//! public contract (`design §2.5`). Official frames travel under their own
+//! event name (`event_type()`), so the gateway hop preserves them verbatim.
+//!
+//! A lagging subscription is told once (`gap`) and then closed by both SSE
+//! writers: the dropped events may include a turn terminal, and silently
+//! continuing would leave an official SDK waiting forever.
 
 use serde_json::{json, Value};
 
-use crate::domain::{ItemView, StreamEvent, TurnEvent};
+use crate::domain::{ItemView, OfficialEvent, StreamEvent, TurnEvent};
 
 pub const EVENT_ITEM: &str = "item";
 pub const EVENT_TURN: &str = "turn";
 pub const EVENT_GAP: &str = "gap";
+/// SSE event-name prefix of the official Agents API event family.
+pub const OFFICIAL_PREFIX: &str = "agent.session.";
 
 /// One decoded SSE frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +49,11 @@ impl Frame {
                 let from_seq = value.get("fromSeq")?.as_u64()?;
                 let to_seq = value.get("toSeq")?.as_u64()?;
                 Some(StreamEvent::Gap { from_seq, to_seq })
+            }
+            event if event.starts_with(OFFICIAL_PREFIX) => {
+                serde_json::from_str::<OfficialEvent>(&self.data)
+                    .ok()
+                    .map(StreamEvent::Official)
             }
             _ => None,
         }
@@ -76,6 +89,11 @@ impl FrameWriter {
             StreamEvent::Turn(turn) => {
                 Some(frame(EVENT_TURN, None, &serde_json::to_string(turn).ok()?))
             }
+            StreamEvent::Official(event) => Some(frame(
+                event.event_type(),
+                None,
+                &serde_json::to_string(event).ok()?,
+            )),
             StreamEvent::Gap { from_seq, to_seq } => Some(frame(
                 EVENT_GAP,
                 None,
@@ -186,7 +204,7 @@ fn parse_block(block: &[u8]) -> Option<Frame> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ItemKind, ItemSource};
+    use crate::domain::{ItemKind, ItemSource, OfficialEvent, OfficialSession, SessionStatus};
 
     fn item(seq: u64) -> ItemView {
         ItemView {
@@ -207,9 +225,9 @@ mod tests {
         let mut encoded = String::new();
         for event in [
             StreamEvent::Item(item(1)),
-            StreamEvent::Turn(TurnEvent::started("req-1")),
+            StreamEvent::Turn(TurnEvent::started("req-1", "turn_1")),
             StreamEvent::Item(item(2)),
-            StreamEvent::Turn(TurnEvent::completed("req-1", "end_turn")),
+            StreamEvent::Turn(TurnEvent::completed("req-1", "turn_1", "end_turn")),
             StreamEvent::Gap {
                 from_seq: 3,
                 to_seq: 4,
@@ -232,10 +250,13 @@ mod tests {
             .collect();
         assert_eq!(events.len(), 5);
         assert_eq!(events[0], StreamEvent::Item(item(1)));
-        assert_eq!(events[1], StreamEvent::Turn(TurnEvent::started("req-1")));
+        assert_eq!(
+            events[1],
+            StreamEvent::Turn(TurnEvent::started("req-1", "turn_1"))
+        );
         assert_eq!(
             events[3],
-            StreamEvent::Turn(TurnEvent::completed("req-1", "end_turn"))
+            StreamEvent::Turn(TurnEvent::completed("req-1", "turn_1", "end_turn"))
         );
         assert_eq!(
             events[4],
@@ -244,6 +265,22 @@ mod tests {
                 to_seq: 4
             }
         );
+    }
+
+    #[test]
+    fn official_frames_keep_their_event_name_across_the_hop() {
+        let mut writer = FrameWriter::new(0);
+        let session = OfficialSession::new("agent-1", SessionStatus::Idle, 1, 2, None, None, None);
+        let event = StreamEvent::Official(OfficialEvent::session_idle("turn_1", session));
+        let encoded = writer.render(&event).expect("encode");
+        assert!(
+            encoded.starts_with("event: agent.session.idle\n"),
+            "{encoded}"
+        );
+        let mut parser = FrameParser::new();
+        let frame = parser.push(encoded.as_bytes()).pop().expect("frame");
+        assert_eq!(frame.event, "agent.session.idle");
+        assert_eq!(frame.into_stream_event(), Some(event));
     }
 
     #[test]

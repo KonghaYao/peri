@@ -1,10 +1,33 @@
+use axum::http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
-use super::{resolve_tools, CreateSessionBody};
-use crate::domain::{ErrorCode, ErrorKind};
+use super::{resolve_submission, resolve_tools, CreateSessionBody, SubmitEventBody};
+use crate::domain::{ErrorCode, ErrorKind, InputKind, InputMode};
 
 fn body(value: serde_json::Value) -> CreateSessionBody {
     serde_json::from_value(value).expect("create body")
+}
+
+fn event_body(value: serde_json::Value) -> SubmitEventBody {
+    serde_json::from_value(value).expect("event body")
+}
+
+fn idempotency_headers(key: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "idempotency-key",
+        HeaderValue::from_str(key).expect("idempotency header"),
+    );
+    headers
+}
+
+fn official_envelope(content: serde_json::Value) -> serde_json::Value {
+    json!({
+        "events": [{
+            "type": "agent.session.input.message",
+            "input": [{ "role": "user", "content": content }]
+        }]
+    })
 }
 
 fn field(error: &crate::domain::SwarmError) -> String {
@@ -298,4 +321,211 @@ fn unknown_official_fields_are_preserved_not_rejected() {
     .expect("tools");
     assert_eq!(tools[0].extra["server_description"], json!("wiki"));
     assert_eq!(tools[0].require_approval, Some(json!("always")));
+}
+
+#[test]
+fn official_events_envelope_maps_to_one_user_turn() {
+    let submission = resolve_submission(
+        event_body(official_envelope(json!([
+            { "type": "input_text", "text": "hello" },
+            { "type": "input_text", "text": "world" }
+        ]))),
+        &HeaderMap::new(),
+    )
+    .expect("official envelope");
+
+    assert_eq!(submission.kind, InputKind::User);
+    assert_eq!(submission.mode, InputMode::Turn);
+    assert_eq!(submission.text.as_deref(), Some("hello\nworld"));
+    assert!(submission.attachments.is_empty());
+    assert!(submission.plugin_selections.is_empty());
+    assert!(submission.original_draft.is_none());
+    let generated = uuid::Uuid::parse_str(&submission.input_id).expect("generated UUID");
+    assert_eq!(
+        generated.get_version_num(),
+        7,
+        "the no-key carve-out generates a UUIDv7"
+    );
+}
+
+#[test]
+fn official_events_envelope_reuses_the_idempotency_key() {
+    let input_id = uuid::Uuid::now_v7().to_string();
+    let submission = resolve_submission(
+        event_body(official_envelope(json!([
+            { "type": "input_text", "text": "via header" }
+        ]))),
+        &idempotency_headers(&input_id),
+    )
+    .expect("official envelope with key");
+
+    assert_eq!(submission.input_id, input_id);
+    assert_eq!(submission.text.as_deref(), Some("via header"));
+}
+
+#[test]
+fn official_events_envelope_rejects_a_non_uuid_idempotency_key() {
+    let error = resolve_submission(
+        event_body(official_envelope(json!([
+            { "type": "input_text", "text": "hello" }
+        ]))),
+        &idempotency_headers("not-a-uuid"),
+    )
+    .expect_err("non-UUID key");
+
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(error.message(), "inputId must be a UUID");
+}
+
+#[test]
+fn native_event_body_without_input_id_still_requires_one() {
+    let error = resolve_submission(event_body(json!({ "text": "hello" })), &HeaderMap::new())
+        .expect_err("native path must not generate inputId");
+
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert!(error.message().contains("inputId is required"), "{error:?}");
+}
+
+#[test]
+fn official_events_envelope_accepts_only_one_event() {
+    let message_event = json!({
+        "type": "agent.session.input.message",
+        "input": [{ "role": "user", "content": [{ "type": "input_text", "text": "a" }] }]
+    });
+
+    let error = resolve_submission(
+        event_body(json!({ "events": [message_event.clone(), message_event] })),
+        &HeaderMap::new(),
+    )
+    .expect_err("multiple events");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "events");
+    assert!(error.message().contains("only one event"), "{error:?}");
+
+    let error = resolve_submission(event_body(json!({ "events": [] })), &HeaderMap::new())
+        .expect_err("empty events");
+    assert_eq!(field(&error), "events");
+}
+
+#[test]
+fn official_events_envelope_accepts_only_one_user_message() {
+    let error = resolve_submission(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.message",
+                "input": [
+                    { "role": "user", "content": [{ "type": "input_text", "text": "a" }] },
+                    { "role": "user", "content": [{ "type": "input_text", "text": "b" }] }
+                ]
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("multiple messages");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "events[0].input");
+
+    let error = resolve_submission(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.message",
+                "input": []
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("empty messages");
+    assert_eq!(field(&error), "events[0].input");
+}
+
+#[test]
+fn official_events_envelope_rejects_image_content_at_its_index() {
+    let error = resolve_submission(
+        event_body(official_envelope(json!([
+            { "type": "input_text", "text": "before" },
+            { "type": "input_image", "image_url": "https://example.invalid/x.png" }
+        ]))),
+        &HeaderMap::new(),
+    )
+    .expect_err("input_image is unsupported");
+
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "events[0].input[0].content[1]");
+    assert!(error.message().contains("input_text"), "{error:?}");
+}
+
+#[test]
+fn official_events_envelope_rejects_unknown_event_types_by_name() {
+    for kind in [
+        "agent.session.input.cancel",
+        "mcp_approval_request_result",
+        "agent.session.input.unknown",
+    ] {
+        let error = resolve_submission(
+            event_body(json!({ "events": [{ "type": kind }] })),
+            &HeaderMap::new(),
+        )
+        .expect_err("unsupported event type");
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{kind}");
+        assert_eq!(field(&error), "events[0].type", "{kind}");
+        assert!(error.message().contains("agent.session.input.message"));
+    }
+}
+
+#[test]
+fn official_events_envelope_rejects_unknown_event_fields() {
+    let error = resolve_submission(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.message",
+                "input": [],
+                "unexpected": true
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("unsupported event field");
+
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "events[0].unexpected");
+}
+
+#[test]
+fn official_events_envelope_cannot_be_mixed_with_native_fields() {
+    let envelope = official_envelope(json!([{ "type": "input_text", "text": "hello" }]));
+    for (native, expected) in [
+        (
+            json!({ "inputId": uuid::Uuid::now_v7().to_string() }),
+            "inputId",
+        ),
+        (json!({ "kind": "control" }), "kind"),
+        (json!({ "mode": "steer" }), "mode"),
+        (json!({ "text": "native" }), "text"),
+        (json!({ "attachments": [] }), "attachments"),
+        (json!({ "pluginSelections": [] }), "pluginSelections"),
+        (json!({ "originalDraft": "draft" }), "originalDraft"),
+    ] {
+        let mut mixed = envelope.clone();
+        let object = mixed.as_object_mut().expect("object");
+        for (key, value) in native.as_object().expect("native fields") {
+            object.insert(key.clone(), value.clone());
+        }
+        let error = resolve_submission(event_body(mixed), &HeaderMap::new())
+            .expect_err("mixed envelope and native fields");
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{expected}");
+        assert_eq!(field(&error), expected);
+    }
+}
+
+#[test]
+fn official_events_envelope_keeps_the_existing_empty_input_check() {
+    let error = resolve_submission(
+        event_body(official_envelope(
+            json!([{ "type": "input_text", "text": "   " }]),
+        )),
+        &HeaderMap::new(),
+    )
+    .expect_err("blank text");
+
+    assert_eq!(error.code(), ErrorCode::EmptyInput);
 }

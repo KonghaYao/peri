@@ -10,17 +10,24 @@ use std::time::Duration;
 use peri_acp_types::session_store::SessionStoreLocator;
 
 use super::{
-    BootstrapConfig, DEFAULT_BOOTSTRAP_BIND, DEFAULT_STORE_ENGINE, MACHINE_ID_ENV,
-    SESSION_STORE_ENV, SETTINGS_JSON_ENV, STATE_STORE_ENV, STORE_ENGINE_ENV, STORE_TOKEN_ENV,
+    preflight_external_engine, BootstrapConfig, BootstrapError, RivetConfig, RivetEngineSpawn,
+    DEFAULT_BOOTSTRAP_BIND, DEFAULT_RIVET_ENDPOINT, DEFAULT_RIVET_NAMESPACE, DEFAULT_RIVET_POOL,
+    DEFAULT_STORE_ENGINE, MACHINE_ID_ENV, RIVET_ENDPOINT_ENV, RIVET_ENGINE_SPAWN_ENV,
+    RIVET_NAMESPACE_ENV, RIVET_POOL_ENV, RIVET_TOKEN_ENV, SESSION_STORE_ENV, SETTINGS_JSON_ENV,
+    STATE_STORE_ENV, STORE_ENGINE_ENV, STORE_TOKEN_ENV,
 };
 use crate::config::{
-    ConfigError, API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV,
-    BUN_URL_ALIAS_ENV, DEFAULT_SSE_HEARTBEAT_MS, MODEL_ENV, SSE_HEARTBEAT_MS_ENV,
-    WORKSPACE_ROOT_ENV,
+    ConfigError, API_KEY_ENV, BIND_ALLOW_NON_LOOPBACK_ENV, BIND_ENV, BUN_BASE_URL_ENV,
+    BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV, DEFAULT_SSE_HEARTBEAT_MS, MODEL_ENV,
+    SSE_HEARTBEAT_MS_ENV, WORKSPACE_ROOT_ENV,
 };
 
 const TOKEN_ENV_NAME: &str = "PERI_TEST_LOOM_TOKEN";
 const TOKEN_VALUE: &str = "loom-secret-value";
+const RIVET_TOKEN_ENV_NAME: &str = "PERI_TEST_ENGINE_TOKEN";
+const RIVET_TOKEN_VALUE: &str = "engine-secret-value";
+/// A private plaintext address: syntactically valid but not loopback.
+const EXTERNAL_ENDPOINT: &str = "http://10.20.30.40:6420";
 const MACHINE_ID: &str = "0192f0c4-0000-7000-8000-0000000000aa";
 const ROOT_NAME: &str = "peri-swarm-bootstrap-test";
 /// Platform-absolute workspace root; `/tmp/...` is not absolute on Windows.
@@ -400,8 +407,305 @@ fn relative_or_unnormalized_workspace_root_is_rejected() {
 
 #[test]
 fn non_loopback_bind_is_rejected() {
-    expect_invalid(parse(&[(BIND_ENV, Some("0.0.0.0:8080"))]), BIND_ENV);
+    let reason = expect_invalid(parse(&[(BIND_ENV, Some("0.0.0.0:8080"))]), BIND_ENV);
+    assert!(reason.contains("loopback"), "{reason}");
+    assert!(reason.contains(BIND_ALLOW_NON_LOOPBACK_ENV), "{reason}");
     expect_invalid(parse(&[(BIND_ENV, Some("not-an-address"))]), BIND_ENV);
+}
+
+#[test]
+fn the_bind_opt_in_allows_a_non_loopback_address_and_rejects_other_values() {
+    let config = parse(&[
+        (BIND_ENV, Some("0.0.0.0:8080")),
+        (BIND_ALLOW_NON_LOOPBACK_ENV, Some("1")),
+    ])
+    .expect("opted-in bind");
+    assert_eq!(config.bind_addr.to_string(), "0.0.0.0:8080");
+    // The gateway config receives the same accepted address.
+    assert_eq!(config.swarm_config().bind_addr, config.bind_addr);
+
+    // An explicit off value keeps the loopback rule.
+    let reason = expect_invalid(
+        parse(&[
+            (BIND_ENV, Some("0.0.0.0:8080")),
+            (BIND_ALLOW_NON_LOOPBACK_ENV, Some("off")),
+        ]),
+        BIND_ENV,
+    );
+    assert!(reason.contains("loopback"), "{reason}");
+
+    let reason = expect_invalid(
+        parse(&[(BIND_ALLOW_NON_LOOPBACK_ENV, Some("maybe"))]),
+        BIND_ALLOW_NON_LOOPBACK_ENV,
+    );
+    assert!(reason.contains("1/true/yes/on"), "{reason}");
+}
+
+// ── rivet engine configuration (M1) ────────────────────────────────────────
+
+#[test]
+fn the_default_engine_configuration_matches_the_former_constants() {
+    let config = parse(&[]).expect("configuration");
+    let rivet = &config.rivet;
+    // The client-facing spelling has no trailing slash: byte-identical to the
+    // constant the process used before M1.
+    assert_eq!(rivet.endpoint_string(), DEFAULT_RIVET_ENDPOINT);
+    assert_eq!(rivet.endpoint_string(), "http://127.0.0.1:6420");
+    assert_eq!(rivet.endpoint.as_str(), "http://127.0.0.1:6420/");
+    assert_eq!(rivet.token_env, None);
+    assert_eq!(rivet.namespace, DEFAULT_RIVET_NAMESPACE);
+    assert_eq!(rivet.pool, DEFAULT_RIVET_POOL);
+    assert_eq!(rivet.engine_spawn, RivetEngineSpawn::Always);
+    assert_eq!(rivet.engine_spawn.as_str(), "always");
+}
+
+#[test]
+fn a_loopback_endpoint_may_be_overridden_and_never_needs_no_token() {
+    // Replica B in the M1 topology: attach to an engine someone else started.
+    let config = parse(&[
+        (RIVET_ENDPOINT_ENV, Some("http://localhost:7420/")),
+        (RIVET_ENGINE_SPAWN_ENV, Some("never")),
+    ])
+    .expect("loopback external engine");
+    assert_eq!(config.rivet.endpoint_string(), "http://localhost:7420");
+    assert_eq!(config.rivet.engine_spawn, RivetEngineSpawn::Never);
+    assert_eq!(config.rivet.token_env, None);
+
+    let auto = parse(&[(RIVET_ENGINE_SPAWN_ENV, Some("AUTO"))]).expect("auto on loopback");
+    assert_eq!(auto.rivet.engine_spawn, RivetEngineSpawn::Auto);
+    assert_eq!(auto.rivet.engine_spawn.as_str(), "auto");
+}
+
+#[test]
+fn an_unknown_spawn_mode_is_rejected() {
+    let reason = expect_invalid(
+        parse(&[(RIVET_ENGINE_SPAWN_ENV, Some("sometimes"))]),
+        RIVET_ENGINE_SPAWN_ENV,
+    );
+    assert!(reason.contains("always, auto or never"), "{reason}");
+}
+
+#[test]
+fn https_engine_endpoints_are_rejected_until_tls_is_designed() {
+    let reason = expect_invalid(
+        parse(&[(RIVET_ENDPOINT_ENV, Some("https://engine.internal:6420"))]),
+        RIVET_ENDPOINT_ENV,
+    );
+    assert!(reason.contains("plaintext"), "{reason}");
+    assert!(reason.contains("TLS"), "{reason}");
+}
+
+#[test]
+fn a_public_or_unspecified_literal_endpoint_is_rejected() {
+    // The engine token must never leave for a public address; this is the
+    // environment-level check of the rule owned by `config::validate_rivet_endpoint`.
+    for (value, expected) in [
+        ("http://192.0.2.1:6420", "public address"),
+        ("http://8.8.8.8:6420", "public address"),
+        ("http://0.0.0.0:6420", "unspecified address"),
+        ("http://[::]:6420", "unspecified address"),
+        ("http://[2001:db8::1]:6420", "public address"),
+    ] {
+        let reason = expect_invalid(
+            parse(&[(RIVET_ENDPOINT_ENV, Some(value))]),
+            RIVET_ENDPOINT_ENV,
+        );
+        assert!(reason.contains(expected), "{value}: {reason}");
+        assert!(reason.contains(value), "{value}: {reason}");
+    }
+}
+
+#[test]
+fn engine_endpoint_shape_is_validated() {
+    for (value, expected) in [
+        ("ws://127.0.0.1:6420", "http"),
+        ("http://127.0.0.1:6420/path", "path"),
+        ("http://127.0.0.1:6420/?a=1", "query and fragment"),
+        ("http://127.0.0.1:6420/#frag", "query and fragment"),
+        ("http://user:pass@127.0.0.1:6420", "embedded credentials"),
+        ("http://127.0.0.1", "explicit port"),
+        ("not-a-url", "URL"),
+    ] {
+        let reason = expect_invalid(
+            parse(&[(RIVET_ENDPOINT_ENV, Some(value))]),
+            RIVET_ENDPOINT_ENV,
+        );
+        assert!(reason.contains(expected), "{value}: {reason}");
+    }
+}
+
+#[test]
+fn a_non_loopback_endpoint_requires_never_and_a_token_variable() {
+    // Default spawn (`always`) with a remote address is a contradiction: the
+    // local engine would never be the one answering.
+    let reason = expect_invalid(
+        parse(&[(RIVET_ENDPOINT_ENV, Some(EXTERNAL_ENDPOINT))]),
+        RIVET_ENGINE_SPAWN_ENV,
+    );
+    assert!(reason.contains("never"), "{reason}");
+    assert!(reason.contains(EXTERNAL_ENDPOINT), "{reason}");
+
+    expect_invalid(
+        parse(&[
+            (RIVET_ENDPOINT_ENV, Some(EXTERNAL_ENDPOINT)),
+            (RIVET_ENGINE_SPAWN_ENV, Some("auto")),
+        ]),
+        RIVET_ENGINE_SPAWN_ENV,
+    );
+
+    // `never` alone is not enough: the engine token must come from somewhere.
+    let reason = expect_invalid(
+        parse(&[
+            (RIVET_ENDPOINT_ENV, Some(EXTERNAL_ENDPOINT)),
+            (RIVET_ENGINE_SPAWN_ENV, Some("never")),
+        ]),
+        RIVET_TOKEN_ENV,
+    );
+    assert!(reason.contains(EXTERNAL_ENDPOINT), "{reason}");
+}
+
+#[test]
+fn an_external_engine_configuration_keeps_only_the_token_variable_name() {
+    let config = parse(&[
+        (RIVET_ENDPOINT_ENV, Some(EXTERNAL_ENDPOINT)),
+        (RIVET_ENGINE_SPAWN_ENV, Some("never")),
+        (RIVET_TOKEN_ENV, Some(RIVET_TOKEN_ENV_NAME)),
+        (RIVET_TOKEN_ENV_NAME, Some(RIVET_TOKEN_VALUE)),
+        (RIVET_NAMESPACE_ENV, Some("prod-eu")),
+        (RIVET_POOL_ENV, Some("swarm-prod")),
+    ])
+    .expect("external engine");
+    assert_eq!(config.rivet.endpoint_string(), EXTERNAL_ENDPOINT);
+    assert_eq!(
+        config.rivet.token_env.as_deref(),
+        Some(RIVET_TOKEN_ENV_NAME)
+    );
+    assert_eq!(config.rivet.namespace, "prod-eu");
+    assert_eq!(config.rivet.pool, "swarm-prod");
+    assert_eq!(config.rivet.engine_spawn, RivetEngineSpawn::Never);
+
+    let rendered = format!("{config:?}");
+    assert!(!rendered.contains(RIVET_TOKEN_VALUE), "{rendered}");
+    assert!(!rendered.contains(TOKEN_VALUE), "{rendered}");
+    assert!(rendered.contains(RIVET_TOKEN_ENV_NAME), "{rendered}");
+    let rivet = format!("{:?}", config.rivet);
+    assert!(!rivet.contains(RIVET_TOKEN_VALUE), "{rivet}");
+}
+
+#[test]
+fn token_variable_name_and_lookup_failures_are_reported() {
+    // A token value in the name slot.
+    let reason = expect_invalid(
+        parse(&[(RIVET_TOKEN_ENV, Some("eng-secret-literal"))]),
+        RIVET_TOKEN_ENV,
+    );
+    assert!(reason.contains("variable name"), "{reason}");
+
+    // Naming the Loom credential would leak it to the engine.
+    let reason = expect_invalid(
+        parse(&[(RIVET_TOKEN_ENV, Some(TOKEN_ENV_NAME))]),
+        RIVET_TOKEN_ENV,
+    );
+    assert!(reason.contains(STORE_TOKEN_ENV), "{reason}");
+
+    // The named variable must exist and be non-empty.
+    let reason = expect_invalid(
+        parse(&[(RIVET_TOKEN_ENV, Some("PERI_TEST_MISSING_ENGINE_TOKEN"))]),
+        RIVET_TOKEN_ENV,
+    );
+    assert!(
+        reason.contains("PERI_TEST_MISSING_ENGINE_TOKEN"),
+        "{reason}"
+    );
+    let reason = expect_invalid(
+        parse(&[
+            (RIVET_TOKEN_ENV, Some(RIVET_TOKEN_ENV_NAME)),
+            (RIVET_TOKEN_ENV_NAME, Some("  ")),
+        ]),
+        RIVET_TOKEN_ENV,
+    );
+    assert!(reason.contains("empty"), "{reason}");
+}
+
+#[test]
+fn namespace_and_pool_are_validated_as_deployment_identity() {
+    for (variable, value) in [
+        (RIVET_NAMESPACE_ENV, ""),
+        (RIVET_NAMESPACE_ENV, "  "),
+        (RIVET_NAMESPACE_ENV, "prod eu"),
+    ] {
+        let reason = expect_invalid(parse(&[(variable, Some(value))]), variable);
+        assert!(
+            reason.contains("empty") || reason.contains("whitespace"),
+            "{value:?}: {reason}"
+        );
+    }
+    let too_long = "x".repeat(129);
+    let reason = expect_invalid(
+        parse(&[(RIVET_POOL_ENV, Some(too_long.as_str()))]),
+        RIVET_POOL_ENV,
+    );
+    assert!(reason.contains("128"), "{reason}");
+
+    let config = parse(&[
+        (RIVET_NAMESPACE_ENV, Some("prod-eu")),
+        (RIVET_POOL_ENV, Some("swarm-prod")),
+    ])
+    .expect("identity");
+    assert_eq!(config.rivet.namespace, "prod-eu");
+    assert_eq!(config.rivet.pool, "swarm-prod");
+}
+
+fn rivet_for(endpoint: &str, spawn: RivetEngineSpawn) -> RivetConfig {
+    RivetConfig {
+        endpoint: url::Url::parse(endpoint).expect("endpoint"),
+        token_env: None,
+        namespace: "default".to_owned(),
+        pool: "peri-swarm".to_owned(),
+        engine_spawn: spawn,
+    }
+}
+
+#[tokio::test]
+async fn an_unreachable_external_engine_fails_before_any_store_is_opened() {
+    // Reserve a loopback port and release it: nothing listens on it afterwards.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("probe port");
+    let port = listener.local_addr().expect("probe addr").port();
+    drop(listener);
+
+    let rivet = rivet_for(&format!("http://127.0.0.1:{port}"), RivetEngineSpawn::Never);
+    match preflight_external_engine(&rivet).await {
+        Err(BootstrapError::RivetUnreachable { endpoint, reason }) => {
+            assert_eq!(endpoint, format!("http://127.0.0.1:{port}"));
+            assert!(reason.contains("local engine"), "{reason}");
+            assert!(reason.contains(RIVET_ENGINE_SPAWN_ENV), "{reason}");
+        }
+        other => panic!("expected RivetUnreachable, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_reachable_external_engine_passes_the_probe_and_local_modes_skip_it() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let port = listener.local_addr().expect("addr").port();
+    let rivet = rivet_for(&format!("http://127.0.0.1:{port}"), RivetEngineSpawn::Never);
+    preflight_external_engine(&rivet)
+        .await
+        .expect("the listener is reachable");
+    drop(listener);
+
+    // `always`/`auto` never probe: the local engine may not exist yet.
+    let local = rivet_for(
+        &format!("http://127.0.0.1:{port}"),
+        RivetEngineSpawn::Always,
+    );
+    preflight_external_engine(&local)
+        .await
+        .expect("local modes do not probe");
 }
 
 #[test]

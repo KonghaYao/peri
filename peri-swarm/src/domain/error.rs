@@ -166,6 +166,22 @@ impl SwarmError {
         .with_details(serde_json::json!({ "received": value, "supported": "1" }))
     }
 
+    /// An official resource the gateway cannot map at all.
+    ///
+    /// The resource really does not exist here, so the status is `404`; the
+    /// code is the existing `unsupported_contract` (this gateway does not
+    /// implement that part of the official contract). Never used to hide a
+    /// supported operation that failed.
+    #[must_use]
+    pub fn unsupported_resource(resource: &str) -> Self {
+        Self::new(
+            ErrorKind::NotFound,
+            ErrorCode::UnsupportedContract,
+            format!("official resource `{resource}` is not supported by this gateway"),
+        )
+        .with_details(serde_json::json!({ "resource": resource, "supported": false }))
+    }
+
     #[must_use]
     pub fn invalid_logical_id(reason: &str) -> Self {
         Self::new(
@@ -197,7 +213,7 @@ impl SwarmError {
     }
 
     #[must_use]
-    pub fn invalid_query(reason: &str) -> Self {
+    pub fn invalid_query(reason: impl Into<String>) -> Self {
         Self::new(ErrorKind::BadRequest, ErrorCode::InvalidQuery, reason)
     }
 

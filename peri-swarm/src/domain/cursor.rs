@@ -1,5 +1,40 @@
 use crate::domain::error::SwarmError;
 
+/// Starting point of an SSE subscription (`GET /events`).
+///
+/// A subscription that carries **no** cursor starts at the current tail and
+/// delivers live events only: the official SDK subscribes before it submits the
+/// input, and replaying an older turn would end its `TurnState` on the previous
+/// turn's terminal. An explicit `afterSeq`/`after`/`Last-Event-ID` (including
+/// `0`) replays the persisted backlog first (`design §4.2`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EventCursor {
+    /// No cursor supplied: live events only, no backlog.
+    #[default]
+    Tail,
+    /// Replay persisted items with `seq > inner`, then live events.
+    After(Cursor),
+}
+
+impl EventCursor {
+    /// Explicit `after=0`: replay the whole persisted log.
+    pub const START: Self = Self::After(Cursor::START);
+
+    #[must_use]
+    pub fn after(seq: u64) -> Self {
+        Self::After(Cursor::new(seq))
+    }
+
+    /// Replayed cursor, or `None` for a tail subscription.
+    #[must_use]
+    pub fn cursor(self) -> Option<Cursor> {
+        match self {
+            Self::Tail => None,
+            Self::After(cursor) => Some(cursor),
+        }
+    }
+}
+
 /// Monotonic item cursor. `0` means "before the first item".
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Cursor(u64);
@@ -19,12 +54,14 @@ impl Cursor {
 
     /// Reconcile `afterSeq` (query), `after` (SDK query alias) and
     /// `Last-Event-ID`. Any disagreement is `400 conflicting_cursor`
-    /// (`design §2.5`).
-    pub fn reconcile(
+    /// (`design §2.5`). No cursor at all keeps the [`EventCursor::Tail`]
+    /// meaning instead of defaulting to `0`: absence is not "replay
+    /// everything".
+    pub fn reconcile_events(
         after_seq: Option<u64>,
         after: Option<u64>,
         last_event_id: Option<u64>,
-    ) -> Result<Self, SwarmError> {
+    ) -> Result<EventCursor, SwarmError> {
         let candidates = [after_seq, after, last_event_id];
         let mut resolved: Option<u64> = None;
         for candidate in candidates.into_iter().flatten() {
@@ -36,7 +73,7 @@ impl Cursor {
                 Some(_) => {}
             }
         }
-        Ok(Self(resolved.unwrap_or(0)))
+        Ok(resolved.map_or(EventCursor::Tail, EventCursor::after))
     }
 
     /// Reconcile the two item-query spellings (`afterSeq` and the SDK `after`).

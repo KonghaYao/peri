@@ -12,19 +12,27 @@ use url::Url;
 
 use super::{
     binding_params, classify, decode_binding, decode_input, decode_item, decode_session,
-    input_params, item_params, require_supported_version, resolve_credential, seq_param,
-    session_params, SwarmStateError, SwarmStateStoreConfig, CREATE_INDEX_SQL,
-    CREATE_META_TABLE_SQL, CREATE_TABLE_SQL, INSERT_INPUT_SQL, INSERT_ITEM_SQL,
-    META_TABLE_EXISTS_SQL, PIN_VERSION_SQL, SELECT_BINDING_SQL, SELECT_INPUT_SQL,
-    SELECT_ITEMS_AFTER_SQL, SELECT_ITEMS_BEFORE_SQL, SELECT_ITEMS_TAIL_SQL, SELECT_LAST_SEQ_SQL,
-    SELECT_SESSION_SQL, SELECT_VERSION_SQL, SESSIONS_TABLE_EXISTS_SQL, SWARM_STATE_SCHEMA_VERSION,
-    UPDATE_SESSION_SQL, UPSERT_BINDING_SQL, UPSERT_SESSION_SQL,
+    decode_turn, input_params, item_params, migration_retry_decision, migration_statements,
+    require_supported_version, resolve_credential, seq_param, session_list_sql, session_params,
+    turn_params, MigrationRetry, SwarmStateError, SwarmStateStoreConfig, CLOSE_OPEN_TURNS_SQL,
+    CREATE_INDEX_SQL, CREATE_META_TABLE_SQL, CREATE_TABLE_SQL, DELETE_BINDINGS_SQL,
+    DELETE_INPUTS_SQL, DELETE_ITEMS_SQL, DELETE_SESSION_SQL, DELETE_TURNS_SQL, HAS_OPEN_TURN_SQL,
+    INSERT_INPUT_SQL, INSERT_ITEM_SQL, META_TABLE_EXISTS_SQL, MIGRATION_COLUMNS, PATCH_SESSION_SQL,
+    PIN_VERSION_SQL, SELECT_BINDING_SQL, SELECT_INPUT_SQL, SELECT_ITEMS_AFTER_SQL,
+    SELECT_ITEMS_BEFORE_SQL, SELECT_ITEMS_TAIL_SQL, SELECT_ITEM_PAGE_ASC_SQL,
+    SELECT_ITEM_PAGE_DESC_SQL, SELECT_ITEM_PAGE_TAIL_SQL, SELECT_LAST_SEQ_SQL, SELECT_SESSION_SQL,
+    SELECT_TURNS_ASC_AFTER_SQL, SELECT_TURNS_ASC_SQL, SELECT_TURNS_DESC_AFTER_SQL,
+    SELECT_TURNS_DESC_SQL, SELECT_TURN_SQL, SELECT_VERSION_SQL, SESSIONS_TABLE_EXISTS_SQL,
+    SESSIONS_TABLE_INFO_SQL, SWARM_STATE_SCHEMA_VERSION, UPDATE_SESSION_SQL, UPSERT_BINDING_SQL,
+    UPSERT_SESSION_SQL, UPSERT_TURN_SQL,
 };
 use crate::domain::{
-    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, McpHeader, McpToolSpec,
-    SessionState,
+    EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemOrder, ItemSource, McpHeader,
+    McpToolSpec, SessionState, TurnStatus,
 };
-use crate::store::{StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow};
+use crate::store::{
+    StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow, SwarmTurnRow,
+};
 use turso_serverless::Value;
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -49,6 +57,8 @@ fn sample_session() -> SwarmSessionRow {
             kind: EnvironmentKind::None,
             id: Some("logical-1".to_owned()),
         },
+        metadata: Default::default(),
+        prompt_cache_options: None,
         created_at: "2026-11-20T00:00:00Z".to_owned(),
         last_activity_at: "2026-11-20T00:00:01Z".to_owned(),
         last_item_seq: 7,
@@ -221,9 +231,45 @@ fn read_statements_bind_one_cursor_shaped_parameter_set() {
     assert_eq!(placeholders(SELECT_ITEMS_AFTER_SQL), 3);
     assert_eq!(placeholders(SELECT_ITEMS_BEFORE_SQL), 3);
     assert_eq!(placeholders(SELECT_ITEMS_TAIL_SQL), 2);
+    assert_eq!(placeholders(SELECT_ITEM_PAGE_ASC_SQL), 3);
+    assert_eq!(placeholders(SELECT_ITEM_PAGE_DESC_SQL), 3);
+    assert_eq!(placeholders(SELECT_ITEM_PAGE_TAIL_SQL), 2);
     assert_eq!(placeholders(SELECT_LAST_SEQ_SQL), 1);
     assert_eq!(placeholders(SELECT_INPUT_SQL), 2);
     assert_eq!(placeholders(SELECT_BINDING_SQL), 1);
+}
+
+#[test]
+fn item_page_statements_group_by_item_not_by_row() {
+    for (sql, bound) in [
+        (SELECT_ITEM_PAGE_ASC_SQL, "MAX(seq) > ?2"),
+        (SELECT_ITEM_PAGE_DESC_SQL, "MAX(seq) < ?2"),
+    ] {
+        let normalized = normalized(sql);
+        assert!(
+            normalized.contains("GROUP BY logical_id, item_id"),
+            "the page unit is the item: {normalized}"
+        );
+        assert!(
+            normalized.contains(bound),
+            "the cursor bounds the item's greatest seq: {normalized}"
+        );
+        assert!(
+            normalized.contains("ORDER BY last_seq"),
+            "page membership follows the item boundary: {normalized}"
+        );
+        assert!(
+            normalized
+                .contains("JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id"),
+            "every row of a selected item is returned: {normalized}"
+        );
+    }
+    let tail = normalized(SELECT_ITEM_PAGE_TAIL_SQL);
+    assert!(tail.contains("GROUP BY logical_id, item_id"), "{tail}");
+    assert!(
+        !tail.contains("HAVING"),
+        "no cursor means every item: {tail}"
+    );
 }
 
 // ── row encoding ────────────────────────────────────────────────────────────
@@ -461,4 +507,262 @@ fn assert_unavailable(error: StoreError) {
         StoreError::Unavailable(detail) => assert!(!detail.is_empty(), "empty detail"),
         other => panic!("expected Unavailable, got {other:?}"),
     }
+}
+
+// ── post-v1 additive migration and official session resources ───────────────
+
+fn legacy_session_columns() -> Vec<String> {
+    [
+        "logical_id",
+        "root_session_id",
+        "actor_key",
+        "cwd",
+        "state",
+        "model",
+        "instructions",
+        "mcp_json",
+        "environment_json",
+        "created_at",
+        "last_activity_at",
+        "last_item_seq",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn migration_adds_only_the_missing_session_columns() {
+    let legacy = legacy_session_columns();
+    let plan = migration_statements(&legacy);
+    assert_eq!(
+        plan,
+        MIGRATION_COLUMNS
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect::<Vec<_>>(),
+        "a pre-v1 table gains both nullable columns"
+    );
+    assert!(plan.iter().all(|sql| sql.starts_with("ALTER TABLE")));
+    assert!(plan[0].contains("metadata_json"));
+    assert!(plan[1].contains("prompt_cache_options_json"));
+
+    // After the first migration the table carries both columns: reopening
+    // must not issue another ALTER (SQLite rejects a duplicate column).
+    let migrated: Vec<String> = legacy
+        .into_iter()
+        .chain([
+            "metadata_json".to_owned(),
+            "prompt_cache_options_json".to_owned(),
+        ])
+        .collect();
+    assert!(migration_statements(&migrated).is_empty());
+
+    // A fresh database takes the CREATE TABLE path; empty means "table absent",
+    // so no ALTER is attempted before the table exists.
+    assert!(migration_statements(&[]).is_empty());
+
+    assert!(SESSIONS_TABLE_INFO_SQL.contains("PRAGMA table_info(swarm_sessions)"));
+}
+
+#[test]
+fn a_duplicate_column_race_is_retried_only_when_every_migrated_column_exists() {
+    let migrated: Vec<String> = legacy_session_columns()
+        .into_iter()
+        .chain([
+            "metadata_json".to_owned(),
+            "prompt_cache_options_json".to_owned(),
+        ])
+        .collect();
+    let duplicate = SwarmStateError::Schema(
+        "swarm state store schema check failed: duplicate column name: metadata_json".to_owned(),
+    );
+    assert_eq!(
+        migration_retry_decision(&duplicate, Some(&migrated)),
+        MigrationRetry::Retry,
+        "the other replica won the ALTER; a re-read saw every column and the batch is retried"
+    );
+
+    // The duplicate-column message alone is not enough: a concurrent writer
+    // may have added only one of the columns, so the retry must not happen.
+    assert_eq!(
+        migration_retry_decision(&duplicate, Some(&legacy_session_columns())),
+        MigrationRetry::Propagate
+    );
+    assert_eq!(
+        migration_retry_decision(&duplicate, None),
+        MigrationRetry::Propagate,
+        "a missing table is not a migration race"
+    );
+
+    // Every other schema/transport failure propagates unchanged.
+    for error in [
+        SwarmStateError::Schema("no such table: swarm_sessions".to_owned()),
+        SwarmStateError::Schema("near \"ALTER\": syntax error".to_owned()),
+        SwarmStateError::Connect("connection reset".to_owned()),
+        SwarmStateError::Credential {
+            variable: "PERI_SWARM_STATE_TOKEN".to_owned(),
+            reason: "not set",
+        },
+    ] {
+        assert_eq!(
+            migration_retry_decision(&error, Some(&migrated)),
+            MigrationRetry::Propagate,
+            "{error}"
+        );
+    }
+
+    // The probe used by the retry must agree with `TurnStatus::is_open`.
+    for status in ["queued", "in_progress", "waiting"] {
+        assert!(
+            HAS_OPEN_TURN_SQL.contains(&format!("'{status}'")),
+            "HAS_OPEN_TURN_SQL must treat {status} as open"
+        );
+    }
+    for status in ["completed", "failed", "cancelled"] {
+        assert!(
+            !HAS_OPEN_TURN_SQL.contains(&format!("'{status}'")),
+            "HAS_OPEN_TURN_SQL must treat {status} as terminal"
+        );
+    }
+}
+
+#[test]
+fn session_schema_carries_metadata_and_prompt_cache_columns() {
+    let sessions = normalized(CREATE_TABLE_SQL[0]);
+    assert!(sessions.contains("metadata_json TEXT"));
+    assert!(sessions.contains("prompt_cache_options_json TEXT"));
+    // Both are nullable: an older row reads back as "no metadata"/"no TTL".
+    assert!(!sessions.contains("metadata_json TEXT NOT NULL"));
+    assert!(!sessions.contains("prompt_cache_options_json TEXT NOT NULL"));
+}
+
+#[test]
+fn turns_schema_is_keyed_for_exclusive_paging() {
+    let turns = normalized(CREATE_TABLE_SQL[4]);
+    assert!(turns.starts_with("CREATE TABLE IF NOT EXISTS swarm_turns"));
+    assert!(turns.contains("PRIMARY KEY (logical_id, turn_id)"));
+    assert!(turns.contains("status TEXT NOT NULL"));
+    assert!(turns.contains("created_at INTEGER NOT NULL"));
+    assert!(turns.contains("started_at INTEGER"));
+    assert!(turns.contains("completed_at INTEGER"));
+    assert!(turns.contains("error_json TEXT"));
+    assert!(turns.contains("usage_json TEXT"));
+    assert!(turns.contains("subagent_id TEXT"));
+
+    let index = normalized(CREATE_INDEX_SQL[1]);
+    assert!(index.contains("ON swarm_turns (logical_id, created_at, turn_id)"));
+}
+
+#[test]
+fn session_list_sql_adds_one_json_each_predicate_per_metadata_pair() {
+    let plain = session_list_sql(ItemOrder::Desc, 0);
+    let plain = normalized(&plain);
+    assert!(plain.contains("ORDER BY s.logical_id DESC LIMIT ?2"));
+    assert!(!plain.contains("json_each"));
+
+    let filtered = session_list_sql(ItemOrder::Asc, 2);
+    let filtered = normalized(&filtered);
+    assert_eq!(filtered.matches("json_each(s.metadata_json)").count(), 2);
+    assert!(filtered.contains("m.key = ?3 AND m.value = ?4"));
+    assert!(filtered.contains("m.key = ?5 AND m.value = ?6"));
+    assert!(
+        filtered.find("json_each").expect("predicate") < filtered.find("ORDER BY").expect("order"),
+        "filters precede the order/limit suffix: {filtered}"
+    );
+}
+
+#[test]
+fn turn_statements_bind_their_placeholders_and_keyset_columns() {
+    let sample = SwarmTurnRow {
+        logical_id: "logical-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        status: TurnStatus::Failed,
+        created_at: 10,
+        started_at: Some(10),
+        completed_at: Some(12),
+        error: Some(json!({ "code": "internal_error", "message": "boom" })),
+        usage: None,
+        subagent_id: None,
+    };
+    assert_eq!(
+        placeholders(UPSERT_TURN_SQL),
+        turn_params(&sample).expect("turn params").len()
+    );
+    assert_eq!(placeholders(SELECT_TURN_SQL), 2);
+    assert_eq!(placeholders(SELECT_TURNS_ASC_SQL), 2);
+    assert_eq!(
+        placeholders(SELECT_TURNS_ASC_AFTER_SQL),
+        5,
+        "?2 is reused by the tie-break"
+    );
+    assert_eq!(placeholders(SELECT_TURNS_DESC_SQL), 2);
+    assert_eq!(
+        placeholders(SELECT_TURNS_DESC_AFTER_SQL),
+        5,
+        "?2 is reused by the tie-break"
+    );
+    assert_eq!(placeholders(CLOSE_OPEN_TURNS_SQL), 4);
+    assert_eq!(placeholders(PATCH_SESSION_SQL), 11);
+
+    for (sql, bound) in [
+        (
+            SELECT_TURNS_ASC_AFTER_SQL,
+            "created_at > ?2 OR (created_at = ?2 AND turn_id > ?3)",
+        ),
+        (
+            SELECT_TURNS_DESC_AFTER_SQL,
+            "created_at < ?2 OR (created_at = ?2 AND turn_id < ?3)",
+        ),
+    ] {
+        assert!(
+            normalized(sql).contains(bound),
+            "after is an exclusive (created_at, turn_id) keyset: {sql}"
+        );
+    }
+    for sql in [
+        SELECT_TURNS_ASC_SQL,
+        SELECT_TURNS_ASC_AFTER_SQL,
+        SELECT_TURNS_DESC_SQL,
+        SELECT_TURNS_DESC_AFTER_SQL,
+    ] {
+        let sql = normalized(sql);
+        assert!(
+            sql.contains("ORDER BY created_at ASC, turn_id ASC")
+                || sql.contains("ORDER BY created_at DESC, turn_id DESC"),
+            "turns have a stable total order with a tie-break: {sql}"
+        );
+    }
+
+    assert_eq!(placeholders(DELETE_SESSION_SQL), 1);
+    assert_eq!(placeholders(DELETE_ITEMS_SQL), 1);
+    assert_eq!(placeholders(DELETE_INPUTS_SQL), 1);
+    assert_eq!(placeholders(DELETE_TURNS_SQL), 1);
+    assert_eq!(placeholders(DELETE_BINDINGS_SQL), 1);
+}
+
+#[test]
+fn turn_roundtrip_preserves_status_times_error_and_usage() {
+    let sample = SwarmTurnRow {
+        logical_id: "logical-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        status: TurnStatus::Failed,
+        created_at: 10,
+        started_at: Some(11),
+        completed_at: Some(12),
+        error: Some(json!({ "code": "internal_error", "message": "boom" })),
+        usage: Some(json!({ "input_tokens": 1, "output_tokens": 2 })),
+        subagent_id: Some("sub-1".to_owned()),
+    };
+    let decoded = decode_turn(&turn_params(&sample).expect("params")).expect("decode");
+    assert_eq!(decoded, sample);
+
+    let mut open = sample.clone();
+    open.status = TurnStatus::InProgress;
+    open.completed_at = None;
+    open.error = None;
+    open.usage = None;
+    open.subagent_id = None;
+    let decoded = decode_turn(&turn_params(&open).expect("params")).expect("decode");
+    assert_eq!(decoded, open);
 }
