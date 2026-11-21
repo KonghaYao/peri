@@ -21,6 +21,9 @@ use crate::domain::{ItemView, OfficialEvent, StreamEvent, TurnEvent};
 pub const EVENT_ITEM: &str = "item";
 pub const EVENT_TURN: &str = "turn";
 pub const EVENT_GAP: &str = "gap";
+/// SSE event-name of the official failure frame; unlike the other official
+/// frames it has no `agent.session.` prefix.
+pub const EVENT_ERROR: &str = "error";
 /// SSE event-name prefix of the official Agents API event family.
 pub const OFFICIAL_PREFIX: &str = "agent.session.";
 
@@ -50,7 +53,7 @@ impl Frame {
                 let to_seq = value.get("toSeq")?.as_u64()?;
                 Some(StreamEvent::Gap { from_seq, to_seq })
             }
-            event if event.starts_with(OFFICIAL_PREFIX) => {
+            event if event.starts_with(OFFICIAL_PREFIX) || event == EVENT_ERROR => {
                 serde_json::from_str::<OfficialEvent>(&self.data)
                     .ok()
                     .map(StreamEvent::Official)
@@ -280,6 +283,18 @@ mod tests {
         let mut parser = FrameParser::new();
         let frame = parser.push(encoded.as_bytes()).pop().expect("frame");
         assert_eq!(frame.event, "agent.session.idle");
+        assert_eq!(frame.into_stream_event(), Some(event));
+    }
+
+    #[test]
+    fn error_frames_cross_the_hop_under_their_official_name() {
+        let mut writer = FrameWriter::new(0);
+        let event = StreamEvent::Official(OfficialEvent::error("turn_1", "agent-1", "boom"));
+        let encoded = writer.render(&event).expect("encode");
+        assert!(encoded.starts_with("event: error\n"), "{encoded}");
+        let mut parser = FrameParser::new();
+        let frame = parser.push(encoded.as_bytes()).pop().expect("frame");
+        assert_eq!(frame.event, "error");
         assert_eq!(frame.into_stream_event(), Some(event));
     }
 

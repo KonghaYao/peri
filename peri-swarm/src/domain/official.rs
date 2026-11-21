@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::item::ItemOrder;
-use crate::domain::session::{PromptCacheOptions, SessionStatus};
+use crate::domain::session::{PromptCacheOptions, SessionStatus, SessionView};
 
 /// Derive the internal turn id from the user item that opened the turn.
 ///
@@ -41,6 +41,46 @@ pub fn turn_created_event_id(turn_id: &str) -> String {
 #[must_use]
 pub fn turn_item_added_event_id(seq: u64) -> String {
     format!("evt_item_{seq}_added")
+}
+
+#[must_use]
+pub fn turn_item_done_event_id(seq: u64) -> String {
+    format!("evt_item_{seq}_done")
+}
+
+#[must_use]
+pub fn turn_item_part_added_event_id(seq: u64) -> String {
+    format!("evt_item_{seq}_part_added")
+}
+
+#[must_use]
+pub fn turn_item_part_done_event_id(seq: u64) -> String {
+    format!("evt_item_{seq}_part_done")
+}
+
+#[must_use]
+pub fn turn_item_text_done_event_id(seq: u64) -> String {
+    format!("evt_item_{seq}_text_done")
+}
+
+#[must_use]
+pub fn turn_in_progress_event_id(turn_id: &str) -> String {
+    format!("evt_{turn_id}_in_progress")
+}
+
+#[must_use]
+pub fn session_in_progress_event_id(turn_id: &str) -> String {
+    format!("evt_{turn_id}_session_in_progress")
+}
+
+#[must_use]
+pub fn session_created_event_id(session_id: &str) -> String {
+    format!("evt_{session_id}_session_created")
+}
+
+#[must_use]
+pub fn turn_error_event_id(turn_id: &str) -> String {
+    format!("evt_{turn_id}_error")
 }
 
 #[must_use]
@@ -317,6 +357,17 @@ impl OfficialMessageItem {
             turn_id: turn_id.to_owned(),
         }
     }
+
+    /// Replace the assistant message phase.
+    ///
+    /// Live `finish_turn` knows which flushed message is the turn's last one and
+    /// persists that decision; replay reads it back instead of deriving the
+    /// phase a second way.
+    #[must_use]
+    pub fn with_phase(mut self, phase: Option<&str>) -> Self {
+        self.phase = phase.map(str::to_owned);
+        self
+    }
 }
 
 /// Minimal `AgentSession.Agent` projection: only what the gateway persists.
@@ -398,17 +449,89 @@ impl OfficialSession {
         self.prompt_cache_options = prompt_cache_options;
         self
     }
+
+    /// Project the public `SessionView` into the official session snapshot.
+    ///
+    /// `POST /sessions?stream=true` has no store read at this layer; the create
+    /// result already carries the persisted projection. Only fields the gateway
+    /// actually recorded are copied: `environment` is a known official gap and
+    /// is not invented here.
+    #[must_use]
+    pub fn from_session_view(view: &SessionView) -> Self {
+        Self {
+            id: view.id.clone(),
+            object: "agent.session".to_owned(),
+            status: view.status.as_str().to_owned(),
+            created_at: view.created_at,
+            last_active_at: view.last_active_at,
+            error: view.error.clone(),
+            agent: OfficialSessionAgent {
+                id: "root".to_owned(),
+                model: view.agent.model.clone(),
+                instructions: view.agent.instructions.clone(),
+            },
+            metadata: view.metadata.clone(),
+            prompt_cache_options: view.prompt_cache_options,
+            required_actions: view.required_actions.clone(),
+            usage: view.usage.clone(),
+            vault_ids: view.vault_ids.clone(),
+        }
+    }
+}
+
+/// Customer-safe failure carried by the official `error` event (`SessionError`).
+///
+/// The gateway has one failure category: the persisted turn row records
+/// `{"code":"internal_error"}`. No finer classification is derived here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OfficialSessionError {
+    pub code: String,
+    pub message: String,
+    pub param: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl OfficialSessionError {
+    #[must_use]
+    pub fn internal(message: &str) -> Self {
+        Self {
+            code: "internal_error".to_owned(),
+            message: message.to_owned(),
+            param: None,
+            kind: "internal_error".to_owned(),
+        }
+    }
 }
 
 /// The subset of `AgentSessionEvent` the gateway can honor.
 ///
 /// `requires_action`, `turn.cancelled`, budget and subagent frames are not
-/// emitted: the local runtime has no corresponding fact.
+/// emitted: the local runtime has no corresponding fact. Text deltas,
+/// reasoning frames and environment frames are likewise absent (`design
+/// §4.2.1`); completion is reported through the item/part events below.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum OfficialEvent {
+    #[serde(rename = "agent.session.created")]
+    SessionCreated {
+        event_id: String,
+        session: OfficialSession,
+    },
+    #[serde(rename = "agent.session.in_progress")]
+    SessionInProgress {
+        event_id: String,
+        session: OfficialSession,
+    },
     #[serde(rename = "agent.session.turn.created")]
     TurnCreated {
+        event_id: String,
+        session_id: String,
+        turn_id: String,
+        turn: OfficialTurn,
+    },
+    #[serde(rename = "agent.session.turn.in_progress")]
+    TurnInProgress {
         event_id: String,
         session_id: String,
         turn_id: String,
@@ -421,6 +544,44 @@ pub enum OfficialEvent {
         turn_id: Option<String>,
         output_index: Option<u32>,
         item: OfficialMessageItem,
+    },
+    #[serde(rename = "agent.session.turn.item.done")]
+    TurnItemDone {
+        event_id: String,
+        session_id: String,
+        turn_id: Option<String>,
+        output_index: u32,
+        item: OfficialMessageItem,
+    },
+    #[serde(rename = "agent.session.turn.content_part.added")]
+    TurnContentPartAdded {
+        event_id: String,
+        session_id: String,
+        turn_id: Option<String>,
+        item_id: String,
+        content_index: u32,
+        output_index: u32,
+        part: OfficialContent,
+    },
+    #[serde(rename = "agent.session.turn.content_part.done")]
+    TurnContentPartDone {
+        event_id: String,
+        session_id: String,
+        turn_id: Option<String>,
+        item_id: String,
+        content_index: u32,
+        output_index: u32,
+        part: OfficialContent,
+    },
+    #[serde(rename = "agent.session.turn.output_text.done")]
+    TurnOutputTextDone {
+        event_id: String,
+        session_id: String,
+        turn_id: Option<String>,
+        item_id: String,
+        content_index: u32,
+        output_index: u32,
+        text: String,
     },
     #[serde(rename = "agent.session.turn.completed")]
     TurnCompleted {
@@ -448,13 +609,45 @@ pub enum OfficialEvent {
         event_id: String,
         session: OfficialSession,
     },
+    #[serde(rename = "error")]
+    Error {
+        event_id: String,
+        session_id: String,
+        error: OfficialSessionError,
+    },
 }
 
 impl OfficialEvent {
     #[must_use]
+    pub fn session_created(session: OfficialSession) -> Self {
+        Self::SessionCreated {
+            event_id: session_created_event_id(&session.id),
+            session,
+        }
+    }
+
+    #[must_use]
+    pub fn session_in_progress(turn_id: &str, session: OfficialSession) -> Self {
+        Self::SessionInProgress {
+            event_id: session_in_progress_event_id(turn_id),
+            session,
+        }
+    }
+
+    #[must_use]
     pub fn turn_created(session_id: &str, turn_id: &str, turn: OfficialTurn) -> Self {
         Self::TurnCreated {
             event_id: turn_created_event_id(turn_id),
+            session_id: session_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            turn,
+        }
+    }
+
+    #[must_use]
+    pub fn turn_in_progress(session_id: &str, turn_id: &str, turn: OfficialTurn) -> Self {
+        Self::TurnInProgress {
+            event_id: turn_in_progress_event_id(turn_id),
             session_id: session_id.to_owned(),
             turn_id: turn_id.to_owned(),
             turn,
@@ -474,6 +667,87 @@ impl OfficialEvent {
             turn_id: Some(turn_id.to_owned()),
             output_index: None,
             item,
+        }
+    }
+
+    #[must_use]
+    pub fn turn_item_done(
+        seq: u64,
+        session_id: &str,
+        turn_id: &str,
+        output_index: u32,
+        item: OfficialMessageItem,
+    ) -> Self {
+        Self::TurnItemDone {
+            event_id: turn_item_done_event_id(seq),
+            session_id: session_id.to_owned(),
+            turn_id: Some(turn_id.to_owned()),
+            output_index,
+            item,
+        }
+    }
+
+    #[must_use]
+    pub fn turn_content_part_added(
+        seq: u64,
+        session_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        output_index: u32,
+        text: &str,
+    ) -> Self {
+        Self::TurnContentPartAdded {
+            event_id: turn_item_part_added_event_id(seq),
+            session_id: session_id.to_owned(),
+            turn_id: Some(turn_id.to_owned()),
+            item_id: item_id.to_owned(),
+            content_index: 0,
+            output_index,
+            part: OfficialContent::OutputText {
+                text: text.to_owned(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn turn_content_part_done(
+        seq: u64,
+        session_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        output_index: u32,
+        text: &str,
+    ) -> Self {
+        Self::TurnContentPartDone {
+            event_id: turn_item_part_done_event_id(seq),
+            session_id: session_id.to_owned(),
+            turn_id: Some(turn_id.to_owned()),
+            item_id: item_id.to_owned(),
+            content_index: 0,
+            output_index,
+            part: OfficialContent::OutputText {
+                text: text.to_owned(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn turn_output_text_done(
+        seq: u64,
+        session_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        output_index: u32,
+        text: &str,
+    ) -> Self {
+        Self::TurnOutputTextDone {
+            event_id: turn_item_text_done_event_id(seq),
+            session_id: session_id.to_owned(),
+            turn_id: Some(turn_id.to_owned()),
+            item_id: item_id.to_owned(),
+            content_index: 0,
+            output_index,
+            text: text.to_owned(),
         }
     }
 
@@ -515,16 +789,34 @@ impl OfficialEvent {
         }
     }
 
+    /// Failed turn's `error` frame; the code mirrors the persisted turn row.
+    #[must_use]
+    pub fn error(turn_id: &str, session_id: &str, message: &str) -> Self {
+        Self::Error {
+            event_id: turn_error_event_id(turn_id),
+            session_id: session_id.to_owned(),
+            error: OfficialSessionError::internal(message),
+        }
+    }
+
     /// SSE `event:` name and JSON `type` value.
     #[must_use]
     pub fn event_type(&self) -> &'static str {
         match self {
+            Self::SessionCreated { .. } => "agent.session.created",
+            Self::SessionInProgress { .. } => "agent.session.in_progress",
             Self::TurnCreated { .. } => "agent.session.turn.created",
+            Self::TurnInProgress { .. } => "agent.session.turn.in_progress",
             Self::TurnItemAdded { .. } => "agent.session.turn.item.added",
+            Self::TurnItemDone { .. } => "agent.session.turn.item.done",
+            Self::TurnContentPartAdded { .. } => "agent.session.turn.content_part.added",
+            Self::TurnContentPartDone { .. } => "agent.session.turn.content_part.done",
+            Self::TurnOutputTextDone { .. } => "agent.session.turn.output_text.done",
             Self::TurnCompleted { .. } => "agent.session.turn.completed",
             Self::TurnFailed { .. } => "agent.session.turn.failed",
             Self::SessionIdle { .. } => "agent.session.idle",
             Self::SessionFailed { .. } => "agent.session.failed",
+            Self::Error { .. } => "error",
         }
     }
 
@@ -532,12 +824,20 @@ impl OfficialEvent {
     #[must_use]
     pub fn event_id(&self) -> &str {
         match self {
-            Self::TurnCreated { event_id, .. }
+            Self::SessionCreated { event_id, .. }
+            | Self::SessionInProgress { event_id, .. }
+            | Self::TurnCreated { event_id, .. }
+            | Self::TurnInProgress { event_id, .. }
             | Self::TurnItemAdded { event_id, .. }
+            | Self::TurnItemDone { event_id, .. }
+            | Self::TurnContentPartAdded { event_id, .. }
+            | Self::TurnContentPartDone { event_id, .. }
+            | Self::TurnOutputTextDone { event_id, .. }
             | Self::TurnCompleted { event_id, .. }
             | Self::TurnFailed { event_id, .. }
             | Self::SessionIdle { event_id, .. }
-            | Self::SessionFailed { event_id, .. } => event_id,
+            | Self::SessionFailed { event_id, .. }
+            | Self::Error { event_id, .. } => event_id,
         }
     }
 }

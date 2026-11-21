@@ -1172,21 +1172,27 @@ async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
     assert_eq!(
         names,
         [
+            "agent.session.in_progress",
             "agent.session.turn.created",
+            "agent.session.turn.in_progress",
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
+            "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.done",
+            "agent.session.turn.content_part.done",
+            "agent.session.turn.item.done",
             "agent.session.turn.completed",
             "agent.session.idle",
         ],
     );
-    let OfficialEvent::TurnCreated { turn_id, turn, .. } = &official[0] else {
-        panic!("the first official frame opens the turn: {:?}", official[0]);
+    let OfficialEvent::TurnCreated { turn_id, turn, .. } = &official[1] else {
+        panic!("the first official frame opens the turn: {:?}", official[1]);
     };
     assert!(
         turn.subagent_id.is_none(),
         "a swarm turn belongs to the root agent: {turn:?}"
     );
-    let items: Vec<(&str, String)> = official[1..3]
+    let items: Vec<(&str, String)> = official[3..5]
         .iter()
         .map(|event| match event {
             OfficialEvent::TurnItemAdded {
@@ -1208,9 +1214,9 @@ async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
     let OfficialEvent::TurnCompleted {
         turn_id: completed_turn,
         ..
-    } = &official[3]
+    } = &official[9]
     else {
-        panic!("the terminal names the turn: {:?}", official[3]);
+        panic!("the terminal names the turn: {:?}", official[9]);
     };
     assert_eq!(completed_turn, turn_id, "completed closes the created turn");
 

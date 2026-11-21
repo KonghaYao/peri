@@ -22,7 +22,7 @@ pub use item::{ItemKind, ItemOrder, ItemPage, ItemSource, ItemView, ItemsWindow}
 pub use mcp::{McpHeader, McpToolKind, McpToolSpec};
 pub use official::{
     turn_id_for_item, OfficialContent, OfficialEvent, OfficialMessageItem, OfficialSession,
-    OfficialTurn, TurnPage, TurnStatus, TurnsWindow,
+    OfficialSessionError, OfficialTurn, TurnPage, TurnStatus, TurnsWindow,
 };
 pub use session::{
     AgentView, CreateSessionResponse, EnvironmentKind, EnvironmentRef, PromptCacheOptions,

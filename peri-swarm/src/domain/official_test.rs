@@ -1,9 +1,12 @@
 use serde_json::json;
 
 use super::{
-    session_failed_event_id, session_idle_event_id, turn_completed_event_id, turn_created_event_id,
-    turn_failed_event_id, turn_id_for_item, turn_item_added_event_id, unix_from_rfc3339,
-    OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn, TurnStatus,
+    session_created_event_id, session_failed_event_id, session_idle_event_id,
+    session_in_progress_event_id, turn_completed_event_id, turn_created_event_id,
+    turn_error_event_id, turn_failed_event_id, turn_id_for_item, turn_in_progress_event_id,
+    turn_item_added_event_id, turn_item_done_event_id, turn_item_part_added_event_id,
+    turn_item_part_done_event_id, turn_item_text_done_event_id, unix_from_rfc3339, OfficialEvent,
+    OfficialMessageItem, OfficialSession, OfficialTurn, TurnStatus,
 };
 use crate::domain::{SessionState, SessionStatus};
 
@@ -94,6 +97,119 @@ fn message_items_carry_the_official_content_blocks() {
     let value = serde_json::to_value(&assistant).expect("serialize");
     assert_eq!(value["role"], json!("assistant"));
     assert_eq!(value["content"][0]["type"], json!("output_text"));
+}
+
+#[test]
+fn completion_event_ids_derive_from_the_persisted_facts() {
+    assert_eq!(turn_item_done_event_id(7), "evt_item_7_done");
+    assert_eq!(turn_item_part_added_event_id(7), "evt_item_7_part_added");
+    assert_eq!(turn_item_part_done_event_id(7), "evt_item_7_part_done");
+    assert_eq!(turn_item_text_done_event_id(7), "evt_item_7_text_done");
+    assert_eq!(
+        turn_in_progress_event_id("turn_a"),
+        "evt_turn_a_in_progress"
+    );
+    assert_eq!(
+        session_in_progress_event_id("turn_a"),
+        "evt_turn_a_session_in_progress"
+    );
+    assert_eq!(
+        session_created_event_id("agent-1"),
+        "evt_agent-1_session_created"
+    );
+    assert_eq!(turn_error_event_id("turn_a"), "evt_turn_a_error");
+
+    let turn = OfficialTurn::new("agent-1", "turn_a", TurnStatus::InProgress, 100, None);
+    let created = OfficialEvent::session_in_progress(
+        "turn_a",
+        OfficialSession::new(
+            "agent-1",
+            SessionStatus::InProgress,
+            100,
+            100,
+            None,
+            None,
+            None,
+        ),
+    );
+    assert_eq!(created.event_id(), "evt_turn_a_session_in_progress");
+    let progress = OfficialEvent::turn_in_progress("agent-1", "turn_a", turn);
+    assert_eq!(progress.event_id(), "evt_turn_a_in_progress");
+    assert_eq!(progress.event_type(), "agent.session.turn.in_progress");
+}
+
+#[test]
+fn completion_frames_match_the_local_sdk_shape() {
+    let message =
+        OfficialMessageItem::assistant("itim_msg_x", "turn_a", "hi").with_phase(Some("commentary"));
+    let done = OfficialEvent::turn_item_done(3, "agent-1", "turn_a", 1, message);
+    let value = serde_json::to_value(&done).expect("serialize");
+    assert_eq!(value["type"], json!("agent.session.turn.item.done"));
+    assert_eq!(value["event_id"], json!("evt_item_3_done"));
+    assert_eq!(value["output_index"], json!(1));
+    assert_eq!(value["item"]["id"], json!("itim_msg_x"));
+    assert_eq!(value["item"]["type"], json!("message"));
+    assert_eq!(value["item"]["role"], json!("assistant"));
+    assert_eq!(value["item"]["status"], json!("completed"));
+    assert_eq!(value["item"]["phase"], json!("commentary"));
+    assert_eq!(value["item"]["content"][0]["type"], json!("output_text"));
+    assert_eq!(value["item"]["content"][0]["text"], json!("hi"));
+    assert_eq!(value["item"]["turn_id"], json!("turn_a"));
+
+    let added =
+        OfficialEvent::turn_content_part_added(3, "agent-1", "turn_a", "itim_msg_x", 1, "hi");
+    let value = serde_json::to_value(&added).expect("serialize");
+    assert_eq!(
+        value["type"],
+        json!("agent.session.turn.content_part.added")
+    );
+    assert_eq!(value["event_id"], json!("evt_item_3_part_added"));
+    assert_eq!(value["content_index"], json!(0));
+    assert_eq!(value["output_index"], json!(1));
+    assert_eq!(
+        value["part"],
+        json!({ "type": "output_text", "text": "hi" })
+    );
+
+    let text = OfficialEvent::turn_output_text_done(3, "agent-1", "turn_a", "itim_msg_x", 1, "hi");
+    let value = serde_json::to_value(&text).expect("serialize");
+    assert_eq!(value["type"], json!("agent.session.turn.output_text.done"));
+    assert_eq!(value["item_id"], json!("itim_msg_x"));
+    assert_eq!(value["content_index"], json!(0));
+    assert_eq!(value["output_index"], json!(1));
+    assert_eq!(value["text"], json!("hi"));
+    assert_eq!(value["session_id"], json!("agent-1"));
+    assert_eq!(value["turn_id"], json!("turn_a"));
+
+    let error = OfficialEvent::error("turn_a", "agent-1", "boom");
+    let value = serde_json::to_value(&error).expect("serialize");
+    assert_eq!(value["type"], json!("error"));
+    assert_eq!(value["event_id"], json!("evt_turn_a_error"));
+    assert_eq!(value["session_id"], json!("agent-1"));
+    assert_eq!(
+        value["error"],
+        json!({
+            "code": "internal_error",
+            "message": "boom",
+            "param": null,
+            "type": "internal_error",
+        })
+    );
+
+    let created = OfficialEvent::session_created(OfficialSession::new(
+        "agent-1",
+        SessionStatus::Idle,
+        100,
+        101,
+        None,
+        None,
+        None,
+    ));
+    let value = serde_json::to_value(&created).expect("serialize");
+    assert_eq!(value["type"], json!("agent.session.created"));
+    assert_eq!(value["event_id"], json!("evt_agent-1_session_created"));
+    assert_eq!(value["session"]["id"], json!("agent-1"));
+    assert_eq!(value["session"]["object"], json!("agent.session"));
 }
 
 #[test]

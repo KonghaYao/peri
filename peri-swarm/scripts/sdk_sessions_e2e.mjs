@@ -169,8 +169,8 @@ async function main() {
     state: fetched.state,
     lastItemSeq: fetched.lastItemSeq,
     cwd: fetched.cwd,
-    createdAt: fetched.createdAt,
-    lastActivityAt: fetched.lastActivityAt,
+    created_at: fetched.created_at,
+    last_active_at: fetched.last_active_at,
     environment: fetched.environment,
   };
   check('get returns the same session', fetched.id === created.id, { got: fetched.id });

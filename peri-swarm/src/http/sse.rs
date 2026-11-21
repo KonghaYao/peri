@@ -13,11 +13,19 @@ use serde_json::json;
 use tokio::sync::broadcast;
 use tokio::time::{interval, Interval, MissedTickBehavior};
 
-use crate::domain::{CreateSessionResponse, StreamEvent};
+use crate::domain::{CreateSessionResponse, OfficialEvent, OfficialSession, StreamEvent};
 use crate::service::{CreateSessionResult, EventSubscription};
 
-/// Successful `POST /sessions?stream=true` response: one `session` event, then
-/// the first turn's live events.
+/// Successful `POST /sessions?stream=true` response.
+///
+/// A real create starts with the official `agent.session.created` frame (the
+/// SDK's session identity), then the gateway's own `session` frame, then the
+/// first turn's live events. An idempotent attach (`created == false`) emits
+/// only the custom `session` frame: it must not pretend the session was newly
+/// created. The official frame always precedes any turn frame, and the `events`
+/// stream never emits `agent.session.created`. The session snapshot shares
+/// [`OfficialSession`] with `agent.session.idle`/`failed` (no environment
+/// field, a known gap).
 ///
 /// The subscription was opened before the first turn was recorded and
 /// scheduled, and this response is built from the accepted create result
@@ -31,7 +39,17 @@ pub fn create_response(
     heartbeat: Duration,
 ) -> Response {
     let session = CreateSessionResponse::new(result.session.clone(), result.created);
-    let initial = vec![json_event("session", &session)];
+    // An attach (`created=false`) reuses an existing session: the official
+    // `created` frame would claim the session was just created, so it is only
+    // emitted for a real create. The custom `session` frame is always present.
+    let mut initial = Vec::with_capacity(2);
+    if result.created {
+        initial.push(json_event(
+            "agent.session.created",
+            &OfficialEvent::session_created(OfficialSession::from_session_view(&result.session)),
+        ));
+    }
+    initial.push(json_event("session", &session));
     event_response_with_initial(subscription, heartbeat, initial)
 }
 

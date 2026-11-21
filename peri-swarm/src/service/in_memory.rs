@@ -374,18 +374,21 @@ impl InMemorySwarmService {
             truncated,
         };
         self.broadcast(logical_id.as_str(), StreamEvent::Item(view.clone()));
-        self.broadcast_official_item(logical_id, &view);
+        self.broadcast_official_item(logical_id, &view).await;
         Ok(seq)
     }
 
-    /// Official `agent.session.turn.item.added` for message frames only.
+    /// Official frames for message items.
     ///
-    /// A user item accepted while no turn is open opens a turn: its
-    /// `turn.created` is published first, then the item. Assistant items use the
-    /// open turn. Delta frames are skipped; the final `complete:true` frame is
-    /// the item the SDK consumes.
-    fn broadcast_official_item(&self, logical_id: &LogicalId, view: &ItemView) {
-        if view.kind != ItemKind::Message {
+    /// A user item accepted while no turn is open opens a turn: the session
+    /// enters `in_progress`, then `turn.created`, `turn.in_progress` and the
+    /// item. Assistant items use the open turn and report completion through the
+    /// item, content-part and output-text frames. Delta frames are skipped; the
+    /// final `complete:true` frame is the item the SDK consumes.
+    async fn broadcast_official_item(&self, logical_id: &LogicalId, view: &ItemView) {
+        if !view.source.is_root() || view.kind != ItemKind::Message {
+            // Thought chunks share the answer's `messageId`; child items have
+            // their own source. Neither produces an official item frame.
             return;
         }
         let role = view.payload.get("role").and_then(|role| role.as_str());
@@ -421,18 +424,74 @@ impl InMemorySwarmService {
                     .get("text")
                     .and_then(|text| text.as_str())
                     .unwrap_or_default();
-                (
-                    turn_id.clone(),
-                    OfficialMessageItem::assistant(&view.item_id, &turn_id, text),
-                    false,
+                let phase = view
+                    .payload
+                    .get("phase")
+                    .and_then(|phase| phase.as_str())
+                    .unwrap_or("final_answer");
+                let output_index = u32::try_from(
+                    view.payload
+                        .get("outputIndex")
+                        .and_then(|index| index.as_u64())
+                        .unwrap_or(0),
                 )
+                .unwrap_or(u32::MAX);
+                self.broadcast_assistant_item(
+                    logical_id,
+                    view,
+                    &turn_id,
+                    text,
+                    phase,
+                    output_index,
+                );
+                return;
             }
             _ => return,
         };
         if opened {
+            let session = match self
+                .official_session(logical_id, SessionStatus::InProgress, None)
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(
+                        logical_id = logical_id.as_str(),
+                        error = %error,
+                        "official session.in_progress snapshot was not readable"
+                    );
+                    OfficialSession::new(
+                        logical_id.as_str(),
+                        SessionStatus::InProgress,
+                        0,
+                        0,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+            };
+            self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::session_in_progress(&turn_id, session)),
+            );
             self.broadcast(
                 logical_id.as_str(),
                 StreamEvent::Official(OfficialEvent::turn_created(
+                    logical_id.as_str(),
+                    &turn_id,
+                    OfficialTurn::new(
+                        logical_id.as_str(),
+                        &turn_id,
+                        TurnStatus::InProgress,
+                        crate::domain::official::unix_from_rfc3339(&view.created_at),
+                        None,
+                    ),
+                )),
+            );
+            self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::turn_in_progress(
                     logical_id.as_str(),
                     &turn_id,
                     OfficialTurn::new(
@@ -454,6 +513,55 @@ impl InMemorySwarmService {
                 item,
             )),
         );
+    }
+
+    fn broadcast_assistant_item(
+        &self,
+        logical_id: &LogicalId,
+        view: &ItemView,
+        turn_id: &str,
+        text: &str,
+        phase: &str,
+        output_index: u32,
+    ) {
+        let message =
+            OfficialMessageItem::assistant(&view.item_id, turn_id, text).with_phase(Some(phase));
+        for event in [
+            OfficialEvent::turn_item_added(view.seq, logical_id.as_str(), turn_id, message.clone()),
+            OfficialEvent::turn_content_part_added(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                &view.item_id,
+                output_index,
+                text,
+            ),
+            OfficialEvent::turn_output_text_done(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                &view.item_id,
+                output_index,
+                text,
+            ),
+            OfficialEvent::turn_content_part_done(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                &view.item_id,
+                output_index,
+                text,
+            ),
+            OfficialEvent::turn_item_done(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                output_index,
+                message,
+            ),
+        ] {
+            self.broadcast(logical_id.as_str(), StreamEvent::Official(event));
+        }
     }
 
     /// Persist one accepted user input as a single-frame `message` item.
@@ -558,6 +666,14 @@ impl InMemorySwarmService {
                 failed_turn,
             )),
         );
+        self.broadcast(
+            logical_id.as_str(),
+            StreamEvent::Official(OfficialEvent::error(
+                turn_id,
+                logical_id.as_str(),
+                error.message(),
+            )),
+        );
         match self
             .official_session(
                 logical_id,
@@ -634,6 +750,10 @@ impl InMemorySwarmService {
             "messageId": format!("msg_{}", Uuid::now_v7()),
             "text": format!("fake-echo: {text}"),
             "complete": true,
+            // The fake turn has exactly one assistant message: it is the final
+            // answer and output 0. Persisting both keeps live and replay equal.
+            "phase": "final_answer",
+            "outputIndex": 0,
         });
         let seq = match self
             .append_item(logical_id, ItemKind::Message, ItemSource::root(), payload)

@@ -21,8 +21,8 @@ use tokio::sync::broadcast;
 use crate::domain::{
     EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
     McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn,
-    PromptCacheOptions, SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent,
-    SwarmError, TurnPage, TurnStatus, TurnsWindow,
+    PromptCacheOptions, SessionPage, SessionState, SessionStatus, SessionView, SessionsWindow,
+    StreamEvent, SwarmError, TurnPage, TurnStatus, TurnsWindow,
 };
 use crate::store::{store_failure, SwarmSessionRow, SwarmStore};
 
@@ -355,6 +355,8 @@ struct OfficialReplay {
     session_last_active_at: i64,
     model: Option<String>,
     instructions: Option<String>,
+    metadata: BTreeMap<String, String>,
+    prompt_cache_options: Option<PromptCacheOptions>,
     session_failed: bool,
     /// The session has a turn open in the live runtime right now.
     live_open_turn: bool,
@@ -365,6 +367,9 @@ struct ReplayTurn {
     created_at: i64,
     /// Unix seconds of the last persisted final assistant frame.
     completed_at: Option<i64>,
+    /// Assistant completion rows already replayed for this turn. Used when the
+    /// persisted payload predates `outputIndex`.
+    assistant_outputs: u32,
 }
 
 /// Turn identity the replay window starts inside, recovered from history at or
@@ -401,7 +406,12 @@ enum RowFrame {
     /// User message that joins an already-open turn (a steer).
     SteerUser { turn: usize, text: String },
     /// Final assistant message of the open turn.
-    Assistant { turn: usize, text: String },
+    Assistant {
+        turn: usize,
+        text: String,
+        phase: String,
+        output_index: u32,
+    },
     /// Delta or non-message row: the custom `item` frame only.
     Nothing,
 }
@@ -412,7 +422,10 @@ fn classify_row(
     turns: &mut Vec<ReplayTurn>,
     current: &mut Option<usize>,
 ) -> RowFrame {
-    if item.kind != crate::domain::ItemKind::Message {
+    if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
+        // Thought chunks share the answer's `messageId`; child agents own their
+        // own source. Both stay on the custom `item` surface and must not open
+        // turns, close them, or claim an official output index.
         return RowFrame::Nothing;
     }
     let text = item
@@ -431,6 +444,7 @@ fn classify_row(
                     turn_id: crate::domain::turn_id_for_item(&item.item_id),
                     created_at: crate::domain::official::unix_from_rfc3339(&item.created_at),
                     completed_at: None,
+                    assistant_outputs: 0,
                 });
                 *current = Some(turns.len() - 1);
                 RowFrame::OpensTurn {
@@ -452,9 +466,31 @@ fn classify_row(
             };
             turns[turn].completed_at =
                 Some(crate::domain::official::unix_from_rfc3339(&item.created_at));
+            // `finish_turn` persists both facts with the completion row. Rows
+            // written before those keys existed replay as the final answer,
+            // numbered by their order inside the turn.
+            let phase = item
+                .payload
+                .get("phase")
+                .and_then(|phase| phase.as_str())
+                .unwrap_or("final_answer")
+                .to_owned();
+            let output_index = match item
+                .payload
+                .get("outputIndex")
+                .and_then(|index| index.as_u64())
+            {
+                Some(index) => u32::try_from(index).unwrap_or(u32::MAX),
+                None => turns[turn].assistant_outputs,
+            };
+            turns[turn].assistant_outputs = turns[turn]
+                .assistant_outputs
+                .max(output_index.saturating_add(1));
             RowFrame::Assistant {
                 turn,
                 text: text.to_owned(),
+                phase,
+                output_index,
             }
         }
         _ => RowFrame::Nothing,
@@ -471,6 +507,8 @@ impl OfficialReplay {
             ),
             model: row.model.clone(),
             instructions: row.instructions.clone(),
+            metadata: row.metadata.clone(),
+            prompt_cache_options: row.prompt_cache_options,
             session_failed: row.state == crate::domain::SessionState::Failed,
             live_open_turn,
         }
@@ -495,6 +533,7 @@ impl OfficialReplay {
                 turn_id: seed.turn_id.clone(),
                 created_at: seed.created_at,
                 completed_at: seed.completed_at,
+                assistant_outputs: 0,
             });
             current = Some(0);
         }
@@ -514,6 +553,10 @@ impl OfficialReplay {
             out.push(StreamEvent::Item(item.clone()));
             if let RowFrame::OpensTurn { turn, text } = frame {
                 open = Some(*turn);
+                out.push(StreamEvent::Official(OfficialEvent::session_in_progress(
+                    &turns[*turn].turn_id,
+                    self.official_session(crate::domain::SessionStatus::InProgress),
+                )));
                 out.push(StreamEvent::Official(OfficialEvent::turn_created(
                     &self.logical_id,
                     &turns[*turn].turn_id,
@@ -525,15 +568,38 @@ impl OfficialReplay {
                         None,
                     ),
                 )));
-                self.push_item_added(item, &turns[*turn].turn_id, text, false, &mut out);
+                out.push(StreamEvent::Official(OfficialEvent::turn_in_progress(
+                    &self.logical_id,
+                    &turns[*turn].turn_id,
+                    OfficialTurn::new(
+                        &self.logical_id,
+                        &turns[*turn].turn_id,
+                        TurnStatus::InProgress,
+                        turns[*turn].created_at,
+                        None,
+                    ),
+                )));
+                self.push_item_added(item, &turns[*turn].turn_id, text, &mut out);
                 continue;
             }
             match frame {
                 RowFrame::SteerUser { turn, text } => {
-                    self.push_item_added(item, &turns[*turn].turn_id, text, false, &mut out);
+                    self.push_item_added(item, &turns[*turn].turn_id, text, &mut out);
                 }
-                RowFrame::Assistant { turn, text } => {
-                    self.push_item_added(item, &turns[*turn].turn_id, text, true, &mut out);
+                RowFrame::Assistant {
+                    turn,
+                    text,
+                    phase,
+                    output_index,
+                } => {
+                    self.push_assistant_item(
+                        item,
+                        &turns[*turn].turn_id,
+                        text,
+                        phase,
+                        *output_index,
+                        &mut out,
+                    );
                 }
                 RowFrame::OpensTurn { .. } | RowFrame::Nothing => {}
             }
@@ -542,6 +608,25 @@ impl OfficialReplay {
             self.push_terminal(&turns[last], last + 1 == turns.len(), &mut out);
         }
         out
+    }
+
+    /// Official session snapshot for the progress/terminal frames.
+    ///
+    /// Built from the same persisted session row as the live terminal frames,
+    /// including metadata and prompt cache options. No field is re-read from
+    /// `swarm_turns`, and no environment projection is invented.
+    fn official_session(&self, status: SessionStatus) -> OfficialSession {
+        OfficialSession::new(
+            &self.logical_id,
+            status,
+            self.session_created_at,
+            self.session_last_active_at,
+            None,
+            self.model.clone(),
+            self.instructions.clone(),
+        )
+        .with_metadata(self.metadata.clone())
+        .with_prompt_cache_options(self.prompt_cache_options)
     }
 
     /// Emit one turn terminal plus the session frame the SDK reads after it.
@@ -565,19 +650,17 @@ impl OfficialReplay {
                     None,
                 ),
             )));
+            // The persisted log carries no failure detail; the message stays
+            // empty instead of inventing one. The code mirrors the only
+            // failure category the gateway writes to a turn row.
+            out.push(StreamEvent::Official(OfficialEvent::error(
+                &turn.turn_id,
+                &self.logical_id,
+                "",
+            )));
             out.push(StreamEvent::Official(OfficialEvent::session_failed(
                 &turn.turn_id,
-                OfficialSession::new(
-                    &self.logical_id,
-                    crate::domain::SessionStatus::Failed,
-                    self.session_created_at,
-                    self.session_last_active_at,
-                    // The persisted log carries no failure detail; keep it null
-                    // instead of inventing a message.
-                    None,
-                    self.model.clone(),
-                    self.instructions.clone(),
-                ),
+                self.official_session(SessionStatus::Failed),
             )));
             return;
         }
@@ -594,15 +677,7 @@ impl OfficialReplay {
         )));
         out.push(StreamEvent::Official(OfficialEvent::session_idle(
             &turn.turn_id,
-            OfficialSession::new(
-                &self.logical_id,
-                crate::domain::SessionStatus::Idle,
-                self.session_created_at,
-                self.session_last_active_at,
-                None,
-                self.model.clone(),
-                self.instructions.clone(),
-            ),
+            self.official_session(SessionStatus::Idle),
         )));
     }
 
@@ -611,18 +686,68 @@ impl OfficialReplay {
         item: &crate::domain::ItemView,
         turn_id: &str,
         text: &str,
-        assistant: bool,
         out: &mut Vec<StreamEvent>,
     ) {
-        let message = if assistant {
-            OfficialMessageItem::assistant(&item.item_id, turn_id, text)
-        } else {
-            OfficialMessageItem::user(&item.item_id, turn_id, text)
-        };
         out.push(StreamEvent::Official(OfficialEvent::turn_item_added(
             item.seq,
             &self.logical_id,
             turn_id,
+            OfficialMessageItem::user(&item.item_id, turn_id, text),
+        )));
+    }
+
+    /// Assistant completion frames: the item, its one output text part and the
+    /// done item, all keyed by the persisted row `seq`.
+    fn push_assistant_item(
+        &self,
+        item: &crate::domain::ItemView,
+        turn_id: &str,
+        text: &str,
+        phase: &str,
+        output_index: u32,
+        out: &mut Vec<StreamEvent>,
+    ) {
+        let message =
+            OfficialMessageItem::assistant(&item.item_id, turn_id, text).with_phase(Some(phase));
+        out.push(StreamEvent::Official(OfficialEvent::turn_item_added(
+            item.seq,
+            &self.logical_id,
+            turn_id,
+            message.clone(),
+        )));
+        out.push(StreamEvent::Official(
+            OfficialEvent::turn_content_part_added(
+                item.seq,
+                &self.logical_id,
+                turn_id,
+                &item.item_id,
+                output_index,
+                text,
+            ),
+        ));
+        out.push(StreamEvent::Official(OfficialEvent::turn_output_text_done(
+            item.seq,
+            &self.logical_id,
+            turn_id,
+            &item.item_id,
+            output_index,
+            text,
+        )));
+        out.push(StreamEvent::Official(
+            OfficialEvent::turn_content_part_done(
+                item.seq,
+                &self.logical_id,
+                turn_id,
+                &item.item_id,
+                output_index,
+                text,
+            ),
+        ));
+        out.push(StreamEvent::Official(OfficialEvent::turn_item_done(
+            item.seq,
+            &self.logical_id,
+            turn_id,
+            output_index,
             message,
         )));
     }
@@ -702,10 +827,10 @@ fn seed_for(
     })
 }
 
-/// Role of the first row that participates in turn classification.
+/// Role of the first root row that participates in turn classification.
 fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str> {
     for item in items {
-        if item.kind != crate::domain::ItemKind::Message {
+        if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
             continue;
         }
         match item.payload.get("role").and_then(|role| role.as_str()) {
@@ -747,7 +872,9 @@ async fn turn_at_cursor(
         };
         for row in page {
             let view = row.to_view();
-            if view.kind != crate::domain::ItemKind::Message {
+            // Child and thought rows are not root turn boundaries; only root
+            // messages may open, close, or steer a turn.
+            if view.kind != crate::domain::ItemKind::Message || !view.source.is_root() {
                 continue;
             }
             match view.payload.get("role").and_then(|role| role.as_str()) {
@@ -821,8 +948,8 @@ pub(crate) fn project_session(
         status,
         turn: turn.unwrap_or_default(),
         last_item_seq: row.last_item_seq,
-        created_at: row.created_at.clone(),
-        last_activity_at: row.last_activity_at.clone(),
+        created_at: crate::domain::official::unix_from_rfc3339(&row.created_at),
+        last_active_at: crate::domain::official::unix_from_rfc3339(&row.last_activity_at),
         agent: crate::domain::AgentView {
             model: row.model.clone(),
             instructions: row.instructions.clone(),
@@ -1291,5 +1418,11 @@ mod tests {
         assert_eq!(value["vault_ids"], serde_json::json!([]));
         assert_eq!(value["usage"], serde_json::Value::Null);
         assert_eq!(value["error"], serde_json::Value::Null);
+        // The persisted RFC3339 strings project to official snake_case Unix
+        // seconds; the camelCase spellings are gone.
+        assert_eq!(value["created_at"], serde_json::json!(1_767_225_600));
+        assert_eq!(value["last_active_at"], serde_json::json!(1_767_225_600));
+        assert!(value.get("createdAt").is_none(), "{value}");
+        assert!(value.get("lastActivityAt").is_none(), "{value}");
     }
 }

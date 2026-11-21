@@ -53,13 +53,24 @@ pub enum TurnOutcome {
     Failed { code: i64, message: String },
 }
 
-/// Key of one streamed text message: `(agentId, messageId)`.
-type StreamKey = (String, String);
+/// Key of one streamed text message: `(agentId, messageId, kind)`.
+///
+/// Peri gives reasoning and answer chunks of one model call the same
+/// `messageId`; the kind is part of the identity so a `thought` chunk cannot
+/// fix the stream kind and swallow the later answer text.
+type StreamKey = (String, String, &'static str);
 
 struct MessageStream {
     kind: ItemKind,
     item_id: String,
     text: String,
+    /// `seq` of the message's first persisted delta chunk.
+    ///
+    /// Completion flushes happen in `finish_turn`, after all deltas; the first
+    /// chunk's `seq` is the only persisted fact that orders two interleaved
+    /// messages, so the `final_answer`/`commentary` decision uses it instead of
+    /// a map or arrival order.
+    first_seq: Option<u64>,
 }
 
 /// User item whose `turn.created`/`turn.item.added` frames are published when
@@ -85,8 +96,8 @@ struct ContinuationRun {
 struct LogState {
     /// Text streams opened in the current turn, keyed for deterministic flush.
     streams: BTreeMap<StreamKey, MessageStream>,
-    /// `(agentId, messageId)` → stable `itemId`; kept across turns so a late
-    /// chunk of an already-flushed message cannot mint a second identity.
+    /// `(agentId, messageId, kind)` → stable `itemId`; kept across turns so a
+    /// late chunk of an already-flushed message cannot mint a second identity.
     identities: HashMap<StreamKey, String>,
     /// Request id of the gateway turn currently running, if any.
     active: Option<String>,
@@ -411,7 +422,24 @@ impl ItemLog {
             return Err(store_failure("upsert_turn", error));
         }
         if let Some(event) = created {
+            // The session enters `in_progress` before its first turn is
+            // announced; the SDK observes the same order on replay.
+            self.broadcast(StreamEvent::Official(OfficialEvent::session_in_progress(
+                turn_id,
+                self.official_session(SessionStatus::InProgress, None).await,
+            )));
             self.broadcast(StreamEvent::Official(event));
+            self.broadcast(StreamEvent::Official(OfficialEvent::turn_in_progress(
+                &self.logical_id,
+                turn_id,
+                OfficialTurn::new(
+                    &self.logical_id,
+                    turn_id,
+                    TurnStatus::InProgress,
+                    created_at,
+                    None,
+                ),
+            )));
         }
         if let Some(event) = added {
             self.broadcast(StreamEvent::Official(event));
@@ -480,9 +508,42 @@ impl ItemLog {
         };
         // The turn identity stays set while completion items are flushed: their
         // `turn.item.added` frames belong to this turn.
-        for ((agent_id, message_id), stream) in streams {
-            if stream.text.is_empty() {
-                continue;
+        //
+        // Messages are ordered by their first persisted chunk, so a turn that
+        // interleaved two messages still reports them in output order. Only root
+        // `Message` streams compete for `outputIndex` and the final-answer
+        // phase: thought streams (same `messageId` as the answer) and child
+        // agents are persisted as custom items but never become official
+        // outputs.
+        let mut streams: Vec<_> = streams
+            .into_iter()
+            .filter(|(_, stream)| !stream.text.is_empty())
+            .map(|(key, stream)| (stream.first_seq.unwrap_or(u64::MAX), key, stream))
+            .collect();
+        streams.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let root_messages = streams
+            .iter()
+            .filter(|(_, (agent_id, _, _), stream)| {
+                agent_id.as_str() == "root" && stream.kind == ItemKind::Message
+            })
+            .count();
+        let mut root_message_index = 0usize;
+        for (_, (agent_id, message_id, _), stream) in streams {
+            let root_message = agent_id == "root" && stream.kind == ItemKind::Message;
+            let mut payload = json!({
+                "role": "assistant",
+                "messageId": message_id,
+                "text": stream.text,
+                "complete": true,
+            });
+            if root_message {
+                payload["phase"] = json!(if root_message_index + 1 == root_messages {
+                    "final_answer"
+                } else {
+                    "commentary"
+                });
+                payload["outputIndex"] = json!(root_message_index);
+                root_message_index += 1;
             }
             let item = ProjectedItem {
                 kind: stream.kind,
@@ -490,12 +551,7 @@ impl ItemLog {
                     agent_id,
                     task_id: None,
                 },
-                payload: json!({
-                    "role": "assistant",
-                    "messageId": message_id,
-                    "text": stream.text,
-                    "complete": true,
-                }),
+                payload,
             };
             if let Err(error) = self.append_item(item, Some(stream.item_id)).await {
                 tracing::warn!(
@@ -625,6 +681,11 @@ impl ItemLog {
                     // The failure text is now persisted on the turn row; the
                     // live frame and a later `turns.retrieve` agree.
                     .with_error(Some(message.clone())),
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::error(
+                    &turn_id,
+                    &self.logical_id,
+                    &message,
                 )));
                 self.broadcast(StreamEvent::Official(OfficialEvent::session_failed(
                     &turn_id,
@@ -764,11 +825,15 @@ impl ItemLog {
                     .cloned()
                     .unwrap_or_else(ItemView::new_item_id);
                 state.identities.insert(key.clone(), item_id.clone());
-                let stream = state.streams.entry(key).or_insert_with(|| MessageStream {
-                    kind: item.kind,
-                    item_id: item_id.clone(),
-                    text: String::new(),
-                });
+                let stream = state
+                    .streams
+                    .entry(key.clone())
+                    .or_insert_with(|| MessageStream {
+                        kind: item.kind,
+                        item_id: item_id.clone(),
+                        text: String::new(),
+                        first_seq: None,
+                    });
                 stream.text.push_str(&text);
                 item_id
             };
@@ -786,8 +851,16 @@ impl ItemLog {
                 source: item.source,
                 payload,
             };
-            if let Err(error) = self.append_item(projected, Some(item_id)).await {
-                self.report_append_failure("item", error).await;
+            match self.append_item(projected, Some(item_id)).await {
+                Ok(seq) => {
+                    // Persisted: the first chunk's seq orders this message among
+                    // the turn's outputs. A later chunk never rewrites it.
+                    let mut state = self.state.lock();
+                    if let Some(stream) = state.streams.get_mut(&key) {
+                        stream.first_seq.get_or_insert(seq);
+                    }
+                }
+                Err(error) => self.report_append_failure("item", error).await,
             }
             return;
         }
@@ -879,6 +952,11 @@ impl ItemLog {
 
     /// Official frames one persisted message frame implies.
     ///
+    /// Only the root agent's assistant `Message` items become official items.
+    /// Thought chunks share the answer's `messageId`, and child agents have
+    /// their own `source.agent_id`; both stay on the gateway's custom `item`
+    /// surface and never enter `turn.item.added`/`item.done`.
+    ///
     /// A user item opens a turn when none is open, but the opening turn's
     /// `turn.created`/`turn.item.added` frames are deferred to
     /// [`Self::begin_turn`]: acceptance must not publish a turn that may never
@@ -886,7 +964,7 @@ impl ItemLog {
     /// published against that turn immediately. Assistant deltas are skipped;
     /// only the final `complete:true` frame is the item the SDK consumes.
     fn official_frames(&self, view: &ItemView) -> Vec<OfficialEvent> {
-        if view.kind != ItemKind::Message {
+        if !view.source.is_root() || view.kind != ItemKind::Message {
             return Vec::new();
         }
         let text = view
@@ -920,18 +998,70 @@ impl ItemLog {
                 }
             }
             Some("assistant") if view.payload.get("complete") == Some(&json!(true)) => {
-                let turn_id = self.state.lock().turn_id.clone();
-                turn_id
-                    .map(|turn_id| {
-                        OfficialEvent::turn_item_added(
-                            view.seq,
-                            &self.logical_id,
-                            &turn_id,
-                            OfficialMessageItem::assistant(&view.item_id, &turn_id, text),
-                        )
-                    })
-                    .into_iter()
-                    .collect()
+                let facts = {
+                    let state = self.state.lock();
+                    let Some(turn_id) = state.turn_id.clone() else {
+                        return Vec::new();
+                    };
+                    // Written by `finish_turn`; a row persisted before these
+                    // keys existed still replays as the final answer at index 0.
+                    let phase = view
+                        .payload
+                        .get("phase")
+                        .and_then(Value::as_str)
+                        .unwrap_or("final_answer")
+                        .to_owned();
+                    let output_index = u32::try_from(
+                        view.payload
+                            .get("outputIndex")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    )
+                    .unwrap_or(u32::MAX);
+                    (turn_id, phase, output_index)
+                };
+                let (turn_id, phase, output_index) = facts;
+                let item = OfficialMessageItem::assistant(&view.item_id, &turn_id, text)
+                    .with_phase(Some(&phase));
+                vec![
+                    OfficialEvent::turn_item_added(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        item.clone(),
+                    ),
+                    OfficialEvent::turn_content_part_added(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        &view.item_id,
+                        output_index,
+                        text,
+                    ),
+                    OfficialEvent::turn_output_text_done(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        &view.item_id,
+                        output_index,
+                        text,
+                    ),
+                    OfficialEvent::turn_content_part_done(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        &view.item_id,
+                        output_index,
+                        text,
+                    ),
+                    OfficialEvent::turn_item_done(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        output_index,
+                        item,
+                    ),
+                ]
             }
             _ => Vec::new(),
         }
@@ -1006,7 +1136,13 @@ fn stream_parts(item: &ProjectedItem) -> Option<(StreamKey, String, String)> {
     }
     let message_id = item.payload.get("messageId")?.as_str()?.to_owned();
     let text = item.payload.get("text")?.as_str()?.to_owned();
-    let key = (item.source.agent_id.clone(), message_id.clone());
+    // The kind separates reasoning from the answer even when Peri assigns both
+    // the same `messageId`.
+    let key = (
+        item.source.agent_id.clone(),
+        message_id.clone(),
+        item.kind.as_str(),
+    );
     Some((key, message_id, text))
 }
 

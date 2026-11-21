@@ -49,6 +49,12 @@ impl ItemSource {
             task_id: None,
         }
     }
+
+    /// Whether this item belongs to the root agent rather than a child.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.agent_id == "root"
+    }
 }
 
 /// One append-only item. `seq` is the stable ordering and resume cursor.

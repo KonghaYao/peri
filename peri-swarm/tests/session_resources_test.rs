@@ -362,6 +362,55 @@ async fn create_and_retrieve_expose_empty_official_default_fields() {
 }
 
 #[tokio::test]
+async fn session_times_use_official_snake_case_unix_seconds() {
+    let harness = harness();
+    let (status, created) = create(&harness, json!({ "logicalId": "agent-times" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let (status, read) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-times",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+
+    // Storage keeps RFC3339 strings; only the projection turns them into Unix
+    // seconds, so the expected value comes from the row the create wrote.
+    let row = stored_session(&harness, "agent-times").await;
+    let expected_created_at = peri_swarm::domain::official::unix_from_rfc3339(&row.created_at);
+    let expected_last_active_at =
+        peri_swarm::domain::official::unix_from_rfc3339(&row.last_activity_at);
+
+    for (label, value) in [("create", &created), ("retrieve", &read)] {
+        let created_at = value["created_at"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{label}: `created_at` must be a JSON integer: {value}"));
+        let last_active_at = value["last_active_at"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{label}: `last_active_at` must be a JSON integer: {value}"));
+        assert_eq!(created_at, expected_created_at, "{label}: {value}");
+        assert_eq!(last_active_at, expected_last_active_at, "{label}: {value}");
+        assert!(
+            created_at > 0 && last_active_at > 0,
+            "{label}: the persisted RFC3339 times must yield real Unix seconds: {value}"
+        );
+        assert!(
+            value.get("createdAt").is_none(),
+            "{label}: the official `created_at` replaces `createdAt`: {value}"
+        );
+        assert!(
+            value.get("lastActivityAt").is_none(),
+            "{label}: the official `last_active_at` replaces `lastActivityAt`: {value}"
+        );
+    }
+    assert_eq!(created["created_at"], read["created_at"]);
+    assert_eq!(created["last_active_at"], read["last_active_at"]);
+}
+
+#[tokio::test]
 async fn prompt_cache_options_empty_object_uses_the_official_default_ttl() {
     let harness = harness();
     let (status, created) = create(

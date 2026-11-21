@@ -321,8 +321,15 @@ pub struct SessionView {
     pub status: SessionStatus,
     pub turn: TurnView,
     pub last_item_seq: u64,
-    pub created_at: String,
-    pub last_activity_at: String,
+    /// Official `AgentSession.created_at`: Unix seconds, not the persisted
+    /// RFC3339 column. The explicit name overrides `rename_all = "camelCase"`;
+    /// the official SDK reads only the snake_case field.
+    #[serde(rename = "created_at")]
+    pub created_at: i64,
+    /// Official `AgentSession.last_active_at`: Unix seconds, projected from the
+    /// persisted RFC3339 `last_activity_at` column.
+    #[serde(rename = "last_active_at")]
+    pub last_active_at: i64,
     pub agent: AgentView,
     pub environment: EnvironmentRef,
     pub sandbox: Option<SandboxView>,

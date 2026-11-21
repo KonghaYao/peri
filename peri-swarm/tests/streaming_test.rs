@@ -265,26 +265,47 @@ async fn stream_create_subscribes_before_the_first_turn() {
     assert_eq!(
         names,
         [
+            "agent.session.created",
+            "agent.session.in_progress",
             "agent.session.turn.created",
+            "agent.session.turn.in_progress",
             "agent.session.turn.item.added",
             "agent.session.turn.item.added",
+            "agent.session.turn.content_part.added",
+            "agent.session.turn.output_text.done",
+            "agent.session.turn.content_part.done",
+            "agent.session.turn.item.done",
             "agent.session.turn.completed",
             "agent.session.idle",
         ],
         "{text}"
     );
+    // The create stream's first official frame is `agent.session.created`, and
+    // it names the same session as the turn frames.
+    assert_eq!(official[0].0, "agent.session.created", "{text}");
+    assert_eq!(official[0].1["session"]["id"], json!("agent-01"), "{text}");
     for (event, value) in &official {
         assert_eq!(value["type"], json!(event), "SSE name and JSON type agree");
     }
-    assert_eq!(official[1].1["item"]["role"], json!("user"), "{text}");
-    assert_eq!(official[2].1["item"]["role"], json!("assistant"), "{text}");
+    assert_eq!(official[4].1["item"]["role"], json!("user"), "{text}");
+    assert_eq!(official[5].1["item"]["role"], json!("assistant"), "{text}");
     assert_eq!(
-        official[0].1["turn_id"], official[1].1["turn_id"],
+        official[2].1["turn_id"], official[4].1["turn_id"],
         "the user item belongs to the created turn"
     );
     assert_eq!(
-        official[1].1["turn_id"], official[2].1["turn_id"],
+        official[4].1["turn_id"], official[5].1["turn_id"],
         "the assistant item belongs to the same turn"
+    );
+    assert_eq!(
+        official[9].1["output_index"],
+        json!(0),
+        "the only assistant message is output 0"
+    );
+    assert_eq!(
+        official[9].1["item"]["phase"],
+        json!("final_answer"),
+        "{text}"
     );
     assert!(
         !text.contains("event: gap"),
@@ -673,24 +694,49 @@ async fn official_frames_stream_in_sdk_order_and_replay_identically() {
     let live = read_complete(live_body, "event: agent.session.idle").await;
 
     // The order the official SDK's `TurnState` relies on.
+    let session_progress = live
+        .find("event: agent.session.in_progress")
+        .expect("session in progress");
     let created = live
         .find("event: agent.session.turn.created")
         .expect("turn created");
+    let turn_progress = live
+        .find("event: agent.session.turn.in_progress")
+        .expect("turn in progress");
     let user_added = live
         .find("\"event_id\":\"evt_item_1_added\"")
         .expect("user item added");
     let assistant_added = live
         .find("\"event_id\":\"evt_item_2_added\"")
         .expect("assistant item added");
+    let part_added = live
+        .find("\"event_id\":\"evt_item_2_part_added\"")
+        .expect("content part added");
+    let text_done = live
+        .find("\"event_id\":\"evt_item_2_text_done\"")
+        .expect("output text done");
+    let part_done = live
+        .find("\"event_id\":\"evt_item_2_part_done\"")
+        .expect("content part done");
+    let item_done = live
+        .find("\"event_id\":\"evt_item_2_done\"")
+        .expect("item done");
     let completed = live
         .find("event: agent.session.turn.completed")
         .expect("turn completed");
     let idle = live
         .find("event: agent.session.idle")
         .expect("session idle");
+    assert!(session_progress < created, "{live}");
+    assert!(created < turn_progress, "{live}");
+    assert!(turn_progress < user_added, "{live}");
     assert!(created < user_added, "{live}");
     assert!(user_added < assistant_added, "{live}");
-    assert!(assistant_added < completed, "{live}");
+    assert!(assistant_added < part_added, "{live}");
+    assert!(part_added < text_done, "{live}");
+    assert!(text_done < part_done, "{live}");
+    assert!(part_done < item_done, "{live}");
+    assert!(item_done < completed, "{live}");
     assert!(completed < idle, "{live}");
 
     let live_frames = frames(&live);
@@ -742,8 +788,8 @@ async fn official_frames_stream_in_sdk_order_and_replay_identically() {
     );
     assert_eq!(
         official_ids(&live).len(),
-        5,
-        "created, 2 items, completed, idle"
+        11,
+        "session/turn progress, created, 2 items, 4 completion frames, completed, idle"
     );
 }
 

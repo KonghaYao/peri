@@ -257,30 +257,59 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 | 官方事件 | 发出时机 | 载荷来源 | `event_id` |
 | --- | --- | --- | --- |
+| `agent.session.created` | **仅** `POST /sessions?stream=true` 的流式 create 响应，作为第一个官方帧 | create 结果的 `AgentSession` 投影（与 `idle`/`failed` 同为 `OfficialSession`） | `evt_<sessionId>_session_created` |
+| `agent.session.in_progress` | turn 真正开始，**先于** `turn.created` | 会话行快照（`in_progress`） | `evt_<turnId>_session_in_progress` |
 | `agent.session.turn.created` | turn 真正开始（`begin_turn`），**不是**受理时 | 打开 turn 的 user item | `evt_<turnId>_created` |
+| `agent.session.turn.in_progress` | 紧跟 `turn.created` | 同一 turn 快照（`in_progress`） | `evt_<turnId>_in_progress` |
 | `agent.session.turn.item.added` | user item 开启 turn/steer 时、assistant `complete:true` 落库后 | 持久化 item 的 `seq`、`itemId`、text | `evt_item_<seq>_added` |
+| `agent.session.turn.content_part.added` | assistant 完成行落库后，紧跟 `item.added` | 该行的 `text`、`outputIndex`；`content_index=0` | `evt_item_<seq>_part_added` |
+| `agent.session.turn.output_text.done` | 同上 | 同上 | `evt_item_<seq>_text_done` |
+| `agent.session.turn.content_part.done` | 同上 | 同上 | `evt_item_<seq>_part_done` |
+| `agent.session.turn.item.done` | 同上 | 同一完成 item（`phase` 来自 payload） | `evt_item_<seq>_done` |
 | `agent.session.turn.completed` | 成功终态 | turn 的 `created_at` 与完成时刻 | `evt_<turnId>_completed` |
 | `agent.session.turn.failed` | 失败终态 | 同上 | `evt_<turnId>_failed` |
+| `error` | 失败 turn：`turn.failed` 之后、`session.failed` 之前 | `SessionError{code:"internal_error",type:"internal_error",message}` | `evt_<turnId>_error` |
 | `agent.session.idle` | **紧接** `turn.completed` 之后 | 会话行快照 | `evt_<turnId>_idle` |
-| `agent.session.failed` | **紧接** `turn.failed` 之后 | 会话行快照 + 错误 | `evt_<turnId>_session_failed` |
+| `agent.session.failed` | **紧接** `error` 之后 | 会话行快照 + 错误 | `evt_<turnId>_session_failed` |
 
 - `turnId = turn_<打开 turn 的 user itemId 去掉 itim_ 前缀>`。它由已持久化的 user
   item 派生，不用 ACP `messageId`，不含时钟或随机源；重连后由同一行重算，值不变。
-- `event_id` 只由 `turnId` 或持久化 `seq` 派生，因此实时投递与 backlog 重放给出
-  完全相同的 identity；客户端的 `event_id` 去重窗口可跨重连生效。
-- 受理只持久化 user item，不发 `turn.created`/`turn.item.added`。两个帧在 turn 真正
-  开始时按 `turn.created` → `turn.item.added` 顺序发出；从未执行的 turn 不会留下
-  只有 created 没有终态的悬空 turn。
-- `turn.item.added` 只投影 `message` item（user 与 assistant 的完成帧）；一个 turn
-  可以落多条 assistant 完成帧（工具循环等），它们都属于同一个 `turn_id`。
-  `receipt`、thought、tool 帧只存在于网关自定义面。`output_index` 恒为 `null`。
+- `event_id` 只由 `turnId`、`sessionId` 或持久化 item `seq` 派生，因此实时投递与
+  backlog 重放给出完全相同的 identity；客户端的 `event_id` 去重窗口可跨重连生效。
+- 受理只持久化 user item，不发 `turn.created`/`turn.item.added`。turn 真正开始时
+  官方帧按 `session.in_progress` → `turn.created` → `turn.in_progress` →
+  `turn.item.added`（user）发出，随后是自定义 `turn: started`；从未执行的 turn 不会
+  留下只有 created 没有终态的悬空 turn。实时与回放使用同一顺序。
+- 每条 assistant 完成消息按 `turn.item.added` → `content_part.added` →
+  `output_text.done` → `content_part.done` → `turn.item.done` 发出。`item.done.item`
+  是 `AgentSessionAssistantMessage`（`status:"completed"`，`content` 为单个
+  `output_text`），`content_index` 恒为 `0`。
+- 同一模型调用的 reasoning 与 answer 共享 `messageId`。流键是
+  `(agentId, messageId, kind)`，`Message` 与 `Thought` 分开累积、各自拥有稳定
+  `itemId`，各自持久化 delta 与完成行；reasoning 先到不会把 answer 并进 Thought。
+- assistant `phase`/`outputIndex` **只对 root 的 `Message` 完成行计算**：同一 turn 内
+  按**首块持久化 `seq`** 排序，最后一条 root Message 是 `final_answer`，其余是
+  `commentary`。`finish_turn` 把 `phase` 和 `outputIndex` 写进该完成 item 的 payload；
+  实时帧与回放都只读 payload，不维护第二套推导。`output_index` 是 turn 内 root
+  assistant 输出消息序号（从 0 开始），user item、`Thought` 与 child 行不参与。
+  `Thought`/child 完成行照常持久化，但不带 `phase`/`outputIndex`。旧 payload 没有
+  这两个键时，`phase` 回放为 `final_answer`，`outputIndex` 按该 turn 内完成行顺序
+  推导；旧记录仍可回放。
+- 官方 item 帧只投影 **root** assistant `Message`（以及 root user item）：
+  `official_frames` 先检查 `source.agent_id == "root"`，`projection` 里的
+  `child:<id>` 行、`Thought`、tool/receipt 帧都只留在网关自定义 `item` 面。
+  `turn.item.added` 因此不会出现 child 或 reasoning item；`turn.item.added.output_index`
+  仍为 `null`，完成序号只由 `item.done` 承载。回放按持久化的 `source.agent_id`
+  做同一过滤，child 行不开启/关闭 turn，也不消耗 `outputIndex`。
 - backlog 按行重建 turn 边界：user item 在「没有打开的 turn」或「打开的 turn 已落
   assistant 完成帧」时开启新 turn，否则视为该 turn 的 steer；终态在下一 turn 的
   `turn.created` 之前或回放末尾发出。最后一个 turn 仅在会话行状态仍为 `failed`
-  时补 `turn.failed` + `agent.session.failed`。回放仍只从 item 行重建，不读取
-  `swarm_turns`：因此重放的失败 `error` 与 `completed_at` 保持 `null`，不把
+  时补 `turn.failed` + `error` + `agent.session.failed`。回放仍只从 item 行重建，
+  不读取 `swarm_turns`：因此重放的失败 `error` 与 `completed_at` 保持 `null`，不把
   turn 行的事实混进既有帧；实时失败帧的 `turn.error` 由失败消息填充
-  （`{code:"internal_error", message}`）。`turns.list`/`turns.retrieve` 读的是
+  （`{code:"internal_error", message}`）。`error.error.code`/`type` 固定为
+  `internal_error`（持久 turn 行只写这一分类）；实时帧的 `message` 是真实失败文本，
+  回放没有持久文本时留空字符串而不是编造。`turns.list`/`turns.retrieve` 读的是
   持久 turn 行，失败 turn 在那里带 `error` 与 `completed_at`。若该 turn 此刻仍在
   实时执行，回放不补终态，终态由实时流给出，避免 SDK 提前结束。
 - 重连游标落在 turn 中间时，lookback 从游标（含）之前回看：跳过 steer user item，
@@ -303,11 +332,16 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   `turns.list`/`turns.retrieve` 使用同一状态。受理但未执行
   （`abandon_pending_turn`）不写行：它与「不发 `turn.created`」一致，因此不会留下
   `queued`/`in_progress` 的 phantom 行。
-- `agent.session.idle`/`agent.session.failed` 的 `metadata` 来自会话行；官方
+- `agent.session.in_progress`/`idle`/`failed` 的 `metadata` 来自会话行；官方
   `AgentSession.prompt_cache_options` 是可选项，网关只在有持久值时发送它（没有值
-  时字段不出现，而不是伪造 `null`）。
+  时字段不出现，而不是伪造 `null`）。实时与回放使用同一会话行投影，字段不静默分叉。
 - `usage` 恒为 `null`；`requires_action` 永不发送（本地没有待审批事实）；
-  `turn.cancelled`、budget、subagent 与官方 `function_call` item 不在本层。
+  `turn.cancelled` 不存在：取消折叠为 `turn.completed(status="cancelled")`；
+  budget、subagent 与官方 `function_call` item 不在本层。
+- 本批**不覆盖**的官方事件（本地没有对应持久事实）：`output_text.delta` 等文本
+  delta、四种 `reasoning_summary.*`、八种 `environment.*`、三种 `subagent.*`。
+  `AgentSession.environment` 也不在 `OfficialSession` 投影中（已知缺口）；会话
+  快照只包含网关实际持久化的字段。
 
 
 ### 4.3 创建与首轮
@@ -317,7 +351,10 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 `stream:true` 时网关先为 `logicalId` 打开订阅；service 受理初始输入后立即返回
 （actor 在 action reply 前用 `ctx.wait_until` 注册首轮，in-process fake 由 handler
 `tokio::spawn`，与 `POST /events` 的 `202` 相同），网关再构造并返回 SSE 响应
-（headers 与初始 `session` 帧）。首轮事件在广播容量内实时送达；客户端读取过慢或
+（headers、首个官方 `agent.session.created` 帧与自定义 `session` 帧）。官方帧在
+任何 turn 帧之前；`events` 流的实时与回放都不发 `agent.session.created`。幂等
+attach（`created=false`）只发自定义 `session` 帧，不伪造“刚创建”的官方帧。首轮事件
+在广播容量内实时送达；客户端读取过慢或
 首轮突发超过容量时，按 §4.2 的 `gap` + EOF 语义显式失败，客户端可按最后已渲染
 item 的 `seq` 重连。
 actor 路径的 action reply 与 gateway 响应构造之间仍有一个短窗口：`wait_until` 在
@@ -414,6 +451,11 @@ SRT 启停，表里也没有该列，所以不伪造 `reserved`/`running`。实�
 `usage=null`、`error=null`。这些只是形状对齐：网关没有待审批动作、vault、token
 记账或可投影的会话级错误，不会伪造非空值。反序列化对四个字段使用 serde 默认值，
 旧的持久/测试 JSON 不因缺字段失败。
+
+会话时间字段使用官方 `AgentSession.created_at` / `last_active_at` 的 snake_case
+拼写，类型是 Unix 秒 number；投影由持久行的 RFC3339 `created_at` /
+`last_activity_at` 列转换。响应不再返回 `createdAt` / `lastActivityAt` camelCase
+时间字段，其余 Swarm 扩展字段仍为 camelCase。
 
 会话投影同时携带官方 `metadata`（`string -> string`，空对象表示无）与
 `prompt_cache_options`（`{ttl:"30m"|"12h"}` 或 `null`）。`prompt_cache_options` 是
