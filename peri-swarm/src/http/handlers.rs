@@ -1,13 +1,16 @@
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use super::error::{from_json_rejection, from_query_rejection};
-use super::request::{self, CreateSessionBody, EventsQuery, ItemsQuery, SubmitEventBody};
+use super::request::{
+    self, CreateSessionBody, EventsQuery, ItemsQuery, SessionsQuery, SubmitEventBody, TurnsQuery,
+    UpdateSessionBody,
+};
 use super::{sse, AppState};
-use crate::domain::{resolve_cwd, CreateSessionResponse, LogicalId, SwarmError};
+use crate::domain::{resolve_cwd, CreateSessionResponse, LogicalId, SessionDeleted, SwarmError};
 use crate::service::CreateSessionCommand;
 
 /// Process liveness for the bootstrap entry (S6b). Deliberately constant: it
@@ -32,6 +35,14 @@ pub async fn create_session(
     )?;
     let (model, instructions) = request::resolve_agent(&body)?;
     let mcp_tools = request::resolve_tools(&body)?;
+    let metadata = match body.metadata.as_ref() {
+        Some(value) => request::resolve_metadata(value, "metadata")?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let prompt_cache_options = match body.prompt_cache_options.as_ref() {
+        Some(value) => request::resolve_prompt_cache_options(value)?,
+        None => None,
+    };
     let initial_input = request::resolve_create_input(&body)?;
     let environment = request::resolve_environment(&body)?;
     let stream = body.stream;
@@ -41,6 +52,8 @@ pub async fn create_session(
         model,
         instructions,
         mcp_tools,
+        metadata,
+        prompt_cache_options,
         initial_input,
         environment: environment.0,
         environment_id: environment.1,
@@ -105,6 +118,84 @@ pub async fn get_session(
     let logical_id = LogicalId::parse(&logical_id)?;
     let session = state.service().get_session(&logical_id).await?;
     Ok(Json(session).into_response())
+}
+
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    query: Result<Query<SessionsQuery>, QueryRejection>,
+) -> Result<Response, SwarmError> {
+    let Query(query) = query.map_err(from_query_rejection)?;
+    let window = request::resolve_sessions_window(&query)?;
+    let page = state.service().list_sessions(window).await?;
+    Ok(Json(page).into_response())
+}
+
+pub async fn update_session(
+    State(state): State<AppState>,
+    Path(logical_id): Path<String>,
+    body: Result<Json<UpdateSessionBody>, JsonRejection>,
+) -> Result<Response, SwarmError> {
+    let Json(body) = body.map_err(from_json_rejection)?;
+    let logical_id = LogicalId::parse(&logical_id)?;
+    let command = request::resolve_update(body)?;
+    let session = state.service().update_session(&logical_id, command).await?;
+    Ok(Json(session).into_response())
+}
+
+pub async fn delete_session(
+    State(state): State<AppState>,
+    Path(logical_id): Path<String>,
+) -> Result<Response, SwarmError> {
+    let logical_id = LogicalId::parse(&logical_id)?;
+    state.service().delete_session(&logical_id).await?;
+    Ok(Json(SessionDeleted::new(logical_id.as_str())).into_response())
+}
+
+pub async fn list_turns(
+    State(state): State<AppState>,
+    Path(logical_id): Path<String>,
+    query: Result<Query<TurnsQuery>, QueryRejection>,
+) -> Result<Response, SwarmError> {
+    let logical_id = LogicalId::parse(&logical_id)?;
+    let Query(query) = query.map_err(from_query_rejection)?;
+    let window = request::resolve_turns_window(&query)?;
+    let page = state.service().list_turns(&logical_id, window).await?;
+    Ok(Json(page).into_response())
+}
+
+pub async fn get_turn(
+    State(state): State<AppState>,
+    Path((logical_id, turn_id)): Path<(String, String)>,
+) -> Result<Response, SwarmError> {
+    let logical_id = LogicalId::parse(&logical_id)?;
+    let turn = state.service().get_turn(&logical_id, &turn_id).await?;
+    Ok(Json(turn).into_response())
+}
+
+/// Registered official resource the gateway cannot map.
+///
+/// Registering the route (instead of letting axum answer) keeps the error a
+/// gateway JSON envelope and still runs the Bearer gate.
+pub async fn unsupported_resource(uri: Uri) -> Result<Response, SwarmError> {
+    Err(SwarmError::unsupported_resource(official_resource(
+        uri.path(),
+    )))
+}
+
+fn official_resource(path: &str) -> &'static str {
+    if path.contains("/traces") {
+        "sessions.traces"
+    } else if path.contains("/artifacts") && path.ends_with("/content") {
+        "sessions.artifacts.content"
+    } else if path.contains("/artifacts") {
+        "sessions.artifacts"
+    } else if path.contains("/subagents") {
+        "sessions.subagents"
+    } else if path.contains("/turns/") && path.ends_with("/items") {
+        "sessions.turns.items"
+    } else {
+        "unknown"
+    }
 }
 
 pub async fn submit_event(

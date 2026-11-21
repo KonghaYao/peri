@@ -20,7 +20,7 @@
 //! full-chain recovery in S9; until then a rebuilt actor answers reads and
 //! rejects turns instead of faking a live session.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,10 +41,14 @@ use super::service::AcpSwarmService;
 use crate::domain::{
     ActorKey, ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind,
     InputMode, InputOutcome, InputSubmission, ItemOrder, ItemPage, ItemView, ItemsWindow,
-    LogicalId, McpToolSpec, SessionState, SessionView, StreamEvent, SwarmError,
+    LogicalId, McpToolSpec, OfficialTurn, SessionDeleted, SessionState, SessionView, StreamEvent,
+    SwarmError, TurnPage, TurnsWindow,
 };
 use crate::event_stream::FrameWriter;
-use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
+use crate::service::{
+    CreateSessionCommand, CreateSessionResult, EventSubscription, SessionUpdateCommand,
+    SwarmService,
+};
 use crate::store::{store_failure, SwarmStore};
 
 /// Registered actor name. It is part of the routing contract with the gateway.
@@ -220,7 +224,18 @@ impl SwarmActor {
 #[async_trait]
 impl Actor for SwarmActor {
     type Input = SwarmActorInput;
-    type Actions = (Info, Create, Get, Submit, ListItems, Subscribe);
+    type Actions = (
+        Info,
+        Create,
+        Get,
+        Submit,
+        ListItems,
+        Subscribe,
+        Update,
+        Delete,
+        ListTurns,
+        GetTurn,
+    );
     type Events = ();
     type ConnParams = ();
     type Action = Value;
@@ -567,6 +582,10 @@ pub struct Create {
     #[serde(default)]
     pub mcp_tools: Vec<McpToolSpec>,
     #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub prompt_cache_options: Option<crate::domain::PromptCacheOptions>,
+    #[serde(default)]
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
     /// Caller-supplied hosted environment id (S8a3a); `None` mints one.
@@ -604,6 +623,8 @@ impl Handler<Create> for SwarmActor {
             model: action.model,
             instructions: action.instructions,
             mcp_tools: action.mcp_tools,
+            metadata: action.metadata,
+            prompt_cache_options: action.prompt_cache_options,
             initial_input: action.initial_input,
             environment: action.environment,
             environment_id: action.environment_id,
@@ -839,5 +860,160 @@ impl Handler<Subscribe> for SwarmActor {
             last_seq: page.last_item_seq,
             has_more: page.has_more,
         })))
+    }
+}
+
+/// `PATCH /sessions/{id}` (`sessions.update`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Update {
+    pub logical_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_tools: Option<Vec<McpToolSpec>>,
+    /// Omitted keeps the stored map; `null` or `{}` clears it.
+    #[serde(default, skip_serializing_if = "crate::service::UpdateField::is_keep")]
+    pub metadata: crate::service::UpdateField<BTreeMap<String, String>>,
+    /// Omitted keeps the stored value; `null` clears it. The field must be
+    /// omitted, not sent as `null`, when the patch keeps the value.
+    #[serde(default, skip_serializing_if = "crate::service::UpdateField::is_keep")]
+    pub prompt_cache_options: crate::service::UpdateField<crate::domain::PromptCacheOptions>,
+}
+
+impl rivetkit::Action for Update {
+    type Output = ActionEnvelope<SessionView>;
+
+    const NAME: &'static str = "update";
+}
+
+impl Handler<Update> for SwarmActor {
+    async fn handle(
+        self: Arc<Self>,
+        _ctx: Ctx<Self>,
+        action: Update,
+    ) -> Result<ActionEnvelope<SessionView>> {
+        let logical_id = match self.check_logical_id(&action.logical_id) {
+            Ok(logical_id) => logical_id,
+            Err(error) => return Ok(envelope(Err(error))),
+        };
+        let command = SessionUpdateCommand {
+            model: action.model,
+            mcp_tools: action.mcp_tools,
+            metadata: action.metadata,
+            prompt_cache_options: action.prompt_cache_options,
+        };
+        Ok(envelope(
+            self.service.update_session(&logical_id, command).await,
+        ))
+    }
+}
+
+/// `DELETE /sessions/{id}` (`sessions.delete`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Delete {
+    pub logical_id: String,
+}
+
+impl rivetkit::Action for Delete {
+    type Output = ActionEnvelope<SessionDeleted>;
+
+    const NAME: &'static str = "delete";
+}
+
+impl Handler<Delete> for SwarmActor {
+    async fn handle(
+        self: Arc<Self>,
+        ctx: Ctx<Self>,
+        action: Delete,
+    ) -> Result<ActionEnvelope<SessionDeleted>> {
+        let logical_id = match self.check_logical_id(&action.logical_id) {
+            Ok(logical_id) => logical_id,
+            Err(error) => return Ok(envelope(Err(error))),
+        };
+        let result = self.service.delete_session(&logical_id).await;
+        match result {
+            Ok(()) => {
+                // The rows are gone and an in-process host may still hold an
+                // idle ACP child or an old broadcast hub. Destroying the actor
+                // makes the next create a fresh generation with no stale
+                // memory; the action reply is sent before the stop is applied.
+                let stop = ctx.clone();
+                ctx.wait_until(async move {
+                    if let Err(error) = stop.destroy() {
+                        tracing::warn!(error = %error, "swarm actor could not be destroyed after delete");
+                    }
+                });
+                Ok(envelope(Ok(SessionDeleted::new(logical_id.as_str()))))
+            }
+            Err(error) => Ok(envelope(Err(error))),
+        }
+    }
+}
+
+/// `GET /sessions/{id}/turns`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTurns {
+    pub logical_id: String,
+    pub order: ItemOrder,
+    #[serde(default)]
+    pub after: Option<String>,
+    pub limit: u32,
+}
+
+impl rivetkit::Action for ListTurns {
+    type Output = ActionEnvelope<TurnPage>;
+
+    const NAME: &'static str = "list_turns";
+}
+
+impl Handler<ListTurns> for SwarmActor {
+    async fn handle(
+        self: Arc<Self>,
+        _ctx: Ctx<Self>,
+        action: ListTurns,
+    ) -> Result<ActionEnvelope<TurnPage>> {
+        let logical_id = match self.check_logical_id(&action.logical_id) {
+            Ok(logical_id) => logical_id,
+            Err(error) => return Ok(envelope(Err(error))),
+        };
+        let window = TurnsWindow {
+            order: action.order,
+            after: action.after,
+            limit: action.limit,
+        };
+        Ok(envelope(self.service.list_turns(&logical_id, window).await))
+    }
+}
+
+/// `GET /sessions/{id}/turns/{turnId}`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetTurn {
+    pub logical_id: String,
+    pub turn_id: String,
+}
+
+impl rivetkit::Action for GetTurn {
+    type Output = ActionEnvelope<OfficialTurn>;
+
+    const NAME: &'static str = "get_turn";
+}
+
+impl Handler<GetTurn> for SwarmActor {
+    async fn handle(
+        self: Arc<Self>,
+        _ctx: Ctx<Self>,
+        action: GetTurn,
+    ) -> Result<ActionEnvelope<OfficialTurn>> {
+        let logical_id = match self.check_logical_id(&action.logical_id) {
+            Ok(logical_id) => logical_id,
+            Err(error) => return Ok(envelope(Err(error))),
+        };
+        Ok(envelope(
+            self.service.get_turn(&logical_id, &action.turn_id).await,
+        ))
     }
 }

@@ -141,3 +141,28 @@ fn persisted_rfc3339_timestamps_convert_to_unix_seconds() {
     assert_eq!(unix_from_rfc3339("not-a-timestamp"), 0);
     assert_eq!(unix_from_rfc3339(""), 0);
 }
+
+#[test]
+fn official_session_carries_persisted_metadata_and_prompt_cache_options() {
+    let session = OfficialSession::new(
+        "agent-1",
+        SessionStatus::Idle,
+        100,
+        101,
+        None,
+        Some("model-a".to_owned()),
+        None,
+    )
+    .with_metadata([("team".to_owned(), "alpha".to_owned())].into())
+    .with_prompt_cache_options(Some(crate::domain::PromptCacheOptions::new(
+        crate::domain::PromptCacheTtl::TwelveHours,
+    )));
+    let value = serde_json::to_value(&session).expect("serialize");
+    assert_eq!(value["metadata"], json!({ "team": "alpha" }));
+    assert_eq!(value["prompt_cache_options"], json!({ "ttl": "12h" }));
+
+    // No configured value: the optional field is absent, never `null`.
+    let session = OfficialSession::new("agent-1", SessionStatus::Idle, 0, 0, None, None, None);
+    let value = serde_json::to_value(&session).expect("serialize");
+    assert!(value.get("prompt_cache_options").is_none());
+}

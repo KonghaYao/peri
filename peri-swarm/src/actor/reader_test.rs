@@ -21,6 +21,8 @@ fn session_row() -> SwarmSessionRow {
         environment: crate::domain::EnvironmentRef::none(
             &crate::domain::LogicalId::parse("agent-1").expect("logical id"),
         ),
+        metadata: Default::default(),
+        prompt_cache_options: None,
         created_at: "2026-01-01T00:00:00Z".to_owned(),
         last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
         last_item_seq: 0,

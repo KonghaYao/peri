@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use axum::http::HeaderMap;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -6,8 +8,11 @@ use uuid::Uuid;
 use super::{MAX_INSTRUCTIONS_BYTES, MAX_MODEL_BYTES, MAX_TEXT_BYTES};
 use crate::domain::{
     ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
-    InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, SwarmError,
+    InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, PromptCacheOptions,
+    PromptCacheTtl, SessionsWindow, SwarmError, TurnsWindow, MAX_METADATA_KEY_CHARS,
+    MAX_METADATA_PAIRS, MAX_METADATA_VALUE_CHARS,
 };
+use crate::service::{SessionUpdateCommand, UpdateField};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +36,12 @@ pub struct CreateSessionBody {
     pub input: Option<CreateInputBody>,
     #[serde(default)]
     pub environment: Option<EnvironmentBody>,
+    /// Official `metadata` string map. `null`/omitted means no metadata.
+    #[serde(default)]
+    pub metadata: Option<Value>,
+    /// Official `prompt_cache_options` (`{ttl: "30m"|"12h"}`). `null` clears.
+    #[serde(rename = "prompt_cache_options", default)]
+    pub prompt_cache_options: Option<Value>,
     #[serde(default)]
     pub stream: bool,
 }
@@ -178,6 +189,52 @@ pub struct ItemsQuery {
     pub limit: Option<u32>,
     #[serde(default)]
     pub order: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnsQuery {
+    #[serde(default)]
+    pub after: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub order: Option<String>,
+}
+
+/// Raw `sessions.list` query. `metadata[key]=value` has dynamic keys, so the
+/// map is validated by [`resolve_sessions_window`] instead of serde.
+pub type SessionsQuery = HashMap<String, String>;
+
+/// `PATCH /sessions/{id}` body (`SessionUpdateParams`).
+///
+/// [`UpdateField`] distinguishes omission (keep), explicit `null` (clear) and
+/// a value (replace); `Option<Option<T>>` would collapse `null` into
+/// "absent" on deserialization.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSessionBody {
+    #[serde(default)]
+    pub agent: Option<UpdateAgentBody>,
+    #[serde(default)]
+    pub metadata: UpdateField<Value>,
+    #[serde(rename = "prompt_cache_options", default)]
+    pub prompt_cache_options: UpdateField<Value>,
+    #[serde(default)]
+    pub review: UpdateField<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentBody {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub tools: UpdateField<Value>,
+    #[serde(default)]
+    pub reasoning: UpdateField<Value>,
+    #[serde(default)]
+    pub service_tier: UpdateField<Value>,
 }
 
 /// `logicalId` is optional for SDK clients: an `Idempotency-Key` gives a stable
@@ -813,6 +870,255 @@ pub fn resolve_items_window(query: &ItemsQuery) -> Result<ItemsWindow, SwarmErro
         after,
         after_id,
         limit,
+    })
+}
+
+/// Validate the official `metadata` string map (create and update).
+pub fn resolve_metadata(
+    value: &Value,
+    field: &str,
+) -> Result<BTreeMap<String, String>, SwarmError> {
+    let Value::Object(map) = value else {
+        return Err(metadata_invalid(
+            field,
+            "metadata must be an object of string values",
+        ));
+    };
+    if map.len() > MAX_METADATA_PAIRS {
+        return Err(metadata_invalid(
+            field,
+            &format!("metadata must have at most {MAX_METADATA_PAIRS} pairs"),
+        ));
+    }
+    let mut metadata = BTreeMap::new();
+    for (key, value) in map {
+        let path = format!("{field}.{key}");
+        if key.is_empty() || key.chars().count() > MAX_METADATA_KEY_CHARS {
+            return Err(metadata_invalid(
+                &path,
+                &format!("metadata keys must be 1..={MAX_METADATA_KEY_CHARS} characters"),
+            ));
+        }
+        let Some(text) = value.as_str() else {
+            return Err(metadata_invalid(&path, "metadata values must be strings"));
+        };
+        if text.chars().count() > MAX_METADATA_VALUE_CHARS {
+            return Err(metadata_invalid(
+                &path,
+                &format!("metadata values must be at most {MAX_METADATA_VALUE_CHARS} characters"),
+            ));
+        }
+        metadata.insert(key.clone(), text.to_owned());
+    }
+    Ok(metadata)
+}
+
+fn metadata_invalid(field: &str, message: &str) -> SwarmError {
+    SwarmError::invalid_input(message).with_details(json!({ "field": field }))
+}
+
+/// Parse `prompt_cache_options`. `null`/`{}` mean "no configured value".
+pub fn resolve_prompt_cache_options(
+    value: &Value,
+) -> Result<Option<PromptCacheOptions>, SwarmError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Value::Object(map) = value else {
+        return Err(metadata_invalid(
+            "prompt_cache_options",
+            "prompt_cache_options must be an object",
+        ));
+    };
+    for key in map.keys() {
+        if key != "ttl" {
+            return Err(metadata_invalid(
+                &format!("prompt_cache_options.{key}"),
+                "only `ttl` is supported in prompt_cache_options",
+            ));
+        }
+    }
+    let Some(ttl) = map.get("ttl") else {
+        return Ok(None);
+    };
+    let Some(ttl) = ttl.as_str() else {
+        return Err(metadata_invalid(
+            "prompt_cache_options.ttl",
+            "ttl must be a string",
+        ));
+    };
+    let Some(ttl) = PromptCacheTtl::parse(ttl) else {
+        return Err(metadata_invalid(
+            "prompt_cache_options.ttl",
+            "ttl must be `30m` or `12h`",
+        ));
+    };
+    Ok(Some(PromptCacheOptions::new(ttl)))
+}
+
+/// `GET /v1/agents/sessions` query.
+pub fn resolve_sessions_window(query: &SessionsQuery) -> Result<SessionsWindow, SwarmError> {
+    let mut after = None;
+    let mut limit = None;
+    let mut order = None;
+    let mut agent_id = None;
+    let mut metadata = BTreeMap::new();
+    for (name, value) in query {
+        match name.as_str() {
+            "after" => after = Some(value.clone()),
+            "limit" => {
+                limit = Some(value.parse::<u32>().map_err(|_| {
+                    SwarmError::invalid_query("limit must be a positive integer")
+                        .with_details(json!({ "field": "limit", "received": value }))
+                })?);
+            }
+            "order" => order = Some(value.clone()),
+            "agent_id" => agent_id = Some(value.clone()),
+            other => {
+                let Some(key) = other
+                    .strip_prefix("metadata[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                else {
+                    return Err(SwarmError::invalid_query(format!(
+                        "unknown query parameter `{other}`"
+                    ))
+                    .with_details(json!({ "field": other })));
+                };
+                metadata.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    if metadata.len() > MAX_METADATA_PAIRS {
+        return Err(SwarmError::invalid_query(format!(
+            "metadata must have at most {MAX_METADATA_PAIRS} pairs"
+        ))
+        .with_details(json!({ "field": "metadata" })));
+    }
+    for (key, value) in &metadata {
+        if key.is_empty() || key.chars().count() > MAX_METADATA_KEY_CHARS {
+            return Err(SwarmError::invalid_query(format!(
+                "metadata keys must be 1..={MAX_METADATA_KEY_CHARS} characters"
+            ))
+            .with_details(json!({ "field": format!("metadata[{key}]") })));
+        }
+        if value.chars().count() > MAX_METADATA_VALUE_CHARS {
+            return Err(SwarmError::invalid_query(format!(
+                "metadata values must be at most {MAX_METADATA_VALUE_CHARS} characters"
+            ))
+            .with_details(json!({ "field": format!("metadata[{key}]") })));
+        }
+    }
+    let limit = limit.unwrap_or(SessionsWindow::DEFAULT_LIMIT);
+    if limit == 0 || limit > SessionsWindow::MAX_LIMIT {
+        return Err(SwarmError::invalid_query(format!(
+            "limit must be within 1..={}",
+            SessionsWindow::MAX_LIMIT
+        ))
+        .with_details(json!({ "field": "limit", "received": limit })));
+    }
+    let order = match order.as_deref() {
+        Some(value) => ItemOrder::parse(value)?,
+        None => ItemOrder::Desc,
+    };
+    Ok(SessionsWindow {
+        order,
+        after,
+        limit,
+        agent_id,
+        metadata,
+    })
+}
+
+/// `GET /v1/agents/sessions/{id}/turns` query. The official default is `desc`.
+pub fn resolve_turns_window(query: &TurnsQuery) -> Result<TurnsWindow, SwarmError> {
+    let limit = query.limit.unwrap_or(TurnsWindow::DEFAULT_LIMIT);
+    if limit == 0 || limit > TurnsWindow::MAX_LIMIT {
+        return Err(SwarmError::invalid_query(format!(
+            "limit must be within 1..={}",
+            TurnsWindow::MAX_LIMIT
+        ))
+        .with_details(json!({ "field": "limit", "received": limit })));
+    }
+    let order = match query.order.as_deref() {
+        Some(value) => ItemOrder::parse(value)?,
+        None => ItemOrder::Desc,
+    };
+    Ok(TurnsWindow {
+        order,
+        after: query.after.clone(),
+        limit,
+    })
+}
+
+/// Validate a `tools` array supplied to `sessions.update` (same normalizer as
+/// create; `null`/`[]` clears the declaration).
+pub fn resolve_tools_value(value: &Value, field: &str) -> Result<Vec<McpToolSpec>, SwarmError> {
+    let declared = declared_tools(Some(value), field)?;
+    declared
+        .iter()
+        .enumerate()
+        .map(|(index, value)| normalize_tool(field, index, value))
+        .collect()
+}
+
+fn unsupported_official_field(field: &str) -> SwarmError {
+    SwarmError::new(
+        ErrorKind::BadRequest,
+        ErrorCode::InvalidRequest,
+        format!("official field `{field}` is not supported by this gateway"),
+    )
+    .with_details(json!({ "field": field, "supported": false }))
+}
+
+/// `PATCH /v1/agents/sessions/{id}` body.
+pub fn resolve_update(body: UpdateSessionBody) -> Result<SessionUpdateCommand, SwarmError> {
+    let agent = body.agent;
+    if !body.review.is_keep() {
+        return Err(unsupported_official_field("review"));
+    }
+    if let Some(agent) = agent.as_ref() {
+        if !agent.reasoning.is_keep() {
+            return Err(unsupported_official_field("agent.reasoning"));
+        }
+        if !agent.service_tier.is_keep() {
+            return Err(unsupported_official_field("agent.service_tier"));
+        }
+    }
+    let model = match agent.as_ref().and_then(|agent| agent.model.clone()) {
+        Some(model) => {
+            if model.trim().is_empty() {
+                return Err(metadata_invalid("agent.model", "model must not be empty"));
+            }
+            check_len("agent.model", &model, MAX_MODEL_BYTES)?;
+            Some(model)
+        }
+        None => None,
+    };
+    let mcp_tools = match agent.as_ref().map(|agent| &agent.tools) {
+        None | Some(UpdateField::Keep) => None,
+        Some(UpdateField::Clear) => Some(Vec::new()),
+        Some(UpdateField::Set(value)) => Some(resolve_tools_value(value, "agent.tools")?),
+    };
+    let metadata = match body.metadata {
+        UpdateField::Keep => UpdateField::Keep,
+        UpdateField::Clear => UpdateField::Clear,
+        UpdateField::Set(value) => UpdateField::Set(resolve_metadata(&value, "metadata")?),
+    };
+    let prompt_cache_options = match body.prompt_cache_options {
+        UpdateField::Keep => UpdateField::Keep,
+        UpdateField::Clear => UpdateField::Clear,
+        UpdateField::Set(value) => match resolve_prompt_cache_options(&value)? {
+            Some(options) => UpdateField::Set(options),
+            // `{}` carries no `ttl`, i.e. the model default: clear the
+            // session default instead of inventing a TTL.
+            None => UpdateField::Clear,
+        },
+    };
+    Ok(SessionUpdateCommand {
+        model,
+        mcp_tools,
+        metadata,
+        prompt_cache_options,
     })
 }
 

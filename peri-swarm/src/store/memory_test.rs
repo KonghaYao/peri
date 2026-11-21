@@ -20,6 +20,8 @@ fn session_row(logical_id: &str, cwd: &str) -> SwarmSessionRow {
             kind: EnvironmentKind::None,
             id: Some(logical_id.to_owned()),
         },
+        metadata: Default::default(),
+        prompt_cache_options: None,
         created_at: "2026-01-01T00:00:00.000000Z".to_owned(),
         last_activity_at: "2026-01-01T00:00:00.000000Z".to_owned(),
         last_item_seq: 0,
@@ -420,4 +422,408 @@ async fn item_page_spends_limit_as_an_aggregate_row_budget() {
         [1, 2, 3]
     );
     assert!(whole.has_more);
+}
+
+// ── official session resources (sessions.list/update/delete, turns) ─────────
+
+fn window(
+    order: crate::domain::ItemOrder,
+    after: Option<&str>,
+    limit: u32,
+    metadata: &[(&str, &str)],
+) -> SessionsWindow {
+    SessionsWindow {
+        order,
+        after: after.map(str::to_owned),
+        limit,
+        agent_id: None,
+        metadata: metadata
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect(),
+    }
+}
+
+fn turn_row(logical_id: &str, turn_id: &str, created_at: i64, status: TurnStatus) -> SwarmTurnRow {
+    SwarmTurnRow {
+        logical_id: logical_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        status,
+        created_at,
+        started_at: Some(created_at),
+        completed_at: if status.is_open() {
+            None
+        } else {
+            Some(created_at)
+        },
+        error: None,
+        usage: None,
+        subagent_id: None,
+    }
+}
+
+#[tokio::test]
+async fn session_list_orders_by_id_and_matches_metadata_exactly() {
+    let store = MemorySwarmStore::new();
+    for (id, team) in [
+        ("agent-a", "alpha"),
+        ("agent-b", "beta"),
+        ("agent-c", "alpha"),
+    ] {
+        let mut row = session_row(id, "/tmp");
+        row.metadata.insert("team".to_owned(), team.to_owned());
+        store.swarm_upsert_session(row).await.expect("upsert");
+    }
+
+    let desc = store
+        .swarm_list_sessions(&window(ItemOrder::Desc, None, 10, &[]))
+        .await
+        .expect("list");
+    assert_eq!(
+        desc.iter()
+            .map(|row| row.logical_id.as_str())
+            .collect::<Vec<_>>(),
+        ["agent-c", "agent-b", "agent-a"]
+    );
+
+    let asc = store
+        .swarm_list_sessions(&window(ItemOrder::Asc, None, 10, &[]))
+        .await
+        .expect("list");
+    assert_eq!(
+        asc.iter()
+            .map(|row| row.logical_id.as_str())
+            .collect::<Vec<_>>(),
+        ["agent-a", "agent-b", "agent-c"]
+    );
+
+    let after = store
+        .swarm_list_sessions(&window(ItemOrder::Desc, Some("agent-b"), 10, &[]))
+        .await
+        .expect("list");
+    assert_eq!(
+        after
+            .iter()
+            .map(|row| row.logical_id.as_str())
+            .collect::<Vec<_>>(),
+        ["agent-a"],
+        "after is exclusive in the selected order"
+    );
+
+    let filtered = store
+        .swarm_list_sessions(&window(ItemOrder::Asc, None, 10, &[("team", "alpha")]))
+        .await
+        .expect("list");
+    assert_eq!(
+        filtered
+            .iter()
+            .map(|row| row.logical_id.as_str())
+            .collect::<Vec<_>>(),
+        ["agent-a", "agent-c"]
+    );
+
+    let missing = store
+        .swarm_list_sessions(&window(ItemOrder::Asc, None, 10, &[("team", "missing")]))
+        .await
+        .expect("list");
+    assert!(missing.is_empty());
+
+    let mut other_agent = window(ItemOrder::Asc, None, 10, &[]);
+    other_agent.agent_id = Some("someone-else".to_owned());
+    assert!(store
+        .swarm_list_sessions(&other_agent)
+        .await
+        .expect("list")
+        .is_empty());
+
+    let probe = store
+        .swarm_list_sessions(&window(ItemOrder::Asc, None, 2, &[]))
+        .await
+        .expect("list");
+    assert_eq!(
+        probe.len(),
+        3,
+        "the store returns limit + 1 rows for has_more"
+    );
+}
+
+#[tokio::test]
+async fn session_patch_replaces_and_clears_official_fields() {
+    let store = MemorySwarmStore::new();
+    let mut row = session_row("agent-p", "/tmp");
+    row.metadata.insert("old".to_owned(), "value".to_owned());
+    row.prompt_cache_options = Some(crate::domain::PromptCacheOptions::new(
+        crate::domain::PromptCacheTtl::ThirtyMinutes,
+    ));
+    store.swarm_upsert_session(row).await.expect("upsert");
+
+    let tool = McpToolSpec::new("deepwiki", "https://mcp.example.test/mcp");
+    store
+        .swarm_patch_session(SwarmSessionPatch {
+            logical_id: "agent-p".to_owned(),
+            model: Some("model-2".to_owned()),
+            mcp_tools: Some(vec![tool.clone()]),
+            metadata: Some([("new".to_owned(), "value".to_owned())].into()),
+            prompt_cache_options: Some(Some(crate::domain::PromptCacheOptions::new(
+                crate::domain::PromptCacheTtl::TwelveHours,
+            ))),
+            last_activity_at: None,
+        })
+        .await
+        .expect("patch");
+
+    let row = store
+        .swarm_get_session("agent-p")
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.model.as_deref(), Some("model-2"));
+    assert_eq!(row.mcp_tools, vec![tool]);
+    assert_eq!(row.metadata.keys().collect::<Vec<_>>(), [&"new".to_owned()]);
+    assert_eq!(
+        row.prompt_cache_options.expect("ttl").ttl,
+        crate::domain::PromptCacheTtl::TwelveHours
+    );
+
+    store
+        .swarm_patch_session(SwarmSessionPatch {
+            logical_id: "agent-p".to_owned(),
+            model: None,
+            mcp_tools: Some(Vec::new()),
+            metadata: Some(Default::default()),
+            prompt_cache_options: Some(None),
+            last_activity_at: None,
+        })
+        .await
+        .expect("clear");
+    let row = store
+        .swarm_get_session("agent-p")
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.model.as_deref(), Some("model-2"), "omitted model stays");
+    assert!(row.mcp_tools.is_empty());
+    assert!(row.metadata.is_empty());
+    assert_eq!(row.prompt_cache_options, None);
+
+    assert!(matches!(
+        store
+            .swarm_patch_session(SwarmSessionPatch {
+                logical_id: "missing".to_owned(),
+                model: None,
+                mcp_tools: None,
+                metadata: None,
+                prompt_cache_options: None,
+                last_activity_at: None,
+            })
+            .await,
+        Err(StoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn delete_session_removes_every_scoped_row() {
+    let store = MemorySwarmStore::new();
+    store
+        .swarm_upsert_session(session_row("agent-d", "/tmp"))
+        .await
+        .expect("session");
+    store
+        .swarm_append_item(item_row("agent-d", 1))
+        .await
+        .expect("item");
+    store
+        .swarm_put_input(sample_input_for("agent-d"))
+        .await
+        .expect("input");
+    store
+        .swarm_put_binding(binding_for("agent-d"))
+        .await
+        .expect("binding");
+    store
+        .swarm_upsert_turn(turn_row("agent-d", "turn-1", 10, TurnStatus::Completed))
+        .await
+        .expect("turn");
+
+    store.swarm_delete_session("agent-d").await.expect("delete");
+    assert!(store
+        .swarm_get_session("agent-d")
+        .await
+        .expect("get")
+        .is_none());
+    assert_eq!(store.swarm_last_seq("agent-d").await.expect("seq"), 0);
+    assert!(store
+        .swarm_get_input("agent-d", "input-1")
+        .await
+        .expect("input")
+        .is_none());
+    assert!(store
+        .swarm_get_binding("env-agent-d")
+        .await
+        .expect("binding")
+        .is_none());
+    assert!(store
+        .swarm_get_turn("agent-d", "turn-1")
+        .await
+        .expect("turn")
+        .is_none());
+}
+
+#[tokio::test]
+async fn turn_page_is_ordered_and_after_is_exclusive_in_both_orders() {
+    let store = MemorySwarmStore::new();
+    store
+        .swarm_upsert_session(session_row("agent-t", "/tmp"))
+        .await
+        .expect("session");
+    store
+        .swarm_upsert_turn(turn_row("agent-t", "turn-b", 10, TurnStatus::Completed))
+        .await
+        .expect("first");
+    store
+        .swarm_upsert_turn(turn_row("agent-t", "turn-a", 10, TurnStatus::Completed))
+        .await
+        .expect("tie-break");
+    store
+        .swarm_upsert_turn(turn_row("agent-t", "turn-c", 11, TurnStatus::Failed))
+        .await
+        .expect("last");
+
+    let asc = store
+        .swarm_turn_page(
+            "agent-t",
+            &TurnsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("page");
+    assert_eq!(
+        asc.iter()
+            .map(|row| row.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        ["turn-a", "turn-b", "turn-c"],
+        "same-second turns use the turn id as tie-break"
+    );
+
+    let desc = store
+        .swarm_turn_page(
+            "agent-t",
+            &TurnsWindow {
+                order: ItemOrder::Desc,
+                after: None,
+                limit: 1,
+            },
+        )
+        .await
+        .expect("page");
+    assert_eq!(
+        desc.iter()
+            .map(|row| row.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        ["turn-c", "turn-b"],
+        "the store returns limit + 1 rows for has_more"
+    );
+
+    let after = store
+        .swarm_turn_page(
+            "agent-t",
+            &TurnsWindow {
+                order: ItemOrder::Desc,
+                after: Some("turn-b".to_owned()),
+                limit: 2,
+            },
+        )
+        .await
+        .expect("page");
+    assert_eq!(
+        after
+            .iter()
+            .map(|row| row.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        ["turn-a"]
+    );
+
+    // A terminal write keeps the opening `created_at`.
+    let mut completed = turn_row("agent-t", "turn-b", 999, TurnStatus::Completed);
+    completed.completed_at = Some(12);
+    store.swarm_upsert_turn(completed).await.expect("update");
+    let row = store
+        .swarm_get_turn("agent-t", "turn-b")
+        .await
+        .expect("get")
+        .expect("turn");
+    assert_eq!(row.created_at, 10);
+    assert_eq!(row.completed_at, Some(12));
+}
+
+#[tokio::test]
+async fn close_open_turns_only_touches_non_terminal_rows() {
+    let store = MemorySwarmStore::new();
+    store
+        .swarm_upsert_session(session_row("agent-c", "/tmp"))
+        .await
+        .expect("session");
+    store
+        .swarm_upsert_turn(turn_row("agent-c", "open", 10, TurnStatus::InProgress))
+        .await
+        .expect("open");
+    store
+        .swarm_upsert_turn(turn_row("agent-c", "done", 11, TurnStatus::Completed))
+        .await
+        .expect("done");
+
+    let closed = store
+        .swarm_close_open_turns(
+            "agent-c",
+            TurnStatus::Failed,
+            12,
+            Some(json!({ "code": "internal_error", "message": "interrupted" })),
+        )
+        .await
+        .expect("close");
+    assert_eq!(closed, 1);
+
+    let open = store
+        .swarm_get_turn("agent-c", "open")
+        .await
+        .expect("get")
+        .expect("turn");
+    assert_eq!(open.status, TurnStatus::Failed);
+    assert_eq!(open.completed_at, Some(12));
+    assert_eq!(open.error.expect("error")["code"], json!("internal_error"));
+
+    let done = store
+        .swarm_get_turn("agent-c", "done")
+        .await
+        .expect("get")
+        .expect("turn");
+    assert_eq!(done.status, TurnStatus::Completed);
+    assert_eq!(done.completed_at, Some(11));
+}
+
+fn sample_input_for(logical_id: &str) -> SwarmInputRow {
+    SwarmInputRow {
+        logical_id: logical_id.to_owned(),
+        input_id: "input-1".to_owned(),
+        fingerprint: "sha256:abc".to_owned(),
+        state: InputState::Accepted,
+        created_at: "2026-01-01T00:00:00Z".to_owned(),
+    }
+}
+
+fn binding_for(logical_id: &str) -> SwarmBindingRow {
+    SwarmBindingRow {
+        logical_env_id: format!("env-{logical_id}"),
+        logical_id: logical_id.to_owned(),
+        sandbox_id: "sandbox-1".to_owned(),
+        workspace_path: "/tmp/ws".to_owned(),
+        sandbox_root: "/tmp".to_owned(),
+        settings_profile: None,
+        token_file: None,
+        last_run_id: None,
+        last_used_at: "2026-01-01T00:00:00Z".to_owned(),
+    }
 }

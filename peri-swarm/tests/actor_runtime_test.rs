@@ -30,9 +30,9 @@ use peri_swarm::actor::service::{AcpSwarmService, ActorServiceConfig};
 use peri_swarm::domain::{
     ActorKey, ContentBlock, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode, EventCursor,
     InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId,
-    OfficialEvent, SessionState, StreamEvent, TurnEvent,
+    OfficialEvent, SessionState, StreamEvent, TurnEvent, TurnsWindow,
 };
-use peri_swarm::service::{CreateSessionCommand, SwarmService};
+use peri_swarm::service::{CreateSessionCommand, SessionUpdateCommand, SwarmService};
 use peri_swarm::store::{MemorySwarmStore, SwarmSessionRow, SwarmSessionUpdate, SwarmStore};
 
 /// One chunk of assistant output; the stub splits it in two SSE frames.
@@ -375,6 +375,8 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             model: None,
             instructions: Some("keep it short".to_owned()),
             mcp_tools: Vec::new(),
+            metadata: Default::default(),
+            prompt_cache_options: None,
             initial_input: Some("hello".to_owned()),
             environment: EnvironmentKind::None,
             environment_id: None,
@@ -889,6 +891,8 @@ async fn model_unavailable_is_a_diagnosable_error() {
             model: None,
             instructions: None,
             mcp_tools: Vec::new(),
+            metadata: Default::default(),
+            prompt_cache_options: None,
             initial_input: None,
             environment: EnvironmentKind::None,
             environment_id: None,
@@ -918,6 +922,42 @@ async fn model_unavailable_is_a_diagnosable_error() {
 
 // ── interrupted create: the row is written before the Peri session ─────────
 
+/// Poll `turns.list` until the host's terminal is visible.
+///
+/// `session/prompt` can answer before the terminal notification is ingested,
+/// so the terminal is asynchronous from the caller's point of view.
+async fn wait_turn(
+    service: &AcpSwarmService,
+    logical: &LogicalId,
+    turn_id: &str,
+    status: &str,
+) -> peri_swarm::domain::OfficialTurn {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let turns = service
+            .list_turns(
+                logical,
+                TurnsWindow {
+                    order: ItemOrder::Desc,
+                    after: None,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("turns");
+        if let Some(turn) = turns.data.iter().find(|turn| turn.id == turn_id) {
+            if turn.status == status {
+                return turn.clone();
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "turn {turn_id} did not reach {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 fn service_config(base_url: &str, tmp: &tempfile::TempDir) -> ActorServiceConfig {
     ActorServiceConfig {
         settings_json: Some(settings_json(base_url)),
@@ -938,6 +978,8 @@ fn create_command(
         model: None,
         instructions: None,
         mcp_tools: Vec::new(),
+        metadata: Default::default(),
+        prompt_cache_options: None,
         initial_input: initial_input.map(str::to_owned),
         environment: EnvironmentKind::None,
         environment_id: None,
@@ -957,6 +999,8 @@ fn creating_row(logical: &LogicalId, cwd: &std::path::Path, root: &str) -> Swarm
         model: None,
         instructions: None,
         mcp_tools: Vec::new(),
+        metadata: Default::default(),
+        prompt_cache_options: None,
         environment: EnvironmentRef {
             kind: EnvironmentKind::None,
             id: Some(logical.as_str().to_owned()),
@@ -1716,4 +1760,197 @@ async fn tail_subscription_before_the_row_keeps_the_first_turn() {
         Some(format!("{TURN_PREFIX}0").as_str())
     );
     assert_eq!(stub.main_calls(), 1, "one model call for the first turn");
+}
+
+// ── official session resources on the real in-process host ─────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turns_update_and_delete_round_trip_through_the_actor_service() {
+    clear_telemetry_env();
+    let (base_url, _stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(MemorySwarmStore::new());
+    let store_port: Arc<dyn SwarmStore> = Arc::clone(&store) as Arc<dyn SwarmStore>;
+    let service = AcpSwarmService::new(store_port, service_config(&base_url, &tmp));
+    let logical = LogicalId::parse("agent-resources").expect("logical id");
+    let created = service
+        .create_session(create_command(&logical, tmp.path(), None))
+        .await
+        .expect("create");
+    assert!(created.created);
+    let first_root = created.session.root_session_id.clone();
+
+    service
+        .submit_input(
+            &logical,
+            user_input(
+                "0192f0c5-0000-7000-8000-0000000000a1",
+                InputMode::Turn,
+                "hello",
+            ),
+        )
+        .await
+        .expect("turn");
+
+    // `session/prompt` may answer before the host's terminal notification, so
+    // wait for the reader to close the turn instead of assuming the reply is
+    // the terminal.
+    let turn_id = "turn_input_0192f0c5-0000-7000-8000-0000000000a1";
+    wait_turn(&service, &logical, turn_id, "completed").await;
+    let turns = service
+        .list_turns(
+            &logical,
+            TurnsWindow {
+                order: ItemOrder::Desc,
+                after: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("turns");
+    assert_eq!(turns.data.len(), 1, "{turns:?}");
+    let turn = &turns.data[0];
+    assert_eq!(turn.id, "turn_input_0192f0c5-0000-7000-8000-0000000000a1");
+    assert_eq!(turn.status, "completed", "{turns:?}");
+    assert!(turn.started_at.is_some());
+    assert!(turn.completed_at.is_some());
+    assert_eq!(turn.usage, None);
+    assert_eq!(turn.subagent_id, None);
+
+    let updated = service
+        .update_session(
+            &logical,
+            SessionUpdateCommand {
+                model: None,
+                mcp_tools: None,
+                metadata: peri_swarm::service::UpdateField::Set(
+                    [("team".to_owned(), "swarm".to_owned())]
+                        .into_iter()
+                        .collect(),
+                ),
+                prompt_cache_options: peri_swarm::service::UpdateField::Set(
+                    peri_swarm::domain::PromptCacheOptions::new(
+                        peri_swarm::domain::PromptCacheTtl::TwelveHours,
+                    ),
+                ),
+            },
+        )
+        .await
+        .expect("update");
+    assert_eq!(
+        updated.metadata.get("team").map(String::as_str),
+        Some("swarm")
+    );
+    assert_eq!(
+        updated.prompt_cache_options.map(|options| options.ttl),
+        Some(peri_swarm::domain::PromptCacheTtl::TwelveHours)
+    );
+
+    service.delete_session(&logical).await.expect("delete");
+    assert!(!service.is_live(&logical), "the live host must be stopped");
+    let missing = service
+        .get_turn(&logical, &turn.id)
+        .await
+        .expect_err("deleted session");
+    assert_eq!(missing.code(), ErrorCode::UnknownAgent);
+
+    // Recreate with the same logical id: the actor memory and every store row
+    // were invalidated, so this is a genuinely fresh session.
+    let recreated = service
+        .create_session(create_command(&logical, tmp.path(), None))
+        .await
+        .expect("recreate");
+    assert!(recreated.created);
+    assert_ne!(recreated.session.root_session_id, first_root);
+    assert!(service
+        .list_items(
+            &logical,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                after_id: None,
+                limit: 10,
+            }
+        )
+        .await
+        .expect("items")
+        .items
+        .is_empty());
+    assert!(service
+        .list_turns(
+            &logical,
+            TurnsWindow {
+                order: ItemOrder::Desc,
+                after: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("turns")
+        .data
+        .is_empty());
+
+    service.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn an_interrupted_turn_row_is_closed_on_the_next_live_attempt() {
+    let store = Arc::new(MemorySwarmStore::new());
+    let logical = LogicalId::parse("agent-interrupted").expect("logical id");
+    let mut row = creating_row(
+        &logical,
+        std::path::Path::new("/tmp"),
+        "0192f0c5-0000-7000-8000-0000000000b1",
+    );
+    row.state = SessionState::Running;
+    store.swarm_upsert_session(row).await.expect("session");
+    store
+        .swarm_upsert_turn(peri_swarm::store::SwarmTurnRow {
+            logical_id: logical.as_str().to_owned(),
+            turn_id: "turn_input_interrupted".to_owned(),
+            status: peri_swarm::domain::TurnStatus::InProgress,
+            created_at: 100,
+            started_at: Some(100),
+            completed_at: None,
+            error: None,
+            usage: None,
+            subagent_id: None,
+        })
+        .await
+        .expect("turn");
+
+    let store_port: Arc<dyn SwarmStore> = Arc::clone(&store) as Arc<dyn SwarmStore>;
+    let service = AcpSwarmService::new(store_port, ActorServiceConfig::default());
+    let refused = service
+        .ensure_live(&logical)
+        .await
+        .expect_err("a running row is not resumed");
+    assert_eq!(refused.code(), ErrorCode::UpstreamUnavailable);
+    assert!(refused
+        .details()
+        .to_string()
+        .contains("session_resume_required"));
+
+    let turn = store
+        .swarm_get_turn(logical.as_str(), "turn_input_interrupted")
+        .await
+        .expect("get turn")
+        .expect("turn row");
+    assert_eq!(turn.status, peri_swarm::domain::TurnStatus::Failed);
+    assert!(turn.completed_at.is_some());
+    assert_eq!(turn.error.expect("error")["code"], json!("internal_error"));
+
+    // The read path keeps reporting the same terminal instead of flipping it.
+    let turns = service
+        .list_turns(
+            &logical,
+            TurnsWindow {
+                order: ItemOrder::Desc,
+                after: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("turns");
+    assert_eq!(turns.data[0].status, "failed");
 }

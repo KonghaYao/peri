@@ -38,16 +38,18 @@ use super::runtime::{
 use crate::domain::{
     new_root_session_id, turn_id_for_item, ActorKey, Disposition, EnvironmentKind, EnvironmentRef,
     ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome, InputState,
-    InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec, SandboxView, SessionState,
-    SessionStatus, SessionView, StreamEvent, SwarmError, TurnView,
+    InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec, OfficialTurn, SandboxView,
+    SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent, SwarmError, TurnPage,
+    TurnStatus, TurnView, TurnsWindow,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::{
     resolve_window_after, AcceptedInput, CreateSessionCommand, CreateSessionResult,
-    EventSubscription, PendingTurn, SwarmService,
+    EventSubscription, PendingTurn, SessionUpdateCommand, SwarmService,
 };
 use crate::store::{
-    store_failure, InputPut, SwarmInputRow, SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
+    store_failure, InputPut, SwarmInputRow, SwarmSessionPatch, SwarmSessionRow, SwarmSessionUpdate,
+    SwarmStore,
 };
 
 /// Upper bound for a steered turn to be continued by the host's queued run.
@@ -249,6 +251,53 @@ impl AcpSwarmService {
         self.sessions.lock().contains_key(logical_id.as_str())
     }
 
+    /// Give a crash-orphaned turn a terminal row.
+    ///
+    /// A row that still says `running` without a live turn means the process
+    /// died between `begin_turn` and its terminal. Reads (`turns.list`/
+    /// `turns.retrieve`) and [`Self::ensure_live`] close those rows as `failed`
+    /// instead of serving an `in_progress` turn forever. The session row stays
+    /// `running`, so `ensure_live` still answers `502 session_resume_required`;
+    /// resuming the interrupted turn is not implemented (`design §7`).
+    async fn close_orphan_turns(&self, row: &SwarmSessionRow) {
+        if row.state != SessionState::Running {
+            return;
+        }
+        let live = self
+            .sessions
+            .lock()
+            .get(row.logical_id.as_str())
+            .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn());
+        if live {
+            return;
+        }
+        match self
+            .store
+            .swarm_close_open_turns(
+                &row.logical_id,
+                TurnStatus::Failed,
+                crate::domain::official::unix_now(),
+                Some(json!({
+                    "code": "internal_error",
+                    "message": "the turn was interrupted before it reached a terminal",
+                })),
+            )
+            .await
+        {
+            Ok(0) => {}
+            Ok(closed) => tracing::warn!(
+                logical_id = row.logical_id.as_str(),
+                closed,
+                "swarm closed turn rows left open by an interrupted host"
+            ),
+            Err(error) => tracing::warn!(
+                logical_id = row.logical_id.as_str(),
+                error = %error,
+                "swarm could not close interrupted turn rows"
+            ),
+        }
+    }
+
     fn runtime(&self, logical_id: &LogicalId) -> Result<Arc<SessionRuntime>, SwarmError> {
         self.sessions
             .lock()
@@ -288,6 +337,9 @@ impl AcpSwarmService {
                 logical_id = logical_id.as_str(),
                 "swarm session row still records an unfinished turn"
             );
+            // The process that owned the turn is gone; close its row so
+            // `turns.list` cannot report `in_progress` forever.
+            self.close_orphan_turns(&row).await;
             return Err(SwarmError::upstream_unavailable("session_resume_required"));
         }
         let model = self.resolve_model(row.model.as_deref())?;
@@ -422,28 +474,14 @@ impl AcpSwarmService {
         turn: Option<TurnSlot>,
         sandbox: Option<SandboxView>,
     ) -> SessionView {
-        SessionView {
-            id: row.logical_id.clone(),
-            object: "agent.session".to_owned(),
-            logical_id: row.logical_id.clone(),
-            root_session_id: row.root_session_id.clone(),
-            cwd: row.cwd.clone(),
-            state: row.state,
-            status: SessionStatus::project(row.state, turn.is_some()),
-            turn: turn.map_or_else(TurnView::default, |slot| TurnView {
+        crate::service::project_session(
+            row,
+            turn.map(|slot| TurnView {
                 request_id: Some(slot.request_id),
                 started_at: Some(slot.started_at),
             }),
-            last_item_seq: row.last_item_seq,
-            created_at: row.created_at.clone(),
-            last_activity_at: row.last_activity_at.clone(),
-            agent: crate::domain::AgentView {
-                model: row.model.clone(),
-                instructions: row.instructions.clone(),
-            },
-            environment: row.environment.clone(),
             sandbox,
-        }
+        )
     }
 
     /// Project the booked Bun environment without contacting Bun.
@@ -455,24 +493,7 @@ impl AcpSwarmService {
     /// (`reserved`/`ready`) and the binding row does not persist it, so there is
     /// no durable fact to project (`design §4.1`).
     async fn sandbox_view(&self, row: &SwarmSessionRow) -> Result<Option<SandboxView>, SwarmError> {
-        if row.environment.kind != EnvironmentKind::OpenAiHosted {
-            return Ok(None);
-        }
-        let Some(env_id) = row.environment.id.as_deref() else {
-            return Ok(None);
-        };
-        let binding = self
-            .store
-            .swarm_get_binding(env_id)
-            .await
-            .map_err(|error| store_failure("get_binding", error))?;
-        Ok(binding.map(|binding| SandboxView {
-            logical_env_id: binding.logical_env_id,
-            sandbox_id: Some(binding.sandbox_id),
-            run_id: binding.last_run_id,
-            state: None,
-            workspace_path: Some(binding.workspace_path),
-        }))
+        crate::service::sandbox_view(self.store.as_ref(), row).await
     }
 
     async fn view_by_id(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError> {
@@ -1174,6 +1195,22 @@ impl SwarmService for AcpSwarmService {
                 )
                 .with_details(json!({ "field": "tools" })));
             }
+            if command.metadata != row.metadata {
+                return Err(SwarmError::new(
+                    ErrorKind::Conflict,
+                    ErrorCode::IdentityConflict,
+                    "logicalId already exists with different metadata",
+                )
+                .with_details(json!({ "field": "metadata" })));
+            }
+            if command.prompt_cache_options != row.prompt_cache_options {
+                return Err(SwarmError::new(
+                    ErrorKind::Conflict,
+                    ErrorCode::IdentityConflict,
+                    "logicalId already exists with different prompt cache options",
+                )
+                .with_details(json!({ "field": "prompt_cache_options" })));
+            }
             if model != row.model {
                 return Err(SwarmError::new(
                     ErrorKind::BadRequest,
@@ -1244,6 +1281,8 @@ impl SwarmService for AcpSwarmService {
             instructions: command.instructions.clone(),
             mcp_tools: command.mcp_tools.clone(),
             environment,
+            metadata: command.metadata.clone(),
+            prompt_cache_options: command.prompt_cache_options,
             created_at: now.clone(),
             last_activity_at: now,
             last_item_seq: 0,
@@ -1335,6 +1374,121 @@ impl SwarmService for AcpSwarmService {
 
     async fn get_session(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError> {
         self.view_by_id(logical_id).await
+    }
+
+    async fn list_sessions(&self, window: SessionsWindow) -> Result<SessionPage, SwarmError> {
+        crate::service::list_sessions_from_store(self.store.as_ref(), &window).await
+    }
+
+    async fn update_session(
+        &self,
+        logical_id: &LogicalId,
+        command: SessionUpdateCommand,
+    ) -> Result<SessionView, SwarmError> {
+        self.require_row(logical_id).await?;
+        // Same admission rule as `accept_input`: a running or accepted turn
+        // owns the session. Holding the per-session admission lock across the
+        // store write keeps a concurrent accept from starting a turn between
+        // the check and the update.
+        let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
+        let _admission = match runtime.as_ref() {
+            Some(runtime) => Some(runtime.admission.lock().await),
+            None => None,
+        };
+        if runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn())
+        {
+            return Err(SwarmError::turn_in_progress());
+        }
+        let model = match command.model.as_deref() {
+            Some(requested) => {
+                if requested.trim().is_empty() {
+                    return Err(SwarmError::invalid_input("model must not be empty")
+                        .with_details(json!({ "field": "agent.model" })));
+                }
+                self.resolve_model(Some(requested))?
+            }
+            None => None,
+        };
+        let host_changes = command.changes_host();
+        let metadata = command.metadata_patch();
+        let prompt_cache_options = command.prompt_cache_patch();
+        self.store
+            .swarm_patch_session(SwarmSessionPatch {
+                logical_id: logical_id.as_str().to_owned(),
+                model,
+                mcp_tools: command.mcp_tools,
+                metadata,
+                prompt_cache_options,
+                last_activity_at: Some(peri_time::now_utc_rfc3339()),
+            })
+            .await
+            .map_err(|error| store_failure("patch_session", error))?;
+        if host_changes {
+            // `model` and `mcpServers` are fixed at `session/new`; keep the
+            // stored row as the authority and let the next interaction
+            // reattach with the new values. Keeping the old host would report a
+            // configuration the next turn does not use.
+            if let Some(shutdown) = self.shutdown(logical_id).await {
+                tracing::info!(
+                    logical_id = logical_id.as_str(),
+                    report = shutdown.report,
+                    "swarm host restarted after a session update"
+                );
+            }
+            self.channels.lock().remove(logical_id.as_str());
+        }
+        self.view_by_id(logical_id).await
+    }
+
+    async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
+        self.require_row(logical_id).await?;
+        let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
+        let _admission = match runtime.as_ref() {
+            Some(runtime) => Some(runtime.admission.lock().await),
+            None => None,
+        };
+        if runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn())
+        {
+            return Err(SwarmError::turn_in_progress());
+        }
+        self.store
+            .swarm_delete_session(logical_id.as_str())
+            .await
+            .map_err(|error| store_failure("delete_session", error))?;
+        if let Some(shutdown) = self.shutdown(logical_id).await {
+            tracing::info!(
+                logical_id = logical_id.as_str(),
+                report = shutdown.report,
+                "swarm host stopped by session delete"
+            );
+        }
+        self.channels.lock().remove(logical_id.as_str());
+        Ok(())
+    }
+
+    async fn list_turns(
+        &self,
+        logical_id: &LogicalId,
+        window: TurnsWindow,
+    ) -> Result<TurnPage, SwarmError> {
+        let row = self.require_row(logical_id).await?;
+        self.close_orphan_turns(&row).await;
+        crate::service::list_turns_from_store(self.store.as_ref(), logical_id.as_str(), &window)
+            .await
+    }
+
+    async fn get_turn(
+        &self,
+        logical_id: &LogicalId,
+        turn_id: &str,
+    ) -> Result<OfficialTurn, SwarmError> {
+        let row = self.require_row(logical_id).await?;
+        self.close_orphan_turns(&row).await;
+        crate::service::get_turn_from_store(self.store.as_ref(), logical_id.as_str(), turn_id).await
     }
 
     async fn accept_input(

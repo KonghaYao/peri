@@ -6,12 +6,14 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use peri_swarm::config::{SwarmConfig, API_KEY_ENV, SSE_HEARTBEAT_MS_ENV, WORKSPACE_ROOT_ENV};
-use peri_swarm::domain::{ItemOrder, McpHeader, McpToolSpec, SessionState};
+use peri_swarm::domain::{
+    ItemOrder, McpHeader, McpToolSpec, SessionState, SessionsWindow, TurnsWindow,
+};
 use peri_swarm::http::{build_router, AppState};
 use peri_swarm::service::{InMemorySwarmService, ServiceConfig, SwarmService, TurnPolicy};
 use peri_swarm::store::{
     InputPut, MemorySwarmStore, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
-    SwarmItemRow, SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
+    SwarmItemRow, SwarmSessionPatch, SwarmSessionRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -316,7 +318,7 @@ async fn unknown_fields_and_out_of_scope_capabilities_are_diagnosable() {
 
     let (status, value) = create_session(
         &harness,
-        json!({ "logicalId": "agent-01", "metadata": { "team": "x" } }),
+        json!({ "logicalId": "agent-01", "vault_ids": [] }),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -324,7 +326,7 @@ async fn unknown_fields_and_out_of_scope_capabilities_are_diagnosable() {
     assert!(value["error"]["message"]
         .as_str()
         .expect("message")
-        .contains("metadata"));
+        .contains("vault_ids"));
 
     let (status, value) = create_session(
         &harness,
@@ -1062,6 +1064,21 @@ impl SwarmStore for FailingStore {
         self.inner.swarm_update_session(update).await
     }
 
+    async fn swarm_patch_session(&self, patch: SwarmSessionPatch) -> Result<(), StoreError> {
+        self.inner.swarm_patch_session(patch).await
+    }
+
+    async fn swarm_list_sessions(
+        &self,
+        window: &SessionsWindow,
+    ) -> Result<Vec<SwarmSessionRow>, StoreError> {
+        self.inner.swarm_list_sessions(window).await
+    }
+
+    async fn swarm_delete_session(&self, logical_id: &str) -> Result<(), StoreError> {
+        self.inner.swarm_delete_session(logical_id).await
+    }
+
     async fn swarm_append_item(&self, row: SwarmItemRow) -> Result<(), StoreError> {
         if self.fail_append_item {
             return Err(StoreError::Unavailable("append disabled".to_owned()));
@@ -1137,6 +1154,38 @@ impl SwarmStore for FailingStore {
         logical_env_id: &str,
     ) -> Result<Option<SwarmBindingRow>, StoreError> {
         self.inner.swarm_get_binding(logical_env_id).await
+    }
+
+    async fn swarm_upsert_turn(&self, row: SwarmTurnRow) -> Result<(), StoreError> {
+        self.inner.swarm_upsert_turn(row).await
+    }
+
+    async fn swarm_get_turn(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<SwarmTurnRow>, StoreError> {
+        self.inner.swarm_get_turn(logical_id, turn_id).await
+    }
+
+    async fn swarm_turn_page(
+        &self,
+        logical_id: &str,
+        window: &TurnsWindow,
+    ) -> Result<Vec<SwarmTurnRow>, StoreError> {
+        self.inner.swarm_turn_page(logical_id, window).await
+    }
+
+    async fn swarm_close_open_turns(
+        &self,
+        logical_id: &str,
+        status: peri_swarm::domain::TurnStatus,
+        completed_at: i64,
+        error: Option<Value>,
+    ) -> Result<u64, StoreError> {
+        self.inner
+            .swarm_close_open_turns(logical_id, status, completed_at, error)
+            .await
     }
 }
 

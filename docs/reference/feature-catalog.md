@@ -214,7 +214,7 @@
 | F-CLI-004 | L3 | 元数据查询；只读查询不更改执行事实 | [契约](../design/meta-control.md) |
 | F-CLI-005 | L3 | Workflow CLI；运行与分发共用工作流语义 | [契约](../design/workflow.md) |
 | F-CLI-006 | L3 | 启动配置；显式参数进入统一配置路径 | [契约](../design/configuration-authority.md) |
-| F-SWARM-001 | L1 | 会话 HTTP 面；五路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
+| F-SWARM-001 | L1 | 会话 HTTP 面；sessions/events/items/turns 路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
 | F-SWARM-002 | L1 | 会话身份；logicalId 与 rootSessionId 分离 | [契约](../design/peri-swarm.md) |
 | F-SWARM-003 | L1 | 事件续读；无游标只送实时（不读行）、显式游标回放；lookback 播种与末尾终态；官方 `agent.session.*` 帧；items 分页与行预算 | [契约](../design/peri-swarm.md) |
 | F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409；官方 `events` 信封单条 message；受理持久化后 202、turn 后台执行 | [契约](../design/peri-swarm.md) |
@@ -225,3 +225,4 @@
 | F-SWARM-009 | L2 | 宿主恢复；仅杀 Rust 后 reattach 不重放 | [契约](../design/peri-swarm.md) |
 | F-SWARM-010 | L3 | 本地运行面；双库 provision 与启动顺序 | [契约](../design/peri-swarm.md) |
 | F-SWARM-011 | L3 | 副本组部署面；外部 engine（字面 endpoint 限私网/环回，域名由部署保证）、共享 namespace/pool 与显式非 loopback 绑定 | [契约](../design/peri-swarm.md) |
+| F-SWARM-012 | L1 | 官方会话资源面；list/update/delete/turns 映射，无法映射资源显式 404 | [契约](../design/peri-swarm.md) |
