@@ -2,6 +2,8 @@
 
 - 状态：代码与契约测试证据记录；**真实 `openai@7.60.0` SDK 客户端已对本进程内网关执行
   create/retrieve/update/turns.list 探针**；无活体 Loom/Rivet/Bun engine
+- 后续变更注记：`prompt_cache_options: {}` 已按官方默认 `ttl=30m` 处理，不再是“未配置”；
+  见[官方默认值对齐](peri-swarm-official-defaults-2026-11-21.md)。本文件其余正文保留当时证据。
 - 日期：2026-11-21
 - 基线：`35819dfdd`（P1-6 初始实现）+ `0383c0dd9`（缺陷修复）+ 本记录同一提交中的
   update 空 body 兼容与准入措辞修正

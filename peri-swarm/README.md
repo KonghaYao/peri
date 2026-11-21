@@ -414,17 +414,17 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 | 环境投影 | `environment` 按类型给出实际内容：hosted 含 `files` / `network` / `packages` / `plugins` / `skills` 等；`none` 只有 `{type:"none"}` | `none` 已对齐为 `{type:"none"}`；hosted 只有 `{type,id}`（`id` 是 logicalEnvId）。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 只保留预留值 | 网关只持久化绑定，不跟踪 Bun SRT 实时状态；hosted 的 `files`/`network`/`packages` 没有同步通道 |
 | turn 用量与错误 | `usage` 是 token 用量（未知时 `null`）；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；`error` 实时帧带 `{code:"internal_error"}`，SSE 回放为 `null`，`turns.retrieve` 读持久 error | 网关不做 token 记账；错误只存在于实时帧与持久 turn 行，回放层不从 turn 行重建 |
 | turns 字段 | `agent_id` 可为子 agent、`subagent_id` 可非空、`usage` 有值；`status` 含 `queued` / `waiting` | `agent_id` 恒 `root`、`subagent_id` 恒 `null`、`usage` 恒 `null`；只产生 `in_progress` / `completed` / `failed` / `cancelled` | 没有子 agent 调度与 `queued`/`waiting` 排队状态；turn 只由单会话串行执行产生 |
-| 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名）；Bearer 校验先于 404 | 没有对应的数据源或结构映射（traces、artifacts、subagent items 等均未落地） |
+| 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名）；Bearer 校验先于 404 | 没有 traces/artifacts/subagent 的持久化表与投影；turns items 也没有官方结构映射 |
 | 删除会话 | 运行中必须先取消；返回 `agent.session.deleted`；物理清理可异步 | 运行中 `409 turn_in_progress`；无 live runtime 但持久 `running` → `502 session_resume_required`；五表级联同步删除；同一 `logicalId` 重建为新会话 | 崩溃遗留的 `running` 行需要跨进程 actor 与数据库处置；网关无法同步确认或安全强删 |
 | prompt cache | 服务端按 `prompt_cache_options` 的 TTL 影响后续 turn 的缓存 | 只持久化并回显；本地模型链是否使用该 TTL 未验证 | TTL 只是官方兼容字段，本地模型链尚未消费，无法影响后续 turn 的缓存 |
-| SSE 续读 | 流参数只有 `include_obfuscation`，没有 `after`；从订阅时刻起只送新事件 | 额外支持 `after` / `afterSeq` / `Last-Event-ID` 回放；接受并忽略 `include_obfuscation`，不生成填充；追平末尾后连接保持，只发心跳 | 官方 SDK 没有 `after` 参数；回放扩展必须走三实参 `events.stream(id, { after }, {})`，这是客户端调用形状，不是网关能去掉的契约差异 |
+| SSE 续读 | 流参数只有 `include_obfuscation`，没有 `after`；从订阅时刻起只送新事件 | 额外支持 `after` / `afterSeq` / `Last-Event-ID` 回放；接受并忽略 `include_obfuscation`，不生成填充；追平末尾后连接保持，只发心跳 | 官方 SDK 的 query 类型没有 `after`；回放只能作为网关扩展存在，SDK 不会为它提供原生查询字段，去掉回放就失去续读能力 |
 
 调用方式上还有四点不是契约差异，但容易踩：
 
 - `sessions.update` 官方 SDK 用 `POST`；网关同样只接受 `POST`（`PATCH` → `405`）。
 - 空 body、整个 body 为 JSON `null` 或 `{}` 都是 no-op；官方 SDK 省略 body 时会发 `{}`。
-- 网关严格拒绝未知 query/body 字段（`400 unknown_field`）；列表分页用 `after` + `limit`，
-  没有 `cursor` 参数。
+- 网关严格拒绝未知 query 字段（`400 invalid_query`）与未知 body 字段（`400 unknown_field`）；
+  列表分页用 `after` + `limit`，没有 `cursor` 参数。
 - `prompt_cache_options: {}` 等于官方默认 `{"ttl":"30m"}`；只有 `null` 清空，省略表示保持。
 
 ```js
@@ -446,7 +446,7 @@ const body = /** @type {any} */ (page).body;
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
 | `GET` | `/v1/agents/sessions` | `sessions.list`：`after`（上一页末项 `logicalId`，排他）、`order`（默认 `desc`）、`limit`（1..=500，默认 20）、`agent_id`（仅 `root`）、`metadata[key]=value`（≤16 对，精确匹配）；响应 `{object:"list",data,has_more,hasMore,nextCursor}`，`nextCursor` 仅在 `has_more` 时给出；`cursor` → `400 invalid_query` |
-| `POST` | `/v1/agents/sessions/{logicalId}` | `sessions.update`（官方 SDK 用 POST；`PATCH` → 405）：`agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`metadata`/`prompt_cache_options` 省略保持、`null`/`{}` 清空、值整体替换；无 body 或 JSON `null` 是 no-op；`agent.model:null` 与未映射字段 → `400` |
+| `POST` | `/v1/agents/sessions/{logicalId}` | `sessions.update`（官方 SDK 用 POST；`PATCH` → 405）：`agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`metadata` 省略保持、`null`/`{}` 清空；`prompt_cache_options` 省略保持、`null` 清空、`{}` 等于 `{"ttl":"30m"}`；值整体替换；无 body 或 JSON `null` 是 no-op；`agent.model:null` 与未映射字段 → `400` |
 | `DELETE` | `/v1/agents/sessions/{logicalId}` | `sessions.delete` → `{id,object:"agent.session.deleted",deleted:true}`；级联 items/inputs/turns/bindings |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns` | `turns.list`：`order`（默认 `desc`）、`limit`（1..=500，默认 20）、`after`（必须是本会话的 turn id，排他；无效 → `400 invalid_query`）；响应同上 |
 | `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | `turns.retrieve`：官方 Turn JSON；不属于该会话 → 404 |
@@ -518,7 +518,7 @@ const body = /** @type {any} */ (page).body;
 
 | 字段/行为 | 网关投影 | 判断方式 |
 | --- | --- | --- |
-| `environment.type=none` | `id` 等于 logicalId；没有 `sandbox` 字段 | 不要当 sandbox id |
+| `environment.type=none` | `environment` 只有 `{"type":"none"}`；顶层 `sandbox` 为 `null` | 用 session id / logicalId 识别会话，不要从 `environment` 取 id |
 | `environment.type=openai_hosted` | `environment.id` 等于 `sandbox.logicalEnvId` | 用它复用逻辑环境 |
 | `sandbox.state` | 恒 `null` | 查 Bun `GET /v1/sandboxes/{logicalEnvId}` |
 | `sandbox.runId` | 预留时 Bun 返回值；后续运行不回填 | 查 Bun 的 `runId`/`state` |
