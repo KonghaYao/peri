@@ -37,8 +37,8 @@ unlike definition `tools: []`. Use a nonempty allowlist to restrict a stage.
 | target | runs commands | why |
 | --- | --- | --- |
 | `coder` | yes | Inherits tools; excludes Agent |
-| `explorer` | no | Allows Read, Grep, Glob, ReadContextArchive; excludes Agent |
-| `general-purpose` | yes | Inherits tools through `*` |
+| `explorer` | yes | Inherits tools; excludes Agent; read-only comes from the prompt, not a tool allowlist |
+| `general-purpose` | yes | Inherits tools |
 | `plan` | yes | Inherits tools; excludes Agent; brief remains read-only |
 | `verification` | yes | Inherits tools; excludes Agent; do not modify the implementation |
 | `web-researcher` | yes | Inherits tools; excludes Agent |

@@ -103,9 +103,11 @@ Resolve the definition body and tool policy before dispatch. `available_agents` 
 scheduling hint, not a tool list. Read the definition resource, such as
 `agent://builtin/plan/agent.md`, with the host's resource reader, discovering it if needed.
 Omitted `tools` inherits; `tools: []` grants none; `disallowedTools` always removes tools.
-The shipped `explorer` is tool-level read-only. A command-running read-only assignment
-needs a compatible definition and an explicit read-only brief. The shipped `coder` is
-normally the execution definition; its build/test checks do not combine roles.
+The shipped `explorer` keeps read-only behavior through its prompt, not a tool allowlist,
+so the caller's brief still carries the read-only expectation. A command-running
+read-only assignment needs a compatible definition and an explicit read-only brief. The
+shipped `coder` is normally the execution definition; its build/test checks do not combine
+roles.
 
 Require a small first probe of a necessary tool. A missing-tool result ends that
 assignment; choose a capable fresh target. Do not narrate an unrun command as evidence.
