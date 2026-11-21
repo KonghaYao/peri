@@ -371,3 +371,53 @@ async fn bindings_roundtrip_without_token_values() {
         .expect("get")
         .is_none());
 }
+
+#[tokio::test]
+async fn item_page_spends_limit_as_an_aggregate_row_budget() {
+    let store = MemorySwarmStore::new();
+    for (seq, item_id) in [(1, "itim_a"), (2, "itim_a"), (3, "itim_a"), (4, "itim_b")] {
+        let mut row = item_row("agent", seq);
+        row.item_id = item_id.to_owned();
+        store.swarm_append_item(row).await.expect("append");
+    }
+
+    // The first item already spends the two-row budget, so the next item waits
+    // for the following page even though the item cap would allow it.
+    let first = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Asc, None, 2)
+        .await
+        .expect("page");
+    assert_eq!(
+        first.rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        first.items.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [3]
+    );
+    assert!(first.has_more);
+    assert_eq!(first.next_cursor, Some(3));
+
+    let second = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Asc, Some(3), 2)
+        .await
+        .expect("page");
+    assert_eq!(
+        second.rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [4]
+    );
+    assert!(!second.has_more);
+    assert_eq!(second.next_cursor, None);
+
+    // A single item larger than the budget is still returned whole, so its
+    // final frame cannot be lost.
+    let whole = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Asc, None, 1)
+        .await
+        .expect("page");
+    assert_eq!(
+        whole.rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(whole.has_more);
+}

@@ -132,7 +132,9 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   必须一致，否则 `400 conflicting_cursor`）。**没有任何游标时从当前末尾开始，只
   投递实时事件**：官方 `sessions.stream` 先订阅再 POST，若回放旧 turn 的终态，
   SDK 会在旧 turn 的 `idle` 上结束。显式 `afterSeq=0` 仍回放全部（既有客户端语义
-  不变）；`POST /sessions?stream=true` 在首轮前打开的订阅同样从末尾开始、不回放。
+  不变）。无游标订阅不读会话行：`POST /sessions?stream=true` 在行尚未创建时先
+  打开订阅，行检查只属于显式游标（未知会话仍是 `404 unknown_agent`），否则
+  create 的响应会在首轮开始前就得到已关闭的流。
 - 带游标时先补 `seq > after` 的 backlog，再转实时广播。心跳间隔由
   `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳 payload 的 `lastItemSeq` 是该会话当前
   `MAX(seq)`（与 item 写入方共享），只表示进度，不能代替已投递 item 的 `seq`
@@ -149,17 +151,22 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   `turn.failed`+`session.failed`）；该 turn 此刻仍在实时执行（存在在途 turn）时
   不补，终态由实时流给出。只有 tool 帧、没有 assistant 完成帧的 turn 由同一
   lookback 播种，并按「已闭合且无输出 → `completed`」补终态。
+- lookback 的已知边界：它按「打开的 turn 已落 assistant 完成帧则视为已闭合」的
+  行边界规则推断。真实 steer 发生在该 turn 已有 assistant 完成帧之后时，实时流
+  把新输入挂到原 turn，回放却会把它当作新 turn（多一个 `turn.created`）。行里
+  没有 turn 终态标记，无法消除；游标落在 steer 之前且该 turn 尚无完成帧的常见
+  情况已由 lookback 修复。
 - 慢订阅者：广播容量耗尽（Lagged）时发一帧 `gap` 后关闭该订阅。丢失的事件可能
   包含终态，官方 SDK 因而以 EOF 识别中断；原生客户端用最后一个已渲染 item 的
   `seq` 重连恢复。
-- items 按 **item 分组**分页（§4.2.2）：`limit` 计 item 数，`has_more` 按 item
-  计算，`nextCursor` 是本页最后一个 item 的最大 `seq`（仅 `has_more=true` 时
-  给出）。`items` 是本页这些 item 的全部原始行；`data` 是每个 item 的最后一行
-  （最大 `seq`）。`data` 通常比 `items` 短，两者数量允许不同；既有 delta 消费者
-  继续读 `items`。`after` 接受十进制 `seq`（与 `afterSeq` 同义），也接受官方
-  `after=<itemId>`：解析为该 id 的最大 `seq`，升序取 `MAX(seq) > after`、降序取
-  `MAX(seq) < after`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
-  `400 conflicting_cursor`。item 是事件级帧（user message、assistant delta、
+- items 按 **item 分组**分页（§4.2.2）：`limit` 同时是 item 数上限与整页聚合行预算，
+  `has_more` 按 item 计算，`nextCursor` 是本页最后一个 item 的最大 `seq`（仅
+  `has_more=true` 时给出）。`items` 是本页这些 item 的全部原始行；`data` 是每个
+  item 的最后一行（最大 `seq`）。`data` 通常比 `items` 短，两者数量允许不同；既有
+  delta 消费者继续读 `items`。`after` 接受十进制 `seq`（与 `afterSeq` 同义），也
+  接受官方 `after=<itemId>`：解析为该 id 的最大 `seq`，升序取 `MAX(seq) > after`、
+  降序取 `MAX(seq) < after`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致
+  返回 `400 conflicting_cursor`。item 是事件级帧（user message、assistant delta、
   tool_call、tool_update、tool_result），不是官方高层 item；assistant 按
   `payload.messageId` 聚合，最终文本取 `payload.complete` 帧，`tool_call` 按
   `payload.toolCallId` 聚合（可能分带/不带 `input` 的两帧）。
@@ -170,19 +177,27 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 `after=<itemId>` 不能按行理解：
 
 - item 归属按该 item 的最大 `seq` 判定，分页单位是 item；升序页是
-  `MAX(seq) > after` 的前 `limit` 个 item，降序页是 `MAX(seq) < after` 的前
-  `limit` 个 item。`limit=1` 且首条消息有 3 帧时，`items` 返回 3 行、`data`
-  返回 1 行——这正是「先取 `limit` 行再去重」会产生空页的场景。
+  `MAX(seq) > after` 的前若干个 item，降序页是 `MAX(seq) < after` 的前若干个
+  item。`limit=1` 且首条消息有 3 帧时，`items` 返回 3 行、`data` 返回 1 行——
+  这正是「先取 `limit` 行再去重」会产生空页的场景。
 - 分组在存储层完成：Turso 用 `GROUP BY logical_id, item_id` + `MAX(seq)` 选页，
   再按 `item_id` join 回全部行；内存 fake 用同一 `grouped_item_page` 规则，两者
   不会给出不同的页边界。
+- **行预算**：`limit` 既是 item 数上限，也是整页聚合行预算。按 item 顺序累加原始
+  行数，达到或超过 `limit` 行后不再纳入下一个 item；因此 `limit` 个 item 不保证
+  都出现在一页里。单个 item 自身的行数超过预算时整条返回（至少纳入 1 个 item），
+  否则会丢掉它的最终帧——这是已知边界；`items.list` 是 item 取向的接口，delta
+  帧应走 SSE。
 - `nextCursor` 是页内最后一个 item 的最大 `seq`，因此升序下一页严格前进；降序页
   的游标是页内最旧 item 的最大 `seq`，下一页只取更小的 item。`after=<itemId>`
   解析为该 item 的最大 `seq`，所以同一 item 不会被重复分页。十进制
   `after`/`afterSeq` 同样按 item 边界解释：游标落在多帧 item 中间时，该 item 整条
   出现在页里（`items` 含游标之前的帧，`data` 仍是它的最后一行）。
-- 一条仍在增长的消息可以在两页之间追加新帧：它的旧页游标只会越过已返回的最大
-  `seq`，新帧会以同一 `itemId` 出现在后一页。分页游标仍严格前进、不会循环。
+- **增长中的 item**：`after=<itemId>` 在请求时解析为该 item 的当前 `MAX(seq)`；
+  之后追加的帧都落在这个 `seq` 之后，不会再由该游标返回（其他最大 `seq` 低于该值
+  的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按
+  item 边界判定，会把包含该行的 item 整条重新给出（含新追加的帧），因此能看到
+  最终帧。分页游标始终严格前进、不会循环。
 - 默认 `order=asc` 与官方默认 `desc` 不同；保持既有客户端行为，不改默认值。
 
 #### 4.2.1 官方事件映射
@@ -235,7 +250,9 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 `POST /sessions` 接受 OpenAI Agents API 形状的 `model`/`instructions`（顶层与
 `agent` 内同名字段必须一致）、`input`、`environment`、`tools` 与 `stream`。
-`stream:true` 时网关先为 `logicalId` 打开订阅，再执行首轮，因此首轮事件不会丢；
+`stream:true` 时网关先为 `logicalId` 打开订阅，再执行首轮，因此首轮事件不会丢。
+订阅在会话行写入之前建立：tail 订阅不读会话行（见 §4.2），gateway 的
+`open_stream` 在 actor 接受该订阅后转发真实活跃流，不会退回已关闭的广播。
 非流式创建返回 `created` 与会话投影。
 
 首次创建的写入顺序固定：`bind_environment`（hosted 时预留并持久化绑定）→ 写入

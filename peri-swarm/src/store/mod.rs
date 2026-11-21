@@ -113,19 +113,33 @@ impl SwarmItemRow {
 /// Group raw rows into an item page.
 ///
 /// `rows` must contain every row of the candidate items (at most `limit + 1`
-/// items, in either order). The helper keeps `limit` items, derives `data` from
-/// each item's greatest `seq`, and returns the raw rows of exactly those items.
-/// Both stores call it, so memory and Loom pages cannot disagree on the
-/// boundary rule.
+/// items, in either order). The helper keeps items in page order until either
+/// the item cap (`limit`) or the aggregate **row budget** (`limit` rows) is
+/// reached, derives `data` from each kept item's greatest `seq`, and returns the
+/// raw rows of exactly those items. Both stores call it, so memory and Loom
+/// pages cannot disagree on the boundary rule.
+///
+/// A page's own item rows are what `/items` returns, so a page of `limit` long
+/// messages would otherwise serialize thousands of rows twice (`items` and
+/// `data`). The row budget stops adding a *next* item once the page already
+/// holds `limit` rows. The first item is always kept, even when it alone
+/// exceeds the budget: dropping it would lose its final frame, and
+/// `items.list` is an item-oriented read (delta frames belong on SSE).
 #[must_use]
 pub(crate) fn grouped_item_page(
     rows: Vec<SwarmItemRow>,
     order: ItemOrder,
     limit: u32,
 ) -> SwarmItemPage {
+    // `limit` is both the item cap and the aggregate row budget (`design §4.2.2`).
+    let item_cap = limit as usize;
+    let row_budget = limit as usize;
+    let mut rows_per_item: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
     let mut last_rows: std::collections::BTreeMap<String, SwarmItemRow> =
         std::collections::BTreeMap::new();
     for row in &rows {
+        *rows_per_item.entry(row.item_id.as_str()).or_default() += 1;
         match last_rows.get(&row.item_id) {
             Some(existing) if existing.seq >= row.seq => {}
             _ => {
@@ -133,13 +147,31 @@ pub(crate) fn grouped_item_page(
             }
         }
     }
-    let mut items: Vec<SwarmItemRow> = last_rows.into_values().collect();
-    items.sort_by_key(|row| row.seq);
+    let mut candidates: Vec<SwarmItemRow> = last_rows.into_values().collect();
+    candidates.sort_by_key(|row| row.seq);
     if order == ItemOrder::Desc {
-        items.reverse();
+        candidates.reverse();
     }
-    let has_more = items.len() > limit as usize;
-    items.truncate(limit as usize);
+    let candidates_len = candidates.len();
+
+    let mut items: Vec<SwarmItemRow> = Vec::new();
+    let mut rows_in_page = 0usize;
+    for item in candidates {
+        if items.len() == item_cap {
+            break;
+        }
+        if !items.is_empty() && rows_in_page >= row_budget {
+            break;
+        }
+        rows_in_page += rows_per_item
+            .get(item.item_id.as_str())
+            .copied()
+            .unwrap_or(0);
+        items.push(item);
+    }
+    // More items exist beyond this page (the stores fetch `limit + 1` items, so
+    // a kept set shorter than the candidate set always leaves an item behind).
+    let has_more = candidates_len > items.len();
     // `nextCursor` only exists when a next page does (existing clients read it
     // as "there is more") and names the last item's greatest seq.
     let next_cursor = if has_more {
@@ -181,6 +213,11 @@ pub struct SwarmInputRow {
 /// membership is defined by the item's greatest `seq`, so `after` (a seq or an
 /// item id resolved to one) advances strictly past a whole item instead of
 /// landing inside it and re-reading the same item forever.
+///
+/// `limit` is both the item cap and the aggregate row budget. A page therefore
+/// normally holds fewer `items` (and rows) than a pure item count would allow
+/// when messages have many deltas; an item whose own row count exceeds the
+/// budget is still returned whole.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwarmItemPage {
     /// Every row of the page's items, in the requested order (`seq` is not
@@ -244,7 +281,9 @@ pub trait SwarmStore: Send + Sync {
     /// `after` is an item boundary: an item belongs to an ascending page when
     /// its greatest `seq` is `> after`, and to a descending page when it is
     /// `< after`. Grouping happens in the store so a long message cannot
-    /// consume the row budget and leave the page empty.
+    /// consume the row budget and leave the page empty. `limit` caps both the
+    /// item count and the page's aggregate row count; a single item larger than
+    /// the budget is returned whole.
     async fn swarm_item_page(
         &self,
         logical_id: &str,

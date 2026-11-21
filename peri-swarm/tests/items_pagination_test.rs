@@ -483,14 +483,159 @@ async fn item_grouped_pages_keep_data_shorter_than_items() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    // Two items were selected, so every row of both is in `items`; `data` has
-    // one row per item (its last frame).
-    assert_eq!(seqs(&first), [1, 2, 3, 4]);
-    assert_eq!(data_ids(&first), ["itim_msg_long", "itim_user_2"]);
-    assert_eq!(data_seqs(&first), [3, 4]);
-    assert_eq!(first["nextCursor"], json!(4));
+    // The page holds one item (three rows): the row budget is spent before the
+    // next item fits, while `data` keeps one row per item.
+    assert_eq!(seqs(&first), [1, 2, 3]);
+    assert_eq!(data_ids(&first), ["itim_msg_long"]);
+    assert_eq!(data_seqs(&first), [3]);
+    assert_eq!(first["nextCursor"], json!(3));
     assert_eq!(first["has_more"], json!(true));
     assert_eq!(first["lastItemSeq"], json!(6));
+
+    // The next page starts after the whole item, so both remaining items fit.
+    let (status, _, second) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=3",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(seqs(&second), [4, 5, 6]);
+    assert_eq!(data_ids(&second), ["itim_user_2", "itim_msg_2"]);
+    assert_eq!(data_seqs(&second), [4, 6]);
+    assert_eq!(second["has_more"], json!(false));
+    assert_eq!(second["nextCursor"], json!(null));
+}
+
+/// `limit` is also the aggregate row budget: a long first item fills the page,
+/// and the next item waits for the following page. `has_more` still counts
+/// items.
+#[tokio::test]
+async fn row_budget_stops_before_the_next_item() {
+    let harness = harness();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    for seq in 1..=3 {
+        append_row(
+            &harness,
+            seq,
+            "itim_msg_a",
+            "assistant",
+            json!({"delta": true}),
+        )
+        .await;
+    }
+    append_row(
+        &harness,
+        4,
+        "itim_msg_b",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+
+    let (_, _, first) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2",
+        None,
+    )
+    .await;
+    assert_eq!(seqs(&first), [1, 2, 3], "only the long item fits");
+    assert_eq!(data_ids(&first), ["itim_msg_a"]);
+    assert_eq!(first["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(first["has_more"], json!(true), "the next item still exists");
+
+    let (_, _, second) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=3",
+        None,
+    )
+    .await;
+    assert_eq!(seqs(&second), [4]);
+    assert_eq!(data_ids(&second), ["itim_msg_b"]);
+    assert_eq!(second["has_more"], json!(false));
+    assert_eq!(second["nextCursor"], json!(null));
+}
+
+/// `after=<itemId>` is resolved to that item's `MAX(seq)` **at request time**.
+/// Frames appended after the first page are therefore behind the cursor and are
+/// not returned by it; resuming from the last row `seq` (`afterSeq`) still
+/// re-delivers the item, whose final row is then visible.
+#[tokio::test]
+async fn item_id_cursor_does_not_cover_frames_appended_later() {
+    let harness = harness();
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    append_row(
+        &harness,
+        1,
+        "itim_msg_a",
+        "assistant",
+        json!({"delta": true}),
+    )
+    .await;
+    append_row(
+        &harness,
+        2,
+        "itim_msg_a",
+        "assistant",
+        json!({"delta": true}),
+    )
+    .await;
+
+    let (_, _, first) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2",
+        None,
+    )
+    .await;
+    assert_eq!(data_seqs(&first), [2]);
+    let cursor = first["data"][0]["id"].as_str().expect("id").to_owned();
+
+    // The message finishes after the page was read.
+    append_row(
+        &harness,
+        3,
+        "itim_msg_a",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+
+    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={cursor}");
+    let (status, _, after_id) = send(&harness.router, Method::GET, &uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{after_id}");
+    assert!(
+        seqs(&after_id).is_empty(),
+        "the cursor now names seq 3, so the appended frame is behind it: {after_id}"
+    );
+
+    // Resuming from the last rendered row seq still re-delivers the item.
+    let (_, _, by_seq) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=2",
+        None,
+    )
+    .await;
+    assert_eq!(seqs(&by_seq), [1, 2, 3]);
+    assert_eq!(data_seqs(&by_seq), [3], "the final frame is visible");
 }
 
 #[tokio::test]

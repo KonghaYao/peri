@@ -772,11 +772,21 @@ impl AcpSwarmService {
     /// rebuilt from the same rows ([`crate::service::replay_backlog`]), so a
     /// reconnecting SDK observes the same `turn_id`/`event_id` sequence as a
     /// live stream.
+    ///
+    /// A tail subscription has no backlog **by definition**, so it is answered
+    /// before the session row is read. `POST /sessions?stream=true` opens the
+    /// stream before the row exists; requiring the row here made the actor
+    /// answer `503`, and the create response then carried no first-turn events
+    /// (pre-existing since `05d93fe1e`, fixed here). An explicit cursor still
+    /// needs the row and reports `unknown_agent`.
     pub async fn replay_after(
         &self,
         logical_id: &LogicalId,
         start: EventCursor,
     ) -> Result<Vec<StreamEvent>, SwarmError> {
+        if start.cursor().is_none() {
+            return Ok(Vec::new());
+        }
         let session = self.require_row(logical_id).await?;
         let live_open_turn = self
             .sessions

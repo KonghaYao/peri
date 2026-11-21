@@ -3,7 +3,8 @@
 - 状态：代码与契约测试证据记录；无活体 Loom/Rivet engine，**无真实官方 SDK 进程调用**
 - 日期：2026-11-21
 - 基线：`05d93fe1e`（`feat/swarm-official-p1a` 分支基点）+ 本记录同一提交中的工作树改动；
-  第二轮复核基线为 `d06e1a124`（判 FAIL 的上一轮实现），对应改动见 §7
+  第二轮复核基线为 `d06e1a124`（判 FAIL 的上一轮实现），对应改动见 §7；第三轮复核
+  基线为 `155441f59`，对应改动见 §8
 - 范围：按 `openai@7.60.0` Agents API 的实际读取行为，补齐 items 分页、会话状态、
   官方 `agent.session.*` 事件（实时与 backlog 重放）以及 `POST /events` 的 `202`
   边界。既有自定义 `item`/`turn` 帧、错误码与门禁不变。
@@ -197,9 +198,11 @@ completed/failed → idle/failed`）。`TurnPolicy::Immediate` 下 202 的 `last
     现在也按 item 边界解释：游标落在多帧 item 中间时，该 item 整条进入结果页。
     `peri-swarm/README.md` 本轮未改，其 `after` 等于/超过末尾「只有心跳」一行只
     描述 `item`/`turn` 帧；官方 `agent.session.*` 终态补发是附加帧，见 §7.3。
-14. **仍在增长的 item 可以跨页出现。** 一条消息在客户端翻页期间继续落帧时，后一页
-    会以同一 `itemId`、更大的 `seq` 再给出它（游标仍严格前进，不会循环）。这是
-    append-only 行日志的固有结果，未做快照隔离。
+14. **`after=<itemId>` 不会返回请求之后追加的帧。** 该游标在请求时解析为 item 当时的
+    最大 `seq`；翻页期间同一 item 继续落帧时，新帧位于游标之后，不会被下一页返回
+    （其他最大 `seq` 低于该值的 item 也会被越过）。这是 item 级游标的既定语义，
+    不做「增长中的 item 在下一页重新给出」的承诺；需要从最后已渲染行续读时用
+    `afterSeq=<seq>`，它按 item 边界判定并整条重给包含该行的 item。见 §8.2。
 
 ## 6. 证据边界
 
@@ -239,7 +242,8 @@ item 上反复命中，`has_more` 恒真。
 最大 `seq` 的一行，`items` 是全部原始行，二者数量可以不同（长消息 3 行、`limit=1`
 时 `items` 3 行、`data` 1 行）。分组在存储层完成，不存在「先取 `limit` 行再前端
 去重」导致的空页。`afterSeq` 与 `after` 不一致仍走
-`400 conflicting_cursor`。
+`400 conflicting_cursor`。第三轮为整页增加聚合行预算（`limit` 同时限制总行数），
+见 §8.3；`after=<itemId>` 的增长语义见 §8.2。
 
 ### 7.3 lookback 播种与末尾终态
 
@@ -325,3 +329,116 @@ opener。`turn_id` 始终由 opener 的 item id 派生，不用随机或时间�
 2. writer 侧的 Loom 实现只做了 SQL 形状与离线单测；无活体 Loom 的 item 级分页
    往返。
 3. 多订阅者容量、真实慢客户端与重连风暴未压测。
+
+## 8. 第三轮复核：create-stream 首轮与 item 页容量
+
+独立复验在 `155441f59` 上发现三个问题。**A 是既有缺陷（`05d93fe1e` 起），本轮修复，
+不归因于本分支**；B/C 是本分支上一轮引入的语义/容量问题。
+
+### 8.1 A：真实 actor 路径的 create-stream 丢掉首轮事件（既有，本轮修复）
+
+复现路径（验证者给出并复核）：
+
+1. `POST /v1/agents/sessions`，`stream:true`。
+2. `handlers::create_session` 先 `open_stream`，真实 actor 收到 `GET /events`（无
+   `afterSeq`，即 `EventCursor::Tail`）。
+3. actor `events_response` → `AcpSwarmService::replay_after` → 会话行尚不存在，
+   `require_row` 返回 `unknown_agent` → actor 回 `503`。
+4. gateway 的 `open_stream` 把失败映射成已关闭的 `broadcast`。
+5. `create_session` 随后写行并跑首轮；SSE 只剩初始 `session` 事件，首轮
+   `item`/`turn`/官方帧全丢。
+
+内存 fake 的 `open_stream` 不读行，因此既有测试没有暴露该顺序。根因自
+`05d93fe1e` 的 actor `replay_after` 就存在。
+
+修复：`AcpSwarmService::replay_after` 在 `EventCursor::Tail` 时先返回空 backlog，
+不读会话行；行检查只保留给显式游标（未知会话仍是 `unknown_agent`）。内存 fake 的
+`replay_after` 采用同一规则，避免两个实现再次分叉。gateway 的 `open_stream` 因此
+拿到 actor 的 `200` SSE 并转发真实活跃订阅，不再退回已关闭广播。
+
+测试：`tests/actor_runtime_test.rs::tail_subscription_before_the_row_keeps_the_first_turn`
+（非 ignored）。它按 actor 端点的顺序执行 `open_stream` → `replay_after(Tail)` →
+带初始输入 `create_session`，断言 tail 回放为空、显式游标在无行时仍报
+`unknown_agent`，并收到首轮 user item、assistant 完成帧与 `completed` 终态（一次
+真实 host+stub 模型调用）。
+
+证据边界：没有 Rivet engine，`SwarmActor::events_response` 与 gateway 的
+`RivetSwarmService::open_stream` 之间的真实 HTTP 回调未在本轮运行；测试覆盖的是
+该回调调用的同一 service 序列。engine 下的 create-stream 场景仍标记未验证。
+
+### 8.2 B：`after=<itemId>` 与增长中的 item
+
+上一轮的文档与测试声称「增长中的消息会在下一页以同一 `itemId` 再给出」，与实现
+矛盾：`after=<itemId>` 在请求时解析为该 item 的当前最大 `seq`，之后追加的帧都在
+游标之后，下一页不会返回它们；最大 `seq` 低于该值的其他 item 也会被越过。
+
+决策：不改游标语义（item 级游标就是「越过整个 item」）。已改写
+`docs/design/peri-swarm.md` §4.2.2 与本记录 §5-14，明确：
+
+- `after=<itemId>` 解析为请求时的最大 `seq`，之后追加的帧不再由该游标返回；
+- 从最后已渲染行续读用 `afterSeq=<seq>`；它同样按 item 边界判定，会把包含该行的
+  item 整条重给（含新帧），因此能看到最终帧。
+
+测试：`tests/items_pagination_test.rs::item_id_cursor_does_not_cover_frames_appended_later`
+固化两侧行为（`after=<itemId>` 的下一页为空；`afterSeq=2` 的下一页包含后续追加的
+最终帧）。
+
+### 8.3 C：官方 `data` 让页失去行数上限（容量回归）
+
+上一轮按 item 分组后返回页内所有 item 的全部原始行：`limit=1` 遇长消息可返回数千
+行，且 `items`/`data` 同时序列化，构成容量回归。
+
+修复：`limit` 同时是 item 数上限与整页聚合行预算。`grouped_item_page` 按 item 顺序
+累加原始行数，达到或超过 `limit` 行后不再纳入下一个 item；`has_more` 仍按 item
+计算，`nextCursor` 不变。**单 item 例外**：第一个 item 总是纳入，因此它自身行数
+超过预算时整条返回，避免丢掉最终帧；这是已知边界，`items.list` 是 item 取向接口，
+delta 帧应走 SSE。
+
+测试：
+
+- `tests/items_pagination_test.rs::row_budget_stops_before_the_next_item`：`limit=2`、
+  第一个 item 3 行、第二个 item 1 行 → 第一页只含第一个 item（`data` 1、`items`
+  3、`has_more=true`），第二页返回第二个 item。
+- `tests/items_pagination_test.rs::item_grouped_pages_keep_data_shorter_than_items`
+  按行预算更新：首页只含 3 行的长消息，第二页才给出后两个 item。
+- `src/store/memory_test.rs::item_page_spends_limit_as_an_aggregate_row_budget`：
+  存储层行预算、`nextCursor` 与单 item 例外。
+
+Turso 侧复用同一 `grouped_item_page`，SQL 选页仍取 `limit+1` 个候选 item；行预算
+只在已取到的候选行上生效，不需要额外查询。
+
+### 8.4 实际执行的命令与结果
+
+环境同 §4。默认并行与 `--test-threads=1` 各跑一次全量。
+
+| # | 命令 | 默认并行 | 单线程 |
+| --- | --- | --- | --- |
+| 1 | `cargo check -p peri-swarm --all-targets --locked` | 通过，exit 0 | — |
+| 2 | `cargo test -p peri-swarm --locked` | 通过：lib 208、`actor_runtime_test` 8（1 ignored）、`http_contract_test` 25、`items_pagination_test` 12、`loom_store_test` 0（3 ignored）、`mcp_injection_test` 4、`openai_hosted_test` 7、`rivet_actor_test` 0（2 ignored）、`streaming_test` 14、doc-tests 0；合计 278 passed，0 failed | 相同计数，0 failed |
+| 3 | `cargo clippy -p peri-swarm --all-targets --locked -- -D warnings` | 通过，exit 0 | — |
+| 4 | `python3 scripts/check-feature-catalog.py` | `Documentation: PASS (structure and destinations; not runtime acceptance)` | — |
+| 5 | `git diff --check` | 通过，exit 0，无输出 | — |
+
+`openai_hosted_test::an_anonymous_hosted_session_reserves_a_bun_workspace` 的已知并行
+flake 在本轮两次全量中均未出现；未为它改无关代码。
+
+### 8.5 仍存限制与未验证项
+
+1. **历史失败 turn**：会话行只保留最新状态，只有最近一个 turn 的失败能如实回放，
+   更早的失败显示为 `completed`（未新增表/列）。
+2. **官方载荷子集**：`OfficialSession`/`OfficialSessionAgent` 缺官方字段，
+   `agent.model` 可为 `null`，`usage` 恒 `null`；`TurnState` 只读少量字段。
+3. **items 默认 `order=asc`** 与官方默认 `desc` 不同，不改默认值。
+4. **Lagged 后不可恢复**：检测到丢事件时发 `gap` 并关闭订阅；官方 SDK 以 EOF
+   中断，同一连接无法续读中间 turn，重订阅从 tail 或显式游标开始，服务端不会重发
+   在途 turn 的 `turn.created`。
+5. **lookback 扫描成本**：正常会话只回看到上一 turn 的完成帧；若当前 turn 从未产生
+   assistant 完成帧，游标之后的订阅可能反向扫描到会话开头，成本随该 turn 的行数
+   线性增长，未做行数上限。
+6. **`data` 仍是事件级 `ItemView`**：每项是我们的事件级行（含 `payload.delta` 等），
+   不是官方高层 item 联合类型；官方 SDK 的 `CursorPage` 只读 `id`，类型化消费者
+   不能把 `data[]` 当官方 item。
+7. **真实 engine/Turso 未运行**：create-stream 场景只在 service 序列上覆盖；Turso
+   的 item 分组/行预算只有 SQL 形状与离线单测，无活体 Loom 往返；真实官方 SDK
+   进程仍未启动。
+8. **steer 在已有输出之后**：回放仍可能多一个 turn 边界（设计 §4.2 已记录）。

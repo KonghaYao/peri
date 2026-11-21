@@ -1255,3 +1255,68 @@ async fn create_rejects_a_root_session_id_the_host_could_never_honor() {
         "an identity the host can never honor is not persisted"
     );
 }
+
+/// The actor `GET /events` sequence for `POST /sessions?stream=true`:
+/// `open_stream` (no row yet) → `replay_after(Tail)` → `create_session` runs the
+/// first turn. The tail replay must not read the session row: doing so answered
+/// `503 unknown_agent` and the create response lost every first-turn event
+/// (pre-existing since `05d93fe1e`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tail_subscription_before_the_row_keeps_the_first_turn() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    );
+    let logical = LogicalId::parse("agent-create-stream").expect("logical id");
+
+    // No row exists yet: a tail subscription still gets an empty backlog.
+    let backlog = service
+        .replay_after(&logical, EventCursor::Tail)
+        .await
+        .expect("a tail replay must not require the session row");
+    assert!(backlog.is_empty());
+    // An explicit cursor still needs a known session.
+    let error = service
+        .replay_after(&logical, EventCursor::START)
+        .await
+        .expect_err("cursor replay requires the row");
+    assert_eq!(error.code(), ErrorCode::UnknownAgent);
+
+    // The actor endpoint registers the live receiver before replaying.
+    let (_, mut live) = service.open_stream(&logical).await.into_parts();
+    let backlog = service
+        .replay_after(&logical, EventCursor::Tail)
+        .await
+        .expect("tail replay after subscribing");
+    assert!(backlog.is_empty());
+
+    service
+        .create_session(create_command(&logical, &cwd, Some("hello")))
+        .await
+        .expect("create session");
+    let first = collect_until_terminal(&mut live, Duration::from_secs(30)).await;
+    assert!(
+        matches!(&first.terminal, Some(TurnEvent::Completed { .. })),
+        "first turn terminal: {:?}",
+        first.terminal
+    );
+    assert!(
+        first
+            .items
+            .iter()
+            .any(|item| item.payload["role"] == "user"),
+        "the accepted input reached the stream: {:?}",
+        first.items
+    );
+    assert_eq!(
+        completed_text(&first)
+            .first()
+            .map(|(_, text)| text.as_str()),
+        Some(format!("{TURN_PREFIX}0").as_str())
+    );
+    assert_eq!(stub.main_calls(), 1, "one model call for the first turn");
+}

@@ -649,11 +649,18 @@ impl InMemorySwarmService {
         Ok(seq)
     }
 
+    /// Backlog for a subscription. A tail subscription has no backlog and is
+    /// answered without reading the session row (the real actor has the same
+    /// rule, so `stream:true` create works before the row exists). An explicit
+    /// cursor still requires a known session.
     async fn replay_after(
         &self,
         logical_id: &LogicalId,
         start: EventCursor,
     ) -> Result<Vec<StreamEvent>, SwarmError> {
+        if start.cursor().is_none() {
+            return Ok(Vec::new());
+        }
         let session = self.require_session(logical_id).await?;
         let live_open_turn = self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str()));
         super::replay_backlog(self.store.as_ref(), &session, start, live_open_turn).await
