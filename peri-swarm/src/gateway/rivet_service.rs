@@ -26,8 +26,8 @@ use crate::actor::swarm::{
     ACTOR_NAME,
 };
 use crate::domain::{
-    new_root_session_id, ActorKey, Cursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow,
-    LogicalId, SessionView, StreamEvent, SwarmError,
+    new_root_session_id, ActorKey, Cursor, EventCursor, InputOutcome, InputSubmission, ItemPage,
+    ItemsWindow, LogicalId, SessionView, StreamEvent, SwarmError,
 };
 use crate::event_stream::FrameParser;
 use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
@@ -128,13 +128,19 @@ impl RivetSwarmService {
     /// Open the actor event stream and forward decoded events to a broadcast
     /// channel. The actor replays its own backlog, so the returned subscription
     /// has no local backlog.
+    ///
+    /// [`EventCursor::Tail`] sends **no** `afterSeq`: the actor then starts at
+    /// its tail and forwards live events only.
     async fn open(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError> {
         let handle = self.handle(logical_id)?;
-        let path = format!("/events?afterSeq={}", cursor.value());
+        let path = match start.cursor() {
+            Some(cursor) => format!("/events?afterSeq={}", cursor.value()),
+            None => "/events".to_owned(),
+        };
         let response = handle
             .inner()
             .fetch(&path, Method::GET, HeaderMap::new(), None)
@@ -142,7 +148,7 @@ impl RivetSwarmService {
             .map_err(|error| {
                 tracing::warn!(
                     logical_id = logical_id.as_str(),
-                    cursor = cursor.value(),
+                    cursor = start.cursor().map_or(0, Cursor::value),
                     error = %error,
                     "swarm actor event stream failed"
                 );
@@ -157,7 +163,7 @@ impl RivetSwarmService {
             return Err(SwarmError::upstream_unavailable("swarm_actor_stream"));
         }
         let (sender, receiver) = broadcast::channel(self.config.channel_capacity.max(1));
-        // The actor replays from `cursor`, so the subscription tail starts at
+        // The actor replays from the cursor, so the subscription tail starts at
         // the stored MAX(seq) (or the client cursor if the store read fails)
         // and advances with every forwarded item.
         let tail = Arc::new(AtomicU64::new(
@@ -169,7 +175,7 @@ impl RivetSwarmService {
                         error = %error,
                         "swarm last seq read failed; heartbeat starts from the cursor"
                     );
-                    cursor.value()
+                    start.cursor().map_or(0, Cursor::value)
                 }
             },
         ));
@@ -239,6 +245,7 @@ impl SwarmService for RivetSwarmService {
             environment: command.environment,
             environment_id: command.environment_id,
             root_session_id: Some(root_session_id),
+            defer_initial_turn: command.defer_initial_turn,
         };
         let envelope: ActionEnvelope<CreateSessionResult> = self.call(&handle, action).await?;
         envelope.into_result()
@@ -257,11 +264,11 @@ impl SwarmService for RivetSwarmService {
         envelope.into_result()
     }
 
-    async fn submit_input(
+    async fn accept_input(
         &self,
         logical_id: &LogicalId,
         submission: InputSubmission,
-    ) -> Result<InputOutcome, SwarmError> {
+    ) -> Result<crate::service::AcceptedInput, SwarmError> {
         let handle = self.handle(logical_id)?;
         let action = Submit {
             logical_id: logical_id.as_str().to_owned(),
@@ -274,7 +281,20 @@ impl SwarmService for RivetSwarmService {
             original_draft: submission.original_draft,
         };
         let envelope: ActionEnvelope<InputOutcome> = self.call(&handle, action).await?;
-        envelope.into_result()
+        // The actor runs the accepted turn itself (it owns the ACP host), so the
+        // gateway never receives pending work.
+        envelope
+            .into_result()
+            .map(crate::service::AcceptedInput::settled)
+    }
+
+    async fn run_pending_turn(
+        &self,
+        _pending: crate::service::PendingTurn,
+    ) -> Result<(), SwarmError> {
+        // Pending turns are executed inside the actor; a gateway-side call means
+        // the acceptance contract was bypassed.
+        Err(SwarmError::upstream_unavailable("pending_turn_not_routed"))
     }
 
     async fn list_items(
@@ -287,6 +307,7 @@ impl SwarmService for RivetSwarmService {
             logical_id: logical_id.as_str().to_owned(),
             order: window.order,
             after: window.after,
+            after_id: window.after_id,
             limit: window.limit,
         };
         let envelope: ActionEnvelope<ItemPage> = self.call(&handle, action).await?;
@@ -296,7 +317,7 @@ impl SwarmService for RivetSwarmService {
     async fn subscribe(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError> {
         // Unknown sessions are 404 before any stream is opened; the row also
         // carries the `rootSessionId` the actor must be hosting.
@@ -304,14 +325,17 @@ impl SwarmService for RivetSwarmService {
         tracing::debug!(
             logical_id = logical_id.as_str(),
             root_session_id = %row.root_session_id,
-            after_seq = cursor.value(),
+            after_seq = start.cursor().map_or(0, Cursor::value),
+            replay = start.cursor().is_some(),
             "swarm gateway subscribing through the actor"
         );
-        self.open(logical_id, cursor).await
+        self.open(logical_id, start).await
     }
 
     async fn open_stream(&self, logical_id: &LogicalId) -> EventSubscription {
-        match self.open(logical_id, Cursor::START).await {
+        // Tail: the create response must not replay history from before this
+        // stream (`design §4.3`).
+        match self.open(logical_id, EventCursor::Tail).await {
             Ok(subscription) => subscription,
             Err(error) => {
                 // The HTTP layer reports `create_session`'s failure as JSON;

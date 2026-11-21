@@ -31,9 +31,11 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 
+use crate::domain::official::{unix_from_rfc3339, unix_now};
 use crate::domain::{
-    ErrorCode, ErrorKind, ItemKind, ItemSource, ItemView, SessionState, StreamEvent, SwarmError,
-    TurnEvent,
+    turn_id_for_item, ErrorCode, ErrorKind, ItemKind, ItemSource, ItemView, OfficialEvent,
+    OfficialMessageItem, OfficialSession, OfficialTurn, SessionState, SessionStatus, StreamEvent,
+    SwarmError, TurnEvent, TurnStatus,
 };
 use crate::store::{store_failure, SwarmItemRow, SwarmSessionUpdate, SwarmStore};
 
@@ -60,6 +62,16 @@ struct MessageStream {
     text: String,
 }
 
+/// User item whose `turn.created`/`turn.item.added` frames are published when
+/// the accepted turn actually starts.
+#[derive(Clone, Debug)]
+struct PendingUserItem {
+    seq: u64,
+    item_id: String,
+    text: String,
+    created_at: i64,
+}
+
 /// One queued host run that continues the open turn after a steer handoff.
 #[derive(Clone, Debug, PartialEq)]
 struct ContinuationRun {
@@ -78,6 +90,16 @@ struct LogState {
     identities: HashMap<StreamKey, String>,
     /// Request id of the gateway turn currently running, if any.
     active: Option<String>,
+    /// Internal turn identity derived from the persisted user item that opened
+    /// the turn; stable in replay.
+    turn_id: Option<String>,
+    /// Unix seconds when this turn was opened, reused by `turn.created` and
+    /// `turn.completed`/`turn.failed` so one turn reports one creation time.
+    turn_created_at: Option<i64>,
+    /// User item persisted at acceptance whose official frames wait for the
+    /// turn to start (`begin_turn`). Emitting `turn.created` at acceptance
+    /// would leave a created turn with no terminal if execution never starts.
+    pending_user_item: Option<PendingUserItem>,
     /// Queue generation reported by the host for the active turn (diagnostics).
     generation: Option<String>,
     /// Last fatal agent message observed while the turn was active.
@@ -156,20 +178,25 @@ impl ItemLog {
         &self,
         input_id: Option<&str>,
         text: &str,
-    ) -> Result<u64, SwarmError> {
+    ) -> Result<(u64, String), SwarmError> {
         let mut payload = json!({ "role": "user", "text": text });
         if let Some(input_id) = input_id {
             payload["inputId"] = json!(input_id);
         }
-        self.append_item(
-            ProjectedItem {
-                kind: ItemKind::Message,
-                source: ItemSource::root(),
-                payload,
-            },
-            input_id.map(|input_id| format!("itim_input_{input_id}")),
-        )
-        .await
+        let item_id = input_id
+            .map(|input_id| format!("itim_input_{input_id}"))
+            .unwrap_or_else(ItemView::new_item_id);
+        let seq = self
+            .append_item(
+                ProjectedItem {
+                    kind: ItemKind::Message,
+                    source: ItemSource::root(),
+                    payload,
+                },
+                Some(item_id.clone()),
+            )
+            .await?;
+        Ok((seq, item_id))
     }
 
     #[must_use]
@@ -260,31 +287,134 @@ impl ItemLog {
         }
     }
 
-    /// Open a gateway turn: persist `running`, then announce `turn: started`.
-    pub async fn begin_turn(&self, request_id: &str) -> Result<(), SwarmError> {
-        {
+    /// Open a gateway turn: persist `running`, then publish the official
+    /// `agent.session.turn.created` (+ the accepted user item's
+    /// `turn.item.added`) and the gateway's own `turn: started`.
+    ///
+    /// Acceptance appends the user item and marks the turn as pending, but
+    /// defers both official frames until the turn actually starts: a turn that
+    /// never executes then produces no `turn.created` that could never be
+    /// closed. `turn.created` is always emitted before the item's frame, on the
+    /// live stream and in backlog replay alike.
+    pub async fn begin_turn(&self, request_id: &str, turn_id: &str) -> Result<(), SwarmError> {
+        let (created, added) = {
             let mut state = self.state.lock();
             if state.active.is_some() {
                 return Err(SwarmError::turn_in_progress());
             }
             state.active = Some(request_id.to_owned());
+            let (created, added) = match state.turn_id.clone() {
+                Some(open) if open == turn_id => {
+                    // The accepted user item opened this turn; publish its
+                    // frames now that execution starts.
+                    match state.pending_user_item.clone() {
+                        Some(pending) => {
+                            let created_at = state.turn_created_at.unwrap_or(pending.created_at);
+                            (
+                                Some(OfficialEvent::turn_created(
+                                    &self.logical_id,
+                                    turn_id,
+                                    OfficialTurn::new(
+                                        &self.logical_id,
+                                        turn_id,
+                                        TurnStatus::InProgress,
+                                        created_at,
+                                        None,
+                                    ),
+                                )),
+                                Some(OfficialEvent::turn_item_added(
+                                    pending.seq,
+                                    &self.logical_id,
+                                    turn_id,
+                                    OfficialMessageItem::user(
+                                        &pending.item_id,
+                                        turn_id,
+                                        &pending.text,
+                                    ),
+                                )),
+                            )
+                        }
+                        None => (None, None),
+                    }
+                }
+                open => {
+                    if let Some(stale) = open {
+                        tracing::warn!(
+                            logical_id = %self.logical_id,
+                            stale_turn = stale,
+                            turn_id,
+                            "opening a turn while a previously announced turn was never closed"
+                        );
+                    }
+                    let created_at = unix_now();
+                    state.turn_id = Some(turn_id.to_owned());
+                    state.turn_created_at = Some(created_at);
+                    state.pending_user_item = None;
+                    (
+                        Some(OfficialEvent::turn_created(
+                            &self.logical_id,
+                            turn_id,
+                            OfficialTurn::new(
+                                &self.logical_id,
+                                turn_id,
+                                TurnStatus::InProgress,
+                                created_at,
+                                None,
+                            ),
+                        )),
+                        None,
+                    )
+                }
+            };
             state.generation = None;
             state.failure = None;
             state.streams.clear();
             state.steer_epoch = 0;
             state.continuation = None;
-        }
+            (created, added)
+        };
         if let Err(error) = self.set_session_state(SessionState::Running, None).await {
-            self.state.lock().active = None;
+            let mut state = self.state.lock();
+            state.active = None;
             return Err(error);
         }
-        self.broadcast(StreamEvent::Turn(TurnEvent::started(request_id)));
+        if let Some(event) = created {
+            self.broadcast(StreamEvent::Official(event));
+        }
+        if let Some(event) = added {
+            self.broadcast(StreamEvent::Official(event));
+        }
+        {
+            let mut state = self.state.lock();
+            state.pending_user_item = None;
+        }
+        self.broadcast(StreamEvent::Turn(TurnEvent::started(request_id, turn_id)));
         // Publish after the terminal-safe state is visible: `wait_turn_closed`
         // subscribes to this watch, and a stale `None` would let a caller treat
         // the still-open turn as already closed (a steer's `cancelled` attempt
         // terminal must not close it before the queued run takes over).
         self.active_watch.send_replace(Some(request_id.to_owned()));
         Ok(())
+    }
+
+    /// Whether a turn is open or accepted-but-not-yet-started.
+    #[must_use]
+    pub fn has_open_turn(&self) -> bool {
+        self.state.lock().turn_id.is_some()
+    }
+
+    /// Drop a pending turn whose execution never started.
+    ///
+    /// No official frame was published for it (they wait for [`Self::begin_turn`]),
+    /// so the stream simply never learns about that turn; the persisted user
+    /// item stays readable from `/items`.
+    pub fn abandon_pending_turn(&self, turn_id: &str) {
+        let mut state = self.state.lock();
+        if state.active.is_none() && state.turn_id.as_deref() == Some(turn_id) {
+            state.turn_id = None;
+            state.turn_created_at = None;
+            state.pending_user_item = None;
+        }
     }
 
     /// Close a gateway turn: flush streamed text, then publish the terminal.
@@ -315,6 +445,8 @@ impl ItemLog {
             state.continuation = None;
             (std::mem::take(&mut state.streams), state.failure.take())
         };
+        // The turn identity stays set while completion items are flushed: their
+        // `turn.item.added` frames belong to this turn.
         for ((agent_id, message_id), stream) in streams {
             if stream.text.is_empty() {
                 continue;
@@ -340,25 +472,116 @@ impl ItemLog {
                 );
             }
         }
+        let (turn_id, created_at) = {
+            let mut state = self.state.lock();
+            (state.turn_id.take(), state.turn_created_at.take())
+        };
+        self.state.lock().pending_user_item = None;
+        let Some(turn_id) = turn_id else {
+            // Unreachable by construction: `begin_turn` always records the
+            // turn id it was given. Neither custom nor official frames can name
+            // a turn, so do not fabricate one.
+            tracing::error!(
+                logical_id = %self.logical_id,
+                request_id,
+                "swarm turn closed without a recorded turn id"
+            );
+            self.active_watch.send_replace(None);
+            return;
+        };
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
                 self.update_state_quiet(SessionState::Idle).await;
                 self.broadcast(StreamEvent::Turn(TurnEvent::completed(
                     request_id,
+                    &turn_id,
                     stop_reason,
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::turn_completed(
+                    &self.logical_id,
+                    &turn_id,
+                    OfficialTurn::new(
+                        &self.logical_id,
+                        &turn_id,
+                        TurnStatus::Completed,
+                        created_at.unwrap_or_else(unix_now),
+                        Some(unix_now()),
+                    ),
+                )));
+                // Immediately after the terminal: the SDK's `TurnState` only
+                // treats `agent.session.idle` as terminal after it observed the
+                // matching `turn.completed`.
+                self.broadcast(StreamEvent::Official(OfficialEvent::session_idle(
+                    &turn_id,
+                    self.official_session(SessionStatus::Idle, None).await,
                 )));
             }
             TurnOutcome::Failed { code, message } => {
                 let message = failure.unwrap_or(message);
                 self.update_state_quiet(SessionState::Failed).await;
                 self.broadcast(StreamEvent::Turn(TurnEvent::failed(
-                    request_id, code, message,
+                    request_id,
+                    &turn_id,
+                    code,
+                    message.clone(),
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::turn_failed(
+                    &self.logical_id,
+                    &turn_id,
+                    OfficialTurn::new(
+                        &self.logical_id,
+                        &turn_id,
+                        TurnStatus::Failed,
+                        created_at.unwrap_or_else(unix_now),
+                        Some(unix_now()),
+                    )
+                    // The failure text is known on the live path; it is not
+                    // persisted, so a replay still reports `error: null`.
+                    .with_error(Some(message.clone())),
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::session_failed(
+                    &turn_id,
+                    self.official_session(SessionStatus::Failed, Some(message))
+                        .await,
                 )));
             }
         }
         // Wake `wait_turn_closed` only after the terminal is out, so a caller
         // that returns from the prompt observes a fully closed turn.
         self.active_watch.send_replace(None);
+    }
+
+    /// Official session snapshot for `agent.session.idle`/`agent.session.failed`.
+    ///
+    /// A missing/failed row read still yields a snapshot: the terminal frame is
+    /// the SDK's only way out of `in_progress`, so suppressing it would hang a
+    /// stream. Unread timestamps are `0`, which is visibly not an observation.
+    async fn official_session(
+        &self,
+        status: SessionStatus,
+        error: Option<String>,
+    ) -> OfficialSession {
+        let row = self.store.swarm_get_session(&self.logical_id).await;
+        match row {
+            Ok(Some(row)) => OfficialSession::new(
+                &self.logical_id,
+                status,
+                unix_from_rfc3339(&row.created_at),
+                unix_from_rfc3339(&row.last_activity_at),
+                error,
+                row.model,
+                row.instructions,
+            ),
+            Ok(None) => OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None),
+            Err(read_error) => {
+                tracing::warn!(
+                    logical_id = %self.logical_id,
+                    error = %read_error,
+                    "swarm session row was not readable for the official terminal frame"
+                );
+                OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None)
+            }
+        }
     }
 
     /// Key/value projection of the last item appended (test and gateway aid).
@@ -523,7 +746,7 @@ impl ItemLog {
         self.tail.fetch_max(seq, Ordering::Relaxed);
         self.set_session_state(SessionState::Running, Some(seq))
             .await?;
-        self.broadcast(StreamEvent::Item(ItemView {
+        let view = ItemView {
             id: item_id.clone(),
             seq,
             item_id,
@@ -532,8 +755,72 @@ impl ItemLog {
             payload,
             created_at,
             truncated,
-        }));
+        };
+        self.broadcast(StreamEvent::Item(view.clone()));
+        for event in self.official_frames(&view) {
+            self.broadcast(StreamEvent::Official(event));
+        }
         Ok(seq)
+    }
+
+    /// Official frames one persisted message frame implies.
+    ///
+    /// A user item opens a turn when none is open, but the opening turn's
+    /// `turn.created`/`turn.item.added` frames are deferred to
+    /// [`Self::begin_turn`]: acceptance must not publish a turn that may never
+    /// run. A user item that arrives while a turn is open is a steer and is
+    /// published against that turn immediately. Assistant deltas are skipped;
+    /// only the final `complete:true` frame is the item the SDK consumes.
+    fn official_frames(&self, view: &ItemView) -> Vec<OfficialEvent> {
+        if view.kind != ItemKind::Message {
+            return Vec::new();
+        }
+        let text = view
+            .payload
+            .get("text")
+            .and_then(|text| text.as_str())
+            .unwrap_or_default();
+        match view.payload.get("role").and_then(|role| role.as_str()) {
+            Some("user") => {
+                let mut state = self.state.lock();
+                match state.turn_id.clone() {
+                    Some(turn_id) => vec![OfficialEvent::turn_item_added(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        OfficialMessageItem::user(&view.item_id, &turn_id, text),
+                    )],
+                    None => {
+                        let turn_id = turn_id_for_item(&view.item_id);
+                        let created_at = unix_from_rfc3339(&view.created_at);
+                        state.turn_id = Some(turn_id);
+                        state.turn_created_at = Some(created_at);
+                        state.pending_user_item = Some(PendingUserItem {
+                            seq: view.seq,
+                            item_id: view.item_id.clone(),
+                            text: text.to_owned(),
+                            created_at,
+                        });
+                        Vec::new()
+                    }
+                }
+            }
+            Some("assistant") if view.payload.get("complete") == Some(&json!(true)) => {
+                let turn_id = self.state.lock().turn_id.clone();
+                turn_id
+                    .map(|turn_id| {
+                        OfficialEvent::turn_item_added(
+                            view.seq,
+                            &self.logical_id,
+                            &turn_id,
+                            OfficialMessageItem::assistant(&view.item_id, &turn_id, text),
+                        )
+                    })
+                    .into_iter()
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     async fn report_append_failure(&self, operation: &'static str, error: SwarmError) {

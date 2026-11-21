@@ -87,11 +87,11 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
-| `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先打开订阅再执行首轮 |
-| `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影 |
-| `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
-| `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时 |
-| `GET` | `/v1/agents/sessions/{logicalId}/items` | 按 seq 增量读取 |
+| `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先建立订阅并构造/返回 SSE 响应（初始 `session` 帧），再调度首轮；首轮事件受广播容量约束（§4.3） |
+| `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影；`status` 是官方 `idle`/`in_progress`/`failed` |
+| `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；受理持久化后 `202`；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
+| `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时；含官方 `agent.session.*` 事件 |
+| `GET` | `/v1/agents/sessions/{logicalId}/items` | 按 seq 增量读取；兼容官方 `CursorPage`（`data`/`has_more`、`after=<itemId>`） |
 
 约定：
 
@@ -125,33 +125,164 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   assistant 帧仍按 `payload.messageId` 聚合。
 - item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
   游标，不能用 `id` 去重 delta 帧。
-- SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn` 与 `gap` 不持久化，不推进
-  `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是 `completed` 或
-  `failed`。
-- 重连游标接受 `Last-Event-ID` 头或 `?afterSeq=`；服务端先补 `seq > after` 的
-  backlog，再转实时广播。心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳
-  payload 的 `lastItemSeq` 是该会话当前 `MAX(seq)`（与 item 写入方共享），只表示
-  进度，不能代替已投递 item 的 `seq` 作为恢复游标。
-- 回放（backlog）只发 `item` 帧，没有 `turn` 控制帧；客户端的回放终止条件是目标
-  message 的 `payload.complete=true`。`after` 已等于或超过会话末尾时没有可回放
-  item，流保持打开并只发心跳；客户端必须自行超时或取消（或改用 items 分页）。
-- items 支持 `order=asc|desc`、`after`、`limit`，响应给出 `items`、`hasMore`、
-  `nextCursor`、`lastItemSeq`；同一 assistant 消息的 delta 与 complete 共享稳定
-  `itemId`。item 是事件级帧（user message、assistant delta、tool_call、
-  tool_update、tool_result），不是官方高层 item；assistant 按
+- SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn`、官方 `agent.session.*` 与 `gap`
+  不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是
+  `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn` 帧保持不变。
+- 订阅游标接受 `Last-Event-ID` 头、`?afterSeq=` 或 `?after=`（三者等价，同时给出
+  必须一致，否则 `400 conflicting_cursor`）。**没有任何游标时从当前末尾开始，只
+  投递实时事件**：官方 `sessions.stream` 先订阅再 POST，若回放旧 turn 的终态，
+  SDK 会在旧 turn 的 `idle` 上结束。显式 `afterSeq=0` 仍回放全部（既有客户端语义
+  不变）。无游标订阅不读会话行：`POST /sessions?stream=true` 在行尚未创建时先
+  打开订阅，行检查只属于显式游标（未知会话仍是 `404 unknown_agent`），否则流式
+  create 会在行尚不存在时得到已关闭的订阅。
+- 带游标时先补 `seq > after` 的 backlog，再转实时广播。心跳间隔由
+  `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳 payload 的 `lastItemSeq` 是该会话当前
+  `MAX(seq)`（与 item 写入方共享），只表示进度，不能代替已投递 item 的 `seq`
+  作为恢复游标。
+- 回放（backlog）与实时同序：先发该行的 `item` 帧，紧接由同一行推导的官方帧
+  （§4.2.1）；上一 turn 的终态先于下一 turn 的 `turn.created`。因此重连看到的官方
+  序列与实时一致；`turn` 控制帧仍只出现在实时段。客户端的回放终止条件是目标
+  message 的 `payload.complete=true`。
+- 回放边界由 lookback 决定：窗口首行不是 turn opener（assistant/tool 帧），或首行
+  是 steer user item 时，服务端向游标之前回看，找到仍打开该 turn 的 opener（user
+  item），用它的 `turn_id` 播种；不重发 `turn.created`（重发会让新订阅的
+  `TurnState` 选中旧 turn 并在其终态结束）。窗口为空且会话行已 `idle`/`failed`
+  时，从最后一批 item 推导最后一个 turn 并补发终态（`turn.completed`+`idle` 或
+  `turn.failed`+`session.failed`）；该 turn 此刻仍在实时执行（存在在途 turn）时
+  不补，终态由实时流给出。只有 tool 帧、没有 assistant 完成帧的 turn 由同一
+  lookback 播种，并按「已闭合且无输出 → `completed`」补终态。
+- lookback 的已知边界：它按「打开的 turn 已落 assistant 完成帧则视为已闭合」的
+  行边界规则推断。真实 steer 发生在该 turn 已有 assistant 完成帧之后时，实时流
+  把新输入挂到原 turn，回放却会把它当作新 turn（多一个 `turn.created`）。行里
+  没有 turn 终态标记，无法消除；游标落在 steer 之前且该 turn 尚无完成帧的常见
+  情况已由 lookback 修复。
+- 慢订阅者：广播容量耗尽（Lagged）时发一帧 `gap` 后关闭该订阅。丢失的事件可能
+  包含终态，官方 SDK 因而以 EOF 识别中断；原生客户端用最后一个已渲染 item 的
+  `seq` 重连恢复。流式 create 的首轮走同一通道：订阅先于首轮建立，容量内的首轮
+  事件实时送达；首轮突发或客户端读取过慢超过容量时同样 `gap` + EOF，不静默丢弃
+  （§4.3）。
+- items 按 **item 分组**分页（§4.2.2）：`limit` 同时是 item 数上限与整页聚合行预算，
+  `has_more` 按 item 计算，`nextCursor` 是本页最后一个 item 的最大 `seq`（仅
+  `has_more=true` 时给出）。`items` 是本页这些 item 的全部原始行；`data` 是每个
+  item 的最后一行（最大 `seq`）。`data` 通常比 `items` 短，两者数量允许不同；既有
+  delta 消费者继续读 `items`。`after` 接受十进制 `seq`（与 `afterSeq` 同义），也
+  接受官方 `after=<itemId>`：解析为该 id 的最大 `seq`，升序取 `MAX(seq) > after`、
+  降序取 `MAX(seq) < after`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致
+  返回 `400 conflicting_cursor`。item 是事件级帧（user message、assistant delta、
+  tool_call、tool_update、tool_result），不是官方高层 item；assistant 按
   `payload.messageId` 聚合，最终文本取 `payload.complete` 帧，`tool_call` 按
   `payload.toolCallId` 聚合（可能分带/不带 `input` 的两帧）。
+
+#### 4.2.2 item 级分页
+
+同一条 assistant 消息的 delta 与 `complete` 共享 `itemId`、`seq` 各不相同，所以
+`after=<itemId>` 不能按行理解：
+
+- item 归属按该 item 的最大 `seq` 判定，分页单位是 item；升序页是
+  `MAX(seq) > after` 的前若干个 item，降序页是 `MAX(seq) < after` 的前若干个
+  item。`limit=1` 且首条消息有 3 帧时，`items` 返回 3 行、`data` 返回 1 行——
+  这正是「先取 `limit` 行再去重」会产生空页的场景。
+- 分组在存储层完成：Turso 用 `GROUP BY logical_id, item_id` + `MAX(seq)` 选页，
+  再按 `item_id` join 回全部行；内存 fake 用同一 `grouped_item_page` 规则，两者
+  不会给出不同的页边界。
+- **行预算**：`limit` 既是 item 数上限，也是整页聚合行预算。按 item 顺序累加原始
+  行数，达到或超过 `limit` 行后不再纳入下一个 item；因此 `limit` 个 item 不保证
+  都出现在一页里。单个 item 自身的行数超过预算时整条返回（至少纳入 1 个 item），
+  否则会丢掉它的最终帧——这是已知边界；`items.list` 是 item 取向的接口，delta
+  帧应走 SSE。
+- `nextCursor` 是页内最后一个 item 的最大 `seq`，因此升序下一页严格前进；降序页
+  的游标是页内最旧 item 的最大 `seq`，下一页只取更小的 item。`after=<itemId>`
+  解析为该 item 的最大 `seq`，所以同一 item 不会被重复分页。十进制
+  `after`/`afterSeq` 同样按 item 边界解释：游标落在多帧 item 中间时，该 item 整条
+  出现在页里（`items` 含游标之前的帧，`data` 仍是它的最后一行）。
+- **增长中的 item**：`after=<itemId>` 在请求时解析为该 item 的当前 `MAX(seq)`；
+  之后追加的帧都落在这个 `seq` 之后，不会再由该游标返回（其他最大 `seq` 低于该值
+  的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按
+  item 边界判定，会把包含该行的 item 整条重新给出（含新追加的帧），因此能看到
+  最终帧。分页游标始终严格前进、不会循环。
+- 默认 `order=asc` 与官方默认 `desc` 不同；保持既有客户端行为，不改默认值。
+
+#### 4.2.1 官方事件映射
+
+官方 `openai@7.60.0` Agents API 的事件帧是附加层：SSE `event:` 名与 JSON `type`
+相同，均为 `agent.session.*`；既有 `item`/`turn` 客户端不受影响。
+
+| 官方事件 | 发出时机 | 载荷来源 | `event_id` |
+| --- | --- | --- | --- |
+| `agent.session.turn.created` | turn 真正开始（`begin_turn`），**不是**受理时 | 打开 turn 的 user item | `evt_<turnId>_created` |
+| `agent.session.turn.item.added` | user item 开启 turn/steer 时、assistant `complete:true` 落库后 | 持久化 item 的 `seq`、`itemId`、text | `evt_item_<seq>_added` |
+| `agent.session.turn.completed` | 成功终态 | turn 的 `created_at` 与完成时刻 | `evt_<turnId>_completed` |
+| `agent.session.turn.failed` | 失败终态 | 同上 | `evt_<turnId>_failed` |
+| `agent.session.idle` | **紧接** `turn.completed` 之后 | 会话行快照 | `evt_<turnId>_idle` |
+| `agent.session.failed` | **紧接** `turn.failed` 之后 | 会话行快照 + 错误 | `evt_<turnId>_session_failed` |
+
+- `turnId = turn_<打开 turn 的 user itemId 去掉 itim_ 前缀>`。它由已持久化的 user
+  item 派生，不用 ACP `messageId`，不含时钟或随机源；重连后由同一行重算，值不变。
+- `event_id` 只由 `turnId` 或持久化 `seq` 派生，因此实时投递与 backlog 重放给出
+  完全相同的 identity；客户端的 `event_id` 去重窗口可跨重连生效。
+- 受理只持久化 user item，不发 `turn.created`/`turn.item.added`。两个帧在 turn 真正
+  开始时按 `turn.created` → `turn.item.added` 顺序发出；从未执行的 turn 不会留下
+  只有 created 没有终态的悬空 turn。
+- `turn.item.added` 只投影 `message` item（user 与 assistant 的完成帧）；一个 turn
+  可以落多条 assistant 完成帧（工具循环等），它们都属于同一个 `turn_id`。
+  `receipt`、thought、tool 帧只存在于网关自定义面。`output_index` 恒为 `null`。
+- backlog 按行重建 turn 边界：user item 在「没有打开的 turn」或「打开的 turn 已落
+  assistant 完成帧」时开启新 turn，否则视为该 turn 的 steer；终态在下一 turn 的
+  `turn.created` 之前或回放末尾发出。最后一个 turn 仅在会话行状态仍为 `failed`
+  时补 `turn.failed` + `agent.session.failed`；失败原因未持久化，重放的 `error` 与
+  `completed_at` 保持 `null`，不编造；实时失败帧的 `turn.error` 由失败消息填充
+  （`{code:"internal_error", message}`）。若该 turn 此刻仍在实时执行，回放不补
+  终态，终态由实时流给出，避免 SDK 提前结束。
+- 重连游标落在 turn 中间时，lookback 从游标（含）之前回看：跳过 steer user item，
+  直到找到一个未被 assistant 完成帧与更早 user item 分隔的 opener，取其 `turn_id`
+  播种，`turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。首行是 steer
+  时，实时与回放给出同一 `turn_id`。只有 tool 帧的窗口同样由 lookback 播种：能判定
+  已闭合（会话行 `idle`）时按「无输出 → `completed`」补终态；会话行 `failed` 时按
+  `turn.failed`。
+- `afterSeq` 等于会话末尾时窗口为空：会话行 `idle`/`failed` 时仍按最后一批 item
+  补发该 turn 的终态与 `agent.session.idle`/`agent.session.failed`（冗余终态按
+  `event_id` 幂等）；有在途 turn 时不补。
+- 历史 turn 的失败无法区分：会话行只保留最新状态，更早的失败 turn 在回放中显示为
+  `completed`。这是已记录的限制，不通过新增表/列修复。
+- `usage` 恒为 `null`；`requires_action` 永不发送（本地没有待审批事实）；
+  `turn.cancelled`、budget、subagent 与官方 `function_call` item 不在本层。
+
 
 ### 4.3 创建与首轮
 
 `POST /sessions` 接受 OpenAI Agents API 形状的 `model`/`instructions`（顶层与
 `agent` 内同名字段必须一致）、`input`、`environment`、`tools` 与 `stream`。
-`stream:true` 时网关先为 `logicalId` 打开订阅，再执行首轮，因此首轮事件不会丢；
-非流式创建返回 `created` 与会话投影。
+`stream:true` 时网关先为 `logicalId` 打开订阅；service 受理初始输入后立即返回
+（actor 在 action reply 前用 `ctx.wait_until` 注册首轮，in-process fake 由 handler
+`tokio::spawn`，与 `POST /events` 的 `202` 相同），网关再构造并返回 SSE 响应
+（headers 与初始 `session` 帧）。首轮事件在广播容量内实时送达；客户端读取过慢或
+首轮突发超过容量时，按 §4.2 的 `gap` + EOF 语义显式失败，客户端可按最后已渲染
+item 的 `seq` 重连。
+actor 路径的 action reply 与 gateway 响应构造之间仍有一个短窗口：`wait_until` 在
+action reply 后即可开始执行，因此不承诺「首轮一定晚于客户端读到响应」，只承诺
+订阅先于首轮建立、响应构造不等待首轮完成。延迟的不是受理：初始 user item 与其
+`turn_id` 已在 service 内持久化，执行归属仍由 service/actor 持有，因此 `creating`
+行恢复时「已有 item 不重放」的至多一次语义不变。必须延迟的原因有二：广播 receiver
+只在响应到达客户端后才被轮询，而通道容量有界（gateway 默认 256）；若在返回响应前
+跑完首轮，超过容量的首轮会让首次读取得到 `Lagged`，SSE 发一帧 `gap` 后关闭，整轮
+帧丢失。即便未溢出，首轮也会在结束后一次性投递，而不是实时流。
+订阅在会话行写入之前建立：tail 订阅不读会话行（见 §4.2），gateway 的
+`open_stream` 在 actor 接受该订阅后转发真实活跃流，不会退回已关闭的广播。
+命中已存在行（含 `creating`）的 create 走与 `accept_input` 相同的 admission 规则：
+若该会话已有运行中的 turn，或已有受理但尚未开始的 turn（user item 已落库、执行尚未
+启动），`create_session` 在写入初始 user item **之前**返回 `409 turn_in_progress`，
+`defer=true` 与 `defer=false` 一致；`creating` 行恢复在 `last_seq == 0` 窗口内同样
+由该检查拒绝，不静默跳过。被拒绝的 create 不写 user item，因此不会留下没有终态的
+stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn`），不是持久化
+的行状态：这些检查只适用于已 live 的 runtime；崩溃遗留的 `running` 行仍由
+`ensure_live` 返回 `502 session_resume_required`，turn 恢复尚未实现（§7、验收 §5-5）。
+非流式创建不延迟：首轮仍在 `create_session` 内执行，错误仍以 HTTP 状态返回；
+流式创建的首轮错误只出现在流上。
 
 首次创建的写入顺序固定：`bind_environment`（hosted 时预留并持久化绑定）→ 写入
 `state=creating` 的完整会话行（含 `rootSessionId`、`cwd`、model、instructions、
-`mcp_tools`、environment 与时间戳）→ `session/new` → 同一行改 `idle` → 首轮。
+`mcp_tools`、environment 与时间戳）→ `session/new` → 同一行改 `idle` → 首轮
+（流式创建在 `idle` 之后先建立订阅并构造/返回 SSE 响应，再调度首轮，见上）。
 `created=true` 只出现在首次创建；命中已存在行（无论 `idle` 还是 `creating`）都返回
 `created=false`。行状态语义：`creating` 表示身份已持久化但 Peri 会话尚未确认，
 `idle`/`running` 表示 host 已就绪；`creating` 不是「创建失败」，而是可重试的中间态。
@@ -170,9 +301,20 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   一条 user message item；同一 key 与内容的重放返回 `existing`，不重复追加。
 - `POST /sessions` 的 `Idempotency-Key` 只用于稳定 `logicalId` 并复用已存在会话，
   不是跨请求的事务承诺。
+- `POST /sessions/{logicalId}/events` 的 `202` 是**受理**回执：input receipt、user
+  item 与 turn 预留都持久化后才返回，turn 在响应之后执行（actor 路径经
+  `wait_until` 调度，HTTP 路径用独立任务；与流式 create 一样存在 action reply 与
+  响应构造之间的短窗口，见 §4.3）。响应中的 `lastItemSeq` 是受理时刻的
+  `MAX(seq)`，通常只含本条 user item；assistant item 与终态经 SSE 投递。因此
+  「先建流、后 POST」仍是观察本轮的可靠方式，但 202 不再等待模型。
+- 同步失败仍按原语义返回：空输入/畸形请求 `400`，同 key 不同内容
+  `409 input_conflict`，需要 `session/resume` 的失败 `502 session_resume_required`
+  （`details.operation` 指向具体阶段）。turn 执行失败在流上以 `turn.failed` +
+  `agent.session.failed` 呈现，不追认改已返回的 `202`。
 - 创建中断的恢复是**按已持久化的 root id 核对**，不是重新生成：`creating` 行重试
   先 `session/load`、必要时才用同一 root id `session/new`，返回 `created=false`；
-  初始输入至多执行一次（行内已有 item 时不重放）。两次尝试都失败返回可诊断的
+  初始输入至多执行一次（行内已有 item 时不重放；`last_seq == 0` 但已有在途 turn
+  时按 §4.3 返回 `409 turn_in_progress`，不静默跳过）。两次尝试都失败返回可诊断的
   `502`（`details.operation=create_recovery_failed`），行与 root id 保留，可继续
   重试。ACP 返回的 session id 与行内 root id 不一致时以 `session_id_mismatch`
   失败，不接管该身份。
@@ -181,16 +323,16 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 `GET /sessions/{logicalId}`（以及创建响应）的 `environment` 是
 `{type,id}`；hosted 会话另有 `sandbox` 投影，字段来自 `swarm_bindings`：
-`logicalEnvId`、`sandboxId`、`runId`、`workspacePath`。`state` 固定为 `null`：
-网关只持久化绑定，不跟踪 Bun 的实时 SRT 启停；实时状态以 Bun
+`logicalEnvId`、`sandboxId`、`runId`、`workspacePath`。`runId` 在绑定记录后如实
+填充；`state` 固定为 `null`：网关只持久化绑定，不跟踪 Bun 的实时 SRT 启停，表里
+也没有该列，所以不伪造 `reserved`/`running`。实时状态以 Bun
 `GET /v1/sandboxes/{logicalEnvId}` 为准。会话 `cwd` 是网关工作目录，不是工具执行
 目录；工具在 `sandbox.workspacePath` 下执行。
 
-`POST /sessions/{logicalId}/events` 在 HTTP 层返回 `202`，但 `mode=turn` 的受理在
-本轮进入终态后才返回；响应中的 `lastItemSeq` 已包含本轮 item。对调用方而言，**返回
-时本轮可能已经完成**；它不是「排队后异步执行」，也不能在返回后再开流补看本轮——
-要观察本轮，先建立 SSE 再 POST。未完成 turn、`session/resume` 与后台任务边界仍是
-§8 的未完成项。
+`status` 由会话行与进程内在途 turn 投影：有在途 turn（含已受理未开始）为
+`in_progress`，行状态 `failed` 为 `failed`，否则 `idle`。本地没有审批事实，不会
+出现 `requires_action`。
+
 
 ## 5. MCP 注入
 

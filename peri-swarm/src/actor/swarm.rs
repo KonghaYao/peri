@@ -39,9 +39,9 @@ use tokio::sync::mpsc;
 use super::deployment::current_deployment;
 use super::service::AcpSwarmService;
 use crate::domain::{
-    ActorKey, ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, InputKind, InputMode,
-    InputOutcome, InputSubmission, ItemOrder, ItemPage, ItemView, ItemsWindow, LogicalId,
-    McpToolSpec, SessionState, SessionView, StreamEvent, SwarmError,
+    ActorKey, ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind,
+    InputMode, InputOutcome, InputSubmission, ItemOrder, ItemPage, ItemView, ItemsWindow,
+    LogicalId, McpToolSpec, SessionState, SessionView, StreamEvent, SwarmError,
 };
 use crate::event_stream::FrameWriter;
 use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
@@ -177,8 +177,9 @@ impl SwarmActor {
     }
 
     async fn events_response(&self, request: &Request) -> Result<ActorHttpResponse> {
-        let after = match query_u64(request.uri().query(), "afterSeq") {
-            Ok(after) => after,
+        let start = match query_cursor(request.uri().query(), "afterSeq") {
+            Ok(Some(after)) => EventCursor::after(after),
+            Ok(None) => EventCursor::Tail,
             Err(message) => {
                 return buffered_json(
                     400,
@@ -189,11 +190,7 @@ impl SwarmActor {
         // Receiver first, then backlog: no item can slip between replay and
         // live delivery (`design §6.1`).
         let live = self.service.open_stream(&self.logical_id).await;
-        let backlog = match self
-            .service
-            .replay_after(&self.logical_id, Cursor::new(after))
-            .await
-        {
+        let backlog = match self.service.replay_after(&self.logical_id, start).await {
             Ok(backlog) => backlog,
             Err(error) => {
                 return buffered_json(
@@ -208,7 +205,7 @@ impl SwarmActor {
             }
         };
         let (sender, receiver) = mpsc::channel(STREAM_CHUNK_CAPACITY);
-        tokio::spawn(forward_events(backlog, live, after, sender));
+        tokio::spawn(forward_events(backlog, live, start, sender));
         let headers = HashMap::from([
             ("content-type".to_owned(), "text/event-stream".to_owned()),
             ("cache-control".to_owned(), "no-cache".to_owned()),
@@ -358,13 +355,16 @@ impl Actor for SwarmActor {
 }
 
 /// Append SSE frames from the replay backlog and then the live channel.
+///
+/// The writer dedupes items against the replay cursor; a tail subscription has
+/// no cursor, so every live item passes.
 async fn forward_events(
     backlog: Vec<StreamEvent>,
     live: EventSubscription,
-    after: u64,
+    start: EventCursor,
     sender: mpsc::Sender<ResponseChunk>,
 ) {
-    let mut writer = FrameWriter::new(after);
+    let mut writer = FrameWriter::new(start.cursor().map_or(0, Cursor::value));
     let (_, mut receiver) = live.into_parts();
     for event in backlog {
         if let Some(frame) = writer.render(&event) {
@@ -383,9 +383,12 @@ async fn forward_events(
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                if !send_frame(&sender, writer.gap(skipped)).await {
-                    return;
-                }
+                // Events were dropped, possibly including a turn terminal. Report
+                // the loss and end the subscription instead of leaving the client
+                // waiting forever: an official SDK sees EOF (and throws), a native
+                // client reconnects from the last item `seq` it rendered.
+                let _ = send_frame(&sender, writer.gap(skipped)).await;
+                break;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
@@ -418,19 +421,24 @@ fn buffered_json(status: u16, body: &Value) -> Result<ActorHttpResponse> {
     Ok(ActorHttpResponse::Buffered(response))
 }
 
-fn query_u64(query: Option<&str>, name: &str) -> std::result::Result<u64, String> {
+/// Read an optional numeric query parameter.
+///
+/// `Ok(None)` means the parameter is absent; the caller decides what absence
+/// means (an SSE subscription without a cursor starts at the tail).
+fn query_cursor(query: Option<&str>, name: &str) -> std::result::Result<Option<u64>, String> {
     let Some(query) = query else {
-        return Ok(0);
+        return Ok(None);
     };
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         if key == name {
             return value
                 .parse::<u64>()
+                .map(Some)
                 .map_err(|_| format!("{name} must be a non-negative integer"));
         }
     }
-    Ok(0)
+    Ok(None)
 }
 
 /// `["agent", logicalId]` — the routing key rendered for diagnostics.
@@ -567,6 +575,11 @@ pub struct Create {
     /// Reserved by the gateway before routing; `None` keeps S4 behavior.
     #[serde(default)]
     pub root_session_id: Option<String>,
+    /// Internal (`stream:true`): record the initial input but answer the action
+    /// before the first turn runs. The actor then schedules the turn with
+    /// `ctx.wait_until`, so the gateway can return the SSE response first.
+    #[serde(default)]
+    pub defer_initial_turn: bool,
 }
 
 impl rivetkit::Action for Create {
@@ -595,11 +608,33 @@ impl Handler<Create> for SwarmActor {
             environment: action.environment,
             environment_id: action.environment_id,
             root_session_id: action.root_session_id,
+            defer_initial_turn: action.defer_initial_turn,
         };
-        // A create with an initial input runs a turn: hold the actor awake for
-        // its whole duration (`design §6.3`).
+        // A create may run an initial turn: hold the actor awake for the
+        // durable half (`design §6.3`). A deferred turn is registered below.
         let result = ctx.keep_awake(self.service.create_session(command)).await;
-        Ok(envelope(result))
+        match result {
+            Ok(mut result) => {
+                // A streamed create answered the action before its first turn;
+                // run that turn out-of-band, like `Submit`, so the gateway can
+                // construct the SSE response without waiting for it. The reply
+                // may still be followed immediately by the turn: `wait_until`
+                // starts it as soon as the action reply is sent (`design §4.3`).
+                if let Some(pending) = result.pending_initial.take() {
+                    let service = Arc::clone(&self.service);
+                    ctx.wait_until(async move {
+                        if let Err(error) = service.run_pending_turn(pending).await {
+                            tracing::warn!(
+                                error = %error,
+                                "deferred swarm first turn failed to run"
+                            );
+                        }
+                    });
+                }
+                Ok(envelope(Ok(result)))
+            }
+            Err(error) => Ok(envelope(Err(error))),
+        }
     }
 }
 
@@ -682,12 +717,29 @@ impl Handler<Submit> for SwarmActor {
             plugin_selections: action.plugin_selections,
             original_draft: action.original_draft,
         };
-        // An idle `mode=turn` input runs a full turn inside this call; the
-        // actor must not sleep in the middle of it.
-        let result = ctx
-            .keep_awake(self.service.submit_input(&logical_id, submission))
+        // Acceptance is the durable half: receipt, user item, and turn
+        // reservation. The turn itself runs out-of-band so the action can
+        // answer `202` without waiting for the terminal.
+        let accepted = ctx
+            .keep_awake(self.service.accept_input(&logical_id, submission))
             .await;
-        Ok(envelope(result))
+        match accepted {
+            Ok(accepted) => {
+                if let Some(pending) = accepted.pending_turn {
+                    let service = Arc::clone(&self.service);
+                    ctx.wait_until(async move {
+                        if let Err(error) = service.run_pending_turn(pending).await {
+                            tracing::warn!(
+                                error = %error,
+                                "accepted swarm turn failed to run"
+                            );
+                        }
+                    });
+                }
+                Ok(envelope(Ok(accepted.outcome)))
+            }
+            Err(error) => Ok(envelope(Err(error))),
+        }
     }
 }
 
@@ -699,6 +751,10 @@ pub struct ListItems {
     pub order: ItemOrder,
     #[serde(default)]
     pub after: Option<u64>,
+    /// Official `CursorPage` cursor (`after=<itemId>`); resolved to a seq by
+    /// the service across the actor boundary.
+    #[serde(default)]
+    pub after_id: Option<String>,
     pub limit: u32,
 }
 
@@ -721,6 +777,7 @@ impl Handler<ListItems> for SwarmActor {
         let window = ItemsWindow {
             order: action.order,
             after: action.after,
+            after_id: action.after_id,
             limit: action.limit,
         };
         Ok(envelope(self.service.list_items(&logical_id, window).await))
@@ -770,6 +827,7 @@ impl Handler<Subscribe> for SwarmActor {
         let window = ItemsWindow {
             order: ItemOrder::Asc,
             after: Some(action.after_seq),
+            after_id: None,
             limit,
         };
         let page = match self.service.list_items(&logical_id, window).await {

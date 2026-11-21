@@ -688,7 +688,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     // Open the Swarm turn exactly like `AcpSwarmService::run_turn`: the log owns
     // `running`, the delta rows and the terminal.
     let request_id = "s6c2-turn-1";
-    log.begin_turn(request_id)
+    log.begin_turn(request_id, "turn_s6c2-1")
         .await
         .expect("open the swarm turn on the remote store");
     let child = AcpChild::spawn(

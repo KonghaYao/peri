@@ -216,8 +216,8 @@
 | F-CLI-006 | L3 | 启动配置；显式参数进入统一配置路径 | [契约](../design/configuration-authority.md) |
 | F-SWARM-001 | L1 | 会话 HTTP 面；五路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
 | F-SWARM-002 | L1 | 会话身份；logicalId 与 rootSessionId 分离 | [契约](../design/peri-swarm.md) |
-| F-SWARM-003 | L1 | 事件续读；SSE 先补 backlog 后实时 | [契约](../design/peri-swarm.md) |
-| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409；官方 `events` 信封单条 message | [契约](../design/peri-swarm.md) |
+| F-SWARM-003 | L1 | 事件续读；无游标只送实时（不读行）、显式游标回放；lookback 播种与末尾终态；官方 `agent.session.*` 帧；items 分页与行预算 | [契约](../design/peri-swarm.md) |
+| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409；官方 `events` 信封单条 message；受理持久化后 202、turn 后台执行 | [契约](../design/peri-swarm.md) |
 | F-SWARM-005 | L2 | 双库归属；会话事实与 Swarm 事实互不建表 | [契约](../design/peri-swarm.md) |
 | F-SWARM-006 | L2 | MCP 注入；agent.tools 映射 ACP 会话声明 | [契约](../design/peri-swarm.md) |
 | F-SWARM-007 | L2 | 宿主沙箱；Bun 懒预留与 workspace 代理 | [契约](../design/peri-swarm.md) |

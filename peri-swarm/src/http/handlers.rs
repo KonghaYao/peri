@@ -35,7 +35,7 @@ pub async fn create_session(
     let initial_input = request::resolve_create_input(&body)?;
     let environment = request::resolve_environment(&body)?;
     let stream = body.stream;
-    let command = CreateSessionCommand {
+    let mut command = CreateSessionCommand {
         logical_id: logical_id.clone(),
         cwd,
         model,
@@ -45,17 +45,47 @@ pub async fn create_session(
         environment: environment.0,
         environment_id: environment.1,
         root_session_id: None,
+        defer_initial_turn: false,
     };
 
     if stream {
-        // Contract: the SSE subscription exists before the first turn runs.
+        // Contract: the SSE subscription exists before the first turn is
+        // scheduled. The actor may start the turn right after its action reply,
+        // so delivery is bounded by the broadcast capacity, not by this
+        // response.
         let subscription = state.service().open_stream(&logical_id).await;
-        let result = state.service().create_session(command).await?;
-        return Ok(sse::create_response(
-            &result,
-            subscription,
-            state.config().sse_heartbeat,
-        ));
+        // The receiver is not polled until the response body reaches the
+        // client. Running the turn inside `create_session` would buffer every
+        // event with no consumer, and a turn longer than the broadcast capacity
+        // would surface as `Lagged`: one `gap` frame, then the stream closes
+        // with the whole first turn lost. Record the input now (acceptance
+        // stays in the service) and answer with headers plus the initial
+        // `session` frame without waiting for the turn. Events that exceed the
+        // capacity while the body is unpolled fail with `gap` + EOF; the client
+        // reconnects from the last rendered item `seq`.
+        command.defer_initial_turn = true;
+        let mut result = state.service().create_session(command).await?;
+        // Build the response (headers plus the initial `session` frame) from
+        // the accepted result; it never waits for the turn to finish.
+        let response = sse::create_response(&result, subscription, state.config().sse_heartbeat);
+        // The actor path schedules the deferred turn itself (`ctx.wait_until`)
+        // and returns no pending turn across the process boundary. The
+        // in-process fake returns it here. Spawn it before answering, mirroring
+        // `submit_event`; the in-process turn does not wait for the response,
+        // whereas the actor's turn may already have started.
+        if let Some(pending) = result.pending_initial.take() {
+            let service = std::sync::Arc::clone(state.service());
+            tokio::spawn(async move {
+                if let Err(error) = service.run_pending_turn(pending).await {
+                    tracing::warn!(
+                        error = %error,
+                        logical_id = %logical_id,
+                        "deferred swarm first turn failed; the stream carries the terminal"
+                    );
+                }
+            });
+        }
+        return Ok(response);
     }
 
     let result = state.service().create_session(command).await?;
@@ -86,11 +116,26 @@ pub async fn submit_event(
     let Json(body) = body.map_err(from_json_rejection)?;
     let logical_id = LogicalId::parse(&logical_id)?;
     let submission = request::resolve_submission(body, &headers)?;
-    let outcome = state
+    // `202` is acceptance, not durable completion: the response is sent once the
+    // receipt, user item, and turn reservation are persisted. The turn itself
+    // runs out-of-band so a slow model cannot hold the HTTP response open.
+    let accepted = state
         .service()
-        .submit_input(&logical_id, submission)
+        .accept_input(&logical_id, submission)
         .await?;
-    Ok((StatusCode::ACCEPTED, Json(outcome)).into_response())
+    if let Some(pending) = accepted.pending_turn {
+        let service = std::sync::Arc::clone(state.service());
+        tokio::spawn(async move {
+            if let Err(error) = service.run_pending_turn(pending).await {
+                tracing::warn!(
+                    error = %error,
+                    logical_id = %logical_id,
+                    "accepted swarm turn failed; the stream carries the terminal"
+                );
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(accepted.outcome)).into_response())
 }
 
 pub async fn stream_events(

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::{MAX_INSTRUCTIONS_BYTES, MAX_MODEL_BYTES, MAX_TEXT_BYTES};
 use crate::domain::{
-    ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, InputKind, InputMode,
+    ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, SwarmError,
 };
 
@@ -170,8 +170,10 @@ pub struct EventsQuery {
 pub struct ItemsQuery {
     #[serde(rename = "afterSeq", default)]
     pub after_seq: Option<u64>,
+    /// Decimal `seq` (our spelling) or `itim_...` item id (official
+    /// `CursorPage` spelling). Parsed by [`resolve_items_window`].
     #[serde(default)]
-    pub after: Option<u64>,
+    pub after: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -769,16 +771,34 @@ fn official_event_shape_error(value: &Value, error: serde_json::Error) -> SwarmE
     official_invalid("events[0]", &format!("unsupported event shape: {error}"))
 }
 
+/// Starting point of an SSE subscription.
+///
+/// No cursor at all means [`EventCursor::Tail`]: the official SDK subscribes
+/// before it submits the input and reads only what happens next. An explicit
+/// `afterSeq`/`after`/`Last-Event-ID` (including `0`) replays the backlog.
 pub fn resolve_events_cursor(
     query: &EventsQuery,
     headers: &HeaderMap,
-) -> Result<Cursor, SwarmError> {
+) -> Result<EventCursor, SwarmError> {
     let last_event_id = last_event_id(headers)?;
-    Cursor::reconcile(query.after_seq, query.after, last_event_id)
+    Cursor::reconcile_events(query.after_seq, query.after, last_event_id)
 }
 
 pub fn resolve_items_window(query: &ItemsQuery) -> Result<ItemsWindow, SwarmError> {
-    let after = Cursor::reconcile_optional(query.after_seq, query.after)?;
+    let after_text = query.after.as_deref();
+    let numeric_after = match after_text {
+        // The official `CursorPage` sends the last item's `id`, never a seq.
+        Some(value) if value.starts_with("itim_") => None,
+        Some(value) => Some(value.parse::<u64>().map_err(|_| {
+            SwarmError::invalid_query("after must be a decimal seq or an `itim_` item id")
+                .with_details(json!({ "field": "after", "received": value }))
+        })?),
+        None => None,
+    };
+    let after = Cursor::reconcile_optional(query.after_seq, numeric_after)?;
+    let after_id = after_text
+        .filter(|value| value.starts_with("itim_"))
+        .map(str::to_owned);
     let limit = query.limit.unwrap_or(ItemsWindow::DEFAULT_LIMIT);
     if limit == 0 || limit > ItemsWindow::MAX_LIMIT {
         return Err(SwarmError::invalid_query("limit must be within 1..=500")
@@ -791,6 +811,7 @@ pub fn resolve_items_window(query: &ItemsQuery) -> Result<ItemsWindow, SwarmErro
     Ok(ItemsWindow {
         order,
         after,
+        after_id,
         limit,
     })
 }
