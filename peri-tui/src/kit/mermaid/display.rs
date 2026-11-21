@@ -2,6 +2,10 @@
 
 use std::time::Instant;
 
+use peri_theme::atoms::THEME_ATOM;
+use peri_tui_components::h_viewport::{HorizontalViewport, content_width};
+use peri_tui_components::scrollbar::{HorizontalBar, horizontal_scrollbar_line};
+use peri_tui_components::text::slice_by_width;
 use ratatui_kit::ratatui::style::{Color, Modifier, Style};
 use ratatui_kit::ratatui::text::{Line, Span};
 
@@ -9,8 +13,27 @@ use crate::i18n;
 use crate::kit::markdown::{MermaidFence, MermaidFenceKey, MermaidMessageRef, MermaidSegment};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 
+use super::hscroll;
 use super::preview::{PreviewContent, PreviewNotice, rebuild_history};
 use super::store;
+
+/// 帧的横向视口元数据：绘制滚动条与命中换算共用同一组数字。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MermaidHView {
+    pub(crate) viewport: usize,
+    pub(crate) max_offset: usize,
+    /// 帧行数（含滚动条行），用于确定可横向滚动的屏幕行范围。
+    pub(crate) rows: usize,
+    /// 滚动条行相对围栏首行的逻辑偏移；`None` 表示视口太窄放不下条。
+    pub(crate) bar_line: Option<usize>,
+    pub(crate) bar: Option<HorizontalBar>,
+}
+
+/// 一处围栏的渲染结果：行 + 横向视口。
+pub(crate) struct FenceRender {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) h_view: Option<MermaidHView>,
+}
 
 /// 一处围栏在消息行里的位置与调度信息。
 #[derive(Debug, Clone)]
@@ -22,6 +45,9 @@ pub(crate) struct FenceSpan {
     /// 消息内逻辑行范围（wrap 前，end 为开区间）。
     pub(crate) logical: std::ops::Range<usize>,
     pub(crate) layout_bytes: usize,
+    /// 正文前缀宽度（围栏首列在消息行内的偏移），横向条命中用。
+    pub(crate) prefix: usize,
+    pub(crate) h_view: Option<MermaidHView>,
 }
 
 impl FenceSpan {
@@ -36,6 +62,8 @@ impl FenceSpan {
             logical: self.logical.start.saturating_add(delta)
                 ..self.logical.end.saturating_add(delta),
             layout_bytes: self.layout_bytes,
+            prefix: self.prefix,
+            h_view: self.h_view,
         }
     }
 }
@@ -89,22 +117,33 @@ pub(crate) fn display_lines(
     width: usize,
     frozen: bool,
     foreground: Color,
-) -> Vec<Line<'static>> {
+) -> FenceRender {
+    let key = scope.key(segment.fence.open_start);
+    let selected = super::action_selected(&key);
     if frozen && !store::worker_running() {
         // 无后台线程（CLI/测试）时，历史消息直接按同一纯函数重建，
         // 避免留下永不发布的待排版任务。
         let replay = rebuild_history(&segment.fence, width, None);
-        let selected = super::action_selected(&scope.key(segment.fence.open_start));
-        return render_content(segment, replay.content, replay.notice, foreground, selected);
+        return render_content(
+            segment,
+            &key,
+            replay.content,
+            replay.notice,
+            width,
+            foreground,
+            selected,
+        );
     }
-    let view = store::observe(
-        scope.key(segment.fence.open_start),
-        &segment.fence,
+    let view = store::observe(key.clone(), &segment.fence, width, frozen);
+    render_content(
+        segment,
+        &key,
+        view.content,
+        view.notice,
         width,
-        frozen,
-    );
-    let selected = super::action_selected(&scope.key(segment.fence.open_start));
-    render_content(segment, view.content, view.notice, foreground, selected)
+        foreground,
+        selected,
+    )
 }
 
 /// 消息区渲染路径：只读取当前帧，不排队。可见性调度由 transcript 用围栏
@@ -115,12 +154,21 @@ pub(crate) fn display_lines_peek(
     width: usize,
     _frozen: bool,
     foreground: Color,
-) -> (Vec<Line<'static>>, usize) {
-    let view = store::peek(scope.key(segment.fence.open_start), &segment.fence, width);
+) -> (FenceRender, usize) {
+    let key = scope.key(segment.fence.open_start);
+    let view = store::peek(key.clone(), &segment.fence, width);
     let bytes = content_bytes(&view.content);
-    let selected = super::action_selected(&scope.key(segment.fence.open_start));
+    let selected = super::action_selected(&key);
     (
-        render_content(segment, view.content, view.notice, foreground, selected),
+        render_content(
+            segment,
+            &key,
+            view.content,
+            view.notice,
+            width,
+            foreground,
+            selected,
+        ),
         bytes,
     )
 }
@@ -134,15 +182,37 @@ fn content_bytes(content: &PreviewContent) -> usize {
 
 fn render_content(
     segment: &MermaidSegment,
+    key: &MermaidFenceKey,
     content: PreviewContent,
     notice: Option<PreviewNotice>,
+    width: usize,
     foreground: Color,
     action_selected: bool,
-) -> Vec<Line<'static>> {
+) -> FenceRender {
+    let mut h_view = None;
     let mut lines = match content {
         PreviewContent::Source => segment.lines.clone(),
         PreviewContent::Frame { lines, tail, .. } => {
-            let mut rendered = frame_lines(&lines, foreground);
+            let viewport = HorizontalViewport::new(width, content_width(&lines));
+            // 不溢出时也要读一次：`offset_for` 在该分支返回 0 并清掉旧列，
+            // 否则帧变窄再变宽会从陈旧列恢复。
+            let offset = hscroll::offset_for(key, viewport.viewport(), viewport.content());
+            let mut rendered = frame_lines(&lines, foreground, viewport, offset);
+            let bar = viewport.bar(u16::try_from(width).unwrap_or(u16::MAX), offset);
+            let bar_line = bar.map(|bar| {
+                let index = rendered.len();
+                rendered.push(horizontal_bar_row(bar, width));
+                index
+            });
+            if viewport.overflows() {
+                h_view = Some(MermaidHView {
+                    viewport: viewport.viewport(),
+                    max_offset: viewport.max_offset(),
+                    rows: rendered.len(),
+                    bar_line,
+                    bar,
+                });
+            }
             if !tail.is_empty() {
                 rendered.push(Line::default());
                 for line in tail.lines() {
@@ -159,7 +229,7 @@ fn render_content(
         lines.push(notice_line(notice, foreground));
     }
     lines.push(open_action_line(foreground, action_selected));
-    lines
+    FenceRender { lines, h_view }
 }
 
 /// 只做一次低成本判断，避免预览版本变化时重算无关消息。
@@ -185,17 +255,37 @@ pub(crate) fn vm_might_have_mermaid(vm: &TuiRenderUnit) -> bool {
     })
 }
 
-fn frame_lines(lines: &[String], foreground: Color) -> Vec<Line<'static>> {
+fn frame_lines(
+    lines: &[String],
+    foreground: Color,
+    viewport: HorizontalViewport,
+    offset: usize,
+) -> Vec<Line<'static>> {
     lines
         .iter()
         .map(|line| {
-            if line.is_empty() {
+            let text = if viewport.overflows() {
+                slice_by_width(line, offset, viewport.viewport())
+            } else {
+                line.clone()
+            };
+            if text.is_empty() {
                 Line::default()
             } else {
-                Line::from(Span::styled(line.clone(), Style::default().fg(foreground)))
+                Line::from(Span::styled(text, Style::default().fg(foreground)))
             }
         })
         .collect()
+}
+
+/// 帧底部的横向滚动条行；轨道与滑块由组件 `HorizontalBar` 决定，绘制与命中同源。
+fn horizontal_bar_row(bar: HorizontalBar, width: usize) -> Line<'static> {
+    let semantic = THEME_ATOM.state().read().semantic;
+    let thumb = Style::default().fg(semantic.text.dim).bg(semantic.text.dim);
+    let arrow = Style::default()
+        .fg(semantic.text.muted)
+        .add_modifier(Modifier::BOLD);
+    horizontal_scrollbar_line(u16::try_from(width).unwrap_or(u16::MAX), &bar, thumb, arrow)
 }
 
 fn open_action_line(foreground: Color, selected: bool) -> Line<'static> {

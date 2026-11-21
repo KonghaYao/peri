@@ -5,6 +5,7 @@
 
 mod detail;
 mod display;
+mod hscroll;
 mod store;
 
 pub(crate) use peri_tui_components::mermaid::{frame, overview, preview};
@@ -42,6 +43,9 @@ pub(crate) use display::{
     FenceSpan, PreviewScope, display_lines, display_lines_peek, vm_might_have_mermaid,
 };
 #[cfg(test)]
+pub(crate) use hscroll::offset_for as h_offset_for;
+pub(crate) use hscroll::{scroll_by as scroll_h, set_offset as set_h};
+#[cfg(test)]
 pub(crate) use store::{drain_preview_jobs_now, reset_for_test};
 pub(crate) use store::{evict_geometry_to, init_preview_worker, retract_unseen};
 #[cfg(test)]
@@ -68,7 +72,9 @@ pub(crate) fn message_revision_for_vm(
     Some(
         store_revision
             .wrapping_mul(31)
-            .wrapping_add(MERMAID_ACTION_REVISION.get()),
+            .wrapping_add(MERMAID_ACTION_REVISION.get())
+            .wrapping_mul(31)
+            .wrapping_add(hscroll::revision()),
     )
 }
 
