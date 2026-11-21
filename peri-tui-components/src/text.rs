@@ -56,53 +56,72 @@ pub fn prefix_by_width(s: &str, max_width: usize) -> String {
 
 /// 取从 `offset` 列开始、最多 `max_width` 列的片段（不折行、不追加省略号）。
 ///
-/// 输出显示宽度 ≤ `max_width`；双宽字素跨左边界时以空格补齐被切掉的半格，
+/// 输出显示宽度 ≤ `max_width`；宽字素跨左边界时以空格补齐被切掉的半格，
 /// 跨右边界时整字素舍弃（与终端裁剪一致）。
 ///
-/// 列宽按字符串口径（[`UnicodeWidthStr::width`]）测量：连字（如 Arabic
-/// Lam–Alef）会让字素宽度之和大于字符串宽度，逐字素累加会与 `content_width`
-/// 不一致，导致右侧内容不可达。前缀宽度单调不减，故用边界二分定位。
+/// 列宽按字符串口径（[`UnicodeWidthStr::width`]）测量，与 `content_width`
+/// 一致。连字（Arabic Lam–Alef、Tifinagh 连接符等）会让前缀宽度在字素边界处
+/// 回落，逐字素累加与二分都不可靠；这类串走慢路径逐边界实测。
 pub fn slice_by_width(s: &str, offset: usize, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let count = s.graphemes(true).count();
-    let prefix = |k: usize| s[..grapheme_byte(s, k)].width();
-    let last_fitting = |target: usize| {
-        let (mut lo, mut hi) = (0usize, count);
-        while lo < hi {
-            let mid = lo + (hi - lo).div_ceil(2);
-            if prefix(mid) <= target {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        lo
-    };
-    let limit = offset.saturating_add(max_width);
-    let (start, end) = (last_fitting(offset), last_fitting(limit));
-    let mut out = String::new();
-    let mut first = start;
-    if prefix(start) < offset {
-        // 宽字素被左边界切开：可见的半格留空。
-        let blank = prefix(start + 1).saturating_sub(offset);
-        out.push_str(&" ".repeat(blank.min(max_width)));
-        first += 1;
+    let naive: usize = s.graphemes(true).map(UnicodeWidthStr::width).sum();
+    if naive == s.width() {
+        return slice_by_grapheme(s, offset, max_width);
     }
-    out.extend(
-        s.graphemes(true)
-            .skip(first)
-            .take(end.saturating_sub(first)),
-    );
+    let mut boundaries: Vec<usize> = s.grapheme_indices(true).map(|(byte, _)| byte).collect();
+    boundaries.push(s.len());
+    let start = boundaries
+        .iter()
+        .position(|&byte| s[..byte].width() >= offset)
+        .unwrap_or(boundaries.len() - 1);
+    let start_byte = boundaries[start];
+    let blank = s[..start_byte]
+        .width()
+        .saturating_sub(offset)
+        .min(max_width);
+    // 余量内尽量多取：以片段自身的实测宽度为准，避免连字把累计值算大/算小。
+    let budget = max_width.saturating_sub(blank);
+    let mut end_byte = start_byte;
+    for &byte in &boundaries[start + 1..] {
+        if s[start_byte..byte].width() > budget {
+            break;
+        }
+        end_byte = byte;
+    }
+    let mut out = " ".repeat(blank);
+    out.push_str(&s[start_byte..end_byte]);
     out
 }
 
-/// 第 `k` 个字素边界（0 = 串首，字素总数 = 串尾）的字节下标。
-fn grapheme_byte(s: &str, k: usize) -> usize {
-    s.grapheme_indices(true)
-        .nth(k)
-        .map_or(s.len(), |(byte, _)| byte)
+/// 无跨字素连字时的快路径：前缀宽度单调，逐字素累加即可。
+fn slice_by_grapheme(s: &str, offset: usize, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut column = 0usize;
+    let mut emitted = 0usize;
+    for grapheme in s.graphemes(true) {
+        let width = grapheme.width();
+        if column + width <= offset {
+            column += width;
+            continue;
+        }
+        if column < offset {
+            // 宽字素被左边界切开：可见的半格留空。
+            let blank = (column + width - offset).min(max_width);
+            out.push_str(&" ".repeat(blank));
+            emitted += blank;
+            column += width;
+            continue;
+        }
+        if emitted + width > max_width {
+            break;
+        }
+        out.push_str(grapheme);
+        emitted += width;
+        column += width;
+    }
+    out
 }
 
 /// 取不超过 `max_width` 列的后缀（不追加省略号）。
@@ -250,6 +269,15 @@ mod tests {
         assert_eq!(slice_by_width("لاabcd", 2, 3), "bcd");
         assert_eq!(slice_by_width("لاabcd", 4, 3), "d");
         assert_eq!(slice_by_width("لاabcd", 0, 3), "لاab");
+        // Tifinagh 连接符会让前缀宽度在边界处回落：输出仍不得越界。
+        let tifinagh = "\u{2D4F}\u{2D7F}\u{2D3E}abc";
+        for (offset, width) in [(0, 1), (1, 1), (1, 2), (2, 2), (3, 3)] {
+            let slice = slice_by_width(tifinagh, offset, width);
+            assert!(
+                slice.width() <= width,
+                "offset={offset} width={width} slice={slice:?}"
+            );
+        }
     }
 
     #[test]
