@@ -18,7 +18,7 @@ use crate::service::{CreateSessionResult, EventSubscription};
 
 /// Successful `POST /sessions?stream=true` response: one `session` event, then
 /// the first turn's live events. The subscription was opened by the handler
-/// before the service executed the turn.
+/// before the service started the turn, which runs after this response.
 pub fn create_response(
     result: &CreateSessionResult,
     subscription: EventSubscription,

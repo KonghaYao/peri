@@ -429,6 +429,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             environment: EnvironmentKind::None,
             environment_id: None,
             root_session_id: None,
+            defer_initial_turn: false,
         })
         .await
         .expect("create session through the actor");
@@ -490,6 +491,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             environment: EnvironmentKind::None,
             environment_id: None,
             root_session_id: Some(reserved.clone()),
+            defer_initial_turn: false,
         })
         .await
         .expect("create with a reserved root session id");
@@ -511,6 +513,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             environment: EnvironmentKind::None,
             environment_id: None,
             root_session_id: None,
+            defer_initial_turn: false,
         })
         .await
         .expect("repeat create");
@@ -538,6 +541,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             environment: EnvironmentKind::None,
             environment_id: None,
             root_session_id: None,
+            defer_initial_turn: false,
         })
         .await
         .expect_err("different MCP declaration");
@@ -864,6 +868,7 @@ async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry(
             environment: EnvironmentKind::None,
             environment_id: None,
             root_session_id: None,
+            defer_initial_turn: false,
         })
         .await
         .expect("create through replica A");

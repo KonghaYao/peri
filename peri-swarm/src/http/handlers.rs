@@ -35,7 +35,7 @@ pub async fn create_session(
     let initial_input = request::resolve_create_input(&body)?;
     let environment = request::resolve_environment(&body)?;
     let stream = body.stream;
-    let command = CreateSessionCommand {
+    let mut command = CreateSessionCommand {
         logical_id: logical_id.clone(),
         cwd,
         model,
@@ -45,17 +45,40 @@ pub async fn create_session(
         environment: environment.0,
         environment_id: environment.1,
         root_session_id: None,
+        defer_initial_turn: false,
     };
 
     if stream {
         // Contract: the SSE subscription exists before the first turn runs.
         let subscription = state.service().open_stream(&logical_id).await;
-        let result = state.service().create_session(command).await?;
-        return Ok(sse::create_response(
-            &result,
-            subscription,
-            state.config().sse_heartbeat,
-        ));
+        // The receiver is not polled until the response body reaches the
+        // client. Running the turn inside `create_session` would buffer every
+        // event with no consumer, and a turn longer than the broadcast capacity
+        // would surface as `Lagged`: one `gap` frame, then the stream closes
+        // with the whole first turn lost. Record the input now (acceptance
+        // stays in the service) and answer with headers plus the initial
+        // `session` frame before the turn starts.
+        command.defer_initial_turn = true;
+        let mut result = state.service().create_session(command).await?;
+        // Build the response (headers plus the initial `session` frame) before
+        // scheduling the turn, so the response never depends on the turn.
+        let response = sse::create_response(&result, subscription, state.config().sse_heartbeat);
+        // The actor path schedules the deferred turn itself; the in-process
+        // fake returns it here. Spawn it before answering, mirroring
+        // `submit_event`, so the turn does not wait for the HTTP response.
+        if let Some(pending) = result.pending_initial.take() {
+            let service = std::sync::Arc::clone(state.service());
+            tokio::spawn(async move {
+                if let Err(error) = service.run_pending_turn(pending).await {
+                    tracing::warn!(
+                        error = %error,
+                        logical_id = %logical_id,
+                        "deferred swarm first turn failed; the stream carries the terminal"
+                    );
+                }
+            });
+        }
+        return Ok(response);
     }
 
     let result = state.service().create_session(command).await?;

@@ -15,6 +15,7 @@ fn create_command(logical_id: &str, cwd: &str) -> CreateSessionCommand {
         environment: EnvironmentKind::None,
         environment_id: None,
         root_session_id: None,
+        defer_initial_turn: false,
     }
 }
 
@@ -507,6 +508,126 @@ async fn stream_is_opened_before_the_first_turn_executes() {
             ServiceCall::CreateSession("agent-01".to_owned()),
         ]
     );
+}
+
+#[tokio::test]
+async fn deferred_create_returns_the_first_turn_without_running_it() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    let id = LogicalId::parse("agent-01").expect("id");
+    let subscription = service.open_stream(&id).await;
+    let mut command = create_command("agent-01", "/tmp/agent-01");
+    command.initial_input = Some("hello".to_owned());
+    command.defer_initial_turn = true;
+
+    let created = service.create_session(command).await.expect("create");
+    assert!(created.created);
+    let pending = created.pending_initial.clone().expect("deferred turn");
+    assert_eq!(pending.text, "hello");
+    assert_eq!(pending.logical_id, id);
+    // Acceptance happened; execution did not. Recording the user item marks
+    // the session running, exactly as an accepted `POST /events` does.
+    assert_eq!(
+        created.session.last_item_seq, 1,
+        "defer records only the user item"
+    );
+    assert_eq!(created.session.state, SessionState::Running);
+    let page = service
+        .list_items(
+            &id,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                after_id: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("items");
+    assert_eq!(page.items.len(), 1, "no assistant item before the turn");
+    assert_eq!(page.items[0].payload["role"], serde_json::json!("user"));
+
+    // The pre-create subscription saw the user item and its official frames,
+    // but neither the gateway `turn` frames nor a terminal.
+    let (backlog, mut live) = subscription.into_parts();
+    assert!(backlog.is_empty());
+    let user = live.recv().await.expect("user item");
+    assert_eq!(user.item_seq(), Some(1));
+    let created_event = live.recv().await.expect("turn created");
+    assert!(matches!(
+        created_event,
+        StreamEvent::Official(OfficialEvent::TurnCreated { .. })
+    ));
+    let added = live.recv().await.expect("user item added");
+    assert!(matches!(
+        added,
+        StreamEvent::Official(OfficialEvent::TurnItemAdded { .. })
+    ));
+    assert!(
+        matches!(
+            live.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "the deferred turn has not started"
+    );
+}
+
+#[tokio::test]
+async fn deferred_first_turn_streams_the_complete_turn_when_run() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    let id = LogicalId::parse("agent-01").expect("id");
+    let subscription = service.open_stream(&id).await;
+    let mut command = create_command("agent-01", "/tmp/agent-01");
+    command.initial_input = Some("hello".to_owned());
+    command.defer_initial_turn = true;
+    let created = service.create_session(command).await.expect("create");
+    let pending = created.pending_initial.expect("deferred turn");
+
+    service.run_pending_turn(pending).await.expect("run");
+
+    let (backlog, mut live) = subscription.into_parts();
+    assert!(backlog.is_empty());
+    let mut events = Vec::new();
+    while let Ok(event) = live.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(StreamEvent::item_seq)
+            .collect::<Vec<_>>(),
+        [1, 2],
+        "the user item, then the assistant completion"
+    );
+    let official_names: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(official) => Some(official.event_type().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        official_names,
+        [
+            "agent.session.turn.created",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "the official sequence is complete"
+    );
+    assert!(matches!(
+        events[3],
+        StreamEvent::Turn(TurnEvent::Started { .. })
+    ));
+    assert!(matches!(
+        events[6],
+        StreamEvent::Turn(TurnEvent::Completed { .. })
+    ));
+    assert!(matches!(
+        events[8],
+        StreamEvent::Official(OfficialEvent::SessionIdle { .. })
+    ));
 }
 
 #[tokio::test]

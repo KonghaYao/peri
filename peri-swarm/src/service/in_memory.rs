@@ -649,6 +649,30 @@ impl InMemorySwarmService {
         Ok(seq)
     }
 
+    /// Persist the create's initial input and either run it or defer it.
+    ///
+    /// The user item is written exactly once in both modes. A deferred turn
+    /// carries the `turn_id` derived from that item, so running it later opens
+    /// the same turn the synchronous path would and cannot duplicate the input.
+    async fn accept_initial_turn(
+        &self,
+        logical_id: &LogicalId,
+        text: &str,
+        defer: bool,
+    ) -> Result<Option<PendingTurn>, SwarmError> {
+        let (_, item_id) = self.record_user_input(logical_id, None, text).await?;
+        let turn_id = turn_id_for_item(&item_id);
+        if defer {
+            return Ok(Some(PendingTurn {
+                logical_id: logical_id.clone(),
+                text: text.to_owned(),
+                turn_id,
+            }));
+        }
+        self.run_turn(logical_id, text, &turn_id).await?;
+        Ok(None)
+    }
+
     /// Backlog for a subscription. A tail subscription has no backlog and is
     /// answered without reading the session row (the real actor has the same
     /// rule, so `stream:true` create works before the row exists). An explicit
@@ -722,20 +746,20 @@ impl SwarmService for InMemorySwarmService {
                     "requested": model,
                 })));
             }
+            let mut pending_initial = None;
             if let Some(text) = command.initial_input.as_deref() {
                 if row.state == SessionState::Running {
                     return Err(SwarmError::turn_in_progress());
                 }
-                let (_, item_id) = self
-                    .record_user_input(&command.logical_id, None, text)
-                    .await?;
-                self.run_turn(&command.logical_id, text, &turn_id_for_item(&item_id))
+                pending_initial = self
+                    .accept_initial_turn(&command.logical_id, text, command.defer_initial_turn)
                     .await?;
             }
             let session = self.view_by_id(&command.logical_id).await?;
             return Ok(CreateSessionResult {
                 session,
                 created: false,
+                pending_initial,
             });
         }
 
@@ -784,17 +808,17 @@ impl SwarmService for InMemorySwarmService {
             Err(error) => return Err(store_failure("upsert_session", error)),
         }
 
+        let mut pending_initial = None;
         if let Some(text) = command.initial_input.as_deref() {
-            let (_, item_id) = self
-                .record_user_input(&command.logical_id, None, text)
-                .await?;
-            self.run_turn(&command.logical_id, text, &turn_id_for_item(&item_id))
+            pending_initial = self
+                .accept_initial_turn(&command.logical_id, text, command.defer_initial_turn)
                 .await?;
         }
         let session = self.view_by_id(&command.logical_id).await?;
         Ok(CreateSessionResult {
             session,
             created: true,
+            pending_initial,
         })
     }
 

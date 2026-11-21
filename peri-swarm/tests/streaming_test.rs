@@ -237,7 +237,9 @@ async fn stream_create_subscribes_before_the_first_turn() {
         "1"
     );
 
-    let text = read_until(response.into_body(), "\"stopReason\":\"end_turn\"").await;
+    // The response returns before the first turn runs; wait for the turn's
+    // final official frame so every first-turn frame is in the buffer.
+    let text = read_complete(response.into_body(), "event: agent.session.idle").await;
     assert!(text.contains("event: session"), "{text}");
     let session_at = text.find("event: session").expect("session event");
     // The create input is logged before the turn opens, so the subscription
@@ -252,6 +254,42 @@ async fn stream_create_subscribes_before_the_first_turn() {
     assert!(item_at < completed_at, "{text}");
     assert!(text.contains("id: 1"), "{text}");
     assert!(text.contains("\"seq\":1"), "{text}");
+
+    // The official compatibility frames of the first turn arrive on the same
+    // subscription, in order, with SSE name == JSON type.
+    let official: Vec<(String, Value)> = frames(&text)
+        .into_iter()
+        .filter(|(event, _)| event.starts_with("agent.session."))
+        .collect();
+    let names: Vec<&str> = official.iter().map(|(event, _)| event.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "agent.session.turn.created",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{text}"
+    );
+    for (event, value) in &official {
+        assert_eq!(value["type"], json!(event), "SSE name and JSON type agree");
+    }
+    assert_eq!(official[1].1["item"]["role"], json!("user"), "{text}");
+    assert_eq!(official[2].1["item"]["role"], json!("assistant"), "{text}");
+    assert_eq!(
+        official[0].1["turn_id"], official[1].1["turn_id"],
+        "the user item belongs to the created turn"
+    );
+    assert_eq!(
+        official[1].1["turn_id"], official[2].1["turn_id"],
+        "the assistant item belongs to the same turn"
+    );
+    assert!(
+        !text.contains("event: gap"),
+        "the first turn must not lag: {text}"
+    );
 
     assert_eq!(
         harness.service.calls(),

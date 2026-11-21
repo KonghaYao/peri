@@ -362,9 +362,31 @@ opener。`turn_id` 始终由 opener 的 item id 派生，不用随机或时间�
 `unknown_agent`，并收到首轮 user item、assistant 完成帧与 `completed` 终态（一次
 真实 host+stub 模型调用）。
 
+后续修复（`feat/swarm-official-p1a`）：上述修复只保证订阅在首轮开始前建立；
+`create_session` 仍在返回 SSE 响应之前同步跑完首轮。receiver 在响应到达客户端前
+没有消费者，首轮事件数超过广播容量时首次读取得到 `Lagged`，SSE 发一帧 `gap` 后
+关闭；未溢出时也只是首轮结束后一次性投递，不是实时流。现在流式 create 在 service
+内持久化初始 user item 与 `turn_id` 后立即返回：actor 用 `ctx.wait_until` 调度该
+turn，in-process fake 由 handler `tokio::spawn`，SSE 响应（headers 与初始 `session`
+帧）先返回，首轮随后在同一订阅上执行。覆盖：
+
+- `tests/streaming_test.rs::stream_create_subscribes_before_the_first_turn` 按顺序
+  断言 `agent.session.turn.created`、user 与 assistant 的 `turn.item.added`、
+  `agent.session.turn.completed`、`agent.session.idle`，且 SSE name 与 JSON `type`
+  一致、没有 `gap`。
+- `service::in_memory::tests::deferred_create_returns_the_first_turn_without_running_it`
+  与 `deferred_first_turn_streams_the_complete_turn_when_run`：defer 返回时只有
+  user item，`run_pending_turn` 后出现完整首轮。
+- `tests/actor_runtime_test.rs::deferred_create_returns_before_the_first_turn_executes`
+  覆盖 actor 新行路径；`creating_row_with_a_persisted_peri_session_reattaches_without_replaying`
+  以 defer 重试恢复窗口，断言已有 item 时不重复提交。
+
 证据边界：没有 Rivet engine，`SwarmActor::events_response` 与 gateway 的
 `RivetSwarmService::open_stream` 之间的真实 HTTP 回调未在本轮运行；测试覆盖的是
-该回调调用的同一 service 序列。engine 下的 create-stream 场景仍标记未验证。
+该回调调用的同一 service 序列。新增的 HTTP 级 create-stream 断言使用
+`InMemorySwarmService`；actor 侧的 defer 语义由 `tests/actor_runtime_test.rs` 直接
+驱动 service 覆盖，不含 gateway 的 HTTP 回调。engine 下的 create-stream 场景仍标记
+未验证。
 
 ### 8.2 B：`after=<itemId>` 与增长中的 item
 

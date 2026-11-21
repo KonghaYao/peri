@@ -575,6 +575,11 @@ pub struct Create {
     /// Reserved by the gateway before routing; `None` keeps S4 behavior.
     #[serde(default)]
     pub root_session_id: Option<String>,
+    /// Internal (`stream:true`): record the initial input but answer the action
+    /// before the first turn runs. The actor then schedules the turn with
+    /// `ctx.wait_until`, so the gateway can return the SSE response first.
+    #[serde(default)]
+    pub defer_initial_turn: bool,
 }
 
 impl rivetkit::Action for Create {
@@ -603,11 +608,32 @@ impl Handler<Create> for SwarmActor {
             environment: action.environment,
             environment_id: action.environment_id,
             root_session_id: action.root_session_id,
+            defer_initial_turn: action.defer_initial_turn,
         };
-        // A create with an initial input runs a turn: hold the actor awake for
-        // its whole duration (`design §6.3`).
+        // A create may run an initial turn: hold the actor awake for the
+        // durable half (`design §6.3`). A deferred turn is registered below.
         let result = ctx.keep_awake(self.service.create_session(command)).await;
-        Ok(envelope(result))
+        match result {
+            Ok(mut result) => {
+                // A streamed create answered the action before its first turn;
+                // run that turn out-of-band, like `Submit`, so the caller can
+                // return the SSE response (headers and the initial `session`
+                // frame) first.
+                if let Some(pending) = result.pending_initial.take() {
+                    let service = Arc::clone(&self.service);
+                    ctx.wait_until(async move {
+                        if let Err(error) = service.run_pending_turn(pending).await {
+                            tracing::warn!(
+                                error = %error,
+                                "deferred swarm first turn failed to run"
+                            );
+                        }
+                    });
+                }
+                Ok(envelope(Ok(result)))
+            }
+            Err(error) => Ok(envelope(Err(error))),
+        }
     }
 }
 

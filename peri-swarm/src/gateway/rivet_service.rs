@@ -245,6 +245,7 @@ impl SwarmService for RivetSwarmService {
             environment: command.environment,
             environment_id: command.environment_id,
             root_session_id: Some(root_session_id),
+            defer_initial_turn: command.defer_initial_turn,
         };
         let envelope: ActionEnvelope<CreateSessionResult> = self.call(&handle, action).await?;
         envelope.into_result()

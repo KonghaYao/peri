@@ -44,6 +44,15 @@ pub struct CreateSessionCommand {
     /// generates it before routing to the actor so a retried create addresses
     /// the same identity; `None` keeps the S4 behavior (service generates one).
     pub root_session_id: Option<String>,
+    /// Internal `stream:true` switch: record the initial input and return its
+    /// turn as [`CreateSessionResult::pending_initial`] instead of executing it
+    /// before the response. Every other create runs the first turn inside
+    /// `create_session`, so its errors surface as the HTTP status.
+    ///
+    /// The service still owns acceptance: the user item is persisted here, and
+    /// the deferred [`PendingTurn`] reuses its `turn_id`, so running it later
+    /// cannot duplicate the input.
+    pub defer_initial_turn: bool,
 }
 
 /// Create response payload shared by the in-memory fake and the actor.
@@ -52,6 +61,14 @@ pub struct CreateSessionCommand {
 pub struct CreateSessionResult {
     pub session: SessionView,
     pub created: bool,
+    /// First turn deferred by [`CreateSessionCommand::defer_initial_turn`].
+    ///
+    /// Never serialized: the actor runs it locally after answering the action,
+    /// and the gateway envelope must not carry execution state across the
+    /// process boundary. An in-process caller (the HTTP handler on the fake)
+    /// consumes it to run the turn after returning the SSE response.
+    #[serde(skip)]
+    pub pending_initial: Option<PendingTurn>,
 }
 
 /// A live SSE subscription: persisted backlog first, then broadcast events.
@@ -631,6 +648,12 @@ fn previous_turn(
 /// Typed port between HTTP and the session runtime (S4 actor / S3 fake).
 #[async_trait]
 pub trait SwarmService: Send + Sync {
+    /// Create or reuse the session.
+    ///
+    /// With [`CreateSessionCommand::defer_initial_turn`] the initial user item
+    /// is persisted but its turn is returned as
+    /// [`CreateSessionResult::pending_initial`] for the caller to run through
+    /// [`SwarmService::run_pending_turn`].
     async fn create_session(
         &self,
         command: CreateSessionCommand,

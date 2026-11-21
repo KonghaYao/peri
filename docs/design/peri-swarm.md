@@ -87,7 +87,7 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
-| `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先打开订阅再执行首轮 |
+| `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先返回 SSE 响应（初始 `session` 帧），再执行首轮 |
 | `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影；`status` 是官方 `idle`/`in_progress`/`failed` |
 | `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；受理持久化后 `202`；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
 | `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时；含官方 `agent.session.*` 事件 |
@@ -133,8 +133,8 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   投递实时事件**：官方 `sessions.stream` 先订阅再 POST，若回放旧 turn 的终态，
   SDK 会在旧 turn 的 `idle` 上结束。显式 `afterSeq=0` 仍回放全部（既有客户端语义
   不变）。无游标订阅不读会话行：`POST /sessions?stream=true` 在行尚未创建时先
-  打开订阅，行检查只属于显式游标（未知会话仍是 `404 unknown_agent`），否则
-  create 的响应会在首轮开始前就得到已关闭的流。
+  打开订阅，行检查只属于显式游标（未知会话仍是 `404 unknown_agent`），否则流式
+  create 会在行尚不存在时得到已关闭的订阅。
 - 带游标时先补 `seq > after` 的 backlog，再转实时广播。心跳间隔由
   `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳 payload 的 `lastItemSeq` 是该会话当前
   `MAX(seq)`（与 item 写入方共享），只表示进度，不能代替已投递 item 的 `seq`
@@ -250,14 +250,24 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 `POST /sessions` 接受 OpenAI Agents API 形状的 `model`/`instructions`（顶层与
 `agent` 内同名字段必须一致）、`input`、`environment`、`tools` 与 `stream`。
-`stream:true` 时网关先为 `logicalId` 打开订阅，再执行首轮，因此首轮事件不会丢。
+`stream:true` 时网关先为 `logicalId` 打开订阅，service 受理初始输入后立即返回，
+网关先回 SSE 响应（headers 与初始 `session` 帧），首轮随后在同一订阅上执行并完整
+送达。延迟的不是受理：初始 user item 与其 `turn_id` 已在 service 内持久化，执行归属
+仍由 service/actor 持有，因此 `creating` 行恢复时「已有 item 不重放」的至多一次语义
+不变。必须延迟的原因有二：广播 receiver 只在响应到达客户端后才被轮询，而通道容量
+有界（gateway 默认 256）；若在返回响应前跑完首轮，超过容量的首轮会让首次读取得到
+`Lagged`，SSE 发一帧 `gap` 后关闭，整轮帧丢失。即便未溢出，首轮也会在结束后一次性
+投递，而不是实时流。actor 路径把该 turn 交给 `ctx.wait_until`，in-process fake 由
+handler 在返回响应前 `tokio::spawn`（`CreateSessionCommand::defer_initial_turn`）。
 订阅在会话行写入之前建立：tail 订阅不读会话行（见 §4.2），gateway 的
 `open_stream` 在 actor 接受该订阅后转发真实活跃流，不会退回已关闭的广播。
-非流式创建返回 `created` 与会话投影。
+非流式创建不延迟：首轮仍在 `create_session` 内执行，错误仍以 HTTP 状态返回；
+流式创建的首轮错误只出现在流上。
 
 首次创建的写入顺序固定：`bind_environment`（hosted 时预留并持久化绑定）→ 写入
 `state=creating` 的完整会话行（含 `rootSessionId`、`cwd`、model、instructions、
-`mcp_tools`、environment 与时间戳）→ `session/new` → 同一行改 `idle` → 首轮。
+`mcp_tools`、environment 与时间戳）→ `session/new` → 同一行改 `idle` → 首轮
+（流式创建在 `idle` 之后先返回 SSE 响应，再执行首轮）。
 `created=true` 只出现在首次创建；命中已存在行（无论 `idle` 还是 `creating`）都返回
 `created=false`。行状态语义：`creating` 表示身份已持久化但 Peri 会话尚未确认，
 `idle`/`running` 表示 host 已就绪；`creating` 不是「创建失败」，而是可重试的中间态。

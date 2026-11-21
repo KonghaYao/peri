@@ -582,6 +582,31 @@ impl AcpSwarmService {
         }
     }
 
+    /// Persist the create's initial input and either run it or defer it.
+    ///
+    /// The user item is written exactly once in both modes. A deferred turn
+    /// carries the `turn_id` derived from that item, so running it later opens
+    /// the same turn the synchronous path would and cannot duplicate the input.
+    async fn accept_initial_input(
+        &self,
+        runtime: &Arc<SessionRuntime>,
+        logical_id: &LogicalId,
+        text: &str,
+        defer: bool,
+    ) -> Result<Option<PendingTurn>, SwarmError> {
+        let (_, item_id) = runtime.log.record_user_input(None, text).await?;
+        let turn_id = turn_id_for_item(&item_id);
+        if defer {
+            return Ok(Some(PendingTurn {
+                logical_id: logical_id.clone(),
+                text: text.to_owned(),
+                turn_id,
+            }));
+        }
+        self.run_turn(runtime, text, &turn_id).await?;
+        Ok(None)
+    }
+
     /// Append an input to the running turn through the host user-input queue.
     ///
     /// `turn_id` belongs to the accepted user item; it is only used by the
@@ -1006,10 +1031,16 @@ impl AcpSwarmService {
         // The initial input runs at most once: a persisted item means the
         // interrupted attempt already recorded it, so replaying it here would
         // duplicate the user message and its turn.
+        let mut pending_initial = None;
         if last_seq == 0 {
             if let Some(text) = command.initial_input.as_deref() {
-                let (_, item_id) = runtime.log.record_user_input(None, text).await?;
-                self.run_turn(&runtime, text, &turn_id_for_item(&item_id))
+                pending_initial = self
+                    .accept_initial_input(
+                        &runtime,
+                        &command.logical_id,
+                        text,
+                        command.defer_initial_turn,
+                    )
                     .await?;
             }
         }
@@ -1017,6 +1048,7 @@ impl AcpSwarmService {
         Ok(CreateSessionResult {
             session,
             created: false,
+            pending_initial,
         })
     }
 
@@ -1149,15 +1181,22 @@ impl SwarmService for AcpSwarmService {
             let runtime = self
                 .runtime(&command.logical_id)
                 .map_err(|_| SwarmError::upstream_unavailable("session_not_live"))?;
+            let mut pending_initial = None;
             if let Some(text) = command.initial_input.as_deref() {
-                let (_, item_id) = runtime.log.record_user_input(None, text).await?;
-                self.run_turn(&runtime, text, &turn_id_for_item(&item_id))
+                pending_initial = self
+                    .accept_initial_input(
+                        &runtime,
+                        &command.logical_id,
+                        text,
+                        command.defer_initial_turn,
+                    )
                     .await?;
             }
             let session = self.view_by_id(&command.logical_id).await?;
             return Ok(CreateSessionResult {
                 session,
                 created: false,
+                pending_initial,
             });
         }
 
@@ -1254,15 +1293,22 @@ impl SwarmService for AcpSwarmService {
             .lock()
             .insert(command.logical_id.as_str().to_owned(), Arc::clone(&runtime));
 
+        let mut pending_initial = None;
         if let Some(text) = command.initial_input.as_deref() {
-            let (_, item_id) = runtime.log.record_user_input(None, text).await?;
-            self.run_turn(&runtime, text, &turn_id_for_item(&item_id))
+            pending_initial = self
+                .accept_initial_input(
+                    &runtime,
+                    &command.logical_id,
+                    text,
+                    command.defer_initial_turn,
+                )
                 .await?;
         }
         let session = self.view_by_id(&command.logical_id).await?;
         Ok(CreateSessionResult {
             session,
             created: true,
+            pending_initial,
         })
     }
 

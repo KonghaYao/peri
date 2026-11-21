@@ -379,6 +379,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             environment: EnvironmentKind::None,
             environment_id: None,
             root_session_id: None,
+            defer_initial_turn: false,
         })
         .await
         .expect("create session");
@@ -892,6 +893,7 @@ async fn model_unavailable_is_a_diagnosable_error() {
             environment: EnvironmentKind::None,
             environment_id: None,
             root_session_id: None,
+            defer_initial_turn: false,
         })
         .await
         .expect_err("no provider");
@@ -940,6 +942,7 @@ fn create_command(
         environment: EnvironmentKind::None,
         environment_id: None,
         root_session_id: None,
+        defer_initial_turn: false,
     }
 }
 
@@ -1004,6 +1007,76 @@ async fn wait_idle(service: &AcpSwarmService, logical: &LogicalId) {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deferred_create_returns_before_the_first_turn_executes() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    );
+    let logical = LogicalId::parse("agent-create-defer").expect("logical id");
+    let (_, mut live) = service.open_stream(&logical).await.into_parts();
+
+    let mut command = create_command(&logical, &cwd, Some("hello"));
+    command.defer_initial_turn = true;
+    let created = service.create_session(command).await.expect("create");
+    assert!(created.created);
+    let pending = created
+        .pending_initial
+        .clone()
+        .expect("the first turn is deferred");
+    assert_eq!(pending.text, "hello");
+    assert_eq!(
+        created.session.state,
+        SessionState::Running,
+        "acceptance marks the session running before the turn executes"
+    );
+    assert_eq!(
+        created.session.last_item_seq, 1,
+        "defer persisted only the user item"
+    );
+    assert_eq!(stub.main_calls(), 0, "the turn has not run");
+    let before = items_of(&service, &logical).await;
+    assert_eq!(before.len(), 1, "no assistant item yet");
+    assert_eq!(before[0].0, 1, "only the user item is persisted");
+
+    service
+        .run_pending_turn(pending)
+        .await
+        .expect("run the deferred first turn");
+    wait_idle(&service, &logical).await;
+    assert_eq!(stub.main_calls(), 1, "one turn request after the response");
+    let events = collect_until_terminal(&mut live, Duration::from_secs(30)).await;
+    assert!(
+        matches!(events.terminal, Some(TurnEvent::Completed { .. })),
+        "deferred turn terminal: {:?}",
+        events.terminal
+    );
+    assert!(
+        events
+            .items
+            .iter()
+            .any(|item| item.payload["role"] == json!("user")),
+        "the persisted user item reaches the stream"
+    );
+    assert!(
+        events.items.iter().any(|item| {
+            item.payload["role"] == json!("assistant") && item.payload["complete"] == json!(true)
+        }),
+        "the assistant completion reaches the stream"
+    );
+    let reports = service.shutdown_all().await;
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].complete,
+        "host shutdown report: {:?}",
+        reports[0]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1096,12 +1169,20 @@ async fn creating_row_with_a_persisted_peri_session_reattaches_without_replaying
         .expect("mark the create as interrupted");
 
     let second = AcpSwarmService::new(Arc::clone(&store), service_config(&base_url, &tmp));
+    // `stream:true` retries with the same deferred-create flag; the recovery
+    // window must not turn the already persisted input into a second turn.
+    let mut retry = command.clone();
+    retry.defer_initial_turn = true;
     let resumed = second
-        .create_session(command)
+        .create_session(retry)
         .await
         .expect("reattach to the persisted session");
 
     assert!(!resumed.created);
+    assert!(
+        resumed.pending_initial.is_none(),
+        "a persisted item means the interrupted attempt already recorded the input"
+    );
     assert_eq!(resumed.session.root_session_id, reserved);
     assert_eq!(resumed.session.state, SessionState::Idle);
     assert!(second.is_live(&logical), "the retry attached a host");
