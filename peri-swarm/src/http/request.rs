@@ -1091,6 +1091,70 @@ fn unsupported_official_field(field: &str) -> SwarmError {
     .with_details(json!({ "field": field, "supported": false }))
 }
 
+/// Decide whether a `sessions.update` request carries a body at all.
+///
+/// Official `update(sessionID, body?: SessionUpdateParams | null | undefined)`
+/// (`sessions.d.ts:76`) lets the SDK omit the body entirely; in that case it
+/// sends no body and no `content-type`. An empty byte stream and a JSON `null`
+/// are the two spellings of "no update", so both return `None` (a no-op).
+///
+/// Only a non-empty body is held to the media-type and syntax rules: a
+/// non-JSON content-type is `415 invalid_content_type`, and malformed JSON is
+/// `400 invalid_request`. A rejection is never silently downgraded to a
+/// no-op, which is why `Option<Json<T>>` (whose rejection covers both) is not
+/// used here.
+pub fn parse_update_body(
+    bytes: &[u8],
+    headers: &HeaderMap,
+) -> Result<Option<UpdateSessionBody>, SwarmError> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if !has_json_content_type(headers) {
+        return Err(SwarmError::new(
+            ErrorKind::UnsupportedMediaType,
+            ErrorCode::InvalidContentType,
+            "content-type must be application/json",
+        ));
+    }
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        SwarmError::new(
+            ErrorKind::BadRequest,
+            ErrorCode::InvalidRequest,
+            format!("failed to parse the JSON body: {error}"),
+        )
+    })?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value).map(Some).map_err(|error| {
+        let message = format!("failed to deserialize the update body: {error}");
+        if message.contains("unknown field") {
+            SwarmError::new(ErrorKind::BadRequest, ErrorCode::UnknownField, message)
+        } else {
+            SwarmError::new(ErrorKind::BadRequest, ErrorCode::InvalidRequest, message)
+        }
+    })
+}
+
+/// Same JSON media types axum's `Json` extractor accepts (`application/json`,
+/// `application/*+json`), so reading the raw bytes does not narrow the
+/// contract.
+fn has_json_content_type(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Some((top, sub)) = value.split(';').next().unwrap_or_default().split_once('/') else {
+        return false;
+    };
+    top.trim().eq_ignore_ascii_case("application")
+        && (sub.trim().eq_ignore_ascii_case("json")
+            || sub.trim().to_ascii_lowercase().ends_with("+json"))
+}
+
 /// `POST /v1/agents/sessions/{id}` body.
 pub fn resolve_update(body: UpdateSessionBody) -> Result<SessionUpdateCommand, SwarmError> {
     let agent = body.agent;

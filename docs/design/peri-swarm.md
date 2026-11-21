@@ -136,6 +136,13 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   `agent.reasoning`、`agent.service_tier` 没有本地映射，显式 `400 invalid_request`
   （`details.field` 指向官方字段），不静默接受。model 或 MCP tools 变化会停止当前
   ACP host；下一次交互按新配置重新 attach，避免返回一个下一轮不会使用的旧配置。
+- 官方 `update(sessionID, body?: SessionUpdateParams | null | undefined)`
+  （`sessions.d.ts:76`）允许省略 body；SDK 此时不发 body 也不发 content-type。
+  网关把「无 body」（含无 content-type、`Content-Length: 0`）与 JSON `null` 都视为
+  **空更新**：返回当前 `SessionView`，不写任何行（含 `last_activity_at`），也不执行
+  在途/恢复准入判定。只有非空 body 才按上一条解析：非 JSON content-type
+  返回 `415 invalid_content_type`，JSON 语法错误返回 `400 invalid_request`；
+  两者都不会被降级成 no-op。
 - `sessions.delete` 在 `swarm_sessions`、`swarm_items`、`swarm_inputs`、
   `swarm_turns`、`swarm_bindings` 上删除该 `logicalId` 的全部行；Turso 用一次
   受管事务，内存实现同一语义。删除先停 ACP host 并移除进程内 channel，Rivet
@@ -377,9 +384,11 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
     与删除都不会先写后报错；
   - 正常 idle 行不受影响。
 
-  判定在受理互斥内完成，更新/删除不会与并发受理交错。删除成功后的
-  get/events/items/turns 都是 `404 unknown_agent`；同一 `logicalId` 重新 create
-  视为新会话，不复用旧 root id。
+  live runtime 路径的准入判定在受理互斥内完成，更新/删除不会与该 actor 的并发
+  受理交错；无 live runtime 的拒绝路径只读持久状态（会话行与
+  `swarm_has_open_turn`），不写 `state`/turn 行，但并发 attach 仍可能在该判定之后
+  开始新 turn——拒绝不是跨进程的锁。删除成功后的 get/events/items/turns 都是
+  `404 unknown_agent`；同一 `logicalId` 重新 create 视为新会话，不复用旧 root id。
 
 ### 4.5 会话投影与环境
 

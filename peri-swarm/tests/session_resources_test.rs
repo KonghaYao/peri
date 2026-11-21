@@ -105,6 +105,48 @@ async fn send(
     (status, value)
 }
 
+/// `POST` with an explicit content-type (or none) and a raw body string, so
+/// the "no body at all" shape the official SDK sends stays expressible.
+async fn send_raw(
+    harness: &Harness,
+    uri: &str,
+    content_type: Option<&str>,
+    body: &str,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("authorization", format!("Bearer {TOKEN}"));
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
+    }
+    let response = harness
+        .router
+        .clone()
+        .oneshot(builder.body(Body::from(body.to_owned())).expect("request"))
+        .await
+        .expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json")
+    };
+    (status, value)
+}
+
+async fn stored_session(harness: &Harness, logical_id: &str) -> SwarmSessionRow {
+    harness
+        .store
+        .swarm_get_session(logical_id)
+        .await
+        .expect("row")
+        .expect("session")
+}
+
 async fn create(harness: &Harness, body: Value) -> (StatusCode, Value) {
     send(
         &harness.router,
@@ -499,6 +541,93 @@ async fn update_replaces_and_clears_official_fields() {
     assert_eq!(missing["error"]["code"], json!("unknown_agent"));
 }
 
+/// Official `sessions.update` allows `update(id)` / `update(id, null)`; the
+/// SDK then sends no body and no content-type. Those are empty updates, not a
+/// `415`, and they must not write any row.
+#[tokio::test]
+async fn update_accepts_an_absent_or_null_body_as_a_no_op() {
+    let harness = harness();
+    let (status, created) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-noop",
+            "model": "model-1",
+            "metadata": { "keep": "yes" },
+            "prompt_cache_options": { "ttl": "30m" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let before = stored_session(&harness, "agent-noop").await;
+
+    for (label, content_type, body) in [
+        ("no body, no content-type", None, ""),
+        ("empty body, text/plain", Some("text/plain"), ""),
+        ("JSON null", Some("application/json"), "null"),
+    ] {
+        let (status, session) = send_raw(
+            &harness,
+            "/v1/agents/sessions/agent-noop",
+            content_type,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{label}: {session}");
+        assert_eq!(session["agent"]["model"], json!("model-1"), "{label}");
+        assert_eq!(session["metadata"], json!({ "keep": "yes" }), "{label}");
+        assert_eq!(
+            session["prompt_cache_options"]["ttl"],
+            json!("30m"),
+            "{label}"
+        );
+        // The response alone cannot prove "no write": `update_session` would
+        // also return the same values for a keep-only patch. The stored row
+        // (including `last_activity_at`) is the evidence.
+        let after = stored_session(&harness, "agent-noop").await;
+        assert_eq!(after.model, before.model, "{label}");
+        assert_eq!(after.mcp_tools, before.mcp_tools, "{label}");
+        assert_eq!(after.metadata, before.metadata, "{label}");
+        assert_eq!(
+            after.prompt_cache_options, before.prompt_cache_options,
+            "{label}"
+        );
+        assert_eq!(after.last_activity_at, before.last_activity_at, "{label}");
+    }
+
+    let (status, error) = send_raw(
+        &harness,
+        "/v1/agents/sessions/agent-noop",
+        Some("text/plain"),
+        "{}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{error}");
+    assert_eq!(error["error"]["code"], json!("invalid_content_type"));
+
+    // Malformed JSON is a request error, never a silent no-op.
+    let (status, error) = send_raw(
+        &harness,
+        "/v1/agents/sessions/agent-noop",
+        Some("application/json"),
+        "{",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["error"]["code"], json!("invalid_request"));
+
+    let (status, updated) = send_raw(
+        &harness,
+        "/v1/agents/sessions/agent-noop",
+        Some("application/json"),
+        r#"{"metadata":{"only":"one"},"agent":{"model":"model-2"}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["metadata"], json!({ "only": "one" }));
+    assert_eq!(updated["agent"]["model"], json!("model-2"));
+    assert_eq!(updated["prompt_cache_options"]["ttl"], json!("30m"));
+}
+
 #[tokio::test]
 async fn a_null_agent_model_is_rejected_but_null_tools_clear() {
     let harness = harness();
@@ -526,7 +655,19 @@ async fn a_null_agent_model_is_rejected_but_null_tools_clear() {
     }
 
     // The session used by the update half must exist first.
-    let (status, _) = create(&harness, json!({ "logicalId": "agent-u" })).await;
+    let (status, _) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-u",
+            "model": "model-keep",
+            "agent": { "tools": [{
+                "type": "mcp",
+                "server_label": "deepwiki",
+                "server_url": "https://mcp.example.test/mcp"
+            }] }
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
 
     // `agent.tools:null` is the official "clear the declaration" spelling and
@@ -540,6 +681,12 @@ async fn a_null_agent_model_is_rejected_but_null_tools_clear() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
+
+    // The 200 alone would also be returned by a keep-only patch; the stored row
+    // proves the tools were cleared while the model was left alone.
+    let row = stored_session(&harness, "agent-u").await;
+    assert!(row.mcp_tools.is_empty(), "{:?}", row.mcp_tools);
+    assert_eq!(row.model.as_deref(), Some("model-keep"));
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::rejection::{BytesRejection, JsonRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -73,6 +73,24 @@ pub fn from_json_rejection(rejection: JsonRejection) -> SwarmError {
         return SwarmError::new(ErrorKind::BadRequest, ErrorCode::InvalidInput, message);
     }
     SwarmError::new(ErrorKind::BadRequest, ErrorCode::InvalidRequest, message)
+}
+
+/// Buffer rejection for handlers that read the raw body to decide whether one
+/// was sent at all (`sessions.update`).
+#[must_use]
+pub fn from_bytes_rejection(rejection: BytesRejection) -> SwarmError {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return SwarmError::new(
+            ErrorKind::PayloadTooLarge,
+            ErrorCode::RequestTooLarge,
+            "request body exceeds 8 MiB",
+        );
+    }
+    SwarmError::new(
+        ErrorKind::BadRequest,
+        ErrorCode::InvalidRequest,
+        rejection.to_string(),
+    )
 }
 
 #[must_use]

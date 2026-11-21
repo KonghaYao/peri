@@ -3,7 +3,8 @@
 - 状态：代码与契约测试证据记录；**真实 `openai@7.60.0` SDK 客户端已对本进程内网关执行
   create/retrieve/update/turns.list 探针**；无活体 Loom/Rivet/Bun engine
 - 日期：2026-11-21
-- 基线：`35819dfdd`（P1-6 初始实现）+ 本记录同一提交中的缺陷修复
+- 基线：`35819dfdd`（P1-6 初始实现）+ `0383c0dd9`（缺陷修复）+ 本记录同一提交中的
+  update 空 body 兼容与准入措辞修正
 - 范围：`openai@7.60.0` `client.beta.agents.sessions` 资源面。已能映射的
   `sessions.list/update/delete` 与 `sessions.turns.list/retrieve` 实现在网关；
   `turns.items`、`traces`、`artifacts`、`subagents` 及其子资源注册路由并返回网关
@@ -40,6 +41,7 @@
 | D7 create attach 的 metadata 语义与文档不一致 | `CreateSessionCommand` 的 `metadata`/`prompt_cache_options` 改为 `UpdateField` 三态；省略保持行内值且不冲突，显式值（含 `{}`/`null`）必须与行内一致，否则 `409 identity_conflict`；actor action 对 `Keep` 省略序列化，跨进程不把“省略”误读为 `null` |
 | D8 取消 turn 持久化为 `completed` | `finish_turn` 在 `stop_reason == "cancelled"` 时持久 `TurnStatus::Cancelled`，同一帧的官方 `turn.completed.turn.status` 也是 `cancelled`；`turns.list`/`turns.retrieve` 断言同一状态 |
 | D9 文档与证据 | 设计文档的动词、准入、404 清单、attach 语义、取消状态与字段拼写同步；本记录执行结果只写实际执行项 |
+| D10 官方 `update(id)` / `update(id, null)` 被判 `415` | update handler 读原始 body 并区分三态：空 body（含无 content-type、`Content-Length: 0`）与 JSON `null` 是空更新（`200` 当前投影，不写行）；非空 body 才校验 JSON content-type 与语法，非法 JSON 仍 `400 invalid_request`，不降级为 no-op |
 
 ## 3. 行为矩阵
 
@@ -68,6 +70,9 @@
 | create attach 显式不同值，或行内非空时显式 `{}`/`null` | `409 identity_conflict` |
 | create/update `agent.model:null` | `400 invalid_request`，`details.field="agent.model"` |
 | PATCH `/v1/agents/sessions/{id}` | `405 Method Not Allowed`（官方动词只有 POST） |
+| POST update 无 body（无 content-type 或 `Content-Length: 0`）/ JSON `null` | `200` 当前 `SessionView`；不写行（含 `last_activity_at`），不做在途/恢复准入判定（官方 `update(id)` / `update(id, null)`） |
+| POST update 非空 body + 非 JSON content-type | `415 invalid_content_type` |
+| POST update 非空 body + JSON 语法错误 | `400 invalid_request`，不会被当成 no-op |
 | POST update `metadata:{...}` | 整体替换 |
 | POST update `metadata:null` 或 `{}` | 清空为 `{}` |
 | POST update `prompt_cache_options:{ttl}` / `null` | 整体替换 / 清空 |
@@ -228,10 +233,18 @@ Bun，也不覆盖取消路径（in-memory fake 没有 ACP host）。
 - create attach 三态：`session_resources_test::create_attach_distinguishes_omitted_and_explicit_identity_fields`、
   `service::tests::create_attach_only_conflicts_on_an_explicit_different_value`、
   `service::tests::create_action_keeps_omission_across_the_actor_boundary`。
-- `agent.model:null`：`session_resources_test::a_null_agent_model_is_rejected_but_null_tools_clear`。
+- `agent.model:null`：`session_resources_test::a_null_agent_model_is_rejected_but_null_tools_clear`
+  （`agent.tools:null` 清空 MCP 声明由同一测试断言 store 行 `mcp_tools` 为空、`model`
+  保持）。
+- update 空 body / JSON `null`：`session_resources_test::update_accepts_an_absent_or_null_body_as_a_no_op`
+  （无 body 无 content-type、空 body + `text/plain`、JSON `null` 三种都为 `200`，
+  且 store 行的 model、MCP tools、metadata、prompt cache、`last_activity_at` 均未变；
+  非空 `text/plain` 为 `415 invalid_content_type`，非法 JSON 为 `400 invalid_request`，
+  正常 body 仍整体替换 metadata/model）。
 - 持久未完成 turn 的 update/delete 准入：
   `actor_runtime_test::a_persisted_unfinished_turn_refuses_update_and_delete_without_a_runtime`
-  （running 与 idle+开放 turn 两种持久行，PATCH/DELETE 均 502 且行未变）；
+  （running 与 idle+开放 turn 两种持久行，update（官方 POST）/delete 均 502 且行未变；
+  PATCH 不是官方动词，由 `update_replaces_and_clears_official_fields` 单独断言 `405`）；
   live 在途 409 由 `session_resources_test::update_and_delete_are_refused_while_a_turn_is_open` 覆盖。
 - 取消 turn：`reader::tests::agent_event_done_terminal_is_the_active_turn`
   （持久 `cancelled`、官方帧 `status=cancelled`、`turns.list/retrieve` 同为 `cancelled`）。
@@ -278,3 +291,6 @@ Bun，也不覆盖取消路径（in-memory fake 没有 ACP host）。
 8. **Lefthook 完整执行**：第一次运行因 mise 联网安装 `rust@1.99.0` 失败而被
    `check`/`clippy`/`fmt` 阻断；第二次用 `MISE_DISABLE_TOOLS=rust`（复用已激活的
    rustc 1.99.0）重跑同一 hook 后全部命令通过。没有使用 `--no-verify`。
+9. **update 空 body 语义的证据边界**：只有内存 service + 真实 axum 路由的 HTTP
+   契约测试；没有用 `openai@7.60.0` SDK 重跑 `update(id)`/`update(id, null)` 探针，
+   也没有在 Loom/Rivet 路径上验证空更新的准入跳过。

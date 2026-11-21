@@ -1,13 +1,13 @@
-use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::body::Bytes;
+use axum::extract::rejection::{BytesRejection, JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use super::error::{from_json_rejection, from_query_rejection};
+use super::error::{from_bytes_rejection, from_json_rejection, from_query_rejection};
 use super::request::{
     self, CreateSessionBody, EventsQuery, ItemsQuery, SessionsQuery, SubmitEventBody, TurnsQuery,
-    UpdateSessionBody,
 };
 use super::{sse, AppState};
 use crate::domain::{resolve_cwd, CreateSessionResponse, LogicalId, SessionDeleted, SwarmError};
@@ -140,10 +140,19 @@ pub async fn list_sessions(
 pub async fn update_session(
     State(state): State<AppState>,
     Path(logical_id): Path<String>,
-    body: Result<Json<UpdateSessionBody>, JsonRejection>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, SwarmError> {
-    let Json(body) = body.map_err(from_json_rejection)?;
     let logical_id = LogicalId::parse(&logical_id)?;
+    let bytes = body.map_err(from_bytes_rejection)?;
+    let Some(body) = request::parse_update_body(&bytes, &headers)? else {
+        // The official SDK sends no body and no content-type for
+        // `update(id)` / `update(id, null)`. An empty update has nothing to
+        // apply, so answer with the current projection and write nothing
+        // (design §4.1) instead of running the in-flight admission.
+        let session = state.service().get_session(&logical_id).await?;
+        return Ok(Json(session).into_response());
+    };
     let command = request::resolve_update(body)?;
     let session = state.service().update_session(&logical_id, command).await?;
     Ok(Json(session).into_response())
