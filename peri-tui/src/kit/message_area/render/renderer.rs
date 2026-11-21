@@ -123,19 +123,22 @@ fn is_blank_body_line(line: &Line<'static>) -> bool {
 }
 
 /// 渲染一处 Mermaid 围栏并记录它在消息行里的逻辑范围；渲染本身不排队。
+/// 正文列宽与前缀宽度、围栏身份/帧都由渲染上下文决定，拆参数结构体没有收益。
+#[allow(clippy::too_many_arguments)]
 fn mermaid_block(
     segment: &crate::kit::markdown::MermaidSegment,
     scope: &crate::kit::mermaid::PreviewScope,
     width: usize,
+    prefix: usize,
     frozen: bool,
     foreground: ratatui_kit::ratatui::style::Color,
     start: usize,
     schedule: bool,
 ) -> (Vec<Line<'static>>, crate::kit::mermaid::FenceSpan) {
-    let (lines, layout_bytes) = if schedule {
-        let lines = crate::kit::mermaid::display_lines(segment, scope, width, frozen, foreground);
-        let bytes = 0;
-        (lines, bytes)
+    let (rendered, layout_bytes) = if schedule {
+        let rendered =
+            crate::kit::mermaid::display_lines(segment, scope, width, frozen, foreground);
+        (rendered, 0)
     } else {
         crate::kit::mermaid::display_lines_peek(segment, scope, width, frozen, foreground)
     };
@@ -144,10 +147,12 @@ fn mermaid_block(
         fence: Arc::new(segment.fence.clone()),
         width,
         frozen,
-        logical: start..start.saturating_add(lines.len()),
+        logical: start..start.saturating_add(rendered.lines.len()),
         layout_bytes,
+        prefix,
+        h_view: rendered.h_view,
     };
-    (lines, span)
+    (rendered.lines, span)
 }
 
 /// 将单个 TuiRenderUnit 变体转换为渲染行。
@@ -327,6 +332,12 @@ fn vm_to_lines_impl(
             } else {
                 grid.content_width()
             };
+            // 围栏行在消息行内的正文前缀宽度；横向条命中从该列起算。
+            let mermaid_prefix = if brief {
+                grid.process_prefix_width()
+            } else {
+                grid.cont_prefix_width()
+            };
             let mermaid_frozen = data.started_at.is_none();
             let mermaid_scope = crate::kit::mermaid::PreviewScope::for_bubble(
                 crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone(),
@@ -434,6 +445,7 @@ fn vm_to_lines_impl(
                                         segment,
                                         &mermaid_scope,
                                         body_width,
+                                        mermaid_prefix,
                                         mermaid_frozen,
                                         md_text_fg,
                                         start,
@@ -480,6 +492,7 @@ fn vm_to_lines_impl(
                                         segment,
                                         &mermaid_scope,
                                         body_width,
+                                        mermaid_prefix,
                                         mermaid_frozen,
                                         md_text_fg,
                                         start,
@@ -540,6 +553,7 @@ fn vm_to_lines_impl(
                                     segment,
                                     &mermaid_scope,
                                     body_width,
+                                    mermaid_prefix,
                                     mermaid_frozen,
                                     md_text_fg,
                                     start,

@@ -8,6 +8,7 @@ use super::grid::GridSpec;
 use super::hits::{
     CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit, MermaidActionHit,
 };
+use super::mermaid_scroll::mermaid_arrow_delta;
 use super::vm_cache_slot::VmCacheSlot;
 
 use super::props::ScrollbarFields;
@@ -620,10 +621,12 @@ pub(super) fn register_keyboard_nav(
     interaction_option: State<usize>,
     vm_caches: State<Vec<VmCacheSlot>>,
     mermaid_action: State<Option<(usize, usize)>>,
+    h_tick: State<u64>,
 ) {
     let option_state = interaction_option;
     let caches_state = vm_caches;
     let action_state = mermaid_action;
+    let h_tick_state = h_tick;
     hooks.use_event_handler(EventScope::Global, EventPriority::High, move |event| {
         let Event::Key(key) = event else {
             return EventResult::Ignored;
@@ -712,6 +715,31 @@ pub(super) fn register_keyboard_nav(
                     );
                     *option_state.write() = next_opt;
                     return EventResult::Consumed;
+                }
+                // [Mermaid 横向视口] Tab 选中「查看图」后，←/→ 平移该图；
+                // 未选中图动作时保持 Ignored（不抢普通聊天滚动/文本选择）。
+                if matches!(key.code, KeyCode::Left | KeyCode::Right)
+                    && let Some((slot, index)) = *action_state.read()
+                    && Some(slot) == idx
+                {
+                    let target = caches_state
+                        .read()
+                        .get(slot)
+                        .and_then(|cache| cache.mermaid_fences.get(index))
+                        .and_then(|span| span.h_view.map(|view| (span.key.clone(), view)));
+                    if let Some((fence_key, h_view)) = target {
+                        let delta = mermaid_arrow_delta(key.code)
+                            .expect("the match arm only handles Left/Right");
+                        crate::kit::mermaid::scroll_h(
+                            &fence_key,
+                            delta,
+                            h_view.viewport,
+                            h_view.max_offset,
+                        );
+                        let next = h_tick_state.read().wrapping_add(1);
+                        *h_tick_state.write() = next;
+                        return EventResult::Consumed;
+                    }
                 }
                 // 消息导航态且回复含图：Tab 按文档顺序循环选中「查看图」。
                 if key.code == KeyCode::Tab {

@@ -180,6 +180,135 @@ pub(super) fn update_mermaid_action_hits(
     *actions.write_no_update() = Arc::new(hits);
 }
 
+// ── Mermaid 帧的横向视口（滚动条 + 平移区域）──
+// 每帧由渲染产物（FenceSpan 的 h_view）换算屏幕行；绘制、拖拽与滚轮命中
+// 共用同一组 HorizontalBar 数字，resize 后随重渲染更新。
+#[derive(Debug, Clone)]
+pub(super) struct MermaidHScrollHit {
+    /// 帧首行（屏幕坐标）。
+    pub(super) row_start: u16,
+    /// 帧后一行（不含 tail/notice/动作行）。
+    pub(super) row_end: u16,
+    pub(super) x_start: u16,
+    pub(super) x_end: u16,
+    pub(super) key: crate::kit::markdown::MermaidFenceKey,
+    pub(super) viewport: usize,
+    pub(super) max_offset: usize,
+    pub(super) bar: Option<peri_tui_components::scrollbar::HorizontalBar>,
+    pub(super) bar_row: Option<u16>,
+}
+
+impl MermaidHScrollHit {
+    /// 指针落在帧区域内（滚轮平移）。
+    pub(super) fn contains(&self, column: u16, row: u16) -> bool {
+        row >= self.row_start && row < self.row_end && column >= self.x_start && column < self.x_end
+    }
+
+    /// 指针落在滚动条行内（拖拽/轨道点击）。
+    pub(super) fn bar_contains(&self, column: u16, row: u16) -> bool {
+        self.bar.is_some()
+            && self.bar_row == Some(row)
+            && column >= self.x_start
+            && column < self.x_end
+    }
+
+    /// 条内列号（跳过左箭头）；调用方按 `HorizontalBar` 轨道 clamp。
+    pub(super) fn track_cell(&self, column: u16) -> Option<usize> {
+        let bar = self.bar?;
+        let cell = usize::from(column.saturating_sub(self.x_start.saturating_add(1)));
+        Some(cell.min(bar.track.saturating_sub(1)))
+    }
+}
+
+pub(super) fn update_mermaid_hscroll_hits(
+    hits: State<Arc<Vec<MermaidHScrollHit>>>,
+    vm_caches: &State<Vec<VmCacheSlot>>,
+    index: &super::selection::SlotIndex,
+    area_rect: Option<Rect>,
+    vis_height: u16,
+    scroll_y: usize,
+) {
+    *hits.write_no_update() = Arc::new(build_mermaid_hscroll_hits(
+        &vm_caches.read(),
+        index,
+        area_rect,
+        vis_height,
+        scroll_y,
+    ));
+}
+
+/// 可见围栏 → 屏幕行/列；纯函数，验收测试直接读取同一份几何。
+#[must_use]
+pub(super) fn build_mermaid_hscroll_hits(
+    caches: &[VmCacheSlot],
+    index: &super::selection::SlotIndex,
+    area_rect: Option<Rect>,
+    vis_height: u16,
+    scroll_y: usize,
+) -> Vec<MermaidHScrollHit> {
+    let Some(area) = area_rect else {
+        return Vec::new();
+    };
+    let viewport_bottom = area.y.saturating_add(vis_height) as i64;
+    let mut hits = Vec::new();
+    for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
+        let Some(slot) = caches.get(slot_index) else {
+            continue;
+        };
+        for span in &slot.mermaid_fences {
+            let Some(view) = span.h_view else {
+                continue;
+            };
+            if view.max_offset == 0 {
+                continue;
+            }
+            let Some(first) = slot.wrap_map.get(span.logical.start) else {
+                continue;
+            };
+            let slot_visual = index.slot_visual_start(slot_index).unwrap_or(0);
+            let last_logical = span
+                .logical
+                .start
+                .saturating_add(view.rows.saturating_sub(1));
+            let Some(last) = slot.wrap_map.get(last_logical) else {
+                continue;
+            };
+            let exact_start =
+                area.y as i64 + (slot_visual + first.visual_start) as i64 - scroll_y as i64;
+            let exact_end =
+                area.y as i64 + (slot_visual + last.visual_end) as i64 - scroll_y as i64;
+            let row_start = exact_start.max(area.y as i64).min(viewport_bottom);
+            let row_end = exact_end.max(area.y as i64).min(viewport_bottom);
+            if row_start >= row_end {
+                continue;
+            }
+            let x_start = area
+                .x
+                .saturating_add(span.prefix.min(u16::MAX as usize) as u16)
+                .min(area.right().saturating_sub(1));
+            let x_end = x_start
+                .saturating_add(view.viewport.min(u16::MAX as usize) as u16)
+                .min(area.right());
+            let bar_row = view.bar_line.and_then(|line| {
+                let row = exact_start.saturating_add(line as i64);
+                (row >= area.y as i64 && row < viewport_bottom).then_some(row as u16)
+            });
+            hits.push(MermaidHScrollHit {
+                row_start: row_start as u16,
+                row_end: row_end as u16,
+                x_start,
+                x_end,
+                key: span.key.clone(),
+                viewport: view.viewport,
+                max_offset: view.max_offset,
+                bar: view.bar,
+                bar_row,
+            });
+        }
+    }
+    hits
+}
+
 // ── md 复制按钮屏幕位置（每帧更新）──
 // 按钮行在 slot 内是唯一视觉行（copy_button_line 已保证不折行），
 // 屏幕行 = area.y + slot 视觉偏移 + 行内视觉偏移 - scroll_y。

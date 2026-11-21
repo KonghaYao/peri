@@ -54,6 +54,41 @@ pub fn prefix_by_width(s: &str, max_width: usize) -> String {
     out
 }
 
+/// 取从 `offset` 列开始、最多 `max_width` 列的片段（不折行、不追加省略号）。
+///
+/// 输出显示宽度 ≤ `max_width`；双宽字素跨左边界时以空格补齐被切掉的半格，
+/// 跨右边界时整字素舍弃（与终端裁剪一致）。
+pub fn slice_by_width(s: &str, offset: usize, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut column = 0usize;
+    let mut emitted = 0usize;
+    for grapheme in s.graphemes(true) {
+        let width = grapheme.width();
+        if column + width <= offset {
+            column += width;
+            continue;
+        }
+        if column < offset {
+            // 宽字素被左边界切开：可见的半格留空。
+            let blank = (column + width - offset).min(max_width);
+            out.push_str(&" ".repeat(blank));
+            emitted += blank;
+            column += width;
+            continue;
+        }
+        if emitted + width > max_width {
+            break;
+        }
+        out.push_str(grapheme);
+        emitted += width;
+        column += width;
+    }
+    out
+}
+
 /// 取不超过 `max_width` 列的后缀（不追加省略号）。
 pub fn suffix_by_width(s: &str, max_width: usize) -> String {
     let mut width = 0usize;
@@ -104,8 +139,8 @@ pub fn wrap_by_width(s: &str, max_width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ellipsis, prefix_by_width, suffix_by_width, truncate_to_width, truncate_to_width_with,
-        wrap_by_width,
+        Ellipsis, prefix_by_width, slice_by_width, suffix_by_width, truncate_to_width,
+        truncate_to_width_with, wrap_by_width,
     };
     use unicode_width::UnicodeWidthStr;
 
@@ -174,6 +209,26 @@ mod tests {
         assert_eq!(suffix_by_width("你好世界", 3), "界");
         assert_eq!(prefix_by_width("abcdef", 0), "");
         assert_eq!(suffix_by_width("abcdef", 99), "abcdef");
+    }
+
+    /// 列切片：不折行、不补省略号；宽字素跨边界时按终端裁剪语义留空/舍弃。
+    #[test]
+    fn slice_takes_exact_column_window() {
+        assert_eq!(slice_by_width("abcdef", 2, 3), "cde");
+        assert_eq!(slice_by_width("abcdef", 0, 3), "abc");
+        assert_eq!(slice_by_width("abcdef", 5, 3), "f");
+        assert_eq!(slice_by_width("abcdef", 6, 3), "");
+        assert_eq!(slice_by_width("abcdef", 0, 0), "");
+        // 双宽字素跨左边界：被切掉的半格留空；跨右边界：整字素舍弃。
+        assert_eq!(slice_by_width("啊bc", 1, 2), " b");
+        assert_eq!(slice_by_width("abc啊", 2, 2), "c");
+        assert_eq!(slice_by_width("abc啊", 2, 3), "c啊");
+        for (offset, width) in [(0, 1), (1, 1), (1, 2), (2, 2), (3, 1)] {
+            assert!(
+                slice_by_width("a你b好c", offset, width).width() <= width,
+                "offset={offset} width={width}"
+            );
+        }
     }
 
     #[test]

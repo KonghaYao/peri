@@ -46,12 +46,15 @@ pub(crate) fn measure_synthetic_wrap(lines: &[Line<'static>], width: u16) {
 
 use self::hits::CopyButtonHit;
 use self::hits::MermaidActionHit;
+use self::hits::MermaidHScrollHit;
 
 use self::hits::ImageLineHit;
 use self::hits::InteractionOptionHit;
 
 use self::vm_cache::VmCacheSlot;
 use self::vm_cache::total_visual_rows;
+
+use super::mermaid_scroll::MermaidBarDrag;
 
 use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
@@ -144,6 +147,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // Mermaid「查看图」入口与当前选中的图（slot, fence 序号）。
     let mermaid_actions = hooks.use_state(Arc::<Vec<MermaidActionHit>>::default);
     let mermaid_action = hooks.use_state(|| Option::<(usize, usize)>::None);
+    // Mermaid 帧横向视口：每帧命中（条拖拽/滚轮）与拖拽态、重绘 tick。
+    let mermaid_h_hits = hooks.use_state(Arc::<Vec<MermaidHScrollHit>>::default);
+    let mermaid_h_drag = hooks.use_state(|| Option::<MermaidBarDrag>::None);
+    let mermaid_h_tick = hooks.use_state(|| 0u64);
     // [T4 §4] @image 行屏幕点击/hover 热区（每帧由渲染 body 更新，点击与
     // Moved handler 实时读取——同 CopyButtonHit 模式）。
     let image_rects = hooks.use_state(Arc::<Vec<ImageLineHit>>::default);
@@ -314,6 +321,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         mermaid_action,
     );
 
+    super::mermaid_scroll::register_mermaid_hscroll_events(
+        &mut hooks,
+        mermaid_h_hits,
+        mermaid_h_drag,
+        mermaid_h_tick,
+    );
+
     // ── 鼠标事件处理（滚动 + 文本拖拽选中复制）──
     // [TRAP] event_handler 闭包必须是 'static → 必须 move。但 concat_wrap_map_arc /
     // slot_arcs_arc / slot_offsets_arc 后续视口裁剪也要用。Arc::clone 是 O(1) 引用计数，
@@ -368,7 +382,13 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         Arc::clone(&slot_index),
     );
 
-    handlers::register_keyboard_nav(&mut hooks, interaction_option, vm_caches, mermaid_action);
+    handlers::register_keyboard_nav(
+        &mut hooks,
+        interaction_option,
+        vm_caches,
+        mermaid_action,
+        mermaid_h_tick,
+    );
 
     // [S2 单一事实源] 焦点同步已删除：外部清除（输入区点击 / session 复位）
     // 在事件边界直接写 FOCUSED_ENTRY = None，仲裁与渲染同源读取——不再需要
@@ -588,6 +608,15 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         scroll_y,
         &slot_index,
         grid,
+    );
+
+    hits::update_mermaid_hscroll_hits(
+        mermaid_h_hits,
+        &vm_caches,
+        &slot_index,
+        area_rect,
+        vp_height as u16,
+        scroll_y,
     );
 
     hits::update_image_line_hits(

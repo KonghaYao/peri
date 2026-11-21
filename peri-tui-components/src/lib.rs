@@ -5,6 +5,7 @@ pub mod charts;
 pub mod completion;
 pub mod diff;
 pub mod genui;
+pub mod h_viewport;
 pub mod history;
 pub mod list;
 pub mod list_nav;

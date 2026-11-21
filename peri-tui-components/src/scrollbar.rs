@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation};
 
 /// Rows a single wheel notch scrolls. Hosts keep their own scroll configuration
@@ -148,6 +149,39 @@ pub fn horizontal_scrollbar(
     for cell in bar.thumb_start..bar.thumb_start + bar.thumb_len {
         buf.set_string(x + cell as u16, area.y, " ", thumb);
     }
+}
+
+/// Same bar as one text row for hosts that own their line list (inline chat):
+/// arrows at both ends, the thumb painted as styled spaces, plain track cells.
+///
+/// The returned line is exactly `width` cells, so a Paragraph host and a Buffer
+/// host paint identical thumb positions for the same [`HorizontalBar`].
+#[must_use]
+pub fn horizontal_scrollbar_line(
+    width: u16,
+    bar: &HorizontalBar,
+    thumb: Style,
+    arrow: Style,
+) -> Line<'static> {
+    if width < 2 {
+        return Line::default();
+    }
+    let track = usize::from(width - 2);
+    let start = bar.thumb_start.min(track);
+    let len = bar.thumb_len.min(track - start);
+    let mut spans = Vec::with_capacity(5);
+    spans.push(Span::styled("◄", arrow));
+    if start > 0 {
+        spans.push(Span::raw(" ".repeat(start)));
+    }
+    if len > 0 {
+        spans.push(Span::styled(" ".repeat(len), thumb));
+    }
+    if start + len < track {
+        spans.push(Span::raw(" ".repeat(track - start - len)));
+    }
+    spans.push(Span::styled("►", arrow));
+    Line::from(spans)
 }
 
 /// Vertical thumb geometry in one whole bar column, arrows included.
@@ -332,6 +366,7 @@ mod tests {
 
     use super::{
         HorizontalBar, Throttle, VerticalBar, VerticalPress, bounded_offset, horizontal_scrollbar,
+        horizontal_scrollbar_line,
     };
 
     fn scroll_bar(offset: usize) -> HorizontalBar {
@@ -412,8 +447,39 @@ mod tests {
         assert_ne!(buf[(7, 0)].style().bg, Some(Color::DarkGray));
     }
 
-    // ── VerticalBar：原始偏移 + 绘制/命中同源 ───────────────────────────
+    #[test]
+    fn horizontal_line_paints_the_same_cells_as_the_buffer_host() {
+        let thumb = Style::new().fg(Color::DarkGray).bg(Color::DarkGray);
+        let arrow = Style::new().fg(Color::Red);
+        for offset in [0, 20, 80] {
+            let bar = scroll_bar(offset);
+            let line = horizontal_scrollbar_line(32, &bar, thumb, arrow);
+            assert_eq!(
+                line.width(),
+                32,
+                "the row must occupy the full viewport width"
+            );
+            let area = Rect::new(0, 0, 32, 1);
+            let mut from_line = Buffer::empty(area);
+            from_line.set_line(0, 0, &line, 32);
+            let mut from_buffer = Buffer::empty(area);
+            horizontal_scrollbar(area, &mut from_buffer, thumb, arrow, &bar);
+            for column in 0..32 {
+                assert_eq!(
+                    from_line[(column, 0)].symbol(),
+                    from_buffer[(column, 0)].symbol(),
+                    "offset {offset}, column {column}"
+                );
+                assert_eq!(
+                    from_line[(column, 0)].style(),
+                    from_buffer[(column, 0)].style(),
+                    "offset {offset}, column {column}"
+                );
+            }
+        }
+    }
 
+    // ── VerticalBar：原始偏移 + 绘制/命中同源 ───────────────────────────
     const LONG_CONTENT: usize = 1000;
     const LONG_VIEWPORT: usize = 10;
 

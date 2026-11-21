@@ -53,8 +53,9 @@ pub(crate) const BORDER: Style = Style::new().fg(Color::DarkGray);
 
 /// Rows a single wheel notch scrolls; the host uses `SCROLL_LINES` (3 rows).
 pub(crate) const WHEEL_ROWS: usize = 3;
-/// Columns a horizontal wheel notch scrolls; the bar drag is the precise path.
-const WHEEL_COLS: usize = 8;
+/// Columns a horizontal wheel notch scrolls; shared with inline chat so both
+/// hosts pan by the same step.
+pub(crate) use peri_tui_components::h_viewport::WHEEL_COLS;
 
 /// Viewport height assumed when seeding a scrolled variant; rendering clamps the
 /// offset against the real preview height.

@@ -3,6 +3,7 @@ use std::ops::Range;
 use peri_theme::{bridge::ThemeDefinitionExt, builtin::dark_theme};
 use peri_tui_components::button::hit_test;
 use peri_tui_components::genui;
+use peri_tui_components::h_viewport::HorizontalViewport;
 use peri_tui_components::markdown::{MarkdownSegment, parse_markdown, table_data_to_lines};
 use peri_tui_components::scrollbar::{HorizontalBar, horizontal_scrollbar, vertical_scrollbar};
 use ratatui::buffer::Buffer;
@@ -75,7 +76,7 @@ pub(crate) struct DocumentLayout {
     content_width: usize,
     content_height: usize,
     max_scroll: usize,
-    max_h_scroll: usize,
+    h_viewport: HorizontalViewport,
     /// 底部横向滚动条是否真的占到一行（视口只有一行或放不下箭头时不显示）。
     has_h_bar: bool,
 }
@@ -110,12 +111,12 @@ impl DocumentLayout {
             }
             break (lines, buttons);
         };
-        let max_h_scroll = widest.saturating_sub(content_width);
+        let h_viewport = HorizontalViewport::new(content_width, widest);
         Self {
             size: (width, height),
             max_scroll: lines.len().saturating_sub(content_height),
-            max_h_scroll,
-            has_h_bar: horizontal && max_h_scroll > 0 && content_width >= 3,
+            has_h_bar: horizontal && h_viewport.overflows() && content_width >= 3,
+            h_viewport,
             lines,
             buttons,
             content_width,
@@ -167,9 +168,9 @@ impl DocumentLayout {
         );
         let bar = HorizontalBar::new(
             rect.width,
-            self.content_width,
-            self.content_width + self.max_h_scroll,
-            h_scroll,
+            self.h_viewport.viewport(),
+            self.h_viewport.content(),
+            self.h_viewport.clamp(h_scroll),
         )?;
         Some((rect, bar))
     }
@@ -261,7 +262,9 @@ pub(crate) fn document_h_scroll_max(
     width: usize,
     height: usize,
 ) -> usize {
-    DocumentLayout::new(content, width.max(1), height.max(1)).max_h_scroll
+    DocumentLayout::new(content, width.max(1), height.max(1))
+        .h_viewport
+        .max_offset()
 }
 
 /// 文档变体共享的可变视图状态：竖直/水平偏移、按下态与缓存的排版。
@@ -308,7 +311,7 @@ impl DocumentView<'_> {
         }
         let cached = DocumentLayout::cached(layout, content, area);
         *scroll = (*scroll).min(cached.max_scroll);
-        *h_scroll = (*h_scroll).min(cached.max_h_scroll);
+        *h_scroll = cached.h_viewport.clamp(*h_scroll);
         let h_offset = u16::try_from(*h_scroll).unwrap_or(u16::MAX);
         let content_area = cached.content_area(area);
         let mut lines = cached.lines[*scroll..].to_vec();
@@ -432,12 +435,15 @@ impl DocumentView<'_> {
                 }
                 let cached = DocumentLayout::cached(layout, content, area);
                 // Shift+滚轮在字符图上横向平移；没有横向溢出时退回纵向滚动。
-                if mouse.modifiers.contains(KeyModifiers::SHIFT) && cached.max_h_scroll > 0 {
-                    *h_scroll = if mouse.kind == MouseEventKind::ScrollUp {
-                        h_scroll.saturating_sub(WHEEL_COLS)
-                    } else {
-                        h_scroll.saturating_add(WHEEL_COLS).min(cached.max_h_scroll)
-                    };
+                if mouse.modifiers.contains(KeyModifiers::SHIFT) && cached.h_viewport.overflows() {
+                    *h_scroll = cached.h_viewport.pan(
+                        *h_scroll,
+                        if mouse.kind == MouseEventKind::ScrollUp {
+                            -(WHEEL_COLS as i32)
+                        } else {
+                            WHEEL_COLS as i32
+                        },
+                    );
                     return true;
                 }
                 *scroll = if mouse.kind == MouseEventKind::ScrollUp {
@@ -456,14 +462,17 @@ impl DocumentView<'_> {
                 }
                 let cached = DocumentLayout::cached(layout, content, area);
                 // 一行高的视口放不下滚动条，但溢出列仍要能平移。
-                if cached.max_h_scroll == 0 {
+                if !cached.h_viewport.overflows() {
                     return false;
                 }
-                *h_scroll = if mouse.kind == MouseEventKind::ScrollLeft {
-                    h_scroll.saturating_sub(WHEEL_COLS)
-                } else {
-                    h_scroll.saturating_add(WHEEL_COLS).min(cached.max_h_scroll)
-                };
+                *h_scroll = cached.h_viewport.pan(
+                    *h_scroll,
+                    if mouse.kind == MouseEventKind::ScrollLeft {
+                        -(WHEEL_COLS as i32)
+                    } else {
+                        WHEEL_COLS as i32
+                    },
+                );
                 true
             }
             // 终端丢失左键 release 后只剩移动事件：清除悬空的按下态与 thumb 拖拽。
