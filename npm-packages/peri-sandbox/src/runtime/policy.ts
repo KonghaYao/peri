@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, realpathSync, rmSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import type { SandboxProfile } from '../instance/types.js';
 import { SandboxError } from '../instance/types.js';
 import { srtRuntime } from './srt.js';
@@ -49,14 +49,16 @@ function overlapsManagedRoot(candidate: string, root: string): boolean {
 /**
  * Build the SRT policy for one sandbox.
  *
- * `allowRead` is limited to runtime paths plus workspace/home/tmp; the
- * sandbox root itself (policy, token, lock, diagnostics) stays unreadable.
+ * `allowRead` is limited to `profile.runtimeReadPaths`, the SRT package
+ * directory, `periPath` itself and workspace/home/tmp; the sandbox root
+ * (policy, token, lock, diagnostics) stays unreadable.
  *
- * The Peri binary's directory is allowed as well: `sandbox-exec` needs search
- * permission on the parent to exec `<dir>/peri`, and the default development
- * layout (`target/debug/peri`) does not include that directory in any runtime
- * path. Only the parent is added; sibling files stay readable like any other
- * runtime directory (e.g. `/usr/bin`).
+ * The Peri binary's parent directory is not added here. `sandbox-exec` needs
+ * search permission on the parent to exec `<dir>/peri`, so callers that rely on
+ * that layout must request it explicitly:
+ * `StartSandboxOptions.allowPeriBinaryDirectory` appends the directory to the
+ * effective profile, and direct `policyFor` callers can list it in
+ * `profile.runtimeReadPaths`.
  */
 export function policyFor(options: {
   sandboxesRoot: string;
@@ -68,12 +70,7 @@ export function policyFor(options: {
 }): { json: string; hash: string } {
   const root = existsSync(options.sandboxesRoot) ? realpathSync(options.sandboxesRoot) : resolve(options.sandboxesRoot);
   const reads: string[] = [];
-  for (const path of [
-    ...options.profile.runtimeReadPaths,
-    srtRuntime().packageRoot,
-    options.periPath,
-    dirname(options.periPath),
-  ]) {
+  for (const path of [...options.profile.runtimeReadPaths, srtRuntime().packageRoot, options.periPath]) {
     if (!existsSync(path)) throw new SandboxError('unsupported_environment', `runtime path missing: ${path}`);
     const target = realpathSync(path);
     for (const candidate of [path, target]) {

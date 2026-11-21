@@ -438,7 +438,13 @@ export class SwarmManager {
     const sandboxId = reservation.sandboxId;
     let instance: SandboxInstance;
     try {
-      instance = await this.startSandbox({ sandboxId, sandboxesRoot: this.root });
+      instance = await this.startSandbox({
+        sandboxId,
+        sandboxesRoot: this.root,
+        // macOS sandbox-exec needs search permission on the peri binary's
+        // parent; the shared policy keeps that scope opt-in per caller.
+        allowPeriBinaryDirectory: true,
+      });
     } catch (error) {
       reservation.state = 'failed';
       reservation.lastError = {

@@ -273,6 +273,7 @@ function startSandbox(options?: StartSandboxOptions): Promise<SandboxInstance>;
 | `port` | `0` | 显式占用返回 `conflict` |
 | `periPath` | settings 值 | 启动前校验存在且是普通文件 |
 | `periSha256` | settings 值 | 与文件 SHA-256 不一致报 `unsupported_environment` |
+| `allowPeriBinaryDirectory` | `false` | 仅显式 `true` 时把 `dirname(periPath)` 并入本次 profile 的 `runtimeReadPaths`（去重、规范化）；公共 policy 默认不放行该目录 |
 | `bashCalls` | `10000` | 单实例 Bash 调用预算 |
 | `startupTimeoutMs` | `45000` | settings 可提供默认值，per-start 覆盖 |
 | `stopTimeoutMs` | `15000` | settings 可提供默认值，per-start 覆盖 |
@@ -415,7 +416,7 @@ settings 的最小合法形状（四个顶层字段必填；`profiles` 中这个
 
 profile 内必填 `runtimeReadPaths`、`memoryMax`、`tasksMax`、`cpuQuota`；`allowedDomains` 可省略（默认空列表）。`allowedDomains` 只填域名，不支持 URL 或 `*`。`runtimeReadPaths` 必须存在且不能覆盖 `sandboxesRoot`。`memoryMax`、`tasksMax`、`cpuQuota` 只在 Linux 生效。SRT policy 在每次启动时重新生成，因此修改 profile 后需重启实例；同一 workspace 会在新 policy 下启动。
 
-`PERI_PATH`/settings 的 `periPath` 父目录会由 policy 生成器自动加入 `allowRead`：`sandbox-exec` 执行 `<dir>/peri` 需要该目录的 search 权限，默认开发布局 `<repo>/target/debug/peri` 因此可直接启动，不需要手改 policy。显式给出的 `runtimeReadPaths` 仍会保留并在同一 policy 中生效。
+`PERI_PATH`/settings 的 `periPath` 父目录**不会**由公共 policy 自动加入 `allowRead`：默认只放行 profile 的 `runtimeReadPaths`、SRT 包目录与可执行文件本身。若 `sandbox-exec` 需要搜索 `<dir>/peri` 的父目录（macOS 上执行任意布局的二进制都会遇到），调用方必须显式请求：`startSandbox({ allowPeriBinaryDirectory: true })` 会把 `dirname(periPath)` 合并进本次 profile 的 `runtimeReadPaths`（去重、保持规范化），也可以直接把该目录写进 profile 的 `runtimeReadPaths`。默认开发布局 `<repo>/target/debug/peri` 因此需要显式开启该选项或配置 profile 后才能启动；Swarm 链路是显式开启的调用方。
 
 `settings.json` 中的路径必须是规范化绝对路径（示例中的 `/Users/you/...` 是占位符）：加载时不展开 `~`，写 `"~/.peri-sandbox/sandboxes"` 会因不是绝对路径而报 `invalid_options`。
 
@@ -423,8 +424,8 @@ profile 内必填 `runtimeReadPaths`、`memoryMax`、`tasksMax`、`cpuQuota`；`
 
 ### 隔离边界
 
-1. 文件系统：SRT policy 设置 `denyRead: ["/"]`，`allowRead` 仅包含 profile 的 `runtimeReadPaths`、SRT 包目录、Peri 可执行文件及其父目录、workspace/home/tmp；workspace 与 home 可写。
-2. 为了让 `sandbox-exec` 执行 `<dir>/peri`，policy 以目录级 `allowRead` 放行 Peri 的父目录；该目录下的其他文件因此对沙箱可读。不要把 Peri 二进制放在含 token/凭据的目录：本地开发用 `<repo>/target/debug/peri`，生产部署用专用 bin 目录。默认布局 `~/.peri/peri` 会使 `~/.peri` 对沙箱可读；若该目录保存 `settings.json` 等配置，请把二进制移到专用目录。
+1. 文件系统：SRT policy 设置 `denyRead: ["/"]`，`allowRead` 仅包含 profile 的 `runtimeReadPaths`、SRT 包目录、Peri 可执行文件本身、workspace/home/tmp；workspace 与 home 可写。
+2. 公共 policy 不自动放行 Peri 的父目录。需要 `sandbox-exec` 搜索 `<dir>/peri` 的调用方通过 `StartSandboxOptions.allowPeriBinaryDirectory` 或 profile 的 `runtimeReadPaths` 显式请求；目录级放行会让其中其他文件对沙箱可读，因此只应把二进制放在专用目录：本地开发用 `<repo>/target/debug/peri`，生产部署用专用 bin 目录。开启该选项时，默认布局 `~/.peri/peri` 会使 `~/.peri` 对沙箱可读；若该目录保存 `settings.json` 等配置，请把二进制移到专用目录。
 3. `<sandboxRoot>` 下的 `policy.json`、`token`、`.lock`、`diagnostics/` 不在 `allowRead` 中；宿主进程本身仍能读取。
 4. 网络：按域名严格 allowlist，`strictAllowlist: true`，不允许 URL 或通配符，Unix socket 默认拒绝。
 5. Linux 用 cgroup 提供 CPU/内存/进程数硬限制；macOS 没有等价硬限制，double-fork/setsid 后代可能逃逸进程组。

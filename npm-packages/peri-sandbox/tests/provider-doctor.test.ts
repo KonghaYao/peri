@@ -3,12 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { settingsSchema, profileSchema } from '../src/instance/options.js';
-import { policyFor } from '../src/runtime/policy.js';
-import { SystemdProvider } from '../src/runtime/systemd-provider.js';
-import { transientUnitProperties, verifyProbeCgroup } from '../src/runtime/doctor.js';
-import { srtRuntime } from '../src/runtime/srt.js';
+import { profileSchema, settingsSchema } from '../src/instance/options.js';
 import type { SandboxProfile } from '../src/instance/types.js';
+import { transientUnitProperties, verifyProbeCgroup } from '../src/runtime/doctor.js';
+import { policyFor } from '../src/runtime/policy.js';
+import { srtRuntime } from '../src/runtime/srt.js';
+import { SystemdProvider } from '../src/runtime/systemd-provider.js';
 
 const sandboxId = `sbx_${'a'.repeat(32)}`;
 const profile: SandboxProfile = {
@@ -46,7 +46,7 @@ test('sandbox reads only the required SRT npm package, not its parent project', 
   assert.equal(policy.filesystem.allowGitConfig, true);
 });
 
-test('policy allows the peri binary directory and keeps explicit runtime paths', () => {
+test('policy keeps explicit runtime paths and does not add the peri binary directory', () => {
   const root = mkdtempSync(join(tmpdir(), 'peri-policy-'));
   try {
     const bin = join(root, 'target', 'debug');
@@ -54,21 +54,28 @@ test('policy allows the peri binary directory and keeps explicit runtime paths',
     const periPath = join(bin, 'peri');
     writeFileSync(periPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const sandboxesRoot = join(root, 'sandboxes');
-    const policy = JSON.parse(
-      policyFor({
-        sandboxesRoot,
-        sandboxId,
-        workspacePath: join(sandboxesRoot, sandboxId, 'workspace'),
-        homePath: join(sandboxesRoot, sandboxId, 'home'),
-        profile,
-        periPath,
-      }).json,
-    );
-    // sandbox-exec needs search permission on the parent to exec <dir>/peri.
-    assert(policy.filesystem.allowRead.includes(bin));
-    assert(policy.filesystem.allowRead.includes(periPath));
-    assert(policy.filesystem.allowRead.includes('/usr'));
-    assert(!policy.filesystem.allowRead.includes(sandboxesRoot));
+    const build = (runtimeReadPaths: string[]) =>
+      JSON.parse(
+        policyFor({
+          sandboxesRoot,
+          sandboxId,
+          workspacePath: join(sandboxesRoot, sandboxId, 'workspace'),
+          homePath: join(sandboxesRoot, sandboxId, 'home'),
+          profile: { ...profile, runtimeReadPaths },
+          periPath,
+        }).json,
+      );
+    // The shared policy never widens to dirname(periPath); opt-in callers
+    // list the directory in profile.runtimeReadPaths instead.
+    const shared = build(['/usr']);
+    assert(shared.filesystem.allowRead.includes(periPath));
+    assert(!shared.filesystem.allowRead.includes(bin));
+    assert(shared.filesystem.allowRead.includes('/usr'));
+    assert(!shared.filesystem.allowRead.includes(sandboxesRoot));
+    const optedIn = build(['/usr', bin]);
+    assert(optedIn.filesystem.allowRead.includes(bin));
+    assert(optedIn.filesystem.allowRead.includes(periPath));
+    assert(optedIn.filesystem.allowRead.includes('/usr'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

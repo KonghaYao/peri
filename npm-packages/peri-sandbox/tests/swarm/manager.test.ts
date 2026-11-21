@@ -71,6 +71,19 @@ test('concurrent ensure starts the sandbox exactly once', async (t) => {
   }
 });
 
+test('manager opts into the peri binary directory for sandbox starts', async (t) => {
+  const root = temporarySwarmRoot(t);
+  const fake = createFakeStarter();
+  const manager = new SwarmManager({ root, startSandbox: fake.start });
+  try {
+    await manager.ensure('env-peri-binary');
+    assert.equal(fake.calls.length, 1);
+    assert.equal(fake.calls[0]?.options.allowPeriBinaryDirectory, true);
+  } finally {
+    await manager.closeAll();
+  }
+});
+
 test('close keeps data and re-ensure reuses the directory with a new run', async (t) => {
   const root = temporarySwarmRoot(t);
   const fake = createFakeStarter();

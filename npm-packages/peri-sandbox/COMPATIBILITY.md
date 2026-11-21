@@ -68,7 +68,7 @@ Linux 侧需要手工确认：`run` 前台启动后 Ctrl+C 无残留；`kill -9`
 | 能力 | 说明 |
 | --- | --- |
 | workspace/home 持久 | `close()` 保留；只有 `deleteData` 删除 |
-| SRT 路径/网络策略 | 每次启动重新生成 `policy.json`；`denyRead: ["/"]`，allowRead 仅运行时路径（含 Peri 可执行文件及其父目录）+ workspace/home/tmp |
+| SRT 路径/网络策略 | 每次启动重新生成 `policy.json`；`denyRead: ["/"]`，allowRead 仅运行时路径（`runtimeReadPaths`、SRT 包目录、Peri 可执行文件本身）+ workspace/home/tmp；Peri 父目录只由调用方显式 opt-in 进入本次 profile |
 | 单 workspace 单写者 | `<sandboxRoot>/.lock`（O_EXCL + pid 存活校验） |
 | HTTP 鉴权 | 每实例 token；`timingSafeEqual`；Host/Origin 校验；请求 1 MiB / 响应 8 MiB |
 | Linux cgroup 限制 | transient unit 保留 `MemoryMax`/`TasksMax`/`CPUQuota`/`PrivateTmp` |

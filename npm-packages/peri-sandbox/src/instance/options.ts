@@ -184,7 +184,10 @@ export interface ResolvedSandboxOptions {
 }
 
 /**
- * Select the effective profile exactly as `startSandbox` does.
+ * Select the base profile exactly as `startSandbox` does.
+ *
+ * The `allowPeriBinaryDirectory` opt-in is applied after this in
+ * `resolveOptions`, so diagnostics see the settings/profile rule only.
  *
  * Exported so read-only diagnostics share the runtime rule instead of
  * re-implementing `defaultProfile` fallback or unknown-name handling.
@@ -216,6 +219,11 @@ export function resolveOptions(options: StartSandboxOptions, settings: SandboxSe
       ? join(sandboxRoot, 'workspace')
       : resolveExplicitWorkspace(options.workspacePath, sandboxesRoot);
   const { profile, profileName } = resolveProfile(settings, options);
+  const periPath = resolve(options.periPath ?? settings.periPath);
+  const effectiveProfile =
+    options.allowPeriBinaryDirectory === true
+      ? { ...profile, runtimeReadPaths: [...new Set([...profile.runtimeReadPaths, dirname(periPath)])] }
+      : profile;
 
   if (options.token !== undefined && options.tokenFile !== undefined)
     throw new SandboxError('invalid_options', 'token and tokenFile are mutually exclusive.');
@@ -236,9 +244,9 @@ export function resolveOptions(options: StartSandboxOptions, settings: SandboxSe
     sandboxRoot,
     workspacePath,
     homePath: join(sandboxRoot, 'home'),
-    profile,
+    profile: effectiveProfile,
     profileName,
-    periPath: resolve(options.periPath ?? settings.periPath),
+    periPath,
     periSha256: options.periSha256 ?? settings.periSha256,
     token: options.token,
     tokenFile: options.tokenFile === undefined ? undefined : canonicalizePath(resolve(options.tokenFile)),

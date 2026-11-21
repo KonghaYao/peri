@@ -170,3 +170,18 @@ policy/settings。第 6 步 PARTIAL，残留与聚焦修复如下：
 -p peri-swarm` 全绿（含 `bootstrap` 31、`reader`、`streaming`、`items_pagination`）、
 `clippy` 与 pre-commit 通过。**真实模型供应商、后台任务引用、1000 Agent 规模、生产
 TLS、Linux SRT 与真实第三方 MCP 仍未验证**；本记录不把它们写成已验收。
+
+## 9. 审查修复：Peri 二进制目录收窄为显式 opt-in
+
+PR #513 审查指出公共 `policyFor()` 无条件放行 `dirname(periPath)`，扩大了所有沙箱的
+读范围。现在公共策略只保留 profile 的 `runtimeReadPaths`、SRT 包目录与 `periPath`
+本身；`startSandbox` 新增 `allowPeriBinaryDirectory`（默认 `false`），仅 Swarm
+manager 启动沙箱时传 `true`，把 `dirname(periPath)` 去重后并入该实例 profile 的
+`runtimeReadPaths`。`provider-doctor.test.ts` 断言公共 policy 不含二进制目录；
+`options.test.ts` 覆盖默认不含、显式 true 时合并与去重；Swarm manager 测试断言启动
+选项为 true。
+
+门禁（本工作树）：`bun run build` 通过；`node --test dist/tests/*.test.js` 74 pass /
+0 fail；`node --test dist/tests/swarm/*.test.js` 38 pass / 0 fail；相关文件
+`biome check` 无 error。**未重跑真实 macOS `sandbox-exec` 端到端链路**：Swarm 显式
+opt-in 后的二进制执行与目录可读范围仍需用真实链路复验，本记录不将其写成已验收。

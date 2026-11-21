@@ -237,7 +237,10 @@ Bun：
 - `npm-packages/peri-sandbox` 的 `bun run dev:swarm` 启动本地服务，默认
   `127.0.0.1:8081`；根目录默认 `~/.peri-swarm/sandboxes`，空闲回收阈值
   `PERI_SWARM_IDLE_MS` 默认 30 分钟，`0` 关闭。沙箱内的 Peri 可执行文件由
-  `PERI_PATH` 指定。
+  `PERI_PATH` 指定。Swarm 启动沙箱时显式传 `allowPeriBinaryDirectory: true`，
+  只把该实例 profile 的 `runtimeReadPaths` 扩到 `dirname(periPath)`
+  （macOS `sandbox-exec` 需要父目录 search 权限）；公共 `peri-sandbox` policy
+  默认不放行该目录。
 
 模型：
 
