@@ -49,7 +49,10 @@ pub async fn create_session(
     };
 
     if stream {
-        // Contract: the SSE subscription exists before the first turn runs.
+        // Contract: the SSE subscription exists before the first turn is
+        // scheduled. The actor may start the turn right after its action reply,
+        // so delivery is bounded by the broadcast capacity, not by this
+        // response.
         let subscription = state.service().open_stream(&logical_id).await;
         // The receiver is not polled until the response body reaches the
         // client. Running the turn inside `create_session` would buffer every
@@ -57,15 +60,19 @@ pub async fn create_session(
         // would surface as `Lagged`: one `gap` frame, then the stream closes
         // with the whole first turn lost. Record the input now (acceptance
         // stays in the service) and answer with headers plus the initial
-        // `session` frame before the turn starts.
+        // `session` frame without waiting for the turn. Events that exceed the
+        // capacity while the body is unpolled fail with `gap` + EOF; the client
+        // reconnects from the last rendered item `seq`.
         command.defer_initial_turn = true;
         let mut result = state.service().create_session(command).await?;
-        // Build the response (headers plus the initial `session` frame) before
-        // scheduling the turn, so the response never depends on the turn.
+        // Build the response (headers plus the initial `session` frame) from
+        // the accepted result; it never waits for the turn to finish.
         let response = sse::create_response(&result, subscription, state.config().sse_heartbeat);
-        // The actor path schedules the deferred turn itself; the in-process
-        // fake returns it here. Spawn it before answering, mirroring
-        // `submit_event`, so the turn does not wait for the HTTP response.
+        // The actor path schedules the deferred turn itself (`ctx.wait_until`)
+        // and returns no pending turn across the process boundary. The
+        // in-process fake returns it here. Spawn it before answering, mirroring
+        // `submit_event`; the in-process turn does not wait for the response,
+        // whereas the actor's turn may already have started.
         if let Some(pending) = result.pending_initial.take() {
             let service = std::sync::Arc::clone(state.service());
             tokio::spawn(async move {

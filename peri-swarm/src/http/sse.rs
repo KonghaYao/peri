@@ -17,8 +17,14 @@ use crate::domain::{CreateSessionResponse, StreamEvent};
 use crate::service::{CreateSessionResult, EventSubscription};
 
 /// Successful `POST /sessions?stream=true` response: one `session` event, then
-/// the first turn's live events. The subscription was opened by the handler
-/// before the service started the turn, which runs after this response.
+/// the first turn's live events.
+///
+/// The subscription was opened before the first turn was recorded and
+/// scheduled, and this response is built from the accepted create result
+/// without waiting for the turn. On the actor path the turn may start as soon
+/// as the action reply is sent, so first-turn events are delivered while the
+/// body is being read; if they exceed the broadcast capacity the stream reports
+/// `gap` and ends (see [`event_stream`]).
 pub fn create_response(
     result: &CreateSessionResult,
     subscription: EventSubscription,

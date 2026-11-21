@@ -616,9 +616,10 @@ impl Handler<Create> for SwarmActor {
         match result {
             Ok(mut result) => {
                 // A streamed create answered the action before its first turn;
-                // run that turn out-of-band, like `Submit`, so the caller can
-                // return the SSE response (headers and the initial `session`
-                // frame) first.
+                // run that turn out-of-band, like `Submit`, so the gateway can
+                // construct the SSE response without waiting for it. The reply
+                // may still be followed immediately by the turn: `wait_until`
+                // starts it as soon as the action reply is sent (`design §4.3`).
                 if let Some(pending) = result.pending_initial.take() {
                     let service = Arc::clone(&self.service);
                     ctx.wait_until(async move {

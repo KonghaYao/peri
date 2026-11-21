@@ -239,6 +239,70 @@ async fn turn_in_progress_and_steer() {
 }
 
 #[tokio::test]
+async fn create_on_a_running_session_is_refused_before_recording_the_input() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig {
+        turn_policy: TurnPolicy::Manual,
+        ..ServiceConfig::default()
+    });
+    service
+        .create_session(create_command("agent-01", "/tmp/agent-01"))
+        .await
+        .expect("create");
+    let id = LogicalId::parse("agent-01").expect("id");
+    service
+        .submit_input(&id, submission("input-1", "long task"))
+        .await
+        .expect("first");
+    assert_eq!(
+        service.get_session(&id).await.expect("get").state,
+        SessionState::Running
+    );
+    let before = service
+        .list_items(
+            &id,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                after_id: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("items");
+
+    // Both create modes follow the same admission rule: a create that replays
+    // its initial input on a busy session is refused before the user item is
+    // recorded, so no opener is left behind for a turn that cannot start.
+    for defer in [false, true] {
+        let mut command = create_command("agent-01", "/tmp/agent-01");
+        command.initial_input = Some("replayed".to_owned());
+        command.defer_initial_turn = defer;
+        let error = service
+            .create_session(command)
+            .await
+            .expect_err("running create");
+        assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    }
+    let after = service
+        .list_items(
+            &id,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                after_id: None,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("items");
+    assert_eq!(
+        after.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        before.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        "a refused create must not append a stray user item"
+    );
+}
+
+#[tokio::test]
 async fn control_input_is_recorded_without_a_turn() {
     let service = InMemorySwarmService::in_memory(ServiceConfig::default());
     service
@@ -569,6 +633,34 @@ async fn deferred_create_returns_the_first_turn_without_running_it() {
         ),
         "the deferred turn has not started"
     );
+}
+
+#[tokio::test]
+async fn pending_initial_does_not_cross_the_actor_boundary() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    let mut command = create_command("agent-01", "/tmp/agent-01");
+    command.initial_input = Some("hello".to_owned());
+    command.defer_initial_turn = true;
+    let created = service.create_session(command).await.expect("create");
+    assert!(
+        created.pending_initial.is_some(),
+        "the deferred turn is returned to the caller that runs it"
+    );
+
+    // `#[serde(skip)]` keeps execution state out of the actor envelope: the
+    // gateway deserializes the reply and must not see a pending turn it would
+    // wrongly run (`design §4.3`).
+    let value = serde_json::to_value(&created).expect("serialize");
+    assert!(
+        value.get("pendingInitial").is_none(),
+        "the envelope carries no execution state: {value}"
+    );
+    let decoded: CreateSessionResult = serde_json::from_value(value).expect("deserialize");
+    assert!(
+        decoded.pending_initial.is_none(),
+        "a decoded create reply never carries a pending turn"
+    );
+    assert!(decoded.created, "the durable fields survive the round trip");
 }
 
 #[tokio::test]

@@ -30,7 +30,7 @@ use peri_swarm::actor::service::{AcpSwarmService, ActorServiceConfig};
 use peri_swarm::domain::{
     ActorKey, ContentBlock, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode, EventCursor,
     InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId,
-    SessionState, StreamEvent, TurnEvent,
+    OfficialEvent, SessionState, StreamEvent, TurnEvent,
 };
 use peri_swarm::service::{CreateSessionCommand, SwarmService};
 use peri_swarm::store::{MemorySwarmStore, SwarmSessionRow, SwarmSessionUpdate, SwarmStore};
@@ -1070,6 +1070,322 @@ async fn deferred_create_returns_before_the_first_turn_executes() {
         }),
         "the assistant completion reaches the stream"
     );
+    let reports = service.shutdown_all().await;
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].complete,
+        "host shutdown report: {:?}",
+        reports[0]
+    );
+}
+
+/// The deferred first turn replays the official frames an SDK sees, in order.
+///
+/// [`collect_until_terminal`] drops `StreamEvent::Official`; this test keeps
+/// them and asserts the SDK-visible sequence of the actor path itself (for the
+/// HTTP-level counterpart see `streaming_test`, which drives the fake).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deferred_first_turn_emits_the_official_frames_in_sdk_order() {
+    clear_telemetry_env();
+    let (base_url, _stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    );
+    let logical = LogicalId::parse("agent-create-official").expect("logical id");
+    let (_, mut live) = service.open_stream(&logical).await.into_parts();
+
+    let mut command = create_command(&logical, &cwd, Some("hello"));
+    command.defer_initial_turn = true;
+    let created = service.create_session(command).await.expect("create");
+    let pending = created.pending_initial.expect("the first turn is deferred");
+    service
+        .run_pending_turn(pending)
+        .await
+        .expect("run the deferred first turn");
+
+    // The subscription predates the session row, so it observes the whole
+    // first turn; `agent.session.idle` closes it and any other official frame
+    // is unexpected.
+    let mut official: Vec<OfficialEvent> = Vec::new();
+    while !official
+        .last()
+        .is_some_and(|event| matches!(event, OfficialEvent::SessionIdle { .. }))
+    {
+        let event = timeout(Duration::from_secs(30), live.recv())
+            .await
+            .expect("the first turn terminates")
+            .expect("the subscription stays live");
+        if let StreamEvent::Official(event) = event {
+            official.push(event);
+        }
+    }
+    let names: Vec<&str> = official.iter().map(OfficialEvent::event_type).collect();
+    assert_eq!(
+        names,
+        [
+            "agent.session.turn.created",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+    );
+    let OfficialEvent::TurnCreated { turn_id, turn, .. } = &official[0] else {
+        panic!("the first official frame opens the turn: {:?}", official[0]);
+    };
+    assert!(
+        turn.subagent_id.is_none(),
+        "a swarm turn belongs to the root agent: {turn:?}"
+    );
+    let items: Vec<(&str, String)> = official[1..3]
+        .iter()
+        .map(|event| match event {
+            OfficialEvent::TurnItemAdded {
+                turn_id: Some(item_turn),
+                item,
+                ..
+            } => {
+                assert_eq!(item_turn, turn_id, "the item names the created turn");
+                (item.role.as_str(), item.turn_id.clone())
+            }
+            other => panic!("expected turn.item.added: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        items,
+        vec![("user", turn_id.clone()), ("assistant", turn_id.clone())],
+        "the user frame precedes the assistant completion"
+    );
+    let OfficialEvent::TurnCompleted {
+        turn_id: completed_turn,
+        ..
+    } = &official[3]
+    else {
+        panic!("the terminal names the turn: {:?}", official[3]);
+    };
+    assert_eq!(completed_turn, turn_id, "completed closes the created turn");
+
+    let reports = service.shutdown_all().await;
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].complete,
+        "host shutdown report: {:?}",
+        reports[0]
+    );
+}
+
+/// A create that replays its input into a reserved turn is refused before it
+/// records anything.
+///
+/// The accepted turn's user item opens the log's turn slot; execution has not
+/// started yet (the handler would spawn it). Recording the create input there
+/// used to leave a stray opener whose turn could never start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_on_a_reserved_turn_is_refused_before_the_user_item() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    );
+    let logical = LogicalId::parse("agent-create-reserved").expect("logical id");
+    service
+        .create_session(create_command(&logical, &cwd, None))
+        .await
+        .expect("create");
+
+    let accepted = service
+        .accept_input(&logical, user_input(&uuid(31), InputMode::Turn, "occupied"))
+        .await
+        .expect("accept");
+    assert!(accepted.pending_turn.is_some(), "the turn is due");
+    assert_eq!(stub.main_calls(), 0, "the accepted turn has not run");
+    let before = items_of(&service, &logical).await;
+    assert_eq!(before.len(), 1, "one user item opened the turn");
+
+    // Both create modes follow the same admission rule: `defer` only changes
+    // who executes the turn, not whether a second opener may be recorded.
+    for defer in [false, true] {
+        let mut command = create_command(&logical, &cwd, Some("replayed"));
+        command.defer_initial_turn = defer;
+        let error = service
+            .create_session(command)
+            .await
+            .expect_err("a create must not open a second turn");
+        assert_eq!(error.code(), ErrorCode::TurnInProgress);
+        assert_eq!(error.details()["suggest"], json!("steer"));
+    }
+
+    let after = items_of(&service, &logical).await;
+    assert_eq!(
+        after, before,
+        "a refused create leaves no stray user item: {after:?}"
+    );
+    assert_eq!(stub.main_calls(), 0, "no turn was started");
+
+    let reports = service.shutdown_all().await;
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].complete,
+        "host shutdown report: {:?}",
+        reports[0]
+    );
+}
+
+/// A create while the turn slot is held by a running prompt is refused too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_on_a_running_turn_is_refused_before_the_user_item() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    stub.set_delay(3_000);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = Arc::new(AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    ));
+    let logical = LogicalId::parse("agent-create-running").expect("logical id");
+    service
+        .create_session(create_command(&logical, &cwd, None))
+        .await
+        .expect("create");
+    let accepted = service
+        .accept_input(
+            &logical,
+            user_input(&uuid(41), InputMode::Turn, "long task"),
+        )
+        .await
+        .expect("accept");
+    let pending = accepted.pending_turn.expect("the turn is due");
+    let runner = {
+        let service = Arc::clone(&service);
+        tokio::spawn(async move { service.run_pending_turn(pending).await })
+    };
+    // The model request proves the prompt is in flight and holds the slot.
+    assert!(
+        wait_for_main_calls(&stub, 1, Duration::from_secs(10)).await,
+        "the running turn reaches the model"
+    );
+
+    for defer in [false, true] {
+        let mut command = create_command(&logical, &cwd, Some("replayed"));
+        command.defer_initial_turn = defer;
+        let error = service
+            .create_session(command)
+            .await
+            .expect_err("a create must not replay its input into a running turn");
+        assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    }
+
+    runner
+        .await
+        .expect("turn task")
+        .expect("the accepted turn completes");
+    wait_idle(&service, &logical).await;
+    let page = service
+        .list_items(
+            &logical,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                after_id: None,
+                limit: ItemsWindow::MAX_LIMIT,
+            },
+        )
+        .await
+        .expect("items");
+    let user_texts: Vec<&str> = page
+        .items
+        .iter()
+        .filter(|item| item.payload["role"] == json!("user"))
+        .map(|item| item.payload["text"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        user_texts,
+        ["long task"],
+        "the refused creates recorded no user item"
+    );
+
+    let reports = service.shutdown_all().await;
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].complete,
+        "host shutdown report: {:?}",
+        reports[0]
+    );
+}
+
+/// A retried create on an existing idle row defers its first turn once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn existing_idle_row_defers_the_first_turn_exactly_once() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let service = AcpSwarmService::new(
+        Arc::new(MemorySwarmStore::new()),
+        service_config(&base_url, &tmp),
+    );
+    let logical = LogicalId::parse("agent-create-existing-defer").expect("logical id");
+    let first = service
+        .create_session(create_command(&logical, &cwd, None))
+        .await
+        .expect("create");
+    assert!(first.created);
+
+    let mut command = create_command(&logical, &cwd, Some("hello"));
+    command.defer_initial_turn = true;
+    let reused = service.create_session(command).await.expect("reuse");
+    assert!(!reused.created, "an existing row is not a new session");
+    let pending = reused.pending_initial.expect("the first turn is deferred");
+    assert_eq!(
+        reused.session.last_item_seq, 1,
+        "defer persisted only the user item"
+    );
+    assert_eq!(reused.session.state, SessionState::Running);
+    assert_eq!(stub.main_calls(), 0, "the deferred turn has not run");
+    let before = items_of(&service, &logical).await;
+    assert_eq!(before.len(), 1, "one user item, no assistant item");
+
+    service
+        .run_pending_turn(pending)
+        .await
+        .expect("run the deferred first turn");
+    wait_idle(&service, &logical).await;
+    assert_eq!(stub.main_calls(), 1, "one turn request after the reuse");
+    let page = service
+        .list_items(
+            &logical,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                after_id: None,
+                limit: ItemsWindow::MAX_LIMIT,
+            },
+        )
+        .await
+        .expect("items");
+    let user_items = page
+        .items
+        .iter()
+        .filter(|item| item.payload["role"] == json!("user"))
+        .count();
+    assert_eq!(
+        user_items, 1,
+        "the deferred execution reuses the recorded item"
+    );
+    assert!(
+        page.items.iter().any(|item| {
+            item.payload["role"] == json!("assistant") && item.payload["complete"] == json!(true)
+        }),
+        "the reused row ran the assistant turn"
+    );
+
     let reports = service.shutdown_all().await;
     assert_eq!(reports.len(), 1);
     assert!(

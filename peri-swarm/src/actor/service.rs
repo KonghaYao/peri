@@ -587,6 +587,14 @@ impl AcpSwarmService {
     /// The user item is written exactly once in both modes. A deferred turn
     /// carries the `turn_id` derived from that item, so running it later opens
     /// the same turn the synchronous path would and cannot duplicate the input.
+    ///
+    /// Admission follows [`Self::accept_input`] and happens **before** the user
+    /// item is recorded: a running turn, or a turn accepted earlier that has not
+    /// started yet, owns the session. Recording the initial input there would
+    /// append an opener whose turn can never start (`run_turn` reports
+    /// `turn_in_progress`), leaving a stray user item and no terminal on a
+    /// streamed create. The in-memory fake answers `409` in the same situation
+    /// (`design §4.3`).
     async fn accept_initial_input(
         &self,
         runtime: &Arc<SessionRuntime>,
@@ -594,7 +602,20 @@ impl AcpSwarmService {
         text: &str,
         defer: bool,
     ) -> Result<Option<PendingTurn>, SwarmError> {
-        let (_, item_id) = runtime.log.record_user_input(None, text).await?;
+        let item_id = {
+            let _admission = runtime.admission.lock().await;
+            // Same rule as `accept_input`: a running turn owns the session.
+            if runtime.is_running() {
+                return Err(SwarmError::turn_in_progress());
+            }
+            // A turn accepted earlier but not started yet owns it too; a second
+            // opener would race its user item into that turn.
+            if runtime.log.has_open_turn() {
+                return Err(SwarmError::turn_in_progress());
+            }
+            let (_, item_id) = runtime.log.record_user_input(None, text).await?;
+            item_id
+        };
         let turn_id = turn_id_for_item(&item_id);
         if defer {
             return Ok(Some(PendingTurn {

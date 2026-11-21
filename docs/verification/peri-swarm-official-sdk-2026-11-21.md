@@ -367,8 +367,12 @@ opener。`turn_id` 始终由 opener 的 item id 派生，不用随机或时间�
 没有消费者，首轮事件数超过广播容量时首次读取得到 `Lagged`，SSE 发一帧 `gap` 后
 关闭；未溢出时也只是首轮结束后一次性投递，不是实时流。现在流式 create 在 service
 内持久化初始 user item 与 `turn_id` 后立即返回：actor 用 `ctx.wait_until` 调度该
-turn，in-process fake 由 handler `tokio::spawn`，SSE 响应（headers 与初始 `session`
-帧）先返回，首轮随后在同一订阅上执行。覆盖：
+turn，in-process fake 由 handler `tokio::spawn`；网关先构造并返回 SSE 响应
+（headers 与初始 `session` 帧），首轮随后在同一订阅上执行。首轮事件在广播容量内
+实时送达；客户端读取过慢或首轮突发超过容量时，按既有 `gap` + EOF 语义显式失败，
+可按最后 item `seq` 重连。措辞边界：actor 路径的 action reply 与 gateway 响应构造
+之间仍有一个短窗口（`wait_until` 在 reply 后即可开始），所以不承诺「首轮一定晚于
+客户端读到响应」，只承诺订阅先于首轮建立、响应构造不等待首轮完成（§9.2）。覆盖：
 
 - `tests/streaming_test.rs::stream_create_subscribes_before_the_first_turn` 按顺序
   断言 `agent.session.turn.created`、user 与 assistant 的 `turn.item.added`、
@@ -464,3 +468,119 @@ flake 在本轮两次全量中均未出现；未为它改无关代码。
    的 item 分组/行预算只有 SQL 形状与离线单测，无活体 Loom 往返；真实官方 SDK
    进程仍未启动。
 8. **steer 在已有输出之后**：回放仍可能多一个 turn 边界（设计 §4.2 已记录）。
+
+## 9. 第四轮复核：运行中会话的 create 与首轮措辞
+
+复验基线 `d5cae0008`（`fix(swarm): 流式创建先返回 SSE 再执行首轮`）。本轮修复一个
+中高缺陷与一处文档措辞，均不改变正常 idle 会话的 create 语义、`created` 标志或
+item/turn 身份规则。
+
+### 9.1 缺陷 1：actor 既有行的 streamed create 静默失败并留下 stray item
+
+复验证据（源码确定）：`AcpSwarmService::create_session` 的既有行路径在
+`ensure_live` 成功后直接调用 `accept_initial_input`；该函数先
+`record_user_input(None, text)`，没有检查 `runtime.is_running()` 或
+`runtime.log.has_open_turn()`。`defer=true` 时它返回 `PendingTurn`，actor
+`Handler<Create>` 用 `wait_until` 调 `run_pending_turn` → `run_turn`，admission
+发现 `is_running()` 后返回 `turn_in_progress`，调用处只记 warning。结果：HTTP 已
+返回 `200` SSE，会话日志多一条永不执行的 user item，既无 `turn.failed` 也无其他
+终态，客户端一直等待。in-memory 的既有行路径在写 item 之前检查行状态并返回 `409`，
+两个实现因此分叉。
+
+修复（`peri-swarm/src/actor/service.rs::accept_initial_input`）：在
+`runtime.admission.lock().await` 之下，先检查 `runtime.is_running()`，再检查
+`runtime.log.has_open_turn()`（已受理但尚未开始的 turn），任一成立就在写 user item
+**之前**返回 `SwarmError::turn_in_progress()`。规则与同文件 `accept_input` 的
+admission 段一致，没有第二套判定。检查对 `defer=true`/`defer=false` 同样生效，
+因此**非流式 create 在同样场景由原先的「写入 item 后执行失败」收紧为 `409` 且不写
+item**；这是本轮有意的行为收紧。`recover_creating_row` 保留 `last_seq == 0` 条件，
+窗口内遇到运行中/已预占 turn 时由同一函数返回 `turn_in_progress`，不静默跳过。
+
+判定依据是进程内在途 turn，不是持久化行状态：崩溃后残留的 `running` 行在重新
+attach 后没有在途 turn，create 仍可继续接收初始输入。
+
+测试：
+
+- `tests/actor_runtime_test.rs::create_on_a_reserved_turn_is_refused_before_the_user_item`
+  （真实 host，无模型调用）：既有 idle 行先 `accept_input` 预占 turn（不执行），
+  `defer=false` 与 `defer=true` 的 create 都返回 `TurnInProgress`，item 列表与
+  `suggest=steer` 不变，`stub.main_calls()==0`。
+- `tests/actor_runtime_test.rs::create_on_a_running_turn_is_refused_before_the_user_item`
+  （stub 挂起 3 s）：turn 已进入模型请求后，两种 defer 的 create 都返回
+  `TurnInProgress`；turn 结束后会话只有一条 user item（文本为原输入），证明被拒的
+  create 没有写入。
+- `service::in_memory::tests::create_on_a_running_session_is_refused_before_recording_the_input`：
+  in-memory 的 `409` 行为与「被拒后 item seq 不变」。
+- `creating_row` 的 `last_seq == 0` 窗口无法确定性构造「零 item + 在途 turn」
+  （任何公开受理路径都先写 item）；两个 defer 模式的同一函数测试覆盖该检查本身，
+  恢复路径只透传其错误，未为不可复现窗口造时序测试。
+
+### 9.2 缺陷 2：「先返回 SSE，再执行首轮」的措辞过绝对
+
+actor 的 `ctx.wait_until` 在 action reply 后即可开始首轮，gateway 的响应随后才
+构造；因此「响应一定先于首轮」不成立。这是有界广播 + `gap` 的既有语义，不是无限
+挂起，但文档必须写准。已改写：
+
+- `docs/design/peri-swarm.md` §4.1 方法表、§4.2 慢订阅者、§4.3 创建与首轮、
+  §4.4 的恢复与 `202`：先建立订阅并构造/返回响应，再调度首轮；首轮事件在容量内
+  实时送达，超容量按 `gap` + EOF 显式失败并可按最后 item `seq` 重连；明确 actor
+  路径 action reply 与响应构造之间的短窗口，不承诺首轮晚于客户端读到响应。
+- 本文 §8.1 的同一措辞。
+- 代码注释：`src/http/handlers.rs`、`src/http/sse.rs`、`src/actor/swarm.rs`
+  的 `Handler<Create>`。
+
+### 9.3 新增证据
+
+- **actor 官方帧顺序**：`tests/actor_runtime_test.rs::deferred_first_turn_emits_the_official_frames_in_sdk_order`
+  不复用忽略 `StreamEvent::Official` 的 `collect_until_terminal`，在真实
+  host + stub 模型上按 defer 首轮收集官方帧，断言顺序为
+  `turn.created` → user `turn.item.added` → assistant `turn.item.added` →
+  `turn.completed` → `agent.session.idle`；`turn.created.turn.subagent_id`
+  为 `null`，user/assistant 的 `turn_id` 与 created 一致，`turn.completed`
+  属于同一 turn。
+- **`pending_initial` 不跨进程**：`service::in_memory::tests::pending_initial_does_not_cross_the_actor_boundary`
+  对一个带 pending 的真实 `CreateSessionResult` 序列化，断言 JSON 不含
+  `pendingInitial`，再反序列化得到 `None`（`#[serde(skip)]`），避免 gateway
+  误调 `run_pending_turn`。
+- **既有 idle 行 defer**：`tests/actor_runtime_test.rs::existing_idle_row_defers_the_first_turn_exactly_once`
+  断言复用的 idle 行只写一条 user item、返回 `pending_initial`、`created=false`、
+  执行前无 assistant/终态；`run_pending_turn` 后 assistant 完成且 user item 仍为
+  一条。
+
+### 9.4 实际执行的命令与结果
+
+环境同 §4（`CARGO_HOME=/tmp/cargo-home-rsproxy`）。
+
+| # | 命令 | 结果 |
+| --- | --- | --- |
+| 1 | `cargo test -p peri-swarm --locked --test streaming_test` | 通过：14 passed |
+| 2 | `cargo test -p peri-swarm --locked --test http_contract_test` | 通过：25 passed |
+| 3 | `cargo test -p peri-swarm --locked --test actor_runtime_test` | 通过：13 passed，1 ignored |
+| 4 | `cargo test -p peri-swarm --locked --test items_pagination_test` | 通过：12 passed |
+| 5 | `cargo test -p peri-swarm --locked --lib` | 通过：212 passed |
+| 6 | `cargo clippy -p peri-swarm --all-targets --locked -- -D warnings` | 通过，exit 0 |
+| 7 | `cargo check -p peri-swarm --all-targets --locked` | 通过，exit 0 |
+| 8 | `cargo fmt --check` | 通过，exit 0 |
+| 9 | `git diff --check` | 通过，exit 0，无输出 |
+
+本轮只跑了上述定向命令，未重跑 `openai_hosted_test` 与全量 `cargo test`；
+`openai_hosted_test::an_anonymous_hosted_session_reserves_a_bun_workspace` 的已知
+并行 flake 与本次改动无关。
+
+### 9.5 证据边界与残余风险
+
+1. **仍无真实 engine**：没有 Rivet engine，`SwarmActor::events_response` 与 gateway
+   `RivetSwarmService::open_stream` 之间的真实 HTTP 回调未运行。actor 官方帧测试
+   直接驱动 `AcpSwarmService`（与回调调用同一 service），但不覆盖 engine 的
+   action/stream 编解码与定时器。
+2. **admission 与 turn 启动的窄竞态**：`accept_initial_input` 在锁内检查并写 item，
+   但 `run_turn` 在释放锁后再次取锁、设置 turn slot。窗口内若有另一个输入抢到
+   slot，`run_turn` 仍会返回 `turn_in_progress`（此时 item 已写）；正常 create 的
+   初始输入紧随其后，实际不可达，但形式上不是「检查即预留」。彻底消除需要把
+   slot 预留放在写 item 的同一临界区，本轮未扩大设计。
+3. **defer 后进程崩溃**：初始 user item 已持久化；若首轮在 `wait_until` 调度前
+   进程退出，`PendingTurn` 随进程消失，没有恢复路径补跑该 turn（重试 create 带
+   `input` 时会作为新输入、新 item 再跑一次；不带 `input` 时该 turn 永不执行）。
+   这是 `d5cae0008` 已存在的边界，本轮不改。
+4. **超容量首轮**：首轮事件超过广播容量时仍以 `gap` + EOF 显式失败，客户端需按
+   最后 item `seq` 重连；掉线窗口内的实时官方帧不可恢复（已知限制，§8.5-4）。

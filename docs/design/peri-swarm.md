@@ -87,7 +87,7 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
-| `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先返回 SSE 响应（初始 `session` 帧），再执行首轮 |
+| `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先建立订阅并构造/返回 SSE 响应（初始 `session` 帧），再调度首轮；首轮事件受广播容量约束（§4.3） |
 | `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影；`status` 是官方 `idle`/`in_progress`/`failed` |
 | `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；受理持久化后 `202`；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
 | `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时；含官方 `agent.session.*` 事件 |
@@ -158,7 +158,9 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   情况已由 lookback 修复。
 - 慢订阅者：广播容量耗尽（Lagged）时发一帧 `gap` 后关闭该订阅。丢失的事件可能
   包含终态，官方 SDK 因而以 EOF 识别中断；原生客户端用最后一个已渲染 item 的
-  `seq` 重连恢复。
+  `seq` 重连恢复。流式 create 的首轮走同一通道：订阅先于首轮建立，容量内的首轮
+  事件实时送达；首轮突发或客户端读取过慢超过容量时同样 `gap` + EOF，不静默丢弃
+  （§4.3）。
 - items 按 **item 分组**分页（§4.2.2）：`limit` 同时是 item 数上限与整页聚合行预算，
   `has_more` 按 item 计算，`nextCursor` 是本页最后一个 item 的最大 `seq`（仅
   `has_more=true` 时给出）。`items` 是本页这些 item 的全部原始行；`data` 是每个
@@ -250,24 +252,37 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 `POST /sessions` 接受 OpenAI Agents API 形状的 `model`/`instructions`（顶层与
 `agent` 内同名字段必须一致）、`input`、`environment`、`tools` 与 `stream`。
-`stream:true` 时网关先为 `logicalId` 打开订阅，service 受理初始输入后立即返回，
-网关先回 SSE 响应（headers 与初始 `session` 帧），首轮随后在同一订阅上执行并完整
-送达。延迟的不是受理：初始 user item 与其 `turn_id` 已在 service 内持久化，执行归属
-仍由 service/actor 持有，因此 `creating` 行恢复时「已有 item 不重放」的至多一次语义
-不变。必须延迟的原因有二：广播 receiver 只在响应到达客户端后才被轮询，而通道容量
-有界（gateway 默认 256）；若在返回响应前跑完首轮，超过容量的首轮会让首次读取得到
-`Lagged`，SSE 发一帧 `gap` 后关闭，整轮帧丢失。即便未溢出，首轮也会在结束后一次性
-投递，而不是实时流。actor 路径把该 turn 交给 `ctx.wait_until`，in-process fake 由
-handler 在返回响应前 `tokio::spawn`（`CreateSessionCommand::defer_initial_turn`）。
+`stream:true` 时网关先为 `logicalId` 打开订阅；service 受理初始输入后立即返回
+（actor 在 action reply 前用 `ctx.wait_until` 注册首轮，in-process fake 由 handler
+`tokio::spawn`，与 `POST /events` 的 `202` 相同），网关再构造并返回 SSE 响应
+（headers 与初始 `session` 帧）。首轮事件在广播容量内实时送达；客户端读取过慢或
+首轮突发超过容量时，按 §4.2 的 `gap` + EOF 语义显式失败，客户端可按最后已渲染
+item 的 `seq` 重连。
+actor 路径的 action reply 与 gateway 响应构造之间仍有一个短窗口：`wait_until` 在
+action reply 后即可开始执行，因此不承诺「首轮一定晚于客户端读到响应」，只承诺
+订阅先于首轮建立、响应构造不等待首轮完成。延迟的不是受理：初始 user item 与其
+`turn_id` 已在 service 内持久化，执行归属仍由 service/actor 持有，因此 `creating`
+行恢复时「已有 item 不重放」的至多一次语义不变。必须延迟的原因有二：广播 receiver
+只在响应到达客户端后才被轮询，而通道容量有界（gateway 默认 256）；若在返回响应前
+跑完首轮，超过容量的首轮会让首次读取得到 `Lagged`，SSE 发一帧 `gap` 后关闭，整轮
+帧丢失。即便未溢出，首轮也会在结束后一次性投递，而不是实时流。
 订阅在会话行写入之前建立：tail 订阅不读会话行（见 §4.2），gateway 的
 `open_stream` 在 actor 接受该订阅后转发真实活跃流，不会退回已关闭的广播。
+命中已存在行（含 `creating`）的 create 走与 `accept_input` 相同的 admission 规则：
+若该会话已有运行中的 turn，或已有受理但尚未开始的 turn（user item 已落库、执行尚未
+启动），`create_session` 在写入初始 user item **之前**返回 `409 turn_in_progress`，
+`defer=true` 与 `defer=false` 一致；`creating` 行恢复在 `last_seq == 0` 窗口内同样
+由该检查拒绝，不静默跳过。被拒绝的 create 不写 user item，因此不会留下没有终态的
+stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn`），不是持久化
+的行状态：崩溃后残留的 `running` 行在重新 attach 后没有在途 turn，可以继续接收初始
+输入。
 非流式创建不延迟：首轮仍在 `create_session` 内执行，错误仍以 HTTP 状态返回；
 流式创建的首轮错误只出现在流上。
 
 首次创建的写入顺序固定：`bind_environment`（hosted 时预留并持久化绑定）→ 写入
 `state=creating` 的完整会话行（含 `rootSessionId`、`cwd`、model、instructions、
 `mcp_tools`、environment 与时间戳）→ `session/new` → 同一行改 `idle` → 首轮
-（流式创建在 `idle` 之后先返回 SSE 响应，再执行首轮）。
+（流式创建在 `idle` 之后先建立订阅并构造/返回 SSE 响应，再调度首轮，见上）。
 `created=true` 只出现在首次创建；命中已存在行（无论 `idle` 还是 `creating`）都返回
 `created=false`。行状态语义：`creating` 表示身份已持久化但 Peri 会话尚未确认，
 `idle`/`running` 表示 host 已就绪；`creating` 不是「创建失败」，而是可重试的中间态。
@@ -288,7 +303,8 @@ handler 在返回响应前 `tokio::spawn`（`CreateSessionCommand::defer_initial
   不是跨请求的事务承诺。
 - `POST /sessions/{logicalId}/events` 的 `202` 是**受理**回执：input receipt、user
   item 与 turn 预留都持久化后才返回，turn 在响应之后执行（actor 路径经
-  `wait_until` 调度，HTTP 路径用独立任务）。响应中的 `lastItemSeq` 是受理时刻的
+  `wait_until` 调度，HTTP 路径用独立任务；与流式 create 一样存在 action reply 与
+  响应构造之间的短窗口，见 §4.3）。响应中的 `lastItemSeq` 是受理时刻的
   `MAX(seq)`，通常只含本条 user item；assistant item 与终态经 SSE 投递。因此
   「先建流、后 POST」仍是观察本轮的可靠方式，但 202 不再等待模型。
 - 同步失败仍按原语义返回：空输入/畸形请求 `400`，同 key 不同内容
@@ -297,7 +313,8 @@ handler 在返回响应前 `tokio::spawn`（`CreateSessionCommand::defer_initial
   `agent.session.failed` 呈现，不追认改已返回的 `202`。
 - 创建中断的恢复是**按已持久化的 root id 核对**，不是重新生成：`creating` 行重试
   先 `session/load`、必要时才用同一 root id `session/new`，返回 `created=false`；
-  初始输入至多执行一次（行内已有 item 时不重放）。两次尝试都失败返回可诊断的
+  初始输入至多执行一次（行内已有 item 时不重放；`last_seq == 0` 但已有在途 turn
+  时按 §4.3 返回 `409 turn_in_progress`，不静默跳过）。两次尝试都失败返回可诊断的
   `502`（`details.operation=create_recovery_failed`），行与 root id 保留，可继续
   重试。ACP 返回的 session id 与行内 root id 不一致时以 `session_id_mismatch`
   失败，不接管该身份。
