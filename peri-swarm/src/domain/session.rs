@@ -325,6 +325,11 @@ pub struct SessionView {
     /// Caller metadata, exactly as persisted. Never synthesized.
     pub metadata: BTreeMap<String, String>,
     /// Session-default prompt cache lifetime; `null` means the model default.
+    ///
+    /// The official `AgentSession.prompt_cache_options` spelling is snake_case,
+    /// unlike the rest of this Swarm-defined projection; the official SDK reads
+    /// only that name, so it overrides `rename_all = "camelCase"`.
+    #[serde(rename = "prompt_cache_options")]
     pub prompt_cache_options: Option<PromptCacheOptions>,
 }
 

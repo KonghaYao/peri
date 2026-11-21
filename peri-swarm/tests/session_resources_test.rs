@@ -157,7 +157,11 @@ async fn create_get_and_list_round_trip_metadata_and_prompt_cache() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["metadata"]["team"], json!("alpha"));
     assert_eq!(created["metadata"]["env"], json!("dev"));
-    assert_eq!(created["promptCacheOptions"]["ttl"], json!("12h"));
+    assert_eq!(created["prompt_cache_options"]["ttl"], json!("12h"));
+    assert!(
+        created.get("promptCacheOptions").is_none(),
+        "the official SDK reads only `prompt_cache_options`: {created}"
+    );
 
     let (status, read) = send(
         &harness.router,
@@ -169,13 +173,17 @@ async fn create_get_and_list_round_trip_metadata_and_prompt_cache() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(read["metadata"], created["metadata"]);
-    assert_eq!(read["promptCacheOptions"], created["promptCacheOptions"]);
+    assert_eq!(
+        read["prompt_cache_options"],
+        created["prompt_cache_options"]
+    );
+    assert!(read.get("promptCacheOptions").is_none());
 
     // A second session without metadata proves filters and default order.
     let (status, second) = create(&harness, json!({ "logicalId": "agent-b" })).await;
     assert_eq!(status, StatusCode::CREATED, "{second}");
     assert_eq!(second["metadata"], json!({}));
-    assert_eq!(second["promptCacheOptions"], json!(null));
+    assert_eq!(second["prompt_cache_options"], json!(null));
 
     let (status, page) = send(
         &harness.router,
@@ -197,6 +205,12 @@ async fn create_get_and_list_round_trip_metadata_and_prompt_cache() {
         .map(|session| session["id"].as_str().expect("id"))
         .collect();
     assert_eq!(ids, vec!["agent-b", "agent-a"], "default order is desc");
+    for session in page["data"].as_array().expect("data") {
+        assert!(
+            session.get("promptCacheOptions").is_none(),
+            "list items must use the official spelling: {session}"
+        );
+    }
 
     let (status, filtered) = send(
         &harness.router,
@@ -341,9 +355,21 @@ async fn update_replaces_and_clears_official_fields() {
     )
     .await;
 
-    let (status, updated) = send(
+    // The official `sessions.update` verb is POST; PATCH was never part of the
+    // official surface and must not stay reachable as a second spelling.
+    let (status, _) = send(
         &harness.router,
         Method::PATCH,
+        "/v1/agents/sessions/agent-u",
+        Some(json!({ "metadata": {} })),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let (status, updated) = send(
+        &harness.router,
+        Method::POST,
         "/v1/agents/sessions/agent-u",
         Some(json!({
             "metadata": { "only": "one" },
@@ -354,12 +380,12 @@ async fn update_replaces_and_clears_official_fields() {
     .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["metadata"], json!({ "only": "one" }));
-    assert_eq!(updated["promptCacheOptions"]["ttl"], json!("12h"));
+    assert_eq!(updated["prompt_cache_options"]["ttl"], json!("12h"));
     assert_eq!(updated["agent"]["model"], json!("model-1"));
 
     let (status, cleared) = send(
         &harness.router,
-        Method::PATCH,
+        Method::POST,
         "/v1/agents/sessions/agent-u",
         Some(json!({ "metadata": null, "prompt_cache_options": null })),
         Some(TOKEN),
@@ -367,12 +393,12 @@ async fn update_replaces_and_clears_official_fields() {
     .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
     assert_eq!(cleared["metadata"], json!({}));
-    assert_eq!(cleared["promptCacheOptions"], json!(null));
+    assert_eq!(cleared["prompt_cache_options"], json!(null));
 
     // Omitted fields keep their value.
     let (status, unchanged) = send(
         &harness.router,
-        Method::PATCH,
+        Method::POST,
         "/v1/agents/sessions/agent-u",
         Some(json!({})),
         Some(TOKEN),
@@ -383,7 +409,7 @@ async fn update_replaces_and_clears_official_fields() {
 
     let (status, model) = send(
         &harness.router,
-        Method::PATCH,
+        Method::POST,
         "/v1/agents/sessions/agent-u",
         Some(json!({ "agent": { "model": "model-2" } })),
         Some(TOKEN),
@@ -416,7 +442,7 @@ async fn update_replaces_and_clears_official_fields() {
     );
     let (status, _) = send(
         &harness.router,
-        Method::PATCH,
+        Method::POST,
         "/v1/agents/sessions/agent-tools",
         Some(json!({ "agent": { "tools": [] } })),
         Some(TOKEN),
@@ -439,7 +465,7 @@ async fn update_replaces_and_clears_official_fields() {
     ] {
         let (status, error) = send(
             &harness.router,
-            Method::PATCH,
+            Method::POST,
             "/v1/agents/sessions/agent-u",
             Some(body),
             Some(TOKEN),
@@ -452,7 +478,7 @@ async fn update_replaces_and_clears_official_fields() {
 
     let (status, error) = send(
         &harness.router,
-        Method::PATCH,
+        Method::POST,
         "/v1/agents/sessions/agent-u",
         Some(json!({ "unknown": true })),
         Some(TOKEN),
@@ -463,7 +489,7 @@ async fn update_replaces_and_clears_official_fields() {
 
     let (status, missing) = send(
         &harness.router,
-        Method::PATCH,
+        Method::POST,
         "/v1/agents/sessions/agent-missing",
         Some(json!({ "metadata": {} })),
         Some(TOKEN),
@@ -471,6 +497,128 @@ async fn update_replaces_and_clears_official_fields() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(missing["error"]["code"], json!("unknown_agent"));
+}
+
+#[tokio::test]
+async fn a_null_agent_model_is_rejected_but_null_tools_clear() {
+    let harness = harness();
+
+    for (method, path, body) in [
+        (
+            Method::POST,
+            "/v1/agents/sessions",
+            json!({ "logicalId": "agent-null-model", "agent": { "model": null } }),
+        ),
+        (
+            Method::POST,
+            "/v1/agents/sessions/agent-u",
+            json!({ "agent": { "model": null } }),
+        ),
+    ] {
+        let (status, error) = send(&harness.router, method, path, Some(body), Some(TOKEN)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {error}");
+        assert_eq!(error["error"]["code"], json!("invalid_request"), "{path}");
+        assert_eq!(
+            error["error"]["details"]["field"],
+            json!("agent.model"),
+            "{path}"
+        );
+    }
+
+    // The session used by the update half must exist first.
+    let (status, _) = create(&harness, json!({ "logicalId": "agent-u" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // `agent.tools:null` is the official "clear the declaration" spelling and
+    // stays valid.
+    let (status, cleared) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-u",
+        Some(json!({ "agent": { "tools": null } })),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+}
+
+#[tokio::test]
+async fn create_attach_distinguishes_omitted_and_explicit_identity_fields() {
+    let harness = harness();
+    let (status, created) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-attach",
+            "metadata": { "team": "alpha" },
+            "prompt_cache_options": { "ttl": "12h" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    // Omission keeps the stored identity: an attach without metadata or prompt
+    // cache options is not a conflict (`design §4.1`).
+    let (status, attached) = create(&harness, json!({ "logicalId": "agent-attach" })).await;
+    assert_eq!(status, StatusCode::OK, "{attached}");
+    assert_eq!(attached["created"], json!(false));
+    assert_eq!(attached["metadata"], json!({ "team": "alpha" }));
+    assert_eq!(attached["prompt_cache_options"]["ttl"], json!("12h"));
+
+    // An explicit value equal to the stored one is accepted.
+    let (status, same) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-attach",
+            "metadata": { "team": "alpha" },
+            "prompt_cache_options": { "ttl": "12h" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{same}");
+
+    // A different explicit value conflicts, including the explicit empty
+    // spellings (`{}`/`null`) against a non-empty stored value.
+    for body in [
+        json!({ "logicalId": "agent-attach", "metadata": { "team": "beta" } }),
+        json!({ "logicalId": "agent-attach", "metadata": {} }),
+        json!({ "logicalId": "agent-attach", "metadata": null }),
+        json!({ "logicalId": "agent-attach", "prompt_cache_options": { "ttl": "30m" } }),
+        json!({ "logicalId": "agent-attach", "prompt_cache_options": null }),
+    ] {
+        let (status, error) = create(&harness, body.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}: {error}");
+        assert_eq!(error["error"]["code"], json!("identity_conflict"), "{body}");
+    }
+
+    // The refusals did not mutate the row.
+    let (status, read) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-attach",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["metadata"], json!({ "team": "alpha" }));
+    assert_eq!(read["prompt_cache_options"]["ttl"], json!("12h"));
+
+    // An explicit empty value matches a session that has none: create a second
+    // session and attach with both empty spellings.
+    let (status, _) = create(&harness, json!({ "logicalId": "agent-empty" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, empty) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-empty",
+            "metadata": {},
+            "prompt_cache_options": null
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["metadata"], json!({}));
+    assert_eq!(empty["prompt_cache_options"], json!(null));
 }
 
 #[tokio::test]
@@ -482,7 +630,7 @@ async fn update_and_delete_are_refused_while_a_turn_is_open() {
 
     let (status, error) = send(
         &harness.router,
-        Method::PATCH,
+        Method::POST,
         "/v1/agents/sessions/agent-run",
         Some(json!({ "metadata": { "a": "b" } })),
         Some(TOKEN),
@@ -921,6 +1069,9 @@ async fn a_failed_turn_persists_its_customer_safe_error() {
                 .swarm_close_open_turns(logical_id, status, completed_at, error)
                 .await
         }
+        async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError> {
+            self.inner.swarm_has_open_turn(logical_id).await
+        }
     }
 
     let workspace = tempfile::tempdir().expect("workspace");
@@ -1041,6 +1192,26 @@ async fn unmappable_official_resources_return_gateway_json_404() {
             Method::GET,
             "/v1/agents/sessions/agent-x/subagents/sub_1",
             "sessions.subagents",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/sessions/agent-x/subagents/sub_1/items",
+            "sessions.subagents.items",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/sessions/agent-x/subagents/sub_1/turns",
+            "sessions.subagents.turns",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/sessions/agent-x/subagents/sub_1/turns/turn_1",
+            "sessions.subagents.turns",
+        ),
+        (
+            Method::GET,
+            "/v1/agents/sessions/agent-x/subagents/sub_1/turns/turn_1/items",
+            "sessions.subagents.turns.items",
         ),
         (
             Method::GET,

@@ -260,9 +260,6 @@ impl AcpSwarmService {
     /// `running`, so `ensure_live` still answers `502 session_resume_required`;
     /// resuming the interrupted turn is not implemented (`design §7`).
     async fn close_orphan_turns(&self, row: &SwarmSessionRow) {
-        if row.state != SessionState::Running {
-            return;
-        }
         let live = self
             .sessions
             .lock()
@@ -332,7 +329,7 @@ impl AcpSwarmService {
         else {
             return Ok(false);
         };
-        if row.state == SessionState::Running {
+        if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
             tracing::warn!(
                 logical_id = logical_id.as_str(),
                 "swarm session row still records an unfinished turn"
@@ -1195,7 +1192,7 @@ impl SwarmService for AcpSwarmService {
                 )
                 .with_details(json!({ "field": "tools" })));
             }
-            if command.metadata != row.metadata {
+            if command.metadata_conflicts_with(&row.metadata) {
                 return Err(SwarmError::new(
                     ErrorKind::Conflict,
                     ErrorCode::IdentityConflict,
@@ -1203,7 +1200,7 @@ impl SwarmService for AcpSwarmService {
                 )
                 .with_details(json!({ "field": "metadata" })));
             }
-            if command.prompt_cache_options != row.prompt_cache_options {
+            if command.prompt_cache_options_conflict_with(&row.prompt_cache_options) {
                 return Err(SwarmError::new(
                     ErrorKind::Conflict,
                     ErrorCode::IdentityConflict,
@@ -1281,8 +1278,8 @@ impl SwarmService for AcpSwarmService {
             instructions: command.instructions.clone(),
             mcp_tools: command.mcp_tools.clone(),
             environment,
-            metadata: command.metadata.clone(),
-            prompt_cache_options: command.prompt_cache_options,
+            metadata: command.metadata_for_new_row(),
+            prompt_cache_options: command.prompt_cache_options_for_new_row(),
             created_at: now.clone(),
             last_activity_at: now,
             last_item_seq: 0,
@@ -1385,7 +1382,7 @@ impl SwarmService for AcpSwarmService {
         logical_id: &LogicalId,
         command: SessionUpdateCommand,
     ) -> Result<SessionView, SwarmError> {
-        self.require_row(logical_id).await?;
+        let row = self.require_row(logical_id).await?;
         // Same admission rule as `accept_input`: a running or accepted turn
         // owns the session. Holding the per-session admission lock across the
         // store write keeps a concurrent accept from starting a turn between
@@ -1400,6 +1397,12 @@ impl SwarmService for AcpSwarmService {
             .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn())
         {
             return Err(SwarmError::turn_in_progress());
+        }
+        if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+            // The live host is gone but the durable row still owns an open
+            // turn: mutating it would silently discard that turn, and the
+            // existing recovery path answers `session_resume_required`.
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
         }
         let model = match command.model.as_deref() {
             Some(requested) => {
@@ -1443,7 +1446,7 @@ impl SwarmService for AcpSwarmService {
     }
 
     async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
-        self.require_row(logical_id).await?;
+        let row = self.require_row(logical_id).await?;
         let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
         let _admission = match runtime.as_ref() {
             Some(runtime) => Some(runtime.admission.lock().await),
@@ -1454,6 +1457,12 @@ impl SwarmService for AcpSwarmService {
             .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn())
         {
             return Err(SwarmError::turn_in_progress());
+        }
+        if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+            // No live host owns this row, but its durable turn is still open;
+            // deleting it would erase an interrupted turn the resume path is
+            // meant to surface.
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
         }
         self.store
             .swarm_delete_session(logical_id.as_str())

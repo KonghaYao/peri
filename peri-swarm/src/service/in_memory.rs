@@ -796,7 +796,7 @@ impl SwarmService for InMemorySwarmService {
                 )
                 .with_details(json!({ "field": "tools" })));
             }
-            if command.metadata != row.metadata {
+            if command.metadata_conflicts_with(&row.metadata) {
                 return Err(SwarmError::new(
                     ErrorKind::Conflict,
                     ErrorCode::IdentityConflict,
@@ -804,7 +804,7 @@ impl SwarmService for InMemorySwarmService {
                 )
                 .with_details(json!({ "field": "metadata" })));
             }
-            if command.prompt_cache_options != row.prompt_cache_options {
+            if command.prompt_cache_options_conflict_with(&row.prompt_cache_options) {
                 return Err(SwarmError::new(
                     ErrorKind::Conflict,
                     ErrorCode::IdentityConflict,
@@ -868,8 +868,8 @@ impl SwarmService for InMemorySwarmService {
             instructions: command.instructions.clone(),
             mcp_tools: command.mcp_tools.clone(),
             environment,
-            metadata: command.metadata.clone(),
-            prompt_cache_options: command.prompt_cache_options,
+            metadata: command.metadata_for_new_row(),
+            prompt_cache_options: command.prompt_cache_options_for_new_row(),
             created_at: now.clone(),
             last_activity_at: now,
             last_item_seq: 0,
@@ -914,9 +914,12 @@ impl SwarmService for InMemorySwarmService {
         logical_id: &LogicalId,
         command: SessionUpdateCommand,
     ) -> Result<SessionView, SwarmError> {
-        self.require_session(logical_id).await?;
+        let row = self.require_session(logical_id).await?;
         if self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str())) {
             return Err(SwarmError::turn_in_progress());
+        }
+        if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
         }
         let model = match command.model.as_deref() {
             Some(requested) => {
@@ -945,9 +948,12 @@ impl SwarmService for InMemorySwarmService {
     }
 
     async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
-        self.require_session(logical_id).await?;
+        let row = self.require_session(logical_id).await?;
         if self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str())) {
             return Err(SwarmError::turn_in_progress());
+        }
+        if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
         }
         self.store
             .swarm_delete_session(logical_id.as_str())

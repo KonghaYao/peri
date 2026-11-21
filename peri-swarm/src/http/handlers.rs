@@ -11,7 +11,7 @@ use super::request::{
 };
 use super::{sse, AppState};
 use crate::domain::{resolve_cwd, CreateSessionResponse, LogicalId, SessionDeleted, SwarmError};
-use crate::service::CreateSessionCommand;
+use crate::service::{CreateSessionCommand, UpdateField};
 
 /// Process liveness for the bootstrap entry (S6b). Deliberately constant: it
 /// does not touch the store, so a green probe means "the gateway is listening",
@@ -35,13 +35,20 @@ pub async fn create_session(
     )?;
     let (model, instructions) = request::resolve_agent(&body)?;
     let mcp_tools = request::resolve_tools(&body)?;
-    let metadata = match body.metadata.as_ref() {
-        Some(value) => request::resolve_metadata(value, "metadata")?,
-        None => std::collections::BTreeMap::new(),
+    let metadata = match &body.metadata {
+        UpdateField::Keep => UpdateField::Keep,
+        UpdateField::Clear => UpdateField::Clear,
+        UpdateField::Set(value) => UpdateField::Set(request::resolve_metadata(value, "metadata")?),
     };
-    let prompt_cache_options = match body.prompt_cache_options.as_ref() {
-        Some(value) => request::resolve_prompt_cache_options(value)?,
-        None => None,
+    let prompt_cache_options = match &body.prompt_cache_options {
+        UpdateField::Keep => UpdateField::Keep,
+        UpdateField::Clear => UpdateField::Clear,
+        UpdateField::Set(value) => match request::resolve_prompt_cache_options(value)? {
+            Some(options) => UpdateField::Set(options),
+            // `{}` carries no `ttl`: it asserts the model default, the same
+            // meaning as an explicit `null`.
+            None => UpdateField::Clear,
+        },
     };
     let initial_input = request::resolve_create_input(&body)?;
     let environment = request::resolve_environment(&body)?;
@@ -183,12 +190,20 @@ pub async fn unsupported_resource(uri: Uri) -> Result<Response, SwarmError> {
 }
 
 fn official_resource(path: &str) -> &'static str {
+    let subagent_turns =
+        path.contains("/subagents/") && (path.contains("/turns/") || path.ends_with("/turns"));
     if path.contains("/traces") {
         "sessions.traces"
     } else if path.contains("/artifacts") && path.ends_with("/content") {
         "sessions.artifacts.content"
     } else if path.contains("/artifacts") {
         "sessions.artifacts"
+    } else if subagent_turns && path.ends_with("/items") {
+        "sessions.subagents.turns.items"
+    } else if subagent_turns {
+        "sessions.subagents.turns"
+    } else if path.contains("/subagents/") && path.ends_with("/items") {
+        "sessions.subagents.items"
     } else if path.contains("/subagents") {
         "sessions.subagents"
     } else if path.contains("/turns/") && path.ends_with("/items") {

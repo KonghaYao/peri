@@ -395,6 +395,14 @@ impl SwarmStore for MemorySwarmStore {
         }
         Ok(updated)
     }
+
+    async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError> {
+        let state = self.lock();
+        Ok(state
+            .turns
+            .get(logical_id)
+            .is_some_and(|turns| turns.values().any(|row| row.status.is_open())))
+    }
 }
 
 #[cfg(test)]

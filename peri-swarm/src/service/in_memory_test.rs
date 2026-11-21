@@ -12,7 +12,7 @@ fn create_command(logical_id: &str, cwd: &str) -> CreateSessionCommand {
         instructions: None,
         mcp_tools: Vec::new(),
         metadata: Default::default(),
-        prompt_cache_options: None,
+        prompt_cache_options: Default::default(),
         initial_input: None,
         environment: EnvironmentKind::None,
         environment_id: None,

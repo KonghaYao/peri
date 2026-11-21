@@ -5,7 +5,10 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use super::{ItemLog, TurnOutcome};
-use crate::domain::{turn_id_for_item, ItemKind, SessionState, StreamEvent, TurnEvent};
+use crate::domain::{
+    turn_id_for_item, ItemKind, OfficialEvent, PromptCacheOptions, PromptCacheTtl, SessionState,
+    StreamEvent, TurnEvent,
+};
 use crate::store::{MemorySwarmStore, SwarmSessionRow, SwarmStore};
 
 fn session_row() -> SwarmSessionRow {
@@ -222,7 +225,9 @@ async fn terminal_for_another_turn_is_ignored() {
 #[tokio::test]
 async fn agent_event_done_terminal_is_the_active_turn() {
     let Fixture {
-        log, mut events, ..
+        log,
+        store,
+        mut events,
     } = fixture().await;
     log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.ingest(
@@ -237,6 +242,76 @@ async fn agent_event_done_terminal_is_the_active_turn() {
         StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. }) if stop_reason == "cancelled"
     )));
     assert!(log.active_turn().is_none());
+
+    // Official vocabulary: a cancelled attempt is `turn.completed` with
+    // `status:"cancelled"`, and `turns.retrieve` must report the same status
+    // instead of inventing a successful completion.
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        StreamEvent::Official(crate::domain::OfficialEvent::TurnCompleted { turn, .. })
+            if turn.status == "cancelled"
+    )));
+    let row = store
+        .swarm_get_turn("agent-1", "turn_1")
+        .await
+        .expect("read turn")
+        .expect("turn row");
+    assert_eq!(row.status, crate::domain::TurnStatus::Cancelled);
+    assert!(row.completed_at.is_some());
+
+    // `turns.list`/`turns.retrieve` read the same row, so both report the
+    // official status instead of `completed`.
+    let page = crate::service::list_turns_from_store(
+        store.as_ref(),
+        "agent-1",
+        &crate::domain::TurnsWindow {
+            order: crate::domain::ItemOrder::Desc,
+            after: None,
+            limit: 10,
+        },
+    )
+    .await
+    .expect("turns.list");
+    assert_eq!(page.data.len(), 1);
+    assert_eq!(page.data[0].status, "cancelled");
+    let retrieved = crate::service::get_turn_from_store(store.as_ref(), "agent-1", "turn_1")
+        .await
+        .expect("turns.retrieve");
+    assert_eq!(retrieved.status, "cancelled");
+}
+
+#[tokio::test]
+async fn idle_frame_carries_the_persisted_metadata_and_prompt_cache_options() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    let mut row = session_row();
+    row.metadata = [("team".to_owned(), "alpha".to_owned())].into();
+    row.prompt_cache_options = Some(PromptCacheOptions::new(PromptCacheTtl::TwelveHours));
+    store.swarm_upsert_session(row).await.expect("session row");
+
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+
+    let seen = drain(&mut events);
+    let idle = seen
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::SessionIdle { session, .. }) => Some(session),
+            _ => None,
+        })
+        .expect("agent.session.idle");
+    assert_eq!(
+        idle.metadata,
+        [("team".to_owned(), "alpha".to_owned())].into()
+    );
+    assert_eq!(
+        idle.prompt_cache_options,
+        Some(PromptCacheOptions::new(PromptCacheTtl::TwelveHours))
+    );
 }
 
 #[tokio::test]

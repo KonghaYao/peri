@@ -36,12 +36,15 @@ pub struct CreateSessionBody {
     pub input: Option<CreateInputBody>,
     #[serde(default)]
     pub environment: Option<EnvironmentBody>,
-    /// Official `metadata` string map. `null`/omitted means no metadata.
+    /// Official `metadata` string map. Omitted keeps the stored value on an
+    /// attach; explicit `null`/`{}` asserts "no metadata" (`sessions.update`
+    /// uses the same tri-state).
     #[serde(default)]
-    pub metadata: Option<Value>,
-    /// Official `prompt_cache_options` (`{ttl: "30m"|"12h"}`). `null` clears.
+    pub metadata: UpdateField<Value>,
+    /// Official `prompt_cache_options` (`{ttl: "30m"|"12h"}`); `null` asserts
+    /// the model default.
     #[serde(rename = "prompt_cache_options", default)]
-    pub prompt_cache_options: Option<Value>,
+    pub prompt_cache_options: UpdateField<Value>,
     #[serde(default)]
     pub stream: bool,
 }
@@ -49,8 +52,11 @@ pub struct CreateSessionBody {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentBody {
+    /// Official `agent.model` is a string; [`UpdateField`] keeps an explicit
+    /// `null` distinguishable from omission so it can be rejected instead of
+    /// silently treated as "not supplied".
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: UpdateField<String>,
     #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]
@@ -206,7 +212,7 @@ pub struct TurnsQuery {
 /// map is validated by [`resolve_sessions_window`] instead of serde.
 pub type SessionsQuery = HashMap<String, String>;
 
-/// `PATCH /sessions/{id}` body (`SessionUpdateParams`).
+/// `POST /sessions/{id}` body (`SessionUpdateParams`).
 ///
 /// [`UpdateField`] distinguishes omission (keep), explicit `null` (clear) and
 /// a value (replace); `Option<Option<T>>` would collapse `null` into
@@ -228,7 +234,7 @@ pub struct UpdateSessionBody {
 #[serde(deny_unknown_fields)]
 pub struct UpdateAgentBody {
     #[serde(default)]
-    pub model: Option<String>,
+    pub model: UpdateField<String>,
     #[serde(default)]
     pub tools: UpdateField<Value>,
     #[serde(default)]
@@ -255,7 +261,11 @@ pub fn resolve_logical_id(
 pub fn resolve_agent(
     body: &CreateSessionBody,
 ) -> Result<(Option<String>, Option<String>), SwarmError> {
-    let nested_model = body.agent.as_ref().and_then(|agent| agent.model.clone());
+    let nested_model = match body.agent.as_ref().map(|agent| &agent.model) {
+        None | Some(UpdateField::Keep) => None,
+        Some(UpdateField::Clear) => return Err(agent_model_not_string()),
+        Some(UpdateField::Set(model)) => Some(model.clone()),
+    };
     let nested_instructions = body
         .agent
         .as_ref()
@@ -917,6 +927,17 @@ fn metadata_invalid(field: &str, message: &str) -> SwarmError {
     SwarmError::invalid_input(message).with_details(json!({ "field": field }))
 }
 
+/// Official `Agent.model` is a string; an explicit `null` is a request error,
+/// not "keep the current model".
+fn agent_model_not_string() -> SwarmError {
+    SwarmError::new(
+        ErrorKind::BadRequest,
+        ErrorCode::InvalidRequest,
+        "agent.model must be a string",
+    )
+    .with_details(json!({ "field": "agent.model" }))
+}
+
 /// Parse `prompt_cache_options`. `null`/`{}` mean "no configured value".
 pub fn resolve_prompt_cache_options(
     value: &Value,
@@ -1070,7 +1091,7 @@ fn unsupported_official_field(field: &str) -> SwarmError {
     .with_details(json!({ "field": field, "supported": false }))
 }
 
-/// `PATCH /v1/agents/sessions/{id}` body.
+/// `POST /v1/agents/sessions/{id}` body.
 pub fn resolve_update(body: UpdateSessionBody) -> Result<SessionUpdateCommand, SwarmError> {
     let agent = body.agent;
     if !body.review.is_keep() {
@@ -1084,15 +1105,16 @@ pub fn resolve_update(body: UpdateSessionBody) -> Result<SessionUpdateCommand, S
             return Err(unsupported_official_field("agent.service_tier"));
         }
     }
-    let model = match agent.as_ref().and_then(|agent| agent.model.clone()) {
-        Some(model) => {
+    let model = match agent.as_ref().map(|agent| &agent.model) {
+        None | Some(UpdateField::Keep) => None,
+        Some(UpdateField::Clear) => return Err(agent_model_not_string()),
+        Some(UpdateField::Set(model)) => {
             if model.trim().is_empty() {
                 return Err(metadata_invalid("agent.model", "model must not be empty"));
             }
-            check_len("agent.model", &model, MAX_MODEL_BYTES)?;
-            Some(model)
+            check_len("agent.model", model, MAX_MODEL_BYTES)?;
+            Some(model.clone())
         }
-        None => None,
     };
     let mcp_tools = match agent.as_ref().map(|agent| &agent.tools) {
         None | Some(UpdateField::Keep) => None,

@@ -12,18 +12,19 @@ use url::Url;
 
 use super::{
     binding_params, classify, decode_binding, decode_input, decode_item, decode_session,
-    decode_turn, input_params, item_params, migration_statements, require_supported_version,
-    resolve_credential, seq_param, session_list_sql, session_params, turn_params, SwarmStateError,
-    SwarmStateStoreConfig, CLOSE_OPEN_TURNS_SQL, CREATE_INDEX_SQL, CREATE_META_TABLE_SQL,
-    CREATE_TABLE_SQL, DELETE_BINDINGS_SQL, DELETE_INPUTS_SQL, DELETE_ITEMS_SQL, DELETE_SESSION_SQL,
-    DELETE_TURNS_SQL, INSERT_INPUT_SQL, INSERT_ITEM_SQL, META_TABLE_EXISTS_SQL, MIGRATION_COLUMNS,
-    PATCH_SESSION_SQL, PIN_VERSION_SQL, SELECT_BINDING_SQL, SELECT_INPUT_SQL,
-    SELECT_ITEMS_AFTER_SQL, SELECT_ITEMS_BEFORE_SQL, SELECT_ITEMS_TAIL_SQL,
-    SELECT_ITEM_PAGE_ASC_SQL, SELECT_ITEM_PAGE_DESC_SQL, SELECT_ITEM_PAGE_TAIL_SQL,
-    SELECT_LAST_SEQ_SQL, SELECT_SESSION_SQL, SELECT_TURNS_ASC_AFTER_SQL, SELECT_TURNS_ASC_SQL,
-    SELECT_TURNS_DESC_AFTER_SQL, SELECT_TURNS_DESC_SQL, SELECT_TURN_SQL, SELECT_VERSION_SQL,
-    SESSIONS_TABLE_EXISTS_SQL, SESSIONS_TABLE_INFO_SQL, SWARM_STATE_SCHEMA_VERSION,
-    UPDATE_SESSION_SQL, UPSERT_BINDING_SQL, UPSERT_SESSION_SQL, UPSERT_TURN_SQL,
+    decode_turn, input_params, item_params, migration_retry_decision, migration_statements,
+    require_supported_version, resolve_credential, seq_param, session_list_sql, session_params,
+    turn_params, MigrationRetry, SwarmStateError, SwarmStateStoreConfig, CLOSE_OPEN_TURNS_SQL,
+    CREATE_INDEX_SQL, CREATE_META_TABLE_SQL, CREATE_TABLE_SQL, DELETE_BINDINGS_SQL,
+    DELETE_INPUTS_SQL, DELETE_ITEMS_SQL, DELETE_SESSION_SQL, DELETE_TURNS_SQL, HAS_OPEN_TURN_SQL,
+    INSERT_INPUT_SQL, INSERT_ITEM_SQL, META_TABLE_EXISTS_SQL, MIGRATION_COLUMNS, PATCH_SESSION_SQL,
+    PIN_VERSION_SQL, SELECT_BINDING_SQL, SELECT_INPUT_SQL, SELECT_ITEMS_AFTER_SQL,
+    SELECT_ITEMS_BEFORE_SQL, SELECT_ITEMS_TAIL_SQL, SELECT_ITEM_PAGE_ASC_SQL,
+    SELECT_ITEM_PAGE_DESC_SQL, SELECT_ITEM_PAGE_TAIL_SQL, SELECT_LAST_SEQ_SQL, SELECT_SESSION_SQL,
+    SELECT_TURNS_ASC_AFTER_SQL, SELECT_TURNS_ASC_SQL, SELECT_TURNS_DESC_AFTER_SQL,
+    SELECT_TURNS_DESC_SQL, SELECT_TURN_SQL, SELECT_VERSION_SQL, SESSIONS_TABLE_EXISTS_SQL,
+    SESSIONS_TABLE_INFO_SQL, SWARM_STATE_SCHEMA_VERSION, UPDATE_SESSION_SQL, UPSERT_BINDING_SQL,
+    UPSERT_SESSION_SQL, UPSERT_TURN_SQL,
 };
 use crate::domain::{
     EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemOrder, ItemSource, McpHeader,
@@ -562,6 +563,68 @@ fn migration_adds_only_the_missing_session_columns() {
     assert!(migration_statements(&[]).is_empty());
 
     assert!(SESSIONS_TABLE_INFO_SQL.contains("PRAGMA table_info(swarm_sessions)"));
+}
+
+#[test]
+fn a_duplicate_column_race_is_retried_only_when_every_migrated_column_exists() {
+    let migrated: Vec<String> = legacy_session_columns()
+        .into_iter()
+        .chain([
+            "metadata_json".to_owned(),
+            "prompt_cache_options_json".to_owned(),
+        ])
+        .collect();
+    let duplicate = SwarmStateError::Schema(
+        "swarm state store schema check failed: duplicate column name: metadata_json".to_owned(),
+    );
+    assert_eq!(
+        migration_retry_decision(&duplicate, Some(&migrated)),
+        MigrationRetry::Retry,
+        "the other replica won the ALTER; a re-read saw every column and the batch is retried"
+    );
+
+    // The duplicate-column message alone is not enough: a concurrent writer
+    // may have added only one of the columns, so the retry must not happen.
+    assert_eq!(
+        migration_retry_decision(&duplicate, Some(&legacy_session_columns())),
+        MigrationRetry::Propagate
+    );
+    assert_eq!(
+        migration_retry_decision(&duplicate, None),
+        MigrationRetry::Propagate,
+        "a missing table is not a migration race"
+    );
+
+    // Every other schema/transport failure propagates unchanged.
+    for error in [
+        SwarmStateError::Schema("no such table: swarm_sessions".to_owned()),
+        SwarmStateError::Schema("near \"ALTER\": syntax error".to_owned()),
+        SwarmStateError::Connect("connection reset".to_owned()),
+        SwarmStateError::Credential {
+            variable: "PERI_SWARM_STATE_TOKEN".to_owned(),
+            reason: "not set",
+        },
+    ] {
+        assert_eq!(
+            migration_retry_decision(&error, Some(&migrated)),
+            MigrationRetry::Propagate,
+            "{error}"
+        );
+    }
+
+    // The probe used by the retry must agree with `TurnStatus::is_open`.
+    for status in ["queued", "in_progress", "waiting"] {
+        assert!(
+            HAS_OPEN_TURN_SQL.contains(&format!("'{status}'")),
+            "HAS_OPEN_TURN_SQL must treat {status} as open"
+        );
+    }
+    for status in ["completed", "failed", "cancelled"] {
+        assert!(
+            !HAS_OPEN_TURN_SQL.contains(&format!("'{status}'")),
+            "HAS_OPEN_TURN_SQL must treat {status} as terminal"
+        );
+    }
 }
 
 #[test]

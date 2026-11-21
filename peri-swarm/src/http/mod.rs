@@ -76,7 +76,9 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/agents/sessions/{logical_id}",
             get(handlers::get_session)
-                .patch(handlers::update_session)
+                // Official `sessions.update` is `POST /agents/sessions/{id}`
+                // (`sessions.js` in `openai@7.60.0`), not PATCH.
+                .post(handlers::update_session)
                 .delete(handlers::delete_session),
         )
         .route(
@@ -121,6 +123,22 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/v1/agents/sessions/{logical_id}/subagents/{subagent_id}",
+            get(handlers::unsupported_resource),
+        )
+        .route(
+            "/v1/agents/sessions/{logical_id}/subagents/{subagent_id}/items",
+            get(handlers::unsupported_resource),
+        )
+        .route(
+            "/v1/agents/sessions/{logical_id}/subagents/{subagent_id}/turns",
+            get(handlers::unsupported_resource),
+        )
+        .route(
+            "/v1/agents/sessions/{logical_id}/subagents/{subagent_id}/turns/{turn_id}",
+            get(handlers::unsupported_resource),
+        )
+        .route(
+            "/v1/agents/sessions/{logical_id}/subagents/{subagent_id}/turns/{turn_id}/items",
             get(handlers::unsupported_resource),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

@@ -87,7 +87,7 @@ pub struct SwarmSessionUpdate {
     pub last_activity_at: String,
 }
 
-/// One `PATCH /sessions/{id}` write (`sessions.update`), all fields optional.
+/// One `sessions.update` write (`POST /sessions/{id}`), all fields optional.
 ///
 /// `None` keeps the stored value. `Some(empty)` replaces metadata with an empty
 /// map (the official "clear" spelling); `Some(None)` clears the prompt cache
@@ -419,4 +419,11 @@ pub trait SwarmStore: Send + Sync {
         completed_at: i64,
         error: Option<Value>,
     ) -> Result<u64, StoreError>;
+    /// Whether the session still owns a non-terminal (`queued`/`in_progress`/
+    /// `waiting`) turn row.
+    ///
+    /// A crash can leave the session row `idle` after the turn row outlived its
+    /// writer, so `session.state` alone cannot answer "was this turn closed?".
+    /// This is the read side of [`Self::swarm_close_open_turns`].
+    async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError>;
 }

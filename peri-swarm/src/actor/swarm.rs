@@ -581,10 +581,14 @@ pub struct Create {
     /// Caller-declared MCP tools, already normalized by the HTTP layer.
     #[serde(default)]
     pub mcp_tools: Vec<McpToolSpec>,
-    #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
-    #[serde(default)]
-    pub prompt_cache_options: Option<crate::domain::PromptCacheOptions>,
+    /// Tri-state so an attach can distinguish omission from an explicit empty
+    /// value (see [`CreateSessionCommand::metadata_conflicts_with`]). Omitted
+    /// keeps the stored value across the action hop, so `Keep` must not be
+    /// serialized as `null`.
+    #[serde(default, skip_serializing_if = "crate::service::UpdateField::is_keep")]
+    pub metadata: crate::service::UpdateField<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "crate::service::UpdateField::is_keep")]
+    pub prompt_cache_options: crate::service::UpdateField<crate::domain::PromptCacheOptions>,
     #[serde(default)]
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
@@ -863,7 +867,7 @@ impl Handler<Subscribe> for SwarmActor {
     }
 }
 
-/// `PATCH /sessions/{id}` (`sessions.update`).
+/// `POST /sessions/{id}` (`sessions.update`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Update {

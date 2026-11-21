@@ -295,6 +295,11 @@ const CLOSE_OPEN_TURNS_SQL: &str = "UPDATE swarm_turns
     SET status = ?2, completed_at = ?3, error_json = ?4
     WHERE logical_id = ?1 AND status IN ('queued', 'in_progress', 'waiting')";
 
+/// Crash-recovery probe: does the session still own a non-terminal turn row?
+/// Predicate matches [`TurnStatus::is_open`].
+const HAS_OPEN_TURN_SQL: &str = "SELECT EXISTS(SELECT 1 FROM swarm_turns
+    WHERE logical_id = ?1 AND status IN ('queued', 'in_progress', 'waiting'))";
+
 const INSERT_ITEM_SQL: &str = "INSERT INTO swarm_items
     (logical_id, seq, item_id, kind, source, payload_json, created_at, truncated)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
@@ -656,7 +661,38 @@ async fn session_columns(connection: &Connection) -> Result<Option<Vec<String>>,
 
 /// Create the owned objects in one managed transaction. `pin_version` also
 /// records [`SWARM_STATE_SCHEMA_VERSION`] when no row exists yet.
+///
+/// `PRAGMA table_info` runs before the transaction, so two replicas opening the
+/// same legacy database can both decide a column is missing. The loser's
+/// `ALTER TABLE ... ADD COLUMN` fails with `duplicate column`; that is a lost
+/// migration race, not a schema error. When a re-read confirms every migrated
+/// column is now present, the batch is retried once (it is idempotent, and the
+/// retry also pins the version row a concurrent fresh open may have raced).
 async fn apply_ddl(connection: &Connection, pin_version: bool) -> Result<(), SwarmStateError> {
+    match apply_ddl_once(connection, pin_version).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // A failed `PRAGMA` leaves the decision at `Propagate`: the
+            // original failure is what the caller must see.
+            let existing = session_columns(connection).await.ok().flatten();
+            match migration_retry_decision(&error, existing.as_deref()) {
+                MigrationRetry::Propagate => Err(error),
+                MigrationRetry::Retry => match apply_ddl_once(connection, pin_version).await {
+                    Ok(()) => Ok(()),
+                    Err(retry_error) => {
+                        tracing::warn!(
+                            error = %retry_error,
+                            "swarm schema retry after a duplicate-column race failed"
+                        );
+                        Err(error)
+                    }
+                },
+            }
+        }
+    }
+}
+
+async fn apply_ddl_once(connection: &Connection, pin_version: bool) -> Result<(), SwarmStateError> {
     let existing = session_columns(connection).await?;
     let mut statements = Vec::with_capacity(4 + CREATE_TABLE_SQL.len() + CREATE_INDEX_SQL.len());
     statements.push(batch_statement(CREATE_META_TABLE_SQL, Vec::new())?);
@@ -694,6 +730,39 @@ fn batch_statement(
 ) -> Result<BatchStatement, SwarmStateError> {
     BatchStatement::new(sql, params)
         .map_err(|error| SwarmStateError::Schema(format!("cannot build schema statement: {error}")))
+}
+
+/// Outcome of a failed schema batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MigrationRetry {
+    /// A concurrent replica added the columns first; retry the idempotent batch
+    /// once (this also pins the version row, which the loser did not write).
+    Retry,
+    /// Not a lost migration race, or the migrated columns are still missing:
+    /// surface the original failure instead of retrying blindly.
+    Propagate,
+}
+
+/// Decide whether a failed `apply_ddl_once` lost a migration race.
+///
+/// Pure so the decision is testable with a constructed error; the actual
+/// retry lives in [`apply_ddl`]. Only SQLite's `duplicate column` text counts as
+/// a race: every other schema failure (missing table, permission, transport)
+/// must propagate unchanged.
+fn migration_retry_decision(
+    error: &SwarmStateError,
+    existing: Option<&[String]>,
+) -> MigrationRetry {
+    let SwarmStateError::Schema(message) = error else {
+        return MigrationRetry::Propagate;
+    };
+    if !message.to_ascii_lowercase().contains("duplicate column") {
+        return MigrationRetry::Propagate;
+    }
+    match existing {
+        Some(columns) if migration_statements(columns).is_empty() => MigrationRetry::Retry,
+        _ => MigrationRetry::Propagate,
+    }
 }
 
 // ── error classification ────────────────────────────────────────────────────
@@ -1542,6 +1611,23 @@ impl SwarmStore for SwarmStateStore {
             ],
         )
         .await
+    }
+
+    async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError> {
+        let rows = self
+            .query_rows(
+                "has_open_turn",
+                HAS_OPEN_TURN_SQL,
+                vec![Value::Text(logical_id.to_owned())],
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] => match row.as_slice() {
+                [Value::Integer(open)] => Ok(*open != 0),
+                _ => Err(unreadable("has_open_turn result is not one integer")),
+            },
+            rows => Err(unexpected_row_count("has_open_turn", rows.len())),
+        }
     }
 }
 

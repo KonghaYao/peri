@@ -529,10 +529,19 @@ impl ItemLog {
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
                 let completed_at = unix_now();
+                // A host-side cancel is still a `turn.completed` frame, but the
+                // official `Turn.status` carries `cancelled`; persisting
+                // `completed` would make `turns.retrieve` disagree with the
+                // official status vocabulary (`turns.d.ts`).
+                let status = if stop_reason == "cancelled" {
+                    TurnStatus::Cancelled
+                } else {
+                    TurnStatus::Completed
+                };
                 if let Err(error) = self
                     .persist_terminal_turn(
                         &turn_id,
-                        TurnStatus::Completed,
+                        status,
                         created_at.unwrap_or(completed_at),
                         started_at,
                         completed_at,
@@ -559,7 +568,7 @@ impl ItemLog {
                     OfficialTurn::new(
                         &self.logical_id,
                         &turn_id,
-                        TurnStatus::Completed,
+                        status,
                         created_at.unwrap_or(completed_at),
                         Some(completed_at),
                     ),

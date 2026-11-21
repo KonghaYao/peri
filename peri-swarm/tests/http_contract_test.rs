@@ -1187,6 +1187,9 @@ impl SwarmStore for FailingStore {
             .swarm_close_open_turns(logical_id, status, completed_at, error)
             .await
     }
+    async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError> {
+        self.inner.swarm_has_open_turn(logical_id).await
+    }
 }
 
 async fn failing_router(fail_put_input: bool, fail_append_item: bool) -> (Router, TempDir) {

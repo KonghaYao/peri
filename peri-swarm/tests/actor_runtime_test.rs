@@ -28,12 +28,14 @@ use tokio::time::timeout;
 
 use peri_swarm::actor::service::{AcpSwarmService, ActorServiceConfig};
 use peri_swarm::domain::{
-    ActorKey, ContentBlock, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode, EventCursor,
-    InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId,
-    OfficialEvent, SessionState, StreamEvent, TurnEvent, TurnsWindow,
+    ActorKey, ContentBlock, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode, ErrorKind,
+    EventCursor, InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow,
+    LogicalId, OfficialEvent, SessionState, StreamEvent, TurnEvent, TurnsWindow,
 };
-use peri_swarm::service::{CreateSessionCommand, SessionUpdateCommand, SwarmService};
-use peri_swarm::store::{MemorySwarmStore, SwarmSessionRow, SwarmSessionUpdate, SwarmStore};
+use peri_swarm::service::{CreateSessionCommand, SessionUpdateCommand, SwarmService, UpdateField};
+use peri_swarm::store::{
+    MemorySwarmStore, SwarmSessionRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow,
+};
 
 /// One chunk of assistant output; the stub splits it in two SSE frames.
 const TURN_PREFIX: &str = "stub-";
@@ -376,7 +378,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             instructions: Some("keep it short".to_owned()),
             mcp_tools: Vec::new(),
             metadata: Default::default(),
-            prompt_cache_options: None,
+            prompt_cache_options: Default::default(),
             initial_input: Some("hello".to_owned()),
             environment: EnvironmentKind::None,
             environment_id: None,
@@ -892,7 +894,7 @@ async fn model_unavailable_is_a_diagnosable_error() {
             instructions: None,
             mcp_tools: Vec::new(),
             metadata: Default::default(),
-            prompt_cache_options: None,
+            prompt_cache_options: Default::default(),
             initial_input: None,
             environment: EnvironmentKind::None,
             environment_id: None,
@@ -979,7 +981,7 @@ fn create_command(
         instructions: None,
         mcp_tools: Vec::new(),
         metadata: Default::default(),
-        prompt_cache_options: None,
+        prompt_cache_options: Default::default(),
         initial_input: initial_input.map(str::to_owned),
         environment: EnvironmentKind::None,
         environment_id: None,
@@ -1891,6 +1893,95 @@ async fn turns_update_and_delete_round_trip_through_the_actor_service() {
         .is_empty());
 
     service.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn a_persisted_unfinished_turn_refuses_update_and_delete_without_a_runtime() {
+    let store = Arc::new(MemorySwarmStore::new());
+    let store_port: Arc<dyn SwarmStore> = Arc::clone(&store) as Arc<dyn SwarmStore>;
+    let service = AcpSwarmService::new(store_port, ActorServiceConfig::default());
+
+    // `running` is the ordinary crash window; an `idle` row with an open turn
+    // row is the case the session state alone cannot see.
+    for (index, (logical, state)) in [
+        ("agent-stale-running", SessionState::Running),
+        ("agent-stale-idle", SessionState::Idle),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let logical = LogicalId::parse(logical).expect("logical id");
+        let mut row = creating_row(
+            &logical,
+            std::path::Path::new("/tmp"),
+            &format!("0192f0c5-0000-7000-8000-0000000000c{index}"),
+        );
+        row.state = state;
+        store.swarm_upsert_session(row).await.expect("session");
+        let turn_id = format!("turn_input_stale_{index}");
+        store
+            .swarm_upsert_turn(SwarmTurnRow {
+                logical_id: logical.as_str().to_owned(),
+                turn_id: turn_id.clone(),
+                status: peri_swarm::domain::TurnStatus::InProgress,
+                created_at: 100,
+                started_at: Some(100),
+                completed_at: None,
+                error: None,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+            .expect("turn");
+
+        let update = service
+            .update_session(
+                &logical,
+                SessionUpdateCommand {
+                    metadata: UpdateField::Set(
+                        [("attempt".to_owned(), "mutated".to_owned())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..SessionUpdateCommand::default()
+                },
+            )
+            .await
+            .expect_err("a persisted open turn is not updated");
+        assert_eq!(update.code(), ErrorCode::UpstreamUnavailable);
+        assert_eq!(update.kind(), ErrorKind::BadGateway);
+        assert_eq!(
+            update.details()["operation"],
+            json!("session_resume_required")
+        );
+
+        let delete = service
+            .delete_session(&logical)
+            .await
+            .expect_err("a persisted open turn is not deleted");
+        assert_eq!(delete.code(), ErrorCode::UpstreamUnavailable);
+        assert_eq!(delete.kind(), ErrorKind::BadGateway);
+        assert_eq!(
+            delete.details()["operation"],
+            json!("session_resume_required")
+        );
+
+        // Neither refusal may mutate the row first: metadata is unchanged and
+        // the turn is still open (not closed as `failed` by this path).
+        let row = store
+            .swarm_get_session(logical.as_str())
+            .await
+            .expect("read session")
+            .expect("session");
+        assert_eq!(row.state, state);
+        assert!(row.metadata.is_empty());
+        let turn = store
+            .swarm_get_turn(logical.as_str(), &turn_id)
+            .await
+            .expect("read turn")
+            .expect("turn");
+        assert_eq!(turn.status, peri_swarm::domain::TurnStatus::InProgress);
+    }
 }
 
 #[tokio::test]

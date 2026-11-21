@@ -21,8 +21,8 @@ use tokio::sync::broadcast;
 use crate::domain::{
     EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
     McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn,
-    PromptCacheOptions, SessionPage, SessionView, SessionsWindow, StreamEvent, SwarmError,
-    TurnPage, TurnStatus, TurnsWindow,
+    PromptCacheOptions, SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent,
+    SwarmError, TurnPage, TurnStatus, TurnsWindow,
 };
 use crate::store::{store_failure, SwarmSessionRow, SwarmStore};
 
@@ -38,9 +38,15 @@ pub struct CreateSessionCommand {
     /// persists and compares them; ACP injection is S8a2 (`design §5.1`).
     pub mcp_tools: Vec<McpToolSpec>,
     /// Caller metadata, validated by the HTTP layer.
-    pub metadata: BTreeMap<String, String>,
+    ///
+    /// Tri-state so an attach can tell an omitted field (keep the stored
+    /// value) from an explicit `{}`/`null` (assert "no metadata"). Only a
+    /// provided value that differs from the stored one is an identity
+    /// conflict.
+    pub metadata: UpdateField<BTreeMap<String, String>>,
     /// Session-default prompt cache lifetime, validated by the HTTP layer.
-    pub prompt_cache_options: Option<PromptCacheOptions>,
+    /// Same omission/clear/value distinction as [`Self::metadata`].
+    pub prompt_cache_options: UpdateField<PromptCacheOptions>,
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
     /// Caller-supplied hosted environment id (`environment.environment_id`).
@@ -60,6 +66,52 @@ pub struct CreateSessionCommand {
     /// the deferred [`PendingTurn`] reuses its `turn_id`, so running it later
     /// cannot duplicate the input.
     pub defer_initial_turn: bool,
+}
+
+impl CreateSessionCommand {
+    /// Metadata to persist for a new row: omission, explicit `null` and `{}`
+    /// all mean "no metadata" on create.
+    #[must_use]
+    pub fn metadata_for_new_row(&self) -> BTreeMap<String, String> {
+        match &self.metadata {
+            UpdateField::Set(metadata) => metadata.clone(),
+            UpdateField::Keep | UpdateField::Clear => BTreeMap::new(),
+        }
+    }
+
+    /// Prompt cache options to persist for a new row (same rule as
+    /// [`Self::metadata_for_new_row`]).
+    #[must_use]
+    pub fn prompt_cache_options_for_new_row(&self) -> Option<PromptCacheOptions> {
+        match &self.prompt_cache_options {
+            UpdateField::Set(options) => Some(*options),
+            UpdateField::Keep | UpdateField::Clear => None,
+        }
+    }
+
+    /// Whether an attach request's metadata disagrees with the stored value.
+    ///
+    /// Omission keeps the stored value (`false`). An explicit value, including
+    /// `null`/`{}`, must equal it; only a difference is an identity conflict.
+    #[must_use]
+    pub fn metadata_conflicts_with(&self, stored: &BTreeMap<String, String>) -> bool {
+        match &self.metadata {
+            UpdateField::Keep => false,
+            UpdateField::Clear => !stored.is_empty(),
+            UpdateField::Set(metadata) => metadata != stored,
+        }
+    }
+
+    /// Whether an attach request's prompt cache options disagree with the
+    /// stored value; `null` means "unset".
+    #[must_use]
+    pub fn prompt_cache_options_conflict_with(&self, stored: &Option<PromptCacheOptions>) -> bool {
+        match &self.prompt_cache_options {
+            UpdateField::Keep => false,
+            UpdateField::Clear => stored.is_some(),
+            UpdateField::Set(options) => stored.as_ref() != Some(options),
+        }
+    }
 }
 
 /// Tri-state write used by `sessions.update` across the process boundary.
@@ -892,6 +944,29 @@ pub(crate) async fn get_turn_from_store(
         })
 }
 
+/// Whether the persisted session still owns an unfinished turn.
+///
+/// A crash between the opening write and the terminal leaves `state=running`; a
+/// crash that reset the session row first can leave an open turn row behind.
+/// Either fact means the session must be resumed, not mutated or deleted.
+///
+/// This is the single admission rule shared by `ensure_live` and the
+/// update/delete paths: callers that already hold a live turn answer
+/// `409 turn_in_progress` themselves and only reach this probe when the runtime
+/// has no turn.
+pub(crate) async fn persisted_turn_resume_required(
+    store: &dyn SwarmStore,
+    row: &SwarmSessionRow,
+) -> Result<bool, SwarmError> {
+    if row.state == SessionState::Running {
+        return Ok(true);
+    }
+    store
+        .swarm_has_open_turn(&row.logical_id)
+        .await
+        .map_err(|error| store_failure("has_open_turn", error))
+}
+
 /// Typed port between HTTP and the session runtime (S4 actor / S3 fake).
 #[async_trait]
 pub trait SwarmService: Send + Sync {
@@ -1061,5 +1136,118 @@ mod tests {
             serde_json::to_value(set).expect("serialize"),
             serde_json::json!({ "prompt_cache_options": { "ttl": "30m" } })
         );
+    }
+
+    fn create_command(
+        metadata: UpdateField<BTreeMap<String, String>>,
+        prompt_cache_options: UpdateField<PromptCacheOptions>,
+    ) -> CreateSessionCommand {
+        CreateSessionCommand {
+            logical_id: LogicalId::parse("agent-attach").expect("logical id"),
+            cwd: std::path::PathBuf::from("/tmp"),
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            metadata,
+            prompt_cache_options,
+            initial_input: None,
+            environment: EnvironmentKind::None,
+            environment_id: None,
+            root_session_id: None,
+            defer_initial_turn: false,
+        }
+    }
+
+    #[test]
+    fn create_attach_only_conflicts_on_an_explicit_different_value() {
+        let stored_metadata: BTreeMap<String, String> =
+            [("team".to_owned(), "alpha".to_owned())].into();
+        let stored_cache_value =
+            PromptCacheOptions::new(crate::domain::PromptCacheTtl::TwelveHours);
+        let stored_cache = Some(stored_cache_value);
+
+        let omitted = create_command(UpdateField::Keep, UpdateField::Keep);
+        assert!(!omitted.metadata_conflicts_with(&stored_metadata));
+        assert!(!omitted.prompt_cache_options_conflict_with(&stored_cache));
+        assert!(omitted.metadata_for_new_row().is_empty());
+        assert_eq!(omitted.prompt_cache_options_for_new_row(), None);
+
+        let same = create_command(
+            UpdateField::Set(stored_metadata.clone()),
+            UpdateField::Set(stored_cache_value),
+        );
+        assert!(!same.metadata_conflicts_with(&stored_metadata));
+        assert!(!same.prompt_cache_options_conflict_with(&stored_cache));
+
+        let different = create_command(
+            UpdateField::Set([("team".to_owned(), "beta".to_owned())].into()),
+            UpdateField::Set(PromptCacheOptions::new(
+                crate::domain::PromptCacheTtl::ThirtyMinutes,
+            )),
+        );
+        assert!(different.metadata_conflicts_with(&stored_metadata));
+        assert!(different.prompt_cache_options_conflict_with(&stored_cache));
+
+        // Explicit `{}`/`null` assert "unset" and conflict with a stored value.
+        let cleared = create_command(UpdateField::Clear, UpdateField::Clear);
+        assert!(cleared.metadata_conflicts_with(&stored_metadata));
+        assert!(cleared.prompt_cache_options_conflict_with(&stored_cache));
+        assert!(cleared.metadata_for_new_row().is_empty());
+        assert_eq!(cleared.prompt_cache_options_for_new_row(), None);
+
+        // The same explicit empties match a session that has no value.
+        assert!(!cleared.metadata_conflicts_with(&BTreeMap::new()));
+        assert!(!cleared.prompt_cache_options_conflict_with(&None));
+    }
+
+    #[test]
+    fn create_action_keeps_omission_across_the_actor_boundary() {
+        let keep = create_command(UpdateField::Keep, UpdateField::Keep);
+        let action = crate::actor::swarm::Create {
+            logical_id: keep.logical_id.as_str().to_owned(),
+            cwd: keep.cwd.to_string_lossy().into_owned(),
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            metadata: keep.metadata,
+            prompt_cache_options: keep.prompt_cache_options,
+            initial_input: None,
+            environment: EnvironmentKind::None,
+            environment_id: None,
+            root_session_id: None,
+            defer_initial_turn: false,
+        };
+        let encoded = serde_json::to_value(&action).expect("serialize");
+        assert!(
+            encoded.get("metadata").is_none() && encoded.get("promptCacheOptions").is_none(),
+            "a kept create field must be omitted, not `null`: {encoded}"
+        );
+        let decoded: crate::actor::swarm::Create =
+            serde_json::from_value(encoded).expect("deserialize");
+        assert!(decoded.metadata.is_keep());
+        assert!(decoded.prompt_cache_options.is_keep());
+
+        let cleared = create_command(UpdateField::Clear, UpdateField::Clear);
+        let action = crate::actor::swarm::Create {
+            logical_id: cleared.logical_id.as_str().to_owned(),
+            cwd: cleared.cwd.to_string_lossy().into_owned(),
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            metadata: cleared.metadata,
+            prompt_cache_options: cleared.prompt_cache_options,
+            initial_input: None,
+            environment: EnvironmentKind::None,
+            environment_id: None,
+            root_session_id: None,
+            defer_initial_turn: false,
+        };
+        let encoded = serde_json::to_value(&action).expect("serialize");
+        assert_eq!(encoded["metadata"], serde_json::Value::Null);
+        assert_eq!(encoded["promptCacheOptions"], serde_json::Value::Null);
+        let decoded: crate::actor::swarm::Create =
+            serde_json::from_value(encoded).expect("deserialize");
+        assert_eq!(decoded.metadata, UpdateField::Clear);
+        assert_eq!(decoded.prompt_cache_options, UpdateField::Clear);
     }
 }
