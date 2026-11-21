@@ -19,6 +19,7 @@ fn settings() -> Settings {
         idle_yield: Duration::from_millis(15_000),
         yield_timeout: Duration::from_millis(5_000),
         request_human_timeout: Duration::from_millis(120_000),
+        has_peer: true,
     }
 }
 
@@ -1198,4 +1199,71 @@ async fn a_viewer_alone_never_takes_the_controller() {
     assert!(!harness.handle.snapshot().interactive());
     assert!(harness.gateway.try_recv().is_err());
     assert!(harness.attached.lock().expect("attach log").is_empty());
+}
+
+#[test]
+fn a_session_without_a_peer_takes_the_page_without_a_yield() {
+    // `--dev` has no MCP that could answer a yield, so waiting out
+    // `yield_timeout` would only produce `yield_pending` and a dead monitor.
+    let mut machine = Machine::new(
+        Settings {
+            has_peer: false,
+            ..settings()
+        },
+        "dev",
+        "dev",
+        AgentState::Idle,
+        Some("t1".to_owned()),
+    );
+
+    let effects = machine.on(Event::Takeover, Instant::now());
+    assert_eq!(machine.state(), OwnershipState::YieldPending);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::OpenController { page_id }] if page_id == "t1"
+    ));
+    // A second click before the controller opens must not invent a peer.
+    assert!(machine.on(Event::Takeover, Instant::now()).is_empty());
+    assert!(machine.next_deadline().is_none());
+
+    machine.on(
+        Event::ControllerOpened {
+            page_id: "t1".to_owned(),
+            error: None,
+        },
+        Instant::now(),
+    );
+    assert_eq!(machine.state(), OwnershipState::HumanHolds);
+    assert!(machine.is_interactive());
+}
+
+#[test]
+fn a_session_without_a_peer_never_arms_the_idle_yield() {
+    // The idle timer exists to hand a *driven* page to the human. With no agent
+    // there is nobody to ask, so the timer must not fire (and must not spam the
+    // viewer with "no agent is connected").
+    let now = Instant::now();
+    let mut dev = Machine::new(
+        Settings {
+            has_peer: false,
+            ..settings()
+        },
+        "dev",
+        "dev",
+        AgentState::Idle,
+        Some("t1".to_owned()),
+    );
+    dev.on(Event::ViewerJoined, now);
+    assert!(dev.next_deadline().is_none());
+
+    // Contrast: the same machine with a peer does arm the timer.
+    let mut peer = Machine::new(
+        settings(),
+        "s1",
+        "peri-abc",
+        AgentState::Idle,
+        Some("t1".to_owned()),
+    );
+    peer.on(Event::ViewerJoined, now);
+    assert!(peer.next_deadline().is_some());
 }

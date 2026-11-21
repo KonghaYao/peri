@@ -51,6 +51,10 @@ pub struct Settings {
     pub yield_timeout: Duration,
     /// Human handoff wait before the MCP receives `timeout`.
     pub request_human_timeout: Duration,
+    /// Whether an agent is connected to this session at all. `--dev` runs
+    /// without an MCP peer, so nothing can answer a yield: the human takes the
+    /// page directly and no idle timer fires (README §6.1, §11).
+    pub has_peer: bool,
 }
 
 impl Default for Settings {
@@ -61,6 +65,7 @@ impl Default for Settings {
             request_human_timeout: Duration::from_millis(
                 crate::config::DEFAULT_REQUEST_HUMAN_TIMEOUT_MS,
             ),
+            has_peer: true,
         }
     }
 }
@@ -73,6 +78,7 @@ impl Settings {
             idle_yield: Duration::from_millis(config.idle_yield_ms),
             yield_timeout: Duration::from_millis(config.yield_timeout_ms),
             request_human_timeout: Duration::from_millis(config.request_human_timeout_ms),
+            has_peer: !config.dev,
         }
     }
 }
@@ -434,6 +440,7 @@ impl Machine {
             || self.viewers == 0
             || self.page.is_none()
             || self.handoff.is_some()
+            || !self.settings.has_peer
         {
             return;
         }
@@ -509,6 +516,17 @@ impl Machine {
         match self.state {
             OwnershipState::HumanHolds => Vec::new(),
             OwnershipState::YieldPending => {
+                if !self.settings.has_peer {
+                    // The controller open is already in flight; a second request
+                    // must not ask a peer that does not exist and arm a timeout
+                    // that would report `yield_pending`.
+                    debug!(
+                        session = %self.session_id,
+                        page = %page,
+                        "ignoring a repeated takeover while the controller opens"
+                    );
+                    return Vec::new();
+                }
                 // A retry (the MCP may have been mid-call when the first request
                 // arrived) re-sends the same request and re-arms the report.
                 self.yield_deadline = Some(now + self.settings.yield_timeout);
@@ -519,6 +537,18 @@ impl Machine {
             }
             OwnershipState::AgentDriving => {
                 self.state = OwnershipState::YieldPending;
+                if !self.settings.has_peer {
+                    // Nobody can answer the yield, and the page has no writer, so
+                    // the human takes it directly instead of waiting out a timeout
+                    // that would only end in `yield_pending`.
+                    self.yield_deadline = None;
+                    info!(
+                        session = %self.session_id,
+                        page = %page,
+                        "takeover granted without a yield: no agent is connected"
+                    );
+                    return vec![Effect::OpenController { page_id: page }];
+                }
                 self.yield_deadline = Some(now + self.settings.yield_timeout);
                 info!(session = %self.session_id, page = %page, "takeover requested");
                 vec![Effect::Yield {
