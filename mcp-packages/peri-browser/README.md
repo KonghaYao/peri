@@ -20,7 +20,7 @@
 - 不做 per-page `Fetch` 拦截：0.5.3 在 page 连接上拒绝 `Fetch.*`。
 - 不把 CDP 端点直接暴露到网络；跨机访问只经过带鉴权的网关，网关不转发实例级方法（§6）。
 - 不把监控端口做成 CDP 端点：网关只服务监控页，第三方工具接入不在本轮。
-- 不内嵌 Chrome DevTools frontend：诊断域在 viewer 上本就受限，硬接等于自造第二条权限链；监控页自己画。
+- 不内嵌 Chrome DevTools frontend：官方前端没有可离线嵌入的构建产物（npm 包只有 TS 源码，Chrome.app 不带解包前端），硬接等于自造第二条权限链。需要官方 DevTools 时走“交还页面 + `devtools://` 地址”（§6.3），监控页自己画诊断抽屉。
 - 不做同一页面上的双写：人为可写时 agent 让出，反之亦然；不合并两方输入。
 - 不承诺无锁并发建页：Browser 端点同一时刻只有一个 controller。
 - 不做 page 级抢占式 takeover：0.5.3 没有这个机制；接管一律走“让出—换连接”。
@@ -158,10 +158,13 @@ stateDiagram-v2
 | 新标签 / 关标签 | 一律经 MCP 建页短连接（机器锁 + Browser 端点）；网关只发请求，不碰建页 | 建页已实测 |
 | agent 状态 pill | MCP 上报 `driving` / `idle` / `waiting-for-human` | 设计 |
 | 诊断面板 | 人持 controller 时 `Runtime.enable` + `Network.enable`，环形缓冲最近 200 条；只读时隐藏并说明原因 | controller 可见已实测 |
+| 官方 DevTools | 菜单“交给 Chrome DevTools”发 `{t:"devtools"}`：网关关闭自己的 controller，返回 `devtools://devtools/bundled/inspector.html?ws=<实例端点>/devtools/page/<id>`；用户在 Chrome 地址栏打开，官方前端独占该页 | 已实测：Elements 显示真实 DOM、Console/Sources 可用 |
 | 交接横幅 | `request_human`：显示 agent 的请求，人点“我来”进入 `HumanHolds`，点“完成”交还 | 设计 |
 | 只读标记 | viewer 连接，`Input.*` 由 Kitesurf 拒绝 | 已实测 |
 
 `request_human` 的语义：工具调用阻塞，网关把请求显示在监控页；人接受后进入 `HumanHolds`，完成后工具返回人操作后的 `url`/`title` 与一张截图；无人响应超过 `request_human_timeout_ms` 返回 `no_human`。等待期间该会话的其他页面工具返回 `waiting_for_human`，不排队堆积。
+
+官方 DevTools 的边界：Kitesurf 每个页面只接受一个 controller，所以交付是“让出”而不是“并存”——网关关闭页面连接后监控页变成只读，DevTools 窗口关掉、人重新接管后才回到网关。交付本身不产生错误提示：agent 持有页面时网关没有 controller 可关，页面连接本来就是 agent 的。已知代价：官方前端挂上后会高频空转发 `CSS.takeComputedStyleUpdates`（Kitesurf 侧问题，#529），Elements 面板明显变慢。
 
 ### 6.4 帧策略
 
@@ -226,6 +229,8 @@ sequenceDiagram
 
 - 单个 `monitor.html`：内联 CSS/JS，无构建、无依赖，`include_str!` 进网关二进制。
 - 组成：canvas、标签条与缩略图、地址栏与前进后退、agent 状态 pill、诊断抽屉、交接横幅。
+- DevTools 按钮是菜单：交给 Chrome 官方 DevTools（显示 `devtools://` 地址与复制按钮）或打开内置面板；Esc 与点击空白处关闭。
+- 地址栏、后退键跟随页面驱动的导航：`Page.frameNavigated` 滞后 6–15 s（Kitesurf 侧问题 #527），因此以 `/json/list` 轮询先发现新 URL，再回读确认；按 §6.3。
 - 画面用 `<canvas>`，按 ack 节奏更新；输入事件按 §6.4 的坐标映射发出。
 
 ## 7. 工具面（参考 chrome-devtools-mcp）
