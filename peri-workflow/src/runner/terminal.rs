@@ -205,6 +205,22 @@ pub(super) fn ensure_failure_error(result: &mut WorkflowResult) {
     }
 }
 
+/// 终态归一化：done 之后回填的限额或非限额致命失败不得让 run 保持 completed。
+///
+/// 投影与持久化都读取返回的状态，避免“先投影、后修正”把 failed run 的 delivery
+/// 留在 unknown。
+pub(super) fn terminal_status<'a>(
+    status: &'a str,
+    breaches: &[peri_acp_types::workflow::LimitBreach],
+    first_error: Option<&str>,
+) -> &'a str {
+    if status == "completed" && (!breaches.is_empty() || first_error.is_some()) {
+        "failed"
+    } else {
+        status
+    }
+}
+
 pub(super) fn finalize_workflow(
     mut final_result: WorkflowResult,
     input: &WorkflowInput,
@@ -219,6 +235,11 @@ pub(super) fn finalize_workflow(
         token_usage,
         first_error,
     } = limit_report;
+    // 终态读取的是收尾时的完整事实：done 之后才回填的 settle 或非限额致命失败
+    // 都不得把 run 显示成全绿。投影与持久化必须读同一个状态，否则 failed run 的
+    // delivery 会停在 unknown。
+    let status =
+        terminal_status(&final_result.status, &breaches, first_error.as_deref()).to_string();
     let postcondition = match &input.git_observation {
         crate::journal::GitObservation::Captured(baseline) => {
             Some(baseline.verify_postcondition(input.write_intent.as_ref()))
@@ -228,12 +249,13 @@ pub(super) fn finalize_workflow(
     };
     let acceptance_status = peri_acp_types::workflow::AcceptanceStatus::Unknown;
     let projection = project_postcondition(
-        &final_result.status,
+        &status,
         acceptance_status,
         input.write_intent.as_ref(),
         &input.git_observation,
         postcondition.as_ref(),
     );
+    final_result.status = status;
     final_result.post_processing_status = projection.post_processing;
     final_result.delivery_status = projection.delivery;
     if let crate::journal::GitObservation::Incomplete(detail) = &input.git_observation {
@@ -243,11 +265,6 @@ pub(super) fn finalize_workflow(
             error = %detail,
             "git observation is incomplete; delivery cannot claim an unchanged worktree"
         );
-    }
-    // 终态读取的是收尾时的完整限额事实：done 之后才回填的 settle 仍不得把
-    // 超限 run 显示成全绿（与 done 时的判定同一规则，不新增中断）。
-    if !breaches.is_empty() && final_result.status == "completed" {
-        final_result.status = "failed".to_string();
     }
     if final_result.error.is_none() {
         final_result.error = first_error.clone();

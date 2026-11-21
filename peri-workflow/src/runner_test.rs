@@ -452,6 +452,32 @@ fn postcondition_projection_fails_safe_without_evidence() {
     }
 }
 
+/// late settle 的致命失败没有结构化 breach：它必须在投影前把 completed 归一化为
+/// failed，否则 delivery 会停在 `unknown` / `not_requested`。
+#[test]
+fn late_fatal_failure_is_normalized_before_projection() {
+    use crate::runner::terminal::{project_postcondition, terminal_status};
+    use peri_acp_types::workflow::{AcceptanceStatus, DeliveryStatus};
+
+    let status = terminal_status("completed", &[], Some("scope not closed"));
+    assert_eq!(status, "failed");
+    let projection = project_postcondition(
+        status,
+        AcceptanceStatus::Unknown,
+        None,
+        &captured_git_observation(),
+        Some(&Ok(())),
+    );
+    assert_eq!(projection.delivery, DeliveryStatus::Blocked);
+    assert_eq!(projection.reason, None);
+
+    assert_eq!(terminal_status("completed", &[], None), "completed");
+    assert_eq!(
+        terminal_status("killed", &[], Some("scope not closed")),
+        "killed"
+    );
+}
+
 #[test]
 fn postcondition_projection_separates_unattributed_changes_from_violations() {
     use peri_acp_types::workflow::{AcceptanceStatus, DeliveryStatus, PostProcessingStatus};

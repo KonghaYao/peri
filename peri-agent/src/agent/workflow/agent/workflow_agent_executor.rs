@@ -276,6 +276,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
             "Workflow agent: starting execution"
         );
 
+        // 重试会复用 `(run_id, agent_id)`：上一轮解析的上限与用量不得挂到本次
+        // attempt 上（例如重试在进入循环前就失败）。
+        self.execution_limits
+            .write()
+            .remove(&(params.run_id.clone(), params.agent_id));
+
         let started_at = peri_time::monotonic_now();
 
         let agent_definition = match params.agent_type.as_deref() {
@@ -433,6 +439,16 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let cancel_token = self.ctx.cancel.clone().unwrap_or_default();
         let (max_iterations, iteration_limit_source) =
             resolve_iteration_limit(agent_definition.as_ref());
+        // 上限已解析就先记录上限本身；用量要等循环推进，未进入循环时保持 None。
+        self.record_execution_limits(
+            &params.run_id,
+            params.agent_id,
+            peri_acp_types::workflow::AgentExecutionLimits {
+                iteration_limit: max_iterations as u64,
+                iteration_limit_source,
+                iterations_used: None,
+            },
+        );
 
         // tools: Vec<Box<dyn BaseTool>> → Vec<Arc<dyn BaseTool>>
         let tools_arc: Vec<Arc<dyn crate::tools::BaseTool>> = tools
