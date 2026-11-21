@@ -42,7 +42,7 @@ fn minimal_input() -> WorkflowInput {
         workflow_name: "t".into(),
         resume_from: None,
         write_intent: None,
-        git_baseline: None,
+        git_observation: Default::default(),
     }
 }
 
@@ -120,6 +120,8 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
                 acceptance_status: Default::default(),
                 post_processing_status: Default::default(),
                 delivery_status: Default::default(),
+                delivery_reason: None,
+                postcondition_observation: None,
                 outcome: Default::default(),
                 write_intent: None,
                 limits: Default::default(),

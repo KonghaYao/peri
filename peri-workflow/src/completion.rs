@@ -187,6 +187,9 @@ impl RunCompletion {
                 state.execution_status = ExecutionStatus::Failed;
                 state.post_processing_status = PostProcessingStatus::Failed;
                 state.delivery_status = DeliveryStatus::Blocked;
+                // 后到的清理失败改写了执行结论：旧的交付原因（如 not_requested）
+                // 不再解释本次 failed 终态。
+                state.delivery_reason = None;
                 state.outcome = peri_acp_types::workflow::WorkflowOutcome::Failed;
                 state.error = Some(error.to_string());
                 if let Err(write_error) = self.journal.write_state(&self.run_id, &state) {

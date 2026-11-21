@@ -719,7 +719,9 @@ impl WorkflowRuntime {
         }
 
         let write_intent = state.write_intent.clone();
-        let git_baseline = crate::journal::GitBaseline::capture_for_intent(
+        // Resume 同样重新采样：历史记录没有持久化 baseline，不能把“未记录”
+        // 当作“无变化”；恢复后的观测窗口从 resume 时刻开始。
+        let git_observation = crate::journal::GitBaseline::capture_for_intent(
             std::path::Path::new(self.runner.cwd()),
             write_intent.as_ref(),
         )
@@ -733,7 +735,7 @@ impl WorkflowRuntime {
             workflow_name: state.workflow_name.clone(),
             resume_from: Some(run_id.to_string()),
             write_intent,
-            git_baseline,
+            git_observation,
         };
         self.start_prepared_run(wf_input).await
     }

@@ -238,10 +238,10 @@ results may still become `null` after engine retry, so scripts must check requir
 - **execution**：由 run 状态投影（completed / failed / killed）。
 - **acceptance**：语义验收不由运行内核判定；内核当前投影为 `unknown`，验收结论属 ADLC/skill 层（`ADLC-DELIVERY-STATUS-001`，[Ultra-ADLC 设计](ultra-adlc.md)）。
 - **outcome**：引擎级派生三态——execution 失败/取消为 `failed`/`killed`，completed 且 delivery 或 acceptance 阻断为 `blocked`，completed 且未阻断为 `completed`，其余为 `unknown`。`completed` 只表示引擎执行完成，不表示任务成功。
-- **post-processing**：Git postcondition 结果——read_only 通过为 `not_required`，write 通过为 `passed`，可归因违例为 `failed`，无 writeIntent 或观察到 footprint 外变化为 `blocked`。
-- **delivery**：内核只投影 `blocked` / `unknown`——execution 完成、acceptance 非 failed、存在 write intent 且 post-processing 通过时为 `unknown`，其余为 `blocked`；`deliverable` 判定属引擎之外的验收层（ADLC/skill），内核不产出。
+- **post-processing**：Git postcondition 结果——read_only 通过为 `not_required`，write 通过为 `passed`，可归因违例为 `failed`；未声明 writeIntent 且观测完整、无差异为 `unknown`（原因 `not_requested`）；观察到 footprint 外变化为 `blocked`（原因 `unattributed_change`）；无基线、采样失败或范围不可验证为 `blocked`（原因 `observation_incomplete`）。
+- **delivery**：内核只投影 `blocked` / `unknown`——execution 完成、acceptance 非 failed 且 post-processing 未阻断时为 `unknown`（未请求交付同样为 `unknown` + `not_requested`），其余为 `blocked`；`deliverable` 判定属引擎之外的验收层（ADLC/skill），内核不产出。结构化原因字段只在 `state.json`，旧消费者忽略。
 
-Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；未声明 `writeIntent` 时不捕获 baseline、不做 Git 检查（post-processing 为 blocked），避免把父会话并发改动报成不可归因。read_only/无写 footprint 时观察到的变化只标为 blocked 并给出路径；write 的 allowlist 越界、非法 HEAD 变化与提交越界仍失败。异常只报告，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
+Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；未声明 `writeIntent` 时仍采样并比较：观测完整且无差异只表示未请求交付，不判 blocked；无基线、采样失败或范围不可验证一律 blocked（`observation_incomplete`），不得宣称无变化。read_only 时观察到的变化只标为 blocked 并给出路径；write 的 allowlist 越界、非法 HEAD 变化与提交越界仍失败。异常只报告，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
 
 ### 5.3 通知与投递
 

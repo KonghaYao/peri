@@ -36,17 +36,54 @@ impl AgentTaskSink for RecordingSink {
     }
 }
 
-/// 与 RPC 单测相同的本地管道 fixture；不查询 HOME、artifact cache 或网络。
-///
-/// 返回 (终态, state.json, progress)。
+/// 初始化带一个提交的最小仓库，供终态 Git 对账使用。
+fn init_git_repository(root: &std::path::Path) {
+    let run = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run(&["init", "-q"]);
+    std::fs::write(root.join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    // workflow journal 位于 cwd/.claude；fixture 必须忽略它，否则终态对账会把
+    // 本 run 自己的运行目录当成外部变化。
+    std::fs::write(root.join(".gitignore"), ".claude/\n")
+        .expect("the test fixture file must be writable");
+    run(&["add", "tracked.txt", ".gitignore"]);
+    run(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+}
+
 async fn run_messages(
     sink: Arc<dyn AgentTaskSink>,
     method: &str,
     params: serde_json::Value,
     limits: WorkflowLimits,
     breach: Option<&str>,
+    git_repository: bool,
 ) -> (WorkflowResult, RunState, RunProgress) {
+    // 与 RPC 单测相同的本地管道 fixture；不查询 HOME、artifact cache 或网络。
+    // 返回 (终态, state.json, progress)。
     let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
+    let observation = if git_repository {
+        init_git_repository(tmp.path());
+        crate::journal::GitBaseline::capture(tmp.path())
+            .map(crate::journal::GitObservation::Captured)
+            .expect("the fixture repository must be observable")
+    } else {
+        crate::journal::GitObservation::default()
+    };
     let journal = Arc::new(WorkflowJournalStore::new(
         tmp.path()
             .to_str()
@@ -109,7 +146,7 @@ async fn run_messages(
             workflow_name: "dispatch-test".into(),
             resume_from: None,
             write_intent: None,
-            git_baseline: None,
+            git_observation: observation,
         },
         started_at_iso: "2026-09-10T00:00:00Z".into(),
         run_started: std::time::Instant::now(),
@@ -147,6 +184,7 @@ async fn test_invalid_agent_task_continues_to_workflow_done() {
         json!({"runId": "other-run", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         WorkflowLimits::default(),
         None,
+        false,
     )
     .await;
     assert_eq!(calls.load(Ordering::SeqCst), 0, "跨 run 发布不得进入准入");
@@ -172,6 +210,7 @@ async fn test_agent_limit_stops_before_queued_workflow_done() {
         json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         limits,
         None,
+        false,
     )
     .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1, "准入被调用一次并拒绝");
@@ -203,6 +242,7 @@ async fn test_elapsed_timeout_keeps_the_first_breach() {
         json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         limits,
         Some("workflow exceeded maxToolCalls (5)"),
+        false,
     )
     .await;
     assert_eq!(
@@ -213,4 +253,51 @@ async fn test_elapsed_timeout_keeps_the_first_breach() {
     assert_eq!(state.error, result.error);
     assert_eq!(result.status, "failed");
     assert!(matches!(progress.status, RunStatus::Failed));
+}
+
+/// issue #522：completed + 未声明 writeIntent、Git 观测完整且无差异。
+///
+/// 旧行为把这种情况投影成 `delivery=blocked`；新语义是“交付未请求”，
+/// 旧枚举保持 `unknown`，原因与观测完整性写入 `state.json`。
+#[tokio::test]
+async fn completed_without_write_intent_declares_unrequested_delivery() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let sink = RecordingSink {
+        calls: Arc::clone(&calls),
+        outcome: AgentTaskPublish::Accepted,
+    };
+    let (result, state, progress) = run_messages(
+        Arc::new(sink),
+        "agent/task",
+        // 跨 run 发布在准入前被拒绝：本用例只关心终态投影。
+        json!({"runId": "other-run", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
+        WorkflowLimits::default(),
+        None,
+        true,
+    )
+    .await;
+
+    assert_eq!(result.status, "completed");
+    assert_eq!(result.error, None, "干净省略意图的 run 不应附带 Git 错误");
+    assert_eq!(
+        result.post_processing_status,
+        peri_acp_types::workflow::PostProcessingStatus::Unknown
+    );
+    assert_eq!(
+        result.delivery_status,
+        peri_acp_types::workflow::DeliveryStatus::Unknown,
+        "未请求交付不得投影为 blocked"
+    );
+    assert_eq!(
+        state.delivery_reason,
+        Some(peri_acp_types::workflow::DeliveryReason::NotRequested)
+    );
+    assert_eq!(
+        state.postcondition_observation,
+        Some(peri_acp_types::workflow::PostconditionObservation::Complete)
+    );
+    assert_eq!(
+        progress.delivery_status,
+        peri_acp_types::workflow::DeliveryStatus::Unknown
+    );
 }

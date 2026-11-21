@@ -1,4 +1,5 @@
 use crate::journal::git::GitBaseline;
+use crate::journal::git::GitObservation;
 use crate::journal::AttemptTracker;
 use crate::journal::RunState;
 use crate::journal::WorkflowJournalStore;
@@ -148,6 +149,8 @@ fn test_write_and_read_state() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        delivery_reason: None,
+        postcondition_observation: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
@@ -210,6 +213,8 @@ fn test_state_error_field_round_trip() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Failed,
         delivery_status: DeliveryStatus::Blocked,
+        delivery_reason: None,
+        postcondition_observation: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
@@ -251,6 +256,8 @@ fn test_state_error_skipped_when_none() {
         acceptance_status: AcceptanceStatus::Passed,
         post_processing_status: PostProcessingStatus::NotRequired,
         delivery_status: DeliveryStatus::Unknown,
+        delivery_reason: None,
+        postcondition_observation: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Completed,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
@@ -308,21 +315,70 @@ fn test_legacy_completed_defaults_do_not_claim_delivery() {
     assert_eq!(state.acceptance_status, AcceptanceStatus::Unknown);
     assert_eq!(state.post_processing_status, PostProcessingStatus::Unknown);
     assert_eq!(state.delivery_status, DeliveryStatus::Unknown);
+    assert_eq!(
+        state.delivery_reason, None,
+        "旧 state.json 缺原因字段：不得据此推断“未请求交付”或“无变化”"
+    );
+    assert_eq!(state.postcondition_observation, None);
 }
 
 #[test]
-fn test_non_git_baseline_is_optional_for_legacy_and_read_only() {
+fn postcondition_reason_fields_round_trip_and_stay_optional() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    let store = WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    store
+        .init_run("run-reason", "script")
+        .expect("the init run fixture result is required for this assertion");
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "run-reason",
+        "workflow_name": "reason",
+        "status": "completed",
+        "script": "script",
+        "started_at": "2026-06-22T00:00:00Z"
+    }))
+    .expect("legacy payload must deserialize");
+    let mut state = state;
+    state.delivery_reason = Some(peri_acp_types::workflow::DeliveryReason::NotRequested);
+    state.postcondition_observation =
+        Some(peri_acp_types::workflow::PostconditionObservation::Complete);
+    store
+        .write_state("run-reason", &state)
+        .expect("the write state fixture result is required for this assertion");
+
+    let read = store
+        .read_state("run-reason")
+        .expect("the read state fixture result is required for this assertion");
+    assert_eq!(
+        read.delivery_reason,
+        Some(peri_acp_types::workflow::DeliveryReason::NotRequested)
+    );
+    assert_eq!(
+        read.postcondition_observation,
+        Some(peri_acp_types::workflow::PostconditionObservation::Complete)
+    );
+}
+
+#[test]
+fn test_non_git_directory_reports_not_applicable_without_intent() {
     let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
 
-    assert!(GitBaseline::capture_for_intent(tmp.path(), None)
-        .expect("the path fixture result is required for this assertion")
-        .is_none());
-    assert!(GitBaseline::capture_for_intent(
-        tmp.path(),
-        Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
-    )
-    .expect("the path fixture result is required for this assertion")
-    .is_none());
+    assert!(matches!(
+        GitBaseline::capture_for_intent(tmp.path(), None)
+            .expect("sampling failure must not fail start"),
+        GitObservation::NotApplicable
+    ));
+    assert!(matches!(
+        GitBaseline::capture_for_intent(
+            tmp.path(),
+            Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
+        )
+        .expect("read-only sampling failure must not fail start"),
+        GitObservation::NotApplicable
+    ));
 }
 
 #[test]
@@ -865,7 +921,7 @@ fn attempt_tracker_makes_engine_retries_visible_and_preserves_recovery() {
 }
 
 #[test]
-fn no_write_intent_skips_git_baseline_even_inside_a_repository() {
+fn no_write_intent_still_samples_git_baseline_inside_a_repository() {
     let tmp = TempDir::new().expect("the temporary test directory must be available");
     assert!(std::process::Command::new("git")
         .args(["init", "-q"])
@@ -895,14 +951,40 @@ fn no_write_intent_skips_git_baseline_even_inside_a_repository() {
         .status()
         .expect("the status fixture result is required for this assertion")
         .success());
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .expect("the temporary directory must be canonicalizable");
 
-    assert!(GitBaseline::capture_for_intent(tmp.path(), None)
-        .expect("without an intent there is no baseline to capture")
-        .is_none());
-    assert!(GitBaseline::capture_for_intent(
-        tmp.path(),
+    for intent in [
+        None,
         Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
+    ] {
+        let observation = GitBaseline::capture_for_intent(tmp.path(), intent)
+            .expect("sampling without a write intent must not fail start");
+        match observation {
+            GitObservation::Captured(baseline) => {
+                assert_eq!(baseline.repo_root, canonical);
+                assert_eq!(baseline.cwd, canonical);
+            }
+            other => panic!("inside a repository the baseline must be sampled: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn broken_git_repository_is_incomplete_not_not_applicable() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    std::fs::write(
+        tmp.path().join(".git"),
+        "gitdir: /nonexistent/peri-issue-522\n",
     )
-    .expect("read-only still captures a verification baseline")
-    .is_some());
+    .expect("the test fixture file must be writable");
+
+    let observation = GitBaseline::capture_for_intent(tmp.path(), None)
+        .expect("sampling failure must not fail start");
+    assert!(
+        matches!(observation, GitObservation::Incomplete(_)),
+        "损坏的仓库是采样失败，不得读作没有可观测范围: {observation:?}"
+    );
 }

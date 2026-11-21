@@ -33,6 +33,12 @@ pub struct RunState {
     pub post_processing_status: PostProcessingStatus,
     #[serde(default)]
     pub delivery_status: DeliveryStatus,
+    /// 交付结论的结构化原因；旧 `state.json` 缺省为 `None`，不得据此升级为通过。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_reason: Option<peri_acp_types::workflow::DeliveryReason>,
+    /// Git 观测完整性；旧 `state.json` 缺省为 `None`（未记录，不等于完整观测）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postcondition_observation: Option<peri_acp_types::workflow::PostconditionObservation>,
     /// 引擎级三态；与 acceptance 分开，旧 state.json 缺省为 `unknown`。
     #[serde(default)]
     pub outcome: peri_acp_types::workflow::WorkflowOutcome,

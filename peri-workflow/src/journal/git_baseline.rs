@@ -7,6 +7,8 @@ use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostconditionFailure {
+    /// 无法观测（采样或解析失败、验证范围不可用）：不得据此宣称“无变化”。
+    ObservationIncomplete(String),
     /// 观察到的变化落在本 run 声明写入范围之外：可以报告，但不能归因给本 run。
     Unattributed(String),
     /// 可归因的后置条件违例（越界、HEAD 变化、提交含范围外路径等）。
@@ -19,10 +21,26 @@ impl PostconditionFailure {
         matches!(self, Self::Violation(_))
     }
 
+    /// 交付投影的结构化原因；可归因违例由 `PostProcessingStatus::Failed` 表达。
+    #[must_use]
+    pub fn delivery_reason(&self) -> Option<peri_acp_types::workflow::DeliveryReason> {
+        match self {
+            Self::ObservationIncomplete(_) => {
+                Some(peri_acp_types::workflow::DeliveryReason::ObservationIncomplete)
+            }
+            Self::Unattributed(_) => {
+                Some(peri_acp_types::workflow::DeliveryReason::UnattributedChange)
+            }
+            Self::Violation(_) => None,
+        }
+    }
+
     #[must_use]
     pub fn message(&self) -> &str {
         match self {
-            Self::Unattributed(message) | Self::Violation(message) => message,
+            Self::ObservationIncomplete(message)
+            | Self::Unattributed(message)
+            | Self::Violation(message) => message,
         }
     }
 }
@@ -58,8 +76,44 @@ fn unattributed(message: impl Into<String>) -> PostconditionFailure {
     PostconditionFailure::Unattributed(message.into())
 }
 
+fn observation_incomplete(message: impl Into<String>) -> PostconditionFailure {
+    PostconditionFailure::ObservationIncomplete(message.into())
+}
+
 fn violation(message: impl Into<String>) -> PostconditionFailure {
     PostconditionFailure::Violation(message.into())
+}
+
+/// 启动时捕获的 Git 观测窗口。
+///
+/// [`Self::Incomplete`] 与 [`Self::NotApplicable`] 都不是“没有变化”：前者无法观测，
+/// 后者没有可绑定的仓库范围；交付投影不得据此显示通过。
+#[derive(Debug, Clone)]
+pub enum GitObservation {
+    /// 基线已采样，运行后可以对比。
+    Captured(GitBaseline),
+    /// 非 Git 仓库：没有可绑定的仓库范围。
+    NotApplicable,
+    /// 采样失败；保留原因用于诊断。
+    Incomplete(String),
+}
+
+impl Default for GitObservation {
+    fn default() -> Self {
+        Self::Incomplete("no git observation was captured".to_string())
+    }
+}
+
+impl GitObservation {
+    #[must_use]
+    pub fn completeness(&self) -> peri_acp_types::workflow::PostconditionObservation {
+        use peri_acp_types::workflow::PostconditionObservation;
+        match self {
+            Self::Captured(_) => PostconditionObservation::Complete,
+            Self::NotApplicable => PostconditionObservation::NotApplicable,
+            Self::Incomplete(_) => PostconditionObservation::Incomplete,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,36 +127,32 @@ pub struct GitBaseline {
 impl GitBaseline {
     /// 按声明式写入意图捕获 Git baseline。
     ///
-    /// `write` 必须位于可验证的 Git 仓库；legacy/read-only 在普通目录仍可执行，
-    /// 但没有 baseline 时不能据此宣称 post-processing 或 delivery 已通过。
-    /// 未声明 intent 时没有可验证的后置条件，不捕获 baseline（也不再对并发变化
-    /// 报“不可归因”）：该 run 的 post-processing 只能是 blocked。
+    /// `write` 必须位于可验证的 Git 仓库，否则启动失败（否则无法验证写入边界）。
+    /// legacy/read-only 在普通目录仍可执行：采样失败返回
+    /// [`GitObservation::Incomplete`]，非 Git 目录返回 [`GitObservation::NotApplicable`]，
+    /// 都不阻断 start，但也不能据此宣称 post-processing 或 delivery 已通过。
+    /// 未声明 intent 时同样采样：没有意图不等于“没有变化”，只表示未请求交付。
     pub fn capture_for_intent(
         cwd: &Path,
         intent: Option<&peri_acp_types::workflow::WorkflowWriteIntent>,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<GitObservation, String> {
+        // cwd 本身不可用属于启动输入错误，不是“Git 采样失败”。
         cwd.canonicalize()
             .map_err(|error| format!("cannot canonicalize workflow cwd: {error}"))?;
-        if intent.is_none() {
-            return Ok(None);
-        }
-        match Self::capture(cwd) {
-            Ok(baseline) => {
-                if let Some(intent) = intent {
-                    baseline.validate_write_intent(intent)?;
-                }
-                Ok(Some(baseline))
+        if let Some(intent) = intent {
+            if matches!(
+                intent,
+                peri_acp_types::workflow::WorkflowWriteIntent::Write { .. }
+            ) {
+                let baseline = Self::capture(cwd)?;
+                baseline.validate_write_intent(intent)?;
+                return Ok(GitObservation::Captured(baseline));
             }
-            Err(error)
-                if matches!(
-                    intent,
-                    Some(peri_acp_types::workflow::WorkflowWriteIntent::Write { .. })
-                ) =>
-            {
-                Err(error)
-            }
-            Err(_) => Ok(None),
         }
+        Ok(match Self::capture(cwd) {
+            Ok(baseline) => GitObservation::Captured(baseline),
+            Err(error) => classify_unobserved(cwd, error),
+        })
     }
 
     /// 只读捕获 Git baseline。仅使用 plumbing/read-only 命令，不修改 index/worktree。
@@ -197,7 +247,7 @@ impl GitBaseline {
             return self.verify_unchanged();
         };
         let after = Self::capture(&self.cwd).map_err(|error| {
-            unattributed(format!(
+            observation_incomplete(format!(
                 "cannot capture git postcondition baseline: {error}"
             ))
         })?;
@@ -206,10 +256,12 @@ impl GitBaseline {
                 "canonical git repository changed during workflow",
             ));
         }
-        let before = parse_status_paths(&self.status_porcelain_v2)
-            .map_err(|error| unattributed(format!("cannot parse baseline git status: {error}")))?;
-        let after_status = parse_status_paths(&after.status_porcelain_v2)
-            .map_err(|error| unattributed(format!("cannot parse post-run git status: {error}")))?;
+        let before = parse_status_paths(&self.status_porcelain_v2).map_err(|error| {
+            observation_incomplete(format!("cannot parse baseline git status: {error}"))
+        })?;
+        let after_status = parse_status_paths(&after.status_porcelain_v2).map_err(|error| {
+            observation_incomplete(format!("cannot parse post-run git status: {error}"))
+        })?;
         let changed_paths: BTreeSet<String> = before
             .keys()
             .chain(after_status.keys())
@@ -262,10 +314,10 @@ impl GitBaseline {
                 ],
             )
             .map_err(|error| {
-                unattributed(format!("cannot inspect the committed path list: {error}"))
+                observation_incomplete(format!("cannot inspect the committed path list: {error}"))
             })?;
             let committed_paths = String::from_utf8(committed)
-                .map_err(|_| unattributed("git commit path list is not UTF-8"))?;
+                .map_err(|_| observation_incomplete("git commit path list is not UTF-8"))?;
             let path_items = committed_paths.lines();
             let outside: BTreeSet<String> = path_items
                 .filter(|path| !path.is_empty())
@@ -292,7 +344,7 @@ impl GitBaseline {
     /// 本 run 的后置条件失败；真实的写意图越界由 `verify_postcondition` 判定。
     pub fn verify_unchanged(&self) -> Result<(), PostconditionFailure> {
         let after = Self::capture(&self.cwd).map_err(|error| {
-            unattributed(format!(
+            observation_incomplete(format!(
                 "cannot capture git postcondition baseline: {error}"
             ))
         })?;
@@ -308,10 +360,10 @@ impl GitBaseline {
         }
         if after.status_porcelain_v2 != self.status_porcelain_v2 {
             let before = parse_status_paths(&self.status_porcelain_v2).map_err(|error| {
-                unattributed(format!("cannot parse baseline git status: {error}"))
+                observation_incomplete(format!("cannot parse baseline git status: {error}"))
             })?;
             let after_status = parse_status_paths(&after.status_porcelain_v2).map_err(|error| {
-                unattributed(format!("cannot parse post-run git status: {error}"))
+                observation_incomplete(format!("cannot parse post-run git status: {error}"))
             })?;
             let changed_paths: BTreeSet<String> = before
                 .keys()
@@ -354,7 +406,40 @@ fn path_is_allowed(path: &str, allowed: &str) -> bool {
     path == allowed || path.starts_with(allowed)
 }
 
-fn git_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+/// 采样失败时区分“明确不在 Git 仓库”与“无法观测”。
+///
+/// 只有 git 可执行、探测确认不在 worktree 且没有 `.git` marker 时才判
+/// [`GitObservation::NotApplicable`]；损坏的仓库或缺 git 都按采样失败处理，
+/// 否则会把“读不到”误报成“没有可观测的变化”。
+fn classify_unobserved(cwd: &Path, error: String) -> GitObservation {
+    match git_worktree_probe(cwd) {
+        Ok(true) => GitObservation::Incomplete(error),
+        Ok(false) if has_git_marker(cwd) => GitObservation::Incomplete(error),
+        Ok(false) => GitObservation::NotApplicable,
+        Err(_) => GitObservation::Incomplete(error),
+    }
+}
+
+fn git_worktree_probe(cwd: &Path) -> Result<bool, String> {
+    let output = run_git(cwd, &["rev-parse", "--is-inside-work-tree"])?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+fn has_git_marker(cwd: &Path) -> bool {
+    let mut current = Some(cwd);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return true;
+        }
+        current = dir.parent();
+    }
+    false
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     let mut command = Command::new("git");
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -369,6 +454,11 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = command
         .output()
         .map_err(|error| format!("failed to execute git: {error}"))?;
+    Ok(output)
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = run_git(cwd, args)?;
     if !output.status.success() {
         return Err("git pre/postcondition command failed".to_string());
     }

@@ -383,6 +383,33 @@ pub enum DeliveryStatus {
     Unknown,
 }
 
+/// 交付结论的结构化原因。
+///
+/// `delivery_status` 只有 `blocked` / `unknown`，无法区分“未请求交付”
+/// “无法归因的变化”和“观测不完整”。旧消费者忽略本字段；缺失不是“已通过”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryReason {
+    /// 未声明 writeIntent：本次运行没有请求交付，不能读作写入验收通过。
+    NotRequested,
+    /// 观察到差异但无法归因给本 run。
+    UnattributedChange,
+    /// 无基线、采样失败或范围不可验证：不得据此宣称“无变化”。
+    ObservationIncomplete,
+}
+
+/// Git 观测窗口的完整性（观测事实，不是交付结论）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostconditionObservation {
+    /// 基线已采样，运行前后可以对比。
+    Complete,
+    /// 非 Git 仓库：没有可绑定的仓库范围。
+    NotApplicable,
+    /// 采样失败或验证范围不可用。
+    Incomplete,
+}
+
 /// 引擎级结论：只聚合 execution 与 post-processing/delivery，不代替语义验收。
 ///
 /// `Completed` 仅表示执行完成且 post-condition 未阻断；`acceptance_status` 仍是
@@ -657,7 +684,8 @@ fn post_condition_word(status: PostProcessingStatus) -> &'static str {
         PostProcessingStatus::NotRequired => "passed (read-only verified)",
         PostProcessingStatus::Passed => "passed (write intent verified)",
         PostProcessingStatus::Failed => "failed",
-        PostProcessingStatus::Blocked => "blocked (no baseline or intent omitted)",
+        // 无基线、采样失败与无法归因都落在这里：只陈述“未验证”，不猜测原因。
+        PostProcessingStatus::Blocked => "blocked (post-condition not verified)",
         PostProcessingStatus::Unknown => "unknown",
     }
 }

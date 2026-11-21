@@ -44,7 +44,8 @@ pub struct WorkflowInput {
     pub workflow_name: String,
     pub resume_from: Option<String>,
     pub write_intent: Option<peri_acp_types::workflow::WorkflowWriteIntent>,
-    pub git_baseline: Option<crate::journal::GitBaseline>,
+    /// 启动时捕获的 Git 观测窗口；缺失基线不是“无变化”。
+    pub git_observation: crate::journal::GitObservation,
 }
 
 /// Workflow 执行结果

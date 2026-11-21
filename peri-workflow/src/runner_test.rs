@@ -133,7 +133,7 @@ async fn resume_sequence_gap_fails_before_any_agent_execution() {
         workflow_name: "gap".into(),
         resume_from: Some("source".into()),
         write_intent: None,
-        git_baseline: None,
+        git_observation: Default::default(),
     };
 
     let error = runner
@@ -314,6 +314,15 @@ async fn workflow_result_receiver_returns_none_when_closed_without_result() {
     assert!(result.is_none());
 }
 
+fn captured_git_observation() -> crate::journal::GitObservation {
+    crate::journal::GitObservation::Captured(crate::journal::GitBaseline {
+        repo_root: std::path::PathBuf::from("/repo"),
+        cwd: std::path::PathBuf::from("/repo"),
+        head: "0123456789abcdef".into(),
+        status_porcelain_v2: Vec::new(),
+    })
+}
+
 /// 内核只投影 `blocked` / `unknown`：acceptance 无生产写入方，任何组合都不会
 /// 升级成 `deliverable`（该判定属引擎之外的验收层）。
 #[test]
@@ -323,33 +332,29 @@ fn postcondition_projection_never_escalates_to_deliverable() {
     };
 
     let read_only = WorkflowWriteIntent::ReadOnly;
-    assert_eq!(
+    let captured = captured_git_observation();
+    let project = |acceptance| {
         crate::runner::terminal::project_postcondition(
             "completed",
-            AcceptanceStatus::Unknown,
+            acceptance,
             Some(&read_only),
+            &captured,
             Some(&Ok(())),
-        ),
-        (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
-    );
+        )
+    };
+    for acceptance in [AcceptanceStatus::Unknown, AcceptanceStatus::Passed] {
+        let projection = project(acceptance);
+        assert_eq!(
+            (projection.post_processing, projection.delivery),
+            (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
+        );
+        assert_eq!(projection.reason, None);
+    }
     // acceptance 无生产写入方（内核不判验收）：Passed 也不把 delivery 抬到
     // deliverable——deliverable 属引擎之外的验收层（2026-10-11 用户裁决）。
+    let projection = project(AcceptanceStatus::Failed);
     assert_eq!(
-        crate::runner::terminal::project_postcondition(
-            "completed",
-            AcceptanceStatus::Passed,
-            Some(&read_only),
-            Some(&Ok(())),
-        ),
-        (PostProcessingStatus::NotRequired, DeliveryStatus::Unknown)
-    );
-    assert_eq!(
-        crate::runner::terminal::project_postcondition(
-            "completed",
-            AcceptanceStatus::Failed,
-            Some(&read_only),
-            Some(&Ok(())),
-        ),
+        (projection.post_processing, projection.delivery),
         (PostProcessingStatus::NotRequired, DeliveryStatus::Blocked)
     );
 }
@@ -357,7 +362,8 @@ fn postcondition_projection_never_escalates_to_deliverable() {
 #[test]
 fn postcondition_projection_fails_safe_without_evidence() {
     use peri_acp_types::workflow::{
-        AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
+        AcceptanceStatus, DeliveryReason, DeliveryStatus, PostProcessingStatus,
+        PostconditionObservation, WorkflowWriteIntent,
     };
 
     let write = WorkflowWriteIntent::Write {
@@ -367,66 +373,196 @@ fn postcondition_projection_fails_safe_without_evidence() {
         head_may_change: false,
         commit_required: None,
     };
+    let captured = captured_git_observation();
+    // 有基线但没跑验证：不能假定通过。
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        Some(&write),
+        &captured,
+        None,
+    );
     assert_eq!(
-        crate::runner::terminal::project_postcondition(
-            "completed",
-            AcceptanceStatus::Unknown,
-            Some(&write),
-            None
-        ),
+        (projection.post_processing, projection.delivery),
         (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
     );
     assert_eq!(
-        crate::runner::terminal::project_postcondition(
-            "completed",
-            AcceptanceStatus::Unknown,
-            Some(&write),
-            Some(&Err(crate::journal::PostconditionFailure::Violation(
-                "credential token=secret".into(),
-            ),)),
-        ),
+        projection.reason,
+        Some(DeliveryReason::ObservationIncomplete)
+    );
+    assert_eq!(projection.observation, PostconditionObservation::Incomplete);
+
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        Some(&write),
+        &captured,
+        Some(&Err(crate::journal::PostconditionFailure::Violation(
+            "credential token=secret".into(),
+        ))),
+    );
+    assert_eq!(
+        (projection.post_processing, projection.delivery),
         (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
     );
-    assert_eq!(
-        crate::runner::terminal::project_postcondition(
+    assert_eq!(projection.reason, None);
+
+    // 采样失败（含非 Git 上的显式只读）：blocked + observation_incomplete，
+    // 绝不显示通过。
+    for observation in [
+        crate::journal::GitObservation::Incomplete("git failed".into()),
+        crate::journal::GitObservation::NotApplicable,
+    ] {
+        let projection = crate::runner::terminal::project_postcondition(
             "completed",
             AcceptanceStatus::Unknown,
-            None,
+            Some(&WorkflowWriteIntent::ReadOnly),
+            &observation,
             Some(&Ok(())),
-        ),
-        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
-    );
+        );
+        assert_eq!(
+            (projection.post_processing, projection.delivery),
+            (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+        );
+        assert_eq!(
+            projection.reason,
+            Some(DeliveryReason::ObservationIncomplete)
+        );
+        assert_eq!(projection.observation, PostconditionObservation::Incomplete);
+    }
 }
 
 #[test]
 fn postcondition_projection_separates_unattributed_changes_from_violations() {
-    use crate::journal::PostconditionFailure;
-    use peri_acp_types::workflow::{
-        AcceptanceStatus, DeliveryStatus, PostProcessingStatus, WorkflowWriteIntent,
-    };
+    use peri_acp_types::workflow::{AcceptanceStatus, DeliveryStatus, PostProcessingStatus};
 
-    let read_only = WorkflowWriteIntent::ReadOnly;
-    let unattributed =
-        PostconditionFailure::Unattributed("git changes outside the run's write footprint".into());
+    let read_only = peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly;
+    let captured = captured_git_observation();
+    let unattributed = crate::journal::PostconditionFailure::Unattributed(
+        "git changes outside the run's write footprint".into(),
+    );
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        Some(&read_only),
+        &captured,
+        Some(&Err(unattributed)),
+    );
     assert_eq!(
-        crate::runner::terminal::project_postcondition(
-            "completed",
-            AcceptanceStatus::Unknown,
-            Some(&read_only),
-            Some(&Err(unattributed)),
-        ),
+        (projection.post_processing, projection.delivery),
         (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
     );
-    let violation = PostconditionFailure::Violation("escaped allowlist".into());
     assert_eq!(
-        crate::runner::terminal::project_postcondition(
-            "completed",
-            AcceptanceStatus::Unknown,
-            Some(&read_only),
-            Some(&Err(violation)),
-        ),
+        projection.reason,
+        Some(peri_acp_types::workflow::DeliveryReason::UnattributedChange)
+    );
+
+    let violation = crate::journal::PostconditionFailure::Violation("escaped allowlist".into());
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        Some(&read_only),
+        &captured,
+        Some(&Err(violation)),
+    );
+    assert_eq!(
+        (projection.post_processing, projection.delivery),
         (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
     );
+}
+
+/// 投影表：每一行的证据组合都必须落到对应结论，且旧枚举不新增值。
+#[test]
+fn postcondition_projection_table_grades_delivery_by_evidence() {
+    use peri_acp_types::workflow::{
+        AcceptanceStatus, DeliveryReason, DeliveryStatus, PostProcessingStatus,
+        PostconditionObservation, WorkflowWriteIntent,
+    };
+
+    let write = WorkflowWriteIntent::Write {
+        repo_root: "/repo".into(),
+        cwd: "/repo".into(),
+        path_allowlist: vec!["src".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+    let captured = captured_git_observation();
+
+    // 无 intent + 观测完整 + 无差异：交付未请求，不阻塞，旧枚举保持 unknown。
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        None,
+        &captured,
+        Some(&Ok(())),
+    );
+    assert_eq!(
+        (projection.post_processing, projection.delivery),
+        (PostProcessingStatus::Unknown, DeliveryStatus::Unknown)
+    );
+    assert_eq!(projection.reason, Some(DeliveryReason::NotRequested));
+    assert_eq!(projection.observation, PostconditionObservation::Complete);
+
+    // 非 Git + 无 intent：not_requested，观测原因 not_applicable。
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        None,
+        &crate::journal::GitObservation::NotApplicable,
+        None,
+    );
+    assert_eq!(
+        (projection.post_processing, projection.delivery),
+        (PostProcessingStatus::Unknown, DeliveryStatus::Unknown)
+    );
+    assert_eq!(projection.reason, Some(DeliveryReason::NotRequested));
+    assert_eq!(
+        projection.observation,
+        PostconditionObservation::NotApplicable
+    );
+
+    // 无 intent 但观察到变化：仍 blocked，不升级 failed。
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        None,
+        &captured,
+        Some(&Err(crate::journal::PostconditionFailure::Unattributed(
+            "changed".into(),
+        ))),
+    );
+    assert_eq!(
+        (projection.post_processing, projection.delivery),
+        (PostProcessingStatus::Blocked, DeliveryStatus::Blocked)
+    );
+    assert_eq!(projection.reason, Some(DeliveryReason::UnattributedChange));
+
+    // 显式写 intent 通过：既有投影不退化。
+    let projection = crate::runner::terminal::project_postcondition(
+        "completed",
+        AcceptanceStatus::Unknown,
+        Some(&write),
+        &captured,
+        Some(&Ok(())),
+    );
+    assert_eq!(
+        (projection.post_processing, projection.delivery),
+        (PostProcessingStatus::Passed, DeliveryStatus::Unknown)
+    );
+    assert_eq!(projection.reason, None);
+
+    // 失败/取消的运行不因“交付不需要”而变绿；原因由 execution 表达。
+    for execution in ["failed", "killed"] {
+        let projection = crate::runner::terminal::project_postcondition(
+            execution,
+            AcceptanceStatus::Unknown,
+            None,
+            &captured,
+            Some(&Ok(())),
+        );
+        assert_eq!(projection.delivery, DeliveryStatus::Blocked);
+        assert_eq!(projection.reason, None);
+    }
 }
 
 #[test]
@@ -506,7 +642,7 @@ fn test_workflow_start_params_preserve_budget_total() {
         workflow_name: "budget".to_string(),
         resume_from: None,
         write_intent: None,
-        git_baseline: None,
+        git_observation: Default::default(),
     };
 
     let params = crate::runner::run_protocol::workflow_start_params("run-1", &input, None, "/tmp");
@@ -677,7 +813,7 @@ return { output: result }
         workflow_name: "kill-test".to_string(),
         resume_from: None,
         write_intent: None,
-        git_baseline: None,
+        git_observation: Default::default(),
     };
 
     let run_id = uuid::Uuid::now_v7().to_string();
@@ -792,7 +928,7 @@ throw new Error('intentional crash after agent')
         workflow_name: "crash-test".to_string(),
         resume_from: None,
         write_intent: None,
-        git_baseline: None,
+        git_observation: Default::default(),
     };
 
     let run_id = uuid::Uuid::now_v7().to_string();
