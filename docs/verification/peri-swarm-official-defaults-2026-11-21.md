@@ -3,10 +3,13 @@
 - 状态：代码与契约测试证据记录；未运行真实 Loom/Rivet/Bun engine、真实模型链或
   真实 SDK 客户端探针
 - 日期：2026-11-21
-- 基线：`71cf3a067`（分支 `feat/swarm-official-defaults`），本记录与实现同一提交
-- 范围：只对齐以下 5 项官方默认值/小形状差异，不扩展 `requires_action`、批量
-  events、官方 item 联合、turns 的 usage/subagent/queued/waiting、hosted 环境详情、
-  时间字段改 Unix 秒或 `sessions.update` 未映射字段：
+- 基线：`71cf3a067`（分支 `feat/swarm-official-defaults`）；实现提交为 `6018094d7`
+  （5 项默认值对齐）与 `0ef562a72`（`sessions.update` `{}` no-op 补充），本记录随该
+  分支后续提交校正
+- 范围：对齐以下 5 项官方默认值/小形状差异，并补充第 6 项 `sessions.update` 空对象
+  no-op（见 §3 补充），不扩展 `requires_action`、批量 events、官方 item 联合、turns
+  的 usage/subagent/queued/waiting、hosted 环境详情、时间字段改 Unix 秒或
+  `sessions.update` 未映射字段：
   1. `items.list` 默认 `order=desc`，显式 `order=asc` 仍可用；
   2. `prompt_cache_options: {}` 等于官方默认 `{"ttl":"30m"}`，`null` 清空，省略保持；
   3. SSE 查询接受并忽略官方 `include_obfuscation`；
@@ -54,6 +57,7 @@
 | 会话默认字段 | `session_resources_test::create_and_retrieve_expose_empty_official_default_fields` |
 | `none` 环境形状 | 同上测试、`http_contract_test::create_returns_the_documented_shape_and_sdk_aliases`、`openai_hosted_test::a_none_environment_never_calls_the_bun_bridge` |
 | 旧 none 行归一化 | `service::tests::project_session_normalizes_legacy_none_environment_and_official_defaults` |
+| `{"metadata":{}}` 显式清空 | `session_resources_test::explicit_empty_metadata_clears_while_omitted_metadata_is_kept`（响应与 stored row 均为空对象；省略 `metadata` 时保留旧值） |
 
 ### 补充：`sessions.update` 的 `{}` 与无 body 同为 no-op
 
@@ -75,7 +79,7 @@
   在 `TurnPolicy::Manual` 留下未关闭 turn 后，对 `{}`、无 body、`null` 三种形状均
   断言 `200`、`status=in_progress`，且 `last_activity_at` 与行状态不被写入。
 
-全量结果：**332 passed, 0 failed, 6 ignored**。
+全量结果：**333 passed, 0 failed, 6 ignored**。
 
 ## 4. 执行命令与结果
 
@@ -95,7 +99,7 @@ MISE_DISABLE_TOOLS=rust npx -y lefthook@1.13.6 run pre-commit
 
 | 命令 | 结果 |
 | --- | --- |
-| `cargo test -p peri-swarm` | **332 passed, 0 failed, 6 ignored** |
+| `cargo test -p peri-swarm` | **333 passed, 0 failed, 6 ignored** |
 | `cargo clippy -p peri-swarm --all-targets -- -D warnings` | 通过（0 error） |
 | `cargo fmt -p peri-swarm -- --check` | 通过 |
 | `lefthook run pre-commit`（npx 1.13.6，`MISE_DISABLE_TOOLS=rust`） | **全部 6 个命令通过**：`check`、`clippy`、`feature-catalog`、`fmt`、`layer-imports`、`tui-components` |
@@ -112,7 +116,7 @@ MISE_DISABLE_TOOLS=rust npx -y lefthook@1.13.6 run pre-commit
 | `mcp_injection_test` | 4 | 0 | 0 |
 | `openai_hosted_test` | 7 | 0 | 0 |
 | `rivet_actor_test` | 0 | 0 | 2 |
-| `session_resources_test` | 15 | 0 | 0 |
+| `session_resources_test` | 16 | 0 | 0 |
 | `streaming_test` | 15 | 0 | 0 |
 
 已知既有 flake：`openai_hosted_test::an_anonymous_hosted_session_reserves_a_bun_workspace`

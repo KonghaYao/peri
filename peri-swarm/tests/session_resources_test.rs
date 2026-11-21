@@ -651,6 +651,54 @@ async fn update_replaces_and_clears_official_fields() {
     assert_eq!(missing["error"]["code"], json!("unknown_agent"));
 }
 
+/// An explicit `{"metadata": {}}` is a non-empty top-level object, so it must
+/// not take the `{}` empty-update no-op path: it clears the stored column.
+/// Omitting `metadata` while changing another field keeps it, which
+/// distinguishes the two shapes the official SDK can send.
+#[tokio::test]
+async fn explicit_empty_metadata_clears_while_omitted_metadata_is_kept() {
+    let harness = harness();
+    let (status, created) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-clear-metadata",
+            "metadata": { "keep": "yes", "drop": "no" },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    // Omitted `metadata` is `Keep`, even though another field changes.
+    let (status, kept) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-clear-metadata",
+        Some(json!({ "agent": { "model": "model-2" } })),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(kept["metadata"], json!({ "keep": "yes", "drop": "no" }));
+    let row = stored_session(&harness, "agent-clear-metadata").await;
+    assert_eq!(row.metadata.len(), 2);
+    assert_eq!(row.metadata.get("keep").map(String::as_str), Some("yes"));
+
+    // Explicit `{}` is `Clear`, not the empty-update no-op.
+    let (status, cleared) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-clear-metadata",
+        Some(json!({ "metadata": {} })),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["metadata"], json!({}));
+    // The response alone cannot prove the write: read the stored row.
+    let row = stored_session(&harness, "agent-clear-metadata").await;
+    assert!(row.metadata.is_empty(), "{:?}", row.metadata);
+}
+
 /// Official `sessions.update` allows `update(id)` / `update(id, null)`.
 /// Omitted body is sent as `{}` with JSON content-type; an explicit `null`
 /// sends no body and no content-type. All three spellings are empty updates,
