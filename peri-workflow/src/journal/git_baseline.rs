@@ -206,8 +206,10 @@ impl GitBaseline {
             .to_string();
         let git_dir = capture_git_path(&cwd, "--git-dir")?;
         let git_common_dir = capture_git_path(&cwd, "--git-common-dir")?;
-        let status_porcelain_v2 =
-            git_output(&cwd, &["status", "--porcelain=v2", "--untracked-files=all"])?;
+        let status_porcelain_v2 = git_output(
+            &cwd,
+            &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+        )?;
         Ok(Self {
             repo_root,
             cwd,
@@ -464,23 +466,32 @@ impl GitBaseline {
     }
 }
 
+/// 解析 `git status --porcelain=v2 -z` 的路径记录。
+///
+/// `-z` 让 git 不再 C-quote 路径（非 ASCII 目录也能与 workflow-owned 前缀比较）；
+/// rename/copy 的原始路径是紧随其后的独立 NUL 字段，两个端点都要参与对账，
+/// 否则“从仓库外 rename 进 journal”会漏掉源路径的消失。
 fn parse_status_paths(status: &[u8]) -> Result<BTreeMap<String, String>, String> {
     let status =
         String::from_utf8(status.to_vec()).map_err(|_| "git status paths are not UTF-8")?;
     let mut records = BTreeMap::new();
-    for line in status.lines() {
-        let path = match line.as_bytes().first() {
-            Some(b'1') => line.splitn(9, ' ').nth(8),
-            Some(b'2') => line
-                .splitn(10, ' ')
-                .nth(9)
-                .and_then(|value| value.split('\t').next()),
-            Some(b'u') => line.splitn(11, ' ').nth(10),
-            Some(b'?') | Some(b'!') => line.get(2..),
-            _ => None,
+    let mut fields = status.split('\0').filter(|field| !field.is_empty());
+    while let Some(field) = fields.next() {
+        let (path, has_rename_source) = match field.as_bytes().first() {
+            Some(b'1') => (field.splitn(9, ' ').nth(8), false),
+            Some(b'2') => (field.splitn(10, ' ').nth(9), true),
+            Some(b'u') => (field.splitn(11, ' ').nth(10), false),
+            Some(b'?') | Some(b'!') => (field.get(2..), false),
+            _ => (None, false),
+        };
+        let path = path.ok_or_else(|| "cannot parse git porcelain v2 path".to_string())?;
+        records.insert(path.to_string(), field.to_string());
+        if has_rename_source {
+            let source = fields
+                .next()
+                .ok_or_else(|| "cannot parse git porcelain v2 rename source".to_string())?;
+            records.insert(source.to_string(), field.to_string());
         }
-        .ok_or_else(|| "cannot parse git porcelain v2 path".to_string())?;
-        records.insert(path.to_string(), line.to_string());
     }
     Ok(records)
 }

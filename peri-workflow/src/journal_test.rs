@@ -580,11 +580,30 @@ fn unmerged_porcelain_entries_do_not_claim_a_change() {
         "main",
     ]);
     let merge = std::process::Command::new("git")
-        .args(["merge", "side"])
+        .args([
+            "-c",
+            "user.name=Peri Test",
+            "-c",
+            "user.email=peri-test@example.invalid",
+            "merge",
+            "--no-ff",
+            "side",
+        ])
         .current_dir(tmp.path())
         .status()
         .expect("the merge fixture result is required for this assertion");
     assert!(!merge.success(), "fixture 必须进入未合并状态");
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("the status fixture result is required for this assertion");
+    let status =
+        String::from_utf8(status.stdout).expect("the status fixture output must be valid UTF-8");
+    assert!(
+        status.split('\0').any(|field| field.starts_with("u ")),
+        "fixture 必须产生未合并记录: {status}"
+    );
 
     let baseline = GitBaseline::capture(tmp.path())
         .expect("the capture fixture result is required for this assertion");
@@ -646,6 +665,106 @@ fn workflow_journal_is_excluded_but_unrelated_untracked_files_are_not() {
         "无 write footprint 时变化只能判为未归因: {failure}"
     );
     assert!(failure.to_string().contains("notes.txt"));
+}
+
+/// rename 只有两端都在 workflow journal 内才是宿主产物：从允许范围外 rename
+/// 进 journal 时，源路径的消失仍必须报告。
+#[test]
+fn rename_into_the_workflow_journal_does_not_hide_the_missing_source() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .expect("the temporary directory must be canonicalizable");
+    let intent = peri_acp_types::workflow::WorkflowWriteIntent::Write {
+        repo_root: canonical.to_string_lossy().into_owned(),
+        cwd: canonical.to_string_lossy().into_owned(),
+        path_allowlist: vec!["src".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+
+    let run_dir = tmp.path().join(".claude/workflow-runs/run-1");
+    std::fs::create_dir_all(&run_dir).expect("the run directory must be creatable");
+    run_git(&[
+        "mv",
+        "tracked.txt",
+        ".claude/workflow-runs/run-1/tracked.txt",
+    ]);
+
+    let failure = baseline
+        .verify_postcondition(Some(&intent))
+        .expect_err("allowlist 外的源文件消失必须报告");
+    assert!(
+        failure.is_violation(),
+        "allowlist 越界是可归因违例: {failure}"
+    );
+    assert!(
+        failure.to_string().contains("tracked.txt"),
+        "报告必须带源路径: {failure}"
+    );
+}
+
+/// 非 ASCII 工作目录下 journal 路径也必须被识别：`-z` 避免 git 的 C-quote。
+#[test]
+fn workflow_journal_is_excluded_under_a_non_ascii_nested_cwd() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let nested = tmp.path().join("子目录");
+    std::fs::create_dir_all(&nested).expect("the nested working directory must be creatable");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let baseline = GitBaseline::capture(&nested)
+        .expect("the capture fixture result is required for this assertion");
+
+    let run_dir = nested.join(".claude/workflow-runs/run-1");
+    std::fs::create_dir_all(&run_dir).expect("the run directory must be creatable");
+    std::fs::write(run_dir.join("script.js"), "return null")
+        .expect("the test fixture file must be writable");
+    baseline
+        .verify_unchanged()
+        .expect("非 ASCII cwd 下的自身 journal 不构成外部变化");
 }
 
 /// 符号链接指向的同一目录必须得到同一分类：损坏的仓库是“无法观测”，
