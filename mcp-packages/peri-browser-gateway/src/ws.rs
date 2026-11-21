@@ -390,6 +390,18 @@ where
                 forward_command(sink, session, state, BrowserCommand::History { delta }).await;
             }
         }
+        ClientMessage::Devtools => match session.devtools_url() {
+            Some((url, page_id)) => {
+                // Kitesurf accepts one controller per page. Handing the page to
+                // the official frontend means the gateway stops writing first.
+                session.ownership.release_for_devtools();
+                info!(session = %session.id, %page_id, "page handed to Chrome DevTools");
+                send_json(sink, &ServerMessage::Devtools { url, page_id }).await;
+            }
+            None => {
+                send_error(sink, "no_page", "this session has no page to debug").await;
+            }
+        },
         ClientMessage::NewTab { url } => {
             forward_command(sink, session, state, BrowserCommand::NewTab { url }).await;
         }

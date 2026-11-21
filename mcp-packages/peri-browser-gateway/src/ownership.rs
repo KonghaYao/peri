@@ -153,6 +153,10 @@ pub enum Event {
     ViewerLeft,
     Takeover,
     Release,
+    /// The viewer hands the page to Chrome DevTools. Unlike [`Event::Release`]
+    /// this is not a complaint about missing control: when the agent owns the
+    /// page there is nothing of ours to close, so it stays silent.
+    ReleaseForDevtools,
     /// The session's active page changed (tab switch, page closed, re-register).
     Page(Option<String>),
     /// The tab list reports this URL for the active page. Kitesurf's
@@ -395,6 +399,7 @@ impl Machine {
             Event::ViewerLeft => self.on_viewer_left(now),
             Event::Takeover => self.on_takeover(now),
             Event::Release => self.on_release(),
+            Event::ReleaseForDevtools => self.on_release_for_devtools(),
             Event::Page(page) => self.on_page(page),
             Event::YieldOk(page_id) => self.on_yield_ok(page_id),
             Event::Reclaim(page_id) => self.on_reclaim(page_id),
@@ -647,6 +652,24 @@ impl Machine {
                 code: "read_only".to_owned(),
                 message: "the agent holds this page; there is nothing to release".to_owned(),
             })],
+        }
+    }
+
+    /// Handing the page to Chrome DevTools needs the gateway to stop writing,
+    /// but it is not a complaint: an agent-owned page has no controller of
+    /// ours to close, and the DevTools frontend is welcome to the slot.
+    fn on_release_for_devtools(&mut self) -> Vec<Effect> {
+        const REASON: &str = "the page was handed to Chrome DevTools";
+        match self.state {
+            // The page does not come back to the agent: DevTools writes to it
+            // until the viewer takes over again.
+            OwnershipState::HumanHolds => self.leave_human_holds(REASON, false),
+            OwnershipState::YieldPending => {
+                self.state = OwnershipState::AgentDriving;
+                self.yield_deadline = None;
+                self.finish_handoff(REASON, true)
+            }
+            OwnershipState::AgentDriving => Vec::new(),
         }
     }
 
@@ -1393,6 +1416,10 @@ impl OwnershipHandle {
 
     pub fn release(&self) {
         self.send(Event::Release);
+    }
+
+    pub fn release_for_devtools(&self) {
+        self.send(Event::ReleaseForDevtools);
     }
 
     pub fn answer(&self, request_id: impl Into<String>, accepted: bool) {

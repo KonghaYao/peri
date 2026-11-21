@@ -118,6 +118,53 @@
   #diagBtn[aria-disabled="true"] .dt-logo { opacity: .45; }
   #diagCount { color: var(--muted); font-variant-numeric: tabular-nums; }
 
+  /* Menu under the DevTools button: the real frontend or the built-in panel. */
+  #devtoolsPop {
+    position: fixed;
+    top: 54px;
+    left: 12px;
+    z-index: 40;
+    width: 350px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--dt-bar);
+    color: var(--dt-text);
+    border: 1px solid var(--dt-line);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .5);
+  }
+  #devtoolsPop[hidden] { display: none; }
+  #devtoolsPop h2 { margin: 0; font-size: 13px; font-weight: 600; }
+  #devtoolsPop p { margin: 0; color: var(--dt-muted); font-size: 12px; line-height: 1.5; }
+  #devtoolsPop button {
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--dt-line);
+    background: #35363a;
+    color: var(--dt-text);
+    cursor: pointer;
+    text-align: left;
+  }
+  #devtoolsPop button:hover { background: #3f4145; }
+  #devtoolsPop button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+  #devtoolsPop button.primary:hover { background: #1b7bff; }
+  #devtoolsPop button[hidden] { display: none; }
+  #devtoolsUrl {
+    width: 100%;
+    padding: 7px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--dt-line);
+    background: var(--dt-bg);
+    color: var(--dt-text);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #devtoolsLink[hidden] { display: none; }
+  #devtoolsLink { display: flex; flex-direction: column; gap: 6px; }
+  #devtoolsLink .row { display: flex; gap: 6px; }
+  #devtoolsCopy { flex: 0 0 auto; }
+
   #tabStrip {
     display: flex;
     align-items: center;
@@ -442,6 +489,23 @@
   <span id="readonly" title="the agent holds the page controller; your input is not sent">read-only</span>
   <span id="holding" hidden>you control this page</span>
   <span class="spacer"></span>
+  <div id="devtoolsPop" role="dialog" aria-label="DevTools" hidden>
+    <h2>Chrome DevTools</h2>
+    <p>Kitesurf accepts one controller per page. Handing the page over keeps the
+      screenshot live but makes the monitor read-only until you take over again.</p>
+    <button id="devtoolsOpen" class="primary">Hand the page to Chrome DevTools</button>
+    <div id="devtoolsLink" hidden>
+      <input id="devtoolsUrl" readonly aria-label="Chrome DevTools URL">
+      <div class="row">
+        <button id="devtoolsCopy">Copy URL</button>
+      </div>
+      <p>A web page cannot open <code>devtools://</code> itself. Paste the URL into
+        Chrome's address bar; the page stays where it is.</p>
+    </div>
+    <p>Console and network without leaving the monitor:</p>
+    <button id="diagBuiltin">Built-in panel</button>
+  </div>
+
   <button id="diagBtn" title="Open the DevTools panel (needs the page controller)">
     <svg class="dt-logo" viewBox="0 0 16 16" aria-hidden="true">
       <rect x="0.5" y="1.5" width="15" height="13" rx="3" fill="#3949ab"></rect>
@@ -541,6 +605,12 @@
   const handoffDecline = document.getElementById("handoffDecline");
   const handoffDone = document.getElementById("handoffDone");
   const diagButton = document.getElementById("diagBtn");
+  const devtoolsPop = document.getElementById("devtoolsPop");
+  const devtoolsOpen = document.getElementById("devtoolsOpen");
+  const devtoolsLink = document.getElementById("devtoolsLink");
+  const devtoolsUrl = document.getElementById("devtoolsUrl");
+  const devtoolsCopy = document.getElementById("devtoolsCopy");
+  const diagBuiltin = document.getElementById("diagBuiltin");
   const diagCount = document.getElementById("diagCount");
   const drawer = document.getElementById("drawer");
   const consoleList = document.getElementById("consoleList");
@@ -582,6 +652,7 @@
     takeoverPending: false,
     takeoverTimer: 0,
     diagOpen: false,
+    devtoolsUrl: "",
     console: [],
     network: [],
     readonlyHintAt: 0,
@@ -794,6 +865,35 @@
     networkList.hidden = consoleActive;
   }
 
+  function showDevtoolsPop() {
+    devtoolsPop.hidden = false;
+    devtoolsButtonState();
+  }
+
+  function hideDevtoolsPop() {
+    devtoolsPop.hidden = true;
+  }
+
+  function devtoolsButtonState() {
+    // Once the gateway reported a URL, the menu keeps it: the control has been
+    // released, and asking again would only repeat the release.
+    devtoolsLink.hidden = !state.devtoolsUrl;
+    devtoolsOpen.hidden = Boolean(state.devtoolsUrl);
+    if (state.devtoolsUrl) devtoolsUrl.value = state.devtoolsUrl;
+  }
+
+  async function copyDevtoolsUrl() {
+    if (!state.devtoolsUrl) return;
+    try {
+      await navigator.clipboard.writeText(state.devtoolsUrl);
+      toast("DevTools URL copied");
+    } catch {
+      devtoolsUrl.focus();
+      devtoolsUrl.select();
+      toast("Press Cmd+C: the browser refused the clipboard");
+    }
+  }
+
   function openDrawer() {
     if (!state.caps.diagnostics || !state.interactive) {
       toast("DevTools needs the page controller; take over to see console and network");
@@ -995,7 +1095,14 @@
       showOverlay("waiting for the first frame\u2026");
       paintThumbnail(state.active);
     }
-    if (state.active !== previous) clearDiagnostics();
+    if (state.active !== previous) {
+      clearDiagnostics();
+      // The URL names the page that was handed over; another tab needs its own.
+      if (state.devtoolsUrl) {
+        state.devtoolsUrl = "";
+        devtoolsButtonState();
+      }
+    }
     renderTabs();
     syncAddress();
     syncControls();
@@ -1028,6 +1135,13 @@
         break;
       case "agent":
         setAgent(message.state);
+        break;
+      case "devtools":
+        state.devtoolsUrl = message.url || "";
+        devtoolsButtonState();
+        // The controller is gone; the badge and the input guards follow the
+        // next `hello`, which the release broadcasts.
+        toast("Paste the URL into Chrome's address bar to open DevTools");
         break;
       case "nav":
         if (message.pageId === state.active) {
@@ -1379,10 +1493,34 @@
   handoffDone.addEventListener("click", () => answerHandoff(false));
   handoffDecline.addEventListener("click", () => answerHandoff(false));
 
-  diagButton.addEventListener("click", () => {
+  diagButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (devtoolsPop.hidden) showDevtoolsPop();
+    else hideDevtoolsPop();
+  });
+  devtoolsOpen.addEventListener("click", () => {
+    // The gateway releases the page before answering, so the URL it returns is
+    // already attachable.
+    send({ t: "devtools" });
+    devtoolsOpen.textContent = "Releasing the page\u2026";
+    setTimeout(() => {
+      devtoolsOpen.textContent = "Hand the page to Chrome DevTools";
+    }, 1500);
+  });
+  devtoolsCopy.addEventListener("click", copyDevtoolsUrl);
+  diagBuiltin.addEventListener("click", () => {
+    hideDevtoolsPop();
     if (state.diagOpen) closeDrawer();
     else openDrawer();
     syncControls();
+  });
+  document.addEventListener("click", (event) => {
+    if (devtoolsPop.hidden) return;
+    if (devtoolsPop.contains(event.target) || diagButton.contains(event.target)) return;
+    hideDevtoolsPop();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !devtoolsPop.hidden) hideDevtoolsPop();
   });
   consoleTab.addEventListener("click", () => setDiagTab("console"));
   networkTab.addEventListener("click", () => setDiagTab("network"));

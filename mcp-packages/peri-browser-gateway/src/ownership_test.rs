@@ -266,6 +266,39 @@ fn release_without_a_controller_is_an_error_not_a_silent_success() {
 }
 
 #[test]
+fn a_devtools_handoff_says_nothing_when_the_agent_owns_the_page() {
+    let now = Instant::now();
+    let mut machine = machine();
+    // Dev mode: no agent connection and no controller, yet the viewer may
+    // still hand the page to the official frontend.
+    assert!(machine.on(Event::ReleaseForDevtools, now).is_empty());
+    assert_eq!(machine.state(), OwnershipState::AgentDriving);
+    assert!(!machine.has_controller());
+}
+
+#[test]
+fn a_devtools_handoff_closes_the_controller_without_returning_the_page() {
+    let now = Instant::now();
+    let mut machine = machine();
+    holds(&mut machine, now);
+
+    let effects = machine.on(Event::ReleaseForDevtools, now);
+    assert!(effects.contains(&Effect::CloseController));
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Reclaimed { .. })));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Broadcast(ServerMessage::Hello {
+            interactive: false,
+            ..
+        })
+    )));
+    assert_eq!(machine.state(), OwnershipState::AgentDriving);
+    assert!(!machine.has_controller());
+}
+
+#[test]
 fn reclaim_while_holding_closes_the_controller_and_acknowledges() {
     let now = Instant::now();
     let mut machine = machine();

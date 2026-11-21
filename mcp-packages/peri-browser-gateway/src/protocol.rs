@@ -219,6 +219,12 @@ pub enum ServerMessage {
     Agent {
         state: AgentState,
     },
+    /// Where the official Chrome DevTools can attach to the active page. The
+    /// monitor cannot navigate to `devtools://` itself, so it shows the URL.
+    Devtools {
+        url: String,
+        page_id: String,
+    },
     Nav {
         page_id: String,
         url: String,
@@ -295,6 +301,9 @@ pub enum KeyEventKind {
 #[serde(tag = "t", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ClientMessage {
     Ack,
+    /// Ask for the official Chrome DevTools URL. The gateway releases the page
+    /// controller first: Kitesurf lets one controller attach at a time.
+    Devtools,
     Switch {
         page_id: String,
     },
@@ -368,6 +377,7 @@ impl ClientMessage {
             Self::History { .. } => "history",
             Self::NewTab { .. } => "newTab",
             Self::CloseTab { .. } => "closeTab",
+            Self::Devtools => "devtools",
             Self::Takeover => "takeover",
             Self::Release => "release",
             Self::Answer { .. } => "answer",

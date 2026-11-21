@@ -134,6 +134,31 @@ impl Session {
         }
     }
 
+    /// The official Chrome DevTools frontend for the active page, in the form
+    /// Chrome's own `/json/list` reports: the `ws=` parameter carries no scheme.
+    ///
+    /// Kitesurf publishes the per-page endpoint as `/devtools/page/<id>` under
+    /// the browser endpoint it advertised, so the path is derived instead of
+    /// stored. `None` when the session has no page to debug.
+    pub fn devtools_url(&self) -> Option<(String, String)> {
+        let target_id = self.effective_active()?.to_owned();
+        let page = self.pages.iter().find(|page| page.target_id == target_id)?;
+        // The registry may advertise the browser endpoint (`…/devtools/browser`)
+        // or the bare authority; both put the page under `/devtools/page/`.
+        let base = match self.cdp_ws.split_once("/devtools/") {
+            Some((base, _)) => base,
+            None => self.cdp_ws.trim_end_matches('/'),
+        };
+        let ws = format!("{base}/devtools/page/{}", page.target_id);
+        Some((
+            format!(
+                "devtools://devtools/bundled/inspector.html?ws={}",
+                ws.trim_start_matches("ws://").trim_start_matches("wss://")
+            ),
+            page.target_id.clone(),
+        ))
+    }
+
     /// Marks `page_id` as active if the session still owns it.
     pub fn set_active_page(&mut self, page_id: &str) -> bool {
         if self.pages.iter().any(|page| page.target_id == page_id) {

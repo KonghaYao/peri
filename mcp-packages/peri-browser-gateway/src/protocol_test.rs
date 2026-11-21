@@ -545,3 +545,24 @@ fn agent_state_strings_are_stable() {
         assert_eq!(serde_json::to_value(state).unwrap(), json!(text));
     }
 }
+
+#[test]
+fn devtools_handshake_matches_the_wire_contract() {
+    assert_eq!(
+        serde_json::to_value(ClientMessage::Devtools).unwrap(),
+        json!({"t": "devtools"})
+    );
+    assert_roundtrip(ServerMessage::Devtools {
+        url: "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:8827/devtools/page/t1"
+            .to_owned(),
+        page_id: "t1".to_owned(),
+    });
+    assert_eq!(
+        serde_json::to_value(ServerMessage::Devtools {
+            url: "devtools://x".to_owned(),
+            page_id: "t1".to_owned(),
+        })
+        .unwrap(),
+        json!({"t": "devtools", "url": "devtools://x", "pageId": "t1"})
+    );
+}

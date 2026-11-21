@@ -210,6 +210,10 @@ fn monitor_page_exposes_the_human_control_surface() {
         "diagnosticsPage(message)",
         "id=\"imeInput\"",
         "compositionend",
+        // The DevTools button offers the official Chrome frontend; a page
+        // cannot open devtools:// by itself, so the URL is shown to copy.
+        "id=\"devtoolsPop\"",
+        "{ t: \"devtools\" }",
     ] {
         assert!(
             MONITOR_HTML.contains(needle),
