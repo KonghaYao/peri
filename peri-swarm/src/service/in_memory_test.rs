@@ -155,6 +155,7 @@ async fn input_idempotency_and_conflict() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: 10,
             },
         )
@@ -225,6 +226,7 @@ async fn turn_in_progress_and_steer() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: 10,
             },
         )
@@ -277,6 +279,7 @@ async fn pagination_is_stable_in_both_orders() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: 2,
             },
         )
@@ -297,6 +300,7 @@ async fn pagination_is_stable_in_both_orders() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: Some(2),
+                after_id: None,
                 limit: 2,
             },
         )
@@ -314,6 +318,7 @@ async fn pagination_is_stable_in_both_orders() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: Some(8),
+                after_id: None,
                 limit: 2,
             },
         )
@@ -332,6 +337,7 @@ async fn pagination_is_stable_in_both_orders() {
             ItemsWindow {
                 order: ItemOrder::Desc,
                 after: None,
+                after_id: None,
                 limit: 2,
             },
         )
@@ -349,6 +355,7 @@ async fn pagination_is_stable_in_both_orders() {
             ItemsWindow {
                 order: ItemOrder::Desc,
                 after: Some(9),
+                after_id: None,
                 limit: 2,
             },
         )
@@ -365,6 +372,7 @@ async fn pagination_is_stable_in_both_orders() {
             ItemsWindow {
                 order: ItemOrder::Desc,
                 after: Some(3),
+                after_id: None,
                 limit: 2,
             },
         )
@@ -426,6 +434,8 @@ async fn stream_is_opened_before_the_first_turn_executes() {
     assert!(backlog.is_empty());
     // The input is logged before the turn starts, so a stream opened first sees
     // the user frame even though the create call runs the turn synchronously.
+    // The official `turn.created` and the user's `turn.item.added` follow the
+    // persisted frame, as the official replay does.
     let user = live.recv().await.expect("user item");
     assert_eq!(user.item_seq(), Some(1));
     match user {
@@ -436,6 +446,22 @@ async fn stream_is_opened_before_the_first_turn_executes() {
         }
         other => panic!("expected the user item, got {other:?}"),
     }
+    let created = live.recv().await.expect("turn created");
+    assert!(
+        matches!(
+            created,
+            StreamEvent::Official(OfficialEvent::TurnCreated { .. })
+        ),
+        "{created:?}"
+    );
+    let added = live.recv().await.expect("user item added");
+    assert!(
+        matches!(
+            added,
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { .. })
+        ),
+        "{added:?}"
+    );
     let started = live.recv().await.expect("started");
     assert!(matches!(
         started,
@@ -443,11 +469,35 @@ async fn stream_is_opened_before_the_first_turn_executes() {
     ));
     let item = live.recv().await.expect("assistant item");
     assert_eq!(item.item_seq(), Some(2));
+    let added = live.recv().await.expect("assistant item added");
+    assert!(
+        matches!(
+            added,
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { .. })
+        ),
+        "{added:?}"
+    );
     let completed = live.recv().await.expect("completed");
     assert!(matches!(
         completed,
         StreamEvent::Turn(TurnEvent::Completed { .. })
     ));
+    let official = live.recv().await.expect("official turn completed");
+    assert!(
+        matches!(
+            official,
+            StreamEvent::Official(OfficialEvent::TurnCompleted { .. })
+        ),
+        "{official:?}"
+    );
+    let idle = live.recv().await.expect("session idle");
+    assert!(
+        matches!(
+            idle,
+            StreamEvent::Official(OfficialEvent::SessionIdle { .. })
+        ),
+        "{idle:?}"
+    );
 
     assert_eq!(
         service.calls(),
@@ -478,6 +528,7 @@ async fn sequence_resumes_from_the_store_after_restart() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: 10,
             },
         )
@@ -512,6 +563,7 @@ async fn oversized_payload_is_marked_truncated() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: 10,
             },
         )
@@ -546,6 +598,7 @@ async fn unknown_session_is_404_for_every_read() {
                 ItemsWindow {
                     order: ItemOrder::Asc,
                     after: None,
+                    after_id: None,
                     limit: 10,
                 },
             )
@@ -561,5 +614,246 @@ async fn unknown_session_is_404_for_every_read() {
             .expect_err("subscribe")
             .code(),
         ErrorCode::UnknownAgent
+    );
+}
+
+/// Official `(type, event_id)` pairs of a replay window, in delivery order.
+fn official_ids(events: &[StreamEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(official) => Some((
+                official.event_type().to_owned(),
+                official.event_id().to_owned(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn seed_session(service: &InMemorySwarmService, logical_id: &str) {
+    service
+        .create_session(create_command(logical_id, "/tmp"))
+        .await
+        .expect("create");
+}
+
+async fn append_message(
+    service: &InMemorySwarmService,
+    logical_id: &str,
+    item_id: &str,
+    payload: serde_json::Value,
+) -> u64 {
+    let id = LogicalId::parse(logical_id).expect("logical id");
+    service
+        .append_item_with_id(
+            &id,
+            ItemKind::Message,
+            ItemSource::root(),
+            payload,
+            Some(item_id.to_owned()),
+        )
+        .await
+        .expect("append")
+}
+
+async fn set_state(service: &InMemorySwarmService, logical_id: &str, state: SessionState) {
+    let id = LogicalId::parse(logical_id).expect("logical id");
+    service
+        .set_session_state(&id, state, None)
+        .await
+        .expect("state");
+}
+
+#[tokio::test]
+async fn replay_keeps_every_assistant_message_of_one_turn() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "hi"}),
+    )
+    .await;
+    // A turn can persist several final assistant messages (e.g. across tool
+    // calls); the first one must not close the turn.
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "first", "complete": true}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_2",
+        json!({"role": "assistant", "messageId": "msg_2", "text": "second", "complete": true}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    let backlog = service
+        .replay_after(&LogicalId::parse("agent-01").expect("id"), Cursor::START)
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.turn.created",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{ids:?}"
+    );
+    let turn_id = "turn_input_x";
+    assert_eq!(ids[0].1, "evt_turn_input_x_created");
+    assert_eq!(ids[1].1, "evt_item_1_added");
+    assert_eq!(ids[2].1, "evt_item_2_added");
+    assert_eq!(ids[3].1, "evt_item_3_added");
+    assert_eq!(ids[4].1, "evt_turn_input_x_completed");
+    assert_eq!(ids[5].1, "evt_turn_input_x_idle");
+    let added: Vec<_> = backlog
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { item, .. }) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(added.len(), 3);
+    assert!(added.iter().all(|item| item.turn_id == turn_id));
+}
+
+#[tokio::test]
+async fn replay_marks_a_failed_last_turn_failed_after_partial_output() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "hi"}),
+    )
+    .await;
+    // `finish_turn` flushes streamed text before the failure terminal, so a
+    // failed turn can still have a persisted final assistant frame.
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "partial", "complete": true}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Failed).await;
+
+    let backlog = service
+        .replay_after(&LogicalId::parse("agent-01").expect("id"), Cursor::START)
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.turn.created",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.failed",
+            "agent.session.failed",
+        ],
+        "a persisted assistant frame must not turn a failed turn into a completion: {ids:?}"
+    );
+    assert_eq!(ids[3].1, "evt_turn_input_x_failed");
+    assert_eq!(ids[4].1, "evt_turn_input_x_session_failed");
+}
+
+#[tokio::test]
+async fn replay_from_inside_a_turn_seeds_the_turn_identity() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    let user_seq = append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "hi"}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "par", "complete": false}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "partial", "complete": true}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    // The reconnect cursor is the opening item: replay starts after it, so the
+    // turn identity comes from the persisted history rather than a new opener.
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            Cursor::new(user_seq),
+        )
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{ids:?}"
+    );
+    assert_eq!(ids[0].1, "evt_item_3_added");
+    assert_eq!(ids[1].1, "evt_turn_input_x_completed");
+    match &backlog[1] {
+        StreamEvent::Item(item) => assert_eq!(item.seq, 3),
+        other => panic!("expected the final assistant item, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn replay_leaves_a_live_turn_open() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig {
+        turn_policy: TurnPolicy::Manual,
+        ..ServiceConfig::default()
+    });
+    seed_session(&service, "agent-01").await;
+    submit(&service, "agent-01", "input-1", "hello").await;
+
+    let backlog = service
+        .replay_after(&LogicalId::parse("agent-01").expect("id"), Cursor::START)
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.turn.created",
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+        ],
+        "a still-running turn must not gain a fabricated terminal: {ids:?}"
     );
 }

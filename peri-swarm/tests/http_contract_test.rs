@@ -6,9 +6,9 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use peri_swarm::config::{SwarmConfig, API_KEY_ENV, SSE_HEARTBEAT_MS_ENV, WORKSPACE_ROOT_ENV};
-use peri_swarm::domain::{McpHeader, McpToolSpec};
+use peri_swarm::domain::{McpHeader, McpToolSpec, SessionState};
 use peri_swarm::http::{build_router, AppState};
-use peri_swarm::service::{InMemorySwarmService, ServiceConfig, SwarmService};
+use peri_swarm::service::{InMemorySwarmService, ServiceConfig, SwarmService, TurnPolicy};
 use peri_swarm::store::{
     InputPut, MemorySwarmStore, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow,
     SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
@@ -429,6 +429,162 @@ async fn get_session_returns_state_or_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(value["error"]["code"], json!("unknown_agent"));
+}
+
+#[tokio::test]
+async fn session_status_projects_idle_in_progress_and_failed() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let config = Arc::new(config_for(&workspace, 15_000));
+    let store = Arc::new(MemorySwarmStore::new());
+    let service = Arc::new(InMemorySwarmService::new(
+        Arc::clone(&store) as Arc<dyn SwarmStore>,
+        ServiceConfig {
+            turn_policy: TurnPolicy::Manual,
+            ..ServiceConfig::default()
+        },
+    ));
+    let router = build_router(AppState::new(service, config));
+
+    let (status, _, value) = send(
+        &router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+
+    let (_, _, view) = send(
+        &router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01",
+        None,
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(view["state"], json!("idle"));
+    assert_eq!(view["status"], json!("idle"));
+    assert_eq!(view["turn"]["requestId"], json!(null));
+
+    // `Manual` keeps the turn open: the session reports `in_progress` while a
+    // turn is in flight, and never a fabricated `requires_action`.
+    let (status, _, accepted) = send(
+        &router,
+        Method::POST,
+        "/v1/agents/sessions/agent-01/events",
+        Some(json!({ "inputId": uuid::Uuid::now_v7().to_string(), "text": "hello" })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let (_, _, view) = send(
+        &router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01",
+        None,
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(view["state"], json!("running"));
+    assert_eq!(view["status"], json!("in_progress"));
+    assert!(view["turn"]["requestId"].is_string(), "{view}");
+    assert!(view.get("requiresAction").is_none(), "{view}");
+
+    // A durable `failed` row with no open turn reports `failed`.
+    send(
+        &router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-02" })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    store
+        .swarm_update_session(SwarmSessionUpdate {
+            logical_id: "agent-02".to_owned(),
+            state: SessionState::Failed,
+            last_item_seq: 0,
+            last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
+        })
+        .await
+        .expect("mark failed");
+    let (status, _, view) = send(
+        &router,
+        Method::GET,
+        "/v1/agents/sessions/agent-02",
+        None,
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["state"], json!("failed"));
+    assert_eq!(view["status"], json!("failed"));
+}
+
+#[tokio::test]
+async fn accepted_input_returns_202_before_the_turn_runs() {
+    let deferred = Arc::new(InMemorySwarmService::in_memory(ServiceConfig {
+        turn_policy: TurnPolicy::Deferred,
+        ..ServiceConfig::default()
+    }));
+    let (router, _workspace) = harness_with_service(deferred, 15_000);
+    send(
+        &router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+
+    let (status, _, value) = send(
+        &router,
+        Method::POST,
+        "/v1/agents/sessions/agent-01/events",
+        Some(json!({ "inputId": uuid::Uuid::now_v7().to_string(), "text": "hello" })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{value}");
+    assert_eq!(value["accepted"], json!(true));
+    assert_eq!(value["disposition"], json!("inserted"));
+    assert_eq!(
+        value["lastItemSeq"],
+        json!(1),
+        "acceptance persists the receipt and user item but not the reply: {value}"
+    );
+
+    // The turn runs out of band after the response; its assistant frame becomes
+    // visible without the POST ever carrying the terminal.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let (_, _, page) = send(
+            &router,
+            Method::GET,
+            "/v1/agents/sessions/agent-01/items",
+            None,
+            Some(TOKEN),
+            &[],
+        )
+        .await;
+        if page["lastItemSeq"] == json!(2) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the deferred turn did not run: {page}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]
@@ -935,6 +1091,14 @@ impl SwarmStore for FailingStore {
 
     async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, StoreError> {
         self.inner.swarm_last_seq(logical_id).await
+    }
+
+    async fn swarm_get_item(
+        &self,
+        logical_id: &str,
+        item_id: &str,
+    ) -> Result<Option<SwarmItemRow>, StoreError> {
+        self.inner.swarm_get_item(logical_id, item_id).await
     }
 
     async fn swarm_put_input(&self, row: SwarmInputRow) -> Result<InputPut, StoreError> {

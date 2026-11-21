@@ -257,11 +257,11 @@ impl SwarmService for RivetSwarmService {
         envelope.into_result()
     }
 
-    async fn submit_input(
+    async fn accept_input(
         &self,
         logical_id: &LogicalId,
         submission: InputSubmission,
-    ) -> Result<InputOutcome, SwarmError> {
+    ) -> Result<crate::service::AcceptedInput, SwarmError> {
         let handle = self.handle(logical_id)?;
         let action = Submit {
             logical_id: logical_id.as_str().to_owned(),
@@ -274,7 +274,20 @@ impl SwarmService for RivetSwarmService {
             original_draft: submission.original_draft,
         };
         let envelope: ActionEnvelope<InputOutcome> = self.call(&handle, action).await?;
-        envelope.into_result()
+        // The actor runs the accepted turn itself (it owns the ACP host), so the
+        // gateway never receives pending work.
+        envelope
+            .into_result()
+            .map(crate::service::AcceptedInput::settled)
+    }
+
+    async fn run_pending_turn(
+        &self,
+        _pending: crate::service::PendingTurn,
+    ) -> Result<(), SwarmError> {
+        // Pending turns are executed inside the actor; a gateway-side call means
+        // the acceptance contract was bypassed.
+        Err(SwarmError::upstream_unavailable("pending_turn_not_routed"))
     }
 
     async fn list_items(
@@ -287,6 +300,7 @@ impl SwarmService for RivetSwarmService {
             logical_id: logical_id.as_str().to_owned(),
             order: window.order,
             after: window.after,
+            after_id: window.after_id,
             limit: window.limit,
         };
         let envelope: ActionEnvelope<ItemPage> = self.call(&handle, action).await?;

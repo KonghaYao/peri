@@ -276,12 +276,62 @@ async fn after_aliases_must_agree_and_limits_are_bounded() {
         "limit=abc",
         "order=sideways",
         "bogus=1",
+        "after=not-a-cursor",
     ] {
         let uri = format!("/v1/agents/sessions/agent-01/items?{query}");
         let (status, _, value) = send(&harness.router, Method::GET, &uri, None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
         assert_eq!(value["error"]["code"], json!("invalid_query"), "{query}");
     }
+}
+
+#[tokio::test]
+async fn official_cursor_page_uses_data_and_item_id_after() {
+    let harness = harness();
+    seed_five_items(&harness).await;
+
+    let (_, _, first) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2",
+        None,
+    )
+    .await;
+    assert_eq!(seqs(&first), [1, 2]);
+    assert_eq!(first["data"], first["items"], "CursorPage reads `data`");
+    assert_eq!(
+        first["has_more"],
+        json!(true),
+        "CursorPage reads `has_more`"
+    );
+    let cursor = first["items"][1]["id"]
+        .as_str()
+        .expect("item id")
+        .to_owned();
+    assert!(cursor.starts_with("itim_"), "{cursor}");
+
+    // `CursorPage` sends the last item's `id` as the next `after`; it resolves
+    // to that row's seq, so the second page continues where the first stopped.
+    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={cursor}");
+    let (status, _, second) = send(&harness.router, Method::GET, &uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(seqs(&second), [3, 4]);
+    assert_eq!(second["nextCursor"], json!(4));
+    assert_eq!(second["has_more"], json!(true));
+
+    // A numeric `afterSeq` must agree with the seq the id resolves to.
+    let user_cursor = first["items"][0]["id"]
+        .as_str()
+        .expect("user id")
+        .to_owned();
+    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={user_cursor}&afterSeq=1");
+    let (_, _, agreed) = send(&harness.router, Method::GET, &uri, None).await;
+    assert_eq!(seqs(&agreed), [2, 3]);
+
+    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={user_cursor}&afterSeq=2");
+    let (status, _, conflict) = send(&harness.router, Method::GET, &uri, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(conflict["error"]["code"], json!("conflicting_cursor"));
 }
 
 #[tokio::test]

@@ -313,6 +313,7 @@ async fn collect_until_terminal(
                 }
             }
             StreamEvent::Gap { .. } => {}
+            StreamEvent::Official(_) => {}
         }
     }
     (items, None)
@@ -577,6 +578,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: ItemsWindow::MAX_LIMIT,
             },
         )
@@ -658,6 +660,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: ItemsWindow::MAX_LIMIT,
             },
         )
@@ -690,7 +693,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
                         return items;
                     }
                 }
-                StreamEvent::Turn(_) | StreamEvent::Gap { .. } => {}
+                StreamEvent::Turn(_) | StreamEvent::Gap { .. } | StreamEvent::Official(_) => {}
             }
         }
         items
@@ -734,6 +737,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: ItemsWindow::MAX_LIMIT,
             },
         )
@@ -875,6 +879,7 @@ async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry(
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: ItemsWindow::MAX_LIMIT,
             },
         )
@@ -919,6 +924,7 @@ async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry(
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: ItemsWindow::MAX_LIMIT,
             },
         )

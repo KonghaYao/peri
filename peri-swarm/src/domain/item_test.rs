@@ -56,13 +56,24 @@ fn item_page_exposes_cursor_and_has_more() {
         true,
         ItemOrder::Asc,
     );
-    let value = serde_json::to_value(page).expect("page");
+    let value = serde_json::to_value(page.clone()).expect("page");
     assert_eq!(value["object"], json!("list"));
     assert_eq!(value["logicalId"], json!("agent-01"));
     assert_eq!(value["nextCursor"], json!(2));
     assert_eq!(value["lastItemSeq"], json!(9));
     assert_eq!(value["hasMore"], json!(true));
+    assert_eq!(value["has_more"], json!(true));
     assert_eq!(value["order"], json!("asc"));
+    // The official `CursorPage` reader consumes `data`; existing clients keep
+    // reading `items`. Both are the same array.
+    assert_eq!(value["data"], value["items"]);
+    assert_eq!(value["data"].as_array().map(Vec::len), Some(2));
+
+    let decoded: ItemPage = serde_json::from_value(value).expect("round trip");
+    assert_eq!(
+        decoded, page,
+        "the duplicate spelling is not a second field"
+    );
 }
 
 #[test]

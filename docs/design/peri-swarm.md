@@ -88,10 +88,10 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
 | `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先打开订阅再执行首轮 |
-| `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影 |
-| `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
-| `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时 |
-| `GET` | `/v1/agents/sessions/{logicalId}/items` | 按 seq 增量读取 |
+| `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影；`status` 是官方 `idle`/`in_progress`/`failed` |
+| `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；受理持久化后 `202`；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
+| `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时；含官方 `agent.session.*` 事件 |
+| `GET` | `/v1/agents/sessions/{logicalId}/items` | 按 seq 增量读取；兼容官方 `CursorPage`（`data`/`has_more`、`after=<itemId>`） |
 
 约定：
 
@@ -125,22 +125,63 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   assistant 帧仍按 `payload.messageId` 聚合。
 - item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
   游标，不能用 `id` 去重 delta 帧。
-- SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn` 与 `gap` 不持久化，不推进
-  `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是 `completed` 或
-  `failed`。
+- SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn`、官方 `agent.session.*` 与 `gap`
+  不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是
+  `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn` 帧保持不变。
 - 重连游标接受 `Last-Event-ID` 头或 `?afterSeq=`；服务端先补 `seq > after` 的
   backlog，再转实时广播。心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳
   payload 的 `lastItemSeq` 是该会话当前 `MAX(seq)`（与 item 写入方共享），只表示
   进度，不能代替已投递 item 的 `seq` 作为恢复游标。
-- 回放（backlog）只发 `item` 帧，没有 `turn` 控制帧；客户端的回放终止条件是目标
+- 回放（backlog）与实时同序：先发该行的 `item` 帧，紧接由同一行推导的官方帧
+  （§4.2.1）；上一 turn 的终态先于下一 turn 的 `turn.created`。因此重连看到的官方
+  序列与实时一致；`turn` 控制帧仍只出现在实时段。客户端的回放终止条件是目标
   message 的 `payload.complete=true`。`after` 已等于或超过会话末尾时没有可回放
   item，流保持打开并只发心跳；客户端必须自行超时或取消（或改用 items 分页）。
-- items 支持 `order=asc|desc`、`after`、`limit`，响应给出 `items`、`hasMore`、
-  `nextCursor`、`lastItemSeq`；同一 assistant 消息的 delta 与 complete 共享稳定
+- items 支持 `order=asc|desc`、`after`、`limit`，响应同时给出 `items`/`data` 与
+  `hasMore`/`has_more`（两套拼写同值）、`nextCursor`、`lastItemSeq`。`after` 接受
+  十进制 `seq`（与 `afterSeq` 同义），也接受官方 `after=<itemId>`：解析为该 id
+  的最大 `seq`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
+  `400 conflicting_cursor`。同一 assistant 消息的 delta 与 complete 共享稳定
   `itemId`。item 是事件级帧（user message、assistant delta、tool_call、
   tool_update、tool_result），不是官方高层 item；assistant 按
   `payload.messageId` 聚合，最终文本取 `payload.complete` 帧，`tool_call` 按
   `payload.toolCallId` 聚合（可能分带/不带 `input` 的两帧）。
+
+#### 4.2.1 官方事件映射
+
+官方 `openai@7.60.0` Agents API 的事件帧是附加层：SSE `event:` 名与 JSON `type`
+相同，均为 `agent.session.*`；既有 `item`/`turn` 客户端不受影响。
+
+| 官方事件 | 发出时机 | 载荷来源 | `event_id` |
+| --- | --- | --- | --- |
+| `agent.session.turn.created` | turn 真正开始（`begin_turn`），**不是**受理时 | 打开 turn 的 user item | `evt_<turnId>_created` |
+| `agent.session.turn.item.added` | user item 开启 turn/steer 时、assistant `complete:true` 落库后 | 持久化 item 的 `seq`、`itemId`、text | `evt_item_<seq>_added` |
+| `agent.session.turn.completed` | 成功终态 | turn 的 `created_at` 与完成时刻 | `evt_<turnId>_completed` |
+| `agent.session.turn.failed` | 失败终态 | 同上 | `evt_<turnId>_failed` |
+| `agent.session.idle` | **紧接** `turn.completed` 之后 | 会话行快照 | `evt_<turnId>_idle` |
+| `agent.session.failed` | **紧接** `turn.failed` 之后 | 会话行快照 + 错误 | `evt_<turnId>_session_failed` |
+
+- `turnId = turn_<打开 turn 的 user itemId 去掉 itim_ 前缀>`。它由已持久化的 user
+  item 派生，不用 ACP `messageId`，不含时钟或随机源；重连后由同一行重算，值不变。
+- `event_id` 只由 `turnId` 或持久化 `seq` 派生，因此实时投递与 backlog 重放给出
+  完全相同的 identity；客户端的 `event_id` 去重窗口可跨重连生效。
+- 受理只持久化 user item，不发 `turn.created`/`turn.item.added`。两个帧在 turn 真正
+  开始时按 `turn.created` → `turn.item.added` 顺序发出；从未执行的 turn 不会留下
+  只有 created 没有终态的悬空 turn。
+- `turn.item.added` 只投影 `message` item（user 与 assistant 的完成帧）；一个 turn
+  可以落多条 assistant 完成帧（工具循环等），它们都属于同一个 `turn_id`。
+  `receipt`、thought、tool 帧只存在于网关自定义面。`output_index` 恒为 `null`。
+- backlog 按行重建 turn 边界：user item 在「没有打开的 turn」或「打开的 turn 已落
+  assistant 完成帧」时开启新 turn，否则视为该 turn 的 steer；终态在下一 turn 的
+  `turn.created` 之前或回放末尾发出。最后一个 turn 仅在会话行状态仍为 `failed`
+  时补 `turn.failed` + `agent.session.failed`；失败原因未持久化，`error` 与
+  `completed_at` 保持 `null`，不编造。若该 turn 此刻仍在实时执行，回放不补终态，
+  终态由实时流给出，避免 SDK 提前结束。
+- 重连游标落在 turn 中间（窗口里先出现 assistant 帧）时，从游标之前最近的 user item
+  取回 turn 身份：`turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。
+- `usage` 恒为 `null`；`requires_action` 永不发送（本地没有待审批事实）；
+  `turn.cancelled`、budget、subagent 与官方 `function_call` item 不在本层。
+
 
 ### 4.3 创建与首轮
 
@@ -170,6 +211,15 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   一条 user message item；同一 key 与内容的重放返回 `existing`，不重复追加。
 - `POST /sessions` 的 `Idempotency-Key` 只用于稳定 `logicalId` 并复用已存在会话，
   不是跨请求的事务承诺。
+- `POST /sessions/{logicalId}/events` 的 `202` 是**受理**回执：input receipt、user
+  item 与 turn 预留都持久化后才返回，turn 在响应之后执行（actor 路径经
+  `wait_until` 调度，HTTP 路径用独立任务）。响应中的 `lastItemSeq` 是受理时刻的
+  `MAX(seq)`，通常只含本条 user item；assistant item 与终态经 SSE 投递。因此
+  「先建流、后 POST」仍是观察本轮的可靠方式，但 202 不再等待模型。
+- 同步失败仍按原语义返回：空输入/畸形请求 `400`，同 key 不同内容
+  `409 input_conflict`，需要 `session/resume` 的失败 `502 session_resume_required`
+  （`details.operation` 指向具体阶段）。turn 执行失败在流上以 `turn.failed` +
+  `agent.session.failed` 呈现，不追认改已返回的 `202`。
 - 创建中断的恢复是**按已持久化的 root id 核对**，不是重新生成：`creating` 行重试
   先 `session/load`、必要时才用同一 root id `session/new`，返回 `created=false`；
   初始输入至多执行一次（行内已有 item 时不重放）。两次尝试都失败返回可诊断的
@@ -181,16 +231,16 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 `GET /sessions/{logicalId}`（以及创建响应）的 `environment` 是
 `{type,id}`；hosted 会话另有 `sandbox` 投影，字段来自 `swarm_bindings`：
-`logicalEnvId`、`sandboxId`、`runId`、`workspacePath`。`state` 固定为 `null`：
-网关只持久化绑定，不跟踪 Bun 的实时 SRT 启停；实时状态以 Bun
+`logicalEnvId`、`sandboxId`、`runId`、`workspacePath`。`runId` 在绑定记录后如实
+填充；`state` 固定为 `null`：网关只持久化绑定，不跟踪 Bun 的实时 SRT 启停，表里
+也没有该列，所以不伪造 `reserved`/`running`。实时状态以 Bun
 `GET /v1/sandboxes/{logicalEnvId}` 为准。会话 `cwd` 是网关工作目录，不是工具执行
 目录；工具在 `sandbox.workspacePath` 下执行。
 
-`POST /sessions/{logicalId}/events` 在 HTTP 层返回 `202`，但 `mode=turn` 的受理在
-本轮进入终态后才返回；响应中的 `lastItemSeq` 已包含本轮 item。对调用方而言，**返回
-时本轮可能已经完成**；它不是「排队后异步执行」，也不能在返回后再开流补看本轮——
-要观察本轮，先建立 SSE 再 POST。未完成 turn、`session/resume` 与后台任务边界仍是
-§8 的未完成项。
+`status` 由会话行与进程内在途 turn 投影：有在途 turn（含已受理未开始）为
+`in_progress`，行状态 `failed` 为 `failed`，否则 `idle`。本地没有审批事实，不会
+出现 `requires_action`。
+
 
 ## 5. MCP 注入
 

@@ -128,6 +128,20 @@ impl SwarmStore for MemorySwarmStore {
             .map_or(0, |(seq, _)| *seq))
     }
 
+    async fn swarm_get_item(
+        &self,
+        logical_id: &str,
+        item_id: &str,
+    ) -> Result<Option<SwarmItemRow>, StoreError> {
+        Ok(self.lock().items.get(logical_id).and_then(|items| {
+            items
+                .values()
+                .rev()
+                .find(|row| row.item_id == item_id)
+                .cloned()
+        }))
+    }
+
     async fn swarm_put_input(&self, row: SwarmInputRow) -> Result<InputPut, StoreError> {
         let mut state = self.lock();
         let key = (row.logical_id.clone(), row.input_id.clone());

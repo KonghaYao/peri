@@ -49,8 +49,10 @@ fn event_response_with_initial(
 
 /// Persisted backlog, then live broadcasts, with a 15 s heartbeat by default.
 ///
-/// Only `item` events carry an SSE `id` equal to `seq`; `turn` and `gap` are
-/// not persisted in `swarm_items` and therefore do not advance `Last-Event-ID`.
+/// Only `item` events carry an SSE `id` equal to `seq`; `turn`, the official
+/// `agent.session.*` frames and `gap` are not persisted in `swarm_items` and
+/// therefore do not advance `Last-Event-ID`. Official frames are additive: the
+/// gateway's own `item`/`turn` events stay on the stream.
 ///
 /// The heartbeat payload's `lastItemSeq` is the session's current
 /// `MAX(seq)` (read from the shared tail), not the last seq this stream
@@ -146,6 +148,7 @@ impl StreamState {
                 Some(json_event("item", &item).id(item.seq.to_string()))
             }
             StreamEvent::Turn(turn) => Some(json_event("turn", &turn)),
+            StreamEvent::Official(event) => Some(json_event(event.event_type(), &event)),
             StreamEvent::Gap { from_seq, to_seq } => Some(json_event(
                 "gap",
                 &json!({ "fromSeq": from_seq, "toSeq": to_seq }),

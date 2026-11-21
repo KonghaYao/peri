@@ -36,13 +36,16 @@ use super::runtime::{
     WORKSPACE_MCP_SERVER_NAME,
 };
 use crate::domain::{
-    new_root_session_id, ActorKey, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
-    ErrorKind, InputKind, InputMode, InputOutcome, InputState, InputSubmission, ItemOrder,
-    ItemPage, ItemsWindow, LogicalId, McpToolSpec, SandboxView, SessionState, SessionView,
-    StreamEvent, SwarmError, TurnView,
+    new_root_session_id, turn_id_for_item, ActorKey, Cursor, Disposition, EnvironmentKind,
+    EnvironmentRef, ErrorCode, ErrorKind, InputKind, InputMode, InputOutcome, InputState,
+    InputSubmission, ItemOrder, ItemPage, ItemsWindow, LogicalId, McpToolSpec, SandboxView,
+    SessionState, SessionStatus, SessionView, StreamEvent, SwarmError, TurnView,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
-use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
+use crate::service::{
+    resolve_window_after, AcceptedInput, CreateSessionCommand, CreateSessionResult,
+    EventSubscription, PendingTurn, SwarmService,
+};
 use crate::store::{
     store_failure, InputPut, SwarmInputRow, SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
 };
@@ -426,6 +429,7 @@ impl AcpSwarmService {
             root_session_id: row.root_session_id.clone(),
             cwd: row.cwd.clone(),
             state: row.state,
+            status: SessionStatus::project(row.state, turn.is_some()),
             turn: turn.map_or_else(TurnView::default, |slot| TurnView {
                 request_id: Some(slot.request_id),
                 started_at: Some(slot.started_at),
@@ -446,6 +450,10 @@ impl AcpSwarmService {
     ///
     /// `swarm_bindings` is the authority for the sandbox identity and workspace
     /// path; a missing row keeps `sandbox: null` instead of failing the read.
+    /// `runId` is the last run Bun reported at reservation time. `state` stays
+    /// `null`: only the reservation response carries Bun's SRT lifecycle
+    /// (`reserved`/`ready`) and the binding row does not persist it, so there is
+    /// no durable fact to project (`design §4.1`).
     async fn sandbox_view(&self, row: &SwarmSessionRow) -> Result<Option<SandboxView>, SwarmError> {
         if row.environment.kind != EnvironmentKind::OpenAiHosted {
             return Ok(None);
@@ -497,7 +505,12 @@ impl AcpSwarmService {
     }
 
     /// Run one `session/prompt` turn and await its reply.
-    async fn run_turn(&self, runtime: &Arc<SessionRuntime>, text: &str) -> Result<(), SwarmError> {
+    async fn run_turn(
+        &self,
+        runtime: &Arc<SessionRuntime>,
+        text: &str,
+        turn_id: &str,
+    ) -> Result<(), SwarmError> {
         let request_id = Uuid::now_v7().to_string();
         let started_at = peri_time::now_utc_rfc3339();
         {
@@ -514,7 +527,12 @@ impl AcpSwarmService {
         let _lease = TurnLease {
             turn: runtime.turn.clone(),
         };
-        runtime.log.begin_turn(&request_id).await?;
+        if let Err(error) = runtime.log.begin_turn(&request_id, turn_id).await {
+            // The turn was opened at acceptance; execution cannot start, so do
+            // not leave a turn that the stream can never terminate.
+            runtime.log.abandon_pending_turn(turn_id);
+            return Err(error);
+        }
         match runtime.child.prompt(text, &request_id).await {
             Ok(reply) => {
                 // A steer cancels this attempt on purpose and the host continues
@@ -565,11 +583,16 @@ impl AcpSwarmService {
     }
 
     /// Append an input to the running turn through the host user-input queue.
+    ///
+    /// `turn_id` belongs to the accepted user item; it is only used by the
+    /// `epoch == 0` fallback, where the turn ended before the handoff and the
+    /// input runs as a normal turn.
     async fn steer(
         &self,
         runtime: &Arc<SessionRuntime>,
         submission: &InputSubmission,
         logical_id: &LogicalId,
+        turn_id: &str,
     ) -> Result<InputOutcome, SwarmError> {
         let text = submission.effective_text();
         // Record the handoff before dispatch: the dispatched input cancels the
@@ -578,7 +601,7 @@ impl AcpSwarmService {
         // input then runs as a normal turn instead of vanishing into the queue.
         let epoch = runtime.log.note_steer();
         if epoch == 0 {
-            self.run_turn(runtime, &text).await?;
+            self.run_turn(runtime, &text, turn_id).await?;
             let last_item_seq = self.last_seq(logical_id).await?;
             return Ok(InputOutcome::new(
                 submission.input_id.clone(),
@@ -744,32 +767,23 @@ impl AcpSwarmService {
 
     /// Persisted backlog after `cursor`, used by the actor SSE endpoint and
     /// the gateway's reconnect path.
+    ///
+    /// The window carries the custom `item` frames plus the official frames
+    /// rebuilt from the same rows ([`crate::service::replay_backlog`]), so a
+    /// reconnecting SDK observes the same `turn_id`/`event_id` sequence as a
+    /// live stream.
     pub async fn replay_after(
         &self,
         logical_id: &LogicalId,
         cursor: Cursor,
     ) -> Result<Vec<StreamEvent>, SwarmError> {
-        let mut backlog = Vec::new();
-        let mut after = cursor.value();
-        loop {
-            let page = self
-                .store
-                .swarm_items_after(logical_id.as_str(), after, ItemsWindow::MAX_LIMIT)
-                .await
-                .map_err(|error| store_failure("items_after", error))?;
-            if page.is_empty() {
-                break;
-            }
-            let page_len = page.len();
-            if let Some(last) = page.last() {
-                after = last.seq;
-            }
-            backlog.extend(page.into_iter().map(|row| StreamEvent::Item(row.to_view())));
-            if page_len < ItemsWindow::MAX_LIMIT as usize {
-                break;
-            }
-        }
-        Ok(backlog)
+        let session = self.require_row(logical_id).await?;
+        let live_open_turn = self
+            .sessions
+            .lock()
+            .get(logical_id.as_str())
+            .is_some_and(|runtime| runtime.log.has_open_turn());
+        crate::service::replay_backlog(self.store.as_ref(), &session, cursor, live_open_turn).await
     }
 
     /// Resolve the session environment and reserve its Bun workspace (S8a3a).
@@ -984,8 +998,9 @@ impl AcpSwarmService {
         // duplicate the user message and its turn.
         if last_seq == 0 {
             if let Some(text) = command.initial_input.as_deref() {
-                runtime.log.record_user_input(None, text).await?;
-                self.run_turn(&runtime, text).await?;
+                let (_, item_id) = runtime.log.record_user_input(None, text).await?;
+                self.run_turn(&runtime, text, &turn_id_for_item(&item_id))
+                    .await?;
             }
         }
         let session = self.view_by_id(&command.logical_id).await?;
@@ -1125,8 +1140,9 @@ impl SwarmService for AcpSwarmService {
                 .runtime(&command.logical_id)
                 .map_err(|_| SwarmError::upstream_unavailable("session_not_live"))?;
             if let Some(text) = command.initial_input.as_deref() {
-                runtime.log.record_user_input(None, text).await?;
-                self.run_turn(&runtime, text).await?;
+                let (_, item_id) = runtime.log.record_user_input(None, text).await?;
+                self.run_turn(&runtime, text, &turn_id_for_item(&item_id))
+                    .await?;
             }
             let session = self.view_by_id(&command.logical_id).await?;
             return Ok(CreateSessionResult {
@@ -1229,8 +1245,9 @@ impl SwarmService for AcpSwarmService {
             .insert(command.logical_id.as_str().to_owned(), Arc::clone(&runtime));
 
         if let Some(text) = command.initial_input.as_deref() {
-            runtime.log.record_user_input(None, text).await?;
-            self.run_turn(&runtime, text).await?;
+            let (_, item_id) = runtime.log.record_user_input(None, text).await?;
+            self.run_turn(&runtime, text, &turn_id_for_item(&item_id))
+                .await?;
         }
         let session = self.view_by_id(&command.logical_id).await?;
         Ok(CreateSessionResult {
@@ -1243,11 +1260,11 @@ impl SwarmService for AcpSwarmService {
         self.view_by_id(logical_id).await
     }
 
-    async fn submit_input(
+    async fn accept_input(
         &self,
         logical_id: &LogicalId,
         submission: InputSubmission,
-    ) -> Result<InputOutcome, SwarmError> {
+    ) -> Result<AcceptedInput, SwarmError> {
         let runtime = self.runtime(logical_id)?;
         self.require_row(logical_id).await?;
         if submission.is_empty() {
@@ -1264,21 +1281,14 @@ impl SwarmService for AcpSwarmService {
         {
             if existing.fingerprint == fingerprint {
                 let last_item_seq = self.last_seq(logical_id).await?;
-                return Ok(InputOutcome::new(
+                return Ok(AcceptedInput::settled(InputOutcome::new(
                     input_id,
                     Disposition::Existing,
                     submission.mode,
                     last_item_seq,
-                ));
+                )));
             }
             return Err(SwarmError::input_conflict(&input_id));
-        }
-
-        if submission.kind == InputKind::User
-            && submission.mode == InputMode::Turn
-            && runtime.is_running()
-        {
-            return Err(SwarmError::turn_in_progress());
         }
 
         let receipt = SwarmInputRow {
@@ -1295,12 +1305,12 @@ impl SwarmService for AcpSwarmService {
                     return Err(SwarmError::input_conflict(&input_id));
                 }
                 let last_item_seq = self.last_seq(logical_id).await?;
-                return Ok(InputOutcome::new(
+                return Ok(AcceptedInput::settled(InputOutcome::new(
                     input_id,
                     Disposition::Existing,
                     submission.mode,
                     last_item_seq,
-                ));
+                )));
             }
             Err(error) => {
                 tracing::warn!(error = %error, "swarm input receipt write failed");
@@ -1308,16 +1318,35 @@ impl SwarmService for AcpSwarmService {
             }
         }
 
-        if submission.kind == InputKind::User {
-            // Recorded at acceptance. The host echoes `user_message_chunk`, but
-            // the projection drops that echo, so this is the only user frame in
-            // the log. A retried `inputId` returns `Existing` above and never
-            // reaches this branch, so the item is appended once.
-            runtime
-                .log
-                .record_user_input(Some(&input_id), &submission.effective_text())
-                .await?;
-        }
+        // Admission is serialized so two concurrent accepts cannot both see an
+        // idle session and attribute their user items to different turns. The
+        // lock is released before any prompt/queue work runs.
+        let (running, turn_id) = {
+            let _admission = runtime.admission.lock().await;
+            let running = runtime.is_running();
+            if submission.kind == InputKind::User && running && submission.mode == InputMode::Turn {
+                return Err(SwarmError::turn_in_progress());
+            }
+            // A previously accepted turn that has not started yet owns the
+            // session; accepting a second one would race its user item into the
+            // first turn.
+            if submission.kind == InputKind::User && !running && runtime.log.has_open_turn() {
+                return Err(SwarmError::turn_in_progress());
+            }
+            let mut turn_id = None;
+            if submission.kind == InputKind::User {
+                // Recorded at acceptance. The host echoes `user_message_chunk`,
+                // but the projection drops that echo, so this is the only user
+                // frame in the log. A retried `inputId` returns `Existing` above
+                // and never reaches this branch, so the item is appended once.
+                let (_, item_id) = runtime
+                    .log
+                    .record_user_input(Some(&input_id), &submission.effective_text())
+                    .await?;
+                turn_id = Some(turn_id_for_item(&item_id));
+            }
+            (running, turn_id)
+        };
 
         if submission.kind == InputKind::Control {
             // `kind=control` is recorded only; `cancel` is the one control
@@ -1330,28 +1359,53 @@ impl SwarmService for AcpSwarmService {
                 self.cancel_turn(logical_id, None).await?;
             }
             let last_item_seq = self.last_seq(logical_id).await?;
-            return Ok(InputOutcome::new(
+            return Ok(AcceptedInput::settled(InputOutcome::new(
                 input_id,
                 Disposition::Inserted,
                 submission.mode,
                 last_item_seq,
-            ));
+            )));
         }
 
-        let outcome = if runtime.is_running() {
-            self.steer(&runtime, &submission, logical_id).await?
-        } else {
-            self.run_turn(&runtime, &submission.effective_text())
+        if running {
+            let turn_id = turn_id.as_deref().unwrap_or_default();
+            let outcome = self
+                .steer(&runtime, &submission, logical_id, turn_id)
                 .await?;
+            return Ok(AcceptedInput::settled(outcome));
+        }
+
+        let Some(turn_id) = turn_id else {
+            // A non-user input never opens a turn; the branch above returned it.
             let last_item_seq = self.last_seq(logical_id).await?;
-            InputOutcome::new(
+            return Ok(AcceptedInput::settled(InputOutcome::new(
                 input_id,
                 Disposition::Inserted,
                 submission.mode,
                 last_item_seq,
-            )
+            )));
         };
-        Ok(outcome)
+        // `202` is sent now; the execution runs out-of-band.
+        let last_item_seq = self.last_seq(logical_id).await?;
+        Ok(AcceptedInput {
+            outcome: InputOutcome::new(
+                input_id,
+                Disposition::Inserted,
+                submission.mode,
+                last_item_seq,
+            ),
+            pending_turn: Some(PendingTurn {
+                logical_id: logical_id.clone(),
+                text: submission.effective_text(),
+                turn_id,
+            }),
+        })
+    }
+
+    async fn run_pending_turn(&self, pending: PendingTurn) -> Result<(), SwarmError> {
+        let runtime = self.runtime(&pending.logical_id)?;
+        self.run_turn(&runtime, &pending.text, &pending.turn_id)
+            .await
     }
 
     async fn list_items(
@@ -1364,17 +1418,20 @@ impl SwarmService for AcpSwarmService {
             return Err(SwarmError::invalid_query("limit must be within 1..=500"));
         }
         let last_item_seq = self.last_seq(logical_id).await?;
+        // The official `CursorPage` sends the last item's `id` as `after`; map
+        // it to that item's seq before querying.
+        let after = resolve_window_after(self.store.as_ref(), logical_id, &window).await?;
         let probe = window.limit.saturating_add(1);
 
         let mut rows = match window.order {
             ItemOrder::Asc => self
                 .store
-                .swarm_items_after(logical_id.as_str(), window.after.unwrap_or(0), probe)
+                .swarm_items_after(logical_id.as_str(), after.unwrap_or(0), probe)
                 .await
                 .map_err(|error| store_failure("items_after", error))?,
             ItemOrder::Desc => self
                 .store
-                .swarm_items_before(logical_id.as_str(), window.after, probe)
+                .swarm_items_before(logical_id.as_str(), after, probe)
                 .await
                 .map_err(|error| store_failure("items_before", error))?,
         };

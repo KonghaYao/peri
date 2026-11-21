@@ -1,0 +1,189 @@
+# Peri Swarm 对齐官方 Agents SDK 验收（分页、状态、事件流）
+
+- 状态：代码与契约测试证据记录；无活体 Loom/Rivet engine，**无真实官方 SDK 进程调用**
+- 日期：2026-11-21
+- 基线：`05d93fe1e`（`feat/swarm-official-p1a` 分支基点）+ 本记录同一提交中的工作树改动
+- 范围：按 `openai@7.60.0` Agents API 的实际读取行为，补齐 items 分页、会话状态、
+  官方 `agent.session.*` 事件（实时与 backlog 重放）以及 `POST /events` 的 `202`
+  边界。既有自定义 `item`/`turn` 帧、错误码与门禁不变。
+- 参考源码（只读，未修改）：`/Users/mino/code/peri/.claude/dogfood/node_modules/openai`
+
+## 1. 官方 SDK 事实依据
+
+| 事实 | 源码位置 |
+| --- | --- |
+| `CursorPage` 只读 `body.data` / `body.has_more`；下一页 `after = data[last].id` | `src/core/pagination.ts:154-200` |
+| `ItemListParams extends CursorPageParams`（`after?: string`、`limit?`）并增加 `order` | `src/resources/beta/agents/sessions/items.ts:259-266` |
+| `sessions.stream()` 先 `sessions.retrieve`，`status !== 'idle'` 直接抛错；随后 `events.stream` 再 `events.create` | `src/lib/agents/agent-session-stream.ts:168-192` |
+| `TurnState` 以 `agent.session.turn.created`（`turn.subagent_id === null`）选择 `turn_id`；按 `event_id` 去重（1024 窗口）；只在 `turn.completed/failed/cancelled` 后把 `agent.session.idle` 视为终态，`agent.session.failed` 本身即终态 | `src/lib/agents/turn-state.ts:13-52` |
+| `events.create` 返回 `APIPromise<void>`；文档写明 “HTTP 202 confirms acceptance, not durable completion” | `src/resources/beta/agents/sessions/events.ts:24-59` |
+| `turn.created` / `turn.item.added` / `turn.completed` / `idle` 帧字段（`event_id`、`session_id`、`turn_id`、`turn`、`item`、`output_index`、`session`） | `src/resources/beta/agents/agents.ts:3076-3120`、`3186-3235`、`2936-2975`、`2188-2215` |
+| `Turn` 结构（`id`、`object`、`agent_id`、`created_at`、`started_at`、`completed_at`、`status`、`subagent_id`、`error`、`usage`） | `src/resources/beta/agents/sessions/turns/turns.ts:294-365` |
+
+`turn.item.added` 只承载 item；`TurnState.call()` 只消费 `item.type === 'function_call'`。
+本地没有对应事实，因此官方层不投影 `function_call`、`requires_action` 或子代理 turn。
+
+## 2. 改动
+
+| 位置 | 改动 |
+| --- | --- |
+| `peri-swarm/src/domain/official.rs`（新增） | 官方 `Turn`/`AgentSession`/message item/事件类型；`turn_id_for_item` 与六个 `event_id` 派生函数；RFC3339→Unix 秒 |
+| `peri-swarm/src/domain/official_test.rs`（新增） | id 派生、序列化往返、content block、`SessionStatus::project`、时间转换 |
+| `peri-swarm/src/domain/session.rs` | `SessionStatus{Idle,InProgress,Failed}` 与 `project(state, turn_active)`；`SessionView.status` |
+| `peri-swarm/src/domain/item.rs` | `ItemPage` 增加 `data`；手写 `Serialize` 同值输出 `hasMore` 与 `has_more`；`ItemsWindow.after_id` |
+| `peri-swarm/src/domain/event.rs` | `TurnEvent` 携带 `turn_id`；`StreamEvent::Official` |
+| `peri-swarm/src/store/{mod,memory,turso}.rs` | `swarm_get_item`：按 `(logical_id, item_id)` 取最大 `seq` 的行 |
+| `peri-swarm/src/http/request.rs` | `after` 接受十进制或 `itim_...`；畸形游标 `400 invalid_query`；与 `afterSeq` 不一致 `400 conflicting_cursor` |
+| `peri-swarm/src/http/handlers.rs`、`sse.rs` | `202` 受理后由独立任务执行 turn；官方帧按 `event_type()` 输出 SSE 事件名 |
+| `peri-swarm/src/service/mod.rs` | `AcceptedInput`/`PendingTurn`；`resolve_window_after`；`replay_backlog` 与 `OfficialReplay::render`（按行重建 turn 边界、多 assistant 帧、失败终态、中段游标播种） |
+| `peri-swarm/src/service/in_memory.rs` | `TurnPolicy::{Immediate,Manual,Deferred}`；状态投影；官方帧发出；回放走同一 `replay_backlog` |
+| `peri-swarm/src/actor/reader.rs` | 受理只落 user item；“turn 真正开始”时才发 `turn.created` + 该 item 的 `turn.item.added`；终态帧紧接自定义 `turn` 帧 |
+| `peri-swarm/src/actor/{service,swarm}.rs` | `accept_input`/`run_pending_turn`；`Submit` 用 `ctx.wait_until` 在 202 后执行；`status` 投影；回放用 `replay_backlog` 并传入实时是否仍有在途 turn |
+| `peri-swarm/src/service/in_memory_test.rs` | 回放契约：多 assistant 帧同 turn、失败 turn 不伪装成功、中段游标播种、实时 turn 不补终态 |
+| `peri-swarm/src/event_stream.rs` | actor→gateway hop 透传 `agent.session.*` 事件名 |
+| `peri-swarm/Cargo.toml`、`Cargo.lock` | 新增 `chrono`（仅用于 RFC3339 解析）；lockfile 只增加 peri-swarm→chrono 依赖边 |
+
+## 3. 行为矩阵
+
+### 3.1 items 分页
+
+| 请求 | 结果 |
+| --- | --- |
+| `GET /items?limit=2` | `object:"list"`；`items` 与 `data` 同数组；`hasMore` 与 `has_more` 同值；`nextCursor`/`lastItemSeq` 保持既有拼写 |
+| `?limit=2&after=<上一页最后一项的 id>` | 解析该 `item_id` 的最大 `seq`，返回其后一页 |
+| `?after=itim_...&afterSeq=<同值 seq>` | 一致，正常返回 |
+| `?after=itim_...&afterSeq=<不同值>` | `400 conflicting_cursor` |
+| `?after=not-a-cursor` | `400 invalid_query` |
+
+`id`/`itemId` 相同的多行（assistant delta 与 complete）解析为该 id 的最大 `seq`，
+与 `nextCursor` 的含义一致。
+
+### 3.2 会话状态
+
+| 会话事实 | `status` |
+| --- | --- |
+| 进程内无在途 turn，行状态 `idle`/`creating` | `idle` |
+| 有在途 turn（含已受理、尚未开始执行） | `in_progress` |
+| 行状态 `failed` 且无在途 turn | `failed` |
+| 任何情况 | 不发送 `requires_action` |
+
+### 3.3 官方事件映射
+
+| 官方事件 | 发出时机 | `event_id` |
+| --- | --- | --- |
+| `agent.session.turn.created` | turn 真正开始（`begin_turn`），受理时**不发** | `evt_<turnId>_created` |
+| `agent.session.turn.item.added` | user item 开启/steer；assistant `complete:true` 落库后 | `evt_item_<seq>_added` |
+| `agent.session.turn.completed` | 成功终态 | `evt_<turnId>_completed` |
+| `agent.session.turn.failed` | 失败终态 | `evt_<turnId>_failed` |
+| `agent.session.idle` | 紧接 `turn.completed` | `evt_<turnId>_idle` |
+| `agent.session.failed` | 紧接 `turn.failed` | `evt_<turnId>_session_failed` |
+
+`turnId = turn_<打开 turn 的 user itemId 去掉 itim_ 前缀>`；它不取自 ACP
+`messageId`，也不含时钟或随机源。`event_id` 只由该 `turnId` 或持久化 `seq` 派生，
+所以实时与 backlog 重放给出完全相同的 identity。`receipt`、thought、tool 帧只留在
+网关自定义面，不进入 `turn.item.added`。
+
+回放按行重建 turn 边界（`OfficialReplay::render`）：
+
+- user item 在「没有打开的 turn」或「打开的 turn 已落 assistant 完成帧」时开启新
+  turn；否则是该 turn 的 steer。
+- 一个 turn 的所有 `complete:true` assistant 帧都挂同一 `turn_id`；终态在下一 turn
+  的 `turn.created` 之前或回放末尾发出。最后一个 turn 仅在会话行仍为 `failed` 时
+  补 `turn.failed` + `agent.session.failed`（`error`、`completed_at` 为 `null`）。
+- 回放时该 turn 仍在实时执行（存在在途 turn）则不补终态，避免 SDK 提前结束。
+- 重连游标落在 turn 中间时，从游标（含）之前最近的 user item 取回 turn 身份，
+  `turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。
+
+实现差异：内存 fake 在 `accept_input` 内同步执行 turn，因此 `turn.created` 紧跟
+user item（actor 路径推迟到 `begin_turn`，避免已受理但从未执行的 turn 留下无终态的
+`turn.created`）；两条路径最终序列一致（`created → item.added → ... →
+completed/failed → idle/failed`）。`TurnPolicy::Immediate` 下 202 的 `lastItemSeq`
+已包含 fake 的 assistant 帧，与生产路径「受理时刻的 MAX(seq)」不同，仅测试替身如此。
+
+### 3.4 `POST /events` 的 `202`
+
+| 阶段 | 行为 |
+| --- | --- |
+| 受理前校验失败 | 同步 `400`（空输入/畸形请求） |
+| 同 key 不同内容 | 同步 `409 input_conflict`，不入队、不追加 item |
+| 需要 `session/resume` | 同步 `502 session_resume_required` |
+| 受理成功 | receipt、user item、turn 预留持久化后返回 `202`；turn 在响应后执行 |
+| turn 执行失败 | 流上 `turn.failed` + `agent.session.failed`；已返回的 `202` 不追认更改 |
+
+响应中的 `lastItemSeq` 是受理时刻的 `MAX(seq)`（通常只含本条 user item），
+不是终态游标。
+
+## 4. 实际执行的命令与结果
+
+命令均在 worktree 内执行，环境为
+`PATH=$HOME/.local/share/uv/python/cpython-3.12.14-macos-aarch64-none/bin:$HOME/.cargo/bin:$PATH`、
+`CARGO_HOME=/tmp/cargo-home-rsproxy`（rsproxy 镜像与补丁 crate 配置）。
+
+| # | 命令 | 结果 |
+| --- | --- | --- |
+| 1 | `cargo check -p peri-swarm --all-targets --locked` | 通过，exit 0，`Finished dev profile` |
+| 2 | `cargo test -p peri-swarm --locked` | 通过，0 failed：lib 196、`actor_runtime_test` 7（1 ignored）、`http_contract_test` 25、`items_pagination_test` 7、`loom_store_test` 0（3 ignored）、`mcp_injection_test` 4、`openai_hosted_test` 7、`rivet_actor_test` 0（2 ignored）、`streaming_test` 12、doc-tests 0 |
+| 3 | `cargo clippy -p peri-swarm --all-targets --locked -- -D warnings` | 通过，exit 0 |
+| 4 | `python3 scripts/check-feature-catalog.py` | `Documentation: PASS (structure and destinations; not runtime acceptance)` |
+| 5 | `git diff --check` | 通过，exit 0，无输出 |
+
+新增/调整的断言：
+
+- `tests/items_pagination_test.rs`：`data == items`、`has_more`、`after=itim_...`
+  第二页、与 `afterSeq` 的一致/冲突、畸形游标。
+- `tests/http_contract_test.rs`：`GET /sessions/{id}` 的 `idle`/`in_progress`/`failed`
+  三态；`TurnPolicy::Deferred` 下 `202` 只含 user item，assistant item 在响应之后出现。
+- `tests/streaming_test.rs`：实时
+  `turn.created → item.added(user) → item.added(assistant) → turn.completed →
+  agent.session.idle`；`event_id` 与 backlog 重放逐项相等。
+- `src/actor/reader_test.rs`、`src/service/in_memory_test.rs`、
+  `src/domain/item_test.rs`、`src/event_stream.rs`：单元级顺序、`event_id`、
+  双拼写与 hop 透传。
+- `src/service/in_memory_test.rs` 的回放契约：同一 turn 多条 assistant 帧、失败 turn
+  带已落库 assistant 帧仍为 `turn.failed`、中段游标播种后 `event_id` 不变、实时
+  turn 不补终态。
+
+## 5. 未验证项与残余风险
+
+1. **没有真实官方 SDK 进程。** 断言形状取自上述源码与类型定义；未启动
+   `openai@7.60.0` 客户端消费本服务。因此不证明 SDK 运行时的额外校验（例如
+   `sessions.retrieve` 的其它必填字段、事件联合类型的运行时分支）。
+2. **没有活体 Loom/Rivet engine。** 集成测试使用 `InMemorySwarmService`；actor 路径
+   由 `actor_runtime_test`/`rivet_actor_test` 在无 engine 条件下覆盖，未验证跨副本
+   唤醒后的实时/重放一致性。
+3. **backlog 的 `turn.failed` 只能按会话行状态重建。** 失败原因未持久化，重放的
+   `agent.session.failed.session.error` 与 `turn.completed_at` 为 `null`；若失败后
+   会话行又被后续 turn 改为 `running`/`idle`，重放把该 turn 呈现为 `completed`。
+4. **回放无法区分 steer 与「上一 turn 无输出后开启的新 turn」。** 行里没有 turn 边界
+   标记：打开的 turn 已落 assistant 完成帧时，后续 user item 按新 turn 处理；否则
+   按 steer 处理。真实 steer 若发生在已有输出之后，回放会多出一个 turn 边界（实时
+   流不受影响）。
+5. **宿主崩溃遗留的 `running` 行。** 行状态为 `running` 且此刻没有在途 turn 时，回放
+   仍按「已闭合 turn → completed」处理；它无法证明该 turn 曾正常结束。`GET` 的
+   `status` 同时报 `in_progress`，两者都只是从持久化事实的推断。
+6. **`agent.session.*` 的 `session` 载荷是子集。** 已含 `id`/`object`/`status`/
+   `created_at`/`last_active_at`/`error`/`agent{id,model,instructions}`/`metadata`/
+   `required_actions`/`usage`/`vault_ids`，缺官方必填的 `environment`；`agent.model`
+   在部署未记录时为 `null`（官方类型为 `string`）。SDK 的 `TurnState` 只读
+   `session.status`/`session.id`，运行时不校验该形状。
+7. **`usage` 恒为 `null`。** 本地没有 token 计量事实，未做假值。
+8. **`sandbox.state` 恒为 `null`。** `swarm_bindings` 不持久化 SRT 状态；`runId` 在
+   绑定时填充。实时状态仍以 Bun 的 `GET /v1/sandboxes/{logicalEnvId}` 为准。
+9. **未实现** `turn.cancelled`、budget、subagent turn 与官方 `function_call` item；
+   `requires_action` 永不发送。官方 SDK 若严格依赖这些帧，会停在等待态。
+10. **SSE 容量与慢客户端 `gap`** 未在本轮重新验证；行为与上一记录一致。
+11. **分页 id 语义**依赖 `swarm_get_item` 的“同 id 取最大 seq”；若未来允许同一 id
+    跨 turn 复用（当前 assistant 身份按 messageId 聚合，跨 turn 不保证唯一），需要
+    重新定义游标解析。
+12. **内存 fake 的 `202` 时序**：`TurnPolicy::Immediate` 在 `accept_input` 内同步跑完
+    turn，响应里的 `lastItemSeq` 已含 assistant 帧；`202`-before-terminal 由
+    `TurnPolicy::Deferred` 与 HTTP 契约测试覆盖，actor 路径由 `ctx.wait_until` 覆盖，
+    但未在真实 model 延迟下计时。
+
+## 6. 证据边界
+
+- 单测证明 id 派生、序列化、状态投影与事件编码；契约测试证明 HTTP 状态码、
+  响应字段、SSE 顺序与重放 identity。
+- 均不证明真实 SDK 兼容性、真实 Loom/Rivet 行为或跨进程恢复。
+- `Cargo.lock` 的唯一改动是 `peri-swarm` 依赖列表新增 `chrono`；`chrono` 本身早已在
+  lockfile 中。

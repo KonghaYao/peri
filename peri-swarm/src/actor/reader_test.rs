@@ -5,7 +5,7 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use super::{ItemLog, TurnOutcome};
-use crate::domain::{ItemKind, SessionState, StreamEvent, TurnEvent};
+use crate::domain::{turn_id_for_item, ItemKind, SessionState, StreamEvent, TurnEvent};
 use crate::store::{MemorySwarmStore, SwarmSessionRow, SwarmStore};
 
 fn session_row() -> SwarmSessionRow {
@@ -76,7 +76,7 @@ async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
         mut events,
     } = fixture().await;
 
-    log.begin_turn("req-1").await.expect("turn");
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.ingest("session/update", &chunk("hel")).await;
     log.ingest("session/update", &chunk("lo")).await;
     log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
@@ -101,12 +101,20 @@ async fn text_deltas_share_one_item_id_and_completion_carries_full_text() {
     assert!(items[0].seq < items[1].seq && items[1].seq < items[2].seq);
 
     // Ordering contract: the completion item is persisted before the turn
-    // terminal is announced.
+    // terminal is announced. The official terminal frames follow it.
     let terminal = seen
         .iter()
         .position(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. })))
         .expect("turn completed");
-    assert_eq!(terminal, seen.len() - 1);
+    assert_eq!(terminal, seen.len() - 3);
+    assert!(matches!(
+        &seen[terminal + 1],
+        StreamEvent::Official(event) if event.event_type() == "agent.session.turn.completed"
+    ));
+    assert!(matches!(
+        &seen[terminal + 2],
+        StreamEvent::Official(event) if event.event_type() == "agent.session.idle"
+    ));
 
     let row = store
         .swarm_get_session("agent-1")
@@ -126,11 +134,12 @@ async fn user_input_is_one_frame_with_a_stable_identity_and_advances_the_tail() 
     } = fixture().await;
 
     let input_id = "0192f0c5-0000-7000-8000-00000000abcd";
-    let seq = log
+    let (seq, item_id) = log
         .record_user_input(Some(input_id), "hello")
         .await
         .expect("user item");
     assert_eq!(seq, 1);
+    assert_eq!(item_id, format!("itim_input_{input_id}"));
 
     let seen = drain(&mut events);
     assert_eq!(seen.len(), 1, "the user message is a single frame");
@@ -157,8 +166,10 @@ async fn user_input_is_one_frame_with_a_stable_identity_and_advances_the_tail() 
     );
 
     // The host's `user_message_chunk` echo is dropped by the projection, so a
-    // turn must not mint a second user row.
-    log.begin_turn("req-user").await.expect("turn");
+    // turn must not mint a second user row. The turn id is the one derived from
+    // the accepted user item.
+    let turn_id = turn_id_for_item(&item_id);
+    log.begin_turn("req-user", &turn_id).await.expect("turn");
     log.ingest(
         "session/update",
         &json!({
@@ -186,7 +197,7 @@ async fn terminal_for_another_turn_is_ignored() {
         mut events,
     } = fixture().await;
 
-    log.begin_turn("req-1").await.expect("turn");
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.finish_turn("req-2", TurnOutcome::Completed("end_turn".into()))
         .await;
 
@@ -211,7 +222,7 @@ async fn agent_event_done_terminal_is_the_active_turn() {
     let Fixture {
         log, mut events, ..
     } = fixture().await;
-    log.begin_turn("req-1").await.expect("turn");
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.ingest(
         "peri/agent_event_done",
         &json!({ "sessionId": "agent-1", "stopReason": "cancelled", "requestId": "req-1" }),
@@ -229,7 +240,7 @@ async fn agent_event_done_terminal_is_the_active_turn() {
 #[tokio::test]
 async fn open_turn_is_visible_to_close_waiters() {
     let Fixture { log, .. } = fixture().await;
-    log.begin_turn("req-1").await.expect("turn");
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
     // After a steer hands the turn to a queued run, the prompt caller waits for
     // that run to close the turn. A waiter that reads the open turn as already
     // closed closes it with the attempt's `cancelled` terminal instead.
@@ -257,7 +268,7 @@ async fn replay_frames_are_not_persisted() {
         store,
         mut events,
     } = fixture().await;
-    log.begin_turn("req-1").await.expect("turn");
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.ingest(
         "session/update",
         &json!({
@@ -289,7 +300,7 @@ async fn child_receipts_keep_their_own_source_and_identity() {
     let Fixture {
         log, mut events, ..
     } = fixture().await;
-    log.begin_turn("req-1").await.expect("turn");
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.ingest(
         "peri/agent_event",
         &json!({
@@ -324,7 +335,7 @@ async fn thought_streams_flush_as_thoughts() {
     let Fixture {
         log, mut events, ..
     } = fixture().await;
-    log.begin_turn("req-1").await.expect("turn");
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
     log.ingest(
         "session/update",
         &json!({

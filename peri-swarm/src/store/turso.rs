@@ -188,6 +188,10 @@ const SELECT_ITEMS_TAIL_SQL: &str = "SELECT logical_id, seq, item_id, kind, sour
     payload_json, created_at, truncated FROM swarm_items
     WHERE logical_id = ?1 ORDER BY seq DESC LIMIT ?2";
 
+const SELECT_ITEM_BY_ID_SQL: &str = "SELECT logical_id, seq, item_id, kind, source,
+    payload_json, created_at, truncated FROM swarm_items
+    WHERE logical_id = ?1 AND item_id = ?2 ORDER BY seq DESC LIMIT 1";
+
 const SELECT_LAST_SEQ_SQL: &str =
     "SELECT COALESCE(MAX(seq), 0) FROM swarm_items WHERE logical_id = ?1";
 
@@ -894,6 +898,28 @@ impl SwarmStore for SwarmStateStore {
         match rows.as_slice() {
             [row] => seq_field(row, 0, "last item seq"),
             rows => Err(unexpected_row_count("last_seq", rows.len())),
+        }
+    }
+
+    async fn swarm_get_item(
+        &self,
+        logical_id: &str,
+        item_id: &str,
+    ) -> Result<Option<SwarmItemRow>, StoreError> {
+        let rows = self
+            .query_rows(
+                "get_item",
+                SELECT_ITEM_BY_ID_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    Value::Text(item_id.to_owned()),
+                ],
+            )
+            .await?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => decode_item(row).map(Some),
+            rows => Err(unexpected_row_count("get_item", rows.len())),
         }
     }
 

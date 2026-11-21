@@ -682,12 +682,29 @@ impl Handler<Submit> for SwarmActor {
             plugin_selections: action.plugin_selections,
             original_draft: action.original_draft,
         };
-        // An idle `mode=turn` input runs a full turn inside this call; the
-        // actor must not sleep in the middle of it.
-        let result = ctx
-            .keep_awake(self.service.submit_input(&logical_id, submission))
+        // Acceptance is the durable half: receipt, user item, and turn
+        // reservation. The turn itself runs out-of-band so the action can
+        // answer `202` without waiting for the terminal.
+        let accepted = ctx
+            .keep_awake(self.service.accept_input(&logical_id, submission))
             .await;
-        Ok(envelope(result))
+        match accepted {
+            Ok(accepted) => {
+                if let Some(pending) = accepted.pending_turn {
+                    let service = Arc::clone(&self.service);
+                    ctx.wait_until(async move {
+                        if let Err(error) = service.run_pending_turn(pending).await {
+                            tracing::warn!(
+                                error = %error,
+                                "accepted swarm turn failed to run"
+                            );
+                        }
+                    });
+                }
+                Ok(envelope(Ok(accepted.outcome)))
+            }
+            Err(error) => Ok(envelope(Err(error))),
+        }
     }
 }
 
@@ -699,6 +716,10 @@ pub struct ListItems {
     pub order: ItemOrder,
     #[serde(default)]
     pub after: Option<u64>,
+    /// Official `CursorPage` cursor (`after=<itemId>`); resolved to a seq by
+    /// the service across the actor boundary.
+    #[serde(default)]
+    pub after_id: Option<String>,
     pub limit: u32,
 }
 
@@ -721,6 +742,7 @@ impl Handler<ListItems> for SwarmActor {
         let window = ItemsWindow {
             order: action.order,
             after: action.after,
+            after_id: action.after_id,
             limit: action.limit,
         };
         Ok(envelope(self.service.list_items(&logical_id, window).await))
@@ -770,6 +792,7 @@ impl Handler<Subscribe> for SwarmActor {
         let window = ItemsWindow {
             order: ItemOrder::Asc,
             after: Some(action.after_seq),
+            after_id: None,
             limit,
         };
         let page = match self.service.list_items(&logical_id, window).await {

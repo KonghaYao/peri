@@ -305,6 +305,7 @@ async fn collect_until_terminal(
                 }
             }
             StreamEvent::Gap { .. } => {}
+            StreamEvent::Official(_) => {}
         }
     }
     events
@@ -642,6 +643,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: ItemsWindow::MAX_LIMIT,
             },
         )
@@ -706,6 +708,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
                 ItemsWindow {
                     order: ItemOrder::Asc,
                     after,
+                    after_id: None,
                     limit: 2,
                 },
             )
@@ -730,6 +733,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
                         ItemsWindow {
                             order: ItemOrder::Asc,
                             after: Some(all.items.last().expect("last").seq),
+                            after_id: None,
                             limit: ItemsWindow::MAX_LIMIT,
                         },
                     )
@@ -965,6 +969,7 @@ async fn items_of(service: &AcpSwarmService, logical: &LogicalId) -> Vec<(u64, S
             ItemsWindow {
                 order: ItemOrder::Asc,
                 after: None,
+                after_id: None,
                 limit: ItemsWindow::MAX_LIMIT,
             },
         )

@@ -170,8 +170,10 @@ pub struct EventsQuery {
 pub struct ItemsQuery {
     #[serde(rename = "afterSeq", default)]
     pub after_seq: Option<u64>,
+    /// Decimal `seq` (our spelling) or `itim_...` item id (official
+    /// `CursorPage` spelling). Parsed by [`resolve_items_window`].
     #[serde(default)]
-    pub after: Option<u64>,
+    pub after: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -778,7 +780,20 @@ pub fn resolve_events_cursor(
 }
 
 pub fn resolve_items_window(query: &ItemsQuery) -> Result<ItemsWindow, SwarmError> {
-    let after = Cursor::reconcile_optional(query.after_seq, query.after)?;
+    let after_text = query.after.as_deref();
+    let numeric_after = match after_text {
+        // The official `CursorPage` sends the last item's `id`, never a seq.
+        Some(value) if value.starts_with("itim_") => None,
+        Some(value) => Some(value.parse::<u64>().map_err(|_| {
+            SwarmError::invalid_query("after must be a decimal seq or an `itim_` item id")
+                .with_details(json!({ "field": "after", "received": value }))
+        })?),
+        None => None,
+    };
+    let after = Cursor::reconcile_optional(query.after_seq, numeric_after)?;
+    let after_id = after_text
+        .filter(|value| value.starts_with("itim_"))
+        .map(str::to_owned);
     let limit = query.limit.unwrap_or(ItemsWindow::DEFAULT_LIMIT);
     if limit == 0 || limit > ItemsWindow::MAX_LIMIT {
         return Err(SwarmError::invalid_query("limit must be within 1..=500")
@@ -791,6 +806,7 @@ pub fn resolve_items_window(query: &ItemsQuery) -> Result<ItemsWindow, SwarmErro
     Ok(ItemsWindow {
         order,
         after,
+        after_id,
         limit,
     })
 }

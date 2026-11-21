@@ -132,6 +132,59 @@ async fn read_until(body: Body, needle: &str) -> String {
     collected
 }
 
+/// Like [`read_until`], but also waits for the frame containing `needle` to be
+/// terminated, so the returned text can be parsed into complete frames.
+async fn read_complete(body: Body, needle: &str) -> String {
+    let mut stream = body.into_data_stream();
+    let mut collected = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !(collected.contains(needle) && collected.ends_with("\n\n")) {
+        let next = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("sse timeout")
+            .expect("sse ended early")
+            .expect("sse chunk");
+        collected.push_str(&String::from_utf8_lossy(&next));
+    }
+    collected
+}
+
+/// Decode `(event name, data)` pairs from the frames of one SSE body.
+fn frames(text: &str) -> Vec<(String, Value)> {
+    text.split("\n\n")
+        .filter_map(|block| {
+            let mut event = None;
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(name) = line.strip_prefix("event: ") {
+                    event = Some(name.to_owned());
+                } else if let Some(payload) = line.strip_prefix("data: ") {
+                    data.push_str(payload);
+                }
+            }
+            let value = serde_json::from_str(&data).ok()?;
+            Some((event?, value))
+        })
+        .collect()
+}
+
+/// The official `agent.session.*` frames as `(type, event_id)` pairs, in order.
+fn official_ids(text: &str) -> Vec<(String, String)> {
+    frames(text)
+        .into_iter()
+        .filter(|(event, _)| event.starts_with("agent.session."))
+        .map(|(event, value)| {
+            let event_id = value["event_id"].as_str().expect("event_id").to_owned();
+            assert_eq!(
+                value["type"],
+                json!(event),
+                "the SSE name and the JSON type agree"
+            );
+            (event, event_id)
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn stream_create_subscribes_before_the_first_turn() {
     let harness = harness(60_000);
@@ -507,4 +560,100 @@ async fn unknown_agent_subscribe_returns_404_json() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(value["error"]["code"], json!("unknown_agent"));
+}
+
+#[tokio::test]
+async fn official_frames_stream_in_sdk_order_and_replay_identically() {
+    let harness = harness(60_000);
+    create_session(&harness).await;
+
+    // Subscribe before the turn so this observes live delivery.
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/v1/agents/sessions/agent-01/events",
+            None,
+            Some(TOKEN),
+            &[],
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let live_body = response.into_body();
+    submit(&harness, "hello").await;
+    let live = read_complete(live_body, "event: agent.session.idle").await;
+
+    // The order the official SDK's `TurnState` relies on.
+    let created = live
+        .find("event: agent.session.turn.created")
+        .expect("turn created");
+    let user_added = live
+        .find("\"event_id\":\"evt_item_1_added\"")
+        .expect("user item added");
+    let assistant_added = live
+        .find("\"event_id\":\"evt_item_2_added\"")
+        .expect("assistant item added");
+    let completed = live
+        .find("event: agent.session.turn.completed")
+        .expect("turn completed");
+    let idle = live
+        .find("event: agent.session.idle")
+        .expect("session idle");
+    assert!(created < user_added, "{live}");
+    assert!(user_added < assistant_added, "{live}");
+    assert!(assistant_added < completed, "{live}");
+    assert!(completed < idle, "{live}");
+
+    let live_frames = frames(&live);
+    let turn_completed_at = live_frames
+        .iter()
+        .position(|(event, _)| event == "agent.session.turn.completed")
+        .expect("turn completed frame");
+    assert_eq!(
+        live_frames[turn_completed_at + 1].0,
+        "agent.session.idle",
+        "`agent.session.idle` immediately follows `turn.completed`: {live}"
+    );
+    let idle_event = &live_frames[turn_completed_at + 1].1;
+    assert_eq!(idle_event["session"]["status"], json!("idle"));
+    let created_event = &live_frames
+        .iter()
+        .find(|(event, _)| event == "agent.session.turn.created")
+        .expect("turn created frame")
+        .1;
+    let turn_id = created_event["turn_id"].as_str().expect("turn id");
+    assert!(turn_id.starts_with("turn_input_"), "{turn_id}");
+    assert!(!turn_id.starts_with("msg_"), "a messageId is not a turn id");
+    assert_eq!(created_event["turn"]["id"], json!(turn_id));
+    assert_eq!(created_event["turn"]["status"], json!("in_progress"));
+    assert_eq!(created_event["turn"]["subagent_id"], json!(null));
+
+    // The backlog is derived from the persisted rows only, so the same frames
+    // (and the same `event_id`s) come back on a fresh subscription.
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/v1/agents/sessions/agent-01/events",
+            None,
+            Some(TOKEN),
+            &[],
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let replayed = read_complete(response.into_body(), "event: agent.session.idle").await;
+    assert_eq!(
+        official_ids(&live),
+        official_ids(&replayed),
+        "live and replay must carry the same official identities"
+    );
+    assert_eq!(
+        official_ids(&live).len(),
+        5,
+        "created, 2 items, completed, idle"
+    );
 }

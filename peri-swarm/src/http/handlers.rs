@@ -86,11 +86,26 @@ pub async fn submit_event(
     let Json(body) = body.map_err(from_json_rejection)?;
     let logical_id = LogicalId::parse(&logical_id)?;
     let submission = request::resolve_submission(body, &headers)?;
-    let outcome = state
+    // `202` is acceptance, not durable completion: the response is sent once the
+    // receipt, user item, and turn reservation are persisted. The turn itself
+    // runs out-of-band so a slow model cannot hold the HTTP response open.
+    let accepted = state
         .service()
-        .submit_input(&logical_id, submission)
+        .accept_input(&logical_id, submission)
         .await?;
-    Ok((StatusCode::ACCEPTED, Json(outcome)).into_response())
+    if let Some(pending) = accepted.pending_turn {
+        let service = std::sync::Arc::clone(state.service());
+        tokio::spawn(async move {
+            if let Err(error) = service.run_pending_turn(pending).await {
+                tracing::warn!(
+                    error = %error,
+                    logical_id = %logical_id,
+                    "accepted swarm turn failed; the stream carries the terminal"
+                );
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(accepted.outcome)).into_response())
 }
 
 pub async fn stream_events(

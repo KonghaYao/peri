@@ -33,6 +33,46 @@ impl SessionState {
     }
 }
 
+/// Official `sessions.retrieve` status (`openai@7.60.0` `agents.ts`).
+///
+/// `requires_action` is deliberately absent: the local runtime never waits for
+/// an approval round-trip, so the gateway would have nothing honest to report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Idle,
+    InProgress,
+    Failed,
+}
+
+impl SessionStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::InProgress => "in_progress",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Project the durable session state plus the in-process turn slot.
+    ///
+    /// An open turn is `in_progress` even while the row still says `running`;
+    /// a failed row without an open turn is `failed` until a later turn
+    /// recovers it. `creating`/`recovering`/`stopped` are not official states
+    /// and project as `idle`.
+    #[must_use]
+    pub fn project(state: SessionState, turn_active: bool) -> Self {
+        if turn_active || state == SessionState::Running {
+            Self::InProgress
+        } else if state == SessionState::Failed {
+            Self::Failed
+        } else {
+            Self::Idle
+        }
+    }
+}
+
 /// Environment requested/allotted for a session.
 ///
 /// `none` runs without a session workspace. `openai_hosted` reserves a sandbox
@@ -136,6 +176,8 @@ pub struct SessionView {
     pub root_session_id: String,
     pub cwd: String,
     pub state: SessionState,
+    /// Official SDK status; derived from `state` and the in-process turn slot.
+    pub status: SessionStatus,
     pub turn: TurnView,
     pub last_item_seq: u64,
     pub created_at: String,

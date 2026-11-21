@@ -163,6 +163,14 @@ pub trait SwarmStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<SwarmItemRow>, StoreError>;
     async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, StoreError>;
+    /// Row for `item_id`, preferring the greatest `seq` when an assistant
+    /// message spans several frames. Used to resolve the official `after=id`
+    /// cursor back to a seq.
+    async fn swarm_get_item(
+        &self,
+        logical_id: &str,
+        item_id: &str,
+    ) -> Result<Option<SwarmItemRow>, StoreError>;
 
     async fn swarm_put_input(&self, row: SwarmInputRow) -> Result<InputPut, StoreError>;
     async fn swarm_get_input(
