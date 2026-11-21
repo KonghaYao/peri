@@ -155,6 +155,7 @@ async fn make_server_config_with(
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
         reserved_root_session_id: false,
+        lazy_workspace: false,
         model_transport_route: None,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),

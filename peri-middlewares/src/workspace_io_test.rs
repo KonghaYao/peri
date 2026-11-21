@@ -538,6 +538,7 @@ async fn cold_remote_workspace_defers_git_branch_until_first_real_call() {
         ConfigSource::WorkspaceRemote,
     )
     .await;
+    fixture.pool.set_lazy_workspace(true).unwrap();
     assert!(fixture.pool.remote_workspace_deferred());
     assert_eq!(
         fixture.branch().await.unwrap().unwrap_err(),

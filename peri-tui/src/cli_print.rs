@@ -183,6 +183,8 @@ pub async fn run_print(
         session_store_shutdown: Some(Box::new(session_store_shutdown)),
         cwd: cwd.clone(),
         bare,
+        // print 不是 cold 代理宿主：远端 workspace 按既有语义启动期探测。
+        lazy_workspace: false,
         // print 无 tick 语义（迁移前 print 路径无每秒 tick，行为零变化）。
         drive_cron_tick: false,
         builtin_assembly_mode: None,

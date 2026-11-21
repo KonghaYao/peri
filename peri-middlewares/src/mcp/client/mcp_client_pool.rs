@@ -149,11 +149,19 @@ pub struct McpClientPool {
     pub(crate) acp_connections: parking_lot::RwLock<HashMap<String, AcpConnectionDeclaration>>,
     /// 远端 workspace（`ConfigSource::WorkspaceRemote`）首次真实 `tools/call` 是否已发生。
     ///
+    /// 只对**显式**声明 lazy workspace 的宿主有意义（[`Self::lazy_workspace`]）：
     /// 远端 cold 面的 `initialize` 只宣告 tools（资源面要真实后端才有），因此
     /// 启动期的 `resources/list`、指令/覆盖读取与 shell 任务扫描都会把「可选探测」
-    /// 变成一次真实启动。首个真实调用之前这些探针一律跳过；调用成功后置真，
-    /// 并触发一次启动后资源重发现（S9a3a）。
+    /// 变成一次真实启动。首个真实调用之前这些探针跳过；调用成功后置真，
+    /// 并触发一次启动后资源重发现。
     pub(crate) workspace_remote_started: std::sync::atomic::AtomicBool,
+    /// 宿主显式声明的 lazy workspace（默认 `false` = 既有语义）。
+    ///
+    /// `true` 且 workspace 来源是 `WorkspaceRemote` 时，启动期资源/指令/Git/任务
+    /// 探测才延后到首个真实 `tools/call`。普通 ACP 客户端的远端 workspace
+    /// **不**默认 lazy：资源发现失败仍拒绝初连。Swarm 的 Bun cold 代理是唯一
+    /// 显式 opt-in 方（`AcpChild` 装配）。
+    pub(in crate::mcp) lazy_workspace: std::sync::atomic::AtomicBool,
 }
 
 impl Debug for McpClientPool {
@@ -307,6 +315,7 @@ impl McpClientPool {
             acp_owners: parking_lot::RwLock::new(HashMap::new()),
             acp_connections: parking_lot::RwLock::new(HashMap::new()),
             workspace_remote_started: std::sync::atomic::AtomicBool::new(false),
+            lazy_workspace: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -695,31 +704,46 @@ impl McpClientPool {
         self.plugin_sources.read().get(name).cloned()
     }
 
-    /// 远端 workspace 的资源面是否仍在「首个真实调用」之前（S9a3a）。
+    /// 宿主是否显式声明了 lazy workspace（默认 `false`）。
+    pub(crate) fn lazy_workspace(&self) -> bool {
+        self.lazy_workspace
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 远端 workspace 的资源面是否仍在「首个真实调用」之前。
     ///
-    /// 远端 cold 面只承诺工具面（`initialize.capabilities` 只有 `tools`）：
-    /// 此时任何 `resources/list` 都会穿透 cold 代理启动真实后端。因此
-    /// workspace 来源为 `WorkspaceRemote` 且尚未发生真实 `tools/call` 时，
-    /// 启动期资源探测、指令/覆盖读取与 shell 任务扫描都必须跳过。
+    /// 只有**宿主显式 opt-in**（[`Self::lazy_workspace`]）且 workspace 来源是
+    /// `WorkspaceRemote` 时才成立：cold 面只承诺工具面（`initialize.capabilities`
+    /// 只有 `tools`），此时任何 `resources/list` 都会穿透 cold 代理启动真实后端，
+    /// 因此启动期资源探测、指令/覆盖读取与 shell 任务扫描都必须跳过。
     ///
-    /// 本机 builtin `workspace` 与普通 MCP 不受影响（返回 false）。
+    /// 未 opt-in 的普通远端 workspace（任意 ACP 客户端）、本机 builtin `workspace`
+    /// 与普通 MCP 都不受影响（返回 false）。
     pub(crate) fn remote_workspace_deferred(&self) -> bool {
-        self.workspace_source() == Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote)
+        self.lazy_workspace()
+            && self.workspace_source()
+                == Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote)
             && !self
                 .workspace_remote_started
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// 远端 workspace 的首次真实 `tools/call` 收口（S9a3a）。
+    /// lazy 远端 workspace 的首次真实 `tools/call` 收口。
     ///
     /// tool bridge 在**成功转发之后**调用：首个调用把「cold」置为「已启动」，
     /// 让后续宿主侧可选探针（shell 任务扫描、git 分支观察等）恢复既有行为；
     /// 同一会话只做一次启动后资源重发现，避免每个 tool call 都追加一次
     /// `resources/list`。
     ///
+    /// 只对显式 opt-in 的宿主生效：非 lazy 宿主在启动期已按既有策略完成资源
+    /// 发现（失败会拒绝初连），这里不产生额外探测。
+    ///
     /// 失败只记 WARN（`downgrade_resource_listing`，与「资源不是启动准入条件」的
     /// 既有语义一致）：session 已创建且工具已在工作，不因一次可选探测失败而崩溃。
     pub(crate) async fn note_remote_workspace_call(&self, handle: &McpClientHandle) {
+        if !self.lazy_workspace() {
+            return;
+        }
         if !matches!(
             handle.source,
             Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote)

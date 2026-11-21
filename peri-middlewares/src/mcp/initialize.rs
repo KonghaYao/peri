@@ -209,6 +209,26 @@ impl McpClientPool {
         Ok(())
     }
 
+    /// 宿主显式声明 lazy workspace（默认 `false`）。
+    ///
+    /// `true` 且本会话 workspace 是远端（`WorkspaceRemote`）时，启动期的资源
+    /// 探测、指令/覆盖读取、Git 分支观察与 shell 任务扫描延后到首个真实
+    /// `tools/call`（Bun cold 代理只宣告 tools，任何启动期探测都会拉起真实后端）。
+    /// `false` 保持既有语义：普通远端 workspace 的资源发现失败仍拒绝初连。
+    ///
+    /// 与其余能力位同一注入窗口：必须在 MCP 初始化开始前。
+    pub fn set_lazy_workspace(&self, lazy: bool) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            return Err(std::io::Error::other(
+                "MCP capability injection window is closed",
+            ));
+        }
+        self.lazy_workspace
+            .store(lazy, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
     pub fn set_plugin_discovery_available(&self, available: bool) -> std::io::Result<()> {
         let context = self.builtin_context.lock();
         if context.initialize_started || !self.is_open() {
@@ -769,18 +789,16 @@ impl McpClientPool {
                                     continue;
                                 }
                             };
-                        // S9a3a：远端 workspace 的 cold 面只宣告 tools（资源要真实
-                        // 后端才有）。启动期的 `resources/list` 会穿透 cold 代理启动
-                        // SRT —— 把可选资源探测延后到首个真实调用之后（tool bridge
-                        // 的 `note_remote_workspace_call`）。本机 builtin 与普通 MCP
-                        // 仍按既有策略在启动期探测。
-                        let resources = if matches!(
-                            server_config.source,
-                            Some(ConfigSource::WorkspaceRemote)
-                        ) {
+                        // 只有宿主显式 opt-in 的 lazy workspace 才延后资源探测：
+                        // cold 面只宣告 tools，启动期 `resources/list` 会穿透 cold
+                        // 代理启动真实后端。普通远端 workspace 按既有策略在启动期
+                        // 探测，失败拒绝初连（`fail_workspace_resource_discovery`）。
+                        let resources = if pool.lazy_workspace()
+                            && matches!(server_config.source, Some(ConfigSource::WorkspaceRemote))
+                        {
                             tracing::info!(
                                 server = %name,
-                                "远端 workspace 资源探测延后到首个真实调用（cold 面只宣告 tools）"
+                                "lazy 远端 workspace 资源探测延后到首个真实调用（cold 面只宣告 tools）"
                             );
                             Vec::new()
                         } else {
@@ -790,6 +808,19 @@ impl McpClientPool {
                             {
                                 Ok(resources) => resources,
                                 Err(error) => {
+                                    if matches!(
+                                        server_config.source,
+                                        Some(ConfigSource::WorkspaceRemote)
+                                    ) {
+                                        let mut service = rs;
+                                        let _ = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+                                        fail_workspace_resource_discovery(
+                                            &pool,
+                                            name,
+                                            &error.to_string(),
+                                        );
+                                        continue;
+                                    }
                                     downgrade_resource_listing(name, &error.to_string());
                                     Vec::new()
                                 }

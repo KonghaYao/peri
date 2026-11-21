@@ -208,6 +208,17 @@ pub struct HostAssemblyInput {
     pub cwd: String,
     /// 跳过 settings hooks / 插件（print --bare 语义）
     pub bare: bool,
+    /// 宿主显式声明本会话的远端 workspace 是 **lazy**（cold 代理，启动期只有
+    /// 工具面）。默认 `false`。
+    ///
+    /// `true` 且会话 workspace 来源是 `WorkspaceRemote` 时，MCP 启动期跳过资源
+    /// 探测、指令/覆盖读取、Git 分支观察与 shell 任务扫描，延后到首个真实
+    /// `tools/call` 之后；资源发现失败不再拒绝初连。普通远端 workspace（任意
+    /// ACP 客户端）保持既有语义：启动期探测，失败拒绝初连。
+    ///
+    /// 唯一 opt-in 方是 Swarm 的 `AcpChild`（Bun cold 代理）；TUI/print/stdio
+    /// 一律 `false`。
+    pub lazy_workspace: bool,
     /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
     /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
     pub drive_cron_tick: bool,
@@ -305,6 +316,8 @@ pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpSer
             session_store_shutdown: input.session_store_shutdown,
             cwd: input.cwd,
             bare: false,
+            // 浏览器部署没有 lazy cold workspace。
+            lazy_workspace: false,
             drive_cron_tick: false,
             builtin_assembly_mode: None,
             // Browser deployments do not discover plugins from a local home directory.
@@ -459,6 +472,7 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         session_store_shutdown,
         cwd,
         bare,
+        lazy_workspace,
         drive_cron_tick,
         builtin_assembly_mode,
         #[cfg(not(target_os = "emscripten"))]
@@ -577,6 +591,11 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         }
         if let Err(error) = pool.set_stdio_available(capabilities.stdio_mcp) {
             tracing::error!(%error, "MCP stdio availability binding failed");
+        }
+        // lazy workspace 是宿主显式声明（默认 false）：必须在 `run_initialize*`
+        // 之前落池，启动期探针与首个真实调用后的重发现都按它判定。
+        if let Err(error) = pool.set_lazy_workspace(lazy_workspace) {
+            tracing::error!(%error, "MCP lazy workspace binding failed");
         }
         if let Some(snapshot) = config_source.snapshot() {
             if let Err(error) = pool.set_configuration_snapshot(snapshot) {
@@ -959,6 +978,8 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         stdio_command_filter: false,
         // 部署级 opt-in：只有显式要求预留根会话 ID 的宿主（进程内 ACP Host）打开。
         reserved_root_session_id,
+        // 部署级 opt-in（默认 false）：会话环境装配把它原样传给会话 MCP 池。
+        lazy_workspace,
         config_source,
         session_manager,
     }

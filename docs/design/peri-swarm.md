@@ -177,7 +177,9 @@ Bun 沙箱以内部 MCP 条目注入：名称固定 `workspace`，URL 为
 省略 `mcpServers` 键。
 
 宿主装配固定 `bare=false` 且关闭 builtin MCP、stdio MCP、cron、plugins 与 settings
-hooks；远程 workspace 与调用方声明的 server 是唯一的 MCP 面。
+hooks；远程 workspace 与调用方声明的 server 是唯一的 MCP 面。宿主同时显式声明
+`lazy_workspace: true`（部署级 opt-in）：这是本部署唯一的 cold 语义来源，TUI / print /
+stdio 与普通 ACP 客户端保持 `false`，远端 workspace 的资源发现失败仍拒绝初连。
 
 ### 5.3 冷态工具面
 
@@ -190,7 +192,8 @@ single-flight 方式拉起实例。工具清单与协议版本来自快照，pro
 
 远端 workspace 在冷态不参与启动期探测：不请求 `resources/list`、不读工作区指令或
 meta、不做 legacy 资源模板/技能投影、不扫描 `shell_task_list`、git 归因返回
-`Unavailable`。首个真实 `tools/call` 置位 `workspace_remote_started`，随后只做一次
+`Unavailable`。该延迟只对宿主显式 `lazy_workspace` 且来源是 `WorkspaceRemote` 的
+会话生效。首个真实 `tools/call` 置位 `workspace_remote_started`，随后只做一次
 启动后 `resources/list` 重发现；发现失败只 WARN，不改变连接、不失败会话。
 
 已记录边界：这次重发现的结果不会回写 `McpClientHandle.resources` 快照，面板与按

@@ -14,7 +14,8 @@ PR：[#513](https://github.com/KonghaYao/peri/pull/513)。
 | 位置 | 改动 | 默认行为 |
 | --- | --- | --- |
 | `peri-acp` | `reserved_root_session_id` opt-in；`session/new` 可选 `_meta.peri.rootSessionId`；UUIDv7 校验/一次消费/冲突映射 | 默认 `false`；未提供时仍自动生成 UUIDv7 |
-| `peri-middlewares` | `HostWorkspaceBinding::{Remote, Absent}` 与宿主绑定窗口；MCP pool/initialize/config/builtin/workspace_io/watch 接线 | 未注入时保持既有 TUI/print/stdio 行为；builtin 关闭不产生第二套 workspace 面 |
+| `peri-middlewares` | `lazy_workspace` 显式 opt-in（pool / initialize / 冷启动探测门） | 默认 `false`：普通远端 workspace 资源发现失败仍拒绝初连；仅 Swarm 装配打开延迟探测 |
+| `peri-acp` | `HostAssemblyInput` / `AcpServerConfig.lazy_workspace` 部署级 opt-in，会话环境原样传给会话 MCP 池 | 默认 `false`；TUI / print / stdio 无行为变化 |
 | `peri-tui` | `cli_print.rs` / `launch.rs` 显式 `reserved_root_session_id: false` | 无行为变化 |
 | `peri-sandbox` | 新增 `src/swarm/*` 本地 Bun 服务、`dev:swarm`/`test:swarm` | 既有单实例 `startSandbox`/HTTP 桥语义不变 |
 | `peri-sandbox` | `instance/options.ts` 字段级 settings 错误；`runtime/policy.ts` SRT `allowRead` 加入 `dirname(periPath)` | 显式 `runtimeReadPaths` 保留；只扩大目录级读权限 |
@@ -29,8 +30,9 @@ PR：[#513](https://github.com/KonghaYao/peri/pull/513)。
 
 - 根会话 ID 必须由宿主预留，才能让 API 会话、Rivet actor key、Peri 根线程一一对应；
   否则只能在 Peri 之外另建并行身份与调度。
-- workspace MCP 必须经既有 bare 初始化路径注入；另建第二套 MCP 装配会绕过 Peri 的发现、
-  冻结、关闭与能力关闭语义。
+- workspace MCP 经既有 `session/new` / `session/load` 的 `mcpServers` 注入（S8a2），
+  复用 Peri 的发现、冻结、关闭与能力关闭语义；宿主再用 `HostCapabilities {
+  builtin_mcp: false }` 关闭本机 builtin 面，不另建第二套 MCP 装配。
 - 沙箱服务复用既有 `startSandbox`、workspace 锁与 HTTP MCP 桥；只新增入口与 SRT 默认路径修复。
 - 存储没有改 Peri schema：双库拆分后 Swarm 自己管理 `swarm_*`，Peri 库保持 15。
 

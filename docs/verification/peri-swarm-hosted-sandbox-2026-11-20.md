@@ -419,15 +419,24 @@ S9a2 的首个启动触发器是宿主在 session 组装期发出的 `resources/
 
 | 触发点 | 修复 |
 | --- | --- |
-| 启动发现的 `resources/list`（`mcp::initialize`） | `ConfigSource::WorkspaceRemote` 启动期不再探测；连接以 cold 工具面发布，资源快照为空 |
-| 内容准入的指令/覆盖面（`read_builtin_workspace_instructions` / `read_builtin_workspace_meta`） | cold 远端 workspace 返回“不可得/空”，不探测 |
-| 技能发现的 legacy `resources/templates/list`（`run_ensure_discovery`） | cold 远端 workspace 不参与技能投影，不 spawn 发现 |
-| 恢复侧 `shell_task_list`（`workspace_watch`） | cold 期跳过扫描，首个真实调用后恢复 |
-| git 归因 `before_agent` 的 `workspace/gitBranch`（`workspace_io`） | cold 期返回 `Unavailable`，首个真实调用后恢复 |
-| 首个真实 `tools/call`（`tool_bridge`） | 置位 `workspace_remote_started`；随后做**一次**启动后 `resources/list` 重发现，失败只 WARN（`downgrade_resource_listing`），不改变连接、不失败 session |
+| 启动发现的 `resources/list`（`mcp::initialize`） | 显式 `lazy_workspace` 的 `ConfigSource::WorkspaceRemote` 启动期不再探测；连接以 cold 工具面发布，资源快照为空 |
+| 内容准入的指令/覆盖面（`read_builtin_workspace_instructions` / `read_builtin_workspace_meta`） | lazy cold 远端 workspace 返回“不可得/空”，不探测 |
+| 技能发现的 legacy `resources/templates/list`（`run_ensure_discovery`） | lazy cold 远端 workspace 不参与技能投影，不 spawn 发现 |
+| 恢复侧 `shell_task_list`（`workspace_watch`） | lazy cold 期跳过扫描，首个真实调用后恢复 |
+| git 归因 `before_agent` 的 `workspace/gitBranch`（`workspace_io`） | lazy cold 期返回 `Unavailable`，首个真实调用后恢复 |
+| 首个真实 `tools/call`（`tool_bridge`） | lazy 宿主置位 `workspace_remote_started`；随后做**一次**启动后 `resources/list` 重发现，失败只 WARN（`downgrade_resource_listing`），不改变连接、不失败 session |
 
 本机 builtin `workspace` 与普通 MCP 行为不变；`fail_workspace_resource_discovery`
 及其“真实失败”判定仍用于 reconnect / OAuth 等真实失败路径，本次未改写。
+
+**范围收窄（本次复核）**：最初的判定是“来源为 `WorkspaceRemote` 即延后”，会连带
+覆盖普通 ACP 客户端的远端 workspace。现在只有宿主显式 `lazy_workspace`（Swarm
+`AcpChild`）才跳过启动期探测；非 lazy 的 `WorkspaceRemote` 恢复既有“资源发现失败
+拒绝初连”（`initialize_test::remote_workspace_resource_discovery_failure_blocks_initial_connection`），
+lazy 路径的延迟与一次性重发现由 `initialize_test::lazy_remote_workspace_resources_are_deferred_until_first_real_call`、
+`workspace_io_test::cold_remote_workspace_defers_git_branch_until_first_real_call` 与
+`workspace_watch_test::remote_workspace_watch_defers_shell_task_list_until_first_real_call` 覆盖。
+本次只做代码级回归，没有重跑 §10.2 的真实 Bun 链路。
 
 ### 10.2 wire 顺序（本次运行，Bun `mcp_request`）
 

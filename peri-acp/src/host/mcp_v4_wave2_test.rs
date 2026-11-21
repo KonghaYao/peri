@@ -367,6 +367,7 @@ async fn assemble_host_with_workspace_input(
             session_store_shutdown: None,
             cwd: dirs.workspace_str(),
             bare: false,
+            lazy_workspace: false,
             drive_cron_tick,
             builtin_assembly_mode: None,
             // session 级 `workspace` 输入（AW3-11）由调用方给定：默认 `None` ⇒

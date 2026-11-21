@@ -190,6 +190,8 @@ async fn attach_acp_with_transport_route(
                     session_store_shutdown: app.session_store_shutdown.take(),
                     cwd: app.services.cwd.clone(),
                     bare: false,
+                    // TUI 不是 cold 代理宿主：远端 workspace 按既有语义启动期探测。
+                    lazy_workspace: false,
                     // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
                     // cron_state，tick 由 host 侧 scheduler 驱动执行）。
                     drive_cron_tick: true,

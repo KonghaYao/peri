@@ -57,11 +57,208 @@ readline.on('line', line => {
 });
 "#;
 
+/// 普通远端 workspace 的资源面失败夹具：资源能力已宣告但 `resources/list` 失败。
+/// 未显式 opt-in lazy 的宿主必须按既有语义拒绝初连。
+const RESOURCE_ERROR_SCRIPT: &str = r#"
+const readline = require('node:readline').createInterface({ input: process.stdin });
+readline.on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result = {};
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25', capabilities: { resources: {} },
+    serverInfo: { name: 'resource-error', version: '1' },
+  };
+  else if (request.method === 'tools/list') result = { tools: [] };
+  else if (request.method === 'resources/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32603, message: 'resource unavailable' } }) + '\n');
+    return;
+  } else if (request.method !== 'ping') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});
+"#;
+
+/// 非 lazy 远端 workspace 的成功夹具：资源能力可用，记录每个 method 到
+/// `remote-ok.log`，用于断言首个真实调用后不会追加额外重发现。
+const RESOURCE_OK_LOG_SCRIPT: &str = r#"
+const fs = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline').createInterface({ input: process.stdin });
+readline.on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  fs.appendFileSync(path.join(process.cwd(), 'remote-ok.log'), request.method + '\n');
+  let result = {};
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25', capabilities: { resources: {} },
+    serverInfo: { name: 'remote-ok', version: '1' },
+  };
+  else if (request.method === 'tools/list') result = { tools: [] };
+  else if (request.method === 'resources/list') result = { resources: [] };
+  else if (request.method !== 'ping') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});
+"#;
+
+/// 普通远端 workspace（未 opt-in lazy）：启动期完成资源发现，首个真实调用
+/// 不触发额外重发现，也不进入 deferred 状态。
+#[tokio::test]
+async fn non_lazy_remote_workspace_does_not_rediscover_after_first_call() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("server.js"), RESOURCE_OK_LOG_SCRIPT).unwrap();
+    let log = fixture.path().join("remote-ok.log");
+    let mut config: super::super::config::McpConfigFile =
+        serde_json::from_value(serde_json::json!({
+            "mcpServers": { "workspace": { "command": "node", "args": ["server.js"] } }
+        }))
+        .unwrap();
+    config.mcp_servers.get_mut("workspace").unwrap().source = Some(ConfigSource::WorkspaceRemote);
+    let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    let (status, _) = tokio::sync::watch::channel(McpInitStatus::Pending);
+    McpClientPool::initialize_config(
+        pool.clone(),
+        fixture.path(),
+        config,
+        Default::default(),
+        status,
+        None,
+    )
+    .await;
+
+    let handle = pool.client("workspace").expect("workspace handle");
+    assert!(matches!(handle.status, ClientStatus::Connected));
+    assert!(!pool.remote_workspace_deferred());
+    let startup_probes = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter(|line| *line == "resources/list")
+        .count();
+    assert!(startup_probes >= 1, "非 lazy 宿主必须在启动期探测资源");
+
+    pool.note_remote_workspace_call(&handle).await;
+    let after = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter(|line| *line == "resources/list")
+        .count();
+    assert_eq!(
+        after, startup_probes,
+        "非 lazy 宿主不得在首个真实调用后追加资源重发现"
+    );
+
+    pool.begin_shutdown();
+    tasks.begin_shutdown();
+    let _ = tasks.shutdown().await;
+    assert!(pool.shutdown().await.is_complete());
+}
+
+/// lazy opt-in + 资源面可用：启动期跳过探测，首个真实调用后重发现成功。
+#[tokio::test]
+async fn lazy_remote_workspace_rediscovery_succeeds_after_first_call() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("server.js"), RESOURCE_OK_LOG_SCRIPT).unwrap();
+    let log = fixture.path().join("remote-ok.log");
+    let mut config: super::super::config::McpConfigFile =
+        serde_json::from_value(serde_json::json!({
+            "mcpServers": { "workspace": { "command": "node", "args": ["server.js"] } }
+        }))
+        .unwrap();
+    config.mcp_servers.get_mut("workspace").unwrap().source = Some(ConfigSource::WorkspaceRemote);
+    let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    pool.set_lazy_workspace(true).unwrap();
+    let (status, _) = tokio::sync::watch::channel(McpInitStatus::Pending);
+    McpClientPool::initialize_config(
+        pool.clone(),
+        fixture.path(),
+        config,
+        Default::default(),
+        status,
+        None,
+    )
+    .await;
+
+    let handle = pool.client("workspace").expect("workspace handle");
+    assert!(matches!(handle.status, ClientStatus::Connected));
+    assert!(pool.remote_workspace_deferred());
+    let startup_probes = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter(|line| *line == "resources/list")
+        .count();
+    assert_eq!(startup_probes, 0, "lazy 宿主启动期不得探测资源");
+
+    pool.note_remote_workspace_call(&handle).await;
+    assert!(!pool.remote_workspace_deferred());
+    let after = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter(|line| *line == "resources/list")
+        .count();
+    assert_eq!(after, 1, "首个真实调用后恰做一次资源重发现");
+
+    pool.begin_shutdown();
+    tasks.begin_shutdown();
+    let _ = tasks.shutdown().await;
+    assert!(pool.shutdown().await.is_complete());
+}
+
+/// 普通远端 workspace（未 opt-in lazy）：资源发现失败必须拒绝初连。
+#[tokio::test]
+async fn remote_workspace_resource_discovery_failure_blocks_initial_connection() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("server.js"), RESOURCE_ERROR_SCRIPT).unwrap();
+    let mut config: super::super::config::McpConfigFile =
+        serde_json::from_value(serde_json::json!({
+            "mcpServers": { "workspace": { "command": "node", "args": ["server.js"] } }
+        }))
+        .unwrap();
+    config.mcp_servers.get_mut("workspace").unwrap().source = Some(ConfigSource::WorkspaceRemote);
+    let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    let (status, _) = tokio::sync::watch::channel(McpInitStatus::Pending);
+    McpClientPool::initialize_config(
+        pool.clone(),
+        fixture.path(),
+        config,
+        Default::default(),
+        status,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        pool.client("workspace").map(|handle| handle.status.clone()),
+        Some(ClientStatus::Failed(_))
+    ));
+    assert!(!pool
+        .discovery_evidence("workspace")
+        .is_some_and(|e| e.is_complete()));
+    let reconnect = pool.reconnect("workspace", None).await;
+    assert!(matches!(
+        reconnect,
+        Err(super::super::client::McpPoolError::ResourceDiscoveryFailed { .. })
+    ));
+    pool.begin_shutdown();
+    tasks.begin_shutdown();
+    let _ = tasks.shutdown().await;
+    assert!(pool.shutdown().await.is_complete());
+}
+
 /// S9a3a：远端 workspace 的 cold 面只宣告 tools。启动期不探测资源（否则
 /// `resources/list` 会启动真实后端）；首个真实调用后做一次可见的重发现，
 /// 失败只告警、不改变已连接的 session。重连仍沿用既有「真实失败」判定。
 #[tokio::test]
-async fn remote_workspace_resources_are_deferred_until_first_real_call() {
+async fn lazy_remote_workspace_resources_are_deferred_until_first_real_call() {
     let fixture = tempfile::tempdir().unwrap();
     std::fs::write(fixture.path().join("server.js"), COLD_RESOURCE_ERROR_SCRIPT).unwrap();
     let log = fixture.path().join("cold-requests.log");
@@ -73,6 +270,7 @@ async fn remote_workspace_resources_are_deferred_until_first_real_call() {
     config.mcp_servers.get_mut("workspace").unwrap().source = Some(ConfigSource::WorkspaceRemote);
     let (mut tasks, spawner) = super::super::task_scope::McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    pool.set_lazy_workspace(true).unwrap();
     let (status, _) = tokio::sync::watch::channel(McpInitStatus::Pending);
     McpClientPool::initialize_config(
         pool.clone(),

@@ -142,6 +142,7 @@ async fn deployment_with_capabilities(
             workspace_id: None,
             cwd: cwd.to_string_lossy().into_owned(),
             bare: false,
+            lazy_workspace: false,
             drive_cron_tick,
             builtin_assembly_mode: None,
             workspace_input: None,

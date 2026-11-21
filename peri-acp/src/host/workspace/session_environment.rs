@@ -379,6 +379,8 @@ impl SessionEnvironment {
             session_store_shutdown: None,
             cwd: cwd.clone(),
             bare: source.bare,
+            // 部署级 opt-in 原样继承：同一部署的会话 MCP 池按同一 workspace 语义装配。
+            lazy_workspace: host.lazy_workspace,
             drive_cron_tick: source.drive_cron_tick,
             builtin_assembly_mode: Some(frozen.map_or_else(
                 || configuration.builtin_assembly_mode(),

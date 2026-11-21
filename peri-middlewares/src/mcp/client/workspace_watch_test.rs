@@ -483,6 +483,7 @@ readline.on('line', line => {
     let log = directory.path().join("remote-cold.log");
     let (mut tasks, spawner) = McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    pool.set_lazy_workspace(true).unwrap();
     pool.configs.write().insert(
         "workspace".to_string(),
         serde_json::from_value(json!({

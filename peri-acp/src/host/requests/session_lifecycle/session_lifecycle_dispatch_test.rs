@@ -72,6 +72,7 @@ async fn test_host(tmp: &TempDir, reserved_root_session_id: bool) -> AcpServerCo
     let (mcp_task_owner, _mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
     AcpServerConfig {
         reserved_root_session_id,
+        lazy_workspace: false,
         model_transport_route: None,
         workspace_assembly: None,
         host_task_owner: Some(host_task_owner),
@@ -399,6 +400,7 @@ async fn host_assembly_opt_in_reaches_config() {
                 session_store_shutdown: None,
                 cwd: cwd.to_string_lossy().into_owned(),
                 bare: false,
+                lazy_workspace: false,
                 drive_cron_tick: false,
                 builtin_assembly_mode: None,
                 workspace_input: None,

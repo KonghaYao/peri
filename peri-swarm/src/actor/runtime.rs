@@ -369,6 +369,10 @@ impl AcpChild {
                 // blocks the future remote workspace injection. The host is
                 // observably bare because every optional capability below is off.
                 bare: false,
+                // S9a3a: the Bun cold proxy only declares the tool surface at
+                // startup. This is the only deployment that opts into deferring
+                // the remote workspace probes until the first real tool call.
+                lazy_workspace: true,
                 drive_cron_tick: false,
                 builtin_assembly_mode: None,
                 #[cfg(not(target_os = "emscripten"))]

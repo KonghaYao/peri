@@ -56,6 +56,7 @@ async fn seam_fixture() -> SeamFixture {
         // bare：跳过插件/settings hooks，会话只建 workspace 池。
         // 本文件验证激活前的输入注入与关闭，初始化受 activation 闸门保护。
         bare: true,
+        lazy_workspace: false,
         drive_cron_tick: false,
         builtin_assembly_mode: None,
         workspace_input: None,
