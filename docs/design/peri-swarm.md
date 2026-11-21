@@ -274,8 +274,8 @@ action reply 后即可开始执行，因此不承诺「首轮一定晚于客户�
 `defer=true` 与 `defer=false` 一致；`creating` 行恢复在 `last_seq == 0` 窗口内同样
 由该检查拒绝，不静默跳过。被拒绝的 create 不写 user item，因此不会留下没有终态的
 stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn`），不是持久化
-的行状态：崩溃后残留的 `running` 行在重新 attach 后没有在途 turn，可以继续接收初始
-输入。
+的行状态：这些检查只适用于已 live 的 runtime；崩溃遗留的 `running` 行仍由
+`ensure_live` 返回 `502 session_resume_required`，turn 恢复尚未实现（§7、验收 §5-5）。
 非流式创建不延迟：首轮仍在 `create_session` 内执行，错误仍以 HTTP 状态返回；
 流式创建的首轮错误只出现在流上。
 

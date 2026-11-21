@@ -496,8 +496,10 @@ admission 段一致，没有第二套判定。检查对 `defer=true`/`defer=fals
 item**；这是本轮有意的行为收紧。`recover_creating_row` 保留 `last_seq == 0` 条件，
 窗口内遇到运行中/已预占 turn 时由同一函数返回 `turn_in_progress`，不静默跳过。
 
-判定依据是进程内在途 turn，不是持久化行状态：崩溃后残留的 `running` 行在重新
-attach 后没有在途 turn，create 仍可继续接收初始输入。
+判定依据是进程内在途 turn，不是持久化行状态；但该检查只适用于已 live 的
+runtime：崩溃遗留的 `running` 行由 `ensure_live` 直接返回
+`502 session_resume_required`，create 不能继续接收初始输入，turn 恢复尚未实现
+（设计 §7、本文件 §5 第 5 条）。
 
 测试：
 
