@@ -14,6 +14,13 @@ use super::{
 #[cfg(not(target_os = "emscripten"))]
 use super::{TickGuard, BUILTIN_TICK_INTERVAL};
 
+/// 远端 workspace 启动后一次性资源重发现的上界（S9a3a）。
+///
+/// 真实后端就在本机/沙箱内，正常是毫秒级；上界只兜底「cold 代理卡住」，
+/// 超时按可见失败记录，不阻塞已创建的 session。
+const REMOTE_WORKSPACE_RESOURCE_PROBE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
 /// MCP 客户端连接池
 pub struct McpClientPool {
     pub(crate) control: super::super::control::PoolControl,
@@ -140,6 +147,21 @@ pub struct McpClientPool {
     /// 与 `acp_owners` 同批写入、同批移除；持久化 cache 只按它 + 当前句柄代号
     /// 计算 origin，凭据从不进入本结构。
     pub(crate) acp_connections: parking_lot::RwLock<HashMap<String, AcpConnectionDeclaration>>,
+    /// 远端 workspace（`ConfigSource::WorkspaceRemote`）首次真实 `tools/call` 是否已发生。
+    ///
+    /// 只对**显式**声明 lazy workspace 的宿主有意义（[`Self::lazy_workspace`]）：
+    /// 远端 cold 面的 `initialize` 只宣告 tools（资源面要真实后端才有），因此
+    /// 启动期的 `resources/list`、指令/覆盖读取与 shell 任务扫描都会把「可选探测」
+    /// 变成一次真实启动。首个真实调用之前这些探针跳过；调用成功后置真，
+    /// 并触发一次启动后资源重发现。
+    pub(crate) workspace_remote_started: std::sync::atomic::AtomicBool,
+    /// 宿主显式声明的 lazy workspace（默认 `false` = 既有语义）。
+    ///
+    /// `true` 且 workspace 来源是 `WorkspaceRemote` 时，启动期资源/指令/Git/任务
+    /// 探测才延后到首个真实 `tools/call`。普通 ACP 客户端的远端 workspace
+    /// **不**默认 lazy：资源发现失败仍拒绝初连。Swarm 的 Bun cold 代理是唯一
+    /// 显式 opt-in 方（`AcpChild` 装配）。
+    pub(in crate::mcp) lazy_workspace: std::sync::atomic::AtomicBool,
 }
 
 impl Debug for McpClientPool {
@@ -292,6 +314,8 @@ impl McpClientPool {
             system_readiness: SystemReadinessTracker::new(),
             acp_owners: parking_lot::RwLock::new(HashMap::new()),
             acp_connections: parking_lot::RwLock::new(HashMap::new()),
+            workspace_remote_started: std::sync::atomic::AtomicBool::new(false),
+            lazy_workspace: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -680,6 +704,92 @@ impl McpClientPool {
         self.plugin_sources.read().get(name).cloned()
     }
 
+    /// 宿主是否显式声明了 lazy workspace（默认 `false`）。
+    pub(crate) fn lazy_workspace(&self) -> bool {
+        self.lazy_workspace
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 远端 workspace 的资源面是否仍在「首个真实调用」之前。
+    ///
+    /// 只有**宿主显式 opt-in**（[`Self::lazy_workspace`]）且 workspace 来源是
+    /// `WorkspaceRemote` 时才成立：cold 面只承诺工具面（`initialize.capabilities`
+    /// 只有 `tools`），此时任何 `resources/list` 都会穿透 cold 代理启动真实后端，
+    /// 因此启动期资源探测、指令/覆盖读取与 shell 任务扫描都必须跳过。
+    ///
+    /// 未 opt-in 的普通远端 workspace（任意 ACP 客户端）、本机 builtin `workspace`
+    /// 与普通 MCP 都不受影响（返回 false）。
+    pub(crate) fn remote_workspace_deferred(&self) -> bool {
+        self.lazy_workspace()
+            && self.workspace_source()
+                == Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote)
+            && !self
+                .workspace_remote_started
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// lazy 远端 workspace 的首次真实 `tools/call` 收口。
+    ///
+    /// tool bridge 在**成功转发之后**调用：首个调用把「cold」置为「已启动」，
+    /// 让后续宿主侧可选探针（shell 任务扫描、git 分支观察等）恢复既有行为；
+    /// 同一会话只做一次启动后资源重发现，避免每个 tool call 都追加一次
+    /// `resources/list`。
+    ///
+    /// 只对显式 opt-in 的宿主生效：非 lazy 宿主在启动期已按既有策略完成资源
+    /// 发现（失败会拒绝初连），这里不产生额外探测。
+    ///
+    /// 失败只记 WARN（`downgrade_resource_listing`，与「资源不是启动准入条件」的
+    /// 既有语义一致）：session 已创建且工具已在工作，不因一次可选探测失败而崩溃。
+    pub(crate) async fn note_remote_workspace_call(&self, handle: &McpClientHandle) {
+        if !self.lazy_workspace() {
+            return;
+        }
+        if !matches!(
+            handle.source,
+            Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote)
+        ) {
+            return;
+        }
+        let first = !self
+            .workspace_remote_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
+        if !first {
+            return;
+        }
+        tracing::info!(
+            server = %handle.name,
+            "远端 workspace 首次真实调用已转发；开始启动后资源重发现"
+        );
+        let Some(peer) = handle.peer.as_ref() else {
+            tracing::warn!(
+                server = %handle.name,
+                "远端 workspace 已启动但 peer 不可用；跳过启动后资源重发现"
+            );
+            return;
+        };
+        match peri_time::timeout(
+            REMOTE_WORKSPACE_RESOURCE_PROBE_TIMEOUT,
+            self.list_all_resources_cached(&handle.name, peer),
+        )
+        .await
+        {
+            Ok(Ok(resources)) => tracing::info!(
+                server = %handle.name,
+                resources = resources.len(),
+                "远端 workspace 启动后资源重发现完成"
+            ),
+            Ok(Err(error)) => super::super::initialize::downgrade_resource_listing(
+                &handle.name,
+                &error.to_string(),
+            ),
+            Err(_) => tracing::warn!(
+                server = %handle.name,
+                timeout_secs = REMOTE_WORKSPACE_RESOURCE_PROBE_TIMEOUT.as_secs(),
+                "远端 workspace 启动后资源重发现超时；本次不发布资源"
+            ),
+        }
+    }
+
     /// MetaHarness 段落覆盖读取（J6）：只认真实 builtin `workspace` 实例。
     ///
     /// - X7：来源白名单按实例身份（`ConfigSource::Builtin { instance: "workspace" }`），
@@ -697,6 +807,15 @@ impl McpClientPool {
             .unwrap_or_default();
         if self.workspace_source_closed(&closed) {
             tracing::warn!("meta_harness: builtin workspace is closed; keeping builtin sections");
+            return Ok(HashMap::new());
+        }
+        // S9a3a：lazy 远端 workspace 的 cold 面没有资源能力（只宣告 tools）。在首个
+        // 真实调用之前读取覆盖会把「可选探测」变成一次真实启动，因此按
+        // 「覆盖不可得 ⇒ 保持内置段落」（X8）处理，而不是去探测。
+        if self.remote_workspace_deferred() {
+            tracing::info!(
+                "meta_harness: remote workspace is still cold; keeping builtin sections until first real call"
+            );
             return Ok(HashMap::new());
         }
         let Some(handle) = self.capability_client("workspace") else {
@@ -773,6 +892,15 @@ impl McpClientPool {
         if self.workspace_source_closed(&closed) {
             tracing::debug!(
                 "instructions: builtin workspace is closed; instruction face stays unavailable"
+            );
+            return Ok((None, None));
+        }
+        // S9a3a：lazy 远端 workspace 在首个真实调用前只有 cold 工具面（资源能力未宣告）。
+        // 指令面按「不适用」返回空，而不是用一次 `resources/list` 启动真实后端；
+        // 冻结的 system prompt 因此不含远端工作区指令（本机 builtin 不受影响）。
+        if self.remote_workspace_deferred() {
+            tracing::info!(
+                "instructions: remote workspace is still cold; instruction face stays unavailable until first real call"
             );
             return Ok((None, None));
         }

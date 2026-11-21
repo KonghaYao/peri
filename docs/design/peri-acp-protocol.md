@@ -63,6 +63,20 @@ closing 并保留 manager/environment owner，二者都确认排空后才删除�
 形状与 `.mcp.json` 的 `subscriptions` 相同；HTTP 与 stdio 生效，非法值返回 `-32602`，
 `type: "acp"` 暂不支持。
 
+`session/new` 的 `_meta["peri.rootSessionId"]` 是**部署级 opt-in** 的根会话 ID 预留：
+只有装配面显式打开该授权的可信宿主（进程内 ACP Host）接受它，TUI / print / stdio 的
+默认装配一律关闭。开启时：
+
+- 取值必须是 UUIDv7 字符串；通过后按规范化（小写连字符）形式返回，并**直接**作为该次
+  创建的会话身份（P1 草稿的 `thread_id`，不先建后改名）。不带该键时仍由宿主生成新的
+  UUIDv7。
+- 非法值（非字符串 / 空串 / 非 UUID / 非 v7）返回 `-32602`（`peri.rootSessionId must be …`）。
+- 未开启授权的宿主对该键返回 `-32602`（`peri.rootSessionId is not enabled for this host`），
+  不静默忽略。
+- 该 ID 已被 live 或持久会话占用时返回 `-32010`（`Session id already exists`）：宿主不覆盖、
+  不改名、不删除既有会话。它不是幂等写——重试前必须先用 `session/load` 或历史读取核对
+  身份，不能把「预留成功」当作「重复提交安全」。
+
 会话工作区扩展由 initialize 的 `peri.sessionWorkspaceV1: true` 显式协商：
 
 - `peri/session_context` 接受互斥的 `{ cwd }` 或 `{ sessionId }`，返回 `version: 1`、

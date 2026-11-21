@@ -52,6 +52,11 @@ Host process (SDK / CLI / 测试)
 | `src/adapter.ts` | `createPeriSandboxAdapter()`：结构化实现 SDK `SandboxAdapter` 契约，映射 options、`workspace`（`{ id: sandboxId, hostPath, runtimePath }`，本地两者相同）、token 与 `deleteData`；不 import SDK |
 | `src/server/http.ts` | 单实例 HTTP server、鉴权、大小/超时限制、`subscriptions/listen` SSE relay |
 | `src/server/mcp-handler.ts` | MCP `Server`、能力/identity/instructions 镜像、全部请求与通知透明转发，pinned `2026-07-28` |
+| `src/swarm/manager.ts` | 本地 swarm 的 logicalEnvId→实例表、并发 `ensure` 单飞、默认持久根与 0700 校验 |
+| `src/swarm/bindings.ts` | `<root>/bindings.json` 原子写（0600），只存路由元数据，不存内层 token |
+| `src/swarm/forward.ts` | `/sandboxes/{id}/mcp` 反向代理：剥离外层鉴权、注入内层 Bearer、流式透传 |
+| `src/swarm/server.ts` | swarm HTTP 路由、稳定 JSON 错误、可选 Bearer 鉴权 |
+| `src/swarm/main.ts` | `Bun.serve` 入口、env 解析、SIGINT/SIGTERM 关闭 |
 | `src/runtime/provider.ts` | Provider 接口 + `providerFor(platform)` |
 | `src/runtime/systemd-provider.ts` | Linux transient unit 的 start/stop/inspect |
 | `src/runtime/mac-provider.ts` | macOS 进程组 start/stop/leader 校验 |
@@ -182,9 +187,11 @@ src/
   index.ts
   instance/{types,options,settings,workspace,instance,start}.ts
   server/{http,mcp-handler}.ts
+  swarm/{main,manager,bindings,forward,server,errors}.ts
   runtime/{provider,systemd-provider,mac-provider,policy,doctor,diagnostics,backend,srt}.ts
   util/timeout.ts
 tests/
   *.test.ts               # 不启动真实 SRT 的单元测试
+  swarm/*.test.ts         # 本地 swarm 服务（fake startSandbox）
   integration/{mac,programmatic-mac,linux,resources}.ts  # 真实环境验收
 ```

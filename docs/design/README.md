@@ -68,6 +68,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（运行中命中与任务终态都会唤醒，终态合并未报告命中）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
 | Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
+| Peri Swarm 本地开发宿主 | [peri-swarm.md](peri-swarm.md) | 五路由 HTTP 面、Rivet actor、Peri/Swarm 双 Loom 库、Bun 沙箱与 MCP 注入、仅杀 Rust 的 reattach；本地验收见[验收记录](../verification/peri-swarm-local-dev.md)，跨机、TLS 与规模未验收 |
 
 ## 维护要求
 

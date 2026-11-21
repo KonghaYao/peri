@@ -100,6 +100,27 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 
 **未裁决**：descriptor 的来源、连接权限与生命周期，以及代理的并发关联、重连与超时细节，在 wire 门槛实现前裁决并记录到 active spec。
 
+#### 2.4.1 lazy 远端 workspace（宿主显式 opt-in）
+
+cold 代理宿主（Bun/Swarm）在真实后端启动前只宣告工具面（`initialize` /
+`tools/list`），资源面要真实后端才有。该形态由宿主**显式声明** `lazy_workspace`
+（`HostAssemblyInput` / `AcpServerConfig`，默认 `false`；会话环境把它原样传给
+会话 MCP 池的 `set_lazy_workspace`），唯一 opt-in 方是 `peri-swarm` 的 `AcpChild`；
+TUI / print / stdio 与普通 ACP 客户端一律 `false`。
+
+约束：
+
+- 默认（`lazy_workspace = false`）：远端 workspace 保持既有语义——启动期探测
+  `resources/list`，`WorkspaceRemote` 的发现失败拒绝初连
+  （`fail_workspace_resource_discovery`）。
+- `lazy_workspace = true` 且 workspace 来源是 `WorkspaceRemote` 时，启动发现只冻结
+  transport / initialize / 能力协商 / `tools/list`：`resources/list`、指令/覆盖面
+  读取、技能模板探测与宿主侧 `shell_task_list` / `workspace/gitBranch` 都延后到
+  首个真实 `tools/call`。首个调用置位 `workspace_remote_started`，随后只做一次
+  启动后 `resources/list` 重发现；失败只降级告警，不改变连接。
+- 延迟只对 lazy 远端 workspace 生效；builtin `workspace`、普通 MCP 与非 lazy 的
+  `WorkspaceRemote` 仍在启动期探测。
+
 ### 2.5 故障域与关闭
 
 **目标（v5）**：

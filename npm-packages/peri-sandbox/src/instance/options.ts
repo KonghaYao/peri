@@ -44,11 +44,27 @@ export const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024;
 export const DEFAULT_UNIT_PREFIX = 'peri-sbx-';
 export const DEFAULT_PROFILE_NAME = 'workspace-default';
 
+/** Field-level summary of a Zod failure; never includes the rejected values. */
+function describeIssues(error: unknown, limit = 8): string {
+  if (!(error instanceof z.ZodError)) return '';
+  return error.issues
+    .slice(0, limit)
+    .map((issue) => `${issue.path.length === 0 ? '(root)' : issue.path.join('.')}: ${issue.message}`)
+    .join('; ');
+}
+
+function invalidOptions(description: string, error: unknown): SandboxError {
+  const details = describeIssues(error);
+  return new SandboxError('invalid_options', `Invalid ${description}${details.length === 0 ? '' : `: ${details}`}.`, {
+    cause: error,
+  });
+}
+
 export function parseProfile(value: unknown, description = 'profile'): SandboxProfile {
   try {
     return profileSchema.parse(value);
   } catch (error) {
-    throw new SandboxError('invalid_options', `Invalid ${description}.`, { cause: error });
+    throw invalidOptions(description, error);
   }
 }
 
@@ -56,7 +72,7 @@ export function parseSettings(value: unknown): SandboxSettings {
   try {
     return settingsSchema.parse(value);
   } catch (error) {
-    throw new SandboxError('invalid_options', 'Invalid sandbox settings.', { cause: error });
+    throw invalidOptions('sandbox settings', error);
   }
 }
 
@@ -168,7 +184,10 @@ export interface ResolvedSandboxOptions {
 }
 
 /**
- * Select the effective profile exactly as `startSandbox` does.
+ * Select the base profile exactly as `startSandbox` does.
+ *
+ * The `allowPeriBinaryDirectory` opt-in is applied after this in
+ * `resolveOptions`, so diagnostics see the settings/profile rule only.
  *
  * Exported so read-only diagnostics share the runtime rule instead of
  * re-implementing `defaultProfile` fallback or unknown-name handling.
@@ -200,6 +219,11 @@ export function resolveOptions(options: StartSandboxOptions, settings: SandboxSe
       ? join(sandboxRoot, 'workspace')
       : resolveExplicitWorkspace(options.workspacePath, sandboxesRoot);
   const { profile, profileName } = resolveProfile(settings, options);
+  const periPath = resolve(options.periPath ?? settings.periPath);
+  const effectiveProfile =
+    options.allowPeriBinaryDirectory === true
+      ? { ...profile, runtimeReadPaths: [...new Set([...profile.runtimeReadPaths, dirname(periPath)])] }
+      : profile;
 
   if (options.token !== undefined && options.tokenFile !== undefined)
     throw new SandboxError('invalid_options', 'token and tokenFile are mutually exclusive.');
@@ -220,9 +244,9 @@ export function resolveOptions(options: StartSandboxOptions, settings: SandboxSe
     sandboxRoot,
     workspacePath,
     homePath: join(sandboxRoot, 'home'),
-    profile,
+    profile: effectiveProfile,
     profileName,
-    periPath: resolve(options.periPath ?? settings.periPath),
+    periPath,
     periSha256: options.periSha256 ?? settings.periSha256,
     token: options.token,
     tokenFile: options.tokenFile === undefined ? undefined : canonicalizePath(resolve(options.tokenFile)),

@@ -437,3 +437,122 @@ async fn adopted_subscription_survives_watcher_stop() {
     assert_eq!(reminders(&fixture.queue).len(), 1);
     shutdown(fixture, cancel).await;
 }
+
+/// S9a3a：远端 workspace 的 cold 面只有工具面（资源/任务都要真实后端）。
+/// 恢复侧 `shell_task_list` 是 tools/call —— cold 期扫描会启动后端，必须等
+/// 首个真实调用（tool bridge 置位）之后才恢复既有节奏。
+#[tokio::test]
+async fn remote_workspace_watch_defers_shell_task_list_until_first_real_call() {
+    use std::sync::atomic::Ordering;
+
+    const COLD_SCRIPT: &str = r#"
+const fs = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline').createInterface({ input: process.stdin });
+readline.on('line', line => {
+  const request = JSON.parse(line);
+  if (request.id === undefined) return;
+  let result = {};
+  if (request.method === 'initialize') result = {
+    protocolVersion: '2025-11-25',
+    capabilities: { tools: {} },
+    serverInfo: { name: 'remote-cold-workspace', version: '0.2.0' },
+  };
+  else if (request.method === 'tools/list') result = { tools: [] };
+  else if (request.method === 'tools/call') {
+    fs.appendFileSync(path.join(process.cwd(), 'remote-cold.log'), (request.params.name || '?') + '\n');
+    result = {
+      content: [{ type: 'text', text: JSON.stringify({ unknown: false, tasks: [] }) }],
+      isError: false,
+    };
+  } else if (request.method === 'resources/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32603, message: 'cold workspace has no resource surface' } }) + '\n');
+    return;
+  } else if (request.method !== 'ping') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      error: { code: -32601, message: 'Method not found' } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+});
+"#;
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("server.js"), COLD_SCRIPT).unwrap();
+    let log = directory.path().join("remote-cold.log");
+    let (mut tasks, spawner) = McpTaskOwner::new();
+    let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
+    pool.set_lazy_workspace(true).unwrap();
+    pool.configs.write().insert(
+        "workspace".to_string(),
+        serde_json::from_value(json!({
+            "command": "node",
+            "args": ["server.js"]
+        }))
+        .map(|mut config: crate::mcp::config::McpServerConfig| {
+            config.source = Some(ConfigSource::WorkspaceRemote);
+            config
+        })
+        .unwrap(),
+    );
+    let transport = pool
+        .spawn_stdio_transport(
+            "workspace",
+            "node",
+            &["server.js".to_string()],
+            &Default::default(),
+            directory.path(),
+        )
+        .expect("cold workspace transport");
+    let service =
+        client::serve_client_auto_for_server(transport, &pool, "workspace", HANDSHAKE_TIMEOUT)
+            .await
+            .expect("cold workspace handshake must not time out")
+            .expect("cold workspace handshake must not fail");
+    let peer = service.peer().clone();
+    pool.clients.write().insert(
+        "workspace".to_string(),
+        Arc::new(McpClientHandle {
+            call_gate: Default::default(),
+            name: "workspace".to_string(),
+            version: None,
+            connected_at: None,
+            protocol_version: None,
+            cache_version: None,
+            peer: Some(peer),
+            tools: Vec::new(),
+            resources: Vec::new(),
+            status: ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: Some(ConfigSource::WorkspaceRemote),
+            url: None,
+            skills_capable: false,
+        }),
+    );
+    assert!(pool.remote_workspace_deferred());
+
+    let cancel = start_watch(&pool);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let cold_requests = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !cold_requests.contains("shell_task_list"),
+        "cold 远端 workspace 不得被恢复扫描启动: {cold_requests}"
+    );
+
+    // 首个真实调用由 tool bridge 置位；下一次扫描恢复既有 `shell_task_list`。
+    pool.workspace_remote_started.store(true, Ordering::Release);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let warm_requests = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        warm_requests.lines().any(|line| line == "shell_task_list"),
+        "首个真实调用后应恢复 shell 任务扫描: {warm_requests}"
+    );
+
+    cancel.cancel();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    pool.begin_shutdown();
+    tasks.begin_shutdown();
+    let _ = tasks.shutdown().await;
+    assert!(pool.shutdown().await.is_complete());
+}

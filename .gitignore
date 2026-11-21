@@ -170,6 +170,7 @@ claude-blog-cn
 !scripts/test-install-beta.py
 !scripts/test-install.py
 !scripts/test-cargo-patches.py
+!peri-swarm/scripts/provision_state_db.py
 build
 .tmp
 tmp/

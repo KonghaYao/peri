@@ -1,0 +1,48 @@
+[package]
+name = "peri-swarm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Peri Swarm gateway — HTTP session contract, SSE events, and typed storage ports"
+
+[dependencies]
+peri-time = { path = "../peri-time" }
+# S4 runtime boundary: only `src/actor/runtime.rs`, `src/store/remote.rs` and
+# the `bootstrap` process entry may import `peri-acp` / `peri-acp-types` /
+# `peri-resources` (design §1.2). The rest of the crate consumes their own
+# types: `store` owns the persistence port, `bootstrap` owns the process store.
+peri-acp = { path = "../peri-acp" }
+peri-acp-types = { path = "../peri-acp-types" }
+peri-resources = { path = "../peri-resources" }
+# S6c1a: the Swarm state database has its own Loom connection. Only
+# `src/store/turso.rs` uses the driver directly; it never goes through the
+# `peri-resources` schema probe/initialization for the Peri session store.
+turso_serverless = "0.1.3"
+async-trait.workspace = true
+axum.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+# Pinned to the engine generation verified in `.peri/plans/env-probe.md`
+# (`Rivet 3.1.1`). 3.1.2-rc.1 is deliberately excluded.
+rivetkit = "=3.1.1"
+# `rivetkit-client` 3.1.1 exposes `ActorHandle::fetch` with reqwest 0.12 types;
+# the workspace pins 0.13 for other crates, so the actor transport names its own.
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+# The process entry (`src/main.rs`) serves axum on a multi-thread runtime and
+# waits for SIGINT; the library keeps the workspace's minimal feature set.
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal"] }
+# `bootstrap` shares one CancellationToken between the gateway and the registry.
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tower.workspace = true

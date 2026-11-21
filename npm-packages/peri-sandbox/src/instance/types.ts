@@ -94,6 +94,13 @@ export interface StartSandboxOptions {
   port?: number;
   periPath?: string;
   periSha256?: string;
+  /**
+   * Append `dirname(periPath)` to the effective profile's `runtimeReadPaths`.
+   *
+   * Off by default: the shared policy does not widen the public scope. Callers
+   * that execute `<dir>/peri` under `sandbox-exec` (the Swarm manager) opt in.
+   */
+  allowPeriBinaryDirectory?: boolean;
   bashCalls?: number;
   startupTimeoutMs?: number;
   stopTimeoutMs?: number;

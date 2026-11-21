@@ -367,6 +367,7 @@ async fn assemble_host_with_workspace_input(
             session_store_shutdown: None,
             cwd: dirs.workspace_str(),
             bare: false,
+            lazy_workspace: false,
             drive_cron_tick,
             builtin_assembly_mode: None,
             // session 级 `workspace` 输入（AW3-11）由调用方给定：默认 `None` ⇒
@@ -387,6 +388,7 @@ async fn assemble_host_with_workspace_input(
             plugin_face_closed: false,
             prepared_plugins: None,
             session_mcp_servers: None,
+            reserved_root_session_id: false,
         },
         peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
         true,

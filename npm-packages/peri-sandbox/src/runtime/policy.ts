@@ -49,8 +49,16 @@ function overlapsManagedRoot(candidate: string, root: string): boolean {
 /**
  * Build the SRT policy for one sandbox.
  *
- * `allowRead` is limited to runtime paths plus workspace/home/tmp; the
- * sandbox root itself (policy, token, lock, diagnostics) stays unreadable.
+ * `allowRead` is limited to `profile.runtimeReadPaths`, the SRT package
+ * directory, `periPath` itself and workspace/home/tmp; the sandbox root
+ * (policy, token, lock, diagnostics) stays unreadable.
+ *
+ * The Peri binary's parent directory is not added here. `sandbox-exec` needs
+ * search permission on the parent to exec `<dir>/peri`, so callers that rely on
+ * that layout must request it explicitly:
+ * `StartSandboxOptions.allowPeriBinaryDirectory` appends the directory to the
+ * effective profile, and direct `policyFor` callers can list it in
+ * `profile.runtimeReadPaths`.
  */
 export function policyFor(options: {
   sandboxesRoot: string;

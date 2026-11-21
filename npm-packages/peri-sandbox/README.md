@@ -76,6 +76,56 @@ await sandbox.close({ deleteData: true }); // 停止并删除 <sandboxRoot>
 
 完整示例见 [`examples/peri-mcp-client.json`](examples/peri-mcp-client.json)。不要传 `0.0.0.0`：`host` 只接受 `127.0.0.1` 或 `::1`。
 
+## 本地 swarm 服务（dev:swarm）
+
+`peri-sandbox` 自带一个 loopback HTTP 服务，把「逻辑环境 → 沙箱」的映射、懒启动、
+MCP 反向代理和空闲回收放在一个进程里，供 `peri-swarm` 网关使用。单实例 API 仍是
+权威：本服务只加路由与生命周期编排。
+
+```bash
+cd npm-packages/peri-sandbox
+bun install
+PERI_PATH=/path/to/peri bun run dev:swarm   # 默认 127.0.0.1:8081
+bun run test:swarm                          # 构建后只跑 tests/swarm/*.test.js
+```
+
+需要固定 settings（推荐用于可重复运行）时显式传入由 `init` 生成的文件：
+
+```bash
+PERI_SANDBOX_SETTINGS=/absolute/settings.json \
+PERI_SWARM_SANDBOXES_ROOT=/absolute/sandboxes \
+PERI_SWARM_BUN_TOKEN=<outer token> \
+bun run dev:swarm
+```
+
+有 settings 文件时，`periPath` 与 `periSha256` 以文件为准（`PERI_PATH` 只用于没有 settings 文件的默认配置）。settings 中 `periSha256` 必须与当前二进制一致，否则首个沙箱启动会以 `unsupported_environment` 拒绝。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PERI_SWARM_BUN_BIND` | `127.0.0.1:8081` | `host:port`，只接受 loopback |
+| `PERI_SWARM_BUN_TOKEN` | 未设置 | 设置后 `/v1/*` 与 `/sandboxes/*` 要求 `Bearer` |
+| `PERI_SWARM_SANDBOXES_ROOT` | `~/.peri-swarm/sandboxes` | 绝对路径，启动时创建/校验 0700 |
+| `PERI_SWARM_IDLE_MS` | 1800000（30 分钟） | 空闲回收阈值；`0` 关闭 |
+| `PERI_PATH` / `PERI_SANDBOX_SETTINGS` | 沿用既有语义 | 沙箱内 Peri 路径与 settings |
+
+路由：`GET /healthz`、`POST /v1/sandboxes`（按 `logicalEnvId` ensure，单飞）、
+`GET|DELETE /v1/sandboxes/{logicalEnvId}`、`POST|GET|DELETE
+/sandboxes/{logicalEnvId}/mcp`（反向代理，注入内层 Bearer）。
+
+- `POST /v1/sandboxes` 带 `{"lazy":true}` 时只做预留（分配 `sandboxId` 与绑定，不启动
+  SRT）；不带 `lazy` 时立即启动。`peri-swarm` 网关使用懒预留。
+- 冷态 MCP 面不需要实例：`initialize`/`server/discover`/`tools/list`/`ping` 由快照
+  回答，首个 `tools/call` 才启动实例。
+- 回收只在 `ready`、无在途代理请求且空闲达到阈值时发生；回收后状态为 `stopped`，
+  `workspace` 与绑定保留，再次 `POST /v1/sandboxes` 分配新 `runId`、复用同一
+  `sandboxId`。`DELETE ?deleteData=true` 才删除目录与绑定。
+- 持久布局：`~/.peri-swarm/sandboxes/bindings.json` 只记录 `sandboxId`、
+  `workspacePath`、`lastRunId` 与使用时间，**不保存 token**；每个沙箱的
+  `workspace/` 与 `home/` 位于 `<root>/<sandboxId>/`，`close()` 后保留。
+
+与网关的接线、双 Loom 库与恢复边界见
+[Peri Swarm 本地开发宿主](../../docs/design/peri-swarm.md)。
+
 ## 与 SDK 集成
 
 `@peri-code/sdk/sandbox` 的 `SandboxManager` 必填 `adapter`，SDK 不提供默认实现，也不动态 import 任何具体 sandbox。manager 只做按 `sandboxId` 的注册表，不感知 session；调用方拿到 `SandboxHandle` 后自行决定绑定到哪个会话。
@@ -223,6 +273,7 @@ function startSandbox(options?: StartSandboxOptions): Promise<SandboxInstance>;
 | `port` | `0` | 显式占用返回 `conflict` |
 | `periPath` | settings 值 | 启动前校验存在且是普通文件 |
 | `periSha256` | settings 值 | 与文件 SHA-256 不一致报 `unsupported_environment` |
+| `allowPeriBinaryDirectory` | `false` | 仅显式 `true` 时把 `dirname(periPath)` 并入本次 profile 的 `runtimeReadPaths`（去重、规范化）；公共 policy 默认不放行该目录 |
 | `bashCalls` | `10000` | 单实例 Bash 调用预算 |
 | `startupTimeoutMs` | `45000` | settings 可提供默认值，per-start 覆盖 |
 | `stopTimeoutMs` | `15000` | settings 可提供默认值，per-start 覆盖 |
@@ -316,7 +367,13 @@ function createPeriSandboxAdapter(options?: {
 
 以上路径都要求 Peri 可被发现：缺失、不是普通文件，或与 settings 记录的 SHA-256 不一致时报 `unsupported_environment`。
 
-`initSettings()` 只做环境固定：写入 `settings.json`（0600）、创建 `sandboxes/`（0700）、把 `periPath` 与 SHA-256 固化进文件、校验目录私有性。它不生成 token、端口或后台服务，也不覆盖已有文件（已存在时报 `conflict`）。需要固定路径/哈希或自定义配置时再使用：
+`initSettings()` 只做环境固定：写入 `settings.json`（0600）、创建 `sandboxes/`（0700）、把 `periPath` 与 SHA-256 固化进文件、校验目录私有性。它不生成 token、端口或后台服务，也不覆盖已有文件（已存在时报 `conflict`）。手写 settings 时最容易漏掉 `periSha256`；校验失败会以字段路径报错（例如 `invalid_options` + `periSha256: ...`），不会要求你从 `init` 输出反推字段。推荐直接生成：
+
+```bash
+cd npm-packages/peri-sandbox
+PERI_PATH=/absolute/path/to/peri \
+  bun run src/cli.ts init --settings /absolute/path/to/settings.json
+```
 
 ```ts
 import { homedir } from "node:os";
@@ -328,25 +385,17 @@ const settingsPath = await initSettings(
 );
 ```
 
-settings 文件结构：
+settings 的最小合法形状（四个顶层字段必填；`profiles` 中这个 profile 的四个资源字段也必填）：
 
 ```json
 {
   "sandboxesRoot": "/Users/you/.peri-sandbox/sandboxes",
   "periPath": "/Users/you/.peri/peri",
-  "periSha256": "<64 hex>",
-  "defaultProfile": "workspace-default",
-  "unitPrefix": "peri-sbx-",
+  "periSha256": "<64 位小写 hex>",
   "profiles": {
     "workspace-default": {
-      "allowedDomains": [
-        "github.com",
-        "api.github.com",
-        "registry.npmjs.org",
-        "api.anthropic.com",
-        "api.openai.com"
-      ],
-      "runtimeReadPaths": ["/usr", "/bin", "/opt/homebrew"],
+      "allowedDomains": ["api.anthropic.com"],
+      "runtimeReadPaths": ["/usr", "/bin"],
       "memoryMax": "1G",
       "tasksMax": 128,
       "cpuQuota": "100%"
@@ -355,17 +404,19 @@ settings 文件结构：
 }
 ```
 
-| 字段 | 说明 |
-| --- | --- |
-| `sandboxesRoot` | 受管根目录；规范化绝对路径 |
-| `periPath` | Peri 可执行文件；规范化绝对路径 |
-| `periSha256` | 启动前比对的 SHA-256 |
-| `defaultProfile` | 默认 profile 名；必须存在于 `profiles` |
-| `unitPrefix` | Linux transient unit 前缀，默认 `peri-sbx-` |
-| `profiles` | 至少一个 profile；SDK/API 可用 `profileName` 或内联 `profile` 覆盖 |
-| `startupTimeoutMs` / `stopTimeoutMs` | 可选默认预算；per-start 参数优先 |
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `sandboxesRoot` | 是 | 受管根目录；规范化绝对路径；已存在时必须是 0700 真实目录 |
+| `periPath` | 是 | Peri 可执行文件；规范化绝对路径 |
+| `periSha256` | 是 | 启动前比对的 64 位小写 SHA-256；缺失或不匹配都会拒绝 |
+| `defaultProfile` | 否 | 默认 profile 名；省略时取 `profiles` 的第一个 |
+| `unitPrefix` | 否 | Linux transient unit 前缀，默认 `peri-sbx-` |
+| `profiles` | 是 | 至少一个 profile；SDK/API 可用 `profileName` 或内联 `profile` 覆盖 |
+| `startupTimeoutMs` / `stopTimeoutMs` | 否 | 可选默认预算；per-start 参数优先 |
 
-`allowedDomains` 只填域名，不支持 URL 或 `*`。`runtimeReadPaths` 必须存在且不能覆盖 `sandboxesRoot`。`memoryMax`、`tasksMax`、`cpuQuota` 只在 Linux 生效。SRT policy 在每次启动时重新生成，因此修改 profile 后需重启实例；同一 workspace 会在新 policy 下启动。
+profile 内必填 `runtimeReadPaths`、`memoryMax`、`tasksMax`、`cpuQuota`；`allowedDomains` 可省略（默认空列表）。`allowedDomains` 只填域名，不支持 URL 或 `*`。`runtimeReadPaths` 必须存在且不能覆盖 `sandboxesRoot`。`memoryMax`、`tasksMax`、`cpuQuota` 只在 Linux 生效。SRT policy 在每次启动时重新生成，因此修改 profile 后需重启实例；同一 workspace 会在新 policy 下启动。
+
+`PERI_PATH`/settings 的 `periPath` 父目录**不会**由公共 policy 自动加入 `allowRead`：默认只放行 profile 的 `runtimeReadPaths`、SRT 包目录与可执行文件本身。若 `sandbox-exec` 需要搜索 `<dir>/peri` 的父目录（macOS 上执行任意布局的二进制都会遇到），调用方必须显式请求：`startSandbox({ allowPeriBinaryDirectory: true })` 会把 `dirname(periPath)` 合并进本次 profile 的 `runtimeReadPaths`（去重、保持规范化），也可以直接把该目录写进 profile 的 `runtimeReadPaths`。默认开发布局 `<repo>/target/debug/peri` 因此需要显式开启该选项或配置 profile 后才能启动；Swarm 链路是显式开启的调用方。
 
 `settings.json` 中的路径必须是规范化绝对路径（示例中的 `/Users/you/...` 是占位符）：加载时不展开 `~`，写 `"~/.peri-sandbox/sandboxes"` 会因不是绝对路径而报 `invalid_options`。
 
@@ -373,12 +424,13 @@ settings 文件结构：
 
 ### 隔离边界
 
-1. 文件系统：SRT policy 设置 `denyRead: ["/"]`，`allowRead` 仅包含 profile 的 `runtimeReadPaths`、SRT 包目录、Peri 可执行文件、workspace/home/tmp；workspace 与 home 可写。
-2. `<sandboxRoot>` 下的 `policy.json`、`token`、`.lock`、`diagnostics/` 不在 `allowRead` 中；宿主进程本身仍能读取。
-3. 网络：按域名严格 allowlist，`strictAllowlist: true`，不允许 URL 或通配符，Unix socket 默认拒绝。
-4. Linux 用 cgroup 提供 CPU/内存/进程数硬限制；macOS 没有等价硬限制，double-fork/setsid 后代可能逃逸进程组。
-5. token 默认只在内存；不要写入日志、提交到 Git 或交给不可信租户。
-6. 本包提供本机开发隔离，不承诺生产级多租户安全边界；需要强隔离时使用独立 VM 或容器。
+1. 文件系统：SRT policy 设置 `denyRead: ["/"]`，`allowRead` 仅包含 profile 的 `runtimeReadPaths`、SRT 包目录、Peri 可执行文件本身、workspace/home/tmp；workspace 与 home 可写。
+2. 公共 policy 不自动放行 Peri 的父目录。需要 `sandbox-exec` 搜索 `<dir>/peri` 的调用方通过 `StartSandboxOptions.allowPeriBinaryDirectory` 或 profile 的 `runtimeReadPaths` 显式请求；目录级放行会让其中其他文件对沙箱可读，因此只应把二进制放在专用目录：本地开发用 `<repo>/target/debug/peri`，生产部署用专用 bin 目录。开启该选项时，默认布局 `~/.peri/peri` 会使 `~/.peri` 对沙箱可读；若该目录保存 `settings.json` 等配置，请把二进制移到专用目录。
+3. `<sandboxRoot>` 下的 `policy.json`、`token`、`.lock`、`diagnostics/` 不在 `allowRead` 中；宿主进程本身仍能读取。
+4. 网络：按域名严格 allowlist，`strictAllowlist: true`，不允许 URL 或通配符，Unix socket 默认拒绝。
+5. Linux 用 cgroup 提供 CPU/内存/进程数硬限制；macOS 没有等价硬限制，double-fork/setsid 后代可能逃逸进程组。
+6. token 默认只在内存；不要写入日志、提交到 Git 或交给不可信租户。
+7. 本包提供本机开发隔离，不承诺生产级多租户安全边界；需要强隔离时使用独立 VM 或容器。
 
 ### 平台差异
 
@@ -388,6 +440,28 @@ settings 文件结构：
 | Linux | `systemd-run --user` transient unit（`KillMode=control-group`、`PrivateTmp=yes`、`CollectMode=inactive-or-failed`），按 profile 设置 cgroup 限制 | 宿主被 SIGKILL 后 unit 依赖 stdio EOF 退出；若 unit 仍存活，下次启动返回 `conflict`，需人工 `systemctl --user stop` |
 
 `doctor` 只报告残留 `peri-sbx-*` unit 与陈旧 `.lock`，不自动清理。Windows 不支持。
+
+## 本地 swarm 服务（开发预览）
+
+`bun run dev:swarm` 在单个 Bun 进程内按逻辑环境启动 sandbox，并暴露稳定的本地 HTTP 入口。它复用 `startSandbox()` 的 settings、`PERI_PATH`、SRT/Peri 启动与 workspace lock 语义，只额外增加进程级实例表与 `/sandboxes/{logicalEnvId}/mcp` 反向代理。
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PERI_SWARM_BUN_BIND` | `127.0.0.1:8081` | 仅接受 loopback host；端口必填 |
+| `PERI_SWARM_SANDBOXES_ROOT` | `~/.peri-swarm/sandboxes` | 持久根，启动时创建为 0700 |
+| `PERI_SWARM_BUN_TOKEN` | 未设置 | 设置后 `/v1/*` 与 `/sandboxes/*` 要求 `Authorization: Bearer`；`/healthz` 不鉴权 |
+
+| 路由 | 行为 |
+| --- | --- |
+| `GET /healthz` | 存活检查，返回 `{"status":"ok"}` |
+| `POST /v1/sandboxes` | body `{"logicalEnvId":"..."}`；启动或复用实例，并发请求只启动一次 |
+| `GET /v1/sandboxes/{logicalEnvId}` | 运行中实例的状态；仅存在绑定记录时返回 `state: "stopped"`、`mcpUrl: null` |
+| `DELETE /v1/sandboxes/{logicalEnvId}?deleteData=true\|false` | 停止实例；默认保留目录，`deleteData=true` 才删除并移除绑定 |
+| `POST\|GET\|DELETE /sandboxes/{logicalEnvId}/mcp` | 代理到实例内层 `/mcp`；剥离外层 `Authorization` 并注入内层 Bearer，流式响应原样透传 |
+
+存储布局：`<root>/bindings.json`（0600，仅 logicalEnvId、sandboxId、workspacePath、lastRunId、lastUsedAt，不含内层 token）与 `<root>/<sandboxId>/workspace`。`close()` 保留目录；同一 logicalEnvId 重开是新的 `runId`，旧文件仍可读。服务重启后第一次 `ensure` 会复用 bindings 中的 `sandboxId` 目录。
+
+错误统一为 `{"error":{"code":"...","message":"..."}}`。未实现：任务台账、闲置自动回收、跨进程/多机调度；内层 token 只存在于当前进程内存，服务重启后需重新 `ensure`。
 
 ## CLI（附录）
 

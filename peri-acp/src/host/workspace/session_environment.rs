@@ -379,6 +379,8 @@ impl SessionEnvironment {
             session_store_shutdown: None,
             cwd: cwd.clone(),
             bare: source.bare,
+            // 部署级 opt-in 原样继承：同一部署的会话 MCP 池按同一 workspace 语义装配。
+            lazy_workspace: host.lazy_workspace,
             drive_cron_tick: source.drive_cron_tick,
             builtin_assembly_mode: Some(frozen.map_or_else(
                 || configuration.builtin_assembly_mode(),
@@ -393,6 +395,8 @@ impl SessionEnvironment {
             builtin_closed,
             skills_face_closed,
             plugin_face_closed,
+            // 部署级授权原样继承：会话级 cfg 不处理 `session/new`，但同源是唯一口径。
+            reserved_root_session_id: host.reserved_root_session_id,
             prepared_plugins: Some(plugins.clone()),
             session_mcp_servers: Some(session_mcp_servers.clone()),
         };

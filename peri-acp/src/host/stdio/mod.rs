@@ -221,6 +221,8 @@ async fn assemble_stdio_config(
             session_store_shutdown: Some(session_store_shutdown),
             cwd: cwd.clone(),
             bare: false,
+            // stdio 不是 cold 代理宿主：远端 workspace 按既有语义启动期探测。
+            lazy_workspace: false,
             drive_cron_tick: false,
             builtin_assembly_mode: None,
             // stdio 顶层装配不构造 builtin 上下文（`session_resources = false`）：
@@ -243,6 +245,7 @@ async fn assemble_stdio_config(
             // host 级装配：无准备路径提供的插件聚合，按既有语义自行加载。
             prepared_plugins: None,
             session_mcp_servers: None,
+            reserved_root_session_id: false,
         },
         apps_enabled,
     )

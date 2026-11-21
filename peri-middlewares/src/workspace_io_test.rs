@@ -89,6 +89,16 @@ impl Fixture {
     }
 
     async fn with_branch_response(branch_response: serde_json::Value) -> Self {
+        Self::with_source(
+            branch_response,
+            ConfigSource::Builtin {
+                instance: "workspace".to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn with_source(branch_response: serde_json::Value, source: ConfigSource) -> Self {
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let cancelled = Arc::new(Notify::new());
@@ -125,9 +135,7 @@ impl Fixture {
             resources: Vec::new(),
             status: ClientStatus::Connected,
             oauth_status: OAuthStatus::None,
-            source: Some(ConfigSource::Builtin {
-                instance: "workspace".to_string(),
-            }),
+            source: Some(source),
             url: None,
             skills_capable: false,
         });
@@ -517,5 +525,43 @@ async fn ownership_changed_before_response_is_rejected() {
         .insert("workspace".to_string(), "other".to_string());
     fixture.release.notify_one();
     assert!(read.await.unwrap().is_err());
+    fixture.shutdown().await;
+}
+
+/// S9a3a：cold 远端 workspace 的 `workspace/gitBranch` 会启动真实后端。
+/// git 归因的分支观察属于可选探测：首个真实调用之前不发 wire 请求，
+/// 启动后恢复（本机 builtin 不受影响，见其余用例）。
+#[tokio::test]
+async fn cold_remote_workspace_defers_git_branch_until_first_real_call() {
+    let fixture = Fixture::with_source(
+        serde_json::json!({"branch": "remote-branch"}),
+        ConfigSource::WorkspaceRemote,
+    )
+    .await;
+    fixture.pool.set_lazy_workspace(true).unwrap();
+    assert!(fixture.pool.remote_workspace_deferred());
+    assert_eq!(
+        fixture.branch().await.unwrap().unwrap_err(),
+        WorkspaceReadError::Unavailable
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), fixture.entered.notified())
+            .await
+            .is_err(),
+        "cold 远端 workspace 不得发出 workspace/gitBranch"
+    );
+
+    // 首个真实调用（tool bridge 置位）之后恢复既有观察。
+    fixture
+        .pool
+        .workspace_remote_started
+        .store(true, std::sync::atomic::Ordering::Release);
+    let branch = fixture.branch();
+    fixture.entered.notified().await;
+    fixture.release.notify_one();
+    assert_eq!(
+        branch.await.unwrap().unwrap(),
+        Some("remote-branch".to_string())
+    );
     fixture.shutdown().await;
 }

@@ -413,6 +413,15 @@ impl BaseTool for McpToolBridge {
                 ));
             }
         };
+        // S9a3a：远端 workspace 的首个真实调用已经转发成功（cold 代理此刻才启动
+        // 真实后端）。这里解锁宿主侧可选探测，并做一次启动后资源重发现；失败只
+        // 记 WARN，不影响本次工具结果。
+        if matches!(
+            self.client.source,
+            Some(super::config::ConfigSource::WorkspaceRemote)
+        ) {
+            pool.note_remote_workspace_call(&self.client).await;
+        }
         let result = match response {
             rmcp::model::CallToolResponse::Complete(result) => {
                 execution_guard.confirm_stopped();
