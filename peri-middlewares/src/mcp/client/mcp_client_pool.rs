@@ -32,12 +32,6 @@ pub struct McpClientPool {
     pub(in crate::mcp) frozen_builtin_mode:
         std::sync::OnceLock<peri_acp_types::builtin_mcp::BuiltinAssemblyMode>,
     pub(in crate::mcp) session_servers: std::sync::OnceLock<HashMap<String, McpServerConfig>>,
-    /// 宿主提供的 workspace 绑定（bare 初始化路径的唯一 workspace 事实源）。
-    ///
-    /// 未绑定 = 既有行为；`Remote` = 只走该远端 descriptor；`Absent` = 无 workspace 面。
-    /// 消费点：`run_initialize_bare`（装配）与 `capability_server_name`（来源判定）。
-    pub(in crate::mcp) host_workspace:
-        std::sync::OnceLock<super::super::host_workspace::ResolvedHostWorkspace>,
     pub(super) credential_client:
         std::sync::OnceLock<super::super::auth_store::OAuthCredentialClient>,
     pub(in crate::mcp) builtin_available: std::sync::atomic::AtomicBool,
@@ -265,7 +259,6 @@ impl McpClientPool {
             configuration_snapshot: std::sync::OnceLock::new(),
             frozen_builtin_mode: std::sync::OnceLock::new(),
             session_servers: std::sync::OnceLock::new(),
-            host_workspace: std::sync::OnceLock::new(),
             credential_client: std::sync::OnceLock::new(),
             builtin_available: std::sync::atomic::AtomicBool::new(true),
             stdio_available: std::sync::atomic::AtomicBool::new(crate::platform::STDIO_TRANSPORT),
@@ -514,37 +507,6 @@ impl McpClientPool {
                 "session MCP servers already bound",
             )
         })
-    }
-
-    /// 绑定宿主提供的 workspace 面（bare 初始化路径的 typed 输入）。
-    ///
-    /// 三态：`Remote` = 显式 descriptor（只走该 HTTP MCP）；`Absent` = 显式无
-    /// workspace（不装配本机 workspace、不探测本机目录、不回退）；未绑定 = 既有
-    /// 行为（bare 保留本机 builtin workspace，会话声明可替换）。
-    ///
-    /// 绑定窗口与 [`Self::set_session_servers`] 同一规则：必须在 MCP 初始化开始前。
-    /// header 环境变量在这里解析一次——解析失败不落池，调用方拿到可诊断的错误
-    /// （只出现 header 名与变量名，不出现值）。
-    pub fn set_host_workspace_binding(
-        &self,
-        binding: super::super::host_workspace::HostWorkspaceBinding,
-    ) -> Result<(), super::super::host_workspace::HostWorkspaceBindingError> {
-        use super::super::host_workspace::HostWorkspaceBindingError;
-        let context = self.builtin_context.lock();
-        if context.initialize_started || !self.is_open() {
-            return Err(HostWorkspaceBindingError::WindowClosed);
-        }
-        let resolved = binding.resolve()?;
-        self.host_workspace
-            .set(resolved)
-            .map_err(|_| HostWorkspaceBindingError::AlreadySet)
-    }
-
-    /// 已绑定的宿主 workspace 事实（`None` = 未绑定，走既有行为）。
-    pub(in crate::mcp) fn host_workspace(
-        &self,
-    ) -> Option<&super::super::host_workspace::ResolvedHostWorkspace> {
-        self.host_workspace.get()
     }
 
     pub fn configuration_revision(&self) -> Option<peri_config::ConfigurationRevision> {
@@ -823,7 +785,7 @@ impl McpClientPool {
             tracing::warn!("meta_harness: builtin workspace is closed; keeping builtin sections");
             return Ok(HashMap::new());
         }
-        // S9a3a：远端 workspace 的 cold 面没有资源能力（只宣告 tools）。在首个
+        // S9a3a：lazy 远端 workspace 的 cold 面没有资源能力（只宣告 tools）。在首个
         // 真实调用之前读取覆盖会把「可选探测」变成一次真实启动，因此按
         // 「覆盖不可得 ⇒ 保持内置段落」（X8）处理，而不是去探测。
         if self.remote_workspace_deferred() {
@@ -909,7 +871,7 @@ impl McpClientPool {
             );
             return Ok((None, None));
         }
-        // S9a3a：远端 workspace 在首个真实调用前只有 cold 工具面（资源能力未宣告）。
+        // S9a3a：lazy 远端 workspace 在首个真实调用前只有 cold 工具面（资源能力未宣告）。
         // 指令面按「不适用」返回空，而不是用一次 `resources/list` 启动真实后端；
         // 冻结的 system prompt 因此不含远端工作区指令（本机 builtin 不受影响）。
         if self.remote_workspace_deferred() {

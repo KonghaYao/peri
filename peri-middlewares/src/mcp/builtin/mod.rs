@@ -58,10 +58,7 @@ mod dispatch;
 
 mod builtin_registry;
 pub(crate) use builtin_registry::apply_builtin_overlay;
-pub(crate) use builtin_registry::assert_no_builtin_session_collision;
 pub(crate) use builtin_registry::builtin_injection_policy_from_env;
-#[cfg(test)]
-pub(crate) use builtin_registry::builtin_workspace_capability_enabled;
 pub(crate) use builtin_registry::capability_closed;
 pub(crate) use builtin_registry::closed_capabilities;
 pub(crate) use builtin_registry::closed_instances;

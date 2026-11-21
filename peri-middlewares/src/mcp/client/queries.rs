@@ -55,20 +55,6 @@ impl McpClientPool {
     /// `None` = 该能力没有已配置的 server（能力不可用），不是「未连接」。
     pub(crate) fn capability_server_name(&self, capability: &str) -> Option<String> {
         peri_acp_types::builtin_mcp::capability(capability)?;
-        // 宿主显式绑定是 workspace 面的唯一事实源（先于会话声明与 builtin）：
-        // `Remote` ⇒ 落点是同名远端条目；`Absent` ⇒ 本会话没有 workspace 面，
-        // 既不回落到 builtin `peri`，也不回落到会话声明。
-        if capability == "workspace" {
-            match self.host_workspace() {
-                Some(super::super::host_workspace::ResolvedHostWorkspace::Remote(_)) => {
-                    return Some(
-                        crate::mcp::host_workspace::HOST_WORKSPACE_SERVER_NAME.to_string(),
-                    );
-                }
-                Some(super::super::host_workspace::ResolvedHostWorkspace::Absent) => return None,
-                None => {}
-            }
-        }
         // 远端 Workspace 是宿主任命的外部执行环境；v5 迁移期仍以 `workspace`
         // 独立条目存在，不并入 `peri`（代理接线见 active spec 的未验证项）。
         if capability == "workspace" {
@@ -126,16 +112,6 @@ impl McpClientPool {
         &self,
         capability: &str,
     ) -> Option<peri_acp_types::plugin::ConfigSource> {
-        // 宿主绑定的来源判定不能等配置落盘：绑定后、初始化前，`configs` 仍为空。
-        if capability == "workspace" {
-            match self.host_workspace() {
-                Some(super::super::host_workspace::ResolvedHostWorkspace::Remote(_)) => {
-                    return Some(peri_acp_types::plugin::ConfigSource::WorkspaceRemote);
-                }
-                Some(super::super::host_workspace::ResolvedHostWorkspace::Absent) => return None,
-                None => {}
-            }
-        }
         let server = self.capability_server_name(capability)?;
         if let Some(servers) = self.session_servers.get() {
             if let Some(config) = servers.get(&server) {

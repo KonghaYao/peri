@@ -15,8 +15,6 @@ pub mod config;
 pub(crate) mod connection_gate;
 pub(crate) mod control;
 pub mod discover_tool;
-// 宿主提供的 workspace MCP 绑定（bare 初始化路径的 typed 输入）。
-pub mod host_workspace;
 // ClientInitializeError 来自 rmcp crate（504 bytes），无法修改其定义
 #[allow(clippy::result_large_err)]
 pub mod initialize;
@@ -63,10 +61,6 @@ pub use config::{
     McpConfigError, McpConfigFile, McpServerConfig, OAuthConfig,
 };
 pub use connection_gate::McpCallGate;
-pub use host_workspace::{
-    HeaderValueSource, HostWorkspaceBinding, HostWorkspaceBindingError, WorkspaceDescriptor,
-    WorkspaceHeader, HOST_WORKSPACE_SERVER_NAME,
-};
 pub use middleware::McpMiddleware;
 pub use oauth_flow::{
     OAuthCallbackResult, OAuthFailureKind, OAuthFlowError, OAuthFlowEvent, OAuthFlowManager,
