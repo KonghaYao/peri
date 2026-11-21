@@ -61,8 +61,19 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 发生变化按 `sandbox_binding_changed` 拒绝。
 
 `logicalId` 与 `rootSessionId` 是两层身份：前者属于调用方并决定 actor 路由，后者
-属于 Peri 的持久历史。创建中断后的重试靠 `logicalId` 指向同一 actor 与同一行，
-不把「预留 root id」当幂等写。
+属于 Peri 的持久历史。创建顺序固定为「先落 ID、后建 Peri 会话」：网关先校验或分配
+`rootSessionId`（调用方预留优先，否则 UUIDv7；非 UUIDv7 在写库前以 `400` 拒绝），
+预留 workspace 绑定，然后以 `state=creating` 写入完整会话行，之后才执行
+`session/new`；成功后同一行改为 `idle`。行写入失败即不启动 Peri 会话——没有可寻址的
+`logicalId → rootSessionId` 映射，就没有要创建的会话。
+
+进程在两次写入之间退出时，行留在 `creating`，`GET` 如实投影该状态。重试同一
+`logicalId` 先按行内 `rootSessionId` 执行 `session/load`；只有当 Peri 会话确实不存在
+（上一次死在 `session/new` 之前）才用同一 root id 建会话；`session/new` 遇到已存在
+的 id 会拒绝（`-32010`），此时再 attach 一次。两条路都失败时返回
+`502 create_recovery_failed`（`details.attach`/`details.spawn` 带契约错误码），行保留
+`creating`，可继续重试。恢复路径从不重新生成 root id，也不把「预留 root id」当幂等
+写。
 
 ## 4. HTTP 契约
 
@@ -98,7 +109,8 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   `message` item：`payload={role:"user",text,inputId}`，`id`/`itemId` 为
   `itim_input_<inputId>`，没有 `delta`/`complete` 字段。host 的
   `user_message_chunk` 回显不投影，因此同一 `inputId` 重试不会重复；`create` 的
-  `input` 同样写一条（每次 create 调用各一条，重试 create 仍按既有语义重跑该轮）。
+  `input` 同样写一条（每次 create 调用各一条；对已 `idle` 会话的重试 create 仍按
+  既有语义重跑该轮，`creating` 行的恢复不重放输入，见 §4.4）。
   assistant 帧仍按 `payload.messageId` 聚合。
 - item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
   游标，不能用 `id` 去重 delta 帧。
@@ -126,6 +138,13 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 `stream:true` 时网关先为 `logicalId` 打开订阅，再执行首轮，因此首轮事件不会丢；
 非流式创建返回 `created` 与会话投影。
 
+首次创建的写入顺序固定：`bind_environment`（hosted 时预留并持久化绑定）→ 写入
+`state=creating` 的完整会话行（含 `rootSessionId`、`cwd`、model、instructions、
+`mcp_tools`、environment 与时间戳）→ `session/new` → 同一行改 `idle` → 首轮。
+`created=true` 只出现在首次创建；命中已存在行（无论 `idle` 还是 `creating`）都返回
+`created=false`。行状态语义：`creating` 表示身份已持久化但 Peri 会话尚未确认，
+`idle`/`running` 表示 host 已就绪；`creating` 不是「创建失败」，而是可重试的中间态。
+
 ### 4.4 幂等语义
 
 - 输入受理需要稳定 `inputId`（body 或 `Idempotency-Key`，两处必须一致；服务端不
@@ -136,6 +155,12 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   返回 `existing`，不重复追加。
 - `POST /sessions` 的 `Idempotency-Key` 只用于稳定 `logicalId` 并复用已存在会话，
   不是跨请求的事务承诺。
+- 创建中断的恢复是**按已持久化的 root id 核对**，不是重新生成：`creating` 行重试
+  先 `session/load`、必要时才用同一 root id `session/new`，返回 `created=false`；
+  初始输入至多执行一次（行内已有 item 时不重放）。两次尝试都失败返回可诊断的
+  `502`（`details.operation=create_recovery_failed`），行与 root id 保留，可继续
+  重试。ACP 返回的 session id 与行内 root id 不一致时以 `session_id_mismatch`
+  失败，不接管该身份。
 
 ### 4.5 会话投影与环境
 
@@ -264,6 +289,10 @@ Bun：
   `session/load` 的回放帧写入 `swarm_items`、或为丢失绑定静默换 workspace。
 - 行状态为 `running` 时 `ensure_live` 返回 `502 session_resume_required`：崩溃中
   未完成 turn 的续跑仍未实现，也没有 `state=recovering` 状态。
+- 创建中断（行状态 `creating`）走独立的核对路径：先 `session/load`，只有当 Peri
+  会话确实不存在时才用同一 root id `session/new`，冲突后再试一次 attach；两条路
+  都失败返回 `502 create_recovery_failed` 并保留行。`ensure_live` 不把 `creating`
+  当作 `running` 拒绝，它只拒绝已记录未完成 turn 的行。
 
 历史只读不等于命令重放：恢复后的 `session/load` 会执行装配期探测（Bun 日志可见
 `resources/list`），但不会执行任何历史工具命令；旧 workspace 文件的哈希与 mtime

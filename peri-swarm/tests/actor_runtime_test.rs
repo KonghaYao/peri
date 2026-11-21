@@ -28,12 +28,12 @@ use tokio::time::timeout;
 
 use peri_swarm::actor::service::{AcpSwarmService, ActorServiceConfig};
 use peri_swarm::domain::{
-    ContentBlock, Cursor, Disposition, EnvironmentKind, ErrorCode, InputKind, InputMode,
-    InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId, SessionState, StreamEvent,
-    TurnEvent,
+    ActorKey, ContentBlock, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
+    InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId,
+    SessionState, StreamEvent, TurnEvent,
 };
 use peri_swarm::service::{CreateSessionCommand, SwarmService};
-use peri_swarm::store::MemorySwarmStore;
+use peri_swarm::store::{MemorySwarmStore, SwarmSessionRow, SwarmSessionUpdate, SwarmStore};
 
 /// One chunk of assistant output; the stub splits it in two SSE frames.
 const TURN_PREFIX: &str = "stub-";
@@ -857,8 +857,9 @@ async fn idle_mq_dispatch_produces_a_turn() {
 async fn model_unavailable_is_a_diagnosable_error() {
     clear_telemetry_env();
     let tmp = tempfile::tempdir().expect("tempdir");
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
     let service = AcpSwarmService::new(
-        Arc::new(MemorySwarmStore::new()),
+        Arc::clone(&store),
         ActorServiceConfig {
             // A trusted document with no provider profile: assembly must fail
             // before a host is spawned, and the client must get a 502 that says
@@ -895,7 +896,355 @@ async fn model_unavailable_is_a_diagnosable_error() {
         "message: {}",
         error.message()
     );
-    // No row and no runtime survive the failure (`design §7.4-1`).
-    assert!(service.get_session(&logical).await.is_err());
+    // The identity row survives as `creating` so a retry keeps the reserved
+    // root id; no host is live for it (`design §3`).
+    let row = store
+        .swarm_get_session(logical.as_str())
+        .await
+        .expect("read the row")
+        .expect("the interrupted create keeps its row");
+    assert_eq!(row.state, SessionState::Creating);
+    assert!(!service.is_live(&logical));
     assert!(service.shutdown_all().await.is_empty());
+}
+
+// ── interrupted create: the row is written before the Peri session ─────────
+
+fn service_config(base_url: &str, tmp: &tempfile::TempDir) -> ActorServiceConfig {
+    ActorServiceConfig {
+        settings_json: Some(settings_json(base_url)),
+        session_store_path: Some(session_store_path(tmp)),
+        channel_capacity: 64,
+        ..ActorServiceConfig::default()
+    }
+}
+
+fn create_command(
+    logical: &LogicalId,
+    cwd: &std::path::Path,
+    initial_input: Option<&str>,
+) -> CreateSessionCommand {
+    CreateSessionCommand {
+        logical_id: logical.clone(),
+        cwd: cwd.to_path_buf(),
+        model: None,
+        instructions: None,
+        mcp_tools: Vec::new(),
+        initial_input: initial_input.map(str::to_owned),
+        environment: EnvironmentKind::None,
+        environment_id: None,
+        root_session_id: None,
+    }
+}
+
+/// A row a killed process left behind: identity persisted, no host ever live.
+fn creating_row(logical: &LogicalId, cwd: &std::path::Path, root: &str) -> SwarmSessionRow {
+    SwarmSessionRow {
+        logical_id: logical.as_str().to_owned(),
+        root_session_id: root.to_owned(),
+        actor_key: ActorKey::new(logical.clone()).storage_key(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        state: SessionState::Creating,
+        model: None,
+        instructions: None,
+        mcp_tools: Vec::new(),
+        environment: EnvironmentRef {
+            kind: EnvironmentKind::None,
+            id: Some(logical.as_str().to_owned()),
+        },
+        created_at: "2026-11-20T00:00:00.000000Z".to_owned(),
+        last_activity_at: "2026-11-20T00:00:00.000000Z".to_owned(),
+        last_item_seq: 0,
+    }
+}
+
+async fn items_of(service: &AcpSwarmService, logical: &LogicalId) -> Vec<(u64, String)> {
+    service
+        .list_items(
+            logical,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                limit: ItemsWindow::MAX_LIMIT,
+            },
+        )
+        .await
+        .expect("items")
+        .items
+        .into_iter()
+        .map(|item| (item.seq, item.item_id))
+        .collect()
+}
+
+/// Wait until the turn terminal is persisted.
+///
+/// `create_session` with an initial input returns once the prompt reply is in;
+/// the reader may still be appending the completion item and writing `idle`.
+async fn wait_idle(service: &AcpSwarmService, logical: &LogicalId) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = service
+            .get_session(logical)
+            .await
+            .expect("session view")
+            .state;
+        if state == SessionState::Idle {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session did not settle to idle: {state:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creating_row_resumes_with_the_persisted_root_session_id() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
+    let logical = LogicalId::parse("agent-create-recover").expect("logical id");
+    let reserved = uuid(901);
+    store
+        .swarm_upsert_session(creating_row(&logical, &cwd, &reserved))
+        .await
+        .expect("seed the interrupted create row");
+
+    let service = AcpSwarmService::new(Arc::clone(&store), service_config(&base_url, &tmp));
+    let resumed = service
+        .create_session(create_command(&logical, &cwd, None))
+        .await
+        .expect("resume the interrupted create");
+
+    assert!(
+        !resumed.created,
+        "a recovered create reports the session, not a new one"
+    );
+    assert_eq!(resumed.session.root_session_id, reserved);
+    assert_eq!(resumed.session.state, SessionState::Idle);
+    assert!(service.is_live(&logical), "recovery starts one live host");
+    let history = service
+        .load_history(&logical, None, None)
+        .await
+        .expect("the peri session is readable");
+    assert!(
+        history.snapshot_token.is_some(),
+        "session/load addressed the recovered peri session"
+    );
+    assert_eq!(stub.main_calls(), 0, "recovery prompts no turn");
+    let reports = service.shutdown_all().await;
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].complete,
+        "host shutdown report: {:?}",
+        reports[0]
+    );
+    assert_eq!(
+        reports[0].session_id, reserved,
+        "the host ran the persisted root id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creating_row_with_a_persisted_peri_session_reattaches_without_replaying() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
+    let logical = LogicalId::parse("agent-create-reattach").expect("logical id");
+    let command = create_command(&logical, &cwd, Some("hello"));
+
+    let first = AcpSwarmService::new(Arc::clone(&store), service_config(&base_url, &tmp));
+    let created = first
+        .create_session(command.clone())
+        .await
+        .expect("first create");
+    assert!(created.created);
+    assert_eq!(stub.main_calls(), 1);
+    let reserved = created.session.root_session_id.clone();
+    wait_idle(&first, &logical).await;
+    let before = items_of(&first, &logical).await;
+    assert!(!before.is_empty(), "the first turn persisted items");
+    let item_seq = first
+        .get_session(&logical)
+        .await
+        .expect("view")
+        .last_item_seq;
+    assert!(first.shutdown_all().await[0].complete, "host died");
+
+    // The process died after the row and the Peri session existed but before
+    // the row reached `idle`; the retry sees exactly that state.
+    store
+        .swarm_update_session(SwarmSessionUpdate {
+            logical_id: logical.as_str().to_owned(),
+            state: SessionState::Creating,
+            last_item_seq: item_seq,
+            last_activity_at: "2026-11-20T00:00:00.000000Z".to_owned(),
+        })
+        .await
+        .expect("mark the create as interrupted");
+
+    let second = AcpSwarmService::new(Arc::clone(&store), service_config(&base_url, &tmp));
+    let resumed = second
+        .create_session(command)
+        .await
+        .expect("reattach to the persisted session");
+
+    assert!(!resumed.created);
+    assert_eq!(resumed.session.root_session_id, reserved);
+    assert_eq!(resumed.session.state, SessionState::Idle);
+    assert!(second.is_live(&logical), "the retry attached a host");
+    assert_eq!(
+        stub.main_calls(),
+        1,
+        "the recovered create does not replay the initial input"
+    );
+    assert_eq!(
+        items_of(&second, &logical).await,
+        before,
+        "session/load replay does not duplicate persisted items"
+    );
+    assert_eq!(second.shutdown_all().await[0].session_id, reserved);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retried_create_keeps_one_row_and_the_first_root_session_id() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
+    let logical = LogicalId::parse("agent-create-retry").expect("logical id");
+    let service = AcpSwarmService::new(Arc::clone(&store), service_config(&base_url, &tmp));
+
+    let created = service
+        .create_session(create_command(&logical, &cwd, None))
+        .await
+        .expect("first create");
+    let reserved = created.session.root_session_id.clone();
+
+    // A retry carrying a different reservation must not replace the identity
+    // the store already holds.
+    let mut retry = create_command(&logical, &cwd, None);
+    retry.root_session_id = Some(uuid(903));
+    let retried = service.create_session(retry).await.expect("retried create");
+    assert!(!retried.created);
+    assert_eq!(retried.session.root_session_id, reserved);
+
+    let row = store
+        .swarm_get_session(logical.as_str())
+        .await
+        .expect("read the row")
+        .expect("one row");
+    assert_eq!(row.logical_id, logical.as_str());
+    assert_eq!(row.root_session_id, reserved);
+    assert_eq!(row.state, SessionState::Idle);
+    assert_eq!(
+        stub.main_calls(),
+        0,
+        "neither create carried an initial input"
+    );
+    assert_eq!(service.shutdown_all().await[0].session_id, reserved);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_create_keeps_the_creating_row_and_retries_with_the_same_root_id() {
+    clear_telemetry_env();
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
+    let logical = LogicalId::parse("agent-create-failure").expect("logical id");
+    let reserved = uuid(904);
+
+    // The deployment has no provider: the row is written, then assembly fails.
+    let failing = AcpSwarmService::new(
+        Arc::clone(&store),
+        ActorServiceConfig {
+            settings_json: Some(json!({ "config": {} }).to_string()),
+            ..service_config(&base_url, &tmp)
+        },
+    );
+    let mut command = create_command(&logical, &cwd, Some("hello"));
+    command.root_session_id = Some(reserved.clone());
+    let error = failing
+        .create_session(command)
+        .await
+        .expect_err("the host cannot be assembled");
+    assert_eq!(error.kind(), peri_swarm::domain::ErrorKind::BadGateway);
+    assert!(!failing.is_live(&logical));
+
+    let row = store
+        .swarm_get_session(logical.as_str())
+        .await
+        .expect("read the row")
+        .expect("the failed create keeps its row");
+    assert_eq!(row.state, SessionState::Creating);
+    assert_eq!(row.root_session_id, reserved);
+
+    let service = AcpSwarmService::new(Arc::clone(&store), service_config(&base_url, &tmp));
+    let recovered = service
+        .create_session(create_command(&logical, &cwd, Some("hello")))
+        .await
+        .expect("the retry completes the create");
+    assert!(!recovered.created);
+    assert_eq!(recovered.session.root_session_id, reserved);
+    wait_idle(&service, &logical).await;
+    let view = service.get_session(&logical).await.expect("view");
+    assert_eq!(view.state, SessionState::Idle);
+    assert_eq!(
+        stub.main_calls(),
+        1,
+        "the initial input runs once, on the attempt that reached a host"
+    );
+    let row = store
+        .swarm_get_session(logical.as_str())
+        .await
+        .expect("read the row")
+        .expect("still one row");
+    assert_eq!(row.root_session_id, reserved);
+    assert_eq!(row.state, SessionState::Idle);
+    assert_eq!(service.shutdown_all().await[0].session_id, reserved);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_rejects_a_root_session_id_the_host_could_never_honor() {
+    clear_telemetry_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store: Arc<dyn SwarmStore> = Arc::new(MemorySwarmStore::new());
+    let service = AcpSwarmService::new(
+        Arc::clone(&store),
+        ActorServiceConfig {
+            session_store_path: Some(session_store_path(&tmp)),
+            channel_capacity: 16,
+            ..ActorServiceConfig::default()
+        },
+    );
+    let logical = LogicalId::parse("agent-create-bad-root").expect("logical id");
+    let mut command = create_command(&logical, tmp.path(), None);
+    command.root_session_id = Some("not-a-uuid".to_owned());
+
+    let error = service
+        .create_session(command)
+        .await
+        .expect_err("a non-UUIDv7 root id is refused");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(
+        error.details()["field"],
+        json!("rootSessionId"),
+        "the refusal names the field: {}",
+        error.details()
+    );
+    assert!(
+        store
+            .swarm_get_session(logical.as_str())
+            .await
+            .expect("read the row")
+            .is_none(),
+        "an identity the host can never honor is not persisted"
+    );
 }

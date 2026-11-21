@@ -242,6 +242,17 @@ fn session_roundtrip_preserves_every_field_and_the_mcp_declaration() {
 }
 
 #[test]
+fn creating_state_roundtrips_as_the_durable_reservation() {
+    let mut row = sample_session();
+    row.state = SessionState::Creating;
+    let params = session_params(&row).expect("params");
+    // The wire value is what an interrupted create is read back as on the next
+    // process; a decoder that refused it would strand the reserved root id.
+    assert_eq!(params[4], Value::Text("creating".to_owned()));
+    assert_eq!(decode_session(&params).expect("decoded"), row);
+}
+
+#[test]
 fn session_without_mcp_tools_stores_null_and_reads_back_empty() {
     let mut row = sample_session();
     row.mcp_tools.clear();

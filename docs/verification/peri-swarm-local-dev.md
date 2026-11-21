@@ -185,3 +185,43 @@ manager 启动沙箱时传 `true`，把 `dirname(periPath)` 去重后并入该�
 0 fail；`node --test dist/tests/swarm/*.test.js` 38 pass / 0 fail；相关文件
 `biome check` 无 error。**未重跑真实 macOS `sandbox-exec` 端到端链路**：Swarm 显式
 opt-in 后的二进制执行与目录可读范围仍需用真实链路复验，本记录不将其写成已验收。
+
+## 10. 审查修复：先持久化 root id，再创建 Peri 会话
+
+PR #513 审查指出一个真实缺口：`AcpSwarmService::create_session` 先执行
+`session/new`、再写 `logicalId → rootSessionId` 行。若进程在两次写入之间退出，行
+不存在，重试查不到映射就会重新分配 UUIDv7，与「创建中断后按原 ID 核对」的承诺相反。
+
+修复（提交信息 `fix(swarm): persist the root session id before creating the peri
+session`）：
+
+| 变更 | 位置 |
+| --- | --- |
+| `SessionState::Creating`（`"creating"`），`ensure_live` 不把它当作 `running` 拒绝 | `domain/session.rs`、`store/turso.rs`、`actor/service.rs` |
+| 写入顺序改为「校验/分配 root id → 绑定 workspace → 写 `creating` 行 → `session/new` → 行改 `idle`」；行写入失败即不启动 host | `actor/service.rs::create_session` |
+| 重试 `creating` 行：先 `session/load`，Peri 会话不存在才用行内 root id 建会话，`-32010` 冲突后再 attach 一次；都失败返回 `502 create_recovery_failed` 并保留行 | `actor/service.rs::recover_creating_row` / `live_for_creating_row` |
+| 调用方预留的 root id 在写库前校验 UUIDv7，拒绝时不落行 | `actor/service.rs::validate_root_session_id` |
+| 恢复路径的 session id 不一致统一为 `session_id_mismatch` | `actor/service.rs::spawn_runtime` |
+
+自动化证据（真实 Peri ACP Host + 模型 stub + 内存 store，无 Loom/Rivet/Bun）：
+
+| 断言 | 用例 |
+| --- | --- |
+| 预置 `creating` 行 → 重试使用同一 root id、`state=idle`、`session/load` 可读、不产生 turn | `actor_runtime_test::creating_row_resumes_with_the_persisted_root_session_id` |
+| 预置 `creating` 行且 Peri 会话已存在 → attach 同一 root id，不重放初始输入，items 不重复 | `actor_runtime_test::creating_row_with_a_persisted_peri_session_reattaches_without_replaying` |
+| 重试同 `logicalId`（即使请求带了另一个 root id）只保留一行与原 root id | `actor_runtime_test::retried_create_keeps_one_row_and_the_first_root_session_id` |
+| `spawn_runtime` 失败后行保留 `creating`，再次调用仍用同一 root id，初始输入恰好执行一次 | `actor_runtime_test::failed_create_keeps_the_creating_row_and_retries_with_the_same_root_id` |
+| 非 UUIDv7 预留 id 在写库前 `400 invalid_input`，不落行 | `actor_runtime_test::create_rejects_a_root_session_id_the_host_could_never_honor` |
+| 无 provider 时 host 装配失败、行停在 `creating`、无 live host | `actor_runtime_test::model_unavailable_is_a_diagnosable_error`（断言按新语义更新） |
+| `creating` 值编码/解码往返 | `store::turso::tests::creating_state_roundtrips_as_the_durable_reservation` |
+
+门禁（本工作树）：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` 全绿
+（216 passed、0 failed、5 ignored；其中 3 个真实 Loom 测试与 1 个真实 Rivet 测试仍
+`ignored`）；`cargo fmt --all -- --check`、`clippy -p peri-swarm --all-targets -D
+warnings` 与 pre-commit 通过。
+
+证据边界：本轮**没有**注入真实进程崩溃来复现「行已写、Peri 会话未确认」的窗口，测试
+通过预置/改写 `creating` 行来代表该状态；真实 Loom/Rivet/Bun/SRT 链路与官方 SDK
+未重跑。`session/new` 返回 `-32010` 后再 attach 的成功分支没有独立用例（测试里的
+Peri 会话存在时 attach 直接成功），只由代码路径与 `-32010` 的既有映射
+（`error.rs::from_acp_error`）保证；该分支需要真实崩溃窗口才能复验。

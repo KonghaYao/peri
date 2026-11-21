@@ -528,6 +528,7 @@ fn columns_of(row: &turso_serverless::Row) -> Result<Vec<Value>, StoreError> {
 
 fn parse_session_state(raw: &str) -> Result<SessionState, StoreError> {
     match raw {
+        "creating" => Ok(SessionState::Creating),
         "idle" => Ok(SessionState::Idle),
         "running" => Ok(SessionState::Running),
         "recovering" => Ok(SessionState::Recovering),

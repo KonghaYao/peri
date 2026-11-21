@@ -292,7 +292,8 @@ const response = await fetch(
   `delta`/`complete` 字段，因此不会终止回放，也不参与 assistant 聚合。同一
   `Idempotency-Key`/`inputId` 重试返回 `existing`，不会重复追加。`kind=control` 的
   输入不写用户帧。`create` 的 `input` 同样记为 user message 帧（每次 create 调用
-  各一条；重试 create 会按既有语义重跑该轮）。
+  各一条；对已 `idle` 会话的重试 create 会按既有语义重跑该轮，恢复 `creating` 行
+  时不重放，见下文「创建中断与恢复」）。
 - **assistant 消息的 payload 带 `role`**：delta 帧为
   `{ role: 'assistant', messageId, text, delta: true }`，complete 帧为
   `{ role: 'assistant', messageId, text, complete: true }`。用户输入帧是
@@ -341,12 +342,34 @@ const response = await fetch(
   本轮可能已经完成**；它不是「已排队、稍后执行」的异步受理，也不能靠 POST 之后再开
   流补看本轮（见上文实时用法）。
 
+### 创建中断与恢复（`state=creating`）
+
+- 写入顺序固定：校验/分配 `rootSessionId`（调用方预留优先，否则 UUIDv7；非 UUIDv7
+  在写库前 `400 invalid_request`）→ 预留 workspace 绑定 → 以 `state=creating` 写入
+  完整会话行 → `session/new` → 同一行改 `idle`。行写入失败就不启动 Peri 会话：
+  没有 `logicalId → rootSessionId` 映射的会话不可寻址。
+- 进程在「行已写、Peri 会话未确认」之间退出时，`GET /sessions/{logicalId}` 如实返回
+  `state=creating`（`created` 仍是 `false` 的重试语义）。这不是终态，重试同一
+  `logicalId` 即可完成创建。
+- 重试按行内 `rootSessionId` 核对：先 `session/load`；只有当 Peri 会话确实不存在
+  （上一次死在 `session/new` 之前）才用**同一个** root id 建会话；`session/new`
+  返回 `-32010 Session id already exists` 时再试一次 attach。绝不重新生成 root id。
+- 恢复成功返回 `created=false`，行变 `idle`；初始输入至多执行一次（行内已有 item
+  时不重放）。两条路都失败返回 `502 upstream_unavailable`
+  （`details.operation=create_recovery_failed`，附 attach/spawn 的契约错误码），行
+  保留 `creating`，可再次重试。
+- `ensure_live` 只在行状态为 `running`（崩溃中未完成 turn）时拒绝；`creating` 不是
+  拒绝条件。
+
 ## 已知限制
 
 - 模型侧没有内置真实供应商；本地验收使用确定性 stub。真实模型需要
   `PERI_SWARM_SETTINGS_JSON` 中的 provider/profile 配置。
 - 只杀 Rust 宿主的 reattach 已实现且验证；未完成 turn（行状态 `running`）不会
   `session/resume`，返回 `502 session_resume_required`。
+- 创建中断留下的 `creating` 行只有重试同一 `logicalId` 的 create 才会完成核对；
+  `GET`/`items` 只读投影，不驱动恢复；`POST /events` 的首次输入只走 `ensure_live`
+  （能 attach 就 attach），不会补做「Peri 会话不存在时用同一 root id 建会话」那一步。
 - 后台任务引用（MCP `resultType:"task"`）尚未进入空闲回收判定；长任务期间可能被
   回收，需要重新 ensure。
 - `sandbox.state` 在会话投影中固定为 `null`，`sandbox.runId` 也不会在沙箱真实运行后

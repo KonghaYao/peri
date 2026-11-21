@@ -215,7 +215,7 @@
 | F-CLI-005 | 源码存在 | [契约](../design/workflow.md) | [源码](../../peri-tui/src/cli_workflow.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-CLI-006 | 源码存在 | [契约](../design/configuration-authority.md) | [源码](../../peri-tui/src/cli_args.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-SWARM-001 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/mod.rs)；[测试](../../peri-swarm/tests/http_contract_test.rs)；[证据](peri-swarm-local-dev.md)；缺口：真实第三方调用方的门禁组合未验证 | 本地真实链路已验证；本次未重跑 |
-| F-SWARM-002 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/identity.rs)；[测试](../../peri-swarm/tests/actor_runtime_test.rs)；[证据](peri-swarm-local-dev.md)；缺口：跨机接管与第二 root id 铸造场景未验证 | 本地真实链路已验证；本次未重跑 |
+| F-SWARM-002 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/domain/identity.rs)；[测试](../../peri-swarm/tests/actor_runtime_test.rs)；[证据](peri-swarm-local-dev.md)；缺口：跨机接管未验证；创建中断的 root id 核对由预置 `creating` 行测试覆盖，未注入真实进程崩溃 | 本地真实链路已验证；本次未重跑 |
 | F-SWARM-003 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/sse.rs)；[测试](../../peri-swarm/tests/streaming_test.rs)；[证据](peri-swarm-local-dev.md)；缺口：慢客户端 `gap` 与多订阅者容量未验证 | 断流重连已真实运行；本次未重跑 |
 | F-SWARM-004 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/http/request.rs)；[测试](../../peri-swarm/tests/http_contract_test.rs)；[证据](peri-swarm-local-dev.md)；缺口：整批原子受理不提供 | 并发同键与冲突已真实运行；本次未重跑 |
 | F-SWARM-005 | 源码存在 | [契约](../design/peri-swarm.md) | [源码](../../peri-swarm/src/store/turso.rs)；[测试](../../peri-swarm/tests/loom_store_test.rs)；[证据](peri-swarm-local-dev.md)；缺口：真实 Loom 存储测试默认 ignored，需显式启用 | 两库隔离已真实运行；本次未重跑 |

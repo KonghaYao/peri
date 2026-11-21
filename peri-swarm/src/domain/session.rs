@@ -3,9 +3,15 @@ use serde::{Deserialize, Serialize};
 use crate::domain::identity::LogicalId;
 
 /// Durable session state exposed by `GET /v1/agents/sessions/{logicalId}`.
+///
+/// `Creating` is the durable "identity reserved, host not live yet" state: the
+/// row is written before the Peri session exists, so an interrupted create can
+/// reconcile against the persisted `root_session_id` instead of minting a new
+/// one (`design §3`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
+    Creating,
     Idle,
     Running,
     Recovering,
@@ -17,6 +23,7 @@ impl SessionState {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Creating => "creating",
             Self::Idle => "idle",
             Self::Running => "running",
             Self::Recovering => "recovering",

@@ -19,7 +19,7 @@
 //! the slot to be empty, and cancel waits for the slot to leave its turn.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,12 +38,14 @@ use super::runtime::{
 use crate::domain::{
     new_root_session_id, ActorKey, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
     ErrorKind, InputKind, InputMode, InputOutcome, InputState, InputSubmission, ItemOrder,
-    ItemPage, ItemsWindow, LogicalId, SandboxView, SessionState, SessionView, StreamEvent,
-    SwarmError, TurnView,
+    ItemPage, ItemsWindow, LogicalId, McpToolSpec, SandboxView, SessionState, SessionView,
+    StreamEvent, SwarmError, TurnView,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
-use crate::store::{store_failure, InputPut, SwarmInputRow, SwarmSessionRow, SwarmStore};
+use crate::store::{
+    store_failure, InputPut, SwarmInputRow, SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
+};
 
 /// Upper bound for a steered turn to be continued by the host's queued run.
 ///
@@ -99,6 +101,21 @@ impl Default for ActorServiceConfig {
             sandbox: None,
         }
     }
+}
+
+/// Everything [`AcpSwarmService::spawn_runtime`] needs to assemble one host.
+///
+/// The create path fills it from the validated command; the interrupted-create
+/// recovery fills it from the persisted row, so a retry cannot drift from the
+/// identity and declaration that row already records.
+struct SpawnRequest<'a> {
+    logical_id: &'a LogicalId,
+    cwd: &'a Path,
+    model: Option<String>,
+    instructions: Option<String>,
+    mcp_tools: &'a [McpToolSpec],
+    workspace: Option<&'a SandboxMcpBinding>,
+    root_session_id: String,
 }
 
 /// One live root session: child host, item log, turn slot and SSE channel.
@@ -875,14 +892,11 @@ impl AcpSwarmService {
 
     async fn spawn_runtime(
         &self,
-        command: &CreateSessionCommand,
-        model: Option<String>,
-        root_session_id: String,
-        workspace: Option<&SandboxMcpBinding>,
+        request: SpawnRequest<'_>,
     ) -> Result<Arc<SessionRuntime>, SwarmError> {
-        let hub = self.hub_for(command.logical_id.as_str());
+        let hub = self.hub_for(request.logical_id.as_str());
         let log = Arc::new(ItemLog::new(
-            command.logical_id.as_str(),
+            request.logical_id.as_str(),
             Arc::clone(&self.store),
             hub.sender.clone(),
             hub.tail,
@@ -892,17 +906,18 @@ impl AcpSwarmService {
             .session_store
             .clone()
             .unwrap_or_else(|| local_session_store(self.config.session_store_path.clone()));
+        let root_session_id = request.root_session_id;
         let child = AcpChild::spawn(
             ChildConfig {
-                cwd: command.cwd.clone(),
+                cwd: request.cwd.to_path_buf(),
                 session_store,
                 machine_id: self.config.machine_id,
                 workspace_root: self.config.workspace_root.clone(),
                 settings_json: self.config.settings_json.clone(),
-                model,
-                instructions: command.instructions.clone(),
-                mcp_tools: command.mcp_tools.clone(),
-                workspace: workspace.cloned(),
+                model: request.model,
+                instructions: request.instructions,
+                mcp_tools: request.mcp_tools.to_vec(),
+                workspace: request.workspace.cloned(),
                 root_session_id: root_session_id.clone(),
             },
             Arc::clone(&log),
@@ -910,7 +925,7 @@ impl AcpSwarmService {
         .await
         .map_err(|error| {
             tracing::warn!(
-                logical_id = command.logical_id.as_str(),
+                logical_id = request.logical_id.as_str(),
                 error = %error,
                 "swarm ACP host assembly failed"
             );
@@ -919,22 +934,123 @@ impl AcpSwarmService {
         if child.session_id() != root_session_id {
             let shutdown = child.shutdown().await;
             tracing::warn!(
-                logical_id = command.logical_id.as_str(),
+                logical_id = request.logical_id.as_str(),
                 expected = %root_session_id,
                 report = shutdown.report,
                 "reserved root session id was not honored"
             );
-            return Err(SwarmError::new(
-                ErrorKind::BadGateway,
-                ErrorCode::AgentError,
-                "agent session identity does not match the reserved id",
-            ));
+            return Err(SwarmError::upstream_unavailable("session_id_mismatch"));
         }
         Ok(Arc::new(SessionRuntime::new(
             Arc::new(child),
             log,
             hub.sender,
         )))
+    }
+
+    /// Reconcile a create that was interrupted after its row was persisted.
+    ///
+    /// The row's `root_session_id` is the only identity this path may use. The
+    /// row stays `Creating` until a host is live, so an interrupted attempt is
+    /// visible instead of being mistaken for an idle session.
+    async fn recover_creating_row(
+        &self,
+        command: &CreateSessionCommand,
+        row: &SwarmSessionRow,
+        model: Option<String>,
+    ) -> Result<CreateSessionResult, SwarmError> {
+        let runtime = self.live_for_creating_row(command, row, model).await?;
+        // Durable progress, not the row copy: an attach can race an interaction
+        // that is already appending items.
+        let last_seq = self.last_seq(&command.logical_id).await?;
+        // A concurrent interaction may already own a turn on the attached host;
+        // promoting it to `idle` would hide that turn from `GET /sessions`.
+        let live_state = if runtime.is_running() {
+            SessionState::Running
+        } else {
+            SessionState::Idle
+        };
+        self.store
+            .swarm_update_session(SwarmSessionUpdate {
+                logical_id: row.logical_id.clone(),
+                state: live_state,
+                last_item_seq: last_seq,
+                last_activity_at: peri_time::now_utc_rfc3339(),
+            })
+            .await
+            .map_err(|error| store_failure("update_session", error))?;
+        // The initial input runs at most once: a persisted item means the
+        // interrupted attempt already recorded it, so replaying it here would
+        // duplicate the user message and its turn.
+        if last_seq == 0 {
+            if let Some(text) = command.initial_input.as_deref() {
+                runtime.log.record_user_input(None, text).await?;
+                self.run_turn(&runtime, text).await?;
+            }
+        }
+        let session = self.view_by_id(&command.logical_id).await?;
+        Ok(CreateSessionResult {
+            session,
+            created: false,
+        })
+    }
+
+    /// Attach to the persisted root id, and only create the Peri session when
+    /// the interrupted attempt provably never reached `session/new`.
+    ///
+    /// `session/new` reusing an existing id is refused by the host (`-32010`),
+    /// so a failed create is followed by one more attach before the failure is
+    /// reported. Every failure keeps the row `Creating`.
+    async fn live_for_creating_row(
+        &self,
+        command: &CreateSessionCommand,
+        row: &SwarmSessionRow,
+        model: Option<String>,
+    ) -> Result<Arc<SessionRuntime>, SwarmError> {
+        let attach_error = match self.ensure_live(&command.logical_id).await {
+            Ok(true) => {
+                return self
+                    .runtime(&command.logical_id)
+                    .map_err(|_| SwarmError::upstream_unavailable("session_not_live"))
+            }
+            Ok(false) => return Err(SwarmError::unknown_agent(command.logical_id.as_str())),
+            Err(error) => error,
+        };
+        tracing::warn!(
+            logical_id = command.logical_id.as_str(),
+            root_session_id = %row.root_session_id,
+            error = %attach_error,
+            "swarm interrupted create could not attach the persisted session"
+        );
+        let workspace = self.reattach_workspace(row).await?;
+        let spawn_error = match self
+            .spawn_runtime(SpawnRequest {
+                logical_id: &command.logical_id,
+                cwd: Path::new(&row.cwd),
+                model,
+                instructions: row.instructions.clone(),
+                mcp_tools: &row.mcp_tools,
+                workspace: workspace.as_ref(),
+                root_session_id: row.root_session_id.clone(),
+            })
+            .await
+        {
+            Ok(runtime) => {
+                self.sessions
+                    .lock()
+                    .insert(row.logical_id.clone(), Arc::clone(&runtime));
+                return Ok(runtime);
+            }
+            Err(error) => error,
+        };
+        // The interrupted attempt may have created the session before dying;
+        // the attach that just failed can succeed once the store settles.
+        match self.ensure_live(&command.logical_id).await {
+            Ok(true) => self
+                .runtime(&command.logical_id)
+                .map_err(|_| SwarmError::upstream_unavailable("session_not_live")),
+            _ => Err(create_recovery_failure(row, &attach_error, &spawn_error)),
+        }
     }
 }
 
@@ -989,6 +1105,12 @@ impl SwarmService for AcpSwarmService {
                 .with_details(json!({ "configured": row.model, "requested": model })));
             }
             check_environment_identity(&row.environment, &command)?;
+            if row.state == SessionState::Creating {
+                // The previous attempt persisted the identity before starting
+                // the Peri session and never reached `Idle`; reconcile against
+                // that row instead of creating a second identity.
+                return self.recover_creating_row(&command, &row, model).await;
+            }
             // A host restart leaves the row but no in-process child; attach it
             // with the persisted identity before running an initial input
             // (`design §6.4-2`, S9a4b). `ensure_live` never prompts or replays.
@@ -1013,30 +1135,26 @@ impl SwarmService for AcpSwarmService {
             });
         }
 
+        // Resolve the identity before any reservation: a caller-supplied id the
+        // host can never honor must not leave a workspace binding behind.
+        let root_session_id = match command.root_session_id.as_deref() {
+            Some(reserved) => {
+                validate_root_session_id(reserved)?;
+                reserved.to_owned()
+            }
+            None => new_root_session_id(),
+        };
         // S8a3a: reserve (never start) the Bun workspace before the host is
         // assembled, so `session/new` already carries the workspace entry.
         let (environment, workspace) = self.bind_environment(&command).await?;
-        let root_session_id = command
-            .root_session_id
-            .clone()
-            .unwrap_or_else(new_root_session_id);
-        let runtime = self
-            .spawn_runtime(
-                &command,
-                model.clone(),
-                root_session_id.clone(),
-                workspace.as_ref(),
-            )
-            .await?;
-
         let now = peri_time::now_utc_rfc3339();
         let row = SwarmSessionRow {
             logical_id: command.logical_id.as_str().to_owned(),
-            root_session_id,
+            root_session_id: root_session_id.clone(),
             actor_key: ActorKey::new(command.logical_id.clone()).storage_key(),
-            cwd,
-            state: SessionState::Idle,
-            model,
+            cwd: cwd.clone(),
+            state: SessionState::Creating,
+            model: model.clone(),
             instructions: command.instructions.clone(),
             mcp_tools: command.mcp_tools.clone(),
             environment,
@@ -1044,27 +1162,67 @@ impl SwarmService for AcpSwarmService {
             last_activity_at: now,
             last_item_seq: 0,
         };
-        match self.store.swarm_upsert_session(row).await {
-            Ok(()) => {}
+        // Persist the reserved identity **before** `session/new` (`design §3`).
+        // A crash between the two writes then leaves a row that names the root
+        // id, and the retry reconciles against it instead of minting a second
+        // one. The row is also the precondition for starting a host: without an
+        // addressable mapping there is no session to create.
+        if let Err(error) = self.store.swarm_upsert_session(row.clone()).await {
+            return Err(match error {
+                crate::store::StoreError::Conflict(_) => SwarmError::new(
+                    ErrorKind::Conflict,
+                    ErrorCode::IdentityConflict,
+                    "logicalId was created concurrently with a different identity",
+                )
+                .with_details(json!({ "field": "logicalId" })),
+                error => store_failure("upsert_session", error),
+            });
+        }
+        let runtime = match self
+            .spawn_runtime(SpawnRequest {
+                logical_id: &command.logical_id,
+                cwd: &command.cwd,
+                model: model.clone(),
+                instructions: command.instructions.clone(),
+                mcp_tools: &command.mcp_tools,
+                workspace: workspace.as_ref(),
+                root_session_id: root_session_id.clone(),
+            })
+            .await
+        {
+            Ok(runtime) => runtime,
             Err(error) => {
-                // A session without its row is not addressable; do not leak a
-                // live host for it (`design §7.4-1`).
-                let shutdown = runtime.child.shutdown().await;
+                // Keep the `Creating` row: it is the durable record of the
+                // reserved id, so the retry addresses the same session and
+                // never re-derives an identity from a fresh UUID.
                 tracing::warn!(
                     logical_id = command.logical_id.as_str(),
-                    report = shutdown.report,
-                    "swarm session row write failed; host shut down"
+                    root_session_id = %root_session_id,
+                    "swarm session create failed after the identity was persisted; the row stays creating"
                 );
-                return Err(match error {
-                    crate::store::StoreError::Conflict(_) => SwarmError::new(
-                        ErrorKind::Conflict,
-                        ErrorCode::IdentityConflict,
-                        "logicalId was created concurrently with a different identity",
-                    )
-                    .with_details(json!({ "field": "logicalId" })),
-                    error => store_failure("upsert_session", error),
-                });
+                return Err(error);
             }
+        };
+        if let Err(error) = self
+            .store
+            .swarm_update_session(SwarmSessionUpdate {
+                logical_id: row.logical_id.clone(),
+                state: SessionState::Idle,
+                last_item_seq: row.last_item_seq,
+                last_activity_at: peri_time::now_utc_rfc3339(),
+            })
+            .await
+        {
+            // The host is not registered in `sessions` yet; shutting it down
+            // avoids leaking an untracked child. The row stays `Creating` and a
+            // retry attaches to the now existing Peri session.
+            let shutdown = runtime.child.shutdown().await;
+            tracing::warn!(
+                logical_id = command.logical_id.as_str(),
+                report = shutdown.report,
+                "swarm session row promotion failed; host shut down"
+            );
+            return Err(store_failure("update_session", error));
         }
         self.sessions
             .lock()
@@ -1269,6 +1427,47 @@ impl SwarmService for AcpSwarmService {
         let live = hub.sender.subscribe();
         EventSubscription::new(Vec::new(), live, hub.tail)
     }
+}
+
+/// A caller-reserved root id must be the shape Peri accepts (UUIDv7).
+///
+/// Validating before the row is written keeps a refused identity out of the
+/// store: a `creating` row the host can never honor would make every retry fail
+/// the same way with no way forward.
+fn validate_root_session_id(root_session_id: &str) -> Result<(), SwarmError> {
+    let valid = Uuid::parse_str(root_session_id)
+        .is_ok_and(|id| id.get_version() == Some(uuid::Version::SortRand));
+    if valid {
+        return Ok(());
+    }
+    Err(SwarmError::invalid_input("rootSessionId must be a UUIDv7")
+        .with_details(json!({ "field": "rootSessionId" })))
+}
+
+/// One diagnosable failure for a create that could neither attach nor create
+/// its persisted identity.
+///
+/// Upstream messages are not echoed (they may embed provider payloads); the
+/// contract codes and details stay inspectable so the caller can tell an
+/// unreachable host from a refused identity.
+fn create_recovery_failure(
+    row: &SwarmSessionRow,
+    attach: &SwarmError,
+    spawn: &SwarmError,
+) -> SwarmError {
+    tracing::warn!(
+        logical_id = row.logical_id.as_str(),
+        root_session_id = %row.root_session_id,
+        attach = %attach,
+        spawn = %spawn,
+        "swarm interrupted create could neither attach nor create the peri session"
+    );
+    SwarmError::upstream_unavailable("create_recovery_failed").with_details(json!({
+        "logicalId": row.logical_id,
+        "rootSessionId": row.root_session_id,
+        "attach": { "code": attach.code().as_str(), "details": attach.details() },
+        "spawn": { "code": spawn.code().as_str(), "details": spawn.details() },
+    }))
 }
 
 /// A retried create must address the same environment identity; changing the
