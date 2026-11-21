@@ -709,6 +709,100 @@ fn main_frame_navigations_refresh_the_address_bar() {
     assert!(machine.on(Event::FrameNavigated { url: current }, now).is_empty());
 }
 
+/// Kitesurf reports `Page.frameNavigated` seconds after the document commits,
+/// so the tab list is what first tells the gateway that a link was followed.
+#[test]
+fn the_tab_list_is_what_first_reports_a_page_driven_navigation() {
+    let now = Instant::now();
+    let mut machine = machine();
+
+    // Read-only: a URL in the tab list is not an invitation to write.
+    assert!(machine
+        .on(Event::PageUrl("https://example.test/next".to_owned()), now)
+        .is_empty());
+
+    holds(&mut machine, now);
+    assert_eq!(
+        machine.on(Event::PageUrl("https://example.test/next".to_owned()), now),
+        vec![Effect::RefreshNavigation]
+    );
+
+    // The URL the address bar already shows does not trigger another read.
+    let current = machine.navigation().url.clone();
+    assert!(machine.on(Event::PageUrl(current), now).is_empty());
+}
+
+/// The tab list updates while the old document is still committing, so the
+/// first read can miss the new URL. The hint is retried instead of waiting for
+/// Kitesurf's frame event, which arrives seconds later.
+#[test]
+fn an_unconfirmed_page_url_is_retried_until_a_read_sees_it() {
+    let now = Instant::now();
+    let mut machine = machine();
+    holds(&mut machine, now);
+
+    assert_eq!(
+        machine.on(Event::PageUrl("https://example.test/next".to_owned()), now),
+        vec![Effect::RefreshNavigation]
+    );
+    // The read came back with the old document; the retry deadline is not due.
+    assert!(machine
+        .on(Event::Tick, now + Duration::from_millis(400))
+        .is_empty());
+    assert_eq!(
+        machine.on(Event::Tick, now + Duration::from_millis(600)),
+        vec![Effect::RefreshNavigation]
+    );
+
+    // A read that reports the hinted document ends the retries.
+    machine.on(
+        Event::Navigation(cdp::NavigationState {
+            url: "https://example.test/next".to_owned(),
+            ..cdp::NavigationState::default()
+        }),
+        now + Duration::from_millis(650),
+    );
+    assert!(machine
+        .on(Event::Tick, now + Duration::from_secs(2))
+        .is_empty());
+    assert_eq!(machine.next_deadline(), None);
+}
+
+/// Kitesurf refuses commands for a while after a navigation, so a back step
+/// that never loads must leave the index where it was.
+#[test]
+fn a_history_step_moves_only_when_the_document_arrives() {
+    let now = Instant::now();
+    let mut machine = machine();
+    holds(&mut machine, now);
+    for url in ["https://example.test/one", "https://example.test/two"] {
+        machine.on(
+            Event::Navigation(cdp::NavigationState {
+                url: url.to_owned(),
+                ..cdp::NavigationState::default()
+            }),
+            now,
+        );
+    }
+
+    assert_eq!(
+        machine.peek_history(-1).as_deref(),
+        Some("https://example.test/one")
+    );
+    assert_eq!(
+        machine.navigation().url,
+        "https://example.test/two",
+        "asking where a step goes must not move it"
+    );
+    assert!(machine.peek_history(1).is_none());
+
+    assert_eq!(
+        machine.on(Event::HistoryArrived { delta: -1 }, now),
+        vec![Effect::RefreshNavigation]
+    );
+    assert_eq!(machine.peek_history(1).as_deref(), Some("https://example.test/two"));
+}
+
 /// Kitesurf's history never learns about `location.assign` navigations, so the
 /// back/forward buttons follow the stack the machine keeps.
 #[test]
@@ -783,6 +877,10 @@ struct FakeController {
     _events: mpsc::UnboundedSender<CdpEvent>,
     events: mpsc::UnboundedReceiver<CdpEvent>,
     history: Arc<AtomicI64>,
+    /// The document a page-driven navigation left behind; `Runtime.evaluate`
+    /// reads it back as `location.href` even though the fake's history has not
+    /// caught up yet.
+    live: Arc<Mutex<Option<String>>>,
     endpoint: String,
 }
 
@@ -804,7 +902,7 @@ impl PageController for FakeController {
                     {"id": 2, "url": "https://example.test/next", "title": "Next"}
                 ]
             }),
-            "Runtime.evaluate" => fake_evaluate(&self.history, &params),
+            "Runtime.evaluate" => fake_evaluate(&self.history, &self.live, &params),
             _ => json!({}),
         })
     }
@@ -821,7 +919,11 @@ impl PageController for FakeController {
 /// Models the two expressions the navigation helpers send: `location.assign`
 /// commits the document (the fake's history follows) and `location.href` reads
 /// it back.
-fn fake_evaluate(history: &AtomicI64, params: &Value) -> Value {
+fn fake_evaluate(
+    history: &AtomicI64,
+    live: &Mutex<Option<String>>,
+    params: &Value,
+) -> Value {
     let expression = params
         .get("expression")
         .and_then(Value::as_str)
@@ -835,7 +937,12 @@ fn fake_evaluate(history: &AtomicI64, params: &Value) -> Value {
         return json!({"result": {"type": "undefined"}});
     }
     match expression {
-        "location.href" => json!({"result": {"value": fake_url(history.load(Ordering::SeqCst))}}),
+        "location.href" => {
+            let override_url = live.lock().expect("live url poisoned").clone();
+            json!({"result": {"value": override_url
+                .as_deref()
+                .unwrap_or_else(|| fake_url(history.load(Ordering::SeqCst)))}})
+        }
         _ => json!({"result": {"value": "Example"}}),
     }
 }
@@ -855,6 +962,7 @@ struct Harness {
     messages: broadcast::Receiver<ServerMessage>,
     commands: Arc<Mutex<Vec<(String, Value)>>>,
     attached: Arc<Mutex<Vec<String>>>,
+    live: Arc<Mutex<Option<String>>>,
 }
 
 impl Harness {
@@ -865,15 +973,18 @@ impl Harness {
 
         let commands: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
         let attached: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let live: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let connector: Connector = {
             let commands = commands.clone();
             let attached = attached.clone();
+            let live = live.clone();
             Arc::new(move |cdp_url: String, page_id: String| -> BoxFuture<
                 'static,
                 Result<Box<dyn PageController>, CdpError>,
             > {
                 let commands = commands.clone();
                 let attached = attached.clone();
+                let live = live.clone();
                 Box::pin(async move {
                     attached
                         .lock()
@@ -885,6 +996,7 @@ impl Harness {
                         _events: sender,
                         events: receiver,
                         history: Arc::new(AtomicI64::new(0)),
+                        live: live.clone(),
                         endpoint: "fake://page".to_owned(),
                     }) as Box<dyn PageController>)
                 })
@@ -912,7 +1024,14 @@ impl Harness {
             messages: receiver,
             commands,
             attached,
+            live,
         }
+    }
+
+    /// Makes the fake page report this document as the live one, the way a
+    /// link click would before Kitesurf's history catches up.
+    fn set_live_url(&self, url: &str) {
+        *self.live.lock().expect("live url poisoned") = Some(url.to_owned());
     }
 
     async fn next_gateway(&mut self) -> GatewayMessage {
@@ -1066,6 +1185,58 @@ async fn the_driver_attaches_the_controller_and_holds_the_page() {
     assert_eq!(page_id, "t1");
     assert_eq!(url, "https://example.test/");
     assert_eq!(title, "Example");
+}
+
+/// A link the human clicks navigates without the gateway asking. Kitesurf's
+/// frame event trails the document by seconds, so the tab list has to carry
+/// the address bar and the back button.
+#[tokio::test]
+async fn a_clicked_link_moves_the_address_bar_and_the_back_button() {
+    let mut harness = Harness::new().await;
+    harness.handle.takeover();
+    let _ = harness.next_gateway().await;
+    harness.handle.yield_ok("t1");
+    assert!(harness.next_hello("interactive hello").await);
+    let (_, url, _) = harness.next_nav("initial").await;
+    assert_eq!(url, "https://example.test/");
+
+    harness.set_live_url("https://example.test/clicked");
+    harness.handle.page_url("https://example.test/clicked");
+    match harness
+        .next_matching("page url", |message| {
+            matches!(message, ServerMessage::Nav { .. })
+        })
+        .await
+    {
+        ServerMessage::Nav {
+            url,
+            can_go_back,
+            can_go_forward,
+            ..
+        } => {
+            assert_eq!(url, "https://example.test/clicked");
+            assert!(can_go_back, "the document before the click is one step back");
+            assert!(!can_go_forward);
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+
+    // The poll repeats the URL until the frame event arrives; that must not
+    // repaint the address bar.
+    harness.handle.page_url("https://example.test/clicked");
+    let repainted = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            match harness.messages.recv().await {
+                Ok(ServerMessage::Nav { .. }) | Err(_) => return true,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        repainted.is_err(),
+        "a repeated URL must not repaint the address bar"
+    );
 }
 
 #[tokio::test]

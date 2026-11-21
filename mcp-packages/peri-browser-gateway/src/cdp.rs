@@ -816,28 +816,46 @@ pub async fn navigate(
     let url = normalize_url(url);
     let before = live_url(controller).await;
     let expression = format!("location.assign({})", Value::String(url));
-    let reply = controller
-        .command(
-            "Runtime.evaluate",
-            json!({"expression": expression, "userGesture": true}),
-        )
-        .await;
-    let changed = wait_for_location(controller, before.as_deref()).await;
-    if let Ok(value) = &reply {
-        if let Some(exception) = value.get("exceptionDetails") {
-            return Err(CdpError::Rejected {
-                method: "Runtime.evaluate".to_owned(),
-                message: exception_message(exception),
-            });
+    let mut retried = false;
+    loop {
+        let reply = controller
+            .command(
+                "Runtime.evaluate",
+                json!({"expression": expression, "userGesture": true}),
+            )
+            .await;
+        let changed = wait_for_location(controller, before.as_deref()).await;
+        if let Ok(value) = &reply {
+            if let Some(exception) = value.get("exceptionDetails") {
+                return Err(CdpError::Rejected {
+                    method: "Runtime.evaluate".to_owned(),
+                    message: exception_message(exception),
+                });
+            }
         }
-    }
-    if let Err(error) = reply {
-        if !changed {
+        if let Err(error) = reply {
+            if changed {
+                tracing::debug!(error = %error, "evaluate failed after the navigation committed");
+                return navigation_state(controller).await;
+            }
+            // Kitesurf answers `Execution context was destroyed` for a moment
+            // after every navigation, and then the assignment never ran. One
+            // retry separates that from a navigation that really committed.
+            if !retried && destructured_retry_allowed(&error) {
+                retried = true;
+                tokio::time::sleep(NAVIGATION_SETTLE_DELAY).await;
+                continue;
+            }
             return Err(error);
         }
-        tracing::debug!(error = %error, "evaluate failed after the navigation committed");
+        return navigation_state(controller).await;
     }
-    navigation_state(controller).await
+}
+
+/// Whether the error is the stale-context answer Kitesurf gives while the
+/// previous document is still being torn down.
+fn destructured_retry_allowed(error: &CdpError) -> bool {
+    matches!(error, CdpError::Protocol { code: -32000, message } if message.contains("Execution context was destroyed"))
 }
 
 /// Gives a bare host the scheme a browser would pick.

@@ -45,6 +45,13 @@ pub const DIAGNOSTICS_CAPACITY: usize = 200;
 /// How many visited documents a held page remembers for back/forward.
 const VISIT_LIMIT: usize = 100;
 
+/// A page-driven navigation is reported by the tab list before the document
+/// commits, so the first read can still see the old URL. The hint is retried
+/// at this interval, up to [`NAVIGATION_HINT_TRIES`] times, until the machine
+/// sees the new document or Kitesurf's late frame event arrives.
+const NAVIGATION_HINT_RETRY: Duration = Duration::from_millis(500);
+const NAVIGATION_HINT_TRIES: usize = 12;
+
 /// Execution-boundary timeouts (CLI/env, README §6.2 and §10).
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
@@ -148,6 +155,12 @@ pub enum Event {
     Release,
     /// The session's active page changed (tab switch, page closed, re-register).
     Page(Option<String>),
+    /// The tab list reports this URL for the active page. Kitesurf's
+    /// `Page.frameNavigated` can lag more than ten seconds behind the document,
+    /// so the poll is the prompt signal that a page-driven navigation happened.
+    PageUrl(String),
+    /// A back/forward step loaded its document; the machine moves the index.
+    HistoryArrived { delta: i64 },
     YieldOk(String),
     Reclaim(String),
     HumanRequest {
@@ -253,6 +266,10 @@ pub struct Machine {
     visits: Vec<String>,
     /// Index of the document currently on screen inside [`Self::visits`].
     visit: usize,
+    /// A document the tab list reported that no refresh has confirmed yet.
+    hint: Option<String>,
+    hint_deadline: Option<Instant>,
+    hint_tries: usize,
     console: VecDeque<ConsoleEntry>,
     network_order: VecDeque<String>,
     network: HashMap<String, NetworkEntry>,
@@ -283,6 +300,9 @@ impl Machine {
             navigation: cdp::NavigationState::default(),
             visits: Vec::new(),
             visit: 0,
+            hint: None,
+            hint_deadline: None,
+            hint_tries: 0,
             console: VecDeque::new(),
             network_order: VecDeque::new(),
             network: HashMap::new(),
@@ -354,7 +374,7 @@ impl Machine {
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {
         let handoff = self.handoff.as_ref().and_then(|handoff| handoff.deadline);
-        [self.idle_deadline, self.yield_deadline, handoff]
+        [self.idle_deadline, self.yield_deadline, self.hint_deadline, handoff]
             .into_iter()
             .flatten()
             .min()
@@ -397,24 +417,35 @@ impl Machine {
                 // gateway drives, so the buttons follow the stack kept here.
                 state.can_go_back = self.visit > 0;
                 state.can_go_forward = self.visit + 1 < self.visits.len();
+                // The poll and the frame event can both notice one navigation;
+                // only a real change is worth a message.
+                let changed = state != self.navigation;
+                if self.hint.as_deref() == Some(state.url.as_str()) {
+                    self.clear_hint();
+                }
                 self.navigation = state;
-                if self.state == OwnershipState::HumanHolds {
+                if self.state == OwnershipState::HumanHolds && changed {
                     vec![Effect::Broadcast(self.nav_message())]
                 } else {
                     Vec::new()
                 }
             }
             Event::FrameNavigated { url } => {
-                // The gateway only writes in HumanHolds, which is also the only
-                // state that keeps a controller (and therefore receives this).
-                if !self.is_interactive() {
-                    return Vec::new();
+                // A frame event is the committed document, so it can be
+                // remembered even if the read that follows fails.
+                if self.is_interactive() {
+                    self.record_visit(&url);
                 }
-                self.record_visit(&url);
-                if url == self.navigation.url {
-                    Vec::new()
-                } else {
+                self.refresh_if_new(&url, now)
+            }
+            Event::PageUrl(url) => self.refresh_if_new(&url, now),
+            Event::HistoryArrived { delta } => {
+                // The document is there; move the index and read it back so the
+                // title and the buttons describe what is on screen.
+                if self.step_history(delta).is_some() {
                     vec![Effect::RefreshNavigation]
+                } else {
+                    Vec::new()
                 }
             }
             Event::Console(entry) => self.on_console(entry),
@@ -703,6 +734,45 @@ impl Machine {
         effects
     }
 
+    /// Asks for a fresh read when a document nobody asked the gateway for is
+    /// on screen. The address bar, the title and the stack come from the state
+    /// that read returns, so a hint that lands before the commit cannot invent
+    /// a visit. The hint is kept until a read confirms it: the tab list updates
+    /// while the old document is still committing.
+    fn refresh_if_new(&mut self, url: &str, now: Instant) -> Vec<Effect> {
+        // The gateway only writes in HumanHolds, which is also the only state
+        // that keeps a controller (and therefore receives frame events).
+        if !self.is_interactive() || url.is_empty() {
+            return Vec::new();
+        }
+        if url == self.navigation.url {
+            self.clear_hint();
+            return Vec::new();
+        }
+        self.hint = Some(url.to_owned());
+        self.hint_deadline = Some(now + NAVIGATION_HINT_RETRY);
+        self.hint_tries = 0;
+        vec![Effect::RefreshNavigation]
+    }
+
+    fn clear_hint(&mut self) {
+        self.hint = None;
+        self.hint_deadline = None;
+        self.hint_tries = 0;
+    }
+
+    /// Re-reads while a hinted document has not shown up yet.
+    fn retry_hint(&mut self, now: Instant) -> Option<Effect> {
+        let hinted = self.hint.clone()?;
+        if !self.is_interactive() || hinted == self.navigation.url || self.hint_tries >= NAVIGATION_HINT_TRIES {
+            self.clear_hint();
+            return None;
+        }
+        self.hint_tries += 1;
+        self.hint_deadline = Some(now + NAVIGATION_HINT_RETRY);
+        Some(Effect::RefreshNavigation)
+    }
+
     /// Records the document on screen, dropping the entries a fresh navigation
     /// makes unreachable.
     fn record_visit(&mut self, url: &str) {
@@ -719,14 +789,24 @@ impl Machine {
     }
 
     /// Moves through [`Self::visits`] and returns the URL to navigate to.
-    fn step_history(&mut self, delta: i64) -> Option<String> {
+    /// The URL a history step would load. The index only moves once the
+    /// document arrives: Kitesurf refuses commands for a while after a
+    /// navigation, and a step that never loads must not shift the stack.
+    fn peek_history(&self, delta: i64) -> Option<String> {
+        self.history_target(delta)
+            .and_then(|target| self.visits.get(target).cloned())
+    }
+
+    fn history_target(&self, delta: i64) -> Option<usize> {
         let target = i64::try_from(self.visit).ok()? + delta;
         let target = usize::try_from(target).ok()?;
-        if target == self.visit || target >= self.visits.len() {
-            return None;
-        }
+        (target != self.visit && target < self.visits.len()).then_some(target)
+    }
+
+    fn step_history(&mut self, delta: i64) -> Option<String> {
+        let target = self.history_target(delta)?;
         self.visit = target;
-        Some(self.visits[target].clone())
+        self.visits.get(target).cloned()
     }
 
     fn on_page(&mut self, page: Option<String>) -> Vec<Effect> {
@@ -741,9 +821,10 @@ impl Machine {
         );
         self.page = page.clone();
         // The visit stack belongs to the page that was on screen; a tab switch
-        // starts a new one.
+        // starts a new one, and a hint about the old tab means nothing here.
         self.visits.clear();
         self.visit = 0;
+        self.clear_hint();
         if self.state != OwnershipState::HumanHolds {
             return Vec::new();
         }
@@ -968,6 +1049,13 @@ impl Machine {
     fn on_tick(&mut self, now: Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
 
+        if self.hint_deadline.is_some_and(|deadline| now >= deadline) {
+            self.hint_deadline = None;
+            if let Some(effect) = self.retry_hint(now) {
+                effects.push(effect);
+            }
+        }
+
         if self.idle_deadline.is_some_and(|deadline| now >= deadline) {
             self.idle_deadline = None;
             if let Some(page) = self.page.clone() {
@@ -1100,6 +1188,7 @@ impl Machine {
         self.state = OwnershipState::AgentDriving;
         self.idle_deadline = None;
         self.yield_deadline = None;
+        self.clear_hint();
         self.clear_diagnostics();
         if let Some(page_id) = page_id.clone() {
             // Empty entries clear the drawer; the read-only `hello` explains why.
@@ -1323,6 +1412,12 @@ impl OwnershipHandle {
 
     pub fn page(&self, page: Option<String>) {
         self.send(Event::Page(page));
+    }
+
+    /// The tab list's view of the active page's URL. Sent on every page-list
+    /// change; the machine ignores repeats of the URL it already reports.
+    pub(crate) fn page_url(&self, url: impl Into<String>) {
+        self.send(Event::PageUrl(url.into()));
     }
 
     /// Updates the CDP endpoint used for the next controller attach.
@@ -1686,10 +1781,10 @@ async fn apply(
                 }
             }
             Effect::History { delta } => {
-                if let Some(url) = machine.step_history(delta) {
+                if let Some(url) = machine.peek_history(delta) {
                     if let Some(connection) = controller.as_deref() {
                         match cdp::navigate(connection, &url).await {
-                            Ok(state) => follow_up.push(Event::Navigation(state)),
+                            Ok(_) => follow_up.push(Event::HistoryArrived { delta }),
                             Err(error) => {
                                 warn!(session = %session_id, error = %error, "history step failed");
                             }

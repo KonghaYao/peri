@@ -358,6 +358,13 @@ struct FakePage {
 }
 
 async fn start_recorder() -> Recorder {
+    start_recorder_with(false).await
+}
+
+/// `stale_first_assign` makes the fake answer the way Kitesurf does for a
+/// moment after a navigation: the assignment never runs and the reply is
+/// `Execution context was destroyed`.
+async fn start_recorder_with(stale_first_assign: bool) -> Recorder {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -370,6 +377,7 @@ async fn start_recorder() -> Recorder {
         ],
         current: 0,
     };
+    let mut stale_first_assign = stale_first_assign;
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
         let mut socket = tokio_tungstenite::accept_async(stream)
@@ -384,22 +392,41 @@ async fn start_recorder() -> Recorder {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let params = request.get("params").cloned().unwrap_or(Value::Null);
-            let result = match method {
-                "Page.getLayoutMetrics" => {
-                    json!({"cssLayoutViewport": {"clientWidth": 800, "clientHeight": 600}})
+            let stale = stale_first_assign
+                && method == "Runtime.evaluate"
+                && params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .is_some_and(|expression| expression.starts_with("location.assign("));
+            if stale {
+                stale_first_assign = false;
+            }
+            let result = if stale {
+                Value::Null
+            } else {
+                match method {
+                    "Page.getLayoutMetrics" => {
+                        json!({"cssLayoutViewport": {"clientWidth": 800, "clientHeight": 600}})
+                    }
+                    "Page.getNavigationHistory" => json!({
+                        "currentIndex": page.current,
+                        "entries": page.entries.iter().map(|(id, url)| json!({
+                            "id": id,
+                            "url": url,
+                            "title": "Example",
+                        })).collect::<Vec<_>>(),
+                    }),
+                    "Runtime.evaluate" => {
+                        evaluate(&mut page, params.get("expression").and_then(Value::as_str))
+                    }
+                    _ => json!({}),
                 }
-                "Page.getNavigationHistory" => json!({
-                    "currentIndex": page.current,
-                    "entries": page.entries.iter().map(|(id, url)| json!({
-                        "id": id,
-                        "url": url,
-                        "title": "Example",
-                    })).collect::<Vec<_>>(),
-                }),
-                "Runtime.evaluate" => evaluate(&mut page, params.get("expression").and_then(Value::as_str)),
-                _ => json!({}),
             };
-            let response = json!({"id": id, "result": result});
+            let response = if stale {
+                json!({"id": id, "error": {"code": -32000, "message": "Execution context was destroyed."}})
+            } else {
+                json!({"id": id, "result": result})
+            };
             socket
                 .send(Message::Text(response.to_string().into()))
                 .await
@@ -519,6 +546,34 @@ async fn input_helpers_send_the_cdp_input_domain() {
     );
 
     recorder.server.abort();
+}
+
+/// Kitesurf answers `Execution context was destroyed` for a moment after any
+/// navigation and then drops the assignment. One retry tells that apart from a
+/// navigation that really committed.
+#[tokio::test]
+async fn a_stale_context_answer_is_retried_once() {
+    let recorder = start_recorder_with(true).await;
+    let controller = Controller::connect(&recorder.url, "t1")
+        .await
+        .expect("controller connects");
+
+    let state = navigate(&controller, "https://example.test/next")
+        .await
+        .expect("the retry lands the document");
+    assert_eq!(state.url, "https://example.test/next");
+
+    let assigns = recorder
+        .params("Runtime.evaluate")
+        .iter()
+        .filter(|params| {
+            params
+                .get("expression")
+                .and_then(Value::as_str)
+                .is_some_and(|expression| expression.starts_with("location.assign("))
+        })
+        .count();
+    assert_eq!(assigns, 2, "the stale answer is retried exactly once");
 }
 
 #[tokio::test]

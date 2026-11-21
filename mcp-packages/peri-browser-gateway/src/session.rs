@@ -351,6 +351,17 @@ impl SessionStore {
         session
             .ownership
             .page(session.effective_active().map(str::to_owned));
+        // Kitesurf's `Page.frameNavigated` trails the document by up to fifteen
+        // seconds, so a link the human clicks would leave the address bar stale.
+        // The tab list already carries the new URL; let the machine read the
+        // rest (title, history buttons) from the live page.
+        if let Some(url) = session
+            .effective_active()
+            .and_then(|active| session.pages.iter().find(|page| page.target_id == active))
+            .map(|page| page.url.clone())
+        {
+            session.ownership.page_url(url);
+        }
         let snapshot = session.clone();
         drop(sessions);
 
