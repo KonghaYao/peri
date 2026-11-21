@@ -767,6 +767,144 @@ fn workflow_journal_is_excluded_under_a_non_ascii_nested_cwd() {
         .expect("非 ASCII cwd 下的自身 journal 不构成外部变化");
 }
 
+/// 两个不同的非 UTF-8 路径若有损解码会折叠成同一个键，从而漏掉变化（false green）。
+/// rename 的原始路径是独立字段，解析层必须把两端都留成各自的字节键。
+#[test]
+fn parse_keeps_distinct_non_utf8_paths_and_rename_endpoints() {
+    let untracked = b"? swap-\xff.bin\0? swap-\xfe.bin\0";
+    let records = crate::journal::git::parse_status_paths(untracked)
+        .expect("non-UTF-8 status must remain parseable");
+    assert_eq!(
+        records.len(),
+        2,
+        "distinct byte paths must not collapse into one key"
+    );
+    assert!(records.contains_key(b"swap-\xff.bin".as_slice()));
+    assert!(records.contains_key(b"swap-\xfe.bin".as_slice()));
+
+    let renamed = b"2 R. N... 100644 100644 100644 aaaa bbbb R100 new-\xff.txt\0old-\xfe.txt\0";
+    let records = crate::journal::git::parse_status_paths(renamed)
+        .expect("rename records must remain parseable");
+    assert_eq!(records.len(), 2, "rename source must be its own record key");
+    for endpoint in [b"new-\xff.txt".as_slice(), b"old-\xfe.txt".as_slice()] {
+        let record = records
+            .get(endpoint)
+            .unwrap_or_else(|| panic!("missing rename endpoint {endpoint:?}"));
+        assert_eq!(
+            record.first(),
+            Some(&b'2'),
+            "rename record type must survive"
+        );
+    }
+}
+
+/// 采到的 status 含非 UTF-8 路径时，对账必须按字节工作，不能退化成
+/// observation incomplete；报告中的路径允许有损展示。
+#[test]
+fn non_utf8_status_path_does_not_become_an_incomplete_observation() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let mut baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    // macOS APFS 拒绝创建非 UTF-8 文件名，这里直接注入等价的 porcelain 记录。
+    baseline.status_porcelain_v2 = b"? dirty-\xff.txt\0".to_vec();
+
+    let failure = baseline
+        .verify_unchanged()
+        .expect_err("注入的未跟踪记录是真实差异");
+    assert!(
+        matches!(
+            failure,
+            crate::journal::PostconditionFailure::Unattributed(_)
+        ),
+        "非 UTF-8 路径不得被读成 observation incomplete: {failure}"
+    );
+    let message = failure.to_string();
+    assert!(
+        message.contains("dirty-"),
+        "报告必须带可定位路径（展示可有损）: {message}"
+    );
+}
+
+/// 真实文件系统上的非 UTF-8 文件名：采样不失败，两个不同路径的 rename 两端都能被区分。
+/// macOS 的 APFS 拒绝此类文件名（EILSEQ），因此只在 Linux 验证。
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_paths_are_sampled_and_reconciled_by_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let first = std::ffi::OsStr::from_bytes(b"swap-\xff.bin");
+    std::fs::write(tmp.path().join(first), b"payload")
+        .expect("the test fixture file must be writable");
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    baseline
+        .verify_unchanged()
+        .expect("非 UTF-8 路径属于基线，既不是变化也不是观测不完整");
+
+    let second = std::ffi::OsStr::from_bytes(b"swap-\xfe.bin");
+    std::fs::rename(tmp.path().join(first), tmp.path().join(second))
+        .expect("the test fixture must be renamable");
+    let failure = baseline
+        .verify_unchanged()
+        .expect_err("两个不同非 UTF-8 路径之间的 rename 必须被观察到");
+    assert!(
+        matches!(
+            failure,
+            crate::journal::PostconditionFailure::Unattributed(_)
+        ),
+        "非 UTF-8 路径不得被读成 observation incomplete: {failure}"
+    );
+    let message = failure.to_string();
+    assert_eq!(
+        message.matches("swap-").count(),
+        2,
+        "rename 的两端必须各自作为独立字节路径参与对账: {message}"
+    );
+}
+
 /// 符号链接指向的同一目录必须得到同一分类：损坏的仓库是“无法观测”，
 /// 不能因为按字面路径找不到 `.git` marker 而读成“没有仓库范围”。
 #[cfg(unix)]

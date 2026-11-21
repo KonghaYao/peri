@@ -68,15 +68,16 @@ impl std::fmt::Display for PostconditionFailure {
 
 impl std::error::Error for PostconditionFailure {}
 
-fn with_paths(message: &str, paths: &BTreeSet<String>) -> String {
+fn with_paths(message: &str, paths: &BTreeSet<Vec<u8>>) -> String {
     const MAX_PATHS: usize = 20;
     if paths.is_empty() {
         return message.to_string();
     }
+    // 仅用于文案：路径本身以字节参与比较，展示时有损解码不影响判定。
     let listed = paths
         .iter()
         .take(MAX_PATHS)
-        .map(String::as_str)
+        .map(|path| String::from_utf8_lossy(path).into_owned())
         .collect::<Vec<_>>()
         .join(", ");
     let remaining = paths.len().saturating_sub(MAX_PATHS);
@@ -342,18 +343,18 @@ impl GitBaseline {
         let owned = self.workflow_owned_prefix();
         let before = strip_workflow_owned(before, owned.as_deref());
         let after_status = strip_workflow_owned(after_status, owned.as_deref());
-        let changed_paths: BTreeSet<String> = before
+        let changed_paths: BTreeSet<Vec<u8>> = before
             .keys()
             .chain(after_status.keys())
             .filter(|path| before.get(*path) != after_status.get(*path))
             .cloned()
             .collect();
-        let escaped: BTreeSet<String> = changed_paths
+        let escaped: BTreeSet<Vec<u8>> = changed_paths
             .iter()
             .filter(|path| {
                 !path_allowlist
                     .iter()
-                    .any(|allowed| path_is_allowed(path, allowed))
+                    .any(|allowed| path_is_allowed(path.as_slice(), allowed))
             })
             .cloned()
             .collect();
@@ -377,7 +378,7 @@ impl GitBaseline {
         if head_changed {
             if before
                 .values()
-                .any(|record| record.starts_with('1') || record.starts_with('2'))
+                .any(|record| matches!(record.first(), Some(b'1' | b'2')))
             {
                 return Err(violation(
                     "cannot attribute a commit while the baseline index already contains staged changes",
@@ -399,14 +400,14 @@ impl GitBaseline {
             let committed_paths = String::from_utf8(committed)
                 .map_err(|_| observation_incomplete("git commit path list is not UTF-8"))?;
             let path_items = committed_paths.lines();
-            let outside: BTreeSet<String> = path_items
+            let outside: BTreeSet<Vec<u8>> = path_items
                 .filter(|path| !path.is_empty())
                 .filter(|path| {
                     !path_allowlist
                         .iter()
-                        .any(|allowed| path_is_allowed(path, allowed))
+                        .any(|allowed| path_is_allowed(path.as_bytes(), allowed))
                 })
-                .map(str::to_string)
+                .map(|path| path.as_bytes().to_vec())
                 .collect();
             if !outside.is_empty() {
                 return Err(violation(with_paths(
@@ -451,7 +452,7 @@ impl GitBaseline {
         let before = strip_workflow_owned(before, owned.as_deref());
         let after_status = strip_workflow_owned(after_status, owned.as_deref());
         if before != after_status {
-            let changed_paths: BTreeSet<String> = before
+            let changed_paths: BTreeSet<Vec<u8>> = before
                 .keys()
                 .chain(after_status.keys())
                 .filter(|path| before.get(*path) != after_status.get(*path))
@@ -471,49 +472,65 @@ impl GitBaseline {
 /// `-z` 让 git 不再 C-quote 路径（非 ASCII 目录也能与 workflow-owned 前缀比较）；
 /// rename/copy 的原始路径是紧随其后的独立 NUL 字段，两个端点都要参与对账，
 /// 否则“从仓库外 rename 进 journal”会漏掉源路径的消失。
-fn parse_status_paths(status: &[u8]) -> Result<BTreeMap<String, String>, String> {
-    let status =
-        String::from_utf8(status.to_vec()).map_err(|_| "git status paths are not UTF-8")?;
+pub(super) fn parse_status_paths(status: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, String> {
+    // 键必须是路径原始字节：有损解码可能让两个不同的非 UTF-8 路径折叠成同一个键，
+    // 从而把真实变化读成“无变化”（false green）。
     let mut records = BTreeMap::new();
-    let mut fields = status.split('\0').filter(|field| !field.is_empty());
+    let mut fields = status
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
     while let Some(field) = fields.next() {
-        let (path, has_rename_source) = match field.as_bytes().first() {
-            Some(b'1') => (field.splitn(9, ' ').nth(8), false),
-            Some(b'2') => (field.splitn(10, ' ').nth(9), true),
-            Some(b'u') => (field.splitn(11, ' ').nth(10), false),
+        let (path, has_rename_source) = match field.first() {
+            Some(b'1') => (field.splitn(9, |byte| *byte == b' ').nth(8), false),
+            Some(b'2') => (field.splitn(10, |byte| *byte == b' ').nth(9), true),
+            Some(b'u') => (field.splitn(11, |byte| *byte == b' ').nth(10), false),
             Some(b'?') | Some(b'!') => (field.get(2..), false),
             _ => (None, false),
         };
         let path = path.ok_or_else(|| "cannot parse git porcelain v2 path".to_string())?;
-        records.insert(path.to_string(), field.to_string());
+        records.insert(path.to_vec(), field.to_vec());
         if has_rename_source {
             let source = fields
                 .next()
                 .ok_or_else(|| "cannot parse git porcelain v2 rename source".to_string())?;
-            records.insert(source.to_string(), field.to_string());
+            records.insert(source.to_vec(), field.to_vec());
         }
     }
     Ok(records)
 }
 
+/// 把 porcelain 路径字节还原为 `Path`：Unix 保留原始字节，非 UTF-8 路径也能精确比较；
+/// 其他平台没有字节级 `Path`，退回有损解码，只影响前缀/allowlist 判定，键比较仍是字节。
+fn status_path(bytes: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
 /// 移除 workflow 自身 journal 目录下的记录；其余路径保持不变。
 fn strip_workflow_owned(
-    records: BTreeMap<String, String>,
+    records: BTreeMap<Vec<u8>, Vec<u8>>,
     owned: Option<&Path>,
-) -> BTreeMap<String, String> {
+) -> BTreeMap<Vec<u8>, Vec<u8>> {
     let Some(owned) = owned else {
         return records;
     };
     records
         .into_iter()
-        .filter(|(path, _)| !Path::new(path).starts_with(owned))
+        .filter(|(path, _)| !status_path(path).starts_with(owned))
         .collect()
 }
 
-fn path_is_allowed(path: &str, allowed: &str) -> bool {
-    let path = Path::new(path);
+fn path_is_allowed(path: &[u8], allowed: &str) -> bool {
+    let path = status_path(path);
     let allowed = Path::new(allowed);
-    path == allowed || path.starts_with(allowed)
+    path.as_path() == allowed || path.starts_with(allowed)
 }
 
 /// 采样失败时区分“明确不在 Git 仓库”与“无法观测”。

@@ -103,3 +103,11 @@
 - `clippy -p peri-workflow -p peri-acp-types -p peri-agent --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` → 通过。
 - 新增定向回归：maxToolCalls + token 同时触发（首要 error 兼容、两项可见）、200/300/400/覆盖值解析、重投不重计、dead/limited 可见、旧 state/journal 缺省；Git 身份与可见范围、stderr 保留、档位文案、旧 state 缺省、git-dir 重绑定 → incomplete。
 - 未复现 issue #522 的 23 个本地 run；结论来自代码路径 + 定向测试。
+
+### 字节键修复（058007f5b 之后）
+
+- `parse_status_paths` 改为字节键（`BTreeMap<Vec<u8>, Vec<u8>>`）：非 UTF-8 路径不再把 `git status` 读成 `observation_incomplete`，终态比较按原始字节区分路径；路径展示仍可 lossy。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-workflow --lib` → 257 passed，0 failed（macOS 本机；`non_utf8_paths_are_sampled_and_reconciled_by_bytes` 仅 `cfg(target_os = "linux")` 编译，Linux 上为 258）。
+- 新增定向回归：字节级解析（不同非 UTF-8 路径不折叠、rename 两端各自成键）、注入非 UTF-8 porcelain 记录的对账、Linux 真实文件采样 + 非 UTF-8 rename。
+- 变异验证：临时恢复严格 UTF-8 解码后新增用例按原回归失败（`observation incomplete: cannot parse baseline git status`），确认用例可捕获该缺陷。
+- `clippy -p peri-workflow --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` → 通过。
