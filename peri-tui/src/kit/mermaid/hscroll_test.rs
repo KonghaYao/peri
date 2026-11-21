@@ -1,4 +1,4 @@
-//! 横向偏移状态：按围栏身份保存、按当前视口 clamp、帧变窄归零。
+//! 横向偏移状态：按围栏身份保存、按当前视口 clamp、帧整体可见时归零。
 
 use super::{offset_for, reset_for_test, revision, scroll_by, set_offset};
 use crate::kit::markdown::{MermaidFenceKey, MermaidMessageIdentity, MermaidMessageRef};
@@ -30,13 +30,16 @@ fn offset_clamps_to_the_current_viewport_and_survives_streaming_growth() {
 
 #[test]
 #[serial_test::serial]
-fn narrowing_content_returns_to_the_left_edge() {
+fn narrowing_content_keeps_the_reading_column_while_it_still_overflows() {
     reset_for_test();
     let key = key("narrow");
     set_offset(&key, 40, 20, 100);
     assert_eq!(offset_for(&key, 20, 100), 40);
-    assert_eq!(offset_for(&key, 20, 60), 0, "新内容变窄后旧偏移不再有意义");
-    // 再次变宽从 0 开始，不恢复旧列。
+    // 流式变窄但仍溢出：保留阅读列，只按新上界 clamp。
+    assert_eq!(offset_for(&key, 20, 60), 40);
+    assert_eq!(offset_for(&key, 20, 50), 30, "clamp 到变窄后的最大值");
+    // 帧整体可见才回到最左列，之后变宽从 0 开始。
+    assert_eq!(offset_for(&key, 20, 20), 0);
     assert_eq!(offset_for(&key, 20, 100), 0);
 }
 

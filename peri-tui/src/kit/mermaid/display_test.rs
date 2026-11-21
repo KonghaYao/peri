@@ -4,6 +4,7 @@ use std::time::Instant;
 use ratatui_kit::prelude::Palette;
 use ratatui_kit::ratatui::style::Color;
 use ratatui_kit::ratatui::text::Line;
+use unicode_width::UnicodeWidthStr;
 
 use crate::kit::markdown::{MarkdownSegment, MermaidSegment, parse_markdown};
 use crate::kit::mermaid::PreviewScope;
@@ -247,6 +248,44 @@ fn horizontal_offset_slices_the_frame_and_survives_rerender() {
     // 再次渲染同一身份仍保留列位置（不因重绘回到 0）。
     let again = display_lines(&segment, &scope, 60, false, Color::Reset);
     assert_eq!(line_text(&again.lines[0]), first_after);
+}
+
+#[test]
+#[serial_test::serial]
+fn narrow_viewport_reaches_the_rightmost_column() {
+    crate::kit::mermaid::reset_for_test();
+    let segment = segment(&wide_markdown());
+    let scope = PreviewScope::for_bubble("session", Some("msg-narrow-right"), None, 78);
+    let key = scope.key(segment.fence.open_start);
+    let rendered = published(&segment, &scope, 60);
+    let view = rendered.h_view.expect("wide frame at 60 columns");
+    let content = view.viewport + view.max_offset;
+    assert!(crate::kit::mermaid::scroll_h(
+        &key,
+        i32::MAX,
+        view.viewport,
+        content
+    ));
+    let panned = display_lines(&segment, &scope, 60, false, Color::Reset);
+
+    // 右侧关键列可达：最宽行的末端窗口完整出现。
+    let full = crate::kit::mermaid::frame::render_source(WIDE_SEQUENCE_SOURCE, 60)
+        .expect("sequence source renders");
+    let widest = full
+        .lines()
+        .iter()
+        .map(String::as_str)
+        .max_by_key(|line| line.width())
+        .expect("frame has lines");
+    let tail = peri_tui_components::text::slice_by_width(widest, view.max_offset, view.viewport);
+    assert_eq!(tail.width(), 60, "最右窗口整窗可见");
+    assert!(
+        panned
+            .lines
+            .iter()
+            .any(|line| line_text(line).trim_end() == tail.trim_end()),
+        "滚到最右列应显示完整右端窗口"
+    );
 }
 
 #[test]
