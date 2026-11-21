@@ -8,7 +8,7 @@ use super::grid::GridSpec;
 use super::hits::{
     CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit, MermaidActionHit,
 };
-use super::mermaid_scroll::mermaid_arrow_delta;
+use super::mermaid_scroll::{mermaid_arrow_delta, scroll_step};
 use super::vm_cache_slot::VmCacheSlot;
 
 use super::props::ScrollbarFields;
@@ -730,12 +730,7 @@ pub(super) fn register_keyboard_nav(
                     if let Some((fence_key, h_view)) = target {
                         let delta = mermaid_arrow_delta(key.code)
                             .expect("the match arm only handles Left/Right");
-                        crate::kit::mermaid::scroll_h(
-                            &fence_key,
-                            delta,
-                            h_view.viewport,
-                            h_view.max_offset,
-                        );
+                        scroll_step(&fence_key, delta, h_view.viewport, h_view.max_offset);
                         let next = h_tick_state.read().wrapping_add(1);
                         *h_tick_state.write() = next;
                         return EventResult::Consumed;

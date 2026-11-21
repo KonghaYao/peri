@@ -58,35 +58,51 @@ pub fn prefix_by_width(s: &str, max_width: usize) -> String {
 ///
 /// 输出显示宽度 ≤ `max_width`；双宽字素跨左边界时以空格补齐被切掉的半格，
 /// 跨右边界时整字素舍弃（与终端裁剪一致）。
+///
+/// 列宽按字符串口径（[`UnicodeWidthStr::width`]）测量：连字（如 Arabic
+/// Lam–Alef）会让字素宽度之和大于字符串宽度，逐字素累加会与 `content_width`
+/// 不一致，导致右侧内容不可达。前缀宽度单调不减，故用边界二分定位。
 pub fn slice_by_width(s: &str, offset: usize, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
+    let count = s.graphemes(true).count();
+    let prefix = |k: usize| s[..grapheme_byte(s, k)].width();
+    let last_fitting = |target: usize| {
+        let (mut lo, mut hi) = (0usize, count);
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            if prefix(mid) <= target {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    };
+    let limit = offset.saturating_add(max_width);
+    let (start, end) = (last_fitting(offset), last_fitting(limit));
     let mut out = String::new();
-    let mut column = 0usize;
-    let mut emitted = 0usize;
-    for grapheme in s.graphemes(true) {
-        let width = grapheme.width();
-        if column + width <= offset {
-            column += width;
-            continue;
-        }
-        if column < offset {
-            // 宽字素被左边界切开：可见的半格留空。
-            let blank = (column + width - offset).min(max_width);
-            out.push_str(&" ".repeat(blank));
-            emitted += blank;
-            column += width;
-            continue;
-        }
-        if emitted + width > max_width {
-            break;
-        }
-        out.push_str(grapheme);
-        emitted += width;
-        column += width;
+    let mut first = start;
+    if prefix(start) < offset {
+        // 宽字素被左边界切开：可见的半格留空。
+        let blank = prefix(start + 1).saturating_sub(offset);
+        out.push_str(&" ".repeat(blank.min(max_width)));
+        first += 1;
     }
+    out.extend(
+        s.graphemes(true)
+            .skip(first)
+            .take(end.saturating_sub(first)),
+    );
     out
+}
+
+/// 第 `k` 个字素边界（0 = 串首，字素总数 = 串尾）的字节下标。
+fn grapheme_byte(s: &str, k: usize) -> usize {
+    s.grapheme_indices(true)
+        .nth(k)
+        .map_or(s.len(), |(byte, _)| byte)
 }
 
 /// 取不超过 `max_width` 列的后缀（不追加省略号）。
@@ -229,6 +245,11 @@ mod tests {
                 "offset={offset} width={width}"
             );
         }
+        // 连字跨字素变窄：字符串宽 5，与 content_width 同口径才可达最右列。
+        assert_eq!("لاabcd".width(), 5);
+        assert_eq!(slice_by_width("لاabcd", 2, 3), "bcd");
+        assert_eq!(slice_by_width("لاabcd", 4, 3), "d");
+        assert_eq!(slice_by_width("لاabcd", 0, 3), "لاab");
     }
 
     #[test]

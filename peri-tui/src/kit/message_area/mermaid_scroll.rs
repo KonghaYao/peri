@@ -10,16 +10,38 @@ use ratatui_kit::crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, M
 use ratatui_kit::prelude::*;
 
 use super::hits::MermaidHScrollHit;
+use crate::kit::markdown::MermaidFenceKey;
 use crate::kit::mouse_router;
 
 #[derive(Debug, Clone)]
 pub(super) struct MermaidBarDrag {
-    key: crate::kit::markdown::MermaidFenceKey,
+    key: MermaidFenceKey,
     x_start: u16,
     bar: peri_tui_components::scrollbar::HorizontalBar,
     grab: usize,
     viewport: usize,
     max_offset: usize,
+}
+
+/// 定位入口：`set_h` 的末参数是**内容宽**，调用点统一由
+/// `viewport + max_offset` 换算——把最大偏移直接当内容宽会让偏移恒被 clamp 到 0。
+pub(super) fn set_position(
+    key: &MermaidFenceKey,
+    offset: usize,
+    viewport: usize,
+    max_offset: usize,
+) -> bool {
+    crate::kit::mermaid::set_h(key, offset, viewport, viewport.saturating_add(max_offset))
+}
+
+/// 相对平移入口；参数口径同 [`set_position`]。
+pub(super) fn scroll_step(
+    key: &MermaidFenceKey,
+    delta: i32,
+    viewport: usize,
+    max_offset: usize,
+) -> bool {
+    crate::kit::mermaid::scroll_h(key, delta, viewport, viewport.saturating_add(max_offset))
 }
 
 /// 滚轮 → 横向步长：横向滚轮直接平移；纵向滚轮仅在 Shift 下平移。
@@ -102,7 +124,7 @@ pub(super) fn register_mermaid_hscroll_events(
                 max_offset: hit.max_offset,
             });
             if let Some(offset) = offset
-                && crate::kit::mermaid::set_h(&hit.key, offset, hit.viewport, hit.max_offset)
+                && set_position(&hit.key, offset, hit.viewport, hit.max_offset)
             {
                 // [TRAP] 先读后写：同一 parking_lot 状态的 read guard 不能跨 write。
                 let next = tick_state.read().wrapping_add(1);
@@ -121,7 +143,7 @@ pub(super) fn register_mermaid_hscroll_events(
                     .saturating_sub(active.x_start.saturating_add(1)),
             );
             let offset = active.bar.offset_for(cell.saturating_sub(active.grab));
-            if crate::kit::mermaid::set_h(&active.key, offset, active.viewport, active.max_offset) {
+            if set_position(&active.key, offset, active.viewport, active.max_offset) {
                 let next = tick_state.read().wrapping_add(1);
                 *tick_state.write() = next;
             }
@@ -139,7 +161,7 @@ pub(super) fn register_mermaid_hscroll_events(
         else {
             return EventResult::Ignored;
         };
-        if crate::kit::mermaid::scroll_h(&hit.key, delta, hit.viewport, hit.max_offset) {
+        if scroll_step(&hit.key, delta, hit.viewport, hit.max_offset) {
             let next = tick_state.read().wrapping_add(1);
             *tick_state.write() = next;
         }

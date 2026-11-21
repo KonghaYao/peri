@@ -251,6 +251,52 @@ fn horizontal_offset_slices_the_frame_and_survives_rerender() {
 
 #[test]
 #[serial_test::serial]
+fn fitting_frame_clears_a_stale_horizontal_offset() {
+    crate::kit::mermaid::reset_for_test();
+    let segment = segment(&wide_markdown());
+    let scope = PreviewScope::for_bubble("session", Some("msg-fit-clear"), None, 75);
+    let key = scope.key(segment.fence.open_start);
+    let frame = |columns: usize| crate::kit::mermaid::preview::PreviewContent::Frame {
+        lines: Arc::new(vec![
+            (0..columns)
+                .map(|i| char::from(b'a' + (i % 26) as u8))
+                .collect(),
+        ]),
+        tail: String::new(),
+        layout_bytes: 0,
+    };
+    let render = |columns: usize| {
+        super::render_content(
+            &segment,
+            &key,
+            frame(columns),
+            None,
+            60,
+            Color::Reset,
+            false,
+        )
+    };
+
+    let left = line_text(&render(120).lines[0]);
+    assert!(crate::kit::mermaid::scroll_h(&key, 40, 60, 120));
+    assert_ne!(
+        line_text(&render(120).lines[0]),
+        left,
+        "偏移后应显示更靠右的列"
+    );
+
+    // 同一围栏身份出现不溢出帧（流式内容变窄）：旧列必须被清掉。
+    let fitted = render(40);
+    assert!(fitted.h_view.is_none());
+    assert_eq!(
+        line_text(&render(120).lines[0]),
+        left,
+        "帧变宽后应从最左列重新开始"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn resize_clamps_the_offset_to_the_new_maximum() {
     crate::kit::mermaid::reset_for_test();
     let segment = segment(&wide_markdown());

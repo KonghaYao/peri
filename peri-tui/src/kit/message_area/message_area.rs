@@ -461,6 +461,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         *image_rects.write_no_update() = Arc::new(Vec::new());
         *genui_rects.write_no_update() = Arc::new(Vec::new());
         *pressed_genui.write_no_update() = None;
+        // 清空 Mermaid 横向条命中与拖拽态（同上——Welcome 页面无图可平移，
+        // 残留命中会消费点击并启动不可见拖拽）。
+        *mermaid_h_hits.write_no_update() = Arc::new(Vec::new());
+        *mermaid_h_drag.write_no_update() = None;
         if let Some(lines) = brewed_lines {
             return element!(
                 View(

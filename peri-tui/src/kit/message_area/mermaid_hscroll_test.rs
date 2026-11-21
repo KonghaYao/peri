@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::grid::GridSpec;
 use super::hits::build_mermaid_hscroll_hits;
-use super::mermaid_scroll::{mermaid_arrow_delta, mermaid_wheel_delta};
+use super::mermaid_scroll::{mermaid_arrow_delta, mermaid_wheel_delta, scroll_step, set_position};
 use super::transcript::Transcript;
 use super::vm_cache::VmCacheSlot;
 use crate::kit::atoms::ViewModelsSnapshot;
@@ -350,4 +350,43 @@ fn state_survives_history_replay_and_normal_width_has_no_hit() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!text.contains('◄') && !text.contains('►'), "{text}");
+}
+
+/// 回归：handler 平移必须按内容宽（viewport + max_offset）调用 set_h/scroll_h。
+/// 直接把最大偏移当内容宽时 viewport 更大，偏移会被恒 clamp 到 0。
+#[test]
+#[serial_test::serial]
+fn handler_pan_reaches_the_right_edge_for_wide_frames() {
+    crate::kit::mermaid::reset_for_test();
+    let mut harness = Harness::new(WIDE, 80);
+    let index = harness.layout();
+    let area = Rect::new(0, 0, harness.grid.line_width(), 40);
+    let hits = build_mermaid_hscroll_hits(&harness.caches, &index, Some(area), 40, 0);
+    let hit = hits.first().expect("wide frame registers a hit");
+    assert!(hit.max_offset > 0, "帧必须溢出才有横向平移");
+
+    assert!(set_position(
+        &hit.key,
+        usize::MAX,
+        hit.viewport,
+        hit.max_offset
+    ));
+    assert_eq!(
+        crate::kit::mermaid::h_offset_for(&hit.key, hit.viewport, hit.viewport + hit.max_offset),
+        hit.max_offset,
+        "定位必须能到达最右列"
+    );
+
+    assert!(set_position(&hit.key, 0, hit.viewport, hit.max_offset));
+    assert!(scroll_step(
+        &hit.key,
+        i32::MAX,
+        hit.viewport,
+        hit.max_offset
+    ));
+    assert_eq!(
+        crate::kit::mermaid::h_offset_for(&hit.key, hit.viewport, hit.viewport + hit.max_offset),
+        hit.max_offset,
+        "键盘/滚轮步进也必须能到达最右列"
+    );
 }

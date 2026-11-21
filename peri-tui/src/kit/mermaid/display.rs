@@ -194,11 +194,9 @@ fn render_content(
         PreviewContent::Source => segment.lines.clone(),
         PreviewContent::Frame { lines, tail, .. } => {
             let viewport = HorizontalViewport::new(width, content_width(&lines));
-            let offset = if viewport.overflows() {
-                hscroll::offset_for(key, viewport.viewport(), viewport.content())
-            } else {
-                0
-            };
+            // 不溢出时也要读一次：`offset_for` 在该分支返回 0 并清掉旧列，
+            // 否则帧变窄再变宽会从陈旧列恢复。
+            let offset = hscroll::offset_for(key, viewport.viewport(), viewport.content());
             let mut rendered = frame_lines(&lines, foreground, viewport, offset);
             let bar = viewport.bar(u16::try_from(width).unwrap_or(u16::MAX), offset);
             let bar_line = bar.map(|bar| {
