@@ -42,6 +42,9 @@ use crate::registry::RegistryHandle;
 /// How many console entries and network requests the driver keeps.
 pub const DIAGNOSTICS_CAPACITY: usize = 200;
 
+/// How many visited documents a held page remembers for back/forward.
+const VISIT_LIMIT: usize = 100;
+
 /// Execution-boundary timeouts (CLI/env, README §6.2 and §10).
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
@@ -166,6 +169,11 @@ pub enum Event {
     },
     ControllerClosed(String),
     Navigation(cdp::NavigationState),
+    /// The page committed a navigation nobody asked the gateway for: a link, a
+    /// form or a script. Only the main frame reports one.
+    FrameNavigated {
+        url: String,
+    },
     Console(ConsoleEntry),
     NetworkStarted {
         request_id: String,
@@ -204,6 +212,12 @@ pub(crate) enum Effect {
         status: HumanStatus,
     },
     Dispatch(ControllerCommand),
+    /// Steps the visit stack the machine kept for this page. It is resolved
+    /// here, not by the controller, because Kitesurf's own history never learns
+    /// about the navigations the gateway drives.
+    History {
+        delta: i64,
+    },
     EnableDiagnostics,
     RefreshViewport,
     RefreshNavigation,
@@ -235,6 +249,10 @@ pub struct Machine {
     yield_deadline: Option<Instant>,
     handoff: Option<Handoff>,
     navigation: cdp::NavigationState,
+    /// URLs this page visited while the gateway watched, oldest first.
+    visits: Vec<String>,
+    /// Index of the document currently on screen inside [`Self::visits`].
+    visit: usize,
     console: VecDeque<ConsoleEntry>,
     network_order: VecDeque<String>,
     network: HashMap<String, NetworkEntry>,
@@ -263,6 +281,8 @@ impl Machine {
             yield_deadline: None,
             handoff: None,
             navigation: cdp::NavigationState::default(),
+            visits: Vec::new(),
+            visit: 0,
             console: VecDeque::new(),
             network_order: VecDeque::new(),
             network: HashMap::new(),
@@ -371,11 +391,30 @@ impl Machine {
             Event::ControllerOpened { page_id, error } => self.on_controller_opened(page_id, error),
             Event::ControllerClosed(reason) => self.on_controller_closed(reason),
             Event::Navigation(state) => {
+                self.record_visit(&state.url);
+                let mut state = state;
+                // Kitesurf's own history never learns about the navigations the
+                // gateway drives, so the buttons follow the stack kept here.
+                state.can_go_back = self.visit > 0;
+                state.can_go_forward = self.visit + 1 < self.visits.len();
                 self.navigation = state;
                 if self.state == OwnershipState::HumanHolds {
                     vec![Effect::Broadcast(self.nav_message())]
                 } else {
                     Vec::new()
+                }
+            }
+            Event::FrameNavigated { url } => {
+                // The gateway only writes in HumanHolds, which is also the only
+                // state that keeps a controller (and therefore receives this).
+                if !self.is_interactive() {
+                    return Vec::new();
+                }
+                self.record_visit(&url);
+                if url == self.navigation.url {
+                    Vec::new()
+                } else {
+                    vec![Effect::RefreshNavigation]
                 }
             }
             Event::Console(entry) => self.on_console(entry),
@@ -389,10 +428,12 @@ impl Machine {
                 // A viewer that raced the handoff sends its input here; without
                 // the controller there is nothing to write to, so it is dropped
                 // (the viewer was told the page is read-only at send time).
-                if self.accepts_input() {
-                    vec![Effect::Dispatch(command)]
-                } else {
+                if !self.accepts_input() {
                     Vec::new()
+                } else if let ControllerCommand::History(delta) = command {
+                    vec![Effect::History { delta }]
+                } else {
+                    vec![Effect::Dispatch(command)]
                 }
             }
             // Transport, owned by the driver, not by the state machine.
@@ -662,6 +703,32 @@ impl Machine {
         effects
     }
 
+    /// Records the document on screen, dropping the entries a fresh navigation
+    /// makes unreachable.
+    fn record_visit(&mut self, url: &str) {
+        if url.is_empty() || self.visits.get(self.visit).is_some_and(|visit| visit == url) {
+            return;
+        }
+        self.visits.truncate(self.visit + 1);
+        self.visits.push(url.to_owned());
+        self.visit = self.visits.len() - 1;
+        if self.visits.len() > VISIT_LIMIT {
+            self.visits.remove(0);
+            self.visit = self.visit.saturating_sub(1);
+        }
+    }
+
+    /// Moves through [`Self::visits`] and returns the URL to navigate to.
+    fn step_history(&mut self, delta: i64) -> Option<String> {
+        let target = i64::try_from(self.visit).ok()? + delta;
+        let target = usize::try_from(target).ok()?;
+        if target == self.visit || target >= self.visits.len() {
+            return None;
+        }
+        self.visit = target;
+        Some(self.visits[target].clone())
+    }
+
     fn on_page(&mut self, page: Option<String>) -> Vec<Effect> {
         if self.page == page {
             return Vec::new();
@@ -673,6 +740,10 @@ impl Machine {
             "session page changed"
         );
         self.page = page.clone();
+        // The visit stack belongs to the page that was on screen; a tab switch
+        // starts a new one.
+        self.visits.clear();
+        self.visit = 0;
         if self.state != OwnershipState::HumanHolds {
             return Vec::new();
         }
@@ -1161,8 +1232,21 @@ pub fn diagnostic_event(event: &CdpEvent, now_ms: u64) -> Option<Event> {
             .map(|(request_id, entry)| Event::NetworkStarted { request_id, entry }),
         "Network.responseReceived" => network_response(&event.params)
             .map(|(request_id, status)| Event::NetworkStatus { request_id, status }),
+        "Page.frameNavigated" => frame_navigated(&event.params),
         _ => None,
     }
+}
+
+/// Main-frame navigations only: iframe swaps are not address-bar material.
+fn frame_navigated(params: &Value) -> Option<Event> {
+    let frame = params.get("frame")?;
+    if frame.get("parentId").is_some() {
+        return None;
+    }
+    let url = frame.get("url")?.as_str()?;
+    Some(Event::FrameNavigated {
+        url: url.to_owned(),
+    })
 }
 
 /// Cheap view of the ownership state for request handlers.
@@ -1601,6 +1685,18 @@ async fn apply(
                     warn!(session = %session_id, error = %error, "human result could not be delivered");
                 }
             }
+            Effect::History { delta } => {
+                if let Some(url) = machine.step_history(delta) {
+                    if let Some(connection) = controller.as_deref() {
+                        match cdp::navigate(connection, &url).await {
+                            Ok(state) => follow_up.push(Event::Navigation(state)),
+                            Err(error) => {
+                                warn!(session = %session_id, error = %error, "history step failed");
+                            }
+                        }
+                    }
+                }
+            }
             Effect::Dispatch(command) => {
                 if let Some(connection) = controller.as_deref() {
                     dispatch(connection, command, &session_id, &mut follow_up).await;
@@ -1674,7 +1770,12 @@ async fn dispatch(
             .map(|_| None),
         ControllerCommand::Text(text) => cdp::insert_text(controller, &text).await.map(|_| None),
         ControllerCommand::Navigate(url) => cdp::navigate(controller, &url).await.map(Some),
-        ControllerCommand::History(delta) => cdp::history_step(controller, delta).await.map(Some),
+        ControllerCommand::History(delta) => {
+            // The machine resolves history against its own visit stack; a step
+            // that reaches the controller has been routed around it.
+            warn!(session = %session_id, delta, "history step was not resolved by the machine");
+            return;
+        }
     };
     match result {
         Ok(Some(state)) => follow_up.push(Event::Navigation(state)),

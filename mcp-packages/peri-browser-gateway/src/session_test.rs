@@ -121,6 +121,49 @@ async fn update_pages_repairs_the_active_page() {
 }
 
 #[tokio::test]
+async fn update_pages_pins_the_default_tab_across_reorders() {
+    let store = store();
+    register(&store, vec![page("t1"), page("t2")]).await;
+
+    // Kitesurf's `/json/list` order is not stable: the first poll pins a tab,
+    // later reorders must not move the screencast (or the controller).
+    let first = store
+        .update_pages("s1", vec![page("t1"), page("t2")])
+        .await
+        .expect("session exists");
+    assert_eq!(first.effective_active(), Some("t1"));
+
+    let reordered = store
+        .update_pages("s1", vec![page("t2"), page("t1")])
+        .await
+        .expect("session exists");
+    assert_eq!(reordered.effective_active(), Some("t1"));
+
+    // An explicit switch still wins, and survives another reorder.
+    store
+        .set_active_page("s1", "t2")
+        .await
+        .expect("t2 is owned");
+    let reordered = store
+        .update_pages("s1", vec![page("t2"), page("t1")])
+        .await
+        .expect("session exists");
+    assert_eq!(reordered.effective_active(), Some("t2"));
+
+    // Only when the held tab disappears does the next first page get pinned.
+    let replaced = store
+        .update_pages("s1", vec![page("t3"), page("t1")])
+        .await
+        .expect("session exists");
+    assert_eq!(replaced.effective_active(), Some("t3"));
+    let reordered = store
+        .update_pages("s1", vec![page("t1"), page("t3")])
+        .await
+        .expect("session exists");
+    assert_eq!(reordered.effective_active(), Some("t3"));
+}
+
+#[tokio::test]
 async fn update_pages_for_unknown_session_is_none() {
     let store = store();
     assert!(store.update_pages("nope", vec![]).await.is_none());

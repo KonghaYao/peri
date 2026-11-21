@@ -675,6 +675,106 @@ fn console_events_decode_the_cdp_payload() {
     );
 }
 
+/// A link the page opens must reach the address bar; the gateway only learns
+/// about it from `Page.frameNavigated`.
+#[test]
+fn main_frame_navigations_refresh_the_address_bar() {
+    let now = Instant::now();
+    let mut machine = machine();
+    holds(&mut machine, now);
+    assert_eq!(machine.state(), OwnershipState::HumanHolds);
+
+    let event = CdpEvent {
+        method: "Page.frameNavigated".to_owned(),
+        params: json!({"frame": {"id": "f1", "url": "https://example.test/next"}}),
+    };
+    let decoded = diagnostic_event(&event, 9).expect("main frame");
+    assert_eq!(
+        decoded,
+        Event::FrameNavigated {
+            url: "https://example.test/next".to_owned(),
+        }
+    );
+    assert_eq!(machine.on(decoded, now), vec![Effect::RefreshNavigation]);
+
+    // Iframe swaps are not address-bar material.
+    let iframe = CdpEvent {
+        method: "Page.frameNavigated".to_owned(),
+        params: json!({"frame": {"id": "f2", "parentId": "f1", "url": "https://ads.test/"}}),
+    };
+    assert_eq!(diagnostic_event(&iframe, 9), None);
+
+    // The URL the machine already reports does not trigger another read.
+    let current = machine.navigation().url.clone();
+    assert!(machine.on(Event::FrameNavigated { url: current }, now).is_empty());
+}
+
+/// Kitesurf's history never learns about `location.assign` navigations, so the
+/// back/forward buttons follow the stack the machine keeps.
+#[test]
+fn the_visit_stack_drives_back_and_forward() {
+    let now = Instant::now();
+    let mut machine = machine();
+    holds(&mut machine, now);
+
+    let navigate = |machine: &mut Machine, url: &str| {
+        machine.on(
+            Event::Navigation(cdp::NavigationState {
+                url: url.to_owned(),
+                ..cdp::NavigationState::default()
+            }),
+            now,
+        );
+    };
+    for url in [
+        "https://example.test/",
+        "https://example.test/?a=1",
+        "https://example.test/?a=2",
+    ] {
+        navigate(&mut machine, url);
+    }
+    assert_eq!(machine.navigation().url, "https://example.test/?a=2");
+    assert!(machine.navigation().can_go_back);
+    assert!(!machine.navigation().can_go_forward);
+
+    // A link the page opens lands in the same stack.
+    machine.on(
+        Event::FrameNavigated {
+            url: "https://example.test/?a=3".to_owned(),
+        },
+        now,
+    );
+    assert_eq!(
+        machine.step_history(-1),
+        Some("https://example.test/?a=2".to_owned())
+    );
+
+    // The replay reports the URL the cursor already points at; that must not
+    // drop the entries ahead of it.
+    navigate(&mut machine, "https://example.test/?a=2");
+    assert!(machine.navigation().can_go_back);
+    assert!(
+        machine.navigation().can_go_forward,
+        "forward survives a replay"
+    );
+    assert_eq!(
+        machine.step_history(1),
+        Some("https://example.test/?a=3".to_owned())
+    );
+
+    // A fresh navigation drops the entries it makes unreachable.
+    navigate(&mut machine, "https://example.test/?b=1");
+    assert!(!machine.navigation().can_go_forward);
+    assert_eq!(
+        machine.step_history(-1),
+        Some("https://example.test/?a=3".to_owned())
+    );
+
+    // Out-of-range steps stay put.
+    assert_eq!(machine.step_history(5), None);
+    assert_eq!(machine.step_history(-5), None);
+}
+
 /// Controller double: records every command and never emits events.
 struct FakeController {
     commands: Arc<Mutex<Vec<(String, Value)>>>,
@@ -704,19 +804,7 @@ impl PageController for FakeController {
                     {"id": 2, "url": "https://example.test/next", "title": "Next"}
                 ]
             }),
-            "Page.navigate" => {
-                self.history.store(1, Ordering::SeqCst);
-                json!({})
-            }
-            "Page.navigateToHistoryEntry" => {
-                if params.get("entryId").and_then(Value::as_i64) == Some(2) {
-                    self.history.store(1, Ordering::SeqCst);
-                } else {
-                    self.history.store(0, Ordering::SeqCst);
-                }
-                json!({})
-            }
-            "Runtime.evaluate" => json!({"result": {"value": "Example"}}),
+            "Runtime.evaluate" => fake_evaluate(&self.history, &params),
             _ => json!({}),
         })
     }
@@ -727,6 +815,36 @@ impl PageController for FakeController {
 
     fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+}
+
+/// Models the two expressions the navigation helpers send: `location.assign`
+/// commits the document (the fake's history follows) and `location.href` reads
+/// it back.
+fn fake_evaluate(history: &AtomicI64, params: &Value) -> Value {
+    let expression = params
+        .get("expression")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(url) = expression
+        .strip_prefix("location.assign(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let url: String = serde_json::from_str(url).expect("string literal");
+        history.store(if url.ends_with("/next") { 1 } else { 0 }, Ordering::SeqCst);
+        return json!({"result": {"type": "undefined"}});
+    }
+    match expression {
+        "location.href" => json!({"result": {"value": fake_url(history.load(Ordering::SeqCst))}}),
+        _ => json!({"result": {"value": "Example"}}),
+    }
+}
+
+fn fake_url(history: i64) -> &'static str {
+    if history == 1 {
+        "https://example.test/next"
+    } else {
+        "https://example.test/"
     }
 }
 
@@ -1027,24 +1145,33 @@ async fn navigation_goes_to_the_controller_and_is_reported() {
     assert_eq!(harness.next_nav("navigation state").await.0, "t1");
 
     harness.handle.input(ControllerCommand::Navigate(
-        "https://example.test/second".to_owned(),
+        "https://example.test/next".to_owned(),
     ));
     let (_, url, _) = harness.next_nav("navigation after navigate").await;
     assert_eq!(url, "https://example.test/next");
-    assert_eq!(
-        harness.params("Page.navigate"),
-        vec![json!({"url": "https://example.test/second"})]
+    assert!(
+        harness.params("Page.navigate").is_empty(),
+        "Page.navigate wedges Kitesurf, so the driver must not use it"
+    );
+    assert!(
+        harness.params("Runtime.evaluate").iter().any(|params| {
+            params["expression"] == json!("location.assign(\"https://example.test/next\")")
+        }),
+        "{:?}",
+        harness.params("Runtime.evaluate")
     );
 
-    // Navigating moved the fake's history to index 1; stepping back uses the
-    // history API, not `Page.navigate`.
+    // The machine kept the two visits, so stepping back replays the first one
+    // through the same `location.assign` path the address bar uses.
     harness.handle.input(ControllerCommand::History(-1));
     let (_, url, _) = harness.next_nav("navigation after history step").await;
     assert_eq!(url, "https://example.test/");
-    assert_eq!(
-        harness.params("Page.navigateToHistoryEntry"),
-        vec![json!({"entryId": 1})],
-        "history steps use Page.navigateToHistoryEntry, not Page.navigate"
+    assert!(
+        harness.params("Runtime.evaluate").iter().any(|params| {
+            params["expression"] == json!("location.assign(\"https://example.test/\")")
+        }),
+        "{:?}",
+        harness.params("Runtime.evaluate")
     );
 }
 

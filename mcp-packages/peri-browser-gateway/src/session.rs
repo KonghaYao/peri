@@ -504,6 +504,13 @@ impl Session {
         if !still_present {
             self.active_page = None;
         }
+        // Kitesurf's `/json/list` order is not stable. Without a pinned tab the
+        // effective page follows `pages.first()`, so a reorder would swap the
+        // screencast — and, while the human holds the page, close and reopen the
+        // controller — on every poll. Pin the first page until it disappears.
+        if self.active_page.is_none() {
+            self.active_page = self.pages.first().map(|page| page.target_id.clone());
+        }
     }
 }
 
