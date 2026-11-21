@@ -763,7 +763,7 @@ fn conflicting_late_settle_keeps_first_result() {
 #[test]
 fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
     let (table, _rx) = make_table();
-    let limit = Arc::new(crate::runner::RunLimitState::new(Some(5)));
+    let limit = Arc::new(crate::runner::RunLimitState::new(Some(5), None));
     let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink_deliveries = Arc::clone(&delivered);
     let sink_limit = Arc::clone(&limit);
@@ -773,7 +773,7 @@ fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
             .as_ref()
             .and_then(|result| result.tool_count())
         {
-            sink_limit.observe_tool_calls(&record.task_id, count);
+            sink_limit.observe_tool_calls(&record.run_id, &record.task_id, record.agent_id, count);
         }
         sink_deliveries
             .lock()

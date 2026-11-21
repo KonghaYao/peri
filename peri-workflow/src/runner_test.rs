@@ -168,11 +168,11 @@ impl AgentExecutor for MockAgentExecutor {
 
 #[test]
 fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
-    let state = RunLimitState::new(Some(5));
-    assert!(state.observe_tool_calls("t-1", 3).is_none());
+    let state = RunLimitState::new(Some(5), None);
+    assert!(state.observe_tool_calls("run-1", "t-1", 0, 3).is_none());
     assert_eq!(state.breach(), None, "未超限不得置 breach");
     assert_eq!(
-        state.observe_tool_calls("t-2", 3).as_deref(),
+        state.observe_tool_calls("run-1", "t-2", 0, 3).as_deref(),
         Some("workflow exceeded maxToolCalls (5)"),
         "累计超限时返回首次 breach 详情",
     );
@@ -190,18 +190,18 @@ fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
 
 #[test]
 fn run_limit_state_counts_each_task_once_on_redelivery() {
-    let state = RunLimitState::new(Some(5));
+    let state = RunLimitState::new(Some(5), None);
     assert!(
-        state.observe_tool_calls("t-1", 3).is_none(),
+        state.observe_tool_calls("run-1", "t-1", 0, 3).is_none(),
         "首次终态结果正常计数"
     );
     assert!(
-        state.observe_tool_calls("t-1", 3).is_none(),
+        state.observe_tool_calls("run-1", "t-1", 0, 3).is_none(),
         "同一 task 的投递重试不得重复计入（3+3 > 5 会误报超限）"
     );
     assert_eq!(state.breach(), None, "重投不产生 breach");
     assert_eq!(
-        state.observe_tool_calls("t-2", 3).as_deref(),
+        state.observe_tool_calls("run-1", "t-2", 0, 3).as_deref(),
         Some("workflow exceeded maxToolCalls (5)"),
         "去重只按 task 生效：首次的 3 确实计入，另一任务累计后超限",
     );
@@ -209,13 +209,13 @@ fn run_limit_state_counts_each_task_once_on_redelivery() {
 
 #[test]
 fn concurrent_redelivery_of_one_task_counts_once() {
-    let state = Arc::new(RunLimitState::new(Some(5)));
+    let state = Arc::new(RunLimitState::new(Some(5), None));
     std::thread::scope(|scope| {
         for _ in 0..8 {
             let state = Arc::clone(&state);
             scope.spawn(move || {
                 assert!(
-                    state.observe_tool_calls("t-1", 3).is_none(),
+                    state.observe_tool_calls("run-1", "t-1", 0, 3).is_none(),
                     "并发重投不得触发超限"
                 );
             });
@@ -223,10 +223,22 @@ fn concurrent_redelivery_of_one_task_counts_once() {
     });
     assert_eq!(state.breach(), None, "8 次并发重投也只能计一次");
     assert_eq!(
-        state.observe_tool_calls("t-2", 3).as_deref(),
+        state.observe_tool_calls("run-1", "t-2", 0, 3).as_deref(),
         Some("workflow exceeded maxToolCalls (5)"),
         "并发去重后累计值仍只来自首次的 3",
     );
+}
+
+fn tool_only_result(tool_count: u64) -> AgentRunResult {
+    AgentRunResult::Ok {
+        output: "ok".into(),
+        usage: Usage { output_tokens: 0 },
+        model: None,
+        tool_count: Some(tool_count),
+        token_count: None,
+        phase: None,
+        duration_ms: None,
+    }
 }
 
 #[test]
@@ -235,21 +247,27 @@ fn duplicate_task_backfill_counts_tool_calls_once() {
         delay: std::time::Duration::ZERO,
     }) as Arc<dyn AgentExecutor>;
     let runner = WorkflowRunner::new(executor, ".", None);
-    runner
-        .run_limit_states
-        .insert("run-201".into(), Arc::new(RunLimitState::new(Some(5))));
+    runner.run_limit_states.insert(
+        "run-201".into(),
+        Arc::new(RunLimitState::new(Some(5), None)),
+    );
 
     // 首次终态提交：3 次工具调用正常计入。
-    assert_eq!(runner.note_task_tool_calls("run-201", "t-1", 3), None);
+    assert_eq!(
+        runner.note_task_execution("run-201", "t-1", 0, &tool_only_result(3)),
+        None
+    );
     // 投递重试（任务表幂等分支再次回填同一结果）：不得重复累计。
     assert_eq!(
-        runner.note_task_tool_calls("run-201", "t-1", 3),
+        runner.note_task_execution("run-201", "t-1", 0, &tool_only_result(3)),
         None,
         "同一 task 的重复回填只计首次"
     );
     // 另一任务继续累计：3+3 > 5 说明首次的 3 未被去重吞掉。
     assert_eq!(
-        runner.note_task_tool_calls("run-201", "t-2", 3).as_deref(),
+        runner
+            .note_task_execution("run-201", "t-2", 0, &tool_only_result(3))
+            .as_deref(),
         Some("workflow exceeded maxToolCalls (5)")
     );
 }
@@ -318,6 +336,8 @@ fn captured_git_observation() -> crate::journal::GitObservation {
     crate::journal::GitObservation::Captured(crate::journal::GitBaseline {
         repo_root: std::path::PathBuf::from("/repo"),
         cwd: std::path::PathBuf::from("/repo"),
+        git_dir: std::path::PathBuf::from("/repo/.git"),
+        git_common_dir: std::path::PathBuf::from("/repo/.git"),
         head: "0123456789abcdef".into(),
         status_porcelain_v2: Vec::new(),
     })
@@ -468,6 +488,30 @@ fn postcondition_projection_separates_unattributed_changes_from_violations() {
     assert_eq!(
         (projection.post_processing, projection.delivery),
         (PostProcessingStatus::Failed, DeliveryStatus::Blocked)
+    );
+}
+
+#[test]
+fn terminal_git_error_assembly_includes_each_attribution_tier() {
+    use crate::journal::PostconditionFailure;
+
+    assert_eq!(
+        crate::runner::terminal::postcondition_error(&PostconditionFailure::Violation(
+            "escaped writeIntent.path_allowlist".into()
+        )),
+        "Git postcondition failed: run-owned violation: escaped writeIntent.path_allowlist"
+    );
+    assert_eq!(
+        crate::runner::terminal::postcondition_error(&PostconditionFailure::Unattributed(
+            "git HEAD changed outside the run's write footprint".into()
+        )),
+        "Git postcondition blocked: unattributed change (external or unknown): git HEAD changed outside the run's write footprint"
+    );
+    assert_eq!(
+        crate::runner::terminal::postcondition_error(&PostconditionFailure::ObservationIncomplete(
+            "cannot sample".into()
+        )),
+        "Git postcondition blocked: observation incomplete: cannot sample"
     );
 }
 
@@ -989,8 +1033,8 @@ fn fatal_host_failure_uses_the_existing_first_failure_slot_per_run() {
         delay: std::time::Duration::ZERO,
     }) as Arc<dyn AgentExecutor>;
     let runner = WorkflowRunner::new(executor, ".", None);
-    let failed = Arc::new(RunLimitState::new(None));
-    let independent = Arc::new(RunLimitState::new(None));
+    let failed = Arc::new(RunLimitState::new(None, None));
+    let independent = Arc::new(RunLimitState::new(None, None));
     runner
         .run_limit_states
         .insert("failed".into(), Arc::clone(&failed));
@@ -1003,4 +1047,110 @@ fn fatal_host_failure_uses_the_existing_first_failure_slot_per_run() {
     assert_eq!(independent.breach(), None);
     runner.note_run_failure("already retired", "late result");
     assert_eq!(runner.run_limit_states.len(), 2);
+}
+
+/// 结算路径按执行器解析的上限记录迭代耗尽；重投不重复记录。
+struct FixedLimitsExecutor {
+    limits: peri_acp_types::workflow::AgentExecutionLimits,
+}
+
+#[async_trait::async_trait]
+impl AgentExecutor for FixedLimitsExecutor {
+    async fn execute(&self, _params: AgentRunParams) -> AgentRunResult {
+        AgentRunResult::Skipped
+    }
+
+    fn execution_limits(
+        &self,
+        _run_id: &str,
+        _agent_id: u64,
+    ) -> Option<peri_acp_types::workflow::AgentExecutionLimits> {
+        Some(self.limits)
+    }
+}
+
+#[test]
+fn iteration_exhaustion_records_resolved_limit_and_usage() {
+    let executor = Arc::new(FixedLimitsExecutor {
+        limits: peri_acp_types::workflow::AgentExecutionLimits {
+            iteration_limit: 400,
+            iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::AgentDefinition,
+            iterations_used: Some(400),
+        },
+    }) as Arc<dyn AgentExecutor>;
+    let runner = WorkflowRunner::new(executor, ".", None);
+    runner
+        .run_limit_states
+        .insert("run-it".into(), Arc::new(RunLimitState::new(None, None)));
+    let result = AgentRunResult::Dead {
+        scope_close_incomplete: false,
+        reason: Some(peri_acp_types::workflow::AGENT_DEAD_REASON_MAX_ITERATIONS.into()),
+        detail: Some("Max iterations exceeded (400)".into()),
+        duration_ms: Some(1),
+        token_count: Some(75_323),
+    };
+    assert_eq!(
+        runner
+            .note_task_execution("run-it", "task-1", 9, &result)
+            .as_deref(),
+        Some("workflow exceeded maxIterations (400)")
+    );
+    // 投递重试不得重复记录同一条超限。
+    assert_eq!(
+        runner.note_task_execution("run-it", "task-1", 9, &result),
+        None
+    );
+    let state = runner
+        .run_limit_states
+        .get("run-it")
+        .expect("run limit state must remain registered");
+    let breaches = state.breaches();
+    assert_eq!(breaches.len(), 1, "重投只保留一条迭代超限记录");
+    assert_eq!(
+        breaches[0].scope,
+        peri_acp_types::workflow::LimitScope::Iterations
+    );
+    assert_eq!(breaches[0].limit, Some(400), "上限按解析值记录");
+    assert_eq!(breaches[0].observed, Some(400), "用量精确到实际迭代数");
+    assert_eq!(
+        breaches[0].attempt.as_ref().map(|attempt| attempt.agent_id),
+        Some(9)
+    );
+    assert_eq!(
+        state.observed_tokens(),
+        Some(75_323),
+        "dead 尝试上报的 token 用量同样累计"
+    );
+}
+
+/// 正常完成不产生超限，但 token 用量照常累计（未配置预算也不例外）。
+#[test]
+fn successful_task_records_usage_without_breach() {
+    let executor = Arc::new(MockAgentExecutor {
+        delay: std::time::Duration::ZERO,
+    }) as Arc<dyn AgentExecutor>;
+    let runner = WorkflowRunner::new(executor, ".", None);
+    runner.run_limit_states.insert(
+        "run-ok".into(),
+        Arc::new(RunLimitState::new(None, Some(60_000))),
+    );
+    let result = AgentRunResult::Ok {
+        output: "ok".into(),
+        usage: Usage { output_tokens: 10 },
+        model: None,
+        tool_count: Some(2),
+        token_count: Some(1_200),
+        phase: None,
+        duration_ms: None,
+    };
+    assert_eq!(
+        runner.note_task_execution("run-ok", "task-1", 1, &result),
+        None
+    );
+    let state = runner
+        .run_limit_states
+        .get("run-ok")
+        .expect("run limit state must remain registered");
+    assert!(state.breaches().is_empty());
+    assert_eq!(state.observed_tokens(), Some(1_200));
 }

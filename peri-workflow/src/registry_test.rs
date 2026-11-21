@@ -306,6 +306,7 @@ fn test_notification_projects_structured_attempt_identity() {
             }),
             consumed: true,
             disposition: peri_acp_types::workflow::AttemptDisposition::Recovered,
+            execution: None,
         }],
     };
 

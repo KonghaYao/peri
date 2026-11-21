@@ -3,7 +3,7 @@
 use super::{
     broadcast, fmt, params, AgentExecutor, AgentRunParams, AgentRunResult, AgentTaskPublish,
     AgentTaskSink, Arc, AtomicBool, CloseGate, Debug, Duration, Formatter, HashMap, Instant,
-    Ordering, ProgressEvent, ProgressExpirySweeper, PublishOutcome, RunProgress,
+    Ordering, ProgressEvent, ProgressExpirySweeper, PublishOutcome, RunLimitBreach, RunProgress,
     RuntimeProgressObserver, RwLock, SettleAdmission, SettleOutcome, TaskManager,
     UnboundedReceiver, WorkflowInput, WorkflowJournalStore, WorkflowProgressStore,
     WorkflowRunEventLog, WorkflowRunner, WorkflowTaskRecord, WorkflowTaskRegistry,
@@ -131,8 +131,11 @@ impl AgentTaskSink for RuntimeAgentTaskSink {
             if let Some(Some(maximum)) = self.budgets.get(&run_id).map(|budget| budget.max_agents) {
                 let active = self.tasks.active_count_for_run(&run_id) as u64;
                 if active >= maximum {
-                    return AgentTaskPublish::LimitBreach(format!(
-                        "workflow exceeded maxAgents ({maximum})"
+                    return AgentTaskPublish::LimitBreach(RunLimitBreach::new(
+                        peri_acp_types::workflow::LimitScope::Agents,
+                        Some(maximum),
+                        Some(active),
+                        format!("workflow exceeded maxAgents ({maximum})"),
                     ));
                 }
             }
@@ -232,11 +235,9 @@ impl WorkflowRuntime {
             if let Some(detail) = result.unsettled_scope_error() {
                 runner.note_run_failure(&record.run_id, detail);
             }
-            // tool 计数与投递同点（任务终态先提交后投递）：计数只影响 run 终态投影，
+            // 限额记账与投递同点（任务终态先提交后投递）：计数只影响 run 终态投影，
             // 不改变已提交结果（design §5.2 第 5 条 limits 计费）；重复回投按 taskId 去重。
-            if let Some(count) = result.tool_count() {
-                runner.note_task_tool_calls(&record.run_id, &record.task_id, count);
-            }
+            runner.note_task_execution(&record.run_id, &record.task_id, record.agent_id, &result);
             runner.deliver_agent_result(&record.run_id, &record.task_id, &result);
         }));
         Self {

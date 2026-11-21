@@ -151,6 +151,46 @@ impl AgentRunResult {
             _ => None,
         }
     }
+
+    /// 迭代上限耗尽：执行器用稳定 reason 编码上报，调用方不解析错误文案。
+    #[must_use]
+    pub fn iteration_limit_exhausted(&self) -> bool {
+        matches!(
+            self,
+            AgentRunResult::Dead {
+                reason: Some(reason),
+                ..
+            } if reason == AGENT_DEAD_REASON_MAX_ITERATIONS
+        )
+    }
+}
+
+/// 迭代上限耗尽的 dead reason（`AgentError::MaxIterationsExceeded` 的结构化投影）。
+pub const AGENT_DEAD_REASON_MAX_ITERATIONS: &str = "max-iterations";
+
+/// 单次 workflow agent 执行实际解析到的硬上限与用量。
+///
+/// 由执行器（peri-agent）在解析后按 `(run_id, agent_id)` 记录，宿主在结算时读取；
+/// 只描述本次执行，不改变 resume 重放与限额策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentExecutionLimits {
+    /// 实际解析后的迭代上限（不写死默认值：无 agentType 的回落值与定义 `max_turns` 各按解析结果）。
+    pub iteration_limit: u64,
+    pub iteration_limit_source: IterationLimitSource,
+    /// 已用语义迭代数；执行未进入循环或未采集时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations_used: Option<u64>,
+}
+
+/// 有效迭代上限的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IterationLimitSource {
+    /// 未指定 agentType（或定义未给出正向 max_turns）：执行器回落的上限。
+    Default,
+    /// agent 定义的 `max_turns`（含 builtin coder 的默认值）。
+    AgentDefinition,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -410,6 +450,38 @@ pub enum PostconditionObservation {
     Incomplete,
 }
 
+/// 运行所在的 Git 身份与基线可见范围（观测事实，不是交付结论）。
+///
+/// 终态只持久化身份与能力，不保存基线内容（porcelain 字节）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitObservationScope {
+    pub repo_root: String,
+    pub cwd: String,
+    /// `git rev-parse --git-dir` 解析后的绝对路径。
+    pub git_dir: String,
+    /// `git rev-parse --git-common-dir` 解析后的绝对路径。
+    pub git_common_dir: String,
+    /// 采样时的 HEAD。
+    pub head: String,
+    /// 基线实际覆盖的范围；未列出的都不在观测范围内。
+    pub visibility: GitObservationVisibility,
+}
+
+/// 基线能观测到什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitObservationVisibility {
+    /// `git status --porcelain=v2` 观测 index。
+    pub index: bool,
+    /// 观测 worktree（含未跟踪文件）。
+    pub worktree: bool,
+    /// ignored 文件不进入基线，其变化不可观测。
+    pub ignored: bool,
+    /// 只比较运行前后的 HEAD 端点，不覆盖完整提交区间与提交内容。
+    pub commit_range: bool,
+}
+
 /// 引擎级结论：只聚合 execution 与 post-processing/delivery，不代替语义验收。
 ///
 /// `Completed` 仅表示执行完成且 post-condition 未阻断；`acceptance_status` 仍是
@@ -492,6 +564,86 @@ pub struct WorkflowAttempt {
     pub recovered_from: Option<RecoveredAttempt>,
     pub consumed: bool,
     pub disposition: AttemptDisposition,
+    /// 本次尝试的执行结果（宿主在写入 journal 时补注）。
+    ///
+    /// 与 `disposition` 正交：`disposition=produced` 只表示结果来源，
+    /// 执行失败/超限仍如实出现在这里；旧 journal 缺省为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<AttemptExecution>,
+}
+
+/// attempt 的实际执行结果（不是交付结论）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptExecution {
+    pub outcome: AttemptOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// 执行器实际解析后的迭代上限；未解析（如执行前失败）为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_limit_source: Option<IterationLimitSource>,
+    /// 已用语义迭代数；未采集为 `None`（不得写成 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations_used: Option<u64>,
+    /// run 的 `budgetTotal`；未配置为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    /// 本次执行上报的 token 用量；未采集为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+}
+
+/// 执行的结局类别：与 `AgentRunResult` 变体对齐，`Limited` 表示迭代上限耗尽。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    Ok,
+    Dead,
+    Skipped,
+    Limited,
+}
+
+/// 已触发硬上限的范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitScope {
+    ToolCalls,
+    Tokens,
+    Iterations,
+    ElapsedMs,
+    Agents,
+}
+
+/// 一次已触发的硬上限（`state.json` 的 `limit_breaches`）。
+///
+/// 与顶层 `error` 并存：`error` 仍是首条 breach 的兼容文本，这里列全部触发项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitBreach {
+    pub scope: LimitScope,
+    /// 配置的上限；未采集到具体数值时为 `None`（不得写成 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// 观测用量；未采集为 `None`（不得写成 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<u64>,
+    /// 触发它的 attempt 身份；run 级超限（如 `maxElapsedMs`）没有单次 attempt。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<LimitBreachAttempt>,
+    /// 检测时点（宿主时钟，RFC 3339）。
+    pub detected_at: String,
+}
+
+/// 超限归因的尝试身份（taskId 作用域 = 单次 run）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitBreachAttempt {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub agent_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -923,6 +1075,16 @@ pub trait AgentExecutor: Send + Sync {
     }
     /// 执行单个 workflow agent，返回 AgentRunResult
     async fn execute(&self, params: AgentRunParams) -> AgentRunResult;
+
+    /// 本次执行实际解析到的硬上限与用量（宿主结算路径读取）。
+    ///
+    /// 默认未知：限额数值只由执行器在解析后给出，宿主不得自行推断或写死默认值。
+    fn execution_limits(&self, _run_id: &str, _agent_id: u64) -> Option<AgentExecutionLimits> {
+        None
+    }
+
+    /// run 结束时回收该 run 的执行事实（无状态实现无需覆盖）。
+    fn forget_run(&self, _run_id: &str) {}
 }
 
 #[cfg(test)]

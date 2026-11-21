@@ -609,3 +609,51 @@ async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
         "入队失败后不得留下续跑意图"
     );
 }
+
+/// 有效迭代上限按实际解析值记录：无 agentType 的 200 与定义 max_turns（含
+/// builtin coder 400）不能统一成一个默认值。
+#[test]
+fn iteration_limit_comes_from_the_resolved_agent_definition() {
+    use peri_acp_types::workflow::IterationLimitSource;
+
+    assert_eq!(
+        crate::agent::workflow::agent::resolve_iteration_limit(None),
+        (200, IterationLimitSource::Default),
+        "无 agentType 时按执行器回落值记录"
+    );
+
+    let builtin_coder = WorkflowAgentDefinition {
+        model: None,
+        allowed_tools: None,
+        disallowed_tools: Vec::new(),
+        skill_names: Vec::new(),
+        // builtin coder 的 max_turns 经 middleware 映射为 400。
+        max_iterations: 400,
+        prompt_overrides: None,
+    };
+    assert_eq!(
+        crate::agent::workflow::agent::resolve_iteration_limit(Some(&builtin_coder)),
+        (400, IterationLimitSource::AgentDefinition),
+        "定义 max_turns 按解析值记录，不写死 200"
+    );
+
+    let custom_override = WorkflowAgentDefinition {
+        max_iterations: 123,
+        ..builtin_coder.clone()
+    };
+    assert_eq!(
+        crate::agent::workflow::agent::resolve_iteration_limit(Some(&custom_override)),
+        (123, IterationLimitSource::AgentDefinition),
+        "覆盖值按定义解析，不写死 200/400"
+    );
+
+    let no_max_turns = WorkflowAgentDefinition {
+        max_iterations: 0,
+        ..builtin_coder
+    };
+    assert_eq!(
+        crate::agent::workflow::agent::resolve_iteration_limit(Some(&no_max_turns)),
+        (200, IterationLimitSource::Default),
+        "定义未给出正向 max_turns 时同样回落，来源保持 default"
+    );
+}

@@ -7,6 +7,7 @@ use tracing::warn;
 use crate::error::WorkflowError;
 use crate::journal::WorkflowJournalStore;
 use crate::progress::WorkflowProgressStore;
+use crate::runner::RunLimitReport;
 use crate::runner::WorkflowInput;
 use crate::runner::WorkflowResult;
 
@@ -16,6 +17,18 @@ fn public_workflow_error(error: &str) -> String {
 
 fn public_stderr_summary(stderr_tail: Option<String>) -> Option<String> {
     stderr_tail.filter(|tail| !tail.trim().is_empty())
+}
+
+/// 终态 Git 错误文案：既有状态词 + 归因档位（`PostconditionFailure` 的 Display）。
+pub(super) fn postcondition_error(failure: &crate::journal::PostconditionFailure) -> String {
+    format!(
+        "Git postcondition {}: {failure}",
+        if failure.is_violation() {
+            "failed"
+        } else {
+            "blocked"
+        }
+    )
 }
 
 fn persist_failed_state(
@@ -35,9 +48,12 @@ fn persist_failed_state(
         delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
         delivery_reason: None,
         postcondition_observation: None,
+        git_observation_scope: input.git_observation.scope(),
         outcome: peri_acp_types::workflow::WorkflowOutcome::Failed,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
+        limit_breaches: Vec::new(),
+        token_usage: None,
         budget_total: input.budget_total,
         args: input.args.clone(),
         max_concurrency: input.max_concurrency,
@@ -196,7 +212,13 @@ pub(super) fn finalize_workflow(
     progress_store: &WorkflowProgressStore,
     started_at_iso: String,
     host: &JsExecutionHost,
+    limit_report: RunLimitReport,
 ) -> WorkflowResult {
+    let RunLimitReport {
+        breaches,
+        token_usage,
+        first_error,
+    } = limit_report;
     let postcondition = match &input.git_observation {
         crate::journal::GitObservation::Captured(baseline) => {
             Some(baseline.verify_postcondition(input.write_intent.as_ref()))
@@ -222,15 +244,16 @@ pub(super) fn finalize_workflow(
             "git observation is incomplete; delivery cannot claim an unchanged worktree"
         );
     }
+    // 终态读取的是收尾时的完整限额事实：done 之后才回填的 settle 仍不得把
+    // 超限 run 显示成全绿（与 done 时的判定同一规则，不新增中断）。
+    if !breaches.is_empty() && final_result.status == "completed" {
+        final_result.status = "failed".to_string();
+    }
+    if final_result.error.is_none() {
+        final_result.error = first_error.clone();
+    }
     if let Some(Err(failure)) = postcondition {
-        let error = format!(
-            "Git postcondition {}: {failure}",
-            if failure.is_violation() {
-                "failed"
-            } else {
-                "blocked"
-            }
-        );
+        let error = postcondition_error(&failure);
         final_result.error = Some(match final_result.error.take() {
             Some(existing) => format!("{existing}; {error}"),
             None => error,
@@ -262,9 +285,12 @@ pub(super) fn finalize_workflow(
         delivery_status: final_result.delivery_status,
         delivery_reason: projection.reason,
         postcondition_observation: Some(projection.observation),
+        git_observation_scope: input.git_observation.scope(),
         outcome,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
+        limit_breaches: breaches,
+        token_usage,
         budget_total: input.budget_total,
         args: input.args.clone(),
         max_concurrency: input.max_concurrency,
@@ -327,7 +353,13 @@ pub(super) fn send_killed(
     input: &crate::runner::WorkflowInput,
     started_at: &str,
     stderr_tail: Option<String>,
+    limit_report: RunLimitReport,
 ) {
+    let RunLimitReport {
+        breaches,
+        token_usage,
+        ..
+    } = limit_report;
     let error = Some("workflow killed by user".to_string());
     let state = crate::journal::RunState {
         run_id: run_id.into(),
@@ -339,9 +371,12 @@ pub(super) fn send_killed(
         delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
         delivery_reason: None,
         postcondition_observation: None,
+        git_observation_scope: input.git_observation.scope(),
         outcome: peri_acp_types::workflow::WorkflowOutcome::Killed,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
+        limit_breaches: breaches,
+        token_usage,
         budget_total: input.budget_total,
         args: input.args.clone(),
         max_concurrency: input.max_concurrency,

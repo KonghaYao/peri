@@ -43,11 +43,26 @@ impl PostconditionFailure {
             | Self::Violation(message) => message,
         }
     }
+
+    /// 归因档位：写进终态错误文案，避免把外部变化读成本 run 写入。
+    #[must_use]
+    pub fn attribution_label(&self) -> &'static str {
+        match self {
+            Self::Violation(_) => "run-owned violation",
+            Self::Unattributed(_) => "unattributed change (external or unknown)",
+            Self::ObservationIncomplete(_) => "observation incomplete",
+        }
+    }
 }
 
 impl std::fmt::Display for PostconditionFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.message())
+        write!(
+            formatter,
+            "{}: {}",
+            self.attribution_label(),
+            self.message()
+        )
     }
 }
 
@@ -114,12 +129,23 @@ impl GitObservation {
             Self::Incomplete(_) => PostconditionObservation::Incomplete,
         }
     }
+
+    /// 观测身份与能力；只有成功采样才有可持久化的范围。
+    #[must_use]
+    pub fn scope(&self) -> Option<peri_acp_types::workflow::GitObservationScope> {
+        match self {
+            Self::Captured(baseline) => Some(baseline.observation_scope()),
+            Self::NotApplicable | Self::Incomplete(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct GitBaseline {
     pub repo_root: PathBuf,
     pub cwd: PathBuf,
+    pub git_dir: PathBuf,
+    pub git_common_dir: PathBuf,
     pub head: String,
     pub status_porcelain_v2: Vec<u8>,
 }
@@ -176,14 +202,48 @@ impl GitBaseline {
             .map_err(|_| "git HEAD is not UTF-8")?
             .trim()
             .to_string();
+        let git_dir = capture_git_path(&cwd, "--git-dir")?;
+        let git_common_dir = capture_git_path(&cwd, "--git-common-dir")?;
         let status_porcelain_v2 =
             git_output(&cwd, &["status", "--porcelain=v2", "--untracked-files=all"])?;
         Ok(Self {
             repo_root,
             cwd,
+            git_dir,
+            git_common_dir,
             head,
             status_porcelain_v2,
         })
+    }
+
+    /// 观测身份与能力：终态只持久化这些，不保存基线内容。
+    #[must_use]
+    pub fn observation_scope(&self) -> peri_acp_types::workflow::GitObservationScope {
+        use peri_acp_types::workflow::{GitObservationScope, GitObservationVisibility};
+        GitObservationScope {
+            repo_root: self.repo_root.to_string_lossy().into_owned(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
+            git_dir: self.git_dir.to_string_lossy().into_owned(),
+            git_common_dir: self.git_common_dir.to_string_lossy().into_owned(),
+            head: self.head.clone(),
+            visibility: GitObservationVisibility {
+                index: true,
+                worktree: true,
+                ignored: false,
+                commit_range: false,
+            },
+        }
+    }
+
+    /// Git 目录身份变化意味着观测窗口已切换（如 worktree 重新绑定），
+    /// 不能拿旧基线比较后宣称“无变化”。
+    fn check_observation_window(&self, after: &Self) -> Result<(), PostconditionFailure> {
+        if after.git_dir != self.git_dir || after.git_common_dir != self.git_common_dir {
+            return Err(observation_incomplete(
+                "git dir/common dir changed since the baseline; the observation window no longer matches",
+            ));
+        }
+        Ok(())
     }
 
     pub fn validate_write_intent(
@@ -256,6 +316,7 @@ impl GitBaseline {
                 "canonical git repository changed during workflow",
             ));
         }
+        self.check_observation_window(&after)?;
         let before = parse_status_paths(&self.status_porcelain_v2).map_err(|error| {
             observation_incomplete(format!("cannot parse baseline git status: {error}"))
         })?;
@@ -353,6 +414,7 @@ impl GitBaseline {
                 "canonical git repository changed outside the run's write footprint",
             ));
         }
+        self.check_observation_window(&after)?;
         if after.head != self.head {
             return Err(unattributed(
                 "git HEAD changed outside the run's write footprint; attribution unavailable",
@@ -460,7 +522,36 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
 fn git_output(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = run_git(cwd, args)?;
     if !output.status.success() {
-        return Err("git pre/postcondition command failed".to_string());
+        // 只保留 git 自身的 stderr 摘要（不拼接环境变量），否则统一文本会丢失诊断。
+        const STDERR_LIMIT: usize = 500;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let detail = if stderr.is_empty() {
+            "no stderr output".to_string()
+        } else {
+            peri_acp_types::session::bounded_error_message(stderr, STDERR_LIMIT)
+        };
+        return Err(format!("git {} failed: {detail}", args.join(" ")));
     }
     Ok(output.stdout)
+}
+
+/// 解析 `rev-parse --git-dir` / `--git-common-dir`：相对路径以 cwd 为基准，
+/// canonicalize 后作为跨采样可比较的观测身份。
+fn capture_git_path(cwd: &Path, flag: &str) -> Result<PathBuf, String> {
+    let raw = String::from_utf8(git_output(cwd, &["rev-parse", flag])?)
+        .map_err(|_| format!("git {flag} is not UTF-8"))?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(format!("git {flag} is empty"));
+    }
+    let path = Path::new(raw);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    absolute
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize git {flag}: {error}"))
 }
