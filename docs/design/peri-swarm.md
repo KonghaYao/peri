@@ -89,7 +89,7 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 | --- | --- | --- |
 | `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先打开订阅再执行首轮 |
 | `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影 |
-| `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入） |
+| `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
 | `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时 |
 | `GET` | `/v1/agents/sessions/{logicalId}/items` | 按 seq 增量读取 |
 
@@ -102,6 +102,11 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 - 请求体上限 8 MiB；`text` 1 MiB、`instructions` 64 KiB、`model` 256 B 由显式检查
   返回 `400`。错误体使用统一信封与稳定 `code`（`invalid_input`、`input_conflict`、
   `session_resume_required`、`upstream_unavailable` 等）。
+- `POST /events` 额外接受官方 Agents API 的 `{events:[...]}` 信封：本轮仅支持一条
+  `agent.session.input.message`、一条 `role:"user"` message、纯 `input_text`
+  content，受理为 `kind=user`、`mode=turn` 的单条 input。与原生字段混用、其他事件
+  类型、`input_image` 或其他内容类型均 `400 invalid_input`，`details.field` 指向
+  具体事件或 content 下标；不支持的能力显式报错，不静默忽略。
 - `cwd` 缺省为 `<workspaceRoot>/<logicalId>`；显式 `cwd` 必须存在且规范化，落在
   虚拟 workspace 根内。
 
@@ -115,6 +120,8 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   `user_message_chunk` 回显不投影，因此同一 `inputId` 重试不会重复；`create` 的
   `input` 同样写一条（每次 create 调用各一条；对已 `idle` 会话的重试 create 仍按
   既有语义重跑该轮，`creating` 行的恢复不重放输入，见 §4.4）。
+  官方 `events` 信封同样只落这一条 user message item（多段 `input_text` 按顺序
+  以换行拼接成一个 `text`）。
   assistant 帧仍按 `payload.messageId` 聚合。
 - item 投影同时给出 `id` 与 `itemId`（同值，`itim_...`）；`seq` 仍是唯一分页与续读
   游标，不能用 `id` 去重 delta 帧。
@@ -151,12 +158,16 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 ### 4.4 幂等语义
 
-- 输入受理需要稳定 `inputId`（body 或 `Idempotency-Key`，两处必须一致；服务端不
-  代生成）。同一 key 与同一内容重放返回同一受理，`disposition=existing`；同一 key
-  不同内容返回 `409 input_conflict`，且不入队。
+- 输入受理需要稳定 `inputId`（body 或 `Idempotency-Key`，两处必须一致；原生 body
+  路径服务端不代生成）。同一 key 与同一内容重放返回同一受理，`disposition=existing`；
+  同一 key 不同内容返回 `409 input_conflict`，且不入队。官方 `events` 信封的
+  carve-out：信封没有 body `inputId`，有 `Idempotency-Key` 时直接作为 `inputId`
+  且必须是 UUID；无 key 时由服务端生成一次性 `Uuid::now_v7()`。官方 API 本就不保证
+  无 key 重试幂等，因此该生成不构成重试承诺；原生 body 路径缺少 `inputId` 仍返回
+  `400`。
 - 受理是逐条的：序列按受理顺序追加，`seq` 前缀可核对；**不**承诺多事件整批全有
-  或全无。`kind=user` 的受理同时追加一条 user message item；同一 key 与内容的重放
-  返回 `existing`，不重复追加。
+  或全无。官方信封本轮只接受单条事件，仍按单条受理。`kind=user` 的受理同时追加
+  一条 user message item；同一 key 与内容的重放返回 `existing`，不重复追加。
 - `POST /sessions` 的 `Idempotency-Key` 只用于稳定 `logicalId` 并复用已存在会话，
   不是跨请求的事务承诺。
 - 创建中断的恢复是**按已持久化的 root id 核对**，不是重新生成：`creating` 行重试

@@ -86,6 +86,10 @@ pub struct EnvironmentBody {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitEventBody {
+    /// Official Agents API envelope. When present, the native fields are
+    /// rejected instead of being interpreted (`design §4.4`).
+    #[serde(default)]
+    pub events: Option<Value>,
     #[serde(rename = "inputId", default)]
     pub input_id: Option<String>,
     #[serde(default)]
@@ -94,12 +98,62 @@ pub struct SubmitEventBody {
     pub mode: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
-    #[serde(default)]
-    pub attachments: Vec<ContentBlock>,
-    #[serde(rename = "pluginSelections", default)]
-    pub plugin_selections: Vec<String>,
+    /// `Option` distinguishes an absent field from `[]` so the official
+    /// envelope can reject any native field, including an empty one. The
+    /// deserializer still rejects an explicit `null` exactly like the previous
+    /// `Vec` field did.
+    #[serde(default, deserialize_with = "present_vec")]
+    pub attachments: Option<Vec<ContentBlock>>,
+    #[serde(rename = "pluginSelections", default, deserialize_with = "present_vec")]
+    pub plugin_selections: Option<Vec<String>>,
     #[serde(rename = "originalDraft", default)]
     pub original_draft: Option<String>,
+}
+
+fn present_vec<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Vec::<T>::deserialize(deserializer).map(Some)
+}
+
+/// The only event accepted from the official `{events: [...]}` envelope.
+const OFFICIAL_INPUT_EVENT: &str = "agent.session.input.message";
+
+/// One entry of the official envelope. `type` stays a plain string so an
+/// unsupported official event kind is reported by name instead of collapsing
+/// into a serde enum rejection.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfficialEventBody {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    input: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfficialInputMessageBody {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    content: Option<Value>,
+}
+
+/// Content blocks are read as a flat object so an unsupported block type can be
+/// reported at its index before its fields are interpreted.
+#[derive(Debug, Deserialize)]
+struct OfficialContentBlockBody {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -437,6 +491,9 @@ pub fn resolve_submission(
     body: SubmitEventBody,
     headers: &HeaderMap,
 ) -> Result<InputSubmission, SwarmError> {
+    if let Some(events) = body.events.as_ref() {
+        return resolve_official_envelope(events, &body, headers);
+    }
     let kind = match body.kind.as_deref() {
         None | Some("user") => InputKind::User,
         Some("control") => InputKind::Control,
@@ -478,7 +535,8 @@ pub fn resolve_submission(
     if let Some(text) = &body.text {
         check_len("text", text, MAX_TEXT_BYTES)?;
     }
-    for block in &body.attachments {
+    let attachments = body.attachments.unwrap_or_default();
+    for block in &attachments {
         check_len("attachments", block.as_text(), MAX_TEXT_BYTES)?;
     }
     if let Some(draft) = &body.original_draft {
@@ -490,14 +548,225 @@ pub fn resolve_submission(
         kind,
         mode,
         text: body.text,
-        attachments: body.attachments,
-        plugin_selections: body.plugin_selections,
+        attachments,
+        plugin_selections: body.plugin_selections.unwrap_or_default(),
         original_draft: body.original_draft,
     };
     if submission.is_empty() {
         return Err(SwarmError::empty_input());
     }
     Ok(submission)
+}
+
+/// Parse the official `{events: [...]}` envelope into the existing acceptance
+/// semantics: exactly one `agent.session.input.message` event carrying exactly
+/// one user message, plain `input_text` content, accepted as one `turn` input.
+/// Unsupported official features are reported explicitly, never dropped.
+fn resolve_official_envelope(
+    events: &Value,
+    body: &SubmitEventBody,
+    headers: &HeaderMap,
+) -> Result<InputSubmission, SwarmError> {
+    if let Some(field) = native_field(body) {
+        return Err(official_invalid(
+            field,
+            "`events` cannot be combined with native submission fields",
+        ));
+    }
+    let Some(items) = events.as_array() else {
+        return Err(official_invalid(
+            "events",
+            "events must be an array containing exactly one `agent.session.input.message`",
+        ));
+    };
+    if items.len() != 1 {
+        return Err(official_invalid(
+            "events",
+            "only one event is supported; send a single `agent.session.input.message`",
+        ));
+    }
+
+    let event: OfficialEventBody = serde_json::from_value(items[0].clone())
+        .map_err(|error| official_event_shape_error(&items[0], error))?;
+    if event.kind != OFFICIAL_INPUT_EVENT {
+        return Err(official_invalid(
+            "events[0].type",
+            "only the `agent.session.input.message` event is supported",
+        ));
+    }
+    let Some(input) = event.input else {
+        return Err(official_invalid(
+            "events[0].input",
+            "the message event must carry `input` messages",
+        ));
+    };
+    let Some(messages) = input.as_array() else {
+        return Err(official_invalid(
+            "events[0].input",
+            "input must be an array containing exactly one user message",
+        ));
+    };
+    if messages.len() != 1 {
+        return Err(official_invalid(
+            "events[0].input",
+            "exactly one user message is supported per event",
+        ));
+    }
+
+    let message: OfficialInputMessageBody =
+        serde_json::from_value(messages[0].clone()).map_err(|error| {
+            official_invalid(
+                "events[0].input[0]",
+                &format!("unsupported input message shape: {error}"),
+            )
+        })?;
+    if let Some(kind) = message.kind.as_deref() {
+        if kind != "message" {
+            return Err(official_invalid(
+                "events[0].input[0].type",
+                "only `message` input entries are supported",
+            ));
+        }
+    }
+    match message.role.as_deref() {
+        Some("user") => {}
+        Some(_) => {
+            return Err(official_invalid(
+                "events[0].input[0].role",
+                "only a `user` message is supported",
+            ));
+        }
+        None => {
+            return Err(official_invalid(
+                "events[0].input[0].role",
+                "the input message must declare `role: \"user\"`",
+            ));
+        }
+    }
+    let Some(content) = message.content else {
+        return Err(official_invalid(
+            "events[0].input[0].content",
+            "the user message must carry `content`",
+        ));
+    };
+    let Some(blocks) = content.as_array() else {
+        return Err(official_invalid(
+            "events[0].input[0].content",
+            "content must be an array of `input_text` blocks",
+        ));
+    };
+
+    let mut texts = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        let path = format!("events[0].input[0].content[{index}]");
+        let block: OfficialContentBlockBody =
+            serde_json::from_value(block.clone()).map_err(|error| {
+                official_invalid(
+                    path.clone(),
+                    &format!("unsupported content block shape: {error}"),
+                )
+            })?;
+        let Some(kind) = block.kind.as_deref() else {
+            return Err(official_invalid(
+                format!("{path}.type"),
+                "content block must declare `type`",
+            ));
+        };
+        if kind != "input_text" {
+            return Err(official_invalid(
+                path,
+                "only `input_text` content blocks are supported; images and other content types are not accepted",
+            ));
+        }
+        if let Some(extra) = block.extra.keys().next() {
+            return Err(official_invalid(
+                format!("{path}.{extra}"),
+                "this content field is not supported by `input_text`",
+            ));
+        }
+        let Some(text) = block.text else {
+            return Err(official_invalid(
+                format!("{path}.text"),
+                "`input_text` content must declare `text`",
+            ));
+        };
+        texts.push(text);
+    }
+
+    // Same join and size/blank checks as the native `input` path; an all-blank
+    // envelope therefore ends at the existing `empty_input`.
+    let text = texts.join("\n");
+    check_len("text", &text, MAX_TEXT_BYTES)?;
+    let input_id = match idempotency_key(headers)? {
+        Some(input_id) => input_id,
+        // Compatibility carve-out: the official envelope has no body inputId,
+        // and the official API does not promise retry idempotency without a
+        // caller key. The native path still never generates one.
+        None => Uuid::now_v7().to_string(),
+    };
+    if Uuid::parse_str(&input_id).is_err() {
+        return Err(SwarmError::invalid_input("inputId must be a UUID"));
+    }
+
+    let submission = InputSubmission {
+        input_id,
+        kind: InputKind::User,
+        mode: InputMode::Turn,
+        text: Some(text),
+        attachments: Vec::new(),
+        plugin_selections: Vec::new(),
+        original_draft: None,
+    };
+    if submission.is_empty() {
+        return Err(SwarmError::empty_input());
+    }
+    Ok(submission)
+}
+
+fn native_field(body: &SubmitEventBody) -> Option<&'static str> {
+    if body.input_id.is_some() {
+        Some("inputId")
+    } else if body.kind.is_some() {
+        Some("kind")
+    } else if body.mode.is_some() {
+        Some("mode")
+    } else if body.text.is_some() {
+        Some("text")
+    } else if body.attachments.is_some() {
+        Some("attachments")
+    } else if body.plugin_selections.is_some() {
+        Some("pluginSelections")
+    } else if body.original_draft.is_some() {
+        Some("originalDraft")
+    } else {
+        None
+    }
+}
+
+fn official_invalid(field: impl Into<String>, message: &str) -> SwarmError {
+    SwarmError::invalid_input(message).with_details(json!({ "field": field.into() }))
+}
+
+/// `OfficialEventBody` keeps `deny_unknown_fields`; this maps its rejection to
+/// the event path so an unsupported official field or a non-string `type` is
+/// diagnosable instead of surfacing as a generic body error.
+fn official_event_shape_error(value: &Value, error: serde_json::Error) -> SwarmError {
+    let Some(object) = value.as_object() else {
+        return official_invalid("events[0]", "each event must be an object");
+    };
+    if !object.get("type").is_some_and(Value::is_string) {
+        return official_invalid("events[0].type", "event must declare a string `type`");
+    }
+    if let Some(extra) = object
+        .keys()
+        .find(|key| key.as_str() != "type" && key.as_str() != "input")
+    {
+        return official_invalid(
+            format!("events[0].{extra}"),
+            "this event field is not supported by the single-message compatibility path",
+        );
+    }
+    official_invalid("events[0]", &format!("unsupported event shape: {error}"))
 }
 
 pub fn resolve_events_cursor(

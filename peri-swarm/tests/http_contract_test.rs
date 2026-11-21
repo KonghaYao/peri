@@ -661,6 +661,141 @@ async fn idempotency_key_header_can_supply_the_input_id() {
 }
 
 #[tokio::test]
+async fn official_events_envelope_is_accepted_with_an_idempotency_key() {
+    let harness = harness();
+    create_session(&harness, json!({ "logicalId": "agent-01" })).await;
+    let input_id = uuid::Uuid::now_v7().to_string();
+    let body = json!({
+        "events": [{
+            "type": "agent.session.input.message",
+            "input": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "hello" },
+                    { "type": "input_text", "text": "official sdk" }
+                ]
+            }]
+        }]
+    });
+
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-01/events",
+        Some(body.clone()),
+        Some(TOKEN),
+        &[("idempotency-key", input_id.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{value}");
+    assert_eq!(value["accepted"], json!(true));
+    assert_eq!(value["disposition"], json!("inserted"));
+    assert_eq!(value["inputId"], json!(input_id));
+
+    let (status, _, page) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?order=asc",
+        None,
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let items = page["items"].as_array().expect("items");
+    assert_eq!(items.len(), 2, "{page}");
+    assert_eq!(items[0]["payload"]["role"], json!("user"));
+    assert_eq!(items[0]["payload"]["text"], json!("hello\nofficial sdk"));
+    assert_eq!(items[0]["payload"]["inputId"], json!(input_id));
+    assert_eq!(items[0]["itemId"], json!(format!("itim_input_{input_id}")));
+    assert_eq!(
+        items[1]["payload"]["text"],
+        json!("fake-echo: hello\nofficial sdk")
+    );
+
+    let (status, _, replay) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-01/events",
+        Some(body),
+        Some(TOKEN),
+        &[("idempotency-key", input_id.as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{replay}");
+    assert_eq!(replay["disposition"], json!("existing"));
+    assert_eq!(replay["lastItemSeq"], json!(2));
+}
+
+#[tokio::test]
+async fn official_events_envelope_without_a_key_generates_an_input_id() {
+    let harness = harness();
+    create_session(&harness, json!({ "logicalId": "agent-01" })).await;
+
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-01/events",
+        Some(json!({
+            "events": [{
+                "type": "agent.session.input.message",
+                "input": [{
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "no key" }]
+                }]
+            }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{value}");
+    let generated = value["inputId"].as_str().expect("generated inputId");
+    assert_eq!(
+        uuid::Uuid::parse_str(generated)
+            .expect("generated inputId is a UUID")
+            .get_version_num(),
+        7,
+        "the compatibility carve-out generates a UUIDv7"
+    );
+
+    let (status, _, page) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?order=asc",
+        None,
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let items = page["items"].as_array().expect("items");
+    assert_eq!(items[0]["payload"]["text"], json!("no key"));
+    assert_eq!(items[0]["payload"]["inputId"], json!(generated));
+}
+
+#[tokio::test]
+async fn official_events_envelope_rejects_unknown_event_types() {
+    let harness = harness();
+    create_session(&harness, json!({ "logicalId": "agent-01" })).await;
+
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-01/events",
+        Some(json!({
+            "events": [{ "type": "agent.session.input.cancel" }]
+        })),
+        Some(TOKEN),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert_eq!(value["error"]["code"], json!("invalid_input"));
+    assert_eq!(value["error"]["details"]["field"], json!("events[0].type"));
+}
+
+#[tokio::test]
 async fn turn_in_progress_suggests_steer() {
     let manual = Arc::new(InMemorySwarmService::in_memory(ServiceConfig {
         turn_policy: peri_swarm::service::TurnPolicy::Manual,

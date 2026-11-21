@@ -217,7 +217,7 @@
 | F-SWARM-001 | L1 | 会话 HTTP 面；五路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
 | F-SWARM-002 | L1 | 会话身份；logicalId 与 rootSessionId 分离 | [契约](../design/peri-swarm.md) |
 | F-SWARM-003 | L1 | 事件续读；SSE 先补 backlog 后实时 | [契约](../design/peri-swarm.md) |
-| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409 | [契约](../design/peri-swarm.md) |
+| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409；官方 `events` 信封单条 message | [契约](../design/peri-swarm.md) |
 | F-SWARM-005 | L2 | 双库归属；会话事实与 Swarm 事实互不建表 | [契约](../design/peri-swarm.md) |
 | F-SWARM-006 | L2 | MCP 注入；agent.tools 映射 ACP 会话声明 | [契约](../design/peri-swarm.md) |
 | F-SWARM-007 | L2 | 宿主沙箱；Bun 懒预留与 workspace 代理 | [契约](../design/peri-swarm.md) |
