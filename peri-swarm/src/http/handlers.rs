@@ -45,8 +45,8 @@ pub async fn create_session(
         UpdateField::Clear => UpdateField::Clear,
         UpdateField::Set(value) => match request::resolve_prompt_cache_options(value)? {
             Some(options) => UpdateField::Set(options),
-            // `{}` carries no `ttl`: it asserts the model default, the same
-            // meaning as an explicit `null`.
+            // Only `null` resolves to `None`; `{}` uses the official default
+            // TTL (`30m`), not "clear".
             None => UpdateField::Clear,
         },
     };

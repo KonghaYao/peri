@@ -598,7 +598,11 @@ async fn a_none_environment_never_calls_the_bun_bridge() {
         .create_session("agent-none", json!({ "environment": { "type": "none" } }))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{value}");
-    assert_eq!(value["environment"]["type"], json!("none"));
+    assert_eq!(
+        value["environment"],
+        json!({ "type": "none" }),
+        "a `none` environment carries no id: {value}"
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(stub.reserves.lock().len(), 0);
     assert!(stub.mcp.lock().is_empty(), "{:?}", stub.mcp.lock());

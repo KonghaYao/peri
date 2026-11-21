@@ -21,9 +21,7 @@ fn session_row() -> SwarmSessionRow {
         model: None,
         instructions: None,
         mcp_tools: Vec::new(),
-        environment: crate::domain::EnvironmentRef::none(
-            &crate::domain::LogicalId::parse("agent-1").expect("logical id"),
-        ),
+        environment: crate::domain::EnvironmentRef::none(),
         metadata: Default::default(),
         prompt_cache_options: None,
         created_at: "2026-01-01T00:00:00Z".to_owned(),

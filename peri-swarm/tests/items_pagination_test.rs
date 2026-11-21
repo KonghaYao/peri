@@ -114,14 +114,37 @@ fn seqs(value: &Value) -> Vec<u64> {
 }
 
 #[tokio::test]
-async fn ascending_pages_cover_every_item_once() {
+async fn default_items_order_is_desc() {
+    let harness = harness();
+    seed_five_items(&harness).await;
+
+    let (status, _, page) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(
+        seqs(&page),
+        [10, 9],
+        "official ItemListParams defaults to desc"
+    );
+    assert_eq!(page["order"], json!("desc"));
+    assert_eq!(page["nextCursor"], json!(9));
+    assert_eq!(page["hasMore"], json!(true));
+}
+
+#[tokio::test]
+async fn explicit_ascending_pages_cover_every_item_once() {
     let harness = harness();
     seed_five_items(&harness).await;
 
     let (status, _, first) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc",
         None,
     )
     .await;
@@ -138,7 +161,7 @@ async fn ascending_pages_cover_every_item_once() {
     let (_, _, second) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&after=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&after=2",
         None,
     )
     .await;
@@ -148,7 +171,7 @@ async fn ascending_pages_cover_every_item_once() {
     let (_, _, third) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=8",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=8",
         None,
     )
     .await;
@@ -161,8 +184,10 @@ async fn ascending_pages_cover_every_item_once() {
     let mut cursor: Option<u64> = None;
     loop {
         let uri = match cursor {
-            Some(cursor) => format!("/v1/agents/sessions/agent-01/items?limit=2&afterSeq={cursor}"),
-            None => "/v1/agents/sessions/agent-01/items?limit=2".to_owned(),
+            Some(cursor) => {
+                format!("/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq={cursor}")
+            }
+            None => "/v1/agents/sessions/agent-01/items?limit=2&order=asc".to_owned(),
         };
         let (_, _, page) = send(&harness.router, Method::GET, &uri, None).await;
         collected.extend(seqs(&page));
@@ -220,7 +245,7 @@ async fn item_shape_carries_stable_identity() {
     let (_, _, page) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc",
         None,
     )
     .await;
@@ -262,7 +287,7 @@ async fn after_aliases_must_agree_and_limits_are_bounded() {
     let (_, _, agreed) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?after=2&afterSeq=2",
+        "/v1/agents/sessions/agent-01/items?order=asc&after=2&afterSeq=2",
         None,
     )
     .await;
@@ -271,7 +296,7 @@ async fn after_aliases_must_agree_and_limits_are_bounded() {
     let (status, _, value) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?after=2&afterSeq=3",
+        "/v1/agents/sessions/agent-01/items?order=asc&after=2&afterSeq=3",
         None,
     )
     .await;
@@ -301,7 +326,7 @@ async fn official_cursor_page_uses_data_and_item_id_after() {
     let (_, _, first) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc",
         None,
     )
     .await;
@@ -320,7 +345,7 @@ async fn official_cursor_page_uses_data_and_item_id_after() {
 
     // `CursorPage` sends the last item's `id` as the next `after`; it resolves
     // to that row's seq, so the second page continues where the first stopped.
-    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={cursor}");
+    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&order=asc&after={cursor}");
     let (status, _, second) = send(&harness.router, Method::GET, &uri, None).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(seqs(&second), [3, 4]);
@@ -332,11 +357,15 @@ async fn official_cursor_page_uses_data_and_item_id_after() {
         .as_str()
         .expect("user id")
         .to_owned();
-    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={user_cursor}&afterSeq=1");
+    let uri = format!(
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&after={user_cursor}&afterSeq=1"
+    );
     let (_, _, agreed) = send(&harness.router, Method::GET, &uri, None).await;
     assert_eq!(seqs(&agreed), [2, 3]);
 
-    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={user_cursor}&afterSeq=2");
+    let uri = format!(
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&after={user_cursor}&afterSeq=2"
+    );
     let (status, _, conflict) = send(&harness.router, Method::GET, &uri, None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(conflict["error"]["code"], json!("conflicting_cursor"));
@@ -349,7 +378,7 @@ async fn cursor_beyond_the_tail_is_an_empty_page() {
     let (status, _, page) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?afterSeq=99",
+        "/v1/agents/sessions/agent-01/items?order=asc&afterSeq=99",
         None,
     )
     .await;
@@ -478,7 +507,7 @@ async fn item_grouped_pages_keep_data_shorter_than_items() {
     let (status, _, first) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc",
         None,
     )
     .await;
@@ -496,7 +525,7 @@ async fn item_grouped_pages_keep_data_shorter_than_items() {
     let (status, _, second) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=3",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=3",
         None,
     )
     .await;
@@ -544,7 +573,7 @@ async fn row_budget_stops_before_the_next_item() {
     let (_, _, first) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc",
         None,
     )
     .await;
@@ -556,7 +585,7 @@ async fn row_budget_stops_before_the_next_item() {
     let (_, _, second) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=3",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=3",
         None,
     )
     .await;
@@ -601,7 +630,7 @@ async fn item_id_cursor_does_not_cover_frames_appended_later() {
     let (_, _, first) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc",
         None,
     )
     .await;
@@ -618,7 +647,7 @@ async fn item_id_cursor_does_not_cover_frames_appended_later() {
     )
     .await;
 
-    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&after={cursor}");
+    let uri = format!("/v1/agents/sessions/agent-01/items?limit=2&order=asc&after={cursor}");
     let (status, _, after_id) = send(&harness.router, Method::GET, &uri, None).await;
     assert_eq!(status, StatusCode::OK, "{after_id}");
     assert!(
@@ -630,7 +659,7 @@ async fn item_id_cursor_does_not_cover_frames_appended_later() {
     let (_, _, by_seq) = send(
         &harness.router,
         Method::GET,
-        "/v1/agents/sessions/agent-01/items?limit=2&afterSeq=2",
+        "/v1/agents/sessions/agent-01/items?limit=2&order=asc&afterSeq=2",
         None,
     )
     .await;
@@ -648,8 +677,10 @@ async fn ascending_item_pages_advance_strictly_and_terminate() {
     let mut after: Option<String> = None;
     for _ in 0..10 {
         let uri = match after.as_deref() {
-            Some(after) => format!("/v1/agents/sessions/agent-01/items?limit=1&after={after}"),
-            None => "/v1/agents/sessions/agent-01/items?limit=1".to_owned(),
+            Some(after) => {
+                format!("/v1/agents/sessions/agent-01/items?limit=1&order=asc&after={after}")
+            }
+            None => "/v1/agents/sessions/agent-01/items?limit=1&order=asc".to_owned(),
         };
         let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
         assert_eq!(status, StatusCode::OK, "{page}");

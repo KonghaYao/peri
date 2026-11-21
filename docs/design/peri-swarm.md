@@ -132,7 +132,7 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   （官方 model 是 string；显式 `null` 返回 `400 invalid_request`，
   `details.field="agent.model"`），`agent.tools` 走与 create 相同的 MCP 规范化
   （`null`/`[]` 清空），`metadata` 整体替换（`null` 或 `{}` 清空），
-  `prompt_cache_options` 整体替换（`null` 清空）。省略字段保持不变。`review`、
+  `prompt_cache_options` 整体替换（`null` 清空，`{}` 使用官方默认 `30m`）。省略字段保持不变。`review`、
   `agent.reasoning`、`agent.service_tier` 没有本地映射，显式 `400 invalid_request`
   （`details.field` 指向官方字段），不静默接受。model 或 MCP tools 变化会停止当前
   ACP host；下一次交互按新配置重新 attach，避免返回一个下一轮不会使用的旧配置。
@@ -174,7 +174,9 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是
   `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn` 帧保持不变。
 - 订阅游标接受 `Last-Event-ID` 头、`?afterSeq=` 或 `?after=`（三者等价，同时给出
-  必须一致，否则 `400 conflicting_cursor`）。**没有任何游标时从当前末尾开始，只
+  必须一致，否则 `400 conflicting_cursor`）。查询还接受官方
+  `include_obfuscation`（`true`/`false`）：网关不生成混淆填充，值被接受并忽略，
+  不改变实时或回放帧。**没有任何游标时从当前末尾开始，只
   投递实时事件**：官方 `sessions.stream` 先订阅再 POST，若回放旧 turn 的终态，
   SDK 会在旧 turn 的 `idle` 上结束。显式 `afterSeq=0` 仍回放全部（既有客户端语义
   不变）。无游标订阅不读会话行：`POST /sessions?stream=true` 在行尚未创建时先
@@ -245,7 +247,8 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   的 item 也一并被越过）。需要按最后已渲染行续读时用 `afterSeq=<seq>`：它同样按
   item 边界判定，会把包含该行的 item 整条重新给出（含新追加的帧），因此能看到
   最终帧。分页游标始终严格前进、不会循环。
-- 默认 `order=asc` 与官方默认 `desc` 不同；保持既有客户端行为，不改默认值。
+- `order` 默认 `desc`，与官方 `ItemListParams.order` 一致；需要升序时显式
+  `order=asc`。分页游标 `after`/`afterSeq` 在所选顺序下排他。
 
 #### 4.2.1 官方事件映射
 
@@ -393,11 +396,13 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
 
 ### 4.5 会话投影与环境
 
-`GET /sessions/{logicalId}`（以及创建响应）的 `environment` 是
-`{type,id}`；hosted 会话另有 `sandbox` 投影，字段来自 `swarm_bindings`：
-`logicalEnvId`、`sandboxId`、`runId`、`workspacePath`。`runId` 在绑定记录后如实
-填充；`state` 固定为 `null`：网关只持久化绑定，不跟踪 Bun 的实时 SRT 启停，表里
-也没有该列，所以不伪造 `reserved`/`running`。实时状态以 Bun
+`GET /sessions/{logicalId}`（以及创建响应）的 `environment` 按官方类型投影：
+`none` 只有 `{"type":"none"}`，不带 `id`；hosted 是 `{type,id}`，`id` 是
+logicalEnvId。早期持久行即使为 `none` 存过 logical id，投影时也归一化为
+`id=None`，旧数据不会泄露额外字段。hosted 会话另有 `sandbox` 投影，字段来自
+`swarm_bindings`：`logicalEnvId`、`sandboxId`、`runId`、`workspacePath`。`runId`
+在绑定记录后如实填充；`state` 固定为 `null`：网关只持久化绑定，不跟踪 Bun 的实时
+SRT 启停，表里也没有该列，所以不伪造 `reserved`/`running`。实时状态以 Bun
 `GET /v1/sandboxes/{logicalEnvId}` 为准。会话 `cwd` 是网关工作目录，不是工具执行
 目录；工具在 `sandbox.workspacePath` 下执行。
 
@@ -405,16 +410,22 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
 `in_progress`，行状态 `failed` 为 `failed`，否则 `idle`。本地没有审批事实，不会
 出现 `requires_action`。
 
+会话投影同时携带官方默认字段：`required_actions=[]`、`vault_ids=[]`、
+`usage=null`、`error=null`。这些只是形状对齐：网关没有待审批动作、vault、token
+记账或可投影的会话级错误，不会伪造非空值。反序列化对四个字段使用 serde 默认值，
+旧的持久/测试 JSON 不因缺字段失败。
+
 会话投影同时携带官方 `metadata`（`string -> string`，空对象表示无）与
 `prompt_cache_options`（`{ttl:"30m"|"12h"}` 或 `null`）。`prompt_cache_options` 是
 官方兼容字段，使用官方 snake_case 拼写（`AgentSession.prompt_cache_options`）；
 其余 Swarm 扩展字段仍为 camelCase。create 接受两者：metadata 最多 16 对、
 key 1..=64 字符、value ≤512 字符；`prompt_cache_options.ttl` 只接受 `30m`/`12h`，
-`{}` 视为未配置。重复 create 命中已存在行时，省略的 metadata/prompt cache 保持
-行内值，不参与冲突判定；显式提供的值（含 `{}`/`null`）必须与行内一致，否则按身份
-冲突 `409 identity_conflict` 拒绝，不静默覆盖。`agent.model` 是官方 string；显式
-`null` 返回 `400 invalid_request`（`details.field="agent.model"`），不作为省略处理。
-`agent.tools: null` 仍是合法的清空声明。
+对象省略 `ttl`（含 `{}`）按官方默认取 `30m`；`null` 清空，字段省略保持行内值。
+重复 create 命中已存在行时，省略的 metadata/prompt cache 保持行内值，不参与冲突
+判定；显式提供的值（含 `{}`/`null`）会先归一化（`{}` 即 `30m`）再与行内值比较，
+不一致按身份冲突 `409 identity_conflict` 拒绝，不静默覆盖。`agent.model` 是官方
+string；显式 `null` 返回 `400 invalid_request`（`details.field="agent.model"`），
+不作为省略处理。`agent.tools: null` 仍是合法的清空声明。
 
 
 ## 5. MCP 注入

@@ -333,6 +333,116 @@ async fn create_get_and_list_round_trip_metadata_and_prompt_cache() {
 }
 
 #[tokio::test]
+async fn create_and_retrieve_expose_empty_official_default_fields() {
+    let harness = harness();
+    let (status, created) = create(&harness, json!({ "logicalId": "agent-defaults" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let (status, read) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-defaults",
+        None,
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+
+    for (label, value) in [("create", &created), ("retrieve", &read)] {
+        assert_eq!(value["required_actions"], json!([]), "{label}: {value}");
+        assert_eq!(value["vault_ids"], json!([]), "{label}: {value}");
+        assert_eq!(value["usage"], json!(null), "{label}: {value}");
+        assert_eq!(value["error"], json!(null), "{label}: {value}");
+        assert_eq!(
+            value["environment"],
+            json!({ "type": "none" }),
+            "official EnvironmentResourceNone has only `type`: {label}: {value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prompt_cache_options_empty_object_uses_the_official_default_ttl() {
+    let harness = harness();
+    let (status, created) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-default-ttl",
+            "prompt_cache_options": {}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["prompt_cache_options"],
+        json!({ "ttl": "30m" }),
+        "official PromptCacheOptions.ttl defaults to 30m: {created}"
+    );
+
+    // Omission still keeps the stored value on attach.
+    let (status, attached) = create(&harness, json!({ "logicalId": "agent-default-ttl" })).await;
+    assert_eq!(status, StatusCode::OK, "{attached}");
+    assert_eq!(attached["prompt_cache_options"], json!({ "ttl": "30m" }));
+
+    // `{}` is an explicit 30m value, so it matches the stored default...
+    let (status, same) = create(
+        &harness,
+        json!({
+            "logicalId": "agent-default-ttl",
+            "prompt_cache_options": {}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{same}");
+
+    // ...and `null` still means "unset", which conflicts with 30m.
+    let (status, error) = create(
+        &harness,
+        json!({ "logicalId": "agent-default-ttl", "prompt_cache_options": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], json!("identity_conflict"));
+
+    // A session with no configured value can adopt the default explicitly;
+    // `null` still clears it, and omission keeps whatever is stored.
+    let (status, _) = create(&harness, json!({ "logicalId": "agent-unset-ttl" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, set) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-unset-ttl",
+        Some(json!({ "prompt_cache_options": {} })),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_eq!(set["prompt_cache_options"], json!({ "ttl": "30m" }));
+
+    let (status, kept) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-unset-ttl",
+        Some(json!({})),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(kept["prompt_cache_options"], json!({ "ttl": "30m" }));
+
+    let (status, cleared) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions/agent-unset-ttl",
+        Some(json!({ "prompt_cache_options": null })),
+        Some(TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["prompt_cache_options"], json!(null));
+}
+
+#[tokio::test]
 async fn session_list_query_and_create_validation_are_explicit() {
     let harness = harness();
     let long_key = "k".repeat(65);
@@ -728,12 +838,13 @@ async fn create_attach_distinguishes_omitted_and_explicit_identity_fields() {
     .await;
     assert_eq!(status, StatusCode::OK, "{same}");
 
-    // A different explicit value conflicts, including the explicit empty
-    // spellings (`{}`/`null`) against a non-empty stored value.
+    // A different explicit value conflicts: `{}` is the explicit default
+    // `30m`, and `null` asserts "unset", against a stored `12h`.
     for body in [
         json!({ "logicalId": "agent-attach", "metadata": { "team": "beta" } }),
         json!({ "logicalId": "agent-attach", "metadata": {} }),
         json!({ "logicalId": "agent-attach", "metadata": null }),
+        json!({ "logicalId": "agent-attach", "prompt_cache_options": {} }),
         json!({ "logicalId": "agent-attach", "prompt_cache_options": { "ttl": "30m" } }),
         json!({ "logicalId": "agent-attach", "prompt_cache_options": null }),
     ] {
@@ -755,8 +866,8 @@ async fn create_attach_distinguishes_omitted_and_explicit_identity_fields() {
     assert_eq!(read["metadata"], json!({ "team": "alpha" }));
     assert_eq!(read["prompt_cache_options"]["ttl"], json!("12h"));
 
-    // An explicit empty value matches a session that has none: create a second
-    // session and attach with both empty spellings.
+    // `null` still matches a session with no prompt cache value; `{}` no longer
+    // does, because it means the official default `30m`.
     let (status, _) = create(&harness, json!({ "logicalId": "agent-empty" })).await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, empty) = create(
@@ -771,6 +882,32 @@ async fn create_attach_distinguishes_omitted_and_explicit_identity_fields() {
     assert_eq!(status, StatusCode::OK, "{empty}");
     assert_eq!(empty["metadata"], json!({}));
     assert_eq!(empty["prompt_cache_options"], json!(null));
+
+    let (status, error) = create(
+        &harness,
+        json!({ "logicalId": "agent-empty", "prompt_cache_options": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"]["code"], json!("identity_conflict"));
+
+    // Two `{}` creates agree on the resolved default.
+    let (status, _) = create(
+        &harness,
+        json!({ "logicalId": "agent-empty-default", "prompt_cache_options": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, same_default) = create(
+        &harness,
+        json!({ "logicalId": "agent-empty-default", "prompt_cache_options": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{same_default}");
+    assert_eq!(
+        same_default["prompt_cache_options"],
+        json!({ "ttl": "30m" })
+    );
 }
 
 #[tokio::test]

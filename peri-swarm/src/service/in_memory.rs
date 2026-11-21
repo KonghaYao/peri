@@ -844,7 +844,7 @@ impl SwarmService for InMemorySwarmService {
         // The fake records the requested environment but never contacts Bun;
         // hosted allocation and workspace injection are actor behavior.
         let environment = match command.environment {
-            EnvironmentKind::None => EnvironmentRef::none(&command.logical_id),
+            EnvironmentKind::None => EnvironmentRef::none(),
             EnvironmentKind::OpenAiHosted => EnvironmentRef {
                 kind: EnvironmentKind::OpenAiHosted,
                 id: Some(

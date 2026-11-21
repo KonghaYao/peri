@@ -401,31 +401,31 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 - **我们**：Peri Swarm 网关的实际行为。
 - 下表只列两者不一致的地方；一致的官方字段和流程不再重复。
 
-| 项目 | 官方 | 我们 | 调用方处理 |
+| 项目 | 官方 | 我们 | 不能同步的难点 |
 | --- | --- | --- | --- |
-| 批量事件 | `events.create({events:[...]})` 接受多条、多种输入事件（消息、取消、工具结果、审批响应等） | 只接受一条 `agent.session.input.message`（单条 user 文本）；多条或其他类型 → `400 invalid_input` | 单条用 `events.create`；多条用同一 client 的 `client.post` 逐条提交 |
-| 会话状态 | `idle` / `in_progress` / `requires_action` / `failed` | 只有 `idle` / `in_progress` / `failed`，不产生 `requires_action` | 不要实现审批等待分支 |
-| 会话时间字段 | `created_at`、`last_active_at`，Unix 秒（number） | 时间字段是 `createdAt`、`lastActivityAt`（字符串）；官方名字不出现 | 读 `createdAt` / `lastActivityAt` |
-| 会话其它字段 | `required_actions`、`vault_ids`、`usage`、`error`，以及 `agent.id` / `agent.tools` / `agent.reasoning` 等 | 不出现这些字段；`agent` 只有 `model` / `instructions`。`metadata`、`prompt_cache_options` 用官方名 | 不要依赖这些官方字段 |
-| `sessions.list` 的 `agent_id` | 可按任意根 agent id 过滤 | 只认 `root`；其他值返回空页 | 不要用它过滤子 agent |
-| `sessions.update` 字段 | `agent.model`、`agent.reasoning`、`agent.service_tier`、`agent.tools`（含函数与内置工具）、`metadata`、`prompt_cache_options`、`review` | 只映射 `agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`reasoning` / `service_tier` / `review` → `400 invalid_request`；`agent.model:null` → `400` | 只发已映射字段；要改 reasoning / service tier 需在别处配置 |
-| items 默认顺序 | `order` 默认 `desc`（最新优先） | 默认 `asc`（兼容既有客户端） | 需要最新优先时显式 `order:'desc'` |
-| items 形状 | `AgentSessionItem` 联合：message、reasoning、function_call、mcp_call、web_search_call、command_execution、subagent 调用等 | 每项是 Swarm `ItemView`（`id` / `itemId` / `seq` / `kind` / `payload`）；`items` 保留逐帧原始行（含 delta） | 文本读 `payload.role` / `payload.text`；工具调用看自定义 `item` 帧 |
-| 官方事件覆盖 | 完整事件集：`agent.session.created`、`turn.*`（含工具 item、文本 delta、cancelled）、`requires_action`、subagent 与环境事件等 | 只发 `turn.created` / `turn.item.added` / `turn.completed` / `turn.failed` + `agent.session.idle` / `agent.session.failed`，另有自定义 `item` / `turn` 帧；缺 `agent.session.created`；`turn.item.added` 只承载 message（user 与 assistant 最终文本）；没有工具调用的官方帧；`turn.subagent_id` 恒 `null` | 不要用官方 `toolHandlers`；工具调用消费自定义 `item` 帧 |
-| 环境投影 | `environment` 按类型给出实际内容：hosted 含 `files` / `network` / `packages` / `plugins` / `skills` 等；`none` 只有 `{type:"none"}` | 只有 `{type, id}`；hosted 的 `id` 是 logicalEnvId。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 只保留预留值。`none` 额外带 `id=logicalId`，`sandbox` 为 `null` | hosted 实时状态查 Bun `GET /v1/sandboxes/{logicalEnvId}`；不要把 `environment.id` 当 sandbox id |
-| turn 用量与错误 | `usage` 是 token 用量（未知时 `null`）；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；`error` 实时帧带 `{code:"internal_error"}`，SSE 回放为 `null`，`turns.retrieve` 读持久 error | 计费看网关日志；失败详情优先 `turns.retrieve` |
-| turns 字段 | `agent_id` 可为子 agent、`subagent_id` 可非空、`usage` 有值；`status` 含 `queued` / `waiting` | `agent_id` 恒 `root`、`subagent_id` 恒 `null`、`usage` 恒 `null`；只产生 `in_progress` / `completed` / `failed` / `cancelled` | 不要依赖子 agent 维度或用量 |
-| 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名）；Bearer 校验先于 404 | 不要调用；需要这些数据时另找来源 |
-| 删除会话 | 运行中必须先取消；返回 `agent.session.deleted`；物理清理可异步 | 运行中 `409 turn_in_progress`；无 live runtime 但持久 `running` → `502 session_resume_required`；五表级联同步删除；同一 `logicalId` 重建为新会话 | 删除前确认 idle；遇到 502 需运维处理数据库，网关不提供强删 |
-| prompt cache | 服务端按 `prompt_cache_options` 的 TTL 影响后续 turn 的缓存 | 只持久化并回显；本地模型链是否使用该 TTL 未验证 | 需要缓存 TTL 时在模型侧另行配置 |
-| SSE 续读 | 流参数只有 `include_obfuscation`，没有 `after`；从订阅时刻起只送新事件 | 额外支持 `after` / `afterSeq` / `Last-Event-ID` 回放；追平末尾后连接保持，只发心跳 | 用三实参 `events.stream(id, { after }, {})`；追平后自行超时或 abort，或改用 `items.list` |
+| 批量事件 | `events.create({events:[...]})` 接受多条、多种输入事件（消息、取消、工具结果、审批响应等） | 只接受一条 `agent.session.input.message`（单条 user 文本）；多条或其他类型 → `400 invalid_input` | 受理侧按单条 message 建 turn 与幂等键；批量需要多事件原子受理、跨事件排队与部分失败语义，现有 service/actor 边界没有这个事务单位 |
+| 会话状态 | `idle` / `in_progress` / `requires_action` / `failed` | 只有 `idle` / `in_progress` / `failed`，不产生 `requires_action` | 本地 ACP 运行时不产生「等待审批」的运行时事实，没有可诚实上报的待审批动作 |
+| 会话时间字段 | `created_at`、`last_active_at`，Unix 秒（number） | 时间字段是 `createdAt`、`lastActivityAt`（字符串）；官方名字不出现 | 已有 camelCase 字符串契约与库列；改成官方 Unix 秒要同时迁移 schema、投影和客户端，不能只改响应 |
+| 会话其它字段 | `required_actions`、`vault_ids`、`usage`、`error`，以及 `agent.id` / `agent.tools` / `agent.reasoning` 等 | 前四个字段已按官方名出现，值为 `[]` / `[]` / `null` / `null`；`agent` 只有 `model` / `instructions`。`created_at`/`last_active_at` 命名与类型、`agent.*` 子字段仍是差异 | 本地没有子 agent、推理配置、审批动作或 token 用量事实可投影；能诚实给出的只有空集合与 `null`，其余只能继续缺省 |
+| `sessions.list` 的 `agent_id` | 可按任意根 agent id 过滤 | 只认 `root`；其他值返回空页 | 网关只有 root agent，子 agent 维度不存在，没有可过滤的 agent 标识 |
+| `sessions.update` 字段 | `agent.model`、`agent.reasoning`、`agent.service_tier`、`agent.tools`（含函数与内置工具）、`metadata`、`prompt_cache_options`、`review` | 只映射 `agent.model`、`agent.tools`（仅 MCP）、`metadata`、`prompt_cache_options`；`reasoning` / `service_tier` / `review` → `400 invalid_request`；`agent.model:null` → `400` | 本地没有 reasoning、service tier 与 review 的执行语义；`agent.tools` 只有 MCP 注入通道，没有函数或内置工具运行时 |
+| items 形状 | `AgentSessionItem` 联合：message、reasoning、function_call、mcp_call、web_search_call、command_execution、subagent 调用等 | 每项是 Swarm `ItemView`（`id` / `itemId` / `seq` / `kind` / `payload`）；`items` 保留逐帧原始行（含 delta） | 官方联合依赖工具调用、推理、审批等高层事实；本地持久化的是 message 与原始 ACP 帧，缺少可映射的数据源 |
+| 官方事件覆盖 | 完整事件集：`agent.session.created`、`turn.*`（含工具 item、文本 delta、cancelled）、`requires_action`、subagent 与环境事件等 | 只发 `turn.created` / `turn.item.added` / `turn.completed` / `turn.failed` + `agent.session.idle` / `agent.session.failed`，另有自定义 `item` / `turn` 帧；缺 `agent.session.created`；`turn.item.added` 只承载 message（user 与 assistant 最终文本）；没有工具调用的官方帧；`turn.subagent_id` 恒 `null` | 缺少工具调用、审批、subagent 与环境事件的产生源；只能发已持久化 item 行能推导的帧 |
+| 环境投影 | `environment` 按类型给出实际内容：hosted 含 `files` / `network` / `packages` / `plugins` / `skills` 等；`none` 只有 `{type:"none"}` | `none` 已对齐为 `{type:"none"}`；hosted 只有 `{type,id}`（`id` 是 logicalEnvId）。顶层 `sandbox` 只有 `logicalEnvId` / `sandboxId` / `runId` / `state` / `workspacePath`：`state` 恒 `null`，`runId` 只保留预留值 | 网关只持久化绑定，不跟踪 Bun SRT 实时状态；hosted 的 `files`/`network`/`packages` 没有同步通道 |
+| turn 用量与错误 | `usage` 是 token 用量（未知时 `null`）；`error` 持久化，`turns.retrieve` 与事件回放一致 | `usage` 恒 `null`；`error` 实时帧带 `{code:"internal_error"}`，SSE 回放为 `null`，`turns.retrieve` 读持久 error | 网关不做 token 记账；错误只存在于实时帧与持久 turn 行，回放层不从 turn 行重建 |
+| turns 字段 | `agent_id` 可为子 agent、`subagent_id` 可非空、`usage` 有值；`status` 含 `queued` / `waiting` | `agent_id` 恒 `root`、`subagent_id` 恒 `null`、`usage` 恒 `null`；只产生 `in_progress` / `completed` / `failed` / `cancelled` | 没有子 agent 调度与 `queued`/`waiting` 排队状态；turn 只由单会话串行执行产生 |
+| 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名）；Bearer 校验先于 404 | 没有对应的数据源或结构映射（traces、artifacts、subagent items 等均未落地） |
+| 删除会话 | 运行中必须先取消；返回 `agent.session.deleted`；物理清理可异步 | 运行中 `409 turn_in_progress`；无 live runtime 但持久 `running` → `502 session_resume_required`；五表级联同步删除；同一 `logicalId` 重建为新会话 | 崩溃遗留的 `running` 行需要跨进程 actor 与数据库处置；网关无法同步确认或安全强删 |
+| prompt cache | 服务端按 `prompt_cache_options` 的 TTL 影响后续 turn 的缓存 | 只持久化并回显；本地模型链是否使用该 TTL 未验证 | TTL 只是官方兼容字段，本地模型链尚未消费，无法影响后续 turn 的缓存 |
+| SSE 续读 | 流参数只有 `include_obfuscation`，没有 `after`；从订阅时刻起只送新事件 | 额外支持 `after` / `afterSeq` / `Last-Event-ID` 回放；接受并忽略 `include_obfuscation`，不生成填充；追平末尾后连接保持，只发心跳 | 官方 SDK 没有 `after` 参数；回放扩展必须走三实参 `events.stream(id, { after }, {})`，这是客户端调用形状，不是网关能去掉的契约差异 |
 
-调用方式上还有三点不是契约差异，但容易踩：
+调用方式上还有四点不是契约差异，但容易踩：
 
 - `sessions.update` 官方 SDK 用 `POST`；网关同样只接受 `POST`（`PATCH` → `405`）。
-- 空 body、JSON `null`、`{}` 都是 no-op；官方 SDK 省略 body 时会发 `{}`。
+- 空 body、整个 body 为 JSON `null` 或 `{}` 都是 no-op；官方 SDK 省略 body 时会发 `{}`。
 - 网关严格拒绝未知 query/body 字段（`400 unknown_field`）；列表分页用 `after` + `limit`，
   没有 `cursor` 参数。
+- `prompt_cache_options: {}` 等于官方默认 `{"ttl":"30m"}`；只有 `null` 清空，省略表示保持。
 
 ```js
 // 单条输入：不要用 sessions.events.create
@@ -509,7 +509,8 @@ const body = /** @type {any} */ (page).body;
 - `nextCursor` 是页尾 item 的最大 seq，下一页传给 `after`/`afterSeq`。`after` 也接受
   `itim_...` item id（官方 `CursorPage` 的翻页方式），请求时解析为该 item 的当前最大 seq，
   之后追加的帧不会再由该游标返回；要在增长中续读用 `afterSeq=<seq>`。传 `cursor` 会得到
-  `400 invalid_query`；`order=desc` 时 `after` 表示「更旧于该 seq」。
+  `400 invalid_query`；`order` 默认 `desc`，升序需显式 `order=asc`；`order=desc` 时
+  `after` 表示「更旧于该 seq」。
 - `POST /events` 的用户输入 item 是 `kind=message`，没有 `kind=user`；同一
   `Idempotency-Key`/`inputId` 重试返回 `existing`，不重复追加。
 

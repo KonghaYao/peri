@@ -671,7 +671,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
             mcp_tools: declared_mcp.clone(),
             metadata: Default::default(),
             prompt_cache_options: None,
-            environment: EnvironmentRef::none(&logical),
+            environment: EnvironmentRef::none(),
             created_at: created_at.clone(),
             last_activity_at: created_at.clone(),
             last_item_seq: 0,

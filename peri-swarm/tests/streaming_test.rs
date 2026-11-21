@@ -327,6 +327,54 @@ async fn events_stream_replays_after_the_cursor() {
 }
 
 #[tokio::test]
+async fn include_obfuscation_is_accepted_and_ignored() {
+    let harness = harness(60_000);
+    create_session(&harness).await;
+    submit(&harness, "first").await;
+
+    let baseline = {
+        let response = harness
+            .router
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/v1/agents/sessions/agent-01/events?afterSeq=0",
+                None,
+                Some(TOKEN),
+                &[],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        read_complete(response.into_body(), "event: agent.session.idle").await
+    };
+    let baseline_frames = frames(&baseline);
+    assert!(!baseline_frames.is_empty(), "{baseline}");
+
+    for flag in ["false", "true"] {
+        let uri =
+            format!("/v1/agents/sessions/agent-01/events?afterSeq=0&include_obfuscation={flag}");
+        let response = harness
+            .router
+            .clone()
+            .oneshot(request(Method::GET, &uri, None, Some(TOKEN), &[]))
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "official `include_obfuscation={flag}` must not be rejected"
+        );
+        let text = read_complete(response.into_body(), "event: agent.session.idle").await;
+        assert_eq!(
+            frames(&text),
+            baseline_frames,
+            "the gateway emits no padding, so `{flag}` changes nothing: {text}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn last_event_id_header_selects_the_cursor() {
     let harness = harness(60_000);
     create_session(&harness).await;

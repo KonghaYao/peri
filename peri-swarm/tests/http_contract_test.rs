@@ -248,7 +248,11 @@ async fn create_returns_the_documented_shape_and_sdk_aliases() {
     assert_eq!(value["lastItemSeq"], json!(2));
     assert_eq!(value["agent"]["model"], json!("model-a"));
     assert_eq!(value["agent"]["instructions"], json!("be brief"));
-    assert_eq!(value["environment"]["type"], json!("none"));
+    assert_eq!(
+        value["environment"],
+        json!({ "type": "none" }),
+        "official EnvironmentResourceNone has only `type`"
+    );
     assert_eq!(value["sandbox"], json!(null));
     let root_session_id = value["rootSessionId"].as_str().expect("root id");
     assert!(uuid::Uuid::parse_str(root_session_id).is_ok());

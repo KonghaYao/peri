@@ -41,8 +41,8 @@ pub struct CreateSessionBody {
     /// uses the same tri-state).
     #[serde(default)]
     pub metadata: UpdateField<Value>,
-    /// Official `prompt_cache_options` (`{ttl: "30m"|"12h"}`); `null` asserts
-    /// the model default.
+    /// Official `prompt_cache_options` (`{ttl: "30m"|"12h"}`); `null` clears and
+    /// `{}` uses the official default TTL `30m`.
     #[serde(rename = "prompt_cache_options", default)]
     pub prompt_cache_options: UpdateField<Value>,
     #[serde(default)]
@@ -180,6 +180,11 @@ pub struct EventsQuery {
     pub after_seq: Option<u64>,
     #[serde(default)]
     pub after: Option<u64>,
+    /// Official `EventStreamParams.include_obfuscation` (snake_case, defaults to
+    /// `true`). The gateway never emits obfuscation padding, so the value is
+    /// accepted and ignored; it cannot change replay or live frames.
+    #[serde(default)]
+    pub include_obfuscation: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -873,7 +878,9 @@ pub fn resolve_items_window(query: &ItemsQuery) -> Result<ItemsWindow, SwarmErro
     }
     let order = match query.order.as_deref() {
         Some(value) => ItemOrder::parse(value)?,
-        None => ItemOrder::Asc,
+        // `ItemListParams.order` defaults to `desc`; ascending pages must ask
+        // for `order=asc` explicitly.
+        None => ItemOrder::Desc,
     };
     Ok(ItemsWindow {
         order,
@@ -938,7 +945,9 @@ fn agent_model_not_string() -> SwarmError {
     .with_details(json!({ "field": "agent.model" }))
 }
 
-/// Parse `prompt_cache_options`. `null`/`{}` mean "no configured value".
+/// Parse `prompt_cache_options`. `null` means "clear"; an object without `ttl`
+/// uses the official `PromptCacheOptions.ttl` default of `30m`. Omission is
+/// handled by the caller's [`UpdateField::Keep`].
 pub fn resolve_prompt_cache_options(
     value: &Value,
 ) -> Result<Option<PromptCacheOptions>, SwarmError> {
@@ -959,20 +968,24 @@ pub fn resolve_prompt_cache_options(
             ));
         }
     }
-    let Some(ttl) = map.get("ttl") else {
-        return Ok(None);
-    };
-    let Some(ttl) = ttl.as_str() else {
-        return Err(metadata_invalid(
-            "prompt_cache_options.ttl",
-            "ttl must be a string",
-        ));
-    };
-    let Some(ttl) = PromptCacheTtl::parse(ttl) else {
-        return Err(metadata_invalid(
-            "prompt_cache_options.ttl",
-            "ttl must be `30m` or `12h`",
-        ));
+    let ttl = match map.get("ttl") {
+        // Official `PromptCacheOptions.ttl` defaults to 30 minutes.
+        None => PromptCacheTtl::ThirtyMinutes,
+        Some(ttl) => {
+            let Some(ttl) = ttl.as_str() else {
+                return Err(metadata_invalid(
+                    "prompt_cache_options.ttl",
+                    "ttl must be a string",
+                ));
+            };
+            let Some(ttl) = PromptCacheTtl::parse(ttl) else {
+                return Err(metadata_invalid(
+                    "prompt_cache_options.ttl",
+                    "ttl must be `30m` or `12h`",
+                ));
+            };
+            ttl
+        }
     };
     Ok(Some(PromptCacheOptions::new(ttl)))
 }
@@ -1196,8 +1209,8 @@ pub fn resolve_update(body: UpdateSessionBody) -> Result<SessionUpdateCommand, S
         UpdateField::Clear => UpdateField::Clear,
         UpdateField::Set(value) => match resolve_prompt_cache_options(&value)? {
             Some(options) => UpdateField::Set(options),
-            // `{}` carries no `ttl`, i.e. the model default: clear the
-            // session default instead of inventing a TTL.
+            // Only `null` resolves to `None`; `{}` resolves to the official
+            // default TTL (`30m`).
             None => UpdateField::Clear,
         },
     };
