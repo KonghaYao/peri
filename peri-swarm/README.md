@@ -134,9 +134,9 @@ flowchart TB
 
 | 组件 | 生产位置 | 落地前置（当前差距） |
 | --- | --- | --- |
-| 传统 Gateway（Nginx 等） | 独立边缘层 | 不需要自研；受 `PERI_SWARM_BIND` loopback 限制，需放开校验或由同机代理转发 |
-| Peri Swarm Server（`peri-swarm`） | 可替换副本组（每副本同时是 Rivet node） | 当前仅单实例；多个 Server 共享同一 engine 与 pool 时才看到同一批 actor；在途 turn 的跨实例接管是设计非目标 |
-| Rivet engine | 3+ 实例 + LB（独立主机组） | endpoint/token/namespace/pool 是 `const`；`EngineSpawnMode::Always` 会拉起本机 engine；客户端只接受 `http`，未暴露 TLS/CA 配置 |
+| 传统 Gateway（Nginx 等） | 独立边缘层 | 不需要自研；`PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 未开启时 Server 只能 loopback，需同机代理 |
+| Peri Swarm Server（`peri-swarm`） | 可替换副本组（每副本同时是 Rivet node） | 仓库内无多副本编排；副本间共享 engine、namespace、pool 与部署身份；在途 turn 的跨实例接管是设计非目标 |
+| Rivet engine | 3+ 实例 + LB（独立主机组） | endpoint/token/namespace/pool 与 spawn 已可配置；非 loopback 必须 `never`；客户端只接受明文 `http`，TLS/CA 未支持 |
 | `peri-sandbox` | 沙箱主机池 | `validate_bun_url` 只接受 loopback `http`；远程需 HTTPS 与主机认证 |
 | Loom | 独立 Docker 主机 | locator 已接受 `http(s)`；存储 SDK 无法注入 CA，跨机需私网明文 + 网络隔离，或前置终止 TLS 的代理 |
 | 模型供应商 | 公网 | 无 |
@@ -160,14 +160,11 @@ control plane 是 Rivet 官方组件，Peri 不实现也不设计其内部：本
 `~/.rivetkit/engine/v3` 并按需拉起，生产直接部署官方 `rivetdev/engine`。Peri 只负责
 配置面与部署编排（LB、TLS、namespace/pool、凭据、bucket 与磁盘）。
 
-当前代码把 engine 钉在 Server 主机上，外置需要三处改动：
-
-1. 配置外置：endpoint、token、namespace、pool 从 `const` 改为配置项；token 只按变量名
-   引用，当前固定为 `default`，不能作为生产凭据。
-2. 关闭本地拉起：默认 `EngineSpawnMode::Always`，Server 启动即拉起本地 engine；外置
-   必须改为 `never`。
-3. 连接安全：当前客户端只接受 `http`，官方生产要求 6420 前置 TLS 与 1h idle；M1 只支持
-   私网明文，TLS 属后续工作。
+配置面已可外置：endpoint、token、namespace、pool 由环境变量提供，token 只按变量名引用；
+`PERI_SWARM_RIVET_ENGINE_SPAWN=never` 关闭本地拉起，非 loopback endpoint 启动前做 5s
+TCP 预检，不可达直接失败。仍未支持连接安全：只接受明文 `http`，官方生产要求 6420
+前置 TLS 与 1h idle。endpoint 的字面地址必须是环回、RFC1918、ULA 或 link-local；
+域名不做 DNS 解析，由部署保证指向私网。
 
 仅把 engine 搬到另一台机器，不会自动获得生产调度能力。Rivet 已负责 node 放置、唤醒与
 15s 重调度；Peri 侧仍不承诺在途 turn 接管：设计把跨机调度、租约/fencing 与跨实例接管
@@ -185,7 +182,9 @@ control plane 是 Rivet 官方组件，Peri 不实现也不设计其内部：本
 - 入口完成 TLS 与统一鉴权；Server 的 Bearer 作为第二道，两处凭据独立轮换。
 - 入口到副本走私网；健康检查用 `GET /healthz`（无鉴权）。
 
-在放开 `PERI_SWARM_BIND` 之前，入口只能与 Server 同机或共享网络命名空间。
+未开 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 时，入口只能与 Server 同机或共享网络命名空间；
+打开后 Server 可监听任意非 loopback 地址（含 `0.0.0.0`），但 Bearer 仍是唯一鉴权，
+TLS 必须由入口终止。
 
 ## 前置
 
@@ -214,11 +213,17 @@ Rust 二进制必须经补丁脚本构建；直接 `cargo run -p peri-swarm` 会
 | 变量 | 必填 | 模块（读取 → 使用） | 说明 |
 | --- | --- | --- | --- |
 | `PERI_SWARM_API_KEY` | 是 | `src/bootstrap.rs` → `src/config.rs::DeploymentApiKey`；`src/http/auth.rs` 校验 | 部署 Bearer；空值拒绝；不打印 |
-| `PERI_SWARM_BIND` | 否 | `src/bootstrap.rs`（`src/main.rs` 入口） | 默认 `127.0.0.1:8080`，只接受 loopback |
+| `PERI_SWARM_BIND` | 否 | `src/bootstrap.rs` → `src/config.rs::parse_bind` | 默认 `127.0.0.1:8080`；非 loopback 需同时开 `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` |
+| `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` | 否 | `src/config.rs::parse_bind_allow_non_loopback` → `parse_bind`（`BootstrapConfig` 与 `SwarmConfig` 共用）；启动日志 | 默认关；`1/true/yes/on` / `0/false/no/off`，其他值启动失败；开启后 WARN：Bearer 是唯一鉴权、TLS 由入口终止 |
 | `PERI_SWARM_SESSION_STORE` | 是 | `src/bootstrap.rs` → `src/actor/runtime.rs::SessionStoreDeployment` | Peri 会话库 locator |
 | `PERI_SWARM_STATE_STORE` | 是 | `src/bootstrap.rs` → `src/store/turso.rs::SwarmStateStore` | Swarm 状态库；必须与会话库不同 |
 | `PERI_SWARM_STORE_ENGINE` | 否 | `src/bootstrap.rs` → `src/actor/runtime.rs::SessionStoreDeployment` | 默认 `turso`；只影响会话库 |
 | `PERI_SWARM_STORE_TOKEN_ENV` | 是 | `src/bootstrap.rs` 校验变量名；`src/actor/runtime.rs` / `src/store/turso.rs` 按名取 token | **变量名**，不是 token 值 |
+| `PERI_SWARM_RIVET_ENDPOINT` | 否 | `src/bootstrap.rs::rivet_config` → `rivetkit::ServeConfig.endpoint` | 默认 `http://127.0.0.1:6420`；只接受明文 `http`、显式端口（写出的默认端口如 `:80` 也算），无 userinfo/query/fragment，path 为空或 `/`；字面 IP 只接受环回/RFC1918/ULA/link-local，域名不解析；`https` 拒绝 |
+| `PERI_SWARM_RIVET_TOKEN_ENV` | 视 endpoint | `src/bootstrap.rs::rivet_config` 校验变量名；`RivetConfig::resolve_token`（`run()` 一次取值）→ `ServeConfig.token` | **变量名**，不是 token 值；非 loopback endpoint 必填；不得与 `PERI_SWARM_STORE_TOKEN_ENV` 同名 |
+| `PERI_SWARM_RIVET_NAMESPACE` | 否 | `src/bootstrap.rs::rivet_config` → `ServeConfig.namespace` | 默认 `default`；非空、无空白、≤128 |
+| `PERI_SWARM_RIVET_POOL` | 否 | `src/bootstrap.rs::rivet_config` → `ServeConfig.pool_name` | 默认 `peri-swarm`；规则同上 |
+| `PERI_SWARM_RIVET_ENGINE_SPAWN` | 否 | `src/bootstrap.rs::RivetEngineSpawn::rivetkit_mode` → `ServeConfig.engine_spawn`；`preflight_external_engine` | 默认 `always`；`always`/`auto` 只允许 loopback；非 loopback 必须 `never`，启动前 5s TCP 预检 |
 | `PERI_SWARM_MACHINE_ID` | 是 | `src/bootstrap.rs` → `src/actor/service.rs::ActorServiceConfig`；`RemoteWorkspaceEnvironment` | 稳定机器 UUID |
 | `PERI_SWARM_WORKSPACE_ROOT` | 是 | `src/bootstrap.rs`；`src/domain/workspace.rs::resolve_cwd`（`src/http/handlers.rs` 调用）；`src/actor/runtime.rs` | 绝对、规范化目录；macOS 用 `/private/tmp` |
 | `PERI_SWARM_MODEL` | 否 | `src/bootstrap.rs` → `src/actor/service.rs::ActorServiceConfig.model` | 部署级默认模型 |
@@ -239,6 +244,8 @@ Rust 二进制必须经补丁脚本构建；直接 `cargo run -p peri-swarm` 会
   网关进程入口不读它们。
 - `PERI_SWARM_LOOM_LOCATOR` 只由 `peri-swarm/tests/loom_store_test.rs` 使用，不是网关
   变量；会话库用 `PERI_SWARM_SESSION_STORE`。
+- Rivet 与 bind 的六个变量不设置时，endpoint/token/namespace/pool/spawn 与旧常量逐字节
+  一致；token 值只在 `run()` 解析一次，不进入 `Debug`、启动日志或错误消息。
 - Bun 侧完整变量清单见
   [peri-sandbox README](../npm-packages/peri-sandbox/README.md#本地-swarm-服务devswarm)。
 
@@ -318,9 +325,11 @@ python3 peri-swarm/scripts/provision_state_db.py \
 
 ### 3. Rivet
 
-本地 engine 为 Rivet 3.1.1，endpoint 固定 `http://127.0.0.1:6420`。首次运行设置
-`RIVETKIT_ENGINE_AUTO_DOWNLOAD=1`，网关会按需拉起（`~/.rivetkit/engine/v3`）；预装
-engine 时无需额外步骤。engine 是 Rivet 官方组件，不归 Peri 代码所有。
+本地 engine 为 Rivet 3.1.1，默认 endpoint `http://127.0.0.1:6420`
+（`PERI_SWARM_RIVET_ENDPOINT` 可改）。首次运行设置 `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1`，
+网关会按需拉起（`~/.rivetkit/engine/v3`）；预装 engine 时无需额外步骤。外置 engine 时
+设 `PERI_SWARM_RIVET_ENGINE_SPAWN=never`，并给出 endpoint、token 变量与 namespace/pool。
+engine 是 Rivet 官方组件，不归 Peri 代码所有。
 **6420 是共享 engine 进程，不归网关所有**：网关停止后它可能继续运行。确认占用用
 `lsof -nP -iTCP:6420 -sTCP:LISTEN`，再用 `ps -p <pid> -o pid,command` 核对；不要为
 释放端口杀无关进程。
@@ -390,19 +399,18 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 
 | 差异 | 网关行为 | 调用方处理 |
 | --- | --- | --- |
-| 批量事件 | `sessions.events.create({events:[...]})` 返回 `400 unknown_field` | 用同一 client 的 `client.post` 单条提交 |
+| 批量事件 | `sessions.events.create({events:[...]})` 仅接受单条 `agent.session.input.message`（一条 `role:"user"` message、纯 `input_text`）；多事件或其他类型返回 `400 invalid_input` | 单条事件用 `events.create`；多事件仍用同一 client 的 `client.post` 逐条提交 |
 | 未知字段 | 未知 query/body 字段返回 `400 unknown_field` | 只发文档字段；不要带官方 SDK 的额外参数 |
-| 状态字段 | 没有 `AgentSession.status`，只有 `state` | 读 `state`；不要用依赖 `status` 的 `sessions.stream()` |
+| 状态字段 | `status` 是本地投影，只有 `idle` / `in_progress` / `failed`，不会出现 `requires_action` | 可正常读 `status`；不要实现审批等待分支 |
 | SSE 参数 | `events.stream(id, {after})` 的第二实参被当作 RequestOptions，`after` 丢失 | 必须 `events.stream(id, { after }, {})` |
-| 分页 | `CursorPage` 自动翻页不适用；items 是事件帧 | 显式读 `body.items`；TS 中 `body` 需要 cast |
-| items 形状 | 事件级帧，不是高层 message/run item | 按 `payload.messageId` / `toolCallId` 聚合 |
-| `POST /events` | 同步：202 返回时本轮已进入终态 | 先开 SSE 再 POST；不要 POST 后开流补看本轮 |
+| items 默认顺序 | `items.list` 不传 `order` 时默认 `asc`（官方默认 `desc`）；`limit` 计 item 数 | 需要最新优先时显式传 `order: 'desc'` |
+| items 形状 | `data` 每项是 Swarm `ItemView`（`id`/`itemId`/`seq`/`kind`/`payload`），不是官方 `message`/`function_call` 结构；`items` 保留逐帧原始行 | 文本按 `payload.role` / `payload.text` 读；工具调用看自定义 `item` 帧 |
+| 官方帧覆盖 | 缺 `agent.session.created`（create-stream 首帧是自定义 `session`）；`turn.item.added` 只承载消息 item（用户输入、assistant 最终文本），工具调用/结果没有官方帧；`turn.subagent_id` 恒 `null` | 不要用官方 `toolHandlers`；工具调用消费自定义 `item` 帧 |
 | SSE 空流 | `after` 到末尾后不关闭，只发心跳 | 客户端超时、`AbortController`/`{ signal }`，或改用 `items.list` |
-| 回放 | 只有 item 帧，没有 turn 帧 | 以目标 assistant 的 `payload.complete === true` 终止 |
 | 游标 | `after`/`afterSeq`；`Last-Event-ID` 等价；`cursor` 参数不支持 | 直接 HTTP 时用 header；SDK 用三实参 `events.stream` |
-| hosted 投影 | `sandbox.state` 恒 `null`，`runId` 不回填 | 需要实时状态时查 Bun `GET /v1/sandboxes/{logicalEnvId}` |
+| hosted 投影 | `sandbox.state` 恒 `null`；`runId` 只保留预留时 Bun 返回的值 | 需要实时状态时查 Bun `GET /v1/sandboxes/{logicalEnvId}` |
 | `environment.type=none` | `id` 等于 logicalId，不是 sandbox id，且无 `sandbox` 字段 | 不要把它当 sandbox id |
-| `sessions.stream` / `items.data` / `has_more` | 未做兼容层 | 用 `events.stream` / `body.items` / `body.hasMore` |
+| turn 用量/错误 | `turn.usage` 恒 `null`；失败 `turn.error` 只在实时帧带 `{code:"internal_error"}`，回放为 `null` | 计费与失败详情看网关日志；不要依赖 `usage` |
 
 ```js
 // 单条输入：不要用 sessions.events.create
@@ -413,7 +421,7 @@ const ack = await client.post(`/agents/sessions/${id}/events`, {
 // 实时：必须三个实参；两实参时 { after } 会被当作 RequestOptions
 const live = await client.beta.agents.sessions.events.stream(id, { after: tail }, {});
 
-// items：显式翻页；TS 中 body 是 protected
+// items：官方 CursorPage 自动翻页可用；直接读 body 时 TS 中 body 是 protected
 const page = await client.beta.agents.sessions.items.list(id, { order: 'asc', after, limit: 50 });
 const body = /** @type {any} */ (page).body;
 ```
@@ -422,19 +430,26 @@ const body = /** @type {any} */ (page).body;
 
 | 场景 | 帧 | 终止 |
 | --- | --- | --- |
-| 实时（先开流，再 POST） | `item`（用户输入先于 `turn.started`）+ `turn`（`started` → `completed` \| `failed`），可能有 `gap` | `turn.state === 'completed' \| 'failed'` |
-| 回放（`after` 小于末尾） | 只有 `item`（+ 心跳），没有 `turn` 帧 | 目标 assistant 的 `payload.complete === true` |
+| 实时（先开流，再 POST） | 自定义 `item`（用户输入先于 `turn.started`）+ 自定义 `turn`（`started` → `completed` \| `failed`）+ 官方 `agent.session.turn.created` → `turn.item.added` → `turn.completed` \| `turn.failed` → `agent.session.idle` \| `failed`；可能有 `gap` | 原生客户端看 `turn.state`；官方 SDK 看 `agent.session.idle` / `agent.session.failed` |
+| 回放（显式 `after`/`afterSeq`/`Last-Event-ID`） | 自定义 `item` + 同一套官方帧，没有自定义 `turn` 帧；可能有 `gap` | 官方 SDK 在 turn 终态后的 `agent.session.idle` 结束；原生客户端看 `payload.complete === true` |
+| 无游标订阅 | 不读历史，只收订阅之后的实时帧 | 同上；要补历史必须显式给游标（`afterSeq=0` 回放全部） |
 | `after` 等于/超过末尾 | 只有心跳 | 不会自行关闭；用客户端超时、`AbortController` 或 `items.list` |
 | 心跳 | `{ "lastItemSeq": N }` | 无 `seq`、无 `state`；不是本流已投递的位置 |
 
-- 实时帧序不是「先 `turn.started`」：用户输入 item 先到；不要收到 `turn.started` 就清空
-  已到达的帧。
-- `POST /events` 是同步语义：202 时本轮可能已完成；要观察本轮，先开流再 POST。不要用
-  `ack.lastItemSeq` 开流补看本轮。
-- `after` 只补 `seq > after` 的 item；`after=0` 回放全部。`Last-Event-ID` 与
+- 实时帧序不是「先 `turn.started`」：用户输入的自定义 `item` 先到，官方 `turn.created`
+  随后；不要收到 `turn.started`/`turn.created` 就清空已到达的帧。
+- `POST /events` 是接收语义：202 只表示 receipt、用户 item 与 turn 预留已持久化，turn 在
+  后台执行；失败在流上以 `turn.failed`/`session.failed` 出现。要观察本轮先开流再 POST；
+  `ack.lastItemSeq` 已包含用户输入，不能用它开流补看本轮。
+- `POST /sessions?stream=true` 先建立订阅并返回 SSE 响应，再执行首轮；响应不等待首轮，
+  但缓冲区仍有界，读取过慢同样按 `gap` 处理。
+- 无游标订阅是 `Tail`：只收实时帧，不读历史；`after=0` 才回放全部。`Last-Event-ID` 与
   `after`/`afterSeq` 等价，同时给出必须一致，否则 `400 conflicting_cursor`。
-- 直接 HTTP 必须按流读取 `response.body`，不要 `res.json()`/`res.text()`；item 帧的
-  `id:` 就是 seq。turn 与 gap 帧不带 `id:`，不推进 `Last-Event-ID`。
+- 直接 HTTP 必须按流读取 `response.body`，不要 `res.json()`/`res.text()`；只有自定义
+  `item` 帧的 `id:` 是 seq。自定义 `turn`、官方 `agent.session.*` 与 `gap` 帧不带 `id:`，
+  不推进 `Last-Event-ID`。
+- 订阅落后超过通道容量时收到一帧 `gap` 后流即结束（可能丢掉 turn 终态）；按最后渲染的
+  item `seq` 重连补齐。
 - 心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 决定（默认 15s，最短 1ms）；空流是否收到
   心跳取决于网关进程配置。
 
@@ -442,15 +457,21 @@ const body = /** @type {any} */ (page).body;
 
 | 帧 | payload | 聚合与终止 |
 | --- | --- | --- |
-| 用户输入 | `{ role: 'user', text, inputId }` | 单帧，无 `delta`/`complete`；不参与 assistant 聚合 |
+| 用户输入 | `{ role: 'user', text, inputId? }` | 单帧，无 `delta`/`complete`；不参与 assistant 聚合 |
 | assistant delta | `{ role: 'assistant', messageId, text, delta: true }` | 按 `messageId` 聚合 |
 | assistant complete | `{ role: 'assistant', messageId, text, complete: true }` | 最终文本以该帧为准 |
 | `tool_call` / `tool_update` | `{ toolCallId, title, status, input?/body? }` | 按 `toolCallId` 聚合；可能先到无 input 的帧 |
 | `tool_result` | `{ toolCallId, status, title?, output? }` | 终态；文件内容不在 `output` |
 
+- `items.list` 返回 item 级游标页：`data` 每个 item 一行（该 item 的最后一行），`items`
+  是该页全部 item 的逐帧原始行；`object` 为 `"list"`，`has_more` 与 `hasMore` 同值。
 - item 的 `id` 与 `itemId` 同值；同一 assistant 消息的 delta/complete 共享 id，不能按 id
   去重。
-- `nextCursor` 是最后一帧的 seq，下一页传给 `after`；传 `cursor` 会得到
+- `limit` 计 item 数（1..=500，默认 200），不按行数截断：单个 item 超过行预算时整条返回，
+  一页行数可能大于 `limit`。
+- `nextCursor` 是页尾 item 的最大 seq，下一页传给 `after`/`afterSeq`。`after` 也接受
+  `itim_...` item id（官方 `CursorPage` 的翻页方式），请求时解析为该 item 的当前最大 seq，
+  之后追加的帧不会再由该游标返回；要在增长中续读用 `afterSeq=<seq>`。传 `cursor` 会得到
   `400 invalid_query`；`order=desc` 时 `after` 表示「更旧于该 seq」。
 - `POST /events` 的用户输入 item 是 `kind=message`，没有 `kind=user`；同一
   `Idempotency-Key`/`inputId` 重试返回 `existing`，不重复追加。
@@ -462,7 +483,7 @@ const body = /** @type {any} */ (page).body;
 | `environment.type=none` | `id` 等于 logicalId；没有 `sandbox` 字段 | 不要当 sandbox id |
 | `environment.type=openai_hosted` | `environment.id` 等于 `sandbox.logicalEnvId` | 用它复用逻辑环境 |
 | `sandbox.state` | 恒 `null` | 查 Bun `GET /v1/sandboxes/{logicalEnvId}` |
-| `sandbox.runId` | 预留时为 `null`，真实运行后不回填 | 查 Bun 的 `runId`/`state` |
+| `sandbox.runId` | 预留时 Bun 返回值；后续运行不回填 | 查 Bun 的 `runId`/`state` |
 | `cwd` | 网关会话工作目录 | 工具在 `sandbox.workspacePath` 下执行 |
 | `tool_result.output` | 只有退出摘要，没有文件内容 | 读 workspace 或 Bun 状态接口 |
 
@@ -497,8 +518,9 @@ stateDiagram-v2
   `session/resume`，返回 `502 session_resume_required`。
 - 后台任务引用（MCP `resultType:"task"`）尚未进入空闲回收判定；长任务期间可能被
   回收，需要重新 ensure。
-- `sandbox.state` 在会话投影中固定为 `null`，`sandbox.runId` 不会在沙箱真实运行后
-  回填；实时状态以 Bun 为准。
-- `peri-swarm` 只绑定 loopback + 单 Bearer；自身不做 TLS，入口依赖外部 Nginx/Gateway。
-  当前单实例；Rivet engine 与 Bun bridge 必须同机；Loom 远端未验收。多租户、跨机
-  调度、1000 Agent 规模、Linux SRT 与真实第三方 MCP 未验收。
+- `sandbox.state` 在会话投影中固定为 `null`；`sandbox.runId` 只反映预留时 Bun 返回的值，
+  不随后续运行更新；实时状态以 Bun 为准。
+- `peri-swarm` 默认只绑定 loopback，非 loopback 需显式开关；只有单 Bearer，自身不做
+  TLS，入口依赖外部 Nginx/Gateway。外部 engine 配置面已实现，但未在活体 engine 上验收；
+  Bun bridge 仍只接受 loopback；多副本部署、Loom 远端、多租户、跨机调度、1000 Agent
+  规模、Linux SRT 与真实第三方 MCP 未验收。
