@@ -55,6 +55,28 @@
 | `none` 环境形状 | 同上测试、`http_contract_test::create_returns_the_documented_shape_and_sdk_aliases`、`openai_hosted_test::a_none_environment_never_calls_the_bun_bridge` |
 | 旧 none 行归一化 | `service::tests::project_session_normalizes_legacy_none_environment_and_official_defaults` |
 
+### 补充：`sessions.update` 的 `{}` 与无 body 同为 no-op
+
+官方 SDK 默认路径 `sessions.update(id)` 会发送 JSON `{}`（`application/json`）。
+此前的 `parse_update_body` 只把空字节流与 `null` 视为无 body，`{}` 会继续进入
+`update_session`：即使没有字段变化也会写 `last_activity_at`，有未关闭 turn 时还会
+返回 `409 turn_in_progress`。这与官方默认调用形状不符。
+
+现在 `parse_update_body` 在 `null` 判断旁把 JSON 空对象也返回 `Ok(None)`，与无 body
+走 handler 的同一个 early return：只读当前投影，不执行在途/恢复准入，不写任何行。
+`{"metadata":{}}` 等非空对象不受影响，仍按现有三态处理。
+
+测试：
+
+- `session_resources_test::update_accepts_an_absent_or_null_body_as_a_no_op`
+  的循环新增 `"JSON empty object"`，与无 body、`null` 一样断言 stored row（含
+  `last_activity_at`）不变；
+- `session_resources_test::empty_object_update_is_a_noop_while_a_turn_is_open`
+  在 `TurnPolicy::Manual` 留下未关闭 turn 后，对 `{}`、无 body、`null` 三种形状均
+  断言 `200`、`status=in_progress`，且 `last_activity_at` 与行状态不被写入。
+
+全量结果：**332 passed, 0 failed, 6 ignored**。
+
 ## 4. 执行命令与结果
 
 所有命令在 `/Users/mino/code/peri/.worktrees/swarm-official-defaults` 执行：
@@ -73,7 +95,7 @@ MISE_DISABLE_TOOLS=rust npx -y lefthook@1.13.6 run pre-commit
 
 | 命令 | 结果 |
 | --- | --- |
-| `cargo test -p peri-swarm` | **331 passed, 0 failed, 6 ignored** |
+| `cargo test -p peri-swarm` | **332 passed, 0 failed, 6 ignored** |
 | `cargo clippy -p peri-swarm --all-targets -- -D warnings` | 通过（0 error） |
 | `cargo fmt -p peri-swarm -- --check` | 通过 |
 | `lefthook run pre-commit`（npx 1.13.6，`MISE_DISABLE_TOOLS=rust`） | **全部 6 个命令通过**：`check`、`clippy`、`feature-catalog`、`fmt`、`layer-imports`、`tui-components` |
@@ -90,7 +112,7 @@ MISE_DISABLE_TOOLS=rust npx -y lefthook@1.13.6 run pre-commit
 | `mcp_injection_test` | 4 | 0 | 0 |
 | `openai_hosted_test` | 7 | 0 | 0 |
 | `rivet_actor_test` | 0 | 0 | 2 |
-| `session_resources_test` | 14 | 0 | 0 |
+| `session_resources_test` | 15 | 0 | 0 |
 | `streaming_test` | 15 | 0 | 0 |
 
 已知既有 flake：`openai_hosted_test::an_anonymous_hosted_session_reserves_a_bun_workspace`

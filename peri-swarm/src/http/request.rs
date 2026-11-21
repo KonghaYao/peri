@@ -1141,6 +1141,11 @@ pub fn parse_update_body(
     if value.is_null() {
         return Ok(None);
     }
+    // The official SDK's default `update(id)` call sends an empty JSON object;
+    // it carries no update fields and must not enter admission or write a row.
+    if value.as_object().is_some_and(|object| object.is_empty()) {
+        return Ok(None);
+    }
     serde_json::from_value(value).map(Some).map_err(|error| {
         let message = format!("failed to deserialize the update body: {error}");
         if message.contains("unknown field") {

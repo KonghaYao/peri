@@ -653,8 +653,8 @@ async fn update_replaces_and_clears_official_fields() {
 
 /// Official `sessions.update` allows `update(id)` / `update(id, null)`.
 /// Omitted body is sent as `{}` with JSON content-type; an explicit `null`
-/// sends no body and no content-type. Both are empty updates, not a `415`,
-/// and neither may write any row.
+/// sends no body and no content-type. All three spellings are empty updates,
+/// not a `415`, and none may write any row.
 #[tokio::test]
 async fn update_accepts_an_absent_or_null_body_as_a_no_op() {
     let harness = harness();
@@ -675,6 +675,8 @@ async fn update_accepts_an_absent_or_null_body_as_a_no_op() {
         ("no body, no content-type", None, ""),
         ("empty body, text/plain", Some("text/plain"), ""),
         ("JSON null", Some("application/json"), "null"),
+        // The official SDK's default `update(id)` body.
+        ("JSON empty object", Some("application/json"), "{}"),
     ] {
         let (status, session) = send_raw(
             &harness,
@@ -938,6 +940,41 @@ async fn update_and_delete_are_refused_while_a_turn_is_open() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{error}");
     assert_eq!(error["error"]["code"], json!("turn_in_progress"));
+}
+
+#[tokio::test]
+async fn empty_object_update_is_a_noop_while_a_turn_is_open() {
+    let harness = harness_with(TurnPolicy::Manual);
+    create(&harness, json!({ "logicalId": "agent-open-noop" })).await;
+    let (status, accepted) = submit(&harness, "agent-open-noop", 11, "hello").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let before = stored_session(&harness, "agent-open-noop").await;
+
+    // The official SDK's default `update(id)` sends `{}`; it must not run the
+    // in-flight admission or write `last_activity_at`.
+    for (label, content_type, body) in [
+        ("JSON empty object", Some("application/json"), "{}"),
+        ("no body", None, ""),
+        ("JSON null", Some("application/json"), "null"),
+    ] {
+        let (status, session) = send_raw(
+            &harness,
+            "/v1/agents/sessions/agent-open-noop",
+            content_type,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{label}: {session}");
+        assert_eq!(session["id"], json!("agent-open-noop"), "{label}");
+        assert_eq!(session["status"], json!("in_progress"), "{label}");
+
+        let after = stored_session(&harness, "agent-open-noop").await;
+        assert_eq!(
+            after.last_activity_at, before.last_activity_at,
+            "{label} must not write the row"
+        );
+        assert_eq!(after.state, before.state, "{label}");
+    }
 }
 
 // ── delete ─────────────────────────────────────────────────────────────────
