@@ -429,14 +429,22 @@ fn test_capability_whitelist_execute_extra_tool_is_writes() {
     }
 }
 
-/// explorer 的只读白名单是工具级裁剪：解析结果非空，且与 capability 标签一致。
+/// explorer 不再声明 tools 白名单：工具面继承父 Agent，只读由提示词弱约束。
 #[test]
-fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
+fn test_explorer_inherits_parent_tools() {
     let content =
         include_str!("../../../mcp-packages/workspace/src/resources/builtin/agents/explorer.md");
     let agent = agent_definition::parse_agent_file(content).expect("explorer fixture 必须可解析");
+    assert_eq!(
+        agent.frontmatter.tools,
+        peri_mcp_core::agent_definition::ToolsValue::Empty,
+        "explorer 必须省略 tools（Empty = 继承父工具）"
+    );
     let capability = super::infer_agent_capability(&agent.frontmatter).expect("档位合法");
-    assert!(!capability.can_mutate, "只读白名单必须标 readonly");
+    assert!(
+        capability.can_mutate,
+        "继承父工具（含 Bash / Write）必须标 writes，声明面不再证明只读"
+    );
 
     let parent_tools: Vec<_> = [
         "Read",
@@ -447,6 +455,7 @@ fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
         "Write",
         "Edit",
         "folder_operations",
+        "Agent",
     ]
     .into_iter()
     .map(|name| -> std::sync::Arc<dyn BaseTool> {
@@ -481,8 +490,17 @@ fn test_explorer_readonly_allowlist_resolves_to_read_tools() {
     let names: Vec<&str> = filtered.iter().map(|tool| tool.name()).collect();
     assert_eq!(
         names,
-        vec!["Read", "Grep", "Glob", "ReadContextArchive"],
-        "explorer 只保留只读工具（silent trimming 不得产出空集）"
+        vec![
+            "Read",
+            "Grep",
+            "Glob",
+            "ReadContextArchive",
+            "Bash",
+            "Write",
+            "Edit",
+            "folder_operations",
+        ],
+        "继承父工具，仅移除 disallowedTools 中的 Agent"
     );
     let strict = crate::subagent::fork::filter_tools(
         &parent_tools,
