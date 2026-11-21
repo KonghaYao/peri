@@ -158,6 +158,7 @@ fn test_journal_attempt_round_trip_and_legacy_default() {
             }),
             consumed: true,
             disposition: AttemptDisposition::Recovered,
+            execution: None,
         }),
     };
     let json = serde_json::to_value(&entry)

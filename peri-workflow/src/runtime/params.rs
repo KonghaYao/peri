@@ -207,7 +207,9 @@ pub(crate) fn parse_start_input(input: &Value, cwd: &str) -> Result<WorkflowInpu
         .transpose()
         .map_err(|error| format!("Invalid writeIntent: {error}"))?;
 
-    let git_baseline = crate::journal::GitBaseline::capture_for_intent(
+    // 采样失败不阻断 start（`capture_for_intent` 只在显式 write 范围内报错）；
+    // 结果携带观测完整性，终态据此决定是否阻塞交付。
+    let git_observation = crate::journal::GitBaseline::capture_for_intent(
         std::path::Path::new(cwd),
         write_intent.as_ref(),
     )
@@ -228,7 +230,7 @@ pub(crate) fn parse_start_input(input: &Value, cwd: &str) -> Result<WorkflowInpu
         workflow_name,
         resume_from,
         write_intent,
-        git_baseline,
+        git_observation,
     })
 }
 

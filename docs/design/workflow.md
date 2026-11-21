@@ -107,7 +107,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 2. 脚本 preflight：引擎 `validate` 子命令在临时目录校验脚本；临时目录与 kill-on-drop 子进程由 preflight 持有，任何退出路径都不残留。
 3. artifact 准备与 spawn：解析固定版本引擎包（§10），无可用路径时 `SpawnFailed`（离线 fail closed）。
 4. `workflow/start` 握手：15 秒超时；ack 校验（协议版本、build id）失败即失败启动并回收。
-5. 消息循环（`runner/message_loop.rs`）按 §2.2 分派；`maxElapsedMs` 由循环内的有界等待强制，超限或资源限额终止循环并投影失败终态。
+5. 消息循环（`runner/message_loop.rs`）按 §2.2 分派；`maxElapsedMs` 由循环内的有界等待强制，超限或资源限额终止循环并投影失败终态。限额记账（`runner/run_limit_state.rs`）分开保存「首条失败文本」与「全部超限明细」：顶层 `error` 仍是首条 breach（旧消费者兼容），`state.limit_breaches` 按 scope / 上限 / 观测值 / attempt 身份 / 检测时点列出工具调用、token、迭代、elapsed 与 agents；未采集的用量缺席而不是 0。token 按 `AgentRunResult.tokenCount` 以 taskId 为稳定身份累计后与 run `budgetTotal` 比较；投递重试与 cache 命中不重复计费，真实重试（新 taskId）独立计量。
 6. 终态：`workflow/done` 或 kill → `runner/terminal.rs` 收尾（Git postcondition、`state.json`、progress 投影）→ 结果经完成通道发布。
 7. 清理：终止子进程、移除 active channel、`cleanup_old_runs()`、`cleanup_completed()`。
 
@@ -166,8 +166,10 @@ run 终态进入 registry 的完成 outbox（`pending_completions` / `acknowledg
 ```
 
 - `key` 是 agent 参数的 SHA256（resume cache-hit 匹配依据），`seq` 是调用顺序号。
-- `state.json` 保存 status、四维状态、派生的 `outcome`、`write_intent`、limits、`args`、`max_concurrency`、attempts 与 `return_value`；写入失败必须使对外结果降级为 failed/blocked。
+- `state.json` 保存 status、四维状态、派生的 `outcome`、`write_intent`、limits、`limit_breaches`、`token_usage`、`args`、`max_concurrency`、attempts 与 `return_value`；写入失败必须使对外结果降级为 failed/blocked。
 - `attempt` 记录宿主观测到的执行尝试序号（引擎重试会递增，journal cache 命中保留原序号）；dead 结果的 `durationMs`/`tokenCount` 可缺省，缺省表示未测量。
+- `attempt.execution` 是可选的执行结果：`outcome`（ok / dead / skipped / limited）、`reason`、有效迭代上限与来源、已用迭代数、token 预算与用量，由宿主在写入 journal 时补注。它与 `disposition` 正交——`produced` 只表示结果来源，dead/limited 仍如实可见；cache 命中（`recovered`）没有本次执行，不写执行事实。旧 journal 的 attempt 没有该对象，缺失不等于成功。
+- 有效迭代上限按执行器实际解析值记录（无 agentType 的回落值与定义 `max_turns`，含 builtin coder 400），不统一默认值；上限耗尽时 attempt 的 `reason` 是结构化编码 `max-iterations`，调用方不解析错误文案。
 - 保留策略：按 mtime 保留最新 50 个目录，run 结束时清理。
 - resume 读取使用 `read_all_strict`：缺失、损坏或序号不连续/重复一律报错，不降级为无缓存新运行。
 - 调用方读取长结果必须跟随 `outputs/` 占位符，不把 agent 全文作为顶层返回值。
@@ -227,21 +229,21 @@ results may still become `null` after engine retry, so scripts must check requir
 1. **关闭门**：`CloseGate::admit` 与 run 注册同临界区；`mark_closed` 等待在途准入结束后不再放行新 run。
 2. **执行 owner**：`ExecutionOwner::admit` 经统一后台任务注册表登记外部执行；未启动即释放。
 3. **并发槽**：`registry.reserve` 先于 spawn，失败不产生孤儿 run。
-4. **预算登记**：`RunExecutionBudget`（maxConcurrency / maxAgents / maxToolCalls）先于 Node 进程登记，供消费者容量判定与 wire 准入共用。
+4. **预算登记**：`RunExecutionBudget`（maxConcurrency / maxAgents / maxToolCalls）先于 Node 进程登记，供消费者容量判定与 wire 准入共用；token 预算（`budgetTotal`）由 runner 的限额状态单独持有，不另立第二份权威。
 5. **后台任务登记**：`BgTaskKind::Workflow` + kill 闭包（取消转发到任务表与 registry）；登记失败回滚并发槽。
 6. **执行任务**：`RunCompletion::spawn` 启动唯一执行任务并 attach 句柄；调用方在 1 秒快速窗口观察同一终态，调用者取消等待不取消执行。
 
-参数校验（`params::parse_start_input`）：`maxConcurrency` 默认 3、上限 16；`scriptPath` 限定在 workflow cwd 内（canonicalize 后读取，消除 check-then-read 竞态）；`strictPreflight` 恒拒绝；limits 使用 JSON 安全整数上界；`writeIntent` 校验并捕获 `GitBaseline`。Git write intent 是声明式后置条件，不是权限边界或文件系统沙箱。
+参数校验（`params::parse_start_input`）：`maxConcurrency` 默认 3、上限 16；`scriptPath` 限定在 workflow cwd 内（canonicalize 后读取，消除 check-then-read 竞态）；`strictPreflight` 恒拒绝；limits 使用 JSON 安全整数上界；`writeIntent` 校验并捕获 `GitBaseline`。基线记录 repo_root/cwd、`--git-dir`/`--git-common-dir`、HEAD 与可见范围（index/worktree 可见、ignored 不可见、只比较 HEAD 端点），运行前后按同一身份比较。Git write intent 是声明式后置条件，不是权限边界或文件系统沙箱。
 
 ### 5.2 完成与终态投影
 
 - **execution**：由 run 状态投影（completed / failed / killed）。
 - **acceptance**：语义验收不由运行内核判定；内核当前投影为 `unknown`，验收结论属 ADLC/skill 层（`ADLC-DELIVERY-STATUS-001`，[Ultra-ADLC 设计](ultra-adlc.md)）。
 - **outcome**：引擎级派生三态——execution 失败/取消为 `failed`/`killed`，completed 且 delivery 或 acceptance 阻断为 `blocked`，completed 且未阻断为 `completed`，其余为 `unknown`。`completed` 只表示引擎执行完成，不表示任务成功。
-- **post-processing**：Git postcondition 结果——read_only 通过为 `not_required`，write 通过为 `passed`，可归因违例为 `failed`，无 writeIntent 或观察到 footprint 外变化为 `blocked`。
-- **delivery**：内核只投影 `blocked` / `unknown`——execution 完成、acceptance 非 failed、存在 write intent 且 post-processing 通过时为 `unknown`，其余为 `blocked`；`deliverable` 判定属引擎之外的验收层（ADLC/skill），内核不产出。
+- **post-processing**：Git postcondition 结果——read_only 通过为 `not_required`，write 通过为 `passed`，可归因本 run 的违例为 `failed`（`run-owned violation`）；未声明 writeIntent 且观测完整、无差异为 `unknown`（原因 `not_requested`）；观察到 footprint 外变化为 `blocked`（原因 `unattributed_change`，文案 `unattributed change (external or unknown)`）；无基线、采样失败、观测窗口被重新绑定或范围不可验证为 `blocked`（原因 `observation_incomplete`，文案 `observation incomplete`）；非 Git 目录且未声明 writeIntent 没有可绑定范围，为 `unknown`（原因 `not_requested`，观测 `not_applicable`）。
+- **delivery**：内核只投影 `blocked` / `unknown`——execution 完成、acceptance 非 failed 且 post-processing 未阻断时为 `unknown`（未请求交付同样为 `unknown` + `not_requested`），其余为 `blocked`；`deliverable` 判定属引擎之外的验收层（ADLC/skill），内核不产出。结构化原因字段只在 `state.json`，旧消费者忽略。
 
-Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；未声明 `writeIntent` 时不捕获 baseline、不做 Git 检查（post-processing 为 blocked），避免把父会话并发改动报成不可归因。read_only/无写 footprint 时观察到的变化只标为 blocked 并给出路径；write 的 allowlist 越界、非法 HEAD 变化与提交越界仍失败。异常只报告，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
+Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未变化的无关 dirty path 不阻塞；workflow 自身 `.claude/workflow-runs` 运行产物不参与对账，仓库是否忽略该目录不改变结论。未声明 `writeIntent` 时仍采样并比较：观测完整且无差异只表示未请求交付，不判 blocked；无基线、采样失败或范围不可验证一律 blocked（`observation_incomplete`），不得宣称无变化；唯一例外是非 Git 目录且未声明 `writeIntent`——没有可绑定范围，按 `unknown` + `not_requested` 投影。read_only 时观察到的变化只标为 blocked 并给出路径；write 的 allowlist 越界、非法 HEAD 变化与提交越界仍失败。归因文案按 `run-owned violation` / `unattributed change (external or unknown)` / `observation incomplete` 分档：外部提交无独立证据时保持未知，不冒充本 run 写入。`state.json` 的 `git_observation_scope` 只保存观测身份与能力，不保存 porcelain 基线内容；采样失败的错误保留 git 自身 stderr 的有界摘要。异常只报告，不执行 add/commit/stash/reset/restore/clean。`state.json` 写入失败使对外结果降级 failed/blocked——不能继续通知 completed。
 
 ### 5.3 通知与投递
 
@@ -290,7 +292,7 @@ saved aggregate evidence instead of restarting finished agents.
 - 缺失、IO 错误、损坏 JSON、序号不连续/重复均报错，不得降级成无缓存新运行；序号损坏需依据工作包 checkpoint 显式重新规划。
 - Node 仍按调用 key 匹配前缀，不能用调用缓存代替工作包依赖与产物有效性检查。
 - `state.json` 保存启动 `args` 与并发数并原样恢复；legacy 缺失参数不可重建，并发兼容默认 3；改变契约或恢复计划时通过 `Workflow` 工具显式传完整新 script（或 `scriptPath`）+ `resumeFromRunId`。
-- 现有 budget/limits 是物理运行上限，不是跨运行计费账本；cache-hit 不重复计数。
+- 现有 budget/limits 是物理运行上限，不是跨运行计费账本；cache-hit 不重复计数。超限明细写入 `state.json`；attempt 执行结果随 journal 条目保存，但 resume 只按 `key/seq/result` 的连续 ok 前缀复用，不据此重放执行或重复计费。旧 `state.json` / 旧 journal 缺字段按未知读取，不补判为未超限或成功。
 
 ---
 

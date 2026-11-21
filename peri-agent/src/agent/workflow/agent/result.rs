@@ -7,6 +7,7 @@ use peri_acp_types::command::PromptStopReason;
 use peri_acp_types::session::ExecutionFailure;
 use peri_acp_types::session::TurnTelemetryOutcome;
 use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::workflow::AgentExecutionLimits;
 use peri_acp_types::workflow::AgentRunParams;
 use peri_acp_types::workflow::AgentRunResult;
 use peri_acp_types::workflow::Usage;
@@ -18,6 +19,8 @@ use crate::session::Session;
 
 pub(super) struct ProjectedResult {
     pub result: AgentRunResult,
+    /// 本次执行实际解析的上限与用量（结算路径交给宿主写入 attempt）。
+    pub execution_limits: AgentExecutionLimits,
     failure: Option<ExecutionFailure>,
 }
 
@@ -88,16 +91,31 @@ pub(super) fn terminal_status_after_close(
     }
 }
 
+/// 投影所需的执行上下文（与循环结果无关的本次执行事实）。
+pub(super) struct ProjectionInputs<'a> {
+    pub session: &'a Arc<Session>,
+    pub observation: &'a WorkflowObservation,
+    pub params: &'a AgentRunParams,
+    pub effective_model: &'a str,
+    /// 执行器解析的有效迭代上限与用量；未采集的用量保持 `None`。
+    pub execution_limits: AgentExecutionLimits,
+    pub started_at: Instant,
+}
+
 /// 调用方必须先关闭 EventBus 并 await forwarder，再读取最终统计与输出。
 pub(super) fn project_run_result(
     loop_result: LoopResult,
     forwarder_result: Result<(), ExecutionFailure>,
-    session: &Arc<Session>,
-    observation: &WorkflowObservation,
-    params: &AgentRunParams,
-    effective_model: &str,
-    started_at: Instant,
+    inputs: ProjectionInputs<'_>,
 ) -> ProjectedResult {
+    let ProjectionInputs {
+        session,
+        observation,
+        params,
+        effective_model,
+        execution_limits,
+        started_at,
+    } = inputs;
     if let Err(failure) = forwarder_result {
         warn!(message = %failure.public_message, "Workflow agent: event forwarder failed");
         return ProjectedResult {
@@ -108,6 +126,7 @@ pub(super) fn project_run_result(
                 Some(observation.snapshot()),
             ),
             failure: Some(failure),
+            execution_limits,
         };
     }
     match loop_result {
@@ -122,6 +141,7 @@ pub(super) fn project_run_result(
                     started_at,
                 ),
                 failure: None,
+                execution_limits,
             }
         }
         LoopResult::Interrupted => {
@@ -134,6 +154,7 @@ pub(super) fn project_run_result(
                     Some(observation.snapshot()),
                 ),
                 failure: None,
+                execution_limits,
             }
         }
         LoopResult::SettlementDue { .. } => {
@@ -149,18 +170,27 @@ pub(super) fn project_run_result(
                     Some(observation.snapshot()),
                 ),
                 failure: None,
+                execution_limits,
             }
         }
         LoopResult::Error(error) => {
             debug!(error = %error, "Workflow agent: execution failed");
+            // 迭代耗尽用稳定 reason 编码上报（上限与用量在 execution_limits 里），
+            // 调用方不需要解析错误文案。
+            let reason = if matches!(&error, crate::error::AgentError::MaxIterationsExceeded(_)) {
+                peri_acp_types::workflow::AGENT_DEAD_REASON_MAX_ITERATIONS
+            } else {
+                "runagent-threw"
+            };
             ProjectedResult {
                 failure: Some(ExecutionFailure::from_agent_error(&error)),
                 result: dead_result(
-                    "runagent-threw",
+                    reason,
                     Some(error.to_string()),
                     started_at,
                     Some(observation.snapshot()),
                 ),
+                execution_limits,
             }
         }
     }
@@ -212,6 +242,15 @@ fn completed_result(
         token_count: Some(tokens),
         phase: params.phase.clone(),
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_execution_limits() -> AgentExecutionLimits {
+    AgentExecutionLimits {
+        iteration_limit: 200,
+        iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::Default,
+        iterations_used: None,
     }
 }
 

@@ -3,7 +3,7 @@
 use super::{
     fmt, oneshot, prepare_workflow_command, scope, watch, AgentExecutor, AgentResultParams,
     AgentRunParams, AgentRunResult, Arc, Debug, Duration, Formatter, JsExecutionHost,
-    JsProcessSpec, MessageLoop, RpcChannel, RunLimitState, Value, WorkflowError,
+    JsProcessSpec, MessageLoop, RpcChannel, RunLimitBreach, RunLimitState, Value, WorkflowError,
     WorkflowJournalStore, WorkflowLimits, WorkflowProgressStore,
 };
 
@@ -20,7 +20,7 @@ pub enum AgentTaskPublish {
     /// Node 等待方，不留悬挂 promise（design §4.4 关闭顺序第 ① 步）。
     Closed,
     /// 超出 run limits（如 maxAgents）：与旧链同语义——run 以限额错误终止。
-    LimitBreach(String),
+    LimitBreach(RunLimitBreach),
 }
 
 /// Node 任务发布面：`agent/task` → 任务表（由 `WorkflowRuntime` 装配期注入）。
@@ -44,7 +44,8 @@ pub struct WorkflowInput {
     pub workflow_name: String,
     pub resume_from: Option<String>,
     pub write_intent: Option<peri_acp_types::workflow::WorkflowWriteIntent>,
-    pub git_baseline: Option<crate::journal::GitBaseline>,
+    /// 启动时捕获的 Git 观测窗口；缺失基线不是“无变化”。
+    pub git_observation: crate::journal::GitObservation,
 }
 
 /// Workflow 执行结果
@@ -198,20 +199,40 @@ impl WorkflowRunner {
         }
     }
 
-    /// 记录一次任务结果的 tool 调用数（design §5.2 第 5 条：与 run limits 同一权威）。
+    /// 记录一次任务终态结果对 run limits 的影响（design §5.2 第 5 条：同一权威）。
     ///
-    /// `task_id` 是去重身份：任务终态回投是投递重试，同一任务只计入首次。
-    /// 返回首次超限的 breach 详情（若有）；breach 由消息循环在 `workflow/done`
+    /// `task_id` 是去重身份：任务终态回投是投递重试，同一任务只计入首次；缓存命中
+    /// 没有本次执行，不会走到这里，因此不会被重复计费。token 用量与 `budgetTotal`
+    /// 比较，迭代耗尽取执行器解析的上限与计数（不写死、不解析错误文案）。
+    /// 返回本次结算新产生的超限详情（若有）；breach 由消息循环在 `workflow/done`
     /// 读取并投影为 run 终态（`status = failed` + 限额错误）。
-    pub(crate) fn note_task_tool_calls(
+    pub(crate) fn note_task_execution(
         &self,
         run_id: &str,
         task_id: &str,
-        count: u64,
+        agent_id: u64,
+        result: &AgentRunResult,
     ) -> Option<String> {
-        self.run_limit_states
-            .get(run_id)
-            .and_then(|state| state.observe_tool_calls(task_id, count))
+        let state = self.run_limit_states.get(run_id)?;
+        let tool_breach = result
+            .tool_count()
+            .and_then(|count| state.observe_tool_calls(run_id, task_id, agent_id, count));
+        if let Some(tokens) = result.token_count() {
+            state.observe_tokens(run_id, task_id, agent_id, tokens);
+        }
+        let iteration_breach = if result.iteration_limit_exhausted() {
+            let limits = self.agent_executor.execution_limits(run_id, agent_id);
+            state.observe_iteration_exhaustion(
+                run_id,
+                task_id,
+                agent_id,
+                limits.map(|limits| limits.iteration_limit),
+                limits.and_then(|limits| limits.iterations_used),
+            )
+        } else {
+            None
+        };
+        tool_breach.or(iteration_breach)
     }
 
     /// Bind workflow agent tools to the owning session's execution scope.
@@ -384,7 +405,7 @@ impl WorkflowRunner {
             _ = &mut kill_rx => {
                 self.active_channels.remove(&run_id);
                 host.kill().await.map_err(|error| WorkflowError::CleanupFailed(error.to_string()))?;
-                crate::runner::terminal::send_killed(&done_tx, &journal_store, &progress_store, &run_id, &input, &started_at_iso, host.stderr_tail());
+                crate::runner::terminal::send_killed(&done_tx, &journal_store, &progress_store, &run_id, &input, &started_at_iso, host.stderr_tail(), crate::runner::RunLimitReport::default());
                 return Ok(());
             }
             result = start_request => result,
@@ -450,7 +471,10 @@ impl WorkflowRunner {
 
         // 8. Message loop (spawned task)
         let run_started = peri_time::monotonic_now();
-        let limit_state = Arc::new(RunLimitState::new(input.limits.max_tool_calls));
+        let limit_state = Arc::new(RunLimitState::new(
+            input.limits.max_tool_calls,
+            input.budget_total,
+        ));
         self.run_limit_states
             .insert(run_id.clone(), Arc::clone(&limit_state));
 
@@ -476,6 +500,7 @@ impl WorkflowRunner {
         let message_loop = MessageLoop {
             run_scope: Arc::clone(&run_scope),
             agent_task_sink: self.agent_task_sink(),
+            agent_executor: Arc::clone(&self.agent_executor),
             limit_state: Arc::clone(&limit_state),
             channel: Arc::clone(&channel),
             journal_store: Arc::clone(&journal_store),
@@ -511,8 +536,13 @@ impl WorkflowRunner {
                 let _ = (&mut msg_loop).await;
 
                 run_scope.drain().await;
+                let limit_report = self
+                    .run_limit_states
+                    .get(&run_id)
+                    .map(|state| state.report())
+                    .unwrap_or_default();
                 crate::runner::terminal::send_killed(&done_tx_for_kill, &journal_clone2, &progress_store,
-                    &run_id, &kill_input, &kill_started_at, host.stderr_tail());
+                    &run_id, &kill_input, &kill_started_at, host.stderr_tail(), limit_report);
             }
             _ = &mut msg_loop => {
                 // Message loop completed naturally
@@ -528,6 +558,8 @@ impl WorkflowRunner {
 
         // Cleanup: drop per-run limit state (计数随 run 结束)
         self.run_limit_states.remove(&run_id);
+        // 执行器持有的每次执行上限事实同样随 run 回收，避免跨 run 残留。
+        self.agent_executor.forget_run(&run_id);
 
         // Cleanup old runs from journal
         let _ = journal_store.cleanup_old_runs();

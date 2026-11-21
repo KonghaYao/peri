@@ -23,6 +23,7 @@ mod git_baseline;
 use git_baseline as git;
 mod output;
 pub use git::GitBaseline;
+pub use git::GitObservation;
 pub use git::PostconditionFailure;
 pub use output::extract_long_texts;
 
