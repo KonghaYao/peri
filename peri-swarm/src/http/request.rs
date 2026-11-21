@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::{MAX_INSTRUCTIONS_BYTES, MAX_MODEL_BYTES, MAX_TEXT_BYTES};
 use crate::domain::{
-    ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, InputKind, InputMode,
+    ContentBlock, Cursor, EnvironmentKind, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputSubmission, ItemOrder, ItemsWindow, LogicalId, McpHeader, McpToolSpec, SwarmError,
 };
 
@@ -771,12 +771,17 @@ fn official_event_shape_error(value: &Value, error: serde_json::Error) -> SwarmE
     official_invalid("events[0]", &format!("unsupported event shape: {error}"))
 }
 
+/// Starting point of an SSE subscription.
+///
+/// No cursor at all means [`EventCursor::Tail`]: the official SDK subscribes
+/// before it submits the input and reads only what happens next. An explicit
+/// `afterSeq`/`after`/`Last-Event-ID` (including `0`) replays the backlog.
 pub fn resolve_events_cursor(
     query: &EventsQuery,
     headers: &HeaderMap,
-) -> Result<Cursor, SwarmError> {
+) -> Result<EventCursor, SwarmError> {
     let last_event_id = last_event_id(headers)?;
-    Cursor::reconcile(query.after_seq, query.after, last_event_id)
+    Cursor::reconcile_events(query.after_seq, query.after, last_event_id)
 }
 
 pub fn resolve_items_window(query: &ItemsQuery) -> Result<ItemsWindow, SwarmError> {

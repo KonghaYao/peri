@@ -144,18 +144,24 @@ impl ItemsWindow {
 
 /// One page of persisted items with a stable cursor.
 ///
-/// `data` mirrors `items` and `has_more` mirrors `hasMore` for the official
-/// `CursorPage` reader, which only looks at those two keys. The older
-/// `items`/`hasMore`/`nextCursor`/`lastItemSeq` spellings stay for existing
-/// clients; both spellings carry the same values.
+/// Pagination is **item-grouped** (`design §4.2`): `limit` counts items, and
+/// every row of the selected items is returned in `items`. `data` is the
+/// official `CursorPage` view of the same page — one row per item, the item's
+/// last persisted row (greatest `seq`). Because one assistant message can span
+/// several delta rows plus its `complete:true` row, `data` is usually shorter
+/// than `items`; `items` remains the raw row list existing delta consumers
+/// read. `has_more`/`hasMore` count items, and `nextCursor` is the greatest
+/// `seq` of the last item of the page in page order.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemPage {
     pub logical_id: String,
     pub object: String,
+    /// Raw rows of the page's items, in `order`.
     pub items: Vec<ItemView>,
+    /// One row per item (the item's last row), in page order.
     pub data: Vec<ItemView>,
-    /// Last seq of this page when more rows exist; `null` otherwise.
+    /// Last item's greatest `seq` when more items exist; `null` otherwise.
     pub next_cursor: Option<u64>,
     pub last_item_seq: u64,
     pub has_more: bool,
@@ -185,10 +191,13 @@ impl Serialize for ItemPage {
 }
 
 impl ItemPage {
+    /// `items` are the raw rows in `order`; `data` is one last row per item in
+    /// page order.
     #[must_use]
     pub fn new(
         logical_id: impl Into<String>,
         items: Vec<ItemView>,
+        data: Vec<ItemView>,
         next_cursor: Option<u64>,
         last_item_seq: u64,
         has_more: bool,
@@ -197,8 +206,8 @@ impl ItemPage {
         Self {
             logical_id: logical_id.into(),
             object: "list".to_owned(),
-            data: items.clone(),
             items,
+            data,
             next_cursor,
             last_item_seq,
             has_more,

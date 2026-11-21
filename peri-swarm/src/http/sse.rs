@@ -54,6 +54,11 @@ fn event_response_with_initial(
 /// therefore do not advance `Last-Event-ID`. Official frames are additive: the
 /// gateway's own `item`/`turn` events stay on the stream.
 ///
+/// A subscription that falls behind the broadcast channel receives one `gap`
+/// frame and the stream ends. The loss may include a turn terminal, so
+/// continuing would leave an official SDK waiting forever; reconnecting with
+/// the last rendered item `seq` replays the dropped rows from the store.
+///
 /// The heartbeat payload's `lastItemSeq` is the session's current
 /// `MAX(seq)` (read from the shared tail), not the last seq this stream
 /// delivered. It reports progress; a client resumes from an item's `seq`.
@@ -78,7 +83,12 @@ pub fn event_stream(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            return Some((Ok(state.gap(skipped)), Some(state)));
+                            // The subscription lost events, possibly including a
+                            // turn terminal. Emit the gap and end the stream: a
+                            // silent continuation would leave an official SDK
+                            // waiting forever, and a native client recovers by
+                            // reconnecting from the last item `seq` it saw.
+                            return Some((Ok(state.gap(skipped)), None));
                         }
                         Err(broadcast::error::RecvError::Closed) => return None,
                     }
@@ -172,3 +182,7 @@ fn json_event<T: serde::Serialize>(name: &'static str, data: &T) -> Event {
         .event(name)
         .data(serde_json::to_string(data).unwrap_or_else(|_| "{}".to_owned()))
 }
+
+#[cfg(test)]
+#[path = "sse_test.rs"]
+mod tests;

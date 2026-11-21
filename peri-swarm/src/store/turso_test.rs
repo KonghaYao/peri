@@ -16,9 +16,10 @@ use super::{
     session_params, SwarmStateError, SwarmStateStoreConfig, CREATE_INDEX_SQL,
     CREATE_META_TABLE_SQL, CREATE_TABLE_SQL, INSERT_INPUT_SQL, INSERT_ITEM_SQL,
     META_TABLE_EXISTS_SQL, PIN_VERSION_SQL, SELECT_BINDING_SQL, SELECT_INPUT_SQL,
-    SELECT_ITEMS_AFTER_SQL, SELECT_ITEMS_BEFORE_SQL, SELECT_ITEMS_TAIL_SQL, SELECT_LAST_SEQ_SQL,
-    SELECT_SESSION_SQL, SELECT_VERSION_SQL, SESSIONS_TABLE_EXISTS_SQL, SWARM_STATE_SCHEMA_VERSION,
-    UPDATE_SESSION_SQL, UPSERT_BINDING_SQL, UPSERT_SESSION_SQL,
+    SELECT_ITEMS_AFTER_SQL, SELECT_ITEMS_BEFORE_SQL, SELECT_ITEMS_TAIL_SQL,
+    SELECT_ITEM_PAGE_ASC_SQL, SELECT_ITEM_PAGE_DESC_SQL, SELECT_ITEM_PAGE_TAIL_SQL,
+    SELECT_LAST_SEQ_SQL, SELECT_SESSION_SQL, SELECT_VERSION_SQL, SESSIONS_TABLE_EXISTS_SQL,
+    SWARM_STATE_SCHEMA_VERSION, UPDATE_SESSION_SQL, UPSERT_BINDING_SQL, UPSERT_SESSION_SQL,
 };
 use crate::domain::{
     EnvironmentKind, EnvironmentRef, InputState, ItemKind, ItemSource, McpHeader, McpToolSpec,
@@ -221,9 +222,45 @@ fn read_statements_bind_one_cursor_shaped_parameter_set() {
     assert_eq!(placeholders(SELECT_ITEMS_AFTER_SQL), 3);
     assert_eq!(placeholders(SELECT_ITEMS_BEFORE_SQL), 3);
     assert_eq!(placeholders(SELECT_ITEMS_TAIL_SQL), 2);
+    assert_eq!(placeholders(SELECT_ITEM_PAGE_ASC_SQL), 3);
+    assert_eq!(placeholders(SELECT_ITEM_PAGE_DESC_SQL), 3);
+    assert_eq!(placeholders(SELECT_ITEM_PAGE_TAIL_SQL), 2);
     assert_eq!(placeholders(SELECT_LAST_SEQ_SQL), 1);
     assert_eq!(placeholders(SELECT_INPUT_SQL), 2);
     assert_eq!(placeholders(SELECT_BINDING_SQL), 1);
+}
+
+#[test]
+fn item_page_statements_group_by_item_not_by_row() {
+    for (sql, bound) in [
+        (SELECT_ITEM_PAGE_ASC_SQL, "MAX(seq) > ?2"),
+        (SELECT_ITEM_PAGE_DESC_SQL, "MAX(seq) < ?2"),
+    ] {
+        let normalized = normalized(sql);
+        assert!(
+            normalized.contains("GROUP BY logical_id, item_id"),
+            "the page unit is the item: {normalized}"
+        );
+        assert!(
+            normalized.contains(bound),
+            "the cursor bounds the item's greatest seq: {normalized}"
+        );
+        assert!(
+            normalized.contains("ORDER BY last_seq"),
+            "page membership follows the item boundary: {normalized}"
+        );
+        assert!(
+            normalized
+                .contains("JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id"),
+            "every row of a selected item is returned: {normalized}"
+        );
+    }
+    let tail = normalized(SELECT_ITEM_PAGE_TAIL_SQL);
+    assert!(tail.contains("GROUP BY logical_id, item_id"), "{tail}");
+    assert!(
+        !tail.contains("HAVING"),
+        "no cursor means every item: {tail}"
+    );
 }
 
 // ── row encoding ────────────────────────────────────────────────────────────

@@ -57,10 +57,12 @@ use turso_serverless::{
 use url::Url;
 
 use super::{
-    InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow,
-    SwarmSessionUpdate, SwarmStore,
+    grouped_item_page, InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
+    SwarmItemRow, SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
 };
-use crate::domain::{EnvironmentRef, InputState, ItemKind, ItemSource, McpToolSpec, SessionState};
+use crate::domain::{
+    EnvironmentRef, InputState, ItemKind, ItemOrder, ItemSource, McpToolSpec, SessionState,
+};
 
 /// Version recorded in `swarm_meta.version` by this build.
 ///
@@ -191,6 +193,42 @@ const SELECT_ITEMS_TAIL_SQL: &str = "SELECT logical_id, seq, item_id, kind, sour
 const SELECT_ITEM_BY_ID_SQL: &str = "SELECT logical_id, seq, item_id, kind, source,
     payload_json, created_at, truncated FROM swarm_items
     WHERE logical_id = ?1 AND item_id = ?2 ORDER BY seq DESC LIMIT 1";
+
+// Item-grouped pagination (`design §4.2`). `page` selects items by their
+// greatest `seq` — never by rows — so a cursor resolved from an item id cannot
+// land inside the same item and repeat it. The outer query then returns every
+// row of the selected items; the caller derives `data` from each item's last
+// row. The join carries `logical_id` so a caller-supplied input id that repeats
+// across sessions can never pull another session's rows.
+const SELECT_ITEM_PAGE_ASC_SQL: &str = "WITH page AS (
+    SELECT logical_id, item_id, MAX(seq) AS last_seq FROM swarm_items
+    WHERE logical_id = ?1 GROUP BY logical_id, item_id HAVING MAX(seq) > ?2
+    ORDER BY last_seq ASC LIMIT ?3)
+  SELECT i.logical_id, i.seq, i.item_id, i.kind, i.source, i.payload_json,
+    i.created_at, i.truncated
+  FROM swarm_items i
+  JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id
+  ORDER BY i.seq ASC";
+
+const SELECT_ITEM_PAGE_DESC_SQL: &str = "WITH page AS (
+    SELECT logical_id, item_id, MAX(seq) AS last_seq FROM swarm_items
+    WHERE logical_id = ?1 GROUP BY logical_id, item_id HAVING MAX(seq) < ?2
+    ORDER BY last_seq DESC LIMIT ?3)
+  SELECT i.logical_id, i.seq, i.item_id, i.kind, i.source, i.payload_json,
+    i.created_at, i.truncated
+  FROM swarm_items i
+  JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id
+  ORDER BY i.seq DESC";
+
+const SELECT_ITEM_PAGE_TAIL_SQL: &str = "WITH page AS (
+    SELECT logical_id, item_id, MAX(seq) AS last_seq FROM swarm_items
+    WHERE logical_id = ?1 GROUP BY logical_id, item_id
+    ORDER BY last_seq DESC LIMIT ?2)
+  SELECT i.logical_id, i.seq, i.item_id, i.kind, i.source, i.payload_json,
+    i.created_at, i.truncated
+  FROM swarm_items i
+  JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id
+  ORDER BY i.seq DESC";
 
 const SELECT_LAST_SEQ_SQL: &str =
     "SELECT COALESCE(MAX(seq), 0) FROM swarm_items WHERE logical_id = ?1";
@@ -885,6 +923,49 @@ impl SwarmStore for SwarmStateStore {
         };
         let rows = self.query_rows("items_before", sql, params).await?;
         rows.iter().map(|row| decode_item(row)).collect()
+    }
+
+    async fn swarm_item_page(
+        &self,
+        logical_id: &str,
+        order: ItemOrder,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<SwarmItemPage, StoreError> {
+        // `limit + 1` items are selected so `has_more` needs no second query;
+        // the extra item's rows are dropped by `grouped_item_page`.
+        let probe = limit.saturating_add(1);
+        let (sql, params) = match (order, after) {
+            (ItemOrder::Asc, after) => (
+                SELECT_ITEM_PAGE_ASC_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    seq_param(after.unwrap_or(0), "cursor")?,
+                    Value::Integer(i64::from(probe)),
+                ],
+            ),
+            (ItemOrder::Desc, Some(after)) => (
+                SELECT_ITEM_PAGE_DESC_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    seq_param(after, "cursor")?,
+                    Value::Integer(i64::from(probe)),
+                ],
+            ),
+            (ItemOrder::Desc, None) => (
+                SELECT_ITEM_PAGE_TAIL_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    Value::Integer(i64::from(probe)),
+                ],
+            ),
+        };
+        let rows = self.query_rows("item_page", sql, params).await?;
+        let rows = rows
+            .iter()
+            .map(|row| decode_item(row))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(grouped_item_page(rows, order, limit))
     }
 
     async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, StoreError> {

@@ -6,12 +6,12 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use peri_swarm::config::{SwarmConfig, API_KEY_ENV, SSE_HEARTBEAT_MS_ENV, WORKSPACE_ROOT_ENV};
-use peri_swarm::domain::{McpHeader, McpToolSpec, SessionState};
+use peri_swarm::domain::{ItemOrder, McpHeader, McpToolSpec, SessionState};
 use peri_swarm::http::{build_router, AppState};
 use peri_swarm::service::{InMemorySwarmService, ServiceConfig, SwarmService, TurnPolicy};
 use peri_swarm::store::{
-    InputPut, MemorySwarmStore, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow,
-    SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
+    InputPut, MemorySwarmStore, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
+    SwarmItemRow, SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -1086,6 +1086,18 @@ impl SwarmStore for FailingStore {
     ) -> Result<Vec<SwarmItemRow>, StoreError> {
         self.inner
             .swarm_items_before(logical_id, before, limit)
+            .await
+    }
+
+    async fn swarm_item_page(
+        &self,
+        logical_id: &str,
+        order: ItemOrder,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<SwarmItemPage, StoreError> {
+        self.inner
+            .swarm_item_page(logical_id, order, after, limit)
             .await
     }
 

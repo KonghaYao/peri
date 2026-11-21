@@ -5,8 +5,10 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use peri_swarm::config::{SwarmConfig, API_KEY_ENV, WORKSPACE_ROOT_ENV};
+use peri_swarm::domain::{ItemKind, ItemSource};
 use peri_swarm::http::{build_router, AppState};
 use peri_swarm::service::{InMemorySwarmService, ServiceConfig};
+use peri_swarm::store::{MemorySwarmStore, SwarmItemRow, SwarmStore};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -15,6 +17,7 @@ const TOKEN: &str = "test-deployment-key";
 
 struct Harness {
     router: Router,
+    store: Arc<MemorySwarmStore>,
     _workspace: TempDir,
 }
 
@@ -28,10 +31,15 @@ fn harness() -> Harness {
         ),
     ]);
     let config = SwarmConfig::from_env_map(|name| env.get(name).cloned()).expect("config");
-    let service = Arc::new(InMemorySwarmService::in_memory(ServiceConfig::default()));
+    let store = Arc::new(MemorySwarmStore::new());
+    let service = Arc::new(InMemorySwarmService::new(
+        Arc::clone(&store) as Arc<dyn SwarmStore>,
+        ServiceConfig::default(),
+    ));
     let router = build_router(AppState::new(service, Arc::new(config)));
     Harness {
         router,
+        store,
         _workspace: workspace,
     }
 }
@@ -364,4 +372,198 @@ async fn unknown_agent_items_is_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(value["error"]["code"], json!("unknown_agent"));
+}
+
+/// Persist one raw row through the store the HTTP service reads. Turn
+/// structure is irrelevant here: the pagination contract is about item rows.
+async fn append_row(harness: &Harness, seq: u64, item_id: &str, role: &str, extra: Value) {
+    let mut payload = json!({ "role": role, "text": format!("{role}-{seq}") });
+    if let Some(object) = extra.as_object() {
+        for (key, value) in object {
+            payload[key] = value.clone();
+        }
+    }
+    harness
+        .store
+        .swarm_append_item(SwarmItemRow {
+            logical_id: "agent-01".to_owned(),
+            seq,
+            item_id: item_id.to_owned(),
+            kind: ItemKind::Message,
+            source: ItemSource::root(),
+            payload,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            truncated: false,
+        })
+        .await
+        .expect("append");
+}
+
+async fn seed_streamed_items(harness: &Harness) {
+    let (status, _, value) = send(
+        &harness.router,
+        Method::POST,
+        "/v1/agents/sessions",
+        Some(json!({ "logicalId": "agent-01" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    // One long streamed message (three rows), a user item, then a short one.
+    append_row(
+        harness,
+        1,
+        "itim_msg_long",
+        "assistant",
+        json!({"delta": true}),
+    )
+    .await;
+    append_row(
+        harness,
+        2,
+        "itim_msg_long",
+        "assistant",
+        json!({"delta": true}),
+    )
+    .await;
+    append_row(
+        harness,
+        3,
+        "itim_msg_long",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+    append_row(harness, 4, "itim_user_2", "user", json!({})).await;
+    append_row(
+        harness,
+        5,
+        "itim_msg_2",
+        "assistant",
+        json!({"delta": true}),
+    )
+    .await;
+    append_row(
+        harness,
+        6,
+        "itim_msg_2",
+        "assistant",
+        json!({"complete": true}),
+    )
+    .await;
+}
+
+fn data_ids(value: &Value) -> Vec<String> {
+    value["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .map(|item| item["id"].as_str().expect("id").to_owned())
+        .collect()
+}
+
+fn data_seqs(value: &Value) -> Vec<u64> {
+    value["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .map(|item| item["seq"].as_u64().expect("seq"))
+        .collect()
+}
+
+#[tokio::test]
+async fn item_grouped_pages_keep_data_shorter_than_items() {
+    let harness = harness();
+    seed_streamed_items(&harness).await;
+
+    let (status, _, first) = send(
+        &harness.router,
+        Method::GET,
+        "/v1/agents/sessions/agent-01/items?limit=2",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    // Two items were selected, so every row of both is in `items`; `data` has
+    // one row per item (its last frame).
+    assert_eq!(seqs(&first), [1, 2, 3, 4]);
+    assert_eq!(data_ids(&first), ["itim_msg_long", "itim_user_2"]);
+    assert_eq!(data_seqs(&first), [3, 4]);
+    assert_eq!(first["nextCursor"], json!(4));
+    assert_eq!(first["has_more"], json!(true));
+    assert_eq!(first["lastItemSeq"], json!(6));
+}
+
+#[tokio::test]
+async fn ascending_item_pages_advance_strictly_and_terminate() {
+    let harness = harness();
+    seed_streamed_items(&harness).await;
+
+    let mut cursors = Vec::new();
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    for _ in 0..10 {
+        let uri = match after.as_deref() {
+            Some(after) => format!("/v1/agents/sessions/agent-01/items?limit=1&after={after}"),
+            None => "/v1/agents/sessions/agent-01/items?limit=1".to_owned(),
+        };
+        let (status, _, page) = send(&harness.router, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page["data"].as_array().expect("data").len() <= 1);
+        // The long message needs three rows while `limit` is one.
+        assert!(!page["items"].as_array().expect("items").is_empty());
+        seen.extend(data_ids(&page));
+        match page["data"].as_array().and_then(|data| data.last()) {
+            Some(item) if page["has_more"] == json!(true) => {
+                cursors.push(item["seq"].as_u64().expect("seq"));
+                after = Some(item["id"].as_str().expect("id").to_owned());
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        ["itim_msg_long", "itim_user_2", "itim_msg_2"],
+        "`after=<itemId>` advances past the whole item, never inside it"
+    );
+    assert_eq!(cursors, [3, 4], "the cursor is the item's greatest seq");
+}
+
+#[tokio::test]
+async fn descending_item_pages_advance_strictly_and_terminate() {
+    let harness = harness();
+    seed_streamed_items(&harness).await;
+
+    let first = {
+        let (status, _, page) = send(
+            &harness.router,
+            Method::GET,
+            "/v1/agents/sessions/agent-01/items?limit=1&order=desc",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        page
+    };
+    assert_eq!(data_seqs(&first), [6]);
+    assert_eq!(seqs(&first), [6, 5], "the page keeps every row of the item");
+
+    // `after` is the item's greatest seq and the next page takes items strictly
+    // below it, so the same item cannot reappear.
+    let uri = format!(
+        "/v1/agents/sessions/agent-01/items?limit=1&order=desc&after={}",
+        first["data"][0]["id"].as_str().expect("id")
+    );
+    let (_, _, second) = send(&harness.router, Method::GET, &uri, None).await;
+    assert_eq!(data_ids(&second), ["itim_user_2"]);
+    assert_eq!(second["nextCursor"], json!(4));
+
+    let uri = format!(
+        "/v1/agents/sessions/agent-01/items?limit=1&order=desc&after={}",
+        second["data"][0]["id"].as_str().expect("id")
+    );
+    let (_, _, third) = send(&harness.router, Method::GET, &uri, None).await;
+    assert_eq!(data_ids(&third), ["itim_msg_long"]);
+    assert_eq!(seqs(&third), [3, 2, 1]);
+    assert_eq!(third["has_more"], json!(false));
+    assert_eq!(third["nextCursor"], json!(null));
 }

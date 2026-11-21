@@ -352,8 +352,9 @@ async fn conflicting_and_invalid_cursors_are_rejected_before_streaming() {
 }
 
 /// The README's realtime order: open the stream at the current tail, then POST.
-/// The stream must deliver the new user frame, the assistant frame and the turn
-/// terminal without replaying older items.
+/// A subscription without a cursor starts at the tail (live only), so the new
+/// user frame, the assistant frame and the turn terminal arrive without
+/// replaying older items.
 #[tokio::test]
 async fn stream_opened_before_post_delivers_the_new_turn() {
     let harness = harness(60_000);
@@ -365,7 +366,7 @@ async fn stream_opened_before_post_delivers_the_new_turn() {
         .clone()
         .oneshot(request(
             Method::GET,
-            "/v1/agents/sessions/agent-01/events?afterSeq=2",
+            "/v1/agents/sessions/agent-01/events",
             None,
             Some(TOKEN),
             &[],
@@ -399,7 +400,7 @@ async fn heartbeat_has_no_id_and_reports_the_last_item_seq() {
         .clone()
         .oneshot(request(
             Method::GET,
-            "/v1/agents/sessions/agent-01/events",
+            "/v1/agents/sessions/agent-01/events?afterSeq=0",
             None,
             Some(TOKEN),
             &[],
@@ -631,13 +632,15 @@ async fn official_frames_stream_in_sdk_order_and_replay_identically() {
     assert_eq!(created_event["turn"]["subagent_id"], json!(null));
 
     // The backlog is derived from the persisted rows only, so the same frames
-    // (and the same `event_id`s) come back on a fresh subscription.
+    // (and the same `event_id`s) come back on a fresh subscription. `afterSeq=0`
+    // is the explicit "replay everything" cursor; a subscription without any
+    // cursor is live-only by design.
     let response = harness
         .router
         .clone()
         .oneshot(request(
             Method::GET,
-            "/v1/agents/sessions/agent-01/events",
+            "/v1/agents/sessions/agent-01/events?afterSeq=0",
             None,
             Some(TOKEN),
             &[],
@@ -655,5 +658,114 @@ async fn official_frames_stream_in_sdk_order_and_replay_identically() {
         official_ids(&live).len(),
         5,
         "created, 2 items, completed, idle"
+    );
+}
+
+/// The official `sessions.stream` subscribes **without** a cursor and then
+/// submits the input. Replaying the previous turn would put its `idle` in the
+/// new `TurnState`; the subscription must start at the tail.
+#[tokio::test]
+async fn subscription_without_cursor_receives_live_events_only() {
+    let harness = harness(25);
+    create_session(&harness).await;
+    submit(&harness, "first").await;
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/v1/agents/sessions/agent-01/events",
+            None,
+            Some(TOKEN),
+            &[],
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    let mut text = String::new();
+    while !text.contains("event: heartbeat") {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("heartbeat timeout")
+            .expect("sse ended early")
+            .expect("sse chunk");
+        text.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(!text.contains("event: item"), "history replayed: {text}");
+    assert!(
+        !text.contains("agent.session.turn.created"),
+        "the old turn was replayed: {text}"
+    );
+    assert!(
+        !text.contains("agent.session.idle"),
+        "the old idle would end the official stream: {text}"
+    );
+    assert!(text.contains("\"lastItemSeq\":2"), "{text}");
+
+    // The stream is still open and the next turn arrives live.
+    submit(&harness, "second").await;
+    text.clear();
+    while !(text.contains("event: agent.session.idle") && text.ends_with("\n\n")) {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .expect("turn timeout")
+            .expect("sse ended early")
+            .expect("sse chunk");
+        text.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(text.contains("agent.session.turn.created"), "{text}");
+    assert!(text.contains("\"seq\":3"), "{text}");
+    assert!(text.contains("\"seq\":4"), "{text}");
+    assert!(text.contains("agent.session.turn.completed"), "{text}");
+}
+
+/// An explicit cursor equal to the tail replays no rows. When the session is
+/// idle the last turn is known to be closed, so its (unpersisted) terminal is
+/// republished instead of leaving a reconnecting client without one.
+#[tokio::test]
+async fn cursor_at_the_tail_republishes_the_last_terminal() {
+    let harness = harness(60_000);
+    create_session(&harness).await;
+    submit(&harness, "first").await;
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/v1/agents/sessions/agent-01/events?afterSeq=2",
+            None,
+            Some(TOKEN),
+            &[],
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = read_complete(response.into_body(), "event: agent.session.idle").await;
+    assert!(!text.contains("event: item"), "no rows to replay: {text}");
+    assert!(
+        !text.contains("agent.session.turn.created"),
+        "the turn was already created before the cursor: {text}"
+    );
+    let replayed = frames(&text);
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|(event, _)| event.as_str())
+            .collect::<Vec<_>>(),
+        ["agent.session.turn.completed", "agent.session.idle"],
+        "{text}"
+    );
+    assert_eq!(
+        replayed[0].1["event_id"],
+        json!(replayed[1].1["event_id"]
+            .as_str()
+            .expect("idle id")
+            .replace("_idle", "_completed")),
+        "the terminal keeps the derived turn identity: {text}"
     );
 }

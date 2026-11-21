@@ -30,9 +30,9 @@ use peri_swarm::actor::deployment::{install_deployment, StaticDeployment};
 use peri_swarm::actor::service::ActorServiceConfig;
 use peri_swarm::actor::swarm::{registry, Info, InfoOutput, SwarmActor, ACTOR_NAME};
 use peri_swarm::domain::{
-    ActorKey, ContentBlock, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
-    ErrorKind, InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId,
-    McpToolSpec, SessionState, StreamEvent, TurnEvent,
+    ActorKey, ContentBlock, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode, ErrorKind,
+    EventCursor, InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow,
+    LogicalId, McpToolSpec, SessionState, StreamEvent, TurnEvent,
 };
 use peri_swarm::gateway::{RivetServiceConfig, RivetSwarmService};
 use peri_swarm::service::{CreateSessionCommand, SwarmService};
@@ -547,7 +547,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
     // Live SSE: open the stream before the turn, then submit.
     let after_first = created.session.last_item_seq;
     let subscription = service
-        .subscribe(&logical_a, Cursor::new(after_first))
+        .subscribe(&logical_a, EventCursor::after(after_first))
         .await
         .expect("subscribe through the actor");
     let (_, mut live) = subscription.into_parts();
@@ -611,7 +611,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
     let unknown = service
         .subscribe(
             &LogicalId::parse("agent-s5-missing").expect("logical id"),
-            Cursor::START,
+            EventCursor::START,
         )
         .await
         .expect_err("unknown session");
@@ -679,7 +679,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
     // Reconnect after the rebuild: the actor replays `swarm_items` from the
     // store without a live host.
     let replay_after_rebuild = service
-        .subscribe(&logical_a, Cursor::START)
+        .subscribe(&logical_a, EventCursor::START)
         .await
         .expect("actor SSE replay after rebuild");
     let (_, mut rebuilt_stream) = replay_after_rebuild.into_parts();
@@ -939,7 +939,7 @@ async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry(
     // Cursor replay on the rebuilt actor (no host): the actor replays from the
     // store, so frames arrive without any model or Bun involvement.
     let (_, mut replay) = service_b
-        .subscribe(&logical, Cursor::START)
+        .subscribe(&logical, EventCursor::START)
         .await
         .expect("subscribe through replica B")
         .into_parts();

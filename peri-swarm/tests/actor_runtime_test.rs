@@ -28,7 +28,7 @@ use tokio::time::timeout;
 
 use peri_swarm::actor::service::{AcpSwarmService, ActorServiceConfig};
 use peri_swarm::domain::{
-    ActorKey, ContentBlock, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
+    ActorKey, ContentBlock, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode, EventCursor,
     InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId,
     SessionState, StreamEvent, TurnEvent,
 };
@@ -653,7 +653,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
     assert_eq!(all.last_item_seq, all.items.last().expect("last item").seq);
 
     let (backlog, mut reconnected) = service
-        .subscribe(&logical, Cursor::START)
+        .subscribe(&logical, EventCursor::START)
         .await
         .expect("subscribe")
         .into_parts();
@@ -676,7 +676,7 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
 
     let midpoint = all.items[all.items.len() / 2].seq;
     let (tail, _) = service
-        .subscribe(&logical, Cursor::new(midpoint))
+        .subscribe(&logical, EventCursor::after(midpoint))
         .await
         .expect("subscribe tail")
         .into_parts();
@@ -714,7 +714,9 @@ async fn in_process_acp_session_projects_turns_steering_cancel_and_paging() {
             )
             .await
             .expect("page");
-        assert!(page.items.len() <= 2);
+        // `limit` counts items, so `items` (every row of the page's items) can
+        // exceed it; `data` carries exactly one row per item.
+        assert!(page.data.len() <= 2);
         paged.extend(page.items.iter().map(|item| item.seq));
         match page.next_cursor {
             Some(cursor) => after = Some(cursor),

@@ -51,6 +51,7 @@ fn item_page_exposes_cursor_and_has_more() {
     let page = ItemPage::new(
         "agent-01",
         vec![item(1), item(2)],
+        vec![item(2)],
         Some(2),
         9,
         true,
@@ -64,10 +65,10 @@ fn item_page_exposes_cursor_and_has_more() {
     assert_eq!(value["hasMore"], json!(true));
     assert_eq!(value["has_more"], json!(true));
     assert_eq!(value["order"], json!("asc"));
-    // The official `CursorPage` reader consumes `data`; existing clients keep
-    // reading `items`. Both are the same array.
-    assert_eq!(value["data"], value["items"]);
-    assert_eq!(value["data"].as_array().map(Vec::len), Some(2));
+    // The official `CursorPage` reader consumes `data` (one last row per item);
+    // existing clients keep reading every raw row from `items`.
+    assert_eq!(value["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["items"].as_array().map(Vec::len), Some(2));
 
     let decoded: ItemPage = serde_json::from_value(value).expect("round trip");
     assert_eq!(

@@ -18,7 +18,7 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use crate::domain::{
-    Cursor, EnvironmentKind, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
+    EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
     McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn, SessionView,
     StreamEvent, SwarmError, TurnStatus,
 };
@@ -179,9 +179,11 @@ pub async fn resolve_window_after(
 ///   `completed` followed immediately by `agent.session.idle`.
 ///
 /// A turn that is still live is left open: its terminal arrives on the live
-/// stream instead of being invented by the replay. The remaining gaps are
-/// listed in `docs/verification/peri-swarm-official-sdk-2026-11-21.md`.
-pub struct OfficialReplay {
+/// stream instead of being invented by the replay. `replay_backlog` seeds the
+/// turn that was open at the cursor from history the client already consumed.
+/// The remaining gaps are listed in
+/// `docs/verification/peri-swarm-official-sdk-2026-11-21.md`.
+struct OfficialReplay {
     logical_id: String,
     session_created_at: i64,
     session_last_active_at: i64,
@@ -197,6 +199,33 @@ struct ReplayTurn {
     created_at: i64,
     /// Unix seconds of the last persisted final assistant frame.
     completed_at: Option<i64>,
+}
+
+/// Turn identity the replay window starts inside, recovered from history at or
+/// before the reconnect cursor.
+struct TurnSeed {
+    turn_id: String,
+    created_at: i64,
+    /// Last assistant final frame of this turn before the cursor, if any. The
+    /// window's own rows refine it.
+    completed_at: Option<i64>,
+}
+
+/// A persisted turn whose opener is at or before the reconnect cursor.
+struct PreviousTurn {
+    turn_id: String,
+    created_at: i64,
+    /// Last assistant final frame of this turn at or before the cursor.
+    completed_at: Option<i64>,
+}
+
+impl PreviousTurn {
+    /// No assistant final frame after the opener: the turn had not produced
+    /// output when the cursor was taken, so a user item right after it is a
+    /// steer of this turn rather than a new turn.
+    fn open(&self) -> bool {
+        self.completed_at.is_none()
+    }
 }
 
 /// Official frames one persisted row implies.
@@ -267,8 +296,7 @@ fn classify_row(
 }
 
 impl OfficialReplay {
-    #[must_use]
-    pub fn new(row: &crate::store::SwarmSessionRow, live_open_turn: bool) -> Self {
+    fn new(row: &crate::store::SwarmSessionRow, live_open_turn: bool) -> Self {
         Self {
             logical_id: row.logical_id.clone(),
             session_created_at: crate::domain::official::unix_from_rfc3339(&row.created_at),
@@ -285,21 +313,22 @@ impl OfficialReplay {
     /// Interleave the custom `item` frames with the official frames they imply.
     ///
     /// `seed` names the turn that was already open when the window starts (the
-    /// reconnect cursor points inside it). Its `turn.created` is not repeated:
-    /// the client received it before the cursor, and the derived id would be
-    /// the same anyway.
-    pub fn render(
+    /// reconnect cursor points inside it, or the window is empty and the last
+    /// turn's terminal was lost). Its `turn.created` is not repeated: the client
+    /// received it before the cursor, and re-sending it would make a fresh
+    /// `TurnState` follow the old turn and end on its terminal.
+    fn render(
         &self,
         items: &[crate::domain::ItemView],
-        seed: Option<(&str, i64)>,
+        seed: Option<&TurnSeed>,
     ) -> Vec<StreamEvent> {
         let mut turns: Vec<ReplayTurn> = Vec::new();
         let mut current: Option<usize> = None;
-        if let Some((turn_id, created_at)) = seed {
+        if let Some(seed) = seed {
             turns.push(ReplayTurn {
-                turn_id: turn_id.to_owned(),
-                created_at,
-                completed_at: None,
+                turn_id: seed.turn_id.clone(),
+                created_at: seed.created_at,
+                completed_at: seed.completed_at,
             });
             current = Some(0);
         }
@@ -440,12 +469,19 @@ impl OfficialReplay {
 /// observes the same identities as the live stream regardless of which service
 /// served it. `live_open_turn` suppresses a fabricated terminal for a turn that
 /// is still running.
+///
+/// [`EventCursor::Tail`] (no cursor supplied) has **no** backlog: it is the
+/// "subscribe before the input" path, and replaying an older turn's terminal
+/// would end the official SDK's stream on that turn.
 pub async fn replay_backlog(
     store: &dyn crate::store::SwarmStore,
     session: &crate::store::SwarmSessionRow,
-    cursor: Cursor,
+    start: EventCursor,
     live_open_turn: bool,
 ) -> Result<Vec<StreamEvent>, SwarmError> {
+    let Some(cursor) = start.cursor() else {
+        return Ok(Vec::new());
+    };
     let mut items = Vec::new();
     let mut after = cursor.value();
     loop {
@@ -462,73 +498,134 @@ pub async fn replay_backlog(
             break;
         }
     }
-    // A window that starts inside a turn (the cursor is past its opening user
-    // item) has no opener row, so the assistant frames would have no turn to
-    // attach to. Seed the turn from the newest user item before the cursor; the
-    // derived id is the one the client already received, so `turn.created` is
-    // not repeated.
-    let seed = if starts_inside_a_turn(&items) {
-        previous_user_item(store, &session.logical_id, cursor.value())
-            .await?
-            .map(|item| {
-                (
-                    crate::domain::turn_id_for_item(&item.item_id),
-                    crate::domain::official::unix_from_rfc3339(&item.created_at),
-                )
-            })
-    } else {
+    // A window that starts inside a turn has no opener row, and a window whose
+    // first row is a steer user item would otherwise mint a second turn id for
+    // the same turn. Look back past the cursor for the opener of the turn that
+    // was open there; an empty window still uses it to republish a terminal the
+    // client may have missed.
+    let previous = if cursor.value() == 0 {
         None
+    } else {
+        turn_at_cursor(store, &session.logical_id, cursor.value()).await?
     };
+    let seed = seed_for(&items, previous.as_ref());
     let replay = OfficialReplay::new(session, live_open_turn);
-    Ok(replay.render(
-        &items,
-        seed.as_ref().map(|(turn_id, at)| (turn_id.as_str(), *at)),
-    ))
+    Ok(replay.render(&items, seed.as_ref()))
 }
 
-/// Whether the first official-relevant row is an assistant final frame, i.e.
-/// the window begins after its turn's opening user item.
-fn starts_inside_a_turn(items: &[crate::domain::ItemView]) -> bool {
+/// Decide whether the window continues a turn from before the cursor.
+///
+/// A window whose first turn-relevant row is a user item starts a new turn only
+/// when the previous turn already produced output under the same boundary rule
+/// [`classify_row`] applies (`!previous.open()`); otherwise that user item is a
+/// steer and must keep the opener's `turn_id`. Any other first row (assistant
+/// frame, tool frame) means the window starts inside the previous turn. An
+/// empty window keeps the seed so the last turn's terminal can be republished.
+fn seed_for(
+    items: &[crate::domain::ItemView],
+    previous: Option<&PreviousTurn>,
+) -> Option<TurnSeed> {
+    let previous = previous?;
+    if first_turn_row_role(items) == Some("user") && !previous.open() {
+        return None;
+    }
+    Some(TurnSeed {
+        turn_id: previous.turn_id.clone(),
+        created_at: previous.created_at,
+        completed_at: previous.completed_at,
+    })
+}
+
+/// Role of the first row that participates in turn classification.
+fn first_turn_row_role(items: &[crate::domain::ItemView]) -> Option<&'static str> {
     for item in items {
         if item.kind != crate::domain::ItemKind::Message {
             continue;
         }
         match item.payload.get("role").and_then(|role| role.as_str()) {
-            Some("user") => return false,
-            Some("assistant") if item.payload.get("complete") == Some(&json!(true)) => return true,
+            Some("user") => return Some("user"),
+            Some("assistant") if item.payload.get("complete") == Some(&json!(true)) => {
+                return Some("assistant");
+            }
             _ => {}
         }
     }
-    false
+    None
 }
 
-/// Newest user message at or before `up_to`, scanning backwards.
-async fn previous_user_item(
+/// Walk persisted rows backwards from `up_to` to the opener of the turn that
+/// was open there, together with its last assistant final frame.
+///
+/// The walk mirrors [`classify_row`]: a user item is a steer when no assistant
+/// final frame separates it from the next older user item. Scanning stops as
+/// soon as the opener is confirmed, so a normal session reads only the tail of
+/// the previous turn; a session whose turns never produced output reads back to
+/// its first user item.
+async fn turn_at_cursor(
     store: &dyn crate::store::SwarmStore,
     logical_id: &str,
     up_to: u64,
-) -> Result<Option<crate::domain::ItemView>, SwarmError> {
+) -> Result<Option<PreviousTurn>, SwarmError> {
     // The reconnect cursor is the last delivered seq, so its row is included.
     let mut before = Some(up_to.saturating_add(1));
-    while let Some(cursor) = before {
+    let mut opener: Option<crate::domain::ItemView> = None;
+    let mut newest_complete: Option<(u64, i64)> = None;
+    let mut complete_since_opener = false;
+    while let Some(bound) = before {
         let page = store
-            .swarm_items_before(logical_id, Some(cursor), ItemsWindow::MAX_LIMIT)
+            .swarm_items_before(logical_id, Some(bound), ItemsWindow::MAX_LIMIT)
             .await
             .map_err(|error| crate::store::store_failure("items_before", error))?;
         let Some(oldest_seq) = page.last().map(|row| row.seq) else {
-            return Ok(None);
+            break;
         };
-        if let Some(row) = page.into_iter().find(|row| {
+        for row in page {
             let view = row.to_view();
-            view.kind == crate::domain::ItemKind::Message
-                && view.payload.get("role").and_then(|role| role.as_str()) == Some("user")
-        }) {
-            return Ok(Some(row.to_view()));
+            if view.kind != crate::domain::ItemKind::Message {
+                continue;
+            }
+            match view.payload.get("role").and_then(|role| role.as_str()) {
+                Some("user") => {
+                    if opener.is_some() && complete_since_opener {
+                        return Ok(Some(previous_turn(opener, newest_complete)));
+                    }
+                    opener = Some(view);
+                    complete_since_opener = false;
+                }
+                Some("assistant") if view.payload.get("complete") == Some(&json!(true)) => {
+                    if newest_complete.is_none() {
+                        newest_complete = Some((
+                            view.seq,
+                            crate::domain::official::unix_from_rfc3339(&view.created_at),
+                        ));
+                    }
+                    if opener.is_some() {
+                        complete_since_opener = true;
+                    }
+                }
+                _ => {}
+            }
         }
         // The page is descending, so the oldest row is the next exclusive bound.
-        before = (oldest_seq < cursor).then_some(oldest_seq);
+        before = (oldest_seq < bound).then_some(oldest_seq);
     }
-    Ok(None)
+    Ok(opener.map(|item| previous_turn(Some(item), newest_complete)))
+}
+
+/// Build the cursor turn; a completion older than its opener belongs to an
+/// earlier turn.
+fn previous_turn(
+    opener: Option<crate::domain::ItemView>,
+    newest_complete: Option<(u64, i64)>,
+) -> PreviousTurn {
+    let opener = opener.expect("a turn only exists once a user item opened it");
+    PreviousTurn {
+        turn_id: crate::domain::turn_id_for_item(&opener.item_id),
+        created_at: crate::domain::official::unix_from_rfc3339(&opener.created_at),
+        completed_at: newest_complete
+            .filter(|(seq, _)| *seq > opener.seq)
+            .map(|(_, at)| at),
+    }
 }
 
 /// Typed port between HTTP and the session runtime (S4 actor / S3 fake).
@@ -575,10 +672,13 @@ pub trait SwarmService: Send + Sync {
     ) -> Result<ItemPage, SwarmError>;
 
     /// Subscribe to an existing session; unknown sessions are `404 unknown_agent`.
+    ///
+    /// [`EventCursor::Tail`] means the caller supplied no cursor: the
+    /// subscription carries live events only and never replays an older turn.
     async fn subscribe(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError>;
 
     /// Register a stream before `POST /sessions` executes the first turn.

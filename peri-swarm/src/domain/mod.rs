@@ -11,7 +11,7 @@ pub mod official;
 pub mod session;
 pub mod workspace;
 
-pub use cursor::Cursor;
+pub use cursor::{Cursor, EventCursor};
 pub use error::{ErrorCode, ErrorKind, SwarmError};
 pub use event::{StreamEvent, TurnEvent, TurnFailure};
 pub use identity::{new_root_session_id, ActorKey, LogicalId};

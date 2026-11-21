@@ -2,7 +2,8 @@
 
 - 状态：代码与契约测试证据记录；无活体 Loom/Rivet engine，**无真实官方 SDK 进程调用**
 - 日期：2026-11-21
-- 基线：`05d93fe1e`（`feat/swarm-official-p1a` 分支基点）+ 本记录同一提交中的工作树改动
+- 基线：`05d93fe1e`（`feat/swarm-official-p1a` 分支基点）+ 本记录同一提交中的工作树改动；
+  第二轮复核基线为 `d06e1a124`（判 FAIL 的上一轮实现），对应改动见 §7
 - 范围：按 `openai@7.60.0` Agents API 的实际读取行为，补齐 items 分页、会话状态、
   官方 `agent.session.*` 事件（实时与 backlog 重放）以及 `POST /events` 的 `202`
   边界。既有自定义 `item`/`turn` 帧、错误码与门禁不变。
@@ -49,14 +50,16 @@
 
 | 请求 | 结果 |
 | --- | --- |
-| `GET /items?limit=2` | `object:"list"`；`items` 与 `data` 同数组；`hasMore` 与 `has_more` 同值；`nextCursor`/`lastItemSeq` 保持既有拼写 |
-| `?limit=2&after=<上一页最后一项的 id>` | 解析该 `item_id` 的最大 `seq`，返回其后一页 |
+| `GET /items?limit=2` | `object:"list"`；`limit` 计 item 数，`items` 是本页 2 个 item 的全部原始行，`data` 是这 2 个 item 各自的最后一行；`hasMore` 与 `has_more` 同值；`nextCursor` 是本页最后一个 item 的最大 `seq`（仅 `has_more=true` 时非 `null`） |
+| `?limit=2&after=<上一页最后一项的 id>` | 解析该 `item_id` 的最大 `seq`，只返回最大 `seq` 严格大于它的 item |
 | `?after=itim_...&afterSeq=<同值 seq>` | 一致，正常返回 |
 | `?after=itim_...&afterSeq=<不同值>` | `400 conflicting_cursor` |
 | `?after=not-a-cursor` | `400 invalid_query` |
 
-`id`/`itemId` 相同的多行（assistant delta 与 complete）解析为该 id 的最大 `seq`，
-与 `nextCursor` 的含义一致。
+`id`/`itemId` 相同的多行（assistant delta 与 complete）属于同一个 item：`data`
+只取最大 `seq` 的那一行，`items` 保留全部行，因此 `data.len() <= limit` 而
+`items.len()` 可以更大。分页归属按 item 的最大 `seq` 判定（升序 `>`、降序 `<`），
+`after=<itemId>` 因此严格越过整个 item，不会在同一 item 上循环。
 
 ### 3.2 会话状态
 
@@ -89,10 +92,14 @@
   turn；否则是该 turn 的 steer。
 - 一个 turn 的所有 `complete:true` assistant 帧都挂同一 `turn_id`；终态在下一 turn
   的 `turn.created` 之前或回放末尾发出。最后一个 turn 仅在会话行仍为 `failed` 时
-  补 `turn.failed` + `agent.session.failed`（`error`、`completed_at` 为 `null`）。
+  补 `turn.failed` + `agent.session.failed`（重放的 `error`、`completed_at` 为
+  `null`）。
 - 回放时该 turn 仍在实时执行（存在在途 turn）则不补终态，避免 SDK 提前结束。
-- 重连游标落在 turn 中间时，从游标（含）之前最近的 user item 取回 turn 身份，
-  `turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。
+- 重连游标落在 turn 中间时，lookback 向游标之前回看并跳过 steer，找到仍打开该 turn
+  的 opener，`turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。
+- 窗口为空（游标在末尾）时，会话行 `idle`/`failed` 仍补最后 turn 的终态与
+  `idle`/`failed`；重复终态由 `event_id` 去重。
+- 无游标订阅不回放（见 §7.1）。
 
 实现差异：内存 fake 在 `accept_input` 内同步执行 turn，因此 `turn.created` 紧跟
 user item（actor 路径推迟到 `begin_turn`，避免已受理但从未执行的 turn 留下无终态的
@@ -151,13 +158,17 @@ completed/failed → idle/failed`）。`TurnPolicy::Immediate` 下 202 的 `last
 2. **没有活体 Loom/Rivet engine。** 集成测试使用 `InMemorySwarmService`；actor 路径
    由 `actor_runtime_test`/`rivet_actor_test` 在无 engine 条件下覆盖，未验证跨副本
    唤醒后的实时/重放一致性。
-3. **backlog 的 `turn.failed` 只能按会话行状态重建。** 失败原因未持久化，重放的
-   `agent.session.failed.session.error` 与 `turn.completed_at` 为 `null`；若失败后
-   会话行又被后续 turn 改为 `running`/`idle`，重放把该 turn 呈现为 `completed`。
-4. **回放无法区分 steer 与「上一 turn 无输出后开启的新 turn」。** 行里没有 turn 边界
-   标记：打开的 turn 已落 assistant 完成帧时，后续 user item 按新 turn 处理；否则
-   按 steer 处理。真实 steer 若发生在已有输出之后，回放会多出一个 turn 边界（实时
-   流不受影响）。
+3. **backlog 的 `turn.failed` 只能按会话行状态重建。** 会话行只保留最新状态：
+   **只有最近一个 turn 的失败能被如实回放，更早的失败会显示为 `completed`**。本轮
+   未新增表或列区分历史成败（需单独批准），这是明确保留的限制，不是已修复项。
+   失败原因未持久化，重放的 `agent.session.failed.session.error`、
+   `turn.error` 与 `turn.completed_at` 为 `null`；实时失败帧的 `turn.error` 已由
+   失败消息填充（`{code:"internal_error",message}`）。
+4. **回放无法区分 steer 与「上一 turn 已输出后开启的新 turn」。** 行里没有 turn
+   边界标记：打开的 turn 已落 assistant 完成帧时，后续 user item 按新 turn 处理；
+   否则按 steer 处理。真实 steer 若发生在已有输出之后，回放会多出一个 turn 边界
+   （实时流不受影响）。lookback 只修复了游标落在 steer 之前、且该 turn 尚无
+   assistant 完成帧的情况。
 5. **宿主崩溃遗留的 `running` 行。** 行状态为 `running` 且此刻没有在途 turn 时，回放
    仍按「已闭合 turn → completed」处理；它无法证明该 turn 曾正常结束。`GET` 的
    `status` 同时报 `in_progress`，两者都只是从持久化事实的推断。
@@ -171,14 +182,24 @@ completed/failed → idle/failed`）。`TurnPolicy::Immediate` 下 202 的 `last
    绑定时填充。实时状态仍以 Bun 的 `GET /v1/sandboxes/{logicalEnvId}` 为准。
 9. **未实现** `turn.cancelled`、budget、subagent turn 与官方 `function_call` item；
    `requires_action` 永不发送。官方 SDK 若严格依赖这些帧，会停在等待态。
-10. **SSE 容量与慢客户端 `gap`** 未在本轮重新验证；行为与上一记录一致。
-11. **分页 id 语义**依赖 `swarm_get_item` 的“同 id 取最大 seq”；若未来允许同一 id
-    跨 turn 复用（当前 assistant 身份按 messageId 聚合，跨 turn 不保证唯一），需要
-    重新定义游标解析。
+10. **慢订阅者 `gap`。** 本轮改为发一帧 `gap` 后关闭订阅（见 §7.5），单测覆盖
+    「Lagged → gap → EOF」。多订阅者容量与真实慢客户端仍未压测。
+11. **分页 id 语义依赖 item 分组。** 分组键是 `(logical_id, item_id)`：若同一
+    `item_id` 跨 turn 复用（assistant 身份按 `messageId` 聚合，跨 turn 不保证
+    唯一），这些行会被视为同一个 item，`data` 只保留最大 `seq` 的一行。当前
+    网关生成的 identity 每 turn 唯一；出现复用需重新定义分组键。
 12. **内存 fake 的 `202` 时序**：`TurnPolicy::Immediate` 在 `accept_input` 内同步跑完
     turn，响应里的 `lastItemSeq` 已含 assistant 帧；`202`-before-terminal 由
     `TurnPolicy::Deferred` 与 HTTP 契约测试覆盖，actor 路径由 `ctx.wait_until` 覆盖，
     但未在真实 model 延迟下计时。
+13. **无游标语义是行为变更。** 依赖「不带游标即从头回放」的旧客户端必须显式传
+    `afterSeq=0`（或 `after=0`/`Last-Event-ID: 0`）。另外，十进制 `after`/`afterSeq`
+    现在也按 item 边界解释：游标落在多帧 item 中间时，该 item 整条进入结果页。
+    `peri-swarm/README.md` 本轮未改，其 `after` 等于/超过末尾「只有心跳」一行只
+    描述 `item`/`turn` 帧；官方 `agent.session.*` 终态补发是附加帧，见 §7.3。
+14. **仍在增长的 item 可以跨页出现。** 一条消息在客户端翻页期间继续落帧时，后一页
+    会以同一 `itemId`、更大的 `seq` 再给出它（游标仍严格前进，不会循环）。这是
+    append-only 行日志的固有结果，未做快照隔离。
 
 ## 6. 证据边界
 
@@ -187,3 +208,120 @@ completed/failed → idle/failed`）。`TurnPolicy::Immediate` 下 202 的 `last
 - 均不证明真实 SDK 兼容性、真实 Loom/Rivet 行为或跨进程恢复。
 - `Cargo.lock` 的唯一改动是 `peri-swarm` 依赖列表新增 `chrono`；`chrono` 本身早已在
   lockfile 中。
+
+## 7. 第二轮复核：游标与回放边界修正
+
+独立验证对 `d06e1a124` 判 FAIL。以下缺陷均已复现并以本轮改动修复，证据是本节的契约
+测试与 §7.7 的命令结果。
+
+### 7.1 无游标订阅不再回放
+
+缺陷：`GET /events` 不带任何游标时按 `Cursor(0)` 回放全部。官方 `sessions.stream`
+先订阅再 POST，旧 turn 的 `turn.completed` + `agent.session.idle` 进入新流的
+`TurnState`，SDK 在第一个历史 turn 的 idle 结束，看不到新 turn。
+
+修复：`EventCursor::{Tail, After}`（`domain/cursor.rs`）。没有任何游标
+（`afterSeq`/`after`/`Last-Event-ID` 全缺）是 `Tail`：backlog 为空，只送实时事件。
+显式 `afterSeq=0` 仍是 `After(0)`，回放全部。actor hop 在 `Tail` 时不发
+`afterSeq`，网关 `open_stream`（`POST /sessions?stream=true` 前打开）也明确使用
+`Tail`，两条路径都是「不回放」。依赖「无游标即回放」的测试改为 `?afterSeq=0`。
+
+### 7.2 items 按 item 分组分页
+
+缺陷：`after=<itemId>` 解析为该 id 的最大 `seq` 后仍按行分页；同一 assistant
+消息的 delta 与 complete 共享 `itemId`，升序会跳过中间帧，降序 `limit=1` 会在同一
+item 上反复命中，`has_more` 恒真。
+
+修复：`SwarmStore::swarm_item_page`（memory 与 Turso 都实现）以 item 为单位选页：
+`GROUP BY logical_id, item_id` + `MAX(seq)`，升序 `MAX(seq) > after`、降序
+`MAX(seq) < after`，再 join 回这些 item 的全部行；`limit` 计 item 数，`has_more`
+按 item 计算，`nextCursor` 是页内最后一个 item 的最大 `seq`。`data` 是每 item
+最大 `seq` 的一行，`items` 是全部原始行，二者数量可以不同（长消息 3 行、`limit=1`
+时 `items` 3 行、`data` 1 行）。分组在存储层完成，不存在「先取 `limit` 行再前端
+去重」导致的空页。`afterSeq` 与 `after` 不一致仍走
+`400 conflicting_cursor`。
+
+### 7.3 lookback 播种与末尾终态
+
+缺陷与修复：
+
+| 场景 | 修复 |
+| --- | --- |
+| 窗口首行是 steer user item | 向游标之前回看，跳过 steer，找到仍打开该 turn 的 opener，用它的 `turn_id` 播种；该 user item 作为 steer 发出 `turn.item.added`，与实时一致，不再派生 `turn_input_<steer>` |
+| 只有 tool 帧、无 assistant 完成帧的 turn | 同一 lookback 找到 opener 并播种；会话行 `idle` 时按「已闭合且无输出 → `completed`」补 `turn.completed`+`idle`，`failed` 时补失败终态 |
+| `afterSeq` 等于尾部 seq（窗口为空） | 会话行 `idle`/`failed` 且无在途 turn 时，从最后一批 item 推导最后 turn，补发终态与 `idle`/`failed`；`event_id` 不变，客户端去重 |
+
+判定依据：回放的行边界规则是「user item 在无打开 turn、或打开 turn 已落
+assistant 完成帧时开启新 turn」。lookback 用同一规则反向走：从游标（含）向前，
+只有当一个 assistant 完成帧把候选 user item 与更早的 user item 分开时，候选才是
+opener。`turn_id` 始终由 opener 的 item id 派生，不用随机或时间戳。播种不重发
+`turn.created`：新订阅的 `TurnState` 会选中第一个 `turn.created`，重发旧 turn
+会让它在旧 turn 的终态提前结束。空窗口补发的终态因此不带 `turn.created`，只对
+已经历该 turn 的客户端构成幂等重放。
+
+### 7.4 历史失败 turn（中 4）
+
+未新增表或列：会话行只保留最新状态，**只有最近一个 turn 的失败能被如实回放，
+更早的失败会显示为 `completed`**。这是验收限制（§5-3），不是已修复项。
+
+### 7.5 慢订阅者 Lagged（中 5）
+
+官方流无法区分客户端，因此两条 SSE 写路径统一处理：检测到
+`broadcast::RecvError::Lagged` 时发一帧 `gap` 后关闭订阅。丢失的事件可能包含
+终态；官方 SDK 以「EOF before idle/failed」抛错识别中断，不再静默挂起。原生
+客户端用最后一个已渲染 item 的 `seq` 重连恢复。单测覆盖
+`Lagged → gap → EOF`。
+
+### 7.6 其余记录项
+
+- 低 6：`OfficialSession`/`OfficialSessionAgent` 仍是官方载荷的子集（缺
+  `environment` 等字段，`agent.model` 可为 `null`）。本轮不扩字段；`TurnState`
+  只读 `session.status`/`id`，不校验该形状。记录为限制。
+- 低 7：items 默认 `order=asc` 与官方默认 `desc` 不同；保持既有客户端行为，
+  不改默认值。记录为限制。
+- 低 8：实时 `turn.failed` 的 `turn.error` 现在填
+  `{code:"internal_error", message}`（消息来自已有失败文本）；重放没有持久化文本，
+  保持 `null`。`agent.session.failed.session.error` 的实时文本不变。
+
+### 7.7 实际执行的命令与结果
+
+环境同 §4（`PATH` 含 CPython/`cargo`，`CARGO_HOME=/tmp/cargo-home-rsproxy`）。
+默认并行与 `--test-threads=1` 各跑一次全量。
+
+| # | 命令 | 默认并行 | 单线程 |
+| --- | --- | --- | --- |
+| 1 | `cargo check -p peri-swarm --all-targets --locked` | 通过，exit 0 | — |
+| 2 | `cargo test -p peri-swarm --locked` | 通过：lib 207、`actor_runtime_test` 7（1 ignored）、`http_contract_test` 25、`items_pagination_test` 10、`loom_store_test` 0（3 ignored）、`mcp_injection_test` 4、`openai_hosted_test` 7、`rivet_actor_test` 0（2 ignored）、`streaming_test` 14、doc-tests 0；合计 274 passed，0 failed | 相同计数，0 failed |
+| 3 | `cargo clippy -p peri-swarm --all-targets --locked -- -D warnings` | 通过，exit 0 | — |
+| 4 | `python3 scripts/check-feature-catalog.py` | `Documentation: PASS (structure and destinations; not runtime acceptance)` | — |
+| 5 | `git diff --check` | 通过，exit 0，无输出 | — |
+
+`openai_hosted_test::an_anonymous_hosted_session_reserves_a_bun_workspace` 是已知
+并行 flaky（不在本 diff）；本轮两次全量运行均通过，未为它改无关代码。
+
+新增/调整的断言：
+
+- `tests/streaming_test.rs`：无游标订阅只收实时、不因历史 idle 终止；
+  `afterSeq=0` 显式回放；`afterSeq=<tail>` 补发最后 turn 的
+  `turn.completed`+`idle`（无 `turn.created`）；旧的「无游标回放」测试改为显式
+  `afterSeq=0`；「先订阅再 POST」用无游标订阅。
+- `tests/items_pagination_test.rs`：`data` 按 item 去重且短于 `items`；
+  升序/降序 `limit=1` 逐页遍历，`nextCursor` 严格前进并终止；长消息跨 3 行仍只
+  占 1 个 item。
+- `src/service/in_memory_test.rs`：无游标无 backlog；steer 中段游标沿用 opener
+  的 `turn_id`；tool-only turn 补终态；空窗口补发终态；已输出后下一个 user item
+  开启新 turn；重放失败 `error` 为 `null`。
+- `src/actor/reader_test.rs`：实时 steer 帧带打开 turn 的 `turn_id`；实时
+  `turn.failed` 的 `turn.error` 含失败文本。
+- `src/store/memory_test.rs`、`src/store/turso_test.rs`：item 分组分页
+  （`items`/`data` 数量、item 边界、无游标降序）与分组 SQL 形状。
+- `src/http/sse_test.rs`：`Lagged` 后只发一帧 `gap` 并结束流。
+- `src/domain/cursor_test.rs`：无游标 → `Tail`；显式 `0` → `After(0)`。
+
+### 7.8 本轮未验证
+
+1. 仍未用真实 `openai@7.60.0` 客户端消费本服务；官方 `sessions.stream` 的行为
+   依据仍是源码阅读。
+2. writer 侧的 Loom 实现只做了 SQL 形状与离线单测；无活体 Loom 的 item 级分页
+   往返。
+3. 多订阅者容量、真实慢客户端与重连风暴未压测。

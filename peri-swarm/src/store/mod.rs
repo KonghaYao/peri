@@ -13,17 +13,16 @@
 mod memory;
 mod turso;
 
+use async_trait::async_trait;
 pub use memory::MemorySwarmStore;
+use serde_json::Value;
 pub use turso::{
     SwarmStateError, SwarmStateStore, SwarmStateStoreConfig, SWARM_STATE_SCHEMA_VERSION,
 };
 
-use async_trait::async_trait;
-use serde_json::Value;
-
 use crate::domain::{
-    EnvironmentRef, InputState, ItemKind, ItemSource, ItemView, McpToolSpec, SessionState,
-    SwarmError,
+    EnvironmentRef, InputState, ItemKind, ItemOrder, ItemSource, ItemView, McpToolSpec,
+    SessionState, SwarmError,
 };
 
 /// Failure classes of the store port. `Unavailable` and `Conflict` are reported,
@@ -111,6 +110,61 @@ impl SwarmItemRow {
     }
 }
 
+/// Group raw rows into an item page.
+///
+/// `rows` must contain every row of the candidate items (at most `limit + 1`
+/// items, in either order). The helper keeps `limit` items, derives `data` from
+/// each item's greatest `seq`, and returns the raw rows of exactly those items.
+/// Both stores call it, so memory and Loom pages cannot disagree on the
+/// boundary rule.
+#[must_use]
+pub(crate) fn grouped_item_page(
+    rows: Vec<SwarmItemRow>,
+    order: ItemOrder,
+    limit: u32,
+) -> SwarmItemPage {
+    let mut last_rows: std::collections::BTreeMap<String, SwarmItemRow> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        match last_rows.get(&row.item_id) {
+            Some(existing) if existing.seq >= row.seq => {}
+            _ => {
+                last_rows.insert(row.item_id.clone(), row.clone());
+            }
+        }
+    }
+    let mut items: Vec<SwarmItemRow> = last_rows.into_values().collect();
+    items.sort_by_key(|row| row.seq);
+    if order == ItemOrder::Desc {
+        items.reverse();
+    }
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    // `nextCursor` only exists when a next page does (existing clients read it
+    // as "there is more") and names the last item's greatest seq.
+    let next_cursor = if has_more {
+        items.last().map(|row| row.seq)
+    } else {
+        None
+    };
+    let keep: std::collections::BTreeSet<&str> =
+        items.iter().map(|row| row.item_id.as_str()).collect();
+    let mut rows: Vec<SwarmItemRow> = rows
+        .into_iter()
+        .filter(|row| keep.contains(row.item_id.as_str()))
+        .collect();
+    rows.sort_by_key(|row| row.seq);
+    if order == ItemOrder::Desc {
+        rows.reverse();
+    }
+    SwarmItemPage {
+        rows,
+        items,
+        has_more,
+        next_cursor,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwarmInputRow {
     pub logical_id: String,
@@ -118,6 +172,26 @@ pub struct SwarmInputRow {
     pub fingerprint: String,
     pub state: InputState,
     pub created_at: String,
+}
+
+/// One item-grouped page of `swarm_items` (`design §4.2`).
+///
+/// The page unit is the item (`item_id`), not the row: a streamed assistant
+/// message persists one row per delta plus its final `complete:true` row. Item
+/// membership is defined by the item's greatest `seq`, so `after` (a seq or an
+/// item id resolved to one) advances strictly past a whole item instead of
+/// landing inside it and re-reading the same item forever.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwarmItemPage {
+    /// Every row of the page's items, in the requested order (`seq` is not
+    /// contiguous because two streamed messages can interleave).
+    pub rows: Vec<SwarmItemRow>,
+    /// One row per item: the item's greatest `seq`, in page order.
+    pub items: Vec<SwarmItemRow>,
+    /// More items exist beyond this page.
+    pub has_more: bool,
+    /// Greatest `seq` of the last item in page order; `None` for an empty page.
+    pub next_cursor: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -156,12 +230,28 @@ pub trait SwarmStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<SwarmItemRow>, StoreError>;
     /// Descending page with `seq < before` (newest first when `before` is `None`).
+    ///
+    /// Row-level read used by the SSE replay and the history lookback; it is
+    /// not the `/items` pagination path.
     async fn swarm_items_before(
         &self,
         logical_id: &str,
         before: Option<u64>,
         limit: u32,
     ) -> Result<Vec<SwarmItemRow>, StoreError>;
+    /// Item-grouped page (`design §4.2`).
+    ///
+    /// `after` is an item boundary: an item belongs to an ascending page when
+    /// its greatest `seq` is `> after`, and to a descending page when it is
+    /// `< after`. Grouping happens in the store so a long message cannot
+    /// consume the row budget and leave the page empty.
+    async fn swarm_item_page(
+        &self,
+        logical_id: &str,
+        order: ItemOrder,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<SwarmItemPage, StoreError>;
     async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, StoreError>;
     /// Row for `item_id`, preferring the greatest `seq` when an assistant
     /// message spans several frames. Used to resolve the official `after=id`

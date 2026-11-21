@@ -167,6 +167,23 @@ impl OfficialTurn {
             usage: None,
         }
     }
+
+    /// Attach the customer-safe failure description (`SessionTurnError`).
+    ///
+    /// Only the live failure path has a message; the persisted log does not
+    /// carry one, so replay keeps `error: null` instead of inventing a reason.
+    #[must_use]
+    pub fn with_error(mut self, message: Option<String>) -> Self {
+        self.error = message
+            .filter(|message| !message.trim().is_empty())
+            .map(|message| {
+                serde_json::json!({
+                    "code": "internal_error",
+                    "message": message,
+                })
+            });
+        self
+    }
 }
 
 /// One content block of an official `message` item.

@@ -9,6 +9,10 @@
 //! official `agent.session.*` frames and `gap` are not persisted, matching the
 //! public contract (`design §2.5`). Official frames travel under their own
 //! event name (`event_type()`), so the gateway hop preserves them verbatim.
+//!
+//! A lagging subscription is told once (`gap`) and then closed by both SSE
+//! writers: the dropped events may include a turn terminal, and silently
+//! continuing would leave an official SDK waiting forever.
 
 use serde_json::{json, Value};
 

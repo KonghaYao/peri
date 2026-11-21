@@ -36,10 +36,10 @@ use super::runtime::{
     WORKSPACE_MCP_SERVER_NAME,
 };
 use crate::domain::{
-    new_root_session_id, turn_id_for_item, ActorKey, Cursor, Disposition, EnvironmentKind,
-    EnvironmentRef, ErrorCode, ErrorKind, InputKind, InputMode, InputOutcome, InputState,
-    InputSubmission, ItemOrder, ItemPage, ItemsWindow, LogicalId, McpToolSpec, SandboxView,
-    SessionState, SessionStatus, SessionView, StreamEvent, SwarmError, TurnView,
+    new_root_session_id, turn_id_for_item, ActorKey, Disposition, EnvironmentKind, EnvironmentRef,
+    ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome, InputState,
+    InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec, SandboxView, SessionState,
+    SessionStatus, SessionView, StreamEvent, SwarmError, TurnView,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::{
@@ -775,7 +775,7 @@ impl AcpSwarmService {
     pub async fn replay_after(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<Vec<StreamEvent>, SwarmError> {
         let session = self.require_row(logical_id).await?;
         let live_open_turn = self
@@ -783,7 +783,7 @@ impl AcpSwarmService {
             .lock()
             .get(logical_id.as_str())
             .is_some_and(|runtime| runtime.log.has_open_turn());
-        crate::service::replay_backlog(self.store.as_ref(), &session, cursor, live_open_turn).await
+        crate::service::replay_backlog(self.store.as_ref(), &session, start, live_open_turn).await
     }
 
     /// Resolve the session environment and reserve its Bun workspace (S8a3a).
@@ -1419,39 +1419,23 @@ impl SwarmService for AcpSwarmService {
         }
         let last_item_seq = self.last_seq(logical_id).await?;
         // The official `CursorPage` sends the last item's `id` as `after`; map
-        // it to that item's seq before querying.
+        // it to that item's greatest seq before querying. The store then pages
+        // by item, so a long message cannot fill the row budget.
         let after = resolve_window_after(self.store.as_ref(), logical_id, &window).await?;
-        let probe = window.limit.saturating_add(1);
-
-        let mut rows = match window.order {
-            ItemOrder::Asc => self
-                .store
-                .swarm_items_after(logical_id.as_str(), after.unwrap_or(0), probe)
-                .await
-                .map_err(|error| store_failure("items_after", error))?,
-            ItemOrder::Desc => self
-                .store
-                .swarm_items_before(logical_id.as_str(), after, probe)
-                .await
-                .map_err(|error| store_failure("items_before", error))?,
-        };
-
-        let has_more = rows.len() > window.limit as usize;
-        if has_more {
-            rows.truncate(window.limit as usize);
-        }
-        let next_cursor = if has_more {
-            rows.last().map(|row| row.seq)
-        } else {
-            None
-        };
-        let items = rows.into_iter().map(|row| row.to_view()).collect();
+        let page = self
+            .store
+            .swarm_item_page(logical_id.as_str(), window.order, after, window.limit)
+            .await
+            .map_err(|error| store_failure("item_page", error))?;
+        let items = page.rows.into_iter().map(|row| row.to_view()).collect();
+        let data = page.items.into_iter().map(|row| row.to_view()).collect();
         Ok(ItemPage::new(
             logical_id.as_str(),
             items,
-            next_cursor,
+            data,
+            page.next_cursor,
             last_item_seq,
-            has_more,
+            page.has_more,
             window.order,
         ))
     }
@@ -1459,14 +1443,14 @@ impl SwarmService for AcpSwarmService {
     async fn subscribe(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError> {
         self.require_row(logical_id).await?;
         let runtime = self.runtime(logical_id)?;
         // Receiver first, then backlog: no event can slip between replay and
         // live delivery.
         let live = runtime.channel.subscribe();
-        let backlog = self.replay_after(logical_id, cursor).await?;
+        let backlog = self.replay_after(logical_id, start).await?;
         let tail = runtime.log.tail();
         // A host restart rebuilds the log with an empty tail; the store is the
         // authority for items persisted before this process opened a stream.

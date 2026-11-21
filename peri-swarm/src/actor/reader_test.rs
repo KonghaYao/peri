@@ -365,3 +365,85 @@ async fn thought_streams_flush_as_thoughts() {
         .all(|item| item.kind == crate::domain::ItemKind::Thought));
     assert_eq!(items[1].payload["text"], "why");
 }
+
+#[tokio::test]
+async fn live_failed_turn_carries_the_failure_text() {
+    let Fixture {
+        log, mut events, ..
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    log.finish_turn(
+        "req-1",
+        TurnOutcome::Failed {
+            code: -32603,
+            message: "model refused".to_owned(),
+        },
+    )
+    .await;
+
+    let seen = drain(&mut events);
+    let failed_turn = seen
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(crate::domain::OfficialEvent::TurnFailed { turn, .. }) => {
+                Some(turn)
+            }
+            _ => None,
+        })
+        .expect("turn.failed frame");
+    assert_eq!(
+        failed_turn.error,
+        Some(json!({ "code": "internal_error", "message": "model refused" }))
+    );
+    let failed_session = seen
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(crate::domain::OfficialEvent::SessionFailed {
+                session, ..
+            }) => Some(session),
+            _ => None,
+        })
+        .expect("session.failed frame");
+    assert_eq!(failed_session.error.as_deref(), Some("model refused"));
+}
+
+#[tokio::test]
+async fn steer_user_frame_keeps_the_open_turn_id() {
+    let Fixture {
+        log, mut events, ..
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_input_x").await.expect("turn");
+    drain(&mut events);
+
+    // A user input accepted while the turn is open is a steer: the live frame
+    // must name the open turn, which is exactly the turn id replay recovers
+    // from the opener before the cursor.
+    log.record_user_input(Some("steer-1"), "adjust")
+        .await
+        .expect("steer item");
+
+    let seen = drain(&mut events);
+    let added: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(crate::domain::OfficialEvent::TurnItemAdded {
+                turn_id,
+                item,
+                ..
+            }) => Some((turn_id.clone(), item.role.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        added,
+        [(Some("turn_input_x".to_owned()), "user".to_owned())],
+        "a steer keeps the live turn id: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Official(crate::domain::OfficialEvent::TurnCreated { .. })
+        )),
+        "a steer does not open a second turn"
+    );
+}

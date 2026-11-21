@@ -534,7 +534,10 @@ impl ItemLog {
                         TurnStatus::Failed,
                         created_at.unwrap_or_else(unix_now),
                         Some(unix_now()),
-                    ),
+                    )
+                    // The failure text is known on the live path; it is not
+                    // persisted, so a replay still reports `error: null`.
+                    .with_error(Some(message.clone())),
                 )));
                 self.broadcast(StreamEvent::Official(OfficialEvent::session_failed(
                     &turn_id,

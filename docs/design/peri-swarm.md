@@ -128,24 +128,62 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 - SSE 帧只有 `item` 带 `id`（等于 `seq`）；`turn`、官方 `agent.session.*` 与 `gap`
   不持久化，不推进 `Last-Event-ID`。实时段的 `turn` 先发 `started`，终止帧是
   `completed` 或 `failed`；官方帧是增量兼容层，既有 `item`/`turn` 帧保持不变。
-- 重连游标接受 `Last-Event-ID` 头或 `?afterSeq=`；服务端先补 `seq > after` 的
-  backlog，再转实时广播。心跳间隔由 `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳
-  payload 的 `lastItemSeq` 是该会话当前 `MAX(seq)`（与 item 写入方共享），只表示
-  进度，不能代替已投递 item 的 `seq` 作为恢复游标。
+- 订阅游标接受 `Last-Event-ID` 头、`?afterSeq=` 或 `?after=`（三者等价，同时给出
+  必须一致，否则 `400 conflicting_cursor`）。**没有任何游标时从当前末尾开始，只
+  投递实时事件**：官方 `sessions.stream` 先订阅再 POST，若回放旧 turn 的终态，
+  SDK 会在旧 turn 的 `idle` 上结束。显式 `afterSeq=0` 仍回放全部（既有客户端语义
+  不变）；`POST /sessions?stream=true` 在首轮前打开的订阅同样从末尾开始、不回放。
+- 带游标时先补 `seq > after` 的 backlog，再转实时广播。心跳间隔由
+  `PERI_SWARM_SSE_HEARTBEAT_MS` 控制。心跳 payload 的 `lastItemSeq` 是该会话当前
+  `MAX(seq)`（与 item 写入方共享），只表示进度，不能代替已投递 item 的 `seq`
+  作为恢复游标。
 - 回放（backlog）与实时同序：先发该行的 `item` 帧，紧接由同一行推导的官方帧
   （§4.2.1）；上一 turn 的终态先于下一 turn 的 `turn.created`。因此重连看到的官方
   序列与实时一致；`turn` 控制帧仍只出现在实时段。客户端的回放终止条件是目标
-  message 的 `payload.complete=true`。`after` 已等于或超过会话末尾时没有可回放
-  item，流保持打开并只发心跳；客户端必须自行超时或取消（或改用 items 分页）。
-- items 支持 `order=asc|desc`、`after`、`limit`，响应同时给出 `items`/`data` 与
-  `hasMore`/`has_more`（两套拼写同值）、`nextCursor`、`lastItemSeq`。`after` 接受
-  十进制 `seq`（与 `afterSeq` 同义），也接受官方 `after=<itemId>`：解析为该 id
-  的最大 `seq`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
-  `400 conflicting_cursor`。同一 assistant 消息的 delta 与 complete 共享稳定
-  `itemId`。item 是事件级帧（user message、assistant delta、tool_call、
-  tool_update、tool_result），不是官方高层 item；assistant 按
+  message 的 `payload.complete=true`。
+- 回放边界由 lookback 决定：窗口首行不是 turn opener（assistant/tool 帧），或首行
+  是 steer user item 时，服务端向游标之前回看，找到仍打开该 turn 的 opener（user
+  item），用它的 `turn_id` 播种；不重发 `turn.created`（重发会让新订阅的
+  `TurnState` 选中旧 turn 并在其终态结束）。窗口为空且会话行已 `idle`/`failed`
+  时，从最后一批 item 推导最后一个 turn 并补发终态（`turn.completed`+`idle` 或
+  `turn.failed`+`session.failed`）；该 turn 此刻仍在实时执行（存在在途 turn）时
+  不补，终态由实时流给出。只有 tool 帧、没有 assistant 完成帧的 turn 由同一
+  lookback 播种，并按「已闭合且无输出 → `completed`」补终态。
+- 慢订阅者：广播容量耗尽（Lagged）时发一帧 `gap` 后关闭该订阅。丢失的事件可能
+  包含终态，官方 SDK 因而以 EOF 识别中断；原生客户端用最后一个已渲染 item 的
+  `seq` 重连恢复。
+- items 按 **item 分组**分页（§4.2.2）：`limit` 计 item 数，`has_more` 按 item
+  计算，`nextCursor` 是本页最后一个 item 的最大 `seq`（仅 `has_more=true` 时
+  给出）。`items` 是本页这些 item 的全部原始行；`data` 是每个 item 的最后一行
+  （最大 `seq`）。`data` 通常比 `items` 短，两者数量允许不同；既有 delta 消费者
+  继续读 `items`。`after` 接受十进制 `seq`（与 `afterSeq` 同义），也接受官方
+  `after=<itemId>`：解析为该 id 的最大 `seq`，升序取 `MAX(seq) > after`、降序取
+  `MAX(seq) < after`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致返回
+  `400 conflicting_cursor`。item 是事件级帧（user message、assistant delta、
+  tool_call、tool_update、tool_result），不是官方高层 item；assistant 按
   `payload.messageId` 聚合，最终文本取 `payload.complete` 帧，`tool_call` 按
   `payload.toolCallId` 聚合（可能分带/不带 `input` 的两帧）。
+
+#### 4.2.2 item 级分页
+
+同一条 assistant 消息的 delta 与 `complete` 共享 `itemId`、`seq` 各不相同，所以
+`after=<itemId>` 不能按行理解：
+
+- item 归属按该 item 的最大 `seq` 判定，分页单位是 item；升序页是
+  `MAX(seq) > after` 的前 `limit` 个 item，降序页是 `MAX(seq) < after` 的前
+  `limit` 个 item。`limit=1` 且首条消息有 3 帧时，`items` 返回 3 行、`data`
+  返回 1 行——这正是「先取 `limit` 行再去重」会产生空页的场景。
+- 分组在存储层完成：Turso 用 `GROUP BY logical_id, item_id` + `MAX(seq)` 选页，
+  再按 `item_id` join 回全部行；内存 fake 用同一 `grouped_item_page` 规则，两者
+  不会给出不同的页边界。
+- `nextCursor` 是页内最后一个 item 的最大 `seq`，因此升序下一页严格前进；降序页
+  的游标是页内最旧 item 的最大 `seq`，下一页只取更小的 item。`after=<itemId>`
+  解析为该 item 的最大 `seq`，所以同一 item 不会被重复分页。十进制
+  `after`/`afterSeq` 同样按 item 边界解释：游标落在多帧 item 中间时，该 item 整条
+  出现在页里（`items` 含游标之前的帧，`data` 仍是它的最后一行）。
+- 一条仍在增长的消息可以在两页之间追加新帧：它的旧页游标只会越过已返回的最大
+  `seq`，新帧会以同一 `itemId` 出现在后一页。分页游标仍严格前进、不会循环。
+- 默认 `order=asc` 与官方默认 `desc` 不同；保持既有客户端行为，不改默认值。
 
 #### 4.2.1 官方事件映射
 
@@ -174,11 +212,21 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 - backlog 按行重建 turn 边界：user item 在「没有打开的 turn」或「打开的 turn 已落
   assistant 完成帧」时开启新 turn，否则视为该 turn 的 steer；终态在下一 turn 的
   `turn.created` 之前或回放末尾发出。最后一个 turn 仅在会话行状态仍为 `failed`
-  时补 `turn.failed` + `agent.session.failed`；失败原因未持久化，`error` 与
-  `completed_at` 保持 `null`，不编造。若该 turn 此刻仍在实时执行，回放不补终态，
-  终态由实时流给出，避免 SDK 提前结束。
-- 重连游标落在 turn 中间（窗口里先出现 assistant 帧）时，从游标之前最近的 user item
-  取回 turn 身份：`turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。
+  时补 `turn.failed` + `agent.session.failed`；失败原因未持久化，重放的 `error` 与
+  `completed_at` 保持 `null`，不编造；实时失败帧的 `turn.error` 由失败消息填充
+  （`{code:"internal_error", message}`）。若该 turn 此刻仍在实时执行，回放不补
+  终态，终态由实时流给出，避免 SDK 提前结束。
+- 重连游标落在 turn 中间时，lookback 从游标（含）之前回看：跳过 steer user item，
+  直到找到一个未被 assistant 完成帧与更早 user item 分隔的 opener，取其 `turn_id`
+  播种，`turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。首行是 steer
+  时，实时与回放给出同一 `turn_id`。只有 tool 帧的窗口同样由 lookback 播种：能判定
+  已闭合（会话行 `idle`）时按「无输出 → `completed`」补终态；会话行 `failed` 时按
+  `turn.failed`。
+- `afterSeq` 等于会话末尾时窗口为空：会话行 `idle`/`failed` 时仍按最后一批 item
+  补发该 turn 的终态与 `agent.session.idle`/`agent.session.failed`（冗余终态按
+  `event_id` 幂等）；有在途 turn 时不补。
+- 历史 turn 的失败无法区分：会话行只保留最新状态，更早的失败 turn 在回放中显示为
+  `completed`。这是已记录的限制，不通过新增表/列修复。
 - `usage` 恒为 `null`；`requires_action` 永不发送（本地没有待审批事实）；
   `turn.cancelled`、budget、subagent 与官方 `function_call` item 不在本层。
 

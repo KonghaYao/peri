@@ -1,11 +1,13 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 
+use crate::domain::ItemOrder;
+
 use super::{
-    InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow,
-    SwarmSessionUpdate, SwarmStore,
+    grouped_item_page, InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
+    SwarmItemRow, SwarmSessionRow, SwarmSessionUpdate, SwarmStore,
 };
 
 /// In-memory fake for the S3 ports. Semantics mirror the future remote store:
@@ -117,6 +119,46 @@ impl SwarmStore for MemorySwarmStore {
             .take(limit as usize)
             .map(|(_, row)| row.clone())
             .collect())
+    }
+
+    async fn swarm_item_page(
+        &self,
+        logical_id: &str,
+        order: ItemOrder,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<SwarmItemPage, StoreError> {
+        let state = self.lock();
+        let Some(rows) = state.items.get(logical_id) else {
+            return Ok(grouped_item_page(Vec::new(), order, limit));
+        };
+        // Item membership is decided by each item's greatest `seq`, so a cursor
+        // resolved from an item id advances past the whole item.
+        let mut maxima: BTreeMap<&str, u64> = BTreeMap::new();
+        for row in rows.values() {
+            let entry = maxima.entry(row.item_id.as_str()).or_insert(row.seq);
+            *entry = (*entry).max(row.seq);
+        }
+        let mut selected: Vec<(&str, u64)> = maxima
+            .into_iter()
+            .filter(|(_, max_seq)| match (order, after) {
+                (ItemOrder::Asc, Some(after)) => *max_seq > after,
+                (ItemOrder::Desc, Some(after)) => *max_seq < after,
+                (_, None) => true,
+            })
+            .collect();
+        selected.sort_by_key(|(_, max_seq)| *max_seq);
+        if order == ItemOrder::Desc {
+            selected.reverse();
+        }
+        selected.truncate(limit.saturating_add(1) as usize);
+        let keep: BTreeSet<&str> = selected.into_iter().map(|(item_id, _)| item_id).collect();
+        let page_rows: Vec<SwarmItemRow> = rows
+            .values()
+            .filter(|row| keep.contains(row.item_id.as_str()))
+            .cloned()
+            .collect();
+        Ok(grouped_item_page(page_rows, order, limit))
     }
 
     async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, StoreError> {

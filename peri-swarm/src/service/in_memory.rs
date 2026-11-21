@@ -14,9 +14,9 @@ use super::{
 };
 use crate::config::SwarmConfig;
 use crate::domain::{
-    new_root_session_id, turn_id_for_item, ActorKey, Cursor, Disposition, EnvironmentKind,
-    EnvironmentRef, ErrorCode, ErrorKind, InputKind, InputMode, InputOutcome, InputState,
-    InputSubmission, ItemKind, ItemOrder, ItemPage, ItemSource, ItemView, ItemsWindow, LogicalId,
+    new_root_session_id, turn_id_for_item, ActorKey, Disposition, EnvironmentKind, EnvironmentRef,
+    ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome, InputState,
+    InputSubmission, ItemKind, ItemPage, ItemSource, ItemView, ItemsWindow, LogicalId,
     OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn, SessionState, SessionStatus,
     SessionView, StreamEvent, SwarmError, TurnEvent, TurnStatus, TurnView,
 };
@@ -533,7 +533,8 @@ impl InMemorySwarmService {
             TurnStatus::Failed,
             crate::domain::official::unix_now(),
             Some(crate::domain::official::unix_now()),
-        );
+        )
+        .with_error(Some(error.message().to_owned()));
         self.broadcast(
             logical_id.as_str(),
             StreamEvent::Official(OfficialEvent::turn_failed(
@@ -651,11 +652,11 @@ impl InMemorySwarmService {
     async fn replay_after(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<Vec<StreamEvent>, SwarmError> {
         let session = self.require_session(logical_id).await?;
         let live_open_turn = self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str()));
-        super::replay_backlog(self.store.as_ref(), &session, cursor, live_open_turn).await
+        super::replay_backlog(self.store.as_ref(), &session, start, live_open_turn).await
     }
 }
 
@@ -940,37 +941,20 @@ impl SwarmService for InMemorySwarmService {
         }
         let last_item_seq = self.last_seq(logical_id).await?;
         let after = resolve_window_after(self.store.as_ref(), logical_id, &window).await?;
-        let probe = window.limit.saturating_add(1);
-
-        let mut rows = match window.order {
-            ItemOrder::Asc => self
-                .store
-                .swarm_items_after(logical_id.as_str(), after.unwrap_or(0), probe)
-                .await
-                .map_err(|error| store_failure("items_after", error))?,
-            ItemOrder::Desc => self
-                .store
-                .swarm_items_before(logical_id.as_str(), after, probe)
-                .await
-                .map_err(|error| store_failure("items_before", error))?,
-        };
-
-        let has_more = rows.len() > window.limit as usize;
-        if has_more {
-            rows.truncate(window.limit as usize);
-        }
-        let next_cursor = if has_more {
-            rows.last().map(|row| row.seq)
-        } else {
-            None
-        };
-        let items = rows.into_iter().map(|row| row.to_view()).collect();
+        let page = self
+            .store
+            .swarm_item_page(logical_id.as_str(), window.order, after, window.limit)
+            .await
+            .map_err(|error| store_failure("item_page", error))?;
+        let items = page.rows.into_iter().map(|row| row.to_view()).collect();
+        let data = page.items.into_iter().map(|row| row.to_view()).collect();
         Ok(ItemPage::new(
             logical_id.as_str(),
             items,
-            next_cursor,
+            data,
+            page.next_cursor,
             last_item_seq,
-            has_more,
+            page.has_more,
             window.order,
         ))
     }
@@ -978,13 +962,13 @@ impl SwarmService for InMemorySwarmService {
     async fn subscribe(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError> {
         self.record(ServiceCall::Subscribe(logical_id.as_str().to_owned()));
         self.require_session(logical_id).await?;
         let hub = self.hub_for(logical_id.as_str());
         let live = hub.sender.subscribe();
-        let backlog = self.replay_after(logical_id, cursor).await?;
+        let backlog = self.replay_after(logical_id, start).await?;
         hub.tail
             .fetch_max(self.last_seq(logical_id).await?, Ordering::Relaxed);
         Ok(EventSubscription::new(backlog, live, hub.tail))

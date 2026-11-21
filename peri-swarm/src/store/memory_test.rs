@@ -127,6 +127,96 @@ async fn last_seq_reads_the_item_table_not_the_session_projection() {
 }
 
 #[tokio::test]
+async fn item_page_groups_rows_by_item_and_advances_past_a_whole_item() {
+    let store = MemorySwarmStore::new();
+    // Two streamed items interleaved by seq, plus one single-row item.
+    let rows = [
+        (1, "itim_a"),
+        (2, "itim_b"),
+        (3, "itim_a"),
+        (4, "itim_b"),
+        (5, "itim_c"),
+    ];
+    for (seq, item_id) in rows {
+        let mut row = item_row("agent", seq);
+        row.item_id = item_id.to_owned();
+        store.swarm_append_item(row).await.expect("append");
+    }
+
+    // `limit` counts items: the first item owns two rows but is one entry.
+    let first = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Asc, None, 1)
+        .await
+        .expect("page");
+    assert_eq!(
+        first.rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [1, 3],
+        "every row of the page's item is returned"
+    );
+    assert_eq!(
+        first.items.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [3],
+        "`data` keeps one row per item: its greatest seq"
+    );
+    assert!(first.has_more);
+    assert_eq!(first.next_cursor, Some(3));
+
+    // `after` is the item's greatest seq, so the same item cannot repeat.
+    let second = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Asc, Some(3), 1)
+        .await
+        .expect("page");
+    assert_eq!(
+        second.items.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [4]
+    );
+    assert_eq!(second.next_cursor, Some(4));
+
+    let third = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Asc, Some(4), 1)
+        .await
+        .expect("page");
+    assert_eq!(
+        third.items.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [5]
+    );
+    assert!(!third.has_more);
+    assert_eq!(third.next_cursor, None);
+
+    // Descending membership uses the same item boundary: strictly below the
+    // item's greatest seq.
+    let newest = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Desc, None, 1)
+        .await
+        .expect("page");
+    assert_eq!(
+        newest.rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [5]
+    );
+    let middle = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Desc, Some(5), 1)
+        .await
+        .expect("page");
+    assert_eq!(
+        middle.rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [4, 2]
+    );
+    assert_eq!(
+        middle.items.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [4]
+    );
+    let oldest = store
+        .swarm_item_page("agent", crate::domain::ItemOrder::Desc, Some(4), 1)
+        .await
+        .expect("page");
+    assert_eq!(
+        oldest.rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+        [3, 1]
+    );
+    assert!(!oldest.has_more);
+}
+
+#[tokio::test]
 async fn duplicate_seq_is_a_visible_conflict() {
     let store = MemorySwarmStore::new();
     store

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::domain::{EventCursor, ItemOrder};
 use crate::store::MemorySwarmStore;
 
 fn create_command(logical_id: &str, cwd: &str) -> CreateSessionCommand {
@@ -403,7 +404,7 @@ async fn subscribe_replays_from_the_cursor() {
     }
     let id = LogicalId::parse("agent-01").expect("id");
     let subscription = service
-        .subscribe(&id, Cursor::new(1))
+        .subscribe(&id, EventCursor::after(1))
         .await
         .expect("subscribe");
     let seqs: Vec<u64> = subscription
@@ -609,7 +610,7 @@ async fn unknown_session_is_404_for_every_read() {
     );
     assert_eq!(
         service
-            .subscribe(&id, Cursor::START)
+            .subscribe(&id, EventCursor::START)
             .await
             .expect_err("subscribe")
             .code(),
@@ -695,7 +696,10 @@ async fn replay_keeps_every_assistant_message_of_one_turn() {
     set_state(&service, "agent-01", SessionState::Idle).await;
 
     let backlog = service
-        .replay_after(&LogicalId::parse("agent-01").expect("id"), Cursor::START)
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::START,
+        )
         .await
         .expect("replay");
     let ids = official_ids(&backlog);
@@ -754,7 +758,10 @@ async fn replay_marks_a_failed_last_turn_failed_after_partial_output() {
     set_state(&service, "agent-01", SessionState::Failed).await;
 
     let backlog = service
-        .replay_after(&LogicalId::parse("agent-01").expect("id"), Cursor::START)
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::START,
+        )
         .await
         .expect("replay");
     let ids = official_ids(&backlog);
@@ -807,7 +814,7 @@ async fn replay_from_inside_a_turn_seeds_the_turn_identity() {
     let backlog = service
         .replay_after(
             &LogicalId::parse("agent-01").expect("id"),
-            Cursor::new(user_seq),
+            EventCursor::after(user_seq),
         )
         .await
         .expect("replay");
@@ -841,7 +848,10 @@ async fn replay_leaves_a_live_turn_open() {
     submit(&service, "agent-01", "input-1", "hello").await;
 
     let backlog = service
-        .replay_after(&LogicalId::parse("agent-01").expect("id"), Cursor::START)
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::START,
+        )
         .await
         .expect("replay");
     let ids = official_ids(&backlog);
@@ -856,4 +866,290 @@ async fn replay_leaves_a_live_turn_open() {
         ],
         "a still-running turn must not gain a fabricated terminal: {ids:?}"
     );
+}
+
+#[tokio::test]
+async fn no_cursor_subscription_has_no_backlog() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    submit(&service, "agent-01", "input-1", "hello").await;
+
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::Tail,
+        )
+        .await
+        .expect("replay");
+    assert!(
+        backlog.is_empty(),
+        "a subscription without a cursor must start at the tail: {backlog:?}"
+    );
+}
+
+#[tokio::test]
+async fn replay_from_a_steer_keeps_the_opener_turn_id() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "hi"}),
+    )
+    .await;
+    // A delta before the steer proves the turn has no final assistant frame
+    // yet, so the live stream would attach the steer to the same turn.
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "par", "delta": true}),
+    )
+    .await;
+    let steer_seq = append_message(
+        &service,
+        "agent-01",
+        "itim_input_y",
+        json!({"role": "user", "text": "adjust"}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "partial", "complete": true}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    // The reconnect cursor is just before the steer: the window starts with a
+    // user item that must not mint `turn_input_y`.
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::after(steer_seq - 1),
+        )
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.turn.item.added",
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{ids:?}"
+    );
+    assert_eq!(ids[0].1, "evt_item_3_added");
+    assert_eq!(ids[1].1, "evt_item_4_added");
+    assert_eq!(
+        ids[2].1, "evt_turn_input_x_completed",
+        "the steer belongs to the opener's turn: {ids:?}"
+    );
+    let turn_ids: Vec<_> = backlog
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnItemAdded { turn_id, .. }) => turn_id.clone(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        turn_ids,
+        ["turn_input_x", "turn_input_x"],
+        "the steer must keep the live turn id"
+    );
+}
+
+#[tokio::test]
+async fn replay_from_a_tool_only_turn_emits_its_terminal() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "run a tool"}),
+    )
+    .await;
+    let id = LogicalId::parse("agent-01").expect("id");
+    for (kind, payload) in [
+        (
+            ItemKind::ToolCall,
+            json!({"toolCallId": "call-1", "name": "read"}),
+        ),
+        (
+            ItemKind::ToolResult,
+            json!({"toolCallId": "call-1", "text": "ok"}),
+        ),
+    ] {
+        service
+            .append_item_with_id(
+                &id,
+                kind,
+                ItemSource::root(),
+                payload,
+                Some("itim_tool_1".to_owned()),
+            )
+            .await
+            .expect("append");
+    }
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    // A turn whose only rows are tool frames has no assistant final frame. The
+    // lookback still finds its opener, so the window carries a terminal.
+    let backlog = service
+        .replay_after(&id, EventCursor::after(1))
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        ["agent.session.turn.completed", "agent.session.idle"],
+        "{ids:?}"
+    );
+    assert_eq!(ids[0].1, "evt_turn_input_x_completed");
+    assert_eq!(ids[1].1, "evt_turn_input_x_idle");
+    let items: Vec<_> = backlog
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Item(item) => Some(item.seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(items, [2, 3], "tool rows keep their custom item frames");
+}
+
+#[tokio::test]
+async fn empty_window_at_the_tail_republishes_the_last_terminal() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "hi"}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "done", "complete": true}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    // `afterSeq` equal to the tail has no rows to replay, but the client may
+    // have missed the (unpersisted) terminal. The idle session row proves the
+    // last turn closed, so its terminal is republished with the same event ids.
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::after(2),
+        )
+        .await
+        .expect("replay");
+    assert_eq!(
+        official_ids(&backlog)
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        ["agent.session.turn.completed", "agent.session.idle"]
+    );
+    assert!(backlog
+        .iter()
+        .all(|event| !matches!(event, StreamEvent::Item(_))));
+}
+
+#[tokio::test]
+async fn replay_after_output_starts_a_new_turn_for_the_next_user_item() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "first"}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_msg_1",
+        json!({"role": "assistant", "messageId": "msg_1", "text": "done", "complete": true}),
+    )
+    .await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_y",
+        json!({"role": "user", "text": "second"}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Idle).await;
+
+    // The previous turn already produced its final frame under the replay
+    // boundary rule, so the next user item opens a new turn and the window
+    // closes it.
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::after(2),
+        )
+        .await
+        .expect("replay");
+    let ids = official_ids(&backlog);
+    assert_eq!(
+        ids.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "agent.session.turn.created",
+            "agent.session.turn.item.added",
+            "agent.session.turn.completed",
+            "agent.session.idle",
+        ],
+        "{ids:?}"
+    );
+    assert_eq!(ids[0].1, "evt_turn_input_y_created");
+    assert_eq!(ids[2].1, "evt_turn_input_y_completed");
+}
+
+#[tokio::test]
+async fn replay_keeps_the_failure_text_null_because_it_is_not_persisted() {
+    let service = InMemorySwarmService::in_memory(ServiceConfig::default());
+    seed_session(&service, "agent-01").await;
+    append_message(
+        &service,
+        "agent-01",
+        "itim_input_x",
+        json!({"role": "user", "text": "hi"}),
+    )
+    .await;
+    set_state(&service, "agent-01", SessionState::Failed).await;
+
+    let backlog = service
+        .replay_after(
+            &LogicalId::parse("agent-01").expect("id"),
+            EventCursor::START,
+        )
+        .await
+        .expect("replay");
+    let failed_turn = backlog
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Official(OfficialEvent::TurnFailed { turn, .. }) => Some(turn),
+            _ => None,
+        })
+        .expect("turn.failed");
+    // The persisted log carries no failure text, so replay keeps it null
+    // instead of inventing a reason (the live frame carries the real message).
+    assert_eq!(failed_turn.error, None);
 }
