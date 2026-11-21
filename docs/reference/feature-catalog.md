@@ -224,3 +224,4 @@
 | F-SWARM-008 | L2 | 空闲回收；在途阻断且文件与绑定保留 | [契约](../design/peri-swarm.md) |
 | F-SWARM-009 | L2 | 宿主恢复；仅杀 Rust 后 reattach 不重放 | [契约](../design/peri-swarm.md) |
 | F-SWARM-010 | L3 | 本地运行面；双库 provision 与启动顺序 | [契约](../design/peri-swarm.md) |
+| F-SWARM-011 | L3 | 副本组部署面；外部 engine、共享 namespace/pool 与显式非 loopback 绑定 | [契约](../design/peri-swarm.md) |

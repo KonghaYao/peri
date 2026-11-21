@@ -75,6 +75,42 @@ fn rejects_non_loopback_bind() {
     env.insert(BIND_ENV.to_owned(), "0.0.0.0:8787".to_owned());
     let error = parse(env).expect_err("non-loopback bind");
     assert!(error.to_string().contains("loopback"));
+    // The error must name the opt-in that is missing.
+    assert!(error.to_string().contains(BIND_ALLOW_NON_LOOPBACK_ENV));
+}
+
+#[test]
+fn bind_opt_in_is_the_only_way_to_a_non_loopback_address() {
+    let workspace = tempfile::tempdir().expect("workspace");
+
+    for enabled in ["1", "true", "yes", "on", " TRUE "] {
+        let mut env = base_env(&workspace);
+        env.insert(BIND_ENV.to_owned(), "0.0.0.0:8787".to_owned());
+        env.insert(BIND_ALLOW_NON_LOOPBACK_ENV.to_owned(), enabled.to_owned());
+        let config = parse(env).expect("opted-in bind");
+        assert_eq!(config.bind_addr.to_string(), "0.0.0.0:8787");
+    }
+
+    for disabled in ["0", "false", "no", "off"] {
+        let mut env = base_env(&workspace);
+        env.insert(BIND_ENV.to_owned(), "0.0.0.0:8787".to_owned());
+        env.insert(BIND_ALLOW_NON_LOOPBACK_ENV.to_owned(), disabled.to_owned());
+        let error = parse(env).expect_err("switch off");
+        assert!(error.to_string().contains("loopback"));
+    }
+
+    let mut env = base_env(&workspace);
+    env.insert(BIND_ALLOW_NON_LOOPBACK_ENV.to_owned(), "maybe".to_owned());
+    let error = parse(env).expect_err("unknown switch value");
+    assert!(error.to_string().contains(BIND_ALLOW_NON_LOOPBACK_ENV));
+    assert!(error.to_string().contains("1/true/yes/on"));
+
+    // A malformed address is still a parse error, not a policy error.
+    let mut env = base_env(&workspace);
+    env.insert(BIND_ENV.to_owned(), "not-an-address".to_owned());
+    env.insert(BIND_ALLOW_NON_LOOPBACK_ENV.to_owned(), "1".to_owned());
+    let error = parse(env).expect_err("malformed bind");
+    assert!(error.to_string().contains("host:port"));
 }
 
 #[test]

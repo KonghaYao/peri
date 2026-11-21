@@ -30,13 +30,13 @@ use peri_swarm::actor::deployment::{install_deployment, StaticDeployment};
 use peri_swarm::actor::service::ActorServiceConfig;
 use peri_swarm::actor::swarm::{registry, Info, InfoOutput, SwarmActor, ACTOR_NAME};
 use peri_swarm::domain::{
-    ActorKey, ContentBlock, Cursor, Disposition, EnvironmentKind, ErrorCode, InputKind, InputMode,
-    InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId, McpToolSpec, SessionState,
-    StreamEvent, TurnEvent,
+    ActorKey, ContentBlock, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
+    ErrorKind, InputKind, InputMode, InputSubmission, ItemKind, ItemOrder, ItemsWindow, LogicalId,
+    McpToolSpec, SessionState, StreamEvent, TurnEvent,
 };
 use peri_swarm::gateway::{RivetServiceConfig, RivetSwarmService};
 use peri_swarm::service::{CreateSessionCommand, SwarmService};
-use peri_swarm::store::{MemorySwarmStore, SwarmStore};
+use peri_swarm::store::{MemorySwarmStore, SwarmSessionRow, SwarmStore};
 use reqwest::header::HeaderMap;
 use reqwest::Method;
 use rivetkit::client::{Client, ClientConfig, GetOrCreateOptions};
@@ -52,6 +52,8 @@ const NAMESPACE: &str = "default";
 /// Both phases use the same pool: phase 2 must recover the *same* actor
 /// identity, not a fresh one in a different pool.
 const POOL: &str = "peri-swarm-s5";
+/// The M1 replica test keeps its actors out of the S5 pool.
+const REPLICA_POOL: &str = "peri-swarm-m1";
 
 const TURN_PREFIX: &str = "stub-";
 
@@ -203,14 +205,19 @@ struct ServedRegistry {
 impl ServedRegistry {
     /// Serve [`registry`] on the shared local engine with a fixed pool.
     async fn start() -> Self {
+        Self::start_in(POOL, EngineSpawnMode::Always).await
+    }
+
+    /// Serve the same actor registry under an explicit pool and engine-spawn
+    /// mode. `Never` is how a replica attaches to an engine another process
+    /// owns; nothing in the harness spawns in that case.
+    async fn start_in(pool: &str, engine_spawn: EngineSpawnMode) -> Self {
         let config = ServeConfig {
             endpoint: ENDPOINT.to_owned(),
             token: Some(TOKEN.to_owned()),
             namespace: NAMESPACE.to_owned(),
-            pool_name: POOL.to_owned(),
-            // Start or reuse the local engine; the cached 3.1.1 binary is
-            // resolved by rivetkit.
-            engine_spawn: EngineSpawnMode::Always,
+            pool_name: pool.to_owned(),
+            engine_spawn,
             ..ServeConfig::default()
         };
         let shutdown = CancellationToken::new();
@@ -225,7 +232,7 @@ impl ServedRegistry {
             ClientConfig::new(ENDPOINT)
                 .token(TOKEN)
                 .namespace(NAMESPACE)
-                .pool_name(POOL),
+                .pool_name(pool),
         );
         Self {
             client,
@@ -769,4 +776,229 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
     );
 
     served.shutdown().await;
+}
+
+// ── M1: replica group with an external engine ───────────────────────────────
+
+/// Two registries on one engine, same namespace and pool:
+///
+/// - replica A serves with `engine_spawn = Always` and owns the engine process;
+/// - replica B serves with `engine_spawn = Never` and only attaches.
+///
+/// The test then stops A and proves that B alone reconstructs the actor from
+/// the shared store (`live = false`, the same `MAX(seq)`), replays items from a
+/// cursor, and refuses a row whose turn was still `running` with 502
+/// `session_resume_required`.
+///
+/// Evidence limits:
+///
+/// - `install_deployment` is **process-level**, so both registries share this
+///   process's store and actor configuration. That is equivalent to "both
+///   replicas read the same Loom databases"; it is **not** "two hosts", and it
+///   says nothing about a multi-node engine or TLS.
+/// - because the deployment is process-wide, run this test alone in its own
+///   process: `--test rivet_actor_test --ignored --exact <this name>`.
+#[ignore = "requires a local Rivet engine; run alone with --ignored --exact"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry() {
+    if std::env::var_os("SWARM_TRACE_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+    }
+    clear_telemetry_env();
+    assert!(
+        peri_swarm::actor::deployment::current_deployment().is_none(),
+        "a swarm deployment is already installed: this process-wide state belongs to another \
+         test. Run this test alone: --test rivet_actor_test --ignored --exact \
+         an_attaching_registry_recovers_actors_started_by_the_spawning_registry"
+    );
+
+    let (base_url, stub) = start_stub().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let session_store: PathBuf = tmp.path().join("threads-m1.db");
+
+    let deployment = install_deployment(StaticDeployment::new(
+        Arc::new(MemorySwarmStore::new()),
+        ActorServiceConfig {
+            settings_json: Some(settings_json(&base_url)),
+            session_store_path: Some(session_store),
+            session_store: None,
+            machine_id: None,
+            workspace_root: None,
+            model: None,
+            channel_capacity: 512,
+            sandbox: None,
+        },
+    ));
+    let store: Arc<dyn SwarmStore> = deployment.store();
+
+    let logical = LogicalId::parse("agent-m1-a").expect("logical id");
+    let running = LogicalId::parse("agent-m1-running").expect("logical id");
+
+    // ── replica A starts the engine and runs the first turn ─────────────────
+    let replica_a = ServedRegistry::start_in(REPLICA_POOL, EngineSpawnMode::Always).await;
+    replica_a.wait_ready(logical.as_str()).await;
+    let service_a = RivetSwarmService::new(
+        replica_a.client.clone(),
+        Arc::clone(&store),
+        RivetServiceConfig::default(),
+    );
+    let (_, mut first_turn) = timeout(Duration::from_secs(20), service_a.open_stream(&logical))
+        .await
+        .expect("open_stream returns as soon as the actor sends headers")
+        .into_parts();
+    let created = service_a
+        .create_session(CreateSessionCommand {
+            logical_id: logical.clone(),
+            cwd: cwd.clone(),
+            model: None,
+            instructions: Some("m1 replica".to_owned()),
+            mcp_tools: Vec::new(),
+            initial_input: Some("hello".to_owned()),
+            environment: EnvironmentKind::None,
+            environment_id: None,
+            root_session_id: None,
+        })
+        .await
+        .expect("create through replica A");
+    assert!(created.created);
+    let (_, terminal) = collect_until_terminal(&mut first_turn, Duration::from_secs(30)).await;
+    assert!(
+        matches!(&terminal, Some(TurnEvent::Completed { .. })),
+        "first turn terminal: {terminal:?}"
+    );
+    let before = service_a
+        .list_items(
+            &logical,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                limit: ItemsWindow::MAX_LIMIT,
+            },
+        )
+        .await
+        .expect("items from replica A");
+    assert!(!before.items.is_empty(), "the first turn produced items");
+    assert_eq!(stub.main_calls(), 1, "exactly one model turn ran on A");
+
+    // ── replica B attaches: same endpoint, namespace and pool ───────────────
+    let replica_b = ServedRegistry::start_in(REPLICA_POOL, EngineSpawnMode::Never).await;
+    let attached = replica_b.wait_ready(logical.as_str()).await;
+    assert!(
+        attached.live,
+        "B routes to the actor A already started; the live host lives on A"
+    );
+
+    // ── stop A: B alone must reconstruct the actor from the shared store ────
+    replica_a.shutdown().await;
+    let rebuilt = replica_b.wait_ready(logical.as_str()).await;
+    let recovery = rebuilt
+        .recovery
+        .clone()
+        .expect("on_start restored the session row on B");
+    assert_eq!(recovery.root_session_id, created.session.root_session_id);
+    assert_eq!(
+        recovery.last_item_seq, before.last_item_seq,
+        "the rebuilt actor restores MAX(seq) from the shared store"
+    );
+    assert!(
+        !rebuilt.live,
+        "a rebuilt actor restores only the read-only view (no ACP host)"
+    );
+
+    let service_b = RivetSwarmService::new(
+        replica_b.client.clone(),
+        Arc::clone(&store),
+        RivetServiceConfig::default(),
+    );
+    let after = service_b
+        .list_items(
+            &logical,
+            ItemsWindow {
+                order: ItemOrder::Asc,
+                after: None,
+                limit: ItemsWindow::MAX_LIMIT,
+            },
+        )
+        .await
+        .expect("items through replica B");
+    assert_eq!(
+        after.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        before.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        "B reads the same persisted items as A"
+    );
+
+    // Cursor replay on the rebuilt actor (no host): the actor replays from the
+    // store, so frames arrive without any model or Bun involvement.
+    let (_, mut replay) = service_b
+        .subscribe(&logical, Cursor::START)
+        .await
+        .expect("subscribe through replica B")
+        .into_parts();
+    let replayed = timeout(Duration::from_secs(20), async {
+        let mut items = Vec::new();
+        while let Ok(event) = replay.recv().await {
+            if let StreamEvent::Item(item) = event {
+                items.push(item);
+                if items.len() == after.items.len() {
+                    break;
+                }
+            }
+        }
+        items
+    })
+    .await
+    .expect("cursor replay through replica B");
+    assert_eq!(
+        replayed.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        after.items.iter().map(|item| item.seq).collect::<Vec<_>>(),
+        "replay follows the cursor order"
+    );
+
+    // A row whose turn was still running is the known boundary: the rebuilt
+    // actor refuses to attach and the gateway maps it to 502.
+    store
+        .swarm_upsert_session(SwarmSessionRow {
+            logical_id: running.as_str().to_owned(),
+            root_session_id: "0192f0c4-0000-7000-8000-0000000000bb".to_owned(),
+            actor_key: format!("agent/{}", running.as_str()),
+            cwd: cwd.to_string_lossy().into_owned(),
+            state: SessionState::Running,
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            environment: EnvironmentRef {
+                kind: EnvironmentKind::None,
+                id: None,
+            },
+            created_at: "2026-11-21T00:00:00.000000Z".to_owned(),
+            last_activity_at: "2026-11-21T00:00:00.000000Z".to_owned(),
+            last_item_seq: 0,
+        })
+        .await
+        .expect("seed a running row");
+    let refused = service_b
+        .submit_input(&running, user_input("input-m1-running", "resume"))
+        .await
+        .expect_err("a running row must be refused");
+    assert_eq!(refused.kind(), ErrorKind::BadGateway, "{refused:?}");
+    assert_eq!(refused.code(), ErrorCode::UpstreamUnavailable);
+    assert_eq!(
+        refused.details()["operation"],
+        serde_json::json!("session_resume_required")
+    );
+    let row = store
+        .swarm_get_session(running.as_str())
+        .await
+        .expect("read the running row")
+        .expect("row");
+    assert_eq!(
+        row.state,
+        SessionState::Running,
+        "the refusal leaves the row untouched"
+    );
+
+    replica_b.shutdown().await;
 }

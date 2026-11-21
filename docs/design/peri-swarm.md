@@ -16,7 +16,11 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 非目标：
 
-- 不做跨机调度、租约或 fencing；本地部署只绑定 loopback，使用单个部署 Bearer。
+- 不做跨机调度、租约或 fencing；网关默认只绑定 loopback，
+  `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` 允许在受信任入口之后绑定私网地址，鉴权仍是
+  单个部署 Bearer，TLS 必须由该入口终止。
+- 副本组共享同一 engine、namespace/pool 与两个 Loom 库；多副本不改变本机的恢复
+  语义（§7），也不提供跨实例在途 turn 接管。
 - 不新增 ACP 方法名或协议版本，不改 Peri 的通用 SQL 执行面。
 - 不把 `session/load` 的只读浏览路径变成命令重放入口。
 - 不承诺整批输入原子的受理语义（见 §4.4）。
@@ -252,10 +256,24 @@ Loom：
 
 Rivet：
 
-- 本地 engine 为 Rivet 3.1.1（`~/.rivetkit/engine/v3`），网关在
-  `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1` 时按需拉起，endpoint 固定
-  `http://127.0.0.1:6420`；pool/部署身份由进程配置提供，两个进程只有共享同一 engine
+- 本地 engine 为 Rivet 3.1.1（`~/.rivetkit/engine/v3`）；默认 endpoint
+  `http://127.0.0.1:6420`、namespace `default`、pool `peri-swarm`，默认
+  `PERI_SWARM_RIVET_ENGINE_SPAWN=always` 在 `RIVETKIT_ENGINE_AUTO_DOWNLOAD=1` 时按需
+  拉起本地 engine。副本组的进程只有共享同一 engine、namespace、pool、两个 Loom 库
   与部署身份时才看到同一批 actor。
+- 配置面：`PERI_SWARM_RIVET_ENDPOINT`（仅私网明文 `http`，必须显式端口；`https`
+  显式拒绝，engine TLS 终止需另行设计）、`PERI_SWARM_RIVET_TOKEN_ENV`（**变量名**，
+  不是值）、`PERI_SWARM_RIVET_NAMESPACE`、`PERI_SWARM_RIVET_POOL`、
+  `PERI_SWARM_RIVET_ENGINE_SPAWN`（`always`/`auto`/`never`）。token 值只在启动时
+  解析一次；启动日志只记录 endpoint/namespace/pool/spawn。
+- namespace 与 pool 是部署身份：一个环境一套；多个环境共用一个 engine 时必须使用
+  不同值，否则 actor 会串台。
+- 外置 engine 必须 `never` 且提供 token 变量名；`always`/`auto` 只允许 loopback
+  endpoint，矛盾在解析阶段失败。`never` 时进程在打开两个 Loom 库之前做一次 5 秒
+  TCP 预检；失败即启动失败，消息写明 endpoint 且说明不会拉起本地 engine。预检只
+  证明 TCP 可达，engine 握手与健康仍由 registry 任务报告。
+- 未验证：engine 多节点/集群入口、engine 重启后的客户端重连、逐副本 engine 凭据
+  与 engine TLS。
 
 Bun：
 
@@ -298,6 +316,16 @@ Bun：
 `resources/list`），但不会执行任何历史工具命令；旧 workspace 文件的哈希与 mtime
 保持不变是直接证据。
 
+副本组：
+
+- actor 无状态且空闲 300s 后由 engine 回收，下一次交互可能在**任一**副本唤醒；
+  跨副本重建沿用上面的只读恢复与 `session/load` 语义，不新增在途 turn 接管。
+- 因此所有副本必须使用同一 `PERI_SWARM_MACHINE_ID`、同一绝对路径的
+  `PERI_SWARM_WORKSPACE_ROOT`（共享卷或同路径挂载）、可写的两个 Loom 库，并保证
+  Bun（hosted）从每个副本可达；actor 重建副本上的 `cwd` 必须本机存在。
+- 行状态仍为 `running` 时照旧返回 `502 session_resume_required`；滚动停副本与在途
+  turn 的处置不在本层，见 §8。
+
 ## 8. 未完成项与风险
 
 1. **后台任务引用**：Bun 转发层尚未识别 `resultType:"task"` 与 `tasks/get` 终态，
@@ -307,10 +335,12 @@ Bun：
    Loom 同时不可用时的失败文案、以及「崩溃时正在执行命令」的中断语义未覆盖。
 3. **真实部署模型任务**：模型侧全部为确定性 stub；真实供应商的 tool call、长任务
    与多轮副作用未验收。
-4. **1000 Agent 规模**：没有吞吐、并发会话或单 engine 容量的运行证据；actor 的并发
-   SSE 观看者与 engine 池容量都未经真实压力验证。
-5. **生产 TLS**：网关只绑定 loopback，Bearer 是唯一鉴权；Loom 侧只能用 loopback
-   HTTP，生产 TLS 与证书轮换未实现。
+4. **1000 Agent 规模与单 engine 容量**：没有吞吐、并发会话、单 engine 节点的容量或
+   多副本压力证据；actor 的并发 SSE 观看者与 engine 池容量都未经真实压力验证。
+5. **生产 TLS 与入口鉴权**：网关默认只绑定 loopback；显式开关允许非 loopback
+   绑定，但 Bearer 是唯一鉴权、TLS 必须由受信任入口终止，组合后的链路未验收。
+   Rivet endpoint 只支持私网明文 HTTP；Loom 侧只能用 loopback HTTP。生产 TLS 与
+   证书轮换未实现。
 6. **Linux SRT**：`peri-sandbox` 有 `systemd-run` 路径，但本链路只在 macOS 的
    `sandbox-exec` 上验收；Linux 沙箱与回收行为未验证。
 7. **真实模型工具调用**：工具 wire、冷/热分界与结果回填已在 stub 驱动下验证；
@@ -320,3 +350,9 @@ Bun：
 9. **冷态可见性降级**：hosted 会话冻结的 system prompt 不含远端 workspace 指令与
    覆盖（冷期不可得），启动后资源发现也不刷新句柄快照。
 10. **整批原子性**：逐条受理的语义固定，不提供批量事务或整批回执。
+11. **readiness 与滚动发布**：没有独立的 readiness 探针、drain 或滚动发布流程；
+    停副本时在途 turn 的实际行为未定义，也没有自动处置。
+12. **逐副本 engine 凭据**：Rivet 当前是单一 admin token 模型，未实现逐副本或最小
+    权限凭据。
+13. **engine 重启后的客户端重连**：运行中停/启 engine 时进程是退出、请求 502 还是
+    自动重连，未验证。

@@ -29,7 +29,8 @@
 //!
 //! | variable | meaning |
 //! | --- | --- |
-//! | `PERI_SWARM_BIND` | gateway address, default `127.0.0.1:8080`, loopback only |
+//! | `PERI_SWARM_BIND` | gateway address, default `127.0.0.1:8080` |
+//! | `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK` | opt-in switch for a non-loopback bind, default off |
 //! | `PERI_SWARM_API_KEY` | deployment bearer key (required) |
 //! | `PERI_SWARM_SESSION_STORE` | Peri session store locator `http(s)://…` (required) |
 //! | `PERI_SWARM_STATE_STORE` | Swarm state store locator `http(s)://…` (required, distinct) |
@@ -44,6 +45,11 @@
 //! | `PERI_SWARM_BUN_TOKEN` | optional Bun outer bearer token (value; not rendered) |
 //! | `PERI_SWARM_BUN_BEARER_ENV` | alternative: **name** of the variable holding that token |
 //! | `PERI_SWARM_SSE_HEARTBEAT_MS` | SSE heartbeat in milliseconds, default `15000` |
+//! | `PERI_SWARM_RIVET_ENDPOINT` | engine endpoint, default `http://127.0.0.1:6420` (plaintext `http` only) |
+//! | `PERI_SWARM_RIVET_TOKEN_ENV` | **name** of the variable holding the engine token; required for a non-loopback endpoint |
+//! | `PERI_SWARM_RIVET_NAMESPACE` | engine namespace (deployment identity), default `default` |
+//! | `PERI_SWARM_RIVET_POOL` | engine pool (deployment identity), default `peri-swarm` |
+//! | `PERI_SWARM_RIVET_ENGINE_SPAWN` | `always` (default), `auto` or `never`; a non-loopback endpoint requires `never` |
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -65,10 +71,12 @@ use crate::actor::runtime::SessionStoreDeployment;
 use crate::actor::service::ActorServiceConfig;
 use crate::actor::swarm;
 use crate::config::{
-    is_env_var_name, optional_non_empty, parse_sse_heartbeat, validate_bun_url,
-    validate_store_locator, BunConfig, ConfigError, DeploymentApiKey, ModelConfig,
-    SessionStoreConfig, StoreAccess, SwarmConfig, API_KEY_ENV, BIND_ENV, BUN_BASE_URL_ENV,
-    BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV, MODEL_ENV, WORKSPACE_ROOT_ENV,
+    is_env_var_name, is_loopback_endpoint, optional_non_empty, parse_bind,
+    parse_bind_allow_non_loopback, parse_sse_heartbeat, validate_bun_url, validate_rivet_endpoint,
+    validate_rivet_identity, validate_store_locator, BunConfig, ConfigError, DeploymentApiKey,
+    ModelConfig, SessionStoreConfig, StoreAccess, SwarmConfig, API_KEY_ENV, BIND_ENV,
+    BUN_BASE_URL_ENV, BUN_BEARER_ENV, BUN_TOKEN_ENV, BUN_URL_ALIAS_ENV, MODEL_ENV,
+    WORKSPACE_ROOT_ENV,
 };
 use crate::gateway::{RivetServiceConfig, RivetSwarmService};
 use crate::http::{build_router, AppState};
@@ -95,19 +103,145 @@ pub const SETTINGS_JSON_ENV: &str = "PERI_SWARM_SETTINGS_JSON";
 pub const DEFAULT_BOOTSTRAP_BIND: &str = "127.0.0.1:8080";
 pub const DEFAULT_STORE_ENGINE: &str = "turso";
 
-/// Rivet endpoint/identity verified in `.peri/plans/S5-report.md` §2. A local
-/// engine is spawned on demand; the pool name is the deployment identity, so
-/// two processes serving it share actor state through the engine.
-const RIVET_ENDPOINT: &str = "http://127.0.0.1:6420";
-const RIVET_TOKEN: &str = "default";
-const RIVET_NAMESPACE: &str = "default";
-const RIVET_POOL: &str = "peri-swarm";
+/// Rivet engine endpoint (M1). A local engine is the default; an external one
+/// is reachable through the same configuration surface.
+pub const RIVET_ENDPOINT_ENV: &str = "PERI_SWARM_RIVET_ENDPOINT";
+/// **Name** of the environment variable that holds the engine token. Never the
+/// value: the token is resolved once in [`run`] and never stored in a config.
+pub const RIVET_TOKEN_ENV: &str = "PERI_SWARM_RIVET_TOKEN_ENV";
+/// Engine namespace (deployment identity).
+pub const RIVET_NAMESPACE_ENV: &str = "PERI_SWARM_RIVET_NAMESPACE";
+/// Engine pool name (deployment identity).
+pub const RIVET_POOL_ENV: &str = "PERI_SWARM_RIVET_POOL";
+/// Whether this process may start a local engine (`always`/`auto`) or must
+/// attach to an external one (`never`).
+pub const RIVET_ENGINE_SPAWN_ENV: &str = "PERI_SWARM_RIVET_ENGINE_SPAWN";
+
+/// Defaults match the constants used before M1 byte for byte, so an unchanged
+/// environment keeps the local development chain identical.
+pub const DEFAULT_RIVET_ENDPOINT: &str = "http://127.0.0.1:6420";
+/// The local engine's fixed development token. Only used for a loopback
+/// endpoint; a non-loopback endpoint must name its own variable.
+pub const DEFAULT_RIVET_TOKEN: &str = "default";
+pub const DEFAULT_RIVET_NAMESPACE: &str = "default";
+pub const DEFAULT_RIVET_POOL: &str = "peri-swarm";
+
+/// How this process relates to the engine process (M1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RivetEngineSpawn {
+    /// Start or reuse the local engine; only valid for a loopback endpoint.
+    Always,
+    /// Delegate start-or-reuse to RivetKit; only valid for a loopback endpoint.
+    Auto,
+    /// Never start an engine: the configured endpoint must already serve one.
+    Never,
+}
+
+impl RivetEngineSpawn {
+    fn parse(value: &str, variable: &'static str) -> Result<Self, ConfigError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "always" => Ok(Self::Always),
+            "auto" => Ok(Self::Auto),
+            "never" => Ok(Self::Never),
+            _ => Err(ConfigError::Invalid {
+                variable,
+                reason: "expected always, auto or never".to_owned(),
+            }),
+        }
+    }
+
+    fn is_local(self) -> bool {
+        matches!(self, Self::Always | Self::Auto)
+    }
+
+    /// Stable spelling for logs and errors (no secret involved).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Auto => "auto",
+            Self::Never => "never",
+        }
+    }
+
+    #[must_use]
+    pub fn rivetkit_mode(self) -> EngineSpawnMode {
+        match self {
+            Self::Always => EngineSpawnMode::Always,
+            Self::Auto => EngineSpawnMode::Auto,
+            Self::Never => EngineSpawnMode::Never,
+        }
+    }
+}
+
+/// Engine endpoint and deployment identity (M1).
+///
+/// The token **value** is deliberately absent: [`Self::token_env`] names the
+/// environment variable and [`run`] resolves it once, so neither `Debug` nor a
+/// startup log can render a credential.
+#[derive(Clone)]
+pub struct RivetConfig {
+    pub endpoint: Url,
+    pub token_env: Option<String>,
+    pub namespace: String,
+    pub pool: String,
+    pub engine_spawn: RivetEngineSpawn,
+}
+
+impl RivetConfig {
+    /// The endpoint in the spelling the engine client uses. `Url` always adds a
+    /// trailing `/`; the previous constants had none, so the default must be
+    /// byte-identical after stripping it.
+    #[must_use]
+    pub fn endpoint_string(&self) -> String {
+        let raw = self.endpoint.as_str();
+        raw.strip_suffix('/').unwrap_or(raw).to_owned()
+    }
+
+    /// Resolve the token value once. A named variable is re-checked at runtime
+    /// so a value present at parse time but unset later fails visibly.
+    fn resolve_token<F>(&self, lookup: F) -> Result<String, ConfigError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match &self.token_env {
+            Some(name) => match lookup(name) {
+                Some(value) if !value.trim().is_empty() => Ok(value),
+                Some(_) => Err(ConfigError::Invalid {
+                    variable: RIVET_TOKEN_ENV,
+                    reason: format!("{name} is set but empty"),
+                }),
+                None => Err(ConfigError::Invalid {
+                    variable: RIVET_TOKEN_ENV,
+                    reason: format!("{name} is not set"),
+                }),
+            },
+            // Loopback only: the local engine's fixed development token.
+            None => Ok(DEFAULT_RIVET_TOKEN.to_owned()),
+        }
+    }
+}
+
+impl std::fmt::Debug for RivetConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RivetConfig")
+            .field("endpoint", &self.endpoint)
+            .field("token_env", &self.token_env)
+            .field("namespace", &self.namespace)
+            .field("pool", &self.pool)
+            .field("engine_spawn", &self.engine_spawn)
+            .finish()
+    }
+}
 
 /// One model per actor (`design §0.4-3`); the channel is the SSE fan-out bound.
 const ACTOR_CHANNEL_CAPACITY: usize = 256;
 
 /// How long shutdown waits for the gateway/registry tasks before aborting.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Bound on the reachability probe for an engine this process must not spawn.
+const RIVET_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A parse or validation failure of the process environment.
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +250,10 @@ pub enum BootstrapError {
     Config(#[from] ConfigError),
     #[error("invalid remote workspace environment: {0}")]
     Environment(String),
+    /// The external engine is unreachable. Raised before either Loom database is
+    /// opened, so a failed start leaves no half-initialized process behind.
+    #[error("external Rivet engine at {endpoint} is not reachable: {reason}")]
+    RivetUnreachable { endpoint: String, reason: String },
     /// Opening the remote session store failed (credential, connection, schema).
     /// The inner text comes from `peri-resources` and contains no credential
     /// value.
@@ -149,6 +287,9 @@ pub struct BootstrapConfig {
     pub state_store_locator: Url,
     pub store_engine: String,
     pub store_token_env: String,
+    /// Engine endpoint and deployment identity (M1). Holds the token variable
+    /// name, never the token value.
+    pub rivet: RivetConfig,
     pub machine_id: Uuid,
     pub workspace_root: PathBuf,
     pub model: Option<String>,
@@ -177,17 +318,9 @@ impl BootstrapConfig {
             lookup(API_KEY_ENV).ok_or(ConfigError::MissingEnv(API_KEY_ENV))?,
         )?;
 
+        let allow_non_loopback = parse_bind_allow_non_loopback(&lookup)?;
         let bind_value = lookup(BIND_ENV).unwrap_or_else(|| DEFAULT_BOOTSTRAP_BIND.to_owned());
-        let bind_addr: SocketAddr = bind_value.parse().map_err(|_| ConfigError::Invalid {
-            variable: BIND_ENV,
-            reason: "expected host:port".to_owned(),
-        })?;
-        if !bind_addr.ip().is_loopback() {
-            return Err(ConfigError::Invalid {
-                variable: BIND_ENV,
-                reason: "must bind a loopback IP".to_owned(),
-            });
-        }
+        let bind_addr = parse_bind(&bind_value, BIND_ENV, allow_non_loopback)?;
 
         let locator_raw =
             lookup(SESSION_STORE_ENV).ok_or(ConfigError::MissingEnv(SESSION_STORE_ENV))?;
@@ -235,6 +368,8 @@ impl BootstrapConfig {
                 });
             }
         }
+
+        let rivet = rivet_config(&lookup, &store_token_env)?;
 
         let machine_id_raw =
             lookup(MACHINE_ID_ENV).ok_or(ConfigError::MissingEnv(MACHINE_ID_ENV))?;
@@ -329,6 +464,7 @@ impl BootstrapConfig {
             state_store_locator,
             store_engine,
             store_token_env,
+            rivet,
             machine_id,
             workspace_root,
             model,
@@ -392,9 +528,136 @@ impl BootstrapConfig {
     }
 }
 
+/// Parse the engine surface and cross-check it against the endpoint shape.
+///
+/// Contradictions fail here, at configuration time, instead of surfacing as a
+/// confusing connection error later:
+///
+/// - a non-loopback endpoint must use `never` (this process cannot spawn a
+///   local engine for a remote address) and must name its token variable;
+/// - the token variable must be a variable name, must not be the Loom
+///   credential variable, and must hold a non-empty value;
+/// - the loopback default reuses the local engine's fixed development token.
+fn rivet_config<F>(lookup: &F, store_token_env: &str) -> Result<RivetConfig, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint_value =
+        lookup(RIVET_ENDPOINT_ENV).unwrap_or_else(|| DEFAULT_RIVET_ENDPOINT.to_owned());
+    let endpoint = validate_rivet_endpoint(&endpoint_value, RIVET_ENDPOINT_ENV)?;
+    let loopback = is_loopback_endpoint(&endpoint);
+
+    let engine_spawn = match lookup(RIVET_ENGINE_SPAWN_ENV) {
+        Some(value) => RivetEngineSpawn::parse(&value, RIVET_ENGINE_SPAWN_ENV)?,
+        None => RivetEngineSpawn::Always,
+    };
+    if !loopback && engine_spawn.is_local() {
+        return Err(ConfigError::Invalid {
+            variable: RIVET_ENGINE_SPAWN_ENV,
+            reason: format!(
+                "must be `never` for the non-loopback engine endpoint {endpoint}; a local \
+                 engine is only spawned for a loopback endpoint"
+            ),
+        });
+    }
+
+    let token_env = match lookup(RIVET_TOKEN_ENV) {
+        Some(name) => {
+            if !is_env_var_name(&name) {
+                return Err(ConfigError::Invalid {
+                    variable: RIVET_TOKEN_ENV,
+                    reason: "expected an environment variable name, not a value".to_owned(),
+                });
+            }
+            if name == store_token_env {
+                return Err(ConfigError::Invalid {
+                    variable: RIVET_TOKEN_ENV,
+                    reason: format!(
+                        "must not name the store credential variable {STORE_TOKEN_ENV}; the \
+                         engine must never receive the Loom credential"
+                    ),
+                });
+            }
+            match lookup(&name) {
+                Some(value) if !value.trim().is_empty() => {}
+                Some(_) => {
+                    return Err(ConfigError::Invalid {
+                        variable: RIVET_TOKEN_ENV,
+                        reason: format!("{name} is set but empty"),
+                    });
+                }
+                None => {
+                    return Err(ConfigError::Invalid {
+                        variable: RIVET_TOKEN_ENV,
+                        reason: format!("{name} is not set"),
+                    });
+                }
+            }
+            Some(name)
+        }
+        None => {
+            if !loopback {
+                return Err(ConfigError::Invalid {
+                    variable: RIVET_TOKEN_ENV,
+                    reason: format!(
+                        "required for the non-loopback engine endpoint {endpoint}; name the \
+                         variable that holds the engine token"
+                    ),
+                });
+            }
+            None
+        }
+    };
+
+    let namespace = validate_rivet_identity(
+        lookup(RIVET_NAMESPACE_ENV).unwrap_or_else(|| DEFAULT_RIVET_NAMESPACE.to_owned()),
+        RIVET_NAMESPACE_ENV,
+    )?;
+    let pool = validate_rivet_identity(
+        lookup(RIVET_POOL_ENV).unwrap_or_else(|| DEFAULT_RIVET_POOL.to_owned()),
+        RIVET_POOL_ENV,
+    )?;
+
+    Ok(RivetConfig {
+        endpoint,
+        token_env,
+        namespace,
+        pool,
+        engine_spawn,
+    })
+}
+
 /// Run the process until shutdown. Errors are startup/runtime failures of this
 /// process; none of them is repaired by opening a local store.
 pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
+    // The bind opt-in is a deployment decision, not a per-request one: say it
+    // once at startup, with the two facts that constrain it.
+    if !config.bind_addr.ip().is_loopback() {
+        tracing::warn!(
+            bind = %config.bind_addr,
+            "gateway binds a non-loopback address: the deployment Bearer token is the only \
+             authentication and TLS must be terminated by the trusted ingress in front of \
+             this process"
+        );
+    }
+
+    // Resolve the engine token once, before any Loom connection exists. Only the
+    // endpoint/namespace/pool/spawn are ever logged; the token is not.
+    let rivet_token = config
+        .rivet
+        .resolve_token(|name| std::env::var(name).ok())?;
+    let rivet_endpoint = config.rivet.endpoint_string();
+    tracing::info!(
+        endpoint = %rivet_endpoint,
+        namespace = %config.rivet.namespace,
+        pool = %config.rivet.pool,
+        engine_spawn = config.rivet.engine_spawn.as_str(),
+        "rivet engine configuration"
+    );
+    // For an external engine, fail before opening either database: no local
+    // engine is started and a half-initialized process must not remain.
+    preflight_external_engine(&config.rivet).await?;
+
     let environment = RemoteWorkspaceEnvironment::virtual_workspace(
         &config.machine_id.to_string(),
         config.workspace_root.clone(),
@@ -447,10 +710,10 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
     let store = deployment.store();
 
     let client = Client::new(
-        ClientConfig::new(RIVET_ENDPOINT)
-            .token(RIVET_TOKEN)
-            .namespace(RIVET_NAMESPACE)
-            .pool_name(RIVET_POOL),
+        ClientConfig::new(rivet_endpoint.clone())
+            .token(rivet_token.clone())
+            .namespace(config.rivet.namespace.clone())
+            .pool_name(config.rivet.pool.clone()),
     );
     let service = Arc::new(RivetSwarmService::new(
         client,
@@ -489,11 +752,11 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
         let shutdown = shutdown.clone();
         let registry = swarm::registry();
         let serve_config = ServeConfig {
-            endpoint: RIVET_ENDPOINT.to_owned(),
-            token: Some(RIVET_TOKEN.to_owned()),
-            namespace: RIVET_NAMESPACE.to_owned(),
-            pool_name: RIVET_POOL.to_owned(),
-            engine_spawn: EngineSpawnMode::Always,
+            endpoint: rivet_endpoint.clone(),
+            token: Some(rivet_token.clone()),
+            namespace: config.rivet.namespace.clone(),
+            pool_name: config.rivet.pool.clone(),
+            engine_spawn: config.rivet.engine_spawn.rivetkit_mode(),
             ..ServeConfig::default()
         };
         tokio::spawn(async move {
@@ -506,8 +769,10 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
 
     tracing::info!(
         addr = %bound,
-        rivet = RIVET_ENDPOINT,
-        pool = RIVET_POOL,
+        rivet = %rivet_endpoint,
+        namespace = %config.rivet.namespace,
+        pool = %config.rivet.pool,
+        engine_spawn = config.rivet.engine_spawn.as_str(),
         "peri-swarm gateway is listening"
     );
 
@@ -563,6 +828,54 @@ pub async fn run(config: BootstrapConfig) -> Result<(), BootstrapError> {
     match close_failure {
         Some(error) => Err(error),
         None => outcome,
+    }
+}
+
+/// A bounded TCP probe of an engine this process must not spawn.
+///
+/// It only proves that a listener exists at the configured address; the real
+/// handshake still happens in the registry task and reports its own failure.
+/// The probe runs before either Loom database is opened so an unreachable
+/// engine stops the process without a half-initialized deployment.
+async fn preflight_external_engine(rivet: &RivetConfig) -> Result<(), BootstrapError> {
+    if rivet.engine_spawn.is_local() {
+        return Ok(());
+    }
+    let endpoint = rivet.endpoint_string();
+    let unreachable = |reason: String| BootstrapError::RivetUnreachable {
+        endpoint: endpoint.clone(),
+        reason: format!(
+            "{reason} (this process does not spawn a local engine; \
+             {RIVET_ENGINE_SPAWN_ENV}=never)"
+        ),
+    };
+    let host = rivet
+        .endpoint
+        .host_str()
+        .ok_or_else(|| unreachable("the endpoint has no host".to_owned()))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned();
+    let port = rivet
+        .endpoint
+        .port_or_known_default()
+        .ok_or_else(|| unreachable("the endpoint has no port".to_owned()))?;
+
+    match tokio::time::timeout(
+        RIVET_PREFLIGHT_TIMEOUT,
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => {
+            tracing::info!(endpoint = %endpoint, "external rivet engine accepted a TCP probe");
+            Ok(())
+        }
+        Ok(Err(error)) => Err(unreachable(format!("TCP connect failed: {error}"))),
+        Err(_) => Err(unreachable(format!(
+            "TCP connect timed out after {} seconds",
+            RIVET_PREFLIGHT_TIMEOUT.as_secs()
+        ))),
     }
 }
 

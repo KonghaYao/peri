@@ -6,6 +6,10 @@ use url::Url;
 
 pub const API_KEY_ENV: &str = "PERI_SWARM_API_KEY";
 pub const BIND_ENV: &str = "PERI_SWARM_BIND";
+/// Explicit opt-in for a non-loopback gateway bind (M1). Bearer is still the
+/// only authentication, so the flag is only meaningful behind a trusted
+/// ingress that terminates TLS.
+pub const BIND_ALLOW_NON_LOOPBACK_ENV: &str = "PERI_SWARM_BIND_ALLOW_NON_LOOPBACK";
 pub const WORKSPACE_ROOT_ENV: &str = "PERI_SWARM_WORKSPACE_ROOT";
 pub const STORE_LOCATOR_ENV: &str = "PERI_SWARM_STORE_LOCATOR";
 pub const STORE_CREDENTIAL_ENV: &str = "PERI_SWARM_STORE_CREDENTIAL_ENV";
@@ -141,13 +145,9 @@ impl SwarmConfig {
         let api_key_value = lookup(API_KEY_ENV).ok_or(ConfigError::MissingEnv(API_KEY_ENV))?;
         let api_key = DeploymentApiKey::new(api_key_value)?;
 
+        let allow_non_loopback = parse_bind_allow_non_loopback(&lookup)?;
         let bind_value = lookup(BIND_ENV).unwrap_or_else(|| DEFAULT_BIND.to_owned());
-        let bind_addr: SocketAddr = bind_value
-            .parse()
-            .map_err(|_| ConfigError::invalid(BIND_ENV, "expected host:port"))?;
-        if !bind_addr.ip().is_loopback() {
-            return Err(ConfigError::invalid(BIND_ENV, "must bind a loopback IP"));
-        }
+        let bind_addr = parse_bind(&bind_value, BIND_ENV, allow_non_loopback)?;
 
         let workspace_value = match lookup(WORKSPACE_ROOT_ENV) {
             Some(value) => PathBuf::from(value),
@@ -223,6 +223,52 @@ where
     Ok(Duration::from_millis(heartbeat_ms))
 }
 
+/// The one gateway-bind decision. `BootstrapConfig` and [`SwarmConfig`] both
+/// call this so the loopback rule (and the exact error) cannot drift apart.
+///
+/// A non-loopback address is only accepted when the operator opted in:
+/// Bearer remains the only authentication and TLS termination is the
+/// responsibility of the trusted ingress in front of this process.
+pub(crate) fn parse_bind(
+    value: &str,
+    variable: &'static str,
+    allow_non_loopback: bool,
+) -> Result<SocketAddr, ConfigError> {
+    let bind_addr: SocketAddr = value
+        .parse()
+        .map_err(|_| ConfigError::invalid(variable, "expected host:port"))?;
+    if !allow_non_loopback && !bind_addr.ip().is_loopback() {
+        return Err(ConfigError::invalid(
+            variable,
+            format!(
+                "must bind a loopback IP; set {BIND_ALLOW_NON_LOOPBACK_ENV}=1 only behind a \
+                 trusted ingress, because the deployment Bearer token is the only \
+                 authentication and that ingress must terminate TLS"
+            ),
+        ));
+    }
+    Ok(bind_addr)
+}
+
+/// `PERI_SWARM_BIND_ALLOW_NON_LOOPBACK`: `1/true/yes/on` or `0/false/no/off`.
+/// Any other value fails the start instead of guessing.
+pub(crate) fn parse_bind_allow_non_loopback<F>(lookup: &F) -> Result<bool, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(value) = lookup(BIND_ALLOW_NON_LOOPBACK_ENV) else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(ConfigError::invalid(
+            BIND_ALLOW_NON_LOOPBACK_ENV,
+            "expected one of 1/true/yes/on or 0/false/no/off",
+        )),
+    }
+}
+
 fn canonical_directory(path: &Path) -> Result<PathBuf, ConfigError> {
     let canonical = std::fs::canonicalize(path).map_err(|error| ConfigError::Io {
         variable: WORKSPACE_ROOT_ENV,
@@ -259,6 +305,88 @@ pub(crate) fn validate_store_locator(
         ));
     }
     Ok(url)
+}
+
+/// Rivet engine endpoint (M1): plaintext `http` only, because the pinned
+/// client exposes no TLS/CA configuration. `https` is rejected explicitly
+/// rather than silently downgraded; TLS termination for the engine needs its
+/// own design.
+///
+/// The endpoint must carry an explicit port and no userinfo, query, fragment
+/// or path (empty or `/`). Callers use the trailing-slash-free spelling so the
+/// default stays byte-identical to the former constant.
+pub(crate) fn validate_rivet_endpoint(
+    value: &str,
+    variable: &'static str,
+) -> Result<Url, ConfigError> {
+    let url = Url::parse(value).map_err(|_| ConfigError::invalid(variable, "expected a URL"))?;
+    if url.scheme() == "https" {
+        return Err(ConfigError::invalid(
+            variable,
+            "M1 supports only private plaintext engine endpoints; TLS termination for the \
+             engine needs a separate design",
+        ));
+    }
+    if url.scheme() != "http" {
+        return Err(ConfigError::invalid(variable, "scheme must be http"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ConfigError::invalid(
+            variable,
+            "embedded credentials are not allowed; name the token variable instead",
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(ConfigError::invalid(
+            variable,
+            "query and fragment are not allowed",
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(ConfigError::invalid(variable, "host is required"));
+    }
+    if url.port().is_none() {
+        return Err(ConfigError::invalid(variable, "explicit port is required"));
+    }
+    if !matches!(url.path(), "" | "/") {
+        return Err(ConfigError::invalid(variable, "path must be empty or /"));
+    }
+    Ok(url)
+}
+
+/// Deployment identity for the engine (namespace and pool): non-empty, no
+/// whitespace, at most 128 characters. Values are kept verbatim.
+pub(crate) fn validate_rivet_identity(
+    value: String,
+    variable: &'static str,
+) -> Result<String, ConfigError> {
+    if value.trim().is_empty() {
+        return Err(ConfigError::invalid(variable, "must not be empty"));
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err(ConfigError::invalid(
+            variable,
+            "must not contain whitespace",
+        ));
+    }
+    if value.chars().count() > 128 {
+        return Err(ConfigError::invalid(
+            variable,
+            "must be at most 128 characters",
+        ));
+    }
+    Ok(value)
+}
+
+/// `127.0.0.0/8`, `::1` and `localhost` are loopback. The check is on the
+/// parsed host, so `127.0.0.1.example.test` is not mistaken for an address.
+pub(crate) fn is_loopback_endpoint(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
 }
 
 pub(crate) fn validate_bun_url(value: &str, variable: &'static str) -> Result<Url, ConfigError> {
