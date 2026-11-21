@@ -163,21 +163,23 @@ impl GitBaseline {
         intent: Option<&peri_acp_types::workflow::WorkflowWriteIntent>,
     ) -> Result<GitObservation, String> {
         // cwd 本身不可用属于启动输入错误，不是“Git 采样失败”。
-        cwd.canonicalize()
+        let cwd = cwd
+            .canonicalize()
             .map_err(|error| format!("cannot canonicalize workflow cwd: {error}"))?;
         if let Some(intent) = intent {
             if matches!(
                 intent,
                 peri_acp_types::workflow::WorkflowWriteIntent::Write { .. }
             ) {
-                let baseline = Self::capture(cwd)?;
+                let baseline = Self::capture(&cwd)?;
                 baseline.validate_write_intent(intent)?;
                 return Ok(GitObservation::Captured(baseline));
             }
         }
-        Ok(match Self::capture(cwd) {
+        Ok(match Self::capture(&cwd) {
             Ok(baseline) => GitObservation::Captured(baseline),
-            Err(error) => classify_unobserved(cwd, error),
+            // 用规范化路径探测 `.git` marker：符号链接与真实路径必须是同一结论。
+            Err(error) => classify_unobserved(&cwd, error),
         })
     }
 
@@ -293,6 +295,18 @@ impl GitBaseline {
         Ok(())
     }
 
+    /// workflow 自身 journal 目录（相对 repo root）。
+    ///
+    /// 该目录由宿主在运行期间写入；未把它加入 `.gitignore` 的仓库不能因此把本 run
+    /// 自己的产物判成外部变化。
+    fn workflow_owned_prefix(&self) -> Option<PathBuf> {
+        self.cwd
+            .join(super::workflow_journal_store::WORKFLOW_RUNS_DIR)
+            .strip_prefix(&self.repo_root)
+            .ok()
+            .map(Path::to_path_buf)
+    }
+
     pub fn verify_postcondition(
         &self,
         intent: Option<&peri_acp_types::workflow::WorkflowWriteIntent>,
@@ -323,6 +337,9 @@ impl GitBaseline {
         let after_status = parse_status_paths(&after.status_porcelain_v2).map_err(|error| {
             observation_incomplete(format!("cannot parse post-run git status: {error}"))
         })?;
+        let owned = self.workflow_owned_prefix();
+        let before = strip_workflow_owned(before, owned.as_deref());
+        let after_status = strip_workflow_owned(after_status, owned.as_deref());
         let changed_paths: BTreeSet<String> = before
             .keys()
             .chain(after_status.keys())
@@ -420,13 +437,18 @@ impl GitBaseline {
                 "git HEAD changed outside the run's write footprint; attribution unavailable",
             ));
         }
-        if after.status_porcelain_v2 != self.status_porcelain_v2 {
-            let before = parse_status_paths(&self.status_porcelain_v2).map_err(|error| {
-                observation_incomplete(format!("cannot parse baseline git status: {error}"))
-            })?;
-            let after_status = parse_status_paths(&after.status_porcelain_v2).map_err(|error| {
-                observation_incomplete(format!("cannot parse post-run git status: {error}"))
-            })?;
+        let before = parse_status_paths(&self.status_porcelain_v2).map_err(|error| {
+            observation_incomplete(format!("cannot parse baseline git status: {error}"))
+        })?;
+        let after_status = parse_status_paths(&after.status_porcelain_v2).map_err(|error| {
+            observation_incomplete(format!("cannot parse post-run git status: {error}"))
+        })?;
+        // workflow 自身 journal 目录不计入对账：未忽略 `.claude` 的仓库不能把
+        // 本 run 刚写下的运行目录当成外部变化。
+        let owned = self.workflow_owned_prefix();
+        let before = strip_workflow_owned(before, owned.as_deref());
+        let after_status = strip_workflow_owned(after_status, owned.as_deref());
+        if before != after_status {
             let changed_paths: BTreeSet<String> = before
                 .keys()
                 .chain(after_status.keys())
@@ -453,6 +475,7 @@ fn parse_status_paths(status: &[u8]) -> Result<BTreeMap<String, String>, String>
                 .splitn(10, ' ')
                 .nth(9)
                 .and_then(|value| value.split('\t').next()),
+            Some(b'u') => line.splitn(11, ' ').nth(10),
             Some(b'?') | Some(b'!') => line.get(2..),
             _ => None,
         }
@@ -460,6 +483,20 @@ fn parse_status_paths(status: &[u8]) -> Result<BTreeMap<String, String>, String>
         records.insert(path.to_string(), line.to_string());
     }
     Ok(records)
+}
+
+/// 移除 workflow 自身 journal 目录下的记录；其余路径保持不变。
+fn strip_workflow_owned(
+    records: BTreeMap<String, String>,
+    owned: Option<&Path>,
+) -> BTreeMap<String, String> {
+    let Some(owned) = owned else {
+        return records;
+    };
+    records
+        .into_iter()
+        .filter(|(path, _)| !Path::new(path).starts_with(owned))
+        .collect()
 }
 
 fn path_is_allowed(path: &str, allowed: &str) -> bool {

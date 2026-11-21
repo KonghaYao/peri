@@ -62,11 +62,9 @@ fn init_git_repository(root: &std::path::Path) {
     run(&["init", "-q"]);
     std::fs::write(root.join("tracked.txt"), "base\n")
         .expect("the test fixture file must be writable");
-    // workflow journal 位于 cwd/.claude；fixture 必须忽略它，否则终态对账会把
-    // 本 run 自己的运行目录当成外部变化。
-    std::fs::write(root.join(".gitignore"), ".claude/\n")
-        .expect("the test fixture file must be writable");
-    run(&["add", "tracked.txt", ".gitignore"]);
+    // 故意不忽略 `.claude/`：journal 由宿主在本 run 内创建，终态对账必须排除
+    // 自身产物，而不能依赖仓库的 ignore 规则。
+    run(&["add", "tracked.txt"]);
     run(&[
         "-c",
         "user.name=Peri Test",

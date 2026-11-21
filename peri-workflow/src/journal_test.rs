@@ -522,6 +522,154 @@ fn test_git_baseline_detects_unattributed_change_without_restoring_it() {
     );
 }
 
+/// 未合并条目（`u`）也要能被解析：始终比较 map（而非原始字节）后，
+/// 冲突中的仓库不能因为解析失败被读成观测不完整。
+#[test]
+fn unmerged_porcelain_entries_do_not_claim_a_change() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "init",
+        "-q",
+    ]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    run_git(&["checkout", "-q", "-b", "side"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "side\n")
+        .expect("the test fixture file must be writable");
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qam",
+        "side",
+    ]);
+    run_git(&["checkout", "-q", "-"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "main\n")
+        .expect("the test fixture file must be writable");
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qam",
+        "main",
+    ]);
+    let merge = std::process::Command::new("git")
+        .args(["merge", "side"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("the merge fixture result is required for this assertion");
+    assert!(!merge.success(), "fixture 必须进入未合并状态");
+
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    baseline
+        .verify_unchanged()
+        .expect("未合并条目本身不是运行带来的变化");
+}
+
+#[test]
+fn workflow_journal_is_excluded_but_unrelated_untracked_files_are_not() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    // 刻意不忽略 `.claude/`：宿主自己的运行产物不得被当成外部变化。
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    let run_dir = tmp
+        .path()
+        .join(".claude")
+        .join("workflow-runs")
+        .join("run-1");
+    std::fs::create_dir_all(&run_dir).expect("the run directory must be creatable");
+    std::fs::write(run_dir.join("script.js"), "return null")
+        .expect("the test fixture file must be writable");
+    baseline
+        .verify_unchanged()
+        .expect("本 run 自己的 journal 不构成外部变化");
+
+    std::fs::write(tmp.path().join("notes.txt"), "external\n")
+        .expect("the test fixture file must be writable");
+    let failure = baseline
+        .verify_unchanged()
+        .expect_err("journal 之外的未跟踪文件仍必须报告");
+    assert!(
+        matches!(
+            failure,
+            crate::journal::PostconditionFailure::Unattributed(_)
+        ),
+        "无 write footprint 时变化只能判为未归因: {failure}"
+    );
+    assert!(failure.to_string().contains("notes.txt"));
+}
+
+/// 符号链接指向的同一目录必须得到同一分类：损坏的仓库是“无法观测”，
+/// 不能因为按字面路径找不到 `.git` marker 而读成“没有仓库范围”。
+#[cfg(unix)]
+#[test]
+fn broken_repository_behind_a_symlink_is_an_incomplete_observation() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    let repo = tmp.path().join("repo");
+    let sub = repo.join("sub");
+    std::fs::create_dir_all(&sub).expect("the test fixture directory must be creatable");
+    std::fs::write(repo.join(".git"), "gitdir: /nonexistent/peri-issue-522\n")
+        .expect("the test fixture file must be writable");
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&sub, &alias).expect("the test fixture symlink must be creatable");
+
+    let observation = GitBaseline::capture_for_intent(&alias, None)
+        .expect("sampling failure must not fail start");
+    assert!(
+        matches!(observation, GitObservation::Incomplete(_)),
+        "同一目录经符号链接访问仍是采样失败: {observation:?}"
+    );
+}
+
 #[test]
 fn test_write_postcondition_ignores_unchanged_preexisting_dirty_path() {
     let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
