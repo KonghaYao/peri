@@ -22,7 +22,8 @@ pub use turso::{
 
 use crate::domain::{
     EnvironmentRef, InputState, ItemKind, ItemOrder, ItemSource, ItemView, McpToolSpec,
-    SessionState, SwarmError,
+    OfficialTurn, PromptCacheOptions, SessionState, SessionsWindow, SwarmError, TurnStatus,
+    TurnsWindow,
 };
 
 /// Failure classes of the store port. `Unavailable` and `Conflict` are reported,
@@ -69,6 +70,10 @@ pub struct SwarmSessionRow {
     /// rows with `NULL` read back the same way.
     pub mcp_tools: Vec<McpToolSpec>,
     pub environment: EnvironmentRef,
+    /// Caller metadata (`metadata_json`). `NULL`/absent reads as an empty map.
+    pub metadata: std::collections::BTreeMap<String, String>,
+    /// Session-default prompt cache lifetime (`prompt_cache_options_json`).
+    pub prompt_cache_options: Option<PromptCacheOptions>,
     pub created_at: String,
     pub last_activity_at: String,
     pub last_item_seq: u64,
@@ -80,6 +85,61 @@ pub struct SwarmSessionUpdate {
     pub state: SessionState,
     pub last_item_seq: u64,
     pub last_activity_at: String,
+}
+
+/// One `sessions.update` write (`POST /sessions/{id}`), all fields optional.
+///
+/// `None` keeps the stored value. `Some(empty)` replaces metadata with an empty
+/// map (the official "clear" spelling); `Some(None)` clears the prompt cache
+/// option. `model` and `mcp_tools` are replaced when present.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwarmSessionPatch {
+    pub logical_id: String,
+    pub model: Option<String>,
+    pub mcp_tools: Option<Vec<McpToolSpec>>,
+    pub metadata: Option<std::collections::BTreeMap<String, String>>,
+    pub prompt_cache_options: Option<Option<PromptCacheOptions>>,
+    pub last_activity_at: Option<String>,
+}
+
+/// One persisted turn (`swarm_turns`).
+///
+/// Ordering is `(created_at, turn_id)`: `created_at` is the Unix second when
+/// the turn opened, and `turn_id` is the unique tie-break when two turns share
+/// a second. Timestamps are Unix seconds, matching the official `Turn` shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwarmTurnRow {
+    pub logical_id: String,
+    pub turn_id: String,
+    pub status: TurnStatus,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub error: Option<Value>,
+    pub usage: Option<Value>,
+    pub subagent_id: Option<String>,
+}
+
+impl SwarmTurnRow {
+    /// Public projection. `agent_id` is the gateway's single root convention;
+    /// `subagent_id`/`usage` stay whatever the caller persisted (today both
+    /// are always `None`).
+    #[must_use]
+    pub fn to_official(&self) -> OfficialTurn {
+        OfficialTurn {
+            id: self.turn_id.clone(),
+            object: "agent.session.turn".to_owned(),
+            agent_id: "root".to_owned(),
+            session_id: self.logical_id.clone(),
+            status: self.status.as_str().to_owned(),
+            created_at: self.created_at,
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            subagent_id: self.subagent_id.clone(),
+            error: self.error.clone(),
+            usage: self.usage.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -257,6 +317,23 @@ pub trait SwarmStore: Send + Sync {
         logical_id: &str,
     ) -> Result<Option<SwarmSessionRow>, StoreError>;
     async fn swarm_update_session(&self, update: SwarmSessionUpdate) -> Result<(), StoreError>;
+    /// Replace the mutable `sessions.update` fields. Absent fields keep their
+    /// stored value. Returns `NotFound` when the row does not exist.
+    async fn swarm_patch_session(&self, patch: SwarmSessionPatch) -> Result<(), StoreError>;
+    /// One keyset page over `(logical_id, order)` with metadata/agent filters.
+    ///
+    /// Returns at most `window.limit + 1` rows so the caller can derive
+    /// `has_more` without a second query.
+    async fn swarm_list_sessions(
+        &self,
+        window: &SessionsWindow,
+    ) -> Result<Vec<SwarmSessionRow>, StoreError>;
+    /// Delete every Swarm-owned row of one session.
+    ///
+    /// The implementation must delete `swarm_sessions`, `swarm_items`,
+    /// `swarm_inputs`, `swarm_turns` and `swarm_bindings` as one unit: a
+    /// partial delete that reports success is a contract violation.
+    async fn swarm_delete_session(&self, logical_id: &str) -> Result<(), StoreError>;
 
     async fn swarm_append_item(&self, row: SwarmItemRow) -> Result<(), StoreError>;
     /// Ascending page with `seq > after`.
@@ -313,4 +390,40 @@ pub trait SwarmStore: Send + Sync {
         &self,
         logical_env_id: &str,
     ) -> Result<Option<SwarmBindingRow>, StoreError>;
+
+    /// Insert or replace one turn row.
+    ///
+    /// `begin_turn` writes `in_progress`; the terminal write replaces status,
+    /// `started_at`/`completed_at`, `error`, `usage` and `subagent_id` while
+    /// keeping the opening `created_at`.
+    async fn swarm_upsert_turn(&self, row: SwarmTurnRow) -> Result<(), StoreError>;
+    async fn swarm_get_turn(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<SwarmTurnRow>, StoreError>;
+    /// Keyset page over `(created_at, turn_id)`; `after` must already be
+    /// resolved to an existing turn by the caller. Returns at most
+    /// `window.limit + 1` rows.
+    async fn swarm_turn_page(
+        &self,
+        logical_id: &str,
+        window: &TurnsWindow,
+    ) -> Result<Vec<SwarmTurnRow>, StoreError>;
+    /// Close every non-terminal turn of a session (crash reconciliation).
+    /// Returns the number of rows updated.
+    async fn swarm_close_open_turns(
+        &self,
+        logical_id: &str,
+        status: TurnStatus,
+        completed_at: i64,
+        error: Option<Value>,
+    ) -> Result<u64, StoreError>;
+    /// Whether the session still owns a non-terminal (`queued`/`in_progress`/
+    /// `waiting`) turn row.
+    ///
+    /// A crash can leave the session row `idle` after the turn row outlived its
+    /// writer, so `session.state` alone cannot answer "was this turn closed?".
+    /// This is the read side of [`Self::swarm_close_open_turns`].
+    async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError>;
 }

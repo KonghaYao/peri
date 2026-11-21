@@ -8,6 +8,7 @@ mod in_memory;
 
 pub use in_memory::{InMemorySwarmService, ServiceCall, ServiceConfig, TurnPolicy};
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -19,9 +20,11 @@ use tokio::sync::broadcast;
 
 use crate::domain::{
     EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
-    McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn, SessionView,
-    StreamEvent, SwarmError, TurnStatus,
+    McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn,
+    PromptCacheOptions, SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent,
+    SwarmError, TurnPage, TurnStatus, TurnsWindow,
 };
+use crate::store::{store_failure, SwarmSessionRow, SwarmStore};
 
 /// Fully validated create command. The HTTP layer owns request parsing and cwd
 /// normalization; the service owns identity and turn semantics.
@@ -34,6 +37,16 @@ pub struct CreateSessionCommand {
     /// Caller-declared MCP tools, already normalized by the HTTP layer. S8a
     /// persists and compares them; ACP injection is S8a2 (`design §5.1`).
     pub mcp_tools: Vec<McpToolSpec>,
+    /// Caller metadata, validated by the HTTP layer.
+    ///
+    /// Tri-state so an attach can tell an omitted field (keep the stored
+    /// value) from an explicit `{}`/`null` (assert "no metadata"). Only a
+    /// provided value that differs from the stored one is an identity
+    /// conflict.
+    pub metadata: UpdateField<BTreeMap<String, String>>,
+    /// Session-default prompt cache lifetime, validated by the HTTP layer.
+    /// Same omission/clear/value distinction as [`Self::metadata`].
+    pub prompt_cache_options: UpdateField<PromptCacheOptions>,
     pub initial_input: Option<String>,
     pub environment: EnvironmentKind,
     /// Caller-supplied hosted environment id (`environment.environment_id`).
@@ -53,6 +66,142 @@ pub struct CreateSessionCommand {
     /// the deferred [`PendingTurn`] reuses its `turn_id`, so running it later
     /// cannot duplicate the input.
     pub defer_initial_turn: bool,
+}
+
+impl CreateSessionCommand {
+    /// Metadata to persist for a new row: omission, explicit `null` and `{}`
+    /// all mean "no metadata" on create.
+    #[must_use]
+    pub fn metadata_for_new_row(&self) -> BTreeMap<String, String> {
+        match &self.metadata {
+            UpdateField::Set(metadata) => metadata.clone(),
+            UpdateField::Keep | UpdateField::Clear => BTreeMap::new(),
+        }
+    }
+
+    /// Prompt cache options to persist for a new row (same rule as
+    /// [`Self::metadata_for_new_row`]).
+    #[must_use]
+    pub fn prompt_cache_options_for_new_row(&self) -> Option<PromptCacheOptions> {
+        match &self.prompt_cache_options {
+            UpdateField::Set(options) => Some(*options),
+            UpdateField::Keep | UpdateField::Clear => None,
+        }
+    }
+
+    /// Whether an attach request's metadata disagrees with the stored value.
+    ///
+    /// Omission keeps the stored value (`false`). An explicit value, including
+    /// `null`/`{}`, must equal it; only a difference is an identity conflict.
+    #[must_use]
+    pub fn metadata_conflicts_with(&self, stored: &BTreeMap<String, String>) -> bool {
+        match &self.metadata {
+            UpdateField::Keep => false,
+            UpdateField::Clear => !stored.is_empty(),
+            UpdateField::Set(metadata) => metadata != stored,
+        }
+    }
+
+    /// Whether an attach request's prompt cache options disagree with the
+    /// stored value; `null` means "unset".
+    #[must_use]
+    pub fn prompt_cache_options_conflict_with(&self, stored: &Option<PromptCacheOptions>) -> bool {
+        match &self.prompt_cache_options {
+            UpdateField::Keep => false,
+            UpdateField::Clear => stored.is_some(),
+            UpdateField::Set(options) => stored.as_ref() != Some(options),
+        }
+    }
+}
+
+/// Tri-state write used by `sessions.update` across the process boundary.
+///
+/// Serde maps an omitted field (through `#[serde(default)]`) to [`Keep`] and an
+/// explicit `null` to [`Clear`]. A plain `Option<Option<T>>` cannot express
+/// this: `null` deserializes as the outer `None`, i.e. "keep".
+///
+/// [`Keep`]: UpdateField::Keep
+/// [`Clear`]: UpdateField::Clear
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UpdateField<T> {
+    #[default]
+    Keep,
+    Clear,
+    Set(T),
+}
+
+impl<T> UpdateField<T> {
+    #[must_use]
+    pub fn is_keep(&self) -> bool {
+        matches!(self, Self::Keep)
+    }
+}
+
+impl<T: Serialize> Serialize for UpdateField<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Keep | Self::Clear => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for UpdateField<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Null => Ok(Self::Clear),
+            value => serde_json::from_value(value)
+                .map(Self::Set)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+/// Fully validated `sessions.update` command (official `SessionUpdateParams`).
+///
+/// `None` keeps the stored value for `model`/`mcp_tools`; the tri-state fields
+/// distinguish omission, explicit `null` (clear) and a replacement.
+#[derive(Clone, Debug, Default)]
+pub struct SessionUpdateCommand {
+    pub model: Option<String>,
+    pub mcp_tools: Option<Vec<McpToolSpec>>,
+    pub metadata: UpdateField<BTreeMap<String, String>>,
+    pub prompt_cache_options: UpdateField<PromptCacheOptions>,
+}
+
+impl SessionUpdateCommand {
+    /// Whether the update changes the ACP host configuration (`model` or
+    /// `mcpServers`). Such a change requires a host restart to take effect.
+    #[must_use]
+    pub fn changes_host(&self) -> bool {
+        self.model.is_some() || self.mcp_tools.is_some()
+    }
+
+    /// Store-level prompt cache write.
+    #[must_use]
+    pub fn prompt_cache_patch(&self) -> Option<Option<PromptCacheOptions>> {
+        match self.prompt_cache_options {
+            UpdateField::Keep => None,
+            UpdateField::Clear => Some(None),
+            UpdateField::Set(options) => Some(Some(options)),
+        }
+    }
+
+    /// Store-level metadata write; `Clear` becomes an empty replacement.
+    #[must_use]
+    pub fn metadata_patch(&self) -> Option<BTreeMap<String, String>> {
+        match &self.metadata {
+            UpdateField::Keep => None,
+            UpdateField::Clear => Some(BTreeMap::new()),
+            UpdateField::Set(metadata) => Some(metadata.clone()),
+        }
+    }
 }
 
 /// Create response payload shared by the in-memory fake and the actor.
@@ -645,6 +794,179 @@ fn previous_turn(
     }
 }
 
+/// Project one persisted row into the public session shape.
+///
+/// `turn` is the live in-process turn slot: its presence is what makes
+/// `status=in_progress` even before the row state catches up.
+#[must_use]
+pub(crate) fn project_session(
+    row: &SwarmSessionRow,
+    turn: Option<crate::domain::TurnView>,
+    sandbox: Option<crate::domain::SandboxView>,
+) -> SessionView {
+    let status = crate::domain::SessionStatus::project(row.state, turn.is_some());
+    SessionView {
+        id: row.logical_id.clone(),
+        object: "agent.session".to_owned(),
+        logical_id: row.logical_id.clone(),
+        root_session_id: row.root_session_id.clone(),
+        cwd: row.cwd.clone(),
+        state: row.state,
+        status,
+        turn: turn.unwrap_or_default(),
+        last_item_seq: row.last_item_seq,
+        created_at: row.created_at.clone(),
+        last_activity_at: row.last_activity_at.clone(),
+        agent: crate::domain::AgentView {
+            model: row.model.clone(),
+            instructions: row.instructions.clone(),
+        },
+        environment: row.environment.clone(),
+        sandbox,
+        metadata: row.metadata.clone(),
+        prompt_cache_options: row.prompt_cache_options,
+    }
+}
+
+/// Project the booked Bun environment without contacting Bun (`design §4.5`).
+pub(crate) async fn sandbox_view(
+    store: &dyn SwarmStore,
+    row: &SwarmSessionRow,
+) -> Result<Option<crate::domain::SandboxView>, SwarmError> {
+    if row.environment.kind != EnvironmentKind::OpenAiHosted {
+        return Ok(None);
+    }
+    let Some(env_id) = row.environment.id.as_deref() else {
+        return Ok(None);
+    };
+    let binding = store
+        .swarm_get_binding(env_id)
+        .await
+        .map_err(|error| store_failure("get_binding", error))?;
+    Ok(binding.map(|binding| crate::domain::SandboxView {
+        logical_env_id: binding.logical_env_id,
+        sandbox_id: Some(binding.sandbox_id),
+        run_id: binding.last_run_id,
+        state: None,
+        workspace_path: Some(binding.workspace_path),
+    }))
+}
+
+/// One `sessions.list` page from the store (shared by both services).
+pub(crate) async fn list_sessions_from_store(
+    store: &dyn SwarmStore,
+    window: &SessionsWindow,
+) -> Result<SessionPage, SwarmError> {
+    if window.limit == 0 || window.limit > SessionsWindow::MAX_LIMIT {
+        return Err(SwarmError::invalid_query(format!(
+            "limit must be within 1..={}",
+            SessionsWindow::MAX_LIMIT
+        )));
+    }
+    let mut rows = store
+        .swarm_list_sessions(window)
+        .await
+        .map_err(|error| store_failure("list_sessions", error))?;
+    let probe = rows.len();
+    rows.truncate(window.limit as usize);
+    let has_more = probe > rows.len();
+    let next_cursor = has_more
+        .then(|| rows.last().map(|row| row.logical_id.clone()))
+        .flatten();
+    let mut data = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let sandbox = sandbox_view(store, row).await?;
+        data.push(project_session(row, None, sandbox));
+    }
+    Ok(SessionPage::new(data, has_more, next_cursor))
+}
+
+/// One `turns.list` page from the store (shared by both services).
+pub(crate) async fn list_turns_from_store(
+    store: &dyn SwarmStore,
+    logical_id: &str,
+    window: &TurnsWindow,
+) -> Result<TurnPage, SwarmError> {
+    if window.limit == 0 || window.limit > TurnsWindow::MAX_LIMIT {
+        return Err(SwarmError::invalid_query(format!(
+            "limit must be within 1..={}",
+            TurnsWindow::MAX_LIMIT
+        )));
+    }
+    if let Some(after) = window.after.as_deref() {
+        let exists = store
+            .swarm_get_turn(logical_id, after)
+            .await
+            .map_err(|error| store_failure("get_turn", error))?
+            .is_some();
+        if !exists {
+            return Err(
+                SwarmError::invalid_query("after must name a turn of this session")
+                    .with_details(json!({ "field": "after", "received": after })),
+            );
+        }
+    }
+    let mut rows = store
+        .swarm_turn_page(logical_id, window)
+        .await
+        .map_err(|error| store_failure("turn_page", error))?;
+    let probe = rows.len();
+    rows.truncate(window.limit as usize);
+    let has_more = probe > rows.len();
+    let next_cursor = has_more
+        .then(|| rows.last().map(|row| row.turn_id.clone()))
+        .flatten();
+    let data = rows
+        .iter()
+        .map(crate::store::SwarmTurnRow::to_official)
+        .collect();
+    Ok(TurnPage::new(data, has_more, next_cursor))
+}
+
+/// One `turns.retrieve` read; a turn of another session is not found.
+pub(crate) async fn get_turn_from_store(
+    store: &dyn SwarmStore,
+    logical_id: &str,
+    turn_id: &str,
+) -> Result<OfficialTurn, SwarmError> {
+    store
+        .swarm_get_turn(logical_id, turn_id)
+        .await
+        .map_err(|error| store_failure("get_turn", error))?
+        .map(|row| row.to_official())
+        .ok_or_else(|| {
+            SwarmError::new(
+                crate::domain::ErrorKind::NotFound,
+                crate::domain::ErrorCode::UnknownAgent,
+                "unknown turn for this session",
+            )
+            .with_details(json!({ "logicalId": logical_id, "turnId": turn_id }))
+        })
+}
+
+/// Whether the persisted session still owns an unfinished turn.
+///
+/// A crash between the opening write and the terminal leaves `state=running`; a
+/// crash that reset the session row first can leave an open turn row behind.
+/// Either fact means the session must be resumed, not mutated or deleted.
+///
+/// This is the single admission rule shared by `ensure_live` and the
+/// update/delete paths: callers that already hold a live turn answer
+/// `409 turn_in_progress` themselves and only reach this probe when the runtime
+/// has no turn.
+pub(crate) async fn persisted_turn_resume_required(
+    store: &dyn SwarmStore,
+    row: &SwarmSessionRow,
+) -> Result<bool, SwarmError> {
+    if row.state == SessionState::Running {
+        return Ok(true);
+    }
+    store
+        .swarm_has_open_turn(&row.logical_id)
+        .await
+        .map_err(|error| store_failure("has_open_turn", error))
+}
+
 /// Typed port between HTTP and the session runtime (S4 actor / S3 fake).
 #[async_trait]
 pub trait SwarmService: Send + Sync {
@@ -660,6 +982,38 @@ pub trait SwarmService: Send + Sync {
     ) -> Result<CreateSessionResult, SwarmError>;
 
     async fn get_session(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError>;
+
+    /// `sessions.list`: one id-keyset page with optional metadata/agent filters.
+    async fn list_sessions(&self, window: SessionsWindow) -> Result<SessionPage, SwarmError>;
+
+    /// `sessions.update`: replace the mutable official fields.
+    ///
+    /// A live turn owns the session (`409 turn_in_progress`). A model or MCP
+    /// tools change restarts the ACP host, because both are fixed at
+    /// `session/new`; the next interaction reattaches with the new values.
+    async fn update_session(
+        &self,
+        logical_id: &LogicalId,
+        command: SessionUpdateCommand,
+    ) -> Result<SessionView, SwarmError>;
+
+    /// `sessions.delete`: remove every Swarm row and invalidate live runtime
+    /// state so a later create with the same id starts clean.
+    async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError>;
+
+    /// `sessions.turns.list`: one `(created_at, turn_id)` keyset page.
+    async fn list_turns(
+        &self,
+        logical_id: &LogicalId,
+        window: TurnsWindow,
+    ) -> Result<TurnPage, SwarmError>;
+
+    /// `sessions.turns.retrieve`; a turn of another session is `404`.
+    async fn get_turn(
+        &self,
+        logical_id: &LogicalId,
+        turn_id: &str,
+    ) -> Result<OfficialTurn, SwarmError>;
 
     /// Durably accept one input: idempotency resolution, receipt write, and the
     /// user item. The returned [`AcceptedInput::pending_turn`] is the execution
@@ -707,4 +1061,193 @@ pub trait SwarmService: Send + Sync {
     /// Register a stream before `POST /sessions` executes the first turn.
     /// Must not create or touch session rows.
     async fn open_stream(&self, logical_id: &LogicalId) -> EventSubscription;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct PatchBody {
+        #[serde(default)]
+        prompt_cache_options: UpdateField<PromptCacheOptions>,
+        #[serde(default)]
+        metadata: UpdateField<BTreeMap<String, String>>,
+    }
+
+    #[test]
+    fn update_field_distinguishes_absent_null_and_value() {
+        let absent: PatchBody = serde_json::from_str("{}").expect("absent");
+        assert!(absent.prompt_cache_options.is_keep());
+        assert!(absent.metadata.is_keep());
+
+        let cleared: PatchBody =
+            serde_json::from_str(r#"{"prompt_cache_options": null, "metadata": null}"#)
+                .expect("cleared");
+        assert_eq!(cleared.prompt_cache_options, UpdateField::Clear);
+        assert_eq!(cleared.metadata, UpdateField::Clear);
+
+        let set: PatchBody = serde_json::from_str(
+            r#"{"prompt_cache_options": {"ttl": "12h"}, "metadata": {"team": "x"}}"#,
+        )
+        .expect("set");
+        assert_eq!(
+            set.prompt_cache_options,
+            UpdateField::Set(PromptCacheOptions::new(
+                crate::domain::PromptCacheTtl::TwelveHours
+            ))
+        );
+        assert_eq!(
+            set.metadata,
+            UpdateField::Set([("team".to_owned(), "x".to_owned())].into())
+        );
+    }
+
+    #[test]
+    fn a_kept_update_field_is_omitted_and_a_cleared_one_is_null() {
+        #[derive(Serialize)]
+        struct Patch<'a> {
+            #[serde(skip_serializing_if = "UpdateField::is_keep")]
+            prompt_cache_options: &'a UpdateField<PromptCacheOptions>,
+        }
+
+        let keep = Patch {
+            prompt_cache_options: &UpdateField::Keep,
+        };
+        assert_eq!(
+            serde_json::to_value(keep).expect("serialize"),
+            serde_json::json!({})
+        );
+
+        let clear = Patch {
+            prompt_cache_options: &UpdateField::Clear,
+        };
+        assert_eq!(
+            serde_json::to_value(clear).expect("serialize"),
+            serde_json::json!({ "prompt_cache_options": null })
+        );
+
+        let set = Patch {
+            prompt_cache_options: &UpdateField::Set(PromptCacheOptions::new(
+                crate::domain::PromptCacheTtl::ThirtyMinutes,
+            )),
+        };
+        assert_eq!(
+            serde_json::to_value(set).expect("serialize"),
+            serde_json::json!({ "prompt_cache_options": { "ttl": "30m" } })
+        );
+    }
+
+    fn create_command(
+        metadata: UpdateField<BTreeMap<String, String>>,
+        prompt_cache_options: UpdateField<PromptCacheOptions>,
+    ) -> CreateSessionCommand {
+        CreateSessionCommand {
+            logical_id: LogicalId::parse("agent-attach").expect("logical id"),
+            cwd: std::path::PathBuf::from("/tmp"),
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            metadata,
+            prompt_cache_options,
+            initial_input: None,
+            environment: EnvironmentKind::None,
+            environment_id: None,
+            root_session_id: None,
+            defer_initial_turn: false,
+        }
+    }
+
+    #[test]
+    fn create_attach_only_conflicts_on_an_explicit_different_value() {
+        let stored_metadata: BTreeMap<String, String> =
+            [("team".to_owned(), "alpha".to_owned())].into();
+        let stored_cache_value =
+            PromptCacheOptions::new(crate::domain::PromptCacheTtl::TwelveHours);
+        let stored_cache = Some(stored_cache_value);
+
+        let omitted = create_command(UpdateField::Keep, UpdateField::Keep);
+        assert!(!omitted.metadata_conflicts_with(&stored_metadata));
+        assert!(!omitted.prompt_cache_options_conflict_with(&stored_cache));
+        assert!(omitted.metadata_for_new_row().is_empty());
+        assert_eq!(omitted.prompt_cache_options_for_new_row(), None);
+
+        let same = create_command(
+            UpdateField::Set(stored_metadata.clone()),
+            UpdateField::Set(stored_cache_value),
+        );
+        assert!(!same.metadata_conflicts_with(&stored_metadata));
+        assert!(!same.prompt_cache_options_conflict_with(&stored_cache));
+
+        let different = create_command(
+            UpdateField::Set([("team".to_owned(), "beta".to_owned())].into()),
+            UpdateField::Set(PromptCacheOptions::new(
+                crate::domain::PromptCacheTtl::ThirtyMinutes,
+            )),
+        );
+        assert!(different.metadata_conflicts_with(&stored_metadata));
+        assert!(different.prompt_cache_options_conflict_with(&stored_cache));
+
+        // Explicit `{}`/`null` assert "unset" and conflict with a stored value.
+        let cleared = create_command(UpdateField::Clear, UpdateField::Clear);
+        assert!(cleared.metadata_conflicts_with(&stored_metadata));
+        assert!(cleared.prompt_cache_options_conflict_with(&stored_cache));
+        assert!(cleared.metadata_for_new_row().is_empty());
+        assert_eq!(cleared.prompt_cache_options_for_new_row(), None);
+
+        // The same explicit empties match a session that has no value.
+        assert!(!cleared.metadata_conflicts_with(&BTreeMap::new()));
+        assert!(!cleared.prompt_cache_options_conflict_with(&None));
+    }
+
+    #[test]
+    fn create_action_keeps_omission_across_the_actor_boundary() {
+        let keep = create_command(UpdateField::Keep, UpdateField::Keep);
+        let action = crate::actor::swarm::Create {
+            logical_id: keep.logical_id.as_str().to_owned(),
+            cwd: keep.cwd.to_string_lossy().into_owned(),
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            metadata: keep.metadata,
+            prompt_cache_options: keep.prompt_cache_options,
+            initial_input: None,
+            environment: EnvironmentKind::None,
+            environment_id: None,
+            root_session_id: None,
+            defer_initial_turn: false,
+        };
+        let encoded = serde_json::to_value(&action).expect("serialize");
+        assert!(
+            encoded.get("metadata").is_none() && encoded.get("promptCacheOptions").is_none(),
+            "a kept create field must be omitted, not `null`: {encoded}"
+        );
+        let decoded: crate::actor::swarm::Create =
+            serde_json::from_value(encoded).expect("deserialize");
+        assert!(decoded.metadata.is_keep());
+        assert!(decoded.prompt_cache_options.is_keep());
+
+        let cleared = create_command(UpdateField::Clear, UpdateField::Clear);
+        let action = crate::actor::swarm::Create {
+            logical_id: cleared.logical_id.as_str().to_owned(),
+            cwd: cleared.cwd.to_string_lossy().into_owned(),
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            metadata: cleared.metadata,
+            prompt_cache_options: cleared.prompt_cache_options,
+            initial_input: None,
+            environment: EnvironmentKind::None,
+            environment_id: None,
+            root_session_id: None,
+            defer_initial_turn: false,
+        };
+        let encoded = serde_json::to_value(&action).expect("serialize");
+        assert_eq!(encoded["metadata"], serde_json::Value::Null);
+        assert_eq!(encoded["promptCacheOptions"], serde_json::Value::Null);
+        let decoded: crate::actor::swarm::Create =
+            serde_json::from_value(encoded).expect("deserialize");
+        assert_eq!(decoded.metadata, UpdateField::Clear);
+        assert_eq!(decoded.prompt_cache_options, UpdateField::Clear);
+    }
 }

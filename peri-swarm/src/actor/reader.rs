@@ -37,7 +37,7 @@ use crate::domain::{
     OfficialMessageItem, OfficialSession, OfficialTurn, SessionState, SessionStatus, StreamEvent,
     SwarmError, TurnEvent, TurnStatus,
 };
-use crate::store::{store_failure, SwarmItemRow, SwarmSessionUpdate, SwarmStore};
+use crate::store::{store_failure, SwarmItemRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow};
 
 use super::projection::{self, Projected, ProjectedItem};
 
@@ -96,6 +96,8 @@ struct LogState {
     /// Unix seconds when this turn was opened, reused by `turn.created` and
     /// `turn.completed`/`turn.failed` so one turn reports one creation time.
     turn_created_at: Option<i64>,
+    /// Unix seconds when execution started; persisted as `swarm_turns.started_at`.
+    turn_started_at: Option<i64>,
     /// User item persisted at acceptance whose official frames wait for the
     /// turn to start (`begin_turn`). Emitting `turn.created` at acceptance
     /// would leave a created turn with no terminal if execution never starts.
@@ -297,6 +299,7 @@ impl ItemLog {
     /// closed. `turn.created` is always emitted before the item's frame, on the
     /// live stream and in backlog replay alike.
     pub async fn begin_turn(&self, request_id: &str, turn_id: &str) -> Result<(), SwarmError> {
+        let started_at = unix_now();
         let (created, added) = {
             let mut state = self.state.lock();
             if state.active.is_some() {
@@ -371,12 +374,41 @@ impl ItemLog {
             state.streams.clear();
             state.steer_epoch = 0;
             state.continuation = None;
+            state.turn_started_at = Some(started_at);
             (created, added)
         };
+        let created_at = self.state.lock().turn_created_at.unwrap_or(started_at);
         if let Err(error) = self.set_session_state(SessionState::Running, None).await {
             let mut state = self.state.lock();
             state.active = None;
             return Err(error);
+        }
+        // The turn is durable before its first frame: a client can never see
+        // `turn.created` for a turn that `turns.retrieve` does not know.
+        if let Err(error) = self
+            .store
+            .swarm_upsert_turn(SwarmTurnRow {
+                logical_id: self.logical_id.clone(),
+                turn_id: turn_id.to_owned(),
+                status: TurnStatus::InProgress,
+                created_at,
+                started_at: Some(started_at),
+                completed_at: None,
+                error: None,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+        {
+            // No frame was published yet. Return the session to `idle` so the
+            // persisted `running` row does not outlive a turn nobody can close;
+            // the caller abandons the pending turn.
+            {
+                let mut state = self.state.lock();
+                state.active = None;
+            }
+            self.update_state_quiet(SessionState::Idle).await;
+            return Err(store_failure("upsert_turn", error));
         }
         if let Some(event) = created {
             self.broadcast(StreamEvent::Official(event));
@@ -405,14 +437,15 @@ impl ItemLog {
 
     /// Drop a pending turn whose execution never started.
     ///
-    /// No official frame was published for it (they wait for [`Self::begin_turn`]),
-    /// so the stream simply never learns about that turn; the persisted user
-    /// item stays readable from `/items`.
+    /// No turn row and no official frame exist for it (both wait for
+    /// [`Self::begin_turn`]), so the stream simply never learns about that turn;
+    /// the persisted user item stays readable from `/items`.
     pub fn abandon_pending_turn(&self, turn_id: &str) {
         let mut state = self.state.lock();
         if state.active.is_none() && state.turn_id.as_deref() == Some(turn_id) {
             state.turn_id = None;
             state.turn_created_at = None;
+            state.turn_started_at = None;
             state.pending_user_item = None;
         }
     }
@@ -472,9 +505,13 @@ impl ItemLog {
                 );
             }
         }
-        let (turn_id, created_at) = {
+        let (turn_id, created_at, started_at) = {
             let mut state = self.state.lock();
-            (state.turn_id.take(), state.turn_created_at.take())
+            (
+                state.turn_id.take(),
+                state.turn_created_at.take(),
+                state.turn_started_at.take(),
+            )
         };
         self.state.lock().pending_user_item = None;
         let Some(turn_id) = turn_id else {
@@ -491,6 +528,34 @@ impl ItemLog {
         };
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
+                let completed_at = unix_now();
+                // A host-side cancel is still a `turn.completed` frame, but the
+                // official `Turn.status` carries `cancelled`; persisting
+                // `completed` would make `turns.retrieve` disagree with the
+                // official status vocabulary (`turns.d.ts`).
+                let status = if stop_reason == "cancelled" {
+                    TurnStatus::Cancelled
+                } else {
+                    TurnStatus::Completed
+                };
+                if let Err(error) = self
+                    .persist_terminal_turn(
+                        &turn_id,
+                        status,
+                        created_at.unwrap_or(completed_at),
+                        started_at,
+                        completed_at,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        logical_id = %self.logical_id,
+                        turn_id,
+                        error = %error,
+                        "swarm completed turn row was not persisted"
+                    );
+                }
                 self.update_state_quiet(SessionState::Idle).await;
                 self.broadcast(StreamEvent::Turn(TurnEvent::completed(
                     request_id,
@@ -503,9 +568,9 @@ impl ItemLog {
                     OfficialTurn::new(
                         &self.logical_id,
                         &turn_id,
-                        TurnStatus::Completed,
-                        created_at.unwrap_or_else(unix_now),
-                        Some(unix_now()),
+                        status,
+                        created_at.unwrap_or(completed_at),
+                        Some(completed_at),
                     ),
                 )));
                 // Immediately after the terminal: the SDK's `TurnState` only
@@ -518,6 +583,28 @@ impl ItemLog {
             }
             TurnOutcome::Failed { code, message } => {
                 let message = failure.unwrap_or(message);
+                let completed_at = unix_now();
+                if let Err(error) = self
+                    .persist_terminal_turn(
+                        &turn_id,
+                        TurnStatus::Failed,
+                        created_at.unwrap_or(completed_at),
+                        started_at,
+                        completed_at,
+                        Some(json!({
+                            "code": "internal_error",
+                            "message": message,
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        logical_id = %self.logical_id,
+                        turn_id,
+                        error = %error,
+                        "swarm failed turn row was not persisted"
+                    );
+                }
                 self.update_state_quiet(SessionState::Failed).await;
                 self.broadcast(StreamEvent::Turn(TurnEvent::failed(
                     request_id,
@@ -532,11 +619,11 @@ impl ItemLog {
                         &self.logical_id,
                         &turn_id,
                         TurnStatus::Failed,
-                        created_at.unwrap_or_else(unix_now),
-                        Some(unix_now()),
+                        created_at.unwrap_or(completed_at),
+                        Some(completed_at),
                     )
-                    // The failure text is known on the live path; it is not
-                    // persisted, so a replay still reports `error: null`.
+                    // The failure text is now persisted on the turn row; the
+                    // live frame and a later `turns.retrieve` agree.
                     .with_error(Some(message.clone())),
                 )));
                 self.broadcast(StreamEvent::Official(OfficialEvent::session_failed(
@@ -549,6 +636,31 @@ impl ItemLog {
         // Wake `wait_turn_closed` only after the terminal is out, so a caller
         // that returns from the prompt observes a fully closed turn.
         self.active_watch.send_replace(None);
+    }
+
+    /// Persist one terminal turn row, keeping the opening `created_at`.
+    async fn persist_terminal_turn(
+        &self,
+        turn_id: &str,
+        status: TurnStatus,
+        created_at: i64,
+        started_at: Option<i64>,
+        completed_at: i64,
+        error: Option<Value>,
+    ) -> Result<(), crate::store::StoreError> {
+        self.store
+            .swarm_upsert_turn(SwarmTurnRow {
+                logical_id: self.logical_id.clone(),
+                turn_id: turn_id.to_owned(),
+                status,
+                created_at,
+                started_at,
+                completed_at: Some(completed_at),
+                error,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
     }
 
     /// Official session snapshot for `agent.session.idle`/`agent.session.failed`.
@@ -571,7 +683,9 @@ impl ItemLog {
                 error,
                 row.model,
                 row.instructions,
-            ),
+            )
+            .with_metadata(row.metadata)
+            .with_prompt_cache_options(row.prompt_cache_options),
             Ok(None) => OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None),
             Err(read_error) => {
                 tracing::warn!(

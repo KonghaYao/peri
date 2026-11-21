@@ -22,15 +22,19 @@ use rivetkit::TypedActorHandle;
 use tokio::sync::broadcast;
 
 use crate::actor::swarm::{
-    ActionEnvelope, Create, Get, ListItems, Submit, Subscribe, SubscribeOutcome, SwarmActor,
-    ACTOR_NAME,
+    ActionEnvelope, Create, Delete, Get, GetTurn, ListItems, ListTurns, Submit, Subscribe,
+    SubscribeOutcome, SwarmActor, Update, ACTOR_NAME,
 };
 use crate::domain::{
     new_root_session_id, ActorKey, Cursor, EventCursor, InputOutcome, InputSubmission, ItemPage,
-    ItemsWindow, LogicalId, SessionView, StreamEvent, SwarmError,
+    ItemsWindow, LogicalId, OfficialTurn, SessionPage, SessionView, SessionsWindow, StreamEvent,
+    SwarmError, TurnPage, TurnsWindow,
 };
 use crate::event_stream::FrameParser;
-use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
+use crate::service::{
+    CreateSessionCommand, CreateSessionResult, EventSubscription, SessionUpdateCommand,
+    SwarmService,
+};
 use crate::store::{store_failure, SwarmStore};
 
 /// Adapter configuration. The channel capacity bounds how far a slow SSE client
@@ -241,6 +245,8 @@ impl SwarmService for RivetSwarmService {
             model: command.model,
             instructions: command.instructions,
             mcp_tools: command.mcp_tools,
+            metadata: command.metadata,
+            prompt_cache_options: command.prompt_cache_options,
             initial_input: command.initial_input,
             environment: command.environment,
             environment_id: command.environment_id,
@@ -261,6 +267,69 @@ impl SwarmService for RivetSwarmService {
                 },
             )
             .await?;
+        envelope.into_result()
+    }
+
+    async fn list_sessions(&self, window: SessionsWindow) -> Result<SessionPage, SwarmError> {
+        // `sessions.list` is cross-session: no actor owns the result set, so
+        // the gateway reads the same store the actors write.
+        crate::service::list_sessions_from_store(self.store.as_ref(), &window).await
+    }
+
+    async fn update_session(
+        &self,
+        logical_id: &LogicalId,
+        command: SessionUpdateCommand,
+    ) -> Result<SessionView, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = Update {
+            logical_id: logical_id.as_str().to_owned(),
+            model: command.model,
+            mcp_tools: command.mcp_tools,
+            metadata: command.metadata,
+            prompt_cache_options: command.prompt_cache_options,
+        };
+        let envelope: ActionEnvelope<SessionView> = self.call(&handle, action).await?;
+        envelope.into_result()
+    }
+
+    async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = Delete {
+            logical_id: logical_id.as_str().to_owned(),
+        };
+        let envelope: ActionEnvelope<crate::domain::SessionDeleted> =
+            self.call(&handle, action).await?;
+        envelope.into_result().map(|_| ())
+    }
+
+    async fn list_turns(
+        &self,
+        logical_id: &LogicalId,
+        window: TurnsWindow,
+    ) -> Result<TurnPage, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = ListTurns {
+            logical_id: logical_id.as_str().to_owned(),
+            order: window.order,
+            after: window.after,
+            limit: window.limit,
+        };
+        let envelope: ActionEnvelope<TurnPage> = self.call(&handle, action).await?;
+        envelope.into_result()
+    }
+
+    async fn get_turn(
+        &self,
+        logical_id: &LogicalId,
+        turn_id: &str,
+    ) -> Result<OfficialTurn, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = GetTurn {
+            logical_id: logical_id.as_str().to_owned(),
+            turn_id: turn_id.to_owned(),
+        };
+        let envelope: ActionEnvelope<OfficialTurn> = self.call(&handle, action).await?;
         envelope.into_result()
     }
 

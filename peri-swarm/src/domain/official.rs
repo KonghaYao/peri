@@ -18,7 +18,8 @@ use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::session::SessionStatus;
+use crate::domain::item::ItemOrder;
+use crate::domain::session::{PromptCacheOptions, SessionStatus};
 
 /// Derive the internal turn id from the user item that opened the turn.
 ///
@@ -108,6 +109,26 @@ impl TurnStatus {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// Parse a persisted status; unknown text is rejected instead of guessed.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "in_progress" => Some(Self::InProgress),
+            "waiting" => Some(Self::Waiting),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
+    /// Whether a turn in this status has not reached a terminal state.
+    #[must_use]
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Queued | Self::InProgress | Self::Waiting)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +204,63 @@ impl OfficialTurn {
                 })
             });
         self
+    }
+}
+
+/// Query window for `GET /v1/agents/sessions/{id}/turns` (`TurnListParams`).
+///
+/// `after` is a turn id and is exclusive in the selected order. Turns are
+/// ordered by `(created_at, turn_id)`, the stable total order used by the
+/// store; the id is the tie-break for two turns created in the same second.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnsWindow {
+    pub order: ItemOrder,
+    pub after: Option<String>,
+    pub limit: u32,
+}
+
+impl TurnsWindow {
+    pub const DEFAULT_LIMIT: u32 = 20;
+    pub const MAX_LIMIT: u32 = 500;
+}
+
+/// One `CursorPage<Turn>` page.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct TurnPage {
+    pub object: String,
+    pub data: Vec<OfficialTurn>,
+    pub has_more: bool,
+    /// Id of the last turn in page order; `None` on an empty page. Accepts
+    /// the camelCase name this gateway serializes.
+    #[serde(rename = "nextCursor", default)]
+    pub next_cursor: Option<String>,
+}
+
+impl TurnPage {
+    #[must_use]
+    pub fn new(data: Vec<OfficialTurn>, has_more: bool, next_cursor: Option<String>) -> Self {
+        Self {
+            object: "list".to_owned(),
+            data,
+            has_more,
+            next_cursor,
+        }
+    }
+}
+
+impl Serialize for TurnPage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut page = serializer.serialize_struct("TurnPage", 5)?;
+        page.serialize_field("object", &self.object)?;
+        page.serialize_field("data", &self.data)?;
+        page.serialize_field("has_more", &self.has_more)?;
+        page.serialize_field("hasMore", &self.has_more)?;
+        page.serialize_field("nextCursor", &self.next_cursor)?;
+        page.end()
     }
 }
 
@@ -264,6 +342,10 @@ pub struct OfficialSession {
     pub error: Option<String>,
     pub agent: OfficialSessionAgent,
     pub metadata: BTreeMap<String, String>,
+    /// Optional in `AgentSession`; omitted entirely when the session has no
+    /// configured value instead of sending `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
     pub required_actions: Vec<Value>,
     pub usage: Option<Value>,
     pub vault_ids: Vec<String>,
@@ -293,10 +375,28 @@ impl OfficialSession {
                 instructions,
             },
             metadata: BTreeMap::new(),
+            prompt_cache_options: None,
             required_actions: Vec::new(),
             usage: None,
             vault_ids: Vec::new(),
         }
+    }
+
+    /// Fill the caller's persisted metadata (`agent.session.idle/failed`).
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Fill the persisted session-default prompt cache lifetime.
+    #[must_use]
+    pub fn with_prompt_cache_options(
+        mut self,
+        prompt_cache_options: Option<PromptCacheOptions>,
+    ) -> Self {
+        self.prompt_cache_options = prompt_cache_options;
+        self
     }
 }
 

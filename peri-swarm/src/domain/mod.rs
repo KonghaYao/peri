@@ -22,10 +22,12 @@ pub use item::{ItemKind, ItemOrder, ItemPage, ItemSource, ItemView, ItemsWindow}
 pub use mcp::{McpHeader, McpToolKind, McpToolSpec};
 pub use official::{
     turn_id_for_item, OfficialContent, OfficialEvent, OfficialMessageItem, OfficialSession,
-    OfficialTurn, TurnStatus,
+    OfficialTurn, TurnPage, TurnStatus, TurnsWindow,
 };
 pub use session::{
-    AgentView, CreateSessionResponse, EnvironmentKind, EnvironmentRef, SandboxState, SandboxView,
-    SessionState, SessionStatus, SessionView, TurnView,
+    AgentView, CreateSessionResponse, EnvironmentKind, EnvironmentRef, PromptCacheOptions,
+    PromptCacheTtl, SandboxState, SandboxView, SessionDeleted, SessionPage, SessionState,
+    SessionStatus, SessionView, SessionsWindow, TurnView, MAX_METADATA_KEY_CHARS,
+    MAX_METADATA_PAIRS, MAX_METADATA_VALUE_CHARS,
 };
 pub use workspace::resolve_cwd;

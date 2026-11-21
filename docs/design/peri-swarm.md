@@ -37,13 +37,16 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 | 库 | 所有者 | 版本 | 内容 |
 | --- | --- | --- | --- |
 | Peri 会话库 | Peri 会话存储（`SessionStoreDeployment`） | `peri_store_meta.schema_version=15`，contract `peri.session.store/v9` | 线程、消息、MQ、workspace 登记等 Peri 事实；不得出现 `swarm_*` 对象 |
-| Swarm 状态库 | `peri-swarm`（`store::SwarmStateStore`） | `swarm_meta.version=1` | `swarm_sessions`、`swarm_items`、`swarm_inputs`、`swarm_bindings` 与索引 |
+| Swarm 状态库 | `peri-swarm`（`store::SwarmStateStore`） | `swarm_meta.version=1` | `swarm_sessions`、`swarm_items`、`swarm_inputs`、`swarm_bindings`、`swarm_turns` 与索引 |
 
 - 两个 locator 都是必填且必须不同；同一数据库、缺失 locator 或任一库打不开都会让
   进程启动失败，不复用另一库、不降级。
 - Peri 会话库在打开时执行 Peri schema 检查/升级；未知或更高版本 fail closed。
 - Swarm 状态库自带 DDL 与版本判定：已存在 `swarm_*` 表但没有 `swarm_meta` 时拒绝
-  接管，未知版本直接中止。
+  接管，未知版本直接中止。版本内新增的列是加法式迁移：`PRAGMA table_info` 判断缺列后
+  执行 `ALTER TABLE ... ADD COLUMN`，新库由 `CREATE TABLE` 一次建好；版本号不因加列
+  改变，重复打开不会再次执行 `ALTER`。`swarm_turns` 同样由幂等的
+  `CREATE TABLE IF NOT EXISTS` 补齐。
 - 工作区归属仍由 Peri 的远端工作区实现（`RemoteWorkspaceEnvironment`）决定：`cwd`
   必须落在虚拟根内，workspace 登记与准入语义不在 `peri-swarm` 复制一份；相关边界见
   [存储 v2](storage-v2-machine-workspace-session.md)。`peri-swarm` 不新增通用 SQL
@@ -81,17 +84,23 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 
 ## 4. HTTP 契约
 
-### 4.1 五个方法与门禁
+### 4.1 方法面与门禁
 
 路由只在 `peri-swarm/src/http` 定义，`/healthz` 是唯一不鉴权的常量探针。
 
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
 | `POST` | `/v1/agents/sessions` | 创建或复用会话；`stream:true` 先建立订阅并构造/返回 SSE 响应（初始 `session` 帧），再调度首轮；首轮事件受广播容量约束（§4.3） |
+| `GET` | `/v1/agents/sessions` | 官方 `sessions.list`：按 `logicalId` 的 keyset 分页（`after` 排他、`order` 默认 `desc`），可选 `agent_id` 与 `metadata[key]=value` 过滤 |
 | `GET` | `/v1/agents/sessions/{logicalId}` | 读取会话投影；`status` 是官方 `idle`/`in_progress`/`failed` |
+| `POST` | `/v1/agents/sessions/{logicalId}` | 官方 `sessions.update`（官方 SDK 用 `POST /agents/sessions/{id}`）：替换 model / MCP tools / metadata / prompt cache；live 运行中返回 `409 turn_in_progress`，无 live runtime 但持久行仍有未完成 turn 时返回 `502 session_resume_required` |
+| `DELETE` | `/v1/agents/sessions/{logicalId}` | 官方 `sessions.delete`：删除该会话的全部 Swarm 行并失效运行态；与 update 同一准入判定（`409 turn_in_progress` / `502 session_resume_required`） |
 | `POST` | `/v1/agents/sessions/{logicalId}/events` | 提交一条输入（`mode=turn` 或控制输入）；受理持久化后 `202`；兼容官方 `events` 信封（单条 message、纯文本、受理为单条 input） |
 | `GET` | `/v1/agents/sessions/{logicalId}/events` | SSE：先补 backlog 再转实时；含官方 `agent.session.*` 事件 |
 | `GET` | `/v1/agents/sessions/{logicalId}/items` | 按 seq 增量读取；兼容官方 `CursorPage`（`data`/`has_more`、`after=<itemId>`） |
+| `GET` | `/v1/agents/sessions/{logicalId}/turns` | 官方 `sessions.turns.list`：按 `(created_at, turn_id)` 的 keyset 分页，`order` 默认 `desc` |
+| `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | 官方 `sessions.turns.retrieve`；turn 不属于该会话时 `404 unknown_agent` |
+| `GET` | `.../turns/{turnId}/items`、`.../subagents/{id}/items`、`.../subagents/{id}/turns[/{turnId}][/items]`、`.../traces`、`.../artifacts[/{id}][/content]`、`.../subagents[/{id}]` | 无法映射的官方资源；注册路由并以网关 JSON 错误返回 `404 unsupported_contract`，消息指出资源名 |
 
 约定：
 
@@ -109,6 +118,42 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   具体事件或 content 下标；不支持的能力显式报错，不静默忽略。
 - `cwd` 缺省为 `<workspaceRoot>/<logicalId>`；显式 `cwd` 必须存在且规范化，落在
   虚拟 workspace 根内。
+- `sessions.list` 的排序键是公开会话 id `logicalId`（唯一、稳定全序），不是
+  `createdAt`；同一秒创建的会话不会因时钟并列而乱序。`after` 是上一页最后一项的
+  `id`，在所选顺序上排他；`limit` 是会话条数上限（默认 20，范围 1..=500），不做
+  行预算，`has_more` 基于**过滤后**的结果。响应是 `{object:"list", data, has_more,
+  hasMore, nextCursor}`，官方 `CursorPage` 可用最后一项的 `id` 自动翻页。
+  `metadata[k]=v` 最多 16 对、key 1..=64 字符、value ≤512 字符，全部精确匹配；
+  `cursor` 等未知查询参数、越界 limit 与畸形 order 都是 `400 invalid_query`。
+- `agent_id` 过滤按网关唯一的根 agent 约定：所有会话的根 agent 都是 `root`
+  （与官方 turn/session 帧的 `agent.id` 相同），因此 `agent_id=root` 返回全部，
+  其他值返回空页而不是静默忽略。
+- `sessions.update` 以官方 `SessionUpdateParams` 为输入：`agent.model` 写 `model`
+  （官方 model 是 string；显式 `null` 返回 `400 invalid_request`，
+  `details.field="agent.model"`），`agent.tools` 走与 create 相同的 MCP 规范化
+  （`null`/`[]` 清空），`metadata` 整体替换（`null` 或 `{}` 清空），
+  `prompt_cache_options` 整体替换（`null` 清空）。省略字段保持不变。`review`、
+  `agent.reasoning`、`agent.service_tier` 没有本地映射，显式 `400 invalid_request`
+  （`details.field` 指向官方字段），不静默接受。model 或 MCP tools 变化会停止当前
+  ACP host；下一次交互按新配置重新 attach，避免返回一个下一轮不会使用的旧配置。
+- 官方 `update(sessionID, body?: SessionUpdateParams | null | undefined)`
+  （`sessions.d.ts:76`）允许省略 body：官方 SDK 省略时发送 `{}`（`application/json`），
+  只有显式 `null` 才不发 body 也不发 content-type。网关把「无 body」（含无
+  content-type、`Content-Length: 0`）与 JSON `null` 都视为 **空更新**：返回当前
+  `SessionView`，不写任何行（含 `last_activity_at`），也不执行在途/恢复准入判定；
+  省略 body 时的 `{}` 同样不写行。只有非空 body 才按上一条解析：非 JSON content-type
+  返回 `415 invalid_content_type`，JSON 语法错误返回 `400 invalid_request`；
+  两者都不会被降级成 no-op。
+- `sessions.delete` 在 `swarm_sessions`、`swarm_items`、`swarm_inputs`、
+  `swarm_turns`、`swarm_bindings` 上删除该 `logicalId` 的全部行；Turso 用一次
+  受管事务，内存实现同一语义。删除先停 ACP host 并移除进程内 channel，Rivet
+  actor 随后销毁，因此用同一 `logicalId` 重新 create 会得到新 `rootSessionId`、
+  空 items 与空 turns。删除失败不返回成功，行仍可重试。
+- 官方 `sessions.turns.list` 按 `(created_at, turn_id)` 稳定全序分页；`after` 是
+  turn id 且排他，未知 turn id 返回 `400 invalid_query`。`turns.retrieve` 的
+  `usage` 与 `subagent_id` 恒为 `null`（网关不做 token 记账，也没有 subagent
+  turn），`agent_id` 恒为 `root`。
+
 
 ### 4.2 SSE 与 items
 
@@ -229,10 +274,12 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 - backlog 按行重建 turn 边界：user item 在「没有打开的 turn」或「打开的 turn 已落
   assistant 完成帧」时开启新 turn，否则视为该 turn 的 steer；终态在下一 turn 的
   `turn.created` 之前或回放末尾发出。最后一个 turn 仅在会话行状态仍为 `failed`
-  时补 `turn.failed` + `agent.session.failed`；失败原因未持久化，重放的 `error` 与
-  `completed_at` 保持 `null`，不编造；实时失败帧的 `turn.error` 由失败消息填充
-  （`{code:"internal_error", message}`）。若该 turn 此刻仍在实时执行，回放不补
-  终态，终态由实时流给出，避免 SDK 提前结束。
+  时补 `turn.failed` + `agent.session.failed`。回放仍只从 item 行重建，不读取
+  `swarm_turns`：因此重放的失败 `error` 与 `completed_at` 保持 `null`，不把
+  turn 行的事实混进既有帧；实时失败帧的 `turn.error` 由失败消息填充
+  （`{code:"internal_error", message}`）。`turns.list`/`turns.retrieve` 读的是
+  持久 turn 行，失败 turn 在那里带 `error` 与 `completed_at`。若该 turn 此刻仍在
+  实时执行，回放不补终态，终态由实时流给出，避免 SDK 提前结束。
 - 重连游标落在 turn 中间时，lookback 从游标（含）之前回看：跳过 steer user item，
   直到找到一个未被 assistant 完成帧与更早 user item 分隔的 opener，取其 `turn_id`
   播种，`turn.item.added` 仍带同一 `turn_id`，不重复 `turn.created`。首行是 steer
@@ -242,8 +289,20 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 - `afterSeq` 等于会话末尾时窗口为空：会话行 `idle`/`failed` 时仍按最后一批 item
   补发该 turn 的终态与 `agent.session.idle`/`agent.session.failed`（冗余终态按
   `event_id` 幂等）；有在途 turn 时不补。
-- 历史 turn 的失败无法区分：会话行只保留最新状态，更早的失败 turn 在回放中显示为
-  `completed`。这是已记录的限制，不通过新增表/列修复。
+- SSE 回放仍不读 `swarm_turns`：会话行只保留最新状态，更早的失败 turn 在回放中
+  显示为 `completed`。这是回放层的既有边界，`turns.list`/`turns.retrieve` 不受
+  影响（它们以 turn 行为权威）。
+- turn 生命周期同时持久化到 `swarm_turns`：`begin_turn` 写 `in_progress`（`created_at`
+  是打开 turn 的 Unix 秒，`started_at` 是执行开始时刻），`finish_turn` 写
+  `completed`/`cancelled`/`failed` 与 `completed_at`，失败还写
+  `error_json={code:"internal_error", message}`。取消路径的 `turn.completed` 帧内
+  turn 的官方 `status` 是 `cancelled`（`Turn.status` 的官方取值），持久行与
+  `turns.list`/`turns.retrieve` 使用同一状态。受理但未执行
+  （`abandon_pending_turn`）不写行：它与「不发 `turn.created`」一致，因此不会留下
+  `queued`/`in_progress` 的 phantom 行。
+- `agent.session.idle`/`agent.session.failed` 的 `metadata` 来自会话行；官方
+  `AgentSession.prompt_cache_options` 是可选项，网关只在有持久值时发送它（没有值
+  时字段不出现，而不是伪造 `null`）。
 - `usage` 恒为 `null`；`requires_action` 永不发送（本地没有待审批事实）；
   `turn.cancelled`、budget、subagent 与官方 `function_call` item 不在本层。
 
@@ -318,6 +377,19 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   `502`（`details.operation=create_recovery_failed`），行与 root id 保留，可继续
   重试。ACP 返回的 session id 与行内 root id 不一致时以 `session_id_mismatch`
   失败，不接管该身份。
+- `sessions.update` 与 `sessions.delete` 复用同一准入判定（`ensure_live` 同一判定位置）：
+  - 有 live runtime 且 turn 正在运行或已有未关闭 turn：`409 turn_in_progress`；
+  - 无 live runtime，但持久会话行 `state=running` 或 `swarm_turns` 仍有开放行
+    （`queued`/`in_progress`/`waiting`）：`502`，`details.operation =
+    "session_resume_required"`，与 `ensure_live` 的恢复拒绝一致；更新（官方 POST）
+    与删除都不会先写后报错；
+  - 正常 idle 行不受影响。
+
+  live runtime 路径的准入判定在受理互斥内完成，更新/删除不会与该 actor 的并发
+  受理交错；无 live runtime 的拒绝路径只读持久状态（会话行与
+  `swarm_has_open_turn`），不写 `state`/turn 行，但并发 attach 仍可能在该判定之后
+  开始新 turn——拒绝不是跨进程的锁。删除成功后的 get/events/items/turns 都是
+  `404 unknown_agent`；同一 `logicalId` 重新 create 视为新会话，不复用旧 root id。
 
 ### 4.5 会话投影与环境
 
@@ -332,6 +404,17 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
 `status` 由会话行与进程内在途 turn 投影：有在途 turn（含已受理未开始）为
 `in_progress`，行状态 `failed` 为 `failed`，否则 `idle`。本地没有审批事实，不会
 出现 `requires_action`。
+
+会话投影同时携带官方 `metadata`（`string -> string`，空对象表示无）与
+`prompt_cache_options`（`{ttl:"30m"|"12h"}` 或 `null`）。`prompt_cache_options` 是
+官方兼容字段，使用官方 snake_case 拼写（`AgentSession.prompt_cache_options`）；
+其余 Swarm 扩展字段仍为 camelCase。create 接受两者：metadata 最多 16 对、
+key 1..=64 字符、value ≤512 字符；`prompt_cache_options.ttl` 只接受 `30m`/`12h`，
+`{}` 视为未配置。重复 create 命中已存在行时，省略的 metadata/prompt cache 保持
+行内值，不参与冲突判定；显式提供的值（含 `{}`/`null`）必须与行内一致，否则按身份
+冲突 `409 identity_conflict` 拒绝，不静默覆盖。`agent.model` 是官方 string；显式
+`null` 返回 `400 invalid_request`（`details.field="agent.model"`），不作为省略处理。
+`agent.tools: null` 仍是合法的清空声明。
 
 
 ## 5. MCP 注入
@@ -463,8 +546,17 @@ Bun：
   `sandboxId`/`workspacePath` 变化拒绝恢复。
 - 明确禁止：调用 `session/resume`、向恢复会话重发 prompt、重放 MQ 输入、把
   `session/load` 的回放帧写入 `swarm_items`、或为丢失绑定静默换 workspace。
-- 行状态为 `running` 时 `ensure_live` 返回 `502 session_resume_required`：崩溃中
-  未完成 turn 的续跑仍未实现，也没有 `state=recovering` 状态。
+- 持久行 `state=running`，或 `swarm_turns` 仍有开放行（`queued`/`in_progress`/
+  `waiting`）时，`ensure_live` 返回 `502 session_resume_required`：崩溃中未完成
+  turn 的续跑仍未实现，也没有 `state=recovering` 状态。此时遗留的 `swarm_turns`
+  开放行（`queued`/`in_progress`/`waiting`）被关闭为 `failed`
+  （`completed_at` 与 `error_json={code:"internal_error",
+  message:"the turn was interrupted before it reached a terminal"}`）；`turns.list`/
+  `turns.retrieve` 的读路径在持久行仍记录未完成 turn 且没有 live turn 时执行同一
+  关闭，因此客户端不会看到永久 `in_progress` 的 phantom turn。
+- `sessions.update`/`sessions.delete` 在无 live runtime 时使用同一判定：持久行
+  `running` 或存在开放 turn 行都返回 `502 session_resume_required`，不会先修改或
+  删除再报错；只有 live runtime 内的在途 turn 返回 `409 turn_in_progress`。
 - 创建中断（行状态 `creating`）走独立的核对路径：先 `session/load`，只有当 Peri
   会话确实不存在时才用同一 root id `session/new`，冲突后再试一次 attach；两条路
   都失败返回 `502 create_recovery_failed` 并保留行。`ensure_live` 不把 `creating`
@@ -481,16 +573,17 @@ Bun：
 - 因此所有副本必须使用同一 `PERI_SWARM_MACHINE_ID`、同一绝对路径的
   `PERI_SWARM_WORKSPACE_ROOT`（共享卷或同路径挂载）、可写的两个 Loom 库，并保证
   Bun（hosted）从每个副本可达；actor 重建副本上的 `cwd` 必须本机存在。
-- 行状态仍为 `running` 时照旧返回 `502 session_resume_required`；滚动停副本与在途
-  turn 的处置不在本层，见 §8。
+- 持久行仍为 `running` 或仍有开放 turn 行时照旧返回 `502 session_resume_required`；
+  滚动停副本与在途 turn 的处置不在本层，见 §8。
 
 ## 8. 未完成项与风险
 
 1. **后台任务引用**：Bun 转发层尚未识别 `resultType:"task"` 与 `tasks/get` 终态，
    空闲回收也不看任务台账。turn 在最后一个工具调用后长时间输出时，沙箱可能已
    回收，随后代理调用得到 `404 sandbox_not_found`，需要重新 ensure。
-2. **未完成 turn 与并发 reattach**：`session/resume` 未实现；并发 reattach、Bun 与
-   Loom 同时不可用时的失败文案、以及「崩溃时正在执行命令」的中断语义未覆盖。
+2. **未完成 turn 与并发 reattach**：`session/resume` 未实现；崩溃遗留的 turn 行会
+  被关闭为 `failed`，但真正的 turn 续跑、并发 reattach、Bun 与 Loom 同时不可用时
+  的失败文案、以及「崩溃时正在执行命令」的中断语义未覆盖。
 3. **真实部署模型任务**：模型侧全部为确定性 stub；真实供应商的 tool call、长任务
    与多轮副作用未验收。
 4. **1000 Agent 规模与单 engine 容量**：没有吞吐、并发会话、单 engine 节点的容量或
@@ -515,3 +608,7 @@ Bun：
     权限凭据。
 13. **engine 重启后的客户端重连**：运行中停/启 engine 时进程是退出、请求 502 还是
     自动重连，未验证。
+14. **官方会话资源面的活体验证**：`swarm_turns` 建表、既有库的 `ALTER` 迁移与
+    `sessions.list` 的 `json_each` metadata 过滤只在单测中验证 SQL/参数形状，未在
+    真实 Loom 上执行；官方 `openai@7.60.0` 客户端进程尚未消费
+    `sessions.list/update/delete/turns`。
