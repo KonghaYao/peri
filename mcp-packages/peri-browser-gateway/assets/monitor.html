@@ -1,0 +1,1190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>peri-browser monitor</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d11;
+    --panel: #141821;
+    --line: #232a36;
+    --text: #e6e9ef;
+    --muted: #8b94a7;
+    --accent: #f0a05a;
+    --ok: #5fcf8a;
+    --warn: #e8c266;
+    --bad: #e87272;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  button, input { font: inherit; color: inherit; }
+  button {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    cursor: pointer;
+    padding: 3px 7px;
+  }
+  button:hover:not(:disabled) { background: #1d2330; }
+  button:disabled { color: #555e70; cursor: default; }
+
+  #brandbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  #brandbar strong { font-size: 13px; letter-spacing: .2px; }
+  #sessionName { color: var(--muted); }
+  #sessionName:empty { display: none; }
+  #agentPill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: #1d2330;
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+  }
+  #agentPill::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  #agentPill.driving::before { background: var(--accent); }
+  #agentPill.idle::before { background: var(--ok); }
+  #agentPill.waiting_for_human::before { background: var(--warn); }
+  #readonly {
+    padding: 1px 7px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  #readonly[hidden] { display: none; }
+  #holding {
+    padding: 1px 7px;
+    border: 1px solid #2f5c43;
+    border-radius: 999px;
+    background: #12251b;
+    color: var(--ok);
+    font-size: 11px;
+  }
+  #holding[hidden] { display: none; }
+  .spacer { flex: 1; }
+  #connState { color: var(--muted); font-size: 11px; }
+  #takeover, #release, #diagBtn { border-color: var(--line); font-size: 11px; }
+  #takeover[hidden], #release[hidden] { display: none; }
+  #release { color: var(--ok); border-color: #2f5c43; }
+  #diagBtn { color: var(--muted); }
+  #diagBtn.active { color: var(--text); background: #1d2330; }
+  #diagBtn[aria-disabled="true"] { color: #555e70; }
+  #diagCount { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #tabStrip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--line);
+    background: #10141b;
+    min-height: 38px;
+  }
+  #tabRow {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+  .tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 220px;
+    height: 27px;
+    padding: 0 6px 0 8px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    color: var(--muted);
+    white-space: nowrap;
+    user-select: none;
+    cursor: pointer;
+  }
+  .tab:hover { background: #1a1f2a; }
+  .tab.active {
+    background: #232a36;
+    border-color: #2d3646;
+    color: var(--text);
+  }
+  .tdot {
+    width: 6px; height: 6px;
+    background: #3a4252;
+    transform: rotate(45deg);
+    flex: none;
+  }
+  .tab.active .tdot { background: var(--accent); }
+  .tlabel { overflow: hidden; text-overflow: ellipsis; }
+  .tclose {
+    border: 0;
+    padding: 0 3px;
+    color: var(--muted);
+    line-height: 1;
+  }
+  .tclose:hover { color: var(--bad); background: transparent; }
+  #newTabBtn { flex: none; font-size: 16px; line-height: 1; padding: 1px 8px; }
+
+  #toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  #address {
+    flex: 1;
+    min-width: 0;
+    padding: 5px 9px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #0e1118;
+    color: var(--text);
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #address:focus { outline: none; border-color: #3b465c; }
+
+  #main {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #07090d;
+    overflow: hidden;
+  }
+  #screen {
+    max-width: 100%;
+    max-height: 100%;
+    background: #000;
+    display: block;
+    outline: none;
+  }
+  #screen.interactive { cursor: crosshair; }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    background: rgba(7, 9, 13, .72);
+    pointer-events: none;
+    text-align: center;
+    padding: 20px;
+  }
+  #overlay[hidden] { display: none; }
+
+  #handoff {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    background: #2a2416;
+    border-bottom: 1px solid #4a3f22;
+    color: #f0dfb5;
+  }
+  #handoff[hidden] { display: none; }
+  #handoff p { margin: 0; flex: 1; }
+
+  #toasts {
+    position: fixed;
+    right: 12px;
+    bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  .toast {
+    max-width: 360px;
+    padding: 7px 10px;
+    border: 1px solid #3a2e2e;
+    border-radius: 6px;
+    background: #241a1a;
+    color: #f0c9c9;
+    font-size: 12px;
+  }
+
+  #tabPreview {
+    position: fixed;
+    z-index: 9;
+    width: 240px;
+    height: 150px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #000 center / contain no-repeat;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+    display: none;
+    pointer-events: none;
+  }
+  #tabPreview.show { display: block; }
+
+  #drawer {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    height: 210px;
+    border-top: 1px solid var(--line);
+    background: #0c0f15;
+  }
+  #drawer[hidden] { display: none; }
+  #drawerHead {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .diagtab { color: var(--muted); font-size: 11px; border: 1px solid transparent; }
+  .diagtab.active { color: var(--text); background: #1d2330; border-color: var(--line); }
+  .diagtab .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #drawerBody {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .diaglist { list-style: none; margin: 0; padding: 3px 8px 8px; }
+  .diaglist[hidden] { display: none; }
+  .diagrow { display: flex; gap: 8px; padding: 1px 0; }
+  .diagrow .ts { flex: none; color: #5d6678; }
+  .diagrow .lvl { flex: none; width: 52px; text-transform: uppercase; }
+  .diagrow .lvl.error { color: var(--bad); }
+  .diagrow .lvl.warning { color: var(--warn); }
+  .diagrow .lvl.info, .diagrow .lvl.debug { color: var(--muted); }
+  .diagrow .method { flex: none; width: 52px; color: var(--muted); }
+  .diagrow .status { flex: none; width: 34px; text-align: right; color: var(--muted); }
+  .diagrow .status.good { color: var(--ok); }
+  .diagrow .status.bad { color: var(--bad); }
+  .diagrow .url, .diagrow .text {
+    flex: 1;
+    min-width: 0;
+    color: #cdd5e3;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+  .diagempty { color: var(--muted); padding: 8px; }
+</style>
+</head>
+<body>
+<div id="brandbar">
+  <strong>peri-browser</strong>
+  <span id="sessionName"></span>
+  <span id="agentPill">idle</span>
+  <span id="readonly" title="the agent holds the page controller; your input is not sent">read-only</span>
+  <span id="holding" hidden>you control this page</span>
+  <span class="spacer"></span>
+  <button id="diagBtn" title="Diagnostics need the page controller">Diagnostics<span id="diagCount"></span></button>
+  <span id="connState">connecting</span>
+  <button id="takeover" title="Ask the agent to yield the page; it finishes the current call first" hidden>Take over</button>
+  <button id="release" title="Close the controller and give the page back to the agent" hidden>Release</button>
+</div>
+
+<div id="tabStrip">
+  <div id="tabRow" role="tablist"></div>
+  <button id="newTabBtn" title="New tab" hidden>+</button>
+</div>
+
+<div id="toolbar">
+  <button id="back" title="Back">&lsaquo;</button>
+  <button id="forward" title="Forward">&rsaquo;</button>
+  <input id="address" spellcheck="false" autocomplete="off" value="about:blank" aria-label="Page address">
+  <button id="closeTab" title="Close tab" hidden>&times;</button>
+</div>
+
+<div id="handoff" hidden>
+  <p id="handoffText"></p>
+  <button id="handoffAccept">I'll take it</button>
+  <button id="handoffDecline">Not now</button>
+  <button id="handoffDone" hidden>Done</button>
+</div>
+
+<main id="main">
+  <canvas id="screen" width="1280" height="800" tabindex="0" aria-label="page viewport"></canvas>
+  <div id="overlay">waiting for the first frame&hellip;</div>
+</main>
+
+<section id="drawer" hidden aria-label="Diagnostics">
+  <div id="drawerHead">
+    <button class="diagtab active" id="diagConsoleTab" role="tab" aria-selected="true">Console <span class="count" id="consoleCount">0</span></button>
+    <button class="diagtab" id="diagNetworkTab" role="tab" aria-selected="false">Network <span class="count" id="networkCount">0</span></button>
+    <span class="spacer"></span>
+    <button id="diagClear" title="Clear this view; the gateway keeps its own buffer">Clear</button>
+    <button id="diagClose" title="Close diagnostics">&times;</button>
+  </div>
+  <div id="drawerBody">
+    <ul id="consoleList" class="diaglist"></ul>
+    <ul id="networkList" class="diaglist" hidden></ul>
+  </div>
+</section>
+
+<div id="tabPreview"></div>
+<div id="toasts"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const match = location.pathname.match(/^\/s\/([^/]+)\//);
+  const overlay = document.getElementById("overlay");
+  const canvas = document.getElementById("screen");
+  const ctx = canvas.getContext("2d");
+  const tabRow = document.getElementById("tabRow");
+  const address = document.getElementById("address");
+  const agentPill = document.getElementById("agentPill");
+  const readonlyBadge = document.getElementById("readonly");
+  const holdingBadge = document.getElementById("holding");
+  const connState = document.getElementById("connState");
+  const takeoverButton = document.getElementById("takeover");
+  const releaseButton = document.getElementById("release");
+  const newTabButton = document.getElementById("newTabBtn");
+  const closeTabButton = document.getElementById("closeTab");
+  const backButton = document.getElementById("back");
+  const forwardButton = document.getElementById("forward");
+  const preview = document.getElementById("tabPreview");
+  const toasts = document.getElementById("toasts");
+  const handoff = document.getElementById("handoff");
+  const handoffText = document.getElementById("handoffText");
+  const handoffAccept = document.getElementById("handoffAccept");
+  const handoffDecline = document.getElementById("handoffDecline");
+  const handoffDone = document.getElementById("handoffDone");
+  const diagButton = document.getElementById("diagBtn");
+  const diagCount = document.getElementById("diagCount");
+  const drawer = document.getElementById("drawer");
+  const consoleList = document.getElementById("consoleList");
+  const networkList = document.getElementById("networkList");
+  const consoleCount = document.getElementById("consoleCount");
+  const networkCount = document.getElementById("networkCount");
+  const consoleTab = document.getElementById("diagConsoleTab");
+  const networkTab = document.getElementById("diagNetworkTab");
+
+  if (!match) {
+    overlay.textContent = "no session token in the path";
+    return;
+  }
+  const token = match[1];
+  const socketUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/s/${token}/ws`;
+
+  const state = {
+    socket: null,
+    hello: null,
+    tabs: [],
+    active: null,
+    meta: null,
+    interactive: false,
+    caps: { newTab: false, diagnostics: false },
+    thumbs: new Map(),
+    latest: null,
+    pendingBlob: null,
+    decoding: false,
+    visible: !document.hidden,
+    attempt: 0,
+    paintedPage: null,
+    // Pending `request_human` from the agent: `{ requestId, prompt }`. The
+    // banner stays until the gateway broadcasts `handoff { active: false }`.
+    handoff: null,
+    takeoverPending: false,
+    takeoverTimer: 0,
+    diagOpen: false,
+    console: [],
+    network: [],
+    readonlyHintAt: 0,
+  };
+  const DIAG_LIMIT = 200;
+
+  function send(message) {
+    if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+      state.socket.send(JSON.stringify(message));
+    }
+  }
+
+  function setConnection(text) {
+    connState.textContent = text;
+  }
+
+  function showOverlay(text) {
+    overlay.textContent = text;
+    overlay.hidden = false;
+  }
+
+  function hideOverlay() {
+    overlay.hidden = true;
+  }
+
+  function toast(text) {
+    if (!text) return;
+    const last = toasts.lastElementChild;
+    if (last && last.textContent === text) return;
+    const element = document.createElement("div");
+    element.className = "toast";
+    element.textContent = text;
+    toasts.append(element);
+    setTimeout(() => element.remove(), 6000);
+  }
+
+  function hintReadOnly() {
+    const now = Date.now();
+    if (now - state.readonlyHintAt < 3000) return;
+    state.readonlyHintAt = now;
+    toast("read-only: the agent holds the page. Use Take over to interact.");
+  }
+
+  function renderHandoff() {
+    if (!state.handoff) {
+      handoff.hidden = true;
+      handoffText.textContent = "";
+      return;
+    }
+    handoff.hidden = false;
+    handoffText.textContent = state.handoff.prompt || "The agent is waiting for you.";
+    handoffAccept.hidden = state.interactive;
+    handoffDecline.hidden = state.interactive;
+    handoffDone.hidden = !state.interactive;
+  }
+
+  function answerHandoff(accepted) {
+    if (!state.handoff || !state.handoff.requestId) {
+      toast("there is no handoff to answer");
+      return;
+    }
+    // The banner stays until the gateway broadcasts `handoff { active: false }`:
+    // an answer for a request that already timed out is rejected with
+    // `no_handoff` and must not silently hide the agent's request.
+    send({
+      t: "answer",
+      requestId: state.handoff.requestId,
+      accepted,
+    });
+  }
+
+  function updateDiagCount() {
+    const total = state.console.length + state.network.length;
+    diagCount.textContent = total ? ` (${total})` : "";
+    consoleCount.textContent = String(state.console.length);
+    networkCount.textContent = String(state.network.length);
+  }
+
+  function emptyRow(text) {
+    const item = document.createElement("li");
+    item.className = "diagempty";
+    item.textContent = text;
+    return item;
+  }
+
+  function timeLabel(ts) {
+    if (!ts) return "";
+    const date = new Date(ts);
+    return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString();
+  }
+
+  function renderConsole() {
+    consoleList.textContent = "";
+    if (state.console.length === 0) {
+      consoleList.append(emptyRow("no console output yet"));
+    }
+    for (const entry of state.console) {
+      const item = document.createElement("li");
+      item.className = "diagrow";
+      const time = document.createElement("span");
+      time.className = "ts";
+      time.textContent = timeLabel(entry.ts);
+      const level = document.createElement("span");
+      level.className = `lvl ${entry.level || "log"}`;
+      level.textContent = entry.level || "log";
+      const text = document.createElement("span");
+      text.className = "text";
+      text.textContent = entry.text || "";
+      item.append(time, level, text);
+      consoleList.append(item);
+    }
+    updateDiagCount();
+  }
+
+  function renderNetwork() {
+    networkList.textContent = "";
+    if (state.network.length === 0) {
+      networkList.append(emptyRow("no requests yet"));
+    }
+    for (const row of state.network) {
+      const entry = row.entry;
+      const item = document.createElement("li");
+      item.className = "diagrow";
+      const time = document.createElement("span");
+      time.className = "ts";
+      time.textContent = timeLabel(entry.ts);
+      const method = document.createElement("span");
+      method.className = "method";
+      method.textContent = entry.method || "";
+      const status = document.createElement("span");
+      const code = entry.status;
+      status.className = `status${code == null ? "" : code >= 400 ? " bad" : " good"}`;
+      status.textContent = code == null ? "\u2026" : String(code);
+      const url = document.createElement("span");
+      url.className = "url";
+      url.textContent = entry.url || "";
+      item.append(time, method, status, url);
+      networkList.append(item);
+    }
+    updateDiagCount();
+  }
+
+  function renderDiagnostics() {
+    renderConsole();
+    renderNetwork();
+  }
+
+  function clearDiagnostics() {
+    state.console = [];
+    state.network = [];
+    renderDiagnostics();
+  }
+
+  function pushConsole(entries) {
+    if (!Array.isArray(entries)) return;
+    if (entries.length === 0) {
+      // The gateway sends an empty list when it drops its ring buffer (leaving
+      // `HumanHolds`), so the drawer does not keep rows the controller no
+      // longer has.
+      state.console = [];
+    } else {
+      state.console.push(...entries);
+      if (state.console.length > DIAG_LIMIT) {
+        state.console.splice(0, state.console.length - DIAG_LIMIT);
+      }
+    }
+    renderConsole();
+  }
+
+  function pushNetwork(entries) {
+    if (!Array.isArray(entries)) return;
+    if (entries.length === 0) {
+      state.network = [];
+    } else {
+      for (const entry of entries) {
+        // A response update repeats the request entry with a status and the
+        // original timestamp; one row per request, not two.
+        const key = `${entry.method}\u0000${entry.url}\u0000${entry.ts}`;
+        const index = state.network.findIndex((row) => row.key === key);
+        if (index >= 0) state.network[index] = { key, entry };
+        else state.network.push({ key, entry });
+      }
+      if (state.network.length > DIAG_LIMIT) {
+        state.network.splice(0, state.network.length - DIAG_LIMIT);
+      }
+    }
+    renderNetwork();
+  }
+
+  function diagnosticsPage(message) {
+    // The controller only reports the page it holds; a message that names a
+    // different page belongs to a tab this viewer has already left.
+    return !message.pageId || !state.active || message.pageId === state.active;
+  }
+
+  function setDiagTab(tab) {
+    const consoleActive = tab === "console";
+    consoleTab.classList.toggle("active", consoleActive);
+    networkTab.classList.toggle("active", !consoleActive);
+    consoleTab.setAttribute("aria-selected", consoleActive ? "true" : "false");
+    networkTab.setAttribute("aria-selected", consoleActive ? "false" : "true");
+    consoleList.hidden = !consoleActive;
+    networkList.hidden = consoleActive;
+  }
+
+  function openDrawer() {
+    if (!state.caps.diagnostics || !state.interactive) {
+      toast("diagnostics need the page controller; take over to see console and network");
+      return;
+    }
+    state.diagOpen = true;
+    drawer.hidden = false;
+    diagButton.classList.add("active");
+    renderDiagnostics();
+  }
+
+  function closeDrawer() {
+    state.diagOpen = false;
+    drawer.hidden = true;
+    diagButton.classList.remove("active");
+  }
+
+  function activeTab() {
+    return state.tabs.find((tab) => tab.id === state.active) || null;
+  }
+
+  function syncAddress() {
+    if (document.activeElement === address) return;
+    const tab = activeTab();
+    address.value = tab ? (tab.url || "about:blank") : "about:blank";
+  }
+
+  // Mirrors the gateway's view of ownership: `interactive` means the gateway
+  // holds the controller, nothing else. While it is false every input handler
+  // returns before sending, so nothing is queued for a later takeover
+  // (README §6.3). New/close tab are exceptions: the gateway always forwards
+  // them to the MCP, which owns the machine lock and the browser endpoint.
+  function syncControls() {
+    const holding = state.interactive;
+    canvas.classList.toggle("interactive", holding);
+    readonlyBadge.hidden = holding;
+    holdingBadge.hidden = !holding;
+    takeoverButton.hidden = holding || Boolean(state.handoff);
+    takeoverButton.disabled = state.takeoverPending;
+    releaseButton.hidden = !holding || Boolean(state.handoff);
+    newTabButton.hidden = !state.caps.newTab;
+    closeTabButton.hidden = !state.active;
+    diagButton.classList.toggle("active", state.diagOpen);
+    diagButton.title = holding && state.caps.diagnostics
+      ? "Show console and network events from the page controller"
+      : "Diagnostics need the page controller; take over to see console and network";
+    diagButton.setAttribute(
+      "aria-disabled",
+      holding && state.caps.diagnostics ? "false" : "true",
+    );
+    address.title = holding
+      ? "Press Enter: you hold the page, so the gateway navigates it directly"
+      : "Press Enter: the agent executes the navigation while it holds the page";
+    if (!holding || !state.caps.diagnostics) closeDrawer();
+    renderHandoff();
+  }
+
+  function renderTabs() {
+    tabRow.textContent = "";
+    for (const tab of state.tabs) {
+      const element = document.createElement("div");
+      element.className = "tab" + (tab.id === state.active ? " active" : "");
+      element.setAttribute("role", "tab");
+      element.tabIndex = 0;
+      element.title = tab.url || "";
+
+      const dot = document.createElement("span");
+      dot.className = "tdot";
+      element.append(dot);
+
+      const label = document.createElement("span");
+      label.className = "tlabel";
+      label.textContent = tab.title || tab.url || "about:blank";
+      element.append(label);
+
+      const close = document.createElement("button");
+      close.className = "tclose";
+      close.textContent = "\u00d7";
+      close.title = "Close tab";
+      close.addEventListener("click", (event) => {
+        event.stopPropagation();
+        send({ t: "closeTab", pageId: tab.id });
+      });
+      element.append(close);
+
+      element.addEventListener("click", () => selectTab(tab.id));
+      element.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectTab(tab.id);
+        }
+      });
+      element.addEventListener("mouseenter", () => showPreview(tab.id, element));
+      element.addEventListener("mouseleave", hidePreview);
+      element.addEventListener("auxclick", (event) => {
+        if (event.button === 1) {
+          event.preventDefault();
+          send({ t: "closeTab", pageId: tab.id });
+        }
+      });
+      tabRow.append(element);
+    }
+  }
+
+  function showPreview(pageId, element) {
+    if (pageId === state.active) return;
+    const data = state.thumbs.get(pageId);
+    if (!data) return;
+    const rect = element.getBoundingClientRect();
+    preview.style.backgroundImage = `url(${data})`;
+    preview.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - 248))}px`;
+    preview.style.top = `${rect.bottom + 8}px`;
+    preview.classList.add("show");
+  }
+
+  function hidePreview() {
+    preview.classList.remove("show");
+  }
+
+  function paintThumbnail(pageId) {
+    const data = state.thumbs.get(pageId);
+    if (!data) return;
+    const image = new Image();
+    image.onload = () => {
+      if (state.active !== pageId || state.paintedPage === pageId) return;
+      // An unpainted page captures as a 1x1 placeholder; painting it would
+      // replace "waiting for the first frame" with a blank canvas.
+      if (image.naturalWidth <= 1 || image.naturalHeight <= 1) return;
+      canvas.width = image.naturalWidth || canvas.width;
+      canvas.height = image.naturalHeight || canvas.height;
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      state.paintedPage = pageId;
+      hideOverlay();
+    };
+    image.src = data;
+  }
+
+  function selectTab(pageId) {
+    if (!pageId || pageId === state.active) return;
+    state.active = pageId;
+    state.meta = null;
+    state.paintedPage = null;
+    // Diagnostics belong to the controller's page: a tab switch swaps the
+    // controller connection, so the old page's rows must not follow it.
+    clearDiagnostics();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    showOverlay("waiting for the first frame\u2026");
+    paintThumbnail(pageId);
+    renderTabs();
+    syncAddress();
+    syncControls();
+    send({ t: "switch", pageId });
+  }
+
+  function handleHello(message) {
+    const wasInteractive = state.interactive;
+    state.hello = message;
+    document.getElementById("sessionName").textContent = message.name || message.session || "";
+    state.interactive = Boolean(message.interactive);
+    state.caps = message.caps || { newTab: false, diagnostics: false };
+    if (state.interactive) state.takeoverPending = false;
+    setAgent(message.agent);
+    syncControls();
+    if (state.interactive && !wasInteractive && state.visible) {
+      toast("you control the page: click it, then type");
+    }
+    if (!state.interactive) clearDiagnostics();
+  }
+
+  function setAgent(agent) {
+    const value = agent || "idle";
+    agentPill.textContent = value.replaceAll("_", " ");
+    agentPill.className = value;
+    agentPill.title = {
+      driving: "the agent is using this page",
+      idle: "the agent is idle; the page is handed over while a monitor watches",
+      waiting_for_human: "the agent is waiting for you",
+    }[value] || value;
+  }
+
+  function handleTabs(message) {
+    state.tabs = Array.isArray(message.tabs) ? message.tabs : [];
+    const previous = state.active;
+    const active = state.tabs.find((tab) => tab.active);
+    if (active) state.active = active.id;
+    else if (!state.tabs.some((tab) => tab.id === state.active)) state.active = null;
+    // Another viewer switched tabs: the canvas still holds the previous page.
+    // The gateway replays the new page's cached frame when it has one; until
+    // then the old pixels would be a lie, so blank the canvas and say why.
+    if (
+      state.active !== previous &&
+      state.paintedPage &&
+      state.active !== state.paintedPage
+    ) {
+      state.meta = null;
+      state.paintedPage = null;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      showOverlay("waiting for the first frame\u2026");
+      paintThumbnail(state.active);
+    }
+    if (state.active !== previous) clearDiagnostics();
+    renderTabs();
+    syncAddress();
+    syncControls();
+  }
+
+  function handleMeta(message) {
+    // A frame for a page this viewer already left must not move the canvas or
+    // the coordinate base of the page it is showing now.
+    if (message.pageId !== state.active) return;
+    state.meta = message;
+    if (canvas.width !== message.deviceWidth || canvas.height !== message.deviceHeight) {
+      canvas.width = Math.max(1, message.deviceWidth);
+      canvas.height = Math.max(1, message.deviceHeight);
+    }
+  }
+
+  function handleText(raw) {
+    let message;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    switch (message.t) {
+      case "hello":
+        handleHello(message);
+        break;
+      case "tabs":
+        handleTabs(message);
+        break;
+      case "agent":
+        setAgent(message.state);
+        break;
+      case "nav":
+        if (message.pageId === state.active) {
+          if (document.activeElement !== address) address.value = message.url || "about:blank";
+          backButton.disabled = !message.canGoBack;
+          forwardButton.disabled = !message.canGoForward;
+        }
+        break;
+      case "meta":
+        handleMeta(message);
+        break;
+      case "thumb":
+        state.thumbs.set(message.pageId, message.data);
+        if (preview.classList.contains("show") && message.pageId !== state.active) {
+          const current = tabRow.querySelector(".tab.active + .tab, .tab.active");
+          if (current) showPreview(message.pageId, current);
+        }
+        break;
+      case "handoff":
+        if (message.active) {
+          // Keep the request id: the gateway matches answers against the
+          // pending handoff and rejects a placeholder.
+          state.handoff = {
+            requestId: message.requestId || "",
+            prompt: message.prompt || "The agent is waiting for you.",
+          };
+        } else {
+          state.handoff = null;
+        }
+        renderHandoff();
+        syncControls();
+        break;
+      case "error": {
+        const code = message.code || "error";
+        if (code === "yield_pending" || code === "unavailable") {
+          state.takeoverPending = false;
+        }
+        if (code === "controller_lost" || code === "controller_unavailable" || code === "read_only") {
+          state.interactive = false;
+        }
+        if (code === "no_handoff") {
+          // The pending request was already resolved (timeout or another
+          // viewer); do not leave a banner the gateway will not answer.
+          state.handoff = null;
+        }
+        syncControls();
+        toast(message.message || code);
+        break;
+      }
+      case "console":
+        if (diagnosticsPage(message)) pushConsole(message.entries);
+        break;
+      case "network":
+        if (diagnosticsPage(message)) pushNetwork(message.entries);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function onBinary(buffer) {
+    state.latest = buffer;
+    if (!state.visible) return;
+    if (state.meta && state.meta.pageId !== state.active) return;
+    state.pendingBlob = new Blob([buffer], { type: "image/jpeg" });
+    pump();
+  }
+
+  async function pump() {
+    if (state.decoding) return;
+    state.decoding = true;
+    try {
+      while (state.pendingBlob) {
+        const blob = state.pendingBlob;
+        state.pendingBlob = null;
+        if (!state.visible) continue;
+        const bitmap = await createImageBitmap(blob);
+        if (!state.visible) {
+          bitmap.close();
+          continue;
+        }
+        if (state.meta) {
+          const width = Math.max(1, state.meta.deviceWidth);
+          const height = Math.max(1, state.meta.deviceHeight);
+          if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+          }
+        }
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        bitmap.close();
+        state.paintedPage = state.meta ? state.meta.pageId : state.active;
+        hideOverlay();
+        send({ t: "ack" });
+      }
+    } catch {
+      // A truncated JPEG is dropped; the next frame replaces it.
+    } finally {
+      state.decoding = false;
+    }
+  }
+
+  function setVisible(visible) {
+    if (state.visible === visible) return;
+    state.visible = visible;
+    send({ t: "visible", visible });
+    if (visible && state.latest) onBinary(state.latest);
+  }
+
+  // Pointer position in canvas (JPEG) pixels, which is what the wire carries.
+  // The gateway maps that box to CSS pixels with the last frame's metadata and
+  // the live `Page.getLayoutMetrics` viewport (`ws::canvas_to_css`), so the
+  // client must not pre-scale to `viewportWidth`/`viewportHeight`: with a
+  // device pixel ratio other than 1 the position would be scaled twice.
+  function pagePoint(event) {
+    const meta = state.meta;
+    if (!meta) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const width = Math.max(1, canvas.width || meta.deviceWidth || 1);
+    const height = Math.max(1, canvas.height || meta.deviceHeight || 1);
+    const x = ((event.clientX - rect.left) / rect.width) * width;
+    const y = ((event.clientY - rect.top) / rect.height) * height;
+    return {
+      x: Math.max(0, Math.min(width, x)),
+      y: Math.max(0, Math.min(height, y)),
+    };
+  }
+
+  function buttonName(button) {
+    if (button === 1) return "middle";
+    if (button === 2) return "right";
+    return "left";
+  }
+
+  function modifiers(event) {
+    return (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) |
+      (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
+  }
+
+  let moveFrame = 0;
+  let movePoint = null;
+  canvas.addEventListener("mousemove", (event) => {
+    if (!state.interactive) return;
+    movePoint = pagePoint(event);
+    if (!movePoint || moveFrame) return;
+    moveFrame = requestAnimationFrame(() => {
+      moveFrame = 0;
+      if (movePoint) send({ t: "mouse", type: "move", x: movePoint.x, y: movePoint.y });
+    });
+  });
+
+  for (const type of ["down", "up"]) {
+    canvas.addEventListener(type === "down" ? "mousedown" : "mouseup", (event) => {
+      if (!state.interactive) {
+        // Never queue input for a later takeover: the agent is the writer, so
+        // the click is only explained, not remembered (README §6.3).
+        if (type === "down") hintReadOnly();
+        return;
+      }
+      event.preventDefault();
+      canvas.focus();
+      const point = pagePoint(event);
+      if (!point) return;
+      send({
+        t: "mouse",
+        type,
+        x: point.x,
+        y: point.y,
+        button: buttonName(event.button),
+        clickCount: event.detail || 1,
+      });
+    });
+  }
+
+  canvas.addEventListener("contextmenu", (event) => {
+    if (state.interactive) event.preventDefault();
+  });
+
+  canvas.addEventListener("wheel", (event) => {
+    if (!state.interactive) {
+      hintReadOnly();
+      return;
+    }
+    event.preventDefault();
+    const point = pagePoint(event);
+    if (!point) return;
+    send({ t: "wheel", x: point.x, y: point.y, deltaX: event.deltaX, deltaY: event.deltaY });
+  }, { passive: false });
+
+  for (const type of ["down", "up"]) {
+    canvas.addEventListener(type === "down" ? "keydown" : "keyup", (event) => {
+      if (!state.interactive) {
+        if (type === "down") hintReadOnly();
+        return;
+      }
+      event.preventDefault();
+      const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+      send({
+        t: "key",
+        type,
+        key: event.key,
+        code: event.code,
+        text: type === "down" && printable ? event.key : "",
+        modifiers: modifiers(event),
+      });
+    });
+  }
+
+  canvas.addEventListener("paste", (event) => {
+    if (!state.interactive) {
+      hintReadOnly();
+      return;
+    }
+    const text = event.clipboardData && event.clipboardData.getData("text");
+    if (!text) return;
+    event.preventDefault();
+    send({ t: "text", text });
+  });
+
+  address.addEventListener("focus", () => address.select());
+  address.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const url = address.value.trim();
+      if (url) {
+        send({ t: "navigate", url });
+        if (!state.interactive) toast("asking the agent to navigate");
+      }
+      address.blur();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      syncAddress();
+      address.blur();
+    }
+  });
+
+  backButton.addEventListener("click", () => {
+    send({ t: "history", delta: -1 });
+    if (!state.interactive) toast("asking the agent to go back");
+  });
+  forwardButton.addEventListener("click", () => {
+    send({ t: "history", delta: 1 });
+    if (!state.interactive) toast("asking the agent to go forward");
+  });
+  newTabButton.addEventListener("click", () => send({ t: "newTab", url: "about:blank" }));
+  closeTabButton.addEventListener("click", () => {
+    if (state.active) send({ t: "closeTab", pageId: state.active });
+  });
+
+  function requestTakeover() {
+    if (state.interactive || state.takeoverPending) return;
+    state.takeoverPending = true;
+    syncControls();
+    send({ t: "takeover" });
+    toast("asking the agent to yield the page");
+    // The gateway always answers a yield one way or another; this only keeps
+    // the button from staying disabled if the socket died mid-request.
+    clearTimeout(state.takeoverTimer);
+    state.takeoverTimer = setTimeout(() => {
+      state.takeoverPending = false;
+      syncControls();
+    }, 5000);
+  }
+
+  function releasePage() {
+    if (!state.interactive) return;
+    send({ t: "release" });
+    toast("returning the page to the agent");
+  }
+
+  takeoverButton.addEventListener("click", requestTakeover);
+  releaseButton.addEventListener("click", releasePage);
+  handoffAccept.addEventListener("click", () => {
+    toast("asking the agent to yield the page");
+    answerHandoff(true);
+  });
+  handoffDone.addEventListener("click", () => answerHandoff(false));
+  handoffDecline.addEventListener("click", () => answerHandoff(false));
+
+  diagButton.addEventListener("click", () => {
+    if (state.diagOpen) closeDrawer();
+    else openDrawer();
+    syncControls();
+  });
+  consoleTab.addEventListener("click", () => setDiagTab("console"));
+  networkTab.addEventListener("click", () => setDiagTab("network"));
+  document.getElementById("diagClear").addEventListener("click", clearDiagnostics);
+  document.getElementById("diagClose").addEventListener("click", () => {
+    closeDrawer();
+    syncControls();
+  });
+
+  document.addEventListener("visibilitychange", () => setVisible(!document.hidden));
+
+  function connect() {
+    setConnection("connecting");
+    const socket = new WebSocket(socketUrl);
+    socket.binaryType = "arraybuffer";
+    state.socket = socket;
+
+    socket.addEventListener("open", () => {
+      state.attempt = 0;
+      setConnection("connected");
+      if (!state.visible) send({ t: "visible", visible: false });
+    });
+
+    socket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") handleText(event.data);
+      else onBinary(event.data);
+    });
+
+    socket.addEventListener("close", () => {
+      setConnection("offline");
+      // The gateway closes its controller when the last viewer leaves
+      // (README §6.6), so this page is read-only until the reconnect handshake
+      // says otherwise. Input sent in between is dropped, not queued.
+      state.interactive = false;
+      state.takeoverPending = false;
+      syncControls();
+      if (!state.paintedPage) showOverlay("disconnected; reconnecting\u2026");
+      const delay = Math.min(10000, 300 * Math.pow(1.7, state.attempt++));
+      setTimeout(connect, delay);
+    });
+
+    socket.addEventListener("error", () => setConnection("socket error"));
+  }
+
+  syncControls();
+  syncAddress();
+  connect();
+})();
+</script>
+</body>
+</html>
