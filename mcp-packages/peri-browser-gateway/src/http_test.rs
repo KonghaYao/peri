@@ -208,6 +208,8 @@ fn monitor_page_exposes_the_human_control_surface() {
         "requestId: state.handoff.requestId",
         "id=\"drawer\"",
         "diagnosticsPage(message)",
+        "id=\"imeInput\"",
+        "compositionend",
     ] {
         assert!(
             MONITOR_HTML.contains(needle),
