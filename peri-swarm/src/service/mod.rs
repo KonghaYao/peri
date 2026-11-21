@@ -805,6 +805,12 @@ pub(crate) fn project_session(
     sandbox: Option<crate::domain::SandboxView>,
 ) -> SessionView {
     let status = crate::domain::SessionStatus::project(row.state, turn.is_some());
+    // Older rows stored the logical id even for `none`; the official shape has
+    // only `type`, so normalize on projection instead of leaking that id.
+    let mut environment = row.environment.clone();
+    if environment.kind == EnvironmentKind::None {
+        environment.id = None;
+    }
     SessionView {
         id: row.logical_id.clone(),
         object: "agent.session".to_owned(),
@@ -821,8 +827,12 @@ pub(crate) fn project_session(
             model: row.model.clone(),
             instructions: row.instructions.clone(),
         },
-        environment: row.environment.clone(),
+        environment,
         sandbox,
+        required_actions: Vec::new(),
+        vault_ids: Vec::new(),
+        usage: None,
+        error: None,
         metadata: row.metadata.clone(),
         prompt_cache_options: row.prompt_cache_options,
     }
@@ -1249,5 +1259,37 @@ mod tests {
             serde_json::from_value(encoded).expect("deserialize");
         assert_eq!(decoded.metadata, UpdateField::Clear);
         assert_eq!(decoded.prompt_cache_options, UpdateField::Clear);
+    }
+
+    #[test]
+    fn project_session_normalizes_legacy_none_environment_and_official_defaults() {
+        let row = crate::store::SwarmSessionRow {
+            logical_id: "agent-legacy".to_owned(),
+            root_session_id: "0192f0c5-0000-7000-8000-000000000001".to_owned(),
+            actor_key: "agent/agent-legacy".to_owned(),
+            cwd: "/tmp".to_owned(),
+            state: SessionState::Idle,
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            // Old rows stored the logical id even for `none`.
+            environment: crate::domain::EnvironmentRef {
+                kind: EnvironmentKind::None,
+                id: Some("agent-legacy".to_owned()),
+            },
+            metadata: Default::default(),
+            prompt_cache_options: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_item_seq: 0,
+        };
+        let view = project_session(&row, None, None);
+        let value = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(value["environment"], serde_json::json!({ "type": "none" }));
+        assert!(value["environment"].get("id").is_none(), "{value}");
+        assert_eq!(value["required_actions"], serde_json::json!([]));
+        assert_eq!(value["vault_ids"], serde_json::json!([]));
+        assert_eq!(value["usage"], serde_json::Value::Null);
+        assert_eq!(value["error"], serde_json::Value::Null);
     }
 }

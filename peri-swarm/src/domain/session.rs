@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::domain::identity::LogicalId;
 use crate::domain::item::ItemOrder;
 
 /// Official `metadata` limits (`SessionCreateParams.metadata`).
@@ -40,8 +40,9 @@ impl PromptCacheTtl {
 
 /// Persisted `prompt_cache_options`: `{"ttl": "30m" | "12h"}`.
 ///
-/// A session with no configured value stores `NULL`; `None` on the wire means
-/// "model default" rather than a fabricated TTL.
+/// A session with no configured value stores `NULL`; on the wire `null` clears
+/// it. An input object without `ttl` is the official default `30m`, not
+/// "unset".
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PromptCacheOptions {
     pub ttl: PromptCacheTtl,
@@ -238,15 +239,18 @@ impl EnvironmentKind {
 pub struct EnvironmentRef {
     #[serde(rename = "type")]
     pub kind: EnvironmentKind,
+    /// Official `EnvironmentResourceNone` has only `type`, so `none` omits the
+    /// id. Hosted sessions still carry their logical environment id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 }
 
 impl EnvironmentRef {
     #[must_use]
-    pub fn none(logical_id: &LogicalId) -> Self {
+    pub fn none() -> Self {
         Self {
             kind: EnvironmentKind::None,
-            id: Some(logical_id.as_str().to_owned()),
+            id: None,
         }
     }
 }
@@ -322,9 +326,23 @@ pub struct SessionView {
     pub agent: AgentView,
     pub environment: EnvironmentRef,
     pub sandbox: Option<SandboxView>,
+    /// Official `AgentSession.required_actions`; always empty because the local
+    /// runtime never waits for an approval round-trip.
+    #[serde(rename = "required_actions", default)]
+    pub required_actions: Vec<Value>,
+    /// Official `AgentSession.vault_ids`; the gateway exposes no vaults.
+    #[serde(rename = "vault_ids", default)]
+    pub vault_ids: Vec<String>,
+    /// Official `AgentSession.usage`; `null` when unknown, which is always.
+    #[serde(default)]
+    pub usage: Option<Value>,
+    /// Official `AgentSession.error`; `null` while the session is not failed.
+    #[serde(default)]
+    pub error: Option<String>,
     /// Caller metadata, exactly as persisted. Never synthesized.
     pub metadata: BTreeMap<String, String>,
-    /// Session-default prompt cache lifetime; `null` means the model default.
+    /// Session-default prompt cache lifetime; `null` when the session has no
+    /// configured value.
     ///
     /// The official `AgentSession.prompt_cache_options` spelling is snake_case,
     /// unlike the rest of this Swarm-defined projection; the official SDK reads

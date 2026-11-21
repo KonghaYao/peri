@@ -872,7 +872,7 @@ impl AcpSwarmService {
         command: &CreateSessionCommand,
     ) -> Result<(EnvironmentRef, Option<SandboxMcpBinding>), SwarmError> {
         if command.environment == EnvironmentKind::None {
-            return Ok((EnvironmentRef::none(&command.logical_id), None));
+            return Ok((EnvironmentRef::none(), None));
         }
 
         // The injected entry owns the ACP `workspace` name. A caller using the

@@ -1,6 +1,8 @@
 # Peri Swarm 对齐官方 Agents SDK 验收（分页、状态、事件流）
 
 - 状态：代码与契约测试证据记录；无活体 Loom/Rivet engine，**无真实官方 SDK 进程调用**
+- 后续变更注记：items 默认顺序已改为官方 `desc`，`asc` 需显式指定；见
+  [官方默认值对齐](peri-swarm-official-defaults-2026-11-21.md)。本文件其余正文保留当时证据。
 - 日期：2026-11-21
 - 基线：`05d93fe1e`（`feat/swarm-official-p1a` 分支基点）+ 本记录同一提交中的工作树改动；
   第二轮复核基线为 `d06e1a124`（判 FAIL 的上一轮实现），对应改动见 §7；第三轮复核
