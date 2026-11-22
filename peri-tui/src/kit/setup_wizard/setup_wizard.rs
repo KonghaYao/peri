@@ -208,6 +208,7 @@ pub(super) fn dispatch_wizard_event(event: Event) -> EventResult {
 // open on either failure; only successful activation publishes the shared config.
 pub(crate) async fn finish_setup(draft: SetupWizardState) {
     let from_command = draft.from_command;
+    let offline_completion = draft.offline_completion;
     let saved = tokio::task::spawn_blocking(move || setup_wizard::save_setup(&draft)).await;
     let config = match saved {
         Ok(Ok(config)) => config,
@@ -216,7 +217,7 @@ pub(crate) async fn finish_setup(draft: SetupWizardState) {
             return;
         }
     };
-    if from_command {
+    if from_command && !offline_completion {
         let Some(client) = atoms::ACP_CLIENT_HANDLE.get() else {
             report_setup_failure("setup-activation-failed");
             return;
@@ -237,7 +238,7 @@ pub(crate) async fn finish_setup(draft: SetupWizardState) {
         current.save_in_progress = false;
         current.submit_error = None;
     }
-    if !from_command {
+    if !from_command || offline_completion {
         *atoms::SETUP_COMPLETED.state().write() = true;
     }
     *atoms::WIZARD_ACTIVE.state().write() = false;

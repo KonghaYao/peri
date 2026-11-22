@@ -412,6 +412,56 @@ fn test_wizard_replaces_broken_active_selection_with_usable_profile() {
     assert_eq!(merged.config.active_alias, "sonnet");
 }
 
+/// [回归测试] 已配置用户重开表单时，仍可解析的档位选择不得被重置或覆盖。
+#[test]
+fn test_wizard_preserves_resolvable_selection_when_reopened() {
+    let mut provider = MigratedProvider::new(ProviderType::Anthropic);
+    provider.api_key = "sk-test".into();
+    let seed = SetupWizardState {
+        from_command: true,
+        providers: vec![provider],
+        ..Default::default()
+    };
+    let mut cfg = super::build_wizard_config(&seed);
+    cfg.config.active_alias = "sonnet".into();
+    cfg.config
+        .profiles
+        .get_mut("sonnet")
+        .expect("sonnet profile")
+        .effort = "high".into();
+    cfg.config
+        .profiles
+        .get_mut("opus")
+        .expect("opus profile")
+        .effort = "max".into();
+
+    let reopened = super::state_from_config(&cfg);
+    let merged = super::merge_setup(&reopened, cfg);
+
+    assert_eq!(
+        merged.config.active_alias, "sonnet",
+        "valid active selection must survive provider edits"
+    );
+    assert_eq!(
+        merged
+            .config
+            .profiles
+            .get("sonnet")
+            .expect("sonnet profile")
+            .effort,
+        "high"
+    );
+    assert_eq!(
+        merged
+            .config
+            .profiles
+            .get("opus")
+            .expect("opus profile")
+            .effort,
+        "max"
+    );
+}
+
 /// [回归测试] 删除、粘贴等所有文本修改均经过同一失效入口。
 #[test]
 fn test_edit_invalidates_pending_connectivity() {

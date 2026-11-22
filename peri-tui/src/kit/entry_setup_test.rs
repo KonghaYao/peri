@@ -1,6 +1,6 @@
 //! setup pass 决策纯函数的单元测试。
 
-use super::{SetupPassOutcome, setup_pass_outcome, setup_pass_required};
+use super::{SetupPassOutcome, setup_pass_draft, setup_pass_outcome, setup_pass_required};
 
 #[test]
 fn setup_pass_required_covers_needs_setup_and_setup_only() {
@@ -42,5 +42,19 @@ fn setup_pass_outcome_incomplete_cancels_or_fails() {
         setup_pass_outcome(true, false),
         SetupPassOutcome::SetupIncomplete,
         "setup-only cancellation must surface as a failure"
+    );
+}
+
+#[test]
+fn setup_pass_draft_keeps_profile_merge_and_marks_offline_completion() {
+    let cfg = crate::config::PeriConfig::default();
+    let draft = setup_pass_draft(&cfg);
+    assert!(
+        draft.from_command,
+        "a configuration that still resolves must keep the user's profile selection"
+    );
+    assert!(
+        draft.offline_completion,
+        "a pass before ACP assembly has no online activation and must complete offline"
     );
 }

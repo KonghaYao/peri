@@ -65,6 +65,19 @@ pub(crate) fn setup_pass_outcome(setup_only: bool, completed: bool) -> SetupPass
     }
 }
 
+/// 构造 setup pass 草稿。
+///
+/// `state_from_config` 自带 `from_command=true`：交给 `merge_setup` 在配置仍可
+/// 解析时保留用户已有的档位选择。`offline_completion` 单独标记本 pass 发生在
+/// ACP 装配之前，没有在线 `update_config`，完成时直接置 `SETUP_COMPLETED`。
+pub(crate) fn setup_pass_draft(
+    cfg: &crate::config::PeriConfig,
+) -> crate::app::setup_wizard::SetupWizardState {
+    let mut draft = crate::app::setup_wizard::state_from_config(cfg);
+    draft.offline_completion = true;
+    draft
+}
+
 /// 使用 ratatui-kit 的全屏模式启动 TUI。
 ///
 /// 接收 CLI 选项 + panic 通知 rx，完成 App+ACP 构建后
@@ -242,19 +255,19 @@ pub async fn run_kit_fullscreen(
     //     SetupWizard 独占一个 fullscreen 生命周期。wizard 即使是引导界面也
     //     支持 Esc/q 退出（避免首次启动锁死）。
     //
-    //     预填现有配置供编辑，但 from_command=false：本 pass 发生在 ACP 装配
-    //     之前，没有可调用的在线 update_config；完成时必须置 SETUP_COMPLETED，
-    //     entry 才能据此决定 attach 或退出。SETUP_COMPLETED 显式清零，防止
-    //     复用同一进程的旧完成状态让取消被误判为完成。
+    //     预填现有配置供编辑；`from_command` 保持 `state_from_config` 的 true，
+    //     使配置仍可解析时 `merge_setup` 不覆盖用户的档位选择。本 pass 发生在
+    //     ACP 装配之前，没有可调用的在线 update_config，因此用
+    //     `offline_completion` 标记：完成时直接置 SETUP_COMPLETED，entry 据此
+    //     决定 attach 或退出。SETUP_COMPLETED 显式清零，防止复用同一进程的旧
+    //     完成状态让取消被误判为完成。
     let needs_setup = {
         let cfg = app.services.peri_config.read();
         crate::app::setup_wizard::needs_setup(&cfg.config)
     };
     if setup_pass_required(needs_setup, opts.setup_only) {
         if let Some(handle) = atoms::PERI_CONFIG_HANDLE.get() {
-            let mut draft = crate::app::setup_wizard::state_from_config(&handle.read());
-            draft.from_command = false;
-            *atoms::SETUP_WIZARD.state().write() = draft;
+            *atoms::SETUP_WIZARD.state().write() = setup_pass_draft(&handle.read());
         }
         *atoms::SETUP_COMPLETED.state().write() = false;
         *atoms::WIZARD_ACTIVE.state().write() = true;

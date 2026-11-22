@@ -29,7 +29,7 @@
 
 ## 影响面
 
-- 用户影响：首次安装的用户无法从 ACP 客户端完成登录/模型配置；Registry 认证失败。已配置用户不受影响。
+- 用户影响：首次安装的用户在完成登录/模型配置前无法建立 ACP 会话（宿主在握手前退出）；已配置用户会话可用，但 `initialize.authMethods` 为空，按 Registry 只读取 `initialize.authMethods` 的校验推断同样无法通过认证检查。两者是不同阶段的失败，不能互相替代。
 - 受影响模块/调用点：
   - `peri-acp/src/dispatch/init.rs`（initialize 响应）
   - `peri-acp/src/host/requests/session_lifecycle/session_lifecycle_dispatch.rs`（initialize 处理）
@@ -106,4 +106,29 @@
   - 非 TTY 的 `--setup` 在 ratatui fullscreen 初始化处 panic（exit 101），
     属既有全屏 TUI 的 TTY 前提；终端认证客户端提供 TTY，验收路径已由 PTY 覆盖。
   - 真实 ACP Registry `agent.json` 端到端登记在仓库外，未复验。
+
+### 第 1 轮 review 修复（2026-11-22）
+
+CodeRabbit 对 head `9fddfedaa` 提交 3 条意见，逐条核对后全部成立：
+
+1. `peri-acp/src/host/stdio/mod.rs`（Major）：transport 先于装配构造；
+   `--settings-stdin` 缺 provider 时 stdin pump 已启动，runtime 关闭可能等待
+   阻塞式读取。修复：先 `assemble_stdio_config`，成功后再构造 transport。
+   复验：同场景保持 stdin 打开 0.02s 退出 1，stderr
+   `Error: No LLM provider configured in injected settings`。
+2. `peri-tui/src/kit/entry.rs`（Major）：setup pass 置 `from_command=false`，
+   使 `merge_setup` 对已配置用户无条件重置 `active_alias` 并覆盖自定义档位。
+   修复：新增 `offline_completion` 标志，与 `finish_setup` 的在线激活/离线
+   完成解耦；`from_command` 保持 true，只有配置不可解析时才修复档位。
+   复验：已配置 HOME 经真实 PTY 完成向导后退出 0，`active_alias` 仍为
+   `sonnet`，`profiles.sonnet.effort=high`、`profiles.opus.effort=max` 保留。
+3. `spec/issues/2026-11-22-p1-acp-registry-auth.md`（Minor）：用户影响把
+   "已配置用户不受影响"与空 `authMethods` 的 Registry 校验影响混为一谈。
+   修复：区分首次配置失败与已配置环境的认证校验失败。
+
+回归测试：新增 `setup_pass_draft_keeps_profile_merge_and_marks_offline_completion`
+（entry）与 `test_wizard_preserves_resolvable_selection_when_reopened`（wizard）。
+复跑：entry 5、wizard 33、`acp_registry_auth` 4、`run_server_integration` 15、
+`settings_bootstrap` 3，全部通过；真实 ACP 握手 6/6 PASS。
+
 - PR/CI/CodeRabbit：随本 PR 提交，以 PR checks 与 review 为准。
