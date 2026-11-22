@@ -47,8 +47,9 @@ pub trait UserInteractionBroker: Send + Sync {
 |------|------|
 | `Decisions(Vec<ApprovalDecision>)` | 审批决策（Approve / Reject / Edit / Respond） |
 | `Answers(Vec<QuestionAnswer>)` | 问题答案 |
-| `Rejected` | 用户明确拒绝交互 |
+| `Rejected` | 用户明确拒绝交互：`decline`，或裸 `cancel`（无 `_meta`：TUI Esc、生命周期取消） |
 | `Unanswered { cause: UnansweredCause }` | 无人可作答：客户端（如 `-p` 打印模式）声明正常收到提问但无法提供交互界面，或本端没有可投递的在线 endpoint。`cause` 区分客户端声明（`NonInteractiveClient`、无法识别的 `Unknown`）与本端事实（`NoOnlineEndpoint`、`OwnerUnmatched`、`AttachmentDetached`）。工具侧以失败结果如实转述，不伪造空答案 |
+| `Failed { failure: InteractionFailure }` | 提问通道未完成一次可判定的问答：`MethodUnsupported`（`-32601` 方法不支持）、`Timeout`（客户端未在期限内响应）、`Transport`（连接关闭/写失败/响应无法按 elicitation 契约解析）。工具侧以显式执行失败（`ToolExecutionFailed`）结算，不伪装成空答案、用户拒绝或无人可答 |
 
 ### 2.2 Broker 类型
 
@@ -61,8 +62,14 @@ pub trait UserInteractionBroker: Send + Sync {
 
 默认审批模式为 `Forward`，stdio 不自动批准全部工具。`AutoApprove` 必须显式选择，
 是 broker 的本地决策模式，不是另一套 stdio 实现。问答取消携带
-`peri.elicitationUnanswered` 原因时返回 `Unanswered`；无该声明的生命周期取消
-按既有空答案结算，不把无人可作答当作用户回答。
+`peri.elicitationUnanswered` 原因时返回 `Unanswered`；无该声明的裸 `cancel` 是
+用户明确撤销本次提问，返回 `Rejected`。两者都不得回落空 `Answers`，也不得互相
+冒充。`elicitation/create` 返回 `-32601` 时是 `Failed(MethodUnsupported)`，超时
+是 `Failed(Timeout)`，传输失败或响应无法解析是 `Failed(Transport)`；三者都不得
+退化为空 `Answers`。`accept`（包括真实提交空内容）是唯一产生用户提交答案的
+路径；用户 `decline` 与裸 `cancel`（无 `_meta`：TUI Esc、生命周期取消）都产出
+`Rejected`（工具侧 `ToolRejected{cause: UserRejected}`），与真实空提交的
+`Answers` 明确区分。
 
 ### 2.3 Builder 构造逻辑
 

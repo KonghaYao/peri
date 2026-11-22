@@ -212,7 +212,7 @@ pub type SubagentLifecycleStop = Arc<dyn Fn(&str, &str, &str, &str, bool) + Send
 // ─── 子链装配（依赖反转，ARC-MIDDLEWARE-001） ───────────────────────────────
 
 /// 子 agent 链装配上下文：frozen 数据由 [`spawn_subagent`](crate::session::subagent::SessionFactory::spawn_subagent) 从父 session copy 后注入。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SubagentChainContext {
     /// 工作目录（解析 skill 文件路径）
     pub cwd: String,
@@ -227,6 +227,39 @@ pub struct SubagentChainContext {
     /// 装配期关闭的 middleware 名集合（父会话冻结状态投影；
     /// 子链独立装配，必须同样过滤——设计 §2.5）。
     pub meta_harness_disabled: HashSet<String>,
+    /// 父会话的共享权限模式（含外部 MCP 审批范围）。
+    ///
+    /// 子链不继承全量 HITL，但声明的审批范围是**会话事实**：父会话声明了
+    /// 范围时，子 agent 的外部 MCP 调用同样必须进入审批，否则委派就是绕过。
+    /// `None`/空范围时子链行为与基线一致。
+    pub permission_mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>>,
+    /// 父会话的交互 broker；与 [`Self::permission_mode`] 一起构成子链审批通道。
+    pub interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
+}
+
+impl std::fmt::Debug for SubagentChainContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubagentChainContext")
+            .field("cwd", &self.cwd)
+            .field("skill_names", &self.skill_names)
+            .field("frozen_claude_md_present", &self.frozen_claude_md.is_some())
+            .field(
+                "frozen_claude_local_md_present",
+                &self.frozen_claude_local_md.is_some(),
+            )
+            .field(
+                "frozen_skill_summary_present",
+                &self.frozen_skill_summary.is_some(),
+            )
+            .field("meta_harness_disabled", &self.meta_harness_disabled)
+            .field("permission_mode_present", &self.permission_mode.is_some())
+            .field(
+                "interaction_broker_present",
+                &self.interaction_broker.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// 子 agent 中间件链装配器：由中间件层提供实现。

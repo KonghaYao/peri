@@ -22,15 +22,19 @@ use rivetkit::TypedActorHandle;
 use tokio::sync::broadcast;
 
 use crate::actor::swarm::{
-    ActionEnvelope, Create, Get, ListItems, Submit, Subscribe, SubscribeOutcome, SwarmActor,
-    ACTOR_NAME,
+    ActionEnvelope, Create, Delete, Get, GetTurn, ListItems, ListTurns, RespondRequiredAction,
+    Submit, Subscribe, SubscribeOutcome, SwarmActor, Update, ACTOR_NAME,
 };
 use crate::domain::{
-    new_root_session_id, ActorKey, Cursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow,
-    LogicalId, SessionView, StreamEvent, SwarmError,
+    new_root_session_id, ActorKey, Cursor, EventCursor, InputOutcome, InputSubmission, ItemPage,
+    ItemsWindow, LogicalId, OfficialTurn, SessionPage, SessionView, SessionsWindow, StreamEvent,
+    SwarmError, TurnPage, TurnsWindow,
 };
 use crate::event_stream::FrameParser;
-use crate::service::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
+use crate::service::{
+    ApprovalReceipt, CreateSessionCommand, CreateSessionResult, EventSubscription,
+    SessionUpdateCommand, SwarmService,
+};
 use crate::store::{store_failure, SwarmStore};
 
 /// Adapter configuration. The channel capacity bounds how far a slow SSE client
@@ -128,13 +132,19 @@ impl RivetSwarmService {
     /// Open the actor event stream and forward decoded events to a broadcast
     /// channel. The actor replays its own backlog, so the returned subscription
     /// has no local backlog.
+    ///
+    /// [`EventCursor::Tail`] sends **no** `afterSeq`: the actor then starts at
+    /// its tail and forwards live events only.
     async fn open(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError> {
         let handle = self.handle(logical_id)?;
-        let path = format!("/events?afterSeq={}", cursor.value());
+        let path = match start.cursor() {
+            Some(cursor) => format!("/events?afterSeq={}", cursor.value()),
+            None => "/events".to_owned(),
+        };
         let response = handle
             .inner()
             .fetch(&path, Method::GET, HeaderMap::new(), None)
@@ -142,7 +152,7 @@ impl RivetSwarmService {
             .map_err(|error| {
                 tracing::warn!(
                     logical_id = logical_id.as_str(),
-                    cursor = cursor.value(),
+                    cursor = start.cursor().map_or(0, Cursor::value),
                     error = %error,
                     "swarm actor event stream failed"
                 );
@@ -157,7 +167,7 @@ impl RivetSwarmService {
             return Err(SwarmError::upstream_unavailable("swarm_actor_stream"));
         }
         let (sender, receiver) = broadcast::channel(self.config.channel_capacity.max(1));
-        // The actor replays from `cursor`, so the subscription tail starts at
+        // The actor replays from the cursor, so the subscription tail starts at
         // the stored MAX(seq) (or the client cursor if the store read fails)
         // and advances with every forwarded item.
         let tail = Arc::new(AtomicU64::new(
@@ -169,7 +179,7 @@ impl RivetSwarmService {
                         error = %error,
                         "swarm last seq read failed; heartbeat starts from the cursor"
                     );
-                    cursor.value()
+                    start.cursor().map_or(0, Cursor::value)
                 }
             },
         ));
@@ -212,6 +222,30 @@ async fn forward_stream(
     }
 }
 
+impl RivetSwarmService {
+    async fn respond_required_action(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        decision: crate::domain::ApprovalDecision,
+        input_id: Option<String>,
+    ) -> Result<ApprovalReceipt, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let envelope: ActionEnvelope<ApprovalReceipt> = self
+            .call(
+                &handle,
+                RespondRequiredAction {
+                    logical_id: logical_id.as_str().to_owned(),
+                    request_id: request_id.to_owned(),
+                    decision,
+                    input_id,
+                },
+            )
+            .await?;
+        envelope.into_result()
+    }
+}
+
 #[async_trait]
 impl SwarmService for RivetSwarmService {
     async fn create_session(
@@ -235,10 +269,13 @@ impl SwarmService for RivetSwarmService {
             model: command.model,
             instructions: command.instructions,
             mcp_tools: command.mcp_tools,
+            metadata: command.metadata,
+            prompt_cache_options: command.prompt_cache_options,
             initial_input: command.initial_input,
             environment: command.environment,
             environment_id: command.environment_id,
             root_session_id: Some(root_session_id),
+            defer_initial_turn: command.defer_initial_turn,
         };
         let envelope: ActionEnvelope<CreateSessionResult> = self.call(&handle, action).await?;
         envelope.into_result()
@@ -257,11 +294,74 @@ impl SwarmService for RivetSwarmService {
         envelope.into_result()
     }
 
-    async fn submit_input(
+    async fn list_sessions(&self, window: SessionsWindow) -> Result<SessionPage, SwarmError> {
+        // `sessions.list` is cross-session: no actor owns the result set, so
+        // the gateway reads the same store the actors write.
+        crate::service::list_sessions_from_store(self.store.as_ref(), &window).await
+    }
+
+    async fn update_session(
+        &self,
+        logical_id: &LogicalId,
+        command: SessionUpdateCommand,
+    ) -> Result<SessionView, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = Update {
+            logical_id: logical_id.as_str().to_owned(),
+            model: command.model,
+            mcp_tools: command.mcp_tools,
+            metadata: command.metadata,
+            prompt_cache_options: command.prompt_cache_options,
+        };
+        let envelope: ActionEnvelope<SessionView> = self.call(&handle, action).await?;
+        envelope.into_result()
+    }
+
+    async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = Delete {
+            logical_id: logical_id.as_str().to_owned(),
+        };
+        let envelope: ActionEnvelope<crate::domain::SessionDeleted> =
+            self.call(&handle, action).await?;
+        envelope.into_result().map(|_| ())
+    }
+
+    async fn list_turns(
+        &self,
+        logical_id: &LogicalId,
+        window: TurnsWindow,
+    ) -> Result<TurnPage, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = ListTurns {
+            logical_id: logical_id.as_str().to_owned(),
+            order: window.order,
+            after: window.after,
+            limit: window.limit,
+        };
+        let envelope: ActionEnvelope<TurnPage> = self.call(&handle, action).await?;
+        envelope.into_result()
+    }
+
+    async fn get_turn(
+        &self,
+        logical_id: &LogicalId,
+        turn_id: &str,
+    ) -> Result<OfficialTurn, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let action = GetTurn {
+            logical_id: logical_id.as_str().to_owned(),
+            turn_id: turn_id.to_owned(),
+        };
+        let envelope: ActionEnvelope<OfficialTurn> = self.call(&handle, action).await?;
+        envelope.into_result()
+    }
+
+    async fn accept_input(
         &self,
         logical_id: &LogicalId,
         submission: InputSubmission,
-    ) -> Result<InputOutcome, SwarmError> {
+    ) -> Result<crate::service::AcceptedInput, SwarmError> {
         let handle = self.handle(logical_id)?;
         let action = Submit {
             logical_id: logical_id.as_str().to_owned(),
@@ -274,7 +374,20 @@ impl SwarmService for RivetSwarmService {
             original_draft: submission.original_draft,
         };
         let envelope: ActionEnvelope<InputOutcome> = self.call(&handle, action).await?;
-        envelope.into_result()
+        // The actor runs the accepted turn itself (it owns the ACP host), so the
+        // gateway never receives pending work.
+        envelope
+            .into_result()
+            .map(crate::service::AcceptedInput::settled)
+    }
+
+    async fn run_pending_turn(
+        &self,
+        _pending: crate::service::PendingTurn,
+    ) -> Result<(), SwarmError> {
+        // Pending turns are executed inside the actor; a gateway-side call means
+        // the acceptance contract was bypassed.
+        Err(SwarmError::upstream_unavailable("pending_turn_not_routed"))
     }
 
     async fn list_items(
@@ -287,6 +400,7 @@ impl SwarmService for RivetSwarmService {
             logical_id: logical_id.as_str().to_owned(),
             order: window.order,
             after: window.after,
+            after_id: window.after_id,
             limit: window.limit,
         };
         let envelope: ActionEnvelope<ItemPage> = self.call(&handle, action).await?;
@@ -296,7 +410,7 @@ impl SwarmService for RivetSwarmService {
     async fn subscribe(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError> {
         // Unknown sessions are 404 before any stream is opened; the row also
         // carries the `rootSessionId` the actor must be hosting.
@@ -304,14 +418,17 @@ impl SwarmService for RivetSwarmService {
         tracing::debug!(
             logical_id = logical_id.as_str(),
             root_session_id = %row.root_session_id,
-            after_seq = cursor.value(),
+            after_seq = start.cursor().map_or(0, Cursor::value),
+            replay = start.cursor().is_some(),
             "swarm gateway subscribing through the actor"
         );
-        self.open(logical_id, cursor).await
+        self.open(logical_id, start).await
     }
 
     async fn open_stream(&self, logical_id: &LogicalId) -> EventSubscription {
-        match self.open(logical_id, Cursor::START).await {
+        // Tail: the create response must not replay history from before this
+        // stream (`design §4.3`).
+        match self.open(logical_id, EventCursor::Tail).await {
             Ok(subscription) => subscription,
             Err(error) => {
                 // The HTTP layer reports `create_session`'s failure as JSON;
@@ -326,6 +443,17 @@ impl SwarmService for RivetSwarmService {
                 EventSubscription::new(Vec::new(), receiver, Arc::new(AtomicU64::new(0)))
             }
         }
+    }
+
+    async fn respond_required_action(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        decision: crate::domain::ApprovalDecision,
+        input_id: Option<String>,
+    ) -> Result<ApprovalReceipt, SwarmError> {
+        RivetSwarmService::respond_required_action(self, logical_id, request_id, decision, input_id)
+            .await
     }
 }
 

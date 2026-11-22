@@ -50,6 +50,11 @@ pub struct SubAgentMiddlewareConfig {
     /// 装配期关闭的 middleware 名集合（父会话冻结状态投影；
     /// 子链独立装配，必须同样过滤——设计 §2.5）。
     pub meta_harness_disabled: std::collections::HashSet<String>,
+    /// 父会话共享权限模式（含外部 MCP 审批范围）。空范围 ⇒ 子链不装配
+    /// `PermissionMiddleware`，行为与基线一致。
+    pub permission_mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>>,
+    /// 父会话交互 broker；与 [`Self::permission_mode`] 一起构成子链审批通道。
+    pub interaction_broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
 }
 
 impl Debug for SubAgentMiddlewareConfig {
@@ -76,6 +81,8 @@ impl SubAgentMiddlewareConfig {
             frozen_skill_summary: None,
             mcp_skill_registry: None,
             meta_harness_disabled: std::collections::HashSet::new(),
+            permission_mode: None,
+            interaction_broker: None,
         }
     }
     /// Agent 定义路径配置
@@ -91,6 +98,8 @@ impl SubAgentMiddlewareConfig {
             frozen_skill_summary: None,
             mcp_skill_registry: None,
             meta_harness_disabled: std::collections::HashSet::new(),
+            permission_mode: None,
+            interaction_broker: None,
         }
     }
     /// 注入装配期关闭的 middleware 名集合（MetaHarness，设计 §2.5）。
@@ -103,6 +112,20 @@ impl SubAgentMiddlewareConfig {
         disabled: std::collections::HashSet<String>,
     ) -> Self {
         self.meta_harness_disabled = disabled;
+        self
+    }
+    /// 注入父会话的审批范围与交互通道。
+    ///
+    /// 只有范围非空时子链才会装配 `PermissionMiddleware`；空范围保持子链
+    /// 基线（无 HITL）。
+    #[must_use]
+    pub fn with_approval_channel(
+        mut self,
+        mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>>,
+        broker: Option<Arc<dyn peri_acp_types::interaction::UserInteractionBroker>>,
+    ) -> Self {
+        self.permission_mode = mode;
+        self.interaction_broker = broker;
         self
     }
     /// 注入 main agent 在 session/new 时捕获的 frozen 数据。
@@ -203,6 +226,8 @@ pub struct SubAgentMiddleware {
     pub(super) mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
     /// MCP Agent 激活使用的用户交互 broker。
     pub(super) broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
+    /// 父会话共享权限模式（含外部 MCP 审批范围）。
+    pub(super) permission_mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>>,
     /// 后台任务管理器是否可用（能力声明，非持有；collect_tools 时决定是否
     /// 注册 AgentResultTool）
     pub(super) task_manager_available: bool,
@@ -246,8 +271,19 @@ impl SubAgentMiddleware {
             mcp_agent_registry: None,
             mcp_skill_registry: None,
             broker: None,
+            permission_mode: None,
             task_manager_available: false,
         }
+    }
+
+    /// 注入父会话共享权限模式，使子 agent 的外部 MCP 调用继承审批范围。
+    #[must_use]
+    pub fn with_permission_mode(
+        mut self,
+        mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>>,
+    ) -> Self {
+        self.permission_mode = mode;
+        self
     }
 
     #[must_use]
@@ -386,6 +422,7 @@ impl SubAgentMiddleware {
             tool = tool.with_child_handler_factory(Arc::clone(factory));
         }
         tool = tool.with_mcp_agents(self.mcp_agent_registry.clone(), self.broker.clone());
+        tool = tool.with_permission_mode(self.permission_mode.clone());
         // W4b（F5/J5）：把会话级 MCP skill registry 交给子链装配器——子代理
         // `skills:` 预载只按名查该 registry（未命中=缺口，不回落磁盘）。
         tool = tool.with_mcp_skills(self.mcp_skill_registry.clone());

@@ -13,19 +13,43 @@ use serde_json::json;
 use tokio::sync::broadcast;
 use tokio::time::{interval, Interval, MissedTickBehavior};
 
-use crate::domain::{CreateSessionResponse, StreamEvent};
+use crate::domain::{CreateSessionResponse, OfficialEvent, OfficialSession, StreamEvent};
 use crate::service::{CreateSessionResult, EventSubscription};
 
-/// Successful `POST /sessions?stream=true` response: one `session` event, then
-/// the first turn's live events. The subscription was opened by the handler
-/// before the service executed the turn.
+/// Successful `POST /sessions?stream=true` response.
+///
+/// A real create starts with the official `agent.session.created` frame (the
+/// SDK's session identity), then the gateway's own `session` frame, then the
+/// first turn's live events. An idempotent attach (`created == false`) emits
+/// only the custom `session` frame: it must not pretend the session was newly
+/// created. The official frame always precedes any turn frame, and the `events`
+/// stream never emits `agent.session.created`. The session snapshot shares
+/// [`OfficialSession`] with `agent.session.idle`/`failed` (no environment
+/// field, a known gap).
+///
+/// The subscription was opened before the first turn was recorded and
+/// scheduled, and this response is built from the accepted create result
+/// without waiting for the turn. On the actor path the turn may start as soon
+/// as the action reply is sent, so first-turn events are delivered while the
+/// body is being read; if they exceed the broadcast capacity the stream reports
+/// `gap` and ends (see [`event_stream`]).
 pub fn create_response(
     result: &CreateSessionResult,
     subscription: EventSubscription,
     heartbeat: Duration,
 ) -> Response {
     let session = CreateSessionResponse::new(result.session.clone(), result.created);
-    let initial = vec![json_event("session", &session)];
+    // An attach (`created=false`) reuses an existing session: the official
+    // `created` frame would claim the session was just created, so it is only
+    // emitted for a real create. The custom `session` frame is always present.
+    let mut initial = Vec::with_capacity(2);
+    if result.created {
+        initial.push(json_event(
+            "agent.session.created",
+            &OfficialEvent::session_created(OfficialSession::from_session_view(&result.session)),
+        ));
+    }
+    initial.push(json_event("session", &session));
     event_response_with_initial(subscription, heartbeat, initial)
 }
 
@@ -49,8 +73,15 @@ fn event_response_with_initial(
 
 /// Persisted backlog, then live broadcasts, with a 15 s heartbeat by default.
 ///
-/// Only `item` events carry an SSE `id` equal to `seq`; `turn` and `gap` are
-/// not persisted in `swarm_items` and therefore do not advance `Last-Event-ID`.
+/// Only `item` events carry an SSE `id` equal to `seq`; `turn`, the official
+/// `agent.session.*` frames and `gap` are not persisted in `swarm_items` and
+/// therefore do not advance `Last-Event-ID`. Official frames are additive: the
+/// gateway's own `item`/`turn` events stay on the stream.
+///
+/// A subscription that falls behind the broadcast channel receives one `gap`
+/// frame and the stream ends. The loss may include a turn terminal, so
+/// continuing would leave an official SDK waiting forever; reconnecting with
+/// the last rendered item `seq` replays the dropped rows from the store.
 ///
 /// The heartbeat payload's `lastItemSeq` is the session's current
 /// `MAX(seq)` (read from the shared tail), not the last seq this stream
@@ -76,7 +107,12 @@ pub fn event_stream(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            return Some((Ok(state.gap(skipped)), Some(state)));
+                            // The subscription lost events, possibly including a
+                            // turn terminal. Emit the gap and end the stream: a
+                            // silent continuation would leave an official SDK
+                            // waiting forever, and a native client recovers by
+                            // reconnecting from the last item `seq` it saw.
+                            return Some((Ok(state.gap(skipped)), None));
                         }
                         Err(broadcast::error::RecvError::Closed) => return None,
                     }
@@ -146,6 +182,7 @@ impl StreamState {
                 Some(json_event("item", &item).id(item.seq.to_string()))
             }
             StreamEvent::Turn(turn) => Some(json_event("turn", &turn)),
+            StreamEvent::Official(event) => Some(json_event(event.event_type(), &event)),
             StreamEvent::Gap { from_seq, to_seq } => Some(json_event(
                 "gap",
                 &json!({ "fromSeq": from_seq, "toSeq": to_seq }),
@@ -169,3 +206,7 @@ fn json_event<T: serde::Serialize>(name: &'static str, data: &T) -> Event {
         .event(name)
         .data(serde_json::to_string(data).unwrap_or_else(|_| "{}".to_owned()))
 }
+
+#[cfg(test)]
+#[path = "sse_test.rs"]
+mod tests;

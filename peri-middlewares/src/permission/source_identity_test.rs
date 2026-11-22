@@ -323,3 +323,189 @@ async fn bound_direct_and_deferred_targets_keep_their_approval_policy() {
         );
     }
 }
+
+// ─── Scoped external-MCP approval (`Bypass` + declared servers) ──────────────
+
+struct CountingBroker(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl UserInteractionBroker for CountingBroker {
+    async fn request(
+        &self,
+        _owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match ctx {
+            InteractionContext::Approval { items } => InteractionResponse::Decisions(
+                items
+                    .iter()
+                    .map(|_| ApprovalDecision::Approve { source: None })
+                    .collect(),
+            ),
+            _ => InteractionResponse::Decisions(vec![]),
+        }
+    }
+}
+
+fn scoped_mode(servers: &[&str]) -> Arc<SharedPermissionMode> {
+    let mode = SharedPermissionMode::new(PermissionMode::Bypass);
+    mode.set_mcp_approval_servers(servers.iter().map(|server| (*server).to_owned()));
+    mode
+}
+
+/// 声明了范围但绑定来源缺失（`mcp_origin` = None）时，MCP 调用必须进入审批，
+/// 不能按 Bypass 静默执行。
+#[tokio::test]
+async fn a_scoped_mcp_call_without_a_binding_enters_approval_instead_of_bypassing() {
+    let broker = Arc::new(CountingBroker(std::sync::atomic::AtomicUsize::new(0)));
+    let mw = PermissionMiddleware::with_shared_mode(
+        Arc::clone(&broker) as Arc<dyn UserInteractionBroker>,
+        default_requires_approval,
+        scoped_mode(&["declared"]),
+        None,
+    );
+    let call = make_tool_call("mcp__declared__write");
+    let results = mw
+        .process_batch_with_origins(&[call], &[None], Some(&test_owner()), None)
+        .await;
+    assert!(
+        results[0].is_ok(),
+        "the approving broker must be consulted: {:?}",
+        results[0]
+    );
+    assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// 声明范围和 broker 都不存在时，来源缺失的 MCP 调用显式 `PolicyDenied`。
+#[tokio::test]
+async fn a_scoped_mcp_call_without_a_broker_is_policy_denied() {
+    let mw = PermissionMiddleware::with_scope_only(scoped_mode(&["declared"]));
+    let call = make_tool_call("mcp__declared__write");
+    let results = mw
+        .process_batch_with_origins(&[call], &[None], Some(&test_owner()), None)
+        .await;
+    assert!(matches!(
+        &results[0],
+        Err(AgentError::ToolRejected {
+            cause: peri_acp_types::error::ToolRejectionCause::PolicyDenied,
+            ..
+        })
+    ));
+}
+
+/// 有效 `ToolInvoke` 指向 MCP 目标、外层来源缺失时同样 fail-closed。
+#[tokio::test]
+async fn a_scoped_tool_invoke_targeting_mcp_enters_approval_without_a_binding() {
+    let broker = Arc::new(CountingBroker(std::sync::atomic::AtomicUsize::new(0)));
+    let mw = PermissionMiddleware::with_shared_mode(
+        Arc::clone(&broker) as Arc<dyn UserInteractionBroker>,
+        default_requires_approval,
+        scoped_mode(&["declared"]),
+        None,
+    );
+    let call = ToolCall::new(
+        "test-id",
+        "ToolInvoke",
+        serde_json::json!({ "name": "mcp__declared__write", "arguments": {} }),
+    );
+    let results = mw
+        .process_batch_with_origins(&[call], &[None], Some(&test_owner()), None)
+        .await;
+    assert!(results[0].is_ok(), "{:?}", results[0]);
+    assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// 未声明范围时 Bypass 行为不变：没有 broker、没有来源也照常放行。
+#[tokio::test]
+async fn an_empty_scope_keeps_bypass_unchanged() {
+    let mw =
+        PermissionMiddleware::with_scope_only(SharedPermissionMode::new(PermissionMode::Bypass));
+    let call = make_tool_call("mcp__declared__write");
+    let results = mw
+        .process_batch_with_origins(&[call], &[None], Some(&test_owner()), None)
+        .await;
+    assert!(results[0].is_ok());
+}
+
+fn bound_origin(server: &str, tool: &str) -> Option<BoundToolOrigin> {
+    Some(BoundToolOrigin {
+        mcp_server_name: Some(server.to_owned()),
+        mcp_tool_name: Some(tool.to_owned()),
+        builtin_mcp_instance: None,
+    })
+}
+
+/// 同一批次混合「声明 server 的调用」与「免审批调用」：只有前者进入审批，
+/// 逐调用判定，不是整批升级。
+#[tokio::test]
+async fn a_mixed_batch_only_escalates_the_calls_inside_the_declared_range() {
+    let broker = Arc::new(CountingBroker(std::sync::atomic::AtomicUsize::new(0)));
+    let mw = PermissionMiddleware::with_shared_mode(
+        Arc::clone(&broker) as Arc<dyn UserInteractionBroker>,
+        default_requires_approval,
+        scoped_mode(&["declared"]),
+        None,
+    );
+    let calls = vec![
+        ToolCall::new("mixed-1", "mcp__declared__write", serde_json::json!({})),
+        ToolCall::new(
+            "mixed-2",
+            "read_file",
+            serde_json::json!({ "path": "/tmp/x" }),
+        ),
+        ToolCall::new("mixed-3", "mcp__other__read", serde_json::json!({})),
+    ];
+    let origins = vec![
+        bound_origin("declared", "write"),
+        None,
+        bound_origin("other", "read"),
+    ];
+    let results = mw
+        .process_batch_with_origins(&calls, &origins, Some(&test_owner()), None)
+        .await;
+    assert!(
+        results.iter().all(Result::is_ok),
+        "the approving broker must not fail the batch: {results:?}"
+    );
+    assert_eq!(
+        broker.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "only the declared server's call asks a human"
+    );
+}
+
+/// 同名工具绑定在未声明的 server 上不触发审批：判定按绑定来源，不按工具名。
+#[tokio::test]
+async fn an_undeclared_server_does_not_trigger_the_broker_for_the_same_tool_name() {
+    let broker = Arc::new(CountingBroker(std::sync::atomic::AtomicUsize::new(0)));
+    let mw = PermissionMiddleware::with_shared_mode(
+        Arc::clone(&broker) as Arc<dyn UserInteractionBroker>,
+        default_requires_approval,
+        scoped_mode(&["declared"]),
+        None,
+    );
+    let undeclared = ToolCall::new("same-name-1", "mcp__write", serde_json::json!({}));
+    let results = mw
+        .process_batch_with_origins(
+            &[undeclared],
+            &[bound_origin("other", "write")],
+            Some(&test_owner()),
+            None,
+        )
+        .await;
+    assert!(results[0].is_ok(), "{:?}", results[0]);
+    assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let declared = ToolCall::new("same-name-2", "mcp__write", serde_json::json!({}));
+    let results = mw
+        .process_batch_with_origins(
+            &[declared],
+            &[bound_origin("declared", "write")],
+            Some(&test_owner()),
+            None,
+        )
+        .await;
+    assert!(results[0].is_ok(), "{:?}", results[0]);
+    assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

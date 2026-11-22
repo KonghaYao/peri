@@ -405,6 +405,7 @@ async fn multi_view_detach_and_reattach_keeps_epoch_authority() {
                     tool_call_id: "call-stale".to_string(),
                     tool_name: APP_TOOL.to_string(),
                     tool_input: json!({}),
+                    mcp_origin: None,
                 }],
             },
         )

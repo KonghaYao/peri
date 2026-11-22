@@ -35,6 +35,9 @@ pub enum ErrorCode {
     UnsupportedEnvironment,
     UnsupportedTool,
     SeqConflict,
+    UnknownRequiredAction,
+    RequiredActionSettled,
+    RequiredActionSettlementFailed,
 }
 
 impl ErrorCode {
@@ -71,6 +74,9 @@ impl ErrorCode {
             Self::UnsupportedEnvironment => "unsupported_environment",
             Self::UnsupportedTool => "unsupported_tool",
             Self::SeqConflict => "seq_conflict",
+            Self::UnknownRequiredAction => "unknown_required_action",
+            Self::RequiredActionSettled => "required_action_settled",
+            Self::RequiredActionSettlementFailed => "required_action_settlement_failed",
         }
     }
 }
@@ -166,6 +172,22 @@ impl SwarmError {
         .with_details(serde_json::json!({ "received": value, "supported": "1" }))
     }
 
+    /// An official resource the gateway cannot map at all.
+    ///
+    /// The resource really does not exist here, so the status is `404`; the
+    /// code is the existing `unsupported_contract` (this gateway does not
+    /// implement that part of the official contract). Never used to hide a
+    /// supported operation that failed.
+    #[must_use]
+    pub fn unsupported_resource(resource: &str) -> Self {
+        Self::new(
+            ErrorKind::NotFound,
+            ErrorCode::UnsupportedContract,
+            format!("official resource `{resource}` is not supported by this gateway"),
+        )
+        .with_details(serde_json::json!({ "resource": resource, "supported": false }))
+    }
+
     #[must_use]
     pub fn invalid_logical_id(reason: &str) -> Self {
         Self::new(
@@ -197,7 +219,7 @@ impl SwarmError {
     }
 
     #[must_use]
-    pub fn invalid_query(reason: &str) -> Self {
+    pub fn invalid_query(reason: impl Into<String>) -> Self {
         Self::new(ErrorKind::BadRequest, ErrorCode::InvalidQuery, reason)
     }
 
@@ -289,6 +311,56 @@ impl SwarmError {
             "field": field,
             "received": kind,
             "supported": ["mcp"],
+        }))
+    }
+
+    /// The opaque approval id is unknown for this session: never issued here,
+    /// issued by a previous actor generation, or addressed to another session.
+    #[must_use]
+    pub fn unknown_required_action(request_id: &str) -> Self {
+        Self::new(
+            ErrorKind::NotFound,
+            ErrorCode::UnknownRequiredAction,
+            "unknown or expired required action for this session",
+        )
+        .with_details(serde_json::json!({ "requestId": request_id }))
+    }
+
+    /// The approval was already settled (or can no longer be answered).
+    ///
+    /// `reason` is the persisted settlement fact (`answered`, `expired`,
+    /// `turn_ended`, `actor_lost`), so a duplicate answer,
+    /// a concurrent loser and a stale-generation answer stay distinguishable.
+    /// A transport that closes while delivering is reported as the delivery
+    /// failure itself (`502 upstream_unavailable` with `details.requestId`); it
+    /// is not a settlement reason.
+    #[must_use]
+    pub fn required_action_settled(request_id: &str, reason: &str) -> Self {
+        Self::new(
+            ErrorKind::Conflict,
+            ErrorCode::RequiredActionSettled,
+            "required action is no longer answerable",
+        )
+        .with_details(serde_json::json!({ "requestId": request_id, "reason": reason }))
+    }
+
+    /// The settlement row could not be persisted.
+    ///
+    /// A success receipt must never describe an unpersisted settlement: the
+    /// durable approval row would stay `pending` and a restart/replay could
+    /// resurrect the action with the user's decision lost. The caller therefore
+    /// gets a `5xx`; the in-memory pending fact (and the delivery claim) were
+    /// not removed.
+    #[must_use]
+    pub fn required_action_settlement_failed(request_id: &str, operation: &'static str) -> Self {
+        Self::new(
+            ErrorKind::Unavailable,
+            ErrorCode::RequiredActionSettlementFailed,
+            "approval settlement could not be persisted; the action was not settled",
+        )
+        .with_details(serde_json::json!({
+            "requestId": request_id,
+            "operation": operation,
         }))
     }
 

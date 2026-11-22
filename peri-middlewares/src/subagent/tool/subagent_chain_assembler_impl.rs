@@ -5,6 +5,7 @@ use super::{
     SkillPreloadMiddleware, SkillsMiddleware, SubAgentMiddlewareConfig, SubagentChainAssembler,
     SubagentChainContext, TodoMiddleware,
 };
+use crate::permission::{default_requires_approval, PermissionMiddleware};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 
@@ -78,6 +79,24 @@ pub fn build_subagent_middlewares(config: SubAgentMiddlewareConfig) -> Vec<Box<d
             Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new())),
         )));
     }
+    // 会话声明了外部 MCP 审批范围时，子 agent 的绑定 MCP 调用同样走审批；
+    // 否则父会话的声明会被委派绕过。空范围不装配（子链基线不变）。
+    if let Some(mode) = config
+        .permission_mode
+        .as_ref()
+        .filter(|mode| mode.has_mcp_approval_scope())
+    {
+        middlewares.push(Box::new(match config.interaction_broker.clone() {
+            Some(broker) => PermissionMiddleware::with_shared_mode(
+                broker,
+                default_requires_approval,
+                Arc::clone(mode),
+                None,
+            ),
+            // 有范围、无通道：命中范围的调用必须显式拒绝，不能静默执行。
+            None => PermissionMiddleware::with_scope_only(Arc::clone(mode)),
+        }));
+    }
     middlewares
 }
 
@@ -136,7 +155,8 @@ impl SubagentChainAssembler for SubagentChainAssemblerImpl {
             ctx.frozen_skill_summary.clone(),
         )
         .with_mcp_registry(self.mcp_skill_registry.clone())
-        .with_meta_harness_disabled(ctx.meta_harness_disabled.clone());
+        .with_meta_harness_disabled(ctx.meta_harness_disabled.clone())
+        .with_approval_channel(ctx.permission_mode.clone(), ctx.interaction_broker.clone());
         let mut chain = MiddlewareChain::new();
         for mw in build_subagent_middlewares(config) {
             chain.add(mw);

@@ -54,6 +54,7 @@ impl super::SubAgentTool {
                                 "digest": activated.digest,
                                 "effective_tools": effective_tools,
                             }),
+                            mcp_origin: None,
                         }],
                     },
                 )

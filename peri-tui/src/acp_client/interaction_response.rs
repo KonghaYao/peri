@@ -72,7 +72,8 @@ mod tests {
     }
 
     /// Wire 字面量：只有 `action=cancel` + `_meta.peri.elicitationUnanswered` 同时
-    /// 成立，宿主 broker 才产出 `Unanswered`；键名或取值漂移会让 `-p` 退回空答案。
+    /// 成立，宿主 broker 才产出 `Unanswered`；键名或取值漂移会让 `-p` 退回
+    /// 「用户拒绝」而不是「无人可答」。
     #[test]
     fn test_elicitation_unanswered_response_declares_cause() {
         let value = elicitation_unanswered_response(UnansweredCause::NonInteractiveClient);

@@ -555,9 +555,9 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 stdio 路径与 TUI/notify（mpsc）共用同一 `AcpTransportBroker`（`broker/transport_broker.rs`）：broker 只依赖最小面 `RequestTransport` 契约（仅 `send_request`），mpsc 经 `AcpTransport` blanket 桥接（`AcpRequestBridge`），stdio 经 `ConnectionTo<Client>` 直连适配（`transport/mod.rs`），协议帧一致（`elicitation/create` + accept/cancel/decline，共享 `build_elicitation_params` / `parse_elicitation_response`）。stdio 装配差异由构造参数表达：审批默认转发给客户端（`Forward`），提问使用 `with_timeout()` 超时兜底；不存在生产 auto-approve 装配。行为限制：
 
 - **`session/cancel` 不解除挂起提问**：挂起的 elicitation request 由 ACP transport 层管理，`session/cancel` 只中断 agent turn；客户端不响应时提问会一直挂起，直到超时或 transport 关闭。
-- **非交互客户端的 cancel 声明**：客户端取消时可在响应 `_meta` 的 `peri.elicitationUnanswered` 声明「无人可作答」（`-p` 声明 `non_interactive_client`）→ `parse_elicitation_response` 产出 `InteractionResponse::Unanswered`，`AskUserQuestion` 以失败工具结果如实转述原因；取值无法识别收敛为 `Unknown`（只说无人可作答，不转述客户端文本）。缺声明的 cancel（用户撤销弹窗、owner 失效、投递失败等生命周期结算）保持旧语义的空答案，不得伪称非交互客户端（ARC-HITL-001）。
-- **超时兜底**：`PERI_ASK_USER_TIMEOUT_SECS`（秒，缺省 300，`0` 表示不超时）——超时返回 `Rejected`（LLM 侧表现为 `ToolRejected`），不挂死 turn。放弃挂起 elicitation 时必须向客户端发送 `$/cancel_request`（mpsc 与 stdio SDK 的 drop-time cancellation 一致），由客户端结算本地问答 UI；否则面板会保持 pending，后续输入无法作为普通 prompt 发出。
-- **断连兜底**：transport 关闭（incoming EOF）时挂起请求自动失败，返回空答案，会话可继续。
+- **非交互客户端的 cancel 声明**：客户端取消时可在响应 `_meta` 的 `peri.elicitationUnanswered` 声明「无人可作答」（`-p` 声明 `non_interactive_client`）→ `parse_elicitation_response` 产出 `InteractionResponse::Unanswered`，`AskUserQuestion` 以失败工具结果如实转述原因；取值无法识别收敛为 `Unknown`（只说无人可作答，不转述客户端文本）。缺声明的裸 cancel（用户撤销弹窗、owner 失效、投递失败等生命周期结算）是明确的用户拒绝（`Rejected` → `ToolRejected{UserRejected}`），不得伪称非交互客户端，也不得回落空答案（ARC-HITL-001）。
+- **超时兜底**：`PERI_ASK_USER_TIMEOUT_SECS`（秒，缺省 300，`0` 表示不超时）——超时返回 `InteractionResponse::Failed(Timeout)`（LLM 侧表现为 `ToolExecutionFailed`），不挂死 turn。放弃挂起 elicitation 时必须向客户端发送 `$/cancel_request`（mpsc 与 stdio SDK 的 drop-time cancellation 一致），由客户端结算本地问答 UI；否则面板会保持 pending，后续输入无法作为普通 prompt 发出。
+- **断连与能力缺失兜底**：transport 关闭（incoming EOF）或 `elicitation/create` 返回传输/协议错误时，请求以 `Failed(Transport)` 显式失败，会话可继续；网关回 `-32601`（method not found）时分类为 `Failed(MethodUnsupported)`。两者都不得返回空答案。`accept`（包括真实提交空内容）是唯一产生用户提交答案的路径；用户 `decline` 与裸 `cancel`（无 `_meta`、生命周期取消）都产出 `Rejected`（`ToolRejected{cause: UserRejected}`），不得回落空 `Answers`，也不得与真实空提交混淆；方法不支持、超时、传输或协议失败一律 `Failed`，绝不落成 `Answers`。
 
 ---
 

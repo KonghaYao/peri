@@ -206,6 +206,11 @@ pub(super) async fn build_subagent_session_v2(
             .meta_harness
             .disabled_middlewares
             .clone(),
+        // Filled by the middlewares-side `SessionBoundAssembler` from the
+        // `SubAgentTool` that owns this spawn. The agent layer itself has no
+        // broker/permission facts and must not invent them.
+        permission_mode: None,
+        interaction_broker: None,
     });
 
     // H1：bridge 在有子链的一方装配——base system = 子身份投影；动态后缀由

@@ -30,12 +30,16 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
+use uuid::Uuid;
 
+use crate::domain::official::{unix_from_rfc3339, unix_now};
 use crate::domain::{
-    ErrorCode, ErrorKind, ItemKind, ItemSource, ItemView, SessionState, StreamEvent, SwarmError,
-    TurnEvent,
+    declared_approvals, requires_answer, turn_id_for_item, ApprovalDecision, ErrorCode, ErrorKind,
+    ItemKind, ItemSource, ItemView, McpToolSpec, OfficialEvent, OfficialMessageItem,
+    OfficialSession, OfficialTurn, RequiredAction, ServerApproval, SessionState, SessionStatus,
+    SettlementReason, StreamEvent, SwarmError, TurnEvent, TurnStatus, APPROVAL_ID_PREFIX,
 };
-use crate::store::{store_failure, SwarmItemRow, SwarmSessionUpdate, SwarmStore};
+use crate::store::{store_failure, SwarmItemRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow};
 
 use super::projection::{self, Projected, ProjectedItem};
 
@@ -43,6 +47,125 @@ use super::projection::{self, Projected, ProjectedItem};
 const INGEST_SETTLE_WINDOW: Duration = Duration::from_millis(15);
 /// Upper bound of the drain fence, so a noisy stream cannot delay the terminal.
 const INGEST_SETTLE_LIMIT: Duration = Duration::from_millis(500);
+/// Host approval wait, mirrored from the contract (single fact source).
+const APPROVAL_VALIDITY: Duration = peri_acp_types::interaction::APPROVAL_WAIT;
+
+/// How a `session/request_permission` was handled.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PermissionStart {
+    /// The declaration does not cover this tool: answer `allow_once` now.
+    AutoApprove,
+    /// A current pending approval exists; the caller answers it later through
+    /// [`ItemLog::respond_approval`] and the original ACP JSON-RPC id.
+    Pending,
+    /// The request cannot belong to a gateway turn (no open `session/prompt`).
+    /// There is no one to answer it, so the caller refuses it explicitly
+    /// instead of leaving a dangling approval forever.
+    Refuse,
+}
+
+/// One pending approval, kept only in this actor generation.
+#[derive(Clone, Debug)]
+struct PendingApproval {
+    action: RequiredAction,
+    /// Original `session/request_permission` JSON-RPC id; never public.
+    acp_request_id: Value,
+    /// ACP `session/prompt` request id that owned the tool call (execution
+    /// generation). An answer from a later turn cannot match it.
+    turn_request_id: String,
+    /// `seq` of the persisted `approval` item that opened it.
+    item_seq: u64,
+    /// Unix seconds after which the host no longer accepts an answer
+    /// (`peri_acp_types::interaction::APPROVAL_WAIT`).
+    deadline_unix: i64,
+}
+
+/// Terminal fact of one approval, kept for idempotent retries and diagnostics.
+#[derive(Clone, Debug)]
+struct SettledApproval {
+    decision: Option<ApprovalDecision>,
+    reason: SettlementReason,
+    /// `InputSubmission` idempotency key of the accepted answer, if any.
+    input_id: Option<String>,
+}
+
+/// Projection of a settled approval returned to the HTTP layer.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalReceipt {
+    pub request_id: String,
+    pub decision: Option<String>,
+    pub reason: String,
+    pub input_id: Option<String>,
+    /// `duplicate` only when the same idempotency key replayed the answer.
+    pub disposition: String,
+}
+
+impl SettledApproval {
+    fn receipt(&self, request_id: &str, disposition: &'static str) -> ApprovalReceipt {
+        ApprovalReceipt {
+            request_id: request_id.to_owned(),
+            decision: self.decision.map(|decision| decision.as_str().to_owned()),
+            reason: self.reason.as_str().to_owned(),
+            input_id: self.input_id.clone(),
+            disposition: disposition.to_owned(),
+        }
+    }
+}
+
+/// Outcome of one answer attempt.
+#[derive(Clone, Debug)]
+pub enum ApprovalReply {
+    /// Accepted: deliver this body to the still-open ACP request.
+    Applied {
+        acp_request_id: Value,
+        receipt: ApprovalReceipt,
+    },
+    /// Same idempotency key: same receipt, nothing delivered twice.
+    Duplicate { receipt: ApprovalReceipt },
+    /// Already settled (or expired): a 409 with the persisted reason.
+    Settled { reason: SettlementReason },
+    /// Another answer is currently being delivered. Nothing was settled; the
+    /// action remains answerable after that attempt finishes.
+    InFlight,
+    /// The settlement could not be persisted. The action was not removed.
+    SettlementFailed { error: SwarmError },
+    /// Not issued by this actor generation or this session.
+    Unknown,
+}
+
+/// Outcome of phase one of an approval answer.
+#[derive(Clone, Debug)]
+pub enum ApprovalClaim {
+    /// The action is reserved for delivery; the pending fact is still present.
+    Claimed { acp_request_id: Value },
+    /// Same idempotency key: same receipt, nothing delivered twice.
+    Duplicate { receipt: ApprovalReceipt },
+    /// The action expired or its turn ended before delivery could start.
+    Settled { reason: SettlementReason },
+    /// A concurrent answer already reserved the action for delivery.
+    InFlight,
+    /// The settlement row could not be persisted. Nothing was removed from the
+    /// registry; the caller must report a `5xx` instead of a settlement.
+    Failed { error: SwarmError },
+    /// Not issued by this actor generation or this session.
+    Unknown,
+}
+
+/// Outcome of phase two after successful delivery.
+#[derive(Clone, Debug)]
+pub enum ApprovalCompletion {
+    /// Durably settled; this receipt is the HTTP success body.
+    Completed { receipt: ApprovalReceipt },
+    /// The action was settled by another path (for example the turn ended)
+    /// while the delivery was in flight.
+    Settled { reason: SettlementReason },
+    /// The settlement row could not be persisted. The delivery claim was
+    /// released and the pending action remains answerable.
+    Failed { error: SwarmError },
+    /// The claim no longer exists.
+    Unknown,
+}
 
 /// Terminal outcome of a gateway turn, as reported by the gateway.
 #[derive(Clone, Debug, PartialEq)]
@@ -51,13 +174,34 @@ pub enum TurnOutcome {
     Failed { code: i64, message: String },
 }
 
-/// Key of one streamed text message: `(agentId, messageId)`.
-type StreamKey = (String, String);
+/// Key of one streamed text message: `(agentId, messageId, kind)`.
+///
+/// Peri gives reasoning and answer chunks of one model call the same
+/// `messageId`; the kind is part of the identity so a `thought` chunk cannot
+/// fix the stream kind and swallow the later answer text.
+type StreamKey = (String, String, &'static str);
 
 struct MessageStream {
     kind: ItemKind,
     item_id: String,
     text: String,
+    /// `seq` of the message's first persisted delta chunk.
+    ///
+    /// Completion flushes happen in `finish_turn`, after all deltas; the first
+    /// chunk's `seq` is the only persisted fact that orders two interleaved
+    /// messages, so the `final_answer`/`commentary` decision uses it instead of
+    /// a map or arrival order.
+    first_seq: Option<u64>,
+}
+
+/// User item whose `turn.created`/`turn.item.added` frames are published when
+/// the accepted turn actually starts.
+#[derive(Clone, Debug)]
+struct PendingUserItem {
+    seq: u64,
+    item_id: String,
+    text: String,
+    created_at: i64,
 }
 
 /// One queued host run that continues the open turn after a steer handoff.
@@ -73,11 +217,23 @@ struct ContinuationRun {
 struct LogState {
     /// Text streams opened in the current turn, keyed for deterministic flush.
     streams: BTreeMap<StreamKey, MessageStream>,
-    /// `(agentId, messageId)` → stable `itemId`; kept across turns so a late
-    /// chunk of an already-flushed message cannot mint a second identity.
+    /// `(agentId, messageId, kind)` → stable `itemId`; kept across turns so a
+    /// late chunk of an already-flushed message cannot mint a second identity.
     identities: HashMap<StreamKey, String>,
     /// Request id of the gateway turn currently running, if any.
     active: Option<String>,
+    /// Internal turn identity derived from the persisted user item that opened
+    /// the turn; stable in replay.
+    turn_id: Option<String>,
+    /// Unix seconds when this turn was opened, reused by `turn.created` and
+    /// `turn.completed`/`turn.failed` so one turn reports one creation time.
+    turn_created_at: Option<i64>,
+    /// Unix seconds when execution started; persisted as `swarm_turns.started_at`.
+    turn_started_at: Option<i64>,
+    /// User item persisted at acceptance whose official frames wait for the
+    /// turn to start (`begin_turn`). Emitting `turn.created` at acceptance
+    /// would leave a created turn with no terminal if execution never starts.
+    pending_user_item: Option<PendingUserItem>,
     /// Queue generation reported by the host for the active turn (diagnostics).
     generation: Option<String>,
     /// Last fatal agent message observed while the turn was active.
@@ -102,6 +258,30 @@ pub struct ItemLog {
     state: Mutex<LogState>,
     /// Mirror of `state.active` for async waiters (turn handoff to a queued run).
     active_watch: watch::Sender<Option<String>>,
+    /// Declared MCP approval bindings (empty = no approval scope).
+    declarations: Vec<ServerApproval>,
+    /// Current/tombstoned approvals. Loaded once per actor generation: a
+    /// restarted actor mints a fresh registry, so old public ids die with it.
+    approvals: Mutex<ApprovalState>,
+}
+
+/// Maximum settled receipts kept for duplicate-answer detection. Keys are
+/// time-sortable UUIDv7 ids, so the cap drops the oldest fact first.
+const SETTLED_APPROVAL_CAP: usize = 256;
+
+#[derive(Default)]
+struct ApprovalState {
+    pending: BTreeMap<String, PendingApproval>,
+    /// Pending actions reserved by an answer whose delivery has not completed.
+    /// The pending row stays until [`ItemLog::complete_approval_claim`].
+    delivering: std::collections::BTreeSet<String>,
+    /// Pending actions reserved while their settlement row is being persisted.
+    ///
+    /// The in-memory transition happens only after the store accepted the
+    /// settlement, so a storage failure leaves the action answerable instead of
+    /// reporting a success that a restart would forget.
+    settling: std::collections::BTreeSet<String>,
+    settled: BTreeMap<String, SettledApproval>,
 }
 
 impl std::fmt::Debug for ItemLog {
@@ -130,7 +310,18 @@ impl ItemLog {
             tail,
             state: Mutex::new(LogState::default()),
             active_watch,
+            declarations: Vec::new(),
+            approvals: Mutex::new(ApprovalState::default()),
         }
+    }
+
+    /// Attach the session's declared approval bindings.
+    ///
+    /// Called once, before the log is shared with the reader.
+    #[must_use]
+    pub fn with_approval_declarations(mut self, tools: &[McpToolSpec]) -> Self {
+        self.declarations = declared_approvals(tools);
+        self
     }
 
     #[must_use]
@@ -156,20 +347,25 @@ impl ItemLog {
         &self,
         input_id: Option<&str>,
         text: &str,
-    ) -> Result<u64, SwarmError> {
+    ) -> Result<(u64, String), SwarmError> {
         let mut payload = json!({ "role": "user", "text": text });
         if let Some(input_id) = input_id {
             payload["inputId"] = json!(input_id);
         }
-        self.append_item(
-            ProjectedItem {
-                kind: ItemKind::Message,
-                source: ItemSource::root(),
-                payload,
-            },
-            input_id.map(|input_id| format!("itim_input_{input_id}")),
-        )
-        .await
+        let item_id = input_id
+            .map(|input_id| format!("itim_input_{input_id}"))
+            .unwrap_or_else(ItemView::new_item_id);
+        let seq = self
+            .append_item(
+                ProjectedItem {
+                    kind: ItemKind::Message,
+                    source: ItemSource::root(),
+                    payload,
+                },
+                Some(item_id.clone()),
+            )
+            .await?;
+        Ok((seq, item_id))
     }
 
     #[must_use]
@@ -260,31 +456,182 @@ impl ItemLog {
         }
     }
 
-    /// Open a gateway turn: persist `running`, then announce `turn: started`.
-    pub async fn begin_turn(&self, request_id: &str) -> Result<(), SwarmError> {
-        {
+    /// Open a gateway turn: persist `running`, then publish the official
+    /// `agent.session.turn.created` (+ the accepted user item's
+    /// `turn.item.added`) and the gateway's own `turn: started`.
+    ///
+    /// Acceptance appends the user item and marks the turn as pending, but
+    /// defers both official frames until the turn actually starts: a turn that
+    /// never executes then produces no `turn.created` that could never be
+    /// closed. `turn.created` is always emitted before the item's frame, on the
+    /// live stream and in backlog replay alike.
+    pub async fn begin_turn(&self, request_id: &str, turn_id: &str) -> Result<(), SwarmError> {
+        let started_at = unix_now();
+        let (created, added) = {
             let mut state = self.state.lock();
             if state.active.is_some() {
                 return Err(SwarmError::turn_in_progress());
             }
             state.active = Some(request_id.to_owned());
+            let (created, added) = match state.turn_id.clone() {
+                Some(open) if open == turn_id => {
+                    // The accepted user item opened this turn; publish its
+                    // frames now that execution starts.
+                    match state.pending_user_item.clone() {
+                        Some(pending) => {
+                            let created_at = state.turn_created_at.unwrap_or(pending.created_at);
+                            (
+                                Some(OfficialEvent::turn_created(
+                                    &self.logical_id,
+                                    turn_id,
+                                    OfficialTurn::new(
+                                        &self.logical_id,
+                                        turn_id,
+                                        TurnStatus::InProgress,
+                                        created_at,
+                                        None,
+                                    ),
+                                )),
+                                Some(OfficialEvent::turn_item_added(
+                                    pending.seq,
+                                    &self.logical_id,
+                                    turn_id,
+                                    OfficialMessageItem::user(
+                                        &pending.item_id,
+                                        turn_id,
+                                        &pending.text,
+                                    ),
+                                )),
+                            )
+                        }
+                        None => (None, None),
+                    }
+                }
+                open => {
+                    if let Some(stale) = open {
+                        tracing::warn!(
+                            logical_id = %self.logical_id,
+                            stale_turn = stale,
+                            turn_id,
+                            "opening a turn while a previously announced turn was never closed"
+                        );
+                    }
+                    let created_at = unix_now();
+                    state.turn_id = Some(turn_id.to_owned());
+                    state.turn_created_at = Some(created_at);
+                    state.pending_user_item = None;
+                    (
+                        Some(OfficialEvent::turn_created(
+                            &self.logical_id,
+                            turn_id,
+                            OfficialTurn::new(
+                                &self.logical_id,
+                                turn_id,
+                                TurnStatus::InProgress,
+                                created_at,
+                                None,
+                            ),
+                        )),
+                        None,
+                    )
+                }
+            };
             state.generation = None;
             state.failure = None;
             state.streams.clear();
             state.steer_epoch = 0;
             state.continuation = None;
-        }
+            state.turn_started_at = Some(started_at);
+            (created, added)
+        };
+        let created_at = self.state.lock().turn_created_at.unwrap_or(started_at);
         if let Err(error) = self.set_session_state(SessionState::Running, None).await {
-            self.state.lock().active = None;
+            let mut state = self.state.lock();
+            state.active = None;
             return Err(error);
         }
-        self.broadcast(StreamEvent::Turn(TurnEvent::started(request_id)));
+        // The turn is durable before its first frame: a client can never see
+        // `turn.created` for a turn that `turns.retrieve` does not know.
+        if let Err(error) = self
+            .store
+            .swarm_upsert_turn(SwarmTurnRow {
+                logical_id: self.logical_id.clone(),
+                turn_id: turn_id.to_owned(),
+                status: TurnStatus::InProgress,
+                created_at,
+                started_at: Some(started_at),
+                completed_at: None,
+                error: None,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+        {
+            // No frame was published yet. Return the session to `idle` so the
+            // persisted `running` row does not outlive a turn nobody can close;
+            // the caller abandons the pending turn.
+            {
+                let mut state = self.state.lock();
+                state.active = None;
+            }
+            self.update_state_quiet(SessionState::Idle).await;
+            return Err(store_failure("upsert_turn", error));
+        }
+        if let Some(event) = created {
+            // The session enters `in_progress` before its first turn is
+            // announced; the SDK observes the same order on replay.
+            self.broadcast(StreamEvent::Official(OfficialEvent::session_in_progress(
+                turn_id,
+                self.official_session(SessionStatus::InProgress, None).await,
+            )));
+            self.broadcast(StreamEvent::Official(event));
+            self.broadcast(StreamEvent::Official(OfficialEvent::turn_in_progress(
+                &self.logical_id,
+                turn_id,
+                OfficialTurn::new(
+                    &self.logical_id,
+                    turn_id,
+                    TurnStatus::InProgress,
+                    created_at,
+                    None,
+                ),
+            )));
+        }
+        if let Some(event) = added {
+            self.broadcast(StreamEvent::Official(event));
+        }
+        {
+            let mut state = self.state.lock();
+            state.pending_user_item = None;
+        }
+        self.broadcast(StreamEvent::Turn(TurnEvent::started(request_id, turn_id)));
         // Publish after the terminal-safe state is visible: `wait_turn_closed`
         // subscribes to this watch, and a stale `None` would let a caller treat
         // the still-open turn as already closed (a steer's `cancelled` attempt
         // terminal must not close it before the queued run takes over).
         self.active_watch.send_replace(Some(request_id.to_owned()));
         Ok(())
+    }
+
+    /// Whether a turn is open or accepted-but-not-yet-started.
+    #[must_use]
+    pub fn has_open_turn(&self) -> bool {
+        self.state.lock().turn_id.is_some()
+    }
+
+    /// Drop a pending turn whose execution never started.
+    ///
+    /// No turn row and no official frame exist for it (both wait for
+    /// [`Self::begin_turn`]), so the stream simply never learns about that turn;
+    /// the persisted user item stays readable from `/items`.
+    pub fn abandon_pending_turn(&self, turn_id: &str) {
+        let mut state = self.state.lock();
+        if state.active.is_none() && state.turn_id.as_deref() == Some(turn_id) {
+            state.turn_id = None;
+            state.turn_created_at = None;
+            state.turn_started_at = None;
+            state.pending_user_item = None;
+        }
     }
 
     /// Close a gateway turn: flush streamed text, then publish the terminal.
@@ -315,9 +662,58 @@ impl ItemLog {
             state.continuation = None;
             (std::mem::take(&mut state.streams), state.failure.take())
         };
-        for ((agent_id, message_id), stream) in streams {
-            if stream.text.is_empty() {
-                continue;
+        // Approvals owned by this turn can no longer be answered: the prompt
+        // attempt (and its ACP waiter) is gone. Persist the settlement and
+        // publish the empty snapshot before the turn terminal, so a reconnecting
+        // client never believes a dead approval is still pending. A store
+        // failure is logged: the turn terminal still has to be published, and
+        // the durable pending row is settled again by actor recovery.
+        if let Err(error) = self.settle_turn_approvals(request_id).await {
+            tracing::warn!(
+                logical_id = %self.logical_id,
+                request_id,
+                error = %error,
+                "swarm turn-ended approval settlement was not persisted"
+            );
+        }
+        // The turn identity stays set while completion items are flushed: their
+        // `turn.item.added` frames belong to this turn.
+        //
+        // Messages are ordered by their first persisted chunk, so a turn that
+        // interleaved two messages still reports them in output order. Only root
+        // `Message` streams compete for `outputIndex` and the final-answer
+        // phase: thought streams (same `messageId` as the answer) and child
+        // agents are persisted as custom items but never become official
+        // outputs.
+        let mut streams: Vec<_> = streams
+            .into_iter()
+            .filter(|(_, stream)| !stream.text.is_empty())
+            .map(|(key, stream)| (stream.first_seq.unwrap_or(u64::MAX), key, stream))
+            .collect();
+        streams.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        let root_messages = streams
+            .iter()
+            .filter(|(_, (agent_id, _, _), stream)| {
+                agent_id.as_str() == "root" && stream.kind == ItemKind::Message
+            })
+            .count();
+        let mut root_message_index = 0usize;
+        for (_, (agent_id, message_id, _), stream) in streams {
+            let root_message = agent_id == "root" && stream.kind == ItemKind::Message;
+            let mut payload = json!({
+                "role": "assistant",
+                "messageId": message_id,
+                "text": stream.text,
+                "complete": true,
+            });
+            if root_message {
+                payload["phase"] = json!(if root_message_index + 1 == root_messages {
+                    "final_answer"
+                } else {
+                    "commentary"
+                });
+                payload["outputIndex"] = json!(root_message_index);
+                root_message_index += 1;
             }
             let item = ProjectedItem {
                 kind: stream.kind,
@@ -325,12 +721,7 @@ impl ItemLog {
                     agent_id,
                     task_id: None,
                 },
-                payload: json!({
-                    "role": "assistant",
-                    "messageId": message_id,
-                    "text": stream.text,
-                    "complete": true,
-                }),
+                payload,
             };
             if let Err(error) = self.append_item(item, Some(stream.item_id)).await {
                 tracing::warn!(
@@ -340,25 +731,207 @@ impl ItemLog {
                 );
             }
         }
+        let (turn_id, created_at, started_at) = {
+            let mut state = self.state.lock();
+            (
+                state.turn_id.take(),
+                state.turn_created_at.take(),
+                state.turn_started_at.take(),
+            )
+        };
+        self.state.lock().pending_user_item = None;
+        let Some(turn_id) = turn_id else {
+            // Unreachable by construction: `begin_turn` always records the
+            // turn id it was given. Neither custom nor official frames can name
+            // a turn, so do not fabricate one.
+            tracing::error!(
+                logical_id = %self.logical_id,
+                request_id,
+                "swarm turn closed without a recorded turn id"
+            );
+            self.active_watch.send_replace(None);
+            return;
+        };
         match outcome {
             TurnOutcome::Completed(stop_reason) => {
+                let completed_at = unix_now();
+                // A host-side cancel is still a `turn.completed` frame, but the
+                // official `Turn.status` carries `cancelled`; persisting
+                // `completed` would make `turns.retrieve` disagree with the
+                // official status vocabulary (`turns.d.ts`).
+                let status = if stop_reason == "cancelled" {
+                    TurnStatus::Cancelled
+                } else {
+                    TurnStatus::Completed
+                };
+                if let Err(error) = self
+                    .persist_terminal_turn(
+                        &turn_id,
+                        status,
+                        created_at.unwrap_or(completed_at),
+                        started_at,
+                        completed_at,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        logical_id = %self.logical_id,
+                        turn_id,
+                        error = %error,
+                        "swarm completed turn row was not persisted"
+                    );
+                }
                 self.update_state_quiet(SessionState::Idle).await;
                 self.broadcast(StreamEvent::Turn(TurnEvent::completed(
                     request_id,
+                    &turn_id,
                     stop_reason,
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::turn_completed(
+                    &self.logical_id,
+                    &turn_id,
+                    OfficialTurn::new(
+                        &self.logical_id,
+                        &turn_id,
+                        status,
+                        created_at.unwrap_or(completed_at),
+                        Some(completed_at),
+                    ),
+                )));
+                // Immediately after the terminal: the SDK's `TurnState` only
+                // treats `agent.session.idle` as terminal after it observed the
+                // matching `turn.completed`.
+                self.broadcast(StreamEvent::Official(OfficialEvent::session_idle(
+                    &turn_id,
+                    self.official_session(SessionStatus::Idle, None).await,
                 )));
             }
             TurnOutcome::Failed { code, message } => {
                 let message = failure.unwrap_or(message);
+                let completed_at = unix_now();
+                if let Err(error) = self
+                    .persist_terminal_turn(
+                        &turn_id,
+                        TurnStatus::Failed,
+                        created_at.unwrap_or(completed_at),
+                        started_at,
+                        completed_at,
+                        Some(json!({
+                            "code": "internal_error",
+                            "message": message,
+                        })),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        logical_id = %self.logical_id,
+                        turn_id,
+                        error = %error,
+                        "swarm failed turn row was not persisted"
+                    );
+                }
                 self.update_state_quiet(SessionState::Failed).await;
                 self.broadcast(StreamEvent::Turn(TurnEvent::failed(
-                    request_id, code, message,
+                    request_id,
+                    &turn_id,
+                    code,
+                    message.clone(),
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::turn_failed(
+                    &self.logical_id,
+                    &turn_id,
+                    OfficialTurn::new(
+                        &self.logical_id,
+                        &turn_id,
+                        TurnStatus::Failed,
+                        created_at.unwrap_or(completed_at),
+                        Some(completed_at),
+                    )
+                    // The failure text is now persisted on the turn row; the
+                    // live frame and a later `turns.retrieve` agree.
+                    .with_error(Some(message.clone())),
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::error(
+                    &turn_id,
+                    &self.logical_id,
+                    &message,
+                )));
+                self.broadcast(StreamEvent::Official(OfficialEvent::session_failed(
+                    &turn_id,
+                    self.official_session(SessionStatus::Failed, Some(message))
+                        .await,
                 )));
             }
         }
         // Wake `wait_turn_closed` only after the terminal is out, so a caller
         // that returns from the prompt observes a fully closed turn.
         self.active_watch.send_replace(None);
+    }
+
+    /// Persist one terminal turn row, keeping the opening `created_at`.
+    async fn persist_terminal_turn(
+        &self,
+        turn_id: &str,
+        status: TurnStatus,
+        created_at: i64,
+        started_at: Option<i64>,
+        completed_at: i64,
+        error: Option<Value>,
+    ) -> Result<(), crate::store::StoreError> {
+        self.store
+            .swarm_upsert_turn(SwarmTurnRow {
+                logical_id: self.logical_id.clone(),
+                turn_id: turn_id.to_owned(),
+                status,
+                created_at,
+                started_at,
+                completed_at: Some(completed_at),
+                error,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+    }
+
+    /// Official session snapshot for `agent.session.idle`/`agent.session.failed`.
+    ///
+    /// A missing/failed row read still yields a snapshot: the terminal frame is
+    /// the SDK's only way out of `in_progress`, so suppressing it would hang a
+    /// stream. Unread timestamps are `0`, which is visibly not an observation.
+    async fn official_session(
+        &self,
+        status: SessionStatus,
+        error: Option<String>,
+    ) -> OfficialSession {
+        let required_actions = self.required_actions();
+        let row = self.store.swarm_get_session(&self.logical_id).await;
+        match row {
+            Ok(Some(row)) => OfficialSession::new(
+                &self.logical_id,
+                status,
+                unix_from_rfc3339(&row.created_at),
+                unix_from_rfc3339(&row.last_activity_at),
+                error,
+                row.model,
+                row.instructions,
+            )
+            .with_environment(row.environment.normalized())
+            .with_required_actions(required_actions)
+            .with_metadata(row.metadata)
+            .with_prompt_cache_options(row.prompt_cache_options),
+            Ok(None) => OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None)
+                .with_required_actions(required_actions),
+            Err(read_error) => {
+                tracing::warn!(
+                    logical_id = %self.logical_id,
+                    error = %read_error,
+                    "swarm session row was not readable for the official terminal frame"
+                );
+                OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None)
+                    .with_required_actions(required_actions)
+            }
+        }
     }
 
     /// Key/value projection of the last item appended (test and gateway aid).
@@ -416,6 +989,671 @@ impl ItemLog {
         waited.is_ok()
     }
 
+    // ── MCP approvals (`requires_action`) ──────────────────────────────────
+
+    /// Handle one `session/request_permission` from the host.
+    ///
+    /// The decision is scoped by **binding identity**, not by tool name:
+    ///
+    /// - a declared `never` tool is answered `allow_once` immediately (the
+    ///   caller sends it) and leaves no trace;
+    /// - a declared `always`/scoped/unknown tool becomes a pending approval;
+    /// - a request whose MCP origin is missing cannot be attributed to any
+    ///   declaration and is therefore pending as well (fail-closed).
+    pub async fn begin_permission(
+        &self,
+        acp_request_id: &Value,
+        params: &Value,
+    ) -> Result<PermissionStart, SwarmError> {
+        let origin = params.get("_meta").and_then(|meta| meta.get("peri.mcp"));
+        // An empty label/tool is not a fact: treat it as "unknown" so the
+        // projection uses `server_label: ""` (official type has no null) and
+        // `name: null` (official nullable field) rather than inventing empty
+        // names.
+        let server = origin
+            .and_then(|origin| origin.get("server"))
+            .and_then(Value::as_str)
+            .filter(|server| !server.is_empty())
+            .map(str::to_owned);
+        let tool = origin
+            .and_then(|origin| origin.get("tool"))
+            .and_then(Value::as_str)
+            .filter(|tool| !tool.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                params
+                    .get("toolCall")
+                    .and_then(|call| call.get("title"))
+                    .and_then(Value::as_str)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned)
+            });
+        let arguments = params
+            .get("toolCall")
+            .and_then(|call| call.get("rawInput"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let tool_call_id = params
+            .get("toolCall")
+            .and_then(|call| call.get("toolCallId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        let needs_answer = match (server.as_deref(), tool.as_deref()) {
+            (Some(server), Some(tool)) => requires_answer(&self.declarations, server, tool),
+            // Unattributable: fail-closed.
+            _ => true,
+        };
+        if !needs_answer {
+            return Ok(PermissionStart::AutoApprove);
+        }
+
+        let (turn_id, turn_request_id) = {
+            let state = self.state.lock();
+            (state.turn_id.clone(), state.active.clone())
+        };
+        let Some(turn_request_id) = turn_request_id else {
+            return Ok(PermissionStart::Refuse);
+        };
+        // The official required action carries a `turn_id`; an approval that
+        // cannot name its turn is not answerable and must not be projected.
+        let Some(turn_id) = turn_id else {
+            return Ok(PermissionStart::Refuse);
+        };
+        let request_id = format!("{APPROVAL_ID_PREFIX}{}", Uuid::now_v7());
+        let action = RequiredAction {
+            request_id: request_id.clone(),
+            turn_id: turn_id.clone(),
+            server_label: server.clone().unwrap_or_default(),
+            tool: tool.clone(),
+            arguments: arguments.clone(),
+        };
+        // The pending fact is persisted before the official frame is published:
+        // a reconnect can always read the row that the snapshot names.
+        let payload = json!({
+            "type": crate::domain::MCP_APPROVAL_REQUEST,
+            "state": "pending",
+            "requestId": request_id,
+            "turnId": turn_id,
+            "turnRequestId": turn_request_id,
+            "serverLabel": server,
+            "name": tool,
+            "toolCallId": tool_call_id,
+            "arguments": arguments,
+        });
+        let seq = self
+            .append_item(
+                ProjectedItem {
+                    kind: ItemKind::Approval,
+                    source: ItemSource::root(),
+                    payload,
+                },
+                None,
+            )
+            .await?;
+        {
+            let mut approvals = self.approvals.lock();
+            approvals.pending.insert(
+                request_id,
+                PendingApproval {
+                    action,
+                    acp_request_id: acp_request_id.clone(),
+                    turn_request_id,
+                    item_seq: seq,
+                    deadline_unix: unix_now().saturating_add(APPROVAL_VALIDITY.as_secs() as i64),
+                },
+            );
+        }
+        self.broadcast_required_actions(seq).await;
+        Ok(PermissionStart::Pending)
+    }
+
+    /// Answer a pending approval exactly once.
+    ///
+    /// This is the non-delivering convenience used by tests and by callers
+    /// that have no ACP response to send. The actor service uses the
+    /// two-phase [`Self::claim_approval`] / [`Self::complete_approval_claim`]
+    /// pair so a failed delivery leaves the action answerable.
+    ///
+    /// `input_id` is the caller's idempotency key: replaying the same key
+    /// returns the same receipt instead of a conflict.
+    pub async fn respond_approval(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+        input_id: Option<String>,
+    ) -> ApprovalReply {
+        match self.claim_approval(request_id, input_id.clone()).await {
+            ApprovalClaim::Claimed { acp_request_id } => {
+                match self
+                    .complete_approval_claim(request_id, decision, input_id)
+                    .await
+                {
+                    ApprovalCompletion::Completed { receipt } => ApprovalReply::Applied {
+                        acp_request_id,
+                        receipt,
+                    },
+                    ApprovalCompletion::Settled { reason } => ApprovalReply::Settled { reason },
+                    ApprovalCompletion::Failed { error } => {
+                        ApprovalReply::SettlementFailed { error }
+                    }
+                    ApprovalCompletion::Unknown => ApprovalReply::Unknown,
+                }
+            }
+            ApprovalClaim::Duplicate { receipt } => ApprovalReply::Duplicate { receipt },
+            ApprovalClaim::Settled { reason } => ApprovalReply::Settled { reason },
+            ApprovalClaim::InFlight => ApprovalReply::InFlight,
+            ApprovalClaim::Failed { error } => ApprovalReply::SettlementFailed { error },
+            ApprovalClaim::Unknown => ApprovalReply::Unknown,
+        }
+    }
+
+    /// Phase one of an answer: reserve the pending action for delivery.
+    ///
+    /// The pending fact is **not** removed. The caller sends the decision to
+    /// the suspended ACP request, then either
+    /// [`Self::complete_approval_claim`] (durable settlement) or
+    /// [`Self::release_approval_claim`] (delivery failed; still answerable).
+    /// A concurrent answer observes [`ApprovalClaim::InFlight`] instead of
+    /// deleting the action before delivery is known to have succeeded.
+    pub async fn claim_approval(
+        &self,
+        request_id: &str,
+        input_id: Option<String>,
+    ) -> ApprovalClaim {
+        let now = unix_now();
+        // Lock order is `state` then `approvals` everywhere (see
+        // `required_actions`); reading the generation first keeps that rule.
+        let active = self.state.lock().active.clone();
+        let invalid = {
+            let mut approvals = self.approvals.lock();
+            if approvals.delivering.contains(request_id) || approvals.settling.contains(request_id)
+            {
+                return ApprovalClaim::InFlight;
+            }
+            match approvals.pending.get(request_id).cloned() {
+                None => {
+                    return match approvals.settled.get(request_id) {
+                        Some(settled)
+                            if matches!(
+                                (&settled.input_id, &input_id),
+                                (Some(stored), Some(replayed)) if stored == replayed
+                            ) =>
+                        {
+                            ApprovalClaim::Duplicate {
+                                receipt: settled.receipt(request_id, "duplicate"),
+                            }
+                        }
+                        Some(settled) => ApprovalClaim::Settled {
+                            reason: settled.reason,
+                        },
+                        None => ApprovalClaim::Unknown,
+                    };
+                }
+                Some(pending) => {
+                    let invalid = if pending.deadline_unix < now {
+                        Some(SettlementReason::Expired)
+                    } else if active.as_deref() != Some(pending.turn_request_id.as_str()) {
+                        // The turn that owned this call already ended (or a
+                        // newer generation owns the session): the ACP waiter is
+                        // gone.
+                        Some(SettlementReason::TurnEnded)
+                    } else {
+                        None
+                    };
+                    match invalid {
+                        None => {
+                            approvals.delivering.insert(request_id.to_owned());
+                            return ApprovalClaim::Claimed {
+                                acp_request_id: pending.acp_request_id,
+                            };
+                        }
+                        Some(reason) => {
+                            // Reserve the transition before awaiting the store,
+                            // so a concurrent answer cannot persist a second
+                            // settlement for the same id.
+                            approvals.settling.insert(request_id.to_owned());
+                            reason
+                        }
+                    }
+                }
+            }
+        };
+        match self
+            .persist_approval_settlement(request_id, None, invalid, None)
+            .await
+        {
+            Ok(seq) => {
+                {
+                    let mut approvals = self.approvals.lock();
+                    approvals.settling.remove(request_id);
+                    approvals.pending.remove(request_id);
+                    approvals.delivering.remove(request_id);
+                    approvals.settled.insert(
+                        request_id.to_owned(),
+                        SettledApproval {
+                            decision: None,
+                            reason: invalid,
+                            input_id: None,
+                        },
+                    );
+                }
+                self.broadcast_settlement(seq).await;
+                ApprovalClaim::Settled { reason: invalid }
+            }
+            Err(error) => {
+                // The store did not accept the settlement: keep the pending
+                // fact and report the failure instead of a false 409.
+                self.approvals.lock().settling.remove(request_id);
+                ApprovalClaim::Failed { error }
+            }
+        }
+    }
+
+    /// Phase two (success): durably settle a claimed approval and publish the
+    /// receipt. The action is removed only here, after delivery succeeded.
+    ///
+    /// The settlement row is persisted **before** the in-memory registry
+    /// changes. If the store fails, the claim is released and the action stays
+    /// answerable; a success receipt never describes an unpersisted settlement.
+    pub async fn complete_approval_claim(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+        input_id: Option<String>,
+    ) -> ApprovalCompletion {
+        // A settlement that began in parallel (turn end / expiry) may have
+        // removed the pending fact; in that case report its durable outcome
+        // instead of persisting an answer nobody can observe.
+        {
+            let approvals = self.approvals.lock();
+            if !approvals.pending.contains_key(request_id) {
+                return match approvals.settled.get(request_id) {
+                    Some(settled) => ApprovalCompletion::Settled {
+                        reason: settled.reason,
+                    },
+                    None => ApprovalCompletion::Unknown,
+                };
+            }
+        }
+        let seq = match self
+            .persist_approval_settlement(
+                request_id,
+                Some(decision),
+                SettlementReason::Answered,
+                input_id.as_deref(),
+            )
+            .await
+        {
+            Ok(seq) => seq,
+            Err(error) => {
+                // Delivery already reached the host, but the durable fact does
+                // not exist: release the reservation so the next answer is not
+                // permanently reported as `delivering`.
+                self.release_approval_claim(request_id);
+                tracing::warn!(
+                    logical_id = %self.logical_id,
+                    request_id,
+                    error = %error,
+                    "swarm approval delivery succeeded but its settlement was not persisted"
+                );
+                return ApprovalCompletion::Failed { error };
+            }
+        };
+        let completed = {
+            let mut approvals = self.approvals.lock();
+            approvals.delivering.remove(request_id);
+            approvals.pending.remove(request_id);
+            approvals.settled.insert(
+                request_id.to_owned(),
+                SettledApproval {
+                    decision: Some(decision),
+                    reason: SettlementReason::Answered,
+                    input_id: input_id.clone(),
+                },
+            );
+            if approvals.settled.len() > SETTLED_APPROVAL_CAP {
+                let oldest = approvals.settled.keys().next().cloned();
+                if let Some(oldest) = oldest {
+                    approvals.settled.remove(&oldest);
+                }
+            }
+            approvals
+                .settled
+                .get(request_id)
+                .cloned()
+                .expect("just inserted")
+                .receipt(request_id, "inserted")
+        };
+        self.broadcast_settlement(seq).await;
+        ApprovalCompletion::Completed { receipt: completed }
+    }
+
+    /// Phase two (failure): release the reservation without settling. The
+    /// pending action stays answerable, so a 502 never deletes the action.
+    pub fn release_approval_claim(&self, request_id: &str) {
+        self.approvals.lock().delivering.remove(request_id);
+    }
+
+    /// Test-only: move one pending approval's deadline into the past so the
+    /// expiry path can be exercised without waiting the host's 300 s window.
+    #[cfg(test)]
+    pub(crate) fn expire_approval_now(&self, request_id: &str) {
+        if let Some(pending) = self.approvals.lock().pending.get_mut(request_id) {
+            pending.deadline_unix = unix_now().saturating_sub(1);
+        }
+    }
+
+    /// Lazily settle approvals whose host wait already expired.
+    ///
+    /// There is no second timer: the deadline is the host's own
+    /// `APPROVAL_WAIT`, and this method just makes the persisted fact catch up
+    /// when a reader needs the current state.
+    ///
+    /// A settlement is persisted before the in-memory pending fact is removed.
+    /// A store failure leaves the action pending (filtered out by its deadline)
+    /// and returns the explicit `5xx`; it is never silently reported as settled.
+    pub async fn settle_expired_approvals(&self) -> Result<usize, SwarmError> {
+        let now = unix_now();
+        let expired: Vec<String> = {
+            let approvals = self.approvals.lock();
+            approvals
+                .pending
+                .iter()
+                .filter(|(id, pending)| {
+                    pending.deadline_unix < now
+                        && !approvals.delivering.contains(*id)
+                        && !approvals.settling.contains(*id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let mut settled = 0;
+        let mut first_error: Option<SwarmError> = None;
+        for request_id in expired {
+            {
+                let mut approvals = self.approvals.lock();
+                // The expiry decision was taken under the lock above; re-check
+                // so an answer that started meanwhile keeps ownership.
+                if approvals.delivering.contains(&request_id)
+                    || approvals.settling.contains(&request_id)
+                    || !approvals.pending.contains_key(&request_id)
+                {
+                    continue;
+                }
+                approvals.settling.insert(request_id.clone());
+            }
+            match self
+                .persist_approval_settlement(&request_id, None, SettlementReason::Expired, None)
+                .await
+            {
+                Ok(seq) => {
+                    {
+                        let mut approvals = self.approvals.lock();
+                        approvals.settling.remove(&request_id);
+                        approvals.pending.remove(&request_id);
+                        approvals.delivering.remove(&request_id);
+                        approvals.settled.insert(
+                            request_id.clone(),
+                            SettledApproval {
+                                decision: None,
+                                reason: SettlementReason::Expired,
+                                input_id: None,
+                            },
+                        );
+                    }
+                    self.broadcast_settlement(seq).await;
+                    settled += 1;
+                }
+                Err(error) => {
+                    self.approvals.lock().settling.remove(&request_id);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(settled),
+        }
+    }
+
+    /// Drop pending approvals whose owning turn just ended.
+    pub async fn settle_turn_approvals(&self, turn_request_id: &str) -> Result<usize, SwarmError> {
+        let drained: Vec<String> = {
+            let approvals = self.approvals.lock();
+            approvals
+                .pending
+                .iter()
+                .filter(|(id, pending)| {
+                    pending.turn_request_id == turn_request_id
+                        && !approvals.delivering.contains(*id)
+                        && !approvals.settling.contains(*id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let mut settled = 0;
+        let mut first_error: Option<SwarmError> = None;
+        for request_id in drained {
+            {
+                let mut approvals = self.approvals.lock();
+                if approvals.delivering.contains(&request_id)
+                    || approvals.settling.contains(&request_id)
+                    || !approvals.pending.contains_key(&request_id)
+                {
+                    continue;
+                }
+                approvals.settling.insert(request_id.clone());
+            }
+            match self
+                .persist_approval_settlement(&request_id, None, SettlementReason::TurnEnded, None)
+                .await
+            {
+                Ok(seq) => {
+                    {
+                        let mut approvals = self.approvals.lock();
+                        approvals.settling.remove(&request_id);
+                        approvals.pending.remove(&request_id);
+                        approvals.delivering.remove(&request_id);
+                        approvals.settled.insert(
+                            request_id.clone(),
+                            SettledApproval {
+                                decision: None,
+                                reason: SettlementReason::TurnEnded,
+                                input_id: None,
+                            },
+                        );
+                    }
+                    self.broadcast_settlement(seq).await;
+                    settled += 1;
+                }
+                Err(error) => {
+                    self.approvals.lock().settling.remove(&request_id);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(settled),
+        }
+    }
+
+    /// Drop every pending approval because the actor/transport is gone.
+    pub async fn invalidate_approvals(
+        &self,
+        reason: SettlementReason,
+    ) -> Result<usize, SwarmError> {
+        let drained: Vec<String> = {
+            let approvals = self.approvals.lock();
+            approvals.pending.keys().cloned().collect()
+        };
+        let mut settled = 0;
+        let mut first_error: Option<SwarmError> = None;
+        for request_id in drained {
+            match self
+                .persist_approval_settlement(&request_id, None, reason, None)
+                .await
+            {
+                Ok(seq) => {
+                    {
+                        let mut approvals = self.approvals.lock();
+                        approvals.settling.remove(&request_id);
+                        approvals.pending.remove(&request_id);
+                        approvals.delivering.remove(&request_id);
+                        approvals.settled.insert(
+                            request_id.clone(),
+                            SettledApproval {
+                                decision: None,
+                                reason,
+                                input_id: None,
+                            },
+                        );
+                    }
+                    self.broadcast_settlement(seq).await;
+                    settled += 1;
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(settled),
+        }
+    }
+
+    /// Current `required_actions`: unsettled, unexpired and owned by the open
+    /// turn. Retrieval, list and SSE all read this one judgement.
+    #[must_use]
+    pub fn required_actions(&self) -> Vec<Value> {
+        let now = unix_now();
+        let active = self.state.lock().active.clone();
+        let approvals = self.approvals.lock();
+        approvals
+            .pending
+            .values()
+            .filter(|pending| {
+                pending.deadline_unix >= now
+                    && active.as_deref() == Some(pending.turn_request_id.as_str())
+            })
+            .map(|pending| pending.action.to_json())
+            .collect()
+    }
+
+    /// Official `agent.session.requires_action` snapshot for the current set.
+    ///
+    /// The `event_id` is derived from the oldest pending approval's persisted
+    /// item `seq`; the same id is replayed for the same row, and the settlement
+    /// frame uses the settlement row's `seq`, so the SDK's dedupe never drops a
+    /// state change.
+    pub async fn approval_snapshot_event(&self) -> Option<OfficialEvent> {
+        let (seq, actions) = {
+            let now = unix_now();
+            let active = self.state.lock().active.clone();
+            let approvals = self.approvals.lock();
+            let seq = approvals
+                .pending
+                .values()
+                .filter(|pending| {
+                    pending.deadline_unix >= now
+                        && active.as_deref() == Some(pending.turn_request_id.as_str())
+                })
+                .map(|pending| pending.item_seq)
+                .min()?;
+            let actions: Vec<Value> = approvals
+                .pending
+                .values()
+                .filter(|pending| {
+                    pending.deadline_unix >= now
+                        && active.as_deref() == Some(pending.turn_request_id.as_str())
+                })
+                .map(|pending| pending.action.to_json())
+                .collect();
+            (seq, actions)
+        };
+        Some(OfficialEvent::requires_action(
+            seq,
+            self.official_session(SessionStatus::RequiresAction, None)
+                .await
+                .with_required_actions(actions),
+        ))
+    }
+
+    async fn broadcast_required_actions(&self, seq: u64) {
+        let session = self
+            .official_session(SessionStatus::RequiresAction, None)
+            .await;
+        self.broadcast(StreamEvent::Official(OfficialEvent::requires_action(
+            seq, session,
+        )));
+    }
+
+    /// Persist one settlement row. The in-memory registry must not change until
+    /// this succeeds: the durable log is the replay authority.
+    ///
+    /// The returned `seq` is the settlement row's persisted sequence, used as
+    /// the snapshot `event_id` so live and replay frames dedupe.
+    async fn persist_approval_settlement(
+        &self,
+        request_id: &str,
+        decision: Option<ApprovalDecision>,
+        reason: SettlementReason,
+        input_id: Option<&str>,
+    ) -> Result<u64, SwarmError> {
+        let payload = json!({
+            "type": crate::domain::MCP_APPROVAL_REQUEST,
+            "state": "settled",
+            "requestId": request_id,
+            "decision": decision.map(ApprovalDecision::as_str),
+            "reason": reason.as_str(),
+            "inputId": input_id,
+        });
+        self.append_item(
+            ProjectedItem {
+                kind: ItemKind::Approval,
+                source: ItemSource::root(),
+                payload,
+            },
+            None,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                logical_id = %self.logical_id,
+                request_id,
+                error = %error,
+                "swarm approval settlement was not persisted; the pending fact is kept"
+            );
+            SwarmError::required_action_settlement_failed(request_id, "append_settlement")
+        })
+    }
+
+    /// Publish the post-settlement `requires_action` snapshot with the
+    /// settlement row's `seq`.
+    ///
+    /// A settlement only clears the answered action: if another parallel
+    /// approval is still open, the snapshot must keep reporting
+    /// `requires_action` instead of pretending the session is progressing.
+    async fn broadcast_settlement(&self, seq: u64) {
+        let status = if self.required_actions().is_empty() {
+            SessionStatus::InProgress
+        } else {
+            SessionStatus::RequiresAction
+        };
+        let session = self.official_session(status, None).await;
+        self.broadcast(StreamEvent::Official(OfficialEvent::requires_action(
+            seq, session,
+        )));
+    }
+
     /// Persist one projected item, then broadcast it.
     async fn push_item(&self, item: ProjectedItem) {
         if let Some((key, message_id, text)) = stream_parts(&item) {
@@ -427,11 +1665,15 @@ impl ItemLog {
                     .cloned()
                     .unwrap_or_else(ItemView::new_item_id);
                 state.identities.insert(key.clone(), item_id.clone());
-                let stream = state.streams.entry(key).or_insert_with(|| MessageStream {
-                    kind: item.kind,
-                    item_id: item_id.clone(),
-                    text: String::new(),
-                });
+                let stream = state
+                    .streams
+                    .entry(key.clone())
+                    .or_insert_with(|| MessageStream {
+                        kind: item.kind,
+                        item_id: item_id.clone(),
+                        text: String::new(),
+                        first_seq: None,
+                    });
                 stream.text.push_str(&text);
                 item_id
             };
@@ -449,8 +1691,16 @@ impl ItemLog {
                 source: item.source,
                 payload,
             };
-            if let Err(error) = self.append_item(projected, Some(item_id)).await {
-                self.report_append_failure("item", error).await;
+            match self.append_item(projected, Some(item_id)).await {
+                Ok(seq) => {
+                    // Persisted: the first chunk's seq orders this message among
+                    // the turn's outputs. A later chunk never rewrites it.
+                    let mut state = self.state.lock();
+                    if let Some(stream) = state.streams.get_mut(&key) {
+                        stream.first_seq.get_or_insert(seq);
+                    }
+                }
+                Err(error) => self.report_append_failure("item", error).await,
             }
             return;
         }
@@ -523,7 +1773,7 @@ impl ItemLog {
         self.tail.fetch_max(seq, Ordering::Relaxed);
         self.set_session_state(SessionState::Running, Some(seq))
             .await?;
-        self.broadcast(StreamEvent::Item(ItemView {
+        let view = ItemView {
             id: item_id.clone(),
             seq,
             item_id,
@@ -532,8 +1782,129 @@ impl ItemLog {
             payload,
             created_at,
             truncated,
-        }));
+        };
+        self.broadcast(StreamEvent::Item(view.clone()));
+        for event in self.official_frames(&view) {
+            self.broadcast(StreamEvent::Official(event));
+        }
         Ok(seq)
+    }
+
+    /// Official frames one persisted message frame implies.
+    ///
+    /// Only the root agent's assistant `Message` items become official items.
+    /// Thought chunks share the answer's `messageId`, and child agents have
+    /// their own `source.agent_id`; both stay on the gateway's custom `item`
+    /// surface and never enter `turn.item.added`/`item.done`.
+    ///
+    /// A user item opens a turn when none is open, but the opening turn's
+    /// `turn.created`/`turn.item.added` frames are deferred to
+    /// [`Self::begin_turn`]: acceptance must not publish a turn that may never
+    /// run. A user item that arrives while a turn is open is a steer and is
+    /// published against that turn immediately. Assistant deltas are skipped;
+    /// only the final `complete:true` frame is the item the SDK consumes.
+    fn official_frames(&self, view: &ItemView) -> Vec<OfficialEvent> {
+        if !view.source.is_root() || view.kind != ItemKind::Message {
+            return Vec::new();
+        }
+        let text = view
+            .payload
+            .get("text")
+            .and_then(|text| text.as_str())
+            .unwrap_or_default();
+        match view.payload.get("role").and_then(|role| role.as_str()) {
+            Some("user") => {
+                let mut state = self.state.lock();
+                match state.turn_id.clone() {
+                    Some(turn_id) => vec![OfficialEvent::turn_item_added(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        OfficialMessageItem::user(&view.item_id, &turn_id, text),
+                    )],
+                    None => {
+                        let turn_id = turn_id_for_item(&view.item_id);
+                        let created_at = unix_from_rfc3339(&view.created_at);
+                        state.turn_id = Some(turn_id);
+                        state.turn_created_at = Some(created_at);
+                        state.pending_user_item = Some(PendingUserItem {
+                            seq: view.seq,
+                            item_id: view.item_id.clone(),
+                            text: text.to_owned(),
+                            created_at,
+                        });
+                        Vec::new()
+                    }
+                }
+            }
+            Some("assistant") if view.payload.get("complete") == Some(&json!(true)) => {
+                let facts = {
+                    let state = self.state.lock();
+                    let Some(turn_id) = state.turn_id.clone() else {
+                        return Vec::new();
+                    };
+                    // Written by `finish_turn`; a row persisted before these
+                    // keys existed still replays as the final answer at index 0.
+                    let phase = view
+                        .payload
+                        .get("phase")
+                        .and_then(Value::as_str)
+                        .unwrap_or("final_answer")
+                        .to_owned();
+                    let output_index = u32::try_from(
+                        view.payload
+                            .get("outputIndex")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    )
+                    .unwrap_or(u32::MAX);
+                    (turn_id, phase, output_index)
+                };
+                let (turn_id, phase, output_index) = facts;
+                let item = OfficialMessageItem::assistant(&view.item_id, &turn_id, text)
+                    .with_phase(Some(&phase));
+                vec![
+                    OfficialEvent::turn_item_added(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        item.clone(),
+                    ),
+                    OfficialEvent::turn_content_part_added(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        &view.item_id,
+                        output_index,
+                        text,
+                    ),
+                    OfficialEvent::turn_output_text_done(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        &view.item_id,
+                        output_index,
+                        text,
+                    ),
+                    OfficialEvent::turn_content_part_done(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        &view.item_id,
+                        output_index,
+                        text,
+                    ),
+                    OfficialEvent::turn_item_done(
+                        view.seq,
+                        &self.logical_id,
+                        &turn_id,
+                        output_index,
+                        item,
+                    ),
+                ]
+            }
+            _ => Vec::new(),
+        }
     }
 
     async fn report_append_failure(&self, operation: &'static str, error: SwarmError) {
@@ -605,10 +1976,20 @@ fn stream_parts(item: &ProjectedItem) -> Option<(StreamKey, String, String)> {
     }
     let message_id = item.payload.get("messageId")?.as_str()?.to_owned();
     let text = item.payload.get("text")?.as_str()?.to_owned();
-    let key = (item.source.agent_id.clone(), message_id.clone());
+    // The kind separates reasoning from the answer even when Peri assigns both
+    // the same `messageId`.
+    let key = (
+        item.source.agent_id.clone(),
+        message_id.clone(),
+        item.kind.as_str(),
+    );
     Some((key, message_id, text))
 }
 
 #[cfg(test)]
 #[path = "reader_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "approval_test.rs"]
+mod approval_tests;

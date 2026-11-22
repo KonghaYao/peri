@@ -17,6 +17,11 @@ pub enum ItemKind {
     ToolUpdate,
     ToolResult,
     Receipt,
+    /// Durable approval fact: an `mcp_approval_request` was opened or settled.
+    ///
+    /// It is a custom item, so it never becomes an official turn output; its
+    /// `seq` is what makes the approval discoverable on reconnect.
+    Approval,
 }
 
 impl ItemKind {
@@ -29,6 +34,7 @@ impl ItemKind {
             Self::ToolUpdate => "tool_update",
             Self::ToolResult => "tool_result",
             Self::Receipt => "receipt",
+            Self::Approval => "approval",
         }
     }
 }
@@ -48,6 +54,12 @@ impl ItemSource {
             agent_id: "root".to_owned(),
             task_id: None,
         }
+    }
+
+    /// Whether this item belongs to the root agent rather than a child.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.agent_id == "root"
     }
 }
 
@@ -125,10 +137,15 @@ impl ItemOrder {
 
 /// `order=asc` reads `seq > after`; `order=desc` reads `seq < after` (or from
 /// the newest item when `after` is absent).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// `after_id` is the official SDK spelling: `CursorPage` sends the last item's
+/// `id` (`itim_...`) in `after`. Services resolve it to that item's greatest
+/// `seq` before querying; a numeric `after`/`afterSeq` keeps its old meaning.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemsWindow {
     pub order: ItemOrder,
     pub after: Option<u64>,
+    pub after_id: Option<String>,
     pub limit: u32,
 }
 
@@ -138,24 +155,61 @@ impl ItemsWindow {
 }
 
 /// One page of persisted items with a stable cursor.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Pagination is **item-grouped** (`design §4.2`): `limit` counts items, and
+/// every row of the selected items is returned in `items`. `data` is the
+/// official `CursorPage` view of the same page — one row per item, the item's
+/// last persisted row (greatest `seq`). Because one assistant message can span
+/// several delta rows plus its `complete:true` row, `data` is usually shorter
+/// than `items`; `items` remains the raw row list existing delta consumers
+/// read. `has_more`/`hasMore` count items, and `nextCursor` is the greatest
+/// `seq` of the last item of the page in page order.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemPage {
     pub logical_id: String,
     pub object: String,
+    /// Raw rows of the page's items, in `order`.
     pub items: Vec<ItemView>,
-    /// Last seq of this page when more rows exist; `null` otherwise.
+    /// One row per item (the item's last row), in page order.
+    pub data: Vec<ItemView>,
+    /// Last item's greatest `seq` when more items exist; `null` otherwise.
     pub next_cursor: Option<u64>,
     pub last_item_seq: u64,
     pub has_more: bool,
     pub order: ItemOrder,
 }
 
+/// Serialized by hand so one `has_more` value is emitted under both the
+/// camelCase name and the official snake_case name.
+impl Serialize for ItemPage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut page = serializer.serialize_struct("ItemPage", 9)?;
+        page.serialize_field("logicalId", &self.logical_id)?;
+        page.serialize_field("object", &self.object)?;
+        page.serialize_field("items", &self.items)?;
+        page.serialize_field("data", &self.data)?;
+        page.serialize_field("nextCursor", &self.next_cursor)?;
+        page.serialize_field("lastItemSeq", &self.last_item_seq)?;
+        page.serialize_field("hasMore", &self.has_more)?;
+        page.serialize_field("has_more", &self.has_more)?;
+        page.serialize_field("order", &self.order)?;
+        page.end()
+    }
+}
+
 impl ItemPage {
+    /// `items` are the raw rows in `order`; `data` is one last row per item in
+    /// page order.
     #[must_use]
     pub fn new(
         logical_id: impl Into<String>,
         items: Vec<ItemView>,
+        data: Vec<ItemView>,
         next_cursor: Option<u64>,
         last_item_seq: u64,
         has_more: bool,
@@ -165,6 +219,7 @@ impl ItemPage {
             logical_id: logical_id.into(),
             object: "list".to_owned(),
             items,
+            data,
             next_cursor,
             last_item_seq,
             has_more,

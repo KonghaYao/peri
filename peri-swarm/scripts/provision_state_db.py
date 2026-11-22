@@ -329,7 +329,7 @@ def main(argv):
                 "ok via " + hrana_url if hrana_url else "skipped (--skip-hrana)"
             )
         )
-        print("export PERI_SWARM_LOOM_LOCATOR={}".format(public["session_locator"]))
+        print("export PERI_SWARM_SESSION_STORE={}".format(public["session_locator"]))
         print("export PERI_SWARM_STATE_STORE={}".format(public["state_locator"]))
         print("export PERI_SWARM_STORE_TOKEN=<connection.json project_api_key>")
     return 0

@@ -8,25 +8,34 @@ use serde_json::json;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
 use uuid::Uuid;
 
-use super::{CreateSessionCommand, CreateSessionResult, EventSubscription, SwarmService};
+use super::{
+    resolve_window_after, AcceptedInput, CreateSessionCommand, CreateSessionResult,
+    EventSubscription, PendingTurn, SessionUpdateCommand, SwarmService,
+};
 use crate::config::SwarmConfig;
+use crate::domain::official::{unix_from_rfc3339, unix_now};
 use crate::domain::{
-    new_root_session_id, ActorKey, Cursor, Disposition, EnvironmentKind, EnvironmentRef, ErrorCode,
-    ErrorKind, InputKind, InputMode, InputOutcome, InputState, InputSubmission, ItemKind,
-    ItemOrder, ItemPage, ItemSource, ItemView, ItemsWindow, LogicalId, SessionState, SessionView,
-    StreamEvent, SwarmError, TurnEvent, TurnView,
+    new_root_session_id, turn_id_for_item, ActorKey, Disposition, EnvironmentKind, EnvironmentRef,
+    ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome, InputState,
+    InputSubmission, ItemKind, ItemPage, ItemSource, ItemView, ItemsWindow, LogicalId,
+    OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn, SessionPage, SessionState,
+    SessionStatus, SessionView, SessionsWindow, StreamEvent, SwarmError, TurnEvent, TurnPage,
+    TurnStatus, TurnView, TurnsWindow,
 };
 use crate::store::{
-    store_failure, InputPut, StoreError, SwarmInputRow, SwarmItemRow, SwarmSessionRow,
-    SwarmSessionUpdate, SwarmStore,
+    store_failure, InputPut, StoreError, SwarmInputRow, SwarmItemRow, SwarmSessionPatch,
+    SwarmSessionRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow,
 };
 
 /// Deterministic fake turn policy. `Manual` leaves the turn `running` so tests
 /// can exercise `turn_in_progress` and steer paths without a real model.
+/// `Deferred` returns the pending turn from acceptance without executing it, so
+/// tests can observe the `202`-before-terminal boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnPolicy {
     Immediate,
     Manual,
+    Deferred,
 }
 
 #[derive(Clone, Debug)]
@@ -68,10 +77,14 @@ pub enum ServiceCall {
     ListItems(String),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ActiveTurn {
     request_id: String,
+    /// Internal turn identity derived from the user item that opened the turn.
+    turn_id: String,
     started_at: String,
+    /// Unix second when the turn opened; persisted and used for `turn.created`.
+    created_at: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -199,38 +212,42 @@ impl InMemorySwarmService {
             .swarm_last_seq(&row.logical_id)
             .await
             .map_err(|error| store_failure("last_seq", error))?;
-        let turn = self
-            .with_inner(|inner| {
-                inner.turns.get(&row.logical_id).map(|active| TurnView {
-                    request_id: Some(active.request_id.clone()),
-                    started_at: Some(active.started_at.clone()),
-                })
-            })
-            .unwrap_or_default();
+        let mut row = row.clone();
+        row.last_item_seq = last_item_seq;
+        let active = self.with_inner(|inner| inner.turns.get(&row.logical_id).cloned());
+        let turn = active.as_ref().map(|active| TurnView {
+            request_id: Some(active.request_id.clone()),
+            started_at: Some(active.started_at.clone()),
+        });
 
         let sandbox = match row.environment.kind {
             EnvironmentKind::None => None,
             EnvironmentKind::OpenAiHosted => None,
         };
 
-        Ok(SessionView {
-            id: row.logical_id.clone(),
-            object: "agent.session".to_owned(),
-            logical_id: row.logical_id.clone(),
-            root_session_id: row.root_session_id.clone(),
-            cwd: row.cwd.clone(),
-            state: row.state,
-            turn,
-            last_item_seq,
-            created_at: row.created_at.clone(),
-            last_activity_at: row.last_activity_at.clone(),
-            agent: crate::domain::AgentView {
-                model: row.model.clone(),
-                instructions: row.instructions.clone(),
-            },
-            environment: row.environment.clone(),
-            sandbox,
-        })
+        Ok(super::project_session(&row, turn, sandbox, Vec::new()))
+    }
+
+    /// Minimal official session snapshot for `agent.session.idle/failed`.
+    async fn official_session(
+        &self,
+        logical_id: &LogicalId,
+        status: SessionStatus,
+        error: Option<String>,
+    ) -> Result<OfficialSession, SwarmError> {
+        let row = self.require_session(logical_id).await?;
+        Ok(OfficialSession::new(
+            logical_id.as_str(),
+            status,
+            unix_from_rfc3339(&row.created_at),
+            unix_from_rfc3339(&row.last_activity_at),
+            error,
+            row.model,
+            row.instructions,
+        )
+        .with_environment(row.environment.clone().normalized())
+        .with_metadata(row.metadata)
+        .with_prompt_cache_options(row.prompt_cache_options))
     }
 
     async fn view_by_id(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError> {
@@ -347,20 +364,205 @@ impl InMemorySwarmService {
         self.note_tail(logical_id.as_str(), seq);
         self.set_session_state(logical_id, SessionState::Running, Some(seq))
             .await?;
+        let view = ItemView {
+            id: item_id.clone(),
+            seq,
+            item_id: item_id.clone(),
+            kind,
+            source,
+            payload,
+            created_at,
+            truncated,
+        };
+        self.broadcast(logical_id.as_str(), StreamEvent::Item(view.clone()));
+        self.broadcast_official_item(logical_id, &view).await;
+        Ok(seq)
+    }
+
+    /// Official frames for message items.
+    ///
+    /// A user item accepted while no turn is open opens a turn: the session
+    /// enters `in_progress`, then `turn.created`, `turn.in_progress` and the
+    /// item. Assistant items use the open turn and report completion through the
+    /// item, content-part and output-text frames. Delta frames are skipped; the
+    /// final `complete:true` frame is the item the SDK consumes.
+    async fn broadcast_official_item(&self, logical_id: &LogicalId, view: &ItemView) {
+        if !view.source.is_root() || view.kind != ItemKind::Message {
+            // Thought chunks share the answer's `messageId`; child items have
+            // their own source. Neither produces an official item frame.
+            return;
+        }
+        let role = view.payload.get("role").and_then(|role| role.as_str());
+        let open_turn = self.with_inner(|inner| {
+            inner
+                .turns
+                .get(logical_id.as_str())
+                .map(|turn| turn.turn_id.clone())
+        });
+        let (turn_id, item, opened) = match role {
+            Some("user") => {
+                let text = view
+                    .payload
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .unwrap_or_default();
+                let (turn_id, opened) = match open_turn {
+                    Some(turn_id) => (turn_id, false),
+                    None => (turn_id_for_item(&view.item_id), true),
+                };
+                (
+                    turn_id.clone(),
+                    OfficialMessageItem::user(&view.item_id, &turn_id, text),
+                    opened,
+                )
+            }
+            Some("assistant") if view.payload.get("complete") == Some(&json!(true)) => {
+                let Some(turn_id) = open_turn else {
+                    return;
+                };
+                let text = view
+                    .payload
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .unwrap_or_default();
+                let phase = view
+                    .payload
+                    .get("phase")
+                    .and_then(|phase| phase.as_str())
+                    .unwrap_or("final_answer");
+                let output_index = u32::try_from(
+                    view.payload
+                        .get("outputIndex")
+                        .and_then(|index| index.as_u64())
+                        .unwrap_or(0),
+                )
+                .unwrap_or(u32::MAX);
+                self.broadcast_assistant_item(
+                    logical_id,
+                    view,
+                    &turn_id,
+                    text,
+                    phase,
+                    output_index,
+                );
+                return;
+            }
+            _ => return,
+        };
+        if opened {
+            let session = match self
+                .official_session(logical_id, SessionStatus::InProgress, None)
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(
+                        logical_id = logical_id.as_str(),
+                        error = %error,
+                        "official session.in_progress snapshot was not readable"
+                    );
+                    OfficialSession::new(
+                        logical_id.as_str(),
+                        SessionStatus::InProgress,
+                        0,
+                        0,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+            };
+            self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::session_in_progress(&turn_id, session)),
+            );
+            self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::turn_created(
+                    logical_id.as_str(),
+                    &turn_id,
+                    OfficialTurn::new(
+                        logical_id.as_str(),
+                        &turn_id,
+                        TurnStatus::InProgress,
+                        crate::domain::official::unix_from_rfc3339(&view.created_at),
+                        None,
+                    ),
+                )),
+            );
+            self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::turn_in_progress(
+                    logical_id.as_str(),
+                    &turn_id,
+                    OfficialTurn::new(
+                        logical_id.as_str(),
+                        &turn_id,
+                        TurnStatus::InProgress,
+                        crate::domain::official::unix_from_rfc3339(&view.created_at),
+                        None,
+                    ),
+                )),
+            );
+        }
         self.broadcast(
             logical_id.as_str(),
-            StreamEvent::Item(ItemView {
-                id: item_id.clone(),
-                seq,
-                item_id,
-                kind,
-                source,
-                payload,
-                created_at,
-                truncated,
-            }),
+            StreamEvent::Official(OfficialEvent::turn_item_added(
+                view.seq,
+                logical_id.as_str(),
+                &turn_id,
+                item,
+            )),
         );
-        Ok(seq)
+    }
+
+    fn broadcast_assistant_item(
+        &self,
+        logical_id: &LogicalId,
+        view: &ItemView,
+        turn_id: &str,
+        text: &str,
+        phase: &str,
+        output_index: u32,
+    ) {
+        let message =
+            OfficialMessageItem::assistant(&view.item_id, turn_id, text).with_phase(Some(phase));
+        for event in [
+            OfficialEvent::turn_item_added(view.seq, logical_id.as_str(), turn_id, message.clone()),
+            OfficialEvent::turn_content_part_added(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                &view.item_id,
+                output_index,
+                text,
+            ),
+            OfficialEvent::turn_output_text_done(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                &view.item_id,
+                output_index,
+                text,
+            ),
+            OfficialEvent::turn_content_part_done(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                &view.item_id,
+                output_index,
+                text,
+            ),
+            OfficialEvent::turn_item_done(
+                view.seq,
+                logical_id.as_str(),
+                turn_id,
+                output_index,
+                message,
+            ),
+        ] {
+            self.broadcast(logical_id.as_str(), StreamEvent::Official(event));
+        }
     }
 
     /// Persist one accepted user input as a single-frame `message` item.
@@ -372,25 +574,64 @@ impl InMemorySwarmService {
         logical_id: &LogicalId,
         input_id: Option<&str>,
         text: &str,
-    ) -> Result<u64, SwarmError> {
+    ) -> Result<(u64, String), SwarmError> {
         let mut payload = json!({ "role": "user", "text": text });
         if let Some(input_id) = input_id {
             payload["inputId"] = json!(input_id);
         }
-        self.append_item_with_id(
-            logical_id,
-            ItemKind::Message,
-            ItemSource::root(),
-            payload,
-            input_id.map(|input_id| format!("itim_input_{input_id}")),
-        )
-        .await
+        let item_id = input_id
+            .map(|input_id| format!("itim_input_{input_id}"))
+            .unwrap_or_else(ItemView::new_item_id);
+        let seq = self
+            .append_item_with_id(
+                logical_id,
+                ItemKind::Message,
+                ItemSource::root(),
+                payload,
+                Some(item_id.clone()),
+            )
+            .await?;
+        Ok((seq, item_id))
     }
 
-    async fn fail_turn(&self, logical_id: &LogicalId, request_id: &str, error: &SwarmError) {
-        self.with_inner(|inner| {
-            inner.turns.remove(logical_id.as_str());
-        });
+    /// Persist the turn row. `created_at` stays the opening value across the
+    /// terminal write.
+    async fn persist_turn(&self, row: SwarmTurnRow) -> Result<(), SwarmError> {
+        self.store
+            .swarm_upsert_turn(row)
+            .await
+            .map_err(|error| store_failure("upsert_turn", error))
+    }
+
+    async fn fail_turn(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        turn_id: &str,
+        error: &SwarmError,
+    ) {
+        let active = self.with_inner(|inner| inner.turns.remove(logical_id.as_str()));
+        let created_at = active.map_or_else(unix_now, |active| active.created_at);
+        if let Err(update_error) = self
+            .persist_turn(SwarmTurnRow {
+                logical_id: logical_id.as_str().to_owned(),
+                turn_id: turn_id.to_owned(),
+                status: TurnStatus::Failed,
+                created_at,
+                started_at: Some(created_at),
+                completed_at: Some(unix_now()),
+                error: Some(json!({ "code": "internal_error", "message": error.message() })),
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+        {
+            tracing::warn!(
+                logical_id = logical_id.as_str(),
+                error = %update_error,
+                "failed to persist the failed turn row"
+            );
+        }
         if let Err(update_error) = self
             .set_session_state(logical_id, SessionState::Failed, None)
             .await
@@ -403,33 +644,117 @@ impl InMemorySwarmService {
         }
         self.broadcast(
             logical_id.as_str(),
-            StreamEvent::Turn(TurnEvent::failed(request_id, -32603, error.message())),
+            StreamEvent::Turn(TurnEvent::failed(
+                request_id,
+                turn_id,
+                -32603,
+                error.message(),
+            )),
         );
+        let failed_turn = OfficialTurn::new(
+            logical_id.as_str(),
+            turn_id,
+            TurnStatus::Failed,
+            created_at,
+            Some(unix_now()),
+        )
+        .with_error(Some(error.message().to_owned()));
+        self.broadcast(
+            logical_id.as_str(),
+            StreamEvent::Official(OfficialEvent::turn_failed(
+                logical_id.as_str(),
+                turn_id,
+                failed_turn,
+            )),
+        );
+        self.broadcast(
+            logical_id.as_str(),
+            StreamEvent::Official(OfficialEvent::error(
+                turn_id,
+                logical_id.as_str(),
+                error.message(),
+            )),
+        );
+        match self
+            .official_session(
+                logical_id,
+                SessionStatus::Failed,
+                Some(error.message().to_owned()),
+            )
+            .await
+        {
+            Ok(session) => self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::session_failed(turn_id, session)),
+            ),
+            Err(read_error) => tracing::warn!(
+                logical_id = logical_id.as_str(),
+                error = %read_error,
+                "official session.failed snapshot was not readable"
+            ),
+        }
     }
 
-    async fn run_turn(&self, logical_id: &LogicalId, text: &str) -> Result<u64, SwarmError> {
+    async fn run_turn(
+        &self,
+        logical_id: &LogicalId,
+        text: &str,
+        turn_id: &str,
+    ) -> Result<u64, SwarmError> {
         let request_id = Uuid::now_v7().to_string();
         let started_at = peri_time::now_utc_rfc3339();
+        let created_at = unix_now();
         self.with_inner(|inner| {
             inner.turns.insert(
                 logical_id.as_str().to_owned(),
                 ActiveTurn {
                     request_id: request_id.clone(),
+                    turn_id: turn_id.to_owned(),
                     started_at: started_at.clone(),
+                    created_at,
                 },
             );
         });
         self.set_session_state(logical_id, SessionState::Running, None)
             .await?;
+        if let Err(error) = self
+            .persist_turn(SwarmTurnRow {
+                logical_id: logical_id.as_str().to_owned(),
+                turn_id: turn_id.to_owned(),
+                status: TurnStatus::InProgress,
+                created_at,
+                started_at: Some(created_at),
+                completed_at: None,
+                error: None,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+        {
+            // No official frame was published for this attempt yet; clear the
+            // slot so the session is not wedged on a turn nobody can observe.
+            self.with_inner(|inner| {
+                inner.turns.remove(logical_id.as_str());
+            });
+            let _ = self
+                .set_session_state(logical_id, SessionState::Failed, None)
+                .await;
+            return Err(error);
+        }
         self.broadcast(
             logical_id.as_str(),
-            StreamEvent::Turn(TurnEvent::started(request_id.clone())),
+            StreamEvent::Turn(TurnEvent::started(request_id.clone(), turn_id)),
         );
 
         let payload = json!({
             "role": "assistant",
             "messageId": format!("msg_{}", Uuid::now_v7()),
             "text": format!("fake-echo: {text}"),
+            "complete": true,
+            // The fake turn has exactly one assistant message: it is the final
+            // answer and output 0. Persisting both keeps live and replay equal.
+            "phase": "final_answer",
+            "outputIndex": 0,
         });
         let seq = match self
             .append_item(logical_id, ItemKind::Message, ItemSource::root(), payload)
@@ -437,7 +762,8 @@ impl InMemorySwarmService {
         {
             Ok(seq) => seq,
             Err(error) => {
-                self.fail_turn(logical_id, &request_id, &error).await;
+                self.fail_turn(logical_id, &request_id, turn_id, &error)
+                    .await;
                 return Err(error);
             }
         };
@@ -446,42 +772,104 @@ impl InMemorySwarmService {
             self.with_inner(|inner| {
                 inner.turns.remove(logical_id.as_str());
             });
+            if let Err(error) = self
+                .persist_turn(SwarmTurnRow {
+                    logical_id: logical_id.as_str().to_owned(),
+                    turn_id: turn_id.to_owned(),
+                    status: TurnStatus::Completed,
+                    created_at,
+                    started_at: Some(created_at),
+                    completed_at: Some(unix_now()),
+                    error: None,
+                    usage: None,
+                    subagent_id: None,
+                })
+                .await
+            {
+                tracing::warn!(
+                    logical_id = logical_id.as_str(),
+                    error = %error,
+                    "failed to persist the completed turn row"
+                );
+            }
             self.set_session_state(logical_id, SessionState::Idle, Some(seq))
                 .await?;
             self.broadcast(
                 logical_id.as_str(),
-                StreamEvent::Turn(TurnEvent::completed(request_id, "end_turn")),
+                StreamEvent::Turn(TurnEvent::completed(request_id, turn_id, "end_turn")),
             );
+            let completed_turn = OfficialTurn::new(
+                logical_id.as_str(),
+                turn_id,
+                TurnStatus::Completed,
+                created_at,
+                Some(unix_now()),
+            );
+            self.broadcast(
+                logical_id.as_str(),
+                StreamEvent::Official(OfficialEvent::turn_completed(
+                    logical_id.as_str(),
+                    turn_id,
+                    completed_turn,
+                )),
+            );
+            match self
+                .official_session(logical_id, SessionStatus::Idle, None)
+                .await
+            {
+                Ok(session) => self.broadcast(
+                    logical_id.as_str(),
+                    StreamEvent::Official(OfficialEvent::session_idle(turn_id, session)),
+                ),
+                Err(read_error) => tracing::warn!(
+                    logical_id = logical_id.as_str(),
+                    error = %read_error,
+                    "official session.idle snapshot was not readable"
+                ),
+            }
         }
         Ok(seq)
     }
 
+    /// Persist the create's initial input and either run it or defer it.
+    ///
+    /// The user item is written exactly once in both modes. A deferred turn
+    /// carries the `turn_id` derived from that item, so running it later opens
+    /// the same turn the synchronous path would and cannot duplicate the input.
+    async fn accept_initial_turn(
+        &self,
+        logical_id: &LogicalId,
+        text: &str,
+        defer: bool,
+    ) -> Result<Option<PendingTurn>, SwarmError> {
+        let (_, item_id) = self.record_user_input(logical_id, None, text).await?;
+        let turn_id = turn_id_for_item(&item_id);
+        if defer {
+            return Ok(Some(PendingTurn {
+                logical_id: logical_id.clone(),
+                text: text.to_owned(),
+                turn_id,
+            }));
+        }
+        self.run_turn(logical_id, text, &turn_id).await?;
+        Ok(None)
+    }
+
+    /// Backlog for a subscription. A tail subscription has no backlog and is
+    /// answered without reading the session row (the real actor has the same
+    /// rule, so `stream:true` create works before the row exists). An explicit
+    /// cursor still requires a known session.
     async fn replay_after(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<Vec<StreamEvent>, SwarmError> {
-        let mut backlog = Vec::new();
-        let mut after = cursor.value();
-        loop {
-            let page = self
-                .store
-                .swarm_items_after(logical_id.as_str(), after, ItemsWindow::MAX_LIMIT)
-                .await
-                .map_err(|error| store_failure("items_after", error))?;
-            if page.is_empty() {
-                break;
-            }
-            let page_len = page.len();
-            if let Some(last) = page.last() {
-                after = last.seq;
-            }
-            backlog.extend(page.into_iter().map(|row| StreamEvent::Item(row.to_view())));
-            if page_len < ItemsWindow::MAX_LIMIT as usize {
-                break;
-            }
+        if start.cursor().is_none() {
+            return Ok(Vec::new());
         }
-        Ok(backlog)
+        let session = self.require_session(logical_id).await?;
+        let live_open_turn = self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str()));
+        super::replay_backlog(self.store.as_ref(), &session, start, live_open_turn).await
     }
 }
 
@@ -529,6 +917,22 @@ impl SwarmService for InMemorySwarmService {
                 )
                 .with_details(json!({ "field": "tools" })));
             }
+            if command.metadata_conflicts_with(&row.metadata) {
+                return Err(SwarmError::new(
+                    ErrorKind::Conflict,
+                    ErrorCode::IdentityConflict,
+                    "logicalId already exists with different metadata",
+                )
+                .with_details(json!({ "field": "metadata" })));
+            }
+            if command.prompt_cache_options_conflict_with(&row.prompt_cache_options) {
+                return Err(SwarmError::new(
+                    ErrorKind::Conflict,
+                    ErrorCode::IdentityConflict,
+                    "logicalId already exists with different prompt cache options",
+                )
+                .with_details(json!({ "field": "prompt_cache_options" })));
+            }
             if model != row.model {
                 return Err(SwarmError::new(
                     ErrorKind::BadRequest,
@@ -540,18 +944,20 @@ impl SwarmService for InMemorySwarmService {
                     "requested": model,
                 })));
             }
+            let mut pending_initial = None;
             if let Some(text) = command.initial_input.as_deref() {
                 if row.state == SessionState::Running {
                     return Err(SwarmError::turn_in_progress());
                 }
-                self.record_user_input(&command.logical_id, None, text)
+                pending_initial = self
+                    .accept_initial_turn(&command.logical_id, text, command.defer_initial_turn)
                     .await?;
-                self.run_turn(&command.logical_id, text).await?;
             }
             let session = self.view_by_id(&command.logical_id).await?;
             return Ok(CreateSessionResult {
                 session,
                 created: false,
+                pending_initial,
             });
         }
 
@@ -559,7 +965,7 @@ impl SwarmService for InMemorySwarmService {
         // The fake records the requested environment but never contacts Bun;
         // hosted allocation and workspace injection are actor behavior.
         let environment = match command.environment {
-            EnvironmentKind::None => EnvironmentRef::none(&command.logical_id),
+            EnvironmentKind::None => EnvironmentRef::none(),
             EnvironmentKind::OpenAiHosted => EnvironmentRef {
                 kind: EnvironmentKind::OpenAiHosted,
                 id: Some(
@@ -583,6 +989,8 @@ impl SwarmService for InMemorySwarmService {
             instructions: command.instructions.clone(),
             mcp_tools: command.mcp_tools.clone(),
             environment,
+            metadata: command.metadata_for_new_row(),
+            prompt_cache_options: command.prompt_cache_options_for_new_row(),
             created_at: now.clone(),
             last_activity_at: now,
             last_item_seq: 0,
@@ -600,15 +1008,17 @@ impl SwarmService for InMemorySwarmService {
             Err(error) => return Err(store_failure("upsert_session", error)),
         }
 
+        let mut pending_initial = None;
         if let Some(text) = command.initial_input.as_deref() {
-            self.record_user_input(&command.logical_id, None, text)
+            pending_initial = self
+                .accept_initial_turn(&command.logical_id, text, command.defer_initial_turn)
                 .await?;
-            self.run_turn(&command.logical_id, text).await?;
         }
         let session = self.view_by_id(&command.logical_id).await?;
         Ok(CreateSessionResult {
             session,
             created: true,
+            pending_initial,
         })
     }
 
@@ -616,11 +1026,90 @@ impl SwarmService for InMemorySwarmService {
         self.view_by_id(logical_id).await
     }
 
-    async fn submit_input(
+    async fn list_sessions(&self, window: SessionsWindow) -> Result<SessionPage, SwarmError> {
+        super::list_sessions_from_store(self.store.as_ref(), &window).await
+    }
+
+    async fn update_session(
+        &self,
+        logical_id: &LogicalId,
+        command: SessionUpdateCommand,
+    ) -> Result<SessionView, SwarmError> {
+        let row = self.require_session(logical_id).await?;
+        if self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str())) {
+            return Err(SwarmError::turn_in_progress());
+        }
+        if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
+        }
+        let model = match command.model.as_deref() {
+            Some(requested) => {
+                if requested.trim().is_empty() {
+                    return Err(SwarmError::invalid_input("model must not be empty")
+                        .with_details(json!({ "field": "agent.model" })));
+                }
+                self.resolve_model(Some(requested))?
+            }
+            None => None,
+        };
+        let metadata = command.metadata_patch();
+        let prompt_cache_options = command.prompt_cache_patch();
+        self.store
+            .swarm_patch_session(SwarmSessionPatch {
+                logical_id: logical_id.as_str().to_owned(),
+                model,
+                mcp_tools: command.mcp_tools,
+                metadata,
+                prompt_cache_options,
+                last_activity_at: Some(peri_time::now_utc_rfc3339()),
+            })
+            .await
+            .map_err(|error| store_failure("patch_session", error))?;
+        self.view_by_id(logical_id).await
+    }
+
+    async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
+        let row = self.require_session(logical_id).await?;
+        if self.with_inner(|inner| inner.turns.contains_key(logical_id.as_str())) {
+            return Err(SwarmError::turn_in_progress());
+        }
+        if super::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
+            return Err(SwarmError::upstream_unavailable("session_resume_required"));
+        }
+        self.store
+            .swarm_delete_session(logical_id.as_str())
+            .await
+            .map_err(|error| store_failure("delete_session", error))?;
+        self.with_inner(|inner| {
+            inner.turns.remove(logical_id.as_str());
+            inner.channels.remove(logical_id.as_str());
+        });
+        Ok(())
+    }
+
+    async fn list_turns(
+        &self,
+        logical_id: &LogicalId,
+        window: TurnsWindow,
+    ) -> Result<TurnPage, SwarmError> {
+        self.require_session(logical_id).await?;
+        super::list_turns_from_store(self.store.as_ref(), logical_id.as_str(), &window).await
+    }
+
+    async fn get_turn(
+        &self,
+        logical_id: &LogicalId,
+        turn_id: &str,
+    ) -> Result<OfficialTurn, SwarmError> {
+        self.require_session(logical_id).await?;
+        super::get_turn_from_store(self.store.as_ref(), logical_id.as_str(), turn_id).await
+    }
+
+    async fn accept_input(
         &self,
         logical_id: &LogicalId,
         submission: InputSubmission,
-    ) -> Result<InputOutcome, SwarmError> {
+    ) -> Result<AcceptedInput, SwarmError> {
         self.record(ServiceCall::SubmitInput(logical_id.as_str().to_owned()));
         self.require_session(logical_id).await?;
         if submission.is_empty() {
@@ -637,12 +1126,12 @@ impl SwarmService for InMemorySwarmService {
         {
             if existing.fingerprint == fingerprint {
                 let last_item_seq = self.last_seq(logical_id).await?;
-                return Ok(InputOutcome::new(
+                return Ok(AcceptedInput::settled(InputOutcome::new(
                     input_id,
                     Disposition::Existing,
                     submission.mode,
                     last_item_seq,
-                ));
+                )));
             }
             return Err(SwarmError::input_conflict(&input_id));
         }
@@ -669,12 +1158,12 @@ impl SwarmService for InMemorySwarmService {
                     return Err(SwarmError::input_conflict(&input_id));
                 }
                 let last_item_seq = self.last_seq(logical_id).await?;
-                return Ok(InputOutcome::new(
+                return Ok(AcceptedInput::settled(InputOutcome::new(
                     input_id,
                     Disposition::Existing,
                     submission.mode,
                     last_item_seq,
-                ));
+                )));
             }
             Err(error) => {
                 tracing::warn!(error = %error, "swarm input receipt write failed");
@@ -682,33 +1171,72 @@ impl SwarmService for InMemorySwarmService {
             }
         }
 
+        let mut turn_id = None;
         if submission.kind == InputKind::User {
             // Recorded at acceptance, once per inputId (a replayed id takes the
             // `Existing` branch above). The fake never projects host history, so
             // this is the only user frame in the log.
-            self.record_user_input(logical_id, Some(&input_id), &submission.effective_text())
+            let (_, item_id) = self
+                .record_user_input(logical_id, Some(&input_id), &submission.effective_text())
                 .await?;
+            turn_id = Some(turn_id_for_item(&item_id));
         }
 
         if submission.kind == InputKind::Control || row.state == SessionState::Running {
             let last_item_seq = self.last_seq(logical_id).await?;
-            return Ok(InputOutcome::new(
+            return Ok(AcceptedInput::settled(InputOutcome::new(
                 input_id,
                 Disposition::Inserted,
                 submission.mode,
                 last_item_seq,
-            ));
+            )));
         }
 
+        let Some(turn_id) = turn_id else {
+            // A non-user input never opens a turn; the branch above returned it.
+            let last_item_seq = self.last_seq(logical_id).await?;
+            return Ok(AcceptedInput::settled(InputOutcome::new(
+                input_id,
+                Disposition::Inserted,
+                submission.mode,
+                last_item_seq,
+            )));
+        };
+        // The deterministic fake completes the turn inside acceptance; its
+        // HTTP response still reports `202` (there is no external model wait).
+        // `Deferred` returns the work instead, so a test can observe that the
+        // response does not wait for the terminal.
+        if self.config.turn_policy == TurnPolicy::Deferred {
+            let last_item_seq = self.last_seq(logical_id).await?;
+            return Ok(AcceptedInput {
+                outcome: InputOutcome::new(
+                    input_id,
+                    Disposition::Inserted,
+                    submission.mode,
+                    last_item_seq,
+                ),
+                pending_turn: Some(PendingTurn {
+                    logical_id: logical_id.clone(),
+                    text: submission.effective_text(),
+                    turn_id,
+                }),
+            });
+        }
         let seq = self
-            .run_turn(logical_id, &submission.effective_text())
+            .run_turn(logical_id, &submission.effective_text(), &turn_id)
             .await?;
-        Ok(InputOutcome::new(
+        Ok(AcceptedInput::settled(InputOutcome::new(
             input_id,
             Disposition::Inserted,
             submission.mode,
             seq,
-        ))
+        )))
+    }
+
+    async fn run_pending_turn(&self, pending: PendingTurn) -> Result<(), SwarmError> {
+        self.run_turn(&pending.logical_id, &pending.text, &pending.turn_id)
+            .await
+            .map(|_| ())
     }
 
     async fn list_items(
@@ -722,37 +1250,21 @@ impl SwarmService for InMemorySwarmService {
             return Err(SwarmError::invalid_query("limit must be within 1..=500"));
         }
         let last_item_seq = self.last_seq(logical_id).await?;
-        let probe = window.limit.saturating_add(1);
-
-        let mut rows = match window.order {
-            ItemOrder::Asc => self
-                .store
-                .swarm_items_after(logical_id.as_str(), window.after.unwrap_or(0), probe)
-                .await
-                .map_err(|error| store_failure("items_after", error))?,
-            ItemOrder::Desc => self
-                .store
-                .swarm_items_before(logical_id.as_str(), window.after, probe)
-                .await
-                .map_err(|error| store_failure("items_before", error))?,
-        };
-
-        let has_more = rows.len() > window.limit as usize;
-        if has_more {
-            rows.truncate(window.limit as usize);
-        }
-        let next_cursor = if has_more {
-            rows.last().map(|row| row.seq)
-        } else {
-            None
-        };
-        let items = rows.into_iter().map(|row| row.to_view()).collect();
+        let after = resolve_window_after(self.store.as_ref(), logical_id, &window).await?;
+        let page = self
+            .store
+            .swarm_item_page(logical_id.as_str(), window.order, after, window.limit)
+            .await
+            .map_err(|error| store_failure("item_page", error))?;
+        let items = page.rows.into_iter().map(|row| row.to_view()).collect();
+        let data = page.items.into_iter().map(|row| row.to_view()).collect();
         Ok(ItemPage::new(
             logical_id.as_str(),
             items,
-            next_cursor,
+            data,
+            page.next_cursor,
             last_item_seq,
-            has_more,
+            page.has_more,
             window.order,
         ))
     }
@@ -760,13 +1272,13 @@ impl SwarmService for InMemorySwarmService {
     async fn subscribe(
         &self,
         logical_id: &LogicalId,
-        cursor: Cursor,
+        start: EventCursor,
     ) -> Result<EventSubscription, SwarmError> {
         self.record(ServiceCall::Subscribe(logical_id.as_str().to_owned()));
         self.require_session(logical_id).await?;
         let hub = self.hub_for(logical_id.as_str());
         let live = hub.sender.subscribe();
-        let backlog = self.replay_after(logical_id, cursor).await?;
+        let backlog = self.replay_after(logical_id, start).await?;
         hub.tail
             .fetch_max(self.last_seq(logical_id).await?, Ordering::Relaxed);
         Ok(EventSubscription::new(backlog, live, hub.tail))
@@ -782,6 +1294,18 @@ impl SwarmService for InMemorySwarmService {
         }
         let live = hub.sender.subscribe();
         EventSubscription::new(Vec::new(), live, hub.tail)
+    }
+
+    async fn respond_required_action(
+        &self,
+        _logical_id: &LogicalId,
+        request_id: &str,
+        _decision: crate::domain::ApprovalDecision,
+        _input_id: Option<String>,
+    ) -> Result<super::ApprovalReceipt, SwarmError> {
+        // The fake never emits `requires_action`; an id can only be a stale or
+        // fabricated one.
+        Err(SwarmError::unknown_required_action(request_id))
     }
 }
 
