@@ -9,7 +9,8 @@ pub enum MarkdownSegment {
     /// 表格数据，由 `table_data_to_lines` (ratatui-kit 风格 unicode 网格线) 渲染。
     Table(TableData),
     /// 图片（类型化语义——P2 消息流内联像素的升级接口，§6.1 Q2）。
-    /// P0 渲染为文本降级行（§8.1 R4 三式），像素渲染由 T7 overlay 承接。
+    /// 宿主在独占段落且终端协议可用时按像素绘制，否则渲染 `lines` 文本降级
+    /// （§8.1 R4 三式）。
     Image(ImageSegment),
     /// 保留结构和动作，宽度与主题变化时由消息渲染器重新布局。
     GenUi(GenUiSegment),

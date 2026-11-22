@@ -1,13 +1,16 @@
-//! 消息区内联图片：半块渲染行缓存 + 后台解码。
+//! 消息区内联图片：终端图片协议（Kitty/Sixel）像素渲染 + 后台解码编码。
 //!
 //! 渲染 body 只做纯查表（[`lookup_ready`]），不读文件、不起线程（TUI-RENDER-001）；
 //! 请求由消息区 effect 在事件边界发起（[`request`]），后台线程复用
 //! [`crate::kit::image_safety::read_validated_image`] 与
-//! [`crate::kit::image_overlay::decode_image`] 完成校验与解码。
+//! [`crate::kit::image_overlay::decode_image`] 完成校验与解码，再经
+//! [`crate::kit::image_preview::InlineImage`] 一次性 resize+encode。
 //!
-//! 缓存键为 `(canonical path, mtime, len, cols, rows)`，只保留半块行（不保留
-//! `DynamicImage`），按 LRU 与 64MiB 总字节上限淘汰。远程 URL 与危险 scheme
-//! 不解析路径、不请求；失败只降级为现有文本行，原因不进入渲染通知。
+//! 缓存键为 `(canonical path, mtime, len, cols, rows)`，只保留编码后的协议
+//! （不保留 `DynamicImage`），按 LRU 与 64MiB 估算字节上限淘汰。远程 URL 与
+//! 危险 scheme 不解析路径、不请求；终端不支持协议（None/ITerm2/无单元格尺寸
+//! 的 Sixel）时请求直接返回，渲染保持 `[Image: alt] (url)` 文本降级。失败同样
+//! 只降级为文本行，原因不进入渲染通知。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,15 +21,15 @@ use std::time::UNIX_EPOCH;
 #[cfg(test)]
 use std::time::Duration;
 
-use image::GenericImageView;
 use parking_lot::Mutex;
-use ratatui::style::Style;
-use ratatui::text::Line;
 
 use crate::kit::atoms::RENDER_HEARTBEAT;
+use crate::kit::atoms::TERMINAL_CAPS;
+use crate::kit::image_preview;
+use crate::kit::image_preview::InlineImage;
 use crate::kit::image_safety::{ImageSafetyError, MAX_CACHE_BYTES, read_validated_image};
+use crate::kit::terminal_caps::TerminalCaps;
 use crate::kit::tui_render_unit::TuiRenderUnit;
-use peri_tui_components::image::{ImageData, fit, halfblock_lines};
 use peri_tui_components::markdown::{UrlKind, classify_url, image_links};
 
 /// 消息区图片的最大显示行数（正文图）。
@@ -36,7 +39,7 @@ pub(crate) const MAX_ROWS: u16 = 8;
 /// 用户正文上限 6 行）。
 pub(crate) const USER_IMAGE_ROWS: u16 = 6;
 
-/// 半块行缓存总字节上限（复用 T5 的累计解码缓存上限常量）。
+/// 内联图片缓存总字节上限（复用 T5 的累计解码缓存上限常量）。
 const CACHE_BYTES: usize = MAX_CACHE_BYTES as usize;
 
 /// 同时解码的后台线程上限；超出的请求留待下次 effect（revision 变化）重试。
@@ -74,13 +77,31 @@ impl CompleteOutcome {
 }
 
 /// 三态缓存值：render body 只克隆 [`Arc`]，不阻塞。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum InlineImageState {
     Pending,
-    Ready(Arc<Vec<Line<'static>>>),
+    Ready(Arc<InlineImage>),
     /// 失败原因只用于诊断与单测；渲染统一回落降级行，不向用户展示。
     #[allow(dead_code)]
     Failed(&'static str),
+}
+
+impl std::fmt::Debug for InlineImageState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => f.write_str("Pending"),
+            Self::Ready(image) => f.debug_tuple("Ready").field(image).finish(),
+            Self::Failed(reason) => f.debug_tuple("Failed").field(reason).finish(),
+        }
+    }
+}
+
+/// 渲染期可用的内联图片：句柄 + 真实占用单元格。
+#[derive(Debug, Clone)]
+pub(crate) struct ReadyImage {
+    pub(crate) image: Arc<InlineImage>,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
 }
 
 /// 源身份（渲染侧与调度侧共用的纯文本键，不含 IO）。
@@ -168,7 +189,7 @@ impl Cache {
         &mut self,
         key: &CacheKey,
         id: u64,
-        result: Result<Arc<Vec<Line<'static>>>, &'static str>,
+        result: Result<Arc<InlineImage>, &'static str>,
     ) -> CompleteOutcome {
         if self.inflight.get(key).copied() != Some(id) {
             return CompleteOutcome::Ignored;
@@ -185,9 +206,9 @@ impl Cache {
         };
         self.bytes = self.bytes.saturating_sub(entry.bytes);
         let (state, bytes) = match result {
-            Ok(lines) => {
-                let bytes = lines_bytes(&lines);
-                (InlineImageState::Ready(lines), bytes)
+            Ok(image) => {
+                let bytes = image.retained_bytes();
+                (InlineImageState::Ready(image), bytes)
             }
             Err(reason) => (InlineImageState::Failed(reason), 0),
         };
@@ -234,23 +255,46 @@ pub(crate) fn revision() -> u64 {
     REVISION.load(Ordering::SeqCst)
 }
 
-/// 纯查表：命中 Ready 返回半块行，Pending/Failed/远程/未知一律 `None`。
-/// 调用方（render body）不得在此函数外做任何文件 IO。
+/// 纯查表：命中 Ready 返回协议句柄与真实单元格，Pending/Failed/远程/未知一律
+/// `None`。调用方（render body）不得在此函数外做任何文件 IO。
 #[must_use]
-pub(crate) fn lookup_ready(source: &str, cols: u16, rows: u16) -> Option<Arc<Vec<Line<'static>>>> {
+pub(crate) fn lookup_ready(source: &str, cols: u16, rows: u16) -> Option<ReadyImage> {
     let key = source_key(source, cols, rows)?;
     let state = cache().lock().lookup(&key)?;
     match state {
-        InlineImageState::Ready(lines) => Some(lines),
+        InlineImageState::Ready(image) => Some(ReadyImage {
+            cols: image.cols(),
+            rows: image.rows(),
+            image,
+        }),
         InlineImageState::Pending | InlineImageState::Failed(_) => None,
     }
 }
 
-/// 非阻塞请求：本地路径经校验后交给后台线程解码；重复请求由缓存去重。
+/// 非阻塞请求：本地路径经校验后交给后台线程解码并编码协议；重复请求由缓存去重。
 pub(crate) fn request(source: &str, cols: u16, rows: u16) {
+    let caps = *TERMINAL_CAPS.state().read();
+    let cell_px = image_preview::cell_pixel_size();
+    request_with(source, cols, rows, &caps, cell_px);
+}
+
+/// [`request`] 的显式能力注入版：测试用它直接指定协议，不读全局能力位。
+///
+/// 不支持协议时不构造 `Picker`（`Picker::halfblocks` 在 tmux 下有 spawn 副作用），
+/// 也不登记缓存——渲染侧继续走文本降级。
+pub(crate) fn request_with(
+    source: &str,
+    cols: u16,
+    rows: u16,
+    caps: &TerminalCaps,
+    cell_px: Option<(u16, u16)>,
+) {
     if cols == 0 || rows == 0 {
         return;
     }
+    let Some(encoder) = image_preview::InlineImageEncoder::for_caps(caps, cell_px) else {
+        return;
+    };
     let Some(source_key) = source_key(source, cols, rows) else {
         return;
     };
@@ -273,9 +317,9 @@ pub(crate) fn request(source: &str, cols: u16, rows: u16) {
     let spawned = std::thread::Builder::new()
         .name("peri-inline-image".to_string())
         .spawn(move || {
-            // 解码 panic 也要回收 inflight 槽位，否则并发上限会被永久占满。
+            // 解码/编码 panic 也要回收 inflight 槽位，否则并发上限会被永久占满。
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                render_validated(&path, cols, rows)
+                encode_validated(&path, &encoder, cols, rows)
             }))
             .unwrap_or(Err("panic"));
             finish(thread_key, id, result);
@@ -448,7 +492,7 @@ fn file_version(path: PathBuf) -> (PathBuf, u128, u64) {
     }
 }
 
-fn finish(key: CacheKey, id: u64, result: Result<Arc<Vec<Line<'static>>>, &'static str>) {
+fn finish(key: CacheKey, id: u64, result: Result<Arc<InlineImage>, &'static str>) {
     // 版本号与 Ready 状态必须在同一把锁内发布：否则 `wait_ready` 可能先看到
     // 完成态，再读到旧的全局版本，导致渲染缓存判为未变化。丢弃结果也释放了
     // 槽位，同样要唤醒 effect，让并发暂缓的请求重新排队。
@@ -459,36 +503,18 @@ fn finish(key: CacheKey, id: u64, result: Result<Arc<Vec<Line<'static>>>, &'stat
     }
 }
 
-fn render_validated(
+fn encode_validated(
     path: &Path,
+    encoder: &image_preview::InlineImageEncoder,
     cols: u16,
     rows: u16,
-) -> Result<Arc<Vec<Line<'static>>>, &'static str> {
+) -> Result<Arc<InlineImage>, &'static str> {
     let (_meta, buffer) = read_validated_image(path).map_err(safety_reason)?;
     let image = crate::kit::image_overlay::decode_image(buffer)?;
-    let (width, height) = image.dimensions();
-    let (cols, rows) = fit_target(width, height, cols, rows).ok_or("too-small")?;
-    let rgba = image.to_rgba8();
-    let data = ImageData::new(width, height, rgba.into_raw()).ok_or("format")?;
-    Ok(Arc::new(halfblock_lines(
-        &data,
-        (cols, rows),
-        Style::default(),
-    )))
-}
-
-/// 目标单元格：宽度按内容列宽、高度上限 `MAX_ROWS`；小图不放大超过 1:1。
-fn fit_target(width: u32, height: u32, cols: u16, rows: u16) -> Option<(u16, u16)> {
-    if width == 0 || height == 0 || cols == 0 || rows == 0 {
-        return None;
-    }
-    let fitted = fit((width, height), (1, 2), (cols, rows))?;
-    let max_cols = u16::try_from(width.min(u32::from(cols))).ok()?.max(1);
-    let max_rows = u16::try_from(height.div_ceil(2).min(u32::from(rows)))
-        .ok()?
-        .max(1);
-    let target = (fitted.columns.min(max_cols), fitted.rows.min(max_rows));
-    (target.0 >= 1 && target.1 >= 1).then_some(target)
+    encoder
+        .encode(image, cols, rows)
+        .map(Arc::new)
+        .ok_or("encode")
 }
 
 fn safety_reason(error: ImageSafetyError) -> &'static str {
@@ -500,19 +526,6 @@ fn safety_reason(error: ImageSafetyError) -> &'static str {
         ImageSafetyError::Io(_) => "io",
         ImageSafetyError::Decode(_) => "format",
     }
-}
-
-fn lines_bytes(lines: &[Line<'static>]) -> usize {
-    lines
-        .iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.len() + std::mem::size_of_val(span))
-                .sum::<usize>()
-                + std::mem::size_of_val(line)
-        })
-        .sum()
 }
 
 /// 单测等待后台线程完成（最多 `timeout`）；返回是否 Ready。
@@ -538,11 +551,16 @@ pub(crate) fn wait_ready(source: &str, cols: u16, rows: u16, timeout: Duration) 
 
 /// 单测请求并等待就绪：并发已满被暂缓时重试请求。
 /// 生产由可见 slot 的 effect 在 revision 变化时重跑，测试没有该循环。
+/// 固定用 Kitty 能力位（不依赖真实终端单元格尺寸，路径可完全离线复现）。
 #[cfg(test)]
 pub(crate) fn request_until_ready(source: &str, cols: u16, rows: u16, timeout: Duration) -> bool {
+    let caps = TerminalCaps {
+        graphics: crate::kit::terminal_caps::GraphicsProtocol::Kitty,
+        ..TerminalCaps::default()
+    };
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        request(source, cols, rows);
+        request_with(source, cols, rows, &caps, None);
         if wait_ready(source, cols, rows, Duration::from_millis(25)) {
             return true;
         }

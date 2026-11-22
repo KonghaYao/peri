@@ -497,18 +497,19 @@ fn test_user_bubble_file_mention_unaffected_by_attachment_record() {
     assert!(!text.contains("[Image]"), "非图片引用不产生附件记录");
 }
 
-// ── 用户气泡整行 markdown 图片（半块版）─────────────────────────────────
+// ── 用户气泡整行 markdown 图片（终端像素协议）───────────────────────────
 
 fn write_red_png(path: &std::path::Path) {
-    let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([220, 30, 30, 255]));
+    let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([220, 30, 30, 255]));
     image
         .save_with_format(path, image::ImageFormat::Png)
         .expect("user inline image: png fixture must encode");
 }
 
-/// 整行仅 `![alt](path)` 且缓存命中 → 半块图行；计入 6 行用户正文预算。
+/// 整行仅 `![alt](path)` 且缓存命中 → 真实行数的空白占位 + 内联放置；
+/// 计入 6 行用户正文预算，不再输出原始语法或半块字符。
 #[test]
-fn test_user_bubble_standalone_image_renders_when_ready() {
+fn test_user_bubble_standalone_image_renders_placement_when_ready() {
     crate::i18n::init(Some("en"));
     let dir = tempfile::tempdir().expect("user inline image: tempdir must exist");
     let file = dir.path().join("red.png");
@@ -529,13 +530,22 @@ fn test_user_bubble_standalone_image_renders_when_ready() {
     );
 
     let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("![a]({source})")));
-    let lines = render::vm_to_lines(&vm, &grid);
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut cache, false);
     let text = super::all_text(&lines);
+    assert_eq!(image_lines.len(), 1, "整行图片应产出一处内联放置");
+    let info = &image_lines[0];
+    let placement = info.inline.as_ref().expect("应携带协议句柄");
+    assert!(placement.rows >= 1);
+    assert_eq!(
+        placement.x_offset,
+        u16::try_from(grid.cont_prefix_width()).expect("prefix fits u16")
+    );
     assert!(
-        lines
+        !lines
             .iter()
             .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
-        "整行图片应渲染半块行，实际 {text:?}"
+        "像素路径不得输出半块字符，实际 {text:?}"
     );
     assert!(!text.contains("![a]"), "命中后不再显示原始图片语法");
     assert!(!text.contains("[Image:"), "不产生 @image meta 行");

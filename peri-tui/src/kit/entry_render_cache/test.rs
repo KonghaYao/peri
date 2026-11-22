@@ -93,7 +93,8 @@ fn inline_image_revision_change_invalidates_image_messages_only() {
 fn inline_image_completion_rebuilds_message_and_updates_wrap_height() {
     let dir = tempfile::tempdir().expect("inline image completion: tempdir must exist");
     let file = dir.path().join("red.png");
-    let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([220, 30, 30, 255]));
+    // 64x64 → 像素协议占 4 行（字体 10x20），高于 1 行文本降级，可观察行高变化。
+    let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([220, 30, 30, 255]));
     image
         .save_with_format(&file, image::ImageFormat::Png)
         .expect("inline image completion: png fixture must encode");
@@ -126,8 +127,8 @@ fn inline_image_completion_rebuilds_message_and_updates_wrap_height() {
     );
     let lines = cache.lines().len();
     let (height, _) = cache.build_wrap_map(grid.line_width());
-    assert!(height > before, "图片行应增加消息视觉高度");
-    assert_eq!(height, lines, "半块行宽度受控，不应二次折行");
+    assert!(height > before, "图片占位行应增加消息视觉高度");
+    assert_eq!(height, lines, "占位行宽度受控，不应二次折行");
 }
 
 #[test]

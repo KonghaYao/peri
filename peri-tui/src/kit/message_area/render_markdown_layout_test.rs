@@ -7,12 +7,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::kit::message_area::grid::ZoneTransition;
 
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
-use ratatui::style::Color;
-use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
-
 // ── md 复制按钮 ─────────────────────────────────────────────────────────
 
 /// 顶层渲染（render_copy_button=true）时，超过 MD_COPY_MIN_CHARS（400）字符的
@@ -672,7 +666,7 @@ fn test_mermaid_terminal_parse_shows_the_final_diagram() {
     );
 }
 
-// ── 消息区内联图片（半块版）──────────────────────────────────────────────
+// ── 消息区内联图片（终端像素协议）────────────────────────────────────────
 
 fn write_red_png(path: &std::path::Path) {
     let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([220, 30, 30, 255]));
@@ -681,23 +675,10 @@ fn write_red_png(path: &std::path::Path) {
         .expect("inline image render: png fixture must encode");
 }
 
-fn has_red_halfblock_cell(lines: &[Line<'static>]) -> bool {
-    let width = 120u16;
-    let height = u16::try_from(lines.len()).unwrap_or(1).max(1);
-    let mut terminal =
-        Terminal::new(TestBackend::new(width, height)).expect("test backend constructs");
-    terminal
-        .draw(|frame| frame.render_widget(Paragraph::new(lines.to_vec()), frame.area()))
-        .expect("test backend draws");
-    let buffer = terminal.backend().buffer();
-    let red = Color::Rgb(220, 30, 30);
-    (0..height).any(|y| (0..width).any(|x| buffer[(x, y)].fg == red && buffer[(x, y)].bg == red))
-}
-
-/// 本地 PNG 缓存命中后，assistant 独占图片段渲染为半块行（真实 cell 前景/背景色），
-/// 不再输出 `[Image: …]` 降级文本；行数受 8 行上限约束。
+/// 本地 PNG 缓存命中后，assistant 独占图片段输出「真实编码尺寸的行占位 +
+/// 内联放置」，不再输出 `[Image: …]` 降级文本或半块字符；行数受 8 行上限约束。
 #[test]
-fn test_assistant_local_image_renders_halfblocks() {
+fn test_assistant_local_image_renders_pixel_placement() {
     crate::i18n::init(Some("en"));
     let dir = tempfile::tempdir().expect("assistant local image: tempdir must exist");
     let file = dir.path().join("red.png");
@@ -718,21 +699,35 @@ fn test_assistant_local_image_renders_halfblocks() {
 
     let text = format!("{}\n\n![a]({source})\n\nafter", "x".repeat(100));
     let vm = super::assistant_bubble_with_text(&text, 71);
-    let lines = render::vm_to_lines(&vm, &grid);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
 
     let rendered = super::all_text(&lines);
     assert!(
         !rendered.contains("[Image: a]"),
         "命中缓存后不应保留降级文本，实际 {rendered:?}"
     );
-    let halfblocks = lines
-        .iter()
-        .filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
-        .count();
-    assert!(halfblocks > 0 && halfblocks <= usize::from(crate::kit::inline_image::MAX_ROWS));
+    assert_eq!(image_lines.len(), 1, "独占图片应产出一处内联放置");
+    let info = &image_lines[0];
+    let placement = info.inline.as_ref().expect("图片段应携带内联放置");
     assert!(
-        has_red_halfblock_cell(&lines),
-        "TestBackend 中应出现非默认 fg/bg 的半块 cell"
+        placement.rows >= 1 && placement.rows <= crate::kit::inline_image::MAX_ROWS,
+        "占位行数受 8 行上限约束，实际 {}",
+        placement.rows
+    );
+    assert_eq!(
+        placement.x_offset,
+        u16::try_from(grid.cont_prefix_width()).expect("prefix fits u16"),
+        "图片从正文列起画"
+    );
+    // 占位行只有网格前缀，不含半块/方块字符。
+    assert!(
+        (info.logical_idx..info.logical_idx + usize::from(placement.rows)).all(|idx| {
+            lines
+                .get(idx)
+                .is_some_and(|line| !line.spans.iter().any(|span| span.content.contains('█')))
+        }),
+        "像素路径不得再输出半块字符"
     );
 }
 
@@ -823,7 +818,8 @@ fn test_multi_image_segment_keeps_unmatched_fallbacks() {
             .is_some(),
         "缓存查表应命中（诊断为渲染侧问题）"
     );
-    let lines = render::vm_to_lines(&vm, &grid);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
     let rendered = super::all_text(&lines);
 
     assert!(
@@ -834,8 +830,59 @@ fn test_multi_image_segment_keeps_unmatched_fallbacks() {
         rendered.contains("[Remote image: b]"),
         "未命中的同段图片必须保留降级行，实际 {rendered:?}"
     );
+    assert_eq!(image_lines.len(), 1, "同段只有命中的图产生内联放置");
+    assert!(image_lines[0].inline.is_some(), "命中的图片应携带协议句柄");
+}
+
+/// 短回复（brief）正文在过程带宽度内渲染：图片放置从过程区正文列起画，
+/// 预留行数同样等于真实编码行数。
+#[test]
+fn test_assistant_brief_local_image_uses_process_prefix() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("assistant brief image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([220, 30, 30, 255]));
+    image
+        .save_with_format(&file, image::ImageFormat::Png)
+        .expect("assistant brief image: png fixture must encode");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.process_content_width()).expect("process width fits u16");
     assert!(
-        has_red_halfblock_cell(&lines),
-        "同段命中的图片仍应渲染为半块 cell"
+        crate::kit::inline_image::request_until_ready(
+            source,
+            cols,
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
     );
+
+    let vm = super::assistant_bubble_with_text(&format!("![a]({source})"), 75);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let info = image_lines.first().expect("短回复图片应产出内联放置");
+    let placement = info.inline.as_ref().expect("inline placement");
+    assert_eq!(
+        placement.x_offset,
+        u16::try_from(grid.process_prefix_width()).expect("prefix fits u16"),
+        "短回复图片从过程区正文列起画"
+    );
+    assert!(
+        lines.len() >= info.logical_idx + usize::from(placement.rows),
+        "占位行必须完整落在消息行内"
+    );
+    assert!(
+        (info.logical_idx..info.logical_idx + usize::from(placement.rows)).all(|idx| {
+            lines[idx]
+                .spans
+                .iter()
+                .all(|span| span.content.trim().is_empty() || span.content == "│")
+        }),
+        "占位行只含网格前缀"
+    );
+    let rendered = super::all_text(&lines);
+    assert!(!rendered.contains("[Image: a]"), "实际 {rendered:?}");
 }
