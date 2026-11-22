@@ -349,7 +349,7 @@ saved aggregate evidence instead of restarting finished agents.
 - **artifact 解析**（`runner/artifact.rs`）：显式注入目录（`PERI_WORKFLOW_ARTIFACT_DIR`）→ 随包内容身份的本机缓存 `~/.peri/workflow/<version>/<内容身份>/` → 随包 sidecar（可执行文件旁 `peri-resources/workflow/<内容身份>/`）。三者都校验包身份（name/version/main/协议/buildId）、入口不越界与入口 SHA-256；没有任何已校验来源时 fail closed。
 - **离线边界**：运行时不访问 npm/registry；按顺序尝试上述来源，仅当没有任何来源通过包身份与入口摘要校验时才 fail closed（缓存缺失但 sidecar 有效时仍从 sidecar 运行）。显式注入目录仍受同一包身份与 `WORKFLOW_ENTRY_SHA256` 校验。发布新版本时同步随包常量与 sidecar 身份。
 - **红线**：Rust 侧零 JS 嵌入（`ARC-WORKFLOW-DIST-001`，[architecture-contracts.md](../standards/architecture-contracts.md)）；分发缺口不得以嵌入 JS 产物解决，表述以 [workflow-mcp.md](workflow-mcp.md) §2.3 为准。
-- **引擎包**：自述协议与 CLI 子命令（`read`/`list`/`validate`/`boundary`/`adlc`）以 `npm-packages/@peri-workflow/{README,DESIGN}.md` 为准；`dist/` 为构建产物（`bun run build` 可复现字节）、不入库，由发布链在打包前构建并随发布包携带，消费方仍按固定 SHA-256 pin 校验。
+- **引擎包**：自述协议与 CLI 子命令（`read`/`list`/`validate`/`boundary`/`adlc`）以 `npm-packages/@peri-workflow/{README,DESIGN}.md` 为准；`dist/` 为构建产物（`bun run build` 可复现字节；release 工作流固定 bun 版本，升级 bun 需重建并同步 pin）、不入库，由发布链在打包前构建并随发布包携带，消费方仍按固定 SHA-256 pin 校验。
 
 ---
 

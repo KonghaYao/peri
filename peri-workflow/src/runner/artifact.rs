@@ -27,7 +27,7 @@ pub(super) const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.3.0";
 /// 与本地构建产物（`bun run build` 的构建产出，不入库）一致：bundle 变化时必须重新
 /// 发布并同步本常量；仓库内不保存该产物，任何代码/测试都不读取工作树 dist。
 const WORKFLOW_ENTRY_SHA256: &str =
-    "b7fcaf3e1cbccd2629254a071b5d41a808464ba20548346851f538762e0bdd89";
+    "ae03ca29c07dae162e4f15280f1b34b874480b02ca2251e3f3c687e3534ecbd1";
 
 /// 随包 sidecar 目录（相对可执行文件所在目录）。
 const SIDECAR_RELATIVE_DIR: &str = "peri-resources/workflow";
