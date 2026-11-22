@@ -84,8 +84,10 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 主题 | 唯一维护位置 | 边界 |
 | --- | --- | --- |
 | SDK 部署归属 | [OWNERSHIP-MODEL](../../npm-packages/@peri-sdk/OWNERSHIP-MODEL.md) | 使用方 User/Workspace/SessionDB 约束；不替代 SDK Chat 运行设计 |
-| Rivet 对接 | [Rivet DESIGN](../../npm-packages/peri-rivet/DESIGN.md) | actor 接线、活动投影与资源生命周期；无第三运行时 |
+| Rivet 对接与生产主线 | [Peri Swarm 设计](peri-swarm.md) | actor 接线、活动投影与资源生命周期；Rust 实现为唯一主线，无第三运行时 |
 | Sandbox 实例 | [Sandbox 设计](../../npm-packages/peri-sandbox/peri-sandbox-design.md) | 单实例 HTTP MCP 与宿主资源管理；不承诺多租户隔离 |
 
 这些包内设计继续原位维护，本索引只路由；不复制另一份 owner 或控制表。
+试验性 TS 适配层 `npm-packages/peri-rivet` 与 `npm-packages/agent-builder` 已于
+2026-11-22 移除；Rivet 对接与部署归属以 [Peri Swarm 设计](peri-swarm.md) 为准。
 `peri-cf` 已退役，不能作为当前部署入口；历史研究不构成部署验收。

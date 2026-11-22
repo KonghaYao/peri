@@ -7,6 +7,10 @@
 > `feat/peri-swarm-local-dev` 为准。本文只写稳定结构与边界，不记录实施批次、测试数量
 > 或运行日志。
 
+Peri Swarm 是生产主线：Rivet actor 接线、会话托管与沙箱编排由本 crate 唯一实现。
+早期试验性 TS 适配层（`npm-packages/peri-rivet`、`npm-packages/agent-builder`）已于
+2026-11-22 移除，不再作为部署入口。
+
 ## 1. 范围与非目标
 
 本地部署把一条 HTTP 调用链固定下来：客户端 → `peri-swarm`（axum 网关 + Rivet

@@ -34,7 +34,7 @@
 | peri-acp host requests/history/apps | SESSION、HISTORY、APPS | 独立外部入口与协商边界；DTO 字段不逐项登记 |
 | peri-config、peri-model | CONFIG、MODEL | 配置来源/保存及 provider 协议独立；参数组合不各算功能 |
 | peri-tui kit panels/input/history、components | TUI、CLI、PLATFORM | 主要用户操作独立；纯样式 L5 |
-| npm @peri-sdk、peri-rivet、agent-builder、peri-sandbox | SDK、RIVET、PLATFORM | 通用 SDK 与专用装配区分；真实 Engine 验收仍缺 |
+| npm @peri-sdk、peri-sandbox | SDK、PLATFORM | 通用 SDK 与沙箱能力分列；试验性 peri-rivet、agent-builder 已于 2026-11-22 移除，主线归 peri-swarm |
 | peri-wasm/time/runtime/js-runtime、langfuse、memory-plugin | PLATFORM | 平台与观测支持能力；运行时内部工具函数不独立登记 |
 | side-projects、images、示例与构建脚本 | 不作为发布能力 | 实验、资产和工程执行入口；不冒充功能覆盖或验收 |
 
