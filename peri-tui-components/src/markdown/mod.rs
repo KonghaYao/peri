@@ -101,6 +101,19 @@ pub use fence::{
     MermaidMessageRef, is_mermaid_info,
 };
 pub use safety::{UrlKind, classify_url, sanitize_for_terminal};
+/// 图片扫描结果（只读 API 的返回类型；字段语义见 `scan` 模块文档）。
+pub use scan::ImageInfo;
 pub(crate) use table::buffer_to_lines;
 pub use table::table_data_to_lines;
-pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, MermaidSegment, TableData};
+pub use types::{
+    GenUiSegment, ImageSegment, ImageSource, MarkdownSegment, MermaidSegment, TableData,
+};
+
+/// 只读图片语法扫描：返回文本中所有完整 `![alt](url)` 的元数据。
+///
+/// 与渲染管线使用同一扫描器（同一 pulldown 版本与 Options），但不分配占位
+/// token、不改变文本，也不影响现有解析行为；供消息区调度与用户气泡复用。
+#[must_use]
+pub fn image_links(text: &str) -> Vec<ImageInfo> {
+    scan::scan_images(text)
+}

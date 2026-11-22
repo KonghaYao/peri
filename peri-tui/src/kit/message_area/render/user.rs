@@ -101,6 +101,7 @@ pub(super) fn render_system_reminder_lines(
 pub(super) fn render_user_bubble_lines(
     data: &crate::kit::tui_render_unit::TuiUserBubble,
     grid: &GridSpec,
+    inline_pixels: bool,
 ) -> (Vec<Line<'static>>, Vec<ImageLineInfo>) {
     let sem = THEME_ATOM.state().read().semantic;
     // 空文本 user（rewind/重放路径的 thinking 回传消息建模为 user role，
@@ -158,9 +159,49 @@ pub(super) fn render_user_bubble_lines(
                     path: display_path,
                     managed,
                     size_text,
+                    inline: None,
                 });
             }
             continue;
+        }
+        // 整行仅 `![alt](path)`：协议可用且缓存命中 → 预留真实编码尺寸的像素区；
+        // 未命中/超出正文行预算保留原文（行内混排不解析，计划 MVP 边界）。
+        // Detail 等没有 draw hook 的 surface（inline_pixels = false）保持文本，
+        // 否则会留下无法填充的空白占位。
+        if inline_pixels && let Some(url) = crate::kit::inline_image::standalone_image_url(raw) {
+            let cols = u16::try_from(grid.content_width()).unwrap_or(u16::MAX);
+            if let Some(ready) = crate::kit::inline_image::lookup_ready(
+                &url,
+                cols,
+                crate::kit::inline_image::USER_IMAGE_ROWS,
+            ) {
+                let rows = usize::from(ready.rows);
+                if visual_count.saturating_add(rows) <= USER_BODY_MAX_LINES {
+                    let logical_idx = lines.len();
+                    for _ in 0..rows {
+                        lines.push(super::helpers::prefixed_cont_line(
+                            grid,
+                            sem.text.secondary,
+                            Line::default(),
+                        ));
+                    }
+                    image_lines.push(ImageLineInfo {
+                        logical_idx,
+                        path: String::new(),
+                        managed: false,
+                        size_text: String::new(),
+                        inline: Some(super::InlineImagePlacement {
+                            cols: ready.cols,
+                            rows: ready.rows,
+                            x_offset: u16::try_from(grid.cont_prefix_width()).unwrap_or(u16::MAX),
+                            image: ready.image,
+                        }),
+                    });
+                    total += rows;
+                    visual_count += rows;
+                    continue;
+                }
+            }
         }
         let wrapped = crate::truncate::wrap_by_width(raw, grid.content_width());
         total += wrapped.len();

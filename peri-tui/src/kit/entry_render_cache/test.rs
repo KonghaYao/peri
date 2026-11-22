@@ -46,6 +46,92 @@ fn context(surface: EntrySurface) -> EntryRenderContext {
 }
 
 #[test]
+fn inline_image_revision_change_invalidates_image_messages_only() {
+    let grid = GridSpec::grid_for(80);
+    let render_context = context(EntrySurface::Message);
+
+    let image_vm = bubble("![a](u)");
+    let mut image_cache = EntryRenderCache::default();
+    image_cache.ensure(
+        &image_vm,
+        &grid,
+        render_context.clone(),
+        0,
+        ZoneTransition::None,
+    );
+    image_cache.inline_image_revision = Some(crate::kit::inline_image::revision().wrapping_add(1));
+    assert_eq!(
+        image_cache.ensure(
+            &image_vm,
+            &grid,
+            render_context.clone(),
+            0,
+            ZoneTransition::None
+        ),
+        EntryInvalidation::Layout,
+        "图片版本变化必须重建消息以便更新行高"
+    );
+
+    let plain_vm = bubble("plain text");
+    let mut plain_cache = EntryRenderCache::default();
+    plain_cache.ensure(
+        &plain_vm,
+        &grid,
+        render_context.clone(),
+        0,
+        ZoneTransition::None,
+    );
+    plain_cache.inline_image_revision = Some(crate::kit::inline_image::revision().wrapping_add(1));
+    assert_eq!(
+        plain_cache.ensure(&plain_vm, &grid, render_context, 0, ZoneTransition::None),
+        EntryInvalidation::None,
+        "不含图片语法的消息不受图片版本影响"
+    );
+}
+
+#[test]
+fn inline_image_completion_rebuilds_message_and_updates_wrap_height() {
+    let dir = tempfile::tempdir().expect("inline image completion: tempdir must exist");
+    let file = dir.path().join("red.png");
+    // 64x64 → 像素协议占 4 行（字体 10x20），高于 1 行文本降级，可观察行高变化。
+    let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([220, 30, 30, 255]));
+    image
+        .save_with_format(&file, image::ImageFormat::Png)
+        .expect("inline image completion: png fixture must encode");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+
+    let grid = GridSpec::grid_for(120);
+    let render_context = context(EntrySurface::Message);
+    let vm = bubble(&format!("![a]({source})"));
+    let mut cache = EntryRenderCache::default();
+    cache.ensure(&vm, &grid, render_context.clone(), 0, ZoneTransition::None);
+    let before = cache.build_wrap_map(grid.line_width()).0;
+
+    let cols = u16::try_from(grid.process_content_width()).expect("process width fits u16");
+    assert!(
+        crate::kit::inline_image::request_until_ready(
+            source,
+            cols,
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在重建前就绪"
+    );
+
+    assert_eq!(
+        cache.ensure(&vm, &grid, render_context, 0, ZoneTransition::None),
+        EntryInvalidation::Layout,
+        "图片完成后消息需要按 Layout 重建"
+    );
+    let lines = cache.lines().len();
+    let (height, _) = cache.build_wrap_map(grid.line_width());
+    assert!(height > before, "图片占位行应增加消息视觉高度");
+    assert_eq!(height, lines, "占位行宽度受控，不应二次折行");
+}
+
+#[test]
 #[serial_test::serial]
 fn genui_parse_payload_is_counted_once_per_shared_arc() {
     let library = peri_tui_components::genui::library::library().unwrap();

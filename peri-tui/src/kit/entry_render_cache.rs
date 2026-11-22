@@ -54,6 +54,9 @@ pub(crate) struct EntryRenderCache {
     /// 上次渲染时的 Mermaid 预览版本；只有含 Mermaid 的消息需要据此重算。
     preview_revision: Option<u64>,
     has_mermaid: Option<bool>,
+    /// 内联图片缓存版本；只有可能含图片的消息需要据此重算（图片完成后行高变化）。
+    inline_image_revision: Option<u64>,
+    has_inline_image: Option<bool>,
     /// 本消息内每处围栏的逻辑行范围；调度与阅读锚点共用。
     mermaid_fences: Vec<crate::kit::mermaid::FenceSpan>,
     /// 展开的正文空档组：成员标题逻辑行 → 成员 FoldKey（单击热区复用）。
@@ -81,6 +84,15 @@ impl EntryRenderCache {
         let preview_revision = crate::kit::mermaid::message_revision_for_vm(vm);
         let preview_changed =
             self.has_mermaid == Some(true) && self.preview_revision != preview_revision;
+        // 内联图片完成会改变消息行高；只让可能含图片的消息跟随版本重建。
+        if content_changed || self.has_inline_image.is_none() {
+            self.has_inline_image = Some(crate::kit::inline_image::vm_may_have_image(vm));
+        }
+        let inline_image_revision = crate::kit::inline_image::revision();
+        let inline_image_changed = self.has_inline_image == Some(true)
+            && self
+                .inline_image_revision
+                .is_some_and(|cached| cached != inline_image_revision);
         // 转场翻转（相邻 entry 的起止 zone 变化，§6）改变本 slot 的入口台阶行——
         // 按 Layout 级重渲染本 slot，不牵动其他 slot 的缓存。
         let layout_changed = self.grid != Some(*grid)
@@ -90,7 +102,8 @@ impl EntryRenderCache {
                     || !Arc::ptr_eq(&previous.theme, &context.theme)
             })
             || self.genui_state_changed()
-            || preview_changed;
+            || preview_changed
+            || inline_image_changed;
         let period = vm.animation_period_frames();
         let animated = period != 0 && self.frame / period != frame / period;
         let invalidation = if content_changed {
@@ -212,6 +225,7 @@ impl EntryRenderCache {
         self.context = Some(context);
         self.frame = frame;
         self.preview_revision = preview_revision;
+        self.inline_image_revision = Some(inline_image_revision);
         invalidation
     }
 
@@ -223,6 +237,16 @@ impl EntryRenderCache {
     #[must_use]
     pub(crate) fn has_mermaid(&self) -> Option<bool> {
         self.has_mermaid
+    }
+
+    #[must_use]
+    pub(crate) fn has_inline_image(&self) -> Option<bool> {
+        self.has_inline_image
+    }
+
+    #[must_use]
+    pub(crate) fn inline_image_revision(&self) -> Option<u64> {
+        self.inline_image_revision
     }
 
     #[must_use]

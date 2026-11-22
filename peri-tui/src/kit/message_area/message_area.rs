@@ -154,6 +154,10 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     // [T4 §4] @image 行屏幕点击/hover 热区（每帧由渲染 body 更新，点击与
     // Moved handler 实时读取——同 CopyButtonHit 模式）。
     let image_rects = hooks.use_state(Arc::<Vec<ImageLineHit>>::default);
+    // 内联像素图片绘制（跨帧 hook：渲染 body 填放置，post_component_draw 画）。
+    let inline_frame = hooks.use_state(super::inline_image_draw::InlineFrame::default);
+    let _inline_draw =
+        hooks.use_hook(|| super::inline_image_draw::InlineImageDrawHook::new(inline_frame));
     let genui_rects = hooks.use_state(Arc::<Vec<GenUiButtonHit>>::default);
     let pressed_genui = hooks.use_state(|| Option::<PressedGenuiKey>::None);
     let pressed_overlay = hooks.use_hook(|| PressedOverlay {
@@ -452,9 +456,61 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         ),
     );
 
+    // 内联图片调度（effect 边界——render body 只查表，不读文件不起线程）：
+    // 只扫描当前可见 slot；请求去重/尺寸键/陈旧代理由 inline_image 缓存负责。
+    // deps 含可见范围与正文宽度：滚动/resize/内容变化时重新扫描。
+    let inline_image_visible =
+        slot_index.visible_slots(scroll_state.read().offset(), vis_height as usize);
+    let inline_image_start = inline_image_visible.start;
+    let inline_image_end = inline_image_visible.end;
+    let inline_image_content_cols = u16::try_from(grid.content_width()).unwrap_or(u16::MAX);
+    let inline_image_process_cols = u16::try_from(grid.process_content_width()).unwrap_or(u16::MAX);
+    let inline_image_revision = crate::kit::inline_image::revision();
+    {
+        let snapshot = snapshot.clone();
+        hooks.use_effect(
+            move || {
+                // 图片完成后先淘汰可见的图片消息缓存：EntryRenderCache 的版本比较
+                // 只在 ensure 被调用时生效，而内容哈希未变不会触发 ensure。
+                {
+                    let mut caches = vm_caches.write_no_update();
+                    for slot in inline_image_start..inline_image_end {
+                        let Some(cache) = caches.get_mut(slot) else {
+                            continue;
+                        };
+                        if cache.entry.has_inline_image() == Some(true)
+                            && cache.entry.inline_image_revision() != Some(inline_image_revision)
+                        {
+                            cache.evict();
+                        }
+                    }
+                }
+                for slot in inline_image_start..inline_image_end {
+                    if let Some(vm) = snapshot.items.get(slot) {
+                        crate::kit::inline_image::request_vm_images(
+                            vm,
+                            inline_image_content_cols,
+                            inline_image_process_cols,
+                        );
+                    }
+                }
+            },
+            (
+                vm_generation,
+                inline_image_start,
+                inline_image_end,
+                inline_image_content_cols,
+                inline_image_process_cols,
+                inline_image_revision,
+            ),
+        );
+    }
+
     if empty {
         // 重置滚动条字段，避免 Welcome 页面残留旧会话的滚动条
         *scrollbar_fields.write_no_update() = ScrollbarFields::default();
+        // Welcome 页面无消息：清掉上一会话的内联图片放置，防止 hook 继续画像素。
+        super::inline_image_draw::clear(inline_frame);
         // 清空 md 复制按钮映射——Welcome 页面无消息，防止点击残留按钮复制已消失内容
         *copy_buttons.write_no_update() = Arc::new(Vec::new());
         // 清空 @image 行热区映射（同 copy_buttons——Welcome 页面无消息可点）
@@ -632,6 +688,17 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         &slot_index,
         grid,
     );
+
+    // 内联像素图片放置：渲染 body 只把逻辑行折算成槽内绝对视觉行；屏幕 Rect 与
+    // 协议绘制留给 post_component_draw（Paragraph 之后，避免被文字覆盖）。
+    {
+        let vis_height = u16::try_from(vp_height).unwrap_or(u16::MAX);
+        let placements = {
+            let caches = vm_caches.read();
+            super::inline_image_draw::collect(&caches, &slot_index, scroll_y, vis_height)
+        };
+        super::inline_image_draw::set_frame(inline_frame, placements, scroll_y, vis_height);
+    }
 
     let interaction_highlight: Option<(usize, usize)> = hits::update_interaction_hits(
         interaction_rects,

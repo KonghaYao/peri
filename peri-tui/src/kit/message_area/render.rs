@@ -21,6 +21,7 @@ mod tests;
 mod renderer;
 pub(crate) use renderer::CopyButtonInfo;
 pub(crate) use renderer::ImageLineInfo;
+pub(crate) use renderer::InlineImagePlacement;
 pub(crate) use renderer::is_step_row;
 pub(crate) use renderer::running_header_index;
 #[cfg(test)]

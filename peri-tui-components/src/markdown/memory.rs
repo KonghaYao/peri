@@ -209,10 +209,18 @@ impl RetainedHeap for ImageSegment {
             byte_start: _,
             byte_end: _,
             lines,
+            sources,
         } = self;
         alt.heap_bytes()
             .saturating_add(url.heap_bytes())
             .saturating_add(title.as_ref().map_or(0, String::capacity))
             .saturating_add(lines.heap_bytes())
+            .saturating_add(
+                sources
+                    .iter()
+                    .fold(vec_storage_bytes(sources), |bytes, source| {
+                        bytes.saturating_add(source.source.heap_bytes())
+                    }),
+            )
     }
 }

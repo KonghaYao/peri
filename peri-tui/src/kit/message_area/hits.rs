@@ -399,6 +399,10 @@ pub(super) fn update_image_line_hits(
         for slot_index in index.visible_slots(scroll_y, vis_height as usize) {
             let slot = &caches_read[slot_index];
             for info in &slot.image_lines {
+                // 内联像素图片占位不是 @image meta 行：没有路径可打开，也不参与 hover。
+                if info.inline.is_some() {
+                    continue;
+                }
                 let Some(entry) = slot.wrap_map.get(info.logical_idx) else {
                     continue;
                 };

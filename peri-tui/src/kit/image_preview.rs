@@ -31,6 +31,7 @@ use image::DynamicImage;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::terminal;
 use ratatui::layout::{Rect, Size};
+use ratatui::widgets::Widget as _;
 use ratatui_image::FontSize;
 use ratatui_image::errors::Errors;
 use ratatui_image::picker::{Picker, ProtocolType};
@@ -119,6 +120,116 @@ pub fn static_protocol(
 /// 交互路径应优先 [`AsyncImage`]。
 pub fn stateful_protocol(picker: &Picker, img: DynamicImage) -> StatefulProtocol {
     picker.new_resize_protocol(img)
+}
+
+/// 面积固定的内联图片协议：一次性 resize+encode 后跨帧只写占位符。
+///
+/// 与 [`AsyncImage`] 的取舍：内联图片的目标单元格由缓存键（cols/rows）固定，
+/// 滚动、重排与 hover 都不改变图片面积，因此不需要运行时 resize；在后台线程
+/// 编码完成后即可直接绘制。`AsyncImage` 的 resize 完成事件需要额外的唤醒源，
+/// 消息区没有逐帧轮询，固定面积下没必要引入。
+pub struct InlineImage {
+    protocol: Protocol,
+    cols: u16,
+    rows: u16,
+    /// 终端侧保留数据的估算字节（缓存预算用）：编码像素 ≈ 单元格 × 字体像素。
+    bytes: usize,
+}
+
+impl std::fmt::Debug for InlineImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InlineImage")
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InlineImage {
+    /// 在调用线程完成 resize+encode（只应在后台线程调用，编码可能耗时）。
+    ///
+    /// `cols`/`rows` 是调用方的面积预算；实际编码尺寸按等比适配收窄，返回值
+    /// [`Self::cols`]/[`Self::rows`] 是真实占用的单元格。失败只记日志并返回
+    /// `None`——内联路径统一回落到文本降级，不向上抛第三方错误类型。
+    #[must_use]
+    pub fn encode(picker: &Picker, img: DynamicImage, cols: u16, rows: u16) -> Option<Self> {
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        let font = picker.font_size();
+        let target = Resize::Fit(None).size_for(&img, font, Size::new(cols, rows));
+        if target.width == 0 || target.height == 0 {
+            return None;
+        }
+        let protocol = match picker.new_protocol(img, Size::new(cols, rows), Resize::Fit(None)) {
+            Ok(protocol) => protocol,
+            Err(err) => {
+                tracing::warn!(error = %err, "内联图片 resize/encode 失败，回落文本降级");
+                return None;
+            }
+        };
+        let bytes = usize::from(target.width)
+            .saturating_mul(usize::from(target.height))
+            .saturating_mul(usize::from(font.width.max(1)))
+            .saturating_mul(usize::from(font.height.max(1)))
+            .saturating_mul(4);
+        Some(Self {
+            protocol,
+            cols: target.width,
+            rows: target.height,
+            bytes,
+        })
+    }
+
+    /// 真实占用的列数（等比适配后的编码宽度）。
+    #[must_use]
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    /// 真实占用的行数（等比适配后的编码高度）。
+    #[must_use]
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    /// 终端侧保留数据的估算字节（协议串/占位符），供调用方做缓存预算。
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// 在 `area` 内绘制当前帧；面积必须不小于编码尺寸（不足时调用方应先裁剪）。
+    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        ratatui_image::Image::new(&self.protocol).render(area, buf);
+    }
+}
+
+/// 内联图片编码器：把能力位 → `Picker` 的构造收在本模块内，调用方只持有
+/// 不透明句柄即可在后台线程编码（不泄漏 ratatui-image 类型）。
+#[derive(Clone)]
+pub struct InlineImageEncoder {
+    picker: Picker,
+}
+
+impl InlineImageEncoder {
+    /// 协议可用时构造编码器；None/ITerm2/缺单元格尺寸的 Sixel 返回 `None`，
+    /// 调用方据此在请求前就不做任何 IO。
+    #[must_use]
+    pub fn for_caps(caps: &TerminalCaps, cell_px: Option<(u16, u16)>) -> Option<Self> {
+        supported_with_cell_size(caps, cell_px).then(|| Self {
+            picker: picker_for_with_cell_size(caps, cell_px),
+        })
+    }
+
+    /// 在调用线程完成 resize+encode；面积预算由调用方给出。
+    #[must_use]
+    pub fn encode(&self, img: DynamicImage, cols: u16, rows: u16) -> Option<InlineImage> {
+        InlineImage::encode(&self.picker, img, cols, rows)
+    }
 }
 
 /// 降级判定：Kitty 恒定可用；Sixel 仅在拿到真实单元格尺寸时可用
