@@ -1,6 +1,7 @@
 # Workflow 脚本工具调用（`tool()`）验收记录
 
-- 状态：验收记录（PR #539；2026-11-22 修订：E2E 夹具重锚 + CodeRabbit 评审修复）
+- 状态：验收记录（PR #539 已合并 `1b7d3557b`；2026-11-22 修订：E2E 夹具重锚、
+  CodeRabbit 评审修复、后续 PR 收尾示例精度与 e2e pin）
 - 日期：2026-11-22
 - 工作树：`/Users/mino/code/peri`，分支 `feat/workflow-codemode-tool`（PR #539）；
   任务开始前既存的 `.mcp.json` 改动不属于本任务，保持未提交、未纳入验证结论。
@@ -76,7 +77,8 @@
 5. **PR CI 首轮 E2E（62 场景）全失败**：根因是新增 `codemode` 使系统提示词
    +71 字节（catalog 行、resource URI、resource 计数），而 peri-e2e 的 world 是
    录制快照而非源码映射。修复在 peri-e2e PR #23（重锚 317 个 leaf / 305 个
-   stub，响应字节不变），本仓 `.github/peri-e2e.rev` 指向该 PR head；产品代码无缺陷。
+   stub，响应字节不变），该 PR 已 squash 合并为 `ad069780a`，本仓
+   `.github/peri-e2e.rev` 指向该提交；产品代码无缺陷。
 6. **PR CI 首轮 Clippy 失败**（ubuntu/macos）：本地此前只跑
    `clippy --workspace`，漏掉 `--all-targets`；失败点是测试目标
    `clippy::await_holding_lock`（`drop(guard)` 后仍有 await 判定）。已改为块作用域。
@@ -96,7 +98,8 @@
    - `tools.jsonl` 追加失败仍投递结果、resume 会重放未记录前缀：不改变，属已文档化
      的 journal 边界（`tool_journal_append_failure_does_not_change_the_terminal`
      锁定），改变它需要另行裁决磁盘失败时的 run 语义。
-8. **CodeRabbit 追加轮 5 条（`codemode` SKILL 示例）**：均成立，同一次提交修复。
+8. **CodeRabbit 追加轮 7 条（`codemode` SKILL 示例）**：均成立；前 5 条随 #539
+   合并，后 2 条因评审轮次上限在同日后续 PR 修复。
    - `Glob` 无匹配返回 `No files found.`、超限时附 `[Output truncated: ...]` 说明，
      示例会把说明当路径传给 `Read`：示例先判空返回，命中截断说明时抛错要求收窄
      pattern。
@@ -109,6 +112,10 @@
    - 失败 thunk 解析为 `null` 会丢掉 `WorkflowToolError.code`：thunk 内捕获已知
      code（`policy_denied` / `tool_unavailable` 等）随文件名返回，未知异常仍抛出；
      按索引兜底为 `unexpected_error`。
+   - 截断判定用 `includes` 会误匹配正文里的同名字面量：`Read` 内容行带
+     `{:>6}\t` 行号前缀，状态行不带；改为只匹配行首，`Glob` 同步收紧。
+   - 空文件 `Read` 返回 4 行 `[EMPTY FILE]` 状态文本，示例会数成 4 行：计行前
+     判首行 `[EMPTY FILE]` 并返回 0 行；截断条目改记 `truncated: true`。
 
 ## 4. 未覆盖与限制
 
@@ -119,6 +126,6 @@
   仅眼测入口与投影单测。
 - 固定测试仓 SHA 对账：归 peri-e2e #10，本记录不声称完成。
 - `read` CLI 的文本摘要未增加该字段；现有完成通知与 `state.json` 已包含。
-- 本仓 PR #539 的 `.github/peri-e2e.rev` 指向 peri-e2e PR #23 的 head（未合并）；
-  两者需成对合并，否则 E2E 夹具与产品系统提示词会再次错位。
+- `.github/peri-e2e.rev` 现指向 peri-e2e main 的 `ad069780a`（PR #23 squash 合并）；
+  #539 合并时该 pin 曾短暂指向未合并分支 head，后续 PR 已对齐到 main。
 - `.mcp.json` 保持任务开始前原样，未提交。
