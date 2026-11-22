@@ -209,6 +209,9 @@ fn monitor_page_exposes_the_human_control_surface() {
         "id=\"drawer\"",
         "diagnosticsPage(message)",
         "id=\"imeInput\"",
+        // Parked under the cursor to place the IME candidate window, so it must
+        // not take the mouseup that completes the click.
+        "pointer-events: none;\n    width: 1px;",
         "compositionend",
         // The DevTools button offers the official Chrome frontend; a page
         // cannot open devtools:// by itself, so the URL is shown to copy.

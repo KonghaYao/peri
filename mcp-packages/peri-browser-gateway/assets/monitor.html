@@ -318,10 +318,13 @@
 
   /* IME: a 1x1 editable parked at the click point. It owns focus so the OS
      candidate window opens next to the caret, while the canvas keeps the
-     pixels. `opacity: 0` keeps it focusable. */
+     pixels. `opacity: 0` keeps it focusable. It must stay out of hit testing:
+     parked under the cursor it would otherwise swallow the mouseup that
+     completes the click, and the page never sees a press-release pair. */
   #imeInput {
     position: fixed;
     z-index: 8;
+    pointer-events: none;
     width: 1px;
     height: 1px;
     margin: 0;
