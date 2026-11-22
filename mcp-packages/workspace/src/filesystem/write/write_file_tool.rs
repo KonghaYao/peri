@@ -182,19 +182,19 @@ impl BaseTool for WriteFileTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to write (must be absolute, not relative)"
+                    "description": "Absolute path to the file."
                 },
                 "content": {
                     "type": "string",
-                    "description": "The full content to write to the file. Required unless recovering a draft saved by a previous filesystem-stage write failure (see 'from_draft')."
+                    "description": "Nonblank content to write or append. Takes priority over from_draft."
                 },
                 "from_draft": {
                     "type": "string",
-                    "description": "A 'draft_...' id from a previous Write error that failed while writing to disk. Only filesystem-stage failures save drafts; path/parameter validation errors never do (provide 'content' again in that case). Mutually exclusive with 'content'; reuse the original file_path."
+                    "description": "Draft ID from a Write I/O failure. Omit content and reuse the original path; the draft keeps its original append mode. Validation errors do not save drafts."
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "If true, append content to the end of the file instead of overwriting. Use this for writing large files in chunks: first call Write without append to create the file with the initial content, then call Write with append=true to add more content. This avoids sending the entire file content in a single tool call, saving context window space.",
+                    "description": "Append content instead of overwriting.",
                     "default": false
                 }
             },

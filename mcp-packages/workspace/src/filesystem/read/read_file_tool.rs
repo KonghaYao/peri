@@ -258,17 +258,17 @@ impl BaseTool for ReadFileTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to read"
+                    "description": "Absolute file path."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional 1-based start line. OMIT by default. NEVER guess or estimate this value, and never use a large offset to probe the end of a file. Set it only to a line number already observed in Read/Grep output or explicitly provided by the user. For continuation, use the last line actually shown plus 1; do not derive it from limit or an assumed file length"
+                    "description": "1-based start line. OMIT by default. Use an already observed or user-provided line number; NEVER guess or estimate. Continue from the last line actually shown plus 1."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The maximum number of lines to read. Defaults to 2000 when omitted; use the continuation offset shown in the output to read further."
+                    "description": "Number of lines. Defaults to 2000; use the continuation offset in the output."
                 }
             },
             "required": ["file_path"]

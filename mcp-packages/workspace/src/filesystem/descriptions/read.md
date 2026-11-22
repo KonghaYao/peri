@@ -1,26 +1,5 @@
-Reads a file from the local filesystem. You can access any file directly by using this tool.
-Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+Read a local file with 1-based line numbers.
 
-Usage:
-- The file_path parameter must be an absolute path, not a relative path
-- By default, it reads up to 2000 lines starting from the beginning of the file
-- Omit offset by default. Set offset only when its 1-based line number is already known from Read/Grep output or was explicitly provided by the user
-- Never guess or estimate an offset, and never use a large offset to probe the end of a file. If the file length is unknown, read without offset
-- To continue after a partial or truncated result, use the last line number actually shown plus 1. Do not calculate the next offset from limit or an assumed file length
-- Any lines longer than 65536 characters will be truncated; the result reports the original and retained character counts before the line content
-- Results exceeding 5000 bytes are truncated at a line boundary with the original byte count; continue reading the rest with the suggested offset. If a single line alone exceeds the limit, its remainder is not reachable with line-based offset/limit; the hint will say so (Read never persists output to a file)
-- Results are returned using cat -n format, with line numbers starting at 1
-- This tool reads files from the local filesystem; it cannot handle URLs
-- You can call multiple tools in a single response.
-- You should prefer using the Read tool over the Bash tool with commands like cat, head, tail, or sed to read files. This provides better output formatting and filtering
-- Images: .png, .jpg, .jpeg, .gif, and .webp files up to 10 MB are returned as image content for multimodal inspection, not as text
-- For open-ended searches that may require multiple rounds of globbing and grepping, use the Agent tool instead
+Usage: Omit offset unless the start line was observed or provided by the user. Never guess or estimate an offset. Continue from the last line number actually shown plus 1.
 
-Error handling:
-- File not found: returns an error message indicating the path does not exist
-- Other binary files: detected by extension and returns a message indicating the file cannot be displayed as text
-- Images over 10 MB: returns an error; resize the image or inspect it with a shell tool
-- Files exceeding 32 MB: returns an error; offset/limit cannot bypass the file-size limit, so use Grep to locate content or another suitable file-processing tool
-- Offset exceeds file length: returns the actual line count and valid offset range. Do not guess another offset; omit it to restart from the beginning
-- Empty files: return an explicit `[EMPTY FILE]` marker instead of a numbered blank line
-- Directories: explicitly reports that Read converted the directory to a listing and directs callers to `folder_operations` with `operation="list"`
+Error handling: Line offsets cannot recover text truncated within a single line or bypass the 32 MB file limit. Use folder_operations for directories. Supported images up to 10 MB return image content.

@@ -115,19 +115,19 @@ impl BaseTool for EditFileTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to modify"
+                    "description": "Absolute path to the existing file."
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The text to replace. Must match EXACTLY including all whitespace, indentation, and newlines. The edit will fail if old_string is not unique in the file unless replace_all is true"
+                    "description": "Nonempty text to match exactly, including whitespace."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The text to replace it with (must be different from old_string)"
+                    "description": "Replacement text; must differ from old_string."
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "If true, replace all occurrences of old_string. If false (default), replace only the first occurrence. Use this to rename variables or update repeated patterns across the file"
+                    "description": "Replace every match if true; otherwise require exactly one match (default)."
                 }
             },
             "required": ["file_path", "old_string", "new_string"]
