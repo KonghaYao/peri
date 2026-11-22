@@ -128,7 +128,7 @@ pub(crate) const VARIANTS: &[Variant] = &[
     },
     Variant {
         key: "shimmer",
-        note: "Collapsed-group Working label: the host supplies the 100ms frame index; the band sweeps in 2s.",
+        note: "Collapsed-group title row: the host supplies the 100ms frame index; the whole row sweeps in 2s.",
         initial: shimmer_initial,
     },
 ];
@@ -194,16 +194,12 @@ pub(crate) fn render(state: &SpinnerState, area: Rect, buf: &mut Buffer) {
             ]
         }
         SpinnerCase::Shimmer => {
-            let mut spans = vec![
-                Span::styled("▸ ", Style::new().fg(MUTED)),
-                Span::styled("Read 2", Style::new().fg(MUTED)),
-                Span::styled(" · ", Style::new().fg(MUTED)),
-            ];
+            let mut spans = vec![Span::styled("▸ ", Style::new().fg(MUTED))];
             spans.extend(shimmer_spans(
-                "Working",
+                "Read 2 · Thought ×2 · Glob",
                 state.frame.saturating_mul(100),
                 ShimmerStyle {
-                    base: RUNNING,
+                    base: MUTED,
                     highlight: Color::White,
                     truecolor: true,
                     animated: true,
@@ -213,7 +209,7 @@ pub(crate) fn render(state: &SpinnerState, area: Rect, buf: &mut Buffer) {
                 Line::from(spans),
                 Line::from(""),
                 note(format!(
-                    "collapsed group tail · host frame {} · label phase {}ms",
+                    "collapsed group tail · host frame {} · row phase {}ms",
                     state.frame,
                     state.frame.saturating_mul(100)
                 )),
