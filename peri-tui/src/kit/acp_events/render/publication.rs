@@ -302,10 +302,12 @@ pub(super) fn insert_todo_summary(items: &mut im::Vector<TuiRenderUnit>, phase: 
         }
     };
     let summary = TuiRenderUnit::TuiTodoSummary(TuiTodoSummary::new(text));
-    // trailing 最终回答 = 末元素 assistant bubble（流式或已冻结的 turn 尾部）
+    // trailing 最终回答 = 含正文的 assistant bubble（流式或已冻结的 turn 尾部）。
+    // 纯 reasoning 气泡在分组侧是过程单元（`is_body_unit` 判 text 为空），若把它当
+    // 最终回答，todo 会插到它前面，把末尾过程段切成两段（尾部单独成组）。
     let is_trailing_answer = matches!(
         items.back(),
-        Some(TuiRenderUnit::TuiAssistantBubble(b)) if !b.text.is_empty() || b.reasoning.is_some()
+        Some(TuiRenderUnit::TuiAssistantBubble(b)) if !b.text.is_empty()
     );
     let insert_at = if is_trailing_answer {
         items.len() - 1
