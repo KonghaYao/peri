@@ -10,7 +10,7 @@
 //! // Submit (Accept)
 //! {"action": "accept", "content": {"q_id": "label"}}
 //!
-//! // Cancel
+//! // Cancel（裸 cancel：宿主 broker 按明确的用户拒绝结算）
 //! {"action": "cancel"}
 //! ```
 
@@ -122,8 +122,9 @@ async fn handle_submit(
     }
 }
 
-/// 处理取消：构造 Cancel response JSON，调用 send_response。
-/// 成功或传输失败都 owner-aware terminalize；失败不恢复 pending、不重试。
+/// 处理取消（Esc / 生命周期结算）：构造裸 Cancel response JSON，调用 send_response。
+/// 宿主 broker 把它结算为明确的用户拒绝（`Rejected` → `ToolRejected{UserRejected}`），
+/// 不再回落空答案。成功或传输失败都 owner-aware terminalize；失败不恢复 pending、不重试。
 async fn handle_cancel(acp_client: &AcpTuiClient, owner: &InteractionOwner, request_id_str: &str) {
     let response = json!({"action": "cancel"});
 

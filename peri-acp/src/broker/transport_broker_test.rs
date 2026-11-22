@@ -7,7 +7,7 @@
 //! 与响应解析语义（accept/decline/cancel/未知 action/解析失败兜底）。
 
 use peri_acp_types::interaction::{
-    InteractionResponse, QuestionItem, QuestionOption, UnansweredCause,
+    InteractionFailure, InteractionResponse, QuestionItem, QuestionOption, UnansweredCause,
 };
 use serde_json::json;
 
@@ -199,7 +199,7 @@ fn test_parse_accept_boolean_and_integer_to_text() {
 
 #[test]
 fn test_parse_accept_missing_content_keeps_none() {
-    // content 缺失/缺 q_id → text=None（不兜底空串，区别于 cancel）。
+    // content 缺失/缺 q_id → text=None（不兜底空串；空串只来自真实的空提交）。
     let response = crate::broker::transport_broker::parse_elicitation_response(
         json!({ "action": "accept" }),
         sample_questions(),
@@ -211,6 +211,25 @@ fn test_parse_accept_missing_content_keeps_none() {
         assert!(a.text.is_none(), "缺 content → text=None: {a:?}");
         assert!(a.selected.is_empty());
     }
+}
+
+#[test]
+fn test_parse_accept_empty_submission_is_valid_empty_answer() {
+    // 用户真的提交了空内容：accept 仍是合法答案，保持空语义，不得升级为失败。
+    let response = crate::broker::transport_broker::parse_elicitation_response(
+        json!({
+            "action": "accept",
+            "content": { "choice": "", "multi": [], "text": "" }
+        }),
+        sample_questions(),
+    );
+    let InteractionResponse::Answers(answers) = response else {
+        panic!("真实空提交必须保持 Answers: {response:?}");
+    };
+    assert_eq!(answers.len(), 3);
+    assert_eq!(answers[0].text.as_deref(), Some(""));
+    assert!(answers[1].selected.is_empty());
+    assert_eq!(answers[2].text.as_deref(), Some(""));
 }
 
 // ─── parse_elicitation_response：decline / cancel / 兜底 ───
@@ -227,26 +246,25 @@ fn test_parse_decline_rejected() {
     );
 }
 
+/// [回归测试] 裸 `cancel`（无 `_meta`：TUI Esc、owner 失效 / session/prompt
+/// 取消等生命周期结算）是用户明确撤销提问 ⇒ 必须产出 `Rejected`。旧行为回落
+/// 空 `Answers`，让模型把「取消」误读成「用户提交了空答案」。
 #[test]
-fn test_parse_cancel_empty_answers() {
+fn test_parse_bare_cancel_is_rejected() {
     let response = crate::broker::transport_broker::parse_elicitation_response(
         json!({ "action": "cancel" }),
         sample_questions(),
     );
-    let InteractionResponse::Answers(answers) = response else {
-        panic!("cancel 应返回 Answers: {response:?}");
-    };
-    assert_eq!(answers.len(), 3);
-    for a in &answers {
-        assert!(a.selected.is_empty());
-        assert_eq!(a.text.as_deref(), Some(""), "cancel → 空 Answers");
-    }
+    assert!(
+        matches!(response, InteractionResponse::Rejected),
+        "裸 cancel 必须是明确拒绝，不得回落空 Answers: {response:?}"
+    );
 }
 
 /// [回归测试] 非交互客户端（`-p`）的 cancel 用 wire 字面键值声明了原因时，必须
-/// 产出 `Unanswered` —— 若落回空 `Answers`，工具会把伪造的空回答当成用户回答。
-/// 参数化覆盖字面 wire 键/值、未知取值与取值形态畸形的声明：三种都表示「已声明
-/// 无人可作答」，都不得退化为空 `Answers`。
+/// 产出 `Unanswered` —— 若落回空 `Answers`（或降级成 `Rejected`），工具会把
+/// 「无人可作答」说成用户回答或用户拒绝。参数化覆盖字面 wire 键/值、未知取值与
+/// 取值形态畸形的声明：三种都表示「已声明无人可作答」，都必须产出 `Unanswered`。
 #[test]
 fn test_parse_cancel_with_unanswered_cause() {
     for (label, cause_value) in [
@@ -264,7 +282,7 @@ fn test_parse_cancel_with_unanswered_cause() {
             );
             assert!(
                 matches!(response, InteractionResponse::Unanswered { .. }),
-                "{label} 的 cancel 不得退化为空 Answers: {wire} → {response:?}"
+                "{label} 的 cancel 必须产出 Unanswered: {wire} → {response:?}"
             );
         }
     }
@@ -350,22 +368,23 @@ fn test_parse_does_not_infer_unanswered_without_declaration() {
     }
 }
 
-/// [回归测试] 无原因声明的 cancel 保持旧兼容语义：带无关 `_meta` 键时仍是完整
-/// 空 `Answers`（每条问题 `text=""`），与 [`test_parse_cancel_empty_answers`]
-/// 的裸 cancel 同形，不得被升级成 `Unanswered`。
+/// [回归测试] 只有声明 `peri.elicitationUnanswered` 的 cancel 才是
+/// `Unanswered`；无该声明的 cancel（含带无关 `_meta` 键）一律是明确拒绝
+/// （`Rejected`），既不是「无人可作答」也不是空 `Answers`。
 #[test]
-fn test_parse_cancel_without_declaration_keeps_legacy_empty_answers() {
-    let response = crate::broker::transport_broker::parse_elicitation_response(
+fn test_parse_cancel_without_declaration_is_rejected() {
+    for wire in [
         json!({ "action": "cancel", "_meta": { "peri.other": true } }),
-        sample_questions(),
-    );
-    let InteractionResponse::Answers(answers) = response else {
-        panic!("无声明 cancel 应保持空 Answers: {response:?}");
-    };
-    assert_eq!(answers.len(), 3);
-    for a in &answers {
-        assert!(a.selected.is_empty());
-        assert_eq!(a.text.as_deref(), Some(""), "无声明 cancel → 空 Answers");
+        json!({ "action": "cancel", "_meta": {} }),
+    ] {
+        let response = crate::broker::transport_broker::parse_elicitation_response(
+            wire.clone(),
+            sample_questions(),
+        );
+        assert!(
+            matches!(response, InteractionResponse::Rejected),
+            "无声明 cancel 必须是 Rejected: {wire} → {response:?}"
+        );
     }
 }
 
@@ -384,31 +403,41 @@ fn test_parse_permission_cancelled_maps_to_cancel_reject() {
 }
 
 #[test]
-fn test_parse_unknown_action_empty_answers() {
-    // 未知 action（Other 变体）→ 空 Answers 兜底。
+fn test_parse_unknown_action_returns_protocol_failure() {
+    // 未知 action（Other 变体）是协议错误，不是用户提交空答案。
     let response = crate::broker::transport_broker::parse_elicitation_response(
         json!({ "action": "mystery" }),
         sample_questions(),
     );
-    let InteractionResponse::Answers(answers) = response else {
-        panic!("未知 action 应返回空 Answers: {response:?}");
+    let InteractionResponse::Failed { failure } = response else {
+        panic!("未知 action 必须显式失败: {response:?}");
     };
-    assert_eq!(answers.len(), 3);
-    assert_eq!(answers[0].text.as_deref(), Some(""));
+    let InteractionFailure::Transport { detail } = failure else {
+        panic!("未知 action 属传输/协议失败: {failure:?}");
+    };
+    assert!(
+        detail.contains("unsupported elicitation action"),
+        "失败细节必须说明协议错误: {detail}"
+    );
 }
 
 #[test]
-fn test_parse_invalid_response_empty_answers() {
-    // 响应解析失败 → 空 Answers 兜底（不 panic）。
+fn test_parse_invalid_response_returns_protocol_failure() {
+    // 响应解析失败是协议错误 → 显式失败（不 panic、不伪造空答案）。
     let response = crate::broker::transport_broker::parse_elicitation_response(
         json!({ "not": "a response" }),
         sample_questions(),
     );
-    let InteractionResponse::Answers(answers) = response else {
-        panic!("解析失败应返回空 Answers: {response:?}");
+    let InteractionResponse::Failed { failure } = response else {
+        panic!("解析失败必须显式失败: {response:?}");
     };
-    assert_eq!(answers.len(), 3);
-    assert_eq!(answers[0].text.as_deref(), Some(""));
+    let InteractionFailure::Transport { detail } = failure else {
+        panic!("解析失败属传输/协议失败: {failure:?}");
+    };
+    assert!(
+        detail.contains("invalid elicitation response"),
+        "失败细节必须说明协议错误: {detail}"
+    );
 }
 
 // ─── AcpTransportBroker 行为：ApprovalMode / timeout（mock transport） ───
@@ -818,8 +847,8 @@ async fn test_approval_mode_forward_sends_request_permission() {
 }
 
 #[tokio::test]
-async fn test_questions_timeout_returns_rejected() {
-    // 客户端存活但不响应：超时 → Rejected（LLM 侧 ToolRejected）。
+async fn test_questions_timeout_returns_timeout_failure() {
+    // 客户端存活但不响应：超时是通道失败，不是 Rejected（用户拒绝）或空答案。
     let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(vec![]));
     let transport = MockTransport {
         calls: Arc::clone(&calls),
@@ -840,12 +869,89 @@ async fn test_questions_timeout_returns_rejected() {
         )
         .await;
     assert!(
-        matches!(resp, InteractionResponse::Rejected),
-        "超时应返回 Rejected: {resp:?}"
+        matches!(
+            resp,
+            InteractionResponse::Failed {
+                failure: InteractionFailure::Timeout
+            }
+        ),
+        "超时必须显式失败: {resp:?}"
     );
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "elicitation/create");
+}
+
+/// 提问链路（不只纯函数）：客户端回裸 `cancel` 时 broker 必须按明确拒绝结算，
+/// 不得产生空 `Answers`。
+#[tokio::test]
+async fn test_questions_bare_cancel_returns_rejected() {
+    let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(vec![]));
+    let transport = MockTransport {
+        calls: Arc::clone(&calls),
+        behavior: Behavior::Respond(json!({ "action": "cancel" })),
+    };
+    let broker = AcpTransportBroker::new(
+        Arc::new(transport),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
+    let resp = broker.request(owner(), questions_context()).await;
+    assert!(
+        matches!(resp, InteractionResponse::Rejected),
+        "裸 cancel 必须按明确拒绝结算: {resp:?}"
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "elicitation/create");
+}
+
+/// `decline` 仍是明确拒绝（与裸 cancel 同结果，但由不同 wire 动作触发）。
+#[tokio::test]
+async fn test_questions_decline_returns_rejected() {
+    let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(vec![]));
+    let transport = MockTransport {
+        calls: Arc::clone(&calls),
+        behavior: Behavior::Respond(json!({ "action": "decline" })),
+    };
+    let broker = AcpTransportBroker::new(
+        Arc::new(transport),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
+    let resp = broker.request(owner(), questions_context()).await;
+    assert!(
+        matches!(resp, InteractionResponse::Rejected),
+        "decline 必须保持 Rejected: {resp:?}"
+    );
+}
+
+/// 带 `_meta` 的 cancel（`-p` 非交互声明）仍走 `Unanswered`，不得升级为拒绝。
+#[tokio::test]
+async fn test_questions_cancel_with_unanswered_meta_returns_unanswered() {
+    let calls: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(vec![]));
+    let transport = MockTransport {
+        calls: Arc::clone(&calls),
+        behavior: Behavior::Respond(json!({
+            "action": "cancel",
+            "_meta": { "peri.elicitationUnanswered": "non_interactive_client" }
+        })),
+    };
+    let broker = AcpTransportBroker::new(
+        Arc::new(transport),
+        SessionId::new("s1"),
+        interaction_gate(),
+    );
+    let resp = broker.request(owner(), questions_context()).await;
+    assert!(
+        matches!(
+            resp,
+            InteractionResponse::Unanswered {
+                cause: UnansweredCause::NonInteractiveClient
+            }
+        ),
+        "带声明的 cancel 必须保持 Unanswered: {resp:?}"
+    );
 }
 
 #[tokio::test]
@@ -871,7 +977,12 @@ async fn test_questions_timeout_notifies_client_cancel_request() {
             },
         )
         .await;
-    assert!(matches!(resp, InteractionResponse::Rejected));
+    assert!(matches!(
+        resp,
+        InteractionResponse::Failed {
+            failure: InteractionFailure::Timeout
+        }
+    ));
 
     let IncomingMessage::Request { id, method, .. } = client.recv().await.unwrap() else {
         panic!("expected elicitation request");
@@ -891,38 +1002,75 @@ async fn test_questions_timeout_notifies_client_cancel_request() {
     );
 }
 
-#[tokio::test]
-async fn test_questions_transport_error_returns_empty_answers() {
-    // transport 断连（send_request 报错）：空 Answers 而非挂死。
-    struct ErrorTransport;
-    #[async_trait::async_trait]
-    impl RequestTransport for ErrorTransport {
-        async fn send_request(
-            &self,
-            _method: &str,
-            _params: serde_json::Value,
-        ) -> Result<serde_json::Value, AcpError> {
-            Err(AcpError::new(-32000, "transport closed"))
-        }
+/// 固定错误码的 transport：返回指定 `AcpError`（模拟网关能力缺失/断连）。
+struct ErrorTransport {
+    code: i64,
+    message: &'static str,
+}
+
+#[async_trait::async_trait]
+impl RequestTransport for ErrorTransport {
+    async fn send_request(
+        &self,
+        method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        assert_eq!(method, "elicitation/create");
+        Err(AcpError::new(self.code, self.message))
     }
+}
+
+async fn question_response_with_error(transport: ErrorTransport) -> InteractionResponse {
     let broker = AcpTransportBroker::new(
-        Arc::new(ErrorTransport),
+        Arc::new(transport),
         SessionId::new("s1"),
         interaction_gate(),
     );
-    let resp = broker
+    broker
         .request(
             owner(),
             InteractionContext::Questions {
                 requests: sample_questions(),
             },
         )
-        .await;
-    let InteractionResponse::Answers(answers) = resp else {
-        panic!("transport 错误应返回空 Answers: {resp:?}");
+        .await
+}
+
+#[tokio::test]
+async fn test_questions_method_not_found_returns_method_unsupported_failure() {
+    // 网关回 -32601（method not found）：能力缺失，显式失败，不是空答案。
+    let resp = question_response_with_error(ErrorTransport {
+        code: -32601,
+        message: "Method not found",
+    })
+    .await;
+    let InteractionResponse::Failed { failure } = resp else {
+        panic!("-32601 必须显式失败: {resp:?}");
     };
-    assert_eq!(answers.len(), 3);
-    assert_eq!(answers[0].text.as_deref(), Some(""));
+    assert!(
+        matches!(failure, InteractionFailure::MethodUnsupported),
+        "应分类为方法不支持: {failure:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_questions_transport_error_returns_transport_failure() {
+    // transport 断连（send_request 报错）：显式传输失败，不是空答案。
+    let resp = question_response_with_error(ErrorTransport {
+        code: -32000,
+        message: "transport closed",
+    })
+    .await;
+    let InteractionResponse::Failed { failure } = resp else {
+        panic!("transport 错误必须显式失败: {resp:?}");
+    };
+    let InteractionFailure::Transport { detail } = failure else {
+        panic!("应分类为传输失败: {failure:?}");
+    };
+    assert!(
+        detail.contains("-32000") && detail.contains("transport closed"),
+        "失败细节必须保留协议码与原因: {detail}"
+    );
 }
 
 // ─── PERI_ASK_USER_TIMEOUT_SECS 解析（批 4：统一 broker 恢复提问超时兜底）───

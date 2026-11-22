@@ -73,7 +73,7 @@ impl AcpTransport for FrameTransport {
                 }))
             }
             "elicitation/create" => Ok(serde_json::json!({
-                "action": { "action": "cancel" }
+                "action": "cancel"
             })),
             _ => Ok(Value::Null),
         }
@@ -730,6 +730,31 @@ async fn host_request_without_scope_needs_a_unique_online_endpoint() {
 
 // ─── 提问路径：门的串行与超时语义沿用既有 broker ────────────────────────────
 
+/// 无人可答（分派失败）：没有任何在线 endpoint 时提问必须如实报告
+/// `NoOnlineEndpoint`，不得产出空 `Answers` 冒充用户回答。
+#[tokio::test]
+async fn questions_without_any_online_endpoint_report_no_online_endpoint() {
+    let router = router();
+    let response = router
+        .request(
+            model_owner(),
+            InteractionContext::Questions {
+                requests: vec![QuestionItem {
+                    id: "q1".to_string(),
+                    header: "确认".to_string(),
+                    question: "继续?".to_string(),
+                    options: Vec::new(),
+                    multi_select: false,
+                }],
+            },
+        )
+        .await;
+    assert!(
+        is_no_online_endpoint(&response),
+        "没有任何在线 endpoint ⇒ 无人可答，实际: {response:?}"
+    );
+}
+
 #[tokio::test]
 async fn questions_use_the_same_session_gate_and_reach_the_routed_endpoint() {
     let router = router();
@@ -755,16 +780,12 @@ async fn questions_use_the_same_session_gate_and_reach_the_routed_endpoint() {
             },
         )
         .await;
-    // stub 回 cancel 且未声明原因 ⇒ 沿用既有 elicitation 语义（空答案）。
-    match response {
-        InteractionResponse::Answers(answers) => {
-            assert_eq!(answers.len(), 1);
-            assert_eq!(answers[0].id, "q1");
-            assert!(answers[0].selected.is_empty());
-            assert_eq!(answers[0].text.as_deref(), Some(""));
-        }
-        other => panic!("expected Answers, got {other:?}"),
-    }
+    // stub 回裸 cancel（无 `_meta`）：路由后的 endpoint 按明确拒绝结算，
+    // 不得回落空答案（旧行为）。
+    assert!(
+        matches!(response, InteractionResponse::Rejected),
+        "裸 cancel 必须是 Rejected，实际: {response:?}"
+    );
     assert_eq!(transport.frames().len(), 1);
     assert_eq!(transport.frames()[0].0, "elicitation/create");
 }

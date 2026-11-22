@@ -120,7 +120,11 @@ impl RequestTransport for agent_client_protocol::ConnectionTo<agent_client_proto
             .send_request(message)
             .block_task()
             .await
-            .map_err(|e| AcpError::new(-32603, format!("Request failed: {e}")))?;
+            // 保留 JSON-RPC 错误码：调用方（如 elicitation 的 -32601 能力判定）
+            // 依赖协议码区分「方法不支持」与传输失败，不能一律抹平为 -32603。
+            .map_err(|e| {
+                AcpError::new(i64::from(i32::from(e.code)), format!("Request failed: {e}"))
+            })?;
         Ok(response)
     }
 }
