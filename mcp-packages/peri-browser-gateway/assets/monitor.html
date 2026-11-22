@@ -17,7 +17,7 @@
     --ok: #137333;
     --warn: #b26a00;
     --bad: #c5221f;
-    /* Chrome DevTools light palette, used by the docked panel. */
+    /* Chrome DevTools light palette, used by the DevTools menu. */
     --dt-bg: #ffffff;
     --dt-bar: #f1f3f4;
     --dt-line: #dadce0;
@@ -122,19 +122,10 @@
   }
   #diagBtn .dt-logo { width: 16px; height: 16px; display: block; }
   #diagBtn:hover { background: #f1f3f4; }
-  #diagBtn.active { background: #d2e3fc; }
   #diagBtn[aria-disabled="true"] { color: #bdc1c6; }
   #diagBtn[aria-disabled="true"] .dt-logo { opacity: .45; }
-  #diagCount {
-    position: absolute;
-    top: 0; right: 0;
-    color: var(--dt-blue);
-    font-size: 9px;
-    font-variant-numeric: tabular-nums;
-    pointer-events: none;
-  }
 
-  /* Menu under the DevTools button: the real frontend or the built-in panel. */
+  /* Menu under the DevTools button: hand the page to the real frontend. */
   #devtoolsPop {
     position: fixed;
     top: 96px;
@@ -426,132 +417,6 @@
   }
   #imePreview[hidden] { display: none; }
 
-  /* Docked panel styled after Chrome DevTools: white body, #f1f3f4 tab bar,
-     blue underline on the active tab. */
-  #drawer {
-    display: flex;
-    flex-direction: column;
-    flex: none;
-    height: var(--drawer-height, 240px);
-    border-top: 1px solid var(--dt-line);
-    background: var(--dt-bg);
-    color: var(--dt-text);
-    font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  }
-  #drawer[hidden] { display: none; }
-  #drawerResize {
-    flex: none;
-    height: 4px;
-    cursor: row-resize;
-    background: transparent;
-  }
-  #drawerResize:hover, #drawerResize.dragging { background: var(--dt-blue); }
-  #drawerHead {
-    display: flex;
-    align-items: stretch;
-    gap: 2px;
-    padding: 0 4px;
-    background: var(--dt-bar);
-    border-bottom: 1px solid var(--dt-line);
-  }
-  .diagtab {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 30px;
-    padding: 0 10px;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    color: var(--dt-muted);
-    font-size: 11.5px;
-    letter-spacing: .2px;
-  }
-  .diagtab:hover:not(:disabled) { background: #e8eaed; }
-  .diagtab.active { color: var(--dt-text); background: var(--dt-bg); }
-  .diagtab.active::after {
-    content: "";
-    position: absolute;
-    left: 8px;
-    right: 8px;
-    bottom: 0;
-    height: 2px;
-    background: var(--dt-blue);
-  }
-  .diagtab .count {
-    min-width: 15px;
-    padding: 0 5px;
-    border-radius: 8px;
-    background: #dadce0;
-    color: #3c4043;
-    font-size: 10px;
-    text-align: center;
-    font-variant-numeric: tabular-nums;
-  }
-  .dt-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    padding: 0;
-    border: 0;
-    border-radius: 4px;
-    color: var(--dt-muted);
-  }
-  .dt-icon svg { width: 13px; height: 13px; display: block; }
-  .dt-icon:hover:not(:disabled) { background: #e8eaed; color: var(--dt-text); }
-  #drawerBody {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
-    background: var(--dt-bg);
-    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .diaglist { list-style: none; margin: 0; padding: 4px 0 8px; }
-  .diaglist[hidden] { display: none; }
-  .diagrow {
-    display: flex;
-    gap: 8px;
-    align-items: baseline;
-    padding: 2px 10px;
-  }
-  .diagrow:hover { background: #f1f3f4; }
-  .diagrow .ts { flex: none; color: #80868b; }
-  .diagrow .lvl { flex: none; width: 52px; text-transform: uppercase; color: var(--dt-muted); }
-  .diagrow .lvl.error { color: var(--dt-red); }
-  .diagrow .lvl.warning { color: var(--dt-yellow); }
-  .diagrow .lvl.info { color: var(--dt-blue); }
-  .diagrow .lvl.debug { color: var(--dt-muted); }
-  .diagrow .method { flex: none; width: 52px; color: var(--dt-muted); }
-  .diagrow .status { flex: none; width: 34px; text-align: right; color: var(--dt-muted); }
-  .diagrow .status.good { color: var(--dt-green); }
-  .diagrow .status.bad { color: var(--dt-red); }
-  .diagrow .url, .diagrow .text {
-    flex: 1;
-    min-width: 0;
-    color: var(--dt-text);
-    overflow-wrap: anywhere;
-    white-space: pre-wrap;
-  }
-  .nethead {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    display: flex;
-    gap: 8px;
-    padding: 4px 10px;
-    border-bottom: 1px solid var(--dt-line);
-    background: #f8f9fa;
-    color: var(--dt-muted);
-    font-size: 11px;
-  }
-  .nethead .url { flex: 1; min-width: 0; }
-  .nethead .status { flex: none; width: 34px; text-align: right; }
-  .nethead .method { flex: none; width: 52px; }
-  .nethead .ts { flex: none; }
-  .nethead[hidden] { display: none; }
-  .diagempty { color: var(--dt-muted); padding: 8px 10px; }
 </style>
 </head>
 <body>
@@ -578,12 +443,11 @@
       <svg class="omni-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm6.93 6h-2.95a15.6 15.6 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 8ZM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96ZM4.26 14a8.1 8.1 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26Zm.81 2h2.95c.32 1.25.78 2.45 1.38 3.56A8.03 8.03 0 0 1 5.07 16Zm2.95-8H5.07a8.03 8.03 0 0 1 4.33-3.56A15.6 15.6 0 0 0 8.02 8ZM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96ZM14.34 14H9.66a14.6 14.6 0 0 1 0-4h4.68a14.6 14.6 0 0 1 0 4Zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56ZM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.1 8.1 0 0 1 0 4h-3.38Z"/></svg>
       <input id="address" spellcheck="false" autocomplete="off" value="about:blank" aria-label="Page address">
     </div>
-    <button id="diagBtn" title="Open the DevTools panel (needs the page controller)" aria-label="DevTools">
+    <button id="diagBtn" title="Open Chrome DevTools" aria-label="DevTools">
       <svg class="dt-logo" viewBox="0 0 16 16" aria-hidden="true">
         <rect x="0.5" y="1.5" width="15" height="13" rx="3" fill="#3949ab"></rect>
         <path d="M5.7 5.2 3.5 8l2.2 2.8M10.3 5.2 12.5 8l-2.2 2.8" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"></path>
       </svg>
-      <span id="diagCount"></span>
     </button>
     <button id="takeover" title="Ask the agent to yield the page; it finishes the current call first" hidden>Take over</button>
     <button id="release" title="Close the controller and give the page back to the agent" hidden>Release</button>
@@ -602,8 +466,6 @@
       <p>A web page cannot open <code>devtools://</code> itself. Paste the URL into
         Chrome's address bar; the page stays where it is.</p>
     </div>
-    <p>Console and network without leaving the monitor:</p>
-    <button id="diagBuiltin">Built-in panel</button>
   </div>
 </header>
 
@@ -624,32 +486,6 @@
 <textarea id="imeInput" aria-hidden="true" tabindex="-1" autocomplete="off"
   autocapitalize="off" autocorrect="off" spellcheck="false" wrap="off"></textarea>
 <div id="imePreview" hidden></div>
-
-<section id="drawer" hidden aria-label="DevTools">
-  <div id="drawerResize" role="separator" aria-orientation="horizontal" title="Drag to resize"></div>
-  <div id="drawerHead">
-    <button class="diagtab active" id="diagConsoleTab" role="tab" aria-selected="true">Console <span class="count" id="consoleCount">0</span></button>
-    <button class="diagtab" id="diagNetworkTab" role="tab" aria-selected="false">Network <span class="count" id="networkCount">0</span></button>
-    <span class="spacer"></span>
-    <button class="dt-icon" id="diagClear" title="Clear console (the gateway keeps its own buffer)">
-      <svg viewBox="0 0 16 16" aria-hidden="true">
-        <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"></circle>
-        <path d="M3.8 3.8l8.4 8.4" stroke="currentColor" stroke-width="1.4"></path>
-      </svg>
-    </button>
-    <button class="dt-icon" id="diagClose" title="Close DevTools">&times;</button>
-  </div>
-  <div id="drawerBody">
-    <ul id="consoleList" class="diaglist"></ul>
-    <div id="networkHead" class="nethead" hidden>
-      <span class="url">Name</span>
-      <span class="status">Status</span>
-      <span class="method">Method</span>
-      <span class="ts">Time</span>
-    </div>
-    <ul id="networkList" class="diaglist" hidden></ul>
-  </div>
-</section>
 
 <div id="tabPreview"></div>
 <div id="toasts"></div>
@@ -686,17 +522,6 @@
   const devtoolsLink = document.getElementById("devtoolsLink");
   const devtoolsUrl = document.getElementById("devtoolsUrl");
   const devtoolsCopy = document.getElementById("devtoolsCopy");
-  const diagBuiltin = document.getElementById("diagBuiltin");
-  const diagCount = document.getElementById("diagCount");
-  const drawer = document.getElementById("drawer");
-  const consoleList = document.getElementById("consoleList");
-  const networkList = document.getElementById("networkList");
-  const consoleCount = document.getElementById("consoleCount");
-  const networkCount = document.getElementById("networkCount");
-  const consoleTab = document.getElementById("diagConsoleTab");
-  const networkTab = document.getElementById("diagNetworkTab");
-  const networkHead = document.getElementById("networkHead");
-  const drawerResize = document.getElementById("drawerResize");
   const imeInput = document.getElementById("imeInput");
   const imePreview = document.getElementById("imePreview");
 
@@ -727,10 +552,7 @@
     handoff: null,
     takeoverPending: false,
     takeoverTimer: 0,
-    diagOpen: false,
     devtoolsUrl: "",
-    console: [],
-    network: [],
     readonlyHintAt: 0,
     // IME: while a composition is open the page must not receive the raw
     // keystrokes; `compositionend` sends the committed text once.
@@ -739,7 +561,6 @@
     // forwarded (an IME commit also emits a keyup for a key we never sent).
     heldKeys: new Map(),
   };
-  const DIAG_LIMIT = 200;
 
   function send(message) {
     if (state.socket && state.socket.readyState === WebSocket.OPEN) {
@@ -806,141 +627,6 @@
     });
   }
 
-  function updateDiagCount() {
-    const total = state.console.length + state.network.length;
-    diagCount.textContent = total ? String(total) : "";
-    consoleCount.textContent = String(state.console.length);
-    networkCount.textContent = String(state.network.length);
-  }
-
-  function emptyRow(text) {
-    const item = document.createElement("li");
-    item.className = "diagempty";
-    item.textContent = text;
-    return item;
-  }
-
-  function timeLabel(ts) {
-    if (!ts) return "";
-    const date = new Date(ts);
-    return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString();
-  }
-
-  function renderConsole() {
-    consoleList.textContent = "";
-    if (state.console.length === 0) {
-      consoleList.append(emptyRow("no console output yet"));
-    }
-    for (const entry of state.console) {
-      const item = document.createElement("li");
-      item.className = "diagrow";
-      const time = document.createElement("span");
-      time.className = "ts";
-      time.textContent = timeLabel(entry.ts);
-      const level = document.createElement("span");
-      level.className = `lvl ${entry.level || "log"}`;
-      level.textContent = entry.level || "log";
-      const text = document.createElement("span");
-      text.className = "text";
-      text.textContent = entry.text || "";
-      item.append(time, level, text);
-      consoleList.append(item);
-    }
-    updateDiagCount();
-  }
-
-  function renderNetwork() {
-    networkList.textContent = "";
-    if (state.network.length === 0) {
-      networkList.append(emptyRow("no requests yet"));
-    }
-    for (const row of state.network) {
-      const entry = row.entry;
-      const item = document.createElement("li");
-      item.className = "diagrow";
-      const url = document.createElement("span");
-      url.className = "url";
-      url.textContent = entry.url || "";
-      const status = document.createElement("span");
-      const code = entry.status;
-      status.className = `status${code == null ? "" : code >= 400 ? " bad" : " good"}`;
-      status.textContent = code == null ? "\u2026" : String(code);
-      const method = document.createElement("span");
-      method.className = "method";
-      method.textContent = entry.method || "";
-      const time = document.createElement("span");
-      time.className = "ts";
-      time.textContent = timeLabel(entry.ts);
-      item.append(url, status, method, time);
-      networkList.append(item);
-    }
-    updateDiagCount();
-  }
-
-  function renderDiagnostics() {
-    renderConsole();
-    renderNetwork();
-  }
-
-  function clearDiagnostics() {
-    state.console = [];
-    state.network = [];
-    renderDiagnostics();
-  }
-
-  function pushConsole(entries) {
-    if (!Array.isArray(entries)) return;
-    if (entries.length === 0) {
-      // The gateway sends an empty list when it drops its ring buffer (leaving
-      // `HumanHolds`), so the drawer does not keep rows the controller no
-      // longer has.
-      state.console = [];
-    } else {
-      state.console.push(...entries);
-      if (state.console.length > DIAG_LIMIT) {
-        state.console.splice(0, state.console.length - DIAG_LIMIT);
-      }
-    }
-    renderConsole();
-  }
-
-  function pushNetwork(entries) {
-    if (!Array.isArray(entries)) return;
-    if (entries.length === 0) {
-      state.network = [];
-    } else {
-      for (const entry of entries) {
-        // A response update repeats the request entry with a status and the
-        // original timestamp; one row per request, not two.
-        const key = `${entry.method}\u0000${entry.url}\u0000${entry.ts}`;
-        const index = state.network.findIndex((row) => row.key === key);
-        if (index >= 0) state.network[index] = { key, entry };
-        else state.network.push({ key, entry });
-      }
-      if (state.network.length > DIAG_LIMIT) {
-        state.network.splice(0, state.network.length - DIAG_LIMIT);
-      }
-    }
-    renderNetwork();
-  }
-
-  function diagnosticsPage(message) {
-    // The controller only reports the page it holds; a message that names a
-    // different page belongs to a tab this viewer has already left.
-    return !message.pageId || !state.active || message.pageId === state.active;
-  }
-
-  function setDiagTab(tab) {
-    const consoleActive = tab === "console";
-    consoleTab.classList.toggle("active", consoleActive);
-    networkTab.classList.toggle("active", !consoleActive);
-    consoleTab.setAttribute("aria-selected", consoleActive ? "true" : "false");
-    networkTab.setAttribute("aria-selected", consoleActive ? "false" : "true");
-    consoleList.hidden = !consoleActive;
-    networkHead.hidden = consoleActive;
-    networkList.hidden = consoleActive;
-  }
-
   function showDevtoolsPop() {
     devtoolsPop.hidden = false;
     devtoolsButtonState();
@@ -970,23 +656,6 @@
     }
   }
 
-  function openDrawer() {
-    if (!state.caps.diagnostics || !state.interactive) {
-      toast("DevTools needs the page controller; take over to see console and network");
-      return;
-    }
-    state.diagOpen = true;
-    drawer.hidden = false;
-    diagButton.classList.add("active");
-    renderDiagnostics();
-  }
-
-  function closeDrawer() {
-    state.diagOpen = false;
-    drawer.hidden = true;
-    diagButton.classList.remove("active");
-  }
-
   function activeTab() {
     return state.tabs.find((tab) => tab.id === state.active) || null;
   }
@@ -1011,18 +680,10 @@
     takeoverButton.disabled = state.takeoverPending;
     releaseButton.hidden = !holding || Boolean(state.handoff);
     newTabButton.hidden = !state.caps.newTab;
-    diagButton.classList.toggle("active", state.diagOpen);
-    diagButton.title = holding && state.caps.diagnostics
-      ? "Show the console and network log from the page controller"
-      : "DevTools needs the page controller; take over to see console and network";
-    diagButton.setAttribute(
-      "aria-disabled",
-      holding && state.caps.diagnostics ? "false" : "true",
-    );
+    diagButton.setAttribute("aria-disabled", holding ? "false" : "true");
     address.title = holding
       ? "Press Enter: you hold the page, so the gateway navigates it directly"
       : "Press Enter: the agent executes the navigation while it holds the page";
-    if (!holding || !state.caps.diagnostics) closeDrawer();
     if (!holding) resetIme();
     renderHandoff();
   }
@@ -1112,9 +773,6 @@
     state.active = pageId;
     state.meta = null;
     state.paintedPage = null;
-    // Diagnostics belong to the controller's page: a tab switch swaps the
-    // controller connection, so the old page's rows must not follow it.
-    clearDiagnostics();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     showOverlay("waiting for the first frame\u2026");
     paintThumbnail(pageId);
@@ -1136,7 +794,6 @@
     if (state.interactive && !wasInteractive && state.visible) {
       toast("you control the page: click it, then type");
     }
-    if (!state.interactive) clearDiagnostics();
   }
 
   function setAgent(agent) {
@@ -1171,7 +828,6 @@
       paintThumbnail(state.active);
     }
     if (state.active !== previous) {
-      clearDiagnostics();
       // The URL names the page that was handed over; another tab needs its own.
       if (state.devtoolsUrl) {
         state.devtoolsUrl = "";
@@ -1266,12 +922,6 @@
         toast(message.message || code);
         break;
       }
-      case "console":
-        if (diagnosticsPage(message)) pushConsole(message.entries);
-        break;
-      case "network":
-        if (diagnosticsPage(message)) pushNetwork(message.entries);
-        break;
       default:
         break;
     }
@@ -1580,12 +1230,6 @@
     }, 1500);
   });
   devtoolsCopy.addEventListener("click", copyDevtoolsUrl);
-  diagBuiltin.addEventListener("click", () => {
-    hideDevtoolsPop();
-    if (state.diagOpen) closeDrawer();
-    else openDrawer();
-    syncControls();
-  });
   document.addEventListener("click", (event) => {
     if (devtoolsPop.hidden) return;
     if (devtoolsPop.contains(event.target) || diagButton.contains(event.target)) return;
@@ -1594,45 +1238,6 @@
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !devtoolsPop.hidden) hideDevtoolsPop();
   });
-  consoleTab.addEventListener("click", () => setDiagTab("console"));
-  networkTab.addEventListener("click", () => setDiagTab("network"));
-  document.getElementById("diagClear").addEventListener("click", clearDiagnostics);
-  document.getElementById("diagClose").addEventListener("click", () => {
-    closeDrawer();
-    syncControls();
-  });
-
-  // Chrome DevTools lets you drag its top edge; keep that affordance, clamped
-  // so the canvas is never squeezed away entirely.
-  let resizeStart = null;
-  drawerResize.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-    resizeStart = { y: event.clientY, height: drawer.getBoundingClientRect().height };
-    try {
-      drawerResize.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture is best-effort: a synthetic or already-released pointer
-      // still resizes while the drag stays inside the handle.
-    }
-    drawerResize.classList.add("dragging");
-  });
-  drawerResize.addEventListener("pointermove", (event) => {
-    if (!resizeStart) return;
-    const max = Math.max(160, innerHeight - 200);
-    const height = Math.max(120, Math.min(max, resizeStart.height + (resizeStart.y - event.clientY)));
-    drawer.style.setProperty("--drawer-height", `${Math.round(height)}px`);
-  });
-  function endResize(event) {
-    if (!resizeStart) return;
-    resizeStart = null;
-    drawerResize.classList.remove("dragging");
-    if (drawerResize.hasPointerCapture(event.pointerId)) {
-      drawerResize.releasePointerCapture(event.pointerId);
-    }
-  }
-  drawerResize.addEventListener("pointerup", endResize);
-  drawerResize.addEventListener("pointercancel", endResize);
-
   document.addEventListener("visibilitychange", () => setVisible(!document.hidden));
 
   function connect() {

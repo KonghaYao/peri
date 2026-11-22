@@ -10,7 +10,7 @@
 - 人类可接管实例的浏览器控制面；需要介入具体页面时，agent 让出页面连接，人连上后再交还。
 - 人可以在浏览器里看和操作页面：agent 空闲时直接接管输入，agent 开始干活时立即收回，画面继续只读（§6）。
 - agent 可以主动请求人：`request_human` 让监控页弹横幅并阻塞等待，人完成后工具带着结果返回（§6）。
-- 监控页的整体交互面（标签条、缩略图、地址栏、状态、诊断、交接横幅）按 live view 的水平做，不是只给一张截图。
+- 监控页的整体交互面（标签条、缩略图、地址栏、状态、DevTools 交还、交接横幅）按 live view 的水平做，不是只给一张截图。
 - 需要独立登录态时，另起实例（独立 profile、独立端口）。
 
 ## 2. 非目标
@@ -20,7 +20,7 @@
 - 不做 per-page `Fetch` 拦截：0.5.3 在 page 连接上拒绝 `Fetch.*`。
 - 不把 CDP 端点直接暴露到网络；跨机访问只经过带鉴权的网关，网关不转发实例级方法（§6）。
 - 不把监控端口做成 CDP 端点：网关只服务监控页，第三方工具接入不在本轮。
-- 不内嵌 Chrome DevTools frontend：官方前端没有可离线嵌入的构建产物（npm 包只有 TS 源码，Chrome.app 不带解包前端），硬接等于自造第二条权限链。需要官方 DevTools 时走“交还页面 + `devtools://` 地址”（§6.3），监控页自己画诊断抽屉。
+- 不内嵌 Chrome DevTools frontend：官方前端没有可离线嵌入的构建产物（npm 包只有 TS 源码，Chrome.app 不带解包前端），硬接等于自造第二条权限链。需要官方 DevTools 时走“交还页面 + `devtools://` 地址”（§6.3），监控页不再内置面板。
 - 不做同一页面上的双写：人为可写时 agent 让出，反之亦然；不合并两方输入。
 - 不承诺无锁并发建页：Browser 端点同一时刻只有一个 controller。
 - 不做 page 级抢占式 takeover：0.5.3 没有这个机制；接管一律走“让出—换连接”。
@@ -141,7 +141,7 @@ stateDiagram-v2
 ```
 
 - `AgentDriving`：MCP 持 controller；监控页是 viewer，只读。
-- `HumanHolds`：MCP 关闭页面连接（target 保留），网关持 controller；人可点击、输入、导航，诊断面板可用。
+- `HumanHolds`：MCP 关闭页面连接（target 保留），网关持 controller；人可点击、输入、导航；监控页不再内置诊断面板，需要时把页面交还给官方 DevTools。
 - 空闲让出是自动的：一次工具调用结束后 `idle_yield_ms`（默认 15 s）内没有新调用，MCP 让出，人不用先点“接管”。页面状态与 JS 上下文不变。
 - agent 收回是立即的：`HumanHolds` 期间 agent 发起页面操作，MCP 向网关发 `reclaim`；网关关闭 controller（页面上显示“agent 已收回，继续只读”），MCP 重连，最多等 `reclaim_wait_ms`（默认 2 s）。
 - 手动接管（agent 正在执行）：MCP 先完成当前调用再让出；超过 `yield_timeout_ms` 返回 `yield_pending`，监控页显示等待。
@@ -157,7 +157,7 @@ stateDiagram-v2
 | 地址栏 / 前进后退 | agent 持有时经 MCP 工具执行；人持有时由网关在 controller 上 `Page.navigate`、`Page.getNavigationHistory` + `Page.navigateToHistoryEntry` | 待实测 |
 | 新标签 / 关标签 | 一律经 MCP 建页短连接（机器锁 + Browser 端点）；网关只发请求，不碰建页 | 建页已实测 |
 | agent 状态 pill | MCP 上报 `driving` / `idle` / `waiting-for-human` | 设计 |
-| 诊断面板 | 人持 controller 时 `Runtime.enable` + `Network.enable`，环形缓冲最近 200 条；只读时隐藏并说明原因 | controller 可见已实测 |
+| 诊断缓冲 | 人持 controller 时 `Runtime.enable` + `Network.enable`，网关环形缓冲最近 200 条；监控页不展示，诊断交给官方 DevTools | controller 可见已实测 |
 | 官方 DevTools | 菜单“交给 Chrome DevTools”发 `{t:"devtools"}`：网关关闭自己的 controller，返回 `devtools://devtools/bundled/inspector.html?ws=<实例端点>/devtools/page/<id>`；用户在 Chrome 地址栏打开，官方前端独占该页 | 已实测：Elements 显示真实 DOM、Console/Sources 可用 |
 | 交接横幅 | `request_human`：显示 agent 的请求，人点“我来”进入 `HumanHolds`，点“完成”交还 | 设计 |
 | 只读标记 | viewer 连接，`Input.*` 由 Kitesurf 拒绝 | 已实测 |
@@ -194,7 +194,7 @@ sequenceDiagram
   W->>G: 鼠标 / 键盘 / 地址栏
   G->>K: Input.* / Page.navigate
   K-->>G: 诊断事件（Runtime/Network）
-  G-->>W: console / network
+  G-->>W: console / network（页面不再消费）
   M->>G: reclaim（agent 有操作）
   G->>K: 关闭 controller
   M->>K: 重连 controller
@@ -228,8 +228,8 @@ sequenceDiagram
 ### 6.8 前端
 
 - 单个 `monitor.html`：内联 CSS/JS，无构建、无依赖，`include_str!` 进网关二进制。
-- 组成：canvas、标签条与缩略图、地址栏与前进后退、agent 状态 pill、诊断抽屉、交接横幅。
-- DevTools 按钮是菜单：交给 Chrome 官方 DevTools（显示 `devtools://` 地址与复制按钮）或打开内置面板；Esc 与点击空白处关闭。
+- 组成：canvas、标签条与缩略图、地址栏与前进后退、agent 状态 pill、DevTools 交还菜单、交接横幅。
+- DevTools 按钮是菜单：交给 Chrome 官方 DevTools（显示 `devtools://` 地址与复制按钮）；Esc 与点击空白处关闭。
 - 地址栏、后退键跟随页面驱动的导航：`Page.frameNavigated` 滞后 6–15 s（Kitesurf 侧问题 #527），因此以 `/json/list` 轮询先发现新 URL，再回读确认；按 §6.3。
 - 画面用 `<canvas>`，按 ack 节奏更新；输入事件按 §6.4 的坐标映射发出。
 
@@ -252,7 +252,7 @@ sequenceDiagram
 - `browser_status` 返回：实例端点、page target、controller/所有权状态、是否被 fence、是否已让出页面、监控 URL（或 `monitor: unavailable`）、agent 状态。
 - `request_human` 阻塞当前工具调用，返回人的操作结果或 `no_human`；不改变页面所有权（人持有期间 agent 不写）。
 - 错误映射：`Another controller owns this page session`、`Target belongs to another page session`、`This method is not available on a page-session connection`、`Control has changed`、viewer 拒绝、`page_busy_by_human`、`yield_pending`、25 s egress timeout 都转成稳定错误码。
-- console/network 诊断对 page controller 可用（已实测 `Runtime.consoleAPICalled` 与 `Network.*`）；viewer 可读 DOM 与画面，但不能 `Runtime.enable`/`Network.enable`，因此监控页只在人持 controller 时显示诊断。
+- console/network 诊断对 page controller 可用（已实测 `Runtime.consoleAPICalled` 与 `Network.*`）；viewer 可读 DOM 与画面，但不能 `Runtime.enable`/`Network.enable`，因此 console/network 只在人持 controller 时由网关采集；监控页不再内置面板，诊断交给官方 DevTools。
 
 ## 8. 生命周期
 
@@ -312,7 +312,7 @@ sequenceDiagram
 3. **建页路径**：机器锁、Browser 短连接、`new_page`/`close_page`。
 4. **让出与收回**：`yield_page`、空闲让出、reclaim、fenced 状态、重新观察。
 5. **网关骨架**：独立二进制、UDS 注册、固定端口、单 html 监控页（画面、标签条、缩略图、地址栏）。
-6. **人机交接**：`request_human`、诊断面板、断线恢复、多 viewer 扇出与丢帧。
+6. **人机交接**：`request_human`、诊断缓冲、断线恢复、多 viewer 扇出与丢帧。
 7. **加固**：egress timeout 与 403 页识别、导航卡顿的 readyState 兜底、真实实例测试覆盖。
 
 ## 12. 待确认
