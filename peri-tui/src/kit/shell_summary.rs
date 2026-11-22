@@ -52,6 +52,18 @@ struct Stage {
     tokens: Vec<String>,
 }
 
+/// 命令替换 / 括号分组的一层。
+///
+/// 双引号内的 `$(...)` 内部引号独立计数：进入时保存外层引号，`)` 闭合时恢复，
+/// 避免内部引号把 `|` 等控制符暴露给阶段切分。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Frame {
+    /// `$(` 开启的命令替换；命令替换内部的 `(` 只是分组。
+    substitution: bool,
+    /// 进入命令替换前的外层引号。
+    saved_quote: Option<char>,
+}
+
 /// 按 shell 控制符切分阶段。引号、转义、`$(...)` 内的控制符不切分。
 ///
 /// heredoc 在 `<<` 处停止，避免把正文当作命令；未闭合引号 / 命令替换返回 `None`。
@@ -62,8 +74,9 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
     let mut connector = Connector::First;
     let mut quote: Option<char> = None;
     let mut escaped = false;
-    let mut subst_depth = 0usize;
+    let mut frames: Vec<Frame> = Vec::new();
     let mut backtick = false;
+    let mut backtick_saved_quote: Option<char> = None;
     let mut chars = command.chars().peekable();
 
     while let Some(c) = chars.next() {
@@ -83,6 +96,19 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
         if let Some(q) = quote {
             if c == q {
                 quote = None;
+            } else if q == '"' && c == '$' && chars.peek() == Some(&'(') {
+                // 引号内的命令替换：内部引号重新计数，`)` 闭合时恢复外层引号。
+                chars.next();
+                frames.push(Frame {
+                    substitution: true,
+                    saved_quote: quote,
+                });
+                quote = None;
+                token.push_str("$(");
+            } else if q == '"' && c == '`' {
+                quote = None;
+                backtick = true;
+                backtick_saved_quote = Some('"');
             } else {
                 token.push(c);
             }
@@ -91,6 +117,9 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
         if backtick {
             if c == '`' {
                 backtick = false;
+                if let Some(saved) = backtick_saved_quote.take() {
+                    quote = Some(saved);
+                }
             } else {
                 token.push(c);
             }
@@ -99,29 +128,42 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
 
         match c {
             '\'' | '"' => quote = Some(c),
-            '`' => backtick = true,
+            '`' => {
+                backtick = true;
+                backtick_saved_quote = None;
+            }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
-                subst_depth += 1;
+                frames.push(Frame {
+                    substitution: true,
+                    saved_quote: None,
+                });
                 token.push_str("$(");
             }
-            '(' if subst_depth > 0 => {
-                subst_depth += 1;
+            '(' if !frames.is_empty() => {
+                frames.push(Frame {
+                    substitution: false,
+                    saved_quote: None,
+                });
                 token.push(c);
             }
-            ')' if subst_depth > 0 => {
-                subst_depth -= 1;
+            ')' if !frames.is_empty() => {
+                if let Some(frame) = frames.pop()
+                    && frame.substitution
+                {
+                    quote = frame.saved_quote;
+                }
                 token.push(c);
             }
-            ' ' | '\t' | '\r' if subst_depth == 0 => {
+            ' ' | '\t' | '\r' if frames.is_empty() => {
                 flush_token(&mut token, &mut tokens);
             }
-            '\n' if subst_depth == 0 => {
+            '\n' if frames.is_empty() => {
                 flush_token(&mut token, &mut tokens);
                 flush_stage(&mut stages, &mut tokens, connector);
                 connector = Connector::Sequence;
             }
-            '#' if subst_depth == 0 && token.is_empty() => {
+            '#' if frames.is_empty() && token.is_empty() => {
                 flush_token(&mut token, &mut tokens);
                 flush_stage(&mut stages, &mut tokens, connector);
                 connector = Connector::Sequence;
@@ -131,7 +173,7 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
                     }
                 }
             }
-            '<' if subst_depth == 0 && chars.peek() == Some(&'<') => {
+            '<' if frames.is_empty() && chars.peek() == Some(&'<') => {
                 chars.next();
                 if chars.peek() == Some(&'<') {
                     // here-string：`<<<` 不是 heredoc，继续解析。
@@ -144,7 +186,7 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
                     return Some(stages);
                 }
             }
-            '>' if subst_depth == 0 => {
+            '>' if frames.is_empty() => {
                 token.push('>');
                 match chars.peek().copied() {
                     Some('>') => {
@@ -158,14 +200,14 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
                     _ => {}
                 }
             }
-            '<' if subst_depth == 0 => {
+            '<' if frames.is_empty() => {
                 token.push('<');
                 if chars.peek() == Some(&'&') {
                     chars.next();
                     token.push('&');
                 }
             }
-            '&' if subst_depth == 0 => {
+            '&' if frames.is_empty() => {
                 if chars.peek() == Some(&'>') {
                     chars.next();
                     token.push_str("&>");
@@ -182,7 +224,7 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
                     connector = Connector::Sequence;
                 }
             }
-            '|' if subst_depth == 0 => {
+            '|' if frames.is_empty() => {
                 if chars.peek() == Some(&'|') {
                     chars.next();
                     flush_token(&mut token, &mut tokens);
@@ -197,7 +239,7 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
                     connector = Connector::Pipe;
                 }
             }
-            ';' if subst_depth == 0 => {
+            ';' if frames.is_empty() => {
                 flush_token(&mut token, &mut tokens);
                 flush_stage(&mut stages, &mut tokens, connector);
                 connector = Connector::Sequence;
@@ -206,7 +248,7 @@ fn split_stages(command: &str) -> Option<Vec<Stage>> {
         }
     }
 
-    if quote.is_some() || backtick || subst_depth > 0 {
+    if quote.is_some() || backtick || !frames.is_empty() {
         return None;
     }
     flush_token(&mut token, &mut tokens);

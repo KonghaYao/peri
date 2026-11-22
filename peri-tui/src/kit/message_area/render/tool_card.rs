@@ -314,29 +314,29 @@ fn project_shell_tool(
 ) -> ToolRenderPlan {
     let sem = THEME_ATOM.state().read().semantic;
     let content = grid.process_content_width();
-    let command_lines: Vec<&str> = shell
-        .command
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
+    // 空行（如 heredoc 正文）也是命令内容：保留并计入行数上限。
+    let command_lines: Vec<&str> = shell.command.lines().collect();
     let shown = command_lines
         .len()
         .min(crate::kit::shell_summary::MAX_COMMAND_LINES);
     let mut always_visible_details = Vec::with_capacity(shown + 1);
     for (index, line) in command_lines.iter().take(shown).enumerate() {
         let prompt = if index == 0 { "$ " } else { "> " };
-        let text = format!(
-            "{prompt}{}",
-            crate::truncate::truncate_to_width(line.trim_end(), content.saturating_sub(2))
-        );
+        let text = if line.trim().is_empty() {
+            prompt.trim_end().to_string()
+        } else {
+            format!("{prompt}{}", line.trim_end())
+        };
+        // 整行（含提示符）按内容宽度裁剪，避免窄布局越界。
         always_visible_details.push(Line::from(Span::styled(
-            text,
+            crate::truncate::truncate_to_width(&text, content),
             Style::default().fg(sem.syntax.command),
         )));
     }
     if command_lines.len() > shown {
+        let indicator = format!("\u{2026} +{} lines", command_lines.len() - shown);
         always_visible_details.push(Line::from(Span::styled(
-            format!("\u{2026} +{} lines", command_lines.len() - shown),
+            crate::truncate::truncate_to_width(&indicator, content),
             Style::default().fg(sem.text.dim),
         )));
     }

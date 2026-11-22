@@ -135,6 +135,56 @@ fn test_shell_presentation_keeps_tool_chain_and_full_command() {
     assert!(text.contains('\u{2500}'), "输出前有分隔线");
 }
 
+/// heredoc 正文的空行属于命令内容：保留，并计入行数上限与溢出计数。
+#[test]
+fn test_shell_presentation_preserves_blank_command_lines() {
+    let grid = GridSpec::grid_for(80);
+    let command = "cat <<'EOF'\na\n\nb\nEOF";
+    let mut card = super::tool_card("Bash", command, false, false);
+    card.presentation = TuiToolPresentation::Shell(TuiShellPresentation {
+        tool_chain: "cat".into(),
+        command: command.into(),
+    });
+    card.recompute_hash();
+
+    let lines = render::vm_to_lines(&TuiRenderUnit::TuiToolCard(card), &grid);
+    let texts: Vec<String> = lines.iter().map(super::line_text).collect();
+    assert_eq!(texts.len(), 6, "header + 5 行命令: {texts:?}");
+    assert!(texts[2].contains("> a"), "空行前内容保留: {texts:?}");
+    assert!(
+        texts[3].trim_end().ends_with('>'),
+        "空行占位保留: {texts:?}"
+    );
+    assert!(texts[4].contains("> b"), "空行后内容保留: {texts:?}");
+}
+
+/// 整行（含提示符与溢出指示）按内容宽度裁剪，窄布局不越界。
+#[test]
+fn test_shell_presentation_clips_lines_to_content_width() {
+    let command = "cmd\nl1\nl2\nl3\nl4\nl5\nl6";
+    let mut card = super::tool_card("Bash", command, false, false);
+    card.presentation = TuiToolPresentation::Shell(TuiShellPresentation {
+        tool_chain: "cmd".into(),
+        command: command.into(),
+    });
+    card.recompute_hash();
+
+    for content in [1u16, 2, 8] {
+        let grid = GridSpec::with_content(content);
+        let lines = render::vm_to_lines(&TuiRenderUnit::TuiToolCard(card.clone()), &grid);
+        let max_width = grid.first_prefix_width() + grid.content_width();
+        let texts: Vec<String> = lines.iter().map(super::line_text).collect();
+        // 首行是工具头行（既有布局行为），这里只覆盖命令续行与溢出指示。
+        for line in lines.iter().skip(1) {
+            assert!(
+                line.width() <= max_width,
+                "content={content}: 行宽 {} 超过 {max_width}: {texts:?}",
+                line.width(),
+            );
+        }
+    }
+}
+
 /// 错误态：× + 明确错误词（Failed）；错误输出按 ` - Error: ` 拆行、error 色。
 #[test]
 fn test_tool_error_splits_and_uses_error_color() {

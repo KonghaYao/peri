@@ -45,6 +45,19 @@ fn does_not_split_inside_quotes_or_escapes() {
 }
 
 #[test]
+fn command_substitution_inside_double_quotes_keeps_outer_quotes() {
+    assert_eq!(
+        chain("echo \"$(printf \"%s\" \"a|b\")\" | cat"),
+        "echo | cat"
+    );
+    assert_eq!(
+        chain("cd \"$(git rev-parse --show-toplevel)\" && cargo test | tail"),
+        "cargo test | tail"
+    );
+    assert_eq!(chain("echo \"`printf a|b`\" | cat"), "echo | cat");
+}
+
+#[test]
 fn stops_before_heredoc_body() {
     let display = display_for("cat <<'EOF'\nhello\nEOF").expect("heredoc 命令");
     assert_eq!(display.tool_chain, "cat");
