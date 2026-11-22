@@ -304,9 +304,10 @@ npm publish --access public
 - 发布门 `scripts/verify-workflow-sidecar.sh` 会核对归档内元数据、JS 完整 sha256、目录身份与
   上述 Rust 常量四者一致。
 
-**5. 验证**：重编 peri 后触发一次 workflow。首次调用从随包 sidecar 校验并发布到
+**5. 验证**：重编 peri 后，用**隔离的空缓存**运行 `peri workflow --help`（例如把 `HOME`/`USERPROFILE`
+指向临时目录，且不设置 `PERI_WORKFLOW_ARTIFACT_DIR`），确认首次调用从随包 sidecar 校验并发布到
 `~/.peri/workflow/<ver>/<内容身份>/`（离线，无需 npm/网络）；没有任何来源通过校验时 fail closed，
-不存在网络获取路径。
+不存在网络获取路径。若复用已有缓存，解析会先命中缓存，不能证明 sidecar 可用。
 
 > 若协议有变更，同步更新 [DESIGN.md](./DESIGN.md) 的「协议版本」表。
 
