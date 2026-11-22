@@ -37,7 +37,7 @@ Peri（Rust 宿主）**随二进制分发本包构建出的单文件 bundle 作�
 `peri workflow --help` 与 workflow 工具走同一份已校验产物。
 
 - 默认**不联网**：sidecar 或缓存缺失/摘要不符时直接 fail closed（错误信息给出 sidecar 路径与可选入口）。
-- 显式 opt-in 的网络获取（`PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1`）只负责把包取到 staging，仍须通过已发布版本的固定摘要（`WORKFLOW_REGISTRY_SHA256`）校验；**不存在直接执行网络内容的路径**。
+- Peri 运行时不访问 npm/registry；下面是给非 Peri 宿主或手工调试的独立渠道。
 - 部署方可显式指定包目录：`PERI_WORKFLOW_ARTIFACT_DIR`（仍按随包身份与 `WORKFLOW_ENTRY_SHA256` 校验）。
 - `dist/` 为构建产物（`bun run build` 可复现字节）、**不入库**：由发布链在打包前构建并随发布包携带，消费方按固定 SHA-256 pin 校验。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`。
 
@@ -275,6 +275,8 @@ node dist/peri-workflow.js < /dev/null && echo "OK"
 
 ## 发布（Publishing）
 
+> npm 发布仅服务非 Peri 宿主；Peri 的 sidecar 由 release workflow 从同一构建产物打包，不依赖 npm registry。
+
 ### 前置条件
 
 - npm 账号已登录且拥有 `@peri-code` scope 的发布权限：`npm login`
@@ -292,23 +294,19 @@ npm publish --access public
 ```
 
 **4. 同步 Peri 宿主（关键联动）**：`dist/peri-workflow.js` 是发行内容与摘要校验的事实源，
-发布后必须让 Rust 侧与它一致（`peri-workflow/src/runner/artifact.rs`）：
+构建产物确定后必须让 Rust 侧与它一致（无论是否发布到 npm；`peri-workflow/src/runner/artifact.rs`）：
 
 - `WORKFLOW_NPM_VERSION` / `WORKFLOW_BUILD_ID` / `WORKFLOW_PROTOCOL_VERSION` 决定期望的包身份、
   缓存路径 `~/.peri/workflow/<version>/<内容身份>/` 与启动握手校验值；
 - `WORKFLOW_ENTRY_SHA256` 必须改为新 `dist` 的完整 sha256（`repository_bundle_matches_pinned_digest`
   测试会比对构建产物与 pin，不一致即失败——先在 `npm-packages/@peri-workflow` 运行 `bun run build`）；
-- `WORKFLOW_REGISTRY_VERSION` / `WORKFLOW_REGISTRY_SHA256` 服务 registry fallback，指向 registry 上
-  真实存在的已发布版本与摘要；发布新版本后同步为本版本，它与随包 pin 独立，不允许拿随包 pin 比较
-  registry 内容；
 - 内容身份目录名（sha256 前 12 位）由发行归档的打包步骤与发布门自动推导，无需手工同步；
 - 发布门 `scripts/verify-workflow-sidecar.sh` 会核对归档内元数据、JS 完整 sha256、目录身份与
   上述 Rust 常量四者一致。
 
 **5. 验证**：重编 peri 后触发一次 workflow。首次调用从随包 sidecar 校验并发布到
 `~/.peri/workflow/<ver>/<内容身份>/`（离线，无需 npm/网络）；摘要不符或缺失时 fail closed，
-显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 才尝试网络获取，且获取内容须通过与来源绑定的
-固定摘要校验（registry 来源用 `WORKFLOW_REGISTRY_SHA256`）。
+不存在网络获取路径。
 
 > 若协议有变更，同步更新 [DESIGN.md](./DESIGN.md) 的「协议版本」表。
 
@@ -326,7 +324,7 @@ npm publish --access public
 
 | 使用方 | 接入方式 | 需要构建？ |
 |--------|----------|-----------|
-| Peri 宿主（Rust） | 从随包 sidecar 或已校验缓存解析入口（身份 + sha256 校验），`node` 直跑 `dist/peri-workflow.js`；缺产物时 fail closed | 不需要（重编时同步 `WORKFLOW_NPM_VERSION` 与 `WORKFLOW_ENTRY_SHA256`；发布时另同步 `WORKFLOW_REGISTRY_*`） |
+| Peri 宿主（Rust） | 从随包 sidecar 或已校验缓存解析入口（身份 + sha256 校验），`node` 直跑 `dist/peri-workflow.js`；缺产物时 fail closed | 不需要（重编时同步 `WORKFLOW_NPM_VERSION` 与 `WORKFLOW_ENTRY_SHA256`） |
 | 临时手动 / 调试 | `npx -y @peri-code/workflow@<version>` 或 `bunx @peri-code/workflow@<version>`（显式版本；不带版本会在全局已有同名 bin 时静默复用旧版） | 不需要 |
 | 其他宿主集成 | 按上方「宿主实现检查清单」spawn 子进程 + JSON-RPC 协议 | 不需要 |
 | 参与开发 / 发布 | 仓库内 `bun build src/index.ts`（npm run build） | 需要（bun） |

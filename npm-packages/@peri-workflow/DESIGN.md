@@ -416,7 +416,9 @@ bun build src/index.ts \
 （`peri-workflow/src/runner/artifact.rs::WORKFLOW_ENTRY_SHA256`），不把 JS 嵌入二进制。
 重建 dist 后必须同步该摘要（`repository_bundle_matches_pinned_digest` 测试守卫）。
 
-### 安装（npm 渠道）
+### 安装（npm 渠道，非 Peri 宿主）
+
+Peri 运行时不使用该渠道；以下仅用于非 Peri 宿主或手工调试。
 
 ```bash
 npm install -g @peri-code/workflow
@@ -447,15 +449,11 @@ peri-resources/workflow/<内容身份>/     # 内容身份 = dist/peri-workflow.
 
 1. `PERI_WORKFLOW_ARTIFACT_DIR` 显式注入的包目录（部署或测试）；
 2. 本机缓存 `~/.peri/workflow/<version>/<内容身份>/`；
-3. 可执行文件目录旁的随包 sidecar（命中后 best-effort 发布到缓存以便复用）；
-4. registry 已发布内容身份的缓存（最后尝试；无随包 source 时离线复用）。
+3. 可执行文件目录旁的随包 sidecar（命中后 best-effort 发布到缓存以便复用）。
 
 每步都校验包身份（name / version / main / `periProtocolVersion` / `periBuildId`）、入口路径
-不越界，以及入口字节的 sha256 等于该来源的固定 pin：随包来源用编译期 `WORKFLOW_ENTRY_SHA256`，
-registry 来源用已发布版本的 `WORKFLOW_REGISTRY_VERSION` / `WORKFLOW_REGISTRY_SHA256`。
-默认不联网：缺失或摘要不符即 fail closed；显式 `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` 只允许
-一次网络获取，内容须通过 registry pin 校验后才会被使用——不存在直接执行网络内容的路径。
-已发布版本可能滞后于本地随包 engine，fallback 仍服务已发布 bundle；发布新版本时同步两组常量。
+不越界，以及入口字节的 sha256 等于编译期 `WORKFLOW_ENTRY_SHA256`。
+运行时不访问 npm/registry：缺失或摘要不符即 fail closed。
 启动方式为 `node <已校验入口>`；`peri workflow` CLI、preflight 与 workflow 工具共用同一解析路径。
 
 **安全要点**：

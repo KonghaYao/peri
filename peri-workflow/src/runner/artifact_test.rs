@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use crate::runner::artifact::ArtifactOrigin;
 use crate::runner::artifact::ArtifactSources;
 use crate::runner::artifact::EntryPin;
-use crate::runner::artifact::RegistryArtifact;
 use crate::runner::artifact::WORKFLOW_BUILD_ID;
 use crate::runner::artifact::WORKFLOW_ENTRY;
 use crate::runner::artifact::WORKFLOW_ENTRY_SHA256;
@@ -117,7 +116,6 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: Some(cache_prefix.clone()),
         entry_pin: pin.clone(),
-        registry: None,
     })
     .expect("显式注入应优先命中");
     assert_eq!(resolved.origin, ArtifactOrigin::Override);
@@ -129,7 +127,6 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: Some(cache_prefix),
         entry_pin: pin.clone(),
-        registry: None,
     })
     .expect("缓存应优先于随包 sidecar");
     assert_eq!(resolved.origin, ArtifactOrigin::Cache);
@@ -140,72 +137,10 @@ fn resolve_prefers_override_then_cache_then_sidecar() {
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: None,
         entry_pin: pin,
-        registry: None,
     })
     .expect("随包 sidecar 应可离线解析");
     assert_eq!(resolved.origin, ArtifactOrigin::Sidecar);
     assert_eq!(resolved.package_dir, sidecar);
-}
-
-#[test]
-fn resolve_prefers_bundled_sidecar_over_published_registry_cache() {
-    let tmp =
-        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
-    let bundled_seed = "bundled-engine";
-    let bundled = valid_package(tmp.path(), "sidecar", bundled_seed);
-    let bundled_pin = crate::runner::artifact::sha256_hex(&synthetic_entry(bundled_seed));
-
-    // 已发布版本故意与随包版本不同：证明 registry 来源校验自己的版本、buildId 与 pin。
-    let published_version = "0.2.9";
-    let published_build_id = format!("{WORKFLOW_PACKAGE_NAME}@{published_version}");
-    let published_bytes = synthetic_entry("published-engine");
-    let registry = RegistryArtifact {
-        version: published_version.to_string(),
-        build_id: published_build_id.clone(),
-        sha256: crate::runner::artifact::sha256_hex(&published_bytes),
-    };
-    let cache_prefix = tmp.path().join("cache");
-    let published_dir = cache_prefix.join(identity(&registry.sha256));
-    write_package_with(
-        &published_dir,
-        &published_bytes,
-        &registry.version,
-        &published_build_id,
-        WORKFLOW_ENTRY,
-    );
-
-    let sources = ArtifactSources {
-        override_dir: None,
-        sidecar_dirs: vec![bundled.clone()],
-        cache_prefix: Some(cache_prefix),
-        entry_pin: EntryPin(bundled_pin),
-        registry: Some(registry),
-    };
-    let resolved = crate::runner::artifact::resolve_artifact(&sources)
-        .expect("随包 sidecar 应优先于已发布缓存");
-    assert_eq!(resolved.origin, ArtifactOrigin::Sidecar);
-    assert_eq!(resolved.package_dir, bundled);
-
-    // 没有随包 sidecar 时，已发布内容按自己的内容身份离线复用。
-    let sources = ArtifactSources {
-        sidecar_dirs: Vec::new(),
-        ..sources
-    };
-    let resolved =
-        crate::runner::artifact::resolve_artifact(&sources).expect("registry 缓存应可离线复用");
-    assert_eq!(resolved.origin, ArtifactOrigin::Cache);
-    assert_eq!(resolved.package_dir, published_dir);
-    assert_eq!(resolved.entry, published_dir.join(WORKFLOW_ENTRY));
-
-    // 未配置 registry 身份时，同一缓存内容不能借随包 pin 通过校验。
-    let sources = ArtifactSources {
-        registry: None,
-        ..sources
-    };
-    assert!(
-        crate::runner::artifact::resolve_artifact(&sources).is_none(),
-        "已发布内容必须由 registry pin 校验，不能用随包 pin 放行"
-    );
 }
 
 #[test]
@@ -310,7 +245,6 @@ async fn offline_first_use_publishes_sidecar_into_cache() {
         sidecar_dirs: vec![sidecar.clone()],
         cache_prefix: Some(cache_prefix.clone()),
         entry_pin: pin.clone(),
-        registry: None,
     })
     .expect("随包 sidecar 应可离线解析");
     assert_eq!(resolved.origin, ArtifactOrigin::Sidecar);
@@ -334,7 +268,6 @@ async fn offline_first_use_publishes_sidecar_into_cache() {
         sidecar_dirs: Vec::new(),
         cache_prefix: Some(cache_prefix.clone()),
         entry_pin: pin.clone(),
-        registry: None,
     })
     .expect("发布后的缓存应独立可用");
     assert_eq!(cached.origin, ArtifactOrigin::Cache);
@@ -380,7 +313,6 @@ async fn first_use_with_empty_cache_runs_published_sidecar() {
         sidecar_dirs: vec![sidecar],
         cache_prefix: Some(cache_prefix.clone()),
         entry_pin: EntryPin(pin.clone()),
-        registry: None,
     };
 
     let command = crate::runner::artifact::prepare_workflow_command_with(&sources)
@@ -405,11 +337,39 @@ async fn first_use_with_empty_cache_runs_published_sidecar() {
     );
 }
 
+#[test]
+fn resolve_ignores_cache_entries_outside_the_bundled_content_identity() {
+    let tmp =
+        tempfile::TempDir::new().expect("the new fixture result is required for this assertion");
+    let orphan_bytes = synthetic_entry("orphan-cache");
+    let orphan_sha = crate::runner::artifact::sha256_hex(&orphan_bytes);
+    let cache_prefix = tmp.path().join("cache");
+    // 模拟旧 registry/其它来源留下的合法包：内容身份与随包 pin 不同，不得被复用。
+    write_package(
+        &cache_prefix.join(identity(&orphan_sha)),
+        &orphan_bytes,
+        WORKFLOW_NPM_VERSION,
+        WORKFLOW_ENTRY,
+    );
+    let sources = ArtifactSources {
+        override_dir: None,
+        sidecar_dirs: Vec::new(),
+        cache_prefix: Some(cache_prefix),
+        entry_pin: EntryPin(crate::runner::artifact::sha256_hex(&synthetic_entry(
+            "bundled",
+        ))),
+    };
+    assert!(
+        crate::runner::artifact::resolve_artifact(&sources).is_none(),
+        "只允许随包内容身份的缓存命中"
+    );
+}
+
 #[tokio::test]
-async fn prepare_fails_closed_without_artifact_and_without_opt_in() {
+async fn prepare_fails_closed_without_artifact() {
     let error = crate::runner::artifact::prepare_workflow_command_with(&ArtifactSources::default())
         .await
-        .expect_err("无 sidecar、无缓存且未 opt-in 时必须 fail closed");
+        .expect_err("无 sidecar、无缓存时必须 fail closed");
     let message = error.to_string();
     assert!(
         message.contains(&format!(
@@ -419,34 +379,11 @@ async fn prepare_fails_closed_without_artifact_and_without_opt_in() {
         "错误须指出随包 sidecar 位置: {message}"
     );
     assert!(
-        message.contains("PERI_WORKFLOW_ALLOW_NPX_FALLBACK"),
-        "错误须指出显式 opt-in 的联网开关: {message}"
+        message.contains("PERI_WORKFLOW_ARTIFACT_DIR"),
+        "错误须指出显式注入入口: {message}"
     );
-}
-
-#[tokio::test]
-async fn registry_fallback_requires_a_published_identity() {
-    let error =
-        crate::runner::artifact::fetch_and_publish_from_registry(&ArtifactSources::default())
-            .await
-            .expect_err("未配置已发布身份时 registry fallback 必须 fail closed");
     assert!(
-        error.to_string().contains("published artifact identity"),
-        "错误须说明缺少已发布身份: {error}"
+        !message.contains("PERI_WORKFLOW_ALLOW_NPX_FALLBACK"),
+        "错误不得再提示已移除的联网开关: {message}"
     );
-}
-
-#[test]
-fn network_fetch_requires_explicit_opt_in_value() {
-    use std::ffi::OsStr;
-    assert!(!crate::runner::artifact::network_fetch_allowed_from(None));
-    assert!(!crate::runner::artifact::network_fetch_allowed_from(Some(
-        OsStr::new("0")
-    )));
-    assert!(!crate::runner::artifact::network_fetch_allowed_from(Some(
-        OsStr::new("true")
-    )));
-    assert!(crate::runner::artifact::network_fetch_allowed_from(Some(
-        OsStr::new("1")
-    )));
 }
