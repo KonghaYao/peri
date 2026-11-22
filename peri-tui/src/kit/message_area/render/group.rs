@@ -209,16 +209,20 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
     }
 }
 
-/// 正文空档折叠组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · N failed]`。
+/// 正文空档折叠组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · Working][ · N failed]`。
 ///
 /// 折叠 = 一组一行；展开时组内成员按过程区接续渲染
 /// （[`ZoneTransition::None`](crate::kit::message_area::grid::ZoneTransition::None)），
 /// 同区继续、不重复画入口台阶；成员与组头同列。成员渲染保留自己的 fold
 /// （默认单行），另返回「成员标题逻辑行 → FoldKey」命中表供单击定位——
 /// 组头只切换整组，成员标题只切换该成员。
+///
+/// `frame` 仅消息区顶层渲染提供（详情面板与嵌套成员传 `None`）：`None` 时不画
+/// `Working`，避免详情里复制出的旧快照继续闪。
 pub(super) fn render_collapsed_group_lines(
     data: &TuiCollapsedGroup,
     grid: &GridSpec,
+    frame: Option<u64>,
 ) -> (Vec<Line<'static>>, Vec<(usize, FoldKey)>) {
     let sem = THEME_ATOM.state().read().semantic;
     let expanded = data.fold != FoldState::Collapsed;
@@ -229,9 +233,8 @@ pub(super) fn render_collapsed_group_lines(
     };
     let mut spans =
         super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
-    // 先截 title 使 (title + failed 后缀) 总宽 ≤ 过程区预算——失败数不可被截断
-    // 吞掉（§15「error 永不隐藏」），title 截断在前。
-    let suffix = if data.failed_count > 0 {
+    // 宽度预算：失败后缀先扣（§15「error 永不隐藏」），再扣 Working，最后截标题。
+    let failed_suffix = if data.failed_count > 0 {
         format!(
             " \u{b7} {}",
             i18n::tr_args(
@@ -242,15 +245,49 @@ pub(super) fn render_collapsed_group_lines(
     } else {
         String::new()
     };
+    let working_label = i18n::tr("render-group-working");
+    let working_suffix = format!(" \u{b7} {working_label}");
     let content_width = grid.process_content_width();
-    let keep = content_width.saturating_sub(suffix.width()).max(1);
+    // 连 `1 + Working + failed` 都放不下时先隐藏 Working，失败后缀不动。
+    let show_working = frame.is_some()
+        && data.is_working
+        && content_width >= 1 + working_suffix.width() + failed_suffix.width();
+    let reserved = failed_suffix.width()
+        + if show_working {
+            working_suffix.width()
+        } else {
+            0
+        };
+    let keep = content_width.saturating_sub(reserved).max(1);
     let title_trunc = crate::truncate::truncate_to_width(&data.title, keep);
     spans.push(Span::styled(
         title_trunc,
         Style::default().fg(sem.text.muted),
     ));
-    if !suffix.is_empty() {
-        spans.push(Span::styled(suffix, Style::default().fg(sem.status.error)));
+    if show_working && let Some(frame) = frame {
+        spans.push(Span::styled(
+            " \u{b7} ".to_string(),
+            Style::default().fg(sem.text.dim),
+        ));
+        let caps = crate::kit::atoms::TERMINAL_CAPS.get();
+        spans.extend(peri_tui_components::shimmer::shimmer_spans(
+            &working_label,
+            frame.saturating_mul(100),
+            peri_tui_components::shimmer::ShimmerStyle {
+                base: sem.status.running,
+                highlight: sem.text.primary,
+                // truecolor 与颜色输出都不可用时走 DIM/普通/BOLD（NO_COLOR 只剥色，
+                // modifier 保留，运动仍可辨识）。
+                truecolor: caps.truecolor && caps.color,
+                animated: !crate::kit::atoms::REDUCED_MOTION.get(),
+            },
+        ));
+    }
+    if !failed_suffix.is_empty() {
+        spans.push(Span::styled(
+            failed_suffix,
+            Style::default().fg(sem.status.error),
+        ));
     }
     let mut lines = vec![Line::from(spans)];
     let mut fold_hits: Vec<(usize, FoldKey)> = Vec::new();

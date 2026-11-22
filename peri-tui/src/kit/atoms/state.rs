@@ -327,6 +327,10 @@ pub static FOCUSED_ENTRY: AtomStatic<Option<FocusedEntry>> = AtomStatic::new(|| 
 /// 渲染层按此决定 NO_COLOR 剥离 pass 与符号/italic/truecolor 降级。
 pub static TERMINAL_CAPS: AtomStatic<crate::kit::terminal_caps::TerminalCaps> =
     AtomStatic::new(crate::kit::terminal_caps::TerminalCaps::default);
+/// reduced motion（启动时读一次 `PERI_REDUCED_MOTION`；默认 false 保持现有动画）。
+/// 只影响「可关闭的装饰性动画」——尾部组 Working 标签退回静态文本，spinner 与
+/// 工具图标仍按原节拍推进。
+pub static REDUCED_MOTION: AtomStatic<bool> = AtomStatic::new(|| false);
 /// loading 会话 epoch 计数器。每次 submit_consumer 发起新的 agent prompt 时递增。
 /// message_area 据此检测新的 loading 会话，即便 is_loading 的 false→true 过渡在
 /// 同一渲染周期内完成（如 drain_input_buffer 的立即续跑）也能可靠感知。

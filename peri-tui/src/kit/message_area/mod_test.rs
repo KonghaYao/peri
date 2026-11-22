@@ -741,6 +741,7 @@ fn test_apply_fold_toggle_collapsed_group_writes_override() {
         failed_count: 0,
         view_models: Vec::new(),
         fold: FoldState::Collapsed,
+        is_working: false,
         content_hash: 0,
     };
     group.recompute_hash();

@@ -16,6 +16,7 @@ pub mod panel_layout;
 pub mod panel_mouse;
 pub mod scrollbar;
 pub mod selection;
+pub mod shimmer;
 pub mod spinner;
 pub mod style;
 pub mod text;

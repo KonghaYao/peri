@@ -58,6 +58,8 @@ pub async fn run_kit_fullscreen(
     // 1a. 终端能力探测（一次）：NO_COLOR / TERM=dumb / COLORTERM / TERM_PROGRAM。
     //     写入 TERMINAL_CAPS atom，渲染层据此做 NO_COLOR 剥离与符号降级（§4.1/§12）。
     atoms::TERMINAL_CAPS.set(crate::kit::terminal_caps::detect_caps());
+    // 1a2. reduced motion（一次）：只关装饰性扫光，spinner 节拍照旧。
+    atoms::REDUCED_MOTION.set(crate::kit::terminal_caps::detect_reduced_motion());
 
     // 1b. 从磁盘加载输入历史到 INPUT_HISTORY atom（文件不存在则静默跳过）
     input_history::load_history();

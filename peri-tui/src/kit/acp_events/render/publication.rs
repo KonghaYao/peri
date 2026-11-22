@@ -119,7 +119,12 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
     // `changed_from` 取分组输出的稳定前缀长度：`[0, changed_from)` 的槽位内容
     // 未变，Transcript 可保留其渲染缓存。
     let detail_hashes = detail_target_hashes();
-    let changed_from = group_body_gaps(&mut items, &overrides, &detail_hashes);
+    let changed_from = group_body_gaps(
+        &mut items,
+        &overrides,
+        &detail_hashes,
+        active_turn_of(state),
+    );
     drop(overrides);
 
     let view_models = VIEW_MODELS.state();
@@ -372,7 +377,10 @@ fn is_failed_unit(vm: &TuiRenderUnit) -> bool {
     }
 }
 
-/// 组行摘要：成员类型统计（`Read 2 · Thought 1`），运行中追加 `running`。
+/// 组行摘要：成员类型统计（`Read 2 · Thought 1`）。
+///
+/// 运行态不再拼 `running` 后缀——尾部工作组由组行的 `Working` 状态标签表达
+/// （见 `mark_working_group`），避免同一组出现两个状态词。
 fn group_title(run: &[TuiRenderUnit]) -> String {
     let mut parts: Vec<(String, u32)> = Vec::new();
     for vm in run {
@@ -410,10 +418,6 @@ fn group_title(run: &[TuiRenderUnit]) -> String {
             &[("count".to_string(), FluentValue::from(run.len()))],
         );
     }
-    if run.iter().any(TuiRenderUnit::is_animating) {
-        title.push_str(" \u{b7} ");
-        title.push_str(&i18n::tr("render-group-running"));
-    }
     title
 }
 
@@ -437,6 +441,7 @@ fn build_collapsed_group(
         // 组行只折叠一层，展开后每个成员仍是自己的折叠态、可单独点开。
         view_models: run,
         fold,
+        is_working: false,
         content_hash: 0,
     };
     group.recompute_hash();
@@ -444,11 +449,12 @@ fn build_collapsed_group(
 }
 
 /// 分组辅助输入指纹——与快照内容无关但会改变分组结果的输入：语言版本
-/// （组摘要 i18n 标签）、组折叠覆盖（用户手动展开/收起）与详情目标集合
-/// （详情目标单元必须保持独立槽位）。
+/// （组摘要 i18n 标签）、组折叠覆盖（用户手动展开/收起）、详情目标集合
+/// （详情目标单元必须保持独立槽位）与 `active_turn`（尾组 Working 标记）。
 fn body_gap_aux_fingerprint(
     overrides: &std::collections::HashMap<FoldKey, FoldState>,
     detail_hashes: &std::collections::HashSet<u64>,
+    active_turn: bool,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut group_overrides: Vec<(&str, u64)> = overrides
@@ -467,10 +473,21 @@ fn body_gap_aux_fingerprint(
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     group_overrides.hash(&mut hasher);
     details.hash(&mut hasher);
+    // active_turn 翻转（TurnDone / 中断 / 历史回放）必须整体重建分组缓存，
+    // 否则输入逐条相同会让上一帧的尾组标记与 Working 缓存一起留下。
+    active_turn.hash(&mut hasher);
     crate::kit::tui_render_unit::tui_hash_combine(
         crate::kit::atoms::LANG_VERSION.get(),
         hasher.finish(),
     )
+}
+
+/// 本 turn 是否正在产出：prompt 运行中且 `current_turn` 非空。
+///
+/// `current_turn` 为空时不点亮——新一轮 prompt 刚提交、用户气泡尚未到达时，
+/// 上一轮遗留的尾组不应重新亮起。
+fn active_turn_of(state: &BridgeState) -> bool {
+    state.phase == SessionPhase::PromptRunning && !state.current_turn.is_empty()
 }
 
 /// 当前可打开详情的目标内容哈希——这些单元各自保留独立槽位。
@@ -613,9 +630,10 @@ pub(super) fn group_body_gaps(
     items: &mut im::Vector<TuiRenderUnit>,
     overrides: &std::collections::HashMap<FoldKey, FoldState>,
     detail_hashes: &std::collections::HashSet<u64>,
+    active_turn: bool,
 ) -> usize {
     let input = items.clone();
-    let aux = body_gap_aux_fingerprint(overrides, detail_hashes);
+    let aux = body_gap_aux_fingerprint(overrides, detail_hashes, active_turn);
     let cache = BODY_GAP_GROUP_CACHE.lock();
     let (rebuild_from, mut grouped, mut cuts) = match cache.as_ref() {
         Some(cached) if cached.aux == aux => {
@@ -671,6 +689,7 @@ pub(super) fn group_body_gaps(
     if cuts.len() > GROUP_CUT_CAP {
         cuts.drain(0..cuts.len() - GROUP_CUT_CAP);
     }
+    let changed_from = mark_working_group(&mut grouped, changed_from, active_turn);
     *BODY_GAP_GROUP_CACHE.lock() = Some(BodyGapGroupCache {
         input,
         grouped: grouped.clone(),
@@ -679,6 +698,66 @@ pub(super) fn group_body_gaps(
     });
     *items = grouped;
     changed_from.min(items.len())
+}
+
+/// 从尾部向前跳过 todo 摘要，返回最后一张非正文单元的折叠组下标。
+///
+/// todo 摘要是正文单元，可能追加在 turn 底部（§6.9），但不应遮挡尾组。
+fn tail_group_index(grouped: &im::Vector<TuiRenderUnit>) -> Option<usize> {
+    grouped
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, unit)| !matches!(unit, TuiRenderUnit::TuiTodoSummary(_)))
+        .and_then(|(idx, unit)| matches!(unit, TuiRenderUnit::TuiCollapsedGroup(_)).then_some(idx))
+}
+
+/// `[0, changed_from)` 前缀里上一帧还被标记为 Working 的组（同样跳过尾部 todo，
+/// 前缀末尾可能是 `[…, 旧组, todo]`）。
+fn stale_working_index(grouped: &im::Vector<TuiRenderUnit>, changed_from: usize) -> Option<usize> {
+    (0..changed_from.min(grouped.len()))
+        .rev()
+        .find(|&idx| !matches!(&grouped[idx], TuiRenderUnit::TuiTodoSummary(_)))
+        .filter(|&idx| {
+            matches!(&grouped[idx], TuiRenderUnit::TuiCollapsedGroup(group) if group.is_working)
+        })
+}
+
+fn set_group_working(grouped: &mut im::Vector<TuiRenderUnit>, idx: usize, working: bool) {
+    let Some(TuiRenderUnit::TuiCollapsedGroup(group)) = grouped.get_mut(idx) else {
+        return;
+    };
+    if group.is_working == working {
+        return;
+    }
+    group.is_working = working;
+    group.recompute_hash();
+}
+
+/// 标记尾组为 Working，并清掉被新正文挤下去的旧尾组标记。
+///
+/// 旧组必须清除且把 `changed_from` 下移到它的下标：它已不在 Transcript 的
+/// 重扫区间里，否则该 slot 会保留最后一帧的扫光。
+fn mark_working_group(
+    grouped: &mut im::Vector<TuiRenderUnit>,
+    changed_from: usize,
+    active_turn: bool,
+) -> usize {
+    let active_idx = if active_turn {
+        tail_group_index(grouped)
+    } else {
+        None
+    };
+    if let Some(idx) = active_idx {
+        set_group_working(grouped, idx, true);
+    }
+    let Some(stale_idx) =
+        stale_working_index(grouped, changed_from).filter(|&idx| Some(idx) != active_idx)
+    else {
+        return changed_from;
+    };
+    set_group_working(grouped, stale_idx, false);
+    changed_from.min(stale_idx)
 }
 
 /// [PERF] 把 `tail` 并入 `items`——按尾长选择代价更低的合并方式。

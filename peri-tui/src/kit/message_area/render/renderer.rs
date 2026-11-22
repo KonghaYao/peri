@@ -205,6 +205,7 @@ pub(crate) fn vm_to_lines_cached(
         None,
         render_copy_button,
         ZoneTransition::None,
+        None,
         true,
     );
     (lines, copy_button, interaction, image_lines)
@@ -231,6 +232,7 @@ pub(crate) fn vm_to_lines_cached_with_layout_scheduled(
         md_lines,
         render_copy_button,
         transition,
+        None,
         true,
     )
 }
@@ -255,6 +257,10 @@ pub(crate) fn vm_to_lines_cached_with_layout(
 }
 
 /// 消息区缓存路径：渲染只读当前帧；可见围栏由 transcript 统一调度。
+///
+/// `frame` 是 100ms 粒度的壁钟帧序号（与 `EntryRenderCache::ensure` 的缓存键
+/// 同源）：尾部工作组的 Working 扫光相位 = `frame × 100ms`，保证「触发
+/// Animation 重建的帧」与「画出来的相位」是同一个值。
 pub(crate) fn vm_to_lines_cached_with_layout_gated(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
@@ -262,6 +268,7 @@ pub(crate) fn vm_to_lines_cached_with_layout_gated(
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
     transition: ZoneTransition,
+    frame: Option<u64>,
 ) -> RenderOutput {
     vm_to_lines_impl(
         vm,
@@ -270,6 +277,7 @@ pub(crate) fn vm_to_lines_cached_with_layout_gated(
         md_lines,
         render_copy_button,
         transition,
+        frame,
         false,
     )
 }
@@ -282,6 +290,7 @@ fn vm_to_lines_impl(
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
     transition: ZoneTransition,
+    frame: Option<u64>,
     schedule_mermaid: bool,
 ) -> RenderOutput {
     let mut md_lines = md_lines;
@@ -702,7 +711,7 @@ fn vm_to_lines_impl(
             Vec::new(),
         ),
         TuiRenderUnit::TuiCollapsedGroup(data) => {
-            let (lines, hits) = self::group::render_collapsed_group_lines(data, grid);
+            let (lines, hits) = self::group::render_collapsed_group_lines(data, grid, frame);
             fold_hits = hits;
             (lines, None, None, Vec::new(), Vec::new())
         }

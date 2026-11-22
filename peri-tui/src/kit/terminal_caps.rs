@@ -221,6 +221,25 @@ fn detect_caps_from(get: &dyn Fn(&str) -> Option<String>) -> TerminalCaps {
     }
 }
 
+/// `PERI_REDUCED_MOTION` 是否启用：`1`/`true`/`yes`/`on`（大小写不敏感，
+/// 忽略首尾空白）。
+///
+/// [Why] 装饰性扫光在部分用户与录屏环境里干扰阅读；只做启动时一次的进程级开关，
+/// 不引入配置面板与持久化字段。
+pub(crate) fn reduced_motion_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("PERI_REDUCED_MOTION").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// 用真实环境探测 reduced motion（启动时调用一次）。
+pub(crate) fn detect_reduced_motion() -> bool {
+    reduced_motion_from(&|name| std::env::var(name).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,5 +529,22 @@ mod tests {
             detect_graphics_protocol_from(&get)
         );
         assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::ITerm2);
+    }
+
+    #[test]
+    fn test_reduced_motion_accepts_only_enabling_values() {
+        for value in ["1", "true", "TRUE", "yes", "On", "  yes  "] {
+            let overrides = [("PERI_REDUCED_MOTION", Some(value))];
+            let get = env_with(&overrides);
+            assert!(reduced_motion_from(&get), "{value:?} 应启用 reduced motion");
+        }
+        for value in ["0", "false", "no", "off", "enabled", ""] {
+            let overrides = [("PERI_REDUCED_MOTION", Some(value))];
+            let get = env_with(&overrides);
+            assert!(!reduced_motion_from(&get), "{value:?} 不应启用");
+        }
+        // 未设置时保持现有动画。
+        let get = env_with(&[]);
+        assert!(!reduced_motion_from(&get));
     }
 }

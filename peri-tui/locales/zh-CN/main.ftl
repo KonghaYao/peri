@@ -877,7 +877,7 @@ render-group-steps = { $count } 项过程
 render-group-thought = 思考
 render-group-note = 通知
 render-group-reminder = 提醒
-render-group-running = 运行中
+render-group-working = Working
 
 # ---- Interaction block（§6.8，Slice 4）----
 # inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——
