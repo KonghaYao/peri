@@ -119,12 +119,30 @@ pub async fn run_acp_stdio(input: StdioInput) -> anyhow::Result<()> {
     } else {
         None
     };
-    let cfg = assemble_stdio_config(input, injected_settings.as_deref()).await?;
-    let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let transport = StdioTransport::from_reader_writer(stdin, tokio::io::stdout());
-    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
-    super::run_acp_server_with_sessions(transport, cfg, sessions).await;
+    let transport: Arc<dyn AcpTransport> = Arc::new(StdioTransport::from_reader_writer(
+        stdin,
+        tokio::io::stdout(),
+    ));
+    match assemble_stdio_config(input, injected_settings.as_deref()).await? {
+        StdioAssembly::Configured(cfg) => {
+            let sessions: super::SharedSessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            super::run_acp_server_with_sessions(transport, *cfg, sessions).await;
+        }
+        // 无 provider 的常规配置路径：在正常业务 dispatch 之前进入显式降级
+        // 宿主。它复用同一 stdio transport，只应答 initialize 与明确的
+        // AUTH_REQUIRED，不打开 session store、资源或凭证。
+        StdioAssembly::NeedsSetup => auth_required_gate::run_auth_required_gate(transport).await,
+    }
     Ok(())
+}
+
+/// stdio 装配结果。
+///
+/// 只有常规配置文件路径缺少 provider 时才降级为 [`Self::NeedsSetup`]；
+/// `--settings-stdin` 是可信宿主注入，缺少 provider 仍按原有错误退出。
+enum StdioAssembly {
+    Configured(Box<super::AcpServerConfig>),
+    NeedsSetup,
 }
 
 /// 批 3 并入 `run_acp_stdio`（原 `host/stdio/init.rs::init_stdio_context`，已删）。
@@ -145,7 +163,7 @@ fn load_stdio_config_source(
 async fn assemble_stdio_config(
     input: StdioInput,
     injected_settings: Option<&str>,
-) -> anyhow::Result<super::AcpServerConfig> {
+) -> anyhow::Result<StdioAssembly> {
     let model_transport_route = crate::provider::transport_route::from_environment()?;
     // 解析工作目录
     let cwd = std::path::Path::new(&input.cwd)
@@ -167,13 +185,24 @@ async fn assemble_stdio_config(
         }
     });
     let peri_config = config_source.loaded_merged();
-    let provider = LlmProvider::from_source(&config_source).ok_or_else(|| {
-        if injected_settings.is_some() {
-            anyhow::anyhow!("No LLM provider configured in injected settings")
-        } else {
-            anyhow::anyhow!("No LLM provider configured. Configure ~/.peri/settings.json and, if selecting by environment, set both MODEL_PROVIDER and MODEL_TYPE")
+    let provider = match LlmProvider::from_source(&config_source) {
+        Some(provider) => provider,
+        None if injected_settings.is_none() => {
+            // 常规配置路径（未被可信宿主注入 settings）缺少 provider：先启动
+            // 降级宿主，让 ACP client 能拿到 initialize/authMethods 与可操作的
+            // AUTH_REQUIRED，而不是在握手前静默退出。只提示一次，标准错误输出
+            // 不与 stdout 的 JSON-RPC 帧混流。
+            eprintln!(
+                "warning: No LLM provider configured. Run `peri --setup` to configure a model provider; ACP session requests will fail with AUTH_REQUIRED until then."
+            );
+            return Ok(StdioAssembly::NeedsSetup);
         }
-    })?;
+        None => {
+            return Err(anyhow::anyhow!(
+                "No LLM provider configured in injected settings"
+            ));
+        }
+    };
 
     tracing::info!(
         provider = %provider.display_name(),
@@ -255,8 +284,14 @@ async fn assemble_stdio_config(
     cfg.stdio_command_filter = true;
     cfg.model_transport_route = model_transport_route;
 
-    Ok(cfg)
+    Ok(StdioAssembly::Configured(Box::new(cfg)))
 }
+
+mod auth_required_gate;
+
+#[cfg(test)]
+#[path = "auth_required_gate_test.rs"]
+mod auth_required_gate_tests;
 
 #[cfg(test)]
 #[path = "run_server_integration_test.rs"]

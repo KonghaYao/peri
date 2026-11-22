@@ -89,6 +89,9 @@ pub(super) struct Cli {
     /// 加载额外 settings 文件或 JSON 字符串
     #[arg(long = "settings")]
     pub(super) settings: Option<String>,
+    /// 运行一次性配置向导后退出（`peri --setup` / `peri acp --setup`）
+    #[arg(long = "setup", global = true)]
+    pub(super) setup: bool,
     /// 全局配置文件路径（默认 ~/.peri/settings.json）
     #[arg(long = "config-file", visible_alias = "configFile")]
     pub(super) config_file: Option<PathBuf>,
@@ -449,6 +452,11 @@ pub(super) fn validate_cli(cli: &Cli) -> std::result::Result<(), String> {
     {
         return Err("--settings-stdin cannot be combined with --config-file".into());
     }
+    // --setup / PERI_ACP_SETUP 走交互式向导，--settings-stdin 是可信宿主的
+    // 非交互注入；两者同时出现没有可判定的优先级，按参数错误拒绝。
+    if setup_conflicts_with_settings_stdin(cli.setup, &cli.command) {
+        return Err("--setup cannot be combined with --settings-stdin".into());
+    }
     if cli.print.is_some() && cli.command.is_some() {
         return Err("--print cannot be used with a subcommand".into());
     }
@@ -725,6 +733,34 @@ pub(super) fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Res
 
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
+/// `--setup` 或 `PERI_ACP_SETUP` 是否请求一次性配置向导。
+///
+/// 环境值去空白后按 ASCII 大小写不敏感接受 `1` / `true` / `on` / `yes`；
+/// 其它值（含空串）一律为 false，不猜测用户意图。
+pub(super) fn setup_requested(cli_setup: bool, env_value: Option<&str>) -> bool {
+    if cli_setup {
+        return true;
+    }
+    env_value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
+}
+
+/// setup 与可信宿主注入没有可判定优先级；CLI 与环境两个来源共用同一判定。
+pub(super) fn setup_conflicts_with_settings_stdin(setup: bool, command: &Option<Commands>) -> bool {
+    setup
+        && matches!(
+            command,
+            Some(Commands::Acp {
+                settings_stdin: true,
+                ..
+            })
+        )
+}
+
 pub(super) fn run() -> Result<()> {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|arg| arg == "mcp-start") {
@@ -797,6 +833,42 @@ pub(super) fn run() -> Result<()> {
         cli.config_file.clone()
     });
 
+    // --setup / PERI_ACP_SETUP：绕过 -p 与 Commands::Acp，直接进入同一个
+    // 交互式首次配置向导。向导完成一次 pass 后由 kit entry 决定退出码：
+    // 保存成功 0，取消或未完成 1（普通 peri 的取消语义不变）。
+    let setup = setup_requested(cli.setup, std::env::var("PERI_ACP_SETUP").ok().as_deref());
+    // validate_cli 已拒绝显式 --setup 的冲突；环境来源在此复用同一判定，
+    // 不让 --settings-stdin 的可信注入被交互向导旁路。
+    if setup_conflicts_with_settings_stdin(setup, &cli.command) {
+        return Err(anyhow::anyhow!(
+            "--setup cannot be combined with --settings-stdin"
+        ));
+    }
+    if setup {
+        let result = cli_tui::run_tui(TuiOptions {
+            permission_mode: cli.permission_mode.clone(),
+            skip_permissions: cli.skip_permissions,
+            model: cli.model.clone(),
+            effort: cli.effort.clone(),
+            // 配置向导不恢复历史会话：--setup 只处理 provider/凭据。
+            continue_session: false,
+            resume_session: None,
+            session_id: None,
+            session_name: None,
+            settings: cli.settings.clone(),
+            allowed_tools: cli.allowed_tools.clone().unwrap_or_default(),
+            disallowed_tools: cli.disallowed_tools.clone().unwrap_or_default(),
+            // 向导使用默认本机会话库，不消费 --db-path / --session-store：
+            // 这些定位参数属于会话入口，不属于首次配置。
+            session_store: SessionStoreDeployment::default_local(),
+            setup_only: true,
+        });
+        return match result {
+            Ok(()) => Ok(()),
+            Err(_) => std::process::exit(1),
+        };
+    }
+
     // -p/--print 模式（优先级高于子命令）
     if cli.print.is_some() {
         // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
@@ -844,6 +916,7 @@ pub(super) fn run() -> Result<()> {
             allowed_tools: cli.allowed_tools.unwrap_or_default(),
             disallowed_tools: cli.disallowed_tools.unwrap_or_default(),
             session_store,
+            setup_only: false,
         }) {
             Ok(()) => Ok(()),
             Err(_) => std::process::exit(1),
@@ -946,3 +1019,7 @@ pub(super) fn run() -> Result<()> {
 }
 
 // ─── TUI 模式 ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "startup_setup_test.rs"]
+mod setup_tests;

@@ -68,6 +68,9 @@ async fn injected_settings_assemble_without_settings_file() {
     )
     .await
     .unwrap();
+    let super::StdioAssembly::Configured(assembled) = assembled else {
+        panic!("injected settings with a provider must assemble a configured host");
+    };
     assert_eq!(assembled.provider.read().model_name(), "injected-model");
     assert!(!tmp.path().join("missing-settings.json").exists());
 }

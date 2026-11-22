@@ -38,6 +38,33 @@ use ratatui_kit::crossterm::event::EnableMouseCapture;
 use ratatui_kit::crossterm::execute;
 use ratatui_kit::prelude::*;
 
+/// setup pass 的退出决策（纯函数，覆盖 completed / setup_only 组合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupPassOutcome {
+    /// 向导完成且不是 setup-only：继续装配 ACP 并进入正常 shell。
+    Continue,
+    /// setup-only 完成：退出 0，不 attach ACP。
+    ExitAfterSetup,
+    /// setup-only 未完成（取消/失败）：退出非零。
+    SetupIncomplete,
+    /// 普通首次启动取消：保持既有成功退出语义。
+    Cancelled,
+}
+
+/// 是否需要一次 SetupWizard pass：未配置 provider 或显式 setup-only。
+pub(crate) fn setup_pass_required(needs_setup: bool, setup_only: bool) -> bool {
+    needs_setup || setup_only
+}
+
+pub(crate) fn setup_pass_outcome(setup_only: bool, completed: bool) -> SetupPassOutcome {
+    match (setup_only, completed) {
+        (false, true) => SetupPassOutcome::Continue,
+        (true, true) => SetupPassOutcome::ExitAfterSetup,
+        (false, false) => SetupPassOutcome::Cancelled,
+        (true, false) => SetupPassOutcome::SetupIncomplete,
+    }
+}
+
 /// 使用 ratatui-kit 的全屏模式启动 TUI。
 ///
 /// 接收 CLI 选项 + panic 通知 rx，完成 App+ACP 构建后
@@ -211,15 +238,32 @@ pub async fn run_kit_fullscreen(
     //     提供无会话时的默认权限显示；当前会话权限经 ACP 读取和修改。
     let _ = atoms::PERMISSION_MODE_HANDLE.set(app.services.permission_mode.clone());
 
-    // 2e. I17-B：检测首次启动未配置 Provider，触发 SetupWizard 渲染。
-    //     wizard 即使是引导界面也支持 Esc/q 退出（避免首次启动锁死）。
-    {
+    // 2e. 首次启动未配置 Provider，或显式 --setup / PERI_ACP_SETUP：
+    //     SetupWizard 独占一个 fullscreen 生命周期。wizard 即使是引导界面也
+    //     支持 Esc/q 退出（避免首次启动锁死）。
+    //
+    //     预填现有配置供编辑，但 from_command=false：本 pass 发生在 ACP 装配
+    //     之前，没有可调用的在线 update_config；完成时必须置 SETUP_COMPLETED，
+    //     entry 才能据此决定 attach 或退出。SETUP_COMPLETED 显式清零，防止
+    //     复用同一进程的旧完成状态让取消被误判为完成。
+    let needs_setup = {
         let cfg = app.services.peri_config.read();
-        if crate::app::setup_wizard::needs_setup(&cfg.config) {
-            *atoms::WIZARD_ACTIVE.state().write() = true;
-            *atoms::SETUP_PREFLIGHT.state().write() = true;
-            tracing::info!("kit entry: needs_setup=true，触发 SetupWizard");
+        crate::app::setup_wizard::needs_setup(&cfg.config)
+    };
+    if setup_pass_required(needs_setup, opts.setup_only) {
+        if let Some(handle) = atoms::PERI_CONFIG_HANDLE.get() {
+            let mut draft = crate::app::setup_wizard::state_from_config(&handle.read());
+            draft.from_command = false;
+            *atoms::SETUP_WIZARD.state().write() = draft;
         }
+        *atoms::SETUP_COMPLETED.state().write() = false;
+        *atoms::WIZARD_ACTIVE.state().write() = true;
+        *atoms::SETUP_PREFLIGHT.state().write() = true;
+        tracing::info!(
+            needs_setup,
+            setup_only = opts.setup_only,
+            "kit entry: 触发 SetupWizard"
+        );
     }
 
     let shutdown = CancellationToken::new();
@@ -334,22 +378,41 @@ pub async fn run_kit_fullscreen(
             crate::launch::teardown_app(&mut app).await;
             return Err(error.into());
         }
-        if !*atoms::SETUP_COMPLETED.state().read() {
-            shutdown.cancel();
-            crate::kit::program_status::clear();
-            crate::launch::teardown_app(&mut app).await;
-            return Ok(());
-        }
-        *atoms::SETUP_PREFLIGHT.state().write() = false;
-        acp_client = match crate::launch::attach_acp(&mut app).await {
-            Ok(client) => Some(client),
-            Err(error) => {
+        // setup-only 完成即退出，不 attach ACP；未完成（取消/失败）必须让进程
+        // 以非零退出，不能被普通首次启动的取消语义吞掉。普通 peri 的取消
+        // 行为保持不变。
+        match setup_pass_outcome(opts.setup_only, *atoms::SETUP_COMPLETED.state().read()) {
+            SetupPassOutcome::Continue => {
+                *atoms::SETUP_PREFLIGHT.state().write() = false;
+                acp_client = match crate::launch::attach_acp(&mut app).await {
+                    Ok(client) => Some(client),
+                    Err(error) => {
+                        shutdown.cancel();
+                        crate::kit::program_status::clear();
+                        crate::launch::teardown_app(&mut app).await;
+                        return Err(error);
+                    }
+                };
+            }
+            SetupPassOutcome::ExitAfterSetup => {
                 shutdown.cancel();
                 crate::kit::program_status::clear();
                 crate::launch::teardown_app(&mut app).await;
-                return Err(error);
+                return Ok(());
             }
-        };
+            SetupPassOutcome::SetupIncomplete => {
+                shutdown.cancel();
+                crate::kit::program_status::clear();
+                crate::launch::teardown_app(&mut app).await;
+                return Err(anyhow::anyhow!("Setup cancelled or incomplete"));
+            }
+            SetupPassOutcome::Cancelled => {
+                shutdown.cancel();
+                crate::kit::program_status::clear();
+                crate::launch::teardown_app(&mut app).await;
+                return Ok(());
+            }
+        }
     }
 
     // Start snapshots only after setup has either completed and attached ACP,
@@ -795,3 +858,7 @@ fn build_snapshot_source(
         providers,
     }
 }
+
+#[cfg(test)]
+#[path = "entry_setup_test.rs"]
+mod setup_tests;

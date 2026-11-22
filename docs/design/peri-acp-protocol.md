@@ -35,6 +35,9 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
+未配置 provider 的降级 stdio 宿主在 `initialize` 成功后拒绝全部 `session/*`：`session/new` 等返回
+`-32000`、`data.reason="auth_required"` 与 `peri --setup` 提示；完成配置并重连后恢复（见 §2.3.1）。
+
 同一 ACP 连接默认表示客户端的会话切换关系，并且至多绑定一个 setup 会话。连接已有当前
 会话时，`session/new|fork` 与指向不同 ID 的 `session/load|resume` 返回 `-32010`、
 `data.reason="session_switch_requires_close"`；客户端必须先成功 `session/close` 或
@@ -384,6 +387,7 @@ recovery 元数据并保留历史首屏。
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
+| `initialize` | `{ protocolVersion, clientCapabilities?, clientInfo? }` | `{ protocolVersion, agentCapabilities, authMethods }` | 协商版本与 agent capabilities；客户端声明终端认证能力时返回一个 `type:"terminal"` 方法（见 §2.3.1） |
 | `session/set_mode` | `{ modeId?, sessionId? }` | `{}` | 切换**权限模式**（default / plan / acceptEdits 等） |
 | `session/set_config_option` | `{ sessionId?, configId, value }` | `{}` | 更新配置项；`configId` 支持 `mode` / `model`（模型切换）/ `thinking_effort` / `context_1m`（有 session 时用 request，无 session 时用 `session/config_update` notification） |
 | `session/update_config` | `{ sessionId?, config }` | `{ configOptions }` | 完整 `PeriConfig` 替换（校验 providers 非空与 profile→provider 引用），变更后推送 `config_option_update` 并 invalidate LLM 实例 |
@@ -396,6 +400,34 @@ recovery 元数据并保留历史首屏。
 | `mcp/oauth_cancel` | `{ sessionId, server_name }` | `{ success }` | 取消进行中的 OAuth 流程并清理临时状态 |
 
 > **已移除/不存在方法**：`session/approve` 和 `session/answer` 已废弃——HITL 审批经 broker JSON-RPC `session/request_permission` 往返，TUI 通过 `send_response`（JSON-RPC response）回传审批结果（`hitl_response.rs`），AskUser 同理走 `elicitation/create` + `send_response`（`ask_user_action.rs`），均不走 execute-command。`session/query` 和 `session/suggest-files` 未实现——文件补全走本地 `FILE_LIST` atom + `SkimMatcher`。
+
+#### 2.3.1 终端认证与未配置宿主
+
+`initialize` 的 `authMethods` 只在客户端声明终端认证能力时非空。判定输入（任一成立即可）：
+
+- 标准 ACP v1 `clientCapabilities.auth.terminal === true`；
+- Registry 旧标记 `clientCapabilities._meta["terminal-auth"] === true`；
+- 顶层 `params._meta["terminal-auth"] === true`（兼容只把标记放在参数根部的客户端）。
+
+成立时**只返回一个** `type:"terminal"` 方法：id `peri-setup`、name `Configure Peri`，
+`args:["--setup"]`、`env:{"PERI_ACP_SETUP":"1"}`。客户端可分别按“追加参数 / 替换参数 /
+仅设环境变量”启动 `peri acp`，三种形式都进入同一个首次配置向导。未声明任何标记时
+`authMethods` 为空；`clientCapabilities.terminal`（`terminal/*` 工具能力）不是认证声明，
+不单独触发。正常配置 provider 的宿主其余 initialize 形状不变，创建会话不要求先调用
+`authenticate`。
+
+没有 provider 且不是 `--settings-stdin` 注入时，stdio 宿主进入显式降级应答：`initialize`
+仍成功，返回最小 agent capabilities 与上述认证方法；`session/*` 请求被拒绝：
+
+| code | `data.reason` | 条件 |
+|---:|---|---|
+| `-32000` | `auth_required` | 未完成首次配置；`data` 同时携带 `authMethods`、`setupCommand:"peri --setup"` 与 `hint` |
+
+`-32000` 在其他路径也用于 turn/背压失败，客户端须结合 `data.reason="auth_required"` 判定。
+降级宿主对未注册方法返回 `-32601`，消息说明完成 `peri --setup` 前不可用。配置完成后重连，
+`session/new` 走正常宿主；`--settings-stdin` 注入缺少 provider 时仍按注入契约启动失败，
+不进入降级应答。`initialize` 之前的 `session/*` 没有可复用的声明，错误 `data.authMethods`
+为空，提示仍指向 `peri --setup`。
 
 ### 2.4 插件管理
 
@@ -546,7 +578,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 ### 6.2 传输实现
 
 - **TUI 内嵌 ACP**：`MpscTransport` 在同一进程内通过 tokio mpsc 搬运 wire 消息。
-- **IDE / stdio**：`run_acp_stdio(StdioInput)` 完成 stdio 编解码与部署装配，然后进入 `run_acp_server_with_sessions`；它与 TUI 共用 `handle_request` 和 session/prompt 主路径。`session/new` response 必须先于首次 commands notification。legacy `type:cancel` 是兼容性的全 session 强停入口，不等于标准 `session/cancel`。
+- **IDE / stdio**：`run_acp_stdio(StdioInput)` 完成 stdio 编解码与部署装配，然后进入 `run_acp_server_with_sessions`；它与 TUI 共用 `handle_request` 和 session/prompt 主路径。`session/new` response 必须先于首次 commands notification。legacy `type:cancel` 是兼容性的全 session 强停入口，不等于标准 `session/cancel`。正常配置缺少 provider（非 `--settings-stdin`）时，同一 `run_acp_stdio` 在同一 `StdioTransport` 上进入 auth-required 降级宿主：只应答 `initialize` 与拒绝 `session/*`，不装配 `AcpServerConfig`、不复制业务分发；配置完成后重连才进入 `run_acp_server_with_sessions`（见 §2.3.1）。
 
 传输层职责限于消息搬动——不做事件过滤、不做事物流、不做重试。事件协议化与通道选择由 `peri-acp/src/event/` 的 EventSink 和映射层决定。
 

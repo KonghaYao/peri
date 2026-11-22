@@ -32,6 +32,8 @@ pub struct TuiLaunchOptions {
     pub disallowed_tools: Vec<String>,
     /// 会话存储定位描述（由入口归一一次；恢复会话不重新解析存储位置）。
     pub session_store: peri_acp_types::session_store::SessionStoreDeployment,
+    /// 只运行首次配置向导：即使已有 provider 也不装配 ACP。
+    pub setup_only: bool,
 }
 
 /// 构建 App + ACP server/client，并把 acp_client 注入 App。
@@ -129,7 +131,9 @@ pub async fn build_app_and_acp(
         let cfg = app.services.peri_config.read();
         crate::app::setup_wizard::needs_setup(&cfg.config)
     };
-    let acp_client = if needs_setup {
+    // setup-only 与未配置 provider 都不得在此装配 ACP：向导完成后由 kit
+    // entry 决定是否 attach（setup-only 完成即退出，不进入交互主界面）。
+    let acp_client = if needs_setup || opts.setup_only {
         None
     } else {
         Some(attach_acp_with_transport_route(&mut app, model_transport_route).await?)
