@@ -35,15 +35,24 @@ if (listing.includes('Output truncated:')) {
 
 const targets = listing.split('\n').filter(Boolean)
 const results = await parallel(targets.map(file => async () => {
-  const text = await tool('Read', { file_path: file })
-  // A truncated read cannot be ranked by its partial line count.
-  if (text.includes('[Output truncated:')) return { file, lines: null }
-  return { file, lines: text.split('\n').length }
+  try {
+    const text = await tool('Read', { file_path: file })
+    // A truncated read cannot be ranked by its partial line count.
+    if (text.includes('[Output truncated:')) return { file, lines: null }
+    return { file, lines: text.split('\n').length }
+  } catch (error) {
+    // Keep the typed failure code instead of letting parallel() drop it.
+    if (!error.code) throw error
+    return { file, error: error.code }
+  }
 }))
 
-// A failed thunk resolves to `null`; keep those names visible to the agent.
-const counts = results.filter(Boolean)
-const unread = targets.filter((_, index) => results[index] === null)
+const counts = results.filter(result => result && !result.error)
+const unread = results
+  .map((result, index) =>
+    result && !result.error ? null : { file: targets[index], error: result?.error ?? 'unexpected_error' },
+  )
+  .filter(Boolean)
 const verdict = await agent(
   `Rank the largest files and flag anomalies. ` +
     `Line counts: ${JSON.stringify(counts)}. Unread files: ${JSON.stringify(unread)}`,

@@ -96,7 +96,7 @@
    - `tools.jsonl` 追加失败仍投递结果、resume 会重放未记录前缀：不改变，属已文档化
      的 journal 边界（`tool_journal_append_failure_does_not_change_the_terminal`
      锁定），改变它需要另行裁决磁盘失败时的 run 语义。
-8. **CodeRabbit 追加轮 4 条（`codemode` SKILL 示例）**：均成立，同一次提交修复。
+8. **CodeRabbit 追加轮 5 条（`codemode` SKILL 示例）**：均成立，同一次提交修复。
    - `Glob` 无匹配返回 `No files found.`、超限时附 `[Output truncated: ...]` 说明，
      示例会把说明当路径传给 `Read`：示例先判空返回，命中截断说明时抛错要求收窄
      pattern。
@@ -106,6 +106,9 @@
      命中截断说明的条目把 `lines` 记为 `null`（未知），不参与按行数排名。
    - 过滤失败 thunk 会丢失未读文件名：按索引从 `targets` 还原为 `unread`，
      与 `counts` 一同写入提示词并返回。
+   - 失败 thunk 解析为 `null` 会丢掉 `WorkflowToolError.code`：thunk 内捕获已知
+     code（`policy_denied` / `tool_unavailable` 等）随文件名返回，未知异常仍抛出；
+     按索引兜底为 `unexpected_error`。
 
 ## 4. 未覆盖与限制
 
