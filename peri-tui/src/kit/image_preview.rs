@@ -10,6 +10,9 @@
 //! 集成边界（S2 §1）：
 //! - 不走 `Picker::from_query_stdio` 的 stdin 探测（与决策文档 §3.4「query 必须
 //!   在 fullscreen 前」的时序约束解耦），协议由 `caps.graphics` 品牌映射决定；
+//! - Sixel 直接按像素绘制，目标像素必须由真实单元格尺寸换算。本模块用
+//!   `TIOCGWINSZ` 的像素字段（crossterm `window_size`）取尺寸；取不到时退回
+//!   文本降级，宁可 false negative 也不让像素溢出预留区；
 //! - `is_tmux` 无法外部注入（picker.rs `pub(crate)` 字段，S2 §1 边界 2）——
 //!   tmux 内降级/乱码风险接受，T1 矩阵（TMUX 存在 → None）与 `PERI_IMAGE=off`
 //!   逃生位已覆盖；
@@ -26,7 +29,9 @@ use std::thread;
 
 use image::DynamicImage;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::terminal;
 use ratatui::layout::{Rect, Size};
+use ratatui_image::FontSize;
 use ratatui_image::errors::Errors;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::{Protocol, StatefulProtocol};
@@ -35,22 +40,62 @@ use ratatui_image::{Resize, ResizeEncodeRender};
 
 use super::terminal_caps::{GraphicsProtocol, TerminalCaps};
 
+/// 终端单元格像素尺寸；终端不报告（非 TTY / 平台未实现）时返回 `None`。
+///
+/// Sixel 按像素直接落屏，只有拿到真实单元格尺寸才能把编码像素限制在预留
+/// 单元格内；取不到时 [`supported`] 保持文本降级。
+pub(crate) fn cell_pixel_size() -> Option<(u16, u16)> {
+    let size = terminal::window_size().ok()?;
+    if size.columns == 0 || size.rows == 0 || size.width == 0 || size.height == 0 {
+        return None;
+    }
+    let cell = (size.width / size.columns, size.height / size.rows);
+    is_valid_cell_size(cell).then_some(cell)
+}
+
+fn is_valid_cell_size((width, height): (u16, u16)) -> bool {
+    width > 0 && height > 0
+}
+
 /// 从 [`TerminalCaps`] 品牌映射构造 `Picker`。
 ///
-/// 不走 `from_query_stdio`（不读写 stdin）。仅 [`GraphicsProtocol::Kitty`] 强制
-/// `ProtocolType::Kitty`；ITerm2（检测但 disabled）与 None 保持默认 halfblocks
-/// 安全态，像素渲染由 [`supported`] 统一门控。
-///
-/// 注意：`Picker::halfblocks()` 构造时按环境探测 tmux（TERM 以 `tmux` 开头或
+/// 不走 `from_query_stdio`（不读写 stdin）。[`GraphicsProtocol::Kitty`] 强制
+/// 对应 `ProtocolType`；[`GraphicsProtocol::Sixel`] 仅在拿到真实单元格尺寸时
+/// 切换（编码像素与预留区一致），否则保持 halfblocks 安全态。ITerm2（检测但
+/// disabled）与 None 同样保持 halfblocks，像素渲染由 [`supported`] 统一门控。
+/// 注意：`Picker` 构造时按环境探测 tmux（TERM 以 `tmux` 开头或
 /// `TERM_PROGRAM == "tmux"` 时 spawn `tmux set -p allow-passthrough on`）；
-/// T1 探测矩阵保证 `graphics == Kitty` 时 TMUX 环境变量不存在，仅
-/// `PERI_IMAGE=kitty` 强制场景可能触发（用户显式强制，S2 已接受风险）。
+/// T1 探测矩阵保证自动探测下 `graphics` 非 None 时 TMUX 环境变量不存在，仅
+/// `PERI_IMAGE=kitty|sixel` 强制场景可能触发（用户显式强制，S2 已接受风险）。
 pub fn picker_for(caps: &TerminalCaps) -> Picker {
-    let mut picker = Picker::halfblocks();
-    if caps.graphics == GraphicsProtocol::Kitty {
-        picker.set_protocol_type(ProtocolType::Kitty);
+    picker_for_with_cell_size(caps, cell_pixel_size())
+}
+
+pub(crate) fn picker_for_with_cell_size(
+    caps: &TerminalCaps,
+    cell_px: Option<(u16, u16)>,
+) -> Picker {
+    let mut picker = match cell_px {
+        Some(cell) if caps.graphics == GraphicsProtocol::Sixel && is_valid_cell_size(cell) => {
+            picker_with_cell_size(cell)
+        }
+        _ => Picker::halfblocks(),
+    };
+    match caps.graphics {
+        GraphicsProtocol::Kitty => picker.set_protocol_type(ProtocolType::Kitty),
+        GraphicsProtocol::Sixel if cell_px.is_some_and(is_valid_cell_size) => {
+            picker.set_protocol_type(ProtocolType::Sixel);
+        }
+        GraphicsProtocol::ITerm2 | GraphicsProtocol::Sixel | GraphicsProtocol::None => {}
     }
     picker
+}
+
+/// ratatui-image 9.0 起把固定 font size 的构造标为 deprecated（推荐 stdin
+/// 查询）；本模块按 S2 边界不读 stdin，改用 ioctl 实测尺寸。
+#[allow(deprecated)]
+fn picker_with_cell_size((width, height): (u16, u16)) -> Picker {
+    Picker::from_fontsize(FontSize::new(width, height))
 }
 
 /// 静态预览协议（面积固定）：渲染线程跨帧持有同一 `&Protocol`，
@@ -76,17 +121,25 @@ pub fn stateful_protocol(picker: &Picker, img: DynamicImage) -> StatefulProtocol
     picker.new_resize_protocol(img)
 }
 
-/// 降级判定：仅 `caps.graphics == Kitty` 且 picker 实际协议为 Kitty 系时
-/// 允许像素渲染（决策文档 §8.2「可恢复降级」）。
+/// 降级判定：Kitty 恒定可用；Sixel 仅在拿到真实单元格尺寸时可用
+/// （编码像素与预留区一致，防止溢出）；ITerm2 / None 恒 false
+/// （决策文档 §8.2「可恢复降级」，宁可 false negative）。
 ///
-/// - `None` / `ITerm2`（未验证不启用）→ false；
-/// - `Kitty` → 二次判定 `picker_for` 的协议类型（目前恒真：本模块强制设置、
-///   不触碰 stdin 探测；保留判定点以覆盖未来版本内置黑名单降级的可能）。
+/// 二次判定 `picker_for` 的协议类型（目前恒真：本模块强制设置、不触碰 stdin
+/// 探测；保留判定点以覆盖未来版本内置黑名单降级的可能）。
 pub fn supported(caps: &TerminalCaps) -> bool {
-    if caps.graphics != GraphicsProtocol::Kitty {
-        return false;
-    }
-    matches!(picker_for(caps).protocol_type(), ProtocolType::Kitty)
+    supported_with_cell_size(caps, cell_pixel_size())
+}
+
+pub(crate) fn supported_with_cell_size(caps: &TerminalCaps, cell_px: Option<(u16, u16)>) -> bool {
+    let expected = match caps.graphics {
+        GraphicsProtocol::Kitty => ProtocolType::Kitty,
+        GraphicsProtocol::Sixel if cell_px.is_some_and(is_valid_cell_size) => ProtocolType::Sixel,
+        GraphicsProtocol::Sixel | GraphicsProtocol::ITerm2 | GraphicsProtocol::None => {
+            return false;
+        }
+    };
+    picker_for_with_cell_size(caps, cell_px).protocol_type() == expected
 }
 
 /// 后台 resize/encode 卸载的动态协议（S2 §6 非阻塞要求）。
