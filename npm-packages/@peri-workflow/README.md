@@ -280,7 +280,8 @@ node dist/peri-workflow.js < /dev/null && echo "OK"
 ### 前置条件
 
 - npm 账号已登录且拥有 `@peri-code` scope 的发布权限：`npm login`
-- bun 可用（构建依赖 `bun build`）
+- bun `1.4.5`（release 工作流固定的版本，见 `.github/workflows/workflow-sidecar.yml`；
+  版本漂移会改变 bundle 字节，使已提交的 `WORKFLOW_ENTRY_SHA256` 在发布时失效）
 
 ### 发布流程（checklist）
 

@@ -51,11 +51,14 @@ jobs:
               with:
                   persist-credentials: false
 
-            # 产物字节（bundle 内联了 workflow-engine）决定内容身份，因此工具链版本
-            # 必须记录在日志里：bun 升级若改变产物，身份校验会在编译前明确失败，
-            # 而不是让六个平台编译完后才在打包阶段炸掉。
+            # 产物字节（bundle 内联了 workflow-engine）决定内容身份，因此 bun 版本
+            # 必须固定：`bun install --frozen-lockfile` 已锁依赖，工具链不固定时
+            # setup-bun 的 latest 会改变 bundle 字节，使已提交的 pin 在发布时才失效。
+            # 升级 bun 属于有意的身份变更：改这里 → 重建 → 同步 WORKFLOW_ENTRY_SHA256。
             - name: Install Bun
               uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: "1.4.5"
 
             - name: Build and verify sidecar
               id: build
