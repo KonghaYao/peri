@@ -209,7 +209,7 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
     }
 }
 
-/// 正文空档折叠组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · Working][ · N failed]`。
+/// 正文空档折叠组行：`[outer 空][indent 留空][▸|▾][gap]{title}[ · N failed]`。
 ///
 /// 折叠 = 一组一行；展开时组内成员按过程区接续渲染
 /// （[`ZoneTransition::None`](crate::kit::message_area::grid::ZoneTransition::None)），
@@ -217,8 +217,9 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
 /// （默认单行），另返回「成员标题逻辑行 → FoldKey」命中表供单击定位——
 /// 组头只切换整组，成员标题只切换该成员。
 ///
-/// `frame` 仅消息区顶层渲染提供（详情面板与嵌套成员传 `None`）：`None` 时不画
-/// `Working`，避免详情里复制出的旧快照继续闪。
+/// `frame` 仅消息区顶层渲染提供（详情面板与嵌套成员传 `None`）：尾部工作组把
+/// 扫光铺在整行标题上（不是追加状态标签）；`None` 时标题保持静态 muted，避免
+/// 详情里复制出的旧快照继续闪。
 pub(super) fn render_collapsed_group_lines(
     data: &TuiCollapsedGroup,
     grid: &GridSpec,
@@ -233,7 +234,7 @@ pub(super) fn render_collapsed_group_lines(
     };
     let mut spans =
         super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
-    // 宽度预算：失败后缀先扣（§15「error 永不隐藏」），再扣 Working，最后截标题。
+    // 宽度预算：失败后缀先扣（§15「error 永不隐藏」），再截标题（至少 1 列）。
     let failed_suffix = if data.failed_count > 0 {
         format!(
             " \u{b7} {}",
@@ -245,42 +246,31 @@ pub(super) fn render_collapsed_group_lines(
     } else {
         String::new()
     };
-    let working_label = i18n::tr("render-group-working");
-    let working_suffix = format!(" \u{b7} {working_label}");
     let content_width = grid.process_content_width();
-    // 连 `1 + Working + failed` 都放不下时先隐藏 Working，失败后缀不动。
-    let show_working = frame.is_some()
-        && data.is_working
-        && content_width >= 1 + working_suffix.width() + failed_suffix.width();
-    let reserved = failed_suffix.width()
-        + if show_working {
-            working_suffix.width()
-        } else {
-            0
-        };
-    let keep = content_width.saturating_sub(reserved).max(1);
+    let keep = content_width.saturating_sub(failed_suffix.width()).max(1);
     let title_trunc = crate::truncate::truncate_to_width(&data.title, keep);
-    spans.push(Span::styled(
-        title_trunc,
-        Style::default().fg(sem.text.muted),
-    ));
-    if show_working && let Some(frame) = frame {
-        spans.push(Span::styled(
-            " \u{b7} ".to_string(),
-            Style::default().fg(sem.text.dim),
-        ));
+    // 尾部工作组：扫光铺满整行标题（基色仍取静态 muted，光带扫过时提亮到
+    // primary）——不用追加标签占宽，窄屏也不会把状态挤掉。
+    if data.is_working
+        && let Some(frame) = frame
+    {
         let caps = crate::kit::atoms::TERMINAL_CAPS.get();
         spans.extend(peri_tui_components::shimmer::shimmer_spans(
-            &working_label,
+            &title_trunc,
             frame.saturating_mul(100),
             peri_tui_components::shimmer::ShimmerStyle {
-                base: sem.status.running,
+                base: sem.text.muted,
                 highlight: sem.text.primary,
                 // truecolor 与颜色输出都不可用时走 DIM/普通/BOLD（NO_COLOR 只剥色，
                 // modifier 保留，运动仍可辨识）。
                 truecolor: caps.truecolor && caps.color,
                 animated: !crate::kit::atoms::REDUCED_MOTION.get(),
             },
+        ));
+    } else {
+        spans.push(Span::styled(
+            title_trunc,
+            Style::default().fg(sem.text.muted),
         ));
     }
     if !failed_suffix.is_empty() {

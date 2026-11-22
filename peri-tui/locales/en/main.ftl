@@ -879,7 +879,6 @@ render-group-steps = { $count } steps
 render-group-thought = Thought
 render-group-note = Note
 render-group-reminder = Reminder
-render-group-working = Working
 
 # ---- Interaction block (spec §6.8, Slice 4) ----
 # inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——

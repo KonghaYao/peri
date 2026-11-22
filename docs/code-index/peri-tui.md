@@ -10,7 +10,7 @@
 补全的可见窗口、选中标记与命中共用组件的 `completion::CompletionPopup`；
 确认与下载弹窗共用 `overlay::OverlayFrame`（宿主在既有位置只清屏一次），消息区底部
 与运行中工具图标共用无状态的 `spinner::Spinner`（帧集、节奏与文案留在应用）；
-尾部折叠组 `Working` 标签的扫光共用纯函数 `shimmer::shimmer_spans`（相位、基色/
+尾部折叠组标题行的扫光共用纯函数 `shimmer::shimmer_spans`（相位、基色/
 高光与能力由宿主注入，组件不读时钟与终端能力）。
 消息区与子 Agent 详情的纵向滚动条共用 `scrollbar::VerticalBar`：宿主传原始内容偏移，
 绘制、端点/空轨命中与拖拽反推使用同一份滑块几何，两端显式映射 0 与最大偏移；
@@ -82,10 +82,11 @@ Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_i
 组键取组首成员稳定身份（`tool:` / `reasoning:` /
 `reminder:` 等），流式追加入同组不换键；分组缓存按稳定切点复用前缀，只重建变化后缀。
 尾部工作组（`phase == PromptRunning` 且 `current_turn` 非空，跳过尾部 todo 摘要后的
-第一张折叠组）由 `group_body_gaps` 置 `TuiCollapsedGroup::is_working`，组行追加
-` · Working`；标签扫光由 `peri-tui-components` 的 `shimmer::shimmer_spans` 计算，
-相位取消息区帧序号 × 100ms，`PERI_REDUCED_MOTION` 时退回静态标签。标记翻转与旧尾组
-清除会降低 `changed_from` 让该 slot 重扫，历史/回放/完成组不带标记。
+第一张折叠组）由 `group_body_gaps` 置 `TuiCollapsedGroup::is_working`，组行标题整行
+扫光（不追加状态标签，失败后缀独立红色不进扫光）；扫光由 `peri-tui-components` 的
+`shimmer::shimmer_spans` 计算，相位取消息区帧序号 × 100ms，`PERI_REDUCED_MOTION` 时
+退回静态标题。标记翻转与旧尾组清除会降低 `changed_from` 让该 slot 重扫，历史/回放/
+完成组不带标记。
 错误级通知、required / warning 及以上提醒、交互块与子 Agent 组保持可见，不自动隐藏。
 点击命中行由 `message_area/slot_index.rs` 的 `header_local` 扣除过程区转场台阶行，
 `scroll/gesture.rs` 只认 header 行与成员标题行。回归入口：`acp_events_test::display_retention_test`、

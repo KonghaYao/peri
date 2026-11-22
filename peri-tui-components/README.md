@@ -91,7 +91,7 @@ is the primary input and mirrors the real TUI:
 - the spinner story feeds fixed frames: idle holds frame 0, while active and tool
   advance the host-owned index on click; the tool variant previews the glyph the host
   composes into a card header, and the shimmer variant feeds the same 100ms index
-  into `shimmer_spans` for the collapsed-group `Working` label, so dumps stay
+  into `shimmer_spans` for the collapsed group title row, so dumps stay
   reproducible;
 - the image story generates a RGBA gradient in memory and renders it through
   `image::halfblock_lines`; transparent corners stay blank and every row keeps the
@@ -234,7 +234,7 @@ feature unification is not an isolation test.
 ## Scope of this extraction
 
 Spinner labels and modes remain in `peri-tui` because they encode business activity.
-The same holds for the shimmer label text and its "which group is working" decision;
+The same holds for the shimmered title text and its "which group is working" decision;
 `shimmer_spans` only turns the host-supplied phase and colors into styled spans.
 Panel registries, popups, transcript/tool projections and orchestration remain
 application components. This is an initial extraction, not certification that
