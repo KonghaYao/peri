@@ -21,6 +21,7 @@
 | `PERI_RENDER_TIMING` | `1` 或 `true`（不区分大小写）时记录渲染阶段耗时；缺省关闭。 | `peri-tui/src/kit/message_area/vm_cache.rs` |
 | `PERI_NO_HIGHLIGHT` | `1` 或 `true` 时关闭消息区选中文本高亮；缺省关闭此回退。 | `peri-tui/src/kit/message_area/mod.rs` |
 | `PERI_DISABLE_DRAG_SELECT` | `1` 或 `true` 时跳过消息区鼠标拖拽选中；缺省允许。 | `peri-tui/src/kit/message_area/scroll/event.rs` |
+| `PERI_REDUCED_MOTION` | `1`、`true`、`yes` 或 `on`（大小写与首尾空白不敏感）时关闭尾部折叠组 `Working` 标签的扫光，标签保留为静态文本；spinner 与工具图标节拍不变。缺省开启动画。 | `peri-tui/src/kit/terminal_caps.rs`、`peri-tui/src/kit/entry.rs` |
 | `EDITOR` | 编辑记忆文件时启动的编辑器；缺省 `vi`。 | `peri-tui/src/kit/panels/memory.rs` |
 
 `HOME`、`USERPROFILE`、`PATH` 与 `MALLOC_CONF` 等跨组件 OS 输入仍在[主表](environment-variables.md#操作系统与进程输入)说明；它们并非 TUI 专属开关。

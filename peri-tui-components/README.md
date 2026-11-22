@@ -22,6 +22,7 @@ terminal text safety (`markdown::safety`) and pure value image sampling
 | `list_nav` | key events and selection | navigation intent and bounds |
 | `overlay::OverlayFrame` | title line, border/title styles, area | top/bottom borders, centred title, `inner()` region and `hit()` (inside/border/outside); never clears |
 | `spinner::Spinner` | frame set, external frame index, icon style, pre-formatted text line | frame selection (`frame % len`) and `icon + space + text` composition |
+| `shimmer::shimmer_spans` | text, external phase in milliseconds, base/highlight colors, truecolor and reduced-motion flags | per-character cosine band styling (`2s` sweep); no clock, terminal caps or theme atoms |
 | `panel_mouse` | last drawn rectangle, row metrics, mouse event | hit testing and local area tracking |
 | `panel_layout` | terminal height, theme min/max panel height | transcript reserve, border rows and first-frame content height |
 | `scrollbar::VerticalBar` | bar height, viewport rows, content rows, raw offset, thumb/arrow styles | thumb geometry shared by painting and hit testing; `press`/`drag_offset` map both movable-track ends to `0`/`max_offset` |
@@ -89,7 +90,9 @@ is the primary input and mirrors the real TUI:
   the same shell without a confirm action;
 - the spinner story feeds fixed frames: idle holds frame 0, while active and tool
   advance the host-owned index on click; the tool variant previews the glyph the host
-  composes into a card header, so dumps stay reproducible;
+  composes into a card header, and the shimmer variant feeds the same 100ms index
+  into `shimmer_spans` for the collapsed-group `Working` label, so dumps stay
+  reproducible;
 - the image story generates a RGBA gradient in memory and renders it through
   `image::halfblock_lines`; transparent corners stay blank and every row keeps the
   exact preview column budget, with no file or terminal-protocol access;
@@ -105,7 +108,7 @@ Eleven stories cover `textarea`, `list`, `scrollbar`, `completion` (`@` rows,
 `markdown` (rich text, headings, lists, code, table, image, gen-ui fence,
 streaming), `openui` (stack column/row, card, text, heading, list, table, key-value, progress, divider,
 button, bar chart, sparkline, streaming), `overlay` (confirm and download),
-`spinner` (idle, active and tool frames), `image` (half-block RGBA gradient),
+`spinner` (idle, active, tool and shimmer frames), `image` (half-block RGBA gradient),
 `mermaid` (flowchart, sequence,
 state, class, ER, pie, journey, gantt, timeline, gitGraph, mindmap, quadrant,
 requirement, sankey, xychart, architecture, packet and streaming) and `charts`
@@ -231,6 +234,8 @@ feature unification is not an isolation test.
 ## Scope of this extraction
 
 Spinner labels and modes remain in `peri-tui` because they encode business activity.
+The same holds for the shimmer label text and its "which group is working" decision;
+`shimmer_spans` only turns the host-supplied phase and colors into styled spans.
 Panel registries, popups, transcript/tool projections and orchestration remain
 application components. This is an initial extraction, not certification that
 all obsolete TUI code has been removed. Full application build and visual/E2E

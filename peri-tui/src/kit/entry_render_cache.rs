@@ -139,6 +139,7 @@ impl EntryRenderCache {
                         None,
                         true,
                         transition,
+                        Some(frame),
                     )
                 } else {
                     crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(
@@ -176,6 +177,7 @@ impl EntryRenderCache {
                     Some(&mut self.markdown_lines),
                     true,
                     transition,
+                    Some(frame),
                 )
             } else {
                 crate::kit::message_area::render::vm_to_lines_cached_with_layout_scheduled(

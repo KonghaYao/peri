@@ -9,7 +9,9 @@
 语句确认、排版、概览与预览状态机由组件的 `mermaid` 模块持有；输入区 `@`/`/`
 补全的可见窗口、选中标记与命中共用组件的 `completion::CompletionPopup`；
 确认与下载弹窗共用 `overlay::OverlayFrame`（宿主在既有位置只清屏一次），消息区底部
-与运行中工具图标共用无状态的 `spinner::Spinner`（帧集、节奏与文案留在应用）。
+与运行中工具图标共用无状态的 `spinner::Spinner`（帧集、节奏与文案留在应用）；
+尾部折叠组 `Working` 标签的扫光共用纯函数 `shimmer::shimmer_spans`（相位、基色/
+高光与能力由宿主注入，组件不读时钟与终端能力）。
 消息区与子 Agent 详情的纵向滚动条共用 `scrollbar::VerticalBar`：宿主传原始内容偏移，
 绘制、端点/空轨命中与拖拽反推使用同一份滑块几何，两端显式映射 0 与最大偏移；
 三行滚轮步长、有界偏移与调用方时钟节流也由该模块提供。消息内 Mermaid 帧与
@@ -79,11 +81,17 @@ Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_i
 单击成员标题行只切换该成员（`entry_nav::apply_group_member_toggle`），内容行不切换。
 组键取组首成员稳定身份（`tool:` / `reasoning:` /
 `reminder:` 等），流式追加入同组不换键；分组缓存按稳定切点复用前缀，只重建变化后缀。
+尾部工作组（`phase == PromptRunning` 且 `current_turn` 非空，跳过尾部 todo 摘要后的
+第一张折叠组）由 `group_body_gaps` 置 `TuiCollapsedGroup::is_working`，组行追加
+` · Working`；标签扫光由 `peri-tui-components` 的 `shimmer::shimmer_spans` 计算，
+相位取消息区帧序号 × 100ms，`PERI_REDUCED_MOTION` 时退回静态标签。标记翻转与旧尾组
+清除会降低 `changed_from` 让该 slot 重扫，历史/回放/完成组不带标记。
 错误级通知、required / warning 及以上提醒、交互块与子 Agent 组保持可见，不自动隐藏。
 点击命中行由 `message_area/slot_index.rs` 的 `header_local` 扣除过程区转场台阶行，
 `scroll/gesture.rs` 只认 header 行与成员标题行。回归入口：`acp_events_test::display_retention_test`、
 `fold_overrides::tests`、`acp_events_test::{body_gap_group_test,fold_test,snapshot_test,
-diff_grouping_test}`、`message_area::{transcript_index_test,scroll_test,render::tests::group_click_tests}`。
+diff_grouping_test}`、`message_area::{transcript_index_test,scroll_test,
+render::tests::{group_click_tests,group_working_tests},entry_render_cache::tests}`。
 
 内部续跑与定时审批通过 `ExecutionStarted` 建立真实 execution 身份及 HITL 许可；`acp_client/interaction_lifecycle/prompt.rs` 对 managed 输入与 external execution 共用代际、重复和终态归属规则，但仅 managed 输入的 Stop 携带 mailbox 票据身份。`kit/acp_notifier/notifier.rs` 保留终态 request ID；bridge 不让陈旧结束或迟到提交失败清除新执行。`kit/acp_events/bridge_state.rs::SubmittedInputRollback` 将 composer 回滚文本绑定提交请求，`turn.rs` 只允许所属请求取消回滚，internal execution 开始不重绑它。日常提交失败只发布原会话/请求所属事件，不直接写全局 loading。定向入口 `acp_client::client::pump::user_input_run_tests` 与 `kit::acp_events::acp_events_test`。
 
@@ -318,7 +326,7 @@ re-export，`persistence.rs` 维护 revision 保存；`tui_config.rs` 只 re-exp
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 线程存储 | src/thread/mod.rs | 仅 re-export `ThreadStore`/`ThreadMeta`/`SqliteThreadStore`（事实源 peri-acp-types / 实现在 peri-resources） |
-| 通用组件 | peri-tui-components/src/{textarea/,spinner.rs}；src/components/spinner/ | 文本编辑 widget（text_area.rs/text_area_state.rs/word.rs/history.rs）；无状态 spinner（帧序号/帧集/已格式化文字由宿主提供）；应用侧模式、时钟、随机动词与耗时/token 文案（spinner_state.rs/animation.rs/verb.rs） |
+| 通用组件 | peri-tui-components/src/{textarea/,spinner.rs,shimmer.rs}；src/components/spinner/ | 文本编辑 widget（text_area.rs/text_area_state.rs/word.rs/history.rs）；无状态 spinner（帧序号/帧集/已格式化文字由宿主提供）；纯函数文字扫光（相位、基色/高光、truecolor 与 reduced-motion 由宿主提供）；应用侧模式、时钟、随机动词与耗时/token 文案（spinner_state.rs/animation.rs/verb.rs） |
 
 ## 跨模块契约（指向 architecture-contracts.md，不复制正文）
 

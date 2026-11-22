@@ -77,6 +77,8 @@ impl TuiRenderUnit {
         match self {
             Self::TuiToolCard(data) if data.is_running => 1,
             Self::TuiSubAgentGroup(data) if data.is_running => 1,
+            // 尾部工作组：组行的 Working 扫光按帧推进（phase = frame × 100ms）。
+            Self::TuiCollapsedGroup(data) if data.is_working => 1,
             // 组内任一成员运行中且组已展开 → 按 1 帧刷新（成员 spinner / elapsed
             // 可见）；组行本身静态，折叠时无需逐帧重渲染。
             Self::TuiCollapsedGroup(data)

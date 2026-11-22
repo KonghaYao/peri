@@ -106,6 +106,9 @@ pub struct TuiCollapsedGroup {
     pub view_models: Vec<TuiRenderUnit>,
     /// 当前折叠态——用户覆盖（FOLD_OVERRIDES）或默认 `Collapsed`。
     pub fold: FoldState,
+    /// 是否为当前 turn 的尾部工作组——只由 publication 置位，历史/回放/完成组恒
+    /// false；参与 hash/PartialEq，标记翻转必须触发该 slot 的渲染缓存重建。
+    pub is_working: bool,
     /// 内容哈希——rebuild 时用于检测是否需重新渲染
     pub content_hash: u64,
 }
@@ -125,11 +128,12 @@ impl TuiCollapsedGroup {
         h = super::hash::tui_hash_combine(h, self.view_models.len() as u64);
         h = super::hash::tui_hash_combine(h, child_hash_total);
         h = super::hash::tui_hash_combine(h, super::fold::fold_state_code(self.fold));
+        h = super::hash::tui_hash_combine(h, u64::from(self.is_working));
         self.content_hash = h;
     }
 }
 
-tui_impl_partial_eq!(TuiCollapsedGroup: key, title, count, failed_count, view_models, fold);
+tui_impl_partial_eq!(TuiCollapsedGroup: key, title, count, failed_count, view_models, fold, is_working);
 
 /// Visual separator between iteration rounds.
 #[derive(Debug, Clone)]

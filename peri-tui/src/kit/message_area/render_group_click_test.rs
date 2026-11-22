@@ -77,6 +77,7 @@ fn group(members: Vec<TuiRenderUnit>, fold: FoldState) -> TuiCollapsedGroup {
         failed_count: 0,
         view_models: members,
         fold,
+        is_working: false,
         content_hash: 0,
     };
     group.recompute_hash();

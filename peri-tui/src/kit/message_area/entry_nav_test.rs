@@ -401,6 +401,7 @@ fn test_group_expand_claims_deferred_history_result_refetch() {
         failed_count: 0,
         view_models: vec![TuiRenderUnit::TuiToolCard(card)],
         fold: FoldState::Collapsed,
+        is_working: false,
         content_hash: 0,
     };
     group.recompute_hash();
