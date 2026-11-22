@@ -9,8 +9,9 @@ also owns the business-independent renderers moved down from the app: Markdown
 and strictly budgeted truncation (`text::wrap_by_width` /
 `text::truncate_to_width`), bounded unified diff parsing (`diff::*`), the input
 history cursor state machine (`history::HistoryCursor`), display-column
-selection slices (`selection::*`), `NO_COLOR` style stripping (`style::*`) and
-terminal text safety (`markdown::safety`).
+selection slices (`selection::*`), `NO_COLOR` style stripping (`style::*`),
+terminal text safety (`markdown::safety`) and pure value image sampling
+(`image::*`: size validation, aspect fitting and half-block lines).
 
 | Primitive | Caller supplies | Component owns |
 | --- | --- | --- |
@@ -38,6 +39,10 @@ terminal text safety (`markdown::safety`).
 | `diff::parse_unified_diff` | diff text, path hint, `DiffBudget` | bounded hunks/lines/change counts, line numbers, ranges, truncation counts; `None` for binary or over-budget input |
 | `diff::parse_edit_write_summary` | summary text, path hint | `+N`/`−M` block without hunks for Edit/Write summaries |
 | `history::HistoryCursor` | one `VecDeque<String>`, current editor text | up/down/exit/reset transitions; draft kept as `Option<String>` (`Some("")` is explicit empty input) |
+| `image::ImageData` | width, height, RGBA bytes | buffer-length validation; only valid images reach sampling |
+| `image::fit` | image pixels, cell pixels, cell bounds | aspect-preserving cell/pixel target within bounds; half blocks use `(1, 2)` cell pixels |
+| `image::halfblock_lines` | valid image, cell area, base style | upper/lower half-block glyphs, alpha-thresholded foreground/background colors and exact column width |
+| `image::attachment_label` | 1-based attachment number | stable `[Image #n]` composer label |
 | `mermaid` | confirmed source, closed flag, width, job results | statement confirmation, layout, overview and preview state |
 
 The application resolves theme tokens, chooses first-frame panel height, routes
@@ -88,6 +93,9 @@ is the primary input and mirrors the real TUI:
   composes into a card header, and the shimmer variant feeds the same 100ms index
   into `shimmer_spans` for the collapsed-group `Working` label, so dumps stay
   reproducible;
+- the image story generates a RGBA gradient in memory and renders it through
+  `image::halfblock_lines`; transparent corners stay blank and every row keeps the
+  exact preview column budget, with no file or terminal-protocol access;
 - Mermaid character art never wraps: a frame keeps its natural rendered width, so
   a diagram wider than the preview gets a bottom `◄ … ►` bar. Horizontal wheel
   notches move eight columns, and Shift+wheel does the same on a vertical notch;
@@ -95,12 +103,13 @@ is the primary input and mirrors the real TUI:
   position. Markdown prose still wraps at the column width, so only unwrapped
   diagrams show the bar.
 
-Ten stories cover `textarea`, `list`, `scrollbar`, `completion` (`@` rows,
+Eleven stories cover `textarea`, `list`, `scrollbar`, `completion` (`@` rows,
 `/` label+description columns, a scrolled window and the empty state),
 `markdown` (rich text, headings, lists, code, table, image, gen-ui fence,
 streaming), `openui` (stack column/row, card, text, heading, list, table, key-value, progress, divider,
 button, bar chart, sparkline, streaming), `overlay` (confirm and download),
-`spinner` (idle, active, tool and shimmer frames), `mermaid` (flowchart, sequence,
+`spinner` (idle, active, tool and shimmer frames), `image` (half-block RGBA gradient),
+`mermaid` (flowchart, sequence,
 state, class, ER, pie, journey, gantt, timeline, gitGraph, mindmap, quadrant,
 requirement, sankey, xychart, architecture, packet and streaming) and `charts`
 — one static frame per

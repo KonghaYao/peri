@@ -681,7 +681,7 @@ fn draw_preview_overlay_no_protocol_shows_hint() {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            content.contains("terminal doesn"),
+            content.contains("terminal can't"),
             "{protocol:?} 能力提示应出现在像素区（严格宽截断后前缀），实际: {content}"
         );
     }

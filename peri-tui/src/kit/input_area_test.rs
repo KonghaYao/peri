@@ -787,7 +787,7 @@ fn png_attachment() -> PendingAttachment {
     PendingAttachment::image("image/png", "AQID")
 }
 
-/// 单张图片：标签明示类型与序号，不再只显示 `@ 1 个文件`。
+/// 单张图片：标签使用稳定的 `[Image #n]` 编号，不再只显示 `@ 1 个文件`。
 #[test]
 #[serial]
 fn test_composer_label_single_image_attachment() {
@@ -795,11 +795,11 @@ fn test_composer_label_single_image_attachment() {
     i18n::init(Some("zh-CN"));
     assert_eq!(
         render::build_attachments_label(&[png_attachment()]).as_deref(),
-        Some("[图片] 图片 1")
+        Some("[Image #1]")
     );
 }
 
-/// 多张图片：带数量且逐张可区分（序号与提交顺序一致）。
+/// 多张图片：逐张可区分（序号与提交顺序一致）。
 #[test]
 #[serial]
 fn test_composer_label_multiple_images_are_distinguishable() {
@@ -808,11 +808,11 @@ fn test_composer_label_multiple_images_are_distinguishable() {
     let attachments = vec![png_attachment(), png_attachment(), png_attachment()];
     assert_eq!(
         render::build_attachments_label(&attachments).as_deref(),
-        Some("[图片] ×3 · 图片 1 · 图片 2 · 图片 3")
+        Some("[Image #1] · [Image #2] · [Image #3]")
     );
 }
 
-/// 超过 [`ATTACHMENT_NAMES_MAX`] 张：列前 3 个名称后以 `…` 截断，数量仍完整。
+/// 超过 [`ATTACHMENT_NAMES_MAX`] 张：列前 3 个标签后以 `…` 截断。
 #[test]
 #[serial]
 fn test_composer_label_caps_listed_names() {
@@ -826,7 +826,7 @@ fn test_composer_label_caps_listed_names() {
     ];
     assert_eq!(
         render::build_attachments_label(&attachments).as_deref(),
-        Some("[图片] ×4 · 图片 1 · 图片 2 · 图片 3 · …")
+        Some("[Image #1] · [Image #2] · [Image #3] · …")
     );
 }
 
@@ -878,7 +878,7 @@ fn test_composer_tags_put_plugin_selection_before_attachments() {
             80,
         )
         .as_deref(),
-        Some("插件: alpha · [图片] 图片 1")
+        Some("插件: alpha · [Image #1]")
     );
     assert_eq!(render::build_composer_tags(None, None, 80), None);
 }
@@ -899,7 +899,7 @@ fn test_composer_tags_keep_attachment_visible_in_narrow_composer() {
     let tags = render::build_composer_tags(plugin, attachment, 27)
         .expect("插件与附件同时存在时必须生成标签");
     assert!(
-        tags.ends_with("[图片] 图片 1"),
+        tags.ends_with("[Image #1]"),
         "附件提示必须保留在行尾: {tags:?}"
     );
     assert!(tags.contains('…'), "插件 ID 放不下时应截断: {tags:?}");
@@ -915,7 +915,7 @@ fn test_composer_tags_keep_attachment_visible_in_narrow_composer() {
     );
     let rows = render_block_text(&block, 40, 3);
     assert!(
-        rows[2].replace(' ', "").contains("[图片]"),
+        rows[2].replace(' ', "").contains("[Image"),
         "40 列下附件提示必须可见: {:?}",
         rows[2]
     );
@@ -939,7 +939,7 @@ fn test_composer_block_renders_image_attachment_label() {
     // 逐格取样会为宽字符补位（CJK 后跟空格），比较前先去空白。
     let left = rows[3].replace(' ', "");
     assert!(
-        left.contains("[图片]×2·图片1·图片2"),
+        left.contains("[Image#1]·[Image#2]"),
         "title_bottom 左栏应显示图片标签，实际: {:?}",
         rows[3]
     );
@@ -979,24 +979,6 @@ fn test_attachment_label_keys_localized_in_both_locales() {
         assert!(
             meta.contains(&name) && meta.contains("1.0 KB"),
             "{lang}: {meta}"
-        );
-
-        let single = lc.tr_args(
-            "composer-image-attachment",
-            &[("name".to_string(), FluentValue::from(name.clone()))],
-        );
-        assert!(single.contains(&name), "{lang}: {single}");
-
-        let multi = lc.tr_args(
-            "composer-image-attachments",
-            &[
-                ("count".to_string(), FluentValue::from(2u64)),
-                ("names".to_string(), FluentValue::from(name.clone())),
-            ],
-        );
-        assert!(
-            multi.contains(&name) && multi.contains('2'),
-            "{lang}: {multi}"
         );
     }
 }
