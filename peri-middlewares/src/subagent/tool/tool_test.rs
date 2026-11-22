@@ -960,6 +960,8 @@ mod resume_test;
 mod sections_parity_test;
 #[path = "tool_test/session_isolation_test.rs"]
 mod session_isolation_test;
+#[path = "tool_test/subagent_approval_scope_test.rs"]
+mod subagent_approval_scope_test;
 
 #[path = "tool_test/mcp_activation_owner_test.rs"]
 mod mcp_activation_owner_test;

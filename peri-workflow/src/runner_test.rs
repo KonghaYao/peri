@@ -80,6 +80,76 @@ fn resume_gap_is_not_treated_as_a_success_prefix() {
     assert!(crate::runner::run_protocol::reusable_journal_prefix(entries).is_empty());
 }
 
+fn tool_journal_entry(tool_seq: u64, agent_seq: u64) -> crate::protocol::ToolJournalEntry {
+    crate::protocol::ToolJournalEntry {
+        tool_seq,
+        agent_seq,
+        task_id: format!("tool-{tool_seq}"),
+        tool_name: "Read".into(),
+        arguments: serde_json::Map::new(),
+        outcome: peri_acp_types::workflow::WorkflowToolOutcome::Ok {
+            structured_content: None,
+            content: "ok".into(),
+        },
+    }
+}
+
+#[test]
+fn resume_tool_prefix_keeps_a_contiguous_agent_aligned_prefix() {
+    let entries = vec![
+        tool_journal_entry(0, 0),
+        tool_journal_entry(1, 1),
+        tool_journal_entry(2, 1),
+    ];
+
+    let prefix = crate::runner::run_protocol::replayable_tool_prefix(entries, 1);
+
+    assert_eq!(
+        prefix.len(),
+        3,
+        "toolSeq 连续且 agentSeq 不超界时必须全部保留"
+    );
+    assert_eq!(prefix[2].tool_seq, 2);
+}
+
+#[test]
+fn resume_tool_prefix_stops_at_a_tool_seq_gap() {
+    let entries = vec![
+        tool_journal_entry(0, 0),
+        tool_journal_entry(2, 0),
+        tool_journal_entry(3, 0),
+    ];
+
+    let prefix = crate::runner::run_protocol::replayable_tool_prefix(entries, 5);
+
+    assert_eq!(prefix.len(), 1, "首个 toolSeq 断裂即停止");
+    assert_eq!(prefix[0].tool_seq, 0);
+}
+
+#[test]
+fn resume_tool_prefix_stops_when_agent_seq_exceeds_the_agent_prefix() {
+    let entries = vec![
+        tool_journal_entry(0, 0),
+        tool_journal_entry(1, 2),
+        tool_journal_entry(2, 2),
+    ];
+
+    let prefix = crate::runner::run_protocol::replayable_tool_prefix(entries, 1);
+
+    assert_eq!(prefix.len(), 1, "agentSeq 超出可回放 agent 前缀即停止");
+    assert_eq!(prefix[0].task_id, "tool-0");
+}
+
+#[test]
+fn resume_tool_prefix_requires_the_file_to_start_at_zero_and_in_order() {
+    let entries = vec![tool_journal_entry(1, 0), tool_journal_entry(2, 0)];
+
+    assert!(
+        crate::runner::run_protocol::replayable_tool_prefix(entries, 9).is_empty(),
+        "前缀必须从 toolSeq 0 开始（按文件顺序，不排序）"
+    );
+}
+
 struct CountingAgentExecutor {
     calls: Arc<AtomicU64>,
 }
@@ -294,6 +364,7 @@ fn completed_workflow_result() -> WorkflowResult {
         post_processing_status: peri_acp_types::workflow::PostProcessingStatus::NotRequired,
         delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
         stderr_tail: None,
+        unknown_side_effects: false,
     }
 }
 
@@ -715,11 +786,13 @@ fn test_workflow_start_params_preserve_budget_total() {
         git_observation: Default::default(),
     };
 
-    let params = crate::runner::run_protocol::workflow_start_params("run-1", &input, None, "/tmp");
+    let params =
+        crate::runner::run_protocol::workflow_start_params("run-1", &input, None, None, "/tmp");
 
     assert_eq!(params.budget_total, Some(9_007_199_254_740_991));
     assert_eq!(params.max_concurrency, 2);
     assert_eq!(params.args, input.args);
+    assert!(params.resume_tools.is_none());
 }
 
 #[test]

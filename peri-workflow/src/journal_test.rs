@@ -70,8 +70,18 @@ fn test_append_and_read_all_journal() {
 fn strict_resume_read_rejects_missing_and_malformed_journal() {
     let (_tmp, store) = make_store();
     store
-        .init_run("missing", "script")
+        .init_run("empty", "script")
         .expect("the init run fixture result is required for this assertion");
+    assert!(
+        store
+            .read_all_strict("empty")
+            .expect("init_run 建出的空 journal 必须可读")
+            .is_empty(),
+        "零 agent run 的空 journal 是合法空前缀"
+    );
+
+    std::fs::create_dir_all(store.run_dir("missing"))
+        .expect("the missing-run fixture directory must be creatable");
     assert!(store.read_all_strict("missing").is_err());
 
     store
@@ -109,6 +119,122 @@ fn strict_resume_read_rejects_missing_and_malformed_journal() {
     let error = store.read_all_strict("duplicate").unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("expected seq 1"));
+}
+
+// ─── tools.jsonl（issue #407 阶段 2）：append-only 工具调用记录 ───────────────
+
+fn tool_entry(seq: u64, agent_seq: u64, task: &str) -> crate::protocol::ToolJournalEntry {
+    crate::protocol::ToolJournalEntry {
+        tool_seq: seq,
+        agent_seq,
+        task_id: task.into(),
+        tool_name: "Read".into(),
+        arguments: serde_json::Map::new(),
+        outcome: peri_acp_types::workflow::WorkflowToolOutcome::Ok {
+            structured_content: None,
+            content: format!("result-{seq}"),
+        },
+    }
+}
+
+#[test]
+fn tool_journal_appends_and_reads_back_in_sorted_order() {
+    let (_tmp, store) = make_store();
+    store
+        .init_run("run-1", "script")
+        .expect("the init run fixture result is required for this assertion");
+    store
+        .append_tool("run-1", &tool_entry(0, 1, "tool-1"))
+        .expect("append_tool must write the fixture");
+    store
+        .append_tool("run-1", &tool_entry(1, 2, "tool-2"))
+        .expect("append_tool must write the fixture");
+
+    let entries = store
+        .read_tools_strict("run-1")
+        .expect("read_tools_strict must accept the written fixture");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].task_id, "tool-1");
+    assert_eq!(entries[0].tool_seq, 0);
+    assert_eq!(entries[0].agent_seq, 1);
+    assert_eq!(entries[1].task_id, "tool-2");
+    assert_eq!(entries[1].tool_seq, 1);
+    assert_eq!(entries[1].agent_seq, 2);
+}
+
+#[test]
+fn missing_tool_journal_reads_as_empty() {
+    let (_tmp, store) = make_store();
+    store
+        .init_run("run-1", "script")
+        .expect("the init run fixture result is required for this assertion");
+    assert!(store
+        .read_tools_strict("run-1")
+        .expect("缺失 tools.jsonl 不是错误")
+        .is_empty());
+}
+
+#[test]
+fn tool_journal_reads_out_of_order_writes_by_tool_seq() {
+    let (_tmp, store) = make_store();
+    store
+        .init_run("run-1", "script")
+        .expect("the init run fixture result is required for this assertion");
+    // 并发工具调用按完成顺序追加：文件顺序可以不是脚本调用顺序。
+    store
+        .append_tool("run-1", &tool_entry(1, 0, "tool-2"))
+        .expect("append_tool must write the fixture");
+    store
+        .append_tool("run-1", &tool_entry(0, 0, "tool-1"))
+        .expect("append_tool must write the fixture");
+
+    let entries = store
+        .read_tools_strict("run-1")
+        .expect("read_tools_strict must accept the written fixture");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].tool_seq, 0);
+    assert_eq!(entries[0].task_id, "tool-1");
+    assert_eq!(entries[1].tool_seq, 1);
+    assert_eq!(entries[1].task_id, "tool-2");
+}
+
+#[test]
+fn malformed_tool_journal_fails_closed() {
+    let (_tmp, store) = make_store();
+    store
+        .init_run("run-1", "script")
+        .expect("the init run fixture result is required for this assertion");
+    std::fs::write(
+        store.run_dir("run-1").join("tools.jsonl"),
+        "{\"toolSeq\":0,\"agentSeq\":0,\"taskId\":\"tool-1\",\"toolName\":\"Read\",\"arguments\":{},\"outcome\":{\"kind\":\"ok\",\"content\":\"ok\"}}\nnot-json\n",
+    )
+    .expect("the test fixture file must be writable");
+
+    let error = store.read_tools_strict("run-1").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("line 2"));
+}
+
+#[test]
+fn truncate_does_not_clear_the_tool_journal() {
+    let (_tmp, store) = make_store();
+    store
+        .init_run("run-1", "script")
+        .expect("the init run fixture result is required for this assertion");
+    store
+        .append_tool("run-1", &tool_entry(0, 0, "tool-1"))
+        .expect("append_tool must write the fixture");
+    store
+        .truncate("run-1")
+        .expect("truncate must clear only journal.jsonl");
+    assert_eq!(
+        store
+            .read_tools_strict("run-1")
+            .expect("read_tools_strict must accept the fixture")
+            .len(),
+        1,
+        "tools.jsonl 是 append-only：journal/truncate 不得清空"
+    );
 }
 
 #[test]
@@ -153,6 +279,7 @@ fn test_write_and_read_state() {
         postcondition_observation: None,
         git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
+        unknown_side_effects: false,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         limit_breaches: Vec::new(),
@@ -220,6 +347,7 @@ fn test_state_error_field_round_trip() {
         postcondition_observation: None,
         git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
+        unknown_side_effects: false,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         limit_breaches: Vec::new(),
@@ -266,6 +394,7 @@ fn test_state_error_skipped_when_none() {
         postcondition_observation: None,
         git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Completed,
+        unknown_side_effects: false,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
         limit_breaches: Vec::new(),
@@ -1074,6 +1203,49 @@ fn test_write_intent_rejects_parent_traversal() {
 
 // ─── extract_long_texts / write_output 测试 ────────────────────
 
+/// 顶层 return 值是字符串：固定 label `return`，占位符与文件必须同源。
+#[test]
+fn test_extract_long_texts_top_level_string_uses_return_label() {
+    let (_tmp, store) = make_store();
+    store
+        .init_run("r1", "script")
+        .expect("the init run fixture result is required for this assertion");
+    let long_text = "r".repeat(250);
+    let mut value = serde_json::json!(long_text.clone());
+
+    let extracted = crate::journal::output::extract_long_texts(&mut value, "r1", &store, 200);
+
+    assert_eq!(extracted, vec!["return"]);
+    assert_eq!(value, serde_json::json!("${return}"));
+    assert_eq!(
+        std::fs::read_to_string(store.run_dir("r1").join("outputs").join("return.txt"))
+            .expect("the test fixture text file must be readable"),
+        long_text
+    );
+}
+
+/// 字符串数组元素也外置：label 沿用 `[i]` hint，短字符串保持原样。
+#[test]
+fn test_extract_long_texts_string_array_elements() {
+    let (_tmp, store) = make_store();
+    store
+        .init_run("r1", "script")
+        .expect("the init run fixture result is required for this assertion");
+    let long_text = "e".repeat(250);
+    let mut value = serde_json::json!([long_text.clone(), "short"]);
+
+    let extracted = crate::journal::output::extract_long_texts(&mut value, "r1", &store, 200);
+
+    assert_eq!(extracted, vec!["[0]"]);
+    assert_eq!(value[0], "${[0]}");
+    assert_eq!(value[1], "short");
+    assert_eq!(
+        std::fs::read_to_string(store.run_dir("r1").join("outputs").join("[0].txt"))
+            .expect("the test fixture text file must be readable"),
+        long_text
+    );
+}
+
 /// [回归测试] label 归一：分隔符/控制字符替换、连续点折叠、空 label 回落、
 /// 重名去重（同一 label 不得覆盖）。
 #[test]
@@ -1162,6 +1334,12 @@ fn test_extract_long_texts_short_strings() {
     let extracted = crate::journal::output::extract_long_texts(&mut value, "r1", &store, 200);
     assert!(extracted.is_empty());
     assert_eq!(value, serde_json::json!({"k": "short"}));
+
+    // 顶层短字符串同样不外置。
+    let mut top_level = serde_json::json!("short");
+    let extracted = crate::journal::output::extract_long_texts(&mut top_level, "r1", &store, 200);
+    assert!(extracted.is_empty());
+    assert_eq!(top_level, serde_json::json!("short"));
 }
 
 #[test]
@@ -1565,10 +1743,36 @@ fn test_legacy_state_without_limit_breaches_deserializes_as_unknown() {
 
     assert!(state.limit_breaches.is_empty());
     assert_eq!(state.token_usage, None, "旧数据未采集用量，不显示为 0");
+    assert!(
+        !state.unknown_side_effects,
+        "旧 state.json 缺 unknownSideEffects 时按 false 读取（不得据此推断本能力已存在）"
+    );
     assert_eq!(
         state.git_observation_scope, None,
         "旧数据未记录 Git 观测范围，不得推断为完整观测"
     );
+}
+
+/// `unknownSideEffects` 只在为 `true` 时写出（camelCase）；默认 false 不落盘。
+#[test]
+fn unknown_side_effects_is_serialized_only_when_true() {
+    let mut state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "side-effects",
+        "workflow_name": "side-effects",
+        "status": "completed",
+        "script": "script",
+        "started_at": "2026-11-22T00:00:00Z"
+    }))
+    .expect("from_value must accept this test fixture representation");
+    let quiet = serde_json::to_value(&state).expect("state 可序列化");
+    assert!(
+        quiet.get("unknownSideEffects").is_none(),
+        "false 不写出该字段：{quiet}"
+    );
+
+    state.unknown_side_effects = true;
+    let flagged = serde_json::to_value(&state).expect("state 可序列化");
+    assert_eq!(flagged["unknownSideEffects"], true);
 }
 
 /// 终态只保存观测身份与能力：camelCase 范围字段可读，基线内容（porcelain）不落盘。
@@ -1631,6 +1835,7 @@ fn test_limit_breaches_and_token_usage_serialize_without_zero_fillers() {
         postcondition_observation: None,
         git_observation_scope: None,
         outcome: Default::default(),
+        unknown_side_effects: false,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits {
             max_tool_calls: Some(5),

@@ -63,6 +63,9 @@ pub struct SubAgentTool {
     pub(crate) mcp_agent_registry: Option<Arc<McpAgentRegistry>>,
     /// 用户交互 broker，用于远端 Agent 内容绑定批准。
     pub(crate) broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
+    /// 父会话共享权限模式（含外部 MCP 审批范围）。子链据此决定是否装配
+    /// 范围审批，避免委派绕过父会话声明。
+    pub(crate) permission_mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>>,
     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
 }

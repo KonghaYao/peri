@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use super::AskUserTool;
 use peri_agent::interaction::{
-    InteractionContext, InteractionResponse, QuestionAnswer, TrustedInteractionOwner,
-    UnansweredCause, UserInteractionBroker,
+    InteractionContext, InteractionFailure, InteractionResponse, QuestionAnswer,
+    TrustedInteractionOwner, UnansweredCause, UserInteractionBroker,
 };
 
 struct MockBroker(InteractionResponse);
@@ -137,6 +137,20 @@ async fn test_single_question_empty_selected() {
     );
 }
 
+/// 用户真的提交了空内容（`accept` + 空串）：仍是合法答案，保持空语义。
+#[tokio::test]
+async fn test_real_empty_submission_is_valid_answer() {
+    let tool = make_tool(make_answer(&[], Some("")));
+    let result = tool
+        .invoke(single_question_input(), tool_context())
+        .await
+        .unwrap();
+    assert_eq!(
+        result, "[问: H1]\n回答: ",
+        "真实空提交必须成为合法空答案，而不是失败"
+    );
+}
+
 // ── 多问题返回格式 ──
 
 #[tokio::test]
@@ -206,6 +220,46 @@ async fn test_unexpected_response_type() {
     assert!(result.is_err(), "non-Answers response should return Err");
 }
 
+/// 用户明确拒绝（`decline`，或 TUI Esc 的裸 cancel 经 broker 归一为 `Rejected`）：
+/// 工具必须以 `ToolRejected{cause: UserRejected}` 结算，不得返回空白回答。
+#[tokio::test]
+async fn test_rejected_maps_to_user_rejected_tool_error() {
+    let tool = make_tool(InteractionResponse::Rejected);
+    let err = tool
+        .invoke(single_question_input(), tool_context())
+        .await
+        .expect_err("用户拒绝必须返回错误，不得返回空回答");
+    let agent_error = err
+        .downcast_ref::<peri_agent::error::AgentError>()
+        .unwrap_or_else(|| panic!("拒绝必须是 typed AgentError: {err}"));
+    match agent_error {
+        peri_agent::error::AgentError::ToolRejected {
+            tool,
+            reason,
+            cause,
+        } => {
+            assert_eq!(tool, "AskUserQuestion");
+            assert_eq!(
+                *cause,
+                peri_acp_types::error::ToolRejectionCause::UserRejected,
+                "Esc 取消/decline 都是用户拒绝，不得归为 ApprovalUnavailable"
+            );
+            assert!(reason.contains("拒绝"), "拒绝原因文本必须明确: {reason}");
+        }
+        other => panic!("拒绝应保持 ToolRejected 语义: {other:?}"),
+    }
+    assert_eq!(agent_error.category_name(), "tool_rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("Tool rejected") && message.contains("用户拒绝回答"),
+        "错误文本必须声明工具被用户拒绝: {message}"
+    );
+    assert!(
+        !message.contains("回答: "),
+        "不得把拒绝伪装成空白回答: {message}"
+    );
+}
+
 /// [回归测试] 客户端声明无人可作答时，工具必须如实转述原因，而不是返回伪造的
 /// 空回答文本（旧行为：`[问: H1]\n回答: `）。
 ///
@@ -245,6 +299,44 @@ async fn test_unanswered_reports_declared_reason() {
         assert!(
             !message.contains("拒绝回答") && !message.contains("回答: "),
             "{cause:?} 不得声称为用户拒绝，也不得携带伪造的回答: {message}"
+        );
+    }
+}
+
+/// 提问通道失败（方法不支持 / 超时 / 传输或协议错误）：工具必须返回**可见的
+/// 执行失败**（`ToolExecutionFailed`），不得伪造空回答，也不得冒充用户拒绝。
+#[tokio::test]
+async fn test_failed_reports_visible_tool_error() {
+    for (failure, expected) in [
+        (InteractionFailure::MethodUnsupported, "-32601"),
+        (InteractionFailure::Timeout, "超时"),
+        (
+            InteractionFailure::Transport {
+                detail: "JSON-RPC -32000: transport closed".to_string(),
+            },
+            "-32000",
+        ),
+    ] {
+        let tool = make_tool(InteractionResponse::Failed { failure });
+        let err = tool
+            .invoke(single_question_input(), tool_context())
+            .await
+            .expect_err("通道失败必须返回错误，不得伪造空回答");
+        assert!(
+            matches!(
+                err.downcast_ref::<peri_agent::error::AgentError>(),
+                Some(peri_agent::error::AgentError::ToolExecutionFailed { .. })
+            ),
+            "通道失败应保持 ToolExecutionFailed 语义: {err}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains(expected),
+            "错误文本必须说明失败事实: {message}"
+        );
+        assert!(
+            !message.contains("回答: ") && !message.contains("拒绝回答"),
+            "不得携带伪造的回答，也不得声称为用户拒绝: {message}"
         );
     }
 }

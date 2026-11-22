@@ -66,6 +66,7 @@ async fn test_broker_approval_flow() {
             tool_call_id: "tc_1".into(),
             tool_name: "bash".into(),
             tool_input: json!("ls -la"),
+            mcp_origin: None,
         }],
     };
     let owner = TrustedInteractionOwner::model(

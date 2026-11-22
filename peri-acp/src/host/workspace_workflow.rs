@@ -134,6 +134,11 @@ impl SessionEnvironment {
             pool,
             token,
             executor,
+            self.workflow_tool_invoker().unwrap_or_else(|| {
+                let invoker: Arc<dyn peri_acp_types::workflow::WorkflowToolInvoker> =
+                    Arc::new(crate::host::workflow_consumer::UnavailableToolInvoker);
+                invoker
+            }),
             self.session_id.clone(),
         );
         // 重复调用（异常路径）时旧消费者随赋值 drop → 取消，不残留双消费者。

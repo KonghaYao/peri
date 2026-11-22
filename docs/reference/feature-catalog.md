@@ -131,6 +131,7 @@
 | F-WORKFLOW-006 | L3 | Workflow 进度；资源投影供宿主与 TUI 消费 | [契约](../design/workflow.md) |
 | F-WORKFLOW-007 | L3 | Workflow MCP；模型工具与宿主回填信道分离 | [契约](../design/workflow.md) |
 | F-WORKFLOW-008 | L4 | Ultra-ADLC；大交付按文件协议编排 | [契约](../design/workflow.md) |
+| F-WORKFLOW-009 | L3 | 脚本工具调用；effective 名经宿主审批执行并可回放 | [契约](../design/workflow.md) |
 | F-CONFIG-001 | L2 | 配置解析；typed resolver 产生有效快照 | [契约](../design/configuration-authority.md) |
 | F-CONFIG-002 | L2 | 配置作用域；目录与 settings 路径决定视图 | [契约](../design/configuration-authority.md) |
 | F-CONFIG-003 | L2 | 配置保存；expected revision 保护编辑基线 | [契约](../design/configuration-authority.md) |
@@ -214,13 +215,15 @@
 | F-CLI-004 | L3 | 元数据查询；只读查询不更改执行事实 | [契约](../design/meta-control.md) |
 | F-CLI-005 | L3 | Workflow CLI；运行与分发共用工作流语义 | [契约](../design/workflow.md) |
 | F-CLI-006 | L3 | 启动配置；显式参数进入统一配置路径 | [契约](../design/configuration-authority.md) |
-| F-SWARM-001 | L1 | 会话 HTTP 面；五路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
+| F-SWARM-001 | L1 | 会话 HTTP 面；sessions/events/items/turns 路由与 Bearer 门禁 | [契约](../design/peri-swarm.md) |
 | F-SWARM-002 | L1 | 会话身份；logicalId 与 rootSessionId 分离 | [契约](../design/peri-swarm.md) |
-| F-SWARM-003 | L1 | 事件续读；SSE 先补 backlog 后实时 | [契约](../design/peri-swarm.md) |
-| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409 | [契约](../design/peri-swarm.md) |
+| F-SWARM-003 | L1 | 事件续读；无游标只送实时（不读行）、显式回放；lookback 播种与末尾终态；官方 `agent.session.*` 帧；items 分页默认 `desc`、行预算 | [契约](../design/peri-swarm.md) |
+| F-SWARM-004 | L1 | 输入幂等；同键同文复用、异文 409；官方 `events` 信封单条 message；受理持久化后 202、turn 后台执行 | [契约](../design/peri-swarm.md) |
 | F-SWARM-005 | L2 | 双库归属；会话事实与 Swarm 事实互不建表 | [契约](../design/peri-swarm.md) |
 | F-SWARM-006 | L2 | MCP 注入；agent.tools 映射 ACP 会话声明 | [契约](../design/peri-swarm.md) |
 | F-SWARM-007 | L2 | 宿主沙箱；Bun 懒预留与 workspace 代理 | [契约](../design/peri-swarm.md) |
 | F-SWARM-008 | L2 | 空闲回收；在途阻断且文件与绑定保留 | [契约](../design/peri-swarm.md) |
 | F-SWARM-009 | L2 | 宿主恢复；仅杀 Rust 后 reattach 不重放 | [契约](../design/peri-swarm.md) |
 | F-SWARM-010 | L3 | 本地运行面；双库 provision 与启动顺序 | [契约](../design/peri-swarm.md) |
+| F-SWARM-011 | L3 | 副本组部署面；外部 engine（字面 endpoint 限私网/环回，域名由部署保证）、共享 namespace/pool 与显式非 loopback 绑定 | [契约](../design/peri-swarm.md) |
+| F-SWARM-012 | L1 | 官方会话资源面；list/update/delete/turns，官方默认字段与环境 `none` 投影，空对象 update no-op，未映射资源显式 404 | [契约](../design/peri-swarm.md) |

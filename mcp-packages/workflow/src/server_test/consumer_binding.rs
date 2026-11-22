@@ -141,6 +141,13 @@ async fn wire_consumer_commands_require_token_and_claim_is_retry_safe() {
         ("WorkflowTaskObserved", json!({"runId":"run-a"})),
         ("WorkflowConsumerReady", json!({"ready":true})),
         ("WorkflowCompletionAck", json!({"runId":"run-a"})),
+        (
+            "WorkflowToolResult",
+            json!({
+                "runId":"run-a","taskId":"tool-a",
+                "outcome":{"kind":"ok","content":"done"}
+            }),
+        ),
         ("WorkflowClose", json!({})),
     ] {
         test_fixture::assert_invalid_params(
@@ -198,6 +205,59 @@ async fn wire_consumer_commands_require_token_and_claim_is_retry_safe() {
     assert_eq!(
         runtime.tasks().get("run-a", "task-a").unwrap().state,
         WorkflowTaskState::Cancelled
+    );
+    pair.shutdown().await;
+}
+
+/// 断开（`WorkflowConsumerReady{ready:false}`）放弃一个已 claim 的 tool 任务：
+/// 终态仍是 `cancelled`，但「MCP 调用可能已 dispatch」必须留下 run 级未知副作用
+/// （与 run kill / 单 agent kill 路径同口径）。
+#[tokio::test]
+async fn disconnect_settles_executing_tool_task_and_marks_unknown_side_effects() {
+    let runtime = test_fixture::make_runtime();
+    let _ = runtime.tasks().publish_tool(
+        "tool-a".into(),
+        "run-a",
+        "Read".into(),
+        Default::default(),
+        0,
+        0,
+    );
+    assert!(matches!(
+        runtime
+            .tasks()
+            .mark_executing("run-a", "tool-a", Default::default()),
+        ClaimOutcome::Claimed(_)
+    ));
+    assert!(
+        !runtime.tasks().run_unknown_side_effects("run-a"),
+        "claim 本身不产生未知副作用"
+    );
+    let token = runtime.bind_consumer_token();
+    let pair = test_fixture::connect(test_fixture::server(Arc::clone(&runtime))).await;
+    let peer = pair.peer();
+
+    let ready = test_fixture::call_tool_with_meta(
+        &peer,
+        "WorkflowConsumerReady",
+        json!({"ready":false}),
+        Some(test_fixture::consumer_meta(&token)),
+    )
+    .await;
+    assert_ne!(
+        ready.is_error,
+        Some(true),
+        "{}",
+        test_fixture::first_text(&ready)
+    );
+
+    assert_eq!(
+        runtime.tasks().get("run-a", "tool-a").unwrap().state,
+        WorkflowTaskState::Cancelled
+    );
+    assert!(
+        runtime.tasks().run_unknown_side_effects("run-a"),
+        "放弃执行中的 tool 调用必须标记未知副作用"
     );
     pair.shutdown().await;
 }

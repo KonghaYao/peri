@@ -164,7 +164,9 @@ pub enum Event {
     /// so the poll is the prompt signal that a page-driven navigation happened.
     PageUrl(String),
     /// A back/forward step loaded its document; the machine moves the index.
-    HistoryArrived { delta: i64 },
+    HistoryArrived {
+        delta: i64,
+    },
     YieldOk(String),
     Reclaim(String),
     HumanRequest {
@@ -378,10 +380,15 @@ impl Machine {
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {
         let handoff = self.handoff.as_ref().and_then(|handoff| handoff.deadline);
-        [self.idle_deadline, self.yield_deadline, self.hint_deadline, handoff]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.idle_deadline,
+            self.yield_deadline,
+            self.hint_deadline,
+            handoff,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Applies one event and returns the effects to execute.
@@ -787,7 +794,10 @@ impl Machine {
     /// Re-reads while a hinted document has not shown up yet.
     fn retry_hint(&mut self, now: Instant) -> Option<Effect> {
         let hinted = self.hint.clone()?;
-        if !self.is_interactive() || hinted == self.navigation.url || self.hint_tries >= NAVIGATION_HINT_TRIES {
+        if !self.is_interactive()
+            || hinted == self.navigation.url
+            || self.hint_tries >= NAVIGATION_HINT_TRIES
+        {
             self.clear_hint();
             return None;
         }
@@ -799,7 +809,12 @@ impl Machine {
     /// Records the document on screen, dropping the entries a fresh navigation
     /// makes unreachable.
     fn record_visit(&mut self, url: &str) {
-        if url.is_empty() || self.visits.get(self.visit).is_some_and(|visit| visit == url) {
+        if url.is_empty()
+            || self
+                .visits
+                .get(self.visit)
+                .is_some_and(|visit| visit == url)
+        {
             return;
         }
         self.visits.truncate(self.visit + 1);

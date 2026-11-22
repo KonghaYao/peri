@@ -20,7 +20,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use peri_acp_types::ports::{McpPoolPort, McpPoolShutdownReport, McpResourceSubscription};
-use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult, Usage};
+use peri_acp_types::workflow::{
+    AgentExecutor, AgentRunParams, AgentRunResult, Usage, WorkflowToolCall, WorkflowToolErrorCode,
+    WorkflowToolInvoker, WorkflowToolOutcome,
+};
 use peri_mcp_workflow::{WorkflowRuntime, TASKS_URI, WORKFLOW_CONSUMER_META_KEY};
 use peri_workflow::registry::WorkflowRunStatus;
 use peri_workflow::runtime::{WorkflowResourceUpdate, WorkflowTaskState};
@@ -38,6 +41,8 @@ struct StubPool {
     subscribe_fails: bool,
     calls: Mutex<Vec<CallRecord>>,
     tasks_payload: Mutex<String>,
+    /// 前 N 次回填投递返回通道错误（验证结果保留与重投）。
+    backfill_failures: AtomicUsize,
     /// 订阅通道发送端：保持存活，避免订阅因通道关闭而终止。
     _updates: Mutex<Option<tokio::sync::mpsc::Sender<String>>>,
 }
@@ -49,8 +54,14 @@ impl StubPool {
             subscribe_fails,
             calls: Mutex::new(Vec::new()),
             tasks_payload: Mutex::new(tasks_payload.to_string()),
+            backfill_failures: AtomicUsize::new(0),
             _updates: Mutex::new(None),
         }
+    }
+
+    /// 让接下来 `count` 次回填投递失败（模拟通道暂不可用）。
+    fn fail_backfills(&self, count: usize) {
+        self.backfill_failures.store(count, Ordering::SeqCst);
     }
 
     fn calls(&self) -> Vec<CallRecord> {
@@ -85,6 +96,16 @@ impl McpPoolPort for StubPool {
             request_meta,
         ));
         let runtime = self.runtime.get().unwrap();
+        if matches!(tool, "WorkflowToolResult" | "WorkflowAgentResult")
+            && self
+                .backfill_failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    count.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err("workflow instance is temporarily unavailable".into());
+        }
         match tool {
             "WorkflowConsumerReady" => {
                 runtime.set_consumer_ready(arguments["ready"].as_bool().unwrap());
@@ -223,6 +244,7 @@ async fn consumer_readies_then_executes_and_backfills_published_task() {
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
         runtime.bind_consumer_token(),
         Arc::clone(&executor),
+        noop_tool_invoker(),
         "session-a".to_string(),
     );
 
@@ -292,6 +314,7 @@ async fn consumer_stays_not_ready_when_subscription_fails() {
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
         runtime.bind_consumer_token(),
         Arc::clone(&executor),
+        noop_tool_invoker(),
         "session-b".to_string(),
     );
 
@@ -320,6 +343,7 @@ async fn consumer_stop_returns_and_cancels() {
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
         runtime.bind_consumer_token(),
         Arc::clone(&executor),
+        noop_tool_invoker(),
         "session-c".to_string(),
     );
     assert!(wait_ready(&runtime, true).await);
@@ -330,6 +354,199 @@ async fn consumer_stop_returns_and_cancels() {
         !runtime.consumer_ready(),
         "停止后必须回落 not-ready（不再接受新启动）"
     );
+}
+
+// ─── 脚本工具任务消费（issue #407）─────────────────────────────────────────
+
+fn noop_tool_invoker() -> Arc<dyn WorkflowToolInvoker> {
+    Arc::new(super::workflow_consumer::UnavailableToolInvoker)
+}
+
+fn tool_task_payload(task_id: &str, run_id: &str) -> String {
+    json!({
+        "headSequence": 1,
+        "truncatedBefore": 0,
+        "activeTasks": [{
+            "taskId": task_id,
+            "runId": run_id,
+            "state": "published",
+            "params": {"kind": "tool", "toolName": "Read", "arguments": {"file_path": "/tmp/x"}},
+            "publishedAtMs": 0,
+        }],
+        "entries": [],
+    })
+    .to_string()
+}
+
+/// 记录脚本工具调用的 invoker 桩：返回固定结果，不触达真实会话管线。
+struct RecordingInvoker {
+    calls: Mutex<Vec<WorkflowToolCall>>,
+    outcome: WorkflowToolOutcome,
+}
+
+#[async_trait]
+impl WorkflowToolInvoker for RecordingInvoker {
+    async fn invoke_tool(&self, call: WorkflowToolCall) -> WorkflowToolOutcome {
+        self.calls.lock().unwrap().push(call);
+        self.outcome.clone()
+    }
+}
+
+/// issue #407：tool 任务与 agent 任务共用 claim/回填路径，按种类分派到会话 invoker。
+#[tokio::test]
+async fn tool_tasks_dispatch_to_the_session_invoker_and_backfill() {
+    let pool = Arc::new(StubPool::new(
+        false,
+        &tool_task_payload("t-tool", "run-tool"),
+    ));
+    let agent_calls = Arc::new(AtomicUsize::new(0));
+    let executor: Arc<dyn AgentExecutor> = Arc::new(StubExecutor {
+        calls: Arc::clone(&agent_calls),
+    });
+    let runtime = runtime_with(Arc::clone(&executor));
+    assert!(pool.runtime.set(runtime.clone()).is_ok());
+    let _ = runtime.tasks().publish_tool(
+        "t-tool".to_string(),
+        "run-tool",
+        "Read".to_string(),
+        serde_json::from_value(json!({"file_path": "/tmp/x"})).expect("tool arguments 必须是对象"),
+        0,
+        0,
+    );
+    let invoker = Arc::new(RecordingInvoker {
+        calls: Mutex::new(Vec::new()),
+        outcome: WorkflowToolOutcome::Ok {
+            structured_content: Some(json!({"ok": true})),
+            content: "file body".into(),
+        },
+    });
+    let consumer = WorkflowTaskConsumer::start(
+        Arc::clone(&pool) as Arc<dyn McpPoolPort>,
+        runtime.bind_consumer_token(),
+        Arc::clone(&executor),
+        Arc::clone(&invoker) as Arc<dyn WorkflowToolInvoker>,
+        "session-tool".to_string(),
+    );
+    assert!(
+        wait_ready(&runtime, true).await,
+        "消费者在订阅 + 基线成功后必须置就绪"
+    );
+
+    for _ in 0..200 {
+        if pool
+            .calls()
+            .iter()
+            .any(|(_, tool, _, _)| tool == "WorkflowToolResult")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let backfill = pool
+        .calls()
+        .into_iter()
+        .find(|(_, tool, _, _)| tool == "WorkflowToolResult")
+        .expect("tool 任务必须回填 WorkflowToolResult");
+    assert_eq!(backfill.0, "workflow");
+    assert_eq!(backfill.2["runId"], "run-tool");
+    assert_eq!(backfill.2["taskId"], "t-tool");
+    assert_eq!(backfill.2["outcome"]["kind"], "ok");
+    assert_eq!(
+        backfill.2["outcome"]["structuredContent"],
+        json!({"ok": true})
+    );
+    assert_eq!(backfill.2["outcome"]["content"], "file body");
+    let meta = backfill.3.expect("回填必须携带 request _meta");
+    assert_eq!(
+        meta[WORKFLOW_CONSUMER_META_KEY],
+        json!(runtime.bind_consumer_token()),
+        "tool 回填令牌必须与运行时绑定令牌一致"
+    );
+
+    {
+        // 限定 guard 作用域：后续 `consumer.stop().await` 不得与同步锁重叠
+        // （`clippy::await_holding_lock` 的显式 `drop` 形式仍会被判为跨 await）。
+        let calls = invoker.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "tool 任务必须恰好被调用一次");
+        assert_eq!(calls[0].run_id, "run-tool");
+        assert_eq!(calls[0].task_id, "t-tool");
+        assert_eq!(calls[0].tool_name, "Read");
+        assert_eq!(calls[0].arguments["file_path"], "/tmp/x");
+        assert_eq!(
+            agent_calls.load(Ordering::SeqCst),
+            0,
+            "tool 任务不得进入引擎 agent 执行器"
+        );
+    }
+
+    // 终态尚未由桩池结算：任务仍在 executing（唯一 claim 的观察面）。
+    let active = runtime.tasks().active();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].state, WorkflowTaskState::Executing);
+    consumer.stop().await;
+}
+
+/// 回填通道短暂失败：已计算的 outcome 必须保留并重投；重投不重新执行工具。
+///
+/// 失败次数（3）大于旧实现的尝试上限（3），因此只有「保留结果直到服务器接受」
+/// 才能收敛——退避总时长约 1.5s。
+#[tokio::test]
+async fn tool_result_delivery_retries_without_reinvoking_the_tool() {
+    let pool = Arc::new(StubPool::new(
+        false,
+        &tool_task_payload("t-retry", "run-retry"),
+    ));
+    pool.fail_backfills(3);
+    let executor: Arc<dyn AgentExecutor> = Arc::new(StubExecutor {
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let runtime = runtime_with(Arc::clone(&executor));
+    assert!(pool.runtime.set(runtime.clone()).is_ok());
+    let _ = runtime.tasks().publish_tool(
+        "t-retry".to_string(),
+        "run-retry",
+        "Read".to_string(),
+        serde_json::from_value(json!({"file_path": "/tmp/x"})).expect("tool arguments 必须是对象"),
+        0,
+        0,
+    );
+    let invoker = Arc::new(RecordingInvoker {
+        calls: Mutex::new(Vec::new()),
+        outcome: WorkflowToolOutcome::Ok {
+            structured_content: None,
+            content: "file body".into(),
+        },
+    });
+    let consumer = WorkflowTaskConsumer::start(
+        Arc::clone(&pool) as Arc<dyn McpPoolPort>,
+        runtime.bind_consumer_token(),
+        executor,
+        Arc::clone(&invoker) as Arc<dyn WorkflowToolInvoker>,
+        "session-retry".to_string(),
+    );
+    assert!(wait_ready(&runtime, true).await);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let deliveries = pool
+            .calls()
+            .iter()
+            .filter(|(_, tool, _, _)| tool == "WorkflowToolResult")
+            .count();
+        if deliveries >= 4 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "通道恢复后必须重投（已尝试 {deliveries} 次）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    {
+        let calls = invoker.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "重投不得重新执行工具");
+    }
+    consumer.stop().await;
 }
 
 // ─── P6 生命周期等价覆盖（真实引擎 + 真实消费者）─────────────────────────
@@ -390,6 +607,19 @@ impl McpPoolPort for RuntimeWiredPool {
                 ),
             )
             .unwrap());
+        }
+        if tool == "WorkflowToolResult" {
+            let run_id = arguments["runId"].as_str().ok_or("missing runId")?;
+            let task_id = arguments["taskId"].as_str().ok_or("missing taskId")?;
+            let outcome: WorkflowToolOutcome = serde_json::from_value(arguments["outcome"].clone())
+                .map_err(|error| format!("invalid outcome: {error}"))?;
+            return match self.runtime.complete_tool_call(run_id, task_id, outcome) {
+                peri_workflow::runtime::SettleOutcome::Settled(record)
+                | peri_workflow::runtime::SettleOutcome::AlreadyTerminal(record) => {
+                    Ok(format!("settled:{:?}", record.state))
+                }
+                other => Err(format!("tool settle 未生效: {other:?}")),
+            };
         }
         assert_eq!(tool, "WorkflowAgentResult");
         let run_id = arguments["runId"]
@@ -520,6 +750,7 @@ async fn cancelled_caller_keeps_completion_owner_with_real_engine() {
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
         runtime.bind_consumer_token(),
         Arc::clone(&executor),
+        noop_tool_invoker(),
         "session-lifecycle".to_string(),
     );
     assert!(
@@ -602,6 +833,7 @@ async fn simple_workflow_completes_through_host_consumer() {
         Arc::clone(&pool) as Arc<dyn McpPoolPort>,
         runtime.bind_consumer_token(),
         Arc::clone(&executor),
+        noop_tool_invoker(),
         "session-simple".to_string(),
     );
     assert!(wait_ready(&runtime, true).await, "消费者必须先就绪");
@@ -625,3 +857,6 @@ async fn simple_workflow_completes_through_host_consumer() {
 
     consumer.stop().await;
 }
+
+#[path = "workflow_tool_consumer_test.rs"]
+mod tool_e2e;

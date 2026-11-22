@@ -28,8 +28,11 @@ use super::TOOL_WRITE;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 
-/// broker.request 超时（秒）：防止挂起 broker 导致 before_tool 永久阻塞
-pub(crate) const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// broker.request 超时（秒）：防止挂起 broker 导致 before_tool 永久阻塞。
+///
+/// 与 `requires_action` 投影同一期限：契约层 `ApprovalItem` 的等待窗口是唯一
+/// 事实源（`peri_acp_types::interaction::APPROVAL_WAIT`）。
+pub(crate) const BROKER_TIMEOUT: std::time::Duration = peri_acp_types::interaction::APPROVAL_WAIT;
 
 // ─── 默认规则 ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +100,63 @@ pub(super) fn is_edit_tool_without_builtin(tool_name: &str) -> bool {
 
 pub(crate) fn is_external_mcp(origin: Option<&hook_state::BoundToolOrigin>) -> bool {
     matches!(origin, Some(origin) if origin.mcp_server_name.is_some() && origin.builtin_mcp_instance.is_none())
+}
+
+/// 会话级外部 MCP 审批范围是否命中本次调用（`Bypass` 下的唯一升级条件）。
+///
+/// 规则（`spec/issues/2026-11-21-peri-swarm-requires-action-design.md`）：
+///
+/// - 范围为空 ⇒ `false`：`Bypass` 语义完全不变；
+/// - 外部 MCP 且绑定来源可确定 ⇒ 命中声明的 server 才升级，同批其他 server
+///   （含同名工具）不扩大审批；
+/// - 来源不可确定（损坏的调用代理）⇒ `true`：fail-closed，按需审批处理，
+///   绝不因为无法匹配而默认放行。
+fn scoped_mcp_approval(
+    mode: &SharedPermissionMode,
+    call: &ToolCall,
+    origin: Option<&hook_state::BoundToolOrigin>,
+) -> bool {
+    if !mode.has_mcp_approval_scope() {
+        return false;
+    }
+    if is_external_mcp(origin) {
+        return mode
+            .mcp_approval_scoped(origin.and_then(|origin| origin.mcp_server_name.as_deref()));
+    }
+    // 内置 MCP 实例（workspace）不是外部绑定，仍按原模式放行。
+    if matches!(origin, Some(origin) if origin.builtin_mcp_instance.is_some()) {
+        return false;
+    }
+    // 到这里没有可用的绑定来源（`None`、缺 server，或调用目标不在本次绑定表里）。
+    // 一旦会话声明了审批范围，这类调用无法证明自己不属于外部 MCP，必须按
+    // “需要审批”处理，不能以 Bypass 静默执行。
+    //
+    // 名称只用于**保守识别**（外部 MCP 的有效名恒为 `mcp__{server}__{tool}`）；
+    // 命中或代理目标指向 MCP 时 fail-closed，普通内置工具仍放行。
+    if call.name.starts_with("mcp__") {
+        return true;
+    }
+    if peri_acp_types::tool_proxy::is_invoke_proxy_name(&call.name) {
+        return match crate::tool_search::core_tools::parse_proxy_call(&call.input) {
+            Ok(call) => call.target_name.starts_with("mcp__"),
+            Err(_) => true,
+        };
+    }
+    false
+}
+
+/// 外部 MCP 来源的审批归属信息（非 MCP 调用不携带）。
+fn approval_origin(
+    origin: Option<&hook_state::BoundToolOrigin>,
+) -> Option<peri_acp_types::interaction::ApprovalOrigin> {
+    if !is_external_mcp(origin) {
+        return None;
+    }
+    let origin = origin.expect("external MCP has a bound origin");
+    Some(peri_acp_types::interaction::ApprovalOrigin {
+        server: origin.mcp_server_name.clone()?,
+        tool: origin.mcp_tool_name.clone().unwrap_or_default(),
+    })
 }
 
 /// Auto 分类与缓存必须区分外部 MCP 的真实目标，执行调用名仍保持原样。
@@ -263,6 +323,22 @@ impl PermissionMiddleware {
         }
     }
 
+    /// 只有范围、没有交互通道的 fail-closed 中间件。
+    ///
+    /// 用于「父会话声明了外部 MCP 审批范围，但子链没有继承到 broker」：
+    /// `Bypass` 下命中范围的调用会得到 `PolicyDenied`，而不是静默放行。
+    /// 未声明范围时本中间件对所有调用放行，与基线一致。
+    #[must_use]
+    pub fn with_scope_only(mode: Arc<SharedPermissionMode>) -> Self {
+        Self {
+            broker: None,
+            requires_approval: default_requires_approval,
+            mode: Some(mode),
+            auto_classifier: None,
+            broker_timeout: BROKER_TIMEOUT,
+        }
+    }
+
     /// 设置 broker 审批超时（测试用）
     #[must_use]
     pub fn with_broker_timeout(mut self, timeout: std::time::Duration) -> Self {
@@ -389,6 +465,7 @@ impl PermissionMiddleware {
         owner: Option<&TrustedInteractionOwner>,
         broker: &Arc<dyn UserInteractionBroker>,
         tool_call: &ToolCall,
+        origin: Option<&hook_state::BoundToolOrigin>,
     ) -> AgentResult<ToolCall> {
         let Some(owner) = owner.cloned() else {
             return Err(crate::interaction_owner::untrusted_owner_error(
@@ -400,6 +477,7 @@ impl PermissionMiddleware {
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 tool_input: tool_call.input.clone(),
+                mcp_origin: approval_origin(origin),
             }],
         };
         let response =
@@ -444,13 +522,28 @@ impl PermissionMiddleware {
         model_context: Option<peri_model::ModelCallContext>,
     ) -> AgentResult<ToolCall> {
         match mode.load() {
-            PermissionMode::Bypass => Ok(tool_call.clone()),
+            // `Bypass` 保持全局放行；只有会话显式声明了外部 MCP 审批范围且
+            // 本次调用命中绑定来源时才升级为审批。无审批通道时不静默放行
+            // （fail-closed），因为声明已经表达了“这次调用需要人决定”。
+            PermissionMode::Bypass => {
+                if scoped_mcp_approval(mode, tool_call, origin) {
+                    return match &self.broker {
+                        Some(broker) => self.broker_approve(owner, broker, tool_call, origin).await,
+                        None => Err(AgentError::ToolRejected {
+                            tool: tool_call.name.clone(),
+                            reason: "外部 MCP 审批范围已声明，但本端没有审批通道".to_string(),
+                            cause: ToolRejectionCause::PolicyDenied,
+                        }),
+                    };
+                }
+                Ok(tool_call.clone())
+            }
             PermissionMode::AcceptEdit => {
                 if !is_external_mcp(origin) && is_edit_tool(&tool_call.name) {
                     Ok(tool_call.clone())
                 } else {
                     match &self.broker {
-                        Some(broker) => self.broker_approve(owner, broker, tool_call).await,
+                        Some(broker) => self.broker_approve(owner, broker, tool_call, origin).await,
                         None => Ok(tool_call.clone()),
                     }
                 }
@@ -474,7 +567,9 @@ impl PermissionMiddleware {
                             cause: ToolRejectionCause::PolicyDenied,
                         }),
                         Classification::Unsure => match &self.broker {
-                            Some(broker) => self.broker_approve(owner, broker, tool_call).await,
+                            Some(broker) => {
+                                self.broker_approve(owner, broker, tool_call, origin).await
+                            }
                             // 没有分类器 → 没有可作答的审批通道 ⇒ 本端机制拒绝。
                             None => Err(AgentError::ToolRejected {
                                 tool: tool_call.name.clone(),
@@ -485,7 +580,7 @@ impl PermissionMiddleware {
                     }
                 }
                 None => match &self.broker {
-                    Some(broker) => self.broker_approve(owner, broker, tool_call).await,
+                    Some(broker) => self.broker_approve(owner, broker, tool_call, origin).await,
                     None => Err(AgentError::ToolRejected {
                         tool: tool_call.name.clone(),
                         reason: "Auto 模式：无分类器且无 broker".to_string(),
@@ -494,7 +589,7 @@ impl PermissionMiddleware {
                 },
             },
             PermissionMode::Default => match &self.broker {
-                Some(broker) => self.broker_approve(owner, broker, tool_call).await,
+                Some(broker) => self.broker_approve(owner, broker, tool_call, origin).await,
                 None => {
                     tracing::warn!("HITL Default 模式但无 broker，拒绝工具调用");
                     Err(anyhow::anyhow!("HITL 审批不可用：未配置 broker").into())
@@ -552,10 +647,11 @@ impl PermissionMiddleware {
 
         let items: Vec<ApprovalItem> = needs_approval
             .iter()
-            .map(|(_, c)| ApprovalItem {
+            .map(|(i, c)| ApprovalItem {
                 tool_call_id: c.id.clone(),
                 tool_name: c.name.clone(),
                 tool_input: c.input.clone(),
+                mcp_origin: approval_origin(origins[*i].as_ref()),
             })
             .collect();
 
@@ -698,6 +794,7 @@ impl Middleware for PermissionMiddleware {
 
         // 4. 无 mode 但有 broker → 原有弹窗审批逻辑
         let owner = crate::interaction_owner::owner_from_hook_state(state);
-        self.broker_approve(owner.as_ref(), broker, tool_call).await
+        self.broker_approve(owner.as_ref(), broker, tool_call, origin.as_ref())
+            .await
     }
 }

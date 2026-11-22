@@ -223,7 +223,8 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 super::table_layout::status_emoji_for_run(&run.status).to_string()
             };
             let name = &run.workflow_name;
-            let text = format!(" {emoji} {name} ");
+            let warning = if run.unknown_side_effects { " ⚠" } else { "" };
+            let text = format!(" {emoji} {name}{warning} ");
             if is_selected {
                 Span::styled(
                     text,

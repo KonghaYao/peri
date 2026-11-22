@@ -13,10 +13,11 @@ use agent_client_protocol_schema::v1::{
 };
 use async_trait::async_trait;
 use peri_acp_types::interaction::{
-    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, QuestionAnswer,
-    QuestionItem, TrustedInteractionOwner, UnansweredCause, UserInteractionBroker,
+    ApprovalDecision, ApprovalItem, InteractionContext, InteractionFailure, InteractionResponse,
+    QuestionAnswer, QuestionItem, TrustedInteractionOwner, UnansweredCause, UserInteractionBroker,
 };
 
+use crate::transport::types::AcpError;
 use crate::transport::RequestTransport;
 
 /// 审批转发模式：`Forward` 经 `session/request_permission` 转发给客户端；
@@ -80,7 +81,7 @@ impl AcpTransportBroker {
         self
     }
 
-    /// 提问分支超时（`Some` 时超时返回 `Rejected`；`None` 不超时）。
+    /// 提问分支超时（`Some` 时超时返回 `Failed { Timeout }`；`None` 不超时）。
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
         self
@@ -176,7 +177,18 @@ impl AcpTransportBroker {
 
             let request =
                 RequestPermissionRequest::new(self.session_id.clone(), tool_update, options);
-            let params = serde_json::to_value(&request).unwrap_or_default();
+            let mut params = serde_json::to_value(&request).unwrap_or_default();
+            // Binding identity travels with the request (non-MCP approvals omit
+            // it). A gateway that scopes approvals by declared MCP server must
+            // match on this fact instead of the tool name.
+            if let Some(origin) = item.mcp_origin.as_ref() {
+                params["_meta"] = serde_json::json!({
+                    "peri.mcp": {
+                        "server": origin.server,
+                        "tool": origin.tool,
+                    }
+                });
+            }
 
             match self
                 .transport
@@ -220,17 +232,40 @@ impl AcpTransportBroker {
         };
         match result {
             Ok(Ok(response)) => parse_elicitation_response(response, requests),
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "Elicitation request failed, returning empty answers");
-                InteractionResponse::Answers(empty_answers(requests))
+            // 网关/客户端错误（-32601 等）与传输失败都不是用户回答：显式失败，
+            // 不伪造空答案（旧行为把两类失败都伪装成「用户提交了空内容」）。
+            Ok(Err(error)) => {
+                let failure = classify_elicitation_transport_error(&error);
+                tracing::warn!(error = %error, ?failure, "elicitation request failed");
+                InteractionResponse::Failed { failure }
             }
-            // 客户端存活但不响应：超时 → Rejected（LLM 侧 ToolRejected）。
-            Err(_elapsed) => InteractionResponse::Rejected,
+            // 客户端存活但不响应：超时同样是通道失败，不是用户拒绝或空答案。
+            Err(_elapsed) => {
+                tracing::warn!("elicitation request timed out without a response");
+                InteractionResponse::Failed {
+                    failure: InteractionFailure::Timeout,
+                }
+            }
         }
     }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
+
+/// 把 elicitation 的传输错误分成「能力缺失」与「传输/协议失败」两类。
+///
+/// `-32601`（method not found）只说明该 endpoint 不支持 `elicitation/create`：
+/// 请求可达，问题不在连接。其余错误（连接关闭、写失败、SDK/协议错误）统一按
+/// 传输失败处理。两者都必须显式失败，不能退化为空答案。
+pub(crate) fn classify_elicitation_transport_error(error: &AcpError) -> InteractionFailure {
+    if error.code == -32601 {
+        InteractionFailure::MethodUnsupported
+    } else {
+        InteractionFailure::Transport {
+            detail: format!("JSON-RPC {}: {}", error.code, error.message),
+        }
+    }
+}
 
 pub(crate) fn build_elicitation_params(
     requests: &[QuestionItem],
@@ -297,24 +332,37 @@ pub(crate) fn parse_elicitation_response(
                 InteractionResponse::Rejected
             }
             ElicitationAction::Cancel => {
-                // 客户端取消了提问：声明了原因（含无法识别的取值）说明它正常
-                // 收到提问但无法作答，如实产出 Unanswered；未声明才按旧语义
-                // 回落空答案（owner 失效、session/prompt 取消等生命周期结算）。
+                // 客户端声明了原因（含无法识别的取值）：它正常收到提问但无法
+                // 作答，如实产出 Unanswered（`-p` 非交互路径依赖此分支）。
                 if let Some(cause) = UnansweredCause::from_meta(resp.meta.as_ref()) {
                     tracing::info!(?cause, "Elicitation cancelled by unanswered client");
                     return InteractionResponse::Unanswered { cause };
                 }
-                tracing::info!("Elicitation cancelled by user");
-                InteractionResponse::Answers(empty_answers(requests))
+                // 裸 cancel（无 `_meta`：TUI Esc、生命周期结算）：用户明确撤销了
+                // 本次提问，按明确拒绝结算。绝不回落空答案——那会让模型把取消
+                // 当成用户提交了空内容。
+                tracing::info!("Elicitation cancelled by user; settling as explicit rejection");
+                InteractionResponse::Rejected
             }
             _ => {
-                tracing::warn!("Unknown elicitation action, returning empty answers");
-                InteractionResponse::Answers(empty_answers(requests))
+                // 未知 action 是协议错误：客户端没有按 elicitation 契约回答，
+                // 不能把「无法理解的响应」当成用户提交了空答案。
+                tracing::warn!(action = ?resp.action, "Unknown elicitation action");
+                InteractionResponse::Failed {
+                    failure: InteractionFailure::Transport {
+                        detail: format!("unsupported elicitation action: {:?}", resp.action),
+                    },
+                }
             }
         },
         Err(e) => {
+            // 响应体无法按 elicitation 契约解析：协议错误，显式失败。
             tracing::warn!(error = %e, "Failed to parse elicitation response");
-            InteractionResponse::Answers(empty_answers(requests))
+            InteractionResponse::Failed {
+                failure: InteractionFailure::Transport {
+                    detail: format!("invalid elicitation response: {e}"),
+                },
+            }
         }
     }
 }
@@ -382,20 +430,6 @@ fn map_elicitation_answer(
         selected,
         text,
     }
-}
-
-/// 无原因声明的 cancel 兜底（TUI 用户撤销弹窗、owner 过期结算、投递失败等）：
-/// 客户端只取消了本次提问，没有声明「无人可作答」。客户端声明了原因时（含
-/// 未知取值）走 [`UnansweredCause`] → `Unanswered`，不进这里。
-fn empty_answers(requests: Vec<QuestionItem>) -> Vec<QuestionAnswer> {
-    requests
-        .into_iter()
-        .map(|q| QuestionAnswer {
-            id: q.id,
-            selected: vec![],
-            text: Some(String::new()),
-        })
-        .collect()
 }
 
 /// Inject `description` from `QuestionOption` into the serialized JSON's

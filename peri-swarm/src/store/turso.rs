@@ -47,6 +47,7 @@
 //! a delta row and its later complete row (S6b3). `(logical_id, seq)` is the
 //! primary key and `swarm_items_by_id` is a plain index.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
 
@@ -57,10 +58,13 @@ use turso_serverless::{
 use url::Url;
 
 use super::{
-    InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemRow, SwarmSessionRow,
-    SwarmSessionUpdate, SwarmStore,
+    grouped_item_page, InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
+    SwarmItemRow, SwarmSessionPatch, SwarmSessionRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow,
 };
-use crate::domain::{EnvironmentRef, InputState, ItemKind, ItemSource, McpToolSpec, SessionState};
+use crate::domain::{
+    EnvironmentRef, InputState, ItemKind, ItemOrder, ItemSource, McpToolSpec, PromptCacheOptions,
+    SessionState, SessionsWindow, TurnStatus, TurnsWindow,
+};
 
 /// Version recorded in `swarm_meta.version` by this build.
 ///
@@ -77,7 +81,7 @@ const REQUEST_BUDGET: Duration = Duration::from_secs(20);
 const CREATE_META_TABLE_SQL: &str =
     "CREATE TABLE IF NOT EXISTS swarm_meta (version INTEGER NOT NULL)";
 
-const CREATE_TABLE_SQL: [&str; 4] = [
+const CREATE_TABLE_SQL: [&str; 5] = [
     "CREATE TABLE IF NOT EXISTS swarm_sessions (
         logical_id       TEXT PRIMARY KEY,
         root_session_id  TEXT NOT NULL UNIQUE,
@@ -88,6 +92,8 @@ const CREATE_TABLE_SQL: [&str; 4] = [
         instructions     TEXT,
         mcp_json         TEXT,
         environment_json TEXT NOT NULL,
+        metadata_json    TEXT,
+        prompt_cache_options_json TEXT,
         created_at       TEXT NOT NULL,
         last_activity_at TEXT NOT NULL,
         last_item_seq    INTEGER NOT NULL DEFAULT 0
@@ -122,11 +128,48 @@ const CREATE_TABLE_SQL: [&str; 4] = [
         last_run_id      TEXT,
         last_used_at     TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS swarm_turns (
+        logical_id   TEXT NOT NULL,
+        turn_id      TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        started_at   INTEGER,
+        completed_at INTEGER,
+        error_json   TEXT,
+        usage_json   TEXT,
+        subagent_id  TEXT,
+        PRIMARY KEY (logical_id, turn_id)
+    )",
 ];
 
 /// Plain index: `item_id` repeats across delta/complete rows of one turn.
-const CREATE_INDEX_SQL: [&str; 1] =
-    ["CREATE INDEX IF NOT EXISTS swarm_items_by_id ON swarm_items (logical_id, item_id)"];
+const CREATE_INDEX_SQL: [&str; 2] = [
+    "CREATE INDEX IF NOT EXISTS swarm_items_by_id ON swarm_items (logical_id, item_id)",
+    "CREATE INDEX IF NOT EXISTS swarm_turns_by_created ON swarm_turns (logical_id, created_at, turn_id)",
+];
+
+/// Additive columns introduced after `swarm_meta.version=1`.
+///
+/// `CREATE TABLE IF NOT EXISTS` cannot add a column to an existing table, so a
+/// database opened by an older build is repaired with `ALTER TABLE ... ADD
+/// COLUMN` before the ordinary idempotent DDL runs. The version row is not
+/// bumped: the change is additive, old readers keep working, and the new
+/// columns are nullable.
+const MIGRATION_COLUMNS: [(&str, &str); 2] = [
+    (
+        "metadata_json",
+        "ALTER TABLE swarm_sessions ADD COLUMN metadata_json TEXT",
+    ),
+    (
+        "prompt_cache_options_json",
+        "ALTER TABLE swarm_sessions ADD COLUMN prompt_cache_options_json TEXT",
+    ),
+];
+
+/// One `PRAGMA table_info` target per migrated table. Each statement is
+/// static; `apply_ddl` only runs the matching `ALTER` when its column is
+/// missing.
+const SESSIONS_TABLE_INFO_SQL: &str = "PRAGMA table_info(swarm_sessions)";
 
 /// Pin the version exactly once. `WHERE NOT EXISTS` keeps concurrent first
 /// opens from inserting a second row.
@@ -151,8 +194,9 @@ const SELECT_VERSION_SQL: &str = "SELECT version FROM swarm_meta";
 /// `root_session_id` fails on the unique constraint, also a conflict.
 const UPSERT_SESSION_SQL: &str = "INSERT INTO swarm_sessions (
     logical_id, root_session_id, actor_key, cwd, state, model, instructions,
-    mcp_json, environment_json, created_at, last_activity_at, last_item_seq)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+    mcp_json, environment_json, metadata_json, prompt_cache_options_json,
+    created_at, last_activity_at, last_item_seq)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 ON CONFLICT(logical_id) DO UPDATE SET
     actor_key = excluded.actor_key,
     state = excluded.state,
@@ -160,17 +204,101 @@ ON CONFLICT(logical_id) DO UPDATE SET
     instructions = excluded.instructions,
     mcp_json = excluded.mcp_json,
     environment_json = excluded.environment_json,
+    metadata_json = excluded.metadata_json,
+    prompt_cache_options_json = excluded.prompt_cache_options_json,
     last_activity_at = excluded.last_activity_at,
     last_item_seq = excluded.last_item_seq
 WHERE swarm_sessions.root_session_id = excluded.root_session_id
   AND swarm_sessions.cwd = excluded.cwd";
 
 const SELECT_SESSION_SQL: &str = "SELECT logical_id, root_session_id, actor_key, cwd, state,
-    model, instructions, mcp_json, environment_json, created_at, last_activity_at, last_item_seq
+    model, instructions, mcp_json, environment_json, metadata_json,
+    prompt_cache_options_json, created_at, last_activity_at, last_item_seq
     FROM swarm_sessions WHERE logical_id = ?1";
 
 const UPDATE_SESSION_SQL: &str = "UPDATE swarm_sessions
     SET state = ?2, last_item_seq = ?3, last_activity_at = ?4 WHERE logical_id = ?1";
+
+/// `sessions.update`. Each `?n IS NULL` keeps the stored value; booleans decide
+/// the two fields whose official spelling can be either "replace" or "clear".
+const PATCH_SESSION_SQL: &str = "UPDATE swarm_sessions SET
+    model = CASE WHEN ?2 THEN ?3 ELSE model END,
+    mcp_json = CASE WHEN ?4 THEN ?5 ELSE mcp_json END,
+    metadata_json = CASE WHEN ?6 THEN ?7 ELSE metadata_json END,
+    prompt_cache_options_json = CASE WHEN ?8 THEN ?9 ELSE prompt_cache_options_json END,
+    last_activity_at = CASE WHEN ?10 THEN ?11 ELSE last_activity_at END
+    WHERE logical_id = ?1";
+
+/// `sessions.list` base statement; metadata predicates are inserted by
+/// [`session_list_sql`]. `?1` is the exclusive id cursor (`''` = none), `?2` is
+/// `limit + 1`.
+const SESSION_LIST_ASC_PREFIX: &str = "SELECT logical_id, root_session_id, actor_key, cwd, state,
+    model, instructions, mcp_json, environment_json, metadata_json,
+    prompt_cache_options_json, created_at, last_activity_at, last_item_seq
+    FROM swarm_sessions s
+    WHERE (?1 = '' OR s.logical_id > ?1)";
+
+const SESSION_LIST_DESC_PREFIX: &str = "SELECT logical_id, root_session_id, actor_key, cwd, state,
+    model, instructions, mcp_json, environment_json, metadata_json,
+    prompt_cache_options_json, created_at, last_activity_at, last_item_seq
+    FROM swarm_sessions s
+    WHERE (?1 = '' OR s.logical_id < ?1)";
+
+const SESSION_LIST_ASC_SUFFIX: &str = " ORDER BY s.logical_id ASC LIMIT ?2";
+const SESSION_LIST_DESC_SUFFIX: &str = " ORDER BY s.logical_id DESC LIMIT ?2";
+
+const DELETE_SESSION_SQL: &str = "DELETE FROM swarm_sessions WHERE logical_id = ?1";
+const DELETE_ITEMS_SQL: &str = "DELETE FROM swarm_items WHERE logical_id = ?1";
+const DELETE_INPUTS_SQL: &str = "DELETE FROM swarm_inputs WHERE logical_id = ?1";
+const DELETE_TURNS_SQL: &str = "DELETE FROM swarm_turns WHERE logical_id = ?1";
+const DELETE_BINDINGS_SQL: &str = "DELETE FROM swarm_bindings WHERE logical_id = ?1";
+
+const UPSERT_TURN_SQL: &str = "INSERT INTO swarm_turns
+    (logical_id, turn_id, status, created_at, started_at, completed_at,
+     error_json, usage_json, subagent_id)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+    ON CONFLICT(logical_id, turn_id) DO UPDATE SET
+        status = excluded.status,
+        started_at = excluded.started_at,
+        completed_at = excluded.completed_at,
+        error_json = excluded.error_json,
+        usage_json = excluded.usage_json,
+        subagent_id = excluded.subagent_id";
+
+const SELECT_TURN_SQL: &str = "SELECT logical_id, turn_id, status, created_at, started_at,
+    completed_at, error_json, usage_json, subagent_id
+    FROM swarm_turns WHERE logical_id = ?1 AND turn_id = ?2";
+
+const SELECT_TURNS_ASC_SQL: &str = "SELECT logical_id, turn_id, status, created_at,
+    started_at, completed_at, error_json, usage_json, subagent_id
+    FROM swarm_turns WHERE logical_id = ?1
+    ORDER BY created_at ASC, turn_id ASC LIMIT ?2";
+
+const SELECT_TURNS_ASC_AFTER_SQL: &str = "SELECT logical_id, turn_id, status, created_at,
+    started_at, completed_at, error_json, usage_json, subagent_id
+    FROM swarm_turns WHERE logical_id = ?1 AND
+    (created_at > ?2 OR (created_at = ?2 AND turn_id > ?3))
+    ORDER BY created_at ASC, turn_id ASC LIMIT ?4";
+
+const SELECT_TURNS_DESC_SQL: &str = "SELECT logical_id, turn_id, status, created_at,
+    started_at, completed_at, error_json, usage_json, subagent_id
+    FROM swarm_turns WHERE logical_id = ?1
+    ORDER BY created_at DESC, turn_id DESC LIMIT ?2";
+
+const SELECT_TURNS_DESC_AFTER_SQL: &str = "SELECT logical_id, turn_id, status, created_at,
+    started_at, completed_at, error_json, usage_json, subagent_id
+    FROM swarm_turns WHERE logical_id = ?1 AND
+    (created_at < ?2 OR (created_at = ?2 AND turn_id < ?3))
+    ORDER BY created_at DESC, turn_id DESC LIMIT ?4";
+
+const CLOSE_OPEN_TURNS_SQL: &str = "UPDATE swarm_turns
+    SET status = ?2, completed_at = ?3, error_json = ?4
+    WHERE logical_id = ?1 AND status IN ('queued', 'in_progress', 'waiting')";
+
+/// Crash-recovery probe: does the session still own a non-terminal turn row?
+/// Predicate matches [`TurnStatus::is_open`].
+const HAS_OPEN_TURN_SQL: &str = "SELECT EXISTS(SELECT 1 FROM swarm_turns
+    WHERE logical_id = ?1 AND status IN ('queued', 'in_progress', 'waiting'))";
 
 const INSERT_ITEM_SQL: &str = "INSERT INTO swarm_items
     (logical_id, seq, item_id, kind, source, payload_json, created_at, truncated)
@@ -187,6 +315,46 @@ const SELECT_ITEMS_BEFORE_SQL: &str = "SELECT logical_id, seq, item_id, kind, so
 const SELECT_ITEMS_TAIL_SQL: &str = "SELECT logical_id, seq, item_id, kind, source,
     payload_json, created_at, truncated FROM swarm_items
     WHERE logical_id = ?1 ORDER BY seq DESC LIMIT ?2";
+
+const SELECT_ITEM_BY_ID_SQL: &str = "SELECT logical_id, seq, item_id, kind, source,
+    payload_json, created_at, truncated FROM swarm_items
+    WHERE logical_id = ?1 AND item_id = ?2 ORDER BY seq DESC LIMIT 1";
+
+// Item-grouped pagination (`design §4.2`). `page` selects items by their
+// greatest `seq` — never by rows — so a cursor resolved from an item id cannot
+// land inside the same item and repeat it. The outer query then returns every
+// row of the selected items; the caller derives `data` from each item's last
+// row. The join carries `logical_id` so a caller-supplied input id that repeats
+// across sessions can never pull another session's rows.
+const SELECT_ITEM_PAGE_ASC_SQL: &str = "WITH page AS (
+    SELECT logical_id, item_id, MAX(seq) AS last_seq FROM swarm_items
+    WHERE logical_id = ?1 GROUP BY logical_id, item_id HAVING MAX(seq) > ?2
+    ORDER BY last_seq ASC LIMIT ?3)
+  SELECT i.logical_id, i.seq, i.item_id, i.kind, i.source, i.payload_json,
+    i.created_at, i.truncated
+  FROM swarm_items i
+  JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id
+  ORDER BY i.seq ASC";
+
+const SELECT_ITEM_PAGE_DESC_SQL: &str = "WITH page AS (
+    SELECT logical_id, item_id, MAX(seq) AS last_seq FROM swarm_items
+    WHERE logical_id = ?1 GROUP BY logical_id, item_id HAVING MAX(seq) < ?2
+    ORDER BY last_seq DESC LIMIT ?3)
+  SELECT i.logical_id, i.seq, i.item_id, i.kind, i.source, i.payload_json,
+    i.created_at, i.truncated
+  FROM swarm_items i
+  JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id
+  ORDER BY i.seq DESC";
+
+const SELECT_ITEM_PAGE_TAIL_SQL: &str = "WITH page AS (
+    SELECT logical_id, item_id, MAX(seq) AS last_seq FROM swarm_items
+    WHERE logical_id = ?1 GROUP BY logical_id, item_id
+    ORDER BY last_seq DESC LIMIT ?2)
+  SELECT i.logical_id, i.seq, i.item_id, i.kind, i.source, i.payload_json,
+    i.created_at, i.truncated
+  FROM swarm_items i
+  JOIN page p ON i.logical_id = p.logical_id AND i.item_id = p.item_id
+  ORDER BY i.seq DESC";
 
 const SELECT_LAST_SEQ_SQL: &str =
     "SELECT COALESCE(MAX(seq), 0) FROM swarm_items WHERE logical_id = ?1";
@@ -298,7 +466,7 @@ impl SwarmStateStore {
     async fn execute(
         &self,
         operation: &'static str,
-        sql: &'static str,
+        sql: &str,
         params: Vec<Value>,
     ) -> Result<u64, StoreError> {
         within_budget(operation, self.connection.execute(sql, params)).await
@@ -307,7 +475,7 @@ impl SwarmStateStore {
     async fn query_rows(
         &self,
         operation: &'static str,
-        sql: &'static str,
+        sql: &str,
         params: Vec<Value>,
     ) -> Result<Vec<Vec<Value>>, StoreError> {
         let mut rows = within_budget(operation, self.connection.query(sql, params)).await?;
@@ -319,6 +487,27 @@ impl SwarmStateStore {
             }
         }
     }
+}
+
+fn session_list_sql(order: ItemOrder, filters: usize) -> String {
+    let (prefix, suffix) = match order {
+        ItemOrder::Asc => (SESSION_LIST_ASC_PREFIX, SESSION_LIST_ASC_SUFFIX),
+        ItemOrder::Desc => (SESSION_LIST_DESC_PREFIX, SESSION_LIST_DESC_SUFFIX),
+    };
+    let mut sql = String::from(prefix);
+    for index in 0..filters {
+        // `?1`/`?2` are the cursor and limit; each metadata pair binds two
+        // parameters. `json_each` compares the stored key and value as text, so
+        // no caller string becomes SQL or a JSON path.
+        let key_param = 3 + index * 2;
+        let value_param = key_param + 1;
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM json_each(s.metadata_json) m \
+             WHERE m.key = ?{key_param} AND m.value = ?{value_param})"
+        ));
+    }
+    sql.push_str(suffix);
+    sql
 }
 
 fn resolve_credential(
@@ -432,13 +621,90 @@ async fn query_schema_rows(
     }
 }
 
+/// `ALTER TABLE` statements needed for a table with `existing` columns.
+///
+/// Pure so the legacy→current migration decision is testable without a Loom
+/// server. An empty result means the table already carries every new column;
+/// a fresh database takes the `CREATE TABLE` path and passes an empty slice
+/// too (the table does not exist yet, so `ALTER` must not run).
+fn migration_statements(existing: &[String]) -> Vec<&'static str> {
+    if existing.is_empty() {
+        return Vec::new();
+    }
+    MIGRATION_COLUMNS
+        .iter()
+        .filter(|(column, _)| !existing.iter().any(|name| name == column))
+        .map(|(_, sql)| *sql)
+        .collect()
+}
+
+/// Column names reported by `PRAGMA table_info`. `None` means the table does
+/// not exist yet.
+async fn session_columns(connection: &Connection) -> Result<Option<Vec<String>>, SwarmStateError> {
+    let rows = query_schema_rows(connection, SESSIONS_TABLE_INFO_SQL).await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut columns = Vec::with_capacity(rows.len());
+    for row in rows {
+        match row.get(1) {
+            Some(Value::Text(name)) => columns.push(name.clone()),
+            _ => {
+                return Err(SwarmStateError::Schema(
+                    "PRAGMA table_info did not return a text column name".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(Some(columns))
+}
+
 /// Create the owned objects in one managed transaction. `pin_version` also
 /// records [`SWARM_STATE_SCHEMA_VERSION`] when no row exists yet.
+///
+/// `PRAGMA table_info` runs before the transaction, so two replicas opening the
+/// same legacy database can both decide a column is missing. The loser's
+/// `ALTER TABLE ... ADD COLUMN` fails with `duplicate column`; that is a lost
+/// migration race, not a schema error. When a re-read confirms every migrated
+/// column is now present, the batch is retried once (it is idempotent, and the
+/// retry also pins the version row a concurrent fresh open may have raced).
 async fn apply_ddl(connection: &Connection, pin_version: bool) -> Result<(), SwarmStateError> {
-    let mut statements = Vec::with_capacity(2 + CREATE_TABLE_SQL.len() + CREATE_INDEX_SQL.len());
+    match apply_ddl_once(connection, pin_version).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // A failed `PRAGMA` leaves the decision at `Propagate`: the
+            // original failure is what the caller must see.
+            let existing = session_columns(connection).await.ok().flatten();
+            match migration_retry_decision(&error, existing.as_deref()) {
+                MigrationRetry::Propagate => Err(error),
+                MigrationRetry::Retry => match apply_ddl_once(connection, pin_version).await {
+                    Ok(()) => Ok(()),
+                    Err(retry_error) => {
+                        tracing::warn!(
+                            error = %retry_error,
+                            "swarm schema retry after a duplicate-column race failed"
+                        );
+                        Err(error)
+                    }
+                },
+            }
+        }
+    }
+}
+
+async fn apply_ddl_once(connection: &Connection, pin_version: bool) -> Result<(), SwarmStateError> {
+    let existing = session_columns(connection).await?;
+    let mut statements = Vec::with_capacity(4 + CREATE_TABLE_SQL.len() + CREATE_INDEX_SQL.len());
     statements.push(batch_statement(CREATE_META_TABLE_SQL, Vec::new())?);
     for sql in CREATE_TABLE_SQL {
         statements.push(batch_statement(sql, Vec::new())?);
+    }
+    // Existing table: add the post-v1 nullable columns. The decision is made
+    // from `PRAGMA table_info` before the batch, so a second open adds nothing.
+    if let Some(existing) = existing.as_deref() {
+        for sql in migration_statements(existing) {
+            statements.push(batch_statement(sql, Vec::new())?);
+        }
     }
     for sql in CREATE_INDEX_SQL {
         statements.push(batch_statement(sql, Vec::new())?);
@@ -464,6 +730,39 @@ fn batch_statement(
 ) -> Result<BatchStatement, SwarmStateError> {
     BatchStatement::new(sql, params)
         .map_err(|error| SwarmStateError::Schema(format!("cannot build schema statement: {error}")))
+}
+
+/// Outcome of a failed schema batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MigrationRetry {
+    /// A concurrent replica added the columns first; retry the idempotent batch
+    /// once (this also pins the version row, which the loser did not write).
+    Retry,
+    /// Not a lost migration race, or the migrated columns are still missing:
+    /// surface the original failure instead of retrying blindly.
+    Propagate,
+}
+
+/// Decide whether a failed `apply_ddl_once` lost a migration race.
+///
+/// Pure so the decision is testable with a constructed error; the actual
+/// retry lives in [`apply_ddl`]. Only SQLite's `duplicate column` text counts as
+/// a race: every other schema failure (missing table, permission, transport)
+/// must propagate unchanged.
+fn migration_retry_decision(
+    error: &SwarmStateError,
+    existing: Option<&[String]>,
+) -> MigrationRetry {
+    let SwarmStateError::Schema(message) = error else {
+        return MigrationRetry::Propagate;
+    };
+    if !message.to_ascii_lowercase().contains("duplicate column") {
+        return MigrationRetry::Propagate;
+    }
+    match existing {
+        Some(columns) if migration_statements(columns).is_empty() => MigrationRetry::Retry,
+        _ => MigrationRetry::Propagate,
+    }
 }
 
 // ── error classification ────────────────────────────────────────────────────
@@ -546,6 +845,7 @@ fn parse_item_kind(raw: &str) -> Result<ItemKind, StoreError> {
         "tool_update" => Ok(ItemKind::ToolUpdate),
         "tool_result" => Ok(ItemKind::ToolResult),
         "receipt" => Ok(ItemKind::Receipt),
+        "approval" => Ok(ItemKind::Approval),
         other => Err(unreadable(format!("kind={other:?}"))),
     }
 }
@@ -582,6 +882,77 @@ fn decode_mcp_json(text: Option<&str>) -> Result<Vec<McpToolSpec>, StoreError> {
         .map_err(|error| StoreError::Unavailable(format!("cannot decode mcp tools: {error}")))
 }
 
+/// An empty metadata map is stored as `NULL`, the documented "no metadata".
+fn metadata_json(metadata: &BTreeMap<String, String>) -> Result<Value, StoreError> {
+    if metadata.is_empty() {
+        return Ok(Value::Null);
+    }
+    encode(metadata, "metadata").map(Value::Text)
+}
+
+fn decode_metadata(text: Option<&str>) -> Result<BTreeMap<String, String>, StoreError> {
+    match text {
+        None => Ok(BTreeMap::new()),
+        Some(text) => decode(text, "metadata"),
+    }
+}
+
+fn prompt_cache_json(options: Option<PromptCacheOptions>) -> Result<Value, StoreError> {
+    match options {
+        None => Ok(Value::Null),
+        Some(options) => encode(&options, "prompt cache options").map(Value::Text),
+    }
+}
+
+fn decode_prompt_cache(text: Option<&str>) -> Result<Option<PromptCacheOptions>, StoreError> {
+    text.map(|text| decode(text, "prompt cache options"))
+        .transpose()
+}
+
+fn parse_turn_status(raw: &str) -> Result<TurnStatus, StoreError> {
+    TurnStatus::parse(raw).ok_or_else(|| unreadable(format!("turn status={raw:?}")))
+}
+
+fn turn_params(row: &SwarmTurnRow) -> Result<Vec<Value>, StoreError> {
+    Ok(vec![
+        Value::Text(row.logical_id.clone()),
+        Value::Text(row.turn_id.clone()),
+        Value::Text(row.status.as_str().to_owned()),
+        Value::Integer(row.created_at),
+        row.started_at.map_or(Value::Null, Value::Integer),
+        row.completed_at.map_or(Value::Null, Value::Integer),
+        row.error.as_ref().map_or(Ok(Value::Null), |error| {
+            encode(error, "turn error").map(Value::Text)
+        })?,
+        row.usage.as_ref().map_or(Ok(Value::Null), |usage| {
+            encode(usage, "turn usage").map(Value::Text)
+        })?,
+        optional_text(row.subagent_id.as_deref()),
+    ])
+}
+
+fn decode_turn(values: &[Value]) -> Result<SwarmTurnRow, StoreError> {
+    let error = optional_text_field(values, 6, "turn error")?;
+    let usage = optional_text_field(values, 7, "turn usage")?;
+    Ok(SwarmTurnRow {
+        logical_id: text_field(values, 0, "logical id")?,
+        turn_id: text_field(values, 1, "turn id")?,
+        status: parse_turn_status(&text_field(values, 2, "turn status")?)?,
+        created_at: int_field(values, 3, "turn created at")?,
+        started_at: optional_int_field(values, 4, "turn started at")?,
+        completed_at: optional_int_field(values, 5, "turn completed at")?,
+        error: error
+            .as_deref()
+            .map(|text| decode(text, "turn error"))
+            .transpose()?,
+        usage: usage
+            .as_deref()
+            .map(|text| decode(text, "turn usage"))
+            .transpose()?,
+        subagent_id: optional_text_field(values, 8, "subagent id")?,
+    })
+}
+
 fn session_params(row: &SwarmSessionRow) -> Result<Vec<Value>, StoreError> {
     Ok(vec![
         Value::Text(row.logical_id.clone()),
@@ -593,6 +964,8 @@ fn session_params(row: &SwarmSessionRow) -> Result<Vec<Value>, StoreError> {
         optional_text(row.instructions.as_deref()),
         optional_text(mcp_json(&row.mcp_tools)?.as_deref()),
         Value::Text(encode(&row.environment, "environment")?),
+        metadata_json(&row.metadata)?,
+        prompt_cache_json(row.prompt_cache_options)?,
         Value::Text(row.created_at.clone()),
         Value::Text(row.last_activity_at.clone()),
         seq_param(row.last_item_seq, "last item seq")?,
@@ -615,9 +988,13 @@ fn decode_session(values: &[Value]) -> Result<SwarmSessionRow, StoreError> {
             &text_field(values, 8, "environment")?,
             "environment",
         )?,
-        created_at: text_field(values, 9, "created at")?,
-        last_activity_at: text_field(values, 10, "last activity at")?,
-        last_item_seq: seq_field(values, 11, "last item seq")?,
+        metadata: decode_metadata(optional_text_field(values, 9, "metadata")?.as_deref())?,
+        prompt_cache_options: decode_prompt_cache(
+            optional_text_field(values, 10, "prompt cache options")?.as_deref(),
+        )?,
+        created_at: text_field(values, 11, "created at")?,
+        last_activity_at: text_field(values, 12, "last activity at")?,
+        last_item_seq: seq_field(values, 13, "last item seq")?,
     })
 }
 
@@ -718,6 +1095,18 @@ fn optional_text_field(
 
 fn int_field(values: &[Value], index: usize, what: &'static str) -> Result<i64, StoreError> {
     int_at(values, index).ok_or_else(|| unreadable(format!("{what} is not an integer")))
+}
+
+fn optional_int_field(
+    values: &[Value],
+    index: usize,
+    what: &'static str,
+) -> Result<Option<i64>, StoreError> {
+    match values.get(index) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::Integer(value)) => Ok(Some(*value)),
+        _ => Err(unreadable(format!("{what} is not an integer"))),
+    }
 }
 
 fn seq_field(values: &[Value], index: usize, what: &'static str) -> Result<u64, StoreError> {
@@ -824,6 +1213,99 @@ impl SwarmStore for SwarmStateStore {
         }
     }
 
+    async fn swarm_patch_session(&self, patch: SwarmSessionPatch) -> Result<(), StoreError> {
+        let set_mcp = patch.mcp_tools.is_some();
+        let model = patch.model;
+        let mcp = match patch.mcp_tools {
+            Some(tools) => mcp_json(&tools)?,
+            None => None,
+        };
+        let set_metadata = patch.metadata.is_some();
+        let metadata = match patch.metadata {
+            Some(metadata) => Some(metadata_json(&metadata)?),
+            None => None,
+        };
+        let set_prompt_cache = patch.prompt_cache_options.is_some();
+        let prompt_cache = match patch.prompt_cache_options {
+            Some(options) => Some(prompt_cache_json(options)?),
+            None => None,
+        };
+        let params = vec![
+            Value::Text(patch.logical_id.clone()),
+            Value::Integer(i64::from(model.is_some())),
+            optional_text(model.as_deref()),
+            Value::Integer(i64::from(set_mcp)),
+            optional_text(mcp.as_deref()),
+            Value::Integer(i64::from(set_metadata)),
+            metadata.unwrap_or(Value::Null),
+            Value::Integer(i64::from(set_prompt_cache)),
+            prompt_cache.unwrap_or(Value::Null),
+            Value::Integer(i64::from(patch.last_activity_at.is_some())),
+            optional_text(patch.last_activity_at.as_deref()),
+        ];
+        let affected = self
+            .execute("patch_session", PATCH_SESSION_SQL, params)
+            .await?;
+        match affected {
+            1 => Ok(()),
+            0 => Err(StoreError::NotFound(format!(
+                "swarm session {} does not exist",
+                patch.logical_id
+            ))),
+            other => Err(unexplained("patch_session", other)),
+        }
+    }
+
+    async fn swarm_list_sessions(
+        &self,
+        window: &SessionsWindow,
+    ) -> Result<Vec<SwarmSessionRow>, StoreError> {
+        if window
+            .agent_id
+            .as_deref()
+            .is_some_and(|agent_id| agent_id != "root")
+        {
+            // The gateway has one root agent identity; a different id selects
+            // no session rather than being ignored.
+            return Ok(Vec::new());
+        }
+        let sql = session_list_sql(window.order, window.metadata.len());
+        let mut params = vec![
+            Value::Text(window.after.clone().unwrap_or_default()),
+            Value::Integer(i64::from(window.limit.saturating_add(1))),
+        ];
+        for (key, value) in &window.metadata {
+            params.push(Value::Text(key.clone()));
+            params.push(Value::Text(value.clone()));
+        }
+        let rows = self.query_rows("list_sessions", &sql, params).await?;
+        rows.iter().map(|row| decode_session(row)).collect()
+    }
+
+    async fn swarm_delete_session(&self, logical_id: &str) -> Result<(), StoreError> {
+        // One managed transaction: a partial delete can never be reported as
+        // success. Statements are ordered child-first for readability; the
+        // transaction is what makes the set atomic.
+        let statements = [
+            DELETE_ITEMS_SQL,
+            DELETE_INPUTS_SQL,
+            DELETE_TURNS_SQL,
+            DELETE_BINDINGS_SQL,
+            DELETE_SESSION_SQL,
+        ]
+        .into_iter()
+        .map(|sql| batch_statement(sql, vec![Value::Text(logical_id.to_owned())]))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| StoreError::Unavailable(error.to_string()))?;
+        within_budget(
+            "delete_session",
+            self.connection
+                .transactional_batch(statements, TransactionBehavior::Immediate),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn swarm_append_item(&self, row: SwarmItemRow) -> Result<(), StoreError> {
         let affected = self
             .execute("append_item", INSERT_ITEM_SQL, item_params(&row)?)
@@ -883,6 +1365,49 @@ impl SwarmStore for SwarmStateStore {
         rows.iter().map(|row| decode_item(row)).collect()
     }
 
+    async fn swarm_item_page(
+        &self,
+        logical_id: &str,
+        order: ItemOrder,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<SwarmItemPage, StoreError> {
+        // `limit + 1` items are selected so `has_more` needs no second query;
+        // the extra item's rows are dropped by `grouped_item_page`.
+        let probe = limit.saturating_add(1);
+        let (sql, params) = match (order, after) {
+            (ItemOrder::Asc, after) => (
+                SELECT_ITEM_PAGE_ASC_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    seq_param(after.unwrap_or(0), "cursor")?,
+                    Value::Integer(i64::from(probe)),
+                ],
+            ),
+            (ItemOrder::Desc, Some(after)) => (
+                SELECT_ITEM_PAGE_DESC_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    seq_param(after, "cursor")?,
+                    Value::Integer(i64::from(probe)),
+                ],
+            ),
+            (ItemOrder::Desc, None) => (
+                SELECT_ITEM_PAGE_TAIL_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    Value::Integer(i64::from(probe)),
+                ],
+            ),
+        };
+        let rows = self.query_rows("item_page", sql, params).await?;
+        let rows = rows
+            .iter()
+            .map(|row| decode_item(row))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(grouped_item_page(rows, order, limit))
+    }
+
     async fn swarm_last_seq(&self, logical_id: &str) -> Result<u64, StoreError> {
         let rows = self
             .query_rows(
@@ -894,6 +1419,28 @@ impl SwarmStore for SwarmStateStore {
         match rows.as_slice() {
             [row] => seq_field(row, 0, "last item seq"),
             rows => Err(unexpected_row_count("last_seq", rows.len())),
+        }
+    }
+
+    async fn swarm_get_item(
+        &self,
+        logical_id: &str,
+        item_id: &str,
+    ) -> Result<Option<SwarmItemRow>, StoreError> {
+        let rows = self
+            .query_rows(
+                "get_item",
+                SELECT_ITEM_BY_ID_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    Value::Text(item_id.to_owned()),
+                ],
+            )
+            .await?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => decode_item(row).map(Some),
+            rows => Err(unexpected_row_count("get_item", rows.len())),
         }
     }
 
@@ -965,6 +1512,122 @@ impl SwarmStore for SwarmStateStore {
             [] => Ok(None),
             [row] => Ok(Some(decode_binding(row)?)),
             rows => Err(unexpected_row_count("get_binding", rows.len())),
+        }
+    }
+
+    async fn swarm_upsert_turn(&self, row: SwarmTurnRow) -> Result<(), StoreError> {
+        let affected = self
+            .execute("upsert_turn", UPSERT_TURN_SQL, turn_params(&row)?)
+            .await?;
+        match affected {
+            1 => Ok(()),
+            other => Err(unexplained("upsert_turn", other)),
+        }
+    }
+
+    async fn swarm_get_turn(
+        &self,
+        logical_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<SwarmTurnRow>, StoreError> {
+        let rows = self
+            .query_rows(
+                "get_turn",
+                SELECT_TURN_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    Value::Text(turn_id.to_owned()),
+                ],
+            )
+            .await?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => decode_turn(row).map(Some),
+            rows => Err(unexpected_row_count("get_turn", rows.len())),
+        }
+    }
+
+    async fn swarm_turn_page(
+        &self,
+        logical_id: &str,
+        window: &TurnsWindow,
+    ) -> Result<Vec<SwarmTurnRow>, StoreError> {
+        // The service rejects an unknown cursor; a missing row here simply
+        // selects nothing.
+        let after = match window.after.as_deref() {
+            Some(after) => self.swarm_get_turn(logical_id, after).await?,
+            None => None,
+        };
+        let probe = Value::Integer(i64::from(window.limit.saturating_add(1)));
+        let (sql, params) = match (window.order, after) {
+            (ItemOrder::Asc, Some(after)) => (
+                SELECT_TURNS_ASC_AFTER_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    Value::Integer(after.created_at),
+                    Value::Text(after.turn_id),
+                    probe,
+                ],
+            ),
+            (ItemOrder::Asc, None) => (
+                SELECT_TURNS_ASC_SQL,
+                vec![Value::Text(logical_id.to_owned()), probe],
+            ),
+            (ItemOrder::Desc, Some(after)) => (
+                SELECT_TURNS_DESC_AFTER_SQL,
+                vec![
+                    Value::Text(logical_id.to_owned()),
+                    Value::Integer(after.created_at),
+                    Value::Text(after.turn_id),
+                    probe,
+                ],
+            ),
+            (ItemOrder::Desc, None) => (
+                SELECT_TURNS_DESC_SQL,
+                vec![Value::Text(logical_id.to_owned()), probe],
+            ),
+        };
+        let rows = self.query_rows("turn_page", sql, params).await?;
+        rows.iter().map(|row| decode_turn(row)).collect()
+    }
+
+    async fn swarm_close_open_turns(
+        &self,
+        logical_id: &str,
+        status: TurnStatus,
+        completed_at: i64,
+        error: Option<serde_json::Value>,
+    ) -> Result<u64, StoreError> {
+        self.execute(
+            "close_open_turns",
+            CLOSE_OPEN_TURNS_SQL,
+            vec![
+                Value::Text(logical_id.to_owned()),
+                Value::Text(status.as_str().to_owned()),
+                Value::Integer(completed_at),
+                match error {
+                    Some(error) => encode(&error, "turn error").map(Value::Text)?,
+                    None => Value::Null,
+                },
+            ],
+        )
+        .await
+    }
+
+    async fn swarm_has_open_turn(&self, logical_id: &str) -> Result<bool, StoreError> {
+        let rows = self
+            .query_rows(
+                "has_open_turn",
+                HAS_OPEN_TURN_SQL,
+                vec![Value::Text(logical_id.to_owned())],
+            )
+            .await?;
+        match rows.as_slice() {
+            [row] => match row.as_slice() {
+                [Value::Integer(open)] => Ok(*open != 0),
+                _ => Err(unreadable("has_open_turn result is not one integer")),
+            },
+            rows => Err(unexpected_row_count("has_open_turn", rows.len())),
         }
     }
 }

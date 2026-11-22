@@ -20,6 +20,9 @@ peri-resources = { path = "../peri-resources" }
 turso_serverless = "0.1.3"
 async-trait.workspace = true
 axum.workspace = true
+# Replay derives the official `Turn.created_at` (Unix seconds) from the
+# persisted RFC3339 item timestamp; the workspace already pins chrono.
+chrono.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 # Pinned to the engine generation verified in `.peri/plans/env-probe.md`

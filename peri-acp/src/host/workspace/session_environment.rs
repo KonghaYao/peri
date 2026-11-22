@@ -47,12 +47,13 @@ pub(crate) struct SessionEnvironment {
     pub(super) cleanup_tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
     /// ACP 会话自身的后台任务管理器；Workspace Bash 使用 MCP 侧独立 owner。
     pub(super) task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
-    /// `cfg(test)`：canonical idle 入口（`SessionInvocationService`）的观察面。
+    /// session-owned canonical 调用入口（App 回调 / Host invoke / workflow 脚本
+    /// 工具通道共用同一实例与同一管线）。
     ///
     /// 装配点是**注入**取消父的地方，只读环境自己新建的令牌看不到「注入错了哪根」；
-    /// 这里保留 service 句柄，让测试断言它**实际持有**的取消父状态
-    /// （[`Self::session_invocation_cancelled`]）。
-    #[cfg(test)]
+    /// 测试据此断言它**实际持有**的取消父状态（[`Self::session_invocation_cancelled`]）。
+    /// 生产环境保留句柄供 workflow consumer 注入 `WorkflowToolInvoker`：工具通道必须
+    /// 复用同一 canonical 入口，不另建第二套审批 / 解析实现。
     pub(super) session_invocation:
         Option<Arc<peri_middlewares::mcp::session_invocation::SessionInvocationService>>,
     /// 送进 builtin 实例上下文的那份 A24 关闭集（订阅建立门的唯一输入）。
@@ -370,9 +371,15 @@ impl SessionEnvironment {
             provider: configuration.provider.clone(),
             peri_config: Arc::new(parking_lot::RwLock::new((*configuration.config).clone())),
             config_source: configuration.config_source.clone(),
-            permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
-                host.permission_mode.load(),
-            ),
+            permission_mode: {
+                // 会话级模式是部署模式的副本；外部 MCP 审批范围是**声明事实**，
+                // 必须一起继承，否则会话链看不到调用方声明的审批绑定。
+                let session_mode = peri_acp_types::permission::SharedPermissionMode::new(
+                    host.permission_mode.load(),
+                );
+                session_mode.copy_mcp_approval_servers_from(&host.permission_mode);
+                session_mode
+            },
             session_resources: host.session_resources.clone(),
             workspace_id,
             // 会话级装配：这里不是部署 owner，拿不到也不持有全局关闭权。
@@ -604,7 +611,6 @@ impl SessionEnvironment {
             session_lifetime,
             interaction_gate,
             interaction_router,
-            #[cfg(test)]
             session_invocation,
             task_owner: tokio::sync::Mutex::new(task_owner),
             mcp_owner: tokio::sync::Mutex::new(mcp_owner),
@@ -716,6 +722,19 @@ impl SessionEnvironment {
         self.session_invocation
             .as_ref()
             .map(|service| service.session_cancelled())
+    }
+
+    /// workflow 脚本工具通道的宿主实现（issue #407）。
+    ///
+    /// `None` = 本环境没有 canonical 调用入口（无 MCP 装配）：consumer 侧以
+    /// `tool_unavailable` 收敛，不伪造成功。
+    #[cfg(not(target_os = "emscripten"))]
+    pub(crate) fn workflow_tool_invoker(
+        &self,
+    ) -> Option<Arc<dyn peri_acp_types::workflow::WorkflowToolInvoker>> {
+        self.session_invocation.as_ref().map(|service| {
+            Arc::clone(service) as Arc<dyn peri_acp_types::workflow::WorkflowToolInvoker>
+        })
     }
 
     pub(crate) async fn shutdown(&self) -> bool {

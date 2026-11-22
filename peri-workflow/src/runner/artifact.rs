@@ -26,7 +26,7 @@ const WORKFLOW_PACKAGE_NAME: &str = "@peri-code/workflow";
 const WORKFLOW_ENTRY: &str = "dist/peri-workflow.js";
 /// 网络获取的超时（仅显式 opt-in 路径使用）。
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(90);
-pub(super) const WORKFLOW_PROTOCOL_VERSION: u32 = 2;
+pub(super) const WORKFLOW_PROTOCOL_VERSION: u32 = 3;
 pub(super) const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.3.0";
 
 /// 随包 pin 的入口内容摘要（sha256 十六进制小写），不是 JS 内容本身。
@@ -34,7 +34,7 @@ pub(super) const WORKFLOW_BUILD_ID: &str = "@peri-code/workflow@0.3.0";
 /// 与本地构建产物（`bun run build` 的构建产出，不入库）一致：bundle 变化时必须重新
 /// 发布并同步本常量；仓库内不保存该产物，任何代码/测试都不读取工作树 dist。
 const WORKFLOW_ENTRY_SHA256: &str =
-    "1d6b61048c4e3efc8c78d953f7b77c31986b20cec357c8ff070cc95a03c49447";
+    "b7fcaf3e1cbccd2629254a071b5d41a808464ba20548346851f538762e0bdd89";
 
 /// registry fallback 服务的已发布 artifact 版本与入口摘要。
 ///

@@ -76,6 +76,35 @@ pub fn extract_long_texts(
     extracted
 }
 
+/// 把超长字符串写入 `outputs/<label>.txt` 并原位替换为 `${label}`；失败保留原文。
+///
+/// label 由调用方按位置给出：对象字段用 key hint，数组元素用 `[i]` /
+/// `<key>[i]`，顶层 `return` 值固定 `return`（经 [`output_label`] 去重）。
+fn externalize_long_string(
+    target: &mut serde_json::Value,
+    run_id: &str,
+    store: &WorkflowJournalStore,
+    threshold: usize,
+    label_hint: &str,
+    used: &mut HashSet<String>,
+    extracted: &mut Vec<String>,
+) {
+    let serde_json::Value::String(text) = target else {
+        return;
+    };
+    if text.len() <= threshold {
+        return;
+    }
+    // 占位符与文件名取同一 label（去重后），两者不可能再漂移。
+    let label = output_label(label_hint, used);
+    if let Err(e) = store.write_output(run_id, &label, text) {
+        warn!(target: "workflow", run_id = %run_id, label = %label, error = %e, "write_output failed");
+    } else {
+        extracted.push(label.clone());
+        *target = serde_json::Value::String(format!("${{{}}}", label));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn extract_long_texts_inner(
     value: &mut serde_json::Value,
@@ -87,6 +116,16 @@ fn extract_long_texts_inner(
     extracted: &mut Vec<String>,
 ) {
     match value {
+        serde_json::Value::String(_) => {
+            // 顶层 return 值是字符串（或字符串数组元素经递归到达这里）也外置：
+            // 顶层固定 label `return`，数组元素沿用 `[i]` / `<key>[i]` hint。
+            let label_hint = if key_hint.is_empty() {
+                "return"
+            } else {
+                key_hint
+            };
+            externalize_long_string(value, run_id, store, threshold, label_hint, used, extracted);
+        }
         serde_json::Value::Object(map) => {
             for (key, child) in map.iter_mut() {
                 let child_hint = if key_hint.is_empty() {
@@ -94,17 +133,16 @@ fn extract_long_texts_inner(
                 } else {
                     format!("{}.{}", key_hint, key)
                 };
-                if let serde_json::Value::String(s) = child {
-                    if s.len() > threshold {
-                        // 占位符与文件名取同一 label（去重后），两者不可能再漂移。
-                        let label = output_label(&child_hint, used);
-                        if let Err(e) = store.write_output(run_id, &label, s) {
-                            warn!(target: "workflow", run_id = %run_id, label = %label, error = %e, "write_output failed");
-                        } else {
-                            extracted.push(label.clone());
-                            *child = serde_json::Value::String(format!("${{{}}}", label));
-                        }
-                    }
+                if matches!(child, serde_json::Value::String(_)) {
+                    externalize_long_string(
+                        child,
+                        run_id,
+                        store,
+                        threshold,
+                        &child_hint,
+                        used,
+                        extracted,
+                    );
                 } else {
                     extract_long_texts_inner(
                         child,

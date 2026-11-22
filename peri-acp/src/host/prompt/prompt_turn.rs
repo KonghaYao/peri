@@ -182,6 +182,7 @@ pub(crate) async fn approve_scheduled_trigger(
                     tool_call_id: task_id.to_string(),
                     tool_name: "cron_trigger".to_string(),
                     tool_input: serde_json::json!({ "taskId": task_id, "prompt": prompt }),
+                    mcp_origin: None,
                 }],
             },
         )

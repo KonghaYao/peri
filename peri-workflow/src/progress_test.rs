@@ -972,6 +972,7 @@ fn run_done_projection_is_committed_before_the_observer_is_notified() {
         None,
         peri_acp_types::workflow::PostProcessingStatus::Failed,
         peri_acp_types::workflow::DeliveryStatus::Blocked,
+        false,
     );
 
     let seen = probe.seen.lock().clone().expect("RunDone 已回调");
@@ -987,5 +988,51 @@ fn run_done_projection_is_committed_before_the_observer_is_notified() {
     assert_eq!(
         seen.post_processing_status,
         peri_acp_types::workflow::PostProcessingStatus::Failed
+    );
+}
+
+#[test]
+fn unknown_side_effects_is_projected_only_when_set() {
+    let store = make_store();
+    store.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r1".into(),
+        workflow_name: "w".into(),
+        meta: None,
+    });
+    store.apply_run_done(
+        "r1",
+        "killed",
+        None,
+        Some("killed".into()),
+        peri_acp_types::workflow::PostProcessingStatus::Blocked,
+        peri_acp_types::workflow::DeliveryStatus::Blocked,
+        true,
+    );
+
+    let run = store.run_snapshot("r1").expect("run 应存在");
+    assert!(run.unknown_side_effects);
+    let json = serde_json::to_value(&run).expect("RunProgress 必须可序列化");
+    assert_eq!(json["unknown_side_effects"], true);
+
+    let quiet = make_store();
+    quiet.apply_event(&ProgressEvent::RunStarted {
+        run_id: "r2".into(),
+        workflow_name: "w".into(),
+        meta: None,
+    });
+    quiet.apply_run_done(
+        "r2",
+        "completed",
+        None,
+        None,
+        peri_acp_types::workflow::PostProcessingStatus::Unknown,
+        peri_acp_types::workflow::DeliveryStatus::Unknown,
+        false,
+    );
+    let json = serde_json::to_value(quiet.run_snapshot("r2").expect("run 应存在"))
+        .expect("RunProgress 必须可序列化");
+    assert!(
+        json.get("unknown_side_effects").is_none(),
+        "false 不得落 JSON（与 state.json 的 true 才出现一致）"
     );
 }

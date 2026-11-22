@@ -5,7 +5,8 @@ use super::{
     ReadResourceResponse, ReadResourceResult, RequestContext, RequestMetaObject, Resource,
     ResourceContents, ResourceReadError, ResourceTemplate, RoleServer, ServerCapabilities,
     ServerConfig, ServerHandler, SettleOutcome, SubscriptionContext, SubscriptionFilter, Tool,
-    Value, WorkflowInstanceInput, WorkflowRuntime, WorkflowTaskState, WORKFLOW_CONSUMER_META_KEY,
+    Value, WorkflowInstanceInput, WorkflowRuntime, WorkflowTaskState, WorkflowToolOutcome,
+    WORKFLOW_CONSUMER_META_KEY,
 };
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -36,6 +37,11 @@ pub(super) const KILL_DESCRIPTION: &str = "Terminate a workflow run or one of it
 
 pub(super) const AGENT_RESULT_DESCRIPTION: &str =
     "Host-only: settle the result of a published agent task. \
+    The caller must hold the session binding that published the task; \
+    unknown or already-settled tasks are answered without side effects.";
+
+pub(super) const TOOL_RESULT_DESCRIPTION: &str =
+    "Host-only: settle the result of a published script tool task. \
     The caller must hold the session binding that published the task; \
     unknown or already-settled tasks are answered without side effects.";
 
@@ -162,6 +168,9 @@ impl WorkflowMcpServer {
     }
 
     /// 工具声明（顺序即声明段顺序；`Workflow` 的 schema 来自 runtime 的单一权威）。
+    ///
+    /// host-only 回填工具（`WorkflowAgentResult` / `WorkflowToolResult`）与消费者命令都
+    /// 声明在同一实例：同一消费者令牌鉴权、同一任务表终态提交。
     pub(super) fn tools(&self) -> Vec<Tool> {
         let mut tools = vec![
             Tool::new(
@@ -221,6 +230,22 @@ impl WorkflowMcpServer {
                     "required": ["runId", "taskId", "result"]
                 })),
             ),
+            Tool::new(
+                "WorkflowToolResult",
+                TOOL_RESULT_DESCRIPTION,
+                schema_of(json!({
+                    "type": "object",
+                    "properties": {
+                        "runId": { "type": "string", "description": "Workflow run id." },
+                        "taskId": { "type": "string", "description": "Tool task id published by this run." },
+                        "outcome": {
+                            "type": "object",
+                            "description": "WorkflowToolOutcome tagged by 'kind' (ok | error)."
+                        }
+                    },
+                    "required": ["runId", "taskId", "outcome"]
+                })),
+            ),
         ];
         tools.extend(consumer::tools());
         tools
@@ -238,6 +263,7 @@ impl WorkflowMcpServer {
             "WorkflowStatus" => self.call_status(arguments),
             "WorkflowKill" => self.call_kill(arguments).await,
             "WorkflowAgentResult" => self.call_agent_result(arguments, meta),
+            "WorkflowToolResult" => self.call_tool_result(arguments, meta),
             "WorkflowAgentClaim"
             | "WorkflowTaskObserved"
             | "WorkflowConsumerReady"
@@ -448,6 +474,76 @@ impl WorkflowMcpServer {
         }
     }
 
+    /// `WorkflowToolResult`：脚本工具任务的调用授权 + 单次终态提交（幂等）。
+    ///
+    /// 与 [`Self::call_agent_result`] 共用同一消费者令牌鉴权与 `ExecutingOnly`
+    /// 准入口径；区别只在载荷是 `WorkflowToolOutcome`（tagged ok / error）与终态
+    /// 投影。`outcome_unknown` / `task_accepted` 由 runtime 标记 run 的
+    /// `unknownSideEffects`（观测事实，不升级为 run 失败）。
+    pub(super) fn call_tool_result(
+        &self,
+        arguments: &Value,
+        meta: &RequestMetaObject,
+    ) -> DispatchOutcome {
+        let runtime = match self.authorize_consumer(meta) {
+            Ok(runtime) => runtime,
+            Err(error) => return DispatchOutcome::Protocol(error),
+        };
+        let run_id = match required_str(arguments, "runId") {
+            Ok(run_id) => run_id,
+            Err(error) => return DispatchOutcome::Protocol(error),
+        };
+        let task_id = match required_str(arguments, "taskId") {
+            Ok(task_id) => task_id,
+            Err(error) => return DispatchOutcome::Protocol(error),
+        };
+        let Some(outcome_value) = arguments.get("outcome").filter(|value| !value.is_null()) else {
+            return DispatchOutcome::invalid_params("missing 'outcome' argument");
+        };
+        let outcome: WorkflowToolOutcome = match serde_json::from_value(outcome_value.clone()) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return DispatchOutcome::invalid_params(format!(
+                    "invalid 'outcome' argument: {error}"
+                ))
+            }
+        };
+        match runtime.complete_tool_call(run_id, task_id, outcome) {
+            SettleOutcome::Settled(record) => DispatchOutcome::tool_ok(format!(
+                "Tool task '{task_id}' settled as '{}'.",
+                state_name(record.state)
+            )),
+            SettleOutcome::AlreadyTerminal(record) => DispatchOutcome::tool_ok(format!(
+                "Tool task '{task_id}' already settled as '{}' (idempotent).",
+                state_name(record.state)
+            )),
+            SettleOutcome::NotFound => DispatchOutcome::tool_err(format!(
+                "unknown workflow task '{task_id}' in run '{run_id}'"
+            )),
+            SettleOutcome::InvalidState(record) => {
+                tracing::error!(
+                    target: "workflow.mcp",
+                    run_id,
+                    task_id,
+                    task_state = state_name(record.state),
+                    "WorkflowToolResult refused a non-terminal settle state"
+                );
+                DispatchOutcome::Protocol(McpError::internal_error(
+                    format!(
+                        "refused to settle tool task '{task_id}' with non-terminal state '{}'",
+                        state_name(record.state)
+                    ),
+                    None,
+                ))
+            }
+            SettleOutcome::NotAdmitted(record) => DispatchOutcome::invalid_params(format!(
+                "tool task '{task_id}' is '{}', not 'executing': results are only accepted \
+                 from the consumer that claimed the task",
+                state_name(record.state)
+            )),
+        }
+    }
+
     /// 消费者调用令牌校验：令牌只来自请求 `_meta`（[`WORKFLOW_CONSUMER_META_KEY`]），
     /// 参数里的任何身份声明都不参与裁决；错误文本不回显令牌值。返回已解析的运行时，
     /// 供调用方复用同一次槽位解析。
@@ -510,11 +606,13 @@ impl WorkflowMcpServer {
                 ),
             Resource::new("workflow://runs/{runId}/tasks", "Workflow run tasks")
                 .with_mime_type("application/json")
-                .with_description("Agent task events for one run; supports ?after=N&limit=M."),
+                .with_description(
+                    "Workflow task events for one run (agent + tool); supports ?after=N&limit=M.",
+                ),
             Resource::new(resources::TASKS_URI, "Workflow tasks")
                 .with_mime_type("application/json")
                 .with_description(
-                    "Session-level agent task event stream (cross-run); supports ?after=N&limit=M.",
+                    "Session-level workflow task event stream (cross-run, agent + tool); supports ?after=N&limit=M.",
                 ),
         ]
     }

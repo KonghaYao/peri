@@ -212,6 +212,7 @@ impl HookMiddleware {
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 tool_input: tool_call.input.clone(),
+                mcp_origin: None,
             }],
         };
         let response =

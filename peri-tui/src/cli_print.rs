@@ -759,7 +759,7 @@ mod tests {
     }
 
     /// [回归测试] `-p` 取消 elicitation 时必须声明「无人可作答」，否则 broker
-    /// 只能把它当成裸 cancel → 空答案，模型会把伪造的空回答当真。
+    /// 只能按裸 cancel 结算成用户拒绝，模型会把「本客户端无法交互」误读成用户拒绝。
     #[test]
     fn test_print_elicitation_response_declares_non_interactive_client() {
         let response: CreateElicitationResponse =

@@ -243,6 +243,9 @@ pub fn supported(caps: &TerminalCaps) -> bool {
 }
 
 pub(crate) fn supported_with_cell_size(caps: &TerminalCaps, cell_px: Option<(u16, u16)>) -> bool {
+    if !protocol_available(caps, cell_px) {
+        return false;
+    }
     let expected = match caps.graphics {
         GraphicsProtocol::Kitty => ProtocolType::Kitty,
         GraphicsProtocol::Sixel if cell_px.is_some_and(is_valid_cell_size) => ProtocolType::Sixel,
@@ -251,6 +254,18 @@ pub(crate) fn supported_with_cell_size(caps: &TerminalCaps, cell_px: Option<(u16
         }
     };
     picker_for_with_cell_size(caps, cell_px).protocol_type() == expected
+}
+
+/// 轻量能力判定：只回答「能力位 + 单元格尺寸是否足以走像素渲染」。
+///
+/// 与 [`supported_with_cell_size`] 同一门控规则，但不构造 `Picker`——布局预算
+/// 每帧都要问一次，`Picker::halfblocks` 在 tmux 下有 spawn 副作用，不能进渲染路径。
+pub(crate) fn protocol_available(caps: &TerminalCaps, cell_px: Option<(u16, u16)>) -> bool {
+    match caps.graphics {
+        GraphicsProtocol::Kitty => true,
+        GraphicsProtocol::Sixel => cell_px.is_some_and(is_valid_cell_size),
+        GraphicsProtocol::ITerm2 | GraphicsProtocol::None => false,
+    }
 }
 
 /// 后台 resize/encode 卸载的动态协议（S2 §6 非阻塞要求）。

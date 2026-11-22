@@ -42,6 +42,8 @@ pub use workflow_runner::AgentTaskPublish;
 
 pub use workflow_runner::AgentTaskSink;
 
+pub use workflow_runner::ToolTaskPublish;
+
 pub use workflow_runner::WorkflowInput;
 
 pub use workflow_runner::WorkflowResult;

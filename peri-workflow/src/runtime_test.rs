@@ -124,6 +124,7 @@ async fn resume_rejects_unsafe_run_id_and_mismatched_state() {
                 postcondition_observation: None,
                 git_observation_scope: None,
                 outcome: Default::default(),
+                unknown_side_effects: false,
                 write_intent: None,
                 limits: Default::default(),
                 limit_breaches: Vec::new(),
@@ -166,6 +167,292 @@ fn consumer_token_is_bound_once_and_verified() {
     assert_eq!(runtime.bind_consumer_token(), token, "重复绑定返回同一令牌");
     assert!(runtime.verify_consumer_token(&token));
     assert!(!runtime.verify_consumer_token("forged"));
+}
+
+#[test]
+fn complete_tool_call_is_single_terminal_and_marks_unknown_side_effects() {
+    use peri_acp_types::workflow::{WorkflowToolErrorCode, WorkflowToolOutcome};
+
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    let _ = runtime.tasks().publish_tool(
+        "tool-1".into(),
+        "run-tools",
+        "Read".into(),
+        Default::default(),
+        0,
+        0,
+    );
+    assert!(matches!(
+        runtime.tasks().mark_executing(
+            "run-tools",
+            "tool-1",
+            tokio_util::sync::CancellationToken::new()
+        ),
+        crate::runtime::ClaimOutcome::Claimed(_)
+    ));
+
+    // outcome_unknown ⇒ 任务 failed + run 标记未知副作用（不升级为 run 失败）。
+    let outcome = WorkflowToolOutcome::error(
+        WorkflowToolErrorCode::OutcomeUnknown,
+        "Read",
+        "MCP server returned no raw result payload",
+    );
+    match runtime.complete_tool_call("run-tools", "tool-1", outcome.clone()) {
+        crate::runtime::SettleOutcome::Settled(record) => {
+            assert_eq!(record.state, crate::runtime::WorkflowTaskState::Failed);
+            assert_eq!(record.tool_outcome, Some(outcome));
+        }
+        other => panic!("tool 终态必须提交：{other:?}"),
+    }
+    assert!(
+        runtime.tasks().run_unknown_side_effects("run-tools"),
+        "outcome_unknown 必须置位 run 的未知副作用"
+    );
+
+    // 重复回填（不同结果）幂等：保留首次终态。
+    match runtime.complete_tool_call(
+        "run-tools",
+        "tool-1",
+        WorkflowToolOutcome::Ok {
+            structured_content: None,
+            content: "late".into(),
+        },
+    ) {
+        crate::runtime::SettleOutcome::AlreadyTerminal(record) => {
+            assert_eq!(record.state, crate::runtime::WorkflowTaskState::Failed);
+        }
+        other => panic!("重复回填必须幂等：{other:?}"),
+    }
+
+    // 成功结果不置位；tool 任务不进入 agent 结果字段。
+    let _ = runtime.tasks().publish_tool(
+        "tool-2".into(),
+        "run-tools",
+        "Grep".into(),
+        Default::default(),
+        1,
+        0,
+    );
+    assert!(matches!(
+        runtime.tasks().mark_executing(
+            "run-tools",
+            "tool-2",
+            tokio_util::sync::CancellationToken::new()
+        ),
+        crate::runtime::ClaimOutcome::Claimed(_)
+    ));
+    match runtime.complete_tool_call(
+        "run-tools",
+        "tool-2",
+        WorkflowToolOutcome::Ok {
+            structured_content: Some(serde_json::json!({"matches": 1})),
+            content: "1 match".into(),
+        },
+    ) {
+        crate::runtime::SettleOutcome::Settled(record) => {
+            assert_eq!(record.state, crate::runtime::WorkflowTaskState::Completed);
+            assert!(record.result.is_none(), "tool 任务不写 agent result 字段");
+        }
+        other => panic!("tool 成功终态必须提交：{other:?}"),
+    }
+
+    // 未 claim 的任务不得被外部回填（ExecutingOnly）。
+    let _ = runtime.tasks().publish_tool(
+        "tool-3".into(),
+        "run-tools",
+        "Glob".into(),
+        Default::default(),
+        2,
+        0,
+    );
+    assert!(matches!(
+        runtime.complete_tool_call(
+            "run-tools",
+            "tool-3",
+            WorkflowToolOutcome::Ok {
+                structured_content: None,
+                content: "unclaimed".into(),
+            }
+        ),
+        crate::runtime::SettleOutcome::NotAdmitted(_)
+    ));
+}
+
+/// issue #407 阶段 2：tool 终态的单一写入点追加 tools.jsonl；重复回填不重复追加。
+#[test]
+fn tool_terminal_sink_appends_once_to_the_tool_journal() {
+    use peri_acp_types::workflow::WorkflowToolOutcome;
+
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    runtime
+        .journal_store()
+        .init_run("run-tools", "script")
+        .expect("run dir must be initialized");
+
+    let _ = runtime.tasks().publish_tool(
+        "tool-1".into(),
+        "run-tools",
+        "Read".into(),
+        serde_json::from_value(serde_json::json!({"file_path": "/tmp/x"}))
+            .expect("tool arguments 必须是对象"),
+        0,
+        3,
+    );
+    assert!(matches!(
+        runtime.tasks().mark_executing(
+            "run-tools",
+            "tool-1",
+            tokio_util::sync::CancellationToken::new()
+        ),
+        crate::runtime::ClaimOutcome::Claimed(_)
+    ));
+
+    let first = WorkflowToolOutcome::Ok {
+        structured_content: Some(serde_json::json!({"answer": 42})),
+        content: "42".into(),
+    };
+    assert!(matches!(
+        runtime.complete_tool_call("run-tools", "tool-1", first.clone()),
+        crate::runtime::SettleOutcome::Settled(_)
+    ));
+
+    let entries = runtime
+        .journal_store()
+        .read_tools_strict("run-tools")
+        .expect("tools.jsonl 必须可读");
+    assert_eq!(entries.len(), 1, "终态只追加一条");
+    assert_eq!(entries[0].tool_seq, 0);
+    assert_eq!(entries[0].agent_seq, 3);
+    assert_eq!(entries[0].task_id, "tool-1");
+    assert_eq!(entries[0].tool_name, "Read");
+    assert_eq!(entries[0].arguments["file_path"], "/tmp/x");
+    assert_eq!(entries[0].outcome, first);
+
+    // 重复回填（不同结果）幂等：保留首次条目，不重复追加。
+    assert!(matches!(
+        runtime.complete_tool_call(
+            "run-tools",
+            "tool-1",
+            WorkflowToolOutcome::Ok {
+                structured_content: None,
+                content: "late".into(),
+            }
+        ),
+        crate::runtime::SettleOutcome::AlreadyTerminal(_)
+    ));
+    let entries = runtime
+        .journal_store()
+        .read_tools_strict("run-tools")
+        .expect("tools.jsonl 必须可读");
+    assert_eq!(entries.len(), 1, "重复回填不得重复追加");
+    assert_eq!(entries[0].outcome, first);
+}
+
+/// tools.jsonl 追加失败只记录日志：tool 终态照常提交，结果仍会投递。
+#[test]
+fn tool_journal_append_failure_does_not_change_the_terminal() {
+    use peri_acp_types::workflow::WorkflowToolOutcome;
+
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    // 故意不初始化 run 目录：`tools.jsonl` 的父目录不存在，append 必然失败。
+    let _ = runtime.tasks().publish_tool(
+        "tool-1".into(),
+        "run-tools",
+        "Read".into(),
+        Default::default(),
+        0,
+        0,
+    );
+    assert!(matches!(
+        runtime.tasks().mark_executing(
+            "run-tools",
+            "tool-1",
+            tokio_util::sync::CancellationToken::new()
+        ),
+        crate::runtime::ClaimOutcome::Claimed(_)
+    ));
+
+    let outcome = WorkflowToolOutcome::Ok {
+        structured_content: None,
+        content: "result survives".into(),
+    };
+    match runtime.complete_tool_call("run-tools", "tool-1", outcome.clone()) {
+        crate::runtime::SettleOutcome::Settled(record) => {
+            assert_eq!(record.state, crate::runtime::WorkflowTaskState::Completed);
+            assert_eq!(record.tool_outcome, Some(outcome));
+        }
+        other => panic!("追加失败不得改变终态：{other:?}"),
+    }
+    assert!(
+        runtime
+            .journal_store()
+            .read_tools_strict("run-tools")
+            .expect("缺失 tools.jsonl 时读取为空")
+            .is_empty(),
+        "写入失败时不留下半条记录"
+    );
+}
+
+/// 无回填的 tool 任务被取消时，tools.jsonl 记录 `cancelled` 终态。
+#[test]
+fn cancelled_tool_task_without_backfill_appends_cancelled_outcome() {
+    use peri_acp_types::workflow::{WorkflowToolErrorCode, WorkflowToolOutcome};
+
+    let dir = tempfile::tempdir().expect("the temporary test directory must be available");
+    let runtime = make_runtime(
+        dir.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    runtime
+        .journal_store()
+        .init_run("run-tools", "script")
+        .expect("run dir must be initialized");
+    let _ = runtime.tasks().publish_tool(
+        "tool-cancelled".into(),
+        "run-tools",
+        "Bash".into(),
+        Default::default(),
+        0,
+        0,
+    );
+
+    let cancelled = runtime
+        .tasks()
+        .cancel_run("run-tools", Some("workflow run killed".into()));
+    assert_eq!(cancelled, vec!["tool-cancelled".to_string()]);
+
+    let entries = runtime
+        .journal_store()
+        .read_tools_strict("run-tools")
+        .expect("tools.jsonl 必须可读");
+    assert_eq!(entries.len(), 1, "无回填的终态同样进入 tools.jsonl");
+    assert!(
+        matches!(
+            &entries[0].outcome,
+            WorkflowToolOutcome::Error {
+                code: WorkflowToolErrorCode::Cancelled,
+                ..
+            }
+        ),
+        "无回填终态必须是 cancelled: {:?}",
+        entries[0].outcome
+    );
 }
 
 #[test]
@@ -834,6 +1121,7 @@ async fn expiry_keeps_unacked_completion_and_cancel_fences() {
             post_processing_status: PostProcessingStatus::Unknown,
             delivery_status: DeliveryStatus::Blocked,
             outcome: Default::default(),
+            unknown_side_effects: false,
             state_artifact_exists: false,
             duration_ms: 0,
             agent_count: 0,

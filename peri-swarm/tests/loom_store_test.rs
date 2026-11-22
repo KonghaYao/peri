@@ -669,7 +669,9 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
             model: Some("stub-model".to_owned()),
             instructions: Some("s6c2 shared loom store".to_owned()),
             mcp_tools: declared_mcp.clone(),
-            environment: EnvironmentRef::none(&logical),
+            metadata: Default::default(),
+            prompt_cache_options: None,
+            environment: EnvironmentRef::none(),
             created_at: created_at.clone(),
             last_activity_at: created_at.clone(),
             last_item_seq: 0,
@@ -688,7 +690,7 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
     // Open the Swarm turn exactly like `AcpSwarmService::run_turn`: the log owns
     // `running`, the delta rows and the terminal.
     let request_id = "s6c2-turn-1";
-    log.begin_turn(request_id)
+    log.begin_turn(request_id, "turn_s6c2-1")
         .await
         .expect("open the swarm turn on the remote store");
     let child = AcpChild::spawn(
@@ -943,6 +945,8 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
             model: Some("stub-model".to_owned()),
             instructions: Some("s6c2 swarm rows".to_owned()),
             mcp_tools: declared_mcp.clone(),
+            metadata: Default::default(),
+            prompt_cache_options: None,
             environment: EnvironmentRef {
                 kind: EnvironmentKind::None,
                 id: Some(rows_logical.as_str().to_owned()),

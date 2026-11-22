@@ -12,7 +12,7 @@
 // clippy 触发 needless_update 警告。该警告来自宏展开而非用户代码，模块级抑制。
 #![allow(clippy::needless_update)]
 
-use super::{attachment, hooks, paste, popup, render, submit};
+use super::{attachment, attachment_preview, hooks, paste, popup, render, submit};
 
 use attachment::AttachmentEdge;
 use hooks::CjkGhostFix;
@@ -111,6 +111,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     // CJK 光标残影修复：post_component_draw 时标记续接 cell AlwaysUpdate
     hooks.use_hook(|| CjkGhostFix);
+
+    // 附件预览：渲染 body 写预留几何/缓存键，post_component_draw 只读缓存画协议。
+    let preview_frame = hooks.use_state(attachment_preview::PreviewFrame::default);
+    hooks.use_hook(|| attachment_preview::AttachmentPreviewDrawHook::new(preview_frame));
 
     // 终端焦点切换（tmux 窗格 / 终端标签切换）：FocusGained/FocusLost 更新 term_focused
     {
@@ -656,6 +660,24 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let ov_height = slash_popup_height.max(mention_popup_height);
     *overlay_height.lock() = slash_popup_height.max(mention_popup_height);
 
+    // ── 待发送图片预览（composer 上方）──────────────────────────────────
+    // 有图片附件 + 协议可用就预留 6 行；渲染 body 只查缓存/算预算（解码编码在 effect）。
+    let preview = {
+        let atom = PENDING_ATTACHMENTS.state();
+        let attachments = atom.read();
+        attachment_preview::use_preview(
+            &mut hooks,
+            attachment_preview::PreviewInputs {
+                attachments: &attachments,
+                composer_width: composer_area.map(|area| area.width).unwrap_or(80),
+                caps: *crate::kit::atoms::TERMINAL_CAPS.state().read(),
+                budget: props.max_total_height,
+                reserved: composer_height + ov_height,
+                visible: !hidden && props.max_lines.is_none(),
+            },
+        )
+    };
+
     // §10 queued（Slice 3 D4 反转）：loading 期间提交的 prompt 只入队
     // INPUT_BUFFER，渲染在 composer 上方（最多 5 条 + `· · ·`），不提前进
     // transcript；TurnDone/取消复位时 drain（本地气泡恰出现一次）。
@@ -677,8 +699,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         let n = queue_lines.len() as u16;
         match props.max_total_height {
-            // 预算先保 composer + 弹出层，余量给队列；预算低于两者时队列隐藏。
-            Some(budget) => n.min(budget.saturating_sub(composer_height + ov_height)),
+            // 预算先保 composer + 弹出层 + 预览，余量给队列；低于三者时队列隐藏。
+            Some(budget) => {
+                n.min(budget.saturating_sub(composer_height + ov_height + preview.height))
+            }
             None => n,
         }
     };
@@ -691,7 +715,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let steer_items = steers.read().rows(&steer_session_id);
     let steer_budget = props
         .max_total_height
-        .map(|budget| budget.saturating_sub(composer_height + ov_height));
+        .map(|budget| budget.saturating_sub(composer_height + ov_height + preview.height));
     let queue_height = if steer_enabled {
         if hidden || steer_items.is_empty() {
             0
@@ -701,7 +725,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         legacy_queue_height
     };
-    *overlay_height.lock() = ov_height.saturating_add(queue_height);
+    // 点击映射的 composer 顶部：弹出层 + 队列 + 预览（三者都在 composer 之上）。
+    *overlay_height.lock() = ov_height
+        .saturating_add(queue_height)
+        .saturating_add(preview.height);
     let restore_epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     let restore_pending = steers.read().pending_recovery_ids(&steer_session_id);
     let draft_empty = text.is_empty() && PENDING_ATTACHMENTS.state().read().is_empty();
@@ -745,8 +772,12 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     let total_height = if hidden {
         0
     } else {
-        composer_height + ov_height + queue_height
+        composer_height + ov_height + queue_height + preview.height
     };
+
+    // 预览几何：每帧写（钩子只读；编码请求由 use_preview 的 effect 调度）。
+    let preview_y = ov_height.saturating_add(queue_height);
+    attachment_preview::write_frame(preview_frame, &preview, preview_y);
 
     let composer_lines = render::build_composer_lines(lines, loading, props.grid);
 
@@ -912,6 +943,9 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             } else {
                 element!(View(height: Constraint::Length(0), width: Constraint::Length(0))).into_any()
             } }
+            // 附件预览占位：高度 0 时完全不参与布局；像素由 AttachmentPreviewDrawHook
+            // 在 composer 绘制后写入（占位 View 自身不渲染内容）。
+            { attachment_preview::preview_spacer(preview.height) }
             { if !hidden {
                 element!(
                     View(

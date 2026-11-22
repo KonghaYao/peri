@@ -16,7 +16,7 @@ pub use input::{BindOutcome, WorkflowInstanceInput};
 // 任务记录与消费者令牌键——与 `WorkflowRuntime` 同一 re-export 面，宿主不直连
 // `peri-workflow`（依赖方向：宿主经实例 crate 消费领域接口）。
 pub use peri_workflow::runtime::{
-    ClaimOutcome, WorkflowRuntime, WorkflowTaskRecord, WorkflowTaskState,
+    ClaimOutcome, WorkflowRuntime, WorkflowTaskKind, WorkflowTaskRecord, WorkflowTaskState,
     WORKFLOW_CONSUMER_META_KEY,
 };
 pub use resources::{

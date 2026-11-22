@@ -42,8 +42,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use super::reader::ItemLog;
-use crate::domain::McpToolSpec;
+use super::reader::{ItemLog, PermissionStart};
+use crate::domain::{escalation_servers, ApprovalDecision, McpToolSpec};
 use crate::sandbox::SandboxMcpBinding;
 
 /// `_meta` keys carrying the caller's OpenAI tool declaration on one ACP
@@ -316,6 +316,25 @@ impl std::fmt::Debug for AcpChild {
 }
 
 impl AcpChild {
+    /// Test-only child around an in-memory transport.
+    ///
+    /// Actor-service tests need the ACP delivery boundary (open, closed, or a
+    /// server that never answers) without spawning a real host. The child keeps
+    /// no host handle; only [`Self::respond_permission`] is exercised.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        client: Arc<MpscClientTransport>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            host: AsyncMutex::new(None),
+            reader: AsyncMutex::new(None),
+            shutdown: AsyncMutex::new(None),
+            session_id: session_id.into(),
+        }
+    }
+
     /// Assemble the host, spawn it, negotiate `initialize`, and create the session.
     ///
     /// `root_session_id` is reserved by the caller and passed through
@@ -355,12 +374,18 @@ impl AcpChild {
         let resources = open_session_resources(&config).await?;
         let (session_resources, session_store_shutdown) = resources.into_parts();
 
+        // The session-wide mode stays `Bypass`; only the declared MCP bindings
+        // are scoped into the approval channel. An empty set is observably the
+        // pre-approval behavior.
+        let permission_mode = SharedPermissionMode::new(PermissionMode::Bypass);
+        permission_mode.set_mcp_approval_servers(escalation_servers(&config.mcp_tools));
+
         let host_config = assemble_server_config_with_capabilities(
             HostAssemblyInput {
                 provider,
                 peri_config: Arc::new(RwLock::new(peri_config)),
                 config_source: source,
-                permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
+                permission_mode,
                 session_resources,
                 workspace_id: None,
                 session_store_shutdown: Some(Box::new(session_store_shutdown)),
@@ -538,6 +563,24 @@ impl AcpChild {
             stop_reason,
             pending_tasks,
         })
+    }
+
+    /// Answer the still-open `session/request_permission` with its original
+    /// JSON-RPC id. The id never leaves the child boundary; the public approval
+    /// id is independent of it.
+    pub async fn respond_permission(
+        &self,
+        acp_request_id: &Value,
+        decision: ApprovalDecision,
+    ) -> Result<(), ChildError> {
+        let id: peri_acp::transport::types::RequestId =
+            serde_json::from_value(acp_request_id.clone()).map_err(|error| {
+                ChildError::Local(format!("approval request id is not a JSON-RPC id: {error}"))
+            })?;
+        self.client
+            .send_response(id, Ok(decision.acp_response()))
+            .await
+            .map_err(ChildError::rpc)
     }
 
     /// `session/cancel` notification. Targeted when the turn identity is known:
@@ -738,15 +781,51 @@ async fn read_loop(client: Arc<MpscClientTransport>, log: Arc<ItemLog>) {
             IncomingMessage::Notification { method, params } => {
                 log.ingest(&method, &params).await;
             }
-            IncomingMessage::Request { id, method, .. } => {
-                let refusal = if method == "session/request_permission" {
-                    Ok(json!({ "outcome": { "outcome": "cancelled" } }))
-                } else {
-                    Err(AcpError::new(
-                        -32601,
-                        format!("{method} is not supported by the Swarm gateway"),
-                    ))
-                };
+            IncomingMessage::Request { id, method, params } => {
+                if method == "session/request_permission" {
+                    let request_id = serde_json::to_value(&id).unwrap_or(Value::Null);
+                    match log.begin_permission(&request_id, &params).await {
+                        Ok(PermissionStart::Pending) => {
+                            // Answered later through `AcpChild::respond_permission`
+                            // with this same JSON-RPC id; the reader never blocks.
+                        }
+                        Ok(PermissionStart::Refuse) => {
+                            tracing::warn!(
+                                "swarm approval request has no open turn; refusing the call"
+                            );
+                            let refusal = Ok(json!({ "outcome": { "outcome": "cancelled" } }));
+                            if let Err(error) = client.send_response(id, refusal).await {
+                                tracing::warn!(%error, "swarm approval refusal delivery failed");
+                            }
+                        }
+                        Ok(PermissionStart::AutoApprove) => {
+                            if let Err(error) = client
+                                .send_response(id, Ok(ApprovalDecision::Approve.acp_response()))
+                                .await
+                            {
+                                tracing::warn!(%error, "swarm auto-approval delivery failed");
+                            }
+                        }
+                        Err(error) => {
+                            // The approval fact could not be persisted. Refuse the
+                            // call explicitly instead of leaving the host waiting;
+                            // this is a gateway failure, not a user rejection.
+                            tracing::warn!(
+                                %error,
+                                "swarm approval could not be recorded; refusing the call"
+                            );
+                            let refusal = Ok(json!({ "outcome": { "outcome": "cancelled" } }));
+                            if let Err(error) = client.send_response(id, refusal).await {
+                                tracing::warn!(%error, "swarm approval refusal delivery failed");
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let refusal = Err(AcpError::new(
+                    -32601,
+                    format!("{method} is not supported by the Swarm gateway"),
+                ));
                 if let Err(error) = client.send_response(id, refusal).await {
                     tracing::warn!(%error, "swarm ACP refusal delivery failed");
                 }
