@@ -739,7 +739,9 @@ fn main_frame_navigations_refresh_the_address_bar() {
 
     // The URL the machine already reports does not trigger another read.
     let current = machine.navigation().url.clone();
-    assert!(machine.on(Event::FrameNavigated { url: current }, now).is_empty());
+    assert!(machine
+        .on(Event::FrameNavigated { url: current }, now)
+        .is_empty());
 }
 
 /// Kitesurf reports `Page.frameNavigated` seconds after the document commits,
@@ -833,7 +835,10 @@ fn a_history_step_moves_only_when_the_document_arrives() {
         machine.on(Event::HistoryArrived { delta: -1 }, now),
         vec![Effect::RefreshNavigation]
     );
-    assert_eq!(machine.peek_history(1).as_deref(), Some("https://example.test/two"));
+    assert_eq!(
+        machine.peek_history(1).as_deref(),
+        Some("https://example.test/two")
+    );
 }
 
 /// Kitesurf's history never learns about `location.assign` navigations, so the
@@ -952,11 +957,7 @@ impl PageController for FakeController {
 /// Models the two expressions the navigation helpers send: `location.assign`
 /// commits the document (the fake's history follows) and `location.href` reads
 /// it back.
-fn fake_evaluate(
-    history: &AtomicI64,
-    live: &Mutex<Option<String>>,
-    params: &Value,
-) -> Value {
+fn fake_evaluate(history: &AtomicI64, live: &Mutex<Option<String>>, params: &Value) -> Value {
     let expression = params
         .get("expression")
         .and_then(Value::as_str)
@@ -1248,7 +1249,10 @@ async fn a_clicked_link_moves_the_address_bar_and_the_back_button() {
             ..
         } => {
             assert_eq!(url, "https://example.test/clicked");
-            assert!(can_go_back, "the document before the click is one step back");
+            assert!(
+                can_go_back,
+                "the document before the click is one step back"
+            );
             assert!(!can_go_forward);
         }
         other => panic!("unexpected message: {other:?}"),
