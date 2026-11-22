@@ -36,6 +36,7 @@ use crate::kit::tui_render_unit::TuiRenderUnit;
 use fluent_bundle::FluentValue;
 use image::DynamicImage;
 use image::GenericImageView;
+use parking_lot::Mutex;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_image::picker::Picker;
 use ratatui_kit::prelude::*;
@@ -54,15 +55,31 @@ const MIN_PREVIEW_TERM_H: u16 = 12;
 /// 预览请求 id——切换时旧解码线程的陈旧结果据此丢弃（§7.5 竞态防御）。
 static PREVIEW_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
-/// `Picker` 进程级缓存：`TerminalCaps` 启动时探测一次后不再变化，惰性构造。
-/// 测试不走此缓存（直接 `picker_for` 构造），避免全局污染。
-static PICKER: OnceLock<Picker> = OnceLock::new();
+/// `Picker` 进程级缓存：`TerminalCaps` 启动时探测一次，但单元格像素尺寸会
+/// 随终端字体变化；缓存按尺寸失效，避免同一面板反复构造（tmux 探测有 spawn
+/// 副作用）。测试不走此缓存（直接 `picker_for` 构造），避免全局污染。
+static PICKER: OnceLock<Mutex<Option<CachedPicker>>> = OnceLock::new();
 
-fn cached_picker() -> &'static Picker {
-    PICKER.get_or_init(|| {
-        let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
-        crate::kit::image_preview::picker_for(&caps)
-    })
+struct CachedPicker {
+    cell_px: Option<(u16, u16)>,
+    picker: Picker,
+}
+
+fn cached_picker(cell_px: Option<(u16, u16)>) -> Picker {
+    let cache = PICKER.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock();
+    if let Some(cached) = guard.as_ref()
+        && cached.cell_px == cell_px
+    {
+        return cached.picker.clone();
+    }
+    let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
+    let picker = crate::kit::image_preview::picker_for_with_cell_size(&caps, cell_px);
+    *guard = Some(CachedPicker {
+        cell_px,
+        picker: picker.clone(),
+    });
+    picker
 }
 
 // ── 触发仲裁（§7.3）──────────────────────────────────────────────────────
@@ -443,6 +460,8 @@ struct OverlayDrawHook {
     async_img: Option<AsyncImage>,
     /// `async_img` 对应的路径（切换判定）。
     async_path: Option<PathBuf>,
+    /// 构造 `async_img` 时的单元格像素尺寸（字体变化/缺失时重建或降级）。
+    async_cell_px: Option<(u16, u16)>,
 }
 
 impl OverlayDrawHook {
@@ -453,6 +472,7 @@ impl OverlayDrawHook {
             pixel_enabled: true,
             async_img: None,
             async_path: None,
+            async_cell_px: None,
         }
     }
 }
@@ -467,16 +487,22 @@ impl Hook for OverlayDrawHook {
         let state = IMAGE_PREVIEW_STATE.state().read().clone();
         match &state {
             ImagePreviewState::Ready { path, img, .. } => {
-                if self.async_path.as_ref() != Some(path) {
-                    // 首帧/切换：重建协议（旧对象 drop → 后台线程自然退出）。
-                    // F9：仅像素协议（Kitty）支持时才构造 Picker/AsyncImage——
-                    // `picker_for` 的 halfblocks 构造在 TMUX 环境有 spawn 副作用，
-                    // None/ITerm2 终端不得触达（image_preview.rs 注释）。
+                let cell_px = crate::kit::image_preview::cell_pixel_size();
+                // 路径切换、字体变化（单元格尺寸变化）或首次就绪都重建协议。
+                if self.async_path.as_ref() != Some(path) || self.async_cell_px != cell_px {
+                    // F9：仅像素协议支持时才构造 Picker/AsyncImage——
+                    // `Picker` 构造在 TMUX 环境有 spawn 副作用，
+                    // None/ITerm2/无单元格尺寸的 Sixel 不得触达（image_preview.rs 注释）。
                     let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
-                    if crate::kit::image_preview::supported(&caps) {
+                    if crate::kit::image_preview::supported_with_cell_size(&caps, cell_px) {
                         let img = (**img).clone();
-                        self.async_img = Some(AsyncImage::new(cached_picker(), img));
+                        self.async_img = Some(AsyncImage::new(&cached_picker(cell_px), img));
                         self.async_path = Some(path.clone());
+                        self.async_cell_px = cell_px;
+                        redraw = true;
+                    } else if self.async_img.take().is_some() {
+                        self.async_path = None;
+                        self.async_cell_px = None;
                         redraw = true;
                     }
                 }
@@ -485,6 +511,7 @@ impl Hook for OverlayDrawHook {
                 // Idle/Loading/Degraded/Error：清理协议（隐藏/切换语义）。
                 if self.async_img.take().is_some() {
                     self.async_path = None;
+                    self.async_cell_px = None;
                     redraw = true;
                 }
             }

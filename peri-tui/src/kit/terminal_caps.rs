@@ -195,8 +195,9 @@ fn is_zellij(get: &dyn Fn(&str) -> Option<String>) -> bool {
         || get("ZELLIJ_VERSION").is_some()
 }
 
-/// Windows Terminal 1.22+ 支持 Sixel：`WT_SESSION` 是权威信号，
-/// `TERM_PROGRAM` 仅为兼容旧版写入。
+/// Windows Terminal 的 Sixel 能力标记：`WT_SESSION` 只证明会话，不能区分
+/// 1.21/1.22；`TERM_PROGRAM` 旧写法仅作兼容。实际像素渲染还要求单元格像素
+/// 尺寸（`image_preview::supported`），Windows 上 crossterm 不提供，恒文本降级。
 fn is_windows_terminal(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get("WT_SESSION").is_some()
         || get("TERM_PROGRAM").is_some_and(|program| {

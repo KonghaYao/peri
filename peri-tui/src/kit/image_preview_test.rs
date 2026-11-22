@@ -56,7 +56,18 @@ fn wait_for_resize(async_img: &mut AsyncImage) -> bool {
 #[test]
 fn supported_gates_on_capability_bit() {
     assert!(super::supported(&caps(GraphicsProtocol::Kitty)));
-    assert!(super::supported(&caps(GraphicsProtocol::Sixel)));
+    assert!(
+        super::supported_with_cell_size(&caps(GraphicsProtocol::Sixel), Some((8, 16))),
+        "Sixel 有真实单元格尺寸时应启用像素渲染"
+    );
+    assert!(
+        !super::supported_with_cell_size(&caps(GraphicsProtocol::Sixel), None),
+        "拿不到单元格尺寸时 Sixel 必须文本降级（像素会溢出预留区）"
+    );
+    assert!(
+        !super::supported_with_cell_size(&caps(GraphicsProtocol::Sixel), Some((0, 16))),
+        "零尺寸单元格不是有效信号"
+    );
     assert!(
         !super::supported(&caps(GraphicsProtocol::ITerm2)),
         "ITerm2 检测但 disabled：未验证不启用"
@@ -75,9 +86,17 @@ fn picker_for_maps_caps_to_protocol_type() {
         super::picker_for(&caps(GraphicsProtocol::Kitty)).protocol_type(),
         ProtocolType::Kitty
     );
+    let sixel = super::picker_for_with_cell_size(&caps(GraphicsProtocol::Sixel), Some((8, 16)));
+    assert_eq!(sixel.protocol_type(), ProtocolType::Sixel);
     assert_eq!(
-        super::picker_for(&caps(GraphicsProtocol::Sixel)).protocol_type(),
-        ProtocolType::Sixel
+        (sixel.font_size().width, sixel.font_size().height),
+        (8, 16),
+        "Sixel 必须用真实单元格尺寸换算像素，不能用 halfblocks 的 10×20 默认值"
+    );
+    assert_eq!(
+        super::picker_for_with_cell_size(&caps(GraphicsProtocol::Sixel), None).protocol_type(),
+        ProtocolType::Halfblocks,
+        "无单元格尺寸时不切换 Sixel"
     );
     // ITerm2 / None 不强制像素协议（halfblocks 安全态，像素渲染由 supported 门控）。
     assert_eq!(
@@ -133,7 +152,7 @@ fn static_protocol_transmit_once_across_frames() {
 
 #[test]
 fn sixel_protocol_encodes_pixels_for_picker() {
-    let picker = super::picker_for(&caps(GraphicsProtocol::Sixel));
+    let picker = super::picker_for_with_cell_size(&caps(GraphicsProtocol::Sixel), Some((8, 16)));
     let proto = super::static_protocol(
         &picker,
         solid_image(8, 8),
