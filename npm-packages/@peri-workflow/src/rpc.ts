@@ -8,6 +8,7 @@ import type {
   JsonRpcId,
   JsonRpcMessage,
   JsonRpcResponse,
+  WorkflowToolOutcome,
 } from './types'
 
 let reqId = 100
@@ -93,6 +94,65 @@ export function rejectPendingTasks(message: string): void {
     entry.resolve({ kind: 'dead', reason: 'killed', detail: message })
   }
   pendingTasks.clear()
+}
+
+// ─── tool/result 等待表（issue #407 阶段 1）────────────────────
+//
+// 与 agent 任务表相互独立：脚本工具调用不是 agent 任务，不参与引擎的并发/限额。
+// 宿主回填按 taskId 精确匹配；未决项在 run 结束/kill 时以 `cancelled` 结算。
+
+/** 已发布脚本工具调用等待表（taskId → pending resolver，带 effective 名）。 */
+const pendingToolCalls = new Map<
+  string,
+  { toolName: string; resolve: (outcome: WorkflowToolOutcome) => void }
+>()
+
+/** 登记一个已发布工具调用的等待项（`tool/task` 通知发出前调用）。 */
+export function registerToolCall(
+  taskId: string,
+  toolName: string,
+): Promise<WorkflowToolOutcome> {
+  return new Promise((resolve) => {
+    pendingToolCalls.set(taskId, { toolName, resolve })
+  })
+}
+
+/**
+ * 处理宿主 `tool/result` 通知：按 taskId 结算等待项。
+ *
+ * 幂等：未知 taskId（迟到/重复投递、或 run 结束已清空）只打 stderr 警告，
+ * 不影响其他未决调用。
+ */
+export function handleToolResult(msg: {
+  params?: { taskId?: unknown; runId?: unknown; outcome?: unknown }
+}): void {
+  const taskId = msg.params?.taskId
+  if (typeof taskId !== 'string') return
+  const entry = pendingToolCalls.get(taskId)
+  if (!entry) {
+    console.error(`[peri-workflow] ignoring tool/result for unknown taskId: ${taskId}`)
+    return
+  }
+  pendingToolCalls.delete(taskId)
+  entry.resolve(msg.params?.outcome as WorkflowToolOutcome)
+}
+
+/**
+ * 结算全部未决脚本工具调用（run 结束/kill 收口；不残留悬挂 promise）。
+ *
+ * 以 `cancelled` 错误结算：脚本侧抛 `WorkflowToolError`，与宿主取消路径同构。
+ */
+export function rejectPendingToolCalls(reason: string | Error): void {
+  const message = reason instanceof Error ? reason.message : reason
+  for (const [, entry] of pendingToolCalls) {
+    entry.resolve({
+      kind: 'error',
+      code: 'cancelled',
+      tool: entry.toolName,
+      message,
+    })
+  }
+  pendingToolCalls.clear()
 }
 
 export function handleResponse(msg: JsonRpcResponse): void {

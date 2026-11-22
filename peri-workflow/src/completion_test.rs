@@ -207,6 +207,7 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
         postcondition_observation: None,
         git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
+        unknown_side_effects: false,
         write_intent: None,
         limits: WorkflowLimits::default(),
         limit_breaches: Vec::new(),
@@ -286,6 +287,7 @@ fn completion_projects_the_saved_return_value_without_upgrading_acceptance() {
         post_processing_status: PostProcessingStatus::NotRequired,
         delivery_status: DeliveryStatus::Unknown,
         stderr_tail: None,
+        unknown_side_effects: false,
     });
     let preview = result.result_preview.as_ref().unwrap();
     assert!(preview.complete);
@@ -317,6 +319,7 @@ fn completion_keeps_unrequested_delivery_out_of_the_blocked_branch() {
         post_processing_status: PostProcessingStatus::Unknown,
         delivery_status: DeliveryStatus::Unknown,
         stderr_tail: None,
+        unknown_side_effects: false,
     });
 
     assert_eq!(
@@ -361,6 +364,7 @@ fn completion_never_upgrades_failed_or_killed_runs_to_success() {
             post_processing_status: PostProcessingStatus::Unknown,
             delivery_status: DeliveryStatus::Unknown,
             stderr_tail: None,
+            unknown_side_effects: false,
         });
         assert_eq!(result.outcome, outcome, "{status} 的执行终态不得被覆盖");
         assert!(!result.success, "{status} 不得因交付不需要而变绿");
@@ -389,6 +393,7 @@ fn cleanup_failure_clears_the_unrequested_delivery_reason() {
         ),
         git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Completed,
+        unknown_side_effects: false,
         write_intent: None,
         limits: WorkflowLimits::default(),
         limit_breaches: Vec::new(),

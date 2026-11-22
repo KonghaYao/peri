@@ -52,6 +52,7 @@
   cwd:      string,        // 工作目录
   budgetTotal: number|null, // token 预算上限，null 为无限制
   resume?:  JournalEntry[], // 续跑时的历史 journal
+  resumeTools?: ToolJournalEntry[] | null, // 续跑时的脚本工具调用记录；省略/null = 不回放
   script:   string,        // workflow ESM 脚本源码
   args?:    unknown,       // 用户传入的参数（args 变量）
   maxConcurrency?: number, // 最大并发 agent 数
@@ -132,6 +133,59 @@
 - 宿主内部失败：`dead { reason: "runagent-threw", detail }`（adapter 对空投递兜底同一 reason）；
 - `-32603` 等 generic error 仅适用于仍有响应的宿主 → runner 请求（`workflow/start`、`workflow/kill`）。
 
+### 脚本工具调用信道（issue #407）
+
+脚本 `tool()` 的三条通知：`tool/task`（runner → 宿主，发布）、`tool/result`（宿主 → runner，回投）与 `tool/replayed`（runner → 宿主，续跑回放）。与 agent 任务共用回填幂等约定，但使用独立等待表，不进入 agent 任务表、并发槽与 token/工具计数。每次调用的持久记录（`tools.jsonl`）由 **Rust 宿主**写入，Node 侧只消费 `resumeTools` 前缀。
+
+#### `tool/task`
+
+发布一次脚本工具调用（**通知**，无 `id`）。宿主在会话可见视图内按 effective 名解析工具、走既有审批与 canonical 调用管线，并以 `tool/result` 通知回投终态。`taskId` 不进入 agent 任务表，也不约束于 `maxConcurrency`。
+
+```typescript
+// 发布（通知；无 id）
+{ jsonrpc: "2.0", method: "tool/task", params: {
+  taskId:   string,   // 单次 run 内唯一（`tool-<seq>`）；回填按它去重
+  runId:    string,
+  toolName: string,   // 只接受 effective 名；宿主解析，本进程不做前缀归一
+  arguments: object,  // 省略 = 空对象；数组/null/原始值在 Node 侧即拒绝
+  toolSeq:  number,   // 脚本工具调用在 run 内的连续序号（从 0 起，回放与 live 共用）
+  agentSeq: number,   // 该调用前已完成的 agent() 数（= 已观察到的 agent_done 数）
+} }
+```
+
+`taskId` 的 `tool-<n>` 序号与 `toolSeq` 是两套编号：前者只用于 `tool/result` 回填去重，后者是 `tools.jsonl` 的回放位置。
+
+#### `tool/result`
+
+宿主回投脚本工具调用终态（**通知**，无 `id`）。与 `agent/result` 同一条投递契约：任务表提交先于投递，Node 侧按 `taskId` 去重；未知 `taskId` 只记 stderr 警告，不影响其他未决调用。
+
+```typescript
+// 回填（宿主 → runner，通知；无 id）
+{ jsonrpc: "2.0", method: "tool/result", params: {
+  runId:  string,
+  taskId: string,   // 与 tool/task 发布一致
+  outcome:
+    | { kind: "ok", content: string, structuredContent?: unknown }
+    | { kind: "error", code: string, tool: string, message: string, details?: unknown },
+} }
+```
+
+- `kind` 只有 `"ok"` / `"error"`；`content` 恒为字符串，`structuredContent` / `details` 无值时字段省略。
+- `code` 取值为 `tool_not_found` | `invalid_arguments` | `tool_unavailable` | `policy_denied` | `approval_unavailable` | `not_executed` | `tool_error` | `protocol_error` | `task_accepted` | `outcome_unknown` | `cancelled`。
+- run 结束/kill 时未决调用由 `rejectPendingToolCalls` 以 `cancelled` 结算（不残留悬挂 promise）。
+
+#### `tool/replayed`
+
+续跑回放一条已记录的工具调用（**通知**，无 `id`）。每回放一条在把记录值返回脚本**之前**发送一次；宿主据此把该条目补记进本 run 的 `tools.jsonl`。回放不发布 `tool/task`，不触发审批或真实执行。
+
+```typescript
+// 回放（runner → 宿主，通知；无 id）
+{ jsonrpc: "2.0", method: "tool/replayed", params: {
+  runId: string,
+  entry: ToolJournalEntry, // { toolSeq, agentSeq, taskId, toolName, arguments, outcome }
+} }
+```
+
 ### Runner → 宿主（出站通知）
 
 #### `progress/event`
@@ -194,6 +248,53 @@ workflow 执行完毕（不管成功/失败/中止）。
 
 ---
 
+## 脚本 API：`tool()`（issue #407）
+
+run 期间本进程把 `globalThis.tool` 安装到当前 run（`installToolGlobal`，run 结束时在
+`finally` 恢复宿主旧值）。脚本可把确定性 MCP 工具调用交给宿主：
+
+```js
+const result = await tool('Read', { file_path: '/abs/path' })
+// structuredContent 存在（非 null）→ 返回它；否则返回文本字符串
+// 失败 → throw WorkflowToolError { code, tool, message, details? }
+```
+
+- `effectiveName` 必须是非空字符串；`arguments` 必须是普通对象或省略。数组 / `null` /
+  原始值在本地以 `invalid_arguments` 拒绝，不发布 `tool/task`。
+- `tool()` 发布 `tool/task`、等待 `tool/result`，按 `taskId` 结算；不注册 agent 任务，
+  不占用 `maxConcurrency`，也不计入 `maxToolCalls` / token。
+- 错误抛类型化 `WorkflowToolError`，脚本可 `try/catch`；run 结束/kill 时未决调用以
+  `cancelled` 结算。回放记录中的 error 同样抛 `WorkflowToolError`（保留 `code`）。
+- **结果不截断**、不做 schema 校验：schema 归 MCP 服务端，本进程只做 wire 形状检查。
+- **不是安全边界**：脚本仍可使用 Node 原生能力（`process`、`require` 等）；`tool()`
+  只把 MCP 调用交给宿主审批与执行，不提供沙箱或权限提升。
+- 嵌套 `workflow()` 在同一进程、同一 run 内串行执行，共用同一 hook，不另建 run。
+  宿主未接入工具通道的部署形态（如非会话路径）以 `tool_unavailable` 失败。
+
+### 确定性回放（阶段 2）
+
+宿主把每次脚本工具调用写入本 run 的 `tools.jsonl`（`ToolJournalEntry`，字段：
+`toolSeq` / `agentSeq` / `taskId` / `toolName` / `arguments` / `outcome`）。续跑时宿主经
+`workflow/start.resumeTools` 回传该文件，Node 侧按下述规则前缀回放：
+
+- **启用条件**：只有 `journalStore.read()` 真正执行（续跑且脚本未变）后
+  `configureToolReplay(entries, reusableAgentPrefix)` 才启用回放；fresh run 与
+  `scriptChanged` 不读 journal，回放保持禁用。
+- **匹配条件**（全部满足才回放）：`entry.toolSeq === cursor`（当前脚本工具序号）、
+  `entry.agentSeq <= reusableAgentPrefix`、`toolName` 严格相等、`arguments` 与
+  `args ?? {}` JSON 深度相等。
+- **命中**：`cursor += 1`，发 `tool/replayed`，按记录 `outcome` 返回
+  （`structuredContent ?? content`）或抛错；**不发布 `tool/task`**。
+- **首个不匹配转 live**：本次及之后全部走 live，不再尝试回放；`cursor` 仍随每次调用
+  递增，并以当前 `cursor` 作为 live `tool/task.toolSeq`。
+- 引擎判定 journal 分叉并 `truncate` 时调用 `noteJournalReset()`：只关闭回放，
+  **不复位 `cursor`**——本 run 的 `tools.jsonl` 是 append-only，已回放条目继续占位。
+- 每次 `agent_done` 进度事件使已完成 agent 计数 +1（含 journal 命中的 agent），
+  live `tool/task.agentSeq` 取该计数。
+- 非安全边界不变：回放只复用宿主记录的结果，不校验 MCP schema、不截断结果。
+
+---
+
 ## 生命周期
 
 ```
@@ -228,9 +329,9 @@ workflow 执行完毕（不管成功/失败/中止）。
 ### Resume 流程
 
 ```
-[1] 宿主严格读取历史 journal；缺失、IO 错误和坏 JSON 行必须失败
-[2] 宿主 → runner: workflow/start { resume: [...连续成功前缀] }
-[3] runner 仅复用从 seq=0 开始、key 匹配的连续 ok 调用
+[1] 宿主严格读取历史 journal 与 tools.jsonl；缺失、IO 错误和坏 JSON 行必须失败
+[2] 宿主 → runner: workflow/start { resume: [...连续成功前缀], resumeTools: [...工具记录前缀] }
+[3] runner 仅复用从 seq=0 开始、key 匹配的连续 ok 调用；工具调用按 toolSeq 从前缀回放，首个不匹配转 live
 [4] 首个 dead/skipped 及后缀重新执行，保留 recovered/produced 身份；序号缺口/重复由宿主 strict read 拒绝，需依据工作包 checkpoint 显式重规划
 ```
 

@@ -42,7 +42,7 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse | JsonRpcNotificat
 // ─── RPC method signatures ─────────────────────────────────
 
 /** Rust host 与 Node artifact 必须共同实现的启动协议。 */
-export const WORKFLOW_PROTOCOL_VERSION = 2
+export const WORKFLOW_PROTOCOL_VERSION = 3
 export const WORKFLOW_BUILD_ID = '@peri-code/workflow@0.3.0'
 
 export type WorkflowLimits = {
@@ -59,6 +59,8 @@ export type WorkflowStartParams = {
   limits?: WorkflowLimits
   resumeFromRunId?: string
   resume?: JournalEntry[]
+  /** 续跑时的脚本工具调用记录（省略 / null = 不回放）；见 `ToolJournalEntry`。 */
+  resumeTools?: ToolJournalEntry[] | null
   script: string
   args?: unknown
   maxConcurrency?: number
@@ -99,6 +101,90 @@ export type AgentResultParams = {
   runId: string
   taskId: string
   result: unknown
+}
+
+// ─── 脚本工具调用信道（issue #407）──────────────────────────
+
+/** 脚本可见的工具调用错误码（Rust `WorkflowToolErrorCode` 的 snake_case wire 名）。 */
+export type WorkflowToolErrorCode =
+  | 'tool_not_found'
+  | 'invalid_arguments'
+  | 'tool_unavailable'
+  | 'policy_denied'
+  | 'approval_unavailable'
+  | 'not_executed'
+  | 'tool_error'
+  | 'protocol_error'
+  | 'task_accepted'
+  | 'outcome_unknown'
+  | 'cancelled'
+
+/**
+ * 脚本工具调用的终态（Rust `WorkflowToolOutcome`，tagged `kind`）。
+ *
+ * `structuredContent` / `details` 在 Rust 侧是 `Option`，无值时字段省略；
+ * `structuredContent: null` 与缺省同义（脚本侧回落 `content`）。
+ */
+export type WorkflowToolOutcome =
+  | { kind: 'ok'; content: string; structuredContent?: unknown }
+  | {
+      kind: 'error'
+      code: WorkflowToolErrorCode
+      tool: string
+      message: string
+      details?: unknown
+    }
+
+/**
+ * runner → host: 脚本工具调用发布（通知；issue #407）。
+ *
+ * 字段与 Rust 侧 `protocol.rs::ToolTaskParams` 逐字段对齐。`taskId` 作用域 =
+ * 单次 run；`toolName` 只接受 effective 名；`arguments` 省略 = 空对象。
+ *
+ * `toolSeq` 是脚本工具调用在 run 内的连续序号，与 `taskId` 序号相互独立；
+ * `agentSeq` 是该调用发生前已完成的 `agent()` 调用数。
+ */
+export type ToolTaskParams = {
+  taskId: string
+  runId: string
+  toolName: string
+  arguments: Record<string, unknown>
+  toolSeq: number
+  agentSeq: number
+}
+
+/** host → runner: 脚本工具调用结果投递（通知）。 */
+export type ToolResultParams = {
+  taskId: string
+  runId: string
+  outcome: WorkflowToolOutcome
+}
+
+/**
+ * 一次脚本工具调用的持久记录（`tools.jsonl`，由 Rust 宿主写入）。
+ *
+ * `toolSeq` 是 run 内连续序号（从 0 起，回放与 live 共用同一计数）；
+ * `agentSeq` 是该调用发生前已完成的 `agent()` 调用数（= 已观察到的
+ * `agent_done` 事件数）。续跑时宿主经 `workflow/start.resumeTools` 回传前缀。
+ */
+export type ToolJournalEntry = {
+  toolSeq: number
+  agentSeq: number
+  taskId: string
+  toolName: string
+  arguments: Record<string, unknown>
+  outcome: WorkflowToolOutcome
+}
+
+/**
+ * runner → host: 脚本工具调用已从 `resumeTools` 回放（通知）。
+ *
+ * 每个回放条目在记录值交给脚本**之前**发送一次；宿主据此补记本 run 的
+ * `tools.jsonl`（回放条目仍占 `toolSeq`，后续 live 调用沿用同一计数）。
+ */
+export type ToolReplayedParams = {
+  runId: string
+  entry: ToolJournalEntry
 }
 
 // ─── CLI 读取器类型 ────────────────────────────────────────

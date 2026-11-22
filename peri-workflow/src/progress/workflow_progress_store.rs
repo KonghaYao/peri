@@ -6,6 +6,11 @@ use super::{
     RunStatus, RwLock, Serialize, WorkflowMeta,
 };
 
+/// serde：`false` 不落 JSON（`unknown_side_effects` 仅在置位时出现）。
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// 进度事件观察者：`apply_event` 提交后回调（在 `runs` 写锁与 observer 注入锁
 /// 之外，但**仍持有 `commit` 串行锁**：实现不得重入提交，也不得调用任何会触发
 /// `commit` 的 API，否则同线程自锁；含 `Log` 事件）。
@@ -52,6 +57,9 @@ pub struct RunProgress {
     pub phases: Vec<PhaseProgress>,
     #[serde(with = "agents_as_map")]
     pub agents: IndexMap<u64, AgentProgress>,
+    /// 执行中的脚本工具在 run 终止时未结算：观测事实，不升级为 run 失败。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unknown_side_effects: bool,
     /// 完成时间戳（仅 server 侧用于清理过期 runs，不序列化到 JSON）。
     #[serde(skip)]
     pub completed_at: Option<std::time::Instant>,
@@ -125,6 +133,8 @@ impl WorkflowProgressStore {
     ///
     /// 历史上投影由 `set_terminal_projection` 在通知之后补写，订阅方按通知
     /// 补读时会读到未投影的中间态（审查 Major）。
+    /// 终态一次性提交：状态、return、后处理与未知副作用必须同一次投影落定。
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_run_done(
         &self,
         run_id: &str,
@@ -133,6 +143,7 @@ impl WorkflowProgressStore {
         error: Option<String>,
         post_processing_status: peri_acp_types::workflow::PostProcessingStatus,
         delivery_status: peri_acp_types::workflow::DeliveryStatus,
+        unknown_side_effects: bool,
     ) {
         let event = ProgressEvent::RunDone {
             run_id: run_id.to_string(),
@@ -143,6 +154,7 @@ impl WorkflowProgressStore {
         self.commit(&event, |run| {
             run.post_processing_status = post_processing_status;
             run.delivery_status = delivery_status;
+            run.unknown_side_effects = unknown_side_effects;
         });
     }
 
@@ -175,6 +187,7 @@ impl WorkflowProgressStore {
                         meta: None, // meta is raw Value; conversion not required by spec
                         phases: Vec::new(),
                         agents: IndexMap::new(),
+                        unknown_side_effects: false,
                         completed_at: None,
                     };
                     runs.insert(

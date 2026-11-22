@@ -49,6 +49,9 @@ pub struct TuiRunProgress {
     /// Server serializes IndexMap<u64, AgentProgress> as JSON array.
     #[serde(default)]
     pub agents: Vec<TuiAgentProgress>,
+    /// 执行中的脚本工具在 run 终止时未结算；true 才出现。
+    #[serde(default)]
+    pub unknown_side_effects: bool,
 }
 
 /// Mirrors `peri_workflow::progress::PhaseProgress`.

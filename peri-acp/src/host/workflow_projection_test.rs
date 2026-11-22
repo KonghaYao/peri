@@ -218,6 +218,7 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
         result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
+        unknown_side_effects: false,
     };
     runtime
         .registry()
@@ -454,6 +455,7 @@ fn workflow_terminal_delivery_waits_for_the_queue_without_blocking_the_worker() 
         result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
+        unknown_side_effects: false,
     };
     let page = serde_json::to_string(&json!({
         "snapshot": TaskSnapshot {

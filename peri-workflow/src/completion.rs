@@ -137,6 +137,7 @@ impl RunCompletion {
                     post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Failed,
                     delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
                     stderr_tail: None,
+                    unknown_side_effects: false,
                 })
             };
             let stderr_tail = raw.stderr_tail.clone();
@@ -181,8 +182,11 @@ impl RunCompletion {
     fn settle_failed_terminal_state(&self, error: &str) -> WorkflowResult {
         use peri_acp_types::workflow::{DeliveryStatus, ExecutionStatus, PostProcessingStatus};
 
+        let mut unknown_side_effects = false;
         match self.journal.read_state(&self.run_id) {
             Ok(mut state) => {
+                // 后到的清理失败不改写「存在不可确认副作用」这一观测事实。
+                unknown_side_effects = state.unknown_side_effects;
                 state.status = "failed".into();
                 state.execution_status = ExecutionStatus::Failed;
                 state.post_processing_status = PostProcessingStatus::Failed;
@@ -219,6 +223,7 @@ impl RunCompletion {
             Some(error.to_string()),
             PostProcessingStatus::Failed,
             DeliveryStatus::Blocked,
+            unknown_side_effects,
         );
         WorkflowResult {
             run_id: self.run_id.clone(),
@@ -228,6 +233,7 @@ impl RunCompletion {
             post_processing_status: PostProcessingStatus::Failed,
             delivery_status: DeliveryStatus::Blocked,
             stderr_tail: None,
+            unknown_side_effects,
         }
     }
 
@@ -286,6 +292,7 @@ impl RunCompletion {
             result_preview,
             phase_summaries,
             attempts: self.journal.read_attempts(&self.run_id).unwrap_or_default(),
+            unknown_side_effects: result.unknown_side_effects,
         }
     }
 }

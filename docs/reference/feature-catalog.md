@@ -131,6 +131,7 @@
 | F-WORKFLOW-006 | L3 | Workflow 进度；资源投影供宿主与 TUI 消费 | [契约](../design/workflow.md) |
 | F-WORKFLOW-007 | L3 | Workflow MCP；模型工具与宿主回填信道分离 | [契约](../design/workflow.md) |
 | F-WORKFLOW-008 | L4 | Ultra-ADLC；大交付按文件协议编排 | [契约](../design/workflow.md) |
+| F-WORKFLOW-009 | L3 | 脚本工具调用；effective 名经宿主审批执行并可回放 | [契约](../design/workflow.md) |
 | F-CONFIG-001 | L2 | 配置解析；typed resolver 产生有效快照 | [契约](../design/configuration-authority.md) |
 | F-CONFIG-002 | L2 | 配置作用域；目录与 settings 路径决定视图 | [契约](../design/configuration-authority.md) |
 | F-CONFIG-003 | L2 | 配置保存；expected revision 保护编辑基线 | [契约](../design/configuration-authority.md) |

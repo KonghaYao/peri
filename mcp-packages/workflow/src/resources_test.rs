@@ -77,6 +77,7 @@ fn completed_workflow(run_id: &str) -> peri_workflow::registry::WorkflowTaskResu
         result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
+        unknown_side_effects: false,
     }
 }
 
@@ -227,6 +228,53 @@ async fn source_ack_before_owner_settlement_cannot_republish_a_running_task() {
         )
         .unwrap();
     assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
+}
+
+/// issue #407：tool 任务与 agent 任务同表投影（`params.kind` 标种类，tool 无
+/// `agentId`，终态结果在 `toolOutcome`）。
+#[test]
+fn tool_tasks_are_visible_in_the_task_projection_with_kind() {
+    let runtime = make_runtime();
+    runtime
+        .progress_store()
+        .apply_event(&ProgressEvent::RunStarted {
+            run_id: "run-tool".into(),
+            workflow_name: "t".into(),
+            meta: None,
+        });
+    let _ = runtime
+        .tasks()
+        .publish("agent-1".to_string(), published_params("run-tool", 1));
+    let _ = runtime.tasks().publish_tool(
+        "tool-1".to_string(),
+        "run-tool",
+        "Read".to_string(),
+        serde_json::Map::new(),
+        0,
+        0,
+    );
+
+    let payload =
+        crate::resources::read_payload(&runtime, "workflow://tasks").expect("任务流必须可读");
+    let active = payload["activeTasks"]
+        .as_array()
+        .expect("任务资源必须随页返回活跃任务基线");
+    let tool = active
+        .iter()
+        .find(|record| record["taskId"].as_str() == Some("tool-1"))
+        .expect("tool 任务必须在同一任务投影中可见");
+    assert_eq!(tool["params"]["kind"], "tool", "任务种类必须标在投影里");
+    assert_eq!(tool["params"]["toolName"], "Read");
+    assert!(
+        tool.get("agentId").is_none(),
+        "tool 任务没有 agent 槽位，不得伪造 agentId: {tool}"
+    );
+    let agent = active
+        .iter()
+        .find(|record| record["taskId"].as_str() == Some("agent-1"))
+        .expect("agent 任务仍在同一投影中");
+    assert_eq!(agent["params"]["kind"], "agent");
+    assert_eq!(agent["agentId"], 1);
 }
 
 /// F3 回归：长寿命活跃任务的发布事件被事件日志淘汰后，读取方必须仍能从

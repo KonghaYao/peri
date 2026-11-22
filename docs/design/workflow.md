@@ -26,8 +26,9 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 | `phase(title)` | 切换阶段标记，后续 agent 自动归属该阶段 |
 | `log(message)` | 运行日志 |
 | `workflow(nameOrScriptPath, args?)` | 运行子 workflow（一层嵌套上限；按名解析 `.claude/workflows/`） |
+| `tool(name, args?)` | 确定性 MCP 工具调用；effective 名，`structuredContent` 优先，失败抛可 `try/catch` 的类型化 `WorkflowToolError` |
 
-参数契约（含 `scriptPath`）与用法校验归 `WorkflowRuntime` 的 `params` 单一权威；`strictPreflight` 恒拒绝——workflow 原语与调用图不可静态验证。面向模型的手册是 builtin skill `ultracode`（见 §13）。
+参数契约（含 `scriptPath`）与用法校验归 `WorkflowRuntime` 的 `params` 单一权威；`strictPreflight` 恒拒绝——workflow 原语与调用图不可静态验证。面向模型的手册是 builtin skill `ultracode`（多 agent 编排）与 `codemode`（确定性工具管线，见 §13）。
 
 ### 1.2 设计目标
 
@@ -128,6 +129,13 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 - **child 会话结算**：每次 agent 回调对应一个 hidden child session；run 结束（完成/失败/取消，含 future 被 kill drop）时按 `session-durability` §5.3 的映射尝试写终态与 `work_state`；写入失败时 child 可能仍为 `working`，见 §5.3。结算成功后父会话进入时不再把它当作待续跑候选。
 
 任务表是 per-session 运行期状态（process-local，不写 journal）；消费主循环、订阅与就绪语义见 [workflow-mcp.md](workflow-mcp.md) §5.5，入口为 `peri-acp/src/host/workflow_consumer.rs`。
+
+脚本工具任务（`tool/task`，issue #407）与 agent 任务同表同信道，但走独立语义：
+
+- **准入**：`toolSeq` / `agentSeq` 随任务登记；不进入 `maxAgents` / `maxConcurrency` 槽位，也不计入 `maxToolCalls` 与 token。
+- **终态**：宿主回填经 host-only `WorkflowToolResult`（同一消费者令牌、同一单次终态提交）；终态先追加 `<run_dir>/tools.jsonl`，再投递 `tool/result`，同一 `(runId, taskId)` 只追加一次。
+- **未知副作用**：执行中的工具在 run 终止时未结算，或终态为 `outcome_unknown` / `task_accepted` 时，run 终态置 `unknownSideEffects=true`；该字段是观测事实，不升级为 run 失败。`true` 时同时随 run 进度快照投影到 TUI 运行标签（`⚠`），`false` 不落 JSON。
+- **部署形态**：非会话路径（`peri workflow` CLI）没有会话可见工具视图，`tool()` 以 `tool_unavailable` 失败。
 
 结果与进度类型是契约层单一事实源（`peri-acp-types/src/workflow.rs`）：`AgentRunParams`、`AgentRunResult`（`Ok { output, usage, model, … }` / `Skipped` / `Dead { reason, detail, scope_close_incomplete }`）、`ProgressEvent`、四维状态与 `WorkflowTaskResult`；`AgentRunResult` 的 schema/字符串编码由执行体投影统一决定。
 
@@ -290,6 +298,7 @@ saved aggregate evidence instead of restarting finished agents.
 2. **journal 缓存重放**（携带 script 的 `resumeFromRunId`）：`read_all_strict` 读取上一 run journal，仅把从 `seq=0` 开始的连续 `ok` 前缀交给 Node；首个 dead/skipped 及后缀重新执行，Node 按调用 key 匹配前缀。
 
 - 缺失、IO 错误、损坏 JSON、序号不连续/重复均报错，不得降级成无缓存新运行；序号损坏需依据工作包 checkpoint 显式重新规划。
+- 脚本工具结果走独立 `tools.jsonl`（不混入 agent journal 的 key/seq）：resume 时内核只转发 `toolSeq` 从 0 连续、且 `agentSeq <= 已回放 agent 前缀长度` 的条目前缀；Node 再按 `toolSeq` / `toolName` / `arguments` 深比较逐条匹配，首个不匹配起全部转 live。回放命中时 Node 发 `tool/replayed`，宿主只记录不执行。
 - Node 仍按调用 key 匹配前缀，不能用调用缓存代替工作包依赖与产物有效性检查。
 - `state.json` 保存启动 `args` 与并发数并原样恢复；legacy 缺失参数不可重建，并发兼容默认 3；改变契约或恢复计划时通过 `Workflow` 工具显式传完整新 script（或 `scriptPath`）+ `resumeFromRunId`。
 - 现有 budget/limits 是物理运行上限，不是跨运行计费账本；cache-hit 不重复计数。超限明细写入 `state.json`；attempt 执行结果随 journal 条目保存，但 resume 只按 `key/seq/result` 的连续 ok 前缀复用，不据此重放执行或重复计费。旧 `state.json` / 旧 journal 缺字段按未知读取，不补判为未超限或成功。
@@ -383,9 +392,9 @@ saved aggregate evidence instead of restarting finished agents.
 
 ## 13. 能力暴露与关闭
 
-- **工具面**：`Workflow` / `WorkflowStatus` / `WorkflowKill` 经 MCP 桥接成为 deferred 工具（默认 `mcp__peri__*`，legacy 六实例回滚为 `mcp__workflow__*`，经 `ToolSearch → ToolInvoke` 发现与调用）；`WorkflowAgentResult` 是 host-only 回填通道，不进入模型可见面。工具与资源声明以 [workflow-mcp.md](workflow-mcp.md) §4 为权威。
+- **工具面**：`Workflow` / `WorkflowStatus` / `WorkflowKill` 经 MCP 桥接成为 deferred 工具（默认 `mcp__peri__*`，legacy 六实例回滚为 `mcp__workflow__*`，经 `ToolSearch → ToolInvoke` 发现与调用）；`WorkflowAgentResult` 与 `WorkflowToolResult` 是 host-only 回填通道，不进入模型可见面。工具与资源声明以 [workflow-mcp.md](workflow-mcp.md) §4 为权威。
 - **关闭**：v5 能力名 `"workflow": false`（旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter，M4 删除）进会话关闭集；单出口不 spawn 独立 workflow 实例、关闭时不建桥接且宿主消费者不启动；legacy 六实例回滚下命中关闭集时不 spawn 该实例（`ARC-CAPABILITY-CLOSURE-001`）。
-- **模型手册**：builtin skill `ultracode`（`mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md`，宿主注册表经 `include_str!` 引用），按需加载，不常驻系统提示词；复杂全生命周期交付由 `ultra-adlc` skill 与 [Ultra-ADLC 设计](ultra-adlc.md)约束。
+- **模型手册**：builtin skill `ultracode`（多 agent 编排）与 `codemode`（确定性工具管线；`mcp-packages/workspace/src/resources/builtin/skills/codemode/SKILL.md`），宿主注册表经 `include_str!` 引用，按需加载，不常驻系统提示词；复杂全生命周期交付由 `ultra-adlc` skill 与 [Ultra-ADLC 设计](ultra-adlc.md)约束。
 - **入口命令**：`/workflows` 打开面板（`PanelKind::Workflow`）；ACP 方法名（`workflow/list_runs`、`workflow/kill_run`、`workflow/kill_agent`、`workflow/resume`）与 TUI 交互保持不变。
 
 ### Multitask and Ultracode routing

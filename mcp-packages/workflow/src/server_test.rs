@@ -33,6 +33,7 @@ async fn wire_declares_model_and_consumer_tools_and_resources() {
             "WorkflowStatus",
             "WorkflowKill",
             "WorkflowAgentResult",
+            "WorkflowToolResult",
             "WorkflowAgentClaim",
             "WorkflowConsumerReady",
             "WorkflowCompletionAck",
@@ -512,6 +513,153 @@ async fn agent_result_settles_claimed_task_once() {
         .expect("任务必须存在");
     assert!(
         matches!(record.result, Some(AgentRunResult::Ok { .. })),
+        "首次结果为准，迟到结果不得覆盖"
+    );
+
+    pair.shutdown().await;
+}
+
+#[tokio::test]
+async fn tool_result_requires_consumer_token_and_rejects_unclaimed_task() {
+    let runtime = test_fixture::make_runtime();
+    let token = runtime.bind_consumer_token();
+    let _ = runtime.tasks().publish_tool(
+        "tool-pub".into(),
+        "run-tool",
+        "Read".into(),
+        Default::default(),
+        0,
+        0,
+    );
+    let pair = test_fixture::connect(test_fixture::server(Arc::clone(&runtime))).await;
+    let peer = pair.peer();
+    let arguments = json!({
+        "runId": "run-tool",
+        "taskId": "tool-pub",
+        "outcome": {"kind": "ok", "content": "file body"}
+    });
+
+    // 鉴权：无令牌 / 错误令牌一律协议级拒绝。
+    test_fixture::assert_invalid_params(
+        &test_fixture::call_tool_protocol_error(
+            &peer,
+            "WorkflowToolResult",
+            arguments.clone(),
+            None,
+        )
+        .await,
+        "缺令牌的 tool 回填",
+    );
+    test_fixture::assert_invalid_params(
+        &test_fixture::call_tool_protocol_error(
+            &peer,
+            "WorkflowToolResult",
+            arguments.clone(),
+            Some(test_fixture::consumer_meta("wrong")),
+        )
+        .await,
+        "错误令牌的 tool 回填",
+    );
+
+    // 准入：未 claim 的 `published` 任务不得被外部回填。
+    let error = test_fixture::call_tool_protocol_error(
+        &peer,
+        "WorkflowToolResult",
+        arguments,
+        Some(test_fixture::consumer_meta(&token)),
+    )
+    .await;
+    test_fixture::assert_invalid_params(&error, "未 claim 的 tool 任务");
+    assert!(
+        error.message.contains("not 'executing'"),
+        "错误必须说明准入条件: {}",
+        error.message
+    );
+    let record = runtime
+        .tasks()
+        .get("run-tool", "tool-pub")
+        .expect("任务必须仍存在");
+    assert_eq!(record.state, WorkflowTaskState::Published);
+    assert!(record.tool_outcome.is_none(), "拒绝不得写入工具结果");
+
+    pair.shutdown().await;
+}
+
+#[tokio::test]
+async fn tool_result_settles_claimed_task_once_and_marks_unknown_side_effects() {
+    let runtime = test_fixture::make_runtime();
+    let _ = runtime.tasks().publish_tool(
+        "tool-exec".into(),
+        "run-tool-exec",
+        "Read".into(),
+        Default::default(),
+        0,
+        0,
+    );
+    assert!(matches!(
+        runtime
+            .tasks()
+            .mark_executing("run-tool-exec", "tool-exec", Default::default()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let token = runtime.bind_consumer_token();
+    let pair = test_fixture::connect(test_fixture::server(Arc::clone(&runtime))).await;
+    let peer = pair.peer();
+
+    let settled = test_fixture::call_tool_with_meta(
+        &peer,
+        "WorkflowToolResult",
+        json!({
+            "runId": "run-tool-exec",
+            "taskId": "tool-exec",
+            "outcome": {"kind": "error", "code": "outcome_unknown", "tool": "Read", "message": "no payload"}
+        }),
+        Some(test_fixture::consumer_meta(&token)),
+    )
+    .await;
+    assert_ne!(
+        settled.is_error,
+        Some(true),
+        "{}",
+        test_fixture::first_text(&settled)
+    );
+    assert!(
+        test_fixture::first_text(&settled).contains("settled as 'failed'"),
+        "失败结果投影为 failed: {}",
+        test_fixture::first_text(&settled)
+    );
+    assert!(
+        runtime.tasks().run_unknown_side_effects("run-tool-exec"),
+        "outcome_unknown 必须标记未知副作用"
+    );
+
+    // 重复回填免覆盖：首次终态为准，仍幂等成功。
+    let repeated = test_fixture::call_tool_with_meta(
+        &peer,
+        "WorkflowToolResult",
+        json!({
+            "runId": "run-tool-exec",
+            "taskId": "tool-exec",
+            "outcome": {"kind": "ok", "content": "late"}
+        }),
+        Some(test_fixture::consumer_meta(&token)),
+    )
+    .await;
+    assert_ne!(repeated.is_error, Some(true));
+    assert!(
+        test_fixture::first_text(&repeated).contains("already settled as 'failed'"),
+        "重复回填必须幂等返回既有终态: {}",
+        test_fixture::first_text(&repeated)
+    );
+    let record = runtime
+        .tasks()
+        .get("run-tool-exec", "tool-exec")
+        .expect("任务必须存在");
+    assert!(
+        matches!(
+            record.tool_outcome,
+            Some(peri_acp_types::workflow::WorkflowToolOutcome::Error { .. })
+        ),
         "首次结果为准，迟到结果不得覆盖"
     );
 

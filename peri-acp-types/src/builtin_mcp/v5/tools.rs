@@ -252,6 +252,14 @@ pub(super) const WORKFLOW_CAPABILITY_TOOLS: &[CapabilityTool] = &[
         ContextRetention::PreviewOnly,
         false
     ),
+    // 与 workflow MCP handler 的 tools/list 顺序一致（结果回填工具相邻声明）。
+    deferred!(
+        "workflow",
+        "WorkflowToolResult",
+        false,
+        ContextRetention::PreviewOnly,
+        false
+    ),
     deferred!(
         "workflow",
         "WorkflowAgentClaim",

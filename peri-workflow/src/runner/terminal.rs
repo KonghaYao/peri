@@ -50,6 +50,7 @@ fn persist_failed_state(
         postcondition_observation: None,
         git_observation_scope: input.git_observation.scope(),
         outcome: peri_acp_types::workflow::WorkflowOutcome::Failed,
+        unknown_side_effects: false,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         limit_breaches: Vec::new(),
@@ -190,6 +191,7 @@ pub(super) fn send_failure(
         post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
         delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
         stderr_tail: public_stderr_summary(stderr_tail),
+        unknown_side_effects: false,
     }));
 }
 
@@ -234,6 +236,7 @@ pub(super) fn finalize_workflow(
         breaches,
         token_usage,
         first_error,
+        unknown_side_effects,
     } = limit_report;
     // 终态读取的是收尾时的完整事实：done 之后才回填的 settle 或非限额致命失败
     // 都不得把 run 显示成全绿。投影与持久化必须读同一个状态，否则 failed run 的
@@ -258,6 +261,7 @@ pub(super) fn finalize_workflow(
     final_result.status = status;
     final_result.post_processing_status = projection.post_processing;
     final_result.delivery_status = projection.delivery;
+    final_result.unknown_side_effects = unknown_side_effects;
     if let crate::journal::GitObservation::Incomplete(detail) = &input.git_observation {
         warn!(
             target: "workflow",
@@ -304,6 +308,7 @@ pub(super) fn finalize_workflow(
         postcondition_observation: Some(projection.observation),
         git_observation_scope: input.git_observation.scope(),
         outcome,
+        unknown_side_effects,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         limit_breaches: breaches,
@@ -354,6 +359,7 @@ pub(super) fn finalize_workflow(
         final_result.error.clone(),
         final_result.post_processing_status,
         final_result.delivery_status,
+        unknown_side_effects,
     );
 
     final_result.stderr_tail = stderr_tail;
@@ -375,6 +381,7 @@ pub(super) fn send_killed(
     let RunLimitReport {
         breaches,
         token_usage,
+        unknown_side_effects,
         ..
     } = limit_report;
     let error = Some("workflow killed by user".to_string());
@@ -390,6 +397,7 @@ pub(super) fn send_killed(
         postcondition_observation: None,
         git_observation_scope: input.git_observation.scope(),
         outcome: peri_acp_types::workflow::WorkflowOutcome::Killed,
+        unknown_side_effects,
         write_intent: input.write_intent.clone(),
         limits: input.limits.clone(),
         limit_breaches: breaches,
@@ -413,6 +421,7 @@ pub(super) fn send_killed(
         error.clone(),
         peri_acp_types::workflow::PostProcessingStatus::Blocked,
         peri_acp_types::workflow::DeliveryStatus::Blocked,
+        unknown_side_effects,
     );
     let _ = done.send(Some(crate::runner::WorkflowResult {
         run_id: run_id.into(),
@@ -422,5 +431,6 @@ pub(super) fn send_killed(
         post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Blocked,
         delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
         stderr_tail: public_stderr_summary(stderr_tail),
+        unknown_side_effects,
     }));
 }

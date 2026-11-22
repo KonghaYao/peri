@@ -61,6 +61,7 @@ fn terminal_result(run_id: &str) -> WorkflowTaskResult {
         result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
+        unknown_side_effects: false,
     }
 }
 
@@ -112,6 +113,7 @@ async fn test_complete_sends_notification() {
             result_preview: None,
             phase_summaries: Vec::new(),
             attempts: Vec::new(),
+            unknown_side_effects: false,
         },
         task_record("r1"),
     );
@@ -169,6 +171,7 @@ async fn test_complete_retains_unacknowledged_run_with_status() {
             result_preview: None,
             phase_summaries: Vec::new(),
             attempts: Vec::new(),
+            unknown_side_effects: false,
         },
         task_record("r1"),
     );
@@ -203,6 +206,7 @@ fn test_notification_includes_error_when_failed() {
         result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
+        unknown_side_effects: false,
     };
     let notification = result.to_notification();
     assert!(
@@ -251,6 +255,7 @@ fn test_notification_preserves_and_limits_error() {
         result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
+        unknown_side_effects: false,
     };
 
     let notification = result.to_notification();
@@ -308,6 +313,7 @@ fn test_notification_projects_structured_attempt_identity() {
             disposition: peri_acp_types::workflow::AttemptDisposition::Recovered,
             execution: None,
         }],
+        unknown_side_effects: false,
     };
 
     let notification = result.to_notification();
@@ -365,6 +371,7 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
         result_preview: None,
         phase_summaries: Vec::new(),
         attempts: Vec::new(),
+        unknown_side_effects: false,
     };
     let notification = result.to_notification();
     assert!(
@@ -384,13 +391,13 @@ fn test_notification_includes_saved_state_only_when_artifact_exists() {
     // 文案不得含尖括号：提醒正文在信封边界统一 HTML 转义，`>200` 会变成 `&gt;200`。
     assert!(
         notification.contains(&format!(
-            "Long string fields in the result object (over {} bytes) are externalized",
+            "Long strings in the result (over {} bytes, including a top-level string or array items) are externalized",
             peri_acp_types::workflow::LONGTEXT_EXTRACT_THRESHOLD_BYTES
         )),
         "存在 artifact 时应说明长文本外置阈值与作用面，实际：{notification}"
     );
     assert!(
-        notification.contains("`${label}` token in state.json is that field's path"),
+        notification.contains("`${label}` token in state.json is that value's path"),
         "存在 artifact 时应说明 `${{label}}` 是结果对象字段路径，实际：{notification}"
     );
     assert!(

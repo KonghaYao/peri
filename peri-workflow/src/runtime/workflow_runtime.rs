@@ -6,9 +6,10 @@ use super::{
     Ordering, ProgressEvent, ProgressExpirySweeper, PublishOutcome, RunLimitBreach, RunProgress,
     RuntimeProgressObserver, RwLock, SettleAdmission, SettleOutcome, TaskManager,
     UnboundedReceiver, WorkflowInput, WorkflowJournalStore, WorkflowProgressStore,
-    WorkflowRunEventLog, WorkflowRunner, WorkflowTaskRecord, WorkflowTaskRegistry,
-    WorkflowTaskResult, WorkflowTaskState, WorkflowTaskTable,
+    WorkflowRunEventLog, WorkflowRunner, WorkflowTaskKind, WorkflowTaskRecord,
+    WorkflowTaskRegistry, WorkflowTaskResult, WorkflowTaskState, WorkflowTaskTable,
 };
+use crate::protocol::{WorkflowToolErrorCode, WorkflowToolOutcome};
 
 /// run 事件日志容量（保留边界随淘汰前进）。
 pub(super) const RUN_EVENT_LOG_CAPACITY: usize = 1024;
@@ -69,8 +70,9 @@ impl WorkflowStartOutcome {
              The workflow is running in the background.\n\
              You will be notified when it completes with a result summary.\n\
              Results will be saved to .claude/workflow-runs/{run_id}/state.json\n\
-             Long string fields in the result object (over {threshold} bytes) are externalized: a \
-             `${{label}}` token in state.json is that field's path, and its text lives in \
+             Long strings in the result (over {threshold} bytes, including a top-level string or \
+             array items) are externalized: a \
+             `${{label}}` token in state.json is that value's path, and its text lives in \
              `outputs/` in that directory under the same label with a `.txt` suffix.",
             workflow_name = self.workflow_name,
             run_id = self.run_id,
@@ -129,6 +131,7 @@ impl AgentTaskSink for RuntimeAgentTaskSink {
         // 重复发布幂等：已登记的任务直接接受，不重复计入 maxAgents。
         if self.tasks.get(&run_id, &task_id).is_none() {
             if let Some(Some(maximum)) = self.budgets.get(&run_id).map(|budget| budget.max_agents) {
+                // `active_count_for_run` 只计 agent 任务：tool 调用不是 agent 槽位。
                 let active = self.tasks.active_count_for_run(&run_id) as u64;
                 if active >= maximum {
                     return AgentTaskPublish::LimitBreach(RunLimitBreach::new(
@@ -147,6 +150,39 @@ impl AgentTaskSink for RuntimeAgentTaskSink {
             PublishOutcome::Closed => AgentTaskPublish::Closed,
         }
     }
+
+    /// tool 任务发布：与 agent 任务同表，但不做 `maxAgents` / 并发准入。
+    fn publish_tool_task(
+        &self,
+        task_id: String,
+        run_id: String,
+        tool_name: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        tool_seq: u64,
+        agent_seq: u64,
+    ) -> crate::runner::ToolTaskPublish {
+        match self
+            .tasks
+            .publish_tool(task_id, &run_id, tool_name, arguments, tool_seq, agent_seq)
+        {
+            PublishOutcome::Published(_) | PublishOutcome::AlreadyKnown(_) => {
+                crate::runner::ToolTaskPublish::Accepted
+            }
+            PublishOutcome::Closed => crate::runner::ToolTaskPublish::Closed,
+        }
+    }
+
+    fn executing_tool_tasks(&self, run_id: &str) -> usize {
+        self.tasks.executing_tool_count_for_run(run_id)
+    }
+
+    fn unknown_tool_side_effects(&self, run_id: &str) -> bool {
+        self.tasks.run_unknown_side_effects(run_id)
+    }
+
+    fn mark_unknown_tool_side_effect(&self, run_id: &str) {
+        self.tasks.mark_unknown_tool_side_effect(run_id);
+    }
 }
 
 /// 取消路径的投递编码（design §5.3：`cancelled` 对齐 `Dead { reason }` 语义，
@@ -161,6 +197,78 @@ pub(super) fn cancelled_delivery_result(record: &WorkflowTaskRecord) -> AgentRun
             .or_else(|| Some("workflow task cancelled".into())),
         duration_ms: None,
         token_count: None,
+    }
+}
+
+/// tool 任务的取消 / 无回填终态编码：Node 侧拒绝待决 promise（`cancelled` 可 catch）。
+pub(super) fn cancelled_tool_outcome(record: &WorkflowTaskRecord) -> WorkflowToolOutcome {
+    let tool = record
+        .params
+        .tool_call()
+        .map_or("<unknown>", |(tool_name, _)| tool_name);
+    WorkflowToolOutcome::error(
+        WorkflowToolErrorCode::Cancelled,
+        tool,
+        record
+            .reason
+            .clone()
+            .unwrap_or_else(|| "workflow tool task cancelled".into()),
+    )
+}
+
+/// 把 tool 终态追加进 `tools.jsonl`（单一写入点；失败只记录，仍照常投递）。
+///
+/// 调用方已按 `(runId, taskId)` 去重；这里只负责编码与写入。写入失败不改变 run
+/// 语义：Node 等待方仍会收到结果，下一次 resume 只是无法复用这条前缀。
+fn append_tool_journal_entry(
+    journal_store: &WorkflowJournalStore,
+    record: &WorkflowTaskRecord,
+    outcome: &WorkflowToolOutcome,
+) {
+    let Some((tool_name, arguments)) = record.params.tool_call() else {
+        tracing::error!(
+            target: "workflow",
+            run_id = %record.run_id,
+            task_id = %record.task_id,
+            "tools.jsonl append skipped: tool task has no tool payload",
+        );
+        return;
+    };
+    let Some((tool_seq, agent_seq)) = record.params.tool_sequence() else {
+        return;
+    };
+    let entry = crate::protocol::ToolJournalEntry {
+        tool_seq,
+        agent_seq,
+        task_id: record.task_id.clone(),
+        tool_name: tool_name.to_string(),
+        arguments: arguments.clone(),
+        outcome: outcome.clone(),
+    };
+    if let Err(error) = journal_store.append_tool(&record.run_id, &entry) {
+        tracing::error!(
+            target: "workflow",
+            run_id = %record.run_id,
+            task_id = %record.task_id,
+            error = %error,
+            "tools.jsonl append failed; tool result is still delivered",
+        );
+    }
+}
+
+/// tool 终态映射：成功 ⇒ `completed`；准入前取消 ⇒ `cancelled`；其余失败 ⇒ `failed`
+/// （任务状态是观测投影，Node 收到的是原始 `WorkflowToolOutcome`）。
+fn tool_task_terminal_state(outcome: &WorkflowToolOutcome) -> (WorkflowTaskState, Option<String>) {
+    match outcome {
+        WorkflowToolOutcome::Ok { .. } => (WorkflowTaskState::Completed, None),
+        WorkflowToolOutcome::Error { code, message, .. } => {
+            let state = if *code == WorkflowToolErrorCode::Cancelled {
+                WorkflowTaskState::Cancelled
+            } else {
+                WorkflowTaskState::Failed
+            };
+            (state, Some(message.clone()))
+        }
     }
 }
 
@@ -222,23 +330,55 @@ impl WorkflowRuntime {
             budgets: Arc::clone(&budgets),
         }));
         let delivery_runner = Arc::downgrade(&runner);
+        // tool 终态的 tools.jsonl 去重集合：sink 在重复回填时会被再次调用，但同一
+        // `(runId, taskId)` 只能追加一次（append-only 事实源）。
+        let appended_tools: Arc<parking_lot::Mutex<std::collections::HashSet<(String, String)>>> =
+            Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+        let tool_journal = Arc::clone(&journal_store);
         tasks.set_terminal_sink(Arc::new(move |record: &WorkflowTaskRecord| {
-            let Some(runner) = delivery_runner.upgrade() else {
-                return;
-            };
-            let result = record
-                .result
-                .clone()
-                .unwrap_or_else(|| cancelled_delivery_result(record));
-            // The task table has already fenced this run atomically. Record the
-            // committed failure before the engine can react to its notification.
-            if let Some(detail) = result.unsettled_scope_error() {
-                runner.note_run_failure(&record.run_id, detail);
+            match record.kind() {
+                WorkflowTaskKind::Agent => {
+                    let Some(runner) = delivery_runner.upgrade() else {
+                        return;
+                    };
+                    let result = record
+                        .result
+                        .clone()
+                        .unwrap_or_else(|| cancelled_delivery_result(record));
+                    // The task table has already fenced this run atomically. Record the
+                    // committed failure before the engine can react to its notification.
+                    if let Some(detail) = result.unsettled_scope_error() {
+                        runner.note_run_failure(&record.run_id, detail);
+                    }
+                    // 限额记账与投递同点（任务终态先提交后投递）：计数只影响 run 终态投影，
+                    // 不改变已提交结果（design §5.2 第 5 条 limits 计费）；重复回投按 taskId 去重。
+                    runner.note_task_execution(
+                        &record.run_id,
+                        &record.task_id,
+                        record.agent_id.unwrap_or_default(),
+                        &result,
+                    );
+                    runner.deliver_agent_result(&record.run_id, &record.task_id, &result);
+                }
+                // tool 任务：不写限额 / token 计数。顺序固定为「取 effective outcome →
+                // 追加 tools.jsonl → 投递脚本工具结果（先提交后投递）」。
+                // 取消 / 无回填的终态以 `cancelled` 收口 Node 等待方。
+                WorkflowTaskKind::Tool => {
+                    let outcome = record
+                        .tool_outcome
+                        .clone()
+                        .unwrap_or_else(|| cancelled_tool_outcome(record));
+                    let key = (record.run_id.clone(), record.task_id.clone());
+                    // 重复回填只重投结果，不再追加（tools.jsonl 是 append-only 事实源）。
+                    if appended_tools.lock().insert(key) {
+                        append_tool_journal_entry(&tool_journal, record, &outcome);
+                    }
+                    let Some(runner) = delivery_runner.upgrade() else {
+                        return;
+                    };
+                    runner.deliver_tool_result(&record.run_id, &record.task_id, &outcome);
+                }
             }
-            // 限额记账与投递同点（任务终态先提交后投递）：计数只影响 run 终态投影，
-            // 不改变已提交结果（design §5.2 第 5 条 limits 计费）；重复回投按 taskId 去重。
-            runner.note_task_execution(&record.run_id, &record.task_id, record.agent_id, &result);
-            runner.deliver_agent_result(&record.run_id, &record.task_id, &result);
         }));
         Self {
             runner,
@@ -310,7 +450,9 @@ impl WorkflowRuntime {
             if let AgentRunResult::Ok { phase, .. } = &mut result {
                 if phase.is_none() {
                     if let Some(record) = self.tasks.get(run_id, task_id) {
-                        *phase = self.progress_store.agent_phase(run_id, record.agent_id);
+                        if let Some(agent_id) = record.agent_id {
+                            *phase = self.progress_store.agent_phase(run_id, agent_id);
+                        }
                     }
                 }
             }
@@ -322,6 +464,31 @@ impl WorkflowRuntime {
             SettleAdmission::ExecutingOnly,
             state,
             result,
+            reason,
+        )
+    }
+
+    /// 回填 tool 任务终态（`WorkflowToolResult` 工具的领域入口）。
+    ///
+    /// 与 agent 回填共用同一 CAS 与投递路径（`ExecutingOnly`：只接受已被唯一 claim
+    /// 的任务；重复回填幂等返回首次终态）。`outcome_unknown` / `task_accepted` 同时
+    /// 标记 run 的 `unknownSideEffects`——这是观测事实，不升级为 run 失败。
+    pub fn complete_tool_call(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        outcome: WorkflowToolOutcome,
+    ) -> SettleOutcome {
+        if outcome.marks_unknown_side_effects() {
+            self.runner.note_unknown_tool_side_effect(run_id);
+        }
+        let (state, reason) = tool_task_terminal_state(&outcome);
+        self.tasks.settle_tool(
+            run_id,
+            task_id,
+            SettleAdmission::ExecutingOnly,
+            state,
+            Some(outcome),
             reason,
         )
     }

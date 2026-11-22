@@ -46,6 +46,17 @@ pub struct RunState {
     /// 引擎级三态；与 acceptance 分开，旧 state.json 缺省为 `unknown`。
     #[serde(default)]
     pub outcome: peri_acp_types::workflow::WorkflowOutcome,
+    /// run 内存在不可确认的脚本工具副作用（`outcome_unknown` / `task_accepted`，
+    /// 或 run 终止时仍有 executing 的 tool 任务）。
+    ///
+    /// 观测事实，不是失败：`true` 才出现在 `state.json`；旧文件缺省 `false`——
+    /// 不得据此推断本能力已存在。
+    #[serde(
+        default,
+        rename = "unknownSideEffects",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub unknown_side_effects: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_intent: Option<peri_acp_types::workflow::WorkflowWriteIntent>,
     #[serde(default, skip_serializing_if = "limits_are_empty")]
@@ -115,7 +126,10 @@ impl WorkflowJournalStore {
         self.base_dir.join(run_id)
     }
 
-    /// 初始化运行目录，写入脚本副本。
+    /// 初始化运行目录，写入脚本副本，并创建空的 journal/tools 文件。
+    ///
+    /// 空文件保证「零 agent / 零工具调用」的 run 也能 resume：严格读取以文件
+    /// 存在为前提，缺失只能解释为运行目录损坏。
     ///
     /// # Errors
     ///
@@ -123,7 +137,10 @@ impl WorkflowJournalStore {
     pub fn init_run(&self, run_id: &str, script: &str) -> std::io::Result<()> {
         let dir = self.run_dir(run_id);
         fs::create_dir_all(&dir)?;
-        fs::write(dir.join("script.js"), script)
+        fs::write(dir.join("script.js"), script)?;
+        fs::File::create(dir.join("journal.jsonl"))?;
+        fs::File::create(dir.join("tools.jsonl"))?;
+        Ok(())
     }
 
     /// 向 journal.jsonl 追加一条记录（每行一个 JSON 对象）。
@@ -144,6 +161,71 @@ impl WorkflowJournalStore {
     pub fn truncate(&self, run_id: &str) -> std::io::Result<()> {
         let path = self.run_dir(run_id).join("journal.jsonl");
         fs::write(path, "")
+    }
+
+    /// 向 tools.jsonl 追加一条脚本工具调用记录（每行一个 JSON 对象）。
+    ///
+    /// append-only：`journal/truncate` 不清空本文件——回放前缀选择天然容忍断点，
+    /// 清空反而会丢失已结算的工具调用事实。
+    ///
+    /// # Errors
+    ///
+    /// Returns the filesystem or serialization error if the entry cannot be written.
+    pub fn append_tool(
+        &self,
+        run_id: &str,
+        entry: &crate::protocol::ToolJournalEntry,
+    ) -> std::io::Result<()> {
+        let path = self.run_dir(run_id).join("tools.jsonl");
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        let line = serde_json::to_string(entry)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        writeln!(writer, "{line}")
+    }
+
+    /// 读取 tools.jsonl 全部条目（严格模式：坏行即失败，按 `toolSeq` 升序返回）。
+    ///
+    /// 文件不存在返回空列表（旧 run 没有工具调用记录）；有坏行返回
+    /// `InvalidData`，与 [`Self::read_all_strict`] 同口径 fail closed。
+    /// **按 `toolSeq` 排序**：并发工具调用按完成顺序追加，文件顺序不等于脚本
+    /// 调用顺序；回放前缀只认 `toolSeq`，不认写入顺序。
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error when the file cannot be read, or `InvalidData` for malformed entries.
+    pub fn read_tools_strict(
+        &self,
+        run_id: &str,
+    ) -> std::io::Result<Vec<crate::protocol::ToolJournalEntry>> {
+        let path = self.run_dir(run_id).join("tools.jsonl");
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let reader = std::io::BufReader::new(file);
+        let mut entries = Vec::new();
+        let paired_lines = reader.lines().enumerate();
+        for (line_number, line) in paired_lines {
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let entry = serde_json::from_str(trimmed).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid tool journal entry at line {}: {error}",
+                        line_number + 1
+                    ),
+                )
+            })?;
+            entries.push(entry);
+        }
+        entries.sort_by_key(|entry: &crate::protocol::ToolJournalEntry| entry.tool_seq);
+        Ok(entries)
     }
 
     /// 读取 journal.jsonl 全部条目，跳过空行和解析失败的行（宽容模式）。

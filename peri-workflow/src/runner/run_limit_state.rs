@@ -53,6 +53,11 @@ pub struct RunLimitReport {
     /// 首个失败文本（顶层 `error` 的兼容来源）；与 `breaches` 可能不同源
     /// （子作用域未结清等非限额致命失败只写文本）。
     pub first_error: Option<String>,
+    /// run 内存在不可确认的脚本工具副作用（不是失败，只进终态投影）。
+    ///
+    /// 来源是任务表（tool 任务终态 `outcome_unknown` / `task_accepted`，或 run
+    /// 终止时仍有 executing 的 tool 任务）；本报告只承载终态投影，不是第二事实源。
+    pub unknown_side_effects: bool,
 }
 
 /// 单 run limit 状态（消息循环与任务投递路径共享；进程内、随 run 生命周期）。
@@ -114,6 +119,8 @@ impl RunLimitState {
             breaches: self.breaches(),
             token_usage: self.observed_tokens(),
             first_error: self.breach(),
+            // 由调用方按任务表事实覆盖（tool 任务终态 / 未终态 tool 任务）。
+            unknown_side_effects: false,
         }
     }
 

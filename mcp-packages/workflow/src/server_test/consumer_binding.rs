@@ -141,6 +141,13 @@ async fn wire_consumer_commands_require_token_and_claim_is_retry_safe() {
         ("WorkflowTaskObserved", json!({"runId":"run-a"})),
         ("WorkflowConsumerReady", json!({"ready":true})),
         ("WorkflowCompletionAck", json!({"runId":"run-a"})),
+        (
+            "WorkflowToolResult",
+            json!({
+                "runId":"run-a","taskId":"tool-a",
+                "outcome":{"kind":"ok","content":"done"}
+            }),
+        ),
         ("WorkflowClose", json!({})),
     ] {
         test_fixture::assert_invalid_params(

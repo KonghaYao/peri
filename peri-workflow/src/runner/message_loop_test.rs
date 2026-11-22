@@ -47,6 +47,19 @@ impl AgentTaskSink for RecordingSink {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.outcome.clone()
     }
+
+    fn publish_tool_task(
+        &self,
+        _task_id: String,
+        _run_id: String,
+        _tool_name: String,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+        _tool_seq: u64,
+        _agent_seq: u64,
+    ) -> crate::runner::ToolTaskPublish {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        crate::runner::ToolTaskPublish::Accepted
+    }
 }
 
 /// 初始化带一个提交的最小仓库，供终态 Git 对账使用。
@@ -86,7 +99,8 @@ async fn run_messages(
     git_repository: bool,
     budget_total: Option<u64>,
     seed: Option<fn(&RunLimitState)>,
-) -> (WorkflowResult, RunState, RunProgress) {
+    return_value: Option<serde_json::Value>,
+) -> (WorkflowResult, RunState, RunProgress, tempfile::TempDir) {
     // 与 RPC 单测相同的本地管道 fixture；不查询 HOME、artifact cache 或网络。
     // 返回 (终态, state.json, progress)。
     let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
@@ -132,7 +146,11 @@ async fn run_messages(
         .send(IncomingMessage::Request {
             id: None,
             method: "workflow/done".into(),
-            params: Some(json!({"runId": "run-1", "status": "completed"})),
+            params: Some(json!({
+                "runId": "run-1",
+                "status": "completed",
+                "returnValue": return_value,
+            })),
         })
         .await
         .expect("msg tx send test receiver must remain available for this delivery");
@@ -185,6 +203,7 @@ async fn run_messages(
         progress
             .run_snapshot("run-1")
             .expect("the run snapshot fixture result is required for this assertion"),
+        tmp,
     )
 }
 
@@ -195,7 +214,7 @@ async fn test_invalid_agent_task_continues_to_workflow_done() {
         calls: Arc::clone(&calls),
         outcome: AgentTaskPublish::Accepted,
     };
-    let (result, state, progress) = run_messages(
+    let (result, state, progress, _tmp) = run_messages(
         Arc::new(sink),
         "agent/task",
         // 跨 run 的发布：runId 与当前 run 不匹配，必须在准入前被拒绝。
@@ -203,6 +222,7 @@ async fn test_invalid_agent_task_continues_to_workflow_done() {
         WorkflowLimits::default(),
         None,
         false,
+        None,
         None,
         None,
     )
@@ -229,13 +249,14 @@ async fn test_agent_limit_stops_before_queued_workflow_done() {
         max_agents: Some(0),
         ..WorkflowLimits::default()
     };
-    let (result, state, progress) = run_messages(
+    let (result, state, progress, _tmp) = run_messages(
         Arc::new(sink),
         "agent/task",
         json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         limits,
         None,
         false,
+        None,
         None,
         None,
     )
@@ -263,13 +284,14 @@ async fn test_elapsed_timeout_keeps_the_first_breach() {
         max_elapsed_ms: Some(0),
         ..WorkflowLimits::default()
     };
-    let (result, state, progress) = run_messages(
+    let (result, state, progress, _tmp) = run_messages(
         Arc::new(sink),
         "agent/task",
         json!({"runId": "run-1", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
         limits,
         Some("workflow exceeded maxToolCalls (5)"),
         false,
+        None,
         None,
         None,
     )
@@ -295,7 +317,7 @@ async fn completed_without_write_intent_declares_unrequested_delivery() {
         calls: Arc::clone(&calls),
         outcome: AgentTaskPublish::Accepted,
     };
-    let (result, state, progress) = run_messages(
+    let (result, state, progress, _tmp) = run_messages(
         Arc::new(sink),
         "agent/task",
         // 跨 run 发布在准入前被拒绝：本用例只关心终态投影。
@@ -303,6 +325,7 @@ async fn completed_without_write_intent_declares_unrequested_delivery() {
         WorkflowLimits::default(),
         None,
         true,
+        None,
         None,
         None,
     )
@@ -351,7 +374,7 @@ async fn tool_call_and_token_budget_breaches_are_both_visible() {
         max_tool_calls: Some(5),
         ..WorkflowLimits::default()
     };
-    let (result, state, _progress) = run_messages(
+    let (result, state, _progress, _tmp) = run_messages(
         Arc::new(sink),
         "agent/task",
         json!({"runId": "other-run", "taskId": "t-1", "agentId": 7, "prompt": "inspect"}),
@@ -360,6 +383,7 @@ async fn tool_call_and_token_budget_breaches_are_both_visible() {
         false,
         Some(60_000),
         Some(seed),
+        None,
     )
     .await;
 
@@ -571,4 +595,335 @@ fn recovered_attempt_does_not_carry_execution_facts() {
             .is_none(),
         "缓存命中没有本次执行，不得补执行事实"
     );
+}
+
+// ─── 脚本工具任务（issue #407）：wire 校验与未知副作用终态投影 ─────────────
+
+/// 记录 tool 发布的测试 sink：可配置「未知副作用」事实，用于终态投影断言。
+struct RecordingToolSink {
+    calls: Arc<AtomicU64>,
+    publish: crate::runner::ToolTaskPublish,
+    unknown_side_effects: bool,
+    executing_tools: usize,
+    last: Arc<std::sync::Mutex<Option<ToolCallRecord>>>,
+}
+
+type ToolCallRecord = (
+    String,
+    String,
+    String,
+    serde_json::Map<String, serde_json::Value>,
+    u64,
+    u64,
+);
+
+impl RecordingToolSink {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicU64::new(0)),
+            publish: crate::runner::ToolTaskPublish::Accepted,
+            unknown_side_effects: false,
+            executing_tools: 0,
+            last: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    fn with_unknown_side_effects() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicU64::new(0)),
+            publish: crate::runner::ToolTaskPublish::Accepted,
+            unknown_side_effects: true,
+            executing_tools: 0,
+            last: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    fn with_executing_tools(count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicU64::new(0)),
+            publish: crate::runner::ToolTaskPublish::Accepted,
+            unknown_side_effects: false,
+            executing_tools: count,
+            last: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+}
+
+impl AgentTaskSink for RecordingToolSink {
+    fn publish_agent_task(&self, _task_id: String, _params: AgentRunParams) -> AgentTaskPublish {
+        AgentTaskPublish::Accepted
+    }
+
+    fn publish_tool_task(
+        &self,
+        task_id: String,
+        run_id: String,
+        tool_name: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        tool_seq: u64,
+        agent_seq: u64,
+    ) -> crate::runner::ToolTaskPublish {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last
+            .lock()
+            .expect("tool call record mutex must remain unpoisoned") =
+            Some((task_id, run_id, tool_name, arguments, tool_seq, agent_seq));
+        self.publish
+    }
+
+    fn executing_tool_tasks(&self, _run_id: &str) -> usize {
+        self.executing_tools
+    }
+
+    fn unknown_tool_side_effects(&self, _run_id: &str) -> bool {
+        self.unknown_side_effects
+    }
+}
+
+#[tokio::test]
+async fn tool_task_publishes_through_the_shared_task_channel() {
+    let sink = RecordingToolSink::new();
+    let (result, state, progress, _tmp) = run_messages(
+        Arc::clone(&sink) as Arc<dyn AgentTaskSink>,
+        "tool/task",
+        json!({
+            "runId": "run-1",
+            "taskId": "tool-1",
+            "toolName": "Read",
+            "arguments": {"file_path": "/tmp/x"},
+            "toolSeq": 0,
+            "agentSeq": 2
+        }),
+        WorkflowLimits::default(),
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        sink.calls.load(Ordering::SeqCst),
+        1,
+        "tool 任务必须发布一次"
+    );
+    let recorded = sink
+        .last
+        .lock()
+        .expect("tool call record mutex must remain unpoisoned")
+        .clone()
+        .expect("必须记录发布参数");
+    assert_eq!(recorded.0, "tool-1");
+    assert_eq!(recorded.1, "run-1");
+    assert_eq!(recorded.2, "Read");
+    assert_eq!(recorded.3["file_path"], "/tmp/x");
+    assert_eq!(recorded.4, 0, "toolSeq 必须原样传递");
+    assert_eq!(recorded.5, 2, "agentSeq 必须原样传递");
+    assert_eq!(result.status, "completed");
+    assert!(!result.unknown_side_effects, "无未知副作用事实时不得置位");
+    assert!(!state.unknown_side_effects);
+    assert!(matches!(progress.status, RunStatus::Completed));
+}
+
+#[tokio::test]
+async fn invalid_tool_task_is_rejected_before_the_task_channel() {
+    for params in [
+        // 跨 run：runId 必须匹配当前 run。
+        json!({"runId": "other-run", "taskId": "tool-1", "toolName": "Read", "toolSeq": 0, "agentSeq": 0}),
+        // arguments 必须是对象。
+        json!({"runId": "run-1", "taskId": "tool-1", "toolName": "Read", "arguments": [1], "toolSeq": 0, "agentSeq": 0}),
+        // toolName 非空。
+        json!({"runId": "run-1", "taskId": "tool-1", "toolName": " ", "toolSeq": 0, "agentSeq": 0}),
+        // taskId 非空。
+        json!({"runId": "run-1", "taskId": "", "toolName": "Read", "toolSeq": 0, "agentSeq": 0}),
+        // toolSeq 必填（阶段 2 的确定性序号）。
+        json!({"runId": "run-1", "taskId": "tool-1", "toolName": "Read", "agentSeq": 0}),
+        // agentSeq 必填（回放边界）。
+        json!({"runId": "run-1", "taskId": "tool-1", "toolName": "Read", "toolSeq": 0}),
+    ] {
+        let sink = RecordingToolSink::new();
+        let (result, _state, _progress, _tmp) = run_messages(
+            Arc::clone(&sink) as Arc<dyn AgentTaskSink>,
+            "tool/task",
+            params.clone(),
+            WorkflowLimits::default(),
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            sink.calls.load(Ordering::SeqCst),
+            0,
+            "非法 tool/task 不得进入任务表：{params}"
+        );
+        assert_eq!(result.status, "completed", "拒绝参数不应提前结束消息循环");
+    }
+}
+
+#[tokio::test]
+async fn unknown_tool_side_effects_project_without_failing_the_run() {
+    let sinks: Vec<Arc<dyn AgentTaskSink>> = vec![
+        RecordingToolSink::with_unknown_side_effects() as Arc<dyn AgentTaskSink>,
+        RecordingToolSink::with_executing_tools(1) as Arc<dyn AgentTaskSink>,
+    ];
+    for sink in sinks {
+        let (result, state, progress, _tmp) = run_messages(
+            sink,
+            "tool/task",
+            json!({
+                "runId": "run-1",
+                "taskId": "tool-1",
+                "toolName": "Bash",
+                "arguments": {"command": "true"},
+                "toolSeq": 0,
+                "agentSeq": 0
+            }),
+            WorkflowLimits::default(),
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            result.unknown_side_effects,
+            "完成结果必须带上未知副作用事实"
+        );
+        assert!(state.unknown_side_effects, "state.json 必须投影该字段");
+        assert_eq!(result.status, "completed", "未知副作用不得升级为 run 失败");
+        assert!(matches!(progress.status, RunStatus::Completed));
+    }
+}
+
+/// issue #407 阶段 2：`tool/replayed` 把重放 entry 追加到当前 run 的 tools.jsonl。
+#[tokio::test]
+async fn tool_replayed_appends_the_entry_to_the_active_run() {
+    let sink = RecordingToolSink::new();
+    let (result, _state, _progress, tmp) = run_messages(
+        Arc::clone(&sink) as Arc<dyn AgentTaskSink>,
+        "tool/replayed",
+        json!({
+            "runId": "run-1",
+            "entry": {
+                "toolSeq": 0,
+                "agentSeq": 1,
+                "taskId": "tool-1",
+                "toolName": "Read",
+                "arguments": {"file_path": "/tmp/x"},
+                "outcome": {"kind": "ok", "content": "done"}
+            }
+        }),
+        WorkflowLimits::default(),
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.status, "completed", "回放不得终止 run");
+    let store = WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    let entries = store
+        .read_tools_strict("run-1")
+        .expect("tools.jsonl 必须可读");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].tool_seq, 0);
+    assert_eq!(entries[0].agent_seq, 1);
+    assert_eq!(entries[0].task_id, "tool-1");
+    assert_eq!(entries[0].tool_name, "Read");
+    assert_eq!(entries[0].arguments["file_path"], "/tmp/x");
+    assert_eq!(
+        entries[0].outcome,
+        peri_acp_types::workflow::WorkflowToolOutcome::Ok {
+            structured_content: None,
+            content: "done".into(),
+        }
+    );
+}
+
+/// 跨 run 的回放 entry 被拒绝：不写入当前 run，也不终止 run。
+#[tokio::test]
+async fn tool_replayed_rejects_a_foreign_run() {
+    let sink = RecordingToolSink::new();
+    let (result, _state, _progress, tmp) = run_messages(
+        Arc::clone(&sink) as Arc<dyn AgentTaskSink>,
+        "tool/replayed",
+        json!({
+            "runId": "other-run",
+            "entry": {
+                "toolSeq": 0,
+                "agentSeq": 0,
+                "taskId": "tool-1",
+                "toolName": "Read",
+                "arguments": {},
+                "outcome": {"kind": "ok", "content": "done"}
+            }
+        }),
+        WorkflowLimits::default(),
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.status, "completed");
+    let store = WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    assert!(
+        store
+            .read_tools_strict("run-1")
+            .expect("缺失 tools.jsonl 时读取为空")
+            .is_empty(),
+        "跨 run 的 entry 不得写入"
+    );
+    assert!(
+        store.read_tools_strict("other-run").unwrap().is_empty(),
+        "当前消息循环不得为其它 run 写入"
+    );
+}
+
+/// `workflow/done` 的顶层字符串 return 也走外置（label 固定 `return`）。
+#[tokio::test]
+async fn workflow_done_externalizes_a_top_level_return_string() {
+    let sink = RecordingToolSink::new();
+    let long_text = "r".repeat(250);
+    let (result, state, _progress, tmp) = run_messages(
+        Arc::clone(&sink) as Arc<dyn AgentTaskSink>,
+        "log",
+        json!({}),
+        WorkflowLimits::default(),
+        None,
+        false,
+        None,
+        None,
+        Some(serde_json::json!(long_text.clone())),
+    )
+    .await;
+
+    assert_eq!(result.status, "completed");
+    let return_value = state.return_value.expect("returnValue 必须保留");
+    assert_eq!(return_value, serde_json::json!("${return}"));
+    let content = std::fs::read_to_string(
+        tmp.path()
+            .join(".claude/workflow-runs/run-1/outputs/return.txt"),
+    )
+    .expect("outputs/return.txt 必须存在");
+    assert_eq!(content, long_text);
 }
