@@ -34,17 +34,22 @@ if (listing.includes('Output truncated:')) {
 }
 
 const targets = listing.split('\n').filter(Boolean)
-// A failed thunk resolves to `null`; drop those before reporting to the agent.
-const counts = (await parallel(targets.map(file => async () => {
+const results = await parallel(targets.map(file => async () => {
   const text = await tool('Read', { file_path: file })
+  // A truncated read cannot be ranked by its partial line count.
+  if (text.includes('[Output truncated:')) return { file, lines: null }
   return { file, lines: text.split('\n').length }
-}))).filter(Boolean)
+}))
 
+// A failed thunk resolves to `null`; keep those names visible to the agent.
+const counts = results.filter(Boolean)
+const unread = targets.filter((_, index) => results[index] === null)
 const verdict = await agent(
-  `Rank the largest files and flag anomalies. Line counts: ${JSON.stringify(counts)}`,
+  `Rank the largest files and flag anomalies. ` +
+    `Line counts: ${JSON.stringify(counts)}. Unread files: ${JSON.stringify(unread)}`,
   { label: 'rank' },
 )
-return { verdict, counts }
+return { verdict, counts, unread }
 ```
 
 Available hooks: `agent`, `parallel`, `pipeline`, `phase`, `log`, `workflow`, plus
