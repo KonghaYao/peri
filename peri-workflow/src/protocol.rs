@@ -27,6 +27,9 @@ pub struct WorkflowStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_from_run_id: Option<String>,
     pub resume: Option<Vec<JournalEntry>>, // 非-null 时携带 journal entries
+    /// 可回放的脚本工具调用前缀（resume 时携带；fresh run 省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_tools: Option<Vec<ToolJournalEntry>>,
     pub cwd: String,
 }
 
@@ -55,7 +58,7 @@ pub struct WorkflowKillParams {
 
 pub use peri_acp_types::workflow::{
     AgentRunParams, AgentRunResult, AttemptDisposition, ProgressEvent, RecoveredAttempt, Usage,
-    WorkflowAttempt,
+    WorkflowAttempt, WorkflowToolErrorCode, WorkflowToolOutcome,
 };
 
 // ─── Agent 任务信道（P6：`agent/run` 请求/响应 → `agent/task` + `agent/result` 通知）──
@@ -82,6 +85,66 @@ pub struct AgentResultParams {
     pub run_id: String,
     pub task_id: String,
     pub result: AgentRunResult,
+}
+
+// ─── 脚本工具调用信道（P7：`tool/task` + `tool/result` 通知）──────────────
+
+/// Node → 宿主：脚本工具调用任务发布（通知；issue #407 阶段 1）。
+///
+/// `taskId` 作用域 = 单次 run；`toolName` 只接受 effective 名（宿主在会话可见
+/// 视图内解析）。`arguments` 只做对象形状检查，schema 校验归 MCP 服务端。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolTaskParams {
+    pub task_id: String,
+    pub run_id: String,
+    pub tool_name: String,
+    /// 省略 = 空对象；数组 / `null` / 原始值在反序列化即拒绝（形状检查）。
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, Value>,
+    /// run 内脚本工具调用连续序号（从 0 起；重放前缀按它连续匹配）。
+    pub tool_seq: u64,
+    /// 该调用发生前已完成的 `agent()` 调用数（重放边界）。
+    pub agent_seq: u64,
+}
+
+/// 宿主 → Node：脚本工具调用结果投递（通知）。
+///
+/// 投递契约与 `agent/result` 相同：先提交任务表，再投递本通知；Node 侧按
+/// `taskId` 去重、已结算的重复投递忽略。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultParams {
+    pub task_id: String,
+    pub run_id: String,
+    pub outcome: peri_acp_types::workflow::WorkflowToolOutcome,
+}
+
+/// 脚本工具调用 journal 条目（`tools.jsonl`；issue #407 阶段 2）。
+///
+/// `toolSeq` 是 run 内连续序号（从 0 起），`agentSeq` 是该调用发生前已完成的
+/// `agent()` 调用数。回放前缀按文件顺序严格连续匹配，遇到首个不满足即停止。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolJournalEntry {
+    pub tool_seq: u64,
+    pub agent_seq: u64,
+    pub task_id: String,
+    pub tool_name: String,
+    /// 调用参数（必须是对象；schema 校验归 MCP 服务端）。
+    pub arguments: serde_json::Map<String, Value>,
+    pub outcome: peri_acp_types::workflow::WorkflowToolOutcome,
+}
+
+/// Node → 宿主：回放的脚本工具调用（`tool/replayed` 通知；issue #407 阶段 2）。
+///
+/// Node 重放旧 run 的前缀时逐条上报；宿主把 entry 追加进当前 run 的
+/// `tools.jsonl`，使下一次 resume 能继续沿用确定性前缀。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolReplayedParams {
+    pub run_id: String,
+    pub entry: ToolJournalEntry,
 }
 
 // ─── Journal ───────────────────────────────────────────────

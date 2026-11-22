@@ -552,6 +552,7 @@ fn completion_and_consumer_commands_never_enter_model_tool_catalog() {
                     | "WorkflowConsumerReady"
                     | "WorkflowCompletionAck"
                     | "WorkflowClose"
+                    | "WorkflowToolResult"
             ) {
                 assert!(!tool.model_visible && !tool.direct);
             }

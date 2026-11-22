@@ -446,6 +446,7 @@ fn host_only_and_completion_tools_stay_non_direct() {
                 | "WorkflowCompletionAck"
                 | "WorkflowClose"
                 | "WorkflowAgentResult"
+                | "WorkflowToolResult"
         ) {
             assert!(!tool.model_visible, "{} 必须 host-only", tool.original_name);
             assert!(!tool.direct, "{} 必须 deferred", tool.original_name);

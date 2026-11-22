@@ -3,9 +3,9 @@
 //! 设计依据：`docs/design/workflow-mcp.md` §4。三层授权边界：
 //! 1. **发现过滤**（模型面）由注册表 `BuiltinMcpTool.model_visible` 在宿主桥接点
 //!    完成（`WorkflowAgentResult` 是 host-only）；本 handler 与 host 调用面无关。
-//! 2. **调用授权**（服务端）：`WorkflowAgentResult` 校验调用请求 `_meta` 中的消费者
-//!    令牌（[`WORKFLOW_CONSUMER_META_KEY`]），并要求目标任务已被 claim
-//!    （`SettleAdmission::ExecutingOnly`）——不信任调用方参数声明的身份。
+//! 2. **调用授权**（服务端）：`WorkflowAgentResult` / `WorkflowToolResult` 校验调用
+//!    请求 `_meta` 中的消费者令牌（[`WORKFLOW_CONSUMER_META_KEY`]），并要求目标任务
+//!    已被 claim（`SettleAdmission::ExecutingOnly`）——不信任调用方参数声明的身份。
 //! 3. **执行授权**：任务参数只能收缩消费者权限，由消费者侧过滤链承担（P6）。
 //!
 //! 工具面错误分两层（见 [`DispatchOutcome`]）：参数结构 / 未知工具 / 调用授权失败
@@ -19,8 +19,10 @@
 use std::sync::Arc;
 
 use peri_workflow::protocol::AgentRunResult;
+use peri_workflow::protocol::WorkflowToolErrorCode;
+use peri_workflow::protocol::WorkflowToolOutcome;
 use peri_workflow::runtime::{
-    SettleOutcome, WorkflowRuntime, WorkflowTaskState, WORKFLOW_CONSUMER_META_KEY,
+    SettleOutcome, WorkflowRuntime, WorkflowTaskKind, WorkflowTaskState, WORKFLOW_CONSUMER_META_KEY,
 };
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,

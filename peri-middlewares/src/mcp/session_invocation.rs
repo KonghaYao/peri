@@ -33,6 +33,9 @@ use peri_acp_types::tool_invocation::{EffectiveToolCall, InvocationId, Invocatio
 use peri_acp_types::tools::{
     BaseTool, EffectiveToolError, EffectiveToolErrorCode, ToolContext, ToolOutput,
 };
+use peri_acp_types::workflow::{
+    WorkflowToolCall, WorkflowToolErrorCode, WorkflowToolInvoker, WorkflowToolOutcome,
+};
 use peri_agent::agent::stages;
 use peri_agent::agent::stages::InvocationContext;
 use peri_agent::agent::stages::PostHookSkipSink;
@@ -56,6 +59,8 @@ mod tests;
 mod session_invocation_service;
 #[cfg(test)]
 use session_invocation_service::map_dispatch_error;
+#[cfg(test)]
+use session_invocation_service::map_workflow_tool_outcome;
 pub use session_invocation_service::AdmittedPeerTool;
 pub use session_invocation_service::AppDeliveryToken;
 pub use session_invocation_service::AttachmentDeliveryToken;

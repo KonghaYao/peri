@@ -89,6 +89,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 | `WorkflowStatus` | 模型面（deferred） | 查询 run 列表或单 run 快照 | `{ runId?: string, limit?: number }` |
 | `WorkflowKill` | 模型面（deferred） | 终止 run 或单 agent | `{ runId: string, agentId?: string }` |
 | `WorkflowAgentResult` | **host-only** | 回填 agent 任务结果 | `{ runId, taskId, result: AgentRunResult }` |
+| `WorkflowToolResult` | **host-only** | 回填脚本工具调用终态（`tool/task` 发布的任务） | `{ runId, taskId, outcome: WorkflowToolOutcome }` |
 | `WorkflowAgentClaim` | **host-only** | 唯一认领一个任务；同一 `claimId` 重试幂等 | `{ runId, taskId, claimId }` |
 | `WorkflowConsumerReady` | **host-only** | 声明消费者就绪（基线读取完成）；`false` 回落就绪并结算遗留执行 | `{ ready: boolean }` |
 | `WorkflowCompletionAck` | **host-only** | 确认已接受终态交付，释放待确认结果 | `{ runId }` |
@@ -142,7 +143,7 @@ published ──► executing ──► completed | failed | cancelled
 ```
 
 - 单次终态提交：状态转换由任务表单点 compare-and-set，只允许一次进入终态；重复回填返回既有终态（幂等），不同结果冲突以首次为准并记录告警。
-- 结果投递契约（而非未经定义的端到端恰好一次）：**可重试投递 + 单次终态提交 + Node promise 单次结算**。任务结果先提交任务表，再投递 `agent/result`；Node 侧按 taskId 去重，已结算的重复投递忽略。
+- 结果投递契约（而非未经定义的端到端恰好一次）：**可重试投递 + 单次终态提交 + Node promise 单次结算**。任务结果先提交任务表，再投递 `agent/result`；Node 侧按 taskId 去重，已结算的重复投递忽略。投递失败时消费者保留已计算的结果并按有界退避持续重投，服务器接受后才丢弃；重投只重复 `WorkflowAgentResult` / `WorkflowToolResult` 调用，不重新执行 agent 或工具。
 - `taskId` 作用域 = 单次 run；恢复场景不复用旧 taskId（resume 从 journal 缓存命中，不重放未完成任务）。
 - 任务的持久边界：任务表与事件日志为运行期状态（process-local durability，不写 journal）；跨进程恢复不相关（非目标 4）。journal 写入仍由 Node 在拿到结果后按现状 `journal/append` 完成，二者不共享写入权威、互不阻塞。
 
@@ -170,6 +171,13 @@ published ──► executing ──► completed | failed | cancelled
 保留：`workflow/start`、`workflow/kill`（宿主→Node 请求）；`progress/event`、`journal/append|truncate`、`log`、`workflow/done`（Node→宿主通知）。
 
 变更：Node→宿主 `agent/task`（通知）发布任务，宿主→Node `agent/result`（通知）回填结果；原 `agent/run` 请求/响应不再使用。
+
+脚本工具调用（issue #407）复用同一任务信道与终态投递契约，但使用独立通知：
+
+- Node→宿主 `tool/task`（通知）：`{ taskId, runId, toolSeq, agentSeq, toolName, arguments }`；宿主按会话可见视图解析 effective 名并经 canonical 管线执行，回填走 host-only `WorkflowToolResult`（同一消费者令牌、同一单次终态提交）。
+- 宿主→Node `tool/result`（通知）：`{ runId, taskId, outcome }`；`outcome` 为 tagged `ok` / `error`。
+- Node→宿主 `tool/replayed`（通知）：`{ runId, entry }`；resume 回放已记录结果时按 `toolSeq` 连续追加 `tools.jsonl`，宿主不再执行工具。
+- tool 任务与 agent 任务同表，但不占 `maxConcurrency` / `maxAgents`，不计入 `maxToolCalls` 与 token。
 
 `npm-packages/@peri-workflow/src/{adapter,rpc,types}.ts`：adapter 维护 `taskId → pending` 等待表，等待 `agent/result`；超时与 abort 语义保持。`peri-workflow/src/{protocol,runner/message_loop}.rs` 负责任务登记与回填投递；Rust wire 类型与 npm `types.ts` 保持两侧同步。wire 以 `WorkflowRuntime` 的领域接口为边界，不与 MCP 面切换耦合。
 

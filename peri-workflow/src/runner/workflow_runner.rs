@@ -23,12 +23,53 @@ pub enum AgentTaskPublish {
     LimitBreach(RunLimitBreach),
 }
 
-/// Node 任务发布面：`agent/task` → 任务表（由 `WorkflowRuntime` 装配期注入）。
+/// `tool/task` 的发布结果（wire 侧视角；issue #407）。
+///
+/// tool 任务没有 agent 槽位准入：不存在容量 / `maxAgents` 拒绝分支。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolTaskPublish {
+    /// 已登记（重复发布幂等返回既有记录）。
+    Accepted,
+    /// 实例已关闭：不登记，发布方须就地结算 Node 等待方。
+    Closed,
+}
+
+/// Node 任务发布面：`agent/task` / `tool/task` → 任务表（由 `WorkflowRuntime`
+/// 装配期注入）。
 ///
 /// 边界：wire 侧只依赖本 trait，不直连任务表；limits 准入（maxAgents）与关闭判定
 /// 都在实现侧，与 run `maxConcurrency`/limits 使用同一执行权威（design §5.2 第 5 条）。
+/// 两种任务共用同一张表（不是第二套任务通道）。
 pub trait AgentTaskSink: Send + Sync {
     fn publish_agent_task(&self, task_id: String, params: AgentRunParams) -> AgentTaskPublish;
+
+    /// 发布脚本工具调用任务；不参与 agent 槽位 / 限额准入。
+    fn publish_tool_task(
+        &self,
+        task_id: String,
+        run_id: String,
+        tool_name: String,
+        arguments: serde_json::Map<String, Value>,
+        tool_seq: u64,
+        agent_seq: u64,
+    ) -> ToolTaskPublish;
+
+    /// run 终止时仍处于 `executing` 的 tool 任务数（「未知副作用」判定）。
+    ///
+    /// 默认 `0`：未接入任务表的测试 sink 没有可观测的 tool 任务；生产 sink 走
+    /// 任务表的单一计数。
+    fn executing_tool_tasks(&self, _run_id: &str) -> usize {
+        0
+    }
+
+    /// 该 run 是否已记录不可确认的脚本工具副作用（tool 终态 `outcome_unknown` /
+    /// `task_accepted`）。默认 `false`（测试 sink 无任务表）。
+    fn unknown_tool_side_effects(&self, _run_id: &str) -> bool {
+        false
+    }
+
+    /// 记录该 run 存在不可确认的脚本工具副作用。默认无操作（测试 sink 无任务表）。
+    fn mark_unknown_tool_side_effect(&self, _run_id: &str) {}
 }
 
 // ─── 公开类型 ──────────────────────────────────────────────────
@@ -60,6 +101,8 @@ pub struct WorkflowResult {
     pub delivery_status: peri_acp_types::workflow::DeliveryStatus,
     /// 子进程是否产生过 stderr 的稳定诊断摘要；不承载原始 stderr 内容。
     pub stderr_tail: Option<String>,
+    /// run 内存在不可确认的脚本工具副作用（观测事实；不把 run 升级为失败）。
+    pub unknown_side_effects: bool,
 }
 
 /// 读取 workflow 终态：若 fast-path 已经写入当前 watch 值则立即返回，
@@ -192,6 +235,92 @@ impl WorkflowRunner {
         true
     }
 
+    /// 投递 `tool/result` 通知（脚本工具调用的终态）。
+    ///
+    /// 与 [`Self::deliver_agent_result`] 同一条投递契约：任务表提交先于投递、投递是
+    /// 通知而非可靠投递（Node 侧按 `taskId` 去重）；在提交临界区内调用，必须非阻塞。
+    pub fn deliver_tool_result(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        outcome: &peri_acp_types::workflow::WorkflowToolOutcome,
+    ) -> bool {
+        let Some(channel) = self
+            .active_channels
+            .get(run_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            tracing::debug!(
+                target: "workflow.rpc",
+                run_id,
+                task_id,
+                "tool/result delivery skipped: run channel is not active",
+            );
+            return false;
+        };
+        let params = match serde_json::to_value(crate::protocol::ToolResultParams {
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            outcome: outcome.clone(),
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    target: "workflow.rpc",
+                    run_id,
+                    task_id,
+                    error = %error,
+                    "tool/result serialization failed; result not delivered",
+                );
+                return false;
+            }
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::warn!(
+                target: "workflow.rpc",
+                run_id,
+                task_id,
+                "tool/result delivery skipped: no async runtime",
+            );
+            return false;
+        }
+        let delivery_run_id = run_id.to_string();
+        let delivery_task_id = task_id.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = channel.send_notification("tool/result", params).await {
+                tracing::warn!(
+                    target: "workflow.rpc",
+                    run_id = %delivery_run_id,
+                    task_id = %delivery_task_id,
+                    error = %error,
+                    "tool/result delivery failed",
+                );
+            }
+        });
+        true
+    }
+
+    /// 记录 run 内出现不可确认的脚本工具副作用（`outcome_unknown` / `task_accepted`）。
+    ///
+    /// 单一事实源是任务表；本入口经 sink 转发（runner 不持任务表句柄）。
+    pub(crate) fn note_unknown_tool_side_effect(&self, run_id: &str) {
+        if let Some(sink) = self.agent_task_sink() {
+            sink.mark_unknown_tool_side_effect(run_id);
+        }
+    }
+
+    /// run 终止时仍处于 `executing` 的 tool 任务数（未知副作用判定的第二来源）。
+    pub(crate) fn executing_tool_tasks(&self, run_id: &str) -> usize {
+        self.agent_task_sink()
+            .map_or(0, |sink| sink.executing_tool_tasks(run_id))
+    }
+
+    /// 该 run 是否已记录不可确认的脚本工具副作用（任务表事实）。
+    pub(crate) fn unknown_tool_side_effects(&self, run_id: &str) -> bool {
+        self.agent_task_sink()
+            .is_some_and(|sink| sink.unknown_tool_side_effects(run_id))
+    }
+
     /// Preserve the first fatal host failure even if the engine later reports completion.
     pub(crate) fn note_run_failure(&self, run_id: &str, detail: &str) {
         if let Some(state) = self.run_limit_states.get(run_id) {
@@ -299,7 +428,7 @@ impl WorkflowRunner {
         }
 
         // 2. Resume: read old journal if resume_from is set
-        let resume_entries = if let Some(ref old_run_id) = input.resume_from {
+        let (resume_entries, resume_tools) = if let Some(ref old_run_id) = input.resume_from {
             let entries = match journal_store.read_all_strict(old_run_id) {
                 Ok(entries) => entries,
                 Err(error) => {
@@ -316,11 +445,36 @@ impl WorkflowRunner {
                     return Err(err);
                 }
             };
-            Some(crate::runner::run_protocol::reusable_journal_prefix(
-                entries,
-            ))
+            let agent_prefix = crate::runner::run_protocol::reusable_journal_prefix(entries);
+            let replayed_agent_prefix_len =
+                u64::try_from(agent_prefix.len()).expect("journal prefix length fits in u64");
+            // tools.jsonl 与 journal.jsonl 同口径 fail closed：坏行意味着工具前缀
+            // 不可确认；静默丢弃会让 Node 重放错位。
+            let tool_entries = match journal_store.read_tools_strict(old_run_id) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    let err = WorkflowError::Io(error);
+                    crate::runner::terminal::send_failure(
+                        &done_tx,
+                        Some(&journal_store),
+                        &run_id,
+                        &input,
+                        &started_at_iso,
+                        &err,
+                        None,
+                    );
+                    return Err(err);
+                }
+            };
+            (
+                Some(agent_prefix),
+                Some(crate::runner::run_protocol::replayable_tool_prefix(
+                    tool_entries,
+                    replayed_agent_prefix_len,
+                )),
+            )
         } else {
-            None
+            (None, None)
         };
 
         // 3. Prepare the validated runtime artifact and command.
@@ -375,6 +529,7 @@ impl WorkflowRunner {
                 &run_id,
                 &input,
                 resume_entries,
+                resume_tools,
                 &self.cwd,
             )) {
                 Ok(v) => v,
@@ -536,11 +691,19 @@ impl WorkflowRunner {
                 let _ = (&mut msg_loop).await;
 
                 run_scope.drain().await;
-                let limit_report = self
+                let mut limit_report = self
                     .run_limit_states
                     .get(&run_id)
                     .map(|state| state.report())
                     .unwrap_or_default();
+                // run 终止时仍有 tool 任务处于 executing（无终态）⇒ 未知副作用；
+                // 已回填 `outcome_unknown` / `task_accepted` 同样置位（任务表单一来源）。
+                // 先读计数后读标志：结算先置位再移除 executing，反序存在竞态窗口。
+                if self.executing_tool_tasks(&run_id) > 0
+                    || self.unknown_tool_side_effects(&run_id)
+                {
+                    limit_report.unknown_side_effects = true;
+                }
                 crate::runner::terminal::send_killed(&done_tx_for_kill, &journal_clone2, &progress_store,
                     &run_id, &kill_input, &kill_started_at, host.stderr_tail(), limit_report);
             }

@@ -719,6 +719,12 @@ pub struct WorkflowTaskResult {
     pub phase_summaries: Vec<PhaseSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<WorkflowAttempt>,
+    /// run 终止时存在**不可确认**的脚本工具副作用：宿主回填了
+    /// `outcome_unknown` / `task_accepted`，或 run 结束时仍有 tool 任务处于
+    /// `executing`（无终态）。这是观测事实，不把 run 升级为失败；旧 payload 缺省
+    /// `false`（不得据此推断本能力已存在）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unknown_side_effects: bool,
 }
 
 /// `WorkflowTaskResult` 的反序列化影子：`outcome` 用 `Option` 保留「字段缺失」
@@ -752,6 +758,8 @@ struct WorkflowTaskResultWire {
     phase_summaries: Vec<PhaseSummary>,
     #[serde(default)]
     attempts: Vec<WorkflowAttempt>,
+    #[serde(default)]
+    unknown_side_effects: bool,
 }
 
 impl From<WorkflowTaskResultWire> for WorkflowTaskResult {
@@ -777,6 +785,7 @@ impl From<WorkflowTaskResultWire> for WorkflowTaskResult {
             result_preview: wire.result_preview,
             phase_summaries: wire.phase_summaries,
             attempts: wire.attempts,
+            unknown_side_effects: wire.unknown_side_effects,
         }
     }
 }
@@ -859,9 +868,8 @@ fn outcome_word(outcome: WorkflowOutcome) -> &'static str {
     }
 }
 
-/// `return_value` **对象字段**的长文本外置阈值（**字节**，非字符数）：超过它的
-/// 字符串在写 `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}`
-/// 引用。
+/// `return_value` 长文本外置阈值（**字节**，非字符数）：超过它的字符串在写
+/// `state.json` 前被抽出到 `outputs/<label>.txt`，原位替换为 `${label}` 引用。
 ///
 /// 单一权威：宿主提取的调用点（`peri-workflow` 的 `extract_long_texts` 调用）
 /// 与提醒/启动文案（`WorkflowTaskResult::to_notification`、
@@ -869,9 +877,9 @@ fn outcome_word(outcome: WorkflowOutcome) -> &'static str {
 /// 对中文内容远早于 200 字触发；改这里即同时改变提取行为与对外说明。
 /// 口径见 `docs/design/workflow.md` §3.6。
 ///
-/// 作用面：宿主提取点位于 `workflow/done` 处理，且只对**对象形态**的 `return`
-/// 生效（`extract_long_texts` 本身支持数组/嵌套，但调用点的 gate 排除了顶层数组
-/// 与顶层字符串）。文案必须与 gate 一致，不得声称「所有超长字符串都会外置」。
+/// 作用面：宿主提取点位于 `workflow/done` 处理，对任意 `return` 形态生效——
+/// 对象字段 / 数组元素 / 顶层字符串都会被外置（顶层字符串的 label 固定
+/// `return`，数组元素用 `[i]` / `<key>[i]`）。
 pub const LONGTEXT_EXTRACT_THRESHOLD_BYTES: usize = 200;
 
 impl WorkflowTaskResult {
@@ -999,8 +1007,9 @@ impl WorkflowTaskResult {
             let threshold = LONGTEXT_EXTRACT_THRESHOLD_BYTES;
             format!(
                 "Results saved to {state_path}\n\
-                 Long string fields in the result object (over {threshold} bytes) are externalized: \
-                 a `${{label}}` token in state.json is that field's path, and its text lives in \
+                 Long strings in the result (over {threshold} bytes, including a top-level \
+                 string or array items) are externalized: \
+                 a `${{label}}` token in state.json is that value's path, and its text lives in \
                  `outputs/` under the same label with a `.txt` suffix.\n\
                  {read_lead} to view full results.\n"
             )
@@ -1018,6 +1027,13 @@ impl WorkflowTaskResult {
             post_condition_word(self.post_processing_status),
             delivery_status_word(self.delivery_status),
         );
+        // 未知副作用是观测事实：只在 true 时出现，且明确要求核对外部影响。
+        let unknown_side_effects_line = if self.unknown_side_effects {
+            "Unknown tool side effects: at least one script tool call had no settled result; \
+             verify external effects before relying on this run.\n"
+        } else {
+            ""
+        };
 
         let attempt_lines = self
             .attempts
@@ -1047,7 +1063,7 @@ impl WorkflowTaskResult {
 
         format!(
             "Workflow '{}' {}. ({}ms, {} agents, {} tool calls)\n\
-            {}{}{}{}{}{}",
+            {}{}{}{}{}{}{}",
             escape_reminder_text(&self.workflow_name),
             success_msg,
             self.duration_ms,
@@ -1056,6 +1072,7 @@ impl WorkflowTaskResult {
             phase_lines,
             error_line,
             projection_line,
+            unknown_side_effects_line,
             attempt_lines,
             result_lines,
             artifact_lines,
@@ -1085,6 +1102,137 @@ pub trait AgentExecutor: Send + Sync {
 
     /// run 结束时回收该 run 的执行事实（无状态实现无需覆盖）。
     fn forget_run(&self, _run_id: &str) {}
+}
+
+// ─── 脚本工具调用（`tool()` 原语；阶段 1 宿主侧契约）───────────────────────
+//
+// 脚本只给 effective 名与 `arguments` 对象；effective 名到 target 的解析、审批与
+// 执行全部归宿主（会话可见视图 + canonical 调用管线）。本模块只声明跨层契约与
+// wire 形状，不重复 MCP 服务端的 schema 校验，也不承载第二套审批实现。
+
+/// 一次脚本发起的 MCP 工具调用（宿主消费者 claim 后交给 [`WorkflowToolInvoker`]）。
+#[derive(Debug, Clone)]
+pub struct WorkflowToolCall {
+    /// 所属 run（回填身份；`taskId` 作用域 = 单次 run）。
+    pub run_id: String,
+    /// 任务表主键（回填 `WorkflowToolResult` 的身份）。
+    pub task_id: String,
+    /// run 内的稳定调用序号（`InvocationOrigin::Host{namespace:"workflow", seq}`）。
+    pub seq: u64,
+    /// 脚本给出的 effective 工具名（不含旧前缀归一）。
+    pub tool_name: String,
+    /// 已通过对象形状检查的调用参数。
+    pub arguments: serde_json::Map<String, Value>,
+    /// 任务取消令牌：**只**作为准入前的放弃信号（已 dispatch 的调用不强行中断）。
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+/// 脚本工具调用的宿主实现（由会话装配注入 workflow consumer）。
+#[async_trait]
+pub trait WorkflowToolInvoker: Send + Sync {
+    /// 在会话可见视图内解析 effective 名、走 canonical 管线并返回结果事实。
+    async fn invoke_tool(&self, call: WorkflowToolCall) -> WorkflowToolOutcome;
+}
+
+/// 脚本工具调用的终态事实（wire：`tool/result.outcome`，tagged `ok` / `error`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum WorkflowToolOutcome {
+    /// 工具已执行且未报告失败：`structuredContent` 优先，文本 content 兜底。
+    Ok {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_content: Option<Value>,
+        #[serde(default)]
+        content: String,
+    },
+    /// 失败：脚本侧按 `code` 抛类型化错误（可 `try/catch`）。
+    Error {
+        code: WorkflowToolErrorCode,
+        /// effective 工具名（脚本传入的原值）。
+        tool: String,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<Value>,
+    },
+}
+
+impl WorkflowToolOutcome {
+    #[must_use]
+    pub fn error(
+        code: WorkflowToolErrorCode,
+        tool: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Error {
+            code,
+            tool: tool.into(),
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    #[must_use]
+    pub fn error_with_details(
+        code: WorkflowToolErrorCode,
+        tool: impl Into<String>,
+        message: impl Into<String>,
+        details: Value,
+    ) -> Self {
+        Self::Error {
+            code,
+            tool: tool.into(),
+            message: message.into(),
+            details: Some(details),
+        }
+    }
+
+    /// 是否意味着「可能已经发生不可确认的副作用」。
+    ///
+    /// run 终态据此置 `unknownSideEffects`（不升级为 run 失败）：`outcome_unknown`
+    /// 是已发出调用但结果不可知；`task_accepted` 是远端接受为异步任务而未给终态，
+    /// v1 不轮询。
+    #[must_use]
+    pub fn marks_unknown_side_effects(&self) -> bool {
+        matches!(
+            self,
+            Self::Error {
+                code: WorkflowToolErrorCode::OutcomeUnknown | WorkflowToolErrorCode::TaskAccepted,
+                ..
+            }
+        )
+    }
+}
+
+/// 脚本可见的工具调用错误码（脚本 `WorkflowToolError.code`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowToolErrorCode {
+    /// effective 名不在会话可见视图内（或重名无法唯一解析）。
+    ToolNotFound,
+    /// `arguments` 不是对象（Node 侧同口径拒绝）。
+    InvalidArguments,
+    /// 本部署形态没有脚本工具通道（非会话路径 / 实例关闭）。
+    ToolUnavailable,
+    /// 策略或调用授权拒绝（含目标撤销、非用户决定的拒绝）。
+    PolicyDenied,
+    /// 审批不可用（零 / 多在线 endpoint、epoch 过期、客户端不能作答）。
+    ApprovalUnavailable,
+    /// 显式未执行（准入在 wire 调用之前拒绝，零副作用）。
+    NotExecuted,
+    /// 工具返回了 `isError: true`。
+    ToolError,
+    /// 远端 JSON-RPC 协议错误（不是工具结果）。
+    ProtocolError,
+    /// 远端接受为异步任务；v1 不轮询。
+    TaskAccepted,
+    /// 已发出调用但结果不可知（不得当成成功）。
+    OutcomeUnknown,
+    /// 准入前取消 / 放弃。
+    Cancelled,
 }
 
 #[cfg(test)]

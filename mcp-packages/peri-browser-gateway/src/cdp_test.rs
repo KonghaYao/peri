@@ -637,7 +637,10 @@ fn address_bar_input_gets_the_scheme_a_browser_would_pick() {
         "https://example.com/a?b=1"
     );
     // A port is not a scheme.
-    assert_eq!(normalize_url("example.com:8443"), "https://example.com:8443");
+    assert_eq!(
+        normalize_url("example.com:8443"),
+        "https://example.com:8443"
+    );
     assert_eq!(normalize_url("localhost:7391"), "http://localhost:7391");
     assert_eq!(
         normalize_url("127.0.0.1:8827/json"),

@@ -17,7 +17,8 @@ pub use event_log::{BoundedEventLog, EventLogPage};
 pub use events::{WorkflowRunEvent, WorkflowRunEventKind, WorkflowRunEventLog};
 pub use tasks::{
     ClaimOutcome, PublishOutcome, SettleAdmission, SettleOutcome, TaskBaseline, WorkflowTaskEvent,
-    WorkflowTaskEventKind, WorkflowTaskRecord, WorkflowTaskState, WorkflowTaskTable,
+    WorkflowTaskEventKind, WorkflowTaskKind, WorkflowTaskPayload, WorkflowTaskRecord,
+    WorkflowTaskState, WorkflowTaskTable,
 };
 
 use std::collections::HashMap;

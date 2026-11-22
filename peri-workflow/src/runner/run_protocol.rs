@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::error::WorkflowError;
 use crate::protocol::{
-    AgentRunParams, AgentRunResult, AgentTaskParams, JournalEntry, WorkflowDoneParams,
-    WorkflowStartParams,
+    AgentRunParams, AgentRunResult, AgentTaskParams, JournalEntry, ToolJournalEntry,
+    ToolReplayedParams, ToolTaskParams, WorkflowDoneParams, WorkflowStartParams,
 };
 use crate::runner::artifact::{WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION};
 use crate::runner::WorkflowInput;
@@ -68,6 +68,12 @@ impl RunScoped for WorkflowDoneParams {
     }
 }
 
+impl RunScoped for ToolReplayedParams {
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
+}
+
 /// 解析 `agent/task` 通知参数（design §5.2 第 1 条）。
 ///
 /// 与 `agent/run` 同一条 run 作用域校验（`runId` 必须等于当前 run）；`taskId`
@@ -84,10 +90,70 @@ pub(super) fn parse_agent_task_params(
     Ok((parsed.task_id, parsed.params))
 }
 
+/// `tool/task` 参数拒绝：typed 原因直接决定回填给 Node 的错误码。
+#[derive(Debug, Clone)]
+pub(super) struct ToolTaskRejection {
+    pub(super) code: peri_acp_types::workflow::WorkflowToolErrorCode,
+    pub(super) message: String,
+}
+
+impl ToolTaskRejection {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: peri_acp_types::workflow::WorkflowToolErrorCode::InvalidArguments,
+            message: message.into(),
+        }
+    }
+
+    fn not_executed(message: impl Into<String>) -> Self {
+        Self {
+            code: peri_acp_types::workflow::WorkflowToolErrorCode::NotExecuted,
+            message: message.into(),
+        }
+    }
+}
+
+/// 解析 `tool/task` 通知参数（issue #407）。
+///
+/// 校验项与契约一致：`runId` 必须等于当前 run、`taskId` / `toolName` 非空、
+/// `arguments` 必须是对象（省略 = 空对象）。这里只做形状检查，不重复 schema 校验
+/// （归 MCP 服务端）。
+pub(super) fn parse_tool_task_params(
+    params: Option<Value>,
+    expected_run_id: &str,
+) -> Result<ToolTaskParams, ToolTaskRejection> {
+    let Some(value) = params else {
+        return Err(ToolTaskRejection::invalid("missing tool/task params"));
+    };
+    let run_id_matches = value.get("runId").and_then(Value::as_str) == Some(expected_run_id);
+    let parsed: ToolTaskParams = serde_json::from_value(value).map_err(|_| {
+        ToolTaskRejection::invalid(
+            "invalid tool/task params: taskId/toolName must be strings and arguments an object",
+        )
+    })?;
+    if parsed.task_id.trim().is_empty() {
+        return Err(ToolTaskRejection::invalid(
+            "taskId must be a non-empty string",
+        ));
+    }
+    if parsed.tool_name.trim().is_empty() {
+        return Err(ToolTaskRejection::invalid(
+            "toolName must be a non-empty string",
+        ));
+    }
+    if !run_id_matches {
+        return Err(ToolTaskRejection::not_executed(
+            "runId does not match the active workflow run",
+        ));
+    }
+    Ok(parsed)
+}
+
 pub(super) fn workflow_start_params(
     run_id: &str,
     input: &WorkflowInput,
     resume: Option<Vec<JournalEntry>>,
+    resume_tools: Option<Vec<ToolJournalEntry>>,
     cwd: &str,
 ) -> WorkflowStartParams {
     WorkflowStartParams {
@@ -99,6 +165,7 @@ pub(super) fn workflow_start_params(
         limits: Some(input.limits.clone()),
         resume_from_run_id: input.resume_from.clone(),
         resume,
+        resume_tools,
         cwd: cwd.to_string(),
     }
 }
@@ -117,6 +184,26 @@ pub(super) fn reusable_journal_prefix(mut entries: Vec<JournalEntry>) -> Vec<Jou
     for (expected_seq, entry) in paired_items {
         let expected_seq = u64::try_from(expected_seq).expect("journal prefix index fits in u64");
         if entry.seq != expected_seq || !matches!(entry.result, AgentRunResult::Ok { .. }) {
+            break;
+        }
+        prefix.push(entry);
+    }
+    prefix
+}
+
+/// Resume only the deterministic prefix of replayed script tool calls.
+///
+/// 条目按 `tools.jsonl` 写入顺序消费（不重排）：前缀必须从 `toolSeq == 0` 起连续，
+/// 且该调用发生前完成的 agent 调用数不得超过可回放的 agent 前缀长度。首个不满足
+/// 即停止——之后的重放会与未重放的脚本执行顺序脱节，保留它们比丢弃更危险。
+pub(super) fn replayable_tool_prefix(
+    entries: Vec<ToolJournalEntry>,
+    replayed_agent_prefix_len: u64,
+) -> Vec<ToolJournalEntry> {
+    let mut prefix = Vec::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        let expected_seq = u64::try_from(index).expect("tool journal prefix index fits in u64");
+        if entry.tool_seq != expected_seq || entry.agent_seq > replayed_agent_prefix_len {
             break;
         }
         prefix.push(entry);

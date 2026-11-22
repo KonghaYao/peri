@@ -131,6 +131,7 @@
 | F-WORKFLOW-006 | 源码存在 | [契约](../design/workflow.md) | [源码](../../peri-workflow/src)；缺口：Workflow 进度的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-WORKFLOW-007 | 源码存在 | [契约](../design/workflow.md) | [源码](../../peri-workflow/src)；缺口：Workflow MCP的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-WORKFLOW-008 | 源码存在 | [契约](../design/workflow.md) | [源码](../../peri-workflow/src)；缺口：Ultra-ADLC的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
+| F-WORKFLOW-009 | 源码存在 | [契约](../design/workflow.md) | [源码](../../peri-workflow/src/runtime/tasks.rs)；[真实引擎 E2E](../../peri-acp/src/host/workflow_tool_consumer_test.rs)；[Node 测试](../../npm-packages/@peri-workflow/test/tool.test.ts)；[验收记录](workflow-codemode-tool-2026-11-22.md)；缺口：审批拒绝/超时与真实外部 deferred 工具未验证；peri-e2e #10 固定 SHA 对账未做 | 本地真实引擎 E2E 5/5 通过；审批拒绝与外部 deferred 工具未验证 |
 | F-CONFIG-001 | 源码存在 | [契约](../design/configuration-authority.md) | [源码](../../peri-config/src/assembly.rs)；缺口：配置解析的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-CONFIG-002 | 源码存在 | [契约](../design/configuration-authority.md) | [源码](../../peri-config/src/source.rs)；缺口：配置作用域的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-CONFIG-003 | 源码存在 | [契约](../design/configuration-authority.md) | [源码](../../peri-config/src/settings.rs)；缺口：配置保存的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |

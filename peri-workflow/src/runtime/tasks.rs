@@ -1,4 +1,8 @@
-//! Workflow 任务表：agent 任务的发布、状态机、单次终态提交（CAS）与任务事件。
+//! Workflow 任务表：agent / tool 任务的发布、状态机、单次终态提交（CAS）与任务事件。
+//!
+//! 两种任务共用同一张表、同一 claim / 取消 / 事件路径（不建第二张表）：`agent`
+//! 载荷来自引擎 `agent()`，`tool` 载荷来自脚本 `tool()` 的宿主回填通道。差别在
+//! payload、终态载荷与准入计数（tool 任务不占 agent 槽位，也不计 tool/token 用量）。
 //!
 //! 任务表是 per-session、process-local 的运行期状态（不写 journal）；跨进程恢复
 //! 不在范围（design §5.1）。键为 `(runId, taskId)`：`taskId` 作用域 = 单次 run，
@@ -14,7 +18,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::protocol::{AgentRunParams, AgentRunResult};
+use crate::protocol::{AgentRunParams, AgentRunResult, WorkflowToolOutcome};
 
 use crate::runtime::close_gate::CloseGate;
 use crate::runtime::event_log::BoundedEventLog;
@@ -59,22 +63,121 @@ impl WorkflowTaskState {
     }
 }
 
+/// 任务种类：引擎 agent 槽位（`agent()`）或脚本工具调用（`tool()`）。
+///
+/// 两种任务共用同一张任务表、同一 claim / 终态 CAS / 取消 / 事件路径；差别只在
+/// payload、终态载荷与准入计数（tool 任务不占用 agent 槽位，也不计 tool/token 用量）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowTaskKind {
+    Agent,
+    Tool,
+}
+
+/// 任务发布载荷（tagged `kind`：投影里直接可见任务种类）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum WorkflowTaskPayload {
+    #[serde(rename = "agent")]
+    Agent {
+        #[serde(flatten)]
+        params: AgentRunParams,
+    },
+    #[serde(rename = "tool")]
+    Tool {
+        /// 脚本给出的 effective 工具名（宿主在会话可见视图内解析）。
+        tool_name: String,
+        /// 已通过对象形状检查的调用参数（schema 校验归 MCP 服务端）。
+        #[serde(default)]
+        arguments: serde_json::Map<String, serde_json::Value>,
+        /// run 内脚本工具调用连续序号（从 0 起；重放前缀按它连续匹配）。
+        tool_seq: u64,
+        /// 该调用发生前已完成的 `agent()` 调用数（重放边界）。
+        agent_seq: u64,
+    },
+}
+
+impl WorkflowTaskPayload {
+    #[must_use]
+    pub fn kind(&self) -> WorkflowTaskKind {
+        match self {
+            Self::Agent { .. } => WorkflowTaskKind::Agent,
+            Self::Tool { .. } => WorkflowTaskKind::Tool,
+        }
+    }
+
+    #[must_use]
+    pub fn agent_params(&self) -> Option<&AgentRunParams> {
+        match self {
+            Self::Agent { params } => Some(params),
+            Self::Tool { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_call(&self) -> Option<(&str, &serde_json::Map<String, serde_json::Value>)> {
+        match self {
+            Self::Tool {
+                tool_name,
+                arguments,
+                ..
+            } => Some((tool_name.as_str(), arguments)),
+            Self::Agent { .. } => None,
+        }
+    }
+
+    /// `(toolSeq, agentSeq)`：脚本工具调用的确定性序号；agent 任务返回 `None`。
+    #[must_use]
+    pub fn tool_sequence(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Tool {
+                tool_seq,
+                agent_seq,
+                ..
+            } => Some((*tool_seq, *agent_seq)),
+            Self::Agent { .. } => None,
+        }
+    }
+}
+
 /// 任务记录：发布参数 + 当前状态 + 终态结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowTaskRecord {
     pub task_id: String,
     pub run_id: String,
-    pub agent_id: u64,
+    /// agent 任务的引擎槽位身份；tool 任务没有槽位（省略，不伪造 `0`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<u64>,
     pub state: WorkflowTaskState,
-    /// 发布时的完整参数快照（不可变）。
-    pub params: AgentRunParams,
+    /// 发布时的完整参数快照（不可变；payload 的 tag 即任务种类）。
+    pub params: WorkflowTaskPayload,
     /// 发布时刻（wall clock，毫秒）。
     pub published_at_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// agent 任务的终态结果（tool 任务为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<AgentRunResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// tool 任务的宿主回填终态（agent 任务为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_outcome: Option<WorkflowToolOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+impl WorkflowTaskRecord {
+    #[must_use]
+    pub fn kind(&self) -> WorkflowTaskKind {
+        self.params.kind()
+    }
+
+    #[must_use]
+    pub fn is_tool(&self) -> bool {
+        self.kind() == WorkflowTaskKind::Tool
+    }
 }
 
 /// 发布结果：首个发布提交；重复发布幂等返回既有记录（不覆盖参数）。
@@ -178,7 +281,9 @@ pub struct WorkflowTaskEvent {
     pub event_id: String,
     pub run_id: String,
     pub task_id: String,
-    pub agent_id: u64,
+    /// agent 任务的槽位身份；tool 任务省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<u64>,
     pub kind: WorkflowTaskEventKind,
     pub at_ms: i64,
     /// 事件时刻的任务快照（发布事件含参数；终态事件含结果）。
@@ -202,6 +307,9 @@ struct TableInner {
     run_kills: HashMap<String, Option<String>>,
     /// agent 级 kill 栅栏：置位后该 `(run, agent)` 新发布的任务直接转 `cancelled`。
     agent_kills: HashMap<(String, u64), Option<String>>,
+    /// 出现过不可确认脚本工具副作用的 run（tool 终态 `outcome_unknown` /
+    /// `task_accepted`）。run 退役（`forget_run_fences`）时回收。
+    unknown_side_effects: std::collections::HashSet<String>,
 }
 
 struct WorkflowTaskEntry {
@@ -233,6 +341,7 @@ impl WorkflowTaskTable {
                 order: Vec::new(),
                 run_kills: HashMap::new(),
                 agent_kills: HashMap::new(),
+                unknown_side_effects: std::collections::HashSet::new(),
             }),
             events: Arc::new(BoundedEventLog::new(Self::EVENT_LOG_CAPACITY)),
             updates,
@@ -273,11 +382,53 @@ impl WorkflowTaskTable {
     /// （对抗审查 F6）。
     #[must_use]
     pub fn publish(&self, task_id: String, params: AgentRunParams) -> PublishOutcome {
+        let run_id = params.run_id.clone();
+        let agent_id = params.agent_id;
+        self.publish_inner(
+            task_id,
+            run_id,
+            Some(agent_id),
+            WorkflowTaskPayload::Agent { params },
+        )
+    }
+
+    /// 发布脚本工具调用任务（`tool/task`）。
+    ///
+    /// 与 agent 任务共用同一张表、kill 栅栏与事件流；不参与 `maxAgents` 准入
+    /// （`tool()` 不注册为 agent 任务），也不占用 `maxConcurrency` 槽位。
+    #[must_use]
+    pub fn publish_tool(
+        &self,
+        task_id: String,
+        run_id: &str,
+        tool_name: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        tool_seq: u64,
+        agent_seq: u64,
+    ) -> PublishOutcome {
+        self.publish_inner(
+            task_id,
+            run_id.to_string(),
+            None,
+            WorkflowTaskPayload::Tool {
+                tool_name,
+                arguments,
+                tool_seq,
+                agent_seq,
+            },
+        )
+    }
+
+    fn publish_inner(
+        &self,
+        task_id: String,
+        run_id: String,
+        agent_id: Option<u64>,
+        params: WorkflowTaskPayload,
+    ) -> PublishOutcome {
         let Some(_ticket) = self.gate.admit() else {
             return PublishOutcome::Closed;
         };
-        let run_id = params.run_id.clone();
-        let agent_id = params.agent_id;
         let mut inner = self.inner.lock();
         Self::trim_locked(&mut inner, now_ms());
         let key = (run_id.clone(), task_id.clone());
@@ -285,11 +436,11 @@ impl WorkflowTaskTable {
             return PublishOutcome::AlreadyKnown(existing.record.clone());
         }
         let now = now_ms();
-        let kill_reason = inner
-            .run_kills
-            .get(&run_id)
-            .cloned()
-            .or_else(|| inner.agent_kills.get(&(run_id.clone(), agent_id)).cloned());
+        // run 级栅栏对两种任务都生效；agent 级栅栏只命中 agent 任务。
+        let kill_reason = inner.run_kills.get(&run_id).cloned().or_else(|| {
+            agent_id
+                .and_then(|agent_id| inner.agent_kills.get(&(run_id.clone(), agent_id)).cloned())
+        });
         let record = WorkflowTaskRecord {
             task_id: task_id.clone(),
             run_id: run_id.clone(),
@@ -298,6 +449,7 @@ impl WorkflowTaskTable {
             params,
             published_at_ms: now,
             result: None,
+            tool_outcome: None,
             reason: None,
         };
         inner.tasks.insert(
@@ -317,7 +469,7 @@ impl WorkflowTaskTable {
                 &mut inner,
                 &key,
                 WorkflowTaskState::Cancelled,
-                None,
+                TerminalPayload::Clear,
                 Some(reason.unwrap_or_else(|| "workflow run killed".to_string())),
                 now,
             );
@@ -375,16 +527,19 @@ impl WorkflowTaskTable {
         if entry.record.state != WorkflowTaskState::Published {
             return None;
         }
+        // `maxConcurrency` 只约束引擎 agent 槽位：tool 任务不占槽位，也不参与容量门限。
         if capacity.is_some_and(|limit| {
-            inner
-                .tasks
-                .values()
-                .filter(|entry| {
-                    entry.record.run_id == run_id
-                        && entry.record.state == WorkflowTaskState::Executing
-                })
-                .count()
-                >= limit as usize
+            entry.record.kind() == WorkflowTaskKind::Agent
+                && inner
+                    .tasks
+                    .values()
+                    .filter(|entry| {
+                        entry.record.run_id == run_id
+                            && entry.record.state == WorkflowTaskState::Executing
+                            && entry.record.kind() == WorkflowTaskKind::Agent
+                    })
+                    .count()
+                    >= limit as usize
         }) {
             return None;
         }
@@ -412,6 +567,46 @@ impl WorkflowTaskTable {
         result: Option<AgentRunResult>,
         reason: Option<String>,
     ) -> SettleOutcome {
+        self.settle_inner(
+            run_id,
+            task_id,
+            admission,
+            state,
+            TerminalPayload::Agent(result),
+            reason,
+        )
+    }
+
+    /// tool 任务的单次终态提交（与 agent 任务共用同一 CAS 路径）。
+    #[must_use]
+    pub fn settle_tool(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        admission: SettleAdmission,
+        state: WorkflowTaskState,
+        outcome: Option<WorkflowToolOutcome>,
+        reason: Option<String>,
+    ) -> SettleOutcome {
+        self.settle_inner(
+            run_id,
+            task_id,
+            admission,
+            state,
+            TerminalPayload::Tool(outcome),
+            reason,
+        )
+    }
+
+    fn settle_inner(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        admission: SettleAdmission,
+        state: WorkflowTaskState,
+        payload: TerminalPayload,
+        reason: Option<String>,
+    ) -> SettleOutcome {
         let mut inner = self.inner.lock();
         let key = (run_id.to_string(), task_id.to_string());
         let Some(entry) = inner.tasks.get_mut(&key) else {
@@ -421,19 +616,17 @@ impl WorkflowTaskTable {
             return SettleOutcome::InvalidState(entry.record.clone());
         }
         if entry.record.state.is_terminal() {
-            if let Some(incoming) = result.as_ref() {
-                if entry.record.result.as_ref() != Some(incoming) {
-                    warn!(
-                        target: "workflow",
-                        run_id,
-                        task_id,
-                        first_state = ?entry.record.state,
-                        incoming_state = ?state,
-                        first_result = result_summary(entry.record.result.as_ref()),
-                        incoming_result = result_summary(Some(incoming)),
-                        "workflow task terminal conflict: keeping the first result (idempotent retry or conflicting late delivery)"
-                    );
-                }
+            if payload.conflicts_with(&entry.record) {
+                warn!(
+                    target: "workflow",
+                    run_id,
+                    task_id,
+                    first_state = ?entry.record.state,
+                    incoming_state = ?state,
+                    first_result = payload.existing_summary(&entry.record),
+                    incoming_result = payload.incoming_summary(),
+                    "workflow task terminal conflict: keeping the first result (idempotent retry or conflicting late delivery)"
+                );
             }
             let record = entry.record.clone();
             // 重复回填是「可重试投递」的入口（首次投递可能未达 Node）：再投递既有终态，
@@ -449,16 +642,13 @@ impl WorkflowTaskTable {
         // Fence before the terminal sink can deliver the result to the engine: a
         // generic dead result may trigger an immediate retry. Only an admitted,
         // first terminal result can install the fence; rejected reports cannot.
-        let scope_failure = result
-            .as_ref()
-            .and_then(AgentRunResult::unsettled_scope_error)
-            .map(str::to_owned);
+        let scope_failure = payload.agent_scope_failure();
         if let Some(detail) = &scope_failure {
             inner
                 .run_kills
                 .insert(run_id.to_string(), Some(detail.clone()));
         }
-        let record = self.write_terminal_locked(&mut inner, &key, state, result, reason, now_ms());
+        let record = self.write_terminal_locked(&mut inner, &key, state, payload, reason, now_ms());
         if let Some(detail) = scope_failure {
             self.cancel_matching_locked(&mut inner, |record| record.run_id == run_id, Some(detail));
         }
@@ -482,15 +672,21 @@ impl WorkflowTaskTable {
         if entry.record.state.is_terminal() {
             return SettleOutcome::AlreadyTerminal(entry.record.clone());
         }
+        let marks_unknown = entry.record.state == WorkflowTaskState::Executing
+            && entry.record.kind() == WorkflowTaskKind::Tool;
         let token = entry.cancel.take();
         let record = self.write_terminal_locked(
             &mut inner,
             &key,
             WorkflowTaskState::Cancelled,
-            None,
+            TerminalPayload::Clear,
             reason,
             now_ms(),
         );
+        if marks_unknown {
+            // 执行中的 tool 被取消：调用可能已 dispatch，run 终态标记未知副作用。
+            inner.unknown_side_effects.insert(run_id.to_string());
+        }
         drop(inner);
         if let Some(token) = token {
             token.cancel();
@@ -521,9 +717,23 @@ impl WorkflowTaskTable {
             .insert((run_id.to_string(), agent_id), reason.clone());
         self.cancel_matching_locked(
             &mut inner,
-            |record| record.run_id == run_id && record.agent_id == agent_id,
+            |record| record.run_id == run_id && record.agent_id == Some(agent_id),
             reason,
         )
+    }
+
+    /// 记录该 run 存在不可确认的脚本工具副作用（幂等；不改变任务状态）。
+    pub fn mark_unknown_tool_side_effect(&self, run_id: &str) {
+        self.inner
+            .lock()
+            .unknown_side_effects
+            .insert(run_id.to_string());
+    }
+
+    /// 该 run 是否已记录不可确认的脚本工具副作用。
+    #[must_use]
+    pub fn run_unknown_side_effects(&self, run_id: &str) -> bool {
+        self.inner.lock().unknown_side_effects.contains(run_id)
     }
 
     /// 回收某 run 的 run / agent 级取消栅栏。
@@ -533,6 +743,7 @@ impl WorkflowTaskTable {
     pub fn forget_run_fences(&self, run_id: &str) {
         let mut inner = self.inner.lock();
         inner.run_kills.remove(run_id);
+        inner.unknown_side_effects.remove(run_id);
         inner
             .agent_kills
             .retain(|(run_id_key, _), _| run_id_key != run_id);
@@ -559,16 +770,24 @@ impl WorkflowTaskTable {
         let mut tokens = Vec::new();
         let mut cancelled = Vec::new();
         for key in keys {
+            // 取消一个**执行中**的 tool 任务 = MCP 调用可能已 dispatch 且不强行中断：
+            // run 终态必须带「未知副作用」（kill 路径的置位来源）。
+            let mut marks_unknown = false;
             if let Some(entry) = inner.tasks.get_mut(&key) {
+                marks_unknown = entry.record.state == WorkflowTaskState::Executing
+                    && entry.record.kind() == WorkflowTaskKind::Tool;
                 if let Some(token) = entry.cancel.take() {
                     tokens.push(token);
                 }
+            }
+            if marks_unknown {
+                inner.unknown_side_effects.insert(key.0.clone());
             }
             let Some(record) = self.write_terminal_locked(
                 inner,
                 &key,
                 WorkflowTaskState::Cancelled,
-                None,
+                TerminalPayload::Clear,
                 reason.clone(),
                 now,
             ) else {
@@ -590,13 +809,26 @@ impl WorkflowTaskTable {
         inner: &mut TableInner,
         key: &(String, String),
         state: WorkflowTaskState,
-        result: Option<AgentRunResult>,
+        payload: TerminalPayload,
         reason: Option<String>,
         now: i64,
     ) -> Option<WorkflowTaskRecord> {
         let entry = inner.tasks.get_mut(key)?;
         entry.record.state = state;
-        entry.record.result = result;
+        match payload {
+            TerminalPayload::Agent(result) => {
+                entry.record.result = result;
+                entry.record.tool_outcome = None;
+            }
+            TerminalPayload::Tool(outcome) => {
+                entry.record.result = None;
+                entry.record.tool_outcome = outcome;
+            }
+            TerminalPayload::Clear => {
+                entry.record.result = None;
+                entry.record.tool_outcome = None;
+            }
+        }
         entry.record.reason = reason;
         entry.cancel = None;
         entry.terminal_at_ms = Some(now);
@@ -625,26 +857,39 @@ impl WorkflowTaskTable {
             .collect()
     }
 
-    /// 某 run 下未终态任务数（`maxAgents` 门限用；只计数，不 clone 记录）。
+    /// 某 run 下未终态的 **agent** 任务数（`maxAgents` 门限用；只计数，不 clone
+    /// 记录）。tool 任务不是 agent 槽位，不计入。
     ///
     /// 只返回计数：准入判定不需要任务正文。计数与 [`Self::publish`] 分属不同临界区，
     /// 结果仅作为发布前的准入提示；幂等与 kill 栅栏仍由发布路径在自身临界区裁决。
     #[must_use]
     pub fn active_count_for_run(&self, run_id: &str) -> usize {
         let inner = self.inner.lock();
-        Self::count_states_locked(&inner, run_id, |state| !state.is_terminal())
+        Self::count_states_locked(&inner, run_id, |record| {
+            record.kind() == WorkflowTaskKind::Agent && !record.state.is_terminal()
+        })
     }
 
-    /// 某 run 下执行中（`executing`）任务数（`maxConcurrency` 容量用；只计数，
-    /// 不 clone 记录）。
+    /// 某 run 下执行中（`executing`）的 **agent** 任务数（`maxConcurrency` 容量用；
+    /// 只计数，不 clone 记录）。
     ///
+    /// `maxConcurrency` 只约束引擎 agent 槽位：脚本工具调用不受它约束（issue #407）。
     /// 与 [`Self::mark_executing`] 分属不同临界区：返回值用于容量门限，唯一 claim
     /// 仍由 `mark_executing` 的临界区裁决（计数不构成准入保证）。
     #[must_use]
     pub fn executing_count_for_run(&self, run_id: &str) -> usize {
         let inner = self.inner.lock();
-        Self::count_states_locked(&inner, run_id, |state| {
-            state == WorkflowTaskState::Executing
+        Self::count_states_locked(&inner, run_id, |record| {
+            record.kind() == WorkflowTaskKind::Agent && record.state == WorkflowTaskState::Executing
+        })
+    }
+
+    /// 某 run 下执行中的 **tool** 任务数（run 终态「未知副作用」判定用）。
+    #[must_use]
+    pub fn executing_tool_count_for_run(&self, run_id: &str) -> usize {
+        let inner = self.inner.lock();
+        Self::count_states_locked(&inner, run_id, |record| {
+            record.kind() == WorkflowTaskKind::Tool && record.state == WorkflowTaskState::Executing
         })
     }
 
@@ -652,7 +897,7 @@ impl WorkflowTaskTable {
     fn count_states_locked(
         inner: &TableInner,
         run_id: &str,
-        matches: impl Fn(WorkflowTaskState) -> bool,
+        matches: impl Fn(&WorkflowTaskRecord) -> bool,
     ) -> usize {
         inner
             .order
@@ -662,7 +907,7 @@ impl WorkflowTaskTable {
                 inner
                     .tasks
                     .get(*key)
-                    .is_some_and(|entry| matches(entry.record.state))
+                    .is_some_and(|entry| matches(&entry.record))
             })
             .count()
     }
@@ -672,7 +917,7 @@ impl WorkflowTaskTable {
     pub fn for_agent(&self, run_id: &str, agent_id: u64) -> Vec<WorkflowTaskRecord> {
         self.for_run(run_id)
             .into_iter()
-            .filter(|record| record.agent_id == agent_id)
+            .filter(|record| record.agent_id == Some(agent_id))
             .collect()
     }
 
@@ -804,6 +1049,63 @@ fn result_summary(result: Option<&AgentRunResult>) -> Option<&'static str> {
         AgentRunResult::Ok { .. } => Some("ok"),
         AgentRunResult::Skipped => Some("skipped"),
         AgentRunResult::Dead { .. } => Some("dead"),
+    }
+}
+
+/// tool 结果摘要（只用于日志）：`ok` / `error`。
+fn tool_outcome_summary(outcome: Option<&WorkflowToolOutcome>) -> Option<&'static str> {
+    match outcome? {
+        WorkflowToolOutcome::Ok { .. } => Some("ok"),
+        WorkflowToolOutcome::Error { .. } => Some("error"),
+    }
+}
+
+/// 终态载荷：agent 结果 / tool 结果 / 无载荷（取消路径）。
+enum TerminalPayload {
+    Agent(Option<AgentRunResult>),
+    Tool(Option<WorkflowToolOutcome>),
+    /// 取消：任务表不写结果事实（不是一次执行产出）。
+    Clear,
+}
+
+impl TerminalPayload {
+    /// 重复回填是否与既有终态冲突（同一 task 的重试应等同；不同则以首次为准）。
+    fn conflicts_with(&self, record: &WorkflowTaskRecord) -> bool {
+        match self {
+            Self::Agent(incoming) => incoming
+                .as_ref()
+                .is_some_and(|incoming| record.result.as_ref() != Some(incoming)),
+            Self::Tool(incoming) => incoming
+                .as_ref()
+                .is_some_and(|incoming| record.tool_outcome.as_ref() != Some(incoming)),
+            Self::Clear => false,
+        }
+    }
+
+    fn existing_summary(&self, record: &WorkflowTaskRecord) -> Option<&'static str> {
+        match self {
+            Self::Tool(_) => tool_outcome_summary(record.tool_outcome.as_ref()),
+            Self::Agent(_) | Self::Clear => result_summary(record.result.as_ref()),
+        }
+    }
+
+    fn incoming_summary(&self) -> Option<&'static str> {
+        match self {
+            Self::Agent(result) => result_summary(result.as_ref()),
+            Self::Tool(outcome) => tool_outcome_summary(outcome.as_ref()),
+            Self::Clear => None,
+        }
+    }
+
+    /// 子作用域未结清的 agent 结果必须把 run 置失败（tool 结果没有该事实）。
+    fn agent_scope_failure(&self) -> Option<String> {
+        match self {
+            Self::Agent(result) => result
+                .as_ref()
+                .and_then(AgentRunResult::unsettled_scope_error)
+                .map(str::to_owned),
+            Self::Tool(_) | Self::Clear => None,
+        }
     }
 }
 

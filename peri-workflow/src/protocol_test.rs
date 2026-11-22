@@ -20,6 +20,7 @@ fn test_workflow_start_params_serializes_camel_case() {
         limits: None,
         resume_from_run_id: None,
         resume: None,
+        resume_tools: None,
         cwd: "/tmp".into(),
     };
     let json = serde_json::to_value(&params)
@@ -27,6 +28,10 @@ fn test_workflow_start_params_serializes_camel_case() {
     assert!(json.get("runId").is_some(), "runId 应存在，实际: {json}");
     assert!(json.get("maxConcurrency").is_some());
     assert!(json.get("budgetTotal").is_none());
+    assert!(
+        json.get("resumeTools").is_none(),
+        "fresh run 不得出现 resumeTools: {json}"
+    );
     assert!(json.get("run_id").is_none());
     assert!(json.get("max_concurrency").is_none());
 }
@@ -42,6 +47,7 @@ fn test_workflow_start_params_preserves_budget_total() {
         limits: None,
         resume_from_run_id: None,
         resume: None,
+        resume_tools: None,
         cwd: "/tmp".into(),
     };
 
@@ -49,6 +55,53 @@ fn test_workflow_start_params_preserves_budget_total() {
         .expect("to_value must accept this test fixture representation");
 
     assert_eq!(json["budgetTotal"], 9_007_199_254_740_991_u64);
+}
+
+/// issue #407 阶段 2：resume 时 `resumeTools` 按冻结的 camelCase 契约序列化。
+#[test]
+fn test_workflow_start_params_serializes_resume_tools_camel_case() {
+    let entry: crate::protocol::ToolJournalEntry = serde_json::from_value(serde_json::json!({
+        "toolSeq": 0,
+        "agentSeq": 2,
+        "taskId": "tool-1",
+        "toolName": "Read",
+        "arguments": {"file_path": "/tmp/x"},
+        "outcome": {"kind": "ok", "content": "done"}
+    }))
+    .expect("journal entry fixture must deserialize");
+    let params = WorkflowStartParams {
+        run_id: "r1".into(),
+        script: "code".into(),
+        args: None,
+        budget_total: None,
+        max_concurrency: 3,
+        limits: None,
+        resume_from_run_id: Some("old-run".into()),
+        resume: Some(Vec::new()),
+        resume_tools: Some(vec![entry]),
+        cwd: "/tmp".into(),
+    };
+
+    let json = serde_json::to_value(&params)
+        .expect("to_value must accept this test fixture representation");
+
+    assert!(json.get("resume_tools").is_none(), "字段名必须是 camelCase");
+    let tools = json["resumeTools"]
+        .as_array()
+        .expect("resumeTools 必须是数组");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["toolSeq"], 0);
+    assert_eq!(tools[0]["agentSeq"], 2);
+    assert_eq!(tools[0]["taskId"], "tool-1");
+    assert_eq!(tools[0]["toolName"], "Read");
+    assert_eq!(tools[0]["arguments"]["file_path"], "/tmp/x");
+    assert_eq!(tools[0]["outcome"]["kind"], "ok");
+
+    // 读回同一形状（Node → Rust 的重放参数复用该条目）。
+    let decoded: crate::protocol::ToolJournalEntry =
+        serde_json::from_value(tools[0].clone()).expect("resume entry must round-trip");
+    assert_eq!(decoded.tool_seq, 0);
+    assert_eq!(decoded.agent_seq, 2);
 }
 
 #[test]

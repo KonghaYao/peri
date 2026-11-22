@@ -469,6 +469,7 @@ async fn route_workflow_result_reports_persistence_failure() {
         result_preview: None,
         phase_summaries: vec![],
         attempts: vec![],
+        unknown_side_effects: false,
     };
 
     assert!(

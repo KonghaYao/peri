@@ -137,6 +137,7 @@ impl RunCompletion {
                     post_processing_status: peri_acp_types::workflow::PostProcessingStatus::Failed,
                     delivery_status: peri_acp_types::workflow::DeliveryStatus::Blocked,
                     stderr_tail: None,
+                    unknown_side_effects: false,
                 })
             };
             let stderr_tail = raw.stderr_tail.clone();
@@ -181,8 +182,10 @@ impl RunCompletion {
     fn settle_failed_terminal_state(&self, error: &str) -> WorkflowResult {
         use peri_acp_types::workflow::{DeliveryStatus, ExecutionStatus, PostProcessingStatus};
 
-        match self.journal.read_state(&self.run_id) {
+        let unknown_side_effects = match self.journal.read_state(&self.run_id) {
             Ok(mut state) => {
+                // 后到的清理失败不改写「存在不可确认副作用」这一观测事实。
+                let unknown_side_effects = state.unknown_side_effects;
                 state.status = "failed".into();
                 state.execution_status = ExecutionStatus::Failed;
                 state.post_processing_status = PostProcessingStatus::Failed;
@@ -200,16 +203,24 @@ impl RunCompletion {
                         "failed to persist failed terminal state; the on-disk state still reports the previous terminal status while this run is reported as failed"
                     );
                 }
+                unknown_side_effects
             }
             Err(read_error) => {
+                // journal 不可读时回落到内存投影：后到的清理失败不得抹掉已经
+                // 观测到的「存在不可确认副作用」事实。
+                let unknown_side_effects = self
+                    .progress
+                    .run_snapshot(&self.run_id)
+                    .is_some_and(|run| run.unknown_side_effects);
                 tracing::warn!(
                     target: "workflow",
                     run_id = %self.run_id,
                     error = %read_error,
                     "failed to read workflow state; the on-disk terminal state is left unchanged and may still report success while this run is reported as failed"
                 );
+                unknown_side_effects
             }
-        }
+        };
         // 投影与返回值同口径（Failed / Blocked），且与 RunDone 同一次提交：
         // 订阅方按通知补读即得完整终态。
         self.progress.apply_run_done(
@@ -219,6 +230,7 @@ impl RunCompletion {
             Some(error.to_string()),
             PostProcessingStatus::Failed,
             DeliveryStatus::Blocked,
+            unknown_side_effects,
         );
         WorkflowResult {
             run_id: self.run_id.clone(),
@@ -228,6 +240,7 @@ impl RunCompletion {
             post_processing_status: PostProcessingStatus::Failed,
             delivery_status: DeliveryStatus::Blocked,
             stderr_tail: None,
+            unknown_side_effects,
         }
     }
 
@@ -286,6 +299,7 @@ impl RunCompletion {
             result_preview,
             phase_summaries,
             attempts: self.journal.read_attempts(&self.run_id).unwrap_or_default(),
+            unknown_side_effects: result.unknown_side_effects,
         }
     }
 }

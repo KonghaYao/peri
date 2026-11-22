@@ -8,7 +8,8 @@ use super::{
     PostHookSkipSink, RevocationKey, SessionAdmissionOwner, SessionInvocationOutcome,
     SessionInvocationOutcomeRecord, SessionInvocationPort, SessionInvocationRequest,
     SessionInvocationSource, SessionToolCatalogSnapshot, SkippedPostHook, TargetIdentity,
-    ToolContext, ToolOutput, ToolSource,
+    ToolContext, ToolOutput, ToolSource, WorkflowToolCall, WorkflowToolErrorCode,
+    WorkflowToolInvoker, WorkflowToolOutcome,
 };
 
 /// 会话队列解析器：idle 入口的装配早于 `SessionManager` 登记会话（环境装配 →
@@ -21,6 +22,10 @@ pub(super) const MAX_OUTCOME_RECORDS: usize = 256;
 
 /// 单条结果记录的字节预算：超出则**显式不可用**（不截断、不静默丢弃）。
 pub(super) const MAX_OUTCOME_BYTES: usize = 1024 * 1024;
+
+/// 脚本工具面对 workflow 实例自身关闭：嵌套 workflow 走引擎 `workflow()` 原语，
+/// 不得由脚本经 MCP 工具另起 run（issue #407 裁决）。
+const WORKFLOW_INSTANCE_NAME: &str = "workflow";
 
 // ─── 五层取消令牌中的三层（App / Attachment / invocation） ─────────────────────
 
@@ -551,6 +556,56 @@ impl SessionInvocationService {
         Ok((bridge, peer))
     }
 
+    /// 在**同一** `session_visible_bridges` 视图内按 effective 名解析唯一 bridge。
+    ///
+    /// 语义（issue #407）：
+    /// - 视图 = 会话可见 MCP 工具（含 deferred、排除关闭实例）；host-only 工具
+    ///   （bridge 的 `model_visible = false`，如 `WorkflowAgentResult`）不在脚本可见面，
+    ///   与模型目录同一可见性判定，不另建第二份名单；
+    /// - 重名（多个 server 声明同一 effective 名）⇒ `None`：宿主不猜目标（fail closed）；
+    /// - 未命中 ⇒ `None`（调用方映射 `tool_not_found`）。
+    ///
+    /// 本方法不读模型 catalog generation，也不重复 schema 校验：解析与执行归
+    /// canonical 管线，schema 归 MCP 服务端。
+    #[must_use]
+    pub fn resolve_visible_effective(&self, effective_name: &str) -> Option<McpToolBridge> {
+        let mut matches = self.session_visible_bridges().into_iter().filter(|bridge| {
+            bridge.name() == effective_name
+                && bridge.visible_to_model()
+                && bridge.mcp_server_name() != Some(WORKFLOW_INSTANCE_NAME)
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// 执行一次 canonical 调用但**不写 outcome store**（脚本工具通道）。
+    ///
+    /// 复用 [`Self::run`]（归属 / 目标绑定 / before-tool 规则 / 审批 / admission /
+    /// 执行六步），只是跳过 `finish()`：脚本路径不写 session outcome store，结果经
+    /// wire 直接返回（issue #407 裁决「大结果口径」）。
+    pub async fn invoke_unrecorded(
+        &self,
+        origin: InvocationOrigin,
+        target: InvocationTarget,
+        cancel: CancellationToken,
+    ) -> SessionInvocationOutcome {
+        let request = SessionInvocationRequest {
+            session_id: self.session_id.clone(),
+            // 服务自身纪元是唯一权威（调用方不观察 / 不自述）。
+            runtime_epoch: self.runtime_epoch(),
+            origin,
+            target,
+            cancel,
+            invocation_id: None,
+        };
+        let invocation_id = InvocationId::generate();
+        let (outcome, _skipped_post_hooks, _target) = self.run(&request, &invocation_id).await;
+        outcome
+    }
+
     pub(super) async fn run(
         &self,
         request: &SessionInvocationRequest,
@@ -860,4 +915,158 @@ impl SessionInvocationPort for SessionInvocationService {
         self.admission
             .revoke(RevocationKey::Attachment(attachment_id.clone()));
     }
+}
+
+// ─── 脚本工具调用通道（issue #407）：宿主侧实现 ─────────────────────────────
+//
+// 脚本只给 effective 名与对象参数；本实现负责解析、审批与执行（同一 canonical
+// 管线），并把结果事实映射成脚本错误码。不写 outcome store、不重复 schema 校验。
+
+#[async_trait]
+impl WorkflowToolInvoker for SessionInvocationService {
+    async fn invoke_tool(&self, call: WorkflowToolCall) -> WorkflowToolOutcome {
+        let tool = call.tool_name.clone();
+        let Some(bridge) = self.resolve_visible_effective(&call.tool_name) else {
+            return WorkflowToolOutcome::error(
+                WorkflowToolErrorCode::ToolNotFound,
+                tool,
+                format!(
+                    "tool '{}' is not visible in this session (unknown or ambiguous effective name)",
+                    call.tool_name
+                ),
+            );
+        };
+        let (Some(server_id), Some(wire_tool_name)) = (
+            bridge.mcp_server_name().map(str::to_string),
+            bridge.mcp_tool_name().map(str::to_string),
+        ) else {
+            return WorkflowToolOutcome::error(
+                WorkflowToolErrorCode::ToolNotFound,
+                tool,
+                "resolved tool has no MCP server/tool identity",
+            );
+        };
+        // alias 归一复用 canonical `normalize_params`（传入解析出的 bridge）；这里
+        // 不重复 schema 校验（归 MCP 服务端）。
+        let normalized = peri_agent::tools::invocation::normalize_params(
+            serde_json::Value::Object(call.arguments),
+            Some(&bridge as &dyn BaseTool),
+        );
+        let serde_json::Value::Object(arguments) = normalized else {
+            return WorkflowToolOutcome::error(
+                WorkflowToolErrorCode::InvalidArguments,
+                tool,
+                "tool arguments must be a JSON object",
+            );
+        };
+        let outcome = self
+            .invoke_unrecorded(
+                InvocationOrigin::Host {
+                    namespace: "workflow".to_string(),
+                    seq: call.seq,
+                },
+                InvocationTarget::Host {
+                    server_id,
+                    tool_name: wire_tool_name,
+                    arguments,
+                },
+                call.cancel,
+            )
+            .await;
+        map_workflow_tool_outcome(outcome, &tool)
+    }
+}
+
+/// `SessionInvocationOutcome` → 脚本可见结果（不把未执行伪装成执行失败）。
+pub(crate) fn map_workflow_tool_outcome(
+    outcome: SessionInvocationOutcome,
+    tool: &str,
+) -> WorkflowToolOutcome {
+    match outcome {
+        SessionInvocationOutcome::Completed(raw) => {
+            let text = raw_text_content(&raw);
+            if raw.is_error() {
+                let message = if text.is_empty() {
+                    "tool returned an error result".to_string()
+                } else {
+                    text
+                };
+                return WorkflowToolOutcome::error_with_details(
+                    WorkflowToolErrorCode::ToolError,
+                    tool,
+                    message,
+                    raw.as_value().clone(),
+                );
+            }
+            WorkflowToolOutcome::Ok {
+                structured_content: raw.structured_content().cloned(),
+                content: text,
+            }
+        }
+        SessionInvocationOutcome::RemoteProtocolError(error) => {
+            let details = serde_json::to_value(&error).ok();
+            match details {
+                Some(details) => WorkflowToolOutcome::error_with_details(
+                    WorkflowToolErrorCode::ProtocolError,
+                    tool,
+                    error.message.clone(),
+                    details,
+                ),
+                None => WorkflowToolOutcome::error(
+                    WorkflowToolErrorCode::ProtocolError,
+                    tool,
+                    error.message,
+                ),
+            }
+        }
+        SessionInvocationOutcome::TaskAccepted(receipt) => {
+            let details = serde_json::to_value(&receipt).ok();
+            let message = format!(
+                "MCP server accepted the call as a task ({}); this workflow version does not poll tasks",
+                receipt.status
+            );
+            match details {
+                Some(details) => WorkflowToolOutcome::error_with_details(
+                    WorkflowToolErrorCode::TaskAccepted,
+                    tool,
+                    message,
+                    details,
+                ),
+                None => {
+                    WorkflowToolOutcome::error(WorkflowToolErrorCode::TaskAccepted, tool, message)
+                }
+            }
+        }
+        SessionInvocationOutcome::OutcomeUnknown { reason } => {
+            WorkflowToolOutcome::error(WorkflowToolErrorCode::OutcomeUnknown, tool, reason)
+        }
+        SessionInvocationOutcome::NotExecuted { cause } => {
+            WorkflowToolOutcome::error(workflow_tool_error_code(cause), tool, format!("{cause:?}"))
+        }
+    }
+}
+
+/// 未执行原因 → 脚本错误码（审批不可用 / 策略拒绝 / 取消 / 未执行四类显式分离）。
+fn workflow_tool_error_code(cause: NotExecutedCause) -> WorkflowToolErrorCode {
+    match cause {
+        NotExecutedCause::ApprovalUnavailable(_) => WorkflowToolErrorCode::ApprovalUnavailable,
+        NotExecutedCause::UserRejected
+        | NotExecutedCause::PolicyDenied
+        | NotExecutedCause::TargetRevoked
+        | NotExecutedCause::CommitConsumed => WorkflowToolErrorCode::PolicyDenied,
+        NotExecutedCause::CancelledBeforeCommit => WorkflowToolErrorCode::Cancelled,
+        NotExecutedCause::TargetUnbound | NotExecutedCause::UntrustedOwner => {
+            WorkflowToolErrorCode::NotExecuted
+        }
+    }
+}
+
+/// 结果正文的文本投影：只拼接 `content[].text`（图像 / 资源块经
+/// `structuredContent` 或 `details` 保真承载，不在这里编造文本）。
+fn raw_text_content(raw: &peri_acp_types::mcp_apps::RawCallToolResult) -> String {
+    raw.content()
+        .iter()
+        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

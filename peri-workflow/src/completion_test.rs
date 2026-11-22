@@ -178,6 +178,54 @@ fn read_state_failure_is_logged_and_progress_still_converges() {
     assert_eq!(run.delivery_status, DeliveryStatus::Blocked);
 }
 
+/// `read_state` 失败但内存投影已记录未知副作用：清理失败不得抹掉该观测事实。
+#[test]
+fn read_state_failure_preserves_unknown_side_effects_from_progress() {
+    let tmp = tempfile::tempdir().expect("the temporary test directory must be available");
+    let journal = Arc::new(WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    ));
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let run_id = "run-read-fail-side-effects";
+    start_tracking(&progress, run_id);
+    progress.apply_run_done(
+        run_id,
+        "completed",
+        None,
+        None,
+        PostProcessingStatus::Unknown,
+        DeliveryStatus::Unknown,
+        true,
+    );
+    assert!(
+        progress
+            .run_snapshot(run_id)
+            .expect("run 应存在")
+            .unknown_side_effects,
+        "夹具必须先在投影中记录未知副作用"
+    );
+    // 未初始化 run 目录 → read_state 以 NotFound 失败
+    assert!(journal.read_state(run_id).is_err());
+
+    let completion = make_completion(&journal, &progress, run_id);
+    let result = completion.settle_failed_terminal_state("cleanup failed after success");
+
+    assert_failed_result(&result, "cleanup failed after success");
+    assert!(
+        result.unknown_side_effects,
+        "journal 不可读时返回值必须保留已观测的未知副作用"
+    );
+    assert!(
+        progress
+            .run_snapshot(run_id)
+            .expect("run 应存在")
+            .unknown_side_effects,
+        "清理失败不得把未知副作用清成 false"
+    );
+}
+
 /// `write_state` 失败：`state.json` 确实停留在 completed（磁盘/结果不一致），
 /// 但日志必须显式声明该不一致，且 progress 收敛。
 #[test]
@@ -207,6 +255,7 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
         postcondition_observation: None,
         git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
+        unknown_side_effects: false,
         write_intent: None,
         limits: WorkflowLimits::default(),
         limit_breaches: Vec::new(),
@@ -286,6 +335,7 @@ fn completion_projects_the_saved_return_value_without_upgrading_acceptance() {
         post_processing_status: PostProcessingStatus::NotRequired,
         delivery_status: DeliveryStatus::Unknown,
         stderr_tail: None,
+        unknown_side_effects: false,
     });
     let preview = result.result_preview.as_ref().unwrap();
     assert!(preview.complete);
@@ -317,6 +367,7 @@ fn completion_keeps_unrequested_delivery_out_of_the_blocked_branch() {
         post_processing_status: PostProcessingStatus::Unknown,
         delivery_status: DeliveryStatus::Unknown,
         stderr_tail: None,
+        unknown_side_effects: false,
     });
 
     assert_eq!(
@@ -361,6 +412,7 @@ fn completion_never_upgrades_failed_or_killed_runs_to_success() {
             post_processing_status: PostProcessingStatus::Unknown,
             delivery_status: DeliveryStatus::Unknown,
             stderr_tail: None,
+            unknown_side_effects: false,
         });
         assert_eq!(result.outcome, outcome, "{status} 的执行终态不得被覆盖");
         assert!(!result.success, "{status} 不得因交付不需要而变绿");
@@ -389,6 +441,7 @@ fn cleanup_failure_clears_the_unrequested_delivery_reason() {
         ),
         git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Completed,
+        unknown_side_effects: false,
         write_intent: None,
         limits: WorkflowLimits::default(),
         limit_breaches: Vec::new(),

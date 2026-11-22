@@ -9,7 +9,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { handleRequest } from '../src/server'
 import { WORKFLOW_BUILD_ID, WORKFLOW_PROTOCOL_VERSION } from '../src/types'
-import { handleTaskResult, setOutWriter } from '../src/rpc'
+import { handleTaskResult, handleToolResult, setOutWriter } from '../src/rpc'
 
 // ─── 进程级 patch ──────────────────────────────────────────
 
@@ -87,6 +87,189 @@ return { answer: r }`
       expect.arrayContaining(['run_started', 'phase_started', 'agent_started', 'agent_done', 'phase_done', 'run_done'])
     )
     expect(written.some((m) => m.method === 'journal/append')).toBe(true)
+  })
+
+  test('workflow/start：脚本 tool() 经 tool/task + tool/result 闭环', async () => {
+    written = []
+    const script = `export const meta = { name: 'tool-demo', description: 'tool test' }
+const r = await tool('Read', { file_path: '/tmp/a.txt' })
+return { r }`
+
+    await handleRequest({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'workflow/start',
+      params: { runId: 'srv-tool', cwd: '/tmp', script },
+    })
+
+    const task = await waitFor((m) => m.method === 'tool/task')
+    const params = task.params as {
+      taskId: string
+      runId: string
+      toolName: string
+      arguments: Record<string, unknown>
+    }
+    expect(params).toMatchObject({
+      runId: 'srv-tool',
+      toolName: 'Read',
+      arguments: { file_path: '/tmp/a.txt' },
+    })
+    // tool() 不是 agent 任务：不产生 agent/task。
+    expect(written.some((m) => m.method === 'agent/task')).toBe(false)
+
+    handleToolResult({
+      params: {
+        taskId: params.taskId,
+        runId: 'srv-tool',
+        outcome: {
+          kind: 'ok',
+          content: 'file text',
+          structuredContent: { content: 'file text' },
+        },
+      },
+    })
+
+    const done = await waitFor((m) => m.method === 'workflow/done')
+    expect((done.params as { status: string }).status).toBe('completed')
+    expect((done.params as { returnValue: unknown }).returnValue).toEqual({
+      r: { content: 'file text' },
+    })
+    // run 结束后恢复宿主原有全局值（测试进程原本没有 tool 全局）。
+    expect(Object.hasOwn(globalThis, 'tool')).toBe(false)
+  })
+
+  test('脚本 tool() 的 live tool/task 带 toolSeq 与已完成 agent 数', async () => {
+    written = []
+    const script = `export const meta = { name: 'tool-agent-seq', description: 'tool agentSeq test' }
+const a = await agent('hello')
+const r = await tool('Read', { file_path: '/tmp/b.txt' })
+return { a, r }`
+
+    await handleRequest({
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'workflow/start',
+      params: { runId: 'srv-tool-agent-seq', cwd: '/tmp', script },
+    })
+
+    const agentTask = await waitFor((m) => m.method === 'agent/task')
+    handleTaskResult({
+      params: {
+        taskId: (agentTask.params as { taskId: string }).taskId,
+        result: { kind: 'ok', output: 'done', usage: { outputTokens: 1 } },
+      },
+    })
+
+    const task = await waitFor((m) => m.method === 'tool/task')
+    const params = task.params as { taskId: string; toolSeq: number; agentSeq: number }
+    expect(params.toolSeq).toBe(0)
+    expect(params.agentSeq).toBe(1)
+
+    handleToolResult({
+      params: {
+        taskId: params.taskId,
+        runId: 'srv-tool-agent-seq',
+        outcome: { kind: 'ok', content: 'file text' },
+      },
+    })
+
+    const done = await waitFor((m) => m.method === 'workflow/done')
+    expect((done.params as { status: string }).status).toBe('completed')
+  })
+
+  test('续跑 resumeTools 命中：发 tool/replayed 且不发 tool/task', async () => {
+    written = []
+    const entry = {
+      toolSeq: 0,
+      agentSeq: 0,
+      taskId: 'tool-1',
+      toolName: 'Read',
+      arguments: { file_path: '/tmp/cached.txt' },
+      outcome: { kind: 'ok', content: 'cached text' },
+    }
+    const script = `export const meta = { name: 'tool-replay', description: 'tool replay test' }
+const r = await tool('Read', { file_path: '/tmp/cached.txt' })
+return { r }`
+
+    await handleRequest({
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'workflow/start',
+      params: {
+        runId: 'srv-tool-replay',
+        cwd: '/tmp',
+        script,
+        resumeFromRunId: '018-tool-source',
+        resume: [],
+        resumeTools: [entry],
+      },
+    })
+
+    const done = await waitFor((m) => m.method === 'workflow/done')
+    expect((done.params as { status: string }).status).toBe('completed')
+    expect((done.params as { returnValue: unknown }).returnValue).toEqual({ r: 'cached text' })
+    expect(written.some((m) => m.method === 'tool/task')).toBe(false)
+
+    const replayedIndex = written.findIndex((m) => m.method === 'tool/replayed')
+    const doneIndex = written.findIndex((m) => m.method === 'workflow/done')
+    expect(replayedIndex).toBeGreaterThanOrEqual(0)
+    expect(replayedIndex).toBeLessThan(doneIndex)
+    expect(written[replayedIndex]!.params).toEqual({ runId: 'srv-tool-replay', entry })
+  })
+
+  test('workflow/start：非法 resumeTools 以 -32602 拒绝且不启动 run', async () => {
+    const valid = {
+      toolSeq: 0,
+      agentSeq: 0,
+      taskId: 'tool-1',
+      toolName: 'Read',
+      arguments: { file_path: '/a' },
+      outcome: { kind: 'ok', content: 'text' },
+    }
+    const invalid: unknown[] = [
+      { invalid: true },
+      [42],
+      [{ ...valid, toolSeq: -1 }],
+      [{ ...valid, toolSeq: 1.5 }],
+      [{ ...valid, agentSeq: '1' }],
+      [{ ...valid, toolName: 42 }],
+      [{ ...valid, arguments: [] }],
+      [{ ...valid, arguments: null }],
+      [{ ...valid, outcome: { kind: 'weird' } }],
+      [{ ...valid, outcome: null }],
+    ]
+
+    for (const [index, resumeTools] of invalid.entries()) {
+      written = []
+      await handleRequest({
+        jsonrpc: '2.0',
+        id: 200 + index,
+        method: 'workflow/start',
+        params: {
+          runId: `srv-invalid-tools-${index}`,
+          cwd: '/tmp',
+          script: "return 'must-not-run'",
+          resumeTools,
+        },
+      })
+
+      expect(written).toHaveLength(1)
+      const error = written[0]!.error as { code: number; message: string }
+      expect(error.code).toBe(-32602)
+      expect(error.message.startsWith('resumeTools')).toBe(true)
+    }
+    expect(written.some((m) => m.method === 'agent/task' || m.method === 'tool/task')).toBe(false)
+
+    // null 与省略同义：fresh run 正常执行
+    written = []
+    await handleRequest({
+      jsonrpc: '2.0',
+      id: 300,
+      method: 'workflow/start',
+      params: { runId: 'srv-null-tools', cwd: '/tmp', script: "return 'ok'", resumeTools: null },
+    })
+    const done = await waitFor((m) => m.method === 'workflow/done')
+    expect((done.params as { status: string }).status).toBe('completed')
   })
 
   test('phase callback is not executed but phase events are emitted', async () => {

@@ -9,10 +9,12 @@
 //!    `Workflow` 工具在 not-ready 时拒绝新启动，避免「首个任务无人消费」。
 //! 2. **消费**：通知只是唤醒信号（不携带正文）→ `resources/read` 重读任务基线
 //!    （`activeTasks` = 未终态任务，重复扫描幂等）→ 对任务经 `WorkflowAgentClaim` 做**唯一 claim**
-//!    （claimId 保证请求重试，容量判定在实例内）→ 用会话执行依赖运行 agent
-//!    → 经 host-only 工具 `WorkflowAgentResult` 回填（`_meta` 携带消费者令牌）。
-//!    有界并发取自 run 自身的执行权威（`maxConcurrency` + 任务表在执行数），不另立计数
-//!    （design §5.2 第 5 条）。
+//!    （claimId 保证请求重试，容量判定在实例内）→ **按任务种类分派**：agent 任务用
+//!    会话执行依赖运行 `WorkflowAgentExecutor` 并经 `WorkflowAgentResult` 回填；
+//!    tool 任务交给会话 canonical 调用入口（`WorkflowToolInvoker`）并经
+//!    `WorkflowToolResult` 回填（`_meta` 携带消费者令牌）。有界并发取自 run 自身的
+//!    执行权威（`maxConcurrency` + 任务表在执行数），tool 任务不占 agent 槽位
+//!    （design §5.2 第 5 条；issue #407）。
 //! 3. **关闭**：会话关闭取消消费者；在飞执行取消并有界等待，不残留 detached 执行。
 //!
 //! 边界：
@@ -21,12 +23,18 @@
 //! - 执行依赖（executor）由会话装配面注入**与旧链同一实例**，不在此二次构造
 //!   （P5 删除旧链后，本模块是该依赖的唯一持有者）。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use peri_acp_types::ports::{McpPoolPort, McpResourceSubscription};
-use peri_acp_types::workflow::{AgentExecutor, AgentRunParams};
-use peri_mcp_workflow::{WorkflowTaskRecord, TASKS_URI, WORKFLOW_CONSUMER_META_KEY};
+use peri_acp_types::workflow::{
+    AgentExecutor, WorkflowToolCall, WorkflowToolErrorCode, WorkflowToolInvoker,
+    WorkflowToolOutcome,
+};
+use peri_mcp_workflow::{
+    WorkflowTaskKind, WorkflowTaskRecord, TASKS_URI, WORKFLOW_CONSUMER_META_KEY,
+};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::task::JoinSet;
@@ -37,14 +45,20 @@ use tracing::{debug, info, warn};
 const WORKFLOW_INSTANCE: &str = "workflow";
 /// 回填工具名（host-only，`model_visible = false`）。
 const AGENT_RESULT_TOOL: &str = "WorkflowAgentResult";
+/// 脚本工具调用回填工具名（host-only，`model_visible = false`）。
+const TOOL_RESULT_TOOL: &str = "WorkflowToolResult";
+/// `InvocationOrigin::Host { namespace: "workflow" }` 的调用序号权威（进程内单调；
+/// 只作执行身份的表达，不参与安全裁决）。
+static WORKFLOW_TOOL_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 订阅重建的初始退避。
 const RESUBSCRIBE_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 /// 订阅重建退避上界（实例初始化中 / 重连期间不空转）。
 const RESUBSCRIBE_MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// 关闭时等待在飞执行收口的上界；超时强制中止并记录（design §5.5 第 ②/④ 步）。
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-/// 回填投递的可重试次数（design §5.1：可重试投递 + 单次终态提交）。
-const BACKFILL_ATTEMPTS: usize = 3;
+/// 回填投递的退避上界。结果在服务器接受前一直保留：通道恢复后继续重投，
+/// 不重新执行工具。
+const BACKFILL_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 /// `workflow://tasks` 正文的最小消费视图。
 ///
@@ -71,18 +85,34 @@ pub(crate) struct WorkflowTaskConsumer {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// 无 canonical 调用入口的部署形态（无 MCP 装配）：脚本工具调用显式
+/// `tool_unavailable`，不伪造成功。
+pub(crate) struct UnavailableToolInvoker;
+
+#[async_trait::async_trait]
+impl WorkflowToolInvoker for UnavailableToolInvoker {
+    async fn invoke_tool(&self, call: WorkflowToolCall) -> WorkflowToolOutcome {
+        WorkflowToolOutcome::error(
+            WorkflowToolErrorCode::ToolUnavailable,
+            call.tool_name,
+            "workflow tool calls are unavailable: this session has no canonical invocation entry",
+        )
+    }
+}
+
 impl WorkflowTaskConsumer {
     /// 启动消费者（订阅与就绪在后台异步完成；调用方不阻塞）。
     pub(crate) fn start(
         pool: Arc<dyn McpPoolPort>,
         token: String,
         executor: Arc<dyn AgentExecutor>,
+        tool_invoker: Arc<dyn WorkflowToolInvoker>,
         session_id: String,
     ) -> Self {
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
         let handle = tokio::spawn(async move {
-            run(pool, token, executor, session_id, task_cancel).await;
+            run(pool, token, executor, tool_invoker, session_id, task_cancel).await;
         });
         Self { cancel, handle }
     }
@@ -115,6 +145,7 @@ async fn run(
     pool: Arc<dyn McpPoolPort>,
     token: String,
     executor: Arc<dyn AgentExecutor>,
+    tool_invoker: Arc<dyn WorkflowToolInvoker>,
     session_id: String,
     cancel: CancellationToken,
 ) {
@@ -144,7 +175,16 @@ async fn run(
                     );
                 }
                 announced = false;
-                drive(&pool, &executor, &session_id, &token, subscription, &cancel).await;
+                drive(
+                    &pool,
+                    &executor,
+                    &tool_invoker,
+                    &session_id,
+                    &token,
+                    subscription,
+                    &cancel,
+                )
+                .await;
                 // 订阅终止（实例重连 / 移除 / 池释放）：就绪位回落，重建后再置位。
                 let _ = set_ready(&pool, &token, false).await;
             }
@@ -181,6 +221,7 @@ async fn run(
 async fn drive(
     pool: &Arc<dyn McpPoolPort>,
     executor: &Arc<dyn AgentExecutor>,
+    tool_invoker: &Arc<dyn WorkflowToolInvoker>,
     session_id: &str,
     token: &str,
     mut subscription: McpResourceSubscription,
@@ -202,6 +243,7 @@ async fn drive(
     if let Err(error) = scan(
         pool,
         executor,
+        tool_invoker,
         token,
         &mut inflight,
         &mut executions,
@@ -234,7 +276,7 @@ async fn drive(
             wake = subscription.next() => match wake {
                 Some(uri) if uri == TASKS_URI => {
                     if let Err(error) = scan(
-                        pool, executor, token, &mut inflight, &mut executions, &mut claims, &drive_cancel,
+                        pool, executor, tool_invoker, token, &mut inflight, &mut executions, &mut claims, &drive_cancel,
                     )
                     .await
                     {
@@ -251,7 +293,7 @@ async fn drive(
                 None => break,
             },
             _ = poll.tick() => {
-                if let Err(error) = scan(pool, executor, token, &mut inflight, &mut executions, &mut claims, &drive_cancel).await {
+                if let Err(error) = scan(pool, executor, tool_invoker, token, &mut inflight, &mut executions, &mut claims, &drive_cancel).await {
                     warn!(%error, "workflow task reconciliation failed");
                     break;
                 }
@@ -289,9 +331,12 @@ async fn drive(
 }
 
 /// 读取任务基线并对可 claim 的任务登记执行（幂等：重复扫描由唯一 claim 吸收）。
+// 消费者装配面：端口、任务表状态与取消逐项注入；分组会与调用点的可变借用冲突。
+#[allow(clippy::too_many_arguments)]
 async fn scan(
     pool: &Arc<dyn McpPoolPort>,
     executor: &Arc<dyn AgentExecutor>,
+    tool_invoker: &Arc<dyn WorkflowToolInvoker>,
     token: &str,
     inflight: &mut JoinSet<()>,
     executions: &mut std::collections::HashMap<(String, String), CancellationToken>,
@@ -343,16 +388,29 @@ async fn scan(
             executions.insert(key, task_cancel.clone());
             let pool = Arc::clone(pool);
             let executor = Arc::clone(executor);
+            let tool_invoker = Arc::clone(tool_invoker);
             let token = token.to_string();
-            inflight.spawn(async move {
-                execute_and_backfill(pool, executor, token, record, task_cancel).await;
-            });
+            // 按任务种类分派：agent 走引擎执行器，tool 走会话 canonical 调用管线。
+            // 两条路径共用同一 claim / 终态回填 / 取消语义。
+            match record.kind() {
+                WorkflowTaskKind::Agent => {
+                    inflight.spawn(async move {
+                        execute_and_backfill(pool, executor, token, record, task_cancel).await;
+                    });
+                }
+                WorkflowTaskKind::Tool => {
+                    inflight.spawn(async move {
+                        invoke_tool_and_backfill(pool, tool_invoker, token, record, task_cancel)
+                            .await;
+                    });
+                }
+            }
         }
     }
     Ok(())
 }
 
-/// 执行单个任务并回填结果（`WorkflowAgentResult`，`_meta` 携带消费者令牌）。
+/// 执行单个 agent 任务并回填结果（`WorkflowAgentResult`，`_meta` 携带消费者令牌）。
 async fn execute_and_backfill(
     pool: Arc<dyn McpPoolPort>,
     executor: Arc<dyn AgentExecutor>,
@@ -362,7 +420,15 @@ async fn execute_and_backfill(
 ) {
     let run_id = record.run_id.clone();
     let task_id = record.task_id.clone();
-    let params: AgentRunParams = record.params.clone();
+    let Some(params) = record.params.agent_params().cloned() else {
+        warn!(
+            target: "workflow.consumer",
+            run_id = %run_id,
+            task_id = %task_id,
+            "agent task has no agent payload; task remains executing"
+        );
+        return;
+    };
     let result = tokio::select! {
         biased;
         // kill / 会话关闭：任务表已由取消路径提交 `cancelled` 终态（唯一提交点），
@@ -392,14 +458,104 @@ async fn execute_and_backfill(
         }
     };
     let arguments = json!({ "runId": run_id, "taskId": task_id, "result": result_value });
+    backfill_task(
+        pool,
+        token,
+        AGENT_RESULT_TOOL,
+        arguments,
+        &run_id,
+        &task_id,
+        &task_cancel,
+    )
+    .await;
+}
+
+/// 执行单个脚本工具任务并回填结果（`WorkflowToolResult`，`_meta` 携带消费者令牌）。
+///
+/// 取消令牌只作为 canonical 调用的**准入前**放弃信号（随 `WorkflowToolCall` 传入）：
+/// 已 dispatch 的 MCP 调用不因 run kill 被强行中断（既有不变量）；调用结束后仍按
+/// 单次终态提交回填（任务表已取消时幂等返回首次终态）。
+async fn invoke_tool_and_backfill(
+    pool: Arc<dyn McpPoolPort>,
+    invoker: Arc<dyn WorkflowToolInvoker>,
+    token: String,
+    record: WorkflowTaskRecord,
+    task_cancel: CancellationToken,
+) {
+    let run_id = record.run_id.clone();
+    let task_id = record.task_id.clone();
+    let Some((tool_name, arguments)) = record.params.tool_call() else {
+        warn!(
+            target: "workflow.consumer",
+            run_id = %run_id,
+            task_id = %task_id,
+            "tool task has no tool payload; task remains executing"
+        );
+        return;
+    };
+    let call = WorkflowToolCall {
+        run_id: run_id.clone(),
+        task_id: task_id.clone(),
+        // 同一 namespace 的调用序号由本进程单调签发（不参与安全裁决）。
+        seq: WORKFLOW_TOOL_SEQ.fetch_add(1, Ordering::Relaxed),
+        tool_name: tool_name.to_string(),
+        arguments: arguments.clone(),
+        cancel: task_cancel.clone(),
+    };
+    let outcome = invoker.invoke_tool(call).await;
+    let outcome_value = match serde_json::to_value(&outcome) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(
+                target: "workflow.consumer",
+                run_id = %run_id,
+                task_id = %task_id,
+                error = %error,
+                "workflow tool outcome is not serializable; result not delivered"
+            );
+            return;
+        }
+    };
+    let arguments = json!({ "runId": run_id, "taskId": task_id, "outcome": outcome_value });
+    backfill_task(
+        pool,
+        token,
+        TOOL_RESULT_TOOL,
+        arguments,
+        &run_id,
+        &task_id,
+        &task_cancel,
+    )
+    .await;
+}
+
+/// 可重试回填一次任务终态（先提交任务表由实例完成；本函数只负责投递与退避）。
+///
+/// 投递失败时**保留已计算的 outcome**并持续重投（退避有上界），直到服务器接受或
+/// 任务被取消：`await tool(...)` 不会因一次通道故障永久悬挂，重投也不会重新执行
+/// 工具。任务在投递成功前保持 executing；run 终止路径仍会取消并结算未回填任务。
+#[allow(clippy::too_many_arguments)]
+async fn backfill_task(
+    pool: Arc<dyn McpPoolPort>,
+    token: String,
+    backfill_tool: &str,
+    arguments: Value,
+    run_id: &str,
+    task_id: &str,
+    task_cancel: &CancellationToken,
+) {
     let mut meta = Map::new();
     meta.insert(WORKFLOW_CONSUMER_META_KEY.to_string(), Value::String(token));
-    let mut last_error = String::new();
-    for attempt in 1..=BACKFILL_ATTEMPTS {
+    let mut attempt: u64 = 0;
+    loop {
+        if task_cancel.is_cancelled() {
+            return;
+        }
+        attempt = attempt.saturating_add(1);
         match pool
             .call_instance_tool(
                 WORKFLOW_INSTANCE,
-                AGENT_RESULT_TOOL,
+                backfill_tool,
                 arguments.clone(),
                 Some(Value::Object(meta.clone())),
             )
@@ -410,30 +566,41 @@ async fn execute_and_backfill(
                     target: "workflow.consumer",
                     run_id = %run_id,
                     task_id = %task_id,
+                    backfill_tool,
+                    attempt,
                     "workflow task result delivered"
                 );
                 return;
             }
             Err(error) => {
-                last_error = error;
-                if attempt < BACKFILL_ATTEMPTS {
-                    sleep_or_cancel(&task_cancel, Duration::from_millis(250 * attempt as u64))
-                        .await;
-                    if task_cancel.is_cancelled() {
-                        return;
-                    }
+                let backoff = Duration::from_millis(250 * attempt.min(20));
+                if attempt == 1 {
+                    warn!(
+                        target: "workflow.consumer",
+                        run_id = %run_id,
+                        task_id = %task_id,
+                        backfill_tool,
+                        error = %error,
+                        "workflow task result delivery failed; retaining the computed \
+                         outcome and retrying until accepted"
+                    );
+                } else {
+                    debug!(
+                        target: "workflow.consumer",
+                        run_id = %run_id,
+                        task_id = %task_id,
+                        backfill_tool,
+                        attempt,
+                        error = %error,
+                        "workflow task result delivery retry failed"
+                    );
+                }
+                if !sleep_or_cancel(task_cancel, backoff.min(BACKFILL_MAX_BACKOFF)).await {
+                    return;
                 }
             }
         }
     }
-    warn!(
-        target: "workflow.consumer",
-        run_id = %run_id,
-        task_id = %task_id,
-        error = %last_error,
-        "workflow task result delivery failed after retries; task remains executing \
-         until the run is cancelled (kill / session close paths still settle it)"
-    );
 }
 
 /// 可取消的退避等待；返回 `false` = 已取消。

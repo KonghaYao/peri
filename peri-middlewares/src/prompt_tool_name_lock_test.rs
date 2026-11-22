@@ -28,6 +28,7 @@ const MANAGED_PROMPT_FILES: &[&str] = &[
     "mcp-packages/web/src/descriptions/web_fetch.md",
     "mcp-packages/web/src/descriptions/web_search.md",
     "mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md",
+    "mcp-packages/workspace/src/resources/builtin/skills/codemode/SKILL.md",
     "mcp-packages/workspace/src/resources/builtin/skills/interview/SKILL.md",
     "mcp-packages/workspace/src/resources/builtin/skills/use-artifacts/SKILL.md",
     "mcp-packages/workspace/src/resources/builtin/agents/coder.md",
