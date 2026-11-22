@@ -25,16 +25,26 @@ replace a required multi-agent workflow (`ultracode`) with a tool-only script.
 ```js
 export const meta = { name: 'audit', description: 'Collect and compare files' }
 
-// `Glob` returns text (one path per line), not an array.
+// `Glob` returns text: one path per line, `No files found.`, or a listing
+// followed by a `[Output truncated: ...]` note. Handle all three shapes.
 const listing = await tool('Glob', { pattern: 'src/**/*.rs' })
+if (listing.trim() === 'No files found.') return { count: 0, verdict: 'no files matched' }
+if (listing.includes('Output truncated:')) {
+  throw new Error('Glob hit the result limit; rerun with a narrower pattern')
+}
+
 const targets = listing.split('\n').filter(Boolean)
-await parallel(targets.map(file => async () => {
+// A failed thunk resolves to `null`; drop those before reporting to the agent.
+const counts = (await parallel(targets.map(file => async () => {
   const text = await tool('Read', { file_path: file })
   return { file, lines: text.split('\n').length }
-}))
+}))).filter(Boolean)
 
-const verdict = await agent('Rank the largest files and flag anomalies', { label: 'rank' })
-return { verdict, count: targets.length }
+const verdict = await agent(
+  `Rank the largest files and flag anomalies. Line counts: ${JSON.stringify(counts)}`,
+  { label: 'rank' },
+)
+return { verdict, counts }
 ```
 
 Available hooks: `agent`, `parallel`, `pipeline`, `phase`, `log`, `workflow`, plus

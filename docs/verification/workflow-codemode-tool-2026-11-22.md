@@ -96,6 +96,12 @@
    - `tools.jsonl` 追加失败仍投递结果、resume 会重放未记录前缀：不改变，属已文档化
      的 journal 边界（`tool_journal_append_failure_does_not_change_the_terminal`
      锁定），改变它需要另行裁决磁盘失败时的 run 语义。
+8. **CodeRabbit 追加轮 2 条（`codemode` SKILL 示例）**：均成立，同一次提交修复。
+   - `Glob` 无匹配返回 `No files found.`、超限时附 `[Output truncated: ...]` 说明，
+     示例会把说明当路径传给 `Read`：示例先判空返回，命中截断说明时抛错要求收窄
+     pattern。
+   - `parallel()` 结果未绑定、`agent()` 提示词为固定串，每文件行数未送达：
+     示例绑定为 `counts` 并写入提示词；同时说明失败 thunk 解析为 `null` 需过滤。
 
 ## 4. 未覆盖与限制
 
