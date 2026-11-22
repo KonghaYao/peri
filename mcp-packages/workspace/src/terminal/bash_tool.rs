@@ -324,7 +324,7 @@ impl BaseTool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Shell command. Chain dependent steps with &&."
+                    "description": "Shell command. Chain dependent steps with && on Bash; use ; on Windows PowerShell 5.1."
                 },
                 "timeout": {
                     "type": "integer",

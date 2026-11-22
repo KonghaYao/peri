@@ -399,7 +399,7 @@ impl BaseTool for GrepTool {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "File path glob filter."
+                    "description": "File name glob filter, such as *.rs. Matches the base name only; use path to scope directories."
                 },
                 "type": {
                     "type": "string",
