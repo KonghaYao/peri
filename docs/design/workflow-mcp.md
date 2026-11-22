@@ -143,7 +143,7 @@ published ──► executing ──► completed | failed | cancelled
 ```
 
 - 单次终态提交：状态转换由任务表单点 compare-and-set，只允许一次进入终态；重复回填返回既有终态（幂等），不同结果冲突以首次为准并记录告警。
-- 结果投递契约（而非未经定义的端到端恰好一次）：**可重试投递 + 单次终态提交 + Node promise 单次结算**。任务结果先提交任务表，再投递 `agent/result`；Node 侧按 taskId 去重，已结算的重复投递忽略。
+- 结果投递契约（而非未经定义的端到端恰好一次）：**可重试投递 + 单次终态提交 + Node promise 单次结算**。任务结果先提交任务表，再投递 `agent/result`；Node 侧按 taskId 去重，已结算的重复投递忽略。投递失败时消费者保留已计算的结果并按有界退避持续重投，服务器接受后才丢弃；重投只重复 `WorkflowAgentResult` / `WorkflowToolResult` 调用，不重新执行 agent 或工具。
 - `taskId` 作用域 = 单次 run；恢复场景不复用旧 taskId（resume 从 journal 缓存命中，不重放未完成任务）。
 - 任务的持久边界：任务表与事件日志为运行期状态（process-local durability，不写 journal）；跨进程恢复不相关（非目标 4）。journal 写入仍由 Node 在拿到结果后按现状 `journal/append` 完成，二者不共享写入权威、互不阻塞。
 

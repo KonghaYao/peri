@@ -412,6 +412,33 @@ describe('tool() 记录回放', () => {
     expect(replayedNotifies()).toHaveLength(0)
   })
 
+  test('普通对象键序无关仍可回放', async () => {
+    capture()
+    installToolGlobal('run-tool')
+    configureReplay([
+      recorded({ arguments: { first: 1, second: { nested: true } } }),
+    ])
+
+    await expect(
+      tool('Read', { second: { nested: true }, first: 1 }),
+    ).resolves.toBe('recorded')
+    expect(replayedNotifies()).toHaveLength(1)
+    expect(toolTasks()).toHaveLength(0)
+  })
+
+  test('非纯 JSON 嵌套对象（Date）不匹配空记录 → 转 live', async () => {
+    capture()
+    installToolGlobal('run-tool')
+    configureReplay([recorded({ arguments: { value: {} } })])
+
+    const p = tool('Read', { value: new Date(0) })
+    expect(taskParams(0).toolSeq).toBe(0)
+    respond(taskParams(0).taskId, { kind: 'ok', content: 'live' })
+    await expect(p).resolves.toBe('live')
+
+    expect(replayedNotifies()).toHaveLength(0)
+  })
+
   test('entry.agentSeq 超出可回放前缀 → 不回放', async () => {
     capture()
     installToolGlobal('run-tool')

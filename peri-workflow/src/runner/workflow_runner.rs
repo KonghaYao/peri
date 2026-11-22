@@ -698,8 +698,9 @@ impl WorkflowRunner {
                     .unwrap_or_default();
                 // run 终止时仍有 tool 任务处于 executing（无终态）⇒ 未知副作用；
                 // 已回填 `outcome_unknown` / `task_accepted` 同样置位（任务表单一来源）。
-                if self.unknown_tool_side_effects(&run_id)
-                    || self.executing_tool_tasks(&run_id) > 0
+                // 先读计数后读标志：结算先置位再移除 executing，反序存在竞态窗口。
+                if self.executing_tool_tasks(&run_id) > 0
+                    || self.unknown_tool_side_effects(&run_id)
                 {
                     limit_report.unknown_side_effects = true;
                 }

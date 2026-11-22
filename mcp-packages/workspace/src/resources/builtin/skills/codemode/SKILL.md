@@ -25,7 +25,9 @@ replace a required multi-agent workflow (`ultracode`) with a tool-only script.
 ```js
 export const meta = { name: 'audit', description: 'Collect and compare files' }
 
-const targets = await tool('Glob', { pattern: 'src/**/*.rs' })
+// `Glob` returns text (one path per line), not an array.
+const listing = await tool('Glob', { pattern: 'src/**/*.rs' })
+const targets = listing.split('\n').filter(Boolean)
 await parallel(targets.map(file => async () => {
   const text = await tool('Read', { file_path: file })
   return { file, lines: text.split('\n').length }
@@ -55,7 +57,9 @@ const result = await tool('Read', { file_path: '/abs/path' })
 - `arguments` must be a plain object or omitted. Schema validation belongs to the MCP
   server; do not restate or pre-validate a schema in the script.
 - The return value is `structuredContent` when present, otherwise the text content.
-  Results are **not truncated**.
+  Results are **not truncated**. Text-only tools keep their formatted text: `Glob`
+  returns paths joined by newlines and `Grep` returns matching lines, so parse the
+  string (for example `listing.split('\n').filter(Boolean)`) before iterating it.
 - Failures throw a typed `WorkflowToolError` with `code`, `tool`, `message`, and
   optional `details`. Catch it when a failure is expected:
 

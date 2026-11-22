@@ -543,7 +543,10 @@ impl MessageLoop {
         // 此时任务表尚未被 run 终止路径取消（先读后取消），事实仍可观测。
         let mut limit_report = limit_state.report();
         if agent_task_sink.as_ref().is_some_and(|sink| {
-            sink.unknown_tool_side_effects(&run_id) || sink.executing_tool_tasks(&run_id) > 0
+            // 先读执行中计数、后读未知副作用位：`complete_tool_call` 先置位再移除
+            // `executing`，因此计数为 0 时标志已稳定；反序存在「先读到 false、
+            // 结算后才读到 0」的窗口。
+            sink.executing_tool_tasks(&run_id) > 0 || sink.unknown_tool_side_effects(&run_id)
         }) {
             limit_report.unknown_side_effects = true;
         }

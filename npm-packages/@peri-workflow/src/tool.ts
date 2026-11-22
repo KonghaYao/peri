@@ -139,6 +139,15 @@ export function noteJournalReset(): void {
 }
 
 /**
+ * 只把纯 JSON 对象视为记录：`Date` / `Map` / `Set` / 类实例即使没有自有可枚举
+ * 键，也不能与记录中的 `{}` 匹配（wire 上它们会变成字符串或丢失，fail closed）。
+ */
+function isPlainJsonObject(value: object): boolean {
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+/**
  * JSON 深度相等（arguments 回放匹配用）。
  *
  * 只处理 JSON 值域：对象键序无关；数组按位置比较；`undefined` 与缺省不等价
@@ -153,6 +162,7 @@ function jsonDeepEqual(left: unknown, right: unknown): boolean {
     if (left.length !== right.length) return false
     return left.every((item, index) => jsonDeepEqual(item, right[index]))
   }
+  if (!isPlainJsonObject(left) || !isPlainJsonObject(right)) return false
   const leftRecord = left as Record<string, unknown>
   const rightRecord = right as Record<string, unknown>
   const leftKeys = Object.keys(leftRecord)

@@ -56,8 +56,9 @@ const RESUBSCRIBE_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 const RESUBSCRIBE_MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// 关闭时等待在飞执行收口的上界；超时强制中止并记录（design §5.5 第 ②/④ 步）。
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-/// 回填投递的可重试次数（design §5.1：可重试投递 + 单次终态提交）。
-const BACKFILL_ATTEMPTS: usize = 3;
+/// 回填投递的退避上界。结果在服务器接受前一直保留：通道恢复后继续重投，
+/// 不重新执行工具。
+const BACKFILL_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 /// `workflow://tasks` 正文的最小消费视图。
 ///
@@ -530,8 +531,9 @@ async fn invoke_tool_and_backfill(
 
 /// 可重试回填一次任务终态（先提交任务表由实例完成；本函数只负责投递与退避）。
 ///
-/// 失败时**保留任务 executing** 并明确告警——不伪造完成（run 终止路径仍会取消并
-/// 结算未回填任务）。
+/// 投递失败时**保留已计算的 outcome**并持续重投（退避有上界），直到服务器接受或
+/// 任务被取消：`await tool(...)` 不会因一次通道故障永久悬挂，重投也不会重新执行
+/// 工具。任务在投递成功前保持 executing；run 终止路径仍会取消并结算未回填任务。
 #[allow(clippy::too_many_arguments)]
 async fn backfill_task(
     pool: Arc<dyn McpPoolPort>,
@@ -544,8 +546,12 @@ async fn backfill_task(
 ) {
     let mut meta = Map::new();
     meta.insert(WORKFLOW_CONSUMER_META_KEY.to_string(), Value::String(token));
-    let mut last_error = String::new();
-    for attempt in 1..=BACKFILL_ATTEMPTS {
+    let mut attempt: u64 = 0;
+    loop {
+        if task_cancel.is_cancelled() {
+            return;
+        }
+        attempt = attempt.saturating_add(1);
         match pool
             .call_instance_tool(
                 WORKFLOW_INSTANCE,
@@ -561,30 +567,40 @@ async fn backfill_task(
                     run_id = %run_id,
                     task_id = %task_id,
                     backfill_tool,
+                    attempt,
                     "workflow task result delivered"
                 );
                 return;
             }
             Err(error) => {
-                last_error = error;
-                if attempt < BACKFILL_ATTEMPTS {
-                    sleep_or_cancel(task_cancel, Duration::from_millis(250 * attempt as u64)).await;
-                    if task_cancel.is_cancelled() {
-                        return;
-                    }
+                let backoff = Duration::from_millis(250 * attempt.min(20));
+                if attempt == 1 {
+                    warn!(
+                        target: "workflow.consumer",
+                        run_id = %run_id,
+                        task_id = %task_id,
+                        backfill_tool,
+                        error = %error,
+                        "workflow task result delivery failed; retaining the computed \
+                         outcome and retrying until accepted"
+                    );
+                } else {
+                    debug!(
+                        target: "workflow.consumer",
+                        run_id = %run_id,
+                        task_id = %task_id,
+                        backfill_tool,
+                        attempt,
+                        error = %error,
+                        "workflow task result delivery retry failed"
+                    );
+                }
+                if !sleep_or_cancel(task_cancel, backoff.min(BACKFILL_MAX_BACKOFF)).await {
+                    return;
                 }
             }
         }
     }
-    warn!(
-        target: "workflow.consumer",
-        run_id = %run_id,
-        task_id = %task_id,
-        backfill_tool,
-        error = %last_error,
-        "workflow task result delivery failed after retries; task remains executing \
-         until the run is cancelled (kill / session close paths still settle it)"
-    );
 }
 
 /// 可取消的退避等待；返回 `false` = 已取消。

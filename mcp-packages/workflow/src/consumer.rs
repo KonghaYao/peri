@@ -92,6 +92,11 @@ impl WorkflowMcpServer {
                                     // tool 任务走同一终态入口：脚本等待方收到可 catch 的
                                     // `cancelled`（不伪造完成）。
                                     WorkflowTaskKind::Tool => {
+                                        // 放弃执行中的 tool 调用 = MCP 调用可能已
+                                        // dispatch：与 cancel / kill 路径同口径，先置
+                                        // run 的未知副作用，再提交 `cancelled` 终态
+                                        // （`Cancelled` 本身不携带该语义）。
+                                        runtime.tasks().mark_unknown_tool_side_effect(&task.run_id);
                                         let tool = task
                                             .params
                                             .tool_call()

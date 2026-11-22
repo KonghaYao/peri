@@ -1,10 +1,9 @@
 # Workflow 脚本工具调用（`tool()`）验收记录
 
-- 状态：验收记录（本地实现自检；工作树未提交）
+- 状态：验收记录（PR #539；2026-11-22 修订：E2E 夹具重锚 + CodeRabbit 评审修复）
 - 日期：2026-11-22
-- 工作树：`/Users/mino/code/peri`，分支 `feat/peri-swarm-production` @
-  `26d48ec98` + 本任务未提交改动；任务开始前既存的 `.mcp.json` 改动不属于本任务，
-  未纳入验证结论。
+- 工作树：`/Users/mino/code/peri`，分支 `feat/workflow-codemode-tool`（PR #539）；
+  任务开始前既存的 `.mcp.json` 改动不属于本任务，保持未提交、未纳入验证结论。
 - 范围：issue #407 阶段 1+2——`globalThis.tool` 原语、`tool/task` 通道、宿主消费者、
   `tools.jsonl` resume 回放、未知副作用投影、文档与 `codemode` skill。
   审批拒绝、真实外部 deferred MCP 工具与固定测试仓 SHA 对账不在本次证据内。
@@ -34,14 +33,19 @@
 | 命令 | 结果 |
 | --- | --- |
 | `./scripts/cargo-rmcp-patched.sh check --locked -p peri-workflow -p peri-tui -p peri-acp -p peri-middlewares -p peri-mcp-workflow -p peri-acp-types` | 通过 |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-workflow --lib -- --test-threads=1` | 285 passed / 0 failed |
-| `PERI_WORKFLOW_ARTIFACT_DIR="$PWD/dist/workflow-sidecar/peri-resources/workflow/b7fcaf3e1cbc" ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::workflow_consumer_tests` | 11 passed / 0 failed（tool E2E 5 个全部通过） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-workflow --lib -- --test-threads=1` | 286 passed / 0 failed |
+| `PERI_WORKFLOW_ARTIFACT_DIR="$PWD/dist/workflow-sidecar/peri-resources/workflow/b7fcaf3e1cbc" ./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib -- host::workflow_consumer_tests` | 12 passed / 0 failed（tool E2E 5 个；新增回填重投 1 个） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- prompt_tool_name_lock` | 1 passed |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-workspace --lib -- builtin` | 14 passed |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-workspace --lib -- resources::` | 通过（builtin skill 索引与 include_str! 装配） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-workflow` | 34 passed / 0 failed（含断开置未知副作用用例） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib -- workflow` | 21 passed |
-| `bun test`（`npm-packages/@peri-workflow`） | 136 pass / 0 fail / 462 expects / 10 files |
+| `bun test`（`npm-packages/@peri-workflow`） | 138 pass / 0 fail（新增键序与 Date 回放匹配用例） |
 | `bun run typecheck`（同上） | exit 0 |
-| `cargo fmt --check -p peri-workflow -p peri-tui` | 无差异 |
+| `./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings` | 通过（CI 同口径；此前漏掉 `--all-targets` 暴露的测试目标 lint 已修） |
+| `cargo fmt --all -- --check` | 无差异 |
+| `bash scripts/check-layer-imports.sh` | 22 规则 / 0 违规 |
+| `PERI_SOURCE_ROOT=… node scripts/verify-replay-fixtures.mjs --drift-policy=source-anchored`（peri-e2e PR #23） | passed：62 cassettes / 305 entries / 0 worldDrift |
+| `PERI_SOURCE_ROOT=… node scripts/refresh-cassettes.mjs --check`（peri-e2e PR #23） | `stale: false`，无 mapped/unanchored drift |
 | `python3 scripts/check-feature-catalog.py` | 通过 |
 | `git diff --check` | 无输出 |
 | `shasum -a 256` sidecar 入口与 `WORKFLOW_ENTRY_SHA256` | 一致 |
@@ -69,6 +73,29 @@
    与 serial 修改 HOME 的用例存在并行竞争，属既存测试隔离问题，本次未修改。
 4. **E2E 首次重跑失败**：因 `PERI_WORKFLOW_ARTIFACT_DIR` 使用相对路径导致 sidecar
    解析失败；改为绝对路径后 11/11 通过。
+5. **PR CI 首轮 E2E（62 场景）全失败**：根因是新增 `codemode` 使系统提示词
+   +71 字节（catalog 行、resource URI、resource 计数），而 peri-e2e 的 world 是
+   录制快照而非源码映射。修复在 peri-e2e PR #23（重锚 317 个 leaf / 305 个
+   stub，响应字节不变），本仓 `.github/peri-e2e.rev` 指向该 PR head；产品代码无缺陷。
+6. **PR CI 首轮 Clippy 失败**（ubuntu/macos）：本地此前只跑
+   `clippy --workspace`，漏掉 `--all-targets`；失败点是测试目标
+   `clippy::await_holding_lock`（`drop(guard)` 后仍有 await 判定）。已改为块作用域。
+7. **CodeRabbit 评审 8 条处置**：
+   - 断开时放弃执行中的 tool 任务未置未知副作用：成立，`WorkflowConsumerReady
+     {ready:false}` 路径先 `mark_unknown_tool_side_effect` 再结算，补 wire 用例；
+   - 回填耗尽重试后任务永久 executing、脚本 `await tool(...)` 悬挂：成立，改为
+     保留已计算 outcome、有界退避持续重投，服务器接受前不重新执行工具；
+   - `settle_failed_terminal_state` 读 journal 失败时丢失未知副作用：成立，回落到
+     内存投影，补单测；
+   - journal / tools.jsonl 的 `BufWriter` 未显式 `flush`，写入失败被 drop 吞掉：
+     成立，两个 append 均显式 flush；
+   - 终止判定先读未知副作用位再读执行中计数存在竞态：成立，改为先读计数；
+   - `jsonDeepEqual` 让 `Date` 等非纯 JSON 对象匹配 `{}`：成立，非纯对象 fail closed，
+     补键序与 Date 用例；
+   - `codemode` SKILL 示例把 `Glob` 文本当数组：成立，示例与说明改为按行解析；
+   - `tools.jsonl` 追加失败仍投递结果、resume 会重放未记录前缀：不改变，属已文档化
+     的 journal 边界（`tool_journal_append_failure_does_not_change_the_terminal`
+     锁定），改变它需要另行裁决磁盘失败时的 run 语义。
 
 ## 4. 未覆盖与限制
 
@@ -79,4 +106,6 @@
   仅眼测入口与投影单测。
 - 固定测试仓 SHA 对账：归 peri-e2e #10，本记录不声称完成。
 - `read` CLI 的文本摘要未增加该字段；现有完成通知与 `state.json` 已包含。
-- 工作树未提交；`.mcp.json` 保持任务开始前原样。
+- 本仓 PR #539 的 `.github/peri-e2e.rev` 指向 peri-e2e PR #23 的 head（未合并）；
+  两者需成对合并，否则 E2E 夹具与产品系统提示词会再次错位。
+- `.mcp.json` 保持任务开始前原样，未提交。

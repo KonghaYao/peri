@@ -41,6 +41,8 @@ struct StubPool {
     subscribe_fails: bool,
     calls: Mutex<Vec<CallRecord>>,
     tasks_payload: Mutex<String>,
+    /// 前 N 次回填投递返回通道错误（验证结果保留与重投）。
+    backfill_failures: AtomicUsize,
     /// 订阅通道发送端：保持存活，避免订阅因通道关闭而终止。
     _updates: Mutex<Option<tokio::sync::mpsc::Sender<String>>>,
 }
@@ -52,8 +54,14 @@ impl StubPool {
             subscribe_fails,
             calls: Mutex::new(Vec::new()),
             tasks_payload: Mutex::new(tasks_payload.to_string()),
+            backfill_failures: AtomicUsize::new(0),
             _updates: Mutex::new(None),
         }
+    }
+
+    /// 让接下来 `count` 次回填投递失败（模拟通道暂不可用）。
+    fn fail_backfills(&self, count: usize) {
+        self.backfill_failures.store(count, Ordering::SeqCst);
     }
 
     fn calls(&self) -> Vec<CallRecord> {
@@ -88,6 +96,16 @@ impl McpPoolPort for StubPool {
             request_meta,
         ));
         let runtime = self.runtime.get().unwrap();
+        if matches!(tool, "WorkflowToolResult" | "WorkflowAgentResult")
+            && self
+                .backfill_failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    count.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err("workflow instance is temporarily unavailable".into());
+        }
         match tool {
             "WorkflowConsumerReady" => {
                 runtime.set_consumer_ready(arguments["ready"].as_bool().unwrap());
@@ -445,23 +463,89 @@ async fn tool_tasks_dispatch_to_the_session_invoker_and_backfill() {
         "tool 回填令牌必须与运行时绑定令牌一致"
     );
 
-    let calls = invoker.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1, "tool 任务必须恰好被调用一次");
-    assert_eq!(calls[0].run_id, "run-tool");
-    assert_eq!(calls[0].task_id, "t-tool");
-    assert_eq!(calls[0].tool_name, "Read");
-    assert_eq!(calls[0].arguments["file_path"], "/tmp/x");
-    assert_eq!(
-        agent_calls.load(Ordering::SeqCst),
-        0,
-        "tool 任务不得进入引擎 agent 执行器"
-    );
-    drop(calls);
+    {
+        // 限定 guard 作用域：后续 `consumer.stop().await` 不得与同步锁重叠
+        // （`clippy::await_holding_lock` 的显式 `drop` 形式仍会被判为跨 await）。
+        let calls = invoker.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "tool 任务必须恰好被调用一次");
+        assert_eq!(calls[0].run_id, "run-tool");
+        assert_eq!(calls[0].task_id, "t-tool");
+        assert_eq!(calls[0].tool_name, "Read");
+        assert_eq!(calls[0].arguments["file_path"], "/tmp/x");
+        assert_eq!(
+            agent_calls.load(Ordering::SeqCst),
+            0,
+            "tool 任务不得进入引擎 agent 执行器"
+        );
+    }
 
     // 终态尚未由桩池结算：任务仍在 executing（唯一 claim 的观察面）。
     let active = runtime.tasks().active();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].state, WorkflowTaskState::Executing);
+    consumer.stop().await;
+}
+
+/// 回填通道短暂失败：已计算的 outcome 必须保留并重投；重投不重新执行工具。
+///
+/// 失败次数（3）大于旧实现的尝试上限（3），因此只有「保留结果直到服务器接受」
+/// 才能收敛——退避总时长约 1.5s。
+#[tokio::test]
+async fn tool_result_delivery_retries_without_reinvoking_the_tool() {
+    let pool = Arc::new(StubPool::new(
+        false,
+        &tool_task_payload("t-retry", "run-retry"),
+    ));
+    pool.fail_backfills(3);
+    let executor: Arc<dyn AgentExecutor> = Arc::new(StubExecutor {
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let runtime = runtime_with(Arc::clone(&executor));
+    assert!(pool.runtime.set(runtime.clone()).is_ok());
+    let _ = runtime.tasks().publish_tool(
+        "t-retry".to_string(),
+        "run-retry",
+        "Read".to_string(),
+        serde_json::from_value(json!({"file_path": "/tmp/x"})).expect("tool arguments 必须是对象"),
+        0,
+        0,
+    );
+    let invoker = Arc::new(RecordingInvoker {
+        calls: Mutex::new(Vec::new()),
+        outcome: WorkflowToolOutcome::Ok {
+            structured_content: None,
+            content: "file body".into(),
+        },
+    });
+    let consumer = WorkflowTaskConsumer::start(
+        Arc::clone(&pool) as Arc<dyn McpPoolPort>,
+        runtime.bind_consumer_token(),
+        executor,
+        Arc::clone(&invoker) as Arc<dyn WorkflowToolInvoker>,
+        "session-retry".to_string(),
+    );
+    assert!(wait_ready(&runtime, true).await);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let deliveries = pool
+            .calls()
+            .iter()
+            .filter(|(_, tool, _, _)| tool == "WorkflowToolResult")
+            .count();
+        if deliveries >= 4 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "通道恢复后必须重投（已尝试 {deliveries} 次）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    {
+        let calls = invoker.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "重投不得重新执行工具");
+    }
     consumer.stop().await;
 }
 

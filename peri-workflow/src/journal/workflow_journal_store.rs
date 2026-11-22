@@ -154,7 +154,9 @@ impl WorkflowJournalStore {
         let mut writer = std::io::BufWriter::new(file);
         let line = serde_json::to_string(entry)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        writeln!(writer, "{line}")
+        writeln!(writer, "{line}")?;
+        // `BufWriter` 在 drop 时忽略 flush 错误；显式 flush 才能把写入失败交给调用方。
+        writer.flush()
     }
 
     /// 清空 journal.jsonl（写入空字符串截断文件）。
@@ -181,7 +183,9 @@ impl WorkflowJournalStore {
         let mut writer = std::io::BufWriter::new(file);
         let line = serde_json::to_string(entry)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        writeln!(writer, "{line}")
+        writeln!(writer, "{line}")?;
+        // `BufWriter` 在 drop 时忽略 flush 错误；显式 flush 才能把写入失败交给调用方。
+        writer.flush()
     }
 
     /// 读取 tools.jsonl 全部条目（严格模式：坏行即失败，按 `toolSeq` 升序返回）。
