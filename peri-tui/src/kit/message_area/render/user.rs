@@ -101,6 +101,7 @@ pub(super) fn render_system_reminder_lines(
 pub(super) fn render_user_bubble_lines(
     data: &crate::kit::tui_render_unit::TuiUserBubble,
     grid: &GridSpec,
+    inline_pixels: bool,
 ) -> (Vec<Line<'static>>, Vec<ImageLineInfo>) {
     let sem = THEME_ATOM.state().read().semantic;
     // 空文本 user（rewind/重放路径的 thinking 回传消息建模为 user role，
@@ -165,7 +166,9 @@ pub(super) fn render_user_bubble_lines(
         }
         // 整行仅 `![alt](path)`：协议可用且缓存命中 → 预留真实编码尺寸的像素区；
         // 未命中/超出正文行预算保留原文（行内混排不解析，计划 MVP 边界）。
-        if let Some(url) = crate::kit::inline_image::standalone_image_url(raw) {
+        // Detail 等没有 draw hook 的 surface（inline_pixels = false）保持文本，
+        // 否则会留下无法填充的空白占位。
+        if inline_pixels && let Some(url) = crate::kit::inline_image::standalone_image_url(raw) {
             let cols = u16::try_from(grid.content_width()).unwrap_or(u16::MAX);
             if let Some(ready) = crate::kit::inline_image::lookup_ready(
                 &url,

@@ -556,6 +556,47 @@ fn test_user_bubble_standalone_image_renders_placement_when_ready() {
     );
 }
 
+/// 无 draw hook 的 surface（scheduled/detail：inline_pixels=false）不得把已就绪
+/// 图片替换成空白占位——否则 detail 留下无法填充的空行。
+#[test]
+fn test_user_bubble_standalone_image_kept_as_text_without_inline_surface() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("user inline image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    assert!(
+        crate::kit::inline_image::request_until_ready(
+            source,
+            cols,
+            crate::kit::inline_image::USER_IMAGE_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("![a]({source})")));
+    let mut cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines, _, _, _) = render::vm_to_lines_cached_with_layout_scheduled(
+        &vm,
+        &grid,
+        &mut cache,
+        None,
+        false,
+        crate::kit::message_area::grid::ZoneTransition::None,
+    );
+    let text = super::all_text(&lines);
+    assert!(
+        image_lines.is_empty(),
+        "无 draw hook 的 surface 不产出内联放置"
+    );
+    assert!(text.contains("![a]"), "保留原始文本，实际 {text:?}");
+}
+
 /// 行内混排图片不参与替换（MVP 只识别整行语法）。
 #[test]
 fn test_user_bubble_inline_image_syntax_kept_as_text() {

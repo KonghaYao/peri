@@ -769,7 +769,8 @@ fn vm_to_lines_impl(
                     Vec::new(),
                 )
             } else {
-                let (lines, image_lines) = self::user::render_user_bubble_lines(data, grid);
+                let (lines, image_lines) =
+                    self::user::render_user_bubble_lines(data, grid, inline_pixels);
                 (lines, None, None, image_lines, Vec::new())
             }
         }
