@@ -17,6 +17,10 @@ use super::{
 #[derive(Debug, Default)]
 pub struct MemorySwarmStore {
     state: Mutex<MemoryState>,
+    /// Fault injection for unit tests: number of approval settlement appends
+    /// that must fail before the row is accepted.
+    #[cfg(test)]
+    settlement_failures: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Default)]
@@ -33,6 +37,13 @@ impl MemorySwarmStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Test-only: make the next `count` approval settlement appends fail.
+    #[cfg(test)]
+    pub(crate) fn fail_next_settlement_appends(&self, count: usize) {
+        self.settlement_failures
+            .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn lock(&self) -> MutexGuard<'_, MemoryState> {
@@ -165,6 +176,19 @@ impl SwarmStore for MemorySwarmStore {
     }
 
     async fn swarm_append_item(&self, row: SwarmItemRow) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if row.payload.get("state").and_then(Value::as_str) == Some("settled") {
+            let remaining = self
+                .settlement_failures
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if remaining > 0 {
+                self.settlement_failures
+                    .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+                return Err(StoreError::Unavailable(
+                    "injected approval settlement append failure".to_owned(),
+                ));
+            }
+        }
         let mut state = self.lock();
         let items = state.items.entry(row.logical_id.clone()).or_default();
         if items.contains_key(&row.seq) {

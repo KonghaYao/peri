@@ -30,17 +30,17 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
-use super::reader::{ItemLog, TurnOutcome};
+use super::reader::{ApprovalClaim, ApprovalCompletion, ApprovalReceipt, ItemLog, TurnOutcome};
 use super::runtime::{
     local_session_store, AcpChild, ChildConfig, ChildError, ChildShutdown, SessionStoreDeployment,
     WORKSPACE_MCP_SERVER_NAME,
 };
 use crate::domain::{
-    new_root_session_id, turn_id_for_item, ActorKey, Disposition, EnvironmentKind, EnvironmentRef,
-    ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputOutcome, InputState,
-    InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec, OfficialTurn, SandboxView,
-    SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent, SwarmError, TurnPage,
-    TurnStatus, TurnView, TurnsWindow,
+    new_root_session_id, turn_id_for_item, ActorKey, ApprovalDecision, Disposition,
+    EnvironmentKind, EnvironmentRef, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
+    InputOutcome, InputState, InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec,
+    OfficialTurn, SandboxView, SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent,
+    SwarmError, TurnPage, TurnStatus, TurnView, TurnsWindow,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::{
@@ -342,12 +342,15 @@ impl AcpSwarmService {
         let model = self.resolve_model(row.model.as_deref())?;
         let workspace = self.reattach_workspace(&row).await?;
         let hub = self.hub_for(logical_id.as_str());
-        let log = Arc::new(ItemLog::new(
-            logical_id.as_str(),
-            Arc::clone(&self.store),
-            hub.sender.clone(),
-            hub.tail,
-        ));
+        let log = Arc::new(
+            ItemLog::new(
+                logical_id.as_str(),
+                Arc::clone(&self.store),
+                hub.sender.clone(),
+                hub.tail,
+            )
+            .with_approval_declarations(&row.mcp_tools),
+        );
         let session_store = self
             .config
             .session_store
@@ -470,6 +473,7 @@ impl AcpSwarmService {
         row: &SwarmSessionRow,
         turn: Option<TurnSlot>,
         sandbox: Option<SandboxView>,
+        required_actions: Vec<Value>,
     ) -> SessionView {
         crate::service::project_session(
             row,
@@ -478,6 +482,7 @@ impl AcpSwarmService {
                 started_at: Some(slot.started_at),
             }),
             sandbox,
+            required_actions,
         )
     }
 
@@ -495,6 +500,12 @@ impl AcpSwarmService {
 
     async fn view_by_id(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError> {
         let row = self.require_row(logical_id).await?;
+        // Make the persisted approval facts catch up with the host deadline
+        // before the row is projected.
+        let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
+        if let Some(runtime) = runtime {
+            runtime.log.settle_expired_approvals().await?;
+        }
         // Re-read the sequence so a concurrently appended item is reflected.
         let last_item_seq = self.last_seq(logical_id).await?;
         let mut row = row;
@@ -505,7 +516,16 @@ impl AcpSwarmService {
             .get(logical_id.as_str())
             .and_then(|runtime| runtime.turn.borrow().clone());
         let sandbox = self.sandbox_view(&row).await?;
-        Ok(self.session_view(&row, turn, sandbox))
+        let required_actions = self.live_required_actions(logical_id);
+        Ok(self.session_view(&row, turn, sandbox, required_actions))
+    }
+
+    /// Current pending approvals of the live runtime (empty when not live).
+    fn live_required_actions(&self, logical_id: &LogicalId) -> Vec<Value> {
+        self.sessions
+            .lock()
+            .get(logical_id.as_str())
+            .map_or_else(Vec::new, |runtime| runtime.log.required_actions())
     }
 
     fn resolve_model(&self, requested: Option<&str>) -> Result<Option<String>, SwarmError> {
@@ -726,6 +746,89 @@ impl AcpSwarmService {
         Ok(())
     }
 
+    /// Answer one pending approval (`agent.session.input.mcp_approval_request_result`).
+    ///
+    /// Settlement is single-shot: the approval registry removes the pending fact
+    /// before this returns, so a duplicate, a concurrent loser and an answer from
+    /// an older actor generation observe `Settled`/`Unknown` and get a 4xx.
+    /// The answer is delivered to the **original** ACP JSON-RPC request; it never
+    /// creates or queues a turn.
+    pub async fn respond_required_action(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        decision: ApprovalDecision,
+        input_id: Option<String>,
+    ) -> Result<ApprovalReceipt, SwarmError> {
+        self.require_row(logical_id).await?;
+        let runtime = self
+            .sessions
+            .lock()
+            .get(logical_id.as_str())
+            .cloned()
+            .ok_or_else(|| SwarmError::required_action_settled(request_id, "actor_lost"))?;
+        match runtime
+            .log
+            .claim_approval(request_id, input_id.clone())
+            .await
+        {
+            ApprovalClaim::Claimed { acp_request_id } => {
+                if let Err(error) = runtime
+                    .child
+                    .respond_permission(&acp_request_id, decision)
+                    .await
+                {
+                    // The reservation is released and the pending action stays
+                    // answerable: a 502 must never describe a settled action.
+                    runtime.log.release_approval_claim(request_id);
+                    tracing::warn!(
+                        logical_id = logical_id.as_str(),
+                        request_id,
+                        error = %error,
+                        "swarm approval decision could not reach the host; action remains pending"
+                    );
+                    return Err(SwarmError::upstream_unavailable("approval_delivery")
+                        .with_details(json!({ "requestId": request_id })));
+                }
+                match runtime
+                    .log
+                    .complete_approval_claim(request_id, decision, input_id)
+                    .await
+                {
+                    ApprovalCompletion::Completed { receipt } => Ok(receipt),
+                    // The turn ended while delivery was in flight: the durable
+                    // fact wins and the caller is told it is no longer
+                    // answerable instead of receiving a false success.
+                    ApprovalCompletion::Settled { reason } => Err(
+                        SwarmError::required_action_settled(request_id, reason.as_str()),
+                    ),
+                    // Delivery reached the host but the durable settlement did
+                    // not. Report the storage failure; the claim was released
+                    // and the pending fact remains answerable.
+                    ApprovalCompletion::Failed { error } => Err(error),
+                    ApprovalCompletion::Unknown => {
+                        Err(SwarmError::unknown_required_action(request_id))
+                    }
+                }
+            }
+            ApprovalClaim::Duplicate { receipt } => Ok(receipt),
+            ApprovalClaim::Settled { reason } => Err(SwarmError::required_action_settled(
+                request_id,
+                reason.as_str(),
+            )),
+            // The settlement row could not be persisted; the pending fact was
+            // not removed and no success receipt may be returned.
+            ApprovalClaim::Failed { error } => Err(error),
+            // A concurrent answer owns the delivery. Nothing was settled; the
+            // next retry observes the real outcome.
+            ApprovalClaim::InFlight => Err(SwarmError::required_action_settled(
+                request_id,
+                "delivering",
+            )),
+            ApprovalClaim::Unknown => Err(SwarmError::unknown_required_action(request_id)),
+        }
+    }
+
     /// Cancel the turn that is running **now** (or the one named by
     /// `expected`), and wait for it to leave the slot.
     ///
@@ -810,6 +913,21 @@ impl AcpSwarmService {
     /// Stop one live host and forget its runtime. Idempotent.
     pub async fn shutdown(&self, logical_id: &LogicalId) -> Option<ChildShutdown> {
         let runtime = self.sessions.lock().remove(logical_id.as_str())?;
+        // No answer can reach a host that is going away: settle first so the
+        // durable log and `sessions.retrieve` agree that the id is dead. A
+        // store failure is logged: the runtime is already gone, and the
+        // durable pending row is settled by actor recovery.
+        if let Err(error) = runtime
+            .log
+            .invalidate_approvals(crate::domain::SettlementReason::ActorLost)
+            .await
+        {
+            tracing::warn!(
+                logical_id = logical_id.as_str(),
+                error = %error,
+                "swarm approval invalidation on shutdown was not persisted"
+            );
+        }
         Some(runtime.child.shutdown().await)
     }
 
@@ -824,6 +942,16 @@ impl AcpSwarmService {
             .collect();
         let mut reports = Vec::with_capacity(runtimes.len());
         for runtime in runtimes {
+            if let Err(error) = runtime
+                .log
+                .invalidate_approvals(crate::domain::SettlementReason::ActorLost)
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "swarm approval invalidation on shutdown was not persisted"
+                );
+            }
             reports.push(runtime.child.shutdown().await);
         }
         reports
@@ -858,6 +986,37 @@ impl AcpSwarmService {
             .get(logical_id.as_str())
             .is_some_and(|runtime| runtime.log.has_open_turn());
         crate::service::replay_backlog(self.store.as_ref(), &session, start, live_open_turn).await
+    }
+
+    /// Backlog shared by every SSE subscriber (ACP `subscribe`, the actor's
+    /// production `GET /events`, and the gateway's reconnect path).
+    ///
+    /// Order is part of the contract:
+    ///
+    /// 1. settle approvals whose host wait already expired **before** the
+    ///    replay window is read, so a dead `pending` row cannot be projected as
+    ///    a current action;
+    /// 2. replay the persisted rows after the cursor;
+    /// 3. append the current `required_actions` snapshot. A cursor that points
+    ///    after the opening approval row would otherwise never re-learn a
+    ///    still-answerable action. The snapshot reuses the live `event_id`
+    ///    (the oldest pending row's `seq`), so replay and this frame dedupe.
+    pub(crate) async fn subscribe_backlog(
+        &self,
+        logical_id: &LogicalId,
+        start: EventCursor,
+    ) -> Result<Vec<StreamEvent>, SwarmError> {
+        let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
+        if let Some(runtime) = &runtime {
+            runtime.log.settle_expired_approvals().await?;
+        }
+        let mut backlog = self.replay_after(logical_id, start).await?;
+        if let Some(runtime) = &runtime {
+            if let Some(snapshot) = runtime.log.approval_snapshot_event().await {
+                backlog.push(StreamEvent::Official(snapshot));
+            }
+        }
+        Ok(backlog)
     }
 
     /// Resolve the session environment and reserve its Bun workspace (S8a3a).
@@ -983,12 +1142,15 @@ impl AcpSwarmService {
         request: SpawnRequest<'_>,
     ) -> Result<Arc<SessionRuntime>, SwarmError> {
         let hub = self.hub_for(request.logical_id.as_str());
-        let log = Arc::new(ItemLog::new(
-            request.logical_id.as_str(),
-            Arc::clone(&self.store),
-            hub.sender.clone(),
-            hub.tail,
-        ));
+        let log = Arc::new(
+            ItemLog::new(
+                request.logical_id.as_str(),
+                Arc::clone(&self.store),
+                hub.sender.clone(),
+                hub.tail,
+            )
+            .with_approval_declarations(request.mcp_tools),
+        );
         let session_store = self
             .config
             .session_store
@@ -1374,7 +1536,25 @@ impl SwarmService for AcpSwarmService {
     }
 
     async fn list_sessions(&self, window: SessionsWindow) -> Result<SessionPage, SwarmError> {
-        crate::service::list_sessions_from_store(self.store.as_ref(), &window).await
+        let mut page =
+            crate::service::list_sessions_from_store(self.store.as_ref(), &window).await?;
+        // The list reads rows, but a pending approval lives in the live actor.
+        // Overlay it so the list is not stale for the one state the caller must
+        // act on.
+        for view in &mut page.data {
+            let logical_id = LogicalId::parse(&view.logical_id)?;
+            let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
+            if let Some(runtime) = runtime {
+                runtime.log.settle_expired_approvals().await?;
+            }
+            let required_actions = self.live_required_actions(&logical_id);
+            if required_actions.is_empty() {
+                continue;
+            }
+            view.status = crate::domain::SessionStatus::RequiresAction;
+            view.required_actions = required_actions;
+        }
+        Ok(page)
     }
 
     async fn update_session(
@@ -1690,12 +1870,23 @@ impl SwarmService for AcpSwarmService {
         // Receiver first, then backlog: no event can slip between replay and
         // live delivery.
         let live = runtime.channel.subscribe();
-        let backlog = self.replay_after(logical_id, start).await?;
+        let backlog = self.subscribe_backlog(logical_id, start).await?;
         let tail = runtime.log.tail();
         // A host restart rebuilds the log with an empty tail; the store is the
         // authority for items persisted before this process opened a stream.
         tail.fetch_max(self.last_seq(logical_id).await?, Ordering::Relaxed);
         Ok(EventSubscription::new(backlog, live, tail))
+    }
+
+    async fn respond_required_action(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        decision: ApprovalDecision,
+        input_id: Option<String>,
+    ) -> Result<ApprovalReceipt, SwarmError> {
+        AcpSwarmService::respond_required_action(self, logical_id, request_id, decision, input_id)
+            .await
     }
 
     async fn open_stream(&self, logical_id: &LogicalId) -> EventSubscription {
@@ -1839,3 +2030,7 @@ fn queue_unavailable(operation: &'static str, error: ChildError) -> SwarmError {
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "service_test.rs"]
+mod service_test;

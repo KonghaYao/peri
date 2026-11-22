@@ -173,13 +173,15 @@ impl SessionState {
 
 /// Official `sessions.retrieve` status (`openai@7.60.0` `agents.ts`).
 ///
-/// `requires_action` is deliberately absent: the local runtime never waits for
-/// an approval round-trip, so the gateway would have nothing honest to report.
+/// `requires_action` is derived from a **current** pending approval only; the
+/// durable row keeps saying `running`, and a settled/expired approval stops
+/// projecting it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Idle,
     InProgress,
+    RequiresAction,
     Failed,
 }
 
@@ -189,19 +191,23 @@ impl SessionStatus {
         match self {
             Self::Idle => "idle",
             Self::InProgress => "in_progress",
+            Self::RequiresAction => "requires_action",
             Self::Failed => "failed",
         }
     }
 
-    /// Project the durable session state plus the in-process turn slot.
+    /// Project the durable session state plus the in-process facts.
     ///
-    /// An open turn is `in_progress` even while the row still says `running`;
-    /// a failed row without an open turn is `failed` until a later turn
-    /// recovers it. `creating`/`recovering`/`stopped` are not official states
-    /// and project as `idle`.
+    /// A current pending approval is `requires_action` regardless of the turn
+    /// slot; otherwise an open turn is `in_progress` even while the row still
+    /// says `running`. A failed row without an open turn is `failed` until a
+    /// later turn recovers it. `creating`/`recovering`/`stopped` are not
+    /// official states and project as `idle`.
     #[must_use]
-    pub fn project(state: SessionState, turn_active: bool) -> Self {
-        if turn_active || state == SessionState::Running {
+    pub fn project(state: SessionState, turn_active: bool, requires_action: bool) -> Self {
+        if requires_action {
+            Self::RequiresAction
+        } else if turn_active || state == SessionState::Running {
             Self::InProgress
         } else if state == SessionState::Failed {
             Self::Failed
@@ -252,6 +258,17 @@ impl EnvironmentRef {
             kind: EnvironmentKind::None,
             id: None,
         }
+    }
+
+    /// Official `EnvironmentResourceNone` carries no id. Rows written before the
+    /// `none` normalization stored the logical id; projection drops it instead
+    /// of leaking a fabricated resource id.
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        if self.kind == EnvironmentKind::None {
+            self.id = None;
+        }
+        self
     }
 }
 
@@ -333,8 +350,11 @@ pub struct SessionView {
     pub agent: AgentView,
     pub environment: EnvironmentRef,
     pub sandbox: Option<SandboxView>,
-    /// Official `AgentSession.required_actions`; always empty because the local
-    /// runtime never waits for an approval round-trip.
+    /// Official `AgentSession.required_actions`.
+    ///
+    /// Only current (unsettled, unexpired, turn-matching) approvals appear; the
+    /// same validity judgement feeds `sessions.retrieve`, SSE snapshots and
+    /// `sessions.list`.
     #[serde(rename = "required_actions", default)]
     pub required_actions: Vec<Value>,
     /// Official `AgentSession.vault_ids`; the gateway exposes no vaults.

@@ -1,5 +1,6 @@
 //! Protocol-level types shared by the HTTP layer, the typed ports, and tests.
 
+pub mod approval;
 pub mod cursor;
 pub mod error;
 pub mod event;
@@ -11,6 +12,11 @@ pub mod official;
 pub mod session;
 pub mod workspace;
 
+pub use approval::{
+    declared as declared_approvals, escalation_servers, required_action_json, requires_answer,
+    ApprovalDecision, ApprovalPolicy, RequiredAction, ServerApproval, SettlementReason,
+    APPROVAL_ID_PREFIX, MCP_APPROVAL_REQUEST, MCP_TOOL_CALL,
+};
 pub use cursor::{Cursor, EventCursor};
 pub use error::{ErrorCode, ErrorKind, SwarmError};
 pub use event::{StreamEvent, TurnEvent, TurnFailure};

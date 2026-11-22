@@ -3,9 +3,12 @@
 //! 自 `peri-middlewares/src/hitl/shared_mode.rs` 迁入（3.0 批 2 波 1：
 //! 协议类型归契约层；`peri-middlewares::hitl::shared_mode` 保留 re-export 保兼容）。
 
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 /// 权限模式枚举，控制 HITL 审批行为
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +66,14 @@ impl From<u8> for PermissionMode {
 /// 跨线程共享的权限模式状态（`Arc<AtomicU8>` 封装）
 pub struct SharedPermissionMode {
     inner: AtomicU8,
+    /// 会话级审批范围：这些外部 MCP server 的调用即使处于 `Bypass` 也要
+    /// 走审批通道。
+    ///
+    /// 这是**范围**，不是第二个权限模式：空集时 `Bypass` 语义完全不变；
+    /// 非空时只把命中绑定来源的外部 MCP 调用升级为审批，内置工具与其他
+    /// MCP server 仍按原模式放行。`SharedPermissionMode::new` 保持空集，
+    /// 因此既有调用点无需改动。
+    mcp_approval_servers: RwLock<BTreeSet<String>>,
 }
 
 impl SharedPermissionMode {
@@ -70,6 +81,7 @@ impl SharedPermissionMode {
     pub fn new(mode: PermissionMode) -> Arc<Self> {
         Arc::new(Self {
             inner: AtomicU8::new(mode as u8),
+            mcp_approval_servers: RwLock::new(BTreeSet::new()),
         })
     }
 
@@ -82,6 +94,38 @@ impl SharedPermissionMode {
     /// 设置权限模式
     pub fn store(&self, mode: PermissionMode) {
         self.inner.store(mode as u8, Ordering::Relaxed);
+    }
+
+    /// 替换会话级外部 MCP 审批范围。空集 = 不启用范围审批。
+    pub fn set_mcp_approval_servers(&self, servers: impl IntoIterator<Item = String>) {
+        *self.mcp_approval_servers.write() = servers.into_iter().collect();
+    }
+
+    /// 复制另一份共享模式的范围（会话装配派生时使用）。
+    pub fn copy_mcp_approval_servers_from(&self, other: &Self) {
+        *self.mcp_approval_servers.write() = other.mcp_approval_servers.read().clone();
+    }
+
+    /// 当前会话声明的审批范围（按 server 名升序）。
+    #[must_use]
+    pub fn mcp_approval_servers(&self) -> BTreeSet<String> {
+        self.mcp_approval_servers.read().clone()
+    }
+
+    /// 是否启用了外部 MCP 审批范围。
+    #[must_use]
+    pub fn has_mcp_approval_scope(&self) -> bool {
+        !self.mcp_approval_servers.read().is_empty()
+    }
+
+    /// `server` 是否在审批范围内。未知来源返回 `false`，由调用方按
+    /// fail-closed 规则处理（见 `peri-middlewares` 的判定）。
+    #[must_use]
+    pub fn mcp_approval_scoped(&self, server: Option<&str>) -> bool {
+        let Some(server) = server else {
+            return false;
+        };
+        self.mcp_approval_servers.read().contains(server)
     }
 
     /// CAS 循环切换到下一个模式，返回切换后的模式

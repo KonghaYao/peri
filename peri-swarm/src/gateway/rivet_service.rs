@@ -22,8 +22,8 @@ use rivetkit::TypedActorHandle;
 use tokio::sync::broadcast;
 
 use crate::actor::swarm::{
-    ActionEnvelope, Create, Delete, Get, GetTurn, ListItems, ListTurns, Submit, Subscribe,
-    SubscribeOutcome, SwarmActor, Update, ACTOR_NAME,
+    ActionEnvelope, Create, Delete, Get, GetTurn, ListItems, ListTurns, RespondRequiredAction,
+    Submit, Subscribe, SubscribeOutcome, SwarmActor, Update, ACTOR_NAME,
 };
 use crate::domain::{
     new_root_session_id, ActorKey, Cursor, EventCursor, InputOutcome, InputSubmission, ItemPage,
@@ -32,8 +32,8 @@ use crate::domain::{
 };
 use crate::event_stream::FrameParser;
 use crate::service::{
-    CreateSessionCommand, CreateSessionResult, EventSubscription, SessionUpdateCommand,
-    SwarmService,
+    ApprovalReceipt, CreateSessionCommand, CreateSessionResult, EventSubscription,
+    SessionUpdateCommand, SwarmService,
 };
 use crate::store::{store_failure, SwarmStore};
 
@@ -219,6 +219,30 @@ async fn forward_stream(
                 return;
             }
         }
+    }
+}
+
+impl RivetSwarmService {
+    async fn respond_required_action(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        decision: crate::domain::ApprovalDecision,
+        input_id: Option<String>,
+    ) -> Result<ApprovalReceipt, SwarmError> {
+        let handle = self.handle(logical_id)?;
+        let envelope: ActionEnvelope<ApprovalReceipt> = self
+            .call(
+                &handle,
+                RespondRequiredAction {
+                    logical_id: logical_id.as_str().to_owned(),
+                    request_id: request_id.to_owned(),
+                    decision,
+                    input_id,
+                },
+            )
+            .await?;
+        envelope.into_result()
     }
 }
 
@@ -419,6 +443,17 @@ impl SwarmService for RivetSwarmService {
                 EventSubscription::new(Vec::new(), receiver, Arc::new(AtomicU64::new(0)))
             }
         }
+    }
+
+    async fn respond_required_action(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        decision: crate::domain::ApprovalDecision,
+        input_id: Option<String>,
+    ) -> Result<ApprovalReceipt, SwarmError> {
+        RivetSwarmService::respond_required_action(self, logical_id, request_id, decision, input_id)
+            .await
     }
 }
 

@@ -46,8 +46,8 @@ use crate::domain::{
 };
 use crate::event_stream::FrameWriter;
 use crate::service::{
-    CreateSessionCommand, CreateSessionResult, EventSubscription, SessionUpdateCommand,
-    SwarmService,
+    ApprovalReceipt, CreateSessionCommand, CreateSessionResult, EventSubscription,
+    SessionUpdateCommand, SwarmService,
 };
 use crate::store::{store_failure, SwarmStore};
 
@@ -194,7 +194,15 @@ impl SwarmActor {
         // Receiver first, then backlog: no item can slip between replay and
         // live delivery (`design §6.1`).
         let live = self.service.open_stream(&self.logical_id).await;
-        let backlog = match self.service.replay_after(&self.logical_id, start).await {
+        // The production path must behave exactly like `AcpSwarmService::subscribe`:
+        // expiry settlement precedes the replay window, and a reconnect cursor
+        // that points after the opening approval row still receives the current
+        // `required_actions` snapshot.
+        let backlog = match self
+            .service
+            .subscribe_backlog(&self.logical_id, start)
+            .await
+        {
             Ok(backlog) => backlog,
             Err(error) => {
                 return buffered_json(
@@ -292,6 +300,25 @@ impl Actor for SwarmActor {
         let logical_id = self.logical_id.as_str();
         match self.store.swarm_get_session(logical_id).await {
             Ok(Some(row)) => {
+                // A hard crash leaves the opening approval rows `pending`, but
+                // this generation owns no pending registry: settle them before
+                // the recovery view is captured so replay/list/retrieve never
+                // advertise an unanswerable id and the tail includes the new
+                // settlement rows.
+                match crate::service::settle_orphan_approvals(self.store.as_ref(), logical_id).await
+                {
+                    Ok(0) => {}
+                    Ok(settled) => tracing::warn!(
+                        logical_id,
+                        settled,
+                        "swarm settled approvals orphaned by the previous actor"
+                    ),
+                    Err(error) => tracing::warn!(
+                        logical_id,
+                        error = %error,
+                        "swarm could not settle orphaned approvals"
+                    ),
+                }
                 let last_item_seq = match self.store.swarm_last_seq(logical_id).await {
                     Ok(seq) => seq,
                     Err(error) => {
@@ -763,6 +790,57 @@ impl Handler<Submit> for SwarmActor {
                 }
                 Ok(envelope(Ok(accepted.outcome)))
             }
+            Err(error) => Ok(envelope(Err(error))),
+        }
+    }
+}
+
+/// Answer one pending MCP approval (`agent.session.input.mcp_approval_request_result`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RespondRequiredAction {
+    pub logical_id: String,
+    pub request_id: String,
+    pub decision: crate::domain::ApprovalDecision,
+    #[serde(default)]
+    pub input_id: Option<String>,
+}
+
+impl rivetkit::Action for RespondRequiredAction {
+    type Output = ActionEnvelope<ApprovalReceipt>;
+
+    const NAME: &'static str = "respond_required_action";
+}
+
+impl Handler<RespondRequiredAction> for SwarmActor {
+    async fn handle(
+        self: Arc<Self>,
+        _ctx: Ctx<Self>,
+        action: RespondRequiredAction,
+    ) -> Result<ActionEnvelope<ApprovalReceipt>> {
+        let logical_id = match self.check_logical_id(&action.logical_id) {
+            Ok(logical_id) => logical_id,
+            Err(error) => return Ok(envelope(Err(error))),
+        };
+        // An approval lives in the actor that owns the suspended prompt; a
+        // rebuilt actor has no pending registry and answers `actor_lost`.
+        if let Err(error) = self.service.ensure_live(&logical_id).await {
+            return Ok(envelope(Err(error)));
+        }
+        if let Some(error) = self.host_less_error(&logical_id).await {
+            return Ok(envelope(Err(error)));
+        }
+        match self
+            .service
+            .respond_required_action(
+                &logical_id,
+                &action.request_id,
+                action.decision,
+                action.input_id,
+            )
+            .await
+        {
+            Ok(receipt) => Ok(envelope(Ok(receipt))),
             Err(error) => Ok(envelope(Err(error))),
         }
     }

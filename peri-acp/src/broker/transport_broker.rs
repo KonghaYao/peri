@@ -176,7 +176,18 @@ impl AcpTransportBroker {
 
             let request =
                 RequestPermissionRequest::new(self.session_id.clone(), tool_update, options);
-            let params = serde_json::to_value(&request).unwrap_or_default();
+            let mut params = serde_json::to_value(&request).unwrap_or_default();
+            // Binding identity travels with the request (non-MCP approvals omit
+            // it). A gateway that scopes approvals by declared MCP server must
+            // match on this fact instead of the tool name.
+            if let Some(origin) = item.mcp_origin.as_ref() {
+                params["_meta"] = serde_json::json!({
+                    "peri.mcp": {
+                        "server": origin.server,
+                        "tool": origin.tool,
+                    }
+                });
+            }
 
             match self
                 .transport

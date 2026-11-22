@@ -116,6 +116,7 @@ fn approval() -> InteractionContext {
             tool_call_id: "call-1".to_string(),
             tool_name: "Bash".to_string(),
             tool_input: serde_json::json!({"command": "ls"}),
+            mcp_origin: None,
         }],
     }
 }

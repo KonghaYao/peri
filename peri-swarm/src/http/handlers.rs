@@ -230,7 +230,23 @@ pub async fn submit_event(
 ) -> Result<Response, SwarmError> {
     let Json(body) = body.map_err(from_json_rejection)?;
     let logical_id = LogicalId::parse(&logical_id)?;
-    let submission = request::resolve_submission(body, &headers)?;
+    let submission = match request::resolve_event(body, &headers)? {
+        request::SubmitEvent::Input(submission) => submission,
+        request::SubmitEvent::Approval(answer) => {
+            // The answer goes back to the still-suspended `session/prompt`; it
+            // never creates or queues a turn.
+            let receipt = state
+                .service()
+                .respond_required_action(
+                    &logical_id,
+                    &answer.request_id,
+                    answer.decision,
+                    answer.input_id,
+                )
+                .await?;
+            return Ok((StatusCode::ACCEPTED, Json(receipt)).into_response());
+        }
+    };
     // `202` is acceptance, not durable completion: the response is sent once the
     // receipt, user item, and turn reservation are persisted. The turn itself
     // runs out-of-band so a slow model cannot hold the HTTP response open.

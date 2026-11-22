@@ -22,7 +22,12 @@ impl SessionBoundAssembler {
 
 impl SubagentChainAssembler for SessionBoundAssembler {
     fn assemble(&self, context: &SubagentChainContext) -> MiddlewareChain {
-        self.template.chain_assembler.assemble(context)
+        // 父会话的审批范围是会话事实，必须随委派传给子链；agent 层没有这些
+        // 事实，只由持有工具的 middlewares 装配面补齐。
+        let mut context = context.clone();
+        context.permission_mode = self.template.permission_mode.clone();
+        context.interaction_broker = self.template.broker.clone();
+        self.template.chain_assembler.assemble(&context)
     }
 
     fn project_resumed_identity(

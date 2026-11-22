@@ -1,6 +1,13 @@
 # peri-swarm `requires_action` 映射提案
 
-状态：设计提案，修订 2（待批准，未实现）；观察基线 `22e44e0b9`（repo HEAD 会随并行工作前进）。
+状态：已批准并实现（修订 4：2026-11-22 第二轮独立复验返修，修复 `peri-acp` 测试
+目标编译、生产 Rivet SSE 路径的过期结算与订阅快照、结算持久化失败的显式 5xx、
+502 故障注入、子 agent 无 broker 装配测试，以及空来源/空工具名投影与未使用结算
+原因；按本机 `openai@7.60.0` `agents.d.ts` 校正 `required_actions`/答复 body 形状，
+并补齐来源缺失 fail-closed、子 agent 范围继承、硬崩溃恢复与送达一致性）；观察基线
+`22e44e0b9`，实现基线 `deca51f44`。
+实现与逐条验收见 `docs/verification/peri-swarm-requires-action-2026-11-21.md`（保留本文的
+证据边界与历史判断，不改写）。
 本单只回答：官方 `requires_action` 能诚实映射到什么、需要改哪些边界、哪些必须另行批准。
 修订 1 依据一次独立审阅：实时审批与历史回放必须拆开，回答回路未闭合前不实施。
 修订 2 依据文档复验：官方 SDK 没有 `require_approval`、AskUserQuestion 的 `Decline`

@@ -845,6 +845,7 @@ fn parse_item_kind(raw: &str) -> Result<ItemKind, StoreError> {
         "tool_update" => Ok(ItemKind::ToolUpdate),
         "tool_result" => Ok(ItemKind::ToolResult),
         "receipt" => Ok(ItemKind::Receipt),
+        "approval" => Ok(ItemKind::Approval),
         other => Err(unreadable(format!("kind={other:?}"))),
     }
 }

@@ -12,6 +12,13 @@ use crate::identity::AttemptId;
 use crate::session::ExecutionBinding;
 use crate::session::TurnId;
 
+/// Host approval wait: how long a `session/request_permission` stays answerable.
+///
+/// The host's middleware waits this long before settling the tool call as a
+/// policy denial; a gateway that projects `requires_action` must use the same
+/// bound (one source of truth, no second timer in the transport reader).
+pub const APPROVAL_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 // ─── ApprovalItem ──────────────────────────────────────────────────────────────
 
 /// 工具调用审批项
@@ -20,6 +27,22 @@ pub struct ApprovalItem {
     pub tool_call_id: String,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
+    /// 绑定的外部 MCP 来源（server + wire 工具名）。
+    ///
+    /// 仅外部 MCP 调用携带；调用方据此把审批绑回具体 server 声明，而不是按
+    /// 工具名猜测（同名工具会误判）。非 MCP 通道（hook / prompt 入口 / 内置
+    /// 工具）为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_origin: Option<ApprovalOrigin>,
+}
+
+/// 外部 MCP 调用的绑定来源（`ApprovalItem::mcp_origin`）。
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalOrigin {
+    /// ACP `mcpServers[].name`（= 声明的 `server_label`）。
+    pub server: String,
+    /// 该 server 上的 wire 工具名。
+    pub tool: String,
 }
 
 // ─── QuestionItem ──────────────────────────────────────────────────────────────

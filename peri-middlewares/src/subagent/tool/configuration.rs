@@ -39,8 +39,18 @@ impl super::SubAgentTool {
             host: SubagentHost::default(),
             mcp_agent_registry: None,
             broker: None,
+            permission_mode: None,
             chain_assembler: Arc::new(SubagentChainAssemblerImpl::new()),
         }
+    }
+
+    /// 注入父会话共享权限模式（审批范围随子链装配）。
+    pub(crate) fn with_permission_mode(
+        mut self,
+        mode: Option<Arc<peri_acp_types::permission::SharedPermissionMode>>,
+    ) -> Self {
+        self.permission_mode = mode;
+        self
     }
 
     pub(crate) fn with_mcp_agents(

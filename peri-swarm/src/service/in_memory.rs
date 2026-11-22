@@ -225,7 +225,7 @@ impl InMemorySwarmService {
             EnvironmentKind::OpenAiHosted => None,
         };
 
-        Ok(super::project_session(&row, turn, sandbox))
+        Ok(super::project_session(&row, turn, sandbox, Vec::new()))
     }
 
     /// Minimal official session snapshot for `agent.session.idle/failed`.
@@ -245,6 +245,7 @@ impl InMemorySwarmService {
             row.model,
             row.instructions,
         )
+        .with_environment(row.environment.clone().normalized())
         .with_metadata(row.metadata)
         .with_prompt_cache_options(row.prompt_cache_options))
     }
@@ -1293,6 +1294,18 @@ impl SwarmService for InMemorySwarmService {
         }
         let live = hub.sender.subscribe();
         EventSubscription::new(Vec::new(), live, hub.tail)
+    }
+
+    async fn respond_required_action(
+        &self,
+        _logical_id: &LogicalId,
+        request_id: &str,
+        _decision: crate::domain::ApprovalDecision,
+        _input_id: Option<String>,
+    ) -> Result<super::ApprovalReceipt, SwarmError> {
+        // The fake never emits `requires_action`; an id can only be a stale or
+        // fabricated one.
+        Err(SwarmError::unknown_required_action(request_id))
     }
 }
 

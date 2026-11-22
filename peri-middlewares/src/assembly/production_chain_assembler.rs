@@ -162,6 +162,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
                     llm_factory.clone(),
                 )
                 .with_mcp_agents(mcp_agent_registry.clone(), Arc::clone(broker))
+                .with_permission_mode(Some(Arc::clone(permission_mode)))
                 .with_mcp_skills(ctx.mcp_skill_registry.clone())
                 .with_system_builder(system_builder.clone())
                 .with_cancel(cancel.clone())

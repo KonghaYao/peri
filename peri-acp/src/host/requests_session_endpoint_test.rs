@@ -111,6 +111,7 @@ fn scheduled_approval() -> InteractionContext {
             tool_call_id: "cron-call-1".to_string(),
             tool_name: "Bash".to_string(),
             tool_input: json!({"command": "ls"}),
+            mcp_origin: None,
         }],
     }
 }

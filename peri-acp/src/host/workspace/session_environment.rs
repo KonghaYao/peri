@@ -370,9 +370,15 @@ impl SessionEnvironment {
             provider: configuration.provider.clone(),
             peri_config: Arc::new(parking_lot::RwLock::new((*configuration.config).clone())),
             config_source: configuration.config_source.clone(),
-            permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
-                host.permission_mode.load(),
-            ),
+            permission_mode: {
+                // 会话级模式是部署模式的副本；外部 MCP 审批范围是**声明事实**，
+                // 必须一起继承，否则会话链看不到调用方声明的审批绑定。
+                let session_mode = peri_acp_types::permission::SharedPermissionMode::new(
+                    host.permission_mode.load(),
+                );
+                session_mode.copy_mcp_approval_servers_from(&host.permission_mode);
+                session_mode
+            },
             session_resources: host.session_resources.clone(),
             workspace_id,
             // 会话级装配：这里不是部署 owner，拿不到也不持有全局关闭权。

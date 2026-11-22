@@ -17,6 +17,11 @@ pub enum ItemKind {
     ToolUpdate,
     ToolResult,
     Receipt,
+    /// Durable approval fact: an `mcp_approval_request` was opened or settled.
+    ///
+    /// It is a custom item, so it never becomes an official turn output; its
+    /// `seq` is what makes the approval discoverable on reconnect.
+    Approval,
 }
 
 impl ItemKind {
@@ -29,6 +34,7 @@ impl ItemKind {
             Self::ToolUpdate => "tool_update",
             Self::ToolResult => "tool_result",
             Self::Receipt => "receipt",
+            Self::Approval => "approval",
         }
     }
 }

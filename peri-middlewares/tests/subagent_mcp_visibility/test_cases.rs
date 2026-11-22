@@ -188,6 +188,8 @@ pub(super) fn filtered_child(
         frozen_claude_local_md: None,
         frozen_skill_summary: None,
         meta_harness_disabled: Default::default(),
+        permission_mode: None,
+        interaction_broker: None,
     });
     subagent::build_v2_subagent_context(
         None,

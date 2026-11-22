@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::broadcast;
 
+pub use crate::actor::reader::ApprovalReceipt;
+
 use crate::domain::{
     EnvironmentKind, EventCursor, InputOutcome, InputSubmission, ItemPage, ItemsWindow, LogicalId,
     McpToolSpec, OfficialEvent, OfficialMessageItem, OfficialSession, OfficialTurn,
@@ -355,6 +357,7 @@ struct OfficialReplay {
     session_last_active_at: i64,
     model: Option<String>,
     instructions: Option<String>,
+    environment: crate::domain::EnvironmentRef,
     metadata: BTreeMap<String, String>,
     prompt_cache_options: Option<PromptCacheOptions>,
     session_failed: bool,
@@ -497,6 +500,41 @@ fn classify_row(
     }
 }
 
+/// Fold one persisted approval row into the current `required_actions` set.
+fn fold_approval(open: &mut BTreeMap<String, serde_json::Value>, item: &crate::domain::ItemView) {
+    let Some(request_id) = item.payload.get("requestId").and_then(|id| id.as_str()) else {
+        return;
+    };
+    match item.payload.get("state").and_then(|state| state.as_str()) {
+        Some("pending") => {
+            let turn_id = item
+                .payload
+                .get("turnId")
+                .and_then(|turn| turn.as_str())
+                .unwrap_or_default();
+            open.insert(
+                request_id.to_owned(),
+                crate::domain::required_action_json(
+                    request_id,
+                    turn_id,
+                    item.payload
+                        .get("serverLabel")
+                        .and_then(|label| label.as_str())
+                        .unwrap_or_default(),
+                    item.payload.get("name").and_then(|name| name.as_str()),
+                    item.payload.get("arguments"),
+                ),
+            );
+        }
+        Some("settled") => {
+            open.remove(request_id);
+        }
+        // A row this build does not understand stays out of the projection
+        // instead of being guessed.
+        _ => {}
+    }
+}
+
 impl OfficialReplay {
     fn new(row: &crate::store::SwarmSessionRow, live_open_turn: bool) -> Self {
         Self {
@@ -507,6 +545,7 @@ impl OfficialReplay {
             ),
             model: row.model.clone(),
             instructions: row.instructions.clone(),
+            environment: row.environment.clone().normalized(),
             metadata: row.metadata.clone(),
             prompt_cache_options: row.prompt_cache_options,
             session_failed: row.state == crate::domain::SessionState::Failed,
@@ -544,6 +583,10 @@ impl OfficialReplay {
 
         let mut out = Vec::with_capacity(items.len().saturating_mul(2));
         let mut open: Option<usize> = if seed.is_some() { Some(0) } else { None };
+        // Approval rows fold into a current `required_actions` set; each row
+        // republishes the same snapshot the live stream sent for that `seq`, so
+        // a reconnect never resurrects a settled action.
+        let mut open_actions: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         for (item, frame) in items.iter().zip(frames.iter()) {
             if let RowFrame::OpensTurn { .. } = frame {
                 if let Some(previous) = open {
@@ -551,6 +594,14 @@ impl OfficialReplay {
                 }
             }
             out.push(StreamEvent::Item(item.clone()));
+            if item.kind == crate::domain::ItemKind::Approval {
+                fold_approval(&mut open_actions, item);
+                out.push(StreamEvent::Official(self.approval_frame(
+                    item.seq,
+                    open_actions.values().cloned().collect(),
+                )));
+                continue;
+            }
             if let RowFrame::OpensTurn { turn, text } = frame {
                 open = Some(*turn);
                 out.push(StreamEvent::Official(OfficialEvent::session_in_progress(
@@ -613,9 +664,28 @@ impl OfficialReplay {
     /// Official session snapshot for the progress/terminal frames.
     ///
     /// Built from the same persisted session row as the live terminal frames,
-    /// including metadata and prompt cache options. No field is re-read from
-    /// `swarm_turns`, and no environment projection is invented.
+    /// including metadata, prompt cache options and the recorded environment.
+    /// No field is re-read from `swarm_turns`, and an unknown environment stays
+    /// `none` instead of being invented.
     fn official_session(&self, status: SessionStatus) -> OfficialSession {
+        self.official_session_with(status, Vec::new())
+    }
+
+    /// Approval snapshot carried by `agent.session.requires_action`.
+    fn approval_frame(&self, seq: u64, required_actions: Vec<serde_json::Value>) -> OfficialEvent {
+        let status = if required_actions.is_empty() {
+            SessionStatus::InProgress
+        } else {
+            SessionStatus::RequiresAction
+        };
+        OfficialEvent::requires_action(seq, self.official_session_with(status, required_actions))
+    }
+
+    fn official_session_with(
+        &self,
+        status: SessionStatus,
+        required_actions: Vec<serde_json::Value>,
+    ) -> OfficialSession {
         OfficialSession::new(
             &self.logical_id,
             status,
@@ -625,6 +695,8 @@ impl OfficialReplay {
             self.model.clone(),
             self.instructions.clone(),
         )
+        .with_environment(self.environment.clone())
+        .with_required_actions(required_actions)
         .with_metadata(self.metadata.clone())
         .with_prompt_cache_options(self.prompt_cache_options)
     }
@@ -804,6 +876,92 @@ pub async fn replay_backlog(
     Ok(replay.render(&items, seed.as_ref()))
 }
 
+/// Settle approvals left pending by an actor generation that no longer exists.
+///
+/// A hard crash leaves the opening `approval` row `state=pending`; the rebuilt
+/// actor owns no pending registry, so its id can never be answered. Recovery
+/// appends a settlement row (`actor_lost`, or `turn_ended` when the owning turn
+/// already reached a terminal) so replay/retrieve/list stop projecting an
+/// unanswerable action. The fold is idempotent: a second run sees the
+/// settlement row and appends nothing.
+pub(crate) async fn settle_orphan_approvals(
+    store: &dyn SwarmStore,
+    logical_id: &str,
+) -> Result<usize, SwarmError> {
+    let turn_open = store
+        .swarm_has_open_turn(logical_id)
+        .await
+        .map_err(|error| store_failure("has_open_turn", error))?;
+    let mut pending: BTreeMap<String, ()> = BTreeMap::new();
+    let mut after = 0;
+    loop {
+        let page = store
+            .swarm_items_after(logical_id, after, ItemsWindow::MAX_LIMIT)
+            .await
+            .map_err(|error| store_failure("items_after", error))?;
+        let page_len = page.len();
+        if let Some(last) = page.last() {
+            after = last.seq;
+        }
+        for item in page {
+            if item.kind != crate::domain::ItemKind::Approval {
+                continue;
+            }
+            let Some(request_id) = item.payload.get("requestId").and_then(|id| id.as_str()) else {
+                continue;
+            };
+            match item.payload.get("state").and_then(|state| state.as_str()) {
+                Some("pending") => {
+                    pending.insert(request_id.to_owned(), ());
+                }
+                Some("settled") => {
+                    pending.remove(request_id);
+                }
+                _ => {}
+            }
+        }
+        if page_len < ItemsWindow::MAX_LIMIT as usize {
+            break;
+        }
+    }
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let reason = if turn_open {
+        crate::domain::SettlementReason::ActorLost
+    } else {
+        crate::domain::SettlementReason::TurnEnded
+    };
+    let mut seq = store
+        .swarm_last_seq(logical_id)
+        .await
+        .map_err(|error| store_failure("last_seq", error))?;
+    for request_id in pending.keys() {
+        seq = seq.saturating_add(1);
+        store
+            .swarm_append_item(crate::store::SwarmItemRow {
+                logical_id: logical_id.to_owned(),
+                seq,
+                item_id: crate::domain::ItemView::new_item_id(),
+                kind: crate::domain::ItemKind::Approval,
+                source: crate::domain::ItemSource::root(),
+                payload: json!({
+                    "type": crate::domain::MCP_APPROVAL_REQUEST,
+                    "state": "settled",
+                    "requestId": request_id,
+                    "decision": null,
+                    "reason": reason.as_str(),
+                    "inputId": null,
+                }),
+                created_at: peri_time::now_utc_rfc3339(),
+                truncated: false,
+            })
+            .await
+            .map_err(|error| store_failure("append_item", error))?;
+    }
+    Ok(pending.len())
+}
+
 /// Decide whether the window continues a turn from before the cursor.
 ///
 /// A window whose first turn-relevant row is a user item starts a new turn only
@@ -930,8 +1088,13 @@ pub(crate) fn project_session(
     row: &SwarmSessionRow,
     turn: Option<crate::domain::TurnView>,
     sandbox: Option<crate::domain::SandboxView>,
+    required_actions: Vec<serde_json::Value>,
 ) -> SessionView {
-    let status = crate::domain::SessionStatus::project(row.state, turn.is_some());
+    let status = crate::domain::SessionStatus::project(
+        row.state,
+        turn.is_some(),
+        !required_actions.is_empty(),
+    );
     // Older rows stored the logical id even for `none`; the official shape has
     // only `type`, so normalize on projection instead of leaking that id.
     let mut environment = row.environment.clone();
@@ -956,7 +1119,7 @@ pub(crate) fn project_session(
         },
         environment,
         sandbox,
-        required_actions: Vec::new(),
+        required_actions,
         vault_ids: Vec::new(),
         usage: None,
         error: None,
@@ -1013,7 +1176,7 @@ pub(crate) async fn list_sessions_from_store(
     let mut data = Vec::with_capacity(rows.len());
     for row in &rows {
         let sandbox = sandbox_view(store, row).await?;
-        data.push(project_session(row, None, sandbox));
+        data.push(project_session(row, None, sandbox, Vec::new()));
     }
     Ok(SessionPage::new(data, has_more, next_cursor))
 }
@@ -1198,6 +1361,18 @@ pub trait SwarmService: Send + Sync {
     /// Register a stream before `POST /sessions` executes the first turn.
     /// Must not create or touch session rows.
     async fn open_stream(&self, logical_id: &LogicalId) -> EventSubscription;
+
+    /// Answer one pending MCP approval (`agent.session.input.mcp_approval_request_result`).
+    ///
+    /// Implementations that never project `requires_action` (the in-memory fake)
+    /// reject every id as unknown instead of pretending to settle it.
+    async fn respond_required_action(
+        &self,
+        logical_id: &LogicalId,
+        request_id: &str,
+        decision: crate::domain::ApprovalDecision,
+        input_id: Option<String>,
+    ) -> Result<ApprovalReceipt, SwarmError>;
 }
 
 #[cfg(test)]
@@ -1410,7 +1585,7 @@ mod tests {
             last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
             last_item_seq: 0,
         };
-        let view = project_session(&row, None, None);
+        let view = project_session(&row, None, None, Vec::new());
         let value = serde_json::to_value(&view).expect("serialize");
         assert_eq!(value["environment"], serde_json::json!({ "type": "none" }));
         assert!(value["environment"].get("id").is_none(), "{value}");
@@ -1424,5 +1599,277 @@ mod tests {
         assert_eq!(value["last_active_at"], serde_json::json!(1_767_225_600));
         assert!(value.get("createdAt").is_none(), "{value}");
         assert!(value.get("lastActivityAt").is_none(), "{value}");
+    }
+
+    #[test]
+    fn a_current_approval_projects_requires_action_and_the_official_item() {
+        let row = crate::store::SwarmSessionRow {
+            logical_id: "agent-live".to_owned(),
+            root_session_id: "0192f0c5-0000-7000-8000-000000000002".to_owned(),
+            actor_key: "agent/agent-live".to_owned(),
+            cwd: "/tmp".to_owned(),
+            state: SessionState::Running,
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            environment: crate::domain::EnvironmentRef::none(),
+            metadata: Default::default(),
+            prompt_cache_options: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_item_seq: 3,
+        };
+        let action = serde_json::json!({
+            "type": "mcp_approval_request",
+            "id": "appr_1",
+            "server_label": "server-a",
+            "name": "search",
+            "arguments": {},
+        });
+        let view = project_session(&row, None, None, vec![action.clone()]);
+        assert_eq!(view.status, crate::domain::SessionStatus::RequiresAction);
+        assert_eq!(view.required_actions, vec![action]);
+        // Settled: the same row without a current action is in_progress.
+        assert_eq!(
+            project_session(&row, None, None, Vec::new()).status,
+            crate::domain::SessionStatus::InProgress
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_folds_approval_rows_and_never_revives_a_settled_action() {
+        let store: Arc<dyn crate::store::SwarmStore> =
+            Arc::new(crate::store::MemorySwarmStore::new());
+        let row = crate::store::SwarmSessionRow {
+            logical_id: "agent-replay".to_owned(),
+            root_session_id: "0192f0c5-0000-7000-8000-000000000003".to_owned(),
+            actor_key: "agent/agent-replay".to_owned(),
+            cwd: "/tmp".to_owned(),
+            state: SessionState::Running,
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            environment: crate::domain::EnvironmentRef::none(),
+            metadata: Default::default(),
+            prompt_cache_options: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_item_seq: 0,
+        };
+        store
+            .swarm_upsert_session(row.clone())
+            .await
+            .expect("session row");
+        for (seq, payload) in [
+            (
+                1,
+                serde_json::json!({
+                    "type": "mcp_approval_request",
+                    "state": "pending",
+                    "requestId": "appr_1",
+                    "turnId": "turn_1",
+                    "serverLabel": "server-a",
+                    "name": "search",
+                    "arguments": {},
+                }),
+            ),
+            (
+                2,
+                serde_json::json!({
+                    "type": "mcp_approval_request",
+                    "state": "settled",
+                    "requestId": "appr_1",
+                    "decision": "deny",
+                    "reason": "answered",
+                }),
+            ),
+        ] {
+            store
+                .swarm_append_item(crate::store::SwarmItemRow {
+                    logical_id: "agent-replay".to_owned(),
+                    seq,
+                    item_id: format!("itim_approval_{seq}"),
+                    kind: crate::domain::ItemKind::Approval,
+                    source: crate::domain::ItemSource::root(),
+                    payload,
+                    created_at: "2026-01-01T00:00:00Z".to_owned(),
+                    truncated: false,
+                })
+                .await
+                .expect("item");
+        }
+        let events = replay_backlog(&*store, &row, EventCursor::after(0), true)
+            .await
+            .expect("replay");
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Official(official)
+                    if official.event_type() == "agent.session.requires_action" =>
+                {
+                    match official {
+                        crate::domain::OfficialEvent::RequiresAction { event_id, session } => {
+                            Some((event_id.clone(), session.required_actions.clone()))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].0, "evt_item_1_requires_action");
+        assert_eq!(snapshots[0].1.len(), 1);
+        assert_eq!(snapshots[0].1[0]["request_id"], "appr_1");
+        assert_eq!(snapshots[0].1[0]["turn_id"], "turn_1");
+        assert_eq!(snapshots[0].1[0]["request"]["type"], "mcp_tool_call");
+        assert_eq!(snapshots[0].1[0]["request"]["server_label"], "server-a");
+        assert_eq!(snapshots[0].1[0]["request"]["name"], "search");
+        // The settlement row republishes an empty set: the action is gone and
+        // cannot be revived by replaying its opening row.
+        assert_eq!(snapshots[1].0, "evt_item_2_requires_action");
+        assert!(snapshots[1].1.is_empty());
+    }
+
+    fn orphan_row(logical_id: &str) -> crate::store::SwarmSessionRow {
+        crate::store::SwarmSessionRow {
+            logical_id: logical_id.to_owned(),
+            root_session_id: "0192f0c5-0000-7000-8000-00000000000a".to_owned(),
+            actor_key: format!("agent/{logical_id}"),
+            cwd: "/tmp".to_owned(),
+            state: SessionState::Idle,
+            model: None,
+            instructions: None,
+            mcp_tools: Vec::new(),
+            environment: crate::domain::EnvironmentRef::none(),
+            metadata: Default::default(),
+            prompt_cache_options: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_activity_at: "2026-01-01T00:00:00Z".to_owned(),
+            last_item_seq: 0,
+        }
+    }
+
+    async fn append_pending_approval(store: &dyn crate::store::SwarmStore, logical_id: &str) {
+        store
+            .swarm_append_item(crate::store::SwarmItemRow {
+                logical_id: logical_id.to_owned(),
+                seq: 1,
+                item_id: "itim_approval_pending".to_owned(),
+                kind: crate::domain::ItemKind::Approval,
+                source: crate::domain::ItemSource::root(),
+                payload: serde_json::json!({
+                    "type": "mcp_approval_request",
+                    "state": "pending",
+                    "requestId": "appr_orphan",
+                    "turnId": "turn_orphan",
+                    "turnRequestId": "prompt-orphan",
+                    "serverLabel": "server-a",
+                    "name": "search",
+                    "arguments": {},
+                }),
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+                truncated: false,
+            })
+            .await
+            .expect("pending item");
+    }
+
+    async fn settled_reason(
+        store: &dyn crate::store::SwarmStore,
+        logical_id: &str,
+    ) -> Vec<serde_json::Value> {
+        store
+            .swarm_items_after(logical_id, 1, 10)
+            .await
+            .expect("items")
+            .into_iter()
+            .filter(|item| item.kind == crate::domain::ItemKind::Approval)
+            .map(|item| item.payload)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn recovery_settles_orphan_approvals_and_replay_stops_projecting_them() {
+        let store: Arc<dyn crate::store::SwarmStore> =
+            Arc::new(crate::store::MemorySwarmStore::new());
+        let row = orphan_row("agent-orphan");
+        store.swarm_upsert_session(row.clone()).await.expect("row");
+        append_pending_approval(store.as_ref(), &row.logical_id).await;
+
+        assert_eq!(
+            settle_orphan_approvals(store.as_ref(), &row.logical_id)
+                .await
+                .expect("settle"),
+            1
+        );
+        let settlements = settled_reason(store.as_ref(), &row.logical_id).await;
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(settlements[0]["state"], "settled");
+        assert_eq!(settlements[0]["reason"], "turn_ended");
+        assert!(settlements[0]["decision"].is_null());
+
+        // Idempotent: the settlement row is the new fold fact.
+        assert_eq!(
+            settle_orphan_approvals(store.as_ref(), &row.logical_id)
+                .await
+                .expect("second settle"),
+            0
+        );
+
+        let events = replay_backlog(&*store, &row, EventCursor::after(0), false)
+            .await
+            .expect("replay");
+        let projected: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Official(official)
+                    if official.event_type() == "agent.session.requires_action" =>
+                {
+                    match official {
+                        crate::domain::OfficialEvent::RequiresAction { session, .. } => {
+                            Some(session.required_actions.clone())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].len(), 1);
+        assert!(projected.last().expect("last snapshot").is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovery_marks_orphan_approvals_actor_lost_while_the_turn_is_open() {
+        let store: Arc<dyn crate::store::SwarmStore> =
+            Arc::new(crate::store::MemorySwarmStore::new());
+        let row = orphan_row("agent-orphan-open");
+        store.swarm_upsert_session(row.clone()).await.expect("row");
+        store
+            .swarm_upsert_turn(crate::store::SwarmTurnRow {
+                logical_id: row.logical_id.clone(),
+                turn_id: "turn_orphan".to_owned(),
+                status: TurnStatus::InProgress,
+                created_at: 1,
+                started_at: Some(1),
+                completed_at: None,
+                error: None,
+                usage: None,
+                subagent_id: None,
+            })
+            .await
+            .expect("open turn");
+        append_pending_approval(store.as_ref(), &row.logical_id).await;
+
+        assert_eq!(
+            settle_orphan_approvals(store.as_ref(), &row.logical_id)
+                .await
+                .expect("settle"),
+            1
+        );
+        let settlements = settled_reason(store.as_ref(), &row.logical_id).await;
+        assert_eq!(settlements[0]["reason"], "actor_lost");
     }
 }

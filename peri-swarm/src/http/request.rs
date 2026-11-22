@@ -135,8 +135,30 @@ where
     Vec::<T>::deserialize(deserializer).map(Some)
 }
 
-/// The only event accepted from the official `{events: [...]}` envelope.
+/// The official message input event.
 const OFFICIAL_INPUT_EVENT: &str = "agent.session.input.message";
+/// The official MCP approval answer event.
+const OFFICIAL_APPROVAL_RESULT_EVENT: &str = "agent.session.input.mcp_approval_request_result";
+
+/// One accepted `POST /events` submission.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SubmitEvent {
+    /// A user/control input that opens or steers a turn.
+    Input(InputSubmission),
+    /// An answer to a pending MCP approval. It settles one tool call and never
+    /// creates or queues a turn.
+    Approval(ApprovalAnswer),
+}
+
+/// One validated approval answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApprovalAnswer {
+    pub request_id: String,
+    pub decision: crate::domain::ApprovalDecision,
+    /// `Idempotency-Key` of this answer (optional); a replay returns the same
+    /// receipt instead of a conflict.
+    pub input_id: Option<String>,
+}
 
 /// One entry of the official envelope. `type` stays a plain string so an
 /// unsupported official event kind is reported by name instead of collapsing
@@ -148,6 +170,45 @@ struct OfficialEventBody {
     kind: String,
     #[serde(default)]
     input: Option<Value>,
+}
+
+/// Approval result entry. The public id is opaque and is not parsed.
+///
+/// The official (`openai@7.60.0`) shape is:
+///
+/// ```json
+/// {
+///   "type": "agent.session.input.mcp_approval_request_result",
+///   "request_id": "appr_...",
+///   "response": { "type": "mcp_tool_call", "decision": "approve" }
+/// }
+/// ```
+///
+/// The top-level `decision` spelling is kept as a native-client extension.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfficialApprovalResultBody {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(
+        rename = "request_id",
+        alias = "requestId",
+        alias = "approval_request_id"
+    )]
+    request_id: Option<Value>,
+    #[serde(default)]
+    response: Option<OfficialApprovalResponseBody>,
+    #[serde(default)]
+    decision: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OfficialApprovalResponseBody {
+    #[serde(rename = "type", default)]
+    kind: Option<Value>,
+    #[serde(default)]
+    decision: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -561,6 +622,99 @@ pub fn resolve_environment(
     }
 }
 
+/// Resolve `POST /events` into either a turn input or an approval answer.
+pub fn resolve_event(
+    body: SubmitEventBody,
+    headers: &HeaderMap,
+) -> Result<SubmitEvent, SwarmError> {
+    let Some(events) = body.events.as_ref() else {
+        return resolve_submission(body, headers).map(SubmitEvent::Input);
+    };
+    let Some(items) = events.as_array() else {
+        return Err(official_invalid(
+            "events",
+            "events must be an array containing exactly one event",
+        ));
+    };
+    let approval = items.len() == 1
+        && items[0].get("type").and_then(Value::as_str) == Some(OFFICIAL_APPROVAL_RESULT_EVENT);
+    if !approval {
+        return resolve_official_envelope(events, &body, headers).map(SubmitEvent::Input);
+    }
+    if let Some(field) = native_field(&body) {
+        return Err(official_invalid(
+            field,
+            "`events` cannot be combined with native submission fields",
+        ));
+    }
+    let entry: OfficialApprovalResultBody = serde_json::from_value(items[0].clone())
+        .map_err(|error| approval_shape_error(&items[0], error))?;
+    if entry.kind != OFFICIAL_APPROVAL_RESULT_EVENT {
+        return Err(official_invalid(
+            "events[0].type",
+            "only one approval result event is supported",
+        ));
+    }
+    let request_id = entry
+        .request_id
+        .as_ref()
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            official_invalid(
+                "events[0].request_id",
+                "the approval result must name the pending `request_id`",
+            )
+        })?
+        .to_owned();
+    let decision = match entry.response {
+        Some(response) => {
+            // `response.type` is the official discriminant for an MCP tool
+            // call. Accepting another value would answer a different action
+            // kind that this gateway never projected.
+            if response.kind.as_ref().and_then(Value::as_str) != Some(crate::domain::MCP_TOOL_CALL)
+            {
+                return Err(official_invalid(
+                    "events[0].response.type",
+                    "`response.type` must be `mcp_tool_call`",
+                ));
+            }
+            match (response.decision.as_ref(), entry.decision.as_ref()) {
+                (Some(nested), Some(top)) if nested != top => Err(official_invalid(
+                    "events[0].decision",
+                    "top-level `decision` conflicts with `response.decision`",
+                )),
+                (Some(nested), _) => approval_decision(nested, "events[0].response.decision"),
+                (None, Some(top)) => approval_decision(top, "events[0].decision"),
+                (None, None) => Err(official_invalid(
+                    "events[0].response.decision",
+                    "the approval result must carry `response.decision`: approve, deny or cancel",
+                )),
+            }?
+        }
+        None => {
+            let value = entry.decision.as_ref().ok_or_else(|| {
+                official_invalid(
+                    "events[0].response",
+                    "the approval result must carry `response` with `type` and `decision`",
+                )
+            })?;
+            approval_decision(value, "events[0].decision")?
+        }
+    };
+    let input_id = idempotency_key(headers)?;
+    if let Some(input_id) = input_id.as_deref() {
+        if Uuid::parse_str(input_id).is_err() {
+            return Err(SwarmError::invalid_input("Idempotency-Key must be a UUID"));
+        }
+    }
+    Ok(SubmitEvent::Approval(ApprovalAnswer {
+        request_id,
+        decision,
+        input_id,
+    }))
+}
+
 pub fn resolve_submission(
     body: SubmitEventBody,
     headers: &HeaderMap,
@@ -841,6 +995,57 @@ fn official_event_shape_error(value: &Value, error: serde_json::Error) -> SwarmE
         );
     }
     official_invalid("events[0]", &format!("unsupported event shape: {error}"))
+}
+
+/// Map an approval-result deserialization failure to the exact offending field.
+fn approval_shape_error(value: &Value, error: serde_json::Error) -> SwarmError {
+    let Some(object) = value.as_object() else {
+        return official_invalid("events[0]", "each event must be an object");
+    };
+    if !object.get("type").is_some_and(Value::is_string) {
+        return official_invalid("events[0].type", "event must declare a string `type`");
+    }
+    if let Some(response) = object.get("response") {
+        let Some(response) = response.as_object() else {
+            return official_invalid("events[0].response", "`response` must be an object");
+        };
+        if let Some(extra) = response
+            .keys()
+            .find(|key| !matches!(key.as_str(), "type" | "decision"))
+        {
+            return official_invalid(
+                format!("events[0].response.{extra}"),
+                "this approval response field is not supported",
+            );
+        }
+    }
+    if let Some(extra) = object.keys().find(|key| {
+        !matches!(
+            key.as_str(),
+            "type" | "request_id" | "requestId" | "approval_request_id" | "response" | "decision"
+        )
+    }) {
+        return official_invalid(
+            format!("events[0].{extra}"),
+            "this approval result field is not supported",
+        );
+    }
+    official_invalid(
+        "events[0]",
+        &format!("unsupported approval result shape: {error}"),
+    )
+}
+
+/// Read one official `decision` string at its exact field path.
+fn approval_decision(
+    value: &Value,
+    field: &str,
+) -> Result<crate::domain::ApprovalDecision, SwarmError> {
+    let decision = value
+        .as_str()
+        .ok_or_else(|| official_invalid(field, "`decision` must be a string"))?;
+    crate::domain::ApprovalDecision::parse(decision)
+        .ok_or_else(|| official_invalid(field, "decision must be `approve`, `deny` or `cancel`"))
 }
 
 /// Starting point of an SSE subscription.

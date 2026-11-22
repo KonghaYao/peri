@@ -208,6 +208,42 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   `seq` 重连恢复。流式 create 的首轮走同一通道：订阅先于首轮建立，容量内的首轮
   事件实时送达；首轮突发或客户端读取过慢超过容量时同样 `gap` + EOF，不静默丢弃
   （§4.3）。
+- MCP 审批使用同一 item 游标：`kind=approval` 的行记录 `state=pending|settled`、
+  `requestId`（公开不透明 ID `appr_<uuidv7>`）、`turnId`、`serverLabel`、`name`、
+  `arguments` 与结算 `decision`/`reason`。pending 行落库后广播
+  `agent.session.requires_action`（`event_id=evt_item_<seq>_requires_action`，只含
+  当前有效待办）；结算行再次发出同类型快照，剩余集合为空即表示“无待办”。公开
+  投影与官方 `openai@7.60.0` 一致：每条为
+  `{type:"mcp_approval_request",request_id,turn_id,request:{type:"mcp_tool_call",
+  server_label,name,arguments,message}}`；`request_id`/`turn_id` 由待办事实派生，
+  `name`/`arguments` 缺失分别为 `null`，`message` 只描述待审批动作，不伪造工具输出。
+  来源无法归属时 `server_label` 为 `""`：官方该字段是不可空的 `string`，空串是唯一
+  可投影值，语义是“来源未知”，`message` 明确写 “could not be determined”；host
+  给出空工具名时按缺失处理，投影 `name: null`（不造 `name: ""`）。
+  重连补 backlog 时按行折叠：pending 加入、settled 移除，已结算动作不会复活。
+  订阅建立后还会补一帧当前快照（同一 `event_id`，按 id 幂等），覆盖 opener 在游标
+  之前的情况。ACP `subscribe` 与生产 actor 的 `GET /events` 共用同一个
+  backlog 装配：先结算已过期的待办，再读游标之后的回放窗口，最后追加当前快照；
+  两条路径不再各自实现。审批不产生官方 item，也不终结 turn。
+- 答复 body 接受官方
+  `{type:"agent.session.input.mcp_approval_request_result",request_id,
+  response:{type:"mcp_tool_call",decision}}`；`response.type` 必须是
+  `mcp_tool_call`，`decision ∈ approve|deny|cancel`。顶层 `decision` 与
+  `requestId`/`approval_request_id` 只作为原生客户端别名保留，官方形状不会 400。
+  错误 details 指向具体字段（`events[0].response.type`、
+  `events[0].response.decision` 等）。
+- 答复采用两阶段结算：先认领待办并送 ACP，成功后才写 `settled` 并返回成功回执；
+  送达失败释放认领、待办仍可答复并返回 `502 upstream_unavailable`。并发答复只有
+  一个认领成功，其余得到“正在送达”的冲突，不会在送达前删除待办。结算行持久化
+  **先于**内存待办删除：存储失败时返回 `503 required_action_settlement_failed`
+  （`details.requestId`），释放认领并保留待答复事实；不会出现“回执成功但耐久日志
+  仍 pending”或“回执失败但内存已删除”。
+- 硬崩溃恢复：actor 重建时扫描 `state=pending` 的 approval 行，追加结算行
+  （turn 仍打开为 `actor_lost`，turn 已结束为 `turn_ended`）；回放、retrieve 与
+  list 因此不再投影旧代次无法答复的动作。
+- SSE 顺序：工具调用帧（若有）→ `requires_action` → 答复后工具结果帧 →
+  `turn.completed` → `session.idle`。结算快照先于终态发布；`deny`/`cancel` 只结算
+  那一次工具调用，turn 仍由 host 结果收尾。
 - items 按 **item 分组**分页（§4.2.2）：`limit` 同时是 item 数上限与整页聚合行预算，
   `has_more` 按 item 计算，`nextCursor` 是本页最后一个 item 的最大 `seq`（仅
   `has_more=true` 时给出）。`items` 是本页这些 item 的全部原始行；`data` 是每个
@@ -216,7 +252,7 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   接受官方 `after=<itemId>`：解析为该 id 的最大 `seq`，升序取 `MAX(seq) > after`、
   降序取 `MAX(seq) < after`；畸形 id 返回 `400 invalid_query`，与 `afterSeq` 不一致
   返回 `400 conflicting_cursor`。item 是事件级帧（user message、assistant delta、
-  tool_call、tool_update、tool_result），不是官方高层 item；assistant 按
+  tool_call、tool_update、tool_result、approval），不是官方高层 item；assistant 按
   `payload.messageId` 聚合，最终文本取 `payload.complete` 帧，`tool_call` 按
   `payload.toolCallId` 聚合（可能分带/不带 `input` 的两帧）。
 
@@ -335,13 +371,19 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 - `agent.session.in_progress`/`idle`/`failed` 的 `metadata` 来自会话行；官方
   `AgentSession.prompt_cache_options` 是可选项，网关只在有持久值时发送它（没有值
   时字段不出现，而不是伪造 `null`）。实时与回放使用同一会话行投影，字段不静默分叉。
-- `usage` 恒为 `null`；`requires_action` 永不发送（本地没有待审批事实）；
+- `usage` 恒为 `null`；`requires_action` 只对声明了 MCP 审批的 MCP 绑定发送
+  （见 §4.5 与 `spec/issues/2026-11-21-peri-swarm-requires-action-design.md`）；
   `turn.cancelled` 不存在：取消折叠为 `turn.completed(status="cancelled")`；
   budget、subagent 与官方 `function_call` item 不在本层。
+
+  审批范围只由网关扩展 `agent.tools[].require_approval` 触发，匹配依据是绑定身份
+  （`server_label` + wire 工具名），不是工具名；会话级 `PermissionMode` 仍是
+  `Bypass`，只有命中声明的 server 进入审批通道。无法归属到声明的调用 fail-closed：
+  进入待办等待，不默认放行。
 - 本批**不覆盖**的官方事件（本地没有对应持久事实）：`output_text.delta` 等文本
   delta、四种 `reasoning_summary.*`、八种 `environment.*`、三种 `subagent.*`。
-  `AgentSession.environment` 也不在 `OfficialSession` 投影中（已知缺口）；会话
-  快照只包含网关实际持久化的字段。
+  `AgentSession.environment` 已随会话行投影（§4.5）；快照只包含网关实际持久化的
+  字段，未知环境为 `{"type":"none"}`。
 
 
 ### 4.3 创建与首轮
@@ -443,13 +485,28 @@ SRT 启停，表里也没有该列，所以不伪造 `reserved`/`running`。实�
 `GET /v1/sandboxes/{logicalEnvId}` 为准。会话 `cwd` 是网关工作目录，不是工具执行
 目录；工具在 `sandbox.workspacePath` 下执行。
 
-`status` 由会话行与进程内在途 turn 投影：有在途 turn（含已受理未开始）为
-`in_progress`，行状态 `failed` 为 `failed`，否则 `idle`。本地没有审批事实，不会
-出现 `requires_action`。
+`status` 由会话行、进程内在途 turn 与**当前有效待办**投影：有当前待办为
+`requires_action`；否则有在途 turn（含已受理未开始）为 `in_progress`；行状态
+`failed` 为 `failed`；其余 `idle`。有效性的唯一判定点是 `ItemLog::required_actions`：
+待办未结算、未超过 host 审批等待期限（`peri_acp_types::interaction::APPROVAL_WAIT`，
+与 `BROKER_TIMEOUT` 同源），且所属 `session/prompt` 仍是当前执行代次。
+`sessions.retrieve`、SSE 快照、`sessions.list`（对 live actor 覆盖）与回放共用它。
+持久行可以继续是 `running`；`deny`/审批 `cancel` 不提前终止 turn。
+硬崩溃遗留的 pending 行不属于新 actor 的代次：恢复时按 turn 行状态结算为
+`actor_lost`（turn 未结束）或 `turn_ended`（turn 已结束），追加 settled 行后再参与
+折叠，因此 retrieve/list/replay 不会展示不可答复的动作。live actor 的 read/SSE
+路径在读回放窗口前先结算已过期待办；过期或已结算的行不会被当作当前待办。
+答复送达与结算按两阶段执行：送达失败时待办保留、返回 502；只有送达成功才写
+`answered` 并返回成功回执。settled 行先落库再删除内存待办：落库失败返回
+`503 required_action_settlement_failed` 并保留待办，回执成功只描述已持久化的结算。
+`reason` 的取值是 `answered|expired|turn_ended|actor_lost`；ACP 传输关闭按送达
+失败（502）处理，不单独伪造一个持久结算原因。
 
-会话投影同时携带官方默认字段：`required_actions=[]`、`vault_ids=[]`、
-`usage=null`、`error=null`。这些只是形状对齐：网关没有待审批动作、vault、token
-记账或可投影的会话级错误，不会伪造非空值。反序列化对四个字段使用 serde 默认值，
+会话投影同时携带官方默认字段：`required_actions`（当前待办，通常为 `[]`）、
+`vault_ids=[]`、`usage=null`、`error=null`。vault、token 记账与会话级错误没有本地
+事实，不伪造非空值。`OfficialSession.environment` 使用与 REST 相同的
+`{type,id}` 投影：hosted 带 logicalEnvId，`none` 省略 id，未记录时为
+`{"type":"none"}`。反序列化对四个字段使用 serde 默认值，
 旧的持久/测试 JSON 不因缺字段失败。
 
 会话时间字段使用官方 `AgentSession.created_at` / `last_active_at` 的 snake_case

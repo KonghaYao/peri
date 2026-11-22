@@ -457,6 +457,7 @@ fn approval_context() -> InteractionContext {
             tool_call_id: "call_1".into(),
             tool_name: "Bash".into(),
             tool_input: json!({"command": "ls"}),
+            mcp_origin: None,
         }],
     }
 }
@@ -468,6 +469,7 @@ fn approval_context_with_items(count: usize) -> InteractionContext {
                 tool_call_id: format!("call_{index}"),
                 tool_name: "Bash".into(),
                 tool_input: json!({"command": format!("echo {index}")}),
+                mcp_origin: None,
             })
             .collect(),
     }

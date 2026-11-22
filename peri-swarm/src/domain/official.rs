@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::item::ItemOrder;
-use crate::domain::session::{PromptCacheOptions, SessionStatus, SessionView};
+use crate::domain::session::{EnvironmentRef, PromptCacheOptions, SessionStatus, SessionView};
 
 /// Derive the internal turn id from the user item that opened the turn.
 ///
@@ -71,6 +71,13 @@ pub fn turn_in_progress_event_id(turn_id: &str) -> String {
 #[must_use]
 pub fn session_in_progress_event_id(turn_id: &str) -> String {
     format!("evt_{turn_id}_session_in_progress")
+}
+
+/// `requires_action` is a snapshot of the **current** pending approvals, keyed
+/// by the persisted approval item `seq` (no clock, no random source).
+#[must_use]
+pub fn requires_action_event_id(seq: u64) -> String {
+    format!("evt_item_{seq}_requires_action")
 }
 
 #[must_use]
@@ -392,6 +399,9 @@ pub struct OfficialSession {
     pub last_active_at: i64,
     pub error: Option<String>,
     pub agent: OfficialSessionAgent,
+    /// Official `AgentSession.environment`: the session's declared/bound
+    /// environment. Unknown stays `none` with no id -- never invented.
+    pub environment: EnvironmentRef,
     pub metadata: BTreeMap<String, String>,
     /// Optional in `AgentSession`; omitted entirely when the session has no
     /// configured value instead of sending `null`.
@@ -425,12 +435,27 @@ impl OfficialSession {
                 model,
                 instructions,
             },
+            environment: EnvironmentRef::none(),
             metadata: BTreeMap::new(),
             prompt_cache_options: None,
             required_actions: Vec::new(),
             usage: None,
             vault_ids: Vec::new(),
         }
+    }
+
+    /// Fill the current `required_actions` snapshot.
+    #[must_use]
+    pub fn with_required_actions(mut self, required_actions: Vec<Value>) -> Self {
+        self.required_actions = required_actions;
+        self
+    }
+
+    /// Fill the persisted environment projection (`agent.session.*` snapshots).
+    #[must_use]
+    pub fn with_environment(mut self, environment: EnvironmentRef) -> Self {
+        self.environment = environment;
+        self
     }
 
     /// Fill the caller's persisted metadata (`agent.session.idle/failed`).
@@ -454,8 +479,7 @@ impl OfficialSession {
     ///
     /// `POST /sessions?stream=true` has no store read at this layer; the create
     /// result already carries the persisted projection. Only fields the gateway
-    /// actually recorded are copied: `environment` is a known official gap and
-    /// is not invented here.
+    /// actually recorded are copied; an unknown environment stays `none`.
     #[must_use]
     pub fn from_session_view(view: &SessionView) -> Self {
         Self {
@@ -470,6 +494,7 @@ impl OfficialSession {
                 model: view.agent.model.clone(),
                 instructions: view.agent.instructions.clone(),
             },
+            environment: view.environment.clone(),
             metadata: view.metadata.clone(),
             prompt_cache_options: view.prompt_cache_options,
             required_actions: view.required_actions.clone(),
@@ -506,7 +531,8 @@ impl OfficialSessionError {
 
 /// The subset of `AgentSessionEvent` the gateway can honor.
 ///
-/// `requires_action`, `turn.cancelled`, budget and subagent frames are not
+/// `requires_action` is emitted only for a declared MCP approval that is
+/// currently pending. `turn.cancelled`, budget and subagent frames are not
 /// emitted: the local runtime has no corresponding fact. Text deltas,
 /// reasoning frames and environment frames are likewise absent (`design
 /// §4.2.1`); completion is reported through the item/part events below.
@@ -598,6 +624,16 @@ pub enum OfficialEvent {
         turn_id: String,
         turn: OfficialTurn,
         usage: Option<Value>,
+    },
+    /// A current `required_actions` snapshot.
+    ///
+    /// Reused for settlement: after an answer, the same event carries the
+    /// remaining set (possibly empty), so the official collector stops treating
+    /// a resolved action as pending without inventing a terminal.
+    #[serde(rename = "agent.session.requires_action")]
+    RequiresAction {
+        event_id: String,
+        session: OfficialSession,
     },
     #[serde(rename = "agent.session.idle")]
     SessionIdle {
@@ -774,6 +810,14 @@ impl OfficialEvent {
     }
 
     #[must_use]
+    pub fn requires_action(seq: u64, session: OfficialSession) -> Self {
+        Self::RequiresAction {
+            event_id: requires_action_event_id(seq),
+            session,
+        }
+    }
+
+    #[must_use]
     pub fn session_idle(turn_id: &str, session: OfficialSession) -> Self {
         Self::SessionIdle {
             event_id: session_idle_event_id(turn_id),
@@ -814,6 +858,7 @@ impl OfficialEvent {
             Self::TurnOutputTextDone { .. } => "agent.session.turn.output_text.done",
             Self::TurnCompleted { .. } => "agent.session.turn.completed",
             Self::TurnFailed { .. } => "agent.session.turn.failed",
+            Self::RequiresAction { .. } => "agent.session.requires_action",
             Self::SessionIdle { .. } => "agent.session.idle",
             Self::SessionFailed { .. } => "agent.session.failed",
             Self::Error { .. } => "error",
@@ -835,6 +880,7 @@ impl OfficialEvent {
             | Self::TurnOutputTextDone { event_id, .. }
             | Self::TurnCompleted { event_id, .. }
             | Self::TurnFailed { event_id, .. }
+            | Self::RequiresAction { event_id, .. }
             | Self::SessionIdle { event_id, .. }
             | Self::SessionFailed { event_id, .. }
             | Self::Error { event_id, .. } => event_id,

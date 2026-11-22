@@ -30,12 +30,14 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
+use uuid::Uuid;
 
 use crate::domain::official::{unix_from_rfc3339, unix_now};
 use crate::domain::{
-    turn_id_for_item, ErrorCode, ErrorKind, ItemKind, ItemSource, ItemView, OfficialEvent,
-    OfficialMessageItem, OfficialSession, OfficialTurn, SessionState, SessionStatus, StreamEvent,
-    SwarmError, TurnEvent, TurnStatus,
+    declared_approvals, requires_answer, turn_id_for_item, ApprovalDecision, ErrorCode, ErrorKind,
+    ItemKind, ItemSource, ItemView, McpToolSpec, OfficialEvent, OfficialMessageItem,
+    OfficialSession, OfficialTurn, RequiredAction, ServerApproval, SessionState, SessionStatus,
+    SettlementReason, StreamEvent, SwarmError, TurnEvent, TurnStatus, APPROVAL_ID_PREFIX,
 };
 use crate::store::{store_failure, SwarmItemRow, SwarmSessionUpdate, SwarmStore, SwarmTurnRow};
 
@@ -45,6 +47,125 @@ use super::projection::{self, Projected, ProjectedItem};
 const INGEST_SETTLE_WINDOW: Duration = Duration::from_millis(15);
 /// Upper bound of the drain fence, so a noisy stream cannot delay the terminal.
 const INGEST_SETTLE_LIMIT: Duration = Duration::from_millis(500);
+/// Host approval wait, mirrored from the contract (single fact source).
+const APPROVAL_VALIDITY: Duration = peri_acp_types::interaction::APPROVAL_WAIT;
+
+/// How a `session/request_permission` was handled.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PermissionStart {
+    /// The declaration does not cover this tool: answer `allow_once` now.
+    AutoApprove,
+    /// A current pending approval exists; the caller answers it later through
+    /// [`ItemLog::respond_approval`] and the original ACP JSON-RPC id.
+    Pending,
+    /// The request cannot belong to a gateway turn (no open `session/prompt`).
+    /// There is no one to answer it, so the caller refuses it explicitly
+    /// instead of leaving a dangling approval forever.
+    Refuse,
+}
+
+/// One pending approval, kept only in this actor generation.
+#[derive(Clone, Debug)]
+struct PendingApproval {
+    action: RequiredAction,
+    /// Original `session/request_permission` JSON-RPC id; never public.
+    acp_request_id: Value,
+    /// ACP `session/prompt` request id that owned the tool call (execution
+    /// generation). An answer from a later turn cannot match it.
+    turn_request_id: String,
+    /// `seq` of the persisted `approval` item that opened it.
+    item_seq: u64,
+    /// Unix seconds after which the host no longer accepts an answer
+    /// (`peri_acp_types::interaction::APPROVAL_WAIT`).
+    deadline_unix: i64,
+}
+
+/// Terminal fact of one approval, kept for idempotent retries and diagnostics.
+#[derive(Clone, Debug)]
+struct SettledApproval {
+    decision: Option<ApprovalDecision>,
+    reason: SettlementReason,
+    /// `InputSubmission` idempotency key of the accepted answer, if any.
+    input_id: Option<String>,
+}
+
+/// Projection of a settled approval returned to the HTTP layer.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalReceipt {
+    pub request_id: String,
+    pub decision: Option<String>,
+    pub reason: String,
+    pub input_id: Option<String>,
+    /// `duplicate` only when the same idempotency key replayed the answer.
+    pub disposition: String,
+}
+
+impl SettledApproval {
+    fn receipt(&self, request_id: &str, disposition: &'static str) -> ApprovalReceipt {
+        ApprovalReceipt {
+            request_id: request_id.to_owned(),
+            decision: self.decision.map(|decision| decision.as_str().to_owned()),
+            reason: self.reason.as_str().to_owned(),
+            input_id: self.input_id.clone(),
+            disposition: disposition.to_owned(),
+        }
+    }
+}
+
+/// Outcome of one answer attempt.
+#[derive(Clone, Debug)]
+pub enum ApprovalReply {
+    /// Accepted: deliver this body to the still-open ACP request.
+    Applied {
+        acp_request_id: Value,
+        receipt: ApprovalReceipt,
+    },
+    /// Same idempotency key: same receipt, nothing delivered twice.
+    Duplicate { receipt: ApprovalReceipt },
+    /// Already settled (or expired): a 409 with the persisted reason.
+    Settled { reason: SettlementReason },
+    /// Another answer is currently being delivered. Nothing was settled; the
+    /// action remains answerable after that attempt finishes.
+    InFlight,
+    /// The settlement could not be persisted. The action was not removed.
+    SettlementFailed { error: SwarmError },
+    /// Not issued by this actor generation or this session.
+    Unknown,
+}
+
+/// Outcome of phase one of an approval answer.
+#[derive(Clone, Debug)]
+pub enum ApprovalClaim {
+    /// The action is reserved for delivery; the pending fact is still present.
+    Claimed { acp_request_id: Value },
+    /// Same idempotency key: same receipt, nothing delivered twice.
+    Duplicate { receipt: ApprovalReceipt },
+    /// The action expired or its turn ended before delivery could start.
+    Settled { reason: SettlementReason },
+    /// A concurrent answer already reserved the action for delivery.
+    InFlight,
+    /// The settlement row could not be persisted. Nothing was removed from the
+    /// registry; the caller must report a `5xx` instead of a settlement.
+    Failed { error: SwarmError },
+    /// Not issued by this actor generation or this session.
+    Unknown,
+}
+
+/// Outcome of phase two after successful delivery.
+#[derive(Clone, Debug)]
+pub enum ApprovalCompletion {
+    /// Durably settled; this receipt is the HTTP success body.
+    Completed { receipt: ApprovalReceipt },
+    /// The action was settled by another path (for example the turn ended)
+    /// while the delivery was in flight.
+    Settled { reason: SettlementReason },
+    /// The settlement row could not be persisted. The delivery claim was
+    /// released and the pending action remains answerable.
+    Failed { error: SwarmError },
+    /// The claim no longer exists.
+    Unknown,
+}
 
 /// Terminal outcome of a gateway turn, as reported by the gateway.
 #[derive(Clone, Debug, PartialEq)]
@@ -137,6 +258,30 @@ pub struct ItemLog {
     state: Mutex<LogState>,
     /// Mirror of `state.active` for async waiters (turn handoff to a queued run).
     active_watch: watch::Sender<Option<String>>,
+    /// Declared MCP approval bindings (empty = no approval scope).
+    declarations: Vec<ServerApproval>,
+    /// Current/tombstoned approvals. Loaded once per actor generation: a
+    /// restarted actor mints a fresh registry, so old public ids die with it.
+    approvals: Mutex<ApprovalState>,
+}
+
+/// Maximum settled receipts kept for duplicate-answer detection. Keys are
+/// time-sortable UUIDv7 ids, so the cap drops the oldest fact first.
+const SETTLED_APPROVAL_CAP: usize = 256;
+
+#[derive(Default)]
+struct ApprovalState {
+    pending: BTreeMap<String, PendingApproval>,
+    /// Pending actions reserved by an answer whose delivery has not completed.
+    /// The pending row stays until [`ItemLog::complete_approval_claim`].
+    delivering: std::collections::BTreeSet<String>,
+    /// Pending actions reserved while their settlement row is being persisted.
+    ///
+    /// The in-memory transition happens only after the store accepted the
+    /// settlement, so a storage failure leaves the action answerable instead of
+    /// reporting a success that a restart would forget.
+    settling: std::collections::BTreeSet<String>,
+    settled: BTreeMap<String, SettledApproval>,
 }
 
 impl std::fmt::Debug for ItemLog {
@@ -165,7 +310,18 @@ impl ItemLog {
             tail,
             state: Mutex::new(LogState::default()),
             active_watch,
+            declarations: Vec::new(),
+            approvals: Mutex::new(ApprovalState::default()),
         }
+    }
+
+    /// Attach the session's declared approval bindings.
+    ///
+    /// Called once, before the log is shared with the reader.
+    #[must_use]
+    pub fn with_approval_declarations(mut self, tools: &[McpToolSpec]) -> Self {
+        self.declarations = declared_approvals(tools);
+        self
     }
 
     #[must_use]
@@ -506,6 +662,20 @@ impl ItemLog {
             state.continuation = None;
             (std::mem::take(&mut state.streams), state.failure.take())
         };
+        // Approvals owned by this turn can no longer be answered: the prompt
+        // attempt (and its ACP waiter) is gone. Persist the settlement and
+        // publish the empty snapshot before the turn terminal, so a reconnecting
+        // client never believes a dead approval is still pending. A store
+        // failure is logged: the turn terminal still has to be published, and
+        // the durable pending row is settled again by actor recovery.
+        if let Err(error) = self.settle_turn_approvals(request_id).await {
+            tracing::warn!(
+                logical_id = %self.logical_id,
+                request_id,
+                error = %error,
+                "swarm turn-ended approval settlement was not persisted"
+            );
+        }
         // The turn identity stays set while completion items are flushed: their
         // `turn.item.added` frames belong to this turn.
         //
@@ -734,6 +904,7 @@ impl ItemLog {
         status: SessionStatus,
         error: Option<String>,
     ) -> OfficialSession {
+        let required_actions = self.required_actions();
         let row = self.store.swarm_get_session(&self.logical_id).await;
         match row {
             Ok(Some(row)) => OfficialSession::new(
@@ -745,9 +916,12 @@ impl ItemLog {
                 row.model,
                 row.instructions,
             )
+            .with_environment(row.environment.normalized())
+            .with_required_actions(required_actions)
             .with_metadata(row.metadata)
             .with_prompt_cache_options(row.prompt_cache_options),
-            Ok(None) => OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None),
+            Ok(None) => OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None)
+                .with_required_actions(required_actions),
             Err(read_error) => {
                 tracing::warn!(
                     logical_id = %self.logical_id,
@@ -755,6 +929,7 @@ impl ItemLog {
                     "swarm session row was not readable for the official terminal frame"
                 );
                 OfficialSession::new(&self.logical_id, status, 0, 0, error, None, None)
+                    .with_required_actions(required_actions)
             }
         }
     }
@@ -812,6 +987,671 @@ impl ItemLog {
         )
         .await;
         waited.is_ok()
+    }
+
+    // ── MCP approvals (`requires_action`) ──────────────────────────────────
+
+    /// Handle one `session/request_permission` from the host.
+    ///
+    /// The decision is scoped by **binding identity**, not by tool name:
+    ///
+    /// - a declared `never` tool is answered `allow_once` immediately (the
+    ///   caller sends it) and leaves no trace;
+    /// - a declared `always`/scoped/unknown tool becomes a pending approval;
+    /// - a request whose MCP origin is missing cannot be attributed to any
+    ///   declaration and is therefore pending as well (fail-closed).
+    pub async fn begin_permission(
+        &self,
+        acp_request_id: &Value,
+        params: &Value,
+    ) -> Result<PermissionStart, SwarmError> {
+        let origin = params.get("_meta").and_then(|meta| meta.get("peri.mcp"));
+        // An empty label/tool is not a fact: treat it as "unknown" so the
+        // projection uses `server_label: ""` (official type has no null) and
+        // `name: null` (official nullable field) rather than inventing empty
+        // names.
+        let server = origin
+            .and_then(|origin| origin.get("server"))
+            .and_then(Value::as_str)
+            .filter(|server| !server.is_empty())
+            .map(str::to_owned);
+        let tool = origin
+            .and_then(|origin| origin.get("tool"))
+            .and_then(Value::as_str)
+            .filter(|tool| !tool.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                params
+                    .get("toolCall")
+                    .and_then(|call| call.get("title"))
+                    .and_then(Value::as_str)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned)
+            });
+        let arguments = params
+            .get("toolCall")
+            .and_then(|call| call.get("rawInput"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let tool_call_id = params
+            .get("toolCall")
+            .and_then(|call| call.get("toolCallId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        let needs_answer = match (server.as_deref(), tool.as_deref()) {
+            (Some(server), Some(tool)) => requires_answer(&self.declarations, server, tool),
+            // Unattributable: fail-closed.
+            _ => true,
+        };
+        if !needs_answer {
+            return Ok(PermissionStart::AutoApprove);
+        }
+
+        let (turn_id, turn_request_id) = {
+            let state = self.state.lock();
+            (state.turn_id.clone(), state.active.clone())
+        };
+        let Some(turn_request_id) = turn_request_id else {
+            return Ok(PermissionStart::Refuse);
+        };
+        // The official required action carries a `turn_id`; an approval that
+        // cannot name its turn is not answerable and must not be projected.
+        let Some(turn_id) = turn_id else {
+            return Ok(PermissionStart::Refuse);
+        };
+        let request_id = format!("{APPROVAL_ID_PREFIX}{}", Uuid::now_v7());
+        let action = RequiredAction {
+            request_id: request_id.clone(),
+            turn_id: turn_id.clone(),
+            server_label: server.clone().unwrap_or_default(),
+            tool: tool.clone(),
+            arguments: arguments.clone(),
+        };
+        // The pending fact is persisted before the official frame is published:
+        // a reconnect can always read the row that the snapshot names.
+        let payload = json!({
+            "type": crate::domain::MCP_APPROVAL_REQUEST,
+            "state": "pending",
+            "requestId": request_id,
+            "turnId": turn_id,
+            "turnRequestId": turn_request_id,
+            "serverLabel": server,
+            "name": tool,
+            "toolCallId": tool_call_id,
+            "arguments": arguments,
+        });
+        let seq = self
+            .append_item(
+                ProjectedItem {
+                    kind: ItemKind::Approval,
+                    source: ItemSource::root(),
+                    payload,
+                },
+                None,
+            )
+            .await?;
+        {
+            let mut approvals = self.approvals.lock();
+            approvals.pending.insert(
+                request_id,
+                PendingApproval {
+                    action,
+                    acp_request_id: acp_request_id.clone(),
+                    turn_request_id,
+                    item_seq: seq,
+                    deadline_unix: unix_now().saturating_add(APPROVAL_VALIDITY.as_secs() as i64),
+                },
+            );
+        }
+        self.broadcast_required_actions(seq).await;
+        Ok(PermissionStart::Pending)
+    }
+
+    /// Answer a pending approval exactly once.
+    ///
+    /// This is the non-delivering convenience used by tests and by callers
+    /// that have no ACP response to send. The actor service uses the
+    /// two-phase [`Self::claim_approval`] / [`Self::complete_approval_claim`]
+    /// pair so a failed delivery leaves the action answerable.
+    ///
+    /// `input_id` is the caller's idempotency key: replaying the same key
+    /// returns the same receipt instead of a conflict.
+    pub async fn respond_approval(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+        input_id: Option<String>,
+    ) -> ApprovalReply {
+        match self.claim_approval(request_id, input_id.clone()).await {
+            ApprovalClaim::Claimed { acp_request_id } => {
+                match self
+                    .complete_approval_claim(request_id, decision, input_id)
+                    .await
+                {
+                    ApprovalCompletion::Completed { receipt } => ApprovalReply::Applied {
+                        acp_request_id,
+                        receipt,
+                    },
+                    ApprovalCompletion::Settled { reason } => ApprovalReply::Settled { reason },
+                    ApprovalCompletion::Failed { error } => {
+                        ApprovalReply::SettlementFailed { error }
+                    }
+                    ApprovalCompletion::Unknown => ApprovalReply::Unknown,
+                }
+            }
+            ApprovalClaim::Duplicate { receipt } => ApprovalReply::Duplicate { receipt },
+            ApprovalClaim::Settled { reason } => ApprovalReply::Settled { reason },
+            ApprovalClaim::InFlight => ApprovalReply::InFlight,
+            ApprovalClaim::Failed { error } => ApprovalReply::SettlementFailed { error },
+            ApprovalClaim::Unknown => ApprovalReply::Unknown,
+        }
+    }
+
+    /// Phase one of an answer: reserve the pending action for delivery.
+    ///
+    /// The pending fact is **not** removed. The caller sends the decision to
+    /// the suspended ACP request, then either
+    /// [`Self::complete_approval_claim`] (durable settlement) or
+    /// [`Self::release_approval_claim`] (delivery failed; still answerable).
+    /// A concurrent answer observes [`ApprovalClaim::InFlight`] instead of
+    /// deleting the action before delivery is known to have succeeded.
+    pub async fn claim_approval(
+        &self,
+        request_id: &str,
+        input_id: Option<String>,
+    ) -> ApprovalClaim {
+        let now = unix_now();
+        // Lock order is `state` then `approvals` everywhere (see
+        // `required_actions`); reading the generation first keeps that rule.
+        let active = self.state.lock().active.clone();
+        let invalid = {
+            let mut approvals = self.approvals.lock();
+            if approvals.delivering.contains(request_id) || approvals.settling.contains(request_id)
+            {
+                return ApprovalClaim::InFlight;
+            }
+            match approvals.pending.get(request_id).cloned() {
+                None => {
+                    return match approvals.settled.get(request_id) {
+                        Some(settled)
+                            if matches!(
+                                (&settled.input_id, &input_id),
+                                (Some(stored), Some(replayed)) if stored == replayed
+                            ) =>
+                        {
+                            ApprovalClaim::Duplicate {
+                                receipt: settled.receipt(request_id, "duplicate"),
+                            }
+                        }
+                        Some(settled) => ApprovalClaim::Settled {
+                            reason: settled.reason,
+                        },
+                        None => ApprovalClaim::Unknown,
+                    };
+                }
+                Some(pending) => {
+                    let invalid = if pending.deadline_unix < now {
+                        Some(SettlementReason::Expired)
+                    } else if active.as_deref() != Some(pending.turn_request_id.as_str()) {
+                        // The turn that owned this call already ended (or a
+                        // newer generation owns the session): the ACP waiter is
+                        // gone.
+                        Some(SettlementReason::TurnEnded)
+                    } else {
+                        None
+                    };
+                    match invalid {
+                        None => {
+                            approvals.delivering.insert(request_id.to_owned());
+                            return ApprovalClaim::Claimed {
+                                acp_request_id: pending.acp_request_id,
+                            };
+                        }
+                        Some(reason) => {
+                            // Reserve the transition before awaiting the store,
+                            // so a concurrent answer cannot persist a second
+                            // settlement for the same id.
+                            approvals.settling.insert(request_id.to_owned());
+                            reason
+                        }
+                    }
+                }
+            }
+        };
+        match self
+            .persist_approval_settlement(request_id, None, invalid, None)
+            .await
+        {
+            Ok(seq) => {
+                {
+                    let mut approvals = self.approvals.lock();
+                    approvals.settling.remove(request_id);
+                    approvals.pending.remove(request_id);
+                    approvals.delivering.remove(request_id);
+                    approvals.settled.insert(
+                        request_id.to_owned(),
+                        SettledApproval {
+                            decision: None,
+                            reason: invalid,
+                            input_id: None,
+                        },
+                    );
+                }
+                self.broadcast_settlement(seq).await;
+                ApprovalClaim::Settled { reason: invalid }
+            }
+            Err(error) => {
+                // The store did not accept the settlement: keep the pending
+                // fact and report the failure instead of a false 409.
+                self.approvals.lock().settling.remove(request_id);
+                ApprovalClaim::Failed { error }
+            }
+        }
+    }
+
+    /// Phase two (success): durably settle a claimed approval and publish the
+    /// receipt. The action is removed only here, after delivery succeeded.
+    ///
+    /// The settlement row is persisted **before** the in-memory registry
+    /// changes. If the store fails, the claim is released and the action stays
+    /// answerable; a success receipt never describes an unpersisted settlement.
+    pub async fn complete_approval_claim(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+        input_id: Option<String>,
+    ) -> ApprovalCompletion {
+        // A settlement that began in parallel (turn end / expiry) may have
+        // removed the pending fact; in that case report its durable outcome
+        // instead of persisting an answer nobody can observe.
+        {
+            let approvals = self.approvals.lock();
+            if !approvals.pending.contains_key(request_id) {
+                return match approvals.settled.get(request_id) {
+                    Some(settled) => ApprovalCompletion::Settled {
+                        reason: settled.reason,
+                    },
+                    None => ApprovalCompletion::Unknown,
+                };
+            }
+        }
+        let seq = match self
+            .persist_approval_settlement(
+                request_id,
+                Some(decision),
+                SettlementReason::Answered,
+                input_id.as_deref(),
+            )
+            .await
+        {
+            Ok(seq) => seq,
+            Err(error) => {
+                // Delivery already reached the host, but the durable fact does
+                // not exist: release the reservation so the next answer is not
+                // permanently reported as `delivering`.
+                self.release_approval_claim(request_id);
+                tracing::warn!(
+                    logical_id = %self.logical_id,
+                    request_id,
+                    error = %error,
+                    "swarm approval delivery succeeded but its settlement was not persisted"
+                );
+                return ApprovalCompletion::Failed { error };
+            }
+        };
+        let completed = {
+            let mut approvals = self.approvals.lock();
+            approvals.delivering.remove(request_id);
+            approvals.pending.remove(request_id);
+            approvals.settled.insert(
+                request_id.to_owned(),
+                SettledApproval {
+                    decision: Some(decision),
+                    reason: SettlementReason::Answered,
+                    input_id: input_id.clone(),
+                },
+            );
+            if approvals.settled.len() > SETTLED_APPROVAL_CAP {
+                let oldest = approvals.settled.keys().next().cloned();
+                if let Some(oldest) = oldest {
+                    approvals.settled.remove(&oldest);
+                }
+            }
+            approvals
+                .settled
+                .get(request_id)
+                .cloned()
+                .expect("just inserted")
+                .receipt(request_id, "inserted")
+        };
+        self.broadcast_settlement(seq).await;
+        ApprovalCompletion::Completed { receipt: completed }
+    }
+
+    /// Phase two (failure): release the reservation without settling. The
+    /// pending action stays answerable, so a 502 never deletes the action.
+    pub fn release_approval_claim(&self, request_id: &str) {
+        self.approvals.lock().delivering.remove(request_id);
+    }
+
+    /// Test-only: move one pending approval's deadline into the past so the
+    /// expiry path can be exercised without waiting the host's 300 s window.
+    #[cfg(test)]
+    pub(crate) fn expire_approval_now(&self, request_id: &str) {
+        if let Some(pending) = self.approvals.lock().pending.get_mut(request_id) {
+            pending.deadline_unix = unix_now().saturating_sub(1);
+        }
+    }
+
+    /// Lazily settle approvals whose host wait already expired.
+    ///
+    /// There is no second timer: the deadline is the host's own
+    /// `APPROVAL_WAIT`, and this method just makes the persisted fact catch up
+    /// when a reader needs the current state.
+    ///
+    /// A settlement is persisted before the in-memory pending fact is removed.
+    /// A store failure leaves the action pending (filtered out by its deadline)
+    /// and returns the explicit `5xx`; it is never silently reported as settled.
+    pub async fn settle_expired_approvals(&self) -> Result<usize, SwarmError> {
+        let now = unix_now();
+        let expired: Vec<String> = {
+            let approvals = self.approvals.lock();
+            approvals
+                .pending
+                .iter()
+                .filter(|(id, pending)| {
+                    pending.deadline_unix < now
+                        && !approvals.delivering.contains(*id)
+                        && !approvals.settling.contains(*id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let mut settled = 0;
+        let mut first_error: Option<SwarmError> = None;
+        for request_id in expired {
+            {
+                let mut approvals = self.approvals.lock();
+                // The expiry decision was taken under the lock above; re-check
+                // so an answer that started meanwhile keeps ownership.
+                if approvals.delivering.contains(&request_id)
+                    || approvals.settling.contains(&request_id)
+                    || !approvals.pending.contains_key(&request_id)
+                {
+                    continue;
+                }
+                approvals.settling.insert(request_id.clone());
+            }
+            match self
+                .persist_approval_settlement(&request_id, None, SettlementReason::Expired, None)
+                .await
+            {
+                Ok(seq) => {
+                    {
+                        let mut approvals = self.approvals.lock();
+                        approvals.settling.remove(&request_id);
+                        approvals.pending.remove(&request_id);
+                        approvals.delivering.remove(&request_id);
+                        approvals.settled.insert(
+                            request_id.clone(),
+                            SettledApproval {
+                                decision: None,
+                                reason: SettlementReason::Expired,
+                                input_id: None,
+                            },
+                        );
+                    }
+                    self.broadcast_settlement(seq).await;
+                    settled += 1;
+                }
+                Err(error) => {
+                    self.approvals.lock().settling.remove(&request_id);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(settled),
+        }
+    }
+
+    /// Drop pending approvals whose owning turn just ended.
+    pub async fn settle_turn_approvals(&self, turn_request_id: &str) -> Result<usize, SwarmError> {
+        let drained: Vec<String> = {
+            let approvals = self.approvals.lock();
+            approvals
+                .pending
+                .iter()
+                .filter(|(id, pending)| {
+                    pending.turn_request_id == turn_request_id
+                        && !approvals.delivering.contains(*id)
+                        && !approvals.settling.contains(*id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let mut settled = 0;
+        let mut first_error: Option<SwarmError> = None;
+        for request_id in drained {
+            {
+                let mut approvals = self.approvals.lock();
+                if approvals.delivering.contains(&request_id)
+                    || approvals.settling.contains(&request_id)
+                    || !approvals.pending.contains_key(&request_id)
+                {
+                    continue;
+                }
+                approvals.settling.insert(request_id.clone());
+            }
+            match self
+                .persist_approval_settlement(&request_id, None, SettlementReason::TurnEnded, None)
+                .await
+            {
+                Ok(seq) => {
+                    {
+                        let mut approvals = self.approvals.lock();
+                        approvals.settling.remove(&request_id);
+                        approvals.pending.remove(&request_id);
+                        approvals.delivering.remove(&request_id);
+                        approvals.settled.insert(
+                            request_id.clone(),
+                            SettledApproval {
+                                decision: None,
+                                reason: SettlementReason::TurnEnded,
+                                input_id: None,
+                            },
+                        );
+                    }
+                    self.broadcast_settlement(seq).await;
+                    settled += 1;
+                }
+                Err(error) => {
+                    self.approvals.lock().settling.remove(&request_id);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(settled),
+        }
+    }
+
+    /// Drop every pending approval because the actor/transport is gone.
+    pub async fn invalidate_approvals(
+        &self,
+        reason: SettlementReason,
+    ) -> Result<usize, SwarmError> {
+        let drained: Vec<String> = {
+            let approvals = self.approvals.lock();
+            approvals.pending.keys().cloned().collect()
+        };
+        let mut settled = 0;
+        let mut first_error: Option<SwarmError> = None;
+        for request_id in drained {
+            match self
+                .persist_approval_settlement(&request_id, None, reason, None)
+                .await
+            {
+                Ok(seq) => {
+                    {
+                        let mut approvals = self.approvals.lock();
+                        approvals.settling.remove(&request_id);
+                        approvals.pending.remove(&request_id);
+                        approvals.delivering.remove(&request_id);
+                        approvals.settled.insert(
+                            request_id.clone(),
+                            SettledApproval {
+                                decision: None,
+                                reason,
+                                input_id: None,
+                            },
+                        );
+                    }
+                    self.broadcast_settlement(seq).await;
+                    settled += 1;
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(settled),
+        }
+    }
+
+    /// Current `required_actions`: unsettled, unexpired and owned by the open
+    /// turn. Retrieval, list and SSE all read this one judgement.
+    #[must_use]
+    pub fn required_actions(&self) -> Vec<Value> {
+        let now = unix_now();
+        let active = self.state.lock().active.clone();
+        let approvals = self.approvals.lock();
+        approvals
+            .pending
+            .values()
+            .filter(|pending| {
+                pending.deadline_unix >= now
+                    && active.as_deref() == Some(pending.turn_request_id.as_str())
+            })
+            .map(|pending| pending.action.to_json())
+            .collect()
+    }
+
+    /// Official `agent.session.requires_action` snapshot for the current set.
+    ///
+    /// The `event_id` is derived from the oldest pending approval's persisted
+    /// item `seq`; the same id is replayed for the same row, and the settlement
+    /// frame uses the settlement row's `seq`, so the SDK's dedupe never drops a
+    /// state change.
+    pub async fn approval_snapshot_event(&self) -> Option<OfficialEvent> {
+        let (seq, actions) = {
+            let now = unix_now();
+            let active = self.state.lock().active.clone();
+            let approvals = self.approvals.lock();
+            let seq = approvals
+                .pending
+                .values()
+                .filter(|pending| {
+                    pending.deadline_unix >= now
+                        && active.as_deref() == Some(pending.turn_request_id.as_str())
+                })
+                .map(|pending| pending.item_seq)
+                .min()?;
+            let actions: Vec<Value> = approvals
+                .pending
+                .values()
+                .filter(|pending| {
+                    pending.deadline_unix >= now
+                        && active.as_deref() == Some(pending.turn_request_id.as_str())
+                })
+                .map(|pending| pending.action.to_json())
+                .collect();
+            (seq, actions)
+        };
+        Some(OfficialEvent::requires_action(
+            seq,
+            self.official_session(SessionStatus::RequiresAction, None)
+                .await
+                .with_required_actions(actions),
+        ))
+    }
+
+    async fn broadcast_required_actions(&self, seq: u64) {
+        let session = self
+            .official_session(SessionStatus::RequiresAction, None)
+            .await;
+        self.broadcast(StreamEvent::Official(OfficialEvent::requires_action(
+            seq, session,
+        )));
+    }
+
+    /// Persist one settlement row. The in-memory registry must not change until
+    /// this succeeds: the durable log is the replay authority.
+    ///
+    /// The returned `seq` is the settlement row's persisted sequence, used as
+    /// the snapshot `event_id` so live and replay frames dedupe.
+    async fn persist_approval_settlement(
+        &self,
+        request_id: &str,
+        decision: Option<ApprovalDecision>,
+        reason: SettlementReason,
+        input_id: Option<&str>,
+    ) -> Result<u64, SwarmError> {
+        let payload = json!({
+            "type": crate::domain::MCP_APPROVAL_REQUEST,
+            "state": "settled",
+            "requestId": request_id,
+            "decision": decision.map(ApprovalDecision::as_str),
+            "reason": reason.as_str(),
+            "inputId": input_id,
+        });
+        self.append_item(
+            ProjectedItem {
+                kind: ItemKind::Approval,
+                source: ItemSource::root(),
+                payload,
+            },
+            None,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                logical_id = %self.logical_id,
+                request_id,
+                error = %error,
+                "swarm approval settlement was not persisted; the pending fact is kept"
+            );
+            SwarmError::required_action_settlement_failed(request_id, "append_settlement")
+        })
+    }
+
+    /// Publish the post-settlement `requires_action` snapshot with the
+    /// settlement row's `seq`.
+    ///
+    /// A settlement only clears the answered action: if another parallel
+    /// approval is still open, the snapshot must keep reporting
+    /// `requires_action` instead of pretending the session is progressing.
+    async fn broadcast_settlement(&self, seq: u64) {
+        let status = if self.required_actions().is_empty() {
+            SessionStatus::InProgress
+        } else {
+            SessionStatus::RequiresAction
+        };
+        let session = self.official_session(status, None).await;
+        self.broadcast(StreamEvent::Official(OfficialEvent::requires_action(
+            seq, session,
+        )));
     }
 
     /// Persist one projected item, then broadcast it.
@@ -1149,3 +1989,7 @@ fn stream_parts(item: &ProjectedItem) -> Option<(StreamKey, String, String)> {
 #[cfg(test)]
 #[path = "reader_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "approval_test.rs"]
+mod approval_tests;

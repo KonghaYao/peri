@@ -215,33 +215,33 @@ fn completion_frames_match_the_local_sdk_shape() {
 #[test]
 fn session_status_projects_the_durable_state_and_open_turn() {
     assert_eq!(
-        SessionStatus::project(SessionState::Idle, false),
+        SessionStatus::project(SessionState::Idle, false, false),
         SessionStatus::Idle
     );
     assert_eq!(
-        SessionStatus::project(SessionState::Idle, true),
+        SessionStatus::project(SessionState::Idle, true, false),
         SessionStatus::InProgress
     );
     assert_eq!(
-        SessionStatus::project(SessionState::Running, false),
+        SessionStatus::project(SessionState::Running, false, false),
         SessionStatus::InProgress
     );
     assert_eq!(
-        SessionStatus::project(SessionState::Failed, false),
+        SessionStatus::project(SessionState::Failed, false, false),
         SessionStatus::Failed
     );
     // A later turn recovers the session.
     assert_eq!(
-        SessionStatus::project(SessionState::Failed, true),
+        SessionStatus::project(SessionState::Failed, true, false),
         SessionStatus::InProgress
     );
     // States without an official spelling project as idle.
     assert_eq!(
-        SessionStatus::project(SessionState::Creating, false),
+        SessionStatus::project(SessionState::Creating, false, false),
         SessionStatus::Idle
     );
     assert_eq!(
-        SessionStatus::project(SessionState::Stopped, false),
+        SessionStatus::project(SessionState::Stopped, false, false),
         SessionStatus::Idle
     );
     assert_eq!(SessionStatus::Idle.as_str(), "idle");
@@ -281,4 +281,70 @@ fn official_session_carries_persisted_metadata_and_prompt_cache_options() {
     let session = OfficialSession::new("agent-1", SessionStatus::Idle, 0, 0, None, None, None);
     let value = serde_json::to_value(&session).expect("serialize");
     assert!(value.get("prompt_cache_options").is_none());
+}
+
+#[test]
+fn official_sessions_carry_the_recorded_environment() {
+    let session = OfficialSession::new("agent-1", SessionStatus::Idle, 0, 0, None, None, None)
+        .with_environment(crate::domain::EnvironmentRef {
+            kind: crate::domain::EnvironmentKind::OpenAiHosted,
+            id: Some("env-1".to_owned()),
+        });
+    let value = serde_json::to_value(&session).expect("serialize");
+    assert_eq!(
+        value["environment"],
+        json!({ "type": "openai_hosted", "id": "env-1" })
+    );
+
+    // Unknown environment stays officially `none`; no id is fabricated.
+    let session = OfficialSession::new("agent-1", SessionStatus::Idle, 0, 0, None, None, None)
+        .with_environment(crate::domain::EnvironmentRef::none());
+    let value = serde_json::to_value(&session).expect("serialize");
+    assert_eq!(value["environment"], json!({ "type": "none" }));
+}
+
+#[test]
+fn a_requires_action_snapshot_is_an_official_session_event() {
+    let session = OfficialSession::new(
+        "agent-1",
+        SessionStatus::RequiresAction,
+        1,
+        2,
+        None,
+        None,
+        None,
+    )
+    .with_required_actions(vec![json!({
+        "type": "mcp_approval_request",
+        "request_id": "appr_1",
+        "turn_id": "turn_1",
+        "request": {
+            "type": "mcp_tool_call",
+            "server_label": "server-a",
+            "name": "search",
+            "arguments": {},
+            "message": "MCP tool `search` on server `server-a` requires approval",
+        },
+    })]);
+    let event = OfficialEvent::requires_action(9, session);
+    assert_eq!(event.event_type(), "agent.session.requires_action");
+    assert_eq!(event.event_id(), "evt_item_9_requires_action");
+    let value = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(value["type"], "agent.session.requires_action");
+    assert_eq!(value["session"]["object"], "agent.session");
+    assert_eq!(value["session"]["status"], "requires_action");
+    assert_eq!(value["session"]["created_at"], 1);
+    assert_eq!(value["session"]["last_active_at"], 2);
+    assert_eq!(value["session"]["environment"], json!({ "type": "none" }));
+    assert_eq!(value["session"]["metadata"], json!({}));
+    assert_eq!(value["session"]["vault_ids"], json!([]));
+    assert!(value["session"]["usage"].is_null());
+    assert_eq!(
+        value["session"]["required_actions"][0]["request_id"],
+        "appr_1"
+    );
+    assert_eq!(
+        value["session"]["required_actions"][0]["request"]["type"],
+        "mcp_tool_call"
+    );
 }

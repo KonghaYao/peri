@@ -529,3 +529,144 @@ fn official_events_envelope_keeps_the_existing_empty_input_check() {
 
     assert_eq!(error.code(), ErrorCode::EmptyInput);
 }
+
+#[test]
+fn an_approval_result_event_resolves_to_a_decision() {
+    let event = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "request_id": "appr_0192f0c5-0000-7000-8000-000000000001",
+                "response": { "type": "mcp_tool_call", "decision": "approve" },
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect("approval event");
+    let super::SubmitEvent::Approval(answer) = event else {
+        panic!("expected an approval answer");
+    };
+    assert_eq!(
+        answer.request_id,
+        "appr_0192f0c5-0000-7000-8000-000000000001"
+    );
+    assert_eq!(answer.decision, crate::domain::ApprovalDecision::Approve);
+    assert!(answer.input_id.is_none());
+}
+
+#[test]
+fn the_native_top_level_decision_alias_still_resolves() {
+    let event = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "requestId": "appr_alias",
+                "decision": "deny",
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect("native extension");
+    let super::SubmitEvent::Approval(answer) = event else {
+        panic!("expected an approval answer");
+    };
+    assert_eq!(answer.request_id, "appr_alias");
+    assert_eq!(answer.decision, crate::domain::ApprovalDecision::Deny);
+}
+
+#[test]
+fn an_approval_response_type_must_be_mcp_tool_call() {
+    let error = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "request_id": "appr_1",
+                "response": { "type": "computer_use", "decision": "approve" },
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("wrong response type");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "events[0].response.type");
+    assert!(error.message().contains("mcp_tool_call"));
+}
+
+#[test]
+fn an_approval_result_carries_the_idempotency_key_and_rejects_unknown_decisions() {
+    let key = "0192f0c5-0000-7000-8000-0000000000bb";
+    let event = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "request_id": "appr_1",
+                "response": { "type": "mcp_tool_call", "decision": "cancel" },
+            }]
+        })),
+        &idempotency_headers(key),
+    )
+    .expect("approval event");
+    let super::SubmitEvent::Approval(answer) = event else {
+        panic!("expected an approval answer");
+    };
+    assert_eq!(answer.input_id.as_deref(), Some(key));
+    assert_eq!(answer.decision, crate::domain::ApprovalDecision::Cancel);
+
+    let error = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "request_id": "appr_1",
+                "response": { "type": "mcp_tool_call", "decision": "maybe" },
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("unknown decision");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(field(&error), "events[0].response.decision");
+    assert!(error.message().contains("approve"));
+}
+
+#[test]
+fn an_approval_result_requires_the_pending_id() {
+    let error = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "response": { "type": "mcp_tool_call", "decision": "approve" },
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("missing id");
+    assert_eq!(field(&error), "events[0].request_id");
+}
+
+#[test]
+fn an_approval_result_requires_the_official_response_object() {
+    let error = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "request_id": "appr_1",
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("missing response");
+    assert_eq!(field(&error), "events[0].response");
+
+    let error = super::resolve_event(
+        event_body(json!({
+            "events": [{
+                "type": "agent.session.input.mcp_approval_request_result",
+                "request_id": "appr_1",
+                "response": { "type": "mcp_tool_call" },
+            }]
+        })),
+        &HeaderMap::new(),
+    )
+    .expect_err("missing decision");
+    assert_eq!(field(&error), "events[0].response.decision");
+}
