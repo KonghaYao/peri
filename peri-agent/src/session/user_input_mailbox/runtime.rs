@@ -51,6 +51,7 @@ impl UserInputMailbox {
             active.cancel = Some(cancel);
             // 预留期间的 dispatch 还没有真正中断一个执行。
             active.reason = InterruptReason::None;
+            state.model_request_in_flight = false;
             state.revision += 1;
             crate::session::user_input_mailbox::state::ready_ids(&state)
         };
@@ -165,9 +166,10 @@ impl UserInputMailbox {
         }
     }
 
-    /// 当前 attempt 是否被用户暂存区发送打断（steer 而非 Stop）。
+    /// 当前 attempt 是否被模型请求在途时的用户发送打断（steer 而非 Stop）。
     ///
-    /// 必须在 `finish_attempt` 之前判定：收尾会移除 active 记录，之后恒为 false。
+    /// 工具批次/空闲阶段的立即发送不取消执行，因此不会置位。必须在
+    /// `finish_attempt` 之前判定：收尾会移除 active 记录，之后恒为 false。
     #[must_use]
     pub fn is_steer_interruption(&self, ticket: &UserInputRunTicket) -> bool {
         self.state.lock().active.as_ref().is_some_and(|active| {
@@ -215,6 +217,7 @@ impl UserInputMailbox {
                 return;
             }
             let active = state.active.take().expect("已核对执行身份");
+            state.model_request_in_flight = false;
             state.revision += 1;
             state.suspended = false;
             let outcome = active.outcome.unwrap_or(fallback);
@@ -264,6 +267,7 @@ impl UserInputMailbox {
                 active.cancel.clone()
             };
             state.active = None;
+            state.model_request_in_flight = false;
             state.revision += 1;
             state.paused = true;
             state.suspended = false;
@@ -316,6 +320,7 @@ impl UserInputMailbox {
             }
             state.paused = true;
             state.suspended = false;
+            state.model_request_in_flight = false;
             let cancel = state.active.as_mut().and_then(|active| {
                 active.reason = InterruptReason::Stop;
                 active.cancel.clone()

@@ -408,10 +408,15 @@ impl UserInputMailbox {
                         record.handed_off = true;
                     }
                 }
-                if let Some(active) = state.active.as_mut() {
-                    // 用户在 Stop 后重新发送是明确继续；旧 attempt 仍须先完成收尾。
-                    active.reason = crate::session::user_input_mailbox::InterruptReason::Steer;
-                    cancel = active.cancel.clone();
+                // 只有实际 LLM 调用/流式期间才硬取消；工具批次、Compact、idle
+                // 与收尾阶段只放行 MQ，由下一次 Receive 在同一 attempt 内摄取。
+                // MQ 放行已在前一步完成：必须先移交再中断，避免漏发。
+                if state.model_request_in_flight {
+                    if let Some(active) = state.active.as_mut() {
+                        // 用户在 Stop 后重新发送是明确继续；旧 attempt 仍须先完成收尾。
+                        active.reason = crate::session::user_input_mailbox::InterruptReason::Steer;
+                        cancel = active.cancel.clone();
+                    }
                 }
             }
             // 只有存储给出确定结论的 ID 才能离开待发投影；Unknown 保留记录等待重试。

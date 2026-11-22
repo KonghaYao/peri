@@ -152,7 +152,7 @@
 | F-TUI-001 | L2 | 输入提交；绑定提交时的会话身份 | [契约](../design/tui-acp-data-flow.md) |
 | F-TUI-002 | L2 | 流式消息；ACP 事件投影为稳定展示状态 | [契约](../design/tui-acp-data-flow.md) |
 | F-TUI-003 | L2 | 工具活动；调用身份连接开始、输出和终态 | [契约](../design/tui-acp-data-flow.md) |
-| F-TUI-004 | L2 | 待发送队列；取回与投递有明确用户反馈 | [契约](../design/tui-acp-data-flow.md) |
+| F-TUI-004 | L2 | 待发送队列；阶段化立即发送、取回与投递反馈 | [契约](../design/tui-acp-data-flow.md) |
 | F-TUI-005 | L2 | 历史浏览；窗口翻页不阻塞 live 尾部 | [契约](../design/tui-acp-data-flow.md) |
 | F-TUI-006 | L3 | 子 Agent 面板；活动和终态保留所属身份 | [契约](../design/tui-acp-data-flow.md) |
 | F-TUI-007 | L3 | 任务面板；查询取消与输出引用可追踪 | [契约](../design/tui-acp-data-flow.md) |

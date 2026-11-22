@@ -232,6 +232,14 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 使用 generate_reasoning_with_observed_body：观测体复用本次调用已构建的
     // request（消除每轮 request 双构建），LlmRequestPayload 在成功后、LlmCallEnd
     // 之前 emit——Langfuse 按 step 缓存 raw_body，时序兼容（on_llm_end 前到达即可）。
+    // 立即发送的阶段门：只有这次实际模型调用/流式期间才允许硬取消。
+    // 请求准备与响应后处理不在 guard 内；子 Agent 没有 mailbox，自然 no-op。
+    let steer_gate = ctx
+        .session
+        .user_input_mailbox
+        .as_ref()
+        .map(|mailbox| mailbox.begin_model_request());
+
     let (reasoning, observed_body): (Reasoning, Option<serde_json::Value>) = tokio::select! {
         biased;
         _ = ctx.session.turn.cancel_token.cancelled() => {
@@ -286,6 +294,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             }
         }
     };
+    // select 结束即关闭窗口；后续事件与 payload 处理期间不得再被 steer 取消。
+    drop(steer_gate);
 
     // emit LlmRequestPayload（仅发送 Model 的安全 observation body；复用本次
     // LLM 调用已构建的 request，见 generate_reasoning_with_observed_body）

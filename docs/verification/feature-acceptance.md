@@ -152,7 +152,7 @@
 | F-TUI-001 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：输入提交的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-TUI-002 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：流式消息的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-TUI-003 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：工具活动的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-TUI-004 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：待发送队列的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
+| F-TUI-004 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-agent/src/session/user_input_mailbox)；[相关测试](../../peri-agent/src/session/user_input_mailbox_test.rs)；阶段门定向验证见 [验收记录](steer-stage-gate-2026-11-22.md)；缺口：真实 TUI 交互与外置场景仍待测试仓对账 | 本地定向复验；未跑全量/e2e |
 | F-TUI-005 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：历史浏览的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-TUI-006 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：子 Agent 面板的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-TUI-007 | 源码存在 | [契约](../design/tui-acp-data-flow.md) | [源码](../../peri-tui/src/kit)；缺口：任务面板的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |

@@ -118,6 +118,11 @@ pub(super) struct MailboxState {
     pub(super) admissions_in_flight: usize,
     pub(super) paused: bool,
     pub(super) suspended: bool,
+    /// 实际 LLM 调用/流式窗口；只有此窗口内的立即发送才中断当前执行。
+    ///
+    /// 请求准备与响应后处理不属于该窗口：立即发送此时只放行 MQ，由下一次
+    /// Receive 在同一 attempt 内摄取。
+    pub(super) model_request_in_flight: bool,
     pub(super) valid: bool,
     pub(super) delivered_notifications: HashSet<String>,
     pub(super) delivery_journal: VecDeque<PendingDeliveryNotification>,
@@ -164,6 +169,7 @@ impl UserInputMailbox {
                 admissions_in_flight: 0,
                 paused: false,
                 suspended: false,
+                model_request_in_flight: false,
                 valid: true,
                 delivered_notifications: HashSet::new(),
                 delivery_journal: VecDeque::new(),
@@ -193,6 +199,36 @@ impl UserInputMailbox {
             .active
             .as_ref()
             .is_some_and(|active| active.managed)
+    }
+
+    /// 标记实际 LLM 调用/流式窗口开始；Drop 时复位。
+    ///
+    /// 窗口只覆盖 `run_reason` 中与 cancel 竞争的 select：请求准备和响应后处理
+    /// 不得被当作可中断窗口，否则工具批次之外的立即发送会误取消本轮。
+    pub(crate) fn begin_model_request(self: &Arc<Self>) -> ModelRequestGuard {
+        {
+            let mut state = self.state.lock();
+            debug_assert!(
+                !state.model_request_in_flight,
+                "model request guard must not nest"
+            );
+            state.model_request_in_flight = true;
+        }
+        ModelRequestGuard {
+            mailbox: Arc::clone(self),
+        }
+    }
+}
+
+/// 实际模型请求的在途 guard；生命周期覆盖一次 `run_reason` 的 select。
+#[must_use = "dropping the guard immediately would re-enable soft steer delivery"]
+pub(crate) struct ModelRequestGuard {
+    mailbox: Arc<UserInputMailbox>,
+}
+
+impl Drop for ModelRequestGuard {
+    fn drop(&mut self) {
+        self.mailbox.state.lock().model_request_in_flight = false;
     }
 }
 

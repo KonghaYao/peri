@@ -275,7 +275,7 @@ pub enum MqInput {
 
 ### 5.3 发送选择
 
-`send_inputs` 只提交运行期发送选择，复用现有显式 Steer 中断及收尾规则。它等待 Receive 的移交结果，不写 `released`、命令回执或恢复阶段。
+`send_inputs` 只提交运行期发送选择，不自行中断执行。是否取消由 mailbox 的阶段门决定：实际 LLM 调用/流式期间才按 Steer 中断；工具批次、Compact、idle 与收尾阶段只放行 MQ，由下一次 Receive 在现有 attempt 内摄取。它等待 Receive 的移交结果，不写 `released`、命令回执或恢复阶段。
 
 `Unknown` 或无法确认的发送错误保留 `Dispatching`，不重置成 `Queued`；显式重试使用同一消息 ID 查询／发送。收尾仅在确认 MQ 行仍存在时回收，历史查询未知或 MQ 缺失都不能证明未发送。
 

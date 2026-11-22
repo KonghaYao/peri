@@ -742,14 +742,19 @@ fn test_mailbox_steer_then_late_idle_preserves_selected_continuation() {
     mailbox
         .enqueue_sync(&selected)
         .expect("the enqueue sync fixture result is required for this assertion");
+    let gate = mailbox.begin_model_request();
     mailbox
         .dispatch_sync(&crate::session::user_input_mailbox::tests::make_dispatch(
             &mailbox,
             &[&selected],
         ))
         .expect("the dispatch sync fixture result is required for this assertion");
+    drop(gate);
     mailbox.enter_idle_sync();
-    assert!(cancel.is_cancelled(), "立即发送先请求旧执行收尾");
+    assert!(
+        cancel.is_cancelled(),
+        "模型请求在途的立即发送先请求旧执行收尾"
+    );
 
     let later =
         crate::session::user_input_mailbox::tests::make_input(&mailbox, "C 收尾期间的新待办");
