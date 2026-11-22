@@ -452,6 +452,56 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         ),
     );
 
+    // 内联图片调度（effect 边界——render body 只查表，不读文件不起线程）：
+    // 只扫描当前可见 slot；请求去重/尺寸键/陈旧代理由 inline_image 缓存负责。
+    // deps 含可见范围与正文宽度：滚动/resize/内容变化时重新扫描。
+    let inline_image_visible =
+        slot_index.visible_slots(scroll_state.read().offset(), vis_height as usize);
+    let inline_image_start = inline_image_visible.start;
+    let inline_image_end = inline_image_visible.end;
+    let inline_image_content_cols = u16::try_from(grid.content_width()).unwrap_or(u16::MAX);
+    let inline_image_process_cols = u16::try_from(grid.process_content_width()).unwrap_or(u16::MAX);
+    let inline_image_revision = crate::kit::inline_image::revision();
+    {
+        let snapshot = snapshot.clone();
+        hooks.use_effect(
+            move || {
+                // 图片完成后先淘汰可见的图片消息缓存：EntryRenderCache 的版本比较
+                // 只在 ensure 被调用时生效，而内容哈希未变不会触发 ensure。
+                {
+                    let mut caches = vm_caches.write_no_update();
+                    for slot in inline_image_start..inline_image_end {
+                        let Some(cache) = caches.get_mut(slot) else {
+                            continue;
+                        };
+                        if cache.entry.has_inline_image() == Some(true)
+                            && cache.entry.inline_image_revision() != Some(inline_image_revision)
+                        {
+                            cache.evict();
+                        }
+                    }
+                }
+                for slot in inline_image_start..inline_image_end {
+                    if let Some(vm) = snapshot.items.get(slot) {
+                        crate::kit::inline_image::request_vm_images(
+                            vm,
+                            inline_image_content_cols,
+                            inline_image_process_cols,
+                        );
+                    }
+                }
+            },
+            (
+                vm_generation,
+                inline_image_start,
+                inline_image_end,
+                inline_image_content_cols,
+                inline_image_process_cols,
+                inline_image_revision,
+            ),
+        );
+    }
+
     if empty {
         // 重置滚动条字段，避免 Welcome 页面残留旧会话的滚动条
         *scrollbar_fields.write_no_update() = ScrollbarFields::default();

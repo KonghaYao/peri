@@ -162,12 +162,12 @@ pub(crate) fn preview_geometry(term_w: u16, term_h: u16) -> Option<Rect> {
 
 // ── 请求流程（§7.3，事件边界调用）────────────────────────────────────────
 
-/// 后台解码（生产路径）：从 T5 已校验缓冲解码（F2：**不得按路径二次打开**——
-/// validate 通过后文件可能被替换，缓冲是唯一可信数据源，字节数 ≤
-/// [`MAX_IMAGE_BYTES`] 天然生效）。header 尺寸校验（防恶意 header 撑爆内存）
-/// → 整图解码 → 解码后复核尺寸（纵深防御）。返回内部原因分类
-/// （"io"/"format"/"too-large"），不泄漏路径细节。
-fn decode_image(buf: Vec<u8>) -> Result<DynamicImage, &'static str> {
+/// 后台解码（生产路径，overlay 与消息区内联图片共用）：从 T5 已校验缓冲
+/// 解码（F2：**不得按路径二次打开**——validate 通过后文件可能被替换，缓冲是
+/// 唯一可信数据源，字节数 ≤ [`MAX_IMAGE_BYTES`] 天然生效）。header 尺寸校验
+/// （防恶意 header 撑爆内存）→ 整图解码 → 解码后复核尺寸（纵深防御）。返回
+/// 内部原因分类（"io"/"format"/"too-large"），不泄漏路径细节。
+pub(crate) fn decode_image(buf: Vec<u8>) -> Result<DynamicImage, &'static str> {
     let reader = image::ImageReader::new(std::io::Cursor::new(&buf))
         .with_guessed_format()
         .map_err(|_| "format")?;

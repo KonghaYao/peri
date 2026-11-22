@@ -549,10 +549,26 @@ fn vm_to_lines_impl(
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::Image(img) => {
-                                // 降级行已在 convert 阶段折行（wrap_styled_line），
-                                // 前缀/空行逻辑与 Text 分支一致。
-                                for line in &img.lines {
-                                    lines.push(body_line(line.clone()));
+                                // 本地独占段落图片：只查半块行缓存（render body 不做 IO）；
+                                // 未命中（Pending/Failed/窄屏/远程/行内混排）保留 convert
+                                // 阶段折好的降级行，视觉与旧行为一致。
+                                let image_lines = if img.is_remote || !img.standalone {
+                                    None
+                                } else {
+                                    crate::kit::inline_image::lookup_ready(
+                                        &img.url,
+                                        u16::try_from(body_width).unwrap_or(u16::MAX),
+                                        crate::kit::inline_image::MAX_ROWS,
+                                    )
+                                };
+                                if let Some(image_lines) = image_lines {
+                                    for line in image_lines.iter() {
+                                        lines.push(body_line(line.clone()));
+                                    }
+                                } else {
+                                    for line in &img.lines {
+                                        lines.push(body_line(line.clone()));
+                                    }
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::Mermaid(segment) => {

@@ -7,6 +7,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::kit::message_area::grid::ZoneTransition;
 
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::style::Color;
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+
 // ── md 复制按钮 ─────────────────────────────────────────────────────────
 
 /// 顶层渲染（render_copy_button=true）时，超过 MD_COPY_MIN_CHARS（400）字符的
@@ -663,5 +669,127 @@ fn test_mermaid_terminal_parse_shows_the_final_diagram() {
     assert!(
         !rendered.contains("graph TD"),
         "闭合终稿不应退回源码，实际 {rendered:?}"
+    );
+}
+
+// ── 消息区内联图片（半块版）──────────────────────────────────────────────
+
+fn write_red_png(path: &std::path::Path) {
+    let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([220, 30, 30, 255]));
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .expect("inline image render: png fixture must encode");
+}
+
+fn has_red_halfblock_cell(lines: &[Line<'static>]) -> bool {
+    let width = 120u16;
+    let height = u16::try_from(lines.len()).unwrap_or(1).max(1);
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("test backend constructs");
+    terminal
+        .draw(|frame| frame.render_widget(Paragraph::new(lines.to_vec()), frame.area()))
+        .expect("test backend draws");
+    let buffer = terminal.backend().buffer();
+    let red = Color::Rgb(220, 30, 30);
+    (0..height).any(|y| (0..width).any(|x| buffer[(x, y)].fg == red && buffer[(x, y)].bg == red))
+}
+
+/// 本地 PNG 缓存命中后，assistant 独占图片段渲染为半块行（真实 cell 前景/背景色），
+/// 不再输出 `[Image: …]` 降级文本；行数受 8 行上限约束。
+#[test]
+fn test_assistant_local_image_renders_halfblocks() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("assistant local image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    let source = file.to_str().expect("utf8 path");
+    let grid = GridSpec::grid_for(120);
+    crate::kit::inline_image::request(
+        source,
+        u16::try_from(grid.content_width()).expect("content width fits u16"),
+        crate::kit::inline_image::MAX_ROWS,
+    );
+    assert!(
+        crate::kit::inline_image::wait_ready(
+            source,
+            u16::try_from(grid.content_width()).expect("content width fits u16"),
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+
+    let text = format!("{}\n\n![a]({source})\n\nafter", "x".repeat(100));
+    let vm = super::assistant_bubble_with_text(&text, 71);
+    let lines = render::vm_to_lines(&vm, &grid);
+
+    let rendered = super::all_text(&lines);
+    assert!(
+        !rendered.contains("[Image: a]"),
+        "命中缓存后不应保留降级文本，实际 {rendered:?}"
+    );
+    let halfblocks = lines
+        .iter()
+        .filter(|line| line.spans.iter().any(|span| span.content.contains('█')))
+        .count();
+    assert!(halfblocks > 0 && halfblocks <= usize::from(crate::kit::inline_image::MAX_ROWS));
+    assert!(
+        has_red_halfblock_cell(&lines),
+        "TestBackend 中应出现非默认 fg/bg 的半块 cell"
+    );
+}
+
+/// 远程 URL 不请求、不替换：保留 `[Remote image: …]` 降级行。
+#[test]
+fn test_remote_image_keeps_degraded_line() {
+    crate::i18n::init(Some("en"));
+    let vm = super::assistant_bubble_with_text("![a](https://example.com/a.png)", 72);
+    let lines = render::vm_to_lines(&vm, &GridSpec::grid_for(100));
+    let rendered = super::all_text(&lines);
+    assert!(
+        rendered.contains("[Remote image: a]"),
+        "远程图片保持降级文本，实际 {rendered:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
+        "远程图片不得渲染半块行"
+    );
+}
+
+/// 本地校验/解码失败：缓存进入 Failed，渲染保留原 `[Image: …]` 降级行。
+#[test]
+fn test_local_image_failure_keeps_degraded_line() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("local image failure: tempdir must exist");
+    let file = dir.path().join("bad.png");
+    std::fs::write(&file, b"not an image").expect("local image failure: fixture write");
+    let source = file.to_str().expect("utf8 path");
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::MAX_ROWS);
+    assert!(
+        !crate::kit::inline_image::wait_ready(
+            source,
+            cols,
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "坏图不应进入 Ready"
+    );
+
+    let vm = super::assistant_bubble_with_text(&format!("![a]({source})"), 73);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let rendered = super::all_text(&lines);
+    assert!(
+        rendered.contains("[Image: a]"),
+        "失败回落降级文本，实际 {rendered:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
+        "失败时不得渲染半块行"
     );
 }

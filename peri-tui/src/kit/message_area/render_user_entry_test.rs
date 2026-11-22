@@ -496,3 +496,84 @@ fn test_user_bubble_file_mention_unaffected_by_attachment_record() {
     );
     assert!(!text.contains("[Image]"), "非图片引用不产生附件记录");
 }
+
+// ── 用户气泡整行 markdown 图片（半块版）─────────────────────────────────
+
+fn write_red_png(path: &std::path::Path) {
+    let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([220, 30, 30, 255]));
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .expect("user inline image: png fixture must encode");
+}
+
+/// 整行仅 `![alt](path)` 且缓存命中 → 半块图行；计入 6 行用户正文预算。
+#[test]
+fn test_user_bubble_standalone_image_renders_when_ready() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("user inline image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    let source = file.to_str().expect("utf8 path");
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::USER_IMAGE_ROWS);
+    assert!(
+        crate::kit::inline_image::wait_ready(
+            source,
+            cols,
+            crate::kit::inline_image::USER_IMAGE_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("![a]({source})")));
+    let lines = render::vm_to_lines(&vm, &grid);
+    let text = super::all_text(&lines);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
+        "整行图片应渲染半块行，实际 {text:?}"
+    );
+    assert!(!text.contains("![a]"), "命中后不再显示原始图片语法");
+    assert!(!text.contains("[Image:"), "不产生 @image meta 行");
+    assert!(
+        lines.len() <= 6,
+        "图片行计入用户正文预算（6 行），实际 {} 行",
+        lines.len()
+    );
+}
+
+/// 行内混排图片不参与替换（MVP 只识别整行语法）。
+#[test]
+fn test_user_bubble_inline_image_syntax_kept_as_text() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("user inline image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    let source = file.to_str().expect("utf8 path");
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::USER_IMAGE_ROWS);
+    assert!(
+        crate::kit::inline_image::wait_ready(
+            source,
+            cols,
+            crate::kit::inline_image::USER_IMAGE_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+
+    let vm = TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(format!("see ![a]({source})")));
+    let lines = render::vm_to_lines(&vm, &grid);
+    let text = super::all_text(&lines);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
+        "行内混排不替换为图片，实际 {text:?}"
+    );
+    assert!(text.contains("![a]"), "保留原始文本，实际 {text:?}");
+}

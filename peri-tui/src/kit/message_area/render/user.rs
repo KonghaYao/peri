@@ -162,6 +162,28 @@ pub(super) fn render_user_bubble_lines(
             }
             continue;
         }
+        // 整行仅 `![alt](path)`：缓存命中时替换为半块图；未命中保留原文。
+        // 只识别独占行，行内混排不解析（计划 MVP 边界）。
+        if let Some(url) = crate::kit::inline_image::standalone_image_url(raw)
+            && let Some(rendered) = crate::kit::inline_image::lookup_ready(
+                &url,
+                u16::try_from(grid.content_width()).unwrap_or(u16::MAX),
+                crate::kit::inline_image::USER_IMAGE_ROWS,
+            )
+        {
+            total += rendered.len();
+            if visual_count >= USER_BODY_MAX_LINES {
+                continue;
+            }
+            let take = (USER_BODY_MAX_LINES - visual_count).min(rendered.len());
+            for line in &rendered[..take] {
+                let mut spans = super::helpers::cont_prefix(grid, sem.text.secondary);
+                spans.extend(line.spans.iter().cloned());
+                lines.push(Line::from(spans));
+            }
+            visual_count += take;
+            continue;
+        }
         let wrapped = crate::truncate::wrap_by_width(raw, grid.content_width());
         total += wrapped.len();
         if visual_count >= USER_BODY_MAX_LINES {
