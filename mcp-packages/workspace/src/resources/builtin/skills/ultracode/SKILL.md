@@ -243,7 +243,6 @@ error is a correction, not an invitation to free-form repeated completion claims
 
 Peri uses the bundled, digest-verified `@peri-code/workflow` engine beside its executable,
 materialized into `~/.peri/workflow/<version>/<content-identity>/` and reused offline.
-Node.js is required. Missing or mismatched artifacts fail closed; there is no silent
-network fallback. Only an explicit `PERI_WORKFLOW_ALLOW_NPX_FALLBACK=1` permits a registry
-fetch with the same digest check. Report the actual missing prerequisite rather than
+Node.js is required. Missing or mismatched artifacts fail closed; peri never fetches the
+engine from npm/registry at runtime. Report the actual missing prerequisite rather than
 inventing successful execution or silently changing the requested method.

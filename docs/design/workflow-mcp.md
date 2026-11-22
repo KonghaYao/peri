@@ -30,8 +30,8 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 ### 2.3 分发红线
 
 1. **Rust 侧零 JS 嵌入**：`peri-workflow` 及任何 Rust 侧代码不得以 `include_bytes!`、`include_str!`、embed 或等价机制把 JS 产物（如 `@peri-workflow` 的 dist bundle）嵌入二进制。该红线优先于自包含、简化分发等诉求；任何分发缺口都不得以把 JS 产物嵌入二进制的方式解决。
-2. **`@peri-workflow` 分发结构要求**：分发须保持「**构建可复现、不入库**（dist 为构建产物，`bun run build` 可复现字节；由发布链在打包前构建并随发布包携带）+ **发布结构**（发布包保留入口产物与包元数据契约）+ **离线可用**（无网络即可获得并可运行已验证 artifact）+ **完整性校验**（artifact 的身份与内容在使用前经受校验；pin = 构建产物 SHA-256 == 发布产物 SHA-256）」。该要求必须以非嵌入途径实现（文件系统读取、摘要校验、网络获取等类别），不得以嵌入机制作为解法。
-3. **现状与边界**：Rust 侧嵌入已移除；各项分发要求已以非嵌入方式落实——dist 不入库、由发布链在打包前构建并随发布包携带，消费方默认离线、仅使用通过包身份与入口内容（固定 SHA-256 pin）校验的 artifact；网络获取须显式 opt-in，且内容仍须通过与来源绑定的固定摘要校验（随包/本地构建用 `WORKFLOW_ENTRY_SHA256`，registry fallback 用已发布产物的 `WORKFLOW_REGISTRY_SHA256`）。安装位置、校验算法、获取时机等具体机制不属本节内容，本节只记录红线与原则；落实与验收证据见 `ARC-WORKFLOW-DIST-001`。
+2. **`@peri-workflow` 分发结构要求**：分发须保持「**构建可复现、不入库**（dist 为构建产物，`bun run build` 可复现字节；由发布链在打包前构建并随发布包携带）+ **发布结构**（发布包保留入口产物与包元数据契约）+ **离线可用**（无网络即可获得并可运行已验证 artifact）+ **完整性校验**（artifact 的身份与内容在使用前经受校验；pin = 构建产物 SHA-256 == 发布产物 SHA-256）」。该要求必须以非嵌入途径实现（文件系统读取、摘要校验等类别），不得以嵌入机制作为解法。
+3. **现状与边界**：Rust 侧嵌入已移除；各项分发要求已以非嵌入方式落实——dist 不入库、由发布链在打包前构建并随发布包携带，消费方只使用通过包身份与入口内容（固定 SHA-256 pin）校验的 artifact，运行时不访问 npm/registry；仅当没有任何来源通过校验时 fail closed。安装位置、校验算法、获取时机等具体机制不属本节内容，本节只记录红线与原则；落实与验收证据见 `ARC-WORKFLOW-DIST-001`。
 
 标准依据：`ARC-WORKFLOW-DIST-001`（[architecture-contracts.md](../standards/architecture-contracts.md)）。
 
