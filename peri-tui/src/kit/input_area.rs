@@ -7,6 +7,7 @@
 //! - **slash**：行首 / 触发 SLASH_HINT_ACTIVE；popup 显示在输入框上方
 //! - **提交**：Enter 提交，submit_consumer 消费 + push_history
 mod attachment;
+mod attachment_preview;
 mod hooks;
 mod image;
 mod paste;

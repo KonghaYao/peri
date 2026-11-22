@@ -55,7 +55,11 @@ fn paste_gate_releases_on_panic() {
 }
 
 /// 上传式附件载荷：base64 解码后必须与剪贴板字节逐字节一致（不经像素转换）。
+///
+/// `PENDING_ATTACHMENTS` 是进程级 atom：不串行会与其它读写它的用例互清（本文件
+/// 唯一触碰该 atom 的非 serial 用例）。
 #[test]
+#[serial_test::serial]
 fn attach_image_stores_base64_payload_without_reencoding() {
     use base64::Engine;
     crate::kit::atoms::init_atoms();
