@@ -54,6 +54,25 @@ enum BeginOutcome {
     Deferred,
 }
 
+/// [`Cache::complete`] 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompleteOutcome {
+    /// 新状态已写入缓存。
+    Updated,
+    /// 槽位已释放，但结果被丢弃（来源已指向新版本）。
+    Released,
+    /// 非当前请求（已被同键新请求取代），无槽位变化。
+    Ignored,
+}
+
+impl CompleteOutcome {
+    /// 是否需要唤醒渲染 effect。释放槽位也必须唤醒：否则并发暂缓的图片
+    /// 要等到滚动/内容变化才会重试，期间一直停留在文本降级。
+    fn wakes_render(self) -> bool {
+        !matches!(self, Self::Ignored)
+    }
+}
+
 /// 三态缓存值：render body 只克隆 [`Arc`]，不阻塞。
 #[derive(Debug, Clone)]
 pub(crate) enum InlineImageState {
@@ -144,25 +163,25 @@ impl Cache {
     }
 
     /// 写回后台结果；请求代数不匹配（被更新请求取代）或别名已指向别的版本
-    /// 时丢弃。返回是否实际更新了缓存。
+    /// 时丢弃。返回槽位与缓存的实际变化。
     fn complete(
         &mut self,
         key: &CacheKey,
         id: u64,
         result: Result<Arc<Vec<Line<'static>>>, &'static str>,
-    ) -> bool {
+    ) -> CompleteOutcome {
         if self.inflight.get(key).copied() != Some(id) {
-            return false;
+            return CompleteOutcome::Ignored;
         }
         self.inflight.remove(key);
         if !self.aliases.values().any(|aliased| aliased == key) {
             // 该版本已被新请求取代：清掉遗留的 Pending 条目，否则同一文件版本
             // 再次出现时 `begin` 会因条目存在而永不重启 worker（永久文本降级）。
             self.entries.remove(key);
-            return false;
+            return CompleteOutcome::Released;
         }
         let Some(entry) = self.entries.get_mut(key) else {
-            return false;
+            return CompleteOutcome::Released;
         };
         self.bytes = self.bytes.saturating_sub(entry.bytes);
         let (state, bytes) = match result {
@@ -179,7 +198,7 @@ impl Cache {
         self.bytes = self.bytes.saturating_add(bytes);
         self.revision = self.revision.wrapping_add(1);
         self.evict_to_budget(CACHE_BYTES);
-        true
+        CompleteOutcome::Updated
     }
 
     fn evict_to_budget(&mut self, budget: usize) {
@@ -431,9 +450,10 @@ fn file_version(path: PathBuf) -> (PathBuf, u128, u64) {
 
 fn finish(key: CacheKey, id: u64, result: Result<Arc<Vec<Line<'static>>>, &'static str>) {
     // 版本号与 Ready 状态必须在同一把锁内发布：否则 `wait_ready` 可能先看到
-    // 完成态，再读到旧的全局版本，导致渲染缓存判为未变化。
+    // 完成态，再读到旧的全局版本，导致渲染缓存判为未变化。丢弃结果也释放了
+    // 槽位，同样要唤醒 effect，让并发暂缓的请求重新排队。
     let mut guard = cache().lock();
-    if guard.complete(&key, id, result) {
+    if guard.complete(&key, id, result).wakes_render() {
         REVISION.fetch_add(1, Ordering::SeqCst);
         RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
     }

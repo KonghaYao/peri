@@ -52,8 +52,9 @@ fn cache_key_distinguishes_mtime_length_and_target() {
     ];
     for (index, cache_key) in keys.iter().enumerate() {
         let id = spawned(cache.begin(src.clone(), cache_key.clone()));
-        assert!(
+        assert_eq!(
             cache.complete(cache_key, id, Ok(lines(2, 1))),
+            CompleteOutcome::Updated,
             "第 {index} 个键应独立完成（mtime/len/目标尺寸任一变化都是新版本）"
         );
         assert!(matches!(
@@ -70,14 +71,20 @@ fn stale_completion_is_ignored_and_does_not_bump_revision() {
     let src = source("a.png", 10, 2);
     let key = key("a.png", 1, 10, 10, 2);
     let id = spawned(cache.begin(src.clone(), key.clone()));
-    assert!(!cache.complete(&key, id + 1, Ok(lines(2, 1))));
+    assert_eq!(
+        cache.complete(&key, id + 1, Ok(lines(2, 1))),
+        CompleteOutcome::Ignored
+    );
     assert!(matches!(
         cache.lookup(&src),
         Some(InlineImageState::Pending)
     ));
     assert_eq!(cache.revision, 0);
 
-    assert!(cache.complete(&key, id, Ok(lines(2, 1))));
+    assert_eq!(
+        cache.complete(&key, id, Ok(lines(2, 1))),
+        CompleteOutcome::Updated
+    );
     assert!(matches!(
         cache.lookup(&src),
         Some(InlineImageState::Ready(_))
@@ -91,7 +98,10 @@ fn failed_result_is_cached_and_falls_back() {
     let src = source("bad.png", 10, 2);
     let key = key("bad.png", 1, 10, 10, 2);
     let id = spawned(cache.begin(src.clone(), key.clone()));
-    assert!(cache.complete(&key, id, Err("format")));
+    assert_eq!(
+        cache.complete(&key, id, Err("format")),
+        CompleteOutcome::Updated
+    );
     match cache.lookup(&src) {
         Some(InlineImageState::Failed(reason)) => assert_eq!(reason, "format"),
         other => panic!("expected failed state, got {other:?}"),
@@ -123,7 +133,10 @@ fn lru_evicts_least_recently_used() {
         let src = source(name, 10, 2);
         let key = key(name, mtime, len, 10, 2);
         let id = spawned(cache.begin(src, key.clone()));
-        assert!(cache.complete(&key, id, Ok(lines(4, 2))));
+        assert_eq!(
+            cache.complete(&key, id, Ok(lines(4, 2))),
+            CompleteOutcome::Updated
+        );
     }
     // 触碰 a（最近使用），b 成为最旧。
     let a = source("a.png", 10, 2);
@@ -218,7 +231,14 @@ fn abandoned_pending_entry_is_released_for_retry() {
     let old_id = spawned(cache.begin(src.clone(), old.clone()));
     // 同一 source 指向新版本（如符号链接切换）：旧别名被取代。
     let _new_id = spawned(cache.begin(src.clone(), new));
-    assert!(!cache.complete(&old, old_id, Ok(lines(2, 1))));
+    assert_eq!(
+        cache.complete(&old, old_id, Ok(lines(2, 1))),
+        CompleteOutcome::Released
+    );
+    assert!(
+        CompleteOutcome::Released.wakes_render(),
+        "丢弃结果释放了槽位，必须唤醒 effect 重试暂缓请求"
+    );
     assert!(
         !cache.entries.contains_key(&old),
         "被取代的 Pending 条目必须清理"
@@ -249,9 +269,43 @@ fn concurrent_decodes_are_bounded_and_retried_later() {
         "暂缓请求不登记条目，等下一次 effect 重试"
     );
 
-    assert!(cache.complete(&key("0.png", 1, 10, 10, 2), ids[0], Ok(lines(2, 1))));
+    assert_eq!(
+        cache.complete(&key("0.png", 1, 10, 10, 2), ids[0], Ok(lines(2, 1))),
+        CompleteOutcome::Updated
+    );
     assert!(
         matches!(cache.begin(extra_src, extra_key), BeginOutcome::Spawn(_)),
         "腾出槽位后重试应启动"
+    );
+}
+
+#[test]
+fn discarded_completion_also_frees_slot_and_wakes_render() {
+    let mut cache = Cache::default();
+    let mut ids = Vec::new();
+    for index in 0..MAX_CONCURRENT {
+        let name = format!("{index}.png");
+        let src = source(&name, 10, 2);
+        ids.push(spawned(cache.begin(src, key(&name, 1, 10, 10, 2))));
+    }
+    let extra_src = source("extra.png", 10, 2);
+    let extra_key = key("extra.png", 1, 10, 10, 2);
+    assert!(matches!(
+        cache.begin(extra_src.clone(), extra_key.clone()),
+        BeginOutcome::Deferred
+    ));
+
+    // 来源切到新版本后旧键不再被引用：完成结果被丢弃，但槽位确实释放了。
+    let old_key = key("0.png", 1, 10, 10, 2);
+    cache.aliases.retain(|_, aliased| aliased != &old_key);
+    let outcome = cache.complete(&old_key, ids[0], Ok(lines(2, 1)));
+    assert_eq!(outcome, CompleteOutcome::Released);
+    assert!(
+        outcome.wakes_render(),
+        "丢弃结果也必须唤醒 effect，否则暂缓请求要等滚动才重试"
+    );
+    assert!(
+        matches!(cache.begin(extra_src, extra_key), BeginOutcome::Spawn(_)),
+        "丢弃结果腾出的槽位应允许暂缓请求重试"
     );
 }
