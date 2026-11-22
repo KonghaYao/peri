@@ -1,11 +1,11 @@
-//! Skill 与 TodoWrite 的用户语义展示逻辑。
+//! Skill、TodoWrite 与 Shell 的用户语义展示逻辑。
 //!
 //! 只消费工具调用的结构化输入；不解析工具的原始输出，以避免将 SKILL.md 正文或
 //! TodoWrite 的内部索引摘要泄漏到消息卡片中。
 
 use crate::kit::tui_render_unit::{
-    TuiSkillPresentation, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem, TuiTodoPresentation,
-    TuiTodoStatus, TuiToolPresentation,
+    TuiShellPresentation, TuiSkillPresentation, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem,
+    TuiTodoPresentation, TuiTodoStatus, TuiToolPresentation,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -59,8 +59,30 @@ pub(crate) fn presentation_for(
     match tool_name {
         "Skill" | "SkillTool" => skill_presentation(raw_input),
         "TodoWrite" => todo_presentation(raw_input, previous_todos),
-        _ => TuiToolPresentation::Generic,
+        _ => {
+            let normalized =
+                peri_acp_types::builtin_mcp::original_tool_name_of_effective(tool_name)
+                    .unwrap_or(tool_name);
+            if normalized == "Bash" {
+                shell_presentation(raw_input)
+            } else {
+                TuiToolPresentation::Generic
+            }
+        }
     }
+}
+
+fn shell_presentation(raw_input: &Value) -> TuiToolPresentation {
+    let Some(command) = raw_input.get("command").and_then(Value::as_str) else {
+        return TuiToolPresentation::Generic;
+    };
+    let Some(display) = crate::kit::shell_summary::display_for(command) else {
+        return TuiToolPresentation::Generic;
+    };
+    TuiToolPresentation::Shell(TuiShellPresentation {
+        tool_chain: display.tool_chain,
+        command: display.command,
+    })
 }
 
 fn skill_presentation(raw_input: &Value) -> TuiToolPresentation {

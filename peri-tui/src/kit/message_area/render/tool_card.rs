@@ -1,8 +1,8 @@
 use crate::i18n;
 use crate::kit::message_area::grid::{Breakpoint, GridSpec};
 use crate::kit::tui_render_unit::{
-    FoldState, TuiDiffBlock, TuiHunkLineKind, TuiTodoChangeKind, TuiTodoPresentation, TuiToolCard,
-    TuiToolPresentation,
+    FoldState, TuiDiffBlock, TuiHunkLineKind, TuiShellPresentation, TuiTodoChangeKind,
+    TuiTodoPresentation, TuiToolCard, TuiToolPresentation,
 };
 
 use peri_theme::atoms::THEME_ATOM;
@@ -27,6 +27,8 @@ const TOOL_OUTPUT_MAX_LINES: usize = 4;
 /// - error：× + status.error 符号色 + 明确错误词（`— Failed`），正文不整块染红。
 /// - 默认 Collapsed：running / completed / error 都只有单行 header；展开后
 ///   completed 输出 ≤4 行，Bash 展开显示 `$ command` + 分隔线 + 输出。
+/// - Shell presentation 例外：header 只放工具链，完整命令作为常驻第二行，
+///   展开后直接接输出，不再重复命令。
 pub(super) fn render_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Line<'static>> {
     let plan = project_tool_render_plan(data, grid);
     let resolved = resolve_tool_render_plan(data, plan);
@@ -40,6 +42,8 @@ struct ToolRenderPlan {
     summary: String,
     completed_suffix: String,
     hide_completed_summary_when_expanded: bool,
+    /// 不受折叠状态影响的续行（Shell 的完整命令）。
+    always_visible_details: Vec<Line<'static>>,
     running_details: Vec<Line<'static>>,
     completed_details: Vec<Line<'static>>,
     error_details: Vec<Line<'static>>,
@@ -49,6 +53,7 @@ struct ResolvedToolRenderPlan {
     label: String,
     summary: String,
     suffix: String,
+    always_visible_details: Vec<Line<'static>>,
     details: Vec<Line<'static>>,
 }
 
@@ -57,6 +62,7 @@ fn project_tool_render_plan(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPl
         TuiToolPresentation::Generic => project_generic_tool(data, grid),
         TuiToolPresentation::Skill(skill) => project_skill_tool(&skill.name),
         TuiToolPresentation::Todo(todo) => project_todo_tool(data, todo, grid),
+        TuiToolPresentation::Shell(shell) => project_shell_tool(data, shell, grid),
     }
 }
 
@@ -73,6 +79,12 @@ pub(super) fn projected_tool_header_text(data: &TuiToolCard, grid: &GridSpec) ->
         text.push_str(" \u{2014} ");
         text.push_str(&i18n::tr("msg-status-failed"));
     }
+    // Shell 的完整命令是常驻可见内容；语义复制不能只剩工具链。
+    if let TuiToolPresentation::Shell(shell) = &data.presentation {
+        text.push('\n');
+        text.push_str("$ ");
+        text.push_str(&shell.command);
+    }
     text
 }
 
@@ -84,6 +96,7 @@ fn resolve_tool_render_plan(data: &TuiToolCard, plan: ToolRenderPlan) -> Resolve
         mut summary,
         completed_suffix,
         hide_completed_summary_when_expanded,
+        always_visible_details,
         running_details,
         completed_details,
         error_details,
@@ -106,12 +119,14 @@ fn resolve_tool_render_plan(data: &TuiToolCard, plan: ToolRenderPlan) -> Resolve
         label,
         summary,
         suffix,
+        always_visible_details,
         details,
     }
 }
 
 /// 工具卡片的唯一结构 renderer。所有 presentation 共用同一条状态与折叠路径：
-/// header 恒可见；Collapsed 不消费 detail；Preview/Expanded 消费解析后的 detail。
+/// header 恒可见；Shell 的完整命令是 always-visible 续行；Collapsed 不消费折叠
+/// detail；Preview/Expanded 消费解析后的 detail。
 fn render_tool_plan(
     data: &TuiToolCard,
     plan: ResolvedToolRenderPlan,
@@ -195,6 +210,11 @@ fn render_tool_plan(
     }
 
     let mut lines = vec![Line::from(spans)];
+    for detail in plan.always_visible_details {
+        let mut spans = super::helpers::process_cont_prefix(grid, sem.accents.tool);
+        spans.extend(detail.spans);
+        lines.push(Line::from(spans));
+    }
     if data.is_error {
         if data.fold != FoldState::Collapsed {
             let width = grid.process_content_width();
@@ -226,6 +246,7 @@ fn project_skill_tool(name: &str) -> ToolRenderPlan {
         summary: String::new(),
         completed_suffix: String::new(),
         hide_completed_summary_when_expanded: false,
+        always_visible_details: Vec::new(),
         running_details,
         completed_details: Vec::new(),
         error_details: Vec::new(),
@@ -279,9 +300,75 @@ fn project_todo_tool(
         summary: String::new(),
         completed_suffix: String::new(),
         hide_completed_summary_when_expanded: false,
+        always_visible_details: Vec::new(),
         running_details: completed_details.clone(),
         completed_details,
         error_details,
+    }
+}
+
+fn project_shell_tool(
+    data: &TuiToolCard,
+    shell: &TuiShellPresentation,
+    grid: &GridSpec,
+) -> ToolRenderPlan {
+    let sem = THEME_ATOM.state().read().semantic;
+    let content = grid.process_content_width();
+    let command_lines: Vec<&str> = shell
+        .command
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let shown = command_lines
+        .len()
+        .min(crate::kit::shell_summary::MAX_COMMAND_LINES);
+    let mut always_visible_details = Vec::with_capacity(shown + 1);
+    for (index, line) in command_lines.iter().take(shown).enumerate() {
+        let prompt = if index == 0 { "$ " } else { "> " };
+        let text = format!(
+            "{prompt}{}",
+            crate::truncate::truncate_to_width(line.trim_end(), content.saturating_sub(2))
+        );
+        always_visible_details.push(Line::from(Span::styled(
+            text,
+            Style::default().fg(sem.syntax.command),
+        )));
+    }
+    if command_lines.len() > shown {
+        always_visible_details.push(Line::from(Span::styled(
+            format!("\u{2026} +{} lines", command_lines.len() - shown),
+            Style::default().fg(sem.text.dim),
+        )));
+    }
+
+    let max_lines = if matches!(grid.bp, Breakpoint::Compact | Breakpoint::Narrow) {
+        2
+    } else {
+        TOOL_OUTPUT_MAX_LINES
+    };
+    let output_details = |output: &str, color| {
+        super::helpers::compact_output_lines(output, max_lines, content)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(color))))
+            .collect::<Vec<_>>()
+    };
+    let mut completed_details = Vec::new();
+    if let Some(diff) = &data.diff {
+        completed_details.extend(render_diff_lines(diff, grid));
+    } else if !data.output_summary.is_empty() {
+        completed_details.push(divider_fill_line(grid));
+        completed_details.extend(output_details(&data.output_summary, sem.text.muted));
+    }
+
+    ToolRenderPlan {
+        label: crate::kit::tool_display::format_tool_name(&data.tool_name),
+        summary: shell.tool_chain.clone(),
+        completed_suffix: completed_header_suffix(data),
+        hide_completed_summary_when_expanded: false,
+        always_visible_details,
+        running_details: Vec::new(),
+        completed_details,
+        error_details: Vec::new(),
     }
 }
 
@@ -346,6 +433,7 @@ fn project_generic_tool(data: &TuiToolCard, grid: &GridSpec) -> ToolRenderPlan {
         summary: data.input_summary.clone(),
         completed_suffix: completed_header_suffix(data),
         hide_completed_summary_when_expanded: bash,
+        always_visible_details: Vec::new(),
         running_details: Vec::new(),
         completed_details,
         error_details,

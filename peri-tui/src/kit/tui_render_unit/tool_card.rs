@@ -25,6 +25,16 @@ pub enum TuiToolPresentation {
     Generic,
     Skill(TuiSkillPresentation),
     Todo(TuiTodoPresentation),
+    Shell(TuiShellPresentation),
+}
+
+/// Shell 工具的两行展示：头行工具链 + 常驻完整命令。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiShellPresentation {
+    /// 纯工具链，例如 `grep | head`。
+    pub tool_chain: String,
+    /// 完整原始命令（已按展示上限裁剪）。
+    pub command: String,
 }
 
 /// User-facing information for a successfully loaded skill.

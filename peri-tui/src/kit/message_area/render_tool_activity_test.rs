@@ -12,6 +12,7 @@ use super::TuiTodoPresentation;
 use super::TuiTodoStatus;
 use super::TuiToolCard;
 use super::TuiToolPresentation;
+use crate::kit::tui_render_unit::TuiShellPresentation;
 
 use crate::kit::message_area::grid::Breakpoint;
 use crate::kit::message_area::grid::GridSpec;
@@ -75,6 +76,63 @@ fn test_tool_bash_command_and_expanded_dollar_line() {
     let text = super::all_text(&lines);
     assert!(text.contains("$ cargo test"), "展开态应有 `$ command` 行");
     assert!(text.contains("\u{2500}"), "展开态应有分隔线");
+}
+
+/// Shell presentation：头行只放工具链，完整命令作为常驻第二行；展开不重复命令。
+#[test]
+fn test_shell_presentation_keeps_tool_chain_and_full_command() {
+    let grid = GridSpec::grid_for(80);
+    let command = "cd /tmp && grep -n target Cargo.toml | head -5";
+    let mut card = super::tool_card("Bash", command, false, false);
+    card.presentation = TuiToolPresentation::Shell(TuiShellPresentation {
+        tool_chain: "grep | head".into(),
+        command: command.into(),
+    });
+    card.recompute_hash();
+
+    let lines = render::vm_to_lines(&TuiRenderUnit::TuiToolCard(card.clone()), &grid);
+    assert_eq!(lines.len(), 2, "Shell 折叠态固定两行");
+    let header = super::header_of(&lines);
+    assert!(
+        header.contains("grep | head"),
+        "header 只放工具链: {header:?}"
+    );
+    assert!(
+        !header.contains("Cargo.toml"),
+        "header 不应含参数: {header:?}"
+    );
+    let command_line = super::line_text(&lines[1]);
+    assert!(
+        command_line.contains('\u{2502}'),
+        "第二行需要前导线: {command_line:?}"
+    );
+    assert!(
+        command_line.contains("$ cd /tmp && grep -n target Cargo.toml | head -5"),
+        "第二行保留完整命令: {command_line:?}"
+    );
+    let semantic = super::super::tool_card::projected_tool_header_text(&card, &grid);
+    assert!(
+        semantic.contains("grep | head"),
+        "语义复制保留工具链: {semantic:?}"
+    );
+    assert!(
+        semantic.contains("$ cd /tmp && grep -n target Cargo.toml | head -5"),
+        "语义复制保留完整命令: {semantic:?}"
+    );
+
+    let mut expanded = card;
+    expanded.fold = FoldState::Expanded;
+    expanded.output_summary = "Cargo.toml:1:target".into();
+    expanded.recompute_hash();
+    let lines = render::vm_to_lines(&TuiRenderUnit::TuiToolCard(expanded), &grid);
+    let text = super::all_text(&lines);
+    assert_eq!(
+        text.matches("$ cd /tmp").count(),
+        1,
+        "完整命令只显示一次: {text}"
+    );
+    assert!(text.contains("Cargo.toml:1:target"), "展开输出可见: {text}");
+    assert!(text.contains('\u{2500}'), "输出前有分隔线");
 }
 
 /// 错误态：× + 明确错误词（Failed）；错误输出按 ` - Error: ` 拆行、error 色。
