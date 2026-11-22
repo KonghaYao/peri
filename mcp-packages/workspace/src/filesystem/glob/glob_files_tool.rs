@@ -346,11 +346,11 @@ impl BaseTool for GlobFilesTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "The glob pattern to match file paths relative to the search root (e.g. \"src/**/*.rs\", \"*.config.json\"). Wildcards follow the glob crate defaults: `*` and `?` match across `/`, so `*.rs` matches .rs files at ANY depth, not just the current directory. To scope the walk, use a literal directory prefix (e.g. \"src/*.rs\") or the path parameter"
+                    "description": "Glob relative to the search root. Includes hidden paths; `*` and `?` match across `/`. Narrow with path or a literal prefix."
                 },
                 "path": {
                     "type": "string",
-                    "description": "The directory to search in. Absolute path or relative to cwd. If not specified, the current working directory is used"
+                    "description": "Search directory, absolute or relative to cwd; defaults to cwd."
                 }
             },
             "required": ["pattern"]

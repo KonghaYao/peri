@@ -101,9 +101,7 @@ impl BashTool {
         serde_json::json!({
             "type": "boolean",
             "default": false,
-            "description": "If true, runs the command in the background and returns \
-                 immediately with a task_id. Only use for long-running servers, watchers, or \
-                 daemons. For builds/installs/tests, prefer a longer timeout instead.",
+            "description": "Run in the background and return a task ID. Use for services or work beyond the foreground cap.",
         })
     }
 
@@ -326,14 +324,14 @@ impl BaseTool for BashTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The bash command (and optional arguments) to execute. This can be complex commands that use pipes, &&, or other shell features. For multiple dependent commands, chain them with && rather than making separate calls"
+                    "description": "Shell command. Chain dependent steps with && on Bash; use ; on Windows PowerShell 5.1."
                 },
                 "timeout": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 600000,
                     "description": format!(
-                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
+                        "Milliseconds. Foreground: default 15000, cap {FOREGROUND_MAX_TIMEOUT_MS}; 0 means the cap. Background: omit or use 0 for no deadline; a positive value requests termination on expiry."
                     )
                 },
                 "run_in_background": Self::run_in_background_schema()

@@ -391,95 +391,95 @@ impl BaseTool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "The regular expression pattern to search for in file contents. Supports full regex syntax (e.g. \"log.*Error\", \"function\\s+\\w+\")"
+                    "description": "Content regex."
                 },
                 "path": {
                     "type": "string",
-                    "description": "File or directory path to search in. Defaults to current working directory if not specified"
+                    "description": "File or directory to search; defaults to cwd."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\"). Only files matching the glob will be searched"
+                    "description": "File name glob filter, such as *.rs. Matches the base name only; use path to scope directories."
                 },
                 "type": {
                     "type": "string",
-                    "description": "Filter files by type. Common values: \"rust\", \"js\", \"py\", \"go\", \"java\", \"ts\". More efficient than glob for type-based filtering"
+                    "description": "File type filter, such as rust or ts."
                 },
                 "output_mode": {
                     "type": "string",
                     "enum": ["content", "files_with_matches", "count", "files_without_matches"],
-                    "description": "Output mode: \"content\" shows matching lines with line numbers (default), \"files_with_matches\" lists only file paths, \"count\" shows match counts per file, \"files_without_matches\" lists file paths without matches"
+                    "description": "Result format: content (default), files_with_matches, count, or files_without_matches."
                 },
                 "-i": {
                     "type": "boolean",
-                    "description": "Enable case-insensitive search (default: false). Alias of case_insensitive"
+                    "description": "Alias of case_insensitive."
                 },
                 "case_insensitive": {
                     "type": "boolean",
-                    "description": "Enable case-insensitive search (default: false). Semantic alias of -i"
+                    "description": "Ignore case; defaults to false."
                 },
                 "-C": {
                     "type": "number",
-                    "description": "Number of context lines to show before and after each match. Alias of context"
+                    "description": "Alias of context."
                 },
                 "context": {
                     "type": "number",
-                    "description": "Number of context lines to show before and after each match. Semantic alias of -C"
+                    "description": "Context lines before and after each match."
                 },
                 "-A": {
                     "type": "number",
-                    "description": "Number of context lines to show after each match (takes priority over -C). Alias of after_context"
+                    "description": "Alias of after_context."
                 },
                 "after_context": {
                     "type": "number",
-                    "description": "Number of context lines to show after each match (takes priority over context). Semantic alias of -A"
+                    "description": "Context lines after each match; overrides context on that side."
                 },
                 "-B": {
                     "type": "number",
-                    "description": "Number of context lines to show before each match (takes priority over -C). Alias of before_context"
+                    "description": "Alias of before_context."
                 },
                 "before_context": {
                     "type": "number",
-                    "description": "Number of context lines to show before each match (takes priority over context). Semantic alias of -B"
+                    "description": "Context lines before each match; overrides context on that side."
                 },
                 "-n": {
                     "type": "boolean",
-                    "description": "Show line numbers (default: true). Alias of show_line_numbers"
+                    "description": "Alias of show_line_numbers."
                 },
                 "show_line_numbers": {
                     "type": "boolean",
-                    "description": "Show line numbers (default: true). Semantic alias of -n"
+                    "description": "Include line numbers; defaults to true."
                 },
                 "multiline": {
                     "type": "boolean",
-                    "description": "Enable multiline mode where ^/$ match line boundaries and . matches newlines (default: false)"
+                    "description": "Allow matches across lines; . matches newlines and ^/$ match line boundaries."
                 },
                 "whole_word": {
                     "type": "boolean",
-                    "description": "Match whole words only (default: false)"
+                    "description": "Match whole words only."
                 },
                 "invert_match": {
                     "type": "boolean",
-                    "description": "Invert match: show lines that do NOT match the pattern, equivalent to grep -v (default: false)"
+                    "description": "Select nonmatching lines."
                 },
                 "fixed_strings": {
                     "type": "boolean",
-                    "description": "Treat pattern as a literal string instead of regex, equivalent to grep -F (default: false)"
+                    "description": "Treat pattern as literal text."
                 },
                 "max_depth": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Maximum directory depth to search. Limits how deep the search traverses into subdirectories"
+                    "description": "Maximum directory traversal depth."
                 },
                 "head_limit": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Limit output to first N matching lines (default 250). Pass 0 for unlimited. Use sparingly — large result sets waste context"
+                    "description": "Output cap: lines with context, or files in file modes. Default 250; 0 removes only the count cap."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Skip first N lines of output before applying head_limit"
+                    "description": "Skip this many output entries before applying head_limit."
                 }
             },
             "required": ["pattern"]
