@@ -60,7 +60,7 @@ user agent 的任务提示必须包含：
 - 记录：逐条写下执行的命令与观察结果、耗时、阻塞点、文档与行为不符之处、困惑点；给出可复现命令。
 - 遇到问题时先记录再绕过；若必须绕过，写清绕法与为什么需要它。
 
-任务示例（按实际包替换，不要硬编码）：用 `peri-rivet` 做一个 ChatGPT 风格的 Web 前端，包含输入框、消息列表、流式回复、刷新后保留历史。示例的价值是覆盖安装、API 使用、运行时行为和持久化，而不是覆盖某个函数。
+任务示例（按实际包替换，不要硬编码）：用 `@peri-code/sdk` 做一个 ChatGPT 风格的 Web 前端，包含输入框、消息列表、流式回复、刷新后保留历史。示例的价值是覆盖安装、API 使用、运行时行为和持久化，而不是覆盖某个函数。
 
 **完成标准**：报告足以让第三人逐条重放每条命令并看到相同结果；没有“理论上应该可以”式结论。
 
@@ -91,29 +91,24 @@ user agent 的任务提示必须包含：
 - 验收报告写到 `.peri/plans/dogfood-report-<date>.md`。`.peri/*` 已被 `.gitignore` 忽略，属工作区产物，不是仓库长期事实源；稳定结论再回写到对应 issue 或文档。
 - 报告至少包含：环境与输入（commit、tarball digest、运行时版本）、第一轮命令与观察、问题分类、修复清单、第二轮重放判定表、`unverified` 项与残余风险。
 
-## 仓库示例：peri-rivet
+## 仓库示例：peri-sandbox
 
 ```bash
-# 从全新 clone 开始；两个包各自安装依赖
-cd npm-packages/@peri-sdk
+# 从全新 clone 开始
+cd npm-packages/peri-sandbox
 bun install
-bun run build:ts     # 或 bun run build（完整构建，额外产出 wasm；需 Emscripten 6.0.10 + Python ≥3.10）
-cd ../peri-rivet
-bun install
-bun run build        # pack:local 要求两个包的 dist 都已存在
-bun run pack:local --out /tmp/peri-rivet-pack   # 生成 @peri-code/sdk 与 @peri-code/rivet 的 tarball 并写 install.sh，不发布
-bun run check:engine # 预检 rivet-engine 二进制能否解析；失败时按 README §4.1 处理，属环境阻塞
+bun run build
+npm pack --pack-destination /tmp/peri-sandbox-pack   # prepack 会重建 dist；只生成本地 tarball，不发布
 ```
 
-- `pack:local` 默认输出到临时目录；示例用 `--out` 固定路径以便记录 tarball 与 digest，等价于 `node scripts/pack-local.mjs --out <目录>`。
-- 它打印的安装命令会把两个 tarball 和 `rivetkit` 一起安装（SDK 是 peer）；在临时项目里照此安装，不要换成 registry 版本。
-- 安装后按 README quickstart **逐字执行**；文档写错或缺失本身就是发现项。
+- 在全新临时项目里安装该 tarball，按 README 启动 CLI / MCP server；文档写错或缺失本身就是发现项。
+- 早期 `peri-rivet` 与 `agent-builder` 已移除，不得作为演练对象。
 - 禁止 `npm publish`，禁止 `git push`。
 
 ## 卫生与边界
 
 - 每轮结束释放自己创建的临时目录、后台进程和端口，并在报告中记录释放了什么。
-- 不得杀用户端口上的进程，包括 `6420`、`8787`、`8788`、`5173`、`6437`。`6420`（`peri-rivet` engine）与 `8787`（artifact 示例）当前文档有出处；`8788` 仅历史文档有出处（peri-cf Lab 已移除）；`5173`、`6437` 无文档出处，实际端口以当前环境配置为准。端口被占用时换端口或记为阻塞，不要清场。
+- 不得杀用户端口上的进程，包括 `6420`、`8787`、`8788`、`5173`、`6437`。`6420`（Rivet engine，peri-swarm 本地开发）与 `8787`（artifact 示例）当前文档有出处；`8788` 仅历史文档有出处（peri-cf Lab 已移除）；`5173`、`6437` 随 agent-builder 移除不再使用。实际端口以当前环境配置为准。端口被占用时换端口或记为阻塞，不要清场。
 - 环境缺失归为**环境阻塞**而非产品缺陷：如 Emscripten 未安装、Python 版本不符、磁盘空间不足、registry 缺包。记录命令、输出和版本证据，修复清单不收录。
 - 环境阻塞若可由用户环境补齐，不影响其余路径的判定；相关路径标为 `unverified`，不要标 `FAIL`。
 

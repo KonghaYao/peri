@@ -137,13 +137,13 @@
 | [npm-packages/@peri-sdk/README.md](../../npm-packages/@peri-sdk/README.md) | 保留 | 「@peri-code/sdk」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
 | [npm-packages/@peri-workflow/DESIGN.md](../../npm-packages/@peri-workflow/DESIGN.md) | 保留 | 「@peri-code/workflow — Design & Integration Contract」在原包维护专属边界，不复制到中央控制表。 |
 | [npm-packages/@peri-workflow/README.md](../../npm-packages/@peri-workflow/README.md) | 保留 | 「@peri-code/workflow」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
-| [npm-packages/agent-builder/README.md](../../npm-packages/agent-builder/README.md) | 保留 | 「Peri Agent Builder」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
+| [npm-packages/agent-builder/README.md](../../npm-packages/agent-builder/README.md) | 删除 | 试验性 TS 装配层退役（2026-11-22）；主线归 peri-swarm。 |
 | [npm-packages/memory-plugin/DESIGN.md](../../npm-packages/memory-plugin/DESIGN.md) | 保留 | 「Peri Memory MCP：Hindsight 后端与独立消息导入器」在原包维护专属边界，不复制到中央控制表。 |
 | [npm-packages/memory-plugin/README.md](../../npm-packages/memory-plugin/README.md) | 保留 | 「@peri/memory-plugin」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
 | [npm-packages/memory-plugin/VALIDATION.md](../../npm-packages/memory-plugin/VALIDATION.md) | 保留 | 「Memory MCP 0.1.0 验证记录」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
-| [npm-packages/peri-rivet/DESIGN.md](../../npm-packages/peri-rivet/DESIGN.md) | 改写 | 补当前设计状态、SDK 唯一路由与真实运行验收缺口。 |
-| [npm-packages/peri-rivet/README.md](../../npm-packages/peri-rivet/README.md) | 保留 | 「@peri-code/rivet」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
-| [npm-packages/peri-rivet/docs/custom-runtime.md](../../npm-packages/peri-rivet/docs/custom-runtime.md) | 保留 | 「自定义 transport runtime」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
+| [npm-packages/peri-rivet/DESIGN.md](../../npm-packages/peri-rivet/DESIGN.md) | 删除 | 试验性 TS 适配层退役（2026-11-22）；Rivet 对接主线归 peri-swarm。 |
+| [npm-packages/peri-rivet/README.md](../../npm-packages/peri-rivet/README.md) | 删除 | 同包随适配层移除（2026-11-22）。 |
+| [npm-packages/peri-rivet/docs/custom-runtime.md](../../npm-packages/peri-rivet/docs/custom-runtime.md) | 删除 | 同包随适配层移除（2026-11-22）。 |
 | [npm-packages/peri-sandbox/COMPATIBILITY.md](../../npm-packages/peri-sandbox/COMPATIBILITY.md) | 保留 | 「Compatibility and validation ledger」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
 | [npm-packages/peri-sandbox/MCP-TOOL-TEST-ISSUES.md](../../npm-packages/peri-sandbox/MCP-TOOL-TEST-ISSUES.md) | 保留 | 「peri-sandbox MCP 工具测试问题报告」是使用/开发入口；实现事实由其指向的代码与设计核对。 |
 | [npm-packages/peri-sandbox/README.md](../../npm-packages/peri-sandbox/README.md) | 保留 | 「peri-sandbox」是使用/开发入口；实现事实由其指向的代码与设计核对。 |

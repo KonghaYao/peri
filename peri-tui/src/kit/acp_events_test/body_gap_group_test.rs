@@ -276,6 +276,44 @@ fn test_trailing_process_units_form_tail_group() {
     assert_eq!(group.key, "tool:t1");
 }
 
+/// 纯 reasoning 的尾气泡不得被 todo 摘要切成第二组。
+///
+/// todo 插入时只把「含正文的 assistant bubble」当最终回答；纯 reasoning 是过程
+/// 单元，若被当成最终回答，todo 会插到它前面，把末尾过程段切成两段并留下一条
+/// 单独的 `▸ Thought`。
+#[test]
+#[serial]
+fn test_todo_summary_does_not_split_trailing_reasoning_group() {
+    let mut state = prompt_state();
+    *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
+        status: crate::kit::message_area::TodoStatus::InProgress,
+        content: "处理中".into(),
+    }];
+    dispatch_all(
+        &mut state,
+        &[
+            tool_started("t1"),
+            tool_ended("t1"),
+            reasoning("思考", "m2"),
+        ],
+    );
+    let snapshot = current_snapshot();
+    assert_eq!(snapshot.items.len(), 2, "items={:?}", snapshot.items);
+    let group = group_at(&snapshot, 0);
+    assert_eq!(group.count, 2, "工具与 trailing reasoning 应在同一组");
+    assert!(
+        group.title.contains("Thought"),
+        "组标题应包含 Thought，实际 {:?}",
+        group.title
+    );
+    assert!(
+        matches!(&snapshot.items[1], TuiRenderUnit::TuiTodoSummary(_)),
+        "todo 摘要应在折叠组之后，实际 {:?}",
+        snapshot.items
+    );
+    crate::kit::atoms::TODO_ITEMS.state().write().clear();
+}
+
 /// 流式追加：同一空档内的新过程项进入既有组，组身份与用户展开选择保持稳定。
 #[test]
 #[serial]

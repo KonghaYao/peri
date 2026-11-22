@@ -26,10 +26,10 @@ replace a required multi-agent workflow (`ultracode`) with a tool-only script.
 export const meta = { name: 'audit', description: 'Collect and compare files' }
 
 // `Glob` returns text: one path per line, `No files found.`, or a listing
-// followed by a `[Output truncated: ...]` note. Handle all three shapes.
+// followed by an unnumbered `[Output truncated: ...]` note.
 const listing = await tool('Glob', { pattern: 'src/**/*.rs' })
 if (listing.trim() === 'No files found.') return { count: 0, verdict: 'no files matched' }
-if (listing.includes('Output truncated:')) {
+if (listing.split('\n').some(line => line.startsWith('[Output truncated:'))) {
   throw new Error('Glob hit the result limit; rerun with a narrower pattern')
 }
 
@@ -37,9 +37,12 @@ const targets = listing.split('\n').filter(Boolean)
 const results = await parallel(targets.map(file => async () => {
   try {
     const text = await tool('Read', { file_path: file })
-    // A truncated read cannot be ranked by its partial line count.
-    if (text.includes('[Output truncated:')) return { file, lines: null }
-    return { file, lines: text.split('\n').length }
+    const lines = text.split('\n')
+    // `Read` content lines are numbered; status lines are not. Match only the
+    // latter so a file containing the same literal is still counted.
+    if (lines[0] === '[EMPTY FILE]') return { file, lines: 0 }
+    if (lines.some(line => line.startsWith('[Output truncated:'))) return { file, truncated: true }
+    return { file, lines: lines.length }
   } catch (error) {
     // Keep the typed failure code instead of letting parallel() drop it.
     if (!error.code) throw error
