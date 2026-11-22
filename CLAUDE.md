@@ -10,7 +10,7 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 - Peri Loom 是优先支持的 libSQL 兼容后端目标；实际适配及验证范围以存储设计和源码为准。
 - Community Swarms 仍为规划层，只组合 Managed Agents API 的通信、认知与记忆，不旁路 Session 执行归属或另建调度存储。
 - 控制链为 MetaHarness → Middleware → Harness；宿主组合与注入，不维护另一套能力策略。
-- 分布式复用同一 Agent 规则；SDK 管 Chat/Session/ACP，Rivet 管 actor 路由与生命周期，对接层只接线。
+- 分布式复用同一 Agent 规则；SDK 管 Chat/Session/ACP，Rivet 管 actor 路由与生命周期，Peri Swarm 是 actor 对接与部署主线，对接层只接线。
 - 内部能力通过 MCP 消费，外部协议出口通过 ACP；部署隔离按信任边界与生命周期决定。
 - 文件系统能力下沉到 MCP 实现；业务层消费端口，不重新解释环境事实。
 - 契约比能力数量重要：能力关闭应真正不可达，失败可见，迁移有退出条件。
@@ -35,7 +35,7 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 | 当前与已批准目标设计 | [design 索引](docs/design/README.md) |
 | 架构与代码依赖 | [总体架构](docs/design/architecture.md) |
 | 控制、能力与注入 | [Middleware](docs/design/middleware-system.md)、[MetaHarness](docs/design/meta-harness.md)、[System Prompt](docs/design/system-prompt.md) |
-| SDK / Rivet / Sandbox | [SDK Chat](docs/design/peri-sdk-chat.md)、[Rivet](npm-packages/peri-rivet/DESIGN.md)、[Sandbox](npm-packages/peri-sandbox/peri-sandbox-design.md) |
+| Swarm 主线 / SDK / Sandbox | [Peri Swarm](docs/design/peri-swarm.md)、[SDK Chat](docs/design/peri-sdk-chat.md)、[Sandbox](npm-packages/peri-sandbox/peri-sandbox-design.md) |
 | 功能与验收 | [功能目录](docs/reference/feature-catalog.md)、[验收映射](docs/verification/feature-acceptance.md) |
 | 领域术语 | [CONTEXT.md](CONTEXT.md) |
 | 实现定位 | `docs/code-index/` |

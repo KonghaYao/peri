@@ -145,7 +145,8 @@ flowchart TB
 
 这里的 engine 是 Rivet 的 control plane（本地 3.1.1，`:6420`），不是 Peri 进程或 ACP
 Host。Peri 侧的运行单元是 actor 实例：`peri-swarm` 的 `SwarmActor`（key
-`agent/<logicalId>`）与 `@peri-code/rivet` 的 `PeriChatActor`。control plane 选择承载
+`agent/<logicalId>`）。早期试验性 `@peri-code/rivet` 的 `PeriChatActor` 已随适配层移除；
+Peri Swarm 是唯一 actor 主线。control plane 选择承载
 actor 的 node、按需唤醒，并把 HTTP/WebSocket 请求转发给该 node；actor 逻辑跑在连到
 同一 control plane 的 Server 进程里。node 不需要公网地址或 actor 入站端口。
 

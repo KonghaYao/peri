@@ -5,7 +5,9 @@
 
 分级规则只在 [功能登记标准](../standards/features.md) 维护；实现和验证状态见 [验收映射](../verification/feature-acceptance.md)。稳定 ID 不因重排或等级改变而改变；退役 ID 不复用。每行可见字符包含 ID、等级、功能、边界和链接标签，不含 URL 与表格分隔符，最多 100 字。
 
-本次从 Cargo workspace、MCP handlers、middleware 模块、ACP 请求、TUI 面板、SDK/Rivet 入口交叉盘点；源码位置见验收表。内部辅助函数、参数组合、重复入口不各算能力。159 项旧草表未附送，不能虚构逐项迁移对应；旧表对账仍是明确缺口。此表范围为 Peri 产品能力和直接支持的 SDK/插件；side-projects 实验不视为已发布能力。
+本次从 Cargo workspace、MCP handlers、middleware 模块、ACP 请求、TUI 面板、SDK/Peri Swarm 入口交叉盘点；源码位置见验收表。内部辅助函数、参数组合、重复入口不各算能力。159 项旧草表未附送，不能虚构逐项迁移对应；旧表对账仍是明确缺口。此表范围为 Peri 产品能力和直接支持的 SDK/插件；side-projects 实验不视为已发布能力。
+
+> 2026-11-22：试验性 TS 适配层 `npm-packages/peri-rivet` 与 `npm-packages/agent-builder` 已移除；F-SDK-008 与 F-RIVET-001..008 退役，ID 不复用。Rivet actor 与部署主线见 F-SWARM-001..012。
 
 | ID | 等级 | 功能与边界 | 权威来源 |
 | --- | --- | --- | --- |
@@ -179,15 +181,6 @@
 | F-SDK-005 | L1 | 会话执行归属；SDK 管理唯一执行者 | [契约](../design/peri-sdk-chat.md) |
 | F-SDK-006 | L2 | Runtime 适配；ACP 后端可替换而不复制规则 | [契约](../design/peri-sdk-chat.md) |
 | F-SDK-007 | L3 | SDK 数据库；持久事实与运行句柄分离 | [契约](../design/peri-sdk-chat.md) |
-| F-SDK-008 | L3 | 专用装配；agent-builder 组合通用 SDK 能力 | [契约](../design/peri-sdk-chat.md) |
-| F-RIVET-001 | L2 | ChatActor；Rivet action 接入 SDK Chat | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
-| F-RIVET-002 | L2 | SandboxActor；工作区资源生命周期独立 | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
-| F-RIVET-003 | L2 | 活动账本；内部任务与待交付结果阻止误休眠 | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
-| F-RIVET-004 | L2 | KeepAwake；未知活动不能判定空闲 | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
-| F-RIVET-005 | L3 | 资源查询；只读查询不新增调度状态 | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
-| F-RIVET-006 | L3 | Sandbox MCP；HTTP descriptor 绑定资源引用 | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
-| F-RIVET-007 | L3 | 扩容与 drain；活跃执行连续性待真实验收 | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
-| F-RIVET-008 | L3 | 长时运行；24h 连续性须真实时间证据 | [契约](../../npm-packages/peri-rivet/DESIGN.md) |
 | F-PLATFORM-001 | L3 | WASM 运行；复用同一 Harness 与协议语义 | [契约](../design/serverless-execution-identity.md) |
 | F-PLATFORM-002 | L3 | 执行环境身份；宿主实例与会话身份分离 | [契约](../design/serverless-execution-identity.md) |
 | F-PLATFORM-003 | L3 | Sandbox 启动；显式工作区和运行策略 | [契约](../design/serverless-execution-identity.md) |

@@ -5,7 +5,7 @@
 
 功能定义与评级只在 [功能目录](../reference/feature-catalog.md)；本表维护当前实现、源码定位和证据缺口。“相关测试”是已定位的候选证据入口，仍须逐断言确认覆盖范围，不能据此声称整行边界已验证。各行“未复验”指本次文档变更未重跑对应运行行为，并非已确认产品缺陷。所有 L1–L4 的场景 ID、关键断言和固定产品/测试 SHA 对账交 [peri-e2e #10](https://github.com/KonghaYao/peri-e2e/issues/10)，不在 Peri 复制测试编排。L5 没有自动新增 E2E 的义务。
 
-已知证据：#443 已由 [#455](https://github.com/KonghaYao/peri/pull/455) 合并，async-only 已由 [#453](https://github.com/KonghaYao/peri/pull/453) 合并；这是维护者历史验收声明，本次未重跑。History V2 的细项证据与缺口只在 [既有矩阵](history-v2-acceptance.md)。Rivet 真运行时/24h 证据归 [#448](https://github.com/KonghaYao/peri/issues/448)，内存证据归 [#447](https://github.com/KonghaYao/peri/issues/447)，工具命名与懒加载归 [#449](https://github.com/KonghaYao/peri/issues/449)。#456 尚未合入本盘点基线。
+已知证据：#443 已由 [#455](https://github.com/KonghaYao/peri/pull/455) 合并，async-only 已由 [#453](https://github.com/KonghaYao/peri/pull/453) 合并；这是维护者历史验收声明，本次未重跑。History V2 的细项证据与缺口只在 [既有矩阵](history-v2-acceptance.md)。试验性 TS 适配层（`peri-rivet`、`agent-builder`）已于 2026-11-22 移除，F-SDK-008 与 F-RIVET-001..008 退役；原 [#448](https://github.com/KonghaYao/peri/issues/448) 的真实 Engine/24h 证据随该层归档，Peri Swarm 主线的未验收项见[本地开发验收记录](peri-swarm-local-dev.md) 的 `unverified` 清单。内存证据归 [#447](https://github.com/KonghaYao/peri/issues/447)，工具命名与懒加载归 [#449](https://github.com/KonghaYao/peri/issues/449)。#456 尚未合入本盘点基线。
 
 | ID | 实现状态 | 契约 | 证据或缺口 | 验证状态 |
 | --- | --- | --- | --- | --- |
@@ -179,15 +179,6 @@
 | F-SDK-005 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/@peri-sdk/src/execution)；缺口：会话执行归属的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-SDK-006 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/@peri-sdk/src/transport)；缺口：Runtime 适配的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-SDK-007 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/@peri-sdk/src/storage)；缺口：SDK 数据库的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-SDK-008 | 源码存在 | [契约](../design/peri-sdk-chat.md) | [源码](../../npm-packages/agent-builder/server)；缺口：专用装配的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-RIVET-001 | 源码存在 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/src/rivet/chat-actor.ts)；缺口：ChatActor的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-RIVET-002 | 源码存在 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/src/rivet/sandbox-actor.ts)；缺口：SandboxActor的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-RIVET-003 | 源码存在 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/src/host/activity.ts)；缺口：活动账本的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-RIVET-004 | 源码存在 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/src/host/keep-awake.ts)；缺口：KeepAwake的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-RIVET-005 | 源码存在 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/src/resource/queries.ts)；缺口：资源查询的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-RIVET-006 | 源码存在 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/src/rivet/sandbox-mcp-actor.ts)；缺口：Sandbox MCP的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
-| F-RIVET-007 | 目标；真实运行待验 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/DESIGN.md)；缺口：#448 实际 Engine、扩容/drain 与 24h 连续性证据 | 未复验 |
-| F-RIVET-008 | 目标；真实运行待验 | [契约](../../npm-packages/peri-rivet/DESIGN.md) | [源码](../../npm-packages/peri-rivet/DESIGN.md)；缺口：#448 实际 Engine、扩容/drain 与 24h 连续性证据 | 未复验 |
 | F-PLATFORM-001 | 源码存在 | [契约](../design/serverless-execution-identity.md) | [源码](../../peri-wasm/src)；缺口：WASM 运行的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-PLATFORM-002 | 源码存在 | [契约](../design/serverless-execution-identity.md) | [源码](../../peri-wasm/src)；缺口：执行环境身份的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
 | F-PLATFORM-003 | 源码存在 | [契约](../design/serverless-execution-identity.md) | [源码](../../npm-packages/peri-sandbox/src)；缺口：Sandbox 启动的场景/断言与当前 SHA 尚待测试仓对账 | 未复验 |
