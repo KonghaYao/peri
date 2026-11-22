@@ -453,7 +453,7 @@ peri-resources/workflow/<内容身份>/     # 内容身份 = dist/peri-workflow.
 
 每步都校验包身份（name / version / main / `periProtocolVersion` / `periBuildId`）、入口路径
 不越界，以及入口字节的 sha256 等于编译期 `WORKFLOW_ENTRY_SHA256`。
-运行时不访问 npm/registry：缺失或摘要不符即 fail closed。
+运行时不访问 npm/registry：按顺序尝试上述来源，仅当没有任何来源通过身份与摘要校验时 fail closed。
 启动方式为 `node <已校验入口>`；`peri workflow` CLI、preflight 与 workflow 工具共用同一解析路径。
 
 **安全要点**：

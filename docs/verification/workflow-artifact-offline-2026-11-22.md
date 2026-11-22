@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | registry/网络回退代码删除 | 通过 | `peri-workflow/src/runner/artifact.rs` 不再包含 `RegistryArtifact`、`WORKFLOW_REGISTRY_*`、`fetch_and_publish_from_registry`、`PERI_WORKFLOW_ALLOW_NPX_FALLBACK` |
 | 解析仅使用已校验本地来源 | 通过 | `resolve_artifact` 顺序为显式注入 → 本机缓存 → 随包 sidecar；三者统一由 `WORKFLOW_ENTRY_SHA256` 校验 |
-| 缺失 artifact fail closed 且不再提示联网 | 通过 | `prepare_fails_closed_without_artifact` 断言错误包含 sidecar 路径与 `PERI_WORKFLOW_ARTIFACT_DIR`，不包含旧开关 |
+| 无可用 artifact fail closed 且不再提示联网 | 通过 | `prepare_fails_closed_without_artifact` 断言错误包含 sidecar 路径与 `PERI_WORKFLOW_ARTIFACT_DIR`，不包含旧开关 |
 | 旧内容身份缓存不被复用 | 通过 | `resolve_ignores_cache_entries_outside_the_bundled_content_identity` |
 | 权威文档同步 | 通过 | `docs/design/workflow.md`、`workflow-mcp.md`、`architecture-contracts.md`、`environment-variables.md`、`code-index/peri-workflow.md`、npm README/DESIGN、ultracode SKILL |
 

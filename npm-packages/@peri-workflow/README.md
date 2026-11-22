@@ -36,7 +36,7 @@ Peri（Rust 宿主）**随二进制分发本包构建出的单文件 bundle 作�
 首次使用时校验身份与摘要并发布到本机缓存 `~/.peri/workflow/<version>/<内容身份>/`，之后离线复用。
 `peri workflow --help` 与 workflow 工具走同一份已校验产物。
 
-- 默认**不联网**：sidecar 或缓存缺失/摘要不符时直接 fail closed（错误信息给出 sidecar 路径与可选入口）。
+- 默认**不联网**：按顺序尝试各本地来源，仅当没有任何来源通过身份与摘要校验时 fail closed（缓存缺失但 sidecar 有效时仍可运行；错误信息给出 sidecar 路径与可选入口）。
 - Peri 运行时不访问 npm/registry；下面是给非 Peri 宿主或手工调试的独立渠道。
 - 部署方可显式指定包目录：`PERI_WORKFLOW_ARTIFACT_DIR`（仍按随包身份与 `WORKFLOW_ENTRY_SHA256` 校验）。
 - `dist/` 为构建产物（`bun run build` 可复现字节）、**不入库**：由发布链在打包前构建并随发布包携带，消费方按固定 SHA-256 pin 校验。仓库开发时先 `bun run build`，再用 `node dist/peri-workflow.js --help`。
@@ -305,7 +305,7 @@ npm publish --access public
   上述 Rust 常量四者一致。
 
 **5. 验证**：重编 peri 后触发一次 workflow。首次调用从随包 sidecar 校验并发布到
-`~/.peri/workflow/<ver>/<内容身份>/`（离线，无需 npm/网络）；摘要不符或缺失时 fail closed，
+`~/.peri/workflow/<ver>/<内容身份>/`（离线，无需 npm/网络）；没有任何来源通过校验时 fail closed，
 不存在网络获取路径。
 
 > 若协议有变更，同步更新 [DESIGN.md](./DESIGN.md) 的「协议版本」表。
