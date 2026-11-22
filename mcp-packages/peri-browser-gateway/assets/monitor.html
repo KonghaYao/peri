@@ -6,26 +6,27 @@
 <title>peri-browser monitor</title>
 <style>
   :root {
-    color-scheme: dark;
-    --bg: #0b0d11;
-    --panel: #141821;
-    --line: #232a36;
-    --text: #e6e9ef;
-    --muted: #8b94a7;
-    --accent: #f0a05a;
-    --ok: #5fcf8a;
-    --warn: #e8c266;
-    --bad: #e87272;
-    /* Chrome DevTools dark palette, used by the docked panel. */
-    --dt-bg: #202124;
-    --dt-bar: #292a2d;
-    --dt-line: #3c4043;
-    --dt-text: #e8eaed;
-    --dt-muted: #9aa0a6;
-    --dt-blue: #8ab4f8;
-    --dt-green: #81c995;
-    --dt-red: #f28b82;
-    --dt-yellow: #fdd663;
+    color-scheme: light;
+    /* Chrome's light palette: the monitor shell mirrors the browser it drives. */
+    --bg: #dee1e6;
+    --panel: #ffffff;
+    --line: #dadce0;
+    --text: #202124;
+    --muted: #5f6368;
+    --accent: #1a73e8;
+    --ok: #137333;
+    --warn: #b26a00;
+    --bad: #c5221f;
+    /* Chrome DevTools light palette, used by the docked panel. */
+    --dt-bg: #ffffff;
+    --dt-bar: #f1f3f4;
+    --dt-line: #dadce0;
+    --dt-text: #202124;
+    --dt-muted: #5f6368;
+    --dt-blue: #1a73e8;
+    --dt-green: #137333;
+    --dt-red: #c5221f;
+    --dt-yellow: #b26a00;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -45,95 +46,111 @@
     cursor: pointer;
     padding: 3px 7px;
   }
-  button:hover:not(:disabled) { background: #1d2330; }
-  button:disabled { color: #555e70; cursor: default; }
+  button:hover:not(:disabled) { background: #f1f3f4; }
+  button:focus-visible { outline: 2px solid var(--dt-blue); outline-offset: 1px; }
+  button:disabled { color: #bdc1c6; cursor: default; }
 
-  #brandbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 10px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel);
-  }
-  #brandbar strong { font-size: 13px; letter-spacing: .2px; }
-  #sessionName { color: var(--muted); }
+  /* Chrome's frame: a tab strip over a toolbar. The active tab shares the
+     toolbar's fill so the two read as one surface, the way they do in Chrome. */
+  #chrome { background: var(--panel); }
+  #sessionName { color: var(--muted); font-size: 11px; white-space: nowrap; }
   #sessionName:empty { display: none; }
   #agentPill {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: #1d2330;
+    padding: 0 2px;
     color: var(--muted);
     font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: .6px;
+    white-space: nowrap;
   }
   #agentPill::before {
     content: "";
-    width: 7px; height: 7px;
+    width: 6px; height: 6px;
     border-radius: 50%;
     background: var(--muted);
   }
-  #agentPill.driving::before { background: var(--accent); }
+  #agentPill.driving::before { background: var(--warn); }
   #agentPill.idle::before { background: var(--ok); }
   #agentPill.waiting_for_human::before { background: var(--warn); }
-  #readonly {
-    padding: 1px 7px;
-    border: 1px solid var(--line);
+  #readonly, #holding {
+    padding: 1px 8px;
+    border: 1px solid #c4c7c5;
     border-radius: 999px;
     color: var(--muted);
     font-size: 11px;
+    white-space: nowrap;
   }
-  #readonly[hidden] { display: none; }
-  #holding {
-    padding: 1px 7px;
-    border: 1px solid #2f5c43;
-    border-radius: 999px;
-    background: #12251b;
-    color: var(--ok);
-    font-size: 11px;
-  }
-  #holding[hidden] { display: none; }
+  #readonly[hidden], #holding[hidden] { display: none; }
+  #holding { border-color: #a8dab5; color: var(--ok); }
   .spacer { flex: 1; }
-  #connState { color: var(--muted); font-size: 11px; }
-  #takeover, #release, #diagBtn { border-color: var(--line); font-size: 11px; }
+  #connState { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  #takeover {
+    flex: none;
+    height: 28px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 999px;
+    background: #1a73e8;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  #takeover:hover:not(:disabled) { background: #1765cc; }
+  #release {
+    flex: none;
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid #dadce0;
+    border-radius: 999px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  #release:hover:not(:disabled) { background: #f1f3f4; }
   #takeover[hidden], #release[hidden] { display: none; }
-  #release { color: var(--ok); border-color: #2f5c43; }
   #diagBtn {
+    position: relative;
+    flex: none;
+    width: 32px; height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--muted);
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    color: var(--muted);
+    justify-content: center;
   }
-  #diagBtn .dt-logo { width: 13px; height: 13px; display: block; }
-  #diagBtn.active {
-    color: var(--dt-text);
-    background: #1b2b42;
-    border-color: #2d4a6b;
-  }
-  #diagBtn[aria-disabled="true"] { color: #555e70; }
+  #diagBtn .dt-logo { width: 16px; height: 16px; display: block; }
+  #diagBtn:hover { background: #f1f3f4; }
+  #diagBtn.active { background: #d2e3fc; }
+  #diagBtn[aria-disabled="true"] { color: #bdc1c6; }
   #diagBtn[aria-disabled="true"] .dt-logo { opacity: .45; }
-  #diagCount { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #diagCount {
+    position: absolute;
+    top: 0; right: 0;
+    color: var(--dt-blue);
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
 
   /* Menu under the DevTools button: the real frontend or the built-in panel. */
   #devtoolsPop {
     position: fixed;
-    top: 54px;
-    left: 12px;
+    top: 96px;
+    right: 12px;
     z-index: 40;
     width: 350px;
+    max-width: calc(100vw - 24px);
     padding: 14px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: var(--dt-bar);
+    background: var(--dt-bg);
     color: var(--dt-text);
     border: 1px solid var(--dt-line);
     border-radius: 8px;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, .5);
+    box-shadow: 0 10px 28px rgba(60, 64, 67, .3);
   }
   #devtoolsPop[hidden] { display: none; }
   #devtoolsPop h2 { margin: 0; font-size: 13px; font-weight: 600; }
@@ -142,14 +159,14 @@
     padding: 7px 10px;
     border-radius: 6px;
     border: 1px solid var(--dt-line);
-    background: #35363a;
+    background: #f1f3f4;
     color: var(--dt-text);
     cursor: pointer;
     text-align: left;
   }
-  #devtoolsPop button:hover { background: #3f4145; }
+  #devtoolsPop button:hover { background: #e8eaed; }
   #devtoolsPop button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
-  #devtoolsPop button.primary:hover { background: #1b7bff; }
+  #devtoolsPop button.primary:hover { background: #1765cc; }
   #devtoolsPop button[hidden] { display: none; }
   #devtoolsUrl {
     width: 100%;
@@ -168,75 +185,126 @@
   #tabStrip {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--line);
-    background: #10141b;
-    min-height: 38px;
+    gap: 6px;
+    height: 40px;
+    padding: 0 8px;
+    background: var(--bg);
+    min-width: 0;
   }
   #tabRow {
     display: flex;
-    gap: 4px;
+    align-items: flex-end;
+    gap: 2px;
+    height: 100%;
+    min-width: 0;
     overflow-x: auto;
     overflow-y: hidden;
-    scrollbar-width: thin;
+    scrollbar-width: none;
   }
+  #tabRow::-webkit-scrollbar { display: none; }
   .tab {
     display: flex;
     align-items: center;
-    gap: 6px;
-    max-width: 220px;
-    height: 27px;
-    padding: 0 6px 0 8px;
-    border: 1px solid transparent;
-    border-radius: 5px;
+    gap: 8px;
+    flex: 0 1 220px;
+    min-width: 88px;
+    height: 34px;
+    padding: 0 6px 0 12px;
+    border: 0;
+    border-radius: 8px 8px 0 0;
     color: var(--muted);
+    font-size: 12px;
     white-space: nowrap;
     user-select: none;
     cursor: pointer;
   }
-  .tab:hover { background: #1a1f2a; }
-  .tab.active {
-    background: #232a36;
-    border-color: #2d3646;
-    color: var(--text);
-  }
+  .tab:hover { background: #d0d3d8; }
+  .tab.active { background: var(--panel); color: var(--text); }
   .tdot {
-    width: 6px; height: 6px;
-    background: #3a4252;
-    transform: rotate(45deg);
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: #9aa0a6;
     flex: none;
   }
-  .tab.active .tdot { background: var(--accent); }
+  .tab.active .tdot { background: var(--dt-blue); }
   .tlabel { overflow: hidden; text-overflow: ellipsis; }
   .tclose {
+    flex: none;
+    width: 18px; height: 18px;
+    padding: 0;
     border: 0;
-    padding: 0 3px;
+    border-radius: 50%;
     color: var(--muted);
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+  }
+  .tab:hover .tclose, .tab.active .tclose, .tclose:focus-visible { opacity: 1; }
+  .tclose:hover { background: rgba(32, 33, 36, .08); color: var(--text); }
+  #newTabBtn {
+    flex: none;
+    align-self: flex-end;
+    width: 28px; height: 28px;
+    margin-bottom: 3px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--text);
+    font-size: 18px;
     line-height: 1;
   }
-  .tclose:hover { color: var(--bad); background: transparent; }
-  #newTabBtn { flex: none; font-size: 16px; line-height: 1; padding: 1px 8px; }
+  #newTabBtn:hover { background: #d0d3d8; }
 
   #toolbar {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--line);
+    gap: 4px;
+    height: 48px;
+    padding: 0 8px;
     background: var(--panel);
   }
+  .navbtn {
+    flex: none;
+    width: 32px; height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--text);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .navbtn svg { width: 18px; height: 18px; fill: currentColor; }
+  .navbtn:hover:not(:disabled) { background: #f1f3f4; }
+  .navbtn:disabled { color: #bdc1c6; }
+  #omnibox {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    margin: 0 4px;
+    padding: 0 12px;
+    border: 1px solid transparent;
+    border-radius: 15px;
+    background: #f1f3f4;
+  }
+  #omnibox:focus-within {
+    border-color: var(--dt-blue);
+    box-shadow: inset 0 0 0 1px var(--dt-blue);
+  }
+  .omni-icon { width: 16px; height: 16px; flex: none; fill: var(--muted); }
   #address {
     flex: 1;
     min-width: 0;
-    padding: 5px 9px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: #0e1118;
+    padding: 0;
+    border: 0;
+    background: transparent;
     color: var(--text);
-    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    outline: none;
   }
-  #address:focus { outline: none; border-color: #3b465c; }
 
   #main {
     position: relative;
@@ -245,13 +313,13 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #07090d;
+    background: #f1f3f4;
     overflow: hidden;
   }
   #screen {
     max-width: 100%;
     max-height: 100%;
-    background: #000;
+    background: #ffffff;
     display: block;
     outline: none;
   }
@@ -263,7 +331,7 @@
     align-items: center;
     justify-content: center;
     color: var(--muted);
-    background: rgba(7, 9, 13, .72);
+    background: rgba(248, 249, 250, .85);
     pointer-events: none;
     text-align: center;
     padding: 20px;
@@ -274,10 +342,11 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
-    background: #2a2416;
-    border-bottom: 1px solid #4a3f22;
-    color: #f0dfb5;
+    padding: 8px 12px;
+    background: #e8f0fe;
+    border-bottom: 1px solid var(--line);
+    border-left: 3px solid var(--dt-blue);
+    color: #1967d2;
   }
   #handoff[hidden] { display: none; }
   #handoff p { margin: 0; flex: 1; }
@@ -294,12 +363,13 @@
   }
   .toast {
     max-width: 360px;
-    padding: 7px 10px;
-    border: 1px solid #3a2e2e;
-    border-radius: 6px;
-    background: #241a1a;
-    color: #f0c9c9;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+    color: var(--text);
     font-size: 12px;
+    box-shadow: 0 1px 3px rgba(60, 64, 67, .3);
   }
 
   #tabPreview {
@@ -309,8 +379,8 @@
     height: 150px;
     border: 1px solid var(--line);
     border-radius: 6px;
-    background: #000 center / contain no-repeat;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+    background: #ffffff center / contain no-repeat;
+    box-shadow: 0 8px 24px rgba(60, 64, 67, .3);
     display: none;
     pointer-events: none;
   }
@@ -350,13 +420,13 @@
     background: var(--dt-bar);
     color: var(--dt-text);
     font-size: 12px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+    box-shadow: 0 4px 14px rgba(60, 64, 67, .3);
     pointer-events: none;
     white-space: pre;
   }
   #imePreview[hidden] { display: none; }
 
-  /* Docked panel styled after Chrome DevTools: #202124 body, #292a2d tab bar,
+  /* Docked panel styled after Chrome DevTools: white body, #f1f3f4 tab bar,
      blue underline on the active tab. */
   #drawer {
     display: flex;
@@ -398,7 +468,7 @@
     font-size: 11.5px;
     letter-spacing: .2px;
   }
-  .diagtab:hover:not(:disabled) { background: #35363a; }
+  .diagtab:hover:not(:disabled) { background: #e8eaed; }
   .diagtab.active { color: var(--dt-text); background: var(--dt-bg); }
   .diagtab.active::after {
     content: "";
@@ -413,8 +483,8 @@
     min-width: 15px;
     padding: 0 5px;
     border-radius: 8px;
-    background: #3c4043;
-    color: var(--dt-text);
+    background: #dadce0;
+    color: #3c4043;
     font-size: 10px;
     text-align: center;
     font-variant-numeric: tabular-nums;
@@ -430,7 +500,7 @@
     color: var(--dt-muted);
   }
   .dt-icon svg { width: 13px; height: 13px; display: block; }
-  .dt-icon:hover:not(:disabled) { background: #3c4043; color: var(--dt-text); }
+  .dt-icon:hover:not(:disabled) { background: #e8eaed; color: var(--dt-text); }
   #drawerBody {
     flex: 1;
     min-height: 0;
@@ -446,8 +516,8 @@
     align-items: baseline;
     padding: 2px 10px;
   }
-  .diagrow:hover { background: #2a2b2e; }
-  .diagrow .ts { flex: none; color: #7f858c; }
+  .diagrow:hover { background: #f1f3f4; }
+  .diagrow .ts { flex: none; color: #80868b; }
   .diagrow .lvl { flex: none; width: 52px; text-transform: uppercase; color: var(--dt-muted); }
   .diagrow .lvl.error { color: var(--dt-red); }
   .diagrow .lvl.warning { color: var(--dt-yellow); }
@@ -472,7 +542,7 @@
     gap: 8px;
     padding: 4px 10px;
     border-bottom: 1px solid var(--dt-line);
-    background: #26272a;
+    background: #f8f9fa;
     color: var(--dt-muted);
     font-size: 11px;
   }
@@ -485,13 +555,40 @@
 </style>
 </head>
 <body>
-<div id="brandbar">
-  <strong>peri-browser</strong>
-  <span id="sessionName"></span>
-  <span id="agentPill">idle</span>
-  <span id="readonly" title="the agent holds the page controller; your input is not sent">read-only</span>
-  <span id="holding" hidden>you control this page</span>
-  <span class="spacer"></span>
+<header id="chrome">
+  <div id="tabStrip">
+    <div id="tabRow" role="tablist"></div>
+    <button id="newTabBtn" title="New tab" hidden>+</button>
+    <span class="spacer"></span>
+    <span id="sessionName"></span>
+    <span id="agentPill">idle</span>
+    <span id="readonly" title="the agent holds the page controller; your input is not sent">read-only</span>
+    <span id="holding" hidden>you control this page</span>
+    <span id="connState">connecting</span>
+  </div>
+
+  <div id="toolbar">
+    <button id="back" class="navbtn" title="Back" aria-label="Back">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4 4 12l8 8 1.41-1.41L7.83 13H20z"/></svg>
+    </button>
+    <button id="forward" class="navbtn" title="Forward" aria-label="Forward">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11h12.17l-5.59-5.59L12 4l8 8-8 8-1.41-1.41L16.17 13H4z"/></svg>
+    </button>
+    <div id="omnibox">
+      <svg class="omni-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm6.93 6h-2.95a15.6 15.6 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 8ZM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96ZM4.26 14a8.1 8.1 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26Zm.81 2h2.95c.32 1.25.78 2.45 1.38 3.56A8.03 8.03 0 0 1 5.07 16Zm2.95-8H5.07a8.03 8.03 0 0 1 4.33-3.56A15.6 15.6 0 0 0 8.02 8ZM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96ZM14.34 14H9.66a14.6 14.6 0 0 1 0-4h4.68a14.6 14.6 0 0 1 0 4Zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56ZM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.1 8.1 0 0 1 0 4h-3.38Z"/></svg>
+      <input id="address" spellcheck="false" autocomplete="off" value="about:blank" aria-label="Page address">
+    </div>
+    <button id="diagBtn" title="Open the DevTools panel (needs the page controller)" aria-label="DevTools">
+      <svg class="dt-logo" viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="0.5" y="1.5" width="15" height="13" rx="3" fill="#3949ab"></rect>
+        <path d="M5.7 5.2 3.5 8l2.2 2.8M10.3 5.2 12.5 8l-2.2 2.8" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+      <span id="diagCount"></span>
+    </button>
+    <button id="takeover" title="Ask the agent to yield the page; it finishes the current call first" hidden>Take over</button>
+    <button id="release" title="Close the controller and give the page back to the agent" hidden>Release</button>
+  </div>
+
   <div id="devtoolsPop" role="dialog" aria-label="DevTools" hidden>
     <h2>Chrome DevTools</h2>
     <p>Kitesurf accepts one controller per page. Handing the page over keeps the
@@ -508,30 +605,7 @@
     <p>Console and network without leaving the monitor:</p>
     <button id="diagBuiltin">Built-in panel</button>
   </div>
-
-  <button id="diagBtn" title="Open the DevTools panel (needs the page controller)">
-    <svg class="dt-logo" viewBox="0 0 16 16" aria-hidden="true">
-      <rect x="0.5" y="1.5" width="15" height="13" rx="3" fill="#3949ab"></rect>
-      <path d="M5.7 5.2 3.5 8l2.2 2.8M10.3 5.2 12.5 8l-2.2 2.8" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"></path>
-    </svg>
-    <span>DevTools</span><span id="diagCount"></span>
-  </button>
-  <span id="connState">connecting</span>
-  <button id="takeover" title="Ask the agent to yield the page; it finishes the current call first" hidden>Take over</button>
-  <button id="release" title="Close the controller and give the page back to the agent" hidden>Release</button>
-</div>
-
-<div id="tabStrip">
-  <div id="tabRow" role="tablist"></div>
-  <button id="newTabBtn" title="New tab" hidden>+</button>
-</div>
-
-<div id="toolbar">
-  <button id="back" title="Back">&lsaquo;</button>
-  <button id="forward" title="Forward">&rsaquo;</button>
-  <input id="address" spellcheck="false" autocomplete="off" value="about:blank" aria-label="Page address">
-  <button id="closeTab" title="Close tab" hidden>&times;</button>
-</div>
+</header>
 
 <div id="handoff" hidden>
   <p id="handoffText"></p>
@@ -597,7 +671,6 @@
   const takeoverButton = document.getElementById("takeover");
   const releaseButton = document.getElementById("release");
   const newTabButton = document.getElementById("newTabBtn");
-  const closeTabButton = document.getElementById("closeTab");
   const backButton = document.getElementById("back");
   const forwardButton = document.getElementById("forward");
   const preview = document.getElementById("tabPreview");
@@ -735,7 +808,7 @@
 
   function updateDiagCount() {
     const total = state.console.length + state.network.length;
-    diagCount.textContent = total ? ` (${total})` : "";
+    diagCount.textContent = total ? String(total) : "";
     consoleCount.textContent = String(state.console.length);
     networkCount.textContent = String(state.network.length);
   }
@@ -938,7 +1011,6 @@
     takeoverButton.disabled = state.takeoverPending;
     releaseButton.hidden = !holding || Boolean(state.handoff);
     newTabButton.hidden = !state.caps.newTab;
-    closeTabButton.hidden = !state.active;
     diagButton.classList.toggle("active", state.diagOpen);
     diagButton.title = holding && state.caps.diagnostics
       ? "Show the console and network log from the page controller"
@@ -1462,9 +1534,6 @@
     if (!state.interactive) toast("asking the agent to go forward");
   });
   newTabButton.addEventListener("click", () => send({ t: "newTab", url: "about:blank" }));
-  closeTabButton.addEventListener("click", () => {
-    if (state.active) send({ t: "closeTab", pageId: state.active });
-  });
 
   function requestTakeover() {
     if (state.interactive || state.takeoverPending) return;
