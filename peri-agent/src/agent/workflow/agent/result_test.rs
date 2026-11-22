@@ -237,14 +237,21 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
     let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
     let params = params(None);
     let observation = WorkflowObservation::new(&params, None, None);
-    let failed = crate::agent::workflow::agent::result::project_run_result(
+    let failed = super::project_run_result(
         LoopResult::Interrupted,
         Err(ExecutionFailure::internal("forwarder join failed")),
-        &session,
-        &observation,
-        &params,
-        "effective",
-        Instant::now(),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 200,
+                iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::Default,
+                iterations_used: None,
+            },
+            started_at: Instant::now(),
+        },
     );
     assert!(matches!(&failed.result, AgentRunResult::Dead { reason, .. }
         if reason.as_deref() == Some("event-forwarder-failed")));
@@ -268,14 +275,21 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
         matches!(failed.telemetry_outcome(), TurnTelemetryOutcome::Failed { failure }
         if failure.public_message == "forwarder join failed")
     );
-    let interrupted = crate::agent::workflow::agent::result::project_run_result(
+    let interrupted = super::project_run_result(
         LoopResult::Interrupted,
         Ok(()),
-        &session,
-        &observation,
-        &params,
-        "effective",
-        Instant::now(),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 200,
+                iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::Default,
+                iterations_used: None,
+            },
+            started_at: Instant::now(),
+        },
     );
     assert!(matches!(
         interrupted.telemetry_outcome(),
@@ -297,14 +311,21 @@ fn run_projection_keeps_forwarder_failure_priority_and_cancel_terminal() {
     );
     assert_eq!(*token_count, None);
     assert_eq!(interrupted.result.token_count(), None);
-    let completed = crate::agent::workflow::agent::result::project_run_result(
+    let completed = super::project_run_result(
         LoopResult::Completed,
         Ok(()),
-        &session,
-        &observation,
-        &params,
-        "effective",
-        Instant::now(),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 200,
+                iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::Default,
+                iterations_used: None,
+            },
+            started_at: Instant::now(),
+        },
     );
     assert!(matches!(
         completed.telemetry_outcome(),
@@ -327,14 +348,21 @@ fn dead_result_reports_tokens_only_when_usage_was_reported() {
         request_id: None,
         source_agent_id: None,
     });
-    let interrupted = crate::agent::workflow::agent::result::project_run_result(
+    let interrupted = super::project_run_result(
         LoopResult::Interrupted,
         Ok(()),
-        &session,
-        &observation,
-        &params,
-        "effective",
-        Instant::now(),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 200,
+                iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::Default,
+                iterations_used: None,
+            },
+            started_at: Instant::now(),
+        },
     );
     assert_eq!(
         interrupted.result.token_count(),
@@ -452,6 +480,7 @@ fn scope_close_failure_replaces_success_before_return_and_telemetry() {
             phase: None,
             duration_ms: None,
         },
+        execution_limits: super::test_execution_limits(),
         failure: None,
     }
     .after_scope_close(false);
@@ -483,6 +512,7 @@ fn incomplete_scope_close_keeps_the_first_failure_reason() {
     };
     let projected = super::ProjectedResult {
         result: original.clone(),
+        execution_limits: super::test_execution_limits(),
         failure: Some(ExecutionFailure::internal(
             "Workflow agent event forwarding failed",
         )),
@@ -509,11 +539,18 @@ fn interrupted_after_incomplete_close_reports_failure_telemetry() {
     let projected = super::project_run_result(
         LoopResult::Interrupted,
         Ok(()),
-        &session,
-        &observation,
-        &params,
-        "effective",
-        Instant::now(),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 200,
+                iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::Default,
+                iterations_used: None,
+            },
+            started_at: Instant::now(),
+        },
     )
     .after_scope_close(false);
     assert!(matches!(&projected.result, AgentRunResult::Dead {
@@ -545,6 +582,7 @@ fn successful_scope_close_preserves_the_original_outcome() {
     ] {
         let projected = super::ProjectedResult {
             result: original.clone(),
+            execution_limits: super::test_execution_limits(),
             failure: None,
         }
         .after_scope_close(true);
@@ -570,11 +608,18 @@ fn formal_report_survives_compaction_and_cleanup_through_schema_projection() {
     let projected = super::project_run_result(
         LoopResult::Completed,
         Ok(()),
-        &session,
-        &observation,
-        &params,
-        "effective",
-        Instant::now(),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 200,
+                iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::Default,
+                iterations_used: None,
+            },
+            started_at: Instant::now(),
+        },
     )
     .after_scope_close(true);
     let AgentRunResult::Ok { output, .. } = projected.result else {
@@ -583,5 +628,100 @@ fn formal_report_survives_compaction_and_cleanup_through_schema_projection() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(output.as_str().unwrap()).unwrap(),
         json!({"status": "passed", "artifact": "revision-2"})
+    );
+}
+
+/// 迭代上限耗尽：结构化 reason + 实际解析上限与精确用量（不解析错误文案）。
+#[test]
+fn iteration_exhaustion_reports_structured_reason_and_measured_usage() {
+    let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+    let params = params(None);
+    let observation = WorkflowObservation::new(&params, None, None);
+    let projected = super::project_run_result(
+        LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(2)),
+        Ok(()),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 2,
+                iteration_limit_source:
+                    peri_acp_types::workflow::IterationLimitSource::AgentDefinition,
+                iterations_used: Some(2),
+            },
+            started_at: Instant::now(),
+        },
+    );
+    assert!(
+        projected.result.iteration_limit_exhausted(),
+        "迭代耗尽必须用稳定 reason 编码，而不是靠错误文案解析"
+    );
+    assert_eq!(
+        projected.execution_limits,
+        super::AgentExecutionLimits {
+            iteration_limit: 2,
+            iteration_limit_source: peri_acp_types::workflow::IterationLimitSource::AgentDefinition,
+            iterations_used: Some(2),
+        },
+        "上限按解析值记录，用量取循环的语义迭代计数"
+    );
+}
+
+/// 正常完成也记录本次解析的上限与真实用量；不是默认值推断。
+#[test]
+fn completed_run_records_resolved_limit_and_measured_iterations() {
+    let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+    let params = params(None);
+    let observation = WorkflowObservation::new(&params, None, None);
+    let projected = super::project_run_result(
+        LoopResult::Completed,
+        Ok(()),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 400,
+                iteration_limit_source:
+                    peri_acp_types::workflow::IterationLimitSource::AgentDefinition,
+                iterations_used: Some(1),
+            },
+            started_at: Instant::now(),
+        },
+    );
+    assert_eq!(projected.execution_limits.iteration_limit, 400);
+    assert_eq!(projected.execution_limits.iterations_used, Some(1));
+}
+
+/// 其他错误仍是 runagent-threw：不能把任意失败升级为“上限耗尽”。
+#[test]
+fn non_limit_errors_keep_the_generic_dead_reason() {
+    let session = Session::new(Arc::from("/unused"), FrozenContext::builder().build(), None);
+    let params = params(None);
+    let observation = WorkflowObservation::new(&params, None, None);
+    let projected = super::project_run_result(
+        LoopResult::Error(crate::error::AgentError::Other(anyhow::anyhow!("boom"))),
+        Ok(()),
+        super::ProjectionInputs {
+            session: &session,
+            observation: &observation,
+            params: &params,
+            effective_model: "effective",
+            execution_limits: super::AgentExecutionLimits {
+                iteration_limit: 400,
+                iteration_limit_source:
+                    peri_acp_types::workflow::IterationLimitSource::AgentDefinition,
+                iterations_used: Some(2),
+            },
+            started_at: Instant::now(),
+        },
+    );
+    assert!(!projected.result.iteration_limit_exhausted());
+    assert!(
+        matches!(&projected.result, AgentRunResult::Dead { reason, .. }
+        if reason.as_deref() == Some("runagent-threw"))
     );
 }

@@ -126,6 +126,13 @@ pub struct WorkflowAgentContext {
 pub struct WorkflowAgentExecutor {
     pub(super) ctx: WorkflowAgentContext,
     pub(super) execution_manager: std::sync::OnceLock<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+    /// 按 `(run_id, agent_id)` 记录本次执行实际解析的迭代上限与用量。
+    ///
+    /// 执行结果只携带 agent 输出；上限/用量是宿主结算所需的独立事实，由执行器
+    /// （唯一解析点）给出，宿主不得自行推断默认值。`forget_run` 随 run 结束回收。
+    execution_limits: parking_lot::RwLock<
+        std::collections::HashMap<(String, u64), peri_acp_types::workflow::AgentExecutionLimits>,
+    >,
 }
 
 impl WorkflowAgentExecutor {
@@ -134,7 +141,18 @@ impl WorkflowAgentExecutor {
         Self {
             ctx,
             execution_manager: std::sync::OnceLock::new(),
+            execution_limits: parking_lot::RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    fn record_execution_limits(
+        &self,
+        run_id: &str,
+        agent_id: u64,
+        limits: peri_acp_types::workflow::AgentExecutionLimits,
+    ) {
+        let mut recorded = self.execution_limits.write();
+        recorded.insert((run_id.to_string(), agent_id), limits);
     }
 }
 
@@ -189,6 +207,26 @@ pub fn create_default_executor(
     }))
 }
 
+/// 有效迭代上限与来源的唯一解析点。
+///
+/// 定义给出正向 `max_turns`（含 builtin coder 的 400）时按定义值；未指定 agentType
+/// 或定义为 0 时回落执行器默认值。调用方（attempt/state 投影）直接使用这里的结果，
+/// 不另行推断或写死默认。
+pub(super) fn resolve_iteration_limit(
+    agent_definition: Option<&crate::agent::workflow::factory::WorkflowAgentDefinition>,
+) -> (usize, peri_acp_types::workflow::IterationLimitSource) {
+    match agent_definition
+        .map(|definition| definition.max_iterations)
+        .filter(|max_iterations| *max_iterations > 0)
+    {
+        Some(limit) => (
+            limit,
+            peri_acp_types::workflow::IterationLimitSource::AgentDefinition,
+        ),
+        None => (200, peri_acp_types::workflow::IterationLimitSource::Default),
+    }
+}
+
 pub(super) fn requested_model<'a>(
     request_model: Option<&'a str>,
     agent_definition: Option<&'a crate::agent::workflow::factory::WorkflowAgentDefinition>,
@@ -237,6 +275,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
             max_tokens = ?params.max_tokens,
             "Workflow agent: starting execution"
         );
+
+        // 重试会复用 `(run_id, agent_id)`：上一轮解析的上限与用量不得挂到本次
+        // attempt 上（例如重试在进入循环前就失败）。
+        self.execution_limits
+            .write()
+            .remove(&(params.run_id.clone(), params.agent_id));
 
         let started_at = peri_time::monotonic_now();
 
@@ -393,11 +437,18 @@ impl AgentExecutor for WorkflowAgentExecutor {
 
         // 6. v2 stages 装配（替代 SubAgentBuilder）
         let cancel_token = self.ctx.cancel.clone().unwrap_or_default();
-        let max_iterations = agent_definition
-            .as_ref()
-            .map(|definition| definition.max_iterations)
-            .filter(|max_iterations| *max_iterations > 0)
-            .unwrap_or(200);
+        let (max_iterations, iteration_limit_source) =
+            resolve_iteration_limit(agent_definition.as_ref());
+        // 上限已解析就先记录上限本身；用量要等循环推进，未进入循环时保持 None。
+        self.record_execution_limits(
+            &params.run_id,
+            params.agent_id,
+            peri_acp_types::workflow::AgentExecutionLimits {
+                iteration_limit: max_iterations as u64,
+                iteration_limit_source,
+                iterations_used: None,
+            },
+        );
 
         // tools: Vec<Box<dyn BaseTool>> → Vec<Arc<dyn BaseTool>>
         let tools_arc: Vec<Arc<dyn crate::tools::BaseTool>> = tools
@@ -515,6 +566,9 @@ impl AgentExecutor for WorkflowAgentExecutor {
             agent_id: _,
             event_bus,
         } = v2_ctx;
+        // 语义迭代计数归 TurnContext（循环内 advance_step 推进）：循环消费 context
+        // 后仍可读，用于 attempt 的真实用量；未进入循环的执行才留 None。
+        let turn = Arc::clone(&context.session.turn);
         let handler_for_forwarder = Arc::clone(&event_handler);
         let publish_hook = self.ctx.publish_hook.clone();
         let sid_for_forwarder = self.ctx.session_id.clone();
@@ -579,12 +633,23 @@ impl AgentExecutor for WorkflowAgentExecutor {
         let projected = result::project_run_result(
             loop_result,
             forwarder_result,
-            &session,
-            &observation,
-            &params,
-            &model_name,
-            started_at,
+            result::ProjectionInputs {
+                session: &session,
+                observation: &observation,
+                params: &params,
+                effective_model: &model_name,
+                // 上限取执行器解析值，用量取循环自己的语义迭代计数
+                // （`advance_step` 与预算检查同点推进）。
+                execution_limits: peri_acp_types::workflow::AgentExecutionLimits {
+                    iteration_limit: max_iterations as u64,
+                    iteration_limit_source,
+                    iterations_used: Some(turn.current_step() as u64),
+                },
+                started_at,
+            },
         );
+        // 结算路径（宿主）按 (run_id, agent_id) 读取本次解析结果；run 结束时回收。
+        self.record_execution_limits(&params.run_id, params.agent_id, projected.execution_limits);
         if forwarded {
             execution_guard.confirm_stopped();
         }
@@ -614,6 +679,23 @@ impl AgentExecutor for WorkflowAgentExecutor {
         }
 
         projected.result
+    }
+
+    fn execution_limits(
+        &self,
+        run_id: &str,
+        agent_id: u64,
+    ) -> Option<peri_acp_types::workflow::AgentExecutionLimits> {
+        self.execution_limits
+            .read()
+            .get(&(run_id.to_string(), agent_id))
+            .copied()
+    }
+
+    fn forget_run(&self, run_id: &str) {
+        self.execution_limits
+            .write()
+            .retain(|(run, _), _| run != run_id);
     }
 }
 

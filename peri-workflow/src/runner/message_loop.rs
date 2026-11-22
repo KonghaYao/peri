@@ -25,6 +25,7 @@ use crate::runner::limits::RunLimitState;
 use crate::runner::run_protocol::JournalAppendParams;
 use crate::runner::run_protocol::JournalTruncateParams;
 
+use crate::runner::AgentExecutor;
 use crate::runner::AgentTaskPublish;
 use crate::runner::AgentTaskSink;
 use crate::runner::WorkflowInput;
@@ -36,6 +37,8 @@ pub(super) struct MessageLoop {
     pub(super) run_scope: Arc<crate::runner::scope::RunScope>,
     /// `agent/task` 发布面（装配期绑定；未接线时一律拒绝并记录）。
     pub(super) agent_task_sink: Option<Arc<dyn AgentTaskSink>>,
+    /// agent 执行器：读取每次执行实际解析的上限与用量（attempt 富化用）。
+    pub(super) agent_executor: Arc<dyn AgentExecutor>,
     /// run limit 状态（tool 计数 / breach）；与投递路径共享同一实例。
     pub(super) limit_state: Arc<RunLimitState>,
     pub(super) channel: Arc<RpcChannel>,
@@ -56,6 +59,7 @@ impl MessageLoop {
         let Self {
             run_scope,
             agent_task_sink,
+            agent_executor,
             limit_state,
             channel,
             journal_store,
@@ -91,8 +95,12 @@ impl MessageLoop {
                 let remaining = maximum.saturating_sub(elapsed);
                 if remaining == 0 {
                     // 超时是后到的失败：已记录的 breach/错误才是首个诊断。
-                    let error = format!("workflow exceeded maxElapsedMs ({maximum})");
-                    limit_state.set_breach(error);
+                    limit_state.record_run_breach(crate::runner::RunLimitBreach::new(
+                        peri_acp_types::workflow::LimitScope::ElapsedMs,
+                        Some(maximum),
+                        Some(elapsed),
+                        format!("workflow exceeded maxElapsedMs ({maximum})"),
+                    ));
                     final_result.error = final_result.error.take().or_else(|| limit_state.breach());
                     break;
                 }
@@ -100,8 +108,13 @@ impl MessageLoop {
                     Ok(message) => message,
                     Err(_) => {
                         // 超时是后到的失败：已记录的 breach/错误才是首个诊断。
-                        let error = format!("workflow exceeded maxElapsedMs ({maximum})");
-                        limit_state.set_breach(error);
+                        limit_state.record_run_breach(crate::runner::RunLimitBreach::new(
+                            peri_acp_types::workflow::LimitScope::ElapsedMs,
+                            Some(maximum),
+                            // 等待已耗尽剩余预算，检测时点的观测值即上限。
+                            Some(maximum),
+                            format!("workflow exceeded maxElapsedMs ({maximum})"),
+                        ));
                         final_result.error =
                             final_result.error.take().or_else(|| limit_state.breach());
                         break;
@@ -228,11 +241,11 @@ impl MessageLoop {
                                     );
                                 }
                             }
-                            AgentTaskPublish::LimitBreach(error) => {
+                            AgentTaskPublish::LimitBreach(breach) => {
                                 // 与旧链同语义（agent/run 的 maxAgents 分支）：run 立即
                                 // 以限额错误终止，后续 done 不得覆写。
-                                limit_state.set_breach(error.clone());
-                                final_result.error = Some(error);
+                                limit_state.record_run_breach(breach);
+                                final_result.error = limit_state.breach();
                                 break;
                             }
                         }
@@ -264,6 +277,20 @@ impl MessageLoop {
                             >(Some(p), &run_id)
                             {
                                 attempts.annotate(&mut parsed.entry);
+                                // 执行事实按 agent 身份取（`annotate` 已回填可证身份）。
+                                let agent_identity = parsed
+                                    .entry
+                                    .attempt
+                                    .as_ref()
+                                    .and_then(|attempt| attempt.agent_id)
+                                    .unwrap_or(parsed.entry.seq);
+                                let limits =
+                                    agent_executor.execution_limits(&run_id, agent_identity);
+                                enrich_attempt_execution(
+                                    &mut parsed.entry,
+                                    limits,
+                                    input.budget_total,
+                                );
                                 if let Err(e) = journal_store.append(&parsed.run_id, &parsed.entry)
                                 {
                                     warn!(target: "workflow", run_id = %parsed.run_id, error = %e, "journal/append: write failed");
@@ -371,9 +398,46 @@ impl MessageLoop {
             &progress_store,
             started_at_iso,
             &host,
+            limit_state.report(),
         );
         let _ = done_tx.send(Some(final_result));
     }
+}
+
+/// 给 attempt 补执行结果：`disposition` 保持来源语义，dead/limited 单独可见。
+///
+/// 缓存命中（recovered）没有本次执行，不写执行事实，也不参与计费；旧 journal
+/// 不含 `execution`，只能在写入时按当时的执行事实生成，不回填历史。
+fn enrich_attempt_execution(
+    entry: &mut crate::protocol::JournalEntry,
+    limits: Option<peri_acp_types::workflow::AgentExecutionLimits>,
+    token_budget: Option<u64>,
+) {
+    use peri_acp_types::workflow::AttemptExecution;
+    use peri_acp_types::workflow::AttemptOutcome;
+
+    let Some(attempt) = entry.attempt.as_mut() else {
+        return;
+    };
+    if attempt.disposition != peri_acp_types::workflow::AttemptDisposition::Produced {
+        return;
+    }
+    let limited = entry.result.iteration_limit_exhausted();
+    let (outcome, reason) = match &entry.result {
+        AgentRunResult::Ok { .. } => (AttemptOutcome::Ok, None),
+        AgentRunResult::Skipped => (AttemptOutcome::Skipped, None),
+        AgentRunResult::Dead { reason, .. } if limited => (AttemptOutcome::Limited, reason.clone()),
+        AgentRunResult::Dead { reason, .. } => (AttemptOutcome::Dead, reason.clone()),
+    };
+    attempt.execution = Some(AttemptExecution {
+        outcome,
+        reason,
+        iteration_limit: limits.map(|limits| limits.iteration_limit),
+        iteration_limit_source: limits.map(|limits| limits.iteration_limit_source),
+        iterations_used: limits.and_then(|limits| limits.iterations_used),
+        token_budget,
+        token_count: entry.result.token_count(),
+    });
 }
 
 /// 就地投递 `agent/result`（关闭拒绝路径；正常终态由任务表终态 sink 投递）。

@@ -1,4 +1,5 @@
 use crate::journal::git::GitBaseline;
+use crate::journal::git::GitObservation;
 use crate::journal::AttemptTracker;
 use crate::journal::RunState;
 use crate::journal::WorkflowJournalStore;
@@ -148,9 +149,14 @@ fn test_write_and_read_state() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        delivery_reason: None,
+        postcondition_observation: None,
+        git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
+        limit_breaches: Vec::new(),
+        token_usage: None,
         budget_total: Some(9_007_199_254_740_991),
         args: Some(serde_json::json!({"task": "round-trip"})),
         max_concurrency: 7,
@@ -210,9 +216,14 @@ fn test_state_error_field_round_trip() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Failed,
         delivery_status: DeliveryStatus::Blocked,
+        delivery_reason: None,
+        postcondition_observation: None,
+        git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
+        limit_breaches: Vec::new(),
+        token_usage: None,
         budget_total: None,
         args: None,
         max_concurrency: 3,
@@ -251,9 +262,14 @@ fn test_state_error_skipped_when_none() {
         acceptance_status: AcceptanceStatus::Passed,
         post_processing_status: PostProcessingStatus::NotRequired,
         delivery_status: DeliveryStatus::Unknown,
+        delivery_reason: None,
+        postcondition_observation: None,
+        git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Completed,
         write_intent: None,
         limits: crate::protocol::WorkflowLimits::default(),
+        limit_breaches: Vec::new(),
+        token_usage: None,
         budget_total: None,
         args: None,
         max_concurrency: 3,
@@ -308,21 +324,70 @@ fn test_legacy_completed_defaults_do_not_claim_delivery() {
     assert_eq!(state.acceptance_status, AcceptanceStatus::Unknown);
     assert_eq!(state.post_processing_status, PostProcessingStatus::Unknown);
     assert_eq!(state.delivery_status, DeliveryStatus::Unknown);
+    assert_eq!(
+        state.delivery_reason, None,
+        "旧 state.json 缺原因字段：不得据此推断“未请求交付”或“无变化”"
+    );
+    assert_eq!(state.postcondition_observation, None);
 }
 
 #[test]
-fn test_non_git_baseline_is_optional_for_legacy_and_read_only() {
+fn postcondition_reason_fields_round_trip_and_stay_optional() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    let store = WorkflowJournalStore::new(
+        tmp.path()
+            .to_str()
+            .expect("the fixture text must be valid UTF-8"),
+    );
+    store
+        .init_run("run-reason", "script")
+        .expect("the init run fixture result is required for this assertion");
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "run-reason",
+        "workflow_name": "reason",
+        "status": "completed",
+        "script": "script",
+        "started_at": "2026-06-22T00:00:00Z"
+    }))
+    .expect("legacy payload must deserialize");
+    let mut state = state;
+    state.delivery_reason = Some(peri_acp_types::workflow::DeliveryReason::NotRequested);
+    state.postcondition_observation =
+        Some(peri_acp_types::workflow::PostconditionObservation::Complete);
+    store
+        .write_state("run-reason", &state)
+        .expect("the write state fixture result is required for this assertion");
+
+    let read = store
+        .read_state("run-reason")
+        .expect("the read state fixture result is required for this assertion");
+    assert_eq!(
+        read.delivery_reason,
+        Some(peri_acp_types::workflow::DeliveryReason::NotRequested)
+    );
+    assert_eq!(
+        read.postcondition_observation,
+        Some(peri_acp_types::workflow::PostconditionObservation::Complete)
+    );
+}
+
+#[test]
+fn test_non_git_directory_reports_not_applicable_without_intent() {
     let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
 
-    assert!(GitBaseline::capture_for_intent(tmp.path(), None)
-        .expect("the path fixture result is required for this assertion")
-        .is_none());
-    assert!(GitBaseline::capture_for_intent(
-        tmp.path(),
-        Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
-    )
-    .expect("the path fixture result is required for this assertion")
-    .is_none());
+    assert!(matches!(
+        GitBaseline::capture_for_intent(tmp.path(), None)
+            .expect("sampling failure must not fail start"),
+        GitObservation::NotApplicable
+    ));
+    assert!(matches!(
+        GitBaseline::capture_for_intent(
+            tmp.path(),
+            Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
+        )
+        .expect("read-only sampling failure must not fail start"),
+        GitObservation::NotApplicable
+    ));
 }
 
 #[test]
@@ -337,7 +402,18 @@ fn test_non_git_baseline_is_required_for_write_intent() {
     };
 
     let error = GitBaseline::capture_for_intent(tmp.path(), Some(&intent)).unwrap_err();
-    assert!(error.contains("git pre/postcondition command failed"));
+    // 采样失败必须保留 git 自身 stderr 摘要，不能退化成统一文本。
+    let detail = error
+        .strip_prefix("git rev-parse --show-toplevel failed: ")
+        .unwrap_or_else(|| panic!("错误必须带失败命令: {error}"));
+    assert!(
+        !detail.trim().is_empty() && detail != "no stderr output",
+        "错误必须保留 git 诊断: {error}"
+    );
+    assert!(
+        detail.chars().count() <= 501,
+        "stderr 摘要必须有界: {error}"
+    );
 }
 
 #[test]
@@ -443,6 +519,411 @@ fn test_git_baseline_detects_unattributed_change_without_restoring_it() {
         std::fs::read_to_string(tmp.path().join("tracked.txt"))
             .expect("the test fixture text file must be readable"),
         "agent claim without ownership\n"
+    );
+}
+
+/// 未合并条目（`u`）也要能被解析：始终比较 map（而非原始字节）后，
+/// 冲突中的仓库不能因为解析失败被读成观测不完整。
+#[test]
+fn unmerged_porcelain_entries_do_not_claim_a_change() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "init",
+        "-q",
+    ]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    run_git(&["checkout", "-q", "-b", "side"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "side\n")
+        .expect("the test fixture file must be writable");
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qam",
+        "side",
+    ]);
+    run_git(&["checkout", "-q", "-"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "main\n")
+        .expect("the test fixture file must be writable");
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qam",
+        "main",
+    ]);
+    let merge = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Peri Test",
+            "-c",
+            "user.email=peri-test@example.invalid",
+            "merge",
+            "--no-ff",
+            "side",
+        ])
+        .current_dir(tmp.path())
+        .status()
+        .expect("the merge fixture result is required for this assertion");
+    assert!(!merge.success(), "fixture 必须进入未合并状态");
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("the status fixture result is required for this assertion");
+    let status =
+        String::from_utf8(status.stdout).expect("the status fixture output must be valid UTF-8");
+    assert!(
+        status.split('\0').any(|field| field.starts_with("u ")),
+        "fixture 必须产生未合并记录: {status}"
+    );
+
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    baseline
+        .verify_unchanged()
+        .expect("未合并条目本身不是运行带来的变化");
+}
+
+#[test]
+fn workflow_journal_is_excluded_but_unrelated_untracked_files_are_not() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    // 刻意不忽略 `.claude/`：宿主自己的运行产物不得被当成外部变化。
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    let run_dir = tmp
+        .path()
+        .join(".claude")
+        .join("workflow-runs")
+        .join("run-1");
+    std::fs::create_dir_all(&run_dir).expect("the run directory must be creatable");
+    std::fs::write(run_dir.join("script.js"), "return null")
+        .expect("the test fixture file must be writable");
+    baseline
+        .verify_unchanged()
+        .expect("本 run 自己的 journal 不构成外部变化");
+
+    std::fs::write(tmp.path().join("notes.txt"), "external\n")
+        .expect("the test fixture file must be writable");
+    let failure = baseline
+        .verify_unchanged()
+        .expect_err("journal 之外的未跟踪文件仍必须报告");
+    assert!(
+        matches!(
+            failure,
+            crate::journal::PostconditionFailure::Unattributed(_)
+        ),
+        "无 write footprint 时变化只能判为未归因: {failure}"
+    );
+    assert!(failure.to_string().contains("notes.txt"));
+}
+
+/// rename 只有两端都在 workflow journal 内才是宿主产物：从允许范围外 rename
+/// 进 journal 时，源路径的消失仍必须报告。
+#[test]
+fn rename_into_the_workflow_journal_does_not_hide_the_missing_source() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .expect("the temporary directory must be canonicalizable");
+    let intent = peri_acp_types::workflow::WorkflowWriteIntent::Write {
+        repo_root: canonical.to_string_lossy().into_owned(),
+        cwd: canonical.to_string_lossy().into_owned(),
+        path_allowlist: vec!["src".into()],
+        head_may_change: false,
+        commit_required: None,
+    };
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+
+    let run_dir = tmp.path().join(".claude/workflow-runs/run-1");
+    std::fs::create_dir_all(&run_dir).expect("the run directory must be creatable");
+    run_git(&[
+        "mv",
+        "tracked.txt",
+        ".claude/workflow-runs/run-1/tracked.txt",
+    ]);
+
+    let failure = baseline
+        .verify_postcondition(Some(&intent))
+        .expect_err("allowlist 外的源文件消失必须报告");
+    assert!(
+        failure.is_violation(),
+        "allowlist 越界是可归因违例: {failure}"
+    );
+    assert!(
+        failure.to_string().contains("tracked.txt"),
+        "报告必须带源路径: {failure}"
+    );
+}
+
+/// 非 ASCII 工作目录下 journal 路径也必须被识别：`-z` 避免 git 的 C-quote。
+#[test]
+fn workflow_journal_is_excluded_under_a_non_ascii_nested_cwd() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let nested = tmp.path().join("子目录");
+    std::fs::create_dir_all(&nested).expect("the nested working directory must be creatable");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let baseline = GitBaseline::capture(&nested)
+        .expect("the capture fixture result is required for this assertion");
+
+    let run_dir = nested.join(".claude/workflow-runs/run-1");
+    std::fs::create_dir_all(&run_dir).expect("the run directory must be creatable");
+    std::fs::write(run_dir.join("script.js"), "return null")
+        .expect("the test fixture file must be writable");
+    baseline
+        .verify_unchanged()
+        .expect("非 ASCII cwd 下的自身 journal 不构成外部变化");
+}
+
+/// 两个不同的非 UTF-8 路径若有损解码会折叠成同一个键，从而漏掉变化（false green）。
+/// rename 的原始路径是独立字段，解析层必须把两端都留成各自的字节键。
+#[test]
+fn parse_keeps_distinct_non_utf8_paths_and_rename_endpoints() {
+    let untracked = b"? swap-\xff.bin\0? swap-\xfe.bin\0";
+    let records = crate::journal::git::parse_status_paths(untracked)
+        .expect("non-UTF-8 status must remain parseable");
+    assert_eq!(
+        records.len(),
+        2,
+        "distinct byte paths must not collapse into one key"
+    );
+    assert!(records.contains_key(b"swap-\xff.bin".as_slice()));
+    assert!(records.contains_key(b"swap-\xfe.bin".as_slice()));
+
+    let renamed = b"2 R. N... 100644 100644 100644 aaaa bbbb R100 new-\xff.txt\0old-\xfe.txt\0";
+    let records = crate::journal::git::parse_status_paths(renamed)
+        .expect("rename records must remain parseable");
+    assert_eq!(records.len(), 2, "rename source must be its own record key");
+    for endpoint in [b"new-\xff.txt".as_slice(), b"old-\xfe.txt".as_slice()] {
+        let record = records
+            .get(endpoint)
+            .unwrap_or_else(|| panic!("missing rename endpoint {endpoint:?}"));
+        assert_eq!(
+            record.first(),
+            Some(&b'2'),
+            "rename record type must survive"
+        );
+    }
+}
+
+/// 采到的 status 含非 UTF-8 路径时，对账必须按字节工作，不能退化成
+/// observation incomplete；报告中的路径允许有损展示。
+#[test]
+fn non_utf8_status_path_does_not_become_an_incomplete_observation() {
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let mut baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    // macOS APFS 拒绝创建非 UTF-8 文件名，这里直接注入等价的 porcelain 记录。
+    baseline.status_porcelain_v2 = b"? dirty-\xff.txt\0".to_vec();
+
+    let failure = baseline
+        .verify_unchanged()
+        .expect_err("注入的未跟踪记录是真实差异");
+    assert!(
+        matches!(
+            failure,
+            crate::journal::PostconditionFailure::Unattributed(_)
+        ),
+        "非 UTF-8 路径不得被读成 observation incomplete: {failure}"
+    );
+    let message = failure.to_string();
+    assert!(
+        message.contains("dirty-"),
+        "报告必须带可定位路径（展示可有损）: {message}"
+    );
+}
+
+/// 真实文件系统上的非 UTF-8 文件名：采样不失败，两个不同路径的 rename 两端都能被区分。
+/// macOS 的 APFS 拒绝此类文件名（EILSEQ），因此只在 Linux 验证。
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_paths_are_sampled_and_reconciled_by_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = TempDir::new().expect("the new fixture result is required for this assertion");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let first = std::ffi::OsStr::from_bytes(b"swap-\xff.bin");
+    std::fs::write(tmp.path().join(first), b"payload")
+        .expect("the test fixture file must be writable");
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    baseline
+        .verify_unchanged()
+        .expect("非 UTF-8 路径属于基线，既不是变化也不是观测不完整");
+
+    let second = std::ffi::OsStr::from_bytes(b"swap-\xfe.bin");
+    std::fs::rename(tmp.path().join(first), tmp.path().join(second))
+        .expect("the test fixture must be renamable");
+    let failure = baseline
+        .verify_unchanged()
+        .expect_err("两个不同非 UTF-8 路径之间的 rename 必须被观察到");
+    assert!(
+        matches!(
+            failure,
+            crate::journal::PostconditionFailure::Unattributed(_)
+        ),
+        "非 UTF-8 路径不得被读成 observation incomplete: {failure}"
+    );
+    let message = failure.to_string();
+    assert_eq!(
+        message.matches("swap-").count(),
+        2,
+        "rename 的两端必须各自作为独立字节路径参与对账: {message}"
+    );
+}
+
+/// 符号链接指向的同一目录必须得到同一分类：损坏的仓库是“无法观测”，
+/// 不能因为按字面路径找不到 `.git` marker 而读成“没有仓库范围”。
+#[cfg(unix)]
+#[test]
+fn broken_repository_behind_a_symlink_is_an_incomplete_observation() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    let repo = tmp.path().join("repo");
+    let sub = repo.join("sub");
+    std::fs::create_dir_all(&sub).expect("the test fixture directory must be creatable");
+    std::fs::write(repo.join(".git"), "gitdir: /nonexistent/peri-issue-522\n")
+        .expect("the test fixture file must be writable");
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&sub, &alias).expect("the test fixture symlink must be creatable");
+
+    let observation = GitBaseline::capture_for_intent(&alias, None)
+        .expect("sampling failure must not fail start");
+    assert!(
+        matches!(observation, GitObservation::Incomplete(_)),
+        "同一目录经符号链接访问仍是采样失败: {observation:?}"
     );
 }
 
@@ -828,6 +1309,7 @@ fn attempt_tracker_makes_engine_retries_visible_and_preserves_recovery() {
             recovered_from: None,
             consumed: true,
             disposition: AttemptDisposition::Produced,
+            execution: None,
         }),
     };
     tracker.annotate(&mut entry);
@@ -851,6 +1333,7 @@ fn attempt_tracker_makes_engine_retries_visible_and_preserves_recovery() {
             recovered_from: None,
             consumed: true,
             disposition: AttemptDisposition::Recovered,
+            execution: None,
         }),
     };
     tracker.annotate(&mut recovered);
@@ -865,7 +1348,7 @@ fn attempt_tracker_makes_engine_retries_visible_and_preserves_recovery() {
 }
 
 #[test]
-fn no_write_intent_skips_git_baseline_even_inside_a_repository() {
+fn no_write_intent_still_samples_git_baseline_inside_a_repository() {
     let tmp = TempDir::new().expect("the temporary test directory must be available");
     assert!(std::process::Command::new("git")
         .args(["init", "-q"])
@@ -895,14 +1378,294 @@ fn no_write_intent_skips_git_baseline_even_inside_a_repository() {
         .status()
         .expect("the status fixture result is required for this assertion")
         .success());
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .expect("the temporary directory must be canonicalizable");
 
-    assert!(GitBaseline::capture_for_intent(tmp.path(), None)
-        .expect("without an intent there is no baseline to capture")
-        .is_none());
-    assert!(GitBaseline::capture_for_intent(
-        tmp.path(),
+    for intent in [
+        None,
         Some(&peri_acp_types::workflow::WorkflowWriteIntent::ReadOnly),
+    ] {
+        let observation = GitBaseline::capture_for_intent(tmp.path(), intent)
+            .expect("sampling without a write intent must not fail start");
+        match observation {
+            GitObservation::Captured(baseline) => {
+                assert_eq!(baseline.repo_root, canonical);
+                assert_eq!(baseline.cwd, canonical);
+            }
+            other => panic!("inside a repository the baseline must be sampled: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn broken_git_repository_is_incomplete_not_not_applicable() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    std::fs::write(
+        tmp.path().join(".git"),
+        "gitdir: /nonexistent/peri-issue-522\n",
     )
-    .expect("read-only still captures a verification baseline")
-    .is_some());
+    .expect("the test fixture file must be writable");
+
+    let observation = GitBaseline::capture_for_intent(tmp.path(), None)
+        .expect("sampling failure must not fail start");
+    assert!(
+        observation.scope().is_none(),
+        "采样失败没有可持久化的观测范围"
+    );
+    assert!(
+        matches!(observation, GitObservation::Incomplete(_)),
+        "损坏的仓库是采样失败，不得读作没有可观测范围: {observation:?}"
+    );
+}
+
+#[test]
+fn git_baseline_records_repository_identity_and_visible_scope() {
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let canonical = tmp
+        .path()
+        .canonicalize()
+        .expect("the temporary directory must be canonicalizable");
+
+    let baseline = GitBaseline::capture(tmp.path())
+        .expect("the capture fixture result is required for this assertion");
+    assert_eq!(baseline.git_dir, canonical.join(".git"));
+    assert_eq!(baseline.git_common_dir, canonical.join(".git"));
+
+    let scope = baseline.observation_scope();
+    assert_eq!(scope.repo_root, canonical.to_string_lossy());
+    assert_eq!(scope.cwd, canonical.to_string_lossy());
+    assert_eq!(scope.git_dir, canonical.join(".git").to_string_lossy());
+    assert_eq!(scope.head, baseline.head);
+    assert!(scope.visibility.index);
+    assert!(scope.visibility.worktree);
+    assert!(
+        !scope.visibility.ignored,
+        "ignored 文件不进入基线，其变化不可观测"
+    );
+    assert!(
+        !scope.visibility.commit_range,
+        "只比较运行前后 HEAD 端点，不覆盖完整提交区间"
+    );
+}
+
+#[test]
+fn postcondition_failure_messages_carry_the_attribution_tier() {
+    use crate::journal::PostconditionFailure;
+
+    for (failure, message, display) in [
+        (
+            PostconditionFailure::Violation("escaped writeIntent.path_allowlist".into()),
+            "escaped writeIntent.path_allowlist",
+            "run-owned violation: escaped writeIntent.path_allowlist",
+        ),
+        (
+            PostconditionFailure::Unattributed("git HEAD changed".into()),
+            "git HEAD changed",
+            "unattributed change (external or unknown): git HEAD changed",
+        ),
+        (
+            PostconditionFailure::ObservationIncomplete("cannot sample".into()),
+            "cannot sample",
+            "observation incomplete: cannot sample",
+        ),
+    ] {
+        assert_eq!(failure.to_string(), display);
+        assert_eq!(
+            failure.message(),
+            message,
+            "结构化 message 保持不带档位前缀"
+        );
+    }
+}
+
+/// 观测窗口被重新绑定（cwd 指向另一个 git dir）时不能对比旧基线宣称“无变化”。
+#[cfg(unix)]
+#[test]
+fn rebinding_the_git_directory_is_incomplete_not_an_unattributed_change() {
+    use crate::journal::PostconditionFailure;
+
+    let tmp = TempDir::new().expect("the temporary test directory must be available");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).expect("the test fixture directory must be creatable");
+    let run_git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .expect("the status fixture result is required for this assertion")
+            .success());
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(repo.join("tracked.txt"), "base\n")
+        .expect("the test fixture file must be writable");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&[
+        "-c",
+        "user.name=Peri Test",
+        "-c",
+        "user.email=peri-test@example.invalid",
+        "commit",
+        "-qm",
+        "baseline",
+    ]);
+    let baseline = GitBaseline::capture(&repo)
+        .expect("the capture fixture result is required for this assertion");
+
+    let moved_git = tmp.path().join("moved-git");
+    std::fs::rename(repo.join(".git"), &moved_git)
+        .expect("the test fixture git directory must be movable");
+    std::os::unix::fs::symlink(&moved_git, repo.join(".git"))
+        .expect("the test fixture symlink must be creatable");
+
+    let failure = baseline
+        .verify_unchanged()
+        .expect_err("重新绑定 git dir 后不得宣称无变化");
+    assert!(
+        matches!(failure, PostconditionFailure::ObservationIncomplete(_)),
+        "观测窗口切换属于无法观测，不是外部变化: {failure}"
+    );
+    assert!(failure.to_string().starts_with("observation incomplete: "));
+}
+
+/// 旧 `state.json` 没有限额明细：缺省为空/None，不得据此推断“未触发过限额”。
+#[test]
+fn test_legacy_state_without_limit_breaches_deserializes_as_unknown() {
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "legacy-limits",
+        "workflow_name": "legacy",
+        "status": "failed",
+        "script": "script",
+        "started_at": "2026-11-21T00:00:00Z",
+        "error": "workflow exceeded maxToolCalls (5)"
+    }))
+    .expect("from_value must accept this test fixture representation");
+
+    assert!(state.limit_breaches.is_empty());
+    assert_eq!(state.token_usage, None, "旧数据未采集用量，不显示为 0");
+    assert_eq!(
+        state.git_observation_scope, None,
+        "旧数据未记录 Git 观测范围，不得推断为完整观测"
+    );
+}
+
+/// 终态只保存观测身份与能力：camelCase 范围字段可读，基线内容（porcelain）不落盘。
+#[test]
+fn run_state_persists_git_observation_scope_without_baseline_content() {
+    let state: RunState = serde_json::from_value(serde_json::json!({
+        "run_id": "scope-run",
+        "workflow_name": "scope",
+        "status": "completed",
+        "script": "script",
+        "started_at": "2026-11-21T00:00:00Z",
+        "git_observation_scope": {
+            "repoRoot": "/repo",
+            "cwd": "/repo/sub",
+            "gitDir": "/repo/.git",
+            "gitCommonDir": "/repo/.git",
+            "head": "0123456789abcdef",
+            "visibility": {
+                "index": true,
+                "worktree": true,
+                "ignored": false,
+                "commitRange": false
+            }
+        }
+    }))
+    .expect("from_value must accept git_observation_scope");
+
+    let scope = state
+        .git_observation_scope
+        .as_ref()
+        .expect("记录的范围必须可读");
+    assert_eq!(scope.git_dir, "/repo/.git");
+    assert_eq!(scope.git_common_dir, "/repo/.git");
+    assert!(scope.visibility.index && scope.visibility.worktree);
+    assert!(!scope.visibility.ignored && !scope.visibility.commit_range);
+
+    let wire = serde_json::to_value(&state).expect("state must serialize");
+    assert_eq!(wire["git_observation_scope"]["gitCommonDir"], "/repo/.git");
+    assert!(
+        wire.get("status_porcelain_v2").is_none()
+            && wire["git_observation_scope"]
+                .get("status_porcelain_v2")
+                .is_none(),
+        "终态不得持久化 baseline 内容"
+    );
+}
+
+/// 新 state.json 的限额条目按 camelCase wire 写出，未采集字段缺席。
+#[test]
+fn test_limit_breaches_and_token_usage_serialize_without_zero_fillers() {
+    let state = RunState {
+        run_id: "run-limits".into(),
+        workflow_name: "limits".into(),
+        status: "failed".into(),
+        execution_status: Default::default(),
+        acceptance_status: Default::default(),
+        post_processing_status: Default::default(),
+        delivery_status: Default::default(),
+        delivery_reason: None,
+        postcondition_observation: None,
+        git_observation_scope: None,
+        outcome: Default::default(),
+        write_intent: None,
+        limits: crate::protocol::WorkflowLimits {
+            max_tool_calls: Some(5),
+            ..Default::default()
+        },
+        limit_breaches: vec![peri_acp_types::workflow::LimitBreach {
+            scope: peri_acp_types::workflow::LimitScope::Iterations,
+            limit: Some(400),
+            observed: None,
+            attempt: Some(peri_acp_types::workflow::LimitBreachAttempt {
+                run_id: "run-limits".into(),
+                task_id: Some("task-1".into()),
+                agent_id: 3,
+            }),
+            detected_at: "2026-11-21T00:00:00Z".into(),
+        }],
+        token_usage: Some(75_323),
+        budget_total: Some(60_000),
+        args: None,
+        max_concurrency: 3,
+        attempts: Vec::new(),
+        return_value: None,
+        script: "script".into(),
+        started_at: "2026-11-21T00:00:00Z".into(),
+        finished_at: None,
+        error: Some("workflow exceeded maxIterations (400)".into()),
+    };
+    let wire = serde_json::to_value(&state).expect("state must serialize");
+    assert_eq!(wire["limits"]["maxToolCalls"], 5);
+    assert_eq!(wire["limit_breaches"][0]["scope"], "iterations");
+    assert_eq!(wire["limit_breaches"][0]["limit"], 400);
+    assert!(
+        wire["limit_breaches"][0].get("observed").is_none(),
+        "未采集用量不得写成 0"
+    );
+    assert_eq!(wire["token_usage"], 75_323);
+    assert_eq!(wire["budget_total"], 60_000);
 }

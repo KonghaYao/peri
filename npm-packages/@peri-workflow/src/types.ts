@@ -123,6 +123,26 @@ export type WorkflowDeliveryStatus = 'blocked' | 'unknown'
 export type WorkflowOutcome = 'completed' | 'blocked' | 'failed' | 'killed' | 'unknown'
 
 export type AttemptDisposition = 'produced' | 'recovered' | 'rejected'
+export type AttemptOutcome = 'ok' | 'dead' | 'skipped' | 'limited'
+
+/** 有效迭代上限的来源：`default` = 执行器回落值，`agent_definition` = 定义的 max_turns。 */
+export type IterationLimitSource = 'default' | 'agent_definition'
+
+/**
+ * attempt 的实际执行结果（宿主写入；与 `disposition` 正交）。
+ *
+ * `disposition=produced` 只表示结果来源，dead/limited 仍如实出现在这里；
+ * 未采集的字段缺席（不得写成 0），旧 journal 的 attempt 没有该对象。
+ */
+export type AttemptExecution = {
+  outcome: AttemptOutcome
+  reason?: string
+  iterationLimit?: number
+  iterationLimitSource?: IterationLimitSource
+  iterationsUsed?: number
+  tokenBudget?: number
+  tokenCount?: number
+}
 
 export type WorkflowAttempt = {
   runId: string
@@ -134,9 +154,27 @@ export type WorkflowAttempt = {
   recoveredFrom?: { runId: string; agentId?: number; journalSeq: number }
   consumed: boolean
   disposition: AttemptDisposition
+  /** 宿主补注的执行结果；缓存命中（recovered）与旧 journal 缺席。 */
+  execution?: AttemptExecution
 }
 
 export type WorkflowJournalEntry = JournalEntry & { attempt?: WorkflowAttempt }
+
+/** 已触发硬上限的范围（`state.json` 的 `limit_breaches`）。 */
+export type LimitScope = 'tool_calls' | 'tokens' | 'iterations' | 'elapsed_ms' | 'agents'
+
+/** 一次已触发的硬上限；与顶层 `error`（首条兼容文本）并存。 */
+export type LimitBreach = {
+  scope: LimitScope
+  /** 配置的上限；未采集为缺席。 */
+  limit?: number
+  /** 观测用量；未采集为缺席，不是 0。 */
+  observed?: number
+  /** run 级超限（如 elapsed）没有单次 attempt。 */
+  attempt?: { runId: string; taskId?: string; agentId: number }
+  /** 检测时点（宿主时钟，RFC 3339）。 */
+  detectedAt: string
+}
 
 /** `.claude/workflow-runs/<runId>/state.json` 的结构 */
 export interface RunState {
@@ -151,6 +189,10 @@ export interface RunState {
   /** Engine-level outcome; absent in legacy snapshots and never a task-success verdict. */
   outcome?: WorkflowOutcome
   limits?: WorkflowLimits
+  /** 全部已触发的硬上限；旧 state.json 缺席不等于“从未超限”。 */
+  limit_breaches?: LimitBreach[]
+  /** 按 attempt 累计的 token 用量；未采集缺席（不显示为 0）。 */
+  token_usage?: number
   budget_total?: number
   /** Exact workflow script arguments; absent in legacy state snapshots. */
   args?: unknown

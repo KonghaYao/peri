@@ -47,6 +47,9 @@ pub use workflow_agent_executor::create_default_executor;
 use workflow_agent_executor::requested_model;
 
 #[cfg(test)]
+use workflow_agent_executor::resolve_iteration_limit;
+
+#[cfg(test)]
 use workflow_agent_executor::await_workflow_forwarder;
 
 #[cfg(test)]
