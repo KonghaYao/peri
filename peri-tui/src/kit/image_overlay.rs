@@ -529,12 +529,18 @@ impl Hook for OverlayDrawHook {
         };
         let state = IMAGE_PREVIEW_STATE.state().read().clone();
         let caps = *crate::kit::atoms::TERMINAL_CAPS.state().read();
+        // 单元格尺寸变化后旧帧可能溢出预留区：跳过这一帧，等 poll_change 重建。
+        let async_img = if self.async_cell_px == crate::kit::image_preview::cell_pixel_size() {
+            self.async_img.as_mut()
+        } else {
+            None
+        };
         draw_preview_overlay(
             drawer.buffer_mut(),
             rect,
             &state,
             self.pixel_enabled,
-            self.async_img.as_mut(),
+            async_img,
             &caps,
         );
     }
