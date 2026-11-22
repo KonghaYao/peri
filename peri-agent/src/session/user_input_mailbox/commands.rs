@@ -410,14 +410,21 @@ impl UserInputMailbox {
                 // 只有实际 LLM 调用/流式期间才硬取消；工具批次、Compact、idle
                 // 与收尾阶段只放行 MQ，由下一次 Receive 在同一 attempt 内摄取。
                 // MQ 放行已在前一步完成：必须先移交再中断，避免漏发。
-                if state.model_request_in_flight {
-                    if let Some(active) = state.active.as_mut() {
-                        // 用户在 Stop 后重新发送是明确继续；旧 attempt 仍须先完成收尾。
+                let model_request_in_flight = state.model_request_in_flight;
+                if let Some(active) = state.active.as_mut() {
+                    // Stop 收尾中的重新发送是明确继续：Stop 已取消令牌，这里只把
+                    // reason 从 Stop 改为 Steer，让宿主保留续跑而不是抑制激活。
+                    if model_request_in_flight
+                        || active.reason
+                            == crate::session::user_input_mailbox::InterruptReason::Stop
+                    {
                         active.reason = crate::session::user_input_mailbox::InterruptReason::Steer;
                         // 与阶段门同一临界区发出取消：guard Drop 需要同一把锁，
                         // 因此窗口不会在判定与取消之间关闭。
-                        if let Some(cancel) = active.cancel.clone() {
-                            cancel.cancel();
+                        if model_request_in_flight {
+                            if let Some(cancel) = active.cancel.clone() {
+                                cancel.cancel();
+                            }
                         }
                     }
                 }

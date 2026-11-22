@@ -870,6 +870,59 @@ fn test_mailbox_stop_then_late_suspend_waits_for_fresh_attempt() {
     );
 }
 
+/// [steer 阶段门] Stop 收尾中的重新发送是明确继续：不再取消（令牌已由 Stop
+/// 取消），但必须把 reason 从 Stop 改为 Steer，宿主据此保留续跑。
+#[test]
+fn test_mailbox_dispatch_after_stop_marks_explicit_continuation() {
+    let (mailbox, inbox) = crate::session::user_input_mailbox::tests::make_mailbox();
+    let cancel = CancellationToken::new();
+    let current = mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let stopped = crate::session::user_input_mailbox::tests::make_input(&mailbox, "停止前待办");
+    mailbox
+        .enqueue_sync(&stopped)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    mailbox.stop_sync();
+    assert!(cancel.is_cancelled(), "Stop 必须先取消旧执行");
+
+    let resent = crate::session::user_input_mailbox::tests::make_input(&mailbox, "停止后重新发送");
+    mailbox
+        .enqueue_sync(&resent)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    mailbox
+        .dispatch_sync(&crate::session::user_input_mailbox::tests::make_dispatch(
+            &mailbox,
+            &[&resent],
+        ))
+        .expect("the dispatch sync fixture result is required for this assertion");
+    assert!(
+        mailbox.is_steer_interruption(&current),
+        "Stop 收尾中的重新发送必须标记为显式继续"
+    );
+
+    mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);
+    let continuation = mailbox.reserve_run().expect("明确继续必须保留续跑准入");
+    assert!(mailbox.attach_attempt_sync(&continuation, CancellationToken::new()));
+    let delivered = inbox.queue_for_test().drain_all_sync();
+    let delivered_ids: Vec<String> = delivered
+        .iter()
+        .map(|entry| {
+            entry
+                .message()
+                .expect("the fixture entry must contain a message payload")
+                .id()
+                .as_uuid()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        delivered_ids,
+        [stopped.input_id.clone(), resent.input_id.clone()],
+        "续跑按队列顺序领取旧待办与 Stop 后重新发送的输入"
+    );
+}
+
 /// [回归测试] Stop 完成后，新的后台 continuation 仍继承 paused；新输入必须
 /// 解除暂停并交接给这个仍有效、未取消的当前执行。
 #[test]

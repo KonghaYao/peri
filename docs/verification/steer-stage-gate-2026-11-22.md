@@ -17,8 +17,8 @@
 | --- | --- | --- |
 | 1. 工具批次执行中立即发送：批次完成、同一 attempt 的下一次 Receive 摄取、不出现 Interrupted | 通过 | `test_run_react_loop_steer_during_tool_batch_is_received_next_iteration`：取消 token 未触发（`!cancel.is_cancelled()`）、`LoopResult::Completed`、ticket 仍有效、Reason 调用 2 次、mailbox 快照为空（两条均交付）；第二轮请求顺序为 工具结果 < `steer-1` < `steer-2` |
 | 2. 实际 LLM 调用/流式中立即发送：仍硬取消，新 attempt 入口 Receive 摄取 | 通过 | `test_mailbox_dispatch_during_model_request_cancels_and_records_steer`；`test_run_reason_error_hook_observes_closed_steer_gate`（`on_error` 时窗口已关闭）；`peri-acp --lib steer_activation` 3 passed（既有流式 steer 用例：`steer_dispatch_cancelled_turn_keeps_activation_and_consumes_input` 等） |
-| 3. Stop 任何阶段立即取消；未摄取输入回 Queued | 通过 | `test_mailbox_stop_during_model_request_cancels_immediately`、`test_mailbox_stop_outside_model_request_cancels_immediately`、`test_mailbox_soft_dispatch_then_stop_returns_input_to_queued` |
-| 4. 普通待发仍 idle-only，不进入工具边界注入 | 通过（路径未改） | `test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completion`、`test_mailbox_running_enqueue_never_wakes_consumption_queue`（均在 mailbox 60 passed 内） |
+| 3. Stop 任何阶段立即取消；未摄取输入回 Queued | 通过 | `test_mailbox_stop_during_model_request_cancels_immediately`、`test_mailbox_stop_outside_model_request_cancels_immediately`、`test_mailbox_soft_dispatch_then_stop_returns_input_to_queued`；Stop 收尾中的重新发送保持显式继续（`test_mailbox_dispatch_after_stop_marks_explicit_continuation`） |
+| 4. 普通待发仍 idle-only，不进入工具边界注入 | 通过（路径未改） | `test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completion`、`test_mailbox_running_enqueue_never_wakes_consumption_queue`（均在 mailbox 61 passed 内） |
 | 5. 多条 steer 同一 Receive 批次按 MQ 顺序进入上下文 | 通过 | 上表第 1 项的顺序断言；`test_mailbox_dispatch_snapshot_and_consecutive_commands_preserve_acceptance_order`（接受顺序仍按服务端 `(enqueued_at,id)`） |
 | 6. 目标测试、format、定向 clippy 通过 | 通过 | 见第 2 节命令与结果 |
 
@@ -33,13 +33,16 @@
   由 `test_run_reason_error_hook_observes_closed_steer_gate` 断言 `on_error` 时窗口为关。
 - `dispatch` 的阶段门判定、`reason=Steer` 与 `cancel()` 在同一 mailbox 锁临界区完成，
   guard 的 `Drop` 不能插在判定与取消之间。
+- Stop 收尾中的重新发送保持既有“显式继续”语义：令牌已由 Stop 取消，不重复取消，
+  但把 `reason` 从 Stop 改为 Steer，让宿主保留续跑激活；由
+  `test_mailbox_dispatch_after_stop_marks_explicit_continuation` 覆盖。
 
 ## 2. 运行命令与结果
 
 | 命令 | 结果 |
 | --- | --- |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib` | 1593 passed / 0 failed / 5 ignored（全量 lib，修复轮） |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib user_input_mailbox` | 60 passed / 0 failed（1537 filtered out） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib user_input_mailbox` | 61 passed / 0 failed（1538 filtered out） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib loop_lifecycle` | 7 passed / 0 failed（1590 filtered out） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib receive::tests::test_receive_user_input_delivery_keeps_identity_order_and_render_fifo` | 1 passed / 0 failed（首轮 CI 失败用例） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib steer_activation` | 3 passed / 0 failed（1508 filtered out） |
@@ -77,6 +80,10 @@
    临界区。两条均按建议收紧，未改产品语义。
 7. **pre-commit `tui-components` 环境失败**：系统 `python3` 为 3.9（缺 `tomllib`）；
    改用 `python3.12` 置于 PATH 后 8 个用例与边界检查全部通过，非代码问题。
+8. **第二轮 CodeRabbit Minor 意见（Stop 后重新发送）**：阶段门使 Stop 收尾中的重新发送
+   不再记录 Steer，宿主会走 `activation.suppress()`，与既有“Stop 后重新发送是明确继续”
+   契约冲突。已保留原语义：令牌由 Stop 取消，不重复取消；仅把 `reason` 改为 Steer。
+   新增 `test_mailbox_dispatch_after_stop_marks_explicit_continuation`，mailbox 61/61。
 
 ## 4. 未覆盖与证据边界
 

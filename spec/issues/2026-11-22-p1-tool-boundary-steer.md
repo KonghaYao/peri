@@ -45,7 +45,9 @@
   - 在 `MailboxState` 增加 `model_request_in_flight` 阶段门，由 Reason 的实际 `tokio::select!` LLM 调用持有 RAII guard。
   - `dispatch` 仅在阶段门为 true 时保持 `reason=Steer` + cancel；其余阶段只放行 MQ，不取消。
   - 不改 Receive 摄取逻辑，不新增 Ingest 阶段；工具批次完成后的下一次 Receive 即工具边界摄取点。
-  - 保持 Stop 为唯一无条件硬中断；保持普通待发 idle-only。
+  - 保持 Stop 为唯一无条件硬中断；保持普通待发 idle-only。Stop 收尾中的重新发送保持既有
+    “显式继续”语义：不重复取消（令牌已由 Stop 取消），但把 `reason` 从 Stop 改为 Steer，
+    让宿主保留续跑激活。
   - 失败/Stop 在摄取前仍把未领取输入回收为 Queued。
   - 同一 Receive 批次按 MQ 顺序摄取多条 steer；预算仍消耗当前 turn 的语义迭代。
 - 明确不做：
@@ -57,6 +59,7 @@
   - `peri-agent/src/session/user_input_mailbox_test.rs`
   - `peri-agent/src/session/user_input_mailbox_control_test.rs`
   - `peri-agent/src/agent/stages/loop_lifecycle_test.rs`
+  - `peri-agent/src/agent/stages/reason_test.rs`（错误处理时阶段门已关闭）
   - `peri-acp/src/host/steer_activation_test.rs`（流式窗口仍硬取消）
 
 ## 验收标准
@@ -73,8 +76,8 @@
 基线 `1b7d3557b`，定向验证全部通过，详见
 `docs/verification/steer-stage-gate-2026-11-22.md`：
 
-- `peri-agent --lib`（全量）：1593 passed / 0 failed / 5 ignored。
-- `peri-agent --lib user_input_mailbox`：60 passed / 0 failed。
+- `peri-agent --lib`（全量）：1594 passed / 0 failed / 5 ignored。
+- `peri-agent --lib user_input_mailbox`：61 passed / 0 failed。
 - `peri-agent --lib loop_lifecycle`：7 passed / 0 failed（新增工具批次 steer 用例）。
 - `peri-acp --lib steer_activation`：3 passed / 0 failed。
 - `peri-tui --lib -- steer`：108 passed / 0 failed。
@@ -84,5 +87,8 @@
 首轮 PR CI 暴露既有 `receive_test` 的顺序用例同样假设 dispatch 必取消，已改为在
 模型请求窗口内 dispatch；首轮 CodeRabbit 两条 Minor 意见（错误处理仍持 guard、
 判定与取消之间存在间隙）已收紧并由 `test_run_reason_error_hook_observes_closed_steer_gate`
-覆盖。未覆盖：全量 `--all-targets`/CI 矩阵、真实 TUI 手工交互、外置 `peri-e2e`
-场景；阶段门边界竞态仅记录为行为边界，未做确定性复现。
+覆盖。第二轮 CodeRabbit 指出阶段门误伤了 Stop 收尾中的重新发送，已按既有“显式继续”
+契约保留（不再取消，仅记录 Steer），新增
+`test_mailbox_dispatch_after_stop_marks_explicit_continuation`。未覆盖：全量
+`--all-targets`/CI 矩阵、真实 TUI 手工交互、外置 `peri-e2e` 场景；阶段门边界竞态
+仅记录为行为边界，未做确定性复现。
