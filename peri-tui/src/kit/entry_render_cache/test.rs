@@ -97,7 +97,9 @@ fn inline_image_completion_rebuilds_message_and_updates_wrap_height() {
     image
         .save_with_format(&file, image::ImageFormat::Png)
         .expect("inline image completion: png fixture must encode");
-    let source = file.to_str().expect("utf8 path");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
 
     let grid = GridSpec::grid_for(120);
     let render_context = context(EntrySurface::Message);
@@ -107,9 +109,8 @@ fn inline_image_completion_rebuilds_message_and_updates_wrap_height() {
     let before = cache.build_wrap_map(grid.line_width()).0;
 
     let cols = u16::try_from(grid.process_content_width()).expect("process width fits u16");
-    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::MAX_ROWS);
     assert!(
-        crate::kit::inline_image::wait_ready(
+        crate::kit::inline_image::request_until_ready(
             source,
             cols,
             crate::kit::inline_image::MAX_ROWS,

@@ -341,6 +341,30 @@ fn test_image_standalone_segments() {
         vec!["[Image: a] (u)", "[Image: b] (v)"],
         "段内多行连续"
     );
+    assert_eq!(multi_img.sources.len(), 2, "合并段应保留每张图片的原始来源");
+    assert_eq!(multi_img.sources[0].source, "u");
+    assert_eq!(multi_img.sources[0].line_range, 0..1);
+    assert_eq!(multi_img.sources[1].source, "v");
+    assert_eq!(multi_img.sources[1].line_range, 1..2);
+}
+
+/// 展示字段截断到 200 字符，但内联图片查表键必须保留完整原始 url。
+#[test]
+fn test_image_source_keeps_untruncated_url() {
+    let long = format!("/tmp/{}.png", "a".repeat(240));
+    let segments = super::parse_markdown(
+        &format!("![alt]({long})"),
+        80,
+        Palette::default(),
+        TEST_BASE_FG,
+    );
+    let MarkdownSegment::Image(img) = &segments[0] else {
+        panic!("应为 Image segment");
+    };
+    assert!(img.url.len() < long.len(), "展示字段应截断");
+    assert_eq!(img.sources.len(), 1);
+    assert_eq!(img.sources[0].source, long, "查表键必须保留原始 url");
+    assert_eq!(img.sources[0].line_range, 0..img.lines.len());
 }
 
 /// [P1-1 回归] 跨段独立图片 `![a](u)\n\n![b](v)`：两个独立段落 → **两个**

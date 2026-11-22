@@ -81,6 +81,18 @@ pub struct ImageSegment {
     /// convert 阶段构建的降级渲染行（含样式 + wrap_styled_line 折行）。
     /// 标签 span 用正文 base_style；url span 用 theme.link_style（下划线，链接语义）。
     pub lines: Vec<ratatui::text::Line<'static>>,
+    /// 段内每张图片的原始 url 与降级行区间（同段多图合并时按文档顺序追加）。
+    /// 渲染层据此逐图替换，避免只按首图身份替换整段而丢掉其余图片的降级行。
+    pub sources: Vec<ImageSource>,
+}
+
+/// 合并段内单张图片的来源与降级行区间。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSource {
+    /// markdown 中的原始目标 url（未 sanitize/截断）；内联图片缓存查表键。
+    pub source: String,
+    /// 对应 [`ImageSegment::lines`] 中的降级行区间。
+    pub line_range: std::ops::Range<usize>,
 }
 
 /// 表格结构化数据。

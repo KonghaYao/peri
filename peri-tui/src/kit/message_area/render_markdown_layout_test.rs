@@ -702,15 +702,12 @@ fn test_assistant_local_image_renders_halfblocks() {
     let dir = tempfile::tempdir().expect("assistant local image: tempdir must exist");
     let file = dir.path().join("red.png");
     write_red_png(&file);
-    let source = file.to_str().expect("utf8 path");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
     let grid = GridSpec::grid_for(120);
-    crate::kit::inline_image::request(
-        source,
-        u16::try_from(grid.content_width()).expect("content width fits u16"),
-        crate::kit::inline_image::MAX_ROWS,
-    );
     assert!(
-        crate::kit::inline_image::wait_ready(
+        crate::kit::inline_image::request_until_ready(
             source,
             u16::try_from(grid.content_width()).expect("content width fits u16"),
             crate::kit::inline_image::MAX_ROWS,
@@ -765,9 +762,12 @@ fn test_local_image_failure_keeps_degraded_line() {
     let dir = tempfile::tempdir().expect("local image failure: tempdir must exist");
     let file = dir.path().join("bad.png");
     std::fs::write(&file, b"not an image").expect("local image failure: fixture write");
-    let source = file.to_str().expect("utf8 path");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
     let grid = GridSpec::grid_for(120);
-    let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
+    // 短回复走 brief 形态：与渲染侧 wrap 宽度对齐，确保命中 Failed 缓存而非未请求。
+    let cols = u16::try_from(grid.process_content_width()).expect("content width fits u16");
     crate::kit::inline_image::request(source, cols, crate::kit::inline_image::MAX_ROWS);
     assert!(
         !crate::kit::inline_image::wait_ready(
@@ -791,5 +791,51 @@ fn test_local_image_failure_keeps_degraded_line() {
             .iter()
             .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
         "失败时不得渲染半块行"
+    );
+}
+
+/// 同段多图：一张命中本地缓存时，其余图片仍保留各自的降级行（不丢内容）。
+#[test]
+fn test_multi_image_segment_keeps_unmatched_fallbacks() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("multi image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+    let grid = GridSpec::grid_for(120);
+    let text = format!("![a]({source}) ![b](https://example.com/b.png)");
+    let vm = super::assistant_bubble_with_text(&text, 74);
+    // 短回复走 brief 形态：正文 wrap 宽度是过程区列宽，缓存键必须与之对齐。
+    let cols = u16::try_from(grid.process_content_width()).expect("content width fits u16");
+    assert!(
+        crate::kit::inline_image::request_until_ready(
+            source,
+            cols,
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+    assert!(
+        crate::kit::inline_image::lookup_ready(source, cols, crate::kit::inline_image::MAX_ROWS)
+            .is_some(),
+        "缓存查表应命中（诊断为渲染侧问题）"
+    );
+    let lines = render::vm_to_lines(&vm, &grid);
+    let rendered = super::all_text(&lines);
+
+    assert!(
+        !rendered.contains("[Image: a]"),
+        "命中的本地图不应保留降级文本，实际 {rendered:?}"
+    );
+    assert!(
+        rendered.contains("[Remote image: b]"),
+        "未命中的同段图片必须保留降级行，实际 {rendered:?}"
+    );
+    assert!(
+        has_red_halfblock_cell(&lines),
+        "同段命中的图片仍应渲染为半块 cell"
     );
 }

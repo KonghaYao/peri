@@ -513,12 +513,13 @@ fn test_user_bubble_standalone_image_renders_when_ready() {
     let dir = tempfile::tempdir().expect("user inline image: tempdir must exist");
     let file = dir.path().join("red.png");
     write_red_png(&file);
-    let source = file.to_str().expect("utf8 path");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
     let grid = GridSpec::grid_for(120);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
-    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::USER_IMAGE_ROWS);
     assert!(
-        crate::kit::inline_image::wait_ready(
+        crate::kit::inline_image::request_until_ready(
             source,
             cols,
             crate::kit::inline_image::USER_IMAGE_ROWS,
@@ -552,12 +553,13 @@ fn test_user_bubble_inline_image_syntax_kept_as_text() {
     let dir = tempfile::tempdir().expect("user inline image: tempdir must exist");
     let file = dir.path().join("red.png");
     write_red_png(&file);
-    let source = file.to_str().expect("utf8 path");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
     let grid = GridSpec::grid_for(120);
     let cols = u16::try_from(grid.content_width()).expect("content width fits u16");
-    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::USER_IMAGE_ROWS);
     assert!(
-        crate::kit::inline_image::wait_ready(
+        crate::kit::inline_image::request_until_ready(
             source,
             cols,
             crate::kit::inline_image::USER_IMAGE_ROWS,

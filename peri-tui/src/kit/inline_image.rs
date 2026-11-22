@@ -39,6 +39,21 @@ pub(crate) const USER_IMAGE_ROWS: u16 = 6;
 /// 半块行缓存总字节上限（复用 T5 的累计解码缓存上限常量）。
 const CACHE_BYTES: usize = MAX_CACHE_BYTES as usize;
 
+/// 同时解码的后台线程上限；超出的请求留待下次 effect（revision 变化）重试。
+/// 单个可见消息可能含多张图片，无上限会按图片数起线程并各自持有解码缓冲。
+const MAX_CONCURRENT: usize = 4;
+
+/// [`Cache::begin`] 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeginOutcome {
+    /// 调用方应启动后台线程。
+    Spawn(u64),
+    /// 同版本同尺寸已有条目（含 Pending/Failed），只更新别名与 LRU。
+    Existing,
+    /// 并发已满；本次不登记，等下一次 effect 重试。
+    Deferred,
+}
+
 /// 三态缓存值：render body 只克隆 [`Arc`]，不阻塞。
 #[derive(Debug, Clone)]
 pub(crate) enum InlineImageState {
@@ -98,15 +113,21 @@ impl Cache {
         Some(entry.state.clone())
     }
 
-    /// 登记一次请求；返回 `Some(id)` 表示调用方应 spawn 后台线程。
+    /// 登记一次请求；`Spawn` 表示调用方应 spawn 后台线程。
     /// 同源同尺寸已有条目（含 Pending/Failed）时只更新别名与 LRU，不重复请求。
-    fn begin(&mut self, source: SourceKey, key: CacheKey) -> Option<u64> {
+    fn begin(&mut self, source: SourceKey, key: CacheKey) -> BeginOutcome {
         self.clock = self.clock.wrapping_add(1);
         let now = self.clock;
+        let known = self.entries.contains_key(&key);
         self.aliases.insert(source, key.clone());
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.last_used = now;
-            return None;
+        if known {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.last_used = now;
+            }
+            return BeginOutcome::Existing;
+        }
+        if self.inflight.len() >= MAX_CONCURRENT {
+            return BeginOutcome::Deferred;
         }
         self.next_request = self.next_request.wrapping_add(1);
         let id = self.next_request;
@@ -119,7 +140,7 @@ impl Cache {
             },
         );
         self.inflight.insert(key, id);
-        Some(id)
+        BeginOutcome::Spawn(id)
     }
 
     /// 写回后台结果；请求代数不匹配（被更新请求取代）或别名已指向别的版本
@@ -135,6 +156,9 @@ impl Cache {
         }
         self.inflight.remove(key);
         if !self.aliases.values().any(|aliased| aliased == key) {
+            // 该版本已被新请求取代：清掉遗留的 Pending 条目，否则同一文件版本
+            // 再次出现时 `begin` 会因条目存在而永不重启 worker（永久文本降级）。
+            self.entries.remove(key);
             return false;
         }
         let Some(entry) = self.entries.get_mut(key) else {
@@ -222,15 +246,19 @@ pub(crate) fn request(source: &str, cols: u16, rows: u16) {
         cols,
         rows,
     };
-    let id = cache().lock().begin(source_key, key.clone());
-    let Some(id) = id else {
-        return;
+    let id = match cache().lock().begin(source_key, key.clone()) {
+        BeginOutcome::Spawn(id) => id,
+        BeginOutcome::Existing | BeginOutcome::Deferred => return,
     };
     let thread_key = key.clone();
     let spawned = std::thread::Builder::new()
         .name("peri-inline-image".to_string())
         .spawn(move || {
-            let result = render_validated(&path, cols, rows);
+            // 解码 panic 也要回收 inflight 槽位，否则并发上限会被永久占满。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                render_validated(&path, cols, rows)
+            }))
+            .unwrap_or(Err("panic"));
             finish(thread_key, id, result);
         });
     if spawned.is_err() {
@@ -250,8 +278,12 @@ pub(crate) fn request_vm_images(vm: &TuiRenderUnit, content_cols: u16, process_c
             } else {
                 content_cols
             };
-            for link in image_links(&bubble.text) {
-                request(&link.url, cols, MAX_ROWS);
+            // 只请求渲染器可能替换的独占行图片（整行仅图片语法与空白）。
+            // 同段多图也在此覆盖；行级判定是段落级 standalone 的超集。
+            for line in bubble.text.lines() {
+                for url in image_line_urls(line) {
+                    request(&url, cols, MAX_ROWS);
+                }
             }
         }
         TuiRenderUnit::TuiUserBubble(bubble) => {
@@ -278,23 +310,44 @@ pub(crate) fn vm_may_have_image(vm: &TuiRenderUnit) -> bool {
 /// 整行仅一张图片语法时返回 url；行内混排、多个语法或空 url 返回 `None`。
 #[must_use]
 pub(crate) fn standalone_image_url(line: &str) -> Option<String> {
+    let mut urls = image_line_urls(line);
+    (urls.len() == 1).then(|| urls.remove(0))
+}
+
+/// 整行仅图片语法与空白时返回该行所有图片 url；行内混排返回空。
+///
+/// 行级判定是段落级 standalone 的超集（段落还受其它行文本影响），
+/// 用于请求调度时宁可多请求，也不漏掉独占段落的图片。
+fn image_line_urls(line: &str) -> Vec<String> {
     if !line.contains("![") {
-        return None;
+        return Vec::new();
     }
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return None;
+        return Vec::new();
     }
     let links = image_links(trimmed);
-    if links.len() != 1 {
-        return None;
+    if links.is_empty() {
+        return Vec::new();
     }
-    let link = &links[0];
-    if link.byte_start != 0 || link.byte_end != trimmed.len() {
-        return None;
+    let mut gaps = String::new();
+    let mut cursor = 0;
+    for link in &links {
+        if link.byte_start < cursor || link.byte_end > trimmed.len() {
+            return Vec::new();
+        }
+        gaps.push_str(&trimmed[cursor..link.byte_start]);
+        cursor = link.byte_end;
     }
-    let url = link.url.trim();
-    (!url.is_empty()).then(|| url.to_string())
+    gaps.push_str(&trimmed[cursor..]);
+    if !gaps.trim().is_empty() {
+        return Vec::new();
+    }
+    links
+        .into_iter()
+        .map(|link| link.url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .collect()
 }
 
 fn source_key(source: &str, cols: u16, rows: u16) -> Option<SourceKey> {
@@ -377,7 +430,10 @@ fn file_version(path: PathBuf) -> (PathBuf, u128, u64) {
 }
 
 fn finish(key: CacheKey, id: u64, result: Result<Arc<Vec<Line<'static>>>, &'static str>) {
-    if cache().lock().complete(&key, id, result) {
+    // 版本号与 Ready 状态必须在同一把锁内发布：否则 `wait_ready` 可能先看到
+    // 完成态，再读到旧的全局版本，导致渲染缓存判为未变化。
+    let mut guard = cache().lock();
+    if guard.complete(&key, id, result) {
         REVISION.fetch_add(1, Ordering::SeqCst);
         RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
     }
@@ -457,6 +513,22 @@ pub(crate) fn wait_ready(source: &str, cols: u16, rows: u16, timeout: Duration) 
             return false;
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// 单测请求并等待就绪：并发已满被暂缓时重试请求。
+/// 生产由可见 slot 的 effect 在 revision 变化时重跑，测试没有该循环。
+#[cfg(test)]
+pub(crate) fn request_until_ready(source: &str, cols: u16, rows: u16, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        request(source, cols, rows);
+        if wait_ready(source, cols, rows, Duration::from_millis(25)) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
     }
 }
 

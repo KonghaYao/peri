@@ -32,42 +32,35 @@ fn lines(width: usize, rows: usize) -> Arc<Vec<Line<'static>>> {
     )
 }
 
+fn spawned(outcome: BeginOutcome) -> u64 {
+    match outcome {
+        BeginOutcome::Spawn(id) => id,
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+}
+
 #[test]
 fn cache_key_distinguishes_mtime_length_and_target() {
     let mut cache = Cache::default();
     let src = source("a.png", 10, 2);
-    assert!(
-        cache
-            .begin(src.clone(), key("a.png", 1, 10, 10, 2))
-            .is_some()
-    );
-    assert!(
-        cache
-            .begin(src.clone(), key("a.png", 1, 10, 10, 2))
-            .is_none()
-    );
-    assert!(
-        cache
-            .begin(src.clone(), key("a.png", 2, 10, 10, 2))
-            .is_some(),
-        "mtime 变化是新版本"
-    );
-    assert!(
-        cache
-            .begin(src.clone(), key("a.png", 2, 11, 10, 2))
-            .is_some(),
-        "len 变化是新版本"
-    );
-    assert!(
-        cache
-            .begin(src.clone(), key("a.png", 2, 11, 20, 2))
-            .is_some(),
-        "目标列宽变化是新版本"
-    );
-    assert!(
-        cache.begin(src, key("a.png", 2, 11, 20, 3)).is_some(),
-        "目标行数变化是新版本"
-    );
+    let keys = [
+        key("a.png", 1, 10, 10, 2),
+        key("a.png", 2, 10, 10, 2),
+        key("a.png", 2, 11, 10, 2),
+        key("a.png", 2, 11, 20, 2),
+        key("a.png", 2, 11, 20, 3),
+    ];
+    for (index, cache_key) in keys.iter().enumerate() {
+        let id = spawned(cache.begin(src.clone(), cache_key.clone()));
+        assert!(
+            cache.complete(cache_key, id, Ok(lines(2, 1))),
+            "第 {index} 个键应独立完成（mtime/len/目标尺寸任一变化都是新版本）"
+        );
+        assert!(matches!(
+            cache.begin(src.clone(), cache_key.clone()),
+            BeginOutcome::Existing
+        ));
+    }
     assert_eq!(cache.entries.len(), 5);
 }
 
@@ -76,9 +69,7 @@ fn stale_completion_is_ignored_and_does_not_bump_revision() {
     let mut cache = Cache::default();
     let src = source("a.png", 10, 2);
     let key = key("a.png", 1, 10, 10, 2);
-    let id = cache
-        .begin(src.clone(), key.clone())
-        .expect("first request");
+    let id = spawned(cache.begin(src.clone(), key.clone()));
     assert!(!cache.complete(&key, id + 1, Ok(lines(2, 1))));
     assert!(matches!(
         cache.lookup(&src),
@@ -99,7 +90,7 @@ fn failed_result_is_cached_and_falls_back() {
     let mut cache = Cache::default();
     let src = source("bad.png", 10, 2);
     let key = key("bad.png", 1, 10, 10, 2);
-    let id = cache.begin(src.clone(), key.clone()).expect("request");
+    let id = spawned(cache.begin(src.clone(), key.clone()));
     assert!(cache.complete(&key, id, Err("format")));
     match cache.lookup(&src) {
         Some(InlineImageState::Failed(reason)) => assert_eq!(reason, "format"),
@@ -115,8 +106,11 @@ fn duplicate_requests_share_one_pending_entry() {
     let key = key("a.png", 1, 10, 10, 2);
     let first = cache.begin(src.clone(), key.clone());
     let second = cache.begin(src, key.clone());
-    assert!(first.is_some());
-    assert!(second.is_none(), "同版本同尺寸重复请求必须去重");
+    assert!(matches!(first, BeginOutcome::Spawn(_)));
+    assert!(
+        matches!(second, BeginOutcome::Existing),
+        "同版本同尺寸重复请求必须去重"
+    );
     assert_eq!(cache.entries.len(), 1);
     assert_eq!(cache.inflight.len(), 1);
 }
@@ -128,7 +122,7 @@ fn lru_evicts_least_recently_used() {
     for (name, mtime, len) in entries {
         let src = source(name, 10, 2);
         let key = key(name, mtime, len, 10, 2);
-        let id = cache.begin(src, key.clone()).expect("request");
+        let id = spawned(cache.begin(src, key.clone()));
         assert!(cache.complete(&key, id, Ok(lines(4, 2))));
     }
     // 触碰 a（最近使用），b 成为最旧。
@@ -192,9 +186,8 @@ fn production_request_decodes_real_png_into_halfblocks() {
         .expect("inline image production request: png fixture must encode");
     let source = file.to_str().expect("utf8 path");
     let target = (20u16, MAX_ROWS);
-    request(source, target.0, target.1);
     assert!(
-        wait_ready(source, target.0, target.1, Duration::from_secs(5)),
+        request_until_ready(source, target.0, target.1, Duration::from_secs(5)),
         "后台解码应在超时前完成"
     );
     let rendered = lookup_ready(source, target.0, target.1).expect("ready lines");
@@ -214,4 +207,51 @@ fn remote_and_dangerous_sources_are_never_requested() {
     request("javascript:alert(1)", 20, MAX_ROWS);
     assert!(lookup_ready("https://example.com/a.png", 20, MAX_ROWS).is_none());
     assert!(lookup_ready("javascript:alert(1)", 20, MAX_ROWS).is_none());
+}
+
+#[test]
+fn abandoned_pending_entry_is_released_for_retry() {
+    let mut cache = Cache::default();
+    let src = source("link.png", 10, 2);
+    let old = key("link.png", 1, 10, 10, 2);
+    let new = key("link.png", 2, 10, 10, 2);
+    let old_id = spawned(cache.begin(src.clone(), old.clone()));
+    // 同一 source 指向新版本（如符号链接切换）：旧别名被取代。
+    let _new_id = spawned(cache.begin(src.clone(), new));
+    assert!(!cache.complete(&old, old_id, Ok(lines(2, 1))));
+    assert!(
+        !cache.entries.contains_key(&old),
+        "被取代的 Pending 条目必须清理"
+    );
+    assert!(
+        matches!(cache.begin(src, old), BeginOutcome::Spawn(_)),
+        "同版本再次出现时应能重新启动 worker"
+    );
+}
+
+#[test]
+fn concurrent_decodes_are_bounded_and_retried_later() {
+    let mut cache = Cache::default();
+    let mut ids = Vec::new();
+    for index in 0..MAX_CONCURRENT {
+        let name = format!("{index}.png");
+        let src = source(&name, 10, 2);
+        ids.push(spawned(cache.begin(src, key(&name, 1, 10, 10, 2))));
+    }
+    let extra_src = source("extra.png", 10, 2);
+    let extra_key = key("extra.png", 1, 10, 10, 2);
+    assert!(matches!(
+        cache.begin(extra_src.clone(), extra_key.clone()),
+        BeginOutcome::Deferred
+    ));
+    assert!(
+        !cache.entries.contains_key(&extra_key),
+        "暂缓请求不登记条目，等下一次 effect 重试"
+    );
+
+    assert!(cache.complete(&key("0.png", 1, 10, 10, 2), ids[0], Ok(lines(2, 1))));
+    assert!(
+        matches!(cache.begin(extra_src, extra_key), BeginOutcome::Spawn(_)),
+        "腾出槽位后重试应启动"
+    );
 }

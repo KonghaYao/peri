@@ -105,7 +105,9 @@ pub use safety::{UrlKind, classify_url, sanitize_for_terminal};
 pub use scan::ImageInfo;
 pub(crate) use table::buffer_to_lines;
 pub use table::table_data_to_lines;
-pub use types::{GenUiSegment, ImageSegment, MarkdownSegment, MermaidSegment, TableData};
+pub use types::{
+    GenUiSegment, ImageSegment, ImageSource, MarkdownSegment, MermaidSegment, TableData,
+};
 
 /// 只读图片语法扫描：返回文本中所有完整 `![alt](url)` 的元数据。
 ///
