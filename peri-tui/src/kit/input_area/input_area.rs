@@ -725,7 +725,10 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
     } else {
         legacy_queue_height
     };
-    *overlay_height.lock() = ov_height.saturating_add(queue_height);
+    // 点击映射的 composer 顶部：弹出层 + 队列 + 预览（三者都在 composer 之上）。
+    *overlay_height.lock() = ov_height
+        .saturating_add(queue_height)
+        .saturating_add(preview.height);
     let restore_epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
     let restore_pending = steers.read().pending_recovery_ids(&steer_session_id);
     let draft_empty = text.is_empty() && PENDING_ATTACHMENTS.state().read().is_empty();
@@ -774,7 +777,7 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
 
     // 预览几何：每帧写（钩子只读；编码请求由 use_preview 的 effect 调度）。
     let preview_y = ov_height.saturating_add(queue_height);
-    attachment_preview::write_frame(preview_frame, &preview, preview_y, composer_area);
+    attachment_preview::write_frame(preview_frame, &preview, preview_y);
 
     let composer_lines = render::build_composer_lines(lines, loading, props.grid);
 

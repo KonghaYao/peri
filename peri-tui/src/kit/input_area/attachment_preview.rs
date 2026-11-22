@@ -63,19 +63,14 @@ pub(super) fn layout_height(budget: Option<u16>, reserved: u16, wanted: bool) ->
 
 /// 预留区矩形。
 ///
-/// `composer_area` 是 `AreaTracker` 记录的**整块输入区**（不是 composer 本体）：
-/// composer 顶部 = 输入区顶 + 弹出层高度 + 队列高度，预览紧贴其上方——与
-/// element! 中「队列与 composer 之间插入 View」的顺序一致。首帧（或高度变化
-/// 当帧）没有可用的 composer_area 时返回 `None`，由绘制钩子用当帧区域回退。
-pub(super) fn preview_rect(
-    composer_area: Option<Rect>,
-    y_offset: u16,
-    height: u16,
-) -> Option<Rect> {
+/// `area` 必须是**当帧**输入区矩形（`drawer.area`）。
+/// composer 顶部 = 输入区顶 + 弹出层高度 + 队列高度，预览紧贴其上方；
+/// 与 element! 中「队列与 composer 之间插入 View」的顺序一致。
+/// 用上一帧几何会在输入区移动时错位，故不复用。
+pub(super) fn preview_rect(area: Rect, y_offset: u16, height: u16) -> Option<Rect> {
     if height == 0 {
         return None;
     }
-    let area = composer_area?;
     let y = area.y.saturating_add(y_offset);
     if y.saturating_add(height) > area.bottom() {
         return None;
@@ -406,15 +401,9 @@ pub(super) fn use_preview(hooks: &mut Hooks<'_, '_>, inputs: PreviewInputs<'_>) 
 }
 
 /// 每帧写预留几何（钩子只读；`write_no_update` 避免渲染自激）。
-pub(super) fn write_frame(
-    frame: State<PreviewFrame>,
-    plan: &PreviewPlan,
-    y_offset: u16,
-    composer_area: Option<Rect>,
-) {
-    let rect = preview_rect(composer_area, y_offset, plan.height);
+pub(super) fn write_frame(frame: State<PreviewFrame>, plan: &PreviewPlan, y_offset: u16) {
     let mut frame = frame.write_no_update();
-    frame.update(plan.height, y_offset, rect, plan.key.clone());
+    frame.update(plan.height, y_offset, plan.key.clone());
 }
 
 /// 预览占位 View：只占高度，不渲染内容（像素由 [`AttachmentPreviewDrawHook`] 写）。
@@ -435,44 +424,24 @@ pub(super) struct PreviewFrame {
     height: u16,
     /// 预留区相对输入区顶部的行偏移（弹出层 + 队列高度）。
     y_offset: u16,
-    /// 由 composer_area 预计算的屏幕矩形；`None` 时钩子用当帧输入区回退。
-    rect: Option<Rect>,
     key: Option<Arc<PreviewKey>>,
 }
 
 impl PreviewFrame {
-    pub(super) fn update(
-        &mut self,
-        height: u16,
-        y_offset: u16,
-        rect: Option<Rect>,
-        key: Option<Arc<PreviewKey>>,
-    ) {
+    pub(super) fn update(&mut self, height: u16, y_offset: u16, key: Option<Arc<PreviewKey>>) {
         self.height = height;
         self.y_offset = y_offset;
-        self.rect = rect;
         self.key = key;
     }
 
     /// 在输入区当帧区域 `area` 内绘制 Ready 的预览；其余状态 no-op。
     fn draw(&self, buf: &mut Buffer, area: Rect) {
-        if self.height == 0 {
-            return;
-        }
         let Some(key) = self.key.as_ref() else {
             return;
         };
-        let rect = self.rect.unwrap_or_else(|| {
-            Rect::new(
-                area.x,
-                area.y.saturating_add(self.y_offset),
-                area.width,
-                self.height,
-            )
-        });
-        if rect.y < area.y || rect.bottom() > area.bottom() || rect.right() > area.right() {
+        let Some(rect) = preview_rect(area, self.y_offset, self.height) else {
             return;
-        }
+        };
         let Some(image) = lookup_ready(key) else {
             return;
         };

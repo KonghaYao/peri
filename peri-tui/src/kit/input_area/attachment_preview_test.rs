@@ -180,13 +180,12 @@ fn layout_height_yields_to_budget() {
 fn preview_rect_sits_directly_above_composer() {
     let area = Rect::new(2, 5, 40, 20);
     assert_eq!(
-        preview_rect(Some(area), 3, PREVIEW_ROWS),
+        preview_rect(area, 3, PREVIEW_ROWS),
         Some(Rect::new(2, 8, 40, PREVIEW_ROWS)),
         "预览 = 输入区顶 + 弹出层 + 队列，紧贴 composer 上沿"
     );
-    assert_eq!(preview_rect(Some(area), 16, PREVIEW_ROWS), None, "越界不画");
-    assert_eq!(preview_rect(Some(area), 3, 0), None, "无预览高度");
-    assert_eq!(preview_rect(None, 3, PREVIEW_ROWS), None, "首帧无区域");
+    assert_eq!(preview_rect(area, 16, PREVIEW_ROWS), None, "越界不画");
+    assert_eq!(preview_rect(area, 3, 0), None, "无预览高度");
 }
 
 // ── 缓存状态机 ────────────────────────────────────────────────────────────
@@ -580,7 +579,6 @@ fn draw_hook_writes_sixel_dcs_into_preview_rect() {
     let frame = PreviewFrame {
         height: PREVIEW_ROWS,
         y_offset: 0,
-        rect: Some(Rect::new(0, 0, 40, PREVIEW_ROWS)),
         key: Some(Arc::new(key)),
     };
     frame.draw(&mut buf, area);
@@ -606,7 +604,6 @@ fn draw_hook_skips_pending_and_out_of_bounds_frames() {
     let pending = PreviewFrame {
         height: PREVIEW_ROWS,
         y_offset: 0,
-        rect: Some(Rect::new(0, 0, 40, PREVIEW_ROWS)),
         key: Some(Arc::new(key.clone())),
     };
     pending.draw(&mut buf, area);
@@ -616,7 +613,6 @@ fn draw_hook_skips_pending_and_out_of_bounds_frames() {
     let out_of_bounds = PreviewFrame {
         height: PREVIEW_ROWS,
         y_offset: 10,
-        rect: None,
         key: Some(Arc::new(key)),
     };
     out_of_bounds.draw(&mut buf, area);
