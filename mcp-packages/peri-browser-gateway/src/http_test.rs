@@ -197,8 +197,9 @@ fn escape_html_covers_the_dangerous_characters() {
 /// The monitor page is the human half of the contract (README §6.3, §6.8).
 /// The asset is compiled in, so these checks guard the shape the gateway's
 /// messages are written against: separate takeover/release actions, a handoff
-/// banner that echoes the gateway's request id, a diagnostics drawer, and
-/// pointer coordinates left in canvas pixels for the gateway to map.
+/// banner that echoes the gateway's request id, a DevTools menu that hands the
+/// page off by URL, and pointer coordinates left in canvas pixels for the
+/// gateway to map.
 #[test]
 fn monitor_page_exposes_the_human_control_surface() {
     for needle in [
@@ -206,8 +207,6 @@ fn monitor_page_exposes_the_human_control_surface() {
         "id=\"release\"",
         "id=\"handoffDone\"",
         "requestId: state.handoff.requestId",
-        "id=\"drawer\"",
-        "diagnosticsPage(message)",
         "id=\"imeInput\"",
         // Parked under the cursor to place the IME candidate window, so it must
         // not take the mouseup that completes the click.
@@ -216,11 +215,29 @@ fn monitor_page_exposes_the_human_control_surface() {
         // The DevTools button offers the official Chrome frontend; a page
         // cannot open devtools:// by itself, so the URL is shown to copy.
         "id=\"devtoolsPop\"",
+        "id=\"devtoolsOpen\"",
+        "id=\"devtoolsCopy\"",
         "{ t: \"devtools\" }",
     ] {
         assert!(
             MONITOR_HTML.contains(needle),
             "monitor.html must contain {needle}"
+        );
+    }
+    // The monitor ships no console/network panel: diagnostics stay in the
+    // gateway, and DevTools is reached through the devtools:// URL.
+    for needle in [
+        "id=\"drawer\"",
+        "diagnosticsPage",
+        "id=\"diagBuiltin\"",
+        "id=\"consoleList\"",
+        "id=\"networkList\"",
+        "id=\"diagCount\"",
+        "id=\"drawerResize\"",
+    ] {
+        assert!(
+            !MONITOR_HTML.contains(needle),
+            "the DevTools menu hands the page off by URL; monitor.html must not contain {needle}"
         );
     }
     assert!(

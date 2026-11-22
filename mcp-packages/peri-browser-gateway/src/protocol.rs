@@ -292,10 +292,12 @@ pub enum KeyEventKind {
 
 /// Monitor page → gateway messages.
 ///
-/// Pointer coordinates are canvas (JPEG) pixels: the gateway maps them to CSS
-/// pixels of the page viewport with the last frame's [`ServerMessage::Meta`]
-/// and the live `Page.getLayoutMetrics` viewport (`ws::canvas_to_css`), so the
-/// client must not pre-scale them to `viewportWidth`/`viewportHeight`.
+/// Pointer coordinates are in the device space of the last frame's
+/// [`ServerMessage::Meta`] (`deviceWidth`/`deviceHeight`). When the screencast
+/// bound clamps a frame, its JPEG pixel size differs from that box.
+/// The gateway maps it to CSS pixels with the live `Page.getLayoutMetrics`
+/// viewport (`ws::canvas_to_css`), so the client must not pre-scale them to
+/// `viewportWidth`/`viewportHeight`.
 /// Keyboard modifier bitmask: Alt = 1, Ctrl = 2, Meta = 4, Shift = 8.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase", rename_all_fields = "camelCase")]

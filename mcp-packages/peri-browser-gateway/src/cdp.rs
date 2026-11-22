@@ -50,7 +50,7 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 pub const EVENT_CAPACITY: usize = 64;
 
 /// Screencast defaults from README §6.4.
-pub const FRAME_QUALITY: u8 = 55;
+pub const FRAME_QUALITY: u8 = 70;
 pub const FRAME_MAX_WIDTH: u32 = 1600;
 pub const FRAME_MAX_HEIGHT: u32 = 1000;
 /// Thumbnail capture is a still image, not a second screencast.
@@ -1147,7 +1147,7 @@ pub fn viewport_from_metrics(value: &Value) -> Option<Viewport> {
     })
 }
 
-/// Starts a screencast with the gateway defaults (JPEG q55, 1600×1000 bound).
+/// Starts a screencast with the gateway defaults (JPEG q70, 1600×1000 bound).
 pub async fn start_screencast(viewer: &Viewer) -> Result<(), CdpError> {
     viewer
         .command(
