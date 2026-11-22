@@ -665,3 +665,224 @@ fn test_mermaid_terminal_parse_shows_the_final_diagram() {
         "闭合终稿不应退回源码，实际 {rendered:?}"
     );
 }
+
+// ── 消息区内联图片（终端像素协议）────────────────────────────────────────
+
+fn write_red_png(path: &std::path::Path) {
+    let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([220, 30, 30, 255]));
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .expect("inline image render: png fixture must encode");
+}
+
+/// 本地 PNG 缓存命中后，assistant 独占图片段输出「真实编码尺寸的行占位 +
+/// 内联放置」，不再输出 `[Image: …]` 降级文本或半块字符；行数受 8 行上限约束。
+#[test]
+fn test_assistant_local_image_renders_pixel_placement() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("assistant local image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+    let grid = GridSpec::grid_for(120);
+    assert!(
+        crate::kit::inline_image::request_until_ready(
+            source,
+            u16::try_from(grid.content_width()).expect("content width fits u16"),
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+
+    let text = format!("{}\n\n![a]({source})\n\nafter", "x".repeat(100));
+    let vm = super::assistant_bubble_with_text(&text, 71);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+
+    let rendered = super::all_text(&lines);
+    assert!(
+        !rendered.contains("[Image: a]"),
+        "命中缓存后不应保留降级文本，实际 {rendered:?}"
+    );
+    assert_eq!(image_lines.len(), 1, "独占图片应产出一处内联放置");
+    let info = &image_lines[0];
+    let placement = info.inline.as_ref().expect("图片段应携带内联放置");
+    assert!(
+        placement.rows >= 1 && placement.rows <= crate::kit::inline_image::MAX_ROWS,
+        "占位行数受 8 行上限约束，实际 {}",
+        placement.rows
+    );
+    assert_eq!(
+        placement.x_offset,
+        u16::try_from(grid.cont_prefix_width()).expect("prefix fits u16"),
+        "图片从正文列起画"
+    );
+    // 占位行只有网格前缀，不含半块/方块字符。
+    assert!(
+        (info.logical_idx..info.logical_idx + usize::from(placement.rows)).all(|idx| {
+            lines
+                .get(idx)
+                .is_some_and(|line| !line.spans.iter().any(|span| span.content.contains('█')))
+        }),
+        "像素路径不得再输出半块字符"
+    );
+}
+
+/// 远程 URL 不请求、不替换：保留 `[Remote image: …]` 降级行。
+#[test]
+fn test_remote_image_keeps_degraded_line() {
+    crate::i18n::init(Some("en"));
+    let vm = super::assistant_bubble_with_text("![a](https://example.com/a.png)", 72);
+    let lines = render::vm_to_lines(&vm, &GridSpec::grid_for(100));
+    let rendered = super::all_text(&lines);
+    assert!(
+        rendered.contains("[Remote image: a]"),
+        "远程图片保持降级文本，实际 {rendered:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
+        "远程图片不得渲染半块行"
+    );
+}
+
+/// 本地校验/解码失败：缓存进入 Failed，渲染保留原 `[Image: …]` 降级行。
+#[test]
+fn test_local_image_failure_keeps_degraded_line() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("local image failure: tempdir must exist");
+    let file = dir.path().join("bad.png");
+    std::fs::write(&file, b"not an image").expect("local image failure: fixture write");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+    let grid = GridSpec::grid_for(120);
+    // 短回复走 brief 形态：与渲染侧 wrap 宽度对齐，确保命中 Failed 缓存而非未请求。
+    let cols = u16::try_from(grid.process_content_width()).expect("content width fits u16");
+    crate::kit::inline_image::request(source, cols, crate::kit::inline_image::MAX_ROWS);
+    assert!(
+        !crate::kit::inline_image::wait_ready(
+            source,
+            cols,
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "坏图不应进入 Ready"
+    );
+
+    let vm = super::assistant_bubble_with_text(&format!("![a]({source})"), 73);
+    let lines = render::vm_to_lines(&vm, &grid);
+    let rendered = super::all_text(&lines);
+    assert!(
+        rendered.contains("[Image: a]"),
+        "失败回落降级文本，实际 {rendered:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains('█'))),
+        "失败时不得渲染半块行"
+    );
+}
+
+/// 同段多图：一张命中本地缓存时，其余图片仍保留各自的降级行（不丢内容）。
+#[test]
+fn test_multi_image_segment_keeps_unmatched_fallbacks() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("multi image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    write_red_png(&file);
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+    let grid = GridSpec::grid_for(120);
+    let text = format!("![a]({source}) ![b](https://example.com/b.png)");
+    let vm = super::assistant_bubble_with_text(&text, 74);
+    // 短回复走 brief 形态：正文 wrap 宽度是过程区列宽，缓存键必须与之对齐。
+    let cols = u16::try_from(grid.process_content_width()).expect("content width fits u16");
+    assert!(
+        crate::kit::inline_image::request_until_ready(
+            source,
+            cols,
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+    assert!(
+        crate::kit::inline_image::lookup_ready(source, cols, crate::kit::inline_image::MAX_ROWS)
+            .is_some(),
+        "缓存查表应命中（诊断为渲染侧问题）"
+    );
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let rendered = super::all_text(&lines);
+
+    assert!(
+        !rendered.contains("[Image: a]"),
+        "命中的本地图不应保留降级文本，实际 {rendered:?}"
+    );
+    assert!(
+        rendered.contains("[Remote image: b]"),
+        "未命中的同段图片必须保留降级行，实际 {rendered:?}"
+    );
+    assert_eq!(image_lines.len(), 1, "同段只有命中的图产生内联放置");
+    assert!(image_lines[0].inline.is_some(), "命中的图片应携带协议句柄");
+}
+
+/// 短回复（brief）正文在过程带宽度内渲染：图片放置从过程区正文列起画，
+/// 预留行数同样等于真实编码行数。
+#[test]
+fn test_assistant_brief_local_image_uses_process_prefix() {
+    crate::i18n::init(Some("en"));
+    let dir = tempfile::tempdir().expect("assistant brief image: tempdir must exist");
+    let file = dir.path().join("red.png");
+    let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([220, 30, 30, 255]));
+    image
+        .save_with_format(&file, image::ImageFormat::Png)
+        .expect("assistant brief image: png fixture must encode");
+    // markdown 链接里反斜杠是转义符（`\.` 会丢反斜杠），Windows 路径统一用正斜杠。
+    let source = file.to_str().expect("utf8 path").replace('\\', "/");
+    let source = source.as_str();
+    let grid = GridSpec::grid_for(120);
+    let cols = u16::try_from(grid.process_content_width()).expect("process width fits u16");
+    assert!(
+        crate::kit::inline_image::request_until_ready(
+            source,
+            cols,
+            crate::kit::inline_image::MAX_ROWS,
+            std::time::Duration::from_secs(5),
+        ),
+        "图片缓存应在渲染前就绪"
+    );
+
+    let vm = super::assistant_bubble_with_text(&format!("![a]({source})"), 75);
+    let mut md_cache = crate::kit::markdown::MarkdownRenderCache::default();
+    let (lines, _, _, image_lines) = render::vm_to_lines_cached(&vm, &grid, &mut md_cache, false);
+    let info = image_lines.first().expect("短回复图片应产出内联放置");
+    let placement = info.inline.as_ref().expect("inline placement");
+    assert_eq!(
+        placement.x_offset,
+        u16::try_from(grid.process_prefix_width()).expect("prefix fits u16"),
+        "短回复图片从过程区正文列起画"
+    );
+    assert!(
+        lines.len() >= info.logical_idx + usize::from(placement.rows),
+        "占位行必须完整落在消息行内"
+    );
+    assert!(
+        (info.logical_idx..info.logical_idx + usize::from(placement.rows)).all(|idx| {
+            lines[idx]
+                .spans
+                .iter()
+                .all(|span| span.content.trim().is_empty() || span.content == "│")
+        }),
+        "占位行只含网格前缀"
+    );
+    let rendered = super::all_text(&lines);
+    assert!(!rendered.contains("[Image: a]"), "实际 {rendered:?}");
+}

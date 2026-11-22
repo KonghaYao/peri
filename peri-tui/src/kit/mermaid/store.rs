@@ -204,4 +204,5 @@ pub(crate) fn reset_for_test() {
     hub.revision.store(0, Ordering::Relaxed);
     *super::MERMAID_ACTION_SELECTED.state().write() = None;
     super::MERMAID_ACTION_REVISION.set(0);
+    super::hscroll::reset_for_test();
 }

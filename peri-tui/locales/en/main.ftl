@@ -859,7 +859,7 @@ image-preview-meta = [Image: { $name } · { $w }×{ $h } · { $size } · { $mime
 image-preview-loading = [Image: { $name }]
 image-preview-degraded = Only images inside the managed folder (~/.peri/images) can be previewed
 image-preview-error = This image cannot be previewed
-image-preview-no-protocol = This terminal doesn't support image display (Kitty graphics); showing text info
+image-preview-no-protocol = This terminal can't render image pixels (graphics protocol or cell size unavailable); showing text info
 
 # ---- Message Entry Status Fallbacks (spec §4.1: symbols' text fallbacks) ----
 # Unicode 能力不足时，状态由符号退化为明确文本；同时 serve as aria/语义后备。
@@ -879,7 +879,6 @@ render-group-steps = { $count } steps
 render-group-thought = Thought
 render-group-note = Note
 render-group-reminder = Reminder
-render-group-running = running
 
 # ---- Interaction block (spec §6.8, Slice 4) ----
 # inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——

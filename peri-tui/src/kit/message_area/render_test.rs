@@ -182,6 +182,9 @@ mod subagent_groups_tests;
 #[path = "render_group_click_test.rs"]
 mod group_click_tests;
 
+#[path = "render_group_working_test.rs"]
+mod group_working_tests;
+
 fn assistant_bubble_with_text(text: &str, hash: u64) -> TuiRenderUnit {
     TuiRenderUnit::TuiAssistantBubble(
         TuiAssistantBubble {

@@ -30,6 +30,8 @@ use crate::rpc::RpcChannel;
 
 pub(crate) use artifact::prepare_workflow_command;
 pub(crate) use artifact::WorkflowCommand;
+pub use limits::RunLimitBreach;
+pub(crate) use limits::RunLimitReport;
 pub(crate) use limits::RunLimitState;
 
 // ─── Agent 回调 trait（3.0 批 2 波 1 迁入 peri-acp-types）────────────

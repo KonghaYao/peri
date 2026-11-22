@@ -6,16 +6,27 @@
 <title>peri-browser monitor</title>
 <style>
   :root {
-    color-scheme: dark;
-    --bg: #0b0d11;
-    --panel: #141821;
-    --line: #232a36;
-    --text: #e6e9ef;
-    --muted: #8b94a7;
-    --accent: #f0a05a;
-    --ok: #5fcf8a;
-    --warn: #e8c266;
-    --bad: #e87272;
+    color-scheme: light;
+    /* Chrome's light palette: the monitor shell mirrors the browser it drives. */
+    --bg: #dee1e6;
+    --panel: #ffffff;
+    --line: #dadce0;
+    --text: #202124;
+    --muted: #5f6368;
+    --accent: #1a73e8;
+    --ok: #137333;
+    --warn: #b26a00;
+    --bad: #c5221f;
+    /* Chrome DevTools light palette, used by the DevTools menu. */
+    --dt-bg: #ffffff;
+    --dt-bar: #f1f3f4;
+    --dt-line: #dadce0;
+    --dt-text: #202124;
+    --dt-muted: #5f6368;
+    --dt-blue: #1a73e8;
+    --dt-green: #137333;
+    --dt-red: #c5221f;
+    --dt-yellow: #b26a00;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -35,140 +46,256 @@
     cursor: pointer;
     padding: 3px 7px;
   }
-  button:hover:not(:disabled) { background: #1d2330; }
-  button:disabled { color: #555e70; cursor: default; }
+  button:hover:not(:disabled) { background: #f1f3f4; }
+  button:focus-visible { outline: 2px solid var(--dt-blue); outline-offset: 1px; }
+  button:disabled { color: #bdc1c6; cursor: default; }
 
-  #brandbar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 10px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel);
-  }
-  #brandbar strong { font-size: 13px; letter-spacing: .2px; }
-  #sessionName { color: var(--muted); }
+  /* Chrome's frame: a tab strip over a toolbar. The active tab shares the
+     toolbar's fill so the two read as one surface, the way they do in Chrome. */
+  #chrome { background: var(--panel); }
+  #sessionName { color: var(--muted); font-size: 11px; white-space: nowrap; }
   #sessionName:empty { display: none; }
   #agentPill {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: #1d2330;
+    padding: 0 2px;
     color: var(--muted);
     font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: .6px;
+    white-space: nowrap;
   }
   #agentPill::before {
     content: "";
-    width: 7px; height: 7px;
+    width: 6px; height: 6px;
     border-radius: 50%;
     background: var(--muted);
   }
-  #agentPill.driving::before { background: var(--accent); }
+  #agentPill.driving::before { background: var(--warn); }
   #agentPill.idle::before { background: var(--ok); }
   #agentPill.waiting_for_human::before { background: var(--warn); }
-  #readonly {
-    padding: 1px 7px;
-    border: 1px solid var(--line);
+  #readonly, #holding {
+    padding: 1px 8px;
+    border: 1px solid #c4c7c5;
     border-radius: 999px;
     color: var(--muted);
     font-size: 11px;
+    white-space: nowrap;
   }
-  #readonly[hidden] { display: none; }
-  #holding {
-    padding: 1px 7px;
-    border: 1px solid #2f5c43;
-    border-radius: 999px;
-    background: #12251b;
-    color: var(--ok);
-    font-size: 11px;
-  }
-  #holding[hidden] { display: none; }
+  #readonly[hidden], #holding[hidden] { display: none; }
+  #holding { border-color: #a8dab5; color: var(--ok); }
   .spacer { flex: 1; }
-  #connState { color: var(--muted); font-size: 11px; }
-  #takeover, #release, #diagBtn { border-color: var(--line); font-size: 11px; }
+  #connState { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  #takeover {
+    flex: none;
+    height: 28px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 999px;
+    background: #1a73e8;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  #takeover:hover:not(:disabled) { background: #1765cc; }
+  #release {
+    flex: none;
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid #dadce0;
+    border-radius: 999px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  #release:hover:not(:disabled) { background: #f1f3f4; }
   #takeover[hidden], #release[hidden] { display: none; }
-  #release { color: var(--ok); border-color: #2f5c43; }
-  #diagBtn { color: var(--muted); }
-  #diagBtn.active { color: var(--text); background: #1d2330; }
-  #diagBtn[aria-disabled="true"] { color: #555e70; }
-  #diagCount { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #diagBtn {
+    position: relative;
+    flex: none;
+    width: 32px; height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #diagBtn .dt-logo { width: 16px; height: 16px; display: block; }
+  #diagBtn:hover { background: #f1f3f4; }
+  #diagBtn[aria-disabled="true"] { color: #bdc1c6; }
+  #diagBtn[aria-disabled="true"] .dt-logo { opacity: .45; }
+
+  /* Menu under the DevTools button: hand the page to the real frontend. */
+  #devtoolsPop {
+    position: fixed;
+    top: 96px;
+    right: 12px;
+    z-index: 40;
+    width: 350px;
+    max-width: calc(100vw - 24px);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--dt-bg);
+    color: var(--dt-text);
+    border: 1px solid var(--dt-line);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(60, 64, 67, .3);
+  }
+  #devtoolsPop[hidden] { display: none; }
+  #devtoolsPop h2 { margin: 0; font-size: 13px; font-weight: 600; }
+  #devtoolsPop p { margin: 0; color: var(--dt-muted); font-size: 12px; line-height: 1.5; }
+  #devtoolsPop button {
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--dt-line);
+    background: #f1f3f4;
+    color: var(--dt-text);
+    cursor: pointer;
+    text-align: left;
+  }
+  #devtoolsPop button:hover { background: #e8eaed; }
+  #devtoolsPop button.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+  #devtoolsPop button.primary:hover { background: #1765cc; }
+  #devtoolsPop button[hidden] { display: none; }
+  #devtoolsUrl {
+    width: 100%;
+    padding: 7px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--dt-line);
+    background: var(--dt-bg);
+    color: var(--dt-text);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #devtoolsLink[hidden] { display: none; }
+  #devtoolsLink { display: flex; flex-direction: column; gap: 6px; }
+  #devtoolsLink .row { display: flex; gap: 6px; }
+  #devtoolsCopy { flex: 0 0 auto; }
 
   #tabStrip {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--line);
-    background: #10141b;
-    min-height: 38px;
+    gap: 6px;
+    height: 40px;
+    padding: 0 8px;
+    background: var(--bg);
+    min-width: 0;
   }
   #tabRow {
     display: flex;
-    gap: 4px;
+    align-items: flex-end;
+    gap: 2px;
+    height: 100%;
+    min-width: 0;
     overflow-x: auto;
     overflow-y: hidden;
-    scrollbar-width: thin;
+    scrollbar-width: none;
   }
+  #tabRow::-webkit-scrollbar { display: none; }
   .tab {
     display: flex;
     align-items: center;
-    gap: 6px;
-    max-width: 220px;
-    height: 27px;
-    padding: 0 6px 0 8px;
-    border: 1px solid transparent;
-    border-radius: 5px;
+    gap: 8px;
+    flex: 0 1 220px;
+    min-width: 88px;
+    height: 34px;
+    padding: 0 6px 0 12px;
+    border: 0;
+    border-radius: 8px 8px 0 0;
     color: var(--muted);
+    font-size: 12px;
     white-space: nowrap;
     user-select: none;
     cursor: pointer;
   }
-  .tab:hover { background: #1a1f2a; }
-  .tab.active {
-    background: #232a36;
-    border-color: #2d3646;
-    color: var(--text);
-  }
+  .tab:hover { background: #d0d3d8; }
+  .tab.active { background: var(--panel); color: var(--text); }
   .tdot {
-    width: 6px; height: 6px;
-    background: #3a4252;
-    transform: rotate(45deg);
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: #9aa0a6;
     flex: none;
   }
-  .tab.active .tdot { background: var(--accent); }
+  .tab.active .tdot { background: var(--dt-blue); }
   .tlabel { overflow: hidden; text-overflow: ellipsis; }
   .tclose {
+    flex: none;
+    width: 18px; height: 18px;
+    padding: 0;
     border: 0;
-    padding: 0 3px;
+    border-radius: 50%;
     color: var(--muted);
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+  }
+  .tab:hover .tclose, .tab.active .tclose, .tclose:focus-visible { opacity: 1; }
+  .tclose:hover { background: rgba(32, 33, 36, .08); color: var(--text); }
+  #newTabBtn {
+    flex: none;
+    align-self: flex-end;
+    width: 28px; height: 28px;
+    margin-bottom: 3px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--text);
+    font-size: 18px;
     line-height: 1;
   }
-  .tclose:hover { color: var(--bad); background: transparent; }
-  #newTabBtn { flex: none; font-size: 16px; line-height: 1; padding: 1px 8px; }
+  #newTabBtn:hover { background: #d0d3d8; }
 
   #toolbar {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--line);
+    gap: 4px;
+    height: 48px;
+    padding: 0 8px;
     background: var(--panel);
   }
+  .navbtn {
+    flex: none;
+    width: 32px; height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: var(--text);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .navbtn svg { width: 18px; height: 18px; fill: currentColor; }
+  .navbtn:hover:not(:disabled) { background: #f1f3f4; }
+  .navbtn:disabled { color: #bdc1c6; }
+  #omnibox {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    margin: 0 4px;
+    padding: 0 12px;
+    border: 1px solid transparent;
+    border-radius: 15px;
+    background: #f1f3f4;
+  }
+  #omnibox:focus-within {
+    border-color: var(--dt-blue);
+    box-shadow: inset 0 0 0 1px var(--dt-blue);
+  }
+  .omni-icon { width: 16px; height: 16px; flex: none; fill: var(--muted); }
   #address {
     flex: 1;
     min-width: 0;
-    padding: 5px 9px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: #0e1118;
+    padding: 0;
+    border: 0;
+    background: transparent;
     color: var(--text);
-    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    outline: none;
   }
-  #address:focus { outline: none; border-color: #3b465c; }
 
   #main {
     position: relative;
@@ -177,13 +304,13 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #07090d;
+    background: #f1f3f4;
     overflow: hidden;
   }
   #screen {
     max-width: 100%;
     max-height: 100%;
-    background: #000;
+    background: #ffffff;
     display: block;
     outline: none;
   }
@@ -195,7 +322,7 @@
     align-items: center;
     justify-content: center;
     color: var(--muted);
-    background: rgba(7, 9, 13, .72);
+    background: rgba(248, 249, 250, .85);
     pointer-events: none;
     text-align: center;
     padding: 20px;
@@ -206,10 +333,11 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 7px 10px;
-    background: #2a2416;
-    border-bottom: 1px solid #4a3f22;
-    color: #f0dfb5;
+    padding: 8px 12px;
+    background: #e8f0fe;
+    border-bottom: 1px solid var(--line);
+    border-left: 3px solid var(--dt-blue);
+    color: #1967d2;
   }
   #handoff[hidden] { display: none; }
   #handoff p { margin: 0; flex: 1; }
@@ -226,12 +354,13 @@
   }
   .toast {
     max-width: 360px;
-    padding: 7px 10px;
-    border: 1px solid #3a2e2e;
-    border-radius: 6px;
-    background: #241a1a;
-    color: #f0c9c9;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+    color: var(--text);
     font-size: 12px;
+    box-shadow: 0 1px 3px rgba(60, 64, 67, .3);
   }
 
   #tabPreview {
@@ -241,85 +370,104 @@
     height: 150px;
     border: 1px solid var(--line);
     border-radius: 6px;
-    background: #000 center / contain no-repeat;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+    background: #ffffff center / contain no-repeat;
+    box-shadow: 0 8px 24px rgba(60, 64, 67, .3);
     display: none;
     pointer-events: none;
   }
   #tabPreview.show { display: block; }
 
-  #drawer {
-    display: flex;
-    flex-direction: column;
-    flex: none;
-    height: 210px;
-    border-top: 1px solid var(--line);
-    background: #0c0f15;
+  /* IME: a 1x1 editable parked at the click point. It owns focus so the OS
+     candidate window opens next to the caret, while the canvas keeps the
+     pixels. `opacity: 0` keeps it focusable. It must stay out of hit testing:
+     parked under the cursor it would otherwise swallow the mouseup that
+     completes the click, and the page never sees a press-release pair. */
+  #imeInput {
+    position: fixed;
+    z-index: 8;
+    pointer-events: none;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    font-size: 16px;
+    resize: none;
+    overflow: hidden;
+    white-space: pre;
+    opacity: 0;
   }
-  #drawer[hidden] { display: none; }
-  #drawerHead {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 8px;
-    border-bottom: 1px solid var(--line);
+  #imePreview {
+    position: fixed;
+    z-index: 9;
+    max-width: 360px;
+    padding: 3px 9px;
+    border: 1px solid var(--dt-line);
+    border-radius: 12px;
+    background: var(--dt-bar);
+    color: var(--dt-text);
+    font-size: 12px;
+    box-shadow: 0 4px 14px rgba(60, 64, 67, .3);
+    pointer-events: none;
+    white-space: pre;
   }
-  .diagtab { color: var(--muted); font-size: 11px; border: 1px solid transparent; }
-  .diagtab.active { color: var(--text); background: #1d2330; border-color: var(--line); }
-  .diagtab .count { color: var(--muted); font-variant-numeric: tabular-nums; }
-  #drawerBody {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
-    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .diaglist { list-style: none; margin: 0; padding: 3px 8px 8px; }
-  .diaglist[hidden] { display: none; }
-  .diagrow { display: flex; gap: 8px; padding: 1px 0; }
-  .diagrow .ts { flex: none; color: #5d6678; }
-  .diagrow .lvl { flex: none; width: 52px; text-transform: uppercase; }
-  .diagrow .lvl.error { color: var(--bad); }
-  .diagrow .lvl.warning { color: var(--warn); }
-  .diagrow .lvl.info, .diagrow .lvl.debug { color: var(--muted); }
-  .diagrow .method { flex: none; width: 52px; color: var(--muted); }
-  .diagrow .status { flex: none; width: 34px; text-align: right; color: var(--muted); }
-  .diagrow .status.good { color: var(--ok); }
-  .diagrow .status.bad { color: var(--bad); }
-  .diagrow .url, .diagrow .text {
-    flex: 1;
-    min-width: 0;
-    color: #cdd5e3;
-    overflow-wrap: anywhere;
-    white-space: pre-wrap;
-  }
-  .diagempty { color: var(--muted); padding: 8px; }
+  #imePreview[hidden] { display: none; }
+
 </style>
 </head>
 <body>
-<div id="brandbar">
-  <strong>peri-browser</strong>
-  <span id="sessionName"></span>
-  <span id="agentPill">idle</span>
-  <span id="readonly" title="the agent holds the page controller; your input is not sent">read-only</span>
-  <span id="holding" hidden>you control this page</span>
-  <span class="spacer"></span>
-  <button id="diagBtn" title="Diagnostics need the page controller">Diagnostics<span id="diagCount"></span></button>
-  <span id="connState">connecting</span>
-  <button id="takeover" title="Ask the agent to yield the page; it finishes the current call first" hidden>Take over</button>
-  <button id="release" title="Close the controller and give the page back to the agent" hidden>Release</button>
-</div>
+<header id="chrome">
+  <div id="tabStrip">
+    <div id="tabRow" role="tablist"></div>
+    <button id="newTabBtn" title="New tab" hidden>+</button>
+    <span class="spacer"></span>
+    <span id="sessionName"></span>
+    <span id="agentPill">idle</span>
+    <span id="readonly" title="the agent holds the page controller; your input is not sent">read-only</span>
+    <span id="holding" hidden>you control this page</span>
+    <span id="connState">connecting</span>
+  </div>
 
-<div id="tabStrip">
-  <div id="tabRow" role="tablist"></div>
-  <button id="newTabBtn" title="New tab" hidden>+</button>
-</div>
+  <div id="toolbar">
+    <button id="back" class="navbtn" title="Back" aria-label="Back">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4 4 12l8 8 1.41-1.41L7.83 13H20z"/></svg>
+    </button>
+    <button id="forward" class="navbtn" title="Forward" aria-label="Forward">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11h12.17l-5.59-5.59L12 4l8 8-8 8-1.41-1.41L16.17 13H4z"/></svg>
+    </button>
+    <div id="omnibox">
+      <svg class="omni-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm6.93 6h-2.95a15.6 15.6 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 8ZM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96ZM4.26 14a8.1 8.1 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26Zm.81 2h2.95c.32 1.25.78 2.45 1.38 3.56A8.03 8.03 0 0 1 5.07 16Zm2.95-8H5.07a8.03 8.03 0 0 1 4.33-3.56A15.6 15.6 0 0 0 8.02 8ZM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96ZM14.34 14H9.66a14.6 14.6 0 0 1 0-4h4.68a14.6 14.6 0 0 1 0 4Zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56ZM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.1 8.1 0 0 1 0 4h-3.38Z"/></svg>
+      <input id="address" spellcheck="false" autocomplete="off" value="about:blank" aria-label="Page address">
+    </div>
+    <button id="diagBtn" title="Open Chrome DevTools" aria-label="DevTools">
+      <svg class="dt-logo" viewBox="0 0 16 16" aria-hidden="true">
+        <rect x="0.5" y="1.5" width="15" height="13" rx="3" fill="#3949ab"></rect>
+        <path d="M5.7 5.2 3.5 8l2.2 2.8M10.3 5.2 12.5 8l-2.2 2.8" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+    </button>
+    <button id="takeover" title="Ask the agent to yield the page; it finishes the current call first" hidden>Take over</button>
+    <button id="release" title="Close the controller and give the page back to the agent" hidden>Release</button>
+  </div>
 
-<div id="toolbar">
-  <button id="back" title="Back">&lsaquo;</button>
-  <button id="forward" title="Forward">&rsaquo;</button>
-  <input id="address" spellcheck="false" autocomplete="off" value="about:blank" aria-label="Page address">
-  <button id="closeTab" title="Close tab" hidden>&times;</button>
-</div>
+  <div id="devtoolsPop" role="dialog" aria-label="DevTools" hidden>
+    <h2>Chrome DevTools</h2>
+    <p>Kitesurf accepts one controller per page. Handing the page over keeps the
+      screenshot live but makes the monitor read-only until you take over again.</p>
+    <button id="devtoolsOpen" class="primary">Hand the page to Chrome DevTools</button>
+    <div id="devtoolsLink" hidden>
+      <input id="devtoolsUrl" readonly aria-label="Chrome DevTools URL">
+      <div class="row">
+        <button id="devtoolsCopy">Copy URL</button>
+      </div>
+      <p>A web page cannot open <code>devtools://</code> itself. Paste the URL into
+        Chrome's address bar; the page stays where it is.</p>
+    </div>
+  </div>
+</header>
 
 <div id="handoff" hidden>
   <p id="handoffText"></p>
@@ -333,19 +481,11 @@
   <div id="overlay">waiting for the first frame&hellip;</div>
 </main>
 
-<section id="drawer" hidden aria-label="Diagnostics">
-  <div id="drawerHead">
-    <button class="diagtab active" id="diagConsoleTab" role="tab" aria-selected="true">Console <span class="count" id="consoleCount">0</span></button>
-    <button class="diagtab" id="diagNetworkTab" role="tab" aria-selected="false">Network <span class="count" id="networkCount">0</span></button>
-    <span class="spacer"></span>
-    <button id="diagClear" title="Clear this view; the gateway keeps its own buffer">Clear</button>
-    <button id="diagClose" title="Close diagnostics">&times;</button>
-  </div>
-  <div id="drawerBody">
-    <ul id="consoleList" class="diaglist"></ul>
-    <ul id="networkList" class="diaglist" hidden></ul>
-  </div>
-</section>
+<!-- Focus target for the canvas: opaque to the user, but a real editable so the
+     OS IME composes here and the candidate window follows the click point. -->
+<textarea id="imeInput" aria-hidden="true" tabindex="-1" autocomplete="off"
+  autocapitalize="off" autocorrect="off" spellcheck="false" wrap="off"></textarea>
+<div id="imePreview" hidden></div>
 
 <div id="tabPreview"></div>
 <div id="toasts"></div>
@@ -356,6 +496,7 @@
 
   const match = location.pathname.match(/^\/s\/([^/]+)\//);
   const overlay = document.getElementById("overlay");
+  const main = document.getElementById("main");
   const canvas = document.getElementById("screen");
   const ctx = canvas.getContext("2d");
   const tabRow = document.getElementById("tabRow");
@@ -367,7 +508,6 @@
   const takeoverButton = document.getElementById("takeover");
   const releaseButton = document.getElementById("release");
   const newTabButton = document.getElementById("newTabBtn");
-  const closeTabButton = document.getElementById("closeTab");
   const backButton = document.getElementById("back");
   const forwardButton = document.getElementById("forward");
   const preview = document.getElementById("tabPreview");
@@ -378,14 +518,13 @@
   const handoffDecline = document.getElementById("handoffDecline");
   const handoffDone = document.getElementById("handoffDone");
   const diagButton = document.getElementById("diagBtn");
-  const diagCount = document.getElementById("diagCount");
-  const drawer = document.getElementById("drawer");
-  const consoleList = document.getElementById("consoleList");
-  const networkList = document.getElementById("networkList");
-  const consoleCount = document.getElementById("consoleCount");
-  const networkCount = document.getElementById("networkCount");
-  const consoleTab = document.getElementById("diagConsoleTab");
-  const networkTab = document.getElementById("diagNetworkTab");
+  const devtoolsPop = document.getElementById("devtoolsPop");
+  const devtoolsOpen = document.getElementById("devtoolsOpen");
+  const devtoolsLink = document.getElementById("devtoolsLink");
+  const devtoolsUrl = document.getElementById("devtoolsUrl");
+  const devtoolsCopy = document.getElementById("devtoolsCopy");
+  const imeInput = document.getElementById("imeInput");
+  const imePreview = document.getElementById("imePreview");
 
   if (!match) {
     overlay.textContent = "no session token in the path";
@@ -414,12 +553,15 @@
     handoff: null,
     takeoverPending: false,
     takeoverTimer: 0,
-    diagOpen: false,
-    console: [],
-    network: [],
+    devtoolsUrl: "",
     readonlyHintAt: 0,
+    // IME: while a composition is open the page must not receive the raw
+    // keystrokes; `compositionend` sends the committed text once.
+    composing: false,
+    // Keys whose `keydown` reached the page, so only their real releases are
+    // forwarded (an IME commit also emits a keyup for a key we never sent).
+    heldKeys: new Map(),
   };
-  const DIAG_LIMIT = 200;
 
   function send(message) {
     if (state.socket && state.socket.readyState === WebSocket.OPEN) {
@@ -486,155 +628,33 @@
     });
   }
 
-  function updateDiagCount() {
-    const total = state.console.length + state.network.length;
-    diagCount.textContent = total ? ` (${total})` : "";
-    consoleCount.textContent = String(state.console.length);
-    networkCount.textContent = String(state.network.length);
+  function showDevtoolsPop() {
+    devtoolsPop.hidden = false;
+    devtoolsButtonState();
   }
 
-  function emptyRow(text) {
-    const item = document.createElement("li");
-    item.className = "diagempty";
-    item.textContent = text;
-    return item;
+  function hideDevtoolsPop() {
+    devtoolsPop.hidden = true;
   }
 
-  function timeLabel(ts) {
-    if (!ts) return "";
-    const date = new Date(ts);
-    return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString();
+  function devtoolsButtonState() {
+    // Once the gateway reported a URL, the menu keeps it: the control has been
+    // released, and asking again would only repeat the release.
+    devtoolsLink.hidden = !state.devtoolsUrl;
+    devtoolsOpen.hidden = Boolean(state.devtoolsUrl);
+    if (state.devtoolsUrl) devtoolsUrl.value = state.devtoolsUrl;
   }
 
-  function renderConsole() {
-    consoleList.textContent = "";
-    if (state.console.length === 0) {
-      consoleList.append(emptyRow("no console output yet"));
+  async function copyDevtoolsUrl() {
+    if (!state.devtoolsUrl) return;
+    try {
+      await navigator.clipboard.writeText(state.devtoolsUrl);
+      toast("DevTools URL copied");
+    } catch {
+      devtoolsUrl.focus();
+      devtoolsUrl.select();
+      toast("Press Cmd+C: the browser refused the clipboard");
     }
-    for (const entry of state.console) {
-      const item = document.createElement("li");
-      item.className = "diagrow";
-      const time = document.createElement("span");
-      time.className = "ts";
-      time.textContent = timeLabel(entry.ts);
-      const level = document.createElement("span");
-      level.className = `lvl ${entry.level || "log"}`;
-      level.textContent = entry.level || "log";
-      const text = document.createElement("span");
-      text.className = "text";
-      text.textContent = entry.text || "";
-      item.append(time, level, text);
-      consoleList.append(item);
-    }
-    updateDiagCount();
-  }
-
-  function renderNetwork() {
-    networkList.textContent = "";
-    if (state.network.length === 0) {
-      networkList.append(emptyRow("no requests yet"));
-    }
-    for (const row of state.network) {
-      const entry = row.entry;
-      const item = document.createElement("li");
-      item.className = "diagrow";
-      const time = document.createElement("span");
-      time.className = "ts";
-      time.textContent = timeLabel(entry.ts);
-      const method = document.createElement("span");
-      method.className = "method";
-      method.textContent = entry.method || "";
-      const status = document.createElement("span");
-      const code = entry.status;
-      status.className = `status${code == null ? "" : code >= 400 ? " bad" : " good"}`;
-      status.textContent = code == null ? "\u2026" : String(code);
-      const url = document.createElement("span");
-      url.className = "url";
-      url.textContent = entry.url || "";
-      item.append(time, method, status, url);
-      networkList.append(item);
-    }
-    updateDiagCount();
-  }
-
-  function renderDiagnostics() {
-    renderConsole();
-    renderNetwork();
-  }
-
-  function clearDiagnostics() {
-    state.console = [];
-    state.network = [];
-    renderDiagnostics();
-  }
-
-  function pushConsole(entries) {
-    if (!Array.isArray(entries)) return;
-    if (entries.length === 0) {
-      // The gateway sends an empty list when it drops its ring buffer (leaving
-      // `HumanHolds`), so the drawer does not keep rows the controller no
-      // longer has.
-      state.console = [];
-    } else {
-      state.console.push(...entries);
-      if (state.console.length > DIAG_LIMIT) {
-        state.console.splice(0, state.console.length - DIAG_LIMIT);
-      }
-    }
-    renderConsole();
-  }
-
-  function pushNetwork(entries) {
-    if (!Array.isArray(entries)) return;
-    if (entries.length === 0) {
-      state.network = [];
-    } else {
-      for (const entry of entries) {
-        // A response update repeats the request entry with a status and the
-        // original timestamp; one row per request, not two.
-        const key = `${entry.method}\u0000${entry.url}\u0000${entry.ts}`;
-        const index = state.network.findIndex((row) => row.key === key);
-        if (index >= 0) state.network[index] = { key, entry };
-        else state.network.push({ key, entry });
-      }
-      if (state.network.length > DIAG_LIMIT) {
-        state.network.splice(0, state.network.length - DIAG_LIMIT);
-      }
-    }
-    renderNetwork();
-  }
-
-  function diagnosticsPage(message) {
-    // The controller only reports the page it holds; a message that names a
-    // different page belongs to a tab this viewer has already left.
-    return !message.pageId || !state.active || message.pageId === state.active;
-  }
-
-  function setDiagTab(tab) {
-    const consoleActive = tab === "console";
-    consoleTab.classList.toggle("active", consoleActive);
-    networkTab.classList.toggle("active", !consoleActive);
-    consoleTab.setAttribute("aria-selected", consoleActive ? "true" : "false");
-    networkTab.setAttribute("aria-selected", consoleActive ? "false" : "true");
-    consoleList.hidden = !consoleActive;
-    networkList.hidden = consoleActive;
-  }
-
-  function openDrawer() {
-    if (!state.caps.diagnostics || !state.interactive) {
-      toast("diagnostics need the page controller; take over to see console and network");
-      return;
-    }
-    state.diagOpen = true;
-    drawer.hidden = false;
-    diagButton.classList.add("active");
-    renderDiagnostics();
-  }
-
-  function closeDrawer() {
-    state.diagOpen = false;
-    drawer.hidden = true;
-    diagButton.classList.remove("active");
   }
 
   function activeTab() {
@@ -661,19 +681,11 @@
     takeoverButton.disabled = state.takeoverPending;
     releaseButton.hidden = !holding || Boolean(state.handoff);
     newTabButton.hidden = !state.caps.newTab;
-    closeTabButton.hidden = !state.active;
-    diagButton.classList.toggle("active", state.diagOpen);
-    diagButton.title = holding && state.caps.diagnostics
-      ? "Show console and network events from the page controller"
-      : "Diagnostics need the page controller; take over to see console and network";
-    diagButton.setAttribute(
-      "aria-disabled",
-      holding && state.caps.diagnostics ? "false" : "true",
-    );
+    diagButton.setAttribute("aria-disabled", holding ? "false" : "true");
     address.title = holding
       ? "Press Enter: you hold the page, so the gateway navigates it directly"
       : "Press Enter: the agent executes the navigation while it holds the page";
-    if (!holding || !state.caps.diagnostics) closeDrawer();
+    if (!holding) resetIme();
     renderHandoff();
   }
 
@@ -762,9 +774,6 @@
     state.active = pageId;
     state.meta = null;
     state.paintedPage = null;
-    // Diagnostics belong to the controller's page: a tab switch swaps the
-    // controller connection, so the old page's rows must not follow it.
-    clearDiagnostics();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     showOverlay("waiting for the first frame\u2026");
     paintThumbnail(pageId);
@@ -786,7 +795,6 @@
     if (state.interactive && !wasInteractive && state.visible) {
       toast("you control the page: click it, then type");
     }
-    if (!state.interactive) clearDiagnostics();
   }
 
   function setAgent(agent) {
@@ -820,21 +828,42 @@
       showOverlay("waiting for the first frame\u2026");
       paintThumbnail(state.active);
     }
-    if (state.active !== previous) clearDiagnostics();
+    if (state.active !== previous) {
+      // The URL names the page that was handed over; another tab needs its own.
+      if (state.devtoolsUrl) {
+        state.devtoolsUrl = "";
+        devtoolsButtonState();
+      }
+    }
     renderTabs();
     syncAddress();
     syncControls();
+  }
+
+  // The canvas backing store is the frame's real pixel grid (set in `pump`);
+  // CSS only scales it down to fit the monitor. Never upscale past 1:1: a
+  // downscaled frame is resampled once and stays sharp, an upscaled one is
+  // blurry on Retina displays.
+  function fitCanvas() {
+    const meta = state.meta;
+    if (!meta) return;
+    const cssW = Math.max(1, meta.deviceWidth || 1);
+    const cssH = Math.max(1, meta.deviceHeight || 1);
+    const availW = Math.max(1, main.clientWidth || 1);
+    const availH = Math.max(1, main.clientHeight || 1);
+    const scale = Math.min(1, availW / cssW, availH / cssH);
+    canvas.style.width = `${Math.max(1, Math.floor(cssW * scale))}px`;
+    canvas.style.height = `${Math.max(1, Math.floor(cssH * scale))}px`;
   }
 
   function handleMeta(message) {
     // A frame for a page this viewer already left must not move the canvas or
     // the coordinate base of the page it is showing now.
     if (message.pageId !== state.active) return;
+    // Only the display box changes here: resizing the backing store would
+    // clear the frame already painted while the next one is still in flight.
     state.meta = message;
-    if (canvas.width !== message.deviceWidth || canvas.height !== message.deviceHeight) {
-      canvas.width = Math.max(1, message.deviceWidth);
-      canvas.height = Math.max(1, message.deviceHeight);
-    }
+    fitCanvas();
   }
 
   function handleText(raw) {
@@ -853,6 +882,13 @@
         break;
       case "agent":
         setAgent(message.state);
+        break;
+      case "devtools":
+        state.devtoolsUrl = message.url || "";
+        devtoolsButtonState();
+        // The controller is gone; the badge and the input guards follow the
+        // next `hello`, which the release broadcasts.
+        toast("Paste the URL into Chrome's address bar to open DevTools");
         break;
       case "nav":
         if (message.pageId === state.active) {
@@ -902,12 +938,6 @@
         toast(message.message || code);
         break;
       }
-      case "console":
-        if (diagnosticsPage(message)) pushConsole(message.entries);
-        break;
-      case "network":
-        if (diagnosticsPage(message)) pushNetwork(message.entries);
-        break;
       default:
         break;
     }
@@ -934,15 +964,14 @@
           bitmap.close();
           continue;
         }
-        if (state.meta) {
-          const width = Math.max(1, state.meta.deviceWidth);
-          const height = Math.max(1, state.meta.deviceHeight);
-          if (canvas.width !== width || canvas.height !== height) {
-            canvas.width = width;
-            canvas.height = height;
-          }
+        // Backing store = the frame's own pixels, 1:1. The screencast bound
+        // makes this differ from the device box, and the JPEG is not stretched
+        // to `deviceWidth`: that would blur a clamped frame.
+        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
         }
-        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(bitmap, 0, 0);
         bitmap.close();
         state.paintedPage = state.meta ? state.meta.pageId : state.active;
         hideOverlay();
@@ -962,18 +991,21 @@
     if (visible && state.latest) onBinary(state.latest);
   }
 
-  // Pointer position in canvas (JPEG) pixels, which is what the wire carries.
-  // The gateway maps that box to CSS pixels with the last frame's metadata and
+  // Pointer position in the last frame metadata's device space
+  // (`deviceWidth`/`deviceHeight`), which is what the wire carries. When the
+  // screencast bound clamps a frame its JPEG pixel size differs from that box,
+  // so `canvas.width` is only a fallback: using it would scale the position by
+  // the clamp ratio. The gateway maps the box to CSS pixels with
   // the live `Page.getLayoutMetrics` viewport (`ws::canvas_to_css`), so the
-  // client must not pre-scale to `viewportWidth`/`viewportHeight`: with a
+  // client must not pre-scale to `viewportWidth`/`viewportHeight` either: with a
   // device pixel ratio other than 1 the position would be scaled twice.
   function pagePoint(event) {
     const meta = state.meta;
     if (!meta) return null;
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
-    const width = Math.max(1, canvas.width || meta.deviceWidth || 1);
-    const height = Math.max(1, canvas.height || meta.deviceHeight || 1);
+    const width = Math.max(1, meta.deviceWidth || canvas.width || 1);
+    const height = Math.max(1, meta.deviceHeight || canvas.height || 1);
     const x = ((event.clientX - rect.left) / rect.width) * width;
     const y = ((event.clientY - rect.top) / rect.height) * height;
     return {
@@ -1014,7 +1046,7 @@
         return;
       }
       event.preventDefault();
-      canvas.focus();
+      if (type === "down") focusIme(event.clientX, event.clientY);
       const point = pagePoint(event);
       if (!point) return;
       send({
@@ -1043,26 +1075,94 @@
     send({ t: "wheel", x: point.x, y: point.y, deltaX: event.deltaX, deltaY: event.deltaY });
   }, { passive: false });
 
-  for (const type of ["down", "up"]) {
-    canvas.addEventListener(type === "down" ? "keydown" : "keyup", (event) => {
-      if (!state.interactive) {
-        if (type === "down") hintReadOnly();
-        return;
-      }
-      event.preventDefault();
-      const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
-      send({
-        t: "key",
-        type,
-        key: event.key,
-        code: event.code,
-        text: type === "down" && printable ? event.key : "",
-        modifiers: modifiers(event),
-      });
-    });
+  // The canvas only shows pixels; focus lives in the 1x1 editable so the OS
+  // IME composes there. Parking it at the click point makes the candidate
+  // window open next to the caret instead of the window's top-left corner.
+  function focusIme(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = typeof clientX === "number" ? clientX : rect.left + 24;
+    const y = typeof clientY === "number" ? clientY : rect.top + 24;
+    imeInput.style.left = `${Math.round(x)}px`;
+    imeInput.style.top = `${Math.round(y)}px`;
+    imePreview.style.left = `${Math.round(Math.min(Math.max(8, x), Math.max(8, innerWidth - 140)))}px`;
+    imePreview.style.top = `${Math.round(Math.min(y + 18, Math.max(18, innerHeight - 36)))}px`;
+    if (document.activeElement !== imeInput) imeInput.focus({ preventScroll: true });
   }
 
-  canvas.addEventListener("paste", (event) => {
+  function resetIme() {
+    state.composing = false;
+    state.heldKeys.clear();
+    imeInput.value = "";
+    imePreview.hidden = true;
+  }
+
+  canvas.addEventListener("focus", () => {
+    if (state.interactive) focusIme();
+  });
+
+  imeInput.addEventListener("keydown", (event) => {
+    if (!state.interactive) {
+      hintReadOnly();
+      return;
+    }
+    // `isComposing` / keyCode 229 (key "Process" on some platforms) are IME
+    // bookkeeping. The page gets the committed text from `compositionend`,
+    // never these raw keys.
+    if (state.composing || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+    if (!event.repeat) state.heldKeys.set(event.code, event.key);
+    send({
+      t: "key",
+      type: "down",
+      key: event.key,
+      code: event.code,
+      text: printable ? event.key : "",
+      modifiers: modifiers(event),
+    });
+  });
+
+  imeInput.addEventListener("keyup", (event) => {
+    if (!state.interactive) return;
+    if (state.composing || event.isComposing || event.keyCode === 229) return;
+    // An IME commit also emits a keyup for a key whose keydown the page never
+    // saw; forwarding it would look like a stuck release.
+    if (!state.heldKeys.has(event.code)) return;
+    state.heldKeys.delete(event.code);
+    event.preventDefault();
+    send({
+      t: "key",
+      type: "up",
+      key: event.key,
+      code: event.code,
+      text: "",
+      modifiers: modifiers(event),
+    });
+  });
+
+  imeInput.addEventListener("compositionstart", () => {
+    state.composing = true;
+    if (!state.interactive) return;
+    imePreview.textContent = "";
+    imePreview.hidden = false;
+  });
+
+  imeInput.addEventListener("compositionupdate", (event) => {
+    if (!state.composing || !state.interactive) return;
+    imePreview.textContent = event.data || "";
+    imePreview.hidden = !event.data;
+  });
+
+  imeInput.addEventListener("compositionend", (event) => {
+    if (!state.composing) return;
+    const text = event.data || "";
+    resetIme();
+    if (text) send({ t: "text", text });
+  });
+
+  imeInput.addEventListener("blur", resetIme);
+
+  imeInput.addEventListener("paste", (event) => {
     if (!state.interactive) {
       hintReadOnly();
       return;
@@ -1075,6 +1175,9 @@
 
   address.addEventListener("focus", () => address.select());
   address.addEventListener("keydown", (event) => {
+    // The Enter that commits an IME composition belongs to the input method,
+    // not to the address bar.
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter") {
       event.preventDefault();
       const url = address.value.trim();
@@ -1099,9 +1202,6 @@
     if (!state.interactive) toast("asking the agent to go forward");
   });
   newTabButton.addEventListener("click", () => send({ t: "newTab", url: "about:blank" }));
-  closeTabButton.addEventListener("click", () => {
-    if (state.active) send({ t: "closeTab", pageId: state.active });
-  });
 
   function requestTakeover() {
     if (state.interactive || state.takeoverPending) return;
@@ -1133,20 +1233,31 @@
   handoffDone.addEventListener("click", () => answerHandoff(false));
   handoffDecline.addEventListener("click", () => answerHandoff(false));
 
-  diagButton.addEventListener("click", () => {
-    if (state.diagOpen) closeDrawer();
-    else openDrawer();
-    syncControls();
+  diagButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (devtoolsPop.hidden) showDevtoolsPop();
+    else hideDevtoolsPop();
   });
-  consoleTab.addEventListener("click", () => setDiagTab("console"));
-  networkTab.addEventListener("click", () => setDiagTab("network"));
-  document.getElementById("diagClear").addEventListener("click", clearDiagnostics);
-  document.getElementById("diagClose").addEventListener("click", () => {
-    closeDrawer();
-    syncControls();
+  devtoolsOpen.addEventListener("click", () => {
+    // The gateway releases the page before answering, so the URL it returns is
+    // already attachable.
+    send({ t: "devtools" });
+    devtoolsOpen.textContent = "Releasing the page\u2026";
+    setTimeout(() => {
+      devtoolsOpen.textContent = "Hand the page to Chrome DevTools";
+    }, 1500);
   });
-
+  devtoolsCopy.addEventListener("click", copyDevtoolsUrl);
+  document.addEventListener("click", (event) => {
+    if (devtoolsPop.hidden) return;
+    if (devtoolsPop.contains(event.target) || diagButton.contains(event.target)) return;
+    hideDevtoolsPop();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !devtoolsPop.hidden) hideDevtoolsPop();
+  });
   document.addEventListener("visibilitychange", () => setVisible(!document.hidden));
+  window.addEventListener("resize", fitCanvas);
 
   function connect() {
     setConnection("connecting");

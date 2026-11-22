@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui_kit::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
+use peri_tui_components::shimmer::{ShimmerStyle, shimmer_spans};
 use peri_tui_components::spinner::Spinner;
 
 use super::{ACCENT, MUTED, StoryState, Variant, muted_style, rect_contains};
@@ -38,6 +39,8 @@ pub(crate) enum SpinnerCase {
     Active,
     /// 运行中工具图标：宿主只取字形，再拼进工具卡标题。
     Tool,
+    /// 尾部折叠组的状态标签：宿主给 100ms 帧序号，标签按 2s 周期扫光。
+    Shimmer,
 }
 
 pub(crate) struct SpinnerState {
@@ -54,6 +57,8 @@ impl SpinnerState {
             SpinnerCase::Idle => 0,
             SpinnerCase::Active => 3,
             SpinnerCase::Tool => 4,
+            // 标签扫光周期 20 帧，5 帧正好把光带放在词中间。
+            SpinnerCase::Shimmer => 5,
         };
         Self {
             case,
@@ -101,6 +106,10 @@ fn tool_initial() -> StoryState {
     StoryState::Spinner(SpinnerState::new(SpinnerCase::Tool))
 }
 
+fn shimmer_initial() -> StoryState {
+    StoryState::Spinner(SpinnerState::new(SpinnerCase::Shimmer))
+}
+
 pub(crate) const VARIANTS: &[Variant] = &[
     Variant {
         key: "idle",
@@ -116,6 +125,11 @@ pub(crate) const VARIANTS: &[Variant] = &[
         key: "tool",
         note: "Running tool icon: the host rotates the glyph every 100ms and composes the card header.",
         initial: tool_initial,
+    },
+    Variant {
+        key: "shimmer",
+        note: "Collapsed-group title row: the host supplies the 100ms frame index; the whole row sweeps in 2s.",
+        initial: shimmer_initial,
     },
 ];
 
@@ -177,6 +191,31 @@ pub(crate) fn render(state: &SpinnerState, area: Rect, buf: &mut Buffer) {
                     TOOL_FRAMES.len()
                 )),
                 note("glyph is composed by the host into the tool card header"),
+            ]
+        }
+        SpinnerCase::Shimmer => {
+            let mut spans = vec![Span::styled("▸ ", Style::new().fg(MUTED))];
+            spans.extend(shimmer_spans(
+                "Read 2 · Thought ×2 · Glob",
+                state.frame.saturating_mul(100),
+                ShimmerStyle {
+                    base: MUTED,
+                    highlight: Color::White,
+                    truecolor: true,
+                    animated: true,
+                },
+            ));
+            vec![
+                Line::from(spans),
+                Line::from(""),
+                note(format!(
+                    "collapsed group tail · host frame {} · row phase {}ms",
+                    state.frame,
+                    state.frame.saturating_mul(100)
+                )),
+                note(
+                    "truecolor blends base → highlight + BOLD; without RGB it uses DIM / plain / BOLD",
+                ),
             ]
         }
     };

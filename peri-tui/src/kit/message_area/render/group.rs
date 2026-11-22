@@ -216,9 +216,14 @@ pub(super) fn subagent_error_reason(data: &TuiSubAgentGroup) -> Option<&str> {
 /// 同区继续、不重复画入口台阶；成员与组头同列。成员渲染保留自己的 fold
 /// （默认单行），另返回「成员标题逻辑行 → FoldKey」命中表供单击定位——
 /// 组头只切换整组，成员标题只切换该成员。
+///
+/// `frame` 仅消息区顶层渲染提供（详情面板与嵌套成员传 `None`）：尾部工作组把
+/// 扫光铺在整行标题上（不是追加状态标签）；`None` 时标题保持静态 muted，避免
+/// 详情里复制出的旧快照继续闪。
 pub(super) fn render_collapsed_group_lines(
     data: &TuiCollapsedGroup,
     grid: &GridSpec,
+    frame: Option<u64>,
 ) -> (Vec<Line<'static>>, Vec<(usize, FoldKey)>) {
     let sem = THEME_ATOM.state().read().semantic;
     let expanded = data.fold != FoldState::Collapsed;
@@ -229,9 +234,8 @@ pub(super) fn render_collapsed_group_lines(
     };
     let mut spans =
         super::helpers::process_first_prefix(grid, symbol, Style::default().fg(sem.text.dim));
-    // 先截 title 使 (title + failed 后缀) 总宽 ≤ 过程区预算——失败数不可被截断
-    // 吞掉（§15「error 永不隐藏」），title 截断在前。
-    let suffix = if data.failed_count > 0 {
+    // 宽度预算：失败后缀先扣（§15「error 永不隐藏」），再截标题（至少 1 列）。
+    let failed_suffix = if data.failed_count > 0 {
         format!(
             " \u{b7} {}",
             i18n::tr_args(
@@ -243,14 +247,37 @@ pub(super) fn render_collapsed_group_lines(
         String::new()
     };
     let content_width = grid.process_content_width();
-    let keep = content_width.saturating_sub(suffix.width()).max(1);
+    let keep = content_width.saturating_sub(failed_suffix.width()).max(1);
     let title_trunc = crate::truncate::truncate_to_width(&data.title, keep);
-    spans.push(Span::styled(
-        title_trunc,
-        Style::default().fg(sem.text.muted),
-    ));
-    if !suffix.is_empty() {
-        spans.push(Span::styled(suffix, Style::default().fg(sem.status.error)));
+    // 尾部工作组：扫光铺满整行标题（基色仍取静态 muted，光带扫过时提亮到
+    // primary）——不用追加标签占宽，窄屏也不会把状态挤掉。
+    if data.is_working
+        && let Some(frame) = frame
+    {
+        let caps = crate::kit::atoms::TERMINAL_CAPS.get();
+        spans.extend(peri_tui_components::shimmer::shimmer_spans(
+            &title_trunc,
+            frame.saturating_mul(100),
+            peri_tui_components::shimmer::ShimmerStyle {
+                base: sem.text.muted,
+                highlight: sem.text.primary,
+                // truecolor 与颜色输出都不可用时走 DIM/普通/BOLD（NO_COLOR 只剥色，
+                // modifier 保留，运动仍可辨识）。
+                truecolor: caps.truecolor && caps.color,
+                animated: !crate::kit::atoms::REDUCED_MOTION.get(),
+            },
+        ));
+    } else {
+        spans.push(Span::styled(
+            title_trunc,
+            Style::default().fg(sem.text.muted),
+        ));
+    }
+    if !failed_suffix.is_empty() {
+        spans.push(Span::styled(
+            failed_suffix,
+            Style::default().fg(sem.status.error),
+        ));
     }
     let mut lines = vec![Line::from(spans)];
     let mut fold_hits: Vec<(usize, FoldKey)> = Vec::new();

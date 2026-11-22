@@ -42,6 +42,16 @@ use crate::registry::RegistryHandle;
 /// How many console entries and network requests the driver keeps.
 pub const DIAGNOSTICS_CAPACITY: usize = 200;
 
+/// How many visited documents a held page remembers for back/forward.
+const VISIT_LIMIT: usize = 100;
+
+/// A page-driven navigation is reported by the tab list before the document
+/// commits, so the first read can still see the old URL. The hint is retried
+/// at this interval, up to [`NAVIGATION_HINT_TRIES`] times, until the machine
+/// sees the new document or Kitesurf's late frame event arrives.
+const NAVIGATION_HINT_RETRY: Duration = Duration::from_millis(500);
+const NAVIGATION_HINT_TRIES: usize = 12;
+
 /// Execution-boundary timeouts (CLI/env, README §6.2 and §10).
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
@@ -143,8 +153,18 @@ pub enum Event {
     ViewerLeft,
     Takeover,
     Release,
+    /// The viewer hands the page to Chrome DevTools. Unlike [`Event::Release`]
+    /// this is not a complaint about missing control: when the agent owns the
+    /// page there is nothing of ours to close, so it stays silent.
+    ReleaseForDevtools,
     /// The session's active page changed (tab switch, page closed, re-register).
     Page(Option<String>),
+    /// The tab list reports this URL for the active page. Kitesurf's
+    /// `Page.frameNavigated` can lag more than ten seconds behind the document,
+    /// so the poll is the prompt signal that a page-driven navigation happened.
+    PageUrl(String),
+    /// A back/forward step loaded its document; the machine moves the index.
+    HistoryArrived { delta: i64 },
     YieldOk(String),
     Reclaim(String),
     HumanRequest {
@@ -166,6 +186,11 @@ pub enum Event {
     },
     ControllerClosed(String),
     Navigation(cdp::NavigationState),
+    /// The page committed a navigation nobody asked the gateway for: a link, a
+    /// form or a script. Only the main frame reports one.
+    FrameNavigated {
+        url: String,
+    },
     Console(ConsoleEntry),
     NetworkStarted {
         request_id: String,
@@ -204,6 +229,12 @@ pub(crate) enum Effect {
         status: HumanStatus,
     },
     Dispatch(ControllerCommand),
+    /// Steps the visit stack the machine kept for this page. It is resolved
+    /// here, not by the controller, because Kitesurf's own history never learns
+    /// about the navigations the gateway drives.
+    History {
+        delta: i64,
+    },
     EnableDiagnostics,
     RefreshViewport,
     RefreshNavigation,
@@ -235,6 +266,14 @@ pub struct Machine {
     yield_deadline: Option<Instant>,
     handoff: Option<Handoff>,
     navigation: cdp::NavigationState,
+    /// URLs this page visited while the gateway watched, oldest first.
+    visits: Vec<String>,
+    /// Index of the document currently on screen inside [`Self::visits`].
+    visit: usize,
+    /// A document the tab list reported that no refresh has confirmed yet.
+    hint: Option<String>,
+    hint_deadline: Option<Instant>,
+    hint_tries: usize,
     console: VecDeque<ConsoleEntry>,
     network_order: VecDeque<String>,
     network: HashMap<String, NetworkEntry>,
@@ -263,6 +302,11 @@ impl Machine {
             yield_deadline: None,
             handoff: None,
             navigation: cdp::NavigationState::default(),
+            visits: Vec::new(),
+            visit: 0,
+            hint: None,
+            hint_deadline: None,
+            hint_tries: 0,
             console: VecDeque::new(),
             network_order: VecDeque::new(),
             network: HashMap::new(),
@@ -334,7 +378,7 @@ impl Machine {
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {
         let handoff = self.handoff.as_ref().and_then(|handoff| handoff.deadline);
-        [self.idle_deadline, self.yield_deadline, handoff]
+        [self.idle_deadline, self.yield_deadline, self.hint_deadline, handoff]
             .into_iter()
             .flatten()
             .min()
@@ -355,6 +399,7 @@ impl Machine {
             Event::ViewerLeft => self.on_viewer_left(now),
             Event::Takeover => self.on_takeover(now),
             Event::Release => self.on_release(),
+            Event::ReleaseForDevtools => self.on_release_for_devtools(),
             Event::Page(page) => self.on_page(page),
             Event::YieldOk(page_id) => self.on_yield_ok(page_id),
             Event::Reclaim(page_id) => self.on_reclaim(page_id),
@@ -371,9 +416,39 @@ impl Machine {
             Event::ControllerOpened { page_id, error } => self.on_controller_opened(page_id, error),
             Event::ControllerClosed(reason) => self.on_controller_closed(reason),
             Event::Navigation(state) => {
+                self.record_visit(&state.url);
+                let mut state = state;
+                // Kitesurf's own history never learns about the navigations the
+                // gateway drives, so the buttons follow the stack kept here.
+                state.can_go_back = self.visit > 0;
+                state.can_go_forward = self.visit + 1 < self.visits.len();
+                // The poll and the frame event can both notice one navigation;
+                // only a real change is worth a message.
+                let changed = state != self.navigation;
+                if self.hint.as_deref() == Some(state.url.as_str()) {
+                    self.clear_hint();
+                }
                 self.navigation = state;
-                if self.state == OwnershipState::HumanHolds {
+                if self.state == OwnershipState::HumanHolds && changed {
                     vec![Effect::Broadcast(self.nav_message())]
+                } else {
+                    Vec::new()
+                }
+            }
+            Event::FrameNavigated { url } => {
+                // A frame event is the committed document, so it can be
+                // remembered even if the read that follows fails.
+                if self.is_interactive() {
+                    self.record_visit(&url);
+                }
+                self.refresh_if_new(&url, now)
+            }
+            Event::PageUrl(url) => self.refresh_if_new(&url, now),
+            Event::HistoryArrived { delta } => {
+                // The document is there; move the index and read it back so the
+                // title and the buttons describe what is on screen.
+                if self.step_history(delta).is_some() {
+                    vec![Effect::RefreshNavigation]
                 } else {
                     Vec::new()
                 }
@@ -389,10 +464,12 @@ impl Machine {
                 // A viewer that raced the handoff sends its input here; without
                 // the controller there is nothing to write to, so it is dropped
                 // (the viewer was told the page is read-only at send time).
-                if self.accepts_input() {
-                    vec![Effect::Dispatch(command)]
-                } else {
+                if !self.accepts_input() {
                     Vec::new()
+                } else if let ControllerCommand::History(delta) = command {
+                    vec![Effect::History { delta }]
+                } else {
+                    vec![Effect::Dispatch(command)]
                 }
             }
             // Transport, owned by the driver, not by the state machine.
@@ -578,6 +655,24 @@ impl Machine {
         }
     }
 
+    /// Handing the page to Chrome DevTools needs the gateway to stop writing,
+    /// but it is not a complaint: an agent-owned page has no controller of
+    /// ours to close, and the DevTools frontend is welcome to the slot.
+    fn on_release_for_devtools(&mut self) -> Vec<Effect> {
+        const REASON: &str = "the page was handed to Chrome DevTools";
+        match self.state {
+            // The page does not come back to the agent: DevTools writes to it
+            // until the viewer takes over again.
+            OwnershipState::HumanHolds => self.leave_human_holds(REASON, false),
+            OwnershipState::YieldPending => {
+                self.state = OwnershipState::AgentDriving;
+                self.yield_deadline = None;
+                self.finish_handoff(REASON, true)
+            }
+            OwnershipState::AgentDriving => Vec::new(),
+        }
+    }
+
     fn finish_handoff(&mut self, reason: &str, declined: bool) -> Vec<Effect> {
         let Some(handoff) = self.handoff.take() else {
             return Vec::new();
@@ -662,6 +757,81 @@ impl Machine {
         effects
     }
 
+    /// Asks for a fresh read when a document nobody asked the gateway for is
+    /// on screen. The address bar, the title and the stack come from the state
+    /// that read returns, so a hint that lands before the commit cannot invent
+    /// a visit. The hint is kept until a read confirms it: the tab list updates
+    /// while the old document is still committing.
+    fn refresh_if_new(&mut self, url: &str, now: Instant) -> Vec<Effect> {
+        // The gateway only writes in HumanHolds, which is also the only state
+        // that keeps a controller (and therefore receives frame events).
+        if !self.is_interactive() || url.is_empty() {
+            return Vec::new();
+        }
+        if url == self.navigation.url {
+            self.clear_hint();
+            return Vec::new();
+        }
+        self.hint = Some(url.to_owned());
+        self.hint_deadline = Some(now + NAVIGATION_HINT_RETRY);
+        self.hint_tries = 0;
+        vec![Effect::RefreshNavigation]
+    }
+
+    fn clear_hint(&mut self) {
+        self.hint = None;
+        self.hint_deadline = None;
+        self.hint_tries = 0;
+    }
+
+    /// Re-reads while a hinted document has not shown up yet.
+    fn retry_hint(&mut self, now: Instant) -> Option<Effect> {
+        let hinted = self.hint.clone()?;
+        if !self.is_interactive() || hinted == self.navigation.url || self.hint_tries >= NAVIGATION_HINT_TRIES {
+            self.clear_hint();
+            return None;
+        }
+        self.hint_tries += 1;
+        self.hint_deadline = Some(now + NAVIGATION_HINT_RETRY);
+        Some(Effect::RefreshNavigation)
+    }
+
+    /// Records the document on screen, dropping the entries a fresh navigation
+    /// makes unreachable.
+    fn record_visit(&mut self, url: &str) {
+        if url.is_empty() || self.visits.get(self.visit).is_some_and(|visit| visit == url) {
+            return;
+        }
+        self.visits.truncate(self.visit + 1);
+        self.visits.push(url.to_owned());
+        self.visit = self.visits.len() - 1;
+        if self.visits.len() > VISIT_LIMIT {
+            self.visits.remove(0);
+            self.visit = self.visit.saturating_sub(1);
+        }
+    }
+
+    /// Moves through [`Self::visits`] and returns the URL to navigate to.
+    /// The URL a history step would load. The index only moves once the
+    /// document arrives: Kitesurf refuses commands for a while after a
+    /// navigation, and a step that never loads must not shift the stack.
+    fn peek_history(&self, delta: i64) -> Option<String> {
+        self.history_target(delta)
+            .and_then(|target| self.visits.get(target).cloned())
+    }
+
+    fn history_target(&self, delta: i64) -> Option<usize> {
+        let target = i64::try_from(self.visit).ok()? + delta;
+        let target = usize::try_from(target).ok()?;
+        (target != self.visit && target < self.visits.len()).then_some(target)
+    }
+
+    fn step_history(&mut self, delta: i64) -> Option<String> {
+        let target = self.history_target(delta)?;
+        self.visit = target;
+        self.visits.get(target).cloned()
+    }
+
     fn on_page(&mut self, page: Option<String>) -> Vec<Effect> {
         if self.page == page {
             return Vec::new();
@@ -673,6 +843,11 @@ impl Machine {
             "session page changed"
         );
         self.page = page.clone();
+        // The visit stack belongs to the page that was on screen; a tab switch
+        // starts a new one, and a hint about the old tab means nothing here.
+        self.visits.clear();
+        self.visit = 0;
+        self.clear_hint();
         if self.state != OwnershipState::HumanHolds {
             return Vec::new();
         }
@@ -897,6 +1072,13 @@ impl Machine {
     fn on_tick(&mut self, now: Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
 
+        if self.hint_deadline.is_some_and(|deadline| now >= deadline) {
+            self.hint_deadline = None;
+            if let Some(effect) = self.retry_hint(now) {
+                effects.push(effect);
+            }
+        }
+
         if self.idle_deadline.is_some_and(|deadline| now >= deadline) {
             self.idle_deadline = None;
             if let Some(page) = self.page.clone() {
@@ -1029,6 +1211,7 @@ impl Machine {
         self.state = OwnershipState::AgentDriving;
         self.idle_deadline = None;
         self.yield_deadline = None;
+        self.clear_hint();
         self.clear_diagnostics();
         if let Some(page_id) = page_id.clone() {
             // Empty entries clear the drawer; the read-only `hello` explains why.
@@ -1161,8 +1344,21 @@ pub fn diagnostic_event(event: &CdpEvent, now_ms: u64) -> Option<Event> {
             .map(|(request_id, entry)| Event::NetworkStarted { request_id, entry }),
         "Network.responseReceived" => network_response(&event.params)
             .map(|(request_id, status)| Event::NetworkStatus { request_id, status }),
+        "Page.frameNavigated" => frame_navigated(&event.params),
         _ => None,
     }
+}
+
+/// Main-frame navigations only: iframe swaps are not address-bar material.
+fn frame_navigated(params: &Value) -> Option<Event> {
+    let frame = params.get("frame")?;
+    if frame.get("parentId").is_some() {
+        return None;
+    }
+    let url = frame.get("url")?.as_str()?;
+    Some(Event::FrameNavigated {
+        url: url.to_owned(),
+    })
 }
 
 /// Cheap view of the ownership state for request handlers.
@@ -1222,6 +1418,10 @@ impl OwnershipHandle {
         self.send(Event::Release);
     }
 
+    pub fn release_for_devtools(&self) {
+        self.send(Event::ReleaseForDevtools);
+    }
+
     pub fn answer(&self, request_id: impl Into<String>, accepted: bool) {
         self.send(Event::Answer {
             request_id: request_id.into(),
@@ -1239,6 +1439,12 @@ impl OwnershipHandle {
 
     pub fn page(&self, page: Option<String>) {
         self.send(Event::Page(page));
+    }
+
+    /// The tab list's view of the active page's URL. Sent on every page-list
+    /// change; the machine ignores repeats of the URL it already reports.
+    pub(crate) fn page_url(&self, url: impl Into<String>) {
+        self.send(Event::PageUrl(url.into()));
     }
 
     /// Updates the CDP endpoint used for the next controller attach.
@@ -1601,6 +1807,18 @@ async fn apply(
                     warn!(session = %session_id, error = %error, "human result could not be delivered");
                 }
             }
+            Effect::History { delta } => {
+                if let Some(url) = machine.peek_history(delta) {
+                    if let Some(connection) = controller.as_deref() {
+                        match cdp::navigate(connection, &url).await {
+                            Ok(_) => follow_up.push(Event::HistoryArrived { delta }),
+                            Err(error) => {
+                                warn!(session = %session_id, error = %error, "history step failed");
+                            }
+                        }
+                    }
+                }
+            }
             Effect::Dispatch(command) => {
                 if let Some(connection) = controller.as_deref() {
                     dispatch(connection, command, &session_id, &mut follow_up).await;
@@ -1674,7 +1892,12 @@ async fn dispatch(
             .map(|_| None),
         ControllerCommand::Text(text) => cdp::insert_text(controller, &text).await.map(|_| None),
         ControllerCommand::Navigate(url) => cdp::navigate(controller, &url).await.map(Some),
-        ControllerCommand::History(delta) => cdp::history_step(controller, delta).await.map(Some),
+        ControllerCommand::History(delta) => {
+            // The machine resolves history against its own visit stack; a step
+            // that reaches the controller has been routed around it.
+            warn!(session = %session_id, delta, "history step was not resolved by the machine");
+            return;
+        }
     };
     match result {
         Ok(Some(state)) => follow_up.push(Event::Navigation(state)),

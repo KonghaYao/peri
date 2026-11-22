@@ -46,6 +46,35 @@ async fn register_stores_the_session_with_a_derived_token() {
     assert!(store.get("missing").await.is_none());
 }
 
+/// Chrome's own target list publishes `devtools://…?ws=host:port/path`, with no
+/// scheme in the parameter. The gateway has the browser endpoint, so the page
+/// endpoint is derived from it.
+#[tokio::test]
+async fn devtools_url_points_at_the_active_page_without_a_scheme() {
+    let store = store();
+    let mut session = register(&store, vec![page("t1"), page("t2")]).await;
+    assert_eq!(
+        session.devtools_url(),
+        Some((
+            "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:8827/devtools/page/t1"
+                .to_owned(),
+            "t1".to_owned()
+        ))
+    );
+
+    session.set_active_page("t2");
+    assert_eq!(
+        session.devtools_url().map(|(url, _)| url),
+        Some(
+            "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:8827/devtools/page/t2"
+                .to_owned()
+        )
+    );
+
+    let empty = register(&store, Vec::new()).await;
+    assert_eq!(empty.devtools_url(), None, "nothing to debug");
+}
+
 #[tokio::test]
 async fn lookup_by_token_accepts_only_the_derived_token() {
     let store = store();
@@ -118,6 +147,49 @@ async fn update_pages_repairs_the_active_page() {
     let tabs = updated.tabs();
     assert_eq!(tabs.len(), 1);
     assert!(tabs[0].active);
+}
+
+#[tokio::test]
+async fn update_pages_pins_the_default_tab_across_reorders() {
+    let store = store();
+    register(&store, vec![page("t1"), page("t2")]).await;
+
+    // Kitesurf's `/json/list` order is not stable: the first poll pins a tab,
+    // later reorders must not move the screencast (or the controller).
+    let first = store
+        .update_pages("s1", vec![page("t1"), page("t2")])
+        .await
+        .expect("session exists");
+    assert_eq!(first.effective_active(), Some("t1"));
+
+    let reordered = store
+        .update_pages("s1", vec![page("t2"), page("t1")])
+        .await
+        .expect("session exists");
+    assert_eq!(reordered.effective_active(), Some("t1"));
+
+    // An explicit switch still wins, and survives another reorder.
+    store
+        .set_active_page("s1", "t2")
+        .await
+        .expect("t2 is owned");
+    let reordered = store
+        .update_pages("s1", vec![page("t2"), page("t1")])
+        .await
+        .expect("session exists");
+    assert_eq!(reordered.effective_active(), Some("t2"));
+
+    // Only when the held tab disappears does the next first page get pinned.
+    let replaced = store
+        .update_pages("s1", vec![page("t3"), page("t1")])
+        .await
+        .expect("session exists");
+    assert_eq!(replaced.effective_active(), Some("t3"));
+    let reordered = store
+        .update_pages("s1", vec![page("t1"), page("t3")])
+        .await
+        .expect("session exists");
+    assert_eq!(reordered.effective_active(), Some("t3"));
 }
 
 #[tokio::test]

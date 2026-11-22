@@ -436,3 +436,191 @@ fn test_group_snapshot_matches_cold_rebuild() {
     assert_eq!(group_at(&hot, 1).key, group_at(&cold, 1).key);
     assert_eq!(group_at(&cold, 1).count, 3);
 }
+
+// ---------------------------------------------------------------------------
+// 尾部工作组标记（Working shimmer 的判定层）
+// ---------------------------------------------------------------------------
+
+fn group_indexes(snapshot: &ViewModelsSnapshot) -> Vec<usize> {
+    snapshot
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, vm)| matches!(vm, TuiRenderUnit::TuiCollapsedGroup(_)).then_some(idx))
+        .collect()
+}
+
+fn changed_from() -> usize {
+    crate::kit::atoms::TRANSCRIPT_PUBLICATION.get().changed_from
+}
+
+/// 只有「turn 运行中 + 最后一台折叠组」带标记；正文开始流式后旧组立即清除，
+/// 且 `changed_from` 覆盖旧组下标（否则缓存保留最后一帧扫光）。
+#[test]
+#[serial]
+fn test_only_tail_group_is_working_and_old_group_is_cleared() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[
+            text("正文 A", "m1"),
+            tool_started("t1"),
+            tool_ended("t1"),
+            text("正文 B", "m2"),
+            tool_started("t2"),
+            tool_ended("t2"),
+        ],
+    );
+    let snapshot = current_snapshot();
+    let groups = group_indexes(&snapshot);
+    assert_eq!(
+        groups,
+        vec![1, 3],
+        "两个正文段之间各一台组：{:?}",
+        snapshot.items
+    );
+    assert!(!group_at(&snapshot, 1).is_working, "前一台组不是尾组");
+    assert!(group_at(&snapshot, 3).is_working, "尾组在 turn 运行中");
+
+    // 正文 C 开始流式：旧尾组被挤下去。
+    let old_index = 3;
+    dispatch_all(&mut state, &[text("正文 C", "m3")]);
+    let snapshot = current_snapshot();
+    assert!(
+        !group_at(&snapshot, old_index).is_working,
+        "旧尾组必须失去标记"
+    );
+    assert!(
+        changed_from() <= old_index,
+        "旧组下标必须落在重扫区间内：changed_from={} old={old_index}",
+        changed_from()
+    );
+}
+
+/// 尾部是 todo 摘要时，跳过它仍点亮前一张组；正文开始流式后同样要清除标记
+/// （缓存前缀尾部是 todo，清扫不能只看 `changed_from - 1`）。
+#[test]
+#[serial]
+fn test_todo_summary_at_tail_does_not_hide_working_group() {
+    let mut state = prompt_state();
+    *crate::kit::atoms::TODO_ITEMS.state().write() = vec![crate::kit::message_area::TodoItem {
+        status: crate::kit::message_area::TodoStatus::InProgress,
+        content: "Running tests".into(),
+    }];
+    dispatch_all(
+        &mut state,
+        &[text("正文 A", "m1"), tool_started("t1"), tool_ended("t1")],
+    );
+    let snapshot = current_snapshot();
+    assert_eq!(snapshot.items.len(), 3, "{:?}", snapshot.items);
+    assert!(
+        matches!(&snapshot.items[2], TuiRenderUnit::TuiTodoSummary(_)),
+        "todo 摘要位于 turn 底部"
+    );
+    assert!(group_at(&snapshot, 1).is_working, "todo 不遮挡尾组");
+
+    dispatch_all(&mut state, &[text("正文 B", "m2")]);
+    let snapshot = current_snapshot();
+    assert!(
+        !group_at(&snapshot, 1).is_working,
+        "旧组被正文挤下去后必须清除（即使前缀尾部是 todo）"
+    );
+    assert!(
+        changed_from() <= 1,
+        "旧的 working 组必须重新进入重扫区间：changed_from={}",
+        changed_from()
+    );
+    *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
+}
+
+/// turn 结束后标记清除；下一轮只有新的尾组亮起。
+#[test]
+#[serial]
+fn test_turn_done_clears_working_and_next_turn_marks_its_own_tail() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[text("正文 A", "m1"), tool_started("t1"), tool_ended("t1")],
+    );
+    assert!(group_at(&current_snapshot(), 1).is_working);
+
+    dispatch_all(&mut state, &[AcpEventData::TurnDone]);
+    let snapshot = current_snapshot();
+    assert!(
+        !group_at(&snapshot, 1).is_working,
+        "TurnDone 归档后历史组不得继续亮"
+    );
+
+    dispatch_all(
+        &mut state,
+        &[
+            AcpEventData::PromptSubmitted {
+                request_id: Some("r2".into()),
+            },
+            text("正文 C", "m3"),
+            tool_started("t2"),
+            tool_ended("t2"),
+        ],
+    );
+    let snapshot = current_snapshot();
+    let groups = group_indexes(&snapshot);
+    assert_eq!(groups.len(), 2, "{:?}", snapshot.items);
+    assert!(
+        !group_at(&snapshot, groups[0]).is_working,
+        "上一轮组保持静态"
+    );
+    assert!(
+        group_at(&snapshot, groups[1]).is_working,
+        "本轮尾组才是工作组"
+    );
+}
+
+/// 中断后（phase == Idle）标记立即清除。
+#[test]
+#[serial]
+fn test_turn_interrupted_clears_working() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[text("正文 A", "m1"), tool_started("t1"), tool_ended("t1")],
+    );
+    assert!(group_at(&current_snapshot(), 1).is_working);
+
+    dispatch_all(
+        &mut state,
+        &[AcpEventData::TurnInterrupted {
+            reason: "cancel".into(),
+            request_id: None,
+        }],
+    );
+    let snapshot = current_snapshot();
+    assert!(
+        !group_at(&snapshot, 1).is_working,
+        "中断后折叠组不得继续显示 Working"
+    );
+}
+
+/// 历史回放（phase == ReplayingHistory）永不标记——即使 `current_turn` 里还留着
+/// 上一帧的工作组。
+#[test]
+#[serial]
+fn test_replay_phase_never_marks_a_working_group() {
+    let mut state = prompt_state();
+    dispatch_all(
+        &mut state,
+        &[text("正文 A", "m1"), tool_started("t1"), tool_ended("t1")],
+    );
+    assert!(group_at(&current_snapshot(), 1).is_working);
+
+    state.phase = crate::kit::acp_events::SessionPhase::ReplayingHistory;
+    crate::kit::acp_events::push_view_models(&mut state);
+    let snapshot = current_snapshot();
+    assert!(
+        matches!(
+            &snapshot.items[1],
+            TuiRenderUnit::TuiCollapsedGroup(group) if !group.is_working
+        ),
+        "回放阶段不得点亮 Working：items={:?}",
+        snapshot.items
+    );
+}

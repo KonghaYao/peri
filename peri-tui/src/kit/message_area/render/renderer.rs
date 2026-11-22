@@ -42,8 +42,9 @@ pub(crate) struct CopyButtonInfo {
 }
 
 /// @image 行的渲染期信息（image-p0-p1-spec §4 T4；VmCacheSlot 内持有，
-/// rebuild 时随 lines 重建）。供 MessageArea 构建点击/hover 屏幕映射。
-#[derive(Debug, Clone, PartialEq)]
+/// rebuild 时随 lines 重建）。供 MessageArea 构建点击/hover 屏幕映射；
+/// `inline` 非空时该行是内联像素图片的占位首行（无路径/大小语义）。
+#[derive(Debug, Clone)]
 pub(crate) struct ImageLineInfo {
     /// slot 内逻辑行索引（wrap_map 中该 meta 行的 visual_start）。
     pub(in super::super) logical_idx: usize,
@@ -55,6 +56,41 @@ pub(crate) struct ImageLineInfo {
     /// 重建期算好的大小文案（B/KB/MB 或 missing）——hover 渲染复用，
     /// hover 时不再 stat（§4.4 stat 时机取舍）。
     pub(crate) size_text: String,
+    /// 内联像素图片放置（消息区 draw hook 绘制）；meta 行为 `None`。
+    pub(in super::super) inline: Option<InlineImagePlacement>,
+}
+
+/// 内联像素图片的渲染期放置：像素协议句柄 + 占用的单元格 + 正文列起点。
+/// `logical_idx`（首行）由所在的 [`ImageLineInfo`] 承载。
+#[derive(Debug, Clone)]
+pub(crate) struct InlineImagePlacement {
+    /// 图片列数（等比适配后真实编码宽度）。
+    pub(in super::super) cols: u16,
+    /// 图片行数（等比适配后真实编码高度，等于预留的占位行数）。
+    pub(in super::super) rows: u16,
+    /// 正文列起点（相对消息区 x=0；随行前缀形态变化）。
+    pub(in super::super) x_offset: u16,
+    /// 已编码的协议句柄；render body 只 clone `Arc`，不触 IO。
+    pub(in super::super) image: std::sync::Arc<crate::kit::image_preview::InlineImage>,
+}
+
+impl PartialEq for ImageLineInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.logical_idx == other.logical_idx
+            && self.path == other.path
+            && self.managed == other.managed
+            && self.size_text == other.size_text
+            && match (&self.inline, &other.inline) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.cols == b.cols
+                        && a.rows == b.rows
+                        && a.x_offset == b.x_offset
+                        && std::sync::Arc::ptr_eq(&a.image, &b.image)
+                }
+                _ => false,
+            }
+    }
 }
 
 /// `vm_to_lines_cached_with_layout` 的渲染产物：行、复制按钮、交互布局、
@@ -123,19 +159,22 @@ fn is_blank_body_line(line: &Line<'static>) -> bool {
 }
 
 /// 渲染一处 Mermaid 围栏并记录它在消息行里的逻辑范围；渲染本身不排队。
+/// 正文列宽与前缀宽度、围栏身份/帧都由渲染上下文决定，拆参数结构体没有收益。
+#[allow(clippy::too_many_arguments)]
 fn mermaid_block(
     segment: &crate::kit::markdown::MermaidSegment,
     scope: &crate::kit::mermaid::PreviewScope,
     width: usize,
+    prefix: usize,
     frozen: bool,
     foreground: ratatui_kit::ratatui::style::Color,
     start: usize,
     schedule: bool,
 ) -> (Vec<Line<'static>>, crate::kit::mermaid::FenceSpan) {
-    let (lines, layout_bytes) = if schedule {
-        let lines = crate::kit::mermaid::display_lines(segment, scope, width, frozen, foreground);
-        let bytes = 0;
-        (lines, bytes)
+    let (rendered, layout_bytes) = if schedule {
+        let rendered =
+            crate::kit::mermaid::display_lines(segment, scope, width, frozen, foreground);
+        (rendered, 0)
     } else {
         crate::kit::mermaid::display_lines_peek(segment, scope, width, frozen, foreground)
     };
@@ -144,10 +183,12 @@ fn mermaid_block(
         fence: Arc::new(segment.fence.clone()),
         width,
         frozen,
-        logical: start..start.saturating_add(lines.len()),
+        logical: start..start.saturating_add(rendered.lines.len()),
         layout_bytes,
+        prefix,
+        h_view: rendered.h_view,
     };
-    (lines, span)
+    (rendered.lines, span)
 }
 
 /// 将单个 TuiRenderUnit 变体转换为渲染行。
@@ -176,7 +217,8 @@ pub(crate) fn vm_to_lines(vm: &TuiRenderUnit, grid: &GridSpec) -> Vec<Line<'stat
 ///
 /// 返回四元组 `(lines, copy_button, interaction_layout, image_lines)`——第三项仅 pending
 /// 的 interaction block（§6.8）有值（选项行布局，供视口 post-pass 高亮与
-/// 点击热区）；第四项仅 UserBubble 的 @image 行有值（§4 T4，点击/hover 映射）；
+/// 点击热区）；第四项含 UserBubble 的 @image meta 行（§4 T4，点击/hover 映射）
+/// 与消息区内联图片占位（`ImageLineInfo::inline`，绘制由 MessageArea hook 承接）；
 /// 其余变体恒 None / 空 Vec。
 ///
 /// 与 [`vm_to_lines_cached_with_layout`] 同逻辑，不带 markdown stable overlay；
@@ -200,6 +242,8 @@ pub(crate) fn vm_to_lines_cached(
         None,
         render_copy_button,
         ZoneTransition::None,
+        None,
+        true,
         true,
     );
     (lines, copy_button, interaction, image_lines)
@@ -226,7 +270,9 @@ pub(crate) fn vm_to_lines_cached_with_layout_scheduled(
         md_lines,
         render_copy_button,
         transition,
+        None,
         true,
+        false,
     )
 }
 
@@ -250,6 +296,10 @@ pub(crate) fn vm_to_lines_cached_with_layout(
 }
 
 /// 消息区缓存路径：渲染只读当前帧；可见围栏由 transcript 统一调度。
+///
+/// `frame` 是 100ms 粒度的壁钟帧序号（与 `EntryRenderCache::ensure` 的缓存键
+/// 同源）：尾部工作组的 Working 扫光相位 = `frame × 100ms`，保证「触发
+/// Animation 重建的帧」与「画出来的相位」是同一个值。
 pub(crate) fn vm_to_lines_cached_with_layout_gated(
     vm: &TuiRenderUnit,
     grid: &GridSpec,
@@ -257,6 +307,7 @@ pub(crate) fn vm_to_lines_cached_with_layout_gated(
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
     transition: ZoneTransition,
+    frame: Option<u64>,
 ) -> RenderOutput {
     vm_to_lines_impl(
         vm,
@@ -265,7 +316,9 @@ pub(crate) fn vm_to_lines_cached_with_layout_gated(
         md_lines,
         render_copy_button,
         transition,
+        frame,
         false,
+        true,
     )
 }
 
@@ -277,7 +330,9 @@ fn vm_to_lines_impl(
     md_lines: Option<&mut crate::kit::message_area::vm_cache::MarkdownLineCache>,
     render_copy_button: bool,
     transition: ZoneTransition,
+    frame: Option<u64>,
     schedule_mermaid: bool,
+    inline_pixels: bool,
 ) -> RenderOutput {
     let mut md_lines = md_lines;
     if let Some(layout) = md_lines.as_deref_mut() {
@@ -327,6 +382,12 @@ fn vm_to_lines_impl(
             } else {
                 grid.content_width()
             };
+            // 围栏行在消息行内的正文前缀宽度；横向条命中从该列起算。
+            let mermaid_prefix = if brief {
+                grid.process_prefix_width()
+            } else {
+                grid.cont_prefix_width()
+            };
             let mermaid_frozen = data.started_at.is_none();
             let mermaid_scope = crate::kit::mermaid::PreviewScope::for_bubble(
                 crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone(),
@@ -356,6 +417,9 @@ fn vm_to_lines_impl(
             if !brief && data.reasoning.is_some() && !data.text.is_empty() && grid.indent > 0 {
                 lines.push(self::helpers::step_line(STEP_EXIT, line_color));
             }
+
+            // 内联图片放置信息（正文图片段命中协议缓存时填充）。
+            let mut image_lines: Vec<ImageLineInfo> = Vec::new();
 
             // Markdown 正文——wrap 在 `body_width`（长回复 content 列宽、短回复
             // 过程带收窄宽度），行级再套统一前缀（`body_line`）。
@@ -434,6 +498,7 @@ fn vm_to_lines_impl(
                                         segment,
                                         &mermaid_scope,
                                         body_width,
+                                        mermaid_prefix,
                                         mermaid_frozen,
                                         md_text_fg,
                                         start,
@@ -480,6 +545,7 @@ fn vm_to_lines_impl(
                                         segment,
                                         &mermaid_scope,
                                         body_width,
+                                        mermaid_prefix,
                                         mermaid_frozen,
                                         md_text_fg,
                                         start,
@@ -527,10 +593,58 @@ fn vm_to_lines_impl(
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::Image(img) => {
-                                // 降级行已在 convert 阶段折行（wrap_styled_line），
-                                // 前缀/空行逻辑与 Text 分支一致。
-                                for line in &img.lines {
-                                    lines.push(body_line(line.clone()));
+                                // 本地独占段落图片：逐图只查协议缓存（render body 不做
+                                // IO）。命中时按真实编码尺寸预留 rows 行空白占位并把
+                                // 放置信息交给消息区 draw hook 画像素；未命中/非独占
+                                // 段落保留各自的降级行——同段多图合并时按首图身份整段
+                                // 替换会丢掉其余图片的文本。远程/危险来源由查表侧拒绝。
+                                // Detail 面板等没有 draw hook 的 surface（inline_pixels
+                                // = false）保持文本，避免留下无法填充的空白占位。
+                                if !img.standalone || !inline_pixels {
+                                    for line in &img.lines {
+                                        lines.push(body_line(line.clone()));
+                                    }
+                                } else {
+                                    let cols = u16::try_from(body_width).unwrap_or(u16::MAX);
+                                    let x_offset = u16::try_from(if brief {
+                                        grid.process_prefix_width()
+                                    } else {
+                                        grid.cont_prefix_width()
+                                    })
+                                    .unwrap_or(u16::MAX);
+                                    for source in &img.sources {
+                                        let ready = crate::kit::inline_image::lookup_ready(
+                                            &source.source,
+                                            cols,
+                                            crate::kit::inline_image::MAX_ROWS,
+                                        );
+                                        let fallback: &[Line<'static>] = img
+                                            .lines
+                                            .get(source.line_range.clone())
+                                            .map_or(&[], |slice| slice);
+                                        if let Some(ready) = ready {
+                                            let logical_idx = lines.len();
+                                            for _ in 0..ready.rows {
+                                                lines.push(body_line(Line::default()));
+                                            }
+                                            image_lines.push(ImageLineInfo {
+                                                logical_idx,
+                                                path: String::new(),
+                                                managed: false,
+                                                size_text: String::new(),
+                                                inline: Some(InlineImagePlacement {
+                                                    cols: ready.cols,
+                                                    rows: ready.rows,
+                                                    x_offset,
+                                                    image: ready.image,
+                                                }),
+                                            });
+                                        } else {
+                                            for line in fallback {
+                                                lines.push(body_line(line.clone()));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             crate::kit::markdown::MarkdownSegment::Mermaid(segment) => {
@@ -540,6 +654,7 @@ fn vm_to_lines_impl(
                                     segment,
                                     &mermaid_scope,
                                     body_width,
+                                    mermaid_prefix,
                                     mermaid_frozen,
                                     md_text_fg,
                                     start,
@@ -641,7 +756,7 @@ fn vm_to_lines_impl(
                 lines.push(body_line(Line::default()));
             }
 
-            (lines, copy_button, None, Vec::new(), mermaid_fences)
+            (lines, copy_button, None, image_lines, mermaid_fences)
         }
         TuiRenderUnit::TuiUserBubble(data) => {
             if let Some(ref info) = data.reminder {
@@ -654,7 +769,8 @@ fn vm_to_lines_impl(
                     Vec::new(),
                 )
             } else {
-                let (lines, image_lines) = self::user::render_user_bubble_lines(data, grid);
+                let (lines, image_lines) =
+                    self::user::render_user_bubble_lines(data, grid, inline_pixels);
                 (lines, None, None, image_lines, Vec::new())
             }
         }
@@ -688,7 +804,7 @@ fn vm_to_lines_impl(
             Vec::new(),
         ),
         TuiRenderUnit::TuiCollapsedGroup(data) => {
-            let (lines, hits) = self::group::render_collapsed_group_lines(data, grid);
+            let (lines, hits) = self::group::render_collapsed_group_lines(data, grid, frame);
             fold_hits = hits;
             (lines, None, None, Vec::new(), Vec::new())
         }

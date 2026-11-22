@@ -36,7 +36,7 @@ use crate::progress::{RunProgress, WorkflowProgressStore};
 use crate::protocol::{AgentRunParams, AgentRunResult, ProgressEvent};
 use crate::registry::{WorkflowTaskRegistry, WorkflowTaskResult};
 use crate::runner::{
-    AgentExecutor, AgentTaskPublish, AgentTaskSink, WorkflowInput, WorkflowRunner,
+    AgentExecutor, AgentTaskPublish, AgentTaskSink, RunLimitBreach, WorkflowInput, WorkflowRunner,
 };
 
 use events::RuntimeProgressObserver;

@@ -858,7 +858,7 @@ image-preview-meta = [Image: { $name } · { $w }×{ $h } · { $size } · { $mime
 image-preview-loading = [Image: { $name }]
 image-preview-degraded = 仅受管理目录（~/.peri/images）内的图片可自动预览
 image-preview-error = 无法预览此图片
-image-preview-no-protocol = 当前终端不支持图片显示（Kitty graphics），仅显示文本信息
+image-preview-no-protocol = 当前终端无法进行图片像素渲染（缺少图形协议或单元格尺寸），仅显示文本信息
 
 # ---- 消息条目状态后备文案（spec §4.1：符号的文本后备）----
 msg-status-running = 运行中
@@ -877,7 +877,6 @@ render-group-steps = { $count } 项过程
 render-group-thought = 思考
 render-group-note = 通知
 render-group-reminder = 提醒
-render-group-running = 运行中
 
 # ---- Interaction block（§6.8，Slice 4）----
 # inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——

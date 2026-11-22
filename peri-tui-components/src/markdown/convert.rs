@@ -13,7 +13,7 @@ use crate::markdown::safety::UrlKind;
 use super::list::LIST_ITEM_GAP_MAX_DEPTH;
 use super::scan::ImageInfo;
 
-use super::types::{ImageSegment, MarkdownSegment, MermaidSegment, TableData};
+use super::types::{ImageSegment, ImageSource, MarkdownSegment, MermaidSegment, TableData};
 
 // ── 图片 token 侧表查表（T3）────────────────────────────────────────
 
@@ -332,8 +332,16 @@ pub(crate) fn convert_to_segments_with_state(
                                                 &mut state.segments[img_idx]
                                         {
                                             // 同段多图：降级行追加到已合并段
-                                            // （段内连续，无空行）。
+                                            // （段内连续，无空行），来源区间随偏移。
+                                            let offset = prev.lines.len();
                                             prev.lines.extend(seg.lines);
+                                            prev.sources.extend(seg.sources.into_iter().map(
+                                                |source| ImageSource {
+                                                    source: source.source,
+                                                    line_range: (source.line_range.start + offset)
+                                                        ..(source.line_range.end + offset),
+                                                },
+                                            ));
                                         } else {
                                             state.segments.push(MarkdownSegment::Image(seg));
                                             pending_image = Some(state.segments.len() - 1);
@@ -706,6 +714,10 @@ fn build_image_segment(
         standalone,
         byte_start: info.byte_start,
         byte_end: info.byte_end,
+        sources: vec![ImageSource {
+            source: info.url.clone(),
+            line_range: 0..lines.len(),
+        }],
         lines,
     }
 }

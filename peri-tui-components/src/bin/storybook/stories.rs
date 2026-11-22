@@ -14,6 +14,7 @@
 use std::time::Instant;
 
 mod document;
+mod image;
 mod list_items;
 mod markdown;
 mod mermaid;
@@ -53,8 +54,9 @@ pub(crate) const BORDER: Style = Style::new().fg(Color::DarkGray);
 
 /// Rows a single wheel notch scrolls; the host uses `SCROLL_LINES` (3 rows).
 pub(crate) const WHEEL_ROWS: usize = 3;
-/// Columns a horizontal wheel notch scrolls; the bar drag is the precise path.
-const WHEEL_COLS: usize = 8;
+/// Columns a horizontal wheel notch scrolls; shared with inline chat so both
+/// hosts pan by the same step.
+pub(crate) use peri_tui_components::h_viewport::WHEEL_COLS;
 
 /// Viewport height assumed when seeding a scrolled variant; rendering clamps the
 /// offset against the real preview height.
@@ -132,6 +134,8 @@ pub(crate) enum StoryState {
     Overlay(overlay::OverlayState),
     /// 无状态活动指示器：帧序号与帧集由宿主提供。
     Spinner(spinner::SpinnerState),
+    /// 纯值图片组件：RGBA 渐变按半块采样，无文件、无终端探测。
+    Image(image::ImageState),
 }
 
 pub(crate) struct Variant {
@@ -876,6 +880,11 @@ pub(crate) const STORIES: &[Story] = &[
         variants: spinner::VARIANTS,
     },
     Story {
+        key: "image",
+        title: "Image",
+        variants: image::VARIANTS,
+    },
+    Story {
         key: "charts",
         title: "tui-chart",
         variants: CHART_VARIANTS,
@@ -927,6 +936,7 @@ pub(crate) fn render_story(state: &mut StoryState, area: Rect, buf: &mut Buffer)
         StoryState::Chart { demo } => crate::charts::render_demo(*demo, area, buf),
         StoryState::Overlay(overlay) => overlay::render(overlay, area, buf),
         StoryState::Spinner(spinner) => spinner::render(spinner, area, buf),
+        StoryState::Image(image) => image::render(image, area, buf),
     }
 }
 
@@ -1364,6 +1374,8 @@ pub(crate) fn handle_story_mouse(state: &mut StoryState, mouse: &MouseEvent, are
         StoryState::Chart { .. } => matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),
         StoryState::Overlay(overlay) => overlay::handle_mouse(overlay, mouse, area),
         StoryState::Spinner(spinner) => spinner::handle_mouse(spinner, mouse, area),
+        // Static image frames consume clicks like chart frames.
+        StoryState::Image(_) => matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),
     }
 }
 

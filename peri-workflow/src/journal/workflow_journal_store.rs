@@ -33,6 +33,16 @@ pub struct RunState {
     pub post_processing_status: PostProcessingStatus,
     #[serde(default)]
     pub delivery_status: DeliveryStatus,
+    /// 交付结论的结构化原因；旧 `state.json` 缺省为 `None`，不得据此升级为通过。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_reason: Option<peri_acp_types::workflow::DeliveryReason>,
+    /// Git 观测完整性；旧 `state.json` 缺省为 `None`（未记录，不等于完整观测）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postcondition_observation: Option<peri_acp_types::workflow::PostconditionObservation>,
+    /// 采样到的 Git 身份与可见范围；只存身份与能力，不存基线内容。
+    /// 旧 `state.json` 缺省为 `None`（未记录，不得推断观测范围）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_observation_scope: Option<peri_acp_types::workflow::GitObservationScope>,
     /// 引擎级三态；与 acceptance 分开，旧 state.json 缺省为 `unknown`。
     #[serde(default)]
     pub outcome: peri_acp_types::workflow::WorkflowOutcome,
@@ -40,6 +50,15 @@ pub struct RunState {
     pub write_intent: Option<peri_acp_types::workflow::WorkflowWriteIntent>,
     #[serde(default, skip_serializing_if = "limits_are_empty")]
     pub limits: crate::protocol::WorkflowLimits,
+    /// 全部已触发的硬上限（scope / 上限 / 观测值 / attempt / 时点）。
+    ///
+    /// 与顶层 `error`（首条兼容文本）并存；旧 `state.json` 缺省为空，不得据此
+    /// 推断“未触发过限额”。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limit_breaches: Vec<peri_acp_types::workflow::LimitBreach>,
+    /// 按 attempt 累计的 token 用量；没有任何执行上报时为 `None`（不显示为 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_total: Option<u64>,
     /// Exact script arguments are part of the workflow input. Keeping them in

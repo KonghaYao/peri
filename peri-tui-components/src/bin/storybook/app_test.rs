@@ -2485,6 +2485,23 @@ fn spinner_tool_glyph_matches_the_host_frame_set() {
 }
 
 #[test]
+fn spinner_shimmer_advances_with_the_host_frame_index() {
+    let mut app = story_app("spinner", "shimmer");
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("▸ Read 2 · Thought ×2 · Glob"));
+    assert!(screen.contains("host frame 5 · row phase 500ms"));
+    assert!(crate::stories::is_animating(&app.state));
+
+    // 宿主时钟推进两帧：文字不变，扫光相位跟着帧序号走。
+    let base = spinner_state(&app).last_tick();
+    crate::stories::tick_at(&mut app.state, base + Duration::from_millis(200));
+    assert_eq!(spinner_state(&app).frame, 7);
+    let screen = dump_screen(&mut app, 100, 32);
+    assert!(screen.contains("▸ Read 2 · Thought ×2 · Glob"));
+    assert!(screen.contains("host frame 7 · row phase 700ms"));
+}
+
+#[test]
 fn spinner_active_advances_with_the_host_clock() {
     let mut app = story_app("spinner", "active");
     assert!(crate::stories::is_animating(&app.state));

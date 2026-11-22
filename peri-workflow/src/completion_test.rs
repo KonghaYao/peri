@@ -203,9 +203,14 @@ fn write_state_failure_is_logged_and_declares_stale_disk_state() {
         acceptance_status: AcceptanceStatus::Unknown,
         post_processing_status: PostProcessingStatus::Blocked,
         delivery_status: DeliveryStatus::Blocked,
+        delivery_reason: None,
+        postcondition_observation: None,
+        git_observation_scope: None,
         outcome: peri_acp_types::workflow::WorkflowOutcome::Blocked,
         write_intent: None,
         limits: WorkflowLimits::default(),
+        limit_breaches: Vec::new(),
+        token_usage: None,
         budget_total: None,
         args: None,
         max_concurrency: 3,
@@ -294,4 +299,124 @@ fn completion_projects_the_saved_return_value_without_upgrading_acceptance() {
         .background_result()
         .output
         .contains("Confirmed checks"));
+}
+
+/// completed 且未请求交付：交付不阻塞，通知不得再声称 “delivery is blocked”。
+#[test]
+fn completion_keeps_unrequested_delivery_out_of_the_blocked_branch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
+    journal.init_run("unrequested-run", "script").unwrap();
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let completion = make_completion(&journal, &progress, "unrequested-run");
+    let result = completion.project(crate::runner::WorkflowResult {
+        run_id: "unrequested-run".into(),
+        status: "completed".into(),
+        return_value: Some(serde_json::json!({"ok": true})),
+        error: None,
+        post_processing_status: PostProcessingStatus::Unknown,
+        delivery_status: DeliveryStatus::Unknown,
+        stderr_tail: None,
+    });
+
+    assert_eq!(
+        result.outcome,
+        peri_acp_types::workflow::WorkflowOutcome::Completed
+    );
+    assert!(result.success);
+    assert_eq!(result.notification_status_phrase(), "completed");
+    let notification = result.to_notification();
+    assert!(
+        !notification.contains("delivery is blocked"),
+        "未请求交付不得显示交付阻塞: {notification}"
+    );
+}
+
+/// 交付“不需要”不能把 failed / killed 运行抬成成功。
+#[test]
+fn completion_never_upgrades_failed_or_killed_runs_to_success() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
+    journal.init_run("not-green-run", "script").unwrap();
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let completion = make_completion(&journal, &progress, "not-green-run");
+
+    for (status, outcome, phrase) in [
+        (
+            "failed",
+            peri_acp_types::workflow::WorkflowOutcome::Failed,
+            "failed",
+        ),
+        (
+            "killed",
+            peri_acp_types::workflow::WorkflowOutcome::Killed,
+            "killed",
+        ),
+    ] {
+        let result = completion.project(crate::runner::WorkflowResult {
+            run_id: "not-green-run".into(),
+            status: status.into(),
+            return_value: None,
+            error: Some("run did not complete".into()),
+            post_processing_status: PostProcessingStatus::Unknown,
+            delivery_status: DeliveryStatus::Unknown,
+            stderr_tail: None,
+        });
+        assert_eq!(result.outcome, outcome, "{status} 的执行终态不得被覆盖");
+        assert!(!result.success, "{status} 不得因交付不需要而变绿");
+        assert_eq!(result.notification_status_phrase(), phrase);
+    }
+}
+
+/// 后到的清理失败改写为 failed 时，旧的 `not_requested` 不得继续解释交付结论。
+#[test]
+fn cleanup_failure_clears_the_unrequested_delivery_reason() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let journal = Arc::new(WorkflowJournalStore::new(tmp.path().to_str().unwrap()));
+    journal.init_run("cleanup-run", "script").unwrap();
+    let progress = Arc::new(WorkflowProgressStore::new());
+    let state = RunState {
+        run_id: "cleanup-run".into(),
+        workflow_name: "test-workflow".into(),
+        status: "completed".into(),
+        execution_status: ExecutionStatus::Completed,
+        acceptance_status: AcceptanceStatus::Unknown,
+        post_processing_status: PostProcessingStatus::Unknown,
+        delivery_status: DeliveryStatus::Unknown,
+        delivery_reason: Some(peri_acp_types::workflow::DeliveryReason::NotRequested),
+        postcondition_observation: Some(
+            peri_acp_types::workflow::PostconditionObservation::Complete,
+        ),
+        git_observation_scope: None,
+        outcome: peri_acp_types::workflow::WorkflowOutcome::Completed,
+        write_intent: None,
+        limits: WorkflowLimits::default(),
+        limit_breaches: Vec::new(),
+        token_usage: None,
+        budget_total: None,
+        args: None,
+        max_concurrency: 3,
+        attempts: Vec::new(),
+        return_value: None,
+        script: "script".into(),
+        started_at: "2026-11-21T00:00:00Z".into(),
+        finished_at: Some("2026-11-21T00:01:00Z".into()),
+        error: None,
+    };
+    journal.write_state("cleanup-run", &state).unwrap();
+
+    let completion = make_completion(&journal, &progress, "cleanup-run");
+    let result = completion.settle_failed_terminal_state("cleanup failed after success");
+    assert_failed_result(&result, "cleanup failed after success");
+
+    let read = journal.read_state("cleanup-run").unwrap();
+    assert_eq!(read.status, "failed");
+    assert_eq!(
+        read.outcome,
+        peri_acp_types::workflow::WorkflowOutcome::Failed
+    );
+    assert_eq!(
+        read.delivery_reason, None,
+        "failed 终态不得保留 not_requested 作为交付原因"
+    );
 }

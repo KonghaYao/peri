@@ -50,7 +50,7 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 pub const EVENT_CAPACITY: usize = 64;
 
 /// Screencast defaults from README §6.4.
-pub const FRAME_QUALITY: u8 = 55;
+pub const FRAME_QUALITY: u8 = 70;
 pub const FRAME_MAX_WIDTH: u32 = 1600;
 pub const FRAME_MAX_HEIGHT: u32 = 1000;
 /// Thumbnail capture is a still image, not a second screencast.
@@ -63,9 +63,11 @@ pub const THUMBNAIL_QUALITY: u8 = 40;
 /// Kitesurf error instead of a silent second writer.
 pub const CONTROLLER_OWNER: &str = "peri-browser-gateway";
 
-/// How often `history_step` re-reads the index after `navigateToHistoryEntry`.
-const HISTORY_RETRIES: usize = 4;
-const HISTORY_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// How long `navigate` waits for the new document to show up in `location.href`
+/// before it reports the state as it stands. Kitesurf's evaluate reply can land
+/// before the commit.
+const NAVIGATION_SETTLE_TRIES: usize = 20;
+const NAVIGATION_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CdpError {
@@ -85,6 +87,8 @@ pub enum CdpError {
     Protocol { code: i64, message: String },
     #[error("invalid CDP payload: {0}")]
     Decode(String),
+    #[error("{method} was rejected: {message}")]
+    Rejected { method: String, message: String },
     #[error("CDP WebSocket error: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
 }
@@ -673,7 +677,6 @@ pub struct NavigationState {
 
 #[derive(Debug, Clone)]
 struct HistoryEntry {
-    id: i64,
     url: String,
     title: String,
 }
@@ -692,7 +695,6 @@ fn parse_history(value: &Value) -> Option<History> {
         .iter()
         .map(|entry| {
             Some(HistoryEntry {
-                id: entry.get("id")?.as_i64()?,
                 url: entry.get("url")?.as_str()?.to_owned(),
                 title: entry
                     .get("title")
@@ -748,6 +750,10 @@ fn navigation_state_from(history: &History, title: Option<String>) -> Navigation
 
 /// Reads the controller's current navigation state.
 ///
+/// The live `location.href` wins over the history entry: Kitesurf keeps
+/// `Page.getNavigationHistory` on the previous document for a few seconds after
+/// a navigation commits, and the address bar must not lag behind the page.
+///
 /// # Errors
 ///
 /// Fails when the history cannot be read or parsed.
@@ -756,76 +762,179 @@ pub async fn navigation_state(
 ) -> Result<NavigationState, CdpError> {
     let history = read_history(controller).await?;
     let title = document_title(controller).await;
-    Ok(navigation_state_from(&history, title))
+    let live = live_url(controller).await;
+    Ok(state_with_live_location(&history, title, live.as_deref()))
+}
+
+fn state_with_live_location(
+    history: &History,
+    title: Option<String>,
+    live: Option<&str>,
+) -> NavigationState {
+    let mut state = navigation_state_from(history, title);
+    if let Some(live) = live.filter(|live| *live != history.entries[history.current].url) {
+        // The history has not caught up with the document that just committed;
+        // the new entry will land one step forward.
+        state.url = live.to_owned();
+        state.can_go_back = true;
+        state.can_go_forward = false;
+    }
+    state
+}
+
+async fn live_url(controller: &dyn PageController) -> Option<String> {
+    let value = controller
+        .command(
+            "Runtime.evaluate",
+            json!({"expression": "location.href", "returnByValue": true}),
+        )
+        .await
+        .ok()?;
+    value
+        .get("result")?
+        .get("value")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Navigates the controller's page and reports the resulting state.
 ///
+/// Kitesurf never answers `Page.navigate` and stops answering every later
+/// command on that connection, so the navigation is written as
+/// `location.assign(...)` through `Runtime.evaluate`, which it does answer.
+/// It sometimes answers that evaluate with `Execution context was destroyed`
+/// once the new document took over; the effect decides, not the reply.
+///
 /// # Errors
 ///
-/// Fails when `Page.navigate` or the follow-up history read fails.
+/// Fails when the page rejects the evaluation and stayed where it was, or when
+/// the follow-up history read fails.
 pub async fn navigate(
     controller: &dyn PageController,
     url: &str,
 ) -> Result<NavigationState, CdpError> {
-    controller
-        .command("Page.navigate", json!({ "url": url }))
-        .await?;
-    navigation_state(controller).await
+    let url = normalize_url(url);
+    let before = live_url(controller).await;
+    let expression = format!("location.assign({})", Value::String(url));
+    let mut retried = false;
+    loop {
+        let reply = controller
+            .command(
+                "Runtime.evaluate",
+                json!({"expression": expression, "userGesture": true}),
+            )
+            .await;
+        let changed = wait_for_location(controller, before.as_deref()).await;
+        if let Ok(value) = &reply {
+            if let Some(exception) = value.get("exceptionDetails") {
+                return Err(CdpError::Rejected {
+                    method: "Runtime.evaluate".to_owned(),
+                    message: exception_message(exception),
+                });
+            }
+        }
+        if let Err(error) = reply {
+            if changed {
+                tracing::debug!(error = %error, "evaluate failed after the navigation committed");
+                return navigation_state(controller).await;
+            }
+            // Kitesurf answers `Execution context was destroyed` for a moment
+            // after every navigation, and then the assignment never ran. One
+            // retry separates that from a navigation that really committed.
+            if !retried && destructured_retry_allowed(&error) {
+                retried = true;
+                tokio::time::sleep(NAVIGATION_SETTLE_DELAY).await;
+                continue;
+            }
+            return Err(error);
+        }
+        return navigation_state(controller).await;
+    }
 }
 
-/// Steps `delta` entries through the controller's navigation history.
-///
-/// Kitesurf answers `Page.navigateToHistoryEntry` immediately; the history index
-/// can need a moment to reflect the new entry, so the read is retried briefly
-/// before giving up. Out-of-range steps are a no-op that reports the current
-/// state.
-///
-/// # Errors
-///
-/// Fails when the history cannot be read or the step is rejected.
-pub async fn history_step(
-    controller: &dyn PageController,
-    delta: i64,
-) -> Result<NavigationState, CdpError> {
-    let history = read_history(controller).await?;
-    let target = i64::try_from(history.current).unwrap_or(i64::MAX) + delta;
-    if target < 0 || usize::try_from(target).map_or(true, |target| target >= history.entries.len())
-    {
-        let title = document_title(controller).await;
-        return Ok(navigation_state_from(&history, title));
-    }
-    let target_index = usize::try_from(target).unwrap_or(history.current);
-    controller
-        .command(
-            "Page.navigateToHistoryEntry",
-            json!({ "entryId": history.entries[target_index].id }),
-        )
-        .await?;
+/// Whether the error is the stale-context answer Kitesurf gives while the
+/// previous document is still being torn down.
+fn destructured_retry_allowed(error: &CdpError) -> bool {
+    matches!(error, CdpError::Protocol { code: -32000, message } if message.contains("Execution context was destroyed"))
+}
 
-    let mut current = history;
-    for attempt in 0..HISTORY_RETRIES {
-        current = read_history(controller).await?;
-        if current.current == target_index {
-            break;
+/// Gives a bare host the scheme a browser would pick.
+///
+/// `example.com` typed into the address bar must not resolve relative to the
+/// current document; `Page.navigate` would have done exactly that.
+fn normalize_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_owned();
+    }
+    let has_scheme = trimmed.split_once(':').is_some_and(|(scheme, rest)| {
+        !scheme.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            && (rest.starts_with("//")
+                || matches!(
+                    scheme,
+                    "about" | "blob" | "data" | "file" | "javascript" | "view-source"
+                ))
+    });
+    if has_scheme {
+        return trimmed.to_owned();
+    }
+    // Chrome falls back to http for the loopback names people type.
+    if ["localhost", "127.", "[::1]"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return format!("http://{trimmed}");
+    }
+    format!("https://{trimmed}")
+}
+
+fn exception_message(exception: &Value) -> String {
+    exception
+        .get("exception")
+        .and_then(|exception| exception.get("description"))
+        .and_then(Value::as_str)
+        .or_else(|| exception.get("text").and_then(Value::as_str))
+        .unwrap_or("the page rejected the URL")
+        .to_owned()
+}
+
+/// Waits briefly for the document to commit so the caller reports the new URL.
+///
+/// Kitesurf's evaluate reply can arrive before the commit; the history read is
+/// the slow one, so the live location is polled instead of sleeping a fixed
+/// amount. Returns whether the location moved away from `before`.
+async fn wait_for_location(controller: &dyn PageController, before: Option<&str>) -> bool {
+    for attempt in 0..NAVIGATION_SETTLE_TRIES {
+        if live_url(controller)
+            .await
+            .as_deref()
+            .is_some_and(|live| Some(live) != before)
+        {
+            return true;
         }
-        if attempt + 1 < HISTORY_RETRIES {
-            tokio::time::sleep(HISTORY_RETRY_DELAY).await;
+        if attempt + 1 < NAVIGATION_SETTLE_TRIES {
+            tokio::time::sleep(NAVIGATION_SETTLE_DELAY).await;
         }
     }
-    let title = document_title(controller).await;
-    Ok(navigation_state_from(&current, title))
+    false
 }
 
 /// Enables the diagnostics domains the monitor reproduces.
 ///
-/// `Runtime.enable` and `Network.enable` are rejected on a viewer connection;
-/// this is the first thing the driver does after taking the controller.
+/// `Runtime.enable`, `Network.enable` and `Page.enable` are rejected on a viewer
+/// connection; this is the first thing the driver does after taking the
+/// controller. `Page.enable` is what makes `Page.frameNavigated` arrive, so the
+/// address bar follows links the page opens on its own.
 ///
 /// # Errors
 ///
-/// Fails when either domain cannot be enabled.
+/// Fails when a domain cannot be enabled.
 pub async fn enable_diagnostics(controller: &dyn PageController) -> Result<(), CdpError> {
+    controller.command("Page.enable", json!({})).await?;
     controller.command("Runtime.enable", json!({})).await?;
     controller.command("Network.enable", json!({})).await?;
     Ok(())
@@ -880,11 +989,19 @@ async fn dispatch(text: &str, pending: &Pending, events: &mpsc::Sender<CdpEvent>
             method: method.to_owned(),
             params: value.get("params").cloned().unwrap_or(Value::Null),
         };
-        if events.send(event).await.is_err() {
-            return false;
+        // Kitesurf replays every execution context of the target to each
+        // session (100+ on a busy page). Blocking here would stop the reader
+        // behind those events, and the reply to the command in flight — or to
+        // the next one — would never be dispatched. Consumers keep the newest
+        // state, so shedding events while the queue is full is safer than a
+        // socket that goes silent.
+        match events.try_send(event) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
+    } else {
+        true
     }
-    true
 }
 
 fn fail_pending(pending: &Pending, error: &CdpError) {
@@ -916,6 +1033,10 @@ fn clone_error(error: &CdpError) -> CdpError {
             message: message.clone(),
         },
         CdpError::Decode(message) => CdpError::Decode(message.clone()),
+        CdpError::Rejected { method, message } => CdpError::Rejected {
+            method: method.clone(),
+            message: message.clone(),
+        },
         CdpError::WebSocket(_) => CdpError::Closed {
             url: "CDP socket".to_owned(),
         },
@@ -1026,7 +1147,7 @@ pub fn viewport_from_metrics(value: &Value) -> Option<Viewport> {
     })
 }
 
-/// Starts a screencast with the gateway defaults (JPEG q55, 1600×1000 bound).
+/// Starts a screencast with the gateway defaults (JPEG q70, 1600×1000 bound).
 pub async fn start_screencast(viewer: &Viewer) -> Result<(), CdpError> {
     viewer
         .command(

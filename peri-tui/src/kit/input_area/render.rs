@@ -19,7 +19,7 @@ use peri_theme::atoms::THEME_ATOM;
 /// §10 queued 队列在 composer 上方最多显示的行数，超出显示 `· · ·`。
 pub(super) const QUEUE_VISIBLE_MAX: usize = 5;
 
-/// composer 附件标签最多列出的图片名数——再多以 `…` 截断（右侧还有资源线）。
+/// composer 附件标签最多列出的图片数——再多以 `…` 截断（右侧还有资源线）。
 pub(super) const ATTACHMENT_NAMES_MAX: usize = 3;
 
 fn input_tokens() -> peri_theme::component::InputTokens {
@@ -28,8 +28,9 @@ fn input_tokens() -> peri_theme::component::InputTokens {
 
 /// composer 底部左侧的附件标签。
 ///
-/// 图片按提交顺序显示（`[图片] 图片 1 · 图片 2`，多张带 `×N`），一眼可辨「这是图片」
-/// 且多张可区分；非图片附件沿用计数文案（`@ N 个文件`）。
+/// 图片按提交顺序显示为 `[Image #1] · [Image #2]`，编号在整批附件内稳定；
+/// 非图片附件沿用计数文案（`@ N 个文件`）。标签只存在于底栏，不写入编辑器文本，
+/// 删除与提交语义不变。
 ///
 /// [Why 不统一用计数] 粘贴剪贴板图片产生的是上传式附件（`paste.rs`），
 /// `@ N 个文件` 看不出类型，也与 @mention 文件引用混淆。
@@ -37,38 +38,21 @@ pub(super) fn build_attachments_label(attachments: &[PendingAttachment]) -> Opti
     if attachments.is_empty() {
         return None;
     }
-    let images: Vec<&PendingAttachment> = attachments
+    let mut parts: Vec<String> = Vec::new();
+    let images = attachments
         .iter()
         .filter(|attachment| attachment.media_type.starts_with("image/"))
-        .collect();
-    let mut parts: Vec<String> = Vec::new();
-    if !images.is_empty() {
-        let mut names: Vec<String> = images
-            .iter()
-            .take(ATTACHMENT_NAMES_MAX)
-            .enumerate()
-            .map(|(index, _)| crate::kit::tui_render_unit::user_attachment_name(index + 1))
+        .count();
+    if images > 0 {
+        let mut labels: Vec<String> = (1..=images.min(ATTACHMENT_NAMES_MAX))
+            .map(peri_tui_components::image::attachment_label)
             .collect();
-        if images.len() > names.len() {
-            names.push("…".to_string());
+        if images > labels.len() {
+            labels.push("…".to_string());
         }
-        let names = names.join(" · ");
-        parts.push(if images.len() == 1 {
-            i18n::tr_args(
-                "composer-image-attachment",
-                &[("name".to_string(), FluentValue::from(names))],
-            )
-        } else {
-            i18n::tr_args(
-                "composer-image-attachments",
-                &[
-                    ("count".to_string(), FluentValue::from(images.len() as u64)),
-                    ("names".to_string(), FluentValue::from(names)),
-                ],
-            )
-        });
+        parts.push(labels.join(" · "));
     }
-    let others = attachments.len() - images.len();
+    let others = attachments.len() - images;
     if others > 0 {
         parts.push(i18n::tr_args(
             "composer-attachments",
@@ -135,7 +119,7 @@ pub(super) fn build_composer_tags(
 }
 
 /// §10 composer 边框：title_top 右侧 session title；title_bottom 左侧附件标签
-/// （`[图片] 图片 1`，见 [`build_attachments_label`]；插件选择见
+/// （`[Image #1] · [Image #2]`，见 [`build_attachments_label`]；插件选择见
 /// [`build_plugin_label`]）+ 右侧资源线
 /// （`footer_right`：CPU% · MEM · ctx，原状态栏迁移）。
 /// 窄屏（§11）逐级隐藏：`show_top=false`（h<12）隐藏 title_top 整行；

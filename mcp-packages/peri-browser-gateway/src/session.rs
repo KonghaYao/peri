@@ -134,6 +134,31 @@ impl Session {
         }
     }
 
+    /// The official Chrome DevTools frontend for the active page, in the form
+    /// Chrome's own `/json/list` reports: the `ws=` parameter carries no scheme.
+    ///
+    /// Kitesurf publishes the per-page endpoint as `/devtools/page/<id>` under
+    /// the browser endpoint it advertised, so the path is derived instead of
+    /// stored. `None` when the session has no page to debug.
+    pub fn devtools_url(&self) -> Option<(String, String)> {
+        let target_id = self.effective_active()?.to_owned();
+        let page = self.pages.iter().find(|page| page.target_id == target_id)?;
+        // The registry may advertise the browser endpoint (`…/devtools/browser`)
+        // or the bare authority; both put the page under `/devtools/page/`.
+        let base = match self.cdp_ws.split_once("/devtools/") {
+            Some((base, _)) => base,
+            None => self.cdp_ws.trim_end_matches('/'),
+        };
+        let ws = format!("{base}/devtools/page/{}", page.target_id);
+        Some((
+            format!(
+                "devtools://devtools/bundled/inspector.html?ws={}",
+                ws.trim_start_matches("ws://").trim_start_matches("wss://")
+            ),
+            page.target_id.clone(),
+        ))
+    }
+
     /// Marks `page_id` as active if the session still owns it.
     pub fn set_active_page(&mut self, page_id: &str) -> bool {
         if self.pages.iter().any(|page| page.target_id == page_id) {
@@ -351,6 +376,17 @@ impl SessionStore {
         session
             .ownership
             .page(session.effective_active().map(str::to_owned));
+        // Kitesurf's `Page.frameNavigated` trails the document by up to fifteen
+        // seconds, so a link the human clicks would leave the address bar stale.
+        // The tab list already carries the new URL; let the machine read the
+        // rest (title, history buttons) from the live page.
+        if let Some(url) = session
+            .effective_active()
+            .and_then(|active| session.pages.iter().find(|page| page.target_id == active))
+            .map(|page| page.url.clone())
+        {
+            session.ownership.page_url(url);
+        }
         let snapshot = session.clone();
         drop(sessions);
 
@@ -503,6 +539,13 @@ impl Session {
             .is_some_and(|active| self.pages.iter().any(|page| page.target_id == active));
         if !still_present {
             self.active_page = None;
+        }
+        // Kitesurf's `/json/list` order is not stable. Without a pinned tab the
+        // effective page follows `pages.first()`, so a reorder would swap the
+        // screencast — and, while the human holds the page, close and reopen the
+        // controller — on every poll. Pin the first page until it disappears.
+        if self.active_page.is_none() {
+            self.active_page = self.pages.first().map(|page| page.target_id.clone());
         }
     }
 }

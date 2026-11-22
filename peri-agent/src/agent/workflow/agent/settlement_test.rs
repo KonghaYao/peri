@@ -244,6 +244,40 @@ async fn completed_run_settles_child_to_done_and_idle() {
     assert_eq!(meta.work_state, WorkState::Idle);
 }
 
+/// 重试复用同一 `(run_id, agent_id)`：本次 attempt 在进入循环前失败时，
+/// 宿主不得读到上一轮解析的迭代用量。
+#[tokio::test]
+async fn retry_without_a_loop_does_not_reuse_previous_execution_limits() {
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    resources.register_bound_session(PARENT, CWD);
+    let ctx = workflow_context(
+        CWD.into(),
+        resources.clone() as Arc<dyn SessionResources>,
+        Arc::new(DoneModel),
+    );
+    let executor = crate::agent::workflow::WorkflowAgentExecutor::new(ctx);
+
+    let first = executor.execute(params()).await;
+    assert!(matches!(first, AgentRunResult::Ok { .. }), "{first:?}");
+    assert!(
+        executor
+            .execution_limits(&params().run_id, params().agent_id)
+            .is_some(),
+        "首次执行应记录解析后的上限与用量"
+    );
+
+    let mut retry = params();
+    retry.agent_type = Some("missing-agent-type".into());
+    let second = executor.execute(retry).await;
+    assert!(matches!(second, AgentRunResult::Dead { .. }), "{second:?}");
+    assert!(
+        executor
+            .execution_limits(&params().run_id, params().agent_id)
+            .is_none(),
+        "尚未进入循环的重试不得继承上一轮用量"
+    );
+}
+
 #[tokio::test]
 async fn failed_run_settles_child_to_error_and_idle() {
     let resources = crate::session::test_resources::mock::MockSessionResources::new();

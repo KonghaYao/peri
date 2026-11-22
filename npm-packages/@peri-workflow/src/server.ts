@@ -124,6 +124,9 @@ function createPorts(): WorkflowPorts {
         })
       },
       async append(runId: string, entry: JournalEntry): Promise<void> {
+        // `attempt.execution`（执行结局、解析后的迭代上限与用量）由宿主在写入
+        // journal 时按自己的执行事实补注：本进程看不到迭代计数与 run 预算，
+        // 不在这里重复推导一份。
         const structured: WorkflowJournalEntry = {
           ...entry,
           attempt: {

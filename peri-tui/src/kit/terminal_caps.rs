@@ -1,7 +1,7 @@
 //! 终端能力探测与符号降级（规格 §4.1 / §12）。
 //!
 //! - [`detect_caps`]：启动时探测一次（NO_COLOR / TERM=dumb / COLORTERM / TERM_PROGRAM /
-//!   PERI_IMAGE / TMUX），写入 `atoms::TERMINAL_CAPS`，进程生命周期内只读。
+//!   PERI_IMAGE / TMUX / ZELLIJ / WT_SESSION），写入 `atoms::TERMINAL_CAPS`，进程生命周期内只读。
 //! - [`symbols`]：按 unicode 能力选择 §4.1 的 Unicode 符号集或 ASCII 后备符号集。
 //!
 //! 不变式：任何状态都不能只依赖颜色（§12）——符号集降级表与规格 §4.1 逐条对应。
@@ -12,6 +12,8 @@
 pub enum GraphicsProtocol {
     /// kitty graphics protocol（Kitty / Ghostty / WezTerm / Warp 品牌映射）。
     Kitty,
+    /// Sixel（foot / mlterm / Windows Terminal 自动探测；`PERI_IMAGE=sixel` 强制）。
+    Sixel,
     /// iTerm2 inline image（OSC 1337）。能力位保留，渲染层当前视同 [`None`]。
     ITerm2,
     /// 无图片协议——像素渲染不可用，恒降级文本。
@@ -135,28 +137,38 @@ pub fn detect_caps() -> TerminalCaps {
 
 /// 图片协议探测：品牌映射 + 环境变量 override（§6.3 E5 / image-p0-p1-spec §1.4）。
 /// 仅启动时调用一次（entry.rs）。
-/// 优先级：`PERI_IMAGE` override > 品牌映射 > None。
+/// 优先级：`PERI_IMAGE` override > tmux/zellij 禁用 > Sixel 自动探测 > 品牌映射 > None。
 pub fn detect_graphics_protocol_from(get: &dyn Fn(&str) -> Option<String>) -> GraphicsProtocol {
-    // PERI_IMAGE override（最高优先级，值解析为小写）：off=禁用 / kitty=强制 / iterm2=强制。
-    // 空值视为未设置；未知值回落安全默认（宁可 false negative 不可 false positive）。
+    // PERI_IMAGE override（最高优先级，值解析为小写）：off=禁用 / kitty=强制 /
+    // sixel=强制 / iterm2=强制。空值视为未设置；未知值回落安全默认
+    // （宁可 false negative 不可 false positive）。
     if let Some(value) = get("PERI_IMAGE")
         && !value.is_empty()
     {
         return match value.to_ascii_lowercase().as_str() {
             "kitty" => GraphicsProtocol::Kitty,
+            "sixel" => GraphicsProtocol::Sixel,
             "iterm2" => GraphicsProtocol::ITerm2,
             // "off" 及任何未知值 → None
             _ => GraphicsProtocol::None,
         };
     }
 
-    // TMUX 存在 → None：tmux 内嵌会转发/剥协议序列，即使 TERM_PROGRAM 残留外层
-    // 终端品牌也禁用（矩阵硬性规则，宁可 false negative）。
-    if get("TMUX").is_some() {
+    // tmux / zellij 内嵌会转发/剥协议序列，即使 TERM_PROGRAM 残留外层
+    // 终端品牌也禁用（矩阵硬性规则，宁可 false negative）。显式 PERI_IMAGE
+    // override 已在上方返回，不受此禁用影响。
+    if get("TMUX").is_some() || is_zellij(get) {
         return GraphicsProtocol::None;
     }
 
-    // Windows ConPTY 会剥 APC（kitty protocol 依赖 APC），恒 None。
+    // Sixel 自动探测：Windows Terminal 与 TERM 显式声明的终端。
+    // Sixel 走 DCS，不依赖 Windows ConPTY 会剥掉的 APC，因此在 Windows 平台
+    // 回退 None 之前判定。
+    if is_windows_terminal(get) || term_supports_sixel(get) {
+        return GraphicsProtocol::Sixel;
+    }
+
+    // Windows ConPTY 会剥 APC（kitty protocol 依赖 APC），无 Sixel 信号时恒 None。
     // 作为尾表达式（下方品牌映射仅非 Windows 编译，Windows 下此即函数尾）。
     #[cfg(target_os = "windows")]
     {
@@ -174,6 +186,34 @@ pub fn detect_graphics_protocol_from(get: &dyn Fn(&str) -> Option<String>) -> Gr
         Some("iterm.app") => GraphicsProtocol::ITerm2,
         _ => GraphicsProtocol::None,
     };
+}
+
+/// zellij 会接管/转发终端图形序列，自动探测视为不可用。
+fn is_zellij(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("ZELLIJ").is_some()
+        || get("ZELLIJ_SESSION_NAME").is_some()
+        || get("ZELLIJ_VERSION").is_some()
+}
+
+/// Windows Terminal 的 Sixel 能力标记：`WT_SESSION` 只证明会话，不能区分
+/// 1.21/1.22；`TERM_PROGRAM` 旧写法仅作兼容。实际像素渲染还要求单元格像素
+/// 尺寸（`image_preview::supported`），Windows 上 crossterm 不提供，恒文本降级。
+fn is_windows_terminal(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("WT_SESSION").is_some()
+        || get("TERM_PROGRAM").is_some_and(|program| {
+            program
+                .to_ascii_lowercase()
+                .replace([' ', '-'], "_")
+                .eq("windows_terminal")
+        })
+}
+
+/// TERM 显式声明的 Sixel 终端：`*-sixel`、mlterm 与 foot。
+fn term_supports_sixel(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("TERM").is_some_and(|term| {
+        let term = term.to_ascii_lowercase();
+        term.contains("sixel") || term.contains("mlterm") || term.contains("foot")
+    })
 }
 
 /// 可注入环境读取器的探测实现（便于单测，不触碰真实 env）。
@@ -219,6 +259,25 @@ fn detect_caps_from(get: &dyn Fn(&str) -> Option<String>) -> TerminalCaps {
         truecolor,
         graphics: detect_graphics_protocol_from(get),
     }
+}
+
+/// `PERI_REDUCED_MOTION` 是否启用：`1`/`true`/`yes`/`on`（大小写不敏感，
+/// 忽略首尾空白）。
+///
+/// [Why] 装饰性扫光在部分用户与录屏环境里干扰阅读；只做启动时一次的进程级开关，
+/// 不引入配置面板与持久化字段。
+pub(crate) fn reduced_motion_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("PERI_REDUCED_MOTION").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// 用真实环境探测 reduced motion（启动时调用一次）。
+pub(crate) fn detect_reduced_motion() -> bool {
+    reduced_motion_from(&|name| std::env::var(name).ok())
 }
 
 #[cfg(test)]
@@ -397,17 +456,24 @@ mod tests {
                 "PERI_IMAGE=off 时 TERM_PROGRAM={prog:?} 应禁用"
             );
         }
-        // PERI_IMAGE=kitty / iterm2 → 强制对应协议（覆盖品牌映射）
+        // PERI_IMAGE=kitty / sixel / iterm2 → 强制对应协议（覆盖品牌映射）
         let caps = detect_graphics_protocol_from(&env_with(&[
             ("PERI_IMAGE", Some("kitty")),
             ("TERM_PROGRAM", Some("UnknownTerm")),
         ]));
         assert_eq!(caps, GraphicsProtocol::Kitty);
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("PERI_IMAGE", Some("sixel")),
+            ("TERM_PROGRAM", Some("UnknownTerm")),
+        ]));
+        assert_eq!(caps, GraphicsProtocol::Sixel);
         let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("iterm2"))]));
         assert_eq!(caps, GraphicsProtocol::ITerm2);
         // 值解析为小写：OFF 也命中 disable
         let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("OFF"))]));
         assert_eq!(caps, GraphicsProtocol::None);
+        let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("SIXEL"))]));
+        assert_eq!(caps, GraphicsProtocol::Sixel);
         // 未知值 → 安全默认 None；空值视为未设置
         let caps = detect_graphics_protocol_from(&env_with(&[("PERI_IMAGE", Some("halfblock"))]));
         assert_eq!(caps, GraphicsProtocol::None);
@@ -465,6 +531,86 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_graphics_protocol_sixel_from_term() {
+        for term in ["xterm-sixel", "mlterm-256color", "foot", "foot-extra"] {
+            let caps = detect_graphics_protocol_from(&env_with(&[("TERM", Some(term))]));
+            assert_eq!(caps, GraphicsProtocol::Sixel, "TERM={term} 应映射 Sixel");
+        }
+        // 大小写不敏感；普通 xterm 不误判。
+        let caps = detect_graphics_protocol_from(&env_with(&[("TERM", Some("XTERM-SIXEL"))]));
+        assert_eq!(caps, GraphicsProtocol::Sixel);
+        let caps = detect_graphics_protocol_from(&env_with(&[("TERM", Some("xterm-256color"))]));
+        assert_eq!(caps, GraphicsProtocol::None);
+    }
+
+    #[test]
+    fn test_detect_graphics_protocol_sixel_windows_terminal() {
+        // WT_SESSION 是 Windows Terminal 的权威信号（1.22+ 支持 Sixel）。
+        let caps = detect_graphics_protocol_from(&env_with(&[(
+            "WT_SESSION",
+            Some("8b1c2f9d-0000-0000-0000-000000000000"),
+        )]));
+        assert_eq!(caps, GraphicsProtocol::Sixel);
+
+        // 兼容旧版只写 TERM_PROGRAM 的环境；空格/连字符与大小写归一。
+        for program in ["Windows_Terminal", "windows terminal", "Windows-Terminal"] {
+            let caps = detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", Some(program))]));
+            assert_eq!(
+                caps,
+                GraphicsProtocol::Sixel,
+                "TERM_PROGRAM={program} 应映射 Sixel"
+            );
+        }
+    }
+
+    #[test]
+    fn test_detect_graphics_protocol_multiplexers_disable_auto_only() {
+        // tmux / zellij 内自动探测禁用，即使 TERM 声称支持 Sixel。
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("TMUX", Some("/tmp/tmux-501/default,123,0")),
+            ("TERM", Some("foot")),
+        ]));
+        assert_eq!(caps, GraphicsProtocol::None);
+        for name in ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_VERSION"] {
+            let caps = detect_graphics_protocol_from(&env_with(&[
+                (name, Some("1")),
+                ("TERM", Some("foot")),
+            ]));
+            assert_eq!(caps, GraphicsProtocol::None, "{name} 应禁用自动探测");
+        }
+
+        // 显式 PERI_IMAGE 覆盖仍然生效。
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("PERI_IMAGE", Some("sixel")),
+            ("TMUX", Some("/tmp/tmux-501/default,123,0")),
+        ]));
+        assert_eq!(caps, GraphicsProtocol::Sixel);
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("PERI_IMAGE", Some("kitty")),
+            ("ZELLIJ", Some("1")),
+        ]));
+        assert_eq!(caps, GraphicsProtocol::Kitty);
+    }
+
+    /// Windows 契约：Sixel 走 DCS，可在 ConPTY 的 APC 剥离之外自动启用；
+    /// 无 Sixel 信号时仍回落 None。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_detect_graphics_protocol_windows_sixel_before_conpty_fallback() {
+        for env in [
+            vec![("TERM", Some("foot"))],
+            vec![("WT_SESSION", Some("session"))],
+            vec![("TERM_PROGRAM", Some("Windows_Terminal"))],
+        ] {
+            let caps = detect_graphics_protocol_from(&env_with(&env));
+            assert_eq!(caps, GraphicsProtocol::Sixel, "env={env:?}");
+        }
+        let caps =
+            detect_graphics_protocol_from(&env_with(&[("TERM_PROGRAM", Some("UnknownTerm"))]));
+        assert_eq!(caps, GraphicsProtocol::None);
+    }
+
+    #[test]
     fn test_detect_graphics_protocol_none_fallback() {
         // tmux / 未知 / 无任何 env → None（安全默认，宁可 false negative）
         for prog in [Some("tmux"), Some("UnknownTerm"), None] {
@@ -478,6 +624,12 @@ mod tests {
         // TMUX 环境变量存在 → None（即使 TERM_PROGRAM 残留外层终端品牌）
         let caps = detect_graphics_protocol_from(&env_with(&[
             ("TMUX", Some("/tmp/tmux-501/default,123,0")),
+            ("TERM_PROGRAM", Some("kitty")),
+        ]));
+        assert_eq!(caps, GraphicsProtocol::None);
+        // zellij 同理（任一标识存在即禁用自动探测）
+        let caps = detect_graphics_protocol_from(&env_with(&[
+            ("ZELLIJ", Some("0")),
             ("TERM_PROGRAM", Some("kitty")),
         ]));
         assert_eq!(caps, GraphicsProtocol::None);
@@ -510,5 +662,29 @@ mod tests {
             detect_graphics_protocol_from(&get)
         );
         assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::ITerm2);
+
+        let get = env_with(&[("PERI_IMAGE", Some("sixel"))]);
+        assert_eq!(
+            detect_caps_from(&get).graphics,
+            detect_graphics_protocol_from(&get)
+        );
+        assert_eq!(detect_caps_from(&get).graphics, GraphicsProtocol::Sixel);
+    }
+
+    #[test]
+    fn test_reduced_motion_accepts_only_enabling_values() {
+        for value in ["1", "true", "TRUE", "yes", "On", "  yes  "] {
+            let overrides = [("PERI_REDUCED_MOTION", Some(value))];
+            let get = env_with(&overrides);
+            assert!(reduced_motion_from(&get), "{value:?} 应启用 reduced motion");
+        }
+        for value in ["0", "false", "no", "off", "enabled", ""] {
+            let overrides = [("PERI_REDUCED_MOTION", Some(value))];
+            let get = env_with(&overrides);
+            assert!(!reduced_motion_from(&get), "{value:?} 不应启用");
+        }
+        // 未设置时保持现有动画。
+        let get = env_with(&[]);
+        assert!(!reduced_motion_from(&get));
     }
 }

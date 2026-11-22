@@ -292,6 +292,8 @@ fn fence_span(name: &str, open_start: usize, start: usize, end: usize) -> FenceS
         frozen: true,
         logical: start..end,
         layout_bytes: 0,
+        prefix: 4,
+        h_view: None,
     }
 }
 

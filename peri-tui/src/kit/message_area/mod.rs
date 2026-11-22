@@ -13,6 +13,8 @@ pub(crate) mod grid;
 mod handlers;
 mod hits;
 mod image_action;
+mod inline_image_draw;
+mod mermaid_scroll;
 mod props;
 pub(crate) mod render;
 pub(crate) mod scroll;
@@ -45,8 +47,16 @@ mod window_viewport_tests;
 mod p_matrix_tui_tests;
 
 #[cfg(test)]
+#[path = "inline_image_draw_test.rs"]
+mod inline_image_draw_tests;
+
+#[cfg(test)]
 #[path = "mermaid_viewport_test.rs"]
 mod mermaid_viewport_tests;
+
+#[cfg(test)]
+#[path = "mermaid_hscroll_test.rs"]
+mod mermaid_hscroll_tests;
 
 #[cfg(test)]
 use std::sync::Arc;

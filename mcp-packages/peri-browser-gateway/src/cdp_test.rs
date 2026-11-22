@@ -267,6 +267,53 @@ async fn the_http_endpoint_is_not_used_as_a_websocket() {
     http.abort();
 }
 
+#[tokio::test]
+async fn a_flood_of_events_does_not_block_a_command_reply() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("handshake");
+        while let Some(Ok(Message::Text(text))) = socket.next().await {
+            let request: Value = serde_json::from_str(text.as_str()).expect("json");
+            if request.get("method").and_then(Value::as_str) == Some("Runtime.enable") {
+                // Kitesurf replays every execution context of the target to
+                // each session; more events than the buffer holds must not
+                // stall the socket reader ahead of the reply.
+                for index in 0..(EVENT_CAPACITY * 4) {
+                    let event = json!({
+                        "method": "Runtime.executionContextCreated",
+                        "params": {"context": {"id": index}},
+                    });
+                    socket
+                        .send(Message::Text(event.to_string().into()))
+                        .await
+                        .expect("event");
+                }
+                let reply = json!({"id": request["id"], "result": {}});
+                socket
+                    .send(Message::Text(reply.to_string().into()))
+                    .await
+                    .expect("reply");
+            }
+        }
+    });
+
+    let controller = Controller::connect(&format!("ws://{address}"), "t1")
+        .await
+        .expect("connect");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(2),
+        controller.command("Runtime.enable", json!({})),
+    )
+    .await
+    .expect("the reply must not wait behind the event queue");
+    assert!(reply.is_ok(), "{reply:?}");
+    server.abort();
+}
+
 #[test]
 fn controller_url_is_the_writable_page_endpoint() {
     assert_eq!(
@@ -294,19 +341,43 @@ fn controller_url_is_the_writable_page_endpoint() {
     assert!(error.to_string().contains("invalid target id"));
 }
 
-/// Minimal CDP server that records requests and answers the domains the
-/// controller helpers use.
+/// Minimal CDP server that records requests and answers like Kitesurf does for
+/// the controller helpers: `Runtime.evaluate` drives the page and the history
+/// lags behind the committed document.
 struct Recorder {
     url: String,
     requests: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
     server: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Default)]
+struct FakePage {
+    href: String,
+    entries: Vec<(i64, String)>,
+    current: usize,
+}
+
 async fn start_recorder() -> Recorder {
+    start_recorder_with(false).await
+}
+
+/// `stale_first_assign` makes the fake answer the way Kitesurf does for a
+/// moment after a navigation: the assignment never runs and the reply is
+/// `Execution context was destroyed`.
+async fn start_recorder_with(stale_first_assign: bool) -> Recorder {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorded = requests.clone();
+    let mut page = FakePage {
+        href: "https://example.test/".to_owned(),
+        entries: vec![
+            (7, "https://example.test/".to_owned()),
+            (8, "https://example.test/next".to_owned()),
+        ],
+        current: 0,
+    };
+    let mut stale_first_assign = stale_first_assign;
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
         let mut socket = tokio_tungstenite::accept_async(stream)
@@ -320,18 +391,42 @@ async fn start_recorder() -> Recorder {
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let result = match method {
-                "Page.getLayoutMetrics" => {
-                    json!({"cssLayoutViewport": {"clientWidth": 800, "clientHeight": 600}})
+            let params = request.get("params").cloned().unwrap_or(Value::Null);
+            let stale = stale_first_assign
+                && method == "Runtime.evaluate"
+                && params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .is_some_and(|expression| expression.starts_with("location.assign("));
+            if stale {
+                stale_first_assign = false;
+            }
+            let result = if stale {
+                Value::Null
+            } else {
+                match method {
+                    "Page.getLayoutMetrics" => {
+                        json!({"cssLayoutViewport": {"clientWidth": 800, "clientHeight": 600}})
+                    }
+                    "Page.getNavigationHistory" => json!({
+                        "currentIndex": page.current,
+                        "entries": page.entries.iter().map(|(id, url)| json!({
+                            "id": id,
+                            "url": url,
+                            "title": "Example",
+                        })).collect::<Vec<_>>(),
+                    }),
+                    "Runtime.evaluate" => {
+                        evaluate(&mut page, params.get("expression").and_then(Value::as_str))
+                    }
+                    _ => json!({}),
                 }
-                "Page.getNavigationHistory" => json!({
-                    "currentIndex": 0,
-                    "entries": [{"id": 7, "url": "https://example.test/", "title": "Example"}]
-                }),
-                "Runtime.evaluate" => json!({"result": {"value": "Example"}}),
-                _ => json!({}),
             };
-            let response = json!({"id": id, "result": result});
+            let response = if stale {
+                json!({"id": id, "error": {"code": -32000, "message": "Execution context was destroyed."}})
+            } else {
+                json!({"id": id, "result": result})
+            };
             socket
                 .send(Message::Text(response.to_string().into()))
                 .await
@@ -342,6 +437,24 @@ async fn start_recorder() -> Recorder {
         url: format!("ws://{address}"),
         requests,
         server,
+    }
+}
+
+/// Answers the two expressions the helpers send. `location.assign` moves the
+/// document but leaves the history where it was, like Kitesurf does.
+fn evaluate(page: &mut FakePage, expression: Option<&str>) -> Value {
+    let expression = expression.unwrap_or_default();
+    if let Some(url) = expression
+        .strip_prefix("location.assign(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        page.href = serde_json::from_str(url).expect("string literal");
+        return json!({"result": {"type": "undefined"}});
+    }
+    match expression {
+        "location.href" => json!({"result": {"value": page.href}}),
+        "document.title" => json!({"result": {"value": "Example"}}),
+        _ => json!({"result": {"value": "Example"}}),
     }
 }
 
@@ -435,6 +548,34 @@ async fn input_helpers_send_the_cdp_input_domain() {
     recorder.server.abort();
 }
 
+/// Kitesurf answers `Execution context was destroyed` for a moment after any
+/// navigation and then drops the assignment. One retry tells that apart from a
+/// navigation that really committed.
+#[tokio::test]
+async fn a_stale_context_answer_is_retried_once() {
+    let recorder = start_recorder_with(true).await;
+    let controller = Controller::connect(&recorder.url, "t1")
+        .await
+        .expect("controller connects");
+
+    let state = navigate(&controller, "https://example.test/next")
+        .await
+        .expect("the retry lands the document");
+    assert_eq!(state.url, "https://example.test/next");
+
+    let assigns = recorder
+        .params("Runtime.evaluate")
+        .iter()
+        .filter(|params| {
+            params
+                .get("expression")
+                .and_then(Value::as_str)
+                .is_some_and(|expression| expression.starts_with("location.assign("))
+        })
+        .count();
+    assert_eq!(assigns, 2, "the stale answer is retried exactly once");
+}
+
 #[tokio::test]
 async fn navigation_helpers_read_and_drive_the_page() {
     let recorder = start_recorder().await;
@@ -446,42 +587,35 @@ async fn navigation_helpers_read_and_drive_the_page() {
     assert_eq!(state.url, "https://example.test/");
     assert_eq!(state.title, "Example");
     assert!(!state.can_go_back);
-    assert!(!state.can_go_forward);
+    assert!(state.can_go_forward);
 
     let state = navigate(&controller, "https://example.test/next")
         .await
         .expect("navigate");
-    assert_eq!(state.url, "https://example.test/");
-    assert_eq!(
-        recorder.params("Page.navigate"),
-        vec![json!({"url": "https://example.test/next"})]
+    // The history still points at the old document; the live location wins.
+    assert_eq!(state.url, "https://example.test/next");
+    assert!(state.can_go_back);
+    assert!(!state.can_go_forward);
+    assert!(
+        recorder.params("Page.navigate").is_empty(),
+        "Page.navigate wedges Kitesurf, so it must not be used"
     );
-
-    // Out-of-range steps are a no-op, not a failed navigation.
-    let state = history_step(&controller, -1).await.expect("history no-op");
-    assert_eq!(state.url, "https://example.test/");
-    assert!(recorder
-        .methods()
-        .iter()
-        .all(|method| method != "Page.navigateToHistoryEntry"));
+    assert!(recorder.params("Runtime.evaluate").iter().any(|params| {
+        params["expression"] == json!("location.assign(\"https://example.test/next\")")
+    }));
 
     enable_diagnostics(&controller).await.expect("diagnostics");
-    assert_eq!(
-        recorder
-            .methods()
-            .iter()
-            .filter(|method| *method == "Runtime.enable")
-            .count(),
-        1
-    );
-    assert_eq!(
-        recorder
-            .methods()
-            .iter()
-            .filter(|method| *method == "Network.enable")
-            .count(),
-        1
-    );
+    for domain in ["Page.enable", "Runtime.enable", "Network.enable"] {
+        assert_eq!(
+            recorder
+                .methods()
+                .iter()
+                .filter(|method| *method == domain)
+                .count(),
+            1,
+            "{domain} must be enabled once"
+        );
+    }
 
     let viewport = layout_metrics(&controller).await.expect("metrics");
     assert_eq!(
@@ -493,6 +627,26 @@ async fn navigation_helpers_read_and_drive_the_page() {
     );
 
     recorder.server.abort();
+}
+
+#[test]
+fn address_bar_input_gets_the_scheme_a_browser_would_pick() {
+    assert_eq!(normalize_url("example.com"), "https://example.com");
+    assert_eq!(
+        normalize_url("  example.com/a?b=1  "),
+        "https://example.com/a?b=1"
+    );
+    // A port is not a scheme.
+    assert_eq!(normalize_url("example.com:8443"), "https://example.com:8443");
+    assert_eq!(normalize_url("localhost:7391"), "http://localhost:7391");
+    assert_eq!(
+        normalize_url("127.0.0.1:8827/json"),
+        "http://127.0.0.1:8827/json"
+    );
+    assert_eq!(normalize_url("http://example.com"), "http://example.com");
+    assert_eq!(normalize_url("https://example.com"), "https://example.com");
+    assert_eq!(normalize_url("about:blank"), "about:blank");
+    assert_eq!(normalize_url("data:text/html,hi"), "data:text/html,hi");
 }
 
 #[test]
