@@ -496,6 +496,7 @@
 
   const match = location.pathname.match(/^\/s\/([^/]+)\//);
   const overlay = document.getElementById("overlay");
+  const main = document.getElementById("main");
   const canvas = document.getElementById("screen");
   const ctx = canvas.getContext("2d");
   const tabRow = document.getElementById("tabRow");
@@ -839,15 +840,30 @@
     syncControls();
   }
 
+  // The canvas backing store is the frame's real pixel grid (set in `pump`);
+  // CSS only scales it down to fit the monitor. Never upscale past 1:1: a
+  // downscaled frame is resampled once and stays sharp, an upscaled one is
+  // blurry on Retina displays.
+  function fitCanvas() {
+    const meta = state.meta;
+    if (!meta) return;
+    const cssW = Math.max(1, meta.deviceWidth || 1);
+    const cssH = Math.max(1, meta.deviceHeight || 1);
+    const availW = Math.max(1, main.clientWidth || 1);
+    const availH = Math.max(1, main.clientHeight || 1);
+    const scale = Math.min(1, availW / cssW, availH / cssH);
+    canvas.style.width = `${Math.max(1, Math.floor(cssW * scale))}px`;
+    canvas.style.height = `${Math.max(1, Math.floor(cssH * scale))}px`;
+  }
+
   function handleMeta(message) {
     // A frame for a page this viewer already left must not move the canvas or
     // the coordinate base of the page it is showing now.
     if (message.pageId !== state.active) return;
+    // Only the display box changes here: resizing the backing store would
+    // clear the frame already painted while the next one is still in flight.
     state.meta = message;
-    if (canvas.width !== message.deviceWidth || canvas.height !== message.deviceHeight) {
-      canvas.width = Math.max(1, message.deviceWidth);
-      canvas.height = Math.max(1, message.deviceHeight);
-    }
+    fitCanvas();
   }
 
   function handleText(raw) {
@@ -948,15 +964,14 @@
           bitmap.close();
           continue;
         }
-        if (state.meta) {
-          const width = Math.max(1, state.meta.deviceWidth);
-          const height = Math.max(1, state.meta.deviceHeight);
-          if (canvas.width !== width || canvas.height !== height) {
-            canvas.width = width;
-            canvas.height = height;
-          }
+        // Backing store = the frame's own pixels, 1:1. The screencast bound
+        // makes this differ from the device box, and the JPEG is not stretched
+        // to `deviceWidth`: that would blur a clamped frame.
+        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
         }
-        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(bitmap, 0, 0);
         bitmap.close();
         state.paintedPage = state.meta ? state.meta.pageId : state.active;
         hideOverlay();
@@ -976,18 +991,21 @@
     if (visible && state.latest) onBinary(state.latest);
   }
 
-  // Pointer position in canvas (JPEG) pixels, which is what the wire carries.
-  // The gateway maps that box to CSS pixels with the last frame's metadata and
+  // Pointer position in the last frame metadata's device space
+  // (`deviceWidth`/`deviceHeight`), which is what the wire carries. When the
+  // screencast bound clamps a frame its JPEG pixel size differs from that box,
+  // so `canvas.width` is only a fallback: using it would scale the position by
+  // the clamp ratio. The gateway maps the box to CSS pixels with
   // the live `Page.getLayoutMetrics` viewport (`ws::canvas_to_css`), so the
-  // client must not pre-scale to `viewportWidth`/`viewportHeight`: with a
+  // client must not pre-scale to `viewportWidth`/`viewportHeight` either: with a
   // device pixel ratio other than 1 the position would be scaled twice.
   function pagePoint(event) {
     const meta = state.meta;
     if (!meta) return null;
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
-    const width = Math.max(1, canvas.width || meta.deviceWidth || 1);
-    const height = Math.max(1, canvas.height || meta.deviceHeight || 1);
+    const width = Math.max(1, meta.deviceWidth || canvas.width || 1);
+    const height = Math.max(1, meta.deviceHeight || canvas.height || 1);
     const x = ((event.clientX - rect.left) / rect.width) * width;
     const y = ((event.clientY - rect.top) / rect.height) * height;
     return {
@@ -1239,6 +1257,7 @@
     if (event.key === "Escape" && !devtoolsPop.hidden) hideDevtoolsPop();
   });
   document.addEventListener("visibilitychange", () => setVisible(!document.hidden));
+  window.addEventListener("resize", fitCanvas);
 
   function connect() {
     setConnection("connecting");

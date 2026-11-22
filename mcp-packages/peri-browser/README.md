@@ -169,7 +169,7 @@ stateDiagram-v2
 ### 6.4 帧策略
 
 - 一个页面一路 screencast，由网关开在 viewer 连接上，扇出给 N 个 viewer；慢客户端丢帧，只保留最新一帧。
-- JPEG `quality` 默认 55；`maxWidth/maxHeight` 取最大 viewer 的画布尺寸（CSS px × dpr，上限 1600×1000），小画布客户端缩放显示。
+- JPEG `quality` 默认 70；`maxWidth/maxHeight` 取最大 viewer 的画布尺寸（CSS px × dpr，上限 1600×1000），小画布客户端缩放显示。
 - 逐帧 `Page.screencastFrameAck`；ack 后若又来了新帧，直接丢弃旧的。
 - 页面静止时没有帧（screencast 随页面 damaged 产生）；监控页隐藏（`document.hidden`）时 `Page.stopScreencast`，回到前台再启动。
 - 重连先渲染缓存的最后一帧，等新帧替换，不闪白屏。
@@ -200,7 +200,7 @@ sequenceDiagram
   M->>K: 重连 controller
 ```
 
-- 帧：`Page.startScreencast`（viewer 可用）。`format=jpeg`、`quality` 50–60、尺寸跟随客户端；逐帧 ack，慢客户端只保留最新帧。无 viewer 时 `Page.stopScreencast`，避免空转编码。
+- 帧：`Page.startScreencast`（viewer 可用）。`format=jpeg`、`quality` 70、尺寸跟随客户端；逐帧 ack，慢客户端只保留最新帧。无 viewer 时 `Page.stopScreencast`，避免空转编码。
 - 坐标：`Page.getLayoutMetrics`（viewer 可用）给视口，`screencastFrame.metadata` 给 `deviceWidth`/`deviceHeight`/`pageScaleFactor`/`scrollOffset*`；按比例把画布坐标换回 CSS 像素。首帧后要用一次真实点击校准，不能只看比例。
 - 键盘：`Input.dispatchKeyEvent`（带 modifiers）覆盖快捷键；普通文本与粘贴走 `Input.insertText`。
 - 只读时输入一律拒绝，UI 明确标注；不要在前端偷偷排队等接管。
@@ -299,7 +299,7 @@ sequenceDiagram
 | `PERI_BROWSER_MONITOR_BIND` | `127.0.0.1:7391` | 网关固定监听地址；非环回必须显式设置 |
 | `PERI_BROWSER_MONITOR_TOKEN_TTL_MS` | `0` | `0` = 随会话生命周期；否则到期 404 |
 | `PERI_BROWSER_MONITOR_MAX_VIEWERS` | 8 | 单页面并发 viewer 上限 |
-| `PERI_BROWSER_FRAME_QUALITY` | 55 | screencast JPEG 质量 |
+| `PERI_BROWSER_FRAME_QUALITY` | 70 | screencast JPEG 质量 |
 | `PERI_BROWSER_FRAME_MAX_WIDTH` | 1600 | 帧宽上限，跟随最大 viewer |
 | `PERI_BROWSER_MONITOR_TLS_CERT` / `_KEY` | 无 | 网关自己终止 TLS 时使用；否则由反代终止 |
 
