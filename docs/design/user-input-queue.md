@@ -27,6 +27,16 @@ loading 期间普通输入只进入 Thread MQ 的待发投影，不打断当前�
 空闲提交同样遵循队首顺序；一次交接占用本次 idle，即使 Receive 尚未开始，也不会追加第二条。
 单条与全部立即发送使用同一个指定 ID 集合的操作，只提前处理选中内容。
 
+立即发送按 loop 所处阶段投递：只有实际 LLM 调用/流式期间、且该输入尚未被 Receive 摄取时，
+才设置 steer 并取消当前 turn；已摄取（Claimed/Delivered）的输入已经进入当次请求上下文，
+取消只会让同一请求重跑一遍，因此不再取消。Act 工具批次执行中、Compact、idle 等待与收尾阶段
+不取消执行，只放行 MQ。工具批次放行的输入由整批完成后的下一次 Receive 在同一 attempt 内摄取，
+并进入下一轮 Reason；同一批多条立即发送按 MQ 顺序进入同一 Receive 批次。Stop 不受阶段门限制，
+任何阶段都立即硬取消；摄取前的输入回到 Queued，需要重新发送。Stop 收尾中的重新发送仍是显式
+继续：令牌已由 Stop 取消，不重复取消，但记录 steer 让宿主保留续跑激活。记录复位与发送选择
+撤回在同一临界区完成：复位之后才提交的接纳不会被撤回；复位前已经接纳的记录回落到 Queued、
+不写 `handed_off`，并撤回其选择，必须重新发送。
+
 入队保存完整内容与原始草稿，不创建额外持久账本。显式发送提交选中的完整集合，由下一次
 Receive 原子写入历史；后到草稿不能加入，自动 idle 只选择队首一条。变更请求绑定当前 lifecycle、
 revision、generation 与 attempt；回执不明确时保留原命令与 input ID，不能换身份重建。
@@ -34,7 +44,7 @@ revision、generation 与 attempt；回执不明确时保留原命令与 input I
 ```text
 Queued → Dispatching → Claimed → Delivered
    └──→ Withdrawn
-Dispatching → Queued：仅在已从 MQ 撤出且确认未领取时
+Dispatching → Queued：摄取前执行失败、Stop，或确认未领取后从 MQ 撤出（与发送选择撤回同一临界区）
 ```
 
 Receive 在 MQ 事务中领取，Stop 通过 `cancel_input` 撤出未被领取的输入；展示状态只投影已确认结果。
@@ -56,8 +66,9 @@ Receive 在 MQ 事务中领取，Stop 通过 `cancel_input` 撤出未被领取�
 首次 Receive 将本批用户消息 ID 交给输入准备 hook；图片与文件引用按这些 ID 逐条处理，
 保留已有附件和消息身份，不重新读取历史消息的引用。
 
-为接收立即发送内容而中断和收尾期间，不释放普通待发内容；用户已选中的发送集合优先执行。
-选中内容执行到 idle 后，普通待发内容恢复逐条调度。跨 turn 的自动启动仍须等待
+流式 steer 触发的中断和收尾期间，不释放普通待发内容；用户已选中的发送集合优先执行。
+Act 工具批次、Compact、idle 与收尾阶段的立即发送只放行 MQ，由下一次 Receive 摄取，
+不取消当前执行。选中内容执行到 idle 后，普通待发内容恢复逐条调度。跨 turn 的自动启动仍须等待
 transcript flush 与事件 forwarder 收尾，确认自然成功；同一 attempt 的 idle 唤醒经既有 inbox 进行。
 用户 Stop 取消尚未开始的 ticket，保留待办，并只回收明确未被 Receive 领取的内容。
 执行失败不视作自然完成；当前消息写入失败显式报错，不以旧 Work 恢复状态冻结新输入。

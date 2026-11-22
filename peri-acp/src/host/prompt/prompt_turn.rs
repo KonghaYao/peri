@@ -681,7 +681,9 @@ pub(super) async fn run_prompt_attempt(
         if let Some((activation, watermark, result_watermark)) = attempt_activation {
             if result.stop_reason == executor::PromptStopReason::Cancelled {
                 if user_input_mailbox.is_steer_interruption(&input_attempt) {
-                    // 用户显式发送打断当前 turn：MQ 已放行输入，收尾后必须继续调度。
+                    // 模型调用/流式期间的显式发送打断当前 turn：MQ 已放行输入，
+                    // 收尾后必须继续调度。工具批次/空闲阶段的立即发送走软注入，
+                    // 不会进入取消分支。
                     tracing::debug!(
                         session_id = %session_id,
                         thread_id = %thread_id,

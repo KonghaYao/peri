@@ -215,10 +215,23 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
             .enqueue_sync(input)
             .expect("the enqueue sync fixture result is required for this assertion");
     }
+    let steer_gate = mailbox.begin_model_request();
     mailbox
         .dispatch_sync(&make_dispatch(&mailbox, &[&b]))
         .expect("the dispatch sync fixture result is required for this assertion");
-    assert!(cancel.is_cancelled(), "单发请求中断真实执行");
+    assert!(
+        cancel.is_cancelled(),
+        "模型请求在途时的单发请求中断真实执行"
+    );
+    assert!(
+        mailbox.is_steer_interruption(&first),
+        "流式 steer 必须保留可区分的取消原因"
+    );
+    drop(steer_gate);
+    assert!(
+        !mailbox.state.lock().model_request_in_flight,
+        "guard 结束必须关闭模型请求窗口"
+    );
     assert_eq!(
         mailbox
             .snapshot_sync()
@@ -313,6 +326,239 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
 }
 
 #[test]
+fn test_mailbox_dispatch_during_model_request_cancels_and_records_steer() {
+    let (mailbox, _) = make_mailbox();
+    let cancel = CancellationToken::new();
+    let ticket = mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let input = make_input(&mailbox, "流式期间的立即发送");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
+
+    let gate = mailbox.begin_model_request();
+    mailbox
+        .dispatch_sync(&make_dispatch(&mailbox, &[&input]))
+        .expect("the dispatch sync fixture result is required for this assertion");
+
+    assert!(cancel.is_cancelled(), "模型请求在途时必须硬取消当前执行");
+    assert!(
+        mailbox.is_steer_interruption(&ticket),
+        "流式 steer 必须与 Stop 区分"
+    );
+    drop(gate);
+    assert!(
+        !mailbox.state.lock().model_request_in_flight,
+        "guard Drop 必须关闭模型请求窗口"
+    );
+}
+
+#[test]
+fn test_mailbox_dispatch_outside_model_request_hands_off_without_cancel() {
+    let (mailbox, inbox) = make_mailbox();
+    let cancel = CancellationToken::new();
+    let ticket = mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let input = make_input(&mailbox, "工具批次中的立即发送");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
+
+    mailbox
+        .dispatch_sync(&make_dispatch(&mailbox, &[&input]))
+        .expect("the dispatch sync fixture result is required for this assertion");
+
+    assert!(!cancel.is_cancelled(), "非模型窗口不得取消当前执行");
+    assert!(!mailbox.is_steer_interruption(&ticket));
+    assert!(
+        mailbox
+            .state
+            .lock()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.reason
+                == crate::session::user_input_mailbox::mailbox::InterruptReason::None),
+        "软注入不得设置 steer 取消原因"
+    );
+    let released = inbox.queue_for_test().drain_all_sync();
+    assert_eq!(released.len(), 1, "MQ 仍须放行以便下一次 Receive 摄取");
+    assert_eq!(
+        released[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id()
+            .as_uuid()
+            .to_string(),
+        input.input_id
+    );
+}
+
+#[test]
+fn test_mailbox_stop_during_model_request_cancels_immediately() {
+    let (mailbox, _) = make_mailbox();
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let gate = mailbox.begin_model_request();
+
+    mailbox.stop_sync();
+
+    assert!(cancel.is_cancelled(), "Stop 不受阶段门限制");
+    assert!(
+        !mailbox.state.lock().model_request_in_flight,
+        "Stop 必须复位防御性阶段标志"
+    );
+    drop(gate);
+}
+
+#[test]
+fn test_mailbox_stop_outside_model_request_cancels_immediately() {
+    let (mailbox, _) = make_mailbox();
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+
+    mailbox.stop_sync();
+
+    assert!(cancel.is_cancelled(), "Stop 在任何阶段都立即取消");
+}
+
+#[test]
+fn test_attach_attempt_clears_model_request_flag() {
+    let (mailbox, _) = make_mailbox();
+    let input = make_input(&mailbox, "旧请求泄漏");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    let ticket = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
+    let gate = mailbox.begin_model_request();
+    assert!(mailbox.state.lock().model_request_in_flight);
+
+    assert!(mailbox.attach_attempt_sync(&ticket, CancellationToken::new()));
+    assert!(
+        !mailbox.state.lock().model_request_in_flight,
+        "attach_attempt 必须防止旧窗口泄漏到新 attempt"
+    );
+    drop(gate);
+}
+
+#[test]
+fn test_finish_attempt_clears_model_request_flag() {
+    let (mailbox, _) = make_mailbox();
+    let ticket = mailbox
+        .attach_external_attempt_sync(CancellationToken::new(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let gate = mailbox.begin_model_request();
+    assert!(mailbox.state.lock().model_request_in_flight);
+
+    mailbox.finish_attempt_sync(&ticket, UserInputAttemptOutcome::Completed);
+
+    assert!(
+        !mailbox.state.lock().model_request_in_flight,
+        "finish_attempt 必须防止旧窗口泄漏到下一个 attempt"
+    );
+    drop(gate);
+}
+
+#[test]
+fn test_fail_reserved_clears_model_request_flag() {
+    let (mailbox, _) = make_mailbox();
+    let input = make_input(&mailbox, "早退");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    let ticket = mailbox
+        .reserve_run()
+        .expect("the reserve run fixture result is required for this assertion");
+    mailbox.attach_attempt_sync(&ticket, CancellationToken::new());
+    let gate = mailbox.begin_model_request();
+
+    mailbox.fail_reserved(&ticket);
+
+    assert!(
+        !mailbox.state.lock().model_request_in_flight,
+        "fail_reserved 的 Drop 路径必须运行期复位"
+    );
+    drop(gate);
+}
+
+#[test]
+fn test_mailbox_soft_dispatch_then_failed_attempt_returns_input_to_queued() {
+    let (mailbox, inbox) = make_mailbox();
+    let cancel = CancellationToken::new();
+    let ticket = mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let input = make_input(&mailbox, "失败前未摄取");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    mailbox
+        .dispatch_sync(&make_dispatch(&mailbox, &[&input]))
+        .expect("the dispatch sync fixture result is required for this assertion");
+    assert!(!cancel.is_cancelled());
+    assert_eq!(
+        mailbox.snapshot_sync().items[0].state,
+        UserInputState::Dispatching
+    );
+
+    mailbox.finish_attempt_sync(&ticket, UserInputAttemptOutcome::Failed);
+
+    assert_eq!(
+        mailbox.snapshot_sync().items[0].state,
+        UserInputState::Queued,
+        "摄取前失败必须回到待发，等待用户重新发送"
+    );
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "未摄取输入必须从 MQ 撤出"
+    );
+    let input_id = MessageId::from(
+        uuid::Uuid::parse_str(&input.input_id)
+            .expect("the fixture input id must be a valid UUID for this assertion"),
+    );
+    assert!(
+        mailbox.mark_delivered_sync(&[input_id]).is_empty(),
+        "摄取前失败不得写交付历史"
+    );
+}
+
+#[test]
+fn test_mailbox_soft_dispatch_then_stop_returns_input_to_queued() {
+    let (mailbox, inbox) = make_mailbox();
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    let input = make_input(&mailbox, "Stop 前未摄取");
+    mailbox
+        .enqueue_sync(&input)
+        .expect("the enqueue sync fixture result is required for this assertion");
+    mailbox
+        .dispatch_sync(&make_dispatch(&mailbox, &[&input]))
+        .expect("the dispatch sync fixture result is required for this assertion");
+
+    mailbox.stop_sync();
+
+    assert!(cancel.is_cancelled(), "Stop 立即取消");
+    assert_eq!(
+        mailbox.snapshot_sync().items[0].state,
+        UserInputState::Queued,
+        "Stop 后未摄取输入回到待发"
+    );
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "Stop 必须撤出未领取的发送选择"
+    );
+}
+
+#[test]
 fn test_mailbox_dispatch_snapshot_and_consecutive_commands_preserve_acceptance_order() {
     let (mailbox, inbox) = make_mailbox();
     let current = mailbox
@@ -327,6 +573,9 @@ fn test_mailbox_dispatch_snapshot_and_consecutive_commands_preserve_acceptance_o
             .enqueue_sync(input)
             .expect("the enqueue sync fixture result is required for this assertion");
     }
+    // 本用例验证发送选择的接受顺序；显式持有模型请求窗口，保持“立即发送
+    // 打断旧执行”的前置条件（窗口外的发送只移交 MQ，不取消）。
+    let gate = mailbox.begin_model_request();
     mailbox
         .dispatch_sync(&make_dispatch(&mailbox, &[&inputs[1]]))
         .expect("the dispatch sync fixture result is required for this assertion");
@@ -336,6 +585,7 @@ fn test_mailbox_dispatch_snapshot_and_consecutive_commands_preserve_acceptance_o
             &[&inputs[2], &inputs[0], &inputs[1]],
         ))
         .expect("the dispatch sync fixture result is required for this assertion");
+    drop(gate);
     mailbox
         .enqueue_sync(&inputs[3])
         .expect("the enqueue sync fixture result is required for this assertion");
@@ -1038,4 +1288,158 @@ async fn dispatch_confirms_handoff_on_an_idle_session() {
     releaser
         .await
         .expect("the releaser fixture result is required for this assertion");
+}
+
+/// [steer 阶段门] 移交确认迟到时不能取消已经包含该输入的请求。
+///
+/// `dispatch` 的有界确认可以在 Receive 摄取输入、下一次 Reason 打开请求窗口
+/// 之后才看到 `HandedOff`。此时该输入已进入当次请求上下文，取消只会让同一
+/// 请求白跑一遍；阶段门必须以「接纳是否已被摄取」为准，而不是只看窗口。
+#[tokio::test]
+async fn test_late_handoff_confirmation_does_not_cancel_consuming_request() {
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = Arc::new(SessionInbox::new(Arc::clone(&queue)));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    let cancel = CancellationToken::new();
+    let ticket = mailbox
+        .attach_external_attempt(cancel.clone(), false)
+        .await
+        .expect("the attach external attempt fixture result is required for this assertion");
+    let input = make_input(&mailbox, "批次内输入");
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+
+    let mut wake = queue.subscribe_wake();
+    let (entered, release) = queue.gate_next_receive();
+    let dispatch = {
+        let mailbox = Arc::clone(&mailbox);
+        let request = make_dispatch(&mailbox, &[&input]);
+        tokio::spawn(async move { mailbox.dispatch(&request).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), wake.changed())
+        .await
+        .expect("dispatch 必须先提交发送选择")
+        .expect("wake channel must stay open");
+
+    // 模拟工具批次结束后的 Receive：选中后停在提交门，由测试放行。
+    let worker_queue = Arc::clone(&queue);
+    let worker = tokio::spawn(async move {
+        let owner = worker_queue.owner();
+        let permit = owner.begin_receive(
+            MqReceivePurpose::ModelLoop,
+            ExecutionBinding {
+                turn_id: TurnId::new(),
+                attempt_id: AttemptId::new(),
+            },
+        );
+        let items = owner
+            .select_for_receive(&permit)
+            .await
+            .expect("the select for receive fixture result is required for this assertion");
+        assert_eq!(items.len(), 1, "只摄取被挑选的发送输入");
+        owner
+            .receive(permit, items)
+            .await
+            .expect("the receive fixture result is required for this assertion")
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered)
+        .await
+        .expect("Receive 必须进入提交门")
+        .expect("receive gate must stay open");
+    release.send(()).expect("release receive gate");
+    let outcome = tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .expect("receive worker must finish")
+        .expect("receive worker panicked");
+    assert_eq!(outcome.items.len(), 1, "输入必须已写入历史");
+
+    // 摄取完成后才开始下一次模型请求；迟到的移交确认不得再取消它。
+    let input_id = MessageId::from(
+        uuid::Uuid::parse_str(&input.input_id)
+            .expect("the parse str fixture result is required for this assertion"),
+    );
+    mailbox.mark_claimed(&[input_id]).await;
+    let gate = mailbox.begin_model_request();
+    let receipt = dispatch
+        .await
+        .expect("dispatch task must finish")
+        .expect("the dispatch fixture result is required for this assertion");
+    assert_eq!(receipt.results[0].state, UserInputState::Claimed);
+    assert!(!cancel.is_cancelled(), "已摄取输入不能触发硬取消");
+    assert!(
+        !mailbox.is_steer_interruption(&ticket),
+        "已摄取输入不能记录为 steer 中断"
+    );
+    drop(gate);
+}
+
+/// [steer 阶段门] Stop 复位与并发 dispatch 的接纳/撤回必须有序。
+///
+/// Stop 收尾复位记录、撤回发送选择时，并发的 dispatch 可能刚好提交接纳。
+/// 复位之后的接纳不能被收尾撤回删除，也不能在记录已回到 Queued 后残留
+/// `handed_off`；记录必须保持可重新发送、可再次被 Receive 领取。
+#[tokio::test]
+async fn test_stop_reset_and_concurrent_dispatch_leave_record_reselectable() {
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = Arc::new(SessionInbox::new(Arc::clone(&queue)));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt(cancel.clone(), false)
+        .await
+        .expect("the attach external attempt fixture result is required for this assertion");
+    let input = make_input(&mailbox, "收尾中的重新发送");
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+
+    let mut wake = queue.subscribe_wake();
+    let dispatch = {
+        let mailbox = Arc::clone(&mailbox);
+        let request = make_dispatch(&mailbox, &[&input]);
+        tokio::spawn(async move { mailbox.dispatch(&request).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), wake.changed())
+        .await
+        .expect("dispatch 必须先提交发送选择")
+        .expect("wake channel must stay open");
+
+    // 接纳已提交、移交确认尚未完成时执行 Stop：复位与撤回发生在确认之前。
+    mailbox.stop().await;
+    let receipt = dispatch
+        .await
+        .expect("dispatch task must finish")
+        .expect("the dispatch fixture result is required for this assertion");
+    assert_eq!(
+        receipt.results[0].state,
+        UserInputState::Queued,
+        "复位后的接纳必须回到待发"
+    );
+    assert_eq!(
+        record_state(&mailbox, &input.input_id),
+        Some((UserInputState::Queued, false)),
+        "回到待发的记录不能残留 handed_off"
+    );
+
+    // 重新发送必须能再次被挑选并摄取。
+    let resent = mailbox
+        .dispatch(&make_dispatch(&mailbox, &[&input]))
+        .await
+        .expect("the dispatch fixture result is required for this assertion");
+    assert_eq!(resent.results[0].state, UserInputState::Dispatching);
+    let received = queue.drain_all_sync();
+    assert_eq!(received.len(), 1, "重新发送的输入必须被 Receive 领取");
+    assert_eq!(
+        received[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id()
+            .as_uuid()
+            .to_string(),
+        input.input_id
+    );
+    assert!(cancel.is_cancelled(), "Stop 必须先取消旧执行");
 }

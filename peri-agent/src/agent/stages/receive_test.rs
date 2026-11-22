@@ -316,6 +316,9 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
     mailbox
         .enqueue_sync(&b)
         .expect("the enqueue sync fixture result is required for this assertion");
+    // 本用例验证连续发送选择的接收顺序；显式持有模型请求窗口，保持
+    // “立即发送打断旧执行”的前置条件（窗口外的发送只移交 MQ，不取消）。
+    let gate = mailbox.begin_model_request();
     for (command_id, input) in [("dispatch-b", &b), ("dispatch-a", &a)] {
         mailbox
             .dispatch(&DispatchUserInputsRequest {
@@ -327,6 +330,7 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
             .await
             .expect("the dispatch fixture result is required for this assertion");
     }
+    drop(gate);
     mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);
     let ticket = mailbox
         .reserve_run()

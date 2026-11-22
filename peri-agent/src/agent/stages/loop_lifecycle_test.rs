@@ -235,6 +235,206 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
     );
 }
 
+/// [回归测试] Act 工具批次中放行的立即发送不取消执行；下一次 Receive 在
+/// 同一 attempt 内摄取，工具结果在前、steer 输入按 MQ 顺序在后。
+#[tokio::test]
+async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration() {
+    use crate::agent::react::{Reasoning, ToolCall};
+    use crate::session::tool_catalog::SessionToolCatalog;
+    use crate::session::user_input_mailbox::UserInputMailbox;
+    use crate::tools::BaseTool;
+    use peri_acp_types::session::{
+        DispatchUserInputsRequest, EnqueueUserInputRequest, SessionInbox, UserInputState,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering;
+    use tokio_util::sync::CancellationToken;
+
+    struct ToolBatchLlm {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        requests: Arc<parking_lot::Mutex<Vec<Vec<BaseMessage>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ReactLLM for ToolBatchLlm {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::agent::react::StreamingContext>,
+        ) -> crate::error::AgentResult<Reasoning> {
+            self.requests.lock().push(messages.to_vec());
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(Reasoning::with_tools(
+                    "need the blocking tool",
+                    vec![ToolCall::new(
+                        "call-block",
+                        "Blocking",
+                        serde_json::json!({}),
+                    )],
+                ));
+            }
+            Ok(Reasoning::with_answer("", "done"))
+        }
+        fn model_name(&self) -> String {
+            "mock-tool-batch".to_string()
+        }
+    }
+
+    struct BlockingTool {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl BaseTool for BlockingTool {
+        fn name(&self) -> &str {
+            "Blocking"
+        }
+        fn description(&self) -> &str {
+            "blocks the Act batch"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn is_direct(&self) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok("tool finished".to_string())
+        }
+    }
+
+    let session = Session::new(
+        Arc::from("/tmp/steer-during-tool-batch"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut tools: BTreeMap<String, Arc<dyn BaseTool>> = BTreeMap::new();
+    tools.insert(
+        "Blocking".to_string(),
+        Arc::new(BlockingTool {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }),
+    );
+    let shared_tools = Arc::new(parking_lot::RwLock::new(tools.clone()));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let mut context = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_llm(Arc::new(ToolBatchLlm {
+        calls: Arc::clone(&calls),
+        requests: Arc::clone(&requests),
+    }))
+    .with_tools(shared_tools)
+    .with_tool_catalog(Arc::new(SessionToolCatalog::new(tools, None)))
+    .build();
+    let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
+    let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
+    let cancel = CancellationToken::new();
+    let ticket = mailbox
+        .attach_external_attempt_sync(cancel.clone(), false)
+        .expect("the attach external attempt sync fixture result is required for this assertion");
+    context.session.user_input_mailbox = Some(mailbox.clone());
+    context.session.queue.push_sync(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        BaseMessage::human("初始任务"),
+    ));
+
+    let task = tokio::spawn(crate::agent::stages::run_react_loop(context, 10));
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("工具批次必须开始执行");
+
+    let mut input_ids = Vec::new();
+    for text in ["steer-1", "steer-2"] {
+        let input_id = uuid::Uuid::now_v7().to_string();
+        let receipt = mailbox
+            .enqueue(&EnqueueUserInputRequest {
+                session_id: "session".into(),
+                generation: mailbox.generation().into(),
+                command_id: format!("enqueue-{text}"),
+                input_id: input_id.clone(),
+                content: MessageContent::text(text),
+                original_draft: text.into(),
+                plugin_selections: Vec::new(),
+            })
+            .await
+            .expect("the enqueue fixture result is required for this assertion");
+        assert_eq!(receipt.results[0].state, UserInputState::Queued);
+        input_ids.push(input_id);
+    }
+    mailbox
+        .dispatch(&DispatchUserInputsRequest {
+            session_id: "session".into(),
+            generation: mailbox.generation().into(),
+            command_id: "dispatch-during-tool-batch".into(),
+            input_ids: input_ids.clone(),
+        })
+        .await
+        .expect("the dispatch fixture result is required for this assertion");
+    assert!(!cancel.is_cancelled(), "工具批次执行中不得取消当前 attempt");
+
+    release.notify_one();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("工具完成后 loop 必须继续")
+        .expect("loop task 不得 panic");
+    assert!(
+        matches!(result, LoopResult::Completed),
+        "软注入必须完成同一 attempt，不得返回 Interrupted: {result:?}"
+    );
+    assert!(!cancel.is_cancelled(), "整个过程中不应触发取消");
+    assert!(
+        mailbox.is_active_ticket(&ticket),
+        "软注入不得结束当前 attempt"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "工具后必须再走一轮 Reason");
+    assert!(
+        mailbox.snapshot_sync().items.is_empty(),
+        "两条 steer 都应在同一 Receive 批次内交付"
+    );
+
+    let requests = requests.lock();
+    let second = requests.get(1).expect("第二轮 Reason 请求必须存在");
+    let tool_position = second
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                BaseMessage::Tool { tool_call_id, .. } if tool_call_id == "call-block"
+            )
+        })
+        .expect("第二轮请求必须包含工具结果");
+    let steer_positions: Vec<_> = ["steer-1", "steer-2"]
+        .iter()
+        .map(|text| {
+            second
+                .iter()
+                .position(|message| {
+                    matches!(message, BaseMessage::Human { .. }) && message.content() == *text
+                })
+                .unwrap_or_else(|| panic!("第二轮请求缺少 {text}"))
+        })
+        .collect();
+    assert!(
+        tool_position < steer_positions[0] && steer_positions[0] < steer_positions[1],
+        "同一批 steer 必须按 MQ 顺序排在工具结果之后: {steer_positions:?}, tool={tool_position}"
+    );
+}
+
 #[tokio::test]
 async fn test_e2e_cancel_before_loop() {
     // e2e：cancel_token 在 run_react_loop 之前触发 → Interrupted
