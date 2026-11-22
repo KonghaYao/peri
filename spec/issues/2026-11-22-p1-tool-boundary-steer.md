@@ -73,6 +73,7 @@
 基线 `1b7d3557b`，定向验证全部通过，详见
 `docs/verification/steer-stage-gate-2026-11-22.md`：
 
+- `peri-agent --lib`（全量）：1593 passed / 0 failed / 5 ignored。
 - `peri-agent --lib user_input_mailbox`：60 passed / 0 failed。
 - `peri-agent --lib loop_lifecycle`：7 passed / 0 failed（新增工具批次 steer 用例）。
 - `peri-acp --lib steer_activation`：3 passed / 0 failed。
@@ -80,5 +81,8 @@
 - `bash scripts/check-changed.sh`、定向 `clippy -D warnings`、`cargo fmt --check`、
   `git diff --check`：通过。
 
-未覆盖：全量 `--all-targets`/CI 矩阵、真实 TUI 手工交互、外置 `peri-e2e` 场景；
-阶段门边界竞态仅记录为行为边界，未做确定性复现。
+首轮 PR CI 暴露既有 `receive_test` 的顺序用例同样假设 dispatch 必取消，已改为在
+模型请求窗口内 dispatch；首轮 CodeRabbit 两条 Minor 意见（错误处理仍持 guard、
+判定与取消之间存在间隙）已收紧并由 `test_run_reason_error_hook_observes_closed_steer_gate`
+覆盖。未覆盖：全量 `--all-targets`/CI 矩阵、真实 TUI 手工交互、外置 `peri-e2e`
+场景；阶段门边界竞态仅记录为行为边界，未做确定性复现。

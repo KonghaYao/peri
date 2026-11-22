@@ -16,7 +16,7 @@
 | 验收项 | 结果 | 证据 |
 | --- | --- | --- |
 | 1. 工具批次执行中立即发送：批次完成、同一 attempt 的下一次 Receive 摄取、不出现 Interrupted | 通过 | `test_run_react_loop_steer_during_tool_batch_is_received_next_iteration`：取消 token 未触发（`!cancel.is_cancelled()`）、`LoopResult::Completed`、ticket 仍有效、Reason 调用 2 次、mailbox 快照为空（两条均交付）；第二轮请求顺序为 工具结果 < `steer-1` < `steer-2` |
-| 2. 实际 LLM 调用/流式中立即发送：仍硬取消，新 attempt 入口 Receive 摄取 | 通过 | `test_mailbox_dispatch_during_model_request_cancels_and_records_steer`；`peri-acp --lib steer_activation` 3 passed（既有流式 steer 用例：`steer_dispatch_cancelled_turn_keeps_activation_and_consumes_input` 等） |
+| 2. 实际 LLM 调用/流式中立即发送：仍硬取消，新 attempt 入口 Receive 摄取 | 通过 | `test_mailbox_dispatch_during_model_request_cancels_and_records_steer`；`test_run_reason_error_hook_observes_closed_steer_gate`（`on_error` 时窗口已关闭）；`peri-acp --lib steer_activation` 3 passed（既有流式 steer 用例：`steer_dispatch_cancelled_turn_keeps_activation_and_consumes_input` 等） |
 | 3. Stop 任何阶段立即取消；未摄取输入回 Queued | 通过 | `test_mailbox_stop_during_model_request_cancels_immediately`、`test_mailbox_stop_outside_model_request_cancels_immediately`、`test_mailbox_soft_dispatch_then_stop_returns_input_to_queued` |
 | 4. 普通待发仍 idle-only，不进入工具边界注入 | 通过（路径未改） | `test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completion`、`test_mailbox_running_enqueue_never_wakes_consumption_queue`（均在 mailbox 60 passed 内） |
 | 5. 多条 steer 同一 Receive 批次按 MQ 顺序进入上下文 | 通过 | 上表第 1 项的顺序断言；`test_mailbox_dispatch_snapshot_and_consecutive_commands_preserve_acceptance_order`（接受顺序仍按服务端 `(enqueued_at,id)`） |
@@ -27,12 +27,21 @@
 `test_fail_reserved_clears_model_request_flag` 覆盖；窗口外发送只移交 MQ 的用例为
 `test_mailbox_dispatch_outside_model_request_hands_off_without_cancel`。
 
+窗口边界收紧（首轮 CI/评审后）：
+
+- `run_reason` 的 select 返回即释放 guard，`run_on_error` 等错误处理不再落在窗口内；
+  由 `test_run_reason_error_hook_observes_closed_steer_gate` 断言 `on_error` 时窗口为关。
+- `dispatch` 的阶段门判定、`reason=Steer` 与 `cancel()` 在同一 mailbox 锁临界区完成，
+  guard 的 `Drop` 不能插在判定与取消之间。
+
 ## 2. 运行命令与结果
 
 | 命令 | 结果 |
 | --- | --- |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib` | 1593 passed / 0 failed / 5 ignored（全量 lib，修复轮） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib user_input_mailbox` | 60 passed / 0 failed（1537 filtered out） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib loop_lifecycle` | 7 passed / 0 failed（1590 filtered out） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --lib receive::tests::test_receive_user_input_delivery_keeps_identity_order_and_render_fifo` | 1 passed / 0 failed（首轮 CI 失败用例） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib steer_activation` | 3 passed / 0 failed（1508 filtered out） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib -- steer` | 108 passed / 0 failed（2698 filtered out；UI 契约回归） |
 | `bash scripts/check-changed.sh` | 通过（`cargo check --locked` 反向依赖闭包 14 个 crate；2m59s） |
@@ -57,6 +66,17 @@
    自定义 `CARGO_HOME`（仅索引替换）完成构建；依赖版本与 feature 未改变。
 4. **TUI 测试链接器提示**：`ld: __eh_frame section too large ...` 为链接器性能
    提示，非编译/lint 错误；同次 108 passed。
+5. **首轮 PR CI（ubuntu）失败**：`agent::stages::receive::tests::test_receive_user_input_delivery_keeps_identity_order_and_render_fifo`
+   在 `reserve_run()` panic。原因是该既有用例同样默认「dispatch 必然取消」，
+   `Interrupted` + `reason=None` 触发失败回收置 `paused=true`。已改为在
+   `begin_model_request()` 窗口内执行两次 dispatch，复跑该用例并通过全量 lib
+   （1593 passed）。
+6. **首轮 CodeRabbit 两条 Minor 意见**：①错误处理仍在 guard 内——已改为 select
+   返回即释放 guard，并新增 `test_run_reason_error_hook_observes_closed_steer_gate`；
+   ②阶段门判定与 `cancel()` 之间存在 guard 可插入的间隙——已把取消并入同一
+   临界区。两条均按建议收紧，未改产品语义。
+7. **pre-commit `tui-components` 环境失败**：系统 `python3` 为 3.9（缺 `tomllib`）；
+   改用 `python3.12` 置于 PATH 后 8 个用例与边界检查全部通过，非代码问题。
 
 ## 4. 未覆盖与证据边界
 

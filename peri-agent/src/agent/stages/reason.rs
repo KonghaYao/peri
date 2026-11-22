@@ -240,62 +240,62 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .as_ref()
         .map(|mailbox| mailbox.begin_model_request());
 
-    let (reasoning, observed_body): (Reasoning, Option<serde_json::Value>) = tokio::select! {
+    let model_result = tokio::select! {
         biased;
         _ = ctx.session.turn.cancel_token.cancelled() => {
             return Err(AgentError::Interrupted);
         }
-        result = ctx.runtime.llm.generate_reasoning_with_observed_body(&messages_snapshot, &tool_refs, streaming) => {
-            match result {
-                Ok((r, body)) => (r, body),
-                Err(e) => {
-                    tracing::error!(
-                        step,
-                        model = %ctx.runtime.llm.model_name(),
-                        error = %e,
-                        "LLM generate_reasoning 失败"
-                    );
-                    // LLM 报错时 emit LlmCallEnd，让消费者可见
-                    ctx.runtime.event_bus.emit_observe(ObserveEvent::LlmCallEnd {
-                        turn_id,
-                        agent_id,
-                        step,
-                        model: ctx.runtime.llm.model_name(),
-                        output: format!("ERROR: {}", e),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cache_creation_input_tokens: None,
-                        cache_read_input_tokens: None,
-                        request_id: None,
-                    });
-                    // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
-                    // S1.3：LLM 内部自报 cancel（model_bridge.rs is_cancelled → Err(Interrupted)，
-                    // 外层 biased select 的 cancel 分支未必抢先，微竞态可达）必须映射为
-                    // Interrupted，不能吞成 LlmFailure（遥测分类错误）。
-                    let reason = match &e {
-                        AgentError::LlmHttpError { .. }
-                        | AgentError::LlmError(..)
-                        | AgentError::ModelError(..) => {
-                            TurnErrorReason::LlmFailure
-                        }
-                        AgentError::Interrupted => TurnErrorReason::Interrupted,
-                        _ => TurnErrorReason::LlmFailure,
-                    };
-                    ctx.runtime.event_bus.emit_observe(ObserveEvent::TurnError {
-                        turn_id,
-                        agent_id,
-                        reason,
-                        message: e.to_string(),
-                    });
-                    // 通过 middleware chain 触发 on_error
-                    let _ = crate::agent::stages::middleware_runner::run_on_error(ctx, &e).await;
-                    return Err(e);
-                }
-            }
+        result = ctx.runtime.llm.generate_reasoning_with_observed_body(&messages_snapshot, &tool_refs, streaming) => result,
+    };
+    // select 返回即关闭窗口：错误处理与 payload 处理期间不得再被 steer 取消。
+    drop(steer_gate);
+
+    let (reasoning, observed_body): (Reasoning, Option<serde_json::Value>) = match model_result {
+        Ok((r, body)) => (r, body),
+        Err(e) => {
+            tracing::error!(
+                step,
+                model = %ctx.runtime.llm.model_name(),
+                error = %e,
+                "LLM generate_reasoning 失败"
+            );
+            // LLM 报错时 emit LlmCallEnd，让消费者可见
+            ctx.runtime
+                .event_bus
+                .emit_observe(ObserveEvent::LlmCallEnd {
+                    turn_id,
+                    agent_id,
+                    step,
+                    model: ctx.runtime.llm.model_name(),
+                    output: format!("ERROR: {}", e),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                    request_id: None,
+                });
+            // TurnError：通知 TUI 显示错误 SystemNote（v2_bridge → AgentExecutionFailed → 红色消息）
+            // S1.3：LLM 内部自报 cancel（model_bridge.rs is_cancelled → Err(Interrupted)，
+            // 外层 biased select 的 cancel 分支未必抢先，微竞态可达）必须映射为
+            // Interrupted，不能吞成 LlmFailure（遥测分类错误）。
+            let reason = match &e {
+                AgentError::LlmHttpError { .. }
+                | AgentError::LlmError(..)
+                | AgentError::ModelError(..) => TurnErrorReason::LlmFailure,
+                AgentError::Interrupted => TurnErrorReason::Interrupted,
+                _ => TurnErrorReason::LlmFailure,
+            };
+            ctx.runtime.event_bus.emit_observe(ObserveEvent::TurnError {
+                turn_id,
+                agent_id,
+                reason,
+                message: e.to_string(),
+            });
+            // 通过 middleware chain 触发 on_error
+            let _ = crate::agent::stages::middleware_runner::run_on_error(ctx, &e).await;
+            return Err(e);
         }
     };
-    // select 结束即关闭窗口；后续事件与 payload 处理期间不得再被 steer 取消。
-    drop(steer_gate);
 
     // emit LlmRequestPayload（仅发送 Model 的安全 observation body；复用本次
     // LLM 调用已构建的 request，见 generate_reasoning_with_observed_body）

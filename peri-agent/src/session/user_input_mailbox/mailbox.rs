@@ -218,6 +218,12 @@ impl UserInputMailbox {
             mailbox: Arc::clone(self),
         }
     }
+
+    /// 仅测试：观察实际 LLM 调用窗口是否开启。
+    #[cfg(test)]
+    pub(crate) fn is_model_request_in_flight(&self) -> bool {
+        self.state.lock().model_request_in_flight
+    }
 }
 
 /// 实际模型请求的在途 guard；生命周期覆盖一次 `run_reason` 的 select。

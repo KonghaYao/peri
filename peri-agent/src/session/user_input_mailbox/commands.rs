@@ -395,7 +395,6 @@ impl UserInputMailbox {
             .filter_map(|(id, _)| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
             .collect();
         let mut unknown = Vec::new();
-        let mut cancel = None;
         let results = {
             let mut state = self.state.lock();
             if !accepted.is_empty() {
@@ -415,7 +414,11 @@ impl UserInputMailbox {
                     if let Some(active) = state.active.as_mut() {
                         // 用户在 Stop 后重新发送是明确继续；旧 attempt 仍须先完成收尾。
                         active.reason = crate::session::user_input_mailbox::InterruptReason::Steer;
-                        cancel = active.cancel.clone();
+                        // 与阶段门同一临界区发出取消：guard Drop 需要同一把锁，
+                        // 因此窗口不会在判定与取消之间关闭。
+                        if let Some(cancel) = active.cancel.clone() {
+                            cancel.cancel();
+                        }
                     }
                 }
             }
@@ -466,9 +469,6 @@ impl UserInputMailbox {
                 Vec::new()
             }
         };
-        if let Some(cancel) = cancel {
-            cancel.cancel();
-        }
         if !unknown.is_empty() {
             // 超时/未知不证明未发送；保留 Dispatching，由相同 ID 的显式重试求证。
             return Err(UserInputQueueError::Store(format!(
