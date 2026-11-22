@@ -56,6 +56,7 @@ fn wait_for_resize(async_img: &mut AsyncImage) -> bool {
 #[test]
 fn supported_gates_on_capability_bit() {
     assert!(super::supported(&caps(GraphicsProtocol::Kitty)));
+    assert!(super::supported(&caps(GraphicsProtocol::Sixel)));
     assert!(
         !super::supported(&caps(GraphicsProtocol::ITerm2)),
         "ITerm2 检测但 disabled：未验证不启用"
@@ -74,14 +75,18 @@ fn picker_for_maps_caps_to_protocol_type() {
         super::picker_for(&caps(GraphicsProtocol::Kitty)).protocol_type(),
         ProtocolType::Kitty
     );
-    // ITerm2 / None 不强制 Kitty（halfblocks 安全态，像素渲染由 supported 门控）。
-    assert_ne!(
-        super::picker_for(&caps(GraphicsProtocol::ITerm2)).protocol_type(),
-        ProtocolType::Kitty
+    assert_eq!(
+        super::picker_for(&caps(GraphicsProtocol::Sixel)).protocol_type(),
+        ProtocolType::Sixel
     );
-    assert_ne!(
+    // ITerm2 / None 不强制像素协议（halfblocks 安全态，像素渲染由 supported 门控）。
+    assert_eq!(
+        super::picker_for(&caps(GraphicsProtocol::ITerm2)).protocol_type(),
+        ProtocolType::Halfblocks
+    );
+    assert_eq!(
         super::picker_for(&TerminalCaps::default()).protocol_type(),
-        ProtocolType::Kitty
+        ProtocolType::Halfblocks
     );
 }
 
@@ -121,6 +126,31 @@ fn static_protocol_transmit_once_across_frames() {
             .iter()
             .any(|c| c.symbol().contains('\u{10EEEE}')),
         "第二帧应仍有占位符渲染"
+    );
+}
+
+// ── Sixel 协议（§6.5 协议选择）────────────────────────────────────────
+
+#[test]
+fn sixel_protocol_encodes_pixels_for_picker() {
+    let picker = super::picker_for(&caps(GraphicsProtocol::Sixel));
+    let proto = super::static_protocol(
+        &picker,
+        solid_image(8, 8),
+        Size::new(4, 2),
+        Resize::Fit(None),
+    )
+    .expect("Sixel static protocol 构造失败");
+    let mut term = Terminal::new(TestBackend::new(10, 4)).expect("Sixel test backend");
+    term.draw(|f| f.render_widget(ratatui_image::Image::new(&proto), Rect::new(0, 0, 4, 2)))
+        .expect("Sixel frame 渲染失败");
+    assert!(
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol().contains("\x1bP")),
+        "Sixel 协议应把 DCS 数据写入首格"
     );
 }
 

@@ -37,18 +37,20 @@ use super::terminal_caps::{GraphicsProtocol, TerminalCaps};
 
 /// 从 [`TerminalCaps`] 品牌映射构造 `Picker`。
 ///
-/// 不走 `from_query_stdio`（不读写 stdin）。仅 [`GraphicsProtocol::Kitty`] 强制
-/// `ProtocolType::Kitty`；ITerm2（检测但 disabled）与 None 保持默认 halfblocks
-/// 安全态，像素渲染由 [`supported`] 统一门控。
+/// 不走 `from_query_stdio`（不读写 stdin）。[`GraphicsProtocol::Kitty`] 与
+/// [`GraphicsProtocol::Sixel`] 分别强制对应 `ProtocolType`；ITerm2（检测但
+/// disabled）与 None 保持默认 halfblocks 安全态，像素渲染由 [`supported`] 统一门控。
 ///
 /// 注意：`Picker::halfblocks()` 构造时按环境探测 tmux（TERM 以 `tmux` 开头或
 /// `TERM_PROGRAM == "tmux"` 时 spawn `tmux set -p allow-passthrough on`）；
-/// T1 探测矩阵保证 `graphics == Kitty` 时 TMUX 环境变量不存在，仅
-/// `PERI_IMAGE=kitty` 强制场景可能触发（用户显式强制，S2 已接受风险）。
+/// T1 探测矩阵保证自动探测下 `graphics` 非 None 时 TMUX 环境变量不存在，仅
+/// `PERI_IMAGE=kitty|sixel` 强制场景可能触发（用户显式强制，S2 已接受风险）。
 pub fn picker_for(caps: &TerminalCaps) -> Picker {
     let mut picker = Picker::halfblocks();
-    if caps.graphics == GraphicsProtocol::Kitty {
-        picker.set_protocol_type(ProtocolType::Kitty);
+    match caps.graphics {
+        GraphicsProtocol::Kitty => picker.set_protocol_type(ProtocolType::Kitty),
+        GraphicsProtocol::Sixel => picker.set_protocol_type(ProtocolType::Sixel),
+        GraphicsProtocol::ITerm2 | GraphicsProtocol::None => {}
     }
     picker
 }
@@ -76,17 +78,19 @@ pub fn stateful_protocol(picker: &Picker, img: DynamicImage) -> StatefulProtocol
     picker.new_resize_protocol(img)
 }
 
-/// 降级判定：仅 `caps.graphics == Kitty` 且 picker 实际协议为 Kitty 系时
-/// 允许像素渲染（决策文档 §8.2「可恢复降级」）。
+/// 降级判定：仅 Kitty / Sixel 且 picker 实际协议匹配时允许像素渲染
+/// （决策文档 §8.2「可恢复降级」）。
 ///
 /// - `None` / `ITerm2`（未验证不启用）→ false；
-/// - `Kitty` → 二次判定 `picker_for` 的协议类型（目前恒真：本模块强制设置、
-///   不触碰 stdin 探测；保留判定点以覆盖未来版本内置黑名单降级的可能）。
+/// - `Kitty` / `Sixel` → 二次判定 `picker_for` 的协议类型（目前恒真：本模块强制
+///   设置、不触碰 stdin 探测；保留判定点以覆盖未来版本内置黑名单降级的可能）。
 pub fn supported(caps: &TerminalCaps) -> bool {
-    if caps.graphics != GraphicsProtocol::Kitty {
-        return false;
-    }
-    matches!(picker_for(caps).protocol_type(), ProtocolType::Kitty)
+    let expected = match caps.graphics {
+        GraphicsProtocol::Kitty => ProtocolType::Kitty,
+        GraphicsProtocol::Sixel => ProtocolType::Sixel,
+        GraphicsProtocol::ITerm2 | GraphicsProtocol::None => return false,
+    };
+    picker_for(caps).protocol_type() == expected
 }
 
 /// 后台 resize/encode 卸载的动态协议（S2 §6 非阻塞要求）。
