@@ -397,31 +397,56 @@ impl UserInputMailbox {
         let mut unknown = Vec::new();
         let results = {
             let mut state = self.state.lock();
+            // 已摄取（Claimed/Delivered）的输入已进入当次请求的上下文，不能再触发
+            // 打断；仍在 Dispatching 的接纳才需要中断。Stop/失败收尾把记录放回
+            // Queued 时，本次接纳已不属于当前执行：不记录移交，并在同一临界区
+            // 撤回选择，避免留下「Queued 且已挑选」的不可领取记录。
+            let mut unconsumed_handoff = false;
+            let mut stale = Vec::new();
             if !accepted.is_empty() {
                 for record in &mut state.records {
-                    if promoted.contains(&record.input_id)
-                        && accepted
+                    if !promoted.contains(&record.input_id)
+                        || !accepted
                             .iter()
                             .any(|id| id.as_uuid().to_string() == record.input_id)
                     {
-                        record.handed_off = true;
+                        continue;
+                    }
+                    match record.state {
+                        UserInputState::Dispatching => {
+                            record.handed_off = true;
+                            unconsumed_handoff = true;
+                        }
+                        UserInputState::Claimed | UserInputState::Delivered => {
+                            record.handed_off = true;
+                        }
+                        UserInputState::Queued => stale.push(record.input_id.clone()),
+                        _ => {}
                     }
                 }
-                // 只有实际 LLM 调用/流式期间才硬取消；工具批次、Compact、idle
-                // 与收尾阶段只放行 MQ，由下一次 Receive 在同一 attempt 内摄取。
-                // MQ 放行已在前一步完成：必须先移交再中断，避免漏发。
+                if !stale.is_empty() {
+                    let stale_ids: Vec<MessageId> = stale
+                        .iter()
+                        .filter_map(|id| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
+                        .collect();
+                    self.inbox.queue().withdraw_send_inputs(&stale_ids);
+                }
+                // 只有实际 LLM 调用/流式期间、且输入尚未摄取时才硬取消；工具批次、
+                // Compact、idle 与收尾阶段只放行 MQ，由下一次 Receive 在同一 attempt
+                // 内摄取。MQ 放行已在前一步完成：必须先移交再中断，避免漏发。
                 let model_request_in_flight = state.model_request_in_flight;
+                let hard_cancel = model_request_in_flight && unconsumed_handoff;
                 if let Some(active) = state.active.as_mut() {
                     // Stop 收尾中的重新发送是明确继续：Stop 已取消令牌，这里只把
                     // reason 从 Stop 改为 Steer，让宿主保留续跑而不是抑制激活。
-                    if model_request_in_flight
+                    if hard_cancel
                         || active.reason
                             == crate::session::user_input_mailbox::InterruptReason::Stop
                     {
                         active.reason = crate::session::user_input_mailbox::InterruptReason::Steer;
                         // 与阶段门同一临界区发出取消：guard Drop 需要同一把锁，
                         // 因此窗口不会在判定与取消之间关闭。
-                        if model_request_in_flight {
+                        if hard_cancel {
                             if let Some(cancel) = active.cancel.clone() {
                                 cancel.cancel();
                             }
@@ -636,6 +661,7 @@ impl UserInputMailbox {
             Ok(outcome) => {
                 let mut state = self.state.lock();
                 let mut unknown = Vec::new();
+                let mut stale = Vec::new();
                 for record in &mut state.records {
                     if !ids.contains(&record.input_id) {
                         continue;
@@ -646,8 +672,20 @@ impl UserInputMailbox {
                     match status {
                         // Unknown 不是结论：不宣称已移交，留在 ready 里等下一次重试。
                         Some(MqSendStatus::Unknown) | None => unknown.push(record.input_id.clone()),
+                        // Stop/失败收尾已把记录放回 Queued：本次接纳不再属于当前
+                        // 执行，与 reset 同一临界区撤回选择。
+                        Some(_) if record.state == UserInputState::Queued => {
+                            stale.push(record.input_id.clone());
+                        }
                         Some(_) => record.handed_off = true,
                     }
+                }
+                if !stale.is_empty() {
+                    let stale_ids: Vec<MessageId> = stale
+                        .iter()
+                        .filter_map(|id| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
+                        .collect();
+                    self.inbox.queue().withdraw_send_inputs(&stale_ids);
                 }
                 if clear_ready {
                     state

@@ -254,7 +254,7 @@ impl UserInputMailbox {
     /// 下一条输入一起暂停。Drop 路径不能 await，只能做保守的运行期复位；
     /// MQ 行仍在，下一次 `hydrate`/`reclaim` 会按持久事实核对。
     pub fn fail_reserved(&self, ticket: &UserInputRunTicket) {
-        let (cancel, reset_ids) = {
+        let cancel = {
             let mut state = self.state.lock();
             let cancel = {
                 let Some(active) = state
@@ -288,12 +288,14 @@ impl UserInputMailbox {
                         .map(MessageId::from)
                 })
                 .collect();
-            (cancel, reset_ids)
+            // 复位与撤回同一临界区：并发的 dispatch 若在复位之后提交接纳，
+            // 不能被这次撤回删除；复位之前的接纳也不会残留成「已挑选」。
+            self.inbox.queue().withdraw_send_inputs(&reset_ids);
+            cancel
         };
         if let Some(cancel) = cancel {
             cancel.cancel();
         }
-        self.inbox.queue().withdraw_send_inputs(&reset_ids);
     }
 
     pub async fn stop(&self) {

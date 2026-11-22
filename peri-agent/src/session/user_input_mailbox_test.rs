@@ -1289,3 +1289,157 @@ async fn dispatch_confirms_handoff_on_an_idle_session() {
         .await
         .expect("the releaser fixture result is required for this assertion");
 }
+
+/// [steer 阶段门] 移交确认迟到时不能取消已经包含该输入的请求。
+///
+/// `dispatch` 的有界确认可以在 Receive 摄取输入、下一次 Reason 打开请求窗口
+/// 之后才看到 `HandedOff`。此时该输入已进入当次请求上下文，取消只会让同一
+/// 请求白跑一遍；阶段门必须以「接纳是否已被摄取」为准，而不是只看窗口。
+#[tokio::test]
+async fn test_late_handoff_confirmation_does_not_cancel_consuming_request() {
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = Arc::new(SessionInbox::new(Arc::clone(&queue)));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    let cancel = CancellationToken::new();
+    let ticket = mailbox
+        .attach_external_attempt(cancel.clone(), false)
+        .await
+        .expect("the attach external attempt fixture result is required for this assertion");
+    let input = make_input(&mailbox, "批次内输入");
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+
+    let mut wake = queue.subscribe_wake();
+    let (entered, release) = queue.gate_next_receive();
+    let dispatch = {
+        let mailbox = Arc::clone(&mailbox);
+        let request = make_dispatch(&mailbox, &[&input]);
+        tokio::spawn(async move { mailbox.dispatch(&request).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), wake.changed())
+        .await
+        .expect("dispatch 必须先提交发送选择")
+        .expect("wake channel must stay open");
+
+    // 模拟工具批次结束后的 Receive：选中后停在提交门，由测试放行。
+    let worker_queue = Arc::clone(&queue);
+    let worker = tokio::spawn(async move {
+        let owner = worker_queue.owner();
+        let permit = owner.begin_receive(
+            MqReceivePurpose::ModelLoop,
+            ExecutionBinding {
+                turn_id: TurnId::new(),
+                attempt_id: AttemptId::new(),
+            },
+        );
+        let items = owner
+            .select_for_receive(&permit)
+            .await
+            .expect("the select for receive fixture result is required for this assertion");
+        assert_eq!(items.len(), 1, "只摄取被挑选的发送输入");
+        owner
+            .receive(permit, items)
+            .await
+            .expect("the receive fixture result is required for this assertion")
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered)
+        .await
+        .expect("Receive 必须进入提交门")
+        .expect("receive gate must stay open");
+    release.send(()).expect("release receive gate");
+    let outcome = tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .expect("receive worker must finish")
+        .expect("receive worker panicked");
+    assert_eq!(outcome.items.len(), 1, "输入必须已写入历史");
+
+    // 摄取完成后才开始下一次模型请求；迟到的移交确认不得再取消它。
+    let input_id = MessageId::from(
+        uuid::Uuid::parse_str(&input.input_id)
+            .expect("the parse str fixture result is required for this assertion"),
+    );
+    mailbox.mark_claimed(&[input_id]).await;
+    let gate = mailbox.begin_model_request();
+    let receipt = dispatch
+        .await
+        .expect("dispatch task must finish")
+        .expect("the dispatch fixture result is required for this assertion");
+    assert_eq!(receipt.results[0].state, UserInputState::Claimed);
+    assert!(!cancel.is_cancelled(), "已摄取输入不能触发硬取消");
+    assert!(
+        !mailbox.is_steer_interruption(&ticket),
+        "已摄取输入不能记录为 steer 中断"
+    );
+    drop(gate);
+}
+
+/// [steer 阶段门] Stop 复位与并发 dispatch 的接纳/撤回必须有序。
+///
+/// Stop 收尾复位记录、撤回发送选择时，并发的 dispatch 可能刚好提交接纳。
+/// 复位之后的接纳不能被收尾撤回删除，也不能在记录已回到 Queued 后残留
+/// `handed_off`；记录必须保持可重新发送、可再次被 Receive 领取。
+#[tokio::test]
+async fn test_stop_reset_and_concurrent_dispatch_leave_record_reselectable() {
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = Arc::new(SessionInbox::new(Arc::clone(&queue)));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt(cancel.clone(), false)
+        .await
+        .expect("the attach external attempt fixture result is required for this assertion");
+    let input = make_input(&mailbox, "收尾中的重新发送");
+    mailbox
+        .enqueue(&input)
+        .await
+        .expect("the enqueue fixture result is required for this assertion");
+
+    let mut wake = queue.subscribe_wake();
+    let dispatch = {
+        let mailbox = Arc::clone(&mailbox);
+        let request = make_dispatch(&mailbox, &[&input]);
+        tokio::spawn(async move { mailbox.dispatch(&request).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), wake.changed())
+        .await
+        .expect("dispatch 必须先提交发送选择")
+        .expect("wake channel must stay open");
+
+    // 接纳已提交、移交确认尚未完成时执行 Stop：复位与撤回发生在确认之前。
+    mailbox.stop().await;
+    let receipt = dispatch
+        .await
+        .expect("dispatch task must finish")
+        .expect("the dispatch fixture result is required for this assertion");
+    assert_eq!(
+        receipt.results[0].state,
+        UserInputState::Queued,
+        "复位后的接纳必须回到待发"
+    );
+    assert_eq!(
+        record_state(&mailbox, &input.input_id),
+        Some((UserInputState::Queued, false)),
+        "回到待发的记录不能残留 handed_off"
+    );
+
+    // 重新发送必须能再次被挑选并摄取。
+    let resent = mailbox
+        .dispatch(&make_dispatch(&mailbox, &[&input]))
+        .await
+        .expect("the dispatch fixture result is required for this assertion");
+    assert_eq!(resent.results[0].state, UserInputState::Dispatching);
+    let received = queue.drain_all_sync();
+    assert_eq!(received.len(), 1, "重新发送的输入必须被 Receive 领取");
+    assert_eq!(
+        received[0]
+            .message()
+            .expect("the fixture entry must contain a message payload")
+            .id()
+            .as_uuid()
+            .to_string(),
+        input.input_id
+    );
+    assert!(cancel.is_cancelled(), "Stop 必须先取消旧执行");
+}

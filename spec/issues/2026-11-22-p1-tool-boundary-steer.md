@@ -76,8 +76,8 @@
 基线 `1b7d3557b`，定向验证全部通过，详见
 `docs/verification/steer-stage-gate-2026-11-22.md`：
 
-- `peri-agent --lib`（全量）：1594 passed / 0 failed / 5 ignored。
-- `peri-agent --lib user_input_mailbox`：61 passed / 0 failed。
+- `peri-agent --lib`（全量）：1596 passed / 0 failed / 5 ignored。
+- `peri-agent --lib user_input_mailbox`：63 passed / 0 failed。
 - `peri-agent --lib loop_lifecycle`：7 passed / 0 failed（新增工具批次 steer 用例）。
 - `peri-acp --lib steer_activation`：3 passed / 0 failed。
 - `peri-tui --lib -- steer`：108 passed / 0 failed。
@@ -89,6 +89,11 @@
 判定与取消之间存在间隙）已收紧并由 `test_run_reason_error_hook_observes_closed_steer_gate`
 覆盖。第二轮 CodeRabbit 指出阶段门误伤了 Stop 收尾中的重新发送，已按既有“显式继续”
 契约保留（不再取消，仅记录 Steer），新增
-`test_mailbox_dispatch_after_stop_marks_explicit_continuation`。未覆盖：全量
+`test_mailbox_dispatch_after_stop_marks_explicit_continuation`。第三轮 CodeRabbit 指出
+两点：移交确认迟到时不得取消已经包含该输入的请求；Stop 复位与并发发送接纳/撤回必须
+有序。已按“记录是否已被摄取”判定取消，并把复位与撤回收进同一临界区、让复位前的接纳
+回落到 Queued 且不写 `handed_off`，新增
+`test_late_handoff_confirmation_does_not_cancel_consuming_request` 与
+`test_stop_reset_and_concurrent_dispatch_leave_record_reselectable`。未覆盖：全量
 `--all-targets`/CI 矩阵、真实 TUI 手工交互、外置 `peri-e2e` 场景；阶段门边界竞态
 仅记录为行为边界，未做确定性复现。

@@ -156,16 +156,18 @@ impl UserInputMailbox {
                 }
             }
             state.ready.retain(|id| !reclaimed.contains(id));
+            if !reclaimed.is_empty() {
+                // 与复位同一临界区撤回：并发的 dispatch 在复位之后才提交的接纳
+                // 不能被这次撤回删掉，复位之前的接纳也不会残留成「已挑选」。
+                let reclaimed_ids: Vec<MessageId> = reclaimed
+                    .iter()
+                    .filter_map(|id| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
+                    .collect();
+                self.inbox.queue().withdraw_send_inputs(&reclaimed_ids);
+            }
             if changed {
                 state.revision += 1;
             }
-        }
-        let reclaimed_ids: Vec<MessageId> = reclaimed
-            .iter()
-            .filter_map(|id| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
-            .collect();
-        if !reclaimed_ids.is_empty() {
-            self.inbox.queue().withdraw_send_inputs(&reclaimed_ids);
         }
         let snapshot = self.snapshot().await;
         self.publish(snapshot);
