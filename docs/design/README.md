@@ -9,7 +9,7 @@
 
 ## 状态含义
 
-- **现行设计**：描述已落地的稳定结构；具体符号和文件入口以代码索引与源码为准。
+- **现行设计**：描述已落地的稳定结构，不等于发布、端到端或规模验收；具体符号和文件入口以代码索引与源码为准。
 - **已批准目标设计**：描述已经裁决但尚未完全落地的目标；实现进度、临时风险和
   验收勾选只写对应 `spec/issues/`。
 - **待重构**：已批准目标设计中设计已收敛、实现差距已审计的部分；作为代码重构基线，
@@ -42,7 +42,8 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Compact | [micro-compact.md](micro-compact.md) | Step/交换投影、原文回查、原子提交与 Full/fork/rewind 生命周期；门控和能力边界 |
 | MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、附件与记录绑定、多路数据隔离 |
 | Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI、machines 目录查询与持久化边界 |
-| Workflow | [workflow.md](workflow.md) | Node wire、runner、任务与进度、journal/state、resume/kill、TUI 投影与 CLI/artifact 分发；MCP 接入与任务信道归 [workflow-mcp.md](workflow-mcp.md) |
+| Workflow | [workflow.md](workflow.md) | Node wire、runner、任务与进度、journal/state、resume/kill、TUI 投影与 CLI/artifact 分发 |
+| Workflow MCP 接入 | [workflow-mcp.md](workflow-mcp.md) | 默认内置 `peri` 出口下的 Workflow 能力、任务与结果回填；旧独立实例仅用于回滚 |
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
 | TUI 流式 Markdown 性能 | [tui-streaming-markdown-performance.md](tui-streaming-markdown-performance.md) | publication scheduler、lazy projection、增量 Markdown 与 slot index |
@@ -58,13 +59,12 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属；builtin 实例最小隔离单位条款已被 [v5 单出口设计](mcp-v5-single-exit.md) 取代，六实例仅保留为兼容期路径；迁移状态以代码与契约测试为准 |
 | MCP v5 单出口 | [mcp-v5-single-exit.md](mcp-v5-single-exit.md) | builtin 单 `peri` 出口、capability router、workspace 代理、能力关闭矩阵与迁移回滚契约；`peri` 已是宿主默认装配，旧 policy 键保留为确定性映射 adapter（M4 删除），`PERI_MCP_BUILTIN=legacy` 保留六实例回滚到 M4 截止决定；Sandbox workspace 代理接线与端到端验收见 [active spec](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md) |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；WASM 完整验收与既有公开 Chrono 契约范围仍待核实；入口见 [peri-time 索引](../code-index/peri-time.md) |
-| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/执行、canonical 历史与普通执行；待发送消息持久化见 [Thread MQ](thread-mq.md)，**持久执行恢复仍剥离** |
+| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/执行、canonical 历史与普通执行；待发送消息持久化见 [Thread MQ](thread-mq.md)；恢复只按意图建新运行，不接管旧执行 |
 | Session Durability | [session-durability.md](session-durability.md) | 进入会话时按持久工作意图建立新运行；不恢复旧执行身份；后端能力与验收缺口见本文 |
 | Thread MQ 持久收件箱 | [thread-mq.md](thread-mq.md) | 主、子与 Workflow Agent 的统一持久 MQ、原子 Receive 与 Rust 操作接口；实施与验收见 [active issue](../../spec/issues/2026-11-01-thread-mq-implementation.md) |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；真实远端验收待执行 |
 | Command 系统 | [command-system.md](command-system.md) | 命令协议与执行边界以代码和契约测试为准 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | transcript 展示、组合器与工作台布局的现行约束 |
-| Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | builtin 实例、任务资源与回填信道已落地；`peri-resources` 门面已删除 |
 | MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（运行中命中与任务终态都会唤醒，终态合并未报告命中）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
 | Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |

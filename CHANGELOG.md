@@ -1,6 +1,8 @@
 # Changelog
 
-Perihelion Agent 版本变更记录。
+[GitHub Releases](https://github.com/KonghaYao/peri/releases) 记录各 `agent-v*` 发布版本的变更和下载资产。主分支的改动不等于已经发布。
+
+以下保留早期 Perihelion Agent 的历史记录。
 
 ---
 

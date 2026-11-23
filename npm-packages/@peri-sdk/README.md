@@ -16,8 +16,14 @@ SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地
 
 ## 安装
 
+`@peri-code/sdk` 是宿主侧 ACP / Chat SDK；它不实现 Swarm 的 OpenAI HTTP 客户端。
+调用 [Peri Swarm](../../peri-swarm/README.md#node-sdk-同会话追问与续读) 时使用 npm
+`openai`。两者与 Agent CLI 独立版本化。SDK 以 [npm 版本](https://www.npmjs.com/package/%40peri-code/sdk?activeTab=versions)
+和 `sdk-v*` tag 为准，仓库 `package.json` 的版本占位不是已发布版本。
+
 ```bash
 bun add @peri-code/sdk
+# 使用 npm 的 Node 项目也可以 npm install @peri-code/sdk
 # 宿主自己选择具体实现；SDK 不依赖 unstorage
 bun add unstorage
 ```
@@ -674,6 +680,8 @@ next = Button("展开阻塞项", @ToAssistant("展开阻塞项并给出处理建
 - [Chat 架构设计](../../docs/design/peri-sdk-chat.md)
 - [Ownership 模型](OWNERSHIP-MODEL.md)
 - [代码索引](../../docs/code-index/peri-ts-sdk.md)
+- [本地 Workers 探针](../../peri-wasm/README.md#local-cloudflare-workers-check)：验证
+  `startWasmRuntime` + `moduleFactory` 和 ACP 路径；不等于 Hosted Workers 部署或 Chat 全链路验收。
 - [demo.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo.ts) 使用 `runtime.kind="wasm"`。
 - [demo-wasm.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。
 

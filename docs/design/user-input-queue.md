@@ -49,7 +49,7 @@ Queued → Dispatching → Claimed → Delivered
 Dispatching → Queued：摄取前执行失败、Stop，或确认未领取后从 MQ 撤出（与发送选择撤回同一临界区）
 ```
 
-Receive 在 MQ 事务中领取，Stop 通过 `cancel_input` 撤出未被领取的输入；展示状态只投影已确认结果。
+Receive 在 MQ 事务中领取；Stop 撤回未领取输入的发送选择，正文仍留待发送。显式取消待发项才删除 MQ 行。展示状态只投影已确认结果。
 写入 canonical transcript 才算 Delivered；仅入队或提交发送选择不能当作用户消息出现在聊天区。
 
 ## 交互与投递
@@ -126,6 +126,6 @@ TUI 依赖通知通道关闭路径收敛（`ACP_STATE.is_loading=false`、清空
 新建/加载会话在同一个 operation gate 内绑定队列 generation 并恢复实际运行身份，之后才
 接纳新交互。带身份的 Stop 不能取消后来的执行。
 
-队列只保存在当前进程内；切换会话查询原实例，进程重启或会话销毁不承诺保留待发送内容。
+已持久接纳而未移交的待发正文、原稿和插件选择，在支持持久 MQ 的后端上可于重启后按新 generation 从 MQ 对账。旧发送选择、命令回执与运行 ticket 不恢复，不自动重放旧发送。仅内存后端不保证跨进程保留；已经显式删除的项不会恢复。
 
 交互回归见 `KonghaYao/peri-e2e` 的 `tests/smoke/steer-queue-live.test.ts`，使用临时会话配置与本地模型服务；运行方式见 [E2E 指南](../standards/testing.md)。

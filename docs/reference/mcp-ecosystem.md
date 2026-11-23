@@ -2,8 +2,8 @@
 
 > 本文件是生态背景与外部互通参考，不是仓库架构或协议的事实源。Perihelion
 > 的 MCP 设计以 `docs/design/acp-mcp-control.md`、
-> `docs/design/mcp-multiplexing.md`、`docs/design/mcp-adaptation-v4-part-1.md`
-> （MCP 迁移范围与验收语义的目标设计）和代码契约测试为准。
+> `docs/design/mcp-multiplexing.md`、`docs/design/mcp-v5-single-exit.md`（现行 builtin 出口）、
+> `docs/design/mcp-adaptation-v4-part-1.md`（外部 MCP 与兼容期设计）和代码契约测试为准。
 >
 > 实验位置：`side-projects/mcp-apps/`（Node.js + `@modelcontextprotocol/ext-apps` + `@modelcontextprotocol/sdk`）
 > 文档定位：说明 MCP 在 perihelion 中的生态角色——**标准的 connector / 通用外部能力对接器**——以及外部开发者如何实现「外部 MCP server ↔ peri 内部」的互通。不搬运规范原文，官方出处见各章末尾链接。
@@ -99,7 +99,7 @@ flowchart LR
 | [4](#4-resources只读内容通道核心原语) | resources（核心原语） | 部分（订阅机制） |
 | [5](#5-subscriptions服务端通知) | subscriptions（服务端通知） | **差异显著（重点）** |
 | [6](#6-mcp-apps交互式-ui-扩展sep-1865) | MCP Apps（官方扩展） | 正式（2026-07-28 纳入，SEP-1865） |
-| [7](#7-skills技能发现与加载) | skills（技能发现） | 未入规范（工作组推进中） |
+| [7](#7-skills技能发现与加载) | skills（技能发现） | 官方可选 Beta 扩展（SEP-2640 Final；非核心） |
 
 > prompts 原语因职责已被宿主命令系统与 skills 覆盖，peri 不采用（见 4.1）。
 
@@ -113,15 +113,15 @@ flowchart LR
 
 tools 原语在两个协议版本中基本兼容。2026-07-28 的新增与调整有三处：
 
-1. 调用结果携带 `resultType`（`"complete"` / `"input_required"`）——即 MRTR（Multi-Round Tool Results，多轮工具结果）机制。
-2. list 结果可带 `ttlMs` + `cacheScope`（CacheableResult），与 `listChanged` 互补。
+1. 调用结果携带 `resultType`（`"complete"` / `"input_required"`）——即 MRTR（Multi Round-Trip Requests，多往返请求）机制。旧版本响应没有该字段时按 `complete` 处理。
+2. `tools/list` 结果必须带 `ttlMs` + `cacheScope`（CacheableResult），与 `listChanged` 互补。
 3. `x-mcp-header` 注解：将工具参数镜像为 HTTP 头，仅供 Streamable HTTP 中介路由使用。
 
 ### 3.2 进入 peri 的工具面：direct 与 deferred
 
 对 MCP 工具而言，核心问题不是协议本身，而是**如何进入 peri 的 tool search 体系**。peri 把工具面分成两面（由 `BaseTool::is_direct()` 决定，默认 `false`——安全默认值：新工具默认为 deferred）：
 
-- **direct（核心面）**：直接出现在 LLM API 的 tools 参数中，始终可见——core tools 与两个元工具（`ToolSearch` / `ToolInvoke`）属于此面。
+- **direct（核心面）**：通过当前会话/轮次的可见性过滤后直接出现在 LLM API 的 tools 参数中——core tools 与两个元工具（`ToolSearch` / `ToolInvoke`）属于此面。
 - **deferred（延迟面）**：不直接可见。工具进入 `ToolSearchIndex` 索引，agent 先经 `ToolSearch` 发现、再经 `ToolInvoke` 代理执行。
 
 **MCP 工具默认落在 deferred 面**，收益有二：
@@ -131,18 +131,18 @@ tools 原语在两个协议版本中基本兼容。2026-07-28 的新增与调整
 
 **例外**：声明为启动依赖的 server 用 `system_mcp_tools` 指名必需工具（配置语义见 §9.2）；这些工具的目标行为是不经 tool search、直接进入 RCRA 工具列表，契约见 `docs/design/mcp-adaptation-v4-part-1.md`。其余 MCP 工具仍全部落在 deferred 面。
 
-**内置实例（builtin）**：peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力同样以 MCP 实例形态提供，只是 server 与 client 同进程，由本地默认配置层自动注入。各实例的工具、直连性与关闭键见 [MCP packages 索引](../code-index/mcp-packages.md)；声明表 `peri-acp-types/src/builtin_mcp.rs` 是唯一事实源。
+**内置能力（builtin）**：宿主默认自动注入单出口 `peri`，聚合 Web / Artifact / Cron / Monitor / Workspace / Workflow。旧六实例是兼容回滚路径，不是默认装配。见 [MCP v5 单出口](../design/mcp-v5-single-exit.md) 与 [MCP packages 索引](../code-index/mcp-packages.md)。
 
 ### 3.3 桥接与命名
 
 MCP 工具经 `McpToolBridge`（`peri-middlewares/src/mcp/tool_bridge.rs`）包装为 `BaseTool`：
 
 - **命名**：普通 MCP 工具与 deferred MCP 工具使用 `mcp__<server>__<tool>`，server / tool 名经 sanitize（非 `[a-zA-Z0-9_-]` 字符替换为 `_`）；技能命令使用独立词法（见 §7.4）。被 `system_mcp_tools` 选中的工具以 wire 原始工具名注入模型面。
-- **内置实例工具名**：builtin `web`、`artifact`、`workspace` 的 direct 工具以原始名出现在模型面（`WebSearch`、`WebFetch`、`artifact`、`Read`、`Write`、`Edit`、`Glob`、`Grep`、`folder_operations`、`Bash`）；builtin `cron` / `monitor` / `workflow` 保持 deferred，模型面名为 `mcp__<实例>__<tool>`。普通 system MCP 的选中工具同样使用原始名，其余工具仍带前缀。MCP wire `tools/call.name` 始终使用原始工具名，原名注入不创建前缀别名。
+- **内置实例工具名**：builtin `web`、`artifact`、`workspace` 的 direct 工具以原始名出现在模型面（`WebSearch`、`WebFetch`、`artifact`、`Read`、`Write`、`Edit`、`Glob`、`Grep`、`folder_operations`、`Bash`）；builtin `cron` / `monitor` / `workflow` 保持 deferred，默认模型名前缀为 `mcp__peri__`；旧六实例模式下才以对应实例名作为前缀。普通 system MCP 的选中工具同样使用原始名，其余工具仍带前缀。MCP wire `tools/call.name` 始终使用原始工具名，原名注入不创建前缀别名。
 - **按绑定来源判定与匹配**：权限按工具来源和原始工具身份处理；未知或外部 MCP 工具不能因名称恰为 `Read`、`Write` 或 `Bash` 获得 builtin 权限。工具名匹配按实际模型可见名进行，不合成额外可调用别名。
 - **描述**：加 `[MCP:<server>]` 前缀，指明来源 server。
 - **参数**：透传 MCP 工具的 `inputSchema`。
-- **调用**：`invoke` 走 MCP client 的 `tools/call`，超时 120s；输出超过 2000 行或 100 KB 时按 `format_output` 截断并落存到 workspace output store，返回可回查引用（`peri-middlewares/src/mcp/client/output_store.rs`，见 4.5）。
+- **调用**：`invoke` 走 MCP client 的 `tools/call`，通常限时 120 秒；builtin workspace 保留工具原生超时（例如 Bash 到前台上限可移交后台）。输出超过 2000 行或 100 KB 时按 `format_output` 截断并落存到 workspace output store，返回可回查引用（`peri-middlewares/src/mcp/client/output_store.rs`，见 4.5）。
 
 ### 3.4 发现与执行链路（tool search 体系）
 
@@ -284,7 +284,7 @@ peri 侧现状：资源读取已由 `McpResourceTool`（`mcp_read_resource`，`p
 - 声明 `capabilities.resources.listChanged` 表示支持资源列表变化通知（SHOULD 语义）；声明 `resources.subscribe` 表示支持单资源变更通知。**两者独立可选，可皆不声明。**
 - **订阅机制两版不同**：
   - **2025-11-25**：client 发 `resources/subscribe`（`params.uri`）订阅单个资源，变更时收 `notifications/resources/updated`（`params.uri`）；`list_changed` 直接推送。Streamable HTTP 另有 GET 端点（`?method=notifications/resources/updated`）承载订阅流。
-  - **2026-07-28**：`resources/subscribe` 被 `subscriptions/listen` 的 `resourceSubscriptions` 过滤器取代；`notifications/resources/updated` 追加 `subscriptionId`（详见第 5 章）。
+  - **2026-07-28**：`resources/subscribe` 被 `subscriptions/listen` 的 `resourceSubscriptions` 过滤器取代；`notifications/resources/updated` 追加 `io.modelcontextprotocol/subscriptionId`（详见第 5 章）。
 - 错误码调整：2026-07-28 将「资源不存在」从 `-32002` 改为 `-32602`（client 向后兼容接受两者）。
 
 订阅的资源内容变化（2026-07-28 形态）：
@@ -310,7 +310,7 @@ peri 侧现状：资源读取已由 `McpResourceTool`（`mcp_read_resource`，`p
 
 ## 5. subscriptions：服务端通知
 
-这是「MCP server 向 client **主动推送**信息」的唯一官方通道，也是两个版本差异最显著的部分，是互通实现的重点。
+这是 2026-07-28 的变更通知通道。进度与日志走原请求的响应流，不进入订阅流；日志还要求原请求声明 `io.modelcontextprotocol/logLevel`。
 
 ### 5.1 2026-07-28：`subscriptions/listen` 统一长流
 
@@ -321,19 +321,19 @@ sequenceDiagram
     participant C as MCP Client（peri-agent）
     participant S as MCP Server
 
-    C->>S: subscriptions/listen (id=1)<br/>notifications 过滤器：{toolsListChanged, resourceSubscriptions:[uri]}
+    C->>S: subscriptions/listen (id=1)<br/>notifications 过滤器：{toolsListChanged:true, resourcesListChanged:true, resourceSubscriptions:[uri]}
     Note over S: 回显同意支持的子集<br/>不支持的类别省略
-    S-->>C: notifications/subscriptions/acknowledged<br/>_meta.subscriptionId = 1
-    Note over C,S: 确认之前禁止发送任何通知
+    S-->>C: notifications/subscriptions/acknowledged<br/>_meta["io.modelcontextprotocol/subscriptionId"] = 1
+    Note over C,S: 该订阅的确认必须先于其后续通知；其他订阅可交错
 
-    S-->>C: notifications/tools/list_changed<br/>_meta.subscriptionId = 1
-    S-->>C: notifications/resources/updated<br/>_meta.subscriptionId = 1, uri
-    S-->>C: notifications/resources/list_changed<br/>_meta.subscriptionId = 1
+    S-->>C: notifications/tools/list_changed<br/>_meta["io.modelcontextprotocol/subscriptionId"] = 1
+    S-->>C: notifications/resources/updated<br/>_meta["io.modelcontextprotocol/subscriptionId"] = 1, uri
+    S-->>C: notifications/resources/list_changed<br/>_meta["io.modelcontextprotocol/subscriptionId"] = 1
 
     alt client 取消
         C->>S: notifications/cancelled（stdio）或关闭流（HTTP）
     else server 主动关闭（shutdown）
-        S-->>C: 空结果 resultType:"complete"（优雅结束）
+        S-->>C: resultType:"complete" 和原订阅 ID（优雅结束）
     end
 ```
 
@@ -343,7 +343,7 @@ sequenceDiagram
 stateDiagram-v2
     [*] --> Listening : client 发 subscriptions/listen<br/>notifications 过滤器声明想收的类型
     Listening --> Active : server 发 acknowledged<br/>（回显同意支持的子集）
-    Active --> Active : 推送已订阅类型的通知<br/>每条带 _meta.subscriptionId
+    Active --> Active : 推送已订阅类型的通知<br/>每条带 _meta["io.modelcontextprotocol/subscriptionId"]
     Active --> [*] : client 发 notifications/cancelled / 关闭流
     Active --> [*] : server 主动关闭 → 空结果 resultType:complete
     Listening --> [*] : 重连后订阅丢失<br/>（server 不保存跨连接状态）
@@ -352,8 +352,8 @@ stateDiagram-v2
 三条核心规则（对应上图）：
 
 1. **显式 opt-in**：server 不得发送 client 未在过滤器中声明的通知类型。
-2. **先确认、后推送**：`acknowledged` 必须先于任何通知。
-3. **订阅 ID 多路复用**：每条通知的 `_meta.subscriptionId` = 对应 `subscriptions/listen` 请求的 JSON-RPC id；stdio 单通道上靠它关联通知与订阅。断线重连后 client 必须重发 `listen`（server 无跨连接订阅状态）。
+2. **先确认、后推送**：`acknowledged` 必须先于该订阅的其他通知，不限制其他订阅消息的顺序。
+3. **订阅 ID 多路复用**：订阅消息的 `_meta["io.modelcontextprotocol/subscriptionId"]` 等于对应 `subscriptions/listen` 请求的 JSON-RPC id；stdio 单通道据此关联。要在断线后继续接收通知，应新建订阅，不能依赖旧流重放。
 
 ### 5.2 2025-11-25：`resources/subscribe` 单点订阅
 
@@ -375,10 +375,10 @@ flowchart LR
 | 维度 | 2025-11-25 | 2026-07-28 |
 | --- | --- | --- |
 | 订阅机制 | `resources/subscribe`/`unsubscribe` RPC + HTTP GET 端点 | `subscriptions/listen` 单一长流（取代上述二者） |
-| 通知范围 | 连接建立后 list_changed 直接推；资源订阅按 URI 单个订阅 | 全部通知需显式 opt-in 过滤器，**未请求的类别不得发送** |
-| 关联性 | 通知不带订阅标识 | 每条通知 `_meta` 带 `subscriptionId`（= listen 请求 id），stdio 上据此多路复用 |
+| 通知范围 | 连接建立后 list_changed 直接推；资源订阅按 URI 单个订阅 | 订阅流上的通知需显式 opt-in 过滤器，**未请求的类别不得发送** |
+| 关联性 | 通知不带订阅标识 | 订阅流的通知 `_meta` 带 `io.modelcontextprotocol/subscriptionId`（= listen 请求 id），stdio 上据此多路复用 |
 | 确认机制 | 无 | `notifications/subscriptions/acknowledged` 先确认（回显同意子集）后推送 |
-| 资源通知 | `notifications/resources/updated`（`params.uri`） | 同名同构，追加 `subscriptionId` |
+| 资源通知 | `notifications/resources/updated`（`params.uri`） | 同名同构，追加 `io.modelcontextprotocol/subscriptionId` |
 | list_changed | 直接发送 | 仅发往订阅了对应类型的流 |
 | 取消 | `resources/unsubscribe` | `notifications/cancelled`（stdio）/ 关流（HTTP） |
 | 重连 | 订阅随连接丢失，需重建 | 同左，且 client **必须**重发 `subscriptions/listen`（server 无跨连接订阅状态） |
@@ -534,7 +534,7 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 - **Peri 接入**：提供只读查询、异步发现与统一激活；当前目录协议、正文校验及命令形态见 §7.4。
 - **安全边界**：技能正文是来源内容，不能凭声明取得工具执行权限；Peri 仍按工具准入与审批契约执行。
-- **官方正在标准化**：MCP 官方 **Skills Over MCP 工作组**（2026 年 4 月成立）当前方向为 **SEP-2640 Skills Extension**（Extensions Track，**基于 Resources 原语**），并协调 Agent Skills 规范（agentskills.io 的 well-known URI 发现）与 registry `skills.json`。**尚未进入 2026-07-28 规范正式扩展**（当前正式扩展：Apps / Tasks / Authorization）。
+- **官方可选扩展（非 MCP 核心）**：SEP-2640 已 Final，定义基于 Resources 的 `io.modelcontextprotocol/skills`；扩展总览将其标为 Beta。规范地位不等同于每个 SDK 或产品已支持。
 
 ### 7.3 使用场景
 
@@ -579,6 +579,8 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 ### 8.2 外部实现 checklist
 
+**先区分协议版本。** 2026-07-28 不使用旧 MCP `initialize` 握手或 Streamable HTTP 会话 ID：每个请求在 `params._meta` 声明 `io.modelcontextprotocol/protocolVersion` 和 `io.modelcontextprotocol/clientCapabilities`；服务端必须提供 `server/discover`。Peri 的 rmcp Auto 模式先尝试发现，不支持时走 legacy 握手。此处不改变 ACP 的 `initialize` 或下游 Apps 的 `ui/initialize`。见 [官方发现契约](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)。
+
 1. **基础原语**（第 3、4 章）：实现 `tools/list` + `tools/call`（或仅实现 `resources/*` 亦可），声明 `capabilities`。**可变实体遵守读写配对约定**（见 4.7）：资源只读，配套写工具在 description 中声明对应资源 URI，写成功后发 `updated` 通知。
 2. **服务端通知（可选，第 5 章）**：声明 `listChanged` / `subscribe` capability；按协商的协议版本实现 `subscriptions/listen`（2026-07-28）或 `resources/subscribe` + 直接 list_changed（2025-11-25）。
 3. **MCP App（可选，第 6 章）**：以 `ui://` resource 发布 HTML，工具携带 `_meta.ui.resourceUri` 绑定；App 内用 ext-apps `App` 类（`{ name, version }` 必填）。
@@ -617,10 +619,9 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 无效配置明确失败，不能降级为空配置；启动与工具注入契约由
 [MCP 适配设计](../design/mcp-adaptation-v4-part-1.md)维护。
 
-builtin 实例由默认配置层提供。用户关闭某个实例时使用
-`{"mcpServers":{"web":{"disabled":true}}}` 这一配置形态；不要同时声明
-`system_mcp: true`，也不要用 `command` / `url` 接管 builtin 保留名。
-实例保留名、工具与策略关闭键以声明表和 [MCP packages 索引](../code-index/mcp-packages.md)为准；
+宿主默认注入 `peri` 单出口。会话配置 `{"mcpServers":{"web":{"disabled":true}}}` 将旧条目映射为关闭 `peri` 内的 `web` 能力（不是关闭独立 server）。不要同时声明 `system_mcp: true`，也不要用 `command` / `url` 接管 builtin 保留名。
+独立启动 `peri mcp-start peri` 时，`--capability` 优先于 `<workspace>/.mcp.json` 中的 `mcpServers.peri.x-peri.capabilities`（字符串数组，例如 `["workspace"]`）；此数组不是会话内建能力开关，也不是 MCP wire 字段。
+保留名、工具与策略关闭键见 [MCP packages 索引](../code-index/mcp-packages.md)；
 进程级 `PERI_MCP_BUILTIN` 的合法值与关闭边界见
 [环境变量标准](../standards/environment-variables.md)。
 

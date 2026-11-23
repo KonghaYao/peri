@@ -6,8 +6,7 @@
 - 工作树：`/Users/mino/code/peri/.worktrees/tool-boundary-steer`
 - 范围：`UserInputMailbox` 的 `model_request_in_flight` 阶段门、`run_reason`
   实际 LLM 调用窗口的 RAII guard、`dispatch` 的取消门、attempt 生命周期复位、
-  定向回归测试与契约文档。对应 issue
-  `spec/issues/2026-11-22-p1-tool-boundary-steer.md`。
+  定向回归测试与契约文档。原过程记录已归 [11 月月志](../../spec/history/2026-11.md)；此记录只对应上列历史基线，不代替 [#569](https://github.com/KonghaYao/peri/pull/569) 的后续改动或验证。
 - 环境：macOS 26.6.2；`rustc`/`cargo` 1.99.0（`rust-toolchain.toml`）；
   构建统一经 `./scripts/cargo-rmcp-patched.sh`。
 

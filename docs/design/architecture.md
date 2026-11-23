@@ -76,17 +76,16 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 - session 生命周期容器：Session 创建/运行/销毁全生命周期归此层
   - 聚合根原则：归此层的职责以 session 生命周期为界；session 是聚合根，本节职责范围由此自洽
   - AgentGroup（agm 理念：Agent 平等、管线通讯）
-  - frozen data 构建与持有：session 创建时从 Resources 拉磁盘数据（CLAUDE.md/skills/日期）冻结；subagent 创建时 copy
+  - frozen data：宿主在会话创建期经 workspace 资源获取项目指令与段落覆盖，按已装配能力读取 skills，再冻结会话输入；子 Agent 复用已有冻结输入。中间件不直接读盘，不以当前磁盘替换持久快照。见 [文档加载标准](../standards/documentation.md) 和 [System Prompt](system-prompt.md)。
   - Session 级 hook（on_session_start/end）随 session 归此层
 - subagent 创建：SessionFactory::spawn_subagent(parent, config)
   - 建 thread：经 Resources 存储，parent_thread_id 挂父子链
   - 建 session：transcript 绑定存储（with_persistence）
   - 运行 + 结束：更新 agent_status
-- Task 目录、调用关联和交付属于当前进程运行态；跨实例执行恢复目标已撤销。
-  当前任务与关闭边界见 [Session 异步任务架构](session-async-tasks.md)。
+- Task 目录、调用关联、句柄和运行身份属于当前进程；不接管旧执行。进入会话可按持久工作意图和 MQ 建立新运行。分别见 [Session 异步任务](session-async-tasks.md) 与 [Session Durability](session-durability.md)。
 - 消息统一：`BaseMessage`（Human/Ai/Tool/SystemReminder 等角色；协议转换在 Reason 阶段）
 - MQ 消息管理：MessageQueue（Prompt/Defer/Info + MessageSource）
-- RCRA 循环：Receive -> Compact -> Reason -> Act，Receive 为唯一退出口
+- RCRA 循环：Receive → Compact → Reason → Act。Receive 是正常队列耗尽的退出判定点；取消、阶段失败或中断也可提前结束，仍遵循相应的终态与结算契约。
 - Hook/Middleware 统一抽象：MiddlewareHook trait
 - Middleware 链序蓝本在 Agent session 工厂，具体实例装配在
   `peri-middlewares/src/assembly.rs`，由宿主经装配端口注入，遵循 ARC-MIDDLEWARE-001。
@@ -103,7 +102,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 ## 4. Peri Middleware 分片
 
 - 实现 MiddlewareHook，承载 Goal/SubAgent/Permission/AskUser 等业务切面；
-  文件系统与终端工具由 builtin Workspace MCP 实例提供，不再是独立链槽位。
+  文件系统与终端工具由内置 workspace 能力提供；默认经 `peri` 出口装配，旧独立实例只用于兼容回滚。
 - MCP 客户端连接池、连接生命周期与工具桥接在 Middleware 层；宿主装配并注入 pool，
   不把连接状态误归 Resources。输入 I/O 与工具提供方经各自 MCP 能力边界消费。
 - 切面 = hook 挂载 + 工具声明 + prompt 贡献 + 条件守卫
@@ -113,7 +112,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 - 外部系统门面：抽象外部数据，对上提供抓手
   - 配置来源 I/O：由独立 `peri-mcp-config` bootstrap 能力提供文件正文、具名环境与字节 CAS；有效配置规则归 `peri-config`，不归 Resources 或输入 provider
   - 会话持久化：SessionResources 契约与本地 SQLite、远端 Turso adapter，保存身份、
-    transcript、配置、frozen/inherited、环境绑定；不保存 Agent 执行恢复账本。
+    transcript、配置、frozen/inherited、环境绑定、待发 MQ 与粗粒度工作意图；不保存旧执行的阶段或调用账本。
   - Workspace 级 OAuth 凭据的持久存储；MCP 连接由 Middleware 持有，交互 broker
     由 ACP 宿主提供，不归 Resources。
 - adapter 保存和适配状态，共用领域 reducer，不维护第二份业务规则；访问模式与
@@ -198,16 +197,14 @@ session 销毁顺序：
 
 持久真相：
 
-- Thread/transcript、配置与 frozen/inherited 是历史事实源；持久 Work、任务恢复绑定、
-  处理义务与 control 回执目标已撤销，不建立替代执行账本。
-- TaskManager、运行句柄、MQ 和 callback 是当前进程能力，不因加载历史复活旧 execution。
-  外部副作用未知时如实报告，不伪造完成、取消或跨进程恢复保证。
+- Thread/transcript、配置与 frozen/inherited 是历史事实源；[Thread MQ](thread-mq.md) 是待发消息事实源，Receive 原子移交至 canonical 历史。
+- `threads.work_state` 仅记录工作意图，不是运行记录。只有显式进入会话时才按持久事实重新准入，不恢复旧 TaskManager、运行句柄、调用、审批或 callback。只读历史不触发执行。未知外部副作用不伪造完成或取消。
 
 异步完成与激活（运行与历史边界见 [RCRA 消息权威](rcra-message-activation.md)）：
 
 ```mermaid
 flowchart LR
-    Bg[当前任务完成] --> I[明确收件会话的内存 MQ]
+    Bg[当前任务完成] --> I[明确收件会话的持久 MQ]
     I --> P[当前运行资格与取消检查]
     P --> A[RCRA 处理并写入 canonical history]
 ```
@@ -230,6 +227,6 @@ HITL/secret：宿主把 broker 经装配端口注入 Middleware，审批由 `Per
 Task vs Thread：
 
 - Task 运行投影：内存 registry 与执行句柄；任务归属与结果处理只存在于当前进程，
-  不持久化 owner 声明、任务绑定或交付账本，也不提供跨实例恢复。
+  不持久化 owner 声明、任务绑定或交付账本，也不接管其他实例的运行；完成后的待发结果按 Thread MQ 契约持久接纳。
 - Thread：持久化实体（sqlite），ThreadMeta + 消息，subagent 必有
 - 父子链 parent_thread_id = 父子标记的持久化载体（thread_id = agent_id）

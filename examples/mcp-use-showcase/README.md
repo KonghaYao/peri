@@ -32,18 +32,22 @@ demo 目录内自带 `.mcp.json`，在该目录启动 Peri 即可加载。
 `.mcp.json` 内容如下：
 
 ```json
-"mcp-use-showcase": {
-  "type": "http",
-  "url": "http://127.0.0.1:31337/mcp",
-  "subscriptions": {
-    "resources": ["demo://state"],
-    "resourcesListChanged": true,
-    "toolsListChanged": true
+{
+  "mcpServers": {
+    "mcp-use-showcase": {
+      "type": "http",
+      "url": "http://127.0.0.1:31337/mcp",
+      "subscriptions": {
+        "resources": ["demo://state"],
+        "resourcesListChanged": true,
+        "toolsListChanged": true
+      }
+    }
   }
 }
 ```
 
-Peri 默认支持 `subscriptions/listen`，启动后会按上述配置建立长流；调用 `set_theme` 会收到 `notifications/resources/updated`（`uri="demo://state"`），调用 `create_note` 会收到 `notifications/resources/list_changed`，资源缓存随之刷新。订阅不是 initialize 的 client capability，`client_info.capabilities` 没有订阅字段；验收以 listen 是否建立、通知是否到达为准。其他宿主只有实际调用返回 `Method not found` 时才记 SKIP。
+与支持 MCP 2026-07-28 的 server 建连成功后，Peri 按上述配置发出 `subscriptions/listen`；其中 `subscriptions.resources` 是 Peri 配置字段，不是 wire 请求字段（wire 使用 `resourceSubscriptions`）。调用 `set_theme` 会收到 `notifications/resources/updated`（`uri="demo://state"`），调用 `create_note` 会收到 `notifications/resources/list_changed`，资源缓存随之刷新。订阅不是 initialize 的 client capability，`client_info.capabilities` 没有订阅字段；验收以 listen 是否建立、通知是否到达为准。其他宿主只有实际调用返回 `Method not found` 时才记 SKIP。
 
 ## 功能地图
 
@@ -66,7 +70,7 @@ Peri 默认支持 `subscriptions/listen`，启动后会按上述配置建立长�
 | Views / Apps | 未包含：需要 React 渲染宿主，Peri TUI 不消费 |
 | OAuth / Deployment | 未包含：需要外部 provider 与部署环境 |
 
-Skills 遵循官方零配置约定：项目根存在 `skills/` 即自动发现，不需要 `skills: true`。参考 [mcp-use Skills 文档](https://docs.mcp-use.com/typescript/server/skills)。
+这个示例使用 mcp-use 的目录自动发现：项目根存在 `skills/` 即可，不需要 `skills: true`。这是 SDK 约定，不是 MCP wire 的要求。参考 [mcp-use Skills 文档](https://docs.mcp-use.com/typescript/server/skills)。
 
 ## 工具
 
@@ -104,7 +108,7 @@ Skills 遵循官方零配置约定：项目根存在 `skills/` 即自动发现�
 
 ```bash
 bun run client      # mcp-use client：tools/resources/templates/prompts/progress/MRTR
-bun run subscribe   # 2026 subscriptions/listen：资源更新、列表变化、日志通知
+bun run subscribe   # 2026 subscriptions/listen：资源更新、列表变化
 bun run openapi     # 端口 31338，OpenAPI 生成工具 + 本地 mock REST API
 bun run gateway     # 端口 31341，代理 31340 的上游 MCP server
 bun run typecheck

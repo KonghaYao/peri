@@ -24,13 +24,9 @@
 
 ## 安装
 
-```bash
-bun add peri-sandbox
-# 或
-npm install peri-sandbox
-```
-
-当前包仍是仓库内的 private 包；发布前请用本地路径或 workspace 链接安装。使用 SDK 集成时还需安装 `@peri-code/sdk`。
+`peri-sandbox` 是仓库内的 private 开发包，不从 npm registry 安装。可在本目录运行
+`bun install --frozen-lockfile` 后按下文开发；其他本地项目通过工作区或本地路径链接该包。
+需要 SDK 集成时，另行安装公开包 `@peri-code/sdk` 并注入 adapter。
 
 ## 快速开始
 
@@ -84,7 +80,7 @@ MCP 反向代理和空闲回收放在一个进程里，供 `peri-swarm` 网关�
 
 ```bash
 cd npm-packages/peri-sandbox
-bun install
+bun install --frozen-lockfile
 PERI_PATH=/path/to/peri bun run dev:swarm   # 默认 127.0.0.1:8081
 bun run test:swarm                          # 构建后只跑 tests/swarm/*.test.js
 ```
@@ -108,9 +104,15 @@ bun run dev:swarm
 | `PERI_SWARM_IDLE_MS` | 1800000（30 分钟） | 空闲回收阈值；`0` 关闭 |
 | `PERI_PATH` / `PERI_SANDBOX_SETTINGS` | 沿用既有语义 | 沙箱内 Peri 路径与 settings |
 
-路由：`GET /healthz`、`POST /v1/sandboxes`（按 `logicalEnvId` ensure，单飞）、
-`GET|DELETE /v1/sandboxes/{logicalEnvId}`、`POST|GET|DELETE
-/sandboxes/{logicalEnvId}/mcp`（反向代理，注入内层 Bearer）。
+| 路由 | 行为 |
+| --- | --- |
+| `GET /healthz` | 存活检查，返回 `{"status":"ok"}`，不鉴权 |
+| `POST /v1/sandboxes` | 按 `logicalEnvId` 启动或复用；并发请求只启动一次；`"lazy":true` 只预留 |
+| `GET /v1/sandboxes/{logicalEnvId}` | 读取状态；空闲回收后为 `reserved`，显式停止运行实例后为 `stopped`、`mcpUrl: null` |
+| `DELETE /v1/sandboxes/{logicalEnvId}` | 停止；默认保留目录和绑定，传 `deleteData=true` 才删除 |
+| `POST`、`GET`、`DELETE /sandboxes/{logicalEnvId}/mcp` | 代理到内层 `/mcp`，替换为内层 Bearer 并保留流式响应 |
+
+错误形状为 `{"error":{"code":"...","message":"..."}}`。
 
 - `POST /v1/sandboxes` 带 `{"lazy":true}` 时只做预留（分配 `sandboxId` 与绑定，不启动
   SRT）；不带 `lazy` 时立即启动。`peri-swarm` 网关使用懒预留。
@@ -122,10 +124,12 @@ bun run dev:swarm
 - 任务引用按运行保存。MCP `resultType:"task"` 建立引用，状态为 `completed`、`failed` 或
   `cancelled` 时释放；空取消回执不代表进程结束。客户端离开后，空闲检查按原 owner 查询
   `tasks/get`，每实例至多同时查询一次。若 Bash 调用被中断而没有收到任务 ID，检查使用 workspace
-  的 `shell_task_list` 核对各 owner。暂时查询失败会保留实例，最后一个任务结算后重新计时。
+  的 `shell_task_list` 核对各 owner。无法确认结果时保留实例；一直无法核对可能阻止
+  回收。最后一个任务结算后重新计时。
 - 持久布局：`~/.peri-swarm/sandboxes/bindings.json` 只记录 `sandboxId`、
   `workspacePath`、`lastRunId` 与使用时间，**不保存 token**；每个沙箱的
-  `workspace/` 与 `home/` 位于 `<root>/<sandboxId>/`，`close()` 后保留。
+  `workspace/` 与 `home/` 位于 `<root>/<sandboxId>/`，`close()` 后保留。Bun 重启后的
+  首次 ensure 可以复用持久目录，不恢复旧的任务引用。
 
 与网关的接线、双 Loom 库与恢复边界见
 [Peri Swarm 本地开发宿主](../../docs/design/peri-swarm.md)。
@@ -239,6 +243,9 @@ ready -> stopping -> closed
 6. 不恢复旧执行：实例停止或宿主崩溃后，在途 MCP 请求、Task 映射和 Bash 预算全部丢失；workspace 文件保留。
 
 `SandboxState` 联合还包含 `starting` 与 `stopped`；当前启动路径不会把未就绪的实例交给调用方。
+以上是 `startSandbox()` 管理的单次实例契约，不是 `dev:swarm` 的逻辑预留：后者空闲
+回收后保留原 MCP URL 与工作区，下一次调用开启新 run。显式停止、删除或 Bun 宿主
+重启不属于同一次运行的保活。参见 [Swarm 恢复边界](../../docs/design/peri-swarm.md#7-恢复边界)。
 
 ## API
 
@@ -444,30 +451,6 @@ profile 内必填 `runtimeReadPaths`、`memoryMax`、`tasksMax`、`cpuQuota`；`
 | Linux | `systemd-run --user` transient unit（`KillMode=control-group`、`PrivateTmp=yes`、`CollectMode=inactive-or-failed`），按 profile 设置 cgroup 限制 | 宿主被 SIGKILL 后 unit 依赖 stdio EOF 退出；若 unit 仍存活，下次启动返回 `conflict`，需人工 `systemctl --user stop` |
 
 `doctor` 只报告残留 `peri-sbx-*` unit 与陈旧 `.lock`，不自动清理。Windows 不支持。
-
-## 本地 swarm 服务（开发预览）
-
-`bun run dev:swarm` 在单个 Bun 进程内按逻辑环境启动 sandbox，并暴露稳定的本地 HTTP 入口。它复用 `startSandbox()` 的 settings、`PERI_PATH`、SRT/Peri 启动与 workspace lock 语义，只额外增加进程级实例表与 `/sandboxes/{logicalEnvId}/mcp` 反向代理。
-
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PERI_SWARM_BUN_BIND` | `127.0.0.1:8081` | 仅接受 loopback host；端口必填 |
-| `PERI_SWARM_SANDBOXES_ROOT` | `~/.peri-swarm/sandboxes` | 持久根，启动时创建为 0700 |
-| `PERI_SWARM_BUN_TOKEN` | 未设置 | 设置后 `/v1/*` 与 `/sandboxes/*` 要求 `Authorization: Bearer`；`/healthz` 不鉴权 |
-| `PERI_SWARM_IDLE_MS` | 1800000 | 无请求及未完成任务时的空闲回收阈值（毫秒），`0` 关闭 |
-
-| 路由 | 行为 |
-| --- | --- |
-| `GET /healthz` | 存活检查，返回 `{"status":"ok"}` |
-| `POST /v1/sandboxes` | body `{"logicalEnvId":"..."}`；启动或复用实例，并发请求只启动一次。可加 `"lazy":true` 只预留 |
-| `GET /v1/sandboxes/{logicalEnvId}` | 读取状态；空闲回收后的 `reserved` 保留 MCP URL 与上次 runId，显式停止已运行环境后为 `stopped`、`mcpUrl: null` |
-| `DELETE /v1/sandboxes/{logicalEnvId}?deleteData=true\|false` | 停止实例；默认保留目录，`deleteData=true` 才删除并移除绑定 |
-| `POST\|GET\|DELETE /sandboxes/{logicalEnvId}/mcp` | 代理到实例内层 `/mcp`；剥离外层 `Authorization` 并注入内层 Bearer，流式响应原样透传 |
-
-存储布局：`<root>/bindings.json`（0600，仅 logicalEnvId、sandboxId、workspacePath、lastRunId、lastUsedAt，不含内层 token）与 `<root>/<sandboxId>/workspace`。`close()` 保留目录；同一 logicalEnvId 重开是新的 `runId`，旧文件仍可读。服务重启后第一次 `ensure` 会复用 bindings 中的 `sandboxId` 目录。
-
-错误统一为 `{"error":{"code":"...","message":"..."}}`。自动回收与任务观察由当前 Bun 进程负责；
-服务重启后，首次懒预留或 `ensure` 可重新打开曾运行的绑定。跨进程与多机调度尚未实现。
 
 ## CLI（附录）
 

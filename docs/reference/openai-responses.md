@@ -23,7 +23,7 @@
    不提供 Responses 专属字段）。新建 provider 不自动绑定任何档位，已有 provider 的绑定与其参数保持
    不变；改名时所有显式引用随新 id 更新，空引用继续走首 provider 回退。保存只阻断“本次
    新弄坏”的已有绑定：原本就可解析、本次变为不可解析时显示精确错误（模型缺失指向 Login
-   默认模型字段，窗口缺失指向 settings 的 `profile.contextWindow`；Model 面板不提供
+   默认模型字段，窗口缺失提示在 `/model` 面板设置；该面板不提供
    Responses 专属字段）；原本就不可解析的绑定允许保存并给非阻断提示，不会自动补绑定或
    清空引用。
 5. 已登录且作用域一致时，空/兼容的 plan 身份会在状态查询成功或保存门自动采用，一次保存
@@ -34,13 +34,13 @@
    出现 revision 冲突时按 Ctrl+R 从 authority 重读并重新基线化（同时同步认证作用域），
    不会用旧草稿覆盖外部新值，只有该冲突显示重新载入提示。
 7. 在 `/model` 右栏选择要绑定的档位并编辑 Provider / Model / Effort / Max tokens /
-   1m enable：所有 provider（含 Responses / ChatGPT plan）共用同一张 K/V 表与即时保存
+   Context window / 1m enable：所有 provider（含 Responses / ChatGPT plan）共用同一张 K/V 表与即时保存
    路径，不出现档位草稿、专属保存面板或 Responses 专属字段。Login 落盘的四档默认模型
    会用于 Model 面板预填；已有显式 `profile.model` 优先，不会被预填覆盖。底部
    `[Ctrl+L 管理 Provider · 认证：/login]` 是按钮，点击与 Ctrl+L 相同：打开 Login
    并定向编辑当前 provider。
 8. Login Edit 的字段、类型/认证方式/Confirm 可用鼠标点击，语义与键盘一致。Model 右栏
-   Provider/Model/Effort/Max tokens/1m enable 行也可点击：先聚焦该行，再执行与键盘
+   Provider/Model/Effort/Max tokens/Context window/1m enable 行也可点击：先聚焦该行，再执行与键盘
    相同的动作。空白、边框、分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
 9. 已确认的 ChatGPT plan 模型缺窗口时按 1M 默认值立即可用；其它 Responses 模型
    缺窗口的绑定可保存为未完成状态，但激活前须填写正整数窗口（其它档位的编辑不受影响）。

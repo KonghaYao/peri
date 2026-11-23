@@ -1,6 +1,8 @@
-# peri-browser MCP（计划）
+# peri-browser MCP 与监控网关
 
-把 Kitesurf 作为 Peri 的浏览器后端：`kitesurf` 外部二进制提供浏览器，`peri-browser` 负责 CDP 到 MCP 的转换，`peri-browser-gateway` 提供人看的监控页。当前目录只放计划，不含实现。
+**状态：MCP server 是计划；监控网关已有独立实现。** 本目录没有 `peri-browser` MCP 运行时代码；同级 [`peri-browser-gateway`](../peri-browser-gateway/) 包含注册信道、会话监控页与 WebSocket、CDP 画面/输入及交接状态机。除网关已有的代码能力外，下述模型工具、Peri 自动装配、MCP 端重连和整条交接链为设计，不代表已发布。
+
+**部署边界：** 默认仅本机环回。当前网关不是公网认证边界：监控索引会列出带访问 token 的会话链接；不要直接暴露给不可信网络，远程访问须由受信接入层鉴权，不能仅靠 TLS 或 URL token。页面控制隔离不等于账号隔离，独立账号需要独立 profile。
 
 ## 1. 目标
 
@@ -281,6 +283,8 @@ sequenceDiagram
 - 缩略图是截图而非串流，成本按切页频率计；多标签同时显示时限制刷新频率。
 
 ## 10. 配置
+
+下表是设计的总体配置，不是当前网关运行参数清单。网关当前识别的参数、环境变量及默认值见 [程序帮助](../peri-browser-gateway/src/main.rs) 和 [配置解析](../peri-browser-gateway/src/config.rs)。例如网关当前的手动让出等待为 5 秒、请求人工响应为 120 秒；表中后续 MCP 目标值不能用来推断网关现状。网关当前不自行终止 TLS。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |

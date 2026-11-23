@@ -48,7 +48,7 @@ Anthropic、OpenAI-compatible（Chat Completions）与 Responses adapter 实现�
 
 1. `prepare_request`：构造 provider-native 请求观测投影；
 2. `stream`：经公共 HTTP/SSE runtime 发起请求并返回统一事件流；
-3. 请求/响应映射：在统一 `ContentBlock` 与 provider wire JSON 之间无损转换。
+3. 请求/响应映射：按 provider 契约在统一 `ContentBlock` 与 wire JSON 之间转换，保留 canonical 历史与降维边界。
 
 映射必须保持 assistant tool call 与 tool result 配对、reasoning/signature、usage 与
 stop reason 语义。新增 `ContentBlock` 变体时，需要同步两端请求映射、响应映射和
@@ -58,6 +58,15 @@ System Prompt 的 cached/uncached seam 由
 `peri_model::prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 传递。支持显式 cache
 breakpoint 的 adapter 消费该 seam；其他 adapter 只做字节守恒剥离。详见
 [System Prompt 设计](system-prompt.md)与 ARC-SERIAL-001。
+
+### Anthropic 兼容的 thinking 与 effort
+
+开启 extended thinking 后，适配器仅为已确认的精确模型使用 adaptive；手动
+thinking 按有效请求输出上限和历史签名策略决定是否发送，不能伪造签名。
+DeepSeek 官方 Anthropic 兼容域名（`deepseek.com` 及其子域）不以手动预算是否
+足够来决定 effort：即使因预算不足省略 `thinking`，仍单独发送配置的
+`output_config.effort`。不把此例外扩展给未知端点。精确模型、别名和回放规则见
+[模型代码索引](../code-index/peri-model.md)的 Anthropic 段。
 
 ### Responses 与认证
 

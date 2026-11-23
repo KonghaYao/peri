@@ -8,6 +8,8 @@ Workspace 后台任务的资源结算以 `workspace/src/shell_tasks.rs` 为准�
 
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配目标设计（v4-part-1）`](../design/mcp-adaptation-v4-part-1.md)。v5 单出口 `peri` 与 capability router 已实现于 `peri-middlewares`（`mcp/builtin/router.rs`），宿主默认装配为单出口，`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；见 [`MCP v5 单出口目标设计`](../design/mcp-v5-single-exit.md)。
 
+浏览器监控网关不是 builtin MCP：`mcp-packages/peri-browser-gateway/` 是独立二进制，`src/{http,registry,session,ws}.rs` 提供本地监控与交接入口；`mcp-packages/peri-browser/` 仍为浏览器 MCP 设计，没有该 server 的运行时。部署与认证边界见[浏览器说明](../../mcp-packages/peri-browser/README.md)。
+
 Workspace git ref 更新由 `workspace/src/workspace/workspace_mcp_server.rs` 在 MCP 通知
 `_meta["peri/messageKind"]` 中逐条声明 `info`；其他 MCP server 可按同一字段声明
 `info` 或 `defer`。类型字面量与键在 `peri-acp-types/src/mcp.rs` 统一定义。
