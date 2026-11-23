@@ -82,6 +82,10 @@ export class ManagedSandboxInstance implements SandboxInstance {
     return this.http.url;
   }
 
+  watchTaskActivity(onSettled: () => void): () => boolean {
+    return this.backend.watchTaskActivity?.(onSettled) ?? (() => false);
+  }
+
   status(): SandboxStatus {
     return {
       id: this.id,

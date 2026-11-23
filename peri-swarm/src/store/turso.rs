@@ -192,11 +192,23 @@ const SELECT_VERSION_SQL: &str = "SELECT version FROM swarm_meta";
 /// `cwd` may repeat for one `logical_id`, otherwise the update affects 0 rows
 /// and the caller sees a conflict. A second `logical_id` claiming the same
 /// `root_session_id` fails on the unique constraint, also a conflict.
-const UPSERT_SESSION_SQL: &str = "INSERT INTO swarm_sessions (
+macro_rules! insert_session {
+    ($conflict:literal) => {
+        concat!(
+            "INSERT INTO swarm_sessions (
     logical_id, root_session_id, actor_key, cwd, state, model, instructions,
     mcp_json, environment_json, metadata_json, prompt_cache_options_json,
     created_at, last_activity_at, last_item_seq)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14",
+            $conflict
+        )
+    };
+}
+const INSERT_SESSION_SQL: &str = insert_session!("");
+// Immediately follows the guarded binding UPDATE on the same SQLite connection.
+const INSERT_ATTACHED_SESSION_SQL: &str = insert_session!(" WHERE changes() = 1");
+const UPSERT_SESSION_SQL: &str = insert_session!(
+    "
 ON CONFLICT(logical_id) DO UPDATE SET
     actor_key = excluded.actor_key,
     state = excluded.state,
@@ -209,7 +221,8 @@ ON CONFLICT(logical_id) DO UPDATE SET
     last_activity_at = excluded.last_activity_at,
     last_item_seq = excluded.last_item_seq
 WHERE swarm_sessions.root_session_id = excluded.root_session_id
-  AND swarm_sessions.cwd = excluded.cwd";
+  AND swarm_sessions.cwd = excluded.cwd"
+);
 
 const SELECT_SESSION_SQL: &str = "SELECT logical_id, root_session_id, actor_key, cwd, state,
     model, instructions, mcp_json, environment_json, metadata_json,
@@ -251,6 +264,14 @@ const DELETE_SESSION_SQL: &str = "DELETE FROM swarm_sessions WHERE logical_id = 
 const DELETE_ITEMS_SQL: &str = "DELETE FROM swarm_items WHERE logical_id = ?1";
 const DELETE_INPUTS_SQL: &str = "DELETE FROM swarm_inputs WHERE logical_id = ?1";
 const DELETE_TURNS_SQL: &str = "DELETE FROM swarm_turns WHERE logical_id = ?1";
+// The binding records the most recent session to attach. Before deleting that
+// session, give another user of the same environment the binding in this transaction.
+const REASSIGN_BINDINGS_SQL: &str = "UPDATE swarm_bindings SET logical_id = COALESCE((
+    SELECT s.logical_id FROM swarm_sessions s
+    WHERE s.logical_id <> ?1 AND json_extract(s.environment_json, '$.type') = 'openai_hosted'
+      AND json_extract(s.environment_json, '$.id') = swarm_bindings.logical_env_id
+    ORDER BY s.logical_id LIMIT 1
+), logical_id) WHERE logical_id = ?1";
 const DELETE_BINDINGS_SQL: &str = "DELETE FROM swarm_bindings WHERE logical_id = ?1";
 
 const UPSERT_TURN_SQL: &str = "INSERT INTO swarm_turns
@@ -381,6 +402,9 @@ const UPSERT_BINDING_SQL: &str = "INSERT INTO swarm_bindings
         last_run_id = excluded.last_run_id,
         last_used_at = excluded.last_used_at";
 
+const ATTACH_BINDING_SQL: &str = "UPDATE swarm_bindings
+    SET logical_id = ?2, last_used_at = ?9, last_run_id = COALESCE(?8, last_run_id)
+    WHERE logical_env_id = ?1 AND sandbox_id = ?3 AND workspace_path = ?4";
 const SELECT_BINDING_SQL: &str = "SELECT logical_env_id, logical_id, sandbox_id, workspace_path,
     sandbox_root, settings_profile, token_file, last_run_id, last_used_at
     FROM swarm_bindings WHERE logical_env_id = ?1";
@@ -790,20 +814,16 @@ async fn within_budget<T>(
 /// unreachable database cannot be mistaken for absent data.
 fn classify(operation: &'static str, error: SdkError) -> StoreError {
     match error {
-        SdkError::Constraint(message) => {
-            StoreError::Conflict(format!("{operation}: {message}"))
-        }
+        SdkError::Constraint(message) => StoreError::Conflict(format!("{operation}: {message}")),
         SdkError::Readonly(message) => StoreError::Unsupported(format!(
             "{operation}: swarm state store is read only: {message}"
         )),
-        SdkError::BatchStatementFailed { index, error, .. } => {
-            match classify(operation, *error) {
-                StoreError::Conflict(detail) => {
-                    StoreError::Conflict(format!("batch statement {index}: {detail}"))
-                }
-                other => other,
+        SdkError::BatchStatementFailed { index, error, .. } => match classify(operation, *error) {
+            StoreError::Conflict(detail) => {
+                StoreError::Conflict(format!("batch statement {index}: {detail}"))
             }
-        }
+            other => other,
+        },
         SdkError::BatchRollbackFailed {
             error,
             rollback_error,
@@ -1172,6 +1192,41 @@ impl SwarmStore for SwarmStateStore {
         }
     }
 
+    async fn swarm_create_hosted_session(
+        &self,
+        row: SwarmSessionRow,
+        binding: SwarmBindingRow,
+        require_existing: bool,
+    ) -> Result<(), StoreError> {
+        let (binding_sql, session_sql) = if require_existing {
+            (ATTACH_BINDING_SQL, INSERT_ATTACHED_SESSION_SQL)
+        } else {
+            (UPSERT_BINDING_SQL, INSERT_SESSION_SQL)
+        };
+        // Updating the binding and inserting the session form one write transaction.
+        // A session identity conflict rolls back the binding update. A missing or
+        // replaced shared environment leaves both statements without effect.
+        let statements = [
+            BatchStatement::new(binding_sql, binding_params(&binding))
+                .map_err(|e| classify("create_hosted_session", e))?,
+            BatchStatement::new(session_sql, session_params(&row)?)
+                .map_err(|e| classify("create_hosted_session", e))?,
+        ];
+        let results = within_budget(
+            "create_hosted_session",
+            self.connection
+                .transactional_batch(statements, TransactionBehavior::Immediate),
+        )
+        .await?;
+        if results
+            .last()
+            .is_none_or(|result| result.rows_affected() != 1)
+        {
+            return Err(StoreError::NotFound(binding.logical_env_id));
+        }
+        Ok(())
+    }
+
     async fn swarm_get_session(
         &self,
         logical_id: &str,
@@ -1290,6 +1345,7 @@ impl SwarmStore for SwarmStateStore {
             DELETE_ITEMS_SQL,
             DELETE_INPUTS_SQL,
             DELETE_TURNS_SQL,
+            REASSIGN_BINDINGS_SQL,
             DELETE_BINDINGS_SQL,
             DELETE_SESSION_SQL,
         ]

@@ -66,17 +66,17 @@ export async function main(): Promise<void> {
     fetch: (request) => handler(request),
   });
 
-  // Idle reclaim: only environments with no in-flight MCP request are eligible
-  // (manager.beginRequest/endRequest). `PERI_SWARM_IDLE_MS=0` disables the timer.
+  // Coalesce timer ticks while a provider is stopping. Zero disables the sweep.
   const sweepIntervalMs = idleSweepIntervalMs(idleMs);
-  let sweepQueue: Promise<void> = Promise.resolve();
+  let activeSweep: Promise<void> | undefined;
   const sweepTimer =
     sweepIntervalMs === 0
       ? null
       : setInterval(() => {
-          sweepQueue = sweepQueue
-            .then(async () => {
-              const result = await manager.sweepIdle();
+          if (activeSweep) return;
+          activeSweep = manager
+            .sweepIdle()
+            .then((result) => {
               if (result.reclaimed.length > 0 || result.inFlight.length > 0)
                 console.log(
                   JSON.stringify({
@@ -89,6 +89,9 @@ export async function main(): Promise<void> {
             })
             .catch((error: unknown) => {
               console.error('swarm idle sweep failed', error);
+            })
+            .finally(() => {
+              activeSweep = undefined;
             });
         }, sweepIntervalMs);
   sweepTimer?.unref();
@@ -111,7 +114,7 @@ export async function main(): Promise<void> {
     shuttingDown = true;
     console.log(JSON.stringify({ event: 'swarm_server_stopping', signal }));
     if (sweepTimer !== null) clearInterval(sweepTimer);
-    await sweepQueue.catch(() => undefined);
+    await activeSweep;
     server.stop(true);
     try {
       await manager.closeAll();

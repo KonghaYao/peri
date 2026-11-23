@@ -239,7 +239,22 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
 /// 同一 attempt 内摄取，工具结果在前、steer 输入按 MQ 顺序在后。
 #[tokio::test]
 async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration() {
+    assert_tool_boundary_steer(0, false).await;
+}
+
+#[tokio::test]
+async fn test_tool_boundary_steer_behind_two_pages_reaches_next_model_request() {
+    assert_tool_boundary_steer(130, false).await;
+}
+
+#[tokio::test]
+async fn test_tool_boundary_steer_during_request_preparation_reaches_next_model_request() {
+    assert_tool_boundary_steer(0, true).await;
+}
+
+async fn assert_tool_boundary_steer(backlog: usize, dispatch_in_preparation: bool) {
     use crate::agent::react::{Reasoning, ToolCall};
+    use crate::middleware::{capabilities::BeforeModelState, Middleware, MiddlewareChain};
     use crate::session::tool_catalog::SessionToolCatalog;
     use crate::session::user_input_mailbox::UserInputMailbox;
     use crate::tools::BaseTool;
@@ -247,8 +262,31 @@ async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration(
         DispatchUserInputsRequest, EnqueueUserInputRequest, SessionInbox, UserInputState,
     };
     use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use tokio_util::sync::CancellationToken;
+
+    struct PauseSecondRequest {
+        hooks: AtomicUsize,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Middleware for PauseSecondRequest {
+        fn name(&self) -> &str {
+            "pause-second-request"
+        }
+        async fn before_model(
+            &self,
+            _: &mut dyn BeforeModelState,
+        ) -> crate::error::AgentResult<()> {
+            if self.hooks.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        }
+    }
 
     struct ToolBatchLlm {
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -329,6 +367,16 @@ async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration(
     let shared_tools = Arc::new(parking_lot::RwLock::new(tools.clone()));
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let mut chain = MiddlewareChain::new();
+    let preparing = Arc::new(tokio::sync::Notify::new());
+    let resume_preparation = Arc::new(tokio::sync::Notify::new());
+    if dispatch_in_preparation {
+        chain.add(Box::new(PauseSecondRequest {
+            hooks: AtomicUsize::new(0),
+            entered: preparing.clone(),
+            release: resume_preparation.clone(),
+        }));
+    }
     let mut context = StageContext::builder(
         session.start_turn(),
         session.transcript(),
@@ -338,12 +386,13 @@ async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration(
         calls: Arc::clone(&calls),
         requests: Arc::clone(&requests),
     }))
+    .with_middleware_chain(Arc::new(chain))
     .with_tools(shared_tools)
     .with_tool_catalog(Arc::new(SessionToolCatalog::new(tools, None)))
     .build();
     let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
     let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
-    let cancel = CancellationToken::new();
+    let cancel = context.session.turn.cancel_token.as_ref().clone();
     let ticket = mailbox
         .attach_external_attempt_sync(cancel.clone(), false)
         .expect("the attach external attempt sync fixture result is required for this assertion");
@@ -353,13 +402,21 @@ async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration(
         BaseMessage::human("初始任务"),
     ));
 
-    let task = tokio::spawn(crate::agent::stages::run_react_loop(context, 10));
+    let task = tokio::spawn(crate::agent::stages::run_react_loop(context, 2));
     tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
         .await
         .expect("工具批次必须开始执行");
 
+    // 后台进度先于用户显式发送入队，不能耗掉一次模型调用。
+    for index in 0..backlog {
+        session.queue().push_sync(QueuedMessage::info(
+            MessageSource::SystemInjected,
+            BaseMessage::human(format!("background progress {index}")),
+        ));
+    }
+
     let mut input_ids = Vec::new();
-    for text in ["steer-1", "steer-2"] {
+    for text in ["idle-only", "steer-1", "steer-2"] {
         let input_id = uuid::Uuid::now_v7().to_string();
         let receipt = mailbox
             .enqueue(&EnqueueUserInputRequest {
@@ -374,7 +431,15 @@ async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration(
             .await
             .expect("the enqueue fixture result is required for this assertion");
         assert_eq!(receipt.results[0].state, UserInputState::Queued);
-        input_ids.push(input_id);
+        if text != "idle-only" {
+            input_ids.push(input_id);
+        }
+    }
+    if dispatch_in_preparation {
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), preparing.notified())
+            .await
+            .expect("the tool result must have passed Receive before dispatch");
     }
     mailbox
         .dispatch(&DispatchUserInputsRequest {
@@ -387,7 +452,11 @@ async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration(
         .expect("the dispatch fixture result is required for this assertion");
     assert!(!cancel.is_cancelled(), "工具批次执行中不得取消当前 attempt");
 
-    release.notify_one();
+    if dispatch_in_preparation {
+        resume_preparation.notify_one();
+    } else {
+        release.notify_one();
+    }
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
         .expect("工具完成后 loop 必须继续")
@@ -402,13 +471,25 @@ async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration(
         "软注入不得结束当前 attempt"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2, "工具后必须再走一轮 Reason");
-    assert!(
-        mailbox.snapshot_sync().items.is_empty(),
-        "两条 steer 都应在同一 Receive 批次内交付"
-    );
+    let pending = mailbox.snapshot_sync().items;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].original_draft, "idle-only");
+    assert_eq!(pending[0].state, UserInputState::Queued);
 
     let requests = requests.lock();
     let second = requests.get(1).expect("第二轮 Reason 请求必须存在");
+    for text in ["steer-1", "steer-2"] {
+        assert_eq!(
+            second
+                .iter()
+                .filter(|message| message.content() == text)
+                .count(),
+            1
+        );
+    }
+    assert!(!second
+        .iter()
+        .any(|message| message.content() == "idle-only"));
     let tool_position = second
         .iter()
         .position(|message| {

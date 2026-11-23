@@ -217,8 +217,8 @@
 | F-SWARM-005 | L2 | 双库归属；会话事实与 Swarm 事实互不建表 | [契约](../design/peri-swarm.md) |
 | F-SWARM-006 | L2 | MCP 注入；agent.tools 映射 ACP 会话声明 | [契约](../design/peri-swarm.md) |
 | F-SWARM-007 | L2 | 宿主沙箱；Bun 懒预留与 workspace 代理 | [契约](../design/peri-swarm.md) |
-| F-SWARM-008 | L2 | 空闲回收；在途阻断且文件与绑定保留 | [契约](../design/peri-swarm.md) |
-| F-SWARM-009 | L2 | 宿主恢复；仅杀 Rust 后 reattach 不重放 | [契约](../design/peri-swarm.md) |
+| F-SWARM-008 | L2 | 空闲回收；请求与后台 MCP 任务保活，保留工作区并按需唤醒 | [契约](../design/peri-swarm.md) |
+| F-SWARM-009 | L2 | 宿主恢复；按交互重新挂接，持久 MQ 恢复，同步中断可继续追问 | [契约](../design/peri-swarm.md) |
 | F-SWARM-010 | L3 | 本地运行面；双库 provision 与启动顺序 | [契约](../design/peri-swarm.md) |
 | F-SWARM-011 | L3 | 副本组部署面；外部 engine（字面 endpoint 限私网/环回，域名由部署保证）、共享 namespace/pool 与显式非 loopback 绑定 | [契约](../design/peri-swarm.md) |
 | F-SWARM-012 | L1 | 官方会话资源面；list/update/delete/turns，官方默认字段与环境 `none` 投影，空对象 update no-op，未映射资源显式 404 | [契约](../design/peri-swarm.md) |

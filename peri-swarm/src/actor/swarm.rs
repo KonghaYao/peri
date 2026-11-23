@@ -15,10 +15,9 @@
 //! it replays `swarm_items` after the cursor and then forwards the session's
 //! broadcast channel as SSE frames ([`crate::event_stream`]).
 //!
-//! Recovery boundary: `on_start` restores a **read-only** view (session row and
-//! `MAX(seq)`). Re-attaching a live ACP host needs the remote store (S6) and the
-//! full-chain recovery in S9; until then a rebuilt actor answers reads and
-//! rejects turns instead of faking a live session.
+//! On restart the actor serves history from the session and item stores. A
+//! fresh keyed user input attaches the existing root and reconciles any lost
+//! turn before accepting the new one.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -49,7 +48,7 @@ use crate::service::{
     ApprovalReceipt, CreateSessionCommand, CreateSessionResult, EventSubscription,
     SessionUpdateCommand, SwarmService,
 };
-use crate::store::{store_failure, SwarmStore};
+use crate::store::SwarmStore;
 
 /// Registered actor name. It is part of the routing contract with the gateway.
 pub const ACTOR_NAME: &str = ActorKey::ACTOR_NAME;
@@ -151,24 +150,6 @@ impl SwarmActor {
             ));
         }
         Ok(parsed)
-    }
-
-    /// S5 recovery boundary: a rebuilt actor restores a read-only view but owns
-    /// no ACP host until the first interaction. `ensure_live` attaches the
-    /// persisted session with `session/load` (S9a4b); this check then only
-    /// covers the remaining host-less cases (no row yet, or an attach that
-    /// deliberately did not run) and keeps the error a `502`
-    /// `session_not_live` instead of the host-less service's `404
-    /// unknown_agent`.
-    async fn host_less_error(&self, logical_id: &LogicalId) -> Option<SwarmError> {
-        if self.service.is_live(logical_id) {
-            return None;
-        }
-        match self.store.swarm_get_session(logical_id.as_str()).await {
-            Ok(Some(_)) => Some(SwarmError::upstream_unavailable("session_not_live")),
-            Ok(None) => None,
-            Err(error) => Some(store_failure("get_session", error)),
-        }
     }
 
     fn info(&self) -> InfoOutput {
@@ -292,10 +273,8 @@ impl Actor for SwarmActor {
 
     /// Restore the read-only view from `swarm_sessions` and `MAX(seq)`.
     ///
-    /// No ACP host is spawned: `session/load` into a fresh child needs the
-    /// remote store (S6) and is verified end to end in S9. Store failures are
-    /// logged instead of failing the start so reads keep surfacing the actual
-    /// error instead of a crash loop.
+    /// The first user interaction owns host attachment. A failed store read
+    /// leaves the actor available for a later request to retry.
     async fn on_start(self: Arc<Self>, _ctx: Ctx<Self>) -> Result<()> {
         let logical_id = self.logical_id.as_str();
         match self.store.swarm_get_session(logical_id).await {
@@ -756,15 +735,6 @@ impl Handler<Submit> for SwarmActor {
             Ok(logical_id) => logical_id,
             Err(error) => return Ok(envelope(Err(error))),
         };
-        // A rebuilt actor holds only the read-only view. The first turn is the
-        // interaction that reattaches the persisted session (`session/load`,
-        // no prompt and no queued-input replay).
-        if let Err(error) = self.service.ensure_live(&logical_id).await {
-            return Ok(envelope(Err(error)));
-        }
-        if let Some(error) = self.host_less_error(&logical_id).await {
-            return Ok(envelope(Err(error)));
-        }
         let submission = InputSubmission {
             input_id: action.input_id,
             kind: action.kind,
@@ -827,14 +797,6 @@ impl Handler<RespondRequiredAction> for SwarmActor {
             Ok(logical_id) => logical_id,
             Err(error) => return Ok(envelope(Err(error))),
         };
-        // An approval lives in the actor that owns the suspended prompt; a
-        // rebuilt actor has no pending registry and answers `actor_lost`.
-        if let Err(error) = self.service.ensure_live(&logical_id).await {
-            return Ok(envelope(Err(error)));
-        }
-        if let Some(error) = self.host_less_error(&logical_id).await {
-            return Ok(envelope(Err(error)));
-        }
         match self
             .service
             .respond_required_action(

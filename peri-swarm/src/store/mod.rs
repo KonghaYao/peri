@@ -312,6 +312,14 @@ pub struct SwarmBindingRow {
 #[async_trait]
 pub trait SwarmStore: Send + Sync {
     async fn swarm_upsert_session(&self, row: SwarmSessionRow) -> Result<(), StoreError>;
+    /// Atomically claim a new hosted session identity and attach its environment.
+    /// An identity conflict must leave the existing environment binding intact.
+    async fn swarm_create_hosted_session(
+        &self,
+        row: SwarmSessionRow,
+        binding: SwarmBindingRow,
+        require_existing: bool,
+    ) -> Result<(), StoreError>;
     async fn swarm_get_session(
         &self,
         logical_id: &str,

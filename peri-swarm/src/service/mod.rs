@@ -341,10 +341,10 @@ pub async fn resolve_window_after(
 ///   steer and attaches to that turn;
 /// - every `complete:true` assistant message attaches to the open turn (one
 ///   turn can persist several messages, e.g. across tool calls);
-/// - a turn's terminal is emitted immediately before the next turn's
-///   `turn.created`, or at the end of the window. The last turn is `failed` only
-///   while the session row still records `failed`; every other closed turn is
-///   `completed` followed immediately by `agent.session.idle`.
+/// - a persisted turn row identifies its opener, including when the previous
+///   attempt was interrupted without producing an answer. The persisted row
+///   determines its terminal. Legacy items with no row use output boundaries
+///   and the last recorded session state.
 ///
 /// A turn that is still live is left open: its terminal arrives on the live
 /// stream instead of being invented by the replay. `replay_backlog` seeds the
@@ -363,6 +363,7 @@ struct OfficialReplay {
     session_failed: bool,
     /// The session has a turn open in the live runtime right now.
     live_open_turn: bool,
+    persisted: BTreeMap<String, crate::store::SwarmTurnRow>,
 }
 
 struct ReplayTurn {
@@ -424,6 +425,7 @@ fn classify_row(
     item: &crate::domain::ItemView,
     turns: &mut Vec<ReplayTurn>,
     current: &mut Option<usize>,
+    persisted: &BTreeMap<String, crate::store::SwarmTurnRow>,
 ) -> RowFrame {
     if item.kind != crate::domain::ItemKind::Message || !item.source.is_root() {
         // Thought chunks share the answer's `messageId`; child agents own their
@@ -442,9 +444,10 @@ fn classify_row(
             // frame starts the next turn: live accepts a new turn only while
             // no turn is open. Before that point it is a steer of the open turn.
             let produces_output = current.is_some_and(|turn| turns[turn].completed_at.is_some());
-            if current.is_none() || produces_output {
+            let turn_id = crate::domain::turn_id_for_item(&item.item_id);
+            if current.is_none() || produces_output || persisted.contains_key(&turn_id) {
                 turns.push(ReplayTurn {
-                    turn_id: crate::domain::turn_id_for_item(&item.item_id),
+                    turn_id,
                     created_at: crate::domain::official::unix_from_rfc3339(&item.created_at),
                     completed_at: None,
                     assistant_outputs: 0,
@@ -550,6 +553,7 @@ impl OfficialReplay {
             prompt_cache_options: row.prompt_cache_options,
             session_failed: row.state == crate::domain::SessionState::Failed,
             live_open_turn,
+            persisted: BTreeMap::new(),
         }
     }
 
@@ -578,7 +582,12 @@ impl OfficialReplay {
         }
         let mut frames = Vec::with_capacity(items.len());
         for item in items {
-            frames.push(classify_row(item, &mut turns, &mut current));
+            frames.push(classify_row(
+                item,
+                &mut turns,
+                &mut current,
+                &self.persisted,
+            ));
         }
 
         let mut out = Vec::with_capacity(items.len().saturating_mul(2));
@@ -703,32 +712,47 @@ impl OfficialReplay {
 
     /// Emit one turn terminal plus the session frame the SDK reads after it.
     fn push_terminal(&self, turn: &ReplayTurn, is_last: bool, out: &mut Vec<StreamEvent>) {
-        if is_last && self.live_open_turn {
-            // The turn is still running; its terminal comes from the live
-            // stream. Replaying one here would end the SDK stream early.
+        let persisted = self.persisted.get(&turn.turn_id);
+        if persisted.is_some_and(|row| row.status.is_open())
+            || (is_last && self.live_open_turn && persisted.is_none())
+        {
             return;
         }
-        if is_last && self.session_failed {
-            out.push(StreamEvent::Official(OfficialEvent::turn_failed(
-                &self.logical_id,
-                &turn.turn_id,
+        let failed = persisted.map_or(is_last && self.session_failed, |row| {
+            row.status == TurnStatus::Failed
+        });
+        let snapshot = persisted.map_or_else(
+            || {
                 OfficialTurn::new(
                     &self.logical_id,
                     &turn.turn_id,
-                    TurnStatus::Failed,
+                    if failed {
+                        TurnStatus::Failed
+                    } else {
+                        TurnStatus::Completed
+                    },
                     turn.created_at,
-                    // The failure time is not persisted; keep it null instead
-                    // of pretending the last item's timestamp is one.
-                    None,
-                ),
+                    if failed { None } else { turn.completed_at },
+                )
+            },
+            crate::store::SwarmTurnRow::to_official,
+        );
+        if failed {
+            let message = snapshot
+                .error
+                .as_ref()
+                .and_then(|error| error["message"].as_str())
+                .unwrap_or_default()
+                .to_owned();
+            out.push(StreamEvent::Official(OfficialEvent::turn_failed(
+                &self.logical_id,
+                &turn.turn_id,
+                snapshot,
             )));
-            // The persisted log carries no failure detail; the message stays
-            // empty instead of inventing one. The code mirrors the only
-            // failure category the gateway writes to a turn row.
             out.push(StreamEvent::Official(OfficialEvent::error(
                 &turn.turn_id,
                 &self.logical_id,
-                "",
+                &message,
             )));
             out.push(StreamEvent::Official(OfficialEvent::session_failed(
                 &turn.turn_id,
@@ -739,13 +763,7 @@ impl OfficialReplay {
         out.push(StreamEvent::Official(OfficialEvent::turn_completed(
             &self.logical_id,
             &turn.turn_id,
-            OfficialTurn::new(
-                &self.logical_id,
-                &turn.turn_id,
-                TurnStatus::Completed,
-                turn.created_at,
-                turn.completed_at,
-            ),
+            snapshot,
         )));
         out.push(StreamEvent::Official(OfficialEvent::session_idle(
             &turn.turn_id,
@@ -866,13 +884,42 @@ pub async fn replay_backlog(
     // the same turn. Look back past the cursor for the opener of the turn that
     // was open there; an empty window still uses it to republish a terminal the
     // client may have missed.
+    let mut replay = OfficialReplay::new(
+        session,
+        live_open_turn || session.state == crate::domain::SessionState::Running,
+    );
     let previous = if cursor.value() == 0 {
         None
     } else {
-        turn_at_cursor(store, &session.logical_id, cursor.value()).await?
+        turn_at_cursor(
+            store,
+            &session.logical_id,
+            cursor.value(),
+            &mut replay.persisted,
+        )
+        .await?
     };
     let seed = seed_for(&items, previous.as_ref());
-    let replay = OfficialReplay::new(session, live_open_turn);
+    use futures::{StreamExt, TryStreamExt};
+    let user_turns: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            item.kind == crate::domain::ItemKind::Message
+                && item.source.is_root()
+                && item.payload["role"].as_str() == Some("user")
+        })
+        .map(|item| crate::domain::turn_id_for_item(&item.item_id))
+        .collect();
+    let lookups = futures::stream::iter(user_turns)
+        .map(|id| async move { store.swarm_get_turn(&session.logical_id, &id).await })
+        .buffer_unordered(8);
+    let rows: Vec<_> = lookups
+        .try_collect()
+        .await
+        .map_err(|error| store_failure("get_turn", error))?;
+    for row in rows.into_iter().flatten() {
+        replay.persisted.insert(row.turn_id.clone(), row);
+    }
     Ok(replay.render(&items, seed.as_ref()))
 }
 
@@ -1014,6 +1061,7 @@ async fn turn_at_cursor(
     store: &dyn crate::store::SwarmStore,
     logical_id: &str,
     up_to: u64,
+    persisted: &mut BTreeMap<String, crate::store::SwarmTurnRow>,
 ) -> Result<Option<PreviousTurn>, SwarmError> {
     // The reconnect cursor is the last delivered seq, so its row is included.
     let mut before = Some(up_to.saturating_add(1));
@@ -1039,6 +1087,15 @@ async fn turn_at_cursor(
                 Some("user") => {
                     if opener.is_some() && complete_since_opener {
                         return Ok(Some(previous_turn(opener, newest_complete)));
+                    }
+                    let turn_id = crate::domain::turn_id_for_item(&view.item_id);
+                    if let Some(row) = store
+                        .swarm_get_turn(logical_id, &turn_id)
+                        .await
+                        .map_err(|error| store_failure("get_turn", error))?
+                    {
+                        persisted.insert(turn_id, row);
+                        return Ok(Some(previous_turn(Some(view), newest_complete)));
                     }
                     opener = Some(view);
                     complete_since_opener = false;

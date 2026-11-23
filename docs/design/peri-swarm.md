@@ -66,6 +66,8 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 | `logicalEnvId` | 调用方经 `environment.environment_id` 复用，或由网关生成 `env_<uuidv7>` | Bun 逻辑环境；同一会话的 sandbox 绑定键 |
 | `sandboxId` / `runId` | `sandboxId` 为 `sbx_<32 hex>`，由绑定或 `logicalEnvId` 派生；`runId` 每次拉起都不同 | Bun 进程与持久目录；`runId` 不跨回收复用 |
 
+显式共享在创建事务里核对原绑定的 `sandboxId` 和 `workspacePath`。若最后一个引用已经删除或身份有变，创建失败，防止复活失效的绑定。
+
 绑定关系以 Swarm 状态库的 `swarm_bindings` 为权威，Bun 侧 `bindings.json` 是派生
 缓存：只含 `sandboxId`、`workspacePath`、`lastRunId` 与使用时间，绝不保存 token。
 恢复时先读 Loom 绑定，缺失即失败，不静默新建环境；`sandboxId` 或 `workspacePath`
@@ -74,7 +76,7 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
 `logicalId` 与 `rootSessionId` 是两层身份：前者属于调用方并决定 actor 路由，后者
 属于 Peri 的持久历史。创建顺序固定为「先落 ID、后建 Peri 会话」：网关先校验或分配
 `rootSessionId`（调用方预留优先，否则 UUIDv7；非 UUIDv7 在写库前以 `400` 拒绝），
-预留 workspace 绑定，然后以 `state=creating` 写入完整会话行，之后才执行
+向 Bun 预留 workspace，在同一个 Swarm 事务内登记绑定和 `state=creating` 的会话行，之后才执行
 `session/new`；成功后同一行改为 `idle`。行写入失败即不启动 Peri 会话——没有可寻址的
 `logicalId → rootSessionId` 映射，就没有要创建的会话。
 
@@ -149,8 +151,7 @@ actor）→ 进程内 Peri ACP Host → 远程 workspace MCP（Bun 托管的沙�
   返回 `415 invalid_content_type`，JSON 语法错误返回 `400 invalid_request`；
   两者都不会被降级成 no-op。
 - `sessions.delete` 在 `swarm_sessions`、`swarm_items`、`swarm_inputs`、
-  `swarm_turns`、`swarm_bindings` 上删除该 `logicalId` 的全部行；Turso 用一次
-  受管事务，内存实现同一语义。删除先停 ACP host 并移除进程内 channel，Rivet
+  `swarm_turns` 上清除该会话的行。共享环境的绑定转交给仍引用它的会话，最后一个引用删除后才移除绑定。Turso 在同一个写事务中完成，内存实现使用同一把锁。事务提交后网关停止 ACP host、移除进程内 channel，Rivet
   actor 随后销毁，因此用同一 `logicalId` 重新 create 会得到新 `rootSessionId`、
   空 items 与空 turns。删除失败不返回成功，行仍可重试。
 - 官方 `sessions.turns.list` 按 `(created_at, turn_id)` 稳定全序分页；`after` 是
@@ -419,12 +420,11 @@ action reply 后即可开始执行，因此不承诺「首轮一定晚于客户�
 `defer=true` 与 `defer=false` 一致；`creating` 行恢复在 `last_seq == 0` 窗口内同样
 由该检查拒绝，不静默跳过。被拒绝的 create 不写 user item，因此不会留下没有终态的
 stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn`），不是持久化
-的行状态：这些检查只适用于已 live 的 runtime；崩溃遗留的 `running` 行仍由
-`ensure_live` 返回 `502 session_resume_required`，turn 恢复尚未实现（§7、验收 §5-5）。
+的行状态。这些检查只适用于已有运行时的会话。宿主崩溃后的下一条新输入按 §7 恢复。
 非流式创建不延迟：首轮仍在 `create_session` 内执行，错误仍以 HTTP 状态返回；
 流式创建的首轮错误只出现在流上。
 
-首次创建的写入顺序固定：`bind_environment`（hosted 时预留并持久化绑定）→ 写入
+首次创建时先向 Bun 懒预留 hosted 环境，再用一次 Swarm 写事务登记绑定及
 `state=creating` 的完整会话行（含 `rootSessionId`、`cwd`、model、instructions、
 `mcp_tools`、environment 与时间戳）→ `session/new` → 同一行改 `idle` → 首轮
 （流式创建在 `idle` 之后先建立订阅并构造/返回 SSE 响应，再调度首轮，见上）。
@@ -453,7 +453,7 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   `MAX(seq)`，通常只含本条 user item；assistant item 与终态经 SSE 投递。因此
   「先建流、后 POST」仍是观察本轮的可靠方式，但 202 不再等待模型。
 - 同步失败仍按原语义返回：空输入/畸形请求 `400`，同 key 不同内容
-  `409 input_conflict`，需要 `session/resume` 的失败 `502 session_resume_required`
+  `409 input_conflict`，恢复期间的冲突或上游故障返回对应的 409 或 502
   （`details.operation` 指向具体阶段）。turn 执行失败在流上以 `turn.failed` +
   `agent.session.failed` 呈现，不追认改已返回的 `202`。
 - 创建中断的恢复是**按已持久化的 root id 核对**，不是重新生成：`creating` 行重试
@@ -463,7 +463,7 @@ stray opener。判定依据是进程内在途 turn（`is_running`/`has_open_turn
   `502`（`details.operation=create_recovery_failed`），行与 root id 保留，可继续
   重试。ACP 返回的 session id 与行内 root id 不一致时以 `session_id_mismatch`
   失败，不接管该身份。
-- `sessions.update` 与 `sessions.delete` 复用同一准入判定（`ensure_live` 同一判定位置）：
+- `sessions.update` 与 `sessions.delete` 使用管理操作的准入判定：
   - 有 live runtime 且 turn 正在运行或已有未关闭 turn：`409 turn_in_progress`；
   - 无 live runtime，但持久会话行 `state=running` 或 `swarm_turns` 仍有开放行
     （`queued`/`in_progress`/`waiting`）：`502`，`details.operation =
@@ -653,28 +653,20 @@ Bun：
 
 - 新进程启动时，actor 的 `on_start` 只恢复只读视图（会话行与 `MAX(seq)`）；`GET`
   读取不装载 host、不触达 Bun。
-- 第一次交互（`POST /events`，或对已存在行重复 create）触发 `ensure_live`：
-  重建 host，`initialize` 后用持久 `rootSessionId`、`cwd` 与同一组 `mcpServers`
-  执行 `session/load`；不写 `_meta`，不新铸 root id。
-- workspace 绑定先读 Loom；缺失即失败，不新建环境。Bun 侧只做懒 `reserve`；
-  `sandboxId`/`workspacePath` 变化拒绝恢复。
-- 明确禁止：调用 `session/resume`、向恢复会话重发 prompt、重放 MQ 输入、把
-  `session/load` 的回放帧写入 `swarm_items`、或为丢失绑定静默换 workspace。
-- 持久行 `state=running`，或 `swarm_turns` 仍有开放行（`queued`/`in_progress`/
-  `waiting`）时，`ensure_live` 返回 `502 session_resume_required`：崩溃中未完成
-  turn 的续跑仍未实现，也没有 `state=recovering` 状态。此时遗留的 `swarm_turns`
-  开放行（`queued`/`in_progress`/`waiting`）被关闭为 `failed`
-  （`completed_at` 与 `error_json={code:"internal_error",
-  message:"the turn was interrupted before it reached a terminal"}`）；`turns.list`/
-  `turns.retrieve` 的读路径在持久行仍记录未完成 turn 且没有 live turn 时执行同一
-  关闭，因此客户端不会看到永久 `in_progress` 的 phantom turn。
+- 空闲会话在下一次交互时用持久的 `rootSessionId`、`cwd` 与 MCP 配置执行 `session/load`。
+  工作区先从 Loom 读取绑定，再由 Bun 懒预留。丢失绑定或目录身份改变时向调用方报告错误。
+- 宿主丢失时，历史查询可以看到上一次持久化的开放 turn。新的用户输入按幂等键去重后才触发恢复。
+  网关先核对 Peri 持久工作状态，再调用 ACP `session/resume`。上次同步工具的结果若无法确认，
+  旧 Swarm turn 记录为中断失败，保留历史，不重发原提示或工具调用。
+- 若 Peri 的持久 MQ 有待处理结果，ACP 负责恢复。网关在根会话的恢复工作结束后接纳新的 turn。
+  查询 session、items 和 turns，以及重复提交已经受理的输入，都不会再次启动旧命令。
 - `sessions.update`/`sessions.delete` 在无 live runtime 时使用同一判定：持久行
   `running` 或存在开放 turn 行都返回 `502 session_resume_required`，不会先修改或
   删除再报错；只有 live runtime 内的在途 turn 返回 `409 turn_in_progress`。
 - 创建中断（行状态 `creating`）走独立的核对路径：先 `session/load`，只有当 Peri
   会话确实不存在时才用同一 root id `session/new`，冲突后再试一次 attach；两条路
   都失败返回 `502 create_recovery_failed` 并保留行。`ensure_live` 不把 `creating`
-  当作 `running` 拒绝，它只拒绝已记录未完成 turn 的行。
+  当作 `running` 拒绝，创建的重试沿用原身份。
 
 历史只读不等于命令重放：恢复后的 `session/load` 会执行装配期探测（Bun 日志可见
 `resources/list`），但不会执行任何历史工具命令；旧 workspace 文件的哈希与 mtime
@@ -683,21 +675,17 @@ Bun：
 副本组：
 
 - actor 无状态且空闲 300s 后由 engine 回收，下一次交互可能在**任一**副本唤醒；
-  跨副本重建沿用上面的只读恢复与 `session/load` 语义，不新增在途 turn 接管。
+  跨副本重建沿用上面的读历史与交互恢复规则。
 - 因此所有副本必须使用同一 `PERI_SWARM_MACHINE_ID`、同一绝对路径的
   `PERI_SWARM_WORKSPACE_ROOT`（共享卷或同路径挂载）、可写的两个 Loom 库，并保证
   Bun（hosted）从每个副本可达；actor 重建副本上的 `cwd` 必须本机存在。
-- 持久行仍为 `running` 或仍有开放 turn 行时照旧返回 `502 session_resume_required`；
-  滚动停副本与在途 turn 的处置不在本层，见 §8。
+- 滚动部署与多副本接管的验收范围见 §8。
 
 ## 8. 未完成项与风险
 
-1. **后台任务引用**：Bun 转发层尚未识别 `resultType:"task"` 与 `tasks/get` 终态，
-   空闲回收也不看任务台账。turn 在最后一个工具调用后长时间输出时，沙箱可能已
-   回收，随后代理调用得到 `404 sandbox_not_found`，需要重新 ensure。
-2. **未完成 turn 与并发 reattach**：`session/resume` 未实现；崩溃遗留的 turn 行会
-  被关闭为 `failed`，但真正的 turn 续跑、并发 reattach、Bun 与 Loom 同时不可用时
-  的失败文案、以及「崩溃时正在执行命令」的中断语义未覆盖。
+1. **沙箱任务与进程边界**：Bun 在同一次服务运行内跟踪 MCP 后台任务，终态后重新计算空闲时间。
+   自动回收保留懒预留，下一次工具调用可唤醒原环境。Bun 自身重启后的任务身份与进程重建另行验收。
+2. **跨故障域恢复**：这里覆盖仅有 Rust 宿主退出的情形。Bun、Loom 与宿主同时失效以及滚动部署仍需独立验证。
 3. **真实部署模型任务**：模型侧全部为确定性 stub；真实供应商的 tool call、长任务
    与多轮副作用未验收。
 4. **1000 Agent 规模与单 engine 容量**：没有吞吐、并发会话、单 engine 节点的容量或
@@ -707,8 +695,9 @@ Bun：
    Bearer 是唯一鉴权、TLS 必须由受信任入口终止，组合后的链路未验收。Rivet endpoint
    只接受私网/环回字面地址或由部署保证指向私网/环回的域名，且只支持明文 HTTP；Loom
    侧只能用 loopback HTTP。生产 TLS 与证书轮换未实现。
-6. **Linux SRT**：`peri-sandbox` 有 `systemd-run` 路径，但本链路只在 macOS 的
-   `sandbox-exec` 上验收；Linux 沙箱与回收行为未验证。
+6. **Linux SRT**：本地 Linux 验收覆盖 Bun 空闲回收，并以 Bubblewrap 启动原生 Peri MCP
+   执行工作区命令。当前执行机禁止 SRT 的 Unix socket，且无法使用 systemd 用户总线；
+   生产 `systemd-run` 与 SRT 组合仍待验证。
 7. **真实模型工具调用**：工具 wire、冷/热分界与结果回填已在 stub 驱动下验证；
    真实模型是否会选择工具、如何重试与失败恢复未验证。
 8. **调用方第三方 MCP**：注入形状与 `session/load` 复用有集成测试，但没有真实第三方

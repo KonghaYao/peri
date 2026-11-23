@@ -311,6 +311,9 @@ pub(crate) fn settlement_due(context: &StageContext) -> bool {
 pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> LoopResult {
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
+    // A deferred request keeps its iteration and tool results while Receive
+    // consumes more FIFO pages or picks up a steer accepted during preparation.
+    let mut deferred_steer = Vec::new();
     let execution = context.session.turn.execution_binding();
     let initial_input_watermark = match context.session.queue.admission_watermark().await {
         Ok(watermark) => watermark,
@@ -343,7 +346,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     ReceiveInput {
                         context: context.clone(),
                     },
-                    (semantic_iterations >= max_iterations)
+                    (deferred_steer.is_empty() && semantic_iterations >= max_iterations)
                         .then(|| initial_input_watermark.clone())
                         .flatten(),
                 )
@@ -624,7 +627,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             // Receive、队列竞态重试与 idle wake 都不消耗语义迭代预算。只有确实需要
             // 进入 Compact → Reason → Act 时才检查并推进预算；因此最后一轮 Act 提交
             // final answer 后，下一次 Receive 仍可作为唯一正常退出入口。
-            if semantic_iterations >= max_iterations {
+            if deferred_steer.is_empty() && semantic_iterations >= max_iterations {
                 tracing::warn!(
                     max_iterations,
                     semantic_iterations,
@@ -638,8 +641,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 record_stage_failure(&context, "max_iterations", &failure);
                 return failure;
             }
-            semantic_iterations += 1;
-            context.session.turn.advance_step();
+            if deferred_steer.is_empty() {
+                semantic_iterations += 1;
+                context.session.turn.advance_step();
+            }
 
             // ── before_agent hooks（首次 Receive 后执行一次）──
             // RCRA 下 Receive 是唯一队列消费点，消息已通过 drain_all() 写入 transcript，
@@ -685,6 +690,25 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 }
             }
 
+            // A withdrawn or missing row cannot keep this step spinning. If
+            // Receive made progress, a selected row may still be on a later page.
+            let missing = if receive_out.consumed_count == 0 {
+                deferred_steer.as_slice()
+            } else {
+                &[]
+            };
+            // Preserve FIFO and the per-transaction batch limit. Drain through an
+            // already selected instruction before paying for hooks and compaction.
+            if loop_state.has_tool_calls {
+                if let Some(mailbox) = &context.session.user_input_mailbox {
+                    let pending = mailbox.pending_steer_ids(missing);
+                    if !pending.is_empty() {
+                        deferred_steer = pending;
+                        continue 'rcra;
+                    }
+                }
+            }
+
             // ── Compact ──
             // Compact 输出（compacted 标志）当前无调用方：compact 的副作用已直接
             // 写入 transcript/flags 与事件流，此处仅保留阶段观测与错误传播。
@@ -708,15 +732,25 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
             // ── Reason ──
             let reason_out = match run_stage(&context, Stage::Reason, || async {
-                reason::run_reason(ReasonInput {
-                    context: context.clone(),
-                    has_tool_calls: loop_state.has_tool_calls,
-                })
+                reason::run_reason_with_admission(
+                    ReasonInput {
+                        context: context.clone(),
+                        has_tool_calls: loop_state.has_tool_calls,
+                    },
+                    Some(missing),
+                )
                 .await
             })
             .await
             {
-                Ok(out) => out,
+                Ok(std::ops::ControlFlow::Continue(out)) => {
+                    deferred_steer.clear();
+                    out
+                }
+                Ok(std::ops::ControlFlow::Break(ids)) => {
+                    deferred_steer = ids;
+                    continue 'rcra;
+                }
                 Err(e) => {
                     record_stage_failure(&context, "reason", &e);
                     return e;

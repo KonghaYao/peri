@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
 import { deriveSandboxId } from '../../src/instance/options.js';
 import { SandboxError } from '../../src/instance/types.js';
@@ -294,4 +296,87 @@ test('lazy:false keeps the S7 eager start behavior', async (t) => {
   } finally {
     await manager.closeAll();
   }
+});
+
+test('shared idle workspace wakes once at its existing MCP URL and respects explicit stop and delete', async (t) => {
+  let now = 0;
+  const inner = await startInnerMcp();
+  t.after(() => inner.close());
+  const fake = createFakeStarter({ delayMs: 15, mcpUrl: () => inner.url });
+  const manager = new SwarmManager({
+    root: temporarySwarmRoot(t),
+    startSandbox: fake.start,
+    now: () => new Date(now),
+    idleMs: 100,
+  });
+  const handler = createSwarmRequestHandler({ manager, token: 'outer-secret' });
+  const id = 'env-shared';
+  const stop = () =>
+    handler(
+      new Request(`${BASE}/v1/sandboxes/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer outer-secret' },
+      }),
+    );
+  try {
+    const first = await manager.ensure(id);
+    const marker = join(first.workspacePath, 'saved.txt');
+    writeFileSync(marker, 'before reclaim');
+    now = 100;
+    assert.deepEqual((await manager.sweepIdle()).reclaimed, [id]);
+    const responses = await Promise.all([handler(mcpRequest(id)), handler(mcpRequest(id))]);
+    for (const response of responses) {
+      assert.equal(response.status, 200);
+      await response.json();
+    }
+    const awake = manager.get(id)!;
+    assert.notEqual(awake.runId, first.runId);
+    assert.equal(awake.workspacePath, first.workspacePath);
+    assert.equal(awake.sandboxId, first.sandboxId);
+    assert.equal(readFileSync(marker, 'utf8'), 'before reclaim');
+    assert.equal(fake.calls.length, 2);
+    now += 100;
+    await manager.sweepIdle();
+    assert.equal((await stop()).status, 200);
+    assert.equal(manager.describe(id)?.state, 'stopped');
+    const stopped = await handler(mcpRequest(id));
+    assert.equal(stopped.status, 404);
+    await stopped.text();
+    await manager.ensure(id);
+    await manager.close(id, { deleteData: true });
+    const deleted = await handler(mcpRequest(id));
+    assert.equal(deleted.status, 404);
+    await deleted.text();
+    assert.equal(fake.calls.length, 3);
+  } finally {
+    await manager.closeAll();
+  }
+});
+
+test('deletion while a cold tool request body is arriving cannot recreate the environment', async (t) => {
+  const fake = createFakeStarter();
+  const manager = new SwarmManager({ root: temporarySwarmRoot(t), startSandbox: fake.start });
+  const handler = createSwarmRequestHandler({ manager });
+  await manager.reserve('env-slow');
+  let body!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      body = controller;
+    },
+  });
+  const request = new Request(`${BASE}/sandboxes/env-slow/mcp`, {
+    method: 'POST',
+    body: stream,
+    duplex: 'half',
+  } as RequestInit);
+  const waiting = handler(request);
+  await new Promise((resolve) => setImmediate(resolve));
+  await manager.close('env-slow', { deleteData: true });
+  body.enqueue(new TextEncoder().encode('{"jsonrpc":"2.0","id":1,"method":"tools/call"}'));
+  body.close();
+  const response = await waiting;
+  assert.equal(response.status, 404);
+  await response.text();
+  assert.equal(fake.calls.length, 0);
+  assert.equal(manager.binding('env-slow'), undefined);
 });

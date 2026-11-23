@@ -2,7 +2,7 @@
 //! Peri session store (session/history/MQ facts) and the independent Swarm
 //! state store (`swarm_meta` + `swarm_*` rows, `design §4.1`, §4.3, §7.2-S6).
 //!
-//! Both tests are ignored by default because they need a running Loom. They are
+//! These tests are ignored by default because they need a running Loom. They are
 //! driven purely by environment:
 //!
 //! - `PERI_SWARM_LOOM_LOCATOR` — the Hrana base URL of the Peri session database
@@ -350,12 +350,13 @@ async fn close(resources: Resources) {
 const PERI_SCHEMA_VERSION: &str = "15";
 
 /// Tables the Swarm state database owns (`peri-swarm/src/store/turso.rs`).
-const SWARM_TABLES: [&str; 5] = [
+const SWARM_TABLES: [&str; 6] = [
     "swarm_bindings",
     "swarm_inputs",
     "swarm_items",
     "swarm_meta",
     "swarm_sessions",
+    "swarm_turns",
 ];
 
 /// A read-only connection to one logical database. Schema facts
@@ -483,7 +484,7 @@ async fn assert_swarm_schema(probe: &SchemaProbe) {
         .collect();
     assert_eq!(
         tables, expected,
-        "the state database owns the four Swarm tables plus swarm_meta"
+        "the state database owns exactly the five Swarm tables plus swarm_meta"
     );
 
     let index = probe

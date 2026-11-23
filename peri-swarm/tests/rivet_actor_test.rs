@@ -568,7 +568,6 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
         .await
         .expect("submit through the actor");
     assert_eq!(submitted.disposition, Disposition::Inserted);
-    assert_eq!(stub.main_calls(), 2, "the second turn reached the model");
 
     let (live_items, live_terminal) =
         collect_until_terminal(&mut live, Duration::from_secs(30)).await;
@@ -576,6 +575,7 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
         matches!(&live_terminal, Some(TurnEvent::Completed { .. })),
         "live turn terminal: {live_terminal:?}"
     );
+    assert_eq!(stub.main_calls(), 2, "the second turn reached the model");
     assert!(!live_items.is_empty(), "the live stream delivered items");
     assert!(
         live_items.iter().all(|item| item.seq > after_first),
@@ -724,11 +724,22 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
         .iter()
         .map(|item| (item.seq, item.item_id.clone()))
         .collect();
+    let (_, mut reattached_turn) = service
+        .subscribe(&logical_a, EventCursor::Tail)
+        .await
+        .expect("live stream before reattach")
+        .into_parts();
     let resumed = service
         .submit_input(&logical_a, user_input("input-3", "after rebuild"))
         .await
         .expect("the first turn after the rebuild reattaches the persisted session");
     assert_eq!(resumed.disposition, Disposition::Inserted);
+    let (_, reattached_terminal) =
+        collect_until_terminal(&mut reattached_turn, Duration::from_secs(30)).await;
+    assert!(
+        matches!(&reattached_terminal, Some(TurnEvent::Completed { .. })),
+        "reattached turn terminal: {reattached_terminal:?}"
+    );
     assert_eq!(
         stub.main_calls(),
         3,
@@ -803,8 +814,8 @@ async fn actor_hosts_sessions_streams_events_and_recovers_max_seq() {
 ///
 /// The test then stops A and proves that B alone reconstructs the actor from
 /// the shared store (`live = false`, the same `MAX(seq)`), replays items from a
-/// cursor, and refuses a row whose turn was still `running` with 502
-/// `session_resume_required`.
+/// cursor, and returns 502 when an interrupted row references a missing
+/// Peri session.
 ///
 /// Evidence limits:
 ///
@@ -978,8 +989,8 @@ async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry(
         "replay follows the cursor order"
     );
 
-    // A row whose turn was still running is the known boundary: the rebuilt
-    // actor refuses to attach and the gateway maps it to 502.
+    // A Swarm row with no matching Peri root must fail attachment without
+    // inventing a replacement session identity.
     store
         .swarm_upsert_session(SwarmSessionRow {
             logical_id: running.as_str().to_owned(),
@@ -1005,12 +1016,12 @@ async fn an_attaching_registry_recovers_actors_started_by_the_spawning_registry(
     let refused = service_b
         .submit_input(&running, user_input("input-m1-running", "resume"))
         .await
-        .expect_err("a running row must be refused");
+        .expect_err("a missing Peri root cannot be recovered");
     assert_eq!(refused.kind(), ErrorKind::BadGateway, "{refused:?}");
     assert_eq!(refused.code(), ErrorCode::UpstreamUnavailable);
     assert_eq!(
         refused.details()["operation"],
-        serde_json::json!("session_resume_required")
+        serde_json::json!("acp_child")
     );
     let row = store
         .swarm_get_session(running.as_str())

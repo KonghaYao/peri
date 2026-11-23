@@ -622,6 +622,103 @@ async fn session_patch_replaces_and_clears_official_fields() {
 }
 
 #[tokio::test]
+async fn deleting_either_shared_session_keeps_the_environment_until_its_last_user_leaves() {
+    for (first, survivor) in [("agent-a", "agent-c"), ("agent-c", "agent-a")] {
+        let store = MemorySwarmStore::new();
+        for id in ["agent-a", "agent-c"] {
+            let mut row = session_row(id, "/work");
+            row.root_session_id = format!("root-{id}");
+            row.environment = EnvironmentRef {
+                kind: EnvironmentKind::OpenAiHosted,
+                id: Some("shared".into()),
+            };
+            let mut binding = binding_for(id);
+            binding.logical_env_id = "shared".into();
+            binding.sandbox_id = "stable".into();
+            binding.workspace_path = "/work/shared".into();
+            store
+                .swarm_create_hosted_session(row, binding, id == "agent-c")
+                .await
+                .expect("attach");
+        }
+        let mut late = session_row("late", "/work");
+        late.root_session_id = "another-root".into();
+        let mut changed = store
+            .swarm_get_binding("shared")
+            .await
+            .expect("get")
+            .expect("shared");
+        changed.logical_id = late.logical_id.clone();
+        changed.workspace_path = "/different".into();
+        assert!(matches!(
+            store
+                .swarm_create_hosted_session(late.clone(), changed.clone(), true)
+                .await,
+            Err(StoreError::NotFound(_))
+        ));
+        assert!(store
+            .swarm_get_session("late")
+            .await
+            .expect("get")
+            .is_none());
+        let mut conflicting = session_row("agent-c", "/other");
+        conflicting.environment = EnvironmentRef {
+            kind: EnvironmentKind::OpenAiHosted,
+            id: Some("unclaimed".into()),
+        };
+        let mut unrelated = binding_for("agent-c");
+        unrelated.logical_env_id = "unclaimed".into();
+        assert!(matches!(
+            store
+                .swarm_create_hosted_session(conflicting, unrelated, false)
+                .await,
+            Err(StoreError::Conflict(_))
+        ));
+        assert!(store
+            .swarm_get_binding("unclaimed")
+            .await
+            .expect("get")
+            .is_none());
+
+        store
+            .swarm_delete_session(first)
+            .await
+            .expect("delete first");
+        let active = store
+            .swarm_get_binding("shared")
+            .await
+            .expect("get")
+            .expect("retained");
+        assert_eq!(active.logical_id, survivor);
+        assert!(store
+            .swarm_get_session(survivor)
+            .await
+            .expect("get")
+            .is_some());
+        store
+            .swarm_delete_session(survivor)
+            .await
+            .expect("delete last");
+        changed.workspace_path = "/work/shared".into();
+        assert!(matches!(
+            store.swarm_create_hosted_session(late, changed, true).await,
+            Err(StoreError::NotFound(_))
+        ));
+        assert!(store
+            .swarm_get_session("late")
+            .await
+            .expect("get")
+            .is_none());
+
+        assert!(store
+            .swarm_get_binding("shared")
+            .await
+            .expect("get")
+            .is_none());
+    }
+}
+
+#[tokio::test]
 async fn delete_session_removes_every_scoped_row() {
     let store = MemorySwarmStore::new();
     store

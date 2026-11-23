@@ -116,9 +116,13 @@ bun run dev:swarm
   SRT）；不带 `lazy` 时立即启动。`peri-swarm` 网关使用懒预留。
 - 冷态 MCP 面不需要实例：`initialize`/`server/discover`/`tools/list`/`ping` 由快照
   回答，首个 `tools/call` 才启动实例。
-- 回收只在 `ready`、无在途代理请求且空闲达到阈值时发生；回收后状态为 `stopped`，
-  `workspace` 与绑定保留，再次 `POST /v1/sandboxes` 分配新 `runId`、复用同一
-  `sandboxId`。`DELETE ?deleteData=true` 才删除目录与绑定。
+- 回收要求 `ready`、达到空闲阈值、代理请求已结束且后台任务已结算。Bun 在本次运行内将环境恢复为
+  `reserved`，保留原 MCP URL、`workspace`、`sandboxId` 与上次 `runId`。后续工具调用自动启动新的
+  `runId`，共用环境的会话并发唤醒只启动一次。显式停止已运行环境后仍需管理 API 重新预留或启动。`DELETE ?deleteData=true` 才删除目录与绑定。
+- 任务引用按运行保存。MCP `resultType:"task"` 建立引用，状态为 `completed`、`failed` 或
+  `cancelled` 时释放；空取消回执不代表进程结束。客户端离开后，空闲检查按原 owner 查询
+  `tasks/get`，每实例至多同时查询一次。若 Bash 调用被中断而没有收到任务 ID，检查使用 workspace
+  的 `shell_task_list` 核对各 owner。暂时查询失败会保留实例，最后一个任务结算后重新计时。
 - 持久布局：`~/.peri-swarm/sandboxes/bindings.json` 只记录 `sandboxId`、
   `workspacePath`、`lastRunId` 与使用时间，**不保存 token**；每个沙箱的
   `workspace/` 与 `home/` 位于 `<root>/<sandboxId>/`，`close()` 后保留。
@@ -450,18 +454,20 @@ profile 内必填 `runtimeReadPaths`、`memoryMax`、`tasksMax`、`cpuQuota`；`
 | `PERI_SWARM_BUN_BIND` | `127.0.0.1:8081` | 仅接受 loopback host；端口必填 |
 | `PERI_SWARM_SANDBOXES_ROOT` | `~/.peri-swarm/sandboxes` | 持久根，启动时创建为 0700 |
 | `PERI_SWARM_BUN_TOKEN` | 未设置 | 设置后 `/v1/*` 与 `/sandboxes/*` 要求 `Authorization: Bearer`；`/healthz` 不鉴权 |
+| `PERI_SWARM_IDLE_MS` | 1800000 | 无请求及未完成任务时的空闲回收阈值（毫秒），`0` 关闭 |
 
 | 路由 | 行为 |
 | --- | --- |
 | `GET /healthz` | 存活检查，返回 `{"status":"ok"}` |
-| `POST /v1/sandboxes` | body `{"logicalEnvId":"..."}`；启动或复用实例，并发请求只启动一次 |
-| `GET /v1/sandboxes/{logicalEnvId}` | 运行中实例的状态；仅存在绑定记录时返回 `state: "stopped"`、`mcpUrl: null` |
+| `POST /v1/sandboxes` | body `{"logicalEnvId":"..."}`；启动或复用实例，并发请求只启动一次。可加 `"lazy":true` 只预留 |
+| `GET /v1/sandboxes/{logicalEnvId}` | 读取状态；空闲回收后的 `reserved` 保留 MCP URL 与上次 runId，显式停止已运行环境后为 `stopped`、`mcpUrl: null` |
 | `DELETE /v1/sandboxes/{logicalEnvId}?deleteData=true\|false` | 停止实例；默认保留目录，`deleteData=true` 才删除并移除绑定 |
 | `POST\|GET\|DELETE /sandboxes/{logicalEnvId}/mcp` | 代理到实例内层 `/mcp`；剥离外层 `Authorization` 并注入内层 Bearer，流式响应原样透传 |
 
 存储布局：`<root>/bindings.json`（0600，仅 logicalEnvId、sandboxId、workspacePath、lastRunId、lastUsedAt，不含内层 token）与 `<root>/<sandboxId>/workspace`。`close()` 保留目录；同一 logicalEnvId 重开是新的 `runId`，旧文件仍可读。服务重启后第一次 `ensure` 会复用 bindings 中的 `sandboxId` 目录。
 
-错误统一为 `{"error":{"code":"...","message":"..."}}`。未实现：任务台账、闲置自动回收、跨进程/多机调度；内层 token 只存在于当前进程内存，服务重启后需重新 `ensure`。
+错误统一为 `{"error":{"code":"...","message":"..."}}`。自动回收与任务观察由当前 Bun 进程负责；
+服务重启后，首次懒预留或 `ensure` 可重新打开曾运行的绑定。跨进程与多机调度尚未实现。
 
 ## CLI（附录）
 

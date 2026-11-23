@@ -29,6 +29,13 @@
 //                 seen in `ps`, and the sandbox/process view (kill/restart
 //                 timeline helper; needs the state file).
 //
+//   active-prepare / active-after
+//                 strict running-turn regression, orchestrated by
+//                 sdk_recovery_restart_driver.mjs. Unlike the historical
+//                 after-restart mode, requires official SDK fresh submission
+//                 success after repeated read-only reconnects, and rejects
+//                 session_resume_required/session_not_live boundaries.
+//
 // Requirements (same harness as S9a2/S9a3/S9a4a):
 //   - Peri Loom (9497) with the session and state databases,
 //   - Bun swarm service (8081) with `PERI_PATH`,
@@ -57,6 +64,7 @@
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -863,7 +871,209 @@ async function probeMode() {
 
 // ------------------------------------------------------------------ main ----
 
-const MODES = { prepare: prepareMode, 'pre-kill': preKillMode, 'after-restart': afterRestartMode, probe: probeMode };
+// The active-turn regression uses the same real hosted workspace and existing
+// model stub as the historical modes above. Run sdk_recovery_restart_driver.mjs
+// to own/kill/restart the gateway. Configure stub directive `once` with
+// ONCE_COMMAND and PERI_STUB_CHUNK_DELAY_MS=1500 (or slower). Preparation fails
+// if the real model stream finishes before the running boundary is observed.
+async function activePrepareMode() {
+  const baseline = await stubStats();
+  if (!baseline.directives?.includes(ONCE_DIRECTIVE)) throw new Error('model stub must configure the once directive');
+  const created = await createSession({ type: 'openai_hosted' }, 'active');
+  if (created.status !== 201) throw new Error('hosted session creation failed');
+  const session = created.created;
+  let sandbox = (await bunView(session.environment.id)).body?.sandbox;
+  if (!sandbox?.workspacePath) throw new Error('hosted workspace path is unavailable');
+  const inputId = crypto.randomUUID();
+  const text = `Active restart ${inputId} [[tool:once]]`;
+  const accepted = await api('POST', `/agents/sessions/${session.id}/events`, {
+    body: { inputId, kind: 'user', mode: 'turn', text },
+    headers: { 'idempotency-key': inputId },
+  });
+  check('active: initial input accepted', accepted.status === 202 && accepted.body?.accepted === true, accepted);
+  const deadline = Date.now() + TIMEOUT_MS;
+  let stats;
+  let view;
+  let ranLog;
+  let items;
+  while (Date.now() < deadline) {
+    stats = await stubStats();
+    ranLog = fileEvidence(path.join(sandbox.workspacePath, 'ran.log'));
+    view = await api('GET', `/agents/sessions/${session.id}`);
+    const finalStarted = stats.turns?.some((turn) => turn.kind === 'final' && turn.lastUserText.includes(inputId));
+    if (ranLog.lines === 1 && finalStarted && view.body?.state === 'running') {
+      items = await readAllItems(session.id);
+      // Recheck after the snapshot: the wrapper kills only a still-active turn.
+      view = await api('GET', `/agents/sessions/${session.id}`);
+      if (view.body?.state === 'running') break;
+    }
+    await sleep(25);
+  }
+  check('active: kill boundary has one real tool side effect and a running final model stream',
+    ranLog?.lines === 1 && view?.body?.state === 'running' && Boolean(items),
+    { state: view?.body?.state, ranLog, mainCalls: stats?.mainCalls });
+  // Reservation is intentionally lazy: runId is null until the first real
+  // tool call starts the provider. Snapshot the live run after that call.
+  sandbox = (await bunView(session.environment.id)).body?.sandbox;
+  check('active: real tool activated one ready hosted sandbox',
+    sandbox?.state === 'ready' && typeof sandbox?.runId === 'string' && sandbox.runId.length > 0,
+    sandbox);
+  if (failedChecks().length) throw new Error('active boundary unavailable; use a slower real model stub');
+  const state = {
+    scenario: 'active-turn', sessionId: session.id, envId: session.environment.id,
+    inputId, turnId: `turn_input_${inputId}`, workspacePath: sandbox.workspacePath,
+    runId: sandbox.runId, sandboxId: sandbox.sandboxId,
+    sessionView: view.body, items, files: { ranLog }, stub: stats,
+    stubStartedAt: stats.startedAt, preparedAt: nowIso(),
+  };
+  writeState(state);
+  return { mode: MODE, statePath: STATE_PATH, ...state };
+}
+
+async function sdkReconnect(client, sessionId) {
+  const stream = await client.beta.agents.sessions.events.stream(
+    sessionId, { after: 0 }, { headers: CONTRACT_HEADERS });
+  const events = [];
+  let deliberateAbort = false;
+  let error = null;
+  const iteration = (async () => {
+    try {
+      for await (const event of stream) events.push(event);
+    } catch (cause) {
+      if (!deliberateAbort) error = cause?.message ?? String(cause);
+    }
+  })();
+  // Reconnect reads intentionally have no terminal until a fresh submission.
+  await Promise.race([iteration, sleep(500)]);
+  deliberateAbort = true;
+  stream.controller.abort();
+  await iteration;
+  return { events, error };
+}
+
+async function activeAfterMode() {
+  const state = readState();
+  if (state.scenario !== 'active-turn') throw new Error('active-prepare state is required');
+  const require = createRequire(import.meta.url);
+  const OpenAI = require('openai');
+  const sdkVersion = JSON.parse(fs.readFileSync(path.join(path.dirname(require.resolve('openai')), 'package.json'), 'utf8')).version;
+  const client = new OpenAI({ apiKey: API_KEY, baseURL: BASE_URL, maxRetries: 0, timeout: TIMEOUT_MS });
+  const evidence = { mode: MODE, sdkVersion, sessionId: state.sessionId, before: state, reads: [] };
+  const originalTurns = (await client.beta.agents.sessions.turns.list(
+    state.sessionId, { order: 'asc', limit: 100 }, { headers: CONTRACT_HEADERS })).data;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const session = await client.beta.agents.sessions.retrieve(state.sessionId, { headers: CONTRACT_HEADERS });
+    const items = await readAllItems(state.sessionId);
+    const sdkItems = await client.beta.agents.sessions.items.list(
+      state.sessionId, { order: 'asc', limit: 100 }, { headers: CONTRACT_HEADERS });
+    const turns = (await client.beta.agents.sessions.turns.list(
+      state.sessionId, { order: 'asc', limit: 100 }, { headers: CONTRACT_HEADERS })).data;
+    const reconnect = await sdkReconnect(client, state.sessionId);
+    const stats = await stubStats();
+    const ranLog = fileEvidence(path.join(state.workspacePath, 'ran.log'));
+    const comparison = compareItems(state.items, items);
+    check(`active read ${attempt}: persisted identity and running state unchanged`,
+      session.id === state.sessionId && typeof session.rootSessionId === 'string' &&
+      session.rootSessionId === state.sessionView.rootSessionId && session.state === 'running', session);
+    check(`active read ${attempt}: item history and page cursors unchanged`,
+      comparison.sameItemSequence && comparison.samePageCursors, comparison);
+    check(`active read ${attempt}: official SDK item page is nonempty`, Array.isArray(sdkItems.data) && sdkItems.data.length > 0);
+    check(`active read ${attempt}: interrupted turn remains in_progress without GET settlement`,
+      turns.find((turn) => turn.id === state.turnId)?.status === 'in_progress' &&
+      JSON.stringify(turns) === JSON.stringify(originalTurns), turns);
+    check(`active read ${attempt}: SDK SSE reconnect consumed persisted items without gap or error`,
+      reconnect.error === null && reconnect.events.some((event) => typeof event.seq === 'number') &&
+      !reconnect.events.some((event) => ['gap', 'error'].includes(event.type) ||
+        event.fromSeq !== undefined || event.toSeq !== undefined ||
+        (['agent.session.turn.completed', 'agent.session.turn.failed'].includes(event.type) && event.turn_id === state.turnId)), reconnect);
+    check(`active read ${attempt}: no automatic model call or tool replay`,
+      stats.startedAt === state.stubStartedAt && stats.mainCalls === state.stub.mainCalls &&
+      stats.toolCalls === state.stub.toolCalls && ranLog.lines === 1 &&
+      ranLog.sha256 === state.files.ranLog.sha256 && ranLog.mtimeMs === state.files.ranLog.mtimeMs,
+      { stats, ranLog });
+    evidence.reads.push({ attempt, session, items, turns, reconnect, stub: stats, ranLog });
+  }
+
+  const cursor = evidence.reads.at(-1).session.lastItemSeq;
+  const stream = openSse(state.sessionId, { after: cursor });
+  const inputId = crypto.randomUUID();
+  const acceptedResponse = await client.beta.agents.sessions.events.create(state.sessionId, {
+    'Idempotency-Key': inputId,
+    events: [{
+      type: 'agent.session.input.message',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: `Fresh input after active crash ${inputId}. Reply with the stub text.` }] }],
+    }],
+  }, { headers: CONTRACT_HEADERS }).asResponse();
+  const accepted = await acceptedResponse.json();
+  check('active: fresh official SDK submission returns HTTP 202', acceptedResponse.status === 202, acceptedResponse.status);
+  check('active: fresh official SDK submission accepted', accepted.accepted === true && accepted.disposition === 'inserted' && accepted.inputId === inputId, accepted);
+  let terminal = null;
+  const terminalDeadline = Date.now() + TIMEOUT_MS;
+  while (Date.now() < terminalDeadline && !terminal) {
+    terminal = stream.state.events.find((event) =>
+      ['agent.session.turn.completed', 'agent.session.turn.failed'].includes(event.data?.type) &&
+      event.data?.turn_id === `turn_input_${inputId}`) ?? null;
+    if (!terminal) await sleep(25);
+  }
+  stream.abort();
+  await stream.ready;
+  check('active: new turn completed', terminal?.data?.type === 'agent.session.turn.completed', terminal);
+  const turns = (await client.beta.agents.sessions.turns.list(
+    state.sessionId, { order: 'asc', limit: 100 }, { headers: CONTRACT_HEADERS })).data;
+  const items = await readAllItems(state.sessionId);
+  const stats = await stubStats();
+  const ranLog = fileEvidence(path.join(state.workspacePath, 'ran.log'));
+  const sandbox = (await bunView(state.envId)).body?.sandbox;
+  const expectedReply = stats.turns?.filter((turn) => turn.kind === 'final').at(-1)?.reply;
+  const assistantOutputs = stream.state.events
+    .filter((event) => event.data?.type === 'agent.session.turn.item.done' &&
+      event.data?.turn_id === `turn_input_${inputId}` && event.data?.item?.role === 'assistant')
+    .map((event) => (event.data.item.content ?? [])
+      .filter((part) => part.type === 'output_text').map((part) => part.text ?? '').join(''));
+  check('active: new turn delivered nonempty expected assistant output',
+    typeof expectedReply === 'string' && expectedReply.length > 0 && assistantOutputs.includes(expectedReply),
+    { expectedReply, assistantOutputs });
+  let finalSession;
+  const settleDeadline = Date.now() + 5000;
+  do {
+    finalSession = await client.beta.agents.sessions.retrieve(state.sessionId, { headers: CONTRACT_HEADERS });
+    if (finalSession.state === 'idle' && finalSession.status === 'idle') break;
+    await sleep(25);
+  } while (Date.now() < settleDeadline);
+  check('active: new turn leaves the session idle', finalSession.state === 'idle' && finalSession.status === 'idle', finalSession);
+  check('active: interrupted turn settled failed with an explicit error',
+    turns.find((turn) => turn.id === state.turnId)?.status === 'failed' &&
+    turns.find((turn) => turn.id === state.turnId)?.error?.code === 'internal_error', turns);
+  check('active: new input owns one completed turn',
+    turns.filter((turn) => turn.id === `turn_input_${inputId}` && turn.status === 'completed').length === 1, turns);
+  check('active: old item history remains an exact prefix',
+    JSON.stringify(items.items.slice(0, state.items.items.length)) === JSON.stringify(state.items.items), items);
+  check('active: new input made one model call and no repeated tool execution',
+    stats.mainCalls === state.stub.mainCalls + 1 && stats.toolCalls === state.stub.toolCalls &&
+    ranLog.lines === 1 && ranLog.sha256 === state.files.ranLog.sha256 && ranLog.mtimeMs === state.files.ranLog.mtimeMs,
+    { stats, ranLog });
+  check('active: existing hosted sandbox reused', sandbox?.runId === state.runId && sandbox?.sandboxId === state.sandboxId, sandbox);
+  const replayAfter = await sdkReconnect(client, state.sessionId);
+  const terminalFrames = replayAfter.events.filter((event) =>
+    ['agent.session.turn.completed', 'agent.session.turn.failed'].includes(event.type));
+  check('active: durable SDK replay fails only the old turn and completes only the new turn',
+    replayAfter.error === null &&
+    terminalFrames.filter((event) => event.type === 'agent.session.turn.failed' && event.turn_id === state.turnId).length === 1 &&
+    terminalFrames.filter((event) => event.type === 'agent.session.turn.completed' && event.turn_id === `turn_input_${inputId}`).length === 1 &&
+    !terminalFrames.some((event) => event.type === 'agent.session.turn.completed' && event.turn_id === state.turnId) &&
+    !replayAfter.events.some((event) => event.type === 'gap' || event.fromSeq !== undefined || event.toSeq !== undefined),
+    { error: replayAfter.error, terminalFrames });
+  const replayStats = await stubStats();
+  check('active: post-completion reconnect made no model or tool call',
+    replayStats.mainCalls === stats.mainCalls && replayStats.toolCalls === stats.toolCalls, replayStats);
+  evidence.newInput = { inputId, accepted, terminal, turns, items, stats, ranLog, sandbox, finalSession, assistantOutputs, events: stream.state.events, replayAfter, replayStats };
+  return evidence;
+}
+
+const MODES = {
+  prepare: prepareMode, 'pre-kill': preKillMode, 'after-restart': afterRestartMode, probe: probeMode,
+  'active-prepare': activePrepareMode, 'active-after': activeAfterMode,
+};
 const runMode = MODES[MODE];
 if (!runMode) {
   console.error(`[s9a4b] unknown mode ${MODE}; expected ${Object.keys(MODES).join(' / ')}`);

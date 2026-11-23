@@ -1,5 +1,6 @@
 //! Implementation leaf for `crate::session::user_input_mailbox`.
 
+use peri_acp_types::messages::MessageId;
 pub(super) use std::collections::HashMap;
 pub(super) use std::collections::HashSet;
 pub(super) use std::collections::VecDeque;
@@ -201,22 +202,60 @@ impl UserInputMailbox {
             .is_some_and(|active| active.managed)
     }
 
-    /// 标记实际 LLM 调用/流式窗口开始；Drop 时复位。
-    ///
-    /// 窗口只覆盖 `run_reason` 中与 cancel 竞争的 select：请求准备和响应后处理
-    /// 不得被当作可中断窗口，否则工具批次之外的立即发送会误取消本轮。
-    pub(crate) fn begin_model_request(self: &Arc<Self>) -> ModelRequestGuard {
-        {
-            let mut state = self.state.lock();
-            debug_assert!(
-                !state.model_request_in_flight,
-                "model request guard must not nest"
-            );
-            state.model_request_in_flight = true;
+    /// 同锁裁决：已接纳且尚未摄取的 steer 回 Receive；否则开启模型调用窗口。
+    /// MQ 选择在 dispatch 的有界移交确认之前就已生效。不能只检查 handed_off。
+    pub(crate) fn admit_model_request(
+        self: &Arc<Self>,
+        after_tools: bool,
+        missing: &[MessageId],
+    ) -> Result<ModelRequestGuard, Vec<MessageId>> {
+        let mut state = self.state.lock();
+        if after_tools {
+            let pending = self.selected_steer_ids(&state, missing);
+            if !pending.is_empty() {
+                return Err(pending);
+            }
         }
-        ModelRequestGuard {
+        debug_assert!(
+            !state.model_request_in_flight,
+            "model request guard must not nest"
+        );
+        state.model_request_in_flight = true;
+        Ok(ModelRequestGuard {
             mailbox: Arc::clone(self),
+        })
+    }
+
+    pub(crate) fn pending_steer_ids(&self, missing: &[MessageId]) -> Vec<MessageId> {
+        self.selected_steer_ids(&self.state.lock(), missing)
+    }
+
+    fn selected_steer_ids(&self, state: &MailboxState, missing: &[MessageId]) -> Vec<MessageId> {
+        if !state
+            .records
+            .iter()
+            .any(|record| record.state == UserInputState::Dispatching)
+        {
+            return Vec::new();
         }
+        let selected = self.inbox.queue().selected_input_ids();
+        state
+            .records
+            .iter()
+            .filter(|record| record.state == UserInputState::Dispatching)
+            .filter_map(|record| {
+                uuid::Uuid::parse_str(&record.input_id)
+                    .ok()
+                    .map(MessageId::from)
+            })
+            .filter(|id| selected.contains(id) && !missing.contains(id))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_model_request(self: &Arc<Self>) -> ModelRequestGuard {
+        self.admit_model_request(false, &[])
+            .expect("unconditional model admission")
     }
 
     /// 仅测试：观察实际 LLM 调用窗口是否开启。
