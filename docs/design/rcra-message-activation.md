@@ -7,7 +7,7 @@
 
 会话 ID、历史消息、配置、frozen/inherited context 与待发送消息持久保存。处理批次、阶段、调用关联、执行预算和运行 ticket 是当前进程运行态，不以完整 WorkState 或替代执行账本持久化；`threads.work_state` 只是粗粒度续跑意图，不携带上述执行状态。待发送消息的结构与恢复边界见 [Thread MQ](thread-mq.md)，MQ 行只表示尚未移交，不表示模型已处理。
 
-RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → MessageQueue`。Receive 是唯一的常规 MQ 消费入口和正常耗尽判定点；取消、阶段失败或中断也可终止本次循环，不因此丢弃已提交事实。进程退出终止该进程的执行责任：不续接旧进程的模型请求、工具调用、审批、回调或旧发送，也不重放停机期间的外围事件；待发消息保留在 MQ，由进入会话后的新运行消费。`work_state=working` 的 thread（含 async child）只在进入会话时按持久事实建立新运行，见 [Session Durable](session-durability.md)。
+RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → MessageQueue`。Receive 是唯一的常规 MQ 消费入口和正常耗尽判定点；取消、阶段失败或中断也可终止本次循环，不因此丢弃已提交事实。进程退出终止该进程的执行责任：不续接旧进程的模型请求、工具调用、审批、回调或旧发送，也不重放停机期间的外围事件；待发消息保留在 MQ，只有之后建立新运行时才由 Receive 消费（Stop 本身不建立运行）。`work_state=working` 的 thread（含 async child）只在进入会话时按持久事实建立新运行，见 [Session Durable](session-durability.md)。
 
 历史中的 started、未结束工具或子任务只表示历史事实，不是当前执行证据。未知外部副作用不改写为成功、失败或已取消；删除追踪不会自动停止外部任务。新输入不因已撤销的旧检查点被冻结。
 

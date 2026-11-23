@@ -25,7 +25,8 @@
 ## 安装
 
 `peri-sandbox` 是仓库内的 private 开发包，不从 npm registry 安装。可在本目录运行
-`bun install --frozen-lockfile` 后按下文开发；其他本地项目通过工作区或本地路径链接该包。
+`bun install --frozen-lockfile` 与 `bun run build` 后按下文开发；`dist/` 不随仓库分发，
+链接方按 `package.json` 读取 `dist/src/index.js`，因此链接前必须先构建。
 需要 SDK 集成时，另行安装公开包 `@peri-code/sdk` 并注入 adapter。
 
 ## 快速开始

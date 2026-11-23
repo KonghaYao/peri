@@ -114,6 +114,8 @@ sqlite3 ~/.peri-fuse/telemetry.db \
 
 ```bash
 # 服务存活（注意用 LANGFUSE_BASE_URL，不是 LANGFUSE_HOST）
+# dev.sh 只在自己的进程内加载 .env，当前 shell 需先给出实际地址
+export LANGFUSE_BASE_URL="http://127.0.0.1:3000"
 curl -fsS "${LANGFUSE_BASE_URL%/}/api/public/health"     # 期望 {"status":"OK"}
 
 # 认证 401 排查：key 是否在 peri-fuse 注册表里

@@ -39,7 +39,7 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
 | --- | --- | --- |
 | `PERI_MCP_CACHE` | MCP 响应缓存开关；`true/false`、`1/0`、`on/off`，忽略首尾空白和大小写；非法值报配置错误。环境值不强制覆盖文件中的 false；全部缺省时启用。 | `peri-config/src/mcp.rs` |
-| `PERI_MCP_BUILTIN` | 选择内置 MCP 装配：缺省及 `on` / `1` / `v5` 使用单一 `peri` 出口；`legacy` / `v4` 为迁移期独立实例回滚；`off` / `0` 不自动注入内置能力。未知值告警并使用单出口。关闭 workspace 能力时不再提供内置文件、终端和资源能力；`--bare` 同样受此开关影响。 | `peri-config/src/mcp.rs`、`peri-middlewares/src/mcp/builtin/mod.rs` |
+| `PERI_MCP_BUILTIN` | 选择内置 MCP 装配：缺省及 `on` / `1` / `v5` 使用单一 `peri` 出口；`legacy` / `v4` 为迁移期独立实例回滚；`off` / `0` 不自动注入内置能力。未知值告警并使用单出口。浏览器 worker（无进程内 builtin）恒为零注入，不读取本变量；显式配置的 remote workspace 仍按 url 注入。关闭 workspace 能力时不再提供内置文件、终端和资源能力；`--bare` 同样受此开关影响。 | `peri-config/src/mcp.rs`、`peri-middlewares/src/mcp/builtin/mod.rs` |
 | `PERI_MCP_APPS` | stdio ACP 的 MCP Apps deployment profile；支持 MCP Apps 的客户端启动 Peri 时携带此变量，**存在即启用**，空串或 `0` 也启用；缺省关闭。Peri 提供 ACP relay，客户端负责 Apps UI。 | `peri-acp/src/host/stdio/mod.rs` |
 | `PERI_ASK_USER_TIMEOUT_SECS` | AskUser 等待 ACP 客户端回答的超时秒数；无效或缺省为 300 秒，`0` 为无限等待。适用于 TUI 和 stdio 共用 broker。 | `peri-acp/src/broker/transport_broker.rs` |
 | `PERI_MACHINE_ID` | 当前机器的 session environment 身份覆盖；必须为 UUID，解析后规范化，首次初始化后进程内缓存；缺省使用本机 `~/.peri/machine-id`。 | `peri-resources/src/sessions/machine.rs` |

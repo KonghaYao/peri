@@ -9,7 +9,7 @@
 A native Rust coding agent for macOS, Linux, and Windows.<br>
 Bring an Anthropic or OpenAI-compatible endpoint.
 
-[**Get started ↓**](#get-started) · [User guide (简体中文)](https://github.com/KonghaYao/peri-cool/tree/main/src/content/docs/docs) · [Releases](https://github.com/KonghaYao/peri/releases)
+[**Get started ↓**](#get-started) · [User guide (简体中文)](https://konghayao.github.io/peri-cool/) · [Releases](https://github.com/KonghaYao/peri/releases)
 
 </div>
 

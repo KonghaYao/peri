@@ -46,7 +46,7 @@ revision、generation 与 attempt；回执不明确时保留原命令与 input I
 ```text
 Queued → Dispatching → Claimed → Delivered
    └──→ Withdrawn
-Dispatching → Queued：摄取前执行失败、Stop，或确认未领取后从 MQ 撤出（与发送选择撤回同一临界区）
+Dispatching → Queued：摄取前执行失败、Stop，或确认未领取后撤回其发送选择（MQ 行保留，与发送选择撤回同一临界区）
 ```
 
 Receive 在 MQ 事务中领取；Stop 撤回未领取输入的发送选择，正文仍留待发送。显式取消待发项才删除 MQ 行。展示状态只投影已确认结果。

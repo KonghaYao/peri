@@ -259,10 +259,14 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 ### Node SDK 同会话追问与续读
 
 下面使用已创建的会话 `id`（沿用 create 返回的 id），不为追问新建会话。用收到的最后
-事件游标续读；没有游标只订阅未来事件。断线后可重试同一条输入，但应保留原幂等键；
-新输入使用新键。HTTP 202 是受理回执，不代表已经运行或得到终态。
+事件游标续读；没有游标只订阅未来事件，因此要观察本轮必须先开流再 POST。断线后可重试
+同一条输入，但应保留原幂等键；新输入使用新键。HTTP 202 是受理回执，不代表已经运行或得到终态。
 
 ```js
+// 实时：先开流再 POST；tail 是上次流收到的最后事件游标，没有游标时省略（Tail 只收实时帧）。
+// 必须三个实参；两实参时 { after } 会被当作 RequestOptions
+const live = await client.beta.agents.sessions.events.stream(id, tail ? { after: tail } : {}, {});
+
 // 使用官方 SDK 在同一会话追问。重试同一条输入时复用 inputId。
 const inputId = crypto.randomUUID();
 const response = await client.beta.agents.sessions.events.create(id, {
@@ -273,9 +277,6 @@ const response = await client.beta.agents.sessions.events.create(id, {
   }],
 }).asResponse();
 const ack = await response.json(); // HTTP 202，含 inputId 和 lastItemSeq
-
-// 实时：必须三个实参；两实参时 { after } 会被当作 RequestOptions
-const live = await client.beta.agents.sessions.events.stream(id, { after: tail }, {});
 
 // items：官方 CursorPage 自动翻页可用；直接读 body 时 TS 中 body 是 protected
 const page = await client.beta.agents.sessions.items.list(id, { order: 'asc', after, limit: 50 });

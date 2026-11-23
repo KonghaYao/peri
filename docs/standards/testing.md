@@ -371,8 +371,13 @@ export PERI_E2E_REPLAY_RESULTS="$(mktemp -d)"
 npm --prefix ../peri-e2e run e2e:replay
 (cd ../peri-e2e && node scripts/check-replay-catalog.mjs --results "$PERI_E2E_REPLAY_RESULTS")
 
-# 非 CI 默认门禁：本地全等核对；仅显式重录时执行 record。
+# 非 CI 默认门禁：本地全等核对。
 npm --prefix ../peri-e2e run e2e:replay:verify:strict
+```
+
+仅在显式要求重录时单独执行以下命令；它改写 cassette，不随上面的验证一起跑：
+
+```bash
 npm --prefix ../peri-e2e run e2e:replay:record
 ```
 

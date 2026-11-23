@@ -1,5 +1,7 @@
 # peri-wasm 代码索引
 
+更新：2026-11-23
+
 `peri-wasm/src/emscripten/acp/peri_wasm_acp.rs` 导出 `PeriWasmAcp`。启动配置注入现有 `ConfigSource`，以 `Resources::open_turso_writable` 打开可写会话存储，并调用 `peri-acp::host::assemble_wasm_server_config` 和 `spawn_acp_server`。`peri-acp::transport::mpsc_transport_pair` 与 `WireBridge` 仅交换原始 JSON-RPC 帧；ACP 方法、Agent 执行、模型和会话规则仍在原有 crate。
 
 Host 配置直接启动普通 ACP runtime，与 stdio 一样不依赖 SDK admission、entry 或 settlement；已移除 `ReverseExecutionAdmission` 接线。历史查询与普通执行保留，不接管旧执行。Cloudflare/SDK 的旧恢复协调消费端仍须单独适配，不能把其旧测试视为当前后端兼容证明。

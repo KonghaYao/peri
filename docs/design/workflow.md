@@ -12,7 +12,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 - **宿主拥有 agent 执行权**：LLM 调用、工具执行、权限与审批由 Peri 侧完成；
 - **引擎拥有编排权**：agent 之间的并行、流水线与阶段推进由脚本与 `workflow-engine` 决定。
 
-能力以 builtin MCP 实例 `workflow` 接入会话；实例 handler 背后的唯一控制面是领域接口 `WorkflowRuntime`（`peri-workflow`），Node wire 是该接口的实现细节（[workflow-mcp.md](workflow-mcp.md) §3）。
+能力以 builtin MCP 接入会话：默认单出口 `peri`，legacy 独立实例 `workflow` 仅作回滚；实例 handler 背后的唯一控制面是领域接口 `WorkflowRuntime`（`peri-workflow`），Node wire 是该接口的实现细节（[workflow-mcp.md](workflow-mcp.md) §3）。
 
 ### 1.1 脚本与核心原语
 
