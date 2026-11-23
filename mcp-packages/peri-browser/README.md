@@ -1,5 +1,7 @@
 # peri-browser MCP
 
+> **已退役（2026-11-23）**：本 crate 的 stdio MCP 服务、独立二进制与 UDS 网关协议已移除，运行时 owner 迁移到 [`peri-browser-gateway`](../peri-browser-gateway/README.md)。Peri 改为连接网关的 HTTP MCP（`http://127.0.0.1:7391/mcp`）；旧 `peri-browser` 配置项与 `PERI_BROWSER_GATEWAY_SOCK`、`PERI_BROWSER_HTTP_ADDR` 不再生效。下文保留为 Kitesurf 隔离模型、工具语义与引擎实测的历史契约；拓扑与配置以网关 README 为准。
+
 把 Kitesurf 作为 Peri 的浏览器后端：`kitesurf` 外部二进制提供浏览器，`peri-browser` 负责 CDP 到 MCP 的转换，`peri-browser-gateway` 提供人看的监控页。MCP server 已实现，CDP 层内联在 `peri-browser`；网关是独立二进制，§10 中标注“计划”的网关变量尚未实现。
 
 ## 1. 目标

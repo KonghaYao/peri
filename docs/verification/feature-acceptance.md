@@ -200,6 +200,7 @@
 | F-EXT-013 | 源码存在 | [契约](../design/system-reminder.md) | [源码](../../peri-middlewares/src/goal)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-EXT-014 | 源码存在 | [契约](../design/tool-system.md) | [源码](../../peri-middlewares/src/middleware/todo.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-EXT-015 | 源码存在 | [契约](../design/model-adapters.md) | [源码](../../peri-middlewares/src/middleware/image)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
+| F-EXT-016 | 源码存在 | [契约](../../mcp-packages/peri-browser-gateway/README.md) | [源码](../../mcp-packages/peri-browser-gateway/src)；[契约测试](../../mcp-packages/peri-browser-gateway/tests/mcp_http.rs)；[证据](peri-browser-gateway-mcp.md)；缺口：真实 Kitesurf 引擎、发布包与独立复验未运行 | 本地 fixture 契约测试通过（lib 123 + mcp_http 18）；真实引擎 smoke 未运行 |
 | F-CLI-001 | 源码存在 | [契约](../design/architecture.md) | [源码](../../peri-tui/src/cli_print.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-CLI-002 | 源码存在 | [契约](../design/configuration-authority.md) | [源码](../../peri-tui/src/cli_auth.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
 | F-CLI-003 | 源码存在 | [契约](../design/architecture.md) | [源码](../../peri-tui/src/update.rs)；缺口：精确断言覆盖和外置场景需对账 | 未复验 |
