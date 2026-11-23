@@ -14,7 +14,7 @@
 //! - [`session`]: in-memory session table with per-session broadcast.
 //! - [`registry`]: newline-delimited JSON over the MCP Unix socket.
 //! - [`dev`]: standalone `--dev` discovery from Kitesurf's `/json/list`.
-//! - [`cdp`]: read-only viewer connections to Kitesurf pages.
+//! - [`cdp`]: CDP page connections, re-exported from `peri-browser`.
 //! - [`stream`]: one screencast per active page, fanned out to monitor viewers.
 //! - [`http`] / [`ws`]: session list, health probe, monitor page and socket.
 //!
@@ -29,7 +29,6 @@
 //!
 //! Design: `mcp-packages/peri-browser/README.md` section 6.
 
-pub mod cdp;
 pub mod config;
 pub mod dev;
 pub mod error;
@@ -41,3 +40,6 @@ pub mod session;
 pub mod stream;
 pub mod token;
 pub mod ws;
+
+pub use peri_browser::cdp;
+pub use peri_browser::input;

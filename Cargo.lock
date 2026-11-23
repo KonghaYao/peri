@@ -3724,6 +3724,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures",
+ "peri-browser",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

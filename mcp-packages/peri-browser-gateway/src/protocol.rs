@@ -267,28 +267,9 @@ pub enum ServerMessage {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MouseEventKind {
-    Down,
-    Up,
-    Move,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MouseButton {
-    Left,
-    Right,
-    Middle,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KeyEventKind {
-    Down,
-    Up,
-}
+/// Input vocabulary is shared with the CDP layer (`peri-browser`): the monitor
+/// wire names and the `Input.*` payloads must stay one definition.
+pub use peri_browser::input::{KeyEventKind, MouseButton, MouseEventKind};
 
 /// Monitor page → gateway messages.
 ///
