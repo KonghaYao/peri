@@ -146,3 +146,39 @@ fn identical_todo_snapshot_has_no_changes() {
     };
     assert!(todo.changes.is_empty());
 }
+
+#[test]
+fn bash_presentation_exposes_tool_chain_and_full_command() {
+    let command = "cd /tmp && grep -n target Cargo.toml | head -5";
+    let presentation = super::presentation_for("Bash", &json!({ "command": command }), None);
+    let TuiToolPresentation::Shell(shell) = presentation else {
+        panic!("expected Shell presentation");
+    };
+    assert_eq!(shell.tool_chain, "grep | head");
+    assert_eq!(shell.command, command);
+}
+
+#[test]
+fn effective_bash_name_uses_shell_presentation() {
+    let presentation = super::presentation_for(
+        "mcp__workspace__Bash",
+        &json!({ "command": "cargo test" }),
+        None,
+    );
+    let TuiToolPresentation::Shell(shell) = presentation else {
+        panic!("expected Shell presentation");
+    };
+    assert_eq!(shell.tool_chain, "cargo test");
+}
+
+#[test]
+fn bash_without_command_stays_generic() {
+    assert_eq!(
+        super::presentation_for("Bash", &json!({}), None),
+        TuiToolPresentation::Generic
+    );
+    assert_eq!(
+        super::presentation_for("Bash", &json!({ "command": "   " }), None),
+        TuiToolPresentation::Generic
+    );
+}

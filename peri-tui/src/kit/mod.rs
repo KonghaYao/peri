@@ -65,6 +65,7 @@ pub(crate) mod scrollbar_chrome;
 pub mod service_snapshot;
 pub mod session_boundary;
 pub mod setup_wizard;
+pub(crate) mod shell_summary;
 pub mod slash_completion;
 pub mod slash_projection;
 pub mod status_bar;

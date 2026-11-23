@@ -124,6 +124,9 @@ pub fn presentation_bytes(presentation: &TuiToolPresentation) -> BodyReserved {
             }
             bytes
         }
+        TuiToolPresentation::Shell(shell) => {
+            string_body_reserved(&shell.tool_chain) + string_body_reserved(&shell.command)
+        }
     }
 }
 

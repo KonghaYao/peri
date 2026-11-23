@@ -43,8 +43,8 @@ pub use interaction::{InteractionKind, TuiAskUserBlock, TuiAskUserItem, interact
 pub(crate) use reminder::DisplayTrusted;
 pub use reminder::{ReminderInfo, ReminderRelay, ReminderType, TuiSystemReminder, detect_reminder};
 pub use tool_card::{
-    TuiSkillPresentation, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem, TuiTodoPresentation,
-    TuiTodoStatus, TuiToolCard, TuiToolPresentation,
+    TuiShellPresentation, TuiSkillPresentation, TuiTodoChange, TuiTodoChangeKind, TuiTodoItem,
+    TuiTodoPresentation, TuiTodoStatus, TuiToolCard, TuiToolPresentation,
 };
 pub use unit::TuiRenderUnit;
 #[cfg(test)]

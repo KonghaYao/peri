@@ -86,6 +86,9 @@ fn tool_presentation_bytes(presentation: &TuiToolPresentation) -> LayerBytes {
             }
             bytes
         }
+        TuiToolPresentation::Shell(shell) => {
+            string_layer_bytes(&shell.tool_chain) + string_layer_bytes(&shell.command)
+        }
     }
 }
 
