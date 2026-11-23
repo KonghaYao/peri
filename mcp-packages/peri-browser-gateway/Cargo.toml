@@ -13,6 +13,7 @@ axum.workspace = true
 base64 = "0.22"
 bytes = "1"
 futures.workspace = true
+peri-browser = { path = "../peri-browser" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

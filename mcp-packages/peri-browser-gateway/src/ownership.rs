@@ -1515,10 +1515,17 @@ pub type Connector = Arc<
         + Sync,
 >;
 
+/// Owner name the gateway uses for its writable page connection.
+///
+/// It is deliberately distinct from the MCP's owner: the two never hold the same
+/// page at once, and a distinct name makes a mistaken double attach a visible
+/// Kitesurf error instead of a silent second writer.
+pub const CONTROLLER_OWNER: &str = "peri-browser-gateway";
+
 fn cdp_connector() -> Connector {
     Arc::new(|cdp_url, page_id| {
         Box::pin(async move {
-            let controller = cdp::Controller::connect(&cdp_url, &page_id).await?;
+            let controller = cdp::Controller::connect(&cdp_url, &page_id, CONTROLLER_OWNER).await?;
             Ok(Box::new(controller) as Box<dyn PageController>)
         })
     })

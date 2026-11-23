@@ -7,8 +7,10 @@
 //! - [`Viewer`] appends `?role=viewer`, so Kitesurf itself rejects navigation,
 //!   input and `Runtime.enable` (`Viewer connection cannot control the browser`).
 //!   This is the connection that carries frames (README §6.4).
-//! - [`Controller`] appends `?owner=peri-browser-gateway` and no `role`: it is a
-//!   page controller, the only writer of the page while the human holds it.
+//! - [`Controller`] appends the caller's `?owner=` and no `role`: it is a page
+//!   controller, the only writer of its page. Each process supplies its own owner
+//!   name (the MCP session, the monitor gateway), so a mistaken double attach is a
+//!   visible Kitesurf error rather than a silent second writer.
 //!   Measured on Kitesurf 0.5.3 (throwaway instance): a second controller on the
 //!   same target is refused with `HTTP 409 {"error":"Another controller owns this
 //!   page session"}`, a different owner can attach once the previous controller
@@ -39,7 +41,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
-use crate::protocol::{KeyEventKind, MouseButton, MouseEventKind};
+use crate::input::{KeyEventKind, MouseButton, MouseEventKind};
 
 /// Viewer attach timeout (README §10 `PERI_BROWSER_CONNECT_TIMEOUT_MS`).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,13 +57,6 @@ pub const FRAME_MAX_WIDTH: u32 = 1600;
 pub const FRAME_MAX_HEIGHT: u32 = 1000;
 /// Thumbnail capture is a still image, not a second screencast.
 pub const THUMBNAIL_QUALITY: u8 = 40;
-
-/// Owner name the gateway uses for its writable page connection.
-///
-/// It is deliberately distinct from the MCP's owner: the two never hold the same
-/// page at once, and a distinct name makes a mistaken double attach a visible
-/// Kitesurf error instead of a silent second writer.
-pub const CONTROLLER_OWNER: &str = "peri-browser-gateway";
 
 /// How long `navigate` waits for the new document to show up in `location.href`
 /// before it reports the state as it stands. Kitesurf's evaluate reply can land
@@ -315,17 +310,28 @@ impl std::fmt::Debug for Viewer {
 
 /// A writable page connection (no `role=viewer` query).
 ///
-/// The gateway only opens one after the MCP confirmed the yield; owning two
-/// controllers for one target is refused by Kitesurf (HTTP 409), so this type is
-/// created exclusively by the ownership driver.
+/// Owning two controllers for one target is refused by Kitesurf (HTTP 409), so a
+/// process opens one only when it holds the writer role: the MCP while the agent
+/// drives, the gateway after the MCP confirmed the yield (README §5, §6.2).
 pub struct Controller {
     connection: Connection,
 }
 
 impl Controller {
-    /// Connects to `target_id` below `cdp_url` as a page controller.
-    pub async fn connect(cdp_url: &str, target_id: &str) -> Result<Self, CdpError> {
-        let url = page_controller_url(cdp_url, target_id, CONTROLLER_OWNER)?;
+    /// Connects to `target_id` below `cdp_url` as a page controller owned by
+    /// `owner`.
+    ///
+    /// The owner is the process's identity on the page, not a CDP concept: the
+    /// MCP and the gateway pass different names so an accidental second writer is
+    /// reported by Kitesurf instead of silently sharing the page.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a non-WebSocket endpoint, an invalid target id or owner, a
+    /// refused attach (for example `Another controller owns this page session`),
+    /// and a connect timeout.
+    pub async fn connect(cdp_url: &str, target_id: &str, owner: &str) -> Result<Self, CdpError> {
+        let url = page_controller_url(cdp_url, target_id, owner)?;
         Ok(Self {
             connection: Connection::open(url).await?,
         })
