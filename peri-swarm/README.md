@@ -264,8 +264,9 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 
 ```js
 // 实时：先开流再 POST；tail 是上次流收到的最后事件游标，没有游标时省略（Tail 只收实时帧）。
-// 必须三个实参；两实参时 { after } 会被当作 RequestOptions
-const live = await client.beta.agents.sessions.events.stream(id, tail ? { after: tail } : {}, {});
+// 必须三个实参；两实参时 { after } 会被当作 RequestOptions。tail 为 0 时保留 after，回放全部。
+const streamOptions = tail == null ? {} : { after: tail };
+const live = await client.beta.agents.sessions.events.stream(id, streamOptions, {});
 
 // 使用官方 SDK 在同一会话追问。重试同一条输入时复用 inputId。
 const inputId = crypto.randomUUID();
