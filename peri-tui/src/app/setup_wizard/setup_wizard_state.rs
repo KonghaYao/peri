@@ -315,6 +315,11 @@ pub struct SetupWizardState {
     pub browse_cursor: usize,
     pub form_focus: FormField,
     pub from_command: bool,
+    /// 离线完成标记：本 pass 发生在 ACP 装配之前（首次启动或 `--setup`），
+    /// 没有在线 `update_config` 可用；保存成功后直接置 `SETUP_COMPLETED`。
+    /// 与 [`Self::from_command`] 解耦——后者只决定是否修复已不可解析的档位选择。
+    #[serde(default)]
+    pub offline_completion: bool,
     pub submit_error: Option<String>,
     pub connectivity_result: Option<(bool, String)>,
     #[serde(default)]
@@ -343,6 +348,7 @@ impl Default for SetupWizardState {
             browse_cursor: 0,
             form_focus: FormField::ProviderType,
             from_command: false,
+            offline_completion: false,
             submit_error: None,
             connectivity_result: None,
             save_in_progress: false,

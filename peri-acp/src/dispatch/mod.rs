@@ -17,7 +17,7 @@ pub mod session_fork;
 pub mod session_load;
 pub mod session_replay;
 
-pub use init::build_initialize_response;
+pub use init::{build_initialize_response, terminal_auth_methods};
 pub use list_sessions::list_sessions_as_info;
 pub use prompt::{extract_prompt_params, handle_prompt};
 pub use rewind::{rewind_execute, rewind_preview};

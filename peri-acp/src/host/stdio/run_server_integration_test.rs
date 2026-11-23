@@ -74,6 +74,9 @@ async fn test_stdio_assembly_uses_input_cwd_workspace() {
     )
     .await
     .unwrap();
+    let super::StdioAssembly::Configured(assembled) = assembled else {
+        panic!("configured input workspace must assemble a host");
+    };
 
     assert_eq!(
         assembled.config_source.loaded_merged().config.providers[0].id,
@@ -560,6 +563,76 @@ async fn test_prompt_wire_shape_unknown_session_returns_error() {
         notif["params"]["update"]["sessionUpdate"],
         "session_info_update"
     );
+
+    await_server_exit(server_task, input_write).await;
+}
+
+/// 正常宿主（已配置 provider）的 initialize 认证广告：只有认证能力标记
+/// （ACP v1 `auth.terminal`、Registry `_meta["terminal-auth"]` 或顶层同键）
+/// 才产生恰好一个 `peri-setup` terminal 方法；`clientCapabilities.terminal`
+/// 是 `terminal/*` 工具能力，不得触发。
+#[tokio::test]
+async fn test_initialize_advertises_terminal_auth_for_declared_capabilities() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg = test_config(&tmp).await;
+    let (transport, mut input_write, mut output_read) = duplex_transport();
+    let transport: Arc<dyn AcpTransport> = Arc::new(transport);
+    let server_task = tokio::spawn(host::run_acp_server(transport, cfg));
+
+    let cases = [
+        (
+            1,
+            json!({ "clientCapabilities": { "auth": { "terminal": true } } }),
+            true,
+        ),
+        (
+            2,
+            json!({ "clientCapabilities": { "_meta": { "terminal-auth": true } } }),
+            true,
+        ),
+        (3, json!({ "_meta": { "terminal-auth": true } }), true),
+        (
+            4,
+            json!({ "clientCapabilities": { "terminal": true } }),
+            false,
+        ),
+        (5, json!({}), false),
+    ];
+    for (id, extra, expected) in cases {
+        let mut params = json!({ "protocolVersion": 1 });
+        if let Some(object) = params.as_object_mut() {
+            for (key, value) in extra.as_object().expect("case parameters are objects") {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        write_line(
+            &mut input_write,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "initialize",
+                "params": params
+            })
+            .to_string(),
+        )
+        .await;
+        let v: Value = serde_json::from_str(&read_line(&mut output_read).await).unwrap();
+        assert_eq!(v["id"], id, "initialize RequestId 往返: {v}");
+        let methods = v["result"]["authMethods"]
+            .as_array()
+            .unwrap_or_else(|| panic!("initialize 必须返回 authMethods 数组: {v}"));
+        if expected {
+            assert_eq!(methods.len(), 1, "应恰好广告一个认证方法: {v}");
+            assert_eq!(methods[0]["type"], "terminal", "认证方法类型: {v}");
+            assert_eq!(methods[0]["id"], "peri-setup", "认证方法 ID: {v}");
+            assert_eq!(methods[0]["args"], json!(["--setup"]), "认证参数: {v}");
+            assert_eq!(methods[0]["env"]["PERI_ACP_SETUP"], "1", "认证环境: {v}");
+        } else {
+            assert!(methods.is_empty(), "未声明认证能力时 authMethods 为空: {v}");
+        }
+        // 正常宿主的既有能力形状不因认证广告改变。
+        assert_eq!(v["result"]["agentCapabilities"]["loadSession"], true);
+    }
 
     await_server_exit(server_task, input_write).await;
 }

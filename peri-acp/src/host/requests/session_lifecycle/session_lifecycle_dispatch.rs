@@ -145,7 +145,11 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
     cfg.session_manager.set_pending_caps(peri_caps.clone());
 
     let apps = session_apps_capability::apps_capability(cfg);
-    let resp = dispatch::build_initialize_response(&peri_caps, apps.as_ref());
+    let mut resp = dispatch::build_initialize_response(&peri_caps, apps.as_ref());
+    // 客户端声明终端认证能力（ACP v1 auth.terminal 或 Registry 旧标记）时广告
+    // 一次性配置向导；未声明时保持 authMethods: []。判定只在
+    // `dispatch::terminal_auth_methods` 一处，降级宿主共用。
+    resp.auth_methods = dispatch::terminal_auth_methods(params);
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
 

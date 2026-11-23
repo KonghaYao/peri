@@ -18,6 +18,8 @@ pub(super) struct TuiOptions {
     pub(super) disallowed_tools: Vec<String>,
     /// 会话存储定位描述（已由入口归一；恢复会话不再重新解析存储）。
     pub(super) session_store: SessionStoreDeployment,
+    /// 只运行一次首次配置向导：不连接 ACP，完成后退回入口决定退出码。
+    pub(super) setup_only: bool,
 }
 
 pub(super) fn propagate_tui_result(result: Result<()>) -> Result<()> {
@@ -61,6 +63,7 @@ pub(super) fn run_tui(opts: TuiOptions) -> Result<()> {
             allowed_tools: opts.allowed_tools.clone(),
             disallowed_tools: opts.disallowed_tools.clone(),
             session_store: opts.session_store.clone(),
+            setup_only: opts.setup_only,
         };
         peri_tui::kit::entry::run_kit_fullscreen(launch_opts, panic_notify_rx).await
     });

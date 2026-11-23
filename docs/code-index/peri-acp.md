@@ -23,6 +23,7 @@
 | `peri-acp/src/host/prompt.rs` | [`peri-acp/src/host/prompt/prompt_turn.rs`](../../peri-acp/src/host/prompt/prompt_turn.rs) |
 | `peri-acp/src/host/recovery/coordinator.rs` | [`peri-acp/src/host/recovery/coordinator/host_session_recovery.rs`](../../peri-acp/src/host/recovery/coordinator/host_session_recovery.rs) |
 | `peri-acp/src/host/requests.rs` | [`peri-acp/src/host/requests/request_dispatch.rs`](../../peri-acp/src/host/requests/request_dispatch.rs) |
+| `peri-acp/src/dispatch/mod.rs` | [`peri-acp/src/dispatch/init.rs`](../../peri-acp/src/dispatch/init.rs) |
 | `peri-acp/src/host/requests/session_lifecycle.rs` | [`peri-acp/src/host/requests/session_lifecycle/session_lifecycle_dispatch.rs`](../../peri-acp/src/host/requests/session_lifecycle/session_lifecycle_dispatch.rs) |
 | `peri-acp/src/host/requests/session_restore.rs` | [`peri-acp/src/host/requests/session_restore/session_restore_dispatch.rs`](../../peri-acp/src/host/requests/session_restore/session_restore_dispatch.rs) |
 | `peri-acp/src/host/server_loop.rs` | [`peri-acp/src/host/server_loop/server_loop.rs`](../../peri-acp/src/host/server_loop/server_loop.rs) |
@@ -287,7 +288,8 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | 装配 | `host/assemble.rs` | `assemble_server_config`；`build_legacy_frozen_data` 按保存目录准备配置与插件输入；新建 MCP pool 在初始化前绑定 `ConfigSource` snapshot，host Langfuse 消费同快照的 observability；观测成功时安装指标出口，未配置时不安装、指标不落盘 |
 | stage 构建 | host/stage_builder.rs | `build_stage_context`：消费单一 `FrozenSessionData`，派生 frozen language/MetaHarness/date 与 Agent 装配输入，禁止从当轮 config 建第二事实源；frozen 中的项目指令正文来自 P4 内容准入期经 builtin `workspace` 实例读取的 `peri-instruction://workspace/{main|local}` 资源（`AgentsMdMiddleware` 为纯 adapter、不读盘） |
 | workflow 宿主面 | host/session_workflow_chain.rs + host/workflow_consumer.rs + host/requests/workflow.rs | 本地运行时路径（`create_session_workflow_chain` 经 `WorkflowAgentFactory` 端口装配 executor/runtime 链、`WorkflowTaskConsumer` 就绪屏障 + 订阅 `workflow://tasks`、`workflow_face_closed` 关闭集特例、`AcpServerConfig::workflow_middleware_factory`）按 `not(emscripten)` 门控：wasm 产物不打包本地 workflow 运行时，该目标不建链、不绑定；ACP 四 handler（`host/requests/workflow.rs`）经**会话池协议面**调用实例 `Workflow`/`WorkflowStatus`/`WorkflowKill`，不随目标门控（远端通路保留） |
-| stdio 部署 | host/stdio/ | `run_acp_stdio`（`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路） |
+| initialize 终端认证 | host/requests/session_lifecycle/session_lifecycle_dispatch.rs + dispatch/init.rs | `dispatch::terminal_auth_methods`：只从 initialize params 判定 `clientCapabilities.auth.terminal`、`clientCapabilities._meta["terminal-auth"]` 与顶层 `_meta["terminal-auth"]`，至多返回一个 `AuthMethod::Terminal`（id `peri-setup`，`args:["--setup"]`，`env:{"PERI_ACP_SETUP":"1"}`）；`build_auth_required_initialize_response` 供降级宿主复用同一能力形状。回归 `dispatch/init_auth_test.rs`、`host/stdio/auth_required_gate_test.rs` |
+| stdio 部署 | host/stdio/ | `run_acp_stdio`（`StdioInput` → `assemble_stdio_config` → `run_acp_server_with_sessions`，业务处理走统一宿主）；常规配置缺 provider（非 `--settings-stdin`）时 `StdioAssembly::NeedsSetup` → `auth_required_gate::run_auth_required_gate`，在同一 `StdioTransport` 上只答 `initialize` 并以 `-32000` 拒绝 `session/*`；集成测试 `run_server_integration_test.rs`（initialize → session/new → 通知 wire 链路）与 `auth_required_gate_test.rs` |
 
 ### src/agent/（装配面薄壳）
 
