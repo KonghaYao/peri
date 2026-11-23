@@ -105,6 +105,11 @@ impl ProducerQueue<'_> {
         self.queue.send_inputs_within(ids, timeout).await
     }
 
+    /// Snapshot of accepted send IDs. Inspecting it never withdraws a selection.
+    pub fn selected_input_ids(&self) -> Vec<MessageId> {
+        self.queue.inner.send_selection.lock().clone()
+    }
+
     pub fn take_send_selection(&self) -> Vec<MessageId> {
         self.queue.take_send_selection()
     }

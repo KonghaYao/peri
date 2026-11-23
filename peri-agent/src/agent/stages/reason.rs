@@ -10,7 +10,22 @@ use crate::agent::stages::ReasonInput;
 use crate::agent::stages::ReasonOutput;
 use crate::error::{AgentError, AgentResult};
 
+use crate::messages::MessageId;
+use std::ops::ControlFlow;
+
 pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
+    // Standalone stage callers own their input snapshot. The RCRA runner can also
+    // return to Receive before committing to a model request.
+    match run_reason_with_admission(input, None).await? {
+        ControlFlow::Continue(output) => Ok(output),
+        ControlFlow::Break(_) => unreachable!("standalone Reason does not defer to Receive"),
+    }
+}
+
+pub(super) async fn run_reason_with_admission(
+    input: ReasonInput,
+    missing: Option<&[MessageId]>,
+) -> AgentResult<ControlFlow<Vec<MessageId>, ReasonOutput>> {
     let ctx = &input.context;
     let step = ctx.session.turn.current_step();
     let turn_id = ctx.turn_id();
@@ -136,12 +151,6 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .map(|item| item.delivery_id)
         .filter(|id| messages_snapshot.iter().any(|message| message.id() == *id))
         .collect();
-    let receipt = ctx.session.async_result_mailbox.capture_request(
-        format!("{}:{step}", ctx.session.turn.execution_binding().attempt_id),
-        format!("{turn_id}:{step}"),
-        &included,
-    );
-
     let exposure = crate::agent::compact_v2::exposure::RequestExposure::capture(
         &messages_snapshot,
         &ctx.session.transcript.read(),
@@ -175,25 +184,9 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         "Reason 阶段：准备调用 LLM"
     );
 
-    // emit LlmCallStart（携带 messages + tools 快照，对齐 v1 Langfuse Generation input）
-    // messages 为 Arc 浅拷贝，与下方 LLM 调用共享同一份快照
-    let start_tools: Vec<crate::tools::ToolDefinition> =
-        tool_refs.iter().map(|t| t.definition()).collect();
-    ctx.runtime
-        .event_bus
-        .emit_observe(ObserveEvent::LlmCallStart {
-            turn_id,
-            agent_id,
-            step,
-            messages: messages_snapshot.clone(),
-            tools: start_tools,
-        });
-
     // 构造 StreamingContext：LLM 适配器（AgentModelBridge）在流式解析过程中
     // 直接 emit v2 RenderEvent/ObserveEvent（v1 ExecutorEvent 流式中间态已退役，
     // v1 兼容映射仅保留在 ACP 协议序列化面）。身份（turn_id/agent_id）随上下文注入。
-    let turn_id = ctx.turn_id();
-    let agent_id = ctx.session.agent_id;
     let streaming = Some(StreamingContext {
         event_bus: std::sync::Arc::clone(&ctx.runtime.event_bus),
         turn_id,
@@ -222,6 +215,39 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
             transcript.entries().last().map(|entry| entry.id()),
         )
     };
+    let start_tools: Vec<crate::tools::ToolDefinition> =
+        tool_refs.iter().map(|t| t.definition()).collect();
+    // All asynchronous request preparation has finished. Admit the snapshot
+    // before creating receipts or emitting a start event for an actual call.
+    let steer_gate = if let Some(mailbox) = &ctx.session.user_input_mailbox {
+        match mailbox.admit_model_request(
+            input.has_tool_calls && missing.is_some(),
+            missing.unwrap_or_default(),
+        ) {
+            Ok(guard) => Some(guard),
+            Err(ids) => return Ok(ControlFlow::Break(ids)),
+        }
+    } else {
+        None
+    };
+    let receipt = ctx.session.async_result_mailbox.capture_request(
+        format!("{}:{step}", ctx.session.turn.execution_binding().attempt_id),
+        format!("{turn_id}:{step}"),
+        &included,
+    );
+
+    // emit LlmCallStart（携带 messages + tools 快照，对齐 v1 Langfuse Generation input）
+    // messages 为 Arc 浅拷贝，与下方 LLM 调用共享同一份快照
+    ctx.runtime
+        .event_bus
+        .emit_observe(ObserveEvent::LlmCallStart {
+            turn_id,
+            agent_id,
+            step,
+            messages: messages_snapshot.clone(),
+            tools: start_tools,
+        });
+
     let budget_probe = ctx
         .compact
         .budget_recovery
@@ -232,14 +258,6 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 使用 generate_reasoning_with_observed_body：观测体复用本次调用已构建的
     // request（消除每轮 request 双构建），LlmRequestPayload 在成功后、LlmCallEnd
     // 之前 emit——Langfuse 按 step 缓存 raw_body，时序兼容（on_llm_end 前到达即可）。
-    // 立即发送的阶段门：只有这次实际模型调用/流式期间才允许硬取消。
-    // 请求准备与响应后处理不在 guard 内；子 Agent 没有 mailbox，自然 no-op。
-    let steer_gate = ctx
-        .session
-        .user_input_mailbox
-        .as_ref()
-        .map(|mailbox| mailbox.begin_model_request());
-
     let model_result = tokio::select! {
         biased;
         _ = ctx.session.turn.cancel_token.cancelled() => {
@@ -398,13 +416,13 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // after_model middleware（hook_middleware / git_attribution 等在此）
     crate::agent::stages::middleware_runner::run_after_model(ctx, &reasoning).await?;
 
-    Ok(ReasonOutput {
+    Ok(ControlFlow::Continue(ReasonOutput {
         reasoning,
         catalog,
         messages_snapshot,
         receipt,
         exposure,
-    })
+    }))
 }
 
 /// 按当次最终工具目录重算硬记忆的可执行入口。
