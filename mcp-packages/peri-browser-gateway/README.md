@@ -2,19 +2,53 @@
 
 本机浏览器服务的唯一 owner：一个 loopback listener 同时提供 MCP Streamable HTTP（`/mcp`）与人工监控页面。每个 MCP 会话拥有独立的 `BrowserCore`（端点、页面、活动页、快照），页面写入经唯一 `PageControl` writer；人可在 monitor 里接管同一页面。
 
-`mcp-packages/peri-browser` 的 stdio 服务已退役，本 crate 是运行时契约的唯一来源。工具面、Kitesurf 隔离模型与历史引擎证据仍保留在 [peri-browser README](../peri-browser/README.md) 供迁移对照。
+`mcp-packages/peri-browser` 的 stdio 服务与旧二进制已移除；本 crate 是运行时契约的唯一来源，迁移步骤见文末。工具面与 Kitesurf 隔离模型的历史证据见 `docs/verification/` 与 git 历史。
 
 ## 快速开始
 
 ```bash
+# 安装二进制与 kitesurf 引擎
+curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install-browser.sh | bash
+
+peri-browser start kitesurf   # 引擎 18971，网关 127.0.0.1:7391
+```
+
+`start kitesurf` 先确保引擎在后台就绪，再打印 MCP 与监控地址并前台运行网关。Ctrl-C 只停止网关，引擎留在后台，可用 `kitesurf stop --port 18971` 停止；引擎已在监听时直接复用。
+
+本地开发可以直接构建：
+
+```bash
 cargo build -p peri-browser-gateway
-./target/debug/peri-browser-gateway --bind 127.0.0.1:7391
+./target/debug/peri-browser install kitesurf   # 已安装时只打印版本与路径
+./target/debug/peri-browser start kitesurf
+```
+
+只运行网关：
+
+```bash
+./target/debug/peri-browser --bind 127.0.0.1:7391
+./target/debug/peri-browser serve --bind 127.0.0.1:7391   # 显式别名
 ```
 
 - MCP：`http://127.0.0.1:7391/mcp`
 - 监控首页：`http://127.0.0.1:7391/`（列出 Live 会话）
 - 单会话页：`http://127.0.0.1:7391/s/{token}/`，WS 为 `/s/{token}/ws`
 - 健康检查：`/healthz`
+
+### 命令面
+
+| 命令 | 行为 |
+| --- | --- |
+| `peri-browser [OPTIONS]`、`peri-browser serve [OPTIONS]` | 前台运行网关；裸参数与 `serve` 后参数走同一套解析。 |
+| `peri-browser install kitesurf` | 安装 kitesurf；已安装则打印版本与路径并返回 0。 |
+| `peri-browser start kitesurf [--port N] [--bind IP:PORT]` | 后台启动 `kitesurf serve --port <N>`（日志 `$HOME/.kitesurf/serve-<N>.log`），就绪后前台运行网关。 |
+| `peri-browser --version`、`peri-browser -h\|--help` | 版本与命令帮助。 |
+
+`start kitesurf` 的 `--port` 默认 `18971`（引擎推荐端口），`--bind` 默认 `127.0.0.1:7391`；两者只接受环回地址。引擎未安装时命令失败并提示先运行 `peri-browser install kitesurf`。
+
+### 安装脚本
+
+`install-browser.sh` 支持 kitesurf 官方安装器覆盖的两个平台（macOS arm64、Linux x86_64），校验发布资产的 SHA-256，安装到 `$HOME/.peri/browser/bin/peri-browser`，随后执行 `peri-browser install kitesurf`。
 
 Peri 侧配置（HTTP MCP，宿主不含任何浏览器协商代码）：
 
@@ -28,6 +62,8 @@ Peri 侧配置（HTTP MCP，宿主不含任何浏览器协商代码）：
   }
 }
 ```
+
+换端口时，`start kitesurf --bind` 与这里的 `url` 必须一致。
 
 ## 架构
 
@@ -94,7 +130,7 @@ flowchart TD
 
 ## 配置
 
-CLI 参数优先于同名环境变量；超时值范围 `1..=86400000` 毫秒，非法值拒绝启动。
+以下参数只属于网关（`serve` / 裸调用）；`start kitesurf` 的 `--port` / `--bind` 见上文命令面。CLI 参数优先于同名环境变量；超时值范围 `1..=86400000` 毫秒，非法值拒绝启动。
 
 | 参数 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -107,9 +143,11 @@ CLI 参数优先于同名环境变量；超时值范围 `1..=86400000` 毫秒，
 
 其余会话/页面/安装相关变量（`PERI_BROWSER_OWNER`、`PERI_BROWSER_SESSION_NAME`、`KITESURF_INSTALL_DIR`、`PERI_BROWSER_PROVISION_LOCK*`、`PERI_BROWSER_CONNECT_TIMEOUT_MS`、`PERI_BROWSER_PAGE_WAIT_MS`、`PERI_BROWSER_RECLAIM_WAIT_MS`、`PERI_BROWSER_LOCK_STALE_MS`）见 [环境变量表](../../docs/standards/environment-variables.md#browser-gateway)。旧 `PERI_BROWSER_GATEWAY_SOCK`、`PERI_BROWSER_HTTP_ADDR` 与自动拉起网关不再生效。
 
+`start kitesurf` 的 `--bind` / `--port` 是独立进程的启动参数，不读取 `PERI_BROWSER_MONITOR_BIND`；它固定用 `--cdp-url http://127.0.0.1:<port>` 启动前台网关。
+
 ## 引导（onboarding）
 
-`browser_status` 在无引擎时也能启动：返回安装检测、建议端点、监听状态与可执行的 `nextSteps`（安装 → 启动 → `browser_connect`）。网关不运行安装器、不拉起 Kitesurf、不在启动时探测或绑定端点；推荐的 `--cdp-url` 只是提示，实际连接由会话显式建立。
+`browser_status` 在无引擎时也能启动：返回安装检测、建议端点、监听状态与可执行的 `nextSteps`（安装 → 启动 → `browser_connect`）。MCP 会话本身不运行安装器、不拉起 Kitesurf；安装与启动只经 CLI 的 `install kitesurf` / `start kitesurf` 显式执行。网关启动时仍不探测或绑定端点，推荐的 `--cdp-url` 只是提示，实际连接由会话显式建立。
 
 ## 从 peri-browser 迁移
 
@@ -131,4 +169,4 @@ bash scripts/check-layer-imports.sh
 
 ## 非目标
 
-远程访问与鉴权、跨进程状态恢复、多 profile、现代 stateless 工具调用、自动安装/启动引擎、旧 UDS/stdio 兼容，以及依赖宿主侧 MCP 适配层的浏览器逻辑。
+远程访问与鉴权、跨进程状态恢复、多 profile、现代 stateless 工具调用、旧 UDS/stdio 兼容，以及依赖宿主侧 MCP 适配层的浏览器逻辑。

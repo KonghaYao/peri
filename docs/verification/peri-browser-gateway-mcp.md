@@ -1,6 +1,6 @@
 # peri-browser-gateway MCP 合并验收记录
 
-> 基线：`local/peri-browser-check`，`1d97f3f223` 加本分支四个提交（`42ef2e669` 合并、`860df7e5e` 文档、`bc04e8064` 页面 owner 修复、`249fe5ae6` 引擎断开视为已释放）；2026-11-23。平台 macOS 26.6.2 arm64，Rust 1.99.0，patched rmcp 3.9.0、tokio 1.53.1、axum 0.8.9。功能行见 [F-EXT-016](../reference/feature-catalog.md)，运行时契约见 [gateway README](../../mcp-packages/peri-browser-gateway/README.md)。
+> 基线：`local/peri-browser-check`，`1d97f3f223` 起本分支的提交（`42ef2e669` 合并、`860df7e5e` 文档、`bc04e8064` 页面 owner 修复、`249fe5ae6` 引擎断开视为已释放、`eae68a04d` 冒烟记录），以及与本记录同批提交的单一二进制 CLI、安装脚本与发布通道改动；2026-11-23。平台 macOS 26.6.2 arm64，Rust 1.99.0，patched rmcp 3.9.0、tokio 1.53.1、axum 0.8.9。功能行见 [F-EXT-016](../reference/feature-catalog.md)，运行时契约见 [gateway README](../../mcp-packages/peri-browser-gateway/README.md)。
 
 ## 范围与证据性质
 
@@ -60,11 +60,28 @@ export CARGO_INCREMENTAL=0
 
 独立 CDP 探针确认 owner 语义：browser controller 以 `owner=peri-browser` 建 target 后，page WS 只有 `?owner=peri-browser` 能连上，`?owner=probe` 与 `?owner=p_test` 均被拒绝。修复后有回归用例断言 controller owner 跟随配置而非页 ID。关闭语义的修复在 `249fe5ae6`：对端 EOF/`ResetWithoutClosingHandshake` 与 `ConnectionClosed` 一样视为连接已释放，并新增 fixture `reset_on_close` 模式下带页面 DELETE 的回归用例。
 
+## 单一二进制 CLI、安装脚本与发布通道（2026-11-23）
+
+`peri-browser` 现在由 `src/cli.rs` 分派 `serve`（裸调用同义）、`install kitesurf`、`start kitesurf`，由 `src/lifecycle.rs` 下载安装器并在前台网关启动前拉起引擎；对外安装入口是 `scripts/install-browser.sh`，发布通道是 `.github/workflows/release-browser.yml`（tag `browser-v*`，仅 macos-aarch64 与 linux-x86_64）。本节证据采集于 `eae68a04d` 的工作区，改动与本记录同批提交；由执行代理在隔离 `HOME`/`PATH` 下运行，协调者复核了报告与关键行为，仍不是独立复验。
+
+| 检查 | 观察结果 |
+| --- | --- |
+| 单元与契约 | lib 137（含 cli 8、lifecycle 4、help 文案 1）、`tests/mcp_http` 19、doc 0；clippy `-D warnings` 与 fmt PASS。 |
+| `install kitesurf` 已安装 | fixture 命中已有安装，exit 0，不触网、不执行安装器。 |
+| `install kitesurf` 未安装 | exit 1，错误为 `kitesurf is not installed; run 'peri-browser install kitesurf' first`；无 `HOME` 时 exit 1 并提示设置 `KITESURF_INSTALL_DIR`。 |
+| 安装器临时目录 | 每次运行创建 0700 私有目录并以 `create_new` 预留脚本文件，退出后清理；单测覆盖目录唯一、权限与重复清理。 |
+| `start kitesurf` 复用 | 假引擎 `/json/version` 于 18973 可达时直接复用，打印 mcp/monitor，网关 `/healthz` 200，SIGTERM 后 exit 0。 |
+| `start kitesurf` 等待 | 引擎不监听时 15s 后 exit 1，子进程回收，错误指向 `$HOME/.kitesurf/serve-<port>.log`；fixture 以 7 退出时立即失败并带退出码。 |
+| 网关接线 | MCP `initialize` 的 `serverInfo.version` 取 `version()`；`browser_status` 的 recommendedEndpoint 跟随 `start kitesurf --port`。 |
+| `install-browser.sh` | 离线 harness 37 项通过：平台映射与拒绝不支持平台、按 `browser-v` 前缀选最新 release、SHA-256 篡改或缺失即失败、`curl \| bash`、同版本重装与旧版本清理、跳过引擎开关。未联网下载、未真实安装。 |
+| `release-browser.yml` | YAML 解析、9 个 `run` 块 `bash -n`、触发/矩阵/版本注入/资产名/`contents: write` 断言通过；未在 GitHub 上执行。 |
+
 ## 未运行与剩余风险
 
 - **真实引擎仅覆盖最小路径**：已用 Kitesurf 0.5.2 走通 initialize/connect/new_page/snapshot/list，以及带页面会话的 DELETE；未验证 monitor 浏览器交互、yield/request_human、真实导航与 fill、0.5.4、多会话并发。
 - **独立复验未完成**：原计划的 verification agent 三次均被 provider 错误终止；上表由协调者执行。
 - **外部 Peri 进程经 HTTP 消费未联测**：`/mcp` 由真实 listener 与 SDK 客户端验证，但未用完整的 Peri 宿主配置跑通。
-- **跨平台与发布物未验证**：Linux、Windows、macOS x64、发布包安装路径、`rg` 依赖的仓库扫描均未运行。
-- **残余风险**：monitor token 出现在 URL；网关无鉴权，安全边界是本机回环与 Host/Origin 校验；fixture fidelity 与真实引擎仍可能有差异。
-- 改造按逻辑分步提交（见基线的四个提交与本记录）；未推送。
+- **跨平台与发布物未验证**：Linux、Windows、macOS x64、发布包在真实平台的运行、`rg` 依赖的仓库扫描均未运行。
+- **发布与安装入口未端到端验证**：`release-browser.yml` 未在 GitHub Actions 上执行，`install-browser.sh` 未对真实 Release 下载与安装，`browser-v*` / `agent-v*` tag 未推送；PR CI、CodeRabbit 与合并结果也不在本记录证据内。
+- **残余风险**：monitor token 出现在 URL；网关无鉴权，安全边界是本机回环与 Host/Origin 校验；fixture fidelity 与真实引擎仍可能有差异；`scripts/install.sh` 用 `releases?per_page=30` 查找最新 agent release，browser tag 增多后可能把 agent tag 挤出窗口。
+- 改造按逻辑分步提交（本分支提交与本记录）；记录时未推送。
