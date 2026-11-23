@@ -1,6 +1,6 @@
-# peri-browser MCP（计划）
+# peri-browser MCP
 
-把 Kitesurf 作为 Peri 的浏览器后端：`kitesurf` 外部二进制提供浏览器，`peri-browser` 负责 CDP 到 MCP 的转换，`peri-browser-gateway` 提供人看的监控页。当前目录只放计划，不含实现。
+把 Kitesurf 作为 Peri 的浏览器后端：`kitesurf` 外部二进制提供浏览器，`peri-browser` 负责 CDP 到 MCP 的转换，`peri-browser-gateway` 提供人看的监控页。MCP server 已实现，CDP 层内联在 `peri-browser`；网关是独立二进制，§10 中标注“计划”的网关变量尚未实现。
 
 ## 1. 目标
 
@@ -27,7 +27,7 @@
 
 ## 3. Kitesurf 的隔离模型（0.5.3 实测）
 
-macOS arm64，release tarball `kitesurf-0.5.3-darwin-arm64.tar.gz`（sha256 `6942287…0080c2`），单实例、临时 profile；主流程 54 项检查通过，多 tab、console/network、关闭 target 另做补充验证：
+macOS arm64，release tarball `kitesurf-0.5.3-darwin-arm64.tar.gz`（sha256 `6942287…0080c2`），单实例、临时 profile；主流程 54 项检查通过，多 tab、console/network、关闭 target 另做补充验证。交付前的 live 检查在 0.5.4 上复跑建页、导航与 `fill`，未发现与本节矩阵冲突的行为：
 
 | 场景 | 实际结果 |
 | --- | --- |
@@ -125,7 +125,7 @@ flowchart LR
   - `/s/{token}/ws` — 画面与输入的同一条 WebSocket。
 - MCP 通过 UDS（`peri-browser-gateway.sock`）注册会话与页面，上报 `driving` / `idle` / `waiting-for-human`；网关不主动扫描 `/json/list` 猜所有权。
 - 没有网关时 MCP 照常工作，`browser_status` 标记 `monitor: unavailable`；网关重启后 MCP 重新注册，token 由会话 id 与网关 secret 派生，URL 不变。
-- 网关自己连 CDP 当 viewer，只读由 Kitesurf 强制；不让 MCP 代传画面，否则“只读”退化成前端自觉。两者共用 `peri-browser-cdp`（页面连接、screencast、坐标与按键映射），不写两遍。
+- 网关自己连 CDP 当 viewer，只读由 Kitesurf 强制；不让 MCP 代传画面，否则“只读”退化成前端自觉。两边各自持有页面连接、screencast 与坐标/按键映射（MCP 侧是 `peri-browser` 内联的 `cdp` 模块，网关侧是它自己的同名模块），不新增第三个共享 crate。
 
 ### 6.2 所有权状态机
 
@@ -235,9 +235,9 @@ sequenceDiagram
 
 ## 7. 工具面（参考 chrome-devtools-mcp）
 
-| 分类 | 计划工具 |
+| 分类 | 工具 |
 | --- | --- |
-| 会话 | `browser_status`、`yield_page`、`request_human` |
+| 会话 | `browser_status`、`yield_page`、`request_human`、`request_authorization` |
 | 页面 | `list_pages`、`select_page`、`new_page`、`navigate_page`、`close_page` |
 | 读取 | `take_snapshot`、`take_screenshot`、`evaluate_script` |
 | 交互 | `click`、`fill`、`hover`、`press_key`、`wait_for` |
@@ -253,6 +253,12 @@ sequenceDiagram
 - `request_human` 阻塞当前工具调用，返回人的操作结果或 `no_human`；不改变页面所有权（人持有期间 agent 不写）。
 - 错误映射：`Another controller owns this page session`、`Target belongs to another page session`、`This method is not available on a page-session connection`、`Control has changed`、viewer 拒绝、`page_busy_by_human`、`yield_pending`、25 s egress timeout 都转成稳定错误码。
 - console/network 诊断对 page controller 可用（已实测 `Runtime.consoleAPICalled` 与 `Network.*`）；viewer 可读 DOM 与画面，但不能 `Runtime.enable`/`Network.enable`，因此 console/network 只在人持 controller 时由网关采集；监控页不再内置面板，诊断交给官方 DevTools。
+
+技能与传输：
+
+- 通过 SEP-2640（`io.modelcontextprotocol/skills`）暴露随包技能：`skills/list`、`skills/get` 与 `resources/read`（`skill://peri-browser/<skill>/SKILL.md`）；digest 为 `sha256:` 形式，size 与文件字节一致。
+- 默认 stdio；`--http <addr>` 启用 MCP Streamable HTTP，技能随同一服务器暴露，不另起端点。
+- `request_authorization` 只校验并返回授权 URL（`status: user_confirmation_required`、`url`、`message`、`instruction`），不导航页面、不依赖浏览器连接；模型随后调用既有 `AskUserQuestion` 把 URL 展示给用户，服务端不验证用户回答。
 
 ## 8. 生命周期
 
@@ -285,14 +291,19 @@ sequenceDiagram
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `KITESURF_CDP_URL` | 无（必须注入） | 共享实例的 CDP 端点 |
+| `PERI_BROWSER_CDP_URL` | 无 | 直接运行时覆盖 `KITESURF_CDP_URL`；空值忽略 |
 | `PERI_BROWSER_OWNER` | `peri-browser` | Browser 端点 owner；同一实例的所有会话共用 |
+| `PERI_BROWSER_SESSION_NAME` | 同 `PERI_BROWSER_OWNER` | 网关注册与监控使用的会话标签 |
 | `PERI_BROWSER_PROVISION_LOCK` | 运行目录下 `kitesurf-provision.lock` | 建页短连接的互斥锁 |
+| `PERI_BROWSER_PROVISION_LOCK_WAIT_MS` | 10000 | 等待建页锁的上限 |
+| `PERI_BROWSER_LOCK_STALE_MS` | 30000 | 建页锁的 stale 判定年龄 |
 | `PERI_BROWSER_CONNECT_TIMEOUT_MS` | 5000 | 页面与建页连接超时 |
 | `PERI_BROWSER_PAGE_WAIT_MS` | 30000 | 等待页面进入 `complete` 的上限 |
 | `PERI_BROWSER_IDLE_YIELD_MS` | 15000 | agent 空闲多久自动让出 controller |
 | `PERI_BROWSER_RECLAIM_WAIT_MS` | 2000 | agent 发起操作时等待网关交还的上限 |
 | `PERI_BROWSER_YIELD_TIMEOUT_MS` | 60000 | 手动接管等待让出的上限 |
 | `PERI_BROWSER_REQUEST_HUMAN_TIMEOUT_MS` | 300000 | `request_human` 等人响应的上限 |
+| `PERI_BROWSER_HTTP_ADDR` | 无 | 未传 `--http` 时的 Streamable HTTP 监听地址 |
 | `PERI_BROWSER_GATEWAY_BIN` | `peri-browser-gateway`（PATH） | 宿主拉起网关的命令 |
 | `PERI_BROWSER_GATEWAY_SOCK` | 运行目录 `peri-browser-gateway.sock` | MCP ↔ 网关 |
 | `PERI_BROWSER_GATEWAY_SECRET` | 运行目录下随机生成 | token 派生；重启保持 URL 不变 |
@@ -303,9 +314,13 @@ sequenceDiagram
 | `PERI_BROWSER_FRAME_MAX_WIDTH` | 1600 | 帧宽上限，跟随最大 viewer |
 | `PERI_BROWSER_MONITOR_TLS_CERT` / `_KEY` | 无 | 网关自己终止 TLS 时使用；否则由反代终止 |
 
+状态：`PERI_BROWSER_GATEWAY_BIN`、`PERI_BROWSER_MONITOR_TOKEN_TTL_MS`、`PERI_BROWSER_MONITOR_MAX_VIEWERS`、`PERI_BROWSER_FRAME_QUALITY`、`PERI_BROWSER_FRAME_MAX_WIDTH`、`PERI_BROWSER_MONITOR_TLS_CERT`/`_KEY` 是网关后续计划项，当前两个 crate 均未读取；其余表项已由所属进程读取（网关项由 `peri-browser-gateway` 读取，MCP 项由 `peri-browser` 读取）。
+
+传输：默认 stdio；`--http <addr>` 切换为 MCP Streamable HTTP，技能与工具在同一服务器暴露。`KITESURF_CDP_URL` 缺席时 `browser_status` 报告未连接，浏览器工具返回可操作的启动提示，进程不退出。
+
 ## 11. 实施顺序
 
-实现语言：Rust，与 `mcp-packages/*` 其余包一致；网关是独立二进制，与 MCP 共用 `peri-browser-cdp`。
+实现语言：Rust，与 `mcp-packages/*` 其余包一致；网关是独立二进制，CDP 层内联在 `peri-browser`，本分支不新增共享 crate。
 
 1. **页面会话骨架**：页面连接、`browser_status`、`list_pages`、`select_page`、`navigate_page`、`take_snapshot`、`take_screenshot`。
 2. **核心交互**：uid 映射、`click`/`fill`/`press_key`、`evaluate_script`、`wait_for`。
