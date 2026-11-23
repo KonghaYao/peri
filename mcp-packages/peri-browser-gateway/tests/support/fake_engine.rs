@@ -60,6 +60,7 @@ struct Data {
     reply_gate: Option<(String, Arc<Gate>)>,
     close_gate: Option<Arc<Gate>>,
     upgrade_gate: Option<Arc<Gate>>,
+    reset_on_close: bool,
 }
 
 #[derive(Default)]
@@ -153,6 +154,11 @@ impl Engine {
         let gate = Arc::new(Gate::default());
         self.shared.data.lock().unwrap().close_gate = Some(gate.clone());
         gate
+    }
+
+    /// 模拟 Kitesurf 0.5.2：收到 Close 后直接断开 TCP，不回复 Close 帧。
+    pub fn reset_on_close(&self) {
+        self.shared.data.lock().unwrap().reset_on_close = true;
     }
 
     pub fn gate_upgrade(&self) -> Arc<Gate> {
@@ -303,6 +309,10 @@ async fn drive(mut socket: WebSocket, mut guard: SocketGuard) {
                     tokio::select! { _ = shared.stop.cancelled() => break, _ = gate.pass() => {} }
                 }
                 guard.release();
+                if shared.data.lock().unwrap().reset_on_close {
+                    // 不 flush 排队中的 Close 应答，直接断开 TCP。
+                    return;
+                }
                 // tungstenite 在读 Close 时排队了应答；继续发送会 flush 它。
                 let _ = socket.flush().await;
                 break;

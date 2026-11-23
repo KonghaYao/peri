@@ -518,8 +518,8 @@ impl BrowserCore {
         let mut failure = None;
         let page_cleanup = futures::future::join_all(
             pages
-                .into_values()
-                .map(|page| async move { page.control.settle().await }),
+                .into_iter()
+                .map(|(id, page)| async move { (id, page.control.settle().await) }),
         );
         let task_cleanup = async {
             if let Some(ServiceTasks { idle, stream }) = tasks {
@@ -530,8 +530,14 @@ impl BrowserCore {
             Ok::<_, SettlementError>(())
         };
         let (page_results, task_result) = tokio::join!(page_cleanup, task_cleanup);
-        if page_results.into_iter().any(|x| x.is_err()) {
-            failure = Some(SettlementError::Unconfirmed);
+        for (id, result) in page_results {
+            if let Err(error) = result {
+                tracing::debug!(page = %id, ?error, "页面清理未确认");
+                failure = Some(SettlementError::Unconfirmed);
+            }
+        }
+        if let Err(error) = &task_result {
+            tracing::debug!(?error, "服务任务清理未确认");
         }
         task_result?;
         failure.map_or(Ok(()), Err)

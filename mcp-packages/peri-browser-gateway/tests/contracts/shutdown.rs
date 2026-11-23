@@ -260,6 +260,28 @@ async fn sdk_recovers_from_attached_post_404_without_replaying_a_write_against_o
     engine.shutdown().await
 }
 
+#[tokio::test]
+async fn delete_settles_when_the_engine_drops_tcp_without_a_close_reply() -> anyhow::Result<()> {
+    let mut engine = Engine::ephemeral().await?;
+    let mut gateway = Gateway::start(&engine.url(), &[]).await?;
+    let id = gateway.init().await?;
+    gateway.connect(&id, &engine.url()).await?;
+    gateway.new_page(&id).await?;
+    gateway.success(&id, "take_snapshot", json!({})).await?;
+    engine.reset_on_close();
+    assert_eq!(gateway.delete(&id).send().await?.status(), 202);
+    assert_eq!(gateway.count().await?, 0);
+    engine
+        .wait(|events| {
+            events.iter().any(
+                |event| matches!(event, Event::End(Role::Writer, target) if target == "target-1"),
+            )
+        })
+        .await?;
+    gateway.shutdown().await?;
+    engine.shutdown().await
+}
+
 async fn live_with_writer() -> anyhow::Result<(Engine, Gateway, String, Monitor)> {
     let engine = Engine::ephemeral().await?;
     let gateway = Gateway::start(&engine.url(), &[]).await?;

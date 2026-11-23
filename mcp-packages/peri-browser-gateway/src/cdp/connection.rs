@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use tokio_tungstenite::tungstenite::{error::ProtocolError, Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
@@ -132,6 +132,7 @@ impl Connection {
     pub async fn close(&mut self) -> Result<(), CdpError> {
         self.stop.cancel();
         if let Some(task) = self.task.as_mut() {
+            let running = !task.is_finished();
             let confirmed = match tokio::time::timeout(CLOSE_TIMEOUT, &mut *task).await {
                 Ok(result) => result.unwrap_or(false),
                 Err(_) => {
@@ -140,6 +141,7 @@ impl Connection {
                     false
                 }
             };
+            tracing::debug!(running, confirmed, url = %self.url, "关闭 CDP 连接");
             self.task = None;
             self.close_confirmed = Some(confirmed);
         }
@@ -187,8 +189,12 @@ async fn run(
                     if !send(&mut socket, None, &stop).await { break; }
                 }
                 Some(Ok(_)) => {},
-                None | Some(Err(WsError::ConnectionClosed | WsError::AlreadyClosed)) => return true,
-                Some(Err(_)) => return false,
+                None => return true,
+                Some(Err(error)) if socket_gone(&error) => return true,
+                Some(Err(error)) => {
+                    tracing::debug!(?error, "读取 CDP 失败");
+                    return false;
+                }
             },
             command = commands.recv(), if pending.len() < MAX_PENDING => {
                 let Some(command) = command else { break };
@@ -206,19 +212,33 @@ async fn run(
     drop(commands);
     drop(pending);
     drop(events);
-    if socket.send(Message::Close(None)).await.is_err() {
-        return false;
+    if let Err(error) = socket.send(Message::Close(None)).await {
+        tracing::debug!(?error, "发送 CDP Close 失败");
+        return socket_gone(&error);
     }
     while let Some(message) = socket.next().await {
         match message {
-            Ok(Message::Close(_)) | Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => {
-                return true
+            Ok(Message::Close(_)) => return true,
+            Err(error) if socket_gone(&error) => return true,
+            Err(error) => {
+                tracing::debug!(?error, "等待 CDP Close 失败");
+                return false;
             }
-            Err(_) => return false,
             _ => {}
         }
     }
     true
+}
+
+/// 对端断开即视为连接已释放：即使缺少 WebSocket Close 帧，socket 也不可再用。
+/// Kitesurf 0.5.2 收到 Close 后直接关闭 TCP，不回复 Close 帧。
+fn socket_gone(error: &WsError) -> bool {
+    matches!(
+        error,
+        WsError::ConnectionClosed
+            | WsError::AlreadyClosed
+            | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+    )
 }
 
 async fn send(socket: &mut Socket, message: Option<Message>, stop: &CancellationToken) -> bool {
