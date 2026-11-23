@@ -16,6 +16,13 @@ fn page() -> Arc<PageHandle> {
     )
 }
 
+#[test]
+fn controller_owner_follows_the_engine_controller_not_the_page_id() {
+    let page = page();
+    assert_eq!(page.controller_owner, "peri-browser");
+    assert_ne!(page.controller_owner, page.id);
+}
+
 #[tokio::test]
 async fn navigation_events_keep_only_a_title_that_matches_the_top_level_url() {
     let page = page();

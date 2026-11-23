@@ -30,7 +30,9 @@ pub(crate) struct PageHandle {
     pub target_id: String,
     pub endpoint: String,
     pub control: control::PageControl,
-    owner: String,
+    /// Engine page-controller identity. Kitesurf requires it to match the
+    /// browser controller's `owner`; a page-scoped id is rejected with 409.
+    controller_owner: String,
     connect_timeout: Duration,
     page_wait: Duration,
     meta: Mutex<PageMeta>,
@@ -50,7 +52,7 @@ impl PageHandle {
     ) -> Arc<Self> {
         let id = format!("p_{}", uuid::Uuid::new_v4().simple());
         Arc::new(Self {
-            owner: id.clone(),
+            controller_owner: config.owner.clone(),
             id,
             target_id,
             endpoint,

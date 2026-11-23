@@ -560,7 +560,7 @@ async fn connect_writer(
     let connected = Controller::connect_with_timeout(
         &page.endpoint,
         &page.target_id,
-        &page.owner,
+        &page.controller_owner,
         page.connect_timeout,
     )
     .await;
