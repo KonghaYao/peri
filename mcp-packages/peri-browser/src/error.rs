@@ -10,8 +10,12 @@ use crate::cdp::CdpError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
-    #[error("browser is not connected: no CDP endpoint configured")]
+    #[error("browser is not connected: call browser_connect first")]
     NotConnected,
+    #[error("browser endpoint {url} is not reachable: {reason}")]
+    ConnectFailed { url: String, reason: String },
+    #[error("already connected to {endpoint}; refusing to switch to {requested}")]
+    AlreadyConnected { endpoint: String, requested: String },
     #[error("no active page in this session")]
     NoActivePage,
     #[error("page {0:?} is not owned by this session")]
@@ -52,6 +56,8 @@ impl BrowserError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotConnected => "not_connected",
+            Self::ConnectFailed { .. } => "connect_failed",
+            Self::AlreadyConnected { .. } => "already_connected",
             Self::NoActivePage => "no_active_page",
             Self::PageNotFound(_) => "page_not_found",
             Self::AmbiguousPage(_) => "ambiguous_page",
@@ -76,7 +82,13 @@ impl BrowserError {
     pub fn hint(&self) -> Option<&'static str> {
         match self {
             Self::NotConnected => Some(
-                "Start Kitesurf and point KITESURF_CDP_URL at its ws:// endpoint (or set PERI_BROWSER_CDP_URL for a direct run), then restart this MCP server.",
+                "Call browser_status, then browser_connect with the URL from nextSteps.",
+            ),
+            Self::ConnectFailed { .. } => Some(
+                "Start kitesurf (for example `kitesurf serve --port 18971`) or check the URL, then call browser_connect again.",
+            ),
+            Self::AlreadyConnected { .. } => Some(
+                "Restart this MCP process to switch endpoints; call browser_connect with the current endpoint to reuse it.",
             ),
             Self::NoActivePage => Some("Call list_pages or new_page first."),
             Self::PageNotFound(_) => Some("Call list_pages to see the pages this session owns."),
@@ -153,7 +165,7 @@ fn cdp_hint(error: &CdpError) -> Option<&'static str> {
             "The page target is gone. Call list_pages; create a new page if it is no longer listed.",
         ),
         "cdp_connect" => Some(
-            "Check that Kitesurf is running and that KITESURF_CDP_URL points at its CDP endpoint.",
+            "Check that kitesurf is running and that browser_connect pointed at its CDP endpoint.",
         ),
         "another_controller" => Some(
             "Another writer owns this page. The monitor may be holding it; the agent reclaims it on the next operation, or use yield_page deliberately.",

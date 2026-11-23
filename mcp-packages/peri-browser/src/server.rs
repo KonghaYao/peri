@@ -51,8 +51,19 @@ impl BrowserMcpServer {
         vec![
             tool(
                 "browser_status",
-                "Report the shared browser endpoint, this session's pages, controller/ownership state and whether the monitor gateway is reachable. Call it first when browser tools fail.",
+                "Report connection, install and endpoint state plus this session's pages and monitor. Call it first when browser tools fail: while disconnected, follow nextSteps to install kitesurf, start it and connect.",
                 json!({"type": "object", "properties": {}}),
+            ),
+            tool(
+                "browser_connect",
+                "Attach this session to a running Kitesurf instance. Required before any page tool; browser_status is the only state source. Accepts http:// or ws:// loopback URLs with an explicit port and fixes the endpoint for the process lifetime.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "running Kitesurf endpoint, for example http://127.0.0.1:18971 or ws://127.0.0.1:18971/devtools/browser"}
+                    },
+                    "required": ["url"]
+                }),
             ),
             tool(
                 "list_pages",
@@ -246,6 +257,13 @@ impl BrowserMcpServer {
         let core = &self.core;
         let response = match name {
             "browser_status" => success(core.status().await),
+            "browser_connect" => {
+                let args: ConnectArgs = arguments(request)?;
+                match core.connect(&args.url).await {
+                    Ok(value) => success(value),
+                    Err(error) => failure(error),
+                }
+            }
             "list_pages" => success(core.list_pages().await),
             "select_page" => {
                 let args: SelectPageArgs = arguments(request)?;
@@ -547,11 +565,12 @@ impl ServerHandler for BrowserMcpServer {
         ServerConfig::new(capabilities)
             .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Browser control through a shared Kitesurf instance. Start with browser_status, \
-                 use take_snapshot before uid-based interaction, and take a new snapshot after \
-                 every navigation. A page starts as yours; the monitor may ask for it, in which \
-                 case page tools return page_busy_by_human until you reclaim it. Skills: \
-                 skill://peri-browser/browser-automation/SKILL.md and \
+                "Browser control through a Kitesurf instance. Start with browser_status; if it \
+                 reports connected: false, follow nextSteps and call browser_connect before any \
+                 page tool. Use take_snapshot before uid-based interaction, and take a new \
+                 snapshot after every navigation. A page starts as yours; the monitor may ask \
+                 for it, in which case page tools return page_busy_by_human until you reclaim \
+                 it. Skills: skill://peri-browser/browser-automation/SKILL.md and \
                  skill://peri-browser/debugging/SKILL.md.",
             )
     }
@@ -623,6 +642,12 @@ impl ServerHandler for BrowserMcpServer {
 }
 
 // -- argument types ---------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectArgs {
+    url: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

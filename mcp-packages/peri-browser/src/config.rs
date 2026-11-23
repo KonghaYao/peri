@@ -1,9 +1,9 @@
 //! Environment and command-line configuration for the `peri-browser` MCP server.
 //!
-//! The host injects `KITESURF_CDP_URL`; a direct run may override it with
-//! `PERI_BROWSER_CDP_URL`. There is deliberately no default endpoint: without
-//! one the server still starts, `browser_status` reports `connected: false` and
-//! browser tools return an actionable error (README §10).
+//! There is deliberately no endpoint configuration: the browser endpoint is
+//! chosen at runtime by `browser_connect`. The only install-related input is
+//! `KITESURF_INSTALL_DIR`, which locates an existing kitesurf install for
+//! `browser_status`; it never influences the connection (README §10).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -12,13 +12,13 @@ use std::time::Duration;
 use clap::Parser;
 
 /// Command-line surface. Everything else is environment-driven so the host can
-/// inject the endpoint without rebuilding the MCP configuration.
+/// inject paths without rebuilding the MCP configuration.
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "peri-browser",
     version,
     about = "MCP server exposing Kitesurf CDP pages as browser tools",
-    after_help = "Environment:\n  KITESURF_CDP_URL                  shared Kitesurf CDP endpoint (host-injected)\n  PERI_BROWSER_CDP_URL              direct-run override for KITESURF_CDP_URL\n  PERI_BROWSER_OWNER                page controller owner (default peri-browser)\n  PERI_BROWSER_SESSION_NAME         monitor session label (default: owner)\n  PERI_BROWSER_GATEWAY_SOCK         monitor gateway UDS (default: $TMPDIR/peri-browser-gateway.sock)\n  PERI_BROWSER_PROVISION_LOCK       create/close lock file (default: $TMPDIR/kitesurf-provision.lock)\n  PERI_BROWSER_CONNECT_TIMEOUT_MS   page and browser connection timeout (default 5000)\n  PERI_BROWSER_PAGE_WAIT_MS         page load wait bound (default 30000)\n  PERI_BROWSER_IDLE_YIELD_MS        idle hand-off delay (default 15000)\n  PERI_BROWSER_RECLAIM_WAIT_MS      reclaim wait (default 2000)\n  PERI_BROWSER_YIELD_TIMEOUT_MS     manual takeover wait (default 60000)\n  PERI_BROWSER_REQUEST_HUMAN_TIMEOUT_MS  hand-off timeout (default 300000)\n  PERI_BROWSER_PROVISION_LOCK_WAIT_MS    lock wait bound (default 10000)\n  PERI_BROWSER_LOCK_STALE_MS        stale lock age (default 30000)\n  PERI_BROWSER_HTTP_ADDR            same as --http when no flag is passed"
+    after_help = "Environment:\n  KITESURF_INSTALL_DIR              kitesurf install root reported by browser_status (default: $HOME/.kitesurf)\n  PERI_BROWSER_OWNER                page controller owner (default peri-browser)\n  PERI_BROWSER_SESSION_NAME         monitor session label (default: owner)\n  PERI_BROWSER_GATEWAY_SOCK         monitor gateway UDS (default: $TMPDIR/peri-browser-gateway.sock)\n  PERI_BROWSER_PROVISION_LOCK       create/close lock file (default: $TMPDIR/kitesurf-provision.lock)\n  PERI_BROWSER_CONNECT_TIMEOUT_MS   page and browser connection timeout (default 5000)\n  PERI_BROWSER_PAGE_WAIT_MS         page load wait bound (default 30000)\n  PERI_BROWSER_IDLE_YIELD_MS        idle hand-off delay (default 15000)\n  PERI_BROWSER_RECLAIM_WAIT_MS      reclaim wait (default 2000)\n  PERI_BROWSER_YIELD_TIMEOUT_MS     manual takeover wait (default 60000)\n  PERI_BROWSER_REQUEST_HUMAN_TIMEOUT_MS  hand-off timeout (default 300000)\n  PERI_BROWSER_PROVISION_LOCK_WAIT_MS    lock wait bound (default 10000)\n  PERI_BROWSER_LOCK_STALE_MS        stale lock age (default 30000)\n  PERI_BROWSER_HTTP_ADDR            same as --http when no flag is passed"
 )]
 pub struct Cli {
     /// Serve MCP Streamable HTTP at ADDR instead of stdio (for example 127.0.0.1:8832)
@@ -35,14 +35,17 @@ pub enum ConfigError {
     EmptyValue { key: &'static str },
     #[error("invalid HTTP listen address: {0}")]
     InvalidHttpAddr(String),
+    #[error("HOME is not set; set KITESURF_INSTALL_DIR to name the kitesurf install root")]
+    MissingHome,
 }
 
 /// Effective browser MCP configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserConfig {
-    pub cdp_url: Option<String>,
     pub owner: String,
     pub session_name: String,
+    /// Install root used by `browser_status` to locate kitesurf.
+    pub kitesurf_home: PathBuf,
     pub gateway_sock: Option<PathBuf>,
     pub provision_lock: PathBuf,
     pub provision_lock_wait: Duration,
@@ -67,17 +70,19 @@ impl BrowserConfig {
         lookup: impl Fn(&str) -> Option<String>,
         http: Option<SocketAddr>,
     ) -> Result<Self, ConfigError> {
-        let cdp_url = lookup("PERI_BROWSER_CDP_URL")
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| lookup("KITESURF_CDP_URL"))
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-
         let owner = string_with_default(&lookup, "PERI_BROWSER_OWNER", "peri-browser")?;
         let session_name = lookup("PERI_BROWSER_SESSION_NAME")
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| owner.clone());
+
+        let kitesurf_home = match non_empty(&lookup, "KITESURF_INSTALL_DIR") {
+            Some(dir) => PathBuf::from(dir),
+            None => match non_empty(&lookup, "HOME") {
+                Some(home) => PathBuf::from(home).join(".kitesurf"),
+                None => return Err(ConfigError::MissingHome),
+            },
+        };
 
         let temp = std::env::temp_dir();
         let gateway_sock = lookup("PERI_BROWSER_GATEWAY_SOCK")
@@ -107,9 +112,9 @@ impl BrowserConfig {
         };
 
         Ok(Self {
-            cdp_url,
             owner,
             session_name,
+            kitesurf_home,
             gateway_sock,
             provision_lock,
             provision_lock_wait: millis(&lookup, "PERI_BROWSER_PROVISION_LOCK_WAIT_MS", 10_000)?,
@@ -127,6 +132,12 @@ impl BrowserConfig {
             http,
         })
     }
+}
+
+fn non_empty(lookup: &impl Fn(&str) -> Option<String>, key: &'static str) -> Option<String> {
+    lookup(key)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn string_with_default(

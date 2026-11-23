@@ -26,9 +26,8 @@ async fn main() -> anyhow::Result<()> {
     let core = BrowserCore::new(config);
     tracing::info!(
         session = %core.session_id(),
-        endpoint = ?core.config.cdp_url,
         transport = if http.is_some() { "http" } else { "stdio" },
-        "peri-browser starting"
+        "peri-browser starting; call browser_status and browser_connect to attach a browser"
     );
 
     if let Some(address) = http {

@@ -5,21 +5,37 @@ use std::time::Duration;
 
 use super::*;
 
+/// `HOME` is always present in a real process; the helper supplies one so the
+/// install-root default is exercised instead of an error.
 fn config(pairs: &[(&str, &str)], http: Option<SocketAddr>) -> Result<BrowserConfig, ConfigError> {
+    let mut map: HashMap<String, String> = [("HOME".to_owned(), "/home/tester".to_owned())]
+        .into_iter()
+        .collect();
+    for (key, value) in pairs {
+        map.insert((*key).to_owned(), (*value).to_owned());
+    }
+    BrowserConfig::from_lookup(move |key| map.get(key).cloned(), http)
+}
+
+/// The same read without the implicit `HOME`, for the missing-home cases.
+fn bare_config(pairs: &[(&str, &str)]) -> Result<BrowserConfig, ConfigError> {
     let map: HashMap<String, String> = pairs
         .iter()
         .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
         .collect();
-    BrowserConfig::from_lookup(move |key| map.get(key).cloned(), http)
+    BrowserConfig::from_lookup(move |key| map.get(key).cloned(), None)
 }
 
 #[test]
-fn an_empty_environment_has_no_endpoint_and_safe_defaults() {
+fn an_empty_environment_starts_without_an_endpoint_and_safe_defaults() {
     let config = config(&[], None).expect("defaults parse");
 
-    assert_eq!(config.cdp_url, None);
     assert_eq!(config.owner, "peri-browser");
     assert_eq!(config.session_name, "peri-browser");
+    assert_eq!(
+        config.kitesurf_home,
+        PathBuf::from("/home/tester/.kitesurf")
+    );
     let socket = config.gateway_sock.expect("gateway socket default");
     assert_eq!(socket.file_name().unwrap(), "peri-browser-gateway.sock");
     assert!(socket.starts_with(std::env::temp_dir()));
@@ -39,33 +55,57 @@ fn an_empty_environment_has_no_endpoint_and_safe_defaults() {
 }
 
 #[test]
-fn the_shared_endpoint_is_read_from_kitesurf_and_overridable() {
-    let shared = config(&[("KITESURF_CDP_URL", " ws://127.0.0.1:8827 ")], None).unwrap();
-    assert_eq!(shared.cdp_url.as_deref(), Some("ws://127.0.0.1:8827"));
-
-    let overridden = config(
+fn the_removed_endpoint_environment_has_no_effect() {
+    let baseline = config(&[], None).expect("defaults parse");
+    for pairs in [
+        &[("KITESURF_CDP_URL", "ws://127.0.0.1:8827")][..],
+        &[("PERI_BROWSER_CDP_URL", "ws://127.0.0.1:8831")][..],
         &[
             ("KITESURF_CDP_URL", "ws://127.0.0.1:8827"),
             ("PERI_BROWSER_CDP_URL", "ws://127.0.0.1:8831"),
-        ],
-        None,
-    )
-    .unwrap();
-    assert_eq!(overridden.cdp_url.as_deref(), Some("ws://127.0.0.1:8831"));
+        ][..],
+    ] {
+        let settings = config(pairs, None).expect("the endpoint env is ignored");
+        assert_eq!(
+            settings, baseline,
+            "{pairs:?} must not change any configuration"
+        );
+    }
+}
 
-    let blank_override = config(
+#[test]
+fn the_install_dir_only_changes_the_install_root() {
+    let baseline = config(&[], None).expect("defaults parse");
+    let overridden =
+        config(&[("KITESURF_INSTALL_DIR", "/opt/kitesurf")], None).expect("install dir is valid");
+    assert_eq!(overridden.kitesurf_home, PathBuf::from("/opt/kitesurf"));
+    let mut expected = baseline.clone();
+    expected.kitesurf_home = PathBuf::from("/opt/kitesurf");
+    assert_eq!(overridden, expected);
+
+    // It is a path setting, not a connection setting: endpoint envs stay inert.
+    let with_endpoint = config(
         &[
+            ("KITESURF_INSTALL_DIR", "/opt/kitesurf"),
             ("KITESURF_CDP_URL", "ws://127.0.0.1:8827"),
-            ("PERI_BROWSER_CDP_URL", "   "),
         ],
         None,
     )
-    .unwrap();
+    .expect("endpoint env is ignored");
+    assert_eq!(with_endpoint, overridden);
+}
+
+#[test]
+fn a_missing_home_is_an_error_unless_the_install_dir_is_given() {
+    assert_eq!(bare_config(&[]).unwrap_err(), ConfigError::MissingHome);
     assert_eq!(
-        blank_override.cdp_url.as_deref(),
-        Some("ws://127.0.0.1:8827"),
-        "a blank override falls back instead of clearing the endpoint"
+        bare_config(&[("HOME", "   ")]).unwrap_err(),
+        ConfigError::MissingHome
     );
+
+    let pinned = bare_config(&[("KITESURF_INSTALL_DIR", "/opt/kitesurf")])
+        .expect("an explicit install dir does not need HOME");
+    assert_eq!(pinned.kitesurf_home, PathBuf::from("/opt/kitesurf"));
 }
 
 #[test]

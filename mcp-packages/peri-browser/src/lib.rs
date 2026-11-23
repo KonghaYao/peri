@@ -18,6 +18,7 @@
 //! - [`diagnostics`]: per-page console/network ring buffers.
 //! - [`provision`]: machine-local create/close lock and the short browser
 //!   connection.
+//! - [`onboarding`]: runtime endpoint normalization and install guidance.
 //! - [`gateway`]: the newline-delimited registry client.
 //! - [`core`]: session state and gateway orchestration.
 //! - [`skills`]: bundled SEP-2640 skills.
@@ -32,6 +33,7 @@ pub mod error;
 pub mod gateway;
 pub mod input;
 pub mod keys;
+pub mod onboarding;
 pub mod page;
 pub mod provision;
 pub mod ring;

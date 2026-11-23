@@ -13,9 +13,9 @@ type GatewayStream = BufReader<tokio::net::UnixStream>;
 
 fn config(sock: Option<PathBuf>) -> BrowserConfig {
     BrowserConfig {
-        cdp_url: Some(TEST_CDP_URL.to_owned()),
         owner: "peri-browser-test".to_owned(),
         session_name: "test-session".to_owned(),
+        kitesurf_home: std::env::temp_dir().join("peri-browser-gateway-test-kitesurf"),
         gateway_sock: sock,
         provision_lock: std::env::temp_dir().join("peri-browser-gateway-test.lock"),
         provision_lock_wait: Duration::from_millis(100),
@@ -189,6 +189,87 @@ async fn without_a_socket_nothing_is_registered() {
 }
 
 #[tokio::test]
+async fn the_gateway_waits_for_the_first_browser_connect() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sock = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&sock).expect("bind gateway socket");
+
+    let (inbox, _receiver) = mpsc::unbounded_channel();
+    let client = GatewayClient::new(&config(Some(sock)), "session-1", inbox);
+    assert!(!client.is_configured());
+    assert_eq!(client.endpoint(), None);
+
+    // start() is a no-op while the endpoint is unknown: the monitor must never
+    // register a session without a browser to show.
+    client.start();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), listener.accept())
+            .await
+            .is_err(),
+        "no connection before browser_connect"
+    );
+
+    // The successful connect publishes the endpoint and starts the writer. The
+    // register frame carries the real endpoint and the state accumulated while
+    // the gateway was idle.
+    client.update_state(AgentState::Driving);
+    client.set_endpoint(TEST_CDP_URL);
+    client.start();
+    let mut gateway = connect(&listener).await;
+    let register = next_frame(&mut gateway).await;
+    assert_eq!(register["type"], "register");
+    assert_eq!(register["cdpUrl"], TEST_CDP_URL);
+    assert_eq!(register["state"], "driving");
+    drop(gateway);
+}
+
+#[tokio::test]
+async fn the_monitor_waits_for_connect_and_then_reports_connected() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sock = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&sock).expect("bind gateway socket");
+
+    // A loopback engine the connect probe accepts. It answers the two JSON
+    // surfaces only; no page is created here.
+    let app = axum::Router::new()
+        .route(
+            "/json/version",
+            axum::routing::get(|| async { axum::Json(json!({"Browser": "Kitesurf/0.5.4"})) }),
+        )
+        .route(
+            "/json/list",
+            axum::routing::get(|| async { axum::Json(json!([])) }),
+        );
+    let engine = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake engine");
+    let address = engine.local_addr().expect("engine address");
+    let engine_task = tokio::spawn(async move {
+        let _ = axum::serve(engine, app).await;
+    });
+
+    let core = crate::core::BrowserCore::new(config(Some(sock)));
+    assert_eq!(
+        core.status().await["monitor"],
+        "waiting_for_connect",
+        "a configured socket waits for the first browser_connect"
+    );
+
+    core.connect(&format!("http://{address}"))
+        .await
+        .expect("the fake engine answers /json/version");
+    let mut gateway = connect(&listener).await;
+    let register = next_frame(&mut gateway).await;
+    assert_eq!(
+        register["cdpUrl"],
+        format!("ws://{address}/devtools/browser")
+    );
+    assert_eq!(core.status().await["monitor"], "connected");
+
+    engine_task.abort();
+}
+
+#[tokio::test]
 async fn registers_and_replays_state_after_a_reconnect() {
     let dir = tempfile::tempdir().expect("temp dir");
     let sock = dir.path().join("gateway.sock");
@@ -196,7 +277,11 @@ async fn registers_and_replays_state_after_a_reconnect() {
 
     let (inbox, _receiver) = mpsc::unbounded_channel();
     let client = GatewayClient::new(&config(Some(sock.clone())), "session-1", inbox);
+    assert!(!client.is_configured(), "no endpoint until browser_connect");
+    assert_eq!(client.endpoint(), None);
+    client.set_endpoint(TEST_CDP_URL);
     assert!(client.is_configured());
+    assert_eq!(client.endpoint().as_deref(), Some(TEST_CDP_URL));
     client.start();
 
     let mut first = connect(&listener).await;
@@ -242,6 +327,7 @@ async fn malformed_known_frames_are_not_delivered() {
 
     let (inbox, mut receiver) = mpsc::unbounded_channel();
     let client = GatewayClient::new(&config(Some(sock.clone())), "session-1", inbox);
+    client.set_endpoint(TEST_CDP_URL);
     client.start();
 
     let mut gateway = connect(&listener).await;
@@ -283,6 +369,7 @@ async fn a_missing_socket_does_not_stop_the_client() {
         "session-1",
         inbox,
     );
+    client.set_endpoint(TEST_CDP_URL);
     client.start();
     client.update_state(AgentState::Driving);
     tokio::time::sleep(Duration::from_millis(50)).await;

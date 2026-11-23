@@ -140,11 +140,7 @@ impl PageHandle {
         if self.controller.lock().await.is_some() {
             return Ok(());
         }
-        let cdp_url = core
-            .config
-            .cdp_url
-            .clone()
-            .ok_or(BrowserError::NotConnected)?;
+        let cdp_url = core.endpoint().await?;
 
         if self.is_yielded() && core.gateway.is_configured() {
             core.gateway.reclaim(&self.id);
@@ -198,11 +194,7 @@ impl PageHandle {
         if self.controller.lock().await.is_some() {
             return Ok(true);
         }
-        let cdp_url = core
-            .config
-            .cdp_url
-            .clone()
-            .ok_or(BrowserError::NotConnected)?;
+        let cdp_url = core.endpoint().await?;
         match Controller::connect(&cdp_url, &self.target_id, &core.config.owner).await {
             Ok(controller) => {
                 let _ = controller.command("Page.enable", json!({})).await;

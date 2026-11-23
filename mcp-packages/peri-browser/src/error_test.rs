@@ -6,6 +6,22 @@ use super::*;
 #[test]
 fn every_local_variant_has_a_stable_code() {
     assert_eq!(BrowserError::NotConnected.code(), "not_connected");
+    assert_eq!(
+        BrowserError::ConnectFailed {
+            url: "ws://127.0.0.1:18971/devtools/browser".to_owned(),
+            reason: "connection refused".to_owned(),
+        }
+        .code(),
+        "connect_failed"
+    );
+    assert_eq!(
+        BrowserError::AlreadyConnected {
+            endpoint: "ws://127.0.0.1:18971/devtools/browser".to_owned(),
+            requested: "ws://127.0.0.1:9300/devtools/browser".to_owned(),
+        }
+        .code(),
+        "already_connected"
+    );
     assert_eq!(BrowserError::NoActivePage.code(), "no_active_page");
     assert_eq!(
         BrowserError::PageNotFound("p1".to_owned()).code(),
@@ -125,7 +141,37 @@ fn transport_failures_have_their_own_codes() {
 fn render_prefixes_the_code_and_appends_the_hint() {
     let rendered = BrowserError::NotConnected.render();
     assert!(rendered.starts_with("not_connected: "), "{rendered}");
-    assert!(rendered.contains("KITESURF_CDP_URL"), "{rendered}");
+    assert!(rendered.contains("browser_status"), "{rendered}");
+    assert!(rendered.contains("browser_connect"), "{rendered}");
+    assert!(
+        !rendered.contains("CDP_URL"),
+        "the removed endpoint env must not appear: {rendered}"
+    );
+
+    let refused = BrowserError::ConnectFailed {
+        url: "ws://127.0.0.1:18971/devtools/browser".to_owned(),
+        reason: "HTTP 404".to_owned(),
+    }
+    .render();
+    assert!(refused.starts_with("connect_failed: "), "{refused}");
+    assert!(refused.contains("kitesurf serve"), "{refused}");
+    assert!(refused.contains("browser_connect"), "{refused}");
+
+    let occupied = BrowserError::AlreadyConnected {
+        endpoint: "ws://127.0.0.1:18971/devtools/browser".to_owned(),
+        requested: "ws://127.0.0.1:9300/devtools/browser".to_owned(),
+    }
+    .render();
+    assert!(occupied.starts_with("already_connected: "), "{occupied}");
+    assert!(occupied.contains("Restart this MCP process"), "{occupied}");
+    assert!(
+        occupied.contains("ws://127.0.0.1:18971/devtools/browser"),
+        "the current endpoint is named: {occupied}"
+    );
+    assert!(
+        occupied.contains("ws://127.0.0.1:9300/devtools/browser"),
+        "the refused endpoint is named: {occupied}"
+    );
 
     let no_hint = BrowserError::InvalidArgument {
         name: "uid".to_owned(),
@@ -133,6 +179,22 @@ fn render_prefixes_the_code_and_appends_the_hint() {
     }
     .render();
     assert_eq!(no_hint, "invalid_argument: invalid argument uid: missing");
+}
+
+#[test]
+fn connection_hints_never_mention_the_removed_endpoint_environment() {
+    let transport = BrowserError::from(CdpError::Connect {
+        url: "ws://127.0.0.1:1/devtools/browser".to_owned(),
+        source: tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )),
+    });
+    assert_eq!(transport.code(), "cdp_connect");
+    let hint = transport.hint().expect("cdp_connect has a hint");
+    assert!(hint.contains("kitesurf"), "{hint}");
+    assert!(hint.contains("browser_connect"), "{hint}");
+    assert!(!hint.contains("CDP_URL"), "{hint}");
 }
 
 #[test]

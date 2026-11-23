@@ -1,9 +1,11 @@
-//! Session state: pages, the active page, agent lifecycle and the gateway
-//! bridge.
+//! Session state: pages, the active page, the runtime browser endpoint, agent
+//! lifecycle and the gateway bridge.
 //!
 //! The core owns no browser connection itself. Page connections live in
 //! [`PageHandle`]; this module coordinates them, answers tool calls, and turns
-//! gateway messages into page operations (README §5, §6.2, §8).
+//! gateway messages into page operations (README §5, §6.2, §8). The endpoint is
+//! chosen at runtime by [`BrowserCore::connect`] and lives in memory only: a
+//! restart starts disconnected.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,8 +21,9 @@ use crate::error::BrowserError;
 use crate::gateway::{
     AgentState, BrowserCommand, GatewayClient, HumanStatus, Incoming, PageRef, YieldReason,
 };
+use crate::onboarding;
 use crate::page::{PageHandle, Screenshot};
-use crate::provision::{close_target, create_target, probe_engine, ProvisionSettings};
+use crate::provision::{close_target, create_target, probe_engine, EngineProbe, ProvisionSettings};
 
 /// Poll interval while a manual yield waits for the controller to come back.
 const YIELD_POLL: Duration = Duration::from_millis(250);
@@ -44,6 +47,9 @@ pub struct BrowserCore {
     pub config: Arc<BrowserConfig>,
     pub gateway: GatewayClient,
     session_id: String,
+    /// Canonical endpoint of the connected instance; `None` until the first
+    /// successful `browser_connect`.
+    endpoint: Mutex<Option<String>>,
     pages: Mutex<BTreeMap<String, Arc<PageHandle>>>,
     active: Mutex<Option<String>>,
     state: Mutex<AgentState>,
@@ -52,8 +58,9 @@ pub struct BrowserCore {
 }
 
 impl BrowserCore {
-    /// Creates the session and starts the gateway writer and dispatcher. Must
-    /// run inside a Tokio runtime.
+    /// Creates the session. The gateway writer is not started yet: it first
+    /// registers after `browser_connect` supplied a real endpoint. Must run
+    /// inside a Tokio runtime.
     #[must_use]
     pub fn new(config: BrowserConfig) -> Arc<Self> {
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -63,13 +70,13 @@ impl BrowserCore {
             config: Arc::new(config),
             gateway,
             session_id,
+            endpoint: Mutex::new(None),
             pages: Mutex::new(BTreeMap::new()),
             active: Mutex::new(None),
             state: Mutex::new(AgentState::Idle),
             human: Mutex::new(None),
             idle_generation: AtomicU64::new(0),
         });
-        core.gateway.start();
         let weak = Arc::downgrade(&core);
         tokio::spawn(async move { dispatch(weak, inbox_rx).await });
         core
@@ -78,6 +85,70 @@ impl BrowserCore {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Canonical endpoint of the connected instance.
+    ///
+    /// # Errors
+    ///
+    /// [`BrowserError::NotConnected`] before the first `browser_connect`.
+    pub async fn endpoint(&self) -> Result<String, BrowserError> {
+        self.endpoint
+            .lock()
+            .await
+            .clone()
+            .ok_or(BrowserError::NotConnected)
+    }
+
+    /// Connects to the runtime endpoint and registers the monitor gateway.
+    ///
+    /// The first success fixes the endpoint for the process lifetime. Calling
+    /// again with the same canonical URL is an idempotent success; a different
+    /// URL is refused with [`BrowserError::AlreadyConnected`] rather than
+    /// silently replacing an instance that already owns pages.
+    ///
+    /// # Errors
+    ///
+    /// [`BrowserError::InvalidArgument`] for a non-loopback/TLS/portless URL,
+    /// [`BrowserError::ConnectFailed`] when the probe cannot reach the
+    /// endpoint, [`BrowserError::AlreadyConnected`] for a second endpoint.
+    pub async fn connect(&self, raw_url: &str) -> Result<Value, BrowserError> {
+        let canonical = onboarding::normalize_endpoint(raw_url)?;
+        // Probe before touching the state: an unreachable URL leaves the
+        // current connection exactly as it was.
+        let probe = probe_engine(&canonical, self.config.connect_timeout).await;
+        if !probe.reachable {
+            return Err(connect_failed(&canonical, &probe));
+        }
+        let mut slot = self.endpoint.lock().await;
+        match slot.as_deref() {
+            Some(current) if current == canonical => {
+                drop(slot);
+                return Ok(json!({
+                    "connected": true,
+                    "alreadyConnected": true,
+                    "endpoint": canonical,
+                    "engine": engine_json(&probe),
+                }));
+            }
+            Some(current) => {
+                return Err(BrowserError::AlreadyConnected {
+                    endpoint: current.to_owned(),
+                    requested: canonical,
+                });
+            }
+            None => {}
+        }
+        *slot = Some(canonical.clone());
+        drop(slot);
+        self.gateway.set_endpoint(&canonical);
+        self.gateway.start();
+        debug!(endpoint = %canonical, "browser endpoint connected");
+        Ok(json!({
+            "connected": true,
+            "endpoint": canonical,
+            "engine": engine_json(&probe),
+        }))
     }
 
     /// Cancels a pending idle-yield timer and arms a new one. Called after each
@@ -125,25 +196,55 @@ impl BrowserCore {
         }
     }
 
-    /// Reports instance, pages and ownership (README §7 `browser_status`).
+    /// Reports connection, install, endpoint and ownership state (README §7
+    /// `browser_status`).
     pub async fn status(&self) -> Value {
-        let probe = match self.config.cdp_url.as_deref() {
+        let endpoint = self.endpoint.lock().await.clone();
+        let probe = match endpoint.as_deref() {
             Some(url) => Some(probe_engine(url, self.config.connect_timeout).await),
             None => None,
         };
+        let reachable = probe.as_ref().is_some_and(|probe| probe.reachable);
+        // Probe the recommendation only while disconnected: the model uses it
+        // to decide whether kitesurf still needs to be started.
+        let listening = if reachable {
+            None
+        } else {
+            Some(onboarding::probe_recommended(self.config.connect_timeout).await)
+        };
+        let install =
+            onboarding::detect_install(&self.config.kitesurf_home, &|key| std::env::var(key).ok());
+        let platform = onboarding::platform();
+        let next_steps = onboarding::next_steps(
+            install.installed,
+            listening.unwrap_or(false),
+            endpoint.as_deref(),
+            reachable,
+        );
         let pages = self.page_views().await;
         let active = self.active.lock().await.clone();
         let state = *self.state.lock().await;
-        let monitor = if !self.gateway.is_configured() {
-            "unavailable"
-        } else if self.gateway.is_connected() {
+        // The gateway is deliberately not started before `browser_connect`, so
+        // a configured socket without an endpoint means the monitor is waiting
+        // for the browser, not broken. After a connect, a missing gateway is the
+        // pre-existing "unavailable" state.
+        let monitor = if self.gateway.is_connected() {
             "connected"
+        } else if endpoint.is_none() && self.gateway.sock_path().is_some() {
+            "waiting_for_connect"
         } else {
             "unavailable"
         };
         json!({
-            "connected": probe.as_ref().is_some_and(|probe| probe.reachable),
-            "endpoint": self.config.cdp_url,
+            "connected": reachable,
+            "endpoint": endpoint,
+            "platform": platform.to_json(),
+            "kitesurf": install.to_json(),
+            "recommendedEndpoint": {
+                "url": onboarding::recommended_endpoint(),
+                "listening": listening,
+            },
+            "nextSteps": next_steps,
             "owner": self.config.owner,
             "sessionId": self.session_id,
             "state": state.as_str(),
@@ -189,7 +290,7 @@ impl BrowserCore {
     /// Creates a target through the machine-local create lock and keeps the new
     /// page active (README §7 `new_page`).
     pub async fn new_page(&self, url: Option<&str>) -> Result<Value, BrowserError> {
-        let settings = self.provision_settings()?;
+        let settings = self.provision_settings().await?;
         let target_id = create_target(&settings).await?;
         let page = PageHandle::new(target_id.clone());
         self.pages
@@ -218,7 +319,7 @@ impl BrowserCore {
     /// Closes a target through the browser endpoint and forgets the page.
     pub async fn close_page(&self, page_id: Option<&str>) -> Result<Value, BrowserError> {
         let page = self.resolve_page(page_id).await?;
-        let settings = self.provision_settings()?;
+        let settings = self.provision_settings().await?;
         page.detach().await?;
         close_target(&settings, &page.target_id).await?;
         let mut pages = self.pages.lock().await;
@@ -430,14 +531,9 @@ impl BrowserCore {
         self.gateway.update_state(state);
     }
 
-    fn provision_settings(&self) -> Result<ProvisionSettings, BrowserError> {
-        let cdp_url = self
-            .config
-            .cdp_url
-            .clone()
-            .ok_or(BrowserError::NotConnected)?;
+    async fn provision_settings(&self) -> Result<ProvisionSettings, BrowserError> {
         Ok(ProvisionSettings {
-            cdp_url,
+            cdp_url: self.endpoint().await?,
             owner: self.config.owner.clone(),
             lock: self.config.provision_lock.clone(),
             lock_wait: self.config.provision_lock_wait,
@@ -630,8 +726,29 @@ impl std::fmt::Debug for BrowserCore {
         formatter
             .debug_struct("BrowserCore")
             .field("session_id", &self.session_id)
-            .field("endpoint", &self.config.cdp_url)
+            .field(
+                "endpoint",
+                &self
+                    .endpoint
+                    .try_lock()
+                    .ok()
+                    .and_then(|endpoint| endpoint.clone()),
+            )
             .finish_non_exhaustive()
+    }
+}
+
+fn engine_json(probe: &EngineProbe) -> Value {
+    json!({"version": probe.version, "pageCount": probe.page_count})
+}
+
+fn connect_failed(url: &str, probe: &EngineProbe) -> BrowserError {
+    BrowserError::ConnectFailed {
+        url: url.to_owned(),
+        reason: probe
+            .error
+            .clone()
+            .unwrap_or_else(|| "the endpoint did not answer /json/version".to_owned()),
     }
 }
 

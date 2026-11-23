@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use rmcp::model::{
 use rmcp::service::{serve_directly, RoleClient, RoleServer, RunningService, ServiceError};
 use rmcp::ServerHandler;
 use serde_json::{json, Map, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -23,18 +25,14 @@ const AUTHORIZE_URL: &str = "https://example.test/oauth/authorize?client=peri";
 const AUTHORIZE_REASON: &str = "connect the deployment account";
 
 fn config() -> BrowserConfig {
-    config_with(None)
-}
-
-fn config_with(cdp_url: Option<String>) -> BrowserConfig {
     let lock = std::env::temp_dir().join(format!(
         "peri-browser-server-test-{}.lock",
         uuid::Uuid::new_v4()
     ));
     BrowserConfig {
-        cdp_url,
         owner: "peri-browser-test".to_owned(),
         session_name: "test-session".to_owned(),
+        kitesurf_home: std::env::temp_dir().join("peri-browser-server-test-kitesurf"),
         gateway_sock: None,
         provision_lock: lock,
         provision_lock_wait: Duration::from_millis(100),
@@ -121,6 +119,7 @@ fn tool_surface_matches_the_readme() {
         names,
         vec![
             "browser_status",
+            "browser_connect",
             "list_pages",
             "select_page",
             "new_page",
@@ -366,6 +365,124 @@ async fn tool_failures_are_results_with_stable_codes() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn browser_status_reports_the_onboarding_state() -> anyhow::Result<()> {
+    with_client(|client| async move {
+        let status = call(&client, "browser_status", json!({})).await?;
+        assert_eq!(status.is_error, Some(false), "{status:?}");
+        let status = status.structured_content.expect("structured status");
+        assert_eq!(status["connected"], false);
+        assert_eq!(status["platform"]["os"], std::env::consts::OS);
+        assert_eq!(status["platform"]["arch"], std::env::consts::ARCH);
+        assert!(status["platform"]["supported"].is_boolean());
+        assert!(status["kitesurf"]["installCommand"]
+            .as_str()
+            .is_some_and(|command| command.contains("install-kitesurf.sh")));
+        assert_eq!(
+            status["recommendedEndpoint"]["url"],
+            "http://127.0.0.1:18971"
+        );
+        assert!(status["recommendedEndpoint"]["listening"].is_boolean());
+        assert!(
+            status["nextSteps"]
+                .as_array()
+                .is_some_and(|steps| !steps.is_empty()),
+            "a disconnected session always explains the next step: {status:?}"
+        );
+        assert_eq!(status["monitor"], "unavailable");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn browser_connect_validates_then_reports_an_unreachable_endpoint() -> anyhow::Result<()> {
+    with_client(|client| async move {
+        for url in [
+            "https://127.0.0.1:18971",
+            "wss://localhost:18971",
+            "http://127.0.0.1",
+            "http://example.test:18971",
+            "file:///tmp/kitesurf.sock",
+        ] {
+            let result = call(&client, "browser_connect", json!({"url": url})).await?;
+            assert_eq!(error_code(&result), "invalid_argument", "{url}");
+        }
+
+        let result = call(
+            &client,
+            "browser_connect",
+            json!({"url": "http://127.0.0.1:1"}),
+        )
+        .await?;
+        assert_eq!(error_code(&result), "connect_failed");
+        assert!(
+            result.structured_content.expect("error content")["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("browser_connect")),
+            "the failure explains how to retry"
+        );
+
+        let status = call(&client, "browser_status", json!({})).await?;
+        let status = status.structured_content.expect("structured status");
+        assert_eq!(status["connected"], false);
+        assert!(
+            status["endpoint"].is_null(),
+            "a failed connect changes nothing"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn browser_connect_attaches_once_and_refuses_a_second_endpoint() -> anyhow::Result<()> {
+    let (address, server, _seen) = fake_cdp().await;
+    let other = fake_cdp().await;
+    let other_address = other.0;
+    with_client(move |client| async move {
+        let url = format!("http://{address}");
+        let connected = call(&client, "browser_connect", json!({"url": url})).await?;
+        assert_eq!(connected.is_error, Some(false), "{connected:?}");
+        let value = connected.structured_content.expect("connect result");
+        assert_eq!(value["connected"], true);
+        assert_eq!(
+            value["endpoint"],
+            format!("ws://{address}/devtools/browser")
+        );
+        assert_eq!(value["engine"]["version"]["Browser"], "Kitesurf/0.5.4");
+
+        let again = call(&client, "browser_connect", json!({"url": url})).await?;
+        assert_eq!(again.is_error, Some(false), "{again:?}");
+        assert_eq!(
+            again.structured_content.expect("idempotent result")["alreadyConnected"],
+            true
+        );
+
+        let refused = call(
+            &client,
+            "browser_connect",
+            json!({"url": format!("http://{other_address}")}),
+        )
+        .await?;
+        assert_eq!(error_code(&refused), "already_connected");
+
+        let status = call(&client, "browser_status", json!({})).await?;
+        let status = status.structured_content.expect("structured status");
+        assert_eq!(status["connected"], true);
+        assert_eq!(
+            status["endpoint"],
+            format!("ws://{address}/devtools/browser")
+        );
+        assert_eq!(status["nextSteps"].as_array().map(Vec::len), Some(0));
+        Ok(())
+    })
+    .await?;
+    other.1.abort();
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn unknown_tools_and_arguments_are_protocol_errors() -> anyhow::Result<()> {
     with_client(|client| async move {
         let error = call(&client, "no_such_tool", json!({}))
@@ -427,8 +544,11 @@ const FAKE_AX_TREE: &str = r#"{
 
 #[tokio::test(flavor = "current_thread")]
 async fn browser_tools_drive_a_cdp_endpoint() -> anyhow::Result<()> {
-    let (endpoint, server, seen) = fake_cdp().await;
-    let core = BrowserCore::new(config_with(Some(endpoint)));
+    let (address, server, seen) = fake_cdp().await;
+    let core = BrowserCore::new(config());
+    core.connect(&format!("http://{address}"))
+        .await
+        .expect("the fake answers /json/version");
     with_core(core, |client| async move {
         let created = call(&client, "new_page", json!({"url": "example.test"})).await?;
         assert_eq!(created.is_error, Some(false), "{created:?}");
@@ -558,7 +678,11 @@ async fn browser_tools_drive_a_cdp_endpoint() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn fake_cdp() -> (String, tokio::task::JoinHandle<()>, Arc<Mutex<Vec<Value>>>) {
+async fn fake_cdp() -> (
+    SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Vec<Value>>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake CDP");
@@ -570,10 +694,21 @@ async fn fake_cdp() -> (String, tokio::task::JoinHandle<()>, Arc<Mutex<Vec<Value
             tokio::spawn(serve_fake_cdp(stream, Arc::clone(&server_seen)));
         }
     });
-    (format!("ws://{address}"), server, seen)
+    (address, server, seen)
 }
 
+/// The endpoint answers both surfaces on one port: a plain `GET` is the
+/// `/json/version` probe, anything else is a WebSocket upgrade.
 async fn serve_fake_cdp(stream: TcpStream, seen: Arc<Mutex<Vec<Value>>>) {
+    // Both the JSON probes and the WebSocket upgrade start with `GET`; only
+    // the upgrade advertises `Upgrade: websocket`.
+    let mut prefix = [0_u8; 1024];
+    let peeked = stream.peek(&mut prefix).await.unwrap_or(0);
+    let head = String::from_utf8_lossy(&prefix[..peeked]).to_ascii_lowercase();
+    if head.starts_with("get ") && !head.contains("upgrade: websocket") {
+        serve_fake_probe(stream).await;
+        return;
+    }
     let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
         return;
     };
@@ -603,6 +738,40 @@ async fn serve_fake_cdp(stream: TcpStream, seen: Arc<Mutex<Vec<Value>>>) {
             break;
         }
     }
+}
+
+async fn serve_fake_probe(mut stream: TcpStream) {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => {
+                request.extend_from_slice(&chunk[..read]);
+                if request
+                    .windows(4)
+                    .any(|window| window.starts_with(b"\r\n\r\n"))
+                {
+                    break;
+                }
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&request);
+    let path = text.split_whitespace().nth(1).unwrap_or_default();
+    let body = match path {
+        "/json/version" => json!({"Browser": "Kitesurf/0.5.4"}),
+        "/json/list" => json!([{"id": "target-1", "type": "page"}]),
+        _ => json!({"error": "not found"}),
+    }
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
 }
 
 fn fake_cdp_reply(method: &str, params: &Value, url: &mut String, targets: &mut usize) -> Value {

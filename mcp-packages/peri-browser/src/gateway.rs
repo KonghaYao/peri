@@ -202,7 +202,9 @@ pub enum Incoming {
 
 struct Inner {
     sock: Option<PathBuf>,
-    cdp_url: Option<String>,
+    /// Set by the first successful `browser_connect`; the gateway does not
+    /// start before that, so a register frame always carries a real endpoint.
+    cdp_url: StdMutex<Option<String>>,
     session_id: String,
     name: String,
     outbox: mpsc::UnboundedSender<Outgoing>,
@@ -234,7 +236,7 @@ impl GatewayClient {
         Self {
             inner: Arc::new(Inner {
                 sock: config.gateway_sock.clone(),
-                cdp_url: config.cdp_url.clone(),
+                cdp_url: StdMutex::new(None),
                 session_id: session_id.to_owned(),
                 name: config.session_name.clone(),
                 outbox,
@@ -249,8 +251,8 @@ impl GatewayClient {
         }
     }
 
-    /// Starts the reconnect loop once. Without a socket and a CDP endpoint
-    /// there is nothing to register, so the task is not created.
+    /// Starts the reconnect loop once. Without a socket and a connected
+    /// endpoint there is nothing to register, so the task is not created.
     pub fn start(&self) {
         if !self.is_configured() {
             return;
@@ -272,10 +274,30 @@ impl GatewayClient {
         });
     }
 
-    /// The monitor can be reached at all (socket and endpoint configured).
+    /// Records the endpoint of the first successful `browser_connect`.
+    ///
+    /// The gateway only registers after this, so monitor tabs and viewers never
+    /// see a session without a browser.
+    pub fn set_endpoint(&self, endpoint: &str) {
+        if let Ok(mut current) = self.inner.cdp_url.lock() {
+            *current = Some(endpoint.to_owned());
+        }
+    }
+
+    /// The monitor can be reached at all (socket and connected endpoint).
     #[must_use]
     pub fn is_configured(&self) -> bool {
-        self.inner.sock.is_some() && self.inner.cdp_url.is_some()
+        self.inner.sock.is_some() && self.endpoint().is_some()
+    }
+
+    /// Endpoint reported to the monitor, once `browser_connect` succeeded.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<String> {
+        self.inner
+            .cdp_url
+            .lock()
+            .ok()
+            .and_then(|endpoint| endpoint.clone())
     }
 
     /// The registry socket currently has a live connection.
@@ -475,7 +497,12 @@ fn register(inner: &Inner) -> String {
     let message = Outgoing::Register {
         session_id: inner.session_id.clone(),
         name: inner.name.clone(),
-        cdp_url: inner.cdp_url.clone().unwrap_or_default(),
+        cdp_url: inner
+            .cdp_url
+            .lock()
+            .ok()
+            .and_then(|endpoint| endpoint.clone())
+            .unwrap_or_default(),
         pages,
         state,
     };
