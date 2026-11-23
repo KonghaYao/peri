@@ -7,27 +7,27 @@ export const COLD_WORKSPACE_TOOL_SNAPSHOT = {
   "providerVersion": "0.2.0",
   "protocolVersion": "2026-07-28",
   "sourceCommand": "peri mcp-start peri --capability workspace --stdio",
-  "toolsDigest": "sha256:0d68f4e3841bc4898f395297bfdf33fb67eb397e173dcb0f2c10573a60a47876",
+  "toolsDigest": "sha256:788b253c98a37d93cd11cbfe57039292f086a8995c81949d6c86ab5ffee51ccf",
   "tools": [
     {
       "name": "Read",
-      "description": "Reads a file from the local filesystem. You can access any file directly by using this tool.\nAssume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- By default, it reads up to 2000 lines starting from the beginning of the file\n- Omit offset by default. Set offset only when its 1-based line number is already known from Read/Grep output or was explicitly provided by the user\n- Never guess or estimate an offset, and never use a large offset to probe the end of a file. If the file length is unknown, read without offset\n- To continue after a partial or truncated result, use the last line number actually shown plus 1. Do not calculate the next offset from limit or an assumed file length\n- Any lines longer than 65536 characters will be truncated; the result reports the original and retained character counts before the line content\n- Results exceeding 5000 bytes are truncated at a line boundary with the original byte count; continue reading the rest with the suggested offset. If a single line alone exceeds the limit, its remainder is not reachable with line-based offset/limit; the hint will say so (Read never persists output to a file)\n- Results are returned using cat -n format, with line numbers starting at 1\n- This tool reads files from the local filesystem; it cannot handle URLs\n- You can call multiple tools in a single response.\n- You should prefer using the Read tool over the Bash tool with commands like cat, head, tail, or sed to read files. This provides better output formatting and filtering\n- Images: .png, .jpg, .jpeg, .gif, and .webp files up to 10 MB are returned as image content for multimodal inspection, not as text\n- For open-ended searches that may require multiple rounds of globbing and grepping, use the Agent tool instead\n\nError handling:\n- File not found: returns an error message indicating the path does not exist\n- Other binary files: detected by extension and returns a message indicating the file cannot be displayed as text\n- Images over 10 MB: returns an error; resize the image or inspect it with a shell tool\n- Files exceeding 32 MB: returns an error; offset/limit cannot bypass the file-size limit, so use Grep to locate content or another suitable file-processing tool\n- Offset exceeds file length: returns the actual line count and valid offset range. Do not guess another offset; omit it to restart from the beginning\n- Empty files: return an explicit `[EMPTY FILE]` marker instead of a numbered blank line\n- Directories: explicitly reports that Read converted the directory to a listing and directs callers to `folder_operations` with `operation=\"list\"`\n",
+      "description": "Read a local file with 1-based line numbers.\n\nUsage: Omit offset unless the start line was observed or provided by the user. Never guess or estimate an offset. Continue from the last line number actually shown plus 1.\n\nError handling: Line offsets cannot recover text truncated within a single line or bypass the 32 MB file limit. Use folder_operations for directories. Supported images up to 10 MB return image content.\n",
       "inputSchema": {
         "type": "object",
         "properties": {
           "file_path": {
             "type": "string",
-            "description": "The absolute path to the file to read"
+            "description": "Absolute file path."
           },
           "offset": {
             "type": "integer",
             "minimum": 1,
-            "description": "Optional 1-based start line. OMIT by default. NEVER guess or estimate this value, and never use a large offset to probe the end of a file. Set it only to a line number already observed in Read/Grep output or explicitly provided by the user. For continuation, use the last line actually shown plus 1; do not derive it from limit or an assumed file length"
+            "description": "1-based start line. OMIT by default. Use an already observed or user-provided line number; NEVER guess or estimate. Continue from the last line actually shown plus 1."
           },
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "description": "The maximum number of lines to read. Defaults to 2000 when omitted; use the continuation offset shown in the output to read further."
+            "description": "Number of lines. Defaults to 2000; use the continuation offset in the output."
           }
         },
         "required": [
@@ -37,25 +37,25 @@ export const COLD_WORKSPACE_TOOL_SNAPSHOT = {
     },
     {
       "name": "Write",
-      "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path\n- ALWAYS prefer editing existing files in the codebase. DO NOT create new files unless explicitly required\n- The file_path parameter must be an absolute path, not a relative path\n- Parent directories are created automatically if they do not exist\n\nNotes:\n- Uses atomic write (write to temp file then rename) to prevent data loss on crash\n- Atomic replacement depends on directory permissions: on Unix, a writable parent directory can allow an existing read-only file (for example mode 0444) to be replaced. The target file's read-only bits alone do not prevent overwriting; platform ACLs and directory permissions still apply.\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the User\n- Only use emojis if the User explicitly requests it. Avoid writing emojis to files unless asked\n- For files longer than 200 lines, consider writing in chunks: use Write for the first chunk, then Write with append=true for subsequent chunks. This reduces context window consumption significantly\n",
+      "description": "Create or replace a file with an atomic write.\n\nUsage: Use an absolute path; missing parent directories are created. Prefer Edit for targeted changes. Create files only when required; create Markdown/README files or add emoji only on explicit request.\n\nFor large files, write in chunks with `append=true` after the first chunk. Before retrying an uncertain append, verify the content was not already added. On Unix, a writable directory can permit replacing a read-only file.\n",
       "inputSchema": {
         "type": "object",
         "properties": {
           "file_path": {
             "type": "string",
-            "description": "The absolute path to the file to write (must be absolute, not relative)"
+            "description": "Absolute path to the file."
           },
           "content": {
             "type": "string",
-            "description": "The full content to write to the file. Required unless recovering a draft saved by a previous filesystem-stage write failure (see 'from_draft')."
+            "description": "Nonblank content to write or append. Takes priority over from_draft."
           },
           "from_draft": {
             "type": "string",
-            "description": "A 'draft_...' id from a previous Write error that failed while writing to disk. Only filesystem-stage failures save drafts; path/parameter validation errors never do (provide 'content' again in that case). Mutually exclusive with 'content'; reuse the original file_path."
+            "description": "Draft ID from a Write I/O failure. Omit content and reuse the original path; the draft keeps its original append mode. Validation errors do not save drafts."
           },
           "append": {
             "type": "boolean",
-            "description": "If true, append content to the end of the file instead of overwriting. Use this for writing large files in chunks: first call Write without append to create the file with the initial content, then call Write with append=true to add more content. This avoids sending the entire file content in a single tool call, saving context window space.",
+            "description": "Append content instead of overwriting.",
             "default": false
           }
         },
@@ -66,25 +66,25 @@ export const COLD_WORKSPACE_TOOL_SNAPSHOT = {
     },
     {
       "name": "Edit",
-      "description": "Performs exact string replacements in files.\n\nUsage:\n- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix\n- ALWAYS prefer editing existing files in the codebase. DO NOT create new files unless explicitly required\n- The file_path parameter must be an absolute path, not a relative path\n- The old_string parameter must match exactly, including all whitespace and indentation\n- The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use replace_all to change every instance of old_string\n- Use replace_all for replacing and renaming strings across the file\n\nError handling:\n- old_string not found: returns an error indicating the string does not exist in the file\n- old_string not unique: returns an error with the count of occurrences, suggesting more context or replace_all\n- old_string is empty: returns an error rejecting the operation\n- File not found: returns an error indicating the path does not exist\n",
+      "description": "Replace exact text in an existing file at an absolute path.\nUsage: Use a nonempty `old_string` and a different replacement. Preserve source whitespace and omit Read line-number prefixes. By default exactly one match is required; add surrounding context or use `replace_all=true` for every match. A missing file or match is an error.\n",
       "inputSchema": {
         "type": "object",
         "properties": {
           "file_path": {
             "type": "string",
-            "description": "The absolute path to the file to modify"
+            "description": "Absolute path to the existing file."
           },
           "old_string": {
             "type": "string",
-            "description": "The text to replace. Must match EXACTLY including all whitespace, indentation, and newlines. The edit will fail if old_string is not unique in the file unless replace_all is true"
+            "description": "Nonempty text to match exactly, including whitespace."
           },
           "new_string": {
             "type": "string",
-            "description": "The text to replace it with (must be different from old_string)"
+            "description": "Replacement text; must differ from old_string."
           },
           "replace_all": {
             "type": "boolean",
-            "description": "If true, replace all occurrences of old_string. If false (default), replace only the first occurrence. Use this to rename variables or update repeated patterns across the file"
+            "description": "Replace every match if true; otherwise require exactly one match (default)."
           }
         },
         "required": [
@@ -96,17 +96,17 @@ export const COLD_WORKSPACE_TOOL_SNAPSHOT = {
     },
     {
       "name": "Glob",
-      "description": "Fast file pattern matching tool that works with any codebase size. Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". Returns matching file paths sorted by modification time.\n\nUsage:\n- Use this tool when you need to find files by name patterns\n- Returns file paths sorted by modification time (most recently modified first)\n- Maximum 1000 results returned; collection stops once the limit is exceeded and results are truncated with a notice. The shown 1000 are the newest among the collected matches (walk order), not necessarily the globally newest files in the tree\n- If collection stays within 1000 matches but the paths exceed 20000 bytes, they are persisted to a temp file; only the first 100 paths are returned inline with a path hint. The result-count limit takes priority when both limits are exceeded.\n- Common directories like node_modules, .git, target, dist, build are automatically excluded from results\n- Unlike Grep directory search, this tool does not read `.gitignore` or `.ignore`. Hidden files and directories are included unless their directory name is on the exclusion list.\n- The path parameter is optional; defaults to the current working directory\n- An explicitly supplied `path` is canonicalized when possible: a symlink used as the search root is resolved and its target is searched, with canonical paths returned. Symbolic links encountered inside the walk are skipped, including links pointing outside that resolved root.\n- Searches taking longer than 15 seconds time out with an error; use a more specific pattern or an explicit path\n- For searching file contents, use Grep instead\n\nWhen to use:\n- Use Glob when searching for files by name pattern (e.g., find all TypeScript files, find a specific config file)\n- Use Grep when searching for content within files (e.g., find where a function is defined)\n- For open-ended searches requiring multiple rounds, consider using a sub-agent via Agent\n\nAnti-patterns (will be warned):\n- Glob(\"*\") or Glob(\"**/*\") produces massive directory dumps — use folder_operations or Bash ls to list directories.\n- Prefer specific patterns like \"**/*.rs\" over \"**/*\" — extension filtering keeps output bounded.\n\nOutput-size protection (always active, no opt-in):\n- Directories named node_modules, .git, target, dist, build, worktrees, and similar caches/copies are skipped during the walk, so globbing the project root won't enumerate worktree or build copies. The blacklist applies by directory name at every level, including the search root itself.\n- Results exceeding 1000 entries or 20000 bytes are truncated inline; the collected output is persisted to a temp file and the path is returned in the output. Collection stops at the result limit, so the persisted file may not contain every match in the tree.\n- Note: wildcards are matched with the glob crate defaults, so `*`/`?` also cross `/` (e.g. `*.rs` matches nested files too). Use a directory prefix such as `src/**/*.rs` to scope the walk; the walk only descends into directories matching the pattern's literal prefix.\n",
+      "description": "Find files by path pattern, sorted by modification time.\n\nUsage: Wildcards cross directory separators. Use a literal prefix or path to scope the search. Hidden paths are included; ignore files are not consulted. Common build/cache directories and symlink entries are skipped. Truncated results may be saved, but the saved list can still be incomplete; narrow the search root or pattern if needed.\n",
       "inputSchema": {
         "type": "object",
         "properties": {
           "pattern": {
             "type": "string",
-            "description": "The glob pattern to match file paths relative to the search root (e.g. \"src/**/*.rs\", \"*.config.json\"). Wildcards follow the glob crate defaults: `*` and `?` match across `/`, so `*.rs` matches .rs files at ANY depth, not just the current directory. To scope the walk, use a literal directory prefix (e.g. \"src/*.rs\") or the path parameter"
+            "description": "Glob relative to the search root. Includes hidden paths; `*` and `?` match across `/`. Narrow with path or a literal prefix."
           },
           "path": {
             "type": "string",
-            "description": "The directory to search in. Absolute path or relative to cwd. If not specified, the current working directory is used"
+            "description": "Search directory, absolute or relative to cwd; defaults to cwd."
           }
         },
         "required": [
@@ -116,25 +116,25 @@ export const COLD_WORKSPACE_TOOL_SNAPSHOT = {
     },
     {
       "name": "Grep",
-      "description": "A powerful search tool built on ripgrep. Supports full regex syntax (e.g. \"log.*Error\", \"function\\s+\\w+\"). Filter files with glob parameter (e.g. \"*.js\", \"*.{ts,tsx}\") or type parameter (e.g. \"js\", \"py\", \"rust\", \"go\"). Use output_mode to control result format.\n\nUsage:\n- Always provide pattern parameter\n- Use glob parameter for file type filtering (e.g. \"*.js\", \"*.{ts,tsx}\")\n- Use type parameter for language-based filtering (e.g. \"rust\", \"js\", \"py\")\n- Directory searches skip hidden files/directories and honor `.ignore` even outside Git repositories. Git ignore rules (`.gitignore`, `.git/info/exclude`, and configured global Git ignores) apply when searching within a Git repository. Ancestor ignore rules may also apply.\n- An explicit `path` naming a file bypasses those directory-walk exclusions, so a hidden or ignored file can be searched directly. `No matches found.` for a directory only describes the searched files; use Glob to locate hidden/ignored files, then pass the specific file path here.\n- Supports full regex syntax — literal braces need escaping (use \\{\\} to find interface{} in Go code)\n- Output includes line numbers by default (use -n to disable)\n- Search times out after 15 seconds; cancellation is checked between matches/context callbacks and at file boundaries. Blocking work already in progress may take longer to stop — use more specific patterns for large codebases.\n- Default head_limit is 250 output lines (matched + context lines); exactly N matches are NOT marked truncated, only outputs beyond N are truncated and persisted\n- In files_with_matches / count / files_without_matches modes, head_limit limits the number of files listed (each file counts as one output line)\n- Lines longer than 1000 bytes are truncated at a UTF-8-safe boundary with a \"… [line truncated]\" marker\n- Inline content has a 20000-byte budget, excluding notices. Reaching a line or byte budget stops collection; only the collected output is saved to a temp file (use Read to view), and only its head is returned inline. Counts marked `collected; total unknown` are not the total matches in the search tree. `head_limit: 0` removes the line limit, not the byte limit.\n- Use fixed_strings (-F) to search literal strings without regex interpretation\n- Use invert_match (-v) to find lines that do NOT match the pattern\n- Use whole_word (-w) to match whole words only\n- Use multiline to match patterns spanning multiple lines\n- Use max_depth to limit search directory depth\n\nOutput modes:\n- \"content\": shows matching lines with line numbers (default)\n- \"files_with_matches\": lists only file paths that contain matches\n- \"count\": shows match counts per file\n- \"files_without_matches\": lists only file paths that do NOT contain matches\n\nContext control:\n- -C: symmetric context lines before and after each match\n- -A: context lines after each match (takes priority over -C)\n- -B: context lines before each match (takes priority over -C)\n\nWhen to use:\n- Prefer Grep over shell commands like grep or rg for content search\n- Use Glob for file name search, Grep for content search\n- For open-ended searches, start with the most specific query and broaden if needed\n",
+      "description": "Search file contents using regex.\n\nDirectory walks skip hidden entries and honor ignore rules; an explicit file path bypasses those exclusions. A saved result contains only collected output, not necessarily all matches; narrow or partition the search for complete counts.\n\nOutput modes: Match lines, matching files, matching-line counts by file in single-line mode (not occurrences), or nonmatching files. The limit counts output lines in content mode and files otherwise; zero removes only the count limit, not the byte cap.\n",
       "inputSchema": {
         "type": "object",
         "properties": {
           "pattern": {
             "type": "string",
-            "description": "The regular expression pattern to search for in file contents. Supports full regex syntax (e.g. \"log.*Error\", \"function\\s+\\w+\")"
+            "description": "Content regex."
           },
           "path": {
             "type": "string",
-            "description": "File or directory path to search in. Defaults to current working directory if not specified"
+            "description": "File or directory to search; defaults to cwd."
           },
           "glob": {
             "type": "string",
-            "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\"). Only files matching the glob will be searched"
+            "description": "File name glob filter, such as *.rs. Matches the base name only; use path to scope directories."
           },
           "type": {
             "type": "string",
-            "description": "Filter files by type. Common values: \"rust\", \"js\", \"py\", \"go\", \"java\", \"ts\". More efficient than glob for type-based filtering"
+            "description": "File type filter, such as rust or ts."
           },
           "output_mode": {
             "type": "string",
@@ -144,78 +144,78 @@ export const COLD_WORKSPACE_TOOL_SNAPSHOT = {
               "count",
               "files_without_matches"
             ],
-            "description": "Output mode: \"content\" shows matching lines with line numbers (default), \"files_with_matches\" lists only file paths, \"count\" shows match counts per file, \"files_without_matches\" lists file paths without matches"
+            "description": "Result format: content (default), files_with_matches, count, or files_without_matches."
           },
           "-i": {
             "type": "boolean",
-            "description": "Enable case-insensitive search (default: false). Alias of case_insensitive"
+            "description": "Alias of case_insensitive."
           },
           "case_insensitive": {
             "type": "boolean",
-            "description": "Enable case-insensitive search (default: false). Semantic alias of -i"
+            "description": "Ignore case; defaults to false."
           },
           "-C": {
             "type": "number",
-            "description": "Number of context lines to show before and after each match. Alias of context"
+            "description": "Alias of context."
           },
           "context": {
             "type": "number",
-            "description": "Number of context lines to show before and after each match. Semantic alias of -C"
+            "description": "Context lines before and after each match."
           },
           "-A": {
             "type": "number",
-            "description": "Number of context lines to show after each match (takes priority over -C). Alias of after_context"
+            "description": "Alias of after_context."
           },
           "after_context": {
             "type": "number",
-            "description": "Number of context lines to show after each match (takes priority over context). Semantic alias of -A"
+            "description": "Context lines after each match; overrides context on that side."
           },
           "-B": {
             "type": "number",
-            "description": "Number of context lines to show before each match (takes priority over -C). Alias of before_context"
+            "description": "Alias of before_context."
           },
           "before_context": {
             "type": "number",
-            "description": "Number of context lines to show before each match (takes priority over context). Semantic alias of -B"
+            "description": "Context lines before each match; overrides context on that side."
           },
           "-n": {
             "type": "boolean",
-            "description": "Show line numbers (default: true). Alias of show_line_numbers"
+            "description": "Alias of show_line_numbers."
           },
           "show_line_numbers": {
             "type": "boolean",
-            "description": "Show line numbers (default: true). Semantic alias of -n"
+            "description": "Include line numbers; defaults to true."
           },
           "multiline": {
             "type": "boolean",
-            "description": "Enable multiline mode where ^/$ match line boundaries and . matches newlines (default: false)"
+            "description": "Allow matches across lines; . matches newlines and ^/$ match line boundaries."
           },
           "whole_word": {
             "type": "boolean",
-            "description": "Match whole words only (default: false)"
+            "description": "Match whole words only."
           },
           "invert_match": {
             "type": "boolean",
-            "description": "Invert match: show lines that do NOT match the pattern, equivalent to grep -v (default: false)"
+            "description": "Select nonmatching lines."
           },
           "fixed_strings": {
             "type": "boolean",
-            "description": "Treat pattern as a literal string instead of regex, equivalent to grep -F (default: false)"
+            "description": "Treat pattern as literal text."
           },
           "max_depth": {
             "type": "integer",
             "minimum": 0,
-            "description": "Maximum directory depth to search. Limits how deep the search traverses into subdirectories"
+            "description": "Maximum directory traversal depth."
           },
           "head_limit": {
             "type": "integer",
             "minimum": 0,
-            "description": "Limit output to first N matching lines (default 250). Pass 0 for unlimited. Use sparingly — large result sets waste context"
+            "description": "Output cap: lines with context, or files in file modes. Default 250; 0 removes only the count cap."
           },
           "offset": {
             "type": "integer",
             "minimum": 0,
-            "description": "Skip first N lines of output before applying head_limit"
+            "description": "Skip this many output entries before applying head_limit."
           }
         },
         "required": [
@@ -262,24 +262,24 @@ export const COLD_WORKSPACE_TOOL_SNAPSHOT = {
     },
     {
       "name": "Bash",
-      "description": "Executes a given shell command and returns its output.\n\nUsage:\n- Each invocation starts a new shell in the tool's configured working directory. A `cd` in one invocation does not change the starting directory of later invocations; use `cd \"path\" && command` within the same invocation when needed. Shell variables and other shell state do not persist between invocations. Do not assume user profile files are loaded; see the platform-specific shell invocation below.\n- IMPORTANT: Avoid using this tool to run find, grep, cat, head, tail, sed, awk, or echo commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task\n- Instead, use the appropriate dedicated tool which will provide a much better experience for the user:\n  - File search: Use Glob (NOT find or ls)\n  - Content search: Use Grep (NOT grep or rg)\n  - Read files: Use Read (NOT cat/head/tail)\n  - Edit files: Use Edit (NOT sed/awk)\n  - Write files: Use Write (NOT echo/cat with redirect)\n- You can specify an optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms (15 seconds) and is capped at 120000ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `timeout: 0` leaves a background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached\n- When issuing multiple commands, use && to chain them together rather than using separate tool calls if the commands depend on each other\n- For builds, installs, or tests that may exceed 15s, set a longer `timeout` value up to the 120000ms foreground maximum. Anything that may need longer, and long-running processes like dev servers or watchers, belongs in `run_in_background: true` — a synchronous command that reaches its timeout is promoted to a background task instead of being killed (see Timeout behavior).\n\nTimeout behavior:\n- The synchronous path is always bounded: the effective timeout is clamped to at most 120000ms, and `timeout: 0` is treated as that maximum rather than disabling the timeout. There is no way to disable the timeout on the synchronous path.\n- The same foreground deadline covers both shell exit and stdout/stderr draining. `nohup ... &` can leave descendants holding the output pipes after the shell exits; that wait also times out and follows the background-promotion behavior below.\n- Foreground timeout returns a timeout error, but does not terminate the process: when background task registration is available and succeeds, the command is promoted to a background task and the tool returns a background receipt. The command has already run for at least the foreground deadline, so the receipt is not evidence that it just started, and output produced before promotion is not included in the receipt.\n- If background task registration is unavailable or fails, foreground timeout requests process termination.\n- For commands explicitly started with `run_in_background: true`, a positive `timeout` requests process termination when reached. Omitting `timeout` or setting it to `0` leaves that background command without a timeout.\n- Read the returned process status before retrying. If it says the process is still running, do not start a replacement for the same work; wait for the completion reminder or use the host's task cancellation interface to stop it.\n\nPlatform behavior:\n- Windows: uses powershell -NoProfile -NoLogo -NonInteractive -Command to execute commands\n- Unix/macOS: uses bash -c to execute commands\n- On Unix, child processes run in their own process group. When termination is requested, cleanup targets the process group; this does not apply to a foreground timeout that continues in the background.\n- On Windows, shell cleanup commands use taskkill for the PowerShell process tree; Unix process-group semantics do not apply.\n- The command's stdin is redirected to /dev/null: interactive commands (read, prompts, editors, stdio services waiting on stdin) fail fast with an EOF error instead of hanging until timeout. Do not rely on terminal input; provide input via pipes or files instead\n\nOutput handling:\n- Inline model output has a 10000-character budget, including truncation notices and space reserved for execution status. Output above 9488 characters takes a head-only preview path, even when it is below 65000 bytes; do not assume the tail is included. The retained head is cut at a UTF-8-safe byte boundary, so multibyte text may retain fewer characters.\n- When that character-budget path is not triggered, the internal formatter initially selects the first and last 1000 lines from output over 2000 lines. It also has a 65000-byte cap. A later MCP projection keeps only the first 2000 rendered lines, including formatting notices, and adds an `[MCP output truncated: ...]` marker. This can remove the tail selected by the internal formatter even for short-line output below the character budget; no inline preview guarantees the final output lines are present.\n- Each truncation layer attempts to save its own input to a temporary file. An MCP `[Full output saved to ...]` path can therefore contain an already shortened Bash result, not the original command output. Use Read with offset/limit to inspect that file; if it contains another saved-output path, follow that inner reference to read the original captured output and its tail. Persistence failures are reported in the result.\n- Non-zero exit codes are reported\n- Both stdout and stderr are captured\n\nBackground mode (run_in_background: true):\n- Returns a task receipt carrying the task id. The receipt is the only handle it carries: it does not include a pid or live log paths.\n- The completion reminder is delivered to the session that started the task and carries the exit status plus output file references; use Read on those files to inspect the captured output. Reminders for the same terminal transition are delivered once.\n- Run the service in the foreground inside this already-backgrounded shell: do not add `&`, use `Start-Job`, or detach it with `Start-Process` without `-Wait`.\n- Stop a running task through the host's task cancellation interface; killing only a shell PID can leave the service and its output pipes alive. If cancellation is unavailable, the process may keep running until it exits on its own.\n- Preserve cleanup errors and verify actual process exit. Do not hide a failed kill with `2>/dev/null` or report success merely because a trailing `echo cleaned` succeeded.\n\n## Bash discipline\n\n`Bash` is the most powerful tool and the most common source of unintended damage. Before running a command:\n\n- Quote file paths that may contain spaces.\n- Prefer non-destructive forms (`git status` over `git clean -f`, `ls` over `rm`).\n- Never pipe `curl` into `sh`/`bash` unless the user explicitly asks.\n- Avoid commands with glob expansion you have not verified (`rm *.log`) — list first, then act.\n",
+      "description": "Run a command in a fresh, non-interactive shell (Bash on Unix/macOS, PowerShell on Windows).\nUsage: Cwd and shell state do not carry over. Prefer dedicated tools for file operations. Quote paths, verify destructive targets, and do not pipe downloads into a shell unless explicitly requested.\n\n- Foreground defaults to 15000ms and caps at 120000ms. A timeout can return a still-running task receipt; if promotion fails, termination is requested. Check the existing task before retrying; a receipt is not an exit status.\n- Run long-lived services in the foreground within `run_in_background: true`; do not detach them yourself. Use the task ID to track the shell task; read logs if the receipt supplies them, otherwise wait for the completion notice. If available, use the host task monitor for status or cancellation. Use its monitor ID for monitor calls; do not assume the shell task ID is the monitor ID. Verify exit after cancellation.\n- Inline output can omit the tail. Follow saved-output references with Read, including nested references. A saved preview may not be the original output.\n",
       "inputSchema": {
         "type": "object",
         "properties": {
           "command": {
             "type": "string",
-            "description": "The bash command (and optional arguments) to execute. This can be complex commands that use pipes, &&, or other shell features. For multiple dependent commands, chain them with && rather than making separate calls"
+            "description": "Shell command. Chain dependent steps with && on Bash; use ; on Windows PowerShell 5.1."
           },
           "timeout": {
             "type": "integer",
             "minimum": 0,
             "maximum": 600000,
-            "description": "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at 120000ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
+            "description": "Milliseconds. Foreground: default 15000, cap 120000; 0 means the cap. Background: omit or use 0 for no deadline; a positive value requests termination on expiry."
           },
           "run_in_background": {
             "type": "boolean",
             "default": false,
-            "description": "If true, runs the command in the background and returns immediately with a task_id. Only use for long-running servers, watchers, or daemons. For builds/installs/tests, prefer a longer timeout instead."
+            "description": "Run in the background and return a task ID. Use for services or work beyond the foreground cap."
           }
         },
         "required": [

@@ -25,9 +25,12 @@
 // `PERI_STUB_TOOL_COMMAND` fallback uses the same per-turn rule for requests
 // without a directive.
 //
-// The reply is a pure function of the turn's user text (the directive-bearing
-// message when present, else the last user message) and the main-call index, so
-// a repeated run produces the same text for the same input:
+// The SDK session driver supplies a verification code on one turn and asks
+// for it on the next. The stub recalls it only from the messages in that
+// request, including the first turn's acknowledgement.
+//
+// The default reply uses the turn's user text (the directive-bearing message
+// when present, else the last user message) and the main-call index:
 //
 //     stub-echo:<sha1(normalized text)[0..12]>#<main call index>
 //
@@ -59,6 +62,9 @@ const SYSTEM_REMINDER_MARKER = '<system-reminder>';
 /** The legacy per-turn fallback is opt-in: it needs the explicit command. */
 const TOOL_FALLBACK_ENABLED = process.env.PERI_STUB_TOOL_COMMAND !== undefined;
 const DIRECTIVE_PATTERN = /\[\[tool:([A-Za-z0-9._-]+)\]\]/;
+const REMEMBER_CODE = /^Remember the verification code ([a-f0-9]{32}) for our next turn\. Acknowledge receipt\.$/;
+const RECALL_CODE = 'What verification code did I give you? Reply with the code only.';
+const CODE_ACKNOWLEDGEMENT = 'stub-code-saved';
 
 /** `PERI_STUB_COMMANDS` is a JSON object of directive name -> shell command. */
 function parseCommands(raw) {
@@ -233,6 +239,20 @@ function directiveOf(text) {
 function lastUserText(body) {
   const users = messagesOf(body).filter((message) => message?.role === 'user');
   return users.length > 0 ? messageText(users[users.length - 1]?.content) : '';
+}
+
+function recalledCode(messages, turnStart) {
+  let sawAcknowledgement = false;
+  for (let index = turnStart - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const text = messageText(message?.content).trim();
+    if (message?.role === 'assistant' && text === CODE_ACKNOWLEDGEMENT) {
+      sawAcknowledgement = true;
+    }
+    if (message?.role === 'user' && !text.includes(SYSTEM_REMINDER_MARKER)) {
+      return sawAcknowledgement ? REMEMBER_CODE.exec(text)?.[1] : undefined;
+    }
+  }
 }
 
 function replyFor(text, index) {
@@ -419,9 +439,14 @@ async function handleChat(_request, response, body) {
   state.mainCalls += 1;
   const index = state.mainCalls;
   const directiveText = directiveTextOf(body);
+  const messages = messagesOf(body);
+  const turnStart = currentTurnStart(body);
+  const turnText = messageText(messages[turnStart]?.content).trim();
+  const rememberingCode = REMEMBER_CODE.test(turnText);
+  const recallingCode = turnText === RECALL_CODE;
   // The reply digest follows the turn's own directive text, not the trailing
   // `<system-reminder>` user message (which is identical for every turn).
-  const userText = directiveText ?? lastUserText(body);
+  const userText = rememberingCode || recallingCode ? turnText : directiveText ?? lastUserText(body);
   const bashName = bashToolName(body);
   const directive = directiveText === null ? null : directiveOf(directiveText);
   const directiveCommand = directive === null ? undefined : COMMANDS[directive];
@@ -477,7 +502,9 @@ async function handleChat(_request, response, body) {
     return sendToolCallCompletion(response, { id, model, callId, toolName: bashName, argumentsText });
   }
 
-  const reply = replyFor(userText, index);
+  let reply = replyFor(userText, index);
+  if (rememberingCode) reply = CODE_ACKNOWLEDGEMENT;
+  if (recallingCode) reply = recalledCode(messages, turnStart) ?? 'stub-history-missing';
   state.turns.push({
     n: index,
     kind: 'final',

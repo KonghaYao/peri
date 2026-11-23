@@ -199,11 +199,14 @@ test('cold initialize, discover, ping and tools/list never start the sandbox', a
     const ping = (await (
       await handler(authorized('env-cold', { jsonrpc: '2.0', id: 3, method: 'ping' }))
     ).json()) as JsonRpcResult;
-    assert.deepEqual(ping.result, {});
+    assert.deepEqual(ping.result, { resultType: 'complete' });
 
     const list = (await (
       await handler(authorized('env-cold', { jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} }))
     ).json()) as JsonRpcResult;
+    assert.equal(list.result.resultType, 'complete');
+    assert.equal(list.result.ttlMs, 0);
+    assert.equal(list.result.cacheScope, 'private');
     const tools = list.result.tools as Array<Record<string, unknown>>;
     assert.equal(tools.length, 7);
     assert.deepEqual(

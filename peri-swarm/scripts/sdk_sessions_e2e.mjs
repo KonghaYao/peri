@@ -6,19 +6,16 @@
 // Covered official methods:
 //   1. create   POST /v1/agents/sessions?stream=true   client.beta.agents.sessions.create
 //   2. get      GET  /v1/agents/sessions/{id}          client.beta.agents.sessions.retrieve
-//   3. event    POST /v1/agents/sessions/{id}/events   low-level client.post
-//      (the one-event native body `{inputId, kind, mode, text}`)
+//   3. event    POST /v1/agents/sessions/{id}/events   client.beta.agents.sessions.events.create
 //   4. events   GET  /v1/agents/sessions/{id}/events   client.beta.agents.sessions.events.stream
 //   5. items    GET  /v1/agents/sessions/{id}/items    client.beta.agents.sessions.items.list
 //   6. turns    GET  /v1/agents/sessions/{id}/turns    client.beta.agents.sessions.turns.list
 //
-// Submission policy: the follow-up turn is submitted exactly once, through the
-// low-level `client.post` native body, because the driver needs the `inputId`
-// receipt and the accepted `lastItemSeq`. The high-level
-// `events.create({events:[...]})` path is not also sent: the gateway accepts a
-// single `agent.session.input.message` (202) and would start a second turn.
-// The batch envelope is exercised only as a rejected probe that cannot create a
-// turn; the accepted envelope is covered by `http_contract_test`.
+// The follow-up uses one official message event with an Idempotency-Key. The
+// SDK's asResponse() exposes the HTTP 202 and the gateway receipt. A replay
+// with the same key must leave both the item log and model call count stable.
+// The answer must recall the code supplied only on the first turn. An SDK
+// reconnect with Last-Event-ID then reads the follow-up from a saved item seq.
 //
 // Official event coverage asserted in the create stream and the follow-up
 // stream: `agent.session.created` first frame, the
@@ -58,6 +55,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const require = createRequire(import.meta.url);
 const OpenAI = require('openai');
@@ -145,18 +143,6 @@ async function stubStats() {
   const response = await fetch(`${STUB_URL}/__stats`);
   if (!response.ok) throw new Error(`model stub /__stats returned ${response.status}`);
   return response.json();
-}
-
-function findStubTurn(stats, expectedText) {
-  const turns = Array.isArray(stats.turns) ? stats.turns : [];
-  const exact = [...turns].reverse().find((turn) => turn.lastUserText.trim() === expectedText.trim());
-  if (exact) return exact;
-  return [...turns].reverse().find((turn) => turn.lastUserText.includes(expectedText.trim()));
-}
-
-function findStubReply(stats, reply) {
-  const turns = Array.isArray(stats.turns) ? stats.turns : [];
-  return [...turns].reverse().find((turn) => turn.kind === 'final' && turn.reply === reply);
 }
 
 function itemLabel(item) {
@@ -278,10 +264,8 @@ function officialEventTurnId(event) {
 /**
  * Whether one SSE frame belongs to the turn this driver just submitted.
  *
- * A subscription at the tail replays the previous turn's official terminal
- * (actor replay seeds the last turn when the window is empty), so raw stream
- * order is not enough: terminal frames from the previous turn arrive before the
- * new `turn.created`.
+ * Explicit cursor subscriptions can replay another turn's terminal before
+ * the new turn starts. Read the turn id from each frame.
  */
 function eventBelongsToTurn(event, turnId, firstItemSeq) {
   if (isItemFrame(event)) {
@@ -543,12 +527,13 @@ async function main() {
     },
   };
 
-  const client = new OpenAI({
+  const clientOptions = {
     baseURL: BASE_URL,
     apiKey: API_KEY,
     maxRetries: 0,
     timeout: TIMEOUT_MS,
-  });
+  };
+  const client = new OpenAI(clientOptions);
 
   // A fresh stub counter makes the deterministic reply index repeatable.
   const reset = await fetch(`${STUB_URL}/__reset`, { method: 'POST' });
@@ -560,8 +545,9 @@ async function main() {
     'stub 没有独立失败开关；未知 [[tool:<name>]] 指令会返回 400，但真实 host 将其折叠为 completed 空 turn（见末尾差异）。取消路径使用 control=cancel。',
   );
 
-  const initialInput = 'S9a1 initial turn: reply with the deterministic stub text.';
-  const followUp = 'S9a1 follow-up turn: this answer must land in the item log.';
+  const verificationCode = crypto.randomBytes(16).toString('hex');
+  const initialInput = `Remember the verification code ${verificationCode} for our next turn. Acknowledge receipt.`;
+  const followUp = 'What verification code did I give you? Reply with the code only.';
 
   // 1. create (official streaming create) -----------------------------------
   const createStarted = Date.now();
@@ -626,6 +612,11 @@ async function main() {
     'agent.session.created created_at is Unix seconds',
     Number.isInteger(createdEvent?.session?.created_at) && createdEvent.session.created_at > 1_600_000_000,
     createdEvent?.session?.created_at,
+  );
+  check(
+    'agent.session.created carries the requested environment',
+    createdEvent?.session?.environment?.type === 'none',
+    createdEvent?.session?.environment,
   );
 
   // The gateway's own `session` frame carries the persisted projection.
@@ -692,6 +683,11 @@ async function main() {
   const createIdle = findOfficial(create.events, 'agent.session.idle');
   check('create stream ends with agent.session.idle', Boolean(createIdle), officialTypes(create.events));
   check('create idle session id matches', createIdle?.session?.id === createdSessionId);
+  check(
+    'agent.session.idle carries the requested environment',
+    createIdle?.session?.environment?.type === 'none',
+    createIdle?.session?.environment,
+  );
   check('create stream emitted no failure frame', officialIndex(create.events, 'agent.session.failed') === -1);
   check('create stream emitted no error frame', officialIndex(create.events, 'error') === -1);
 
@@ -848,8 +844,11 @@ async function main() {
     { id: initialComplete?.id, itemId: initialComplete?.itemId },
   );
   const initialStats = await stubStats();
-  const initialTurn = findStubTurn(initialStats, initialInput) ?? findStubReply(initialStats, initialComplete?.payload?.text);
+  const initialTurn = initialStats.turns.find(
+    (turn) => turn.kind === 'final' && turn.lastUserText === initialInput,
+  );
   check('model stub saw the initial input', Boolean(initialTurn), initialStats.turns);
+  check('first answer acknowledged the verification code', createFinal.text === 'stub-code-saved', createFinal.text);
   check('first answer text equals the stub reply', initialComplete?.payload?.text === initialTurn.reply, {
     item: initialComplete?.payload?.text,
     stub: initialTurn.reply,
@@ -865,7 +864,6 @@ async function main() {
   };
 
   // 3. Official batch envelope: rejected without creating a turn ------------
-  // The follow-up itself is submitted exactly once, below, through client.post.
   const rejectStarted = Date.now();
   let batchProbe;
   try {
@@ -922,29 +920,36 @@ async function main() {
     { before: fetched.lastItemSeq, after: afterReject.lastItemSeq },
   );
 
-  // 4. events GET (SSE) opened BEFORE the follow-up so the deltas are live.
+  // 4. A fresh SDK client subscribes before posting to the existing session.
+  const continuingClient = new OpenAI(clientOptions);
+  const sessionEvents = continuingClient.beta.agents.sessions.events;
   const streamStarted = Date.now();
   const inputId = crypto.randomUUID();
-  const stream = await client.beta.agents.sessions.events.stream(
-    createdSessionId,
-    { after: fetched.lastItemSeq },
-    { headers: CONTRACT_HEADERS },
-  );
+  const expectedFollowUpTurnId = `turn_input_${inputId}`;
+  const stream = await sessionEvents.stream(createdSessionId, { headers: CONTRACT_HEADERS });
   const streamOpenedAt = Date.now();
   summary.timings.sseOpenMs = streamOpenedAt - streamStarted;
   const followUpReader = collectStream(
     stream,
-    (event) => turnTerminalReached(event, `turn_input_${inputId}`),
+    (event) => turnTerminalReached(event, expectedFollowUpTurnId),
     TIMEOUT_MS,
   );
-  await sleep(200);
-
   const postStarted = Date.now();
   summary.timings.ssePostGapMs = postStarted - streamOpenedAt;
-  const accepted = await client.post(`/agents/sessions/${createdSessionId}/events`, {
-    body: { inputId, kind: 'user', mode: 'turn', text: followUp },
-    headers: CONTRACT_HEADERS,
-  });
+  const submitFollowUp = () => sessionEvents.create(
+    createdSessionId,
+    {
+      'Idempotency-Key': inputId,
+      events: [{
+        type: 'agent.session.input.message',
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: followUp }] }],
+      }],
+    },
+    { headers: CONTRACT_HEADERS },
+  ).asResponse();
+  const acceptedResponse = await submitFollowUp();
+  check('SDK events.create returned HTTP 202', acceptedResponse.status === 202, acceptedResponse.status);
+  const accepted = await acceptedResponse.json();
   summary.timings.eventsPostMs = Date.now() - postStarted;
   summary.accepted = accepted;
   check('events POST accepted the input', accepted?.accepted === true, accepted);
@@ -958,11 +963,11 @@ async function main() {
   );
 
   const followUpRun = await followUpReader;
-  const expectedFollowUpTurnId = `turn_input_${inputId}`;
+  const followUpRawGaps = assertNoRawGap(followUpRun.events, 'follow-up stream (raw)');
   const followUpEvents = followUpRun.events.filter(
     (event) => eventBelongsToTurn(event, expectedFollowUpTurnId, accepted.lastItemSeq),
   );
-  const replayedTurnIds = [
+  const unexpectedTurnIds = [
     ...new Set(
       followUpRun.events
         .filter(isOfficialEvent)
@@ -970,20 +975,11 @@ async function main() {
         .filter((turnId) => turnId !== null && turnId !== expectedFollowUpTurnId),
     ),
   ];
-  const replayedOfficialTypes = officialTypes(
-    followUpRun.events.filter(
-      (event) => isOfficialEvent(event) && officialEventTurnId(event) !== expectedFollowUpTurnId,
-    ),
-  );
   summary.timings.sseMs = Date.now() - streamStarted;
   summary.followUpStream = {
     rawEventCount: followUpRun.events.length,
     rawEventTypes: countFrames(followUpRun.events),
-    replay: {
-      note: 'after=tail 的 actor 回放会重放上一 turn 的官方 terminal；按 turn_id 过滤',
-      replayedTurnIds,
-      replayedOfficialTypes,
-    },
+    unexpectedTurnIds,
     turnEventCount: followUpEvents.length,
     eventTypes: countFrames(followUpEvents),
     officialTypes: officialTypes(followUpEvents),
@@ -996,7 +992,6 @@ async function main() {
   });
   check('follow-up stream emitted no error frame', officialIndex(followUpEvents, 'error') === -1);
   check('follow-up stream emitted no failure frame', officialIndex(followUpEvents, 'agent.session.failed') === -1);
-  const followUpRawGaps = assertNoRawGap(followUpRun.events, 'follow-up stream (raw)');
   summary.followUpStream.rawGapCount = followUpRawGaps.length;
   summary.followUpStream.rawGapFrames = followUpRawGaps;
   summary.followUpStream.rawFrameSamples = rawFrameSample(followUpRun.events);
@@ -1005,15 +1000,7 @@ async function main() {
     followUpEvents.length > 0,
     { expectedTurnId: expectedFollowUpTurnId, rawEventTypes: summary.followUpStream.rawEventTypes },
   );
-  recordDifference(
-    'after=tail 回放上一 turn 的 terminal',
-    {
-      replayedTurnIds,
-      replayedOfficialTypes,
-      expectedTurnId: expectedFollowUpTurnId,
-    },
-    '空回放窗口仍会重放上一 turn 的 turn.completed/session.idle；客户端必须按 turn_id 过滤，不能把重放 terminal 当成新 turn。',
-  );
+  check('SDK tail subscription skipped earlier turns', unexpectedTurnIds.length === 0, unexpectedTurnIds);
 
   assertTurnStartOrder(followUpEvents, 'follow-up stream');
   const followUpTurnId = assertTurnIdentity(followUpEvents, 'follow-up stream');
@@ -1023,16 +1010,21 @@ async function main() {
     followUpTurnId === expectedFollowUpTurnId,
     { observed: followUpTurnId, expected: expectedFollowUpTurnId },
   );
-  const userAdded = followUpEvents.find(
+  const userAddedEvents = followUpEvents.filter(
     (event) => event?.type === 'agent.session.turn.item.added' && event.item?.role === 'user',
   );
-  check('follow-up stream carries the user item', Boolean(userAdded), officialTypes(followUpEvents));
+  check('follow-up stream carries one user item', userAddedEvents.length === 1, officialTypes(followUpEvents));
+  const [userAdded] = userAddedEvents;
   check('follow-up user item text is the submitted text', itemText(userAdded?.item) === followUp, {
     item: itemText(userAdded?.item),
     submitted: followUp,
   });
   check('follow-up user item shares the turn id', userAdded?.turn_id === followUpTurnId);
   const followUpFinal = assertAssistantFinal(followUpEvents, 'follow-up stream');
+  check('follow-up recalled the verification code from the first turn', followUpFinal.text === verificationCode, {
+    expected: verificationCode,
+    actual: followUpFinal.text,
+  });
   const followUpCompleted = findOfficial(followUpEvents, 'agent.session.turn.completed');
   check(
     'follow-up stream reports a completed turn',
@@ -1124,8 +1116,16 @@ async function main() {
   );
 
   const finalStats = await stubStats();
-  const followUpTurn = findStubTurn(finalStats, followUp) ?? findStubReply(finalStats, sseComplete?.payload?.text);
-  check('model stub saw the follow-up turn', Boolean(followUpTurn), finalStats.turns);
+  const newModelCalls = finalStats.turns.filter((turn) => turn.n > initialTurn.n);
+  check(
+    'model stub received exactly one follow-up call',
+    finalStats.mainCalls === initialStats.mainCalls + 1
+      && newModelCalls.length === 1
+      && newModelCalls[0].kind === 'final'
+      && newModelCalls[0].lastUserText === followUp,
+    newModelCalls,
+  );
+  const [followUpTurn] = newModelCalls;
   check('SSE complete text equals the stub reply', sseComplete?.payload?.text === followUpTurn.reply, {
     item: sseComplete?.payload?.text,
     stub: followUpTurn.reply,
@@ -1182,10 +1182,85 @@ async function main() {
     { session: afterFollowUp.lastItemSeq, sse: sseItems[sseItems.length - 1]?.seq },
   );
   check('same session across every call', afterFollowUp.id === createdSessionId);
+  check('follow-up kept the root session id', afterFollowUp.rootSessionId === fetched.rootSessionId, {
+    before: fetched.rootSessionId,
+    after: afterFollowUp.rootSessionId,
+  });
   check(
     'follow-up advanced last_active_at',
     afterFollowUp.last_active_at >= fetched.last_active_at,
     { before: fetched.last_active_at, after: afterFollowUp.last_active_at },
+  );
+
+  // Resume from the live user item's seq, as a client that missed the answer would.
+  const checkpoint = sseItems[0].seq;
+  const replayStream = await sessionEvents.stream(createdSessionId, {
+    headers: { ...CONTRACT_HEADERS, 'Last-Event-ID': String(checkpoint) },
+  });
+  const replayRun = await collectStream(
+    replayStream,
+    (event) => turnTerminalReached(event, followUpTurnId) || isGapFrame(event),
+    TIMEOUT_MS,
+  );
+  const replayRawGaps = assertNoRawGap(replayRun.events, 'reconnect stream (raw)');
+  const replayItems = replayRun.events.filter(isItemFrame);
+  const remainingItems = sseItems.slice(1);
+  summary.reconnect = {
+    lastEventId: checkpoint,
+    outcome: replayRun.outcome,
+    rawEventTypes: countFrames(replayRun.events),
+    itemSeqs: replayItems.map((item) => item.seq),
+  };
+  check('SDK reconnect reached the follow-up terminal', replayRun.outcome === 'terminal', {
+    ...summary.reconnect,
+    error: replayRun.error?.message,
+  });
+  check(
+    'SDK reconnect replayed exactly the rows after the checkpoint',
+    isDeepStrictEqual(replayItems, remainingItems),
+    { replayed: summarizeItems(replayItems), expected: summarizeItems(remainingItems) },
+  );
+  assertTerminalTurnIds(replayRun.events, followUpTurnId, 'reconnect stream');
+  const replayFinal = assertAssistantFinal(replayRun.events, 'reconnect stream');
+  check(
+    'SDK reconnect replayed the same assistant item and answer',
+    replayFinal.event.turn_id === followUpTurnId
+      && replayFinal.event.event_id === followUpFinal.event.event_id
+      && replayFinal.item.id === followUpFinal.item.id
+      && replayFinal.text === verificationCode,
+    replayFinal,
+  );
+  check(
+    'SDK reconnect reached idle for the same session',
+    findOfficial(replayRun.events, 'agent.session.idle')?.session?.id === createdSessionId,
+    officialTypes(replayRun.events),
+  );
+
+  const retriedResponse = await submitFollowUp();
+  check('repeated SDK events.create returned HTTP 202', retriedResponse.status === 202, retriedResponse.status);
+  const retried = await retriedResponse.json();
+  summary.retried = retried;
+  check(
+    'repeated SDK events.create preserved the receipt and the item cursor',
+    retried?.accepted === true
+      && retried.inputId === inputId
+      && retried.disposition === 'existing'
+      && retried.lastItemSeq === afterFollowUp.lastItemSeq,
+    retried,
+  );
+  const afterRetry = await continuingClient.beta.agents.sessions.retrieve(createdSessionId, {
+    headers: CONTRACT_HEADERS,
+  });
+  check(
+    'repeated SDK events.create left the session idle and history unchanged',
+    afterRetry.status === 'idle' && afterRetry.lastItemSeq === afterFollowUp.lastItemSeq,
+    { status: afterRetry.status, lastItemSeq: afterRetry.lastItemSeq },
+  );
+  const statsAfterRetry = await stubStats();
+  check(
+    'SDK reconnect and repeated events.create started no additional model call',
+    statsAfterRetry.mainCalls === finalStats.mainCalls,
+    { before: finalStats.mainCalls, after: statsAfterRetry.mainCalls },
   );
 
   // 5. items GET (asc and desc, cursor paging) ------------------------------
@@ -1369,6 +1444,20 @@ async function main() {
     (item) => item.payload?.complete === true && item.payload?.text === followUpTurn.reply,
   );
   check('follow-up answer landed in items', Boolean(loggedFollowUp), summarizeItems(fullItems));
+  const loggedConversation = fullData.map((item) => ({
+    role: item.payload?.role,
+    text: item.payload?.text,
+  }));
+  check(
+    'item history contains both user and assistant turns exactly once, in order',
+    isDeepStrictEqual(loggedConversation, [
+      { role: 'user', text: initialInput },
+      { role: 'assistant', text: createFinal.text },
+      { role: 'user', text: followUp },
+      { role: 'assistant', text: verificationCode },
+    ]),
+    loggedConversation,
+  );
   check(
     'items complete item matches the SSE item',
     typeof loggedFollowUp?.itemId === 'string'
@@ -1668,14 +1757,6 @@ async function main() {
     '本地运行时只有 root agent；agent_id 恒 root、subagent_id 恒 null。',
   );
   recordDifference(
-    '官方 session 的 environment 投影',
-    {
-      created_session_has_environment: 'environment' in (createdEvent?.session ?? {}),
-      idle_session_has_environment: 'environment' in (createIdle?.session ?? {}),
-    },
-    'OfficialSession 不带 environment 字段；会话级 environment 只在自定义 session 帧/GET 中出现。',
-  );
-  recordDifference(
     '模型 400 与 turn 终态',
     {
       probe: 'unknown [[tool:...]] directive -> stub HTTP 400',
@@ -1708,11 +1789,13 @@ async function main() {
   summary.rawFrameCounts = {
     create: create.events.length,
     followUp: followUpRun.events.length,
+    reconnect: replayRun.events.length,
     cancel: cancelled.events.length,
   };
   summary.rawGapCounts = {
     create: createRawGaps.length,
     followUp: followUpRawGaps.length,
+    reconnect: replayRawGaps.length,
     cancel: cancelRawGaps.length,
   };
   summary.finishedAt = new Date().toISOString();
@@ -1726,6 +1809,7 @@ async function main() {
           git: summary.git,
           create: create.events,
           followUp: followUpRun.events,
+          reconnect: replayRun.events,
           cancel: cancelled.events,
         },
         null,

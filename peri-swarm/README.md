@@ -419,7 +419,7 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 | P1 | 未映射资源 | `turns/{id}/items`、`subagents/*`、`traces`、`artifacts` 都可用 | 这些路由返回 `404 unsupported_contract`（`details.resource` 指资源名） | 持久化表可以新增；真正的缺口是 traces/artifacts/subagent 没有产生源，turns items 也没有官方结构映射 |
 | P2 | `sessions.list` 的 `agent_id` | 可按任意根 agent id 过滤 | 只认 `root`；其他值返回空页 | 网关只有 root agent，子 agent 维度不存在，没有可过滤的 agent 标识 |
 | P2 | turns 字段 | `agent_id` 可为子 agent、`subagent_id` 可非空、`usage` 有值；`status` 还含 `queued` / `waiting` | `agent_id` 恒 `root`、`subagent_id` 恒 `null`、`usage` 见「turn 用量与错误」行；不产生 `queued` / `waiting` | 没有子 agent 调度与 `queued` / `waiting` 排队状态；turn 只由单会话串行执行产生 |
-| P2 | 删除会话 | 物理清理可异步 | 五表级联同步删除；无 live runtime 但持久 `running` → `502 session_resume_required` | 崩溃遗留的 `running` 行需要跨进程 actor 协调；数据库可重置，但网关仍无法同步确认或安全强删 |
+| P2 | 删除会话 | 物理清理可异步 | 按会话同步删除，共享绑定在最后一个引用释放时删除；无 live runtime 但持久 `running` → `502 session_resume_required` | 先用新的用户输入触发交互恢复，再执行删除或更新 |
 | P2 | prompt cache | 服务端按 `prompt_cache_options` 的 TTL 影响后续 turn 的缓存 | 只持久化并回显；本地模型链是否使用该 TTL 未验证 | TTL 只是官方兼容字段，本地模型链尚未消费，无法影响后续 turn 的缓存 |
 | P2 | SSE 续读 | query 类型没有 `after`；从订阅时刻起只送新事件 | 额外支持 `after` / `afterSeq` / `Last-Event-ID` 回放；追平末尾后连接保持，只发心跳 | 官方 SDK 的 query 类型没有 `after`；回放只能作为网关扩展存在，SDK 不会为它提供原生查询字段，去掉回放就失去续读能力 |
 
@@ -432,12 +432,16 @@ export PERI_SWARM_BUN_TOKEN='<与 Bun 相同的 token>'
 - `prompt_cache_options: {}` 等于官方默认 `{"ttl":"30m"}`；只有 `null` 清空，省略表示保持。
 
 ```js
-// 单条输入：官方 events.create 接受单条 agent.session.input.message（202）；
-// HTTP 响应带 inputId / lastItemSeq，但官方 SDK 的 events.create 返回 Promise<void>，
-// 需要 receipt 时用低层 client.post
-const ack = await client.post(`/agents/sessions/${id}/events`, {
-  body: { inputId: crypto.randomUUID(), kind: 'user', mode: 'turn', text: 'follow up' },
-});
+// 使用官方 SDK 在同一会话追问。重试同一条输入时复用 inputId。
+const inputId = crypto.randomUUID();
+const response = await client.beta.agents.sessions.events.create(id, {
+  'Idempotency-Key': inputId,
+  events: [{
+    type: 'agent.session.input.message',
+    input: [{ role: 'user', content: [{ type: 'input_text', text: 'follow up' }] }],
+  }],
+}).asResponse();
+const ack = await response.json(); // HTTP 202，含 inputId 和 lastItemSeq
 
 // 实时：必须三个实参；两实参时 { after } 会被当作 RequestOptions
 const live = await client.beta.agents.sessions.events.stream(id, { after: tail }, {});
@@ -458,8 +462,7 @@ const body = /** @type {any} */ (page).body;
 | `GET` | `/v1/agents/sessions/{logicalId}/turns/{turnId}` | `turns.retrieve`：官方 Turn JSON；不属于该会话 → 404 |
 
 - 准入：`update`/`delete` 在 live 运行中或有未关闭 turn 时 `409 turn_in_progress`；无 live
-  runtime 但持久行 `running` 或仍有开放 turn 行时 `502 session_resume_required`（与
-  `ensure_live` 一致），不会先写后报错。
+  runtime 但持久行 `running` 或仍有开放 turn 行时 `502 session_resume_required`。用新用户输入执行交互恢复后，可再次进行管理操作。
 - create attach：同一 `logicalId` 已存在时，省略 metadata/prompt cache 保持原值；显式不同
   值 → `409 identity_conflict`。
 - turns 在 `begin_turn` 写入 `in_progress`，终态在 `finish_turn` 更新；pending 输入不落 turn
@@ -531,6 +534,8 @@ const body = /** @type {any} */ (page).body;
 | `cwd` | 网关会话工作目录 | 工具在 `sandbox.workspacePath` 下执行 |
 | `tool_result.output` | 只有退出摘要，没有文件内容 | 读 workspace 或 Bun 状态接口 |
 
+共享环境的绑定在创建时与会话行一起提交。删除会话时由其余引用者保留绑定，最后一个会话删除后才移除绑定。
+
 `swarm_bindings` 是绑定权威，Bun 侧 `bindings.json` 只是派生缓存；恢复时先读 Loom
 绑定，缺失即失败，`sandboxId`/`workspacePath` 变化按 `sandbox_binding_changed` 拒绝。
 
@@ -558,16 +563,12 @@ stateDiagram-v2
 
 - 模型侧没有内置真实供应商；本地验收使用确定性 stub。真实模型需要
   `PERI_SWARM_SETTINGS_JSON` 中的 provider/profile 配置。
-- 只杀 Rust 宿主的 reattach 已实现且验证；未完成 turn（行状态 `running`）不会
-  `session/resume`，返回 `502 session_resume_required`。`update`/`delete` 对这类行同样
-  502，网关不提供强制清理；需要运维处理数据库。
-- `swarm_turns` 与新增列的迁移、`json_each` metadata 过滤、五表单事务删除目前只有 SQL
-  单测/内存实现证据；真实 Loom/Turso 未活体验证；两副本同时从旧库启动只有代码级重试，
-  未复现真实竞态。
+- 宿主在 turn 中退出后，历史查询返回已存状态。下一条新用户输入触发原会话恢复；同步中断的旧 turn 记录为失败，Peri 按持久 MQ 恢复待处理工作。
+- 真实双库 Loom 已验证共享环境的引用转交和最后一次删除。旧库迁移、两个副本同时迁移、
+  `json_each` metadata 过滤及删除事务的中途故障仍需专门验收。
 - `turns.usage`/`subagent_id` 恒 `null`；`prompt_cache_options` 只持久化/回显，本地模型链
-  是否使用未验证；`DELETE` 的真实 actor 销毁（`ctx.destroy`）未在真实 Rivet engine 验证。
-- 后台任务引用（MCP `resultType:"task"`）尚未进入空闲回收判定；长任务期间可能被
-  回收，需要重新 ensure。
+  是否使用未验证。官方 SDK 的删除已通过本地 Rivet engine，后台 `ctx.destroy` 的完成时机仍待独立观测。
+- 沙箱的后台任务在 Bun 运行期间保活。空闲回收后保留同一 MCP URL，后续工具调用会启动新 run；显式停止的环境须重新预留。
 - `sandbox.state` 在会话投影中固定为 `null`；`sandbox.runId` 只反映预留时 Bun 返回的值，
   不随后续运行更新；实时状态以 Bun 为准。
 - `peri-swarm` 默认只绑定 loopback，非 loopback 需显式开关；只有单 Bearer，自身不做

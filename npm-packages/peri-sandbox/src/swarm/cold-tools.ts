@@ -184,6 +184,9 @@ export function coldDiscoverResult(expectedProviderVersion: string): Record<stri
 /** Cold `tools/list` result: the real provider's tools plus snapshot provenance. */
 export function coldToolsListResult(expectedProviderVersion: string): Record<string, unknown> {
   return {
+    resultType: 'complete',
+    ttlMs: 0,
+    cacheScope: 'private',
     tools: COLD_WORKSPACE_SNAPSHOT.tools.map((tool) => ({
       name: tool.name,
       description: tool.description,

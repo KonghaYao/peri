@@ -1377,6 +1377,16 @@ async fn a_failed_turn_persists_its_customer_safe_error() {
         async fn swarm_upsert_session(&self, row: SwarmSessionRow) -> Result<(), StoreError> {
             self.inner.swarm_upsert_session(row).await
         }
+        async fn swarm_create_hosted_session(
+            &self,
+            row: SwarmSessionRow,
+            binding: SwarmBindingRow,
+            require_existing: bool,
+        ) -> Result<(), StoreError> {
+            self.inner
+                .swarm_create_hosted_session(row, binding, require_existing)
+                .await
+        }
         async fn swarm_get_session(
             &self,
             logical_id: &str,

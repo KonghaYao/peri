@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::domain::{ItemOrder, SessionsWindow, TurnStatus, TurnsWindow};
+use crate::domain::{EnvironmentKind, ItemOrder, SessionsWindow, TurnStatus, TurnsWindow};
 
 use super::{
     grouped_item_page, InputPut, StoreError, SwarmBindingRow, SwarmInputRow, SwarmItemPage,
@@ -64,6 +64,47 @@ impl SwarmStore for MemorySwarmStore {
             }
         }
         state.sessions.insert(row.logical_id.clone(), row);
+        Ok(())
+    }
+
+    async fn swarm_create_hosted_session(
+        &self,
+        row: SwarmSessionRow,
+        binding: SwarmBindingRow,
+        require_existing: bool,
+    ) -> Result<(), StoreError> {
+        let mut state = self.lock();
+        if state.sessions.contains_key(&row.logical_id)
+            || state
+                .sessions
+                .values()
+                .any(|s| s.root_session_id == row.root_session_id)
+        {
+            return Err(StoreError::Conflict(
+                "hosted session identity already exists".to_owned(),
+            ));
+        }
+        let mut binding = binding;
+        if require_existing {
+            let prior = state
+                .bindings
+                .get(&binding.logical_env_id)
+                .filter(|prior| {
+                    prior.sandbox_id == binding.sandbox_id
+                        && prior.workspace_path == binding.workspace_path
+                })
+                .ok_or_else(|| StoreError::NotFound(binding.logical_env_id.clone()))?;
+            binding = SwarmBindingRow {
+                logical_id: binding.logical_id,
+                last_used_at: binding.last_used_at,
+                last_run_id: binding.last_run_id.or_else(|| prior.last_run_id.clone()),
+                ..prior.clone()
+            };
+        }
+        state.sessions.insert(row.logical_id.clone(), row);
+        state
+            .bindings
+            .insert(binding.logical_env_id.clone(), binding);
         Ok(())
     }
 
@@ -169,9 +210,24 @@ impl SwarmStore for MemorySwarmStore {
         state.items.remove(logical_id);
         state.turns.remove(logical_id);
         state.inputs.retain(|(session, _), _| session != logical_id);
-        state
-            .bindings
-            .retain(|_, binding| binding.logical_id != logical_id);
+        let MemoryState {
+            bindings, sessions, ..
+        } = &mut *state;
+        bindings.retain(|env_id, binding| {
+            if binding.logical_id != logical_id {
+                return true;
+            }
+            let survivor = sessions.values().find(|session| {
+                session.environment.kind == EnvironmentKind::OpenAiHosted
+                    && session.environment.id.as_ref() == Some(env_id)
+            });
+            if let Some(session) = survivor {
+                binding.logical_id.clone_from(&session.logical_id);
+                true
+            } else {
+                false
+            }
+        });
         Ok(())
     }
 
