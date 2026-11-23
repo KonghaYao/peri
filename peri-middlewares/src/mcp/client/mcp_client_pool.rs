@@ -10,6 +10,7 @@ use super::{
     McpClientHandle, McpConnectionKey, McpInitStatus, McpServerConfig, McpServiceOwner,
     McpServiceWrapper, OAuthFlowEvent, OAuthFlowKey, PendingMcpNotification, PendingOAuthCallback,
     ResourceContents, ServiceShutdownState, SkillMetadata, SystemReadinessTracker,
+    UrlElicitationPort,
 };
 #[cfg(not(target_os = "emscripten"))]
 use super::{TickGuard, BUILTIN_TICK_INTERVAL};
@@ -126,6 +127,11 @@ pub struct McpClientPool {
         parking_lot::Mutex<HashMap<OAuthFlowKey, PendingOAuthCallback>>,
     /// 每个 scoped connection 最多一个活跃 OAuth flow。
     pub(super) active_oauth_flows: parking_lot::Mutex<HashMap<McpConnectionKey, String>>,
+    /// URL 模式 MCP elicitation 的宿主端口（装配时注入，`None` = 无前台可投递）。
+    ///
+    /// 端口按会话装配：会话级池只有一个归属会话，池本身就是连接身份到会话的
+    /// 解析结果；host 级装配不建池，因此不存在「跨会话广播」的路径。
+    pub(super) url_elicitation_port: parking_lot::RwLock<Option<Arc<dyn UrlElicitationPort>>>,
     /// subscriptions/listen 会话 inbox 注册表（session_id → InboxHandle）。
     /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
@@ -307,6 +313,7 @@ impl McpClientPool {
             oauth_event_callback: parking_lot::RwLock::new(None),
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
+            url_elicitation_port: parking_lot::RwLock::new(None),
             session_bindings: parking_lot::RwLock::new(session_bindings::SessionBindings::default()),
             resource_cache: super::super::resource_cache::McpResourceCache::new(),
             capability_profile,

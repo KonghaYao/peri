@@ -15,6 +15,8 @@ members = [
     "mcp-packages/artifact",
     "mcp-packages/cron",
     "mcp-packages/monitor",
+    "mcp-packages/peri-browser",
+    "mcp-packages/peri-browser-cdp",
     "mcp-packages/peri-browser-gateway",
     "mcp-packages/workspace",
     "mcp-packages/workflow",

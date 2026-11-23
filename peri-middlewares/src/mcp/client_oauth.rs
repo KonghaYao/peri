@@ -237,7 +237,8 @@ impl McpClientPool {
                     PeriClientHandler::new(
                         super::client::mcpp_client_info_for_profile(&self.capability_profile),
                         Some(Arc::new(NotificationTap::new(self, server_name))),
-                    ),
+                    )
+                    .with_url_elicitation(Arc::downgrade(self), server_name),
                     client::build_authed_transport(&url, &headers, auth_manager),
                 ),
             )

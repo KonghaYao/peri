@@ -73,7 +73,7 @@ impl AcpTransport for FrameTransport {
                 }))
             }
             "elicitation/create" => Ok(serde_json::json!({
-                "action": { "action": "cancel" }
+                "action": "cancel"
             })),
             _ => Ok(Value::Null),
         }
@@ -777,4 +777,77 @@ fn ask_user_timeout_defaults_are_shared_with_the_acp_broker() {
         crate::broker::ask_user_timeout(),
         "router 与 AcpTransportBroker 必须共用同一超时事实源"
     );
+}
+
+// ─── URL 模式 MCP elicitation：Host 归属、单一端点、不广播 ───────────────────
+
+#[tokio::test]
+async fn url_elicitation_without_online_endpoint_is_not_delivered() {
+    let router = router();
+    let cause = router
+        .request_url_elicitation("Authorize", "https://example.test/a", "e-1", Some("srv"))
+        .await
+        .expect_err("无在线 endpoint ⇒ 未投递");
+    assert_eq!(
+        cause,
+        UnansweredCause::NoOnlineEndpoint,
+        "本端没有任何在线 endpoint 时必须如实报告 NoOnlineEndpoint"
+    );
+}
+
+#[tokio::test]
+async fn url_elicitation_goes_to_the_unique_online_endpoint() {
+    let router = router();
+    let transport = Arc::new(FrameTransport::default());
+    router
+        .register_connection("conn-1", erased(&transport))
+        .expect("注册首个连接");
+
+    let decision = router
+        .request_url_elicitation(
+            "Authorize the browser session",
+            "https://example.test/authorize",
+            "e-1",
+            Some("peri-browser"),
+        )
+        .await
+        .expect("唯一在线 endpoint ⇒ 可投递");
+
+    // stub 对 elicitation/create 回 cancel：决策必须如实映射，不伪造成 accept。
+    assert_eq!(decision, crate::broker::UrlElicitationDecision::Cancelled);
+
+    let frames = transport.frames();
+    assert_eq!(frames.len(), 1, "一次 URL elicitation 只发一帧");
+    let (method, params) = &frames[0];
+    assert_eq!(method, "elicitation/create");
+    assert_eq!(params["mode"], "url");
+    assert_eq!(params["sessionId"], "session-1");
+    assert_eq!(params["url"], "https://example.test/authorize");
+    assert_eq!(params["elicitationId"], "e-1");
+    assert_eq!(params["message"], "Authorize the browser session");
+    assert_eq!(
+        params["_meta"][peri_acp_types::interaction::MCP_ELICITATION_SERVER_META_KEY],
+        "peri-browser"
+    );
+}
+
+#[tokio::test]
+async fn url_elicitation_with_multiple_online_endpoints_refuses_to_guess() {
+    let router = router();
+    let first = Arc::new(FrameTransport::default());
+    let second = Arc::new(FrameTransport::default());
+    router
+        .register_connection("conn-1", erased(&first))
+        .expect("注册首个连接");
+    router
+        .register_connection("conn-2", erased(&second))
+        .expect("注册第二个连接");
+
+    let cause = router
+        .request_url_elicitation("Authorize", "https://example.test/a", "e-1", None)
+        .await
+        .expect_err("多端点且无请求作用域 ⇒ 不猜归属");
+    assert_eq!(cause, UnansweredCause::OwnerUnmatched);
+    assert!(first.frames().is_empty(), "不得广播到任意连接");
+    assert!(second.frames().is_empty(), "不得广播到任意连接");
 }

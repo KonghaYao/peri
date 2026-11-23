@@ -60,6 +60,22 @@ pub(crate) fn handle_ask_user(state: &mut BridgeState, pending: &PendingInteract
     crate::kit::acp_events::render::push_acp_state(state);
 }
 
+/// URL 模式 MCP elicitation：写入待处理 atom 并打开授权弹窗。
+///
+/// 不注入 transcript block：URL 授权的唯一载体是弹窗（Done/Cancel 之后响应
+/// 直接回到 MCP 请求，没有可回写的交互块）。
+pub(crate) fn handle_url_elicitation(
+    state: &mut BridgeState,
+    pending: &PendingInteraction<UrlElicitation>,
+) {
+    *crate::kit::atoms::URL_ELICITATION_INFO.state().write() = Some(pending.clone());
+    state.popup_kind = Some(crate::kit::atoms::PopupKind::UrlElicitation);
+    state.variant = 2;
+    program_status::publish(ProgramStatus::Blocked(BlockedKind::Auth));
+    crate::kit::acp_events::render::push_popup_kind(state);
+    crate::kit::acp_events::render::push_acp_state(state);
+}
+
 /// [§6.8] committed 中是否已存在同 request_id 的 pending interaction block。
 /// request_id 缺失（测试构造/协议异常）时按「无 pending 同源块」处理（不拦截）。
 fn committed_has_pending(state: &BridgeState, owner: &crate::acp_client::InteractionOwner) -> bool {
@@ -109,6 +125,24 @@ pub(crate) fn handle_interaction_terminal(
             crate::kit::panel_registry::close_panel(crate::app::panel_types::PanelKind::AskUser);
             if *crate::kit::atoms::POPUP_KIND.state().read()
                 == Some(crate::kit::atoms::PopupKind::AskUser)
+            {
+                *crate::kit::atoms::POPUP_KIND.state().write() = None;
+            }
+        }
+    }
+    {
+        // URL 授权没有 transcript block，弹窗是唯一载体：请求在宿主侧结算
+        // （超时 `$/cancel_request`、连接关闭）而用户尚未作答时，必须撤掉
+        // 待处理项与弹窗——否则弹窗会对着已失效的 request id 继续收决策。
+        let atom = crate::kit::atoms::URL_ELICITATION_INFO.state();
+        let mut pending = atom.write();
+        if pending
+            .as_ref()
+            .is_some_and(|pending| pending.owner == *owner)
+        {
+            *pending = None;
+            if *crate::kit::atoms::POPUP_KIND.state().read()
+                == Some(crate::kit::atoms::PopupKind::UrlElicitation)
             {
                 *crate::kit::atoms::POPUP_KIND.state().write() = None;
             }
@@ -282,3 +316,5 @@ use crate::kit::atoms::ASK_USER_PENDING;
 use peri_acp_types::event_data::AskUser;
 
 use peri_acp_types::event_data::HitlPending;
+
+use peri_acp_types::event_data::UrlElicitation;

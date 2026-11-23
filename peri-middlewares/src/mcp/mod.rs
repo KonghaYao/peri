@@ -54,7 +54,8 @@ pub use auth_store::{OAuthCredentialClient, PerServerCredentialStore};
 pub use callback_server::{parse_code_from_url, CallbackError, OAuthCallbackServer};
 pub use client::{
     ClientStatus, McpClientHandle, McpClientPool, McpInitStatus, McpPoolError,
-    OAuthStartDisposition, OAuthStatus, ServerInfo,
+    OAuthStartDisposition, OAuthStatus, ServerInfo, UrlElicitationOutcome, UrlElicitationPort,
+    UrlElicitationRequest,
 };
 pub use config::{
     load_merged_config, remove_server_from_config, set_server_disabled, ConfigSource,

@@ -14,6 +14,7 @@
 //! - `AskUser`     → `PopupKind::AskUser`
 //! - `RewindPreview` → `PopupKind::Rewind`
 //! - `OauthNeeded` → `PopupKind::OAuth`
+//! - `UrlElicitation` → `PopupKind::UrlElicitation`
 //!
 //! ## Esc 关闭
 //!
@@ -28,6 +29,7 @@ use crate::kit::popups::hitl_popup::HitlPopup;
 use crate::kit::popups::model_quick_switch::ModelQuickSwitchPopup;
 use crate::kit::popups::oauth_popup::OAuthPopup;
 use crate::kit::popups::rewind_popup::RewindPopup;
+use crate::kit::popups::url_elicitation_popup::UrlElicitationPopup;
 use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Constraint;
@@ -58,6 +60,9 @@ pub fn PopupOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         Some(PopupKind::AskUser) => render_empty(), // AskUser 已迁移为 Panel
         Some(PopupKind::Rewind) => render_popup(element!(RewindPopup()).into(), term_w, term_h),
         Some(PopupKind::OAuth) => render_popup(element!(OAuthPopup()).into(), term_w, term_h),
+        Some(PopupKind::UrlElicitation) => {
+            render_popup(element!(UrlElicitationPopup()).into(), term_w, term_h)
+        }
         Some(PopupKind::Confirm) => render_popup(element!(ConfirmPopup()).into(), term_w, term_h),
         Some(PopupKind::Download) => {
             render_popup(element!(DownloadProgressPopup()).into(), term_w, term_h)
@@ -147,6 +152,9 @@ pub fn close_popup() -> Option<PopupKind> {
                 *atoms::REWIND_QUERY_ERROR.state().write() = None;
             }
             PopupKind::OAuth => *atoms::OAUTH_INFO.state().write() = None,
+            PopupKind::UrlElicitation => {
+                *atoms::URL_ELICITATION_INFO.state().write() = None;
+            }
             PopupKind::Confirm => *atoms::CONFIRM_PAYLOAD.state().write() = None,
             PopupKind::Download => {
                 *atoms::DOWNLOAD_PROGRESS.state().write() = DownloadProgressPayload::default()

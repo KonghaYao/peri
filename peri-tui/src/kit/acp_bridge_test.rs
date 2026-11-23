@@ -606,10 +606,23 @@ fn ask_user() -> AcpEventData {
     })
 }
 
+fn url_elicitation() -> AcpEventData {
+    AcpEventData::UrlElicitation(PendingInteraction {
+        owner: Default::default(),
+        request_id_json: "\"u\"".into(),
+        payload: peri_acp_types::event_data::UrlElicitation {
+            server_name: "peri-browser".into(),
+            message: "Authorize the browser session".into(),
+            url: "https://example.test/authorize".into(),
+            elicitation_id: "e-1".into(),
+        },
+    })
+}
+
 /// [回归测试] 入站 interaction 只接受非空且精确匹配的 active session。
 #[test]
 fn test_interaction_gate_requires_nonempty_exact_active_session() {
-    for event in [hitl(), ask_user()] {
+    for event in [hitl(), ask_user(), url_elicitation()] {
         assert!(super::accepts_event_session(&event, "s1", "s1", false));
         assert!(!super::accepts_event_session(&event, "", "s1", false));
         assert!(!super::accepts_event_session(&event, "s1", "", false));
@@ -895,6 +908,56 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     *HITL_PENDING.state().write() = old_pending;
     *POPUP_KIND.state().write() = old_popup;
     *VIEW_MODELS.state().write() = old_view;
+}
+
+/// URL 模式 MCP elicitation 事件打开授权弹窗并保存待处理项。
+#[tokio::test]
+#[serial]
+async fn test_url_elicitation_event_opens_popup() {
+    use crate::kit::atoms::{
+        ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, POPUP_KIND, PopupKind, URL_ELICITATION_INFO,
+    };
+    let old_active = ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = BRIDGE_RESET_COUNTER.get();
+    let old_popup = *POPUP_KIND.state().read();
+    let old_url = URL_ELICITATION_INFO.state().read().clone();
+    *ACTIVE_SESSION_ID.state().write() = "s1".into();
+    BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
+    let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let handle = super::spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+
+    tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: BRIDGE_RESET_COUNTER.get(),
+        event: url_elicitation(),
+        active_session_id: "s1".into(),
+    })
+    .await
+    .expect(
+        "url elicitation event opens popup: fixture task and request must complete successfully",
+    );
+    assert_eq!(observed_rx.recv().await, Some(true));
+    assert_eq!(*POPUP_KIND.state().read(), Some(PopupKind::UrlElicitation));
+    let pending = URL_ELICITATION_INFO
+        .state()
+        .read()
+        .clone()
+        .expect("url elicitation 必须留下待处理项");
+    assert_eq!(pending.request_id_json, "\"u\"");
+    assert_eq!(pending.payload.server_name, "peri-browser");
+    assert_eq!(pending.payload.url, "https://example.test/authorize");
+
+    shutdown.cancel();
+    drop(tx);
+    handle.await.expect(
+        "url elicitation event opens popup: fixture task and request must complete successfully",
+    );
+    *ACTIVE_SESSION_ID.state().write() = old_active;
+    BRIDGE_RESET_COUNTER.set(old_reset);
+    *POPUP_KIND.state().write() = old_popup;
+    *URL_ELICITATION_INFO.state().write() = old_url;
 }
 
 #[path = "acp_bridge_ask_user_test.rs"]

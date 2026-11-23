@@ -138,4 +138,22 @@ fn test_close_popup_clears_payload_atoms() {
         atoms::OAUTH_INFO.state().read().is_none(),
         "OAUTH_INFO should be cleared after close_popup"
     );
+
+    // URL 授权弹窗：关闭后待处理项必须清空（迟到的重复事件不得复用旧决策）。
+    *atoms::URL_ELICITATION_INFO.state().write() = Some(atoms::PendingUrlElicitation {
+        owner: Default::default(),
+        request_id_json: "\"url-1\"".into(),
+        payload: peri_acp_types::event_data::UrlElicitation {
+            server_name: "peri-browser".into(),
+            message: "Authorize".into(),
+            url: "https://example.test/authorize".into(),
+            elicitation_id: "e-1".into(),
+        },
+    });
+    super::open_popup(PopupKind::UrlElicitation);
+    super::close_popup();
+    assert!(
+        atoms::URL_ELICITATION_INFO.state().read().is_none(),
+        "URL_ELICITATION_INFO should be cleared after close_popup"
+    );
 }

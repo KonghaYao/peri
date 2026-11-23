@@ -7,6 +7,8 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 /// 处理 Elicitation 通知：原子封装 RequestId + AskUser 后推入 bridge。
+///
+/// `mode: "url"` 走 URL 授权弹窗（`UrlElicitation`），其余保持表单路径。
 pub(super) async fn handle_elicitation(
     owner: crate::acp_client::InteractionOwner,
     request_id_json: String,
@@ -19,6 +21,30 @@ pub(super) async fn handle_elicitation(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    if let Some(url_elicitation) = parse_url_elicitation(params) {
+        let event = AcpEventData::UrlElicitation(PendingInteraction {
+            owner,
+            request_id_json,
+            payload: url_elicitation,
+        });
+        let wrapped = AcpEventWithEpoch {
+            child_origin: None,
+            view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
+            event,
+            active_session_id: session_id,
+        };
+
+        info!("kit ACP notifier: forwarding URL Elicitation as UrlElicitation event");
+
+        return sink.send(wrapped).await.map_or_else(
+            |e| {
+                warn!(error = %e, "kit ACP notifier: bridge closed, rejecting URL elicitation");
+                false
+            },
+            |_| true,
+        );
+    }
 
     let questions = parse_elicitation_questions(params);
     let ask_user = AskUser { questions };
@@ -100,6 +126,47 @@ pub(super) async fn handle_request_permission(
         },
         |_| true,
     )
+}
+
+/// 从 CreateElicitationRequest JSON 中解析 URL 模式载荷。
+///
+/// 只有 `mode` 明确为 `"url"` 且带非空 `url` 才返回 `Some`；缺 `mode` 的旧式
+/// form 请求与所有表单请求都返回 `None`，走原表单解析路径。
+///
+/// JSON 结构（`ElicitationUrlMode` 的 `scope` 被 `#[serde(flatten)]` 展开）:
+/// ```json
+/// {"mode": "url", "sessionId": "sess_1", "elicitationId": "e-1",
+///  "url": "https://example.test/authorize", "message": "...",
+///  "_meta": {"io.peri/mcp-server": "peri-browser"}}
+/// ```
+pub(super) fn parse_url_elicitation(params: &Value) -> Option<UrlElicitation> {
+    if params.get("mode").and_then(|v| v.as_str()) != Some("url") {
+        return None;
+    }
+    let url = params.get("url").and_then(|v| v.as_str())?;
+    if url.is_empty() {
+        return None;
+    }
+    let server_name = params
+        .get("_meta")
+        .and_then(|meta| meta.get(peri_acp_types::interaction::MCP_ELICITATION_SERVER_META_KEY))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(UrlElicitation {
+        server_name,
+        message: params
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        url: url.to_string(),
+        elicitation_id: params
+            .get("elicitationId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
 /// 从 CreateElicitationRequest JSON 中解析问题列表。
@@ -219,3 +286,5 @@ use peri_acp_types::event_data::HitlPending;
 use peri_acp_types::event_data::Question;
 
 use peri_acp_types::event_data::QuestionOption;
+
+use peri_acp_types::event_data::UrlElicitation;

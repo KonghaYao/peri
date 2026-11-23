@@ -830,13 +830,47 @@ impl UserInteractionBroker for SessionInteractionRouter {
         };
         // 转发复用既有 ACP broker：审批 / 提问编解码、超时与错误映射单一权威；
         // 门是同一把 session 门（本 router 借用，不重建）。
-        let broker = AcpTransportBroker::new(
+        self.broker_for(transport).request(owner, context).await
+    }
+}
+
+impl SessionInteractionRouter {
+    /// Host 归属的 URL 模式 `elicitation/create`（MCP server 请求用户在浏览器
+    /// 里完成授权）。
+    ///
+    /// 归属规则与 [`UserInteractionBroker::request`] 的 Host 分支**完全一致**：
+    /// 请求作用域连接优先，否则**唯一**在线 endpoint；无 endpoint 或多 endpoint
+    /// 时返回 `Err(cause)`，调用方按 decline 处理——绝不广播到任意连接。
+    ///
+    /// 与审批 / 提问复用同一 endpoint、同一把 session 门与同一超时。
+    pub async fn request_url_elicitation(
+        &self,
+        message: &str,
+        url: &str,
+        elicitation_id: &str,
+        server_name: Option<&str>,
+    ) -> Result<crate::broker::UrlElicitationDecision, UnansweredCause> {
+        // `route` 的 Host 分支不读 namespace / seq（它们只用于跨入口留痕）；
+        // 这里给的是「MCP elicitation 入口」这一事实，不伪造调用序号。
+        let transport = self.route(&TrustedInteractionOwner::Host {
+            namespace: "peri/mcp/elicitation".to_string(),
+            seq: 0,
+        })?;
+        Ok(self
+            .broker_for(transport)
+            .handle_url_elicitation(message, url, elicitation_id, server_name)
+            .await)
+    }
+
+    /// 单个 endpoint 的交互 broker：同一 `AcpRequestBridge`、同一把 session 门、
+    /// 同一超时——审批 / 提问 / URL elicitation 共用，不另建第二套 wire 语义。
+    fn broker_for(&self, transport: Arc<dyn AcpTransport>) -> AcpTransportBroker {
+        AcpTransportBroker::new(
             Arc::new(AcpRequestBridge(transport)),
             self.session_id.clone().into(),
             Arc::clone(&self.gate),
         )
-        .with_timeout(self.timeout);
-        broker.request(owner, context).await
+        .with_timeout(self.timeout)
     }
 }
 

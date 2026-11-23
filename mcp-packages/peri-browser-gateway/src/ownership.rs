@@ -1518,7 +1518,8 @@ pub type Connector = Arc<
 fn cdp_connector() -> Connector {
     Arc::new(|cdp_url, page_id| {
         Box::pin(async move {
-            let controller = cdp::Controller::connect(&cdp_url, &page_id).await?;
+            let controller =
+                cdp::Controller::connect(&cdp_url, &page_id, cdp::CONTROLLER_OWNER).await?;
             Ok(Box::new(controller) as Box<dyn PageController>)
         })
     })

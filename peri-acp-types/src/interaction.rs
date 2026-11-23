@@ -103,6 +103,15 @@ pub enum InteractionResponse {
     },
 }
 
+// ─── MCP elicitation `_meta` ──────────────────────────────────────────────────
+
+/// ACP `elicitation/create`（URL 模式）`_meta` 键：发起请求的 MCP server 名。
+///
+/// ACP 的 `ElicitationSessionScope` 只带 session 与可选 toolCallId，不足以说明
+/// 「谁在要授权」。宿主写入本键，客户端按需展示；**缺失时不得假设**（其他
+/// agent 实现不写本键）。
+pub const MCP_ELICITATION_SERVER_META_KEY: &str = "io.peri/mcp-server";
+
 // ─── UnansweredCause ───────────────────────────────────────────────────────────
 
 /// elicitation 响应的 `_meta` 键：客户端声明「问题无法被作答」的原因。

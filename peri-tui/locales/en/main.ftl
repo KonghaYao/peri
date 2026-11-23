@@ -755,6 +755,19 @@ oauth-hint-input-focus =   Paste authorization code, Enter to submit  |  Tab: bu
 oauth-copied-hint =   ✓ Link copied (open it in your browser)
 oauth-opened-hint =   Browser opened — if not, copy the link and open manually
 
+# ---- MCP URL elicitation popup ----
+
+popup-url-elicitation-title =  MCP Authorization Request 
+popup-url-elicitation-server = Server: { $server }
+popup-url-elicitation-server-unknown = Server: MCP
+popup-url-elicitation-hints = o: open link · c: copy link
+popup-url-elicitation-keys = Enter: done · Esc: cancel
+popup-url-elicitation-done = Done
+popup-url-elicitation-empty = No pending authorization request
+popup-url-elicitation-copied = Link copied
+popup-url-elicitation-copy-failed = Copy failed — open the link manually
+popup-url-elicitation-open-blocked = Not a web link — copy it and inspect before opening
+
 # ---- Login Panel ----
 
 login-field-name = Name

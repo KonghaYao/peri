@@ -67,6 +67,8 @@ mod history_window;
 mod interaction_router;
 /// 连接级实时投递注册表（F2a）：暂停缓冲、序号与关闭语义。
 pub(crate) mod live_delivery;
+/// URL 模式 MCP elicitation 的会话级投递面（端口 → 本会话交互 router）。
+mod mcp_url_elicitation;
 
 /// MCP Apps facade（七个 `peri/mcp/apps/*` 方法）与请求账本（设计 4a §1.3/§4.4）。
 mod apps_facade;

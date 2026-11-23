@@ -476,6 +476,7 @@ pub(crate) fn dispatch_for_bridge(
         // ── §4.5 Interaction events ──
         HitlPending(hp) => system::handle_hitl_pending(state, hp),
         AskUser(au) => system::handle_ask_user(state, au),
+        UrlElicitation(ue) => system::handle_url_elicitation(state, ue),
         // [Slice 4 §6.8] TUI 内部事件：interaction block 结果回写（本地，
         // 不走 ACP 协议）。
         InteractionTerminal { owner, outcome } => {

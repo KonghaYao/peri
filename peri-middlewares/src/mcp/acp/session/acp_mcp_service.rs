@@ -255,7 +255,8 @@ pub(super) async fn discover_server(
     }
 
     let served =
-        client::serve_client_auto(transport, &pool.capability_profile, HTTP_CONNECT_TIMEOUT).await;
+        client::serve_client_auto_for_acp(transport, &pool, &spec.server_id, HTTP_CONNECT_TIMEOUT)
+            .await;
     let service = match served {
         Ok(Ok(service)) => service,
         Ok(Err(error)) => {

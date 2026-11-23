@@ -34,5 +34,5 @@ pub(super) use self::bg_task::{
 #[cfg(test)]
 pub(crate) use self::interaction::hitl_input_summary;
 pub(super) use self::interaction::{
-    handle_ask_user, handle_hitl_pending, handle_interaction_terminal,
+    handle_ask_user, handle_hitl_pending, handle_interaction_terminal, handle_url_elicitation,
 };

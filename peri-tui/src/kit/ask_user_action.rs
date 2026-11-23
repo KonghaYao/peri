@@ -45,6 +45,14 @@ pub enum AskUserResponseAction {
         owner: InteractionOwner,
         request_id_str: String,
     },
+    /// URL 模式 MCP elicitation 的结局：Done → `accept`，Cancel → `decline`。
+    ///
+    /// 与表单同一通道：响应必须回到发起请求的连接（owner 来自反向请求）。
+    UrlElicitation {
+        owner: InteractionOwner,
+        request_id_str: String,
+        accepted: bool,
+    },
 }
 
 /// 启动 ask_user 响应消费者后台任务。
@@ -80,6 +88,9 @@ pub fn spawn_ask_user_consumer(
                         }
                         Some(AskUserResponseAction::Reject { owner, request_id_str }) => {
                             handle_reject(&acp_client, &owner, &request_id_str).await;
+                        }
+                        Some(AskUserResponseAction::UrlElicitation { owner, request_id_str, accepted }) => {
+                            handle_url_elicitation(&acp_client, &owner, &request_id_str, accepted).await;
                         }
                     }
                 }
@@ -157,6 +168,38 @@ async fn handle_reject(acp_client: &AcpTuiClient, owner: &InteractionOwner, requ
         .await
     {
         tracing::error!(error = %e, "kit ask_user_consumer: send_response (reject) failed");
+    }
+}
+
+/// 处理 URL 模式 elicitation 的结局：完成 → `accept`，取消 → `decline`。
+///
+/// 不携带 content：URL 模式没有用户填写的内容，授权结果由 MCP server 侧校验。
+/// 成功或传输失败都 owner-aware terminalize；失败不重试。
+async fn handle_url_elicitation(
+    acp_client: &AcpTuiClient,
+    owner: &InteractionOwner,
+    request_id_str: &str,
+    accepted: bool,
+) {
+    let response = if accepted {
+        tracing::info!(request_id = %request_id_str, "kit ask_user_consumer: sending URL elicitation accept");
+        json!({"action": "accept"})
+    } else {
+        tracing::info!(request_id = %request_id_str, "kit ask_user_consumer: sending URL elicitation decline");
+        json!({"action": "decline"})
+    };
+
+    let result = i18n::tr(if accepted {
+        "render-interaction-result-answered"
+    } else {
+        "render-interaction-result-rejected"
+    });
+
+    if let Err(e) = acp_client
+        .respond_interaction(owner, response, result)
+        .await
+    {
+        error!(error = %e, "kit ask_user_consumer: send_response (url elicitation) failed");
     }
 }
 

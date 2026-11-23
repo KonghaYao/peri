@@ -58,6 +58,7 @@ pub trait UserInteractionBroker: Send + Sync {
 
 - `Approval` → 转为 `session/request_permission` RPC，每个 `ApprovalItem` 发送独立的 `RequestPermission` 请求
 - `Questions` → 转为 `elicitation/create` RPC，聚合所有 `QuestionItem` 为单个表单 schema
+- URL 模式 MCP elicitation（`handle_url_elicitation`）→ 转为 `elicitation/create` RPC（`ElicitationUrlMode`），只回传 `Accepted` / `Declined` / `Cancelled`，不携带用户内容；它由 MCP server 发起、不是 `UserInteractionBroker` 的变体，但与审批 / 提问共用同一 endpoint、同一把 session 门与同一超时口径。
 
 默认审批模式为 `Forward`，stdio 不自动批准全部工具。`AutoApprove` 必须显式选择，
 是 broker 的本地决策模式，不是另一套 stdio 实现。问答取消携带

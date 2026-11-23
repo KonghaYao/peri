@@ -39,3 +39,4 @@ pub mod hitl_popup;
 pub mod model_quick_switch;
 pub mod oauth_popup;
 pub mod rewind_popup;
+pub mod url_elicitation_popup;

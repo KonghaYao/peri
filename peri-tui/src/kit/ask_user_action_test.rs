@@ -66,6 +66,76 @@ async fn test_ask_user_submit_sends_full_answers_once() {
     handle.await.expect("ask user submit sends full answers once: fixture task and request must complete successfully");
 }
 
+/// URL 模式 elicitation：Done → `accept`（无 content），Cancel → `decline`；
+/// 两种结局都必须回到发起请求的连接，并发出 owner-aware terminal 事件。
+#[tokio::test]
+async fn test_url_elicitation_done_and_cancel_send_action_without_content() {
+    let (client_transport, server_transport) = peri_acp::transport::mpsc::mpsc_transport_pair();
+    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+    client.force_stable_for_test("s1", true);
+    client.spawn_pump(notification_tx);
+    let (tx, rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let handle = super::spawn_ask_user_consumer(client, rx, shutdown.clone());
+    let server = Arc::new(server_transport);
+
+    for (accepted, expected_action) in [(true, "accept"), (false, "decline")] {
+        let request_server = Arc::clone(&server);
+        let request = tokio::spawn(async move {
+            request_server
+                .send_request(
+                    "elicitation/create",
+                    json!({
+                        "mode": "url",
+                        "sessionId": "s1",
+                        "elicitationId": "e-1",
+                        "message": "Authorize the browser session",
+                        "url": "https://example.test/authorize"
+                    }),
+                )
+                .await
+                .expect(
+                    "url elicitation response: fixture task and request must complete successfully",
+                )
+        });
+        let crate::acp_client::AcpNotification::Elicitation {
+            owner,
+            request_id_json,
+            ..
+        } = notification_rx.recv().await.expect(
+            "url elicitation response: the fixture channel must exchange its expected message",
+        )
+        else {
+            panic!()
+        };
+        tx.send(AskUserResponseAction::UrlElicitation {
+            owner,
+            request_id_str: request_id_json,
+            accepted,
+        })
+        .expect("url elicitation response: fixture channel must deliver its expected message");
+        let response = request.await.expect(
+            "url elicitation response: fixture task and request must complete successfully",
+        );
+        assert_eq!(response["action"], expected_action);
+        assert!(
+            response.get("content").is_none(),
+            "URL 模式没有用户填写内容，不得伪造 content"
+        );
+        assert!(matches!(
+            notification_rx.recv().await.expect(
+                "url elicitation response: the fixture channel must exchange its expected message"
+            ),
+            crate::acp_client::AcpNotification::InteractionTerminal { .. }
+        ));
+    }
+
+    shutdown.cancel();
+    handle
+        .await
+        .expect("url elicitation response: fixture task and request must complete successfully");
+}
+
 #[test]
 fn test_ask_user_response_action_variants_carry_owner() {
     let owner = crate::acp_client::InteractionOwner::default();

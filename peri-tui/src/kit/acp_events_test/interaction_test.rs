@@ -417,4 +417,81 @@ fn test_hitl_input_summary_extraction_matrix() {
     );
 }
 
+/// URL 授权在宿主侧结算（超时 `$/cancel_request`、连接关闭）时，弹窗是唯一
+/// 载体：`InteractionTerminal` 必须撤掉待处理项与弹窗，否则用户会对已失效的
+/// request id 继续作答。owner 不匹配时保持现状（其他交互的结算不得误关）。
+#[test]
+#[serial]
+fn test_interaction_terminal_clears_pending_url_elicitation() {
+    let mut state = make_interaction_state();
+    let owner = crate::acp_client::InteractionOwner::default();
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::UrlElicitation(crate::kit::acp_types::PendingInteraction {
+            owner: owner.clone(),
+            request_id_json: serde_json::to_string(&"url-1")
+                .expect("url elicitation terminal: fixture request id must serialize to JSON"),
+            payload: peri_acp_types::event_data::UrlElicitation {
+                server_name: "peri-browser".into(),
+                message: "Authorize the browser session".into(),
+                url: "https://example.test/authorize".into(),
+                elicitation_id: "e-1".into(),
+            },
+        }),
+    );
+    assert!(
+        crate::kit::atoms::URL_ELICITATION_INFO
+            .state()
+            .read()
+            .is_some(),
+        "URL 授权事件必须留下待处理项"
+    );
+    assert_eq!(
+        *crate::kit::atoms::POPUP_KIND.state().read(),
+        Some(crate::kit::atoms::PopupKind::UrlElicitation)
+    );
+
+    // 其他 owner 的结算不得误关本会话的 URL 授权弹窗。
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::InteractionTerminal {
+            owner: crate::acp_client::InteractionOwner {
+                token: 999,
+                ..Default::default()
+            },
+            outcome: crate::acp_client::InteractionUiOutcome::Expired {
+                reason: crate::acp_client::InteractionExpiryReason::ServerCancelled,
+            },
+        },
+    );
+    assert!(
+        crate::kit::atoms::URL_ELICITATION_INFO
+            .state()
+            .read()
+            .is_some(),
+        "owner 不匹配的 InteractionTerminal 不得清空待处理项"
+    );
+
+    super::dispatch_and_notify(
+        &mut state,
+        &AcpEventData::InteractionTerminal {
+            owner,
+            outcome: crate::acp_client::InteractionUiOutcome::Expired {
+                reason: crate::acp_client::InteractionExpiryReason::ServerCancelled,
+            },
+        },
+    );
+    assert!(
+        crate::kit::atoms::URL_ELICITATION_INFO
+            .state()
+            .read()
+            .is_none(),
+        "宿主侧结算后 URL 授权待处理项必须清空"
+    );
+    assert!(
+        crate::kit::atoms::POPUP_KIND.state().read().is_none(),
+        "宿主侧结算后 URL 授权弹窗必须关闭"
+    );
+}
+
 use crate::kit::atoms::{FOLD_OVERRIDES, VIEW_MODELS, ViewModelsSnapshot};

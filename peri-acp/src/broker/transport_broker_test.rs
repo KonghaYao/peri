@@ -980,3 +980,88 @@ fn test_ask_user_timeout_reads_env() {
         Some(Duration::from_secs(300))
     );
 }
+
+// ─── URL 模式 elicitation：参数构造 / 响应解析 ───
+
+#[test]
+fn test_build_url_elicitation_params_carries_scope_url_and_server_meta() {
+    let params = crate::broker::transport_broker::build_url_elicitation_params(
+        "Authorize the browser session",
+        "https://example.test/authorize",
+        "e-1",
+        Some("peri-browser"),
+        SessionId::new("s1"),
+    );
+
+    assert_eq!(params["mode"], "url");
+    assert_eq!(params["sessionId"], "s1");
+    assert_eq!(params["message"], "Authorize the browser session");
+    assert_eq!(params["url"], "https://example.test/authorize");
+    assert_eq!(params["elicitationId"], "e-1");
+    assert_eq!(
+        params["_meta"][peri_acp_types::interaction::MCP_ELICITATION_SERVER_META_KEY],
+        "peri-browser"
+    );
+    // URL 模式不带表单 schema。
+    assert!(params.get("requestedSchema").is_none());
+}
+
+#[test]
+fn test_build_url_elicitation_params_omits_meta_without_server_name() {
+    let params = crate::broker::transport_broker::build_url_elicitation_params(
+        "Authorize",
+        "https://example.test/authorize",
+        "",
+        None,
+        SessionId::new("s1"),
+    );
+
+    assert_eq!(params["mode"], "url");
+    assert_eq!(params["elicitationId"], "");
+    assert!(
+        params.get("_meta").is_none(),
+        "server 名未知时不得写出 _meta"
+    );
+}
+
+#[test]
+fn test_parse_url_elicitation_accept_is_accepted() {
+    let decision = crate::broker::transport_broker::parse_url_elicitation_response(
+        json!({"action": "accept"}),
+    );
+    assert_eq!(
+        decision,
+        crate::broker::transport_broker::UrlElicitationDecision::Accepted
+    );
+}
+
+#[test]
+fn test_parse_url_elicitation_decline_and_cancel() {
+    assert_eq!(
+        crate::broker::transport_broker::parse_url_elicitation_response(
+            json!({"action": "decline"})
+        ),
+        crate::broker::transport_broker::UrlElicitationDecision::Declined
+    );
+    assert_eq!(
+        crate::broker::transport_broker::parse_url_elicitation_response(
+            json!({"action": "cancel"})
+        ),
+        crate::broker::transport_broker::UrlElicitationDecision::Cancelled
+    );
+}
+
+#[test]
+fn test_parse_url_elicitation_garbage_is_declined() {
+    // 解析失败 / 未知 action 都不得被当成「用户已确认」。
+    assert_eq!(
+        crate::broker::transport_broker::parse_url_elicitation_response(json!({"nope": 1})),
+        crate::broker::transport_broker::UrlElicitationDecision::Declined
+    );
+    assert_eq!(
+        crate::broker::transport_broker::parse_url_elicitation_response(
+            json!({"action": "something-else"})
+        ),
+        crate::broker::transport_broker::UrlElicitationDecision::Declined
+    );
+}

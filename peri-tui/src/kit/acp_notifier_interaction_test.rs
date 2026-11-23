@@ -56,6 +56,91 @@ async fn test_request_permission_forwards_hitl_pending_event() {
     shutdown.cancel();
 }
 
+/// URL 模式 elicitation 必须投影成 `UrlElicitation`（不得落成空表单 AskUser）。
+#[tokio::test]
+#[serial]
+async fn test_url_mode_elicitation_forwards_url_event() {
+    crate::kit::atoms::init_atoms();
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::Elicitation {
+            owner: crate::acp_client::InteractionOwner {
+                kind: crate::acp_client::ReverseInteractionKind::Elicitation,
+                ..Default::default()
+            },
+            request_id_json: "\"url-req\"".into(),
+            params: json!({
+                "mode": "url",
+                "sessionId": "s1",
+                "elicitationId": "e-1",
+                "message": "Authorize the browser session",
+                "url": "https://example.test/authorize",
+                "_meta": {"io.peri/mcp-server": "peri-browser"}
+            }),
+        })
+        .await
+        .expect("URL elicitation 必须能进入 notifier 队列");
+
+    let event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收到 UrlElicitation");
+    assert_eq!(event.active_session_id, "s1");
+    match event.event {
+        AcpEventData::UrlElicitation(pending) => {
+            assert_eq!(pending.request_id_json, "\"url-req\"");
+            assert_eq!(pending.payload.server_name, "peri-browser");
+            assert_eq!(pending.payload.message, "Authorize the browser session");
+            assert_eq!(pending.payload.url, "https://example.test/authorize");
+            assert_eq!(pending.payload.elicitation_id, "e-1");
+        }
+        other => panic!("expected UrlElicitation, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
+/// URL 模式缺 `_meta` 时不臆造 server 名（空串，由弹窗回落通用标签）。
+#[tokio::test]
+#[serial]
+async fn test_url_mode_elicitation_without_meta_has_no_server_name() {
+    crate::kit::atoms::init_atoms();
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::Elicitation {
+            owner: crate::acp_client::InteractionOwner {
+                kind: crate::acp_client::ReverseInteractionKind::Elicitation,
+                ..Default::default()
+            },
+            request_id_json: "7".into(),
+            params: json!({
+                "mode": "url",
+                "sessionId": "s1",
+                "message": "Authorize",
+                "url": "https://example.test/authorize"
+            }),
+        })
+        .await
+        .expect("URL elicitation 必须能进入 notifier 队列");
+
+    let event = bridge_rx
+        .recv()
+        .await
+        .expect("bridge 应收到 UrlElicitation");
+    match event.event {
+        AcpEventData::UrlElicitation(pending) => {
+            assert_eq!(pending.request_id_json, "7");
+            assert_eq!(pending.payload.server_name, "");
+            assert_eq!(pending.payload.elicitation_id, "");
+        }
+        other => panic!("expected UrlElicitation, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
 /// [回归测试] Number(7) 与 String("7") 必须保留 variant，且连续通知保持 FIFO。
 #[tokio::test]
 async fn test_request_permission_queued_events_keep_number_and_string_ids_atomic() {

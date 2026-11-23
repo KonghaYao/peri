@@ -3689,6 +3689,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "peri-browser"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.9",
+ "clap",
+ "futures",
+ "peri-browser-cdp",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "peri-browser-cdp"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "peri-browser-gateway"
 version = "0.2.0"
 dependencies = [
@@ -3698,6 +3740,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures",
+ "peri-browser-cdp",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

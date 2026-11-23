@@ -129,6 +129,23 @@ pub struct QuestionOption {
     pub description: String,
 }
 
+/// URL 模式 elicitation：MCP server 请求用户在浏览器里完成授权。
+///
+/// 由 TUI notifier 从 ACP 反向请求（`elicitation/create`，`mode: "url"`）投影，
+/// **不是** ACP 自定义事件——`AcpEventData::decode` 不产出对应变体。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct UrlElicitation {
+    /// 发起请求的 MCP server 名；请求未带 `_meta` 时为空串（不得假设）。
+    pub server_name: String,
+    /// server 给出的人类可读说明。
+    pub message: String,
+    /// 需要用户打开的授权链接。
+    pub url: String,
+    /// MCP 侧请求标识；协议 2026-07-28 起可为空。
+    pub elicitation_id: String,
+}
+
 /// `"rewind-preview"` — preview of changes that will be undone by a rewind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

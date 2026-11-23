@@ -479,6 +479,25 @@ impl SessionEnvironment {
                 Arc::clone(&interaction_gate),
             ),
         );
+        // URL 模式 MCP elicitation：MCP server 的授权链接经本会话 router 投给
+        // 唯一的在线 endpoint（Host 归属；无 / 多 endpoint 一律 decline，不广播）。
+        // 注入必须早于 `activate()`——池的 `run_initialize` 等在 `activation`
+        // 取消后才建连，晚于本点的注入才会被首个连接看到。
+        //
+        // 本装配点（`session_scoped = true`）的池由本会话独占，所以「连接所在池
+        // = 归属会话」在建连前已经成立；host 级池（无会话归属）不装配端口，其
+        // 连接上的 elicitation 按 decline 结算。
+        if let Some(pool) = cfg.mcp_pool.as_ref().and_then(|port| {
+            Arc::clone(port)
+                .downcast_arc::<peri_middlewares::mcp::McpClientPool>()
+                .ok()
+        }) {
+            pool.set_url_elicitation_port(Arc::new(
+                super::super::mcp_url_elicitation::SessionUrlElicitation::new(Arc::clone(
+                    &interaction_router,
+                )),
+            ));
+        }
         let session_invocation = if mcp_enabled {
             let pool = cfg
                 .mcp_pool

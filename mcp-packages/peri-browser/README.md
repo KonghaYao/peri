@@ -1,6 +1,6 @@
-# peri-browser MCP（计划）
+# peri-browser MCP
 
-把 Kitesurf 作为 Peri 的浏览器后端：`kitesurf` 外部二进制提供浏览器，`peri-browser` 负责 CDP 到 MCP 的转换，`peri-browser-gateway` 提供人看的监控页。当前目录只放计划，不含实现。
+把 Kitesurf 作为 Peri 的浏览器后端：`kitesurf` 外部二进制提供浏览器，`peri-browser` 负责 CDP 到 MCP 的转换，`peri-browser-gateway` 提供人看的监控页。MCP server 与共享 `peri-browser-cdp` 已实现；网关是独立二进制，§10 中标注“计划”的网关变量尚未实现。
 
 ## 1. 目标
 
@@ -27,7 +27,7 @@
 
 ## 3. Kitesurf 的隔离模型（0.5.3 实测）
 
-macOS arm64，release tarball `kitesurf-0.5.3-darwin-arm64.tar.gz`（sha256 `6942287…0080c2`），单实例、临时 profile；主流程 54 项检查通过，多 tab、console/network、关闭 target 另做补充验证：
+macOS arm64，release tarball `kitesurf-0.5.3-darwin-arm64.tar.gz`（sha256 `6942287…0080c2`），单实例、临时 profile；主流程 54 项检查通过，多 tab、console/network、关闭 target 另做补充验证。交付前的 live 检查在 0.5.4 上复跑建页、导航与 `fill`，未发现与本节矩阵冲突的行为：
 
 | 场景 | 实际结果 |
 | --- | --- |
@@ -235,9 +235,9 @@ sequenceDiagram
 
 ## 7. 工具面（参考 chrome-devtools-mcp）
 
-| 分类 | 计划工具 |
+| 分类 | 工具 |
 | --- | --- |
-| 会话 | `browser_status`、`yield_page`、`request_human` |
+| 会话 | `browser_status`、`yield_page`、`request_human`、`request_authorization` |
 | 页面 | `list_pages`、`select_page`、`new_page`、`navigate_page`、`close_page` |
 | 读取 | `take_snapshot`、`take_screenshot`、`evaluate_script` |
 | 交互 | `click`、`fill`、`hover`、`press_key`、`wait_for` |
@@ -253,6 +253,12 @@ sequenceDiagram
 - `request_human` 阻塞当前工具调用，返回人的操作结果或 `no_human`；不改变页面所有权（人持有期间 agent 不写）。
 - 错误映射：`Another controller owns this page session`、`Target belongs to another page session`、`This method is not available on a page-session connection`、`Control has changed`、viewer 拒绝、`page_busy_by_human`、`yield_pending`、25 s egress timeout 都转成稳定错误码。
 - console/network 诊断对 page controller 可用（已实测 `Runtime.consoleAPICalled` 与 `Network.*`）；viewer 可读 DOM 与画面，但不能 `Runtime.enable`/`Network.enable`，因此 console/network 只在人持 controller 时由网关采集；监控页不再内置面板，诊断交给官方 DevTools。
+
+技能与传输：
+
+- 通过 SEP-2640（`io.modelcontextprotocol/skills`）暴露随包技能：`skills/list`、`skills/get` 与 `resources/read`（`skill://peri-browser/<skill>/SKILL.md`）；digest 为 `sha256:` 形式，size 与文件字节一致。
+- 默认 stdio；`--http <addr>` 启用 MCP Streamable HTTP，技能随同一服务器暴露，不另起端点。
+- `request_authorization` 用 URL 模式 elicitation 把授权链接交给前端弹窗，不导航当前页面；前端拒绝或客户端不支持时返回 `declined`/`unsupported`。
 
 ## 8. 生命周期
 
@@ -285,14 +291,19 @@ sequenceDiagram
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `KITESURF_CDP_URL` | 无（必须注入） | 共享实例的 CDP 端点 |
+| `PERI_BROWSER_CDP_URL` | 无 | 直接运行时覆盖 `KITESURF_CDP_URL`；空值忽略 |
 | `PERI_BROWSER_OWNER` | `peri-browser` | Browser 端点 owner；同一实例的所有会话共用 |
+| `PERI_BROWSER_SESSION_NAME` | 同 `PERI_BROWSER_OWNER` | 网关注册与监控使用的会话标签 |
 | `PERI_BROWSER_PROVISION_LOCK` | 运行目录下 `kitesurf-provision.lock` | 建页短连接的互斥锁 |
+| `PERI_BROWSER_PROVISION_LOCK_WAIT_MS` | 10000 | 等待建页锁的上限 |
+| `PERI_BROWSER_LOCK_STALE_MS` | 30000 | 建页锁的 stale 判定年龄 |
 | `PERI_BROWSER_CONNECT_TIMEOUT_MS` | 5000 | 页面与建页连接超时 |
 | `PERI_BROWSER_PAGE_WAIT_MS` | 30000 | 等待页面进入 `complete` 的上限 |
 | `PERI_BROWSER_IDLE_YIELD_MS` | 15000 | agent 空闲多久自动让出 controller |
 | `PERI_BROWSER_RECLAIM_WAIT_MS` | 2000 | agent 发起操作时等待网关交还的上限 |
 | `PERI_BROWSER_YIELD_TIMEOUT_MS` | 60000 | 手动接管等待让出的上限 |
 | `PERI_BROWSER_REQUEST_HUMAN_TIMEOUT_MS` | 300000 | `request_human` 等人响应的上限 |
+| `PERI_BROWSER_HTTP_ADDR` | 无 | 未传 `--http` 时的 Streamable HTTP 监听地址 |
 | `PERI_BROWSER_GATEWAY_BIN` | `peri-browser-gateway`（PATH） | 宿主拉起网关的命令 |
 | `PERI_BROWSER_GATEWAY_SOCK` | 运行目录 `peri-browser-gateway.sock` | MCP ↔ 网关 |
 | `PERI_BROWSER_GATEWAY_SECRET` | 运行目录下随机生成 | token 派生；重启保持 URL 不变 |
@@ -302,6 +313,10 @@ sequenceDiagram
 | `PERI_BROWSER_FRAME_QUALITY` | 70 | screencast JPEG 质量 |
 | `PERI_BROWSER_FRAME_MAX_WIDTH` | 1600 | 帧宽上限，跟随最大 viewer |
 | `PERI_BROWSER_MONITOR_TLS_CERT` / `_KEY` | 无 | 网关自己终止 TLS 时使用；否则由反代终止 |
+
+状态：`PERI_BROWSER_GATEWAY_BIN`、`PERI_BROWSER_MONITOR_TOKEN_TTL_MS`、`PERI_BROWSER_MONITOR_MAX_VIEWERS`、`PERI_BROWSER_FRAME_QUALITY`、`PERI_BROWSER_FRAME_MAX_WIDTH`、`PERI_BROWSER_MONITOR_TLS_CERT`/`_KEY` 是网关后续计划项，当前三个 crate 均未读取；其余表项已由所属进程读取（网关项由 `peri-browser-gateway` 读取，MCP 项由 `peri-browser` 读取）。
+
+传输：默认 stdio；`--http <addr>` 切换为 MCP Streamable HTTP，技能与工具在同一服务器暴露。`KITESURF_CDP_URL` 缺席时 `browser_status` 报告未连接，浏览器工具返回可操作的启动提示，进程不退出。
 
 ## 11. 实施顺序
 

@@ -11,6 +11,14 @@ use rmcp::model::ClientCapabilities;
 #[allow(deprecated)]
 use rmcp::model::CustomNotification;
 #[allow(deprecated)]
+use rmcp::model::ElicitRequestParams;
+#[allow(deprecated)]
+use rmcp::model::ElicitResult;
+#[allow(deprecated)]
+use rmcp::model::ElicitationAction;
+#[allow(deprecated)]
+use rmcp::model::ElicitationCapability;
+#[allow(deprecated)]
 use rmcp::model::Implementation;
 #[allow(deprecated)]
 use rmcp::model::InitializeRequestParams;
@@ -21,6 +29,8 @@ use rmcp::model::ProgressNotificationParam;
 #[allow(deprecated)]
 use rmcp::model::TaskStatusNotificationParams;
 #[allow(deprecated)]
+use rmcp::model::UrlElicitationCapability;
+#[allow(deprecated)]
 use rmcp::model::TASKS_EXTENSION_ID;
 #[allow(deprecated)]
 use rmcp::service::MaybeSendFuture;
@@ -30,6 +40,8 @@ use rmcp::service::NotificationContext;
 use rmcp::service::Peer;
 #[allow(deprecated)]
 use rmcp::service::QuitReason;
+#[allow(deprecated)]
+use rmcp::service::RequestContext;
 #[allow(deprecated)]
 use rmcp::service::RoleClient;
 #[allow(deprecated)]
@@ -100,17 +112,88 @@ impl Drop for McpServiceOwner {
 pub(crate) struct PeriClientHandler {
     info: InitializeRequestParams,
     tap: Option<Arc<NotificationTap>>,
+    /// URL elicitation 的归属来源：连接所在池 + 连接名。未装配时一律 decline。
+    elicitation: Option<super::UrlElicitationSource>,
+    /// form 模式首次被拒时的「只记一次」标记（每个连接一条日志）。
+    form_elicitation_declined: std::sync::atomic::AtomicBool,
 }
 
 impl PeriClientHandler {
     pub(crate) fn new(info: InitializeRequestParams, tap: Option<Arc<NotificationTap>>) -> Self {
-        Self { info, tap }
+        Self {
+            info,
+            tap,
+            elicitation: None,
+            form_elicitation_declined: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// 装配 URL elicitation 投递面（池 + 连接名，弱引用避免池-服务环）。
+    pub(crate) fn with_url_elicitation(
+        mut self,
+        pool: std::sync::Weak<super::McpClientPool>,
+        server_name: &str,
+    ) -> Self {
+        self.elicitation = Some(super::UrlElicitationSource::new(pool, server_name));
+        self
     }
 }
 
 impl ClientHandler for PeriClientHandler {
     fn get_info(&self) -> InitializeRequestParams {
         self.info.clone()
+    }
+
+    /// MCP `elicitation/create` 的客户端处理。
+    ///
+    /// 仅支持 URL 模式：请求交给连接所属池注入的宿主端口，等待用户在前台弹窗
+    /// 里选择。其余模式（form / 未知）一律 decline——Peri 的表单交互走 ACP
+    /// `elicitation/create`（AskUser），不复用 MCP 的表单语义。rmcp 为每个对端
+    /// 请求单独 spawn service task，本函数 await 用户决策不会阻塞连接读循环。
+    #[allow(clippy::manual_async_fn)]
+    fn create_elicitation(
+        &self,
+        request: ElicitRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> impl Future<Output = Result<ElicitResult, rmcp::ErrorData>> + MaybeSendFuture + '_ {
+        async move {
+            let action = match request {
+                ElicitRequestParams::UrlElicitationParams {
+                    message,
+                    url,
+                    elicitation_id,
+                    ..
+                } => match &self.elicitation {
+                    Some(source) => {
+                        let outcome = source.elicit(message, url, elicitation_id).await;
+                        match outcome {
+                            super::UrlElicitationOutcome::Accepted => ElicitationAction::Accept,
+                            super::UrlElicitationOutcome::Declined => ElicitationAction::Decline,
+                            super::UrlElicitationOutcome::Cancelled => ElicitationAction::Cancel,
+                        }
+                    }
+                    None => {
+                        tracing::info!(
+                            "URL elicitation 无前台投递面（连接未装配宿主端口），按 decline 处理"
+                        );
+                        ElicitationAction::Decline
+                    }
+                },
+                ElicitRequestParams::FormElicitationParams { .. } => {
+                    if !self
+                        .form_elicitation_declined
+                        .swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        tracing::info!(
+                            "MCP form elicitation 不在支持范围（仅声明 URL 模式），已 decline"
+                        );
+                    }
+                    ElicitationAction::Decline
+                }
+                _ => ElicitationAction::Decline,
+            };
+            Ok(ElicitResult::new(action))
+        }
     }
 
     fn on_cancelled(
@@ -326,6 +409,10 @@ pub(crate) fn mcpp_client_info_for_profile(
     extensions.insert(TASKS_EXTENSION_ID.to_string(), serde_json::Map::new());
     let mut capabilities = ClientCapabilities::default();
     capabilities.extensions = Some(extensions);
+    // 只声明 URL 模式：form 模式的 MCP elicitation 不在支持范围（见
+    // `PeriClientHandler::create_elicitation`）。未声明时 server 不会发起请求。
+    capabilities.elicitation =
+        Some(ElicitationCapability::new().with_url(UrlElicitationCapability::new()));
     InitializeRequestParams::new(capabilities, Implementation::from_build_env())
 }
 

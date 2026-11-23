@@ -8,8 +8,9 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol_schema::v1::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
-    ElicitationContentValue, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
-    EnumOption, MultiSelectPropertySchema, StringPropertySchema,
+    ElicitationContentValue, ElicitationFormMode, ElicitationId, ElicitationSchema,
+    ElicitationSessionScope, ElicitationUrlMode, EnumOption, MultiSelectPropertySchema,
+    StringPropertySchema,
 };
 use async_trait::async_trait;
 use peri_acp_types::interaction::{
@@ -26,6 +27,20 @@ use crate::transport::RequestTransport;
 pub enum ApprovalMode {
     Forward,
     AutoApprove,
+}
+
+/// URL 模式 elicitation 的决策。
+///
+/// form 模式用 [`InteractionResponse::Answers`] 承载用户内容；URL 模式没有
+/// 内容，只有「完成 / 拒绝 / 中止」三种事实，因此单独成型，不塞进 Answers。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlElicitationDecision {
+    /// 用户在浏览器完成流程（ACP / MCP `accept`）。
+    Accepted,
+    /// 用户拒绝，或本端无法投递 / 超时（`decline`——授权未发生，操作可继续）。
+    Declined,
+    /// 用户或宿主中止整次操作（`cancel`）。
+    Cancelled,
 }
 
 /// A broker that uses [`RequestTransport`] to relay HITL and AskUser
@@ -228,6 +243,47 @@ impl AcpTransportBroker {
             Err(_elapsed) => InteractionResponse::Rejected,
         }
     }
+
+    /// URL 模式 `elicitation/create`：把授权链接交给客户端，等用户完成或拒绝。
+    ///
+    /// 与 [`UserInteractionBroker::request`] 的 Questions 分支共用同一 endpoint、
+    /// 同一把 session 门与同一超时口径（`with_timeout`）：同一 session 同一时刻
+    /// 只有一个交互面在前台，URL 弹窗不与审批 / 提问弹窗叠放。
+    ///
+    /// 超时按 `Declined` 结算（授权没有发生，MCP 侧可继续执行未授权分支），
+    /// 不伪称用户拒绝以外的第三种事实。
+    pub async fn handle_url_elicitation(
+        &self,
+        message: &str,
+        url: &str,
+        elicitation_id: &str,
+        server_name: Option<&str>,
+    ) -> UrlElicitationDecision {
+        let params = build_url_elicitation_params(
+            message,
+            url,
+            elicitation_id,
+            server_name,
+            self.session_id.clone(),
+        );
+        let _interaction_guard = self.interaction_gate.lock().await;
+        let request = self.transport.send_request("elicitation/create", params);
+        let result = match self.timeout {
+            Some(timeout) => peri_time::timeout(timeout, request).await,
+            None => Ok(request.await),
+        };
+        match result {
+            Ok(Ok(response)) => parse_url_elicitation_response(response),
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "URL elicitation request failed");
+                UrlElicitationDecision::Declined
+            }
+            Err(_elapsed) => {
+                tracing::info!("URL elicitation timed out; treating as declined");
+                UrlElicitationDecision::Declined
+            }
+        }
+    }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────────
@@ -275,6 +331,70 @@ pub(crate) fn build_elicitation_params(
     let mut params = serde_json::to_value(&request).unwrap_or_default();
     inject_option_descriptions(&mut params, requests);
     params
+}
+
+/// `_meta` 键：发起 URL elicitation 的 MCP server 名。
+///
+/// 单一事实源在契约层（`peri-acp-types`），TUI 侧按同一键读取。
+pub(crate) const MCP_SERVER_META_KEY: &str =
+    peri_acp_types::interaction::MCP_ELICITATION_SERVER_META_KEY;
+
+/// 构造 URL 模式 `elicitation/create` 参数。
+///
+/// 与 form 同源：scope 用 `ElicitationSessionScope`（session 归属是客户端回传
+/// 与路由的事实）。`elicitation_id` 由调用方给出（MCP 2026-07-28 起可为空）。
+pub(crate) fn build_url_elicitation_params(
+    message: &str,
+    url: &str,
+    elicitation_id: &str,
+    server_name: Option<&str>,
+    session_id: SessionId,
+) -> serde_json::Value {
+    let mode = ElicitationUrlMode::new(
+        ElicitationSessionScope::new(session_id),
+        ElicitationId::new(elicitation_id.to_string()),
+        url.to_string(),
+    );
+    let mut request = CreateElicitationRequest::new(mode, message.to_string());
+    if let Some(server_name) = server_name {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            MCP_SERVER_META_KEY.to_string(),
+            serde_json::Value::String(server_name.to_string()),
+        );
+        request.meta = Some(meta);
+    }
+    serde_json::to_value(&request).unwrap_or_default()
+}
+
+/// 解析 URL 模式 elicitation 响应：完成 / 拒绝 / 中止。
+///
+/// 解析失败与未知 action 都按 `Declined` 结算：授权没有成立，调用方不得据此
+/// 认为用户已确认。
+pub(crate) fn parse_url_elicitation_response(
+    response: serde_json::Value,
+) -> UrlElicitationDecision {
+    match serde_json::from_value::<CreateElicitationResponse>(response) {
+        Ok(resp) => match resp.action {
+            ElicitationAction::Accept(_) => UrlElicitationDecision::Accepted,
+            ElicitationAction::Decline => {
+                tracing::info!("URL elicitation declined by user");
+                UrlElicitationDecision::Declined
+            }
+            ElicitationAction::Cancel => {
+                tracing::info!("URL elicitation cancelled");
+                UrlElicitationDecision::Cancelled
+            }
+            _ => {
+                tracing::warn!("Unknown URL elicitation action, treating as declined");
+                UrlElicitationDecision::Declined
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse URL elicitation response");
+            UrlElicitationDecision::Declined
+        }
+    }
 }
 
 pub(crate) fn parse_elicitation_response(

@@ -585,6 +585,42 @@ impl dyn McpPoolPort {
     }
 }
 
+/// 一次 URL 模式 MCP elicitation 请求（从 MCP `elicitation/create` 参数投影）。
+///
+/// MCP 客户端在 `peri-middlewares`，投递面（ACP 连接与 TUI 弹窗）在 ACP 侧；
+/// 两侧只共享本契约，端口实现由宿主提供。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlElicitationRequest {
+    /// 发起请求的 MCP server（池内名称）。
+    pub server_name: String,
+    /// 给人看的说明文本。
+    pub message: String,
+    /// 需要用户在浏览器中打开的链接。
+    pub url: String,
+    /// MCP 侧的请求标识（`elicitationId`；协议 2026-07-28 起可为空）。
+    pub elicitation_id: String,
+}
+
+/// URL elicitation 端口决策，映射到 MCP `ElicitationAction`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlElicitationOutcome {
+    /// 用户确认完成（`accept`）。
+    Accepted,
+    /// 用户拒绝，或本端无法投递（`decline`）。
+    Declined,
+    /// 用户/宿主中止（`cancel`）。
+    Cancelled,
+}
+
+/// 宿主注入的 URL elicitation 投递端口（`peri-middlewares` 的会话池消费）。
+///
+/// 实现必须自己限定「投递给哪个前台连接」：端口只收到 server 名称与请求内容，
+/// **不得**把链接广播到任意连接。
+#[async_trait::async_trait]
+pub trait UrlElicitationPort: Send + Sync {
+    async fn elicit_url(&self, request: UrlElicitationRequest) -> UrlElicitationOutcome;
+}
+
 /// ACP 侧 agent→client 发送网关（MCP over ACP 的传输切片）。
 ///
 /// 由 host 按 ACP 连接提供（`AcpTransport` 的请求子集）；middlewares 的

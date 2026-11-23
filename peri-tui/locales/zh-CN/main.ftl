@@ -755,6 +755,19 @@ oauth-hint-input-focus =   粘贴授权码后 Enter 提交  |  Tab: 切回按钮
 oauth-copied-hint =   ✓ 授权链接已复制（可在浏览器打开）
 oauth-opened-hint =   已在浏览器打开授权页（未弹出可复制链接）
 
+# ---- MCP URL 授权弹窗 ----
+
+popup-url-elicitation-title =  MCP 授权请求 
+popup-url-elicitation-server = 服务器：{ $server }
+popup-url-elicitation-server-unknown = 服务器：MCP
+popup-url-elicitation-hints = o: 打开链接 · c: 复制链接
+popup-url-elicitation-keys = Enter: 完成 · Esc: 取消
+popup-url-elicitation-done = 完成
+popup-url-elicitation-empty = 当前没有待处理的授权请求
+popup-url-elicitation-copied = 链接已复制
+popup-url-elicitation-copy-failed = 复制失败，请手动打开链接
+popup-url-elicitation-open-blocked = 不是网页链接，已阻止自动打开；可复制后自行检查
+
 # ---- Login 面板 ----
 
 login-field-name = 名称

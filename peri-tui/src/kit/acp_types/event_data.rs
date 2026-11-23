@@ -229,6 +229,12 @@ pub enum AcpEventData {
     /// `"ask-user"` -- multi-question form initiated by the agent.
     AskUser(PendingInteraction<AskUser>),
 
+    /// URL 模式 `elicitation/create`：MCP server 请求用户在浏览器完成授权。
+    ///
+    /// TUI 内部事件（与 `AskUser` 同族）：notifier 从 ACP 反向请求投影，响应仍
+    /// 走同一条反向请求（`respond_interaction`），不经 ACP 自定义事件。
+    UrlElicitation(PendingInteraction<UrlElicitation>),
+
     /// TUI 内部事件（Slice 4 §6.8）：interaction block 结果回写。仅 TUI 内部
     /// 使用，不走 ACP 协议——`ask_user_action` / `hitl_response` 消费者在
     /// 提交/拒绝后发出，bridge 扫描 committed 中 pending 的 `TuiAskUserBlock`
@@ -785,5 +791,5 @@ use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk, TuiToolEnded, Tui
 use peri_acp_types::event_data::{
     AskUser, BudgetWarning, FileSuggestions, HitlPending, OauthNeeded, PluginActionResult,
     PluginSearchResult, PluginSnapshot, Prediction, Progress, RewindPreview, SystemNotification,
-    ToolCount,
+    ToolCount, UrlElicitation,
 };

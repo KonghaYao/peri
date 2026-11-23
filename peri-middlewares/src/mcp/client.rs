@@ -28,6 +28,7 @@ mod subscription;
 pub(crate) mod task_owner_metadata;
 mod transport;
 mod types;
+mod url_elicitation;
 
 use super::builtin::context::BuiltinContextError;
 use super::builtin::context::BuiltinInstanceContext;
@@ -86,13 +87,19 @@ use status::{mcp_error_summary, mcp_status_label};
 #[cfg(test)]
 pub(crate) use subscription::build_subscription_filter;
 pub(crate) use subscription::setup_subscription;
+/// 仅测试可见：无 elicitation 端口的旧装配入口（生产路径不再使用）。
+#[cfg(test)]
+pub(crate) use transport::serve_client_auto;
 pub(crate) use transport::{
-    build_authed_transport, build_http_transport, serve_client_auto, serve_client_auto_for_server,
+    build_authed_transport, build_http_transport, serve_client_auto_for_acp,
+    serve_client_auto_for_server,
 };
 pub(crate) use types::{AcpConnectionIdentity, McpConnectionKey};
 pub use types::{
     ClientStatus, McpClientHandle, McpInitStatus, McpPoolError, OAuthStatus, ServerInfo,
 };
+pub(crate) use url_elicitation::UrlElicitationSource;
+pub use url_elicitation::{UrlElicitationOutcome, UrlElicitationPort, UrlElicitationRequest};
 
 mod ports;
 mod session_bindings;

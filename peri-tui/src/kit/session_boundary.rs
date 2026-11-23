@@ -67,6 +67,7 @@ fn project_session_boundary_inner(target_session_id: Option<&str>, retire_histor
     *atoms::ASK_USER_PENDING.state().write() = None;
     atoms::OAUTH_INFO.set(None);
     atoms::OAUTH_SESSION_ID.set(None);
+    atoms::URL_ELICITATION_INFO.set(None);
     panel_registry::close_panel(PanelKind::AskUser);
 
     let popup = *atoms::POPUP_KIND.state().read();
@@ -83,7 +84,12 @@ fn project_session_boundary_inner(target_session_id: Option<&str>, retire_histor
         });
     if matches!(
         popup,
-        Some(atoms::PopupKind::Hitl | atoms::PopupKind::AskUser | atoms::PopupKind::OAuth)
+        Some(
+            atoms::PopupKind::Hitl
+                | atoms::PopupKind::AskUser
+                | atoms::PopupKind::OAuth
+                | atoms::PopupKind::UrlElicitation
+        )
     ) || (popup == Some(atoms::PopupKind::Confirm) && session_confirm)
     {
         *atoms::POPUP_KIND.state().write() = None;

@@ -12,9 +12,11 @@ use super::{McpClientPool, McpServiceWrapper, NotificationTap, PeriClientHandler
 /// 使用官方 lifecycle 协商并限制总连接时间（initialize / reconnect 共用）。
 ///
 /// 所有连接使用 Auto：先尝试 `server/discover`，不支持时回退 legacy initialize。
-/// 本入口不装配通知 sink（ACP 声明连接 / 测试直连）；生产 server 用
-/// [`serve_client_auto_for_server`]。
+/// 本入口不装配通知 sink、不接宿主 elicitation 端口；生产连接一律走
+/// [`serve_client_auto_for_server`]（静态）或 [`serve_client_auto_for_acp`]
+/// （MCP over ACP），本入口只服务测试直连。
 // ClientInitializeError 来自 rmcp crate，无法修改其定义
+#[cfg(test)]
 #[allow(clippy::result_large_err)]
 pub(crate) async fn serve_client_auto<T, E, A>(
     transport: T,
@@ -32,7 +34,8 @@ where
     serve_client_auto_with_handler(handler, transport, timeout).await
 }
 
-/// 与 [`serve_client_auto`] 同一条 Auto 握手，但把该 server 的通知汇入 pool 缓冲。
+/// 与 [`serve_client_auto`] 同一条 Auto 握手，但把该 server 的通知汇入 pool 缓冲，
+/// 并把 URL elicitation 交回 pool 的宿主端口。
 #[allow(clippy::result_large_err)]
 pub(crate) async fn serve_client_auto_for_server<T, E, A>(
     transport: T,
@@ -47,7 +50,29 @@ where
     let handler = PeriClientHandler::new(
         super::mcpp_client_info_for_profile(&pool.capability_profile),
         Some(Arc::new(NotificationTap::new(pool, server))),
-    );
+    )
+    .with_url_elicitation(Arc::downgrade(pool), server);
+    serve_client_auto_with_handler(handler, transport, timeout).await
+}
+
+/// 会话级 ACP（MCP over ACP）连接：通知由 ACP 桥接自行路由（不装配 pool tap），
+/// 但 URL elicitation 与静态连接走同一宿主端口——连接所在池就是归属会话。
+#[allow(clippy::result_large_err)]
+pub(crate) async fn serve_client_auto_for_acp<T, E, A>(
+    transport: T,
+    pool: &Arc<McpClientPool>,
+    server: &str,
+    timeout: std::time::Duration,
+) -> Result<Result<McpServiceWrapper, ClientInitializeError>, peri_time::Elapsed>
+where
+    T: IntoTransport<RoleClient, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let handler = PeriClientHandler::new(
+        super::mcpp_client_info_for_profile(&pool.capability_profile),
+        None,
+    )
+    .with_url_elicitation(Arc::downgrade(pool), server);
     serve_client_auto_with_handler(handler, transport, timeout).await
 }
 

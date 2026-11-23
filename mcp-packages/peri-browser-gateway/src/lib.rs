@@ -14,7 +14,7 @@
 //! - [`session`]: in-memory session table with per-session broadcast.
 //! - [`registry`]: newline-delimited JSON over the MCP Unix socket.
 //! - [`dev`]: standalone `--dev` discovery from Kitesurf's `/json/list`.
-//! - [`cdp`]: read-only viewer connections to Kitesurf pages.
+//! - [`cdp`]: CDP page connections, re-exported from `peri-browser-cdp`.
 //! - [`stream`]: one screencast per active page, fanned out to monitor viewers.
 //! - [`http`] / [`ws`]: session list, health probe, monitor page and socket.
 //!

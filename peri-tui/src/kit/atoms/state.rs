@@ -52,6 +52,8 @@ pub enum PopupKind {
     Download,
     /// 状态栏模型段点击弹出的 alias 快速切换弹窗
     ModelQuickSwitch,
+    /// URL 模式 MCP elicitation（授权链接，Done / Cancel）
+    UrlElicitation,
 }
 
 pub type Handle<T> = AtomState<T>;
@@ -490,6 +492,10 @@ pub static HITL_PENDING: AtomStatic<
 pub static ASK_USER_PENDING: AtomStatic<
     Option<crate::kit::acp_types::PendingInteraction<AskUser>>,
 > = AtomStatic::new(|| None);
+/// 待用户处理的 URL 模式 MCP elicitation（授权链接 + 反向请求身份）。
+pub type PendingUrlElicitation = crate::kit::acp_types::PendingInteraction<UrlElicitation>;
+pub static URL_ELICITATION_INFO: AtomStatic<Option<PendingUrlElicitation>> =
+    AtomStatic::new(|| None);
 
 pub static LAST_ESC_TIME: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
 pub static QUIT_PENDING_SINCE: AtomStatic<Option<Instant>> = AtomStatic::new(|| None);
@@ -983,3 +989,5 @@ use peri_acp_types::event_data::HitlPending;
 use peri_acp_types::event_data::OauthNeeded;
 
 use peri_acp_types::event_data::RewindPreview;
+
+use peri_acp_types::event_data::UrlElicitation;

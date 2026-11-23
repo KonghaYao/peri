@@ -45,6 +45,40 @@ fn test_session_boundary_clears_both_interaction_surfaces() {
 
 #[test]
 #[serial]
+fn test_session_boundary_clears_pending_url_elicitation() {
+    let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    let old_pending = atoms::URL_ELICITATION_INFO.state().read().clone();
+    let old_popup = *atoms::POPUP_KIND.state().read();
+    *atoms::URL_ELICITATION_INFO.state().write() = Some(atoms::PendingUrlElicitation {
+        owner: Default::default(),
+        request_id_json: "\"url-1\"".into(),
+        payload: peri_acp_types::event_data::UrlElicitation {
+            server_name: "peri-browser".into(),
+            message: "Authorize".into(),
+            url: "https://example.test/authorize".into(),
+            elicitation_id: "e-1".into(),
+        },
+    });
+    atoms::POPUP_KIND.set(Some(atoms::PopupKind::UrlElicitation));
+
+    super::project_session_boundary(Some("next"));
+
+    assert!(
+        atoms::URL_ELICITATION_INFO.state().read().is_none(),
+        "URL 授权待处理项属于旧会话，边界后必须清空"
+    );
+    assert!(
+        atoms::POPUP_KIND.state().read().is_none(),
+        "旧会话的 URL 授权弹窗不得跨会话残留"
+    );
+
+    *atoms::ACTIVE_SESSION_ID.state().write() = old_active;
+    *atoms::URL_ELICITATION_INFO.state().write() = old_pending;
+    *atoms::POPUP_KIND.state().write() = old_popup;
+}
+
+#[test]
+#[serial]
 fn test_session_boundary_clears_goal_projection_and_panel() {
     let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
     let old_reset = atoms::BRIDGE_RESET_COUNTER.get();

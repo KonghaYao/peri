@@ -466,7 +466,7 @@ fn accepts_event_session(
 ) -> bool {
     if matches!(
         event,
-        AcpEventData::HitlPending(_) | AcpEventData::AskUser(_)
+        AcpEventData::HitlPending(_) | AcpEventData::AskUser(_) | AcpEventData::UrlElicitation(_)
     ) {
         return !active_session_id.is_empty()
             && !incoming_session_id.is_empty()
@@ -606,6 +606,7 @@ fn spawn_acp_bridge_inner(
                             let interaction_owner = match &epoch_event.event {
                                 AcpEventData::HitlPending(pending) => Some(pending.owner.clone()),
                                 AcpEventData::AskUser(pending) => Some(pending.owner.clone()),
+                                AcpEventData::UrlElicitation(pending) => Some(pending.owner.clone()),
                                 _ => None,
                             };
 
