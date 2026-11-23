@@ -299,6 +299,9 @@ pub struct WorkflowTaskEvent {
 /// **非阻塞**（只做移交，例如 spawn 投递任务），且不得回调进入任务表（无重入）。
 pub type TerminalSink = Arc<dyn Fn(&WorkflowTaskRecord) + Send + Sync>;
 
+// The table lock serializes the first terminal transition and later deliveries.
+type TerminalHandler = Arc<dyn Fn(&WorkflowTaskRecord, bool) + Send + Sync>;
+
 struct TableInner {
     tasks: HashMap<(String, String), WorkflowTaskEntry>,
     /// 发布顺序（快照排序稳定）。
@@ -329,7 +332,7 @@ pub struct WorkflowTaskTable {
     /// 与 [`super::WorkflowRuntime`] 共享的关闭门：关闭后拒绝新发布（对抗审查 F6）。
     gate: Arc<CloseGate>,
     /// 终态通知（装配期一次绑定；见 [`TerminalSink`] 契约）。
-    terminal_sink: parking_lot::RwLock<Option<TerminalSink>>,
+    terminal_sink: parking_lot::RwLock<Option<TerminalHandler>>,
 }
 
 impl WorkflowTaskTable {
@@ -352,13 +355,17 @@ impl WorkflowTaskTable {
 
     /// 绑定终态通知（`WorkflowRuntime` 构造期一次绑定；见 [`TerminalSink`] 契约）。
     pub fn set_terminal_sink(&self, sink: TerminalSink) {
-        *self.terminal_sink.write() = Some(sink);
+        self.set_terminal_handler(Arc::new(move |record, _| sink(record)));
+    }
+
+    pub(super) fn set_terminal_handler(&self, handler: TerminalHandler) {
+        *self.terminal_sink.write() = Some(handler);
     }
 
     /// 通知终态（幂等路径也调用：重复回填是「可重试投递」的入口，Node 侧按 taskId 去重）。
-    fn notify_terminal(&self, record: &WorkflowTaskRecord) {
+    fn notify_terminal(&self, record: &WorkflowTaskRecord, first_commit: bool) {
         if let Some(sink) = self.terminal_sink.read().as_ref() {
-            sink(record);
+            sink(record, first_commit);
         }
     }
 
@@ -631,7 +638,7 @@ impl WorkflowTaskTable {
             let record = entry.record.clone();
             // 重复回填是「可重试投递」的入口（首次投递可能未达 Node）：再投递既有终态，
             // Node 侧按 taskId 去重（design §5.1）。
-            self.notify_terminal(&record);
+            self.notify_terminal(&record, false);
             return SettleOutcome::AlreadyTerminal(record);
         }
         if admission == SettleAdmission::ExecutingOnly
@@ -1038,7 +1045,7 @@ impl WorkflowTaskTable {
         });
         // 先可见后通知：终态提交已落事件与订阅唤醒，最后通知投递面（`agent/result`）。
         if record.state.is_terminal() {
-            self.notify_terminal(record);
+            self.notify_terminal(record, true);
         }
     }
 }

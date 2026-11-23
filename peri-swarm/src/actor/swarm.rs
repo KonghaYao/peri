@@ -416,7 +416,12 @@ async fn forward_events(
         }
     }
     loop {
-        match receiver.recv().await {
+        let event = tokio::select! {
+            biased;
+            () = sender.closed() => return,
+            event = receiver.recv() => event,
+        };
+        match event {
             Ok(event) => {
                 if let Some(frame) = writer.render(&event) {
                     if !send_frame(&sender, frame).await {
@@ -1097,5 +1102,24 @@ impl Handler<GetTurn> for SwarmActor {
         Ok(envelope(
             self.service.get_turn(&logical_id, &action.turn_id).await,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    #[tokio::test]
+    async fn idle_sse_drops_live_subscription_when_response_closes() {
+        let (events, live) = tokio::sync::broadcast::channel(1);
+        let live = EventSubscription::new(Vec::new(), live, Arc::new(AtomicU64::new(0)));
+        let (output, viewer) = mpsc::channel(1);
+        let task = forward_events(Vec::new(), live, EventCursor::Tail, output);
+        tokio::pin!(task);
+        assert!(futures::poll!(&mut task).is_pending());
+        drop(viewer);
+        assert!(futures::poll!(&mut task).is_ready());
+        assert_eq!(events.receiver_count(), 0);
     }
 }

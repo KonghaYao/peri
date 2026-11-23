@@ -42,6 +42,10 @@ pub(crate) const USER_IMAGE_ROWS: u16 = 6;
 /// 内联图片缓存总字节上限（复用 T5 的累计解码缓存上限常量）。
 const CACHE_BYTES: usize = MAX_CACHE_BYTES as usize;
 
+/// Bound metadata even for zero-byte failures and multiple URLs for the same file.
+const MAX_CACHE_ENTRIES: usize = 512;
+const MAX_SOURCE_ALIASES: usize = 1024;
+
 /// 同时解码的后台线程上限；超出的请求留待下次 effect（revision 变化）重试。
 /// 单个可见消息可能含多张图片，无上限会按图片数起线程并各自持有解码缓冲。
 const MAX_CONCURRENT: usize = 4;
@@ -122,6 +126,11 @@ struct CacheKey {
     rows: u16,
 }
 
+struct Alias {
+    key: CacheKey,
+    last_used: u64,
+}
+
 struct Entry {
     state: InlineImageState,
     last_used: u64,
@@ -132,7 +141,7 @@ struct Entry {
 #[derive(Default)]
 struct Cache {
     entries: HashMap<CacheKey, Entry>,
-    aliases: HashMap<SourceKey, CacheKey>,
+    aliases: HashMap<SourceKey, Alias>,
     inflight: HashMap<CacheKey, u64>,
     next_request: u64,
     clock: u64,
@@ -142,10 +151,11 @@ struct Cache {
 
 impl Cache {
     fn lookup(&mut self, source: &SourceKey) -> Option<InlineImageState> {
-        let key = self.aliases.get(source)?.clone();
+        let alias = self.aliases.get_mut(source)?;
         self.clock = self.clock.wrapping_add(1);
         let now = self.clock;
-        let Some(entry) = self.entries.get_mut(&key) else {
+        alias.last_used = now;
+        let Some(entry) = self.entries.get_mut(&alias.key) else {
             self.aliases.remove(source);
             return None;
         };
@@ -158,16 +168,31 @@ impl Cache {
     fn begin(&mut self, source: SourceKey, key: CacheKey) -> BeginOutcome {
         self.clock = self.clock.wrapping_add(1);
         let now = self.clock;
-        let known = self.entries.contains_key(&key);
-        self.aliases.insert(source, key.clone());
-        if known {
-            if let Some(entry) = self.entries.get_mut(&key) {
-                entry.last_used = now;
-            }
-            return BeginOutcome::Existing;
-        }
-        if self.inflight.len() >= MAX_CONCURRENT {
+        if !self.entries.contains_key(&key) && self.inflight.len() >= MAX_CONCURRENT {
+            // A stale version must stop drawing even when its replacement cannot start yet.
+            self.aliases.remove(&source);
             return BeginOutcome::Deferred;
+        }
+        self.aliases.insert(
+            source,
+            Alias {
+                key: key.clone(),
+                last_used: now,
+            },
+        );
+        if self.aliases.len() > MAX_SOURCE_ALIASES {
+            let oldest = self
+                .aliases
+                .iter()
+                .min_by_key(|(_, alias)| alias.last_used)
+                .map(|(source, _)| source.clone());
+            if let Some(oldest) = oldest {
+                self.aliases.remove(&oldest);
+            }
+        }
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.last_used = now;
+            return BeginOutcome::Existing;
         }
         self.next_request = self.next_request.wrapping_add(1);
         let id = self.next_request;
@@ -180,6 +205,7 @@ impl Cache {
             },
         );
         self.inflight.insert(key, id);
+        self.evict_to_budget(CACHE_BYTES);
         BeginOutcome::Spawn(id)
     }
 
@@ -195,7 +221,7 @@ impl Cache {
             return CompleteOutcome::Ignored;
         }
         self.inflight.remove(key);
-        if !self.aliases.values().any(|aliased| aliased == key) {
+        if !self.aliases.values().any(|alias| alias.key == *key) {
             // 该版本已被新请求取代：清掉遗留的 Pending 条目，否则同一文件版本
             // 再次出现时 `begin` 会因条目存在而永不重启 worker（永久文本降级）。
             self.entries.remove(key);
@@ -223,11 +249,14 @@ impl Cache {
     }
 
     fn evict_to_budget(&mut self, budget: usize) {
-        while self.bytes > budget {
+        while self.bytes > budget || self.entries.len() > MAX_CACHE_ENTRIES {
             let victim = self
                 .entries
                 .iter()
-                .filter(|(_, entry)| entry.bytes > 0)
+                .filter(|(_, entry)| {
+                    !matches!(entry.state, InlineImageState::Pending)
+                        && (self.bytes <= budget || entry.bytes > 0)
+                })
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone());
             let Some(victim) = victim else {
@@ -236,8 +265,7 @@ impl Cache {
             if let Some(entry) = self.entries.remove(&victim) {
                 self.bytes = self.bytes.saturating_sub(entry.bytes);
             }
-            self.aliases.retain(|_, key| key != &victim);
-            self.inflight.remove(&victim);
+            self.aliases.retain(|_, alias| alias.key != victim);
         }
     }
 }

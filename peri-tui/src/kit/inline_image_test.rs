@@ -392,6 +392,8 @@ fn concurrent_decodes_are_bounded_and_retried_later() {
         "暂缓请求不登记条目，等下一次 effect 重试"
     );
 
+    assert!(!cache.aliases.contains_key(&extra_src));
+
     assert_eq!(
         cache.complete(&key("0.png", 1, 10, 10, 2), ids[0], Ok(ready_image())),
         CompleteOutcome::Updated
@@ -420,7 +422,7 @@ fn discarded_completion_also_frees_slot_and_wakes_render() {
 
     // 来源切到新版本后旧键不再被引用：完成结果被丢弃，但槽位确实释放了。
     let old_key = key("0.png", 1, 10, 10, 2);
-    cache.aliases.retain(|_, aliased| aliased != &old_key);
+    cache.aliases.retain(|_, alias| alias.key != old_key);
     let outcome = cache.complete(&old_key, ids[0], Ok(ready_image()));
     assert_eq!(outcome, CompleteOutcome::Released);
     assert!(
@@ -431,4 +433,48 @@ fn discarded_completion_also_frees_slot_and_wakes_render() {
         matches!(cache.begin(extra_src, extra_key), BeginOutcome::Spawn(_)),
         "丢弃结果腾出的槽位应允许暂缓请求重试"
     );
+}
+
+#[test]
+fn failed_images_release_old_keys_and_aliases_without_charging_protocol_bytes() {
+    let mut cache = Cache::default();
+    for index in 0..=MAX_CACHE_ENTRIES {
+        let name = format!("{index}.png");
+        let k = key(&name, 0, 0, 10, 2);
+        let id = spawned(cache.begin(source(&name, 10, 2), k.clone()));
+        cache.complete(&k, id, Err("missing"));
+    }
+
+    assert_eq!(cache.bytes, 0);
+    assert_eq!(cache.entries.len(), MAX_CACHE_ENTRIES);
+    assert_eq!(cache.aliases.len(), MAX_CACHE_ENTRIES);
+    assert!(cache.lookup(&source("0.png", 10, 2)).is_none());
+    let newest = format!("{MAX_CACHE_ENTRIES}.png");
+    assert!(matches!(
+        cache.lookup(&source(&newest, 10, 2)),
+        Some(InlineImageState::Failed(_))
+    ));
+}
+
+#[test]
+fn many_source_aliases_share_one_entry_with_bounded_metadata() {
+    let mut cache = Cache::default();
+    let k = key("canonical.png", 1, 10, 10, 2);
+    let id = spawned(cache.begin(source("0.png", 10, 2), k.clone()));
+    cache.complete(&k, id, Ok(ready_image()));
+    for index in 1..=MAX_SOURCE_ALIASES {
+        assert_eq!(
+            cache.begin(source(&format!("{index}.png"), 10, 2), k.clone()),
+            BeginOutcome::Existing
+        );
+    }
+
+    assert_eq!(cache.entries.len(), 1);
+    assert_eq!(cache.aliases.len(), MAX_SOURCE_ALIASES);
+    assert!(cache.lookup(&source("0.png", 10, 2)).is_none());
+    let newest = format!("{MAX_SOURCE_ALIASES}.png");
+    assert!(matches!(
+        cache.lookup(&source(&newest, 10, 2)),
+        Some(InlineImageState::Ready(_))
+    ));
 }

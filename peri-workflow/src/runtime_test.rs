@@ -286,6 +286,7 @@ fn complete_tool_call_is_single_terminal_and_marks_unknown_side_effects() {
 /// issue #407 阶段 2：tool 终态的单一写入点追加 tools.jsonl；重复回填不重复追加。
 #[test]
 fn tool_terminal_sink_appends_once_to_the_tool_journal() {
+    use crate::runtime::SettleOutcome::{AlreadyTerminal, Settled};
     use peri_acp_types::workflow::WorkflowToolOutcome;
 
     let dir = tempfile::tempdir().expect("the temporary test directory must be available");
@@ -321,10 +322,22 @@ fn tool_terminal_sink_appends_once_to_the_tool_journal() {
         structured_content: Some(serde_json::json!({"answer": 42})),
         content: "42".into(),
     };
-    assert!(matches!(
-        runtime.complete_tool_call("run-tools", "tool-1", first.clone()),
-        crate::runtime::SettleOutcome::Settled(_)
-    ));
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let settle = || {
+            barrier.wait();
+            runtime.complete_tool_call("run-tools", "tool-1", first.clone())
+        };
+        let concurrent = scope.spawn(settle);
+        let local = settle();
+        let other = concurrent
+            .join()
+            .expect("the concurrent settlement must finish");
+        assert!(matches!(
+            (local, other),
+            (Settled(_), AlreadyTerminal(_)) | (AlreadyTerminal(_), Settled(_))
+        ));
+    });
 
     let entries = runtime
         .journal_store()
