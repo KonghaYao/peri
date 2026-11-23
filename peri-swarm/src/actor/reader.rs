@@ -373,6 +373,37 @@ impl ItemLog {
         &self.logical_id
     }
 
+    /// Reconcile the lost host before ACP may launch any new work. A failed
+    /// store write can be retried without interrupting a replacement runner.
+    pub(super) async fn settle_interrupted_turn(&self) -> Result<(), SwarmError> {
+        let error = json!({
+            "code": "internal_error",
+            "message": "the turn was interrupted before it reached a terminal",
+        });
+        self.store
+            .swarm_close_open_turns(
+                &self.logical_id,
+                TurnStatus::Failed,
+                unix_now(),
+                Some(error),
+            )
+            .await
+            .map_err(|error| store_failure("close_open_turns", error))?;
+        self.set_session_state(SessionState::Idle, None).await
+    }
+
+    /// Recovered output has no new Swarm user turn. Its deltas may have moved
+    /// the session to running; the actual ACP root terminal makes it available.
+    pub(super) async fn finish_recovered_root(&self) {
+        let failed = self.state.lock().failure.take().is_some();
+        self.update_state_quiet(if failed {
+            SessionState::Failed
+        } else {
+            SessionState::Idle
+        })
+        .await;
+    }
+
     /// Consume one host notification. Projection errors are impossible by
     /// construction; persistence errors are logged and never abort the reader.
     pub async fn ingest(&self, method: &str, params: &Value) {

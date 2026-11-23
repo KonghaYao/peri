@@ -170,10 +170,10 @@ test('idle sweep reclaims a ready environment, keeps data and bindings, and re-e
     const swept = await manager.sweepIdle();
     assert.deepEqual(swept, { reclaimed: ['env-idle'], inFlight: [] });
     assert.equal(manager.get('env-idle'), undefined);
-    const stopped = manager.describe('env-idle');
-    assert.equal(stopped?.state, 'stopped');
-    assert.equal(stopped?.runId, first.runId);
-    assert.equal(stopped?.workspacePath, first.workspacePath);
+    const cold = manager.describe('env-idle');
+    assert.equal(cold?.state, 'reserved');
+    assert.equal(cold?.runId, first.runId);
+    assert.equal(cold?.workspacePath, first.workspacePath);
     assert.equal(manager.binding('env-idle')?.lastRunId, first.runId);
     assert.equal(fake.instances[0]?.closedWith.at(-1)?.deleteData, false);
     assert.equal(readFileSync(marker, 'utf8'), 'slow\n');
@@ -256,4 +256,55 @@ test('bindings.json is 0600, atomic and omits the inner token', async (t) => {
   } finally {
     await manager.closeAll();
   }
+});
+
+test('an explicit stop queued during idle closure wins over a waiting tool request', async (t) => {
+  const fake = createFakeStarter();
+  const clock = controllableClock();
+  const manager = new SwarmManager({
+    root: temporarySwarmRoot(t),
+    startSandbox: fake.start,
+    now: clock.now,
+    idleMs: 1,
+  });
+  const entry = await manager.ensure('env-race');
+  const close = entry.instance.close.bind(entry.instance);
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  entry.instance.close = async (options) => {
+    await gate;
+    return close(options);
+  };
+  clock.advance(1);
+  const sweeping = manager.sweepIdle();
+  const waiting = manager.ensureForRequest('env-race');
+  const stopped = manager.close('env-race');
+  finish();
+  await Promise.all([sweeping, stopped]);
+  assert.equal(await waiting, undefined);
+  assert.equal(manager.describe('env-race')?.state, 'stopped');
+  assert.equal(fake.calls.length, 1);
+});
+
+test('a failed close is not reported as an idle reclaim or marked wakeable', async (t) => {
+  const clock = controllableClock();
+  const manager = new SwarmManager({
+    root: temporarySwarmRoot(t),
+    startSandbox: createFakeStarter().start,
+    now: clock.now,
+    idleMs: 1,
+  });
+  const entry = await manager.ensure('env-fail-close');
+  const close = entry.instance.close.bind(entry.instance);
+  entry.instance.close = async () => {
+    throw new Error('provider stop failed');
+  };
+  clock.advance(1);
+  assert.deepEqual((await manager.sweepIdle()).reclaimed, []);
+  assert.equal(manager.get('env-fail-close'), entry);
+  assert.equal(manager.reservation('env-fail-close'), undefined);
+  entry.instance.close = close;
+  await manager.closeAll();
 });

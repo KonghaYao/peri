@@ -137,6 +137,7 @@ starting -> ready -> stopping -> closed
 - MCP handler 固定协议 `2026-07-28`，`legacy: "reject"`。外层 `capabilities`、`serverInfo`、`instructions` 从内层已连接 `Client` 镜像，不合并、不裁剪。
 - 所有请求走 `fallbackRequestHandler` 原样转发；`tasks/get|update|cancel` 仅为通过 SDK custom-method 注册而显式声明 schema，仍原样转发。没有 tools 缓存、方法/参数白名单或任务 ID 改写。
 - `subscriptions/listen` 在 HTTP 入口拦截，转为内层 `Client.listen()`：ack 的 `honoredFilter`、通知、任务 ID 均原样回传；只有写给宿主的 subscription id 使用宿主请求 id，内层 id 不外泄。
+- Swarm 在启用空闲回收时按运行观察 `tools/call` 的任务回执、`tasks/get` 和任务状态通知。非终态任务或在途代理请求使实例保持运行；调用方停止轮询后，Swarm 在空闲扫描时使用原 owner 查询内层 provider，取消回执要等终态。任务全部结算后重新计算空闲时间。空闲回收保留同一 Bun 进程内的冷态路由，下次工具调用复用目录并创建新的 `runId`。
 - 大小边界：stdio 单条 32 MiB（写侧 pendingBytes 2×）；HTTP 请求 8 MiB、响应 33 MiB；listen 单条通知 1 MiB（超限关闭订阅并记录，不截断）。
 - 失败语义：内层进程退出 ⇒ pending 请求失败、实例 `failed`、新请求 503，不自动重启；内层 JSON-RPC 错误按 `code/message/data` 原样回传；`SandboxError` 映射为 `-32602/-32603`，`data.sandbox` 保留桥接错误码。
 

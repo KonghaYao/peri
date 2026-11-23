@@ -63,6 +63,7 @@ export interface SwarmSandboxEntry {
   /** Inner MCP bearer token; memory only, never persisted or exposed over HTTP. */
   readonly innerToken: string;
   readonly instance: SandboxInstance;
+  tasksBusy?: () => boolean;
   /** Last proxied request (or start) for this environment; drives idle reclaim. */
   lastUsedAt: Date;
 }
@@ -107,7 +108,7 @@ export interface CloseSwarmSandboxResult {
   readonly deletedData: boolean;
 }
 
-/** Outcome of one idle sweep; `inFlight` lists environments kept alive by a proxied request. */
+/** Outcome of one idle sweep; inFlight includes proxied requests and unfinished provider tasks. */
 export interface SwarmIdleSweepResult {
   readonly reclaimed: readonly string[];
   readonly inFlight: readonly string[];
@@ -135,8 +136,8 @@ export class SwarmManager {
   private readonly starting = new Map<string, Promise<SwarmSandboxEntry>>();
   /** Proxied MCP requests currently being handled per logical environment. */
   private readonly inFlight = new Map<string, number>();
-  /** In-progress idle reclaims; new work for the same environment waits for them. */
-  private readonly reclaiming = new Map<string, Promise<void>>();
+  /** Idle reclaim, explicit stop and delete serialize on the same workspace. */
+  private readonly closing = new Map<string, Promise<CloseSwarmSandboxResult>>();
 
   constructor(options: SwarmManagerOptions = {}) {
     this.root = prepareSwarmRoot(resolveSwarmSandboxesRoot(options.root));
@@ -192,10 +193,13 @@ export class SwarmManager {
     return this.inFlight.get(logicalEnvId) ?? 0;
   }
 
-  /** Wait for an idle reclaim that is closing this environment right now. */
-  async whenIdleSettled(logicalEnvId: string): Promise<void> {
-    const pending = this.reclaiming.get(logicalEnvId);
-    if (pending !== undefined) await pending.catch(() => undefined);
+  /** Wait for pending close operations, including a delete queued behind idle reclaim. */
+  async whenCloseSettled(logicalEnvId: string): Promise<void> {
+    let pending = this.closing.get(logicalEnvId);
+    while (pending !== undefined) {
+      await pending.catch(() => undefined);
+      pending = this.closing.get(logicalEnvId);
+    }
   }
 
   /**
@@ -203,7 +207,7 @@ export class SwarmManager {
    * and has been idle for at least `idleMs`. Workspace data and bindings stay.
    *
    * Returns the reclaimed ids, plus the ids past the threshold that were kept
-   * because a proxied request was in flight (evidence for "never reclaim in flight").
+   * because a proxied request or provider task was still in flight.
    */
   async sweepIdle(): Promise<SwarmIdleSweepResult> {
     if (this.idleMs <= 0) return { reclaimed: [], inFlight: [] };
@@ -212,14 +216,17 @@ export class SwarmManager {
     const inFlight: string[] = [];
     const pending: Promise<void>[] = [];
     for (const [logicalEnvId, entry] of [...this.entries]) {
-      if (entry.instance.state !== 'ready' || this.reclaiming.has(logicalEnvId)) continue;
+      if (entry.instance.state !== 'ready' || this.closing.has(logicalEnvId)) continue;
       if (now - entry.lastUsedAt.getTime() < this.idleMs) continue;
-      if ((this.inFlight.get(logicalEnvId) ?? 0) > 0) {
+      if ((this.inFlight.get(logicalEnvId) ?? 0) > 0 || entry.tasksBusy?.()) {
         inFlight.push(logicalEnvId);
         continue;
       }
-      reclaimed.push(logicalEnvId);
-      pending.push(this.reclaim(logicalEnvId));
+      pending.push(
+        this.reclaim(logicalEnvId).then((closed) => {
+          if (closed) reclaimed.push(logicalEnvId);
+        }),
+      );
     }
     await Promise.all(pending);
     return { reclaimed, inFlight };
@@ -272,7 +279,7 @@ export class SwarmManager {
    */
   async reserve(logicalEnvId: string): Promise<SwarmSandboxDescription> {
     assertLogicalEnvId(logicalEnvId);
-    await this.whenIdleSettled(logicalEnvId);
+    await this.whenCloseSettled(logicalEnvId);
     const described = this.describe(logicalEnvId);
     if (
       described !== undefined &&
@@ -309,8 +316,7 @@ export class SwarmManager {
     // entry, and starting on top of it would race the same workspace. Only
     // await when one exists, so `ensure()` still flips `reserved → starting`
     // synchronously for a fresh environment.
-    const reclaiming = this.reclaiming.get(logicalEnvId);
-    if (reclaiming !== undefined) await reclaiming.catch(() => undefined);
+    if (this.closing.has(logicalEnvId)) await this.whenCloseSettled(logicalEnvId);
     const existing = this.entries.get(logicalEnvId);
     if (existing !== undefined && existing.instance.state === 'ready') {
       await this.persist(existing, this.now());
@@ -329,8 +335,42 @@ export class SwarmManager {
 
   async close(logicalEnvId: string, options: { deleteData?: boolean } = {}): Promise<CloseSwarmSandboxResult> {
     assertLogicalEnvId(logicalEnvId);
-    await this.whenIdleSettled(logicalEnvId);
-    return await this.closeEntry(logicalEnvId, options);
+    return await this.scheduleClose(logicalEnvId, options);
+  }
+
+  /** Check start eligibility after a possibly slow cold request body or overlapping deletion. */
+  async ensureForRequest(logicalEnvId: string): Promise<SwarmSandboxEntry | undefined> {
+    if (this.closing.has(logicalEnvId)) await this.whenCloseSettled(logicalEnvId);
+    if (!this.get(logicalEnvId) && !this.canStart(logicalEnvId)) return undefined;
+    return this.ensure(logicalEnvId);
+  }
+
+  private async scheduleClose(
+    logicalEnvId: string,
+    options: { deleteData?: boolean; idle?: boolean },
+  ): Promise<CloseSwarmSandboxResult> {
+    const previous = this.closing.get(logicalEnvId);
+    const operation = (async () => {
+      if (previous) await previous.catch(() => undefined);
+      const result = await this.closeEntry(logicalEnvId, options);
+      const binding = this.bindings.get(logicalEnvId);
+      if (options.idle && result.closed && binding) {
+        this.reservations.set(logicalEnvId, {
+          logicalEnvId,
+          ...binding,
+          state: 'reserved',
+          lastUsedAt: new Date(binding.lastUsedAt),
+          lastError: null,
+        });
+      }
+      return result;
+    })();
+    this.closing.set(logicalEnvId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.closing.get(logicalEnvId) === operation) this.closing.delete(logicalEnvId);
+    }
   }
 
   private async closeEntry(logicalEnvId: string, options: { deleteData?: boolean }): Promise<CloseSwarmSandboxResult> {
@@ -363,7 +403,7 @@ export class SwarmManager {
 
   /** Stop every running instance without deleting persisted workspaces. */
   async closeAll(): Promise<void> {
-    await Promise.allSettled([...this.reclaiming.values()]);
+    await Promise.allSettled([...this.closing.values()]);
     await Promise.allSettled([...this.starting.values()]);
     const failures: unknown[] = [];
     for (const [logicalEnvId, entry] of [...this.entries]) {
@@ -385,30 +425,18 @@ export class SwarmManager {
   }
 
   /** Close one idle environment without deleting data; failures stay local to this sweep. */
-  private reclaim(logicalEnvId: string): Promise<void> {
-    const existing = this.reclaiming.get(logicalEnvId);
-    if (existing !== undefined) return existing;
-    const task = (async () => {
-      const lastUsedAt = this.entries.get(logicalEnvId)?.lastUsedAt.toISOString() ?? null;
-      try {
-        const result = await this.closeEntry(logicalEnvId, { deleteData: false });
-        console.log(
-          JSON.stringify({
-            event: 'swarm_sandbox_reclaimed',
-            logicalEnvId,
-            closed: result.closed,
-            idleMs: this.idleMs,
-            lastUsedAt,
-          }),
-        );
-      } catch (error) {
-        console.error('swarm idle reclaim failed', logicalEnvId, error);
-      } finally {
-        this.reclaiming.delete(logicalEnvId);
-      }
-    })();
-    this.reclaiming.set(logicalEnvId, task);
-    return task;
+  private async reclaim(logicalEnvId: string): Promise<boolean> {
+    const lastUsedAt = this.entries.get(logicalEnvId)?.lastUsedAt.toISOString();
+    try {
+      const { closed } = await this.scheduleClose(logicalEnvId, { idle: true });
+      console.log(
+        JSON.stringify({ event: 'swarm_sandbox_reclaimed', logicalEnvId, closed, idleMs: this.idleMs, lastUsedAt }),
+      );
+      return closed;
+    } catch (error) {
+      console.error('swarm idle reclaim failed', logicalEnvId, error);
+      return false;
+    }
   }
 
   private newReservation(logicalEnvId: string): SwarmReservation {
@@ -463,6 +491,10 @@ export class SwarmManager {
       instance,
       lastUsedAt: this.now(),
     };
+    if (this.idleMs > 0)
+      entry.tasksBusy = instance.watchTaskActivity?.(() => {
+        entry.lastUsedAt = this.now();
+      });
     this.entries.set(logicalEnvId, entry);
     try {
       await this.persist(entry, entry.lastUsedAt);

@@ -40,7 +40,7 @@ use crate::domain::{
     EnvironmentKind, EnvironmentRef, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode,
     InputOutcome, InputState, InputSubmission, ItemPage, ItemsWindow, LogicalId, McpToolSpec,
     OfficialTurn, SandboxView, SessionPage, SessionState, SessionView, SessionsWindow, StreamEvent,
-    SwarmError, TurnPage, TurnStatus, TurnView, TurnsWindow,
+    SwarmError, TurnPage, TurnView, TurnsWindow,
 };
 use crate::sandbox::{BunSandboxClient, SandboxClientError, SandboxMcpBinding};
 use crate::service::{
@@ -48,8 +48,8 @@ use crate::service::{
     EventSubscription, PendingTurn, SessionUpdateCommand, SwarmService,
 };
 use crate::store::{
-    store_failure, InputPut, SwarmInputRow, SwarmSessionPatch, SwarmSessionRow, SwarmSessionUpdate,
-    SwarmStore,
+    store_failure, InputPut, SwarmBindingRow, SwarmInputRow, SwarmSessionPatch, SwarmSessionRow,
+    SwarmSessionUpdate, SwarmStore,
 };
 
 /// Upper bound for a steered turn to be continued by the host's queued run.
@@ -149,6 +149,17 @@ impl SessionRuntime {
             admission: AsyncMutex::new(()),
             turn,
         }
+    }
+
+    async fn ready_for_input(&self) -> Result<(), SwarmError> {
+        if self.child.wait_for_recovery().await.map_err(child_error)? {
+            return Ok(());
+        }
+        Err(SwarmError::new(
+            ErrorKind::Conflict,
+            ErrorCode::TurnInProgress,
+            "the recovered session is processing durable work; retry this input after the turn",
+        ))
     }
 
     fn is_running(&self) -> bool {
@@ -251,50 +262,6 @@ impl AcpSwarmService {
         self.sessions.lock().contains_key(logical_id.as_str())
     }
 
-    /// Give a crash-orphaned turn a terminal row.
-    ///
-    /// A row that still says `running` without a live turn means the process
-    /// died between `begin_turn` and its terminal. Reads (`turns.list`/
-    /// `turns.retrieve`) and [`Self::ensure_live`] close those rows as `failed`
-    /// instead of serving an `in_progress` turn forever. The session row stays
-    /// `running`, so `ensure_live` still answers `502 session_resume_required`;
-    /// resuming the interrupted turn is not implemented (`design §7`).
-    async fn close_orphan_turns(&self, row: &SwarmSessionRow) {
-        let live = self
-            .sessions
-            .lock()
-            .get(row.logical_id.as_str())
-            .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn());
-        if live {
-            return;
-        }
-        match self
-            .store
-            .swarm_close_open_turns(
-                &row.logical_id,
-                TurnStatus::Failed,
-                crate::domain::official::unix_now(),
-                Some(json!({
-                    "code": "internal_error",
-                    "message": "the turn was interrupted before it reached a terminal",
-                })),
-            )
-            .await
-        {
-            Ok(0) => {}
-            Ok(closed) => tracing::warn!(
-                logical_id = row.logical_id.as_str(),
-                closed,
-                "swarm closed turn rows left open by an interrupted host"
-            ),
-            Err(error) => tracing::warn!(
-                logical_id = row.logical_id.as_str(),
-                error = %error,
-                "swarm could not close interrupted turn rows"
-            ),
-        }
-    }
-
     fn runtime(&self, logical_id: &LogicalId) -> Result<Arc<SessionRuntime>, SwarmError> {
         self.sessions
             .lock()
@@ -303,16 +270,8 @@ impl AcpSwarmService {
             .ok_or_else(|| SwarmError::unknown_agent(logical_id.as_str()))
     }
 
-    /// Restore a live ACP host for a persisted session after the Rust host was
-    /// killed and restarted (S9a4b).
-    ///
-    /// `Ok(false)` means no session row exists: recovery must not create an
-    /// identity for an unknown id. An idle row is attached with
-    /// `session/load` (persisted root id + `cwd` + `mcpServers`); no turn is
-    /// prompted, no queued input is replayed, and `session/resume` is never
-    /// called. A row whose recorded turn was still running is refused as
-    /// `session_resume_required`, because resuming an interrupted turn is a
-    /// separate recovery path this stage does not implement.
+    /// Attach the persisted identity on an explicit interaction. A lost
+    /// synchronous turn fails and only ACP-owned durable work can continue.
     pub async fn ensure_live(&self, logical_id: &LogicalId) -> Result<bool, SwarmError> {
         if self.is_live(logical_id) {
             return Ok(true);
@@ -329,16 +288,8 @@ impl AcpSwarmService {
         else {
             return Ok(false);
         };
-        if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
-            tracing::warn!(
-                logical_id = logical_id.as_str(),
-                "swarm session row still records an unfinished turn"
-            );
-            // The process that owned the turn is gone; close its row so
-            // `turns.list` cannot report `in_progress` forever.
-            self.close_orphan_turns(&row).await;
-            return Err(SwarmError::upstream_unavailable("session_resume_required"));
-        }
+        let interrupted =
+            crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await?;
         let model = self.resolve_model(row.model.as_deref())?;
         let workspace = self.reattach_workspace(&row).await?;
         let hub = self.hub_for(logical_id.as_str());
@@ -356,22 +307,23 @@ impl AcpSwarmService {
             .session_store
             .clone()
             .unwrap_or_else(|| local_session_store(self.config.session_store_path.clone()));
-        let child = AcpChild::attach(
-            ChildConfig {
-                cwd: PathBuf::from(&row.cwd),
-                session_store,
-                machine_id: self.config.machine_id,
-                workspace_root: self.config.workspace_root.clone(),
-                settings_json: self.config.settings_json.clone(),
-                model,
-                instructions: row.instructions.clone(),
-                mcp_tools: row.mcp_tools.clone(),
-                workspace,
-                root_session_id: row.root_session_id.clone(),
-            },
-            log.clone(),
-        )
-        .await
+        let config = ChildConfig {
+            cwd: PathBuf::from(&row.cwd),
+            session_store,
+            machine_id: self.config.machine_id,
+            workspace_root: self.config.workspace_root.clone(),
+            settings_json: self.config.settings_json.clone(),
+            model,
+            instructions: row.instructions.clone(),
+            mcp_tools: row.mcp_tools.clone(),
+            workspace,
+            root_session_id: row.root_session_id.clone(),
+        };
+        let child = if interrupted {
+            AcpChild::attach_interrupted(config, log.clone()).await
+        } else {
+            AcpChild::attach(config, log.clone()).await
+        }
         .map_err(|error| {
             tracing::warn!(
                 logical_id = logical_id.as_str(),
@@ -401,6 +353,32 @@ impl AcpSwarmService {
             "swarm reattached the persisted session"
         );
         Ok(true)
+    }
+
+    async fn existing_input(
+        &self,
+        logical_id: &LogicalId,
+        submission: &InputSubmission,
+        fingerprint: &str,
+    ) -> Result<Option<AcceptedInput>, SwarmError> {
+        let input_id = &submission.input_id;
+        let Some(existing) = self
+            .store
+            .swarm_get_input(logical_id.as_str(), input_id)
+            .await
+            .map_err(|error| store_failure("get_input", error))?
+        else {
+            return Ok(None);
+        };
+        if existing.fingerprint != fingerprint {
+            return Err(SwarmError::input_conflict(input_id));
+        }
+        Ok(Some(AcceptedInput::settled(InputOutcome::new(
+            input_id.clone(),
+            Disposition::Existing,
+            submission.mode,
+            self.last_seq(logical_id).await?,
+        ))))
     }
 
     /// Rebuild the internal workspace binding from the stored row (S9a4b).
@@ -499,22 +477,20 @@ impl AcpSwarmService {
     }
 
     async fn view_by_id(&self, logical_id: &LogicalId) -> Result<SessionView, SwarmError> {
-        let row = self.require_row(logical_id).await?;
+        let mut row = self.require_row(logical_id).await?;
         // Make the persisted approval facts catch up with the host deadline
         // before the row is projected.
         let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
-        if let Some(runtime) = runtime {
+        if let Some(runtime) = &runtime {
+            if runtime.child.recovering() {
+                row.state = SessionState::Running;
+            }
             runtime.log.settle_expired_approvals().await?;
         }
         // Re-read the sequence so a concurrently appended item is reflected.
         let last_item_seq = self.last_seq(logical_id).await?;
-        let mut row = row;
         row.last_item_seq = last_item_seq;
-        let turn = self
-            .sessions
-            .lock()
-            .get(logical_id.as_str())
-            .and_then(|runtime| runtime.turn.borrow().clone());
+        let turn = runtime.and_then(|runtime| runtime.turn.borrow().clone());
         let sandbox = self.sandbox_view(&row).await?;
         let required_actions = self.live_required_actions(logical_id);
         Ok(self.session_view(&row, turn, sandbox, required_actions))
@@ -640,6 +616,7 @@ impl AcpSwarmService {
         text: &str,
         defer: bool,
     ) -> Result<Option<PendingTurn>, SwarmError> {
+        runtime.ready_for_input().await?;
         let item_id = {
             let _admission = runtime.admission.lock().await;
             // Same rule as `accept_input`: a running turn owns the session.
@@ -1029,7 +1006,7 @@ impl AcpSwarmService {
     async fn bind_environment(
         &self,
         command: &CreateSessionCommand,
-    ) -> Result<(EnvironmentRef, Option<SandboxMcpBinding>), SwarmError> {
+    ) -> Result<(EnvironmentRef, Option<(SandboxMcpBinding, SwarmBindingRow)>), SwarmError> {
         if command.environment == EnvironmentKind::None {
             return Ok((EnvironmentRef::none(), None));
         }
@@ -1107,33 +1084,30 @@ impl AcpSwarmService {
             .workspace_path
             .parent()
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
-        self.store
-            .swarm_put_binding(crate::store::SwarmBindingRow {
-                logical_env_id: logical_env_id.clone(),
-                logical_id: command.logical_id.as_str().to_owned(),
-                sandbox_id: reservation.binding.sandbox_id.clone(),
-                workspace_path: reservation
-                    .binding
-                    .workspace_path
-                    .to_string_lossy()
-                    .into_owned(),
-                sandbox_root: workspace_root,
-                settings_profile: None,
-                token_file: None,
-                last_run_id: reservation.run_id,
-                last_used_at: reservation
-                    .last_used_at
-                    .unwrap_or_else(peri_time::now_utc_rfc3339),
-            })
-            .await
-            .map_err(|error| store_failure("put_binding", error))?;
+        let binding = SwarmBindingRow {
+            logical_env_id: logical_env_id.clone(),
+            logical_id: command.logical_id.as_str().to_owned(),
+            sandbox_id: reservation.binding.sandbox_id.clone(),
+            workspace_path: reservation
+                .binding
+                .workspace_path
+                .to_string_lossy()
+                .into_owned(),
+            sandbox_root: workspace_root,
+            settings_profile: None,
+            token_file: None,
+            last_run_id: reservation.run_id,
+            last_used_at: reservation
+                .last_used_at
+                .unwrap_or_else(peri_time::now_utc_rfc3339),
+        };
 
         Ok((
             EnvironmentRef {
                 kind: EnvironmentKind::OpenAiHosted,
                 id: Some(logical_env_id),
             },
-            Some(reservation.binding),
+            Some((reservation.binding, binding)),
         ))
     }
 
@@ -1385,6 +1359,21 @@ impl SwarmService for AcpSwarmService {
                 // that row instead of creating a second identity.
                 return self.recover_creating_row(&command, &row, model).await;
             }
+            // A cold retry with an unkeyed initial input cannot distinguish the
+            // interrupted command from new intent. Return the stored session;
+            // a keyed user submission is the unambiguous re-entry operation.
+            if !self.is_live(&command.logical_id)
+                && (command.initial_input.is_none()
+                    || self.last_seq(&command.logical_id).await? > 0
+                    || crate::service::persisted_turn_resume_required(self.store.as_ref(), &row)
+                        .await?)
+            {
+                return Ok(CreateSessionResult {
+                    session: self.view_by_id(&command.logical_id).await?,
+                    created: false,
+                    pending_initial: None,
+                });
+            }
             // A host restart leaves the row but no in-process child; attach it
             // with the persisted identity before running an initial input
             // (`design §6.4-2`, S9a4b). `ensure_live` never prompts or replays.
@@ -1428,7 +1417,7 @@ impl SwarmService for AcpSwarmService {
         };
         // S8a3a: reserve (never start) the Bun workspace before the host is
         // assembled, so `session/new` already carries the workspace entry.
-        let (environment, workspace) = self.bind_environment(&command).await?;
+        let (environment, reservation) = self.bind_environment(&command).await?;
         let now = peri_time::now_utc_rfc3339();
         let row = SwarmSessionRow {
             logical_id: command.logical_id.as_str().to_owned(),
@@ -1451,7 +1440,20 @@ impl SwarmService for AcpSwarmService {
         // id, and the retry reconciles against it instead of minting a second
         // one. The row is also the precondition for starting a host: without an
         // addressable mapping there is no session to create.
-        if let Err(error) = self.store.swarm_upsert_session(row.clone()).await {
+        let (workspace, persisted) = match reservation {
+            Some((workspace, binding)) => (
+                Some(workspace),
+                self.store
+                    .swarm_create_hosted_session(
+                        row.clone(),
+                        binding,
+                        command.environment_id.is_some(),
+                    )
+                    .await,
+            ),
+            None => (None, self.store.swarm_upsert_session(row.clone()).await),
+        };
+        if let Err(error) = persisted {
             return Err(match error {
                 crate::store::StoreError::Conflict(_) => SwarmError::new(
                     ErrorKind::Conflict,
@@ -1459,6 +1461,9 @@ impl SwarmService for AcpSwarmService {
                     "logicalId was created concurrently with a different identity",
                 )
                 .with_details(json!({ "field": "logicalId" })),
+                crate::store::StoreError::NotFound(_) if command.environment_id.is_some() => {
+                    SwarmError::upstream_unavailable("sandbox_binding_changed")
+                }
                 error => store_failure("upsert_session", error),
             });
         }
@@ -1545,6 +1550,10 @@ impl SwarmService for AcpSwarmService {
             let logical_id = LogicalId::parse(&view.logical_id)?;
             let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
             if let Some(runtime) = runtime {
+                if runtime.child.recovering() {
+                    view.state = SessionState::Running;
+                    view.status = crate::domain::SessionStatus::InProgress;
+                }
                 runtime.log.settle_expired_approvals().await?;
             }
             let required_actions = self.live_required_actions(&logical_id);
@@ -1562,6 +1571,7 @@ impl SwarmService for AcpSwarmService {
         logical_id: &LogicalId,
         command: SessionUpdateCommand,
     ) -> Result<SessionView, SwarmError> {
+        let _attach = self.attach_lock.lock().await;
         let row = self.require_row(logical_id).await?;
         // Same admission rule as `accept_input`: a running or accepted turn
         // owns the session. Holding the per-session admission lock across the
@@ -1572,10 +1582,9 @@ impl SwarmService for AcpSwarmService {
             Some(runtime) => Some(runtime.admission.lock().await),
             None => None,
         };
-        if runtime
-            .as_ref()
-            .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn())
-        {
+        if runtime.as_ref().is_some_and(|runtime| {
+            runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()
+        }) {
             return Err(SwarmError::turn_in_progress());
         }
         if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
@@ -1626,16 +1635,16 @@ impl SwarmService for AcpSwarmService {
     }
 
     async fn delete_session(&self, logical_id: &LogicalId) -> Result<(), SwarmError> {
+        let _attach = self.attach_lock.lock().await;
         let row = self.require_row(logical_id).await?;
         let runtime = self.sessions.lock().get(logical_id.as_str()).cloned();
         let _admission = match runtime.as_ref() {
             Some(runtime) => Some(runtime.admission.lock().await),
             None => None,
         };
-        if runtime
-            .as_ref()
-            .is_some_and(|runtime| runtime.is_running() || runtime.log.has_open_turn())
-        {
+        if runtime.as_ref().is_some_and(|runtime| {
+            runtime.is_running() || runtime.log.has_open_turn() || runtime.child.recovering()
+        }) {
             return Err(SwarmError::turn_in_progress());
         }
         if crate::service::persisted_turn_resume_required(self.store.as_ref(), &row).await? {
@@ -1664,8 +1673,7 @@ impl SwarmService for AcpSwarmService {
         logical_id: &LogicalId,
         window: TurnsWindow,
     ) -> Result<TurnPage, SwarmError> {
-        let row = self.require_row(logical_id).await?;
-        self.close_orphan_turns(&row).await;
+        self.require_row(logical_id).await?;
         crate::service::list_turns_from_store(self.store.as_ref(), logical_id.as_str(), &window)
             .await
     }
@@ -1675,8 +1683,7 @@ impl SwarmService for AcpSwarmService {
         logical_id: &LogicalId,
         turn_id: &str,
     ) -> Result<OfficialTurn, SwarmError> {
-        let row = self.require_row(logical_id).await?;
-        self.close_orphan_turns(&row).await;
+        self.require_row(logical_id).await?;
         crate::service::get_turn_from_store(self.store.as_ref(), logical_id.as_str(), turn_id).await
     }
 
@@ -1685,7 +1692,6 @@ impl SwarmService for AcpSwarmService {
         logical_id: &LogicalId,
         submission: InputSubmission,
     ) -> Result<AcceptedInput, SwarmError> {
-        let runtime = self.runtime(logical_id)?;
         self.require_row(logical_id).await?;
         if submission.is_empty() {
             return Err(SwarmError::empty_input());
@@ -1693,24 +1699,53 @@ impl SwarmService for AcpSwarmService {
         let fingerprint = submission.fingerprint();
         let input_id = submission.input_id.clone();
 
-        if let Some(existing) = self
-            .store
-            .swarm_get_input(logical_id.as_str(), &input_id)
-            .await
-            .map_err(|error| store_failure("get_input", error))?
+        if let Some(outcome) = self
+            .existing_input(logical_id, &submission, &fingerprint)
+            .await?
         {
-            if existing.fingerprint == fingerprint {
-                let last_item_seq = self.last_seq(logical_id).await?;
-                return Ok(AcceptedInput::settled(InputOutcome::new(
-                    input_id,
-                    Disposition::Existing,
-                    submission.mode,
-                    last_item_seq,
-                )));
-            }
-            return Err(SwarmError::input_conflict(&input_id));
+            return Ok(outcome);
         }
 
+        // A lost approval or cancellation belongs to the dead host. Neither
+        // is authority to start a replacement or schedule its durable queue.
+        let runtime = if submission.kind == InputKind::User {
+            self.ensure_live(logical_id).await?;
+            let runtime = self.runtime(logical_id)?;
+            runtime.ready_for_input().await?;
+            Some(runtime)
+        } else {
+            self.sessions.lock().get(logical_id.as_str()).cloned()
+        };
+        let _admission = match &runtime {
+            Some(runtime) => Some(runtime.admission.lock().await),
+            None => None,
+        };
+        if let Some(admitted) = &runtime {
+            if !self
+                .sessions
+                .lock()
+                .get(logical_id.as_str())
+                .is_some_and(|current| Arc::ptr_eq(current, admitted))
+            {
+                return Err(SwarmError::upstream_unavailable("session_not_live"));
+            }
+        }
+        let running = runtime.as_ref().is_some_and(|runtime| runtime.is_running());
+        if submission.kind == InputKind::User
+            && ((running && submission.mode == InputMode::Turn)
+                || (!running
+                    && runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.log.has_open_turn())))
+        {
+            if let Some(outcome) = self
+                .existing_input(logical_id, &submission, &fingerprint)
+                .await?
+            {
+                return Ok(outcome);
+            }
+            return Err(SwarmError::turn_in_progress());
+        }
         let receipt = SwarmInputRow {
             logical_id: logical_id.as_str().to_owned(),
             input_id: input_id.clone(),
@@ -1738,36 +1773,19 @@ impl SwarmService for AcpSwarmService {
             }
         }
 
-        // Admission is serialized so two concurrent accepts cannot both see an
-        // idle session and attribute their user items to different turns. The
-        // lock is released before any prompt/queue work runs.
-        let (running, turn_id) = {
-            let _admission = runtime.admission.lock().await;
-            let running = runtime.is_running();
-            if submission.kind == InputKind::User && running && submission.mode == InputMode::Turn {
-                return Err(SwarmError::turn_in_progress());
-            }
-            // A previously accepted turn that has not started yet owns the
-            // session; accepting a second one would race its user item into the
-            // first turn.
-            if submission.kind == InputKind::User && !running && runtime.log.has_open_turn() {
-                return Err(SwarmError::turn_in_progress());
-            }
-            let mut turn_id = None;
-            if submission.kind == InputKind::User {
-                // Recorded at acceptance. The host echoes `user_message_chunk`,
-                // but the projection drops that echo, so this is the only user
-                // frame in the log. A retried `inputId` returns `Existing` above
-                // and never reaches this branch, so the item is appended once.
-                let (_, item_id) = runtime
-                    .log
-                    .record_user_input(Some(&input_id), &submission.effective_text())
-                    .await?;
-                turn_id = Some(turn_id_for_item(&item_id));
-            }
-            (running, turn_id)
-        };
-
+        let target = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.turn.borrow().clone());
+        let mut turn_id = None;
+        if submission.kind == InputKind::User {
+            let runtime = runtime.as_ref().expect("user input attached a host");
+            let (_, item_id) = runtime
+                .log
+                .record_user_input(Some(&input_id), &submission.effective_text())
+                .await?;
+            turn_id = Some(turn_id_for_item(&item_id));
+        }
+        drop(_admission);
         if submission.kind == InputKind::Control {
             // `kind=control` is recorded only; `cancel` is the one control
             // command S4 defines (`design §2.4`).
@@ -1776,7 +1794,10 @@ impl SwarmService for AcpSwarmService {
                 .trim()
                 .eq_ignore_ascii_case("cancel")
             {
-                self.cancel_turn(logical_id, None).await?;
+                if let Some(target) = target {
+                    self.cancel_turn(logical_id, Some(&target.request_id))
+                        .await?;
+                }
             }
             let last_item_seq = self.last_seq(logical_id).await?;
             return Ok(AcceptedInput::settled(InputOutcome::new(
@@ -1790,7 +1811,12 @@ impl SwarmService for AcpSwarmService {
         if running {
             let turn_id = turn_id.as_deref().unwrap_or_default();
             let outcome = self
-                .steer(&runtime, &submission, logical_id, turn_id)
+                .steer(
+                    runtime.as_ref().expect("running input has a host"),
+                    &submission,
+                    logical_id,
+                    turn_id,
+                )
                 .await?;
             return Ok(AcceptedInput::settled(outcome));
         }

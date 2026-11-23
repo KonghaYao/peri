@@ -188,8 +188,8 @@ test('GET observes an idle-reclaimed environment and a new ensure starts a new r
     const reclaimed = (await (
       await handler(authorized(`${BASE}/v1/sandboxes/env-reclaimed`))
     ).json()) as SandboxPayload;
-    assert.equal(reclaimed.sandbox.state, 'stopped');
-    assert.equal(reclaimed.sandbox.mcpUrl, null);
+    assert.equal(reclaimed.sandbox.state, 'reserved');
+    assert.equal(reclaimed.sandbox.mcpUrl, created.sandbox.mcpUrl);
     assert.equal(reclaimed.sandbox.runId, created.sandbox.runId);
     assert.equal(reclaimed.sandbox.workspacePath, created.sandbox.workspacePath);
     assert.equal(existsSync(marker), true);

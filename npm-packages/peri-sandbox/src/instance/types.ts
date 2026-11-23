@@ -67,6 +67,8 @@ export interface SandboxInstance {
   readonly workspacePath: string;
   readonly sandboxRoot: string;
   readonly runtime: SandboxRuntimeInfo;
+  /** Swarm idle policy can opt into run-local MCP task observations. */
+  watchTaskActivity?(onSettled: () => void): () => boolean;
   status(): SandboxStatus;
   close(options?: { deleteData?: boolean }): Promise<void>;
 }
@@ -151,6 +153,7 @@ export interface McpBackendSubscription {
  */
 export interface McpBackendPort {
   readonly runId: string;
+  watchTaskActivity?(onSettled: () => void): () => boolean;
   serverCapabilities(): import('@modelcontextprotocol/client').ServerCapabilities | undefined;
   serverInfo(): import('@modelcontextprotocol/client').Implementation | undefined;
   instructions(): string | undefined;

@@ -20,6 +20,8 @@
 //!    then consumes [`peri_acp::host::AcpHostHandle::shutdown`]; dropping the
 //!    handle would only detach the host task.
 
+mod history;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,7 +40,7 @@ pub use peri_acp_types::session_store::SessionStoreDeployment;
 use peri_resources::RemoteWorkspaceEnvironment;
 use peri_resources::Resources;
 use serde_json::{json, Value};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -297,11 +299,22 @@ fn mcp_servers(workspace: Option<&SandboxMcpBinding>, tools: &[McpToolSpec]) -> 
     servers
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionEntry {
+    New,
+    Load,
+    Interrupted,
+}
+
 /// One spawned host + negotiated session + its reader task.
 pub struct AcpChild {
     client: Arc<MpscClientTransport>,
     host: AsyncMutex<Option<AcpHostHandle>>,
     reader: AsyncMutex<Option<JoinHandle<()>>>,
+    // Installed before ACP can launch a recovered root continuation. The
+    // reader acknowledges its terminal only after draining its notifications.
+    recovery_terminal: Option<watch::Receiver<bool>>,
+    retry_recovery: AsyncMutex<bool>,
     shutdown: AsyncMutex<Option<ChildShutdown>>,
     session_id: String,
 }
@@ -330,6 +343,8 @@ impl AcpChild {
             client,
             host: AsyncMutex::new(None),
             reader: AsyncMutex::new(None),
+            recovery_terminal: None,
+            retry_recovery: AsyncMutex::new(false),
             shutdown: AsyncMutex::new(None),
             session_id: session_id.into(),
         }
@@ -341,24 +356,68 @@ impl AcpChild {
     /// `_meta["peri.rootSessionId"]`; the host therefore owns the identity the
     /// Swarm row was written with (S1).
     pub async fn spawn(config: ChildConfig, log: Arc<ItemLog>) -> Result<Self, ChildError> {
-        Self::build(config, log, false).await
+        Self::build(config, log, SessionEntry::New).await
     }
 
     /// Assemble a host and attach it to the **persisted** session id (S9a4b).
     ///
     /// This is `initialize` → `session/load` with the stored root id, `cwd` and
-    /// `mcpServers`. Load restores the session and replays history; it does not
-    /// run a turn, execute a queued input, or mint a new identity. Replay
-    /// notifications are dropped by [`super::projection`], so `swarm_items`
-    /// stays the single record.
+    /// `mcpServers`. ACP handles eligible durable work under this identity.
+    /// Swarm never resubmits the original input, and replayed notifications
+    /// are discarded by [`super::projection`].
     pub async fn attach(config: ChildConfig, log: Arc<ItemLog>) -> Result<Self, ChildError> {
-        Self::build(config, log, true).await
+        Self::build(config, log, SessionEntry::Load).await
+    }
+
+    /// Restore a root whose Swarm turn lost its host. Only durable outstanding
+    /// messages or working children may initiate ACP recovery.
+    pub(super) async fn attach_interrupted(
+        config: ChildConfig,
+        log: Arc<ItemLog>,
+    ) -> Result<Self, ChildError> {
+        Self::build(config, log, SessionEntry::Interrupted).await
+    }
+
+    pub(super) fn recovering(&self) -> bool {
+        self.recovery_terminal
+            .as_ref()
+            .is_some_and(|terminal| !*terminal.borrow())
+    }
+
+    /// Only an explicit later submission may retry a recovery which never
+    /// produced a terminal. ACP owns deduplication against a live continuation.
+    pub(super) async fn wait_for_recovery(&self) -> Result<bool, ChildError> {
+        let Some(mut terminal) = self.recovery_terminal.clone() else {
+            return Ok(true);
+        };
+        let mut retry = self.retry_recovery.lock().await;
+        if *terminal.borrow() {
+            return Ok(true);
+        }
+        if *retry {
+            let response = self
+                .client
+                .send_request("session/resume", json!({ "sessionId": self.session_id }))
+                .await
+                .map_err(ChildError::rpc)?;
+            check_recovery_result(&response)?;
+        }
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), terminal.wait_for(|done| *done)).await;
+        match result {
+            Ok(Ok(_)) => Ok(true),
+            Ok(Err(_)) => Err(ChildError::Closed),
+            Err(_) => {
+                *retry = true;
+                Ok(false)
+            }
+        }
     }
 
     async fn build(
         config: ChildConfig,
         log: Arc<ItemLog>,
-        attach: bool,
+        entry: SessionEntry,
     ) -> Result<Self, ChildError> {
         let cwd = config.cwd.to_string_lossy().into_owned();
         let source = build_config_source(&config)?;
@@ -373,6 +432,31 @@ impl AcpChild {
 
         let resources = open_session_resources(&config).await?;
         let (session_resources, session_store_shutdown) = resources.into_parts();
+        if entry == SessionEntry::Interrupted {
+            // Ordinary prompts also set working before calling the model. A
+            // dead synchronous attempt has no owner to settle it. This store
+            // transaction preserves stopped and pending EnsureProcessing MQ
+            // work, including a result which arrives concurrently.
+            let settlement = async {
+                session_resources
+                    .settle_work_state_after_turn(&config.root_session_id)
+                    .await
+                    .map_err(|error| {
+                        ChildError::Local(format!("settle interrupted root: {error}"))
+                    })?;
+                log.settle_interrupted_turn().await.map_err(|error| {
+                    ChildError::Local(format!("persist interrupted turn: {error}"))
+                })
+            }
+            .await;
+            if let Err(error) = settlement {
+                use peri_acp_types::session_resources::SessionStoreShutdownPort;
+                if let Err(close_error) = session_store_shutdown.shutdown().await {
+                    tracing::warn!(%close_error, "failed closing interrupted session resources");
+                }
+                return Err(error);
+            }
+        }
 
         // The session-wide mode stays `Bypass`; only the declared MCP bindings
         // are scoped into the approval channel. An empty set is observably the
@@ -429,14 +513,19 @@ impl AcpChild {
         let host = spawn_acp_server(Arc::new(server_transport), host_config);
 
         let reader_client = Arc::clone(&client);
+        let root = config.root_session_id.clone();
+        let (root_done, terminal) = watch::channel(false);
+        let (entry_result, recovered_root) = oneshot::channel();
         let reader = tokio::spawn(async move {
-            read_loop(reader_client, log).await;
+            read_loop(reader_client, log, &root, root_done, recovered_root).await;
         });
 
         let child = Self {
             client: Arc::clone(&client),
             host: AsyncMutex::new(Some(host)),
             reader: AsyncMutex::new(Some(reader)),
+            recovery_terminal: None,
+            retry_recovery: AsyncMutex::new(false),
             shutdown: AsyncMutex::new(None),
             session_id: String::new(),
         };
@@ -446,9 +535,14 @@ impl AcpChild {
             return Err(shutdown);
         }
 
+        let attach = entry != SessionEntry::New;
         let (method, params) = if attach {
             (
-                "session/load",
+                if entry == SessionEntry::Interrupted {
+                    "session/resume"
+                } else {
+                    "session/load"
+                },
                 session_load_params(
                     &cwd,
                     &config.root_session_id,
@@ -490,6 +584,14 @@ impl AcpChild {
                 .await);
         }
         let mut child = child;
+        match check_recovery_result(&response) {
+            Ok(Some(recovery)) if recovery.recovered.contains(&session_id) => {
+                child.recovery_terminal = Some(terminal);
+            }
+            Ok(_) => {}
+            Err(error) => return Err(child.finish(Err(error)).await),
+        }
+        let _ = entry_result.send(child.recovery_terminal.is_some());
         child.session_id = session_id;
         Ok(child)
     }
@@ -654,34 +756,6 @@ impl AcpChild {
             .map_err(ChildError::rpc)
     }
 
-    /// Initial `session/load` (no cursor). Returns the raw host response, which
-    /// carries `snapshotToken` and — when archived history exists — `nextCursor`.
-    /// `limit` is forwarded as-is: the host owns the rule that it is only valid
-    /// together with a cursor, and answers `-32602` otherwise.
-    pub async fn load_initial(&self, limit: Option<u32>) -> Result<Value, ChildError> {
-        let mut params = json!({ "sessionId": self.session_id });
-        if let Some(limit) = limit {
-            params["limit"] = json!(limit);
-        }
-        self.client
-            .send_request("session/load", params)
-            .await
-            .map_err(ChildError::rpc)
-    }
-
-    /// Read-only history page. Requires the connection-negotiated
-    /// `peri.historyPagination` capability; the host rejects it otherwise.
-    pub async fn load_page(&self, cursor: &str, limit: Option<u32>) -> Result<Value, ChildError> {
-        let mut params = json!({ "sessionId": self.session_id, "cursor": cursor });
-        if let Some(limit) = limit {
-            params["limit"] = json!(limit);
-        }
-        self.client
-            .send_request("session/load", params)
-            .await
-            .map_err(ChildError::rpc)
-    }
-
     /// Close client admission, join the reader, and consume the host shutdown.
     /// Repeated calls return the cached first report (the host report itself is
     /// stable after its own terminal observation).
@@ -744,6 +818,27 @@ impl AcpChild {
     }
 }
 
+fn check_recovery_result(
+    response: &Value,
+) -> Result<Option<peri_acp_types::recovery::RecoveryView>, ChildError> {
+    use peri_acp_types::recovery::RecoveryView;
+    let Some(meta) = response.pointer("/_meta/peri.recovery") else {
+        return Ok(None);
+    };
+    let recovery: RecoveryView = serde_json::from_value(meta.clone())
+        .map_err(|error| ChildError::Local(format!("invalid ACP recovery result: {error}")))?;
+    if recovery.execution_blocked {
+        return Err(ChildError::Local(format!(
+            "ACP blocked session recovery: {:?}",
+            recovery.error
+        )));
+    }
+    if !recovery.failures.is_empty() || recovery.error.is_some() {
+        tracing::warn!(?recovery, "ACP reported session recovery failures");
+    }
+    Ok(Some(recovery))
+}
+
 fn describe_shutdown(report: &peri_acp::host::AcpHostShutdownReport) -> (bool, &'static str) {
     use peri_acp::host::AcpHostShutdownReport;
     match report {
@@ -775,11 +870,31 @@ fn build_config_source(config: &ChildConfig) -> Result<Arc<ConfigSource>, ChildE
 /// terminal, or permission surface (`initialize` sets `fs.*=false`,
 /// `terminal=false`), so a request here means a host path outside the S4
 /// contract — answering keeps the host from blocking forever.
-async fn read_loop(client: Arc<MpscClientTransport>, log: Arc<ItemLog>) {
+async fn read_loop(
+    client: Arc<MpscClientTransport>,
+    log: Arc<ItemLog>,
+    root: &str,
+    root_done: watch::Sender<bool>,
+    recovered_root: oneshot::Receiver<bool>,
+) {
+    let mut recovered_root = Some(recovered_root);
     while let Some(message) = client.recv().await {
         match message {
             IncomingMessage::Notification { method, params } => {
-                log.ingest(&method, &params).await;
+                if method == super::projection::AGENT_EVENT_DONE {
+                    if params.get("sessionId").and_then(Value::as_str) != Some(root) {
+                        continue;
+                    }
+                    log.ingest(&method, &params).await;
+                    if let Some(expected) = recovered_root.take() {
+                        if expected.await.unwrap_or(false) {
+                            log.finish_recovered_root().await;
+                        }
+                        root_done.send_replace(true);
+                    }
+                } else {
+                    log.ingest(&method, &params).await;
+                }
             }
             IncomingMessage::Request { id, method, params } => {
                 if method == "session/request_permission" {

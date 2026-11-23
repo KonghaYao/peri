@@ -202,7 +202,7 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
       case 'tools/list':
         return jsonRpcResult(message.id, coldToolsListResult(expectedProviderVersion));
       case 'ping':
-        return jsonRpcResult(message.id, {});
+        return jsonRpcResult(message.id, { resultType: 'complete' });
       default:
         return null;
     }
@@ -284,7 +284,7 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
     return (async () => {
       try {
         // Reclaim first wins: wait for a close that already started, then route.
-        await manager.whenIdleSettled(logicalEnvId);
+        await manager.whenCloseSettled(logicalEnvId);
         const response = await routeMcp(logicalEnvId, request);
         return trackResponseBody(response, release);
       } catch (error) {
@@ -367,7 +367,10 @@ export function createSwarmRequestHandler(options: SwarmServerOptions): SwarmReq
 
     // Everything the snapshot cannot answer (tools/call and every other
     // request) starts the instance through the manager's single-flight path.
-    const entry = await manager.ensure(logicalEnvId);
+    // Reading a slow body may overlap an explicit stop/delete. Recheck the binding
+    // before ensure(), which is also the management API's unconditional create.
+    const entry = await manager.ensureForRequest(logicalEnvId);
+    if (!entry) return errorResponse(404, 'sandbox_not_found', 'sandbox is not running.');
     if (entry.instance.state !== 'ready')
       return errorResponse(503, 'sandbox_not_ready', `sandbox is ${entry.instance.state}.`);
     await observeProviderVersion(entry);

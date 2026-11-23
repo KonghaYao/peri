@@ -16,6 +16,7 @@ import {
   type McpBackendSubscription,
   type McpBackendSubscriptionOptions,
 } from '../instance/types.js';
+import { TaskActivity } from './task-activity.js';
 import type { DiagnosticLog } from './diagnostics.js';
 
 const maxMessage = 32 * 1024 * 1024;
@@ -203,6 +204,7 @@ export class PeriBackend implements McpBackendPort {
   private taskRequests = 0;
   private otherRequests = 0;
   private closing = false;
+  private activity?: TaskActivity;
   constructor(options: PeriBackendOptions) {
     this.id = options.id;
     this.runId = options.runId;
@@ -224,6 +226,15 @@ export class PeriBackend implements McpBackendPort {
       });
     };
   }
+  watchTaskActivity(onSettled: () => void): () => boolean {
+    const activity = new TaskActivity(
+      (method, params) => this.client.request({ method, params }, z.record(z.string(), z.unknown()), { timeout: 5000 }),
+      onSettled,
+    );
+    this.activity = activity;
+    return () => this.calls > 0 || activity.busy();
+  }
+
   private handleClosed(): void {
     if (this.closing) return;
     this.onExit?.(new SandboxError('backend_exited', 'Sandbox backend exited unexpectedly.'));
@@ -285,13 +296,22 @@ export class PeriBackend implements McpBackendPort {
       const key = options.requestId === undefined ? undefined : requestKey(options.requestId);
       if (key !== undefined && pending) this.requests.set(key, pending);
       const signal = pending ? AbortSignal.any([options.signal, pending.controller.signal]) : options.signal;
+      const observe = this.activity?.observeRequest(method, params);
       try {
-        return await this.client.request(
+        const result = await this.client.request(
           { method, params: forwardedParams(params) },
           z.record(z.string(), z.unknown()),
           { signal, timeout: requestTimeoutMs, onprogress: options.onProgress },
         );
+        observe?.(result);
+        return result;
       } catch (error) {
+        if (
+          method === 'tools/call' &&
+          params.name === 'Bash' &&
+          (signal.aborted || !(error instanceof ProtocolError) || error.code === -32001)
+        )
+          this.activity?.interruptedBash();
         if (pending?.cancelled) throw new ProtocolError(requestCancelledCode, 'Request cancelled');
         throw error;
       } finally {
@@ -382,6 +402,7 @@ export class PeriBackend implements McpBackendPort {
           (filter) => Array.isArray(filter.resourceSubscriptions) && filter.resourceSubscriptions.includes(uri),
         );
     } else if (method === 'notifications/tasks' || method === 'notifications/tasks/status') {
+      this.activity?.observe(method, {}, params);
       const taskId = taskIdOf(params);
       if (taskId !== undefined)
         routeFiltered(
