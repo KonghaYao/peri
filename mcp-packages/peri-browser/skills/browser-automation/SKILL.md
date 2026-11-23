@@ -8,11 +8,54 @@ description: Drive the Peri browser with the peri-browser MCP tools. Use when in
 The peri-browser MCP exposes one Kitesurf browser instance. Each MCP process is
 one session: it owns the pages it created and drives at most one page at a time.
 
+## Connect before browsing
+
+No page tool works until this session is connected. There is no endpoint
+environment variable: the connection lives in the MCP process and a restart
+starts disconnected. Follow this order every time, and use `browser_status` as
+the only state source (it returns `nextSteps` for the current state).
+
+1. Call `browser_status`.
+2. If `kitesurf.installed` is false, explain to the user what kitesurf is and
+   ask whether to install it. Only after the user agrees, run the exact
+   `kitesurf.installCommand` (the shell installer). Never add `sudo`, never
+   rewrite the command, and do not install without consent.
+3. If `recommendedEndpoint.listening` is false, start
+   `kitesurf serve --port 18971` in the background (do not block the shell) and
+   wait until a new `browser_status` reports `listening: true`.
+4. Call `browser_connect(url: "http://127.0.0.1:18971")`.
+5. Only now use `new_page`, `navigate_page`, `take_snapshot` and the other page
+   tools.
+
+18971 is a convention, not a default: `browser_connect` always needs an explicit
+URL. Same URL twice is an idempotent success (`alreadyConnected: true`); a
+different URL returns `already_connected` because the process keeps the first
+endpoint. To switch endpoints, restart the MCP process and connect again; do not
+try to force a switch.
+
+### Install, profile and port failures
+
+- The installer fails: keep its original error output instead of paraphrasing it.
+  Suggest `GITHUB_PROXY` / `GITHUB_API_PROXY` when the network needs a mirror, or
+  the mise alternative `mise use -g github:KonghaYao/kitesurf@latest`; do not
+  retry with `sudo`.
+- `platform.supported` is false: the installer has no build for this platform.
+  Report it and offer the mise alternative instead of forcing the download.
+- `kitesurf serve` reports that the profile is in use: do not kill processes and
+  do not delete profiles. Report it to the user and ask whether to reuse the
+  running instance (pass its URL to `browser_connect`) or start another one.
+- The chosen port is taken by something else: start kitesurf on another port
+  after asking the user, and pass that URL to `browser_connect`. The recommended
+  endpoint is only a suggestion.
+- The engine answers but `browser_connect` still fails: report the exact
+  `connect_failed` message; do not fall back to another URL silently.
+
 ## Pick the right tool
 
 | Goal | Tool |
 | --- | --- |
 | Is the browser up, which pages exist, is the monitor available | `browser_status` |
+| Attach this MCP session to a Kitesurf endpoint | `browser_connect` |
 | Enumerate this session's pages | `list_pages` |
 | Switch the active page | `select_page` |
 | Open a page | `new_page` |
@@ -95,7 +138,17 @@ search flow, `fill` then `press_key` with `Enter` is usually enough.
 
 Errors are tool errors with a stable code and a hint. Common cases:
 
-- `not_connected`: no `KITESURF_CDP_URL`; report this to the user.
+- `not_connected`: nothing is connected yet. Call `browser_status` and follow
+  `nextSteps` (install, start, `browser_connect`), then retry. Do not report the
+  error as a final answer.
+- `connect_failed`: the URL did not answer `/json/version`. Start kitesurf (or
+  correct the URL) and call `browser_connect` again; retrying page tools is
+  useless until it succeeds.
+- `already_connected`: this MCP process is attached to a different endpoint.
+  Reuse the endpoint named in the error or restart the MCP process; do not
+  retry with the second URL.
+- `invalid_argument` on connect: pass `http://` or `ws://`, an explicit port and
+  a loopback host (`127.0.0.1`, `::1` or `localhost`); TLS is not supported yet.
 - `no_active_page`: call `new_page` or `list_pages` + `select_page`.
 - `cdp_closed` / `target_expired`: the page is gone; list pages and recreate.
 - `context_destroyed`: a navigation landed mid-command; retry after a snapshot.

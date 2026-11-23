@@ -12,8 +12,12 @@ repeat the failing action if the event you need predates the first read.
 
 ## Order of investigation
 
-1. `browser_status` — confirm the endpoint is reachable, the page is listed and
-   the monitor is optional.
+1. `browser_status` — check the connection state first. If `connected` is false,
+   follow `nextSteps` (ask before installing kitesurf, start
+   `kitesurf serve --port 18971` in the background, wait for
+   `recommendedEndpoint.listening`, then `browser_connect`); only then continue.
+   A `not_connected` tool error means no page exists yet, not that the page is
+   broken.
 2. `take_screenshot` — see what the user sees. The result is a JPEG image
    (`image/jpeg`, quality 70, at most 1600x1000) delivered as MCP image content.
 3. `list_console_messages` — errors and warnings, newest last as buffered.

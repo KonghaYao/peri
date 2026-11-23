@@ -90,6 +90,37 @@ flowchart LR
 - 需要独立账号的会话：指向另一个实例（不同端口与 profile），不共享 profile。
 - 监控网关（§6）以 viewer 身份挂在同样的页面端点上，不参与本节的所有权。
 
+### 4.1 连接与安装引导（onboarding）
+
+端点不是启动配置：进程启动不需要端点，浏览器工具在 `browser_connect` 成功前返回 `not_connected`。端点只存在于进程内存，不落盘、不跨进程；MCP 重启后需要重新连接。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unknown: browser_status
+    Unknown --> NotInstalled: 未找到 kitesurf
+    Unknown --> Installed: 找到 kitesurf
+    NotInstalled --> Installed: 用户同意后运行安装脚本
+    Installed --> Listening: 后台 kitesurf serve --port 18971
+    Installed --> NotListening: 未启动
+    Listening --> Connected: browser_connect
+    Connected --> Connected: 页面工具可用
+    NotListening --> Listening: 重试启动
+    Connected --> Degraded: 端点不可达
+    Degraded --> Connected: 引擎恢复后再次 connect
+```
+
+规则：
+
+- `browser_connect(url)` 只接受 `http://` / `ws://` + 显式端口 + 环回 host（`127.0.0.0/8`、`::1`、`localhost`），canonical 固定为 `ws://host:port/devtools/browser`（输入 path/query 被丢弃）。`https://` / `wss://`、缺端口、非环回一律 `invalid_argument`。
+- 连接前用 `/json/version` 探测，超时复用 `PERI_BROWSER_CONNECT_TIMEOUT_MS`；不可达返回 `connect_failed`，不改变连接状态。
+- 首次成功写入进程内端点并通知网关；同一 canonical URL 再次调用是幂等成功（`alreadyConnected: true`）；不同 URL 返回 `already_connected`，不静默切换、不关闭已有页面。切换端点需要重启 MCP 进程。
+- `--http` 模式下同一进程的多个客户端共享该端点，先连者生效；后连不同 URL 得到 `already_connected`。
+- 网关（`peri-browser-gateway`）在首次成功 connect 前不启动；启动后用真实端点注册。网关进程自己的 `--cdp-url` 是网关的独立设置，和 MCP 连接无关，也不由 MCP 读取。
+- 推荐实例：`kitesurf serve --port 18971`，然后 `browser_connect(url: "http://127.0.0.1:18971")`。**18971 只是约定，不是隐式默认值**；端口被占用时换端口并把新 URL 传给 `browser_connect`。
+- 安装（先征得用户同意）：`curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install-kitesurf.sh | bash`。脚本只支持 macOS arm64 与 Linux x64，安装到 `$HOME/.kitesurf`（或 `KITESURF_INSTALL_DIR`），整包解压在 `v<version>/`，`bin/kitesurf` 为符号链接，`current-version.txt` 记录版本。固定版本可设 `KITESURF_INSTALL_VERSION=0.5.4`（跳过 GitHub API）；网络受限时用 `GITHUB_PROXY` / `GITHUB_API_PROXY`；脚本失败时保留原始输出，备选 `mise use -g github:KonghaYao/kitesurf@latest`。
+- `browser_status` 是唯一状态入口：`connected`（端点当前是否可达）、`endpoint`（canonical 或 null）、`platform`、`kitesurf`（安装、版本、路径、`installCommand`，未安装时附 `installInstruction` 要求先询问用户）、`recommendedEndpoint`（`listening` 仅在未连接时探测 `ws://127.0.0.1:18971/json/version`，1s 上限；已连接且可达时为 null，表示未探测）、`nextSteps`（按状态生成）与 `monitor`。
+- `monitor` 取值：`unavailable`（没有网关 socket，或已连接浏览器但网关未运行）、`waiting_for_connect`（网关 socket 已配置，但浏览器尚未 connect；网关按设计尚未启动）、`connected`。
+
 ## 5. 所有权与人类介入
 
 | 能力 | page controller | Browser controller | viewer |
@@ -237,7 +268,7 @@ sequenceDiagram
 
 | 分类 | 工具 |
 | --- | --- |
-| 会话 | `browser_status`、`yield_page`、`request_human`、`request_authorization` |
+| 会话 | `browser_status`、`browser_connect`、`yield_page`、`request_human`、`request_authorization` |
 | 页面 | `list_pages`、`select_page`、`new_page`、`navigate_page`、`close_page` |
 | 读取 | `take_snapshot`、`take_screenshot`、`evaluate_script` |
 | 交互 | `click`、`fill`、`hover`、`press_key`、`wait_for` |
@@ -249,7 +280,8 @@ sequenceDiagram
 - `new_page` 走建页短连接创建 target，再建立新的页面连接；`close_page` 经建页连接 `Target.closeTarget`（返回 `{success:true}`），同时关闭本地页面连接。不要在页面连接上发 `Target.closeTarget`：target 关闭后连接以 `1008 Target expired` 断开，命令没有回复。
 - 从 DOM snapshot 生成 uid，MCP 内部维护 uid → backendNodeId 映射，交互工具只接受最新 snapshot 的 uid。
 - 页面命令直接发在页面连接上，由 Kitesurf 注入该页面的 primary session；不要复用 Browser 连接做页面操作。
-- `browser_status` 返回：实例端点、page target、controller/所有权状态、是否被 fence、是否已让出页面、监控 URL（或 `monitor: unavailable`）、agent 状态。
+- `browser_status` 返回：连接与端点（canonical `ws://…` 或 null）、平台与安装状态、推荐端点与 `nextSteps`、page target、controller/所有权状态、是否被 fence、是否已让出页面、监控状态（含 `waiting_for_connect`）、agent 状态。
+- `browser_connect` 是唯一的连接入口：只接受环回 HTTP/WS URL，探测 `/json/version` 后固定端点；未连接时其余浏览器工具返回 `not_connected`，错误 hint 指向 `browser_status` → `browser_connect`（§4.1）。
 - `request_human` 阻塞当前工具调用，返回人的操作结果或 `no_human`；不改变页面所有权（人持有期间 agent 不写）。
 - 错误映射：`Another controller owns this page session`、`Target belongs to another page session`、`This method is not available on a page-session connection`、`Control has changed`、viewer 拒绝、`page_busy_by_human`、`yield_pending`、25 s egress timeout 都转成稳定错误码。
 - console/network 诊断对 page controller 可用（已实测 `Runtime.consoleAPICalled` 与 `Network.*`）；viewer 可读 DOM 与画面，但不能 `Runtime.enable`/`Network.enable`，因此 console/network 只在人持 controller 时由网关采集；监控页不再内置面板，诊断交给官方 DevTools。
@@ -262,8 +294,9 @@ sequenceDiagram
 
 ## 8. 生命周期
 
-- 实例：默认每机一个，由宿主启动并以 `KITESURF_CDP_URL` 注入；MCP 只连接，不拉起共享实例。
-- 实例未启动：`browser_status` 返回未连接，并提示宿主的启动命令；MCP 不代为拉起。
+- 实例：由用户或技能启动（推荐 `kitesurf serve --port 18971`）；MCP 不拉起共享实例，也不读取任何端点环境变量。连接由 `browser_connect` 在运行时建立（§4.1）。
+- 实例未启动：`browser_status` 返回 `connected: false` 与可执行的 `nextSteps`（安装/启动/连接），浏览器工具返回 `not_connected`；MCP 进程不退出。
+- 端点变更：端点固定后不可在进程内切换；需要换实例时重启 MCP 进程并重新 `browser_connect`。端点不持久化。
 - 网关：独立进程，宿主按需启动；不在时监控不可用，MCP 功能不受影响。
 - 页面：会话首次调用浏览器工具时创建 target 并连接；会话结束关闭页面连接，target 按需保留或关闭。
 - 页面失效：连接收到 `1008 Target expired`（target 被关闭）时，立即失败所有 pending 调用并丢弃该页面；不重放写操作。
@@ -290,8 +323,7 @@ sequenceDiagram
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `KITESURF_CDP_URL` | 无（必须注入） | 共享实例的 CDP 端点 |
-| `PERI_BROWSER_CDP_URL` | 无 | 直接运行时覆盖 `KITESURF_CDP_URL`；空值忽略 |
+| `KITESURF_INSTALL_DIR` | `$HOME/.kitesurf` | `browser_status` 的安装探测根目录（读 `current-version.txt`）；不参与连接 |
 | `PERI_BROWSER_OWNER` | `peri-browser` | Browser 端点 owner；同一实例的所有会话共用 |
 | `PERI_BROWSER_SESSION_NAME` | 同 `PERI_BROWSER_OWNER` | 网关注册与监控使用的会话标签 |
 | `PERI_BROWSER_PROVISION_LOCK` | 运行目录下 `kitesurf-provision.lock` | 建页短连接的互斥锁 |
@@ -316,7 +348,9 @@ sequenceDiagram
 
 状态：`PERI_BROWSER_GATEWAY_BIN`、`PERI_BROWSER_MONITOR_TOKEN_TTL_MS`、`PERI_BROWSER_MONITOR_MAX_VIEWERS`、`PERI_BROWSER_FRAME_QUALITY`、`PERI_BROWSER_FRAME_MAX_WIDTH`、`PERI_BROWSER_MONITOR_TLS_CERT`/`_KEY` 是网关后续计划项，当前两个 crate 均未读取；其余表项已由所属进程读取（网关项由 `peri-browser-gateway` 读取，MCP 项由 `peri-browser` 读取）。
 
-传输：默认 stdio；`--http <addr>` 切换为 MCP Streamable HTTP，技能与工具在同一服务器暴露。`KITESURF_CDP_URL` 缺席时 `browser_status` 报告未连接，浏览器工具返回可操作的启动提示，进程不退出。
+端点不是配置项：没有端点环境变量，也没有默认端点。`KITESURF_INSTALL_DIR` 只影响安装探测。网关进程有一个自己的 `--cdp-url` 参数，那是网关连接浏览器的独立设置，与 MCP 的连接、注册无关；MCP 不读取也不转发它。
+
+传输：默认 stdio；`--http <addr>` 切换为 MCP Streamable HTTP，技能与工具在同一服务器暴露。没有端点时 `browser_status` 报告未连接并给出安装/启动/连接步骤，浏览器工具返回可操作的 `not_connected`，进程不退出；连接成功后页面工具才可用。
 
 ## 11. 实施顺序
 
