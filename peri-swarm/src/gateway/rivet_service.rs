@@ -197,7 +197,13 @@ async fn forward_stream(
 ) {
     let mut parser = FrameParser::new();
     let mut chunks = response.bytes_stream();
-    while let Some(chunk) = chunks.next().await {
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            () = sender.closed() => return,
+            chunk = chunks.next() => chunk,
+        };
+        let Some(chunk) = chunk else { return };
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -488,5 +494,26 @@ impl RivetSwarmService {
             )
             .await?;
         envelope.into_result()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn idle_sse_stops_upstream_when_last_viewer_leaves() {
+        let bytes = futures::stream::pending::<Result<Vec<u8>, std::io::Error>>();
+        let body = reqwest::Body::wrap_stream(bytes);
+        let response = reqwest::Response::from(axum::http::Response::new(body));
+        let (events, viewer) = broadcast::channel(1);
+        let last_viewer = events.subscribe();
+        let task = forward_stream(response, events, Arc::new(AtomicU64::new(0)));
+        tokio::pin!(task);
+        assert!(futures::poll!(&mut task).is_pending());
+        drop(viewer);
+        assert!(futures::poll!(&mut task).is_pending());
+        drop(last_viewer);
+        assert!(futures::poll!(&mut task).is_ready());
     }
 }

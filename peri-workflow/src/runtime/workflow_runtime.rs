@@ -330,12 +330,8 @@ impl WorkflowRuntime {
             budgets: Arc::clone(&budgets),
         }));
         let delivery_runner = Arc::downgrade(&runner);
-        // tool 终态的 tools.jsonl 去重集合：sink 在重复回填时会被再次调用，但同一
-        // `(runId, taskId)` 只能追加一次（append-only 事实源）。
-        let appended_tools: Arc<parking_lot::Mutex<std::collections::HashSet<(String, String)>>> =
-            Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
         let tool_journal = Arc::clone(&journal_store);
-        tasks.set_terminal_sink(Arc::new(move |record: &WorkflowTaskRecord| {
+        tasks.set_terminal_handler(Arc::new(move |record, first_commit| {
             match record.kind() {
                 WorkflowTaskKind::Agent => {
                     let Some(runner) = delivery_runner.upgrade() else {
@@ -368,9 +364,9 @@ impl WorkflowRuntime {
                         .tool_outcome
                         .clone()
                         .unwrap_or_else(|| cancelled_tool_outcome(record));
-                    let key = (record.run_id.clone(), record.task_id.clone());
-                    // 重复回填只重投结果，不再追加（tools.jsonl 是 append-only 事实源）。
-                    if appended_tools.lock().insert(key) {
+                    // A duplicate settlement redelivers the original result. Only the
+                    // first terminal transition writes the append-only journal.
+                    if first_commit {
                         append_tool_journal_entry(&tool_journal, record, &outcome);
                     }
                     let Some(runner) = delivery_runner.upgrade() else {
