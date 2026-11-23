@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "Loopback MCP and monitor gateway for Kitesurf browser sessions"
 license = "Apache-2.0"
 
+[[bin]]
+name = "peri-browser"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

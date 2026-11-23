@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::onboarding::{normalize_endpoint, recommended_canonical};
+use crate::onboarding::{install_root, normalize_endpoint, recommended_canonical};
 
-const DEFAULT_BIND: &str = "127.0.0.1:7391";
+pub(crate) const DEFAULT_BIND: &str = "127.0.0.1:7391";
 const MAX_TIMEOUT_MS: u64 = 86_400_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -102,14 +102,7 @@ impl Config {
             None => [Uuid::new_v4().into_bytes(), Uuid::new_v4().into_bytes()].concat(),
         };
         let home = env("HOME");
-        let kitesurf_home = non_empty(&lookup, "KITESURF_INSTALL_DIR")
-            .map(PathBuf::from)
-            .or_else(|| {
-                home.as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| PathBuf::from(s).join(".kitesurf"))
-            })
-            .ok_or(ConfigError::MissingHome)?;
+        let kitesurf_home = install_root(&lookup).ok_or(ConfigError::MissingHome)?;
         let owner = match lookup("PERI_BROWSER_OWNER") {
             Some(value) if value.trim().is_empty() => {
                 return Err(ConfigError::EmptyValue("PERI_BROWSER_OWNER"))

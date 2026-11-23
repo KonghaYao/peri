@@ -432,7 +432,7 @@ impl ServerHandler for BrowserMcpServer {
             .build();
         ServerConfig::new(capabilities)
             .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
-            .with_server_info(Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(SERVER_NAME, crate::version()))
             .with_instructions(
                 "Browser control through a Kitesurf instance. Start with browser_status; if it \
                  reports connected: false, follow nextSteps and call browser_connect before any \

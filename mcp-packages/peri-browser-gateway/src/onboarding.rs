@@ -191,6 +191,23 @@ impl InstallInfo {
     }
 }
 
+/// Install root: `KITESURF_INSTALL_DIR`, else `$HOME/.kitesurf`.
+///
+/// `None` means neither variable supplies a usable path; callers decide whether
+/// that is an error (both the gateway config and `install`/`start` require it).
+#[must_use]
+pub fn install_root(lookup: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    lookup("KITESURF_INSTALL_DIR")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            lookup("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".kitesurf"))
+        })
+}
+
 /// Looks for kitesurf in `install_dir/bin`, `$HOME/.kitesurf/bin`, then `PATH`.
 ///
 /// `lookup` reads the process environment (`HOME`, `PATH`); it never runs a

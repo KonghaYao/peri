@@ -29,7 +29,7 @@ async fn trace_logs_keep_http_and_cdp_inputs_private_and_sigterm_reaps_listener(
     let home = tempfile::tempdir()?;
     let mut engine = Engine::ephemeral().await?;
     let mut child = RunningGateway(
-        Command::new(env!("CARGO_BIN_EXE_peri-browser-gateway"))
+        Command::new(env!("CARGO_BIN_EXE_peri-browser"))
             .args(["--bind", "127.0.0.1:0", "--cdp-url", &engine.url()])
             .env_clear()
             .env("HOME", home.path())
