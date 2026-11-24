@@ -223,6 +223,17 @@ impl HostTaskOwner {
         }
     }
 
+    /// 预算到期：不再等协作式退出，直接请求 abort。
+    ///
+    /// 墙钟预算（3s）短于 `cooperative_grace`（5s）时，`shutdown` 的 future 会在进入
+    /// abort 阶段前被丢弃；不显式请求 abort，非协作任务会在每轮重试里重新等满 grace。
+    pub(crate) fn abort_pending(&self) {
+        if let Some(inner) = self.inner.as_ref() {
+            begin_shutdown(inner);
+            abort_remaining(inner);
+        }
+    }
+
     pub(crate) async fn shutdown(&mut self) -> HostShutdownReport {
         let Some(inner) = self.inner.as_ref().cloned() else {
             return HostShutdownReport::Complete;

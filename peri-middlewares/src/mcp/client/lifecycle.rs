@@ -15,8 +15,9 @@ use futures::StreamExt;
 
 /// 单个 pool 内并行关闭的上限。
 ///
-/// service / process / builtin 三张表互不共享锁，单项关闭都有 5s（builtin 1s）
-/// 上限；并行收口把「逐项累加」压成「取最大」，同时避免一次拉起过多收尾任务。
+/// service / process 两张表互不共享锁，单项关闭都有 5s 上限；并行收口把「逐项累加」
+/// 压成「取最大」，同时避免一次拉起过多收尾任务。builtin 监督者不适用此闸门：每项
+/// 移交给独立 task（见 `close_builtin_tasks`），实例数由配置决定。
 pub(super) const MAX_PARALLEL_CLOSES: usize = 8;
 
 pub(super) enum ServiceShutdownState {
@@ -672,18 +673,29 @@ impl McpClientPool {
         let supervisors: Vec<(String, BuiltinInstanceSupervisor)> =
             self.builtin_server_tasks.lock().drain().collect();
         // 实例之间互不依赖：并行做「有界等待 → 未收敛才 abort」。
-        let outcomes: Vec<(String, BuiltinCloseOutcome)> = futures::stream::iter(supervisors)
-            .map(|(server_name, supervisor)| async move {
+        //
+        // 每项 close 先移交给独立 task：宿主墙钟预算到期会丢弃本 future，而 supervisor
+        // 已从表里摘除；若随 future 一起 drop，server task 只会被 detach（不 abort）。
+        // 所有权转移后，收尾仍会走完 `BUILTIN_CONVERGE_TIMEOUT` 内的「等待 → abort」。
+        // builtin 实例数由配置决定、量级很小，不需要额外的并发闸门。
+        let closes: Vec<(String, tokio::task::JoinHandle<BuiltinCloseOutcome>)> = supervisors
+            .into_iter()
+            .map(|(server_name, supervisor)| {
                 (
                     server_name,
-                    supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await,
+                    tokio::spawn(supervisor.close(BUILTIN_CONVERGE_TIMEOUT)),
                 )
             })
-            .buffer_unordered(MAX_PARALLEL_CLOSES)
-            .collect()
-            .await;
+            .collect();
         let mut aborted = Vec::new();
-        for (server_name, outcome) in outcomes {
+        for (server_name, handle) in closes {
+            let outcome = match handle.await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::warn!(server = %server_name, %error, "builtin close task failed");
+                    continue;
+                }
+            };
             if matches!(outcome.tick, TickCloseOutcome::AbortedAfterTimeout)
                 || matches!(outcome.server, BuiltinServerExit::AbortedAfterTimeout)
             {

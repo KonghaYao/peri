@@ -54,6 +54,52 @@ async fn test_service_close_runs_in_parallel_across_services() {
 }
 
 #[tokio::test]
+async fn test_abandoned_builtin_close_still_aborts_server_task() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let pool = Arc::new(McpClientPool::new_empty());
+    let dropped = Arc::new(AtomicBool::new(false));
+    struct Probe(Arc<AtomicBool>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let probe = Probe(Arc::clone(&dropped));
+    let handle = tokio::spawn(async move {
+        let _probe = probe;
+        std::future::pending::<()>().await;
+        crate::mcp::builtin::runtime::BuiltinServerExit::NotStarted("unreachable".into())
+    });
+    pool.builtin_server_tasks.lock().insert(
+        "cron".to_string(),
+        crate::mcp::builtin::runtime::BuiltinInstanceSupervisor::new_for_test(
+            "cron".to_string(),
+            handle,
+        ),
+    );
+
+    // 宿主预算到期：关闭 future 被丢弃，此时 supervisor 已从表里摘除。
+    tokio::time::timeout(Duration::from_millis(20), pool.close_builtin_tasks())
+        .await
+        .expect_err("server task 不会自行收敛，关闭 future 必须还在等");
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "关闭 future 被丢弃时 server task 仍应存活（收尾交给独立 task）"
+    );
+
+    // 独立收尾任务必须仍走完「有界等待 → abort」，不能把 task 留在 detach 状态。
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("丢弃的关闭 future 不得让 builtin server task 变成无人 abort 的 orphan");
+}
+
+#[tokio::test]
 async fn test_shutdown_drops_pending_oauth_callbacks() {
     let pool = McpClientPool::new_empty();
     assert_eq!(

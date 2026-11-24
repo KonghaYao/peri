@@ -183,7 +183,7 @@ impl HostExitContext {
 
     async fn finish(mut self) -> ExitRound {
         let progress = ShutdownProgress::new();
-        let resources = match peri_time::timeout(
+        let budgeted = peri_time::timeout(
             HOST_SHUTDOWN_BUDGET,
             super::shutdown::shutdown_host(
                 &mut self.task_owner,
@@ -198,10 +198,13 @@ impl HostExitContext {
                 &progress,
             ),
         )
-        .await
-        {
+        .await;
+        let resources = match budgeted {
             Ok(report) => Some(report),
             Err(_) => {
+                // 预算短于 host owner 的 cooperative grace：不在这里显式 abort，
+                // 非协作任务会在每轮重试里重新等满 grace，永远进不到 abort 阶段。
+                self.task_owner.abort_pending();
                 progress.warn_budget_expired();
                 None
             }
