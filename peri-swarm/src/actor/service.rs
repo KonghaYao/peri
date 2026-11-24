@@ -30,7 +30,9 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
-use super::reader::{ApprovalClaim, ApprovalCompletion, ApprovalReceipt, ItemLog, TurnOutcome};
+use super::reader::{
+    ApprovalClaim, ApprovalCompletion, ApprovalReceipt, ItemLog, SteerReservation, TurnOutcome,
+};
 use super::runtime::{
     local_session_store, AcpChild, ChildConfig, ChildError, ChildShutdown, SessionStoreDeployment,
     WORKSPACE_MCP_SERVER_NAME,
@@ -135,7 +137,7 @@ struct SessionRuntime {
     channel: broadcast::Sender<StreamEvent>,
     /// Serializes turn admission checks; never held across a model turn.
     admission: AsyncMutex<()>,
-    /// Serializes one steer's reservation with its handoff: `note_steer` →
+    /// Serializes one steer's reservation with its handoff: `note_steer_for` →
     /// `session/input/enqueue` → `session/input/dispatch`, and the rollback
     /// when the handoff fails. The reader claims the oldest unclaimed
     /// generation for the next run that starts, so the reservation order must
@@ -144,7 +146,12 @@ struct SessionRuntime {
     /// no longer release the generation the later run claimed, leaving that
     /// generation unresolved forever.
     ///
-    /// The lock never covers the whole turn: the `epoch == 0` fallback runs
+    /// The reservation also names the turn the input was admitted into, and
+    /// the check runs under this lock, because the turn can close and a
+    /// replacement start while a steer waits here; a steer admitted for the
+    /// closed turn must not be dispatched into its replacement.
+    ///
+    /// The lock never covers the whole turn: the `NoTurn` fallback runs
     /// `session/prompt` (a model turn) after releasing it, and a steered turn
     /// is not serialized against other turns. It is only taken after
     /// `admission` is released, so the two never nest in reverse.
@@ -739,41 +746,56 @@ impl AcpSwarmService {
     /// Append an input to the running turn through the host user-input queue.
     ///
     /// `turn_id` belongs to the accepted user item; it is only used by the
-    /// `epoch == 0` fallback, where the turn ended before the handoff and the
+    /// no-open-turn fallback, where the turn ended before the handoff and the
     /// input runs as a normal turn.
+    ///
+    /// `admitted_turn` is the turn the caller admitted the input into. It is
+    /// checked against the open turn under [`SessionRuntime::steer`], so an
+    /// input admitted into a turn that closed while this call waited is
+    /// rejected instead of being dispatched into the turn that replaced it.
     ///
     /// The reservation and the handoff run under [`SessionRuntime::steer`], so
     /// the generation the reader sees claimed is reserved in the same order the
-    /// host receives the input. The lock is released before the `epoch == 0`
-    /// model turn and after the rollback, never covering a turn.
+    /// host receives the input. The lock is released before the fallback model
+    /// turn and after the rollback, never covering a turn.
     async fn steer(
         &self,
         runtime: &Arc<SessionRuntime>,
         submission: &InputSubmission,
         logical_id: &LogicalId,
         turn_id: &str,
+        admitted_turn: &str,
     ) -> Result<InputOutcome, SwarmError> {
         let text = submission.effective_text();
         // Record the handoff before dispatch: the dispatched input cancels the
         // in-flight attempt, and that attempt's `cancelled` terminal must not
-        // close the turn. `0` means the turn ended before the handoff — the
+        // close the turn. `NoTurn` means the turn ended before the handoff — the
         // input then runs as a normal turn instead of vanishing into the queue.
-        let epoch = {
+        let run_as_turn = {
             let _steer = runtime.steer.lock().await;
-            let epoch = runtime.log.note_steer();
-            if epoch != 0 {
-                if let Err(error) = self.dispatch_steer(runtime, submission, &text).await {
-                    // Roll back inside the lock: the generation has to leave the
-                    // unresolved set before the next steer reserves one, so a
-                    // queued run that starts meanwhile cannot claim the failed
-                    // generation as if it had been dispatched.
-                    runtime.log.abandon_steer(epoch).await;
-                    return Err(error);
+            match runtime.log.note_steer_for(admitted_turn) {
+                SteerReservation::Reserved(epoch) => {
+                    if let Err(error) = self.dispatch_steer(runtime, submission, &text).await {
+                        // Roll back inside the lock: the generation has to leave the
+                        // unresolved set before the next steer reserves one, so a
+                        // queued run that starts meanwhile cannot claim the failed
+                        // generation as if it had been dispatched.
+                        runtime.log.abandon_steer(epoch).await;
+                        return Err(error);
+                    }
+                    false
                 }
+                SteerReservation::NoTurn => true,
+                // The admitted turn is closed and a different turn owns the
+                // session. Dispatching would hand this input to that turn: its
+                // run would claim the generation and its terminal would close a
+                // turn the input was never admitted into. The input receipt is
+                // already `Accepted` and the user item recorded, so the caller
+                // retries instead of the input executing here.
+                SteerReservation::OtherTurn => return Err(SwarmError::turn_in_progress()),
             }
-            epoch
         };
-        if epoch == 0 {
+        if run_as_turn {
             self.run_turn(runtime, &text, turn_id).await?;
         }
         let last_item_seq = self.last_seq(logical_id).await?;
@@ -1831,7 +1853,15 @@ impl SwarmService for AcpSwarmService {
                 return Err(SwarmError::upstream_unavailable("session_not_live"));
             }
         }
-        let running = runtime.as_ref().is_some_and(|runtime| runtime.is_running());
+        // Read the turn slot exactly once, under `admission`, and derive both
+        // `running` and the admitted turn from that one snapshot. The turn slot
+        // is closed without taking `admission`, so a second read after the
+        // awaits below could see `None` while `running` is still true (or bind
+        // the receipt to a turn that started in between).
+        let admitted_slot = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.turn.borrow().clone());
+        let running = admitted_slot.is_some();
         if submission.kind == InputKind::User
             && ((running && submission.mode == InputMode::Turn)
                 || (!running
@@ -1874,9 +1904,6 @@ impl SwarmService for AcpSwarmService {
             }
         }
 
-        let target = runtime
-            .as_ref()
-            .and_then(|runtime| runtime.turn.borrow().clone());
         let mut turn_id = None;
         if submission.kind == InputKind::User {
             let runtime = runtime.as_ref().expect("user input attached a host");
@@ -1895,8 +1922,8 @@ impl SwarmService for AcpSwarmService {
                 .trim()
                 .eq_ignore_ascii_case("cancel")
             {
-                if let Some(target) = target {
-                    self.cancel_turn(logical_id, Some(&target.request_id))
+                if let Some(admitted) = admitted_slot.as_ref() {
+                    self.cancel_turn(logical_id, Some(&admitted.request_id))
                         .await?;
                 }
             }
@@ -1910,6 +1937,13 @@ impl SwarmService for AcpSwarmService {
         }
 
         if running {
+            // `running` is derived from `admitted_slot` itself, so the turn is
+            // present in the same snapshot that set it; this cannot observe a
+            // close that happened after the read.
+            let admitted_turn = &admitted_slot
+                .as_ref()
+                .expect("a running turn owns the turn slot")
+                .request_id;
             let turn_id = turn_id.as_deref().unwrap_or_default();
             let outcome = self
                 .steer(
@@ -1917,6 +1951,7 @@ impl SwarmService for AcpSwarmService {
                     &submission,
                     logical_id,
                     turn_id,
+                    admitted_turn,
                 )
                 .await?;
             return Ok(AcceptedInput::settled(outcome));

@@ -348,6 +348,19 @@ struct LogState {
     suppressed_terminal: Option<SuppressedTerminal>,
 }
 
+/// Whether a steer's generation could be reserved for the turn the input was
+/// admitted into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SteerReservation {
+    /// The admitted turn is still open; this generation waits for its run.
+    Reserved(u64),
+    /// No turn is open: the input runs as a normal turn.
+    NoTurn,
+    /// Another turn owns the session now: the input must not be dispatched into
+    /// it.
+    OtherTurn,
+}
+
 impl LogState {
     /// Whether a steer still owns the open turn: an unrolled-back steer is
     /// outstanding, or a queued run was adopted as the turn's continuation.
@@ -359,6 +372,27 @@ impl LogState {
     /// safety net that only fires minutes later.
     fn steer_owns_turn(&self) -> bool {
         !self.outstanding_steers.is_empty() || self.continuation.is_some()
+    }
+
+    /// Reserve one steer generation for the open turn.
+    ///
+    /// The admission check and the insert share this lock on purpose: a caller
+    /// that checked the turn elsewhere could find it closed and its replacement
+    /// open, and its generation would then be claimed by that replacement's
+    /// run. `admitted: None` accepts any open turn (the `note_steer` test
+    /// helper); production callers name the turn the input was admitted into.
+    fn reserve_steer(&mut self, admitted: Option<&str>) -> SteerReservation {
+        let matches_admitted = match self.active.as_deref() {
+            None => return SteerReservation::NoTurn,
+            Some(active) => admitted.is_none_or(|turn| turn == active),
+        };
+        if !matches_admitted {
+            return SteerReservation::OtherTurn;
+        }
+        let generation = self.steer_generation.saturating_add(1);
+        self.steer_generation = generation;
+        self.outstanding_steers.insert(generation);
+        SteerReservation::Reserved(generation)
     }
 
     /// Generation of the newest steer that is still unresolved; `0` when none
@@ -1345,23 +1379,40 @@ impl ItemLog {
 
     /// Record a steer handed to the running turn and return its generation.
     ///
+    /// Test helper: it accepts any open turn, while the service names the turn
+    /// it admitted the input into ([`Self::note_steer_for`]). Returns `0` when
+    /// no turn is open, so the caller runs the input as a normal turn.
+    #[cfg(test)]
+    #[must_use]
+    pub fn note_steer(&self) -> u64 {
+        match self.state.lock().reserve_steer(None) {
+            SteerReservation::Reserved(generation) => generation,
+            SteerReservation::NoTurn => 0,
+            // `None` accepts any open turn, so there is nothing to disagree
+            // with.
+            SteerReservation::OtherTurn => unreachable!("no admitted turn to reject"),
+        }
+    }
+
+    /// Record a steer handed to `admitted_turn` and reserve its generation.
+    ///
     /// The host answers a dispatched steer by cancelling the in-flight attempt,
     /// so the turn must survive that attempt's `cancelled` terminal. The
     /// generation stays in [`LogState::outstanding_steers`] until a queued run
-    /// claims it or the caller passes it to [`Self::abandon_steer`]. `0` means
-    /// no turn is open, so the caller runs the input as a normal turn.
-    pub fn note_steer(&self) -> u64 {
-        let mut state = self.state.lock();
-        if state.active.is_none() {
-            return 0;
-        }
-        let generation = state.steer_generation.saturating_add(1);
-        state.steer_generation = generation;
-        state.outstanding_steers.insert(generation);
-        generation
+    /// claims it or the caller passes it to [`Self::abandon_steer`].
+    ///
+    /// The previous `note_steer` only asked whether *a* turn was active. A caller
+    /// waiting for the service's steer lock could find that turn closed and its
+    /// replacement open, and the dispatch then landed in the replacement. The
+    /// admission check and the insert happen in one `state.lock()`, so a turn
+    /// that is no longer `admitted_turn` yields [`SteerReservation::OtherTurn`]
+    /// and no generation at all.
+    #[must_use]
+    pub(crate) fn note_steer_for(&self, admitted_turn: &str) -> SteerReservation {
+        self.state.lock().reserve_steer(Some(admitted_turn))
     }
 
-    /// Undo [`Self::note_steer`] after a failed handoff.
+    /// Undo [`Self::note_steer_for`] after a failed handoff.
     ///
     /// Only the rolled-back generation leaves the unresolved set, so an
     /// out-of-order rollback (a later steer first) never releases an earlier

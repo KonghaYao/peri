@@ -17,7 +17,7 @@ use peri_acp::transport::types::{AcpError, IncomingMessage};
 use peri_acp::transport::AcpTransport as _;
 
 use super::{AcpSwarmService, ActorServiceConfig, SessionRuntime, TurnSlot};
-use crate::actor::reader::ItemLog;
+use crate::actor::reader::{ItemLog, TurnOutcome};
 use crate::actor::runtime::AcpChild;
 use crate::domain::{
     ApprovalDecision, ErrorCode, ErrorKind, EventCursor, InputKind, InputMode, InputSubmission,
@@ -428,6 +428,14 @@ async fn open_turn(runtime: &SessionRuntime) {
 /// their generations were reserved. The reader claims the oldest unclaimed
 /// generation for the next run that starts, so a handoff that overtakes the
 /// earlier reservation would make the claim name the wrong input.
+///
+/// The first snapshot reply is held until the test releases it, and the release
+/// happens after a bounded wait for the responder to see a second snapshot.
+/// With the service lock only one handoff can exist, so that wait always times
+/// out; it is not a scheduling assumption, it only adds its bound to the locked
+/// path. Without the lock the second handoff reaches the host at once, the
+/// first reply is released immediately, and the second input dispatches first —
+/// the failing path.
 #[tokio::test]
 async fn concurrent_steers_dispatch_in_reservation_order() {
     let Fixture {
@@ -439,13 +447,14 @@ async fn concurrent_steers_dispatch_in_reservation_order() {
     open_turn(&runtime).await;
 
     let server = Arc::new(server);
-    let (first_snapshot_tx, first_snapshot_rx) = tokio::sync::oneshot::channel();
+    let (snapshot_tx, mut snapshot_rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
+    let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
     let (dispatched_tx, mut dispatched_rx) = tokio::sync::mpsc::unbounded_channel();
     let responder = {
         let server = Arc::clone(&server);
         tokio::spawn(async move {
             let mut first_snapshot = true;
-            let mut first_snapshot_tx = Some(first_snapshot_tx);
+            let mut release_first_rx = Some(release_first_rx);
             loop {
                 let Some(message) = server.recv().await else {
                     break;
@@ -456,17 +465,16 @@ async fn concurrent_steers_dispatch_in_reservation_order() {
                 match method.as_str() {
                     "session/input/snapshot" if first_snapshot => {
                         first_snapshot = false;
-                        first_snapshot_tx
-                            .take()
-                            .expect("first snapshot signal")
-                            .send(())
-                            .expect("test observes the first snapshot");
+                        snapshot_tx
+                            .send(1)
+                            .expect("the test waits for the first snapshot");
                         // Hold the first reply only; the responder keeps
-                        // serving the other steer. Without the service lock the
-                        // second handoff overtakes the first.
+                        // serving, so without the service lock the second
+                        // handoff reaches this loop right away.
+                        let release = release_first_rx.take().expect("release signal");
                         let server = Arc::clone(&server);
                         tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            release.await.expect("the test releases the first reply");
                             server
                                 .send_response(id, Ok(json!({ "generation": "gen-1" })))
                                 .await
@@ -474,6 +482,7 @@ async fn concurrent_steers_dispatch_in_reservation_order() {
                         });
                     }
                     "session/input/snapshot" => {
+                        let _ = snapshot_tx.send(2);
                         server
                             .send_response(id, Ok(json!({ "generation": "gen-1" })))
                             .await
@@ -512,14 +521,15 @@ async fn concurrent_steers_dispatch_in_reservation_order() {
                     &steer_submission("u1", "first"),
                     &logical_id(),
                     "turn_1",
+                    "req-1",
                 )
                 .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(5), first_snapshot_rx)
+    let first = tokio::time::timeout(Duration::from_secs(5), snapshot_rx.recv())
         .await
-        .expect("the first steer reached the snapshot RPC")
-        .expect("signal");
+        .expect("the first steer reached the snapshot RPC");
+    assert_eq!(first, Some(1), "the first snapshot signal");
     let u2 = {
         let service = Arc::clone(&service);
         let runtime = Arc::clone(&runtime);
@@ -530,10 +540,17 @@ async fn concurrent_steers_dispatch_in_reservation_order() {
                     &steer_submission("u2", "second"),
                     &logical_id(),
                     "turn_1",
+                    "req-1",
                 )
                 .await
         })
     };
+    // Bounded wait for the second handoff. With the lock u2 is still waiting
+    // for it, so this expires; without it the handoff is already at the host.
+    let _second_handoff = tokio::time::timeout(Duration::from_secs(1), snapshot_rx.recv()).await;
+    release_first_tx
+        .send(())
+        .expect("the test releases the first reply");
     let first = tokio::time::timeout(Duration::from_secs(5), u1)
         .await
         .expect("u1 does not hang")
@@ -607,6 +624,7 @@ async fn a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances() {
             &steer_submission("u1", "first"),
             &logical_id(),
             "turn_1",
+            "req-1",
         )
         .await
         .expect_err("the rejected dispatch fails the steer");
@@ -624,6 +642,7 @@ async fn a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances() {
             &steer_submission("u2", "second"),
             &logical_id(),
             "turn_1",
+            "req-1",
         )
         .await
         .expect("the next steer still advances");
@@ -632,6 +651,342 @@ async fn a_failed_dispatch_rolls_back_the_steer_and_the_next_one_advances() {
     assert!(
         runtime.log.steer_pending(),
         "the dispatched steer owns the turn until its run starts"
+    );
+
+    // Closing the client ends the responder's receive loop.
+    drop(service);
+    drop(runtime);
+    tokio::time::timeout(Duration::from_secs(5), responder)
+        .await
+        .expect("the responder stops once the client closes")
+        .expect("responder");
+}
+
+/// Round 10 finding 1: a steer admitted into a turn that has since closed must
+/// not be dispatched into the turn that replaced it. The reservation names the
+/// admission turn, so a different open turn yields `turn_in_progress` and no
+/// handoff at all.
+#[tokio::test]
+async fn a_steer_admitted_for_a_closed_turn_is_rejected_instead_of_dispatched() {
+    let Fixture {
+        service,
+        runtime,
+        server,
+        ..
+    } = fixture(false).await;
+    // The session moved on: `req-1` is gone and `req-2` owns the turn slot.
+    runtime
+        .log
+        .begin_turn("req-2", "turn_2")
+        .await
+        .expect("turn opens");
+    runtime.turn.send_replace(Some(TurnSlot {
+        request_id: "req-2".to_owned(),
+        started_at: "2026-11-24T00:00:00Z".to_owned(),
+    }));
+
+    let server = Arc::new(server);
+    let (dispatched_tx, mut dispatched_rx) = tokio::sync::mpsc::unbounded_channel();
+    let responder = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            loop {
+                let Some(message) = server.recv().await else {
+                    break;
+                };
+                let IncomingMessage::Request { id, method, params } = message else {
+                    panic!("unexpected host message");
+                };
+                let result = match method.as_str() {
+                    "session/input/snapshot" => Ok(json!({ "generation": "gen-1" })),
+                    "session/input/enqueue" => Ok(json!({ "ok": true })),
+                    "session/input/dispatch" => {
+                        let input_id = params["inputIds"][0]
+                            .as_str()
+                            .expect("dispatched input id")
+                            .to_owned();
+                        dispatched_tx.send(input_id).expect("dispatch order");
+                        Ok(json!({ "ok": true }))
+                    }
+                    other => panic!("unexpected host request: {other}"),
+                };
+                server.send_response(id, result).await.expect("response");
+            }
+        })
+    };
+
+    let result = service
+        .steer(
+            &runtime,
+            &steer_submission("u1", "stale"),
+            &logical_id(),
+            "turn_1",
+            "req-1",
+        )
+        .await;
+    // The reservation is checked before the snapshot/enqueue/dispatch handoff,
+    // so the rejected steer reaches no host RPC; only the dispatch is asserted
+    // because that is the frame that would attribute the input to `req-2`.
+    let dispatched = dispatched_rx.try_recv().ok();
+    assert!(
+        dispatched.is_none(),
+        "the stale input must not be dispatched into the other turn: {dispatched:?}"
+    );
+    let error = result.expect_err("a steer admitted for the closed turn is rejected");
+    assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(
+        runtime.log.steer_generation(),
+        0,
+        "a rejected steer reserves no generation"
+    );
+    assert!(
+        !runtime.log.steer_pending(),
+        "a rejected steer must not own the other turn"
+    );
+    assert_eq!(
+        runtime.log.active_turn().as_deref(),
+        Some("req-2"),
+        "the replacement turn keeps the session"
+    );
+
+    // Closing the client ends the responder's receive loop.
+    drop(service);
+    drop(runtime);
+    tokio::time::timeout(Duration::from_secs(5), responder)
+        .await
+        .expect("the responder stops once the client closes")
+        .expect("responder");
+}
+
+/// Round 11: the turn `accept_input` admits an input into is the turn the steer
+/// reservation names. The other steer tests call `steer` directly, so a
+/// constant `admitted_turn` would reach the same `Reserved` branch and leave
+/// them green; only a handoff through `accept_input` pins the argument. The
+/// rejection *is* constructible from this layer — hold `runtime.steer` and
+/// replace the turn while admission waits (see the negative test below) — but a
+/// constant rejects with the same `turn_in_progress`, so the mutant witness is
+/// this positive dispatch, not the rejection.
+#[tokio::test]
+async fn an_accepted_steer_is_dispatched_with_the_admission_turn() {
+    use crate::domain::Disposition;
+
+    let Fixture {
+        service,
+        runtime,
+        server,
+        ..
+    } = fixture(false).await;
+    open_turn(&runtime).await;
+
+    let server = Arc::new(server);
+    let (dispatched_tx, mut dispatched_rx) = tokio::sync::mpsc::unbounded_channel();
+    let responder = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            loop {
+                let Some(message) = server.recv().await else {
+                    break;
+                };
+                let IncomingMessage::Request { id, method, params } = message else {
+                    panic!("unexpected host message");
+                };
+                let result = match method.as_str() {
+                    "session/input/snapshot" => Ok(json!({ "generation": "gen-1" })),
+                    "session/input/enqueue" => Ok(json!({ "ok": true })),
+                    "session/input/dispatch" => {
+                        let input_id = params["inputIds"][0]
+                            .as_str()
+                            .expect("dispatched input id")
+                            .to_owned();
+                        dispatched_tx.send(input_id).expect("dispatch order");
+                        Ok(json!({ "ok": true }))
+                    }
+                    other => panic!("unexpected host request: {other}"),
+                };
+                server.send_response(id, result).await.expect("response");
+            }
+        })
+    };
+
+    let accepted = service
+        .accept_input(&logical_id(), steer_submission("u1", "first"))
+        .await
+        .expect("an input admitted into the open turn is accepted");
+    assert_eq!(accepted.outcome.input_id, "u1");
+    assert_eq!(
+        accepted.outcome.disposition,
+        Disposition::Inserted,
+        "a running turn takes the steer by dispatch, not by opening a turn"
+    );
+    assert!(
+        accepted.pending_turn.is_none(),
+        "the steer ran in `accept_input`; there is no pending turn to start"
+    );
+    let dispatched = tokio::time::timeout(Duration::from_secs(5), dispatched_rx.recv())
+        .await
+        .expect("the handoff does not wait for a turn terminal")
+        .expect("the responder reports the dispatch");
+    assert_eq!(
+        dispatched, "u1",
+        "accept_input must dispatch the input it admitted"
+    );
+    assert!(
+        dispatched_rx.try_recv().is_err(),
+        "one accepted input reaches the host as exactly one dispatch"
+    );
+    assert_eq!(
+        runtime.log.steer_generation(),
+        1,
+        "the dispatch reserves the generation"
+    );
+    assert!(
+        runtime.log.steer_pending(),
+        "the dispatched steer owns the turn until its run starts"
+    );
+    assert_eq!(
+        runtime.log.active_turn().as_deref(),
+        Some("req-1"),
+        "the admitted turn keeps the session"
+    );
+
+    // Closing the client ends the responder's receive loop.
+    drop(service);
+    drop(runtime);
+    tokio::time::timeout(Duration::from_secs(5), responder)
+        .await
+        .expect("the responder stops once the client closes")
+        .expect("responder");
+}
+
+/// Round 11 rework: a steer admitted into the turn observed at admission is
+/// rejected when that turn is replaced while the input waits for the steer lock.
+/// The interleaving is deterministic: this test holds `runtime.steer` before
+/// `accept_input` reaches it, waits for the receipt (written after the admission
+/// snapshot), then closes `req-1`, opens `req-2` and publishes the slot under
+/// `admission`, which can only be taken after `accept_input` released it. The
+/// positive test above is the mutant witness; this one cannot be — a constant
+/// `admitted_turn` rejects with the same `turn_in_progress`, so it does not
+/// distinguish the mutation.
+#[tokio::test]
+async fn a_steer_accepted_into_a_turn_that_is_replaced_while_waiting_is_rejected() {
+    let Fixture {
+        service,
+        runtime,
+        store,
+        server,
+        ..
+    } = fixture(false).await;
+    open_turn(&runtime).await;
+
+    // Park `accept_input` after its admission snapshot but before the steer
+    // lock: the handoff needs the same lock.
+    let steer_guard = runtime.steer.lock().await;
+
+    let server = Arc::new(server);
+    let (dispatched_tx, mut dispatched_rx) = tokio::sync::mpsc::unbounded_channel();
+    let responder = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            loop {
+                let Some(message) = server.recv().await else {
+                    break;
+                };
+                let IncomingMessage::Request { id, method, params } = message else {
+                    panic!("unexpected host message");
+                };
+                let result = match method.as_str() {
+                    "session/input/snapshot" => Ok(json!({ "generation": "gen-1" })),
+                    "session/input/enqueue" => Ok(json!({ "ok": true })),
+                    "session/input/dispatch" => {
+                        let input_id = params["inputIds"][0]
+                            .as_str()
+                            .expect("dispatched input id")
+                            .to_owned();
+                        dispatched_tx.send(input_id).expect("dispatch order");
+                        Ok(json!({ "ok": true }))
+                    }
+                    other => panic!("unexpected host request: {other}"),
+                };
+                server.send_response(id, result).await.expect("response");
+            }
+        })
+    };
+
+    let accepting = {
+        let service = Arc::clone(&service);
+        let logical_id = logical_id();
+        let submission = steer_submission("u1", "stale");
+        tokio::spawn(async move { service.accept_input(&logical_id, submission).await })
+    };
+
+    // The receipt is written after the admission snapshot and before the steer
+    // lock, so seeing it proves the snapshot names `req-1` and the input is
+    // parked on the lock this test holds.
+    let receipt_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if store
+            .swarm_get_input(LOGICAL_ID, "u1")
+            .await
+            .expect("input receipt")
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < receipt_deadline,
+            "accept_input did not write the receipt within the bound"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // `begin_turn` rejects while another turn is active, so close `req-1` first
+    // (the real close path takes `state.turn_id`), then open the replacement.
+    // The slot is published under `admission`, which can only be taken after
+    // `accept_input` released it; that ordering is what makes the race
+    // deterministic.
+    runtime
+        .log
+        .finish_turn("req-1", TurnOutcome::Completed("end_turn".to_owned()))
+        .await;
+    runtime
+        .log
+        .begin_turn("req-2", "turn_2")
+        .await
+        .expect("turn opens");
+    {
+        let _admission = runtime.admission.lock().await;
+        runtime.turn.send_replace(Some(TurnSlot {
+            request_id: "req-2".to_owned(),
+            started_at: "2026-11-24T00:00:00Z".to_owned(),
+        }));
+    }
+    drop(steer_guard);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), accepting)
+        .await
+        .expect("the parked handoff is released")
+        .expect("accept task");
+    let error = result.expect_err("an input admitted into the replaced turn is rejected");
+    assert_eq!(error.code(), ErrorCode::TurnInProgress);
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert!(
+        dispatched_rx.try_recv().is_err(),
+        "a rejected steer must not reach the host"
+    );
+    assert_eq!(
+        runtime.log.steer_generation(),
+        0,
+        "a rejected steer reserves no generation"
+    );
+    assert!(
+        !runtime.log.steer_pending(),
+        "a rejected steer must not own the replacement turn"
+    );
+    assert_eq!(
+        runtime.log.active_turn().as_deref(),
+        Some("req-2"),
+        "the replacement turn keeps the session"
     );
 
     // Closing the client ends the responder's receive loop.
