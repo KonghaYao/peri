@@ -721,16 +721,25 @@ async fn loom_carries_peri_session_history_mq_and_separate_swarm_state() {
         .prompt("hello shared loom", request_id)
         .await
         .expect("run one turn");
-    log.finish_turn(
-        request_id,
-        TurnOutcome::Completed(
-            reply
-                .stop_reason
-                .clone()
-                .expect("the host reports a terminal stop reason"),
-        ),
-    )
-    .await;
+    // The production service closes the turn on the reader's terminal, not on
+    // the prompt reply. Waiting for that terminal also drains items the reader
+    // may still hold in its coalescing window, so the completion row is built
+    // from the whole stream; the direct close is only the safety net.
+    if !log
+        .wait_turn_closed(request_id, Duration::from_secs(30))
+        .await
+    {
+        log.finish_turn(
+            request_id,
+            TurnOutcome::Completed(
+                reply
+                    .stop_reason
+                    .clone()
+                    .expect("the host reports a terminal stop reason"),
+            ),
+        )
+        .await;
+    }
     assert_eq!(
         reply.stop_reason.as_deref(),
         Some("end_turn"),

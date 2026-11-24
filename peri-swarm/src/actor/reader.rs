@@ -1831,26 +1831,31 @@ impl ItemLog {
             return;
         }
         let streams = std::mem::take(&mut staged.streams);
-        match self
-            .append_items(
+        let mut committed = Vec::new();
+        let result = self
+            .append_items_tracked(
                 std::mem::take(&mut staged.items),
                 ProgressWrite::WhileTurnOpen,
+                &mut committed,
             )
-            .await
+            .await;
+        // A run may need several durable groups; a later group failing must not
+        // discard the seqs earlier groups already own, or `finish_turn` would
+        // order those messages by key instead of by their persisted position.
         {
-            Ok(seqs) => {
-                // Persisted: the first chunk's seq orders this message among the
-                // turn's outputs. A later chunk never rewrites it.
-                let mut state = self.state.lock();
-                for (index, key) in streams {
-                    if let (Some(seq), Some(stream)) =
-                        (seqs.get(index), state.streams.get_mut(&key))
-                    {
-                        stream.first_seq.get_or_insert(*seq);
-                    }
+            // Persisted: the first chunk's seq orders this message among the
+            // turn's outputs. A later chunk never rewrites it.
+            let mut state = self.state.lock();
+            for (index, key) in streams {
+                if let (Some(seq), Some(stream)) =
+                    (committed.get(index), state.streams.get_mut(&key))
+                {
+                    stream.first_seq.get_or_insert(*seq);
                 }
             }
-            Err(error) => self.report_append_failure("item", error).await,
+        }
+        if let Err(error) = result {
+            self.report_append_failure("item", error).await;
         }
     }
 
@@ -1896,8 +1901,26 @@ impl ItemLog {
         items: Vec<(ProjectedItem, Option<String>)>,
         progress: ProgressWrite,
     ) -> Result<Vec<u64>, SwarmError> {
+        let mut committed = Vec::new();
+        self.append_items_tracked(items, progress, &mut committed)
+            .await?;
+        Ok(committed)
+    }
+
+    /// [`Self::append_items`], recording each group's seqs in `committed`
+    /// before the next group is attempted.
+    ///
+    /// A failed group leaves `committed` holding everything the earlier groups
+    /// already made durable, so stream order never regresses to key order for
+    /// items that own a real seq.
+    async fn append_items_tracked(
+        &self,
+        items: Vec<(ProjectedItem, Option<String>)>,
+        progress: ProgressWrite,
+        committed: &mut Vec<u64>,
+    ) -> Result<(), SwarmError> {
         if items.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let created_at = peri_time::now_utc_rfc3339();
         let prepared: Vec<PreparedItem> = items
@@ -1915,7 +1938,6 @@ impl ItemLog {
                 }
             })
             .collect();
-        let mut seqs = Vec::with_capacity(prepared.len());
         let mut start = 0;
         while start < prepared.len() {
             let end = Self::batch_end(&prepared, start);
@@ -1933,10 +1955,10 @@ impl ItemLog {
                 largest_row_bytes = largest,
                 "append_items group"
             );
-            seqs.extend(self.append_group(group, &created_at, progress).await?);
+            committed.extend(self.append_group(group, &created_at, progress).await?);
             start = end;
         }
-        Ok(seqs)
+        Ok(())
     }
 
     /// End index of the group that starts at `start`.
@@ -1967,14 +1989,12 @@ impl ItemLog {
         let mut appended: Option<Vec<u64>> = None;
 
         for attempt in 0..2 {
-            let guard = self.seq_lock.lock().await;
-            let last = match self.next_seq().await {
-                Ok(last) => last,
-                Err(error) => {
-                    drop(guard);
-                    return Err(error);
-                }
-            };
+            // Held through the commit **and** the cache update below: an
+            // append that reloaded `MAX(seq)` in the gap between the commit and
+            // the cache write could otherwise be overwritten by a stale value,
+            // costing the next writer a second conflict and its items.
+            let _guard = self.seq_lock.lock().await;
+            let last = self.next_seq().await?;
             let rows: Vec<SwarmItemRow> = prepared
                 .iter()
                 .enumerate()
@@ -2000,7 +2020,6 @@ impl ItemLog {
                 last_activity_at: created_at.to_owned(),
             });
             let result = self.store.swarm_append_items(&rows, update).await;
-            drop(guard);
             match result {
                 Ok(()) => {
                     let end = last + rows.len() as u64;
@@ -2204,6 +2223,12 @@ impl ItemLog {
         state: SessionState,
         last_item_seq: Option<u64>,
     ) -> Result<(), SwarmError> {
+        // Serialized with item appends: an append decides whether to write
+        // `running` and commits that decision under `seq_lock`, so the closing
+        // `idle`/`failed` write takes the same lock. Otherwise a progress write
+        // decided while the turn was open could land after the terminal and
+        // leave the session `running` with no active turn.
+        let _guard = self.seq_lock.lock().await;
         let last = match last_item_seq {
             Some(seq) => seq,
             None => self

@@ -569,12 +569,18 @@ impl AcpSwarmService {
                         request_id = %request_id,
                         "steer continuation reported no terminal; closing the turn"
                     );
-                    if let Some(stop_reason) = reply.stop_reason.clone() {
-                        runtime
-                            .log
-                            .finish_turn(&request_id, TurnOutcome::Completed(stop_reason))
-                            .await;
-                    }
+                    // A steered attempt that was cancelled reports no stop
+                    // reason; leaving the turn open would reject every later
+                    // input with `turn_in_progress`, so close it the same way
+                    // the unsteered timeout does.
+                    let outcome = match reply.stop_reason.clone() {
+                        Some(stop_reason) => TurnOutcome::Completed(stop_reason),
+                        None => TurnOutcome::Failed {
+                            code: -32603,
+                            message: "steer continuation reported no terminal".to_owned(),
+                        },
+                    };
+                    runtime.log.finish_turn(&request_id, outcome).await;
                 } else if !steered {
                     // The prompt reply is **not** the turn terminal:
                     // `peri/agent_event_done`, ingested in item order, is.

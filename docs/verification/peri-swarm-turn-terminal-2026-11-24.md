@@ -2,7 +2,9 @@
 
 代码基线 `cca9a2be6`（`origin/main`）。端到端观察在同一补丁的工作副本上完成（副本
 基于 `fe665e60e`，与本 PR 的源码差异只有 `origin/main` 上的两个 `peri-acp` 宿主关闭
-提交，未触及本次修改的文件）。
+提交，未触及本次修改的文件）。端到端证据早于 PR 评审回合的补充修正，后者只收紧
+失败路径与并发顺序（见文末「评审回合补充」），未改变被观测的 turn 终止与批量落库
+路径。
 
 环境：macOS 单机；`peri-swarm` 网关监听 `127.0.0.1:8080`；持久化使用单个 Peri Loom
 v1.1.24 容器（hrana over HTTP，project 配额 `max_sessions=16`、
@@ -39,7 +41,7 @@ v1.1.24 容器（hrana over HTTP，project 配额 `max_sessions=16`、
 ```
 bash scripts/check-changed.sh                     → exit 0（-p peri-acp -p peri-swarm -p peri-tui -p peri-wasm）
 ./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm → exit 0
-  lib 294 passed / 0 failed；actor_runtime 17、http_contract 25、items_pagination 13、
+  lib 296 passed / 0 failed；actor_runtime 17、http_contract 25、items_pagination 13、
   mcp_injection 4、openai_hosted 7、session_resources 17、streaming 15，均 0 failed
   ignored 6 项为基线既有（需运行中的 Loom / Rivet / 本地 ACP 测量）
 cargo fmt -p peri-swarm -p peri-acp -- --check     → exit 0
@@ -65,3 +67,22 @@ git diff --check                                   → exit 0
   「修复前」状态不可重复观测。
 - 官方示例 + 本地网关 + Loom 的端到端驱动未提交到仓库；复验需自行装配该环境，仓内
   可复现的是上面的 Rust 套件与 `scripts/check-changed.sh`。
+
+## 评审回合补充（2026-11-24 12:00 UTC 前后）
+
+CodeRabbit 对 PR head 的评审提出 6 条意见，其中 5 条成立并已修正（均为失败路径或
+并发顺序，不改变端到端观测路径）：
+
+| 位置 | 修正 |
+|---|---|
+| `reader.rs::append_group` | `seq_lock` 覆盖下一次 `MAX(seq)` 缓存写入，避免并发 append 读到陈旧缓存后二次冲突 |
+| `reader.rs::append_items` | 按组分批时记录已提交组的 seq；后续组失败不再丢弃前序组的 `first_seq` |
+| `reader.rs::set_session_state` | 终态写与进度写共用 `seq_lock`，开放中的进度写不能在 `idle` 之后落库 |
+| `service.rs::run_turn` | steer 续跑超时且无 `stop_reason` 时按失败关闭 turn，避免 `turn_in_progress` 永久拒绝后续输入 |
+| `store/memory.rs::swarm_append_items` | 单锁内完成校验与写入，满足 trait 的全有或全无语义 |
+| `tests/loom_store_test.rs` | 先等 reader 终态（覆盖合并窗口）再兜底 `finish_turn` |
+
+`store/turso.rs` 提出的「progress session 缺失时在事务内回滚」需要触发器或外键等
+schema 变更，不属于本次缺陷修复范围，已在 PR 对应 thread 回复说明并列为遗留项。
+新增回归：`append_items_rejects_a_run_that_conflicts_without_writing_any_row`、
+`append_items_with_a_missing_progress_session_writes_nothing`。

@@ -262,37 +262,73 @@ impl SwarmStore for MemorySwarmStore {
         rows: &[SwarmItemRow],
         progress: Option<SwarmSessionUpdate>,
     ) -> Result<(), StoreError> {
-        // Validate the whole run before writing anything: the caller retries a
-        // conflict with a reloaded `MAX(seq)`, which is only sound if a rejected
-        // run left no row behind.
+        // Test-only fault injection: one batch counts as one append, and it
+        // rejects before any row is written.
+        #[cfg(test)]
+        if self
+            .settlement_failures
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+            && rows
+                .iter()
+                .any(|row| row.payload.get("state").and_then(Value::as_str) == Some("settled"))
         {
-            let state = self.lock();
-            let mut seen = std::collections::HashSet::new();
-            for row in rows {
-                if !seen.insert((row.logical_id.clone(), row.seq)) {
-                    return Err(StoreError::Conflict(format!(
-                        "seq {} is duplicated inside the run for {}",
-                        row.seq, row.logical_id
-                    )));
-                }
-                if state
-                    .items
-                    .get(&row.logical_id)
-                    .is_some_and(|items| items.contains_key(&row.seq))
-                {
-                    return Err(StoreError::Conflict(format!(
-                        "seq {} already exists for {}",
-                        row.seq, row.logical_id
-                    )));
-                }
+            let remaining = self
+                .settlement_failures
+                .load(std::sync::atomic::Ordering::SeqCst);
+            self.settlement_failures
+                .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+            return Err(StoreError::Unavailable(
+                "injected approval settlement append failure".to_owned(),
+            ));
+        }
+        // One lock scope for validation and mutation: the caller retries a
+        // conflict with a reloaded `MAX(seq)`, which is only sound if a
+        // rejected run left no row behind, and a missing progress session must
+        // not commit the rows either.
+        let mut state = self.lock();
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            if !seen.insert((row.logical_id.clone(), row.seq)) {
+                return Err(StoreError::Conflict(format!(
+                    "seq {} is duplicated inside the run for {}",
+                    row.seq, row.logical_id
+                )));
+            }
+            if state
+                .items
+                .get(&row.logical_id)
+                .is_some_and(|items| items.contains_key(&row.seq))
+            {
+                return Err(StoreError::Conflict(format!(
+                    "seq {} already exists for {}",
+                    row.seq, row.logical_id
+                )));
             }
         }
-        // The single-row path keeps the settlement-failure injection above.
+        if let Some(update) = progress.as_ref() {
+            if !state.sessions.contains_key(&update.logical_id) {
+                return Err(StoreError::NotFound(format!(
+                    "session {}",
+                    update.logical_id
+                )));
+            }
+        }
         for row in rows {
-            self.swarm_append_item(row.clone()).await?;
+            state
+                .items
+                .entry(row.logical_id.clone())
+                .or_default()
+                .insert(row.seq, row.clone());
         }
         if let Some(update) = progress {
-            self.swarm_update_session(update).await?;
+            let session = state
+                .sessions
+                .get_mut(&update.logical_id)
+                .ok_or_else(|| StoreError::NotFound(format!("session {}", update.logical_id)))?;
+            session.state = update.state;
+            session.last_item_seq = update.last_item_seq;
+            session.last_activity_at = update.last_activity_at;
         }
         Ok(())
     }

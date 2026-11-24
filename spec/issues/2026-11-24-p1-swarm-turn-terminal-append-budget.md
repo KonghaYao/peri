@@ -64,6 +64,6 @@
 
 - 端到端（官方 data_analyst 接本地网关 + Loom）：会话 `agent-01a20d14-c5ec-7d20-ab0e-62535861c3ff`，4425 条 item，turn `completed`，`completed_at` 与末条 item 差 −0.8 秒，会话 `idle`，1 条 `final_answer`，答案 22.99% → 11.00%（−11.99pp / −52.15%），9 条 SQL，整轮 0 次 413 / 0 次 429。详见 `docs/verification/peri-swarm-turn-terminal-2026-11-24.md`。
 - `bash scripts/check-changed.sh` → exit 0（`-p peri-acp -p peri-swarm -p peri-tui -p peri-wasm`）。
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0；lib 294 passed，`actor_runtime` 17、`http_contract` 25、`items_pagination` 13、`mcp_injection` 4、`openai_hosted` 7、`session_resources` 17、`streaming` 15，均 0 failed。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0；lib 296 passed，`actor_runtime` 17、`http_contract` 25、`items_pagination` 13、`mcp_injection` 4、`openai_hosted` 7、`session_resources` 17、`streaming` 15，均 0 failed。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp` → 1532 passed / 1 failed；失败项为既有负载 flake（`host::mcp_v4_wire_fixture::wire_fixture_script_logs_wire_and_answers_tools_call`，单跑通过，见 `docs/verification/peri-swarm-requires-action-2026-11-21.md` 第 13 条），本 PR 未触碰该夹具。
 - `cargo fmt -p peri-swarm -p peri-acp -- --check` 与 `git diff --check` → exit 0。
