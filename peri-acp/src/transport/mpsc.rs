@@ -218,9 +218,7 @@ impl MpscClientTransport {
             Ok(message) => batch.push(message),
             Err(mpsc::error::TryRecvError::Disconnected) => return None,
             Err(mpsc::error::TryRecvError::Empty) => {
-                let Some(first) = receiver.recv().await else {
-                    return None;
-                };
+                let first = receiver.recv().await?;
                 batch.push(first);
                 if !coalesce.is_zero() {
                     tokio::time::sleep(coalesce).await;
