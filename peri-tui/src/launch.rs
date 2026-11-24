@@ -14,6 +14,33 @@ use crate::app::agent::LlmProvider;
 
 use peri_acp_types::permission::PermissionMode;
 
+/// 进程内 TUI host 的 MCP Apps 本地开关（默认关闭）。
+///
+/// 只有显式真值（`1` / `true` / `yes` / `on`，忽略大小写与首尾空白）才启用；
+/// 缺省、空串、`0` / `false` 与未知值一律关闭，行为与既有 TUI 完全一致。
+///
+/// 为什么单独一个变量而不是复用 stdio 的 `PERI_MCP_APPS`：stdio 的 Apps 准入
+/// 与 `stdio_command_filter` 同源（IDE 客户端自管理 rewind/clear），而 TUI 必须
+/// 保留这两个命令，不能借道命令过滤打开 Apps。开关只影响本进程内 host 的
+/// assembly（Apps profile + 连接准入 + 本地授权层），不改变任何协议客户端能力。
+pub const MCP_APPS_TUI_ENV: &str = "PERI_MCP_APPS_TUI";
+
+/// 环境值 → 开关（纯函数，便于单测覆盖真值/假值边界）。
+pub(crate) fn mcp_apps_tui_enabled_from(raw: Option<&str>) -> bool {
+    let Some(value) = raw.map(str::trim) else {
+        return false;
+    };
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// 进程环境里的 TUI Apps 开关；`kit::apps` 与 host 装配共用同一解析。
+pub(crate) fn mcp_apps_tui_enabled() -> bool {
+    mcp_apps_tui_enabled_from(std::env::var(MCP_APPS_TUI_ENV).ok().as_deref())
+}
+
 /// TUI 启动选项——CLI 解析后由调用方填好传入。
 ///
 /// 字段语义与 `main.rs::TuiOptions` 一致，但放在 lib 层供 kit 路径复用。
@@ -178,50 +205,64 @@ async fn attach_acp_with_transport_route(
         };
 
         if let Some(provider) = provider {
-            let mut host_config = peri_acp::host::assemble::assemble_server_config(
-                peri_acp::host::assemble::HostAssemblyInput {
-                    provider: provider.clone(),
-                    peri_config: app.services.peri_config.clone(),
-                    config_source: app.config_source.clone(),
-                    permission_mode: app.services.permission_mode.clone(),
-                    // M-TUI 收口：middlewares 具体实现（CronScheduler / McpClientPool /
-                    // ToolSearchIndex / SkillsProvider / PluginManager /
-                    // SettingsHooksLoader / 插件聚合数据）由 ACP Host 装配面内部构造
-                    // （peri_acp::host::assemble）；TUI 只提供协议面输入（§0 依赖方向）。
-                    session_resources: app.services.session_resources.clone(),
-                    workspace_id: None,
-                    // 部署关闭权随宿主移交：任务排空之后由宿主关闭会话存储。
-                    session_store_shutdown: app.session_store_shutdown.take(),
-                    cwd: app.services.cwd.clone(),
-                    bare: false,
-                    // TUI 不是 cold 代理宿主：远端 workspace 按既有语义启动期探测。
-                    lazy_workspace: false,
-                    // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
-                    // cron_state，tick 由 host 侧 scheduler 驱动执行）。
-                    drive_cron_tick: true,
-                    builtin_assembly_mode: None,
-                    // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每
-                    // session 的会话环境装配产生（AW3-11）。
-                    workspace_input: None,
-                    // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，
-                    // 保持未接线（`resources/list` 只有 git ref）。
-                    workspace_resources: None,
-                    // 同理：workflow 运行时槽位是会话级装配输入（编排状态随会话存在），
-                    // 顶层装配无会话对象，恒为 `None`。
-                    workflow_input: None,
-                    // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
-                    builtin_closed: Default::default(),
-                    // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。
-                    skills_face_closed: false,
-                    plugin_face_closed: false,
-                    // TUI 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
-                    prepared_plugins: None,
-                    session_mcp_servers: None,
-                    // TUI/print 不是可信宿主：预留根会话 ID 保持关闭（默认 UUIDv7）。
-                    reserved_root_session_id: false,
-                },
-            )
-            .await;
+            let assembly_input = peri_acp::host::assemble::HostAssemblyInput {
+                provider: provider.clone(),
+                peri_config: app.services.peri_config.clone(),
+                config_source: app.config_source.clone(),
+                permission_mode: app.services.permission_mode.clone(),
+                // M-TUI 收口：middlewares 具体实现（CronScheduler / McpClientPool /
+                // ToolSearchIndex / SkillsProvider / PluginManager /
+                // SettingsHooksLoader / 插件聚合数据）由 ACP Host 装配面内部构造
+                // （peri_acp::host::assemble）；TUI 只提供协议面输入（§0 依赖方向）。
+                session_resources: app.services.session_resources.clone(),
+                workspace_id: None,
+                // 部署关闭权随宿主移交：任务排空之后由宿主关闭会话存储。
+                session_store_shutdown: app.session_store_shutdown.take(),
+                cwd: app.services.cwd.clone(),
+                bare: false,
+                // TUI 不是 cold 代理宿主：远端 workspace 按既有语义启动期探测。
+                lazy_workspace: false,
+                // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
+                // cron_state，tick 由 host 侧 scheduler 驱动执行）。
+                drive_cron_tick: true,
+                builtin_assembly_mode: None,
+                // 顶层装配不构造 builtin 上下文：session 级 workspace 输入由每
+                // session 的会话环境装配产生（AW3-11）。
+                workspace_input: None,
+                // 资源面输入与 session 级输入同源（见上）：顶层装配无会话消费者，
+                // 保持未接线（`resources/list` 只有 git ref）。
+                workspace_resources: None,
+                // 同理：workflow 运行时槽位是会话级装配输入（编排状态随会话存在），
+                // 顶层装配无会话对象，恒为 `None`。
+                workflow_input: None,
+                // 顶层装配无会话上下文：A24 关闭集恒为空集（会话装配才从 frozen 派生）。
+                builtin_closed: Default::default(),
+                // 宿主技能面关闭位与关闭集同源（会话级派生）：顶层装配恒为假。
+                skills_face_closed: false,
+                plugin_face_closed: false,
+                // TUI 装配点无准备路径提供的插件聚合：按既有语义由装配面自行加载。
+                prepared_plugins: None,
+                session_mcp_servers: None,
+                // TUI/print 不是可信宿主：预留根会话 ID 保持关闭（默认 UUIDv7）。
+                reserved_root_session_id: false,
+            };
+            // 默认关闭：只有 `PERI_MCP_APPS_TUI` 为显式真值时才走 Apps 变体；
+            // 关闭时与既有 `assemble_server_config` 逐字段相同（见该函数文档）。
+            // 注意：Apps 变体**不**动 `stdio_command_filter`——TUI 的 rewind/clear
+            // 语义必须保持不变（stdio 的 Apps 准入才借道命令过滤）。
+            let mut host_config = if mcp_apps_tui_enabled() {
+                tracing::info!(
+                    env = MCP_APPS_TUI_ENV,
+                    "MCP Apps local opt-in enabled for in-process TUI host"
+                );
+                peri_acp::host::assemble::assemble_server_config_with_local_mcp_apps(
+                    assembly_input,
+                    true,
+                )
+                .await
+            } else {
+                peri_acp::host::assemble::assemble_server_config(assembly_input).await
+            };
             host_config.model_transport_route = model_transport_route;
 
             // (I17-D) app.services.acp_session_manager 字段已退役——

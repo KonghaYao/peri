@@ -26,6 +26,13 @@ USAGE:
 
 SERVE OPTIONS:
   --bind IP:PORT                 默认 127.0.0.1:7391（PERI_BROWSER_MONITOR_BIND）
+  --sandbox-bind IP:PORT         顶层 App 视图与 sandbox 页的监听，默认 127.0.0.1:7392；
+                                 off 关闭（PERI_BROWSER_SANDBOX_BIND）
+  --app-html PATH                /apps/view 与 /apps/sandbox 返回的真实 MCP App HTML
+                                 （≤5 MiB，自带脚本与样式）；缺省用占位页
+                                 （PERI_BROWSER_APP_HTML）
+  --view-token VALUE             view session API 的 bearer token；缺省时该 API
+                                 关闭（PERI_BROWSER_VIEW_TOKEN，推荐环境变量）
   --cdp-url URL                  Kitesurf 建议地址（KITESURF_CDP_URL）；不自动连接
   --secret VALUE                 monitor token 派生（CLI 参数优先于 PERI_BROWSER_GATEWAY_SECRET）
   --idle-yield-ms MS             默认 15000（PERI_BROWSER_IDLE_YIELD_MS）
@@ -37,7 +44,9 @@ START OPTIONS:
   --bind IP:PORT                 网关监听地址，默认 127.0.0.1:7391
 
 `serve` 前台阻塞运行网关；`start` 用同一套网关参数在后台运行，健康检查
-通过后返回。`start kitesurf` 先确保引擎就绪，再后台启动网关。
+通过后返回。`start kitesurf` 先确保引擎就绪，再后台启动网关；拉起的引擎
+默认带 `--allow-private-network`，设 `PERI_BROWSER_ALLOW_PRIVATE_NETWORK=0`
+可关闭。
 状态：$HOME/.peri/browser/run/gateway-<port>.json
 日志：$HOME/.peri/browser/logs/gateway-<port>.log
 `stop` 只停止 `start` 拉起的网关；`install kitesurf` 下载并执行官方安装脚本。

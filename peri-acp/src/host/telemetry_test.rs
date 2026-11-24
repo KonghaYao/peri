@@ -377,6 +377,7 @@ async fn server_config(tmp: &tempfile::TempDir) -> AcpServerConfig {
         ),
         session_manager,
         stdio_command_filter: true,
+        mcp_apps_connection_enabled: false,
     }
 }
 

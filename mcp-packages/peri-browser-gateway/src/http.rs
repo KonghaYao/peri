@@ -20,7 +20,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{is_bind_ip, Config};
 use crate::error::GatewayError;
 use crate::session::{SessionDirectory, SETTLE_TIMEOUT};
-use crate::{mcp_http, ws};
+use crate::view::{self, ViewSessions};
+use crate::{apps, mcp_http, ws};
 
 pub const MONITOR_HTML: &str = include_str!("../assets/monitor.html");
 
@@ -28,6 +29,7 @@ pub const MONITOR_HTML: &str = include_str!("../assets/monitor.html");
 pub async fn serve(
     listener: TcpListener,
     config: Config,
+    views: Arc<ViewSessions>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let bound = listener.local_addr()?;
@@ -36,23 +38,44 @@ pub async fn serve(
         "gateway requires a loopback listener"
     );
     let keep_alive = config.browser.keep_alive();
+    let sandbox_url = config
+        .sandbox_bind
+        .map(|bind| format!("http://{bind}{}", apps::SANDBOX_PATH));
     let sessions = Arc::new(SessionDirectory::new(
         config.browser,
         format!("http://{bound}/"),
         config.secret,
     ));
-    serve_with_sessions(listener, bound, sessions, keep_alive, shutdown).await
+    serve_with_sessions(
+        listener,
+        bound,
+        sessions,
+        views,
+        keep_alive,
+        sandbox_url,
+        shutdown,
+    )
+    .await
 }
 
 async fn serve_with_sessions(
     listener: TcpListener,
     bound: SocketAddr,
     sessions: Arc<SessionDirectory>,
+    views: Arc<ViewSessions>,
     keep_alive: Duration,
+    sandbox_url: Option<String>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let stop = CancellationToken::new();
-    let app = build_router(bound, sessions.clone(), stop.clone(), keep_alive);
+    let app = build_router(
+        bound,
+        sessions.clone(),
+        views.clone(),
+        stop.clone(),
+        keep_alive,
+        sandbox_url,
+    );
     let graceful = stop.clone();
     let serving = axum::serve(listener, app).with_graceful_shutdown(graceful.cancelled_owned());
     let mut serving = std::pin::pin!(serving.into_future());
@@ -61,6 +84,7 @@ async fn serve_with_sessions(
         () = shutdown => None,
     };
     sessions.begin_shutdown();
+    views.shutdown();
     stop.cancel();
     let (http, drained) = tokio::time::timeout(SETTLE_TIMEOUT + Duration::from_secs(2), async {
         tokio::join!(
@@ -83,18 +107,22 @@ async fn serve_with_sessions(
 fn build_router(
     bound: SocketAddr,
     sessions: Arc<SessionDirectory>,
+    views: Arc<ViewSessions>,
     stop: CancellationToken,
     keep_alive: Duration,
+    sandbox_url: Option<String>,
 ) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route(apps::HOST_PATH, apps::host_router(sandbox_url))
         .route("/s/{token}/", get(monitor))
         .route("/s/{token}/ws", get(ws_upgrade))
         .route_service(
             "/mcp",
             mcp_http::service(sessions.clone(), stop, keep_alive),
         )
+        .merge(view::router(views))
         .layer(middleware::from_fn_with_state(bound, authority_guard))
         .with_state(sessions)
 }

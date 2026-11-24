@@ -207,6 +207,7 @@ async fn make_server_config_with(
         ),
         session_manager,
         stdio_command_filter: true,
+        mcp_apps_connection_enabled: false,
     }
 }
 

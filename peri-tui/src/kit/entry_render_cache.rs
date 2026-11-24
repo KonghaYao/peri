@@ -57,6 +57,8 @@ pub(crate) struct EntryRenderCache {
     /// 内联图片缓存版本；只有可能含图片的消息需要据此重算（图片完成后行高变化）。
     inline_image_revision: Option<u64>,
     has_inline_image: Option<bool>,
+    /// MCP Apps descriptor 版本；工具卡 header 的「打开应用」动作随发现结果变化。
+    apps_revision: Option<u64>,
     /// 本消息内每处围栏的逻辑行范围；调度与阅读锚点共用。
     mermaid_fences: Vec<crate::kit::mermaid::FenceSpan>,
     /// 展开的正文空档组：成员标题逻辑行 → 成员 FoldKey（单击热区复用）。
@@ -88,6 +90,13 @@ impl EntryRenderCache {
         if content_changed || self.has_inline_image.is_none() {
             self.has_inline_image = Some(crate::kit::inline_image::vm_may_have_image(vm));
         }
+        // A1：工具卡 header 的 App 动作只依赖发现结果版本；只有工具卡跟随它失效
+        // （descriptor 变化时其余 entry 的行内容不变）。
+        let apps_revision = crate::kit::apps::registry_revision();
+        let apps_changed = matches!(
+            vm,
+            TuiRenderUnit::TuiToolCard(_) | TuiRenderUnit::TuiCollapsedGroup(_)
+        ) && self.apps_revision != Some(apps_revision);
         let inline_image_revision = crate::kit::inline_image::revision();
         let inline_image_changed = self.has_inline_image == Some(true)
             && self
@@ -103,7 +112,8 @@ impl EntryRenderCache {
             })
             || self.genui_state_changed()
             || preview_changed
-            || inline_image_changed;
+            || inline_image_changed
+            || apps_changed;
         let period = vm.animation_period_frames();
         let animated = period != 0 && self.frame / period != frame / period;
         let invalidation = if content_changed {
@@ -226,6 +236,7 @@ impl EntryRenderCache {
         self.frame = frame;
         self.preview_revision = preview_revision;
         self.inline_image_revision = Some(inline_image_revision);
+        self.apps_revision = Some(apps_revision);
         invalidation
     }
 

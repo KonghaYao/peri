@@ -140,6 +140,7 @@ async fn prepared_test_host(
         ),
         session_manager,
         stdio_command_filter: false,
+        mcp_apps_connection_enabled: false,
     }
 }
 

@@ -118,6 +118,7 @@ async fn test_host(tmp: &TempDir, reserved_root_session_id: bool) -> AcpServerCo
         ),
         session_manager,
         stdio_command_filter: false,
+        mcp_apps_connection_enabled: false,
     }
 }
 

@@ -547,14 +547,46 @@ pub(super) fn register_entry_click(
             *gesture.write_no_update() = None;
             return EventResult::Consumed;
         }
+        // A1：已完成的工具卡匹配到当前会话的 MCP App 时，整条 header 的点击语义
+        // 是「打开应用」而不是折叠切换（header 末尾渲染「▷ 打开应用 · <name>」）。
+        // 工具结束事件只有文本，descriptor 的 model.toolCallId 是唯一稳定锚点。
+        let app_tool = match (&snapshot.items[slot], member_key.as_ref()) {
+            // 正文空档组展开后的成员标题：成员身份即工具卡 id。
+            (_, Some(crate::kit::tui_render_unit::FoldKey::Tool(tool_id))) => Some(tool_id.clone()),
+            (TuiRenderUnit::TuiToolCard(card), None) if !card.is_running => {
+                Some(card.tool_id.clone())
+            }
+            _ => None,
+        };
+        if let Some(tool_id) = app_tool {
+            let session_id = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
+            if crate::kit::apps::app_for_tool_card(&session_id, &tool_id).is_some() {
+                drop(snapshot);
+                *gesture.write_no_update() = None;
+                text_sel.write().clear();
+                crate::kit::apps::open_from_tool_card(&session_id, &tool_id);
+                return EventResult::Consumed;
+            }
+        }
         // 点击 = 取消选区语义（与 keepgoing / md 复制按钮点击一致）
         text_sel.write().clear();
         *gesture.write_no_update() = None;
+        // 组头若承载唯一 App 成员：展开组的同时打开应用（与组头文案一致）。
+        let group_app = match &snapshot.items[slot] {
+            TuiRenderUnit::TuiCollapsedGroup(group) if member_key.is_none() => {
+                crate::kit::apps::app_for_collapsed_group(group)
+            }
+            _ => None,
+        };
         let result = match member_key {
             // 成员标题行：只切换该成员的 fold，组折叠态与其他成员不变。
             Some(key) => super::entry_nav::apply_group_member_toggle(&mut snapshot, slot, &key),
             None => super::entry_nav::apply_fold_toggle(&mut snapshot, slot, false),
         };
+        drop(snapshot);
+        if let Some(entry) = group_app {
+            crate::kit::apps::open_app(&entry.app_id);
+        }
         tracing::trace!(target: "frozen_diag", slot, "click: handler exit");
         result
     });
@@ -859,8 +891,36 @@ pub(super) fn register_keyboard_nav(
                     tracing::trace!(target: "frozen_diag", "enter: interaction submit exit");
                     return EventResult::Consumed;
                 }
+                // A1（键盘等价入口）：焦点在匹配当前会话 MCP App 的已完成工具卡上，
+                // Enter 直接打开应用；其余工具卡保持折叠切换。
+                let app_tool = match &snapshot.items[idx] {
+                    TuiRenderUnit::TuiToolCard(card) if !card.is_running => {
+                        Some(card.tool_id.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(tool_id) = app_tool {
+                    let session_id = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
+                    if crate::kit::apps::app_for_tool_card(&session_id, &tool_id).is_some() {
+                        drop(snapshot);
+                        crate::kit::apps::open_from_tool_card(&session_id, &tool_id);
+                        tracing::trace!(target: "frozen_diag", "enter: app open exit");
+                        return EventResult::Consumed;
+                    }
+                }
+                // 组头承载唯一 App 成员：Enter 展开组并打开应用（与鼠标同语义）。
+                let group_app = match &snapshot.items[idx] {
+                    TuiRenderUnit::TuiCollapsedGroup(group) => {
+                        crate::kit::apps::app_for_collapsed_group(group)
+                    }
+                    _ => None,
+                };
                 let result =
                     super::entry_nav::apply_fold_toggle(&mut snapshot, idx, next_is_preview);
+                drop(snapshot);
+                if let Some(entry) = group_app {
+                    crate::kit::apps::open_app(&entry.app_id);
+                }
                 tracing::trace!(target: "frozen_diag", "enter: handler exit");
                 result
             }

@@ -418,6 +418,7 @@ const ALL_PANEL_KINDS: &[PanelKind] = &[
     PanelKind::Goal,
     PanelKind::HistoryDetail,
     PanelKind::MermaidDiagram,
+    PanelKind::McpApps,
 ];
 
 /// 编译期断言：MutexGroup 实现了 PartialEq（测试需要）。

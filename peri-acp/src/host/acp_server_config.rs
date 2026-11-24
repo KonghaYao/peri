@@ -368,6 +368,38 @@ pub struct AcpServerConfig {
     /// 管线（当作普通文本消息发给模型）——IDE 客户端自管理这两个命令，服务端
     /// 不应执行清会话/回退操作。其余命令不受影响。
     pub stdio_command_filter: bool,
+    /// 进程内 host 的 MCP Apps 连接准入门（部署级 opt-in，默认 `false`）。
+    ///
+    /// 为什么需要独立开关：stdio 部署用 `stdio_command_filter` 兼作 Apps 准入
+    /// （两者在 stdio 同源），但 TUI 进程内 host 必须保留 `rewind` / `clear`
+    /// 语义（`stdio_command_filter` 恒 `false`），不能复用它。本字段把「命令过滤」
+    /// 与「Apps 准入」解耦：只由 `assemble_server_config_with_local_mcp_apps`
+    /// 在部署显式 opt-in 且 Apps profile 已协商时置 `true`。
+    ///
+    /// 它只是第二道闸的一半：仍然要求本部署确实装了 Apps 后端
+    /// （`mcp_apps_relay` 或 `workspace_assembly.mcp_profile.apps_enabled()`）。
+    /// 默认 `false` ⇒ 连接 `apps_enabled` 保持现状（TUI 上 `apps/*` 一律
+    /// `capability_disabled`）。
+    pub(crate) mcp_apps_connection_enabled: bool,
+}
+
+impl AcpServerConfig {
+    /// 本部署是否向连接暴露 MCP Apps 面（`run_acp_server_inner` 的第二道闸）。
+    ///
+    /// 两个准入来源任一成立即可，二者都保持各自既有语义：
+    /// - `stdio_command_filter`：stdio 部署的既有准入（逐字节不变）；
+    /// - [`Self::mcp_apps_connection_enabled`]：进程内 host 的显式本地 opt-in。
+    ///
+    /// 准入来源之外还必须有真正的 Apps 后端（relay 或协商出的 apps profile），
+    /// 否则打开门也只会得到 `CapabilityDisabled`（fail-closed，不静默降级）。
+    pub(crate) fn mcp_apps_connection_available(&self) -> bool {
+        (self.stdio_command_filter || self.mcp_apps_connection_enabled)
+            && (self.mcp_apps_relay.is_some()
+                || self
+                    .workspace_assembly
+                    .as_ref()
+                    .is_some_and(|source| source.mcp_profile.apps_enabled()))
+    }
 }
 
 // ── Main server loop ────────────────────────────────────────────────────────
@@ -428,13 +460,10 @@ pub(super) async fn run_acp_server_inner(
     // legacy TUI 通道分别按 initialize 协商值门控，互不隐式开启。
     let oauth_event_rx = cfg.oauth_event_rx.take();
     let cfg = Arc::new(cfg);
+    // 第二道闸：stdio 命令过滤（既有）或进程内 host 的显式本地 opt-in 任一成立，
+    // 且本部署确有 Apps 后端。见 `AcpServerConfig::mcp_apps_connection_available`。
     let connection = Arc::new(tokio::sync::Mutex::new(connection::ConnectionContext::new(
-        cfg.stdio_command_filter
-            && (cfg.mcp_apps_relay.is_some()
-                || cfg
-                    .workspace_assembly
-                    .as_ref()
-                    .is_some_and(|source| source.mcp_profile.apps_enabled())),
+        cfg.mcp_apps_connection_available(),
     )));
     oauth_delivery::spawn_oauth_consumer(oauth_event_rx, &transport, &cfg, &connection);
     let sessions: SharedSessions = sessions;

@@ -35,6 +35,8 @@ fn help_covers_every_entry_point() {
         "stop [--bind IP:PORT]",
         "update [kitesurf]",
         "-V|--version",
+        "--view-token",
+        "PERI_BROWSER_VIEW_TOKEN",
     ] {
         assert!(USAGE.contains(needle), "help 缺少 {needle}");
     }

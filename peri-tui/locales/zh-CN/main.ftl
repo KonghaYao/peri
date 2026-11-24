@@ -1503,3 +1503,33 @@ mermaid-open-scope = 分组 { $label } · 已确认 { $count } 条语句
 mermaid-unsupported = 当前展示源码：{ $reason }
 mermaid-open-diagram = 查看图
 mermaid-detail-copied = 已复制图源码。
+
+# ---- MCP Apps 实时视图（阶段 1）----
+
+panel-title-mcp-apps = 应用
+panel-desc-mcp-apps = MCP App 实时视图
+tool-app-open = 打开应用 · { $name }
+apps-empty-title = MCP App
+apps-empty-hint = 当前会话没有已完成的 App。先运行带 UI 的工具（如 demo 的 get-time）。
+apps-disabled-hint = MCP Apps 未启用：需要 PERI_MCP_APPS_TUI=1 以及网关 PERI_BROWSER_VIEW_URL / PERI_BROWSER_VIEW_TOKEN。
+apps-discovery-error = App 发现失败：{ $code }
+apps-open-error = 打开失败：{ $code }
+apps-list-title = 可打开的应用（{ $count }）
+apps-view-title = { $name }
+apps-view-title-starting = { $name } · 正在启动…
+apps-no-active = 没有活动视图。
+apps-frame-none = 无帧
+apps-frame-waiting = 等待第一帧…
+apps-frame-info = 帧 #{ $seq } · { $w }×{ $h }
+apps-frame-encoding = 正在编码画面 · { $frame }
+apps-placeholder-title = { $frame }
+apps-no-graphics = 当前终端不支持图片协议（Kitty/Sixel），帧已收到但无法像素渲染。
+apps-no-cell-size = 终端未报告单元格像素尺寸，无法安全渲染像素帧。
+apps-pending-requests = 待回填 { $count }
+apps-footer-hint = Tab 切换视图 · x 关闭当前 · r 重开 · Esc 关闭面板（{ $index }）
+apps-phase-starting = 启动中
+apps-phase-ready = 就绪
+apps-phase-reconnecting = 重连中（第 { $attempt } 次）
+apps-phase-failed = 失败
+apps-phase-closed = 已关闭
+apps-frame-encode-failed = 帧编码失败：当前终端图片协议不可用。

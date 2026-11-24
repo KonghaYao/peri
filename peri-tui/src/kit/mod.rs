@@ -10,6 +10,7 @@ pub mod acp_events;
 pub mod acp_notifier;
 pub mod acp_types;
 pub mod app_shell;
+pub mod apps;
 pub mod ask_user_action;
 pub mod atoms;
 pub(crate) mod auth_browser;

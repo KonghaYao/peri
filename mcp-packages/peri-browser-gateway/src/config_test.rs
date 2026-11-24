@@ -13,6 +13,8 @@ fn parse(args: &[&str], values: &[(&str, &str)]) -> Result<Config, ConfigError> 
 fn default_bind_and_suggested_endpoint_do_not_require_a_running_engine() {
     let config = parse(&[], &[]).unwrap();
     assert_eq!(config.bind.to_string(), "127.0.0.1:7391");
+    assert_eq!(config.sandbox_bind, Some("127.0.0.1:7392".parse().unwrap()));
+    assert_eq!(config.app_html, None);
     let browser = config.browser;
     assert_eq!(
         browser.suggested_endpoint,
@@ -37,6 +39,140 @@ fn default_bind_and_suggested_endpoint_do_not_require_a_running_engine() {
     assert_eq!(browser.yield_timeout, Duration::from_secs(60));
     assert_eq!(browser.request_human_timeout, Duration::from_secs(300));
     assert_eq!(browser.keep_alive(), Duration::from_secs(360));
+}
+
+#[test]
+fn sandbox_bind_is_loopback_by_default_and_can_be_overridden_or_disabled() {
+    assert_eq!(
+        parse(&[], &[("PERI_BROWSER_SANDBOX_BIND", "[::1]:7400")])
+            .unwrap()
+            .sandbox_bind,
+        Some("[::1]:7400".parse().unwrap())
+    );
+    assert_eq!(
+        parse(
+            &["--sandbox-bind", "127.0.0.1:7401"],
+            &[("PERI_BROWSER_SANDBOX_BIND", "127.0.0.1:7400")],
+        )
+        .unwrap()
+        .sandbox_bind,
+        Some("127.0.0.1:7401".parse().unwrap())
+    );
+    for off in ["off", "none"] {
+        assert_eq!(
+            parse(&["--sandbox-bind", off], &[]).unwrap().sandbox_bind,
+            None,
+            "sandbox bind {off}"
+        );
+    }
+    for invalid in [
+        "--sandbox-bind=0.0.0.0:7392",
+        "--sandbox-bind=127.0.0.1:0",
+        "--sandbox-bind=localhost:7392",
+        "--sandbox-bind=",
+    ] {
+        assert!(
+            matches!(parse(&[invalid], &[]), Err(ConfigError::InvalidSandboxBind)),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn view_token_comes_from_the_flag_or_the_environment_and_is_absent_by_default() {
+    assert_eq!(parse(&[], &[]).unwrap().view_token, None);
+    assert_eq!(
+        parse(&["--view-token", "  cli-token  "], &[])
+            .unwrap()
+            .view_token
+            .as_deref(),
+        Some("cli-token")
+    );
+    assert_eq!(
+        parse(&[], &[("PERI_BROWSER_VIEW_TOKEN", "env-token")])
+            .unwrap()
+            .view_token
+            .as_deref(),
+        Some("env-token")
+    );
+    assert_eq!(
+        parse(
+            &["--view-token", "cli-token"],
+            &[("PERI_BROWSER_VIEW_TOKEN", "env-token")],
+        )
+        .unwrap()
+        .view_token
+        .as_deref(),
+        Some("cli-token")
+    );
+    for blank in [&["--view-token="][..], &["--view-token", "  "][..]] {
+        assert!(
+            matches!(
+                parse(blank, &[]),
+                Err(ConfigError::EmptyValue("PERI_BROWSER_VIEW_TOKEN"))
+            ),
+            "{blank:?}"
+        );
+    }
+}
+
+#[test]
+fn app_html_comes_from_the_flag_or_the_environment_and_rejects_blank_values() {
+    assert_eq!(
+        parse(&["--app-html", "/fixture/app.html"], &[])
+            .unwrap()
+            .app_html,
+        Some(PathBuf::from("/fixture/app.html"))
+    );
+    assert_eq!(
+        parse(
+            &[],
+            &[("PERI_BROWSER_APP_HTML", " /fixture/from-env.html ")],
+        )
+        .unwrap()
+        .app_html,
+        Some(PathBuf::from("/fixture/from-env.html"))
+    );
+    assert_eq!(
+        parse(
+            &["--app-html=/fixture/cli.html"],
+            &[("PERI_BROWSER_APP_HTML", "/fixture/from-env.html")],
+        )
+        .unwrap()
+        .app_html,
+        Some(PathBuf::from("/fixture/cli.html"))
+    );
+    for blank in [&["--app-html="][..], &["--app-html", "  "][..]] {
+        assert!(
+            matches!(
+                parse(blank, &[]),
+                Err(ConfigError::EmptyValue("PERI_BROWSER_APP_HTML"))
+            ),
+            "{blank:?}"
+        );
+    }
+    assert!(matches!(
+        parse(&["--app-html"], &[]),
+        Err(ConfigError::MissingValue("PERI_BROWSER_APP_HTML"))
+    ));
+}
+
+#[test]
+fn private_network_access_is_on_by_default_and_env_can_disable_it() {
+    let lookup = |value: Option<&'static str>| {
+        move |key: &str| {
+            (key == "PERI_BROWSER_ALLOW_PRIVATE_NETWORK")
+                .then(|| value.unwrap_or_default().to_owned())
+        }
+    };
+    assert!(allow_private_network(&lookup(None)));
+    for off in ["0", "false", "off", "no"] {
+        assert!(
+            !allow_private_network(&lookup(Some(off))),
+            "PERI_BROWSER_ALLOW_PRIVATE_NETWORK={off}"
+        );
+    }
+    assert!(allow_private_network(&lookup(Some("1"))));
 }
 
 #[test]

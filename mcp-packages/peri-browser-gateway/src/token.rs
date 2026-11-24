@@ -33,7 +33,6 @@ pub fn validate(secret: &[u8], session_id: &str, candidate: &str) -> bool {
 ///
 /// The length check leaks only the public length; the content comparison scans
 /// every byte so a caller cannot learn a matching prefix from timing.
-#[cfg(test)]
 #[must_use]
 pub fn constant_time_eq(expected: &[u8], candidate: &[u8]) -> bool {
     if expected.len() != candidate.len() {

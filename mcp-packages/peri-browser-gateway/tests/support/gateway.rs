@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use peri_browser_gateway::apps::{AppDocument, AppDocuments};
 use peri_browser_gateway::config::Config;
+use peri_browser_gateway::view::ViewSessions;
 use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -35,9 +37,14 @@ impl Gateway {
         let config = fixture_config(temp.path(), suggested, env)?;
         let base = format!("http://{}", listener.local_addr()?);
         let stop = CancellationToken::new();
+        let views = ViewSessions::new(
+            &config,
+            std::sync::Arc::new(AppDocuments::new(AppDocument::placeholder())),
+        );
         let server = tokio::spawn(peri_browser_gateway::serve(
             listener,
             config,
+            views,
             stop.clone().cancelled_owned(),
         ));
         Ok(Self {

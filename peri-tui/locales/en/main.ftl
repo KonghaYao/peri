@@ -1506,3 +1506,33 @@ mermaid-open-scope = Group { $label } · { $count } statements confirmed
 mermaid-unsupported = Source shown: { $reason }
 mermaid-open-diagram = View diagram
 mermaid-detail-copied = Diagram source copied.
+
+# ---- MCP Apps live view (phase 1) ----
+
+panel-title-mcp-apps = App
+panel-desc-mcp-apps = MCP App live view
+tool-app-open = Open app · { $name }
+apps-empty-title = MCP App
+apps-empty-hint = No completed app in this session. Run a UI tool first (for example the demo get-time).
+apps-disabled-hint = MCP Apps is off: set PERI_MCP_APPS_TUI=1 and configure PERI_BROWSER_VIEW_URL / PERI_BROWSER_VIEW_TOKEN.
+apps-discovery-error = App discovery failed: { $code }
+apps-open-error = Open failed: { $code }
+apps-list-title = Apps to open ({ $count })
+apps-view-title = { $name }
+apps-view-title-starting = { $name } · starting…
+apps-no-active = No active view.
+apps-frame-none = no frame
+apps-frame-waiting = Waiting for the first frame…
+apps-frame-info = frame #{ $seq } · { $w }×{ $h }
+apps-frame-encoding = Encoding the frame · { $frame }
+apps-placeholder-title = { $frame }
+apps-no-graphics = This terminal has no image protocol (Kitty/Sixel); the frame arrived but cannot be drawn.
+apps-no-cell-size = The terminal does not report cell pixel size; pixel frames are disabled.
+apps-pending-requests = pending { $count }
+apps-footer-hint = Tab switch view · x close current · r reopen · Esc close panel ({ $index })
+apps-phase-starting = starting
+apps-phase-ready = ready
+apps-phase-reconnecting = reconnecting (#{ $attempt })
+apps-phase-failed = failed
+apps-phase-closed = closed
+apps-frame-encode-failed = Frame encoding failed for this terminal image protocol.

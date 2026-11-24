@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+use crate::config::allow_private_network;
 use crate::onboarding::{detect_install, install_root};
 use crate::provision::probe_engine;
 
@@ -217,7 +218,7 @@ async fn start_engine(port: u16, lookup: &impl Fn(&str) -> Option<String>) -> Re
     let log = root.join(format!("serve-{port}.log"));
     std::fs::create_dir_all(&root)
         .with_context(|| format!("create install root {}", root.display()))?;
-    let mut child = spawn_engine(&binary, port, &log)?;
+    let mut child = spawn_engine(&binary, port, &log, allow_private_network(lookup))?;
     let url = engine_probe_url(port);
     match wait_for_engine(&url, &mut child).await {
         Ok(()) => {
@@ -237,7 +238,12 @@ async fn start_engine(port: u16, lookup: &impl Fn(&str) -> Option<String>) -> Re
     }
 }
 
-fn spawn_engine(binary: &Path, port: u16, log: &Path) -> Result<Child> {
+fn spawn_engine(
+    binary: &Path,
+    port: u16,
+    log: &Path,
+    allow_private_network: bool,
+) -> Result<Child> {
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -248,7 +254,7 @@ fn spawn_engine(binary: &Path, port: u16, log: &Path) -> Result<Child> {
         .with_context(|| format!("duplicate {}", log.display()))?;
     let mut command = Command::new(binary);
     command
-        .args(["serve", "--port", &port.to_string()])
+        .args(engine_args(port, allow_private_network))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -256,6 +262,16 @@ fn spawn_engine(binary: &Path, port: u16, log: &Path) -> Result<Child> {
     command
         .spawn()
         .with_context(|| format!("start {}", binary.display()))
+}
+
+/// `kitesurf serve` arguments; the private-network flag is omitted only when the
+/// operator disables it through `PERI_BROWSER_ALLOW_PRIVATE_NETWORK`.
+fn engine_args(port: u16, allow_private_network: bool) -> Vec<String> {
+    let mut args = vec!["serve".to_owned(), "--port".to_owned(), port.to_string()];
+    if allow_private_network {
+        args.push("--allow-private-network".to_owned());
+    }
+    args
 }
 
 async fn wait_for_engine(url: &str, child: &mut Child) -> Result<()> {

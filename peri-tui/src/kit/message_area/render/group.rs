@@ -279,6 +279,18 @@ pub(super) fn render_collapsed_group_lines(
             Style::default().fg(sem.status.error),
         ));
     }
+    // A1：组成员唯一命中当前会话的 App 时，组头也给出可点击的打开动作。
+    if let Some(entry) = crate::kit::apps::app_for_collapsed_group(data) {
+        let display_name = entry.display_name();
+        let name = crate::kit::image_safety::sanitize_for_terminal(&display_name);
+        spans.push(Span::styled(
+            format!(
+                "  ▷ {}",
+                i18n::tr_args("tool-app-open", &[("name".into(), name.into())])
+            ),
+            Style::default().fg(sem.accent),
+        ));
+    }
     let mut lines = vec![Line::from(spans)];
     let mut fold_hits: Vec<(usize, FoldKey)> = Vec::new();
     if expanded {

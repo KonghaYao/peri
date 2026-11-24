@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::onboarding::{install_root, normalize_endpoint, recommended_canonical};
 
 pub(crate) const DEFAULT_BIND: &str = "127.0.0.1:7391";
+pub(crate) const DEFAULT_SANDBOX_BIND: &str = "127.0.0.1:7392";
 const MAX_TIMEOUT_MS: u64 = 86_400_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +20,8 @@ pub enum ConfigError {
     MissingValue(&'static str),
     #[error("bind must use 127.0.0.1 or [::1] and a port")]
     InvalidBind,
+    #[error("sandbox bind must be off or a loopback IP:PORT with a non-zero port")]
+    InvalidSandboxBind,
     #[error("invalid suggested CDP endpoint: {0}")]
     InvalidCdp(#[source] crate::error::BrowserError),
     #[error("{0} must be an integer from 1 to 86400000 milliseconds")]
@@ -32,6 +35,13 @@ pub enum ConfigError {
 #[derive(Clone)]
 pub struct Config {
     pub bind: SocketAddr,
+    /// `None` disables the sandbox listener; the host page stays available.
+    pub sandbox_bind: Option<SocketAddr>,
+    /// Real App HTML for the sandbox listener; `None` keeps the placeholder.
+    /// The file is read before any listener binds.
+    pub app_html: Option<PathBuf>,
+    /// Bearer token for the view-session API; `None` disables the API.
+    pub(crate) view_token: Option<String>,
     pub(crate) secret: Vec<u8>,
     pub(crate) browser: BrowserConfig,
 }
@@ -68,6 +78,9 @@ impl Config {
                 .map_or((arg.as_str(), None), |(k, v)| (k, Some(v)));
             let key = match flag {
                 "--bind" => "PERI_BROWSER_MONITOR_BIND",
+                "--sandbox-bind" => "PERI_BROWSER_SANDBOX_BIND",
+                "--app-html" => "PERI_BROWSER_APP_HTML",
+                "--view-token" => "PERI_BROWSER_VIEW_TOKEN",
                 "--cdp-url" => "KITESURF_CDP_URL",
                 "--secret" => "PERI_BROWSER_GATEWAY_SECRET",
                 "--idle-yield-ms" => "PERI_BROWSER_IDLE_YIELD_MS",
@@ -90,10 +103,25 @@ impl Config {
         if !is_bind_ip(bind.ip()) {
             return Err(ConfigError::InvalidBind);
         }
+        let sandbox_bind = parse_sandbox_bind(&lookup)?;
+        let app_html = match lookup("PERI_BROWSER_APP_HTML") {
+            Some(value) if value.trim().is_empty() => {
+                return Err(ConfigError::EmptyValue("PERI_BROWSER_APP_HTML"))
+            }
+            Some(value) => Some(PathBuf::from(value.trim())),
+            None => None,
+        };
         let suggested_endpoint = lookup("KITESURF_CDP_URL").map_or_else(
             || Ok(recommended_canonical()),
             |url| normalize_endpoint(&url).map_err(ConfigError::InvalidCdp),
         )?;
+        let view_token = match lookup("PERI_BROWSER_VIEW_TOKEN") {
+            Some(value) if value.trim().is_empty() => {
+                return Err(ConfigError::EmptyValue("PERI_BROWSER_VIEW_TOKEN"))
+            }
+            Some(value) => Some(value.trim().to_owned()),
+            None => None,
+        };
         let secret = match lookup("PERI_BROWSER_GATEWAY_SECRET") {
             Some(value) if value.trim().is_empty() => {
                 return Err(ConfigError::EmptyValue("PERI_BROWSER_GATEWAY_SECRET"))
@@ -136,6 +164,9 @@ impl Config {
         };
         Ok(Self {
             bind,
+            sandbox_bind,
+            app_html,
+            view_token,
             secret,
             browser,
         })
@@ -171,6 +202,40 @@ pub(crate) fn is_bind_ip(ip: IpAddr) -> bool {
     matches!(
         ip,
         IpAddr::V4(Ipv4Addr::LOCALHOST) | IpAddr::V6(Ipv6Addr::LOCALHOST)
+    )
+}
+
+/// `off`/`none` keeps the gateway listener without its sandbox source; an
+/// absent value keeps the loopback default.
+fn parse_sandbox_bind(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<SocketAddr>, ConfigError> {
+    let Some(value) = lookup("PERI_BROWSER_SANDBOX_BIND") else {
+        return DEFAULT_SANDBOX_BIND
+            .parse()
+            .map(Some)
+            .map_err(|_| ConfigError::InvalidSandboxBind);
+    };
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("off") || value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let bind = value
+        .parse::<SocketAddr>()
+        .map_err(|_| ConfigError::InvalidSandboxBind)?;
+    if !is_bind_ip(bind.ip()) || bind.port() == 0 {
+        return Err(ConfigError::InvalidSandboxBind);
+    }
+    Ok(Some(bind))
+}
+
+/// kitesurf 的私有网络访问默认开启；显式关闭值同时覆盖 `--allow-private-network`。
+pub(crate) fn allow_private_network(lookup: &impl Fn(&str) -> Option<String>) -> bool {
+    !matches!(
+        non_empty(lookup, "PERI_BROWSER_ALLOW_PRIVATE_NETWORK")
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "off" | "no")
     )
 }
 

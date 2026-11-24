@@ -444,6 +444,8 @@ pub async fn run_kit_fullscreen(
     *atoms::LAST_CTRL_C_PROCESSED.state().write() = None;
 
     // 4. 配置就绪后接通 kit 四链路，随后才进入正常交互界面。
+    // MCP Apps 运行时句柄：退出时必须先 cancel + join（给网关 DELETE 留出时间）。
+    let mut apps_runtime: Option<crate::kit::apps::runtime::AppsRuntimeHandle> = None;
     if let Some((client, notification_rx)) = acp_client {
         // 4a. SUBMIT channel：InputArea → submit_consumer
         let (submit_tx, submit_rx) = mpsc::unbounded_channel::<SubmitRequest>();
@@ -541,6 +543,12 @@ pub async fn run_kit_fullscreen(
         }
         // 4dz. ACP client handle — for panels to send raw requests
         let _ = atoms::ACP_CLIENT_HANDLE.set(std::sync::Arc::new(client.clone()));
+        // 4dz2. MCP Apps 实时视图（阶段 1）：开关 + 网关配置就绪才 spawn；
+        // 未就绪时 spawn_if_enabled 返回 None —— 零轮询、零网络。
+        apps_runtime = crate::kit::apps::runtime::spawn_if_enabled(
+            std::sync::Arc::new(client.clone()),
+            shutdown.clone(),
+        );
         let specs: Vec<peri_acp_types::command::command_route::UiCommandSpec> =
             crate::kit::ui_command::ui_command_specs()
                 .iter()
@@ -766,6 +774,10 @@ pub async fn run_kit_fullscreen(
 
     // 6. 退出前触发 shutdown，让后台任务干净退出
     shutdown.cancel();
+    // 6a. Apps 运行时：等待视图清理（每个网关会话 DELETE，上限 5s）。
+    if let Some(handle) = apps_runtime.take() {
+        handle.shutdown().await;
+    }
 
     // 7. 单次 teardown；随后 App Drop，不建立后台重试或完整 drain 保证。
     crate::launch::teardown_app(&mut app).await;

@@ -436,7 +436,8 @@ pub async fn assemble_server_config_with_capabilities(
 }
 
 /// stdio deployment variant. The assembly boundary derives the concrete MCP profile;
-/// TUI/MPSC always use [`assemble_server_config`].
+/// TUI/MPSC use [`assemble_server_config`] by default, and the opt-in
+/// `assemble_server_config_with_local_mcp_apps` when the process-local Apps switch is on.
 pub async fn assemble_server_config_with_mcp_apps(
     input: HostAssemblyInput,
     apps_enabled: bool,
@@ -976,6 +977,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // 默认 false（TUI/print 保留全部命令）；stdio 装配点（assemble_stdio_config）
         // 显式置 true，过滤 rewind/clear。
         stdio_command_filter: false,
+        // 默认 false：连接 `apps_enabled` 保持现状。只有进程内 host 的本地 opt-in
+        // 装配变体（`assemble_server_config_with_local_mcp_apps`）会置 true。
+        mcp_apps_connection_enabled: false,
         // 部署级 opt-in：只有显式要求预留根会话 ID 的宿主（进程内 ACP Host）打开。
         reserved_root_session_id,
         // 部署级 opt-in（默认 false）：会话环境装配把它原样传给会话 MCP 池。

@@ -23,6 +23,7 @@ use crate::app::panel_types::PanelKind;
 use crate::i18n;
 
 use crate::kit::panels::agent::AgentPanel;
+use crate::kit::panels::apps::AppsPanel;
 use crate::kit::panels::ask_user::AskUserPanel;
 use crate::kit::panels::config::ConfigPanel;
 use crate::kit::panels::cron::CronPanel;
@@ -173,6 +174,10 @@ fn render_history_detail_panel() -> AnyElement<'static> {
 
 fn render_mermaid_diagram_panel() -> AnyElement<'static> {
     element!(MermaidDiagramPanel()).into()
+}
+
+fn render_apps_panel() -> AnyElement<'static> {
+    element!(AppsPanel()).into()
 }
 
 /// 所有面板的元数据。
@@ -432,6 +437,18 @@ pub const PANELS: &[PanelMeta] = &[
         layout: PanelLayout::fixed(90, 22),
         render: render_mermaid_diagram_panel,
     },
+    PanelMeta {
+        kind: PanelKind::McpApps,
+        title: "App",
+        shortcut_letter: '\0',
+        slash_command: "apps",
+        description: "MCP App live view",
+        priority: 20,
+        mutex_group: MutexGroup::Info,
+        scope: PanelScope::Session,
+        layout: PanelLayout::fixed(100, 30),
+        render: render_apps_panel,
+    },
 ];
 
 pub fn panel_title(kind: PanelKind) -> String {
@@ -456,6 +473,7 @@ pub fn panel_title(kind: PanelKind) -> String {
         PanelKind::Goal => "panel-title-goal",
         PanelKind::HistoryDetail => "panel-title-history-detail",
         PanelKind::MermaidDiagram => "panel-title-mermaid-diagram",
+        PanelKind::McpApps => "panel-title-mcp-apps",
     };
     if matches!(
         kind,
@@ -507,6 +525,7 @@ pub fn panel_description(kind: PanelKind) -> String {
         PanelKind::Goal => "panel-desc-goal",
         PanelKind::HistoryDetail => "panel-desc-history-detail",
         PanelKind::MermaidDiagram => "panel-desc-mermaid-diagram",
+        PanelKind::McpApps => "panel-desc-mcp-apps",
     };
     i18n::tr(key)
 }
@@ -570,7 +589,16 @@ pub fn open_panel(kind: PanelKind) {
         .mutex_group;
     let mut current = open_atom.read().clone();
 
-    // 关闭同 MutexGroup 的其他面板（除 kind 自身）
+    // 关闭同 MutexGroup 的其他面板（除 kind 自身）；Apps 面板被互斥替换时
+    // 同样要结束视图（DELETE 网关会话）。
+    let displaced_apps = kind != PanelKind::McpApps
+        && current.iter().any(|open| {
+            *open == PanelKind::McpApps
+                && meta(*open)
+                    .expect("all PanelKind variants must be registered")
+                    .mutex_group
+                    == group
+        });
     current.retain(|k| {
         let item_group = meta(*k)
             .expect("all PanelKind variants must be registered")
@@ -586,6 +614,9 @@ pub fn open_panel(kind: PanelKind) {
 
     *open_atom.write() = current;
     *active_atom.write() = Some(kind);
+    if displaced_apps {
+        crate::kit::apps::close_all_views();
+    }
 }
 
 /// 关闭栈顶（ACTIVE_PANEL）面板，弹出后新的栈顶成为 active。
@@ -600,6 +631,10 @@ pub fn close_active_panel() -> Option<PanelKind> {
     let next_active = current.last().copied();
     *open_atom.write() = current;
     *active_atom.write() = next_active;
+    // 面板关闭 = 视图结束：运行时对每个网关会话 DELETE（幂等，未启动时无副作用）。
+    if closed == Some(PanelKind::McpApps) {
+        crate::kit::apps::close_all_views();
+    }
     closed
 }
 
@@ -616,6 +651,9 @@ pub fn close_panel(kind: PanelKind) -> bool {
         let next_active = current.last().copied();
         *open_atom.write() = current;
         *active_atom.write() = next_active;
+        if kind == PanelKind::McpApps {
+            crate::kit::apps::close_all_views();
+        }
     }
     removed
 }
@@ -660,8 +698,12 @@ pub fn toggle_panel(kind: PanelKind) -> bool {
 
 /// 关闭所有面板（清空栈）。
 pub fn close_all_panels() {
+    let had_apps = OPEN_PANELS.state().read().contains(&PanelKind::McpApps);
     *OPEN_PANELS.state().write() = Vec::new();
     *ACTIVE_PANEL.state().write() = None;
+    if had_apps {
+        crate::kit::apps::close_all_views();
+    }
 }
 
 // ── S16：per-widgets 风格干净滚动条（空格 + bg 色，无 █ 缝隙）──

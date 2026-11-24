@@ -31,6 +31,8 @@ pub enum PanelKind {
     HistoryDetail,
     /// 聊天中的 Mermaid 图详情：概览、分组、全图与源码。
     MermaidDiagram,
+    /// MCP App 实时视图（阶段 1）：网关 SSE 帧 + 状态。
+    McpApps,
 }
 
 // ─── EventResult ────────────────────────────────────────────────────────────

@@ -32,7 +32,36 @@ const TOOL_OUTPUT_MAX_LINES: usize = 4;
 pub(super) fn render_tool_card_lines(data: &TuiToolCard, grid: &GridSpec) -> Vec<Line<'static>> {
     let plan = project_tool_render_plan(data, grid);
     let resolved = resolve_tool_render_plan(data, plan);
-    render_tool_plan(data, resolved, grid)
+    let mut lines = render_tool_plan(data, resolved, grid);
+    append_app_action(data, &mut lines);
+    lines
+}
+
+/// A1：已完成的工具卡若能匹配当前会话的 MCP App，在 header 末尾追加
+/// `▷ 打开应用 · <name>`。点击语义见 `message_area::handlers`（整条 header
+/// 命中即打开，不再折叠）——这是工具结束事件只有文本时唯一可用的锚点：
+/// descriptor 的 `model.toolCallId` 与工具卡 `tool_id` 同源。
+fn append_app_action(data: &TuiToolCard, lines: &mut [Line<'static>]) {
+    if data.is_running || data.is_error {
+        return;
+    }
+    let session_id = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
+    let Some(entry) = crate::kit::apps::app_for_tool_card(&session_id, &data.tool_id) else {
+        return;
+    };
+    let Some(header) = lines.first_mut() else {
+        return;
+    };
+    let accent = peri_theme::atoms::THEME_ATOM.state().read().semantic.accent;
+    let display_name = entry.display_name();
+    let name = crate::kit::image_safety::sanitize_for_terminal(&display_name);
+    header.spans.push(Span::styled(
+        format!(
+            "  ▷ {}",
+            crate::i18n::tr_args("tool-app-open", &[("name".into(), name.into())])
+        ),
+        Style::default().fg(accent),
+    ));
 }
 
 /// Presentation 只投影 header/detail 候选内容；状态、fold、prefix 与时长由

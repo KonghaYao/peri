@@ -78,6 +78,12 @@ async fn sdk_expiry_revokes_even_a_live_monitor_and_drains_the_transport() -> an
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let bound = listener.local_addr()?;
     let base = format!("http://{bound}");
+    let views = ViewSessions::new(
+        &config,
+        Arc::new(crate::apps::AppDocuments::new(
+            crate::apps::AppDocument::placeholder(),
+        )),
+    );
     let directory = Arc::new(SessionDirectory::new(
         config.browser,
         format!("{base}/"),
@@ -89,7 +95,9 @@ async fn sdk_expiry_revokes_even_a_live_monitor_and_drains_the_transport() -> an
         listener,
         bound,
         directory.clone(),
+        views,
         Duration::from_secs(1),
+        Some("http://127.0.0.1:7392/apps/sandbox".to_owned()),
         stop.clone().cancelled_owned(),
     ));
     let http = reqwest::Client::builder()
@@ -120,6 +128,16 @@ async fn sdk_expiry_revokes_even_a_live_monitor_and_drains_the_transport() -> an
         .await?;
     assert!(index.contains("&lt;script&gt;fixture&lt;/script&gt;"));
     assert!(!index.contains("<script>fixture</script>"));
+    let host = http
+        .get(format!("{base}/apps/host"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    assert!(host.contains(
+        r#"<iframe id="f" src="http://127.0.0.1:7392/apps/sandbox" sandbox="allow-scripts""#
+    ));
     let (token, core) = directory.list().pop().unwrap();
     let url = format!("{base}/s/{token}/");
     let monitor = http.get(&url).send().await?.error_for_status()?;
@@ -179,7 +197,13 @@ async fn explicit_stop_reaps_a_router_with_no_sessions() -> anyhow::Result<()> {
     let config = Config::parse_from([], |key| (key == "HOME").then(|| "/fixture".to_owned()))?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let bound = listener.local_addr()?;
-    serve(listener, config, std::future::ready(())).await?;
+    let views = ViewSessions::new(
+        &config,
+        Arc::new(crate::apps::AppDocuments::new(
+            crate::apps::AppDocument::placeholder(),
+        )),
+    );
+    serve(listener, config, views, std::future::ready(())).await?;
     assert!(tokio::net::TcpStream::connect(bound).await.is_err());
     Ok(())
 }

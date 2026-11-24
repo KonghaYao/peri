@@ -1,6 +1,7 @@
 #![cfg(unix)]
 //! 一个 loopback listener 提供有状态 MCP 和 token 监控；浏览器归属按 MCP 会话划分。
 
+pub mod apps;
 pub mod cdp;
 pub mod cli;
 pub mod config;
@@ -25,6 +26,7 @@ mod skills;
 mod snapshot;
 mod stream;
 mod token;
+pub mod view;
 mod ws;
 
 pub use http::serve;

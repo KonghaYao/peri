@@ -189,6 +189,9 @@ impl PageOperation<'_> {
         let backend = self.resolve_backend(uid, selector).await?;
         let (x, y) = self.element_center(backend).await?;
         let controller = self;
+        // 真实点击先移动指针：hover/pointerover 先于按下发生，依赖 :hover 的样式
+        // 与悬停分支才和浏览器行为一致；顶层文档的输入路径依赖这一点。
+        dispatch_mouse(controller, MouseEventKind::Move, x, y, None, 0, 0).await?;
         dispatch_mouse(
             controller,
             MouseEventKind::Down,

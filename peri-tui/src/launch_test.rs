@@ -1,6 +1,34 @@
 use super::AcpTuiClient;
 use super::App;
 
+/// MCP Apps 本地开关的解析边界：默认关闭，只认显式真值。
+///
+/// 关闭是安全默认：未设置 / 空串 / 假值 / 未知值都不得改变 TUI 既有行为。
+#[test]
+fn local_mcp_apps_switch_is_off_by_default_and_only_accepts_explicit_truthy_values() {
+    for raw in [
+        None,
+        Some(""),
+        Some(" "),
+        Some("0"),
+        Some("false"),
+        Some("off"),
+        Some("no"),
+        Some("enabled"),
+    ] {
+        assert!(
+            !super::mcp_apps_tui_enabled_from(raw),
+            "环境值 {raw:?} 必须视为关闭"
+        );
+    }
+    for raw in ["1", "true", "TRUE", "yes", "on", " 1 ", "On"] {
+        assert!(
+            super::mcp_apps_tui_enabled_from(Some(raw)),
+            "环境值 {raw:?} 必须视为开启"
+        );
+    }
+}
+
 #[tokio::test]
 async fn attach_acp_rejects_second_attachment_before_spawning_host() {
     let temp = tempfile::tempdir().expect("temp db directory");

@@ -102,6 +102,8 @@ fn project_session_boundary_inner(target_session_id: Option<&str>, retire_histor
     // 占用展示属于会话：新会话的已保存值由 load 响应重新建立，不能沿用上一会话。
     *atoms::CONTEXT_USAGE.state().write() = None;
     panel_registry::close_panel(PanelKind::Goal);
+    // App 视图属于会话：边界重置即结束（运行时对网关会话 DELETE）。
+    panel_registry::close_panel(PanelKind::McpApps);
     if previous_session_id != target_session_id.unwrap_or_default() {
         atoms::BG_TASKS.state().write().clear();
         *atoms::BG_TASK_REVISION.state().write() = None;

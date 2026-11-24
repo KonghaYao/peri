@@ -5,6 +5,8 @@
 use std::process::ExitCode;
 
 #[cfg(unix)]
+use peri_browser_gateway::apps::{AppDocument, AppDocuments};
+#[cfg(unix)]
 use peri_browser_gateway::cli::{self, Command, StartOptions};
 #[cfg(unix)]
 use peri_browser_gateway::config::Config;
@@ -13,7 +15,11 @@ use peri_browser_gateway::daemon::{self, EngineBinding};
 #[cfg(unix)]
 use peri_browser_gateway::lifecycle;
 #[cfg(unix)]
+use peri_browser_gateway::view::ViewSessions;
+#[cfg(unix)]
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
 #[tokio::main]
@@ -100,14 +106,65 @@ fn update() -> anyhow::Result<i32> {
 
 #[cfg(unix)]
 async fn serve(args: Vec<String>) -> anyhow::Result<()> {
-    let config = Config::parse_from(args, process_env)?;
+    let mut config = Config::parse_from(args, process_env)?;
+    let document = match config.app_html.as_deref() {
+        Some(path) => {
+            tracing::info!(path = %path.display(), "loading app html");
+            AppDocument::load(path)?
+        }
+        None => AppDocument::placeholder(),
+    };
+    let documents = std::sync::Arc::new(AppDocuments::new(document));
+    if config.app_html.is_some() && config.sandbox_bind.is_none() {
+        tracing::warn!(
+            "app html is configured but the sandbox listener is off; the app view is never served"
+        );
+    }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let listener = TcpListener::bind(config.bind).await?;
     tracing::info!(bind = %listener.local_addr()?, "peri-browser listening");
-    peri_browser_gateway::serve(listener, config, async move {
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    let stop = CancellationToken::new();
+    let sandbox = match config.sandbox_bind {
+        Some(bind) => match TcpListener::bind(bind).await {
+            Ok(listener) => {
+                tracing::info!(bind = %listener.local_addr()?, "sandbox listening");
+                Some(tokio::spawn(peri_browser_gateway::apps::serve(
+                    listener,
+                    documents.clone(),
+                    stop.clone().cancelled_owned(),
+                )))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    bind = %bind,
+                    %error,
+                    "sandbox listener unavailable; host page will not embed it"
+                );
+                config.sandbox_bind = None;
+                None
+            }
+        },
+        None => None,
+    };
+    // sandbox 绑定失败时配置已被清空：会话 URL 必须基于实际可用的文档源。
+    let views = ViewSessions::new(&config, documents.clone());
+    let result = peri_browser_gateway::serve(listener, config, views, {
+        let stop = stop.clone();
+        async move {
+            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+            stop.cancel();
+        }
     })
-    .await
+    .await;
+    stop.cancel();
+    if let Some(sandbox) = sandbox {
+        match sandbox.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "sandbox listener stopped with an error"),
+            Err(error) => tracing::warn!(%error, "sandbox listener task failed"),
+        }
+    }
+    result
 }
 
 /// The background gateway uses the same listener and suggested engine as the

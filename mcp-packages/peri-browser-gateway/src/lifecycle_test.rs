@@ -35,6 +35,15 @@ fn the_probe_url_is_the_canonical_cdp_form() {
 }
 
 #[test]
+fn engine_args_keep_the_port_and_enable_private_network_by_default() {
+    assert_eq!(
+        engine_args(18971, true),
+        vec!["serve", "--port", "18971", "--allow-private-network"]
+    );
+    assert_eq!(engine_args(18971, false), vec!["serve", "--port", "18971"]);
+}
+
+#[test]
 fn installer_dirs_are_unique_private_and_reserve_the_script_with_create_new() {
     let first = make_installer_dir().expect("first installer dir");
     let second = make_installer_dir().expect("second installer dir");

@@ -52,9 +52,16 @@ where
     let uri = format!("http://{}/mcp", listener.local_addr()?);
     let stop = CancellationToken::new();
     let _on_exit = stop.clone().drop_guard();
+    let views = crate::view::ViewSessions::new(
+        &config,
+        std::sync::Arc::new(crate::apps::AppDocuments::new(
+            crate::apps::AppDocument::placeholder(),
+        )),
+    );
     let server = tokio::spawn(crate::serve(
         listener,
         config,
+        views,
         stop.clone().cancelled_owned(),
     ));
     let transport = StreamableHttpClientTransport::with_client(
@@ -605,6 +612,19 @@ async fn browser_tools_drive_a_cdp_endpoint() -> anyhow::Result<()> {
         assert_eq!(clicked["backendNodeId"], 42);
         assert_eq!(clicked["x"], 20.0);
         assert_eq!(clicked["y"], 15.0);
+        // 顶层页面的输入路径：先移动指针再按下/抬起，全部是真实 CDP 输入。
+        let mouse = seen
+            .lock()
+            .expect("seen lock")
+            .iter()
+            .filter(|request| {
+                request["method"] == "Input.dispatchMouseEvent"
+                    && request["params"]["x"] == 20.0
+                    && request["params"]["y"] == 15.0
+            })
+            .filter_map(|request| request["params"]["type"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert_eq!(mouse, ["mouseMoved", "mousePressed", "mouseReleased"]);
 
         let navigated = call(
             &client,

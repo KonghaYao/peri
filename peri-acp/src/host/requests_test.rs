@@ -248,6 +248,8 @@ pub(in crate::host) async fn build_server_config(
         ),
         session_manager,
         stdio_command_filter: false,
+        // 测试宿主不是进程内 Apps 部署：连接准入保持默认关闭。
+        mcp_apps_connection_enabled: false,
     }
 }
 
@@ -676,6 +678,9 @@ mod agent_catalog;
 
 #[path = "requests_idle_invocation_lifetime_test.rs"]
 mod idle_invocation_lifetime;
+
+#[path = "requests_mcp_apps_tui_test.rs"]
+mod mcp_apps_tui_local_opt_in;
 
 #[path = "requests_skill_resources_test.rs"]
 mod skill_resources;

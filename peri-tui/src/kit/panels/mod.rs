@@ -26,6 +26,7 @@ macro_rules! panel_shell {
 }
 
 pub mod agent;
+pub mod apps;
 pub mod ask_user;
 pub mod config;
 pub mod cron;

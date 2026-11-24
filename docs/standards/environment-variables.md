@@ -41,6 +41,7 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | `PERI_MCP_CACHE` | MCP 响应缓存开关；`true/false`、`1/0`、`on/off`，忽略首尾空白和大小写；非法值报配置错误。环境值不强制覆盖文件中的 false；全部缺省时启用。 | `peri-config/src/mcp.rs` |
 | `PERI_MCP_BUILTIN` | 选择内置 MCP 装配：缺省及 `on` / `1` / `v5` 使用单一 `peri` 出口；`legacy` / `v4` 为迁移期独立实例回滚；`off` / `0` 不自动注入内置能力。未知值告警并使用单出口。浏览器 worker（无进程内 builtin）恒为零注入，不读取本变量；显式配置的 remote workspace 仍按 url 注入。关闭 workspace 能力时不再提供内置文件、终端和资源能力；`--bare` 同样受此开关影响。 | `peri-config/src/mcp.rs`、`peri-middlewares/src/mcp/builtin/mod.rs` |
 | `PERI_MCP_APPS` | stdio ACP 的 MCP Apps deployment profile；支持 MCP Apps 的客户端启动 Peri 时携带此变量，**存在即启用**，空串或 `0` 也启用；缺省关闭。Peri 提供 ACP relay，客户端负责 Apps UI。 | `peri-acp/src/host/stdio/mod.rs` |
+| `PERI_MCP_APPS_TUI` | 进程内 TUI ACP host 的 MCP Apps 本地开关；仅 `1` / `true` / `yes` / `on`（忽略大小写与首尾空白）启用，缺省、空串、`0` / `false` 与未知值关闭。启用后 TUI assembly 协商 Apps profile、打开连接准入并注入仅限本进程的 entitlement 层（默认拒绝的例外）；**不**改变 rewind/clear 命令语义。TUI Apps 运行时还要求 `PERI_BROWSER_VIEW_URL` 与 `PERI_BROWSER_VIEW_TOKEN` 同时就绪，否则不启动（零轮询、零 ACP、零 HTTP）。 | `peri-tui/src/launch.rs`、`peri-tui/src/kit/apps/{config,runtime}.rs` |
 | `PERI_ASK_USER_TIMEOUT_SECS` | AskUser 等待 ACP 客户端回答的超时秒数；无效或缺省为 300 秒，`0` 为无限等待。适用于 TUI 和 stdio 共用 broker。 | `peri-acp/src/broker/transport_broker.rs` |
 | `PERI_MACHINE_ID` | 当前机器的 session environment 身份覆盖；必须为 UUID，解析后规范化，首次初始化后进程内缓存；缺省使用本机 `~/.peri/machine-id`。 | `peri-resources/src/sessions/machine.rs` |
 | `PERI_DB_PATH` | 宿主启动时向 hooks / 插件 MCP 子进程导出的本机会话 SQLite 绝对路径（默认库或 `--db-path`）；远程 locator 不设置，进程内已有同名变量会被本次解析结果覆盖。**宿主内部设置，不是用户开关**。 | `peri-tui/src/main.rs` |
@@ -67,8 +68,13 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | 变量 | 控制什么；有效值与缺省行为 | 消费入口 |
 | --- | --- | --- |
 | `PERI_BROWSER_MONITOR_BIND` | MCP 与 monitor 唯一的 TCP 地址；`--bind` 优先，只接受 `127.0.0.1` 或 `[::1]`，默认 `127.0.0.1:7391`；端口 `0` 由 OS 选择。 | `peri-browser-gateway/src/config.rs` |
+| `PERI_BROWSER_SANDBOX_BIND` | 顶层 App 视图与 sandbox 诊断页的 listener；`--sandbox-bind` 优先，只接受 `127.0.0.1` 或 `[::1]` 与非零端口，默认 `127.0.0.1:7392`；`off`/`none` 关闭，宿主页仍可用，App 视图不再提供。 | `peri-browser-gateway/src/config.rs` |
+| `PERI_BROWSER_APP_HTML` | `/apps/view` 与 `/apps/sandbox` 返回的真实 MCP App HTML 路径；`--app-html` 优先，空白值非法。监听前读入内存，读失败、非 UTF-8 或超过 5 MiB 时网关退出；sandbox listener 关闭时只告警不生效。 | `peri-browser-gateway/src/config.rs`、`src/apps.rs` |
+| `PERI_BROWSER_ALLOW_PRIVATE_NETWORK` | `start kitesurf` 拉起的引擎是否带 `--allow-private-network`；缺省开启，`0`/`false`/`off`/`no` 关闭。 | `peri-browser-gateway/src/config.rs`、`src/lifecycle.rs` |
 | `KITESURF_CDP_URL` | 新会话的 `browser_status` 建议地址；`--cdp-url` 优先，缺省建议 `http://127.0.0.1:18971`。仅环回 HTTP/WS、显式非零端口、无 userinfo；不启动引擎也不预绑定。 | 同上；`src/onboarding.rs` |
 | `PERI_BROWSER_GATEWAY_SECRET` | monitor token 派生输入；`--secret` 优先，推荐用环境变量，不留 secret 文件。缺省为每进程随机值，空白值非法。 | 同上；`src/token.rs` |
+| `PERI_BROWSER_VIEW_URL` | TUI 消费的 view session 控制面基址（如 `http://127.0.0.1:7391`）；仅接受 `http`/`https` 且不含 userinfo，首尾空白忽略、末尾 `/` 去除，其余路径允许；缺省、空白或非法时按缺项处理，TUI Apps 运行时关闭并输出一行不含配置值的 warning。 | `peri-tui/src/kit/apps/config.rs` |
+| `PERI_BROWSER_VIEW_TOKEN` | view session API（`/view/sessions*`）的 bearer token；`--view-token` 优先，空白值非法；缺省关闭该 API（`403 view_api_disabled`）。TUI 侧只把 token 放进 `Authorization` 请求头，不打印、不入日志、错误信息与 URL。 | `peri-browser-gateway/src/config.rs`、`src/view/api.rs`、`peri-tui/src/kit/apps/config.rs` |
 | `PERI_BROWSER_OWNER` | 建/关页的 Browser 端点 owner，非空，默认为 `peri-browser`；不是 MCP 会话权限。 | 同上；`src/provision.rs` |
 | `PERI_BROWSER_SESSION_NAME` | monitor 显示标签前缀，缺省/空白用 `PERI_BROWSER_OWNER`；域 UUID 后缀由网关生成。 | 同上；`src/core.rs` |
 | `KITESURF_INSTALL_DIR` | 安装状态检测目录；缺省/空白用 `$HOME/.kitesurf`，不决定已连接的端点。 | 同上；`src/onboarding.rs` |
