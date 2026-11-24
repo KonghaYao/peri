@@ -535,12 +535,17 @@
 
   const state = {
     socket: null,
-    hello: null,
+    view: null,
     tabs: [],
     active: null,
     meta: null,
+    nav: null,
     interactive: false,
-    caps: { newTab: false, diagnostics: false },
+    canNewTab: false,
+    pending: false,
+    externalReserved: false,
+    commandId: 0,
+    pendingCommands: new Map(),
     thumbs: new Map(),
     latest: null,
     pendingBlob: null,
@@ -548,11 +553,8 @@
     visible: !document.hidden,
     attempt: 0,
     paintedPage: null,
-    // Pending `request_human` from the agent: `{ requestId, prompt }`. The
-    // banner stays until the gateway broadcasts `handoff { active: false }`.
+    // 服务端 state 决定当前请求和租约；不做客户端抢占。
     handoff: null,
-    takeoverPending: false,
-    takeoverTimer: 0,
     devtoolsUrl: "",
     readonlyHintAt: 0,
     // IME: while a composition is open the page must not receive the raw
@@ -564,9 +566,23 @@
   };
 
   function send(message) {
-    if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+    if (state.socket?.readyState !== WebSocket.OPEN) return;
+    if (message.t === "ack" || message.t === "visible") {
       state.socket.send(JSON.stringify(message));
+      return;
     }
+    if (!state.view) return;
+    const id = ++state.commandId;
+    if (["takeover", "devtools"].includes(message.t)) {
+      state.pendingCommands.set(id, message.t);
+      syncControls();
+    }
+    state.socket.send(JSON.stringify({ ...message, id, view: state.view }));
+  }
+
+  function currentFrame(meta) {
+    return Boolean(meta && state.view && meta.pageId === state.view.pageId &&
+      meta.viewEpoch === state.view.viewEpoch);
   }
 
   function setConnection(text) {
@@ -608,24 +624,14 @@
     }
     handoff.hidden = false;
     handoffText.textContent = state.handoff.prompt || "The agent is waiting for you.";
-    handoffAccept.hidden = state.interactive;
-    handoffDecline.hidden = state.interactive;
-    handoffDone.hidden = !state.interactive;
+    handoffAccept.hidden = Boolean(state.handoff.accepted);
+    handoffDecline.hidden = Boolean(state.handoff.accepted);
+    handoffDone.hidden = !state.handoff.accepted || !state.interactive;
   }
 
   function answerHandoff(accepted) {
-    if (!state.handoff || !state.handoff.requestId) {
-      toast("there is no handoff to answer");
-      return;
-    }
-    // The banner stays until the gateway broadcasts `handoff { active: false }`:
-    // an answer for a request that already timed out is rejected with
-    // `no_handoff` and must not silently hide the agent's request.
-    send({
-      t: "answer",
-      requestId: state.handoff.requestId,
-      accepted,
-    });
+    if (!state.handoff?.requestId) return;
+    send({ t: "answer", requestId: state.handoff.requestId, accepted });
   }
 
   function showDevtoolsPop() {
@@ -667,24 +673,22 @@
     address.value = tab ? (tab.url || "about:blank") : "about:blank";
   }
 
-  // Mirrors the gateway's view of ownership: `interactive` means the gateway
-  // holds the controller, nothing else. While it is false every input handler
-  // returns before sending, so nothing is queued for a later takeover
-  // (README §6.3). New/close tab are exceptions: the gateway always forwards
-  // them to the MCP, which owns the machine lock and the browser endpoint.
   function syncControls() {
     const holding = state.interactive;
     canvas.classList.toggle("interactive", holding);
     readonlyBadge.hidden = holding;
     holdingBadge.hidden = !holding;
-    takeoverButton.hidden = holding || Boolean(state.handoff);
-    takeoverButton.disabled = state.takeoverPending;
-    releaseButton.hidden = !holding || Boolean(state.handoff);
-    newTabButton.hidden = !state.caps.newTab;
-    diagButton.setAttribute("aria-disabled", holding ? "false" : "true");
-    address.title = holding
-      ? "Press Enter: you hold the page, so the gateway navigates it directly"
-      : "Press Enter: the agent executes the navigation while it holds the page";
+    takeoverButton.hidden = holding || !state.active || Boolean(state.handoff);
+    takeoverButton.disabled = state.pending || [...state.pendingCommands.values()].includes("takeover");
+    takeoverButton.textContent = state.externalReserved ? "Take control back" : "Take over";
+    releaseButton.hidden = !holding;
+    newTabButton.hidden = !state.canNewTab;
+    diagButton.disabled = !state.active || Boolean(state.handoff) || state.pending;
+    devtoolsOpen.disabled = state.externalReserved || [...state.pendingCommands.values()].includes("devtools");
+    address.readOnly = !holding;
+    address.title = holding ? "Press Enter to navigate" : "Take over to navigate";
+    backButton.disabled = !holding || !state.nav?.canGoBack;
+    forwardButton.disabled = !holding || !state.nav?.canGoForward;
     if (!holding) resetIme();
     renderHandoff();
   }
@@ -711,6 +715,7 @@
       close.className = "tclose";
       close.textContent = "\u00d7";
       close.title = "Close tab";
+      close.hidden = !state.interactive || tab.id !== state.active;
       close.addEventListener("click", (event) => {
         event.stopPropagation();
         send({ t: "closeTab", pageId: tab.id });
@@ -771,30 +776,11 @@
 
   function selectTab(pageId) {
     if (!pageId || pageId === state.active) return;
-    state.active = pageId;
-    state.meta = null;
-    state.paintedPage = null;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    showOverlay("waiting for the first frame\u2026");
-    paintThumbnail(pageId);
-    renderTabs();
-    syncAddress();
-    syncControls();
     send({ t: "switch", pageId });
   }
 
   function handleHello(message) {
-    const wasInteractive = state.interactive;
-    state.hello = message;
     document.getElementById("sessionName").textContent = message.name || message.session || "";
-    state.interactive = Boolean(message.interactive);
-    state.caps = message.caps || { newTab: false, diagnostics: false };
-    if (state.interactive) state.takeoverPending = false;
-    setAgent(message.agent);
-    syncControls();
-    if (state.interactive && !wasInteractive && state.visible) {
-      toast("you control the page: click it, then type");
-    }
   }
 
   function setAgent(agent) {
@@ -808,35 +794,52 @@
     }[value] || value;
   }
 
-  function handleTabs(message) {
-    state.tabs = Array.isArray(message.tabs) ? message.tabs : [];
+  function handleState(message) {
     const previous = state.active;
-    const active = state.tabs.find((tab) => tab.active);
-    if (active) state.active = active.id;
-    else if (!state.tabs.some((tab) => tab.id === state.active)) state.active = null;
-    // Another viewer switched tabs: the canvas still holds the previous page.
-    // The gateway replays the new page's cached frame when it has one; until
-    // then the old pixels would be a lie, so blank the canvas and say why.
-    if (
-      state.active !== previous &&
-      state.paintedPage &&
-      state.active !== state.paintedPage
-    ) {
+    const wasPending = state.pending;
+    state.view = message.view;
+    state.active = message.view.pageId;
+    state.tabs = message.tabs;
+    state.nav = message.nav;
+    state.handoff = message.handoff;
+    state.interactive = message.interactive;
+    state.canNewTab = message.canNewTab;
+    state.pending = message.pending;
+    state.externalReserved = message.externalReserved;
+    if (!wasPending && state.pending) toast("Waiting for the page to finish its current operation");
+    if (!currentFrame(state.meta)) {
       state.meta = null;
-      state.paintedPage = null;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      showOverlay("waiting for the first frame\u2026");
-      paintThumbnail(state.active);
+      state.latest = null;
+      state.pendingBlob = null;
+      resetIme();
     }
     if (state.active !== previous) {
-      // The URL names the page that was handed over; another tab needs its own.
-      if (state.devtoolsUrl) {
-        state.devtoolsUrl = "";
-        devtoolsButtonState();
-      }
+      state.paintedPage = null;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      showOverlay(state.active ? "waiting for the first frame…" : "no active tab");
+      paintThumbnail(state.active);
     }
+    for (const pageId of state.thumbs.keys()) {
+      if (!state.tabs.some((tab) => tab.id === pageId)) state.thumbs.delete(pageId);
+    }
+    if (!state.externalReserved || state.active !== previous) state.devtoolsUrl = "";
+    devtoolsButtonState();
+    setAgent(message.agent);
     renderTabs();
     syncAddress();
+    syncControls();
+  }
+
+  function handleResult(message) {
+    const action = state.pendingCommands.get(message.id);
+    state.pendingCommands.delete(message.id);
+    if (!message.ok) toast(message.code || "Command failed");
+    else if (message.value?.navigationError) toast(message.value.navigationError);
+    else if (action === "devtools" && message.value?.pageId === state.active) {
+      state.devtoolsUrl = message.value.url || "";
+      devtoolsButtonState();
+      toast("Paste the URL into Chrome's address bar to open DevTools");
+    }
     syncControls();
   }
 
@@ -857,13 +860,8 @@
   }
 
   function handleMeta(message) {
-    // A frame for a page this viewer already left must not move the canvas or
-    // the coordinate base of the page it is showing now.
-    if (message.pageId !== state.active) return;
-    // Only the display box changes here: resizing the backing store would
-    // clear the frame already painted while the next one is still in flight.
-    state.meta = message;
-    fitCanvas();
+    state.meta = currentFrame(message) ? message : null;
+    if (state.meta) fitCanvas();
   }
 
   function handleText(raw) {
@@ -877,25 +875,11 @@
       case "hello":
         handleHello(message);
         break;
-      case "tabs":
-        handleTabs(message);
+      case "state":
+        handleState(message);
         break;
-      case "agent":
-        setAgent(message.state);
-        break;
-      case "devtools":
-        state.devtoolsUrl = message.url || "";
-        devtoolsButtonState();
-        // The controller is gone; the badge and the input guards follow the
-        // next `hello`, which the release broadcasts.
-        toast("Paste the URL into Chrome's address bar to open DevTools");
-        break;
-      case "nav":
-        if (message.pageId === state.active) {
-          if (document.activeElement !== address) address.value = message.url || "about:blank";
-          backButton.disabled = !message.canGoBack;
-          forwardButton.disabled = !message.canGoForward;
-        }
+      case "result":
+        handleResult(message);
         break;
       case "meta":
         handleMeta(message);
@@ -907,47 +891,17 @@
           if (current) showPreview(message.pageId, current);
         }
         break;
-      case "handoff":
-        if (message.active) {
-          // Keep the request id: the gateway matches answers against the
-          // pending handoff and rejects a placeholder.
-          state.handoff = {
-            requestId: message.requestId || "",
-            prompt: message.prompt || "The agent is waiting for you.",
-          };
-        } else {
-          state.handoff = null;
-        }
-        renderHandoff();
-        syncControls();
-        break;
-      case "error": {
-        const code = message.code || "error";
-        if (code === "yield_pending" || code === "unavailable") {
-          state.takeoverPending = false;
-        }
-        if (code === "controller_lost" || code === "controller_unavailable" || code === "read_only") {
-          state.interactive = false;
-        }
-        if (code === "no_handoff") {
-          // The pending request was already resolved (timeout or another
-          // viewer); do not leave a banner the gateway will not answer.
-          state.handoff = null;
-        }
-        syncControls();
-        toast(message.message || code);
-        break;
-      }
       default:
         break;
     }
   }
 
   function onBinary(buffer) {
+    const meta = state.meta;
+    if (!currentFrame(meta)) return;
     state.latest = buffer;
     if (!state.visible) return;
-    if (state.meta && state.meta.pageId !== state.active) return;
-    state.pendingBlob = new Blob([buffer], { type: "image/jpeg" });
+    state.pendingBlob = { blob: new Blob([buffer], { type: "image/jpeg" }), meta };
     pump();
   }
 
@@ -956,11 +910,11 @@
     state.decoding = true;
     try {
       while (state.pendingBlob) {
-        const blob = state.pendingBlob;
+        const { blob, meta } = state.pendingBlob;
         state.pendingBlob = null;
-        if (!state.visible) continue;
+        if (!state.visible || !currentFrame(meta)) continue;
         const bitmap = await createImageBitmap(blob);
-        if (!state.visible) {
+        if (!state.visible || !currentFrame(meta)) {
           bitmap.close();
           continue;
         }
@@ -973,7 +927,7 @@
         }
         ctx.drawImage(bitmap, 0, 0);
         bitmap.close();
-        state.paintedPage = state.meta ? state.meta.pageId : state.active;
+        state.paintedPage = meta.pageId;
         hideOverlay();
         send({ t: "ack" });
       }
@@ -1029,11 +983,14 @@
   let movePoint = null;
   canvas.addEventListener("mousemove", (event) => {
     if (!state.interactive) return;
-    movePoint = pagePoint(event);
+    const point = pagePoint(event);
+    movePoint = point && { ...point, view: state.view };
     if (!movePoint || moveFrame) return;
     moveFrame = requestAnimationFrame(() => {
       moveFrame = 0;
-      if (movePoint) send({ t: "mouse", type: "move", x: movePoint.x, y: movePoint.y });
+      if (movePoint && state.interactive && movePoint.view === state.view) {
+        send({ t: "mouse", type: "move", x: movePoint.x, y: movePoint.y });
+      }
     });
   });
 
@@ -1181,10 +1138,7 @@
     if (event.key === "Enter") {
       event.preventDefault();
       const url = address.value.trim();
-      if (url) {
-        send({ t: "navigate", url });
-        if (!state.interactive) toast("asking the agent to navigate");
-      }
+      if (url && state.interactive) send({ t: "navigate", url });
       address.blur();
     } else if (event.key === "Escape") {
       event.preventDefault();
@@ -1193,29 +1147,13 @@
     }
   });
 
-  backButton.addEventListener("click", () => {
-    send({ t: "history", delta: -1 });
-    if (!state.interactive) toast("asking the agent to go back");
-  });
-  forwardButton.addEventListener("click", () => {
-    send({ t: "history", delta: 1 });
-    if (!state.interactive) toast("asking the agent to go forward");
-  });
+  backButton.addEventListener("click", () => send({ t: "history", delta: -1 }));
+  forwardButton.addEventListener("click", () => send({ t: "history", delta: 1 }));
   newTabButton.addEventListener("click", () => send({ t: "newTab", url: "about:blank" }));
 
   function requestTakeover() {
-    if (state.interactive || state.takeoverPending) return;
-    state.takeoverPending = true;
-    syncControls();
+    if (state.interactive || takeoverButton.disabled) return;
     send({ t: "takeover" });
-    toast("asking the agent to yield the page");
-    // The gateway always answers a yield one way or another; this only keeps
-    // the button from staying disabled if the socket died mid-request.
-    clearTimeout(state.takeoverTimer);
-    state.takeoverTimer = setTimeout(() => {
-      state.takeoverPending = false;
-      syncControls();
-    }, 5000);
   }
 
   function releasePage() {
@@ -1230,7 +1168,9 @@
     toast("asking the agent to yield the page");
     answerHandoff(true);
   });
-  handoffDone.addEventListener("click", () => answerHandoff(false));
+  handoffDone.addEventListener("click", () => {
+    if (state.handoff?.requestId) send({ t: "done", requestId: state.handoff.requestId });
+  });
   handoffDecline.addEventListener("click", () => answerHandoff(false));
 
   diagButton.addEventListener("click", (event) => {
@@ -1238,15 +1178,7 @@
     if (devtoolsPop.hidden) showDevtoolsPop();
     else hideDevtoolsPop();
   });
-  devtoolsOpen.addEventListener("click", () => {
-    // The gateway releases the page before answering, so the URL it returns is
-    // already attachable.
-    send({ t: "devtools" });
-    devtoolsOpen.textContent = "Releasing the page\u2026";
-    setTimeout(() => {
-      devtoolsOpen.textContent = "Hand the page to Chrome DevTools";
-    }, 1500);
-  });
+  devtoolsOpen.addEventListener("click", () => send({ t: "devtools" }));
   devtoolsCopy.addEventListener("click", copyDevtoolsUrl);
   document.addEventListener("click", (event) => {
     if (devtoolsPop.hidden) return;
@@ -1276,14 +1208,23 @@
       else onBinary(event.data);
     });
 
-    socket.addEventListener("close", () => {
-      setConnection("offline");
-      // The gateway closes its controller when the last viewer leaves
-      // (README §6.6), so this page is read-only until the reconnect handshake
-      // says otherwise. Input sent in between is dropped, not queued.
+    socket.addEventListener("close", (event) => {
+      state.view = null;
       state.interactive = false;
-      state.takeoverPending = false;
+      state.canNewTab = false;
+      state.pending = false;
+      state.pendingCommands.clear();
+      state.handoff = null;
+      state.devtoolsUrl = "";
+      devtoolsButtonState();
+      renderTabs();
       syncControls();
+      if (event.code === 4001) {
+        setConnection("session ended");
+        showOverlay("MCP session ended; return to the gateway index");
+        return;
+      }
+      setConnection("offline");
       if (!state.paintedPage) showOverlay("disconnected; reconnecting\u2026");
       const delay = Math.min(10000, 300 * Math.pow(1.7, state.attempt++));
       setTimeout(connect, delay);

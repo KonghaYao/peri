@@ -2,12 +2,17 @@ use std::time::Duration;
 
 use axum::routing::get;
 use axum::{Json, Router};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
+use super::navigation::normalize_url;
 use super::*;
+
+/// Owner the controller tests attach as. The shared layer has no default owner:
+/// each process passes its own name, which is what this exercises.
+const TEST_OWNER: &str = "peri-browser-test";
 
 #[test]
 fn viewer_url_replaces_the_endpoint_path() {
@@ -229,22 +234,25 @@ async fn capture_thumbnail_returns_the_base64_payload() {
         let mut socket = tokio_tungstenite::accept_async(stream)
             .await
             .expect("handshake");
-        while let Some(Ok(Message::Text(text))) = socket.next().await {
-            let request: Value = serde_json::from_str(text.as_str()).expect("json");
-            let id = request.get("id").cloned().unwrap_or(Value::Null);
-            let response = json!({"id": id, "result": {"data": "dGh1bWI="}});
-            socket
-                .send(Message::Text(response.to_string().into()))
-                .await
-                .expect("response");
-        }
+        let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+            panic!("应先收到截图命令");
+        };
+        let request: Value = serde_json::from_str(text.as_str()).expect("json");
+        assert_eq!(request["method"], "Page.captureScreenshot");
+        let response = json!({"id": request["id"], "result": {"data": "dGh1bWI="}});
+        socket
+            .send(Message::Text(response.to_string().into()))
+            .await
+            .unwrap();
+        assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
+        socket.flush().await.unwrap();
     });
 
     let data = capture_thumbnail(&format!("ws://{address}"), "t1")
         .await
-        .expect("thumbnail captured");
+        .expect("thumbnail captured and viewer closed");
     assert_eq!(data, "dGh1bWI=");
-    server.abort();
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -301,7 +309,7 @@ async fn a_flood_of_events_does_not_block_a_command_reply() {
         }
     });
 
-    let controller = Controller::connect(&format!("ws://{address}"), "t1")
+    let controller = Controller::connect(&format!("ws://{address}"), "t1", TEST_OWNER)
         .await
         .expect("connect");
     let reply = tokio::time::timeout(
@@ -317,13 +325,13 @@ async fn a_flood_of_events_does_not_block_a_command_reply() {
 #[test]
 fn controller_url_is_the_writable_page_endpoint() {
     assert_eq!(
-        page_controller_url("ws://127.0.0.1:8827", "abc", CONTROLLER_OWNER).unwrap(),
-        "ws://127.0.0.1:8827/devtools/page/abc?owner=peri-browser-gateway"
+        page_controller_url("ws://127.0.0.1:8827", "abc", "peri-browser").unwrap(),
+        "ws://127.0.0.1:8827/devtools/page/abc?owner=peri-browser"
     );
     // The viewer role is the one thing a controller must never carry: Kitesurf
     // would then refuse every `Input.*` command.
     assert!(
-        !page_controller_url("ws://127.0.0.1:8827", "abc", CONTROLLER_OWNER)
+        !page_controller_url("ws://127.0.0.1:8827", "abc", "peri-browser")
             .unwrap()
             .contains("role=viewer")
     );
@@ -339,6 +347,16 @@ fn controller_url_is_the_writable_page_endpoint() {
     let error = page_controller_url("ws://127.0.0.1:8827", "a/b", "owner")
         .expect_err("path injection is rejected");
     assert!(error.to_string().contains("invalid target id"));
+}
+
+#[tokio::test]
+async fn controller_connect_validates_the_owner_before_dialing() {
+    // Nothing listens on port 1, so a connect attempt would fail with a socket
+    // error; the invalid-owner answer proves the owner is checked first.
+    let error = Controller::connect("ws://127.0.0.1:1", "abc", "a b")
+        .await
+        .expect_err("owner with a space is rejected");
+    assert!(error.to_string().contains("invalid controller owner"));
 }
 
 /// Minimal CDP server that records requests and answers like Kitesurf does for
@@ -488,10 +506,16 @@ impl Recorder {
 #[tokio::test]
 async fn input_helpers_send_the_cdp_input_domain() {
     let recorder = start_recorder().await;
-    let controller = Controller::connect(&recorder.url, "t1")
+    let controller = Controller::connect(&recorder.url, "t1", TEST_OWNER)
         .await
         .expect("controller connects");
-    assert!(controller.url().contains("/devtools/page/t1?owner="));
+    assert!(
+        controller
+            .url()
+            .ends_with(&format!("/devtools/page/t1?owner={TEST_OWNER}")),
+        "the caller's owner reaches the CDP endpoint: {}",
+        controller.url()
+    );
     assert_eq!(controller.endpoint(), controller.url());
 
     dispatch_mouse(
@@ -554,7 +578,7 @@ async fn input_helpers_send_the_cdp_input_domain() {
 #[tokio::test]
 async fn a_stale_context_answer_is_retried_once() {
     let recorder = start_recorder_with(true).await;
-    let controller = Controller::connect(&recorder.url, "t1")
+    let controller = Controller::connect(&recorder.url, "t1", TEST_OWNER)
         .await
         .expect("controller connects");
 
@@ -579,7 +603,7 @@ async fn a_stale_context_answer_is_retried_once() {
 #[tokio::test]
 async fn navigation_helpers_read_and_drive_the_page() {
     let recorder = start_recorder().await;
-    let controller = Controller::connect(&recorder.url, "t1")
+    let controller = Controller::connect(&recorder.url, "t1", TEST_OWNER)
         .await
         .expect("controller connects");
 

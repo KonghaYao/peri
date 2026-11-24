@@ -1,0 +1,202 @@
+name: Release Browser
+
+# peri-browser（mcp-packages/peri-browser-gateway）的独立发布通道。
+# 触发：push tag `browser-v*`，与 agent 的 `agent-v*` 发布互不触发。
+#
+# 为什么是单独文件而不是往 release-agent.yml 里加一个 job：
+# - agent 的发布 job 用 `peri-*.tar.gz` / `peri-*.sha256` 通配收集资产，
+#   `peri-browser-<platform>.tar.gz` 也在该通配范围内，混入后会连带跑 sidecar
+#   校验并改变 agent Release 的资产集合；
+# - 两套发布的 tag 前缀、版本语义与平台面都不同，合成一条流水线只会制造
+#   分支条件，而不是共享逻辑。
+#
+# 版本注入：只把 PERI_BROWSER_BUILD_VERSION=<tag 去掉 browser-v 前缀> 导出给 cargo
+# （mcp-packages/peri-browser-gateway/src/lib.rs::version() 优先读取它）。不改写任何
+# Cargo.toml 的版本号，因此 Cargo.lock 原样可用 `--locked` 构建，也不需要
+# `update --workspace`。
+#
+# 平台面与 scripts/install-browser.sh 一致（也就是 kitesurf 官方安装器支持的两个）：
+# macos-aarch64、linux-x86_64。资产名 peri-browser-<platform>.tar.gz，
+# 校验和按 <asset>.sha256 逐资产发布。
+
+on:
+    push:
+        tags:
+            - "browser-v*"
+
+permissions:
+    contents: read
+
+concurrency:
+    group: release-browser-${{ github.ref }}
+    cancel-in-progress: false
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    build:
+        name: Build (${{ matrix.platform }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-latest
+                      target: x86_64-unknown-linux-gnu
+                      platform: linux-x86_64
+                    - os: macos-latest
+                      target: aarch64-apple-darwin
+                      platform: macos-aarch64
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@master
+              with:
+                  toolchain: 1.99.0
+                  targets: ${{ matrix.target }}
+
+            # 注册表缓存与 release-agent 同构：key 取根 Cargo.lock（依赖集的真实输入）。
+            # 本工作流不改 Cargo.toml 版本，依赖集只随 Cargo.lock 变化。
+            - name: Cache cargo registry
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/registry/index
+                      ~/.cargo/registry/cache
+                      ~/.cargo/git/db
+                  key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+                  restore-keys: ${{ runner.os }}-cargo-
+
+            # tag 是版本的唯一来源：不接受 tag 与注入版本不一致的构建。
+            - name: Resolve version from tag
+              id: version
+              shell: bash
+              run: |
+                  tag="${GITHUB_REF_NAME}"
+                  [[ "${tag}" == browser-v* ]] || {
+                      echo "::error::tag must start with browser-v: ${tag}"
+                      exit 1
+                  }
+                  version="${tag#browser-v}"
+                  [[ "${version}" =~ ^[0-9][0-9A-Za-z._-]*$ ]] || {
+                      echo "::error::invalid version in tag: ${version}"
+                      exit 1
+                  }
+                  echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+            - name: Install cross
+              if: runner.os == 'Linux'
+              run: cargo install cross
+
+            - name: Build peri-browser (Linux)
+              if: runner.os == 'Linux'
+              shell: bash
+              env:
+                  PERI_BROWSER_BUILD_VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  # cross 在构建前会先运行一次不带 --config 的 `cargo metadata`；
+                  # 若该调用看不到 patch 配置，会按 crates.io 版本改写 Cargo.lock，
+                  # 随后 `--locked` 构建直接失败。把同一份 patch 配置放进 cargo
+                  # 用户级配置链（容器内随 $CARGO_HOME 挂载继承），让 cross 内部
+                  # 调用与容器内 cargo 都读到同一 patch。
+                  ./scripts/cargo-rmcp-patched.sh --version > /dev/null
+                  cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+                  mkdir -p "$cargo_home"
+                  cp "$(ls -t target/peri-rmcp-patches/*/cargo-config.toml | head -1)" "$cargo_home/config.toml"
+                  ./scripts/cargo-rmcp-patched.sh --cross build --locked -p peri-browser-gateway --release --target ${{ matrix.target }}
+
+            - name: Build peri-browser (non-Linux)
+              if: runner.os != 'Linux'
+              shell: bash
+              env:
+                  PERI_BROWSER_BUILD_VERSION: ${{ steps.version.outputs.version }}
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-browser-gateway --release --target ${{ matrix.target }}
+
+            # 版本注入只在编译期生效（option_env!）。以实际二进制的 --version 输出为准：
+            # 环境变量没被 cross 传进容器、或注入拼写有误，都在发布前失败，而不是发出
+            # 一个自称 crate 版本（0.2.0）的包。
+            - name: Verify injected version
+              shell: bash
+              env:
+                  EXPECTED: peri-browser ${{ steps.version.outputs.version }}
+              run: |
+                  built="$(./target/${{ matrix.target }}/release/peri-browser --version)"
+                  if [[ "${built}" != "${EXPECTED}" ]]; then
+                      echo "::error::binary reports '${built}', expected '${EXPECTED}'"
+                      exit 1
+                  fi
+
+            # 归档根目录内的可执行文件固定叫 peri-browser（与安装脚本的解包契约一致）。
+            - name: Package binary
+              shell: bash
+              run: |
+                  mkdir -p dist/package
+                  cp "target/${{ matrix.target }}/release/peri-browser" dist/package/peri-browser
+                  chmod +x dist/package/peri-browser
+                  tar -czf "dist/peri-browser-${{ matrix.platform }}.tar.gz" -C dist/package peri-browser
+                  rm -rf dist/package
+                  cd dist
+                  if command -v sha256sum >/dev/null 2>&1; then
+                      sha256sum "peri-browser-${{ matrix.platform }}.tar.gz" > "peri-browser-${{ matrix.platform }}.tar.gz.sha256"
+                  else
+                      shasum -a 256 "peri-browser-${{ matrix.platform }}.tar.gz" > "peri-browser-${{ matrix.platform }}.tar.gz.sha256"
+                  fi
+
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: peri-browser-${{ matrix.platform }}
+                  path: dist/
+                  retention-days: 7
+
+    release:
+        name: Create GitHub Release
+        needs: build
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Download all artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: artifacts/
+                  merge-multiple: true
+
+            - name: List artifacts
+              run: ls -lR artifacts/
+
+            # 发布前核对逐资产校验和与归档布局：任一平台缺失、校验和未同步或归档里
+            # 少了 peri-browser 都在此失败，不进入 Release。
+            - name: Verify packages
+              run: |
+                  cd artifacts
+                  sha256sum --check peri-browser-*.sha256
+                  for archive in peri-browser-*.tar.gz; do
+                      tar -tzf "${archive}" | grep -qx "peri-browser" || {
+                          echo "::error::${archive} does not contain a peri-browser binary" >&2
+                          exit 1
+                      }
+                  done
+
+            - name: Generate checksums
+              run: |
+                  cd artifacts
+                  sha256sum peri-browser-*.tar.gz > checksums.txt
+                  cat checksums.txt
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  name: ${{ github.ref_name }}
+                  files: |
+                      artifacts/*
+                  generate_release_notes: true
+                  draft: false
+                  prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

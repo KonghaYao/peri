@@ -1,231 +1,207 @@
-use std::sync::Arc;
-
-use reqwest::Client;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use serde_json::Value;
 
 use super::*;
-use crate::protocol::{AgentState, PageRef};
-use crate::registry::RegistryHandle;
-
-struct TestServer {
-    base: String,
-    sessions: Arc<SessionStore>,
-    task: JoinHandle<()>,
-}
-
-impl TestServer {
-    async fn start() -> Self {
-        let sessions = Arc::new(SessionStore::for_tests(b"secret".to_vec()));
-        let state = AppState {
-            sessions: sessions.clone(),
-            registry: Arc::new(RegistryHandle::new()),
-        };
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let address = listener.local_addr().expect("local address");
-        let app = build_router(state);
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve");
-        });
-        Self {
-            base: format!("http://{address}"),
-            sessions,
-            task,
-        }
-    }
-
-    async fn register(&self, name: &str) -> crate::session::Session {
-        self.sessions
-            .register(
-                "s1",
-                name,
-                "ws://127.0.0.1:8827",
-                vec![PageRef {
-                    target_id: "t1".to_owned(),
-                    url: "about:blank".to_owned(),
-                    title: "New Tab".to_owned(),
-                }],
-                AgentState::Idle,
-            )
-            .await
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-#[tokio::test]
-async fn healthz_reports_the_session_count() {
-    let server = TestServer::start().await;
-    server.register("peri-abc").await;
-
-    let response = Client::new()
-        .get(format!("{}/healthz", server.base))
-        .send()
-        .await
-        .expect("health request");
-    assert_eq!(response.status(), 200);
-    let body: serde_json::Value = response.json().await.expect("json body");
-    assert_eq!(body, serde_json::json!({"ok": true, "sessions": 1}));
-}
-
-#[tokio::test]
-async fn index_lists_sessions_and_escapes_names() {
-    let server = TestServer::start().await;
-    let session = server.register("<script>alert(1)</script>").await;
-
-    let response = Client::new()
-        .get(format!("{}/", server.base))
-        .send()
-        .await
-        .expect("index request");
-    assert_eq!(response.status(), 200);
-    assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
-        Some("text/html; charset=utf-8")
-    );
-
-    let body = response.text().await.expect("html body");
-    assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
-    assert!(!body.contains("<script>alert(1)</script>"));
-    assert!(body.contains(&format!("/s/{}/", session.token)));
-    assert!(body.contains("1 page(s)"));
-    assert!(body.contains("idle"));
-}
-
-#[tokio::test]
-async fn index_without_sessions_says_so() {
-    let server = TestServer::start().await;
-    let body = Client::new()
-        .get(format!("{}/", server.base))
-        .send()
-        .await
-        .expect("index request")
-        .text()
-        .await
-        .expect("html body");
-    assert!(body.contains("no sessions"));
-    assert!(body.contains("Sessions (0)"));
-}
-
-#[tokio::test]
-async fn monitor_page_is_served_with_safe_headers() {
-    let server = TestServer::start().await;
-    let session = server.register("peri-abc").await;
-
-    let response = Client::new()
-        .get(format!("{}/s/{}/", server.base, session.token))
-        .send()
-        .await
-        .expect("monitor request");
-    assert_eq!(response.status(), 200);
-
-    let headers = response.headers();
-    assert_eq!(
-        headers
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
-        Some("text/html; charset=utf-8")
-    );
-    assert_eq!(
-        headers
-            .get("cache-control")
-            .and_then(|value| value.to_str().ok()),
-        Some("no-store")
-    );
-    assert_eq!(
-        headers
-            .get("referrer-policy")
-            .and_then(|value| value.to_str().ok()),
-        Some("no-referrer")
-    );
-    assert_eq!(
-        headers
-            .get("x-frame-options")
-            .and_then(|value| value.to_str().ok()),
-        Some("DENY")
-    );
-
-    let body = response.text().await.expect("html body");
-    assert!(body.contains("peri-browser monitor"));
-    assert!(body.contains("/ws"));
-}
-
-#[tokio::test]
-async fn unknown_tokens_are_404_for_page_and_socket() {
-    let server = TestServer::start().await;
-    server.register("peri-abc").await;
-
-    for path in ["/s/nope/", "/s/nope/ws"] {
-        let response = Client::new()
-            .get(format!("{}{path}", server.base))
-            .send()
-            .await
-            .expect("request");
-        assert_eq!(response.status(), 404, "{path} must be 404");
-    }
-}
-
-#[tokio::test]
-async fn known_socket_path_without_upgrade_is_400() {
-    let server = TestServer::start().await;
-    let session = server.register("peri-abc").await;
-
-    let response = Client::new()
-        .get(format!("{}/s/{}/ws", server.base, session.token))
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(response.status(), 400);
-}
 
 #[test]
 fn escape_html_covers_the_dangerous_characters() {
     assert_eq!(
-        escape_html(r#"<a href="x">'&'"#),
-        "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;"
+        escape_html(r#"<a href="x">'&"#),
+        "&lt;a href=&quot;x&quot;&gt;&#39;&amp;"
     );
     assert_eq!(escape_html("plain"), "plain");
 }
 
-/// The monitor page is the human half of the contract (README §6.3, §6.8).
-/// The asset is compiled in, so these checks guard the shape the gateway's
-/// messages are written against: separate takeover/release actions, a handoff
-/// banner that echoes the gateway's request id, a DevTools menu that hands the
-/// page off by URL, and pointer coordinates left in canvas pixels for the
-/// gateway to map.
 #[test]
-fn monitor_page_exposes_the_human_control_surface() {
+fn authority_must_name_the_actual_listener_and_monitor_origin_must_match() {
+    let bound = "127.0.0.1:10001".parse().unwrap();
+    for (uri, host, origin, allowed) in [
+        ("/", "localhost:10001", Some("http://localhost:10001"), true),
+        ("/s/fixture/ws", "127.0.0.1:10001", None, true),
+        (
+            "/s/fixture/ws",
+            "127.0.0.1:10001",
+            Some("http://127.0.0.1:10001"),
+            true,
+        ),
+        (
+            "/s/fixture/ws",
+            "127.0.0.1:10001",
+            Some("http://localhost:10001"),
+            false,
+        ),
+        ("/s/fixture/ws", "127.0.0.1:10001", Some("null"), false),
+        (
+            "/s/fixture/ws",
+            "127.0.0.1:10001",
+            Some("http://127.0.0.1:10001/"),
+            false,
+        ),
+        ("/", "127.0.0.1:10002", None, false),
+        ("/", "127.0.0.1:10001@remote.invalid", None, false),
+        ("/", "remote.invalid:10001", None, false),
+        (
+            "http://remote.invalid:10001/",
+            "localhost:10001",
+            None,
+            false,
+        ),
+    ] {
+        let mut request = Request::builder()
+            .uri(uri)
+            .header("host", host)
+            .header("x-forwarded-host", "localhost:10001");
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        assert_eq!(
+            allowed_authority(&request.body(axum::body::Body::empty()).unwrap(), bound),
+            allowed,
+            "{uri} {host} {origin:?}"
+        );
+    }
+    let duplicate = Request::builder()
+        .uri("/")
+        .header("host", "localhost:10001")
+        .header("host", "localhost:10001")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert!(!allowed_authority(&duplicate, bound));
+}
+
+#[tokio::test]
+async fn sdk_expiry_revokes_even_a_live_monitor_and_drains_the_transport() -> anyhow::Result<()> {
+    let config = Config::parse_from([], |key| match key {
+        "HOME" => Some("/fixture".to_owned()),
+        "PERI_BROWSER_SESSION_NAME" => Some("<script>fixture</script>".to_owned()),
+        _ => None,
+    })?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let bound = listener.local_addr()?;
+    let base = format!("http://{bound}");
+    let directory = Arc::new(SessionDirectory::new(
+        config.browser,
+        format!("{base}/"),
+        config.secret,
+    ));
+    let stop = CancellationToken::new();
+    let _on_exit = stop.clone().drop_guard();
+    let server = tokio::spawn(serve_with_sessions(
+        listener,
+        bound,
+        directory.clone(),
+        Duration::from_secs(1),
+        stop.clone().cancelled_owned(),
+    ));
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    assert!(http
+        .get(&base)
+        .send()
+        .await?
+        .text()
+        .await?
+        .contains("no sessions"));
+    let response = http.post(format!("{base}/mcp")).header("accept", "application/json, text/event-stream").json(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "fixture", "version": "1"}
+        }
+    })).send().await?.error_for_status()?;
+    let id = response.headers()["mcp-session-id"].to_str()?.to_owned();
+    let body = response.text().await?;
+    assert!(body.contains("peri-browser-mcp"));
+    let index = http
+        .get(&base)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    assert!(index.contains("&lt;script&gt;fixture&lt;/script&gt;"));
+    assert!(!index.contains("<script>fixture</script>"));
+    let (token, core) = directory.list().pop().unwrap();
+    let url = format!("{base}/s/{token}/");
+    let monitor = http.get(&url).send().await?.error_for_status()?;
+    for (name, value) in [
+        ("cache-control", "no-store"),
+        ("referrer-policy", "no-referrer"),
+        ("x-frame-options", "DENY"),
+        ("x-content-type-options", "nosniff"),
+    ] {
+        assert_eq!(monitor.headers()[name], value);
+    }
+    assert_eq!(http.get(format!("{url}ws")).send().await?.status(), 400);
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{bound}/s/{token}/ws")).await?;
+    use futures::StreamExt;
+    let closed = tokio::time::timeout(Duration::from_secs(4), async {
+        while let Some(frame) = socket.next().await {
+            if let tokio_tungstenite::tungstenite::Message::Close(frame) = frame? {
+                return Ok::<_, anyhow::Error>(frame);
+            }
+        }
+        anyhow::bail!("monitor 未收到 session ended")
+    })
+    .await??;
+    assert_eq!(u16::from(closed.unwrap().code), 4001);
+    assert!(
+        core.stop.is_cancelled(),
+        "仅持有 core 引用不能保活或保留准入"
+    );
+    assert_eq!(http.get(&url).send().await?.status(), 404);
+    assert_eq!(
+        http.get(format!("{base}/mcp"))
+            .header("accept", "text/event-stream")
+            .header("mcp-session-id", id)
+            .send()
+            .await?
+            .status(),
+        404
+    );
+    let health: Value = http
+        .get(format!("{base}/healthz"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(health, json!({"ok": true, "sessions": 0}));
+    stop.cancel();
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_stop_reaps_a_router_with_no_sessions() -> anyhow::Result<()> {
+    let config = Config::parse_from([], |key| (key == "HOME").then(|| "/fixture".to_owned()))?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let bound = listener.local_addr()?;
+    serve(listener, config, std::future::ready(())).await?;
+    assert!(tokio::net::TcpStream::connect(bound).await.is_err());
+    Ok(())
+}
+
+#[test]
+fn monitor_asset_retains_dedicated_handoff_devtools_and_ime_controls() {
     for needle in [
         "id=\"takeover\"",
         "id=\"release\"",
         "id=\"handoffDone\"",
         "requestId: state.handoff.requestId",
         "id=\"imeInput\"",
-        // Parked under the cursor to place the IME candidate window, so it must
-        // not take the mouseup that completes the click.
-        "pointer-events: none;\n    width: 1px;",
         "compositionend",
-        // The DevTools button offers the official Chrome frontend; a page
-        // cannot open devtools:// by itself, so the URL is shown to copy.
+        "pointer-events: none;\n    width: 1px;",
         "id=\"devtoolsPop\"",
         "id=\"devtoolsOpen\"",
         "id=\"devtoolsCopy\"",
         "{ t: \"devtools\" }",
+        "case \"state\":",
+        "case \"result\":",
+        "event.code === 4001",
+        "view: state.view",
     ] {
-        assert!(
-            MONITOR_HTML.contains(needle),
-            "monitor.html must contain {needle}"
-        );
+        assert!(MONITOR_HTML.contains(needle), "monitor.html 缺少 {needle}");
     }
-    // The monitor ships no console/network panel: diagnostics stay in the
-    // gateway, and DevTools is reached through the devtools:// URL.
     for needle in [
         "id=\"drawer\"",
         "diagnosticsPage",
@@ -234,18 +210,12 @@ fn monitor_page_exposes_the_human_control_surface() {
         "id=\"networkList\"",
         "id=\"diagCount\"",
         "id=\"drawerResize\"",
+        "requestId: \"current\"",
+        "meta.viewportWidth",
     ] {
         assert!(
             !MONITOR_HTML.contains(needle),
-            "the DevTools menu hands the page off by URL; monitor.html must not contain {needle}"
+            "monitor.html 不应包含 {needle}"
         );
     }
-    assert!(
-        !MONITOR_HTML.contains("requestId: \"current\""),
-        "the handoff answer must echo the gateway's request id"
-    );
-    assert!(
-        !MONITOR_HTML.contains("meta.viewportWidth"),
-        "pointer coordinates stay in canvas pixels; the gateway maps them to CSS"
-    );
 }
