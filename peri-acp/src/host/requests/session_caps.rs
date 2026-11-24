@@ -95,6 +95,7 @@ fn apply_backend_caps(mut caps: PeriCaps, supports_history_window: bool) -> Peri
     // 客户端据此不会发送旧 Host 不认识的 pluginSelections。
     if !caps.user_input_queue {
         caps.user_input_queue_plugin_selections = false;
+        caps.user_input_queue_tool_boundary = false;
     }
     caps
 }
@@ -172,9 +173,11 @@ mod tests {
         let orphan = PeriCaps {
             user_input_queue: false,
             user_input_queue_plugin_selections: true,
+            user_input_queue_tool_boundary: true,
             ..PeriCaps::default()
         };
         let caps = effective_caps_for_backend(orphan, &Map::new(), true, true).unwrap();
+        assert!(!caps.user_input_queue_tool_boundary);
         assert!(
             !caps.user_input_queue_plugin_selections,
             "子能力必须依赖队列能力"
@@ -183,9 +186,11 @@ mod tests {
         let paired = PeriCaps {
             user_input_queue: true,
             user_input_queue_plugin_selections: true,
+            user_input_queue_tool_boundary: true,
             ..PeriCaps::default()
         };
         let caps = effective_caps_for_backend(paired, &Map::new(), true, true).unwrap();
+        assert!(caps.user_input_queue_tool_boundary);
         assert!(
             caps.user_input_queue_plugin_selections,
             "队列可用时原样回显"

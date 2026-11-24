@@ -40,6 +40,10 @@ fn test_user_input_queue_cap_is_opt_in_and_echoed() {
     );
     let enabled = serde_json::json!({"peri.userInputQueue":true});
     let caps = PeriCaps::from_client_meta(enabled.as_object().unwrap());
+    assert!(!caps.user_input_queue_tool_boundary);
+    let tui_meta = PeriCaps::all_enabled().to_agent_meta();
+    assert_eq!(tui_meta["peri.userInputQueue.toolBoundary"], true);
+    assert!(PeriCaps::from_client_meta(&tui_meta).user_input_queue_tool_boundary);
     assert!(caps.user_input_queue, "显式协商后启用");
     assert_eq!(
         caps.to_agent_meta()["peri.userInputQueue"],

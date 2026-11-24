@@ -239,20 +239,30 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
 /// 同一 attempt 内摄取，工具结果在前、steer 输入按 MQ 顺序在后。
 #[tokio::test]
 async fn test_run_react_loop_steer_during_tool_batch_is_received_next_iteration() {
-    assert_tool_boundary_steer(0, false).await;
+    assert_tool_boundary_steer(0, false, false).await;
 }
 
 #[tokio::test]
 async fn test_tool_boundary_steer_behind_two_pages_reaches_next_model_request() {
-    assert_tool_boundary_steer(130, false).await;
+    assert_tool_boundary_steer(130, false, false).await;
 }
 
 #[tokio::test]
 async fn test_tool_boundary_steer_during_request_preparation_reaches_next_model_request() {
-    assert_tool_boundary_steer(0, true).await;
+    assert_tool_boundary_steer(0, true, false).await;
 }
 
-async fn assert_tool_boundary_steer(backlog: usize, dispatch_in_preparation: bool) {
+#[tokio::test]
+async fn test_enter_during_tool_batch_reaches_next_model_request_without_dispatch() {
+    assert_tool_boundary_steer(130, false, true).await;
+}
+
+#[tokio::test]
+async fn test_enter_during_request_preparation_reaches_next_model_request_without_dispatch() {
+    assert_tool_boundary_steer(0, true, true).await;
+}
+
+async fn assert_tool_boundary_steer(backlog: usize, dispatch_in_preparation: bool, enter: bool) {
     use crate::agent::react::{Reasoning, ToolCall};
     use crate::middleware::{capabilities::BeforeModelState, Middleware, MiddlewareChain};
     use crate::session::tool_catalog::SessionToolCatalog;
@@ -415,41 +425,47 @@ async fn assert_tool_boundary_steer(backlog: usize, dispatch_in_preparation: boo
         ));
     }
 
-    let mut input_ids = Vec::new();
-    for text in ["idle-only", "steer-1", "steer-2"] {
-        let input_id = uuid::Uuid::now_v7().to_string();
-        let receipt = mailbox
-            .enqueue(&EnqueueUserInputRequest {
-                session_id: "session".into(),
-                generation: mailbox.generation().into(),
-                command_id: format!("enqueue-{text}"),
-                input_id: input_id.clone(),
-                content: MessageContent::text(text),
-                original_draft: text.into(),
-                plugin_selections: Vec::new(),
-            })
-            .await
-            .expect("the enqueue fixture result is required for this assertion");
-        assert_eq!(receipt.results[0].state, UserInputState::Queued);
-        if text != "idle-only" {
-            input_ids.push(input_id);
-        }
-    }
     if dispatch_in_preparation {
         release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(2), preparing.notified())
             .await
             .expect("the tool result must have passed Receive before dispatch");
     }
-    mailbox
-        .dispatch(&DispatchUserInputsRequest {
+    let mut input_ids = Vec::new();
+    for text in ["idle-only", "steer-1", "steer-2"] {
+        let input_id = uuid::Uuid::now_v7().to_string();
+        let request = EnqueueUserInputRequest {
             session_id: "session".into(),
             generation: mailbox.generation().into(),
-            command_id: "dispatch-during-tool-batch".into(),
-            input_ids: input_ids.clone(),
-        })
-        .await
-        .expect("the dispatch fixture result is required for this assertion");
+            command_id: format!("enqueue-{text}"),
+            input_id: input_id.clone(),
+            content: MessageContent::text(text),
+            original_draft: text.into(),
+            plugin_selections: Vec::new(),
+        };
+        let soft_submit = enter && text != "idle-only";
+        let receipt = if soft_submit {
+            mailbox.enqueue_at_tool_boundary(&request).await
+        } else {
+            mailbox.enqueue(&request).await
+        }
+        .expect("enqueue");
+        assert_eq!(receipt.results[0].state, UserInputState::Queued);
+        if text != "idle-only" {
+            input_ids.push(input_id);
+        }
+    }
+    if !enter {
+        mailbox
+            .dispatch(&DispatchUserInputsRequest {
+                session_id: "session".into(),
+                generation: mailbox.generation().into(),
+                command_id: "dispatch-during-tool-batch".into(),
+                input_ids: input_ids.clone(),
+            })
+            .await
+            .expect("the dispatch fixture result is required for this assertion");
+    }
     assert!(!cancel.is_cancelled(), "工具批次执行中不得取消当前 attempt");
 
     if dispatch_in_preparation {

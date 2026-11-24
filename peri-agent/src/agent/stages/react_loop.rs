@@ -342,6 +342,14 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
 
             // ── Receive（循环入口，也是退出判断点）──
             let receive_out = match run_stage(&context, Stage::Receive, || async {
+                if loop_state.has_tool_calls {
+                    if let Some(mailbox) = &context.session.user_input_mailbox {
+                        mailbox
+                            .select_tool_boundary_inputs()
+                            .await
+                            .map_err(anyhow::Error::from)?;
+                    }
+                }
                 receive::run_receive_with_budget(
                     ReceiveInput {
                         context: context.clone(),

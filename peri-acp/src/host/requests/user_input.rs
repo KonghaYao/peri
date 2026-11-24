@@ -58,7 +58,15 @@ pub(super) async fn handle_prepared_user_input(
     let receipt = match method {
         "session/input/enqueue" => {
             let request: EnqueueUserInputRequest = decode(params)?;
-            mailbox.enqueue(&request).await
+            if cfg
+                .session_manager
+                .get_caps(session_id)
+                .user_input_queue_tool_boundary
+            {
+                mailbox.enqueue_at_tool_boundary(&request).await
+            } else {
+                mailbox.enqueue(&request).await
+            }
         }
         "session/input/dispatch" => {
             let request: DispatchUserInputsRequest = decode(params)?;

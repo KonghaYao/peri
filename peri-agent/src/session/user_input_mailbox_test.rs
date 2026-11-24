@@ -108,6 +108,130 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
     );
 }
 
+#[tokio::test]
+async fn test_enter_during_model_request_is_soft_and_stop_wins_replay() {
+    let (mailbox, inbox) = make_mailbox();
+    let cancel = CancellationToken::new();
+    mailbox
+        .attach_external_attempt(cancel.clone(), false)
+        .await
+        .expect("active turn");
+    let model_request = mailbox.begin_model_request();
+    let input = make_input(&mailbox, "next instructions");
+    let receipt = mailbox
+        .enqueue_at_tool_boundary(&input)
+        .await
+        .expect("submit");
+    assert_eq!(receipt.results[0].state, UserInputState::Queued);
+    assert!(!cancel.is_cancelled());
+    assert!(inbox.queue().selected_input_ids().is_empty());
+    mailbox
+        .enqueue_at_tool_boundary(&input)
+        .await
+        .expect("same command");
+    assert_eq!(mailbox.pending_steer_ids(&[]).len(), 1);
+    drop(model_request);
+    mailbox.stop().await;
+    mailbox
+        .enqueue_at_tool_boundary(&input)
+        .await
+        .expect("replay after stop");
+    assert!(mailbox.pending_steer_ids(&[]).is_empty());
+    assert_eq!(
+        record_state(&mailbox, &input.input_id),
+        Some((UserInputState::Queued, false))
+    );
+}
+
+/// [回归] Enter 所属 attempt 在准入时固定：MQ 入队等待期间换 attempt
+/// 不能把输入改绑到后来者的工具边界。
+#[tokio::test]
+async fn enter_accepted_during_enqueue_does_not_bind_to_a_later_attempt() {
+    let resources = MockSessionResources::new();
+    let (mailbox, _queue) = make_mock_mailbox(Arc::clone(&resources));
+    let first = mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .expect("active turn");
+    let input = make_input(&mailbox, "绑定提交时的 attempt");
+    let input_id = input.input_id.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *resources
+        .mq_enqueue_gate
+        .lock()
+        .expect("the mq enqueue gate fixture must remain unpoisoned") =
+        Some(crate::session::test_resources::mock::ResumeLoadGate {
+            entered: entered_tx,
+            release: release_rx,
+            dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+    let submit_mailbox = Arc::clone(&mailbox);
+    let submit = tokio::spawn(async move { submit_mailbox.enqueue_at_tool_boundary(&input).await });
+    entered_rx.await.expect("enqueue reaches the write gate");
+    mailbox.fail_reserved(&first);
+    let second = mailbox
+        .attach_external_attempt(CancellationToken::new(), true)
+        .await
+        .expect("later attempt");
+    release_tx.send(()).expect("release enqueue write");
+    submit
+        .await
+        .expect("enqueue task")
+        .expect("submit after attempt switch");
+
+    assert_ne!(second, first);
+    assert!(
+        mailbox.pending_steer_ids(&[]).is_empty(),
+        "旧 attempt 的 Enter 不得进入新 attempt 的工具边界"
+    );
+    assert_eq!(
+        record_state(&mailbox, &input_id),
+        Some((UserInputState::Queued, false))
+    );
+}
+
+/// [回归] `NotFound` 不是移交结论：MQ 与历史都没有该 ID 时按 dispatch 口径对账。
+#[tokio::test]
+async fn send_not_found_removes_the_record_without_claiming_handoff() {
+    let resources = MockSessionResources::new();
+    let (mailbox, queue) = make_mock_mailbox(Arc::clone(&resources));
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .expect("active turn");
+    let input = make_input(&mailbox, "发送前已缺失");
+    mailbox.enqueue(&input).await.expect("enqueue");
+    let id = MessageId::from(
+        uuid::Uuid::parse_str(&input.input_id).expect("the input id must stay a uuid"),
+    );
+    assert!(matches!(
+        queue
+            .cancel_user_input(&id)
+            .await
+            .expect("cancel removes the queued row"),
+        MqCancelOutcome::Cancelled(_)
+    ));
+    {
+        let mut state = mailbox.state.lock();
+        crate::session::user_input_mailbox::state::promote_ids(
+            &mut state,
+            std::slice::from_ref(&input.input_id),
+        );
+    }
+
+    mailbox
+        .send_ready_ids(vec![input.input_id.clone()], true)
+        .await;
+
+    assert_eq!(
+        record_state(&mailbox, &input.input_id),
+        None,
+        "MQ 与历史都没有的行必须按对账删除"
+    );
+    assert!(!mailbox.has_handed_off_inputs());
+}
+
 #[test]
 fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
     let (mailbox, inbox) = make_mailbox();
