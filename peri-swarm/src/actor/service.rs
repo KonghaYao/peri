@@ -172,6 +172,23 @@ impl SessionRuntime {
     }
 }
 
+/// Keep the safety net alive when `finish_turn` deferred the close to a steer.
+/// The retry runs detached, so cancelling the prompt future cannot drop the
+/// only closer of the turn.
+fn arm_deferred_close(runtime: &Arc<SessionRuntime>, request_id: &str, outcome: TurnOutcome) {
+    if runtime.log.active_turn().as_deref() != Some(request_id) {
+        return;
+    }
+    let runtime = Arc::clone(runtime);
+    let request_id = request_id.to_owned();
+    tokio::spawn(async move {
+        runtime
+            .log
+            .close_lost_turn(&request_id, outcome, STEER_CONTINUATION_TIMEOUT)
+            .await;
+    });
+}
+
 /// Clears the turn slot on drop so a failed/panicked turn cannot wedge the
 /// session, and so a cancel waiting on this turn is always released.
 struct TurnLease {
@@ -580,7 +597,8 @@ impl AcpSwarmService {
                             message: "steer continuation reported no terminal".to_owned(),
                         },
                     };
-                    runtime.log.finish_turn(&request_id, outcome).await;
+                    runtime.log.finish_turn(&request_id, outcome.clone()).await;
+                    arm_deferred_close(runtime, &request_id, outcome);
                 } else if !steered {
                     // The prompt reply is **not** the turn terminal:
                     // `peri/agent_event_done`, ingested in item order, is.
@@ -606,16 +624,12 @@ impl AcpSwarmService {
                             request_id = %request_id,
                             "agent turn reported no terminal"
                         );
-                        runtime
-                            .log
-                            .finish_turn(
-                                &request_id,
-                                TurnOutcome::Failed {
-                                    code: -32603,
-                                    message: "agent turn reported no terminal".to_owned(),
-                                },
-                            )
-                            .await;
+                        let outcome = TurnOutcome::Failed {
+                            code: -32603,
+                            message: "agent turn reported no terminal".to_owned(),
+                        };
+                        runtime.log.finish_turn(&request_id, outcome.clone()).await;
+                        arm_deferred_close(runtime, &request_id, outcome);
                     }
                 }
                 if reply.pending_tasks > 0 {
@@ -637,10 +651,9 @@ impl AcpSwarmService {
                     ChildError::Local(_) => (-32603, "agent runtime failed locally".to_owned()),
                     ChildError::Closed => (-32603, "agent transport is closed".to_owned()),
                 };
-                runtime
-                    .log
-                    .finish_turn(&request_id, TurnOutcome::Failed { code, message })
-                    .await;
+                let outcome = TurnOutcome::Failed { code, message };
+                runtime.log.finish_turn(&request_id, outcome.clone()).await;
+                arm_deferred_close(runtime, &request_id, outcome);
                 Err(child_error(error))
             }
         }

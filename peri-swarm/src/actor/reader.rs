@@ -306,10 +306,9 @@ struct LogState {
     steer_epoch: u64,
     /// Latest queued run adopted by the open turn.
     continuation: Option<ContinuationRun>,
-    /// Prompt attempt's terminal dropped because a steer had taken the turn
-    /// over. Kept so [`ItemLog::abandon_steer`] can still close the turn with
-    /// the real stop reason when the handoff turns out to have failed.
-    suppressed_terminal: Option<(String, String)>,
+    /// Request ID and full outcome of a terminal deferred by a steer, kept so
+    /// [`ItemLog::abandon_steer`] can close the turn if the handoff fails.
+    suppressed_terminal: Option<(String, TurnOutcome)>,
 }
 
 /// Persisted per-session item log shared by the reader, the gateway and SSE.
@@ -543,17 +542,18 @@ impl ItemLog {
                         tracing::debug!(?request_id, "turn terminal ignored: no active turn");
                         return;
                     };
+                    let steer_epoch = state.steer_epoch;
                     match request_id.as_deref() {
                         // The prompt attempt of the open turn. A steer
                         // cancels it on purpose: the turn continues in the
                         // queued run, so this terminal is not the turn's.
                         Some(running) if running == active => {
-                            if state.steer_epoch == 0 {
-                                Some((active, stop_reason))
+                            if steer_epoch == 0 {
+                                Some((active, stop_reason, steer_epoch))
                             } else {
-                                // Keep it: if the handoff fails, the turn has
-                                // no other terminal to close it with.
-                                state.suppressed_terminal = Some((running.to_owned(), stop_reason));
+                                // Keep the prompt outcome in case the handoff fails.
+                                state.suppressed_terminal =
+                                    Some((running.to_owned(), TurnOutcome::Completed(stop_reason)));
                                 None
                             }
                         }
@@ -562,19 +562,21 @@ impl ItemLog {
                         Some(running) => state
                             .continuation
                             .as_ref()
-                            .filter(|run| {
-                                run.request_id == running && run.epoch == state.steer_epoch
-                            })
-                            .map(|_| (active, stop_reason)),
+                            .filter(|run| run.request_id == running && run.epoch == steer_epoch)
+                            .map(|_| (active, stop_reason, steer_epoch)),
                         // Legacy/terminal frames without a request id only
                         // close a turn that no steer has taken over.
-                        None if state.steer_epoch == 0 => Some((active, stop_reason)),
+                        None if steer_epoch == 0 => Some((active, stop_reason, steer_epoch)),
                         None => None,
                     }
                 };
-                if let Some((active, stop_reason)) = closes {
-                    self.finish_turn(&active, TurnOutcome::Completed(stop_reason))
-                        .await;
+                if let Some((active, stop_reason, steer_epoch)) = closes {
+                    self.finish_turn_observed(
+                        &active,
+                        TurnOutcome::Completed(stop_reason),
+                        Some(steer_epoch),
+                    )
+                    .await;
                 }
             }
             Projected::ExecutionFailed { message } => {
@@ -770,13 +772,34 @@ impl ItemLog {
     /// Idempotent: a terminal for a turn that is no longer active (late
     /// `peri/agent_event_done`, or the prompt response after an early cancel)
     /// is a no-op, so a cancel bound to turn N can never terminate turn N+1.
+    ///
+    /// If a steer takes over during `settle`, keep the full `outcome` for a
+    /// failed handoff instead of closing the turn immediately.
     pub async fn finish_turn(&self, request_id: &str, outcome: TurnOutcome) {
-        {
-            let state = self.state.lock();
+        self.finish_turn_observed(request_id, outcome, None).await;
+    }
+
+    async fn finish_turn_observed(
+        &self,
+        request_id: &str,
+        outcome: TurnOutcome,
+        expected_epoch: Option<u64>,
+    ) {
+        let steer_epoch = {
+            let mut state = self.state.lock();
             if state.active.as_deref() != Some(request_id) {
                 return;
             }
-        }
+            // A higher epoch means a new steer took ownership; a lower one means a
+            // rollback, so the original closer must proceed.
+            if expected_epoch.is_some_and(|epoch| state.steer_epoch > epoch) {
+                state
+                    .suppressed_terminal
+                    .get_or_insert((request_id.to_owned(), outcome));
+                return;
+            }
+            state.steer_epoch
+        };
         // Notifications and JSON-RPC responses leave the host on the same
         // transport but are dispatched to the reader and the request router
         // separately; wait for the reader to go quiet so the completion item
@@ -785,6 +808,14 @@ impl ItemLog {
         let (streams, failure) = {
             let mut state = self.state.lock();
             if state.active.as_deref() != Some(request_id) {
+                return;
+            }
+            // A higher epoch means a new steer took ownership during settle; a lower
+            // one means a rollback, so the original closer must proceed.
+            if state.steer_epoch > steer_epoch {
+                state
+                    .suppressed_terminal
+                    .get_or_insert((request_id.to_owned(), outcome));
                 return;
             }
             state.active = None;
@@ -1088,9 +1119,8 @@ impl ItemLog {
     /// Undo [`Self::note_steer`] after a failed handoff. Skipped when a queued
     /// run was already adopted for that epoch: that run owns the turn now.
     ///
-    /// When the rollback leaves the turn unsteered, the prompt attempt's
-    /// terminal — dropped while the steer owned the turn — closes it, so the
-    /// reply is reported instead of waiting for a terminal that already came.
+    /// If rollback leaves the turn unsteered, replay the retained terminal
+    /// to close it instead of waiting for a terminal that already arrived.
     pub async fn abandon_steer(&self, epoch: u64) {
         let terminal = {
             let mut state = self.state.lock();
@@ -1109,8 +1139,8 @@ impl ItemLog {
                 None
             }
         };
-        if let Some((request_id, stop_reason)) = terminal {
-            self.finish_turn(&request_id, TurnOutcome::Completed(stop_reason))
+        if let Some((request_id, outcome)) = terminal {
+            self.finish_turn_observed(&request_id, outcome, Some(0))
                 .await;
         }
     }
@@ -1136,6 +1166,25 @@ impl ItemLog {
         )
         .await;
         waited.is_ok()
+    }
+
+    /// Close a turn whose run no longer reports a terminal.
+    ///
+    /// [`Self::finish_turn`] defers the close while a steer admitted during
+    /// `settle` owns the turn. Wait up to `within` between retries so a host
+    /// that accepts the steer and then goes silent cannot leave the turn open
+    /// forever.
+    ///
+    /// The caller should run this on its own task: the retries must outlive the
+    /// future that triggered them.
+    pub async fn close_lost_turn(&self, request_id: &str, outcome: TurnOutcome, within: Duration) {
+        self.finish_turn(request_id, outcome.clone()).await;
+        while self.active_turn().as_deref() == Some(request_id) {
+            if self.wait_turn_closed(request_id, within).await {
+                return;
+            }
+            self.finish_turn(request_id, outcome.clone()).await;
+        }
     }
 
     // ── MCP approvals (`requires_action`) ──────────────────────────────────

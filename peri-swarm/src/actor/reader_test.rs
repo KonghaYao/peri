@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -1121,6 +1122,371 @@ async fn a_failed_steer_handoff_closes_the_turn_with_the_prompt_terminal() {
                 if stop_reason == "cancelled"
         )),
         "the reply's own stop reason closes the turn: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_steer_admitted_while_settling_keeps_the_turn_open() {
+    let Fixture {
+        log, mut events, ..
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    let finishing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+                .await;
+        })
+    };
+    // Paused time advances only after ready tasks yield, so `finish_turn` is
+    // already waiting inside `settle`.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(log.note_steer(), 1);
+    finishing.await.expect("finish_turn");
+
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert_eq!(log.steer_epoch(), 1);
+    assert!(!drain(&mut events)
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_terminal_kept_by_a_steer_guard_closes_the_turn_when_the_handoff_fails() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    let finishing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+                .await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(log.note_steer(), 1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    finishing.await.expect("finish_turn");
+
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert_eq!(log.steer_epoch(), 1);
+    assert!(!drain(&mut events)
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))));
+
+    log.abandon_steer(1).await;
+    assert!(
+        log.active_turn().is_none(),
+        "the turn must close after the handoff fails"
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. })
+                if stop_reason == "end_turn"
+        )),
+        "the completion must carry the kept stop reason: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_timeout_close_kept_by_a_steer_guard_closes_when_the_handoff_fails() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    let finishing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.finish_turn(
+                "req-1",
+                TurnOutcome::Failed {
+                    code: -32603,
+                    message: "agent turn reported no terminal".to_owned(),
+                },
+            )
+            .await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(log.note_steer(), 1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    finishing.await.expect("finish_turn");
+
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert_eq!(log.steer_epoch(), 1);
+    assert!(!drain(&mut events)
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Failed { .. }))));
+
+    log.abandon_steer(1).await;
+    assert!(
+        log.active_turn().is_none(),
+        "the turn must close after the handoff fails"
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Failed { error, .. })
+                if error.code == -32603 && error.message == "agent turn reported no terminal"
+        )),
+        "the failure must carry the kept code and message: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    // Replaying Failed sets the session to Failed and emits session.failed as usual.
+    assert_eq!(row.state, SessionState::Failed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_terminal_decided_on_an_older_epoch_is_not_used_to_close() {
+    let Fixture {
+        log, mut events, ..
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    assert_eq!(log.note_steer(), 1);
+
+    log.finish_turn_observed("req-1", TurnOutcome::Completed("end_turn".into()), Some(0))
+        .await;
+
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert!(!drain(&mut events)
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))));
+
+    log.abandon_steer(1).await;
+    assert!(
+        log.active_turn().is_none(),
+        "the turn must close after the handoff fails"
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. })
+                if stop_reason == "end_turn"
+        )),
+        "the completion must carry the stop reason kept for the older epoch: {seen:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_steer_rolled_back_while_settling_lets_the_timeout_close_the_turn() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    assert_eq!(log.note_steer(), 1);
+
+    let finishing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.finish_turn(
+                "req-1",
+                TurnOutcome::Failed {
+                    code: -32603,
+                    message: "agent turn reported no terminal".to_owned(),
+                },
+            )
+            .await;
+        })
+    };
+    // Under the paused clock, `finish_turn` has its snapshot and is settling.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    log.abandon_steer(1).await;
+    assert_eq!(log.steer_epoch(), 0);
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    finishing.await.expect("finish_turn");
+
+    assert!(
+        log.active_turn().is_none(),
+        "the timeout closer must still close the turn after a rollback"
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Failed { error, .. })
+                if error.code == -32603 && error.message == "agent turn reported no terminal"
+        )),
+        "the failure must carry the original code and message: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Failed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stale_decision_epoch_after_rollback_still_closes_the_turn() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+    assert_eq!(log.note_steer(), 1);
+    log.abandon_steer(1).await;
+    assert_eq!(log.steer_epoch(), 0);
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+
+    log.finish_turn_observed("req-1", TurnOutcome::Completed("end_turn".into()), Some(1))
+        .await;
+
+    assert!(
+        log.active_turn().is_none(),
+        "a prior decision must still close the turn after a rollback"
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. })
+                if stop_reason == "end_turn"
+        )),
+        "the completion must carry the previously decided stop reason: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deferred_lost_terminal_close_is_retried() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    let retry_window = Duration::from_secs(5);
+    let closing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.close_lost_turn(
+                "req-1",
+                TurnOutcome::Failed {
+                    code: -32603,
+                    message: "agent turn reported no terminal".to_owned(),
+                },
+                retry_window,
+            )
+            .await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(log.note_steer(), 1);
+    tokio::time::sleep(retry_window + Duration::from_secs(1)).await;
+    closing.await.expect("close_lost_turn");
+
+    assert!(
+        log.active_turn().is_none(),
+        "the retry must close a turn whose continuation never reported"
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Failed { error, .. })
+                if error.code == -32603 && error.message == "agent turn reported no terminal"
+        )),
+        "the failure must keep the original code and message: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Failed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_does_not_close_after_the_continuation_terminal() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    let closing = {
+        let log = Arc::clone(&log);
+        tokio::spawn(async move {
+            log.close_lost_turn(
+                "req-1",
+                TurnOutcome::Failed {
+                    code: -32603,
+                    message: "agent turn reported no terminal".to_owned(),
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(log.note_steer(), 1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert!(!closing.is_finished());
+
+    log.finish_turn("req-1", TurnOutcome::Completed("end_turn".into()))
+        .await;
+    closing.await.expect("close_lost_turn");
+
+    assert!(log.active_turn().is_none());
+    let terminals: Vec<_> = drain(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Turn(
+                terminal @ (TurnEvent::Completed { .. } | TurnEvent::Failed { .. }),
+            ) => Some(terminal),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        terminals,
+        [TurnEvent::completed("req-1", "turn_1", "end_turn")]
     );
     let row = store
         .swarm_get_session("agent-1")

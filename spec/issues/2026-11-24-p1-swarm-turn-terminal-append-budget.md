@@ -67,3 +67,20 @@
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0；lib 298 passed，`actor_runtime` 17、`http_contract` 25、`items_pagination` 13、`mcp_injection` 4、`openai_hosted` 7、`session_resources` 17、`streaming` 15，均 0 failed。
 - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp` → 1532 passed / 1 failed；失败项为既有负载 flake（`host::mcp_v4_wire_fixture::wire_fixture_script_logs_wire_and_answers_tools_call`，单跑通过，见 `docs/verification/peri-swarm-requires-action-2026-11-21.md` 第 13 条），本 PR 未触碰该夹具。
 - `cargo fmt -p peri-swarm -p peri-acp -- --check` 与 `git diff --check` → exit 0。
+- 第 4 轮（基线 `f5a69b1da`）：`finish_turn_observed` 两处守卫只在当前 epoch 严格大于判定值或 `settle` 前快照时拒绝关闭（有新 steer 接管）；相等或因回滚而更低时，原关闭者继续。`suppressed_terminal` 仍保留完整 `TurnOutcome`；重放 `Failed` 时沿用 `SessionState::Failed` 与 `session.failed` 契约。
+  - steer 续跑超时、非 steer 终态超时、prompt 返回错误三处先内联 `await finish_turn`；同一 turn 仍打开才由 `arm_deferred_close` 用 `tokio::spawn` 启动独立的 `close_lost_turn`。任务启动后，取消 `run_turn` future 不会丢掉该关闭者。原 outcome、守卫、分支条件、日志和返回值不变。`close_lost_turn` 仍先尝试关闭，同一 turn 若仍打开则每轮等待至多 300 秒，超时后用原 `TurnOutcome` 重试；这不是累计时长或次数上限。
+  - 加入测试 7 前，原有四条定向测试各为 exit 0、`1 passed; 0 failed; 0 ignored; 303 filtered out`，命令见[验收记录第 4 轮](../../docs/verification/peri-swarm-turn-terminal-2026-11-24.md#评审回合补充2026-11-24第-4-轮)：
+    - `a_steer_admitted_while_settling_keeps_the_turn_open`
+    - `a_terminal_kept_by_a_steer_guard_closes_the_turn_when_the_handoff_fails`
+    - `a_failed_timeout_close_kept_by_a_steer_guard_closes_when_the_handoff_fails`
+    - `a_terminal_decided_on_an_older_epoch_is_not_used_to_close`
+  - 新增两条定向测试，恢复 `>` 后各为 exit 0、`1 passed; 0 failed; 0 ignored; 303 filtered out`：
+    - `a_steer_rolled_back_while_settling_lets_the_timeout_close_the_turn`：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib a_steer_rolled_back_while_settling`。回滚发生在 `settle` 内，超时兜底关闭 turn、发出原错误码 `-32603` 和消息 `agent turn reported no terminal`，会话为 `Failed`。
+    - `a_stale_decision_epoch_after_rollback_still_closes_the_turn`：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm --lib a_stale_decision_epoch_after_rollback`。回滚后判定 epoch `1` 仍能关闭 turn、发出 `Completed`（`end_turn`），会话为 `Idle`。
+  - 剥离重试前的反向验证分别仅将第二、第一次加锁的比较改回 `!=`，测试 5、6 都在「turn 应当关闭」断言处失败（exit 101、`0 passed; 1 failed`）。各自恢复为 `>` 后重跑通过；两次恢复后 `reader.rs` 的 SHA-256 均与临时修改前一致。真实输出见验收记录。较早反向验证中，只保留 `Completed` 能让测试 3 失败；将回滚重放的 `Some(0)` 改为 `None` 未让测试 4 失败，两处当时均已恢复。
+  - 测试 7 `a_deferred_lost_terminal_close_is_retried` 以暂停时钟复现单个 steer 在 `settle` 内接管、随后不回滚且没有 continuation 终态；5 秒等待超时后重试关闭，断言 turn 已关闭、`TurnEvent::Failed` 保留原错误码和消息、会话为 `SessionState::Failed`。剥离重试前，临时移除重试循环时在 turn 已关闭的断言失败（exit 101），恢复后 SHA-256 一致且测试通过；本次未重跑反向验证。
+  - 测试 8 `a_retry_does_not_close_after_the_continuation_terminal` 以暂停时钟复现重试等待期间的合法关闭。等待任务退出后，断言 turn 已关闭，恰好一个终端 `TurnEvent::Completed`（`end_turn`），无 `Failed`，会话为 `SessionState::Idle`。本次测试 8、测试 7 和原六条定向测试各跑一次，均 exit 0，各 `1 passed; 0 failed; 0 ignored; 305 filtered out`。
+  - `./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm` → exit 0；合计 404 passed、0 failed、6 ignored。通过数：lib 306、main 0、`actor_runtime` 17、`http_contract` 25、`items_pagination` 13、`loom_store` 0、`mcp_injection` 4、`openai_hosted` 7、`rivet_actor` 0、`session_resources` 17、`streaming` 15、Doc-tests 0；忽略项为 `actor_runtime` 1、`loom_store` 3、`rivet_actor` 2。各目标 `test result` 行见验收记录。
+  - `./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings`、`./scripts/cargo-rmcp-patched.sh fmt -p peri-swarm -- --check`、`git -C /Users/mino/code/peri/.worktrees/swarm-turn-append-budget diff --check` 均 exit 0。`bash scripts/check-changed.sh` 检查 `-p peri-swarm`，exit 0；内部 metadata 调用转发至同一 Cargo 包装脚本，仓库脚本未修改。
+  - 取消边界（源码判断）：如果首次内联 `finish_turn` 在 `settle` 内被取消，独立任务尚未启动，`TurnLease::drop` 只清理 service 槽；没有其他关闭者时，turn 仍可能留在 `ItemLog.active`。这是已有窗口，不是本次剥离重试引入的。
+  - 未覆盖：两个 steer 并发派发失败且乱序回滚；回滚取出终态后、重放前再次接纳 steer（含 epoch 数值复用）；旧 turn 的迟到回滚撞上新 turn；每轮 `settle` 都有后续 steer 接管。测试 7、8 只覆盖 `ItemLog`；未直接取消服务层 `run_turn`，未用真实宿主和 300 秒计时分别复现三个分支，本次没有端到端复验。
