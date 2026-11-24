@@ -16,8 +16,10 @@ peri-browser - Kitesurf MCP and monitor gateway
 USAGE:
   peri-browser [OPTIONS]
   peri-browser serve [OPTIONS]
-  peri-browser install kitesurf
+  peri-browser start [OPTIONS]
   peri-browser start kitesurf [--port N] [--bind IP:PORT]
+  peri-browser stop [--bind IP:PORT]
+  peri-browser install kitesurf
   peri-browser -V|--version
   peri-browser -h|--help
 
@@ -33,16 +35,22 @@ START OPTIONS:
   --port N                       引擎端口，默认 18971
   --bind IP:PORT                 网关监听地址，默认 127.0.0.1:7391
 
-`install kitesurf` 下载并执行官方安装脚本；`start kitesurf` 在引擎就绪后
-前台运行网关，Ctrl-C 只停止网关。";
+`serve` 前台阻塞运行网关；`start` 用同一套网关参数在后台运行，健康检查
+通过后返回。`start kitesurf` 先确保引擎就绪，再后台启动网关。
+状态：$HOME/.peri/browser/run/gateway-<port>.json
+日志：$HOME/.peri/browser/logs/gateway-<port>.log
+`stop` 只停止 `start` 拉起的网关；`install kitesurf` 下载并执行官方安装脚本。";
 
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Bare invocation or the explicit `serve` alias.
+    /// Bare invocation or the explicit `serve` alias; foreground.
     Serve(Vec<String>),
+    /// `start [OPTIONS]`: background gateway with the serve options.
+    StartGateway(Vec<String>),
     InstallKitesurf,
     StartKitesurf(StartOptions),
+    Stop(StopOptions),
     Help,
     Version,
 }
@@ -54,15 +62,19 @@ pub struct StartOptions {
     pub bind: SocketAddr,
 }
 
+/// Options for `stop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopOptions {
+    pub bind: SocketAddr,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CliError {
     #[error("install requires a target; supported: kitesurf")]
     MissingInstallTarget,
     #[error("unknown install target {0:?}; supported: kitesurf")]
     UnknownInstallTarget(String),
-    #[error("start requires a target; supported: kitesurf")]
-    MissingStartTarget,
-    #[error("unknown start target {0:?}; supported: kitesurf")]
+    #[error("unknown start target {0:?}; supported: kitesurf or gateway options")]
     UnknownStartTarget(String),
     #[error("--port requires a value")]
     MissingPort,
@@ -86,6 +98,7 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         Some((command, rest)) if command == "serve" => Ok(Command::Serve(rest.to_vec())),
         Some((command, rest)) if command == "install" => parse_install(rest),
         Some((command, rest)) if command == "start" => parse_start(rest),
+        Some((command, rest)) if command == "stop" => parse_stop(rest),
         _ => Ok(Command::Serve(args.to_vec())),
     }
 }
@@ -104,12 +117,15 @@ fn parse_install(rest: &[String]) -> Result<Command, CliError> {
 }
 
 fn parse_start(rest: &[String]) -> Result<Command, CliError> {
-    let Some((target, flags)) = rest.split_first() else {
-        return Err(CliError::MissingStartTarget);
-    };
-    if target != "kitesurf" {
-        return Err(CliError::UnknownStartTarget(target.clone()));
+    match rest.split_first() {
+        None => Ok(Command::StartGateway(Vec::new())),
+        Some((target, flags)) if target == "kitesurf" => parse_start_kitesurf(flags),
+        Some((flag, _)) if flag.starts_with('-') => Ok(Command::StartGateway(rest.to_vec())),
+        Some((target, _)) => Err(CliError::UnknownStartTarget(target.clone())),
     }
+}
+
+fn parse_start_kitesurf(flags: &[String]) -> Result<Command, CliError> {
     let mut options = StartOptions {
         port: RECOMMENDED_PORT,
         bind: DEFAULT_BIND
@@ -138,10 +154,8 @@ fn parse_start(rest: &[String]) -> Result<Command, CliError> {
                     .map(str::to_owned)
                     .or_else(|| flags.next().cloned())
                     .ok_or(CliError::MissingBind)?;
-                let bind = value
-                    .parse::<SocketAddr>()
-                    .map_err(|_| CliError::InvalidBind)?;
-                if !is_bind_ip(bind.ip()) || bind.port() == 0 {
+                let bind = parse_loopback_bind(&value)?;
+                if bind.port() == 0 {
                     return Err(CliError::InvalidBind);
                 }
                 options.bind = bind;
@@ -150,6 +164,42 @@ fn parse_start(rest: &[String]) -> Result<Command, CliError> {
         }
     }
     Ok(Command::StartKitesurf(options))
+}
+
+fn parse_stop(rest: &[String]) -> Result<Command, CliError> {
+    let mut bind = DEFAULT_BIND
+        .parse::<SocketAddr>()
+        .map_err(|_| CliError::InvalidBind)?;
+    let mut flags = rest.iter();
+    while let Some(arg) = flags.next() {
+        let (flag, inline) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(key, value)| (key, Some(value)));
+        match flag {
+            "--bind" => {
+                let value = inline
+                    .map(str::to_owned)
+                    .or_else(|| flags.next().cloned())
+                    .ok_or(CliError::MissingBind)?;
+                bind = parse_loopback_bind(&value)?;
+                if bind.port() == 0 {
+                    return Err(CliError::InvalidBind);
+                }
+            }
+            _ => return Err(CliError::UnknownOption(flag.to_owned())),
+        }
+    }
+    Ok(Command::Stop(StopOptions { bind }))
+}
+
+fn parse_loopback_bind(value: &str) -> Result<SocketAddr, CliError> {
+    let bind = value
+        .parse::<SocketAddr>()
+        .map_err(|_| CliError::InvalidBind)?;
+    if !is_bind_ip(bind.ip()) {
+        return Err(CliError::InvalidBind);
+    }
+    Ok(bind)
 }
 
 #[cfg(test)]

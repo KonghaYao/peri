@@ -30,7 +30,9 @@ fn help_covers_every_entry_point() {
     for needle in [
         "serve",
         "install kitesurf",
+        "start [OPTIONS]",
         "start kitesurf",
+        "stop [--bind IP:PORT]",
         "-V|--version",
     ] {
         assert!(USAGE.contains(needle), "help 缺少 {needle}");
@@ -88,6 +90,59 @@ fn start_kitesurf_uses_the_recommended_engine_and_gateway_defaults() {
 }
 
 #[test]
+fn start_without_a_target_runs_the_gateway_in_the_background() {
+    assert_eq!(
+        parse(&args(&["start"])),
+        Ok(Command::StartGateway(Vec::new()))
+    );
+    let flags = args(&[
+        "--bind",
+        "127.0.0.1:18793",
+        "--cdp-url",
+        "http://127.0.0.1:18973",
+    ]);
+    let mut argv = vec!["start".to_owned()];
+    argv.extend(flags.clone());
+    assert_eq!(parse(&argv), Ok(Command::StartGateway(flags)));
+}
+
+#[test]
+fn stop_uses_the_gateway_bind_and_rejects_other_flags() {
+    assert_eq!(
+        parse(&args(&["stop"])),
+        Ok(Command::Stop(StopOptions {
+            bind: "127.0.0.1:7391".parse().unwrap(),
+        }))
+    );
+    assert_eq!(
+        parse(&args(&["stop", "--bind", "[::1]:18793"])),
+        Ok(Command::Stop(StopOptions {
+            bind: "[::1]:18793".parse().unwrap(),
+        }))
+    );
+    assert_eq!(
+        parse(&args(&["stop", "--bind=127.0.0.1:18794"])),
+        Ok(Command::Stop(StopOptions {
+            bind: "127.0.0.1:18794".parse().unwrap(),
+        }))
+    );
+    for (argv, expected) in [
+        (vec!["stop", "--bind"], CliError::MissingBind),
+        (
+            vec!["stop", "--bind", "0.0.0.0:7391"],
+            CliError::InvalidBind,
+        ),
+        (vec!["stop", "--bind", "127.0.0.1:0"], CliError::InvalidBind),
+        (
+            vec!["stop", "--listen", "127.0.0.1:7391"],
+            CliError::UnknownOption("--listen".to_owned()),
+        ),
+    ] {
+        assert_eq!(parse(&args(&argv)), Err(expected), "argv={argv:?}");
+    }
+}
+
+#[test]
 fn start_flags_override_defaults_in_both_spellings() {
     assert_eq!(
         parse(&args(&[
@@ -120,7 +175,6 @@ fn start_flags_override_defaults_in_both_spellings() {
 #[test]
 fn start_rejects_invalid_arguments_before_spawning_anything() {
     let cases = [
-        (vec!["start"], CliError::MissingStartTarget),
         (
             vec!["start", "chrome"],
             CliError::UnknownStartTarget("chrome".to_owned()),
