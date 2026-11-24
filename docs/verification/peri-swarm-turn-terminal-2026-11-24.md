@@ -41,7 +41,7 @@ v1.1.24 容器（hrana over HTTP，project 配额 `max_sessions=16`、
 ```
 bash scripts/check-changed.sh                     → exit 0（-p peri-acp -p peri-swarm -p peri-tui -p peri-wasm）
 ./scripts/cargo-rmcp-patched.sh test --locked -p peri-swarm → exit 0
-  lib 296 passed / 0 failed；actor_runtime 17、http_contract 25、items_pagination 13、
+  lib 298 passed / 0 failed；actor_runtime 17、http_contract 25、items_pagination 13、
   mcp_injection 4、openai_hosted 7、session_resources 17、streaming 15，均 0 failed
   ignored 6 项为基线既有（需运行中的 Loom / Rivet / 本地 ACP 测量）
 cargo fmt -p peri-swarm -p peri-acp -- --check     → exit 0
@@ -86,3 +86,13 @@ CodeRabbit 对 PR head 的评审提出 6 条意见，其中 5 条成立并已修
 schema 变更，不属于本次缺陷修复范围，已在 PR 对应 thread 回复说明并列为遗留项。
 新增回归：`append_items_rejects_a_run_that_conflicts_without_writing_any_row`、
 `append_items_with_a_missing_progress_session_writes_nothing`。
+
+第二轮评审（head `9a9bd6fad`）又提出 2 条，均成立并已修正：
+
+| 位置 | 修正 |
+|---|---|
+| `reader.rs::append_items_tracked` | 单个分组失败后继续尝试后续分组，最后上报首个错误；已提交分组按 item 下标记录 seq，超尺寸行不再连带丢弃整批 |
+| `reader.rs` steer 交接 / `abandon_steer` | steer 期间被抑制的 prompt attempt 终态会保留；交接失败回滚到无 steer 状态时用它关闭 turn，不再等 1800 s 超时后被判失败 |
+
+新增回归：`a_failed_group_does_not_discard_the_rest_of_the_run`、
+`a_failed_steer_handoff_closes_the_turn_with_the_prompt_terminal`；lib 298 passed。

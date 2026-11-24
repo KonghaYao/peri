@@ -722,7 +722,7 @@ impl AcpSwarmService {
             ));
         }
         if let Err(error) = self.dispatch_steer(runtime, submission, &text).await {
-            runtime.log.abandon_steer(epoch);
+            runtime.log.abandon_steer(epoch).await;
             return Err(error);
         }
         let last_item_seq = self.last_seq(logical_id).await?;

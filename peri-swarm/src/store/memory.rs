@@ -21,6 +21,9 @@ pub struct MemorySwarmStore {
     /// that must fail before the row is accepted.
     #[cfg(test)]
     settlement_failures: std::sync::atomic::AtomicUsize,
+    /// Fault injection for unit tests: item batches rejected before any write.
+    #[cfg(test)]
+    append_failures: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +46,13 @@ impl MemorySwarmStore {
     #[cfg(test)]
     pub(crate) fn fail_next_settlement_appends(&self, count: usize) {
         self.settlement_failures
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: make the next `count` item batches fail before any write.
+    #[cfg(test)]
+    pub(crate) fn fail_next_appends(&self, count: usize) {
+        self.append_failures
             .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -264,6 +274,23 @@ impl SwarmStore for MemorySwarmStore {
     ) -> Result<(), StoreError> {
         // Test-only fault injection: one batch counts as one append, and it
         // rejects before any row is written.
+        #[cfg(test)]
+        if self
+            .append_failures
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+        {
+            let remaining = self
+                .append_failures
+                .load(std::sync::atomic::Ordering::SeqCst);
+            self.append_failures
+                .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+            return Err(StoreError::Unavailable(
+                "injected append failure".to_owned(),
+            ));
+        }
+        // Test-only fault injection: a settlement row rejects the batch before
+        // any row is written.
         #[cfg(test)]
         if self
             .settlement_failures

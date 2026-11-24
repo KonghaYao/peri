@@ -1081,3 +1081,102 @@ async fn failed_turn_reports_error_between_turn_and_session_failure() {
     assert_eq!(error.1.param, None);
     assert_eq!(error.1.message, "model refused");
 }
+
+#[tokio::test]
+async fn a_failed_steer_handoff_closes_the_turn_with_the_prompt_terminal() {
+    let Fixture {
+        log,
+        store,
+        mut events,
+    } = fixture().await;
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    // The steer owns the turn, so the cancelled prompt attempt's terminal does
+    // not close it yet.
+    let epoch = log.note_steer();
+    assert_eq!(epoch, 1);
+    log.ingest(
+        "peri/agent_event_done",
+        &json!({ "sessionId": "agent-1", "stopReason": "cancelled", "requestId": "req-1" }),
+    )
+    .await;
+    assert_eq!(log.active_turn().as_deref(), Some("req-1"));
+    assert!(
+        !drain(&mut events)
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Turn(TurnEvent::Completed { .. }))),
+        "a steered attempt's terminal is not the turn's"
+    );
+
+    // The handoff failed: the kept terminal closes the turn instead of leaving
+    // it open until the prompt's terminal timeout.
+    log.abandon_steer(epoch).await;
+    assert!(log.active_turn().is_none(), "the turn must not stay open");
+    let seen = drain(&mut events);
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            StreamEvent::Turn(TurnEvent::Completed { stop_reason, .. })
+                if stop_reason == "cancelled"
+        )),
+        "the reply's own stop reason closes the turn: {seen:?}"
+    );
+    let row = store
+        .swarm_get_session("agent-1")
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.state, SessionState::Idle);
+}
+
+#[tokio::test]
+async fn a_failed_group_does_not_discard_the_rest_of_the_run() {
+    let memory = Arc::new(MemorySwarmStore::new());
+    memory
+        .swarm_upsert_session(session_row())
+        .await
+        .expect("session row");
+    let store: Arc<dyn SwarmStore> = memory.clone();
+    let (channel, mut events) = broadcast::channel(64);
+    let log = Arc::new(ItemLog::new(
+        "agent-1",
+        Arc::clone(&store),
+        channel,
+        Arc::new(AtomicU64::new(0)),
+    ));
+    log.begin_turn("req-1", "turn_1").await.expect("turn");
+    drain(&mut events);
+
+    // The oversized delta sits alone in its durable group; the store rejects
+    // that group, and the small delta behind it must still be persisted.
+    memory.fail_next_appends(1);
+    let oversized = "x".repeat(9_000);
+    log.ingest_batch(vec![
+        (
+            "session/update".to_owned(),
+            chunk_for("msg-big", &oversized),
+        ),
+        ("session/update".to_owned(), chunk_for("msg-small", "tail")),
+    ])
+    .await;
+
+    assert_eq!(
+        store.swarm_last_seq("agent-1").await.expect("seq"),
+        1,
+        "the surviving group keeps the run's sequence"
+    );
+    let stored = store
+        .swarm_items_after("agent-1", 0, 10)
+        .await
+        .expect("rows");
+    let texts: Vec<_> = stored
+        .iter()
+        .filter_map(|row| row.payload.get("text").and_then(|text| text.as_str()))
+        .collect();
+    assert_eq!(
+        texts,
+        ["tail"],
+        "a rejected group must not drop later items: {stored:?}"
+    );
+}

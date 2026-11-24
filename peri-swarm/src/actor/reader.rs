@@ -306,6 +306,10 @@ struct LogState {
     steer_epoch: u64,
     /// Latest queued run adopted by the open turn.
     continuation: Option<ContinuationRun>,
+    /// Prompt attempt's terminal dropped because a steer had taken the turn
+    /// over. Kept so [`ItemLog::abandon_steer`] can still close the turn with
+    /// the real stop reason when the handoff turns out to have failed.
+    suppressed_terminal: Option<(String, String)>,
 }
 
 /// Persisted per-session item log shared by the reader, the gateway and SSE.
@@ -532,7 +536,7 @@ impl ItemLog {
                 stop_reason,
             } => {
                 let closes = {
-                    let state = self.state.lock();
+                    let mut state = self.state.lock();
                     let Some(active) = state.active.clone() else {
                         // A terminal for a turn that is already closed: the
                         // turn was finished early and this one is stranded.
@@ -547,6 +551,9 @@ impl ItemLog {
                             if state.steer_epoch == 0 {
                                 Some((active, stop_reason))
                             } else {
+                                // Keep it: if the handoff fails, the turn has
+                                // no other terminal to close it with.
+                                state.suppressed_terminal = Some((running.to_owned(), stop_reason));
                                 None
                             }
                         }
@@ -664,6 +671,7 @@ impl ItemLog {
             state.streams.clear();
             state.steer_epoch = 0;
             state.continuation = None;
+            state.suppressed_terminal = None;
             state.turn_started_at = Some(started_at);
             (created, added)
         };
@@ -783,6 +791,7 @@ impl ItemLog {
             state.generation = None;
             state.steer_epoch = 0;
             state.continuation = None;
+            state.suppressed_terminal = None;
             (std::mem::take(&mut state.streams), state.failure.take())
         };
         // Approvals owned by this turn can no longer be answered: the prompt
@@ -1078,14 +1087,31 @@ impl ItemLog {
 
     /// Undo [`Self::note_steer`] after a failed handoff. Skipped when a queued
     /// run was already adopted for that epoch: that run owns the turn now.
-    pub fn abandon_steer(&self, epoch: u64) {
-        let mut state = self.state.lock();
-        let adopted = state
-            .continuation
-            .as_ref()
-            .is_some_and(|run| run.epoch >= epoch);
-        if state.steer_epoch == epoch && !adopted {
-            state.steer_epoch = epoch.saturating_sub(1);
+    ///
+    /// When the rollback leaves the turn unsteered, the prompt attempt's
+    /// terminal — dropped while the steer owned the turn — closes it, so the
+    /// reply is reported instead of waiting for a terminal that already came.
+    pub async fn abandon_steer(&self, epoch: u64) {
+        let terminal = {
+            let mut state = self.state.lock();
+            let adopted = state
+                .continuation
+                .as_ref()
+                .is_some_and(|run| run.epoch >= epoch);
+            if state.steer_epoch == epoch && !adopted {
+                state.steer_epoch = epoch.saturating_sub(1);
+                if state.steer_epoch == 0 {
+                    state.suppressed_terminal.take()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some((request_id, stop_reason)) = terminal {
+            self.finish_turn(&request_id, TurnOutcome::Completed(stop_reason))
+                .await;
         }
     }
 
@@ -1831,7 +1857,7 @@ impl ItemLog {
             return;
         }
         let streams = std::mem::take(&mut staged.streams);
-        let mut committed = Vec::new();
+        let mut committed = BTreeMap::new();
         let result = self
             .append_items_tracked(
                 std::mem::take(&mut staged.items),
@@ -1839,16 +1865,16 @@ impl ItemLog {
                 &mut committed,
             )
             .await;
-        // A run may need several durable groups; a later group failing must not
-        // discard the seqs earlier groups already own, or `finish_turn` would
-        // order those messages by key instead of by their persisted position.
+        // A run may need several durable groups; a failed group must not
+        // discard the seqs the others already own, or `finish_turn` would order
+        // those messages by key instead of by their persisted position.
         {
             // Persisted: the first chunk's seq orders this message among the
             // turn's outputs. A later chunk never rewrites it.
             let mut state = self.state.lock();
             for (index, key) in streams {
                 if let (Some(seq), Some(stream)) =
-                    (committed.get(index), state.streams.get_mut(&key))
+                    (committed.get(&index), state.streams.get_mut(&key))
                 {
                     stream.first_seq.get_or_insert(*seq);
                 }
@@ -1901,23 +1927,25 @@ impl ItemLog {
         items: Vec<(ProjectedItem, Option<String>)>,
         progress: ProgressWrite,
     ) -> Result<Vec<u64>, SwarmError> {
-        let mut committed = Vec::new();
+        let mut committed = BTreeMap::new();
         self.append_items_tracked(items, progress, &mut committed)
             .await?;
-        Ok(committed)
+        Ok(committed.into_values().collect())
     }
 
-    /// [`Self::append_items`], recording each group's seqs in `committed`
-    /// before the next group is attempted.
+    /// [`Self::append_items`], recording each durable item's seq in
+    /// `committed` under its index in `items`.
     ///
-    /// A failed group leaves `committed` holding everything the earlier groups
-    /// already made durable, so stream order never regresses to key order for
-    /// items that own a real seq.
+    /// Every group is attempted even when an earlier one fails. An item whose
+    /// payload exceeds the store budget sits alone in its group (see
+    /// [`Self::batch_end`]), so one rejected row must not discard the rest of
+    /// the run; the first failure is reported once the remaining groups have
+    /// been tried.
     async fn append_items_tracked(
         &self,
         items: Vec<(ProjectedItem, Option<String>)>,
         progress: ProgressWrite,
-        committed: &mut Vec<u64>,
+        committed: &mut BTreeMap<usize, u64>,
     ) -> Result<(), SwarmError> {
         if items.is_empty() {
             return Ok(());
@@ -1938,6 +1966,7 @@ impl ItemLog {
                 }
             })
             .collect();
+        let mut first_error = None;
         let mut start = 0;
         while start < prepared.len() {
             let end = Self::batch_end(&prepared, start);
@@ -1955,10 +1984,20 @@ impl ItemLog {
                 largest_row_bytes = largest,
                 "append_items group"
             );
-            committed.extend(self.append_group(group, &created_at, progress).await?);
+            match self.append_group(group, &created_at, progress).await {
+                Ok(seqs) => committed.extend(
+                    seqs.into_iter()
+                        .enumerate()
+                        .map(|(offset, seq)| (start + offset, seq)),
+                ),
+                Err(error) => first_error = first_error.or(Some(error)),
+            }
             start = end;
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// End index of the group that starts at `start`.
