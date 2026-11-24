@@ -11,10 +11,10 @@
 
 ```
 peri-controller/src/langfuse/tracer/    ① 观测对象生命周期 + IngestionEvent 构造
-        │  (generation.rs / stages.rs / registry.rs / tool_batch.rs / usage.rs / sampling.rs)
+        │  (generation.rs / llm_events.rs / input_snapshot.rs / stages.rs / registry.rs / usage.rs / sampling_decider.rs)
         ▼
 langfuse-client/src/                    ② 事件批处理 + OTLP 转换 + 上报
-        │  (batcher.rs 攒批 → types/conversion.rs 转 OTLP → client.rs POST)
+        │  (batcher.rs 攒批 → types/conversion.rs 转 OTLP → client_send.rs POST)
         ▼
 POST {LANGFUSE_BASE_URL}/api/public/otel/v1/traces
         │  header: x-langfuse-ingestion-version: 4
@@ -32,9 +32,9 @@ peri-fuse（本地服务 localhost:23332）   ③ 接收端：Langfuse OTel attr
 |------|------|
 | 观测生命周期 | `peri-controller/src/langfuse/tracer/`（各 `*_test.rs` 为行为契约） |
 | OTLP 转换 | `langfuse-client/src/types/conversion.rs`（`ingestion_events_to_otel`） |
-| 上报端点 | `langfuse-client/src/client.rs`（`POST {base_url}/api/public/otel/v1/traces`） |
+| 上报端点 | `langfuse-client/src/client_send.rs`（`POST {base_url}/api/public/otel/v1/traces`） |
 | 服务端 attribute 映射 | peri-fuse 服务端的 `LangfuseOtelSpanAttributes`（与官方 Langfuse 一致） |
-| 配置 | 项目根 `.env`：`LANGFUSE_BASE_URL`（**注意不是** `LANGFUSE_HOST`，两者同名键易混淆） |
+| 配置 | Peri 读取 `LANGFUSE_BASE_URL`（不是 `LANGFUSE_HOST`）；`./dev.sh` 可加载仓库根 `.env`，其他启动方式须确保所选配置来源提供该值 |
 | 查询工具 | `.claude/skills/langfuse/`（trace-search / daily-report / analyze / session-analyze 等脚本 + `bunx langfuse-cli`） |
 | 历史问题 | `spec/global/problems.md`（完整记录通过 Git 检索） |
 
@@ -50,7 +50,7 @@ SHA-256 映射；父子关系共用 span ID 映射。类型以观测字段及 na
 | 类型 | 名称示例 | 必填字段 | 可选字段 | 设计要点 |
 |------|----------|----------|----------|----------|
 | TRACE | `turn <uuid>` | id、start_time、session_id | input、output、metadata、tags | 每个 turn 一条 |
-| GENERATION | `step-N` | id(`gen_*`)、input、output、model、usage_details、parent | metadata（retry/request_id/completion_start_source/first_reasoning_ms/first_visible_text_ms）、completion_start_time | **input 必须为完整请求体**（messages+tools 或 raw body）；parent = 该 agent 活跃 stage span。completion_start_time 只取首个 reasoning 分片（metadata source=`reasoning_chunk`）；无 reasoning 时保持 null 且 source=`unavailable`；首个可见文本无独立事件，`first_visible_text_ms` 恒为 null（不可测量，不代表 0） |
+| GENERATION | `step-N` | id(`gen_*`)、input、output、model、usage_details、parent | metadata（retry/request_id/completion_start_source/first_reasoning_ms/first_visible_text_ms）、completion_start_time | **input 优先使用实际 provider 请求体**；未收到实际请求体时可用 `messages + tools` 初始快照。快照冻结被拒时不伪造 input，metadata 标记 `input_snapshot_rejected=true`；parent = 该 agent 活跃 stage span。completion_start_time 只取首个 reasoning 分片（metadata source=`reasoning_chunk`）；无 reasoning 时保持 null 且 source=`unavailable`；首个可见文本无独立事件，`first_visible_text_ms` 恒为 null（不可测量，不代表 0） |
 | SPAN(stage) | `stage-receive/reason/act/compact/end` | id(`span_*`)、parent | input | 仅 receive 阶段 input 携带 MQ 计数与 `queue_wait_ms`（Receive 起点 − 本批最早 `enqueued_at`；无可用时间时为 null）；其余阶段无 input 为**设计行为**，非缺陷 |
 | SPAN(turn) | `turn <uuid>` | id、parent | input | turn 根 span |
 | SPAN(tool-batch) | `batch_*` | id、input（批量摘要）、output | — | 工具批处理聚合 |
@@ -75,7 +75,7 @@ SHA-256 映射；父子关系共用 span ID 映射。类型以观测字段及 na
 ### 3.1 落库完整性统计（telemetry.db 直查）
 
 ```bash
-# 类型 × input 完整率（异常判据：GENERATION/TOOL/AGENT 完整率应接近 100%）
+# 类型 × input 完整率；GENERATION 缺失时同时检查 input_snapshot_rejected
 sqlite3 ~/.peri-fuse/telemetry.db \
   "SELECT type, COUNT(*) as total,
           SUM(CASE WHEN input IS NULL OR input='' THEN 0 ELSE 1 END) as has_input,
@@ -114,7 +114,9 @@ sqlite3 ~/.peri-fuse/telemetry.db \
 
 ```bash
 # 服务存活（注意用 LANGFUSE_BASE_URL，不是 LANGFUSE_HOST）
-curl -s http://localhost:23332/api/public/health        # 期望 {"status":"OK"}
+# dev.sh 只在自己的进程内加载 .env；当前 shell 未设置时用文档中的本地服务地址
+export LANGFUSE_BASE_URL="${LANGFUSE_BASE_URL:-http://localhost:23332}"
+curl -fsS "${LANGFUSE_BASE_URL%/}/api/public/health"     # 期望 {"status":"OK"}
 
 # 认证 401 排查：key 是否在 peri-fuse 注册表里
 sqlite3 ~/.peri-fuse/langfuse.db "SELECT id, public_key, project_id FROM api_keys;"
@@ -130,8 +132,9 @@ sqlite3 ~/.peri-fuse/langfuse.db "SELECT id, public_key, project_id FROM api_key
 
 ```bash
 bun .claude/skills/langfuse/scripts/trace-search.ts --days 1 --json        # 最近 trace
-bun .claude/skills/langfuse/scripts/trace-tokens.ts <traceId>              # token 流 + 缓存
-bun .claude/skills/langfuse/scripts/trace-messages.ts <traceId>            # 消息组成
+TRACE_ID='REPLACE_WITH_TRACE_ID'
+bun .claude/skills/langfuse/scripts/trace-tokens.ts "$TRACE_ID"           # token 流 + 缓存
+bun .claude/skills/langfuse/scripts/trace-messages.ts "$TRACE_ID"         # 消息组成
 bun .claude/skills/langfuse/scripts/analyze.ts 20 --days 7 --report        # 全维度扫描
 bunx langfuse-cli api traces list --limit 10 --json                        # CLI 直查
 ```
@@ -151,7 +154,7 @@ bunx langfuse-cli api traces list --limit 10 --json                        # CLI
 | 7 | 并行 subagent 下 step 顺序乱/span 挂错 | `analyze.ts --tools` + trace 详情 | 并行 agent 的 generation 应各归其 AGENT obs | 已按 agent 隔离修复 |
 | 8 | token 计费异常（input cost 为负等） | `daily-report.ts --days 7` | cost/token 比例异常 | 脚本侧已修 |
 | 9 | 上报偶发丢失（batcher 慢 flush 丢弃） | 对拍 trace 数量：UI 数 vs telemetry.db 数 | 差异突增 | batcher 慢 flush 会丢事件；查 Git 历史 |
-| 10 | 401 / 连接失败 | §3.2 | 区分「key 未注册」vs「服务未启动」vs「host 配错」 | `.env` 用 `LANGFUSE_BASE_URL`；`LANGFUSE_HOST` 为空会导致 curl/脚本拿空 host |
+| 10 | 401 / 连接失败 | §3.2 | 区分「key 未注册」vs「服务未启动」vs「host 配错」 | `.env` 用 `LANGFUSE_BASE_URL`；仅设置 `LANGFUSE_HOST` 不会给 Peri 配置上报地址 |
 | 11 | **compact 结构异常** | 类型统计按 name 分组 | micro/full 应能通过 name 区分；input 应含 before 状态、output 应含 token 指标 | 此前 name 统一 `compact`（micro 不可区分）、input 缺失、estimated_tokens_*/cache_hit_rate_before 被 bridge 丢弃；需重启生效 |
 
 ### 排查流程（固定套路）
@@ -159,14 +162,14 @@ bunx langfuse-cli api traces list --limit 10 --json                        # CLI
 1. **先判数据是否落库**：telemetry.db 直查（§3.1）→ 区分「上传侧没发」还是「服务端没存」
 2. **再判上传侧**：看 `langfuse-client/src/types/conversion.rs` 转换后 OTLP payload 是否含对应 attribute；必要时在 tracer 事件构造处打点
 3. **最后对拍历史**：按天断点 + `git log --date=short -S '关键字段' -- <tracer 路径>` 定位引入/修复 commit
-4. 修复后验证：新数据落库正常 + `cargo test -p peri-controller --lib langfuse` 契约测试通过
+4. 修复后验证：新数据落库正常 + `./scripts/cargo-rmcp-patched.sh test --locked -p peri-controller --lib langfuse` 契约测试通过
 
 ---
 
 ## 五、易混淆点备忘
 
-- `.env` 键名：`LANGFUSE_BASE_URL`（生效）vs `LANGFUSE_HOST`（skill 文档示例键，脚本两者都读，curl 只认后者）
-- `input: None` 不总是 bug：ErrorTurn 合成 span、非 receive 阶段 stage span 无 input 是设计；GENERATION/TOOL/AGENT 无 input 才是异常
-- generation 的 `input_json` 在 `tracer/generation.rs` 计算（raw_body 优先，回退 messages_json），**必须**被事件构造消费，否则是 dead value（常见故障形态）
+- Peri 使用 `LANGFUSE_BASE_URL`；仓内 Langfuse skill 的 Bun 查询脚本优先使用 `LANGFUSE_HOST`，再回退到 `LANGFUSE_BASE_URL`。curl 不自动读取这些名字，由示例的 shell 展开决定。
+- ErrorTurn 合成 span、非 receive 阶段 stage span 无 input 是设计。GENERATION 缺 input 时先核对 `input_snapshot_rejected`；无拒收标记，或 TOOL/AGENT 出现不预期的缺失，再按异常查。
+- `tracer/llm_events.rs` 冻结输入，`tracer/generation.rs` 跟踪 `GenerationInput`，`tracer/input_snapshot.rs` 定义快照及拒收标记。实际 provider 请求体换入时释放初始快照；换入被拒也不能用旧快照冒充实际请求。
 - 服务端数据在 `~/.peri-fuse/telemetry.db`，`langfuse.db` 只存认证 key；两者都别当临时文件删
 - peri-fuse 是 npx 缓存里的 npm 包，重启方式：`npx peri-fuse` 相关命令（包内 `dist/index.js` CLI）

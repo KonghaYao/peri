@@ -2,10 +2,10 @@
 
 This example demonstrates how a Peri project directory can take precedence over global defaults and define a minimal agent harness.
 
-- `.peri/settings.json` enables only the custom system prompt, project-defined subagents, MCP, and ToolSearch.
+- `.peri/settings.json` enables the custom system prompt, project-defined subagents, MCP, and ToolSearch, and disables the features marked below. It is not an allowlist for every Peri capability.
 - `.peri/meta/*.md` replaces the base prompt, language, persona, and subagent sections.
 - `.claude/agents/minimal-helper.md` defines a project-local subagent with no tool access.
-- `.mcp.json` registers only this project's `minimal-mcpp` server.
+- `.mcp.json` declares one project server, `minimal-mcpp`. It does not clear MCP servers from other configuration scopes.
 
 Configuration and prompt content are frozen when a session is created. Start a new session after changing them.
 
@@ -17,7 +17,7 @@ The Boolean value has different meanings depending on the field category:
 
 - **Prompt section:** `true` replaces the built-in section with `.peri/meta/<field>.md`; `false` keeps the built-in section.
 - **Middleware:** `true` keeps the middleware enabled; `false` removes the middleware, including its tools, hooks, and prompt contributions. Keys here are chain slot names (the value returned by the middleware's `name()`) — except the builtin instance policy keys listed below.
-- **Builtin instance policy key:** `false` closes that built-in MCP instance's tool face for this session only. The instance, its handler, its state (cron scheduler and its 1s tick) and its readiness are **kept** — a policy close is not a physical shutdown.
+- **Builtin capability policy key:** `false` hides that capability's tools from this session without shutting down the built-in server or its background state.
 - **Policy:** the value directly enables or disables the named policy.
 
 ### Prompt section overrides
@@ -37,21 +37,14 @@ The Boolean value has different meanings depending on the field category:
 
 ### Middleware and builtin instance controls
 
-**Note**: `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` are no longer middleware
-slots, and `WorkspaceMiddleware` is the fourth key of the same kind (it replaces the removed
-`FilesystemMiddleware` / `TerminalMiddleware` slot names). Web, artifact, cron and file/shell
-capabilities are provided by the built-in in-process MCP instances
-(`web` / `artifact` / `cron` / `workspace`); these four keys are their close keys
-(`BUILTIN_INSTANCE_POLICY_KEYS`, derived from the capability table's
-`legacy_policy_key`), so the rows below stay valid, and old configs using the three
-former slot names are still recognized. These keys are a migration-period alias: the
-v5 switch identity is the capability name (`web` / `artifact` / `cron` / ...), and both
-forms map to the same capability.
+The default v5 deployment serves the built-in capabilities through one in-process MCP server,
+`peri`. `WebMiddleware`, `ArtifactMiddleware`, `CronMiddleware` and `WorkspaceMiddleware`
+in this example are compatibility keys under `config.meta_harness`, not chain slots. They
+close the corresponding capability for this session.
 
-`cron` tools are always **deferred** (`mcp__cron__cron_register` /
-`mcp__cron__cron_list` / `mcp__cron__cron_remove`): the model reaches them
-through `ToolSearch` → `ToolInvoke`, so closing that instance only shrinks the
-deferred catalog and its search results.
+When enabled, direct tools keep their original model-facing names. The `cron` tools are
+deferred (`mcp__peri__cron_register`, `mcp__peri__cron_list`, `mcp__peri__cron_remove`).
+Closing `cron` removes them from discovery and invocation without stopping the scheduler.
 
 | Field | Current value | Meaning |
 | --- | ---: | --- |
@@ -64,11 +57,11 @@ deferred catalog and its search results.
 | `SkillPreloadMiddleware` | `false` | Disables automatic preloading of selected skills into the session. |
 | `AtMentionMiddleware` | `false` | Disables `@`-mention processing and related context injection. |
 | `ImageMiddleware` | `false` | Disables image attachment handling and image-related prompt contributions. |
-| `WorkspaceMiddleware` | `false` | Closes the built-in `workspace` instance's tool face (`mcp__workspace__Read` / `mcp__workspace__Write` / `mcp__workspace__Edit` / `mcp__workspace__Glob` / `mcp__workspace__Grep` / `mcp__workspace__folder_operations` / `mcp__workspace__Bash`, direct tools). These seven are the only filesystem and shell tools on the chain; external MCP servers are not affected by this key. |
+| `WorkspaceMiddleware` | `false` | Closes the built-in `workspace` tool face (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `folder_operations`, `Bash`). It does not affect independently configured external MCP servers. |
 | `GitAttributionMiddleware` | `false` | Disables automatic Git attribution instructions and behavior. |
-| `WebMiddleware` | `false` | Closes the built-in `web` instance's tool face (`mcp__web__WebSearch` / `mcp__web__WebFetch`, direct tools). |
+| `WebMiddleware` | `false` | Closes the built-in `web` tool face (`WebSearch` and `WebFetch`). |
 | `TodoMiddleware` | `false` | Disables the todo-list tool and its task-tracking behavior. |
-| `CronMiddleware` | `false` | Closes the built-in `cron` instance's tool face (`mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove`, deferred). The instance, its scheduler and its 1s tick keep running. |
+| `CronMiddleware` | `false` | Closes the built-in `cron` tool face (deferred tools); the scheduler keeps running. |
 | `HookMiddleware` | `false` | Disables configured lifecycle hooks. |
 | `PermissionMiddleware` | `false` | Disables tool approval hooks and removes the permission/HITL approval prompt section. |
 | `HumanInTheLoopMiddleware` | `false` | Disables the `AskUserQuestion` tool and its user-question guidance. This is separate from tool approval. |
@@ -76,7 +69,7 @@ deferred catalog and its search results.
 | `McpMiddleware` | `true` | Enables MCP server connections, resources, and MCP-provided tools. Project MCP servers are configured in `.mcp.json`. |
 | `WorkflowMiddleware` | `false` | Disables workflow registration and workflow execution tools. |
 | `ToolSearch` | `true` | Enables `ToolSearch` and `ToolInvoke`, allowing deferred tools such as MCP tools to be discovered and invoked on demand. |
-| `ArtifactMiddleware` | `false` | Closes the built-in `artifact` instance's tool face (`mcp__artifact__artifact`, a direct tool). |
+| `ArtifactMiddleware` | `false` | Closes the built-in `artifact` tool face (`artifact`, a direct tool). |
 | `GoalMiddleware` | `false` | Disables goal-management prompt content and tools. |
 
 ### Policy controls
@@ -85,14 +78,17 @@ deferred catalog and its search results.
 | --- | ---: | --- |
 | `BuiltInSubagents` | `false` | Prevents fallback to Peri's compile-time built-in subagent definitions. Only project-defined agents, such as `.claude/agents/minimal-helper.md`, are available. |
 
-## Install dependencies
+## Try the example
+
+From the repository root, enter the example directory. Use [Bun](https://bun.sh/) and an
+installed Peri with a configured model provider.
 
 ```bash
+cd examples/minimal
 bun install
+peri
 ```
 
-## Run the MCP server
-
-```bash
-bun run src/index.ts
-```
+Ask Peri to find the `minimal-mcpp` tool `echo` and pass `{"text":"hello"}`. Peri starts
+`bun run src/index.ts` as a stdio subprocess through the local `.mcp.json`. You do not
+need a second terminal or an HTTP server.

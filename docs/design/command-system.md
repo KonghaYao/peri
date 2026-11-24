@@ -42,7 +42,7 @@ graph TB
     FEED -->|执行结果 / 命令列表变更| PROJ
 ```
 
-## 权威词法：统一字符串结构
+## 权威词法：统一字符串结构（目标）
 
 所有来源（内置 / 面板 / MCP skill / skill tool / 插件 / 用户自定义）统一为一种结构，`mcp__` 双下划线形态废弃：
 
@@ -55,7 +55,7 @@ CommandName := 裸名                              // 第一等级域（core / u
 - **层数上限：2 段冒号（3 段词）**，最右冒号切分（`rsplit_once(':')`，与 `mcp_skills.rs` / `skill_preload.rs` 先例一致）。
 - **第一等级**（可裸名 / 1 层显式）：`core`（内置命令 + 本地 skill）、`ui`（TUI 面板）。本地 skill 归第一层级——`/skill-name` 短输入体验保留，与内置命令同域同权。
 - **第二等级**（外部来源，必须完整 2 层形态）：`mcp` / `plugin` / `user`。namespace 显式标记不可省略——`mcp:demo:hello`（demo=server 名）、`plugin:ecc:deploy`（ecc=插件名）；`mcp:hello` 形态对外部来源非法。
-- **输入严格，不宽松**：执行解析仅精确匹配（name / alias / 完整全名）；无域省略简写（`demo:hello` 废弃）、无唯一前缀自动补全（`/rew` 不解析为 `/rewind`）、无唯一后缀 fallback。**模糊只发生在搜索层**：UI 补全（SlashCompletion fuzzy 过滤）负责提示与补全，用户选中后以完整形式提交。
+- **输入严格，不宽松**：执行解析仅精确匹配（name / alias / 完整全名）；目标词法不接受省略域名的第二等级简写（例如 `demo:hello`）；这不改变当前普通外部 MCP skill 的 `/{server}:{skill}` 入口、无唯一前缀自动补全（`/rew` 不解析为 `/rewind`）、无唯一后缀 fallback。**模糊只发生在搜索层**：UI 补全（SlashCompletion fuzzy 过滤）负责提示与补全，用户选中后以完整形式提交。
 - **语义对应**：domain = 来源域（provenance 首段），namespace = 来源域内标识（server / 插件名），name = 命令名。词法结构直接携带路由信息。
 - **唯一键 = 全名小写**：重名在词法层消除，"本地优先按名去重"退化为键唯一性检查。
 - **namespace 首段由 provenance 声明，不可伪造**：插件只能注册 `plugin:*`，MCP server 只能注册 `mcp:*`。

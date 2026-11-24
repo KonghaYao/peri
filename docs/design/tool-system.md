@@ -82,7 +82,7 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 | Direct | 当前 session 中直接可见 | 高频工具及桥接元工具 | session-local 工具视图中 `is_direct() = true` |
 | Deferred | 不直接可见 | 低频或动态注册工具 | session-local 工具视图中 `is_direct() = false`，进入 ToolSearch 索引 |
 
-`ToolSearch` 与 `ToolInvoke` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则是 builtin `artifact` MCP 实例（`mcp-packages/artifact/src/{server,tool}.rs`）的**工具核心**，模型面名字为原始名 `artifact`，其 Direct 身份来自注册表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。宿主侧实例注册、context 与 dispatch 仍由 `peri-middlewares/src/mcp/builtin/` 持有，插件路径总表见 [MCP packages 代码索引](../code-index/mcp-packages.md)。
+`ToolSearch` 与 `ToolInvoke` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则是 builtin `peri` 出口上的 `artifact` 能力（旧回滚模式下为独立实例）（`mcp-packages/artifact/src/{server,tool}.rs`）的**工具核心**，模型面名字为原始名 `artifact`，其 Direct 身份来自注册表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。宿主侧实例注册、context 与 dispatch 仍由 `peri-middlewares/src/mcp/builtin/` 持有，插件路径总表见 [MCP packages 代码索引](../code-index/mcp-packages.md)。
 
 工具集合先由 middleware 收集，再应用 disabled middleware 与 agent allowlist/disallowlist 过滤，形成每 turn 的 session-local 工具视图。ToolSearch 的 direct 能力说明、deferred 索引和最终 LLM tools 都必须从该视图派生，不能从静态名称清单推断。
 
@@ -108,7 +108,7 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 Meta 工具（ToolSearch / ToolInvoke）是 LLM 发现和调用 Deferred 工具的通道。
 
 - **ToolSearch**：按关键词搜索可用 Deferred 工具，返回匹配列表。LLM 据此判断是否有合适工具再决定调用。
-- **ToolInvoke**：按 `{name, arguments}` 直接执行 Deferred 工具。LLM 先搜索、再执行——两步走而非一步到位。旧名 `SearchExtraTools` / `ExecuteExtraTool`（及其 `tool_name` / `params` 字段）只作为解析别名保留，不再出现在模型面。
+- **ToolInvoke**：按 `{name, arguments}` 直接执行 Deferred 工具。LLM 先搜索、再执行——两步走而非一步到位。搜索和代理都不得扩大权限；授权使用当前工具视图与可信注册来源，外部 MCP 同名工具不继承内置权限。旧名 `SearchExtraTools` / `ExecuteExtraTool`（及其 `tool_name` / `params` 字段）只作为解析别名保留，不再出现在模型面。
 - **搜索范围**：Deferred 工具来自多个来源——builtin `cron` 实例（`mcp__cron__*`）、MCP 外部服务、Plugin 插件、Workflow 工具。它们都经每 turn 重建的 session-local 工具视图进入搜索面：middleware 工具由 `chain.collect_tools()` 提供，MCP 与 builtin 工具是其中的 `McpToolBridge`，搜索时合并结果。
 
 #### 2.4.1 搜索算法

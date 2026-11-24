@@ -4,7 +4,7 @@ Workflow 的运行耗时、RPC 有界等待和终态时间戳使用 [peri-time](
 预算与持久化字段语义仍由 Workflow 自身定义。
 
 > 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-11-21（终态投影、限额明细、attempt 执行事实与 Git 归因）
-> 依据：`docs/design/workflow-mcp.md`（现行目标设计）、`docs/design/workflow.md`（已取代的旧链描述）、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
+> 依据：[Workflow 运行内核](../design/workflow.md)、[Workflow MCP 接入](../design/workflow-mcp.md)、`docs/standards/architecture-contracts.md` 与源码（无 crate 级 CLAUDE.md）。
 
 ## 架构速览
 

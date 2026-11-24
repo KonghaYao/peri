@@ -1,6 +1,6 @@
 # 会话消息与 Transcript 架构设计
 
-> BaseMessage、ContentBlock 枚举、MessageTranscript 与 staging 事务写
+> BaseMessage、ContentBlock、MessageTranscript 与 canonical 提交
 >
 > 状态：现行内容模型；2026-10-07 已批准撤销持久执行恢复。待发送消息由 [Thread MQ](thread-mq.md) 持久化，canonical 历史继续持久化；会话隔离、类型化消费和历史加载边界由 [RCRA 权威](rcra-message-activation.md) 定义。有效上下文所有权、手动 Compact 有效集读取与 `peri.historyWindowV1` 窗口边界见正文；窗口协议默认关闭。
 >
@@ -34,7 +34,7 @@ graph TB
     TRANSCRIPT -->|"增量持久化"| PERSIST["ThreadStore"]
 
     subgraph COMPACT["Compact 例外操作"]
-        MICRO["Micro<br/>标记 truncated"]
+        MICRO["Micro<br/>projection directive"]
         SMART["Smart（兼容入口）<br/>plan_micro 计划 + projection"]
         FULL["Full<br/>追加摘要·标记 excluded"]
     end
@@ -48,9 +48,9 @@ graph TB
 
 每条消息拥有唯一 `MessageId`（UUID v7，按时间单调递增）。
 
-- **唯一寻址方式**：所有操作一律通过 id 定位消息。Transcript 内部维护 id→消息的索引表，常驻内存。不存在通过 Vec 下标定位的路径——下标会因 Compact 移除消息而漂移，后果严重。
+- **外部寻址**：通过 id 定位消息。Transcript 内部维护 id 到当前位置的索引；不得把当前位置当作跨投影、rewind 或恢复的稳定身份。
 - **去重保证**：同一 Session 内 MessageId 绝不重复。持久化恢复时执行 id 碰撞检测——碰撞意味着数据损坏。
-- **时间有序**：UUID v7 自带时间戳，天然按创建时间排序——Transcript 的消息列表与 id 排序一致。
+- **顺序归属**：UUID v7 记录生成时序，但 Transcript 以已提交的历史顺序为准；不能按 id 排序重建消费或历史顺序。
 
 ### 2.2 Transcript 存储
 
@@ -65,9 +65,9 @@ graph TB
   - ✅ `append_batch()` 批量追加——逐条触发独立 `PersistOp::Append`
   - ❌ 禁止 prepend 或中间插入——破坏 Prompt Cache 前缀
   - ❌ 禁止删除或修改——Compact 通过标记改变模型视图，不改变消息本体
-- **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-acp-types/src/messages/`，`peri-agent/src/messages/` 负责 re-export 与工具配对适配；`MessageTranscript` 定义于 `peri-agent/src/session/transcript.rs`；`MessageQueue` 定义于 `peri-acp-types/src/session/queue.rs`，Agent session 模块 re-export。Transcript 和 Queue 属于 session 模块，messages 模块仅含消息数据类型定义。
+- **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-acp-types/src/messages/`，`peri-agent/src/messages/` 负责 re-export 与工具配对适配；`MessageTranscript` 实现在 `peri-agent/src/session/transcript/message_transcript.rs`；`MessageQueue` 入口为 `peri-acp-types/src/session/message_queue.rs`。
 - **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，并在 `threads.inherited_context` 列一次性写入；恢复时先放 ancestor、再放 child own history。窗口 `inherited` 来源的 `frozenSnapshotId` 由子会话、字节数、条数、祖先与首尾消息 id 派生，父会话后续 append/compact/rewind 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先；本机 SQLite 提供 inherited 窗口读取，remote/emscripten adapter 未覆写该端口时返回 `Unsupported`。ACP `session/fork` 经 `load_fork_snapshot` 合并冻结 inherited 与 own 历史，按冻结授权补齐归档，复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region；归档正文保持 excluded。授权与重映射规则见 [Micro 生命周期](micro-compact.md#7-full继承fork-与-rewind)。
-- **Staging 两阶段写入**：Reason 阶段产出的 AI 消息（含 tool_calls）不直接追加到 Transcript——先 Staging。Act 阶段收集所有 ToolResult 后，AI 消息 + ToolResult 作为一组原子提交到 Transcript。Staging 期间的消息 LLM 请求不可见。提交后触发持久化。若 Act 阶段异常终止（Cancel/Error），staging 消息丢弃——Transcript 回到本轮开始前的状态，不留半个 AI 消息。
+- **Act 工具交换提交**：Reason 的调用正文不单独追加到 canonical 历史。Act 分派收集结果后，先经 writer 原子提交完整的 assistant/tool-result 交换，再发布 canonical 视图。若错误或取消发生在交换提交之后，已提交消息仍保留并同步给宿主；不能当作回到 turn 开始前，也不据此判断工具外部副作用。Transcript 自身的 staging helper 不是该生产提交路径。
 
 ### 2.3 Thread MQ
 
@@ -77,7 +77,7 @@ Thread MQ 是待发送消息的持久事实源，与 `messages` 位于同一 Thr
 
 #### MessageKind 三类消息
 
-消息按 Kind 分为三类，控制循环唤醒和消费行为；`MessageKind` 是展示标签，运行调度以 `MessagePolicy` 为准：
+消息按 Kind 分为三类；`MessageKind` 是内容分类，不单独决定唤醒、消费或展示。运行调度由 `MessagePolicy`、受众与执行绑定决定。下表是常见用法，不是准入判定矩阵：
 
 | Kind | 来源示例 | Receive 消费 | 默认唤醒 |
 |------|---------|----------------|------------|
@@ -89,14 +89,14 @@ Thread MQ 是待发送消息的持久事实源，与 `messages` 位于同一 Thr
 
 每条 `QueuedMessage` 携带 `MessageSource` 标注来源，用于调试和事件追踪：`UserInput` / `SubAgentComplete` / `ShellComplete` / `GoalSteering` / `TodoSteering` / `CronTrigger` / `StopHookFeedback` / `ChannelMessage` / `McpNotification` / `SystemInjected` / `HookStopIntent` / `ToolFailureWarning` / `WorkflowComplete`。
 
-#### 排空 API
+#### Receive 消费边界
 
-- **`drain_batch(limit)`**：Receive 阶段按批消费队列消息，写入 Transcript；`drain_all()` 保留给显式全量消费的调用方。RCRA 下 Receive 是唯一队列消费点，End 阶段不单独消费 Defer。
-- **`has_wake_up()` / `has_required_for_run(execution)`**：退出判断前检查队列是否还有要求新执行处理的消息；`await_wake_for_run(execution)` 负责阻塞等待。Info 永远不会单独唤醒循环——必须被 Prompt 带出。
+- Receive 持生命周期 owner 的消费许可，按执行绑定与策略选择并原子移交 MQ 行；不调用任意全量排空 API，End 不另行消费 Defer。
+- 被动 Info 不自行授予机器执行资格；循环重新检查 MQ 可消费事实，内存唤醒信号不作消费凭证。接口和策略以 [Thread MQ](thread-mq.md) 为准。
 
 ### 2.4 持久化
 
-ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义在 `peri-acp-types/src/store/mod.rs`，实现位于 `peri-resources/src/sessions/`（`filesystem.rs` 的 `FilesystemThreadStore` / `sqlite_store.rs` 的 `SqliteThreadStore`），`peri-acp-types/src/thread/mod.rs` 只承载 thread 元数据类型。该 trait 是**迁移桥**：目标契约是 `peri-acp-types/src/session_resources.rs` 的 `SessionResources`（行为门面，数据与本机执行两面分离），历史纯变换（fork/投影/compaction/rewind）在 `peri-acp-types/src/store/{history,history_projection}.rs`。
+存储是 canonical 历史的持久权威。运行边界使用 `SessionResources` 行为门面；`ThreadStore` 是兼容迁移桥，不等于所有后端都实现所有事务端口。原生默认 SQLite；各后端的 MQ、恢复和原子结算边界见 [Thread MQ](thread-mq.md) 与 [Session Durability](session-durability.md)。纯历史变换在 `peri-acp-types/src/store/{history,history_projection}.rs`。
 
 #### ThreadStore trait 核心方法概览
 
@@ -114,7 +114,7 @@ ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义在
 
 - **触发时机**：消息追加到 Transcript 后异步触发持久化；compact lifecycle 先 flush 追加，再原子提交摘要与标记。turn 收尾检查 writer 结果。
 - **增量持久化**：仅追加新消息；compact 标记变更 UPDATE、新增消息 INSERT。rewind 触发 DELETE。
-- **Compact 标记**：Micro 标记 `truncated`、Full 标记 `excluded`。标记持久化同步（UPDATE 标记字段，不修改 content）。Full 追加新 Human 消息（INSERT）。Smart Compact 为 planner 兼容入口，标记与 Micro 一致（见 §2.6）。
+- **Compact 标记**：Micro 写 projection directive 及归档索引，不靠截断正文；Full 标 `excluded` 并追加摘要 Human 消息。两者经已确认的 lifecycle 提交，保留旧正文；Smart 为共用 Micro 规划的兼容入口（见 §2.6）。
 - **失败恢复**：host 对可信的执行结果采纳 canonical payload 快照，不以 `ok` 决定是否更新历史。Host 只在 `SessionState.history_payloads` 持有**当前有效** payload，并以 `ContextOwnership::{Resident,HandedOff,ReloadRequired}` 表达执行期所有权；`SessionState.history` 消息投影已删除。`HandedOff` 的空集合表示正文已移交在途执行器，**不是空会话**；持久化结果不确定时清空热态、进入 `ReloadRequired` 并撤销窗口票据，下一次使用从存储冷恢复。`finish_prompt_turn` 只采纳结果快照，不因 turn 结束移除 session。writer 错误、compact 提交结果不确定或缺失执行结果会使热会话失效；冷加载恢复磁盘已提交的 payload 与 flags，不能把已提交摘要视为脏数据删除。失败的追加不自动补写。
 
 ### 2.5 Rewind

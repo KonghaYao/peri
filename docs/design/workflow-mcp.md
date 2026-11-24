@@ -1,10 +1,10 @@
 # Workflow as MCP 设计
 
-**状态**：已批准目标设计；MCP 实例与任务信道已落地，残留目标见 §7。
-**范围**：`peri-workflow` 子系统从 middleware 槽位迁移为 builtin MCP 实例；Node 引擎保留为实例执行后端；agent 回调改为「任务资源发布 + 工具回填」的标准信道语义。
+**状态**：现行 MCP 接入；旧 middleware 槽位已退役。单出口迁移的剩余验收见 [v5 验收](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)；不在本设计范围的事项见 §7。
+**范围**：`peri-workflow` 的 builtin MCP 接入，Node 执行后端，以及「任务资源发布 + 工具回填」信道。
 **代码事实源**：`peri-middlewares/src/mcp/builtin/`、`peri-acp-types/src/builtin_mcp.rs`、`peri-workflow/`、`npm-packages/@peri-workflow/`、`peri-acp/src/host/{workflow_agent,requests/workflow}.rs`。
 
-**v5 关系（尚未实现）**：workflow 仍是 `mcp-packages/workflow` 的能力实现；v5 中经单出口 `peri` 暴露，deferred 模型名由 `mcp__workflow__*` 改为 `mcp__peri__*`，关闭粒度由实例改为 capability。本文的工具、资源、订阅、任务信道与取消/幂等语义不变；v4 独立实例形态仅在迁移期兼容。目标见 [MCP v5 单出口目标设计](mcp-v5-single-exit.md)。
+**默认装配**：workflow 由 `mcp-packages/workflow` 实现，经单出口 `peri` 的 `workflow` 能力暴露，deferred 模型名为 `mcp__peri__*`，按能力关闭。仅部署级 `PERI_MCP_BUILTIN=legacy` 回滚才使用独立 `workflow` 实例和 `mcp__workflow__*`（M4 截止）。两条路径共享工具、资源、订阅、取消与幂等契约。参见 [MCP v5 单出口设计](mcp-v5-single-exit.md)。
 
 ## 1. 背景与取代关系
 
@@ -14,7 +14,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 2.1 目标
 
-1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。该形态是 v4 兼容期路径；v5 目标为单出口内的 `workflow` capability。
+1. workflow 以 **builtin MCP 能力**接入会话池，工具、资源、订阅与关闭均经 MCP 面；单出口与 legacy 的装配区分见上。
 2. agent 回调改为 **MCPP Channel 语义**：agent 任务作为 outbound 资源（event-log）发布，宿主消费者发现并执行，经 inbound 工具回填结果。不新增私有 JSON-RPC method 或 vendor capability。
 3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口、旧 middleware 目录与 Resources 门面均已删除；workflow 接入归 builtin MCP 实例。
 4. 能力开关使用 v5 能力名 `"workflow": false`；旧 `"WorkflowMiddleware"` 键保留为确定性映射 adapter（M4 删除）。ACP 方法名（`workflow/*`）与 TUI 交互不变，能力开关以单出口配置为准。
@@ -35,16 +35,16 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 标准依据：`ARC-WORKFLOW-DIST-001`（[architecture-contracts.md](../standards/architecture-contracts.md)）。
 
-## 3. 目标架构
+## 3. 默认接入架构
 
 ```
 ┌───────────────────────────── Peri 进程（per-session 池）─────────────────────────────┐
 │  peri-agent（模型面）              peri-acp host（宿主面）                            │
 │   │ ToolSearch 索引                 │ workflow/* ACP 方法（TUI 轮询/终止/恢复）        │
-│   │ mcp__workflow__*（deferred）    │ WorkflowTaskConsumer（agent 任务消费者）         │
+│   │ mcp__peri__*（deferred）        │ WorkflowTaskConsumer（agent 任务消费者）         │
 │   ▼                                 ▼                                              │
 │  ┌──────────────── MCP client 池（session_scoped = true）────────────────┐          │
-│  │  workflow 实例连接（duplex + rmcp serve_server）                       │          │
+│  │  peri 实例连接 → workflow 能力（duplex + rmcp serve_server）          │          │
 │  │   ├─ tools：Workflow / WorkflowStatus / WorkflowKill（模型面，deferred）│          │
 │  │   ├─ tools：WorkflowAgentResult 与消费者鉴权工具（host-only）           │          │
 │  │   ├─ resources：workflow://runs、runs/{id}[、events、tasks]、tasks      │          │
@@ -59,7 +59,7 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**角色**：workflow 实例是 MCP server；Peri 池是唯一 client。模型经工具桥消费 deferred 工具；宿主经池的 `tools/call`/`resources/read` 消费宿主面工具与资源；消费者订阅任务资源、执行 agent、回填。
+**角色**：默认可见的 MCP server 为 `peri`，router 将 workflow 请求分派到该会话的 `WorkflowMcpServer`；legacy 路径直接连接该 handler。模型经工具桥消费 deferred 工具；宿主经池的 `tools/call`/`resources/read` 消费宿主面工具与资源；消费者订阅任务资源、执行 agent、回填。
 
 **领域控制接口**：MCP adapter（handler）背后的唯一控制面是 `WorkflowRuntime`（start_run / kill / resume / status / 任务表 / 资源快照）。Node wire（`workflow/start`、`agent/task`、`agent/result` 等）是 `WorkflowRuntime` 的实现细节；MCP 对外契约（工具/资源/订阅）不依赖 wire 形态，wire 改造以该领域接口为边界。
 
@@ -72,20 +72,18 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ## 4. MCP 面设计
 
-### 4.1 实例声明
+### 4.1 能力声明
 
-`peri-acp-types/src/builtin_mcp.rs` 声明：
+`peri-acp-types/src/builtin_mcp/v5.rs` 的 `BUILTIN_V5_CAPABILITIES` 是唯一手写声明源，由 `v5/tools.rs` 提供逐工具声明：
 
-- `WORKFLOW_TOOLS`：`Workflow` / `WorkflowStatus` / `WorkflowKill`（模型面，`direct: false`），以及 `WorkflowAgentResult` / `WorkflowAgentClaim` / `WorkflowConsumerReady` / `WorkflowCompletionAck` / `WorkflowClose` / `WorkflowTaskObserved`（host-only，`model_visible: false`）。
-- `BUILTIN_MCP_INSTANCES` 派生视图：`name = "workflow"`、`legacy_instance = "workflow"`（由能力表派生，只服务迁移期 adapter）。
-- `BUILTIN_RESERVED_INSTANCE_NAMES` 包含 `"workflow"`。
-- `BuiltinMcpTool::model_visible` 区分模型可见面与 host-only 工具；其余实例默认 `true`。
+- `WORKFLOW_CAPABILITY_TOOLS` 中 `Workflow` / `WorkflowStatus` / `WorkflowKill` 为模型可见的 deferred 工具；宿主控制和回填（包括 `WorkflowAgentResult`、`WorkflowToolResult`）声明为 host-only。
+- `BUILTIN_MCP_INSTANCES` 与 `BUILTIN_RESERVED_INSTANCE_NAMES` 由能力表派生，服务迁移期 adapter，不是独立配置源。
 
 ### 4.2 工具与授权边界
 
 | 工具（original_name） | 可见性 | 语义 | 参数 |
 | --- | --- | --- | --- |
-| `Workflow` | 模型面（deferred） | 启动/恢复 workflow，异步返回 `run_id` | 现有 `WorkflowTool` 参数全集（script/args/maxConcurrency/budgetTotal/maxAgents/maxToolCalls/maxElapsedMs/resumeFromRunId/name/strictPreflight/writeIntent） |
+| `Workflow` | 模型面（deferred） | 启动/恢复 workflow，异步返回 `run_id` | 支持 `script` 或 `scriptPath`；仅恢复可用 `resumeFromRunId`。完整 schema、校验与拒绝条件由 `peri-workflow/src/runtime/params.rs` 维护。 |
 | `WorkflowStatus` | 模型面（deferred） | 查询 run 列表或单 run 快照 | `{ runId?: string, limit?: number }` |
 | `WorkflowKill` | 模型面（deferred） | 终止 run 或单 agent | `{ runId: string, agentId?: string }` |
 | `WorkflowAgentResult` | **host-only** | 回填 agent 任务结果 | `{ runId, taskId, result: AgentRunResult }` |
@@ -125,10 +123,10 @@ Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请
 
 ### 4.4 关闭
 
-- 关闭键为 v5 能力名 `"workflow"`；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时消失；旧键保留为确定性映射 adapter（M4 删除）。
+- 关闭键为 v5 能力名 `"workflow"`；单出口按能力排除 workflow，不关闭 `peri` 上的其他能力。legacy 路径按同源兼容关闭集不启动独立实例。工具、`workflow://` 资源与订阅、继承面、消费者与宿主任务必须同时关闭；旧键保留为确定性映射 adapter（M4 删除）。覆盖矩阵和尚未验收的面见 [v5 验收](../../spec/issues/2026-11-15-v5-single-exit-acceptance.md)。
 - `MIDDLEWARE_NAMES` 不含该键，`MIDDLEWARE_TOOL_NAMES` 不含 `"Workflow"`；两表零交集由装配测试断言。
-- 工具归一/过滤面（`tool_catalog`、`permission`）按实例身份自动生效（`mcp__workflow__*`）。
-- 子 Agent 按实例身份整体排除 `workflow`（`CHILD_ABSENT_BUILTIN_INSTANCES`），不另立逐工具名单。
+- 工具归一与过滤依据 builtin 来源和能力声明，不用历史模型名授权执行；单出口默认模型名与 legacy 名见上。
+- 子 Agent 的模型目录按 builtin 来源排除 workflow 能力（legacy 识别独立实例，单出口识别工具归属能力），不另立逐工具名单。
 
 ## 5. Agent 任务信道
 

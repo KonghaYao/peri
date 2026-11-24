@@ -10,7 +10,7 @@
 
 - 只接受 `.html` / `.htm` / `.md` 三种文件；
 - `.md` 会在上传前转成带样式的 HTML 页面（表格、任务列表、脚注、删除线、代码块、引用、标题），`.html` / `.htm` 原样上传；
-- 链接默认 7 天过期，也可以要求 30 天；
+- 默认请求保留 7 天，也可请求 30 天；实际过期由存储服务决定；
 - 适合上传生成的报告、看板、原型页面，把链接丢给同事或贴进 issue。
 
 链接是**公开**的：任何拿到 URL 的人都能访问（你的服务若不做鉴权）。**不要把密钥、凭据、内部数据传上去。**
@@ -33,14 +33,14 @@
 | `PERI_ARTIFACTS_URL` | 存储服务**基地址**。上传实际打向 `{该值}/upload`（结尾的 `/` 会被自动去掉） | 必填 |
 | `PERI_ARTIFACTS_TOKEN` | 以 `Authorization: Bearer <token>` 发送的凭据 | 按你的服务要求；不设置时回退到内置共享标识 |
 
-这两个变量在 **MCP 实例环境**中生效：写进 `mcpServers.artifact.env`（`~/.peri/settings.json` 的 `config.mcpServers` 或项目 `.mcp.json`，见 §7 的位置说明）。值里可以用 `${VAR}` 引用宿主进程的环境变量——宿主在建立实例时展开，再把结果作为实例环境透传；只 export 而不写进实例 env 不会生效：
+在默认 v5 单出口中，把变量写进 `mcpServers.peri.env`（`~/.peri/settings.json` 的 `config.mcpServers`，或项目 `.mcp.json` 的顶层 `mcpServers`）。值可用 `${VAR}` 引用宿主进程环境；只在 shell 中 export 而未映射到实例 env 不会生效。旧 `artifact.env` 只适用于显式 legacy 装配，v5 不迁移该条目中的环境变量。
 
 ```jsonc
 // ~/.peri/settings.json
 {
   "config": {
     "mcpServers": {
-      "artifact": {
+      "peri": {
         "env": {
           "PERI_ARTIFACTS_URL": "${ARTIFACT_ENDPOINT}",
           "PERI_ARTIFACTS_TOKEN": "${ARTIFACT_SECRET}"
@@ -59,7 +59,7 @@ export ARTIFACT_SECRET="<你的服务签发的 token>"
 peri
 ```
 
-生效时机：实例环境在 Peri 建立 `artifact` 实例连接时读取一次（即启动新会话时）。**改完要重启 Peri**；会话中途改环境变量不会生效。
+实例环境在 Peri 装配内置 MCP 连接时读取，不会因每次新建会话自动读取。**改完重启 Peri**。
 
 凭据纪律：不要把 token 写进仓库、配置模板或截图，也不要贴进 issue；用环境变量或机密管理器注入。Peri 不会把 token 打印到工具输出或错误信息里；传输失败的错误文本可能包含请求 URL（reqwest 错误），因此也不要把凭据塞进 URL。
 
@@ -79,13 +79,17 @@ X-TTL: 7d
 <文件内容：UTF-8 文本；.md 已转成 HTML>
 ```
 
-**响应**：成功必须是 2xx，并返回 JSON。Peri 先检查 HTTP 状态：非 2xx 一律按失败处理；2xx 的 body 里若出现 `error` 字段也按失败处理（兼容永远返回 200 的托管平台）：
+**响应**：成功必须是 2xx，并返回 JSON。Peri 先检查 HTTP 状态：非 2xx 一律按失败处理；2xx 的 JSON 若含字符串值的 `error` 字段也按失败处理（兼容永远返回 200 的托管平台）：
 
-```jsonc
-// 成功
+成功响应：
+
+```json
 { "url": "https://artifacts.example.internal/a/9f3c.html", "expiresAt": "2026-10-03T12:00:00Z" }
+```
 
-// 失败（HTTP 状态可以是 200、4xx 或 5xx）
+失败响应（HTTP 状态可以是 200、4xx 或 5xx）：
+
+```json
 { "error": "token 无效" }
 ```
 
@@ -93,9 +97,9 @@ X-TTL: 7d
 
 | 字段 | 要求 |
 | --- | --- |
-| `url` | 成功时必填，必须是非空的绝对 `http` / `https` URL，原样展示给用户 |
+| `url` | 成功时必填，去除首尾空白后必须是非空的绝对 `http` / `https` URL |
 | `expiresAt` | 可选（也接受 `expires_at`），展示为链接过期时间 |
-| `error` | 失败时填。非 2xx 时 Peri 优先展示该字段；2xx 时只要出现该字段就按失败处理 |
+| `error` | 失败时填。非 2xx 时 Peri 优先展示该字段；2xx 时字符串值按失败处理；`null` 视为未提供 |
 | `id` | 可以返回，会被忽略 |
 
 其他约定：
@@ -109,7 +113,7 @@ X-TTL: 7d
 ```js
 // stub.mjs —— 只回链接、不真的存文件，够验证配置链路
 // 用法：node stub.mjs
-// 再按 §3 把 mcpServers.artifact.env 的 PERI_ARTIFACTS_URL 配成 http://127.0.0.1:8787，重启 peri
+// 再按 §3 把 mcpServers.peri.env 的 PERI_ARTIFACTS_URL 配成 http://127.0.0.1:8787，重启 peri
 import { createServer } from 'node:http'
 
 createServer((req, res) => {
@@ -148,7 +152,7 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 | 项 | 行为 |
 | --- | --- |
 | 扩展名 | 只接受 `.html` / `.htm` / `.md`（大小写不敏感），其他直接拒绝 |
-| 大小 | 单文件上限 **10 MB** |
+| 大小 | 单文件上限 **10 MiB**（10,485,760 字节） |
 | 工具参数 | `file_path`（必填；相对路径按当前会话工作目录解析）、`ttl`（`7d` 默认，可传 `30d`） |
 | 成功输出 | `Artifact uploaded: <url>`，服务返回过期时间时追加 `Expires: <时间>` |
 | 输出格式 | 纯文本 URL。终端里的可点击链接由界面渲染，工具输出本身不含控制序列 |
@@ -159,7 +163,7 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 | --- | --- |
 | `File not found` / `Not a file` | 路径不存在，或指向目录 |
 | `Only HTML or Markdown files are supported` | 扩展名不在白名单 |
-| `File too large` | 超过 10 MB |
+| `File too large` | 超过 10 MiB |
 | `Upload failed` | 连不上服务：地址写错、DNS、超时、网络不通 |
 | `HTTP <status>` | 服务返回非 2xx；优先附带 body 中的 `error`，否则附带截断后的 body |
 | `Upload error` | HTTP 2xx 但 JSON 里返回了 `error`（非 2xx 走 `HTTP <status>`） |
@@ -179,7 +183,7 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 | `Upload error: ...` | 服务返回的错误文本；常见是 token 不匹配、超限、内容被策略拒绝 |
 | `Failed to parse response` | 服务返回了 HTML 错误页或空 body；按 §4 返回 JSON，并检查是否压缩了响应 |
 | `Artifact response has no usable URL` / `... URL is invalid` | 成功响应缺少 `url`，或 `url` 不是非空绝对 `http` / `https` 地址 |
-| 改了环境变量没变化 | 变量在建立实例连接时读取：重启 Peri；并确认配的是 `mcpServers.artifact.env`（§3），不是只 export 到 shell |
+| 改了环境变量没变化 | 变量在建立实例连接时读取：重启 Peri；并确认默认 v5 配的是 `mcpServers.peri.env`（§3），不是只 export 到 shell |
 | 上传成功但链接打不开 | `url` 由你的服务给出，Peri 不做代理也不托管内容；确认该地址真的对外可访问 |
 
 ## 7. 不需要这个能力时
@@ -192,12 +196,12 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 ```
 
 ```jsonc
-// 2) 实例级：项目 .mcp.json
+// 2) 兼容配置入口：项目 .mcp.json；v5 将该条目映射为关闭 artifact 能力
 { "mcpServers": { "artifact": { "disabled": true } } }
 ```
 
 ```jsonc
-// 2') 实例级：~/.peri/settings.json（两个候选位置都支持，config.mcpServers 优先）
+// 2') 同一关闭开关也可写在 ~/.peri/settings.json
 { "config": { "mcpServers": { "artifact": { "disabled": true } } } }
 ```
 
@@ -212,5 +216,5 @@ export PERI_MCP_BUILTIN=off
 
 - Peri 只做「上传 + 展示链接」：**存储、过期回收、访问控制、内容审查都由你的服务负责**。
 - 默认公共服务的可用性、留存时长与配额不属于本项目的承诺；要可控就自建。
-- 上传内容是明文 HTTP body（HTTPS 由服务地址决定），不要在文件里塞密钥。
-- `artifact` 与 Web 抓取能力互相独立：`WebSearch` / `WebFetch` 不读本文的两个变量；它们的后端经内建 `web` 实例的 `env` 配置（`mcpServers.web.env` 中的 `PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL`，各自可附带 `_TOKEN` 凭据）。
+- 上传的是 HTML 正文而非应用层加密密文；用 HTTPS 保护传输，并且不要上传密钥。
+- `artifact` 与 Web 抓取能力互相独立：`WebSearch` / `WebFetch` 不读本文的两个变量；其后端通过默认 v5 的 `mcpServers.peri.env` 配置 `PERI_WEB_SEARCH_URL` / `PERI_WEB_FETCH_URL`，各自可附带 `_TOKEN` 凭据。v5 对启用中的 `web` 能力保留旧 `mcpServers.web.env` 的兼容回退，但 `peri.env` 同名键优先。

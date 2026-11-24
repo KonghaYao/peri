@@ -12,7 +12,7 @@
 >
 > - **现行**：当前 `origin/main` 的代码行为，由代码与契约测试证明。
 > - **兼容期**：v4 六实例路径在迁移期间仍可用，用于未迁移会话与回滚；不是长期目标。
-> - **目标（v5）**：已裁决的单出口契约；standalone 部分已实现，宿主切换与端到端验收仍未完成。不得把未验收部分写成现状。
+> - **目标（v5）**：已裁决的单出口契约；standalone 与宿主默认切换均已实现；仍待验证的闭环见 active spec，不把未验证部分写成现状。
 >
 > 术语：配置权威使用 `McpConfigFile`（`.mcp.json` 的 typed 解析结果）与 `ConfigurationSnapshot`（配置权威快照）；本文不使用旧 issue 中的其他配置类型名。
 
@@ -51,7 +51,7 @@ v5 把 builtin MCP 从「六个独立 server 实例」收敛为「一个对外�
 **目标（v5）**：
 
 1. 对外目录中只有一个 builtin server 条目 `peri`；其 `source` 为 builtin 身份，`system_mcp = true`，由宿主注入，不作为用户可覆盖的普通 server。
-2. 出口只有一份对外 transport 与一个 server task。initialize/discover 只发生一次；`tools/list`、`resources/list`、`resources/read`、`resources/subscribe`、`tasks/*` 由 router 聚合。
+2. 出口只有一份对外 transport 与一个 server task。不按 capability 分别协商连接；`tools/list`、`resources/list`、`resources/read`、订阅（0728 `subscriptions/listen`，legacy `resources/subscribe` 等）与受支持的 Tasks 扩展方法由 router 聚合。
 3. workspace 代理的上游连接只属于 `peri` 内部，不产生第二个模型可见 endpoint，也不改变客户端看到的资源 URI。
 4. 对外单 transport 不等于共享可变状态：每个 capability 保留独立 handler 状态、凭据、资源根、任务归属与关闭逻辑。
 5. `mcp-packages/*` 仍是能力实现的组织方式；运行时实例划分与 crate 划分解耦。聚合 handler 只做路由、生命周期、代理与错误隔离，不复制业务规则。
@@ -163,15 +163,15 @@ TUI / print / stdio 与普通 ACP 客户端一律 `false`。
 约束：
 
 1. 优先级为命令行 > `.mcp.json` > 内置默认；冲突必须能解释来源。
-2. 不新造顶层 `capabilities` 对象；MCP 的 `capabilities` 是 `initialize` 协议字段，复用会混淆配置与协议协商。
-3. 能力选择优先放在 `mcp-start` 参数。若必须持久化到 `.mcp.json`，只能放在该 server 条目的命名空间扩展下，且标准客户端忽略它不影响连接。扩展键名在实现前按 MCP 生态复核后裁决，本文不预占。
+2. 不新造顶层 `capabilities` 对象；MCP 的 `capabilities` 属于 wire 协议协商，复用会混淆配置与协议协商。
+3. Standalone 优先读取 `mcp-start --capability`；未提供时可从工作区 `.mcp.json` 的 `mcpServers.peri.x-peri.capabilities` 读取非空字符串数组。`all` / `none` 各自互斥，不能与能力名共用；`x-peri` 是 Peri 的暂用配置扩展。
 4. 未知能力名、非法组合、能力子配置冲突是加载期 typed error，不 warning 后忽略。
 5. 旧 middleware 策略键（`WebMiddleware` 等）不再是能力开关身份，但保留为确定性映射 adapter：出现时映射到对应能力（`false` 关闭），M4 清理时删除；不得 silent no-op。v4 逐实例 `.mcp.json` 条目同样由配置 adapter 确定性映射为 capability 开关。
 6. `PERI_MCP_BUILTIN` 是部署级开关：缺省 / `on` / `v5` 走单出口，`legacy` / `v4` 走六实例回滚（M4 截止），`off` / `0` 零注入；不承担逐能力配置。
 7. v4 的逐实例 `.mcp.json` 条目在迁移期由 adapter 确定性映射为单出口能力开关；新会话不得写回六条目。
-8. 宿主内的 builtin 单出口条目由宿主注入，能力开关以 `mcp-start` 参数为准；standalone 与宿主共用能力注册表，但不重新绑定整个 settings 装配。
+8. 宿主内的 builtin 单出口由宿主注入，能力开关来自会话配置与既有映射，不受 `mcp-start` 影响；standalone 与宿主共用能力注册表，但不读取完整 settings。
 
-状态说明：`mcp-start` 的 `--capability` 参数语法已实现；`.mcp.json` 扩展键名仍未裁决。宿主默认装配已切换为单出口 `peri`，`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；旧 `*Middleware` 策略键保留为确定性映射 adapter。验收矩阵见 active spec 的配置组合维度。
+状态说明：`mcp-start` 的 `--capability` 参数语法已实现；standalone 已读取暂用扩展 `mcpServers.peri.x-peri.capabilities`。宿主默认装配已切换为单出口 `peri`，`PERI_MCP_BUILTIN=legacy` 保留六实例回滚（M4 截止）；旧 `*Middleware` 策略键保留为确定性映射 adapter。验收矩阵见 active spec 的配置组合维度。
 
 ## 4. 能力关闭矩阵
 
@@ -279,7 +279,7 @@ TUI / print / stdio 与普通 ACP 客户端一律 `false`。
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| `.mcp.json` server 条目的能力扩展键名 | 未裁决 | 只允许 server 条目命名空间扩展；实现前按 MCP 生态复核，本文不预占 |
+| Standalone 能力扩展最终键名 | 未裁决 | 当前实现读取 `mcpServers.peri.x-peri.capabilities`；是否长期采用 `x-peri` 待生态复核 |
 | 能力/工具声明表的类型名与字段名 | 实现期裁决 | 语义已冻结；可保留 `instance` 字段名以减少机械改动，但语义改为 capability |
 | 聚合 handler 的 crate 落点 | 已裁决（实现期） | `peri-middlewares::mcp::builtin::router`：复用 `BuiltinServerHandler`、`StandaloneFactory` 与 `UpstreamProxy`，不新增 crate |
 | workspace upstream descriptor 来源、授权与生命周期 | 未裁决 | 由 Sandbox Actor 提供；代理 wire 门槛必须验证 |

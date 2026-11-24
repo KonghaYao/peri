@@ -360,13 +360,25 @@ npm ci --prefix ../peri-e2e
 ```
 
 ```bash
-npm --prefix ../peri-e2e run e2e:replay:check          # 录放 runner 与业务场景类型检查
-PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:unit           # 录放代理与动态绑定契约
-PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:verify         # fixture 完整性，source-anchored（CI 入口）
-npm --prefix ../peri-e2e run e2e:replay:verify:strict  # 本地全等核对：任何 drift 都失败
-PERI_SOURCE_ROOT="$PWD" npm --prefix ../peri-e2e run e2e:replay:world-check
-PERI_SOURCE_ROOT="$PWD" PERI_BINARY="$PWD/target/debug/peri" npm --prefix ../peri-e2e run e2e:replay
-npm --prefix ../peri-e2e run e2e:replay:record         # 显式重录，仅本地；CI 拒绝 record 模式
+npm --prefix ../peri-e2e run e2e:replay:check
+export PERI_SOURCE_ROOT="$PWD" PERI_BINARY="$PWD/target/debug/peri"
+npm --prefix ../peri-e2e run e2e:replay:world-check
+npm --prefix ../peri-e2e run e2e:replay:unit
+npm --prefix ../peri-e2e run e2e:replay:verify         # source-anchored（CI 入口）
+(cd ../peri-e2e && node scripts/check-replay-catalog.mjs)
+# CI 每次使用空的输出目录，避免把旧报告计入结果。
+export PERI_E2E_REPLAY_RESULTS="$(mktemp -d)"
+npm --prefix ../peri-e2e run e2e:replay
+(cd ../peri-e2e && node scripts/check-replay-catalog.mjs --results "$PERI_E2E_REPLAY_RESULTS")
+
+# 非 CI 默认门禁：本地全等核对。
+npm --prefix ../peri-e2e run e2e:replay:verify:strict
+```
+
+仅在显式要求重录时单独执行以下命令；它改写 cassette，不随上面的验证一起跑：
+
+```bash
+npm --prefix ../peri-e2e run e2e:replay:record
 ```
 
 `PERI_BINARY` 是已构建 `peri` 的绝对路径；`PERI_SOURCE_ROOT` 指向 Peri 检出，须与
@@ -376,8 +388,9 @@ npm --prefix ../peri-e2e run e2e:replay:record         # 显式重录，仅本�
 
 插件动态 MCP 的用户闭环由 P01 覆盖：选择插件后提交任务，模型只经 `ToolSearch` / `ToolInvoke`
 调用 Loader，下一轮搜索到业务工具 schema 并执行真实本地 HTTP MCP，同会话复用连接，关闭会话后
-连接归零。场景目录、阻塞项与录制基线以 `peri-e2e` 的 `fixtures/replay-v2/README.md` 为准；
-完整回放由 `peri-e2e` CI 执行。
+连接归零。场景目录、阻塞项与录制基线以 `peri-e2e` 的 `fixtures/replay-v2/README.md` 为准。
+Peri 主仓也运行完整的固定版本 Linux 回放并检查结果目录；以日志中两仓实际 SHA、场景名和通过数
+为准，不以步骤标题推断数量。确定性回放不等于真实模型、发行二进制或历史用例等价验收。
 
 world 映射的唯一事实源是 `peri-e2e/scripts/replay-world-sources.mjs`：`sys.block0.main`
 （`01_intro`–`06_tone_style` 组合）、`sys.skills`、`sys.compact.summary`、`sys.compact.user`、

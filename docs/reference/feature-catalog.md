@@ -85,8 +85,8 @@
 | F-INTERACT-005 | L2 | 交互取消；关闭与迟到回复不得悬挂执行 | [契约](../design/interaction-brokers.md) |
 | F-MCP-001 | L2 | MCP 连接；stdio 与 HTTP 由统一 client 消费 | [契约](../design/tool-system.md) |
 | F-MCP-002 | L2 | 工具发现；direct 与 deferred 来自同一事实 | [契约](../design/tool-system.md) |
-| F-MCP-003 | L2 | 工具搜索；SearchExtraTools 返回可用 schema | [契约](../design/tool-system.md) |
-| F-MCP-004 | L2 | 间接执行；ExecuteExtraTool 保留真实目标权限 | [契约](../design/tool-system.md) |
+| F-MCP-003 | L2 | 工具搜索；ToolSearch 返回可用 schema | [契约](../design/tool-system.md) |
+| F-MCP-004 | L2 | 间接执行；ToolInvoke 保留真实目标权限 | [契约](../design/tool-system.md) |
 | F-MCP-005 | L2 | MCP 资源；list、read 与模板由 provider 提供 | [契约](../design/tool-system.md) |
 | F-MCP-006 | L2 | MCP 订阅；通知按 session/task 归属消费 | [契约](../design/tool-system.md) |
 | F-MCP-007 | L2 | MCP 任务；get、cancel 与终态独立于工具响应 | [契约](../design/tool-system.md) |
@@ -97,8 +97,8 @@
 | F-MCP-012 | L3 | 动态注册；ACP 控制面注册不等于懒加载 | [契约](../design/acp-mcp-control.md) |
 | F-MCP-013 | L3 | MCP 缓存；响应复用不替代当前能力目录 | [契约](../design/mcp-cache.md) |
 | F-MCP-014 | L3 | MCP 独立服务；mcp-start 提供标准传输 | [契约](../design/tool-system.md) |
-| F-MCP-015 | L3 | ToolSearch 别名；目标接口尚在独立 PR | [契约](../design/tool-system.md) |
-| F-MCP-016 | L3 | Dynamic 懒加载；显式 Loader 前不得启动目标 | [契约](../design/tool-system.md) |
+| F-MCP-015 | L3 | 兼容旧工具名；仅解析为 ToolSearch/ToolInvoke，不重复暴露 | [契约](../design/tool-system.md) |
+| F-MCP-016 | L3 | Dynamic 懒加载；显式 Loader 前不得启动目标 | [契约](../design/mcp-v5-single-exit.md) |
 | F-WORKSPACE-001 | L2 | 文件读取；范围与媒体投影由 workspace 提供 | [契约](../design/tool-system.md) |
 | F-WORKSPACE-002 | L2 | 文件写入；失败不伪造成功副作用 | [契约](../design/tool-system.md) |
 | F-WORKSPACE-003 | L2 | 文件编辑；匹配条件满足才应用修改 | [契约](../design/tool-system.md) |

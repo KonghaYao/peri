@@ -38,9 +38,8 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 | Swarm 主线 / SDK / Sandbox | [Peri Swarm](docs/design/peri-swarm.md)、[SDK Chat](docs/design/peri-sdk-chat.md)、[Sandbox](npm-packages/peri-sandbox/peri-sandbox-design.md) |
 | 功能与验收 | [功能目录](docs/reference/feature-catalog.md)、[验收映射](docs/verification/feature-acceptance.md) |
 | 领域术语 | [CONTEXT.md](CONTEXT.md) |
-| 实现定位 | `docs/code-index/` |
+| 实现定位 | [代码索引](docs/code-index/)；没有模块级文档时直接查源码 |
 | 活跃任务与验收缺口 | `spec/issues/`；历史检索见 [problems](spec/global/problems.md) |
-| 功能分级与验收 | [功能目录](docs/reference/feature-catalog.md)、[验收映射](docs/verification/feature-acceptance.md) |
 | 文档处置证据 | [#446 盘点](docs/verification/authority-inventory-446.md) |
 | 验收记录 | `docs/verification/`；记录必须注明基线与证据局限 |
 | 构建和测试命令 | [patches](patches/README.md)、[testing](docs/standards/testing.md) |
@@ -48,7 +47,7 @@ Peri 是终端 AI 编程助手：用户交付任务，Agent 推进工作，过�
 | Git 操作 | [git](docs/standards/git.md) |
 
 主链路为 `peri-tui → peri-acp → peri-agent::run_react_loop`；工作区范围以根 `Cargo.toml` 为准。
-Peri 文档加载器不递归继承父目录，模块规则必须显式读取。
+Peri 文档加载器不递归继承父目录。工程任务由上表路由到必要的索引、标准与源码。
 提交前按仓库要求运行 `lefthook run pre-commit`，范围验证见 `scripts/check-changed.sh`。
 功能或边界变更须同一变更同步对应权威契约与验收记录。
 
