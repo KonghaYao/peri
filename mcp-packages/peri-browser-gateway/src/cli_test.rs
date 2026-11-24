@@ -33,7 +33,7 @@ fn help_covers_every_entry_point() {
         "start [OPTIONS]",
         "start kitesurf",
         "stop [--bind IP:PORT]",
-        "peri-browser update",
+        "update [kitesurf]",
         "-V|--version",
     ] {
         assert!(USAGE.contains(needle), "help 缺少 {needle}");
@@ -80,27 +80,61 @@ fn install_requires_the_kitesurf_target() {
 }
 
 #[test]
-fn update_takes_no_arguments() {
+fn update_takes_an_optional_kitesurf_target() {
     assert_eq!(parse(&args(&["update"])), Ok(Command::Update));
-    for extra in ["--force", "kitesurf"] {
-        assert_eq!(
-            parse(&args(&["update", extra])),
-            Err(CliError::UnexpectedUpdateArgument(extra.to_owned())),
-            "argv={extra:?}"
-        );
-    }
+    assert_eq!(
+        parse(&args(&["update", "kitesurf"])),
+        Ok(Command::UpdateKitesurf)
+    );
+    assert_eq!(
+        parse(&args(&["update", "chrome"])),
+        Err(CliError::UnknownUpdateTarget("chrome".to_owned()))
+    );
+    assert_eq!(
+        parse(&args(&["update", "kitesurf", "extra"])),
+        Err(CliError::UnexpectedUpdateArgument("extra".to_owned()))
+    );
+    assert_eq!(
+        parse(&args(&["update", "kitesurf", "--force"])),
+        Err(CliError::UnexpectedUpdateArgument("--force".to_owned()))
+    );
     assert_eq!(parse(&args(&["update", "--help"])), Ok(Command::Help));
 }
 
 #[test]
-fn help_describes_update_as_rerunning_the_install_script() {
+fn unknown_update_targets_point_at_the_supported_target_and_the_gateway() {
+    let message = CliError::UnknownUpdateTarget("chrome".to_owned()).to_string();
     assert!(
-        USAGE.contains("重新运行官方安装脚本"),
-        "help 未说明 update 复用安装脚本：{USAGE}"
+        message.contains("supported: kitesurf"),
+        "错误缺少支持的 target：{message}"
     );
     assert!(
-        USAGE.contains("默认同时处理 kitesurf"),
-        "help 未说明 update 默认处理 kitesurf：{USAGE}"
+        message.contains("without a target"),
+        "错误未提示无目标更新网关：{message}"
+    );
+}
+
+#[test]
+fn help_separates_bare_update_from_update_kitesurf() {
+    assert!(
+        USAGE.contains("update [kitesurf]"),
+        "help 未列出 update 的可选目标：{USAGE}"
+    );
+    assert!(
+        USAGE.contains("重新运行 browser 安装脚本"),
+        "help 未说明裸 update 复用安装脚本：{USAGE}"
+    );
+    assert!(
+        USAGE.contains("引擎不会升级"),
+        "help 未说明裸 update 不升级引擎：{USAGE}"
+    );
+    assert!(
+        USAGE.contains("无条件重跑 kitesurf 官方安装脚本"),
+        "help 未说明 update kitesurf 强制重跑安装器：{USAGE}"
+    );
+    assert!(
+        USAGE.contains("不会停止正在运行的进程"),
+        "help 未说明安装器不停止运行中的进程：{USAGE}"
     );
 }
 

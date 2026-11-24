@@ -19,6 +19,13 @@ fn install_without_a_home_or_override_fails_before_any_download() {
 }
 
 #[test]
+fn update_without_a_home_or_override_fails_before_any_download() {
+    let lookup = |_key: &str| None;
+    let error = update_kitesurf(&lookup).expect_err("missing install root");
+    assert!(error.to_string().contains("HOME is not set"), "{error:#}");
+}
+
+#[test]
 fn the_probe_url_is_the_canonical_cdp_form() {
     assert_eq!(
         engine_probe_url(18971),

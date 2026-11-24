@@ -1,5 +1,6 @@
 //! `peri-browser` entry point: serve the gateway in the foreground, run it in
-//! the background, stop it, install/start kitesurf, or re-run the installer.
+//! the background, stop it, install/start/update kitesurf, or re-run the
+//! browser installer.
 
 use std::process::ExitCode;
 
@@ -57,6 +58,7 @@ async fn run(command: Command) -> anyhow::Result<i32> {
         Command::Stop(options) => daemon::stop(options.bind, &process_env).await,
         Command::InstallKitesurf => lifecycle::install(&process_env),
         Command::Update => update(),
+        Command::UpdateKitesurf => lifecycle::update_kitesurf(&process_env),
         Command::StartKitesurf(options) => {
             let owned = lifecycle::ensure_engine(options.port, &process_env).await?;
             let engine = EngineBinding {
