@@ -3,6 +3,7 @@ use super::*;
 fn state() -> GatewayState {
     GatewayState {
         pid: 4242,
+        pid_start: None,
         bind: "127.0.0.1:7391".to_owned(),
         log: "/tmp/gateway-7391.log".to_owned(),
         engine_port: Some(18971),
@@ -42,19 +43,79 @@ fn state_files_are_named_by_port_and_round_trip() {
 }
 
 #[test]
-fn a_state_whose_pid_is_gone_or_reused_is_stale() {
-    assert_eq!(start_decision(None, None), StartDecision::Start);
+fn publishing_state_is_exclusive_and_never_replaces_the_winner() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = state_path(dir.path(), 7391);
+    let first = GatewayState {
+        pid: 1111,
+        pid_start: Some("boot-a".to_owned()),
+        ..state()
+    };
     assert_eq!(
-        start_decision(Some(&state()), None),
+        publish_state(&path, &first).expect("publish first"),
+        PublishOutcome::Published
+    );
+    let winner = fs::read_to_string(&path).expect("read winner");
+
+    let second = GatewayState {
+        pid: 2222,
+        pid_start: Some("boot-b".to_owned()),
+        ..state()
+    };
+    assert_eq!(
+        publish_state(&path, &second).expect("publish second"),
+        PublishOutcome::AlreadyExists
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("read after conflict"),
+        winner,
+        "the first publisher's state must be untouched"
+    );
+    assert_eq!(read_state(&path).expect("read state"), Some(first));
+    let leftovers: Vec<_> = fs::read_dir(dir.path())
+        .expect("read run dir")
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files must be cleaned up: {leftovers:?}"
+    );
+}
+
+#[test]
+fn a_missing_pid_start_is_omitted_and_old_states_still_parse() {
+    let value = serde_json::to_value(state()).expect("encode state");
+    assert!(value.get("pid_start").is_none(), "{value}");
+    let decoded: GatewayState = serde_json::from_value(value).expect("decode state");
+    assert_eq!(decoded, state());
+
+    let with_start = GatewayState {
+        pid_start: Some("/proc start".to_owned()),
+        ..state()
+    };
+    let value = serde_json::to_value(&with_start).expect("encode state");
+    assert_eq!(value["pid_start"], "/proc start");
+    assert_eq!(
+        serde_json::from_value::<GatewayState>(value).expect("decode state"),
+        with_start
+    );
+}
+
+#[test]
+fn a_state_whose_pid_is_gone_or_reused_is_stale() {
+    assert_eq!(start_decision(None, None, None), StartDecision::Start);
+    assert_eq!(
+        start_decision(Some(&state()), None, None),
         StartDecision::CleanStale
     );
     assert_eq!(
-        start_decision(Some(&state()), Some("/usr/bin/kitesurf")),
+        start_decision(Some(&state()), Some("/usr/bin/kitesurf"), None),
         StartDecision::CleanStale,
         "a recycled pid must not block start"
     );
     assert_eq!(
-        start_decision(Some(&state()), Some("/opt/homebrew/bin/peri-browser")),
+        start_decision(Some(&state()), Some("/opt/homebrew/bin/peri-browser"), None),
         StartDecision::AlreadyRunning { pid: 4242 }
     );
 }
@@ -84,9 +145,12 @@ fn a_state_belongs_to_exactly_its_bind() {
 
 #[test]
 fn stop_is_idempotent_without_state_or_with_a_dead_pid() {
-    assert_eq!(stop_decision(None, bind(), None), StopDecision::NotRunning);
     assert_eq!(
-        stop_decision(Some(&state()), bind(), None),
+        stop_decision(None, bind(), None, None),
+        StopDecision::NotRunning
+    );
+    assert_eq!(
+        stop_decision(Some(&state()), bind(), None, None),
         StopDecision::NotRunning,
         "a dead pid is a stale state, not a failure"
     );
@@ -95,7 +159,7 @@ fn stop_is_idempotent_without_state_or_with_a_dead_pid() {
 #[test]
 fn stop_refuses_a_live_pid_that_is_not_the_gateway() {
     assert_eq!(
-        stop_decision(Some(&state()), bind(), Some("/usr/bin/kitesurf")),
+        stop_decision(Some(&state()), bind(), Some("/usr/bin/kitesurf"), None),
         StopDecision::Refuse {
             pid: 4242,
             comm: "/usr/bin/kitesurf".to_owned()
@@ -110,7 +174,8 @@ fn stop_never_crosses_to_the_other_loopback_address() {
         stop_decision(
             Some(&state()),
             other,
-            Some("/opt/homebrew/bin/peri-browser")
+            Some("/opt/homebrew/bin/peri-browser"),
+            None
         ),
         StopDecision::OtherBind,
         "a live gateway on 127.0.0.1:7391 must survive stop on [::1]:7391"
@@ -124,7 +189,7 @@ fn stop_terminates_only_the_gateway_basename() {
         "/Users/mino/code/peri/target/debug/peri-browser",
     ] {
         assert_eq!(
-            stop_decision(Some(&state()), bind(), Some(comm)),
+            stop_decision(Some(&state()), bind(), Some(comm), None),
             StopDecision::Terminate { pid: 4242 },
             "comm={comm}"
         );
@@ -134,6 +199,60 @@ fn stop_terminates_only_the_gateway_basename() {
     assert!(!is_gateway_comm("peri-browser-helper"));
     assert!(!is_gateway_comm("kitesurf"));
     assert!(!is_gateway_comm(""));
+}
+
+#[test]
+fn a_reused_pid_with_a_different_start_identity_is_not_the_gateway() {
+    let recorded = GatewayState {
+        pid_start: Some("boot-a".to_owned()),
+        ..state()
+    };
+    let comm = Some("/opt/homebrew/bin/peri-browser");
+    assert_eq!(
+        start_decision(Some(&recorded), comm, Some("boot-b")),
+        StartDecision::CleanStale,
+        "same basename but a different start identity is a reused pid"
+    );
+    assert_eq!(
+        stop_decision(Some(&recorded), bind(), comm, Some("boot-b")),
+        StopDecision::NotRunning,
+        "stop must not signal a reused pid"
+    );
+    assert_eq!(
+        start_decision(Some(&recorded), comm, Some("boot-a")),
+        StartDecision::AlreadyRunning { pid: 4242 }
+    );
+    assert_eq!(
+        stop_decision(Some(&recorded), bind(), comm, Some("boot-a")),
+        StopDecision::Terminate { pid: 4242 }
+    );
+}
+
+#[test]
+fn missing_start_identity_falls_back_to_the_comm_basename() {
+    let legacy = state();
+    assert_eq!(
+        start_decision(Some(&legacy), Some("peri-browser"), Some("boot-b")),
+        StartDecision::AlreadyRunning { pid: 4242 },
+        "an old state file without pid_start keeps the basename check"
+    );
+    assert_eq!(
+        stop_decision(Some(&legacy), bind(), Some("peri-browser"), Some("boot-b")),
+        StopDecision::Terminate { pid: 4242 }
+    );
+    let recorded = GatewayState {
+        pid_start: Some("boot-a".to_owned()),
+        ..state()
+    };
+    assert_eq!(
+        start_decision(Some(&recorded), Some("peri-browser"), None),
+        StartDecision::AlreadyRunning { pid: 4242 },
+        "an unavailable current identity falls back to the basename check"
+    );
+    assert_eq!(
+        stop_decision(Some(&recorded), bind(), Some("peri-browser"), None),
+        StopDecision::Terminate { pid: 4242 }
+    );
 }
 
 #[test]

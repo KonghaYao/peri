@@ -78,14 +78,14 @@ export CARGO_INCREMENTAL=0
 
 ## 后台 `start` / `stop`（2026-11-24）
 
-基线与范围：分支 `feat/browser-daemon`，`4860d84a5`（自 `origin/main`）上的工作区改动，未提交。`serve` 保持前台阻塞与 SIGTERM 行为；新增 `start [OPTIONS]`（后台网关）、`start kitesurf`（引擎就绪后后台网关，替换原先的前台阻塞）与 `stop [--bind IP:PORT]`。实现见 `src/daemon.rs`，CLI 分派见 `src/cli.rs`，引擎复用/拉起仍由 `src/lifecycle.rs` 的原有逻辑承担。状态与日志位于 `$HOME/.peri/browser/run|logs`（0700），状态文件 `run/gateway-<port>.json` 记录 `pid`、`bind`、`log`、`engine_port`、`engine_owned`、`started_at`。
+基线与范围：分支 `feat/browser-daemon`，`4860d84a5`（自 `origin/main`）上的工作区改动，未提交。`serve` 保持前台阻塞与 SIGTERM 行为；新增 `start [OPTIONS]`（后台网关）、`start kitesurf`（引擎就绪后后台网关，替换原先的前台阻塞）与 `stop [--bind IP:PORT]`。实现见 `src/daemon.rs`，CLI 分派见 `src/cli.rs`，引擎复用/拉起仍由 `src/lifecycle.rs` 的原有逻辑承担。状态与日志位于 `$HOME/.peri/browser/run|logs`（0700），状态文件 `run/gateway-<port>.json` 记录 `pid`、`pid_start`、`bind`、`log`、`engine_port`、`engine_owned`、`started_at`。
 
 环境：macOS 26.6.2 arm64，Rust 1.99.0；exports 与本记录上方相同（`MISE_PYTHON_VERSION=3.12.15`、`CARGO_HOME=/tmp/cargo-home-rsproxy`、`RUSTUP_TOOLCHAIN=1.99.0`、`CARGO_INCREMENTAL=0`）。
 
 | 检查 | 命令 | 观察结果 |
 | --- | --- | --- |
 | 构建 | `./scripts/cargo-rmcp-patched.sh build -p peri-browser-gateway --offline --locked` | PASS，`Finished dev profile`。 |
-| 测试 | `./scripts/cargo-rmcp-patched.sh test -p peri-browser-gateway --offline --locked` | PASS：lib 149（含 daemon 10、cli 2）、`tests/mcp_http` 21（新增 `daemon` 2，其余 19 保留含 `process` 的前台 `serve` SIGTERM 断言）、doc 0。 |
+| 测试 | `./scripts/cargo-rmcp-patched.sh test -p peri-browser-gateway --offline --locked` | PASS：lib 153（含 daemon 14、cli 2）、`tests/mcp_http` 21（含 `daemon` 契约 2，其余 19 保留含 `process` 的前台 `serve` SIGTERM 断言）、doc 0。 |
 | Clippy | `./scripts/cargo-rmcp-patched.sh clippy -p peri-browser-gateway --all-targets --offline --locked -- -D warnings` | PASS。 |
 | 格式 | `./scripts/cargo-rmcp-patched.sh fmt -p peri-browser-gateway -- --check` | PASS。 |
 | 功能目录 | `python3 scripts/test-feature-catalog.py && python3 scripts/check-feature-catalog.py` | PASS；F-EXT-016 行 visible 91 字符（≤100）。 |
@@ -113,6 +113,24 @@ export CARGO_INCREMENTAL=0
 
 冒烟结束后确认无遗留 `peri-browser` 后台进程；18791 上的既有网关未触碰。未运行项见文末。
 
+### CodeRabbit 修正轮（2026-11-20）
+
+| 检查 | 命令 | 观察结果 |
+| --- | --- | --- |
+| 构建 | `./scripts/cargo-rmcp-patched.sh build --offline --locked -p peri-browser-gateway` | PASS。 |
+| 测试 | `./scripts/cargo-rmcp-patched.sh test --offline --locked -p peri-browser-gateway` | PASS：lib 153、`tests/mcp_http` 21；daemon 单测由 10 增至 14。 |
+| Clippy | `./scripts/cargo-rmcp-patched.sh clippy --offline --locked -p peri-browser-gateway --all-targets -- -D warnings` | PASS。 |
+| 格式 | `./scripts/cargo-rmcp-patched.sh fmt -p peri-browser-gateway -- --check` | PASS。 |
+| 功能目录 | `python3 scripts/test-feature-catalog.py && python3 scripts/check-feature-catalog.py` | PASS（22 tests）。 |
+
+本轮收紧的行为：
+
+- **状态发布时机与排他性**：`start` 不在 spawn 后写状态，只在 `/healthz` 返回子进程自身 pid 后用同目录临时文件 + `hard_link` 发布；并发失败方终止自己的子进程并保留赢家状态，陈旧赢家删除后只重试一次。`start` 在 spawn 前探测绑定地址，已有未记录的 `/healthz` 应答时拒绝接管。
+- **健康校验**：`/healthz` 增加 `pid` 字段；就绪判定要求该 pid 等于本次子进程 pid，否则继续轮询并保留 `try_wait`。健康请求读取完整响应 body，不再只看响应头。
+- **`stop` 可重试**：先停网关，再计算 `engine_stop_target` 并执行 `kitesurf stop`，成功后才删除状态；引擎失败保留状态并返回 1。`NotRunning`（pid 已死或启动标识不同）同样先尝试引擎清理。
+- **进程身份**：状态新增可选 `pid_start`（Linux `/proc/<pid>/stat` 第 22 字段，macOS `ps -p <pid> -o lstart=`）；记录值与当前值都存在时必须相等，缺失时回退 `comm` basename。pid 复用不再触发 SIGTERM。
+- **新增单测**：`publishing_state_is_exclusive_and_never_replaces_the_winner`、`a_reused_pid_with_a_different_start_identity_is_not_the_gateway`、`missing_start_identity_falls_back_to_the_comm_basename`、`a_missing_pid_start_is_omitted_and_old_states_still_parse`；契约测试新增 `/healthz` pid 与状态 `pid_start` 断言，并验证第二次 `start` 不改写赢家状态。
+
 ## 未运行与剩余风险
 
 - **真实引擎仅覆盖最小路径**：已用 Kitesurf 0.5.2 走通 initialize/connect/new_page/snapshot/list，以及带页面会话的 DELETE；未验证 monitor 浏览器交互、yield/request_human、真实导航与 fill、0.5.4、多会话并发。
@@ -120,6 +138,6 @@ export CARGO_INCREMENTAL=0
 - **外部 Peri 进程经 HTTP 消费未联测**：`/mcp` 由真实 listener 与 SDK 客户端验证，但未用完整的 Peri 宿主配置跑通。
 - **跨平台与发布物未验证**：Linux、Windows、macOS x64、发布包在真实平台的运行、`rg` 依赖的仓库扫描均未运行。
 - **发布与安装入口未端到端验证**：`release-browser.yml` 未在 GitHub Actions 上执行，`install-browser.sh` 未对真实 Release 下载与安装，`browser-v*` / `agent-v*` tag 未推送；PR CI、CodeRabbit 与合并结果也不在本记录证据内。
-- **后台网关未接真实引擎**：`start`/`stop` 用真实二进制与隔离 `HOME` 验证；`start kitesurf` 只走 fixture 复用路径，真实引擎的拉起后后台化、`kitesurf stop --port N`、Linux `/proc/<pid>/comm` 身份分支、多网关共享引擎的端到端停止（单测覆盖判定）均未运行；`start kitesurf` 的引擎子进程跨命令退出继续运行只由代码与 fixture 推断，未对真实引擎观测。健康检查 10s 超时后的 SIGTERM 分支未构造到（子进程提前退出与 `stop` 的 SIGTERM 路径已实测）。
+- **后台网关未接真实引擎**：`start`/`stop` 用真实二进制与隔离 `HOME` 验证；`start kitesurf` 只走 fixture 复用路径，真实引擎的拉起后后台化、`kitesurf stop --port N`、Linux `/proc/<pid>/stat` 启动标识分支、多网关共享引擎的端到端停止（单测覆盖判定）均未运行；`start kitesurf` 的引擎子进程跨命令退出继续运行只由代码与 fixture 推断，未对真实引擎观测。引擎清理失败后的保留状态/重试路径未用真实 `kitesurf` 构造；健康检查 10s 超时后的 SIGTERM 分支未构造到（子进程提前退出与 `stop` 的 SIGTERM 路径已实测）。
 - **残余风险**：monitor token 出现在 URL；网关无鉴权，安全边界是本机回环与 Host/Origin 校验；fixture fidelity 与真实引擎仍可能有差异；`scripts/install.sh` 用 `releases?per_page=30` 查找最新 agent release，browser tag 增多后可能把 agent tag 挤出窗口。
 - 改造按逻辑分步提交（本分支提交与本记录）；记录时未推送。

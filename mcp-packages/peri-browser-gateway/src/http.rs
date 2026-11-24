@@ -174,7 +174,11 @@ async fn index(State(sessions): State<Arc<SessionDirectory>>) -> Response {
 }
 
 async fn healthz(State(sessions): State<Arc<SessionDirectory>>) -> Json<serde_json::Value> {
-    Json(json!({"ok": true, "sessions": sessions.list().len()}))
+    Json(json!({
+        "ok": true,
+        "sessions": sessions.list().len(),
+        "pid": std::process::id(),
+    }))
 }
 
 async fn monitor(

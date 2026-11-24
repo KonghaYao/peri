@@ -53,16 +53,17 @@ cargo build -p peri-browser-gateway
 | `peri-browser install kitesurf` | 安装 kitesurf；已安装则打印版本与路径并返回 0。 |
 | `peri-browser --version`、`peri-browser -h\|--help` | 版本与命令帮助。 |
 
-`start` / `stop` 的 `--bind` 默认 `127.0.0.1:7391`，`start kitesurf` 的 `--port` 默认 `18971`；`--bind` 只接受环回地址。引擎未安装时 `start kitesurf` 失败并提示先运行 `peri-browser install kitesurf`。
+`start` / `stop` 的 `--bind` 默认 `127.0.0.1:7391`，`start kitesurf` 的 `--port` 默认 `18971`；`--bind` 只接受环回地址。端口 `0` 只对 `serve` / 裸调用有效；`start` 与 `start kitesurf` 需要固定端口，传 `0` 会被拒绝。引擎未安装时 `start kitesurf` 失败并提示先运行 `peri-browser install kitesurf`。
 
 ### 后台运行、状态与日志
 
-- 状态：`$HOME/.peri/browser/run/gateway-<port>.json`，记录 `pid`、`bind`、`log`、`engine_port`、`engine_owned` 与 `started_at`；目录权限 0700。
+- 状态：`$HOME/.peri/browser/run/gateway-<port>.json`，记录 `pid`、`pid_start`、`bind`、`log`、`engine_port`、`engine_owned` 与 `started_at`；目录权限 0700。
 - 日志：`$HOME/.peri/browser/logs/gateway-<port>.log`，追加写；目录权限 0700。
 - 后台进程由 `current_exe serve <原样网关参数>` 启动，独立进程组、stdin 关闭，终端退出不影响它。
-- `start` 时同一端口已有存活网关会失败，并给出 pid 与 `stop` 提示；记录中的 pid 已退出或已被复用则清理陈旧状态后继续。
+- `start` 只在该子进程 `/healthz` 返回自身 pid 后才排他发布状态；并发启动只会有一个发布成功，失败方终止自己的子进程且不删除既有状态。
+- `start` 时同一端口已有存活网关会失败，并给出 pid 与 `stop` 提示；记录中的 pid 已退出、已被复用（`pid_start` 不同）则清理陈旧状态后继续。地址已有未记录的 `/healthz` 应答时直接拒绝，不接管该进程。
 - `stop` 只向 `peri-browser` 进程发 SIGTERM，不用 SIGKILL：pid 存活但不是 `peri-browser`，或 5 秒内未退出时返回 1 并保留状态。
-- 只有网关启动时拥有引擎（`start kitesurf` 拉起而非复用），且没有其他 `run/gateway-*.json` 引用同一引擎端口时，`stop` 才追加执行 `kitesurf stop --port N`；复用引擎不归 `stop` 关闭。
+- 只有网关启动时拥有引擎（`start kitesurf` 拉起而非复用），且没有其他 `run/gateway-*.json` 引用同一引擎端口时，`stop` 才追加执行 `kitesurf stop --port N`；复用引擎不归 `stop` 关闭。引擎停止失败时状态保留，返回 1，可重试。
 
 ### 安装脚本
 
@@ -152,7 +153,7 @@ flowchart TD
 
 | 参数 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `--bind IP:PORT` | `PERI_BROWSER_MONITOR_BIND` | `127.0.0.1:7391` | 唯一 listener；端口 `0` 交给 OS。 |
+| `--bind IP:PORT` | `PERI_BROWSER_MONITOR_BIND` | `127.0.0.1:7391` | 唯一 listener；端口 `0` 交给 OS，但仅限 `serve` / 裸调用，`start` 与 `start kitesurf` 拒绝端口 `0`。 |
 | `--cdp-url URL` | `KITESURF_CDP_URL` | `http://127.0.0.1:18971` | `browser_status` 的建议地址；不自动连接、不预绑定。 |
 | `--secret VALUE` | `PERI_BROWSER_GATEWAY_SECRET` | 每进程随机 | monitor token 派生输入；推荐环境变量，不留 secret 文件。 |
 | `--idle-yield-ms MS` | `PERI_BROWSER_IDLE_YIELD_MS` | 15000 | Agent 静置让出。 |

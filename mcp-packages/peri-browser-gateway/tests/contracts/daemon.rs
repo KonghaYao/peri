@@ -164,18 +164,30 @@ async fn start_returns_after_the_health_check_and_stop_is_idempotent() -> anyhow
     assert_eq!(state["engine_port"], serde_json::Value::Null);
     assert_eq!(state["engine_owned"], false);
     assert!(state["started_at"].as_u64().unwrap_or(0) > 0);
+    assert!(
+        state["pid_start"]
+            .as_str()
+            .is_some_and(|start| !start.trim().is_empty()),
+        "start must record the OS process start identity: {state_text}"
+    );
     assert!(daemon.log_path().exists());
 
     let http = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
         .build()?;
-    let health = http
+    let health: serde_json::Value = http
         .get(format!("http://{bind}/healthz"))
         .send()
         .await?
-        .error_for_status()?;
-    assert_eq!(health.json::<serde_json::Value>().await?["ok"], true);
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(health["ok"], true);
+    assert_eq!(
+        health["pid"], pid,
+        "/healthz must identify the gateway the state records"
+    );
 
     // A live gateway blocks a second start and points at its pid and stop.
     let (status, _, stderr) = daemon.run(&["start", "--bind", &bind], START_LIMIT)?;
@@ -183,6 +195,12 @@ async fn start_returns_after_the_health_check_and_stop_is_idempotent() -> anyhow
     assert!(stderr.contains(&format!("pid {pid}")), "{stderr}");
     assert!(stderr.contains("peri-browser stop"), "{stderr}");
     assert!(daemon.state_path().exists());
+    let after_conflict: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(daemon.state_path())?)?;
+    assert_eq!(
+        after_conflict, state,
+        "a losing start must not overwrite the winner's state"
+    );
 
     let (status, stdout, stderr) = daemon.run(&["stop", "--bind", &bind], STOP_LIMIT)?;
     assert!(status.success(), "stop failed: {stderr}");
