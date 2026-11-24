@@ -10,10 +10,11 @@
 # 安装二进制与 kitesurf 引擎
 curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install-browser.sh | bash
 
-peri-browser start kitesurf   # 引擎 18971，网关 127.0.0.1:7391
+peri-browser start kitesurf   # 引擎 18971，网关 127.0.0.1:7391；健康检查通过后立即返回
+peri-browser stop             # 停止该网关；必要时一并停止它拉起的引擎
 ```
 
-`start kitesurf` 先确保引擎在后台就绪，再打印 MCP 与监控地址并前台运行网关。Ctrl-C 只停止网关，引擎留在后台，可用 `kitesurf stop --port 18971` 停止；引擎已在监听时直接复用。
+`start kitesurf` 先确保引擎在后台就绪（已监听则复用，否则后台拉起并等待 `/json/version`），再以 `--cdp-url http://127.0.0.1:18971` 后台启动网关；`/healthz` 通过后命令返回 0，终端不再被占用。成功输出包含 MCP 地址、监控地址、pid、日志路径与 `stop` 提示。
 
 本地开发可以直接构建：
 
@@ -23,11 +24,17 @@ cargo build -p peri-browser-gateway
 ./target/debug/peri-browser start kitesurf
 ```
 
-只运行网关：
+只运行网关（同样后台）：
 
 ```bash
-./target/debug/peri-browser --bind 127.0.0.1:7391
-./target/debug/peri-browser serve --bind 127.0.0.1:7391   # 显式别名
+./target/debug/peri-browser start --bind 127.0.0.1:7391
+./target/debug/peri-browser stop --bind 127.0.0.1:7391
+```
+
+前台运行只用于开发、容器或需要阻塞并响应 SIGTERM 的场景：
+
+```bash
+./target/debug/peri-browser serve --bind 127.0.0.1:7391
 ```
 
 - MCP：`http://127.0.0.1:7391/mcp`
@@ -40,11 +47,22 @@ cargo build -p peri-browser-gateway
 | 命令 | 行为 |
 | --- | --- |
 | `peri-browser [OPTIONS]`、`peri-browser serve [OPTIONS]` | 前台运行网关；裸参数与 `serve` 后参数走同一套解析。 |
+| `peri-browser start [OPTIONS]` | 后台运行网关，`OPTIONS` 与 `serve` 相同；`/healthz` 通过后返回 0。 |
+| `peri-browser start kitesurf [--port N] [--bind IP:PORT]` | 先确保 `kitesurf serve --port <N>` 就绪（日志 `$HOME/.kitesurf/serve-<N>.log`），再后台启动网关。 |
+| `peri-browser stop [--bind IP:PORT]` | 停止该 bind 上由 `start` 拉起的网关；未运行时打印提示并返回 0。 |
 | `peri-browser install kitesurf` | 安装 kitesurf；已安装则打印版本与路径并返回 0。 |
-| `peri-browser start kitesurf [--port N] [--bind IP:PORT]` | 后台启动 `kitesurf serve --port <N>`（日志 `$HOME/.kitesurf/serve-<N>.log`），就绪后前台运行网关。 |
 | `peri-browser --version`、`peri-browser -h\|--help` | 版本与命令帮助。 |
 
-`start kitesurf` 的 `--port` 默认 `18971`（引擎推荐端口），`--bind` 默认 `127.0.0.1:7391`；两者只接受环回地址。引擎未安装时命令失败并提示先运行 `peri-browser install kitesurf`。
+`start` / `stop` 的 `--bind` 默认 `127.0.0.1:7391`，`start kitesurf` 的 `--port` 默认 `18971`；`--bind` 只接受环回地址。引擎未安装时 `start kitesurf` 失败并提示先运行 `peri-browser install kitesurf`。
+
+### 后台运行、状态与日志
+
+- 状态：`$HOME/.peri/browser/run/gateway-<port>.json`，记录 `pid`、`bind`、`log`、`engine_port`、`engine_owned` 与 `started_at`；目录权限 0700。
+- 日志：`$HOME/.peri/browser/logs/gateway-<port>.log`，追加写；目录权限 0700。
+- 后台进程由 `current_exe serve <原样网关参数>` 启动，独立进程组、stdin 关闭，终端退出不影响它。
+- `start` 时同一端口已有存活网关会失败，并给出 pid 与 `stop` 提示；记录中的 pid 已退出或已被复用则清理陈旧状态后继续。
+- `stop` 只向 `peri-browser` 进程发 SIGTERM，不用 SIGKILL：pid 存活但不是 `peri-browser`，或 5 秒内未退出时返回 1 并保留状态。
+- 只有网关启动时拥有引擎（`start kitesurf` 拉起而非复用），且没有其他 `run/gateway-*.json` 引用同一引擎端口时，`stop` 才追加执行 `kitesurf stop --port N`；复用引擎不归 `stop` 关闭。
 
 ### 安装脚本
 
@@ -130,7 +148,7 @@ flowchart TD
 
 ## 配置
 
-以下参数只属于网关（`serve` / 裸调用）；`start kitesurf` 的 `--port` / `--bind` 见上文命令面。CLI 参数优先于同名环境变量；超时值范围 `1..=86400000` 毫秒，非法值拒绝启动。
+以下参数只属于网关（`serve` / 裸调用 / `start`）；`start kitesurf` 的 `--port` / `--bind` 见上文命令面。CLI 参数优先于同名环境变量；超时值范围 `1..=86400000` 毫秒，非法值拒绝启动。
 
 | 参数 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -143,7 +161,7 @@ flowchart TD
 
 其余会话/页面/安装相关变量（`PERI_BROWSER_OWNER`、`PERI_BROWSER_SESSION_NAME`、`KITESURF_INSTALL_DIR`、`PERI_BROWSER_PROVISION_LOCK*`、`PERI_BROWSER_CONNECT_TIMEOUT_MS`、`PERI_BROWSER_PAGE_WAIT_MS`、`PERI_BROWSER_RECLAIM_WAIT_MS`、`PERI_BROWSER_LOCK_STALE_MS`）见 [环境变量表](../../docs/standards/environment-variables.md#browser-gateway)。旧 `PERI_BROWSER_GATEWAY_SOCK`、`PERI_BROWSER_HTTP_ADDR` 与自动拉起网关不再生效。
 
-`start kitesurf` 的 `--bind` / `--port` 是独立进程的启动参数，不读取 `PERI_BROWSER_MONITOR_BIND`；它固定用 `--cdp-url http://127.0.0.1:<port>` 启动前台网关。
+`start kitesurf` 的 `--bind` / `--port` 是独立进程的启动参数，不读取 `PERI_BROWSER_MONITOR_BIND`；它固定用 `--cdp-url http://127.0.0.1:<port>` 启动后台网关。
 
 ## 引导（onboarding）
 
@@ -165,7 +183,7 @@ cargo fmt -p peri-browser-gateway -- --check
 bash scripts/check-layer-imports.sh
 ```
 
-`tests/mcp_http.rs` 用真实 listener 与 Peri 等价 Auto 客户端覆盖协商、绑定、隔离、handoff、shutdown 与 onboarding；fixture 以第二 writer 的 HTTP 409 和共享 targetId 模拟真实引擎边界。本次验收证据与未运行项见 [验收记录](../../docs/verification/peri-browser-gateway-mcp.md)。
+`tests/mcp_http.rs` 用真实 listener 与 Peri 等价 Auto 客户端覆盖协商、绑定、隔离、handoff、shutdown 与 onboarding；`tests/contracts/daemon.rs` 用隔离 `HOME` 与临时端口覆盖 `start`/`stop` 的返回时机、端口释放、状态文件与幂等；fixture 以第二 writer 的 HTTP 409 和共享 targetId 模拟真实引擎边界。本次验收证据与未运行项见 [验收记录](../../docs/verification/peri-browser-gateway-mcp.md)。
 
 ## 非目标
 
